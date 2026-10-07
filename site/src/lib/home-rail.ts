@@ -22,11 +22,14 @@ export interface RailCallbacks {
   toggleWorkspaces?: (expanded: boolean) => void;
 }
 
+/** The rail model plus the agent whose page is open (home-types.ts RailVM is frozen). */
+export type HomeRailVM = RailVM & { currentAgentId?: Id };
+
 /** Local to this lane; home-types.ts has no rail options. */
 export interface RailOptions {
   newWorkspaceHref?: string;
-  /** The page's existing wordmark element, moved into the slot at the top. */
-  wordmark?: HTMLElement | null;
+  /** Where the brand row links. Default: the site home. */
+  brandHref?: string;
   workspacesExpanded?: boolean;
 }
 
@@ -81,7 +84,8 @@ export function orderRailPeople(people: RailPeople): RailPeople {
   return { title: people.title, groups: orderCapsules(people.groups), other: [...people.other].sort(compareAgents) };
 }
 
-/** On Catch up the section narrows to the viewer and the viewer's own agents. */
+/** The viewer and the viewer's own agents only. The rail no longer narrows (it lists everyone the viewer
+ *  shares a workspace with, home-map homeRailPeople); kept for callers that want the viewer's own group. */
 export function narrowRailPeopleToViewer(people: RailPeople): RailPeople {
   return {
     title: RAIL_CATCH_UP_PEOPLE_TITLE,
@@ -123,6 +127,22 @@ function link(doc: Document, href: string, className: string, callbacks: RailCal
   return element;
 }
 
+/** A decorative 18px line icon. Its shape is a CSS mask in rail.css and its colour is currentColor. */
+function icon(doc: Document, name: "inbox" | "workspace" | "plus"): HTMLElement {
+  const mark = node(doc, "span", "hm-rail__icon");
+  mark.dataset.icon = name;
+  mark.setAttribute("aria-hidden", "true");
+  return mark;
+}
+
+/** The two-shape mark: a lime circle and an outlined rounded square, drawn by rail.css. */
+function brandMark(doc: Document): HTMLElement {
+  const mark = node(doc, "span", "hm-rail__mark");
+  mark.setAttribute("aria-hidden", "true");
+  mark.append(node(doc, "span", "hm-rail__mark-dot"), node(doc, "span", "hm-rail__mark-square"));
+  return mark;
+}
+
 function badge(doc: Document, count: number | null): HTMLElement[] {
   const value = needsYouBadge(count);
   if (!value) return [];
@@ -154,10 +174,11 @@ function personRow(doc: Document, person: PersonVM, sample: boolean, callbacks: 
   return row;
 }
 
-function agentRow(doc: Document, agent: AgentVM, sample: boolean, callbacks: RailCallbacks): HTMLLIElement {
+function agentRow(doc: Document, agent: AgentVM, sample: boolean, callbacks: RailCallbacks, currentAgentId?: Id): HTMLLIElement {
   const item = node(doc, "li", "hm-rail__agent-item");
   const row = interactiveRow(doc, "hm-rail__agent", sample, () => callbacks.openAgent(agent.id));
   row.dataset.railAgent = agent.id;
+  if (currentAgentId === agent.id) row.setAttribute("aria-current", "page");
   row.dataset.agentState = agent.state.kind;
   row.setAttribute("aria-label", railAgentName(agent));
   const orb = node(doc, "span", "hm-rail__orb");
@@ -172,35 +193,37 @@ function agentRow(doc: Document, agent: AgentVM, sample: boolean, callbacks: Rai
   return item;
 }
 
-function group(doc: Document, capsule: CapsuleVM, sample: boolean, callbacks: RailCallbacks): HTMLLIElement {
+function group(doc: Document, capsule: CapsuleVM, sample: boolean, callbacks: RailCallbacks, currentAgentId?: Id): HTMLLIElement {
   const item = node(doc, "li", "hm-rail__group");
   if (capsule.person.you) item.dataset.railViewer = "";
   item.append(personRow(doc, capsule.person, sample, callbacks));
   if (capsule.agents.length) {
     const agents = node(doc, "ul", "hm-rail__agents");
     agents.setAttribute("aria-label", `${capsule.person.you ? "Your" : `${capsule.person.firstName}’s`} agents`);
-    for (const agent of capsule.agents) agents.append(agentRow(doc, agent, sample, callbacks));
+    for (const agent of capsule.agents) agents.append(agentRow(doc, agent, sample, callbacks, currentAgentId));
     item.append(agents);
   }
   return item;
 }
 
-/** The left rail: wordmark slot, Catch up, Workspaces, People & agents and the ownership line. */
-export function buildHomeRail(doc: Document, vm: RailVM, callbacks: RailCallbacks, options: RailOptions = {}): HTMLElement {
+/** The left rail: brand row, Catch up, Workspaces, People & agents and New workspace. The ownership line is
+ *  read to screen readers only (the canvas design draws none), and is left out on an agent's page. */
+export function buildHomeRail(doc: Document, vm: HomeRailVM, callbacks: RailCallbacks, options: RailOptions = {}): HTMLElement {
+  const currentAgentId = vm.currentAgentId;
   const root = node(doc, "div", "hm-rail");
   root.dataset.homeRail = "";
 
-  const wordmark = node(doc, "div", "hm-rail__wordmark");
-  wordmark.dataset.homeRailWordmark = "";
-  if (options.wordmark) wordmark.append(options.wordmark);
-  root.append(wordmark);
+  const brand = node(doc, "a", "hm-rail__brand");
+  brand.href = options.brandHref ?? "/";
+  brand.append(brandMark(doc), node(doc, "span", "hm-rail__brand-word", "CommonSwarm"));
+  root.append(brand);
 
   const nav = node(doc, "nav", "hm-rail__nav");
   nav.setAttribute("aria-label", "Home");
   const catchUp = link(doc, vm.catchUp.href, "hm-rail__link hm-rail__catch-up", callbacks);
   catchUp.dataset.homeCatchUp = "";
   if (vm.catchUp.current) catchUp.setAttribute("aria-current", "page");
-  catchUp.append(node(doc, "span", "hm-rail__name", "Catch up"), ...badge(doc, vm.catchUp.needsYou));
+  catchUp.append(icon(doc, "inbox"), node(doc, "span", "hm-rail__name", "Catch up"), ...badge(doc, vm.catchUp.needsYou));
   nav.append(catchUp);
 
   const workspaces = node(doc, "section", "hm-rail__workspaces");
@@ -219,9 +242,10 @@ export function buildHomeRail(doc: Document, vm: RailVM, callbacks: RailCallback
     const row = link(doc, workspace.href, "hm-rail__link hm-rail__workspace", callbacks);
     row.dataset.railWorkspace = workspace.id;
     if (workspace.current) row.setAttribute("aria-current", "page");
+    if (needsYouBadge(workspace.needsYou)) row.dataset.railAttention = "";
     const name = node(doc, "span", "hm-rail__name", workspace.name);
     name.title = workspace.name;
-    row.append(name);
+    row.append(icon(doc, "workspace"), name);
     const shortId = railWorkspaceIdentifier(workspace, vm.workspaces);
     if (shortId) { const identifier = node(doc, "span", "hm-rail__identifier", shortId); identifier.title = workspace.id; row.append(identifier); }
     row.append(...badge(doc, workspace.needsYou));
@@ -244,38 +268,40 @@ export function buildHomeRail(doc: Document, vm: RailVM, callbacks: RailCallback
     });
     workspaces.append(more);
   }
-  if (!vm.sample) {
-    const create = link(doc, options.newWorkspaceHref ?? "?v=new", "hm-rail__link hm-rail__new", callbacks);
-    create.dataset.homeNewWorkspace = "";
-    const plus = node(doc, "span", "hm-rail__plus", "+");
-    plus.setAttribute("aria-hidden", "true");
-    create.append(plus, node(doc, "span", "hm-rail__name", "New workspace"));
-    workspaces.append(create);
-  }
   nav.append(workspaces);
   root.append(nav);
 
   if (vm.people) {
-    const people = orderRailPeople(vm.catchUp.current ? narrowRailPeopleToViewer(vm.people) : vm.people);
+    const people = orderRailPeople(vm.people);
     const section = node(doc, "section", "hm-rail__people");
     section.setAttribute("aria-labelledby", "hm-rail-people-title");
     const title = node(doc, "h2", "hm-rail__heading", people.title);
     title.id = "hm-rail-people-title";
     const peopleList = node(doc, "ul", "hm-rail__people-list");
     peopleList.dataset.sidebarParticipantList = "";
-    for (const capsule of people.groups) peopleList.append(group(doc, capsule, vm.sample, callbacks));
+    for (const capsule of people.groups) peopleList.append(group(doc, capsule, vm.sample, callbacks, currentAgentId));
     if (people.other.length) {
       const item = node(doc, "li", "hm-rail__group hm-rail__group--other");
       const head = node(doc, "p", "hm-rail__other-head", "Other agents");
       head.id = "hm-rail-other-title";
       const agents = node(doc, "ul", "hm-rail__agents");
       agents.setAttribute("aria-labelledby", head.id);
-      for (const agent of people.other) agents.append(agentRow(doc, agent, vm.sample, callbacks));
+      for (const agent of people.other) agents.append(agentRow(doc, agent, vm.sample, callbacks, currentAgentId));
       item.append(head, agents);
       peopleList.append(item);
     }
-    section.append(title, peopleList, node(doc, "p", "hm-rail__note", RAIL_OWNERSHIP_NOTE));
+    section.append(title, peopleList);
+    if (!currentAgentId) section.append(node(doc, "p", "hm-rail__note", RAIL_OWNERSHIP_NOTE));
     root.append(section);
+  }
+  /* New workspace is the outline button pinned to the foot of the rail. A sample has no doors. */
+  if (!vm.sample) {
+    const foot = node(doc, "div", "hm-rail__foot");
+    const create = link(doc, options.newWorkspaceHref ?? "?v=new", "hm-rail__new", callbacks);
+    create.dataset.homeNewWorkspace = "";
+    create.append(icon(doc, "plus"), node(doc, "span", "hm-rail__new-label", "New workspace"));
+    foot.append(create);
+    root.append(foot);
   }
   return root;
 }

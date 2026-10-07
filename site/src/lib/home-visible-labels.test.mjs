@@ -353,7 +353,9 @@ test("Catch up suffixes two own agents that were unique inside different workspa
   assert.equal(home.groups[0].agents[0].nestedLabel, "Claude");
   assert.equal(trip.groups[0].agents[0].nestedLabel, "Claude");
   const rail = catchUpRailPeople([{ detail: { people: home } }, { detail: { people: trip } }]);
-  assert.equal(rail.title, "You and your agents");
+  // The Catch-up rail now joins everyone the viewer shares a workspace with (canvas Main artboard), so the title is the
+  // ruled section name, not "You and your agents".
+  assert.equal(rail.title, "People & agents");
   assert.deepEqual(rail.groups[0].agents.map(agent => agent.nestedLabel), ["Claude · 3dab8f40", "Claude · 9c0e1a22"]);
   assert.equal(home.groups[0].agents[0].nestedLabel, "Claude", "the workspace label stays bare");
   assert.equal(trip.groups[0].agents[0].nestedLabel, "Claude");

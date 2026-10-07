@@ -1,156 +1,235 @@
-/* Home UI: to-do view and To-dos pane (UI-SPEC.md 3.4 and 5; lane T). Site tokens only; semantic
-   tokens flip in dark mode, and nothing here sits on --ink, so no dark override block is needed.
-   Contrast, WCAG 2.1 method of tokens.css L33-50, instrument checked on #000/#fff = 21.00 and
-   #777/#fff = 4.48 in the same run; translucent fills composited over their real backdrop:
-     --text on --surface 14.42 light, 13.24 dark; --text-muted on --surface 5.66 light, 8.08 dark;
-     --text-muted on --surface-2 (inside a card) 4.93 light, 7.03 dark;
-     --text on --accent-dim over --surface 12.56 light, 9.72 dark; over --surface-2 10.98 light, 8.58 dark;
-     --border-interactive on --surface 3.75 light, 4.29 dark (1.4.11 non-text). */
+/* Home UI: to-do view and To-dos pane (UI-SPEC.md 3.4 and 5; lane T), drawn to the canvas artboard
+   "Todo" (ref/Todo.dc.html) and the workspace To-dos card (ref/Space.dc.html). Colours are --home-*
+   tokens only; they switch in dark mode, so no dark block is needed here. Contrast of every pair is
+   the audited value next to the token in tokens.css (--home-ink on --home-canvas 14.32, --home-ink-muted
+   on --home-canvas 6.05, --home-card on --home-ink 15.90, --home-offline-text on --home-card 6.66). */
 
 .hm-todo {
-  max-inline-size: 45rem;
+  max-inline-size: calc(720px + 2 * clamp(16px, 4vw, 32px));
   margin-inline: auto;
-  padding: var(--s-6) var(--s-4) var(--s-10);
+  padding: 20px clamp(16px, 4vw, 32px) 32px;
   display: grid;
-  gap: var(--s-5);
-  color: var(--text);
-  font-family: var(--font-sans);
+  gap: 22px;
+  color: var(--home-ink);
+  font-family: var(--home-font-body);
+  font-size: 16px;
+  line-height: 1.45;
   min-inline-size: 0;
 }
 
-.hm-todo-top { display: grid; gap: var(--s-1); }
-.hm-todo-back {
-  display: inline-flex; align-items: center; gap: var(--s-2);
+/* Back link left, "Added by … · Due …" right, on one line when it fits. */
+/* Inside the app's route pane, which already pads 24 px (integration.css), the view adds no padding of its own. */
+.hm-route-pane .hm-todo, .hm-route-pane .hm-todos { max-inline-size: 720px; padding: 0 0 8px; }
+
+/* The pane's generic ".hm-route-pane :is(button, a):not(.hm-agent *)" rule (0,2,1, integration.css) would set
+   every button and link here to inline-flex with 8 px padding. The button and link selectors below repeat their
+   own class after the view's class (0,3,0) to keep the canvas form. */
+.hm-todo-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0 12px; min-inline-size: 0; }
+.hm-todo .hm-todo-back.hm-todo-back {
+  display: inline-flex; align-items: center; gap: 6px;
   min-block-size: 44px; inline-size: fit-content; max-inline-size: 100%;
-  padding-inline: var(--s-2); margin-inline-start: calc(var(--s-2) * -1);
-  border-radius: var(--radius); color: var(--text); font-size: var(--t-sm); font-weight: var(--weight-medium);
+  padding-inline: 4px; margin-inline-start: -4px;
+  border-radius: 12px; color: var(--home-ink-muted); font-size: 15px; font-weight: 600;
   text-decoration: none; overflow-wrap: anywhere;
 }
-.hm-todo-back:hover { text-decoration: underline; }
-.hm-todo-where { margin: 0; font-size: var(--t-sm); font-weight: var(--weight-medium); overflow-wrap: anywhere; }
-.hm-todo-meta { margin: 0; color: var(--text-muted); font-size: var(--t-sm); overflow-wrap: anywhere; }
+.hm-todo .hm-todo-back.hm-todo-back:hover { color: var(--home-link-hover); text-decoration: underline; }
+.hm-todo-back svg { flex: none; }
+.hm-todo-where { margin: 0; color: var(--home-ink-muted); font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+.hm-todo-meta { margin: 0; color: var(--home-ink-muted); font-size: 13px; overflow-wrap: anywhere; }
 
-.hm-todo-head { display: grid; gap: var(--s-2); }
+/* The box, then the title with the notes under it. */
+.hm-todo-head { display: flex; align-items: flex-start; gap: 14px; min-inline-size: 0; }
+.hm-todo-head-copy { display: grid; gap: 8px; min-inline-size: 0; flex: 1 1 auto; }
 .hm-todo-title {
-  margin: 0; font-family: var(--font-display); font-weight: var(--weight-display); letter-spacing: var(--track-head);
-  font-size: var(--t-2xl); line-height: var(--lh-snug); overflow-wrap: anywhere; min-inline-size: 0;
+  margin: 0; font-family: var(--home-font-display); font-weight: 700; letter-spacing: -0.02em;
+  font-size: 32px; line-height: 1.1; overflow-wrap: anywhere; min-inline-size: 0;
 }
 .hm-todo-title:focus { outline: none; }
 .hm-todo[data-todo-state="done"] .hm-todo-title,
-.hm-todo[data-todo-state="dropped"] .hm-todo-title { text-decoration: line-through; text-decoration-thickness: 1px; }
+.hm-todo[data-todo-state="dropped"] .hm-todo-title { text-decoration: line-through; text-decoration-thickness: 2px; color: var(--home-ink-muted); }
+/* A 44 px hit area around a 26 px box; "Mark done" stays the checkbox's name, read but not shown. */
 .hm-todo-done {
-  display: inline-flex; align-items: center; gap: var(--s-2); min-block-size: 44px; inline-size: fit-content;
-  font-size: var(--t-sm); font-weight: var(--weight-medium); cursor: pointer;
+  position: relative; display: inline-flex; align-items: center; justify-content: center; flex: none;
+  inline-size: 44px; block-size: 44px; margin: -4px -8px 0 -10px; border-radius: 12px; cursor: pointer;
 }
-.hm-todo-done input, .hm-todo-check { inline-size: 1.25rem; block-size: 1.25rem; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.hm-todo-done-text {
+  position: absolute; inline-size: 1px; block-size: 1px; margin: -1px; padding: 0; border: 0;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}
 .hm-todo-word {
-  inline-size: fit-content; padding: var(--s-1) var(--s-3); border: 1px solid var(--border); border-radius: var(--radius-pill);
-  color: var(--text-muted); font-size: var(--t-sm); font-weight: var(--weight-medium);
+  inline-size: fit-content; padding: 2px 10px; border: 1.5px solid var(--home-ink-faint); border-radius: 999px;
+  color: var(--home-ink-muted); font-size: 13px; font-weight: 700;
 }
-.hm-todo-notes { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: var(--lh-body); }
+.hm-todo-notes { margin: 0; color: var(--home-ink-muted); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }
 
-.hm-todo-panel, .hm-todo-comments {
-  display: grid; gap: var(--s-3); padding: var(--pad-card); min-inline-size: 0;
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-card);
+/* Canvas check boxes: a rounded square with an ink edge; checked fills ink with a card-coloured tick. */
+.hm-todo-done-box, .hm-todo-check {
+  appearance: none; -webkit-appearance: none; position: relative; display: inline-grid; place-items: center; flex: none;
+  margin: 0; box-sizing: border-box; background: transparent; cursor: pointer;
 }
-/* Saving keeps full contrast: no opacity on the panel, only an accent edge and a progress cursor. */
-.hm-todo-panel[aria-busy="true"] { border-color: var(--accent); cursor: progress; }
+.hm-todo-done-box { inline-size: 26px; block-size: 26px; border: 2px solid var(--home-ink); border-radius: 8px; }
+.hm-todo-check { inline-size: 22px; block-size: 22px; border: 1.5px solid var(--home-ink); border-radius: 7px; }
+.hm-todo-done-box:checked, .hm-todo-check:checked { background: var(--home-ink); }
+.hm-todo-done-box:checked::after, .hm-todo-check:checked::after {
+  content: ""; inline-size: 35%; block-size: 60%; margin-block-start: -12%;
+  border: solid var(--home-card); border-width: 0 2.2px 2.2px 0; transform: rotate(45deg);
+}
+
+/* "Assigned to": a canvas-coloured block, no edge and no lip (Todo.dc.html). */
+.hm-todo-panel {
+  display: grid; gap: 12px; padding: 18px 20px 20px; min-inline-size: 0;
+  background: var(--home-canvas); border-radius: 18px;
+}
+/* Saving keeps full contrast: no opacity on the panel, only an inner edge and a progress cursor. */
+.hm-todo-panel[aria-busy="true"] { box-shadow: inset 0 0 0 1.5px var(--home-ink-faint); cursor: progress; }
 .hm-todo-panel-title {
-  margin: 0; font-family: var(--font-display); font-weight: var(--weight-head); letter-spacing: var(--track-head); font-size: var(--t-lg);
+  margin: 0; font-family: var(--home-font-display); font-weight: 700; letter-spacing: -0.01em; font-size: 19px; line-height: 1.45;
 }
-.hm-todo-status { display: grid; gap: var(--s-1); }
-.hm-todo-status-line { margin: 0; font-weight: var(--weight-medium); overflow-wrap: anywhere; }
-.hm-todo-status-more { margin: 0; color: var(--text-muted); font-size: var(--t-sm); overflow-wrap: anywhere; }
-.hm-todo-quiet { margin: 0; color: var(--text-muted); overflow-wrap: anywhere; }
-.hm-todo-link {
+.hm-todo-comments { display: grid; gap: 14px; min-inline-size: 0; }
+
+/* Start choices: ink-edged pills under a hairline; the chosen one fills ink. */
+.hm-todo-start { margin-block-start: 6px; padding-block-start: 16px; border-block-start: 1px solid var(--home-card-border); min-inline-size: 0; }
+.hm-todo-start legend { float: left; inline-size: 100%; padding: 0; margin: 0 0 10px; font-size: 16px; font-weight: 700; overflow-wrap: anywhere; }
+.hm-todo-start .hm-choice-options { clear: both; gap: 6px; }
+.hm-todo-start .hm-choice {
+  position: relative; min-block-size: 44px; padding: 0 16px; gap: 0;
+  border: 1.5px solid var(--home-ink); background: transparent; color: var(--home-ink);
+  font-size: 14px; font-weight: 600;
+}
+.hm-todo-start .hm-choice input { position: absolute; inset: 0; inline-size: 100%; block-size: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.hm-todo-start .hm-choice-check { display: none; }
+.hm-todo-start .hm-choice:hover { background: var(--home-card); }
+.hm-todo-start .hm-choice:has(input:checked),
+.hm-todo-start .hm-choice[data-selected="true"] { border-color: var(--home-ink); background: var(--home-ink); color: var(--home-card); }
+.hm-todo-start .hm-choice:has(input:disabled) { opacity: 0.6; }
+
+.hm-todo-status { display: grid; gap: 4px; min-block-size: 46px; align-content: start; }
+.hm-todo-status-line { margin: 0; overflow-wrap: anywhere; text-wrap: pretty; }
+.hm-todo-status-more { margin: 0; color: var(--home-ink-muted); font-size: 14px; overflow-wrap: anywhere; }
+.hm-todo-quiet { margin: 0; color: var(--home-ink-muted); overflow-wrap: anywhere; }
+.hm-todo .hm-todo-link.hm-todo-link {
   display: inline-flex; align-items: center; justify-content: center; min-block-size: 44px; min-inline-size: 44px;
-  padding-inline: var(--s-2); margin-inline-start: calc(var(--s-2) * -1); max-inline-size: 100%; overflow-wrap: anywhere;
-  border-radius: var(--radius); color: var(--accent-bright);
+  padding-inline: 8px; margin-inline-start: -8px; max-inline-size: 100%; overflow-wrap: anywhere;
+  border-radius: 12px; color: var(--home-ink); font-weight: 600;
 }
+.hm-todo .hm-todo-link:hover { color: var(--home-link-hover); }
 
 /* Not yet and At a set time editors */
-.hm-todo-editors:empty { display: none; }
+/* Both editors hidden: the empty holder takes no grid gap. */
+.hm-todo-editors:empty, .hm-todo-editors:not(:has(> :not([hidden]))) { display: none; }
 .hm-todo-editor {
-  display: grid; gap: var(--s-3); padding: var(--s-3); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2);
+  display: grid; gap: 12px; padding: 14px; border: 1px solid var(--home-card-border); border-radius: 14px; background: var(--home-card);
 }
 .hm-todo-editor[hidden] { display: none; }
-.hm-todo-gate { display: grid; gap: var(--s-3); margin: 0; padding: 0; border: 0; min-inline-size: 0; }
-.hm-todo-gate legend { padding: 0; margin-block-end: var(--s-2); font-weight: var(--weight-semibold); }
-.hm-todo-gate-kinds { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.hm-todo-gate { display: grid; gap: 12px; margin: 0; padding: 0; border: 0; min-inline-size: 0; }
+.hm-todo-gate legend { padding: 0; margin-block-end: 8px; font-weight: 700; }
+.hm-todo-gate-kinds { display: flex; flex-wrap: wrap; gap: 6px; }
 .hm-todo-gate-kind {
-  display: inline-flex; align-items: center; gap: var(--s-2); min-block-size: 44px; padding-inline: var(--s-3);
-  border: 1px solid var(--border-interactive); border-radius: var(--radius-pill); background: var(--surface); cursor: pointer;
-  font-size: var(--t-sm);
+  display: inline-flex; align-items: center; gap: 8px; min-block-size: 44px; padding-inline: 14px;
+  border: 1.5px solid var(--home-field-border); border-radius: 999px; background: var(--home-card); cursor: pointer;
+  font-size: 14px; font-weight: 600;
 }
-.hm-todo-gate-kind:has(input:checked) { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); font-weight: var(--weight-semibold); }
-.hm-todo-gate-kind input { margin: 0; accent-color: var(--accent); }
+.hm-todo-gate-kind:has(input:checked) { border-color: var(--home-ink); box-shadow: inset 0 0 0 1px var(--home-ink); }
+/* The radios carry .hm-todo-input from the shared builder; keep them native-sized inside their 44 px pill. */
+.hm-todo-gate-kind input.hm-todo-input { flex: none; inline-size: 18px; block-size: 18px; min-block-size: 0; margin: 0; padding: 0; accent-color: var(--home-ink); }
 .hm-todo-gate-field[hidden] { display: none; }
-.hm-todo-when { display: flex; flex-wrap: wrap; gap: var(--s-3); }
-.hm-todo-field { display: grid; gap: var(--s-1); min-inline-size: 0; flex: 1 1 10rem; }
-.hm-todo-field-label { font-size: var(--t-sm); font-weight: var(--weight-medium); }
+.hm-todo-when { display: flex; flex-wrap: wrap; gap: 12px; }
+.hm-todo-field { display: grid; gap: 6px; min-inline-size: 0; flex: 1 1 10rem; }
+.hm-todo-field-label { color: var(--home-ink-muted); font-size: 13px; font-weight: 600; }
 .hm-todo-input {
-  min-block-size: 44px; inline-size: 100%; min-inline-size: 0; padding: var(--s-2) var(--s-3);
-  border: 1px solid var(--border-interactive); border-radius: var(--radius); background: var(--surface); color: var(--text);
-  font: inherit; font-size: var(--t-base);
+  min-block-size: 44px; inline-size: 100%; min-inline-size: 0; padding: 10px 14px; box-sizing: border-box;
+  border: 1.5px solid var(--home-field-border); border-radius: 12px; background: var(--home-field); color: var(--home-ink);
+  font: inherit; font-size: 16px;
 }
-textarea.hm-todo-input { resize: vertical; line-height: var(--lh-body); }
-.hm-todo-save, .hm-todo-cancel, .hm-todos-add-open, .hm-todos-filter-button {
-  min-block-size: 44px; min-inline-size: 44px; padding-inline: var(--s-4); border-radius: var(--radius-pill);
-  font: inherit; font-size: var(--t-sm); font-weight: var(--weight-semibold); cursor: pointer;
+textarea.hm-todo-input { resize: vertical; line-height: 1.45; }
+:is(.hm-todo, .hm-todos) :is(.hm-todo-save.hm-todo-save, .hm-todo-cancel.hm-todo-cancel, .hm-todos-add-open.hm-todos-add-open, .hm-todos-filter-button.hm-todos-filter-button) {
+  display: inline-flex; align-items: center; justify-content: center; min-block-size: 44px; min-inline-size: 44px; padding-inline: 18px; border-radius: 999px;
+  font: inherit; font-size: 14px; font-weight: 700; cursor: pointer;
   transition: background-color var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard);
 }
-.hm-todo-save { justify-self: start; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink); }
-.hm-todo-save:hover { background: var(--accent-bright); border-color: var(--accent-bright); }
-.hm-todo-cancel, .hm-todos-filter-button { border: 1px solid var(--border-interactive); background: var(--surface); color: var(--text); }
+.hm-todo-save { justify-self: start; border: 1.5px solid var(--home-ink); background: var(--home-ink); color: var(--home-card); }
+.hm-todo-save:hover { background: var(--home-link-hover); border-color: var(--home-link-hover); }
+.hm-todo-cancel, .hm-todos-filter-button { border: 1.5px solid var(--home-ink); background: transparent; color: var(--home-ink); }
+.hm-todo-cancel:hover, .hm-todos-filter-button:hover { background: var(--home-soft); }
 
-/* Comments */
-.hm-comments { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s-4); }
-.hm-comment { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--s-3); align-items: start; }
-.hm-comment-main { display: grid; gap: var(--s-1); min-inline-size: 0; }
-.hm-comment-head { margin: 0; display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-2); align-items: baseline; }
-.hm-comment-author { font-weight: var(--weight-semibold); overflow-wrap: anywhere; }
-.hm-comment-time { color: var(--text-muted); font-size: var(--t-sm); }
-.hm-comment-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: var(--lh-body); }
-.hm-tag { padding-inline: 0.15em; border-radius: var(--radius-sm); background: var(--accent-dim); color: var(--text); font-weight: var(--weight-semibold); }
-.hm-comment-form { display: grid; gap: var(--s-2); }
-.hm-comment-field { position: relative; display: grid; gap: var(--s-2); }
+/* Comments: 36 px avatars, name 700, time 13 px muted. */
+.hm-comments { list-style: none; margin: 0; padding: 0; display: grid; gap: 16px; }
+.hm-comment { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: start; }
+.hm-comment-main { display: grid; gap: 2px; min-inline-size: 0; }
+.hm-comment-head { margin: 0; display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline; }
+.hm-comment-author { font-weight: 700; overflow-wrap: anywhere; }
+.hm-comment-time { color: var(--home-ink-muted); font-size: 13px; }
+.hm-comment-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }
+.hm-comment .hm-person-avatar[data-size="36"], .hm-comment .hm-agent-orb[data-size="36"] { font-size: 15px; }
+.hm-comment .hm-agent-orb[data-size="36"] { border-radius: 11px; }
+.hm-comment .hm-agent-orb[data-size="36"] .hm-owner-badge { inline-size: 17px; block-size: 17px; font-size: 10px; }
+/* A tag reads in the tagged name's own colour set, like its avatar. */
+.hm-tag { padding: 1px 7px; border-radius: 6px; background: var(--home-soft); color: var(--home-ink); font-weight: 600; }
+.hm-tag[data-hue="0"] { background: var(--home-blue-tint); color: var(--home-blue-deep); }
+.hm-tag[data-hue="1"] { background: var(--home-orange-tint); color: var(--home-orange-deep); }
+.hm-tag[data-hue="2"] { background: var(--home-purple-tint); color: var(--home-purple-deep); }
+.hm-tag[data-hue="3"] { background: var(--home-teal-tint); color: var(--home-teal-deep); }
 
-/* To-dos pane */
-.hm-todos { display: grid; gap: var(--s-4); max-inline-size: 45rem; margin-inline: auto; padding: var(--s-6) var(--s-4) var(--s-10); min-inline-size: 0; }
-.hm-todos-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s-3); }
-.hm-todos-title { margin: 0; font-family: var(--font-display); font-weight: var(--weight-display); letter-spacing: var(--track-head); font-size: var(--t-2xl); }
+/* The composer: the tag card (in the flow), then the field and Post on one row. */
+.hm-comment-form { display: grid; gap: 10px; margin-block-start: 6px; min-inline-size: 0; }
+.hm-comment-field { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; min-inline-size: 0; }
+.hm-comment-field .hm-todo-field { flex: 1 1 200px; }
+/* One line, like the canvas's text input: no resize grip. */
+.hm-comment-input.hm-comment-input {
+  min-block-size: 50px; padding: 12px 16px; border-color: var(--home-ink); border-radius: 14px; resize: none;
+}
+/* Post: ink fill, no edge, canvas text (--home-canvas on --home-ink 14.32). */
+.hm-todo .hm-comment-post.hm-comment-post {
+  min-block-size: 50px; padding-inline: 24px; border: 0; border-radius: 14px; color: var(--home-canvas); font-size: 15px;
+}
+.hm-todo .hm-comment-post.hm-comment-post:hover { background: var(--home-link-hover); }
+/* Under the field: what a tag does here. */
+.hm-comment-help { margin: 0; color: var(--home-ink-muted); font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; text-wrap: pretty; }
+
+/* To-dos pane: the workspace To-dos card, full width. */
+.hm-todos { display: grid; gap: 18px; max-inline-size: 45rem; margin-inline: auto; padding: 20px clamp(16px, 4vw, 32px) 32px; min-inline-size: 0;
+  color: var(--home-ink); font-family: var(--home-font-body); line-height: 1.45; }
+.hm-todos-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+.hm-todos-title { margin: 0; font-family: var(--home-font-display); font-weight: 700; letter-spacing: -0.02em; font-size: 32px; line-height: 1.1; }
 .hm-todos-title:focus { outline: none; }
-.hm-todos-filter { display: inline-flex; gap: var(--s-2); }
-.hm-todos-filter-button[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.hm-todos-filter { display: inline-flex; gap: 6px; }
+.hm-todos .hm-todos-filter-button[aria-pressed="true"] { background: var(--home-ink); color: var(--home-card); }
 .hm-todo-rows {
-  list-style: none; margin: 0; padding: 0; background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--radius-lg); box-shadow: var(--shadow-card);
+  list-style: none; margin: 0; padding: 0 16px; background: var(--home-card); border: 1px solid var(--home-card-border);
+  border-radius: 18px; box-shadow: var(--home-card-shadow);
 }
-.hm-todo-row {
-  display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: var(--s-2); align-items: start;
-  padding: var(--s-2) var(--s-3) var(--s-2) var(--s-2); min-block-size: 56px;
+/* Scoped under the list: the workspace card styles a bare .hm-todo-row of its own (workspace.css). */
+.hm-todo-rows > .hm-todo-row {
+  display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 0 4px; align-items: center;
+  padding: 6px 6px 6px 0; margin-inline-start: -11px; min-block-size: 58px;
 }
-.hm-todo-row + .hm-todo-row { border-block-start: 1px solid var(--border); }
-.hm-todo-check-hit { display: grid; place-items: center; inline-size: 44px; block-size: 44px; cursor: pointer; }
+.hm-todo-rows > .hm-todo-row + .hm-todo-row { border-block-start: 1px solid var(--home-hairline); }
+.hm-todo-check-hit { display: grid; place-items: center; inline-size: 44px; block-size: 44px; border-radius: 12px; cursor: pointer; }
 span.hm-todo-check-hit { cursor: default; }
-.hm-todo-row-copy { display: grid; gap: var(--s-1); padding-block: var(--s-1); min-inline-size: 0; }
+.hm-todos .hm-todo-row-copy.hm-todo-row-copy {
+  display: grid; gap: 2px; align-content: center; min-block-size: 44px; padding-block: 4px; min-inline-size: 0;
+  color: var(--home-ink); text-decoration: none; border-radius: 10px;
+}
 .hm-todo-row-title {
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere;
-  min-block-size: 44px; align-content: center; color: var(--text); font-weight: var(--weight-medium); text-decoration: none;
+  font-size: 17px; font-weight: 700; line-height: 1.3;
 }
-a.hm-todo-row-title:hover { text-decoration: underline; }
-.hm-todo-row[data-todo-state="done"] .hm-todo-row-title,
-.hm-todo-row[data-todo-state="dropped"] .hm-todo-row-title { text-decoration: line-through; color: var(--text-muted); }
-.hm-todo-row-sub { color: var(--text-muted); font-size: var(--t-sm); overflow-wrap: anywhere; }
-.hm-todos-add { display: grid; gap: var(--s-2); }
-.hm-todos-add-open { justify-self: start; border: 1.5px dashed var(--border-interactive); background: transparent; color: var(--text); }
+a.hm-todo-row-copy:hover .hm-todo-row-title { text-decoration: underline; }
+.hm-todo-rows > .hm-todo-row[data-todo-state="done"] .hm-todo-row-title,
+.hm-todo-rows > .hm-todo-row[data-todo-state="dropped"] .hm-todo-row-title { text-decoration: line-through; color: var(--home-ink-muted); }
+.hm-todo-row-sub { color: var(--home-ink-muted); font-size: 13px; overflow-wrap: anywhere; }
+.hm-todo-row-who { margin-inline: 8px 6px; }
+.hm-todos-add { display: grid; gap: 8px; }
+.hm-todos-add-open { justify-self: start; border: 1.5px dashed var(--home-line-dashed); background: transparent; color: var(--home-ink); }
+.hm-todos-add-open:hover { border-color: var(--home-ink); }
 .hm-todos-add-open[hidden], .hm-todos-add-form[hidden] { display: none; }
-.hm-todos-add-form { display: grid; gap: var(--s-2); }
-.hm-todos-add-actions { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.hm-todos-add-form { display: grid; gap: 8px; }
+.hm-todos-add-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
 .hm-todo :is(a, button, input, select, textarea, label):focus-visible,
 .hm-todos :is(a, button, input, select, textarea, label):focus-visible { outline: none; box-shadow: var(--focus-ring); }
-.hm-todo-done:has(input:focus-visible), .hm-todo-gate-kind:has(input:focus-visible), .hm-todo-check-hit:has(input:focus-visible) { box-shadow: var(--focus-ring); border-radius: var(--radius); }
+.hm-todo-done:has(input:focus-visible), .hm-todo-gate-kind:has(input:focus-visible), .hm-todo-check-hit:has(input:focus-visible) { box-shadow: var(--focus-ring); border-radius: 12px; }
+.hm-todo-done-box:focus-visible, .hm-todo-check:focus-visible { box-shadow: none; }
 
 @media (prefers-reduced-motion: reduce) {
   .hm-todo *, .hm-todos * { transition: none !important; }

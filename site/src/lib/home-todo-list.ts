@@ -3,7 +3,7 @@
 // Sample mode renders no actions and no doors (UI-SPEC 2 and 3.3): no filter, no checkbox, no
 // row link, no "+ Add a to-do".
 import type { Id, TodoVM } from "./home-types";
-import { notice } from "./home-primitives";
+import { agentOrb, notice, personAvatar } from "./home-primitives";
 import { TODO_RESULT_UNKNOWN, TODO_SAVE_FAILED, todoSubline, type TodoCopyContext } from "./home-todo-copy";
 
 export type TodoFilter = "open" | "all";
@@ -38,11 +38,24 @@ function row(doc: Document, entry: TodoListRow, vm: TodoListVM, callbacks: TodoL
     box.addEventListener("change", () => callbacks.complete(todo, box.checked));
     const hit = node(doc, "label", "hm-todo-check-hit"); hit.append(box); item.append(hit);
   } else item.append(node(doc, "span", "hm-todo-check-hit"));
-  const copy = node(doc, "div", "hm-todo-row-copy");
-  const title = vm.sample ? node(doc, "span", "hm-todo-row-title", todo.title) : Object.assign(node(doc, "a", "hm-todo-row-title", todo.title), { href: entry.href });
-  title.title = todo.title;
-  copy.append(title, node(doc, "span", "hm-todo-row-sub", todoSubline(todo, ctx)));
+  // The title and its subline are one link, as on the workspace To-dos card, so the whole text block
+  // is the 44 px target. The link's name stays the title; the subline is its description.
+  const copy = vm.sample ? node(doc, "div", "hm-todo-row-copy") : Object.assign(node(doc, "a", "hm-todo-row-copy"), { href: entry.href });
+  const title = node(doc, "span", "hm-todo-row-title", todo.title); title.title = todo.title;
+  const sub = node(doc, "span", "hm-todo-row-sub", todoSubline(todo, ctx));
+  if (!vm.sample) {
+    const base = `hm-todos-${todo.id}`.replace(/[^A-Za-z0-9_-]/g, "_");
+    title.id = `${base}-title`; sub.id = `${base}-sub`;
+    copy.setAttribute("aria-labelledby", title.id); copy.setAttribute("aria-describedby", sub.id);
+  }
+  copy.append(title, sub);
   item.append(copy);
+  // The assignee's avatar on the right, as on the workspace To-dos card. The subline already names them.
+  const assignee = todo.assignee;
+  if (assignee) {
+    const who = assignee.kind === "agent" ? agentOrb(doc, assignee.agent, { size: 26, badge: true }) : personAvatar(doc, assignee.person, 28);
+    who.setAttribute("aria-hidden", "true"); who.classList.add("hm-todo-row-who"); item.append(who);
+  }
   return item;
 }
 

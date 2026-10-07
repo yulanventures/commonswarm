@@ -131,11 +131,15 @@ test("the Add an agent poll runs only while its own host page is open, and stops
   assert.match(script, /hostPicker\?\.addEventListener\("agent-host-back", \(\) => stopHostJoinWatch\(\)\);/);
 });
 
-test("a person and an agent have separate doors in the People & agents dialog", () => {
-  const dialog = section(markup, 'id="dashboard-roster-dialog"', "</dialog>");
-  assert.match(dialog, /data-add-agent-dialog[\s\S]*?Add an agent/);
-  assert.match(dialog, /data-invite-dialog[\s\S]*?Invite someone/);
-  assert.match(script, /\[data-invite-dialog\]"\)\?\.addEventListener\("click", \(\) => \{\s*closeRosterDialog\(\);\s*openInvite\("channel"\);/);
+/* The doors moved with People & agents from a dialog to a page (2026-10-07, the canvas Members
+   artboard). Two doors still, built by the page, and Invite still opens the existing invite form. */
+test("a person and an agent have separate doors on the People & agents page", () => {
+  const page = section(peopleView, "if (page) {", "const select = ");
+  assert.match(page, /data-people-page-add-agent|peoplePageAddAgent/);
+  assert.match(page, /"Add an agent"/);
+  assert.match(page, /peoplePageInvite/);
+  assert.match(page, /"Invite someone"/);
+  assert.match(script, /invite: \(\) => \{ void navigateHome\(\{ view: "chat", workspaceId: workspace.id \}, "push"\)\.then\(\(\) => openInvite\("channel"\)\); \}/);
 });
 
 test("creation asks for purpose without a default and states the owner's Editor access", () => {

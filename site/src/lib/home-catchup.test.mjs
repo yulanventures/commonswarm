@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   catchUpAgentAttentionLine,
+  catchUpCardFooter,
+  catchUpDateLine,
   catchUpGreeting,
   catchUpLatestVisible,
   catchUpNeedsYouMoreCount,
@@ -118,4 +120,17 @@ test("agent attention line prints nothing when unknown", () => {
 test("workspace check totals count only ready cards as checked", () => {
   const cards = [workspace("a", "loading"), workspace("b", "ready"), workspace("c", "failed"), workspace("d", "open")];
   assert.deepEqual(catchUpWorkspaceCheckTotals(cards), { checked: 1, total: 4, anyFailed: true, anyPending: true });
+});
+
+test("date eyebrow names the weekday, month and day from the same clock as the greeting", () => {
+  assert.equal(catchUpDateLine("2026-10-05T08:30:00"), "Monday, October 5");
+});
+
+test("card footer is one measured line: new messages, then agent attention, then counts", () => {
+  const all = workspace("home", "ready", { openTodos: 4, lists: 3, files: 3, agentsNeedingAttention: 1, newMessagesSinceLastLooked: 6 });
+  assert.deepEqual(catchUpCardFooter(all), { kind: "since", text: "6 new messages since you last looked" });
+  assert.deepEqual(catchUpCardFooter({ ...all, newMessagesSinceLastLooked: 0 }), { kind: "attention", text: "1 agent needs attention" });
+  assert.deepEqual(catchUpCardFooter({ ...all, newMessagesSinceLastLooked: null, agentsNeedingAttention: 0 }),
+    { kind: "counts", text: "4 open to-dos · 3 lists · 3 files" });
+  assert.equal(catchUpCardFooter(workspace("x", "ready")), null);
 });

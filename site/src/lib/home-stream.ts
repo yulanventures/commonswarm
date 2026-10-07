@@ -124,11 +124,14 @@ export function buildDayDivider(doc: Document, label: string, key?: string): HTM
   row.append(node(doc, "span", "hm-day__label", label)); return row;
 }
 
+/** Picture sizes on the stream (Space.dc.html): 36 px for a message, 28 px for a reply inside a thread. */
+export type StreamAvatarSize = 28 | 36;
+
 /** Author line: picture (an agent shows its orb with the owner badge), name, and when. */
-export function buildAuthorLine(doc: Document, signal: Pick<StreamSignalVM, "author" | "when" | "createdAt">): HTMLElement {
+export function buildAuthorLine(doc: Document, signal: Pick<StreamSignalVM, "author" | "when" | "createdAt">, size: StreamAvatarSize = 28): HTMLElement {
   const line = node(doc, "div", "hm-author"); const author = signal.author;
   line.dataset.authorKind = isAgentAuthor(author) ? "agent" : "person";
-  line.append(isAgentAuthor(author) ? agentOrb(doc, author, { size: 28, badge: true }) : personAvatar(doc, author, 28));
+  line.append(isAgentAuthor(author) ? agentOrb(doc, author, { size, badge: true }) : personAvatar(doc, author, size));
   const name = node(doc, "span", "hm-author__name", authorLabel(author)); name.title = authorLabel(author); line.append(name);
   if (!isAgentAuthor(author) && author.you) line.append(node(doc, "span", "hm-author__you", "you"));
   const time = node(doc, "time", "hm-author__when", signal.when);

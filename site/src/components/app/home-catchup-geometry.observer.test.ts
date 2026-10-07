@@ -36,6 +36,20 @@ export function capsule(doc, c) {
   el.setAttribute("aria-label", c.person.firstName);
   return el;
 }
+export function personAvatar(doc, p) {
+  const el = doc.createElement("span");
+  el.className = "hm-person-avatar";
+  el.setAttribute("role", "img");
+  el.setAttribute("aria-label", p.firstName);
+  return el;
+}
+export function agentOrb(doc, a) {
+  const el = doc.createElement("span");
+  el.className = "hm-agent-orb";
+  el.setAttribute("role", "img");
+  el.setAttribute("aria-label", a.name);
+  return el;
+}
 export function needsYouCard(doc, n, onAction) {
   const article = doc.createElement("article");
   article.className = "hm-stub-needs";

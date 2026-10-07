@@ -1,8 +1,8 @@
 // Home UI: the workspace right column (UI-SPEC.md 3.3, lane W). Pure derivation first, then thin DOM
 // builders: (doc, vm, callbacks) => HTMLElement. User text goes in through textContent only; sample mode
 // renders no actions; nothing here reads the network or the clock.
-import type { AgentVM, ObjectCardVM } from "./home-types";
-import { objectCard } from "./home-primitives";
+import type { AgentVM, ObjectCardVM, PersonVM } from "./home-types";
+import { agentOrb, objectCard, personAvatar } from "./home-primitives";
 
 /**
  * The refused Lists & docs door. The words are the Lists pane's own form (LiveDashboard.astro, the
@@ -19,7 +19,9 @@ export const SIDE_OBJECT_LIMIT = 5;
 export type SideTodoState = "open" | "doing" | "done" | "dropped";
 
 /** One to-do as the right column needs it. `subline` arrives already worded ("Your Claude · 2nd in line"). */
-export interface SideTodoVM { id: string; title: string; href: string; state: SideTodoState; mayComplete: boolean; subline: string }
+export interface SideTodoVM { id: string; title: string; href: string; state: SideTodoState; mayComplete: boolean; subline: string;
+  /** Who the to-do is assigned to, shown as a picture at the row's end (Space.dc.html). Absent or null: nobody. */
+  who?: PersonVM | AgentVM | null }
 
 /** `null` means the to-dos read is absent: every To-dos surface is then absent too (UI-SPEC 3.3 states). */
 export interface SideTodosVM { items: SideTodoVM[]; allHref: string; canAdd: boolean; notice?: string }
@@ -112,6 +114,13 @@ function check(doc: Document): SVGSVGElement {
   const path = doc.createElementNS("http://www.w3.org/2000/svg", "path"); path.setAttribute("d", "M2.5 6.2l2.4 2.4 4.6-5"); svg.append(path); return svg;
 }
 
+function plus(doc: Document): SVGSVGElement {
+  const svg = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
+  for (const [name, value] of Object.entries({ viewBox: "0 0 20 20", width: "20", height: "20", fill: "none", stroke: "currentColor", "stroke-width": "2",
+    "stroke-linecap": "round", "aria-hidden": "true", focusable: "false" })) svg.setAttribute(name, value);
+  const path = doc.createElementNS("http://www.w3.org/2000/svg", "path"); path.setAttribute("d", "M10 4v12M4 10h12"); svg.append(path); return svg;
+}
+
 function todoRow(doc: Document, item: SideTodoVM, sample: boolean, callbacks: SideCardsCallbacks): HTMLElement {
   const row = node(doc, "li", "hm-todo-row"); row.dataset.sideTodo = item.id;
   if (item.mayComplete && !sample) {
@@ -132,7 +141,13 @@ function todoRow(doc: Document, item: SideTodoVM, sample: boolean, callbacks: Si
   const title = node(doc, "span", "hm-todo-row__title", item.title); title.title = item.title;
   text.append(title);
   if (item.subline) text.append(node(doc, "span", "hm-todo-row__sub", item.subline));
-  row.append(text); return row;
+  row.append(text);
+  if (item.who) {
+    const who = node(doc, "span", "hm-todo-row__who");
+    who.append("label" in item.who ? agentOrb(doc, item.who, { size: 26, badge: true }) : personAvatar(doc, item.who, 24));
+    row.append(who);
+  }
+  return row;
 }
 
 /** To-dos: up to 6 open rows, "+ Add a to-do" and "All to-dos". Returns null when the read is absent. */
@@ -140,15 +155,19 @@ export function buildTodosCard(doc: Document, vm: SideCardsVM, callbacks: SideCa
   if (!vm.todos) return null;
   const { root, body } = section(doc, "todos", "To-dos");
   const { shown, more } = sideOpenTodos(vm.todos.items);
+  // The add door sits beside the title as a 44 px "+" (Space.dc.html); its name stays "Add a to-do".
+  const heading = root.querySelector("h2");
+  if (heading && vm.todos.canAdd && !vm.sample) {
+    const head = node(doc, "div", "hm-side-card__head"); heading.replaceWith(head); head.append(heading);
+    const add = node(doc, "button", "hm-side-add"); add.type = "button"; add.dataset.sideAddTodo = "";
+    add.setAttribute("aria-label", "Add a to-do"); add.title = "Add a to-do"; add.append(plus(doc));
+    add.addEventListener("click", () => callbacks.onAddTodo()); head.append(add);
+  }
   if (vm.todos.notice) body.append(node(doc, "p", "hm-side-card__empty", vm.todos.notice));
   else if (shown.length === 0) body.append(node(doc, "p", "hm-side-card__empty", "No open to-dos."));
   else { const list = node(doc, "ul", "hm-side-list hm-side-list--todos"); list.setAttribute("aria-label", "Open to-dos");
     for (const item of shown) list.append(todoRow(doc, item, vm.sample, callbacks)); body.append(list); }
   const foot = node(doc, "div", "hm-side-card__foot");
-  if (vm.todos.canAdd && !vm.sample) {
-    const add = node(doc, "button", "hm-side-button", "+ Add a to-do"); add.type = "button"; add.dataset.sideAddTodo = "";
-    add.addEventListener("click", () => callbacks.onAddTodo()); foot.append(add);
-  }
   if (more) foot.append(node(doc, "span", "hm-side-card__empty", `${more} more`));
   foot.append(link(doc, "All to-dos", vm.todos.allHref, "todos", vm.sample)); body.append(foot);
   return root;

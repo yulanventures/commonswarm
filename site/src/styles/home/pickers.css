@@ -1,60 +1,92 @@
-/* Home UI: assign picker and tag picker (UI-SPEC.md 2.4 and 5; lane T). Site tokens only.
-   The popover sits on --surface; the active row is --surface-2 plus a 3px --accent bar (shape, not
-   colour alone, and aria-selected for assistive tech). Contrast by the tokens.css L33-50 method
-   (controls #000/#fff 21.00, #777/#fff 4.48 in the same run): --text-muted captions on --surface-2
-   4.93 light / 7.03 dark; on --surface 5.66 light / 8.08 dark. */
+/* Home UI: assign picker and tag picker (UI-SPEC.md 2.4 and 5; lane T), drawn to the canvas artboard
+   "Todo" (ref/Todo.dc.html). --home-* tokens only; they switch in dark mode.
+   The assign picker is the canvas's row of chips, grouped in card-coloured capsules. The tag picker
+   is the canvas's floating card: a soft heading band, 50 px rows with a hairline between
+   them, the active row in lime with a 3 px ink bar (shape, not colour alone; aria-selected for
+   assistive tech). Contrast, from the audited token notes in tokens.css: --home-lime-ink on
+   --home-lime 12.65; --home-ink-muted on --home-soft 6.21; --home-offline-text on --home-card 6.66. */
 
-.hm-picker { position: relative; display: grid; min-inline-size: 0; }
-.hm-picker-trigger {
-  display: flex; align-items: center; justify-content: space-between; gap: var(--s-3);
-  min-block-size: 44px; inline-size: 100%; padding: var(--s-2) var(--s-3);
-  border: 1px solid var(--border-interactive); border-radius: var(--radius); background: var(--surface); color: var(--text);
-  font: inherit; font-weight: var(--weight-medium); text-align: start; cursor: pointer;
-  transition: border-color var(--dur-2) var(--ease-standard), background-color var(--dur-2) var(--ease-standard);
+.hm-picker { position: relative; display: grid; justify-items: start; min-inline-size: 0; }
+/* Assign chips (Todo canvas): one capsule per person with their agents, 10 px apart; the chosen chip fills
+   ink with canvas text (--home-canvas on --home-ink 14.32). The pane's generic button rule (0,2,1,
+   integration.css) is outweighed by repeating the chip class (0,3,0). */
+.hm-assign-chips { display: flex; flex-wrap: wrap; gap: 10px; min-inline-size: 0; max-inline-size: 100%; }
+.hm-assign-capsule {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 4px; min-inline-size: 0; max-inline-size: 100%;
+  background: var(--home-card); border: 1px solid var(--home-card-border); border-radius: 16px;
 }
-.hm-picker-trigger:hover { border-color: var(--accent); }
-.hm-picker-trigger[aria-expanded="true"] { border-color: var(--accent); }
+.hm-picker .hm-assign-chip.hm-assign-chip {
+  display: inline-flex; align-items: center; gap: 8px; min-block-size: 44px; min-inline-size: 44px; max-inline-size: 100%;
+  padding: 0 14px 0 8px; border: 0; border-radius: 12px; background: transparent; color: var(--home-ink);
+  font: inherit; font-size: 15px; font-weight: 600; line-height: 1.3; text-align: start; cursor: pointer;
+  transition: background-color var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
+}
+.hm-picker .hm-assign-chip.hm-assign-chip:hover { background: var(--home-soft); }
+.hm-picker .hm-assign-chip.hm-assign-chip[aria-checked="true"] { background: var(--home-ink); color: var(--home-canvas); }
+.hm-picker .hm-assign-chip.hm-assign-chip[aria-disabled="true"] { cursor: not-allowed; opacity: 0.6; }
+.hm-picker .hm-assign-chip.hm-assign-chip:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.hm-assign-chip .hm-agent-orb { border-radius: 9px; }
+.hm-assign-name { min-inline-size: 0; overflow-wrap: anywhere; }
+/* The caption the list used to show is each chip's description: read, not shown. The status line under
+   the chips says it for the chosen one. */
+.hm-assign-caption {
+  position: absolute; inline-size: 1px; block-size: 1px; margin: -1px; padding: 0; border: 0;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}
 .hm-picker-value { min-inline-size: 0; overflow-wrap: anywhere; }
-span.hm-picker-value { display: block; min-block-size: 44px; align-content: center; font-weight: var(--weight-medium); }
-.hm-picker-chevron { flex: none; color: var(--text-muted); }
+.hm-picker > span.hm-picker-value { display: block; min-block-size: 44px; align-content: center; font-weight: 600; }
 
 .hm-picker-pop {
-  position: absolute; inset-inline: 0; inset-block-start: calc(100% + var(--s-1)); z-index: 20;
+  position: absolute; inset-inline-start: 0; inline-size: min(100%, 30rem); inset-block-start: calc(100% + 6px); z-index: 20;
   display: grid; max-block-size: min(24rem, 60vh); overflow: auto; overscroll-behavior: contain;
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-floating);
+  background: var(--home-card); border: 1px solid var(--home-card-border); border-radius: 16px; box-shadow: var(--shadow-floating);
 }
-.hm-tag-picker .hm-picker-pop { inset-block-start: auto; inset-block-end: calc(100% + var(--s-1)); }
+/* The tag card sits in the flow between the comments and the field (Todo canvas): it never covers the
+   comments it belongs to. */
+.hm-tag-picker .hm-picker-pop { position: static; inline-size: auto; max-block-size: min(22rem, 55vh); }
 .hm-picker-pop[hidden] { display: none; }
-.hm-pick-list { display: grid; padding: var(--s-1); }
-.hm-pick-group { display: grid; }
-.hm-pick-group + .hm-pick-group { border-block-start: 1px solid var(--border); margin-block-start: var(--s-1); padding-block-start: var(--s-1); }
-.hm-pick-group-head {
-  display: flex; align-items: center; gap: var(--s-2); min-inline-size: 0; padding: var(--s-2) var(--s-3) var(--s-1);
-  color: var(--text-muted); font-size: var(--t-sm); font-weight: var(--weight-semibold);
+.hm-pick-heading {
+  padding: 10px 16px; background: var(--home-soft); color: var(--home-ink-muted); font-size: 13px; font-weight: 700; overflow-wrap: anywhere;
 }
+.hm-pick-list { display: grid; }
+.hm-pick-group { display: grid; }
+.hm-pick-group + .hm-pick-group { border-block-start: 1px solid var(--home-hairline); }
+.hm-pick-group-head {
+  display: flex; align-items: center; gap: 8px; min-inline-size: 0; padding: 10px 16px 4px;
+  color: var(--home-ink-muted); font-size: 13px; font-weight: 700;
+}
+/* The tag card is one flat list, as on the canvas; the group names still label each group for assistive tech. */
+.hm-tag-picker .hm-pick-group-head { display: none; }
 .hm-pick-group-name { overflow-wrap: anywhere; min-inline-size: 0; }
 .hm-pick-option {
-  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--s-3); align-items: center;
-  min-block-size: 44px; padding: var(--s-2) var(--s-3); border-radius: var(--radius); cursor: pointer; color: var(--text);
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: center;
+  min-block-size: 50px; padding: 4px 16px; cursor: pointer; color: var(--home-ink);
   transition: background-color var(--dur-2) var(--ease-standard);
 }
-.hm-pick-option:hover, .hm-pick-option[aria-selected="true"] { background: var(--surface-2); }
-.hm-pick-option[aria-selected="true"] { box-shadow: inset 3px 0 0 var(--accent); }
+.hm-tag-picker .hm-pick-option + .hm-pick-option,
+.hm-tag-picker .hm-pick-group + .hm-pick-group { border-block-start: 1px solid var(--home-hairline); }
+.hm-pick-option:hover { background: var(--home-soft); }
+.hm-pick-option[aria-selected="true"] { background: var(--home-lime); color: var(--home-lime-ink); box-shadow: inset 3px 0 0 var(--home-lime-ink); }
+.hm-pick-option[aria-selected="true"] .hm-owner-badge { box-shadow: 0 0 0 2px var(--home-lime); }
 .hm-pick-option[aria-disabled="true"] { cursor: not-allowed; opacity: 0.6; }
-.hm-pick-copy { display: grid; gap: 0.125rem; min-inline-size: 0; }
-.hm-pick-label { font-weight: var(--weight-semibold); overflow-wrap: anywhere; }
-.hm-pick-caption { color: var(--text-muted); font-size: var(--t-sm); overflow-wrap: anywhere; }
+.hm-pick-copy { display: grid; gap: 0; min-inline-size: 0; }
+.hm-pick-label { font-weight: 600; overflow-wrap: anywhere; }
+.hm-pick-caption { color: var(--home-ink-muted); font-size: 13px; overflow-wrap: anywhere; }
+.hm-pick-option[aria-selected="true"] .hm-pick-caption { color: var(--home-lime-ink); }
+.hm-pick-option[data-pick-state="disconnected"]:not([aria-selected="true"]) .hm-pick-caption { color: var(--home-offline-text); }
+/* Tag card rows: the name grows, the caption sits at the right on one line when it fits. */
+.hm-tag-picker .hm-pick-copy { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0 12px; }
+.hm-tag-picker .hm-pick-label { flex: 1 1 auto; }
+.hm-tag-picker .hm-pick-caption { flex: 0 1 auto; text-align: end; }
 .hm-pick-letter {
-  display: grid; place-items: center; inline-size: 28px; block-size: 28px; border-radius: var(--radius-pill);
-  background: var(--surface-2); border: 1px solid var(--border); color: var(--text); font-size: var(--t-xs); font-weight: var(--weight-semibold);
+  display: grid; place-items: center; inline-size: 28px; block-size: 28px; border-radius: 50%;
+  background: var(--home-soft); border: 1px solid var(--home-card-border); color: var(--home-ink); font-size: 12px; font-weight: 700;
 }
 .hm-pick-footer {
-  margin: 0; padding: var(--s-2) var(--s-3) var(--s-3); border-block-start: 1px solid var(--border);
-  color: var(--text-muted); font-size: var(--t-sm); overflow-wrap: anywhere;
+  margin: 0; padding: 10px 16px 12px; border-block-start: 1px solid var(--home-hairline);
+  color: var(--home-ink-muted); font-size: 13px; overflow-wrap: anywhere;
 }
 
-.hm-picker-trigger:focus-visible { outline: none; box-shadow: var(--focus-ring); }
-
 @media (prefers-reduced-motion: reduce) {
-  .hm-picker-trigger, .hm-pick-option { transition: none; }
+  .hm-picker .hm-assign-chip.hm-assign-chip, .hm-pick-option { transition: none; }
 }
