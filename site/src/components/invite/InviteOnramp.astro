@@ -18,16 +18,23 @@
  * therefore reached through :global() under .invite-onramp.
  */
 import { CONTENT_ROLES, CONTENT_ROLE_COPY } from "../../lib/household-access";
-import { INVITE_CONNECT_FOOTNOTE, inviteAssistantHosts } from "../../lib/agent-hosts";
+import { INVITE_CONNECT_FOOTNOTE, INVITE_CONNECT_LEAD, inviteAssistantHosts } from "../../lib/agent-hosts";
 import ProviderButtons from "../auth/ProviderButtons.astro";
-import Wordmark from "../Wordmark.astro";
 import "../../styles/home/onboarding.css";
 
 const assistantHosts = inviteAssistantHosts();
+/* The chat apps first, as the canvas Phone-Join draws them; the coding tools under More apps. */
+const primaryAssistants = assistantHosts.filter((host) => host.joiner === "primary");
+const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary");
 ---
 
 <invite-onramp class="invite-onramp" data-state="loading">
-  <div class="invite-onramp__brand"><Wordmark href="/" /></div>
+  <div class="invite-onramp__brand">
+    <a class="invite-onramp__brand-link" href="/" aria-label="CommonSwarm home">
+      <svg class="invite-onramp__mark" width="24" height="24" viewBox="0 0 28 28" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="8"></circle><rect x="12" y="12" width="14" height="14" rx="4.5" stroke-width="2"></rect></svg>
+      <span>CommonSwarm</span>
+    </a>
+  </div>
 
   <section class="invite-onramp__panel" data-view="loading" role="status" aria-live="polite">
     <span class="invite-onramp__spinner" aria-hidden="true"></span>
@@ -83,14 +90,45 @@ const assistantHosts = inviteAssistantHosts();
       <span class="invite-onramp__face invite-onramp__face--you" data-viewer-initial></span>
     </div>
     <h1 class="invite-onramp__title" id="invite-review-title"><span data-inviter>A teammate</span> invited you to <span data-review-workspace>Home</span>.</h1>
+    <p class="invite-onramp__intro">A shared workspace for the people in it and the assistants they each already use.</p>
 
-    <div class="invite-onramp__facts">
-      <h2 class="invite-onramp__facet">Who is here</h2>
-      <p data-review-audience></p>
-      <h2 class="invite-onramp__facet">What you will see</h2>
-      <p data-review-disclosure></p>
-      <p class="invite-onramp__private"><strong>What stays private:</strong> your other workspaces.</p>
-    </div>
+    <fieldset class="invite-onramp__choices invite-onramp__choices--assistant">
+      <legend>Which assistant will you bring?</legend>
+      <div class="invite-onramp__assistant-list">
+        {primaryAssistants.map((host) => (
+          <label class="invite-onramp__choice invite-onramp__assistant">
+            <input type="radio" name="invite-assistant" value={host.id} data-assistant-host />
+            <span class="invite-onramp__tile-orb" aria-hidden="true">{host.name.slice(0, 1)}</span>
+            <span>
+              <strong>{host.name}</strong>
+              <small class="visually-hidden">{host.maker}</small>
+            </span>
+          </label>
+        ))}
+        <label class="invite-onramp__choice invite-onramp__assistant">
+          <input type="radio" name="invite-assistant" value="just-me" data-assistant-host />
+          <span class="invite-onramp__tile-orb invite-onramp__tile-orb--empty" aria-hidden="true"></span>
+          <span><strong>Just me for now</strong></span>
+        </label>
+        {moreAssistants.length > 0 && (
+          <details class="invite-onramp__more">
+            <summary>More apps</summary>
+            <div class="invite-onramp__assistant-list">
+              {moreAssistants.map((host) => (
+                <label class="invite-onramp__choice invite-onramp__assistant">
+                  <input type="radio" name="invite-assistant" value={host.id} data-assistant-host />
+                  <span class="invite-onramp__tile-orb" aria-hidden="true">{host.name.slice(0, 1)}</span>
+                  <span>
+                    <strong>{host.name}</strong>
+                    <small class="visually-hidden">{host.maker}</small>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </details>
+        )}
+      </div>
+    </fieldset>
 
     <fieldset class="invite-onramp__choices">
       <legend>Your access</legend>
@@ -107,34 +145,21 @@ const assistantHosts = inviteAssistantHosts();
       </div>
     </fieldset>
 
-    <fieldset class="invite-onramp__choices">
-      <legend>Which assistant will you bring?</legend>
-      <div class="invite-onramp__assistant-list">
-        {assistantHosts.map((host) => (
-          <label class="invite-onramp__choice invite-onramp__assistant">
-            <input type="radio" name="invite-assistant" value={host.id} data-assistant-host />
-            <span class="invite-onramp__tile-orb" aria-hidden="true">{host.name.slice(0, 1)}</span>
-            <span>
-              <strong>{host.name}</strong>
-              <small>{host.maker}</small>
-            </span>
-          </label>
-        ))}
-        <label class="invite-onramp__choice invite-onramp__assistant">
-          <input type="radio" name="invite-assistant" value="just-me" data-assistant-host />
-          <span class="invite-onramp__tile-orb invite-onramp__tile-orb--empty" aria-hidden="true"></span>
-          <span><strong>Just me for now</strong></span>
-        </label>
-      </div>
-    </fieldset>
+    <div class="invite-onramp__facts">
+      <h2 class="invite-onramp__facet">Who is here</h2>
+      <p data-review-audience></p>
+      <h2 class="invite-onramp__facet">What you will see</h2>
+      <p data-review-disclosure></p>
+      <p class="invite-onramp__private"><strong>What stays private:</strong> your other workspaces.</p>
+    </div>
 
     <label class="invite-onramp__consent">
       <input type="checkbox" data-independent-consent />
       <span>I'm joining as myself.</span>
     </label>
-    <p class="invite-onramp__hint" data-review-hint role="alert" hidden></p>
 
     <div class="invite-onramp__actions">
+      <p class="invite-onramp__hint" data-review-hint role="alert" hidden></p>
       <button class="invite-onramp__button" type="button" data-confirm-join><span class="invite-onramp__label">Join <span data-join-workspace-name>Home</span></span></button>
       <a class="invite-onramp__button invite-onramp__button--quiet" href="/app">Not now</a>
     </div>
@@ -158,22 +183,30 @@ const assistantHosts = inviteAssistantHosts();
 
   <section class="invite-onramp__connect hm-invite-connect" data-view="connect" hidden>
     <p class="hm-invite-connect__step" data-connect-step-label hidden>Step 2 of 2</p>
-    <div class="hm-invite-connect__capsule" data-connect-capsule hidden aria-label="You and your assistant">
-      <span class="hm-invite-connect__person" data-connect-initials aria-hidden="true"></span>
-      <span class="hm-invite-connect__agent" aria-hidden="true"></span>
+    <div class="hm-invite-connect__who" data-connect-who hidden>
+      <div class="hm-invite-connect__capsule" data-connect-capsule hidden aria-label="You and your assistant">
+        <span class="hm-invite-connect__person" data-connect-initials aria-hidden="true"></span>
+        <span class="hm-invite-connect__agent" data-connect-agent-initial aria-hidden="true"></span>
+      </div>
+      <p class="hm-invite-connect__caption"><span data-connect-caption></span> <span class="hm-invite-connect__status" data-connect-status hidden></span></p>
     </div>
-    <p class="hm-invite-connect__status" data-connect-status hidden></p>
     <h1 class="hm-invite-connect__title invite-onramp__title" data-connect-title tabindex="-1">Connect your assistant.</h1>
+    <p class="hm-invite-connect__lead" data-connect-lead hidden>{INVITE_CONNECT_LEAD}</p>
     <ol class="hm-ahp__steps" data-connect-steps hidden></ol>
-    <ul class="hm-ahp__notes" data-connect-notes hidden role="list"></ul>
-    <a class="invite-onramp__button" data-connect-open hidden rel="nofollow">Open assistant</a>
-    <button class="hm-invite-connect__copy-link" type="button" data-connect-copy hidden>Copy the connect prompt instead</button>
-    <p class="hm-invite-connect__footnote" data-connect-footnote hidden>{INVITE_CONNECT_FOOTNOTE}</p>
+    <details class="hm-invite-connect__more">
+      <summary>Good to know</summary>
+      <ul class="hm-ahp__notes" data-connect-notes hidden role="list"></ul>
+    </details>
     <div class="invite-onramp__receipt" data-connect-receipt>
       <span class="invite-onramp__receipt-mark" aria-hidden="true">✓</span>
       <h2 class="invite-onramp__receipt-title">You're in <span data-workspace>a workspace</span>.</h2>
     </div>
-    <a class="invite-onramp__button" href="/app">Open the workspace</a>
+    <div class="hm-invite-connect__actions">
+      <a class="invite-onramp__button" data-connect-open hidden rel="nofollow">Open assistant</a>
+      <a class="invite-onramp__button" href="/app">Open the workspace</a>
+      <button class="hm-invite-connect__copy-link" type="button" data-connect-copy hidden>Copy the connect prompt instead</button>
+      <p class="hm-invite-connect__footnote" data-connect-footnote hidden>{INVITE_CONNECT_FOOTNOTE}</p>
+    </div>
   </section>
 
   <section class="invite-onramp__panel invite-onramp__card" data-view="complete" hidden>
@@ -210,7 +243,7 @@ const assistantHosts = inviteAssistantHosts();
   } from "../../lib/member-invite";
 
   import { browserHumanInvitations, HumanInviteRefused } from '../../lib/human-invitations';
-  import { personTint } from "../../lib/home-names";
+  import { addAgentOwnershipLine, personTint } from "../../lib/home-names";
   import type { HumanInvitePreview } from '../../../../src/cloud/human-invitations';
   import {
     AGENT_CONNECTOR_ADDRESS,
@@ -341,6 +374,10 @@ const assistantHosts = inviteAssistantHosts();
       const connectHost = assistantCatalog.find((entry) => entry.id === hostId) ?? null;
       const stepLabel = one<HTMLElement>("[data-connect-step-label]");
       const capsule = one<HTMLElement>("[data-connect-capsule]");
+      const who = one<HTMLElement>("[data-connect-who]");
+      const caption = one<HTMLElement>("[data-connect-caption]");
+      const agentInitial = one<HTMLElement>("[data-connect-agent-initial]");
+      const lead = one<HTMLElement>("[data-connect-lead]");
       const title = one<HTMLElement>("[data-connect-title]");
       const steps = one<HTMLOListElement>("[data-connect-steps]");
       const notes = one<HTMLUListElement>("[data-connect-notes]");
@@ -352,6 +389,8 @@ const assistantHosts = inviteAssistantHosts();
       const showAssistant = connectHost !== null && hostId !== "just-me";
       if (stepLabel) stepLabel.hidden = !showAssistant;
       if (capsule) capsule.hidden = !showAssistant;
+      if (who) who.hidden = !showAssistant;
+      if (lead) lead.hidden = !showAssistant;
       if (footnote) footnote.hidden = !showAssistant;
       if (receipt) receipt.hidden = showAssistant;
       if (!showAssistant) {
@@ -365,6 +404,8 @@ const assistantHosts = inviteAssistantHosts();
       }
       const first = authEmail?.split("@")[0] ?? "You";
       if (title) title.textContent = `Connect ${connectHost.name}.`;
+      if (caption) caption.textContent = addAgentOwnershipLine(workspaceName, "", connectHost.name);
+      if (agentInitial) agentInitial.textContent = Array.from(connectHost.name)[0] ?? "";
       const initialsNode = one<HTMLElement>("[data-connect-initials]");
       if (initialsNode) initialsNode.textContent = viewerInitials(first);
       if (status) {
@@ -378,44 +419,73 @@ const assistantHosts = inviteAssistantHosts();
       }
       const prompt = connectHost.steps.find((step) => step.say)?.say ?? joinSentence(connectHost.name);
       let promptElement: HTMLElement | null = null;
+      let promptReveal: HTMLDetailsElement | null = null;
       if (steps) {
         steps.hidden = false;
         steps.replaceChildren();
+        /* A step is the canvas row: its first sentence as the heading, the rest as the line
+           under it. A value to paste (address, command, words to say) waits behind its own
+           "Show" so the card keeps the canvas density; the Copy link below copies the words. */
+        const reveal = (label: string, value: HTMLElement): HTMLDetailsElement => {
+          const details = document.createElement("details");
+          details.className = "hm-invite-connect__reveal";
+          const summary = document.createElement("summary");
+          summary.textContent = label;
+          const row = document.createElement("div");
+          row.className = "hm-ahp__copyable";
+          row.append(value);
+          details.append(summary, row);
+          return details;
+        };
         const renderStep = (step: AgentHostStep): HTMLLIElement => {
           const item = document.createElement("li");
           item.className = "hm-ahp__step";
-          const paragraph = document.createElement("p");
-          paragraph.textContent = step.text
+          const text = step.text
             .replaceAll("{workspace}", workspaceName)
             .replaceAll("{email}", authEmail ?? "your account");
-          item.append(paragraph);
+          const split = /^(.+?[.!?:])\s+(.+)$/su.exec(text);
+          let head = split ? split[1] : text;
+          let line = split ? split[2] : "";
+          /* A long first sentence keeps its opening clause as the heading ("In Claude",
+             "When Muse opens CommonSwarm") and moves the instruction to the line under it. */
+          const comma = head.indexOf(", ");
+          if (head.length > 60 && comma > 0 && comma < 40) {
+            const tail = head.slice(comma + 2);
+            line = `${tail.charAt(0).toLocaleUpperCase()}${tail.slice(1)}${line ? ` ${line}` : ""}`;
+            head = head.slice(0, comma);
+          }
+          const heading = document.createElement("p");
+          heading.className = "hm-invite-connect__step-head";
+          heading.textContent = head;
+          item.append(heading);
+          if (line) {
+            const support = document.createElement("p");
+            support.className = "hm-invite-connect__step-line";
+            support.textContent = line;
+            item.append(support);
+          }
           if (step.address) {
-            const row = document.createElement("div");
-            row.className = "hm-ahp__copyable";
             const code = document.createElement("code");
             code.className = "hm-ahp__value";
             code.textContent = AGENT_CONNECTOR_ADDRESS;
-            row.append(code);
-            item.append(row);
+            item.append(reveal("Show the address", code));
           }
           if (step.code) {
-            const row = document.createElement("div");
-            row.className = "hm-ahp__copyable";
             const code = document.createElement("pre");
             code.className = "hm-ahp__value";
             code.textContent = step.code;
-            row.append(code);
-            item.append(row);
+            item.append(reveal("Show the command", code));
           }
           if (step.say) {
-            const row = document.createElement("div");
-            row.className = "hm-ahp__copyable hm-ahp__copyable--say";
             const quote = document.createElement("q");
             quote.className = "hm-ahp__value";
             quote.textContent = step.say;
-            if (!promptElement && step.say === prompt) promptElement = quote;
-            row.append(quote);
-            item.append(row);
+            const details = reveal("Show the words", quote);
+            if (!promptElement && step.say === prompt) {
+              promptElement = quote;
+              promptReveal = details;
+            }
+            item.append(details);
           }
           if (step.link) {
             const link = document.createElement("a");
@@ -464,6 +534,7 @@ const assistantHosts = inviteAssistantHosts();
               steps.append(promptElement);
             }
             const target = promptElement;
+            if (promptReveal) promptReveal.open = true;
             if (target) {
               const range = document.createRange();
               range.selectNodeContents(target);
@@ -792,24 +863,36 @@ const assistantHosts = inviteAssistantHosts();
     line-height: 1.4;
   }
 
+  /* The canvas mark: a lime circle under an outlined rounded square, 24px, then the name. */
   .invite-onramp__brand {
     min-inline-size: 0;
-    min-block-size: 28px;
+    min-block-size: 24px;
     display: flex;
     align-items: center;
     align-self: flex-start;
   }
 
-  .invite-onramp__brand :global(.wm) {
-    --mark-center: var(--home-lime);
-    --mark-west: var(--home-rail-strong);
+  .invite-onramp__brand-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
     color: var(--home-rail-strong);
     font-family: var(--home-font-display);
     font-size: 17px;
     font-weight: 700;
-    line-height: 28px;
-    letter-spacing: -0.01em;
+    line-height: 24px;
+    text-decoration: none;
+    border-radius: 6px;
   }
+
+  .invite-onramp__brand-link:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+  }
+
+  .invite-onramp__mark { flex: none; }
+  .invite-onramp__mark circle { fill: var(--home-lime); }
+  .invite-onramp__mark rect { stroke: var(--home-rail-strong); }
 
   .invite-onramp__panel,
   .invite-onramp__connect {
@@ -1107,7 +1190,30 @@ const assistantHosts = inviteAssistantHosts();
     display: none;
   }
 
-  /* Review. */
+  /* Review: the canvas Phone-Join rhythm (faces, 18, title, 12, intro, 22, assistants), then the
+     access choice, the facts and the box, with the Join pill held at the bottom of the screen. */
+  .invite-onramp__panel[data-view="review"] {
+    gap: 0;
+  }
+
+  [data-view="review"] > .invite-onramp__title { margin-block-start: 18px; }
+
+  .invite-onramp .invite-onramp__intro {
+    margin: 12px 0 0;
+    font-size: 17px;
+    line-height: 1.4;
+    color: var(--home-rail-soft);
+    text-wrap: pretty;
+  }
+
+  [data-view="review"] > .invite-onramp__choices { margin-block-start: 22px; }
+  [data-view="review"] > .invite-onramp__choices + .invite-onramp__choices { margin-block-start: 26px; }
+  [data-view="review"] > .invite-onramp__facts { margin-block-start: 22px; }
+  [data-view="review"] > .invite-onramp__consent { margin-block-start: 14px; }
+
+  /* Controls the bottom bar could cover scroll clear of it when the Join hint focuses them. */
+  [data-view="review"] input { scroll-margin-block-end: 180px; }
+
   .invite-onramp__facts {
     display: flex;
     flex-direction: column;
@@ -1176,8 +1282,8 @@ const assistantHosts = inviteAssistantHosts();
     gap: 12px;
     padding: 10px 14px;
     color: var(--home-rail-strong);
-    background: color-mix(in srgb, var(--home-rail-raised) 50%, var(--home-rail-bg));
-    border: 1.5px solid var(--home-rail-divider);
+    background: var(--home-rail-choice);
+    border: 1.5px solid var(--home-rail-choice-edge);
     border-radius: 14px;
     cursor: pointer;
   }
@@ -1243,20 +1349,38 @@ const assistantHosts = inviteAssistantHosts();
   }
 
   .invite-onramp__assistant {
-    min-block-size: 3rem;
-    padding-block: 6px;
+    min-block-size: 48px;
+    padding-block: 0;
   }
 
-  .invite-onramp__assistant > span:not(.invite-onramp__tile-orb) {
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: baseline;
-    column-gap: 8px;
+  .invite-onramp__assistant strong { font-size: 16px; }
+
+  /* More apps: a quiet row under the chat apps that opens the coding tools in the same list. */
+  .invite-onramp__more > summary {
+    min-block-size: 44px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 14px;
+    color: var(--home-rail-soft);
+    font-size: 15px;
+    font-weight: 600;
+    list-style: none;
+    border-radius: 14px;
+    cursor: pointer;
   }
 
-  .invite-onramp__assistant small {
-    font-size: 13px;
+  .invite-onramp__more > summary::-webkit-details-marker { display: none; }
+  .invite-onramp__more > summary::after { content: "+"; margin-inline-start: auto; font-weight: 700; }
+  .invite-onramp__more[open] > summary::after { content: "−"; }
+  .invite-onramp__more > summary:hover { color: var(--home-rail-strong); }
+
+  .invite-onramp__more > summary:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
   }
+
+  .invite-onramp__more[open] > summary { margin-block-end: 8px; }
 
   /* Brand-neutral letter tile, in the joiner's (the viewer's) blue. */
   .invite-onramp__tile-orb {
@@ -1290,12 +1414,21 @@ const assistantHosts = inviteAssistantHosts();
     cursor: pointer;
   }
 
+  /* The Join pill stays at the bottom of the screen, 28px up, as on the canvas, over a short fade;
+     the page under it still scrolls to every choice above. */
   .invite-onramp__actions {
+    position: sticky;
+    inset-block-end: 0;
+    z-index: 1;
     display: flex;
     flex-direction: column;
     gap: 6px;
     margin-block-start: auto;
+    padding-block: 28px;
+    background: linear-gradient(to bottom, transparent, var(--home-rail-bg) 28px);
   }
+
+  .invite-onramp__actions .invite-onramp__hint { margin-block-end: 4px; }
 
   .invite-onramp__actions .invite-onramp__button {
     inline-size: 100%;
@@ -1303,7 +1436,7 @@ const assistantHosts = inviteAssistantHosts();
 
   /* The one primary action on each ink step: full width, 56px, 18px. */
   .invite-onramp__actions .invite-onramp__button:not(.invite-onramp__button--quiet),
-  .invite-onramp__connect > .invite-onramp__button {
+  .hm-invite-connect__actions > .invite-onramp__button {
     inline-size: 100%;
     min-block-size: 56px;
     font-size: 18px;
@@ -1338,7 +1471,7 @@ const assistantHosts = inviteAssistantHosts();
     position: absolute;
     inset-block-start: 56px;
     inset-inline-end: 0;
-    min-block-size: 28px;
+    min-block-size: 24px;
     display: flex;
     align-items: center;
   }
@@ -1347,12 +1480,8 @@ const assistantHosts = inviteAssistantHosts();
     display: none;
   }
 
-  .invite-onramp__connect > .invite-onramp__button {
-    margin-block-start: 24px;
-  }
-
   /* With the assistant's own Open button on screen, the workspace link is the quiet way on. */
-  .invite-onramp__connect:has([data-connect-open]:not([hidden])) > .invite-onramp__button[href="/app"] {
+  .invite-onramp__connect:has([data-connect-open]:not([hidden])) .invite-onramp__button[href="/app"] {
     min-block-size: 3rem;
     margin-block-start: 10px;
     color: var(--home-rail-strong);
@@ -1414,10 +1543,6 @@ const assistantHosts = inviteAssistantHosts();
   }
 
   @media (max-width: 30rem) {
-    .invite-onramp__title {
-      font-size: 38px;
-    }
-
     .invite-onramp :global(.invite-onramp__button) {
       inline-size: 100%;
     }

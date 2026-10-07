@@ -12,6 +12,8 @@ import {
   agentHostsFor,
   agentJoinedSentence,
   cursorInstallLink,
+  hostConnectLine,
+  hostJoinPrompt,
   joinSentence,
 } from "./agent-hosts.ts";
 
@@ -172,4 +174,23 @@ test("the joiner never sees the key flow, and her first screen is chat apps", ()
   }
   // Control: the setter does get the terminal flow.
   assert.ok(agentHostsFor("setter").some((host) => host.id === "terminal"));
+});
+
+test("the add-agent summary line and copy block come from each host's own steps", () => {
+  const banned = /\b(seat|grant|claim|principal|OAuth|MCP|one-click|wakes up)\b/iu;
+  for (const host of AGENT_HOSTS.filter((candidate) => candidate.id !== "terminal")) {
+    const line = hostConnectLine(host);
+    assert.doesNotMatch(line, banned, `${host.id}: "${line}"`);
+    if (host.status === "waiting") {
+      assert.equal(line, host.steps[0].text, `${host.id}: a host that cannot connect keeps its own first step`);
+      assert.equal(hostJoinPrompt(host), null, `${host.id}: nothing to say before it can connect`);
+      continue;
+    }
+    assert.match(line, /sign in with the account you use here/u, host.id);
+    assert.equal(hostJoinPrompt(host), [...host.steps].reverse().find((step) => step.say)?.say, host.id);
+    assert.match(hostJoinPrompt(host) ?? "", /^Use CommonSwarm to join my workspace as /u, host.id);
+  }
+  // Control: only a host with a real link says to open it.
+  assert.match(hostConnectLine(AGENT_HOSTS.find((host) => host.id === "cursor")), /^Open the link/u);
+  assert.doesNotMatch(hostConnectLine(AGENT_HOSTS.find((host) => host.id === "claude")), /Open the link/u);
 });

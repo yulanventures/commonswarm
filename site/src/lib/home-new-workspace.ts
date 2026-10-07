@@ -63,6 +63,14 @@ export function newWorkspacePeopleHint(purpose: HouseholdPurpose | null): string
   return "After you create it, you get an invite link to send yourself, by text or email.";
 }
 
+/** The line under the page title (the canvas New-Space subtitle, in what this form really does). */
+export const NEW_WORKSPACE_SUBTITLE = "Name it and say who it is for. Your agents join after you create it.";
+
+/** The preview's closing sentence and its legend (solid: in the workspace; dashed: added later). */
+export const NEW_WORKSPACE_PREVIEW_NOTE =
+  "Everyone keeps their own agents. In the workspace, people and agents can message each other, so nobody copies messages between apps.";
+export const NEW_WORKSPACE_LEGEND = { member: "In the workspace", later: "Added later" } as const;
+
 /** Create is allowed only with a non-empty name and a chosen purpose. */
 export function newWorkspaceCanCreate(name: string, purpose: HouseholdPurpose | null): boolean {
   return name.trim().length > 0 && (purpose === "shared" || purpose === "personal");
@@ -100,7 +108,13 @@ export function buildNewWorkspaceForm(
   title.dataset.createTitle = "";
   title.className = "hm-new-workspace__title";
   title.textContent = "New workspace";
-  root.append(title);
+  const header = doc.createElement("header");
+  header.className = "hm-new-workspace__header";
+  const subtitle = doc.createElement("p");
+  subtitle.className = "hm-new-workspace__subtitle";
+  subtitle.textContent = NEW_WORKSPACE_SUBTITLE;
+  header.append(title, subtitle);
+  root.append(header);
 
   const nameLabel = doc.createElement("label");
   nameLabel.className = "hm-new-workspace__field";
@@ -179,8 +193,14 @@ export function buildNewWorkspaceForm(
   peopleAvatar.setAttribute("aria-hidden", "true");
   peopleAvatar.textContent = avatarLetter(vm);
   const peopleYou = doc.createElement("p");
-  peopleYou.className = "hm-new-workspace__note-line";
-  peopleYou.textContent = `You (${vm.viewerName})`;
+  peopleYou.className = "hm-new-workspace__row-copy";
+  const peopleName = doc.createElement("span");
+  peopleName.className = "hm-new-workspace__row-name";
+  peopleName.textContent = vm.viewerName;
+  const peopleSub = doc.createElement("span");
+  peopleSub.className = "hm-new-workspace__row-sub";
+  peopleSub.textContent = "You";
+  peopleYou.append(peopleName, peopleSub);
   peopleRow.append(peopleAvatar, peopleYou);
   const peopleHint = doc.createElement("p");
   peopleHint.className = "hm-new-workspace__note-hint";
@@ -193,15 +213,24 @@ export function buildNewWorkspaceForm(
   const agentsHeading = doc.createElement("h2");
   agentsHeading.className = "hm-new-workspace__note-title";
   agentsHeading.textContent = "Agents";
+  /* The canvas row for an agent that comes along (64px, 36px agent square, name and a second line).
+     Creating a workspace takes a name and a purpose only; agents join each workspace from their own
+     app, so this row is the place they will take, not a checkbox the form cannot honour. */
   const agentsRow = doc.createElement("div");
-  agentsRow.className = "hm-new-workspace__person";
+  agentsRow.className = "hm-new-workspace__person hm-new-workspace__person--agent";
   const agentsSlot = doc.createElement("span");
   agentsSlot.className = "hm-new-workspace__orb hm-new-workspace__orb--dashed";
   agentsSlot.setAttribute("aria-hidden", "true");
-  const agentsHint = doc.createElement("p");
-  agentsHint.className = "hm-new-workspace__note-hint";
+  const agentsCopy = doc.createElement("p");
+  agentsCopy.className = "hm-new-workspace__row-copy";
+  const agentsName = doc.createElement("span");
+  agentsName.className = "hm-new-workspace__row-name";
+  agentsName.textContent = "Agents you add";
+  const agentsHint = doc.createElement("span");
+  agentsHint.className = "hm-new-workspace__row-sub";
   agentsHint.textContent = "Add agents after you create it, from the apps you use.";
-  agentsRow.append(agentsSlot, agentsHint);
+  agentsCopy.append(agentsName, agentsHint);
+  agentsRow.append(agentsSlot, agentsCopy);
   agentsNote.append(agentsHeading, agentsRow);
   formCard.append(agentsNote);
 
@@ -285,6 +314,24 @@ export function buildNewWorkspaceForm(
 
   previewBox.append(previewList);
   preview.append(previewBox);
+
+  const previewNote = doc.createElement("p");
+  previewNote.className = "hm-new-workspace__preview-note";
+  previewNote.textContent = NEW_WORKSPACE_PREVIEW_NOTE;
+  const legend = doc.createElement("p");
+  legend.className = "hm-new-workspace__legend";
+  for (const [kind, label] of [["member", NEW_WORKSPACE_LEGEND.member], ["later", NEW_WORKSPACE_LEGEND.later]] as const) {
+    const item = doc.createElement("span");
+    item.className = "hm-new-workspace__legend-item";
+    const mark = doc.createElement("span");
+    mark.className = `hm-new-workspace__legend-mark hm-new-workspace__legend-mark--${kind}`;
+    mark.setAttribute("aria-hidden", "true");
+    const text = doc.createElement("span");
+    text.textContent = label;
+    item.append(mark, text);
+    legend.append(item);
+  }
+  preview.append(previewNote, legend);
   layout.append(formCard, preview);
   root.append(layout);
   return root;
