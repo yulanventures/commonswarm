@@ -3263,30 +3263,40 @@ test('C1-14 W6B2-1: ai-w6-audit publishes C1-audit.json only after counts pass; 
   assert.deepEqual(JSON.parse(readFileSync(join(curPassDir, 'C1-audit.json'), 'utf8')).audit_counts, { init: 1, list: 1, read: 1, action: 1 });
 });
 
-function ownerClientJs(source: string) {
+function ownerJwt(amr: unknown) {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  return `${encode({ alg: 'none', typ: 'JWT' })}.${encode({ amr })}.sig`;
+}
+
+function ownerClientJs(source: string, opts: { accessToken?: string; commandStatus?: number; commandBody?: unknown } = {}) {
   const js = source.match(/<<'JS'\n([\s\S]*?)^JS$/m)![1]!;
-  const imports = js.split('\n').filter(l => l.startsWith('import ') && (l.includes('node:fs') || l.includes('node:crypto'))).join('\n');
+  const imports = js.split('\n').filter(l => l.startsWith('import ') && (l.includes('node:fs') || l.includes('node:crypto') || l.includes('fresh-auth'))).join('\n');
   const body = js.split('\n').filter(l => !l.startsWith('import ')).join('\n');
   const canon = 'canonical-client';
   const metadata = digest(canon);
+  const token = opts.accessToken ?? ownerJwt([{ method: 'password', timestamp: Math.floor(Date.now() / 1000) }]);
+  const commandStatus = opts.commandStatus ?? 200;
+  const commandBody = opts.commandBody ?? { status: 'accepted' };
   const mocks = `
 function canonicalAdminJson(){ return ${JSON.stringify(canon)}; }
 async function credentialStore(){ return {}; }
-async function refreshedCredential(){ return { userId: '22222222-2222-4222-8222-222222222222', accessToken: 't' }; }
+async function refreshedCredential(){ return { userId: '22222222-2222-4222-8222-222222222222', accessToken: ${JSON.stringify(token)} }; }
 function cloudTarget(url,anonKey){ return { url, anonKey }; }
 function commandEndpoint(){ return 'https://api.commonswarm.com/functions/v1/command'; }
 const CLIENT_PROTOCOL_VERSION = 1;
 function withClientBuild(x){ return x; }
-globalThis.fetch = async (url) => {
+globalThis.fetch = async (url, init) => {
+  const headers = init && init.headers ? init.headers : {};
+  await writeFile(process.argv[3] + '/fetch-log.jsonl', JSON.stringify({ url: String(url), origin: headers.origin ?? headers.Origin ?? null, command: String(url).includes('/functions/v1/command') }) + '\\n', { flag: 'a' });
   if (String(url).includes('client.json')) return { ok: true, headers: { get: () => 'application/json' }, text: async () => JSON.stringify({ client_id: 'https://commonswarm.com/oauth/c1-smoke/client.json' }) };
-  return { ok: true, json: async () => ({ status: 'accepted' }) };
+  return { ok: ${commandStatus} >= 200 && ${commandStatus} < 300, status: ${commandStatus}, json: async () => (${JSON.stringify(commandBody)}) };
 };
 `;
   return { js: `${imports}\n${mocks}\n${body}\n`, metadata };
 }
 
-function runOwnerClient(source: string, proof: string, action: string) {
-  const { js, metadata } = ownerClientJs(source);
+function runOwnerClient(source: string, proof: string, action: string, opts: { accessToken?: string; commandStatus?: number; commandBody?: unknown } = {}) {
+  const { js, metadata } = ownerClientJs(source, opts);
   const inputs = join(proof, 'C1-inputs.json');
   const target = join(proof, 'target.json');
   writeFileSync(target, JSON.stringify({ url: 'https://api.commonswarm.com', anonKey: 'anon' }));
@@ -3300,7 +3310,12 @@ function runOwnerClient(source: string, proof: string, action: string) {
     window_id: 'New123',
     plan_sha256: 'a'.repeat(64),
   }));
-  return spawnSync('node', ['--input-type=module', '-', inputs, proof, action], { input: js, encoding: 'utf8', timeout: 15_000 });
+  return spawnSync('node', ['--import', 'tsx', '--input-type=module', '-', inputs, proof, action], { input: js, encoding: 'utf8', timeout: 15_000, cwd: resolve('.') });
+}
+
+function ownerFetchLog(proof: string) {
+  if (!existsSync(join(proof, 'fetch-log.jsonl'))) return [];
+  return readFileSync(join(proof, 'fetch-log.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as { url: string; origin: string | null; command: boolean });
 }
 
 test('C1-14 W6B2-3: owner-client-command reuses a saved id and matching receipt; frozen wx-create dies on reentry', () => {
@@ -3414,6 +3429,88 @@ test('C1-16: owner-command receipts bind release/window/plan/owner/action; froze
   const resumed = runOwnerClient(current, partial, 'withdraw');
   assert.equal(resumed.status, 0, resumed.stderr + resumed.stdout);
   assert.equal(JSON.parse(readFileSync(join(partial, 'client-withdraw.json'), 'utf8')).command_id, saved);
+});
+
+test('C1-31: owner-client-command sends Origin, prechecks AMR freshness at 240 s, and keeps a stored human_confirmation_required id', () => {
+  const current = block('ai-w6-owner-client-command');
+  const js = current.match(/<<'JS'\n([\s\S]*?)^JS$/m)![1]!;
+  const freshAuth = readFileSync(resolve('supabase/functions/command/fresh-auth.ts'), 'utf8');
+  const interactiveMethods = [...(/const INTERACTIVE_METHODS = new Set\(\[([\s\S]*?)\]\)/.exec(freshAuth)?.[1] ?? '').matchAll(/"([^"]+)"/g)].map(m => m[1]!);
+  assert.ok(interactiveMethods.length > 0, 'INTERACTIVE_METHODS must be read from fresh-auth.ts');
+  assert.match(current, /from '\.\/supabase\/functions\/command\/fresh-auth\.ts'/);
+  assert.match(js, /newestInteractiveAmrSeconds\(claims\)/);
+  assert.match(current, /origin:'https:\/\/commonswarm\.com'/);
+  assert.match(js, /fetch\(commandEndpoint\(target\),\{method:'POST',headers:\{authorization:`Bearer \$\{human\.accessToken\}`,apikey:target\.anonKey,'content-type':'application\/json',origin:'https:\/\/commonswarm\.com'\}/);
+  const failFresh = 'FAIL owner client command; interactive owner sign-in expected under 240 s got ';
+  assert.match(js, /interactive owner sign-in expected under 240 s got \$\{interactive===null\?'missing':'stale'\}/);
+  assert.match(js, /Date\.now\(\)\/1000-interactive>240/);
+  const precheck = js.indexOf(failFresh);
+  const idRead = js.indexOf('lstat(idPath)');
+  const idWrite = js.indexOf("writeFile(idPath");
+  const metadataFetch = js.indexOf("fetch('https://commonswarm.com/oauth/c1-smoke/client.json'");
+  const commandFetch = js.indexOf('commandEndpoint(target)');
+  assert.ok(precheck >= 0 && idRead > precheck && idWrite > precheck && metadataFetch > precheck && commandFetch > precheck);
+  for (const row of plan.split('\n').filter(line => line.includes('"id":"ai-w6-owner-client-command"'))) {
+    assert.match(row, /owner interactive sign-in in the owner file-store CLI session immediately before this (approve|withdraw)/);
+  }
+  assert.match(plan, /the owner signs in again interactively in the owner file-store CLI session, then execute ai-w6-owner-client-command/);
+
+  const now = Math.floor(Date.now() / 1000);
+  const originOk = mkdtempSync(join(scratch, 'occ-c131-origin-'));
+  const sent = runOwnerClient(current, originOk, 'approve');
+  assert.equal(sent.status, 0, sent.stderr + sent.stdout);
+  const commandCalls = ownerFetchLog(originOk).filter(c => c.command);
+  assert.equal(commandCalls.length, 1);
+  assert.equal(commandCalls[0]!.origin, 'https://commonswarm.com');
+
+  for (const method of interactiveMethods) {
+    const d = mkdtempSync(join(scratch, 'occ-c131-amr-'));
+    const r = runOwnerClient(current, d, 'approve', { accessToken: ownerJwt([{ method, timestamp: now - 1 }]) });
+    assert.equal(r.status, 0, `${method}: ${r.stderr}`);
+    assert.ok(ownerFetchLog(d).some(c => c.command), method);
+  }
+  const excluded = mkdtempSync(join(scratch, 'occ-c131-amr-ex-'));
+  const excludedMethod = interactiveMethods.includes('token_refresh') ? `${interactiveMethods[0]}-alias` : 'token_refresh';
+  const missingMethod = runOwnerClient(current, excluded, 'approve', {
+    accessToken: ownerJwt([{ method: excludedMethod, timestamp: now - 1 }]),
+  });
+  assert.notEqual(missingMethod.status, 0);
+  assert.match(missingMethod.stderr, /FAIL owner client command; interactive owner sign-in expected under 240 s got missing; sign in again with the owner file-store CLI session and rerun this block; STOP/);
+  assert.equal(ownerFetchLog(excluded).length, 0);
+  assert.ok(!existsSync(join(excluded, 'approve-request-id')));
+
+  const stringAmr = mkdtempSync(join(scratch, 'occ-c131-amr-str-'));
+  const stringOnly = runOwnerClient(current, stringAmr, 'withdraw', { accessToken: ownerJwt(['password']) });
+  assert.notEqual(stringOnly.status, 0);
+  assert.match(stringOnly.stderr, /got missing/);
+  assert.equal(ownerFetchLog(stringAmr).length, 0);
+  assert.ok(!existsSync(join(stringAmr, 'withdraw-request-id')));
+
+  const stale = mkdtempSync(join(scratch, 'occ-c131-stale-'));
+  writeFileSync(join(stale, 'unrelated.txt'), 'keep\n');
+  const staleRun = runOwnerClient(current, stale, 'withdraw', {
+    accessToken: ownerJwt([{ method: interactiveMethods[0], timestamp: now - 241 }]),
+  });
+  assert.notEqual(staleRun.status, 0);
+  assert.match(staleRun.stderr, /FAIL owner client command; interactive owner sign-in expected under 240 s got stale; sign in again with the owner file-store CLI session and rerun this block; STOP/);
+  assert.equal(ownerFetchLog(stale).length, 0);
+  assert.ok(!existsSync(join(stale, 'withdraw-request-id')));
+  const rerun = runOwnerClient(current, stale, 'withdraw');
+  assert.equal(rerun.status, 0, rerun.stderr + rerun.stdout);
+  assert.ok(existsSync(join(stale, 'withdraw-request-id')));
+
+  const saved = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const refused = mkdtempSync(join(scratch, 'occ-c131-403-'));
+  writeFileSync(join(refused, 'approve-request-id'), saved + '\n', { mode: 0o600 });
+  const stored = runOwnerClient(current, refused, 'approve', {
+    commandStatus: 403,
+    commandBody: { error: 'human_confirmation_required' },
+  });
+  assert.notEqual(stored.status, 0);
+  assert.match(stored.stderr, /FAIL owner client command; refused human_confirmation_required \(stored under this request id\); remove .*\/approve-request-id only after HezLead confirms, then sign in again and rerun; STOP/);
+  assert.ok(stored.stderr.includes(`${refused}/approve-request-id`));
+  assert.equal(readFileSync(join(refused, 'approve-request-id'), 'utf8').trim(), saved);
+  assert.ok(!existsSync(join(refused, 'client-approve.json')));
 });
 
 test('C1-16: W5 recovery env refuses a failed python without keeping old vars; frozen 00e4fca4 eval can succeed', () => {

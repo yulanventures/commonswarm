@@ -495,6 +495,19 @@ test('ai-w6-human-revoke refuses an approval withdrawal made before it (withdraw
   const r = run(block('ai-w6-human-revoke'), { C1_PROOF_DIR: dir, C1_INPUTS_FILE: join(dir, 'c1.json') });
   assert.notEqual(r.status, 0); assert.match(r.stderr, /FAIL ai-w6-human-revoke: client-withdraw.json expected absent-before-revoke got present; STOP/);
   assert.match(block('ai-w6-owner-client-command'), /withdraw: AFTER ai-w6-fence-driver/);
+  const ownerClient = block('ai-w6-owner-client-command');
+  assert.match(ownerClient, /origin:'https:\/\/commonswarm\.com'/);
+  assert.match(ownerClient, /newestInteractiveAmrSeconds\(claims\)/);
+  assert.match(ownerClient, /from '\.\/supabase\/functions\/command\/fresh-auth\.ts'/);
+  assert.match(ownerClient, /Date\.now\(\)\/1000-interactive>240/);
+  assert.match(ownerClient, /FAIL owner client command; interactive owner sign-in expected under 240 s got /);
+  assert.match(ownerClient, /FAIL owner client command; refused human_confirmation_required \(stored under this request id\)/);
+  const freshAuth = readFileSync(resolve('supabase/functions/command/fresh-auth.ts'), 'utf8');
+  const interactiveMethods = [...(/const INTERACTIVE_METHODS = new Set\(\[([\s\S]*?)\]\)/.exec(freshAuth)?.[1] ?? '').matchAll(/"([^"]+)"/g)].map(m => m[1]!);
+  assert.ok(interactiveMethods.length > 0);
+  assert.match(ownerClient, /newestInteractiveAmrSeconds/);
+  const precheck = ownerClient.indexOf('interactive owner sign-in expected under 240 s');
+  assert.ok(precheck >= 0 && ownerClient.indexOf('lstat(idPath)') > precheck && ownerClient.indexOf("writeFile(idPath") > precheck && ownerClient.indexOf('commandEndpoint(target)') > precheck);
 });
 
 // ---------------- G4: the recycle archive before activation ----------------
