@@ -125,14 +125,12 @@
 .hm-catchup-needs [data-needs-rank="more"] :is(.hm-eyebrow, .hm-catchup-needs-eyebrow) { font-size: 12px; color: var(--home-ink-muted); }
 .hm-catchup-needs [data-needs-rank="more"] :is(.hm-needs-title, .hm-catchup-needs-what) { font-size: 15px; line-height: 1.35; }
 .hm-catchup-needs .hm-needs-you[data-needs-rank="more"] .hm-button {
-  border-width: 1.5px;
-  border-color: var(--home-ink);
   background: transparent;
   color: var(--home-ink);
 }
 .hm-catchup-needs .hm-needs-you[data-needs-rank="more"] .hm-button[data-primary="true"] {
   min-block-size: 44px;
-  padding-inline: 18px;
+  padding-inline: 19.5px; /* 18px + the 1.5px inset stroke */
   font-size: 14px;
 }
 .hm-catchup-needs .hm-needs-you[data-needs-rank="more"] .hm-button:hover { background: var(--home-lime-hover); color: var(--home-lime-ink); }

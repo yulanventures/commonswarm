@@ -571,6 +571,7 @@
   --home-card-border: #d3dbcc; /* 1px card and capsule edge. Decorative; the lip and fill carry the plane. */
   --home-card-lip: #c9d2c1; /* the 0 2px 0 shadow under a card */
   --home-card-shadow: 0 2px 0 var(--home-card-lip);
+  --home-popover-shadow: 0 6px 18px rgba(23, 35, 28, 0.12); /* a popover card floating over the page (Todo.dc.html tag card): the ink at 12% */
   --home-pill-border: #aeb9a8; /* 1px edge of an outline pill (mockup `1px solid #AEB9A8`). Decorative: 2.00 on card, 1.80 on canvas; the pill's text and fill carry it */
 
   /* Ink. Body text needs 4.5:1; every value below clears it on all three surfaces. */
@@ -595,6 +596,8 @@
   --home-rail-choice-edge: #3a4e42; /* its 1.5px edge. Decorative (1.61 on the choice); the selected state adds a lime edge (9.03 on --home-rail-raised) */
   --home-rail-orange-line: #e58a55; /* dashed outline of a not-yet-joined orange person on ink. 6.26 on --home-rail-bg */
   --home-rail-orange-soft: #f3b48e; /* that person's initial on ink. 9.07 on --home-rail-bg */
+  --home-rail-blue-line: #7a9fe6; /* the blue person's outline on ink (/invite). 6.13 on --home-rail-bg; dark 7.21 on --d-home-rail-bg */
+  --home-rail-blue-soft: #a9c3f5; /* the blue person's initial on ink. 9.13 on --home-rail-bg; dark 10.74 on --d-home-rail-bg */
 
   /* Lime: the one accent. Never text on light (it is a fill). */
   --home-lime: #d4f04a; /* current rail row, Needs-you band, rail badges, working dot */
@@ -602,6 +605,7 @@
   --home-on-lime-ink: #eef2ea; /* text on an ink pill inside the lime band; the pill is --home-lime-ink in BOTH modes, so this is too. 14.32 */
   --home-lime-soft: #f4fad8; /* pale lime row fill. --home-ink on it 15.08 */
   --home-lime-hover: #e4f78a;
+  --home-send-glyph: #d4f04a; /* the phone Send arrow on the ink pill: lime on --home-ink 12.65. Dark: the --home-on-ink value, 14.21 */
 
   /* People. Each person takes one set; their agents always use the owner's set.
      fill = person avatar and owner badge, white initial on it (--home-on-person);
@@ -662,6 +666,7 @@
   --d-home-hairline: #253129;
   --d-home-card-border: #33433a;
   --d-home-card-lip: #070b09;
+  --d-home-popover-shadow: 0 6px 18px rgba(0, 0, 0, 0.32);
   --d-home-pill-border: #5a6b5f;
   --d-home-ink: #e9f0e7;
   --d-home-on-ink: #18211b;
@@ -682,11 +687,14 @@
   --d-home-rail-choice-edge: #2c3d33;
   --d-home-rail-orange-line: #e58a55;
   --d-home-rail-orange-soft: #f3b48e;
+  --d-home-rail-blue-line: #7a9fe6;
+  --d-home-rail-blue-soft: #a9c3f5;
   --d-home-lime: #d4f04a;
   --d-home-lime-ink: #17231c;
   --d-home-on-lime-ink: #eef2ea;
   --d-home-lime-soft: #2a3313;
   --d-home-lime-hover: #e4f78a;
+  --d-home-send-glyph: #18211b;
   --d-home-on-person: #ffffff;
   --d-home-blue: #3a67c4;
   --d-home-blue-tint: #1b2a4a;
@@ -778,6 +786,7 @@
     --home-hairline: var(--d-home-hairline);
     --home-card-border: var(--d-home-card-border);
     --home-card-lip: var(--d-home-card-lip);
+    --home-popover-shadow: var(--d-home-popover-shadow);
     --home-pill-border: var(--d-home-pill-border);
     --home-ink: var(--d-home-ink);
     --home-on-ink: var(--d-home-on-ink);
@@ -798,11 +807,14 @@
     --home-rail-choice-edge: var(--d-home-rail-choice-edge);
     --home-rail-orange-line: var(--d-home-rail-orange-line);
     --home-rail-orange-soft: var(--d-home-rail-orange-soft);
+    --home-rail-blue-line: var(--d-home-rail-blue-line);
+    --home-rail-blue-soft: var(--d-home-rail-blue-soft);
     --home-lime: var(--d-home-lime);
     --home-lime-ink: var(--d-home-lime-ink);
     --home-on-lime-ink: var(--d-home-on-lime-ink);
     --home-lime-soft: var(--d-home-lime-soft);
     --home-lime-hover: var(--d-home-lime-hover);
+    --home-send-glyph: var(--d-home-send-glyph);
     --home-on-person: var(--d-home-on-person);
     --home-blue: var(--d-home-blue);
     --home-blue-tint: var(--d-home-blue-tint);
@@ -891,6 +903,7 @@
   --home-hairline: var(--d-home-hairline);
   --home-card-border: var(--d-home-card-border);
   --home-card-lip: var(--d-home-card-lip);
+  --home-popover-shadow: var(--d-home-popover-shadow);
   --home-pill-border: var(--d-home-pill-border);
   --home-ink: var(--d-home-ink);
   --home-on-ink: var(--d-home-on-ink);
@@ -911,11 +924,14 @@
   --home-rail-choice-edge: var(--d-home-rail-choice-edge);
   --home-rail-orange-line: var(--d-home-rail-orange-line);
   --home-rail-orange-soft: var(--d-home-rail-orange-soft);
+  --home-rail-blue-line: var(--d-home-rail-blue-line);
+  --home-rail-blue-soft: var(--d-home-rail-blue-soft);
   --home-lime: var(--d-home-lime);
   --home-lime-ink: var(--d-home-lime-ink);
   --home-on-lime-ink: var(--d-home-on-lime-ink);
   --home-lime-soft: var(--d-home-lime-soft);
   --home-lime-hover: var(--d-home-lime-hover);
+  --home-send-glyph: var(--d-home-send-glyph);
   --home-on-person: var(--d-home-on-person);
   --home-blue: var(--d-home-blue);
   --home-blue-tint: var(--d-home-blue-tint);

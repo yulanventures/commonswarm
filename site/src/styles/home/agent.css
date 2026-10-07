@@ -408,7 +408,7 @@
 }
 
 .hm-agent .hm-queue-row .hm-button {
-  padding: 0 14px;
+  padding: 0 15.5px; /* 14px + the 1.5px inset stroke (primitives.css stroke method) */
   font-size: 14px;
 }
 
@@ -422,6 +422,9 @@
   text-decoration: underline;
   text-underline-offset: 3px;
 }
+/* The shared pill's edge is an inset stroke (primitives.css): these text controls drop it and keep the focus ring. */
+.hm-agent .hm-queue-row .hm-button:is([data-queue-action="up"], [data-queue-action="down"], [data-queue-action="not-yet"]) { box-shadow: none; }
+.hm-agent .hm-queue-row .hm-button:is([data-queue-action="up"], [data-queue-action="down"], [data-queue-action="not-yet"]):focus-visible { box-shadow: var(--focus-ring); }
 
 /* Not yet: held rows carry no line number; the hold reason reads as the row's second line. */
 .hm-agent__gated {
@@ -617,8 +620,10 @@
   justify-content: center;
   min-inline-size: 44px;
   min-block-size: 44px;
-  padding: 0 18px;
-  border: 1.5px solid var(--home-ink);
+  padding: 0 19.5px;
+  border: 0;
+  /* The canvas's 1.5px outline: the inset stroke (primitives.css), padding 18px + the 1.5px edge. */
+  box-shadow: inset 0 0 0 1.5px var(--home-ink);
   border-radius: var(--radius-pill);
   background: transparent;
   color: var(--home-ink);
@@ -679,6 +684,7 @@
   outline: none;
   box-shadow: var(--focus-ring);
 }
+.hm-agent .hm-agent__manage:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring); }
 
 .hm-agent__action,
 .hm-agent__manage,

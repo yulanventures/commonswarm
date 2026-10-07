@@ -1,5 +1,6 @@
 import {
   agentOrb,
+  lockIcon,
   notice,
   queueRow,
   statusLine,
@@ -125,21 +126,6 @@ export interface AgentPageCallbacks {
   onRemove?: (agent: AgentVM) => void;
 }
 
-const SVG_NS = "http://www.w3.org/2000/svg";
-
-/** The canvas's 16px padlock, drawn in currentColor; decorative. */
-function lockIcon(doc: Document): SVGSVGElement {
-  const svg = doc.createElementNS(SVG_NS, "svg");
-  for (const [name, value] of [["width", "16"], ["height", "16"], ["viewBox", "0 0 16 16"], ["fill", "none"], ["stroke", "currentColor"],
-    ["stroke-width", "1.6"], ["stroke-linecap", "round"], ["stroke-linejoin", "round"], ["aria-hidden", "true"], ["focusable", "false"]]) svg.setAttribute(name, value);
-  svg.setAttribute("class", "hm-agent__lock");
-  const body = doc.createElementNS(SVG_NS, "rect");
-  for (const [name, value] of [["x", "3"], ["y", "7"], ["width", "10"], ["height", "7"], ["rx", "1.8"]]) body.setAttribute(name, value);
-  const shackle = doc.createElementNS(SVG_NS, "path");
-  shackle.setAttribute("d", "M5.5 7V5a2.5 2.5 0 0 1 5 0v2");
-  svg.append(body, shackle);
-  return svg;
-}
 
 function el<K extends keyof HTMLElementTagNameMap>(
   doc: Document,
@@ -449,7 +435,7 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
     }
     policyCard.append(summary);
     const lock = el(doc, "p", "hm-agent__policy-note");
-    lock.append(lockIcon(doc), el(doc, "span", "", AGENT_COPY.policyLock));
+    lock.append(lockIcon(doc, "hm-agent__lock"), el(doc, "span", "", AGENT_COPY.policyLock));
     policyCard.append(lock);
     aside.append(policyCard);
     receiptHome = policyCard;

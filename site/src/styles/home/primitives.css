@@ -24,14 +24,23 @@
   min-inline-size: 44px;
 }
 
+/* The 1.5px stroke (outline pills, agent avatars). Chromium snaps a fractional border-width down to a whole CSS px:
+   `border: 1.5px` computes and paints as 1px at DPR 1 and DPR 2. So a 1.5px edge is an inset shadow with no border:
+       border: 0; box-shadow: inset 0 0 0 1.5px <colour token>;
+   It paints 3 device px at DPR 2 and 1px plus a half-tone px at DPR 1. The padding edge is then the outer edge, so an
+   absolutely placed child (the owner badge) measures from the outer edge as the canvas does. Box-shadow does not compose:
+   a focus rule repeats the inset first (`box-shadow: inset 0 0 0 1.5px <colour>, var(--focus-ring)`), and a rule that
+   changes the edge colour changes the inset colour. A dashed edge cannot be a shadow: it keeps a real border and drops
+   the shadow. A pill's padding adds the 1.5px edge back so its outer size is the canvas's. */
 /* Pill buttons. Secondary: 1.5px ink outline. Primary: ink fill, no edge, --home-on-ink text (the canvas design's #EEF2EA). */
 .hm-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   max-inline-size: 100%;
-  padding: 0 18px;
-  border: 1.5px solid var(--home-ink);
+  padding: 0 19.5px;
+  border: 0;
+  box-shadow: inset 0 0 0 1.5px var(--home-ink);
   border-radius: var(--radius-pill);
   background: transparent;
   color: var(--home-ink);
@@ -44,7 +53,7 @@
   overflow-wrap: anywhere;
   cursor: pointer;
 }
-.hm-button[data-primary="true"] { padding-inline: 24px; border: 0; background: var(--home-ink); color: var(--home-on-ink); }
+.hm-button[data-primary="true"] { padding-inline: 24px; border: 0; box-shadow: none; background: var(--home-ink); color: var(--home-on-ink); }
 .hm-button:hover, button.hm-capsule:hover, button.hm-switch-row:hover { background: var(--home-soft); color: var(--home-ink); }
 .hm-button[data-primary="true"]:hover { background: var(--home-link-hover); color: var(--home-on-ink); }
 .hm-button:focus-visible, .hm-capsule:focus-visible, .hm-object-card:focus-visible,
@@ -52,6 +61,9 @@
   outline: none;
   box-shadow: var(--focus-ring);
 }
+/* The class is doubled so the composed ring outranks integration.css `.hm-route-pane :is(button, a):focus-visible` (0,2,1). */
+.hm-button.hm-button:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring); }
+.hm-button.hm-button[data-primary="true"]:focus-visible { box-shadow: var(--focus-ring); }
 .hm-button:disabled, .hm-switch-row:disabled { cursor: default; }
 
 /* Person avatar: a filled circle in the person's colour, white initial. */
@@ -76,12 +88,13 @@
 .hm-person-avatar[data-hue="2"] { background: var(--home-purple); }
 .hm-person-avatar[data-hue="3"] { background: var(--home-teal); }
 
-/* Agent avatar: a rounded square, the owner's tint, a 1.5px border in the owner's colour and a deep letter. */
-.hm-agent-orb { border-radius: 8px; border: 1.5px solid var(--home-ink-muted); background: var(--home-soft); color: var(--home-ink-muted); }
-.hm-agent-orb[data-hue="0"] { border-color: var(--home-blue); background: var(--home-blue-tint); color: var(--home-blue-deep); }
-.hm-agent-orb[data-hue="1"] { border-color: var(--home-orange); background: var(--home-orange-tint); color: var(--home-orange-deep); }
-.hm-agent-orb[data-hue="2"] { border-color: var(--home-purple); background: var(--home-purple-tint); color: var(--home-purple-deep); }
-.hm-agent-orb[data-hue="3"] { border-color: var(--home-teal); background: var(--home-teal-tint); color: var(--home-teal-deep); }
+/* Agent avatar: a rounded square, the owner's tint, a 1.5px edge in the owner's colour (the inset stroke above) and a
+   deep letter. border-color carries the same colour for the dashed form, which needs a real border. */
+.hm-agent-orb { border-radius: 8px; border: 0 solid var(--home-ink-muted); box-shadow: inset 0 0 0 1.5px var(--home-ink-muted); background: var(--home-soft); color: var(--home-ink-muted); }
+.hm-agent-orb[data-hue="0"] { border-color: var(--home-blue); box-shadow: inset 0 0 0 1.5px var(--home-blue); background: var(--home-blue-tint); color: var(--home-blue-deep); }
+.hm-agent-orb[data-hue="1"] { border-color: var(--home-orange); box-shadow: inset 0 0 0 1.5px var(--home-orange); background: var(--home-orange-tint); color: var(--home-orange-deep); }
+.hm-agent-orb[data-hue="2"] { border-color: var(--home-purple); box-shadow: inset 0 0 0 1.5px var(--home-purple); background: var(--home-purple-tint); color: var(--home-purple-deep); }
+.hm-agent-orb[data-hue="3"] { border-color: var(--home-teal); box-shadow: inset 0 0 0 1.5px var(--home-teal); background: var(--home-teal-tint); color: var(--home-teal-deep); }
 .hm-orb-letter { color: inherit; }
 
 .hm-person-avatar[data-size="24"] { inline-size: 24px; block-size: 24px; font-size: 11px; }
@@ -94,11 +107,19 @@
 .hm-agent-orb[data-size="36"] { border-radius: 10px; }
 .hm-person-avatar[data-size="44"] { inline-size: 44px; block-size: 44px; font-size: 18px; }
 .hm-person-avatar[data-size="48"] { inline-size: 48px; block-size: 48px; font-size: 20px; }
-.hm-agent-orb[data-size="60"] { inline-size: 60px; block-size: 60px; border-width: 2px; border-radius: 18px; font-size: 26px; }
+.hm-agent-orb[data-size="60"] { inline-size: 60px; block-size: 60px; border-radius: 18px; font-size: 26px; box-shadow: inset 0 0 0 2px var(--home-ink-muted); }
+.hm-agent-orb[data-size="60"][data-hue="0"] { box-shadow: inset 0 0 0 2px var(--home-blue); }
+.hm-agent-orb[data-size="60"][data-hue="1"] { box-shadow: inset 0 0 0 2px var(--home-orange); }
+.hm-agent-orb[data-size="60"][data-hue="2"] { box-shadow: inset 0 0 0 2px var(--home-purple); }
+.hm-agent-orb[data-size="60"][data-hue="3"] { box-shadow: inset 0 0 0 2px var(--home-teal); }
 .hm-person-avatar[data-dashed="true"] { border: 1.5px dashed var(--home-line-dashed); background: transparent; color: var(--home-ink-muted); }
-.hm-agent-orb[data-dashed="true"] { border-style: dashed; }
+/* Dashed: a real border in the hue's border-color (computes 1px), no stroke shadow. */
+.hm-agent-orb[data-dashed="true"] { border-width: 1.5px; border-style: dashed; box-shadow: none; }
+.hm-agent-orb[data-size="60"][data-dashed="true"] { border-width: 2px; box-shadow: none; }
 
-/* Owner badge: a small filled circle in the owner's colour, white initial, a 2px ring of the surface it sits on. */
+/* Owner badge: a small filled circle in the owner's colour, white initial, a 2px ring of the surface it sits on.
+   The canvas places it right -6px, bottom -5px from the avatar's outer edge (-8px / -6px on the 60px avatar). The avatar
+   has no border (inset stroke), so its padding edge is that outer edge; a dashed avatar's 1px border moves it 1px out. */
 .hm-owner-badge {
   position: absolute;
   inset-inline-end: -6px;
@@ -121,6 +142,8 @@
 .hm-agent-orb[data-hue="2"] .hm-owner-badge { background: var(--home-purple); }
 .hm-agent-orb[data-hue="3"] .hm-owner-badge { background: var(--home-teal); }
 .hm-agent-orb[data-size="60"] .hm-owner-badge { inset-inline-end: -8px; inset-block-end: -6px; inline-size: 24px; block-size: 24px; box-shadow: 0 0 0 3px var(--home-canvas); font-size: 12px; }
+.hm-agent-orb[data-dashed="true"] .hm-owner-badge { inset-inline-end: -7px; inset-block-end: -6px; }
+.hm-agent-orb[data-size="60"][data-dashed="true"] .hm-owner-badge { inset-inline-end: -10px; inset-block-end: -8px; }
 .hm-needs-you .hm-owner-badge { box-shadow: 0 0 0 2px var(--home-lime); }
 
 /* Person + agents capsule. */
@@ -186,13 +209,19 @@ a.hm-object-card:hover { border-color: var(--home-field-border); color: var(--ho
 .hm-eyebrow { margin: 0; font-size: 13px; font-weight: 700; color: var(--home-lime-ink); }
 .hm-needs-title { margin: 2px 0 0; font-family: var(--home-font-body); font-size: 17px; font-weight: 600; line-height: 1.35; letter-spacing: 0; text-wrap: pretty; }
 .hm-needs-copy > .hm-actions { margin-block-start: 12px; }
-.hm-needs-you .hm-button { border-color: var(--home-lime-ink); color: var(--home-lime-ink); }
+.hm-needs-you .hm-button { box-shadow: inset 0 0 0 1.5px var(--home-lime-ink); color: var(--home-lime-ink); }
 .hm-needs-you .hm-button:hover { background: var(--home-lime-hover); color: var(--home-lime-ink); }
-.hm-needs-you .hm-button[data-primary="true"] { min-block-size: 46px; border: 0; background: var(--home-lime-ink); color: var(--home-on-lime-ink); font-size: 15px; }
-/* A quieter needs-you row (catchup.css data-needs-rank="more") draws its action as an outline pill: keep the edge it colours. */
-.hm-needs-you[data-needs-rank="more"] .hm-button[data-primary="true"] { border-width: 1.5px; border-style: solid; }
+.hm-needs-you .hm-button[data-primary="true"] { min-block-size: 46px; border: 0; box-shadow: none; background: var(--home-lime-ink); color: var(--home-on-lime-ink); font-size: 15px; }
+/* A quieter needs-you row (catchup.css data-needs-rank="more") draws every action as an ink outline pill (the inset stroke). */
+.hm-needs-you[data-needs-rank="more"] .hm-button,
+.hm-needs-you[data-needs-rank="more"] .hm-button[data-primary="true"] { border: 0; box-shadow: inset 0 0 0 1.5px var(--home-ink); }
 /* Hover stays dark in both modes: --home-on-lime-ink on --home-rail-raised 10.22 light, 12.83 dark. */
 .hm-needs-you .hm-button[data-primary="true"]:hover { background: var(--home-rail-raised); color: var(--home-on-lime-ink); }
+/* Focus in the band: the ring after the stroke the state draws (each selector one step above its stroke rule). */
+.hm-needs-you .hm-button.hm-button:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-lime-ink), var(--focus-ring); }
+.hm-needs-you .hm-button.hm-button[data-primary="true"]:focus-visible { box-shadow: var(--focus-ring); }
+.hm-needs-you[data-needs-rank="more"] .hm-button.hm-button:focus-visible,
+.hm-needs-you[data-needs-rank="more"] .hm-button.hm-button[data-primary="true"]:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring); }
 .hm-actions { display: flex; flex-wrap: wrap; gap: 8px; min-inline-size: 0; }
 
 .hm-choices { margin: 0; padding: 0; border: 0; color: var(--home-ink); }
