@@ -90,10 +90,13 @@
   box-sizing: border-box;
   inline-size: 100%;
   min-block-size: 52px;
-  padding: 0 16px;
+  /* 1.5px edge as an inset ring (a 1.5px border paints 1px in Chromium); the padding adds the
+     edge back so the text starts where the canvas's 16px padding inside its border puts it. */
+  padding: 0 17.5px;
   color: var(--home-ink);
   background: var(--home-field);
-  border: 1.5px solid var(--home-ink);
+  border: 0;
+  box-shadow: inset 0 0 0 1.5px var(--home-ink);
   border-radius: 14px;
   font: inherit;
   font-size: 18px;
@@ -102,7 +105,7 @@
 
 .hm-new-workspace__field input:focus-visible {
   outline: none;
-  box-shadow: var(--focus-ring);
+  box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring);
 }
 
 .hm-new-workspace__field input:disabled { opacity: 0.6; }
@@ -389,8 +392,10 @@
 
 .hm-new-workspace__preview-box {
   margin-block-start: 16px;
-  padding: 18px;
-  border: 1.5px solid var(--home-ink-faint);
+  /* Canvas 18px padding inside a 1.5px border: the edge is an inset ring, so 19.5px. */
+  padding: 19.5px;
+  border: 0;
+  box-shadow: inset 0 0 0 1.5px var(--home-ink-faint);
   border-radius: 18px;
 }
 
@@ -903,6 +908,14 @@
 .hm-ahp__detail-title > .hm-ahp__how > :not(summary) { flex: 1 1 100%; min-inline-size: 0; }
 .hm-ahp__detail-title > .hm-ahp__how::details-content { flex: 1 1 100%; min-inline-size: 0; }
 .hm-ahp__detail-title > .hm-ahp__how > .hm-ahp__steps { margin-block-start: 8px; }
+/* Quiet: secondary text beside the 21px title, not a competing action (weight 400, light chevron). */
+.hm-ahp__detail-title > .hm-ahp__how > summary { gap: 6px; font-size: 13px; font-weight: 400; }
+.hm-ahp__detail-title > .hm-ahp__how > summary::before {
+  inline-size: 5px;
+  block-size: 5px;
+  border-inline-end-width: 1.2px;
+  border-block-end-width: 1.2px;
+}
 
 .hm-ahp__how > summary,
 .hm-ahp__testing > summary {
@@ -1028,7 +1041,7 @@
    title and the lead only). */
 .hm-ahp__footer {
   margin: 0;
-  font-size: 14px;
+  font-size: 13px;
   color: var(--home-ink-muted);
   text-wrap: pretty;
 }
@@ -1039,9 +1052,9 @@
 .hm-ahp__link {
   min-block-size: 44px;
   padding: 0 6px;
-  color: var(--home-ink);
+  color: inherit; /* the footer's muted line: an underlined text action, not a second strong endpoint */
   font: inherit;
-  font-weight: 600;
+  font-weight: 400;
   text-decoration: underline;
   text-underline-offset: 2px;
   background: transparent;
@@ -1050,7 +1063,7 @@
   cursor: pointer;
 }
 
-.hm-ahp__link:hover { color: var(--home-link-hover); }
+.hm-ahp__link:hover { color: var(--home-ink); }
 
 .hm-ahp__status {
   position: absolute;
@@ -1155,22 +1168,29 @@
 
 .hm-invite-connect__caption strong { font-weight: 700; color: var(--home-rail-strong); }
 
+/* The host status is plain secondary text in the caption (canvas: no capsule). Only a problem state
+   ("waiting": nobody can use the route yet) keeps the warning capsule. */
 .hm-invite-connect__status {
-  display: inline-block;
+  display: inline;
   margin: 0;
+  padding: 0;
+  font: inherit;
+  white-space: nowrap;
+  color: var(--home-rail-soft);
+  background: transparent;
+}
+
+.hm-invite-connect__status[data-status="waiting"] {
+  display: inline-block;
   padding: 1px 8px;
   vertical-align: 1px;
   border-radius: var(--radius-pill);
   font-size: 12px;
   font-weight: 700;
   line-height: 1.4;
-  white-space: nowrap;
-  color: var(--home-rail-strong);
-  background: var(--home-rail-raised);
+  color: var(--home-offline-deep);
+  background: var(--home-offline-tint);
 }
-
-.hm-invite-connect__status[data-status="ready"] { color: var(--home-lime-ink); background: var(--home-lime); }
-.hm-invite-connect__status[data-status="untested"] { color: var(--home-offline-deep); background: var(--home-offline-tint); }
 
 .hm-invite-connect .hm-invite-connect__title {
   margin-block-start: 18px;
@@ -1305,10 +1325,25 @@
 
 .hm-invite-connect .hm-ahp__step > .hm-ahp__button { margin-block-start: 8px; }
 
-/* "Good to know" is a quiet toggle in the action area, under the footnote (no row in the panel). */
+/* "Good to know" is a quiet toggle in the action area, under the footnote (no row in the panel): the
+   footnote's own 13px muted type and a light chevron, so it reads as part of the footnote. */
 .hm-invite-connect__more { text-align: center; }
 
-.hm-invite-connect__more > summary { min-block-size: 32px; }
+.hm-invite-connect__more > summary {
+  min-block-size: 24px;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--home-rail-muted);
+}
+
+.hm-invite-connect__more > summary::before {
+  inline-size: 5px;
+  block-size: 5px;
+  border-inline-end-width: 1.2px;
+  border-block-end-width: 1.2px;
+}
 .hm-invite-connect__more[open] > .hm-ahp__notes { text-align: start; }
 .hm-invite-connect__more:has(> [data-connect-notes][hidden]) { display: none; }
 

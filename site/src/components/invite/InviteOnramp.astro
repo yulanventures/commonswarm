@@ -919,10 +919,11 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     box-shadow: var(--focus-ring);
   }
 
-  /* Phone-Connect pads its bottom 24px; Phone-Join 28px. Connect ends on the 32px "Good to know"
-     row, whose text sits 6px above its box: 18px more makes the canvas 24px under the text. */
+  /* Phone-Connect pads its bottom 24px; Phone-Join 28px. Connect ends on the 24px "Good to know"
+     row (13px/1.4 text, a 3px box margin under its line): 21px more makes the canvas 24px under
+     the text line. */
   .invite-onramp:has(> [data-view="connect"]:not([hidden])) {
-    padding-block-end: 18px;
+    padding-block-end: 21px;
   }
 
   .invite-onramp__mark { flex: none; }
@@ -1153,8 +1154,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   }
 
   .invite-onramp :global(.invite-onramp__button):focus-visible,
-  .invite-onramp__choice input:focus-visible,
-  .invite-onramp__consent input:focus-visible {
+  .invite-onramp__choice input:focus-visible {
     outline: 2px solid transparent;
     box-shadow: var(--focus-ring);
   }
@@ -1370,14 +1370,56 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     background: var(--home-lime);
   }
 
+  /* A custom check in the screen's own tokens (no grey native box): the choice ring's 1.5px muted
+     rim with 6px corners; checked, it fills lime with an ink tick, like a chosen tile's ring. */
   .invite-onramp__consent input {
+    appearance: none;
+    box-sizing: border-box;
+    display: inline-grid;
+    place-content: center;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    box-shadow: inset 0 0 0 1.5px var(--home-rail-soft);
     accent-color: var(--home-lime);
+    cursor: pointer;
+  }
+
+  .invite-onramp__consent input::before {
+    content: "";
+    inline-size: 5px;
+    block-size: 10px;
+    margin-block-start: -2px;
+    box-sizing: border-box;
+    border-inline-end: 2px solid var(--home-lime-ink);
+    border-block-end: 2px solid var(--home-lime-ink);
+    transform: rotate(45deg);
+    visibility: hidden;
+  }
+
+  .invite-onramp__consent input:checked {
+    background: var(--home-lime);
+    box-shadow: inset 0 0 0 1.5px var(--home-lime);
+  }
+
+  .invite-onramp__consent input:checked::before { visibility: visible; }
+
+  .invite-onramp__consent input:focus-visible {
+    outline: 2px solid transparent;
+    box-shadow: inset 0 0 0 1.5px var(--home-rail-soft), var(--focus-ring);
+  }
+
+  .invite-onramp__consent input:checked:focus-visible {
+    box-shadow: inset 0 0 0 1.5px var(--home-lime), var(--focus-ring);
   }
 
   @media (forced-colors: active) {
-    .invite-onramp__choice input {
+    .invite-onramp__choice input,
+    .invite-onramp__consent input {
       appearance: auto;
     }
+
+    .invite-onramp__consent input::before { content: none; }
   }
 
   .invite-onramp__choice > span:not(.invite-onramp__tile-orb) {
@@ -1421,16 +1463,16 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     align-items: center;
     gap: 6px;
     padding: 0 4px 0 10px;
-    color: var(--home-rail-soft);
+    color: var(--home-rail-muted);
     font-size: 14px;
-    font-weight: 600;
+    font-weight: 400;
     list-style: none;
     border-radius: 10px;
     cursor: pointer;
   }
 
   .invite-onramp__more > summary::-webkit-details-marker { display: none; }
-  .invite-onramp__more > summary::after { content: "+"; font-weight: 700; }
+  .invite-onramp__more > summary::after { content: "+"; font-weight: 400; }
   .invite-onramp__more[open] > summary::after { content: "−"; }
   .invite-onramp__more > summary:hover { color: var(--home-rail-strong); }
 
@@ -1464,13 +1506,17 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     border: 1.5px dashed var(--home-line-dashed);
   }
 
+  /* The consent line is secondary text beside a quiet 20px check (Join stays the one strong
+     element); the whole 44px row is the target. */
   .invite-onramp__consent {
     min-block-size: 2.75rem;
     display: flex;
     align-items: center;
-    gap: 12px;
-    color: var(--home-rail-strong);
-    font-weight: 600;
+    gap: 10px;
+    color: var(--home-rail-soft);
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.4;
     cursor: pointer;
   }
 
