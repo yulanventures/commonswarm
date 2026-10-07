@@ -244,8 +244,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
       <div class="dashboard__frame hm-frame">
         <aside class="dashboard__rail hm-frame__rail" aria-label="Home navigation">
-          <div class="hm-frame__rail-content" data-home-rail-slot></div>
-
+          {/* On a wide screen the rail's BRAND ROW is the account control: the mark and "CommonSwarm", as the canvas
+              rail draws them, plus a quiet chevron (so New workspace is the rail's last element, 16px above the
+              bottom). It comes before the rail in the DOM, so focus meets it at the top, where it is drawn; the
+              rail's own brand link stands down there (rail.css), and the menu's "CommonSwarm home" is the way to
+              the site home. On a phone it is the chevron disc at the top right. The menu keeps the theme switch,
+              Connected apps and Sign out. */}
           <div class="dashboard__rail-foot" data-user-menu-root>
             <button
               class="dashboard__user-trigger"
@@ -254,8 +258,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               aria-haspopup="menu"
               aria-expanded="false"
               aria-controls="dashboard-user-menu"
-              aria-label="Account menu"
+              aria-label="CommonSwarm, account menu"
             >
+              <span class="hm-rail__mark dashboard__user-trigger-mark" aria-hidden="true"><span class="hm-rail__mark-dot"></span><span class="hm-rail__mark-square"></span></span>
+              <span class="dashboard__user-trigger-brand">CommonSwarm</span>
               <span class="dashboard__user-trigger-name" data-rail-account>Your account</span>
               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
                 <path d="m4 6 4 4 4-4"></path>
@@ -294,6 +300,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               <a class="dashboard__wordmark dashboard__user-menu-brand" href="/" aria-label="CommonSwarm home">CommonSwarm</a>
             </div>
           </div>
+
+          <div class="hm-frame__rail-content" data-home-rail-slot></div>
         </aside>
 
         <div class="hm-frame__main">
