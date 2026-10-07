@@ -239,7 +239,7 @@ function fixture(config: Record<string, unknown> = {}) {
     if (producer !== null) put('release/scripts/live-ordinary-controls.mjs', producer);
     const made = spawnSync(python, ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t:\n    [t.add(sys.argv[2]+"/"+m,arcname=m) for m in sys.argv[3:]]', archive, join(root, 'release'), ...members], { encoding: 'utf8' });
     assert.equal(made.status, 0, made.stderr); chmodSync(archive, 0o600);
-    if (bindInputs) put('inputs.json', { release_sha: sha, window_id: 'fixture', window: 'W3', baseline_oauth_sha: baseline, baseline_oauth_image: baselineImage, archive_sha256: digest(readFileSync(archive)), plan_sha256: digest(plan) });
+    if (bindInputs) put('inputs.json', { release_sha: sha, baseline_edge_sha: baseline, window_id: 'fixture', window: 'W3', baseline_oauth_sha: baseline, baseline_oauth_image: baselineImage, archive_sha256: digest(readFileSync(archive)), plan_sha256: digest(plan) });
   }
   buildArchive(producerSource);
   // A valid opening pair, as ai-open retains it.
@@ -377,7 +377,7 @@ type Json = Record<string, unknown>;
 const inDays = (days: number) => new Date(Date.now() + days * 86400_000).toISOString();
 const expiring = (ids: string[], days = 30) => ids.map(client_id => ({ client_id, expires_after: inDays(days) }));
 function consentReceipt(phase: 'pre-W1' | 'post-W5', change: Json = {}): Json {
-  return { kind: 'c1-consent', release_sha: sha, consent_phase: phase,
+  return { kind: 'c1-consent', release_sha: sha, live_edge_sha: phase === 'pre-W1' ? baseline : sha, consent_phase: phase,
     measured_at: new Date(Date.now() - 60_000).toISOString(), producer_sha256: producerSha,
     controls: { cimd_consent: true, dcr_registration_consent: true }, dcr_client_ids: ['dcr-fixture-1', 'dcr-fixture-2'],
     // Amendments A/B: post-W5 cleanup lists earlier clients left to expire, never this run's own.
@@ -385,7 +385,7 @@ function consentReceipt(phase: 'pre-W1' | 'post-W5', change: Json = {}): Json {
     ...change };
 }
 function liveReceipt(window: string, windowId: string, phase: string, consentText: string, change: Json = {}): Json {
-  return { release_sha: sha, window_id: windowId, window, phase,
+  return { release_sha: sha, live_edge_sha: ['W1','W2','W2b','W3'].includes(window) || (window === 'W4' && phase !== 'after') ? baseline : sha, window_id: windowId, window, phase,
     controls: Object.fromEntries(ordinaryKeys.map(k => [k, true])),
     consent_receipt_sha256: digest(consentText), producer_sha256: producerSha, dcr_client_ids: ['dcr-fixture-3'], ...change };
 }
@@ -406,7 +406,7 @@ function openFixture(window: string, producer = producerSource, includeProducer 
     archive, ...files.flatMap(([name]) => [name, join(releaseRoot, name)])], { encoding: 'utf8' });
   assert.equal(made.status, 0, made.stderr);
   chmodSync(archive, 0o600);
-  f.put('open-inputs.json', { release_sha: sha, window_id: openId, window, archive_sha256: digest(readFileSync(archive)), plan_sha256: digest(planText), baseline_postgres_image: image });
+  f.put('open-inputs.json', { release_sha: sha, baseline_edge_sha: baseline, window_id: openId, window, archive_sha256: digest(readFileSync(archive)), plan_sha256: digest(planText), baseline_postgres_image: image });
   f.put('gates.json', '{}'); f.put('home.env', 'EDGE=fixture\n');
   for (const name of ['20-commonswarm-mcp.caddy', '10-commonswarm-api.caddy']) f.put('caddy/'+name, 'fixture '+name);
   const proof = join(f.root, 'admin-issuance/release-proofs', `${sha}-${window}-${openId}`);
@@ -437,11 +437,21 @@ function openGood(window: string, phase: 'pre-W1' | 'post-W5') {
 // ai-live-controls reads the producer from the release archive, re-verified against archive_sha256.
 function liveRun(window: string, phase: string, consent: Json | string, change: Json = {}, retained?: string) {
   const f = fixture(), text = typeof consent === 'string' ? consent : JSON.stringify(consent);
-  f.put('consent.json', text); f.put('inputs.json', { release_sha: sha, window_id: 'fixture', window, archive_sha256: digest(readFileSync(f.archive)), plan_sha256: digest(plan) });
+  f.put('consent.json', text);
+  const inputs = { release_sha: sha, baseline_edge_sha: ['W5','W6','W7'].includes(window) ? sha : baseline, window_id: 'fixture', window, archive_sha256: digest(readFileSync(f.archive)), plan_sha256: digest(plan) };
+  f.put('inputs.json', inputs);
+  if (window === 'W5' && phase === 'before') {
+    mkdirSync(join(f.root, 'w4'), { mode: 0o700 });
+    f.put('w4/inputs.json', { ...inputs, window: 'W4', window_id: 'W4Fx01', baseline_edge_sha: baseline });
+    f.put('w4/consent-pre-W1.json', text);
+    f.put('w4/ordinary-before.json', liveReceipt('W4', 'W4Fx01', 'before', text));
+    f.put('w4/closed.txt', '2026-10-04T09:00:00Z\n');
+    f.put('w4/close-result.json', { release_sha: sha, window: 'W4', window_id: 'W4Fx01', result: 'success', closed_at: '2026-10-04T09:00:00Z' });
+  }
   f.put('controls.json', liveReceipt(window, 'fixture', phase, text, change));
   for (const name of ['ordinary-before.json', 'consent-pre-W1.json']) unlinkSync(join(f.proof, name));
   if (retained !== undefined) f.put('proof/'+retained.split('\n')[0], retained.split('\n').slice(1).join('\n'));
-  return { f, text, result: f.run(['ai-live-controls'], window) };
+  return { f, text, result: f.run(['ai-live-controls'], window, { W4_PROOF_DIR: join(f.root, 'w4') }) };
 }
 function liveRefused(run: ReturnType<typeof liveRun>, phase: string, message: string) {
   stopped(run.result, message); assert.doesNotMatch(run.result.stderr, /Traceback/);
