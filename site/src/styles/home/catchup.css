@@ -48,7 +48,8 @@
   font-size: 22px;
   font-weight: 700;
   letter-spacing: -0.01em;
-  /* line-height inherits the body 1.45, as the canvas h2 does. */
+  /* The canvas h2 inherits the body 1.45 (31.9px); set it here, because the global h2 rule tightens it. */
+  line-height: 1.45;
 }
 
 .hm-catchup-latest > .hm-catchup-section-title { margin-block-end: 14px; }
@@ -274,7 +275,7 @@ a.hm-catchup-card:hover { border-color: var(--home-field-border); }
 .hm-catchup-card-attention {
   margin: 0;
   font-size: 14px;
-  line-height: 1.4;
+  line-height: 1.45;
   color: var(--home-ink-muted);
 }
 .hm-catchup-card-attention { font-weight: 700; color: var(--home-ink); }
@@ -318,7 +319,7 @@ a.hm-catchup-card:hover { border-color: var(--home-field-border); }
   text-wrap: pretty;
   overflow-wrap: anywhere;
 }
-.hm-catchup-latest-author { font-weight: 700; }
+.hm-catchup-latest-author { font-weight: 700; color: var(--home-ink); }
 
 .hm-catchup-latest-when {
   display: block;
@@ -335,11 +336,12 @@ a.hm-catchup-card:hover { border-color: var(--home-field-border); }
   justify-content: center;
   flex: none;
   box-sizing: border-box;
-  /* The hit box stays 44px; the drawn pill is the canvas 36px (::before). The negative margin keeps the row at 36px. */
+  /* The hit box stays 44px; the drawn pill is the canvas 38px (min-height 36px plus two 1px borders, ::before).
+     The negative margin keeps the row at 38px. */
   min-block-size: 44px;
   min-inline-size: 44px;
   max-inline-size: 100%;
-  margin-block: -4px;
+  margin-block: -3px;
   padding: 0 14px;
   border: 0;
   border-radius: var(--radius-pill);
@@ -352,10 +354,10 @@ a.hm-catchup-card:hover { border-color: var(--home-field-border); }
 .hm-catchup-latest-workspace::before {
   content: "";
   position: absolute;
-  inset: 4px 0;
+  inset: 3px 0;
   z-index: -1;
   box-sizing: border-box;
-  border: 1px solid var(--home-card-border);
+  border: 1px solid var(--home-pill-border);
   border-radius: var(--radius-pill);
 }
 a.hm-catchup-latest-workspace:hover::before { background: var(--home-soft); }

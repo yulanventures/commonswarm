@@ -29,12 +29,29 @@ export interface WorkspaceShellVM {
 export interface ShellCallbacks {
   /** Optional in-app navigation for plain clicks on shell links. Without it the links navigate natively. */
   navigate?: (href: string, event: MouseEvent) => void;
-  /** Opens People & agents (the dialog, or the sheet on a phone). */
+  /** Opens the People & agents page. */
   openPeople: () => void;
   /** The phone "Workspaces" chevron. The page decides between history.back() and its parent route. */
   back?: (event: MouseEvent) => void;
   menu: (item: WorkspaceMenuItem) => void;
+  /**
+   * The feed's own controls (Tom's ruling 2, 2026-10-07: the view switch, the filters and refresh live in
+   * this menu). Read each time the menu opens, so the entries always match the feed on screen. Null or
+   * absent: the menu has no feed entries (another view is showing).
+   */
+  feedMenu?: () => FeedMenuState | null;
+  feed?: (action: FeedMenuAction) => void;
 }
+
+export type FeedFilterValue = "all" | "broadcast" | "direct-to-you";
+export interface FeedMenuState {
+  channels: { id: string; label: string; current: boolean }[];
+  mayCreateChannel: boolean;
+  filters: { value: FeedFilterValue; label: string; current: boolean }[];
+  /** The Refresh entry, or null when the feed has nothing to refresh. The label may carry the update count. */
+  refresh: { label: string } | null;
+}
+export type FeedMenuAction = { kind: "channel"; id: string } | { kind: "new-channel" } | { kind: "filter"; value: FeedFilterValue } | { kind: "refresh" };
 
 export const PANE_LABELS: Record<WorkspacePane, string> = { chat: "Chat", todos: "To-dos", lists: "Lists", files: "Files" };
 const PANES: WorkspacePane[] = ["chat", "todos", "lists", "files"];
@@ -77,6 +94,7 @@ export function workspaceMenuItems(vm: Pick<WorkspaceShellVM, "sample" | "menu">
 
 /** The doors the shell renders. A sample has none: no People & agents button and no ⋯ menu. */
 export function shellDoors(vm: Pick<WorkspaceShellVM, "sample" | "menu">): { people: boolean; menu: boolean } {
+  /* A sample has no ⋯, so its feed keeps the view switch and filters in their own rows. */
   return { people: !vm.sample, menu: workspaceMenuItems(vm).length > 0 };
 }
 
@@ -111,12 +129,12 @@ function link(doc: Document, href: string, className: string, callbacks: Pick<Sh
 function chevron(doc: Document): SVGSVGElement {
   const svg = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("class", "hm-icon");
-  svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("width", "20"); svg.setAttribute("height", "20");
-  svg.setAttribute("fill", "none"); svg.setAttribute("stroke", "currentColor"); svg.setAttribute("stroke-width", "1.75");
+  svg.setAttribute("viewBox", "0 0 16 16"); svg.setAttribute("width", "20"); svg.setAttribute("height", "20");
+  svg.setAttribute("fill", "none"); svg.setAttribute("stroke", "currentColor"); svg.setAttribute("stroke-width", "1.8");
   svg.setAttribute("stroke-linecap", "round"); svg.setAttribute("stroke-linejoin", "round");
   svg.setAttribute("aria-hidden", "true"); svg.setAttribute("focusable", "false");
   const path = doc.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute("d", "M14 6l-6 6 6 6");
+  path.setAttribute("d", "M10 3L5 8l5 5");
   svg.append(path);
   return svg;
 }
@@ -150,15 +168,76 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
   menu.hidden = true;
   trigger.setAttribute("aria-controls", menu.id);
   const items: HTMLButtonElement[] = [];
+  const staticItems: HTMLButtonElement[] = [];
   const close = (focusTrigger: boolean) => {
     menu.hidden = true;
     trigger.setAttribute("aria-expanded", "false");
     if (focusTrigger) trigger.focus({ preventScroll: true });
   };
+  /* THE FEED ENTRIES are rebuilt on every open from the state the page reports, as two radio groups
+     (View, Show) and a Refresh item. A choice closes the menu and returns focus to ⋯. */
+  const feedEntries: HTMLElement[] = [];
+  const syncFeedEntries = () => {
+    for (const entry of feedEntries.splice(0)) entry.remove();
+    items.splice(0, items.length, ...staticItems);
+    const state = callbacks.feedMenu?.() ?? null;
+    if (!state || !callbacks.feed) return;
+    const act = (action: FeedMenuAction) => { close(true); callbacks.feed?.(action); };
+    const group = (label: string, radios: { text: string; checked: boolean; action: FeedMenuAction; hook?: [string, string] }[], extra: HTMLButtonElement[] = []) => {
+      const entry = node(doc, "li", "hm-menu__entry hm-menu__group-entry");
+      entry.setAttribute("role", "none");
+      const list = node(doc, "ul", "hm-menu__group");
+      list.setAttribute("role", "group");
+      list.setAttribute("aria-label", label);
+      const heading = node(doc, "li", "hm-menu__group-label", label);
+      heading.setAttribute("role", "presentation");
+      heading.setAttribute("aria-hidden", "true");
+      list.append(heading);
+      const buttons: HTMLButtonElement[] = [];
+      for (const radio of radios) {
+        const li = node(doc, "li", "hm-menu__entry"); li.setAttribute("role", "none");
+        const button = node(doc, "button", "hm-menu__item hm-menu__radio", radio.text);
+        button.type = "button"; button.tabIndex = -1;
+        button.setAttribute("role", "menuitemradio");
+        button.setAttribute("aria-checked", String(radio.checked));
+        if (radio.hook) button.dataset[radio.hook[0]] = radio.hook[1];
+        button.addEventListener("click", () => act(radio.action));
+        li.append(button); list.append(li); buttons.push(button);
+      }
+      for (const button of extra) { const li = node(doc, "li", "hm-menu__entry"); li.setAttribute("role", "none"); li.append(button); list.append(li); buttons.push(button); }
+      entry.append(list);
+      return { entry, buttons };
+    };
+    const plain = (text: string, action: FeedMenuAction, hook: string) => {
+      const button = node(doc, "button", "hm-menu__item", text);
+      button.type = "button"; button.tabIndex = -1; button.setAttribute("role", "menuitem");
+      button.dataset[hook] = "";
+      button.addEventListener("click", () => act(action));
+      return button;
+    };
+    const view = group("View", state.channels.map((channel) => ({ text: channel.label, checked: channel.current,
+      action: { kind: "channel", id: channel.id } as FeedMenuAction, hook: ["menuChannelPlace", channel.id] as [string, string] })),
+      state.mayCreateChannel ? [plain("New channel", { kind: "new-channel" }, "menuChannelNew")] : []);
+    const show = group("Show", state.filters.map((filter) => ({ text: filter.label, checked: filter.current,
+      action: { kind: "filter", value: filter.value } as FeedMenuAction, hook: ["menuFeedFilter", filter.value] as [string, string] })));
+    const built: HTMLElement[] = [view.entry, show.entry];
+    const feedButtons = [...view.buttons, ...show.buttons];
+    if (state.refresh) {
+      const entry = node(doc, "li", "hm-menu__entry"); entry.setAttribute("role", "none");
+      const refresh = plain(state.refresh.label, { kind: "refresh" }, "menuRefresh");
+      entry.append(refresh); built.push(entry); feedButtons.push(refresh);
+    }
+    if (staticItems.length) {
+      const rule = node(doc, "li", "hm-menu__separator"); rule.setAttribute("role", "separator"); built.push(rule);
+    }
+    menu.prepend(...built); feedEntries.push(...built);
+    items.splice(0, items.length, ...feedButtons, ...staticItems);
+  };
   const open = (index: number) => {
+    syncFeedEntries();
     menu.hidden = false;
     trigger.setAttribute("aria-expanded", "true");
-    items[index]?.focus({ preventScroll: true });
+    items[index < 0 ? items.length + index : index]?.focus({ preventScroll: true });
   };
   for (const { item, label } of workspaceMenuItems(vm)) {
     const entry = node(doc, "li", "hm-menu__entry");
@@ -179,12 +258,13 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
     entry.append(button);
     menu.append(entry);
     items.push(button);
+    staticItems.push(button);
   }
   trigger.addEventListener("click", () => (menu.hidden ? open(0) : close(false)));
   trigger.addEventListener("keydown", (event) => {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
     event.preventDefault();
-    open(event.key === "ArrowDown" ? 0 : items.length - 1);
+    open(event.key === "ArrowDown" ? 0 : -1);
   });
   menu.addEventListener("keydown", (event) => {
     if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(true); return; }
@@ -197,7 +277,15 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
   wrap.addEventListener("focusout", (event) => {
     if (!menu.hidden && !wrap.contains(event.relatedTarget as Node | null)) close(false);
   });
-  wrap.append(trigger, menu);
+  /* The live state keeps one small dot (ruling 2): on ⋯, the menu that now holds the feed's controls.
+     The page shows it exactly while the Live chip would show. */
+  const live = node(doc, "span", "hm-live-dot");
+  live.dataset.homeLiveDot = "";
+  live.setAttribute("role", "img");
+  live.setAttribute("aria-label", "Live");
+  live.title = "Live";
+  live.hidden = true;
+  wrap.append(trigger, live, menu);
   return wrap;
 }
 

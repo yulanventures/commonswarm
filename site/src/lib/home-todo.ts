@@ -6,7 +6,7 @@ import { agentOrb, choiceChips, notice, personAvatar } from "./home-primitives";
 import { personTint } from "./home-names";
 import { assignOptions, assignPicker, commentSegments, personNames, tagLabel, tagOptions, tagPicker, tagsInBody, type AssignFacts,
   type PickerPeople } from "./home-pickers";
-import { TODO_RESULT_UNKNOWN, TODO_SAVE_FAILED, isAgent, personName, todoAssigneeLabel, todoMetaLine, todoStartChoice, todoStatus, whenStamp,
+import { TODO_RESULT_UNKNOWN, TODO_SAVE_FAILED, isAgent, personName, todoAssigneeLabel, todoMetaLine, todoStartChoice, todoStatus, todoSteerLine, whenStamp,
   type TodoCopyContext, type TodoNotice, type TodoStartMode } from "./home-todo-copy";
 
 /** Local to lane T: what the view needs beyond TodoVM (home-types.ts has no type for it). */
@@ -177,6 +177,19 @@ function atEditor(doc: Document, todo: TodoVM, callbacks: TodoViewCallbacks): HT
   return form;
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+/** The canvas's 16 px padlock (Todo.dc.html), drawn in currentColor; decorative. */
+function padlock(doc: Document): SVGSVGElement {
+  const svg = doc.createElementNS(SVG_NS, "svg");
+  for (const [key, value] of [["class", "hm-todo-steer-icon"], ["width", "16"], ["height", "16"], ["viewBox", "0 0 16 16"], ["fill", "none"],
+    ["stroke", "currentColor"], ["stroke-width", "1.6"], ["stroke-linecap", "round"], ["stroke-linejoin", "round"], ["aria-hidden", "true"], ["focusable", "false"]]) svg.setAttribute(key, value);
+  const rect = doc.createElementNS(SVG_NS, "rect");
+  for (const [key, value] of [["x", "3"], ["y", "7"], ["width", "10"], ["height", "7"], ["rx", "1.8"]]) rect.setAttribute(key, value);
+  const path = doc.createElementNS(SVG_NS, "path"); path.setAttribute("d", "M5.5 7V5a2.5 2.5 0 0 1 5 0v2");
+  svg.append(rect, path);
+  return svg;
+}
+
 function assignedPanel(doc: Document, todo: TodoVM, vm: TodoViewVM, callbacks: TodoViewCallbacks, ctx: TodoCopyContext): HTMLElement {
   const panel = node(doc, "section", "hm-todo-panel"); panel.dataset.todoAssigned = "";
   const headId = `hm-todo-${todo.id}-assigned`.replace(/[^A-Za-z0-9_-]/g, "_");
@@ -212,6 +225,13 @@ function assignedPanel(doc: Document, todo: TodoVM, vm: TodoViewVM, callbacks: T
   if (copy.warning) panel.append(notice(doc, copy.warning, "warning"));
   if (vm.save === "failed") panel.append(notice(doc, TODO_SAVE_FAILED, "danger"));
   if (vm.save === "unknown") panel.append(notice(doc, TODO_RESULT_UNKNOWN, "warning"));
+  // Todo canvas: a padlock line closes the panel. It says what the server enforces (only the agent's
+  // owner steers its line), so it shows only with the start chips, which render only for that owner.
+  if (choice && todo.assignee?.kind === "agent") {
+    const steer = node(doc, "p", "hm-todo-steer"); steer.dataset.todoSteer = "";
+    steer.append(padlock(doc), node(doc, "span", "", todoSteerLine(todo.assignee.agent, ctx.names)));
+    panel.append(steer);
+  }
   return panel;
 }
 

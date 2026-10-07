@@ -401,11 +401,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 Other; it carries data-agent-owner-self, so it opens AgentConnect exactly as the
                 "I do" choice did. Inviting a person is the picker's footer link, which carries
                 data-agent-owner-teammate and opens the person invite as before. */}
+            {/* Add-Agent.dc.html has one way back: the picker's own breadcrumb, which sends agent-host-home. */}
             <section class="dashboard__connect-view dashboard__choice-view dashboard__host-view" data-channel-view="agent-choice" hidden>
-              <button class="dashboard__back-button" type="button" data-close-agent-choice>
-                <span aria-hidden="true">←</span>
-                Back to the channel
-              </button>
               <AgentHostPicker audience="setter" class="dashboard__host-picker" />
             </section>
 
@@ -981,11 +978,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { parseRoute, routeHref, parentRoute, type HomeRoute } from "../../lib/home-route";
   import { buildHomeRail } from "../../lib/home-rail";
   import { buildWorkspaceHeader, buildPhoneTopBar, buildWorkspaceNav, buildChannelMenu,
-    type WorkspaceShellVM, type ShellCallbacks } from "../../lib/home-shell";
+    type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction } from "../../lib/home-shell";
   import { renderCatchUp as buildCatchUp } from "../../lib/home-catchup";
   import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes } from "../../lib/home-focus";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
-    overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, catchUpRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
+    overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
   import { myWorkspaces, homeOverview, homeOverviewAsks, homeWorkingOn, feed } from "../../lib/commonswarm";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
@@ -1364,6 +1361,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     let homePeopleReadState: HomeReadState = "pending";
     const homeScroll = new Map<string, number>();
     const homeOverviewCounts = new Map<string, number | null>();
+    let railOverviewGeneration = 0;
 
     let agents: (Agent & { work?: AgentWorkStatus })[] = [];
     let members: Member[] = [];
@@ -1790,9 +1788,50 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (liveChip) {
         liveChip.hidden = sampleMode || !(name === "feed" || name === "feed-empty");
       }
+      syncFeedChrome();
       if (name === "feed" || name === "feed-empty") {
         queueMicrotask(() => armLiveFeed());
       }
+    };
+
+    /* TOM'S RULING 2 (2026-10-07, "Quiet forms"): the view switch, the feed filters and refresh live in
+       the workspace header's ⋯ menu, and the live state keeps one small dot there. The stream head and
+       the filter row come back only when they say something the reader must see: a channel other than
+       All messages, a filter other than All, or an address that did not resolve. A sample has no ⋯ (it
+       renders no doors), so it keeps both rows. */
+    const syncFeedChrome = (): void => {
+      const frame = one<HTMLElement>(".hm-frame");
+      const quiet = !sampleMode && homeRoute.view === "chat" && activeWorkspaceView === "signals" &&
+        activeChannelId === null && unknownChannelId === null && signalFilter === "all";
+      frame?.toggleAttribute("data-feed-quiet", quiet);
+      const liveChip = one<HTMLElement>("[data-live-chip]");
+      for (const dot of all<HTMLElement>("[data-home-live-dot]")) dot.hidden = sampleMode || !liveChip || liveChip.hidden;
+    };
+    /** What the ⋯ menu offers for the feed, read from the controls that own it, so the two never disagree. */
+    const feedMenuState = (): FeedMenuState | null => {
+      if (sampleMode || homeRoute.view !== "chat" || activeWorkspaceView !== "signals") return null;
+      const refresh = one<HTMLButtonElement>("[data-refresh]");
+      const count = one<HTMLElement>("[data-update-count]");
+      const refreshLabel = refresh?.getAttribute("aria-label") ?? "Refresh";
+      return {
+        channels: [{ id: "", label: channelLabel(ALL_SIGNALS_SLUG), current: activeChannelId === null && unknownChannelId === null },
+          ...liveChannels(channels).map((channel) => ({ id: channel.channelId, label: channel.slug,
+            current: channel.channelId === activeChannelId && unknownChannelId === null }))],
+        mayCreateChannel: !sampleMode,
+        filters: all<HTMLButtonElement>("[data-feed-filter]").flatMap((button) => {
+          const value = button.dataset.feedFilter;
+          return value === "all" || value === "broadcast" || value === "direct-to-you"
+            ? [{ value, label: (button.textContent ?? "").trim(), current: button.getAttribute("aria-pressed") === "true" }] : [];
+        }),
+        refresh: refresh && !refresh.hidden
+          ? { label: count && !count.hidden && count.textContent ? `${refreshLabel} · ${count.textContent}` : refreshLabel } : null,
+      };
+    };
+    const feedMenuAction = (action: FeedMenuAction): void => {
+      if (action.kind === "channel") selectChannel(action.id === "" ? null : action.id);
+      else if (action.kind === "new-channel") openChannelDialog();
+      else if (action.kind === "filter") one<HTMLButtonElement>(`[data-feed-filter="${action.value}"]`)?.click();
+      else one<HTMLButtonElement>("[data-refresh]")?.click();
     };
 
     const addAgentViewOpen = (): boolean =>
@@ -4284,8 +4323,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const renderHomeRail = (): void => {
       const slot = one<HTMLElement>("[data-home-rail-slot]");
       if (!slot) return;
-      let railPeople = currentHomePeople();
-      if (homeRoute.view === "catchup") railPeople = catchUpRailPeople(catchUpData);
+      /* One rail on every route: everyone in every workspace the overview read, with the workspace in view
+         read first so its own measured states win (home-map homeRailPeople). */
+      const railPeople = homeRailPeople(catchUpData, homeRoute.view === "catchup" ? null : currentHomePeople());
       const vm = mapHomeRail(workspaces, homeRoute, railPeople, sampleMode, homeOverviewCounts);
       const key = homeStructureKey(vm);
       if (key === homeRailKey && slot.childElementCount) {
@@ -4294,10 +4334,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       replaceHomeRegion(slot, "rail", [buildHomeRail(document, vm, {
         navigate: href => navigateHomeHref(href),
         openPerson: id => { void selectHomePerson(id); },
+        /* As for a person: an agent opens in this workspace when it is here, otherwise in the first
+           workspace whose roster names it. */
         openAgent: id => {
-          const workspaceId = homeRoute.view === "catchup"
-            ? catchUpData.find(entry => entry.detail?.people.groups.some(group => group.agents.some(agent => agent.id === id)))?.workspace.id
-            : activeWorkspaceId;
+          const has = (people: HomePeople | undefined): boolean => !!people &&
+            (people.groups.some(group => group.agents.some(agent => agent.id === id)) || people.other.some(agent => agent.id === id));
+          const workspaceId = homeRoute.view !== "catchup" && has(currentHomePeople()) ? activeWorkspaceId
+            : catchUpData.find(entry => has(entry.detail?.people))?.workspace.id ?? null;
           if (workspaceId) void navigateHome({ view: "agent", workspaceId, agentId: id }, "push");
         },
         toggleWorkspaces: expanded => { railExpanded = expanded; },
@@ -4326,6 +4369,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const key = homeStructureKey(vm);
       if (key === homeShellKey && slot.childElementCount) return;
       const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: () => openRosterDialog(),
+        feedMenu: feedMenuState, feed: feedMenuAction,
         menu: item => {
           if (item === "wiki") navigateHomeHref(vm.hrefs.wiki);
           else if (item === "settings") openWorkspaceDetailsDialog();
@@ -4344,6 +4388,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (bottom) replaceHomeRegion(bottom, "phone-nav", [buildWorkspaceNav(document, vm, callbacks, "phone")],
         Array.from(slot.querySelectorAll<HTMLElement>("h1")).find(heading => heading.getClientRects().length > 0));
       homeShellKey = key;
+      syncFeedChrome();
     };
     const renderHomeCatchUp = (): void => {
       if (homeRoute.view !== "catchup") return;
@@ -4416,6 +4461,23 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         renderHomeCatchUp();
       });
     };
+    /* The rail is the same on every route (shared request, round 3A): Catch up reads the overview for its cards, and
+       any other route reads it once too, so people and agents from the other workspaces are listed there as well.
+       A failed or late read leaves the rail on the workspace in view; Catch up replaces this data with its own. */
+    const loadRailOverview = async (): Promise<void> => {
+      if (sampleMode || homeRoute.view === "catchup" || catchUpData.some(entry => entry.detail)) return;
+      const generation = ++railOverviewGeneration;
+      const viewer = homeViewerId();
+      let overview;
+      try { overview = await homeOverview(); } catch { return; }
+      if (!overview || generation !== railOverviewGeneration || homeViewerId() !== viewer || homeRoute.view === "catchup" ||
+        catchUpData.some(entry => entry.detail)) return;
+      catchUpData = overviewCatchUpData(initialCatchUpData(workspaces), overview, sampleMode);
+      // The workspace in view shows its live needs-you items in the stream; a one-time snapshot count on its rail row would go
+      // stale as they are answered, so it gets none here (Lead decision; the mockup's current row has no badge).
+      for (const entry of catchUpData) if (entry.workspace.id !== activeWorkspaceId) homeOverviewCounts.set(entry.workspace.id, homeNeedsYouCount(entry));
+      renderHomeRail();
+    };
     const homePaneMessage = (heading: string, detail: string, homeLink?: { label: string; href: string }): void => {
       const slot = one<HTMLElement>("[data-home-route-pane]");
       if (!slot) return;
@@ -4441,6 +4503,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       frame?.classList.toggle("hm-frame--catchup", home);
       frame?.classList.toggle("hm-frame--agent", homeRoute.view === "agent");
       frame?.classList.toggle("hm-frame--people", homeRoute.view === "people");
+      frame?.classList.toggle("hm-frame--todo", homeRoute.view === "todo");
+      frame?.classList.toggle("hm-frame--add-agent", homeRoute.view === "add-agent");
       if (home) { one<HTMLElement>("[data-home-side-slot]")?.replaceChildren(); renderHomeCatchUp(); return; }
       renderHomeSide();
       if (homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos") {
@@ -4454,6 +4518,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       else if (homeRoute.view === "files") activateWorkspaceView("files");
       else if (homeRoute.view === "wiki") activateWorkspaceView("brain");
       else activateWorkspaceView("signals");
+      syncFeedChrome();
     };
     const focusHomeView = (): void => {
       const route = homeRoute;
@@ -4512,6 +4577,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       if (navigation !== homeNavigation) return;
       renderHomeRail(); renderHomeShell(); applyHomePane(); focusHomeView();
+      void loadRailOverview();
       renderChannelRail();
       if (scroll) scroll.scrollTop = homeScroll.get(route.workspaceId) ?? 0;
       if (route.view === "chat" && route.messageId) {
@@ -5192,6 +5258,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       details.className = "dashboard__message-receipt";
       details.dataset.receiptState = indicator.state;
       if (indicator.outcome !== null) details.dataset.receiptOutcome = indicator.outcome;
+      /* TOM'S RULING 1 (2026-10-07, "Quiet forms"): a receipt shows on the row only while it is a
+         problem or still moving: pending, stuck, failed, expired, or a mix that may hide a failure.
+         A settled receipt is quiet: it moves into the row's tools and shows on hover or focus, and
+         a keyboard reaches it by Tab. A problem state is never quiet. */
+      // Tom's ruling 1: settled receipts go quiet; a problem never hides. "Unavailable" is an unknown delivery state, so
+      // it stays visible like pending/stuck/failed (Lead decision).
+      const receiptProblem = indicator.state === "pending" || indicator.state === "stuck" || indicator.state === "unavailable" ||
+        indicator.outcome === "failed_terminal" || indicator.outcome === "expired" || indicator.outcome === "mixed";
+      if (!receiptProblem) details.dataset.receiptQuiet = "";
       const summary = document.createElement("summary");
       summary.title = indicator.detail;
       summary.setAttribute(
@@ -5588,6 +5663,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const active = button.dataset.feedFilter === signalFilter;
         button.setAttribute("aria-pressed", String(active));
       }
+      syncFeedChrome();
       if (visibleSignals.length === 0) {
         const empty = document.createElement("li");
         empty.className = "dashboard__filter-empty";
@@ -5883,6 +5959,19 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           });
           actions.append(reply);
           body.append(actions);
+        }
+        /* THE ROW'S TOOLS (ruling 1): a quiet receipt and "Reply in thread" share one control strip
+           that shows on hover or keyboard focus. A tap on a touch screen focuses the row (it is
+           focusable but not a tab stop), which shows the strip the same way. */
+        const quietTools = Array.from(body.children as ArrayLike<HTMLElement>).filter((child) =>
+          (child.className === "dashboard__message-receipt" && child.dataset.receiptQuiet !== undefined) ||
+          child.className === "dashboard__message-actions");
+        if (quietTools.length) {
+          const tools = document.createElement("div");
+          tools.className = "dashboard__message-tools";
+          tools.append(...quietTools);
+          body.append(tools);
+          row.tabIndex = -1;
         }
         row.append(avatar, body);
         window.requestAnimationFrame(() => {
@@ -6343,6 +6432,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     /** Clear every workspace-scoped value when auth identity or availability changes. */
     const resetWorkspaceSessionState = (): void => {
       catchUpGeneration += 1;
+      railOverviewGeneration += 1;
       catchUpData = [];
       homeScroll.clear();
       resetHomeWorkspace();
@@ -8091,6 +8181,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       syncChannelCurrent();
       syncComposerPlacement();
+      syncFeedChrome();
     };
 
     const renderChannelRail = (): void => {
@@ -10408,7 +10499,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       event.preventDefault(); const selection = peopleDialogState.selected; peopleDialogState.selected = null;
       renderDialogRoster(); (document.getElementById(`pd-${selection.type}-${selection.id}`) ?? one<HTMLElement>("#pd-page-title"))?.focus({ preventScroll: true });
     });
-    one<HTMLButtonElement>("[data-close-agent-choice]")?.addEventListener("click", returnToChannel);
     one<HTMLButtonElement>("[data-agent-owner-self]")?.addEventListener("click", openConnect);
     one<HTMLButtonElement>("[data-agent-owner-teammate]")?.addEventListener(
       "click",
@@ -16160,8 +16250,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
   @media (max-width: 52rem) {
     .dashboard__setup,
-    .dashboard__objects-view,
-    .dashboard__host-view {
+    .dashboard__objects-view {
       padding-block-start: calc(var(--feed-band-height, 3.25rem) + var(--s-2));
     }
   }

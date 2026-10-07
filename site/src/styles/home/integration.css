@@ -35,6 +35,25 @@
 /* People & agents is a page (Members.dc.html): its own back link and title, the main column's padding, no side
    column. Agent.dc.html and Members.dc.html draw no workspace header above the page; the phone keeps its top bar. */
 .hm-frame--people .hm-route-pane { padding: 20px clamp(16px, 3vw, 40px) 56px; }
+/* A to-do (Todo.dc.html) is one card-surface page with its own 20 px / clamp(16px, 4vw, 32px) padding, so the pane
+   adds none (todo.css no longer zeroes .hm-todo's padding: the two land together, or it would double). On a phone
+   the page has no top bar, no section nav and no account door; its back link is the way out. */
+.hm-route-pane:has(> .hm-todo) { padding: 0; }
+.hm-frame__main:has(> [data-home-route-pane]:not([hidden]) > .hm-todo) { background: var(--home-card); }
+@media (width <= 52rem) {
+  .hm-frame.hm-frame--todo *:is(.hm-phone-bar, .hm-ws-nav--phone, [data-user-menu-root]) { display: none; }
+}
+/* Add an agent (Add-Agent.dc.html) is a page of its own inside the channel: no stream head or filter row at any width,
+   no side column on desktop, and on a phone no top bar, section nav or account door. The picker's breadcrumb is the
+   way back. Scoped to the route AND the view, so a later route never inherits a stale channel view. */
+live-dashboard[data-channel-view="agent-choice"] .hm-frame--add-agent *:is(.hm-frame__channel > header, .dashboard__feed-toolbar) { display: none; }
+@media (width > 52rem) {
+  live-dashboard[data-channel-view="agent-choice"] .hm-frame.hm-frame.hm-frame.hm-frame--add-agent { grid-template-columns: 15.5rem minmax(0, 1fr); }
+  live-dashboard[data-channel-view="agent-choice"] .hm-frame.hm-frame.hm-frame.hm-frame--add-agent > .hm-frame__side { display: none; }
+}
+@media (width <= 52rem) {
+  live-dashboard[data-channel-view="agent-choice"] .hm-frame--add-agent *:is(.hm-phone-bar, .hm-ws-nav--phone, [data-user-menu-root]) { display: none; }
+}
 @media (width > 52rem) {
   .hm-frame:is(.hm-frame--agent, .hm-frame--people) .hm-ws-header { display: none; }
 }
@@ -46,6 +65,13 @@ h2[tabindex="-1"]:focus-visible { outline: none; box-shadow: none; }
 .hm-frame__main [data-home-channel-menu] { min-inline-size: 0; }
 /* The channel line is a slim toolbar (Space.dc.html has none): view switch, Live, updates, refresh. */
 .hm-frame__main .hm-frame__channel > header { min-block-size: 48px; padding: 2px 16px 0; }
+/* Ruling 2 (Quiet forms): the view switch, filters and refresh live in the ⋯ menu; these rows return only
+   while they say something (a channel, a filter, an unresolved address). LiveDashboard sets the attribute. */
+.hm-frame[data-feed-quiet] .hm-frame__channel > header,
+.hm-frame[data-feed-quiet] .dashboard__feed-toolbar { display: none; }
+/* The channel is a two-row grid (head, then body). With the head hidden the body would auto-place into the
+   head's auto row and stop at its content, so the body owns the 1fr row whether or not the head shows. */
+.hm-frame__channel > .dashboard__channel-body { grid-row: 2; }
 .hm-frame__channel > header > [data-home-channel-menu]:not([hidden]) + div { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); }
 @media (width > 52rem) and (width < 64rem) {
   .hm-frame.hm-frame.hm-frame { grid-template-columns: 15.5rem minmax(0, 1fr); }
