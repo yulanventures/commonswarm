@@ -982,7 +982,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { renderCatchUp as buildCatchUp } from "../../lib/home-catchup";
   import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes } from "../../lib/home-focus";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
-    overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, catchUpRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
+    overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
   import { myWorkspaces, homeOverview, homeOverviewAsks, homeWorkingOn, feed } from "../../lib/commonswarm";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
@@ -1361,6 +1361,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     let homePeopleReadState: HomeReadState = "pending";
     const homeScroll = new Map<string, number>();
     const homeOverviewCounts = new Map<string, number | null>();
+    let railOverviewGeneration = 0;
 
     let agents: (Agent & { work?: AgentWorkStatus })[] = [];
     let members: Member[] = [];
@@ -4322,8 +4323,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const renderHomeRail = (): void => {
       const slot = one<HTMLElement>("[data-home-rail-slot]");
       if (!slot) return;
-      let railPeople = currentHomePeople();
-      if (homeRoute.view === "catchup") railPeople = catchUpRailPeople(catchUpData);
+      /* One rail on every route: everyone in every workspace the overview read, with the workspace in view
+         read first so its own measured states win (home-map homeRailPeople). */
+      const railPeople = homeRailPeople(catchUpData, homeRoute.view === "catchup" ? null : currentHomePeople());
       const vm = mapHomeRail(workspaces, homeRoute, railPeople, sampleMode, homeOverviewCounts);
       const key = homeStructureKey(vm);
       if (key === homeRailKey && slot.childElementCount) {
@@ -4332,10 +4334,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       replaceHomeRegion(slot, "rail", [buildHomeRail(document, vm, {
         navigate: href => navigateHomeHref(href),
         openPerson: id => { void selectHomePerson(id); },
+        /* As for a person: an agent opens in this workspace when it is here, otherwise in the first
+           workspace whose roster names it. */
         openAgent: id => {
-          const workspaceId = homeRoute.view === "catchup"
-            ? catchUpData.find(entry => entry.detail?.people.groups.some(group => group.agents.some(agent => agent.id === id)))?.workspace.id
-            : activeWorkspaceId;
+          const has = (people: HomePeople | undefined): boolean => !!people &&
+            (people.groups.some(group => group.agents.some(agent => agent.id === id)) || people.other.some(agent => agent.id === id));
+          const workspaceId = homeRoute.view !== "catchup" && has(currentHomePeople()) ? activeWorkspaceId
+            : catchUpData.find(entry => has(entry.detail?.people))?.workspace.id ?? null;
           if (workspaceId) void navigateHome({ view: "agent", workspaceId, agentId: id }, "push");
         },
         toggleWorkspaces: expanded => { railExpanded = expanded; },
@@ -4456,6 +4461,23 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         renderHomeCatchUp();
       });
     };
+    /* The rail is the same on every route (shared request, round 3A): Catch up reads the overview for its cards, and
+       any other route reads it once too, so people and agents from the other workspaces are listed there as well.
+       A failed or late read leaves the rail on the workspace in view; Catch up replaces this data with its own. */
+    const loadRailOverview = async (): Promise<void> => {
+      if (sampleMode || homeRoute.view === "catchup" || catchUpData.some(entry => entry.detail)) return;
+      const generation = ++railOverviewGeneration;
+      const viewer = homeViewerId();
+      let overview;
+      try { overview = await homeOverview(); } catch { return; }
+      if (!overview || generation !== railOverviewGeneration || homeViewerId() !== viewer || homeRoute.view === "catchup" ||
+        catchUpData.some(entry => entry.detail)) return;
+      catchUpData = overviewCatchUpData(initialCatchUpData(workspaces), overview, sampleMode);
+      // The workspace in view shows its live needs-you items in the stream; a one-time snapshot count on its rail row would go
+      // stale as they are answered, so it gets none here (Lead decision; the mockup's current row has no badge).
+      for (const entry of catchUpData) if (entry.workspace.id !== activeWorkspaceId) homeOverviewCounts.set(entry.workspace.id, homeNeedsYouCount(entry));
+      renderHomeRail();
+    };
     const homePaneMessage = (heading: string, detail: string, homeLink?: { label: string; href: string }): void => {
       const slot = one<HTMLElement>("[data-home-route-pane]");
       if (!slot) return;
@@ -4555,6 +4577,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       if (navigation !== homeNavigation) return;
       renderHomeRail(); renderHomeShell(); applyHomePane(); focusHomeView();
+      void loadRailOverview();
       renderChannelRail();
       if (scroll) scroll.scrollTop = homeScroll.get(route.workspaceId) ?? 0;
       if (route.view === "chat" && route.messageId) {
@@ -6409,6 +6432,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     /** Clear every workspace-scoped value when auth identity or availability changes. */
     const resetWorkspaceSessionState = (): void => {
       catchUpGeneration += 1;
+      railOverviewGeneration += 1;
       catchUpData = [];
       homeScroll.clear();
       resetHomeWorkspace();
