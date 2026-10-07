@@ -6,6 +6,7 @@ import { createInteractionHandler } from "../src/interactions.js";
 import { createAdminInteractionHandler, createResourceInteractionHandler } from "../src/admin-interactions.js";
 import { adminDigest, createAdminConsentService } from "../src/admin-consent.js";
 import { renderAdminConsentPage } from "../src/admin-interaction-page.js";
+import { AdminTransactionCoordinator } from "../src/admin-transaction.js";
 
 const ALICE = "10000000-0000-4000-8000-000000000001";
 const BOB = "10000000-0000-4000-8000-000000000002";
@@ -31,6 +32,39 @@ function request(method = "GET", body, headers = {}) {
 }
 function url(operation = "") { return new URL(`${ORIGIN}/interaction/admin-test${operation}`); }
 
+const measuredRelease = {
+  admin_issuance_enabled: true, legacy_closed: true, auth_contract_version: 2,
+  lane8_evidence_digest: "d".repeat(64), measurement_evidence_ref: "reviewed-step", measured_at: new Date(),
+  approved_edge_release_sha: "a".repeat(40), measured_edge_release_sha: "a".repeat(40),
+  measured_edge_target: `/home/commonswarm/edge/releases/${"a".repeat(40)}`,
+  measured_mount: `/home/commonswarm/edge/releases/${"a".repeat(40)}`,
+  measured_generation: 1, release_generation: 1, measured_artifact_digest: "e".repeat(64),
+  measured_image_digest: `sha256:${"f".repeat(64)}`,
+};
+function issuanceResponse() {
+  const headers = new Map();
+  return { status: 0, statusCode: 200, headers: {}, body: "", headersSent: false, destroyed: false,
+    setHeader(name, value) { headers.set(name.toLowerCase(), value); this.headers[name] = value; },
+    getHeader(name) { return headers.get(name.toLowerCase()); },
+    getHeaderNames() { return [...headers.keys()]; },
+    removeHeader(name) { headers.delete(name.toLowerCase()); delete this.headers[name]; },
+    writeHead(status, extra) { this.status = status; this.statusCode = status;
+      for (const [key, value] of Object.entries(extra ?? {})) this.setHeader(key, value); },
+    write() { return true; }, end(body = "") { this.body += body; }, flushHeaders() {} };
+}
+function openIssuanceCoordinator() {
+  return new AdminTransactionCoordinator({ connect: async () => ({
+    processID: 1,
+    async query(sql) {
+      if (sql === "SELECT session_user AS principal") return { rows: [{ principal: "commonswarm_admin_issuer" }] };
+      if (typeof sql === "string" && sql.includes("admin_cutover_state")) return { rows: [measuredRelease] };
+      if (typeof sql === "string" && sql.includes("migration_checksum_failures")) return { rows: [], rowCount: 0 };
+      return { command: String(sql).split(" ")[0], rows: [], rowCount: 0 };
+    },
+    release() {}, end() {},
+  }) }, { adminIssuanceEnabled: true });
+}
+
 // Fixture supplies stored rows only; policy, receipt checks, manifest creation,
 // summary/CSRF binding and refusal all run through the production service/handler.
 function fixture(scope = "openid offline_access admin:read") {
@@ -55,6 +89,7 @@ function fixture(scope = "openid offline_access admin:read") {
   const state = { session, metadata, verification, approval, details, registered: false,
     parent: { user_id: ALICE, selection_version: 0, oauth_state: "oauth-state" }, receipt: null,
     stages: 0, grants: 0, grantFinds: 0, finishes: 0, completions: 0, cutoverReads: 0, fetches: 0,
+    signIns: 0, gotrueBegins: 0, boundUserId: ALICE,
     cutover: { admin_issuance_enabled: false, legacy_closed: false } };
   const receiptStore = {
     transaction: callback => callback({}),
@@ -84,13 +119,19 @@ function fixture(scope = "openid offline_access admin:read") {
   }
   const provider = { Client: { find: async () => ({ metadata: () => state.metadata }) }, Grant,
     interactionDetails: async () => details,
-    interactionFinished: async () => { state.finishes++; } };
+    interactionFinished: async (_req, _res, result, opts) => {
+      state.finishes++;
+      state.finishedResult = result;
+      state.finishedOpts = opts;
+    } };
   const service = createAdminConsentService({ store: receiptStore, provider,
     fetchMetadata: async () => { state.fetches++; return new Response(JSON.stringify(state.metadata)); },
-    completeInTransaction: async () => { state.completions++; } });
-  const baseStore = { requireSession: async () => session, bindInteraction: async () => ({ user_id: ALICE }),
-    issueConsentToken: async () => ({ token: CSRF, selectionVersion: 0 }) };
-  const handler = createAdminInteractionHandler({ provider, store: baseStore, service, gotrue: {},
+    completeInTransaction: async () => { state.completions++; return "fresh-admin-grant"; } });
+  const baseStore = { requireSession: async () => session, bindInteraction: async () => ({ user_id: state.boundUserId }),
+    issueConsentToken: async () => ({ token: CSRF, selectionVersion: 0 }),
+    beginSignIn: async () => { state.signIns++; } };
+  const handler = createAdminInteractionHandler({ provider, store: baseStore, service,
+    gotrue: { begin: () => { state.gotrueBegins++; return { url: new URL("https://gotrue.example/authorize") }; } },
     workspaceReader: async () => [{ id: WORKSPACE, name: "Selected space" }],
     allowedOrigins: new Set([ORIGIN]), callbackUrl: `${ORIGIN}/oauth/callback/gotrue` });
   const input = () => ({ uid: details.uid, sessionId: SESSION, ownerUserId: ALICE, params: details.params,
@@ -292,9 +333,86 @@ test("admin consent refuses origin/body errors; flags cannot enable completion o
     f.state.cutover = cutover;
     await assert.rejects(f.confirm(selected), { code: "admin_issuance_disabled" });
   }
-  f.state.details.prompt.name = "login";
-  await assert.rejects(f.handler(request(), response(), url()), { code: "admin_issuance_disabled" });
   assert.equal(f.state.grants + f.state.grantFinds + f.state.finishes + f.state.completions, 0);
+});
+
+async function confirmThroughHandler(f, prompt) {
+  f.state.details.prompt.name = prompt;
+  const selected = await f.select();
+  f.provider.interactionFinished = async (_req, res, result, opts) => {
+    f.state.finishes++;
+    f.state.finishedResult = result;
+    f.state.finishedOpts = opts;
+    res.writeHead(303, { location: "/authorize/admin-test" });
+    res.end();
+  };
+  const issued = issuanceResponse();
+  const outcome = await openIssuanceCoordinator().run(issued, () => f.handler(
+    request("POST", { selection_version: selected.parent.selection_version,
+      summary_digest: selected.summary.digest }, { "x-cswarm-csrf": selected.summary.token }),
+    issued, url("/consent")));
+  return { outcome, issued, selected };
+}
+
+test("first-time admin login renders consent and finishes login with consent", async () => {
+  const open = fixture();
+  open.state.details.prompt.name = "login";
+  const openPage = issuanceResponse();
+  const opened = await openIssuanceCoordinator().run(openPage, () => open.handler(request(), openPage, url()));
+  assert.equal(opened.outcome, "committed");
+  assert.equal(openPage.statusCode, 200);
+  assert.match(openPage.body, /Review admin access/u);
+  assert.match(openPage.body, /action="\/interaction\/admin-test\/selection"/u);
+  assert.equal(open.state.finishes, 0);
+
+  const closed = fixture();
+  closed.state.details.prompt.name = "login";
+  await assert.rejects(closed.handler(request(), response(), url()), { code: "admin_issuance_disabled" });
+  assert.equal(closed.state.finishes, 0);
+
+  const stale = fixture();
+  stale.state.details.prompt.name = "login";
+  stale.state.session.authenticated_at = new Date(Date.now() - 301000).toISOString();
+  const staleRes = response();
+  await stale.handler(request(), staleRes, url());
+  assert.equal(staleRes.status, 303);
+  assert.equal(stale.state.gotrueBegins, 1);
+  assert.equal(stale.state.signIns, 1);
+  assert.equal(stale.state.finishes, 0);
+
+  const absent = fixture();
+  absent.state.details.prompt.name = "login";
+  const absentRes = response();
+  await absent.handler(request(), absentRes, url(), undefined, { browser: { id: SESSION, session: {} } });
+  assert.equal(absentRes.status, 303);
+  assert.equal(absent.state.gotrueBegins, 1);
+  assert.equal(absent.state.signIns, 1);
+  assert.equal(absent.state.finishes, 0);
+
+  const loginConfirm = fixture();
+  const loginDone = await confirmThroughHandler(loginConfirm, "login");
+  assert.equal(loginDone.outcome.outcome, "committed");
+  assert.equal(loginConfirm.state.finishes, 1);
+  assert.equal(loginConfirm.state.completions, 1);
+  assert.deepEqual(loginConfirm.state.finishedResult, {
+    login: { accountId: ALICE }, consent: { grantId: "fresh-admin-grant" } });
+  assert.equal(loginConfirm.state.finishedOpts, undefined);
+
+  const consentConfirm = fixture();
+  const consentDone = await confirmThroughHandler(consentConfirm, "consent");
+  assert.equal(consentDone.outcome.outcome, "committed");
+  assert.equal(consentConfirm.state.finishes, 1);
+  assert.deepEqual(consentConfirm.state.finishedResult, { consent: { grantId: "fresh-admin-grant" } });
+
+  const mismatched = fixture();
+  mismatched.state.details.prompt.name = "login";
+  mismatched.state.boundUserId = BOB;
+  await assert.rejects(mismatched.handler(request("POST", { selection_version: 0, mode: "granular",
+    scope_names: ["admin:read"], workspace_ids: [] }), response(), url("/selection")),
+    { code: "authentication_required" });
+  await assert.rejects(mismatched.handler(request("POST", { selection_version: 0, summary_digest: "0".repeat(64) }),
+    response(), url("/consent")), { code: "authentication_required" });
+  assert.equal(mismatched.state.finishes, 0);
 });
 
 test("resource dispatcher sends only scalar admin to its separate handler", async () => {

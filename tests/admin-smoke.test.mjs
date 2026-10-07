@@ -17,6 +17,9 @@ const CLIENT = 'https://commonswarm.com/oauth/c1-smoke/client.json';
 const REDIRECT = 'https://commonswarm.com/oauth/c1-smoke/callback';
 const SCOPE = 'admin:read workspaces:create seats:create seats:revoke';
 const SCOPES = SCOPE.split(' ');
+const resourceUrl = new URL(RESOURCE);
+const resourceMetadataInsertionPath = `/.well-known/oauth-protected-resource${resourceUrl.pathname}`;
+const resourceMetadataSuffixPath = `${resourceUrl.pathname}/.well-known/oauth-protected-resource`;
 const hash = v => createHash('sha256').update(v).digest('base64url');
 const grantId = '11111111-1111-4111-8111-111111111111';
 const ownerId = '22222222-2222-4222-8222-222222222222';
@@ -82,9 +85,12 @@ async function exercise(config = {}) {
       if (req.method === 'GET') {
         if (req.url === '/.well-known/oauth-authorization-server') return emit(res, 200, { issuer: ISSUER,
           authorization_endpoint: `${ISSUER}/authorize`, token_endpoint: `${ISSUER}/token`, jwks_uri: `${ISSUER}/jwks`,
-          code_challenge_methods_supported: ['S256'], dpop_signing_alg_values_supported: ['ES256'] });
-        if (req.url === '/admin/.well-known/oauth-protected-resource') return emit(res, 200, { resource: RESOURCE, authorization_servers: [ISSUER], scopes_supported: SCOPES });
-        if (req.url === '/jwks') return emit(res, 200, { keys: [jwk] });
+          code_challenge_methods_supported: ['S256'], dpop_signing_alg_values_supported: ['ES256'] },
+          config.discoveryContentType ? { 'content-type': config.discoveryContentType } : {});
+        if (req.url === resourceMetadataInsertionPath) return emit(res, 200, { resource: RESOURCE, authorization_servers: [ISSUER], scopes_supported: SCOPES });
+        if (req.url === resourceMetadataSuffixPath) return emit(res, 404, { error: 'not_found' });
+        if (req.url === '/jwks') return emit(res, 200, { keys: [jwk] },
+          { 'content-type': config.jwksContentType ?? 'application/jwk-set+json; charset=utf-8' });
         throw new Error('unexpected_get');
       }
       check(['/token', '/admin'].includes(req.url) && req.method === 'POST', 'unexpected_request');
@@ -216,7 +222,9 @@ async function exercise(config = {}) {
     await handoff;
     const text = await readFile(paths.receipt, 'utf8'), receipt = JSON.parse(text);
     if (fencedRunId) assert.equal(receipt.run_id, fencedRunId, 'fence carried a different run id than the receipt');
-    const modes = { directory: (await stat(dir)).mode & 0o777, authorize: (await stat(paths.authorize)).mode & 0o777, callback: callbackMode,
+    let authorizeMode;
+    try { authorizeMode = (await stat(paths.authorize)).mode & 0o777; } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const modes = { directory: (await stat(dir)).mode & 0o777, ...(authorizeMode !== undefined ? { authorize: authorizeMode } : {}), callback: callbackMode,
       receipt: (await stat(paths.receipt)).mode & 0o777, ...(config.fence && handledFence ? { fence: (await stat(paths.fence)).mode & 0o777 } : {}) };
     // Check raw artifacts/output, including arbitrary upstream strings, JWTs,
     // PKCE, code, email, full identifiers and state. No projection self-test.
@@ -351,6 +359,53 @@ test('printed CIMD metadata matches the independently pinned lane-11 fixture byt
   assert.equal(Object.hasOwn(metadata, 'scope'), false, 'admin scopes belong to the resource authorization request');
   assert.equal(metadata.dpop_bound_access_tokens, true);
   assert.equal(metadata.dpop_signing_alg, 'ES256', 'AS admin verification reads this algorithm field');
+});
+
+function w4AdminMetadataMatcherPath() {
+  const api = readFileSync(new URL('../deploy/supabase-stack/commonswarm-api.caddy', import.meta.url), 'utf8');
+  const plan = readFileSync(new URL('../docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md', import.meta.url), 'utf8');
+  const cand = plan.split('\n```sh\n').find(b => b.startsWith('# step: ai-w4-caddy-candidate\n'));
+  assert.ok(cand, 'ai-w4-caddy-candidate block');
+  const snippet = /snippet='''\n([\s\S]*?)\n'''/.exec(cand)?.[1];
+  assert.ok(snippet, 'W4 Caddy snippet');
+  const anchor = '\t@edge_functions path /functions/v1 /functions/v1/*';
+  assert.equal(api.split(anchor).length - 1, 1, 'API Caddy template has one edge_functions anchor');
+  const installed = snippet + api.replace(anchor, '\timport admin_resource_active\n\n' + anchor);
+  const path = /@admin_metadata \{\n\s+method GET\n\s+path (\S+)/.exec(installed)?.[1];
+  assert.ok(path, '@admin_metadata matcher path');
+  return path;
+}
+
+test('JWKS application/jwk-set+json is accepted; the same type on a non-jwks JSON endpoint is not', async () => {
+  const ok = await exercise();
+  assert.equal(ok.exitCode, 0);
+  const bad = await exercise({ discoveryContentType: 'application/jwk-set+json; charset=utf-8' });
+  assert.equal(bad.exitCode, 1);
+  assert.equal(bad.receipt.failed_step, 'discovery');
+  assert.equal(bad.receipt.failure_code, 'expected_json');
+});
+
+test('text/html on jwks fails expected_json', async () => {
+  const r = await exercise({ jwksContentType: 'text/html' });
+  assert.equal(r.exitCode, 1);
+  assert.equal(r.receipt.failed_step, 'jwks');
+  assert.equal(r.receipt.failure_code, 'expected_json');
+});
+
+test('resource metadata path matches W4 Caddy @admin_metadata; suffix path is 404', async () => {
+  const caddyPath = w4AdminMetadataMatcherPath();
+  const scriptSrc = readFileSync(script, 'utf8');
+  const pinned = /const RESOURCE = '([^']+)'/.exec(scriptSrc)?.[1];
+  assert.equal(pinned, RESOURCE);
+  const derived = new URL(pinned);
+  assert.equal(`/.well-known/oauth-protected-resource${derived.pathname}`, caddyPath);
+  assert.match(scriptSrc, /new URL\(RESOURCE\)/);
+  assert.doesNotMatch(scriptSrc, /\$\{RESOURCE\}\/\.well-known\/oauth-protected-resource/);
+  const r = await exercise();
+  assert.equal(r.exitCode, 0);
+  const metadataGets = r.attempts.filter(a => a.method === 'GET' && String(a.path).includes('oauth-protected-resource'));
+  assert.deepEqual(metadataGets.map(a => a.path), [caddyPath]);
+  assert.equal(r.attempts.filter(a => a.path === resourceMetadataSuffixPath).length, 0);
 });
 
 test('secret window: without the test preload the executable refuses an anvil-secret stage outside /private/tmp', () => {

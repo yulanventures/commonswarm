@@ -3,6 +3,7 @@ import { ClientError, InteractionStateError } from "./client-error.js";
 import { bindingFromDetails, ensureSession, identity, readBody, respond } from "./interactions.js";
 import { ADMIN_RESOURCE } from "./admin-policy.generated.js";
 import { AdminConsentError, requireFreshAdminSession } from "./admin-consent.js";
+import { effectiveAdminGate } from "./admin-gate.js";
 import { renderAdminConsentPage } from "./admin-interaction-page.js";
 
 export function createResourceInteractionHandler({ mcpHandler, adminHandler }) {
@@ -64,9 +65,10 @@ export function createAdminInteractionHandler({ provider, store, service, gotrue
         return true;
       }
       if (details.prompt?.name === "login") {
-        throw new AdminConsentError("admin_issuance_disabled", 503);
+        if (await effectiveAdminGate() !== "open") throw new AdminConsentError("admin_issuance_disabled", 503);
+      } else if (details.prompt?.name !== "consent") {
+        throw new AdminConsentError("invalid_request", 400);
       }
-      if (details.prompt?.name !== "consent") throw new AdminConsentError("invalid_request", 400);
       if (result.receipt) {
         if (result.receipt.consumed_at != null ||
             result.receipt.verification_version !== result.policy.verification.verification_version) {
@@ -88,7 +90,8 @@ export function createAdminInteractionHandler({ provider, store, service, gotrue
       if (error.code !== "origin_forbidden") throw error;
       throw new AdminConsentError("origin_forbidden");
     }
-    if (details.prompt?.name !== "consent" || bound.user_id !== input.ownerUserId) {
+    if ((details.prompt?.name !== "login" && details.prompt?.name !== "consent")
+        || bound.user_id !== input.ownerUserId) {
       throw new AdminConsentError("authentication_required");
     }
     const parsed = context?.parsed ?? await readBody(request, maxBodyBytes, bodyReadTimeoutMs);
@@ -109,7 +112,10 @@ export function createAdminInteractionHandler({ provider, store, service, gotrue
       return true;
     }
     const grantId = await service.confirm(input, body);
-    await provider.interactionFinished(request, response, { consent: { grantId } });
+    const finished = details.prompt?.name === "login"
+      ? { login: { accountId: browser.session.user_id }, consent: { grantId } }
+      : { consent: { grantId } };
+    await provider.interactionFinished(request, response, finished);
     return true;
   };
 }

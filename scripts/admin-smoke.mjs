@@ -114,8 +114,8 @@ function endpoint(value) {
   demand(url.origin === ISSUER && !url.search && !url.hash && !url.username && !url.password, 'unexpected_endpoint');
   return url.href;
 }
-async function boundedJson(response) {
-  demand(response.headers.get('content-type')?.split(';')[0].trim() === 'application/json', 'expected_json');
+async function boundedJson(response, mediaTypes = ['application/json']) {
+  demand(mediaTypes.includes(response.headers.get('content-type')?.split(';')[0].trim()), 'expected_json');
   const reader = response.body?.getReader(); demand(reader, 'missing_response');
   const chunks = []; let size = 0;
   try {
@@ -158,14 +158,14 @@ async function run(o) {
       const input = `${header}.${claims}`;
       return `${input}.${sign('sha256', Buffer.from(input), { key: privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url')}`;
     };
-    const request = async (url, { body, token, protectedRequest = false, until = deadline } = {}) => {
+    const request = async (url, { body, token, protectedRequest = false, until = deadline, jsonMediaTypes } = {}) => {
       for (let attempt = 0; attempt < (protectedRequest ? 2 : 1); attempt++) {
         demand(Date.now() < until, until === deadline ? 'total_timeout' : 'fence_cutoff_passed');
         const response = await fetch(url, { method: body === undefined ? 'GET' : 'POST', body,
           headers: { Accept: 'application/json', ...(body === undefined ? {} : { 'Content-Type': url === `${ISSUER}/token` ? 'application/x-www-form-urlencoded' : 'application/json' }),
             ...(protectedRequest ? { DPoP: proof(url, token, nonces.get(url)) } : {}), ...(token ? { Authorization: `DPoP ${token}` } : {}) },
           redirect: 'error', signal: AbortSignal.timeout(Math.min(o.requestMs, until - Date.now())) });
-        const data = response.status === 204 ? null : await boundedJson(response);
+        const data = response.status === 204 ? null : await boundedJson(response, jsonMediaTypes);
         const nonce = response.headers.get('dpop-nonce');
         if (nonce) { demand(nonce.length <= 512 && /^[A-Za-z0-9_-]+$/.test(nonce), 'invalid_nonce'); nonces.set(url, nonce); }
         const challenged = data?.error === 'use_dpop_nonce' || /error="use_dpop_nonce"/.test(response.headers.get('www-authenticate') ?? '');
@@ -174,15 +174,17 @@ async function run(o) {
       }
       throw new Failure('nonce_retry_failed');
     };
-    const get = async url => { const r = await request(url); demand(r.status === 200, 'unexpected_http_status'); return r.data; };
+    const get = async (url, opts) => { const r = await request(url, opts); demand(r.status === 200, 'unexpected_http_status'); return r.data; };
     const discovery = await step('discovery', () => get(`${ISSUER}/.well-known/oauth-authorization-server`));
     demand(discovery.issuer === ISSUER && discovery.code_challenge_methods_supported?.includes('S256') &&
       discovery.dpop_signing_alg_values_supported?.includes('ES256') && !discovery.require_pushed_authorization_requests, 'discovery_contract');
     const authorizeEndpoint = endpoint(discovery.authorization_endpoint), tokenEndpoint = endpoint(discovery.token_endpoint);
     demand(tokenEndpoint === `${ISSUER}/token`, 'unexpected_token_endpoint');
-    const metadata = await step('resource_metadata', () => get(`${RESOURCE}/.well-known/oauth-protected-resource`));
+    const resourceUrl = new URL(RESOURCE);
+    const metadata = await step('resource_metadata', () => get(`${resourceUrl.origin}/.well-known/oauth-protected-resource${resourceUrl.pathname}`));
     demand(metadata.resource === RESOURCE && metadata.authorization_servers?.includes(ISSUER) && SCOPES.every(s => metadata.scopes_supported?.includes(s)), 'resource_contract');
-    const jwks = await step('jwks', () => get(endpoint(discovery.jwks_uri)));
+    const jwks = await step('jwks', () => get(endpoint(discovery.jwks_uri),
+      { jsonMediaTypes: ['application/json', 'application/jwk-set+json'] }));
     demand(Array.isArray(jwks.keys) && jwks.keys.length <= 32, 'invalid_jwks');
     let claims, tokens, grant;
     const validateTokens = value => {

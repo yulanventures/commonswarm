@@ -185,3 +185,94 @@ test("pinned provider HTTP completion/code/refresh can be buffered without an up
     assert.ok(rotated.refresh_token !== initial.refresh_token, "real provider rotation must produce a successor");
   } finally { await fixture.close(); }
 });
+
+// admin-http continuation is not in this harness: it reads Interaction artifacts
+// and admin_grant_bindings from Postgres and prepareContinuation requires a
+// consumed receipt plus orchestration rows. This file uses the memory adapter.
+// The unit finish payload (login + consent) is in admin-consent.test.js.
+test("first-time admin authorize with no session finishes login and consent together and resumes to a code", async () => {
+  const keys = await generateKeyPair("ES256", { extractable: true });
+  const dpop = await generateKeyPair("ES256", { extractable: true });
+  const publicJwk = await exportJWK(dpop.publicKey), jkt = await calculateJwkThumbprint(publicJwk);
+  const client = `https://client.example/${randomUUID()}`, redirect = "https://client.example/callback";
+  const verifier = "first-login-consent-verifier-0123456789abcdef";
+  const provider = createSpikeProvider({ adapter: createAtomicMemoryAdapter(),
+    metadata: { client_id: client, application_type: "web", grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"], redirect_uris: [redirect], token_endpoint_auth_method: "none",
+      id_token_signed_response_alg: "ES256", dpop_bound_access_tokens: true, dpop_signing_alg: "ES256" },
+    jwk: { ...await exportJWK(keys.privateKey), alg: "ES256", use: "sig", kid: "first-login-consent" },
+    extraTokenClaims: async (_ctx, token) => ({ grant_id: token.grantId }), jwtCustomizer: async () => {} });
+  const callback = provider.callback();
+  let finishes = 0, lastFinish, lastPrompt;
+  const fixture = await serverFixture(async (req, res) => {
+    if (req.url.startsWith("/interaction/")) {
+      const details = await provider.interactionDetails(req, res);
+      lastPrompt = details.prompt.name;
+      if (req.method === "GET") {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end('<form action="/interaction/selection">admin consent</form>');
+        return;
+      }
+      if (req.url.includes("/selection")) {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end('<form action="/interaction/consent">review selection</form>');
+        return;
+      }
+      const grant = new provider.Grant({ accountId: "first-owner", clientId: client });
+      grant.addOIDCScope("openid offline_access"); grant.addResourceScope(ADMIN, "admin:read");
+      lastFinish = { login: { accountId: "first-owner" }, consent: { grantId: await grant.save() } };
+      finishes++;
+      await provider.interactionFinished(req, res, lastFinish);
+      return;
+    }
+    await callback(req, res);
+  });
+  const cookies = new Map();
+  async function request(path, method = "GET") {
+    const headers = { host: new URL(ISSUER).host, "x-forwarded-host": new URL(ISSUER).host,
+      "x-forwarded-proto": "https", accept: "application/json",
+      cookie: [...cookies].map(([name, value]) => `${name}=${value}`).join("; ") };
+    if (method === "POST") headers["content-type"] = "application/x-www-form-urlencoded";
+    const response = await fetch(new URL(path, fixture.url),
+      { method, headers, body: method === "POST" ? new URLSearchParams() : undefined, redirect: "manual" });
+    for (const cookie of response.headers.getSetCookie()) {
+      const pair = cookie.split(";", 1)[0], at = pair.indexOf("="); cookies.set(pair.slice(0, at), pair.slice(at + 1));
+    }
+    return response;
+  }
+  try {
+    const authorize = new URL("/authorize", ISSUER);
+    for (const [name, value] of Object.entries({ client_id: client, redirect_uri: redirect, response_type: "code",
+      scope: "openid offline_access admin:read", resource: ADMIN, dpop_jkt: jkt,
+      code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256" })) {
+      authorize.searchParams.set(name, value);
+    }
+    const start = await request(authorize.pathname + authorize.search);
+    assert.ok([302, 303].includes(start.status));
+    const interaction = new URL(start.headers.get("location"), ISSUER);
+    assert.match(interaction.pathname, /^\/interaction\//u);
+    const page = await request(interaction.pathname + interaction.search);
+    assert.equal(page.status, 200);
+    assert.match(await page.text(), /admin consent/u);
+    assert.equal(lastPrompt, "login");
+    assert.equal(finishes, 0);
+    const selected = await request(`${interaction.pathname}/selection`, "POST");
+    assert.equal(selected.status, 200);
+    assert.match(await selected.text(), /review selection/u);
+    assert.equal(finishes, 0);
+    const confirmed = await request(`${interaction.pathname}/consent`, "POST");
+    assert.ok([302, 303].includes(confirmed.status));
+    assert.equal(finishes, 1);
+    assert.equal(lastPrompt, "login");
+    assert.equal(lastFinish.login.accountId, "first-owner");
+    assert.equal(typeof lastFinish.consent.grantId, "string");
+    const resume = new URL(confirmed.headers.get("location"), ISSUER);
+    assert.match(resume.pathname, /^\/authorize\//u);
+    const completed = await request(resume.pathname + resume.search);
+    assert.ok([302, 303].includes(completed.status));
+    const callbackUrl = new URL(completed.headers.get("location"), redirect);
+    assert.equal(callbackUrl.origin, new URL(redirect).origin);
+    assert.ok(callbackUrl.searchParams.get("code"), "combined login+consent finish must resume to a code");
+    assert.equal(finishes, 1);
+  } finally { await fixture.close(); }
+});
