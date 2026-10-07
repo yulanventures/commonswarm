@@ -114,7 +114,8 @@
   border: 0;
 }
 
-.hm-new-workspace__purpose legend { margin-block-end: 12px; }
+/* The purpose pills sit 12px under the name field (canvas New-Space), not 28px. */
+.hm-new-workspace.hm-new-workspace .hm-new-workspace__card > .hm-new-workspace__field + .hm-new-workspace__purpose { margin-block-start: 12px; }
 
 .hm-new-workspace__purpose-list {
   display: flex;
@@ -122,35 +123,41 @@
   gap: 8px;
 }
 
-/* A purpose is a tile: the canvas pill (1.5px edge, ink fill when chosen) with its sentence kept
-   under the label, so the choice still says what it does before it is made. The native radio
-   covers the tile, transparent, so the tile is the click and focus target. */
+/* A purpose is the canvas pill: 44px, 0 16px, 999px, a 1.5px edge (an inset ring: a 1.5px border
+   renders 1px), 14px/600; chosen, it is ink-filled with a check. The native radio covers the pill,
+   transparent, so the pill is the click and focus target. */
 .hm-new-workspace__purpose-card {
   position: relative;
-  flex: 1 1 220px;
-  min-inline-size: 0;
+  min-inline-size: 44px;
   min-block-size: 44px;
+  max-inline-size: 100%;
   box-sizing: border-box;
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 12px 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 16px;
   color: var(--home-ink);
   background: transparent;
-  border: 1.5px solid var(--home-field-border);
-  border-radius: 16px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  box-shadow: inset 0 0 0 1.5px var(--home-field-border);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
   cursor: pointer;
 }
 
-.hm-new-workspace__purpose-card:hover { border-color: var(--home-ink); }
+.hm-new-workspace__purpose-card:hover { box-shadow: inset 0 0 0 1.5px var(--home-ink); }
 
 .hm-new-workspace__purpose-card:has(input:checked) {
-  color: var(--home-card);
+  color: var(--home-on-ink);
   background: var(--home-ink);
-  border-color: var(--home-ink);
+  box-shadow: inset 0 0 0 1.5px var(--home-ink);
 }
 
-.hm-new-workspace__purpose-card:has(input:focus-visible) { box-shadow: var(--focus-ring); }
+.hm-new-workspace__purpose-card:has(input:focus-visible) {
+  box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring);
+}
 
 .hm-new-workspace__purpose-card input {
   position: absolute;
@@ -164,34 +171,43 @@
 
 .hm-new-workspace__purpose-card input:disabled { cursor: default; }
 
-.hm-new-workspace__purpose-copy {
-  flex: 1;
-  min-inline-size: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
+.hm-new-workspace__purpose-copy { min-inline-size: 0; }
 
 .hm-new-workspace__purpose-card strong {
   color: inherit;
-  font-size: 15px;
-  font-weight: 600;
-  line-height: 1.3;
+  font-size: inherit;
+  font-weight: inherit;
+  overflow-wrap: anywhere;
 }
 
-.hm-new-workspace__purpose-card small {
-  font-size: 13px;
-  line-height: 1.4;
-  color: var(--home-ink-muted);
-}
-
-.hm-new-workspace__purpose-card:has(input:checked) small { color: var(--home-card); }
-
+/* The check is the chosen pill's non-colour cue; unchosen pills carry none. */
 .hm-new-workspace__purpose-check {
+  display: none;
   flex: none;
   font-weight: 700;
   color: inherit;
 }
+
+.hm-new-workspace__purpose-card:has(input:checked) .hm-new-workspace__purpose-check { display: inline; }
+
+/* What the choices do: quiet lines under the pills (all of them until one is chosen). */
+.hm-new-workspace__purpose-details {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-block-start: 10px;
+}
+
+.hm-new-workspace__purpose-detail {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--home-ink-muted);
+  text-wrap: pretty;
+}
+
+.hm-new-workspace__purpose-detail strong { font-weight: 600; color: var(--home-ink); }
+.hm-new-workspace__purpose-detail[hidden] { display: none; }
 
 /* A section of rows: the 21px heading, then 60px (people) or 64px (agents) rows, 4px apart. */
 .hm-new-workspace__note-block {

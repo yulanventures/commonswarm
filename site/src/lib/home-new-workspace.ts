@@ -138,12 +138,22 @@ export function buildNewWorkspaceForm(
   const purposeField = doc.createElement("fieldset");
   const purposeChoices = newWorkspacePurposeChoices(vm);
   purposeField.className = "hm-new-workspace__purpose";
+  /* The canvas draws the choices as compact pills right under the name, with no heading between:
+     the legend stays the fieldset's accessible name, visually hidden. */
   const purposeLegend = doc.createElement("legend");
+  purposeLegend.className = "visually-hidden";
   purposeLegend.textContent = purposeChoices.legend;
   purposeField.append(purposeLegend);
 
   const purposeList = doc.createElement("div");
   purposeList.className = "hm-new-workspace__purpose-list";
+  /* What each choice does, outside the pills: every line until one is chosen, then the chosen one. */
+  const purposeDetails = doc.createElement("div");
+  purposeDetails.className = "hm-new-workspace__purpose-details";
+  const details: HTMLElement[] = [];
+  const showDetails = (chosen: string | null): void => {
+    for (const line of details) line.hidden = chosen !== null && line.dataset.createPurposeDetail !== chosen;
+  };
 
   for (const option of purposeChoices.options) {
     const card = doc.createElement("label");
@@ -155,23 +165,36 @@ export function buildNewWorkspaceForm(
     input.value = option.value;
     input.checked = purposeChoices.value === option.value;
     input.disabled = Boolean(option.disabled);
+    const detailId = `hm-new-workspace-purpose-${option.value}`;
+    input.setAttribute("aria-describedby", detailId);
     input.addEventListener("change", () => {
-      if (input.checked) callbacks.onPurposeSelect(option.value);
+      if (!input.checked) return;
+      showDetails(option.value);
+      callbacks.onPurposeSelect(option.value);
     });
+    const check = doc.createElement("span");
+    check.className = "hm-new-workspace__purpose-check";
+    check.setAttribute("aria-hidden", "true"); check.textContent = "✓";
     const copy = doc.createElement("span");
     copy.className = "hm-new-workspace__purpose-copy";
     const strong = doc.createElement("strong");
     strong.textContent = option.label;
-    const small = doc.createElement("small");
-    small.textContent = option.hint ?? "";
-    copy.append(strong, small);
-    const check = doc.createElement("span");
-    check.className = "hm-new-workspace__purpose-check";
-    check.setAttribute("aria-hidden", "true"); check.textContent = "✓";
-    card.append(input, copy, check);
+    copy.append(strong);
+    card.append(input, check, copy);
     purposeList.append(card);
+
+    const detail = doc.createElement("p");
+    detail.className = "hm-new-workspace__purpose-detail";
+    detail.id = detailId;
+    detail.dataset.createPurposeDetail = option.value;
+    const detailLabel = doc.createElement("strong");
+    detailLabel.textContent = `${option.label}: `;
+    detail.append(detailLabel, option.hint ?? "");
+    details.push(detail);
+    purposeDetails.append(detail);
   }
-  purposeField.append(purposeList);
+  showDetails(purposeChoices.value);
+  purposeField.append(purposeList, purposeDetails);
   formCard.append(purposeField);
 
   const personalWarning = doc.createElement("p");
