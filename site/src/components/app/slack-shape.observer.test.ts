@@ -329,11 +329,16 @@ test("sidebar counts come from loaded signals and the shared field ships both sc
   );
   assert.ok(builtAssets.includes("dashboard__workspace-summary"));
   assert.ok(builtAssets.includes("dashboard__feed-filters"));
+  /* Home canvas (home-visual 40979db1, DESIGN-MAP palette "page canvas"): the field paints
+     --home-canvas, a semantic token with a light value and a dark value that both dark branches map,
+     so it still follows the scheme. Same emitted-CSS forms as dashboard-tokens.observer.test.ts. */
   assert.match(
     builtAssets,
-    /\.dashboard\{[^}]*background:var\(--bg\)/,
+    /\.dashboard\{[^}]*background:var\(--home-canvas\)/,
     "the dashboard field follows the shared semantic background",
   );
+  assert.match(builtAssets, /:root:not\(\[data-theme=light\]\)\{[^}]*--home-canvas:\s*var\(--d-home-canvas\)/, "the OS dark branch maps the field");
+  assert.match(builtAssets, /\[data-theme=dark\]\{[^}]*--home-canvas:\s*var\(--d-home-canvas\)/, "the forced dark branch maps the field");
   assert.match(builtAssets, /@media\s*\(prefers-color-scheme:\s*dark\)/);
   assert.doesNotMatch(
     dashboard,

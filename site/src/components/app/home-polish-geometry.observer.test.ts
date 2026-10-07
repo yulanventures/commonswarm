@@ -11,6 +11,7 @@ import { findChrome, launchChrome } from "../../../tests/chrome.js";
 type Geometry = {
   error?: string;
   width: number;
+  hasFocus: boolean;
   shellBeforePane: boolean;
   catchupColumns: number;
   sideHidden: boolean;
@@ -59,8 +60,12 @@ test("home polish keeps the header above the view, one rail line, and no heading
       <button type="button" id="action">Reply</button>
       <button type="button" class="admin-indicator" id="admin">Admin clients and history</button>
       <script>${script}</script><script>
-      (() => {
-        const metrics = { width: innerWidth };
+      /* Measure on load. Headless Chrome gives the page focus asynchronously; a script that runs while
+         the document is parsed can measure before that, when no element matches :focus or :focus-visible,
+         so the ring checks below would measure nothing (2026-10-07: CI read "none" for the button ring).
+         --dump-dom waits for load, and the page has focus by then; hasFocus is asserted below. */
+      addEventListener("load", () => {
+        const metrics = { width: innerWidth, hasFocus: document.hasFocus() };
         try {
           const state = (kind, word) => ({ kind, word, detail: "Measured just now", attention: kind !== "idle", fix: { action: null, allowed: false, askWho: null, sentence: "" } });
           const person = { id: "zoe", name: "Zoe", firstName: "Zoe", initials: "Z", you: true, role: "owner" };
@@ -124,7 +129,7 @@ test("home polish keeps the header above the view, one rail line, and no heading
           metrics.themes.push({ theme: "dark", ...chip() });
         } catch (error) { metrics.error = String(error); }
         document.documentElement.dataset.metrics = btoa(unescape(encodeURIComponent(JSON.stringify(metrics))));
-      })();
+      });
       </script></body></html>`, "utf8");
     const chrome = await findChrome();
     for (const width of [1440, 390]) {
@@ -135,6 +140,7 @@ test("home polish keeps the header above the view, one rail line, and no heading
       const geometry = JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as Geometry;
       assert.equal(geometry.error, undefined);
       assert.equal(geometry.width, width);
+      assert.equal(geometry.hasFocus, true, "the ring checks need a focused page");
       assert.equal(geometry.shellBeforePane, true);
       assert.equal(geometry.sideHidden, true);
       assert.equal(geometry.catchupColumns, width === 1440 ? 2 : 1);

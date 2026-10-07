@@ -224,11 +224,13 @@
   font-size: 16px;
   font-weight: 600;
   color: var(--home-ink);
+  overflow-wrap: anywhere;
 }
 
 .hm-new-workspace__row-sub {
   font-size: 13px;
   color: var(--home-ink-muted);
+  overflow-wrap: anywhere;
 }
 
 .hm-new-workspace__note-hint {

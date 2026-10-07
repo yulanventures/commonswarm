@@ -363,10 +363,12 @@ const measure = async (
  * (Phone-Space.dc.html: 1 + 10 + 46 + 10) is 67px, under it. Measured on this build in the lane
  * harness: 111.85px desktop, 67px mobile. The reverted control rests at about 123.85px desktop.
  *
- * Two lines with a tag: the same 111.85 + 20px (the 50px field holds one 23px line; a second
- * grows it to 70) + the To: row ruling 3 now shows for a tag (6px gap + a 23.59px chip line) =
- * 161.44px, so 162. Measured 161.44px desktop, 113.39px mobile; the reverted control is about
- * 166.44px desktop and 138.39px mobile, so the ceiling still separates them.
+ * Two lines: the same 111.85 + 20px (the 50px field holds one 23px line; a second grows it to
+ * 70) = 131.85px, so 132. The To: row that ruling 3 shows for a tag is NOT in this number: the
+ * measurement reads 40ms after the input, before the debounced address pass draws the row, so
+ * the gate is the field's own growth. CI 37683104423 measured 131.84px desktop and 87px mobile;
+ * the reverted control measured 136.84px desktop and 112px mobile, so the ceiling separates them.
+ * ~~162 (with the To: row)~~ was derived from a harness run that waited for the row; CI does not.
  *
  * ~~108 / 130~~, retired the same day: they were the 2026-09-05 build's measurements with the
  * To: row always shown and the label absent, not anything the canvas implies.
@@ -383,7 +385,7 @@ const measure = async (
  * docs/evidence/2026-09-05-composer-to/mobile-measurements.json rather than gated here.
  */
 const COMPOSER_REST_BUDGET_PX = 112;
-const COMPOSER_TWO_LINE_BUDGET_PX = 162;
+const COMPOSER_TWO_LINE_BUDGET_PX = 132;
 
 const geometryFailures = (measurement: PolishMeasurement): string[] => {
   const failures: string[] = [];
@@ -441,7 +443,8 @@ const geometryFailures = (measurement: PolishMeasurement): string[] => {
   }
   /* Two lines of text may grow the box, but not past a third of a phone screen. Measured
    * 2026-09-05 with the To: row: 124.44px desktop, 119.38px mobile; the reverted control is
-   * 147.44px / 150.38px, so the ceiling still separates them. */
+   * 147.44px / 150.38px, so the ceiling still separates them. (Superseded numbers: the current
+   * derivation is at COMPOSER_TWO_LINE_BUDGET_PX.) */
   if (measurement.twoLine.composer.height > COMPOSER_TWO_LINE_BUDGET_PX) {
     failures.push(
       `two-line composer is ${measurement.twoLine.composer.height.toFixed(2)}px, over ` +

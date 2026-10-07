@@ -192,6 +192,9 @@
   overscroll-behavior: contain;
   scrollbar-color: var(--home-rail-raised) transparent;
 }
+/* The last agent's 44px target reaches 2px past its 40px pitch (.hm-rail__agent above); this keeps it inside
+   the list, so a short roster does not become a 2px scroll area. Scoped above `.hm-rail ul { padding: 0 }`. */
+.hm-rail .hm-rail__people-list { padding-block-end: 2px; }
 
 /* 2px between a person and their first agent, as between every row (scoped above `.hm-rail ul { margin: 0 }`). */
 .hm-rail .hm-rail__agents { display: flex; flex-direction: column; gap: 2px; margin-block-start: 2px; }

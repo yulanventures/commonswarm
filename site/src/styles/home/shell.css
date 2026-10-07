@@ -235,15 +235,18 @@
 }
 .hm-phone-bar__people--static { cursor: default; }
 
+/* Phone-Space.dc.html: the H1 sits in the 44 px control row with no padding of its own. Its line box is a whole
+   31 px (28 px x 1.1 = 30.8, rounded up) so the bar is a whole number of pixels at any line count: a fractional
+   bar left the transcript's scroll end 0.84 px off its 12 px rhythm above the composer (CI 37683104423). */
 .hm-phone-bar__title {
   align-self: center;
   margin: 0;
-  padding-block: var(--s-2);
+  padding-block: 0;
   font-family: var(--home-font-display);
   font-size: 28px;
   font-weight: 700;
   letter-spacing: -0.02em;
-  line-height: 1.1;
+  line-height: 31px;
   overflow-wrap: anywhere;
 }
 
