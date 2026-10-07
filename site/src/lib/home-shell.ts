@@ -216,7 +216,6 @@ export function buildWorkspaceHeader(doc: Document, vm: WorkspaceShellVM, callba
     const people = node(doc, "button", "hm-ws-header__people", "People & agents");
     people.type = "button";
     people.dataset.rosterOpen = "";
-    people.setAttribute("aria-haspopup", "dialog");
     people.addEventListener("click", () => callbacks.openPeople());
     actions.append(people);
   }
@@ -295,7 +294,6 @@ export function buildPhoneTopBar(doc: Document, vm: WorkspaceShellVM, callbacks:
   if (doors.people) {
     const button = node(doc, "button", "hm-phone-bar__people");
     button.type = "button";
-    button.setAttribute("aria-haspopup", "dialog");
     button.setAttribute("aria-label", `People & agents: ${capsuleSubline(vm.people)}`);
     button.addEventListener("click", () => callbacks.openPeople());
     people = button;

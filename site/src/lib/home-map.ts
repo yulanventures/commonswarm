@@ -159,7 +159,7 @@ export function homeObjectState(id: string, ids: readonly string[], read: HomeRe
   return ids.includes(id) ? "found" : "missing";
 }
 export function homeViewTitle(route: HomeRoute, workspaceName?: string): string {
-  const labels: Record<HomeRoute["view"], string> = { catchup: "Catch up", new: "New workspace", chat: "Chat", todos: "To-dos", lists: "Lists", files: "Files", wiki: "Wiki", "add-agent": "Add agent", todo: "To-do", agent: "Agent" };
+  const labels: Record<HomeRoute["view"], string> = { catchup: "Catch up", new: "New workspace", chat: "Chat", todos: "To-dos", lists: "Lists", files: "Files", wiki: "Wiki", "add-agent": "Add agent", todo: "To-do", agent: "Agent", people: "People & agents" };
   return [labels[route.view], workspaceName, "CommonSwarm"].filter(Boolean).join(" · ");
 }
 /** On an agent's page the agent's rail row is the current row, not its workspace. */

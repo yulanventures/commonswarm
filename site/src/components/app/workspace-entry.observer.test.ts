@@ -88,9 +88,11 @@ test("the live dashboard offers peer agent and collaborator paths from an empty 
   assert.doesNotMatch(dashboard, /<label for="dashboard-workspace-name">/);
   assert.match(dashboard, /id="dashboard-workspace-name"[\s\S]*?aria-label="Workspace name"/);
   // Manage people moved off the rail into the header "People & agents" dialog
-  // (operator direction 2026-08-19): the member-management surface now lives as a
-  // section inside that dialog, not a rail <details>.
-  assert.match(dashboard, /id="dashboard-roster-title">\s*People &amp; agents/);
+  // (operator direction 2026-08-19), and from that dialog to the People & agents PAGE
+  // (home visual lane, 2026-10-07: the canvas Members artboard). The member-management
+  // section is a page host now, still not a rail <details>.
+  // ~~id="dashboard-roster-title">People &amp; agents~~: the page writes its own title.
+  assert.match(dashboard, /layout: "page"/);
   assert.match(dashboard, /class="dashboard__roster-dialog-members" data-member-details/);
   assert.doesNotMatch(dashboard, /data-member-count/);
   /* The zero-agent state is the setup checklist (redesign 2026-10-04). */

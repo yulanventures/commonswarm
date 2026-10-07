@@ -25,13 +25,19 @@
 .hm-frame__main > :is([data-home-workspace-shell], [data-home-phone-nav]) { flex: none; }
 .hm-route-pane { padding: var(--s-6); }
 .hm-route-pane h1 { overflow-wrap: anywhere; }
-.hm-route-pane :is(button, a):not(.hm-agent *) { display: inline-flex; align-items: center; min-block-size: 44px; padding: var(--s-2); }
+.hm-route-pane :is(button, a):not(.hm-agent *, .pd-page *) { display: inline-flex; align-items: center; min-block-size: 44px; padding: var(--s-2); }
 .hm-route-pane :is(button, a):focus-visible { outline: none; box-shadow: var(--focus-ring); }
 /* Panes (an agent, a to-do, the to-do list) sit on the canvas, as Agent.dc.html and Todo.dc.html do; the
    stream stays on the card surface. An agent's page takes the whole main column (Agent.dc.html has no
    side column) with the source's own padding. */
 .hm-frame__main:has(> [data-home-route-pane]:not([hidden])) { background: var(--home-canvas); }
 .hm-frame--agent .hm-route-pane { padding: 28px clamp(16px, 3vw, 40px) 56px; }
+/* People & agents is a page (Members.dc.html): its own back link and title, the main column's padding, no side
+   column. Agent.dc.html and Members.dc.html draw no workspace header above the page; the phone keeps its top bar. */
+.hm-frame--people .hm-route-pane { padding: 20px clamp(16px, 3vw, 40px) 56px; }
+@media (width > 52rem) {
+  .hm-frame:is(.hm-frame--agent, .hm-frame--people) .hm-ws-header { display: none; }
+}
 /* Navigation moves focus to the view heading. That heading is not a tab stop, so it draws no ring. */
 h1[tabindex="-1"]:focus,
 h1[tabindex="-1"]:focus-visible,
@@ -78,8 +84,8 @@ h2[tabindex="-1"]:focus-visible { outline: none; box-shadow: none; }
   .hm-frame__main .hm-frame__channel > header { min-block-size: 48px; }
   .hm-frame.hm-frame.hm-frame.hm-frame--catchup { grid-template-columns: 15.5rem minmax(0, 1fr); }
   .hm-frame.hm-frame.hm-frame.hm-frame--catchup > .hm-frame__side { display: none; }
-  .hm-frame.hm-frame.hm-frame.hm-frame--agent { grid-template-columns: 15.5rem minmax(0, 1fr); }
-  .hm-frame.hm-frame.hm-frame.hm-frame--agent > .hm-frame__side { display: none; }
+  .hm-frame.hm-frame.hm-frame:is(.hm-frame--agent, .hm-frame--people) { grid-template-columns: 15.5rem minmax(0, 1fr); }
+  .hm-frame.hm-frame.hm-frame:is(.hm-frame--agent, .hm-frame--people) > .hm-frame__side { display: none; }
 }
 @media (width <= 52rem) {
   .hm-frame__main .hm-phone-bar { padding-inline-end: calc(44px + var(--s-3)); }
