@@ -124,8 +124,9 @@
 }
 
 /* A purpose is the canvas pill: 44px, 0 16px, 999px, a 1.5px edge (an inset ring: a 1.5px border
-   renders 1px), 14px/600; chosen, it is ink-filled with a check. The native radio covers the pill,
-   transparent, so the pill is the click and focus target. */
+   renders 1px, so the inline padding is 16px plus the 1.5px border and the label sits where the
+   canvas border box puts it), 14px/600; chosen, it is ink-filled with a check. The native radio
+   covers the pill, transparent, so the pill is the click and focus target. */
 .hm-new-workspace__purpose-card {
   position: relative;
   min-inline-size: 44px;
@@ -135,7 +136,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 0 16px;
+  padding: 0 17.5px;
   color: var(--home-ink);
   background: transparent;
   border: 0;
@@ -426,8 +427,8 @@
 
 .hm-new-workspace__preview .hm-new-workspace__avatar--dashed { border-color: var(--home-rail-soft); }
 
+/* The agent square lines up with the person circle's left edge (canvas). */
 .hm-new-workspace__preview .hm-new-workspace__orb--dashed {
-  margin-inline: 4px;
   border-color: var(--home-rail-soft);
 }
 
@@ -891,8 +892,17 @@
   50% { opacity: 1; }
 }
 
-/* Everything else about the route, one tap away, as the connect panel's last row. */
-.hm-ahp__how { flex: 1 1 100%; min-inline-size: 0; margin-block-start: -6px; }
+/* Everything else about the route, one tap away: a compact toggle at the end of the step title's
+   line (the panel keeps the canvas 80px); open, the steps and notes take the full width under the
+   title. The details box joins the title row, so its summary and its content are row items. */
+.hm-ahp__detail-title > .hm-ahp__how { display: contents; }
+/* The 36px toggle does not make the title row taller than the 21px/1.45 title (canvas 12px to the
+   panel); closed, its empty content row adds no gap. */
+.hm-ahp__detail-title > .hm-ahp__how > summary { margin-inline-start: auto; margin-block: -3px; }
+.hm-ahp__detail-title:has(> .hm-ahp__how:not([open])) { row-gap: 0; }
+.hm-ahp__detail-title > .hm-ahp__how > :not(summary) { flex: 1 1 100%; min-inline-size: 0; }
+.hm-ahp__detail-title > .hm-ahp__how::details-content { flex: 1 1 100%; min-inline-size: 0; }
+.hm-ahp__detail-title > .hm-ahp__how > .hm-ahp__steps { margin-block-start: 8px; }
 
 .hm-ahp__how > summary,
 .hm-ahp__testing > summary {
@@ -929,10 +939,7 @@
 .hm-ahp__how > summary:hover,
 .hm-ahp__testing > summary:hover { text-decoration: underline; text-underline-offset: 2px; }
 
-.hm-ahp__how[open] > summary { margin-block-end: 8px; color: var(--home-ink); }
-
-/* Inside the canvas-filled panel the steps card is the card surface. */
-.hm-ahp__connect .hm-ahp__steps { background: var(--home-card); }
+.hm-ahp__how[open] > summary { color: var(--home-ink); }
 
 .hm-ahp__testing { margin-block-start: 12px; }
 .hm-ahp__testing[open] > summary { margin-block-end: 8px; }
@@ -1017,9 +1024,10 @@
   color: var(--home-ink-muted);
 }
 
-/* The person invite: a quiet line under the lead (the canvas lead's "other people" sentence). */
+/* The person invite: a quiet line at the foot of the page, out of the header (canvas header is the
+   title and the lead only). */
 .hm-ahp__footer {
-  margin: 6px 0 0;
+  margin: 0;
   font-size: 14px;
   color: var(--home-ink-muted);
   text-wrap: pretty;
@@ -1174,6 +1182,11 @@
   color: var(--home-rail-strong);
 }
 
+/* On a phone the app's name takes the title's second line (canvas "Connect your / Muse."). */
+@media (max-width: 30rem) {
+  .hm-invite-connect__title-name { display: block; }
+}
+
 .hm-invite-connect__lead {
   margin: 10px 0 0;
   font-size: 16px;
@@ -1183,7 +1196,7 @@
 }
 
 /* The steps: one ink panel, numbered rows (lime numbers, a 700 heading, a 14px line under it).
-   "Good to know" is the panel's last row, not a block of its own. */
+   The numbered rows only; "Good to know" lives in the action area. */
 .hm-invite-connect__panel {
   margin-block-start: 20px;
   padding: 4px 16px;
@@ -1292,13 +1305,11 @@
 
 .hm-invite-connect .hm-ahp__step > .hm-ahp__button { margin-block-start: 8px; }
 
-.hm-invite-connect__more {
-  padding-block: 6px;
-  border-block-start: 1px solid var(--home-rail-divider);
-}
+/* "Good to know" is a quiet toggle in the action area, under the footnote (no row in the panel). */
+.hm-invite-connect__more { text-align: center; }
 
 .hm-invite-connect__more > summary { min-block-size: 32px; }
-.hm-invite-connect__more[open] { padding-block-end: 12px; }
+.hm-invite-connect__more[open] > .hm-ahp__notes { text-align: start; }
 .hm-invite-connect__more:has(> [data-connect-notes][hidden]) { display: none; }
 
 .hm-invite-connect .hm-ahp__notes {
@@ -1319,7 +1330,7 @@
   display: flex;
   flex-direction: column;
   margin-block-start: auto;
-  padding-block-start: 24px;
+  padding-block-start: 16px;
 }
 
 .hm-invite-connect__footnote {
@@ -1407,9 +1418,9 @@ live-dashboard[data-channel-view="agent-choice"] .hm-frame--add-agent .dashboard
 }
 
 @media (width <= 32rem) {
-  /* On a phone the steps card opens inside the connect panel: give it the panel's width. */
-  .hm-ahp__connect .hm-ahp__steps { margin-inline: -10px; padding-inline: 14px; }
-  .hm-ahp__connect .hm-ahp__step { padding-inline-start: 30px; }
+  /* On a phone the opened steps card is the column's width with a narrower number gutter. */
+  .hm-ahp__how .hm-ahp__steps { padding-inline: 14px; }
+  .hm-ahp__how .hm-ahp__step { padding-inline-start: 30px; }
 }
 
 .hm-pane-title {
