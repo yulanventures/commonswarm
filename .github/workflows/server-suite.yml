@@ -119,8 +119,23 @@ jobs:
         if: matrix.suite == 'server'
         # A fresh volume has no swarm_read schema until db reset runs, so PostgREST fails its first health check.
         run: |
+          set -euo pipefail
+          mkdir -p supabase/.temp
+          printf '%s' v14.18 > supabase/.temp/rest-version
           supabase start --ignore-health-check
           npm run db:reset
+          rest_container_ids="$(docker ps --filter name=supabase_rest --format '{{.ID}}')"
+          if [[ -z "$rest_container_ids" || "$rest_container_ids" == *$'\n'* ]]; then
+            echo "Expected exactly one running PostgREST container" >&2
+            exit 1
+          fi
+          rest_image="$(docker inspect --format '{{.Config.Image}}' "$rest_container_ids")"
+          printf 'PostgREST image: %s\n' "$rest_image"
+          docker image inspect --format 'PostgREST RepoDigests: {{json .RepoDigests}}' "$rest_image"
+          if [[ "$rest_image" != *postgrest:v14.18 ]]; then
+            echo "Expected the running PostgREST image to end with postgrest:v14.18" >&2
+            exit 1
+          fi
       - name: Start the local stack for server repeat
         if: matrix.suite == 'server-repeat'
         # A fresh volume has no swarm_read schema until db reset runs, so PostgREST fails its first health check.
