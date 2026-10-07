@@ -84,7 +84,6 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   </section>
 
   <section class="invite-onramp__panel invite-onramp__card" data-view="review" hidden aria-labelledby="invite-review-title">
-    <a class="invite-onramp__button invite-onramp__button--quiet invite-onramp__exit" href="/app">Not now</a>
     <div class="invite-onramp__pair" aria-hidden="true">
       <span class="invite-onramp__face" data-inviter-initial></span>
       <svg class="invite-onramp__pair-arrow" width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8h11M9 4l4 4-4 4"></path></svg>
@@ -111,24 +110,24 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
           <span class="invite-onramp__tile-orb invite-onramp__tile-orb--empty" aria-hidden="true"></span>
           <span><strong>Just me for now</strong></span>
         </label>
-        {moreAssistants.length > 0 && (
-          <details class="invite-onramp__more">
-            <summary>More apps</summary>
-            <div class="invite-onramp__assistant-list">
-              {moreAssistants.map((host) => (
-                <label class="invite-onramp__choice invite-onramp__assistant">
-                  <input type="radio" name="invite-assistant" value={host.id} data-assistant-host />
-                  <span class="invite-onramp__tile-orb" aria-hidden="true">{host.name.slice(0, 1)}</span>
-                  <span>
-                    <strong>{host.name}</strong>
-                    <small class="visually-hidden">{host.maker}</small>
-                  </span>
-                </label>
-              ))}
-            </div>
-          </details>
-        )}
       </div>
+      {moreAssistants.length > 0 && (
+        <details class="invite-onramp__more">
+          <summary>More apps</summary>
+          <div class="invite-onramp__assistant-list">
+            {moreAssistants.map((host) => (
+              <label class="invite-onramp__choice invite-onramp__assistant">
+                <input type="radio" name="invite-assistant" value={host.id} data-assistant-host />
+                <span class="invite-onramp__tile-orb" aria-hidden="true">{host.name.slice(0, 1)}</span>
+                <span>
+                  <strong>{host.name}</strong>
+                  <small class="visually-hidden">{host.maker}</small>
+                </span>
+              </label>
+            ))}
+          </div>
+        </details>
+      )}
     </fieldset>
 
     <fieldset class="invite-onramp__choices">
@@ -154,16 +153,18 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       <p class="invite-onramp__private"><strong>What stays private:</strong> your other workspaces.</p>
     </div>
 
-    <label class="invite-onramp__consent">
-      <input type="checkbox" data-independent-consent />
-      <span>I'm joining as myself.</span>
-    </label>
-
+    {/* The Join bar stays on the first screen (sticky at the foot of the screen); the consent box
+        rides in it, so the line the Join depends on is always beside the button. */}
     <div class="invite-onramp__actions">
       <p class="invite-onramp__hint" data-review-hint role="alert" hidden></p>
+      <label class="invite-onramp__consent">
+        <input type="checkbox" data-independent-consent />
+        <span>I'm joining as myself.</span>
+      </label>
       <button class="invite-onramp__button" type="button" data-confirm-join><span class="invite-onramp__label">Join <span data-join-workspace-name>Home</span></span></button>
     </div>
     <p class="invite-onramp__fineprint" data-review-expiry></p>
+    <a class="invite-onramp__button invite-onramp__button--quiet invite-onramp__exit" href="/app">Not now</a>
   </section>
 
   <section class="invite-onramp__panel" data-view="joining" hidden role="status" aria-live="polite">
@@ -194,10 +195,6 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     <p class="hm-invite-connect__lead" data-connect-lead hidden>{INVITE_CONNECT_LEAD}</p>
     <div class="hm-invite-connect__panel">
       <ol class="hm-ahp__steps" data-connect-steps hidden></ol>
-      <details class="hm-invite-connect__more">
-        <summary>Good to know</summary>
-        <ul class="hm-ahp__notes" data-connect-notes hidden role="list"></ul>
-      </details>
     </div>
     <div class="invite-onramp__receipt" data-connect-receipt>
       <span class="invite-onramp__receipt-mark" aria-hidden="true">✓</span>
@@ -207,7 +204,13 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       <a class="invite-onramp__button" data-connect-open hidden rel="nofollow">Open assistant</a>
       <a class="invite-onramp__button" href="/app">Open the workspace</a>
       <button class="hm-invite-connect__copy-link" type="button" data-connect-copy hidden>Copy the connect prompt instead</button>
-      <p class="hm-invite-connect__footnote" data-connect-footnote hidden>{INVITE_CONNECT_FOOTNOTE}</p>
+      <div class="hm-invite-connect__foot">
+        <p class="hm-invite-connect__footnote" data-connect-footnote hidden>{INVITE_CONNECT_FOOTNOTE}</p>
+        <details class="hm-invite-connect__more">
+          <summary>Good to know</summary>
+          <ul class="hm-ahp__notes" data-connect-notes hidden role="list"></ul>
+        </details>
+      </div>
     </div>
   </section>
 
@@ -405,7 +408,13 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
         return;
       }
       const first = authEmail?.split("@")[0] ?? "You";
-      if (title) title.textContent = `Connect ${connectHost.name}.`;
+      if (title) {
+        /* "Connect" and the app's name on two lines on a phone (Phone-Connect); the text is unchanged. */
+        const name = document.createElement("span");
+        name.className = "hm-invite-connect__title-name";
+        name.textContent = `${connectHost.name}.`;
+        title.replaceChildren("Connect ", name);
+      }
       if (caption) {
         /* The canvas caption: muted sentence, the agent's identity in strong text. */
         const line = addAgentOwnershipLine(workspaceName, "", connectHost.name);
@@ -863,6 +872,12 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     background: var(--home-rail-bg);
   }
 
+  /* On the review the Join bar covers the foot of the screen: a control that takes focus (Tab, or
+     the role the refused Join focuses) scrolls clear of it instead of under it. */
+  :global(html:has(invite-onramp[data-state="review"])) {
+    scroll-padding-block-end: 13rem;
+  }
+
   .invite-onramp {
     position: relative;
     box-sizing: border-box;
@@ -906,7 +921,8 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     box-shadow: var(--focus-ring);
   }
 
-  /* Phone-Connect pads its bottom 24px; Phone-Join 28px. */
+  /* Phone-Connect pads its bottom 24px; Phone-Join 28px. Connect ends on the footnote's last text
+     line ("Good to know" runs on in that line), so the canvas 24px is the padding itself. */
   .invite-onramp:has(> [data-view="connect"]:not([hidden])) {
     padding-block-end: 24px;
   }
@@ -1026,9 +1042,29 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
      canvas emphasis: a mid outline (5.68 / 7.16 on --home-rail-bg, light / dark) and a lighter
      initial (9.30 / 11.28). Both are mixed with rail-strong, so they stay light in dark mode. */
   .invite-onramp__face--you {
+    position: relative;
     background: transparent;
-    border: 1.5px dashed color-mix(in oklab, var(--home-blue) 60%, var(--home-rail-strong));
     color: color-mix(in oklab, var(--home-blue) 30%, var(--home-rail-strong));
+  }
+
+  /* The 1.5px dashed edges (Phone-Join.dc.html) are drawn as SVG strokes: a CSS dashed 1.5px border snaps to 1px in
+     Chromium, and the canvas paints 3 device pixels at 2x. The dash shape is a mask (a pseudo-element, so setting the
+     initial as text keeps it) and its colour is the token background. The canvas dash is 3px with a 1.5px gap;
+     pathLength fits a whole number of dashes, as the canvas does: 33 round the circle, 21 round the tile. */
+  .invite-onramp__face--you::before,
+  .invite-onramp__tile-orb--empty::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    mask-position: center;
+    mask-repeat: no-repeat;
+    mask-size: 100% 100%;
+    pointer-events: none;
+  }
+
+  .invite-onramp__face--you::before {
+    background: color-mix(in oklab, var(--home-blue) 60%, var(--home-rail-strong));
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Ccircle cx='24' cy='24' r='23.25' fill='none' stroke='black' stroke-width='1.5' pathLength='148.5' stroke-dasharray='3 1.5'/%3E%3C/svg%3E");
   }
 
   .invite-onramp__pair-arrow { flex: none; }
@@ -1139,8 +1175,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   }
 
   .invite-onramp :global(.invite-onramp__button):focus-visible,
-  .invite-onramp__choice input:focus-visible,
-  .invite-onramp__consent input:focus-visible {
+  .invite-onramp__choice input:focus-visible {
     outline: 2px solid transparent;
     box-shadow: var(--focus-ring);
   }
@@ -1239,7 +1274,6 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   [data-view="review"] > .invite-onramp__choices { margin-block-start: 22px; }
   [data-view="review"] > .invite-onramp__choices + .invite-onramp__choices { margin-block-start: 26px; }
   [data-view="review"] > .invite-onramp__facts { margin-block-start: 22px; }
-  [data-view="review"] > .invite-onramp__consent { margin-block-start: 14px; }
 
 
   .invite-onramp__facts {
@@ -1301,14 +1335,16 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     gap: 8px;
   }
 
-  /* A choice is a tile: 14px corners, 1.5px edge, a ring on the right that fills lime when chosen. */
+  /* A choice is a tile: 14px corners, 1.5px edge, a ring on the right that fills lime when chosen.
+     The edge is an inset ring, so the inline padding is the canvas 14px plus the 1.5px border:
+     badges, labels and rings sit where the canvas border box puts them. */
   .invite-onramp__choice {
     min-block-size: 3.5rem;
     box-sizing: border-box;
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 10px 14px;
+    padding: 10px 15.5px;
     color: var(--home-rail-strong);
     background: var(--home-rail-choice);
     border: 0;
@@ -1350,19 +1386,61 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     cursor: pointer;
   }
 
+  /* Chosen: lime fill inside the same muted 1.5px rim (canvas). */
   .invite-onramp__choice input:checked {
     background: var(--home-lime);
-    box-shadow: none;
   }
 
+  /* A custom check in the screen's own tokens (no grey native box): the choice ring's 1.5px muted
+     rim with 6px corners; checked, it fills lime with an ink tick, like a chosen tile's ring. */
   .invite-onramp__consent input {
+    appearance: none;
+    box-sizing: border-box;
+    display: inline-grid;
+    place-content: center;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    box-shadow: inset 0 0 0 1.5px var(--home-rail-soft);
     accent-color: var(--home-lime);
+    cursor: pointer;
+  }
+
+  .invite-onramp__consent input::before {
+    content: "";
+    inline-size: 5px;
+    block-size: 10px;
+    margin-block-start: -2px;
+    box-sizing: border-box;
+    border-inline-end: 2px solid var(--home-lime-ink);
+    border-block-end: 2px solid var(--home-lime-ink);
+    transform: rotate(45deg);
+    visibility: hidden;
+  }
+
+  .invite-onramp__consent input:checked {
+    background: var(--home-lime);
+    box-shadow: inset 0 0 0 1.5px var(--home-lime);
+  }
+
+  .invite-onramp__consent input:checked::before { visibility: visible; }
+
+  .invite-onramp__consent input:focus-visible {
+    outline: 2px solid transparent;
+    box-shadow: inset 0 0 0 1.5px var(--home-rail-soft), var(--focus-ring);
+  }
+
+  .invite-onramp__consent input:checked:focus-visible {
+    box-shadow: inset 0 0 0 1.5px var(--home-lime), var(--focus-ring);
   }
 
   @media (forced-colors: active) {
-    .invite-onramp__choice input {
+    .invite-onramp__choice input,
+    .invite-onramp__consent input {
       appearance: auto;
     }
+
+    .invite-onramp__consent input::before { content: none; }
   }
 
   .invite-onramp__choice > span:not(.invite-onramp__tile-orb) {
@@ -1390,23 +1468,32 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
 
   .invite-onramp__assistant strong { font-size: 16px; }
 
-  /* More apps: a quiet row under the chat apps that opens the coding tools in the same list. */
+  /* More apps: a compact toggle on the picker's label line (no row of its own); open, the coding
+     tools join the list under the chat apps. The label keeps room for it and wraps first. */
+  .invite-onramp__choices--assistant { position: relative; }
+  .invite-onramp__choices--assistant:has(> .invite-onramp__more) > legend { padding-inline-end: 6.5rem; }
+
+  /* The fieldset's content box starts under the legend and its 10px gap: -42px centres the 44px
+     target on the 20px legend line. */
   .invite-onramp__more > summary {
+    position: absolute;
+    inset-block-start: -42px;
+    inset-inline-end: 0;
     min-block-size: 44px;
-    display: flex;
+    display: inline-flex;
     align-items: center;
-    gap: 10px;
-    padding: 0 14px;
-    color: var(--home-rail-soft);
-    font-size: 15px;
-    font-weight: 600;
+    gap: 6px;
+    padding: 0 4px 0 10px;
+    color: var(--home-rail-muted);
+    font-size: 14px;
+    font-weight: 400;
     list-style: none;
-    border-radius: 14px;
+    border-radius: 10px;
     cursor: pointer;
   }
 
   .invite-onramp__more > summary::-webkit-details-marker { display: none; }
-  .invite-onramp__more > summary::after { content: "+"; margin-inline-start: auto; font-weight: 700; }
+  .invite-onramp__more > summary::after { content: "+"; font-weight: 400; }
   .invite-onramp__more[open] > summary::after { content: "−"; }
   .invite-onramp__more > summary:hover { color: var(--home-rail-strong); }
 
@@ -1415,7 +1502,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     box-shadow: var(--focus-ring);
   }
 
-  .invite-onramp__more[open] > summary { margin-block-end: 8px; }
+  .invite-onramp__more > .invite-onramp__assistant-list { margin-block-start: 8px; }
 
   /* Brand-neutral letter tile, in the joiner's (the viewer's) blue. */
   .invite-onramp__tile-orb {
@@ -1435,29 +1522,49 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   }
 
   .invite-onramp__tile-orb--empty {
+    position: relative;
     background: transparent;
     box-shadow: none;
-    border: 1.5px dashed var(--home-line-dashed);
   }
 
+  .invite-onramp__tile-orb--empty::before {
+    background: var(--home-line-dashed);
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'%3E%3Crect x='0.75' y='0.75' width='26.5' height='26.5' rx='8.25' fill='none' stroke='black' stroke-width='1.5' pathLength='94.5' stroke-dasharray='3 1.5'/%3E%3C/svg%3E");
+  }
+
+  @media (forced-colors: active) {
+    .invite-onramp__face--you::before,
+    .invite-onramp__tile-orb--empty::before { forced-color-adjust: none; background: CanvasText; }
+  }
+
+  /* The consent line is secondary text beside a quiet 20px check (Join stays the one strong
+     element); the whole 44px row is the target. */
   .invite-onramp__consent {
     min-block-size: 2.75rem;
     display: flex;
     align-items: center;
-    gap: 12px;
-    color: var(--home-rail-strong);
-    font-weight: 600;
+    gap: 10px;
+    color: var(--home-rail-soft);
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.4;
     cursor: pointer;
   }
 
-  /* The Join pill ends the column, pushed to the bottom of the screen when the page is short
-     (canvas margin-top: auto); no overlay over the choices. */
+  /* The Join bar: the consent box and the Join pill, held at the foot of the first screen (canvas
+     Join at 760 of 844: 28px under it) while the review scrolls under it; at the end of the page it
+     sits in its place. The bar is full-bleed ink, and its top 14px fade the rows that pass under. */
   .invite-onramp__actions {
+    position: sticky;
+    inset-block-end: 0;
+    z-index: 1;
     display: flex;
     flex-direction: column;
     gap: 6px;
     margin-block-start: auto;
-    padding-block-start: 28px;
+    margin-inline: -24px;
+    padding: 14px 24px 28px;
+    background: linear-gradient(to bottom, transparent, var(--home-rail-bg) 14px);
   }
 
   .invite-onramp__actions .invite-onramp__hint { margin-block-end: 4px; }
@@ -1474,15 +1581,13 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     font-size: 18px;
   }
 
-  /* The way out sits on the brand row, right, as a quiet link (where Phone-Connect puts its step
-     label): 44px tall, centred on the 24px row. */
+  /* The way out: a quiet link at the end of the review, under the Join bar and the expiry line. */
   .invite-onramp .invite-onramp__exit {
-    position: absolute;
-    inset-block-start: 46px;
-    inset-inline-end: 0;
+    align-self: center;
     inline-size: auto;
     min-block-size: 44px;
-    padding: 0 4px;
+    margin-block-start: 4px;
+    padding: 0 12px;
     color: var(--home-rail-soft);
     background: transparent;
     box-shadow: none;
@@ -1580,10 +1685,6 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
 
     .invite-onramp .hm-invite-connect__step {
       inset-block-start: 64px;
-    }
-
-    .invite-onramp .invite-onramp__exit {
-      inset-block-start: 54px;
     }
   }
 

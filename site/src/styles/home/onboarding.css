@@ -90,10 +90,13 @@
   box-sizing: border-box;
   inline-size: 100%;
   min-block-size: 52px;
-  padding: 0 16px;
+  /* 1.5px edge as an inset ring (a 1.5px border paints 1px in Chromium); the padding adds the
+     edge back so the text starts where the canvas's 16px padding inside its border puts it. */
+  padding: 0 17.5px;
   color: var(--home-ink);
   background: var(--home-field);
-  border: 1.5px solid var(--home-ink);
+  border: 0;
+  box-shadow: inset 0 0 0 1.5px var(--home-ink);
   border-radius: 14px;
   font: inherit;
   font-size: 18px;
@@ -102,7 +105,7 @@
 
 .hm-new-workspace__field input:focus-visible {
   outline: none;
-  box-shadow: var(--focus-ring);
+  box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring);
 }
 
 .hm-new-workspace__field input:disabled { opacity: 0.6; }
@@ -124,8 +127,9 @@
 }
 
 /* A purpose is the canvas pill: 44px, 0 16px, 999px, a 1.5px edge (an inset ring: a 1.5px border
-   renders 1px), 14px/600; chosen, it is ink-filled with a check. The native radio covers the pill,
-   transparent, so the pill is the click and focus target. */
+   renders 1px, so the inline padding is 16px plus the 1.5px border and the label sits where the
+   canvas border box puts it), 14px/600; chosen, it is ink-filled with a check. The native radio
+   covers the pill, transparent, so the pill is the click and focus target. */
 .hm-new-workspace__purpose-card {
   position: relative;
   min-inline-size: 44px;
@@ -135,7 +139,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 0 16px;
+  padding: 0 17.5px;
   color: var(--home-ink);
   background: transparent;
   border: 0;
@@ -388,8 +392,10 @@
 
 .hm-new-workspace__preview-box {
   margin-block-start: 16px;
-  padding: 18px;
-  border: 1.5px solid var(--home-ink-faint);
+  /* Canvas 18px padding inside a 1.5px border: the edge is an inset ring, so 19.5px. */
+  padding: 19.5px;
+  border: 0;
+  box-shadow: inset 0 0 0 1.5px var(--home-ink-faint);
   border-radius: 18px;
 }
 
@@ -426,8 +432,8 @@
 
 .hm-new-workspace__preview .hm-new-workspace__avatar--dashed { border-color: var(--home-rail-soft); }
 
+/* The agent square lines up with the person circle's left edge (canvas). */
 .hm-new-workspace__preview .hm-new-workspace__orb--dashed {
-  margin-inline: 4px;
   border-color: var(--home-rail-soft);
 }
 
@@ -891,8 +897,25 @@
   50% { opacity: 1; }
 }
 
-/* Everything else about the route, one tap away, as the connect panel's last row. */
-.hm-ahp__how { flex: 1 1 100%; min-inline-size: 0; margin-block-start: -6px; }
+/* Everything else about the route, one tap away: a compact toggle at the end of the step title's
+   line (the panel keeps the canvas 80px); open, the steps and notes take the full width under the
+   title. The details box joins the title row, so its summary and its content are row items. */
+.hm-ahp__detail-title > .hm-ahp__how { display: contents; }
+/* The 36px toggle does not make the title row taller than the 21px/1.45 title (canvas 12px to the
+   panel); closed, its empty content row adds no gap. */
+.hm-ahp__detail-title > .hm-ahp__how > summary { margin-inline-start: auto; margin-block: -3px; }
+.hm-ahp__detail-title:has(> .hm-ahp__how:not([open])) { row-gap: 0; }
+.hm-ahp__detail-title > .hm-ahp__how > :not(summary) { flex: 1 1 100%; min-inline-size: 0; }
+.hm-ahp__detail-title > .hm-ahp__how::details-content { flex: 1 1 100%; min-inline-size: 0; }
+.hm-ahp__detail-title > .hm-ahp__how > .hm-ahp__steps { margin-block-start: 8px; }
+/* Quiet: secondary text beside the 21px title, not a competing action (weight 400, light chevron). */
+.hm-ahp__detail-title > .hm-ahp__how > summary { gap: 6px; font-size: 13px; font-weight: 400; }
+.hm-ahp__detail-title > .hm-ahp__how > summary::before {
+  inline-size: 5px;
+  block-size: 5px;
+  border-inline-end-width: 1.2px;
+  border-block-end-width: 1.2px;
+}
 
 .hm-ahp__how > summary,
 .hm-ahp__testing > summary {
@@ -929,10 +952,7 @@
 .hm-ahp__how > summary:hover,
 .hm-ahp__testing > summary:hover { text-decoration: underline; text-underline-offset: 2px; }
 
-.hm-ahp__how[open] > summary { margin-block-end: 8px; color: var(--home-ink); }
-
-/* Inside the canvas-filled panel the steps card is the card surface. */
-.hm-ahp__connect .hm-ahp__steps { background: var(--home-card); }
+.hm-ahp__how[open] > summary { color: var(--home-ink); }
 
 .hm-ahp__testing { margin-block-start: 12px; }
 .hm-ahp__testing[open] > summary { margin-block-end: 8px; }
@@ -1017,10 +1037,11 @@
   color: var(--home-ink-muted);
 }
 
-/* The person invite: a quiet line under the lead (the canvas lead's "other people" sentence). */
+/* The person invite: a quiet line at the foot of the page, out of the header (canvas header is the
+   title and the lead only). */
 .hm-ahp__footer {
-  margin: 6px 0 0;
-  font-size: 14px;
+  margin: 0;
+  font-size: 13px;
   color: var(--home-ink-muted);
   text-wrap: pretty;
 }
@@ -1031,9 +1052,9 @@
 .hm-ahp__link {
   min-block-size: 44px;
   padding: 0 6px;
-  color: var(--home-ink);
+  color: inherit; /* the footer's muted line: an underlined text action, not a second strong endpoint */
   font: inherit;
-  font-weight: 600;
+  font-weight: 400;
   text-decoration: underline;
   text-underline-offset: 2px;
   background: transparent;
@@ -1042,7 +1063,7 @@
   cursor: pointer;
 }
 
-.hm-ahp__link:hover { color: var(--home-link-hover); }
+.hm-ahp__link:hover { color: var(--home-ink); }
 
 .hm-ahp__status {
   position: absolute;
@@ -1147,22 +1168,29 @@
 
 .hm-invite-connect__caption strong { font-weight: 700; color: var(--home-rail-strong); }
 
+/* The host status is plain secondary text in the caption (canvas: no capsule). Only a problem state
+   ("waiting": nobody can use the route yet) keeps the warning capsule. */
 .hm-invite-connect__status {
-  display: inline-block;
+  display: inline;
   margin: 0;
+  padding: 0;
+  font: inherit;
+  white-space: nowrap;
+  color: var(--home-rail-soft);
+  background: transparent;
+}
+
+.hm-invite-connect__status[data-status="waiting"] {
+  display: inline-block;
   padding: 1px 8px;
   vertical-align: 1px;
   border-radius: var(--radius-pill);
   font-size: 12px;
   font-weight: 700;
   line-height: 1.4;
-  white-space: nowrap;
-  color: var(--home-rail-strong);
-  background: var(--home-rail-raised);
+  color: var(--home-offline-deep);
+  background: var(--home-offline-tint);
 }
-
-.hm-invite-connect__status[data-status="ready"] { color: var(--home-lime-ink); background: var(--home-lime); }
-.hm-invite-connect__status[data-status="untested"] { color: var(--home-offline-deep); background: var(--home-offline-tint); }
 
 .hm-invite-connect .hm-invite-connect__title {
   margin-block-start: 18px;
@@ -1174,6 +1202,11 @@
   color: var(--home-rail-strong);
 }
 
+/* On a phone the app's name takes the title's second line (canvas "Connect your / Muse."). */
+@media (max-width: 30rem) {
+  .hm-invite-connect__title-name { display: block; }
+}
+
 .hm-invite-connect__lead {
   margin: 10px 0 0;
   font-size: 16px;
@@ -1183,7 +1216,7 @@
 }
 
 /* The steps: one ink panel, numbered rows (lime numbers, a 700 heading, a 14px line under it).
-   "Good to know" is the panel's last row, not a block of its own. */
+   The numbered rows only; "Good to know" lives in the action area. */
 .hm-invite-connect__panel {
   margin-block-start: 20px;
   padding: 4px 16px;
@@ -1292,13 +1325,34 @@
 
 .hm-invite-connect .hm-ahp__step > .hm-ahp__button { margin-block-start: 8px; }
 
-.hm-invite-connect__more {
-  padding-block: 6px;
-  border-block-start: 1px solid var(--home-rail-divider);
+/* "Good to know" is a quiet toggle that runs on at the end of the footnote's last line (no row in the
+   panel, no row of its own): the footnote's 13px type in the muted ink and a light chevron, so it reads
+   as part of the footnote and the action stack keeps the canvas height (the primary button stays as low
+   as the 844px screen allows). Its 24px target overhangs the 18.2px text line by 3px each way (negative
+   margin), so it does not open the line. Opened, it takes its own block and the notes follow. */
+.hm-invite-connect__more { display: inline-block; margin-inline-start: 6px; text-align: center; vertical-align: top; }
+.hm-invite-connect__more[open] { display: block; margin-inline-start: 0; }
+/* Closed, the summary is the details' only block (no inner line box, so no strut shifts it): its text
+   then sits on the footnote's line. */
+.hm-invite-connect__more:not([open]) > summary { display: flex; }
+
+.hm-invite-connect__more > summary {
+  min-block-size: 24px;
+  margin-block: -3px;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--home-rail-muted);
 }
 
-.hm-invite-connect__more > summary { min-block-size: 32px; }
-.hm-invite-connect__more[open] { padding-block-end: 12px; }
+.hm-invite-connect__more > summary::before {
+  inline-size: 5px;
+  block-size: 5px;
+  border-inline-end-width: 1.2px;
+  border-block-end-width: 1.2px;
+}
+.hm-invite-connect__more[open] > .hm-ahp__notes { text-align: start; }
 .hm-invite-connect__more:has(> [data-connect-notes][hidden]) { display: none; }
 
 .hm-invite-connect .hm-ahp__notes {
@@ -1319,16 +1373,22 @@
   display: flex;
   flex-direction: column;
   margin-block-start: auto;
-  padding-block-start: 24px;
+  padding-block-start: 16px;
 }
 
-.hm-invite-connect__footnote {
+/* The footnote and "Good to know" share one centred text block, 6px under the copy link (canvas). */
+.hm-invite-connect__foot {
   margin: 6px 0 0;
   font-size: 13px;
   line-height: 1.4;
   text-align: center;
-  color: var(--home-rail-soft);
   text-wrap: pretty;
+}
+
+.hm-invite-connect__footnote {
+  display: inline;
+  margin: 0;
+  color: var(--home-rail-soft);
 }
 
 .hm-invite-connect__copy-link {
@@ -1407,9 +1467,9 @@ live-dashboard[data-channel-view="agent-choice"] .hm-frame--add-agent .dashboard
 }
 
 @media (width <= 32rem) {
-  /* On a phone the steps card opens inside the connect panel: give it the panel's width. */
-  .hm-ahp__connect .hm-ahp__steps { margin-inline: -10px; padding-inline: 14px; }
-  .hm-ahp__connect .hm-ahp__step { padding-inline-start: 30px; }
+  /* On a phone the opened steps card is the column's width with a narrower number gutter. */
+  .hm-ahp__how .hm-ahp__steps { padding-inline: 14px; }
+  .hm-ahp__how .hm-ahp__step { padding-inline-start: 30px; }
 }
 
 .hm-pane-title {

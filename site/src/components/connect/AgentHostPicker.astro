@@ -8,11 +8,11 @@
  * ONE PAGE. The breadcrumb, the title, the app pills and the chosen app's connection stay on
  * screen together: choosing a pill fills in the panel under it (the pills stay, the chosen one
  * ink-filled). The panel is the canvas one: a short summary with an action pill only when the
- * app has a real address (Claude's web app, Cursor's install link), then "How to connect, step by
- * step" inside the same panel (every numbered step, the testing steps and the notes), the one
- * sentence to copy, then the waiting line. A host status other than Ready is quiet text beside
- * the step title. The person invite is a quiet line under the lead, where the canvas lead names
- * other people's agents.
+ * app has a real address (Claude's web app, Cursor's install link); "How to connect, step by
+ * step" is a compact toggle on the step title's line that opens every numbered step, the testing
+ * steps and the notes under that title; then the one sentence to copy and the waiting line. A host
+ * status other than Ready is quiet text beside the step title. The person invite is a quiet line
+ * at the foot of the page, so the header is the canvas title and lead only.
  *
  * NOT BUILT (RULINGS.md 5). The canvas "Name its seat" field: on the hosted route the agent names
  * itself when it joins (the sentence it is told to say); no command lets this page name or hold
@@ -79,12 +79,6 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
         Add one of your agents to <span data-ahp-slot="workspace-plain">this workspace</span>
       </h1>
       <p class="hm-ahp__lead" data-ahp-ownership-line></p>
-      {audience === "setter" && (
-        <p class="hm-ahp__footer">
-          Someone else's agent? Invite the person; they connect it themselves.
-          <button class="hm-ahp__link" type="button" data-agent-owner-teammate>Invite someone</button>
-        </p>
-      )}
     </header>
 
     <section class="hm-ahp__section" aria-labelledby={`hm-ahp-${audience}-which`}>
@@ -138,15 +132,6 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
         <h2 class="hm-ahp__step-title hm-ahp__title-anchor" id={`ahp-${audience}-${host.id}-title`} tabindex="-1">2. Connect {host.name}</h2>
         {host.status && host.status !== "ready" && (
           <span class="hm-ahp__status-note" data-status={host.status}>{AGENT_HOST_STATUS_LABELS[host.status]}</span>
-        )}
-      </div>
-
-      <div class="hm-ahp__connect">
-        <p class="hm-ahp__connect-line">{hostConnectLine(host)}</p>
-        {actionOf(host) && (
-          host.open
-            ? <a class="hm-ahp__connect-action" href={host.open.href} target="_blank" rel="noopener noreferrer">{host.open.label}</a>
-            : <a class="hm-ahp__connect-action" href={linkOf(host)!.href} rel="nofollow">{linkOf(host)!.label}</a>
         )}
         <details class="hm-ahp__how" open={host.status === "waiting" ? true : undefined}>
           <summary>How to connect, step by step</summary>
@@ -220,6 +205,15 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
         </details>
       </div>
 
+      <div class="hm-ahp__connect">
+        <p class="hm-ahp__connect-line">{hostConnectLine(host)}</p>
+        {actionOf(host) && (
+          host.open
+            ? <a class="hm-ahp__connect-action" href={host.open.href} target="_blank" rel="noopener noreferrer">{host.open.label}</a>
+            : <a class="hm-ahp__connect-action" href={linkOf(host)!.href} rel="nofollow">{linkOf(host)!.label}</a>
+        )}
+      </div>
+
       {hostJoinPrompt(host) && (
         <div class="hm-ahp__prompt">
           <p class="hm-ahp__caption">Then say this to {sayTo(host)}</p>
@@ -250,6 +244,13 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
     <p class="hm-ahp__joined-lead" data-ahp-joined-lead>Let it use Lists &amp; docs here, or skip for now.</p>
   </section>
 
+
+  {audience === "setter" && (
+    <p class="hm-ahp__footer">
+      Someone else's agent? Invite the person; they connect it themselves.
+      <button class="hm-ahp__link" type="button" data-agent-owner-teammate>Invite someone</button>
+    </p>
+  )}
 
   <p class="hm-ahp__status" role="status" aria-live="polite" data-ahp-status></p>
 </agent-host-picker>

@@ -41,7 +41,25 @@ export interface ShellCallbacks {
    */
   feedMenu?: () => FeedMenuState | null;
   feed?: (action: FeedMenuAction) => void;
+  /**
+   * The account's entries (lead decision, round 7: on a phone the workspace ⋯ is the one account door, so the
+   * floating account control stands down). Read each time the phone menu opens, from the controls that own them.
+   * Only the phone top bar's menu offers them; without this hook (or with null) the menu has none and the page
+   * keeps its own account control.
+   */
+  account?: () => AccountMenuState | null;
+  accountAction?: (action: AccountMenuAction) => void;
 }
+
+export interface AccountMenuState {
+  /** Who is signed in, as the account menu already says it ("Your account" until known). */
+  signedInAs: string;
+  /** The theme switch's current label ("Theme: System"), or null when the page has no theme switch. */
+  theme: string | null;
+  connectedApps: boolean;
+  signOut: boolean;
+}
+export type AccountMenuAction = "theme" | "connected-apps" | "sign-out";
 
 export type FeedFilterValue = "all" | "broadcast" | "direct-to-you";
 export interface FeedMenuState {
@@ -153,7 +171,7 @@ function compactCapsules(doc: Document, people: readonly CapsuleVM[], limit: num
 }
 
 /** The workspace ⋯ menu: a menu button with Wiki, Workspace settings and Admin access and history. */
-export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callbacks: ShellCallbacks, idPrefix: string): HTMLElement {
+export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callbacks: ShellCallbacks, idPrefix: string, options: { account?: boolean } = {}): HTMLElement {
   const wrap = node(doc, "div", "hm-menu");
   const trigger = node(doc, "button", "hm-menu__trigger", "⋯");
   trigger.type = "button";
@@ -177,6 +195,32 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
   /* THE FEED ENTRIES are rebuilt on every open from the state the page reports, as two radio groups
      (View, Show) and a Refresh item. A choice closes the menu and returns focus to ⋯. */
   const feedEntries: HTMLElement[] = [];
+  /* THE ACCOUNT ENTRIES (phone bar only) follow the workspace doors after a rule, rebuilt on every open the same way. */
+  const accountEntries: HTMLElement[] = [];
+  const accountButtons: HTMLButtonElement[] = [];
+  const syncAccountEntries = () => {
+    for (const entry of accountEntries.splice(0)) entry.remove();
+    accountButtons.splice(0);
+    const state = options.account ? callbacks.account?.() ?? null : null;
+    if (!state || !callbacks.accountAction) return;
+    const built: HTMLElement[] = [];
+    const rule = node(doc, "li", "hm-menu__separator"); rule.setAttribute("role", "separator"); built.push(rule);
+    const who = node(doc, "li", "hm-menu__account", state.signedInAs);
+    who.setAttribute("role", "presentation");
+    built.push(who);
+    const entry = (text: string, action: AccountMenuAction, hook: string) => {
+      const li = node(doc, "li", "hm-menu__entry"); li.setAttribute("role", "none");
+      const button = node(doc, "button", "hm-menu__item", text);
+      button.type = "button"; button.tabIndex = -1; button.setAttribute("role", "menuitem");
+      button.dataset[hook] = "";
+      button.addEventListener("click", () => { close(true); callbacks.accountAction?.(action); });
+      li.append(button); built.push(li); accountButtons.push(button);
+    };
+    if (state.theme) entry(state.theme, "theme", "menuTheme");
+    if (state.connectedApps) entry("Connected apps", "connected-apps", "menuConnectedApps");
+    if (state.signOut) entry("Sign out", "sign-out", "menuSignOut");
+    menu.append(...built); accountEntries.push(...built);
+  };
   const syncFeedEntries = () => {
     for (const entry of feedEntries.splice(0)) entry.remove();
     items.splice(0, items.length, ...staticItems);
@@ -235,6 +279,8 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
   };
   const open = (index: number) => {
     syncFeedEntries();
+    syncAccountEntries();
+    items.push(...accountButtons);
     menu.hidden = false;
     trigger.setAttribute("aria-expanded", "true");
     items[index < 0 ? items.length + index : index]?.focus({ preventScroll: true });
@@ -392,7 +438,11 @@ export function buildPhoneTopBar(doc: Document, vm: WorkspaceShellVM, callbacks:
   }
   people.append(faces);
   bar.append(back, title(doc, vm.name, "hm-phone-title", "hm-phone-bar__title"), people);
-  if (doors.menu) bar.append(buildWorkspaceMenu(doc, vm, callbacks, "hm-phone"));
+  if (doors.menu) {
+    bar.append(buildWorkspaceMenu(doc, vm, callbacks, "hm-phone", { account: true }));
+    /* This ⋯ carries the account entries, so the page's own phone account control stands down (integration.css). */
+    if (callbacks.accountAction && callbacks.account?.()) bar.dataset.homeAccountMenu = "";
+  }
   return bar;
 }
 

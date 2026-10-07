@@ -38,6 +38,8 @@ export async function focusFixture() {
     const navigateHomeHref = () => {}, selectHomePerson = () => {}, navigateHome = () => {}, homeBack = () => {}, openRosterDialog = () => {}, openWorkspaceDetailsDialog = () => {};
     // renderHomeShell's feed-menu dependencies (ruling 2). This fixture has no feed, so the menu offers no feed entries.
     const feedMenuState = () => null, feedMenuAction = () => {}, syncFeedChrome = () => {};
+    // renderHomeShell's phone account entries (round 7). No account here: the phone ⋯ offers none and the door stays.
+    const accountMenuState = () => null, accountMenuAction = () => {};
     // renderHomeRail's joined rail (home-map homeRailPeople). The browser fixture imports catchUpRailPeople, which is
     // homeRailPeople(entries); with the view's people as the first source it is the same rail for every state this
     // fixture reaches (catchUpData is empty on its workspace route). Called lazily, so the vm unit test never needs it.

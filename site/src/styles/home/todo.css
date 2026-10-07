@@ -92,9 +92,11 @@
 .hm-todo-start { margin-block-start: 6px; padding-block-start: 16px; border-block-start: 1px solid var(--home-card-border); min-inline-size: 0; }
 .hm-todo-start legend { float: left; inline-size: 100%; padding: 0; margin: 0 0 10px; font-size: 16px; font-weight: 700; overflow-wrap: anywhere; }
 .hm-todo-start .hm-choice-options { clear: both; gap: 6px; }
+/* The 1.5px edge is the lane's inset stroke (primitives.css): a 1.5px border paints as 1px. Padding adds the edge back
+   (16px + 1.5px) so each pill keeps the canvas's outer width. */
 .hm-todo-start .hm-choice {
-  position: relative; min-block-size: 44px; padding: 0 16px; gap: 0;
-  border: 1.5px solid var(--home-ink); background: transparent; color: var(--home-ink);
+  position: relative; min-block-size: 44px; padding: 0 17.5px; gap: 0;
+  border: 0; box-shadow: inset 0 0 0 1.5px var(--home-ink); background: transparent; color: var(--home-ink);
   font-size: 14px; font-weight: 600;
 }
 .hm-todo-start .hm-choice input { position: absolute; inset: 0; inline-size: 100%; block-size: 100%; margin: 0; opacity: 0; cursor: pointer; }
@@ -103,8 +105,10 @@
 .hm-todo-start .hm-choice:has(input:checked),
 .hm-todo-start .hm-choice[data-selected="true"] { border-color: var(--home-ink); background: var(--home-ink); color: var(--home-card); }
 .hm-todo-start .hm-choice:has(input:disabled) { opacity: 0.6; }
+/* Focus repeats the inset edge before the ring (primitives.css's .hm-choice focus rule would drop it). */
+.hm-todo-start .hm-choice.hm-choice:has(input:focus-visible) { box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring); }
 
-.hm-todo-status { display: grid; gap: 4px; min-block-size: 46px; align-content: start; }
+.hm-todo-status { display: grid; gap: 2.5px; min-block-size: 46px; align-content: start; }
 .hm-todo-status-line { margin: 0; overflow-wrap: anywhere; text-wrap: pretty; }
 .hm-todo-status-more { margin: 0; color: var(--home-ink-muted); font-size: 14px; overflow-wrap: anywhere; }
 /* The padlock line that closes the panel: 16 px icon, 10 px gap, 14 px muted (Todo.dc.html; --home-ink-muted on
@@ -180,13 +184,14 @@ textarea.hm-todo-input { resize: vertical; line-height: 1.45; }
 .hm-comment-form { display: grid; gap: 10px; margin-block-start: 6px; min-inline-size: 0; }
 .hm-comment-field { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; min-inline-size: 0; }
 .hm-comment-field .hm-todo-field { flex: 1 1 200px; }
-/* One line, like the canvas's text input: no resize grip. */
+/* One line, like the canvas's text input: no resize grip. The canvas's 1.5px ink edge is the lane's inset stroke
+   (primitives.css); the padding adds the edge back (12px 16px + 1.5px) so the text sits where the canvas puts it. */
 .hm-comment-input.hm-comment-input {
-  min-block-size: 50px; padding: 12px 16px; border-color: var(--home-ink); border-radius: 14px; resize: none;
+  min-block-size: 50px; padding: 13.5px 17.5px; border: 0; box-shadow: inset 0 0 0 1.5px var(--home-ink); border-radius: 14px; resize: none;
 }
-/* Focus stays inside the canvas's ink edge: the edge thickens to 2.5 px, with no outer ring (Todo.dc.html). It
-   outweighs the view's generic focus rule below (0,4,0 over 0,2,1). */
-.hm-todo .hm-comment-input.hm-comment-input:focus-visible { outline: none; box-shadow: inset 0 0 0 1px var(--home-ink); }
+/* Focus keeps the same 1.5px edge and adds the lane's focus ring outside it, so keyboard focus stays clearly visible.
+   It outweighs the view's generic focus rule below (0,4,0 over 0,2,1). */
+.hm-todo .hm-comment-input.hm-comment-input:focus-visible { outline: none; box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring); }
 /* Post: ink fill, no edge, canvas text (--home-canvas on --home-ink 14.32). */
 .hm-todo .hm-comment-post.hm-comment-post {
   min-block-size: 50px; padding-inline: 24px; border: 0; border-radius: 14px; color: var(--home-canvas); font-size: 15px;

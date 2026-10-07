@@ -581,6 +581,7 @@
   --home-ink-faint: #5c6f63; /* tertiary text, min 4.74 (on canvas). ALSO the outline-button edge on the rail: 3.02 on --home-rail-bg (non-text, needs 3:1) */
   --home-line-dashed: #7b897f; /* dashed placeholder outlines. Non-text, 3.59 on card */
   --home-field-border: #8a978c; /* input / composer edge. Control edge: 3.05 on --home-field, 2.99 on card — it only just meets 1.4.11 on white, so never put it on a darker fill */
+  --home-placeholder: #757575; /* placeholder text in a field (the canvas's native neutral grey). 4.61 on --home-field */
   --home-link-hover: #2f4438; /* link hover ink, 10.26 on card */
 
   /* The rail: an ink column in BOTH modes; it is the identity. Text on --home-rail-bg: */
@@ -648,6 +649,7 @@
        --d-home-ink-muted   on canvas  9.05  card  8.43  soft  7.58
        --d-home-ink-faint   on canvas  6.70  card  6.24  soft  5.61   (rail outline 3.25 on rail-bg)
        --d-home-field-border on card 4.77, on field 5.30
+       --d-home-placeholder on field 5.68, on card 5.10
        rail on --d-home-rail-bg: text 12.52  strong 16.84  muted 7.00  soft 10.32  offline 10.20  lime 14.87
        --d-home-rail-text on --d-home-rail-raised 9.54
        primary pill (card text on ink fill) 15.27
@@ -674,6 +676,7 @@
   --d-home-ink-faint: #93a398;
   --d-home-line-dashed: #6e7f74;
   --d-home-field-border: #7d8e82;
+  --d-home-placeholder: #8f8f8f;
   --d-home-link-hover: #ffffff;
   --d-home-rail-bg: #0b110d;
   --d-home-rail-text: #c9d4cc;
@@ -794,6 +797,7 @@
     --home-ink-faint: var(--d-home-ink-faint);
     --home-line-dashed: var(--d-home-line-dashed);
     --home-field-border: var(--d-home-field-border);
+    --home-placeholder: var(--d-home-placeholder);
     --home-link-hover: var(--d-home-link-hover);
     --home-rail-bg: var(--d-home-rail-bg);
     --home-rail-text: var(--d-home-rail-text);
@@ -911,6 +915,7 @@
   --home-ink-faint: var(--d-home-ink-faint);
   --home-line-dashed: var(--d-home-line-dashed);
   --home-field-border: var(--d-home-field-border);
+  --home-placeholder: var(--d-home-placeholder);
   --home-link-hover: var(--d-home-link-hover);
   --home-rail-bg: var(--d-home-rail-bg);
   --home-rail-text: var(--d-home-rail-text);

@@ -456,7 +456,9 @@ section.pd-page[data-people-page] :is(.pd-page-primary, .pd-page-secondary) {
 }
 section.pd-page[data-people-page] .pd-page-primary { border: 0; background: var(--home-ink); color: var(--home-canvas); }
 section.pd-page[data-people-page] .pd-page-primary:hover { background: var(--home-link-hover); }
-section.pd-page[data-people-page] .pd-page-secondary { border: 1.5px solid var(--home-ink); background: transparent; color: var(--home-ink); }
+/* 1.5px edges use the lane's inset-stroke method (primitives.css): a 1.5px border paints as 1px. Padding adds the edge back. */
+section.pd-page[data-people-page] .pd-page-secondary { padding-inline: 21.5px; border: 0; box-shadow: inset 0 0 0 1.5px var(--home-ink); background: transparent; color: var(--home-ink); }
+section.pd-page[data-people-page] .pd-page-secondary:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring); }
 section.pd-page[data-people-page] .pd-page-secondary:hover { background: var(--home-soft); }
 section.pd-page[data-people-page] .pd-page-search {
   box-sizing: border-box; inline-size: 100%; max-inline-size: 420px; min-block-size: 44px; margin-block-start: 14px; padding: 0 16px;
@@ -491,7 +493,7 @@ section.pd-page[data-people-page] .pd-neutral-avatar { border: 1.5px dashed var(
 section.pd-page[data-people-page] .pd-person-copy { display: flex; flex: 1; flex-wrap: wrap; align-items: baseline; gap: 0 6px; min-inline-size: 0; }
 section.pd-page[data-people-page] .pd-person-name {
   min-inline-size: 0; overflow-wrap: anywhere;
-  color: var(--home-ink); font-family: var(--home-font-display); font-size: 21px; font-weight: 700; line-height: 1.2; letter-spacing: -0.01em;
+  color: var(--home-ink); font-family: var(--home-font-display); font-size: 21px; font-weight: 700; line-height: 1.2; letter-spacing: normal;
 }
 section.pd-page[data-people-page] .pd-you { color: var(--home-ink-muted); font-size: 13px; font-weight: 600; }
 section.pd-page[data-people-page] .pd-person-sub { flex: 1 0 100%; color: var(--home-ink-muted); font-size: 13px; line-height: 1.45; }
@@ -504,31 +506,42 @@ section.pd-page[data-people-page] .pd-person-head .pd-fact-sheet { display: cont
 section.pd-page[data-people-page] .pd-person-head .pd-fact-row { display: flex; align-items: center; gap: 8px; min-block-size: 0; padding: 0; border: 0; }
 section.pd-page[data-people-page] .pd-person-head .pd-fact-row dd { margin: 0; }
 section.pd-page[data-people-page] .pd-person-head .hm-role-select {
-  inline-size: auto; min-block-size: 44px; padding: 0 34px 0 14px; appearance: none;
-  border: 1.5px solid var(--home-line-dashed); border-radius: var(--radius-pill); color: var(--home-ink);
-  /* A 2px chevron drawn from two gradient strokes (no icon file, no raw colour). */
-  background: linear-gradient(45deg, transparent calc(50% - 1px), currentColor calc(50% - 1px), currentColor calc(50% + 1px), transparent calc(50% + 1px)) calc(100% - 20px) 55% / 6px 6px no-repeat,
-    linear-gradient(-45deg, transparent calc(50% - 1px), currentColor calc(50% - 1px), currentColor calc(50% + 1px), transparent calc(50% + 1px)) calc(100% - 14px) 55% / 6px 6px no-repeat, transparent;
-  font-family: var(--home-font-body); font-size: 14px; font-weight: 700;
+  inline-size: auto; min-block-size: 44px; padding: 0 35.5px 0 15.5px; appearance: none;
+  border: 0; box-shadow: inset 0 0 0 1.5px var(--home-field-border); border-radius: var(--radius-pill); color: var(--home-ink);
+  background: transparent; font-family: var(--home-font-body); font-size: 14px; font-weight: 700;
 }
-/* Your own role is the canvas "Owner" badge (5px 12px, 13px, no chevron); it stays the same native select. The 7px
-   transparent top and bottom borders keep a 44px target around the 30px pill (the background stops at the padding box). */
+section.pd-page[data-people-page] .pd-person-head .hm-role-select:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-field-border), var(--focus-ring); }
+/* The canvas chevron: a 12px icon (viewBox 0 0 16 16, 2px round stroke) 8px after the role, 14px inside the edge. A select
+   draws no pseudo-element, so its cell draws it as a mask in the ink token; clicks pass through to the native select. */
+section.pd-page[data-people-page] .pd-person-head .hm-role:not([data-own="true"]) dd:has(> .hm-role-select) { position: relative; }
+section.pd-page[data-people-page] .pd-person-head .hm-role:not([data-own="true"]) dd:has(> .hm-role-select)::after {
+  content: ""; position: absolute; inset-block: 0; inset-inline-end: 15.5px; inline-size: 12px; margin-block: auto; block-size: 12px;
+  background: var(--home-ink); pointer-events: none;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 6l5 5 5-5'/%3E%3C/svg%3E") center / 12px 12px no-repeat;
+}
+section.pd-page[data-people-page] .pd-person-head .hm-role:not([data-own="true"]) dd:has(> .hm-role-select:disabled)::after { background: var(--home-ink-muted); }
+/* Your own role is the canvas "Owner" badge (5px 12px, 13px, no chevron); it stays the same native select. The 7px and
+   8px transparent top and bottom borders keep a 44px target around the 29px pill (the canvas 5px + 18.85px + 5px; the
+   background stops at the padding box; whole-pixel borders, because Chromium snaps a fractional border down). */
 section.pd-page[data-people-page] .pd-person-head .hm-role[data-own="true"] .hm-role-select {
-  box-sizing: border-box; min-block-size: 44px; padding: 5px 12px; border: 0; border-block: 7px solid transparent;
+  box-sizing: border-box; min-block-size: 44px; padding: 5px 12px; border: 0; border-block: 7px solid transparent; border-block-end-width: 8px; box-shadow: none;
   background: var(--home-ink); background-clip: padding-box; color: var(--home-canvas); font-size: 13px; line-height: 1.45;
   field-sizing: content; /* as wide as the chosen role, not the widest option */
 }
+section.pd-page[data-people-page] .pd-person-head .hm-role[data-own="true"] .hm-role-select:focus-visible { box-shadow: var(--focus-ring); }
 section.pd-page[data-people-page] .pd-person-head .hm-role .pd-text-button {
   min-block-size: 44px; padding: 0 16px; border: 1.5px solid var(--home-ink); border-radius: var(--radius-pill);
   background: transparent; color: var(--home-ink); font-size: 14px; font-weight: 700; text-decoration: none; cursor: pointer;
 }
 section.pd-page[data-people-page] .pd-person-head .hm-role .pd-text-button:disabled:not([aria-busy="true"]) { display: none; }
+/* With Save hidden its empty wrapper goes too, so the role pill ends at the card's content edge (no trailing 8px gap). */
+section.pd-page[data-people-page] .pd-person-head .pd-fact-action:has(> .pd-text-button:disabled:not([aria-busy="true"])) { display: none; }
 section.pd-page[data-people-page] .pd-person-head .hm-role .pd-text-button[aria-busy="true"] { border-color: var(--home-card-border); color: var(--home-ink-muted); }
 section.pd-page[data-people-page] .pd-person-head .pd-error { flex: 1 0 100%; order: 9; margin: 0 0 10px; color: var(--home-danger); font-size: 14px; }
 section.pd-page[data-people-page] .pd-person-head > .pd-danger-button,
 section.pd-page[data-people-page] :is(.pd-agent-actions, .pd-invite) .pd-text-button {
   min-block-size: 44px; padding: 0 6px; border: 0; background: transparent; color: var(--home-ink);
-  font-family: var(--home-font-body); font-size: 14px; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; cursor: pointer;
+  font-family: var(--home-font-body); font-size: 14px; font-weight: 600; text-decoration: underline; text-underline-offset: auto; text-decoration-thickness: auto; cursor: pointer;
 }
 section.pd-page[data-people-page] .pd-person-head > .pd-danger-button { color: var(--home-danger); }
 section.pd-page[data-people-page] :is(.pd-agent-actions, .pd-invite) .pd-text-button:hover { color: var(--home-link-hover); }
@@ -551,13 +564,13 @@ section.pd-page[data-people-page] .pd-agent-copy { display: flex; flex: 1; flex-
 section.pd-page[data-people-page] .pd-agent-name-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-inline-size: 0; font-weight: 700; }
 section.pd-page[data-people-page] .pd-agent-name-line strong { color: var(--home-ink); font-weight: 700; }
 section.pd-page[data-people-page] .pd-agent-app { color: var(--home-ink-muted); font-size: 13px; line-height: 1.45; text-wrap: pretty; overflow-wrap: anywhere; }
-section.pd-page[data-people-page] .pd-access-mark { margin-inline-start: 6px; color: var(--home-ink-muted); }
 section.pd-page[data-people-page] .pd-agent-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
 section.pd-page[data-people-page] .pd-pill-link {
-  display: inline-flex; align-items: center; box-sizing: border-box; min-block-size: 44px; padding: 0 16px;
-  border: 1.5px solid var(--home-ink); border-radius: var(--radius-pill); color: var(--home-ink); font-size: 14px; font-weight: 700; text-decoration: none;
+  display: inline-flex; align-items: center; box-sizing: border-box; min-block-size: 44px; padding: 0 17.5px;
+  border: 0; box-shadow: inset 0 0 0 1.5px var(--home-ink); border-radius: var(--radius-pill); color: var(--home-ink); font-size: 14px; font-weight: 700; text-decoration: none;
 }
 section.pd-page[data-people-page] .pd-pill-link:hover { background: var(--home-soft); }
+section.pd-page[data-people-page] .pd-pill-link:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring); }
 section.pd-page[data-people-page] .pd-agent-actions .pd-reconnect {
   padding: 0 16px; border-radius: var(--radius-pill); background: var(--home-offline-deep); color: var(--home-offline-tint);
   font-weight: 700; text-decoration: none; white-space: nowrap;
@@ -567,17 +580,18 @@ section.pd-page[data-people-page] .pd-agent > :is(.pd-receipt, .pd-error) { flex
 section.pd-page[data-people-page] .pd-agent > .pd-receipt { color: var(--home-ink-muted); }
 section.pd-page[data-people-page] .pd-error { color: var(--home-danger); }
 
-/* Agent avatar: 34px square, radius 10, 1.5px owner colour, 14px deep letter; dashed when it needs attention. */
+/* Agent avatar: 34px square, radius 10, 1.5px owner colour (inset stroke, primitives.css method), 14px deep letter.
+   Dashed when it needs attention: a dashed edge cannot be a shadow, so it keeps a real border and drops the shadow. */
 section.pd-page[data-people-page] .pd-orb {
   display: grid; place-items: center; box-sizing: border-box; flex: 0 0 34px; inline-size: 34px; block-size: 34px; margin: 0;
-  border: 1.5px solid var(--home-ink-faint); border-radius: 10px; background: transparent; color: var(--home-ink-muted);
+  border: 0 solid var(--home-ink-faint); box-shadow: inset 0 0 0 1.5px var(--home-ink-faint); border-radius: 10px; background: transparent; color: var(--home-ink-muted);
   font-family: var(--home-font-body); font-size: 14px; font-weight: 700;
 }
-section.pd-page[data-people-page] .pd-orb[data-tint="0"] { border-color: var(--home-blue); background: var(--home-blue-tint); color: var(--home-blue-deep); }
-section.pd-page[data-people-page] .pd-orb[data-tint="1"] { border-color: var(--home-orange); background: var(--home-orange-tint); color: var(--home-orange-deep); }
-section.pd-page[data-people-page] .pd-orb[data-tint="2"] { border-color: var(--home-purple); background: var(--home-purple-tint); color: var(--home-purple-deep); }
-section.pd-page[data-people-page] .pd-orb[data-tint="3"] { border-color: var(--home-teal); background: var(--home-teal-tint); color: var(--home-teal-deep); }
-section.pd-page[data-people-page] .pd-agent[data-attention="true"] .pd-orb { border-style: dashed; }
+section.pd-page[data-people-page] .pd-orb[data-tint="0"] { border-color: var(--home-blue); box-shadow: inset 0 0 0 1.5px var(--home-blue); background: var(--home-blue-tint); color: var(--home-blue-deep); }
+section.pd-page[data-people-page] .pd-orb[data-tint="1"] { border-color: var(--home-orange); box-shadow: inset 0 0 0 1.5px var(--home-orange); background: var(--home-orange-tint); color: var(--home-orange-deep); }
+section.pd-page[data-people-page] .pd-orb[data-tint="2"] { border-color: var(--home-purple); box-shadow: inset 0 0 0 1.5px var(--home-purple); background: var(--home-purple-tint); color: var(--home-purple-deep); }
+section.pd-page[data-people-page] .pd-orb[data-tint="3"] { border-color: var(--home-teal); box-shadow: inset 0 0 0 1.5px var(--home-teal); background: var(--home-teal-tint); color: var(--home-teal-deep); }
+section.pd-page[data-people-page] .pd-agent[data-attention="true"] .pd-orb { border-width: 1.5px; border-style: dashed; box-shadow: none; }
 
 /* Measured status pill: active lime, needs attention amber, the rest quiet. */
 section.pd-page[data-people-page] .pd-status {

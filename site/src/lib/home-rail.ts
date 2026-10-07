@@ -31,6 +31,41 @@ export interface RailOptions {
   /** Where the brand row links. Default: the site home. */
   brandHref?: string;
   workspacesExpanded?: boolean;
+  /** While "New workspace" is open: the name typed so far. The rail shows it as a draft row (display only). */
+  draftWorkspace?: { name: string };
+}
+
+/** The draft row's words: the typed name, or the door's own label while the field is empty. */
+export const RAIL_DRAFT_PLACEHOLDER = "New workspace";
+export function railDraftName(name: string): { text: string; empty: boolean } {
+  const trimmed = name.trim();
+  return trimmed ? { text: trimmed, empty: false } : { text: RAIL_DRAFT_PLACEHOLDER, empty: true };
+}
+
+/** Repaints the draft row's name in place (one keystroke must not rebuild the rail). */
+export function setRailDraftName(root: ParentNode, name: string): void {
+  const label = root.querySelector<HTMLElement>("[data-rail-draft-name]");
+  if (!label) return;
+  const value = railDraftName(name);
+  label.textContent = value.text;
+  label.title = value.text;
+  label.toggleAttribute("data-empty", value.empty);
+}
+
+/** The workspace being started (New-Space.dc.html): the current row, drawn with a dashed lime edge and a "new" marker.
+ *  It is not a link: the workspace does not exist until the form creates it, and the row leaves with the form. */
+function draftRow(doc: Document, name: string): HTMLLIElement {
+  const item = node(doc, "li", "hm-rail__workspace-item");
+  const row = node(doc, "div", "hm-rail__draft");
+  row.dataset.railDraft = "";
+  const label = node(doc, "span", "hm-rail__name");
+  label.dataset.railDraftName = "";
+  const marker = node(doc, "span", "hm-rail__draft-marker", "new");
+  marker.setAttribute("aria-hidden", "true");
+  row.append(icon(doc, "workspace"), label, marker, node(doc, "span", "hm-rail__sr", ", not created yet"));
+  item.append(row);
+  setRailDraftName(item, name);
+  return item;
 }
 
 /**
@@ -135,11 +170,11 @@ function icon(doc: Document, name: "inbox" | "workspace" | "plus"): HTMLElement 
   return mark;
 }
 
-/** The two-shape mark: a lime circle and an outlined rounded square, drawn by rail.css. */
+/** The two-shape mark, the canvas's own SVG geometry (Main.dc.html), drawn by rail.css as two masks: a lime circle and an
+ *  outlined rounded square. */
 function brandMark(doc: Document): HTMLElement {
   const mark = node(doc, "span", "hm-rail__mark");
   mark.setAttribute("aria-hidden", "true");
-  mark.append(node(doc, "span", "hm-rail__mark-dot"), node(doc, "span", "hm-rail__mark-square"));
   return mark;
 }
 
@@ -252,6 +287,7 @@ export function buildHomeRail(doc: Document, vm: HomeRailVM, callbacks: RailCall
     item.append(row);
     list.append(item);
   }
+  if (options.draftWorkspace) list.append(draftRow(doc, options.draftWorkspace.name));
   workspaces.append(workspacesTitle, list);
   const moreLabel = railMoreLabel(overflowCount, expanded);
   if (moreLabel) {

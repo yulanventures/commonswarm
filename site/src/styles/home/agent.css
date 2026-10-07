@@ -88,6 +88,7 @@
 }
 
 .hm-agent__status .hm-status[data-form="pill"] {
+  column-gap: 0;
   font-size: 14px;
 }
 
@@ -100,6 +101,18 @@
 /* The canvas header pill is text only: the measured word and its detail, no status shape (the rail keeps its shapes). */
 .hm-agent__status .hm-status-shape {
   display: none;
+}
+
+/* The canvas pill is one 14px 700 run (word and detail alike); primitives.css sets the shared pill's detail to 400. */
+.hm-agent__status .hm-status[data-form="pill"] .hm-status-detail {
+  font-weight: 700;
+}
+
+/* The canvas joins the measured word and its detail with a middle dot ("Offline · seats empty"). Drawn here only, so the
+   shared status primitive keeps its text on other screens; the empty alternative text keeps screen readers on the words.
+   The dot's own spaces replace the pill's flex gap, so the pill reads as one text run. */
+.hm-agent__status .hm-status[data-form="pill"] .hm-status-detail:not(:empty)::before {
+  content: "\00A0\00B7\00A0" / "";
 }
 
 /* One amber notice for an agent that needs a fix: what happened, what waits, one action. */
@@ -151,6 +164,7 @@
 }
 
 .hm-agent__banner .hm-notice-tone {
+  color: inherit; /* the global strong colour would put a second ink in the amber banner */
   font-weight: 700;
 }
 
@@ -387,8 +401,8 @@
   margin-block: -10px;
   font-weight: 600;
   text-decoration: underline;
-  text-decoration-thickness: 1px;
-  text-underline-offset: 3px;
+  text-decoration-thickness: auto;
+  text-underline-offset: auto;
 }
 
 .hm-agent .hm-queue-title:hover {
@@ -422,6 +436,8 @@
   text-decoration: underline;
   text-underline-offset: 3px;
 }
+/* Not yet is the canvas's "Hold": 14px / 600 with the default underline offset. */
+.hm-agent .hm-queue-row .hm-button[data-queue-action="not-yet"] { text-underline-offset: auto; }
 /* The shared pill's edge is an inset stroke (primitives.css): these text controls drop it and keep the focus ring. */
 .hm-agent .hm-queue-row .hm-button:is([data-queue-action="up"], [data-queue-action="down"], [data-queue-action="not-yet"]) { box-shadow: none; }
 .hm-agent .hm-queue-row .hm-button:is([data-queue-action="up"], [data-queue-action="down"], [data-queue-action="not-yet"]):focus-visible { box-shadow: var(--focus-ring); }
@@ -464,7 +480,7 @@
   margin-top: 2px;
 }
 
-/* Facts: the canvas's first aside card. A 14px introduction, a 14px/600 summary line, then 48px ruled rows
+/* Facts: the canvas's first aside card. A 14px introduction, a 14px/600 summary line, then 49px ruled rows
    (16px/600 label with an optional 13px muted note, 13px/700 value right). Values only; no switch. */
 .hm-agent__facts {
   padding-block-end: 12px;
@@ -495,7 +511,8 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  min-block-size: 48px;
+  /* The canvas row: 48px of content plus its 1px rule (a 49px pitch), with no padding. */
+  min-block-size: 49px;
   border-block-start: 1px solid var(--home-hairline);
 }
 
@@ -508,22 +525,24 @@
 .hm-agent__fact-label {
   flex: 0 1 auto;
   max-inline-size: 75%;
-  padding-block: 6px;
   color: var(--home-ink);
   font-weight: 600;
+  /* The canvas label inherits the 16px body at line-height 1.45 (23.2px). One line sits inside the row's 48px
+     minimum (the 49px pitch with its rule); a wrapped label grows the row by its own lines only. */
+  line-height: 1.45;
 }
 
 .hm-agent__fact-detail {
   color: var(--home-ink-muted);
   font-size: 13px;
   font-weight: 400;
+  line-height: 1.45;
 }
 
 .hm-agent__fact-value {
   flex: none;
   max-inline-size: 40%;
   min-inline-size: 0;
-  padding-block: 6px;
   color: var(--home-ink);
   font-size: 13px;
   font-weight: 700;
@@ -657,7 +676,8 @@
   font-weight: 700;
   text-align: start;
   text-decoration: underline;
-  text-underline-offset: 3px;
+  text-decoration-thickness: auto;
+  text-underline-offset: auto;
   cursor: pointer;
   overflow-wrap: anywhere;
 }

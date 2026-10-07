@@ -454,8 +454,8 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     nameLine.append(chip(doc, agent.status));
     const sentence = agent.status.attention && !model.sample ? agent.status.sentence : "";
     const details = node(doc, "span", "pd-agent-app", sentence || [agent.app, secondary].filter(Boolean).join(" · "));
-    // The canvas name line is the name, then the status pill: the Lists & docs mark sits with the agent's details instead.
-    if (approved) { const mark = node(doc, "span", "pd-access-mark", "▤"); mark.dataset.agentContentAccess = ""; mark.setAttribute("role", "img"); mark.setAttribute("aria-label", "Can use Lists & docs"); mark.title = "Can use Lists & docs"; details.append(mark); }
+    // The canvas row draws no Lists & docs glyph: the disclosure's accessible name above carries "Can use Lists & docs",
+    // and the agent's details (the side card) show the Lists & docs fact.
     copy.append(nameLine, details);
     disclosure.append(orb(doc, agent, tintOf(agent)), copy); row.append(disclosure);
     const notice = noticeFor(agent);
