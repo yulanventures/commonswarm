@@ -1,20 +1,6 @@
-/* Home UI: shell styles. The canvas design (Main.dc.html, Space.dc.html, Phone-Space.dc.html), --home-* tokens only.
-
-   Layout (UI-SPEC 1.1):
-     width >= 64rem        three columns: rail · centre · right column minmax(18rem, 22rem)
-     52rem < width < 64rem rail and centre; the right-column cards become the tab row
-     width <= 52rem        one column: phone top bar (ink), bottom nav (pills on canvas); the rail and right column leave
-
-   Surfaces: Catch up sits on --home-canvas; a workspace's stream sits on --home-card with the right
-   column on --home-canvas behind a --home-card-border rule (Space.dc.html).
-
-   Contrast, measured by the tokens.css header method (same instrument as rail.css), light / dark:
-     --home-ink on --home-card 15.90 / 14.21; on --home-canvas 14.32 / 15.27
-     --home-ink-muted (subline) on --home-card 6.72 / 8.43
-     secondary pill: ink text and 1.5px ink edge on card 15.90 / 14.21
-     phone bar: --home-rail-strong title on --home-rail-bg 14.32 / 16.84
-     phone nav: current = --home-card on --home-ink 15.90 / 15.27; others --home-ink on --home-canvas 14.32 / 15.27
-   The current nav item is also 700 weight and carries aria-current, so it is never colour alone. */
+/* Home shell: existing desktop columns and phone navigation geometry.
+   Surfaces and text consume the neutral home palette; light/dark ratios live in tokens.css.
+   The current nav item keeps 700 weight and aria-current. */
 
 /* Base type for the whole app frame. Surfaces set their own sizes on top of this. */
 .hm-frame,
@@ -166,13 +152,13 @@
 /* The feed's entries in ⋯ (ruling 2): two labelled radio groups and Refresh, then a rule before the workspace doors. */
 .hm-menu__group { display: grid; margin: 0; padding: 0; list-style: none; }
 .hm-menu__group-label { padding: 8px 12px 2px; color: var(--home-ink-muted); font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
-.hm-menu__radio[aria-checked="true"] { background: var(--home-lime); color: var(--home-lime-ink); font-weight: 700; }
+.hm-menu__radio[aria-checked="true"] { background: var(--home-blue-item); color: var(--home-ink); font-weight: 700; box-shadow: inset 0 0 0 1.5px var(--home-focus); }
 .hm-menu__separator { block-size: 1px; margin: 6px 4px; background: var(--home-hairline); }
 /* Phone ⋯ only: who is signed in, above the account entries (the account menu's own first line). */
 .hm-menu__account { overflow: hidden; padding: 8px 12px 2px; color: var(--home-ink-muted); font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 /* The live state's one small dot, on ⋯. */
 .hm-live-dot { position: absolute; inset-block-start: 5px; inset-inline-end: 5px; inline-size: 9px; block-size: 9px; border-radius: 50%;
-  background: var(--home-lime); box-shadow: 0 0 0 1.5px var(--home-ink); pointer-events: none; }
+  background: var(--home-accent); box-shadow: 0 0 0 1.5px var(--home-ink); pointer-events: none; }
 .hm-live-dot[hidden] { display: none; }
 .hm-phone-bar .hm-live-dot { box-shadow: 0 0 0 1.5px var(--home-rail-bg); }
 .hm-menu__item:hover,
@@ -180,7 +166,7 @@
 .hm-channel-menu__list > button:hover { background: var(--home-soft); }
 
 .hm-channel-menu__item[aria-current="page"],
-.hm-channel-menu__list > button[aria-current="page"] { font-weight: 700; background: var(--home-lime); color: var(--home-lime-ink); }
+.hm-channel-menu__list > button[aria-current="page"] { font-weight: 700; background: var(--home-blue-item); color: var(--home-ink); box-shadow: inset 0 0 0 1.5px var(--home-focus); }
 
 .hm-channel-menu__trigger {
   display: inline-flex;
@@ -296,7 +282,7 @@
 
 .hm-ws-nav__link:hover { background: var(--home-soft); color: var(--home-ink); }
 .hm-ws-nav__link[aria-current="page"],
-.hm-ws-nav__link[aria-current="page"]:hover { background: var(--home-ink); color: var(--home-card); font-weight: 700; }
+.hm-ws-nav__link[aria-current="page"]:hover { background: var(--home-blue-item); color: var(--home-ink); font-weight: 700; box-shadow: inset 0 0 0 1.5px var(--home-focus); }
 
 .hm-ws-nav--tablet { padding: 8px 24px; border-block-end: 1px solid var(--home-card-border); background: var(--home-card); }
 .hm-ws-nav--tablet .hm-ws-nav__list { overflow-x: auto; }
@@ -312,11 +298,9 @@
 }
 .hm-ws-nav--phone .hm-ws-nav__entry { flex: 1 1 0; min-inline-size: 0; }
 .hm-ws-nav--phone .hm-ws-nav__link { min-block-size: 44px; padding: 0 var(--s-1); }
-/* Phone-Space.dc.html: the chosen tab's label is #EEF2EA on the ink pill, at rest and on hover. --home-on-ink is that
-   value in light mode (the same as --home-rail-strong) and flips with --home-ink in dark mode, where rail-strong would
-   sit light on the light pill. */
+/* The chosen phone tab uses the same pastel blue and ink pair as desktop. */
 .hm-ws-nav--phone .hm-ws-nav__link[aria-current="page"],
-.hm-ws-nav--phone .hm-ws-nav__link[aria-current="page"]:hover { color: var(--home-on-ink); }
+.hm-ws-nav--phone .hm-ws-nav__link[aria-current="page"]:hover { color: var(--home-ink); }
 
 .hm-sr {
   position: absolute;
@@ -333,10 +317,10 @@
 .hm-channel-menu :is(a, button):focus-visible,
 .hm-ws-nav__link:focus-visible {
   outline: none;
-  box-shadow: var(--focus-ring);
+  box-shadow: var(--home-focus-ring);
 }
 /* The outline pills keep their inset edge under the ring (box-shadow does not compose). */
-.hm-ws-header :is(.hm-ws-header__people, .hm-menu__trigger):focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring); }
+.hm-ws-header :is(.hm-ws-header__people, .hm-menu__trigger):focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--home-focus-ring); }
 /* Forced colours drop box-shadow: the edge comes back as a real border there. */
 @media (forced-colors: active) {
   .hm-ws-header :is(.hm-ws-header__people, .hm-menu__trigger) { border: 1.5px solid ButtonText; }
@@ -369,3 +353,5 @@
   .hm-phone-bar { display: grid; }
   .hm-ws-nav--phone { display: block; }
 }
+
+.hm-ws-nav__link[aria-current="page"]:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-focus), var(--home-focus-ring); }

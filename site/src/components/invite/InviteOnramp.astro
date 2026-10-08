@@ -859,17 +859,11 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
 </script>
 
 <style>
-  /*
-   * /invite is an ink screen (canvas Phone-Join and Phone-Connect): the rail colours, which stay
-   * ink in light and dark mode, full-bleed behind a single column, lime for the one primary
-   * action. Measured on --home-rail-bg (light / dark): rail-strong 14.32 / 16.84, rail-soft
-   * 8.77 / 10.32, lime as a fill with lime-ink text 12.65; the 1.5px --home-ink-faint outline is
-   * 3.02 / 3.25 (non-text). Tokens only; no raw colour.
-   */
+  /* /invite shares the white canvas / charcoal dark palette. Ratios live in tokens.css. */
   :global(html:has(invite-onramp)),
   :global(body:has(invite-onramp)) {
-    color-scheme: dark;
-    background: var(--home-rail-bg);
+    color-scheme: var(--home-color-scheme);
+    background: var(--home-canvas);
   }
 
   /* On the review the Join bar covers the foot of the screen: a control that takes focus (Tab, or
@@ -898,7 +892,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     -moz-osx-font-smoothing: auto;
   }
 
-  /* The canvas mark: a lime circle under an outlined rounded square, 24px, then the name. */
+  /* The canvas mark: a blue circle under an outlined rounded square, 24px, then the name. */
   .invite-onramp__brand {
     min-inline-size: 0;
     min-block-size: 24px;
@@ -922,7 +916,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
 
   .invite-onramp__brand-link:focus-visible {
     outline: none;
-    box-shadow: var(--focus-ring);
+    box-shadow: var(--home-focus-ring);
   }
 
   /* Phone-Connect pads its bottom 24px; Phone-Join 28px. Connect ends on the footnote's last text
@@ -932,7 +926,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   }
 
   .invite-onramp__mark { flex: none; }
-  .invite-onramp__mark circle { fill: var(--home-lime); }
+  .invite-onramp__mark circle { fill: var(--home-accent); }
   .invite-onramp__mark rect { stroke: var(--home-rail-strong); }
 
   .invite-onramp__panel,
@@ -964,7 +958,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     display: none;
   }
 
-  /* The card is the page now: no surface of its own on the ink screen. */
+  /* The card is the page: no surface of its own. */
   .invite-onramp__card {
     padding: 0;
     background: transparent;
@@ -975,7 +969,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
 
   .invite-onramp .invite-onramp__eyebrow {
     margin: 0;
-    color: var(--home-lime);
+    color: var(--home-accent-text);
     font-size: 13px;
     line-height: 1.4;
     font-weight: 700;
@@ -1046,13 +1040,11 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   .invite-onramp__face[data-hue="3"] { background: var(--home-teal); }
   .invite-onramp__face:empty { visibility: hidden; }
 
-  /* The joiner's dashed circle, in her (the viewer's) blue, lifted for the ink screen with the
-     canvas emphasis: a mid outline (5.68 / 7.16 on --home-rail-bg, light / dark) and a lighter
-     initial (9.30 / 11.28). Both are mixed with rail-strong, so they stay light in dark mode. */
+  /* Dashed viewer avatar: explicit theme-aware blue line and ink tokens. */
   .invite-onramp__face--you {
     position: relative;
     background: transparent;
-    color: color-mix(in oklab, var(--home-blue) 30%, var(--home-rail-strong));
+    color: var(--home-rail-blue-soft);
   }
 
   /* The 1.5px dashed edges (Phone-Join.dc.html) are drawn as SVG strokes: a CSS dashed 1.5px border snaps to 1px in
@@ -1071,7 +1063,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   }
 
   .invite-onramp__face--you::before {
-    background: color-mix(in oklab, var(--home-blue) 60%, var(--home-rail-strong));
+    background: var(--home-rail-blue-line);
     mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Ccircle cx='24' cy='24' r='23.25' fill='none' stroke='black' stroke-width='1.5' pathLength='148.5' stroke-dasharray='3 1.5'/%3E%3C/svg%3E");
   }
 
@@ -1103,7 +1095,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   .invite-onramp__steps span {
     inline-size: 26px;
     flex: none;
-    color: var(--home-lime);
+    color: var(--home-accent-text);
     font-family: var(--home-font-display);
     font-size: 20px;
     font-weight: 700;
@@ -1129,8 +1121,8 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     justify-content: center;
     gap: 10px;
     padding: 12px 24px;
-    color: var(--home-lime-ink);
-    background: var(--home-lime);
+    color: var(--home-accent-ink);
+    background: var(--home-accent);
     border: 0;
     border-radius: var(--radius-pill);
     font: inherit;
@@ -1155,11 +1147,11 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     min-inline-size: 0;
   }
 
-  /* Hover only where there is a pointer that hovers: a tap on a phone leaves no lighter lime. */
+  /* Hover only where there is a pointer that hovers: a tap on a phone leaves no lighter blue. */
   @media (hover: hover) {
     .invite-onramp :global(.invite-onramp__button):hover {
-      color: var(--home-lime-ink);
-      background: var(--home-lime-hover);
+      color: var(--home-accent-ink);
+      background: var(--home-accent-hover);
     }
 
     .invite-onramp :global(.invite-onramp__button--quiet):hover {
@@ -1185,11 +1177,11 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   .invite-onramp :global(.invite-onramp__button):focus-visible,
   .invite-onramp__choice input:focus-visible {
     outline: 2px solid transparent;
-    box-shadow: var(--focus-ring);
+    box-shadow: var(--home-focus-ring);
   }
 
   .invite-onramp :global(.invite-onramp__button--quiet):focus-visible {
-    box-shadow: inset 0 0 0 1.5px var(--home-ink-faint), var(--focus-ring);
+    box-shadow: inset 0 0 0 1.5px var(--home-ink-faint), var(--home-focus-ring);
   }
 
   .invite-onramp__divider {
@@ -1236,9 +1228,9 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   }
 
   .invite-onramp__auth input:focus-visible {
-    border-color: var(--home-lime);
+    border-color: var(--home-accent-text);
     outline: 2px solid transparent;
-    box-shadow: var(--focus-ring);
+    box-shadow: var(--home-focus-ring);
   }
 
   .invite-onramp .invite-onramp__status {
@@ -1343,7 +1335,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     gap: 8px;
   }
 
-  /* A choice is a tile: 14px corners, 1.5px edge, a ring on the right that fills lime when chosen.
+  /* A choice is a tile: 14px corners, 1.5px edge, a ring on the right that fills blue when chosen.
      The edge is an inset ring (a 1.5px border paints 1px in Chromium), so the canvas border box (Phone-Join.dc.html:
      1.5px border, 14px padding) puts the badge, label and ring at x + 15.5px. A box at a half pixel can be painted
      at a whole one (emulated 2x does), so the badge and ring boxes sit on whole pixels (15px in) and move the last
@@ -1365,15 +1357,15 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
 
   .invite-onramp__choice:has(input:checked) {
     background: var(--home-rail-raised);
-    box-shadow: inset 0 0 0 1.5px var(--home-lime);
+    box-shadow: inset 0 0 0 1.5px var(--home-focus);
   }
 
   .invite-onramp__choice:has(input:focus-visible) {
-    box-shadow: inset 0 0 0 1.5px var(--home-rail-choice-edge), var(--focus-ring);
+    box-shadow: inset 0 0 0 1.5px var(--home-rail-choice-edge), var(--home-focus-ring);
   }
 
   .invite-onramp__choice:has(input:checked:focus-visible) {
-    box-shadow: inset 0 0 0 1.5px var(--home-lime), var(--focus-ring);
+    box-shadow: inset 0 0 0 1.5px var(--home-focus), var(--home-focus-ring);
   }
 
   @media (resolution: 2dppx) {
@@ -1387,7 +1379,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     block-size: 1.25rem;
     flex: none;
     margin: 0;
-    accent-color: var(--accent);
+    accent-color: var(--home-accent);
   }
 
   .invite-onramp__choice input {
@@ -1401,13 +1393,13 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     cursor: pointer;
   }
 
-  /* Chosen: lime fill inside the same muted 1.5px rim (canvas). */
+  /* Chosen: blue fill inside the same muted 1.5px rim (canvas). */
   .invite-onramp__choice input:checked {
-    background: var(--home-lime);
+    background: var(--home-accent-text);
   }
 
   /* A custom check in the screen's own tokens (no grey native box): the choice ring's 1.5px muted
-     rim with 6px corners; checked, it fills lime with an ink tick, like a chosen tile's ring. */
+     rim with 6px corners; checked, it fills blue with an ink tick, like a chosen tile's ring. */
   .invite-onramp__consent input {
     appearance: none;
     box-sizing: border-box;
@@ -1417,7 +1409,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     border-radius: 6px;
     background: transparent;
     box-shadow: inset 0 0 0 1.5px var(--home-rail-soft);
-    accent-color: var(--home-lime);
+    accent-color: var(--home-accent-text);
     cursor: pointer;
   }
 
@@ -1427,26 +1419,27 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     block-size: 10px;
     margin-block-start: -2px;
     box-sizing: border-box;
-    border-inline-end: 2px solid var(--home-lime-ink);
-    border-block-end: 2px solid var(--home-lime-ink);
+    border-inline-end: 2px solid var(--home-ink);
+    border-block-end: 2px solid var(--home-ink);
     transform: rotate(45deg);
     visibility: hidden;
   }
 
   .invite-onramp__consent input:checked {
-    background: var(--home-lime);
-    box-shadow: inset 0 0 0 1.5px var(--home-lime);
+    background: var(--home-blue-item);
+    box-shadow: inset 0 0 0 1.5px var(--home-focus);
   }
 
   .invite-onramp__consent input:checked::before { visibility: visible; }
 
   .invite-onramp__consent input:focus-visible {
     outline: 2px solid transparent;
-    box-shadow: inset 0 0 0 1.5px var(--home-rail-soft), var(--focus-ring);
+    box-shadow: inset 0 0 0 1.5px var(--home-rail-soft), var(--home-focus-ring);
   }
 
   .invite-onramp__consent input:checked:focus-visible {
-    box-shadow: inset 0 0 0 1.5px var(--home-lime), var(--focus-ring);
+    box-shadow: inset 0 0 0 1.5px var(--home-focus), var(--home-focus-ring);
+    background: var(--home-blue-item);
   }
 
   @media (forced-colors: active) {
@@ -1518,7 +1511,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
 
   .invite-onramp__more > summary:focus-visible {
     outline: none;
-    box-shadow: var(--focus-ring);
+    box-shadow: var(--home-focus-ring);
   }
 
   .invite-onramp__more > .invite-onramp__assistant-list { margin-block-start: 8px; }
@@ -1583,7 +1576,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     margin-block-start: auto;
     margin-inline: -24px;
     padding: 14px 24px 28px;
-    background: linear-gradient(to bottom, transparent, var(--home-rail-bg) 14px);
+    background: linear-gradient(to bottom, transparent, var(--home-canvas) 14px);
   }
 
   .invite-onramp__actions .invite-onramp__hint { margin-block-end: 4px; }
@@ -1630,7 +1623,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     }
   }
 
-  .invite-onramp .invite-onramp__exit:focus-visible { box-shadow: var(--focus-ring); }
+  .invite-onramp .invite-onramp__exit:focus-visible { box-shadow: var(--home-focus-ring); }
 
   .invite-onramp .invite-onramp__fineprint {
     margin: 0;
@@ -1679,8 +1672,8 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     display: grid;
     place-items: center;
     flex: none;
-    color: var(--home-lime-ink);
-    background: var(--home-lime);
+    color: var(--home-accent-ink);
+    background: var(--home-accent);
     border-radius: var(--radius-pill);
     font-weight: 700;
   }
@@ -1695,7 +1688,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     inline-size: 1.5rem;
     block-size: 1.5rem;
     border: 2px solid var(--home-rail-divider);
-    border-block-start-color: var(--home-lime);
+    border-block-start-color: var(--home-accent-text);
     border-radius: var(--radius-pill);
     animation: invite-spin 0.8s linear infinite;
   }

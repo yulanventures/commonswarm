@@ -81,7 +81,7 @@
   gap: 8px;
 }
 
-/* Needs you, first item: the lime band. Avatar | meta + sentence | one ink pill on the right. */
+/* Needs you, first item: the warm attention band. Avatar | meta + sentence | one ink pill on the right. */
 .hm-catchup-needs .hm-needs-you,
 .hm-catchup-needs-preview {
   display: grid;
@@ -90,8 +90,8 @@
   gap: 2px 18px;
   padding: 18px 20px;
   border-radius: 18px;
-  background: var(--home-lime);
-  color: var(--home-lime-ink);
+  background: var(--home-attention);
+  color: var(--home-ink);
 }
 
 .hm-catchup-needs .hm-needs-you > .hm-needs-copy { display: contents; }
@@ -109,23 +109,23 @@
 .hm-catchup-needs-eyebrow { font-size: 13px; font-weight: 700; }
 .hm-catchup-needs-what { font-size: 17px; font-weight: 600; line-height: 1.35; text-wrap: pretty; }
 
-/* Needs you, later items: quieter pale-lime rows under the band, outline pill on the right. */
+/* Needs you, later items: quieter warm rows under the band, outline pill on the right. */
 .hm-catchup-needs .hm-needs-you[data-needs-rank="more"],
 .hm-catchup-needs-preview[data-needs-rank="more"] {
   gap: 0 14px;
   padding: 10px 14px 10px 16px;
   border: 1px solid var(--home-card-border);
   border-radius: 14px;
-  background: var(--home-lime-soft);
+  background: var(--home-attention-soft);
   color: var(--home-ink);
 }
 .hm-catchup-needs .hm-needs-you[data-needs-rank="more"] > .hm-agent-orb { inline-size: 28px; block-size: 28px; border-radius: 8px; font-size: 12px; }
 .hm-catchup-needs .hm-needs-you[data-needs-rank="more"] > .hm-person-avatar { inline-size: 28px; block-size: 28px; font-size: 12px; }
-.hm-catchup-needs .hm-needs-you[data-needs-rank="more"] .hm-owner-badge { box-shadow: 0 0 0 2px var(--home-lime-soft); }
+.hm-catchup-needs .hm-needs-you[data-needs-rank="more"] .hm-owner-badge { box-shadow: 0 0 0 2px var(--home-attention-soft); }
 .hm-catchup-needs [data-needs-rank="more"] :is(.hm-eyebrow, .hm-catchup-needs-eyebrow) { font-size: 12px; color: var(--home-ink-muted); }
 .hm-catchup-needs [data-needs-rank="more"] :is(.hm-needs-title, .hm-catchup-needs-what) { font-size: 15px; line-height: 1.35; }
 .hm-catchup-needs .hm-needs-you[data-needs-rank="more"] .hm-button {
-  background: transparent;
+  background: var(--home-quiet);
   color: var(--home-ink);
 }
 .hm-catchup-needs .hm-needs-you[data-needs-rank="more"] .hm-button[data-primary="true"] {
@@ -133,7 +133,7 @@
   padding-inline: 19.5px; /* 18px + the 1.5px inset stroke */
   font-size: 14px;
 }
-.hm-catchup-needs .hm-needs-you[data-needs-rank="more"] .hm-button:hover { background: var(--home-lime-hover); color: var(--home-lime-ink); }
+.hm-catchup-needs .hm-needs-you[data-needs-rank="more"] .hm-button:hover { background: var(--home-soft); color: var(--home-ink); }
 
 /* "Show N more": a quiet underlined text row under the needs list, not a pill. The hit box stays 44px; the negative
    block margins let it overlap the 10px section gap above and the 32px gap below, so its layout footprint is about
@@ -157,7 +157,7 @@
 .hm-catchup-show-more:hover { color: var(--home-ink); }
 .hm-catchup-show-more:focus-visible {
   outline: 2px solid transparent;
-  box-shadow: var(--focus-ring);
+  box-shadow: var(--home-focus-ring);
 }
 
 /* Your workspaces: heading row with the legend on the right. */
@@ -210,10 +210,10 @@
   color: var(--home-ink);
   text-decoration: none;
 }
-a.hm-catchup-card:hover { border-color: var(--home-field-border); }
+a.hm-catchup-card:hover { border-color: var(--home-card-border); background: var(--home-soft); }
 .hm-catchup-card:focus-visible {
   outline: 2px solid transparent;
-  box-shadow: var(--focus-ring), var(--home-card-shadow);
+  box-shadow: var(--home-focus-ring), var(--home-card-shadow);
 }
 
 .hm-catchup-card-body {
@@ -365,7 +365,7 @@ a.hm-catchup-card:hover { border-color: var(--home-field-border); }
 }
 a.hm-catchup-latest-workspace:hover::before { background: var(--home-soft); }
 .hm-catchup-latest-workspace:focus-visible { outline: 2px solid transparent; }
-.hm-catchup-latest-workspace:focus-visible::before { box-shadow: var(--focus-ring); }
+.hm-catchup-latest-workspace:focus-visible::before { box-shadow: var(--home-focus-ring); }
 
 /* Phone width: the band wraps and its pill goes under the text; latest pills go under the sentence. */
 @container hm-catchup (width < 560px) {

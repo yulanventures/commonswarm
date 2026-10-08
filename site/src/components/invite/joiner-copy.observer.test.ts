@@ -502,18 +502,24 @@ test("a button or link-button never mixes loose text with an element (the flex-g
 });
 
 test("neither joiner page shows a protocol word, writes HTML from data, or uses a raw colour", async () => {
+  const tokens = (await readFile(new URL("../../styles/tokens.css", import.meta.url), "utf8"))
+    .replace(/\/\*[\s\S]*?\*\//g, "");
   for (const name of ["InviteOnramp.astro", "HumanInvitationInbox.astro"]) {
     const page = await load(name);
     assert.doesNotMatch(page.markup, PROTOCOL_WORDS, `${name} markup`);
     assert.doesNotMatch(page.script, PROTOCOL_WORDS, `${name} script strings`);
     // textContent for every dynamic value.
     assert.doesNotMatch(page.source, /innerHTML|outerHTML|insertAdjacentHTML|document\.write/, name);
-    // Daylight Orbs tokens only: no hex, rgb or hsl literal in the stylesheet.
+    // Declared palette tokens only: no hex, rgb or hsl literal in the stylesheet.
     assert.doesNotMatch(page.style, /#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(/, `${name} style uses a raw colour`);
     // The focus ring, pill buttons and reduced motion are all there.
-    assert.match(page.style, /var\(--focus-ring\)/, name);
+    // /invite uses the home palette; the inbox keeps the shared site palette.
+    const prefix = name === "InviteOnramp.astro" ? "--home-" : "--";
+    assert.match(tokens, new RegExp(`(?:^|[;{])\\s*${prefix}focus-ring\\s*:\\s*[^;{}]+;`), `${name} focus ring is declared`);
+    assert.match(page.style, new RegExp(`var\\(${prefix}focus-ring\\)`), name);
     assert.match(page.style, /var\(--radius-pill\)/, name);
-    assert.match(page.style, /accent-color: var\(--accent\)/, name);
+    assert.match(tokens, new RegExp(`(?:^|[;{])\\s*${prefix}accent\\s*:\\s*[^;{}]+;`), `${name} accent is declared`);
+    assert.match(page.style, new RegExp(`accent-color: var\\(${prefix}accent\\)`), name);
   }
   const onramp = await load("InviteOnramp.astro");
   assert.match(onramp.style, /@media \(prefers-reduced-motion: reduce\) \{\s*\.invite-onramp__spinner \{\s*animation: none;/);

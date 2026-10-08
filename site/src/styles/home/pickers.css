@@ -1,14 +1,10 @@
-/* Home UI: assign picker and tag picker (UI-SPEC.md 2.4 and 5; lane T), drawn to the canvas artboard
-   "Todo" (ref/Todo.dc.html). --home-* tokens only; they switch in dark mode.
-   The assign picker is the canvas's row of chips, grouped in card-coloured capsules. The tag picker
-   is the canvas's floating card: a soft heading band, 50 px rows with a hairline between
-   them, the active row in lime, as on the canvas (aria-selected for assistive tech). The lime fill is a weak
-   cue on the card (1.26:1), so the active row also carries a 3px ink bar on its start edge, which forced colours keep. Contrast, from the audited token notes in tokens.css: --home-lime-ink on
-   --home-lime 12.65; --home-ink-muted on --home-soft 6.21; --home-offline-text on --home-card 6.66. */
+/* Home assign/tag pickers: existing geometry, neutral capsules and blue selected rows.
+   The selected row retains its 3px bar and aria-selected for forced colours.
+   Measured light/dark contrast pairs are documented in tokens.css. */
 
 .hm-picker { position: relative; display: grid; justify-items: start; min-inline-size: 0; }
 /* Assign chips (Todo canvas): one capsule per person with their agents, 10 px apart; the chosen chip fills
-   ink with canvas text (--home-canvas on --home-ink 14.32). The pane's generic button rule (0,2,1,
+   pastel blue with ink text. The pane's generic button rule (0,2,1,
    integration.css) is outweighed by repeating the chip class (0,3,0). */
 .hm-assign-chips { display: flex; flex-wrap: wrap; gap: 10px; min-inline-size: 0; max-inline-size: 100%; }
 .hm-assign-capsule {
@@ -20,11 +16,12 @@
   padding: 0 14px 0 8px; border: 0; border-radius: 12px; background: transparent; color: var(--home-ink);
   font: inherit; font-size: 15px; font-weight: 600; line-height: 1.3; text-align: start; cursor: pointer;
   transition: background-color var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
+  box-shadow: inset 0 0 0 1.5px var(--home-pill-border);
 }
 .hm-picker .hm-assign-chip.hm-assign-chip:hover { background: var(--home-soft); }
-.hm-picker .hm-assign-chip.hm-assign-chip[aria-checked="true"] { background: var(--home-ink); color: var(--home-canvas); }
+.hm-picker .hm-assign-chip.hm-assign-chip[aria-checked="true"] { background: var(--home-blue-item); color: var(--home-ink); box-shadow: inset 0 0 0 1.5px var(--home-focus); }
 .hm-picker .hm-assign-chip.hm-assign-chip[aria-disabled="true"] { cursor: not-allowed; opacity: 0.6; }
-.hm-picker .hm-assign-chip.hm-assign-chip:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.hm-picker .hm-assign-chip.hm-assign-chip:focus-visible { outline: none; box-shadow: inset 0 0 0 1.5px var(--home-focus), var(--home-focus-ring); }
 .hm-assign-chip .hm-agent-orb { border-radius: 9px; }
 .hm-assign-name { min-inline-size: 0; overflow-wrap: anywhere; }
 /* The caption the list used to show is each chip's description: read, not shown. The status line under
@@ -39,7 +36,8 @@
 .hm-picker-pop {
   position: absolute; inset-inline-start: 0; inline-size: min(100%, 30rem); inset-block-start: calc(100% + 6px); z-index: 20;
   display: grid; max-block-size: min(24rem, 60vh); overflow: auto; overscroll-behavior: contain;
-  background: var(--home-card); border: 1px solid var(--home-card-border); border-radius: 16px; box-shadow: var(--shadow-floating);
+  background: var(--home-card); border: 1px solid var(--home-card-border); border-radius: 16px;
+  box-shadow: var(--shadow-floating);
 }
 /* The tag card sits in the flow between the comments and the field (Todo canvas): it never covers the
    comments it belongs to. */
@@ -71,22 +69,22 @@
   box-sizing: border-box; border-block-start: 1px solid var(--home-hairline);
 }
 .hm-pick-option:hover { background: var(--home-soft); }
-/* The active row (aria-selected, the one Enter inserts) also carries a shape: a 3px ink bar on its start edge.
-   The lime fill alone is 1.26:1 on the card, and forced colours remove fills. The padding gives the bar's
+/* The active row (aria-selected, the one Enter inserts) also carries a shape: a 3px focus-colour bar on its start edge.
+   Forced colours remove fills, so the selected row also retains a start bar. The padding gives the bar's
    width back so the row's text does not move. Code review, release 7. */
 .hm-pick-option[aria-selected="true"] {
-  border-inline-start: 3px solid var(--home-lime-ink); padding-inline-start: 13px;
-  background: var(--home-lime); color: var(--home-lime-ink);
+  border-inline-start: 3px solid var(--home-focus); padding-inline-start: 13px;
+  background: var(--home-blue-item); color: var(--home-ink);
 }
-.hm-pick-option[aria-selected="true"] .hm-owner-badge { box-shadow: 0 0 0 2px var(--home-lime); }
+.hm-pick-option[aria-selected="true"] .hm-owner-badge { box-shadow: 0 0 0 2px var(--home-blue-item); }
 .hm-pick-option[aria-disabled="true"] { cursor: not-allowed; opacity: 0.6; }
 .hm-pick-copy { display: grid; gap: 0; min-inline-size: 0; }
 .hm-pick-label { font-weight: 600; overflow-wrap: anywhere; }
 .hm-pick-caption { color: var(--home-ink-muted); font-size: 13px; overflow-wrap: anywhere; }
-.hm-pick-option[aria-selected="true"] .hm-pick-caption { color: var(--home-lime-ink); }
+.hm-pick-option[aria-selected="true"] .hm-pick-caption { color: var(--home-ink-muted); }
 .hm-pick-option[data-pick-state="disconnected"]:not([aria-selected="true"]) .hm-pick-caption { color: var(--home-offline-text); }
 /* Forced colours for the active row. It comes AFTER every row and caption rule above: at equal specificity the
-   later declaration wins, and the lime-ink caption rule would otherwise sit on the Highlight fill. */
+   later declaration wins, and the selected-row ink caption rule would otherwise sit on the Highlight fill. */
 @media (forced-colors: active) {
   .hm-pick-option[aria-selected="true"] { border-inline-start-color: Highlight; background: Highlight; color: HighlightText; }
   .hm-pick-option[aria-selected="true"] .hm-pick-caption { color: HighlightText; }

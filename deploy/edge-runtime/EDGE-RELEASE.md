@@ -114,6 +114,14 @@ recycle hook compares live files with the archive; if the override differs,
 edge-ready refuses before recreation. HezLead must arrange a reviewed hook
 change for that case; copying the baseline alone cannot make it releasable.
 
+Release parents must already exist at their exact absolute paths, resolve to
+themselves, be real directories, and have no group/world write bits. The edge
+parent may be root-owned or commonswarm-owned (measured commonswarm:0750);
+the helper parent stays root-owned (measured root:0700). Each new top-level
+tree copies its corresponding baseline tree's root:root 0700 metadata, and
+RELEASE_SHA is root:root 0600. Preflight records parent and baseline/new-tree
+metadata in tree-layout.json; copyback retains that nonsecret proof.
+
 If open fails before `PASS open`, use R0 → R4 with CLOSE_RESULT=aborted,
 including failures before session.sh or database snapshots exist. R0 uses the
 early partial-session.sh, requires opened.txt and no open PASS or forward
@@ -796,7 +804,7 @@ edge_forward_admit
 edge_deadline
 edge_identity "$OLD_EDGE"; edge_invariants; edge_timer_active
 python3 - "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$NEW_EDGE" "$NEW_HELPER" "$RECYCLE_HOOK" "$OLD_EDGE/deploy/edge-runtime/compose.override.yaml" <<'PY'
-import datetime,hashlib,json,os,pathlib,re,shutil,stat,sys,tarfile
+import datetime,hashlib,json,os,pathlib,pwd,re,shutil,stat,sys,tarfile
 inputs,archive,proof,edge,helper,hook,baseline=sys.argv[1:]; d=json.load(open(inputs)); p=pathlib.Path(proof); a=pathlib.Path(archive)
 assert a.is_file() and not a.is_symlink() and hashlib.sha256(a.read_bytes()).hexdigest()==d['archive_sha256']
 r=json.load(open(a.with_suffix('.ancestry.json')))
@@ -804,6 +812,24 @@ assert r['release_sha']==d['release_sha'] and re.fullmatch('[0-9a-f]{40}',r['ori
 at=datetime.datetime.fromisoformat(r['measured_at'].replace('Z','+00:00')); now=datetime.datetime.now(datetime.timezone.utc)
 assert 0<=(now-at).total_seconds()<=1800
 assert not os.path.lexists(edge) and not os.path.lexists(helper)
+def metadata(path):
+ s=path.stat(); return {'uid':s.st_uid,'gid':s.st_gid,'mode':oct(stat.S_IMODE(s.st_mode))}
+layout=[]
+for root,kind,expected_parent,owners in [
+ (helper,'helper','/home/commonswarm/admin-issuance/releases',{0}),
+ (edge,'edge','/home/commonswarm/edge/releases',{0,pwd.getpwnam('commonswarm').pw_uid}),
+]:
+ tree=pathlib.Path(root); parent=tree.parent
+ assert tree==pathlib.Path(expected_parent)/d['release_sha'], 'FAIL unexpected release parent/path; STOP'
+ assert parent.is_absolute() and parent.is_dir() and not parent.is_symlink() and parent.resolve()==parent, 'FAIL release parent must be an exact real directory; STOP'
+ s=parent.stat()
+ assert s.st_uid in owners and not stat.S_IMODE(s.st_mode)&0o022, 'FAIL release parent owner/write mode refused; STOP'
+ old=parent/d['baseline_edge_sha']
+ assert old.is_dir() and not old.is_symlink() and old.resolve()==old, 'FAIL baseline release tree must be an exact real directory; STOP'
+ measured=metadata(old)
+ assert measured=={'uid':0,'gid':0,'mode':'0o700'}, 'FAIL baseline release tree must match measured root:root 0700 layout; STOP'
+ layout.append({'part':kind,'path':root,'parent':dict(path=str(parent),**metadata(parent)),'baseline':{'path':str(old),'metadata':measured}})
+(p/'tree-layout.json').write_text(json.dumps(layout,sort_keys=True)+'\n')
 baseline=pathlib.Path(baseline)
 assert baseline.is_file() and not baseline.is_symlink(), 'FAIL baseline override must be a regular non-symlink file; STOP'
 baseline_stat=baseline.stat(); baseline_hash=hashlib.sha256(baseline.read_bytes()).hexdigest()
@@ -840,14 +866,20 @@ with tarfile.open(a) as t:
  found=re.findall(r'^```sh\n(# step: ai-recycle-hook\n.*?)^```$',source,re.M|re.S); assert len(found)==1
  assert ('#!/bin/bash\n'+found[0]).encode()==pathlib.Path(hook).read_bytes(), 'FAIL hook differs; STOP for reviewed hook investigation'
  archive_hash=hashlib.sha256(t.extractfile(override).read()).hexdigest()
- for root,kind in [(helper,'helper'),(edge,'edge')]:
-  parent=pathlib.Path(root).parent; parent.mkdir(parents=True,exist_ok=True)
-  assert parent.resolve()==parent and not parent.is_symlink() and parent.stat().st_uid==0
+ for row in layout:
+  root,kind=row['path'],row['part']; tree=pathlib.Path(root)
   # Exclusive receipt before mkdir; records window ownership even on extraction failure.
   with (p/(kind+'-tree-created.json')).open('x') as f: f.write(json.dumps({'path':root,'release_sha':d['release_sha'],'window_id':d['window_id']})+'\n')
-  pathlib.Path(root).mkdir(mode=0o755); t.extractall(root,filter='data')
-  assert not (pathlib.Path(root)/'RELEASE_SHA').exists()
-  (pathlib.Path(root)/'RELEASE_SHA').write_text(d['release_sha']+'\n')
+  tree.mkdir(mode=int(row['baseline']['metadata']['mode'],8))
+  os.chmod(tree,int(row['baseline']['metadata']['mode'],8))
+  t.extractall(root,filter='data')
+  row['created']=metadata(tree)
+  assert row['created']==row['baseline']['metadata'], 'FAIL new release tree owner/mode differs from baseline; STOP'
+  marker=tree/'RELEASE_SHA'; assert not os.path.lexists(marker)
+  with marker.open('x') as f: f.write(d['release_sha']+'\n')
+  marker.chmod(0o600)
+  assert metadata(marker)=={'uid':0,'gid':0,'mode':'0o600'}, 'FAIL RELEASE_SHA must be root:root 0600; STOP'
+  (p/'tree-layout.json').write_text(json.dumps(layout,sort_keys=True)+'\n')
 dest=pathlib.Path(edge)/override
 assert dest.is_file() and not dest.is_symlink()
 shutil.copy2(baseline,dest)
@@ -1215,8 +1247,10 @@ mkdir -m 0700 "$EVIDENCE_DIR"
 for FILE in inputs.json opened.txt close-result.json closed.txt; do
  ssh -n "$BOX_HOST" "sudo -n cat '$PROOF_DIR/$FILE'" >"$EVIDENCE_DIR/$FILE"
 done
-# Override provenance is optional only when preflight stopped before its receipt.
-ssh -n "$BOX_HOST" "if sudo -n test -e '$PROOF_DIR/override.json' || sudo -n test -L '$PROOF_DIR/override.json'; then sudo -n test -f '$PROOF_DIR/override.json' && ! sudo -n test -L '$PROOF_DIR/override.json' && sudo -n cat '$PROOF_DIR/override.json'; else printf '%s\n' '{\"status\":\"not-created\"}'; fi" >"$EVIDENCE_DIR/override.json"
+# Preflight provenance is optional only when it stopped before each receipt.
+for FILE in override.json tree-layout.json; do
+ ssh -n "$BOX_HOST" "if sudo -n test -e '$PROOF_DIR/$FILE' || sudo -n test -L '$PROOF_DIR/$FILE'; then sudo -n test -f '$PROOF_DIR/$FILE' && ! sudo -n test -L '$PROOF_DIR/$FILE' && sudo -n cat '$PROOF_DIR/$FILE'; else printf '%s\n' '{\"status\":\"not-created\"}'; fi" >"$EVIDENCE_DIR/$FILE"
+done
 python3 - "$EVIDENCE_DIR" "$INPUTS_FILE" <<'PY'
 import json,pathlib,sys
 p=pathlib.Path(sys.argv[1]); d=json.loads((p/'inputs.json').read_bytes()); r=json.loads((p/'close-result.json').read_bytes())
