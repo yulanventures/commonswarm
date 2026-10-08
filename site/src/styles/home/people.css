@@ -581,7 +581,9 @@ section.pd-page[data-people-page] .pd-agent > .pd-receipt { color: var(--home-in
 section.pd-page[data-people-page] .pd-error { color: var(--home-danger); }
 
 /* Agent avatar: 34px square, radius 10, 1.5px owner colour (inset stroke, primitives.css method), 14px deep letter.
-   Dashed when it needs attention: a dashed edge cannot be a shadow, so it keeps a real border and drops the shadow. */
+   Dashed when it needs attention (Members.dc.html: 1.5px dashed): a CSS dashed 1.5px border paints 1px in Chromium, so
+   the edge is an SVG stroke used as a mask in the owner colour (as the rail's draft row and the invite page): 1.5 wide on
+   a 34-unit box with the canvas 10px outer radius, a 3px dash and a 1.5px gap; pathLength fits 25 whole dashes. */
 section.pd-page[data-people-page] .pd-orb {
   display: grid; place-items: center; box-sizing: border-box; flex: 0 0 34px; inline-size: 34px; block-size: 34px; margin: 0;
   border: 0 solid var(--home-ink-faint); box-shadow: inset 0 0 0 1.5px var(--home-ink-faint); border-radius: 10px; background: transparent; color: var(--home-ink-muted);
@@ -591,7 +593,18 @@ section.pd-page[data-people-page] .pd-orb[data-tint="0"] { border-color: var(--h
 section.pd-page[data-people-page] .pd-orb[data-tint="1"] { border-color: var(--home-orange); box-shadow: inset 0 0 0 1.5px var(--home-orange); background: var(--home-orange-tint); color: var(--home-orange-deep); }
 section.pd-page[data-people-page] .pd-orb[data-tint="2"] { border-color: var(--home-purple); box-shadow: inset 0 0 0 1.5px var(--home-purple); background: var(--home-purple-tint); color: var(--home-purple-deep); }
 section.pd-page[data-people-page] .pd-orb[data-tint="3"] { border-color: var(--home-teal); box-shadow: inset 0 0 0 1.5px var(--home-teal); background: var(--home-teal-tint); color: var(--home-teal-deep); }
-section.pd-page[data-people-page] .pd-agent[data-attention="true"] .pd-orb { border-width: 1.5px; border-style: dashed; box-shadow: none; }
+section.pd-page[data-people-page] .pd-agent[data-attention="true"] .pd-orb { position: relative; box-shadow: none; }
+section.pd-page[data-people-page] .pd-agent[data-attention="true"] .pd-orb::before {
+  content: ""; position: absolute; inset: 0; background: var(--home-ink-faint); pointer-events: none;
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 34 34'%3E%3Crect x='0.75' y='0.75' width='32.5' height='32.5' rx='9.25' fill='none' stroke='black' stroke-width='1.5' pathLength='112.5' stroke-dasharray='3 1.5'/%3E%3C/svg%3E");
+  mask-position: center; mask-repeat: no-repeat; mask-size: 100% 100%; }
+section.pd-page[data-people-page] .pd-agent[data-attention="true"] .pd-orb[data-tint="0"]::before { background: var(--home-blue); }
+section.pd-page[data-people-page] .pd-agent[data-attention="true"] .pd-orb[data-tint="1"]::before { background: var(--home-orange); }
+section.pd-page[data-people-page] .pd-agent[data-attention="true"] .pd-orb[data-tint="2"]::before { background: var(--home-purple); }
+section.pd-page[data-people-page] .pd-agent[data-attention="true"] .pd-orb[data-tint="3"]::before { background: var(--home-teal); }
+@media (forced-colors: active) {
+  section.pd-page[data-people-page] .pd-agent[data-attention="true"] .pd-orb::before { forced-color-adjust: none; background: CanvasText; }
+}
 
 /* Measured status pill: active lime, needs attention amber, the rest quiet. */
 section.pd-page[data-people-page] .pd-status {
