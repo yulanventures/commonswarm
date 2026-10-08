@@ -74,11 +74,11 @@ Any overall run over 300 s fails the time requirement.
 GitHub-hosted `ubuntu-latest` Linux runner:
 
 ```yaml
-runs-on: ${{ vars.CS_SMOKE_RUNS_ON || 'ubuntu-latest' }}
+runs-on: ubuntu-latest
 environment: smoke
 ```
 
-Keep **`CS_SMOKE_RUNS_ON` unset**. HezLead approved GitHub-hosted runners for this
+HezLead approved GitHub-hosted runners for this
 public repository; their use is free here. Each runner is ephemeral per run.
 Chromium's `--no-sandbox` and the temporary browser profile assume that disposable
 runner. Do not point this workflow at a self-hosted runner or a Mac.
@@ -92,6 +92,10 @@ only source, installed tools, bundled Chromium, and the allowlisted evidence.
 The runner is separate from the production box.
 
 **One-time environment setup (HezLead or Tom, in repository settings):**
+
+Before the first dispatch and before adding the secret, create the Environment
+`smoke` and restrict it to branch `main`, with no tag rules. A workflow that
+references a missing environment creates it automatically without protection rules.
 
 1. Create the GitHub Environment **`smoke`**.
 2. Set Deployment branches to **Selected branches: main** only. Do not allow
@@ -118,8 +122,11 @@ The workflow has these settings:
   `oauth`, or `edge`), `release_sha`, `release_utc`, `site_sha`, `workflow_ref`,
   `workflow_sha`, and `probe_sha`. Enable it on the default branch before use.
   Dispatch `main` as `WORKFLOW_REF`; checkout `probe_sha`, an immutable commit SHA.
-  Before checkout, validate the release receipts, require the dispatch ref name
-  to equal `workflow_ref`, and compare `github.workflow_sha` to `workflow_sha`.
+  Before checkout, require `github.repository` to equal `yulanventures/commonswarm`,
+  `github.ref` to equal `refs/heads/main`, and `WORKFLOW_REF` to equal `main`;
+  reject any mismatch with `CS_SMOKE_NOT_CANONICAL_MAIN` (exit 1).
+  Validate the release receipts, require the dispatch ref name to equal
+  `workflow_ref`, and compare `github.workflow_sha` to `workflow_sha`.
   After checkout, require `git rev-parse HEAD` to equal `probe_sha`, before OP
   ingress. Set `WORKFLOW_REF`, `WORKFLOW_SHA`, and `PROBE_SHA` from those inputs.
   Set `CS_ACTUAL_WORKFLOW_SHA` from `github.workflow_sha`, and

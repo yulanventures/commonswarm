@@ -42,8 +42,7 @@ concurrency:
 
 jobs:
   smoke:
-    # Keep CS_SMOKE_RUNS_ON unset: the public repository uses an ephemeral GitHub-hosted runner.
-    runs-on: ${{ vars.CS_SMOKE_RUNS_ON || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     environment: smoke
     timeout-minutes: 15
     # Disposable job container: --no-sandbox is confined here; installs do not alter the host.
@@ -67,11 +66,17 @@ jobs:
     steps:
       - name: Validate dispatch receipts before checkout or credentials
         env:
+          ACTUAL_REPOSITORY: ${{ github.repository }}
+          ACTUAL_REF: ${{ github.ref }}
           ACTUAL_WORKFLOW_REF: ${{ github.ref_name }}
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/cs-smoke-chromium-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
           [ "$(uname -s)" = Linux ]
+          if [[ "$ACTUAL_REPOSITORY" != yulanventures/commonswarm || "$ACTUAL_REF" != refs/heads/main || "$WORKFLOW_REF" != main ]]; then
+            printf '%s\n' 'CS_SMOKE_NOT_CANONICAL_MAIN' >&2
+            exit 1
+          fi
           node <<'NODE'
           const e = process.env;
           const sha = value => /^[0-9a-f]{40}$/.test(value || '');
