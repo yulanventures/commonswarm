@@ -1,3 +1,4 @@
+import { fetchRestReadRetrying } from "./rest-read-retry.js";
 import {
   readEndpoint,
   type CloudTarget,
@@ -1057,8 +1058,9 @@ async function fetchSignalReadRetrying(
   timeoutMs: number = SIGNAL_READ_TIMEOUT_MS,
   sleep: (ms: number) => Promise<void> = (ms) =>
     new Promise((resolve) => setTimeout(resolve, ms)),
+  retryTimeoutMs?: () => number | undefined,
 ): Promise<{ response: Response; body: unknown } | null> {
-  let result = await fetchSignalRead(fetcher, input, init, timeoutMs);
+  let result = await fetchSignalRead(fetcher, input, init, retryTimeoutMs?.() ?? timeoutMs);
   for (let attempt = 1; attempt <= READ_RETRY_ATTEMPTS; attempt += 1) {
     if (result === null || result.response.ok) return result;
     if (result.response.status < 500) return result;
@@ -1070,9 +1072,12 @@ async function fetchSignalReadRetrying(
       return result;
     }
     if (init.signal?.aborted) return result;
-    await sleep(READ_RETRY_BASE_MS * attempt);
+    const delayMs = READ_RETRY_BASE_MS * attempt;
+    const remainingMs = retryTimeoutMs?.();
+    if (remainingMs !== undefined && remainingMs <= delayMs) return result;
+    await sleep(delayMs);
     if (init.signal?.aborted) return result;
-    result = await fetchSignalRead(fetcher, input, init, timeoutMs);
+    result = await fetchSignalRead(fetcher, input, init, retryTimeoutMs?.() ?? timeoutMs);
   }
   return result;
 }
@@ -1140,16 +1145,23 @@ async function humanSignals(
     ascending ? "created_at.asc,id.asc" : "created_at.desc,id.desc",
   );
   url.searchParams.set("limit", String(query.limit));
+  const deadlineMs = options.now() + perReadTimeoutMs(options);
+  const retryState = { attempted: false };
+  const restFetcher: typeof fetch = (input, init) => fetchRestReadRetrying(
+    options.fetcher, input, init ?? {}, { deadlineMs, now: options.now, retryState },
+  );
   let result: { response: Response; body: unknown } | null;
   try {
-    result = await fetchSignalReadRetrying(options.fetcher, url, {
+    result = await fetchSignalReadRetrying(restFetcher, url, {
       headers: {
         authorization: `Bearer ${credential.accessToken}`,
         apikey: target.anonKey,
         "accept-profile": "swarm_read",
       },
       ...(options.signal ? { signal: options.signal } : {}),
-    }, perReadTimeoutMs(options));
+    }, perReadTimeoutMs(options), undefined, () =>
+      // Once the JWT wait is spent, transport retries keep that original ceiling.
+      retryState.attempted ? Math.max(0, deadlineMs - options.now()) : undefined);
   } catch (error) {
     mapReadFailure(error, options.deadlineMs !== undefined);
   }

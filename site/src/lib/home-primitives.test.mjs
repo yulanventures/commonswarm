@@ -25,3 +25,12 @@ test("safe links keep normal references and refuse script, data and disguised sc
   for (const href of ["/app?w=W&todo=T", "#todo", "https://example.test/file", "http://example.test/file"]) assert.equal(safeHomeHref(href), href);
   for (const href of ["javascript:alert(1)", "JaVaScRiPt:alert(1)", "data:text/html,<script>1</script>", "//example.test", "/\\example.test", "\njavascript:alert(1)", "java\tscript:alert(1)", "", "relative"]) assert.equal(safeHomeHref(href), null);
 });
+
+test("a needs-you card shows a neutral glyph only when its sender is unknown", async () => {
+  const { needsYouUnknownSender } = await import("./home-primitives.ts");
+  const card = from => ({ id: "n", kind: "todo", workspace: { id: "W", name: "Home", href: "?w=W" }, from, what: "x", when: "", primary: { label: "Open" } });
+  assert.equal(needsYouUnknownSender(card({ id: "", name: "Workspace member", firstName: "Workspace member", initials: "", you: false, role: "member" })), true);
+  assert.equal(needsYouUnknownSender(card({ id: "", name: "Workspace member", firstName: "Workspace member", initials: "  ", you: false, role: "member" })), true);
+  assert.equal(needsYouUnknownSender(card({ id: "amy", name: "Amy", firstName: "Amy", initials: "A", you: false, role: "member" })), false);
+  assert.equal(needsYouUnknownSender(card({ id: "A", name: "Claude", label: "Your Claude", nestedLabel: "Claude" })), false, "an agent is never unknown here");
+});

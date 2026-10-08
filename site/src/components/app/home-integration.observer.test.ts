@@ -637,17 +637,26 @@ test('a stale self-role save ends on sign-in, and the email names Save; removal 
   assert.equal(runInContext('state.roleRefusal.text', context), 'Home needs at least one owner. Make someone else an owner first.');
 });
 
-test('an absent People & agents target falls back to the roster heading', async () => {
-  const frames: (()=>void)[] = [], focused: string[] = [];
+/* People & agents is a page now (2026-10-07). ~~"falls back to the roster heading"~~ of the dialog:
+   on the page an absent target falls back to the page title, and a visit from elsewhere navigates. */
+test('an absent People & agents target falls back to the page heading', async () => {
+  const frames: (()=>void)[] = [], focused: string[] = [], navigations: unknown[] = []; let rendered = 0;
   const context = createContext({window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
-    one:(selector:string)=>selector==='[data-roster-dialog]'?{open:false,showModal(){}}:selector==='#dashboard-roster-title'?{focus:()=>focused.push('roster')}:null,
-    all:()=>[], renderDialogRoster:()=>{}, syncPeopleDialogLayout:()=>{}, loadHouseholdConnections:()=>{},
+    one:(selector:string)=>selector==='#pd-page-title'?{focus:()=>focused.push('page')}:null,
+    all:()=>[], renderDialogRoster:()=>{ rendered++; }, loadHouseholdConnections:()=>{},
+    navigateHome:(route:unknown, mode:string)=>{ navigations.push([route, mode]); return Promise.resolve(); },
     peopleDialogState:{query:'',selected:null,focusApplied:null},sampleMode:true});
-  runInContext("let peopleDialogFocus,rosterFilter='';",context);
-  runInContext(await dashboardFunctions(['openRosterDialog']),context);
-  runInContext("openRosterDialog({kind:'person',id:'gone'})",context);
+  runInContext("let peopleDialogFocus,rosterFilter='',activeWorkspaceId='W',homeRoute={view:'people',workspaceId:'W'};",context);
+  runInContext(await dashboardFunctions(['openRosterDialog','focusPeoplePage']),context);
+  await runInContext("openRosterDialog({kind:'person',id:'gone'})",context);
   for (const frame of frames) frame();
-  assert.deepEqual(focused,['roster']);
+  assert.deepEqual(focused,['page']);
+  assert.equal(rendered,1,'already on the page: it re-renders in place');
+  assert.deepEqual(navigations,[]);
+  /* Positive control on the same context: from the workspace, the door navigates to the page. */
+  runInContext("homeRoute={view:'chat',workspaceId:'W'}",context);
+  await runInContext("openRosterDialog()",context);
+  assert.deepEqual(JSON.parse(JSON.stringify(navigations)),[[{view:'people',workspaceId:'W'},'push']]);
 });
 
 

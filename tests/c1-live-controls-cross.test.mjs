@@ -15,7 +15,9 @@ import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { readFile, writeFile, chmod, mkdir, stat, lstat, mkdtemp, rm } from 'node:fs/promises';
-import { ORDINARY_TOOLS, expectedReleaseMcpToolNames } from '../scripts/live-ordinary-controls.mjs';
+import { ORDINARY_TOOLS } from '../scripts/live-ordinary-controls.mjs';
+
+import { baselineEdgeSha, releaseSha, catalogAt } from './support/live-edge-catalog.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const script = join(repo, 'scripts/live-ordinary-controls.mjs');
@@ -38,9 +40,9 @@ assert.ok(guardedRm.startsWith('/'), 'absolute installed rm runtime');
 const issuer = 'https://mcp.commonswarm.com', api = 'https://api.commonswarm.com';
 const client = 'https://yulanventures.com/oauth/c1-controls/client.json';
 const redirect = 'https://c1-controls.invalid/callback', resource = `${issuer}/mcp`;
-const release = 'a'.repeat(40), scope = 'openid offline_access mcp';
-const baselineTools = [...ORDINARY_TOOLS];
-const releaseTools = await expectedReleaseMcpToolNames();
+const release = releaseSha, scope = 'openid offline_access mcp';
+const baselineTools = (await catalogAt(baselineEdgeSha, ORDINARY_TOOLS)).names;
+const releaseTools = (await catalogAt(releaseSha, ORDINARY_TOOLS)).names;
 const windowId = 'ABC123';
 const hash = b => createHash('sha256').update(b).digest('hex');
 const b64hash = b => createHash('sha256').update(b).digest('base64url');
@@ -124,9 +126,9 @@ async function liveFixture(t) {
         else if (body.method === 'tools/call') {
           assert.equal(req.headers['mcp-protocol-version'], '2025-06-18');
           assert.equal(body.params.name, 'claim_seat');
-          assert.deepEqual(body.params.arguments, { workspace_id: wid, name: 'c1-controls-runner-aaaaaaaa',
-            request_id: `c1_controls_claim_${hash(`${release}:${wid}:c1-controls-runner-aaaaaaaa`).slice(0, 40)}` });
-          result = { content: [{ type: 'text', text: JSON.stringify({ workspace_id: wid, name: 'c1-controls-runner-aaaaaaaa',
+          assert.deepEqual(body.params.arguments, { workspace_id: wid, name: `c1-controls-runner-${release.slice(0, 8)}`,
+            request_id: `c1_controls_claim_${hash(`${release}:${wid}:c1-controls-runner-${release.slice(0, 8)}`).slice(0, 40)}` });
+          result = { content: [{ type: 'text', text: JSON.stringify({ workspace_id: wid, name: `c1-controls-runner-${release.slice(0, 8)}`,
             seat_id: '44444444-4444-4444-8444-444444444444', handle: 'seat_' + 'a'.repeat(32) }) }] };
         } else {
           assert.equal(body.method, 'tools/list');
@@ -185,6 +187,11 @@ async function liveFixture(t) {
       command === 'final-cleanup' ? ['final-cleanup', '--consent-receipt', f.consent] :
         command === 'probe-credentials' ? ['probe-credentials', '--window', 'W2', '--window-id', windowId, '--consent-receipt', f.consent, '--human-profile', human] :
         ['window', '--phase', 'before', '--window', 'W1', '--window-id', windowId, '--consent-receipt', f.consent, '--human-profile', human, '--seat-profile', seat];
+    if (command !== 'final-cleanup') {
+      const phase = extra[extra.indexOf('--phase') + 1], window = extra[extra.indexOf('--window') + 1];
+      const switched = phase === 'post-W5' || ['W5', 'W6', 'W7'].includes(window) || (window === 'W4' && phase === 'after');
+      args.push('--live-edge-sha', switched ? release : baselineEdgeSha);
+    }
     for (let i = 0; i < extra.length; i++) {
       const arg = extra[i]; const n = args.indexOf(arg);
       if (n >= 0) args.splice(n, 2);
@@ -458,7 +465,7 @@ function openRun(f, window, consentBytes, liveBytes, { producerBytes = scriptByt
   const livePath = stageReceipt(f, 'open-live.json', liveBytes);
   const live = JSON.parse(liveBytes.toString());
   const { archive, archiveSha } = buildArchive(f, planText, producerBytes);
-  f.put('open-inputs.json', { release_sha: release, window_id: live.window_id, window, archive_sha256: archiveSha, plan_sha256: digest(planText) });
+  f.put('open-inputs.json', { release_sha: release, baseline_edge_sha: baselineEdgeSha, window_id: live.window_id, window, archive_sha256: archiveSha, plan_sha256: digest(planText) });
   f.put('gates.json', '{}');
   for (const name of ['20-commonswarm-mcp.caddy', '10-commonswarm-api.caddy']) f.put('caddy/' + name, 'fixture ' + name);
   return f.run(['ai-open'], window, {
@@ -478,7 +485,7 @@ function liveControlsRun(f, window, phase, consentBytes, liveBytes) {
   const live = JSON.parse(liveBytes.toString());
   assert.equal(digest(readFileSync(join(f.releaseRoot, 'scripts/live-ordinary-controls.mjs'))), live.producer_sha256);
   const { archive, archiveSha } = buildArchive(f, 'fixture plan\n');
-  f.put('inputs.json', { release_sha: release, window_id: live.window_id, window: live.window, archive_sha256: archiveSha });
+  f.put('inputs.json', { release_sha: release, baseline_edge_sha: ['W5','W6','W7'].includes(live.window) ? release : baselineEdgeSha, window_id: live.window_id, window: live.window, archive_sha256: archiveSha });
   return f.run(['ai-live-controls'], window, {
     INPUTS_FILE: join(f.root, 'inputs.json'),
     LIVE_CONTROLS_FILE: livePath,

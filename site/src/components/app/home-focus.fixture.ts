@@ -36,6 +36,14 @@ export async function focusFixture() {
     const renderSetupChecklist = () => { rosterRenders++; };
     const wakePathMark = () => null, shouldRetireFreshInvite = () => false, retireFreshInviteResult = () => {};
     const navigateHomeHref = () => {}, selectHomePerson = () => {}, navigateHome = () => {}, homeBack = () => {}, openRosterDialog = () => {}, openWorkspaceDetailsDialog = () => {};
+    // renderHomeShell's feed-menu dependencies (ruling 2). This fixture has no feed, so the menu offers no feed entries.
+    const feedMenuState = () => null, feedMenuAction = () => {}, syncFeedChrome = () => {};
+    // renderHomeShell's phone account entries (round 7). No account here: the phone ⋯ offers none and the door stays.
+    const accountMenuState = () => null, accountMenuAction = () => {};
+    // renderHomeRail's joined rail (home-map homeRailPeople). The browser fixture imports catchUpRailPeople, which is
+    // homeRailPeople(entries); with the view's people as the first source it is the same rail for every state this
+    // fixture reaches (catchUpData is empty on its workspace route). Called lazily, so the vm unit test never needs it.
+    const homeRailPeople = (entries, current = null) => catchUpRailPeople(current ? [{ detail: { people: current } }, ...entries] : entries);
     const poll = async (elapsed = 30001) => { now += elapsed; await refreshPendingAccess('W',1); return {reads:rosterReads,rendered:rosterRenders}; };
   `;
   const production = (selected = names) => selected.map(name => `const ${declarations.get(name)};`).join("\n");

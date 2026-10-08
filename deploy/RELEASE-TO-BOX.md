@@ -182,8 +182,10 @@ ownership, symlink, mode, target, or content mismatch remains a stop.
 2. HezLead approves that SHA and an agreed maximum backup age in seconds when a
    database backup is required.
 3. Anvil runs `runbook-02` and `runbook-04` on the Mac mini from this
-   repository. They prove
-   the archive came from the GitHub remote. The lead must have already written
+   repository. `runbook-02` proves the archive came from the GitHub remote;
+   `runbook-04` checks edge environment names only when `KIND_LIST` contains
+   `edge`, otherwise it reports "not applicable" and exits 0. The lead must have
+   already written
    `gate-evidence.txt` in the evidence directory, whose name uses the UTC date on
    which the preflight runs (`docs/evidence/<UTC date>-release-<12-char sha>-<window-id>/`,
    or the same name under `EVIDENCE_ROOT` when the item plan's open receipt names
@@ -310,7 +312,14 @@ window identity, and before any database, service, timer, symlink, or Caddy
 mutation, Anvil runs `runbook-03` on the box to create the copy-back manifest.
 Set `KIND_LIST` to the same approved surfaces used by the apply block,
 list every pending migration version, and list the subset whose functional
-proof produces a `.txt` file during this window. Set the five named switches
+proof produces a `.txt` file during this window. An absent `NO_MIGRATIONS` in
+the durable inputs means `no`; both version lists must be non-empty. For a stack-only image
+release, use `KIND_LIST='stack'`, `NO_MIGRATIONS=yes`, `MIGRATION_VERSIONS=''`,
+and `FUNCTIONAL_VERSIONS=''` in the durable `item-resolved-inputs.env` on both
+hosts. Both lists must be present and empty with `yes`; a missing version list,
+any present switch value other than `yes` or `no`, or a non-empty list with `yes`
+stops the block. An inherited shell switch is ignored. Its copy-back manifest
+then contains no migration entries. Set the five named switches
 when the window includes the section 4 H0 ledger backfill, the guarded stack
 switch, the section 8 backup-status proof, the section 9 API Caddy pair, or the
 section 9 MCP Caddy site.
@@ -346,6 +355,7 @@ initial manifest is built only from the explicit arrays below, never from
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
+  unset NO_MIGRATIONS
   . "$PROOF_DIR/item-resolved-inputs.env"
   : "${KIND_LIST:?resolved item input missing}"
   : "${H0_LEDGER_BACKFILL:?resolved item input missing}"
@@ -353,8 +363,14 @@ initial manifest is built only from the explicit arrays below, never from
   : "${BACKUP_STATUS_PROOF:?resolved item input missing}"
   : "${API_CADDY_PAIR:?resolved item input missing}"
   : "${MCP_CADDY_RELEASE:?resolved item input missing}"
-  : "${MIGRATION_VERSIONS:?resolved item input missing}"
-  : "${FUNCTIONAL_VERSIONS:?resolved item input missing}"
+  NO_MIGRATIONS="${NO_MIGRATIONS-no}"
+  : "${MIGRATION_VERSIONS?resolved item input missing}"
+  : "${FUNCTIONAL_VERSIONS?resolved item input missing}"
+  case "$NO_MIGRATIONS" in
+    yes) test -z "$MIGRATION_VERSIONS"; test -z "$FUNCTIONAL_VERSIONS" ;;
+    no) test -n "$MIGRATION_VERSIONS"; test -n "$FUNCTIONAL_VERSIONS" ;;
+    *) false ;;
+  esac
   LIST_INPUT="$KIND_LIST"
   KIND_ARRAY=()
   while IFS= read -r VALUE || [ -n "$VALUE" ]; do
@@ -371,8 +387,10 @@ initial manifest is built only from the explicit arrays below, never from
     if [ -n "$VALUE" ]; then FUNCTIONAL_VERSIONS[${#FUNCTIONAL_VERSIONS[@]}]="$VALUE"; fi
   done < <(printf '%s\n' "$LIST_INPUT" | tr ' \t' '\n')
   test -n "${KIND_ARRAY[*]:-}"
-  test -n "${MIGRATION_VERSIONS[*]:-}"
-  test -n "${FUNCTIONAL_VERSIONS[*]:-}"
+  if [ "$NO_MIGRATIONS" = no ]; then
+    test -n "${MIGRATION_VERSIONS[*]:-}"
+    test -n "${FUNCTIONAL_VERSIONS[*]:-}"
+  fi
   ITEM_COPY_BACK_FILES=()
   while IFS= read -r VALUE || [ -n "$VALUE" ]; do
     test -n "$VALUE" && ITEM_COPY_BACK_FILES[${#ITEM_COPY_BACK_FILES[@]}]="$VALUE"
@@ -495,8 +513,8 @@ initial manifest is built only from the explicit arrays below, never from
 ```
 
 For a database release, CSwarmDevLead places the reviewed catalog and functional
-verification SQL in `EVIDENCE_DIR` before Anvil continues. Derive the
-environment-name inventory from the same exact-SHA archive on the Mac.
+verification SQL in `EVIDENCE_DIR` before Anvil continues. For an edge release,
+derive the environment-name inventory from the same exact-SHA archive on the Mac.
 The archived router's `REQUIRED_MAIN_ENV` (which includes the service-role
 key) and database alias rule are the base; the lead
 reviews strict checks in each changed function at that SHA and adds any further
@@ -516,7 +534,22 @@ the dark `mcp` name:
   . "$HOME/.commonswarm-release-window.env"
   : "${RELEASE_SHA:?named release SHA required}"
   test "$SHA" = "$RELEASE_SHA"
+  unset KIND_LIST
   . "$EVIDENCE_DIR/item-resolved-inputs.env"
+  : "${KIND_LIST:?resolved item input missing}"
+  LIST_INPUT="$KIND_LIST"
+  KIND_ARRAY=()
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
+    if [ -n "$VALUE" ]; then KIND_ARRAY[${#KIND_ARRAY[@]}]="$VALUE"; fi
+  done < <(printf '%s\n' "$LIST_INPUT" | tr ' \t' '\n')
+  test -n "${KIND_ARRAY[*]:-}"
+  for KIND in "${KIND_ARRAY[@]}"; do
+    case "$KIND" in edge|stack) ;; *) false ;; esac
+  done
+  case " ${KIND_ARRAY[*]} " in
+    *' edge '*) ;;
+    *) printf 'runbook-04: not applicable (KIND_LIST has no edge)\n'; exit 0 ;;
+  esac
   test -s "$ARCHIVE"
   ROUTER_DIR="$(mktemp -d /tmp/commonswarm-router-XXXXXX)"
   case "$ROUTER_DIR" in /tmp/commonswarm-router-??????) ;; *) false ;; esac
@@ -581,8 +614,9 @@ read migration files and helpers from `NEW_STACK`. H0 therefore uses
 `KIND_LIST='edge stack'`. Building that immutable stack directory does not
 itself switch `stack/current`. The guarded switch is the only switch site and
 runs only if stack runtime files changed. Run `runbook-05` only after
-`1-apply-release-directories` below has built both release directories and
-persisted `window.env`. Compare them on the box before deciding:
+`1-apply-release-directories` below has built the requested release directories
+and persisted `window.env`. For `KIND_LIST='stack'` it builds only the stack release
+directory; the same comparison applies. Compare them on the box before deciding:
 
 ```sh
 # step: runbook-05
@@ -1013,7 +1047,11 @@ PY
 After the apply block has created `PROOF_DIR`, exit the box root shell and SSH
 session. Back on the Mac mini, Anvil prepares the proof list. For a database
 release, include the SQL files; for an edge release, include the name-only
-inventory. HezLead reviews this exact list for secrets before transfer:
+inventory. `runbook-07` reads `KIND_LIST` from the Mac's durable item inputs:
+for `KIND_LIST='stack'` its proof list retains `gate-evidence.txt` and any
+reviewed SQL files, and omits `required-edge-env.json` and
+`edge-env-source-check.txt`. HezLead reviews this exact list for secrets before
+transfer:
 
 ```sh
 # step: runbook-07
@@ -1027,9 +1065,24 @@ inventory. HezLead reviews this exact list for secrets before transfer:
   . "$HOME/.commonswarm-release-window.env"
   test "$SHA" = "$RELEASE_SHA"
   test -d "$EVIDENCE_DIR"
+  unset KIND_LIST
+  . "$EVIDENCE_DIR/item-resolved-inputs.env"
+  : "${KIND_LIST:?resolved item input missing}"
+  LIST_INPUT="$KIND_LIST"
+  KIND_ARRAY=()
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
+    if [ -n "$VALUE" ]; then KIND_ARRAY[${#KIND_ARRAY[@]}]="$VALUE"; fi
+  done < <(printf '%s\n' "$LIST_INPUT" | tr ' \t' '\n')
+  test -n "${KIND_ARRAY[*]:-}"
+  for KIND in "${KIND_ARRAY[@]}"; do
+    case "$KIND" in edge|stack) ;; *) false ;; esac
+  done
   PROOF_LIST="$EVIDENCE_DIR/proof-transfer.list"
   (cd "$EVIDENCE_DIR" && find . -maxdepth 1 -type f -name '*.sql' -print | LC_ALL=C sort) >"$PROOF_LIST"
-  printf '%s\n' gate-evidence.txt required-edge-env.json edge-env-source-check.txt >>"$PROOF_LIST"
+  printf '%s\n' gate-evidence.txt >>"$PROOF_LIST"
+  case " ${KIND_ARRAY[*]} " in
+    *' edge '*) printf '%s\n' required-edge-env.json edge-env-source-check.txt >>"$PROOF_LIST" ;;
+  esac
   chmod 0600 "$PROOF_LIST"
   cat "$PROOF_LIST"
 )
@@ -2804,6 +2857,10 @@ Identify the changed service from the reviewed compose diff. Stack service names
 are `postgres`, `gotrue`, `postgrest`, `realtime`, and `storage-api`; edge uses
 `edge-runtime`. A PostgreSQL image change requires a fresh verified backup from
 section 5 and Tom's explicit approval before pull or recreate.
+
+A stack-only image release uses section 1 with `KIND_LIST='stack'` and explicit
+`NO_MIGRATIONS=yes` with both version lists empty; `runbook-04` reports "not
+applicable" and the proof list omits the edge environment files.
 
 ```sh
 # step: runbook-46

@@ -16,7 +16,7 @@ test("all addresses round trip and encoded ids cannot add a query field", () => 
     [{ view: "catchup" }, "/app?v=catchup"], [{ view: "new" }, "/app?v=new"],
     [{ view: "chat", workspaceId: null }, "/app"],
     [{ view: "chat", workspaceId: "W", channelId: "C", messageId: "S" }, "/app?w=W&c=C&m=S"],
-    ...["todos", "lists", "files", "wiki", "add-agent"].map(view => [{ view, workspaceId: "W" }, `/app?w=W&v=${view}`]),
+    ...["todos", "lists", "files", "wiki", "add-agent", "people"].map(view => [{ view, workspaceId: "W" }, `/app?w=W&v=${view}`]),
     [{ view: "todo", workspaceId: "W", todoId: "T&agent=A" }, "/app?w=W&todo=T%26agent%3DA"],
     [{ view: "agent", workspaceId: "W / 李", agentId: "A#x" }, "/app?w=W+%2F+%E6%9D%8E&agent=A%23x"],
   ];
@@ -29,5 +29,6 @@ test("all addresses round trip and encoded ids cannot add a query field", () => 
 test("parent links return to the containing view or Catch up", () => {
   assert.deepEqual(parentRoute({ view: "todo", workspaceId: "W", todoId: "T" }), { view: "todos", workspaceId: "W" });
   assert.deepEqual(parentRoute({ view: "agent", workspaceId: "W", agentId: "A" }), { view: "chat", workspaceId: "W" });
+  assert.deepEqual(parentRoute({ view: "people", workspaceId: "W" }), { view: "chat", workspaceId: "W" });
   for (const view of ["chat", "todos", "lists", "files", "wiki", "add-agent"]) assert.deepEqual(parentRoute({ view, workspaceId: "W" }), { view: "catchup" });
 });

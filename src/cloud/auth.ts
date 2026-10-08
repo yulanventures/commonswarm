@@ -1,3 +1,4 @@
+import { fetchRestReadRetrying } from "./rest-read-retry.js";
 import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { spawn } from "node:child_process";
@@ -424,7 +425,7 @@ async function discoverSoleWorkspace(
   url.searchParams.set("limit", "2");
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await fetchRestReadRetrying(fetch, url, {
       headers: {
         authorization: `Bearer ${accessToken}`,
         apikey: target.anonKey,

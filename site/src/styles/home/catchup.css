@@ -1,133 +1,235 @@
-/* Catch up view (UI-SPEC.md section 3.2). Lane C. Site tokens only. */
+/* Catch up view (UI-SPEC.md section 3.2). Canvas artboard "Main" (ref/Main.dc.html). Home tokens only. */
 
 .hm-catchup {
+  container: hm-catchup / inline-size;
   display: flex;
   flex-direction: column;
-  gap: var(--gap-grid, var(--s-8));
-  padding: var(--s-8) clamp(var(--s-4), 3vw, var(--s-10)) var(--s-12);
-  color: var(--text);
-  background: var(--bg);
+  gap: 32px;
+  padding: 32px clamp(16px, 3vw, 40px) 56px;
+  color: var(--home-ink);
+  background: var(--home-canvas);
+  font-family: var(--home-font-body);
+  font-size: 16px;
+  line-height: 1.45;
 }
 
+/* Header: date eyebrow, greeting, measured subline. */
 .hm-catchup-header {
   display: flex;
   flex-direction: column;
-  gap: var(--s-2);
+}
+
+.hm-catchup-date {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--home-ink-muted);
 }
 
 .hm-catchup-title {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: var(--t-3xl);
-  font-weight: var(--weight-display);
-  letter-spacing: var(--track-head);
+  margin: 4px 0 0;
+  font-family: var(--home-font-display);
+  font-size: clamp(32px, 3.4vw, 46px);
+  font-weight: 700;
+  letter-spacing: -0.025em;
   line-height: 1.05;
+  overflow-wrap: anywhere;
 }
 
 .hm-catchup-subline {
-  margin: 0;
-  font-size: var(--t-lg);
-  color: var(--text-muted);
+  margin: 8px 0 0;
+  font-size: 17px;
+  color: var(--home-ink-muted);
 }
 
 .hm-catchup-section-title {
-  margin: 0 0 var(--s-3);
-  font-family: var(--font-display);
-  font-size: var(--t-xl);
-  font-weight: var(--weight-display);
-  letter-spacing: var(--track-head);
+  margin: 0;
+  font-family: var(--home-font-display);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  /* The canvas h2 inherits the body 1.45 (31.9px); set it here, because the global h2 rule tightens it. */
+  line-height: 1.45;
+}
+
+.hm-catchup-latest > .hm-catchup-section-title { margin-block-end: 14px; }
+
+/* The band's own eyebrow says "Needs you"; the section heading stays for assistive technology only. */
+.hm-catchup-needs-title {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .hm-catchup-needs,
 .hm-catchup-workspaces,
 .hm-catchup-latest {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: var(--s-3);
+  min-inline-size: 0;
 }
 
-.hm-catchup-needs-list,
-.hm-catchup-latest-list {
+.hm-catchup-needs { gap: 10px; }
+
+.hm-catchup-needs-list {
   display: flex;
   flex-direction: column;
-  gap: var(--s-3);
+  gap: 8px;
 }
 
+/* Needs you, first item: the lime band. Avatar | meta + sentence | one ink pill on the right. */
+.hm-catchup-needs .hm-needs-you,
 .hm-catchup-needs-preview {
-  padding: var(--pad-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  box-shadow: var(--shadow-card);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px 18px;
+  padding: 18px 20px;
+  border-radius: 18px;
+  background: var(--home-lime);
+  color: var(--home-lime-ink);
 }
+
+.hm-catchup-needs .hm-needs-you > .hm-needs-copy { display: contents; }
+.hm-catchup-needs .hm-needs-you > :is(.hm-person-avatar, .hm-agent-orb) { grid-column: 1; grid-row: 1 / span 2; }
+.hm-catchup-needs .hm-needs-you > .hm-agent-orb { inline-size: 32px; block-size: 32px; border-radius: 10px; font-size: 14px; }
+.hm-catchup-needs .hm-needs-you > .hm-person-avatar { inline-size: 32px; block-size: 32px; font-size: 14px; }
+.hm-catchup-needs .hm-needs-you .hm-eyebrow { grid-column: 2; grid-row: 1; align-self: end; }
+.hm-catchup-needs .hm-needs-you .hm-needs-title { grid-column: 2; grid-row: 2; align-self: start; margin: 0; }
+.hm-catchup-needs .hm-needs-you .hm-actions { grid-column: 3; grid-row: 1 / span 2; margin: 0; justify-content: flex-end; }
+
+.hm-catchup-needs-preview { grid-template-columns: minmax(0, 1fr); }
 
 .hm-catchup-needs-eyebrow,
-.hm-catchup-needs-what {
-  margin: 0;
-}
+.hm-catchup-needs-what { margin: 0; }
+.hm-catchup-needs-eyebrow { font-size: 13px; font-weight: 700; }
+.hm-catchup-needs-what { font-size: 17px; font-weight: 600; line-height: 1.35; text-wrap: pretty; }
 
-.hm-catchup-needs-eyebrow {
-  font-size: var(--t-sm);
-  color: var(--text-muted);
+/* Needs you, later items: quieter pale-lime rows under the band, outline pill on the right. */
+.hm-catchup-needs .hm-needs-you[data-needs-rank="more"],
+.hm-catchup-needs-preview[data-needs-rank="more"] {
+  gap: 0 14px;
+  padding: 10px 14px 10px 16px;
+  border: 1px solid var(--home-card-border);
+  border-radius: 14px;
+  background: var(--home-lime-soft);
+  color: var(--home-ink);
 }
+.hm-catchup-needs .hm-needs-you[data-needs-rank="more"] > .hm-agent-orb { inline-size: 28px; block-size: 28px; border-radius: 8px; font-size: 12px; }
+.hm-catchup-needs .hm-needs-you[data-needs-rank="more"] > .hm-person-avatar { inline-size: 28px; block-size: 28px; font-size: 12px; }
+.hm-catchup-needs .hm-needs-you[data-needs-rank="more"] .hm-owner-badge { box-shadow: 0 0 0 2px var(--home-lime-soft); }
+.hm-catchup-needs [data-needs-rank="more"] :is(.hm-eyebrow, .hm-catchup-needs-eyebrow) { font-size: 12px; color: var(--home-ink-muted); }
+.hm-catchup-needs [data-needs-rank="more"] :is(.hm-needs-title, .hm-catchup-needs-what) { font-size: 15px; line-height: 1.35; }
+.hm-catchup-needs .hm-needs-you[data-needs-rank="more"] .hm-button {
+  background: transparent;
+  color: var(--home-ink);
+}
+.hm-catchup-needs .hm-needs-you[data-needs-rank="more"] .hm-button[data-primary="true"] {
+  min-block-size: 44px;
+  padding-inline: 19.5px; /* 18px + the 1.5px inset stroke */
+  font-size: 14px;
+}
+.hm-catchup-needs .hm-needs-you[data-needs-rank="more"] .hm-button:hover { background: var(--home-lime-hover); color: var(--home-lime-ink); }
 
+/* "Show N more": a quiet underlined text row under the needs list, not a pill. The hit box stays 44px; the negative
+   block margins let it overlap the 10px section gap above and the 32px gap below, so its layout footprint is about
+   one text line (the list's 8px rhythm above the text) and the sections keep the canvas's 32px spacing. */
 .hm-catchup-show-more {
   align-self: flex-start;
-  min-height: 44px;
-  min-width: 44px;
-  padding: 0 var(--s-4);
-  border: 1px solid var(--border-interactive);
-  border-radius: var(--radius-pill);
-  background: var(--surface);
-  color: var(--text);
+  min-block-size: 44px;
+  min-inline-size: 44px;
+  margin-block: -14px -12px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--home-ink-muted);
   font: inherit;
-  font-weight: var(--weight-semibold);
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: underline;
   cursor: pointer;
 }
-
+.hm-catchup-show-more:hover { color: var(--home-ink); }
 .hm-catchup-show-more:focus-visible {
   outline: 2px solid transparent;
   box-shadow: var(--focus-ring);
 }
 
+/* Your workspaces: heading row with the legend on the right. */
+.hm-catchup-workspaces-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 24px;
+  margin-block-end: 14px;
+}
+
+.hm-catchup-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 18px;
+  font-size: 14px;
+  color: var(--home-ink-muted);
+}
+.hm-catchup-legend-item { display: inline-flex; align-items: center; gap: 7px; }
+.hm-catchup-legend-mark {
+  display: inline-block;
+  flex: none;
+  inline-size: 14px;
+  block-size: 14px;
+  box-sizing: border-box;
+}
+.hm-catchup-legend-mark[data-shape="person"] { border-radius: 50%; background: var(--home-ink-muted); }
+.hm-catchup-legend-mark[data-shape="agent"] { border: 1.5px solid var(--home-ink-muted); border-radius: 4.5px; }
+
 .hm-catchup-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
-  gap: var(--s-3);
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: 14px;
 }
 
 .hm-catchup-card {
   display: flex;
   flex-direction: column;
-  gap: var(--s-3);
-  min-height: 10.75rem;
-  padding: var(--pad-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  box-shadow: var(--shadow-card);
-  color: inherit;
+  gap: 14px;
+  min-inline-size: 0;
+  min-block-size: 172px;
+  padding: 18px;
+  box-sizing: border-box;
+  border: 1px solid var(--home-card-border);
+  border-radius: 18px;
+  background: var(--home-card);
+  box-shadow: var(--home-card-shadow);
+  color: var(--home-ink);
   text-decoration: none;
 }
-
+a.hm-catchup-card:hover { border-color: var(--home-field-border); }
 .hm-catchup-card:focus-visible {
   outline: 2px solid transparent;
-  box-shadow: var(--focus-ring), var(--shadow-card);
+  box-shadow: var(--focus-ring), var(--home-card-shadow);
 }
 
 .hm-catchup-card-body {
   display: flex;
   flex-direction: column;
-  gap: var(--s-1);
-  min-width: 0;
+  min-inline-size: 0;
 }
 
 .hm-catchup-card-title,
 .hm-catchup-card-head {
-  font-family: var(--font-display);
-  font-size: var(--t-lg);
-  font-weight: var(--weight-display);
-  line-height: 1.15;
+  font-family: var(--home-font-display);
+  font-size: 23px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.1;
+  overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -135,42 +237,60 @@
 }
 
 .hm-catchup-card-summary,
-.hm-catchup-card-since,
 .hm-catchup-card-status,
-.hm-catchup-card-open,
-.hm-catchup-card-counts {
+.hm-catchup-card-open {
   margin: 0;
-  font-size: var(--t-sm);
-  color: var(--text-muted);
+  font-size: 14px;
+  color: var(--home-ink-muted);
 }
+.hm-catchup-card-summary { margin-block-start: 4px; }
 
+/* One row of person+agents capsules. Three capsules use the canvas's smaller 28/24 size. */
 .hm-catchup-card-capsules {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--s-2);
+  align-items: center;
+  gap: 10px;
+  min-inline-size: 0;
+}
+.hm-catchup-card-capsules[data-count="1"] > .hm-capsule { inline-size: 100%; }
+/* A person with no agents: an even ring round the avatar (the canvas always draws agents after the person). */
+.hm-catchup-card-capsules .hm-capsule:not(:has(.hm-agent-orb, .hm-capsule-more)) { padding: 3px; }
+.hm-catchup-card-capsules[data-count="3"] .hm-capsule:not(:has(.hm-agent-orb, .hm-capsule-more)) { padding: 2px; }
+.hm-catchup-card-capsules[data-count="3"] { gap: 5px; }
+.hm-catchup-card-capsules[data-count="3"] .hm-capsule { gap: 3px; padding: 2px 6px 2px 2px; }
+.hm-catchup-card-capsules[data-count="3"] .hm-person-avatar { inline-size: 28px; block-size: 28px; font-size: 12px; }
+.hm-catchup-card-capsules[data-count="3"] .hm-agent-orb { inline-size: 24px; block-size: 24px; border-radius: 7px; font-size: 11px; }
+.hm-catchup-card-more {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--home-ink-muted);
 }
 
+/* The single footer line under a hairline. */
 .hm-catchup-card-foot {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-1);
-  margin-top: auto;
-  padding-top: var(--s-3);
-  border-top: 1px solid var(--border);
+  margin-block-start: auto;
+  padding-block-start: 12px;
+  border-block-start: 1px solid var(--home-hairline);
 }
-
+.hm-catchup-card-since,
+.hm-catchup-card-counts,
 .hm-catchup-card-attention {
   margin: 0;
-  font-size: var(--t-sm);
-  font-weight: var(--weight-semibold);
-  color: var(--text);
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--home-ink-muted);
 }
+.hm-catchup-card-attention { font-weight: 700; color: var(--home-ink); }
 
+/* Latest: one card, rows separated by hairlines. Avatar | sentence + time | workspace pill. */
 .hm-catchup-latest-list {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--home-card-border);
+  border-radius: 18px;
+  background: var(--home-card);
+  box-shadow: var(--home-card-shadow);
   overflow: hidden;
 }
 
@@ -178,74 +298,93 @@
   display: flex;
   flex-wrap: wrap;
   align-items: flex-start;
-  gap: var(--s-2) var(--s-3);
-  padding: var(--s-4) var(--s-5);
+  gap: 10px 14px;
+  padding: 16px 20px;
 }
+.hm-catchup-latest-row + .hm-catchup-latest-row { border-block-start: 1px solid var(--home-hairline); }
 
-.hm-catchup-latest-row + .hm-catchup-latest-row {
-  border-top: 1px solid var(--border);
+.hm-catchup-latest-who {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  inline-size: 98px;
 }
-
-.hm-catchup-latest-author {
-  flex: 0 0 6rem;
-  font-size: var(--t-sm);
-  font-weight: var(--weight-semibold);
-}
-
+.hm-catchup-latest-who .hm-agent-orb { border-radius: 9px; }
+.hm-catchup-latest-who .hm-owner-badge { box-shadow: 0 0 0 2px var(--home-card); }
 .hm-catchup-latest-body {
-  flex: 1 1 16rem;
-  min-width: 0;
+  flex: 1 1 280px;
+  min-inline-size: 0;
 }
 
 .hm-catchup-latest-excerpt {
   margin: 0;
-  line-height: 1.4;
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
 }
+.hm-catchup-latest-author { font-weight: 700; color: var(--home-ink); }
 
 .hm-catchup-latest-when {
   display: block;
-  margin-top: var(--s-1);
-  font-size: var(--t-sm);
-  color: var(--text-muted);
+  margin-block-start: 4px;
+  font-size: 13px;
+  color: var(--home-ink-muted);
 }
 
 .hm-catchup-latest-workspace {
+  position: relative;
+  isolation: isolate;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 44px;
-  min-width: 44px;
-  padding: 0 var(--s-3);
-  border: 1px solid var(--border-interactive);
+  flex: none;
+  box-sizing: border-box;
+  /* The hit box stays 44px; the drawn pill is the canvas 38px (min-height 36px plus two 1px borders, ::before).
+     The negative margin keeps the row at 38px. */
+  min-block-size: 44px;
+  min-inline-size: 44px;
+  max-inline-size: 100%;
+  margin-block: -3px;
+  padding: 0 15px; /* the canvas's 14px plus its 1px border, which ::before paints inside the box */
+  border: 0;
   border-radius: var(--radius-pill);
-  color: inherit;
-  font-size: var(--t-sm);
-  font-weight: var(--weight-semibold);
+  color: var(--home-ink);
+  font-size: 14px;
+  font-weight: 600;
   text-decoration: none;
+  overflow-wrap: anywhere;
 }
+.hm-catchup-latest-workspace::before {
+  content: "";
+  position: absolute;
+  inset: 3px 0;
+  z-index: -1;
+  box-sizing: border-box;
+  border: 1px solid var(--home-pill-border);
+  border-radius: var(--radius-pill);
+}
+a.hm-catchup-latest-workspace:hover::before { background: var(--home-soft); }
+.hm-catchup-latest-workspace:focus-visible { outline: 2px solid transparent; }
+.hm-catchup-latest-workspace:focus-visible::before { box-shadow: var(--focus-ring); }
 
-.hm-catchup-latest-workspace:focus-visible {
-  outline: 2px solid transparent;
-  box-shadow: var(--focus-ring);
+/* Phone width: the band wraps and its pill goes under the text; latest pills go under the sentence. */
+@container hm-catchup (width < 560px) {
+  .hm-catchup-needs .hm-needs-you,
+  .hm-catchup-needs-preview { gap: 2px 14px; padding: 16px; }
+  .hm-catchup-needs .hm-needs-you .hm-actions { grid-column: 2 / -1; grid-row: 3; justify-content: flex-start; margin-block-start: 12px; }
+  .hm-catchup-needs .hm-needs-you[data-needs-rank="more"] { padding: 12px 14px; }
+  .hm-catchup-needs .hm-needs-you[data-needs-rank="more"] .hm-actions { margin-block-start: 8px; }
+  .hm-catchup-latest-row { display: grid; grid-template-columns: auto minmax(0, 1fr); padding: 14px 16px; }
+  .hm-catchup-latest-who { inline-size: auto; }
+  .hm-catchup-latest-row:not(:has(> .hm-catchup-latest-who)) { grid-template-columns: minmax(0, 1fr); }
+  .hm-catchup-latest-workspace { grid-column: -2; justify-self: start; }
 }
 
 @media (prefers-reduced-motion: no-preference) {
   .hm-catchup-card,
   .hm-catchup-show-more,
-  .hm-catchup-latest-workspace {
+  .hm-catchup-latest-workspace::before {
     transition: color var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard),
       background-color var(--dur-2) var(--ease-standard);
   }
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .hm-catchup-card,
-  :root:not([data-theme="light"]) .hm-catchup-latest-list {
-    background: var(--elev-2);
-  }
-}
-
-[data-theme="dark"] .hm-catchup-card,
-[data-theme="dark"] .hm-catchup-latest-list {
-  background: var(--elev-2);
 }

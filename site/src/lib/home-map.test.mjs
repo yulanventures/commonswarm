@@ -284,6 +284,8 @@ test("live Catch up keeps a successful overview when ask previews fail, without 
     assert.deepEqual([vm.workspaces[0].openTodos, vm.workspaces[0].lists, vm.workspaces[0].files], [4, 3, 2]);
     assert.deepEqual(reads, ["asks", "latest"], "both positive and failed previews reach the real loading path");
     assert.equal(vm.latest[0].excerpt, "Quotes arrived.");
+    assert.equal(vm.latest[0].author?.id, "amy", "a Latest row carries the member who posted it, for its picture");
+    assert.equal(vm.latest[0].author?.name, "Amy");
     assert.equal(context.homeOverviewCounts.get("W"), 1, "a failed ask preview keeps the overview's measured count");
     assert.equal(context.catchUpData[0].detail.needsYouComplete, true);
     assert.equal(vm.needsYou.length, 1);
@@ -752,4 +754,52 @@ test("workspace identifiers extend past a shared UUID prefix", async () => {
   const memberships = [{id:'12345678-1111-4000-8000-000000000001',name:'Home'},{id:'12345678-2111-4000-8000-000000000002',name:'home'}];
   assert.equal(railWorkspaceIdentifier(memberships[0],memberships),'12345678-1');
   assert.equal(railWorkspaceIdentifier(memberships[1],memberships),'12345678-2');
+});
+
+test("the rail lists everyone the viewer shares a loaded workspace with, each person once, viewer first", async () => {
+  const { homeRailPeople, catchUpRailPeople } = await import("./home-map.ts");
+  const { orderRailPeople } = await import("./home-rail.ts");
+  const base = { viewerId: "zoe", now, sample: false, access: [], signals: [] };
+  const zoe = { userId: "zoe", name: "Zoe", role: "owner" }, amy = { userId: "amy", name: "Amy Ash", role: "member" }, bo = { userId: "bo", name: "Bo", role: "member" };
+  const home = mapHomePeople({ ...base, members: [zoe, amy], agents: [{ principalId: "A", name: "Claude", ownerUserId: "zoe" }, { principalId: "M", name: "Muse", ownerUserId: "amy" }] });
+  const trip = mapHomePeople({ ...base, members: [amy, zoe, bo], agents: [{ principalId: "M", name: "Muse", ownerUserId: "amy" }, { principalId: "G", name: "Grok", ownerUserId: "bo" }, { principalId: "E", name: "Echo", ownerUserId: "gone" }] });
+  const rail = catchUpRailPeople([{ detail: { people: home } }, {}, { detail: { people: trip } }]);
+  const ordered = orderRailPeople(rail);
+  assert.deepEqual(ordered.groups.map(group => group.person.id), ["zoe", "amy", "bo"], "everyone once, the viewer first; no invented people");
+  assert.deepEqual(ordered.groups.map(group => group.agents.map(agent => agent.id)), [["A"], ["M"], ["G"]], "an agent in two workspaces appears once");
+  assert.deepEqual(rail.other.map(agent => agent.id), ["E"]);
+  assert.equal(rail.title, "People & agents");
+  // Nothing loaded: nobody is shown.
+  assert.deepEqual(homeRailPeople([{}, { detail: {} }]).groups, []);
+  // An agent left by its owner in one workspace but owned by a member elsewhere sits with that member.
+  const orphan = mapHomePeople({ ...base, members: [zoe], agents: [{ principalId: "M", name: "Muse", ownerUserId: "amy" }] });
+  const merged = homeRailPeople([{ detail: { people: orphan } }, { detail: { people: home } }]);
+  assert.deepEqual(merged.other, []);
+  assert.deepEqual(merged.groups.find(group => group.person.id === "amy").agents.map(agent => agent.id), ["M"]);
+});
+
+test("one agent measured differently per workspace: the workspace in view wins, else a problem, then working, then the first read", async () => {
+  const { homeRailPeople } = await import("./home-map.ts");
+  const state = (kind, attention = false) => ({ kind, word: kind === "working" ? "Working" : kind === "idle" ? "Idle" : "Disconnected", detail: "", attention, fix: { action: null, allowed: false, askWho: null, sentence: "" } });
+  const person = { id: "zoe", name: "Zoe", firstName: "Zoe", initials: "Z", you: true, role: "owner" };
+  const agent = (kind, attention) => ({ id: "A", name: "Claude", label: "Your Claude", nestedLabel: "Claude", ownerId: "zoe", ownerFirstName: null, ownerInitial: "Z", yours: true, tint: 0, hosted: false, state: state(kind, attention) });
+  const people = (kind, attention) => ({ title: "People & agents", other: [], groups: [{ person, agents: [agent(kind, attention)] }] });
+  const read = (...sources) => homeRailPeople(sources.map(people => ({ detail: { people } }))).groups[0].agents[0].state.kind;
+  assert.equal(read(people("idle"), people("working")), "working");
+  assert.equal(read(people("working"), people("disconnected", true)), "disconnected");
+  assert.equal(read(people("idle"), people("idle")), "idle");
+  const inView = homeRailPeople([{ detail: { people: people("disconnected", true) } }], people("idle"));
+  assert.equal(inView.groups[0].agents[0].state.kind, "idle", "the workspace in view keeps its own reading");
+  const source = people("idle");
+  homeRailPeople([{ detail: { people: source } }]).groups[0].agents[0].nestedLabel = "changed";
+  assert.equal(source.groups[0].agents[0].nestedLabel, "Claude", "the workspace's own model is not changed");
+});
+
+test("on an agent's page the agent is the current rail row and its workspace is not", () => {
+  const vm = mapHomeRail(workspaces, { view: "agent", workspaceId: "W", agentId: "A" }, null, false);
+  assert.equal(vm.currentAgentId, "A");
+  assert.deepEqual(vm.workspaces.map(row => row.current), [false, false]);
+  const chat = mapHomeRail(workspaces, { view: "chat", workspaceId: "W" }, null, false);
+  assert.equal(chat.currentAgentId, undefined);
+  assert.deepEqual(chat.workspaces.map(row => row.current), [true, false]);
 });

@@ -21,8 +21,10 @@ const implemented = usedByLaneT.every((fn) => !pendingSource(fn));
 type Geometry = {
   width: number; pageOverflow: boolean; smallTargets: string[]; titleWraps: boolean; titleOverflow: boolean;
   hostileElements: number; hostileTitle: boolean; hostileComment: boolean; hostileRow: boolean;
-  assignOpen: boolean; firstActive: string | null; firstActiveSelected: boolean; secondActive: string | null; optionHeights: number[];
-  escapeClosed: boolean; escapeFocus: boolean; assigned: string[]; enterFocus: boolean;
+  assignGroup: { role: string | null; labelledBy: string | null; heading: string | null; radios: number; checked: string[] };
+  tabStops: string[]; firstFocus: string | null; firstChecked: boolean; secondFocus: string | null; secondTabStops: string[];
+  moveSent: string[]; checkedAfterMove: string[]; optionHeights: number[];
+  escapeFocus: boolean; escapeSent: string[]; assigned: string[]; enterFocus: boolean; spaceAssigned: string[];
   tagOpen: boolean; tagLabels: string[]; tagFooter: string | null; tagText: string; tagClosedAfterPick: boolean; comments: { body: string; tags: string[] }[];
   tagEscapeClosed: boolean; personChips: number; agentChips: number; offStatus: string; offWarning: boolean; paneRows: number;
   sampleControls: string[]; sampleRows: number; sampleTitle: boolean; textColor: string;
@@ -104,7 +106,7 @@ test("To-do view, To-dos pane and pickers: keyboard paths, 44 px targets, wrappi
 
       const shown = (element) => element.getClientRects().length > 0;
       const box = (element) => (element.matches('input[type=checkbox], input[type=radio]') ? element.closest('label') || element : element).getBoundingClientRect();
-      const targets = () => [...document.querySelectorAll('button, a, input, select, textarea, [role=option]')].filter(shown);
+      const targets = () => [...document.querySelectorAll('button, a, input, select, textarea, [role=option], [role=radio]')].filter(shown);
       const small = () => targets().filter((element) => { const rect = box(element); return rect.height < 44 || rect.width < 44; })
         .map((element) => element.outerHTML.slice(0, 80));
       const key = (target, value) => target.dispatchEvent(new KeyboardEvent('keydown', { key: value, bubbles: true, cancelable: true }));
@@ -137,21 +139,30 @@ test("To-do view, To-dos pane and pickers: keyboard paths, 44 px targets, wrappi
         savingOpacity: (() => { let value = 1; for (let element = document.querySelector('#saving .hm-todo-status-more'); element; element = element.parentElement)
           value *= parseFloat(getComputedStyle(element).opacity); return value; })() };
 
-      // Assign picker: Down opens on the current value, Down moves, Escape closes and keeps focus; Down, Down, Enter picks.
-      const trigger = root.querySelector('[data-assign-picker] [role=combobox]');
-      trigger.focus(); key(trigger, 'ArrowDown');
-      metrics.assignOpen = trigger.getAttribute('aria-expanded') === 'true';
-      metrics.firstActive = trigger.getAttribute('aria-activedescendant');
-      const first = metrics.firstActive && document.getElementById(metrics.firstActive);
-      metrics.firstActiveSelected = !!first && first.getAttribute('aria-selected') === 'true' && first.closest('[role=listbox]').id === trigger.getAttribute('aria-controls');
-      metrics.optionHeights = [...root.querySelectorAll('[data-assign-picker] [role=option]')].map((option) => option.getBoundingClientRect().height);
-      metrics.smallTargets.push(...small());
-      key(trigger, 'ArrowDown'); metrics.secondActive = trigger.getAttribute('aria-activedescendant');
-      key(trigger, 'Escape');
-      metrics.escapeClosed = trigger.getAttribute('aria-expanded') === 'false' && !trigger.hasAttribute('aria-activedescendant');
-      metrics.escapeFocus = document.activeElement === trigger;
-      key(trigger, 'ArrowDown'); key(trigger, 'ArrowDown'); key(trigger, 'Enter');
-      metrics.assigned = calls.assigned; metrics.enterFocus = document.activeElement === trigger;
+      // Assign chips: one radiogroup named by the "Assigned to" heading, one roving tab stop on the recorded
+      // assignee. Arrows move focus only (a pick is a write); Escape keeps focus and sends nothing; Enter and
+      // Space pick the focused chip, and focus stays on it.
+      const group = root.querySelector('[data-assign-picker] [role=radiogroup]');
+      const radios = [...root.querySelectorAll('[data-assign-picker] [role=radio]')];
+      const checked = () => radios.filter((radio) => radio.getAttribute('aria-checked') === 'true').map((radio) => radio.dataset.pickValue);
+      const stops = () => radios.filter((radio) => radio.tabIndex === 0).map((radio) => radio.dataset.pickValue);
+      metrics.assignGroup = { role: group && group.getAttribute('role'), labelledBy: group && group.getAttribute('aria-labelledby'),
+        heading: group && document.getElementById(group.getAttribute('aria-labelledby'))?.textContent || null, radios: radios.length, checked: checked() };
+      metrics.optionHeights = radios.map((radio) => radio.getBoundingClientRect().height);
+      metrics.tabStops = stops();
+      const stop = radios.find((radio) => radio.tabIndex === 0);
+      stop.focus();
+      metrics.firstFocus = document.activeElement.id; metrics.firstChecked = document.activeElement.getAttribute('aria-checked') === 'true';
+      key(document.activeElement, 'ArrowRight');
+      metrics.secondFocus = document.activeElement.id; metrics.secondTabStops = stops();
+      metrics.moveSent = [...calls.assigned]; metrics.checkedAfterMove = checked();
+      const moved = document.activeElement;
+      key(moved, 'Escape');
+      metrics.escapeFocus = document.activeElement === moved; metrics.escapeSent = [...calls.assigned];
+      key(moved, 'Enter');
+      metrics.assigned = [...calls.assigned]; metrics.enterFocus = document.activeElement === moved;
+      key(moved, 'ArrowLeft'); key(document.activeElement, ' ');
+      metrics.spaceAssigned = [...calls.assigned];
 
       // Tag picker: "@Mu" opens a filtered list with the highlight footer; Enter writes the tag; Post sends it.
       const field = root.querySelector('[data-todo-comment]');
@@ -184,13 +195,19 @@ test("To-do view, To-dos pane and pickers: keyboard paths, 44 px targets, wrappi
       assert.equal(g.width, width);
       assert.equal(g.pageOverflow, false, `${where}: no horizontal overflow`);
       assert.deepEqual(g.smallTargets, [], `${where}: every visible target is at least 44 by 44 px`);
-      assert.ok(g.optionHeights.length === 5 && g.optionHeights.every((height) => height >= 44), `${where}: picker rows are 44 px`);
+      assert.ok(g.optionHeights.length === 5 && g.optionHeights.every((height) => height >= 44), `${where}: assign chips are 44 px`);
       assert.equal(g.titleWraps, true, `${where}: a 200-character title wraps`); assert.equal(g.titleOverflow, false);
       assert.equal(g.hostileElements, 0); assert.equal(g.hostileTitle, true); assert.equal(g.hostileComment, true); assert.equal(g.hostileRow, true);
-      assert.equal(g.assignOpen, true); assert.equal(g.firstActive, "hm-todo-t1-assigned-picker-agent-claude", "opens on the current assignee");
-      assert.equal(g.firstActiveSelected, true); assert.equal(g.secondActive, "hm-todo-t1-assigned-picker-agent-dot");
-      assert.equal(g.escapeClosed, true); assert.equal(g.escapeFocus, true, "Escape returns focus to the trigger");
-      assert.deepEqual(g.assigned, ["dot"]); assert.equal(g.enterFocus, true);
+      assert.deepEqual(g.assignGroup, { role: "radiogroup", labelledBy: "hm-todo-t1-assigned", heading: "Assigned to", radios: 5, checked: ["claude"] },
+        `${where}: the assign chips are one radiogroup named by the panel heading, with the recorded assignee checked`);
+      assert.deepEqual(g.tabStops, ["claude"], "one tab stop, on the current assignee");
+      assert.equal(g.firstFocus, "hm-todo-t1-assigned-picker-agent-claude"); assert.equal(g.firstChecked, true);
+      assert.equal(g.secondFocus, "hm-todo-t1-assigned-picker-agent-dot", "an arrow key moves focus to the next chip");
+      assert.deepEqual(g.secondTabStops, ["dot"], "the tab stop moves with focus");
+      assert.deepEqual(g.moveSent, [], "moving focus never assigns"); assert.deepEqual(g.checkedAfterMove, ["claude"], "moving focus does not change the checked chip");
+      assert.equal(g.escapeFocus, true, "Escape keeps focus on the chip"); assert.deepEqual(g.escapeSent, [], "Escape sends nothing");
+      assert.deepEqual(g.assigned, ["dot"]); assert.equal(g.enterFocus, true, "Enter picks the focused chip and keeps focus on it");
+      assert.deepEqual(g.spaceAssigned, ["dot", "claude"], "Space picks the focused chip");
       assert.equal(g.tagOpen, true); assert.deepEqual(g.tagLabels, ["Nikki’s Muse"]);
       assert.equal(g.tagFooter, "A tag here highlights the name. To ask them directly, write in chat.");
       assert.equal(g.tagText, "Thanks @Nikki’s Muse "); assert.equal(g.tagClosedAfterPick, true);

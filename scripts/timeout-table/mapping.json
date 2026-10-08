@@ -2466,6 +2466,20 @@
             "reason": "This lane exercises the read against loopback fixtures but does not measure the hosted request budget."
           }
         },
+        "src/cloud/rest-read-retry.ts:setTimeout": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/cloud/rest-read-retry.ts:1,83-90",
+          "detail": "One-second retry wait for the exact PostgREST JWT issued at future 401. This is a backoff delay, not a request timeout; the original read deadline and abort signal still bound the wait and retry.",
+          "operation": {
+            "name": "postgrest-jwt-clock-retry-wait",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "The table does not measure this local retry delay. Literal-response tests use fake waits; no hosted request is made."
+          }
+        },
         "src/cloud/signals.ts:SIGNAL_READ_TIMEOUT_MS": {
           "class": "network-api",
           "scope": "per-request",
@@ -2473,7 +2487,7 @@
             "/functions/v1/read",
             "/rest/v1/..."
           ],
-          "citation": "src/cloud/signals.ts:41,896-944",
+          "citation": "src/cloud/signals.ts:42,897-945",
           "detail": "Per-request signal read ceiling. The measured helper calls readAgentSignalPage (agent page, /functions/v1/read, body included). The same constant also bounds the members directory, human PostgREST /rest/v1/signals, retries, and delivery-receipt reads, which are not run.",
           "operation": {
             "name": "signal-read",
@@ -2491,7 +2505,7 @@
             "/functions/v1/read",
             "/rest/v1/..."
           ],
-          "citation": "src/cloud/signals.ts:944",
+          "citation": "src/cloud/signals.ts:945",
           "detail": "fetchSignalRead default timeoutMs = SIGNAL_READ_TIMEOUT_MS.",
           "operation": {
             "name": "signal-read-site",
@@ -2509,7 +2523,7 @@
             "/functions/v1/read",
             "/rest/v1/..."
           ],
-          "citation": "src/cloud/signals.ts:1057",
+          "citation": "src/cloud/signals.ts:1058",
           "detail": "fetchSignalReadRetrying default timeoutMs = SIGNAL_READ_TIMEOUT_MS.",
           "operation": {
             "name": "signal-read-site",

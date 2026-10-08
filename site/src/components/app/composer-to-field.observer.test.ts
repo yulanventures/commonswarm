@@ -28,16 +28,18 @@ const siteRoot = join(import.meta.dirname, "..", "..", "..");
 const distRoot = process.env.COMMONSWARM_COMPOSER_TO_DIST_ROOT ?? join(siteRoot, "dist");
 
 type ToMeasurement = {
-  /** The row at rest, before anything is typed: a named broadcast, on one line at 1440px. */
+  /** The row at rest, before anything is typed: a named broadcast, kept quiet (ruling 3). */
   atRest: {
     label: string;
     chips: string[];
     broadcastChip: string;
     note: string;
     oneLine: boolean;
+    rowHidden: boolean;
+    describesInput: boolean;
   };
-  /** A tag mid-sentence adds a chip and leaves the sentence alone. */
-  midSentence: { value: string; chips: string[]; note: string };
+  /** A tag mid-sentence adds a chip, shows the row on one line, and leaves the sentence alone. */
+  midSentence: { value: string; chips: string[]; note: string; rowHidden: boolean; oneLine: boolean };
   /** A second tag ADDS. The first recipient stays, and stays first. */
   secondTag: { chips: string[]; note: string };
   /** WHICH CHIPS CARRY THE NOTIFIED MARK, read without the mark's own selector. */
@@ -233,6 +235,8 @@ const frameScript = `<script>
 
     /* AT REST. Nothing typed, nothing remembered: the row names the broadcast. */
     const toRow = doc.querySelector("[data-composer-to]");
+    const rowIsOneLine = () => toRow.getBoundingClientRect().height <=
+      Math.max(...[...toRow.children].map((child) => child.getBoundingClientRect().height)) + 1;
     const atRest = {
       label: doc.querySelector("[data-composer-to-label]")?.textContent ?? "",
       chips: chipNames(),
@@ -242,14 +246,26 @@ const frameScript = `<script>
          tallest child. Counting line-heights was wrong here -- a chip is a control with its
          own padding and border, so a single-line row is already several note line-heights
          tall and that arithmetic reported four lines for one. */
-      oneLine: toRow.getBoundingClientRect().height <=
-        Math.max(...[...toRow.children].map((child) => child.getBoundingClientRect().height)) + 1,
+      oneLine: rowIsOneLine(),
+      /* QUIET AT REST (Tom's ruling 3, 2026-10-07): the row shows only when the address is not
+         "Everyone here". It is hidden, not emptied: the words above are still written, and the
+         note is still the box's description, so the delivery truth is still read out. */
+      rowHidden: toRow.hidden && toRow.getBoundingClientRect().height === 0,
+      describesInput: (input().getAttribute("aria-describedby") ?? "").split(" ")
+        .includes(doc.querySelector("[data-composer-to-note]")?.id || "no note id"),
     };
 
-    /* MID-SENTENCE. The tag stays in the prose; the chip is what gets addressed. */
+    /* MID-SENTENCE. The tag stays in the prose; the chip is what gets addressed. The row is
+       shown now, and the one-line claim the broadcast row used to carry is measured here. */
     type("as @Orbit said, ship it");
     await settleChips(1, "one chip from a mid-sentence tag");
-    const midSentence = { value: input().value, chips: chipNames(), note: noteText() };
+    const midSentence = {
+      value: input().value,
+      chips: chipNames(),
+      note: noteText(),
+      rowHidden: toRow.hidden || toRow.getBoundingClientRect().height === 0,
+      oneLine: rowIsOneLine(),
+    };
 
     /* A SECOND TAG ADDS (ruling D2). Orbit stays, and stays the notified one. */
     type("as @Orbit said, ship it with @River");
@@ -809,14 +825,18 @@ test("the To: row is the address, and it says who is notified", async () => {
       broadcastChip: "Everyone here",
       note: "No agent is notified. Everyone here can read this.",
       oneLine: true,
-    }, "atRest: the row at rest is a named broadcast on one line");
+      rowHidden: true,
+      describesInput: true,
+    }, "atRest: the row at rest is a named broadcast, hidden (ruling 3) and still the box's description");
 
     /* AN @TAG MID-SENTENCE ADDS A CHIP and leaves the sentence exactly as typed. */
     assert.deepEqual(measured.midSentence, {
       value: "as @Orbit said, ship it",
       chips: ["Orbit"],
       note: "Orbit is notified.",
-    }, "midSentence: a tag mid-sentence adds a chip and leaves the sentence alone");
+      rowHidden: false,
+      oneLine: true,
+    }, "midSentence: a tag mid-sentence shows the row, adds a chip and leaves the sentence alone");
 
     /* A SECOND TAG ADDS (ruling D2): it does not replace the set and does not open a DM.
        ~~"Orbit is still first, so Orbit is still the one the service wakes."~~ Retired

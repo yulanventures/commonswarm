@@ -106,10 +106,14 @@ export function streamAskCard(signal: StreamSignalVM, workspace: StreamContext["
     primary: { label: "Reply", action: "reply" } };
 }
 
-/** Everything extra one message gets beside its text. */
+/**
+ * Everything extra one message gets beside its text. The cards under a message carry no picture (Space.dc.html):
+ * the author line above names who sent the file, and the to-do's own line names who has it.
+ */
 export function deriveStreamExtras(signal: StreamSignalVM, context: StreamContext): StreamExtrasVM {
-  return { ask: streamAskCard(signal, context.workspace), attachments: signal.attachments.map((file) => streamFileCard(file, signal.author)),
-    todo: streamTodoCard(signal.about, context.todos) };
+  const todo = streamTodoCard(signal.about, context.todos);
+  return { ask: streamAskCard(signal, context.workspace), attachments: signal.attachments.map((file) => streamFileCard(file)),
+    todo: todo && { ...todo, who: null } };
 }
 
 function node<K extends keyof HTMLElementTagNameMap>(doc: Document, tag: K, className = "", text?: string): HTMLElementTagNameMap[K] {
@@ -124,11 +128,14 @@ export function buildDayDivider(doc: Document, label: string, key?: string): HTM
   row.append(node(doc, "span", "hm-day__label", label)); return row;
 }
 
+/** Picture sizes on the stream (Space.dc.html): 36 px for a message, 28 px for a reply inside a thread. */
+export type StreamAvatarSize = 28 | 36;
+
 /** Author line: picture (an agent shows its orb with the owner badge), name, and when. */
-export function buildAuthorLine(doc: Document, signal: Pick<StreamSignalVM, "author" | "when" | "createdAt">): HTMLElement {
+export function buildAuthorLine(doc: Document, signal: Pick<StreamSignalVM, "author" | "when" | "createdAt">, size: StreamAvatarSize = 28): HTMLElement {
   const line = node(doc, "div", "hm-author"); const author = signal.author;
   line.dataset.authorKind = isAgentAuthor(author) ? "agent" : "person";
-  line.append(isAgentAuthor(author) ? agentOrb(doc, author, { size: 28, badge: true }) : personAvatar(doc, author, 28));
+  line.append(isAgentAuthor(author) ? agentOrb(doc, author, { size, badge: true }) : personAvatar(doc, author, size));
   const name = node(doc, "span", "hm-author__name", authorLabel(author)); name.title = authorLabel(author); line.append(name);
   if (!isAgentAuthor(author) && author.you) line.append(node(doc, "span", "hm-author__you", "you"));
   const time = node(doc, "time", "hm-author__when", signal.when);

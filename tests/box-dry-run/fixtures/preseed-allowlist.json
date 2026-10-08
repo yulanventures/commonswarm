@@ -2,6 +2,7 @@
   {"kind":"env","name":"PATH","source":"harness:HARNESS_PATH","value":"<stub-bin>:/usr/local/bin:/usr/bin:/bin"},
   {"kind":"env","name":"LANG","source":"harness:HARNESS_LANG","value":"C.UTF-8"},
   {"kind":"env","name":"TZ","source":"harness:HARNESS_TZ","value":"UTC"},
+  {"kind":"env","name":"NO_MIGRATIONS","source":"harness:INHERITED_MIGRATION_MODE_CONTROL","value":"yes","note":"Negative control only: an inherited yes must not replace a missing durable item input. Historical migration cases write no into item-resolved-inputs.env."},
   {"kind":"env","name":"HOME","source":"harness:MAC_HOME","value":"<temporary>/child-home"},
   {"kind":"env","name":"BOX_DRY_RUN_STUB_LOG","source":"harness:HARNESS_STUB_LOG","value":"<temporary>/stub.log"},
   {"kind":"env","name":"BOX_DRY_RUN_PYTHON_FIXTURE","source":"harness:HARNESS_PYTHON_FIXTURE","value":"<temporary>/python"},

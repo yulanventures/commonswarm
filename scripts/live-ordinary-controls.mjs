@@ -12,7 +12,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { open, lstat, realpath, readdir, readFile, rename } from 'node:fs/promises';
 import { dirname, resolve, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash, randomBytes } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
@@ -26,6 +26,8 @@ const UA = 'curl/8.7.1';
 const VERSION = '2025-06-18';
 export const ORDINARY_TOOLS = ['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on'];
 const PROTOCOL_MODULE = new URL('../supabase/functions/_shared/protocol.js', import.meta.url);
+const PRODUCER_TREE = fileURLToPath(new URL('../', import.meta.url));
+const PROTOCOL_PATH = 'supabase/functions/_shared/protocol.js';
 const seatName = release => `c1-controls-runner-${release.slice(0, 8)}`;
 const uuidOK = id => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id) &&
   id !== '00000000-0000-4000-8000-000000000000';
@@ -87,8 +89,8 @@ export async function expectedReleaseMcpToolNames(protocolUrl = PROTOCOL_MODULE,
   return expectedMcpToolNames(hostedHouseholdToolNames(
     protocol.HOUSEHOLD_TOOLS, protocol.HOUSEHOLD_TOOL_REGISTRY, hostedFileTransportEnabled(env)));
 }
-// Scope comes from the invocation (command/window/phase), never from tools/list.
-// Baseline = live edge still on the pre-W4 8-tool catalog. Release = after W4's switch.
+// Scope identifies which release input the caller measures, not a fixed catalog.
+// Both the baseline and the new release may already have household tools.
 export function expectedToolScope({ command, window, phase } = {}) {
   const mapped = (() => {
     if (command === 'consent' && phase === 'pre-W1') return 'baseline';
@@ -107,10 +109,37 @@ export function expectedToolScope({ command, window, phase } = {}) {
   return mapped;
 }
 
+async function liveMcpToolNames(o) {
+  expectedToolScope({ command: o.command, window: o.window, phase: o.phase });
+  const root = await realpath(PRODUCER_TREE);
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
+  const git = async args => {
+    try { return (await promisify(execFile)('git', ['--no-replace-objects', '-C', root, ...args],
+      { env, timeout: 10_000, maxBuffer: 8 * 1024 * 1024 })).stdout; }
+    catch { throw new Failure('known live edge SHA ancestral to release SHA with readable protocol bundle', 'git verification or bundle read failed'); }
+  };
+  demand((await realpath((await git(['rev-parse', '--show-toplevel'])).trim())) === root,
+    'producer root is repository top level', 'unexpected repository root');
+  const live = o['live-edge-sha'], release = o['release-sha'];
+  // The operator verifies this producer tree against the reviewed release.
+  // Read immutable Git objects in that tree, never the working bundle or tools/list.
+  for (const sha of new Set([live, release])) {
+    demand((await git(['cat-file', '-t', sha])).trim() === 'commit', 'edge and release commit SHAs', 'not a commit');
+  }
+  await git(['merge-base', '--is-ancestor', live, release]);
+  const bytes = await git(['show', `${live}:${PROTOCOL_PATH}`]);
+  let protocol;
+  try { protocol = await import(`data:text/javascript;base64,${Buffer.from(bytes).toString('base64')}`); }
+  catch { throw new Failure('readable live edge protocol bundle', 'protocol import failed'); }
+  if (!Object.hasOwn(protocol, 'HOUSEHOLD_TOOLS')) return [...ORDINARY_TOOLS];
+  return expectedMcpToolNames(hostedHouseholdToolNames(
+    protocol.HOUSEHOLD_TOOLS, protocol.HOUSEHOLD_TOOL_REGISTRY, hostedFileTransportEnabled()));
+}
+
 function options(args) {
   const o = { command: args.shift(), requestMs: 10_000, consentMs: 1_500_000, totalMs: 3_300_000 };
   demand(['consent', 'window', 'final-cleanup', 'probe-credentials'].includes(o.command), 'consent, window, final-cleanup or probe-credentials', 'invalid subcommand');
-  const common = ['release-sha', 'cred-dir', 'out', ...(o.command === 'final-cleanup' ? [] : ['workspace-id']),
+  const common = ['release-sha', 'cred-dir', 'out', ...(o.command === 'final-cleanup' ? [] : ['workspace-id', 'live-edge-sha']),
     ...(['consent', 'window'].includes(o.command) ? ['phase'] : [])];
   const allowed = [...common, ...(o.command === 'consent' ? ['pointer-dir', 'prior-consent'] :
     ['window', 'probe-credentials'].includes(o.command) ? ['window', 'window-id', 'consent-receipt', 'human-profile',
@@ -130,6 +159,7 @@ function options(args) {
     }
   }
   demand(/^[a-f0-9]{40}$/.test(o['release-sha'] ?? ''), '40 hex release SHA', 'invalid SHA');
+  if (o.command !== 'final-cleanup') demand(/^[a-f0-9]{40}$/.test(o['live-edge-sha'] ?? ''), '40 hex live edge SHA', 'missing or invalid SHA');
   demand(['final-cleanup', 'probe-credentials'].includes(o.command) || (o.command === 'consent' ? ['pre-W1', 'post-W5'] : ['before', 'after', 'recovery']).includes(o.phase), 'valid phase', 'invalid phase');
   const required = [...common, ...(o.command === 'consent' ? ['pointer-dir', ...(o.phase === 'post-W5' ? ['prior-consent'] : [])] :
     ['window', 'probe-credentials'].includes(o.command) ? ['window', 'window-id', 'consent-receipt', 'human-profile',
@@ -196,8 +226,9 @@ function json(bytes) {
 }
 function consentReceipt(bytes, release, producer, phase) {
   const r = json(bytes);
-  demand(exact(r, ['kind', 'release_sha', 'consent_phase', 'measured_at', 'producer_sha256', 'controls', 'dcr_client_ids', 'cleanup']) &&
+  demand(exact(r, ['kind', 'release_sha', 'live_edge_sha', 'consent_phase', 'measured_at', 'producer_sha256', 'controls', 'dcr_client_ids', 'cleanup']) &&
     r.kind === 'c1-consent' && r.release_sha === release && r.producer_sha256 === producer &&
+    /^[a-f0-9]{40}$/.test(r.live_edge_sha ?? '') && (r.consent_phase !== 'post-W5' || r.live_edge_sha === release) &&
     ['pre-W1', 'post-W5'].includes(r.consent_phase) && (!phase || r.consent_phase === phase) &&
     typeof r.measured_at === 'string' && /^\d{4}-\d\d-\d\dT.*Z$/.test(r.measured_at) && Number.isFinite(Date.parse(r.measured_at)) &&
     exact(r.controls, ['cimd_consent', 'dcr_registration_consent']) && Object.values(r.controls).every(v => v === true) &&
@@ -305,6 +336,9 @@ async function run(o) {
   };
   globalThis.fetch = transport;
   try {
+    leg = 'live_edge';
+    const expected = o.command === 'final-cleanup' ? null : await liveMcpToolNames(o);
+    leg = 'files';
     await directory(cred); await directory(dirname(o.out));
     const reserved = ['live-controls.lock', 'live-controls-state.json', 'dcr-client-ids.json'].map(name => join(cred, name));
     if (o.command === 'consent') for (const name of ['cimd', 'dcr']) for (const suffix of ['authorize-url', 'callback-url']) {
@@ -390,8 +424,6 @@ async function run(o) {
       headers['MCP-Protocol-Version'] = init.result.protocolVersion;
       await rpc(null, 'notifications/initialized'); const list = await rpc(2, 'tools/list', {});
       const names = list.result?.tools?.map(t => t.name);
-      const scope = expectedToolScope({ command: o.command, window: o.window, phase: o.phase });
-      const expected = scope === 'baseline' ? [...ORDINARY_TOOLS] : await expectedReleaseMcpToolNames();
       demand(list.jsonrpc === '2.0' && list.id === 2 && !list.error && !list.result?.nextCursor &&
         exactMcpToolSet(names, expected), 'exact ordinary MCP tool set');
       if (claimSeat) {
@@ -407,6 +439,7 @@ async function run(o) {
         demand(seat.workspace_id === o['workspace-id'] && seat.name === name && uuidOK(seat.seat_id) &&
           typeof seat.handle === 'string' && /^seat_[A-Za-z0-9_-]{22,64}$/.test(seat.handle), 'claimed test seat identity');
         await writePrivate(`${o.out}.report.json`, JSON.stringify({ kind: 'c1-controls-run', release_sha: release,
+          live_edge_sha: o['live-edge-sha'],
           window_id: o['window-id'], window: o.window, phase: o.phase, measured_at: new Date().toISOString(), producer_sha256: producer,
           workspace_id: o['workspace-id'], seat: { name, request_id: requestId, seat_id: seat.seat_id, handle: seat.handle } }, null, 2) + '\n');
       }
@@ -517,7 +550,7 @@ async function run(o) {
         // Prove the old grant is fenced BEFORE either new consent handoff.
         await fence(boundGrant(priorBytes));
       }
-      receipt = { kind: 'c1-consent', release_sha: release, consent_phase: o.phase, measured_at: '', producer_sha256: producer,
+      receipt = { kind: 'c1-consent', release_sha: release, live_edge_sha: o['live-edge-sha'], consent_phase: o.phase, measured_at: '', producer_sha256: producer,
         controls: { cimd_consent: false, dcr_registration_consent: false }, dcr_client_ids: [], cleanup };
       const newGrants = [];
       for (const name of ['cimd', 'dcr']) {
@@ -590,7 +623,7 @@ async function run(o) {
       const seat = await readAgentProfile(join(o['seat-profile'], 'profile.json'));
       demand(seat.url === API && seat.workspace_id === o['workspace-id'], 'same test workspace and hosted target');
       await privateRead(seat.credential_file); const agent = await readProfileCredential(seat);
-      receipt = { release_sha: release, window_id: o['window-id'], window: o.window, phase: o.phase,
+      receipt = { release_sha: release, live_edge_sha: o['live-edge-sha'], window_id: o['window-id'], window: o.window, phase: o.phase,
         controls: { hosted_mcp_consent_refresh: false, dcr_registration_consent: false, cimd_consent: false, human_recovery: false, worker_command_read: false },
         consent_receipt_sha256: consentHash, producer_sha256: producer, dcr_client_ids: [] };
       leg = 'hosted_mcp_consent_refresh'; const t = await refresh(grant); grant.refresh_token = t.refresh_token; await saveGrants(); await mcp(t, true); receipt.controls.hosted_mcp_consent_refresh = true;
@@ -642,7 +675,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   try {
     const o = options(process.argv.slice(2));
     demand(Number(process.versions.node.split('.')[0]) >= 22, 'Node 22 or newer');
-    if (o.dry) process.stdout.write(JSON.stringify(plan(o), null, 2) + '\n'); else await run(o);
+    if (o.dry) {
+      if (o.command !== 'final-cleanup') await liveMcpToolNames(o);
+      process.stdout.write(JSON.stringify(plan(o), null, 2) + '\n');
+    } else await run(o);
   } catch (e) {
     process.stderr.write(`FAIL options: invocation expected ${e instanceof Failure ? e.expected : 'valid invocation'} got ${e instanceof Failure ? e.got : 'invalid invocation'}; STOP\n`); process.exitCode = 1;
   }

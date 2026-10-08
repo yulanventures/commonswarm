@@ -1,175 +1,296 @@
-/* Home UI: onboarding (lane O). Site tokens only; class prefix hm-. */
+/* Home UI: onboarding (lane O). --home-* tokens only (home-visual DESIGN-MAP); class prefix hm-.
+   Sources: ref/New-Space, ref/Add-Agent, ref/Phone-Join and ref/Phone-Connect (.dc.html).
+   Light surfaces: ink text on card/soft, ink primary pill (card text on ink, 15.90 / 15.27),
+   1.5px ink outline secondary. Ink screens (the new-workspace preview, the connect blocks, /invite)
+   use the rail tokens, which stay ink in both modes: rail-strong text 14.32 / 16.84 and rail-soft
+   8.77 / 10.32 on --home-rail-bg; lime-ink on lime 12.65. */
 
-/* --- New workspace (UI-SPEC 3.8) --- */
+/* --- New workspace (UI-SPEC 3.8; ref New-Space) --- */
 
 .hm-new-workspace {
-  display: block;
-  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  color: var(--home-ink);
+  font-family: var(--home-font-body);
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+.hm-new-workspace.hm-new-workspace .hm-new-workspace__title {
+  max-inline-size: none;
+  margin: 0;
+  font-family: var(--home-font-display);
+  font-size: clamp(32px, 3.4vw, 46px);
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.025em;
+  color: var(--home-ink);
+}
+
+.hm-new-workspace__title:focus { outline: none; }
+
+.hm-new-workspace__header { display: block; }
+
+.hm-new-workspace__subtitle {
+  margin: 8px 0 0;
+  font-size: 17px;
+  line-height: 1.45;
+  color: var(--home-ink-muted);
+  text-wrap: pretty;
 }
 
 .hm-new-workspace__layout {
-  display: grid;
-  gap: var(--gap-grid);
-  grid-template-columns: minmax(0, 1fr);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 24px 28px;
 }
 
-@media (min-width: 52rem) {
-  .hm-new-workspace__layout {
-    grid-template-columns: minmax(0, 1.1fr) minmax(16rem, 0.9fr);
-    align-items: start;
-  }
-}
-
-.hm-new-workspace__card,
-.hm-new-workspace__preview {
+.hm-new-workspace__card {
+  flex: 999 1 440px;
   min-inline-size: 0;
-  padding: var(--pad-card);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-card);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  padding: 26px;
+  background: var(--home-card);
+  border: 1px solid var(--home-card-border);
+  border-radius: 18px;
+  box-shadow: var(--home-card-shadow);
 }
 
-.hm-new-workspace__title {
-  margin: 0 0 var(--s-4);
-  font-family: var(--font-display);
-  font-size: var(--t-2xl);
-  line-height: var(--lh-2xl);
-  letter-spacing: var(--track-head);
-  font-weight: var(--weight-head);
-}
+.hm-new-workspace.hm-new-workspace .hm-new-workspace__card > * { margin-block: 0; }
+.hm-new-workspace.hm-new-workspace .hm-new-workspace__card > * + * { margin-block-start: 28px; }
+.hm-new-workspace.hm-new-workspace .hm-new-workspace__card > .hm-new-workspace__note-hint { margin-block-start: 10px; }
+.hm-new-workspace.hm-new-workspace .hm-new-workspace__card > .hm-new-workspace__note-hint:empty { margin-block-start: 0; }
+.hm-new-workspace.hm-new-workspace .hm-new-workspace__card > .hm-new-workspace__error { margin-block-start: 14px; }
 
 .hm-new-workspace__field {
-  display: grid;
-  gap: var(--s-2);
-  margin-block-end: var(--s-5);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
 }
 
-.hm-new-workspace__label {
-  font-family: var(--font-display);
-  font-size: var(--t-lg);
-  font-weight: var(--weight-head);
+.hm-new-workspace__label,
+.hm-new-workspace__purpose legend,
+.hm-new-workspace__note-title {
+  margin: 0;
+  padding: 0;
+  font-family: var(--home-font-display);
+  font-size: 21px;
+  font-weight: 700;
+  line-height: 1.45;
+  letter-spacing: -0.01em;
+  color: var(--home-ink);
 }
 
 .hm-new-workspace__field input {
-  min-block-size: 2.75rem;
+  box-sizing: border-box;
   inline-size: 100%;
-  padding: var(--s-3) var(--s-4);
-  color: var(--text);
-  background: var(--surface);
-  border: 1px solid var(--border-interactive);
-  border-radius: var(--radius);
+  min-block-size: 52px;
+  /* 1.5px edge as an inset ring (a 1.5px border paints 1px in Chromium); the padding adds the
+     edge back so the text starts where the canvas's 16px padding inside its border puts it. */
+  padding: 0 17.5px;
+  color: var(--home-ink);
+  background: var(--home-field);
+  border: 0;
+  box-shadow: inset 0 0 0 1.5px var(--home-ink);
+  border-radius: 14px;
   font: inherit;
+  font-size: 18px;
+  font-weight: 600;
 }
 
 .hm-new-workspace__field input:focus-visible {
   outline: none;
-  box-shadow: var(--focus-ring);
+  box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring);
 }
 
+.hm-new-workspace__field input:disabled { opacity: 0.6; }
+
 .hm-new-workspace__purpose {
-  margin: 0 0 var(--s-5);
+  min-inline-size: 0;
+  margin: 0;
   padding: 0;
   border: 0;
 }
 
-.hm-new-workspace__purpose legend {
-  margin-block-end: var(--s-3);
-  font-family: var(--font-display);
-  font-size: var(--t-lg);
-  font-weight: var(--weight-head);
-}
+/* The purpose pills sit 12px under the name field (canvas New-Space), not 28px. */
+.hm-new-workspace.hm-new-workspace .hm-new-workspace__card > .hm-new-workspace__field + .hm-new-workspace__purpose { margin-block-start: 12px; }
 
 .hm-new-workspace__purpose-list {
-  display: grid;
-  gap: var(--s-3);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
+/* A purpose is the canvas pill: 44px, 0 16px, 999px, a 1.5px edge (an inset ring: a 1.5px border
+   renders 1px, so the inline padding is 16px plus the 1.5px border and the label sits where the
+   canvas border box puts it), 14px/600; chosen, it is ink-filled with a check. The native radio
+   covers the pill, transparent, so the pill is the click and focus target. */
 .hm-new-workspace__purpose-card {
-  min-block-size: 3.5rem;
-  display: flex;
-  align-items: flex-start;
-  gap: var(--s-3);
-  padding: var(--s-4);
-  border: 1px solid var(--border-interactive);
-  border-radius: var(--radius);
+  position: relative;
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  max-inline-size: 100%;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 17.5px;
+  color: var(--home-ink);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-pill);
+  box-shadow: inset 0 0 0 1.5px var(--home-field-border);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
   cursor: pointer;
 }
 
+.hm-new-workspace__purpose-card:hover { box-shadow: inset 0 0 0 1.5px var(--home-ink); }
+
 .hm-new-workspace__purpose-card:has(input:checked) {
-  background: var(--accent-dim);
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
+  color: var(--home-on-ink);
+  background: var(--home-ink);
+  box-shadow: inset 0 0 0 1.5px var(--home-ink);
 }
 
 .hm-new-workspace__purpose-card:has(input:focus-visible) {
-  box-shadow: var(--focus-ring);
+  box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring);
 }
 
 .hm-new-workspace__purpose-card input {
-  inline-size: 1.25rem;
-  block-size: 1.25rem;
-  margin-block-start: 0.15rem;
-  accent-color: var(--accent);
+  position: absolute;
+  inset: 0;
+  inline-size: 100%;
+  block-size: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
 }
 
-.hm-new-workspace__purpose-card span {
-  display: grid;
-  gap: 0.15rem;
-  min-inline-size: 0;
-}
+.hm-new-workspace__purpose-card input:disabled { cursor: default; }
+
+.hm-new-workspace__purpose-copy { min-inline-size: 0; }
 
 .hm-new-workspace__purpose-card strong {
-  font-weight: var(--weight-semibold);
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  overflow-wrap: anywhere;
 }
 
-.hm-new-workspace__purpose-card small {
-  color: var(--text-muted);
-  font-size: var(--t-sm);
-  line-height: var(--lh-sm);
+/* The check is the chosen pill's non-colour cue; unchosen pills carry none. */
+.hm-new-workspace__purpose-check {
+  display: none;
+  flex: none;
+  font-weight: 700;
+  color: inherit;
 }
 
+.hm-new-workspace__purpose-card:has(input:checked) .hm-new-workspace__purpose-check { display: inline; }
+
+/* What the choices do: quiet lines under the pills (all of them until one is chosen). */
+.hm-new-workspace__purpose-details {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-block-start: 10px;
+}
+
+.hm-new-workspace__purpose-detail {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--home-ink-muted);
+  text-wrap: pretty;
+}
+
+.hm-new-workspace__purpose-detail strong { font-weight: 600; color: var(--home-ink); }
+.hm-new-workspace__purpose-detail[hidden] { display: none; }
+
+/* A section of rows: the 21px heading, then 60px (people) or 64px (agents) rows, 4px apart. */
 .hm-new-workspace__note-block {
-  display: grid;
-  gap: var(--s-2);
-  margin-block-end: var(--s-5);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
 }
 
-.hm-new-workspace__note-title {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: var(--t-lg);
-  font-weight: var(--weight-head);
+.hm-new-workspace__note-block > .hm-new-workspace__note-hint { margin-block-start: 8px; }
+
+.hm-new-workspace__person {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-block-size: 60px;
 }
 
-.hm-new-workspace__note-line {
+.hm-new-workspace__person--agent { min-block-size: 64px; }
+
+.hm-new-workspace__row-copy {
+  flex: 1;
+  min-inline-size: 0;
+  display: flex;
+  flex-direction: column;
   margin: 0;
-  font-weight: var(--weight-semibold);
+}
+
+.hm-new-workspace__row-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--home-ink);
+  overflow-wrap: anywhere;
+}
+
+.hm-new-workspace__row-sub {
+  font-size: 13px;
+  color: var(--home-ink-muted);
+  overflow-wrap: anywhere;
 }
 
 .hm-new-workspace__note-hint {
   margin: 0;
-  color: var(--text-muted);
-  font-size: var(--t-sm);
-  line-height: var(--lh-sm);
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--home-ink-muted);
+}
+
+.hm-new-workspace__person .hm-new-workspace__note-hint { flex: 1; min-inline-size: 0; }
+
+.hm-new-workspace__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+  padding-block-start: 22px;
+  border-block-start: 1px solid var(--home-card-border);
 }
 
 .hm-new-workspace__create {
-  min-block-size: 2.75rem;
-  padding: 0 var(--s-5);
-  color: var(--accent-ink);
-  font: inherit;
-  font-weight: var(--weight-semibold);
-  background: var(--accent);
-  border: 1px solid var(--accent);
+  min-block-size: 52px;
+  max-inline-size: 100%;
+  padding: 0 28px;
+  color: var(--home-on-ink);
+  background: var(--home-ink);
+  border: 0;
   border-radius: var(--radius-pill);
+  font: inherit;
+  font-size: 17px;
+  font-weight: 700;
   cursor: pointer;
 }
 
+.hm-new-workspace__create:hover { background: var(--home-link-hover); }
+
 .hm-new-workspace__create:disabled {
-  color: var(--text-muted);
-  background: var(--surface-2);
-  border-color: var(--border);
+  color: var(--home-ink-muted);
+  background: var(--home-canvas);
+  box-shadow: inset 0 0 0 1px var(--home-card-border);
   cursor: not-allowed;
 }
 
@@ -178,25 +299,110 @@
   box-shadow: var(--focus-ring);
 }
 
+.hm-new-workspace__access {
+  flex: 1 1 220px;
+  min-inline-size: 0;
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--home-ink-muted);
+}
+
 .hm-new-workspace__error {
-  margin: var(--s-3) 0 0;
-  padding: var(--s-3) var(--s-4);
-  color: var(--text);
-  background: var(--danger-dim);
-  border-radius: var(--radius);
-  font-size: var(--t-sm);
+  margin: 0;
+  padding: 12px 16px;
+  color: var(--home-offline-deep);
+  background: var(--home-offline-tint);
+  border-radius: 14px;
+  font-size: 14px;
+}
+
+.hm-new-workspace__error[hidden] { display: none; }
+
+/* The create panel is LiveDashboard's gateway (a 42rem centred column made for the first-run
+   form). While it holds this form, it takes the canvas main column instead: wide enough for the
+   form card and the preview side by side, top-aligned, on the page canvas. */
+:is(.dashboard__gateway--create):has(> .hm-new-workspace) {
+  box-sizing: border-box;
+  inline-size: min(100%, 1112px);
+  align-content: start;
+  gap: 24px;
+  padding: 32px clamp(16px, 3vw, 40px) 56px;
+}
+
+:where(body):has(:is(.dashboard__gateway--create):not([hidden]) > .hm-new-workspace) { background: var(--home-canvas); }
+
+/* Person and agent slots. The viewer always takes blue (home-names personTint). */
+.hm-new-workspace__avatar {
+  inline-size: 36px;
+  block-size: 36px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  border-radius: 50%;
+  background: var(--home-blue);
+  color: var(--home-on-person);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.hm-new-workspace__avatar--dashed {
+  border: 1.5px dashed var(--home-line-dashed);
+  background: transparent;
+  color: var(--home-ink-muted);
+}
+
+.hm-new-workspace__orb {
+  inline-size: 36px;
+  block-size: 36px;
+  box-sizing: border-box;
+  flex: none;
+  border-radius: 11px;
+  background: var(--home-blue-tint);
+  border: 1.5px solid var(--home-blue);
+}
+
+.hm-new-workspace__orb--dashed {
+  border: 1.5px dashed var(--home-line-dashed);
+  background: transparent;
+}
+
+/* The preview: an ink panel in both modes (rail tokens). */
+.hm-new-workspace__preview {
+  flex: 1 1 320px;
+  min-inline-size: 0;
+  box-sizing: border-box;
+  padding: 22px;
+  color: var(--home-rail-strong);
+  background: var(--home-rail-bg);
+  border-radius: 22px;
 }
 
 .hm-new-workspace__preview-title {
-  margin: 0 0 var(--s-4);
-  font-family: var(--font-display);
-  font-size: var(--t-lg);
-  font-weight: var(--weight-head);
+  margin: 0;
+  font-family: var(--home-font-display);
+  font-size: 21px;
+  font-weight: 700;
+  line-height: 1.45;
+  letter-spacing: -0.01em;
+  color: var(--home-rail-strong);
+}
+
+.hm-new-workspace__preview-box {
+  margin-block-start: 16px;
+  /* Canvas 18px padding inside a 1.5px border: the edge is an inset ring, so 19.5px. */
+  padding: 19.5px;
+  border: 0;
+  box-shadow: inset 0 0 0 1.5px var(--home-ink-faint);
+  border-radius: 18px;
 }
 
 .hm-new-workspace__preview-list {
-  display: grid;
-  gap: var(--s-3);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -206,431 +412,658 @@
 .hm-new-workspace__preview-slot {
   display: flex;
   align-items: center;
-  gap: var(--s-3);
-  min-block-size: 2.75rem;
+  gap: 12px;
+  min-block-size: 36px;
+  font-size: 14px;
+  color: var(--home-rail-soft);
 }
 
-.hm-new-workspace__avatar {
-  inline-size: 2.25rem;
-  block-size: 2.25rem;
-  display: grid;
-  place-items: center;
+.hm-new-workspace__preview-slot--people {
+  margin-block-start: 6px;
+  padding-block-start: 18px;
+  border-block-start: 1px solid var(--home-rail-divider);
+}
+
+.hm-new-workspace__preview .hm-new-workspace__avatar {
+  inline-size: 44px;
+  block-size: 44px;
+  font-size: 17px;
+}
+
+.hm-new-workspace__preview .hm-new-workspace__avatar--dashed { border-color: var(--home-rail-soft); }
+
+/* The agent square lines up with the person circle's left edge (canvas). */
+.hm-new-workspace__preview .hm-new-workspace__orb--dashed {
+  border-color: var(--home-rail-soft);
+}
+
+.hm-new-workspace__preview-name {
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 0;
+}
+
+.hm-new-workspace__preview-name strong {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--home-rail-strong);
+}
+
+.hm-new-workspace__preview-name small {
+  font-size: 13px;
+  color: var(--home-rail-soft);
+}
+
+.hm-new-workspace__preview-note {
+  margin: 16px 0 0;
+  font-size: 15px;
+  line-height: 1.45;
+  color: var(--home-rail-soft);
+  text-wrap: pretty;
+}
+
+.hm-new-workspace__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 14px 0 0;
+  font-size: 13px;
+  color: var(--home-rail-soft);
+}
+
+.hm-new-workspace__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.hm-new-workspace__legend-mark {
+  inline-size: 14px;
+  block-size: 14px;
+  box-sizing: border-box;
   flex: none;
   border-radius: 50%;
-  background: var(--surface-2);
-  color: var(--text);
-  font-size: var(--t-sm);
-  font-weight: var(--weight-semibold);
+  background: var(--home-rail-soft);
 }
 
-.hm-new-workspace__avatar--dashed {
-  border: 1.5px dashed var(--border-interactive);
+.hm-new-workspace__legend-mark--later {
   background: transparent;
-  color: var(--text-muted);
+  border: 1.5px dashed var(--home-rail-soft);
 }
 
-.hm-new-workspace__orb {
-  inline-size: 2.25rem;
-  block-size: 2.25rem;
-  flex: none;
-  border-radius: 50%;
-  background: radial-gradient(circle at 32% 28%, var(--surface) 0, var(--lavender) 62%);
-}
-
-.hm-new-workspace__orb--dashed {
-  border: 1.5px dashed var(--border-interactive);
-  background: transparent;
-}
-
-/* --- Add agent picker (UI-SPEC 3.7) --- */
+/* --- Add an agent (UI-SPEC 3.7; ref Add-Agent): one continuous page, max 720px, 26px rhythm --- */
 
 .hm-ahp {
-  display: block;
-  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+  max-inline-size: 720px;
+  color: var(--home-ink);
+  font-family: var(--home-font-body);
+  font-size: 16px;
+  line-height: 1.45;
 }
 
-.hm-ahp__view {
-  display: grid;
-  gap: var(--s-6);
-}
+/* The views are wrappers only: their blocks join the page's one 26px column. */
+.hm-ahp__view { display: contents; }
+.hm-ahp__view[hidden] { display: none; }
 
-.hm-ahp__view[hidden] {
-  display: none;
-}
+.hm-ahp__head { display: block; }
 
-.hm-ahp__head {
-  display: grid;
-  gap: var(--s-2);
-}
-
-.hm-ahp__back {
-  justify-self: start;
-  min-block-size: 2.75rem;
-  padding: var(--s-2);
-  margin-inline-start: calc(var(--s-2) * -1);
-  color: var(--text-muted);
+/* Breadcrumb: muted 15px/600 with a 16px chevron, no underline. */
+.hm-ahp__crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-block-size: 44px;
+  padding: 0;
+  color: var(--home-ink-muted);
   font: inherit;
-  font-weight: var(--weight-semibold);
+  font-size: 15px;
+  font-weight: 600;
   background: transparent;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: 10px;
   cursor: pointer;
 }
 
+.hm-ahp__crumb:hover { color: var(--home-ink); }
+.hm-ahp__crumb[hidden] { display: none; }
+.hm-ahp__crumb > svg { flex: none; }
+
+/* A quiet text back control. LiveDashboard's create page reuses it for "← Workspaces". */
+.hm-ahp__back {
+  align-self: flex-start;
+  min-block-size: 44px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px;
+  color: var(--home-ink-muted);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  background: transparent;
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.hm-ahp__back:hover { color: var(--home-ink); }
+.hm-ahp__back[hidden] { display: none; }
+
+/* In the add-agent panel, "← Which app?" stays for keyboard users (the pills above already show
+   the choice): it appears when it takes focus, the skip-link pattern. */
+.hm-ahp__detail > .hm-ahp__back:not(:focus) {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  min-block-size: 0;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.hm-ahp__detail > .hm-ahp__back:focus { color: var(--home-ink); background: var(--home-card); }
+
 .hm-ahp__title {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: var(--t-2xl);
-  line-height: var(--lh-2xl);
-  letter-spacing: var(--track-head);
-  font-weight: var(--weight-head);
+  margin: 4px 0 0;
+  font-family: var(--home-font-display);
+  font-size: 36px;
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.025em;
+  color: var(--home-ink);
   text-wrap: balance;
 }
 
-.hm-ahp__title:focus {
-  outline: none;
-}
+.hm-ahp__title:focus,
+.hm-ahp__title-anchor:focus,
+.hm-ahp__joined-title:focus { outline: none; }
 
 .hm-ahp__lead {
-  max-inline-size: 58ch;
-  margin: 0;
-  color: var(--text-muted);
-  font-size: var(--t-base);
-  line-height: var(--lh-base);
+  margin: 8px 0 0;
+  font-size: 17px;
+  color: var(--home-ink-muted);
+  text-wrap: pretty;
 }
+
+.hm-ahp__lead:empty { display: none; }
+
+.hm-ahp__section { display: block; }
 
 .hm-ahp__step-title {
   margin: 0;
-  font-family: var(--font-display);
-  font-size: var(--t-lg);
-  font-weight: var(--weight-head);
+  font-family: var(--home-font-display);
+  font-size: 21px;
+  font-weight: 700;
+  line-height: 1.45;
+  letter-spacing: -0.01em;
+  color: var(--home-ink);
 }
+
+.hm-ahp__detail-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+}
+
+/* The app pills: one wrapping row; "More apps" is the last pill and opens a second row. */
+.hm-ahp__chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-block-start: 12px;
+}
+
+.hm-ahp__chip-row > .hm-ahp__chips { display: contents; }
 
 .hm-ahp__chips {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--s-2);
+  gap: 8px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
+.hm-ahp__chips > li { display: flex; }
+
 .hm-ahp__chip-btn {
-  min-block-size: 2.75rem;
-  min-inline-size: 2.75rem;
+  min-block-size: 46px;
+  min-inline-size: 44px;
+  max-inline-size: 100%;
   display: inline-flex;
   align-items: center;
-  gap: var(--s-2);
-  padding: 0 var(--s-4);
-  color: var(--text);
+  padding: 0 19.5px;
+  color: var(--home-ink);
   font: inherit;
-  font-weight: var(--weight-semibold);
-  background: var(--surface);
-  border: 1px solid var(--border-interactive);
+  font-size: 15px;
+  font-weight: 600;
+  background: transparent;
+  border: 0;
   border-radius: var(--radius-pill);
+  box-shadow: inset 0 0 0 1.5px var(--home-ink);
   cursor: pointer;
-  transition:
-    border-color var(--dur-2) var(--ease-standard),
-    background var(--dur-2) var(--ease-standard);
+  transition: background var(--dur-2) var(--ease-standard);
 }
 
-.hm-ahp__chip-btn:hover {
-  border-color: var(--border-strong);
-}
+.hm-ahp__chip-btn:hover { background: var(--home-soft); }
 
 .hm-ahp__chip-btn[aria-pressed="true"] {
-  color: var(--accent-ink);
-  background: var(--accent);
-  border-color: var(--accent);
+  color: var(--home-on-ink);
+  background: var(--home-ink);
 }
 
+.hm-ahp__more { display: contents; }
+
+/* "More apps" is one more app pill (the canvas draws every option the same); open, it is soft-filled. */
+.hm-ahp__more > summary {
+  min-block-size: 46px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 19.5px;
+  color: var(--home-ink);
+  font-size: 15px;
+  font-weight: 600;
+  list-style: none;
+  border-radius: var(--radius-pill);
+  box-shadow: inset 0 0 0 1.5px var(--home-ink);
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard);
+}
+
+.hm-ahp__more > summary::-webkit-details-marker { display: none; }
+.hm-ahp__more > summary:hover { background: var(--home-soft); }
+.hm-ahp__more[open] > summary { background: var(--home-soft); }
+.hm-ahp__more > .hm-ahp__chips { flex: 1 1 100%; }
+
 .hm-ahp__chip-btn:focus-visible,
+.hm-ahp__more > summary:focus-visible,
 .hm-ahp__copy:focus-visible,
 .hm-ahp__back:focus-visible,
+.hm-ahp__crumb:focus-visible,
 .hm-ahp__link:focus-visible,
 .hm-ahp__button:focus-visible,
-.hm-ahp__more > summary:focus-visible,
+.hm-ahp__connect-action:focus-visible,
+.hm-ahp__how > summary:focus-visible,
 .hm-ahp__testing > summary:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
 }
 
-.hm-ahp__orb {
-  inline-size: 1.5rem;
-  block-size: 1.5rem;
-  display: grid;
-  place-items: center;
-  flex: none;
-  border-radius: 50%;
-  color: var(--text);
-  font-family: var(--font-display);
-  font-size: var(--t-xs);
-  font-weight: var(--weight-semibold);
-  background: radial-gradient(circle at 32% 28%, var(--surface) 0, var(--lavender) 62%);
+.hm-ahp__chip-btn:focus-visible,
+.hm-ahp__more > summary:focus-visible,
+.hm-ahp__copy:focus-visible {
+  box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring);
 }
 
-.hm-ahp__orb--large {
-  inline-size: 3.25rem;
-  block-size: 3.25rem;
-  font-size: var(--t-base);
-}
-
-.hm-ahp__orb--lavender { background: radial-gradient(circle at 32% 28%, var(--surface) 0, var(--lavender) 62%); }
-.hm-ahp__orb--peach { background: radial-gradient(circle at 32% 28%, var(--surface) 0, var(--peach) 62%); }
-.hm-ahp__orb--sage { background: radial-gradient(circle at 32% 28%, var(--surface) 0, var(--sage) 62%); }
-.hm-ahp__orb--sky { background: radial-gradient(circle at 32% 28%, var(--surface) 0, var(--sky) 62%); }
-
-.hm-ahp__orb--logo {
-  background: var(--surface);
-  border: 1px solid var(--border);
-}
-
-.hm-ahp__orb--logo img {
-  display: block;
-}
-
-.hm-ahp__logo--tile {
-  border-radius: var(--radius-sm);
-}
-
-.hm-ahp__status-chip {
-  padding: 0.2rem 0.6rem;
-  border-radius: var(--radius-pill);
-  font-size: var(--t-2xs);
-  line-height: 1.4;
-  font-weight: var(--weight-semibold);
+/* A status other than Ready: quiet supporting text beside the step title, no capsule. */
+.hm-ahp__status-note {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--home-ink-muted);
   white-space: nowrap;
 }
 
-.hm-ahp__status-chip[data-status="ready"] {
-  color: var(--success);
-  background: var(--success-dim);
-}
-
-.hm-ahp__status-chip[data-status="untested"] {
-  color: var(--warning);
-  background: var(--warning-dim);
-}
-
-.hm-ahp__status-chip[data-status="waiting"] {
-  color: var(--accent-bright);
-  background: var(--accent-dim);
-}
-
-.hm-ahp__more,
-.hm-ahp__testing {
-  border-block-start: 1px solid var(--border);
-  padding-block-start: var(--s-4);
-}
-
-.hm-ahp__more > summary,
-.hm-ahp__testing > summary {
-  min-block-size: 2.75rem;
+/* The connection panel: a compact canvas panel, an ink action pill inline when the app has a link. */
+.hm-ahp__connect {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  color: var(--text);
-  font-weight: var(--weight-semibold);
-  cursor: pointer;
-  border-radius: var(--radius-sm);
+  gap: 12px 18px;
+  margin-block-start: 12px;
+  padding: 16px 18px;
+  background: var(--home-canvas);
+  border-radius: 16px;
 }
 
-.hm-ahp__more[open] > summary {
-  margin-block-end: var(--s-3);
-}
-
-.hm-ahp__footer {
+.hm-ahp__connect-line {
+  flex: 1 1 320px;
+  min-inline-size: 0;
   margin: 0;
-  color: var(--text-muted);
-  font-size: var(--t-sm);
+  text-wrap: pretty;
 }
 
-.hm-ahp__link {
-  min-block-size: 2.75rem;
-  padding: var(--s-2);
-  color: var(--accent-bright);
-  font: inherit;
-  font-weight: var(--weight-semibold);
-  background: transparent;
-  border: 0;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-}
-
-.hm-ahp__detail-head {
-  display: flex;
+.hm-ahp__connect-action {
+  min-block-size: 48px;
+  display: inline-flex;
   align-items: center;
-  gap: var(--s-4);
+  padding: 0 22px;
+  color: var(--home-on-ink);
+  font-size: 15px;
+  font-weight: 700;
+  text-decoration: none;
+  background: var(--home-ink);
+  border-radius: var(--radius-pill);
 }
 
-.hm-ahp__detail-head > div {
-  display: grid;
-  justify-items: start;
-  gap: var(--s-2);
+.hm-ahp__connect-action:hover { color: var(--home-on-ink); background: var(--home-link-hover); }
+
+.hm-ahp__prompt { margin-block-start: 14px; }
+
+.hm-ahp__caption {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--home-ink-muted);
 }
 
-.hm-ahp__steps {
-  display: grid;
-  gap: var(--s-4);
+/* Copyable values: the ink block with a top-aligned outline Copy pill (rail tokens: ink in both modes). */
+.hm-ahp__copyable {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px;
+  max-inline-size: 100%;
+  padding: 14px 16px;
+  color: var(--home-rail-strong);
+  background: var(--home-rail-bg);
+  border-radius: 14px;
+}
+
+.hm-ahp__prompt > .hm-ahp__copyable { margin-block-start: 8px; }
+
+.hm-ahp__value {
+  flex: 1 1 320px;
+  min-inline-size: 0;
   margin: 0;
   padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, var(--font-mono);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--home-rail-strong);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.hm-ahp__copy {
+  flex: none;
+  min-block-size: 44px;
+  padding: 0 17.5px;
+  color: var(--home-rail-strong);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-pill);
+  box-shadow: inset 0 0 0 1.5px var(--home-ink-faint);
+  cursor: pointer;
+}
+
+.hm-ahp__copy:hover { background: var(--home-rail-raised); }
+
+.hm-ahp__button {
+  align-self: flex-start;
+  min-block-size: 48px;
+  max-inline-size: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 22px;
+  color: var(--home-on-ink);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 700;
+  text-decoration: none;
+  background: var(--home-ink);
+  border: 0;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+}
+
+.hm-ahp__button:hover { color: var(--home-on-ink); background: var(--home-link-hover); }
+.hm-ahp__button[hidden] { display: none; }
+
+.hm-ahp__button--quiet {
+  color: var(--home-ink);
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--home-ink);
+}
+
+:is(.hm-ahp__button--quiet):hover { color: var(--home-ink); background: var(--home-soft); }
+
+.hm-ahp__button--text {
+  padding: 0 12px;
+  color: var(--home-ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  background: transparent;
+}
+
+:is(.hm-ahp__button--text):hover { color: var(--home-link-hover); background: transparent; }
+
+/* The lime completion pill (the canvas footer action): Done, once the agent has joined. */
+.hm-ahp__button--done {
+  min-block-size: 52px;
+  padding: 0 28px;
+  color: var(--home-lime-ink);
+  font-size: 17px;
+  background: var(--home-lime);
+}
+
+:is(.hm-ahp__button--done):hover { color: var(--home-lime-ink); background: var(--home-lime-hover); }
+
+.hm-ahp__waiting {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0 0;
+  padding: 12px 16px;
+  font-weight: 600;
+  color: var(--home-ink);
+  background: var(--home-soft);
+  border-radius: 14px;
+}
+
+.hm-ahp__waiting[hidden] { display: none; }
+
+.hm-ahp__waiting-hint { font-weight: 400; color: var(--home-ink-muted); }
+
+.hm-ahp__pulse,
+:is(.hm-ahp__waiting--done)::before {
+  inline-size: 10px;
+  block-size: 10px;
+  box-sizing: border-box;
+  flex: none;
+  border: 1.5px solid var(--home-ink);
+  border-radius: 50%;
+  background: transparent;
+}
+
+.hm-ahp__pulse { animation: hm-ahp-pulse 1.6s ease-in-out infinite; }
+
+/* Joined: the lime line with a filled dot (the canvas "Connected" state). */
+.hm-ahp__waiting--done {
+  color: var(--home-lime-ink);
+  background: var(--home-lime);
+}
+
+:is(.hm-ahp__waiting--done)::before {
+  content: "";
+  border-color: var(--home-lime-ink);
+  background: var(--home-lime-ink);
+}
+
+@keyframes hm-ahp-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+/* Everything else about the route, one tap away: a compact toggle at the end of the step title's
+   line (the panel keeps the canvas 80px); open, the steps and notes take the full width under the
+   title. The details box joins the title row, so its summary and its content are row items. */
+.hm-ahp__detail-title > .hm-ahp__how { display: contents; }
+/* The 36px toggle does not make the title row taller than the 21px/1.45 title (canvas 12px to the
+   panel); closed, its empty content row adds no gap. */
+.hm-ahp__detail-title > .hm-ahp__how > summary { margin-inline-start: auto; margin-block: -3px; }
+.hm-ahp__detail-title:has(> .hm-ahp__how:not([open])) { row-gap: 0; }
+.hm-ahp__detail-title > .hm-ahp__how > :not(summary) { flex: 1 1 100%; min-inline-size: 0; }
+.hm-ahp__detail-title > .hm-ahp__how::details-content { flex: 1 1 100%; min-inline-size: 0; }
+.hm-ahp__detail-title > .hm-ahp__how > .hm-ahp__steps { margin-block-start: 8px; }
+/* Quiet: secondary text beside the 21px title, not a competing action (weight 400, light chevron). */
+.hm-ahp__detail-title > .hm-ahp__how > summary { gap: 6px; font-size: 13px; font-weight: 400; }
+.hm-ahp__detail-title > .hm-ahp__how > summary::before {
+  inline-size: 5px;
+  block-size: 5px;
+  border-inline-end-width: 1.2px;
+  border-block-end-width: 1.2px;
+}
+
+.hm-ahp__how > summary,
+.hm-ahp__testing > summary {
+  min-block-size: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--home-ink-muted);
+  list-style: none;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.hm-ahp__how > summary::-webkit-details-marker,
+.hm-ahp__testing > summary::-webkit-details-marker { display: none; }
+
+.hm-ahp__how > summary::before,
+.hm-ahp__testing > summary::before {
+  content: "";
+  inline-size: 7px;
+  block-size: 7px;
+  flex: none;
+  border-inline-end: 1.8px solid currentColor;
+  border-block-end: 1.8px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform var(--dur-2) var(--ease-standard);
+}
+
+.hm-ahp__how[open] > summary::before,
+.hm-ahp__testing[open] > summary::before { transform: rotate(45deg); }
+
+.hm-ahp__how > summary:hover,
+.hm-ahp__testing > summary:hover { text-decoration: underline; text-underline-offset: 2px; }
+
+.hm-ahp__how[open] > summary { color: var(--home-ink); }
+
+.hm-ahp__testing { margin-block-start: 12px; }
+.hm-ahp__testing[open] > summary { margin-block-end: 8px; }
+
+/* Steps: one soft card, numbered rows split by hairlines. */
+.hm-ahp__steps {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 4px 18px;
   list-style: none;
   counter-reset: hm-ahp-step;
+  background: var(--home-soft);
+  border-radius: 16px;
 }
 
 .hm-ahp__step {
   position: relative;
-  display: grid;
-  gap: var(--s-2);
-  padding-inline-start: 2.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 0 12px 38px;
   counter-increment: hm-ahp-step;
 }
+
+.hm-ahp__step + .hm-ahp__step { border-block-start: 1px solid var(--home-hairline); }
 
 .hm-ahp__step::before {
   content: counter(hm-ahp-step);
   position: absolute;
   inset-inline-start: 0;
-  inset-block-start: 0;
-  inline-size: 1.75rem;
-  block-size: 1.75rem;
-  display: grid;
-  place-items: center;
-  color: var(--accent-bright);
-  font-size: var(--t-sm);
-  font-weight: var(--weight-semibold);
-  background: var(--accent-dim);
-  border-radius: 50%;
+  inset-block-start: 11px;
+  inline-size: 26px;
+  font-family: var(--home-font-display);
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--home-ink);
 }
 
 .hm-ahp__step > p {
   margin: 0;
-  font-size: var(--t-base);
-  line-height: var(--lh-base);
-}
-
-.hm-ahp__copyable {
-  display: flex;
-  align-items: stretch;
-  gap: var(--s-2);
-  max-inline-size: 100%;
-  padding: var(--s-2);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-
-.hm-ahp__value {
-  flex: 1;
-  min-inline-size: 0;
-  margin: 0;
-  padding: var(--s-2);
-  font-family: var(--font-mono);
-  font-size: var(--t-sm);
-  line-height: var(--lh-sm);
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-}
-
-.hm-ahp__copyable--say .hm-ahp__value {
-  font-family: var(--font-sans);
-  font-size: var(--t-base);
-  quotes: "“" "”";
-}
-
-.hm-ahp__copy {
-  flex: none;
-  align-self: center;
-  min-block-size: 2.75rem;
-  min-inline-size: 4.5rem;
-  padding: 0 var(--s-4);
-  color: var(--text);
-  font: inherit;
-  font-size: var(--t-sm);
-  font-weight: var(--weight-semibold);
-  background: var(--surface);
-  border: 1px solid var(--border-interactive);
-  border-radius: var(--radius-pill);
-  cursor: pointer;
-}
-
-.hm-ahp__button {
-  justify-self: start;
-  min-block-size: 2.75rem;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 var(--s-5);
-  color: var(--accent-ink);
-  font: inherit;
-  font-size: var(--t-sm);
-  font-weight: var(--weight-semibold);
-  text-decoration: none;
-  background: var(--accent);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-pill);
-  cursor: pointer;
-}
-
-.hm-ahp__button:hover {
-  background: var(--accent-bright);
-  border-color: var(--accent-bright);
-}
-
-.hm-ahp__button--quiet {
-  color: var(--text);
-  background: var(--surface);
-  border-color: var(--border-interactive);
-}
-
-:is(.hm-ahp__button--quiet):hover {
-  background: var(--surface-2);
-  border-color: var(--border-interactive);
+  font-size: 16px;
+  line-height: 1.45;
 }
 
 .hm-ahp__notes {
-  display: grid;
-  gap: var(--s-2);
-  margin: 0;
-  padding: var(--s-4);
-  color: var(--text-muted);
-  font-size: var(--t-sm);
-  line-height: var(--lh-sm);
-  list-style: none;
-  background: var(--surface-2);
-  border-radius: var(--radius);
-}
-
-.hm-ahp__waiting {
   display: flex;
-  align-items: baseline;
-  gap: var(--s-3);
-  margin: 0;
-  color: var(--text-muted);
-  font-size: var(--t-sm);
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0 0;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--home-ink-muted);
+  list-style: none;
 }
 
-.hm-ahp__pulse {
-  inline-size: 0.6rem;
-  block-size: 0.6rem;
-  flex: none;
-  border-radius: 50%;
-  background: var(--accent);
-  animation: hm-ahp-pulse 1.6s ease-in-out infinite;
-}
+/* Joined: the canvas footer, a 1px rule, then the lime action and a muted line. */
+.hm-ahp__joined { display: block; }
 
-@keyframes hm-ahp-pulse {
-  0%, 100% { opacity: 0.35; transform: scale(0.85); }
-  50% { opacity: 1; transform: scale(1); }
-}
-
-.hm-ahp__joined {
-  justify-items: start;
+.hm-ahp__joined:not([hidden]) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+  padding-block-start: 20px;
+  border-block-start: 1px solid var(--home-card-border);
 }
 
 .hm-ahp__actions {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--s-3);
+  align-items: center;
+  gap: 10px;
 }
+
+.hm-ahp__joined-lead {
+  flex: 1 1 240px;
+  margin: 0;
+  font-size: 14px;
+  color: var(--home-ink-muted);
+}
+
+/* The person invite: a quiet line at the foot of the page, out of the header (canvas header is the
+   title and the lead only). */
+.hm-ahp__footer {
+  margin: 0;
+  font-size: 13px;
+  color: var(--home-ink-muted);
+  text-wrap: pretty;
+}
+
+/* The inline link keeps a 44px target without growing the line. */
+.hm-ahp__footer > .hm-ahp__link { margin-block: -12px; }
+
+.hm-ahp__link {
+  min-block-size: 44px;
+  padding: 0 6px;
+  color: inherit; /* the footer's muted line: an underlined text action, not a second strong endpoint */
+  font: inherit;
+  font-weight: 400;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  background: transparent;
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.hm-ahp__link:hover { color: var(--home-ink); }
 
 .hm-ahp__status {
   position: absolute;
@@ -641,97 +1074,342 @@
   white-space: nowrap;
 }
 
-/* --- /invite connect step (UI-SPEC 3.9) --- */
+
+/* --- /invite connect step (UI-SPEC 3.9; ref Phone-Connect). The page is an ink screen. --- */
 
 .hm-invite-connect {
-  display: grid;
-  gap: var(--s-5);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  color: var(--home-rail-soft);
 }
 
 .hm-invite-connect__step {
   margin: 0;
-  color: var(--text-muted);
-  font-size: var(--t-sm);
-  font-weight: var(--weight-semibold);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--home-rail-soft);
+}
+
+/* Who it will be: the you-and-it capsule with its caption, 26px under the top bar. */
+.hm-invite-connect__who {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-block-start: -2px; /* the page's 28px gap under the brand, less 2: the canvas 26px */
+}
+
+.hm-invite-connect__caption {
+  flex: 1;
+  min-inline-size: 0;
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--home-rail-soft);
+  text-wrap: pretty;
 }
 
 .hm-invite-connect__capsule {
+  align-self: center;
+  flex: none;
   display: inline-flex;
   align-items: center;
-  gap: var(--s-1);
-  padding: var(--s-1) var(--s-2) var(--s-1) var(--s-1);
-  background: var(--surface-2);
+  gap: 4px;
+  padding: 4px 8px 4px 4px;
+  background: var(--home-rail-raised);
   border-radius: var(--radius-pill);
 }
 
 .hm-invite-connect__person {
-  inline-size: 2.5rem;
-  block-size: 2.5rem;
-  display: grid;
-  place-items: center;
+  inline-size: 40px;
+  block-size: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
   border-radius: 50%;
-  background: var(--accent-dim);
-  color: var(--text);
-  font-weight: var(--weight-semibold);
+  background: var(--home-blue);
+  color: var(--home-on-person);
+  font-size: 16px;
+  font-weight: 700;
 }
 
+/* The assistant before it joins: the owner's tint, a dashed owner edge, the deep initial. */
 .hm-invite-connect__agent {
-  inline-size: 2.125rem;
-  block-size: 2.125rem;
-  border: 1.5px dashed var(--border-interactive);
-  border-radius: var(--radius);
-  background: var(--peach);
-  opacity: 0.55;
+  inline-size: 34px;
+  block-size: 34px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  border: 1.5px dashed var(--home-blue);
+  border-radius: 10px;
+  background: var(--home-blue-tint);
+  color: var(--home-blue-deep);
+  font-size: 14px;
+  font-weight: 700;
 }
 
-.hm-invite-connect__title {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: var(--t-2xl);
-  line-height: var(--lh-2xl);
-  font-weight: var(--weight-head);
+/* The capsule is bound to its owner's colour family (data-hue from personTint, as every person
+   dot): 0 blue (the viewer, the default above), 1 orange, 2 purple, 3 teal. */
+.hm-invite-connect__capsule[data-hue="1"] > .hm-invite-connect__person { background: var(--home-orange); }
+.hm-invite-connect__capsule[data-hue="1"] > .hm-invite-connect__agent {
+  border-color: var(--home-orange); background: var(--home-orange-tint); color: var(--home-orange-deep);
+}
+.hm-invite-connect__capsule[data-hue="2"] > .hm-invite-connect__person { background: var(--home-purple); }
+.hm-invite-connect__capsule[data-hue="2"] > .hm-invite-connect__agent {
+  border-color: var(--home-purple); background: var(--home-purple-tint); color: var(--home-purple-deep);
+}
+.hm-invite-connect__capsule[data-hue="3"] > .hm-invite-connect__person { background: var(--home-teal); }
+.hm-invite-connect__capsule[data-hue="3"] > .hm-invite-connect__agent {
+  border-color: var(--home-teal); background: var(--home-teal-tint); color: var(--home-teal-deep);
 }
 
+.hm-invite-connect__caption strong { font-weight: 700; color: var(--home-rail-strong); }
+
+/* The host status is plain secondary text in the caption (canvas: no capsule). Only a problem state
+   ("waiting": nobody can use the route yet) keeps the warning capsule. */
 .hm-invite-connect__status {
+  display: inline;
   margin: 0;
-  padding: 0.2rem 0.6rem;
-  justify-self: start;
-  border-radius: var(--radius-pill);
-  font-size: var(--t-2xs);
-  line-height: 1.4;
-  font-weight: var(--weight-semibold);
+  padding: 0;
+  font: inherit;
   white-space: nowrap;
-}
-
-.hm-invite-connect__status[data-status="ready"] {
-  color: var(--success);
-  background: var(--success-dim);
-}
-
-.hm-invite-connect__status[data-status="untested"] {
-  color: var(--warning);
-  background: var(--warning-dim);
+  color: var(--home-rail-soft);
+  background: transparent;
 }
 
 .hm-invite-connect__status[data-status="waiting"] {
-  color: var(--accent-bright);
-  background: var(--accent-dim);
+  display: inline-block;
+  padding: 1px 8px;
+  vertical-align: 1px;
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+  color: var(--home-offline-deep);
+  background: var(--home-offline-tint);
+}
+
+.hm-invite-connect .hm-invite-connect__title {
+  margin-block-start: 18px;
+  font-family: var(--home-font-display);
+  font-size: 38px;
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.025em;
+  color: var(--home-rail-strong);
+}
+
+/* On a phone the app's name takes the title's second line (canvas "Connect your / Muse."). */
+@media (max-width: 30rem) {
+  .hm-invite-connect__title-name { display: block; }
+}
+
+.hm-invite-connect__lead {
+  margin: 10px 0 0;
+  font-size: 16px;
+  line-height: 1.4;
+  color: var(--home-rail-soft);
+  text-wrap: pretty;
+}
+
+/* The steps: one ink panel, numbered rows (lime numbers, a 700 heading, a 14px line under it).
+   The numbered rows only; "Good to know" lives in the action area. */
+.hm-invite-connect__panel {
+  margin-block-start: 20px;
+  padding: 4px 16px;
+  background: var(--home-rail-panel);
+  border-radius: 18px;
+}
+
+.hm-invite-connect__panel:has(> [data-connect-steps][hidden]) { display: none; }
+
+.hm-invite-connect .hm-ahp__steps {
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+}
+
+/* A row wraps: heading, then a "Show" toggle beside it when it fits; the line and an open value
+   take the full width. */
+.hm-invite-connect .hm-ahp__step {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 10px;
+  padding: 12px 0 12px 38px;
+  color: var(--home-rail-strong);
+}
+
+.hm-invite-connect .hm-ahp__step > * { flex: 0 1 auto; min-inline-size: 0; }
+.hm-invite-connect .hm-ahp__step > .hm-invite-connect__step-line,
+.hm-invite-connect .hm-ahp__step > .hm-ahp__button,
+.hm-invite-connect .hm-ahp__step > .hm-invite-connect__reveal[open] { flex-basis: 100%; }
+
+.hm-invite-connect .hm-ahp__step + .hm-ahp__step { border-block-start-color: var(--home-rail-divider); }
+.hm-invite-connect .hm-ahp__step::before { inset-block-start: 12px; color: var(--home-lime); }
+
+.hm-invite-connect .hm-invite-connect__step-head {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.4;
+  color: var(--home-rail-strong);
+  overflow-wrap: anywhere;
+}
+
+.hm-invite-connect .hm-invite-connect__step-line {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--home-rail-soft);
+  overflow-wrap: anywhere;
+}
+
+.hm-invite-connect__reveal > summary,
+.hm-invite-connect__more > summary {
+  min-block-size: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--home-rail-soft);
+  list-style: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.hm-invite-connect__reveal > summary::-webkit-details-marker,
+.hm-invite-connect__more > summary::-webkit-details-marker { display: none; }
+
+.hm-invite-connect__reveal > summary::before,
+.hm-invite-connect__more > summary::before {
+  content: "";
+  inline-size: 6px;
+  block-size: 6px;
+  flex: none;
+  border-inline-end: 1.6px solid currentColor;
+  border-block-end: 1.6px solid currentColor;
+  transform: rotate(-45deg);
+}
+
+.hm-invite-connect__reveal[open] > summary::before,
+.hm-invite-connect__more[open] > summary::before { transform: rotate(45deg); }
+
+.hm-invite-connect__reveal > summary:hover,
+.hm-invite-connect__more > summary:hover { color: var(--home-rail-strong); }
+
+.hm-invite-connect__reveal > summary:focus-visible,
+.hm-invite-connect__more > summary:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.hm-invite-connect__reveal { margin: 0; }
+/* "Show the words" is secondary text, not a second heading (Phone-Connect.dc.html: numbered headings, then muted
+   lines): the step line's 14px/400 muted ink and a light 1.2px chevron, as "Good to know" draws (critic r9 CPhoneConnect
+   1). The chevron's box stays 7.6px (6.4 + 1.2) so the summary's baseline, and the row height, do not move. */
+.hm-invite-connect__reveal > summary { min-block-size: 22px; font-weight: 400; }
+.hm-invite-connect__reveal > summary::before {
+  inline-size: 6.4px;
+  block-size: 6.4px;
+  border-inline-end-width: 1.2px;
+  border-block-end-width: 1.2px;
+}
+.hm-invite-connect__reveal[open] > summary { margin-block-end: 6px; }
+
+.hm-invite-connect .hm-ahp__copyable {
+  padding: 10px 14px;
+  background: var(--home-rail-bg);
+}
+
+.hm-invite-connect .hm-ahp__value {
+  flex-basis: 200px;
+  font-family: var(--home-font-body);
+  font-size: 14px;
+}
+
+.hm-invite-connect .hm-ahp__step > .hm-ahp__button { margin-block-start: 8px; }
+
+/* "Good to know" is a quiet toggle that runs on at the end of the footnote's last line (no row in the
+   panel, no row of its own): the footnote's 13px type in the muted ink and a light chevron, so it reads
+   as part of the footnote and the action stack keeps the canvas height (the primary button stays as low
+   as the 844px screen allows). Its 24px target overhangs the 18.2px text line by 3px each way (negative
+   margin), so it does not open the line. Opened, it takes its own block and the notes follow. */
+.hm-invite-connect__more { display: inline-block; margin-inline-start: 6px; text-align: center; vertical-align: top; }
+.hm-invite-connect__more[open] { display: block; margin-inline-start: 0; }
+/* Closed, the summary is the details' only block (no inner line box, so no strut shifts it): its text
+   then sits on the footnote's line. */
+.hm-invite-connect__more:not([open]) > summary { display: flex; }
+
+.hm-invite-connect__more > summary {
+  min-block-size: 24px;
+  margin-block: -3px;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--home-rail-muted);
+}
+
+.hm-invite-connect__more > summary::before {
+  inline-size: 5px;
+  block-size: 5px;
+  border-inline-end-width: 1.2px;
+  border-block-end-width: 1.2px;
+}
+.hm-invite-connect__more[open] > .hm-ahp__notes { text-align: start; }
+.hm-invite-connect__more:has(> [data-connect-notes][hidden]) { display: none; }
+
+.hm-invite-connect .hm-ahp__notes {
+  margin-block-start: 6px;
+  padding: 0;
+  font-size: 13px;
+  color: var(--home-rail-soft);
+  border: 0;
+}
+
+.hm-invite-connect .hm-ahp__button {
+  color: var(--home-lime-ink);
+  background: var(--home-lime);
+}
+
+/* The way on, pushed to the bottom of the screen as on the canvas. */
+.hm-invite-connect__actions {
+  display: flex;
+  flex-direction: column;
+  margin-block-start: auto;
+  padding-block-start: 16px;
+}
+
+/* The footnote and "Good to know" share one centred text block, 6px under the copy link (canvas). */
+.hm-invite-connect__foot {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: center;
+  text-wrap: pretty;
 }
 
 .hm-invite-connect__footnote {
+  display: inline;
   margin: 0;
-  color: var(--text-muted);
-  font-size: var(--t-sm);
-  line-height: var(--lh-sm);
+  color: var(--home-rail-soft);
 }
 
 .hm-invite-connect__copy-link {
-  min-block-size: 2.75rem;
+  min-block-size: 46px;
+  margin-block-start: 6px;
   padding: 0;
-  color: var(--accent-bright);
+  color: var(--home-rail-strong);
   font: inherit;
-  font-weight: var(--weight-semibold);
+  font-size: 15px;
+  font-weight: 600;
   text-decoration: underline;
+  text-underline-offset: 2px;
   background: transparent;
   border: 0;
   cursor: pointer;
@@ -743,9 +1421,12 @@
 }
 
 .hm-invite-connect__step[hidden],
+.hm-invite-connect__who[hidden],
 .hm-invite-connect__capsule[hidden],
+.hm-invite-connect__lead[hidden],
 .hm-invite-connect__footnote[hidden],
 .hm-invite-connect__status[hidden],
+.hm-invite-connect .hm-invite-connect__status[hidden],
 .hm-invite-connect [data-connect-steps][hidden],
 .hm-invite-connect [data-connect-notes][hidden],
 .hm-invite-connect [data-connect-open][hidden],
@@ -754,23 +1435,6 @@
   display: none;
 }
 
-.invite-onramp__assistant-list {
-  display: grid;
-  gap: var(--s-3);
-}
-
-.invite-onramp__assistant {
-  min-block-size: 3rem;
-  display: flex;
-  align-items: flex-start;
-  gap: var(--s-3);
-  padding: var(--s-4);
-  cursor: pointer;
-}
-
-.invite-onramp__assistant input {
-  margin-block-start: 0.15rem;
-}
 
 @media (prefers-reduced-motion: reduce) {
   .hm-ahp__pulse {
@@ -782,10 +1446,7 @@
   }
 }
 
-.hm-ahp__selected-check { display: none; }
-.hm-ahp__chip-btn[aria-pressed="true"] .hm-ahp__selected-check { display: inline; }
 .hm-new-workspace__preview-title, .hm-new-workspace__preview-list, .hm-ahp__title, .hm-ahp__lead { overflow-wrap: anywhere; }
-.hm-new-workspace__field input { box-sizing: border-box; }
 
 /* Keep the phone header in flow after the legacy component's scoped styles. */
 @media (width <= 52rem) {
@@ -800,9 +1461,24 @@
   .hm-frame.hm-frame .hm-frame__main .hm-frame__channel .dashboard__feed-more {
     padding-block-start: 0; margin-block-start: 0;
   }
+  /* The canvas Add-Agent page: 20px over the breadcrumb, 32px under the last block, the canvas
+     clamp(16px, 4vw, 32px) gutter, and the full column width on a phone. */
   .hm-frame.hm-frame .hm-frame__main .hm-frame__channel .dashboard__host-view {
-    padding-block: var(--s-6);
+    inline-size: auto;
+    padding-block: 20px 32px;
+    padding-inline: clamp(16px, 4vw, 32px);
   }
+}
+
+/* The breadcrumb is the page's first line: no extra margin over the picker (canvas title at y=68). */
+live-dashboard[data-channel-view="agent-choice"] .hm-frame--add-agent .dashboard__host-view > .dashboard__host-picker {
+  margin-block-start: 0;
+}
+
+@media (width <= 32rem) {
+  /* On a phone the opened steps card is the column's width with a narrower number gutter. */
+  .hm-ahp__how .hm-ahp__steps { padding-inline: 14px; }
+  .hm-ahp__how .hm-ahp__step { padding-inline-start: 30px; }
 }
 
 .hm-pane-title {

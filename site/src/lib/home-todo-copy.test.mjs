@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { TODO_RESULT_UNKNOWN, TODO_SAVE_FAILED, ordinal, todoAssigneeLabel, todoMetaLine, todoStartChoice, todoStatus, todoSubline,
+import { TODO_RESULT_UNKNOWN, TODO_SAVE_FAILED, ordinal, todoAssigneeLabel, todoMetaLine, todoStartChoice, todoStatus, todoSteerLine, todoSubline,
   whenAt, whenDay, whenStamp } from "./home-todo-copy.ts";
 import { todoListOrder } from "./home-todo-list.ts";
 import { personNames } from "./home-pickers.ts";
@@ -257,4 +257,13 @@ test("someone else's agent at a set time names its line once, never a double pos
 test("an open to-do with no assignee has a status line of its own", () => {
   assert.deepEqual(todoStatus(todo(), ctx), { line: "Not assigned yet.", more: [], warning: null });
   assert.deepEqual(todoStatus(todo({ state: "doing" }), ctx), { line: "Not assigned yet.", more: [], warning: null });
+});
+
+test("the padlock line names the owner's agent as the chips do and keeps off-screen words out", () => {
+  const banned = /starts at|\bonline\b|\boffline\b|\bseat\b|\bgrant\b|\btoken\b|\bwake\b|\bturn\b|\bqueue\b/i;
+  assert.match("3rd in the queue", banned, "positive control");
+  const line = todoSteerLine(claude);
+  assert.equal(line, "Only you can change when your Claude picks this up.");
+  assert.doesNotMatch(line, banned);
+  assert.match(todoStartChoice(toAgent(claude, { mode: "queue", position: 1 })).legend, /your Claude pick this up/, "same name and verb as the chips");
 });

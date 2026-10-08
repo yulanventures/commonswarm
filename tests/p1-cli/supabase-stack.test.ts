@@ -71,7 +71,7 @@ const memory = {
 const images = {
   postgres: "public.ecr.aws/supabase/postgres:17.6.1.147",
   gotrue: "public.ecr.aws/supabase/gotrue:v2.197.0",
-  postgrest: "public.ecr.aws/supabase/postgrest:v14.5",
+  postgrest: "public.ecr.aws/supabase/postgrest:v14.18@sha256:c7cd7e265a85b05248abf53f4473fcec7e327c282d0bd0cf60f1551996d09fcf",
   realtime: "public.ecr.aws/supabase/realtime:v2.86.3",
   "storage-api": "public.ecr.aws/supabase/storage-api:v1.77.5",
 } as const;

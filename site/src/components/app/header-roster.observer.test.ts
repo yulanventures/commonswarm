@@ -18,6 +18,8 @@ const rail = await readFile(new URL("../../lib/home-rail.ts", import.meta.url), 
 const homeShellCss = await readFile(new URL("../../styles/home/shell.css", import.meta.url), "utf8");
 const integration = await readFile(new URL("../../styles/home/integration.css", import.meta.url), "utf8");
 const view = await readFile(new URL("../../lib/people-dialog-view.ts", import.meta.url), "utf8");
+const route = await readFile(new URL("../../lib/home-route.ts", import.meta.url), "utf8");
+const peopleCss = await readFile(new URL("../../styles/home/people.css", import.meta.url), "utf8");
 const connect = await readFile(
   new URL("../connect/AgentConnect.astro", import.meta.url),
   "utf8",
@@ -46,17 +48,23 @@ test("the rail carries the nested people list without management doors or legacy
   assert.doesNotMatch(rail, /data-add-agent|data-remove-agent|data-resume/);
 });
 
-test("the header control is one stack button with a dialog relationship", () => {
+/* ~~"the header control is one stack button with a dialog relationship"~~ (aria-haspopup="dialog",
+   aria-controls="dashboard-roster-dialog", aria-expanded), retired 2026-10-07 by the home visual lane:
+   People & agents is a PAGE now (the canvas Members artboard, route `?v=people`). A door that
+   navigates must not claim a popup, so the claim is pinned ABSENT and the page relationship is
+   pinned instead: the door is the current page while the page shows. */
+test("the header control is one stack button that opens the People & agents page", () => {
   assert.match(dashboard, /buildWorkspaceHeader\(document, vm, callbacks\)/);
   assert.match(shell, /people.dataset.rosterOpen/);
-  assert.match(shell, /people.setAttribute\("aria-haspopup", "dialog"\)/);
-  assert.match(dashboard, /id="dashboard-roster-dialog"/);
+  assert.doesNotMatch(shell, /aria-haspopup", "dialog"/, "a door to a page is not a popup");
+  assert.match(route, /view: "people"; workspaceId: string \| null/);
+  assert.match(dashboard, /navigateHome\(\{ view: "people", workspaceId \}, "push"\)/);
   assert.match(shell, /"People & agents"/);
   assert.match(shell, /people.addEventListener\("click", \(\) => callbacks.openPeople\(\)\)/);
   assert.match(shell, /compactCapsules\(doc, vm.people, 2\)/);
   assert.match(shell, /buildPhoneTopBar/);
-  assert.match(dashboard, /button.setAttribute\("aria-controls", "dashboard-roster-dialog"\)/);
-  assert.match(dashboard, /button.setAttribute\("aria-expanded"/);
+  assert.doesNotMatch(dashboard, /aria-controls", "dashboard-roster-dialog"/);
+  assert.match(dashboard, /if \(homeRoute.view === "people"\) button.setAttribute\("aria-current", "page"\)/);
 });
 
 test("pending access keeps the header management door reachable before the first agent", () => {
@@ -83,20 +91,20 @@ test("agent avatars keep one shape and one tint mechanism", () => {
   assert.match(dashboard, /--avatar-hue/);
 });
 
-test("management lives in a dialog whose first primary action is Add an agent", () => {
-  assert.match(dashboard, /<dialog/);
-  assert.match(dashboard, /data-roster-dialog/);
-  const open = dashboard.indexOf("data-roster-dialog");
-  const add = dashboard.indexOf("data-add-agent-dialog");
-  const search = dashboard.indexOf("data-roster-search");
-  const list = dashboard.indexOf("data-dialog-agent-list");
-  assert.ok(open >= 0 && add > open, "the Add door is inside the dialog");
-  assert.ok(add < search && search < list, "Add an agent is the first action, then filter, then roster");
-  assert.match(
-    dashboard,
-    /add\.hidden = sampleMode/,
-    "sample mode never shows an Add door that cannot mint",
-  );
+/* ~~"management lives in a dialog whose first primary action is Add an agent"~~, retired
+   2026-10-07: Members.dc.html puts the two doors beside the page title, Invite someone as the
+   dark primary and Add an agent as the outlined secondary, then the filter, then the roster. */
+test("management lives on the page: the two doors beside the title, then filter, then roster", () => {
+  const page = view.slice(view.indexOf("if (page) {"), view.indexOf("const select = "));
+  const invite = page.indexOf("Invite someone"), add = page.indexOf("Add an agent");
+  const search = page.indexOf("pd-page-search"), columns = page.indexOf("pd-page-columns");
+  assert.ok(invite > 0 && add > invite && search > add && columns > search,
+    "the doors come first, then the filter, then the roster columns");
+  assert.match(page, /button\(doc, "Invite someone", \(\) => nav.invite\?\.\(\), "pd-page-primary"\)/);
+  assert.match(page, /link\(doc, "Add an agent", nav.addAgentHref, "pd-page-secondary", nav.navigate\)/);
+  assert.match(page, /nav.addAgentHref && !model.sample/, "sample mode never shows an Add door that cannot mint");
+  assert.match(dashboard, /layout: "page"/);
+  assert.match(dashboard, /addAgentHref: routeHref\(\{ view: "add-agent", workspaceId: workspace.id \}\)/);
   assert.match(dashboard, /rosterFilter/);
   assert.match(view, /"data-remove-agent"/);
   assert.match(dashboard, /data-agent-error/);
@@ -134,22 +142,21 @@ test("Get prompt is own-agent only and reuses the existing prompt copy path", ()
   assert.match(copy, /navigator\.clipboard\.writeText\(this\.#prompt\)/);
 });
 
-test("the dialog is modal with Escape, backdrop, close, and focus handling", () => {
-  assert.match(dashboard, /dialog\.showModal\(\)/);
-  assert.match(
-    dashboard,
-    /event\.target === dialog[\s\S]*dialog\.close\(\)/,
-    "backdrop clicks close the dialog",
-  );
-  assert.match(
-    dashboard,
-    /dialog\?\.addEventListener\("close"/,
-    "every close path (Escape included, via the native cancel) re-syncs aria-expanded",
-  );
+/* ~~"the dialog is modal with Escape, backdrop, close, and focus handling"~~, retired 2026-10-07:
+   the page is not modal. What stays: confirmations are native modal alertdialogs, Back returns to
+   where the reader came from, Escape closes an open details column, arrival focuses the page title
+   (or the requested details), and focus after a removal reload lands on a real control. */
+test("the page has Back, Escape for details, modal confirmations, and focus on arrival", () => {
+  assert.match(view, /confirm\.showModal\(\)/, "a destructive confirmation is still a modal alertdialog");
+  assert.match(dashboard, /<dialog class="pd-confirm" data-people-confirm role="alertdialog"/);
+  assert.match(dashboard, /back: \(\) => homeBack\(\)/);
+  assert.match(route, /route.view === "people"\) return \{ view: "chat", workspaceId: route.workspaceId \}/, "Back without history returns to the workspace");
+  assert.match(dashboard, /event.key !== "Escape" \|\| homeRoute.view !== "people" \|\| !peopleDialogState.selected/);
+  assert.match(dashboard, /\(peopleDialogFocus \? one<HTMLElement>\("#pd-detail-title"\) : null\)\s*\?\? one<HTMLElement>\("#pd-page-title"\)/);
   assert.match(
     dashboard,
     /one<HTMLButtonElement>\("\[data-roster-open\]"\)[\s\S]*?focus\(\{ preventScroll: true \}\)/,
-    "after a removal reload, focus lands back on the stack button that opened the flow",
+    "after a cancel reload, focus lands back on the door that opened the flow",
   );
 });
 
@@ -173,15 +180,11 @@ test("the dialog cannot outlive its workspace or session", () => {
   assert.match(reset, /closeRosterDialog\(\)/);
 });
 
-test("the dialog is a bottom sheet at mobile widths", () => {
-  assert.match(
-    dashboard,
-    /@media \(max-width: 52rem\)[\s\S]*\.dashboard__roster-dialog\s*\{[\s\S]*margin-block-start:\s*auto/,
-  );
-  assert.match(
-    dashboard,
-    /\.dashboard__roster-dialog::backdrop/,
-  );
+/* ~~"the dialog is a bottom sheet at mobile widths"~~, retired 2026-10-07: the page is the route
+   pane at every width, and its roster and side columns wrap to one column on a phone. */
+test("the page wraps to one column on a phone", () => {
+  assert.match(peopleCss, /section\.pd-page\[data-people-page\] \.pd-page-columns \{ display: flex; flex-wrap: wrap;/);
+  assert.match(integration, /\.hm-frame--people \.hm-route-pane \{ padding: 20px clamp\(16px, 3vw, 40px\) 56px; \}/);
 });
 
 /* UI-SPEC 1.1 uses a phone top bar, an in-flow channel menu and bottom navigation.
@@ -196,7 +199,7 @@ test("the narrow shell keeps a top bar, channel menu and bottom links above the 
   assert.match(integration, /clip-path: inset\(50%\)/);
   assert.doesNotMatch(integration, /channel-menu[^}]*display: none/);
   const shellCss = homeShellCss;
-  assert.match(shellCss, /\.hm-phone-bar__people.*max-inline-size: 40vw/);
+  assert.match(shellCss, /\.hm-phone-bar__people.*max-inline-size: 44vw/);
   assert.match(shellCss, /\.hm-channel-menu__label.*white-space: nowrap/);
   assert.doesNotMatch(dashboard, /\.dashboard__channel(?:--roster)? \.dashboard__channel-body\s*\{[\s\S]*min-block-size:\s*calc\(100svh/);
 });

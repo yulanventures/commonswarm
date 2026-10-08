@@ -20,7 +20,14 @@ type Rect = {
 };
 
 type LayoutMeasurement = {
+  /** Everything above the reading area: the workspace header (or phone bar) plus any stream rows still shown. */
   combinedHeaderHeight: number;
+  /** Where the reading area starts: the transcript's top, or below the stream head and filter row while they show. */
+  transcriptTop: number;
+  /** Ruling 2: the stream head and filter row are hidden in the signed-in default; the ⋯ menu carries their controls. */
+  headVisible: boolean;
+  toolbarVisible: boolean;
+  feedMenu: boolean;
   workspaceHeader: Rect;
   sendUncovered: boolean;
   phoneNav: Rect | null;
@@ -224,6 +231,11 @@ const frameScript = (
       row.append(avatar, body);
       return row;
     }));
+    /* THE SIGNED-IN DEFAULT (Tom's ruling 2, 2026-10-07): the view switch, filters and refresh live in
+       the ⋯ menu and the stream head and filter row are hidden. LiveDashboard sets this attribute for a
+       signed-in feed at its default; the static build boots as a sample, which keeps both rows, so the
+       fixture states the signed-in default here. The reverted variant leaves it off: the old chrome. */
+    ${reverted ? "" : `doc.querySelector(".hm-frame").setAttribute("data-feed-quiet", "");`}
     await doc.fonts.ready;
     await settle();
     /* The real feed deliberately opens at the newest message. This fixture replaces that
@@ -266,10 +278,17 @@ const frameScript = (
     const header = rect(".dashboard__channel-head");
     const toolbar = rect(".dashboard__feed-toolbar");
     const composerBox = rect("[data-composer]");
-    const combinedHeaderHeight = toolbar.bottom - header.top;
-    const transcriptVisibleHeight = composerBox.top - toolbar.bottom;
+    const headVisible = header.height > 0, toolbarVisible = toolbar.height > 0;
+    const transcriptTop = Math.max(rect(".dashboard__feed-view").top, headVisible ? header.bottom : 0, toolbarVisible ? toolbar.bottom : 0);
+    const workspaceTop = rect("[data-home-workspace-shell]").top;
+    const combinedHeaderHeight = transcriptTop - workspaceTop;
+    const transcriptVisibleHeight = composerBox.top - transcriptTop;
     document.documentElement.dataset.layoutMeasurement = btoa(JSON.stringify({
       combinedHeaderHeight,
+      transcriptTop,
+      headVisible,
+      toolbarVisible,
+      feedMenu: [...doc.querySelectorAll("[data-home-workspace-shell] .hm-menu__trigger")].some((trigger) => trigger.getClientRects().length > 0),
       workspaceHeader: rect("[data-home-workspace-shell]"),
       sendUncovered: Boolean(doc.elementFromPoint(rect("[data-composer-send]").left + rect("[data-composer-send]").width / 2, rect("[data-composer-send]").top + rect("[data-composer-send]").height / 2)?.closest("[data-composer-send]")),
       phoneNav: view.innerWidth <= 832 ? rect('[data-home-workspace-nav="phone"]') : null,
@@ -412,16 +431,18 @@ const assertPhoneHeaderRule = (measurement: LayoutMeasurement, width: number): v
     `${width}px density: the app bar is not a one-row bar (${appBar}px), so the rule below ` +
       `is not measuring anything: ${JSON.stringify(measurement.shell)}`,
   );
+  /* Phone-Space.dc.html: the stream starts right under the top bar. While the stream rows are hidden
+     (ruling 2) nothing may sit between them; while they show, together they stay under one bar's height. */
+  const below = measurement.transcriptTop - appBar;
   assert.ok(
-    measurement.shell.channelBody.top >= measurement.header.bottom - 0.5 && measurement.shell.channelBody.top <= 2 * appBar,
-    `${width}px density: ${measurement.shell.channelBody.top}px of header sits above the ` +
-      `transcript, which is taller than the ${appBar}px workspace bar`,
+    measurement.headVisible || measurement.toolbarVisible ? below <= appBar : below <= 0.5,
+    `${width}px density: ${below}px of header sits between the ${appBar}px workspace bar and the transcript`,
   );
-  /* Positive control: a missing channel header must not pass the compact-header rule. */
+  /* Positive control: hiding the rows must not hide their controls. The ⋯ menu that now holds the view
+     switch, the filters and refresh is on screen in the bar. */
   assert.ok(
-    measurement.header.height > 0 && measurement.header.top >= appBar - 0.5,
-    `${width}px density: the channel head is missing from the transcript header: ` +
-      JSON.stringify(measurement.header),
+    measurement.feedMenu,
+    `${width}px density: no ⋯ menu in the workspace bar, so the stream's controls are unreachable`,
   );
   /* At rest the first message must clear the channel header and the filter row. */
   assert.equal(
@@ -434,18 +455,16 @@ const assertPhoneHeaderRule = (measurement: LayoutMeasurement, width: number): v
     `${width}px density: there is no first message, so the clearance below measures nothing`,
   );
   assert.ok(
-    measurement.firstRow.top >= measurement.header.bottom - 0.5,
-    `${width}px density: ${(measurement.header.bottom - measurement.firstRow.top).toFixed(1)}px ` +
-      "of the first message sits under the channel header at rest: " +
-      JSON.stringify({ firstRow: measurement.firstRow, header: measurement.header }),
+    measurement.firstRow.top >= measurement.transcriptTop - 0.5,
+    `${width}px density: ${(measurement.transcriptTop - measurement.firstRow.top).toFixed(1)}px ` +
+      "of the first message sits under the header rows at rest: " +
+      JSON.stringify({ firstRow: measurement.firstRow, header: measurement.header, toolbar: measurement.toolbar }),
   );
-  assert.ok(
-    measurement.firstRow.top >= measurement.toolbar.bottom - 0.5,
-    `${width}px density: the first message sits under the filter row at rest: ` +
-      JSON.stringify({ firstRow: measurement.firstRow, toolbar: measurement.toolbar }),
-  );
-  assert.ok(
-    measurement.transcriptVisibleHeight + measurement.header.height + (measurement.phoneNav?.height ?? 0) >= 600,
+  /* ~~transcript + channel head + bottom nav >= 600px~~, retired 2026-10-07 with the rows. The floor is
+     now the reading height Phone-Space.dc.html leaves at 844px: 844 − the 106px header (50 + 44 + 12)
+     − the 67px composer (1 + 10 + 46 + 10) − the 75px bottom bar (1 + 8 + 44 + 22) = 596px. */
+  if (measurement.viewport.height === 844) assert.ok(
+    measurement.transcriptVisibleHeight >= 596,
     `${width}px density: transcript is too short: ${JSON.stringify(measurement)}`,
   );
 };
@@ -458,11 +477,29 @@ const assertDensity = (measurement: LayoutMeasurement, width: number): void => {
     assertPhoneHeaderRule(measurement, width);
     return;
   }
-  /* The workspace header and channel menu share this compactness budget. The mutation
-   * adds height to the actual elements and must still fail the density checks. */
-  const limits = { headerMax: 125, headerMin: 110, ratioMin: 5, transcriptMin: 600 };
-  // UI-SPEC adds a workspace header before the old stream. Debit its measured height only.
-  const referenceTranscript = measurement.transcriptVisibleHeight + measurement.workspaceHeader.height;
+  /* The workspace header and any stream rows share this compactness budget. The reverted
+   * variant restores the old rows at their old heights and must still fail the density checks. */
+  /* ~~headerMin: 110~~, retired 2026-10-07 (home visual lane). It was the 2026-09 build's own
+   * measurement, not a requirement: the floor only exists so an unrendered header cannot pass.
+   * The canvas (Space.dc.html) draws no channel head and no filter row at all; its only header is
+   * the workspace header above them, which this band does not count. A floor of 110 therefore
+   * failed the lane for moving TOWARD the mockup (CI 37680538386: 48px head + 41px filter row =
+   * 89px). The floor is now one 44px tap row, and the channel head must be present, which is the
+   * same positive control the phone rule uses. headerMax and every reading-space check stand, and
+   * the reverted fixture (a 140px head and a 96px filter row) still fails the band. */
+  /* DERIVED FROM Space.dc.html (2026-10-07, ruling 2). The canvas has one header above the stream:
+   * 16 + the 28px title at 1.1 (30.8) + 2 + the 14px subline at 1.45 (20.3) + 16 + a 1px rule = 86.1px,
+   * so the band's ceiling is 87. Its floor stays the 44px tap row that proves a header rendered.
+   * At 1440x900 that header and the 111.85px composer leave 900 − 86.1 − 111.85 = 702.05px to read,
+   * a ratio of 8.15. ~~headerMax 125, ratioMin 5, transcriptMin 600~~ measured the head and filter
+   * rows the canvas does not have. */
+  const limits = { headerMax: 87, headerMin: 44, ratioMin: 8, transcriptMin: 702 };
+  assert.ok(
+    measurement.workspaceHeader.height >= 44,
+    `${width}px density: the workspace header is missing: ` + JSON.stringify(measurement.workspaceHeader),
+  );
+  assert.ok(measurement.feedMenu, `${width}px density: no ⋯ menu, so the stream's controls are unreachable`);
+  const referenceTranscript = measurement.transcriptVisibleHeight;
   assert.ok(
     measurement.combinedHeaderHeight >= limits.headerMin &&
       measurement.combinedHeaderHeight <= limits.headerMax,
@@ -473,7 +510,7 @@ const assertDensity = (measurement: LayoutMeasurement, width: number): void => {
     `${width}px density: transcript is too short: ${JSON.stringify(measurement)}`,
   );
   assert.ok(
-    referenceTranscript / measurement.combinedHeaderHeight >= limits.ratioMin,
+    measurement.transcriptVisibleHeight / measurement.combinedHeaderHeight >= limits.ratioMin,
     `${width}px density: transcript/header ratio is too low: ${JSON.stringify(measurement)}`,
   );
 };
@@ -557,15 +594,12 @@ test("the smallest phone fits the workspace header, channel menu, composer and b
       `320x568: the app bar is not a one-row bar (${appBar}px), so the rule below is not ` +
         `measuring anything: ${JSON.stringify(measurement.shell)}`,
     );
+    /* Ruling 2: the stream starts right under the bar, and the ⋯ menu holds the rows' controls. */
     assert.ok(
-      measurement.shell.channelBody.top >= measurement.header.bottom - 0.5 && measurement.shell.channelBody.top <= 2 * appBar,
-      `320x568: ${measurement.shell.channelBody.top}px of header sits above the transcript, ` +
-        `which is taller than the ${appBar}px workspace bar`,
+      measurement.transcriptTop - appBar <= 0.5,
+      `320x568: ${measurement.transcriptTop - appBar}px of header sits between the ${appBar}px workspace bar and the transcript`,
     );
-    assert.ok(
-      measurement.header.height > 0 && measurement.header.top >= appBar - 0.5,
-      `320x568: the channel head is missing: ${JSON.stringify(measurement.header)}`,
-    );
+    assert.ok(measurement.feedMenu, `320x568: no ⋯ menu in the bar: ${JSON.stringify(measurement.shell)}`);
     /* The at-rest clearance, re-pinned at the smallest phone and with the widest roster label,
        which is where a band that grew a line would first stop fitting. The shared rule cannot be
        reused whole here: its transcript floor is written for an 844px screen. */
@@ -579,8 +613,7 @@ test("the smallest phone fits the workspace header, channel menu, composer and b
       "320x568: there is no first message, so the clearance below measures nothing",
     );
     assert.ok(
-      measurement.firstRow.top >= measurement.header.bottom - 0.5 &&
-        measurement.firstRow.top >= measurement.toolbar.bottom - 0.5,
+      measurement.firstRow.top >= measurement.transcriptTop - 0.5,
       `320x568: the first message sits under the header at rest: ${JSON.stringify({
         firstRow: measurement.firstRow,
         header: measurement.header,

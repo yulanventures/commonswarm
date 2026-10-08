@@ -2,10 +2,11 @@
 // User and agent text goes in through textContent or an input value only. Controls render only
 // where TodoVM.may allows them and never in sample mode; a hidden control makes no claim why.
 import type { AgentVM, Id, PersonVM, PickOptionVM, TodoVM } from "./home-types";
-import { agentOrb, choiceChips, notice, personAvatar } from "./home-primitives";
+import { agentOrb, choiceChips, lockIcon, notice, personAvatar } from "./home-primitives";
+import { personTint } from "./home-names";
 import { assignOptions, assignPicker, commentSegments, personNames, tagLabel, tagOptions, tagPicker, tagsInBody, type AssignFacts,
   type PickerPeople } from "./home-pickers";
-import { TODO_RESULT_UNKNOWN, TODO_SAVE_FAILED, isAgent, personName, todoAssigneeLabel, todoMetaLine, todoStartChoice, todoStatus, whenStamp,
+import { TODO_RESULT_UNKNOWN, TODO_SAVE_FAILED, isAgent, personName, todoAssigneeLabel, todoMetaLine, todoStartChoice, todoStatus, todoSteerLine, whenStamp,
   type TodoCopyContext, type TodoNotice, type TodoStartMode } from "./home-todo-copy";
 
 /** Local to lane T: what the view needs beyond TodoVM (home-types.ts has no type for it). */
@@ -36,6 +37,10 @@ export interface TodoViewCallbacks {
 }
 
 export const TODO_LOADING = "Loading this to-do…";
+/** Under the comment field when a tag delivers: the server sends each tagged person or agent a
+ * note ("Mentioned you in a comment.", household-todo-policy.ts). When a tag only highlights, the
+ * picker's own footer says so instead. */
+export const TODO_TAG_NOTE = "A tag sends that person or agent a note that you mentioned them.";
 const GATE_KINDS: { kind: TodoGateInput["kind"]; label: string }[] = [
   { kind: "todo", label: "Another to-do" }, { kind: "time", label: "A date and time" }, { kind: "note", label: "A note" },
 ];
@@ -68,10 +73,31 @@ function localInputs(iso: string | null | undefined): { date: string; time: stri
   const pad = (n: number) => String(n).padStart(2, "0");
   return { date: `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`, time: `${pad(at.getHours())}:${pad(at.getMinutes())}` };
 }
-const mark = (doc: Document, who: PersonVM | AgentVM) => isAgent(who) ? agentOrb(doc, who, { size: 28, badge: true }) : personAvatar(doc, who, 28);
+const mark = (doc: Document, who: PersonVM | AgentVM, size = 28) => isAgent(who) ? agentOrb(doc, who, { size, badge: true }) : personAvatar(doc, who, size);
+/** The colour set of a tagged name, as its avatar shows it ("none" when the name is not in the workspace). */
+function tagHue(id: Id, vm: TodoViewVM): string {
+  for (const { person, agents } of vm.people.groups) {
+    if (person.id === id) return String(personTint(person.id, person.you) ?? "none");
+    const agent = agents.find((entry) => entry.id === id);
+    if (agent) return String(personTint(agent.ownerId, agent.yours) ?? "none");
+  }
+  const other = vm.people.other?.find((entry) => entry.id === id);
+  return other ? String(personTint(other.ownerId, other.yours) ?? "none") : "none";
+}
 function authorName(who: PersonVM | AgentVM, names: ReadonlyMap<Id, string>): string {
   if (isAgent(who)) return who.label;
   return who.you ? `${personName(who, names)} (you)` : personName(who, names);
+}
+
+/** A recorded agent tag also highlights under the agent's own name ("@Muse" for "Nikki’s Muse"),
+ * as the Todo canvas shows it. Display only: what a comment sends is still `tagsInBody`. */
+function displayTags(tags: { id: Id; label: string }[], vm: TodoViewVM): { id: Id; label: string }[] {
+  const agents = [...vm.people.groups.flatMap((group) => group.agents), ...(vm.people.other ?? [])];
+  const aliases = tags.flatMap((tag) => {
+    const agent = agents.find((entry) => entry.id === tag.id);
+    return agent && agent.name && agent.name !== tag.label ? [{ id: tag.id, label: agent.name }] : [];
+  });
+  return [...tags, ...aliases];
 }
 
 /** The back link and meta line. A sample to-do has no doors, so its back line is plain text. */
@@ -151,6 +177,7 @@ function atEditor(doc: Document, todo: TodoVM, callbacks: TodoViewCallbacks): HT
   return form;
 }
 
+
 function assignedPanel(doc: Document, todo: TodoVM, vm: TodoViewVM, callbacks: TodoViewCallbacks, ctx: TodoCopyContext): HTMLElement {
   const panel = node(doc, "section", "hm-todo-panel"); panel.dataset.todoAssigned = "";
   const headId = `hm-todo-${todo.id}-assigned`.replace(/[^A-Za-z0-9_-]/g, "_");
@@ -186,6 +213,13 @@ function assignedPanel(doc: Document, todo: TodoVM, vm: TodoViewVM, callbacks: T
   if (copy.warning) panel.append(notice(doc, copy.warning, "warning"));
   if (vm.save === "failed") panel.append(notice(doc, TODO_SAVE_FAILED, "danger"));
   if (vm.save === "unknown") panel.append(notice(doc, TODO_RESULT_UNKNOWN, "warning"));
+  // Todo canvas: a padlock line closes the panel. It says what the server enforces (only the agent's
+  // owner steers its line), so it shows only with the start chips, which render only for that owner.
+  if (choice && todo.assignee?.kind === "agent") {
+    const steer = node(doc, "p", "hm-todo-steer"); steer.dataset.todoSteer = "";
+    steer.append(lockIcon(doc, "hm-todo-steer-icon"), node(doc, "span", "", todoSteerLine(todo.assignee.agent, ctx.names)));
+    panel.append(steer);
+  }
   return panel;
 }
 
@@ -199,26 +233,35 @@ function commentsSection(doc: Document, todo: TodoVM, vm: TodoViewVM, callbacks:
     const list = node(doc, "ol", "hm-comments");
     for (const comment of todo.comments) {
       const item = node(doc, "li", "hm-comment"); item.dataset.commentId = comment.id;
-      const avatar = mark(doc, comment.author); avatar.setAttribute("aria-hidden", "true");
+      const avatar = mark(doc, comment.author, 36); avatar.setAttribute("aria-hidden", "true");
       const body = node(doc, "div", "hm-comment-main");
       const line = node(doc, "p", "hm-comment-head");
       line.append(node(doc, "span", "hm-comment-author", authorName(comment.author, ctx.names ?? new Map())));
       const stamp = whenStamp(comment.at, ctx);
       if (stamp) { const time = node(doc, "time", "hm-comment-time", stamp); time.dateTime = comment.at; line.append(time); }
       const text = node(doc, "p", "hm-comment-text");
-      for (const piece of commentSegments(comment.body, comment.tags)) text.append(piece.tag ? node(doc, "mark", "hm-tag", piece.text) : doc.createTextNode(piece.text));
+      for (const piece of commentSegments(comment.body, displayTags(comment.tags, vm))) {
+        if (!piece.tag) { text.append(doc.createTextNode(piece.text)); continue; }
+        const tag = node(doc, "mark", "hm-tag", piece.text); tag.dataset.hue = tagHue(piece.tag.id, vm); text.append(tag);
+      }
       body.append(line, text); item.append(avatar, body); list.append(item);
     }
     section.append(list);
   }
   if (todo.sample || !todo.may.comment) return section;
   const form = node(doc, "form", "hm-comment-form"); form.dataset.todoCommentForm = "";
-  const area = node(doc, "textarea", "hm-todo-input hm-comment-input"); area.rows = 2; area.dataset.todoComment = "";
+  const area = node(doc, "textarea", "hm-todo-input hm-comment-input"); area.rows = 1; area.dataset.todoComment = "";
   const picked: { id: Id; label: string }[] = [];
-  const picker = tagPicker(doc, area, { id: `${headId}-tags`, label: "Tag someone", options: tagOptions(vm.people), people: vm.people, tagDelivers: todo.tagDelivers },
+  const picker = tagPicker(doc, area, { id: `${headId}-tags`, label: `Tag someone in ${vm.workspace.name}`, options: tagOptions(vm.people), people: vm.people, tagDelivers: todo.tagDelivers },
     (option) => picked.push({ id: option.value, label: tagLabel(option) }));
-  const fieldWrap = node(doc, "div", "hm-comment-field"); fieldWrap.append(field(doc, "Add a comment", area), picker);
-  form.append(fieldWrap, button(doc, "Post", "hm-todo-save", "submit"));
+  // Todo canvas: the tag card sits in the flow between the comments and the field, so it never covers
+  // the comments it belongs to; the field and Post share one row under it.
+  const fieldWrap = node(doc, "div", "hm-comment-field"); fieldWrap.append(field(doc, "Add a comment", area), button(doc, "Post", "hm-todo-save hm-comment-post", "submit"));
+  form.append(picker, fieldWrap);
+  if (todo.tagDelivers) {
+    const help = node(doc, "p", "hm-comment-help", TODO_TAG_NOTE); help.id = `${headId}-help`;
+    area.setAttribute("aria-describedby", help.id); form.append(help);
+  }
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     const text = area.value.trim();
@@ -253,16 +296,21 @@ export function todoView(doc: Document, vm: TodoViewVM, callbacks: TodoViewCallb
   const titleId = `hm-todo-${todo.id}-title`.replace(/[^A-Za-z0-9_-]/g, "_");
   const title = node(doc, "h1", "hm-todo-title", todo.title); title.id = titleId; title.tabIndex = -1;
   root.setAttribute("aria-labelledby", titleId);
-  if (!todo.sample && todo.may.complete && todo.state !== "dropped") {
+  // Todo canvas: the box sits left of the title, and the notes run under the title.
+  const checkable = !todo.sample && todo.may.complete && todo.state !== "dropped";
+  if (checkable) {
     const label = node(doc, "label", "hm-todo-done");
-    const box = input(doc, "checkbox"); box.checked = todo.state === "done"; box.dataset.todoComplete = "";
+    const box = input(doc, "checkbox"); box.className = "hm-todo-done-box"; box.checked = todo.state === "done"; box.dataset.todoComplete = "";
     box.addEventListener("change", () => callbacks.complete(box.checked));
-    label.append(box, node(doc, "span", "", "Mark done"));
+    label.append(box, node(doc, "span", "hm-todo-done-text", "Mark done"));
     head.append(label);
-  } else if (todo.state === "done" || todo.state === "dropped") head.append(node(doc, "span", "hm-todo-word", todo.state === "done" ? "Done" : "Dropped"));
-  head.append(title);
+  }
+  const copy = node(doc, "div", "hm-todo-head-copy");
+  if (!checkable && (todo.state === "done" || todo.state === "dropped")) copy.append(node(doc, "span", "hm-todo-word", todo.state === "done" ? "Done" : "Dropped"));
+  copy.append(title);
+  if (todo.notes.trim()) copy.append(node(doc, "p", "hm-todo-notes", todo.notes));
+  head.append(copy);
   root.append(topBar(doc, vm, callbacks, todoMetaLine(todo, ctx), todo.sample), head);
-  if (todo.notes.trim()) root.append(node(doc, "p", "hm-todo-notes", todo.notes));
   root.append(assignedPanel(doc, todo, vm, callbacks, ctx), commentsSection(doc, todo, vm, callbacks, ctx));
   return root;
 }

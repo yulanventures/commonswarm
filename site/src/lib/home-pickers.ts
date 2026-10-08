@@ -1,6 +1,8 @@
-// Assign picker and tag picker (UI-SPEC.md 2.4; lane T). One listbox shell for both. The pure parts
-// (options, captions, keyboard model, @ parsing) are exported and tested in node; the builders put
-// user text in through textContent only and keep focus on the trigger or field (aria-activedescendant).
+// Assign picker and tag picker (UI-SPEC.md 2.4; lane T). The assign picker is a row of single-choice
+// chips (Todo canvas); the tag picker is a listbox under the comment field. The pure parts (options,
+// captions, keyboard models, @ parsing) are exported and tested in node; the builders put user text
+// in through textContent only. The chips use a roving tab stop; the tag field keeps focus and points
+// at the active row with aria-activedescendant.
 import type { AgentVM, CapsuleVM, Id, PersonVM, PickOptionVM } from "./home-types";
 import { agentOrb, capsule, personAvatar } from "./home-primitives";
 
@@ -192,6 +194,8 @@ export function tagOptionRow(doc: Document, option: PickOptionVM, opts: { id?: s
   if (option.disabled) row.setAttribute("aria-disabled", "true");
   row.dataset.pickValue = option.value; row.dataset.pickKind = option.kind;
   const who = opts.who;
+  // The measured state colours the caption (a disconnected agent's caption reads in the offline ink).
+  if (who && isAgentVM(who)) row.dataset.pickState = who.state.kind;
   const mark = who ? (isAgentVM(who) ? agentOrb(doc, who, { size: 28, badge: true }) : personAvatar(doc, who, 28))
     : node(doc, "span", "hm-pick-letter", option.label.trim().slice(0, 1).toLocaleUpperCase() || "?");
   mark.setAttribute("aria-hidden", "true");
@@ -201,8 +205,9 @@ export function tagOptionRow(doc: Document, option: PickOptionVM, opts: { id?: s
   return row;
 }
 
-/** What a picker popover shows. `id` prefixes every element id; `footer` sits under the listbox. */
-export interface PickerListVM { id: string; label: string; options: PickOptionVM[]; people: PickerPeople; footer?: string | null }
+/** What a picker popover shows. `id` prefixes every element id; `footer` sits under the listbox.
+ * `heading` shows `label` as a visible band above the list and names the listbox with it. */
+export interface PickerListVM { id: string; label: string; options: PickOptionVM[]; people: PickerPeople; footer?: string | null; heading?: boolean }
 
 function groupHead(doc: Document, people: PickerPeople, group: Id, headId: string): HTMLElement {
   const head = node(doc, "div", "hm-pick-group-head"); head.id = headId;
@@ -219,7 +224,12 @@ function groupHead(doc: Document, people: PickerPeople, group: Id, headId: strin
 export function pickerList(doc: Document, vm: PickerListVM, state: PickerState, onPick: (option: PickOptionVM) => void): HTMLElement {
   const pop = node(doc, "div", "hm-picker-pop"); pop.dataset.pickerPop = vm.id;
   const list = node(doc, "div", "hm-pick-list"); list.id = `${vm.id}-listbox`;
-  list.setAttribute("role", "listbox"); list.setAttribute("aria-label", vm.label);
+  list.setAttribute("role", "listbox");
+  if (vm.heading) {
+    // The same name as aria-label, now visible: the band at the top of the card.
+    const head = node(doc, "div", "hm-pick-heading", vm.label); head.id = `${vm.id}-heading`;
+    list.setAttribute("aria-labelledby", head.id); pop.append(head);
+  } else list.setAttribute("aria-label", vm.label);
   const who = whoIndex(vm.people);
   let group: HTMLElement | null = null; let groupId: Id | null = null;
   vm.options.forEach((option, index) => {
@@ -243,42 +253,83 @@ export function pickerList(doc: Document, vm: PickerListVM, state: PickerState, 
 
 export interface AssignPickerVM extends PickerListVM { current: string; currentValue: Id | null; labelledBy?: string; sample?: boolean; disabled?: boolean }
 
-/** The assign picker: a trigger button (role="combobox") that shows the current label and opens
- * the listbox. In sample mode, or without permission, it is plain text. */
+// ---- Assign chips: keyboard model (pure) ----
+/** The chip that takes the one tab stop: the recorded assignee when it can be picked, otherwise the first chip that can. */
+export function chipStop(options: PickOptionVM[], current: Id | null = null): number | null {
+  const at = options.findIndex((option) => option.value === current && !option.disabled);
+  return at >= 0 ? at : step(options, null, 1);
+}
+export interface ChipStep { focus: number | null; select: PickOptionVM | null; handled: boolean }
+/** A single-choice group with manual selection: the arrow keys move focus only (wrapping, skipping
+ * disabled chips), Home and End jump, Space and Enter pick the focused chip. A pick is a write, so
+ * moving never picks. */
+export function chipKey(options: PickOptionVM[], from: number | null, key: string): ChipStep {
+  const move = (focus: number | null): ChipStep => ({ focus, select: null, handled: true });
+  switch (key) {
+    case "ArrowRight": case "ArrowDown": return move(step(options, from, 1));
+    case "ArrowLeft": case "ArrowUp": return move(step(options, from, -1));
+    case "Home": return move(step(options, null, 1));
+    case "End": return move(step(options, null, -1));
+    case " ": case "Enter": {
+      const option = from === null ? undefined : options[from];
+      return { focus: from, select: option && !option.disabled ? option : null, handled: true };
+    }
+    default: return { focus: from, select: null, handled: false };
+  }
+}
+
+/** The assign picker: every person and agent who can be assigned, as chips grouped in their
+ * person's capsule (Todo canvas). One radiogroup named by the panel heading; each chip is a
+ * role="radio" button with one roving tab stop, and aria-checked marks the recorded assignee.
+ * The chip shows the short name inside its owner's capsule; its accessible name is the full
+ * label ("Your Claude"), and the caption the old list showed is its description. In sample mode,
+ * or without permission, it is plain text. */
 export function assignPicker(doc: Document, vm: AssignPickerVM, onPick: (option: PickOptionVM) => void): HTMLElement {
   const root = node(doc, "div", "hm-picker"); root.dataset.assignPicker = vm.id;
   if (vm.sample || vm.disabled) { root.append(node(doc, "span", "hm-picker-value", vm.current)); return root; }
-  const trigger = node(doc, "button", "hm-picker-trigger"); trigger.type = "button"; trigger.id = `${vm.id}-trigger`;
-  trigger.setAttribute("role", "combobox"); trigger.setAttribute("aria-haspopup", "listbox");
-  trigger.setAttribute("aria-controls", `${vm.id}-listbox`); trigger.setAttribute("aria-expanded", "false");
-  const value = node(doc, "span", "hm-picker-value", vm.current); value.id = `${vm.id}-value`;
-  trigger.setAttribute("aria-labelledby", [vm.labelledBy, value.id].filter(Boolean).join(" "));
-  trigger.append(value, node(doc, "span", "hm-picker-chevron", "▾"));
-  trigger.lastElementChild!.setAttribute("aria-hidden", "true");
-  let state: PickerState = PICKER_CLOSED;
-  let pop = pickerList(doc, vm, state, (option) => choose(option));
-  const render = () => {
-    const next = pickerList(doc, vm, state, (option) => choose(option)); pop.replaceWith(next); pop = next;
-    trigger.setAttribute("aria-expanded", String(state.open));
-    const id = activeDescendant(vm.id, state, vm.options);
-    if (id) trigger.setAttribute("aria-activedescendant", id); else trigger.removeAttribute("aria-activedescendant");
-    if (id) doc.getElementById(id)?.scrollIntoView?.({ block: "nearest" });
+  const group = node(doc, "div", "hm-assign-chips"); group.id = `${vm.id}-group`;
+  group.setAttribute("role", "radiogroup");
+  if (vm.labelledBy) group.setAttribute("aria-labelledby", vm.labelledBy); else group.setAttribute("aria-label", vm.label);
+  const who = whoIndex(vm.people);
+  const chips: HTMLButtonElement[] = [];
+  let focus = chipStop(vm.options, vm.currentValue);
+  const rove = (index: number | null) => {
+    focus = index;
+    chips.forEach((chip, at) => { chip.tabIndex = at === index ? 0 : -1; });
+    if (index !== null) chips[index]?.focus();
   };
-  const choose = (option: PickOptionVM) => { state = PICKER_CLOSED; render(); trigger.focus(); onPick(option); };
-  trigger.addEventListener("click", () => { state = state.open ? PICKER_CLOSED : pickerOpen(vm.options, vm.currentValue); render(); });
-  trigger.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !state.open) return; // Enter on a closed button is a click.
-    const result = pickerKey(state, event.key, vm.options, vm.currentValue);
-    if (result.handled) event.preventDefault();
-    if (result.handled && event.key === "Escape") event.stopPropagation(); // close the picker, not the page's dialog
-    state = result.state; render();
-    if (result.effect?.kind === "select") choose(result.effect.option);
-    else if (result.effect?.kind === "close" && result.effect.restoreFocus) trigger.focus();
+  let capsule: HTMLElement | null = null; let capsuleGroup: Id | null = null;
+  vm.options.forEach((option, index) => {
+    if (!capsule || option.group !== capsuleGroup) {
+      capsuleGroup = option.group; capsule = node(doc, "div", "hm-assign-capsule"); group.append(capsule);
+    }
+    const id = pickerOptionId(vm.id, option);
+    const chip = node(doc, "button", "hm-assign-chip"); chip.type = "button"; chip.id = id;
+    chip.setAttribute("role", "radio"); chip.setAttribute("aria-checked", String(option.value === vm.currentValue));
+    chip.setAttribute("aria-label", option.label); chip.setAttribute("aria-describedby", `${id}-caption`);
+    chip.tabIndex = index === focus ? 0 : -1;
+    chip.dataset.pickValue = option.value; chip.dataset.pickKind = option.kind;
+    if (option.disabled) chip.setAttribute("aria-disabled", "true");
+    const person = who.get(`${option.kind}:${option.value}`);
+    if (person && isAgentVM(person)) chip.dataset.pickState = person.state.kind;
+    // Inside the owner's capsule the owner badge would repeat what the capsule already says.
+    const mark = person ? (isAgentVM(person) ? agentOrb(doc, person, { size: 28, badge: false }) : personAvatar(doc, person, 28))
+      : node(doc, "span", "hm-pick-letter", option.label.trim().slice(0, 1).toLocaleUpperCase() || "?");
+    mark.setAttribute("aria-hidden", "true");
+    const shown = person && isAgentVM(person) ? person.nestedLabel || option.label : option.label;
+    const caption = node(doc, "span", "hm-assign-caption", option.caption); caption.id = `${id}-caption`;
+    chip.append(mark, node(doc, "span", "hm-assign-name", shown), caption);
+    chip.addEventListener("click", () => { if (option.disabled) return; rove(index); onPick(option); });
+    chip.addEventListener("keydown", (event) => {
+      const result = chipKey(vm.options, index, event.key);
+      if (!result.handled) return;
+      event.preventDefault();
+      if (result.select) onPick(result.select);
+      else if (result.focus !== index) rove(result.focus);
+    });
+    chips.push(chip); capsule!.append(chip);
   });
-  root.addEventListener("focusout", (event) => {
-    if (state.open && !root.contains(event.relatedTarget as Node | null)) { state = PICKER_CLOSED; render(); }
-  });
-  root.append(trigger, pop);
+  root.append(group);
   return root;
 }
 
@@ -293,12 +344,16 @@ export function tagPicker(doc: Document, field: HTMLInputElement | HTMLTextAreaE
   field.setAttribute("aria-expanded", "false");
   const footer = vm.tagDelivers ? null : TAG_HIGHLIGHT_FOOTER;
   let state: PickerState = PICKER_CLOSED; let shown: PickOptionVM[] = [];
-  const list = (): PickerListVM => ({ id: vm.id, label: vm.label, options: shown, people: vm.people, footer });
+  const list = (): PickerListVM => ({ id: vm.id, label: vm.label, options: shown, people: vm.people, footer, heading: true });
   const holder = node(doc, "div", "hm-tag-picker");
   let pop = pickerList(doc, list(), state, (option) => choose(option)); holder.append(pop);
   const render = () => {
+    const opening = state.open && field.getAttribute("aria-expanded") !== "true";
     const next = pickerList(doc, list(), state, (option) => choose(option)); pop.replaceWith(next); pop = next;
     field.setAttribute("aria-expanded", String(state.open));
+    // The card sits in the flow above the field (Todo canvas), so opening it pushes the field down:
+    // keep the field the person is typing in on screen.
+    if (opening) field.scrollIntoView?.({ block: "nearest" });
     const id = activeDescendant(vm.id, state, shown);
     if (id) field.setAttribute("aria-activedescendant", id); else field.removeAttribute("aria-activedescendant");
     if (id) doc.getElementById(id)?.scrollIntoView?.({ block: "nearest" });
@@ -315,6 +370,9 @@ export function tagPicker(doc: Document, field: HTMLInputElement | HTMLTextAreaE
     field.dispatchEvent(new Event("input", { bubbles: true }));
   };
   field.addEventListener("input", refresh);
+  // A re-render restores the draft and its caret without an input event, then gives focus back:
+  // open on what is already typed, so "Thanks. @" still shows its list.
+  field.addEventListener("focus", refresh);
   field.addEventListener("keydown", (event) => {
     if (!state.open) return;
     const key = (event as KeyboardEvent).key;
