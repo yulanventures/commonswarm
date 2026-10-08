@@ -207,7 +207,7 @@ async function main() {
     const st = state(); alive(st);
     return new Promise((resolve, reject) => {
       const fd = fs.openSync(secret('op-edit.out'), 'w', 0o600), err = fs.openSync(secret('op-edit.err'), 'w', 0o600);
-      const child = spawn('op', ['item', 'edit', item.id, '--vault', 'Yulan Ventures Infra', '--template', secret('item-next.json')], {
+      const child = spawn('op', ['item', 'edit', item.id, '--vault', 'CommonSwarm Smoke', '--template', secret('item-next.json')], {
         env: { ...process.env, OP_SERVICE_ACCOUNT_TOKEN: fs.readFileSync(secret('op-token.txt'), 'utf8') }, stdio: ['ignore', fd, err],
       });
       st.opChild = child; fs.closeSync(fd); fs.closeSync(err);

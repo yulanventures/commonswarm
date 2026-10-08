@@ -21,10 +21,17 @@ HezLead supplies these non-secret inputs:
 - `RELEASE_UTC`: release completion time, in UTC ISO format
   `2026-10-08T20:00:00Z`.
 - `SITE_SHA`: the full SHA of the live site, even for an OAuth or edge release.
-- `WORKFLOW_REF`: reviewed workflow branch or tag NAME for dispatch, not a commit SHA.
-- `WORKFLOW_SHA`: full reviewed SHA to which that workflow branch/tag must resolve.
+- `WORKFLOW_REF`: `main` for dispatch, not a commit SHA. The `smoke` environment
+  permits only this branch.
+- `WORKFLOW_SHA`: full reviewed SHA on `origin/main` to which that workflow ref
+  must resolve.
 - `PROBE_SHA`: full immutable reviewed SHA for checkout of this task and its scripts.
-  It can differ from `WORKFLOW_SHA`. Record and verify both revisions.
+  It must be reachable from `origin/main` and can differ from `WORKFLOW_SHA`.
+  Record and verify both revisions. The workflow fetches complete main history
+  into an empty temporary repository without checking out code, then checks both
+  with `git merge-base --is-ancestor` before checking out or
+  running any probe code. Rejection uses fixed codes
+  `CS_SMOKE_WORKFLOW_NOT_ON_MAIN` or `CS_SMOKE_PROBE_NOT_ON_MAIN` (exit 1).
 - For combined releases, include the full SHA and completion UTC of every
   changed surface in the assignment and evidence handoff.
 
@@ -64,30 +71,41 @@ Any overall run over 300 s fails the time requirement.
 ## 2. Named runner and one-time provisioning
 
 **Browser runner:** job `smoke` in `yulanventures/commonswarm` runs on a
-self-hosted Linux runner selected with the CI-FLEET ordered-variable pattern:
+GitHub-hosted `ubuntu-latest` Linux runner:
 
 ```yaml
-runs-on:
-  - self-hosted
-  - Linux
-  - ${{ vars.CS_SMOKE_RUNS_ON || vars.CI_RUNS_ON || 'self-hosted' }}
+runs-on: ${{ vars.CS_SMOKE_RUNS_ON || 'ubuntu-latest' }}
+environment: smoke
 ```
 
-HezLead must set repository variable **`CS_SMOKE_RUNS_ON`** to
-**`prompteden-hetzner`** for the eligible `pe-ci-1` runner, or to the custom label
-of an existing CommonSwarm Linux runner. That runner must be registered for this
-repository and support Docker job containers. Do not change any fleet label.
-The `self-hosted` and `Linux` labels are mandatory even when a variable is set.
-The effective default is self-hosted Linux. GitHub-hosted `ubuntu-latest` is
-blocked by organization billing and is not a fallback for this workflow.
-Do not use a Mac runner. Do not set repository variables as part of preparation.
+Keep **`CS_SMOKE_RUNS_ON` unset**. HezLead approved GitHub-hosted runners for this
+public repository; their use is free here. Each runner is ephemeral per run.
+Chromium's `--no-sandbox` and the temporary browser profile assume that disposable
+runner. Do not point this workflow at a self-hosted runner or a Mac.
+Do not change fleet labels or set repository variables as part of preparation.
 
 The workflow uses a disposable `node:22.12.0-bookworm` job container.
 Tool and Chromium system-library installs run inside that container, not on the
 runner host. It is removed at job end; raw credentials and the browser profile
 stay in its private `/tmp`. Shared workspace and runner-temp mounts contain
 only source, installed tools, bundled Chromium, and the allowlisted evidence.
-This job does not alter production services even when its runner is on the box.
+The runner is separate from the production box.
+
+**One-time environment setup (HezLead or Tom, in repository settings):**
+
+1. Create the GitHub Environment **`smoke`**.
+2. Set Deployment branches to **Selected branches: main** only. Do not allow
+   other branches or tags. Optionally add required reviewers.
+3. Add environment secret **`CS_SMOKE_OP_SERVICE_ACCOUNT_TOKEN`**, using the
+   dedicated smoke service account described below.
+4. Add environment variable **`CS_SMOKE_RECOVERY_AGE_RECIPIENT`**, using HezLead's
+   age public recipient. Keep its private identity outside Actions.
+
+Keep these values at environment level, without repository-level copies.
+Fork and PR runs can never read the smoke secret: the trigger is
+`workflow_dispatch` only, and the environment allows only `main` in this
+repository. Dispatch `main`; the existing workflow and probe ancestry guards
+still require both reviewed SHAs to be on `origin/main` before probe checkout.
 
 **Provisioning status: not verified.** The workflow and probes are checked in at
 `.github/workflows/cs-smoke.yml`, `scripts/smoke/run.sh`, and
@@ -99,7 +117,7 @@ The workflow has these settings:
 - `workflow_dispatch` only. Required inputs: `release_kind` (choice of `site`,
   `oauth`, or `edge`), `release_sha`, `release_utc`, `site_sha`, `workflow_ref`,
   `workflow_sha`, and `probe_sha`. Enable it on the default branch before use.
-  Dispatch `WORKFLOW_REF`; checkout `probe_sha`, an immutable commit SHA.
+  Dispatch `main` as `WORKFLOW_REF`; checkout `probe_sha`, an immutable commit SHA.
   Before checkout, validate the release receipts, require the dispatch ref name
   to equal `workflow_ref`, and compare `github.workflow_sha` to `workflow_sha`.
   After checkout, require `git rev-parse HEAD` to equal `probe_sha`, before OP
@@ -107,7 +125,8 @@ The workflow has these settings:
   Set `CS_ACTUAL_WORKFLOW_SHA` from `github.workflow_sha`, and
   `CS_ACTUAL_PROBE_SHA` from the measured checkout SHA. Init validates and returns
   both expected and actual revisions. Never infer checkout SHA from run headSha.
-- Job `smoke`, self-hosted Linux labels above, `timeout-minutes: 15`.
+- Job `smoke`, GitHub-hosted `ubuntu-latest`, `environment: smoke`,
+  `timeout-minutes: 15`.
   This leaves time for provisioning, the five-minute entry clock, and upload.
   `permissions: contents: read`. Never deploy from this job.
 - Fixed concurrency group `commonswarm-smoke-test-account`, with
@@ -131,19 +150,21 @@ The workflow has these settings:
   `CS_EVIDENCE_DIR=$GITHUB_WORKSPACE/cs-smoke-evidence` for the entry step.
   `/tmp` must be writable. Each run uses `mktemp -d /tmp/anvil-secret.XXXXXX`,
   mode 0700. Raw credentials, browser profiles, mail links, and stderr stay there.
-- Repository secret **`CS_SMOKE_OP_SERVICE_ACCOUNT_TOKEN`**: a dedicated 1Password
-  service account with read/edit access only to the smoke fixture in vault
-  `Yulan Ventures Infra`. Map it to `OP_SERVICE_ACCOUNT_TOKEN` only in the entry
+- Environment `smoke` secret **`CS_SMOKE_OP_SERVICE_ACCOUNT_TOKEN`**: a dedicated 1Password
+  service account created by Tom, scoped read-only to a NEW vault named
+  **`CommonSwarm Smoke`** that holds only the smoke test items. Never use the main
+  service account or grant access to any other vault. Map it to
+  `OP_SERVICE_ACCOUNT_TOKEN` only in the entry
   step. This OP token is the worker-rule exception for secret environment ingress.
   The wrapper stages it in a 0600 file, unsets it, and supplies it only to each
   `op` process. Do not expose it to unrelated actions or Node browser children.
-  No repository secret for Tom, a service-role key, or production env is needed.
+  No secret for Tom, a service-role key, or production env is needed.
   A builtin-only Linux guard reads `/proc/sys/kernel/ostype` before touching the
   credential. Shell builtins then copy the ingress to an unexported variable and
   unset the original before the first child, including init and encryption. Stage to a 0600
   file and unset that variable before the worker group starts. Only OP processes
   receive the token. Their timeout launchers and Node browser children do not.
-- Repository variable **`CS_SMOKE_RECOVERY_AGE_RECIPIENT`**: HezLead's age public
+- Environment `smoke` variable **`CS_SMOKE_RECOVERY_AGE_RECIPIENT`**: HezLead's age public
   recipient. Set `CS_RECOVERY_RECIPIENT` to that public value. Keep its private
   identity outside Actions. Verify local decryption with HezLead before first run.
 - Always upload only `cs-smoke-evidence/report.md`, `result.json`, and, if present,
@@ -212,7 +233,7 @@ HezLead/Tom must create these once, outside this smoke:
   headless bundled-Chromium login task. Never export cookies from Tom's Chrome.
 
 The proposed 1Password item is exactly **`CommonSwarm smoke test account`**, in
-vault **`Yulan Ventures Infra`**. Existence and permissions are **not verified**.
+vault **`CommonSwarm Smoke`**. Existence and permissions are **not verified**.
 Use these unique field labels:
 
 | Label | Required value |
@@ -260,6 +281,12 @@ before staging the ingress credential or reading the fixture. It does not print 
 or raw `op` errors. Unique-label validation produces only fixed failure codes.
 The current refresh token, config, cookies, and any successor stay in 0600 files
 or memory. Credentials are never command-line arguments.
+
+**Provisioning blocker:** the existing probe saves fixture state and rotated
+refresh tokens with `op item edit`. The required read-only service account cannot
+make those writes; arming fails with `E0_rotation_save_failed` before refresh.
+HezLead must assign a separate change to the persistence path before a successful
+smoke rehearsal. Do not broaden the account's permissions to make this probe pass.
 
 Refresh rotates. First require `fixture_state=ready`. Before sending refresh,
 save `fixture_state=in_use` to the 1Password item with a bounded OP edit. Record
@@ -544,7 +571,10 @@ Use `GH_CONFIG_DIR=/Users/yulanbot/.config/gh-headless` on EVERY Mac `gh` call.
 The Mac runs only GitHub control-plane commands and reads status evidence.
 For safe run identification, serialize fixture jobs and record the exact new run ID
 from the list. Before dispatch, resolve `WORKFLOW_REF` through GitHub's commits
-API and require `WORKFLOW_SHA`. Dispatch only that branch/tag name. After dispatch,
+API and require `WORKFLOW_SHA`. Dispatch only `main`, as required by the `smoke`
+environment; both workflow and probe SHAs must be reachable
+from `origin/main`. The job checks their ancestry before probe checkout or
+credentials. After dispatch,
 require the new run's `headBranch=WORKFLOW_REF` and `headSha=WORKFLOW_SHA`. Then
 require the artifact's actual workflow SHA and actual checkout SHA separately.
 A ref move, wrong workflow revision, or wrong checkout fails before any product
@@ -552,6 +582,7 @@ request. If run identity is ambiguous, stop and
 have HezLead identify the run ID. Never watch or rerun an unrelated workflow.
 
 ```sh
+[ "$WORKFLOW_REF" = main ] || exit 1
 CS_RESOLVED_WORKFLOW_SHA=$(GH_CONFIG_DIR=/Users/yulanbot/.config/gh-headless gh api \
   "repos/yulanventures/commonswarm/commits/$WORKFLOW_REF" --jq .sha)
 [ "$CS_RESOLVED_WORKFLOW_SHA" = "$WORKFLOW_SHA" ] || exit 1
@@ -593,7 +624,7 @@ release_kind=<assigned kind>
 release_sha=<assigned full SHA>
 release_utc=<assigned UTC>
 site_sha=<assigned live site SHA>
-workflow_ref=<assigned workflow branch/tag>
+workflow_ref=main
 workflow_sha=<reviewed workflow SHA>
 probe_sha=<reviewed probe SHA>
 actual_workflow_sha=<workflow receipt SHA>
@@ -704,16 +735,19 @@ That evidence does not provide reusable TEST credentials or current live proof.
 
 The workflow, action pins, and dependency lock are checked in.
 **Not verified:** execution on the selected runner, Docker container support,
-runner access, repository variables, OP repository secret, item permissions,
-and artifact return. No fleet-label change or GitHub-hosted exception is used.
-HezLead/Wren must provision and review section 2 once. The exact-run assignment must name the provisioning rehearsal separately.
+the `smoke` environment's main-only branch policy, environment variable and OP
+secret, item permissions, and artifact return. GitHub-hosted runners are approved;
+no fleet-label change is used.
+HezLead or Tom must provision and review section 2 once. The exact-run assignment must name the provisioning rehearsal separately.
 No production smoke is enabled until the rehearsal below passes.
 
 Provisioning acceptance steps, outside the five-minute release clock:
 
-1. On the approved Linux runner, pin action/dependency/Chromium versions and record
-   them. Confirm default-branch dispatch eligibility. Assign a reviewed workflow
-   branch/tag and a separate full probe SHA. Dispatch the named rehearsal only.
+1. On the GitHub-hosted Linux runner, pin action/dependency/Chromium versions and record
+   them. Confirm default-branch dispatch eligibility and the `smoke` environment's
+   main-only policy. Assign `main` as the workflow ref with its reviewed SHA and
+   a separate full probe SHA on main.
+   Dispatch the named rehearsal only.
    Require both revision receipts. Move the test ref in an isolated rehearsal and
    confirm mismatch fails before credentials or product requests.
 2. Use an isolated Linux network with HTTPS test servers for the three fixed

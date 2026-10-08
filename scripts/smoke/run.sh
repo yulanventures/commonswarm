@@ -161,7 +161,7 @@ setsid bash -eu -c '
   printf "%s" "CommonSwarm smoke recovery control" > "$secret/recovery-control.txt"
   timeout --foreground --signal=TERM --kill-after=1s 2s age -r "$CS_RECOVERY_RECIPIENT" -o "$secret/control.age" \
     "$secret/recovery-control.txt" > "$secret/age.out" 2> "$secret/age.err"
-  timeout --foreground --signal=TERM --kill-after=1s 12s bash -c '\''OP_SERVICE_ACCOUNT_TOKEN="$(cat "$1/op-token.txt")" exec op item get "CommonSwarm smoke test account" --vault "Yulan Ventures Infra" --format=json'\'' cs-op "$secret" > "$secret/item.json" 2> "$secret/op-get.err"
+  timeout --foreground --signal=TERM --kill-after=1s 12s bash -c '\''OP_SERVICE_ACCOUNT_TOKEN="$(cat "$1/op-token.txt")" exec op item get "CommonSwarm smoke test account" --vault "CommonSwarm Smoke" --format=json'\'' cs-op "$secret" > "$secret/item.json" 2> "$secret/op-get.err"
   node "$probe/smoke.mjs" run "$secret" "$evidence" "$CS_TOOL_ROOT" "$start"
 ' cs-smoke "$CS_SECRET_DIR" "$CS_EVIDENCE_DIR" "$CS_PROBE_ROOT" "$CS_START_MS" \
   > "$CS_SECRET_DIR/probe.out" 2> "$CS_SECRET_DIR/probe.err" &

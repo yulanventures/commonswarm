@@ -21,7 +21,7 @@ on:
         required: true
         type: string
       workflow_ref:
-        description: Reviewed workflow branch or tag name used for dispatch
+        description: main (the smoke environment allows only this branch)
         required: true
         type: string
       workflow_sha:
@@ -29,7 +29,7 @@ on:
         required: true
         type: string
       probe_sha:
-        description: Full immutable reviewed SHA to check out for probes and dependency lock
+        description: Full immutable reviewed SHA on main for probes and dependency lock
         required: true
         type: string
 
@@ -42,12 +42,9 @@ concurrency:
 
 jobs:
   smoke:
-    # All labels must match: a variable can never route this job to GitHub-hosted or macOS.
-    # HezLead sets CS_SMOKE_RUNS_ON=prompteden-hetzner or a CommonSwarm Linux runner label.
-    runs-on:
-      - self-hosted
-      - Linux
-      - ${{ vars.CS_SMOKE_RUNS_ON || vars.CI_RUNS_ON || 'self-hosted' }}
+    # Keep CS_SMOKE_RUNS_ON unset: the public repository uses an ephemeral GitHub-hosted runner.
+    runs-on: ${{ vars.CS_SMOKE_RUNS_ON || 'ubuntu-latest' }}
+    environment: smoke
     timeout-minutes: 15
     # Disposable job container: --no-sandbox is confined here; installs do not alter the host.
     container:
@@ -66,12 +63,12 @@ jobs:
       CS_ACTUAL_WORKFLOW_SHA: ${{ github.workflow_sha }}
       CS_TOOL_ROOT: ${{ github.workspace }}/.cs-smoke-tools
       CS_EVIDENCE_DIR: ${{ github.workspace }}/cs-smoke-evidence
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/cs-smoke-chromium-${{ github.run_id }}-${{ github.run_attempt }}
       CS_RECOVERY_RECIPIENT: ${{ vars.CS_SMOKE_RECOVERY_AGE_RECIPIENT }}
     steps:
       - name: Validate dispatch receipts before checkout or credentials
         env:
           ACTUAL_WORKFLOW_REF: ${{ github.ref_name }}
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/cs-smoke-chromium-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
           [ "$(uname -s)" = Linux ]
@@ -87,6 +84,7 @@ jobs:
             e.WORKFLOW_SHA === e.CS_ACTUAL_WORKFLOW_SHA;
           if (!valid) { console.error('Invalid release or workflow receipt.'); process.exit(1); }
           NODE
+          printf 'PLAYWRIGHT_BROWSERS_PATH=%s\n' "$PLAYWRIGHT_BROWSERS_PATH" >> "$GITHUB_ENV"
 
       - name: Provision tools in the disposable container
         timeout-minutes: 2
@@ -95,7 +93,26 @@ jobs:
           apt-get update -q
           apt-get install -y --no-install-recommends ca-certificates curl git unzip age coreutils util-linux procps
 
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Require workflow and probe revisions on main before probe checkout
+        run: |
+          set -euo pipefail
+          # Fetch the full main history in an empty repository without checking out code.
+          CS_REVISION_ROOT=$(mktemp -d "$RUNNER_TEMP/cs-smoke-revisions.XXXXXX")
+          git init --quiet "$CS_REVISION_ROOT"
+          cd "$CS_REVISION_ROOT"
+          git remote add origin https://github.com/yulanventures/commonswarm.git
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$WORKFLOW_SHA" origin/main; then
+            printf '%s\n' 'CS_SMOKE_WORKFLOW_NOT_ON_MAIN' >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$PROBE_SHA" origin/main; then
+            printf '%s\n' 'CS_SMOKE_PROBE_NOT_ON_MAIN' >&2
+            exit 1
+          fi
+
+      - name: Check out the validated probe revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ inputs.probe_sha }}
           persist-credentials: false
