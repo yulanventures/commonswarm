@@ -61,6 +61,11 @@
   outline: none;
   box-shadow: var(--focus-ring);
 }
+/* Forced colours drop box-shadow. Focused controls get the outline from global.css; a choice whose input is
+   hidden is not itself focused, so it carries that outline here. */
+@media (forced-colors: active) {
+  .hm-choice:has(input:focus-visible) { outline: 3px solid Highlight; outline-offset: 2px; }
+}
 /* The class is doubled so the composed ring outranks integration.css `.hm-route-pane :is(button, a):focus-visible` (0,2,1). */
 .hm-button.hm-button:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring); }
 .hm-button.hm-button[data-primary="true"]:focus-visible { box-shadow: var(--focus-ring); }

@@ -78,6 +78,8 @@
 .hm-todo-row__box:focus-visible + .hm-todo-row__mark { box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring); }
 @media (forced-colors: active) {
   .hm-todo-row__mark { border: 1.5px solid CanvasText; }
+  /* The real checkbox is transparent over the mark, so the mark shows its focus. */
+  .hm-todo-row__box:focus-visible + .hm-todo-row__mark { outline: 3px solid Highlight; outline-offset: 2px; }
 }
 .hm-todo-row__text { display: flex; flex: 1 1 auto; flex-direction: column; justify-content: center; gap: 0; min-width: 0; min-height: 2.75rem; padding: 0;
   color: var(--home-ink); text-decoration: none; border-radius: 10px; }
