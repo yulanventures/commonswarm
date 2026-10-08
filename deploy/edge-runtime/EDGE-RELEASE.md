@@ -106,6 +106,14 @@ all archives/helper roots still referenced. After success retain BOTH old and
 new artifacts through verified close; this plan also retains them afterward.
 No pruning occurs. Same-SHA retry requires a fresh window after recovery/aside.
 
+The archive carries compose.override.yaml. Preflight always replaces the new
+edge tree's copy with the measured baseline file, preserving its owner and
+mode, and records both hashes and whether the archive already matched in
+override.json. The helper tree retains exact archive bytes. The unchanged C1
+recycle hook compares live files with the archive; if the override differs,
+edge-ready refuses before recreation. HezLead must arrange a reviewed hook
+change for that case; copying the baseline alone cannot make it releasable.
+
 If open fails before `PASS open`, use R0 → R4 with CLOSE_RESULT=aborted,
 including failures before session.sh or database snapshots exist. R0 uses the
 early partial-session.sh, requires opened.txt and no open PASS or forward
@@ -557,21 +565,32 @@ PY
  edge_fence
 }
 edge_tree_check() {
- python3 - "$1" "$2" "$3" <<'PY'
+ local role=helper
+ case "$1" in "$OLD_EDGE"|"$NEW_EDGE") role=edge;; "$OLD_HELPER"|"$NEW_HELPER") ;; *) fail 'unknown release tree';; esac
+ python3 - "$1" "$2" "$3" "$INPUTS_FILE" "$role" <<'PY'
 import hashlib,pathlib,sys,tarfile
-root,archive,digest=sys.argv[1:]; p=pathlib.Path(root); a=pathlib.Path(archive)
+root,archive,digest,inputs,role=sys.argv[1:]; p=pathlib.Path(root); a=pathlib.Path(archive)
 assert p.is_dir() and not p.is_symlink() and a.is_file() and not a.is_symlink()
 assert hashlib.sha256(a.read_bytes()).hexdigest()==digest
+override='deploy/edge-runtime/compose.override.yaml'
+if role=='edge':
+ import json
+ f=p/override; assert f.is_file() and not f.is_symlink()
+ assert hashlib.sha256(f.read_bytes()).hexdigest()==json.load(open(inputs))['override_sha256'], 'FAIL baseline override digest differs; STOP'
 names=set()
 with tarfile.open(a) as t:
  for m in t.getmembers():
   q=pathlib.PurePosixPath(m.name); assert not q.is_absolute() and '..' not in q.parts and q.as_posix() not in names; names.add(q.as_posix())
   f=p/m.name
-  if m.isfile(): assert not f.is_symlink() and f.read_bytes()==t.extractfile(m).read()
+  if m.isfile():
+   assert f.is_file() and not f.is_symlink()
+   if role!='edge' or q.as_posix()!=override: assert f.read_bytes()==t.extractfile(m).read()
   elif m.issym(): assert f.is_symlink() and f.readlink().as_posix()==m.linkname
   else: assert m.isdir() and f.is_dir() and not f.is_symlink()
 actual={str(f.relative_to(p)) for f in p.rglob('*')}
-assert actual==names|{'RELEASE_SHA','deploy/edge-runtime/compose.override.yaml'} or actual==names|{'RELEASE_SHA'}, 'FAIL extra/missing release files; STOP'
+expected=names|{'RELEASE_SHA'}
+if role=='edge': expected.add(override)
+assert actual==expected, 'FAIL extra/missing release files; STOP'
 marker=p/'RELEASE_SHA'; assert marker.is_file() and not marker.is_symlink() and marker.read_text()==p.name+'\n'
 PY
 }
@@ -776,27 +795,51 @@ edge_forward_admit
 
 edge_deadline
 edge_identity "$OLD_EDGE"; edge_invariants; edge_timer_active
-python3 - "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$NEW_EDGE" "$NEW_HELPER" "$RECYCLE_HOOK" <<'PY'
+python3 - "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$NEW_EDGE" "$NEW_HELPER" "$RECYCLE_HOOK" "$OLD_EDGE/deploy/edge-runtime/compose.override.yaml" <<'PY'
 import datetime,hashlib,json,os,pathlib,re,shutil,stat,sys,tarfile
-inputs,archive,proof,edge,helper,hook=sys.argv[1:]; d=json.load(open(inputs)); p=pathlib.Path(proof); a=pathlib.Path(archive)
+inputs,archive,proof,edge,helper,hook,baseline=sys.argv[1:]; d=json.load(open(inputs)); p=pathlib.Path(proof); a=pathlib.Path(archive)
 assert a.is_file() and not a.is_symlink() and hashlib.sha256(a.read_bytes()).hexdigest()==d['archive_sha256']
 r=json.load(open(a.with_suffix('.ancestry.json')))
 assert r['release_sha']==d['release_sha'] and re.fullmatch('[0-9a-f]{40}',r['origin_main_sha']) and r['is_ancestor'] is True and r['baseline_site_sha']==d['baseline_site_sha']
 at=datetime.datetime.fromisoformat(r['measured_at'].replace('Z','+00:00')); now=datetime.datetime.now(datetime.timezone.utc)
 assert 0<=(now-at).total_seconds()<=1800
 assert not os.path.lexists(edge) and not os.path.lexists(helper)
+baseline=pathlib.Path(baseline)
+assert baseline.is_file() and not baseline.is_symlink(), 'FAIL baseline override must be a regular non-symlink file; STOP'
+baseline_stat=baseline.stat(); baseline_hash=hashlib.sha256(baseline.read_bytes()).hexdigest()
+assert baseline_hash==d['override_sha256'], 'FAIL baseline override digest differs from measured input; STOP'
+override='deploy/edge-runtime/compose.override.yaml'
 with tarfile.open(a) as t:
- seen=set()
+ seen={}
  for m in t.getmembers():
-  q=pathlib.PurePosixPath(m.name); assert not q.is_absolute() and '..' not in q.parts and m.name not in seen; seen.add(m.name)
+  q=pathlib.PurePosixPath(m.name); name=q.as_posix()
+  assert name!='.' and not q.is_absolute() and '..' not in q.parts and name not in seen
+  seen[name]=m
   assert m.isfile() or m.isdir() or m.issym()
   if m.issym():
    link=pathlib.PurePosixPath(m.linkname); assert not link.is_absolute() and '..' not in link.parts
+ for name,m in seen.items():
+  for parent in pathlib.PurePosixPath(name).parents:
+   if str(parent)!='.': assert str(parent) in seen and seen[str(parent)].isdir(), 'FAIL archive parent is not a directory; STOP'
+  if m.issym():
+   target=(pathlib.PurePosixPath(name).parent/pathlib.PurePosixPath(m.linkname)).as_posix()
+   assert target in seen and seen[target].isfile(), 'FAIL archive symlink target is not a regular member; STOP'
+ assert 'RELEASE_SHA' not in seen, 'FAIL archive must not contain RELEASE_SHA; STOP'
+ # Runtime mounts, bootstrap inputs and the recycle DB helper live at repository root.
+ required={
+  'deploy/edge-runtime/compose.yaml':'file', override:'file',
+  'deploy/edge-runtime/bootstrap.sh':'file','deploy/edge-runtime/h0-deno.json':'file',
+  'docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md':'file',
+  'deploy/supabase-stack/migrate/make-pg-service.mjs':'file',
+  'deploy/edge-runtime/main':'dir','supabase/functions':'dir','src':'dir',
+ }
+ for name,kind in required.items():
+  assert name in seen and (seen[name].isfile() if kind=='file' else seen[name].isdir()), 'FAIL required archive path/type '+name+'; STOP'
  # The installed hook must be exactly the reviewed C1 hook, unchanged.
  source=t.extractfile('docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md').read().decode()
  found=re.findall(r'^```sh\n(# step: ai-recycle-hook\n.*?)^```$',source,re.M|re.S); assert len(found)==1
  assert ('#!/bin/bash\n'+found[0]).encode()==pathlib.Path(hook).read_bytes(), 'FAIL hook differs; STOP for reviewed hook investigation'
- assert not any(m.name=='deploy/edge-runtime/compose.override.yaml' for m in t.getmembers())
+ archive_hash=hashlib.sha256(t.extractfile(override).read()).hexdigest()
  for root,kind in [(helper,'helper'),(edge,'edge')]:
   parent=pathlib.Path(root).parent; parent.mkdir(parents=True,exist_ok=True)
   assert parent.resolve()==parent and not parent.is_symlink() and parent.stat().st_uid==0
@@ -805,9 +848,17 @@ with tarfile.open(a) as t:
   pathlib.Path(root).mkdir(mode=0o755); t.extractall(root,filter='data')
   assert not (pathlib.Path(root)/'RELEASE_SHA').exists()
   (pathlib.Path(root)/'RELEASE_SHA').write_text(d['release_sha']+'\n')
+dest=pathlib.Path(edge)/override
+assert dest.is_file() and not dest.is_symlink()
+shutil.copy2(baseline,dest)
+os.chown(dest,baseline_stat.st_uid,baseline_stat.st_gid)
+os.chmod(dest,stat.S_IMODE(baseline_stat.st_mode))
+copied_hash=hashlib.sha256(dest.read_bytes()).hexdigest(); copied_stat=dest.stat()
+assert copied_hash==d['override_sha256'], 'FAIL copied baseline override digest differs; STOP'
+assert (copied_stat.st_uid,copied_stat.st_gid,stat.S_IMODE(copied_stat.st_mode))==(baseline_stat.st_uid,baseline_stat.st_gid,stat.S_IMODE(baseline_stat.st_mode)), 'FAIL copied baseline override owner/mode differs; STOP'
+(p/'override.json').write_text(json.dumps({'archive_sha256':archive_hash,'baseline_sha256':baseline_hash,'copied_sha256':copied_hash,'archive_matched_baseline':archive_hash==baseline_hash,'uid':copied_stat.st_uid,'gid':copied_stat.st_gid,'mode':oct(stat.S_IMODE(copied_stat.st_mode))},sort_keys=True)+'\n')
 (p/'ancestry.json').write_text(json.dumps(r,sort_keys=True)+'\n')
 PY
-cp -p "$SECRET_STAGE/override.yaml" "$NEW_EDGE/deploy/edge-runtime/compose.override.yaml"
 edge_tree_check "$NEW_EDGE" "$BOX_ARCHIVE_PATH" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["archive_sha256"])' "$INPUTS_FILE")"
 edge_tree_check "$NEW_HELPER" "$BOX_ARCHIVE_PATH" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["archive_sha256"])' "$INPUTS_FILE")"
 cmp -s "$NEW_EDGE/deploy/edge-runtime/compose.yaml" "$OLD_EDGE/deploy/edge-runtime/compose.yaml" || fail 'edge runtime definition changed; separate reviewed runtime release required'
@@ -830,6 +881,13 @@ edge_forward_admit
 
 edge_deadline
 test "$(cat "$PROOF_DIR/preflight.txt")" = PASS
+# The unchanged C1 hook compares each live file with archive bytes at recycle.
+python3 - "$PROOF_DIR/override.json" "$INPUTS_FILE" <<'PY'
+import json,sys
+r=json.load(open(sys.argv[1])); d=json.load(open(sys.argv[2]))
+assert r['baseline_sha256']==r['copied_sha256']==d['override_sha256']
+assert r['archive_sha256']==d['override_sha256'] and r['archive_matched_baseline'] is True, 'FAIL unchanged recycle hook requires archive override to match baseline; STOP for reviewed hook change'
+PY
 edge_render "$NEW_EDGE"
 edge_identity "$OLD_EDGE"; edge_invariants; edge_timer_active
 printf 'PASS\n' >"$PROOF_DIR/ready.txt"
@@ -1157,6 +1215,8 @@ mkdir -m 0700 "$EVIDENCE_DIR"
 for FILE in inputs.json opened.txt close-result.json closed.txt; do
  ssh -n "$BOX_HOST" "sudo -n cat '$PROOF_DIR/$FILE'" >"$EVIDENCE_DIR/$FILE"
 done
+# Override provenance is optional only when preflight stopped before its receipt.
+ssh -n "$BOX_HOST" "if sudo -n test -e '$PROOF_DIR/override.json' || sudo -n test -L '$PROOF_DIR/override.json'; then sudo -n test -f '$PROOF_DIR/override.json' && ! sudo -n test -L '$PROOF_DIR/override.json' && sudo -n cat '$PROOF_DIR/override.json'; else printf '%s\n' '{\"status\":\"not-created\"}'; fi" >"$EVIDENCE_DIR/override.json"
 python3 - "$EVIDENCE_DIR" "$INPUTS_FILE" <<'PY'
 import json,pathlib,sys
 p=pathlib.Path(sys.argv[1]); d=json.loads((p/'inputs.json').read_bytes()); r=json.loads((p/'close-result.json').read_bytes())

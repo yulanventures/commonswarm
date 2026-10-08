@@ -1,0 +1,7 @@
+PASS /bin/bash -n: 12 blocks in deploy/edge-runtime/EDGE-RELEASE.md
+PASS /bin/bash -n: 12 blocks in deploy/mcp-auth/OAUTH-RELEASE.md
+PASS /bin/bash -n: 96 blocks in docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md
+PASS /bin/bash -n: persisted SH helpers in deploy/edge-runtime/EDGE-RELEASE.md
+PASS /bin/bash -n: persisted PARTIAL_SH helpers in deploy/edge-runtime/EDGE-RELEASE.md
+PASS /bin/bash -n: persisted SH helpers in deploy/mcp-auth/OAUTH-RELEASE.md
+Bash 5: NOT RUN; not installed. macOS /bin/bash 3.2.57 validated every block above.

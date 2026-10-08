@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -67,7 +67,11 @@ function passed(r: ReturnType<typeof spawnSync>) { assert.equal(r.status, 0, Str
 function stopped(r: ReturnType<typeof spawnSync>, pattern = /FAIL.*STOP/s) {
   assert.notEqual(r.status, 0, String(r.stdout)); assert.match(String(r.stderr), pattern);
 }
-const pythonPath = spawnSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' });
+// Match the box's data-filter extraction API; macOS /usr/bin/python3 is 3.9.
+const archivePython = ['python3', '/opt/homebrew/bin/python3', '/usr/local/bin/python3'].find(path =>
+  spawnSync(path, ['-c', 'import tarfile; assert hasattr(tarfile,"data_filter")'], { encoding: 'utf8' }).status === 0);
+assert.ok(archivePython, 'archive admission requires Python with tarfile.data_filter');
+const pythonPath = spawnSync(archivePython, ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' });
 passed(pythonPath);
 const quotedPythonExecutable = "'" + pythonPath.stdout.trim().replaceAll("'", "'\\''") + "'";
 function bashVersion(path: string) {
@@ -240,6 +244,7 @@ function lifecycle(trees = true) {
   writeFileSync(join(proof, 'inputs.json'), JSON.stringify({ ...d, plan_sha256: hash(plan), checker_sha256: hash(checker), recycle_json_sha256: hash(baseline) }));
   writeFileSync(join(proof, 'open.txt'), 'PASS\n'); writeFileSync(join(proof, 'opened.txt'), clock);
   writeFileSync(join(proof, 'preflight.txt'), 'PASS\n');
+  writeFileSync(join(proof, 'override.json'), JSON.stringify({ archive_sha256: d.override_sha256, baseline_sha256: d.override_sha256, copied_sha256: d.override_sha256, archive_matched_baseline: true }));
   const stage = join(root, 'anvil-secret.Abc123'), lock = join(home, 'edge/release-proofs/OPEN');
   mkdirSync(stage, { mode: 0o700 }); mkdirSync(lock);
   writeFileSync(join(lock, 'proof.path'), proof + '\n');
@@ -260,7 +265,7 @@ datetime.datetime=Clock
 actual=pathlib.Path.stat
 def stat(self,*a,**kw):
  s=actual(self,*a,**kw)
- if str(self)==os.environ['FIXTURE_BINDING'] or self.name=='failed-attempts' or str(self)==os.environ['FIXTURE_STAGE'] or str(self)==os.environ['PROOF_DIR']:
+ if str(self)==os.environ['FIXTURE_BINDING'] or self.name in ('failed-attempts','releases') or str(self)==os.environ['FIXTURE_STAGE'] or str(self)==os.environ['PROOF_DIR']:
   fields=list(s); fields[4]=fields[5]=0; return os.stat_result(fields)
  return s
 pathlib.Path.stat=stat
@@ -298,6 +303,7 @@ INPUTS_FILE="$PROOF_DIR/inputs.json"
 RELEASE_SHA=${d.release_sha}
 WINDOW_ID=${d.window_id}
 OLD_EDGE=${JSON.stringify(old)}
+OLD_HELPER=/retained/baseline-helper
 NEW_EDGE=${JSON.stringify(fresh)}
 NEW_HELPER=${JSON.stringify(helper)}
 RECYCLE_JSON=${JSON.stringify(binding)}
@@ -307,7 +313,7 @@ BOX_ARCHIVE_PATH=/tmp/admin-issuance-${d.release_sha}-${d.window_id}.tar
 EDGE_RECYCLE_TIMER=commonswarm-edge-recycle.timer
 EDGE_RECYCLE_SERVICE=commonswarm-edge-recycle.service
 ${mapped}
-python3() { ${quotedPythonExecutable} ${JSON.stringify(wrapper)} "$@"; }
+python3() { if test "$1" = -c; then ${quotedPythonExecutable} "$@"; else ${quotedPythonExecutable} ${JSON.stringify(wrapper)} "$@"; fi; }
 ${process.platform === 'darwin' ? `# Mac fixture maps only the Linux rename primitive; Linux uses real mv -Tf.
 mv() { test "$1" = -Tf; ${quotedPythonExecutable} -c 'import os,sys; os.replace(sys.argv[1],sys.argv[2])' "$2" "$3"; }` : ''}
 edge_invariants() { :; }
@@ -340,6 +346,122 @@ systemctl() {
     return spawnSync('/bin/bash', ['-s'], { input: source.replaceAll('/home/commonswarm', home).replaceAll('/tmp/anvil-secret', root + '/anvil-secret'), encoding: 'utf8', env: { ...process.env, PROOF_DIR: proof, FIXTURE_BINDING: binding, FIXTURE_CLOCK: clock, FIXTURE_STAGE: stage, FIXTURE_OLD_EDGE: old, ...extra } });
   }, append(source: string) { writeFileSync(join(proof, 'session.sh'), readFileSync(join(proof, 'session.sh'), 'utf8') + '\n' + source); } };
 }
+
+// Archive admission owns a distinct packaging risk: the lifecycle fixtures above
+// do not extract release artifacts. Execute the complete preflight and its real
+// tree checker; only root-parent metadata and unavailable host I/O are supplied.
+const overridePath = 'deploy/edge-runtime/compose.override.yaml';
+const c1PlanPath = 'docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md';
+const c1Plan = readFileSync(resolve(c1PlanPath), 'utf8');
+const hookBlocks = [...c1Plan.matchAll(/^```sh\n(# step: ai-recycle-hook\n[\s\S]*?)^```$/gm)];
+assert.equal(hookBlocks.length, 1);
+const reviewedHook = '#!/bin/bash\n' + hookBlocks[0]![1];
+const repoOverride = readFileSync(resolve(overridePath), 'utf8');
+const repoCompose = readFileSync(resolve('deploy/edge-runtime/compose.yaml'), 'utf8');
+function archiveLifecycle(options: { archiveOverride?: string; baseline?: string; realArchive?: boolean } = {}) {
+  const f = lifecycle(false), archive = join(f.root, 'release.tar');
+  const baseline = options.baseline ?? repoOverride;
+  writeFileSync(join(f.old, overridePath), baseline); chmodSync(join(f.old, overridePath), 0o640);
+  writeFileSync(join(f.old, 'deploy/edge-runtime/compose.yaml'), repoCompose);
+  const hook = join(f.root, 'libexec/commonswarm-admin-edge-recycle');
+  writeFileSync(hook, reviewedHook);
+  if (options.realArchive) {
+    passed(spawnSync('git', ['archive', '--format=tar', 'HEAD', '-o', archive], { encoding: 'utf8' }));
+  } else {
+    const files: Record<string, string> = {
+      [overridePath]: options.archiveOverride ?? repoOverride,
+      'deploy/edge-runtime/compose.yaml': repoCompose,
+      'deploy/edge-runtime/bootstrap.sh': '#!/bin/bash\n',
+      'deploy/edge-runtime/h0-deno.json': '{}\n',
+      'deploy/edge-runtime/main/index.ts': '// fixture router\n',
+      'supabase/functions/command/index.ts': '// fixture function\n',
+      'src/protocol/index.ts': '// fixture core\n',
+      'deploy/supabase-stack/migrate/make-pg-service.mjs': '// fixture helper\n',
+      [c1PlanPath]: c1Plan,
+      'site/AGENTS.md': 'fixture site instructions\n',
+    };
+    passed(spawnSync('python3', ['-c', `
+import io,json,pathlib,sys,tarfile
+files=json.loads(sys.argv[2]); dirs=set()
+for name in files:
+ dirs.update(str(p) for p in pathlib.PurePosixPath(name).parents if str(p)!='.')
+with tarfile.open(sys.argv[1],'w') as t:
+ for name in sorted(dirs):
+  m=tarfile.TarInfo(name+'/'); m.type=tarfile.DIRTYPE; m.mode=0o755; t.addfile(m)
+ for name,data in files.items():
+  raw=data.encode(); m=tarfile.TarInfo(name); m.size=len(raw); m.mode=0o644; t.addfile(m,io.BytesIO(raw))
+ m=tarfile.TarInfo('site/CLAUDE.md'); m.type=tarfile.SYMTYPE; m.linkname='AGENTS.md'; t.addfile(m)
+`, archive, JSON.stringify(files)], { encoding: 'utf8' }));
+  }
+  const input = join(f.proof, 'inputs.json'), d = JSON.parse(readFileSync(input, 'utf8'));
+  if (options.realArchive) {
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }); passed(head);
+    // Match the release marker to the actual artifact SHA and root names.
+    d.release_sha = head.stdout.trim();
+  }
+  const fresh = join(resolve(f.fresh, '..'), d.release_sha), helper = join(resolve(f.helper, '..'), d.release_sha);
+  d.archive_sha256 = hash(readFileSync(archive)); d.override_sha256 = hash(baseline);
+  const checker = JSON.stringify({ release_sha: d.release_sha, plan_sha256: d.plan_sha256, archive_sha256: d.archive_sha256, result: 'PASS', server_suite: 'PASS', meta_regression: 'PASS' });
+  writeFileSync(join(f.proof, 'checker.json'), checker); d.checker_sha256 = hash(checker);
+  writeFileSync(input, JSON.stringify(d));
+  writeFileSync(archive.replace(/\.tar$/, '.ancestry.json'), JSON.stringify({ release_sha: d.release_sha, origin_main_sha: d.release_sha, is_ancestor: true, baseline_site_sha: d.baseline_site_sha, measured_at: clock }));
+  const treeChecker = /^edge_tree_check\(\) \{[\s\S]*?^\}/m.exec(helpers)![0];
+  f.append(`RELEASE_SHA=${d.release_sha}\nNEW_EDGE=${JSON.stringify(fresh)}\nNEW_HELPER=${JSON.stringify(helper)}\nBOX_ARCHIVE_PATH=${JSON.stringify(archive)}\nRECYCLE_HOOK=${JSON.stringify(hook)}\n${treeChecker}`);
+  return { ...f, fresh, helper, archive, d };
+}
+
+test('archive override is admitted, baseline bytes and metadata win, and both trees are verified', () => {
+  for (const archiveOverride of [repoOverride, repoOverride + '# archive-only drift\n']) {
+    const f = archiveLifecycle({ archiveOverride });
+    passed(f.run(block('edge-preflight')));
+    assert.equal(readFileSync(join(f.fresh, overridePath), 'utf8'), repoOverride);
+    assert.equal(readFileSync(join(f.helper, overridePath), 'utf8'), archiveOverride);
+    const old = lstatSync(join(f.old, overridePath)), fresh = lstatSync(join(f.fresh, overridePath));
+    assert.deepEqual([fresh.uid, fresh.gid, fresh.mode & 0o777], [old.uid, old.gid, old.mode & 0o777]);
+    const receipt = JSON.parse(readFileSync(join(f.proof, 'override.json'), 'utf8'));
+    assert.equal(receipt.archive_matched_baseline, archiveOverride === repoOverride);
+    assert.equal(receipt.archive_sha256, hash(archiveOverride));
+    assert.equal(receipt.baseline_sha256, hash(repoOverride));
+    assert.equal(receipt.copied_sha256, hash(repoOverride));
+    // The unchanged C1 recycle hook still compares live files to archive bytes.
+    // Refuse forward work before any recreation if that hook would later fail.
+    if (archiveOverride === repoOverride) passed(f.run(block('edge-ready')));
+    else stopped(f.run(block('edge-ready')), /recycle hook.*archive.*override.*STOP/);
+    assert.equal(existsSync(join(f.proof, 'edge-attempted.txt')), false);
+    // Only the edge override may use baseline bytes; helper files stay exact.
+    const checkTree = '. "$PROOF_DIR/session.sh"\nedge_tree_check ';
+    writeFileSync(join(f.helper, overridePath), 'unverified helper drift\n');
+    stopped(f.run(checkTree + '"$NEW_HELPER" "$BOX_ARCHIVE_PATH" ' + f.d.archive_sha256), /AssertionError/);
+    writeFileSync(join(f.helper, overridePath), archiveOverride);
+    passed(f.run(checkTree + '"$NEW_HELPER" "$BOX_ARCHIVE_PATH" ' + f.d.archive_sha256));
+    writeFileSync(join(f.fresh, overridePath), 'unverified edge drift\n');
+    stopped(f.run(checkTree + '"$NEW_EDGE" "$BOX_ARCHIVE_PATH" ' + f.d.archive_sha256), /baseline override digest.*STOP/);
+  }
+});
+
+test('missing, symlinked or changed baseline override refuses before creating release trees', () => {
+  for (const kind of ['missing', 'symlink', 'changed']) {
+    const f = archiveLifecycle(), path = join(f.old, overridePath);
+    if (kind === 'changed') writeFileSync(path, 'changed baseline\n');
+    else {
+      passed(spawnSync('mv', [path, path + '.retained'], { encoding: 'utf8' }));
+      if (kind === 'symlink') symlinkSync(path + '.retained', path);
+    }
+    stopped(f.run(block('edge-preflight')), /baseline override.*STOP/);
+    for (const path of [f.fresh, f.helper, join(f.proof, 'edge-tree-created.json'), join(f.proof, 'helper-tree-created.json')]) assert.equal(existsSync(path), false);
+  }
+  passed(archiveLifecycle().run(block('edge-preflight')));
+});
+
+test('real git archive of repository HEAD passes archive admission and exact helper/edge content checks', () => {
+  const f = archiveLifecycle({ realArchive: true });
+  passed(f.run(block('edge-preflight')));
+  for (const root of [f.fresh, f.helper]) {
+    assert.equal(readFileSync(join(root, 'RELEASE_SHA'), 'utf8'), f.d.release_sha + '\n');
+    assert.equal(readlinkSync(join(root, 'site/CLAUDE.md')), 'AGENTS.md');
+    assert.deepEqual(readFileSync(join(root, 'deploy/supabase-stack/migrate/make-pg-service.mjs')), readFileSync(resolve('deploy/supabase-stack/migrate/make-pg-service.mjs')));
+  }
+});
 
 test('abort runs R0 → R2 → R4 with baseline probes, no deadline or recreate, and refuses further forward work', () => {
   for (const trees of [true, false]) {
