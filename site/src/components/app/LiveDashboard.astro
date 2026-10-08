@@ -1726,10 +1726,28 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const panelBootFocus = new BootFocusGate();
     const authBootFocus = new BootFocusGate();
 
+    /* Standalone pages use their back link to return to workspace account access. Hide
+       the parked account DOM from rendering and keyboard navigation, then return the same
+       visible node before another panel borrows the rail; its handlers stay attached. */
+    const syncStandalonePage = (leaveChannel = false): void => {
+      const frame = one<HTMLElement>(".hm-frame");
+      const standalone = !leaveChannel && app.dataset.state === "channel" &&
+        (homeRoute.view === "todo" || (homeRoute.view === "add-agent" && app.dataset.channelView === "agent-choice"));
+      frame?.toggleAttribute("data-home-standalone", standalone);
+      const account = one<HTMLElement>("[data-user-menu-root]");
+      if (account) account.hidden = standalone;
+      const host = one<HTMLElement>(standalone ? ".hm-frame__main" : ".hm-frame__rail");
+      if (account && host && account.parentElement !== host) {
+        if (standalone) host.append(account);
+        else host.prepend(account);
+      }
+    };
+
     const showPanel = (
       name: "loading" | "signed-out" | "create" | "workspace-error" | "channel",
     ): void => {
       const previous = app.dataset.state;
+      if (name !== "channel") syncStandalonePage(true);
       /* ONE rail (New-Space.dc.html): a new workspace opens beside the same rail as every other route. The
          create panel borrows the frame's rail while it shows with `data-create-rail`; every other panel
          gives it back, first in the frame. It moves, so renderHomeRail keeps its one slot. */
@@ -1805,6 +1823,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         closeMentionPicker();
       }
       app.dataset.channelView = name;
+      syncStandalonePage();
       /* The Live chip is true exactly while armLiveFeed is allowed to run. */
       const liveChip = one<HTMLElement>("[data-live-chip]");
       if (liveChip) {
@@ -4567,6 +4586,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       frame?.classList.toggle("hm-frame--people", homeRoute.view === "people");
       frame?.classList.toggle("hm-frame--todo", homeRoute.view === "todo");
       frame?.classList.toggle("hm-frame--add-agent", homeRoute.view === "add-agent");
+      syncStandalonePage();
       if (home) { one<HTMLElement>("[data-home-side-slot]")?.replaceChildren(); renderHomeCatchUp(); return; }
       renderHomeSide();
       if (homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos") {

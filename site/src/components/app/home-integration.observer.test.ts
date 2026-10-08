@@ -30,6 +30,68 @@ async function dashboardFunctions(names: string[]): Promise<string> {
   return ts.transpileModule(names.map(name => found.get(name)).join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 }
 
+test('standalone details hide the account door and restore the same DOM to workspace navigation', async () => {
+  const trigger = {}, menu = {};
+  const account = { parentElement: null as unknown, hidden: false, trigger, menu };
+  const content = {}, railContent = {};
+  const container = (children: unknown[]) => ({
+    children,
+    append(node: typeof account) {
+      detach(node); this.children.push(node); node.parentElement = this;
+    },
+    prepend(node: typeof account) {
+      detach(node); this.children.unshift(node); node.parentElement = this;
+    },
+  });
+  const detach = (node: typeof account) => {
+    const parent = node.parentElement as ReturnType<typeof container> | null;
+    if (parent) parent.children.splice(parent.children.indexOf(node), 1);
+  };
+  const rail = container([account, railContent]), main = container([content]);
+  account.parentElement = rail;
+  let standalone = false;
+  const frame = { toggleAttribute(_name: string, enabled: boolean) { standalone = enabled; } };
+  const nodes = new Map<string, unknown>([['.hm-frame', frame], ['[data-user-menu-root]', account],
+    ['.hm-frame__main', main], ['.hm-frame__rail', rail]]);
+  const context = createContext({ one: (selector: string) => nodes.get(selector) });
+  runInContext("let homeRoute={view:'todo'}; const app={dataset:{state:'channel',channelView:'feed'}};", context);
+  runInContext(await dashboardFunctions(['syncStandalonePage']), context);
+  const sync = (statement = '') => runInContext(`${statement}; syncStandalonePage();`, context);
+  sync();
+  assert.equal(standalone, true);
+  assert.deepEqual(main.children, [content, account], 'the intact account DOM is parked after page content');
+  assert.equal(account.hidden, true, 'the account control is hidden from rendering and keyboard navigation');
+  assert.deepEqual(rail.children, [railContent]);
+  sync("homeRoute={view:'add-agent'}; app.dataset.channelView='agent-choice'");
+  assert.equal(standalone, true);
+  assert.deepEqual(main.children, [content, account], 'repainting retains the existing door without duplication');
+  assert.equal(account.hidden, true, 'the add-agent picker also hides the account control');
+  for (const view of ['invite', 'connect', 'feed']) {
+    sync(`app.dataset.channelView='${view}'`);
+    assert.equal(standalone, false, `${view} uses its workspace frame`);
+    assert.deepEqual(rail.children, [account, railContent]);
+    assert.equal(account.hidden, false, `${view} restores visible account access`);
+  }
+  for (const view of ['todos', 'chat', 'catchup', 'agent', 'people']) {
+    sync("homeRoute={view:'todo'}");
+    sync(`homeRoute={view:'${view}'}`);
+    assert.equal(standalone, false, `${view} keeps workspace navigation`);
+    assert.deepEqual(rail.children, [account, railContent]);
+    assert.equal(account.hidden, false, `${view} restores visible account access`);
+  }
+  sync("homeRoute={view:'todo'}");
+  runInContext('syncStandalonePage(true)', context);
+  assert.equal(standalone, false, 'leaving the channel restores account access before the create panel borrows the rail');
+  assert.deepEqual(rail.children, [account, railContent]);
+  assert.equal(account.hidden, false, 'the create panel receives visible account access');
+  sync("app.dataset.state='signed-out'");
+  assert.equal(standalone, false);
+  assert.deepEqual(main.children, [content]);
+  assert.equal(account.hidden, false);
+  assert.equal(account.trigger, trigger, 'restoration preserves the original trigger and its handlers');
+  assert.equal(account.menu, menu, 'restoration preserves the original menu and its handlers');
+});
+
 async function readFixture(server: unknown, postCommand?: (...args: unknown[]) => Promise<unknown>) {
   const context = createContext({ server, postCommand, createLatestRead, HomeToolsUnavailable, HomeCommandRefused });
   runInContext(`

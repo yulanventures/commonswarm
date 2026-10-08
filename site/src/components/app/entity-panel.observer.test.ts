@@ -77,7 +77,11 @@ test("the right panel navigates ownership and exposes the complete agent state",
   assert.doesNotMatch(renderer, /only .* sees|private|lock icon/i);
   const css = readFileSync(new URL("../../styles/home/integration.css", import.meta.url), "utf8");
   // The right column is the canvas design's 320 px aside (Space.dc.html `flex: 1 1 320px`): 20rem at most.
-  assert.match(css, /grid-template-columns: 15.5rem minmax\(0, 1fr\) minmax\(18rem, 20rem\)/);
+  assert.match(css, /grid-template-columns: var\(--hm-rail-width\) minmax\(0, 1fr\) minmax\(18rem, 20rem\)/);
+  // Main.dc.html shares surplus width 1:999 above the 248 + 640 px flex bases.
+  assert.match(css, /@media \(width >= 888px\)\s*\{\s*live-dashboard\s*\{\s*--hm-rail-width: calc\(248px \+ \(100vw - 888px\) \/ 1000\);/);
+  assert.match(css, /live-dashboard\s*\{[^}]*--hm-rail-width: 15\.5rem;/,
+    "below the mockup's combined flex bases, retain the existing rail width");
   assert.match(css, /\.hm-frame__side \{ grid-column: 3; grid-row: 1/);
   assert.match(css, /\.hm-frame__profile.*grid-column: 3; grid-row: 1/);
   assert.match(css, /:has\(> \.hm-frame__profile:not\(\[hidden\]\)\).*\.hm-frame__side \{ display: none/,
