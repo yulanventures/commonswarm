@@ -3313,16 +3313,19 @@ function ownerJwt(amr: unknown) {
   return `${encode({ alg: 'none', typ: 'JWT' })}.${encode({ amr })}.sig`;
 }
 
-function ownerClientJs(source: string, opts: { accessToken?: string; commandStatus?: number; commandBody?: unknown } = {}) {
+type OwnerClientOptions = { accessToken?: string; commandStatus?: number; commandBody?: unknown; nowSeconds?: number };
+
+function ownerClientJs(source: string, opts: OwnerClientOptions = {}) {
   const js = source.match(/<<'JS'\n([\s\S]*?)^JS$/m)![1]!;
   const imports = js.split('\n').filter(l => l.startsWith('import ') && (l.includes('node:fs') || l.includes('node:crypto') || l.includes('fresh-auth'))).join('\n');
   const body = js.split('\n').filter(l => !l.startsWith('import ')).join('\n');
   const canon = 'canonical-client';
   const metadata = digest(canon);
-  const token = opts.accessToken ?? ownerJwt([{ method: 'password', timestamp: Math.floor(Date.now() / 1000) }]);
+  const token = opts.accessToken ?? ownerJwt([{ method: 'password', timestamp: opts.nowSeconds ?? Math.floor(Date.now() / 1000) }]);
   const commandStatus = opts.commandStatus ?? 200;
   const commandBody = opts.commandBody ?? { status: 'accepted' };
   const mocks = `
+${opts.nowSeconds === undefined ? '' : `Date.now = () => ${opts.nowSeconds * 1000};`}
 function canonicalAdminJson(){ return ${JSON.stringify(canon)}; }
 async function credentialStore(){ return {}; }
 async function refreshedCredential(){ return { userId: '22222222-2222-4222-8222-222222222222', accessToken: ${JSON.stringify(token)} }; }
@@ -3340,7 +3343,7 @@ globalThis.fetch = async (url, init) => {
   return { js: `${imports}\n${mocks}\n${body}\n`, metadata };
 }
 
-function runOwnerClient(source: string, proof: string, action: string, opts: { accessToken?: string; commandStatus?: number; commandBody?: unknown } = {}) {
+function runOwnerClient(source: string, proof: string, action: string, opts: OwnerClientOptions = {}) {
   const { js, metadata } = ownerClientJs(source, opts);
   const inputs = join(proof, 'C1-inputs.json');
   const target = join(proof, 'target.json');
@@ -3506,9 +3509,12 @@ test('C1-31: owner-client-command sends Origin, prechecks AMR freshness at 240 s
   }
   assert.match(plan, /the owner signs in again interactively in the owner file-store CLI session, then execute ai-w6-owner-client-command/);
 
-  const now = Math.floor(Date.now() / 1000);
+  const boundNow = Math.floor(Date.now() / 1000);
+  // Freeze the child process clock before the unchanged plan body reads AMR age.
+  const runAtBoundNow = (proof: string, action: string, opts: OwnerClientOptions = {}) =>
+    runOwnerClient(current, proof, action, { nowSeconds: boundNow, ...opts });
   const originOk = mkdtempSync(join(scratch, 'occ-c131-origin-'));
-  const sent = runOwnerClient(current, originOk, 'approve');
+  const sent = runAtBoundNow(originOk, 'approve');
   assert.equal(sent.status, 0, sent.stderr + sent.stdout);
   const commandCalls = ownerFetchLog(originOk).filter(c => c.command);
   assert.equal(commandCalls.length, 1);
@@ -3516,14 +3522,14 @@ test('C1-31: owner-client-command sends Origin, prechecks AMR freshness at 240 s
 
   for (const method of interactiveMethods) {
     const d = mkdtempSync(join(scratch, 'occ-c131-amr-'));
-    const r = runOwnerClient(current, d, 'approve', { accessToken: ownerJwt([{ method, timestamp: now - 1 }]) });
+    const r = runAtBoundNow(d, 'approve', { accessToken: ownerJwt([{ method, timestamp: boundNow - 1 }]) });
     assert.equal(r.status, 0, `${method}: ${r.stderr}`);
     assert.ok(ownerFetchLog(d).some(c => c.command), method);
   }
   const excluded = mkdtempSync(join(scratch, 'occ-c131-amr-ex-'));
   const excludedMethod = interactiveMethods.includes('token_refresh') ? `${interactiveMethods[0]}-alias` : 'token_refresh';
-  const missingMethod = runOwnerClient(current, excluded, 'approve', {
-    accessToken: ownerJwt([{ method: excludedMethod, timestamp: now - 1 }]),
+  const missingMethod = runAtBoundNow(excluded, 'approve', {
+    accessToken: ownerJwt([{ method: excludedMethod, timestamp: boundNow - 1 }]),
   });
   assert.notEqual(missingMethod.status, 0);
   assert.match(missingMethod.stderr, /FAIL owner client command; interactive owner sign-in expected under 240 s got missing; sign in again with the owner file-store CLI session and rerun this block; STOP/);
@@ -3531,7 +3537,7 @@ test('C1-31: owner-client-command sends Origin, prechecks AMR freshness at 240 s
   assert.ok(!existsSync(join(excluded, 'approve-request-id')));
 
   const stringAmr = mkdtempSync(join(scratch, 'occ-c131-amr-str-'));
-  const stringOnly = runOwnerClient(current, stringAmr, 'withdraw', { accessToken: ownerJwt(['password']) });
+  const stringOnly = runAtBoundNow(stringAmr, 'withdraw', { accessToken: ownerJwt(['password']) });
   assert.notEqual(stringOnly.status, 0);
   assert.match(stringOnly.stderr, /got missing/);
   assert.equal(ownerFetchLog(stringAmr).length, 0);
@@ -3539,43 +3545,54 @@ test('C1-31: owner-client-command sends Origin, prechecks AMR freshness at 240 s
 
   const stale = mkdtempSync(join(scratch, 'occ-c131-stale-'));
   writeFileSync(join(stale, 'unrelated.txt'), 'keep\n');
-  const staleRun = runOwnerClient(current, stale, 'withdraw', {
-    accessToken: ownerJwt([{ method: interactiveMethods[0], timestamp: now - 241 }]),
+  const staleRun = runAtBoundNow(stale, 'withdraw', {
+    accessToken: ownerJwt([{ method: interactiveMethods[0], timestamp: boundNow - 241 }]),
   });
   assert.notEqual(staleRun.status, 0);
   assert.match(staleRun.stderr, /FAIL owner client command; interactive owner sign-in expected under 240 s got stale; sign in again with the owner file-store CLI session and rerun this block; STOP/);
   assert.equal(ownerFetchLog(stale).length, 0);
   assert.ok(!existsSync(join(stale, 'withdraw-request-id')));
-  const rerun = runOwnerClient(current, stale, 'withdraw');
+  const rerun = runAtBoundNow(stale, 'withdraw');
   assert.equal(rerun.status, 0, rerun.stderr + rerun.stdout);
   assert.ok(existsSync(join(stale, 'withdraw-request-id')));
 
-  const boundNow = Math.floor(Date.now() / 1000);
   for (const [label, offset] of [['near-stale', -239], ['skew-ok', 3]] as const) {
     const d = mkdtempSync(join(scratch, `occ-c131-${label}-`));
-    const r = runOwnerClient(current, d, 'approve', {
+    const r = runAtBoundNow(d, 'approve', {
       accessToken: ownerJwt([{ method: interactiveMethods[0], timestamp: boundNow + offset }]),
     });
     assert.equal(r.status, 0, `${label}: ${r.stderr}`);
     assert.ok(ownerFetchLog(d).some(c => c.command), label);
   }
+  // Negative control: the same near-stale token must refuse when the injected
+  // clock advances, proving that the child actually uses the supplied time.
+  const clockControl = mkdtempSync(join(scratch, 'occ-c131-clock-control-'));
+  const clockRefusal = runAtBoundNow(clockControl, 'approve', {
+    nowSeconds: boundNow + 3600,
+    accessToken: ownerJwt([{ method: interactiveMethods[0], timestamp: boundNow - 239 }]),
+  });
+  assert.notEqual(clockRefusal.status, 0);
+  assert.match(clockRefusal.stderr, /interactive owner sign-in expected under 240 s got stale/);
+  assert.equal(ownerFetchLog(clockControl).length, 0);
+  assert.ok(!existsSync(join(clockControl, 'approve-request-id')));
+
   const future = mkdtempSync(join(scratch, 'occ-c131-future-'));
   writeFileSync(join(future, 'unrelated.txt'), 'keep\n');
-  const futureRun = runOwnerClient(current, future, 'withdraw', {
+  const futureRun = runAtBoundNow(future, 'withdraw', {
     accessToken: ownerJwt([{ method: interactiveMethods[0], timestamp: boundNow + 10 }]),
   });
   assert.notEqual(futureRun.status, 0);
   assert.match(futureRun.stderr, /FAIL owner client command; interactive owner sign-in expected under 240 s got future; sign in again with the owner file-store CLI session and rerun this block; STOP/);
   assert.equal(ownerFetchLog(future).length, 0);
   assert.ok(!existsSync(join(future, 'withdraw-request-id')));
-  const futureRerun = runOwnerClient(current, future, 'withdraw');
+  const futureRerun = runAtBoundNow(future, 'withdraw');
   assert.equal(futureRerun.status, 0, futureRerun.stderr + futureRerun.stdout);
   assert.ok(existsSync(join(future, 'withdraw-request-id')));
 
   const saved = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   const refused = mkdtempSync(join(scratch, 'occ-c131-403-'));
   writeFileSync(join(refused, 'approve-request-id'), saved + '\n', { mode: 0o600 });
-  const stored = runOwnerClient(current, refused, 'approve', {
+  const stored = runAtBoundNow(refused, 'approve', {
     commandStatus: 403,
     commandBody: { error: 'human_confirmation_required' },
   });
