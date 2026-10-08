@@ -1,12 +1,32 @@
 /** Owns the executable edge-release lifecycle contract; no Docker/network/box. */
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawnSync as nodeSpawnSync, type SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { createMcpProtocolHandler } from '../supabase/functions/mcp/protocol.ts';
+
+// Enforce a portable per-argument budget even on macOS, where Linux's
+// MAX_ARG_STRLEN would otherwise remain untested. Large payloads use stdin.
+const maxArgBytes = 64 * 1024;
+function spawnSync(command: string, args: string[], options: SpawnSyncOptionsWithStringEncoding) {
+  for (const [index, arg] of args.entries()) {
+    const bytes = Buffer.byteLength(arg, 'utf8');
+    assert.ok(bytes <= maxArgBytes, `${command} argv[${index}] is ${bytes} bytes; limit is ${maxArgBytes}; use stdin or a file`);
+  }
+  return nodeSpawnSync(command, args, options);
+}
+
+test('all helper spawns enforce a 64 KiB argv budget measured in UTF-8 bytes', () => {
+  const args = ['-e', 'process.stdout.write("ok")'];
+  const control = spawnSync(process.execPath, [...args, 'x'.repeat(maxArgBytes)], { encoding: 'utf8' });
+  passed(control); assert.equal(control.stdout, 'ok');
+  for (const payload of ['x'.repeat(maxArgBytes + 1), 'é'.repeat(maxArgBytes / 2 + 1)]) {
+    assert.throws(() => spawnSync(process.execPath, [...args, payload], { encoding: 'utf8' }), /argv\[2\].*limit is 65536; use stdin or a file/);
+  }
+});
 
 // Existing OAuth/C1 tests do not execute this post-W4 binding lifecycle. Tests
 // below protect release safety, admission and shell execution, without adding
@@ -63,7 +83,10 @@ exec(compile(sys.stdin.read(),'<extracted-edge-validator>','exec'))
 `;
   return spawnSync('python3', ['-c', harness, inputs, marker, opts.host ?? 'yulan-vps-1', opts.now ?? clock, opts.root ? 'root' : 'nonroot'], { input: validator, encoding: 'utf8' });
 }
-function passed(r: ReturnType<typeof spawnSync>) { assert.equal(r.status, 0, String(r.stderr)); }
+function passed(r: ReturnType<typeof spawnSync>) {
+  assert.ifError(r.error);
+  assert.equal(r.status, 0, String(r.stderr));
+}
 function stopped(r: ReturnType<typeof spawnSync>, pattern = /FAIL.*STOP/s) {
   assert.notEqual(r.status, 0, String(r.stdout)); assert.match(String(r.stderr), pattern);
 }
@@ -382,7 +405,7 @@ function archiveLifecycle(options: { archiveOverride?: string; baseline?: string
     };
     passed(spawnSync('python3', ['-c', `
 import io,json,pathlib,sys,tarfile
-files=json.loads(sys.argv[2]); dirs=set()
+files=json.load(sys.stdin); dirs=set()
 for name in files:
  dirs.update(str(p) for p in pathlib.PurePosixPath(name).parents if str(p)!='.')
 with tarfile.open(sys.argv[1],'w') as t:
@@ -391,7 +414,7 @@ with tarfile.open(sys.argv[1],'w') as t:
  for name,data in files.items():
   raw=data.encode(); m=tarfile.TarInfo(name); m.size=len(raw); m.mode=0o644; t.addfile(m,io.BytesIO(raw))
  m=tarfile.TarInfo('site/CLAUDE.md'); m.type=tarfile.SYMTYPE; m.linkname='AGENTS.md'; t.addfile(m)
-`, archive, JSON.stringify(files)], { encoding: 'utf8' }));
+`, archive], { input: JSON.stringify(files), encoding: 'utf8' }));
   }
   const input = join(f.proof, 'inputs.json'), d = JSON.parse(readFileSync(input, 'utf8'));
   if (options.realArchive) {
@@ -747,11 +770,11 @@ function deployedCaddy() {
   writeFileSync(join(stage, 'api.caddy'), readFileSync(resolve('deploy/supabase-stack/commonswarm-api.caddy')));
   const activationPlan = readFileSync(resolve('docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md'), 'utf8');
   const activation = /^(text=\(stage\/'mcp.off.caddy'\)[\s\S]*?^\(stage\/'mcp.on.caddy'\)[^\n]*)/m.exec(activationPlan)![1]!;
-  passed(spawnSync('python3', ['-c', 'import os,pathlib,re,sys\nstage=pathlib.Path(sys.argv[1])\n' + activation, stage], { encoding: 'utf8' }));
+  passed(spawnSync('python3', ['-', stage], { input: 'import os,pathlib,re,sys\nstage=pathlib.Path(sys.argv[1])\n' + activation, encoding: 'utf8' }));
   writeFileSync(join(stage, 'mcp.caddy'), readFileSync(join(stage, 'mcp.on.caddy')));
   const w4 = readFileSync(resolve('docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'), 'utf8');
   const candidate = /# step: ai-w4-caddy-candidate\n[\s\S]*?^```/m.exec(w4)![0];
-  passed(spawnSync('python3', ['-c', python(candidate), stage], { encoding: 'utf8' }));
+  passed(spawnSync('python3', ['-', stage], { input: python(candidate), encoding: 'utf8' }));
   return parseCaddy(readFileSync(join(stage, 'api.new.caddy'), 'utf8') + '\n' + readFileSync(join(stage, 'mcp.new.caddy'), 'utf8'));
 }
 function caddyRoute(config: CaddyNode[], host: string, path: string, method: string) {
@@ -828,6 +851,7 @@ test('extracted route probes use real MCP origin/auth checks; refuse injected Or
   const source = python(/^edge_route_probes\(\) \{[\s\S]*?^\}/m.exec(helpers)![0]);
   const harness = `
 import http.client,json,ssl,sys
+payload=json.load(sys.stdin); rows=payload['rows']
 ssl.create_default_context=lambda **kw: object()
 class Response:
  def __init__(self,status,data,headers=None): self.status=status; self.data=data; self.headers=headers or {}
@@ -847,7 +871,6 @@ class Connection:
   if path=='/.well-known/oauth-authorization-server': return Response(200,b'{"issuer":"https://mcp.commonswarm.com"}')
   if path=='/.well-known/oauth-protected-resource/mcp' or path=='/mcp':
    # Replay responses from the real TS handler for the exact captured request.
-   rows=json.loads(sys.argv[3])
    row=next(r for r in rows if r['request']==[self.host,path,self.method,self.body,self.headers])
    doc=json.loads(row['body'])
    if sys.argv[2]=='bad-metadata': doc['resource']='https://mcp.commonswarm.com/wrong'
@@ -855,7 +878,7 @@ class Connection:
    return Response(row['status'],json.dumps(doc).encode(),row['headers'])
   raise AssertionError('unexpected probe route')
 http.client.HTTPSConnection=Connection
-exec(compile(sys.stdin.read(),'<extracted-local-caddy-probes>','exec'))
+exec(compile(payload['source'],'<extracted-local-caddy-probes>','exec'))
 `;
   const run = async (probeSource: string, allowedOrigins: string[], kind = 'good') => {
     const handle = createMcpProtocolHandler({
@@ -872,7 +895,7 @@ exec(compile(sys.stdin.read(),'<extracted-local-caddy-probes>','exec'))
       const response = await handle(new Request(`https://${host}${path}`, { method, body, headers }));
       rows.push({ request, status: response.status, body: await response.text(), headers: Object.fromEntries(response.headers) });
     }
-    return { rows, result: spawnSync('python3', ['-c', harness, 'unused-public-ca', kind, JSON.stringify(rows)], { input: probeSource, encoding: 'utf8' }) };
+    return { rows, result: spawnSync('python3', ['-c', harness, 'unused-public-ca', kind], { input: JSON.stringify({ rows, source: probeSource }), encoding: 'utf8' }) };
   };
   const call = "request('mcp.commonswarm.com','/mcp','POST',body,headers=mcp_headers)";
   const injectedOrigin = source.replace(call, call.replace('headers=mcp_headers', "headers={**mcp_headers,'Origin':'https://commonswarm.com'}"));
