@@ -146,42 +146,23 @@ jobs:
         run: |
           set -euo pipefail
           cs_workspace_root=$(realpath -e "$GITHUB_WORKSPACE")
-          validate_smoke_directory() {
-            local target="$1" current="$1" resolved
-            case "$target" in
-              "$cs_workspace_root"/*) ;;
-              *) printf '%s\n' 'CS_SMOKE_PATH_OUTSIDE_WORKSPACE' >&2; exit 1 ;;
-            esac
-            while [[ "$current" != "$cs_workspace_root" ]]; do
-              if [[ -L "$current" ]]; then
-                printf '%s\n' 'CS_SMOKE_PATH_SYMLINK' >&2
-                exit 1
-              fi
-              if [[ -e "$current" && ! -d "$current" ]]; then
-                printf '%s\n' 'CS_SMOKE_PATH_NOT_DIRECTORY' >&2
-                exit 1
-              fi
-              current=${current%/*}
-            done
-            if [[ -e "$target" ]]; then
-              resolved=$(realpath -e "$target")
-            else
-              resolved=$(realpath -m "$target")
-            fi
-            case "$resolved" in
-              "$cs_workspace_root"/*) ;;
-              *) printf '%s\n' 'CS_SMOKE_PATH_OUTSIDE_WORKSPACE' >&2; exit 1 ;;
-            esac
-          }
-          validate_smoke_directory "$CS_EVIDENCE_DIR"
-          validate_smoke_directory "$CS_TOOL_ROOT"
           for cs_directory in "$CS_EVIDENCE_DIR" "$CS_TOOL_ROOT"; do
-            if [[ ! -e "$cs_directory" ]]; then
-              mkdir -- "$cs_directory"
+            case "$cs_directory" in
+              "$cs_workspace_root"/*) ;;
+              *) printf '%s\n' 'CS_SMOKE_PATH_OUTSIDE_WORKSPACE' >&2; exit 1 ;;
+            esac
+            if [ -e "$cs_directory" ] || [ -L "$cs_directory" ]; then
+              printf '%s\n' 'CS_SMOKE_PATH_PREEXISTS' >&2
+              exit 1
             fi
           done
-          validate_smoke_directory "$CS_EVIDENCE_DIR"
-          validate_smoke_directory "$CS_TOOL_ROOT"
+          for cs_directory in "$CS_EVIDENCE_DIR" "$CS_TOOL_ROOT"; do
+            mkdir -- "$cs_directory"
+            if [[ ! -d "$cs_directory" || -L "$cs_directory" ]]; then
+              printf '%s\n' 'CS_SMOKE_PATH_NOT_DIRECTORY' >&2
+              exit 1
+            fi
+          done
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
