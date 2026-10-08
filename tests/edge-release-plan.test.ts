@@ -2,7 +2,8 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 
@@ -22,7 +23,8 @@ function python(source: string) {
 }
 const validator = python(block('edge-open'));
 const helpers = /cat >>"\$PROOF_DIR\/session.sh" <<'SH'\n([\s\S]*?)^SH$/m.exec(block('edge-open'))![1]!;
-const scratch = mkdtempSync('/private/tmp/edge-release-contract-');
+// The extracted plan checks canonical paths; TMPDIR may point through a symlink.
+const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'edge-release-contract-')));
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 const clock = '2031-02-03T12:00:00Z';
 const fixture = () => ({
@@ -63,6 +65,29 @@ function passed(r: ReturnType<typeof spawnSync>) { assert.equal(r.status, 0, Str
 function stopped(r: ReturnType<typeof spawnSync>, pattern = /FAIL.*STOP/s) {
   assert.notEqual(r.status, 0, String(r.stdout)); assert.match(String(r.stderr), pattern);
 }
+const pythonPath = spawnSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' });
+passed(pythonPath);
+const quotedPythonExecutable = "'" + pythonPath.stdout.trim().replaceAll("'", "'\\''") + "'";
+function bashVersion(path: string) {
+  const r = spawnSync(path, ['-c', 'printf "%s.%s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"'], { encoding: 'utf8' });
+  return r.status === 0 ? r.stdout : undefined;
+}
+const bash5 = ['/bin/bash', 'bash', '/opt/homebrew/bin/bash', '/usr/local/bin/bash'].find(path => /^5\./.test(bashVersion(path) ?? ''));
+
+test('every block and persisted helper parses in Bash 5', t => {
+  if (!bash5 && process.platform === 'darwin') {
+    t.skip('Bash 5 is not installed on this Mac; Linux CI requires it'); return;
+  }
+  assert.ok(bash5, 'Bash 5 is required for the Linux release-plan check');
+  for (const source of [...blocks, helpers]) passed(spawnSync(bash5, ['-n'], { input: source, encoding: 'utf8' }));
+});
+
+test('every block and persisted helper parses in macOS /bin/bash 3.2', {
+  skip: process.platform !== 'darwin' || bashVersion('/bin/bash') !== '3.2'
+    ? 'macOS /bin/bash 3.2 is not present; Bash 5 is checked separately' : false,
+}, () => {
+  for (const source of [...blocks, helpers]) passed(spawnSync('/bin/bash', ['-n'], { input: source, encoding: 'utf8' }));
+});
 
 // Same parser as the OAuth contract: tracks command substitutions, skips
 // heredoc bodies. Its positive/negative controls exercise the scope detector.
@@ -101,7 +126,7 @@ function unsafeSubstitution(source: string) {
   }
   return false;
 }
-test('every block and persisted helper parses; embedded Python compiles; heredoc substitutions refuse', () => {
+test('every block is labeled; embedded Python compiles; heredoc substitutions refuse', () => {
   assert.equal(blocks.length, [...plan.matchAll(/^```sh$/gm)].length);
   const seen = new Set<string>();
   for (const source of [...blocks, helpers]) {
@@ -111,7 +136,6 @@ test('every block and persisted helper parses; embedded Python compiles; heredoc
       assert.match(readonly!, /^# readonly: (yes|no|probe)$/); assert.match(host!, /^# host: /);
       assert.ok(!seen.has(step!)); seen.add(step!);
     }
-    passed(spawnSync('/bin/bash', ['-n'], { input: source, encoding: 'utf8' }));
     assert.equal(unsafeSubstitution(source), false, source.split('\n')[0]);
     for (const m of source.matchAll(/^[ \t]*python3[^\n]*<<'([A-Z_]+)'[^\n]*\n([\s\S]*?)^\1$/gm)) {
       passed(spawnSync('python3', ['-c', 'import sys; compile(sys.stdin.read(),"<edge-python>","exec")'], { input: m[2]!, encoding: 'utf8' }));
@@ -244,9 +268,9 @@ BOX_ARCHIVE_PATH=/tmp/admin-issuance-${d.release_sha}-${d.window_id}.tar
 EDGE_RECYCLE_TIMER=commonswarm-edge-recycle.timer
 EDGE_RECYCLE_SERVICE=commonswarm-edge-recycle.service
 ${mapped}
-python3() { ${JSON.stringify(spawnSync('which',['python3'],{encoding:'utf8'}).stdout.trim())} ${JSON.stringify(wrapper)} "$@"; }
-# Mac fixture maps only the Linux rename primitive; lifecycle stays extracted.
-mv() { test "$1" = -Tf; /usr/bin/python3 -c 'import os,sys; os.replace(sys.argv[1],sys.argv[2])' "$2" "$3"; }
+python3() { ${quotedPythonExecutable} ${JSON.stringify(wrapper)} "$@"; }
+${process.platform === 'darwin' ? `# Mac fixture maps only the Linux rename primitive; Linux uses real mv -Tf.
+mv() { test "$1" = -Tf; ${quotedPythonExecutable} -c 'import os,sys; os.replace(sys.argv[1],sys.argv[2])' "$2" "$3"; }` : ''}
 edge_invariants() { :; }
 edge_render() { :; }
 edge_readback() { :; }
