@@ -1,12 +1,13 @@
 /** Production-shaped edge login: SET LOCAL ROLE commonswarm_oauth_runtime. Docker/server suite only. */
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import postgres from 'postgres';
-import { dbAssert, localClusterAdminUrl, repoSql, runSql } from '../support/admin-schema-db.js';
+import { databaseContainer, dbAssert, emptyApplicationSchema, localClusterAdminUrl, openIssuanceForTest, repoSql, runSql } from '../support/admin-schema-db.js';
+import { assertSqlProcessResult } from '../support/admin-schema-process.js';
 
-test('edge-oauth-runtime-set-grant / edge-membership idempotency drift-refusal: catalog accepts exact f/f/t and refuses drift', () => {
+test('edge-oauth-runtime-set-grant / edge-membership: catalog accepts exact f/f/t and refuses ADMIN drift', () => {
   runSql(`
 DO $edge$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='commonswarm_edge') THEN
@@ -43,15 +44,93 @@ SELECT :'catalog_ok'::boolean=false AS drift_ok
 DO $fail$ BEGIN RAISE EXCEPTION 'catalog should refuse ADMIN true drift'; END $fail$;
 \\endif
 ROLLBACK TO SAVEPOINT drift;
-REVOKE commonswarm_oauth_runtime FROM commonswarm_edge;
-GRANT commonswarm_oauth_runtime TO commonswarm_edge WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
-${repoSql('deploy/release-proofs/item-ai/edge-oauth-runtime-catalog.sql')}
-SELECT :'catalog_ok'::boolean=true AS idempotent_ok
-\\gset
-\\if :idempotent_ok
-\\else
-DO $fail$ BEGIN RAISE EXCEPTION 'exact re-grant remains catalog-true'; END $fail$;
-\\endif
+`);
+});
+
+/** Execute the release heredoc inside runSql's rollback, without its outer COMMIT. */
+function extractedBody(kind: 'grant' | 'revoke'): string {
+  const marker = new RegExp(`cat >"\\$PROOF_DIR/edge-oauth-runtime-${kind}\\.sql" <<'SQL'\\n([\\s\\S]*?)\\nSQL\\n`);
+  const sql = marker.exec(repoSql('docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'))?.[1];
+  assert.ok(sql, `${kind} SQL heredoc markers`);
+  assert.match(sql, /^BEGIN;/);
+  assert.match(sql, /COMMIT;$/);
+  return sql.replace(/^BEGIN;/, '').replace(/\nCOMMIT;$/, '');
+}
+
+const edgeFixture = `
+DO $edge$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='commonswarm_edge') THEN
+    CREATE ROLE commonswarm_edge LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
+      INHERIT NOREPLICATION NOBYPASSRLS;
+  END IF;
+END $edge$;
+`;
+
+const exactGrant = 'GRANT commonswarm_oauth_runtime TO commonswarm_edge WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;';
+const membership = `SELECT count(*)=1 AND bool_and(NOT admin_option AND NOT inherit_option AND set_option)
+  FROM pg_auth_members WHERE roleid='commonswarm_oauth_runtime'::regrole AND member='commonswarm_edge'::regrole`;
+const grantor = `c1grantg${randomUUID().replaceAll('-', '')}`;
+const grantRefusals: Array<[string, string, string]> = [
+  ['duplicate grantors', `${exactGrant}
+CREATE ROLE ${grantor} NOLOGIN NOINHERIT CREATEROLE NOSUPERUSER NOBYPASSRLS;
+GRANT commonswarm_oauth_runtime TO ${grantor} WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;
+SET LOCAL ROLE ${grantor};
+${exactGrant}
+RESET ROLE;
+${dbAssert(`SELECT count(*)=2 FROM pg_auth_members WHERE roleid='commonswarm_oauth_runtime'::regrole AND member='commonswarm_edge'::regrole`, 'two grantors before duplicate refusal')}`, 'duplicate commonswarm_edge oauth-runtime membership'],
+  ...['ADMIN TRUE, INHERIT FALSE, SET TRUE', 'ADMIN FALSE, INHERIT TRUE, SET TRUE', 'ADMIN FALSE, INHERIT FALSE, SET FALSE']
+    .map((options): [string, string, string] => [`options ${options}`,
+      `GRANT commonswarm_oauth_runtime TO commonswarm_edge WITH ${options};`,
+      'existing membership options are not ADMIN false/INHERIT false/SET true']),
+  ...['SUPERUSER', 'BYPASSRLS', 'CREATEROLE', 'CREATEDB']
+    .map((attribute): [string, string, string] => [attribute,
+      `ALTER ROLE commonswarm_oauth_runtime ${attribute};`, 'unsafe commonswarm_oauth_runtime role attributes']),
+  ['runtime membership', 'GRANT swarm_read TO commonswarm_oauth_runtime;', 'commonswarm_oauth_runtime must hold no role memberships'],
+  ['open issuance', `${openIssuanceForTest}
+${dbAssert('SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton', 'issuance is open before grant refusal')}`, 'issuance must be closed'],
+];
+
+// Separate rollback transactions and test results keep one failing setup or refusal
+// from hiding another. Each negative control follows a real successful grant.
+for (const [label, setup, message] of grantRefusals) {
+  test(`edge-oauth-runtime-set-grant / drift-refusal: extracted grant refuses ${label}`, () => {
+    const grant = extractedBody('grant');
+    runSql(`
+${edgeFixture}
+${dbAssert(`SELECT NOT EXISTS(SELECT 1 FROM pg_auth_members WHERE roleid='commonswarm_oauth_runtime'::regrole AND member='commonswarm_edge'::regrole)`, 'edge starts without runtime grant')}
+SAVEPOINT safe;
+${grant}
+${dbAssert(membership, 'positive control creates one exact f/f/t row')}
+ROLLBACK TO SAVEPOINT safe;
+${setup}
+DO $deny$ BEGIN
+  BEGIN
+    ${grant}
+    RAISE EXCEPTION 'negative control admitted' USING ERRCODE='ZX001';
+  EXCEPTION WHEN SQLSTATE 'P0001' THEN
+    PERFORM set_config('schema_test.grant_refusal', SQLERRM, true);
+  END;
+END $deny$;
+${dbAssert(`current_setting('schema_test.grant_refusal', true) = '${message}'`, 'extracted grant reached the intended refusal')}
+`);
+  });
+}
+
+test('edge-oauth-runtime-set-grant / idempotency: extracted exact-row retry preserves every catalog field', () => {
+  const grant = extractedBody('grant');
+  runSql(`
+${edgeFixture}
+${dbAssert(`SELECT NOT EXISTS(SELECT 1 FROM pg_auth_members WHERE roleid='commonswarm_oauth_runtime'::regrole AND member='commonswarm_edge'::regrole)`, 'edge starts without runtime grant')}
+${grant}
+${dbAssert(membership, 'extracted grant creates one exact f/f/t row')}
+CREATE TEMP TABLE exact_membership_before AS SELECT * FROM pg_auth_members
+  WHERE roleid='commonswarm_oauth_runtime'::regrole AND member='commonswarm_edge'::regrole;
+${grant}
+${dbAssert(membership, 'exact-row retry leaves one f/f/t row')}
+${dbAssert(`SELECT NOT EXISTS(
+  (SELECT * FROM exact_membership_before EXCEPT SELECT * FROM pg_auth_members WHERE roleid='commonswarm_oauth_runtime'::regrole AND member='commonswarm_edge'::regrole)
+  UNION ALL
+  (SELECT * FROM pg_auth_members WHERE roleid='commonswarm_oauth_runtime'::regrole AND member='commonswarm_edge'::regrole EXCEPT SELECT * FROM exact_membership_before))`, 'exact-row retry leaves every catalog field unchanged')}
 `);
 });
 
@@ -117,16 +196,9 @@ test('edge-oauth-runtime-set-grant / edge-login-switching commit-rollback-reset:
 });
 
 test('edge-oauth-runtime-set-grant / revoke-all-grantors: extracted SQL revokes every grantor and leaves issuer membership unchanged', () => {
-  const extracted = /cat >"\$PROOF_DIR\/edge-oauth-runtime-revoke\.sql" <<'SQL'\n([\s\S]*?)\nSQL\n/.exec(
-    repoSql('docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'),
-  )?.[1];
-  assert.ok(extracted, 'revoke SQL heredoc markers');
-  assert.match(extracted, /^BEGIN;/);
-  assert.match(extracted, /COMMIT;$/);
-  // runSql already opens a rolled-back transaction; the extracted COMMIT would persist it.
-  const revokeBody = extracted.replace(/^BEGIN;/, '').replace(/\nCOMMIT;$/, '');
+  const revokeBody = extractedBody('revoke');
   const grantor = `c1revokeg${randomUUID().replaceAll('-', '')}`;
-  runSql(`
+  const sql = `
 DO $edge$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='commonswarm_edge') THEN
     CREATE ROLE commonswarm_edge LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
@@ -150,12 +222,9 @@ RESET ROLE;
 ${dbAssert(`SELECT count(*)=2 FROM pg_auth_members
   WHERE roleid='commonswarm_oauth_runtime'::regrole AND member='commonswarm_edge'::regrole`,
   'positive control: two grantors before revoke')}
-${dbAssert(`(SELECT array_agg(grantor.rolname::text ORDER BY grantor.rolname)
-  FROM pg_auth_members m JOIN pg_roles grantor ON grantor.oid=m.grantor
-  WHERE m.roleid='commonswarm_oauth_runtime'::regrole AND m.member='commonswarm_edge'::regrole)
-  = (SELECT array_agg(n ORDER BY n) FROM unnest(ARRAY['${grantor}', current_user]::text[]) n)`,
-  'output lists both grantor names')}
+\\echo revoke-stdout-start
 ${revokeBody}
+\\echo revoke-stdout-end
 ${dbAssert(`SELECT count(*)=0 FROM pg_auth_members
   WHERE roleid='commonswarm_oauth_runtime'::regrole AND member='commonswarm_edge'::regrole`,
   'zero rows after per-grantor revoke')}
@@ -168,5 +237,16 @@ ${dbAssert(`current_setting('schema_test.issuer_memberships') = coalesce((
 ${dbAssert(`SELECT EXISTS(SELECT 1 FROM pg_auth_members
   WHERE roleid='commonswarm_oauth_runtime'::regrole AND member='${grantor}'::regrole AND admin_option)`,
   'control grantor ADMIN membership unchanged')}
-`);
+`;
+  const result = spawnSync('docker', ['exec', '-i', databaseContainer(), 'psql', '-X', '-Atq',
+    '-U', 'supabase_admin', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1',
+    '-v', 'VERBOSITY=verbose', '-v', 'SHOW_CONTEXT=never', '-f', '/dev/stdin'], {
+    input: `BEGIN;\n${emptyApplicationSchema()}\n${sql}\nROLLBACK;\n`,
+    encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024,
+  });
+  assertSqlProcessResult(result);
+  const output = /(?:^|\n)revoke-stdout-start\n([\s\S]*?)revoke-stdout-end(?:\n|$)/.exec(result.stdout)?.[1];
+  assert.ok(output, 'stdout contains the extracted revoke output');
+  assert.deepEqual(output.trim().split('\n').sort(), [grantor, 'supabase_admin'].sort(),
+    'revoke SQL stdout lists both grantors exactly once');
 });

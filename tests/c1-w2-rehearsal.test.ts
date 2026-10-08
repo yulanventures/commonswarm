@@ -824,6 +824,7 @@ test('c1 W6 rehearsal: --w6 PASSES on the post-W2 database: W4 fence, recycle ho
     /^PASS ai-edge-receipt:stale-generation: refused \(generation\/release_generation\/measured_generation\)$/m,
     /^PASS ai-w6-edge-oauth-runtime-grant$/m,
     /^EMUL ai-w6-edge-oauth-runtime-grant: live edge-login proof not run /m,
+    /^EMUL ai-w6-edge-oauth-runtime-grant: edge-login file preparation not run \(production SWARM_DATABASE_URL is not read\)$/m,
     /^PASS ai-w6-activation-checks:db-measurement-g4$/m, /^PASS ai-w6-activation-checks:g4-archive-missing: refused /m,
     /^PASS ai-w6-client-verification:digest-not-the-document: refused /m, /^PASS ai-w6-client-verification$/m, /^PASS c1-verification:idempotent: /m,
     /^PASS ai-w6-client-verification:second-active-version: refused \(another active C1 verification version\)$/m,

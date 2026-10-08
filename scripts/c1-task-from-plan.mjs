@@ -6,9 +6,9 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { TextDecoder } from 'node:util';
 
-const VERSION = '5';
+const VERSION = '6';
 const WINDOWS = new Set(['W1', 'W2', 'W2b', 'W3', 'W4', 'W5', 'W6', 'W6e', 'W7']);
-const MODES = new Set(['forward', 'rollback', 'recovered-close']);
+const MODES = new Set(['forward', 'rollback', 'recovered-close', 'admin-close']);
 class PlanError extends Error {}
 const fail = (reason) => { throw new PlanError(`FAIL c1-task-from-plan: ${reason}; STOP`); };
 
@@ -121,6 +121,7 @@ function runOrders(plan, path) {
     } else if (line.startsWith('```c1-order')) {
       const match = /^```c1-order (\S+) (\S+)$/.exec(line);
       if (!match || !WINDOWS.has(match[1]) || !MODES.has(match[2])) fail(`invalid order header at plan line ${n + 1}`);
+      if (match[2] === 'admin-close' && match[1] !== 'W5') fail('admin-close is W5-only');
       const key = `${match[1]} ${match[2]}`;
       if (orders.has(key)) fail(`duplicate run order for ${key}`);
       const evidence = [{ start_line: n + 1, end_line: n + 1, quote: line }], steps = [];
@@ -135,6 +136,7 @@ function runOrders(plan, path) {
     } else if (line.trim()) fail(`unrecognised run-order line at plan line ${n + 1}`);
   }
   for (const window of WINDOWS) for (const mode of MODES) {
+    if (mode === 'admin-close' && window !== 'W5') continue;
     if (!orders.has(`${window} ${mode}`)) fail(`missing run order for ${window} ${mode}`);
   }
   for (const id of blocks.keys()) {
@@ -177,6 +179,7 @@ function main() {
   if (!path || !window || !mode || extra.length) fail('usage: node scripts/c1-task-from-plan.mjs PLAN WINDOW MODE [OUTPUT]');
   if (!WINDOWS.has(window)) fail(`unknown window ${window}`);
   if (!MODES.has(mode)) fail(`unknown mode ${mode}`);
+  if (mode === 'admin-close' && window !== 'W5') fail('admin-close is W5-only');
   const raw = readFileSync(path);
   const plan = parse(raw);
   const { orders, pin } = runOrders(plan, path);
