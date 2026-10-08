@@ -193,7 +193,13 @@
    no link, no hover. An empty name shows the door's label in the muted rail ink, at 400.
      name    --home-rail-strong on --home-rail-bg 14.32 / 16.84; empty --home-rail-muted 5.96 / 7.00
      marker  --home-lime on --home-rail-bg 12.65 / 14.87 (12px 600) */
+/* The draft row's 1.5px dashed lime edge (New-Space.dc.html; 3 device px at 2x, a 3px dash and a 1.5px gap) is an SVG
+   stroke: a CSS dashed 1.5px border snaps to 1px in Chromium (critic r9 CNewSpace 3). The SVG has no viewBox, so its units
+   are CSS px at any row width; the rect is the row's own 12px rounded edge with a 3px stroke, and the pseudo-element's
+   matching radius clips the outer half (on the sides and round the corners), which leaves an exact 1.5px inner edge.
+   Padding adds the edge back (12 + 1.5). */
 .hm-rail__draft {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -201,11 +207,26 @@
   inline-size: 100%;
   min-inline-size: 0;
   min-block-size: 44px;
-  padding: 0 12px;
-  border: 1.5px dashed var(--home-lime);
+  padding: 0 13.5px;
+  border: 0;
   border-radius: 12px;
   color: var(--home-rail-strong);
   font-weight: 700;
+}
+.hm-rail__draft::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--home-lime);
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100%25' height='100%25'%3E%3Crect width='100%25' height='100%25' rx='12' fill='none' stroke='black' stroke-width='3' stroke-dasharray='3 1.5'/%3E%3C/svg%3E");
+  mask-position: 0 0;
+  mask-repeat: no-repeat;
+  mask-size: 100% 100%;
+  pointer-events: none;
+}
+@media (forced-colors: active) {
+  .hm-rail__draft::before { forced-color-adjust: none; background: CanvasText; }
 }
 .hm-rail__draft .hm-rail__icon { color: var(--home-lime); }
 .hm-rail__draft .hm-rail__name[data-empty] { color: var(--home-rail-muted); font-weight: 400; }

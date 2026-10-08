@@ -1,4 +1,8 @@
 /* I1: mounts the pure shell inside the existing session and feed lifecycle. */
+/* The canvas renders text with the browser's default font smoothing. The site sets antialiased/grayscale on body
+   (global.css, the marketing pages keep it); inside the app that drew every stroke thinner than the canvas (critic r9
+   CMembers 1). Both properties inherit, so the app root (frame, dialogs and the agent-connect panel) takes the default. */
+live-dashboard { -webkit-font-smoothing: auto; -moz-osx-font-smoothing: auto; }
 .hm-frame.hm-frame.hm-frame {
   position: relative;
   display: grid;

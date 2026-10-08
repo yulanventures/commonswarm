@@ -131,11 +131,12 @@ function check(doc: Document): SVGSVGElement {
   const path = doc.createElementNS("http://www.w3.org/2000/svg", "path"); path.setAttribute("d", "M2.5 6.2l2.4 2.4 4.6-5"); svg.append(path); return svg;
 }
 
+/** Space.dc.html's to-do header plus: 18px, a 16-unit grid, stroke 2, round caps (inside the 44px button). */
 function plus(doc: Document): SVGSVGElement {
   const svg = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
-  for (const [name, value] of Object.entries({ viewBox: "0 0 20 20", width: "20", height: "20", fill: "none", stroke: "currentColor", "stroke-width": "2",
+  for (const [name, value] of Object.entries({ viewBox: "0 0 16 16", width: "18", height: "18", fill: "none", stroke: "currentColor", "stroke-width": "2",
     "stroke-linecap": "round", "aria-hidden": "true", focusable: "false" })) svg.setAttribute(name, value);
-  const path = doc.createElementNS("http://www.w3.org/2000/svg", "path"); path.setAttribute("d", "M10 4v12M4 10h12"); svg.append(path); return svg;
+  const path = doc.createElementNS("http://www.w3.org/2000/svg", "path"); path.setAttribute("d", "M8 3v10M3 8h10"); svg.append(path); return svg;
 }
 
 function todoRow(doc: Document, item: SideTodoVM, sample: boolean, callbacks: SideCardsCallbacks): HTMLElement {
