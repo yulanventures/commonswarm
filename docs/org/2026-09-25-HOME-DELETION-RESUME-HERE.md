@@ -8,8 +8,7 @@
 - CI runs on GitHub-hosted runners.
 - The host controls stay in place: the `rm` guard at `~/.local/bin/rm`, the hourly APFS local snapshots
   (`com.yulanbot.apfs-snapshot`), and the Claude `PreToolUse` hook that blocks the deletion pattern.
-- Tom's priority for 2026-10-07 (the redesign, the home UI, and the household stack) ships in C1 F17d window W5.
-  Admin issuance (W6 and W7) follows and does not gate W5.
+- C1 is parked since 2026-10-07 ~20:15Z: W3/W4 closed OK and W5 released the redesigned site, but W5's C1 close and W6/W7 (admin issuance) wait for the next C1 pass on Tom's account; UI releases ship site-only meanwhile (releases 1-6 on Oct 7-8).
 - New work goes through HezLead.
 
 ## Incident record (2026-09-25 to 2026-09-26)
