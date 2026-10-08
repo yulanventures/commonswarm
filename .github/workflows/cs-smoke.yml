@@ -60,8 +60,6 @@ jobs:
       WORKFLOW_SHA: ${{ inputs.workflow_sha }}
       PROBE_SHA: ${{ inputs.probe_sha }}
       CS_ACTUAL_WORKFLOW_SHA: ${{ github.workflow_sha }}
-      CS_TOOL_ROOT: ${{ github.workspace }}/.cs-smoke-tools
-      CS_EVIDENCE_DIR: ${{ github.workspace }}/cs-smoke-evidence
       CS_RECOVERY_RECIPIENT: ${{ vars.CS_SMOKE_RECOVERY_AGE_RECIPIENT }}
     steps:
       - name: Validate dispatch receipts before checkout or credentials
@@ -69,7 +67,6 @@ jobs:
           ACTUAL_REPOSITORY: ${{ github.repository }}
           ACTUAL_REF: ${{ github.ref }}
           ACTUAL_WORKFLOW_REF: ${{ github.ref_name }}
-          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/cs-smoke-chromium-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
           [ "$(uname -s)" = Linux ]
@@ -89,7 +86,29 @@ jobs:
             e.WORKFLOW_SHA === e.CS_ACTUAL_WORKFLOW_SHA;
           if (!valid) { console.error('Invalid release or workflow receipt.'); process.exit(1); }
           NODE
-          printf 'PLAYWRIGHT_BROWSERS_PATH=%s\n' "$PLAYWRIGHT_BROWSERS_PATH" >> "$GITHUB_ENV"
+          # Shell variables name the mounted container paths; expression contexts name host paths.
+          cs_workspace_root=$(realpath -e "$GITHUB_WORKSPACE")
+          cs_temp_root=$(realpath -e "$RUNNER_TEMP")
+          CS_TOOL_ROOT=$(realpath -m "$GITHUB_WORKSPACE/.cs-smoke-tools")
+          CS_EVIDENCE_DIR=$(realpath -m "$GITHUB_WORKSPACE/cs-smoke-evidence")
+          PLAYWRIGHT_BROWSERS_PATH=$(realpath -m "$RUNNER_TEMP/cs-smoke-chromium-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT")
+          case "$CS_TOOL_ROOT" in
+            "$cs_workspace_root"/*) ;;
+            *) printf '%s\n' 'CS_SMOKE_TOOL_PATH_OUTSIDE_WORKSPACE' >&2; exit 1 ;;
+          esac
+          case "$CS_EVIDENCE_DIR" in
+            "$cs_workspace_root"/*) ;;
+            *) printf '%s\n' 'CS_SMOKE_EVIDENCE_PATH_OUTSIDE_WORKSPACE' >&2; exit 1 ;;
+          esac
+          case "$PLAYWRIGHT_BROWSERS_PATH" in
+            "$cs_temp_root"/*) ;;
+            *) printf '%s\n' 'CS_SMOKE_BROWSER_PATH_OUTSIDE_TEMP' >&2; exit 1 ;;
+          esac
+          {
+            printf 'CS_TOOL_ROOT=%s\n' "$CS_TOOL_ROOT"
+            printf 'CS_EVIDENCE_DIR=%s\n' "$CS_EVIDENCE_DIR"
+            printf 'PLAYWRIGHT_BROWSERS_PATH=%s\n' "$PLAYWRIGHT_BROWSERS_PATH"
+          } >> "$GITHUB_ENV"
 
       - name: Provision tools in the disposable container
         timeout-minutes: 2
