@@ -141,6 +141,48 @@ jobs:
           ref: ${{ inputs.probe_sha }}
           persist-credentials: false
 
+      - name: Validate and create smoke directories after probe checkout
+        id: smoke_paths
+        run: |
+          set -euo pipefail
+          cs_workspace_root=$(realpath -e "$GITHUB_WORKSPACE")
+          validate_smoke_directory() {
+            local target="$1" current="$1" resolved
+            case "$target" in
+              "$cs_workspace_root"/*) ;;
+              *) printf '%s\n' 'CS_SMOKE_PATH_OUTSIDE_WORKSPACE' >&2; exit 1 ;;
+            esac
+            while [[ "$current" != "$cs_workspace_root" ]]; do
+              if [[ -L "$current" ]]; then
+                printf '%s\n' 'CS_SMOKE_PATH_SYMLINK' >&2
+                exit 1
+              fi
+              if [[ -e "$current" && ! -d "$current" ]]; then
+                printf '%s\n' 'CS_SMOKE_PATH_NOT_DIRECTORY' >&2
+                exit 1
+              fi
+              current=${current%/*}
+            done
+            if [[ -e "$target" ]]; then
+              resolved=$(realpath -e "$target")
+            else
+              resolved=$(realpath -m "$target")
+            fi
+            case "$resolved" in
+              "$cs_workspace_root"/*) ;;
+              *) printf '%s\n' 'CS_SMOKE_PATH_OUTSIDE_WORKSPACE' >&2; exit 1 ;;
+            esac
+          }
+          validate_smoke_directory "$CS_EVIDENCE_DIR"
+          validate_smoke_directory "$CS_TOOL_ROOT"
+          for cs_directory in "$CS_EVIDENCE_DIR" "$CS_TOOL_ROOT"; do
+            if [[ ! -e "$cs_directory" ]]; then
+              mkdir -- "$cs_directory"
+            fi
+          done
+          validate_smoke_directory "$CS_EVIDENCE_DIR"
+          validate_smoke_directory "$CS_TOOL_ROOT"
+
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22.12.0
@@ -151,7 +193,6 @@ jobs:
           CS_ACTUAL_PROBE_SHA=$(git rev-parse HEAD)
           [ "$CS_ACTUAL_PROBE_SHA" = "$PROBE_SHA" ]
           printf 'CS_ACTUAL_PROBE_SHA=%s\n' "$CS_ACTUAL_PROBE_SHA" >> "$GITHUB_ENV"
-          mkdir -p "$CS_EVIDENCE_DIR"
           printf -v receipt_seconds '%(%s)T' -1
           node scripts/smoke/smoke.mjs init "$CS_EVIDENCE_DIR" "$((receipt_seconds * 1000))" \
             "$RELEASE_KIND" "$RELEASE_SHA" "$RELEASE_UTC" "$SITE_SHA" "$PROBE_SHA" \
@@ -165,7 +206,6 @@ jobs:
         timeout-minutes: 3
         run: |
           set -euo pipefail
-          mkdir -p "$CS_TOOL_ROOT"
           cp scripts/smoke/package.json scripts/smoke/package-lock.json "$CS_TOOL_ROOT/"
           npm ci --prefix "$CS_TOOL_ROOT" --ignore-scripts --no-audit --no-fund
           node "$CS_TOOL_ROOT/node_modules/playwright/cli.js" install --with-deps chromium
@@ -184,7 +224,7 @@ jobs:
 
       - name: Upload only RESULT evidence and optional encrypted recovery
         id: evidence
-        if: always()
+        if: always() && steps.smoke_paths.outcome == 'success'
         timeout-minutes: 1
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -197,7 +237,7 @@ jobs:
           retention-days: 7
 
       - name: Require finalized PASS and an artifact receipt
-        if: always()
+        if: always() && steps.smoke_paths.outcome == 'success'
         env:
           PROBE_OUTCOME: ${{ steps.probe.outcome }}
           ARTIFACT_OUTCOME: ${{ steps.evidence.outcome }}
