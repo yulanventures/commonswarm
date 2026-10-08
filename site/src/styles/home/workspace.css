@@ -123,7 +123,7 @@
    ============================================================================================= */
 
 /* ---- Day dividers: a centred 13 px label on a hairline ---- */
-.hm-day { display: flex; align-items: center; gap: 12px; margin: 10px 24px; padding: 0; list-style: none; color: var(--home-ink-muted); font-size: 13px; line-height: 1.4;
+.hm-day { display: flex; align-items: center; gap: 12px; margin: 10px 24px; padding: 0; list-style: none; color: var(--home-ink-muted); font-size: 13px; line-height: 1.45;
   font-weight: 700; letter-spacing: 0; }
 .hm-day::before, .hm-day::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--home-card-border); }
 .hm-day__label { flex: none; padding: 0; border: 0; background: transparent; }
@@ -132,7 +132,7 @@
 .hm-author { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; font-size: 16px; line-height: 1.45; }
 .hm-author__name { min-width: 0; overflow-wrap: anywhere; font-weight: 700; color: var(--home-ink); }
 .hm-author__you { padding: 0 8px; border: 1px solid var(--home-card-border); border-radius: 999px; font-size: 12px; line-height: 1.5; color: var(--home-ink-muted); }
-.hm-author__when { font-size: 13px; line-height: 1.4; color: var(--home-ink-muted); }
+.hm-author__when { font-size: 13px; line-height: 1.45; color: var(--home-ink-muted); }
 
 /* ---- Cards under a message: soft surface, 14 px radius, at most 440 px ---- */
 /* Space.dc.html: 8 px from the text to the card. The message body's 2 px row gap is part of it. */
@@ -157,6 +157,11 @@
 .hm-frame .dashboard__feed-fix .hm-needs-you { box-sizing: border-box; max-inline-size: 520px; align-items: flex-start; gap: 12px; padding: 16px; border-radius: 16px; }
 .hm-frame .dashboard__feed-fix .hm-needs-copy { flex: 1 1 0; }
 .hm-frame :is(.dashboard__feed-fix, .hm-extras__ask) .hm-needs-you .hm-button { min-block-size: 44px; padding-inline: 21.5px; font-size: 15px; }
+/* Space.dc.html: both actions are `padding: 0 20px`. The outline pill adds its 1.5px edge back (21.5px above); the filled
+   primary has no edge, so it is 20px. Its 44px height and focus ring (primitives.css) are unchanged. */
+.hm-frame :is(.dashboard__feed-fix, .hm-extras__ask) .hm-needs-you .hm-button[data-primary="true"] { padding-inline: 20px; }
+/* Space.dc.html and Phone-Space.dc.html: the question sits 4px under the "Needs one of you" label. */
+.hm-frame :is(.dashboard__feed-fix, .hm-extras__ask) .hm-needs-title { margin-top: 4px; }
 
 /* The stream column is the card surface in both themes (the dashboard's own --surface is the old palette). */
 .hm-frame .dashboard__channel { background: var(--home-card); color: var(--home-ink); }
@@ -366,7 +371,8 @@
 /* ---- Phone (Phone-Space.dc.html): 32 px pictures, 15 px type, a pill field and a round Send ---- */
 @media (width <= 52rem) {
   .hm-side { padding: 16px; }
-  .hm-day { margin: 7px 16px; gap: 10px; font-size: 12px; }
+  /* Phone-Space.dc.html sets the phone's 1.4 line on the day label and the times (the desktop canvas uses 1.45). */
+  .hm-day { margin: 7px 16px; gap: 10px; font-size: 12px; line-height: 1.4; }
   .hm-frame .dashboard__feed-fix { padding: 10px 16px 4px; }
   .hm-frame .dashboard__message { grid-template-columns: 32px minmax(0, 1fr); gap: 10px; padding: 7px 16px; }
   .hm-frame .dashboard__feed > .dashboard__message:last-child { padding-block-end: 2px; }
@@ -383,6 +389,7 @@
   .hm-frame .dashboard__message-handoff { gap: 0 4px; padding: 1px 8px; line-height: 1.4; }
   .hm-frame .dashboard__message-handoff-arrow { inline-size: 11px; block-size: 11px; }
   .hm-frame .hm-author__when, .hm-frame .dashboard__message-meta time { font-size: 12px; }
+  .hm-frame .hm-author__when { line-height: 1.4; }
   .hm-frame .dashboard__message-markdown { font-size: 15px; }
   .hm-frame .hm-needs-you .dashboard__message-markdown { font-size: 16px; }
   .hm-frame :is(.dashboard__feed-fix, .hm-extras__ask) .hm-needs-you { padding: 14px; }

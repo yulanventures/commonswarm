@@ -915,7 +915,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     font-family: var(--home-font-display);
     font-size: 17px;
     font-weight: 700;
-    line-height: 24px;
+    line-height: 1.4; /* the canvas's inherited 1.4 (23.8px) */
     text-decoration: none;
     border-radius: 6px;
   }
@@ -1031,10 +1031,10 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     align-items: center;
     justify-content: center;
     flex: none;
-    /* The canvas paints the 18px initial lower in the 48px circle than a centred line box does here (ink centre 1.5px
-       lower at 2x, critic r9 CPhoneJoin 1). The baseline snaps to whole pixels, so 2px of top padding moves it down 1px
-       (0.5px from the canvas; 3px would overshoot by 0.5px). The circle stays 48px (border-box). */
-    padding-block-start: 2px;
+    /* The initial is centred as on the canvas (no top padding). A real 2x screen paints its ink exactly where the
+       reference does; the screenshot harness's emulated 2x snaps text baselines to whole CSS px and reads it 1px high
+       (round 13; r9's 2px top padding fitted the harness and put the initial 1px low on a real 2x screen). */
+    padding-block-start: 0;
     border-radius: 50%;
     background: var(--home-orange);
     color: var(--home-on-person);
@@ -1344,15 +1344,17 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   }
 
   /* A choice is a tile: 14px corners, 1.5px edge, a ring on the right that fills lime when chosen.
-     The edge is an inset ring, so the inline padding is the canvas 14px plus the 1.5px border:
-     badges, labels and rings sit where the canvas border box puts them. */
+     The edge is an inset ring (a 1.5px border paints 1px in Chromium), so the canvas border box (Phone-Join.dc.html:
+     1.5px border, 14px padding) puts the badge, label and ring at x + 15.5px. A box at a half pixel can be painted
+     at a whole one (emulated 2x does), so the badge and ring boxes sit on whole pixels (15px in) and move the last
+     half pixel at 2x, where it is exactly one device pixel (below); the label is text and keeps 15.5px. */
   .invite-onramp__choice {
     min-block-size: 3.5rem;
     box-sizing: border-box;
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 10px 15.5px;
+    padding: 10px 15px 10px 15.5px;
     color: var(--home-rail-strong);
     background: var(--home-rail-choice);
     border: 0;
@@ -1372,6 +1374,11 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
 
   .invite-onramp__choice:has(input:checked:focus-visible) {
     box-shadow: inset 0 0 0 1.5px var(--home-lime), var(--focus-ring);
+  }
+
+  @media (resolution: 2dppx) {
+    .invite-onramp__choice input { transform: translateX(-0.5px); }
+    .invite-onramp__tile-orb { transform: translateX(0.5px); }
   }
 
   .invite-onramp__choice input,
@@ -1469,10 +1476,14 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     line-height: 1.4;
   }
 
+  /* The badge box starts on a whole pixel (15px in) and keeps the label at the canvas 15.5 + 28 + 12. */
   .invite-onramp__assistant {
     min-block-size: 48px;
     padding-block: 0;
+    padding-inline-start: 15px;
   }
+
+  .invite-onramp__assistant .invite-onramp__tile-orb { margin-inline-end: 0.5px; }
 
   .invite-onramp__assistant strong { font-size: 16px; }
 
@@ -1590,12 +1601,10 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     line-height: 1.4; /* the canvas's inherited 1.4 */
   }
 
-  /* Line-height does not move a glyph in a centred box. The Join <button> paints its 18px label about 1.4px higher in
-     the 56px pill than the canvas (ink centre at 2x, critic r9 CPhoneJoin 2); the baseline snaps to whole pixels, so
-     13px over 11px moves it down 1px (0.4px from the canvas, against 0.6px for 2px). The connect page's link button
-     already sits where Phone-Connect puts it, so it keeps the even padding. */
+  /* The Join <button> keeps even 12px padding: at a native 2x render its 18px label sits where Phone-Join puts it
+     (letter tops y=781, critic r14). The earlier 13/11 nudge corrected the harness's emulated DPR, not the page. */
   .invite-onramp__actions button.invite-onramp__button:not(.invite-onramp__button--quiet) {
-    padding-block: 13px 11px;
+    padding-block: 12px;
   }
 
   /* The way out: a quiet link at the end of the review, under the Join bar and the expiry line. */

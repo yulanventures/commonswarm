@@ -163,6 +163,12 @@
   text-wrap: pretty;
 }
 
+/* Agent.dc.html: the disconnected banner is one description block (one 4px margin under the heading). The sentences
+   after the banner continue it with no margin of their own. */
+.hm-agent__banner ~ .hm-agent__fix-sentence {
+  margin-top: 0;
+}
+
 /* The word stays (the warning does not rely on colour alone) at the banner text's own weight: Agent.dc.html sets the
    description in 16px/400 under the 20px heading, with no second emphasis. */
 .hm-agent__banner .hm-notice-tone {
