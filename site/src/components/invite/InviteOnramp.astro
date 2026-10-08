@@ -1601,12 +1601,10 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     line-height: 1.4; /* the canvas's inherited 1.4 */
   }
 
-  /* Line-height does not move a glyph in a centred box. The Join <button> paints its 18px label about 1.4px higher in
-     the 56px pill than the canvas (ink centre at 2x, critic r9 CPhoneJoin 2); the baseline snaps to whole pixels, so
-     13px over 11px moves it down 1px (0.4px from the canvas, against 0.6px for 2px). The connect page's link button
-     already sits where Phone-Connect puts it, so it keeps the even padding. */
+  /* The Join <button> keeps even 12px padding: at a native 2x render its 18px label sits where Phone-Join puts it
+     (letter tops y=781, critic r14). The earlier 13/11 nudge corrected the harness's emulated DPR, not the page. */
   .invite-onramp__actions button.invite-onramp__button:not(.invite-onramp__button--quiet) {
-    padding-block: 13px 11px;
+    padding-block: 12px;
   }
 
   /* The way out: a quiet link at the end of the review, under the Join bar and the expiry line. */
