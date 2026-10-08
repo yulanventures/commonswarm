@@ -7,6 +7,7 @@ import ts from "typescript";
 const repoRoot = resolve(import.meta.dirname, "../..");
 const launcher = join(repoRoot, "site/tests/chrome.ts");
 const cdpLauncher = join(repoRoot, "tests/p1-local/human-seen-browser.test.ts");
+const smokeLauncher = join(repoRoot, "scripts/smoke/smoke.mjs");
 const sourceRoots = ["src", "tests", "scripts", "site", "deploy", "services"];
 const sourceExtensions = new Set([".js", ".mjs", ".ts", ".tsx", ".sh"]);
 const browserFreeChecks = new Set([
@@ -25,6 +26,72 @@ async function sourceFiles(directory: string): Promise<string[]> {
     return sourceExtensions.has(extname(entry.name)) ? [path] : [];
   }));
   return files.flat();
+}
+
+/** The plain-Node Linux smoke cannot import the TypeScript, test-gated launcher. */
+function smokeLaunchViolations(source: string): string[] {
+  const tree = ts.createSourceFile("smoke.mjs", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const launches: ts.CallExpression[] = [];
+  const nodes: ts.Node[] = [];
+  const visit = (node: ts.Node): void => {
+    nodes.push(node);
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && /^(?:launch|launchPersistentContext)$/u.test(node.expression.name.text)) launches.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  const compact = (node: ts.Node): string => node.getText(tree).replace(/\s+/gu, "").replace(/"/gu, "'");
+  const launch = launches[0];
+  if (launches.length !== 1 || !launch || compact(launch.expression) !== "chromium.launchPersistentContext") {
+    return ["smoke must launch only one bundled Chromium context"];
+  }
+  const violations: string[] = [];
+  if (nodes.some((node) => ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+    && /^(?:execFile|spawn|run)$/u.test(node.expression.text) && node.arguments[0]
+    && /chrome|chromium/iu.test(node.arguments[0].getText(tree)))) {
+    violations.push("smoke must not launch a browser subprocess outside Playwright");
+  }
+  const beforeLaunch = (text: string): boolean => nodes.some((node) => node.end < launch.pos && compact(node) === text);
+  for (const [label, text] of [
+    ["Linux guard", "prerequisite(process.platform==='linux')"],
+    ["Playwright cache prerequisite", "prerequisite(typeofprocess.env.PLAYWRIGHT_BROWSERS_PATH==='string'&&process.env.PLAYWRIGHT_BROWSERS_PATH.length>0)"],
+    ["bundled executable", "executable=fs.realpathSync(chromium.executablePath())"],
+    ["realpath cache containment", "must(executable.startsWith(fs.realpathSync(process.env.PLAYWRIGHT_BROWSERS_PATH)+path.sep))"],
+  ]) {
+    if (!beforeLaunch(text!)) violations.push(`smoke missing ${label}`);
+  }
+  if (launch.arguments.length !== 2 || !launch.arguments[0]
+    || compact(launch.arguments[0]) !== "fs.mkdtempSync(secret('profile-'))") {
+    violations.push("smoke must create a fresh temporary profile");
+  }
+  const options = launch.arguments[1];
+  if (!options || !ts.isObjectLiteralExpression(options)) return [...violations, "smoke launch options must be explicit"];
+  const properties = new Map<string, ts.Expression>();
+  const allowedOptions = new Set(["headless", "executablePath", "args", "acceptDownloads", "viewport", "timeout", "serviceWorkers"]);
+  for (const property of options.properties) {
+    if (!ts.isPropertyAssignment(property) || !ts.isIdentifier(property.name)
+      || !allowedOptions.has(property.name.text) || properties.has(property.name.text)) {
+      violations.push("smoke launch must not select a channel, override its profile, or hide options");
+    } else properties.set(property.name.text, property.initializer);
+  }
+  if (properties.get("headless")?.kind !== ts.SyntaxKind.TrueKeyword) violations.push("smoke must be headless");
+  const executable = properties.get("executablePath");
+  if (!executable || compact(executable) !== "executable") violations.push("smoke executable must be the checked bundled path");
+  const args = properties.get("args");
+  if (!args || !ts.isArrayLiteralExpression(args) || args.elements.length !== 3
+    || !["--password-store=basic", "--use-mock-keychain", "--no-sandbox"]
+      .every((flag) => args.elements.some((arg) => ts.isStringLiteral(arg) && arg.text === flag))) {
+    violations.push("smoke must use only the shared password-store, mock-keychain and sandbox flags");
+  }
+  return violations;
+}
+
+function directLaunchViolations(file: string, source: string): string[] {
+  if (file === smokeLauncher) return smokeLaunchViolations(source);
+  // The CDP test owns a long-lived process, but shares admission, realpath validation and flags.
+  if (file === cdpLauncher && ["requireBrowserTests", "resolveChromePath", "buildChromeArgs"]
+    .every((helper) => new RegExp(`\\b${helper}\\s*\\(`, "u").test(source))) return [];
+  return ["direct launch must use site/tests/chrome.ts"];
 }
 
 /** Module evaluation must only register browser tests, never start their shared fixtures. */
@@ -119,6 +186,38 @@ test("the sweep rejects eager setup but admits lazy setup inside browser callbac
   }
 });
 
+test("the smoke exception admits only its exact path and rejects unsafe launch variants", async (t) => {
+  const source = await readFile(smokeLauncher, "utf8");
+  await t.test("current smoke is the positive control", () => {
+    assert.deepEqual(directLaunchViolations(smokeLauncher, source), []);
+  });
+  const cases = [
+    ["installed Chrome channel", "headless: true,", 'headless: true, channel: "chrome",', "must not select a channel"],
+    ["installed executable", "executablePath: executable", 'executablePath: "/usr/bin/google-chrome"', "checked bundled path"],
+    ["missing Linux guard", "prerequisite(process.platform === 'linux');", "", "Linux guard"],
+    ["reused profile", "fs.mkdtempSync(secret('profile-'))", '"/home/user/.config/google-chrome"', "fresh temporary profile"],
+    ["headed browser", "headless: true", "headless: false", "must be headless"],
+    ["missing cache prerequisite", "prerequisite(typeof process.env.PLAYWRIGHT_BROWSERS_PATH === 'string' && process.env.PLAYWRIGHT_BROWSERS_PATH.length > 0);", "", "cache prerequisite"],
+    ["missing realpath containment", "must(executable.startsWith(fs.realpathSync(process.env.PLAYWRIGHT_BROWSERS_PATH) + path.sep));", "", "realpath cache containment"],
+    ["installed path derivation", "fs.realpathSync(chromium.executablePath())", "fs.realpathSync('/usr/bin/google-chrome')", "bundled executable"],
+    ["missing mock keychain", "'--use-mock-keychain', ", "", "shared password-store"],
+    ["hidden launch options", "headless: true,", "...overrides, headless: true,", "hide options"],
+    ["additional launch", "liveContext = context;", "await chromium.launch({ channel: 'chrome' }); liveContext = context;", "only one bundled Chromium context"],
+    ["installed browser subprocess", "liveContext = context;", "spawn('/usr/bin/google-chrome', []); liveContext = context;", "browser subprocess outside Playwright"],
+  ] as const;
+  for (const [name, from, to, reason] of cases) {
+    await t.test(name, () => {
+      const variant = source.replace(from, to);
+      assert.notEqual(variant, source, "negative control must change the real smoke source");
+      assert.ok(directLaunchViolations(smokeLauncher, variant).some((violation) => violation.includes(reason)), reason);
+    });
+  }
+  await t.test("another file cannot use the smoke exception", () => {
+    assert.deepEqual(directLaunchViolations(join(repoRoot, "scripts/smoke/other.mjs"), source),
+      ["direct launch must use site/tests/chrome.ts"]);
+  });
+});
+
 test("repository browser launches use the shared safety helpers and gated test registration", async () => {
   const sources = new Map(await Promise.all(
     (await Promise.all(sourceRoots.map((root) => sourceFiles(join(repoRoot, root))))).flat()
@@ -133,11 +232,8 @@ test("repository browser launches use the shared safety helpers and gated test r
     const launchesBrowserLibrary = /\b(?:chromium|puppeteer|browserType)\s*\.\s*launch(?:PersistentContext)?\s*\(/u.test(source);
     if (hasHeadlessFlag || launchesChrome || launchesBrowserLibrary) {
       browserFiles.add(file);
-      // The CDP test owns a long-lived process, but shares admission, realpath validation and flags.
-      if (file !== cdpLauncher || !["requireBrowserTests", "resolveChromePath", "buildChromeArgs"]
-        .every((helper) => new RegExp(`\\b${helper}\\s*\\(`, "u").test(source))) {
-        violations.push(`${relative(repoRoot, file)}: direct launch must use site/tests/chrome.ts`);
-      }
+      violations.push(...directLaunchViolations(file, source)
+        .map((violation) => `${relative(repoRoot, file)}: ${violation}`));
     }
     if (/\b(?:findChrome|launchChrome)\b/u.test(source)) browserFiles.add(file);
   }
