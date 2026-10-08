@@ -972,7 +972,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       the sign-in block for a removal or role change (moved under the page header while the page shows),
       the spoken receipt, and the confirmation, which is still a native modal alertdialog. */}
   <section class="pd-detail" id="pd-detail" aria-labelledby="pd-detail-title" data-people-detail hidden></section>
-  <section class="dashboard__roster-dialog-members" data-member-details>
+  <section class="dashboard__roster-dialog-members" data-member-details hidden>
     <p class="dashboard__form-error" data-member-error role="alert" hidden></p>
     <div data-member-reauth hidden>
       <ProviderButtons buttonClass="dashboard__rail-add" />
@@ -4263,6 +4263,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const renderHomeObjectPane = (): void => {
       if (homeRoute.view !== "todo" && homeRoute.view !== "todos" && homeRoute.view !== "agent") return;
       const slot = one<HTMLElement>("[data-home-route-pane]"); if (!slot) return;
+      parkPeopleHosts();
       const workspace = workspaces.find(row => row.id === activeWorkspaceId); if (!workspace) return;
       slot.hidden = false;
       const ctx = homeTodoContext();
@@ -4541,6 +4542,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const homePaneMessage = (heading: string, detail: string, homeLink?: { label: string; href: string }): void => {
       const slot = one<HTMLElement>("[data-home-route-pane]");
       if (!slot) return;
+      parkPeopleHosts();
       const title = document.createElement("h1"); title.tabIndex = -1; title.textContent = heading;
       const text = document.createElement("p"); text.textContent = detail;
       const workspace = workspaces.find(workspace => workspace.id === activeWorkspaceId);
@@ -4787,16 +4789,48 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     /* THE PAGE (route `?v=people`). It renders into the route pane, and only while that route is
        current: every other route owns the pane. The doors, the filter, Add an agent and Invite
        someone are the page's own (people-dialog-view.ts, layout "page"). */
-    const parkPeopleHosts = (): void => {
+    /* The page borrows two persistent hosts: the sign-in block (moved under the page header) and the
+       detail column (moved into the page's side column). Both live in the route pane only while the
+       page shows, so every path that replaces or clears that pane parks them first (leaving the page,
+       an agent, to-do or To-dos render, a pane message, the session reset). Missed once, the next visit
+       found no detail host and the page stayed blank until a reload (code review, release 7). */
+    /* Hidden while parked, like the detail column: a refused removal's error and sign-in controls must not show
+       under another route. mountMemberDetails() shows it again under the page header. */
+    const parkMemberDetails = (): void => {
       const members = one<HTMLElement>("[data-member-details]");
-      if (members && members.parentElement !== document.querySelector("live-dashboard")) document.querySelector("live-dashboard")?.append(members);
+      if (members && members.parentElement !== app) { members.hidden = true; app.append(members); }
+    };
+    const mountMemberDetails = (list: HTMLElement): void => {
+      const members = one<HTMLElement>("[data-member-details]"); const head = list.querySelector(".pd-page-head");
+      if (!members || !head) return;
+      head.append(members); members.hidden = false;
+    };
+    const parkPeopleHosts = (): void => {
+      parkMemberDetails();
+      const detail = one<HTMLElement>("[data-people-detail]");
+      // Hidden while parked: a selection's open details must not show at the foot of another route.
+      if (detail && detail.parentElement !== app) { detail.hidden = true; app.append(detail); }
+    };
+    /** The detail host, or a new empty one when a render lost it: the page never stays blank. */
+    const peopleDetailHost = (): HTMLElement => {
+      const found = one<HTMLElement>("[data-people-detail]"); if (found) return found;
+      const detail = document.createElement("section"); detail.className = "pd-detail"; detail.id = "pd-detail";
+      detail.setAttribute("aria-labelledby", "pd-detail-title"); detail.dataset.peopleDetail = ""; detail.hidden = true;
+      app.append(detail); return detail;
     };
     const renderDialogRoster = (): void => {
-      const list = one<HTMLElement>("[data-home-route-pane]"); const detail = one<HTMLElement>("[data-people-detail]");
+      const list = one<HTMLElement>("[data-home-route-pane]");
       const workspace = workspaces.find((row) => row.id === activeWorkspaceId);
-      if (!list || !detail || !workspace || homeRoute.view !== "people") return;
+      if (!list || !workspace || homeRoute.view !== "people") return;
+      const detail = peopleDetailHost();
       const model = peopleDialogModel(); peopleDialogState.query = rosterFilter;
-      parkPeopleHosts();
+      /* The render replaces the page, and the sign-in block sits in its header: moving it drops the focus of a
+         control inside it (the sign-in button after a refusal). Note that control, and put focus back after the
+         block is mounted again. The detail column is not moved here, so the render can read focus held in it. */
+      const signIn = one<HTMLElement>("[data-member-details]"); const active = document.activeElement;
+      const held = signIn && active instanceof HTMLElement && signIn.contains(active) ? active : null;
+      const range = held instanceof HTMLInputElement || held instanceof HTMLTextAreaElement ? [held.selectionStart, held.selectionEnd] as const : null;
+      parkMemberDetails();
       list.hidden = false;
       renderPeopleDialog(list, detail, model, peopleDialogState, { render: renderDialogRoster, action: async (action, id, button, notice) => {
         if (button.disabled) return; button.disabled = true;
@@ -4863,8 +4897,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           onQuery: (value) => { rosterFilter = value; peopleDialogState.collapsed.clear(); renderDialogRoster(); },
         } });
       // A removal or role change that needs a fresh sign-in shows its block under the page header.
-      const memberDetails = one<HTMLElement>("[data-member-details]");
-      if (memberDetails) list.querySelector(".pd-page-head")?.append(memberDetails);
+      mountMemberDetails(list);
+      if (held?.isConnected && document.activeElement !== held) {
+        held.focus({ preventScroll: true });
+        if (range && range[0] !== null && range[1] !== null) try { (held as HTMLInputElement).setSelectionRange(range[0], range[1]); } catch { /* not a text field */ }
+      }
       syncPeopleDialogLayout();
     };
     const reloadPeopleDialog = async (workspaceId: string, principalId: string, receipt: string, action?: PeopleDialogAction): Promise<void> => {
@@ -4961,7 +4998,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     /** Leaving the page: the confirmation closes and every draft that belonged to it is dropped. */
     const closeRosterDialog = (): void => {
       const confirm = one<HTMLDialogElement>("[data-people-confirm]"); if (confirm?.open) confirm.close();
-      parkPeopleHosts();
+      // An in-page action reopens the workspace with the page still current: both hosts stay put, and the
+      // page's next render (renderDialogRoster) moves and remounts them, keeping focus. Any other route parks them.
+      if (homeRoute.view !== "people") parkPeopleHosts();
       peopleDialogFocus = undefined; peopleDialogState.rolePending?.clear(); peopleDialogState.roleDraft = null; peopleDialogState.roleReceipt = null; peopleDialogState.roleRefusal = null;
     };
 
@@ -6520,6 +6559,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       homeRailKey = "";
       homeCatchUpKey = "";
       homeOverviewCounts.clear();
+      // The People page's hosts may sit in the route pane: park them before it is cleared.
+      parkPeopleHosts();
       for (const slot of all<HTMLElement>("[data-home-catchup], [data-home-route-pane], [data-home-workspace-shell], [data-home-phone-nav], [data-home-rail-slot]")) slot.replaceChildren();
       stopFeedPush();
       stopAgentActivity();

@@ -2,6 +2,8 @@
 
 Adopted 2026-07-29. How work is split across model families on this repo, and why.
 
+Model rule updated 2026-10-07: see section 2.
+
 The load-bearing rule is §2. If only one thing here survives, it should be that one.
 
 ---
@@ -24,10 +26,10 @@ renewal was unavailable while it was working (D-002). Neither is visible in sour
 ## 2. Model-inversion review — the control that pays for everything
 
 **A reviewer of a change must be a different model family than its author. Self-family
-review does not count as review** — a codex subagent reviewing codex work satisfies nothing,
-whatever the prompt, session or persona. That is the necessary baseline, not the current
-passing gate. Under D-033 the operative gate requires **both Grok and AGY/Gemini**; one
-different-family verdict is not sufficient.
+review does not count as review.** A codex subagent reviewing codex work satisfies nothing,
+whatever the prompt, session or persona. That is the necessary baseline. Under the Operator
+ruling, 2026-10-07 (Tom), the operative gate is **one allowed-model verdict from the other family
+(Claude for Codex work, Codex for Claude work), bound to the exact SHA, plus green CI.**
 
 Corollaries that have each already cost something here:
 
@@ -42,35 +44,42 @@ Corollaries that have each already cost something here:
 
 ### What is actually available on this machine
 
-Measured, not assumed (`alloy doctor`, and `command -v`):
+Measured, not assumed (`command -v`):
 
 | Family | CLI | Role here |
 |---|---|---|
-| Claude | `claude` | Not a required reviewer under D-033. Headless/shared-account review is spend-limited; the interactive Quarry seat remains live. |
-| OpenAI | `codex` | **Operator/author**, not a substitute for either required review arm. |
-| xAI | `grok` | Required adversarial reviewer for every swarm mate's change. |
-| Google | `agy` → Gemini | Required adversarial reviewer for every swarm mate's change. |
+| Claude | `claude` | **Maker or checker.** Allowed models: Claude Sonnet 5.5 (floor), Claude Opus 5.5, Fable 5.1. |
+| OpenAI | `codex` | **Maker or checker.** Allowed models: gpt-6.1-sol (floor), gpt-6-astra. |
+| xAI | `grok` | Optional non-code strategy panelist only; never maker or checker; not a reviewer. |
+| Google | `agy` (Gemini) | Optional non-code strategy panelist only; never maker or checker; not a reviewer. |
 
-**Operator ruling, 2026-07-29:** every swarm mate must obtain exact-SHA verdicts from
-**both Grok and AGY/Gemini instead of Claude**. A different-family verdict remains
-necessary but is **not sufficient**: Grok alone, Gemini alone, and Codex review do not
-pass this gate; an optional Claude read does not replace either arm. Each arm must return
-substantive findings or reasoning — an empty PASS is not a review. A changed SHA voids
-both verdicts and requires both reviews to rerun.
+**Operator ruling, 2026-10-07 (Tom).** It supersedes the 2026-07-29 ruling and the D-033
+requirement for verdicts from both Grok and AGY/Gemini.
 
-~~Google | `gemini` | Not installed. Do not plan work that assumes it.~~ **Dead as of
-2026-07-29:** `/Users/yulanbot/.local/bin/agy` is installed, supports non-interactive
-`--print`, and enumerates Google Gemini models including `gemini-3.1-pro-high`.
+1. **No Alloy.** Alloy is not used for making, checking or routing work: no `/alloy` panels,
+   no `alloy execute`, and `alloy doctor` is not the source of truth for reviewer availability.
+2. **Every maker (author) and checker (reviewer) uses an allowed model or a stronger one.**
+   The floor is Claude Sonnet 5.5 or Codex gpt-6.1-sol. Claude Opus 5.5, Fable 5.1 and Codex
+   gpt-6-astra are also allowed.
+3. **Never maker or checker:** Cursor composer, cursor-grok, Grok, Gemini Flash, Haiku.
+4. **The check stays cross-family.** Claude makes and Codex checks, or Codex makes and Claude
+   checks. Same-family review still does not count as review.
+5. **Lower-model work is re-reviewed.** Open work made or checked only by a model below the
+   floor (including the excluded models above) is re-reviewed by an allowed cross-family
+   checker before it merges. Lanes running on a lower model finish their current step or stop,
+   then continue on an allowed model.
+6. **CI decides.** A passing allowed-model cross-family verdict bound to the exact SHA is
+   necessary, and the PR's CI must also be green before merge. A review verdict does not
+   override red CI.
+7. **Grok and Gemini are optional strategy panelists only.** They may stay as extra, non-code
+   strategy panelists. They are never a required reviewer, never a maker or checker of code or
+   docs that merge, and their opinion never substitutes for the Claude/Codex cross-family check.
 
-`opencode`, `cursor-agent` and `antigravity` remain excluded from this review path. `agy`
-is the measured Google-family path; do not substitute an unmeasured CLI or enable
-`ALLOY_ALLOW_UNSANDBOXED`.
+`opencode`, `cursor-agent`, Cursor composer, cursor-grok and `antigravity` remain excluded from
+the review path and are never maker or checker. Alloy is not used.
 
-~~The local swarm's `members` output says *"cross-family review is NOT available in this
-swarm"*, and all swarm seats are Claude or UNKNOWN.~~ **Dead:** the current roster includes
-OpenAI, Claude, and UNKNOWN seats, while reviewer CLIs are a separate machine capability.
-`command -v` plus substantive probe output established `grok` and `agy`; roster family labels
-do not establish or negate those CLI paths.
+**Superseded 2026-10-07:** earlier notes here measured `agy` and `grok` as review CLIs. They
+are not reviewers; see the operator ruling above.
 
 ---
 
@@ -89,8 +98,9 @@ review-ready branches, reports with exact SHAs and verbatim gate output. **Never
 promotes, never touches production, never applies schema changes.**
 
 **Executors** — many, disposable. Scoped mechanical work from self-contained briefs. One
-worktree per task, one branch per task, gates inside the task, mutation proof attached. Cheap
-models take mechanical work; max-effort models take anything with judgement in it.
+worktree per task, one branch per task, gates inside the task, mutation proof attached.
+Executors that make or check commits use an allowed model (section 2); nothing below the floor
+makes or checks code. Max-effort models take anything with judgement in it.
 
 ---
 
@@ -159,9 +169,10 @@ once and the shared checkout is frequently not on `main` — see `AGENTS.md`.
 
 1. Advisor maintains `DEFECT-REGISTER.md` on `main` as the single source of truth.
 2. Advisor writes a charter per wave; operator executes; executors fan out.
-3. Every branch gets a cross-family review bound to its exact SHA. REQUEST CHANGES verdicts
-   come back as prescriptions; the advisor turns them into the next charter, quoted verbatim —
-   paraphrase loses the constraint that mattered.
+3. Every branch gets a cross-family review from an allowed model, bound to its exact SHA, and
+   its CI must be green before merge. REQUEST CHANGES verdicts come back as prescriptions; the
+   advisor turns them into the next charter, quoted verbatim, because paraphrase loses the
+   constraint that mattered.
 4. Advisor merges **only at approved heads with executed, non-zero-duration gates**, promotes
    at milestones, and verifies each promotion independently.
 5. Expect 2–3 review rounds on anything hard. A deeper defect surfacing in round 2 is the

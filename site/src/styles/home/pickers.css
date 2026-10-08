@@ -2,8 +2,8 @@
    "Todo" (ref/Todo.dc.html). --home-* tokens only; they switch in dark mode.
    The assign picker is the canvas's row of chips, grouped in card-coloured capsules. The tag picker
    is the canvas's floating card: a soft heading band, 50 px rows with a hairline between
-   them, the active row in lime, as on the canvas (aria-selected for assistive tech; the lime fill
-   against card rows is the visible cue). Contrast, from the audited token notes in tokens.css: --home-lime-ink on
+   them, the active row in lime, as on the canvas (aria-selected for assistive tech). The lime fill is a weak
+   cue on the card (1.26:1), so the active row also carries a 3px ink bar on its start edge, which forced colours keep. Contrast, from the audited token notes in tokens.css: --home-lime-ink on
    --home-lime 12.65; --home-ink-muted on --home-soft 6.21; --home-offline-text on --home-card 6.66. */
 
 .hm-picker { position: relative; display: grid; justify-items: start; min-inline-size: 0; }
@@ -71,7 +71,13 @@
   box-sizing: border-box; border-block-start: 1px solid var(--home-hairline);
 }
 .hm-pick-option:hover { background: var(--home-soft); }
-.hm-pick-option[aria-selected="true"] { background: var(--home-lime); color: var(--home-lime-ink); }
+/* The active row (aria-selected, the one Enter inserts) also carries a shape: a 3px ink bar on its start edge.
+   The lime fill alone is 1.26:1 on the card, and forced colours remove fills. The padding gives the bar's
+   width back so the row's text does not move. Code review, release 7. */
+.hm-pick-option[aria-selected="true"] {
+  border-inline-start: 3px solid var(--home-lime-ink); padding-inline-start: 13px;
+  background: var(--home-lime); color: var(--home-lime-ink);
+}
 .hm-pick-option[aria-selected="true"] .hm-owner-badge { box-shadow: 0 0 0 2px var(--home-lime); }
 .hm-pick-option[aria-disabled="true"] { cursor: not-allowed; opacity: 0.6; }
 .hm-pick-copy { display: grid; gap: 0; min-inline-size: 0; }
@@ -79,6 +85,12 @@
 .hm-pick-caption { color: var(--home-ink-muted); font-size: 13px; overflow-wrap: anywhere; }
 .hm-pick-option[aria-selected="true"] .hm-pick-caption { color: var(--home-lime-ink); }
 .hm-pick-option[data-pick-state="disconnected"]:not([aria-selected="true"]) .hm-pick-caption { color: var(--home-offline-text); }
+/* Forced colours for the active row. It comes AFTER every row and caption rule above: at equal specificity the
+   later declaration wins, and the lime-ink caption rule would otherwise sit on the Highlight fill. */
+@media (forced-colors: active) {
+  .hm-pick-option[aria-selected="true"] { border-inline-start-color: Highlight; background: Highlight; color: HighlightText; }
+  .hm-pick-option[aria-selected="true"] .hm-pick-caption { color: HighlightText; }
+}
 /* Tag card rows: the name grows, the caption sits at the right on one line when it fits. */
 .hm-tag-picker .hm-pick-copy { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0 12px; }
 .hm-tag-picker .hm-pick-label { flex: 1 1 auto; }
