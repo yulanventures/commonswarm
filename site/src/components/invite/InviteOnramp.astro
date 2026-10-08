@@ -1438,8 +1438,9 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   }
 
   .invite-onramp__consent input:checked:focus-visible {
-    box-shadow: inset 0 0 0 1.5px var(--home-focus), var(--home-focus-ring); background: var(--home-blue-item);
-}
+    box-shadow: inset 0 0 0 1.5px var(--home-focus), var(--home-focus-ring);
+    background: var(--home-blue-item);
+  }
 
   @media (forced-colors: active) {
     .invite-onramp__choice input,
@@ -1447,8 +1448,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       appearance: auto;
     }
 
-    .invite-onramp__consent input::before { content: none; border-inline-end: 2px solid var(--home-ink); border-block-end: 2px solid var(--home-ink);
-}
+    .invite-onramp__consent input::before { content: none; }
   }
 
   .invite-onramp__choice > span:not(.invite-onramp__tile-orb) {

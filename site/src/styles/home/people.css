@@ -393,7 +393,9 @@ dialog.dashboard__roster-dialog .pd-detail-identity .pd-orb { inline-size: 52px;
   box-shadow: none;
 }
 .dashboard__roster-dialog .pd-confirm-actions .dashboard__button--primary { background: var(--home-accent); color: var(--home-accent-ink); box-shadow: inset 0 0 0 1.5px var(--home-focus); }
-.dashboard__roster-dialog .pd-confirm-actions .pd-danger-fill { border-color: var(--home-accent); background: var(--home-accent); color: var(--home-accent-ink); box-shadow: inset 0 0 0 1.5px var(--home-focus); }
+.dashboard__roster-dialog .pd-confirm-actions .pd-danger-fill { border-color: var(--home-danger); background: var(--home-danger); color: var(--home-danger-ink); box-shadow: inset 0 0 0 1.5px var(--home-danger); }
+.dashboard__roster-dialog .pd-confirm-actions .pd-danger-fill:hover { border-color: var(--home-danger-hover); background: var(--home-danger-hover); color: var(--home-danger-ink); box-shadow: inset 0 0 0 1.5px var(--home-danger-hover); }
+.dashboard__roster-dialog .pd-confirm-actions .pd-danger-fill:focus-visible { box-shadow: var(--home-focus-ring); }
 /* Confirmations outside the roster dialog (the page's role question, and [data-people-confirm] once it sits outside the
    roster dialog): the same canvas look as the dialog's confirmations above. */
 dialog.pd-confirm:not(.dashboard__roster-dialog *) {
@@ -414,7 +416,9 @@ dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-confirm-actions .dashboar
   box-shadow: none;
 }
 dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-confirm-actions .dashboard__button--primary { background: var(--home-accent); color: var(--home-accent-ink); box-shadow: inset 0 0 0 1.5px var(--home-focus); }
-dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-confirm-actions .pd-danger-fill { border-color: var(--home-accent); background: var(--home-accent); color: var(--home-accent-ink); box-shadow: inset 0 0 0 1.5px var(--home-focus); }
+dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-confirm-actions .pd-danger-fill { border-color: var(--home-danger); background: var(--home-danger); color: var(--home-danger-ink); box-shadow: inset 0 0 0 1.5px var(--home-danger); }
+dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-confirm-actions .pd-danger-fill:hover { border-color: var(--home-danger-hover); background: var(--home-danger-hover); color: var(--home-danger-ink); box-shadow: inset 0 0 0 1.5px var(--home-danger-hover); }
+dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-confirm-actions .pd-danger-fill:focus-visible { box-shadow: var(--home-focus-ring); }
 dialog.pd-confirm:not(.dashboard__roster-dialog *) :is(button, a):focus-visible { outline: none; box-shadow: var(--home-focus-ring); }
 /* The self-change question is a nested alertdialog; the dialog's own .pd-confirm rules size and place it. */
 .hm-role-question { margin: 0; font-size: var(--t-lg); line-height: 1.4; overflow-wrap: anywhere; }
@@ -734,3 +738,7 @@ section.pd-page[data-people-page] .pd-member-card:has(> .pd-person-head .pd-init
 dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-confirm-actions :is(.dashboard__button--primary):hover { background: var(--home-accent-hover); color: var(--home-accent-ink); }
 
 section.pd-page[data-people-page] .pd-guidance .pd-text-button:hover { background: var(--home-accent-hover); color: var(--home-accent-ink); }
+
+/* Row removal and cancelling an invitation/key use the same danger family as their confirms. */
+.dashboard__roster-dialog :is(.pd-agent-actions, .pd-invite) .pd-text-button:is([data-pd-focus^="row-remove-agent-"], [data-pending-id]),
+section.pd-page[data-people-page] :is(.pd-agent-actions, .pd-invite) .pd-text-button:is([data-pd-focus^="row-remove-agent-"], [data-pending-id]) { color: var(--home-danger); }

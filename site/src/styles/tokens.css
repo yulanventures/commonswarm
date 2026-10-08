@@ -631,7 +631,9 @@
   --home-offline-tint: #f8ede3; /* Light: --home-offline-deep 6.70:1, --home-ink 12.70:1, --home-ink-muted 5.24:1 */
   --home-offline-deep: #78471f;
   --home-offline-text: #8c541a;
-  --home-danger: #b43b2a;
+  --home-danger: #b43b2a; /* Destructive fill: --home-danger-ink 5.83:1; edge vs --home-card 5.44:1. */
+  --home-danger-ink: #ffffff;
+  --home-danger-hover: #9e3425; /* Destructive hover: --home-danger-ink 7.07:1; edge vs --home-card 6.58:1. */
   --home-focus: #2471a8; /* Focus edge vs card: Light: --home-card 4.89:1, --home-soft 4.63:1, --home-rail-bg 4.49:1, --home-attention 4.55:1 */
   --home-color-scheme: light;
   --home-popover-shadow: 0 6px 18px rgba(30, 42, 51, 0.12); /* Floating popover only; neutral ink shadow. */
@@ -715,7 +717,9 @@
   --d-home-offline-tint: #3b3028; /* Dark: --home-offline-deep 9.15:1, --home-ink 11.29:1, --home-ink-muted 6.94:1 */
   --d-home-offline-deep: #f1d5bd;
   --d-home-offline-text: #e6b271;
-  --d-home-danger: #ffada0;
+  --d-home-danger: #ffada0; /* Destructive fill: --home-danger-ink 9.44:1; edge vs --home-card 8.27:1. */
+  --d-home-danger-ink: #1b1d20;
+  --d-home-danger-hover: #ffb7ab; /* Destructive hover: --home-danger-ink 10.15:1; edge vs --home-card 8.89:1. */
   --d-home-focus: #91c5eb; /* Focus edge vs card: Dark: --home-card 8.03:1, --home-soft 6.39:1, --home-rail-bg 7.51:1, --home-attention 6.95:1 */
   --d-home-color-scheme: dark;
   --d-home-popover-shadow: 0 6px 18px rgba(0, 0, 0, 0.32); /* Floating popover only; neutral ink shadow. */
@@ -860,6 +864,8 @@
     --home-offline-deep: var(--d-home-offline-deep);
     --home-offline-text: var(--d-home-offline-text);
     --home-danger: var(--d-home-danger);
+    --home-danger-ink: var(--d-home-danger-ink);
+    --home-danger-hover: var(--d-home-danger-hover);
     --home-focus: var(--d-home-focus);
     --home-color-scheme: var(--d-home-color-scheme);
     --home-popover-shadow: var(--d-home-popover-shadow);
@@ -995,6 +1001,8 @@
   --home-offline-deep: var(--d-home-offline-deep);
   --home-offline-text: var(--d-home-offline-text);
   --home-danger: var(--d-home-danger);
+  --home-danger-ink: var(--d-home-danger-ink);
+  --home-danger-hover: var(--d-home-danger-hover);
   --home-focus: var(--d-home-focus);
   --home-color-scheme: var(--d-home-color-scheme);
   --home-popover-shadow: var(--d-home-popover-shadow);
