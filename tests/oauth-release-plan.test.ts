@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -29,6 +29,20 @@ const helpers = /cat >>"\$PROOF_DIR\/session.sh" <<'SH'\n([\s\S]*?)^SH$/m.exec(b
 // No HOME changes and no recursive deletion. Retain small nonsecret fixtures in
 // this test-owned temporary root; their paths appear only in failure diagnostics.
 const scratch = mkdtempSync(join(tmpdir(), 'oauth-release-contract-'));
+// Read exact reviewed release sources from local Git objects; no network.
+function releaseSource(path: string) {
+  const result = spawnSync('git', ['show', `2ab464ae:${path}`], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout;
+}
+const releaseConfig = releaseSource('services/mcp-auth/src/config.js');
+const releaseCatalog = releaseSource('services/mcp-auth/src/auth-provider-catalog.js');
+const providerKeyNames = ['MCP_OAUTH_GOTRUE_PROVIDER', 'MCP_OAUTH_GOTRUE_PROVIDERS'];
+function releaseTree(f: { fresh: string }) {
+  const dir = join(f.fresh, 'services', 'mcp-auth', 'src'); mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'config.js'), releaseConfig);
+  writeFileSync(join(dir, 'auth-provider-catalog.js'), releaseCatalog);
+}
 const clock = '2031-02-03T12:00:00Z';
 const fixture = () => ({
   release_sha: 'a'.repeat(40), archive_sha256: 'b'.repeat(64), window_id: 'Abc123',
@@ -238,7 +252,7 @@ test('run-order table names only complete steps and covers every block', () => {
 // chooses routes/CA, checks response contents and writes its own receipts.
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
-function lifecycle(options: { failure?: string; failedTree?: 'directory' | 'symlink'; attempt?: boolean; snapshots?: boolean } = {}) {
+function lifecycle(options: { failure?: string; failedTree?: 'directory' | 'symlink'; attempt?: boolean; snapshots?: boolean; providers?: unknown; service?: string; enabled?: Record<string, unknown> } = {}) {
   const root = mkdtempSync(join(scratch, 'lifecycle-'));
   const proof = join(root, 'proof'), stage = join(root, 'stage'), env = join(root, 'env');
   const old = join(root, 'releases', fixture().baseline_oauth_sha);
@@ -247,8 +261,9 @@ function lifecycle(options: { failure?: string; failedTree?: 'directory' | 'syml
   if (options.failedTree === 'directory') mkdirSync(fresh);
   if (options.failedTree === 'symlink') symlinkSync(join(root, 'absent'), fresh);
   const compose = `MCP_OAUTH_IMAGE=${fixture().baseline_oauth_image}\n`;
-  const service = 'FIXTURE_PUBLIC_SETTING=unchanged\n';
-  const input = { ...fixture(), compose_env_sha256: digest(compose), service_env_sha256: digest(service) };
+  const service = options.service ?? 'FIXTURE_PUBLIC_SETTING=unchanged\n';
+  const input = { ...fixture(), compose_env_sha256: digest(compose), service_env_sha256: digest(service),
+    ...('providers' in options ? { service_env_provider_list: options.providers } : {}) };
   writeFileSync(join(proof, 'inputs.json'), JSON.stringify(input));
   writeFileSync(join(proof, 'opened.txt'), clock + '\n');
   writeFileSync(join(proof, 'port.txt'), '3490\n');
@@ -257,8 +272,8 @@ function lifecycle(options: { failure?: string; failedTree?: 'directory' | 'syml
   writeFileSync(join(proof, 'probe-failure.txt'), options.failure ?? '');
   for (const dir of [env, stage]) {
     if (dir === stage && options.snapshots === false) continue;
-    writeFileSync(join(dir, 'compose.env'), compose);
-    writeFileSync(join(dir, 'service.env'), service);
+    writeFileSync(join(dir, 'compose.env'), compose, { mode: 0o600 });
+    writeFileSync(join(dir, 'service.env'), service, { mode: 0o600 });
   }
   for (const dir of [old, fresh]) {
     // An absent candidate must stay absent for recovered close. Only apply
@@ -329,10 +344,24 @@ docker() {
  else printf 'unexpected Docker call\\n' >>"$PROOF_DIR/calls.txt"; return 92; fi
 }
 `;
-  writeFileSync(join(proof, 'session.sh'), session);
+  writeFileSync(join(proof, 'session.sh'), session.replaceAll('/etc/commonswarm-oauth/', env + '/'));
+  const bin = join(root, 'bin'); mkdirSync(bin);
+  // Supply only the public GoTrue transport response; the extracted helper
+  // validates the route, selected providers, bytes, metadata and receipts.
+  writeFileSync(join(bin, 'curl'), `#!/usr/bin/env python3
+import json,pathlib,sys
+a=sys.argv[1:]
+assert a[-1]=='https://api.commonswarm.com/auth/v1/settings'
+assert a[a.index('--resolve')+1]=='api.commonswarm.com:443:127.0.0.1'
+assert a[a.index('--cacert')+1]==${JSON.stringify(join(proof, 'caddy-ca.pem'))}
+assert a[a.index('--noproxy')+1]=='*' and '-k' not in a
+assert not any('authorization:' in x.lower() for x in a)
+pathlib.Path(${JSON.stringify(join(proof, 'settings-requested.txt'))}).write_text('settings measured\\n')
+pathlib.Path(a[a.index('--output')+1]).write_text(json.dumps({'external':json.loads(${JSON.stringify(JSON.stringify(options.enabled ?? { google: true, github: true }))})}))
+`, { mode: 0o700 });
   const run = (source: string, vars: Record<string, string> = {}) => spawnSync('/bin/bash', [], {
     input: Object.entries({ PROOF_DIR: proof, ...vars }).map(([k, v]) => `${k}=${quote(v)}\n`).join('') + source.replaceAll('/etc/commonswarm-oauth/', env + '/'),
-    encoding: 'utf8', timeout: 10_000,
+    encoding: 'utf8', timeout: 10_000, env: { ...process.env, PATH: bin + ':' + process.env.PATH },
   });
   return { root, proof, stage, env, old, fresh, run };
 }
@@ -596,4 +625,307 @@ test('every Mac-side ssh that does not feed a heredoc uses -n, so a pipe-fed ope
   const plan = readFileSync(new URL('../deploy/mcp-auth/OAUTH-RELEASE.md', import.meta.url), 'utf8');
   const offenders = plan.split('\n').filter((line) => /\bssh\s/.test(line) && !/<<'?[A-Z]+'?\s*$/.test(line) && !/\bssh\s+-n\b/.test(line) && !/^\s*#/.test(line) && !/`ssh/.test(line));
   assert.deepEqual(offenders, []);
+});
+
+// New owner-boundary cases protect exact env bytes and restart ordering. An
+// unconditional edit, permissive list/provider check, drift overwrite, or late
+// rollback restore fails here; the original lifecycle tests have no env edits.
+// Only transport and host operations are replaced, with no production seam.
+function executableApply(f: Lifecycle) {
+  releaseTree(f);
+  mkdirSync(join(f.fresh, 'deploy', 'mcp-auth'), { recursive: true });
+  for (const file of ['compose.yaml', 'compose.management.yaml']) {
+    writeFileSync(join(f.fresh, 'deploy', 'mcp-auth', file), 'services: {}\n');
+  }
+  writeFileSync(join(f.proof, 'session.sh'), readFileSync(join(f.proof, 'session.sh'), 'utf8') + `
+# Observe the exact live bytes at the real restart boundary.
+oauth_compose() {
+ python3 - "$PROOF_DIR" ${quote(join(f.env, 'service.env'))} "$1" <<'PY'
+import hashlib,json,pathlib,sys
+p=pathlib.Path(sys.argv[1]); raw=pathlib.Path(sys.argv[2]).read_bytes()
+r={'tree':sys.argv[3],'service_sha256':hashlib.sha256(raw).hexdigest(),
+   'step_complete':(p/'service-env-step.json').is_file()}
+with (p/'restarts.jsonl').open('a') as out: out.write(json.dumps(r)+'\\n')
+PY
+}
+# Symlink operations belong to the box; keep their lifecycle boundaries local.
+ln() { :; }
+mv() { :; }
+`);
+}
+function serviceAction(f: Lifecycle, action: string) {
+  return f.run(`(
+set -euo pipefail
+set -E
+trap 'printf "FAIL fixture-service: line %s; STOP\\n" "$LINENO" >&2' ERR
+. "$PROOF_DIR/session.sh"
+${action === 'apply' ? 'oauth_service_env validate\n' : ''}oauth_service_env ${action}
+)\n`);
+}
+function restartRecords(f: Lifecycle) {
+  return readFileSync(join(f.proof, 'restarts.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+}
+function serviceBytes(f: Lifecycle) { return readFileSync(join(f.env, 'service.env')); }
+function metadata(path: string) {
+  const s = statSync(path); return { uid: s.uid, gid: s.gid, mode: s.mode & 0o777 };
+}
+
+test('optional provider input accepts absent/null and ordered IDs, and rejects invalid or duplicate lists', () => {
+  accepts(fixture()); accepts({ ...fixture(), service_env_provider_list: null });
+  for (const value of ['google,github', 'github,google']) {
+    accepts({ ...fixture(), service_env_provider_list: value });
+  }
+  for (const value of ['', 'Google', 'google,', ',github', 'google, github', 'a'.repeat(65), 'a\ngithub', 1, [], false]) {
+    assert.match(refuses({ ...fixture(), service_env_provider_list: value }, 'invalid provider list'), /invalid provider list/);
+  }
+  assert.match(refuses({ ...fixture(), service_env_provider_list: 'google,google' }, 'duplicate provider'), /duplicate provider/);
+});
+
+test('absent/null provider step preserves release-1 bytes and never queries settings; close records no step', () => {
+  for (const options of [{}, { providers: null }]) {
+    const f = lifecycle(options); passed(f.run(openBaseline())); executableApply(f);
+    const before = serviceBytes(f), meta = metadata(join(f.env, 'service.env'));
+    passed(f.run(block('oauth-apply')));
+    assert.deepEqual(serviceBytes(f), before);
+    assert.deepEqual(metadata(join(f.env, 'service.env')), meta);
+    assert.equal(existsSync(join(f.proof, 'settings-requested.txt')), false);
+    assert.equal(existsSync(join(f.proof, 'service-env-attempted.json')), false);
+    assert.equal(existsSync(join(f.proof, 'service-env-step.json')), false);
+    assert.equal(restartRecords(f)[0].service_sha256, digest(before.toString()));
+    passed(f.run(block('oauth-probes'), { PROBE_PHASE: 'forward' }));
+    passed(f.run(closeAdmission(), { CLOSE_RESULT: 'success' }));
+    assert.deepEqual(JSON.parse(readFileSync(join(f.proof, 'close-result.json'), 'utf8')).service_env,
+      { ran: false, key_names: providerKeyNames, before_sha256: digest(before.toString()), after_sha256: digest(before.toString()) });
+  }
+});
+
+test('provider switch removes the singular line and adds exactly one ordered list before restart, with proof and close', () => {
+  const f = lifecycle({ providers: 'github,google', service: '# fixture heading\nMCP_OAUTH_GOTRUE_PROVIDER=github\nFIXTURE_PUBLIC_SETTING=unchanged\n' });
+  passed(f.run(openBaseline())); executableApply(f);
+  const before = serviceBytes(f), meta = metadata(join(f.env, 'service.env'));
+  const result = f.run(block('oauth-apply')); passed(result);
+  const expected = Buffer.from('# fixture heading\nFIXTURE_PUBLIC_SETTING=unchanged\nMCP_OAUTH_GOTRUE_PROVIDERS=github,google\n');
+  assert.deepEqual(serviceBytes(f), expected);
+  assert.deepEqual(readFileSync(join(f.stage, 'service.env')), before, 'open snapshot stays byte-identical');
+  assert.deepEqual(metadata(join(f.env, 'service.env')), meta);
+  assert.match(result.stdout, /^\+MCP_OAUTH_GOTRUE_PROVIDERS=github,google$/m);
+  assert.doesNotMatch(result.stdout + result.stderr, /FIXTURE_PUBLIC_SETTING/);
+  assert.deepEqual(restartRecords(f), [{ tree: f.fresh, service_sha256: digest(expected.toString()), step_complete: true }]);
+  const proof = JSON.parse(readFileSync(join(f.proof, 'service-env-step.json'), 'utf8'));
+  assert.equal(proof.before_sha256, digest(before.toString())); assert.equal(proof.after_sha256, digest(expected.toString()));
+  assert.equal(proof.added_line, 'MCP_OAUTH_GOTRUE_PROVIDERS=github,google');
+  assert.deepEqual(proof.enabled_providers, ['github', 'google']);
+  assert.equal(proof.removed_singular, true); assert.deepEqual(proof.key_names, providerKeyNames);
+  passed(f.run(block('oauth-probes'), { PROBE_PHASE: 'forward' }));
+  passed(f.run(closeAdmission(), { CLOSE_RESULT: 'success' }));
+  assert.deepEqual(JSON.parse(readFileSync(join(f.proof, 'close-result.json'), 'utf8')).service_env,
+    { ran: true, key_names: providerKeyNames, before_sha256: digest(before.toString()), after_sha256: digest(expected.toString()), apply_after_sha256: digest(expected.toString()) });
+});
+
+test('identical provider assignment is a byte and inode no-op with enabled-provider evidence', () => {
+  const f = lifecycle({ providers: 'google,github', service: 'MCP_OAUTH_GOTRUE_PROVIDERS=google,github\nFIXTURE_PUBLIC_SETTING=unchanged\n' });
+  passed(f.run(openBaseline())); executableApply(f);
+  const before = serviceBytes(f), inode = statSync(join(f.env, 'service.env')).ino;
+  passed(f.run(block('oauth-apply')));
+  assert.deepEqual(serviceBytes(f), before); assert.equal(statSync(join(f.env, 'service.env')).ino, inode);
+  assert.equal(JSON.parse(readFileSync(join(f.proof, 'service-env-step.json'), 'utf8')).added, false);
+  assert.equal(existsSync(join(f.proof, 'settings-requested.txt')), true);
+});
+
+test('provider validation refuses conflicts, invalid lists, catalog and GoTrue failures before attempt; R0 stays available', () => {
+  for (const [options, reason] of [
+    [{ providers: 'google,github', service: 'MCP_OAUTH_GOTRUE_PROVIDERS=google\n' }, /existing provider value/],
+    [{ providers: 'google,github', service: 'MCP_OAUTH_GOTRUE_PROVIDERS=google,github\nMCP_OAUTH_GOTRUE_PROVIDERS=google,github\n' }, /existing provider value/],
+    [{ providers: 'google,github', service: 'export MCP_OAUTH_GOTRUE_PROVIDERS=google,github\n' }, /existing provider value/],
+    [{ providers: 'google,github', service: 'FIXTURE_PUBLIC_SETTING=unchanged' }, /final newline/],
+    [{ providers: 'google', service: 'MCP_OAUTH_GOTRUE_PROVIDER=github\n' }, /singular provider not in list/],
+    [{ providers: 'google,github', service: 'MCP_OAUTH_GOTRUE_PROVIDER=github\nMCP_OAUTH_GOTRUE_PROVIDER=github\n' }, /singular provider.*ambiguous/],
+    [{ providers: 'google,email', enabled: { google: true, email: true } }, /outside release catalog/],
+    [{ providers: 'google,' }, /invalid provider list/],
+    [{ providers: 'google,,github' }, /invalid provider list/],
+    [{ providers: 'Google' }, /invalid provider list/],
+    [{ providers: 'google,google' }, /duplicate provider/],
+    [{ providers: 'google,github', enabled: { google: true, github: false } }, /provider not enabled/],
+    [{ providers: 'google,github', enabled: { google: true } }, /provider not enabled/],
+    [{ providers: 'google,github', enabled: { google: true, github: 'true' } }, /provider not enabled/],
+  ] as const) {
+    const f = lifecycle(options); passed(f.run(openBaseline())); executableApply(f);
+    const before = serviceBytes(f), meta = metadata(join(f.env, 'service.env'));
+    rejected(f.run(block('oauth-apply')), reason);
+    assert.deepEqual(serviceBytes(f), before); assert.deepEqual(metadata(join(f.env, 'service.env')), meta);
+    assert.equal(existsSync(join(f.proof, 'restarts.jsonl')), false);
+    assert.equal(existsSync(join(f.proof, 'service-env-step.json')), false);
+    assert.equal(existsSync(join(f.proof, 'oauth-attempted.txt')), false, 'all refusal checks precede attempt receipt');
+    assert.equal(existsSync(join(f.proof, 'service-env-attempted.json')), false);
+    passed(f.run(block('oauth-abort')));
+    assert.deepEqual(serviceBytes(f), before);
+    assert.equal(existsSync(join(f.proof, 'restarts.jsonl')), false, 'R0 leaves the healthy baseline running');
+    passed(runAside(f));
+    passed(f.run(closeAdmission(), { CLOSE_RESULT: 'aborted' }));
+    assert.equal(JSON.parse(readFileSync(join(f.proof, 'close-result.json'), 'utf8')).service_env.ran, false);
+  }
+  const control = lifecycle({ providers: 'google,github' }); passed(control.run(openBaseline())); executableApply(control);
+  passed(control.run(block('oauth-apply')));
+  assert.equal(restartRecords(control).length, 1, 'same restart path with enabled-provider control');
+});
+
+test('unrelated service.env differences stop switch, forward proof, rollback and close without overwriting drift', () => {
+  for (const action of ['apply', 'forward', 'restore', 'close-success', 'close-recovered']) {
+    const f = lifecycle({ providers: 'google,github' }); passed(f.run(openBaseline())); executableApply(f);
+    if (action !== 'apply') passed(f.run(block('oauth-apply')));
+    else writeFileSync(join(f.proof, 'oauth-attempted.txt'), clock);
+    const drift = Buffer.concat([serviceBytes(f), Buffer.from('FIXTURE_OTHER_KEY=drift\n')]);
+    writeFileSync(join(f.env, 'service.env'), drift);
+    rejected(serviceAction(f, action), /extra service.env difference/);
+    assert.deepEqual(serviceBytes(f), drift);
+    assert.equal(existsSync(join(f.proof, 'service-env-close.json')), false);
+  }
+  const control = lifecycle({ providers: 'google,github' }); passed(control.run(openBaseline())); executableApply(control);
+  passed(control.run(block('oauth-apply'))); passed(serviceAction(control, 'forward'));
+});
+
+test('rollback restores exact snapshot and open digest before baseline restart; recovered close records the step', () => {
+  for (const providers of [undefined, null, 'google,github']) {
+    const f = lifecycle({ ...(providers === undefined ? {} : { providers }), service: 'FIXTURE_PUBLIC_SETTING=unchanged\nMCP_OAUTH_GOTRUE_PROVIDER=github\n' });
+    passed(f.run(openBaseline())); executableApply(f);
+    const before = serviceBytes(f), meta = metadata(join(f.env, 'service.env'));
+    passed(f.run(block('oauth-apply'))); const applied = serviceBytes(f);
+    passed(f.run(block('oauth-rollback')));
+    assert.deepEqual(serviceBytes(f), before); assert.deepEqual(metadata(join(f.env, 'service.env')), meta);
+    assert.deepEqual(restartRecords(f).map(r => r.service_sha256), [digest(applied.toString()), digest(before.toString())]);
+    assert.equal(restartRecords(f)[1].tree, f.old);
+    if (providers) assert.equal(JSON.parse(readFileSync(join(f.proof, 'service-env-restored.json'), 'utf8')).sha256, digest(before.toString()));
+    passed(runAside(f)); passed(f.run(block('oauth-probes'), { PROBE_PHASE: 'recovery' }));
+    passed(f.run(closeAdmission(), { CLOSE_RESULT: 'rolled-back' }));
+    const r = JSON.parse(readFileSync(join(f.proof, 'close-result.json'), 'utf8')).service_env;
+    assert.equal(r.ran, !!providers); assert.equal(r.before_sha256, digest(before.toString())); assert.equal(r.after_sha256, digest(before.toString()));
+    if (providers) assert.equal(r.apply_after_sha256, digest(applied.toString()));
+  }
+});
+
+test('snapshot tampering stops provider switch and rollback before restarting', () => {
+  for (const applied of [false, true]) {
+    const f = lifecycle({ providers: 'google,github' }); passed(f.run(openBaseline())); executableApply(f);
+    if (applied) passed(f.run(block('oauth-apply')));
+    else writeFileSync(join(f.proof, 'oauth-attempted.txt'), clock);
+    const before = serviceBytes(f);
+    writeFileSync(join(f.stage, 'service.env'), 'FIXTURE_PUBLIC_SETTING=tampered\n');
+    rejected(applied ? f.run(block('oauth-rollback')) : serviceAction(f, 'apply'), /snapshot.*digest mismatch/);
+    assert.deepEqual(serviceBytes(f), before);
+    assert.equal(existsSync(join(f.proof, 'restarts.jsonl')), applied);
+    if (applied) assert.equal(restartRecords(f).length, 1, 'no baseline restart after invalid snapshot');
+  }
+  const control = lifecycle({ providers: 'google,github' }); passed(control.run(openBaseline())); executableApply(control);
+  passed(control.run(block('oauth-apply'))); passed(control.run(block('oauth-rollback')));
+});
+
+
+test('atomic provider write preserves a non-default fixture mode and replaces its inode', () => {
+  const f = lifecycle({ providers: 'google,github', attempt: true }); releaseTree(f);
+  const path = join(f.env, 'service.env'); chmodSync(path, 0o640);
+  const before = serviceBytes(f), meta = metadata(path), inode = statSync(path).ino;
+  passed(serviceAction(f, 'apply'));
+  assert.deepEqual(serviceBytes(f), Buffer.concat([before, Buffer.from('MCP_OAUTH_GOTRUE_PROVIDERS=google,github\n')]));
+  assert.deepEqual(metadata(path), meta);
+  assert.notEqual(statSync(path).ino, inode, 'completed temp file replaces original inode');
+  passed(serviceAction(f, 'restore'));
+  assert.deepEqual(serviceBytes(f), before); assert.deepEqual(metadata(path), meta);
+});
+
+
+// The real env helper owns post-apply digest acceptance and drift refusal.
+// Only root ownership is supplied: the Mac cannot create root-owned fixtures.
+function realEnv(f: Lifecycle) {
+  const helper = /^oauth_env\(\) \{[\s\S]*?^\}/m.exec(helpers)![0];
+  const owner = `
+_original_stat=pathlib.Path.stat
+class RootMetadata:
+    def __init__(self,s): self.s=s; self.st_uid=self.st_gid=0
+    def __getattr__(self,k): return getattr(self.s,k)
+def fixture_stat(self,*a,**kw):
+    s=_original_stat(self,*a,**kw)
+    return RootMetadata(s) if str(self) in ${JSON.stringify([join(f.env, 'compose.env'), join(f.env, 'service.env')])} else s
+pathlib.Path.stat=fixture_stat
+`;
+  const actual = helper.replace('import hashlib,json,pathlib,re,stat,sys\n', 'import hashlib,json,pathlib,re,stat,sys\n' + owner)
+    .replaceAll('/etc/commonswarm-oauth/', f.env + '/');
+  const session = join(f.proof, 'session.sh'); writeFileSync(session, readFileSync(session, 'utf8') + '\n' + actual + '\n');
+}
+
+test('real oauth_env accepts the switched digest and refuses unrelated service.env drift', () => {
+  const f = lifecycle({ providers: 'google,github', service: 'MCP_OAUTH_GOTRUE_PROVIDER=github\nFIXTURE_PUBLIC_SETTING=unchanged\n' });
+  passed(f.run(openBaseline())); executableApply(f); realEnv(f);
+  passed(f.run(block('oauth-apply'))); // Reverting the digest condition fails here.
+  writeFileSync(join(f.env, 'service.env'), Buffer.concat([serviceBytes(f), Buffer.from('FIXTURE_OTHER_KEY=drift\n')]));
+  // Removing oauth_env's service-env call leaves this real boundary permissive.
+  rejected(f.run('(\nset -euo pipefail\n. "$PROOF_DIR/session.sh"\noauth_env "$(cat "$PROOF_DIR/oauth-image.id")"\n)\n'), /extra service.env difference/);
+});
+
+test('switched env passes the exact 2ab464ae provider parser; retaining the singular key refuses startup providers', () => {
+  const f = lifecycle({ providers: 'google,github', service: 'MCP_OAUTH_GOTRUE_PROVIDER=github\nFIXTURE_PUBLIC_SETTING=unchanged\n' });
+  passed(f.run(openBaseline())); executableApply(f); passed(f.run(block('oauth-apply')));
+  const dir = join(f.root, 'parser'); mkdirSync(dir);
+  writeFileSync(join(dir, 'auth-provider-catalog.mjs'), releaseCatalog);
+  const start = releaseConfig.indexOf('function required('), end = releaseConfig.indexOf('function positiveInteger(', start);
+  assert.ok(start > 0 && end > start);
+  writeFileSync(join(dir, 'config.mjs'), 'import { AUTH_PROVIDER_CATALOG } from "./auth-provider-catalog.mjs";\n' + releaseConfig.slice(start, end));
+  const harness = `
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { parseGoTrueProviders } from './config.mjs';
+const env=Object.fromEntries(readFileSync(process.argv[2],'utf8').trim().split('\\n').filter(x=>!x.startsWith('#')).map(x=>{const n=x.indexOf('=');return [x.slice(0,n),x.slice(n+1)];}));
+assert.deepEqual(parseGoTrueProviders(env),['google','github']);
+assert.throws(()=>parseGoTrueProviders({...env,MCP_OAUTH_GOTRUE_PROVIDER:'github'}),/disagree/);
+assert.throws(()=>parseGoTrueProviders({...env,MCP_OAUTH_GOTRUE_PROVIDERS:'google,email'}),/distinct supported/);
+`;
+  writeFileSync(join(dir, 'run.mjs'), harness);
+  passed(spawnSync('node', [join(dir, 'run.mjs'), join(f.env, 'service.env')], { encoding: 'utf8' }));
+});
+
+test('release catalog must be readable and recognized before receipt; catalog IDs come from the release tree', () => {
+  for (const kind of ['unreadable', 'syntax', 'parser', 'changed-id']) {
+    const f = lifecycle({ providers: 'google,github' }); passed(f.run(openBaseline())); executableApply(f);
+    const src = join(f.fresh, 'services', 'mcp-auth', 'src');
+    if (kind === 'unreadable') {
+      // Move the public source, no deletion or guard bypass.
+      passed(spawnSync('mv', [join(src, 'auth-provider-catalog.js'), join(src, 'retained-catalog.js')], { encoding: 'utf8' }));
+    } else if (kind === 'parser') writeFileSync(join(src, 'config.js'), '// unsupported parser fixture\n');
+    else writeFileSync(join(src, 'auth-provider-catalog.js'), kind === 'syntax' ? 'export const AUTH_PROVIDER_CATALOG=[];' : releaseCatalog.replaceAll('"github"', '"fixture-id"'));
+    rejected(f.run(block('oauth-apply')), /release (provider catalog|parser catalog)|outside release catalog/);
+    assert.equal(existsSync(join(f.proof, 'oauth-attempted.txt')), false);
+    assert.equal(existsSync(join(f.proof, 'settings-requested.txt')), false);
+  }
+  const f = lifecycle({ providers: 'google,fixture-id', enabled: { google: true, 'fixture-id': true } });
+  passed(f.run(openBaseline())); executableApply(f);
+  writeFileSync(join(f.fresh, 'services', 'mcp-auth', 'src', 'auth-provider-catalog.js'), releaseCatalog.replaceAll('"github"', '"fixture-id"'));
+  passed(f.run(block('oauth-apply'))); // A hardcoded second allowlist would fail.
+});
+
+test('switched provider step rerun is a byte and inode no-op', () => {
+  const f = lifecycle({ providers: 'google,github', service: 'MCP_OAUTH_GOTRUE_PROVIDER=github\nFIXTURE_PUBLIC_SETTING=unchanged\n' });
+  passed(f.run(openBaseline())); executableApply(f); passed(f.run(block('oauth-apply')));
+  const before = serviceBytes(f), inode = statSync(join(f.env, 'service.env')).ino;
+  passed(serviceAction(f, 'apply'));
+  assert.deepEqual(serviceBytes(f), before); assert.equal(statSync(join(f.env, 'service.env')).ino, inode);
+  assert.equal(restartRecords(f).length, 1);
+});
+
+test('atomic write failure before rename removes the same-directory secret temp and prints only its path', () => {
+  const f = lifecycle({ providers: 'google,github', attempt: true }); releaseTree(f);
+  const before = serviceBytes(f), session = join(f.proof, 'session.sh');
+  const injection = `
+def refused_replace(*a): raise OSError('fixture rename failure')
+os.replace=refused_replace
+`;
+  const source = readFileSync(session, 'utf8');
+  const anchor = 'import datetime,hashlib,json,os,pathlib,re,stat,subprocess,sys,tempfile\n';
+  assert.ok(source.includes(anchor)); writeFileSync(session, source.replace(anchor, anchor + injection));
+  const result = serviceAction(f, 'apply'); rejected(result, /fixture rename failure/);
+  assert.deepEqual(serviceBytes(f), before);
+  assert.deepEqual(readdirSync(f.env).filter(x => x.startsWith('.service.env.oauth-')), []);
+  assert.match(result.stdout.trim(), new RegExp('^' + f.env.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/\\.service\\.env\\.oauth-[^\\n]+$'));
+  assert.doesNotMatch(result.stdout + result.stderr, /FIXTURE_PUBLIC_SETTING/);
+  assert.equal(existsSync(join(f.proof, 'service-env-step.json')), false);
+  writeFileSync(session, source); passed(serviceAction(f, 'restore'));
+  const control = lifecycle({ providers: 'google,github', attempt: true }); releaseTree(control); passed(serviceAction(control, 'apply'));
 });

@@ -19,7 +19,8 @@ open, and only one operator may run its blocks.
 
 At open, measure the resolved `oauth/current`, running image and SHA label, and
 SHA-256 of `/etc/commonswarm-oauth/{compose,service}.env` privately on the box.
-Create one mode-0600 JSON file with exactly these keys (no C1 INPUTS fields):
+Create one mode-0600 JSON file with the required keys below and, optionally,
+`service_env_provider_list` (no C1 INPUTS fields):
 
 | Key | Value |
 | --- | --- |
@@ -31,6 +32,7 @@ Create one mode-0600 JSON file with exactly these keys (no C1 INPUTS fields):
 | baseline_oauth_image | Measured local immutable `sha256:` image ID |
 | compose_env_sha256 | Measured SHA-256 of compose.env bytes |
 | service_env_sha256 | Measured SHA-256 of service.env bytes |
+| service_env_provider_list | Optional: absent/null keeps service.env unchanged; otherwise an ordered comma list such as `google,github` |
 | target | production or staging |
 
 The operator supplies the measured main ancestry receipt by running the Mac
@@ -40,8 +42,13 @@ bytes. Set `INPUTS_FILE` to that box file for row 1, and to the identical local
 file for rows 0 and 2. Set Mac `BOX_HOST` to the approved SSH destination (production
 `ops@100.115.66.74`; staging uses its separately measured host). Set box
 `CADDY_CA_FILE` to the existing, measured public CA file which verifies this
-box's Caddy certificate for mcp.commonswarm.com. Do not use `-k`, a downloaded
-certificate as an assumed CA, or an external production route for staging.
+box's Caddy certificate for mcp.commonswarm.com. Never use `-k`. Never use a
+certificate taken from the chain the box itself serves, or an external
+production route for staging. A CA root obtained from the issuer's published
+source is allowed only if, before row 0, its SHA-256 fingerprint is verified
+to match a second independent source and the file is installed with owner
+root, group root and mode 0644. Record this preparation as a step outside
+this plan's rows.
 The CA bytes are saved at open and proven by the baseline probes; all later
 probes reuse that copy. Staging is allowed only on hostname
 `c1-staging-20261006` with the regular root:root 0600 marker
@@ -63,15 +70,47 @@ baseline SHA, image ID, archive digest or release date is fixed in this plan.
 | 2 | oauth-archive | Mac | Open succeeded | Prove ancestry, make and verify exact archive; upload archive and receipt |
 | 3 | oauth-preflight | box | Archive and ancestry receipt present | Verify archive, exact Compose bytes; prepare absent release tree |
 | 4 | oauth-build | box | Preflight succeeded | Reuse revision-labelled image or build once under caps |
-| 5 | oauth-apply | box | Image verified and window still valid | Recreate only oauth, atomically switch current, prove health |
+| 5 | oauth-apply | box | Image verified and window still valid; provider step runs only when service_env_provider_list is set | Validate the release catalog and GoTrue providers before the receipt, atomically switch provider keys if selected; recreate only oauth, switch current, prove health |
 | 6 | oauth-probes | box | Apply succeeded; PROBE_PHASE=forward | Probe local Caddy metadata/JWKS and MCP 401; require closed gate |
 | 7 | oauth-close | box | All forward checks pass; CLOSE_RESULT=success | Recheck identity/env/proofs, clean secrets, record success |
 | R0 | oauth-abort | box | Stop after open with oauth-attempted.txt absent; HezLead directs close | Prove unchanged baseline without recreate or rollback; mark aborted-before-attempt |
-| R1 | oauth-rollback | box | Attempt receipt present; HezLead directs recovery | Restore baseline Compose bytes/image/current; prove health (no deadline) |
+| R1 | oauth-rollback | box | Attempt receipt present; HezLead directs recovery | Restore exact baseline service.env and Compose bytes before restarting baseline image/current; prove health (no deadline) |
 | R2 | oauth-release-aside | box | Rollback or abort proven | Retain only this window's receipt-backed tree under failed-attempts |
 | R3 | oauth-probes | box | Rollback and aside complete; PROBE_PHASE=recovery | Probe restored baseline through local Caddy (no deadline) |
-| R4 | oauth-close | box | Rollback or abort checks and aside pass; CLOSE_RESULT=rolled-back or aborted | Require baseline and absence of this window's receipt-backed tree; record the measured result |
+| R4 | oauth-close | box | Rollback or abort checks and aside pass; CLOSE_RESULT=rolled-back or aborted | Require restored service.env digest, baseline and absence of this window's receipt-backed tree; record provider step and before/after digests |
 | 8 | oauth-copyback | Mac | Verified success, rolled-back or aborted close | Copy only nonsecret proof files; guarded Mac scratch cleanup |
+
+The optional provider step is part of row 5. Before the attempt receipt it
+validates input grammar, the release catalog, existing assignments, exact byte
+differences and GoTrue settings. Only the prepared atomic write runs after the
+receipt, before Compose changes or recreation. A validation refusal takes R0
+without restarting the healthy baseline. Absent/null preserves service.env.
+A set value contains distinct, nonempty IDs matching `[a-z0-9_-]{1,64}` in
+requested order. The allowed set comes from the unpacked release tree's
+`services/mcp-auth/src/auth-provider-catalog.js`, checked against its config
+parser's catalog use. Unreadable or unrecognized source is refused. Each ID
+must also be enabled (`external.<id>` is JSON true) in `/auth/v1/settings`
+measured through local Caddy with the saved CA. No credential is sent.
+
+Do not edit service.env by hand before open: release 1 needs its singular key,
+and rollback must get that key back from the exact open snapshot. The switch
+removes exactly one `MCP_OAUTH_GOTRUE_PROVIDER=<id>` line if present; its ID must
+be in the requested list. It then appends exactly one
+`MCP_OAUTH_GOTRUE_PROVIDERS=<list>\n` line unless that exact assignment already
+exists. Duplicate, ambiguous or conflicting assignments, a missing final
+newline before an append, or any other byte difference are refused. An
+already-switched file is a byte and inode no-op on rerun; row 5 itself still
+refuses a second release attempt in the same window.
+
+The switch preserves every other byte, owner, group and mode, using a
+same-directory temp, fsync and rename with a write-time race check. Failure
+before rename removes that temp through the rm guard and prints only its path;
+a guard refusal retains the path and is reported. Only digests, key names and
+provider IDs enter nonsecret evidence; settings and env bytes stay in the
+secret stage. Rollback restores and proves the exact open service.env digest
+before the baseline image restarts. Recovered close requires those restored
+bytes; every close records both key names, whether the optional step ran, and
+the before/after digests (including its apply digest after rollback).
 
 If row 1 fails before it prints its proof path, nothing was deployed. Retain any
 partial proof/scratch directory and report the failure; do not infer an open
@@ -143,8 +182,12 @@ need(stat.S_IMODE(p.stat().st_mode)==0o600,'inputs mode must be 0600')
 try: d=json.loads(p.read_bytes(),object_pairs_hook=pairs)
 except (ValueError,UnicodeError): raise SystemExit('FAIL oauth-open: invalid JSON; STOP') from None
 keys={'release_sha','archive_sha256','window_id','window_end_utc','baseline_oauth_sha','baseline_oauth_image','compose_env_sha256','service_env_sha256','target'}
-need(isinstance(d,dict) and set(d)==keys,'exact input keys required')
-need(all(isinstance(v,str) for v in d.values()),'all input values must be strings')
+need(isinstance(d,dict) and keys<=set(d)<=keys|{'service_env_provider_list'},'exact input keys required')
+need(all(isinstance(d[k],str) for k in keys),'all required input values must be strings')
+v=d.get('service_env_provider_list')
+if v is not None:
+    need(isinstance(v,str) and re.fullmatch(r'[a-z0-9_-]{1,64}(?:,[a-z0-9_-]{1,64})*',v) is not None,'invalid provider list')
+    need(len(v.split(','))==len(set(v.split(','))),'duplicate provider')
 for k in ('release_sha','baseline_oauth_sha'): need(re.fullmatch('[0-9a-f]{40}',d[k]) is not None,k+' must be full SHA')
 for k in ('archive_sha256','compose_env_sha256','service_env_sha256'): need(re.fullmatch('[0-9a-f]{64}',d[k]) is not None,k+' must be SHA-256')
 need(re.fullmatch('sha256:[0-9a-f]{64}',d['baseline_oauth_image']) is not None,'baseline image must be immutable')
@@ -219,6 +262,167 @@ oauth_compose() (
  docker compose --project-name commonswarm-oauth --env-file /etc/commonswarm-oauth/compose.env \
   -f "$tree/deploy/mcp-auth/compose.yaml" -f "$tree/deploy/mcp-auth/compose.management.yaml" "$@"
 )
+oauth_service_env() {
+ python3 - "$1" "$INPUTS_FILE" "$SECRET_STAGE" "$PROOF_DIR" "$CADDY_CA_FILE" "$NEW_OAUTH" <<'PY'
+import datetime,hashlib,json,os,pathlib,re,stat,subprocess,sys,tempfile
+mode,inputs,stage,proof,ca,tree=sys.argv[1:7]; d=json.load(open(inputs)); proof=pathlib.Path(proof)
+p=pathlib.Path('/etc/commonswarm-oauth/service.env'); snapshot=pathlib.Path(stage,'service.env')
+def need(ok,label):
+    if not ok: raise SystemExit('FAIL OAuth service.env: '+label+'; STOP')
+def sha(raw): return hashlib.sha256(raw).hexdigest()
+def regular(path):
+    need(path.is_file() and not path.is_symlink(),'regular service.env or snapshot required')
+def record(name,value):
+    with (proof/name).open('x') as f:
+        f.write(json.dumps(value,sort_keys=True)+'\n'); f.flush(); os.fsync(f.fileno())
+    fd=os.open(proof,os.O_RDONLY|os.O_DIRECTORY)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+def secret_file(path,raw):
+    fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,'wb') as f:
+        os.fchmod(f.fileno(),0o600); f.write(raw); f.flush(); os.fsync(f.fileno())
+def identity(s):
+    return [s.st_dev,s.st_ino,s.st_uid,s.st_gid,s.st_mode,s.st_size,s.st_mtime_ns]
+regular(p); meta=p.stat(); raw=p.read_bytes()
+# Baseline check also runs at open, before a snapshot exists.
+if mode=='baseline':
+    need(sha(raw)==d['service_env_sha256'],'baseline service.env digest mismatch')
+    raise SystemExit(0)
+regular(snapshot); old=snapshot.read_bytes()
+need(sha(old)==d['service_env_sha256'],'snapshot digest mismatch')
+v=d.get('service_env_provider_list'); keys=['MCP_OAUTH_GOTRUE_PROVIDER','MCP_OAUTH_GOTRUE_PROVIDERS']
+prepared=pathlib.Path(stage,'service-env-prepared.json'); prepared_bytes=pathlib.Path(stage,'service.env.switched')
+# Apply consumes only the pre-receipt preparation, with a race check at the write.
+if mode=='apply':
+    if v is None: raise SystemExit(0)
+    regular(prepared); regular(prepared_bytes)
+    ready=json.loads(prepared.read_bytes()); evidence=ready['evidence']; wanted=prepared_bytes.read_bytes()
+    need(ready['input_sha256']==sha(pathlib.Path(inputs).read_bytes()) and evidence['before_sha256']==sha(old) and
+        evidence['after_sha256']==sha(wanted),'prepared switch digest mismatch')
+    need(raw==old or raw==wanted,'extra service.env difference before switch')
+    receipt=proof/'oauth-attempted.txt'
+    need(receipt.is_file() and not receipt.is_symlink(),'regular attempt receipt required before mutation')
+    attempted=proof/'service-env-attempted.json'
+    if os.path.lexists(attempted):
+        regular(attempted); regular(proof/'service-env-step.json')
+        need(json.loads(attempted.read_bytes())==evidence and raw==wanted,'provider step already attempted; recover and close')
+        raise SystemExit(0)
+    need(identity(meta)==ready['identity'],'service.env changed after validation')
+    record('service-env-attempted.json',evidence)
+else:
+    need(mode in ('validate','forward','restore','close-success','close-recovered'),'unknown service.env action')
+    expected=old; added=False; removed=False
+    # An unchanged refused baseline remains eligible for R0/close and R1.
+    unchanged_recovery=mode in ('restore','close-recovered') and raw==old and not os.path.lexists(proof/'service-env-attempted.json')
+    if v is not None and not unchanged_recovery:
+        need(isinstance(v,str) and re.fullmatch(r'[a-z0-9_-]{1,64}(?:,[a-z0-9_-]{1,64})*',v) is not None,'invalid provider list')
+        providers=v.split(','); need(len(providers)==len(set(providers)),'duplicate provider')
+        singular=re.findall(rb'^[ \t]*(?:export[ \t]+)?MCP_OAUTH_GOTRUE_PROVIDER[ \t]*=([^\r\n]*)',old,re.M)
+        if singular:
+            need(len(singular)==1 and singular[0].decode('ascii',errors='replace') in providers,'singular provider not in list or assignment is ambiguous')
+            exact=keys[0].encode()+b'='+singular[0]
+            rows=old.splitlines(keepends=True)
+            need(sum(row in (exact,exact+b'\n') for row in rows)==1,'singular provider assignment is ambiguous')
+            expected=b''.join(row for row in rows if row not in (exact,exact+b'\n')); removed=True
+        line=keys[1].encode()+b'='+v.encode()
+        assignments=re.findall(rb'^[ \t]*(?:export[ \t]+)?MCP_OAUTH_GOTRUE_PROVIDERS[ \t]*=([^\r\n]*)',expected,re.M)
+        if assignments:
+            need(assignments==[v.encode()] and expected.splitlines().count(line)==1,'existing provider value differs or assignment is ambiguous')
+        else:
+            need(not expected or expected.endswith(b'\n'),'snapshot needs final newline for exact provider switch')
+            expected+=line+b'\n'; added=True
+    if mode=='validate':
+        need(raw in (old,expected),'extra service.env difference before switch')
+        if v is None: raise SystemExit(0)
+        # Read only the reviewed, unpacked tree. Fail closed on unreadable or
+        # changed source syntax; never execute release JavaScript on the box.
+        source=pathlib.Path(tree,'services/mcp-auth/src')
+        try:
+            catalog=(source/'auth-provider-catalog.js').read_text()
+            parser=(source/'config.js').read_text()
+        except (OSError,UnicodeError): raise SystemExit('FAIL OAuth service.env: release provider catalog unreadable; STOP') from None
+        need('import { AUTH_PROVIDER_CATALOG } from "./auth-provider-catalog.js";' in parser and
+            'const known = new Set(AUTH_PROVIDER_CATALOG.map(({ id }) => id));' in parser and
+            '!known.has(id)' in parser,'release parser catalog contract changed')
+        catalog=re.sub(r'//[^\n]*','',catalog)
+        outer=re.fullmatch(r'\s*export const AUTH_PROVIDER_CATALOG = Object\.freeze\(\[([\s\S]*)\]\.map\(\(provider\) => Object\.freeze\(provider\)\)\);\s*',catalog)
+        need(outer is not None,'release provider catalog syntax changed')
+        # Restrict the whole declaration to literal reviewed entries. Extract
+        # IDs from the id field only, not labels, comments or another list.
+        string=r'"[^"\\\n]*"'
+        entry=r'\s*\{\s*id:\s*/\*\* @type \{"([a-z0-9_-]{1,64})"\} \*/ \("([a-z0-9_-]{1,64})"\),\s*label:\s*'+string+r',\s*name:\s*'+string+r',\s*legalEntity:\s*'+string+r',\s*\},'
+        entries=list(re.finditer(entry,outer[1]))
+        need(entries and not re.sub(entry,'',outer[1]).strip() and all(x[1]==x[2] for x in entries),'release provider catalog entries changed')
+        allowed=[x[2] for x in entries]
+        need(len(allowed)==len(set(allowed)) and all(x in allowed for x in providers),'provider outside release catalog')
+        settings=pathlib.Path(stage,'gotrue-settings.json')
+        result=subprocess.run(['curl','--fail','--silent','--show-error','--noproxy','*','--connect-timeout','5','--max-time','15',
+            '--cacert',ca,'--resolve','api.commonswarm.com:443:127.0.0.1','--output',str(settings),
+            'https://api.commonswarm.com/auth/v1/settings'],stderr=subprocess.DEVNULL)
+        need(result.returncode==0,'GoTrue settings request failed')
+        body=settings.read_bytes(); need(len(body)<=131072,'oversized GoTrue settings')
+        try: external=json.loads(body).get('external')
+        except (ValueError,AttributeError): raise SystemExit('FAIL OAuth service.env: invalid GoTrue settings; STOP') from None
+        need(isinstance(external,dict) and all(external.get(x) is True for x in providers),'provider not enabled in GoTrue')
+        evidence={'ran':True,'added':added,'removed_singular':removed,'before_sha256':sha(old),'after_sha256':sha(expected),
+            'key_names':keys,'added_line':line.decode() if added else None,'enabled_providers':providers,
+            'owner_uid':meta.st_uid,'owner_gid':meta.st_gid,'mode':format(stat.S_IMODE(meta.st_mode),'04o')}
+        # Secret preparation is not an attempt. A refusal above leaves R0 open.
+        secret_file(prepared_bytes,expected)
+        secret_file(prepared,(json.dumps({'evidence':evidence,'identity':identity(meta),
+            'input_sha256':sha(pathlib.Path(inputs).read_bytes())})+'\n').encode())
+        raise SystemExit(0)
+    elif mode=='restore':
+        need(raw in (old,expected),'extra service.env difference during recovery')
+        wanted=old
+    else:
+        wanted=expected if mode in ('forward','close-success') else old
+        need(raw==wanted,'extra service.env difference or missing provider switch')
+# Rename only on a byte change; keep owner/group/mode and fsync both stages.
+if mode in ('apply','restore') and raw!=wanted:
+    fd,name=tempfile.mkstemp(prefix='.service.env.oauth-',dir=p.parent)
+    try:
+        with os.fdopen(fd,'wb') as f:
+            os.fchown(f.fileno(),meta.st_uid,meta.st_gid)
+            os.fchmod(f.fileno(),stat.S_IMODE(meta.st_mode))
+            f.write(wanted); f.flush(); os.fsync(f.fileno())
+        need(p.read_bytes()==raw and identity(p.stat())==identity(meta),'service.env changed during atomic preparation')
+        os.replace(name,p)
+        fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try: os.fsync(fd)
+        finally: os.close(fd)
+    finally:
+        if os.path.lexists(name):
+            # Use the installed rm guard, even on failure. Report only the path.
+            print(name,flush=True)
+            need(subprocess.run(['rm','--',name]).returncode==0,'temp cleanup refused; retain path and guard message')
+regular(p); after=p.stat()
+need(p.read_bytes()==wanted,'service.env byte proof failed')
+need((after.st_uid,after.st_gid,stat.S_IMODE(after.st_mode))==(meta.st_uid,meta.st_gid,stat.S_IMODE(meta.st_mode)),'service.env metadata changed')
+if mode=='apply' and v is not None:
+    record('service-env-step.json',evidence)
+    print('PASS service.env sha256 '+sha(old)+' -> '+sha(wanted))
+    if evidence['removed_singular']: print('-'+keys[0])
+    if evidence['added']: print('+'+keys[1]+'='+v)
+if mode=='restore':
+    need(sha(p.read_bytes())==d['service_env_sha256'],'restored digest differs from open')
+    if v is not None:
+        (proof/'service-env-restored.json').write_text(json.dumps({'sha256':sha(old)})+'\n')
+if mode.startswith('close-'):
+    attempted=proof/'service-env-attempted.json'; ran=os.path.lexists(attempted)
+    need(not ran or (attempted.is_file() and not attempted.is_symlink()),'unsafe provider step receipt')
+    r={'ran':ran,'key_names':keys,'before_sha256':sha(old),'after_sha256':sha(wanted)}
+    if ran:
+        a=json.loads(attempted.read_bytes())
+        need(v is not None and a['before_sha256']==sha(old) and a['after_sha256']==sha(expected),'provider receipt digest mismatch')
+        r['apply_after_sha256']=a['after_sha256']
+    if mode=='close-success' and v is not None:
+        need(ran and (proof/'service-env-step.json').is_file(),'completed provider step required')
+    (proof/'service-env-close.json').write_text(json.dumps(r,sort_keys=True)+'\n')
+PY
+}
+
 oauth_env() {
  python3 - "$INPUTS_FILE" "$1" <<'PY'
 import hashlib,json,pathlib,re,stat,sys
@@ -232,12 +436,13 @@ for kind in ('compose','service'):
     raw=p.read_bytes()
     # Even an empty assignment is forbidden. Comments are harmless.
     need(re.search(rb'^\s*(?:export\s+)?MCP_OAUTH_ADMIN_(?:ISSUANCE_ENABLED|ISSUER_DATABASE_CREDENTIALS_FILE)\s*=',raw,re.M) is None,'admin issuance env must stay unset')
-    if kind=='service' or expected==d['baseline_oauth_image']:
+    if expected==d['baseline_oauth_image'] or (kind=='service' and d.get('service_env_provider_list') is None):
         need(hashlib.sha256(raw).hexdigest()==d[kind+'_env_sha256'],'measured env digest mismatch')
     if kind=='compose':
         matches=re.findall(rb'^MCP_OAUTH_IMAGE=(.*)$',raw,re.M)
         need(matches==[expected.encode()],'Compose image must equal expected immutable ID')
 PY
+ if test "$1" = "$BASELINE_IMAGE"; then oauth_service_env baseline; else oauth_service_env forward; fi
 }
 oauth_identity() {
  python3 - "$1" "$2" "$PROOF_DIR/port.txt" <<'PY'
@@ -500,8 +705,14 @@ if not re.fullmatch(rb'sha256:[0-9a-f]{64}',image) or len(re.findall(rb'^MCP_OAU
 pathlib.Path(sys.argv[3]).write_bytes(re.sub(rb'^MCP_OAUTH_IMAGE=.*$',b'MCP_OAUTH_IMAGE='+image,raw,flags=re.M))
 PY
 chmod 0600 "$SECRET_STAGE/compose.new.env"
+# Validate the exact switch and GoTrue settings before admission: refusal uses R0.
+oauth_service_env validate
+oauth_deadline
 # Attempt receipt precedes every mutation; an unknown outcome always recovers.
 date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/oauth-attempted.txt"
+# Optional reviewed provider step; null/absent makes no service.env change or settings request.
+oauth_service_env apply
+oauth_deadline
 install -o root -g root -m 0600 "$SECRET_STAGE/compose.new.env" /etc/commonswarm-oauth/compose.env
 oauth_compose "$NEW_OAUTH" up -d --no-build --no-deps --pull never --force-recreate oauth >"$SECRET_STAGE/recreate.log" 2>&1
 ln -sfT "$NEW_OAUTH" /home/commonswarm/oauth/current.oauth-release
@@ -510,7 +721,7 @@ oauth_health
 oauth_identity "$RELEASE_SHA" "$IMAGE"
 oauth_env "$IMAGE"
 cmp -s /etc/commonswarm-oauth/compose.env "$SECRET_STAGE/compose.new.env"
-cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.env"
+oauth_service_env forward
 oauth_deadline
 printf 'PASS\n' >"$PROOF_DIR/applied.txt"
 printf 'PASS OAuth image applied and healthy; probes and close still required\n'
@@ -583,8 +794,9 @@ for kind in ('compose','service'):
 PY
 docker image inspect "$BASELINE_IMAGE" >/dev/null 2>&1
 install -o root -g root -m 0600 "$SECRET_STAGE/compose.env" /etc/commonswarm-oauth/compose.env
-# This plan never changes service.env; unrelated drift is a STOP, not overwritten.
-cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.env"
+# Restore the exact checked snapshot BEFORE restarting the baseline image.
+# Null/absent selection retains the previous drift refusal and performs no write.
+oauth_service_env restore
 oauth_env "$BASELINE_IMAGE"
 oauth_compose "$OLD_OAUTH" up -d --no-build --no-deps --pull never --force-recreate oauth >"$SECRET_STAGE/rollback.log" 2>&1
 ln -sfT "$OLD_OAUTH" /home/commonswarm/oauth/current.oauth-release
@@ -680,7 +892,7 @@ if test "$CLOSE_RESULT" != success && { test -e "$PROOF_DIR/oauth-tree-created.t
  test "$(cat "$PROOF_DIR/oauth-tree-created.txt")" = "$NEW_OAUTH" || fail 'tree-created receipt path mismatch'
  test ! -e "$NEW_OAUTH" && test ! -L "$NEW_OAUTH" || fail 'failed tree remains in releases; run oauth-release-aside'
 fi
-cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.env"
+if test "$CLOSE_RESULT" = success; then oauth_service_env close-success; else oauth_service_env close-recovered; fi
 # Guard proof: reject unsafe deletion paths, then validate this exact created root.
 python3 - "$SECRET_STAGE" "$PROOF_DIR/secret-stage.path" <<'PY'
 import pathlib,re,sys
@@ -697,6 +909,7 @@ python3 - "$INPUTS_FILE" "$CLOSE_RESULT" "$PROOF_DIR" <<'PY'
 import datetime,json,pathlib,sys
 inputs,result,proof=sys.argv[1:4]; p=pathlib.Path(proof); d=json.load(open(inputs))
 r={'release_sha':d['release_sha'],'baseline_oauth_sha':d['baseline_oauth_sha'],'baseline_oauth_image':d['baseline_oauth_image'],'result':result,
+   'service_env':json.loads((p/'service-env-close.json').read_bytes()),
    'window_id':d['window_id'],'target':d['target'],'opened_at':(p/'opened.txt').read_text().strip(),'closed_at':datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
 with (p/'close-result.json').open('x') as f: f.write(json.dumps(r,sort_keys=True)+'\n')
 (p/'closed.txt').write_text(r['closed_at']+'\n')
