@@ -1,0 +1,12 @@
+{
+ "release_sha": "2ab464ae3630f89d0cf0db775ae603bd036f40e2",
+ "archive_sha256": "87d3e68be9fba389d538695b41409a7dd9304e6d037ece08aed74fa2ad97d486",
+ "window_id": "STG9Sd",
+ "window_end_utc": "2026-10-08T06:26:59Z",
+ "baseline_oauth_sha": "24b08c5a49362ac089a679a4be79cfff6876befb",
+ "baseline_oauth_image": "sha256:b7a53939a3d424cd9c3b01b58543bdcabff104342f38d464c6d0b85138eff381",
+ "compose_env_sha256": "14bb8b24527c7e39f3947a4b15c4d8f33d9cea67a94de61b77bef6df9ae3e793",
+ "service_env_sha256": "7c19a150e0e0dac3bf5f6cba1f6b8175d5f60fbd45c2427f788b3331c2158715",
+ "target": "staging",
+ "service_env_provider_list": "google,github"
+}
