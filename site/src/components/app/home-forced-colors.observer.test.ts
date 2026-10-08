@@ -73,7 +73,7 @@ const homeRules: Rule[] = [
 ];
 const focusRules = homeRules.filter((rule) => !rule.forced && /:focus(?:-visible)?\b/.test(rule.selector));
 const suppresses = (rule: Rule): boolean => /(?:^|;)\s*outline\s*:\s*(?:none|0)\b/.test(rule.body);
-const drawsRing = (rule: Rule): boolean => /box-shadow\s*:[^;]*var\(--focus-ring\)/.test(rule.body);
+const drawsRing = (rule: Rule): boolean => /box-shadow\s*:[^;]*var\(--(?:home-)?focus-ring\)/.test(rule.body);
 const forcedOutline = (rule: Rule): boolean => rule.forced && /outline\s*:\s*\d+px\s+solid\s+Highlight/.test(rule.body);
 
 test("global.css gives every focused control a forced-colors outline that outranks component rules", () => {
@@ -283,9 +283,9 @@ const inOption = (option: El, className: string): El => ({ tag: "span", classes:
 
 test("the mention picker's active row has a shape marker, not only a fill, in normal and forced colours", () => {
   const active = pickOption(true), inactive = pickOption(false);
-  /* Normal: lime fill plus a 3px ink bar; the start padding gives the bar's width back, so the text does not move. */
-  assert.equal(effective(active, "border-inline-start", "normal")?.value, "3px solid var(--home-lime-ink)");
-  assert.equal(effective(active, "background-color", "normal")?.value, "var(--home-lime)");
+  /* Normal: pastel fill plus a 3px focus-colour bar; the start padding gives the bar's width back, so the text does not move. */
+  assert.equal(effective(active, "border-inline-start", "normal")?.value, "3px solid var(--home-focus)");
+  assert.equal(effective(active, "background-color", "normal")?.value, "var(--home-blue-item)");
   const basePadding = Number(effective(inactive, "padding", "normal")?.value.match(/^\d+px\s+(\d+)px$/)?.[1]);
   assert.equal(Number(effective(active, "padding-inline-start", "normal")?.value.replace("px", "")) + 3, basePadding);
   /* Inactive rows draw no start border, so the bar marks only the row Enter inserts. */
@@ -297,13 +297,13 @@ test("the mention picker's active row has a shape marker, not only a fill, in no
   assert.equal(effective(active, "border-inline-start-color", "forced")?.value, "Highlight");
   assert.match(effective(active, "border-inline-start-width", "forced")?.value ?? "", /^3px\b/);
   /* Every text in the active row reads on that Highlight fill: its EFFECTIVE colour is HighlightText or inherited
-     from the row. The code check found the caption losing to the later lime-ink rule. */
+     from the row. The code check found the caption losing to the later selected-row ink rule. */
   for (const part of ["hm-pick-label", "hm-pick-caption"]) {
     const value = effective(inOption(active, part), "color", "forced");
     assert.ok(value === null || value.value === "HighlightText", `${part} in forced colours: ${JSON.stringify(value)}`);
   }
-  /* Positive control on the same helper: in normal mode the caption is the lime ink, so the lookup reaches it. */
-  assert.equal(effective(inOption(active, "hm-pick-caption"), "color", "normal")?.value, "var(--home-lime-ink)");
+  /* Positive control on the same helper: in normal mode the caption is the muted ink, so the lookup reaches it. */
+  assert.equal(effective(inOption(active, "hm-pick-caption"), "color", "normal")?.value, "var(--home-ink-muted)");
   /* The listbox semantics stay: the field names the active row and the row says it is selected. */
   const view = read("src/lib/home-pickers.ts");
   assert.match(view, /aria-activedescendant/);

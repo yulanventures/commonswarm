@@ -1,8 +1,5 @@
-/* Home UI: to-do view and To-dos pane (UI-SPEC.md 3.4 and 5; lane T), drawn to the canvas artboard
-   "Todo" (ref/Todo.dc.html) and the workspace To-dos card (ref/Space.dc.html). Colours are --home-*
-   tokens only; they switch in dark mode, so no dark block is needed here. Contrast of every pair is
-   the audited value next to the token in tokens.css (--home-ink on --home-canvas 14.32, --home-ink-muted
-   on --home-canvas 6.05, --home-card on --home-ink 15.90, --home-offline-text on --home-card 6.66). */
+/* Home to-do views: existing geometry with the neutral home palette.
+   Measured light/dark contrast pairs are documented in tokens.css. */
 
 .hm-todo {
   max-inline-size: calc(720px + 2 * clamp(16px, 4vw, 32px));
@@ -88,8 +85,7 @@
 }
 .hm-todo-comments { display: grid; gap: 14px; min-inline-size: 0; }
 
-/* Start choices: ink-edged pills under a hairline; the chosen one fills ink with the on-ink label (Todo.dc.html #EEF2EA;
-   --home-on-ink flips with --home-ink in dark mode). */
+/* Start choices: quiet-edged pills under a hairline; the chosen one has pastel blue fill and ink text. */
 .hm-todo-start { margin-block-start: 6px; padding-block-start: 16px; border-block-start: 1px solid var(--home-card-border); min-inline-size: 0; }
 .hm-todo-start legend { float: left; inline-size: 100%; padding: 0; margin: 0 0 10px; font-size: 16px; font-weight: 700; overflow-wrap: anywhere; }
 .hm-todo-start .hm-choice-options { clear: both; gap: 6px; }
@@ -97,23 +93,23 @@
    (16px + 1.5px) so each pill keeps the canvas's outer width. */
 .hm-todo-start .hm-choice {
   position: relative; min-block-size: 44px; padding: 0 17.5px; gap: 0;
-  border: 0; box-shadow: inset 0 0 0 1.5px var(--home-ink); background: transparent; color: var(--home-ink);
+  border: 0; box-shadow: inset 0 0 0 1.5px var(--home-field-border); background: transparent; color: var(--home-ink);
   font-size: 14px; font-weight: 600;
 }
 .hm-todo-start .hm-choice input { position: absolute; inset: 0; inline-size: 100%; block-size: 100%; margin: 0; opacity: 0; cursor: pointer; }
 .hm-todo-start .hm-choice-check { display: none; }
 .hm-todo-start .hm-choice:hover { background: var(--home-card); }
 .hm-todo-start .hm-choice:has(input:checked),
-.hm-todo-start .hm-choice[data-selected="true"] { border-color: var(--home-ink); background: var(--home-ink); color: var(--home-on-ink); }
+.hm-todo-start .hm-choice[data-selected="true"] { border-color: var(--home-focus); background: var(--home-blue-item); color: var(--home-ink); box-shadow: inset 0 0 0 1.5px var(--home-focus); }
 .hm-todo-start .hm-choice:has(input:disabled) { opacity: 0.6; }
 /* Focus repeats the inset edge before the ring (primitives.css's .hm-choice focus rule would drop it). */
-.hm-todo-start .hm-choice.hm-choice:has(input:focus-visible) { box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring); }
+.hm-todo-start .hm-choice.hm-choice:has(input:focus-visible) { box-shadow: inset 0 0 0 1.5px var(--home-focus), var(--home-focus-ring); }
 
 .hm-todo-status { display: grid; gap: 2.5px; min-block-size: 46px; align-content: start; }
 .hm-todo-status-line { margin: 0; overflow-wrap: anywhere; text-wrap: pretty; }
 .hm-todo-status-more { margin: 0; color: var(--home-ink-muted); font-size: 14px; overflow-wrap: anywhere; }
 /* The padlock line that closes the panel: 16 px icon, 10 px gap, 14 px muted (Todo.dc.html; --home-ink-muted on
-   --home-canvas 6.05). The panel's 12 px gap is the canvas's top margin. */
+   --home-canvas; ratio in tokens.css). The panel's 12 px gap is the canvas's top margin. */
 .hm-todo-steer { display: flex; align-items: center; gap: 10px; margin: 0; color: var(--home-ink-muted); font-size: 14px; min-inline-size: 0; }
 .hm-todo-steer span { min-inline-size: 0; overflow-wrap: anywhere; }
 .hm-todo-steer-icon { flex: none; }
@@ -158,8 +154,8 @@ textarea.hm-todo-input { resize: vertical; line-height: 1.45; }
   font: inherit; font-size: 14px; font-weight: 700; cursor: pointer;
   transition: background-color var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard);
 }
-.hm-todo-save { justify-self: start; border: 1.5px solid var(--home-ink); background: var(--home-ink); color: var(--home-card); }
-.hm-todo-save:hover { background: var(--home-link-hover); border-color: var(--home-link-hover); }
+.hm-todo-save { justify-self: start; border: 1.5px solid var(--home-accent); background: var(--home-accent); color: var(--home-accent-ink); box-shadow: inset 0 0 0 1.5px var(--home-focus); }
+.hm-todo-save:hover { background: var(--home-accent-hover); border-color: var(--home-accent-hover); color: var(--home-accent-ink); }
 .hm-todo-cancel, .hm-todos-filter-button { border: 1.5px solid var(--home-ink); background: transparent; color: var(--home-ink); }
 .hm-todo-cancel:hover, .hm-todos-filter-button:hover { background: var(--home-soft); }
 
@@ -188,16 +184,18 @@ textarea.hm-todo-input { resize: vertical; line-height: 1.45; }
 /* One line, like the canvas's text input: no resize grip. The canvas's 1.5px ink edge is the lane's inset stroke
    (primitives.css); the padding adds the edge back (12px 16px + 1.5px) so the text sits where the canvas puts it. */
 .hm-comment-input.hm-comment-input {
-  min-block-size: 50px; padding: 13.5px 17.5px; border: 0; box-shadow: inset 0 0 0 1.5px var(--home-ink); border-radius: 14px; resize: none;
+  min-block-size: 50px; padding: 13.5px 17.5px; border: 0;
+  box-shadow: inset 0 0 0 1.5px var(--home-ink); border-radius: 14px; resize: none;
 }
 /* Focus keeps the same 1.5px edge and adds the lane's focus ring outside it, so keyboard focus stays clearly visible.
    It outweighs the view's generic focus rule below (0,4,0 over 0,2,1). */
-.hm-todo .hm-comment-input.hm-comment-input:focus-visible { outline: none; box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring); }
-/* Post: ink fill, no edge, canvas text (--home-canvas on --home-ink 14.32). */
+.hm-todo .hm-comment-input.hm-comment-input:focus-visible { outline: none; box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--home-focus-ring); }
+/* Post: blue action, white label, inset boundary. */
 .hm-todo .hm-comment-post.hm-comment-post {
-  min-block-size: 50px; padding-inline: 24px; border: 0; border-radius: 14px; color: var(--home-canvas); font-size: 15px;
+  min-block-size: 50px; padding-inline: 24px; border: 0; border-radius: 14px; color: var(--home-accent-ink); font-size: 15px; background: var(--home-accent);
+  box-shadow: inset 0 0 0 1.5px var(--home-focus);
 }
-.hm-todo .hm-comment-post.hm-comment-post:hover { background: var(--home-link-hover); }
+.hm-todo .hm-comment-post.hm-comment-post:hover { background: var(--home-accent-hover); color: var(--home-accent-ink); }
 /* Under the field: what a tag does here. */
 .hm-comment-help { margin: 0; color: var(--home-ink-muted); font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; text-wrap: pretty; }
 
@@ -208,10 +206,11 @@ textarea.hm-todo-input { resize: vertical; line-height: 1.45; }
 .hm-todos-title { margin: 0; font-family: var(--home-font-display); font-weight: 700; letter-spacing: -0.02em; font-size: 32px; line-height: 1.1; }
 .hm-todos-title:focus { outline: none; }
 .hm-todos-filter { display: inline-flex; gap: 6px; }
-.hm-todos .hm-todos-filter-button[aria-pressed="true"] { background: var(--home-ink); color: var(--home-card); }
+.hm-todos .hm-todos-filter-button[aria-pressed="true"] { background: var(--home-blue-item); color: var(--home-ink); box-shadow: inset 0 0 0 1.5px var(--home-focus); }
 .hm-todo-rows {
   list-style: none; margin: 0; padding: 0 16px; background: var(--home-card); border: 1px solid var(--home-card-border);
-  border-radius: 18px; box-shadow: var(--home-card-shadow);
+  border-radius: 18px;
+  box-shadow: var(--home-card-shadow);
 }
 /* Scoped under the list: the workspace card styles a bare .hm-todo-row of its own (workspace.css). */
 .hm-todo-rows > .hm-todo-row {
@@ -242,8 +241,8 @@ a.hm-todo-row-copy:hover .hm-todo-row-title { text-decoration: underline; }
 .hm-todos-add-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
 .hm-todo :is(a, button, input, select, textarea, label):focus-visible,
-.hm-todos :is(a, button, input, select, textarea, label):focus-visible { outline: none; box-shadow: var(--focus-ring); }
-.hm-todo-done:has(input:focus-visible), .hm-todo-gate-kind:has(input:focus-visible), .hm-todo-check-hit:has(input:focus-visible) { box-shadow: var(--focus-ring); border-radius: 12px; }
+.hm-todos :is(a, button, input, select, textarea, label):focus-visible { outline: none; box-shadow: var(--home-focus-ring); }
+.hm-todo-done:has(input:focus-visible), .hm-todo-gate-kind:has(input:focus-visible), .hm-todo-check-hit:has(input:focus-visible) { box-shadow: var(--home-focus-ring); border-radius: 12px; }
 .hm-todo-done-box:focus-visible, .hm-todo-check:focus-visible { box-shadow: none; }
 
 @media (prefers-reduced-motion: reduce) {
