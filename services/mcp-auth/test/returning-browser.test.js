@@ -69,6 +69,36 @@ function poolFixture() {
         const row = sessions.get(key(parameters[0]));
         return result(row && !row.expired && !row.invalidated ? row : null);
       }
+      if (sql.includes("JOIN commonswarm_oauth.browser_sessions")) {
+        const [uid, sessionHash] = parameters;
+        const row = interactions.get(uid);
+        const session = sessions.get(key(sessionHash));
+        return result(row && row.session_hash.equals(sessionHash) && session &&
+          !session.expired && !session.invalidated && session.authenticated_at &&
+          row.user_id === session.user_id
+          ? { ...row, unexpired: !row.expired } : null);
+      }
+      if (sql.includes("SET selected_workspace_ids") && sql.includes("consent_token_consumed_at = statement_timestamp()")) {
+        const [selected, digest, uid, sessionHash, userId, version, tokenHash] = parameters;
+        const row = interactions.get(uid);
+        if (!row || !row.session_hash.equals(sessionHash) || row.user_id !== userId ||
+            row.selection_version !== version || !row.consent_token_hash.equals(tokenHash) ||
+            row.consent_token_consumed_at || row.completed || row.expired) return result(null);
+        Object.assign(row, { selected_workspace_ids: selected, manifest_digest: digest,
+          selection_version: version + 1, consent_token_consumed_at: new Date() });
+        return result(row);
+      }
+      if (sql.includes("SET provider_grant_id")) {
+        const [providerId, grantId, uid] = parameters;
+        const row = interactions.get(uid);
+        Object.assign(row, { provider_grant_id: providerId, commonswarm_grant_id: grantId });
+        return result(row);
+      }
+      if (sql.includes("SET completed_at")) {
+        const row = interactions.get(parameters[0]);
+        Object.assign(row, { completed: true, completed_at: new Date() });
+        return result(row);
+      }
       if (sql.includes("INSERT INTO commonswarm_oauth.interactions")) {
         const [uid, sessionHash, clientId, redirectUri, resource, scopes, challenge, state] = parameters;
         const previous = interactions.get(uid);
@@ -117,7 +147,19 @@ function poolFixture() {
 }
 
 async function harness() {
-  const provider = await createMcpProvider({ adapter: createAtomicMemoryAdapter() });
+  const adapter = createAtomicMemoryAdapter();
+  const effects = { grants: 0, activations: 0 };
+  const provider = await createMcpProvider({ adapter: (model) => {
+    const backing = adapter(model);
+    return { ...backing, async upsert(...args) {
+      if (model === "Grant") effects.grants += 1;
+      return backing.upsert(...args);
+    } };
+  }, metadataFetch: async () => new Response(JSON.stringify({
+    client_id: "https://client.example/oauth.json", client_name: "Test Client",
+    client_uri: "https://client.example/start", redirect_uris: ["https://client.example/callback"],
+    grant_types: ["authorization_code"], response_types: ["code"], token_endpoint_auth_method: "none",
+  }), { headers: { "content-type": "application/json" } }) });
   const pool = poolFixture();
   pool.addSession(SESSION_A);
   pool.addSession(SESSION_B);
@@ -129,7 +171,7 @@ async function harness() {
       url: new URL("https://api.commonswarm.com/auth/v1/authorize"),
       provider: "github", state: "sign-in-state-long-enough", verifier: "sign-in-verifier-long-enough",
     }) },
-    consentOrchestrator: { status: async () => [] },
+    consentOrchestrator: { status: async () => [], activate: async () => { effects.activations += 1; } },
     workspaceReader: async () => [{ id: WORKSPACE, name: "Workspace One" }],
     allowedOrigins: new Set([ISSUER]), callbackUrl: `${ISSUER}/oauth/callback/gotrue`,
   });
@@ -160,7 +202,7 @@ async function harness() {
     await handler(request, response);
     return response;
   }
-  return { provider, pool, store, logs, attempt, run };
+  return { provider, pool, store, logs, effects, attempt, run };
 }
 
 function expectPage(response, status) {
@@ -305,4 +347,141 @@ test("missing or changed provider sessions and incomplete callbacks have safe re
   assert.equal((await h.run(await h.attempt("session-control", {
     providerSession: { uid: providerSession.uid, accountId: USER },
   }))).statusCode, 200);
+});
+
+function consentPost(view, { session = SESSION_A, csrf, accept = "text/html", origin = ISSUER } = {}) {
+  const form = new URLSearchParams({ selection_version: "0", csrf_token: csrf,
+    workspace_ids: WORKSPACE, home_workspace_id: WORKSPACE });
+  const request = Readable.from([Buffer.from(form.toString())]);
+  request.method = "POST";
+  request.url = `${view.url}/consent`;
+  request.headers = { ...view.headers, accept, origin,
+    "content-type": "application/x-www-form-urlencoded",
+    cookie: view.headers.cookie.replace(SESSION_A, session) };
+  request.socket = { encrypted: true };
+  return request;
+}
+
+test("live consent refuses a different browser session with 409 for HTML and JSON, then admits the original", async () => {
+  const h = await harness();
+  const view = await h.attempt("live-cross-session-consent");
+  const page = await h.run(view);
+  assert.equal(page.statusCode, 200);
+  const csrf = /name="csrf_token" value="([^"]+)"/u.exec(page.body)[1];
+  for (const accept of ["text/html", "application/json"]) {
+    const refused = await h.run(consentPost(view, { csrf, session: SESSION_B, accept }));
+    assert.equal(refused.statusCode, 409, refused.body);
+    if (accept === "text/html") {
+      expectPage(refused, 409);
+      assert.doesNotMatch(refused.body, /Already approved|Test Client|client.example/u);
+    } else {
+      assert.equal(refused.headers["content-type"], "application/json");
+      assert.deepEqual(JSON.parse(refused.body), { error: "interaction_binding_mismatch" });
+    }
+    assert.deepEqual(h.effects, { grants: 0, activations: 0 });
+  }
+  const original = await h.run(consentPost(view, { csrf }));
+  assert.equal(original.statusCode, 303, original.body);
+  assert.deepEqual(h.effects, { grants: 1, activations: 1 });
+});
+
+async function completedConsent(h, uid) {
+  const view = await h.attempt(uid);
+  const page = await h.run(view);
+  assert.equal(page.statusCode, 200);
+  const csrf = /name="csrf_token" value="([^"]+)"/u.exec(page.body)[1];
+  const first = await h.run(consentPost(view, { csrf }));
+  assert.equal(first.statusCode, 303, first.body);
+  assert.deepEqual(h.effects, { grants: 1, activations: 1 });
+  return { view, csrf };
+}
+
+test("repeat consent before and after provider consumption acknowledges approval without another grant", async () => {
+  const h = await harness();
+  const { view, csrf } = await completedConsent(h, "repeat-consent");
+  for (const consumed of [false, true]) {
+    if (consumed) await (await h.provider.Interaction.find("repeat-consent")).destroy();
+    const repeat = await h.run(consentPost(view, { csrf }));
+    assert.equal(repeat.statusCode, 409, repeat.body);
+    assert.match(repeat.headers["content-type"], /text\/html/u);
+    assert.match(repeat.body, /Already approved/u);
+    assert.match(repeat.body, /You can return to <strong>Test Client<\/strong>/u);
+    assert.equal(repeat.headers["cache-control"], "no-store");
+    assert.deepEqual(h.effects, { grants: 1, activations: 1 });
+  }
+  const json = await h.run(consentPost(view, { csrf, accept: "application/json" }));
+  assert.equal(json.statusCode, 410);
+  assert.deepEqual(JSON.parse(json.body), { error: "interaction_expired" });
+});
+
+test("completed consent stays private to its authenticated session and original CSRF token", async () => {
+  const h = await harness();
+  const { view, csrf } = await completedConsent(h, "private-consent");
+  await (await h.provider.Interaction.find("private-consent")).destroy();
+  for (const overrides of [
+    { session: SESSION_B }, { csrf: "incorrect-token-long-enough" },
+    { csrf: "" }, { origin: "https://attacker.example" },
+  ]) {
+    const refusal = await h.run(consentPost(view, { csrf, ...overrides }));
+    assert.ok(refusal.statusCode >= 400);
+    assert.doesNotMatch(refusal.body, /Already approved|Test Client|client.example/u);
+  }
+  const session = h.pool.sessions.get(hashOpaque(SESSION_A).toString("hex"));
+  for (const patch of [{ user_id: "different-user" }, { invalidated: true }, { expired: true }]) {
+    const original = { ...session };
+    Object.assign(session, patch);
+    const refusal = await h.run(consentPost(view, { csrf }));
+    assert.doesNotMatch(refusal.body, /Already approved|Test Client|client.example/u);
+    Object.assign(session, original);
+  }
+  assert.match((await h.run(consentPost(view, { csrf }))).body, /Already approved/u);
+  assert.deepEqual(h.effects, { grants: 1, activations: 1 });
+});
+
+test("expired consent gives a validated restart link; unknown attempts and unsafe client links stay generic", async () => {
+  const h = await harness();
+  const view = await h.attempt("expired-consent");
+  const page = await h.run(view);
+  const csrf = /name="csrf_token" value="([^"]+)"/u.exec(page.body)[1];
+  h.pool.interactions.get("expired-consent").expired = true;
+  await (await h.provider.Interaction.find("expired-consent")).destroy();
+  const expired = await h.run(consentPost(view, { csrf }));
+  assert.equal(expired.statusCode, 410);
+  assert.match(expired.headers["content-type"], /text\/html/u);
+  assert.match(expired.body, /href="https:\/\/client.example\/start"/u);
+  assert.match(expired.body, /Start the connection again/u);
+  const json = await h.run(consentPost(view, { csrf, accept: "application/json" }));
+  assert.deepEqual(JSON.parse(json.body), { error: "interaction_expired" });
+  const unknown = await h.run(consentPost(requestFor("unknown", view.headers.cookie), { csrf }));
+  expectPage(unknown, 410);
+  const otherSession = await h.run(consentPost(view, { csrf, session: SESSION_B }));
+  expectPage(otherSession, 410);
+  assert.doesNotMatch(otherSession.body, /client.example|Test Client/u);
+  for (const clientUri of ["javascript:alert(1)", "https://user:password@client.example/", "https://attacker.example/", "https://client.example/\\@attacker.example"]) {
+    h.provider.Client.find = async () => ({ clientName: "Test Client", clientUri,
+      redirectUris: ["https://client.example/callback"] });
+    const safe = await h.run(consentPost(view, { csrf }));
+    assert.equal(safe.statusCode, 410);
+    assert.doesNotMatch(safe.body, /href="(?:javascript:|https:\/\/(?:user:|attacker))/u);
+  }
+  assert.deepEqual(h.effects, { grants: 0, activations: 0 });
+});
+
+test("consent page permits and serves its local submit script while inline scripts stay blocked", async () => {
+  const h = await harness();
+  const page = await h.run(await h.attempt("submit-script"));
+  const csp = page.headers["content-security-policy"];
+  assert.match(csp, /(?:^|;) script-src 'self'; script-src-attr 'none'$/u);
+  assert.doesNotMatch(csp, /script-src[^;]*'unsafe-inline'/u);
+  const source = /<script src="([^"]+)" defer><\/script>/u.exec(page.body)[1];
+  const request = requestFor("unused", "");
+  request.url = source;
+  const script = await h.run(request);
+  assert.equal(script.statusCode, 200);
+  assert.equal(script.headers["content-type"], "text/javascript; charset=utf-8");
+  assert.equal(script.headers["x-content-type-options"], "nosniff");
+  assert.equal(script.headers["cache-control"], "no-store");
+  assert.ok(script.body.length > 0);
+  assert.doesNotMatch(script.body, /<html|Test Client|browser-session/u);
+  assert.equal(script.headers["set-cookie"], undefined);
 });

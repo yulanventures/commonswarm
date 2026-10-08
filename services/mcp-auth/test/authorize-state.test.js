@@ -105,6 +105,14 @@ async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnab
         sessions.set(values[0].toString("hex"), row);
         return rows(row);
       }
+      if (sql.includes("JOIN commonswarm_oauth.browser_sessions")) {
+        const [uid, sessionHash] = values;
+        const row = interactions.get(uid);
+        const session = sessions.get(sessionHash.toString("hex"));
+        return rows(row && row.session_hash.equals(sessionHash) && session?.status === "valid" &&
+          session.authenticated_at && row.user_id === session.user_id
+          ? { ...row, unexpired: true } : null);
+      }
       if (sql.includes("INSERT INTO commonswarm_oauth.interactions")) {
         const previous = interactions.get(values[0]);
         const row = {
@@ -153,7 +161,7 @@ async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnab
         return rows({ ...row });
       }
       if (sql.includes("SET completed_at")) {
-        interactions.get(values[0]).completed = true;
+        Object.assign(interactions.get(values[0]), { completed: true, completed_at: new Date() });
         return rows({});
       }
       throw new Error("unexpected fixture database operation");
@@ -353,7 +361,7 @@ test("provider error events log a thrown hook with request id and source locatio
 
 function assertConsentPolicy(response) {
   assert.equal(response.getHeader("content-security-policy"),
-    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://claude.ai; frame-ancestors 'none'; base-uri 'none'");
+    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://claude.ai; frame-ancestors 'none'; base-uri 'none'; script-src 'self'; script-src-attr 'none'");
   assert.equal(response.getHeader("referrer-policy"), "same-origin");
 }
 
@@ -450,8 +458,11 @@ test("one workspace consent completes Claude authorization and token exchange", 
             assert.equal(begin.body.command.grant_id, bound.commonswarm_grant_id);
             assert.equal(begin.body.command.manifest_digest, bound.manifest_digest.toString("hex"));
             const replay = await h.run(`${path}/consent`, "POST", form.toString());
-            assert.equal(replay.statusCode, 410);
-            assert.equal(h.commands.length, 3);
+            assert.equal(replay.statusCode, 409);
+            assert.match(replay.getHeader("content-type"), /text\/html/u);
+            assert.match(replay.body, /Already approved/u);
+            assert.equal(await h.provider.Interaction.find(path.split("/").at(-1)), undefined);
+            assert.equal(h.commands.length, 3, "the repeat runs no second grant commands");
           });
         }
       }
@@ -517,7 +528,7 @@ test("consent CSP allows provider-approved native loopback origins", async (t) =
       const page = await h.run(start.getHeader("location"));
       assert.equal(page.statusCode, 200);
       assert.equal(page.getHeader("content-security-policy"),
-        `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' http://${host}:49152; frame-ancestors 'none'; base-uri 'none'`);
+        `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' http://${host}:49152; frame-ancestors 'none'; base-uri 'none'; script-src 'self'; script-src-attr 'none'`);
     });
   }
   await t.test("web loopback is refused before interaction or consent", async () => {

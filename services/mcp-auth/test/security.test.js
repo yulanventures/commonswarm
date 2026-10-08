@@ -254,7 +254,7 @@ test("consent CSP serializes only a safe HTTPS or explicitly allowed loopback or
   ]) {
     const headers = consentSecurityHeaders(uri, options);
     assert.equal(headers["content-security-policy"],
-      `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${origin}; frame-ancestors 'none'; base-uri 'none'`);
+      `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${origin}; frame-ancestors 'none'; base-uri 'none'; script-src 'self'; script-src-attr 'none'`);
     for (const name of ["cache-control", "referrer-policy", "x-content-type-options"]) {
       assert.equal(headers[name], INTERACTION_SECURITY_HEADERS[name]);
     }

@@ -6,6 +6,7 @@ import { createAdminGateHandler } from "./admin-gate.js";
 import { AdminTokenLifecycle } from "./admin-lifecycle.js";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 import { createPool, loadConfig } from "./config.js";
@@ -13,7 +14,7 @@ import { ClientError, InteractionStateError } from "./client-error.js";
 import { INTERACTION_SECURITY_HEADERS } from "./browser-security.js";
 import { createConsentOrchestrator, createPostgresConsentProgress } from "./consent.js";
 import { createGoTrueClient } from "./gotrue.js";
-import { renderDifferentAccountPage } from "./interaction-page.js";
+import { CONSENT_SUBMIT_PATH, renderDifferentAccountPage, renderConsentResultPage } from "./interaction-page.js";
 import { InteractionStore } from "./interaction-store.js";
 import { createInteractionHandler } from "./interactions.js";
 import { createAdminConsentService, PostgresAdminConsentStore } from "./admin-consent.js";
@@ -31,6 +32,7 @@ const ALWAYS_AVAILABLE = new Set([
   "/.well-known/openid-configuration",
   "/.well-known/oauth-authorization-server",
 ]);
+const CONSENT_SUBMIT_SCRIPT = readFileSync(new URL("./consent-submit.js", import.meta.url));
 
 function json(response, status, body, headers = {}) {
   response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", ...headers });
@@ -102,6 +104,16 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
         json(response, 503, { error: "authorization_service_disabled" });
         return;
       }
+      if (path === CONSENT_SUBMIT_PATH) {
+        if (request.method !== "GET" && request.method !== "HEAD") {
+          json(response, 405, { error: "method_not_allowed" }, { allow: "GET, HEAD" });
+          return;
+        }
+        response.writeHead(200, { ...INTERACTION_SECURITY_HEADERS,
+          "content-type": "text/javascript; charset=utf-8" });
+        response.end(request.method === "HEAD" ? undefined : CONSENT_SUBMIT_SCRIPT);
+        return;
+      }
       if (interactionHandler && await interactionHandler(request, response,
         new URL(request.url, "https://mcp.commonswarm.com"))) return;
       await oidc(request, response);
@@ -115,13 +127,14 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
         path, status, error_code: clientResponse?.body.error ?? error?.code ?? "internal_error" });
       if (!response.headersSent) {
         if (error instanceof InteractionStateError && (request.method === "GET" ||
-            error.code === "different_account" || error.code === "interaction_binding_mismatch") &&
+            error.code === "different_account" || error.code === "interaction_binding_mismatch" ||
+            error.code === "interaction_expired") &&
             !String(request.headers.accept ?? "").includes("application/json")) {
           response.writeHead(status, {
             ...INTERACTION_SECURITY_HEADERS,
             "content-type": "text/html; charset=utf-8",
           });
-          response.end(error.code === "different_account" ? renderDifferentAccountPage() : "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Start the connection again</title><p>This connection attempt expired or was opened in another window. Start the connection again from your app.</p></html>");
+          response.end(error.code === "different_account" ? renderDifferentAccountPage() : renderConsentResultPage());
         } else {
           json(response, status, clientResponse?.body ?? { error: "internal_error", request_id: requestId });
         }

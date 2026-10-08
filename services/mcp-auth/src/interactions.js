@@ -7,12 +7,13 @@ import {
   assertAllowedOrigin,
   consentSecurityHeaders,
   INTERACTION_SECURITY_HEADERS,
+  opaqueMatches,
   parseCookies,
   SESSION_COOKIE,
   sessionCookie,
 } from "./browser-security.js";
 import { ClientError, InteractionStateError } from "./client-error.js";
-import { renderConsentPage, renderSignInPage, renderDifferentAccountPage } from "./interaction-page.js";
+import { CONSENT_SUBMIT_PATH, renderConsentPage, renderSignInPage, renderDifferentAccountPage, renderConsentResultPage } from "./interaction-page.js";
 import { metadataUrlAllowed } from "./metadata-fetch.js";
 import { RESOURCE, RESOURCE_SCOPES } from "./provider.js";
 
@@ -124,6 +125,24 @@ async function clientConsentDisplay(provider, clientId, redirectUri) {
     primary: redirect.hostname.toLowerCase(),
     declaredName: client?.clientName ?? null,
   };
+}
+
+async function consentReturnDestination(provider, attempt) {
+  if (!attempt || attempt.resource !== RESOURCE) return {};
+  const client = await findClient(provider, attempt.client_id);
+  // Never build a return link from submitted parameters or an OAuth callback.
+  if (!client?.redirectUris?.includes(attempt.redirect_uri)) return {};
+  const name = client.clientName || new URL(attempt.redirect_uri).hostname;
+  const uri = client.clientUri;
+  if (typeof uri !== "string" || /[\s\u0000-\u001f\u007f\\]/u.test(uri)) return { clientName: name };
+  try {
+    const url = new URL(uri);
+    if (url.protocol !== "https:" || url.username || url.password || url.hash ||
+        url.origin !== new URL(attempt.redirect_uri).origin) return { clientName: name };
+    return { clientName: name, restartUrl: url.href };
+  } catch {
+    return { clientName: name };
+  }
 }
 
 export async function ensureSession(request, response, store) {
@@ -238,6 +257,7 @@ export function createInteractionHandler({
       if (!(error instanceof URIError)) throw error;
       throw new InteractionStateError("interaction_expired");
     }
+    if (`/interaction/${interactionUid}` === CONSENT_SUBMIT_PATH) return false;
     const operation = match[2] ?? "view";
     let parsed;
     let body;
@@ -249,6 +269,35 @@ export function createInteractionHandler({
       }
     }
     const browser = await ensureSession(request, response, store);
+
+    async function unavailableConsent(status = 410) {
+      if (request.method !== "POST" || operation !== "consent") return false;
+      try {
+        assertAllowedOrigin(request.headers.origin, allowedOrigins);
+      } catch (error) {
+        if (error?.code !== "origin_forbidden") throw error;
+        respond(response, 403, { error: "origin_forbidden" });
+        return true;
+      }
+      const csrfToken = parsed.format === "form" ? body.csrf_token : request.headers["x-cswarm-csrf"];
+      if (typeof csrfToken !== "string" || csrfToken.length < 20) {
+        respond(response, 403, { error: "csrf_required" });
+        return true;
+      }
+      const attempt = await store.findConsentAttempt(interactionUid, browser.id);
+      const completed = attempt?.resource === RESOURCE && attempt.unexpired &&
+        attempt.completed_at != null && attempt.consent_token_consumed_at != null &&
+        opaqueMatches(csrfToken, attempt.consent_token_hash);
+      // JSON consumers retain the existing expired error. HTML acknowledges only
+      // the original completed submission, without resuming or granting again.
+      if (String(request.headers.accept ?? "").includes("application/json")) {
+        throw new InteractionStateError("interaction_expired");
+      }
+      const destination = completed || (attempt?.completed_at == null && attempt?.resource === RESOURCE)
+        ? await consentReturnDestination(provider, attempt) : {};
+      respondHtml(response, completed ? 409 : status, renderConsentResultPage({ completed, ...destination }));
+      return true;
+    }
     let details;
     try {
       details = await provider.interactionDetails(request, response);
@@ -256,6 +305,7 @@ export function createInteractionHandler({
       // The pinned provider uses this class for missing/expired interactions,
       // missing interaction cookies, and unavailable/changed provider sessions.
       if (!(error instanceof errors.SessionNotFound)) throw error;
+      if (await unavailableConsent()) return true;
       throw new InteractionStateError("interaction_expired", undefined, { cause: error });
     }
     if (details.uid !== interactionUid) {
@@ -272,9 +322,18 @@ export function createInteractionHandler({
       respond(response, 400, { error: "invalid_target" });
       return true;
     }
-    const bound = await store.bindInteraction(
-      bindingFromDetails(interactionUid, browser.id, details, browser.session),
-    );
+    let bound;
+    try {
+      bound = await store.bindInteraction(
+        bindingFromDetails(interactionUid, browser.id, details, browser.session),
+      );
+    } catch (error) {
+      if (!(error instanceof InteractionStateError) || error.code !== "interaction_binding_mismatch") throw error;
+      // A live binding refusal keeps its 409 contract and original JSON error.
+      if (String(request.headers.accept ?? "").includes("application/json")) throw error;
+      if (await unavailableConsent(error.status)) return true;
+      throw error;
+    }
     const session = await store.requireSession(browser.id);
     if (bound.user_id && session?.user_id && bound.user_id !== session.user_id) {
       respondHtml(response, 409, renderDifferentAccountPage());

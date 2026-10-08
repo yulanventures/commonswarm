@@ -1,5 +1,9 @@
 import { AUTH_PROVIDER_CATALOG } from "./auth-provider-catalog.js";
 
+// Caddy already proxies /interaction/* to OAuth. The dot excludes this fixed
+// filename from oidc-provider's base64url interaction UID alphabet.
+export const CONSENT_SUBMIT_PATH = "/interaction/consent-submit.js";
+
 const CONSENT_WARNING = "Chats using this Claude connection can use any seat created by the connection. Seat names do not isolate chats. These seats check messages during a chat turn; they do not run a listener.";
 
 // Sign-in providers the page may name. Any other value (null, unknown, inherited
@@ -23,7 +27,7 @@ function initial(value) {
   return escapeHtml(first.toUpperCase());
 }
 
-// Inline icons only: the page CSP allows no images, fonts or scripts.
+// Inline icons only: the page CSP allows no images or fonts.
 const ICON_ATTRS = 'width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"';
 const ICONS = {
   workspaces: `<svg ${ICON_ATTRS}><rect x="2.75" y="2.75" width="6" height="6" rx="1.8"/><rect x="11.25" y="2.75" width="6" height="6" rx="1.8"/><rect x="2.75" y="11.25" width="6" height="6" rx="1.8"/><rect x="11.25" y="11.25" width="6" height="6" rx="1.8"/></svg>`,
@@ -271,6 +275,19 @@ export function renderDifferentAccountPage() {
     <h1>You signed in as a different account; start again</h1><p>Start a new connection from your app.</p></div></main></body></html>`;
 }
 
+export function renderConsentResultPage({ completed = false, clientName, restartUrl } = {}) {
+  const title = completed ? "Already approved" : "Start the connection again";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><title>${title}</title><style>${CONSENT_STYLES}</style></head>
+    <body><main class="page"><header class="top"><span class="brand">${BRAND_MARK}<span>CommonSwarm</span></span></header>
+    <div class="card"><h1>${title}</h1>
+    ${completed ? `<p class="lede">You can return to <strong>${escapeHtml(clientName || "your app")}</strong>.</p>
+      <p>If your app did not finish connecting, start a new connection from that app.</p>`
+      : `<p class="lede">This connection attempt expired or was opened in another window. Start the connection again from your app.</p>`}
+    <div class="actions">${restartUrl ? `<a href="${escapeHtml(restartUrl)}">Return to ${escapeHtml(clientName || "your app")}${completed ? "" : " to start again"}</a>`
+      : '<a href="https://commonswarm.com/app">Return to CommonSwarm</a>'}</div></div></main></body></html>`;
+}
+
 export function renderConsentPage({
   interactionUid,
   clientDisplay,
@@ -326,6 +343,7 @@ export function renderConsentPage({
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>Connect an app to CommonSwarm</title>
+<script src="${CONSENT_SUBMIT_PATH}" defer></script>
 <style>
 ${CONSENT_STYLES}
 </style></head><body><main class="page">

@@ -131,7 +131,7 @@ test("chooser offers only configured provider links without scripts; initial sin
   assert.equal(new URL(only.headers.location).searchParams.get("provider"), "github");
 });
 
-test("account forms and their redirect chains stay same-origin and stop at a link chooser under the unchanged CSP", async () => {
+test("account forms and their redirect chains stay same-origin and stop at a link chooser under the page CSP", async () => {
   const chooserCsp = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
   for (const providers of [["google"], ["github"], ["google", "github"]]) {
     const h = harness({ providers, authenticated: true });
@@ -143,7 +143,7 @@ test("account forms and their redirect chains stay same-origin and stop at a lin
     };
     const consent = await h.run();
     assert.equal(consent.status, 200);
-    assert.equal(consent.headers["content-security-policy"], chooserCsp.replace("form-action 'self'", "form-action 'self' https://client.example"));
+    assert.equal(consent.headers["content-security-policy"], chooserCsp.replace("form-action 'self'", "form-action 'self' https://client.example") + "; script-src 'self'; script-src-attr 'none'");
     const forms = [...consent.body.matchAll(/<form\b[^>]*action="([^"]+)"[^>]*>/gu)];
     assert.equal(forms.length, 2, "consent and switch remain separate forms");
     for (const [, action] of forms) assert.equal(new URL(action, ORIGIN).origin, ORIGIN);

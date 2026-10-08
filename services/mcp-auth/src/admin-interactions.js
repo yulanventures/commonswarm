@@ -4,7 +4,7 @@ import { bindingFromDetails, ensureSession, identity, oidcLogin, readBody, respo
 import { ADMIN_RESOURCE } from "./admin-policy.generated.js";
 import { AdminConsentError, requireFreshAdminSession } from "./admin-consent.js";
 import { effectiveAdminGate } from "./admin-gate.js";
-import { renderSignInPage } from "./interaction-page.js";
+import { CONSENT_SUBMIT_PATH, renderSignInPage } from "./interaction-page.js";
 import { renderAdminConsentPage } from "./admin-interaction-page.js";
 
 export function createResourceInteractionHandler({ mcpHandler, adminHandler }) {
@@ -26,6 +26,7 @@ export function createAdminInteractionHandler({ provider, store, service, gotrue
     let uid;
     try { uid = decodeURIComponent(match[1]); }
     catch { throw new InteractionStateError("interaction_expired"); }
+    if (`/interaction/${uid}` === CONSENT_SUBMIT_PATH) return false;
     const operation = match[2] ?? "view";
     const details = suppliedDetails ?? await provider.interactionDetails(request, response);
     if (details.uid !== uid) throw new InteractionStateError("interaction_mismatch");

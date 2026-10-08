@@ -1,9 +1,130 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { Readable } from "node:stream";
+import { runInNewContext } from "node:vm";
 import { test } from "node:test";
 
 import { PROVIDER_LABELS, renderConsentDestination, renderConsentPage } from "../src/interaction-page.js";
 import { createInteractionHandler } from "../src/interactions.js";
+import { createAdminInteractionHandler } from "../src/admin-interactions.js";
+import { createHandler } from "../src/server.js";
+
+// Parse this repository's line-oriented Caddy blocks. Only standalone block
+// delimiters count; braces inside environment placeholders or JSON stay tokens.
+function caddyTree(source) {
+  const root = { tokens: [], children: [] };
+  const stack = [root];
+  for (const raw of source.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line === "}") {
+      assert.ok(stack.length > 1, "unmatched Caddy closing brace");
+      stack.pop();
+      continue;
+    }
+    const block = line.endsWith(" {");
+    const node = { tokens: (block ? line.slice(0, -2) : line).split(/\s+/u), children: [] };
+    stack.at(-1).children.push(node);
+    if (block) stack.push(node);
+  }
+  assert.equal(stack.length, 1, "unclosed Caddy block");
+  return root;
+}
+
+test("production Caddy routes the rendered submit guard GET to the OAuth service", () => {
+  const source = readFileSync(new URL("../../../deploy/supabase-stack/commonswarm-mcp.caddy", import.meta.url), "utf8");
+  const config = caddyTree(source);
+  const site = config.children.find((node) => node.tokens[0] === "mcp.commonswarm.com");
+  assert.ok(site, "production MCP site exists");
+  const snippets = new Map(config.children.filter((node) => /^\(.+\)$/u.test(node.tokens[0]))
+    .map((node) => [node.tokens[0].slice(1, -1), node.children]));
+  const expand = (nodes) => nodes.flatMap((node) => {
+    if (node.tokens[0] !== "import") return [node];
+    assert.ok(snippets.has(node.tokens[1]), "active import resolves to a parsed snippet");
+    return expand(snippets.get(node.tokens[1]));
+  });
+  const route = site.children.find((node) => node.tokens[0] === "route");
+  assert.ok(route, "production site has an active route block");
+  const active = expand(route.children);
+  const matchers = new Map(active.filter((node) => node.tokens[0].startsWith("@"))
+    .map((node) => [node.tokens[0], node.children]));
+  const matchesPath = (pattern, path) => new RegExp(`^${pattern.split("*")
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join(".*")}$`, "u").test(path);
+  const oauthGet = (path) => active.some((node) => {
+    if (node.tokens[0] !== "handle") return false;
+    const matcher = matchers.get(node.tokens[1]);
+    if (!matcher) return false;
+    const methods = matcher.find((entry) => entry.tokens[0] === "method")?.tokens.slice(1) ?? [];
+    const paths = matcher.find((entry) => entry.tokens[0] === "path")?.tokens.slice(1) ?? [];
+    return methods.includes("GET") && paths.some((pattern) => matchesPath(pattern, path)) &&
+      node.children.some((entry) => entry.tokens[0] === "reverse_proxy" &&
+        entry.tokens[1] === "127.0.0.1:{$MCP_OAUTH_HOST_PORT}");
+  });
+  assert.ok(oauthGet("/authorize"), "positive control: a known OAuth GET is routed");
+  assert.equal(oauthGet("/assets/consent-submit.js"), false, "the former asset path falls through");
+  const script = one(htmlTree(page()), (node) => node.tag === "script");
+  assert.ok(oauthGet(script.attrs.src), `submit guard GET ${script.attrs.src} must reach OAuth`);
+});
+
+test("the rendered submit guard is served before interaction lookup with JavaScript security headers", async () => {
+  const script = one(htmlTree(page()), (node) => node.tag === "script");
+  const unexpected = () => assert.fail("the static script must not touch provider, browser session or database state");
+  const handler = createHandler({
+    provider: { callback: () => unexpected },
+    pool: { query: unexpected },
+    publicAuthorizationEnabled: true,
+    maxBodyBytes: 1024,
+    logger: { info() {} },
+    interactionHandler: unexpected,
+  });
+  for (const [method, status] of [["GET", 200], ["HEAD", 200], ["POST", 405]]) {
+    const request = Readable.from([]);
+    Object.assign(request, { method, url: script.attrs.src, headers: {} });
+    const response = {
+      headers: {}, statusCode: 0, body: "",
+      setHeader(name, value) { this.headers[name] = value; },
+      writeHead(status, headers) { this.statusCode = status; Object.assign(this.headers, headers); },
+      end(body = "") { this.body += body; },
+    };
+    await handler(request, response);
+    assert.equal(response.statusCode, status, method);
+    assert.equal(response.headers["cache-control"], "no-store");
+    if (status === 200) {
+      assert.equal(response.headers["content-type"], "text/javascript; charset=utf-8");
+      assert.equal(response.headers["x-content-type-options"], "nosniff");
+      assert.equal(response.body, method === "GET"
+        ? readFileSync(new URL("../src/consent-submit.js", import.meta.url), "utf8") : "");
+    } else {
+      assert.equal(response.headers.allow, "GET, HEAD");
+      assert.deepEqual(JSON.parse(response.body), { error: "method_not_allowed" });
+    }
+  }
+});
+
+test("neither interaction parser treats the submit guard filename as a UID, including encoded aliases", async () => {
+  const script = one(htmlTree(page()), (node) => node.tag === "script");
+  const sentinel = new Error("interaction lookup reached");
+  const options = {
+    provider: { interactionDetails: async () => { throw sentinel; } },
+    store: { requireSession: async () => ({}) },
+  };
+  const request = { method: "GET", headers: { cookie: "__Host-cswarm-oauth=browser-session-long-enough" } };
+  const response = {};
+  for (const make of [createInteractionHandler, createAdminInteractionHandler]) {
+    const handler = make(options);
+    // Positive control: an ordinary UID really reaches provider lookup.
+    await assert.rejects(handler(request, response, new URL(`https://mcp.commonswarm.com/interaction/${UID}`)),
+      (error) => error === sentinel);
+    for (const path of [script.attrs.src, script.attrs.src.replace(".", "%2E"),
+      script.attrs.src.replace("consent", "%63onsent")]) {
+      for (const operation of ["", "/selection", "/consent", "/sign-in", "/switch-account"]) {
+        assert.equal(await handler(request, response, new URL(`https://mcp.commonswarm.com${path}${operation}`)), false,
+          `${make.name}: ${path}${operation} must not become a UID`);
+      }
+    }
+  }
+});
 
 const USER = "10000000-0000-4000-8000-000000000001";
 const W1 = "20000000-0000-4000-8000-000000000001";
@@ -162,7 +283,7 @@ test("provider-supplied and user-supplied values are escaped everywhere they app
     switchAccount: { action: `/interaction/x"><script>bad()</script>/switch-account` },
     validationError: `Bad ${evil}`,
   });
-  assert.doesNotMatch(html, /<script|<img|onerror=alert\(1\)>|x"><|alert\("x"\)|&'/u);
+  assert.doesNotMatch(html, /<script(?! src="\/interaction\/consent-submit\.js" defer><\/script>)|<img|onerror=alert\(1\)>|x"><|alert\("x"\)|&'/u);
   const escaped = "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;&amp;&#39;";
   for (const fragment of [`host${escaped}`, `App ${escaped}`, `mail${escaped}@example.test`, `Name ${escaped}`,
     `value="id-${escaped}"`, `value="csrf&quot;${escaped}"`, `Bad ${escaped}`, "&lt;img src=x onerror=alert(1)&gt;",
@@ -239,9 +360,14 @@ test("the tab title is first-party text and never carries a client-supplied name
     ["Connect Claude to CommonSwarm"]);
 });
 
-test("the page makes no external requests and carries no script", () => {
+test("the page loads only the local submit guard and makes no external requests", () => {
   const html = page({ switchAccount: SWITCH, identity: { ...identity, provider: "google" } });
-  assert.doesNotMatch(html, /<script|<link|<img|<iframe|\bsrc=|url\(|@import|@font-face|javascript:/iu);
+  const tree = htmlTree(html);
+  const script = one(tree, (node) => node.tag === "script");
+  assert.deepEqual(script.attrs, { src: "/interaction/consent-submit.js", defer: null });
+  assert.equal(text(script), "");
+  const withoutGuard = html.replace('<script src="/interaction/consent-submit.js" defer></script>', "");
+  assert.doesNotMatch(withoutGuard, /<script|<link|<img|<iframe|\bsrc=|url\(|@import|@font-face|javascript:/iu);
   assert.deepEqual(html.match(/https?:\/\/[^\s"'<)]+/giu), ["https://commonswarm.com/app"]);
 });
 
@@ -309,4 +435,30 @@ test("the served consent page never renders the OAuth state", async () => {
   assert.match(response.body, /Allow connection/u, "positive control: the consent page rendered");
   assert.doesNotMatch(response.body, /oauth-state-must-not-render/u);
   assert.match(response.headers["content-security-policy"], /^default-src 'none'; style-src 'unsafe-inline';/u);
+});
+
+test("the page submit guard disables both submit buttons, blocks repeat submits and restores a returned page", () => {
+  const tree = htmlTree(page({ switchAccount: SWITCH }));
+  const script = one(tree, (node) => node.tag === "script");
+  const buttons = find(tree, (node) => node.tag === "button").map(() => ({ disabled: false }));
+  assert.equal(buttons.length, 2);
+  const listeners = new Map();
+  const document = { addEventListener: (event, fn) => listeners.set(event, fn),
+    querySelectorAll: () => buttons };
+  const window = { addEventListener: (event, fn) => listeners.set(event, fn) };
+  runInNewContext(readFileSync(new URL(`../src/${script.attrs.src.split("/").at(-1)}`, import.meta.url), "utf8"), { document, window });
+  let prevented = 0;
+  const submit = { defaultPrevented: false, preventDefault: () => { prevented += 1; } };
+  listeners.get("submit")(submit);
+  assert.ok(buttons.every((button) => button.disabled));
+  assert.equal(prevented, 0, "first submit still uses the native form POST");
+  listeners.get("submit")(submit);
+  assert.equal(prevented, 1, "a second submit, including Enter, cannot send another POST");
+  listeners.get("pageshow")({ persisted: true });
+  assert.ok(buttons.every((button) => !button.disabled));
+  listeners.get("submit")({ ...submit, defaultPrevented: true });
+  assert.ok(buttons.every((button) => !button.disabled), "a cancelled submission does not lock the page");
+  listeners.get("submit")(submit);
+  assert.ok(buttons.every((button) => button.disabled));
+  assert.equal(prevented, 1, "returning via back/forward permits one fresh submission");
 });

@@ -365,4 +365,24 @@ export class InteractionStore {
       [interactionUid],
     );
   }
+
+  async findConsentAttempt(interactionUid, sessionId) {
+    const result = await this.pool.query(
+      `SELECT attempt.client_id, attempt.redirect_uri, attempt.resource,
+              attempt.completed_at, attempt.consent_token_hash,
+              attempt.consent_token_consumed_at,
+              attempt.expires_at > statement_timestamp() AS unexpired
+         FROM commonswarm_oauth.interactions AS attempt
+         JOIN commonswarm_oauth.browser_sessions AS browser
+           ON browser.session_hash = attempt.session_hash
+          AND browser.user_id = attempt.user_id
+        WHERE attempt.interaction_uid = $1 AND attempt.session_hash = $2
+          AND browser.authenticated_at IS NOT NULL
+          AND browser.invalidated_at IS NULL
+          AND browser.expires_at > statement_timestamp()
+        LIMIT 1`,
+      [interactionUid, hashOpaque(sessionId)],
+    );
+    return result.rows[0] ?? null;
+  }
 }
