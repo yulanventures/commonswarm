@@ -82,7 +82,7 @@ const isCurrent = (href: string) => !href.includes("#") && href === path;
 
 <header class="hdr" data-header>
   <div class="page hdr__inner">
-    <Wordmark href="/" class="hdr__brand" />
+    <Wordmark marketing href="/" class="hdr__brand" />
 
     <nav class="hdr__nav" aria-label="Primary">
       {
@@ -132,7 +132,7 @@ const isCurrent = (href: string) => !href.includes("#") && href === path;
     <div class="page mnav__bar">
       {/* No href: the bar behind this sheet already has the brand as a link home, and two
           nested "go home" targets a thumb-width apart is a mis-tap waiting to happen. */}
-      <Wordmark />
+      <Wordmark marketing />
       <button class="mnav__close" type="button" data-menu-close>
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
           <path
