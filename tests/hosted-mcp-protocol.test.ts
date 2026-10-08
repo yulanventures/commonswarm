@@ -491,7 +491,7 @@ test("claim_seat advertises and accepts an omitted workspace_id beside an explic
   const claim = (await listed.json()).result.tools.find((tool: { name: string }) => tool.name === "claim_seat");
   assert.deepEqual(claim.inputSchema.required, ["name", "request_id"]);
   assert.equal(claim.inputSchema.properties.workspace_id.type, "string");
-  assert.match(claim.description, /omit workspace_id.*home workspace/iu);
+  assert.equal(claim.description, "Choose a new, unique name for this chat/session; never use another agent's name. Reuse a name only for a seat this same connection created earlier. Omit workspace_id for the consented home workspace, or select another consented workspace. Retry with the same request_id.");
 });
 
 test("claim_seat routes through the grant home and preserves explicit consent checks", async () => {

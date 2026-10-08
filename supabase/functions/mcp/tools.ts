@@ -42,7 +42,7 @@ export const HOSTED_TOOL_TABLE = [
   {
     name: "claim_seat", title: "Claim a named seat",
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
-    description: "Create or reuse a named seat. Omit workspace_id for the consented home workspace, or select another consented workspace. Retry with the same request_id.",
+    description: "Choose a new, unique name for this chat/session; never use another agent's name. Reuse a name only for a seat this same connection created earlier. Omit workspace_id for the consented home workspace, or select another consented workspace. Retry with the same request_id.",
     annotations: { title: "Claim a named seat", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: objectSchema({ workspace_id: claimWorkspace, name: text(1, 80), request_id: requestId }, ["name", "request_id"]),
   },
