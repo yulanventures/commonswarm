@@ -28,8 +28,10 @@ type PeopleState = { search: string; page: boolean; detailInPage: boolean; detai
 type ScenarioResult = {
   scenario: string;
   before: PeopleState;
-  away: { search: string; peoplePageInDom: boolean; detailConnected: boolean };
+  away: { search: string; peoplePageInDom: boolean; detailConnected: boolean; visibleSignIn: number };
   after: PeopleState;
+  signInBefore: number;
+  signInAfter: { mounted: boolean; visible: number };
   sameDetailHost: boolean;
   detail: { opened: boolean; title: string | null };
   sameDocument: boolean;
@@ -71,6 +73,13 @@ const peopleReturnScript = `
     await settle(200);
     const before = state();
     const original = doc.querySelector("[data-people-detail]");
+    /* A refused removal, as the app's FreshLoginRequired handler leaves it: the error and the sign-in block shown
+       under the page header. (The sample build cannot reach the server refusal itself.) */
+    const signInError = doc.querySelector("[data-member-error]"), reauth = doc.querySelector("[data-member-reauth]");
+    if (signInError) { signInError.textContent = "Sign in again, then press Remove once more."; signInError.hidden = false; }
+    if (reauth) reauth.hidden = false;
+    const signInControls = () => Array.from(doc.querySelectorAll("[data-member-error], [data-member-reauth] button")).filter(visible).length;
+    const signInBefore = signInControls();
     const agentRow = doc.querySelector("[data-people-page] [id^='pd-agent-']");
     const agentId = agentRow ? agentRow.id.slice("pd-agent-".length) : "";
     const away = { manage: "?w=" + workspace + "&agent=" + agentId, agent: "?w=" + workspace + "&agent=" + agentId,
@@ -80,7 +89,7 @@ const peopleReturnScript = `
     await until(() => view.location.search === away, "the route " + away);
     await settle(600);
     const awayState = { search: view.location.search, peoplePageInDom: !!doc.querySelector("[data-people-page]"),
-      detailConnected: !!original && original.isConnected && !!original.closest("[data-home-route-pane]") };
+      detailConnected: !!original && original.isConnected && !!original.closest("[data-home-route-pane]"), visibleSignIn: signInControls() };
     let returnedBy = "Back";
     if (scenario === "agent") {
       /* The second way back: the agent page's own Manage action, else the workspace People door. */
@@ -94,6 +103,8 @@ const peopleReturnScript = `
     await until(() => visible(doc.querySelector("[data-people-page]")), "the People page again").catch(() => {});
     await settle(300);
     const after = state();
+    const host = doc.querySelector("[data-member-details]");
+    const signInAfter = { mounted: !!host && !!host.closest("[data-people-page] .pd-page-head") && !host.hidden, visible: signInControls() };
     let detail = { opened: false, title: null };
     const opener = Array.from(doc.querySelectorAll("[data-people-page] [aria-controls='pd-detail']")).find(visible);
     if (opener) {
@@ -102,7 +113,7 @@ const peopleReturnScript = `
       detail = { opened: !!host && visible(host) && !!title && !!host.closest("[data-people-page]"), title: title ? title.textContent : null };
     }
     return { scenario, before, away: awayState, after, sameDetailHost: doc.querySelector("[data-people-detail]") === original,
-      detail, sameDocument: view.__peopleReturnDocument === true, returnedBy };
+      detail, sameDocument: view.__peopleReturnDocument === true, returnedBy, signInBefore, signInAfter };
   };
   const start = () => void run().then((value) => report("data-people-return", value), (error) => report("data-people-return-error", String((error && error.stack) || error)));
   frame.addEventListener("load", start, { once: true });
@@ -177,6 +188,10 @@ test("People & agents comes back with its detail column after another route took
       /* Parking keeps the one host (and any state on it); a recreated host means a route cleared the pane unparked. */
       assert.equal(result.sameDetailHost, true, `${label}: the detail host was lost and recreated, so a pane replacement skipped parkPeopleHosts: ${facts}`);
       assert.equal(result.detail.opened, true, `${label}: a person's details did not open on the returned page: ${facts}`);
+      /* The sign-in block of a refused removal: shown on the page (control), gone under the other route, back on return. */
+      assert.ok(result.signInBefore > 0, `${label}: the refused sign-in block never showed, so its hiding measures nothing: ${facts}`);
+      assert.equal(result.away.visibleSignIn, 0, `${label}: the refusal's error or sign-in controls showed under another route: ${facts}`);
+      assert.ok(result.signInAfter.mounted && result.signInAfter.visible > 0, `${label}: the sign-in block did not come back under the page header: ${facts}`);
     }
   } finally {
     await server.close();

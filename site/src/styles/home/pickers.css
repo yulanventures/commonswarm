@@ -78,10 +78,6 @@
   border-inline-start: 3px solid var(--home-lime-ink); padding-inline-start: 13px;
   background: var(--home-lime); color: var(--home-lime-ink);
 }
-@media (forced-colors: active) {
-  .hm-pick-option[aria-selected="true"] { border-inline-start-color: Highlight; background: Highlight; color: HighlightText; }
-  .hm-pick-option[aria-selected="true"] .hm-pick-caption { color: HighlightText; }
-}
 .hm-pick-option[aria-selected="true"] .hm-owner-badge { box-shadow: 0 0 0 2px var(--home-lime); }
 .hm-pick-option[aria-disabled="true"] { cursor: not-allowed; opacity: 0.6; }
 .hm-pick-copy { display: grid; gap: 0; min-inline-size: 0; }
@@ -89,6 +85,12 @@
 .hm-pick-caption { color: var(--home-ink-muted); font-size: 13px; overflow-wrap: anywhere; }
 .hm-pick-option[aria-selected="true"] .hm-pick-caption { color: var(--home-lime-ink); }
 .hm-pick-option[data-pick-state="disconnected"]:not([aria-selected="true"]) .hm-pick-caption { color: var(--home-offline-text); }
+/* Forced colours for the active row. It comes AFTER every row and caption rule above: at equal specificity the
+   later declaration wins, and the lime-ink caption rule would otherwise sit on the Highlight fill. */
+@media (forced-colors: active) {
+  .hm-pick-option[aria-selected="true"] { border-inline-start-color: Highlight; background: Highlight; color: HighlightText; }
+  .hm-pick-option[aria-selected="true"] .hm-pick-caption { color: HighlightText; }
+}
 /* Tag card rows: the name grows, the caption sits at the right on one line when it fits. */
 .hm-tag-picker .hm-pick-copy { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0 12px; }
 .hm-tag-picker .hm-pick-label { flex: 1 1 auto; }

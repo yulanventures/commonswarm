@@ -972,7 +972,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       the sign-in block for a removal or role change (moved under the page header while the page shows),
       the spoken receipt, and the confirmation, which is still a native modal alertdialog. */}
   <section class="pd-detail" id="pd-detail" aria-labelledby="pd-detail-title" data-people-detail hidden></section>
-  <section class="dashboard__roster-dialog-members" data-member-details>
+  <section class="dashboard__roster-dialog-members" data-member-details hidden>
     <p class="dashboard__form-error" data-member-error role="alert" hidden></p>
     <div data-member-reauth hidden>
       <ProviderButtons buttonClass="dashboard__rail-add" />
@@ -4794,9 +4794,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
        page shows, so every path that replaces or clears that pane parks them first (leaving the page,
        an agent, to-do or To-dos render, a pane message, the session reset). Missed once, the next visit
        found no detail host and the page stayed blank until a reload (code review, release 7). */
+    /* Hidden while parked, like the detail column: a refused removal's error and sign-in controls must not show
+       under another route. mountMemberDetails() shows it again under the page header. */
     const parkMemberDetails = (): void => {
       const members = one<HTMLElement>("[data-member-details]");
-      if (members && members.parentElement !== app) app.append(members);
+      if (members && members.parentElement !== app) { members.hidden = true; app.append(members); }
+    };
+    const mountMemberDetails = (list: HTMLElement): void => {
+      const members = one<HTMLElement>("[data-member-details]"); const head = list.querySelector(".pd-page-head");
+      if (!members || !head) return;
+      head.append(members); members.hidden = false;
     };
     const parkPeopleHosts = (): void => {
       parkMemberDetails();
@@ -4817,7 +4824,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (!list || !workspace || homeRoute.view !== "people") return;
       const detail = peopleDetailHost();
       const model = peopleDialogModel(); peopleDialogState.query = rosterFilter;
-      // Only the sign-in block: moving the detail column here would drop focus held inside it before the render reads it.
+      /* The render replaces the page, and the sign-in block sits in its header: moving it drops the focus of a
+         control inside it (the sign-in button after a refusal). Note that control, and put focus back after the
+         block is mounted again. The detail column is not moved here, so the render can read focus held in it. */
+      const signIn = one<HTMLElement>("[data-member-details]"); const active = document.activeElement;
+      const held = signIn && active instanceof HTMLElement && signIn.contains(active) ? active : null;
+      const range = held instanceof HTMLInputElement || held instanceof HTMLTextAreaElement ? [held.selectionStart, held.selectionEnd] as const : null;
       parkMemberDetails();
       list.hidden = false;
       renderPeopleDialog(list, detail, model, peopleDialogState, { render: renderDialogRoster, action: async (action, id, button, notice) => {
@@ -4885,8 +4897,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           onQuery: (value) => { rosterFilter = value; peopleDialogState.collapsed.clear(); renderDialogRoster(); },
         } });
       // A removal or role change that needs a fresh sign-in shows its block under the page header.
-      const memberDetails = one<HTMLElement>("[data-member-details]");
-      if (memberDetails) list.querySelector(".pd-page-head")?.append(memberDetails);
+      mountMemberDetails(list);
+      if (held?.isConnected && document.activeElement !== held) {
+        held.focus({ preventScroll: true });
+        if (range && range[0] !== null && range[1] !== null) try { (held as HTMLInputElement).setSelectionRange(range[0], range[1]); } catch { /* not a text field */ }
+      }
       syncPeopleDialogLayout();
     };
     const reloadPeopleDialog = async (workspaceId: string, principalId: string, receipt: string, action?: PeopleDialogAction): Promise<void> => {
@@ -4983,8 +4998,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     /** Leaving the page: the confirmation closes and every draft that belonged to it is dropped. */
     const closeRosterDialog = (): void => {
       const confirm = one<HTMLDialogElement>("[data-people-confirm]"); if (confirm?.open) confirm.close();
-      // An in-page action reopens the workspace with the page still current: its detail column stays put.
-      if (homeRoute.view === "people") parkMemberDetails(); else parkPeopleHosts();
+      // An in-page action reopens the workspace with the page still current: both hosts stay put, and the
+      // page's next render (renderDialogRoster) moves and remounts them, keeping focus. Any other route parks them.
+      if (homeRoute.view !== "people") parkPeopleHosts();
       peopleDialogFocus = undefined; peopleDialogState.rolePending?.clear(); peopleDialogState.roleDraft = null; peopleDialogState.roleReceipt = null; peopleDialogState.roleRefusal = null;
     };
 

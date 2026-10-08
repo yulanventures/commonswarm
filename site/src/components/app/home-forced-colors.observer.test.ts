@@ -136,23 +136,190 @@ test("every wrapper that shows a hidden input's focus has its own forced-colors 
   for (const selector of inputDrawn) assert.ok(found.includes(selector), `stale allowance: ${selector}`);
 });
 
+/*
+ * EFFECTIVE values. A forced-colors rule placed above a normal rule of the same specificity loses to it (the
+ * code check found the picker caption doing exactly that). So the checks below run a small cascade: every
+ * rule from global.css and the home stylesheets in their load order, selector matching against a described
+ * element, and the winner by !important, then specificity, then source order. In forced mode the
+ * forced-colors blocks join the normal rules; in normal mode they are left out.
+ */
+type El = { tag?: string; classes?: string[]; attrs?: Record<string, string>; states?: string[]; has?: string[]; parent?: El; prev?: El };
+type Ranked = Rule & { order: number };
+
+const topLevelSplit = (text: string, separator: string): string[] => {
+  const out: string[] = []; let depth = 0, quote = "", from = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i]!;
+    if (quote) { if (char === quote) quote = ""; continue; }
+    if (char === '"' || char === "'") quote = char;
+    else if (char === "(" || char === "[") depth += 1; else if (char === ")" || char === "]") depth -= 1;
+    else if (char === separator && depth === 0) { out.push(text.slice(from, i)); from = i + 1; }
+  }
+  out.push(text.slice(from));
+  return out;
+};
+/** A selector as compounds and the combinators between them. */
+function parseSelector(selector: string): { compounds: string[]; combinators: string[] } {
+  const compounds: string[] = [], combinators: string[] = [];
+  let depth = 0, current = "", pending = "";
+  const flush = () => { if (current.trim()) { if (compounds.length) combinators.push(pending.trim() || " "); compounds.push(current.trim()); } current = ""; pending = ""; };
+  for (const char of selector.trim()) {
+    if (char === "(" || char === "[") depth += 1; else if (char === ")" || char === "]") depth -= 1;
+    if (depth === 0 && (char === " " || char === ">" || char === "+" || char === "~")) { if (current.trim()) flush(); if (char !== " ") pending = char; continue; }
+    current += char;
+  }
+  flush();
+  return { compounds, combinators };
+}
+/** The simple selectors of one compound: tag, .class, [attr], :pseudo(args), ::pseudo-element. */
+function simples(compound: string): string[] {
+  const out: string[] = []; let i = 0;
+  while (i < compound.length) {
+    let j = i + 1;
+    if (compound[i] === "[") { j = compound.indexOf("]", i) + 1; }
+    else if (compound[i] === ":") {
+      if (compound[j] === ":") j += 1;
+      while (j < compound.length && /[\w-]/.test(compound[j]!)) j += 1;
+      if (compound[j] === "(") { let depth = 0; for (; j < compound.length; j += 1) { if (compound[j] === "(") depth += 1; else if (compound[j] === ")") { depth -= 1; if (depth === 0) { j += 1; break; } } } }
+    } else while (j < compound.length && /[\w-]/.test(compound[j]!)) j += 1;
+    out.push(compound.slice(i, j)); i = j;
+  }
+  return out;
+}
+const pseudoArgs = (simple: string): string[] => topLevelSplit(simple.slice(simple.indexOf("(") + 1, -1), ",").map((part) => part.trim());
+function matchSimple(el: El, simple: string): boolean {
+  if (simple === "*") return true;
+  if (simple.startsWith("::")) return false;
+  if (simple.startsWith(".")) return (el.classes ?? []).includes(simple.slice(1));
+  if (simple.startsWith("[")) {
+    const m = simple.match(/^\[([\w-]+)(?:([\^*$]?=)"?([^"\]]*)"?)?\]$/); assert.ok(m, `attribute selector ${simple}`);
+    const value = el.attrs?.[m[1]!]; if (value === undefined) return false;
+    if (!m[2]) return true;
+    return m[2] === "=" ? value === m[3] : m[2] === "^=" ? value.startsWith(m[3]!) : m[2] === "$=" ? value.endsWith(m[3]!) : value.includes(m[3]!);
+  }
+  if (simple.startsWith(":")) {
+    const name = simple.match(/^:([\w-]+)/)![1]!;
+    if (name === "not") return !pseudoArgs(simple).some((arg) => matches(el, arg));
+    if (name === "is" || name === "where") return pseudoArgs(simple).some((arg) => matches(el, arg));
+    if (name === "has") return pseudoArgs(simple).some((arg) => (el.has ?? []).includes(arg));
+    return (el.states ?? []).includes(name);
+  }
+  return el.tag === simple;
+}
+function matches(el: El, selector: string): boolean {
+  const { compounds, combinators } = parseSelector(selector);
+  const at = (index: number, node: El | undefined): boolean => {
+    if (!node || !simples(compounds[index]!).every((simple) => matchSimple(node, simple))) return false;
+    if (index === 0) return true;
+    const combinator = combinators[index - 1];
+    if (combinator === ">") return at(index - 1, node.parent);
+    if (combinator === "+") return at(index - 1, node.prev);
+    const chain = combinator === "~" ? "prev" : "parent";
+    for (let up = node[chain]; up; up = up[chain]) if (at(index - 1, up)) return true;
+    return false;
+  };
+  return at(compounds.length - 1, el);
+}
+function specificity(selector: string): [number, number, number] {
+  const total: [number, number, number] = [0, 0, 0];
+  for (const compound of parseSelector(selector).compounds) for (const simple of simples(compound)) {
+    if (simple.startsWith("::")) total[2] += 1;
+    else if (/^:(?:not|is|has)\(/.test(simple)) {
+      const best = pseudoArgs(simple).map(specificity).sort((x, y) => y[0] - x[0] || y[1] - x[1] || y[2] - x[2])[0]!;
+      total[0] += best[0]; total[1] += best[1]; total[2] += best[2];
+    } else if (simple.startsWith(":where(")) continue;
+    else if (simple.startsWith("#")) total[0] += 1;
+    else if (simple.startsWith(".") || simple.startsWith("[") || simple.startsWith(":")) total[1] += 1;
+    else if (simple !== "*") total[2] += 1;
+  }
+  return total;
+}
+const loadOrder = [...read("src/styles/home/index.css").matchAll(/@import "\.\/([\w-]+\.css)"/g)].map((m) => m[1]!);
+const cascadeRules: Ranked[] = [
+  ...rules("global.css", read("src/styles/global.css")),
+  ...loadOrder.flatMap((name) => rules(`styles/home/${name}`, readFileSync(join(homeDir, name), "utf8"))),
+  ...rules("LiveDashboard.astro <style>", dashboardStyles),
+].map((rule, order) => ({ ...rule, order }));
+/** [important, a, b, c, source order]: the first difference decides; a later rule wins a tie on everything else. */
+const outranks = (key: number[], other: number[]): boolean => { for (let i = 0; i < key.length; i += 1) if (key[i] !== other[i]) return key[i]! > other[i]!; return false; };
+/** The winning declaration for `property` on `el` (longhand or one of its shorthands), or null. */
+function effective(el: El, property: string, mode: "normal" | "forced"): { value: string; from: string } | null {
+  const names = new Set([property, ...({ "background-color": ["background"], "border-inline-start-color": ["border-inline-start", "border-color", "border"],
+    "border-inline-start-width": ["border-inline-start", "border-width", "border"], "outline-style": ["outline"] } as Record<string, string[]>)[property] ?? []]);
+  let best: { value: string; from: string; key: number[] } | null = null;
+  for (const rule of cascadeRules) {
+    if (rule.forced && mode === "normal") continue;
+    if (!matches(el, rule.selector)) continue;
+    for (const declaration of topLevelSplit(rule.body, ";")) {
+      const colon = declaration.indexOf(":"); if (colon === -1) continue;
+      const name = declaration.slice(0, colon).trim(); if (!names.has(name)) continue;
+      const raw = declaration.slice(colon + 1).trim(); const important = /!important$/.test(raw);
+      const key = [important ? 1 : 0, ...specificity(rule.selector), rule.order];
+      if (!best || outranks(key, best.key)) {
+        best = { value: raw.replace(/\s*!important$/, ""), from: `${rule.file}: ${rule.selector}`, key };
+      }
+    }
+  }
+  return best && { value: best.value, from: best.from };
+}
+
+test("the cascade helper reproduces known winners (positive controls)", () => {
+  /* Positive controls for the matcher itself on known rules. */
+  const chip: El = { tag: "button", classes: ["hm-assign-chip"], states: ["focus-visible"], parent: { tag: "div", classes: ["hm-picker"] } };
+  assert.equal(effective(chip, "outline", "normal")?.value, "none", "the chip's own rule suppresses the outline in normal mode");
+  assert.equal(effective(chip, "outline", "forced")?.value, "3px solid Highlight", "global.css's !important outline wins in forced mode");
+  const heading: El = { tag: "h1", attrs: { tabindex: "-1" }, states: ["focus-visible"], parent: { tag: "section", classes: ["pd-page"], attrs: { "data-people-page": "" } } };
+  assert.notEqual(effective(heading, "outline", "forced")?.value, "3px solid Highlight !important", "a route-target heading is outside the !important cover");
+});
+
+const pickOption = (selected: boolean): El => {
+  const card: El = { tag: "div", classes: ["hm-picker", "hm-tag-picker"] };
+  const pop: El = { tag: "div", classes: ["hm-picker-pop"], parent: card };
+  const list: El = { tag: "div", classes: ["hm-pick-list"], attrs: { role: "listbox" }, parent: pop };
+  const group: El = { tag: "div", classes: ["hm-pick-group"], parent: list };
+  return { tag: "div", classes: ["hm-pick-option"], attrs: { role: "option", "aria-selected": String(selected), "data-pick-state": "connected" }, parent: group };
+};
+const inOption = (option: El, className: string): El => ({ tag: "span", classes: [className], parent: { tag: "span", classes: ["hm-pick-copy"], parent: option } });
+
 test("the mention picker's active row has a shape marker, not only a fill, in normal and forced colours", () => {
-  const pickers = rules("styles/home/pickers.css", readFileSync(join(homeDir, "pickers.css"), "utf8"));
-  const base = pickers.find((rule) => !rule.forced && rule.selector === ".hm-pick-option");
-  const active = pickers.filter((rule) => !rule.forced && rule.selector === '.hm-pick-option[aria-selected="true"]');
-  assert.ok(base && active.length > 0);
-  const marker = active.find((rule) => /border-inline-start\s*:\s*3px solid var\(--home-lime-ink\)/.test(rule.body));
-  assert.ok(marker, "the active row carries a 3px ink border on its start edge (a border survives forced colours; a box-shadow bar does not)");
-  /* The border's width is taken back from the start padding, so the row's text does not move. */
-  const basePadding = Number(base.body.match(/padding\s*:\s*\d+px\s+(\d+)px/)?.[1]);
-  const activePadding = Number(marker.body.match(/padding-inline-start\s*:\s*(\d+)px/)?.[1]);
-  assert.equal(activePadding + 3, basePadding);
+  const active = pickOption(true), inactive = pickOption(false);
+  /* Normal: lime fill plus a 3px ink bar; the start padding gives the bar's width back, so the text does not move. */
+  assert.equal(effective(active, "border-inline-start", "normal")?.value, "3px solid var(--home-lime-ink)");
+  assert.equal(effective(active, "background-color", "normal")?.value, "var(--home-lime)");
+  const basePadding = Number(effective(inactive, "padding", "normal")?.value.match(/^\d+px\s+(\d+)px$/)?.[1]);
+  assert.equal(Number(effective(active, "padding-inline-start", "normal")?.value.replace("px", "")) + 3, basePadding);
   /* Inactive rows draw no start border, so the bar marks only the row Enter inserts. */
-  assert.ok(!pickers.some((rule) => !rule.forced && rule.selector.startsWith(".hm-pick-option") && !rule.selector.includes('aria-selected="true"') && /border-inline-start\s*:/.test(rule.body)));
-  const forced = pickers.find((rule) => rule.forced && rule.selector === '.hm-pick-option[aria-selected="true"]');
-  assert.ok(forced && /border-inline-start-color\s*:\s*Highlight/.test(forced.body) && /background\s*:\s*Highlight/.test(forced.body));
+  assert.equal(effective(inactive, "border-inline-start-width", "normal"), null);
+  assert.equal(effective(inactive, "border-inline-start-width", "forced"), null);
+  /* Forced colours: the selected-row system pair, and the bar keeps its width. */
+  assert.equal(effective(active, "background-color", "forced")?.value, "Highlight");
+  assert.equal(effective(active, "color", "forced")?.value, "HighlightText");
+  assert.equal(effective(active, "border-inline-start-color", "forced")?.value, "Highlight");
+  assert.match(effective(active, "border-inline-start-width", "forced")?.value ?? "", /^3px\b/);
+  /* Every text in the active row reads on that Highlight fill: its EFFECTIVE colour is HighlightText or inherited
+     from the row. The code check found the caption losing to the later lime-ink rule. */
+  for (const part of ["hm-pick-label", "hm-pick-caption"]) {
+    const value = effective(inOption(active, part), "color", "forced");
+    assert.ok(value === null || value.value === "HighlightText", `${part} in forced colours: ${JSON.stringify(value)}`);
+  }
+  /* Positive control on the same helper: in normal mode the caption is the lime ink, so the lookup reaches it. */
+  assert.equal(effective(inOption(active, "hm-pick-caption"), "color", "normal")?.value, "var(--home-lime-ink)");
   /* The listbox semantics stay: the field names the active row and the row says it is selected. */
   const view = read("src/lib/home-pickers.ts");
   assert.match(view, /aria-activedescendant/);
   assert.match(view, /aria-selected/);
+});
+
+test("each forced-colors focus outline added for a hidden input is the effective value, not overridden later", () => {
+  const pane: El = { tag: "section", classes: ["hm-route-pane"], attrs: { "data-home-route-pane": "" } };
+  const todoChoice: El = { tag: "label", classes: ["hm-choice"], has: ["input:focus-visible"], parent: { tag: "div", classes: ["hm-todo-start"], parent: { tag: "div", classes: ["hm-todo"], parent: pane } } };
+  const choice: El = { tag: "label", classes: ["hm-choice"], has: ["input:focus-visible"], parent: { tag: "div", classes: ["hm-choice-options"], parent: pane } };
+  const row: El = { tag: "div", classes: ["hm-todo-row"] };
+  const box: El = { tag: "input", classes: ["hm-todo-row__box"], attrs: { type: "checkbox" }, states: ["focus-visible"], parent: row };
+  const mark: El = { tag: "span", classes: ["hm-todo-row__mark"], prev: box, parent: row };
+  const card: El = { tag: "label", classes: ["hm-new-workspace__purpose-card"], has: ["input:focus-visible"], parent: { tag: "div", classes: ["hm-new-workspace"] } };
+  for (const [name, el] of [["to-do start choice", todoChoice], ["choice", choice], ["to-do row mark", mark], ["purpose card", card]] as const) {
+    assert.equal(effective(el, "outline", "forced")?.value, "3px solid Highlight", `${name}: ${JSON.stringify(effective(el, "outline", "forced"))}`);
+    assert.notEqual(effective(el, "outline", "normal")?.value, "3px solid Highlight", `${name}: the outline is forced-colours only`);
+  }
 });
