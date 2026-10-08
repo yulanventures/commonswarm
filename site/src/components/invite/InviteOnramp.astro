@@ -892,6 +892,10 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     font-family: var(--home-font-body);
     font-size: 16px;
     line-height: 1.4;
+    /* The canvas renders text with the browser's default font smoothing; global.css's antialiased/grayscale (kept
+       for the marketing pages) drew the invite and connect screens thinner (critic r9 CPhoneConnect 2). Both inherit. */
+    -webkit-font-smoothing: auto;
+    -moz-osx-font-smoothing: auto;
   }
 
   /* The canvas mark: a lime circle under an outlined rounded square, 24px, then the name. */
@@ -1027,6 +1031,10 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     align-items: center;
     justify-content: center;
     flex: none;
+    /* The canvas paints the 18px initial lower in the 48px circle than a centred line box does here (ink centre 1.5px
+       lower at 2x, critic r9 CPhoneJoin 1). The baseline snaps to whole pixels, so 2px of top padding moves it down 1px
+       (0.5px from the canvas; 3px would overshoot by 0.5px). The circle stays 48px (border-box). */
+    padding-block-start: 2px;
     border-radius: 50%;
     background: var(--home-orange);
     color: var(--home-on-person);
@@ -1579,6 +1587,15 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     inline-size: 100%;
     min-block-size: 56px;
     font-size: 18px;
+    line-height: 1.4; /* the canvas's inherited 1.4 */
+  }
+
+  /* Line-height does not move a glyph in a centred box. The Join <button> paints its 18px label about 1.4px higher in
+     the 56px pill than the canvas (ink centre at 2x, critic r9 CPhoneJoin 2); the baseline snaps to whole pixels, so
+     13px over 11px moves it down 1px (0.4px from the canvas, against 0.6px for 2px). The connect page's link button
+     already sits where Phone-Connect puts it, so it keeps the even padding. */
+  .invite-onramp__actions button.invite-onramp__button:not(.invite-onramp__button--quiet) {
+    padding-block: 13px 11px;
   }
 
   /* The way out: a quiet link at the end of the review, under the Join bar and the expiry line. */

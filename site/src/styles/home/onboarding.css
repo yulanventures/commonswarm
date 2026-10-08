@@ -1309,7 +1309,16 @@
 }
 
 .hm-invite-connect__reveal { margin: 0; }
-.hm-invite-connect__reveal > summary { min-block-size: 22px; }
+/* "Show the words" is secondary text, not a second heading (Phone-Connect.dc.html: numbered headings, then muted
+   lines): the step line's 14px/400 muted ink and a light 1.2px chevron, as "Good to know" draws (critic r9 CPhoneConnect
+   1). The chevron's box stays 7.6px (6.4 + 1.2) so the summary's baseline, and the row height, do not move. */
+.hm-invite-connect__reveal > summary { min-block-size: 22px; font-weight: 400; }
+.hm-invite-connect__reveal > summary::before {
+  inline-size: 6.4px;
+  block-size: 6.4px;
+  border-inline-end-width: 1.2px;
+  border-block-end-width: 1.2px;
+}
 .hm-invite-connect__reveal[open] > summary { margin-block-end: 6px; }
 
 .hm-invite-connect .hm-ahp__copyable {

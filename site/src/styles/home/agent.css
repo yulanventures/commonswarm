@@ -163,9 +163,11 @@
   text-wrap: pretty;
 }
 
+/* The word stays (the warning does not rely on colour alone) at the banner text's own weight: Agent.dc.html sets the
+   description in 16px/400 under the 20px heading, with no second emphasis. */
 .hm-agent__banner .hm-notice-tone {
   color: inherit; /* the global strong colour would put a second ink in the amber banner */
-  font-weight: 700;
+  font-weight: 400;
 }
 
 /* Scoped under .hm-agent so the route pane's generic control padding (integration.css) does not win. */
