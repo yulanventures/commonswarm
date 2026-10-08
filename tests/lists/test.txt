@@ -36,6 +36,7 @@ tests/protocol-workspace.test.ts
 tests/protocol-agent-transport.test.ts
 tests/protocol-agent-token-binding.test.ts
 tests/support/cold-start-retry.test.ts
+tests/support/docker-image-pull.test.ts
 tests/rest-read-retry.test.ts
 tests/support/signal-fetch-deadline.test.ts
 tests/support/agent-receive-cli.test.ts
