@@ -165,7 +165,7 @@ Action pins in `.github/workflows/cs-smoke.yml`:
 |---|---|---|
 | `actions/checkout` | v4.2.2 | `11bd71901bbe5b1630ceea73d27597364c9af683` |
 | `actions/setup-node` | v4.4.0 | `49933ea5288caeca8642d1e84afbd3f7d6820020` |
-| `1Password/install-cli-action` | v1 | `9b82e19ce89f957763220d632ec1de246084f78a` |
+| `1Password/install-cli-action` | v1 | `143a85f84a90555d121cde2ff5872e393a47ab9f` |
 | `actions/upload-artifact` | v4.6.2 | `ea165f8d65b6e75b540449e92b4886f43607fa02` |
 
 The final workflow step requires the probe step and artifact upload to succeed,
