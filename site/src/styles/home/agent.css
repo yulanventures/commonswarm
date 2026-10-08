@@ -1,10 +1,5 @@
-/* Home UI: agent view (UI-SPEC.md 3.5), the canvas "Agent" artboard (home-visual DESIGN-MAP).
-   --home-* tokens only; they switch in dark mode on their own. Class prefix hm-agent.
-   Measured WCAG sRGB contrast (tokens.css header method), light / dark:
-     ink on card 15.90 / 14.21; ink on canvas 14.32 / 15.27; muted on card 6.72 / 8.43;
-     muted on canvas 6.05 / 9.05; muted on soft 6.21 / 7.58; ink on lime-soft 15.08 / 11.43;
-     offline-deep on offline-tint 9.17 / 9.62, and the reverse pair on the fix button the same.
-   Calculator controls on the same run: black/white 21.00; #777/white 4.48; #00f/white 8.59. */
+/* Home agent view: existing canvas geometry with the neutral home palette.
+   Measured light/dark contrast pairs are documented in tokens.css. */
 .hm-agent {
   min-inline-size: 0;
   display: flex;
@@ -186,8 +181,9 @@
   padding: 0 22px;
   border: 0;
   border-radius: var(--radius-pill);
-  background: var(--home-offline-deep);
-  color: var(--home-offline-tint);
+  background: var(--home-accent);
+  color: var(--home-accent-ink);
+  box-shadow: inset 0 0 0 1.5px var(--home-focus);
   font: inherit;
   font-size: 15px;
   font-weight: 700;
@@ -309,7 +305,7 @@
   overflow-wrap: anywhere;
 }
 
-/* Doing now: a pale panel, lime while the agent is measured working. */
+/* Doing now: a pale panel, blue while the agent is measured working. */
 .hm-agent__doing {
   min-inline-size: 0;
   margin-top: 8px;
@@ -319,7 +315,7 @@
 }
 
 .hm-agent[data-hm-state="working"] .hm-agent__doing {
-  background: var(--home-lime-soft);
+  background: var(--home-accent-soft);
 }
 
 .hm-agent__doing .hm-agent__todo-link {
@@ -446,9 +442,9 @@
 }
 /* Not yet is the canvas's "Hold": 14px / 600 with the default underline offset. */
 .hm-agent .hm-queue-row .hm-button[data-queue-action="not-yet"] { text-underline-offset: auto; }
-/* The shared pill's edge is an inset stroke (primitives.css): these text controls drop it and keep the focus ring. */
-.hm-agent .hm-queue-row .hm-button:is([data-queue-action="up"], [data-queue-action="down"], [data-queue-action="not-yet"]) { box-shadow: none; }
-.hm-agent .hm-queue-row .hm-button:is([data-queue-action="up"], [data-queue-action="down"], [data-queue-action="not-yet"]):focus-visible { box-shadow: var(--focus-ring); }
+/* The shared pill's edge is an inset stroke (primitives.css): these quiet controls retain it beneath the focus ring. */
+.hm-agent .hm-queue-row .hm-button:is([data-queue-action="up"], [data-queue-action="down"], [data-queue-action="not-yet"]) { box-shadow: inset 0 0 0 1.5px var(--home-pill-border); }
+.hm-agent .hm-queue-row .hm-button:is([data-queue-action="up"], [data-queue-action="down"], [data-queue-action="not-yet"]):focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-pill-border), var(--home-focus-ring); }
 
 /* Not yet: held rows carry no line number; the hold reason reads as the row's second line. */
 .hm-agent__gated {
@@ -699,8 +695,8 @@
 }
 
 .hm-agent__action:hover {
-  background: var(--home-ink);
-  color: var(--home-card);
+  background: var(--home-accent-hover);
+  color: var(--home-accent-ink);
 }
 
 .hm-agent__todo-link:focus-visible,
@@ -710,9 +706,9 @@
 .hm-agent__policy-change:focus-visible,
 .hm-agent__remove:focus-visible {
   outline: none;
-  box-shadow: var(--focus-ring);
+  box-shadow: var(--home-focus-ring);
 }
-.hm-agent .hm-agent__manage:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring); }
+.hm-agent .hm-agent__manage:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--home-focus-ring); }
 
 .hm-agent__action,
 .hm-agent__manage,

@@ -1,17 +1,5 @@
-/* Home UI: the rail. The canvas design (Main.dc.html <nav>): an ink column in BOTH modes, the
-   identity of the app. --home-rail-* tokens carry their own dark values, so no dark override here.
-
-   Contrast, measured by the tokens.css header method (controls 21.00 / 4.48 / 8.59 on the same run),
-   light / dark:
-     row text        --home-rail-text on --home-rail-bg             10.65 / 12.52
-     strong row      --home-rail-strong on --home-rail-bg           14.32 / 16.84
-     heads, "you", status words (12px)  --home-rail-muted on bg      5.96 /  7.00
-     offline word    --home-offline on --home-rail-bg                8.67 / 10.20
-     current row     --home-lime-ink on --home-lime                 12.65 / 12.65
-     badge           --home-lime-ink on --home-lime                 12.65; on the current row lime on ink 12.65
-     hover row       --home-rail-text on --home-rail-raised          7.60 /  9.54
-     New workspace   edge --home-ink-faint on --home-rail-bg         3.02 /  3.25 (non-text, 3:1)
-   The current row is also 700 weight and carries aria-current, so it is never colour alone. */
+/* Home rail: grey-blue in light mode, neutral charcoal in dark. White current tile in light;
+   colour pairs and control-edge ratios are documented in tokens.css. */
 
 .hm-rail {
   display: flex;
@@ -47,14 +35,14 @@
   letter-spacing: -0.01em;
   text-decoration: none;
 }
-/* 26px mark, the canvas's own SVG (Main.dc.html: viewBox 0 0 28 28, a lime circle r8 at (10,10) under a 14-unit square at
+/* 26px mark, the canvas's own SVG (Main.dc.html: viewBox 0 0 28 28, a blue circle r8 at (10,10) under a 14-unit square at
    (12,12), rx 4.5, stroke 2, no fill), drawn as two masks so each shape takes its token colour and the stroke is rasterised at
    the device scale (a CSS border snaps; this paints the canvas's 2px edge). Used by home-rail.ts brandMark and the
    LiveDashboard account button; the invite pages draw the same SVG inline at 24px. */
 .hm-rail__mark { position: relative; flex: none; inline-size: 26px; block-size: 26px; }
 .hm-rail__mark::before,
 .hm-rail__mark::after { content: ""; position: absolute; inset: 0; mask-position: center; mask-repeat: no-repeat; mask-size: 100% 100%; }
-.hm-rail__mark::before { background: var(--home-lime);
+.hm-rail__mark::before { background: var(--home-accent-text);
   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'%3E%3Ccircle cx='10' cy='10' r='8' fill='black'/%3E%3C/svg%3E"); }
 .hm-rail__mark::after { background: var(--home-rail-strong);
   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'%3E%3Crect x='12' y='12' width='14' height='14' rx='4.5' fill='none' stroke='black' stroke-width='2'/%3E%3C/svg%3E"); }
@@ -127,13 +115,13 @@
 .hm-rail__link[aria-current="page"]:hover,
 .hm-rail__agent[aria-current="page"],
 .hm-rail__agent[aria-current="page"]:hover {
-  background: var(--home-lime);
-  color: var(--home-lime-ink);
+  background: var(--home-rail-current);
+  color: var(--home-rail-current-ink);
   font-weight: 700;
 }
 .hm-rail .hm-rail__agent:is(:hover, [aria-current="page"]) { background: transparent; }
 .hm-rail__agent:hover::before { background: var(--home-rail-raised); }
-.hm-rail__agent[aria-current="page"]::before { background: var(--home-lime); }
+.hm-rail__agent[aria-current="page"]::before { background: var(--home-rail-current); }
 
 /* Line icons: 16-unit shapes as masks, painted in currentColor. */
 .hm-rail__icon {
@@ -179,21 +167,21 @@
   block-size: 22px;
   padding: 0 6px;
   border-radius: var(--radius-pill);
-  background: var(--home-lime);
-  color: var(--home-lime-ink);
+  background: var(--home-count);
+  color: var(--home-on-count);
   font-size: 12px;
   font-weight: 700;
   line-height: 1;
 }
-.hm-rail__link[aria-current="page"] .hm-rail__badge { background: var(--home-lime-ink); color: var(--home-lime); }
+.hm-rail__link[aria-current="page"] .hm-rail__badge { background: var(--home-count); color: var(--home-on-count); }
 
 /* The workspace being started (New-Space.dc.html), while the New workspace form is open: the current row as a draft.
-   44px, radius 12px, a 1.5px dashed lime edge (a dashed edge cannot be the lane's inset stroke, so it is a real border
-   inside the 44px, as the source's border-box), strong 700 text, a lime icon and a lime "new" marker. Display only:
+   44px, radius 12px, a 1.5px dashed blue edge (a dashed edge cannot be the lane's inset stroke, so it is a real border
+   inside the 44px, as the source's border-box), strong 700 text, a blue icon and a blue "new" marker. Display only:
    no link, no hover. An empty name shows the door's label in the muted rail ink, at 400.
-     name    --home-rail-strong on --home-rail-bg 14.32 / 16.84; empty --home-rail-muted 5.96 / 7.00
-     marker  --home-lime on --home-rail-bg 12.65 / 14.87 (12px 600) */
-/* The draft row's 1.5px dashed lime edge (New-Space.dc.html; 3 device px at 2x, a 3px dash and a 1.5px gap) is an SVG
+     name and empty label use audited rail text tokens.
+     marker uses --home-accent-text on the rail (tokens.css). */
+/* The draft row's 1.5px dashed blue edge (New-Space.dc.html; 3 device px at 2x, a 3px dash and a 1.5px gap) is an SVG
    stroke: a CSS dashed 1.5px border snaps to 1px in Chromium (critic r9 CNewSpace 3). The SVG has no viewBox, so its units
    are CSS px at any row width; the rect is the row's own 12px rounded edge with a 3px stroke, and the pseudo-element's
    matching radius clips the outer half (on the sides and round the corners), which leaves an exact 1.5px inner edge.
@@ -218,7 +206,7 @@
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  background: var(--home-lime);
+  background: var(--home-accent-text);
   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100%25' height='100%25'%3E%3Crect width='100%25' height='100%25' rx='12' fill='none' stroke='black' stroke-width='3' stroke-dasharray='3 1.5'/%3E%3C/svg%3E");
   mask-position: 0 0;
   mask-repeat: no-repeat;
@@ -228,9 +216,9 @@
 @media (forced-colors: active) {
   .hm-rail__draft::before { forced-color-adjust: none; background: CanvasText; }
 }
-.hm-rail__draft .hm-rail__icon { color: var(--home-lime); }
+.hm-rail__draft .hm-rail__icon { color: var(--home-accent-text); }
 .hm-rail__draft .hm-rail__name[data-empty] { color: var(--home-rail-muted); font-weight: 400; }
-.hm-rail__draft-marker { flex: none; color: var(--home-lime); font-size: 12px; font-weight: 600; }
+.hm-rail__draft-marker { flex: none; color: var(--home-accent-text); font-size: 12px; font-weight: 600; }
 
 /* People list: fills the height the rail has left and scrolls; a short list shrinks to fit. */
 .hm-rail__people {
@@ -268,20 +256,20 @@
   font-weight: 600;
 }
 
-/* Status words: 12px muted; working = lime dot, disconnected = amber diamond and word, idle = hollow ring. */
+/* Status words: 12px muted; working = blue dot, disconnected = amber diamond and word, idle = hollow ring. */
 .hm-rail__agent { flex-wrap: nowrap; }
 .hm-rail__status { display: inline-flex; align-items: center; flex: none; white-space: nowrap; }
 .hm-rail .hm-status { flex-wrap: nowrap; gap: 6px; color: var(--home-rail-muted); font-size: 12px; white-space: nowrap; }
 .hm-rail .hm-status-word { font-weight: 400; }
 .hm-rail .hm-status-shape { border-color: var(--home-rail-muted); }
-.hm-rail .hm-status-shape[data-shape="dot"] { border: 0; background: var(--home-lime); }
+.hm-rail .hm-status-shape[data-shape="dot"] { border: 0; background: var(--home-accent-text); }
 .hm-rail .hm-status-shape[data-shape="diamond"] { background: var(--home-offline); }
 .hm-rail .hm-status[data-state="disconnected"],
 .hm-rail .hm-status[data-state="disconnected"] .hm-status-word { color: var(--home-offline); }
-/* On the current (lime) agent row the word reads in lime ink, 600, with no shape (Agent.dc.html): 12.65 / 12.65. */
-/* Scoped one class above the disconnected rule (.hm-rail .hm-status[data-state] .hm-status-word), so the word is ink on lime
+/* On the current agent tile the word uses current-tile ink, 600, with no shape. */
+/* Scoped one class above the disconnected rule (.hm-rail .hm-status[data-state] .hm-status-word), so the word uses current-tile ink
    in every state. */
-.hm-rail .hm-rail__agent[aria-current="page"] *:is(.hm-status, .hm-status-word) { color: var(--home-lime-ink); font-weight: 600; }
+.hm-rail .hm-rail__agent[aria-current="page"] *:is(.hm-status, .hm-status-word) { color: var(--home-rail-current-ink); font-weight: 600; }
 .hm-rail__agent[aria-current="page"] .hm-status-shape { display: none; }
 
 /* The ownership line is read, not drawn: the canvas design has no note under the list. */
@@ -317,8 +305,8 @@
   text-decoration: none;
 }
 .hm-rail__new:hover { background: var(--home-rail-raised); color: var(--home-rail-strong); }
-.hm-rail .hm-rail__new:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-ink-faint), var(--focus-ring); }
-.hm-rail__new .hm-rail__icon { color: var(--home-lime); }
+.hm-rail .hm-rail__new:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-ink-faint), var(--home-focus-ring); }
+.hm-rail__new .hm-rail__icon { color: var(--home-accent-text); }
 
 .hm-rail__sr {
   position: absolute;
@@ -332,7 +320,7 @@
 .hm-rail a:focus-visible,
 .hm-rail button:focus-visible {
   outline: none;
-  box-shadow: var(--focus-ring);
+  box-shadow: var(--home-focus-ring);
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -350,7 +338,7 @@
 .hm-frame__rail .dashboard__user-trigger :is(.dashboard__user-trigger-mark, .dashboard__user-trigger-brand) { display: none; }
 /* Wide screens: the brand row IS the account control (the canvas rail has no account foot, so New workspace is its
    last element). The button draws the brand row exactly (mark, then the 20px display word in --home-rail-strong,
-   rail padding 14px 12px, 44px tall, full width). The 12px chevron in --home-rail-muted (5.96 light / 7.00 dark on the rail)
+   rail padding 14px 12px, 44px tall, full width). The 12px chevron in --home-rail-muted (audited in tokens.css)
    is hidden at rest, as the canvas draws no trailing icon, and shows on hover, keyboard focus and while the menu is open
    (opacity, so the row never reflows). The rail's own brand link stands down here; the menu's "CommonSwarm home" is the
    site home link. */
@@ -403,7 +391,7 @@
   }
 }
 /* On a phone the account door floats at the top right, over the ink phone bar on a workspace and over
-   the canvas elsewhere. An ink disc keeps it legible on both: --home-rail-strong on it 14.32 / 16.84. */
+   the canvas elsewhere. A rail-coloured disc keeps it legible on both; pairs are audited in tokens.css. */
 @media (width <= 52rem) {
   .hm-frame__rail .dashboard__user-trigger,
   .hm-frame__rail .dashboard__user-trigger:hover,

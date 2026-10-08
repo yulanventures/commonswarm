@@ -54,11 +54,11 @@ test("the emitted dashboard CSS carries the token system's light and dark paths"
     .join("\n");
   assert.ok(assetPaths.length > 0, "the built app must reference emitted assets");
   assert.match(builtAssets, /--elev-0:/);
-  // The signed-in app paints the home canvas (DESIGN-MAP palette); that token has a light value and a
+  // The signed-in app paints the home canvas (neutral household palette); that token has a light value and a
   // dark value mapped by both dark branches, so the dashboard background follows the scheme.
   assert.match(builtAssets, /\.dashboard\{[^}]*background:var\(--home-canvas\)/);
-  assert.match(builtAssets, /--home-canvas:\s*#eef2ea/i);
-  assert.match(builtAssets, /--d-home-canvas:\s*#121a15/i);
+  assert.match(builtAssets, /--home-canvas:\s*#ffffff/i);
+  assert.match(builtAssets, /--d-home-canvas:\s*#1b1d20/i);
   assert.match(builtAssets, /:root:not\(\[data-theme=light\]\)\{[^}]*--home-canvas:\s*var\(--d-home-canvas\)/, "the OS dark branch maps the canvas");
   assert.match(builtAssets, /\[data-theme=dark\]\{[^}]*--home-canvas:\s*var\(--d-home-canvas\)/, "the forced dark branch maps the canvas");
   assert.match(builtAssets, /@media\s*\(prefers-color-scheme:\s*dark\)/);

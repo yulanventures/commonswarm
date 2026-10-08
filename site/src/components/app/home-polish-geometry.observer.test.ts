@@ -169,13 +169,12 @@ test("home polish keeps the header above the view, one rail line, and no heading
       assert.equal(geometry.rows[0]?.nameTruncated, true);
       assert.equal(geometry.rows[1]?.nameTruncated, false);
       const [light, dark] = geometry.themes;
-      /* Canvas design (home-visual 2026-10-07): the rail is ink in both modes and its status words carry
-         no chip. Disconnected is the amber word and diamond (--home-offline, #f0b25a in both modes,
-         8.67:1 / 10.20:1 on the rail), so it never reads as idle. */
+      /* Neutral palette: disconnected keeps its amber word and diamond, without a chip.
+         Light and charcoal rails use separate AA-safe amber values (tokens.css). */
       assert.equal(light?.disconnectedBg, "rgba(0, 0, 0, 0)");
       assert.equal(dark?.disconnectedBg, "rgba(0, 0, 0, 0)");
-      assert.equal(light?.disconnectedInk, "rgb(240, 178, 90)");
-      assert.equal(dark?.disconnectedInk, "rgb(240, 178, 90)");
+      assert.equal(light?.disconnectedInk, "rgb(140, 84, 26)");
+      assert.equal(dark?.disconnectedInk, "rgb(230, 178, 113)");
       assert.notEqual(light?.disconnectedInk, light?.idleInk);
       assert.notEqual(dark?.disconnectedInk, dark?.idleInk);
       assert.equal(light?.idleBg, "rgba(0, 0, 0, 0)");

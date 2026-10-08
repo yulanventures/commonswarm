@@ -554,87 +554,89 @@
   --d-mark-west: #a8bbff;
 
   /* ======================================================================
-     HOME CANVAS — the signed-in app (/app) palette (2026-10-07)
-     From the canvas mockups (home-visual DESIGN-MAP, *.dc.html sources). New names
-     only: nothing above changes value, so the marketing site is untouched. Home
-     stylesheets read these; dark values live as --d-home-* just below and are
-     mapped by both dark branches. Measured with the instrument in the file header
-     (controls on the same run: #000/#fff 21.00, #777/#fff 4.48, #767676/#fff 4.54,
-     #00f/#fff 8.59; discrimination arm #eee/#fff 1.16).
-
-     Surfaces. Ink ratios are quoted on every surface it sits on; the worst is the
-     one that binds. */
-  --home-canvas: #eef2ea; /* page canvas, capsule fill.  --home-ink 14.32  --home-ink-muted 6.05  --home-ink-faint 4.74 */
-  --home-card: #fcfdfa; /* cards, stream, panels.      --home-ink 15.90  --home-ink-muted 6.72  --home-ink-faint 5.26 */
-  --home-soft: #f1f5ec; /* nested panel inside a card. --home-ink 14.70  --home-ink-muted 6.21  --home-ink-faint 4.86 */
-  --home-field: #ffffff; /* text input fill.           --home-ink 16.6 */
-  --home-hairline: #e3e9dd; /* 1px divider inside a card. Decorative. */
-  --home-card-border: #d3dbcc; /* 1px card and capsule edge. Decorative; the lip and fill carry the plane. */
-  --home-card-lip: #c9d2c1; /* the 0 2px 0 shadow under a card */
-  --home-card-shadow: 0 2px 0 var(--home-card-lip);
-  --home-popover-shadow: 0 6px 18px rgba(23, 35, 28, 0.12); /* a popover card floating over the page (Todo.dc.html tag card): the ink at 12% */
-  --home-pill-border: #aeb9a8; /* 1px edge of an outline pill (mockup `1px solid #AEB9A8`). Decorative: 2.00 on card, 1.80 on canvas; the pill's text and fill carry it */
-
-  /* Ink. Body text needs 4.5:1; every value below clears it on all three surfaces. */
-  --home-ink: #17231c; /* text, primary pill fill. min 14.32 (on canvas); --home-card on it 15.90 */
-  --home-on-ink: #eef2ea; /* text on a primary (ink-filled) pill. 14.32 on --home-ink */
-  --home-ink-muted: #4f5e54; /* secondary text. min 6.05 (on canvas) */
-  --home-ink-faint: #5c6f63; /* tertiary text, min 4.74 (on canvas). ALSO the outline-button edge on the rail: 3.02 on --home-rail-bg (non-text, needs 3:1) */
-  --home-line-dashed: #7b897f; /* dashed placeholder outlines. Non-text, 3.59 on card */
-  --home-field-border: #8a978c; /* input / composer edge. Control edge: 3.05 on --home-field, 2.99 on card — it only just meets 1.4.11 on white, so never put it on a darker fill */
-  --home-placeholder: #757575; /* placeholder text in a field (the canvas's native neutral grey). 4.61 on --home-field */
-  --home-link-hover: #2f4438; /* link hover ink, 10.26 on card */
-
-  /* The rail: an ink column in BOTH modes; it is the identity. Text on --home-rail-bg: */
-  --home-rail-bg: #17231c;
-  --home-rail-text: #c9d4cc; /* rows. 10.65 */
-  --home-rail-strong: #eef2ea; /* brand, unread rows. 14.32 */
-  --home-rail-muted: #8fa196; /* section heads, status words, "you" at 12px. 5.96 */
-  --home-rail-soft: #b4c2b8; /* secondary text on ink screens. 8.77 */
-  --home-rail-raised: #2a3d32; /* hover row, capsule on the ink phone bar. --home-rail-text on it 7.60 */
-  --home-rail-divider: #34483c; /* 1px rule on ink. Decorative. */
-  --home-rail-panel: #22332a; /* panel on an ink screen (invite connect steps). rail-text 8.74, rail-strong 11.76, rail-soft 7.21 */
-  --home-rail-choice: #1e2d25; /* unselected choice card on an ink screen. rail-text 9.45, rail-strong 12.71 */
-  --home-rail-choice-edge: #3a4e42; /* its 1.5px edge. Decorative (1.61 on the choice); the selected state adds a lime edge (9.03 on --home-rail-raised) */
-  --home-rail-orange-line: #e58a55; /* dashed outline of a not-yet-joined orange person on ink. 6.26 on --home-rail-bg */
-  --home-rail-orange-soft: #f3b48e; /* that person's initial on ink. 9.07 on --home-rail-bg */
-  --home-rail-blue-line: #7a9fe6; /* the blue person's outline on ink (/invite). 6.13 on --home-rail-bg; dark 7.21 on --d-home-rail-bg */
-  --home-rail-blue-soft: #a9c3f5; /* the blue person's initial on ink. 9.13 on --home-rail-bg; dark 10.74 on --d-home-rail-bg */
-
-  /* Lime: the one accent. Never text on light (it is a fill). */
-  --home-lime: #d4f04a; /* current rail row, Needs-you band, rail badges, working dot */
-  --home-lime-ink: #17231c; /* text on lime. 12.65. Lime as text on --home-rail-bg (badge on the current row): 12.65 */
-  --home-on-lime-ink: #eef2ea; /* text on an ink pill inside the lime band; the pill is --home-lime-ink in BOTH modes, so this is too. 14.32 */
-  --home-lime-soft: #f4fad8; /* pale lime row fill. --home-ink on it 15.08 */
-  --home-lime-hover: #e4f78a;
-  --home-send-glyph: #d4f04a; /* the phone Send arrow on the ink pill: lime on --home-ink 12.65. Dark: the --home-on-ink value, 14.21 */
-
-  /* People. Each person takes one set; their agents always use the owner's set.
-     fill = person avatar and owner badge, white initial on it (--home-on-person);
-     tint/deep = agent avatar fill and letter, with a 1.5px fill-coloured border.
-       white on fill     blue 6.15  orange 5.09  purple 6.63  teal 5.47
-       deep on tint      blue 8.01  orange 7.19  purple 8.86  teal 7.79
-       fill on card      blue 6.02  orange 4.98  purple 6.49  teal 5.36 (non-text, 3:1) */
+     HOME CANVAS — neutral household palette (2026-10-08, PALETTE.md).
+     Home names only; marketing tokens above are unchanged. Light: white page,
+     grey-blue rail and white current tile. Dark: neutral charcoal equivalents.
+     Accent names describe blue actions; selected states use pastel blue with ink.
+     Cards have transparent edges and no lip; border widths keep their geometry.
+     WCAG sRGB contrast follows the method in the header. Controls in this run:
+     black/white 21.00; #777/white 4.48; #767676/white 4.54; blue/white 8.59;
+     negative control #eee/white 1.16. Body text >=4.5; UI edges/focus >=3.
+     Person fills are darker than the reference swatches for small white initials.
+     Every documented text pair below is >=4.5, including 9px owner badges.
+     ====================================================================== */
+  --home-canvas: #ffffff; /* Light: --home-ink 14.64:1, --home-ink-muted 6.04:1, --home-ink-faint 5.30:1, --home-danger 5.83:1, --home-offline-text 6.18:1 */
+  --home-card: #f5f7fa; /* Light: --home-ink 13.64:1, --home-ink-muted 5.63:1, --home-ink-faint 4.94:1, --home-danger 5.44:1, --home-offline-text 5.76:1 */
+  --home-soft: #eef1f4; /* Light: --home-ink 12.92:1, --home-ink-muted 5.33:1, --home-ink-faint 4.68:1, --home-danger 5.15:1, --home-offline-text 5.45:1 */
+  --home-field: #ffffff; /* Light: --home-ink 14.64:1, --home-ink-muted 6.04:1, --home-ink-faint 5.30:1, --home-danger 5.83:1, --home-offline-text 6.18:1 */
+  --home-hairline: #e0e6ec; /* Decorative divider. */
+  --home-card-border: transparent; /* Transparent card edge; decorative, geometry retained. */
+  --home-card-lip: transparent; /* Transparent lip; decorative. */
+  --home-pill-border: var(--home-field-border); /* Identifying edge: --home-canvas 4.04:1, --home-card 3.76:1, --home-soft 3.56:1, --home-attention 3.50:1, --home-attention-soft 3.74:1, --home-rail-current 4.04:1 */
+  --home-ink: #1e2a33; /* Light: --home-on-ink 14.64:1 */
+  --home-on-ink: #ffffff;
+  --home-ink-muted: #576473;
+  --home-ink-faint: #606d79;
+  --home-line-dashed: #73808d; /* Placeholder edge vs card/soft/rail-bg: Light: --home-card 3.76:1, --home-soft 3.56:1, --home-rail-bg 3.45:1 */
+  --home-field-border: #73808d; /* Control edge vs field/card/soft: Light: --home-field 4.04:1, --home-card 3.76:1, --home-soft 3.56:1 */
+  --home-placeholder: #606d79; /* Text vs field: Light: --home-field 5.30:1 */
+  --home-link-hover: #174f78;
+  --home-rail-bg: #e8eef4; /* Light: --home-rail-text 7.65:1, --home-rail-strong 12.53:1, --home-rail-muted 5.03:1, --home-rail-soft 5.03:1, --home-accent-text 5.91:1, --home-offline 5.29:1, --home-rail-blue-soft 6.55:1, --home-rail-orange-soft 6.61:1 */
+  --home-rail-text: #3d4b59;
+  --home-rail-strong: #1e2a33;
+  --home-rail-muted: #586675;
+  --home-rail-soft: #586675;
+  --home-rail-raised: #dce5ee; /* Light: --home-rail-text 7.02:1, --home-rail-strong 11.49:1, --home-rail-muted 4.61:1, --home-rail-soft 4.61:1, --home-accent-text 5.43:1, --home-offline 4.85:1, --home-rail-blue-soft 6.01:1, --home-rail-orange-soft 6.06:1 */
+  --home-rail-divider: #d1dbe5; /* Decorative divider. */
+  --home-rail-panel: #f5f7fa; /* Light: --home-rail-text 8.33:1, --home-rail-strong 13.64:1, --home-rail-muted 5.48:1, --home-rail-soft 5.48:1, --home-accent-text 6.44:1, --home-offline 5.76:1, --home-rail-blue-soft 7.13:1, --home-rail-orange-soft 7.19:1 */
+  --home-rail-choice: #ffffff; /* Light: --home-rail-text 8.94:1, --home-rail-strong 14.64:1, --home-rail-muted 5.88:1, --home-rail-soft 5.88:1, --home-accent-text 6.91:1, --home-offline 6.18:1, --home-rail-blue-soft 7.65:1, --home-rail-orange-soft 7.72:1 */
+  --home-rail-choice-edge: #73808d; /* Choice edge vs rail-choice/rail-raised: Light: --home-rail-choice 4.04:1, --home-rail-raised 3.17:1 */
+  --home-rail-orange-line: #a9652d;
+  --home-rail-orange-soft: #78471f;
+  --home-rail-blue-line: #2e77b5;
+  --home-rail-blue-soft: #24577f;
+  --home-rail-current: #ffffff; /* Light: --home-rail-text 8.94:1, --home-rail-strong 14.64:1, --home-rail-muted 5.88:1, --home-rail-soft 5.88:1, --home-accent-text 6.91:1, --home-offline 6.18:1, --home-rail-blue-soft 7.65:1, --home-rail-orange-soft 7.72:1 */
+  --home-rail-current-ink: #1e2a33;
+  --home-accent: #2471a8; /* Light: --home-accent-ink 5.25:1, --home-send-glyph 5.25:1 */
+  --home-accent-ink: #ffffff;
+  --home-on-accent-ink: #ffffff;
+  --home-accent-soft: #e9f0f7; /* Light: --home-ink 12.74:1, --home-ink-muted 5.26:1, --home-ink-faint 4.61:1, --home-danger 5.08:1, --home-offline-text 5.38:1 */
+  --home-accent-hover: #1d5e8d; /* Light: --home-accent-ink 6.91:1 */
+  --home-accent-text: #1d5e8d;
+  --home-attention: #f8ede3; /* Light: --home-ink 12.70:1, --home-ink-muted 5.24:1, --home-ink-faint 4.60:1, --home-danger 5.06:1, --home-offline-text 5.36:1 */
+  --home-attention-soft: #fcf5ee; /* Light: --home-ink 13.55:1, --home-ink-muted 5.59:1, --home-ink-faint 4.91:1, --home-danger 5.40:1, --home-offline-text 5.72:1 */
+  --home-count: #b43b2a; /* Light: --home-on-count 5.83:1 */
+  --home-on-count: #ffffff;
+  --home-quiet: #eef1f4; /* Light: --home-ink 12.92:1, --home-ink-muted 5.33:1, --home-ink-faint 4.68:1, --home-danger 5.15:1, --home-offline-text 5.45:1 */
+  --home-send-glyph: #ffffff;
+  --home-person-neutral: #586675; /* Light: --home-on-person 5.88:1 */
   --home-on-person: #ffffff;
-  --home-blue: #2a5dbf;
-  --home-blue-tint: #dde7fa;
-  --home-blue-deep: #1b3f87;
-  --home-orange: #b5501c;
-  --home-orange-tint: #fbe4d5;
-  --home-orange-deep: #7e3410;
-  --home-purple: #6b45b8;
-  --home-purple-tint: #e8e0f8;
-  --home-purple-deep: #44287f;
-  --home-teal: #0f766e;
-  --home-teal-tint: #d5efea;
-  --home-teal-deep: #0b4f49;
-
-  /* Disconnected / offline, and danger. */
-  --home-offline: #f0b25a; /* diamond and word on the ink rail: 8.67 on --home-rail-bg */
-  --home-offline-tint: #fcebcb; /* notice fill */
-  --home-offline-deep: #5e3300; /* text on the tint 9.17; on card 10.55 */
-  --home-offline-text: #8a4b00; /* offline text on light surfaces: 6.66 on card, 6.00 on canvas */
-  --home-danger: #8c2a14; /* remove. 8.37 on card, 7.54 on canvas */
+  --home-blue: #2e77b5; /* Light: --home-on-person 4.75:1 */
+  --home-blue-tint: #e9f0f7; /* Light: --home-ink 12.74:1, --home-ink-muted 5.26:1, --home-blue-deep 6.66:1, --home-blue 4.13:1 */
+  --home-blue-item: #d6e3ef; /* Light: --home-ink 11.22:1, --home-ink-muted 4.63:1, --home-blue-deep 5.86:1. Selected start bar --home-focus 4.02:1; label --home-ink 11.22:1; caption --home-ink-muted 4.63:1. */
+  --home-blue-deep: #24577f;
+  --home-orange: #a9652d; /* Light: --home-on-person 4.58:1 */
+  --home-orange-tint: #f8ede3; /* Light: --home-ink 12.70:1, --home-ink-muted 5.24:1, --home-orange-deep 6.70:1, --home-orange 3.97:1 */
+  --home-orange-item: #f3e3d3; /* Light: --home-ink 11.67:1, --home-ink-muted 4.82:1, --home-orange-deep 6.15:1 */
+  --home-orange-deep: #78471f;
+  --home-purple: #8563ab; /* Light: --home-on-person 4.81:1 */
+  --home-purple-tint: #f1ecf7; /* Light: --home-ink 12.61:1, --home-ink-muted 5.20:1, --home-purple-deep 6.46:1, --home-purple 4.14:1 */
+  --home-purple-item: #e6ddf0; /* Light: --home-ink 11.13:1, --home-ink-muted 4.59:1, --home-purple-deep 5.71:1 */
+  --home-purple-deep: #654881;
+  --home-teal: #327e7d; /* Light: --home-on-person 4.76:1 */
+  --home-teal-tint: #eef5f4; /* Light: --home-ink 13.25:1, --home-ink-muted 5.47:1, --home-teal-deep 6.58:1, --home-teal 4.30:1 */
+  --home-teal-item: #e3efee; /* Light: --home-ink 12.44:1, --home-ink-muted 5.13:1, --home-teal-deep 6.18:1 */
+  --home-teal-deep: #285f5e;
+  --home-offline: #8c541a;
+  --home-offline-tint: #f8ede3; /* Light: --home-offline-deep 6.70:1, --home-ink 12.70:1, --home-ink-muted 5.24:1 */
+  --home-offline-deep: #78471f;
+  --home-offline-text: #8c541a;
+  --home-danger: #b43b2a;
+  --home-focus: #2471a8; /* Focus edge vs card: Light: --home-card 4.89:1, --home-soft 4.63:1, --home-rail-bg 4.49:1, --home-attention 4.55:1 */
+  --home-color-scheme: light;
+  --home-popover-shadow: 0 6px 18px rgba(30, 42, 51, 0.12); /* Floating popover only; neutral ink shadow. */
+  --home-card-shadow: 0 0 0 var(--home-card-lip); /* No visible card shadow; composes with focus shadows. */
+  --home-focus-ring: 0 0 0 2px var(--home-card), 0 0 0 4px var(--home-focus); /* Same 2px halo / 4px outer extent; ratios in home-focus. */
 
   /* Layout. Below the canvas's combined rail and main flex bases, retain the
      existing rail width. Every frame, including the borrowed create rail, shares it. */
@@ -646,81 +648,80 @@
   --home-font-body: "Instrument Sans", "DM Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
     "Segoe UI", Roboto, sans-serif;
 
-  /* HOME CANVAS — dark values. A deep green-black family: the same hue as the light
-     canvas, the rail sinks below the page, lime stays the one accent, and person
-     fills are lifted just enough to separate from the dark card while keeping the
-     white initial at AA. Measured:
-       --d-home-ink         on canvas 15.27  card 14.21  soft 12.79
-       --d-home-ink-muted   on canvas  9.05  card  8.43  soft  7.58
-       --d-home-ink-faint   on canvas  6.70  card  6.24  soft  5.61   (rail outline 3.25 on rail-bg)
-       --d-home-field-border on card 4.77, on field 5.30
-       --d-home-placeholder on field 5.68, on card 5.10
-       rail on --d-home-rail-bg: text 12.52  strong 16.84  muted 7.00  soft 10.32  offline 10.20  lime 14.87
-       --d-home-rail-text on --d-home-rail-raised 9.54
-       primary pill (card text on ink fill) 15.27
-       white on fill        blue 5.36  orange 5.09  purple 5.16  teal 5.47
-       deep on tint         blue 9.83  orange 9.80  purple 10.04 teal 9.76
-       fill on card         blue 3.08  orange 3.25  purple 3.20  teal 3.02 (non-text)
-       --d-home-offline-deep on its tint 9.62; --d-home-offline-text on card 8.82
-       --d-home-danger on card 8.24; --d-home-ink on --d-home-lime-soft 11.43
-       --d-home-on-ink on --d-home-ink 14.21; --d-home-pill-border on card 2.91, on canvas 3.13
-       ink screens on --d-home-rail-bg: --d-home-rail-panel rail-text 10.52 strong 14.15;
-       --d-home-rail-choice rail-text 11.11 strong 14.94; orange line 7.36, orange soft 10.66 */
-  --d-home-canvas: #121a15;
-  --d-home-card: #18211b;
-  --d-home-soft: #1f2a23;
-  --d-home-field: #0f1612;
-  --d-home-hairline: #253129;
-  --d-home-card-border: #33433a;
-  --d-home-card-lip: #070b09;
-  --d-home-popover-shadow: 0 6px 18px rgba(0, 0, 0, 0.32);
-  --d-home-pill-border: #5a6b5f;
-  --d-home-ink: #e9f0e7;
-  --d-home-on-ink: #18211b;
-  --d-home-ink-muted: #aebdb2;
-  --d-home-ink-faint: #93a398;
-  --d-home-line-dashed: #6e7f74;
-  --d-home-field-border: #7d8e82;
-  --d-home-placeholder: #8f8f8f;
-  --d-home-link-hover: #ffffff;
-  --d-home-rail-bg: #0b110d;
-  --d-home-rail-text: #c9d4cc;
-  --d-home-rail-strong: #eef2ea;
-  --d-home-rail-muted: #8fa196;
-  --d-home-rail-soft: #b4c2b8;
-  --d-home-rail-raised: #1f2c24;
-  --d-home-rail-divider: #26352c;
-  --d-home-rail-panel: #18241d;
-  --d-home-rail-choice: #141f19;
-  --d-home-rail-choice-edge: #2c3d33;
-  --d-home-rail-orange-line: #e58a55;
-  --d-home-rail-orange-soft: #f3b48e;
-  --d-home-rail-blue-line: #7a9fe6;
-  --d-home-rail-blue-soft: #a9c3f5;
-  --d-home-lime: #d4f04a;
-  --d-home-lime-ink: #17231c;
-  --d-home-on-lime-ink: #eef2ea;
-  --d-home-lime-soft: #2a3313;
-  --d-home-lime-hover: #e4f78a;
-  --d-home-send-glyph: #18211b;
+  /* HOME CANVAS — dark values. Neutral charcoal, same roles and AA pairs. */
+  --d-home-canvas: #1b1d20; /* Dark: --home-ink 14.88:1, --home-ink-muted 9.15:1, --home-ink-faint 7.84:1, --home-danger 9.44:1, --home-offline-text 8.82:1 */
+  --d-home-card: #25282c; /* Dark: --home-ink 13.04:1, --home-ink-muted 8.02:1, --home-ink-faint 6.87:1, --home-danger 8.27:1, --home-offline-text 7.73:1 */
+  --d-home-soft: #34383e; /* Dark: --home-ink 10.39:1, --home-ink-muted 6.39:1, --home-ink-faint 5.47:1, --home-danger 6.59:1, --home-offline-text 6.16:1 */
+  --d-home-field: #1b1d20; /* Dark: --home-ink 14.88:1, --home-ink-muted 9.15:1, --home-ink-faint 7.84:1, --home-danger 9.44:1, --home-offline-text 8.82:1 */
+  --d-home-hairline: #3d4754; /* Decorative divider. */
+  --d-home-card-border: transparent; /* Transparent card edge; decorative, geometry retained. */
+  --d-home-card-lip: transparent; /* Transparent lip; decorative. */
+  --d-home-pill-border: var(--home-field-border); /* Identifying edge: --home-canvas 6.32:1, --home-card 5.53:1, --home-soft 4.41:1, --home-attention 4.79:1, --home-attention-soft 5.35:1, --home-rail-current 4.25:1 */
+  --d-home-ink: #edf1f5; /* Dark: --home-on-ink 13.04:1 */
+  --d-home-on-ink: #25282c;
+  --d-home-ink-muted: #b5c0cc;
+  --d-home-ink-faint: #a6b2bf;
+  --d-home-line-dashed: #91a0af; /* Placeholder edge vs card/soft/rail-bg: Dark: --home-card 5.53:1, --home-soft 4.41:1, --home-rail-bg 5.17:1 */
+  --d-home-field-border: #91a0af; /* Control edge vs field/card/soft: Dark: --home-field 6.32:1, --home-card 5.53:1, --home-soft 4.41:1 */
+  --d-home-placeholder: #a6b2bf; /* Text vs field: Dark: --home-field 7.84:1 */
+  --d-home-link-hover: #b7dcf5;
+  --d-home-rail-bg: #292d33; /* Dark: --home-rail-text 9.42:1, --home-rail-strong 12.19:1, --home-rail-muted 7.50:1, --home-rail-soft 7.50:1, --home-accent-text 7.51:1, --home-offline 7.23:1, --home-rail-blue-soft 9.60:1, --home-rail-orange-soft 9.88:1 */
+  --d-home-rail-text: #cdd6e0;
+  --d-home-rail-strong: #edf1f5;
+  --d-home-rail-muted: #b5c0cc;
+  --d-home-rail-soft: #b5c0cc;
+  --d-home-rail-raised: #303b49; /* Dark: --home-rail-text 7.74:1, --home-rail-strong 10.01:1, --home-rail-muted 6.16:1, --home-rail-soft 6.16:1, --home-accent-text 6.17:1, --home-offline 5.94:1, --home-rail-blue-soft 7.89:1, --home-rail-orange-soft 8.12:1 */
+  --d-home-rail-divider: #3d4754; /* Decorative divider. */
+  --d-home-rail-panel: #34383e; /* Dark: --home-rail-text 8.02:1, --home-rail-strong 10.39:1, --home-rail-muted 6.39:1, --home-rail-soft 6.39:1, --home-accent-text 6.39:1, --home-offline 6.16:1, --home-rail-blue-soft 8.18:1, --home-rail-orange-soft 8.42:1 */
+  --d-home-rail-choice: #25282c; /* Dark: --home-rail-text 10.07:1, --home-rail-strong 13.04:1, --home-rail-muted 8.02:1, --home-rail-soft 8.02:1, --home-accent-text 8.03:1, --home-offline 7.73:1, --home-rail-blue-soft 10.27:1, --home-rail-orange-soft 10.57:1 */
+  --d-home-rail-choice-edge: #91a0af; /* Choice edge vs rail-choice/rail-raised: Dark: --home-rail-choice 5.53:1, --home-rail-raised 4.25:1 */
+  --d-home-rail-orange-line: #e0b58f;
+  --d-home-rail-orange-soft: #f1d5bd;
+  --d-home-rail-blue-line: #91c5eb;
+  --d-home-rail-blue-soft: #b7dcf5;
+  --d-home-rail-current: #303b49; /* Dark: --home-rail-text 7.74:1, --home-rail-strong 10.01:1, --home-rail-muted 6.16:1, --home-rail-soft 6.16:1, --home-accent-text 6.17:1, --home-offline 5.94:1, --home-rail-blue-soft 7.89:1, --home-rail-orange-soft 8.12:1 */
+  --d-home-rail-current-ink: #edf1f5;
+  --d-home-accent: #2e77b5; /* Dark: --home-accent-ink 4.75:1, --home-send-glyph 4.75:1 */
+  --d-home-accent-ink: #ffffff;
+  --d-home-on-accent-ink: #ffffff;
+  --d-home-accent-soft: #26394b; /* Dark: --home-ink 10.46:1, --home-ink-muted 6.43:1, --home-ink-faint 5.51:1, --home-danger 6.63:1, --home-offline-text 6.20:1 */
+  --d-home-accent-hover: #286da5; /* Dark: --home-accent-ink 5.50:1 */
+  --d-home-accent-text: #91c5eb;
+  --d-home-attention: #3b3028; /* Dark: --home-ink 11.29:1, --home-ink-muted 6.94:1, --home-ink-faint 5.94:1, --home-danger 7.16:1, --home-offline-text 6.69:1 */
+  --d-home-attention-soft: #302923; /* Dark: --home-ink 12.61:1, --home-ink-muted 7.75:1, --home-ink-faint 6.64:1, --home-danger 8.00:1, --home-offline-text 7.48:1 */
+  --d-home-count: #b43b2a; /* Dark: --home-on-count 5.83:1 */
+  --d-home-on-count: #ffffff;
+  --d-home-quiet: #34383e; /* Dark: --home-ink 10.39:1, --home-ink-muted 6.39:1, --home-ink-faint 5.47:1, --home-danger 6.59:1, --home-offline-text 6.16:1 */
+  --d-home-send-glyph: #ffffff;
+  --d-home-person-neutral: #586675; /* Dark: --home-on-person 5.88:1 */
   --d-home-on-person: #ffffff;
-  --d-home-blue: #3a67c4;
-  --d-home-blue-tint: #1b2a4a;
-  --d-home-blue-deep: #c6d7fb;
-  --d-home-orange: #b5501c;
-  --d-home-orange-tint: #3d2417;
-  --d-home-orange-deep: #f7cdb3;
-  --d-home-purple: #7a58c9;
-  --d-home-purple-tint: #2c2348;
-  --d-home-purple-deep: #ddd0f9;
-  --d-home-teal: #0f766e;
-  --d-home-teal-tint: #12332f;
-  --d-home-teal-deep: #aee5dc;
-  --d-home-offline: #f0b25a;
-  --d-home-offline-tint: #3a2a12;
-  --d-home-offline-deep: #f6d29c;
-  --d-home-offline-text: #f0b25a;
-  --d-home-danger: #ff9e86;
+  --d-home-blue: #2e77b5; /* Dark: --home-on-person 4.75:1 */
+  --d-home-blue-tint: #192c3b; /* Dark: --home-ink 12.63:1, --home-ink-muted 7.77:1, --home-blue-deep 9.95:1, --home-blue 3.02:1 */
+  --d-home-blue-item: #30475e; /* Dark: --home-ink 8.45:1, --home-ink-muted 5.20:1, --home-blue-deep 6.66:1. Selected start bar --home-focus 5.20:1; label --home-ink 8.45:1; caption --home-ink-muted 5.20:1. */
+  --d-home-blue-deep: #b7dcf5;
+  --d-home-orange: #a9652d; /* Dark: --home-on-person 4.58:1 */
+  --d-home-orange-tint: #292018; /* Dark: --home-ink 14.08:1, --home-ink-muted 8.66:1, --home-orange-deep 11.41:1, --home-orange 3.49:1 */
+  --d-home-orange-item: #493a2e; /* Dark: --home-ink 9.60:1, --home-ink-muted 5.90:1, --home-orange-deep 7.78:1 */
+  --d-home-orange-deep: #f1d5bd;
+  --d-home-purple: #8563ab; /* Dark: --home-on-person 4.81:1 */
+  --d-home-purple-tint: #26202f; /* Dark: --home-ink 13.91:1, --home-ink-muted 8.55:1, --home-purple-deep 10.21:1, --home-purple 3.29:1 */
+  --d-home-purple-item: #443752; /* Dark: --home-ink 9.67:1, --home-ink-muted 5.94:1, --home-purple-deep 7.09:1 */
+  --d-home-purple-deep: #dcc8f1;
+  --d-home-teal: #327e7d; /* Dark: --home-on-person 4.76:1 */
+  --d-home-teal-tint: #172a29; /* Dark: --home-ink 13.22:1, --home-ink-muted 8.13:1, --home-teal-deep 10.21:1, --home-teal 3.16:1 */
+  --d-home-teal-item: #304b4a; /* Dark: --home-ink 8.29:1, --home-ink-muted 5.10:1, --home-teal-deep 6.41:1 */
+  --d-home-teal-deep: #b4ddda;
+  --d-home-offline: #e6b271;
+  --d-home-offline-tint: #3b3028; /* Dark: --home-offline-deep 9.15:1, --home-ink 11.29:1, --home-ink-muted 6.94:1 */
+  --d-home-offline-deep: #f1d5bd;
+  --d-home-offline-text: #e6b271;
+  --d-home-danger: #ffada0;
+  --d-home-focus: #91c5eb; /* Focus edge vs card: Dark: --home-card 8.03:1, --home-soft 6.39:1, --home-rail-bg 7.51:1, --home-attention 6.95:1 */
+  --d-home-color-scheme: dark;
+  --d-home-popover-shadow: 0 6px 18px rgba(0, 0, 0, 0.32); /* Floating popover only; neutral ink shadow. */
+  --d-home-card-shadow: 0 0 0 var(--home-card-lip); /* No visible card shadow; composes with focus shadows. */
+  --d-home-focus-ring: 0 0 0 2px var(--home-card), 0 0 0 4px var(--home-focus); /* Same 2px halo / 4px outer extent; ratios in home-focus. */
+
 }
 
 /* Main.dc.html's 248 px rail and 640 px main share surplus width at 1:999. */
@@ -799,8 +800,7 @@
     --home-hairline: var(--d-home-hairline);
     --home-card-border: var(--d-home-card-border);
     --home-card-lip: var(--d-home-card-lip);
-    --home-popover-shadow: var(--d-home-popover-shadow);
-    --home-pill-border: var(--d-home-pill-border);
+    --home-pill-border: var(--home-field-border); /* Identifying edge: --home-canvas 4.04:1, --home-card 3.76:1, --home-soft 3.56:1, --home-attention 3.50:1, --home-attention-soft 3.74:1, --home-rail-current 4.04:1 */
     --home-ink: var(--d-home-ink);
     --home-on-ink: var(--d-home-on-ink);
     --home-ink-muted: var(--d-home-ink-muted);
@@ -823,30 +823,48 @@
     --home-rail-orange-soft: var(--d-home-rail-orange-soft);
     --home-rail-blue-line: var(--d-home-rail-blue-line);
     --home-rail-blue-soft: var(--d-home-rail-blue-soft);
-    --home-lime: var(--d-home-lime);
-    --home-lime-ink: var(--d-home-lime-ink);
-    --home-on-lime-ink: var(--d-home-on-lime-ink);
-    --home-lime-soft: var(--d-home-lime-soft);
-    --home-lime-hover: var(--d-home-lime-hover);
+    --home-rail-current: var(--d-home-rail-current);
+    --home-rail-current-ink: var(--d-home-rail-current-ink);
+    --home-accent: var(--d-home-accent);
+    --home-accent-ink: var(--d-home-accent-ink);
+    --home-on-accent-ink: var(--d-home-on-accent-ink);
+    --home-accent-soft: var(--d-home-accent-soft);
+    --home-accent-hover: var(--d-home-accent-hover);
+    --home-accent-text: var(--d-home-accent-text);
+    --home-attention: var(--d-home-attention);
+    --home-attention-soft: var(--d-home-attention-soft);
+    --home-count: var(--d-home-count);
+    --home-on-count: var(--d-home-on-count);
+    --home-quiet: var(--d-home-quiet);
     --home-send-glyph: var(--d-home-send-glyph);
+    --home-person-neutral: var(--d-home-person-neutral);
     --home-on-person: var(--d-home-on-person);
     --home-blue: var(--d-home-blue);
     --home-blue-tint: var(--d-home-blue-tint);
+    --home-blue-item: var(--d-home-blue-item);
     --home-blue-deep: var(--d-home-blue-deep);
     --home-orange: var(--d-home-orange);
     --home-orange-tint: var(--d-home-orange-tint);
+    --home-orange-item: var(--d-home-orange-item);
     --home-orange-deep: var(--d-home-orange-deep);
     --home-purple: var(--d-home-purple);
     --home-purple-tint: var(--d-home-purple-tint);
+    --home-purple-item: var(--d-home-purple-item);
     --home-purple-deep: var(--d-home-purple-deep);
     --home-teal: var(--d-home-teal);
     --home-teal-tint: var(--d-home-teal-tint);
+    --home-teal-item: var(--d-home-teal-item);
     --home-teal-deep: var(--d-home-teal-deep);
     --home-offline: var(--d-home-offline);
     --home-offline-tint: var(--d-home-offline-tint);
     --home-offline-deep: var(--d-home-offline-deep);
     --home-offline-text: var(--d-home-offline-text);
     --home-danger: var(--d-home-danger);
+    --home-focus: var(--d-home-focus);
+    --home-color-scheme: var(--d-home-color-scheme);
+    --home-popover-shadow: var(--d-home-popover-shadow);
+    --home-card-shadow: var(--d-home-card-shadow);
+    --home-focus-ring: var(--d-home-focus-ring);
   }
 }
 
@@ -917,8 +935,7 @@
   --home-hairline: var(--d-home-hairline);
   --home-card-border: var(--d-home-card-border);
   --home-card-lip: var(--d-home-card-lip);
-  --home-popover-shadow: var(--d-home-popover-shadow);
-  --home-pill-border: var(--d-home-pill-border);
+  --home-pill-border: var(--home-field-border); /* Identifying edge: --home-canvas 4.04:1, --home-card 3.76:1, --home-soft 3.56:1, --home-attention 3.50:1, --home-attention-soft 3.74:1, --home-rail-current 4.04:1 */
   --home-ink: var(--d-home-ink);
   --home-on-ink: var(--d-home-on-ink);
   --home-ink-muted: var(--d-home-ink-muted);
@@ -941,30 +958,48 @@
   --home-rail-orange-soft: var(--d-home-rail-orange-soft);
   --home-rail-blue-line: var(--d-home-rail-blue-line);
   --home-rail-blue-soft: var(--d-home-rail-blue-soft);
-  --home-lime: var(--d-home-lime);
-  --home-lime-ink: var(--d-home-lime-ink);
-  --home-on-lime-ink: var(--d-home-on-lime-ink);
-  --home-lime-soft: var(--d-home-lime-soft);
-  --home-lime-hover: var(--d-home-lime-hover);
+  --home-rail-current: var(--d-home-rail-current);
+  --home-rail-current-ink: var(--d-home-rail-current-ink);
+  --home-accent: var(--d-home-accent);
+  --home-accent-ink: var(--d-home-accent-ink);
+  --home-on-accent-ink: var(--d-home-on-accent-ink);
+  --home-accent-soft: var(--d-home-accent-soft);
+  --home-accent-hover: var(--d-home-accent-hover);
+  --home-accent-text: var(--d-home-accent-text);
+  --home-attention: var(--d-home-attention);
+  --home-attention-soft: var(--d-home-attention-soft);
+  --home-count: var(--d-home-count);
+  --home-on-count: var(--d-home-on-count);
+  --home-quiet: var(--d-home-quiet);
   --home-send-glyph: var(--d-home-send-glyph);
+  --home-person-neutral: var(--d-home-person-neutral);
   --home-on-person: var(--d-home-on-person);
   --home-blue: var(--d-home-blue);
   --home-blue-tint: var(--d-home-blue-tint);
+  --home-blue-item: var(--d-home-blue-item);
   --home-blue-deep: var(--d-home-blue-deep);
   --home-orange: var(--d-home-orange);
   --home-orange-tint: var(--d-home-orange-tint);
+  --home-orange-item: var(--d-home-orange-item);
   --home-orange-deep: var(--d-home-orange-deep);
   --home-purple: var(--d-home-purple);
   --home-purple-tint: var(--d-home-purple-tint);
+  --home-purple-item: var(--d-home-purple-item);
   --home-purple-deep: var(--d-home-purple-deep);
   --home-teal: var(--d-home-teal);
   --home-teal-tint: var(--d-home-teal-tint);
+  --home-teal-item: var(--d-home-teal-item);
   --home-teal-deep: var(--d-home-teal-deep);
   --home-offline: var(--d-home-offline);
   --home-offline-tint: var(--d-home-offline-tint);
   --home-offline-deep: var(--d-home-offline-deep);
   --home-offline-text: var(--d-home-offline-text);
   --home-danger: var(--d-home-danger);
+  --home-focus: var(--d-home-focus);
+  --home-color-scheme: var(--d-home-color-scheme);
+  --home-popover-shadow: var(--d-home-popover-shadow);
+  --home-card-shadow: var(--d-home-card-shadow);
+  --home-focus-ring: var(--d-home-focus-ring);
 }
 
 /* ==========================================================================

@@ -33,7 +33,7 @@ live-dashboard {
 .hm-route-pane { padding: var(--s-6); }
 .hm-route-pane h1 { overflow-wrap: anywhere; }
 .hm-route-pane :is(button, a):not(.hm-agent *, .pd-page *) { display: inline-flex; align-items: center; min-block-size: 44px; padding: var(--s-2); }
-.hm-route-pane :is(button, a):focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.hm-route-pane :is(button, a):focus-visible { outline: none; box-shadow: var(--home-focus-ring); }
 /* Panes (an agent, a to-do, the to-do list) sit on the canvas, as Agent.dc.html and Todo.dc.html do; the
    stream stays on the card surface. An agent's page takes the whole main column (Agent.dc.html has no
    side column) with the source's own padding. */

@@ -1,9 +1,5 @@
-/* Home UI: onboarding (lane O). --home-* tokens only (home-visual DESIGN-MAP); class prefix hm-.
-   Sources: ref/New-Space, ref/Add-Agent, ref/Phone-Join and ref/Phone-Connect (.dc.html).
-   Light surfaces: ink text on card/soft, ink primary pill (card text on ink, 15.90 / 15.27),
-   1.5px ink outline secondary. Ink screens (the new-workspace preview, the connect blocks, /invite)
-   use the rail tokens, which stay ink in both modes: rail-strong text 14.32 / 16.84 and rail-soft
-   8.77 / 10.32 on --home-rail-bg; lime-ink on lime 12.65. */
+/* Home onboarding: existing layout and flow, neutral rail panels and blue completion actions.
+   Measured light/dark contrast pairs are documented in tokens.css. */
 
 /* --- New workspace (UI-SPEC 3.8; ref New-Space) --- */
 
@@ -105,7 +101,7 @@
 
 .hm-new-workspace__field input:focus-visible {
   outline: none;
-  box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring);
+  box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--home-focus-ring);
 }
 
 .hm-new-workspace__field input:disabled { opacity: 0.6; }
@@ -154,13 +150,13 @@
 .hm-new-workspace__purpose-card:hover { box-shadow: inset 0 0 0 1.5px var(--home-ink); }
 
 .hm-new-workspace__purpose-card:has(input:checked) {
-  color: var(--home-on-ink);
-  background: var(--home-ink);
-  box-shadow: inset 0 0 0 1.5px var(--home-ink);
+  color: var(--home-ink);
+  background: var(--home-blue-item);
+  box-shadow: inset 0 0 0 1.5px var(--home-focus);
 }
 
 .hm-new-workspace__purpose-card:has(input:focus-visible) {
-  box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring);
+  box-shadow: inset 0 0 0 1.5px var(--home-focus), var(--home-focus-ring);
 }
 /* Forced colours drop box-shadow, and the card's input is transparent: the card shows the outline. */
 @media (forced-colors: active) {
@@ -279,17 +275,18 @@
   min-block-size: 52px;
   max-inline-size: 100%;
   padding: 0 28px;
-  color: var(--home-on-ink);
-  background: var(--home-ink);
+  color: var(--home-accent-ink);
+  background: var(--home-accent);
   border: 0;
   border-radius: var(--radius-pill);
   font: inherit;
   font-size: 17px;
   font-weight: 700;
   cursor: pointer;
+  box-shadow: inset 0 0 0 1.5px var(--home-focus);
 }
 
-.hm-new-workspace__create:hover { background: var(--home-link-hover); }
+.hm-new-workspace__create:hover { background: var(--home-accent-hover); color: var(--home-accent-ink); }
 
 .hm-new-workspace__create:disabled {
   color: var(--home-ink-muted);
@@ -300,7 +297,7 @@
 
 .hm-new-workspace__create:focus-visible {
   outline: none;
-  box-shadow: var(--focus-ring);
+  box-shadow: var(--home-focus-ring);
 }
 
 .hm-new-workspace__access {
@@ -373,7 +370,7 @@
   background: transparent;
 }
 
-/* The preview: an ink panel in both modes (rail tokens). */
+/* The preview uses the neutral rail family in both modes. */
 .hm-new-workspace__preview {
   flex: 1 1 320px;
   min-inline-size: 0;
@@ -649,7 +646,7 @@
   background: transparent;
   border: 0;
   border-radius: var(--radius-pill);
-  box-shadow: inset 0 0 0 1.5px var(--home-ink);
+  box-shadow: inset 0 0 0 1.5px var(--home-field-border);
   cursor: pointer;
   transition: background var(--dur-2) var(--ease-standard);
 }
@@ -657,8 +654,9 @@
 .hm-ahp__chip-btn:hover { background: var(--home-soft); }
 
 .hm-ahp__chip-btn[aria-pressed="true"] {
-  color: var(--home-on-ink);
-  background: var(--home-ink);
+  color: var(--home-ink);
+  background: var(--home-blue-item);
+  box-shadow: inset 0 0 0 1.5px var(--home-focus);
 }
 
 .hm-ahp__more { display: contents; }
@@ -674,7 +672,7 @@
   font-weight: 600;
   list-style: none;
   border-radius: var(--radius-pill);
-  box-shadow: inset 0 0 0 1.5px var(--home-ink);
+  box-shadow: inset 0 0 0 1.5px var(--home-field-border);
   cursor: pointer;
   transition: background var(--dur-2) var(--ease-standard);
 }
@@ -695,13 +693,13 @@
 .hm-ahp__how > summary:focus-visible,
 .hm-ahp__testing > summary:focus-visible {
   outline: none;
-  box-shadow: var(--focus-ring);
+  box-shadow: var(--home-focus-ring);
 }
 
 .hm-ahp__chip-btn:focus-visible,
 .hm-ahp__more > summary:focus-visible,
 .hm-ahp__copy:focus-visible {
-  box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring);
+  box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--home-focus-ring);
 }
 
 /* A status other than Ready: quiet supporting text beside the step title, no capsule. */
@@ -737,15 +735,16 @@
   display: inline-flex;
   align-items: center;
   padding: 0 22px;
-  color: var(--home-on-ink);
+  color: var(--home-accent-ink);
   font-size: 15px;
   font-weight: 700;
   text-decoration: none;
-  background: var(--home-ink);
+  background: var(--home-accent);
   border-radius: var(--radius-pill);
+  box-shadow: inset 0 0 0 1.5px var(--home-focus);
 }
 
-.hm-ahp__connect-action:hover { color: var(--home-on-ink); background: var(--home-link-hover); }
+.hm-ahp__connect-action:hover { color: var(--home-accent-ink); background: var(--home-accent-hover); }
 
 .hm-ahp__prompt { margin-block-start: 14px; }
 
@@ -756,7 +755,7 @@
   color: var(--home-ink-muted);
 }
 
-/* Copyable values: the ink block with a top-aligned outline Copy pill (rail tokens: ink in both modes). */
+/* Copyable values use a neutral panel and a top-aligned Copy pill. */
 .hm-ahp__copyable {
   display: flex;
   flex-wrap: wrap;
@@ -812,18 +811,19 @@
   align-items: center;
   justify-content: center;
   padding: 0 22px;
-  color: var(--home-on-ink);
+  color: var(--home-accent-ink);
   font: inherit;
   font-size: 15px;
   font-weight: 700;
   text-decoration: none;
-  background: var(--home-ink);
+  background: var(--home-accent);
   border: 0;
   border-radius: var(--radius-pill);
   cursor: pointer;
+  box-shadow: inset 0 0 0 1.5px var(--home-focus);
 }
 
-.hm-ahp__button:hover { color: var(--home-on-ink); background: var(--home-link-hover); }
+.hm-ahp__button:hover { color: var(--home-accent-ink); background: var(--home-accent-hover); }
 .hm-ahp__button[hidden] { display: none; }
 
 .hm-ahp__button--quiet {
@@ -844,16 +844,16 @@
 
 :is(.hm-ahp__button--text):hover { color: var(--home-link-hover); background: transparent; }
 
-/* The lime completion pill (the canvas footer action): Done, once the agent has joined. */
+/* The blue completion pill (the canvas footer action): Done, once the agent has joined. */
 .hm-ahp__button--done {
   min-block-size: 52px;
   padding: 0 28px;
-  color: var(--home-lime-ink);
+  color: var(--home-accent-ink);
   font-size: 17px;
-  background: var(--home-lime);
+  background: var(--home-accent);
 }
 
-:is(.hm-ahp__button--done):hover { color: var(--home-lime-ink); background: var(--home-lime-hover); }
+:is(.hm-ahp__button--done):hover { color: var(--home-accent-ink); background: var(--home-accent-hover); }
 
 .hm-ahp__waiting {
   display: flex;
@@ -884,16 +884,16 @@
 
 .hm-ahp__pulse { animation: hm-ahp-pulse 1.6s ease-in-out infinite; }
 
-/* Joined: the lime line with a filled dot (the canvas "Connected" state). */
+/* Joined: the blue line with a filled dot (the canvas "Connected" state). */
 .hm-ahp__waiting--done {
-  color: var(--home-lime-ink);
-  background: var(--home-lime);
+  color: var(--home-blue-deep);
+  background: var(--home-accent-soft);
 }
 
 :is(.hm-ahp__waiting--done)::before {
   content: "";
-  border-color: var(--home-lime-ink);
-  background: var(--home-lime-ink);
+  border-color: var(--home-blue-deep);
+  background: var(--home-blue-deep);
 }
 
 @keyframes hm-ahp-pulse {
@@ -1015,7 +1015,7 @@
   list-style: none;
 }
 
-/* Joined: the canvas footer, a 1px rule, then the lime action and a muted line. */
+/* Joined: the canvas footer, a 1px rule, then the blue action and a muted line. */
 .hm-ahp__joined { display: block; }
 
 .hm-ahp__joined:not([hidden]) {
@@ -1079,7 +1079,7 @@
 }
 
 
-/* --- /invite connect step (UI-SPEC 3.9; ref Phone-Connect). The page is an ink screen. --- */
+/* --- /invite connect step (UI-SPEC 3.9; ref Phone-Connect). The page shares the home canvas. --- */
 
 .hm-invite-connect {
   display: flex;
@@ -1219,7 +1219,7 @@
   text-wrap: pretty;
 }
 
-/* The steps: one ink panel, numbered rows (lime numbers, a 700 heading, a 14px line under it).
+/* The steps: one neutral panel, numbered rows (blue numbers, a 700 heading, a 14px line under it).
    The numbered rows only; "Good to know" lives in the action area. */
 .hm-invite-connect__panel {
   margin-block-start: 20px;
@@ -1253,7 +1253,7 @@
 .hm-invite-connect .hm-ahp__step > .hm-invite-connect__reveal[open] { flex-basis: 100%; }
 
 .hm-invite-connect .hm-ahp__step + .hm-ahp__step { border-block-start-color: var(--home-rail-divider); }
-.hm-invite-connect .hm-ahp__step::before { inset-block-start: 12px; color: var(--home-lime); }
+.hm-invite-connect .hm-ahp__step::before { inset-block-start: 12px; color: var(--home-accent-text); }
 
 .hm-invite-connect .hm-invite-connect__step-head {
   margin: 0;
@@ -1309,7 +1309,7 @@
 .hm-invite-connect__reveal > summary:focus-visible,
 .hm-invite-connect__more > summary:focus-visible {
   outline: none;
-  box-shadow: var(--focus-ring);
+  box-shadow: var(--home-focus-ring);
 }
 
 .hm-invite-connect__reveal { margin: 0; }
@@ -1377,8 +1377,8 @@
 }
 
 .hm-invite-connect .hm-ahp__button {
-  color: var(--home-lime-ink);
-  background: var(--home-lime);
+  color: var(--home-accent-ink);
+  background: var(--home-accent);
 }
 
 /* The way on, pushed to the bottom of the screen as on the canvas. */
@@ -1420,7 +1420,7 @@
 
 .hm-invite-connect__copy-link:focus-visible {
   outline: none;
-  box-shadow: var(--focus-ring);
+  box-shadow: var(--home-focus-ring);
 }
 
 .hm-invite-connect__step[hidden],
@@ -1446,7 +1446,7 @@
 
   .hm-ahp__chip-btn {
     transition: none;
-  }
+}
 }
 
 .hm-new-workspace__preview-title, .hm-new-workspace__preview-list, .hm-ahp__title, .hm-ahp__lead { overflow-wrap: anywhere; }
@@ -1495,3 +1495,8 @@ live-dashboard[data-channel-view="agent-choice"] .hm-frame--add-agent .dashboard
 
 .hm-new-workspace__purpose-check { visibility: hidden; }
 .hm-new-workspace__purpose-card input:checked ~ .hm-new-workspace__purpose-check { visibility: visible; }
+
+/* Joined hints share the readable blue foreground of their pastel status panel. */
+.hm-ahp__waiting--done .hm-ahp__waiting-hint { color: var(--home-blue-deep); }
+
+.hm-ahp__chip-btn[aria-pressed="true"]:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-focus), var(--home-focus-ring); }
