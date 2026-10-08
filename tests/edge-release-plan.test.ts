@@ -61,11 +61,16 @@ const fixture = () => ({
 });
 let serial = 0;
 type Options = { now?: string; host?: string; marker?: string; root?: boolean; mode?: number; raw?: string };
+// Keep fixture imports and monkey-patch dependencies in a closure. Extracted
+// plan code receives its own globals and cannot replace those dependencies.
+function isolatedPythonHarness(source: string) {
+  return `def _run_harness():\n${source.trim().split('\n').map(line => ' ' + line).join('\n')}\n_run_harness()\n`;
+}
 function validate(input: unknown, opts: Options = {}) {
   const n = serial++, inputs = join(scratch, `inputs-${n}.json`), marker = join(scratch, `marker-${n}`);
   writeFileSync(inputs, opts.raw ?? JSON.stringify(input), { mode: 0o600 });
   if (opts.marker !== undefined) { writeFileSync(marker, opts.marker, { mode: opts.mode ?? 0o600 }); chmodSync(marker, opts.mode ?? 0o600); }
-  const harness = `
+  const harness = isolatedPythonHarness(`
 import datetime,os,pathlib,sys
 real_datetime=datetime.datetime
 class Clock(real_datetime):
@@ -79,8 +84,9 @@ def stat(self,*a,**kw):
   fields=list(s); fields[4]=fields[5]=0 if sys.argv[5]=='root' else 501; return os.stat_result(fields)
  return s
 pathlib.Path.stat=stat
-exec(compile(sys.stdin.read(),'<extracted-edge-validator>','exec'))
-`;
+plan_globals={'__name__':'__main__'}
+exec(compile(sys.stdin.read(),'<extracted-edge-validator>','exec'),plan_globals)
+`);
   return spawnSync('python3', ['-c', harness, inputs, marker, opts.host ?? 'yulan-vps-1', opts.now ?? clock, opts.root ? 'root' : 'nonroot'], { input: validator, encoding: 'utf8' });
 }
 function passed(r: ReturnType<typeof spawnSync>) {
@@ -277,7 +283,7 @@ function lifecycle(trees = true) {
   }
   writeFileSync(join(proof, 'ready.txt'), 'PASS\n'); writeFileSync(join(proof, 'timer'), 'active');
   const wrapper = join(root, 'python-wrapper.py');
-  writeFileSync(wrapper, `
+  writeFileSync(wrapper, isolatedPythonHarness(`
 import datetime,json,os,pathlib,subprocess,sys
 sys.argv=sys.argv[1:]
 real_datetime=datetime.datetime
@@ -317,8 +323,9 @@ def run(args,*a,**kw):
  if args[0] in ('docker','systemctl'): raise AssertionError('host mutation is forbidden in fixture')
  return real_run(args,*a,**kw)
 subprocess.run=run
-exec(compile(sys.stdin.read(),'<extracted-plan-python>','exec'))
-`);
+plan_globals={'__name__':'__main__'}
+exec(compile(sys.stdin.read(),'<extracted-plan-python>','exec'),plan_globals)
+`));
   const mapped = helpers.replaceAll('/home/commonswarm', home);
   const session = `
 PROOF_DIR=${JSON.stringify(proof)}
@@ -369,6 +376,32 @@ systemctl() {
     return spawnSync('/bin/bash', ['-s'], { input: source.replaceAll('/home/commonswarm', home).replaceAll('/tmp/anvil-secret', root + '/anvil-secret'), encoding: 'utf8', env: { ...process.env, PROOF_DIR: proof, FIXTURE_BINDING: binding, FIXTURE_CLOCK: clock, FIXTURE_STAGE: stage, FIXTURE_OLD_EDGE: old, ...extra } });
   }, append(source: string) { writeFileSync(join(proof, 'session.sh'), readFileSync(join(proof, 'session.sh'), 'utf8') + '\n' + source); } };
 }
+
+test('Python lifecycle harness keeps fixture helpers working after plan globals collide', () => {
+  const f = lifecycle();
+  const checks = `
+import datetime as plan_datetime, json as plan_json, os as plan_os, pathlib as plan_pathlib, subprocess as plan_subprocess, sys as plan_sys
+assert __name__=='__main__'
+binding=plan_pathlib.Path(plan_os.environ['FIXTURE_BINDING'])
+assert binding.stat().st_uid==0
+assert binding.is_file()
+assert plan_datetime.datetime.now().isoformat()=='2031-02-03T12:00:00+00:00'
+with binding.open('rb') as stream: plan_os.fchown(stream.fileno(),0,0)
+image=plan_json.loads(plan_subprocess.check_output(['docker','inspect','commonswarm-edge-edge-runtime-1']))
+assert image[0]['State']['Running'] is True
+assert plan_subprocess.check_output(['systemctl','cat','fixture.timer'])==b'baseline timer'
+assert plan_subprocess.run(['systemctl','is-active','--quiet'],check=True).returncode==0
+assert plan_subprocess.check_output([plan_sys.executable,'-c',"print('fallback')"]).strip()==b'fallback'
+assert plan_subprocess.run([plan_sys.executable,'-c',"print('fallback')"],capture_output=True).stdout.strip()==b'fallback'
+print('PASS fixture helpers')
+`;
+  for (const collision of ['', 'actual=stat=real=real_datetime=Clock=real_stat=actual_chown=chown=real_check_output=check_output=real_run=run=datetime=json=os=pathlib=subprocess=sys=plan_globals=_run_harness=set()\n']) {
+    // Use PATH's Python directly; archive admission separately requires the
+    // newer interpreter with tarfile.data_filter, even in the Python 3.9 run.
+    const r = f.run(`env python3 ${JSON.stringify(join(f.root, 'python-wrapper.py'))} - <<'PY'\n${collision}${checks}PY\n`);
+    passed(r); assert.equal(r.stdout.trim(), 'PASS fixture helpers');
+  }
+});
 
 // Archive admission owns a distinct packaging risk: the lifecycle fixtures above
 // do not extract release artifacts. Execute the complete preflight and its real
@@ -806,7 +839,7 @@ function caddyRoute(config: CaddyNode[], host: string, path: string, method: str
 }
 type ProbeRequest = [host: string, path: string, method: string, body: string | null, headers: Record<string, string>];
 function probeRequests(source: string): ProbeRequest[] {
-  const extractor = `
+  const extractor = isolatedPythonHarness(`
 import ast,http.client,json,ssl,sys
 ssl.create_default_context=lambda **kw: object()
 calls=[]
@@ -823,9 +856,10 @@ http.client.HTTPSConnection=Connection
 class Extract(ast.NodeTransformer):
  def visit_Assert(self,node): return None
 tree=ast.fix_missing_locations(Extract().visit(ast.parse(sys.stdin.read())))
-exec(compile(tree,'<probe-request-inventory>','exec'))
+plan_globals={'__name__':'__main__'}
+exec(compile(tree,'<probe-request-inventory>','exec'),plan_globals)
 print(json.dumps(calls))
-`;
+`);
   const r = spawnSync('python3', ['-c', extractor, 'unused-ca'], { input: source, encoding: 'utf8' }); passed(r);
   return JSON.parse(r.stdout.trim().split('\n').pop()!);
 }
@@ -849,7 +883,7 @@ test('every extracted probe request has a route in parsed deployed Caddy; bare m
 
 test('extracted route probes use real MCP origin/auth checks; refuse injected Origin, metadata drift and _meta error', async () => {
   const source = python(/^edge_route_probes\(\) \{[\s\S]*?^\}/m.exec(helpers)![0]);
-  const harness = `
+  const harness = isolatedPythonHarness(`
 import http.client,json,ssl,sys
 payload=json.load(sys.stdin); rows=payload['rows']
 ssl.create_default_context=lambda **kw: object()
@@ -878,8 +912,9 @@ class Connection:
    return Response(row['status'],json.dumps(doc).encode(),row['headers'])
   raise AssertionError('unexpected probe route')
 http.client.HTTPSConnection=Connection
-exec(compile(payload['source'],'<extracted-local-caddy-probes>','exec'))
-`;
+plan_globals={'__name__':'__main__'}
+exec(compile(payload['source'],'<extracted-local-caddy-probes>','exec'),plan_globals)
+`);
   const run = async (probeSource: string, allowedOrigins: string[], kind = 'good') => {
     const handle = createMcpProtocolHandler({
       issuer: 'https://mcp.commonswarm.com', resource: 'https://mcp.commonswarm.com/mcp', publicEnabled: true,
