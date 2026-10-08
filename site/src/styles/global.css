@@ -1206,3 +1206,392 @@ a.card:focus-visible,
     --header-h: 5rem;
   }
 }
+
+/* Public marketing controls. Explicit page markers keep this skin out of /app,
+   /invite and the agent-connect flow, which share these primitives. */
+:root:has([data-marketing], .seo-page) .btn {
+  min-block-size: 44px;
+  box-shadow: none;
+}
+
+:root:has([data-marketing], .seo-page) .btn--primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--accent-ink);
+}
+
+:root:has([data-marketing], .seo-page) .btn--primary:hover {
+  background: var(--accent-bright);
+  transform: none;
+  box-shadow: none;
+}
+
+:root:has([data-marketing], .seo-page) .btn--secondary {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: transparent;
+}
+
+:root:has([data-marketing], .seo-page) .btn--secondary:hover {
+  background: var(--bg-raised);
+  border-color: var(--border-interactive);
+}
+
+:root:has([data-marketing], .seo-page) .btn:focus-visible {
+  box-shadow: var(--focus-ring);
+  outline: 2px solid transparent;
+}
+
+:root:has([data-marketing], .seo-page) .card,
+:root:has([data-marketing], .seo-page) .panel {
+  background: var(--bg-raised);
+  border-color: transparent;
+  box-shadow: none;
+}
+
+/* Public workspace examples use the same rail, identities and quiet cards as the app. */
+body .hm-hero {
+  padding-block-start: clamp(var(--s-10), 5vw, var(--s-16));
+  background: var(--bg);
+}
+
+.hm-hero .hm-display {
+  font-size: clamp(2.5rem, 4vw + 0.8rem, 4.25rem);
+  letter-spacing: -0.04em;
+  line-height: 1.1;
+}
+
+.hm-hero .hm-stage {
+  max-inline-size: 65rem;
+  margin: var(--s-10) auto 0;
+  padding: var(--s-6);
+  border-radius: var(--radius-xl);
+  background: var(--surface-2);
+}
+
+.hm-hero .hm-stage__sky {
+  display: none;
+}
+
+.hm-hero .hm-card {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  grid-template-rows: auto 1fr auto;
+  gap: 0 var(--s-6);
+  overflow: hidden;
+  max-inline-size: none;
+  padding: 0 var(--s-6) var(--s-6) 0;
+  border: 0;
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+}
+
+.hm-hero .hm-card__head {
+  position: relative;
+  grid-column: 2;
+  padding-block: var(--s-6);
+}
+
+.hm-hero .hm-card__mark {
+  position: absolute;
+  inset-inline-start: calc(-200px - var(--s-6) + var(--s-6));
+  inset-block-start: var(--s-5);
+  z-index: 1;
+}
+
+.hm-hero .hm-card__title {
+  font-size: var(--t-2xl);
+  line-height: 1.25;
+}
+
+.hm-hero .hm-card__tabs {
+  grid-column: 1;
+  grid-row: 1 / 4;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: var(--s-2);
+  margin: 0;
+  border: 0;
+  padding: calc(var(--s-16) + var(--s-4)) var(--s-3) var(--s-6);
+  background: var(--surface-2);
+}
+
+.hm-hero .hm-card__tabs span {
+  margin: 0;
+  padding: var(--s-3) var(--s-4);
+  border: 0;
+  border-radius: var(--radius);
+  color: var(--text-muted);
+}
+
+.hm-hero .hm-card__tabs .is-active {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: var(--weight-semibold);
+}
+
+.hm-hero .hm-card__msgs {
+  grid-column: 2;
+  align-content: start;
+  display: grid;
+  gap: var(--s-3);
+  margin-block-start: var(--s-4);
+}
+
+.hm-hero .hm-msg {
+  padding: var(--s-4);
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--future-tint);
+}
+
+.hm-hero .hm-msg + .hm-msg {
+  background: var(--life-tint);
+  border: 0;
+}
+
+.hm-hero .hm-msg__dot {
+  inline-size: 34px;
+  block-size: 34px;
+  position: relative;
+  border: 2px solid var(--marketing-lavender-avatar);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.hm-hero .hm-agent-avatar::after {
+  content: "";
+  position: absolute;
+  inline-size: 14px;
+  block-size: 14px;
+  inset: auto -5px -5px auto;
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+  background: var(--marketing-lavender-avatar);
+}
+
+.hm-hero .hm-agent-avatar--peach::after {
+  background: var(--marketing-peach-avatar);
+}
+
+.hm-hero .hm-agent-avatar--peach {
+  border-color: var(--marketing-peach-avatar);
+}
+
+.hm-hero .hm-file {
+  grid-column: 2;
+  margin-block-start: var(--s-4);
+  padding: var(--s-4);
+  background: var(--bg-raised);
+  border: 0;
+  border-radius: var(--radius-lg);
+}
+
+body .hm-section {
+  padding-block-start: clamp(var(--s-12), 7vw, var(--s-24));
+}
+
+.hm-section .hm-step,
+.hm-section .hm-trust__item {
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: none;
+}
+
+.hm-section .hm-step:nth-child(2) {
+  background: var(--marketing-mint);
+}
+
+.hm-section .hm-step:nth-child(3) {
+  background: var(--life-tint);
+}
+
+.hm-section .hm-use,
+.hm-section .hm-soon {
+  border: 0;
+  border-radius: var(--radius-xl);
+  box-shadow: none;
+}
+
+.hm-section .hm-uses .hm-use.hm-use--life {
+  background: var(--life-tint);
+}
+
+.hm-section .hm-uses .hm-use.hm-use--work {
+  background: var(--work-tint);
+}
+
+body .hm-section .hm-soon.hm-soon {
+  background: var(--future-tint);
+}
+
+.hm-section .tile {
+  border: 0;
+  box-shadow: none;
+  transform: none;
+  background: var(--surface);
+}
+
+.hm-section .orb {
+  box-shadow: none;
+}
+
+.hm-section .orb--lavender { background: var(--lavender); }
+.hm-section .orb--peach { background: var(--peach); }
+.hm-section .orb--sage { background: var(--sage); }
+.hm-section .orb--sky { background: var(--sky); }
+.hm-section .orb--pearl { background: var(--surface); }
+
+.hm-section .hm-file--chip,
+.hm-section .hm-logo__chip {
+  border: 0;
+  background: var(--bg-raised);
+  box-shadow: none;
+}
+
+.hm-section .hm-logo__disc {
+  box-shadow: none;
+}
+
+/* Life and Work are two spacious product bands, rather than decorative side-by-side cards. */
+.hm-section .hm-uses {
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s-8);
+}
+
+.hm-section .hm-use {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+  align-items: center;
+  gap: var(--s-10);
+  padding: var(--s-12);
+}
+
+.hm-use__copy,
+.hm-use__example {
+  min-inline-size: 0;
+}
+
+.hm-use__example {
+  padding: var(--s-6);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  text-align: start;
+}
+
+.hm-section .hm-use__example .hm-file--chip {
+  margin: 0;
+  padding: 0 0 var(--s-4);
+  background: transparent;
+  border-radius: 0;
+  font-size: var(--t-lg);
+  font-weight: var(--weight-semibold);
+}
+
+.hm-note-preview {
+  display: flex;
+  gap: var(--s-4);
+  padding: var(--s-6);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+}
+
+.hm-note-preview__identities {
+  display: flex;
+  align-items: start;
+  gap: var(--s-2);
+}
+
+.hm-note-preview__identities i {
+  inline-size: 28px;
+  block-size: 28px;
+  border-radius: 50%;
+  background: var(--marketing-peach-avatar);
+}
+
+.hm-note-preview__identities i + i {
+  border-radius: 8px;
+  border: 2px solid var(--text-muted);
+  background: transparent;
+}
+
+.hm-use--work .hm-note-preview__identities i:first-child {
+  background: var(--accent);
+}
+
+.hm-note-preview__lines {
+  display: grid;
+  flex: 1;
+  gap: var(--s-3);
+  padding-block: var(--s-2);
+}
+
+.hm-note-preview__lines i {
+  block-size: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--border-strong);
+}
+
+.hm-note-preview__lines i:nth-child(2) { inline-size: 80%; }
+.hm-note-preview__lines i:last-child { inline-size: 60%; }
+
+@media (max-width: 47.999rem) {
+  .hm-hero .hm-stage {
+    margin: var(--s-8) var(--s-4) 0;
+    padding: var(--s-3);
+  }
+
+  .hm-hero .hm-card {
+    display: block;
+    padding: var(--s-6);
+  }
+
+  .hm-hero .hm-card__head {
+    padding: 0;
+  }
+
+  .hm-hero .hm-card__mark {
+    position: static;
+  }
+
+  .hm-hero .hm-card__tabs {
+    flex-direction: row;
+    flex-wrap: wrap;
+    padding: var(--s-1);
+    margin-block-start: var(--s-5);
+    border-radius: var(--radius);
+    font-size: var(--t-xs);
+  }
+
+  .hm-hero .hm-card__tabs span {
+    padding: var(--s-2) var(--s-3);
+  }
+
+  .hm-hero .hm-msg {
+    align-items: start;
+  }
+
+  .hm-section .hm-use {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--s-6);
+    padding: var(--s-6);
+  }
+
+  .hm-note-preview {
+    flex-direction: column;
+  }
+}
+
+/* The compatibility handoff shares the public type and touch-target scale. */
+:root:has([data-marketing]) .handoff .handoff__copy h1 {
+  font-size: var(--t-3xl);
+}
+
+:root:has([data-marketing]) .handoff__wordmark {
+  display: inline-flex;
+  align-items: center;
+  min-block-size: 44px;
+}

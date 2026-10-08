@@ -1,27 +1,6 @@
 ---
-/*
- * Wordmark — the CommonSwarm mark and word, in one place (Daylight Orbs, 2026-10-01).
- *
- * The mark is five disjoint circles on a 48 x 48 grid, radius 5.5 each: an ink centre at
- * (24,24) and four satellites — lavender north, peach east, sage south, cobalt west — with a
- * 5-unit gap to the centre. It is drawn here and nowhere else; favicon.svg, the app icon and
- * the social card copy the same geometry, so change all four together.
- *
- * The four satellite hues are brand literals (they do not change by mode). The centre and
- * the west satellite read --mark-center and --mark-west, which tokens.css flips in dark mode
- * to the light ink and the pale cobalt, as the brand's monochrome rule asks. No outlines,
- * orbit lines or blur inside the mark, at any size.
- *
- * Lockups: 32px mark, 10px gap, 22/28 Plus Jakarta Sans 600 at -0.04em in the bar; 26px
- * mark, 8px gap, 18/24 on phones. `markSize` sets a fixed mark size for other placements.
- *
- * Accessible name: when this is a link, the visible word "CommonSwarm" names it and the SVG
- * is hidden. A mark-only link must pass `label` (e.g. "CommonSwarm home").
- *
- * 320px: the bar holds the lockup, a compact CTA and the menu button. SiteHeader drops the
- * CTA (it is repeated in the menu sheet) before this word is ever allowed to wrap or shrink
- * below the mobile lockup; `white-space: nowrap` keeps "CommonSwarm" one word.
- */
+/* Shared app identity: a person circle and an outlined agent square.
+ * The app header uses hm-rail__mark; preserve that geometry in the public lockup. */
 
 interface Props {
   href?: string;
@@ -45,19 +24,14 @@ const sized = typeof markSize === "number";
   aria-label={markOnly ? (label ?? "CommonSwarm home") : undefined}
   style={sized ? `--wm-mark: ${markSize}px` : undefined}
 >
-  <svg class="wm__mark" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
-    <circle cx="24" cy="24" r="5.5" style="fill: var(--mark-center)"></circle>
-    <circle cx="24" cy="8" r="5.5" fill="#B8ADF2"></circle>
-    <circle cx="40" cy="24" r="5.5" fill="#F3B89D"></circle>
-    <circle cx="24" cy="40" r="5.5" fill="#AACBB7"></circle>
-    <circle cx="8" cy="24" r="5.5" style="fill: var(--mark-west)"></circle>
-  </svg>
+  <span class="wm__mark hm-rail__mark" aria-hidden="true"></span>
   {!markOnly && <span class="wm__word">CommonSwarm</span>}
 </Tag>
 
 <style>
   .wm {
     --wm-mark: 32px;
+    min-block-size: 44px;
     display: inline-flex;
     flex: none;
     align-items: center;
@@ -83,6 +57,31 @@ const sized = typeof markSize === "number";
     flex: none;
     inline-size: var(--wm-mark);
     block-size: var(--wm-mark);
+  }
+
+  .wm__mark {
+    position: relative;
+  }
+
+  .wm__mark::before,
+  .wm__mark::after {
+    content: "";
+    position: absolute;
+    inline-size: 56%;
+    block-size: 56%;
+  }
+
+  .wm__mark::before {
+    inset: 6% auto auto 6%;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+  .wm__mark::after {
+    inset: auto 6% 6% auto;
+    border: 2px solid currentColor;
+    border-radius: 30%;
+    box-sizing: border-box;
   }
 
   .wm__word {

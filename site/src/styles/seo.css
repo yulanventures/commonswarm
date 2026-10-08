@@ -56,14 +56,13 @@
 
 .seo-content > section + section,
 .seo-content > .seo-related {
-  margin-block-start: clamp(var(--s-16), 8vw, var(--s-24));
-  padding-block-start: clamp(var(--s-10), 5vw, var(--s-16));
-  border-top: 1px solid var(--seo-rule);
+  margin-block-start: var(--s-16);
+  padding-block-start: 0;
 }
 
 .seo-content h2 {
   max-inline-size: 24ch;
-  margin: 0 0 var(--s-5);
+  margin: 0 0 var(--s-6);
   font-size: clamp(1.65rem, 4vw, var(--t-3xl));
   line-height: var(--lh-tight);
   letter-spacing: var(--track-head);
@@ -72,7 +71,7 @@
 
 .seo-content h3 {
   max-inline-size: 32ch;
-  margin: var(--s-10) 0 var(--s-3);
+  margin: var(--s-10) 0 var(--s-6);
   font-size: var(--t-xl);
   line-height: var(--lh-snug);
   letter-spacing: var(--track-xl);
@@ -334,5 +333,111 @@
   .seo-choice-grid,
   .seo-related ul {
     grid-template-columns: 1fr;
+  }
+}
+
+/* Neutral article furniture shared by orchestration, alternatives and guides. */
+.seo-page .seo-hero {
+  background: var(--bg-raised);
+  border-bottom: 0;
+}
+
+.seo-page .seo-hero__inner {
+  padding-block: clamp(var(--s-12), 6vw, var(--s-24));
+}
+
+.seo-page .seo-callout,
+.seo-page .seo-choice,
+.seo-page .seo-steps > li,
+.seo-page .about-swarm,
+.seo-page .seo-related a,
+.seo-page pre {
+  background: var(--bg-raised);
+  border: 0;
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+}
+
+.seo-page .seo-callout {
+  background: var(--life-tint);
+}
+
+.seo-page .seo-choice:nth-child(2n) {
+  background: var(--marketing-mint);
+}
+
+.seo-page .about-swarm {
+  background: var(--work-tint);
+  padding: var(--s-8);
+}
+
+.seo-page .seo-table-wrap {
+  border-color: var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.seo-page .seo-table th {
+  background: var(--surface-2);
+}
+
+.seo-page .seo-related a {
+  min-block-size: 44px;
+}
+
+.seo-page .seo-related a:hover {
+  background: var(--surface-2);
+}
+
+/* A labelled scroll region keeps the comparison usable by touch and keyboard. */
+.seo-table-frame {
+  position: relative;
+  margin-block: var(--s-6);
+}
+
+.seo-table-frame .seo-table-wrap {
+  margin: 0;
+}
+
+.seo-table-wrap:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+  box-shadow: var(--focus-ring);
+}
+
+@media (max-width: 47.999rem) {
+  .seo-content > section + section,
+  .seo-content > .seo-related {
+    margin-block-start: var(--s-10);
+  }
+
+  .seo-table { table-layout: fixed; }
+
+  .seo-table :is(th, td):first-child {
+    position: sticky;
+    inset-inline-start: 0;
+    z-index: 1;
+    inline-size: 7rem;
+    min-inline-size: 7rem;
+    max-inline-size: 7rem;
+    padding-inline: 12px;
+    box-sizing: border-box;
+    overflow-wrap: anywhere;
+    background: var(--surface);
+    box-shadow: 1px 0 0 var(--border);
+  }
+
+  .seo-page .seo-table th:first-child {
+    background: var(--surface-2);
+  }
+
+  .seo-table-frame.has-more-columns::after {
+    content: '';
+    position: absolute;
+    inset-block: 0;
+    inset-inline-end: 0;
+    inline-size: var(--s-6);
+    border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
+    background: linear-gradient(to right, transparent, var(--surface-2));
+    pointer-events: none;
   }
 }

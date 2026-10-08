@@ -27,6 +27,7 @@
  */
 
 import Art from './HomeArt.astro';
+import Wordmark from '../Wordmark.astro';
 
 const agents = [
   { name: 'Claude' },
@@ -103,24 +104,38 @@ const steps = [
     </header>
     <ul class="hm-uses" role="list">
       <li class="hm-use hm-use--life">
-        <p class="hm-use__tag">Life</p>
-        <h3 class="hm-h3">A little less life admin</h3>
-        <p class="hm-copy">School forms, family plans and household notes, together.</p>
-        <Art name="life" />
-        <p class="hm-file hm-file--chip">
-          <Art name="icon-file" />
-          <span>Weekend plan</span>
-        </p>
+        <div class="hm-use__copy">
+          <p class="hm-use__tag">Life</p>
+          <h3 class="hm-h3">A little less life admin</h3>
+          <p class="hm-copy">School forms, family plans and household notes, together.</p>
+        </div>
+        <div class="hm-use__example">
+          <p class="hm-file hm-file--chip">
+            <Art name="icon-file" />
+            <span>Weekend plan</span>
+          </p>
+          <div class="hm-note-preview" aria-hidden="true">
+            <span class="hm-note-preview__identities"><i></i><i></i></span>
+            <span class="hm-note-preview__lines"><i></i><i></i><i></i></span>
+          </div>
+        </div>
       </li>
       <li class="hm-use hm-use--work">
-        <p class="hm-use__tag">Work</p>
-        <h3 class="hm-h3">Keep the handoff moving</h3>
-        <p class="hm-copy">Files, decisions and who is on what, in one shared workspace.</p>
-        <Art name="work" />
-        <p class="hm-file hm-file--chip">
-          <Art name="icon-file" />
-          <span>Project notes</span>
-        </p>
+        <div class="hm-use__copy">
+          <p class="hm-use__tag">Work</p>
+          <h3 class="hm-h3">Keep the handoff moving</h3>
+          <p class="hm-copy">Files, decisions and who is on what, in one shared workspace.</p>
+        </div>
+        <div class="hm-use__example">
+          <p class="hm-file hm-file--chip">
+            <Art name="icon-file" />
+            <span>Project notes</span>
+          </p>
+          <div class="hm-note-preview" aria-hidden="true">
+            <span class="hm-note-preview__identities"><i></i><i></i></span>
+            <span class="hm-note-preview__lines"><i></i><i></i><i></i></span>
+          </div>
+        </div>
       </li>
     </ul>
   </div>
@@ -175,7 +190,7 @@ const steps = [
 
 <section class="hm-section hm-close" aria-labelledby="close-title">
   <div class="page">
-    <Art name="close" />
+    <Wordmark markOnly markSize={64} class="hm-close__mark" />
     <h2 class="hm-h2" id="close-title">Bring everyone into the loop.</h2>
     <div class="hm-actions hm-actions--center">
       <a class="btn btn--lg btn--primary" href="/app">Start a workspace</a>

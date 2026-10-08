@@ -10,7 +10,7 @@
  * superseded line at the foot of this file — "The product is dark-only today and that is a
  * decision, not a gap" — is DEAD. It is kept, marked dead, in section 11.
  *
- * STRUCTURE — three blocks, and only three:
+ * SHARED STRUCTURE — three blocks; the marketing opt-in skin is at the end:
  *   :root                                    the light palette. This is the product.
  *   @media (prefers-color-scheme: dark)      dark, when the OS asks and nothing overrides.
  *   [data-theme="dark"]                      dark, when a control asks.
@@ -1053,3 +1053,139 @@
    tokens.css is @imported at the top of global.css, so a collision resolves
    silently in global.css's favour and the loser looks like a colour that simply
    does not apply. That rule is why item 2 above is a report and not a patch. */
+
+/* Marketing — neutral cards, 2026-10-08.
+ * Opt-in on the assigned public pages only. The app, invite, OAuth and agent-connect
+ * keep their existing tokens. Bricolage + Instrument match the household redesign.
+ * AA audit: ratios below use WCAG sRGB luminance, tested against black/white = 21.
+ * Surface comments report body / secondary / blue-link contrast, respectively.
+ * Decorative cards use no boundary as a control affordance; actual controls retain
+ * their labels and a two-tone focus ring. Dark values are stored once and mapped
+ * for both OS preference and explicit theme selection.
+ */
+:root:has([data-marketing], .seo-page) {
+  /* Reading hierarchy: body 16/26, contents 14/20, sections 24/30, titles 48/34. */
+  --marketing-reading-line: 1.625;
+  --marketing-contents-line: 1.25rem;
+  --marketing-section-title: 1.5rem;
+  --marketing-section-line: 1.875rem;
+  --marketing-page-title: 3rem;
+  --marketing-mobile-title: 2.125rem;
+  --elev-0: #ffffff; /* ink 14.64:1; secondary 5.89:1; link 6.71:1 */
+  --elev-1: #f6f7f8; /* ink 13.65:1; secondary 5.49:1; link 6.26:1 */
+  --elev-2: #ffffff; /* ink 14.64:1; secondary 5.89:1; link 6.71:1 */
+  --elev-3: #e8eef4; /* ink 12.53:1; secondary 5.04:1; link 5.74:1 */
+  --elev-4: #ffffff; /* ink 14.64:1; secondary 5.89:1; link 6.71:1 */
+  --border: #dce2e7;
+  --border-strong: #cbd4dd;
+  --border-interactive: #75818d; /* control edge >= 3.40:1 on every surface */
+  --text: #1e2a33;
+  --text-muted: #586674;
+  --text-faint: #586674;
+  --accent: #2471a8; /* white label 5.25:1; focus >= 4.49:1 on every marketing surface */
+  --accent-bright: #1d6090;
+  --accent-dim: #e9f0f7;
+  --accent-ink: #ffffff;
+  --focus: #2471a8;
+  --focus-halo: #ffffff;
+  --life-tint: #f8ede3; /* ink 12.70:1; secondary 5.11:1; link 5.82:1 */
+  --work-tint: #e9f0f7; /* ink 12.74:1; secondary 5.12:1; link 5.84:1 */
+  --future-tint: #f1ecf7; /* ink 12.61:1; secondary 5.07:1; link 5.78:1 */
+  --marketing-mint: #eef5f4; /* ink 13.25:1; secondary 5.33:1; link 6.07:1 */
+  --marketing-lavender-avatar: #8e6fb8;
+  --marketing-peach-avatar: #b57036;
+  --bg: var(--elev-0);
+  --bg-raised: var(--elev-1);
+  --surface: var(--elev-2);
+  --surface-2: var(--elev-3);
+  --surface-3: var(--elev-4);
+  --surface-soft: var(--elev-1);
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+  --radius: 16px;
+  --radius-lg: 24px;
+  --radius-xl: 28px;
+  --header-h: 5rem;
+  --ring-top: 0 0 transparent;
+  --shadow-card: 0 0 transparent;
+  --shadow-floating: 0 0 transparent;
+  --shadow-orb: 0 0 transparent;
+  --focus-ring: 0 0 0 2px var(--focus-halo), 0 0 0 4px var(--focus);
+  --d-marketing-elev-0: #191c20; /* ink 15.05:1; secondary 9.37:1; link 11.43:1 */
+  --d-marketing-elev-1: #252a30; /* ink 12.73:1; secondary 7.92:1; link 9.67:1 */
+  --d-marketing-elev-2: #22262c; /* ink 13.38:1; secondary 8.33:1; link 10.17:1 */
+  --d-marketing-elev-3: #2b3138; /* ink 11.56:1; secondary 7.19:1; link 8.78:1 */
+  --d-marketing-elev-4: #2b3138; /* ink 11.56:1; secondary 7.19:1; link 8.78:1 */
+  --d-marketing-border: #383f47;
+  --d-marketing-border-strong: #48535e;
+  --d-marketing-border-interactive: #8b98a5; /* control edge >= 4.44:1 on every surface */
+  --d-marketing-text: #edf1f4;
+  --d-marketing-text-muted: #b7c1cb;
+  --d-marketing-text-faint: #b7c1cb;
+  --d-marketing-accent: #92c5e9; /* label 7.97:1; focus >= 7.09:1 on every surface */
+  --d-marketing-accent-bright: #b4d8f2;
+  --d-marketing-accent-dim: #25323f;
+  --d-marketing-accent-ink: #192a37;
+  --d-marketing-focus: #92c5e9;
+  --d-marketing-focus-halo: #191c20;
+  --d-marketing-life-tint: #332b25; /* ink 12.22:1; secondary 7.60:1; link 9.28:1 */
+  --d-marketing-work-tint: #25323f; /* ink 11.51:1; secondary 7.16:1; link 8.74:1 */
+  --d-marketing-future-tint: #302c39; /* ink 11.97:1; secondary 7.45:1; link 9.09:1 */
+  --d-marketing-mint: #253230; /* ink 11.72:1; secondary 7.29:1; link 8.90:1 */
+  --d-marketing-lavender-avatar: #b09acc;
+  --d-marketing-peach-avatar: #d5a178;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):has([data-marketing], .seo-page) {
+    --elev-0: var(--d-marketing-elev-0);
+    --elev-1: var(--d-marketing-elev-1);
+    --elev-2: var(--d-marketing-elev-2);
+    --elev-3: var(--d-marketing-elev-3);
+    --elev-4: var(--d-marketing-elev-4);
+    --border: var(--d-marketing-border);
+    --border-strong: var(--d-marketing-border-strong);
+    --border-interactive: var(--d-marketing-border-interactive);
+    --text: var(--d-marketing-text);
+    --text-muted: var(--d-marketing-text-muted);
+    --text-faint: var(--d-marketing-text-faint);
+    --accent: var(--d-marketing-accent);
+    --accent-bright: var(--d-marketing-accent-bright);
+    --accent-dim: var(--d-marketing-accent-dim);
+    --accent-ink: var(--d-marketing-accent-ink);
+    --focus: var(--d-marketing-focus);
+    --focus-halo: var(--d-marketing-focus-halo);
+    --life-tint: var(--d-marketing-life-tint);
+    --work-tint: var(--d-marketing-work-tint);
+    --future-tint: var(--d-marketing-future-tint);
+    --marketing-mint: var(--d-marketing-mint);
+    --marketing-lavender-avatar: var(--d-marketing-lavender-avatar);
+    --marketing-peach-avatar: var(--d-marketing-peach-avatar);
+  }
+}
+
+:root[data-theme="dark"]:has([data-marketing], .seo-page) {
+  --elev-0: var(--d-marketing-elev-0);
+  --elev-1: var(--d-marketing-elev-1);
+  --elev-2: var(--d-marketing-elev-2);
+  --elev-3: var(--d-marketing-elev-3);
+  --elev-4: var(--d-marketing-elev-4);
+  --border: var(--d-marketing-border);
+  --border-strong: var(--d-marketing-border-strong);
+  --border-interactive: var(--d-marketing-border-interactive);
+  --text: var(--d-marketing-text);
+  --text-muted: var(--d-marketing-text-muted);
+  --text-faint: var(--d-marketing-text-faint);
+  --accent: var(--d-marketing-accent);
+  --accent-bright: var(--d-marketing-accent-bright);
+  --accent-dim: var(--d-marketing-accent-dim);
+  --accent-ink: var(--d-marketing-accent-ink);
+  --focus: var(--d-marketing-focus);
+  --focus-halo: var(--d-marketing-focus-halo);
+  --life-tint: var(--d-marketing-life-tint);
+  --work-tint: var(--d-marketing-work-tint);
+  --future-tint: var(--d-marketing-future-tint);
+  --marketing-mint: var(--d-marketing-mint);
+  --marketing-lavender-avatar: var(--d-marketing-lavender-avatar);
+  --marketing-peach-avatar: var(--d-marketing-peach-avatar);
+}

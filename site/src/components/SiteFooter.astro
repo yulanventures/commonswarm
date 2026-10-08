@@ -239,7 +239,7 @@ const year = new Date().getFullYear();
      background are what separate the footer; it does not also need a gap. */
   .ft {
     border-top: 1px solid var(--border);
-    background: var(--bg);
+    background: var(--bg-raised);
   }
 
   /* Was --s-16 (64px) on top. Measured at 1440 the footer opened on a hole: the brand
@@ -349,7 +349,9 @@ const year = new Date().getFullYear();
   .ft__link {
     /* Inline links measured 17px tall. The vertical gap already clears WCAG 2.5.8, but the
        target itself failed 2.5.5, so the padding grows and the list gap shrinks to match. */
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
+    min-block-size: 44px;
     padding-block: 0.5rem;
     font-size: var(--t-sm);
     color: var(--text-muted);
