@@ -7,12 +7,13 @@ import { HomeToolsUnavailable, HomeCommandRefused } from '../../lib/home/client'
 import { CommandOutcomeUnknown, FreshLoginRequired, WorkspaceRoleRefused, BROWSER_SIGNAL_COLUMNS, browserSignalFromRow } from '../../lib/commonswarm';
 import { createLatestRead } from '../../lib/latest-read';
 import { buildAuthorLine, buildStreamExtras, deriveStreamExtras } from '../../lib/home-stream';
-import { homeParty, mapHomePeople, homeAskAnswered } from '../../lib/home-map';
+import { homeParty, mapHomePeople, homeAskAnswered, homeViewTitle } from '../../lib/home-map';
 import { peopleRoleBeginSave, peopleRoleErrorCode, peopleRoleFinishSave, peopleRoleReceipt, peopleRoleRefusal } from '../../lib/people-dialog-view';
 import { addAgentOwnershipLine, agentLabelInSentence, personFirstName } from '../../lib/home-names';
 import { canStartThread, THREAD_REPLY_CONTROL_LABEL, threadReplyPlace, threadReplyTargetText } from '../../lib/thread-reply';
 import { channelLabel } from '../../lib/channels';
-import { parentRoute } from '../../lib/home-route';
+import { parentRoute, routeHref } from '../../lib/home-route';
+import { todoView } from '../../lib/home-todo';
 
 /** Execute the dashboard's read/write lifecycle, replacing only the DOM paint boundaries.
  * No browser, model, network or customer data. Expected surface states come from UI-SPEC 3.3. */
@@ -29,6 +30,223 @@ async function dashboardFunctions(names: string[]): Promise<string> {
   for (const name of names) assert.ok(found.has(name), `production declaration ${name}`);
   return ts.transpileModule(names.map(name => found.get(name)).join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 }
+
+test('standalone details hide the account door and restore the same DOM to workspace navigation', async () => {
+  const trigger = {}, menu = {};
+  const account = { parentElement: null as unknown, hidden: false, trigger, menu };
+  const content = {}, railContent = {};
+  const container = (children: unknown[]) => ({
+    children,
+    append(node: typeof account) {
+      detach(node); this.children.push(node); node.parentElement = this;
+    },
+    prepend(node: typeof account) {
+      detach(node); this.children.unshift(node); node.parentElement = this;
+    },
+  });
+  const detach = (node: typeof account) => {
+    const parent = node.parentElement as ReturnType<typeof container> | null;
+    if (parent) parent.children.splice(parent.children.indexOf(node), 1);
+  };
+  const rail = container([account, railContent]), main = container([content]);
+  account.parentElement = rail;
+  let standalone = false;
+  const frame = { toggleAttribute(_name: string, enabled: boolean) { standalone = enabled; } };
+  const nodes = new Map<string, unknown>([['.hm-frame', frame], ['[data-user-menu-root]', account],
+    ['.hm-frame__main', main], ['.hm-frame__rail', rail]]);
+  const context = createContext({ one: (selector: string) => nodes.get(selector) });
+  runInContext("let homeRoute={view:'todo'}; const app={dataset:{state:'channel',channelView:'feed'}};", context);
+  runInContext(await dashboardFunctions(['syncStandalonePage']), context);
+  const sync = (statement = '') => runInContext(`${statement}; syncStandalonePage();`, context);
+  sync();
+  assert.equal(standalone, true);
+  assert.deepEqual(main.children, [content, account], 'the intact account DOM is parked after page content');
+  assert.equal(account.hidden, true, 'the account control is hidden from rendering and keyboard navigation');
+  assert.deepEqual(rail.children, [railContent]);
+  sync("homeRoute={view:'add-agent'}; app.dataset.channelView='agent-choice'");
+  assert.equal(standalone, true);
+  assert.deepEqual(main.children, [content, account], 'repainting retains the existing door without duplication');
+  assert.equal(account.hidden, true, 'the add-agent picker also hides the account control');
+  for (const view of ['invite', 'connect', 'feed']) {
+    sync(`app.dataset.channelView='${view}'`);
+    assert.equal(standalone, false, `${view} uses its workspace frame`);
+    assert.deepEqual(rail.children, [account, railContent]);
+    assert.equal(account.hidden, false, `${view} restores visible account access`);
+  }
+  for (const view of ['todos', 'chat', 'catchup', 'agent', 'people']) {
+    sync("homeRoute={view:'todo'}");
+    sync(`homeRoute={view:'${view}'}`);
+    assert.equal(standalone, false, `${view} keeps workspace navigation`);
+    assert.deepEqual(rail.children, [account, railContent]);
+    assert.equal(account.hidden, false, `${view} restores visible account access`);
+  }
+  sync("homeRoute={view:'todo'}");
+  runInContext('syncStandalonePage(true)', context);
+  assert.equal(standalone, false, 'leaving the channel restores account access before the create panel borrows the rail');
+  assert.deepEqual(rail.children, [account, railContent]);
+  assert.equal(account.hidden, false, 'the create panel receives visible account access');
+  sync("app.dataset.state='signed-out'");
+  assert.equal(standalone, false);
+  assert.deepEqual(main.children, [content]);
+  assert.equal(account.hidden, false);
+  assert.equal(account.trigger, trigger, 'restoration preserves the original trigger and its handlers');
+  assert.equal(account.menu, menu, 'restoration preserves the original menu and its handlers');
+});
+
+for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', null]) {
+  test(`auth reload restores navigation from ${view} during pending boot on ${nextUserId ? 'account change' : 'sign-out'}`, async () => {
+    class SessionNode extends RowNode {
+      hidden = false;
+      get parentElement() { return this.parent; }
+      prepend(node: SessionNode) { node.remove(); node.parent = this; this.children.unshift(node); }
+      toggleAttribute(name: string, enabled: boolean) {
+        if (enabled) this.setAttribute(name, ''); else this.attributes.delete(name);
+      }
+    }
+    const frame = new SessionNode('div'), main = new SessionNode('main'), rail = new SessionNode('nav');
+    const account = new SessionNode('div'), pane = new SessionNode('section');
+    frame.append(rail, main); rail.append(account); main.append(pane); pane.append(new SessionNode('h1'));
+    const nodes = new Map<string, SessionNode>([['.hm-frame', frame], ['.hm-frame__main', main],
+      ['.hm-frame__rail', rail], ['[data-user-menu-root]', account], ['[data-home-route-pane]', pane]]);
+    const microtasks: (() => void)[] = [];
+    let finishBoot!: () => void, boots = 0;
+    const pendingBoot = new Promise<void>(resolve => { finishBoot = resolve; });
+    const context = createContext({
+      one: (selector: string) => nodes.get(selector) ?? null,
+      all: (selector: string) => selector.split(',').some(part => part.trim() === '[data-home-route-pane]') ? [pane] : [],
+      queueMicrotask: (callback: () => void) => microtasks.push(callback),
+      boot: () => { boots++; return boots === 1 ? pendingBoot : Promise.resolve(); },
+      window: { clearTimeout() {}, dispatchEvent() {} },
+      CustomEvent: class { constructor(readonly type: string, readonly options: unknown) {} },
+    });
+    // Paint and transport boundaries are inert; the production reset owns pane removal.
+    runInContext(`
+      const app={dataset:{state:'channel',channelView:${JSON.stringify(view === 'todo' ? 'feed' : 'agent-choice')}}};
+      const homeRoute={view:${JSON.stringify(view)},workspaceId:'W'};
+      let workspaces=[{id:'W',name:'Home'}], activeWorkspaceId='W';
+      let renderedAuthUserId='tom', requestVersion=1, authReloadQueued=false, bootInFlight=null, bootAgain=false;
+      let catchUpGeneration=0, railOverviewGeneration=0, connectedAppsGeneration=0;
+      let homeWorkspaceGeneration=0, homeWorkspaceRead=0, homeDetailGeneration=0;
+      let connectFocusObserver=null, humanSeenObserver=null, signalExpiryTimer;
+      let catchUpData, homeWorkClaims, homePeopleReadState, homeShellKey, homeRailKey, homeCatchUpKey;
+      let homeTodosState, homeTodoRows, homeTodoRead, homeQueue, homeQueueRead, homeDetailKey, homeGateEditorId;
+      let homeTodoSave, homeTodoReceipt, homeTodoNotice, homeObjects, connectedApps;
+      let restoredComposerKey, focusedComposerWorkspaceId, pendingWorkspaceId, pendingWorkspaceCreate;
+      let agents, members, pendingInvites, accessStatuses, pendingAgents, pendingAgentsLoadFailed, renderedPendingAccessKey;
+      let people, signals, sampleSignals, channels, channelListFailed, activeChannelId, unknownChannelId, composerIntent;
+      let deliveryReceiptRefreshOwner, files, fileLoadError, signalCursor, signalHasMore, signalCutoff, channelLoadError;
+      let livePromptPrincipalId, freshInviteLink, freshInviteId, freshInviteWorkspaceId, inviteIntent, activeCreate;
+      let rosterFilter, signalFilter, previousSignalIds, feedWasEmpty, liveFeedInFlight, liveFeedQueued;
+      let rosterRefreshInFlight, rosterRefreshAttemptedAt;
+      const homeScroll=new Map(), homeOverviewCounts=new Map(), homeTodoDetails=new Map(), homePolicies=new Map();
+      const postedSinceReset=new Map(), deliveryReceiptCache=new Map(), attachmentPreviewUrls=new Map();
+      const unknownAgentCandidates=new Set(), settledUnknownAgents=new Set(), expandedSignalIds=new Set();
+      const humanSeenReporter={resetVisible(){}}, pendingRefreshGate={resetCooldown(){}};
+      const parkPeopleHosts=()=>{}, stopFeedPush=()=>{}, stopAgentActivity=()=>{}, closeEntityPanel=()=>{};
+      const closeRosterDialog=()=>{}, closeWorkspaceDetailsDialog=()=>{}, connectedAppsStatus=()=>{}, closeChannelDialog=()=>{};
+      const disarmChannelArchive=()=>{}, renderChannelRail=()=>{}, renderChannelHead=()=>{}, resetInviteSubmitControl=()=>{};
+      const resetComposer=()=>{}, syncPendingPoll=()=>{}, renderMembers=()=>{}, renderRoster=()=>{};
+    `, context);
+    runInContext(await dashboardFunctions(['syncStandalonePage', 'resetHomeWorkspace', 'resetWorkspaceSessionState', 'queueAuthReload', 'runBoot']), context);
+    runInContext('syncStandalonePage(); runBoot();', context);
+    const running = runInContext('bootInFlight', context) as Promise<void>;
+    try {
+      assert.equal(frame.getAttribute('data-home-standalone'), '', 'start on the real standalone screen');
+      assert.equal(account.parentElement, main);
+      assert.equal(account.hidden, true);
+      assert.equal(boots, 1, 'the first boot has started and remains pending');
+      runInContext("queueAuthReload({user:{id:'tom'}})", context);
+      assert.equal(pane.children.length, 1, 'a same-account event keeps the detail page intact');
+      assert.equal(microtasks.length, 0);
+      runInContext(`queueAuthReload(${nextUserId ? JSON.stringify({ user: { id: nextUserId } }) : 'null'})`, context);
+      assert.equal(microtasks.length, 1, 'an identity change queues a reload');
+      for (const callback of microtasks.splice(0)) callback();
+      assert.equal(runInContext('bootAgain', context), true, 'reload defers behind the pending boot');
+      assert.equal(boots, 1, 'no new boot can restore navigation yet');
+      assert.equal(pane.children.length, 0, 'the old workspace detail is removed');
+      assert.equal(frame.getAttribute('data-home-standalone'), null, 'navigation is restored before the boot settles');
+      assert.equal(account.parentElement, rail, 'the same account node returns to the workspace rail');
+      assert.equal(account.hidden, false, 'account access is visible and can receive keyboard focus');
+    } finally {
+      finishBoot();
+      await running;
+    }
+    assert.equal(boots, 2, 'the queued boot runs after the pending one settles');
+  });
+}
+
+test('applyHomePane keeps standalone to-do states readable, with a back link and heading focus when tools become unavailable', async () => {
+  const focused: PaneNode[] = [], frames: (() => void)[] = [];
+  class PaneNode extends RowNode {
+    hidden = false; tabIndex = 0; href = '';
+    get parentElement() { return this.parent; }
+    prepend(node: PaneNode) { node.remove(); node.parent = this; this.children.unshift(node); }
+    toggleAttribute(name: string, enabled: boolean) {
+      if (enabled) this.setAttribute(name, ''); else this.attributes.delete(name);
+    }
+    getClientRects(): unknown[] {
+      for (let node: RowNode | null = this; node; node = node.parent) if ((node as PaneNode).hidden) return [];
+      return [{}];
+    }
+    focus() { focused.push(this); }
+  }
+  const document = { title: '', createElement: (tag: string) => new PaneNode(tag),
+    createElementNS: (_namespace: string, tag: string) => new PaneNode(tag) };
+  const frame = new PaneNode('div'), main = new PaneNode('main'), rail = new PaneNode('nav');
+  const slot = new PaneNode('section'), channel = new PaneNode('section'), account = new PaneNode('div');
+  frame.append(rail, main); rail.append(account); main.append(slot, channel);
+  const nodes = new Map<string, PaneNode>([['.hm-frame', frame], ['.hm-frame__main', main], ['.hm-frame__rail', rail],
+    ['[data-home-route-pane]', slot], ['.dashboard__channel', channel], ['[data-user-menu-root]', account]]);
+  const context = createContext({ document, routeHref, homeViewTitle, todoView,
+    window: { requestAnimationFrame: (callback: () => void) => frames.push(callback) },
+    one: (selector: string) => nodes.get(selector) ?? null,
+    all: (selector: string) => selector === '[data-home-route-pane] h1' ? slot.querySelectorAll('h1') : [],
+    // Paint replacement has its own focus tests; keep the production to-do DOM builder here.
+    replaceHomeRegion: (region: PaneNode, _key: string, children: PaneNode[]) => region.replaceChildren(...children),
+  });
+  runInContext(`
+    const app={dataset:{state:'channel',channelView:'feed'}}, activeWorkspaceId='W', workspaces=[{id:'W',name:'Home'}];
+    const homeRoute={view:'todo',workspaceId:'W',todoId:'T'}, sampleMode=false;
+    let homeTodosState='pending', homeQueueRead='pending', homeTodoReceipt='';
+    const homeTodoRead=null, homeTodoRows=[], homeQueue=null, homePolicies=new Map(), homeDetailKey='';
+    const homeTodoSave='idle', homeTodoNotice=null, homeGateEditorId=null;
+    const homeTodoContext=()=>({now:0,viewerId:'tom',editor:true,people:{groups:[],other:[]}}), homeServer=()=>null;
+    const parkPeopleHosts=()=>{}, renderHomeSide=()=>{}, syncFeedChrome=()=>{};
+  `, context);
+  runInContext(await dashboardFunctions(['syncStandalonePage', 'homePaneMessage', 'renderHomeObjectPane', 'loadHomeObject', 'applyHomePane', 'focusHomeView']), context);
+  const flushFocus = () => { for (const callback of frames.splice(0)) callback(); };
+  const assertPage = (label: string, expectedHref: string) => {
+    assert.equal(frame.getAttribute('data-home-standalone'), '', `${label}: this exercises the standalone route`);
+    assert.equal(account.hidden, true, `${label}: workspace account access uses the back link`);
+    assert.equal(channel.hidden, true);
+    assert.equal(slot.hidden, false, `${label}: the standalone detail page must not be blank`);
+    const back = slot.querySelectorAll('a').find(node => (node as PaneNode).href === expectedHref) as PaneNode | undefined;
+    assert.ok(back, `${label}: a back link returns to the workspace`);
+    assert.ok(back.getClientRects().length, `${label}: the back link is visible`);
+    const title = slot.querySelector('h1') as PaneNode | null;
+    assert.ok(title?.textContent, `${label}: the page has a message`);
+    assert.equal(title.tabIndex, -1, `${label}: the heading accepts scripted focus`);
+    assert.ok(title.getClientRects().length, `${label}: the focus target is visible`);
+    assert.equal(focused.at(-1), title, `${label}: focus reaches the current heading`);
+  };
+  for (const [state, queue, receipt, label, expectedHref] of [
+    ['absent', 'failed', 'Could not load to-dos. Reload to try again.', 'unavailable tools', '/app?w=W'],
+    ['failed', 'pending', 'Could not load to-dos. Reload to try again.', 'failed workspace read', '/app?w=W'],
+    ['refused', 'pending', 'Open Lists & docs to choose your access.', 'refused workspace read', '/app?w=W'],
+    ['ready', 'failed', 'Could not load this page. Reload to try again.', 'failed detail read', '/app?w=W'],
+    ['ready', 'failed', 'not-found', 'missing to-do', '/app?w=W'],
+    ['pending', 'pending', '', 'loading to-do', '/app?w=W&v=todos'],
+  ]) {
+    runInContext(`homeTodosState=${JSON.stringify(state)}; homeQueueRead=${JSON.stringify(queue)}; homeTodoReceipt=${JSON.stringify(receipt)}; applyHomePane(); focusHomeView();`, context);
+    flushFocus();
+    assertPage(label, expectedHref);
+  }
+  // The workspace read can settle after navigation's focus call. Repainting alone must focus its message.
+  focused.length = 0;
+  runInContext("homeTodosState='absent'; homeQueueRead='failed'; applyHomePane();", context);
+  flushFocus();
+  assertPage('tools become unavailable after loading', '/app?w=W');
+});
 
 async function readFixture(server: unknown, postCommand?: (...args: unknown[]) => Promise<unknown>) {
   const context = createContext({ server, postCommand, createLatestRead, HomeToolsUnavailable, HomeCommandRefused });

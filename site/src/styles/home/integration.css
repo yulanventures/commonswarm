@@ -2,11 +2,14 @@
 /* The canvas renders text with the browser's default font smoothing. The site sets antialiased/grayscale on body
    (global.css, the marketing pages keep it); inside the app that drew every stroke thinner than the canvas (critic r9
    CMembers 1). Both properties inherit, so the app root (frame, dialogs and the agent-connect panel) takes the default. */
-live-dashboard { -webkit-font-smoothing: auto; -moz-osx-font-smoothing: auto; }
+live-dashboard {
+  -webkit-font-smoothing: auto;
+  -moz-osx-font-smoothing: auto;
+}
 .hm-frame.hm-frame.hm-frame {
   position: relative;
   display: grid;
-  grid-template-columns: 15.5rem minmax(0, 1fr) minmax(18rem, 20rem);
+  grid-template-columns: var(--home-rail-width) minmax(0, 1fr) minmax(18rem, 20rem);
   block-size: 100%;
   max-block-size: 100dvh;
   grid-template-rows: minmax(0, 1fr);
@@ -39,25 +42,11 @@ live-dashboard { -webkit-font-smoothing: auto; -moz-osx-font-smoothing: auto; }
 /* People & agents is a page (Members.dc.html): its own back link and title, the main column's padding, no side
    column. Agent.dc.html and Members.dc.html draw no workspace header above the page; the phone keeps its top bar. */
 .hm-frame--people .hm-route-pane { padding: 20px clamp(16px, 3vw, 40px) 56px; }
-/* A to-do (Todo.dc.html) is one card-surface page with its own 20 px / clamp(16px, 4vw, 32px) padding, so the pane
-   adds none (todo.css no longer zeroes .hm-todo's padding: the two land together, or it would double). On a phone
-   the page has no top bar, no section nav and no account door; its back link is the way out. */
+/* A to-do supplies the standalone page's own padding and centred 720 px content box. */
 .hm-route-pane:has(> .hm-todo) { padding: 0; }
 .hm-frame__main:has(> [data-home-route-pane]:not([hidden]) > .hm-todo) { background: var(--home-card); }
-@media (width <= 52rem) {
-  .hm-frame.hm-frame--todo *:is(.hm-phone-bar, .hm-ws-nav--phone, [data-user-menu-root]) { display: none; }
-}
-/* Add an agent (Add-Agent.dc.html) is a page of its own inside the channel: no stream head or filter row at any width,
-   no side column on desktop, and on a phone no top bar, section nav or account door. The picker's breadcrumb is the
-   way back. Scoped to the route AND the view, so a later route never inherits a stale channel view. */
+/* The picker has its own back link; it needs no stream head or filter row. */
 live-dashboard[data-channel-view="agent-choice"] .hm-frame--add-agent *:is(.hm-frame__channel > header, .dashboard__feed-toolbar) { display: none; }
-@media (width > 52rem) {
-  live-dashboard[data-channel-view="agent-choice"] .hm-frame.hm-frame.hm-frame.hm-frame--add-agent { grid-template-columns: 15.5rem minmax(0, 1fr); }
-  live-dashboard[data-channel-view="agent-choice"] .hm-frame.hm-frame.hm-frame.hm-frame--add-agent > .hm-frame__side { display: none; }
-}
-@media (width <= 52rem) {
-  live-dashboard[data-channel-view="agent-choice"] .hm-frame--add-agent *:is(.hm-phone-bar, .hm-ws-nav--phone, [data-user-menu-root]) { display: none; }
-}
 @media (width > 52rem) {
   .hm-frame:is(.hm-frame--agent, .hm-frame--people) .hm-ws-header { display: none; }
 }
@@ -68,7 +57,7 @@ live-dashboard[data-channel-view="agent-choice"] .hm-frame--add-agent *:is(.hm-f
 .dashboard__gateway--create[data-create-rail] {
   position: relative;
   display: grid;
-  grid-template-columns: 15.5rem minmax(0, 1fr);
+  grid-template-columns: var(--home-rail-width) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   align-content: stretch;
   inline-size: 100%;
@@ -117,7 +106,7 @@ h2[tabindex="-1"]:focus-visible { outline: none; box-shadow: none; }
 .hm-frame__channel > .dashboard__channel-body { grid-row: 2; }
 .hm-frame__channel > header > [data-home-channel-menu]:not([hidden]) + div { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); }
 @media (width > 52rem) and (width < 64rem) {
-  .hm-frame.hm-frame.hm-frame { grid-template-columns: 15.5rem minmax(0, 1fr); }
+  .hm-frame.hm-frame.hm-frame { grid-template-columns: var(--home-rail-width) minmax(0, 1fr); }
   .hm-frame__side { display: none; }
   .hm-frame__profile.hm-frame__profile { grid-column: 2; }
   .hm-frame__profile.hm-frame__profile { z-index: 10; justify-self: end; inline-size: min(22rem, 100%); }
@@ -154,9 +143,9 @@ h2[tabindex="-1"]:focus-visible { outline: none; box-shadow: none; }
 
 @media (width >= 64rem) {
   .hm-frame__main .hm-frame__channel > header { min-block-size: 48px; }
-  .hm-frame.hm-frame.hm-frame.hm-frame--catchup { grid-template-columns: 15.5rem minmax(0, 1fr); }
+  .hm-frame.hm-frame.hm-frame.hm-frame--catchup { grid-template-columns: var(--home-rail-width) minmax(0, 1fr); }
   .hm-frame.hm-frame.hm-frame.hm-frame--catchup > .hm-frame__side { display: none; }
-  .hm-frame.hm-frame.hm-frame:is(.hm-frame--agent, .hm-frame--people) { grid-template-columns: 15.5rem minmax(0, 1fr); }
+  .hm-frame.hm-frame.hm-frame:is(.hm-frame--agent, .hm-frame--people) { grid-template-columns: var(--home-rail-width) minmax(0, 1fr); }
   .hm-frame.hm-frame.hm-frame:is(.hm-frame--agent, .hm-frame--people) > .hm-frame__side { display: none; }
 }
 @media (width <= 52rem) {
@@ -166,4 +155,44 @@ h2[tabindex="-1"]:focus-visible { outline: none; box-shadow: none; }
   .hm-frame:has(.hm-phone-bar[data-home-account-menu]) > .hm-frame__rail > [data-user-menu-root] { display: none; }
   .hm-frame__main .hm-phone-bar:not([data-home-account-menu]) { padding-inline-end: calc(44px + 4px); }
   .hm-frame__main .hm-catchup-header { padding-inline-end: calc(44px + var(--s-3)); }
+}
+
+/* Todo.dc.html and Add-Agent.dc.html are viewport pages at every width. The route
+   lifecycle sets this only for a to-do detail or the active add-agent picker; the
+   To-dos list and other channel views retain their workspace frame. */
+.hm-frame.hm-frame.hm-frame[data-home-standalone] {
+  grid-template-columns: minmax(0, 1fr);
+  background: var(--home-card);
+}
+.hm-frame[data-home-standalone] > :is(.hm-frame__rail, .hm-frame__side, .hm-frame__profile),
+.hm-frame[data-home-standalone] .hm-frame__main > :is([data-home-workspace-shell], [data-home-phone-nav]) {
+  display: none;
+}
+.hm-frame[data-home-standalone] > .hm-frame__main {
+  grid-area: 1 / 1;
+  overflow-y: auto;
+  background: var(--home-card);
+}
+.hm-frame[data-home-standalone] .hm-route-pane {
+  flex: none;
+  overflow: visible;
+}
+.hm-frame.hm-frame[data-home-standalone] .hm-frame__channel {
+  display: block;
+  flex: none;
+  background: var(--home-card);
+}
+.hm-frame[data-home-standalone] .dashboard__channel-body { display: block; overflow: visible; }
+.hm-frame.hm-frame[data-home-standalone] .hm-frame__main .hm-frame__channel .dashboard__host-view {
+  inline-size: 100%;
+  max-inline-size: none;
+  padding: 20px clamp(16px, 4vw, 32px) 32px;
+  overflow: visible;
+}
+.hm-frame[data-home-standalone] .dashboard__host-picker { inline-size: 100%; margin-inline: auto; }
+
+/* The back link returns to the workspace's account menu. Keep the parked DOM
+   intact, with no footer control or hidden keyboard stop on standalone pages. */
+.hm-frame[data-home-standalone] .hm-frame__main > [data-user-menu-root] {
+  display: none;
 }
