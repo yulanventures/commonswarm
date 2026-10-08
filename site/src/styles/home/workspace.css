@@ -31,10 +31,19 @@
 .hm-side-card__line { color: var(--home-ink); }
 .hm-side-card__line + .hm-side-card__line { padding-block-start: 0; }
 /* "What's shared here" is the canvas's information card (Space.dc.html): no surface of its own (the column's canvas shows
-   through), a 1.5px dashed edge in the dashed-outline grey, 16px padding and no lip. A dashed edge cannot be the lane's
-   inset stroke, so it is a real border, which Chromium paints 1px wide, as the reference PNG does. The last line drops
-   its 10px foot so the card's own 16px is the space under the words. */
-.hm-side-card[data-side-card="shared"] { padding: 16px; background: transparent; border: 1.5px dashed var(--home-line-dashed); box-shadow: none; }
+   through), a 1.5px dashed edge in the dashed-outline grey, 16px padding and no lip. A CSS dashed 1.5px border paints
+   1px in Chromium, so the edge is an SVG stroke used as a mask (as the rail's draft row): 3 device px at 2x, a 3px dash
+   and a 1.5px gap. The SVG has no viewBox, so its units are CSS px at any card size; the stroke is 3 wide on the box
+   edge and `border-radius: inherit` clips its outer half. Padding adds the edge back (16 + 1.5). The last line drops
+   its 10px foot so the card's own padding is the space under the words. */
+.hm-side-card[data-side-card="shared"] { position: relative; padding: 17.5px; background: transparent; border: 0; box-shadow: none; }
+.hm-side-card[data-side-card="shared"]::before {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; background: var(--home-line-dashed); pointer-events: none;
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100%25' height='100%25'%3E%3Crect width='100%25' height='100%25' rx='18' fill='none' stroke='black' stroke-width='3' stroke-dasharray='3 1.5'/%3E%3C/svg%3E");
+  mask-position: 0 0; mask-repeat: no-repeat; mask-size: 100% 100%; }
+@media (forced-colors: active) {
+  .hm-side-card[data-side-card="shared"]::before { forced-color-adjust: none; background: CanvasText; }
+}
 .hm-side-card[data-side-card="shared"] .hm-side-card__line:last-child { padding-block-end: 0; }
 /* Its lines are the canvas body: 16px / 400 at line-height 1.45, 12px under the title (head 6 + 6) and 8px apart. */
 .hm-side-card[data-side-card="shared"] .hm-side-card__line { padding-block: 6px 8px; font-size: 16px; font-weight: 400; line-height: 1.45; }
@@ -55,17 +64,21 @@
 .hm-side-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; min-width: 0; }
 .hm-side-list__item { min-width: 0; padding: 0; border-block-start: 1px solid var(--home-hairline); }
 
-/* ---- To-do rows: 22 px box (44 px label around it), title and status line, the assignee at the end ---- */
+/* ---- To-do rows: 22 px box (44 px label around it), title and status line, the assignee at the end ----
+   The box's 1.5px ink edge is the lane's inset stroke (primitives.css: a 1.5px border paints 1px in Chromium). */
 .hm-todo-row { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 58px; border-block-start: 1px solid var(--home-hairline); }
 .hm-todo-row__check { position: relative; display: inline-flex; flex: none; align-items: center; justify-content: center; width: 2.75rem; min-height: 2.75rem;
   margin-inline: -11px -9px; cursor: pointer; }
 .hm-todo-row__box { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
 .hm-todo-row__mark { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; width: 22px; height: 22px; border-radius: 7px;
-  border: 1.5px solid var(--home-ink); background: transparent; color: var(--home-lime); pointer-events: none; }
+  border: 0; box-shadow: inset 0 0 0 1.5px var(--home-ink); background: transparent; color: var(--home-lime); pointer-events: none; }
 .hm-todo-row__tick { opacity: 0; }
-.hm-todo-row__box:checked + .hm-todo-row__mark { background: var(--home-ink); border-color: var(--home-ink); }
+.hm-todo-row__box:checked + .hm-todo-row__mark { background: var(--home-ink); }
 .hm-todo-row__box:checked + .hm-todo-row__mark .hm-todo-row__tick { opacity: 1; }
-.hm-todo-row__box:focus-visible + .hm-todo-row__mark { box-shadow: var(--focus-ring); }
+.hm-todo-row__box:focus-visible + .hm-todo-row__mark { box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring); }
+@media (forced-colors: active) {
+  .hm-todo-row__mark { border: 1.5px solid CanvasText; }
+}
 .hm-todo-row__text { display: flex; flex: 1 1 auto; flex-direction: column; justify-content: center; gap: 0; min-width: 0; min-height: 2.75rem; padding: 0;
   color: var(--home-ink); text-decoration: none; border-radius: 10px; }
 .hm-todo-row__text:hover { color: var(--home-ink); }
@@ -383,8 +396,9 @@
   .hm-frame .dashboard__composer-input { gap: 8px; min-block-size: 46px; }
   .hm-frame .dashboard__composer-input::before { inset-inline-end: calc(46px + 8px); border-radius: 23px; }
   .hm-frame .dashboard__composer-attachments { margin-inline-end: calc(46px + 8px); }
-  /* The field stays 16px (iOS zooms a smaller field on focus); its placeholder and the label overlay are the source's 15px. */
-  .hm-frame .dashboard__composer textarea { min-block-size: 43px; padding: 10px calc(44px + 4px) 10px 16px; font-size: 16px; line-height: 23px; }
+  /* The field stays 16px (iOS zooms a smaller field on focus); its placeholder and the label overlay are the source's 15px.
+     Text and overlay start 16px inside the 1.5px inset edge (17.5px), at x = 33.5 as in Phone-Space.dc.html. */
+  .hm-frame .dashboard__composer textarea { min-block-size: 43px; padding: 10px calc(44px + 4px) 10px 17.5px; font-size: 16px; line-height: 23px; }
   .hm-frame .dashboard__composer textarea::placeholder { font-size: 15px; }
   .hm-frame .dashboard__composer-attach { inset-inline-end: calc(46px + 9px); inset-block-end: 1px; }
   .hm-frame .dashboard__composer-send { inline-size: 46px; min-inline-size: 0; block-size: 46px; padding: 0; border-radius: 50%; }
@@ -398,7 +412,7 @@
      placeholder, or a staged file, shows natively as before. */
   .hm-frame .dashboard__composer-box:has(textarea[placeholder^="Write to everyone"]:placeholder-shown):has(.dashboard__composer-attachments[hidden]) .dashboard__composer-label {
     z-index: 1; inset-block-start: 0; inset-inline-start: 0; inline-size: auto; max-inline-size: calc(100% - 46px - 8px - 32px);
-    block-size: 46px; padding-inline: 16px; overflow: hidden; clip-path: none; color: var(--home-placeholder);
+    block-size: 46px; padding-inline: 17.5px 16px; overflow: hidden; clip-path: none; color: var(--home-placeholder);
     font-size: 15px; font-weight: 400; line-height: 46px; text-overflow: ellipsis; pointer-events: none; }
   .hm-frame .dashboard__composer-box:has(.dashboard__composer-attachments[hidden]) textarea[placeholder^="Write to everyone"]::placeholder { color: transparent; }
 }

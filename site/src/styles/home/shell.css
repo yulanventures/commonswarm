@@ -89,14 +89,17 @@
 
 .hm-capsule-stack { display: inline-flex; align-items: center; gap: 10px; min-inline-size: 0; }
 
+/* Space.dc.html: a 1.5px ink outline pill, padding 0 18px. The edge is the lane's inset stroke (primitives.css: a 1.5px
+   border paints 1px in Chromium), so the padding adds the 1.5px back (18 + 1.5) and the outer size stays the canvas's. */
 .hm-ws-header__people,
 .hm-menu__trigger {
   display: inline-grid;
   place-items: center;
   min-inline-size: 44px;
   min-block-size: 44px;
-  padding: 0 18px;
-  border: 1.5px solid var(--home-ink);
+  padding: 0 19.5px;
+  border: 0;
+  box-shadow: inset 0 0 0 1.5px var(--home-ink);
   border-radius: var(--radius-pill);
   background: transparent;
   color: var(--home-ink);
@@ -264,7 +267,7 @@
   overflow-wrap: anywhere;
 }
 
-.hm-phone-bar .hm-menu__trigger { border: 0; background: transparent; color: var(--home-rail-strong); }
+.hm-phone-bar .hm-menu__trigger { border: 0; box-shadow: none; background: transparent; color: var(--home-rail-strong); }
 /* With the account entries the phone menu can be taller than a small screen: it scrolls inside the space under the bar. */
 .hm-phone-bar .hm-menu__list { max-block-size: calc(100dvh - 120px); overflow-y: auto; }
 .hm-phone-bar :is(.hm-phone-bar__back, .hm-phone-bar__people, .hm-menu__trigger):hover { background: var(--home-rail-raised); }
@@ -328,6 +331,12 @@
 .hm-ws-nav__link:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
+}
+/* The outline pills keep their inset edge under the ring (box-shadow does not compose). */
+.hm-ws-header :is(.hm-ws-header__people, .hm-menu__trigger):focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring); }
+/* Forced colours drop box-shadow: the edge comes back as a real border there. */
+@media (forced-colors: active) {
+  .hm-ws-header :is(.hm-ws-header__people, .hm-menu__trigger) { border: 1.5px solid ButtonText; }
 }
 
 
