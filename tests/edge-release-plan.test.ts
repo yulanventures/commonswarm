@@ -233,7 +233,7 @@ test('run-order rows 0..8 and R0..R4 refer only to executable steps', () => {
 });
 
 // Run extracted lifecycle blocks against real fixture files. Paths are mapped
-// into one test-owned root. Python supplies root uid/gid only for recycle.json;
+// into one test-owned root. Python supplies host account and uid/gid metadata;
 // bytes, modes, atomic rename, receipt ordering and current links remain real.
 function lifecycle(trees = true) {
   const root = mkdtempSync(join(scratch, 'lifecycle-')), home = join(root, 'home'), d = fixture();
@@ -284,7 +284,7 @@ function lifecycle(trees = true) {
   writeFileSync(join(proof, 'ready.txt'), 'PASS\n'); writeFileSync(join(proof, 'timer'), 'active');
   const wrapper = join(root, 'python-wrapper.py');
   writeFileSync(wrapper, isolatedPythonHarness(`
-import datetime,json,os,pathlib,subprocess,sys
+import datetime,json,os,pathlib,pwd,subprocess,sys
 sys.argv=sys.argv[1:]
 real_datetime=datetime.datetime
 class Clock(real_datetime):
@@ -292,8 +292,15 @@ class Clock(real_datetime):
  def now(cls,tz=None): return real_datetime.fromisoformat(os.environ['FIXTURE_CLOCK'].replace('Z','+00:00'))
 datetime.datetime=Clock
 actual=pathlib.Path.stat
+home=pathlib.Path(os.environ['FIXTURE_OLD_EDGE']).parents[2]
+edge_parent=home/'edge/releases'
+pwd.getpwnam=lambda name: type('Account',(),{'pw_uid':1234})() if name=='commonswarm' else None
 def stat(self,*a,**kw):
  s=actual(self,*a,**kw)
+ if self==edge_parent:
+  fields=list(s); fields[4]=fields[5]=int(os.environ.get('FIXTURE_PARENT_UID','1234')); return os.stat_result(fields)
+ if self.parent in (edge_parent,home/'admin-issuance/releases') or self.name=='RELEASE_SHA' or str(self).endswith('/deploy/edge-runtime/compose.override.yaml'):
+  fields=list(s); fields[4]=fields[5]=0; return os.stat_result(fields)
  if str(self)==os.environ['FIXTURE_BINDING'] or self.name in ('failed-attempts','releases') or str(self)==os.environ['FIXTURE_STAGE'] or str(self)==os.environ['PROOF_DIR']:
   fields=list(s); fields[4]=fields[5]=0; return os.stat_result(fields)
  return s
@@ -303,6 +310,9 @@ def chown(fd,uid,gid):
  if (uid,gid)==(0,0): return actual_chown(fd,os.getuid(),os.getgid())
  return actual_chown(fd,uid,gid)
 os.fchown=chown
+def path_chown(path,uid,gid):
+ assert (uid,gid)==(0,0) and pathlib.Path(path).is_file()
+os.chown=path_chown
 real_check_output=subprocess.check_output
 def check_output(args,*a,**kw):
  if args[:2]==['docker','inspect']:
@@ -405,7 +415,7 @@ print('PASS fixture helpers')
 
 // Archive admission owns a distinct packaging risk: the lifecycle fixtures above
 // do not extract release artifacts. Execute the complete preflight and its real
-// tree checker; only root-parent metadata and unavailable host I/O are supplied.
+// tree checker; only host account/ownership metadata and unavailable I/O are supplied.
 const overridePath = 'deploy/edge-runtime/compose.override.yaml';
 const c1PlanPath = 'docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md';
 const c1Plan = readFileSync(resolve(c1PlanPath), 'utf8');
@@ -416,8 +426,12 @@ const repoOverride = readFileSync(resolve(overridePath), 'utf8');
 const repoCompose = readFileSync(resolve('deploy/edge-runtime/compose.yaml'), 'utf8');
 function archiveLifecycle(options: { archiveOverride?: string; baseline?: string; realArchive?: boolean } = {}) {
   const f = lifecycle(false), archive = join(f.root, 'release.tar');
+  chmodSync(resolve(f.old, '..'), 0o750); chmodSync(f.old, 0o700);
+  const baselineHelper = join(f.home, 'admin-issuance/releases', fixture().baseline_edge_sha);
+  mkdirSync(baselineHelper, { recursive: true, mode: 0o700 });
+  chmodSync(resolve(baselineHelper, '..'), 0o700);
   const baseline = options.baseline ?? repoOverride;
-  writeFileSync(join(f.old, overridePath), baseline); chmodSync(join(f.old, overridePath), 0o640);
+  writeFileSync(join(f.old, overridePath), baseline); chmodSync(join(f.old, overridePath), 0o644);
   writeFileSync(join(f.old, 'deploy/edge-runtime/compose.yaml'), repoCompose);
   const hook = join(f.root, 'libexec/commonswarm-admin-edge-recycle');
   writeFileSync(hook, reviewedHook);
@@ -493,6 +507,36 @@ test('archive override is admitted, baseline bytes and metadata win, and both tr
     writeFileSync(join(f.fresh, overridePath), 'unverified edge drift\n');
     stopped(f.run(checkTree + '"$NEW_EDGE" "$BOX_ARCHIVE_PATH" ' + f.d.archive_sha256), /baseline override digest.*STOP/);
   }
+});
+
+test('measured service-owned parent passes; unsafe parents refuse before either tree is created', () => {
+  const control = archiveLifecycle();
+  passed(control.run(block('edge-preflight')));
+  const layout = JSON.parse(readFileSync(join(control.proof, 'tree-layout.json'), 'utf8'));
+  assert.deepEqual(layout.map((row: { part: string; parent: { uid: number; mode: string } }) => [row.part, row.parent.uid, row.parent.mode]),
+    [['helper', 0, '0o700'], ['edge', 1234, '0o750']]);
+  for (const row of layout) {
+    assert.deepEqual(row.created, row.baseline.metadata);
+    assert.deepEqual(row.created, { uid: 0, gid: 0, mode: '0o700' });
+    assert.equal(lstatSync(row.path).mode & 0o777, 0o700);
+    assert.equal(lstatSync(join(row.path, 'RELEASE_SHA')).mode & 0o777, 0o600);
+  }
+  const rootOwned = archiveLifecycle(); passed(rootOwned.run(block('edge-preflight'), { FIXTURE_PARENT_UID: '0' }));
+  for (const kind of ['group-writable', 'world-writable', 'symlink', 'unexpected-owner', 'regular-file', 'baseline-mode']) {
+    const f = archiveLifecycle(), parent = resolve(f.old, '..');
+    if (kind === 'group-writable') chmodSync(parent, 0o770);
+    if (kind === 'world-writable') chmodSync(parent, 0o752);
+    if (kind === 'baseline-mode') chmodSync(f.old, 0o755);
+    if (kind === 'symlink' || kind === 'regular-file') {
+      passed(spawnSync('mv', [parent, parent + '.retained'], { encoding: 'utf8' }));
+      if (kind === 'symlink') symlinkSync(parent + '.retained', parent);
+      else writeFileSync(parent, 'not a directory');
+    }
+    stopped(f.run(block('edge-preflight'), kind === 'unexpected-owner' ? { FIXTURE_PARENT_UID: '9876' } : {}),
+      kind === 'baseline-mode' ? /baseline release tree.*STOP/ : /release parent.*STOP/);
+    for (const path of [f.fresh, f.helper, join(f.proof, 'edge-tree-created.json'), join(f.proof, 'helper-tree-created.json')]) assert.equal(existsSync(path), false, kind);
+  }
+  passed(archiveLifecycle().run(block('edge-preflight')));
 });
 
 test('missing, symlinked or changed baseline override refuses before creating release trees', () => {
