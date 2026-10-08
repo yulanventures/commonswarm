@@ -6573,6 +6573,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
     /** Clear every workspace-scoped value when auth identity or availability changes. */
     const resetWorkspaceSessionState = (): void => {
+      syncStandalonePage(true);
       catchUpGeneration += 1;
       railOverviewGeneration += 1;
       catchUpData = [];

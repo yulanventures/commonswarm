@@ -93,6 +93,88 @@ test('standalone details hide the account door and restore the same DOM to works
   assert.equal(account.menu, menu, 'restoration preserves the original menu and its handlers');
 });
 
+for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', null]) {
+  test(`auth reload restores navigation from ${view} during pending boot on ${nextUserId ? 'account change' : 'sign-out'}`, async () => {
+    class SessionNode extends RowNode {
+      hidden = false;
+      get parentElement() { return this.parent; }
+      prepend(node: SessionNode) { node.remove(); node.parent = this; this.children.unshift(node); }
+      toggleAttribute(name: string, enabled: boolean) {
+        if (enabled) this.setAttribute(name, ''); else this.attributes.delete(name);
+      }
+    }
+    const frame = new SessionNode('div'), main = new SessionNode('main'), rail = new SessionNode('nav');
+    const account = new SessionNode('div'), pane = new SessionNode('section');
+    frame.append(rail, main); rail.append(account); main.append(pane); pane.append(new SessionNode('h1'));
+    const nodes = new Map<string, SessionNode>([['.hm-frame', frame], ['.hm-frame__main', main],
+      ['.hm-frame__rail', rail], ['[data-user-menu-root]', account], ['[data-home-route-pane]', pane]]);
+    const microtasks: (() => void)[] = [];
+    let finishBoot!: () => void, boots = 0;
+    const pendingBoot = new Promise<void>(resolve => { finishBoot = resolve; });
+    const context = createContext({
+      one: (selector: string) => nodes.get(selector) ?? null,
+      all: (selector: string) => selector.split(',').some(part => part.trim() === '[data-home-route-pane]') ? [pane] : [],
+      queueMicrotask: (callback: () => void) => microtasks.push(callback),
+      boot: () => { boots++; return boots === 1 ? pendingBoot : Promise.resolve(); },
+      window: { clearTimeout() {}, dispatchEvent() {} },
+      CustomEvent: class { constructor(readonly type: string, readonly options: unknown) {} },
+    });
+    // Paint and transport boundaries are inert; the production reset owns pane removal.
+    runInContext(`
+      const app={dataset:{state:'channel',channelView:${JSON.stringify(view === 'todo' ? 'feed' : 'agent-choice')}}};
+      const homeRoute={view:${JSON.stringify(view)},workspaceId:'W'};
+      let workspaces=[{id:'W',name:'Home'}], activeWorkspaceId='W';
+      let renderedAuthUserId='tom', requestVersion=1, authReloadQueued=false, bootInFlight=null, bootAgain=false;
+      let catchUpGeneration=0, railOverviewGeneration=0, connectedAppsGeneration=0;
+      let homeWorkspaceGeneration=0, homeWorkspaceRead=0, homeDetailGeneration=0;
+      let connectFocusObserver=null, humanSeenObserver=null, signalExpiryTimer;
+      let catchUpData, homeWorkClaims, homePeopleReadState, homeShellKey, homeRailKey, homeCatchUpKey;
+      let homeTodosState, homeTodoRows, homeTodoRead, homeQueue, homeQueueRead, homeDetailKey, homeGateEditorId;
+      let homeTodoSave, homeTodoReceipt, homeTodoNotice, homeObjects, connectedApps;
+      let restoredComposerKey, focusedComposerWorkspaceId, pendingWorkspaceId, pendingWorkspaceCreate;
+      let agents, members, pendingInvites, accessStatuses, pendingAgents, pendingAgentsLoadFailed, renderedPendingAccessKey;
+      let people, signals, sampleSignals, channels, channelListFailed, activeChannelId, unknownChannelId, composerIntent;
+      let deliveryReceiptRefreshOwner, files, fileLoadError, signalCursor, signalHasMore, signalCutoff, channelLoadError;
+      let livePromptPrincipalId, freshInviteLink, freshInviteId, freshInviteWorkspaceId, inviteIntent, activeCreate;
+      let rosterFilter, signalFilter, previousSignalIds, feedWasEmpty, liveFeedInFlight, liveFeedQueued;
+      let rosterRefreshInFlight, rosterRefreshAttemptedAt;
+      const homeScroll=new Map(), homeOverviewCounts=new Map(), homeTodoDetails=new Map(), homePolicies=new Map();
+      const postedSinceReset=new Map(), deliveryReceiptCache=new Map(), attachmentPreviewUrls=new Map();
+      const unknownAgentCandidates=new Set(), settledUnknownAgents=new Set(), expandedSignalIds=new Set();
+      const humanSeenReporter={resetVisible(){}}, pendingRefreshGate={resetCooldown(){}};
+      const parkPeopleHosts=()=>{}, stopFeedPush=()=>{}, stopAgentActivity=()=>{}, closeEntityPanel=()=>{};
+      const closeRosterDialog=()=>{}, closeWorkspaceDetailsDialog=()=>{}, connectedAppsStatus=()=>{}, closeChannelDialog=()=>{};
+      const disarmChannelArchive=()=>{}, renderChannelRail=()=>{}, renderChannelHead=()=>{}, resetInviteSubmitControl=()=>{};
+      const resetComposer=()=>{}, syncPendingPoll=()=>{}, renderMembers=()=>{}, renderRoster=()=>{};
+    `, context);
+    runInContext(await dashboardFunctions(['syncStandalonePage', 'resetHomeWorkspace', 'resetWorkspaceSessionState', 'queueAuthReload', 'runBoot']), context);
+    runInContext('syncStandalonePage(); runBoot();', context);
+    const running = runInContext('bootInFlight', context) as Promise<void>;
+    try {
+      assert.equal(frame.getAttribute('data-home-standalone'), '', 'start on the real standalone screen');
+      assert.equal(account.parentElement, main);
+      assert.equal(account.hidden, true);
+      assert.equal(boots, 1, 'the first boot has started and remains pending');
+      runInContext("queueAuthReload({user:{id:'tom'}})", context);
+      assert.equal(pane.children.length, 1, 'a same-account event keeps the detail page intact');
+      assert.equal(microtasks.length, 0);
+      runInContext(`queueAuthReload(${nextUserId ? JSON.stringify({ user: { id: nextUserId } }) : 'null'})`, context);
+      assert.equal(microtasks.length, 1, 'an identity change queues a reload');
+      for (const callback of microtasks.splice(0)) callback();
+      assert.equal(runInContext('bootAgain', context), true, 'reload defers behind the pending boot');
+      assert.equal(boots, 1, 'no new boot can restore navigation yet');
+      assert.equal(pane.children.length, 0, 'the old workspace detail is removed');
+      assert.equal(frame.getAttribute('data-home-standalone'), null, 'navigation is restored before the boot settles');
+      assert.equal(account.parentElement, rail, 'the same account node returns to the workspace rail');
+      assert.equal(account.hidden, false, 'account access is visible and can receive keyboard focus');
+    } finally {
+      finishBoot();
+      await running;
+    }
+    assert.equal(boots, 2, 'the queued boot runs after the pending one settles');
+  });
+}
+
 test('applyHomePane keeps standalone to-do states readable, with a back link and heading focus when tools become unavailable', async () => {
   const focused: PaneNode[] = [], frames: (() => void)[] = [];
   class PaneNode extends RowNode {
