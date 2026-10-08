@@ -15,15 +15,17 @@ import {
   hostedFileTransportEnabled, hostedHouseholdToolNames, loadReleaseHouseholdExports,
 } from '../scripts/live-ordinary-controls.mjs';
 
+import { baselineEdgeSha, earlierEdgeSha, releaseSha, catalogAt } from './support/live-edge-catalog.mjs';
+
 const script = fileURLToPath(new URL('../scripts/live-ordinary-controls.mjs', import.meta.url));
 const preload = 'data:text/javascript;base64,' + Buffer.from((await readFile(new URL('./support/live-ordinary-controls-transport.mjs', import.meta.url), 'utf8'))
   .replace("'https://commonswarm.com'", "'https://yulanventures.com'")).toString('base64');
 const issuer = 'https://mcp.commonswarm.com', api = 'https://api.commonswarm.com';
 const client = 'https://yulanventures.com/oauth/c1-controls/client.json';
 const redirect = 'https://c1-controls.invalid/callback', resource = `${issuer}/mcp`;
-const release = 'a'.repeat(40), scope = 'openid offline_access mcp';
-const baselineTools = [...ORDINARY_TOOLS];
-const releaseTools = await expectedReleaseMcpToolNames();
+const release = releaseSha, scope = 'openid offline_access mcp';
+const baselineTools = (await catalogAt(baselineEdgeSha, ORDINARY_TOOLS)).names;
+const releaseTools = (await catalogAt(releaseSha, ORDINARY_TOOLS)).names;
 const hash = b => createHash('sha256').update(b).digest('hex');
 const b64hash = b => createHash('sha256').update(b).digest('base64url');
 const uid = '11111111-1111-4111-8111-111111111111', wid = 'c2ea0541-f56d-4c73-bf71-56c5405c4934';
@@ -214,6 +216,12 @@ async function fixture(t, config = {}) {
       command === 'final-cleanup' ? ['final-cleanup', '--consent-receipt', f.consent] :
         command === 'probe-credentials' ? ['probe-credentials', '--window', 'W2', '--window-id', 'ABC123', '--consent-receipt', f.consent, '--human-profile', human] :
           ['window', '--phase', 'before', '--window', 'W1', '--window-id', 'ABC123', '--consent-receipt', f.consent, '--human-profile', human, '--seat-profile', seat];
+    if (command !== 'final-cleanup' && !config.omitLiveEdgeSha) {
+      const phase = extra[extra.indexOf('--phase') + 1];
+      const window = extra[extra.indexOf('--window') + 1];
+      const switched = phase === 'post-W5' || ['W5', 'W6', 'W7'].includes(window) || (window === 'W4' && phase === 'after');
+      args.push('--live-edge-sha', switched ? releaseSha : (config.liveEdgeSha ?? baselineEdgeSha));
+    }
     // Overrides replace their original pair, so the runner still tests duplicate refusal.
     for (let i = 0; i < extra.length; i++) { const arg = extra[i]; const n = args.indexOf(arg);
       if (n >= 0) args.splice(n, 2);
@@ -259,7 +267,7 @@ async function fixture(t, config = {}) {
 }
 
 function consentSchema(r, phase, producer) {
-  keys(r, ['kind', 'release_sha', 'consent_phase', 'measured_at', 'producer_sha256', 'controls', 'dcr_client_ids', 'cleanup']);
+  keys(r, ['kind', 'release_sha', 'live_edge_sha', 'consent_phase', 'measured_at', 'producer_sha256', 'controls', 'dcr_client_ids', 'cleanup']);
   assert.equal(r.kind, 'c1-consent'); assert.equal(r.release_sha, release); assert.equal(r.consent_phase, phase);
   assert.equal(r.producer_sha256, producer); assert.equal(new Date(r.measured_at).toISOString(), r.measured_at);
   assert.ok(Date.parse(r.measured_at) <= Date.now()); assert.deepEqual(r.controls, { cimd_consent: true, dcr_registration_consent: true });
@@ -279,21 +287,11 @@ async function pre(f) {
 }
 
 const FILE_ONLY = ['file_read', 'file_upload_begin', 'file_upload_commit'];
-const RELEASE_HOUSEHOLD = [
-  'object_list', 'object_read', 'object_history', 'object_create', 'object_update',
-  'todo_list', 'todo_read', 'todo_queue', 'comment_list', 'todo_create', 'todo_comment',
-  'todo_update', 'todo_assign', 'todo_start', 'todo_set_state',
-];
-
-test('hosted MCP catalog accepts the 7bb28420 ordinary-plus-household set', async () => {
-  const protocol = await loadReleaseHouseholdExports();
-  const household = hostedHouseholdToolNames(protocol.HOUSEHOLD_TOOLS, protocol.HOUSEHOLD_TOOL_REGISTRY, false);
-  const expected = expectedMcpToolNames(household);
-  assert.deepEqual(ORDINARY_TOOLS, ['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on']);
-  assert.deepEqual(household, RELEASE_HOUSEHOLD);
-  assert.deepEqual(expected, [...ORDINARY_TOOLS, ...RELEASE_HOUSEHOLD]);
-  assert.equal(exactMcpToolSet(expected, expected), true);
-  assert.deepEqual(await expectedReleaseMcpToolNames(), expected);
+test('hosted MCP catalog accepts the reviewed release ordinary-plus-household set', async () => {
+  assert.equal(releaseTools.length, 23);
+  assert.equal(baselineTools.length, 8);
+  assert.deepEqual(await expectedReleaseMcpToolNames(), releaseTools);
+  assert.equal(exactMcpToolSet(releaseTools, releaseTools), true);
 });
 
 test('hosted MCP catalog refuses a list missing an ordinary tool', async () => {
@@ -360,7 +358,62 @@ test('each tool scope accepts only its exact set', async () => {
   }
 });
 
-test('producer tools/list uses the invocation scope: W4 recovery is baseline; unknown extra or the other set fail', async t => {
+test('second-pass pre-W1, W3 and W4 before/recovery use the earlier live C1 release catalog', async t => {
+  const liveEdgeSha = earlierEdgeSha;
+  const f = await fixture(t, { liveEdgeSha, listedTools: (await catalogAt(liveEdgeSha, ORDINARY_TOOLS)).names });
+  const consent = await pre(f);
+  assert.equal(consent.receipt.live_edge_sha, liveEdgeSha);
+  for (const [window, phase] of [['W3', 'before'], ['W3', 'after'], ['W3', 'recovery'], ['W4', 'before'], ['W4', 'recovery']]) {
+    const r = await f.run('window', ['--window', window, '--phase', phase]);
+    assert.equal(r.exit, 0, r.output);
+    assert.equal(r.receipt.live_edge_sha, liveEdgeSha);
+    assert.equal(r.report.live_edge_sha, liveEdgeSha);
+  }
+});
+
+test('live edge SHA refuses missing, malformed, unknown, non-ancestor and unreadable bundle inputs before HTTP', async t => {
+  const positive = await fixture(t); await pre(positive);
+  for (const [name, config, extra, failure] of [
+    ['missing', { omitLiveEdgeSha: true }, [], /FAIL options: invocation expected 40 hex live edge SHA/],
+    ['malformed', {}, ['--live-edge-sha', 'abc1234'], /FAIL options: invocation expected 40 hex live edge SHA/],
+    ['unknown', { liveEdgeSha: '0'.repeat(40) }, [], /FAIL live_edge: control expected known live edge SHA ancestral to release SHA with readable protocol bundle/],
+    ['non-ancestor', { releaseSha: baselineEdgeSha, liveEdgeSha: releaseSha }, [], /FAIL live_edge: control expected known live edge SHA ancestral to release SHA with readable protocol bundle/],
+    ['unreadable bundle', { liveEdgeSha: 'b5e8df8097763f7553c8be189ceea0a5ed56b31e' }, [], /FAIL live_edge: control expected known live edge SHA ancestral to release SHA with readable protocol bundle/],
+  ]) await t.test(name, async t => {
+    const f = await fixture(t, config), r = await f.run('consent', extra);
+    assert.equal(r.exit, 1, r.output); assert.match(r.output, failure);
+    await missing(r.out); assert.equal(f.events.length, 0);
+    await missing(join(f.creds, 'live-controls.lock'));
+  });
+});
+
+test('producer Git lookup ignores inherited repository and config overrides', async t => {
+  const f = await fixture(t);
+  const r = await f.run('consent', [], { env: {
+    GIT_DIR: join(f.root, 'absent-repo'), GIT_WORK_TREE: join(f.root, 'absent-tree'),
+    GIT_OBJECT_DIRECTORY: join(f.root, 'absent-objects'), GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'core.repositoryformatversion', GIT_CONFIG_VALUE_0: '999',
+    GIT_CONFIG_PARAMETERS: "'core.repositoryformatversion=999'",
+  } });
+  assert.equal(r.exit, 0, r.output);
+  assert.equal(JSON.parse(await readFile(r.out, 'utf8')).live_edge_sha, baselineEdgeSha);
+});
+
+test('producer refuses a script directory nested below the repository top level', async t => {
+  const f = await fixture(t); await pre(f);
+  const initialized = spawnSync('git', ['--no-replace-objects', '-C', f.root, 'init', '--quiet'], { encoding: 'utf8' });
+  assert.equal(initialized.status, 0, initialized.stderr);
+  const nested = join(f.root, 'nested', 'scripts'); await mkdir(nested, { recursive: true });
+  const copied = join(nested, 'live-ordinary-controls.mjs'); await writeFile(copied, await readFile(script));
+  const result = spawnSync(process.execPath, [copied, 'consent', '--phase', 'pre-W1',
+    '--release-sha', release, '--live-edge-sha', baselineEdgeSha, '--workspace-id', wid,
+    '--cred-dir', f.creds, '--pointer-dir', f.root, '--out', join(f.root, 'nested-receipt.json')], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /producer root is repository top level got unexpected repository root/);
+  await missing(join(f.root, 'nested-receipt.json'));
+});
+
+test('producer tools/list uses the live release catalog: unknown extra or the other set fail', async t => {
   await t.test('pre-W1 refuses the release household set', async t => {
     const f = await fixture(t); f.config.listedTools = releaseTools;
     const r = await f.run('consent');
@@ -551,7 +604,7 @@ test('executable produces exact consent/live bytes with real PKCE, rotating refr
   let generation = 0;
   for (const [window, phase] of [['W1', 'before'], ['W2', 'after'], ['W3', 'recovery']]) {
     const r = await f.run('window', ['--window', window, '--phase', phase]); assert.equal(r.exit, 0, r.output);
-    keys(r.receipt, ['release_sha', 'window_id', 'window', 'phase', 'controls', 'consent_receipt_sha256', 'producer_sha256', 'dcr_client_ids']);
+    keys(r.receipt, ['release_sha', 'live_edge_sha', 'window_id', 'window', 'phase', 'controls', 'consent_receipt_sha256', 'producer_sha256', 'dcr_client_ids']);
     assert.deepEqual(r.receipt.controls, { hosted_mcp_consent_refresh: true, dcr_registration_consent: true, cimd_consent: true, human_recovery: true, worker_command_read: true });
     assert.equal(r.receipt.release_sha, release); assert.equal(r.receipt.window_id, 'ABC123'); assert.equal(r.receipt.window, window); assert.equal(r.receipt.phase, phase);
     assert.equal(r.receipt.consent_receipt_sha256, hash(p.bytes)); assert.equal(r.receipt.producer_sha256, producer);
@@ -559,8 +612,8 @@ test('executable produces exact consent/live bytes with real PKCE, rotating refr
     assert.equal(r.bytes.toString(), JSON.stringify(r.receipt, null, 2) + '\n');
     assert.equal((await stat(`${r.out}.report.json`)).mode & 0o777, 0o600);
     assert.equal(r.report.workspace_id, wid);
-    assert.deepEqual(r.report.seat, { name: 'c1-controls-runner-aaaaaaaa',
-      request_id: `c1_controls_claim_${hash(`${release}:${wid}:c1-controls-runner-aaaaaaaa`).slice(0, 40)}`,
+    assert.deepEqual(r.report.seat, { name: `c1-controls-runner-${release.slice(0, 8)}`,
+      request_id: `c1_controls_claim_${hash(`${release}:${wid}:c1-controls-runner-${release.slice(0, 8)}`).slice(0, 40)}`,
       seat_id: '44444444-4444-4444-8444-444444444444', handle: 'seat_' + 'a'.repeat(32) });
     for (const name of ['live-controls-state.json', 'dcr-client-ids.json']) assert.equal((await stat(join(f.creds, name))).mode & 0o777, 0o600);
     const record = JSON.parse(await readFile(join(f.human, `${hash(api).slice(0, 24)}.json`))); assert.equal(record.generation, ++generation);
@@ -576,22 +629,22 @@ test('consecutive releases succeed while live and revoked principals keep their 
   const claimedNames = new Map([
     ['c1-controls-runner', { principal_id: randomUUID(), grant: { revoked: true } }],
   ]);
-  const firstSha = '0123abcd' + 'a'.repeat(32), secondSha = '89abcdef' + 'b'.repeat(32);
+  const firstSha = earlierEdgeSha, secondSha = releaseSha;
   const first = await fixture(t, { releaseSha: firstSha, claimedNames });
   const firstConsent = await pre(first);
   const firstWindow = await first.run('window');
   assert.equal(firstWindow.exit, 0, firstWindow.output);
   assert.equal(firstWindow.receipt.release_sha, firstSha);
-  assert.equal(firstWindow.report.seat.name, 'c1-controls-runner-0123abcd');
+  assert.equal(firstWindow.report.seat.name, `c1-controls-runner-${firstSha.slice(0, 8)}`);
   assert.equal(firstWindow.report.seat.request_id,
-    `c1_controls_claim_${hash(`${firstSha}:${wid}:c1-controls-runner-0123abcd`).slice(0, 40)}`);
+    `c1_controls_claim_${hash(`${firstSha}:${wid}:c1-controls-runner-${firstSha.slice(0, 8)}`).slice(0, 40)}`);
   const replay = await first.run('window', ['--window', 'W2']);
   assert.equal(replay.exit, 0, replay.output);
   assert.deepEqual(replay.report.seat, firstWindow.report.seat);
   assert.ok(first.events.some(e => e.claim && e.replayed), 'same release replays the original claim');
 
   // A different grant with the same eight-character prefix reaches the name refusal.
-  const collision = await fixture(t, { releaseSha: '0123abcd' + 'c'.repeat(32), claimedNames });
+  const collision = await fixture(t, { releaseSha: firstSha, claimedNames });
   await pre(collision);
   async function refusesCollision() {
     const refused = await collision.run('window');
@@ -614,9 +667,9 @@ test('consecutive releases succeed while live and revoked principals keep their 
   const secondWindow = await second.run('window');
   assert.equal(secondWindow.exit, 0, secondWindow.output);
   assert.equal(secondWindow.receipt.release_sha, secondSha);
-  assert.equal(secondWindow.report.seat.name, 'c1-controls-runner-89abcdef');
+  assert.equal(secondWindow.report.seat.name, `c1-controls-runner-${secondSha.slice(0, 8)}`);
   assert.equal(secondWindow.report.seat.request_id,
-    `c1_controls_claim_${hash(`${secondSha}:${wid}:c1-controls-runner-89abcdef`).slice(0, 40)}`);
+    `c1_controls_claim_${hash(`${secondSha}:${wid}:c1-controls-runner-${secondSha.slice(0, 8)}`).slice(0, 40)}`);
   assert.notEqual(secondWindow.report.seat.request_id, firstWindow.report.seat.request_id);
   assert.equal(claimedNames.size, 3, 'both releases claim new names alongside the revoked legacy principal');
 });
@@ -634,7 +687,7 @@ test('timeout defaults allow two 25-minute consent legs and CLI overrides stay b
   const root = join(realpathSync(tmpdir()), 'live-controls-timeout-dry-run');
   for (const command of ['consent', 'window', 'final-cleanup']) await t.test(command, () => {
     const args = [command, '--dry-run', '--release-sha', release, '--cred-dir', root, '--out', join(root, 'receipt.json')];
-    if (command !== 'final-cleanup') args.push('--workspace-id', wid);
+    if (command !== 'final-cleanup') args.push('--workspace-id', wid, '--live-edge-sha', baselineEdgeSha);
     if (command === 'consent') args.push('--phase', 'pre-W1', '--pointer-dir', root);
     else {
       args.push('--consent-receipt', join(root, 'consent.json'));
@@ -692,7 +745,7 @@ test('seat claim failures withhold receipts and a later failure retains the priv
     const r = await f.run('window'); assert.equal(r.exit, 1, r.output); await missing(r.out);
     assert.match(r.output, config.noReadback ? /FAIL worker_command_read:/ : /FAIL seat_setup:/);
     if (config.noReadback) {
-      assert.equal(r.report.seat.name, 'c1-controls-runner-aaaaaaaa'); assert.equal(r.report.workspace_id, wid);
+      assert.equal(r.report.seat.name, `c1-controls-runner-${release.slice(0, 8)}`); assert.equal(r.report.workspace_id, wid);
       assert.equal((await stat(`${r.out}.report.json`)).mode & 0o777, 0o600);
     } else { await missing(`${r.out}.report.json`); assert.ok(!f.events.some(e => e.command === 'post_signal')); }
   }

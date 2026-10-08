@@ -88,7 +88,7 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
             postsHere: { id: 'posts', label: 'What it posts here', detail: 'Always', state: 'always' },
           },
           activity: { ageLabel: 'Live now', phaseLabel: 'Tool running', toolTitle: 'Read files ' + hostile, emptyMessage: null },
-          may: { steer: true },
+          may: { steer: true, remove: true }, workPolicy: 'owner',
         };
         const nikki = {
           found: true, sample: false, homeHref: '?v=catchup',
@@ -131,10 +131,10 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
           const box = node.getBoundingClientRect();
           return box.height >= 44 && box.width >= 44;
         });
-        const page = HomeAgent.agentPage(document, working, { onManage() {}, onQueueAction() {}, onFix() {}, onListsToggle() {} });
+        const page = HomeAgent.agentPage(document, working, { onManage() {}, onQueueAction() {}, onFix() {}, onListsToggle() {}, onWorkPolicy() {}, onRemove() {} });
         root.append(page);
         const overflow = page.scrollWidth > page.clientWidth + 1 || document.documentElement.scrollWidth > innerWidth + 1;
-        const laneTouchTargets = meetsTouch(visible(page, '.hm-agent__todo-link, .hm-agent__home, .hm-agent__action, .hm-agent__manage'));
+        const laneTouchTargets = meetsTouch(visible(page, '.hm-agent__todo-link, .hm-agent__home, .hm-agent__action, .hm-agent__manage, .hm-agent__policy-change, .hm-agent__remove'));
         const primitiveNodes = visible(page, '[data-hm-up-next] button, [data-hm-not-yet] button, [data-hm-lists] button, [data-hm-lists] [role="switch"]');
         const primitiveTouchTargets = meetsTouch(primitiveNodes);
         const hostileElements = page.querySelectorAll('img').length;

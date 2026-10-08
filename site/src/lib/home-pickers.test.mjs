@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { PICKER_CLOSED, TAG_HIGHLIGHT_FOOTER, activeDescendant, assignOptions, commentSegments, filterOptions, insertTag, mentionQuery,
+import { PICKER_CLOSED, TAG_HIGHLIGHT_FOOTER, activeDescendant, assignOptions, chipKey, chipStop, commentSegments, filterOptions, insertTag, mentionQuery,
   personNames, pickerKey, pickerOpen, pickerOptionId, tagLabel, tagOptions, tagsInBody } from "./home-pickers.ts";
 
 const state = (over = {}) => ({ kind: "idle", word: "Idle", detail: "Active 2 hours ago", attention: false,
@@ -92,6 +92,33 @@ test("combobox keyboard model: Up and Down move and wrap, skip disabled rows, En
   assert.deepEqual(pickerKey(PICKER_CLOSED, "Escape", options), { state: PICKER_CLOSED, effect: null, handled: false });
   assert.deepEqual(pickerKey(PICKER_CLOSED, "ArrowUp", options).state, { open: true, active: 2 });
   assert.deepEqual(pickerKey({ open: true, active: 0 }, "x", options).handled, false);
+});
+
+test("assign chips keyboard model: arrows move focus only, wrap and skip disabled chips; Space and Enter pick", () => {
+  const options = [{ value: "a", kind: "person", label: "A", caption: "", group: "g", disabled: false },
+    { value: "b", kind: "agent", label: "B", caption: "", group: "g", disabled: true },
+    { value: "c", kind: "agent", label: "C", caption: "", group: "h", disabled: false }];
+  assert.deepEqual(chipKey(options, 0, "ArrowRight"), { focus: 2, select: null, handled: true }, "the disabled chip is skipped, nothing is picked");
+  assert.deepEqual(chipKey(options, 0, "ArrowDown"), { focus: 2, select: null, handled: true });
+  assert.equal(chipKey(options, 2, "ArrowRight").focus, 0, "Right wraps to the first chip");
+  assert.equal(chipKey(options, 0, "ArrowLeft").focus, 2, "Left wraps to the last chip");
+  assert.equal(chipKey(options, 2, "ArrowUp").focus, 0);
+  assert.equal(chipKey(options, 2, "Home").focus, 0); assert.equal(chipKey(options, 0, "End").focus, 2);
+  assert.deepEqual(chipKey(options, 2, " "), { focus: 2, select: options[2], handled: true });
+  assert.deepEqual(chipKey(options, 0, "Enter"), { focus: 0, select: options[0], handled: true });
+  assert.deepEqual(chipKey(options, 1, "Enter"), { focus: 1, select: null, handled: true }, "a disabled chip is never picked");
+  assert.deepEqual(chipKey(options, 0, "Escape"), { focus: 0, select: null, handled: false });
+  assert.deepEqual(chipKey(options, 0, "Tab"), { focus: 0, select: null, handled: false }, "Tab leaves the group");
+});
+
+test("the chips' one tab stop is the current assignee when it can be picked, otherwise the first chip that can", () => {
+  const options = assignOptions(people);
+  assert.equal(options[chipStop(options, "muse")].value, "muse");
+  assert.equal(chipStop(options, "absent"), 0); assert.equal(chipStop(options, null), 0);
+  const disabledFirst = [{ value: "x", kind: "person", label: "X", caption: "", group: "g", disabled: true },
+    { value: "y", kind: "person", label: "Y", caption: "", group: "g", disabled: false }];
+  assert.equal(chipStop(disabledFirst, "x"), 1, "a current value that cannot be picked does not take the stop");
+  assert.equal(chipStop([disabledFirst[0]], "x"), null);
 });
 
 test("opening starts on the current value when it can be picked", () => {

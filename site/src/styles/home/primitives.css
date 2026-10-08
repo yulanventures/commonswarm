@@ -1,19 +1,19 @@
-/* Home primitives use the site's light/dark semantic palette. No local colour aliases.
-   Measured WCAG sRGB contrast, light / dark; alpha fills composited over the page:
-   text/surface 14.42 / 13.24; muted/surface 5.66 / 8.08; ink/canvas 13.59 / 15.43;
-   active-ink/active-bg 7.09 / 8.20; review-ink/review-bg 7.06 / 8.68;
-   accent-ink/accent 5.12 / 8.25; accent-ink/accent-bright 7.44 / 10.04;
-   text/accent-dim 11.85 / 11.54; accent-bright/accent-dim 6.11 / 8.40;
-   info/surface 5.93 / 8.89; warning/surface 6.11 / 8.87;
-   danger/surface 5.82 / 8.73; success/surface 6.17 / 7.71.
-   Calculator controls: black/white 21.00; grey 119/white 4.48.
-   Expanded text and notices sit on surface; word-form idle inherits the rail ink. */
+/* Home primitives: the canvas design (home-visual DESIGN-MAP), --home-* tokens only.
+   Measured WCAG sRGB contrast (tokens.css header method), light / dark:
+     ink on card 15.90 / 14.21; ink on canvas 14.32 / 15.27; muted on card 6.72 / 8.43;
+     primary pill (--home-on-ink on ink) 14.32 / 14.21; band pill (--home-on-lime-ink on lime-ink) 14.32 / 14.32; lime-ink on lime 12.65 / 12.65;
+     white initial on person fill: blue 6.15 / 5.36, orange 5.09 / 5.09, purple 6.63 / 5.16, teal 5.47 / 5.47;
+     agent letter (deep on tint): blue 8.01 / 9.83, orange 7.19 / 9.80, purple 8.86 / 10.04, teal 7.79 / 9.76;
+     offline-deep on offline-tint 9.17 / 9.62; offline-text on card 6.66 / 8.82; danger on card 8.37 / 8.24.
+   Calculator controls on the same run: black/white 21.00; #777/white 4.48; #00f/white 8.59.
+   Person colour is data-hue on the avatar (0 blue, 1 orange, 2 purple, 3 teal, none = owner left);
+   an agent always carries its owner's hue. */
 .hm-person-avatar, .hm-agent-orb, .hm-capsule, .hm-status, .hm-object-card,
 .hm-needs-you, .hm-choices, .hm-switch-row, .hm-queue-row, .hm-notice {
   box-sizing: border-box;
-  font-family: var(--font-sans);
+  font-family: var(--home-font-body);
   font-size: var(--t-base);
-  line-height: 1.5;
+  line-height: 1.45;
   max-inline-size: 100%;
   min-inline-size: 0;
   overflow-wrap: anywhere;
@@ -23,31 +23,50 @@
   min-block-size: 44px;
   min-inline-size: 44px;
 }
+
+/* The 1.5px stroke (outline pills, agent avatars). Chromium snaps a fractional border-width down to a whole CSS px:
+   `border: 1.5px` computes and paints as 1px at DPR 1 and DPR 2. So a 1.5px edge is an inset shadow with no border:
+       border: 0; box-shadow: inset 0 0 0 1.5px <colour token>;
+   It paints 3 device px at DPR 2 and 1px plus a half-tone px at DPR 1. The padding edge is then the outer edge, so an
+   absolutely placed child (the owner badge) measures from the outer edge as the canvas does. Box-shadow does not compose:
+   a focus rule repeats the inset first (`box-shadow: inset 0 0 0 1.5px <colour>, var(--focus-ring)`), and a rule that
+   changes the edge colour changes the inset colour. A dashed edge cannot be a shadow: it keeps a real border and drops
+   the shadow. A pill's padding adds the 1.5px edge back so its outer size is the canvas's. */
+/* Pill buttons. Secondary: 1.5px ink outline. Primary: ink fill, no edge, --home-on-ink text (the canvas design's #EEF2EA). */
 .hm-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   max-inline-size: 100%;
-  padding: var(--s-2) var(--s-4);
-  border: 1px solid var(--border-interactive);
+  padding: 0 19.5px;
+  border: 0;
+  box-shadow: inset 0 0 0 1.5px var(--home-ink);
   border-radius: var(--radius-pill);
-  background: var(--surface);
-  color: var(--text);
+  background: transparent;
+  color: var(--home-ink);
   font: inherit;
-  font-weight: var(--weight-semibold);
+  font-family: var(--home-font-body);
+  font-size: var(--t-sm);
+  font-weight: 700;
+  line-height: 1.2;
   text-decoration: none;
   overflow-wrap: anywhere;
   cursor: pointer;
 }
-.hm-button[data-primary="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
-.hm-button:hover, button.hm-capsule:hover, button.hm-switch-row:hover { background: var(--surface-2); color: var(--text); }
-.hm-button[data-primary="true"]:hover { background: var(--accent-bright); color: var(--accent-ink); }
+.hm-button[data-primary="true"] { padding-inline: 24px; border: 0; box-shadow: none; background: var(--home-ink); color: var(--home-on-ink); }
+.hm-button:hover, button.hm-capsule:hover, button.hm-switch-row:hover { background: var(--home-soft); color: var(--home-ink); }
+.hm-button[data-primary="true"]:hover { background: var(--home-link-hover); color: var(--home-on-ink); }
 .hm-button:focus-visible, .hm-capsule:focus-visible, .hm-object-card:focus-visible,
 .hm-switch-row:focus-visible, .hm-queue-title:focus-visible, .hm-choice:has(input:focus-visible) {
   outline: none;
   box-shadow: var(--focus-ring);
 }
+/* The class is doubled so the composed ring outranks integration.css `.hm-route-pane :is(button, a):focus-visible` (0,2,1). */
+.hm-button.hm-button:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring); }
+.hm-button.hm-button[data-primary="true"]:focus-visible { box-shadow: var(--focus-ring); }
 .hm-button:disabled, .hm-switch-row:disabled { cursor: default; }
+
+/* Person avatar: a filled circle in the person's colour, white initial. */
 .hm-person-avatar, .hm-agent-orb {
   position: relative;
   display: inline-flex;
@@ -57,103 +76,194 @@
   block-size: 28px;
   flex: none;
   border-radius: 50%;
-  font-size: var(--t-xs);
-  font-weight: var(--weight-semibold);
+  font-family: var(--home-font-body);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  overflow-wrap: normal;
 }
-.hm-person-avatar { background: var(--canvas); color: var(--ink); border: 1px solid var(--border); }
-.hm-agent-orb { border-radius: 30%; border: 1px solid var(--border-interactive); color: var(--mark-center); background: linear-gradient(135deg, var(--lavender), var(--sky)); }
-.hm-agent-orb[data-tint="1"] { background: linear-gradient(135deg, var(--peach), var(--lavender)); }
-.hm-agent-orb[data-tint="2"] { background: linear-gradient(135deg, var(--sage), var(--sky)); }
-.hm-agent-orb[data-tint="3"] { background: linear-gradient(135deg, var(--sky), var(--lavender)); }
-/* Orb letters are decorative; mark-center dark mapping becomes pale over pastels.
-   Keep their ink at the always-dark chip-review-ink by using the opaque review backdrop. */
-.hm-orb-letter { border-radius: var(--radius-pill); padding-inline: 2px; background: var(--chip-review-bg); color: var(--chip-review-ink); }
-.hm-person-avatar[data-size="24"], .hm-agent-orb[data-size="24"] { inline-size: 24px; block-size: 24px; }
-.hm-agent-orb[data-size="22"] { inline-size: 22px; block-size: 22px; }
-.hm-person-avatar[data-size="36"], .hm-agent-orb[data-size="36"] { inline-size: 36px; block-size: 36px; font-size: var(--t-sm); }
-.hm-person-avatar[data-size="44"] { inline-size: 44px; block-size: 44px; font-size: var(--t-base); }
-.hm-person-avatar[data-size="48"] { inline-size: 48px; block-size: 48px; font-size: var(--t-lg); }
-.hm-agent-orb[data-size="60"] { inline-size: 60px; block-size: 60px; font-size: var(--t-xl); }
-.hm-person-avatar[data-dashed="true"], .hm-agent-orb[data-dashed="true"] { border: 1.5px dashed var(--border-interactive); }
+.hm-person-avatar { background: var(--home-ink-muted); color: var(--home-on-person); }
+.hm-person-avatar[data-hue="0"] { background: var(--home-blue); }
+.hm-person-avatar[data-hue="1"] { background: var(--home-orange); }
+.hm-person-avatar[data-hue="2"] { background: var(--home-purple); }
+.hm-person-avatar[data-hue="3"] { background: var(--home-teal); }
+
+/* Agent avatar: a rounded square, the owner's tint, a 1.5px edge in the owner's colour (the inset stroke above) and a
+   deep letter. border-color carries the same colour for the dashed form, which needs a real border. */
+.hm-agent-orb { border-radius: 8px; border: 0 solid var(--home-ink-muted); box-shadow: inset 0 0 0 1.5px var(--home-ink-muted); background: var(--home-soft); color: var(--home-ink-muted); }
+.hm-agent-orb[data-hue="0"] { border-color: var(--home-blue); box-shadow: inset 0 0 0 1.5px var(--home-blue); background: var(--home-blue-tint); color: var(--home-blue-deep); }
+.hm-agent-orb[data-hue="1"] { border-color: var(--home-orange); box-shadow: inset 0 0 0 1.5px var(--home-orange); background: var(--home-orange-tint); color: var(--home-orange-deep); }
+.hm-agent-orb[data-hue="2"] { border-color: var(--home-purple); box-shadow: inset 0 0 0 1.5px var(--home-purple); background: var(--home-purple-tint); color: var(--home-purple-deep); }
+.hm-agent-orb[data-hue="3"] { border-color: var(--home-teal); box-shadow: inset 0 0 0 1.5px var(--home-teal); background: var(--home-teal-tint); color: var(--home-teal-deep); }
+.hm-orb-letter { color: inherit; }
+
+.hm-person-avatar[data-size="24"] { inline-size: 24px; block-size: 24px; font-size: 11px; }
+.hm-agent-orb[data-size="24"] { inline-size: 24px; block-size: 24px; border-radius: 7px; font-size: 11px; }
+.hm-agent-orb[data-size="22"] { inline-size: 22px; block-size: 22px; border-radius: 7px; font-size: 10px; }
+.hm-agent-orb[data-size="26"] { inline-size: 26px; block-size: 26px; font-size: 12px; }
+.hm-person-avatar[data-size="30"] { inline-size: 30px; block-size: 30px; font-size: 13px; }
+.hm-agent-orb[data-size="32"] { inline-size: 32px; block-size: 32px; border-radius: 10px; font-size: 14px; }
+.hm-person-avatar[data-size="36"], .hm-agent-orb[data-size="36"] { inline-size: 36px; block-size: 36px; font-size: 14px; }
+.hm-agent-orb[data-size="36"] { border-radius: 10px; }
+.hm-person-avatar[data-size="44"] { inline-size: 44px; block-size: 44px; font-size: 18px; }
+.hm-person-avatar[data-size="48"] { inline-size: 48px; block-size: 48px; font-size: 20px; }
+.hm-agent-orb[data-size="60"] { inline-size: 60px; block-size: 60px; border-radius: 18px; font-size: 26px; box-shadow: inset 0 0 0 2px var(--home-ink-muted); }
+.hm-agent-orb[data-size="60"][data-hue="0"] { box-shadow: inset 0 0 0 2px var(--home-blue); }
+.hm-agent-orb[data-size="60"][data-hue="1"] { box-shadow: inset 0 0 0 2px var(--home-orange); }
+.hm-agent-orb[data-size="60"][data-hue="2"] { box-shadow: inset 0 0 0 2px var(--home-purple); }
+.hm-agent-orb[data-size="60"][data-hue="3"] { box-shadow: inset 0 0 0 2px var(--home-teal); }
+.hm-person-avatar[data-dashed="true"] { border: 1.5px dashed var(--home-line-dashed); background: transparent; color: var(--home-ink-muted); }
+/* Dashed: a real border in the hue's border-color (computes 1px), no stroke shadow. */
+.hm-agent-orb[data-dashed="true"] { border-width: 1.5px; border-style: dashed; box-shadow: none; }
+.hm-agent-orb[data-size="60"][data-dashed="true"] { border-width: 2px; box-shadow: none; }
+
+/* Owner badge: a small filled circle in the owner's colour, white initial, a 2px ring of the surface it sits on.
+   The canvas places it right -6px, bottom -5px from the avatar's outer edge (-8px / -6px on the 60px avatar). The avatar
+   has no border (inset stroke), so its padding edge is that outer edge; a dashed avatar's 1px border moves it 1px out. */
 .hm-owner-badge {
   position: absolute;
-  inset-inline-end: -4px;
-  inset-block-end: -4px;
+  inset-inline-end: -6px;
+  inset-block-end: -5px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   inline-size: 16px;
   block-size: 16px;
   border-radius: 50%;
-  background: var(--canvas);
-  color: var(--text);
-  box-shadow: 0 0 0 2px var(--surface);
+  background: var(--home-ink-muted);
+  color: var(--home-on-person);
+  box-shadow: 0 0 0 2px var(--home-card);
   font-size: 9px;
+  font-weight: 700;
   line-height: 1;
 }
-.hm-agent-orb[data-size="60"] .hm-owner-badge { inline-size: 24px; block-size: 24px; font-size: var(--t-xs); }
-.hm-capsule { display: inline-flex; align-items: center; gap: var(--s-1); padding: var(--s-1) var(--s-2); border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--surface); color: var(--text); }
-button.hm-capsule { cursor: pointer; }
-.hm-capsule-name { min-inline-size: 0; font-size: var(--t-sm); }
-.hm-capsule-more { flex: none; font-size: var(--t-xs); }
-.hm-status { display: inline-flex; align-items: center; flex-wrap: wrap; gap: var(--s-2); font-size: var(--t-sm); color: var(--text-muted); }
-.hm-status[data-form="word"] { color: inherit; }
-.hm-status-word { font-weight: var(--weight-semibold); }
-.hm-status-shape { display: inline-block; inline-size: 8px; block-size: 8px; flex: none; border: 1.5px solid currentColor; border-radius: 50%; }
-.hm-status-shape[data-shape="dot"] { background: currentColor; }
-.hm-status-shape[data-shape="diamond"] { border-radius: 1px; transform: rotate(45deg); background: currentColor; }
-.hm-status[data-state="working"] .hm-status-word, .hm-status[data-state="working"] .hm-status-shape { color: var(--chip-active-ink); background: var(--chip-active-bg); }
-.hm-status[data-state="disconnected"] .hm-status-word, .hm-status[data-state="disconnected"] .hm-status-shape { color: var(--chip-review-ink); background: var(--chip-review-bg); }
-.hm-status[data-state="working"] .hm-status-shape { background: var(--chip-active-ink); box-shadow: 0 0 0 3px var(--chip-active-bg); }
-.hm-status[data-state="disconnected"] .hm-status-shape { background: var(--chip-review-ink); box-shadow: 0 0 0 3px var(--chip-review-bg); }
-.hm-status[data-form="pill"] { padding: var(--s-2) var(--s-3); border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--surface); }
+.hm-agent-orb[data-hue="0"] .hm-owner-badge { background: var(--home-blue); }
+.hm-agent-orb[data-hue="1"] .hm-owner-badge { background: var(--home-orange); }
+.hm-agent-orb[data-hue="2"] .hm-owner-badge { background: var(--home-purple); }
+.hm-agent-orb[data-hue="3"] .hm-owner-badge { background: var(--home-teal); }
+.hm-agent-orb[data-size="60"] .hm-owner-badge { inset-inline-end: -8px; inset-block-end: -6px; inline-size: 24px; block-size: 24px; box-shadow: 0 0 0 3px var(--home-canvas); font-size: 12px; }
+.hm-agent-orb[data-dashed="true"] .hm-owner-badge { inset-inline-end: -7px; inset-block-end: -6px; }
+.hm-agent-orb[data-size="60"][data-dashed="true"] .hm-owner-badge { inset-inline-end: -10px; inset-block-end: -8px; }
+.hm-needs-you .hm-owner-badge { box-shadow: 0 0 0 2px var(--home-lime); }
+
+/* Person + agents capsule. */
+.hm-capsule {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px 3px 3px;
+  border: 1px solid var(--home-card-border);
+  border-radius: var(--radius-pill);
+  background: var(--home-canvas);
+  color: var(--home-ink);
+}
+button.hm-capsule { font: inherit; cursor: pointer; }
+.hm-capsule-name { min-inline-size: 0; padding-inline-start: 2px; font-size: var(--t-sm); font-weight: 600; }
+.hm-capsule-more { flex: none; padding-inline-start: 2px; color: var(--home-ink-muted); font-size: 12px; font-weight: 700; }
+
+/* Status: shape, word and measured detail. Working = lime dot; disconnected = amber diamond; idle = hollow ring.
+   The word keeps its pinned text; the canvas design shows it in lower case. */
+.hm-status { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: var(--t-sm); color: var(--home-ink-muted); }
+.hm-status[data-form="word"] { font-size: 12px; }
+.hm-status-word { font-weight: 600; text-transform: lowercase; }
+.hm-status-shape { display: inline-block; box-sizing: border-box; inline-size: 8px; block-size: 8px; flex: none; border: 1.5px solid currentColor; border-radius: 50%; }
+.hm-status-shape[data-shape="dot"] { border-color: var(--home-ink); background: var(--home-lime); }
+.hm-status-shape[data-shape="diamond"] { inline-size: 7px; block-size: 7px; border: 0; border-radius: 2px; transform: rotate(45deg); background: var(--home-offline-text); }
+.hm-status[data-state="disconnected"] .hm-status-word { color: var(--home-offline-text); }
+.hm-status[data-form="pill"] { min-block-size: 36px; padding: 0 14px; border-radius: var(--radius-pill); background: var(--home-canvas); color: var(--home-ink); font-weight: 700; }
+.hm-status[data-form="pill"][data-state="working"] { background: var(--home-lime); color: var(--home-lime-ink); }
+.hm-status[data-form="pill"][data-state="disconnected"] { background: var(--home-offline-tint); color: var(--home-offline-deep); }
+.hm-status[data-form="pill"][data-state="disconnected"] .hm-status-word { color: inherit; }
+.hm-status[data-form="pill"][data-state="disconnected"] .hm-status-shape { background: currentColor; }
+.hm-status[data-form="pill"] .hm-status-word { font-weight: 700; }
+.hm-status[data-form="pill"] .hm-status-detail { font-weight: 400; }
 .hm-status-detail { flex-basis: 100%; }
+.hm-status[data-form="pill"] .hm-status-detail { flex-basis: auto; }
 .hm-status .hm-notice { flex-basis: 100%; }
-.hm-object-card { display: flex; align-items: center; gap: var(--s-3); min-block-size: 56px; padding: var(--s-3); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); background: var(--surface); text-decoration: none; box-shadow: var(--shadow-card); }
-.hm-object-icon { flex: none; font-size: var(--t-lg); }
+
+/* Cards: 18px radius, 1px border, 0 2px 0 lip. */
+.hm-object-card { display: flex; align-items: center; gap: 12px; min-block-size: 56px; padding: 12px 14px; border: 1px solid var(--home-card-border); border-radius: 14px; color: var(--home-ink); background: var(--home-soft); text-decoration: none; }
+a.hm-object-card:hover { border-color: var(--home-field-border); color: var(--home-ink); }
+/* Object icons: the canvas design's 1.6-stroke line icons (Space.dc.html) as masks in currentColor.
+   File 22-unit grid (22px in side cards, 20px in stream attachments); to-do and list 20-unit grid. A surface
+   sizes the icon with inline-size alone; the square follows. */
+.hm-object-icon { display: inline-block; flex: none; box-sizing: border-box; inline-size: 22px; aspect-ratio: 1; background: currentColor; color: var(--home-ink);
+  mask-position: center; mask-repeat: no-repeat; mask-size: 100% 100%; }
+.hm-object-icon[data-icon="file"] { mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 22 22' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 2.5h7l4 4V19a.5.5 0 0 1-.5.5h-10A.5.5 0 0 1 6 19V2.5z'/%3E%3Cpath d='M13 2.5v4h4'/%3E%3C/svg%3E"); }
+.hm-object-icon[data-icon="doc"] { mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 22 22' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 2.5h7l4 4V19a.5.5 0 0 1-.5.5h-10A.5.5 0 0 1 6 19V2.5z'/%3E%3Cpath d='M13 2.5v4h4'/%3E%3Cpath d='M8.8 11.5h5.4M8.8 15h5.4'/%3E%3C/svg%3E"); }
+.hm-object-icon[data-icon="todo"] { mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='3' width='14' height='14' rx='4'/%3E%3C/svg%3E"); }
+.hm-object-card[data-done="true"] .hm-object-icon[data-icon="todo"] { mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='3' width='14' height='14' rx='4'/%3E%3Cpath d='M6.6 10.2l2.3 2.3 4.6-4.9'/%3E%3C/svg%3E"); }
+.hm-object-icon[data-icon="list"] { mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7.5 5.5h9M7.5 10h9M7.5 14.5h9M3.6 5.5h.1M3.6 10h.1M3.6 14.5h.1'/%3E%3C/svg%3E"); }
+.hm-object-icon[data-icon="ask"] { mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 4h12a1.5 1.5 0 0 1 1.5 1.5v6.5a1.5 1.5 0 0 1-1.5 1.5H9l-3.5 3v-3H4a1.5 1.5 0 0 1-1.5-1.5V5.5A1.5 1.5 0 0 1 4 4z'/%3E%3C/svg%3E"); }
 .hm-object-copy { flex: 1; min-inline-size: 0; }
-.hm-object-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: var(--t-lg); font-weight: var(--weight-head); }
+/* The title is a <strong>: the site's global strong colour (--text) would win over the card's inherited ink. */
+.hm-object-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--home-ink); font-size: 16px; font-weight: 700; line-height: 1.3; }
 .hm-object-card[data-done="true"] .hm-object-title { text-decoration: line-through; }
-.hm-object-meta { display: block; color: var(--text-muted); font-size: var(--t-sm); }
-.hm-needs-you { display: flex; align-items: flex-start; gap: var(--s-3); padding: var(--pad-card-sm); border: 1px solid var(--accent); border-radius: var(--radius-lg); background: var(--accent-dim); color: var(--text); }
-.hm-needs-copy { flex: 1; min-inline-size: 0; }
-.hm-eyebrow { margin: 0 0 var(--s-2); font-size: var(--t-sm); color: var(--accent-bright); }
-.hm-needs-title { margin: 0 0 var(--s-3); font-family: var(--font-display); font-size: var(--t-lg); font-weight: var(--weight-display); letter-spacing: var(--track-head); }
-.hm-actions { display: flex; flex-wrap: wrap; gap: var(--s-2); min-inline-size: 0; }
-.hm-choices { margin: 0; padding: 0; border: 0; color: var(--text); }
-.hm-legend { margin-block-end: var(--s-2); font-weight: var(--weight-semibold); }
-.hm-choice-options { display: flex; flex-wrap: wrap; gap: var(--s-2); }
-.hm-choice { display: inline-flex; align-items: center; gap: var(--s-2); max-inline-size: 100%; padding: var(--s-2) var(--s-3); border: 1px solid var(--border-interactive); border-radius: var(--radius-pill); background: var(--surface); cursor: pointer; }
-.hm-radio { inline-size: 18px; block-size: 18px; flex: none; margin: 0; accent-color: var(--accent); }
+.hm-object-meta { display: block; color: var(--home-ink-muted); font-size: var(--t-sm); }
+
+/* Needs you: the lime band. */
+.hm-needs-you { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px; padding: 18px 20px; border: 0; border-radius: 18px; background: var(--home-lime); color: var(--home-lime-ink); }
+.hm-needs-copy { flex: 1 1 320px; min-inline-size: 0; }
+/* An unknown sender (no name, no initials): a neutral glyph in the card's own text colour, the size of the avatar it replaces. */
+.hm-needs-glyph { display: inline-grid; place-items: center; flex: none; inline-size: 36px; block-size: 36px; grid-column: 1; grid-row: 1 / span 2; color: inherit; }
+.hm-needs-glyph .hm-object-icon { inline-size: 24px; color: inherit; }
+.hm-eyebrow { margin: 0; font-size: 13px; font-weight: 700; color: var(--home-lime-ink); }
+.hm-needs-title { margin: 2px 0 0; font-family: var(--home-font-body); font-size: 17px; font-weight: 600; line-height: 1.35; letter-spacing: 0; text-wrap: pretty; }
+.hm-needs-copy > .hm-actions { margin-block-start: 12px; }
+.hm-needs-you .hm-button { box-shadow: inset 0 0 0 1.5px var(--home-lime-ink); color: var(--home-lime-ink); }
+.hm-needs-you .hm-button:hover { background: var(--home-lime-hover); color: var(--home-lime-ink); }
+.hm-needs-you .hm-button[data-primary="true"] { min-block-size: 46px; border: 0; box-shadow: none; background: var(--home-lime-ink); color: var(--home-on-lime-ink); font-size: 15px; }
+/* A quieter needs-you row (catchup.css data-needs-rank="more") draws every action as an ink outline pill (the inset stroke). */
+.hm-needs-you[data-needs-rank="more"] .hm-button,
+.hm-needs-you[data-needs-rank="more"] .hm-button[data-primary="true"] { border: 0; box-shadow: inset 0 0 0 1.5px var(--home-ink); }
+/* Hover stays dark in both modes: --home-on-lime-ink on --home-rail-raised 10.22 light, 12.83 dark. */
+.hm-needs-you .hm-button[data-primary="true"]:hover { background: var(--home-rail-raised); color: var(--home-on-lime-ink); }
+/* Focus in the band: the ring after the stroke the state draws (each selector one step above its stroke rule). */
+.hm-needs-you .hm-button.hm-button:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-lime-ink), var(--focus-ring); }
+.hm-needs-you .hm-button.hm-button[data-primary="true"]:focus-visible { box-shadow: var(--focus-ring); }
+.hm-needs-you[data-needs-rank="more"] .hm-button.hm-button:focus-visible,
+.hm-needs-you[data-needs-rank="more"] .hm-button.hm-button[data-primary="true"]:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring); }
+.hm-actions { display: flex; flex-wrap: wrap; gap: 8px; min-inline-size: 0; }
+
+.hm-choices { margin: 0; padding: 0; border: 0; color: var(--home-ink); }
+.hm-legend { margin-block-end: 8px; font-weight: 700; }
+.hm-choice-options { display: flex; flex-wrap: wrap; gap: 8px; }
+.hm-choice { display: inline-flex; align-items: center; gap: 8px; max-inline-size: 100%; padding: 8px 14px; border: 1.5px solid var(--home-field-border); border-radius: var(--radius-pill); background: var(--home-card); color: var(--home-ink); cursor: pointer; }
+.hm-radio { inline-size: 18px; block-size: 18px; flex: none; margin: 0; accent-color: var(--home-ink); }
 .hm-choice-copy { min-inline-size: 0; }
-.hm-choice-hint { display: block; font-size: var(--t-sm); color: var(--text-muted); }
+.hm-choice-hint { display: block; font-size: var(--t-sm); color: var(--home-ink-muted); }
 .hm-choice-check { visibility: hidden; inline-size: 1em; flex: none; }
-.hm-choice:has(input:checked) { border-color: var(--accent); }
+.hm-choice:has(input:checked) { border-color: var(--home-ink); background: var(--home-lime-soft); }
 .hm-choice:has(input:checked) .hm-choice-check { visibility: visible; }
+.hm-choice[data-selected="true"] { border-color: var(--home-ink); background: var(--home-lime-soft); }
 .hm-choice[data-selected="true"] .hm-choice-check { visibility: visible; }
 .hm-choice[data-static="true"] { cursor: default; }
 .hm-choice:has(input:disabled) { cursor: default; }
-.hm-switch-row { display: flex; align-items: center; gap: var(--s-3); inline-size: 100%; padding: var(--s-3); border: 0; border-block-end: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); text-align: start; }
+
+.hm-switch-row { display: flex; align-items: center; gap: 12px; inline-size: 100%; padding: 12px; border: 0; border-block-end: 1px solid var(--home-hairline); border-radius: 12px; background: var(--home-card); color: var(--home-ink); font: inherit; text-align: start; }
 button.hm-switch-row { cursor: pointer; }
 .hm-switch-copy { flex: 1; min-inline-size: 0; }
 .hm-switch-label, .hm-switch-detail { display: block; }
-.hm-switch-detail { font-size: var(--t-sm); color: var(--text-muted); }
-.hm-switch-word { font-size: var(--t-sm); flex: none; }
-.hm-switch-track { display: inline-flex; align-items: center; inline-size: 44px; block-size: 26px; flex: none; padding: 3px; border: 1px solid var(--border-interactive); border-radius: var(--radius-pill); background: var(--surface-2); }
-.hm-switch-knob { inline-size: 18px; block-size: 18px; border-radius: 50%; background: var(--text-muted); }
-.hm-switch-row[aria-checked="true"] .hm-switch-track { background: var(--accent); border-color: var(--accent); }
-.hm-switch-row[aria-checked="true"] .hm-switch-knob { margin-inline-start: auto; background: var(--accent-ink); }
-.hm-queue-row { display: grid; grid-template-columns: 2rem minmax(0, 1fr); gap: var(--s-2); padding-block: var(--s-3); border-block-end: 1px solid var(--border); color: var(--text); }
-.hm-queue-position { align-self: start; padding-block-start: var(--s-2); color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.hm-switch-label { font-weight: 700; }
+.hm-switch-detail { font-size: var(--t-sm); color: var(--home-ink-muted); }
+.hm-switch-word { font-size: var(--t-sm); font-weight: 600; flex: none; }
+.hm-switch-track { display: inline-flex; align-items: center; inline-size: 44px; block-size: 26px; flex: none; padding: 3px; border: 0; border-radius: var(--radius-pill); background: var(--home-field-border); }
+.hm-switch-knob { inline-size: 20px; block-size: 20px; border-radius: 50%; background: var(--home-card); }
+.hm-switch-row[aria-checked="true"] .hm-switch-track { background: var(--home-ink); }
+.hm-switch-row[aria-checked="true"] .hm-switch-knob { margin-inline-start: auto; background: var(--home-lime); }
+
+.hm-queue-row { display: grid; grid-template-columns: 2rem minmax(0, 1fr); gap: 8px; padding-block: 12px; border-block-end: 1px solid var(--home-hairline); color: var(--home-ink); }
+.hm-queue-position { align-self: start; padding-block-start: 8px; color: var(--home-ink-muted); font-weight: 700; font-variant-numeric: tabular-nums; }
 .hm-queue-copy { min-inline-size: 0; }
-.hm-queue-title { display: flex; align-items: center; color: var(--text); font-weight: var(--weight-semibold); border-radius: var(--radius); }
-.hm-queue-meta { font-size: var(--t-sm); color: var(--text-muted); }
+.hm-queue-title { display: flex; align-items: center; color: var(--home-ink); font-weight: 700; border-radius: 12px; }
+.hm-queue-meta { font-size: var(--t-sm); color: var(--home-ink-muted); }
 .hm-queue-row > .hm-actions { grid-column: 2; }
-.hm-notice { display: block; padding: var(--s-2) var(--s-3); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: var(--t-sm); }
-.hm-notice[data-tone="warning"] { color: var(--warning); }
-.hm-notice[data-tone="danger"] { color: var(--danger); }
-.hm-notice[data-tone="success"] { color: var(--success); }
-.hm-notice[data-tone="info"] { color: var(--info); }
+
+.hm-notice { display: block; padding: 8px 12px; border: 1px solid var(--home-card-border); border-radius: 12px; background: var(--home-card); color: var(--home-ink); font-size: var(--t-sm); }
+.hm-notice[data-tone="warning"] { border-color: var(--home-offline-tint); background: var(--home-offline-tint); color: var(--home-offline-deep); }
+.hm-notice[data-tone="danger"] { color: var(--home-danger); }
+.hm-notice[data-tone="success"] { border-color: var(--home-lime-soft); background: var(--home-lime-soft); color: var(--home-ink); }
+.hm-notice[data-tone="info"] { color: var(--home-ink); }
 .hm-sr-only { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 @media (prefers-reduced-motion: no-preference) {
   .hm-button, button.hm-capsule, button.hm-switch-row { transition: background-color var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard); }

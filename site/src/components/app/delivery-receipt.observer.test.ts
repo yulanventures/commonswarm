@@ -633,3 +633,25 @@ test("receipt refresh reuses the feed tick and adds no timer", () => {
   assert.match(client, /BROWSER_RECEIPT_UNAVAILABLE_REFRESH_MS = 30_000/);
   assert.match(refresh, /visibleReceiptSignalIds\(\)/);
 });
+
+/* TOM'S RULING 1 (2026-10-07, "Quiet forms"): a settled receipt is quiet, shown on hover or focus
+   in the row's tool strip; a problem receipt is never quiet. The negative half is the point: a
+   failed, expired, stuck or pending receipt must stay on the row. */
+test("only a settled receipt is quiet; a problem receipt always stays on the row", () => {
+  const renderer = dashboard.slice(
+    dashboard.indexOf("const appendDeliveryReceipt ="),
+    dashboard.indexOf("const feedScroller ="),
+  );
+  const rule = renderer.match(/const receiptProblem = ([\s\S]*?);\n/)?.[1] ?? "";
+  assert.ok(rule.length > 0, "the problem rule was not found, so nothing below is measured");
+  for (const problem of ['indicator.state === "pending"', 'indicator.state === "stuck"', 'indicator.state === "unavailable"',
+    'indicator.outcome === "failed_terminal"', 'indicator.outcome === "expired"', 'indicator.outcome === "mixed"']) {
+    assert.ok(rule.includes(problem), `a ${problem} receipt must count as a problem: ${rule}`);
+  }
+  assert.match(renderer, /if \(!receiptProblem\) details\.dataset\.receiptQuiet = "";/);
+  /* Only the quiet receipt and the reply control move into the strip; the strip is the only thing hidden. */
+  assert.match(dashboard, /child\.className === "dashboard__message-receipt" && child\.dataset\.receiptQuiet !== undefined/);
+  const css = readFileSync(new URL("../../styles/home/workspace.css", import.meta.url), "utf8");
+  assert.match(css, /\.dashboard__message:not\(:hover, :focus-within\) > \.dashboard__message-body > \.dashboard__message-tools:not\(:has\(details\[open\]\)\)/);
+  assert.doesNotMatch(css, /\.dashboard__message-receipt(\[data-receipt-quiet\])?\s*\{[^}]*display:\s*none/, "a receipt is never removed from view by display:none");
+});

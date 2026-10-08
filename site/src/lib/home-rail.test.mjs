@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  RAIL_OWNERSHIP_NOTE, RAIL_WORKSPACE_CAP, narrowRailPeopleToViewer, needsYouBadge, orderCapsules, orderRailPeople,
-  railAgentName, railMoreLabel, railPersonName, railWorkspaceRows,
+  RAIL_DRAFT_PLACEHOLDER, RAIL_OWNERSHIP_NOTE, RAIL_WORKSPACE_CAP, narrowRailPeopleToViewer, needsYouBadge, orderCapsules, orderRailPeople,
+  railAgentName, railDraftName, railMoreLabel, railPersonName, railWorkspaceRows,
 } from "./home-rail.ts";
 
 const state = (kind, word, detail) => ({ kind, word, detail, attention: kind === "disconnected", fix: { action: null, allowed: false, askWho: null, sentence: "" } });
@@ -114,6 +114,13 @@ test("rail copy uses plain words only", () => {
   const copy = [
     RAIL_OWNERSHIP_NOTE, railMoreLabel(3, false), railMoreLabel(3, true), needsYouBadge(2).label,
     railAgentName(agent("n2", "Muse", nikki)), railPersonName(tom), narrowRailPeopleToViewer(people).title,
+    RAIL_DRAFT_PLACEHOLDER,
   ].join(" ");
   assert.doesNotMatch(copy, /online|offline|seat|grant|token|turn|wake|principal/iu);
+});
+
+test("the New workspace draft row shows the typed name, or the door's label while the field is empty", () => {
+  assert.deepEqual(railDraftName("  Home "), { text: "Home", empty: false });
+  assert.deepEqual(railDraftName("   "), { text: "New workspace", empty: true });
+  assert.deepEqual(railDraftName(""), { text: RAIL_DRAFT_PLACEHOLDER, empty: true });
 });

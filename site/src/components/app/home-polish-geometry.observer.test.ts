@@ -11,6 +11,7 @@ import { findChrome, launchChrome } from "../../../tests/chrome.js";
 type Geometry = {
   error?: string;
   width: number;
+  hasFocus: boolean;
   shellBeforePane: boolean;
   catchupColumns: number;
   sideHidden: boolean;
@@ -20,7 +21,7 @@ type Geometry = {
   adminPosition: string;
   adminRects: number;
   rows: { height: number; oneLine: boolean; nameTruncated: boolean; statusWhole: boolean; title: string; accessible: string }[];
-  themes: { theme: string; disconnectedBg: string; disconnectedInk: string; idleBg: string }[];
+  themes: { theme: string; disconnectedBg: string; disconnectedInk: string; idleBg: string; idleInk: string }[];
 };
 
 const siteRoot = fileURLToPath(new URL("../../../", import.meta.url));
@@ -59,8 +60,12 @@ test("home polish keeps the header above the view, one rail line, and no heading
       <button type="button" id="action">Reply</button>
       <button type="button" class="admin-indicator" id="admin">Admin clients and history</button>
       <script>${script}</script><script>
-      (() => {
-        const metrics = { width: innerWidth };
+      /* Measure on load. Headless Chrome gives the page focus asynchronously; a script that runs while
+         the document is parsed can measure before that, when no element matches :focus or :focus-visible,
+         so the ring checks below would measure nothing (2026-10-07: CI read "none" for the button ring).
+         --dump-dom waits for load, and the page has focus by then; hasFocus is asserted below. */
+      addEventListener("load", () => {
+        const metrics = { width: innerWidth, hasFocus: document.hasFocus() };
         try {
           const state = (kind, word) => ({ kind, word, detail: "Measured just now", attention: kind !== "idle", fix: { action: null, allowed: false, askWho: null, sentence: "" } });
           const person = { id: "zoe", name: "Zoe", firstName: "Zoe", initials: "Z", you: true, role: "owner" };
@@ -117,14 +122,14 @@ test("home polish keeps the header above the view, one rail line, and no heading
             const status = document.querySelector('[data-agent-state="disconnected"] .hm-status');
             const idle = document.querySelector('[data-agent-state="idle"] .hm-status');
             const style = getComputedStyle(status);
-            return { disconnectedBg: style.backgroundColor, disconnectedInk: style.color, idleBg: getComputedStyle(idle).backgroundColor };
+            return { disconnectedBg: style.backgroundColor, disconnectedInk: style.color, idleBg: getComputedStyle(idle).backgroundColor, idleInk: getComputedStyle(idle).color };
           };
           metrics.themes = [{ theme: document.documentElement.dataset.theme || "light", ...chip() }];
           document.documentElement.dataset.theme = "dark";
           metrics.themes.push({ theme: "dark", ...chip() });
         } catch (error) { metrics.error = String(error); }
         document.documentElement.dataset.metrics = btoa(unescape(encodeURIComponent(JSON.stringify(metrics))));
-      })();
+      });
       </script></body></html>`, "utf8");
     const chrome = await findChrome();
     for (const width of [1440, 390]) {
@@ -135,6 +140,7 @@ test("home polish keeps the header above the view, one rail line, and no heading
       const geometry = JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as Geometry;
       assert.equal(geometry.error, undefined);
       assert.equal(geometry.width, width);
+      assert.equal(geometry.hasFocus, true, "the ring checks need a focused page");
       assert.equal(geometry.shellBeforePane, true);
       assert.equal(geometry.sideHidden, true);
       assert.equal(geometry.catchupColumns, width === 1440 ? 2 : 1);
@@ -163,10 +169,15 @@ test("home polish keeps the header above the view, one rail line, and no heading
       assert.equal(geometry.rows[0]?.nameTruncated, true);
       assert.equal(geometry.rows[1]?.nameTruncated, false);
       const [light, dark] = geometry.themes;
-      assert.equal(light?.disconnectedBg === "rgba(0, 0, 0, 0)", false);
-      assert.equal(dark?.disconnectedBg === "rgba(0, 0, 0, 0)", false);
-      assert.notEqual(light?.disconnectedBg, dark?.disconnectedBg);
-      assert.notEqual(light?.disconnectedInk, light?.disconnectedBg);
+      /* Canvas design (home-visual 2026-10-07): the rail is ink in both modes and its status words carry
+         no chip. Disconnected is the amber word and diamond (--home-offline, #f0b25a in both modes,
+         8.67:1 / 10.20:1 on the rail), so it never reads as idle. */
+      assert.equal(light?.disconnectedBg, "rgba(0, 0, 0, 0)");
+      assert.equal(dark?.disconnectedBg, "rgba(0, 0, 0, 0)");
+      assert.equal(light?.disconnectedInk, "rgb(240, 178, 90)");
+      assert.equal(dark?.disconnectedInk, "rgb(240, 178, 90)");
+      assert.notEqual(light?.disconnectedInk, light?.idleInk);
+      assert.notEqual(dark?.disconnectedInk, dark?.idleInk);
       assert.equal(light?.idleBg, "rgba(0, 0, 0, 0)");
     }
   } finally {

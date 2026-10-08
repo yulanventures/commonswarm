@@ -27,6 +27,11 @@ export const AGENT_COPY = {
   resume: "Resume",
   newKey: "Get a new key",
   emptyAssign: "Assign it a to-do from any to-do page.",
+  policyTitle: "Who can give it work",
+  policyOwner: "Only you",
+  policyAnyone: "Anyone in the workspace",
+  policyOffer: "A to-do from anyone else comes to you to decide.",
+  policyLock: "Only you can change who gives it work.",
 } as const;
 
 const NO_STEER: QueueRowVM["may"] = {
@@ -53,6 +58,43 @@ export function disconnectedBanner(detail: string): string {
 
 export function emptyLine(agentName: string): string {
   return `Nothing in ${possessive(agentName)} line. ${AGENT_COPY.emptyAssign}`;
+}
+
+/** Title of the card that holds the agent's line (vocabulary: "line", never "queue"). */
+export function lineTitle(agentName: string): string {
+  return `${possessive(agentName)} line`;
+}
+
+/** What a disconnected agent has waiting, from the measured line only. Null when nothing is measured as waiting. */
+export function waitingLine(count: number): string | null {
+  if (!Number.isInteger(count) || count < 1) return null;
+  return count === 1 ? "1 to-do is waiting in its line." : `${count} to-dos are waiting in its line.`;
+}
+
+/** The Facts card introduction: what the card answers, with no claim the server does not measure. */
+export function factsIntro(agentName: string, workspaceName: string): string {
+  return `How ${agentName} connects to ${workspaceName} and what it may use here.`;
+}
+
+/** The Facts card summary line, from the measured last call (or "Not reported"). */
+export function lastActiveLine(value: string): string {
+  return `${AGENT_COPY.lastActive}: ${value}.`;
+}
+
+/** The secondary control that switches the work policy to the other value. */
+export function policyChangeLabel(next: "owner" | "anyone"): string {
+  const target = next === "owner" ? AGENT_COPY.policyOwner : AGENT_COPY.policyAnyone;
+  return `Change to ${target.charAt(0).toLocaleLowerCase()}${target.slice(1)}`;
+}
+
+/** The value word of a plain fact row (Lists & docs, What it posts here); the same words the switch row used. */
+export function switchWord(state: "on" | "off" | "always" | "never"): string {
+  return { on: "On", off: "Off", always: AGENT_COPY.postsHereAlways, never: "Never" }[state];
+}
+
+/** The danger entry point; removal ends access to this workspace only (people dialog confirmation). */
+export function removeLabel(agentName: string, workspaceName: string): string {
+  return `Remove ${agentName} from ${workspaceName}`;
 }
 
 export function footerNote(agentName: string, workspaceName: string): string {

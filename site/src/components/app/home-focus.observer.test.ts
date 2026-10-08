@@ -150,8 +150,12 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
     assert.equal(await evaluate("!!window.fixture"), true, "production refresh functions initialized");
     const sequential = [...document.querySelectorAll('a[href],button,input,select,textarea,[tabindex]')]
       .filter(node => node.tabIndex >= 0 && !node.disabled && node.getClientRects().length > 0);
-    assert.equal(sequential[2]?.dataset.railWorkspace, "X", "the third native keyboard target is the Trip link");
-    assert.equal(await evaluate("document.activeElement.dataset.railWorkspace"), "X", "three Tab keys landed on the Trip link");
+    /* Canvas rail (home-visual 40979db1, Main.dc.html): the brand row is a link above Catch up, so the
+       document order, and the Tab order, is brand, Catch up, Home, Trip. Pin all four, not only the end. */
+    assert.deepEqual(sequential.slice(0, 4).map(node => node.classList.contains("hm-rail__brand") ? "brand"
+      : node.hasAttribute("data-home-catch-up") ? "catch-up" : node.dataset.railWorkspace ?? node.tagName),
+      ["brand", "catch-up", "W", "X"], "the native keyboard order is brand, Catch up, Home, then the Trip link");
+    assert.equal(await evaluate("document.activeElement.dataset.railWorkspace"), "X", "four Tab keys landed on the Trip link");
     await evaluate("window.original = document.activeElement");
     const statusTitle = () => evaluate("document.querySelector('[data-rail-agent] .hm-status').title");
     assert.equal(await statusTitle(), "Active 13 minutes ago", "initial paint exposes an aging status detail");
@@ -240,7 +244,8 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
       await new Promise((resolveWait) => setTimeout(resolveWait, 50));
     }
     assert.equal(ready, true, "the fixture did not finish painting");
-    for (let step = 0; step < 3; step += 1) {
+    // Brand, Catch up, Home, Trip: the fourth Tab reaches the Trip link (the brand row joined in 40979db1).
+    for (let step = 0; step < 4; step += 1) {
       await connected.send("Input.dispatchKeyEvent", {
         type: "keyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9,
       }, sessionId);
@@ -251,7 +256,7 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
     assert.equal(
       await evaluate(connected.send, sessionId, "document.activeElement?.dataset?.railWorkspace ?? ''"),
       "X",
-      "three Tab keys land on the Trip workspace",
+      "four Tab keys land on the Trip workspace",
     );
     const checks = await evaluate(connected.send, sessionId, "window.runFocusChecks()") as
       { actual: unknown; expected: unknown; name: string; different?: boolean }[];

@@ -3,7 +3,9 @@ export type HomeWorkspaceView = typeof HOME_WORKSPACE_VIEWS[number];
 export type HomeRoute = { view: "catchup" | "new" }
   | { view: HomeWorkspaceView; workspaceId: string | null; channelId?: string; messageId?: string }
   | { view: "todo"; workspaceId: string | null; todoId: string }
-  | { view: "agent"; workspaceId: string | null; agentId: string };
+  | { view: "agent"; workspaceId: string | null; agentId: string }
+  /** People & agents as a page (the canvas Members artboard), not a dialog. */
+  | { view: "people"; workspaceId: string | null };
 
 /** Parsing is navigation only. The integration layer must check workspace membership. */
 export function parseRoute(search: string): HomeRoute {
@@ -13,6 +15,7 @@ export function parseRoute(search: string): HomeRoute {
   if (todoId) return { view: "todo", workspaceId, todoId };
   if (agentId) return { view: "agent", workspaceId, agentId };
   if (view === "catchup" || view === "new") return { view };
+  if (view === "people") return { view, workspaceId };
   const selected = HOME_WORKSPACE_VIEWS.find(value => value === view) ?? "chat";
   return { view: selected, workspaceId, ...(selected === "chat" ? {
     ...(params.get("c") ? { channelId: params.get("c")! } : {}),
@@ -39,6 +42,6 @@ export function routeHref(route: HomeRoute): string {
 
 export function parentRoute(route: HomeRoute): HomeRoute {
   if (route.view === "todo") return { view: "todos", workspaceId: route.workspaceId };
-  if (route.view === "agent") return { view: "chat", workspaceId: route.workspaceId };
+  if (route.view === "agent" || route.view === "people") return { view: "chat", workspaceId: route.workspaceId };
   return { view: "catchup" };
 }

@@ -891,10 +891,10 @@ test('admin release plan: W6 close requires cleanup only after Mac start, reject
   assert.equal(tar.status,0,tar.stderr);
   const producerSha=digest(readFileSync(producerFile)), archiveSha=digest(readFileSync(archive));
   const controls={hosted_mcp_consent_refresh:true,dcr_registration_consent:true,cimd_consent:true,human_recovery:true,worker_command_read:true};
-  const consentFor=(phase:string)=>JSON.stringify({kind:'c1-consent',release_sha:sha,consent_phase:phase,measured_at:new Date(Date.now()-60_000).toISOString(),
+  const consentFor=(phase:string)=>JSON.stringify({kind:'c1-consent',release_sha:sha,live_edge_sha:phase==='pre-W1'?base().baseline_edge_sha:sha,consent_phase:phase,measured_at:new Date(Date.now()-60_000).toISOString(),
     producer_sha256:producerSha,controls:{cimd_consent:true,dcr_registration_consent:true},dcr_client_ids:['dcr-close-own'],
     cleanup:phase==='pre-W1'?null:{grants_revoked:true,dcr_clients_expiring:[{client_id:'dcr-close-earlier',expires_after:new Date(Date.now()+30*86400_000).toISOString()}]}});
-  const liveFor=(window:string,phase:string,consentText:string)=>JSON.stringify({release_sha:sha,window_id:'Abc123',window,phase,controls,
+  const liveFor=(window:string,phase:string,consentText:string)=>JSON.stringify({release_sha:sha,window_id:'Abc123',window,phase,live_edge_sha:['W1','W2','W2b','W3'].includes(window)||(window==='W4'&&phase!=='after')?base().baseline_edge_sha:sha,controls,
     consent_receipt_sha256:digest(consentText),producer_sha256:producerSha,dcr_client_ids:['dcr-close-window']});
   const post=consentFor('post-W5');
   writeFileSync(join(proof,'consent-post-W5.json'),post);
@@ -1051,9 +1051,9 @@ test('admin release plan: W2b close needs its backup gate, preconditions and iss
   assert.equal(tar.status,0,tar.stderr);
   const producerSha=digest(readFileSync(producerFile)), archiveSha=digest(readFileSync(archive));
   const controls={hosted_mcp_consent_refresh:true,dcr_registration_consent:true,cimd_consent:true,human_recovery:true,worker_command_read:true};
-  const pre=JSON.stringify({kind:'c1-consent',release_sha:sha,consent_phase:'pre-W1',measured_at:new Date(Date.now()-60_000).toISOString(),
+  const pre=JSON.stringify({kind:'c1-consent',release_sha:sha,live_edge_sha:base().baseline_edge_sha,consent_phase:'pre-W1',measured_at:new Date(Date.now()-60_000).toISOString(),
     producer_sha256:producerSha,controls:{cimd_consent:true,dcr_registration_consent:true},dcr_client_ids:['dcr-close-own'],cleanup:null});
-  const liveFor=(phase:string,window='W2b')=>JSON.stringify({release_sha:sha,window_id:'Abc123',window,phase,controls,
+  const liveFor=(phase:string,window='W2b')=>JSON.stringify({release_sha:sha,window_id:'Abc123',window,phase,live_edge_sha:['W1','W2','W2b','W3'].includes(window)||(window==='W4'&&phase!=='after')?base().baseline_edge_sha:sha,controls,
     consent_receipt_sha256:digest(pre),producer_sha256:producerSha,dcr_client_ids:['dcr-close-window']});
   const inputs=join(root,'inputs.json'), w4Inputs=join(root,'inputs-w4.json');
   writeFileSync(w4Inputs,JSON.stringify({...base(),window:'W4',rollback_decision:'restore-service',archive_sha256:archiveSha}));
@@ -1137,9 +1137,9 @@ test('same-version retry / w3-recovered-close: a recovered W3 closes only with t
   assert.equal(tar.status,0,tar.stderr);
   const producerSha=digest(readFileSync(producerFile)), archiveSha=digest(readFileSync(archive));
   const controls={hosted_mcp_consent_refresh:true,dcr_registration_consent:true,cimd_consent:true,human_recovery:true,worker_command_read:true};
-  const pre=JSON.stringify({kind:'c1-consent',release_sha:sha,consent_phase:'pre-W1',measured_at:new Date(Date.now()-60_000).toISOString(),
+  const pre=JSON.stringify({kind:'c1-consent',release_sha:sha,live_edge_sha:base().baseline_edge_sha,consent_phase:'pre-W1',measured_at:new Date(Date.now()-60_000).toISOString(),
     producer_sha256:producerSha,controls:{cimd_consent:true,dcr_registration_consent:true},dcr_client_ids:['dcr-close-own'],cleanup:null});
-  const recovery=JSON.stringify({release_sha:sha,window_id:'Abc123',window:'W3',phase:'recovery',controls,consent_receipt_sha256:digest(pre),producer_sha256:producerSha,dcr_client_ids:['dcr-close-window']});
+  const recovery=JSON.stringify({release_sha:sha,window_id:'Abc123',window:'W3',phase:'recovery',live_edge_sha:base().baseline_edge_sha,controls,consent_receipt_sha256:digest(pre),producer_sha256:producerSha,dcr_client_ids:['dcr-close-window']});
   const oldSha='b'.repeat(40), baselineImage='sha256:'+'e'.repeat(64), inputs=join(root,'inputs.json');
   writeFileSync(inputs,JSON.stringify({...base(),window:'W3',rollback_decision:'restore-service',archive_sha256:archiveSha,baseline_oauth_sha:oldSha,baseline_oauth_image:baselineImage}));
   const shim=join(root,'shims'); mkdirSync(shim); writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
@@ -1174,9 +1174,9 @@ test('same-version retry / w4-recovered-close: a recovered W4 closes only with t
   assert.equal(tar.status,0,tar.stderr);
   const producerSha=digest(readFileSync(producerFile)), archiveSha=digest(readFileSync(archive));
   const controls={hosted_mcp_consent_refresh:true,dcr_registration_consent:true,cimd_consent:true,human_recovery:true,worker_command_read:true};
-  const pre=JSON.stringify({kind:'c1-consent',release_sha:sha,consent_phase:'pre-W1',measured_at:new Date(Date.now()-60_000).toISOString(),
+  const pre=JSON.stringify({kind:'c1-consent',release_sha:sha,live_edge_sha:'b'.repeat(40),consent_phase:'pre-W1',measured_at:new Date(Date.now()-60_000).toISOString(),
     producer_sha256:producerSha,controls:{cimd_consent:true,dcr_registration_consent:true},dcr_client_ids:['dcr-close-own'],cleanup:null});
-  const recovery=JSON.stringify({release_sha:sha,window_id:'Abc123',window:'W4',phase:'recovery',controls,consent_receipt_sha256:digest(pre),producer_sha256:producerSha,dcr_client_ids:['dcr-close-window']});
+  const recovery=JSON.stringify({release_sha:sha,window_id:'Abc123',window:'W4',phase:'recovery',live_edge_sha:'b'.repeat(40),controls,consent_receipt_sha256:digest(pre),producer_sha256:producerSha,dcr_client_ids:['dcr-close-window']});
   const oldSha='b'.repeat(40), bytes={mcp:'mcp baseline\n',api:'api baseline\n',file:'import sites/*.caddy\n'}, inputs=join(root,'inputs.json');
   writeFileSync(inputs,JSON.stringify({...base(),window:'W4',rollback_decision:'restore-service',archive_sha256:archiveSha,baseline_edge_sha:oldSha,
     baseline_mcp_caddy_sha256:digest(bytes.mcp),baseline_api_caddy_sha256:digest(bytes.api),baseline_caddyfile_sha256:digest(bytes.file)}));
@@ -1219,7 +1219,7 @@ const W2B_PRECONDITIONS_LINE = 'PASS W2b preconditions: backup gate, bound W2 pr
 const ISSUER_CREDENTIAL_LINE = 'PASS issuer login; credential 0440 root:986; password stays on box\n';
 function proofCheckFixture(kind: 'W2' | 'W2b', bound?: { sha: string; id: string }) {
   const root = realpathSync(mkdtempSync(join(scratch, `proof-check-${kind}-`)));
-  const target = bound ?? (kind === 'W2' ? { sha: 'e'.repeat(40), id: 'RGLqZX' } : { sha, id: 'Xyz789' });
+  const target = bound ?? (kind === 'W2' ? { sha: 'e'.repeat(40), id: 'RGLqZX' } : { sha: '9'.repeat(40), id: 'Xyz789' });
   const producerFile = join(root, 'producer.mjs'); writeFileSync(producerFile, 'export const proofCheck = "live-ordinary-controls";\n');
   const archive = join(root, `archive-${target.sha}-${target.id}.tar`);
   const tar = spawnSync('python3', ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs")', archive, producerFile], { encoding: 'utf8' });
@@ -1260,7 +1260,7 @@ test('admin release plan: the shared proof validator accepts exact W2 and W2b pr
   r = w2.check(); assert.equal(r.status, 0, r.stderr);
   const w2b = proofCheckFixture('W2b'); r = w2b.check();
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(JSON.parse(r.stdout), { kind: 'W2b', release_sha: sha, window_id: 'Xyz789', result: 'success', closed_at: '2026-10-04T09:00:00Z' });
+  assert.deepEqual(JSON.parse(r.stdout), { kind: 'W2b', release_sha: w2b.target.sha, window_id: 'Xyz789', result: 'success', closed_at: '2026-10-04T09:00:00Z' });
   // Validator constants are the writers' exact bytes (no retyped drift).
   assert.ok(block('ai-w2b-preflight').includes(`printf '${W2B_PRECONDITIONS_LINE.trimEnd()}\\n' >"$PROOF_DIR/w2b-preconditions.txt"`));
   assert.ok(block('ai-w2-issuer-credential').includes(`printf '${ISSUER_CREDENTIAL_LINE.trimEnd()}\\n' >"$PROOF_DIR/issuer-credential.txt"`));
@@ -2563,9 +2563,9 @@ test('admin release plan: W2 pre-fence close proves an empty ledger and needs a 
     const tar = spawnSync('python3', ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs")', archive, producerFile], { encoding: 'utf8' });
     assert.equal(tar.status, 0, tar.stderr);
     const producerSha = digest(readFileSync(producerFile));
-    const consent = JSON.stringify({ kind: 'c1-consent', release_sha: sha, consent_phase: 'pre-W1', measured_at: new Date(Date.now() - 60_000).toISOString(),
+    const consent = JSON.stringify({ kind: 'c1-consent', release_sha: sha, live_edge_sha: base().baseline_edge_sha, consent_phase: 'pre-W1', measured_at: new Date(Date.now() - 60_000).toISOString(),
       producer_sha256: producerSha, controls: { cimd_consent: true, dcr_registration_consent: true }, dcr_client_ids: ['dcr-close-own'], cleanup: null });
-    const live = JSON.stringify({ release_sha: sha, window_id: 'Abc123', window: 'W2', phase: 'recovery',
+    const live = JSON.stringify({ release_sha: sha, window_id: 'Abc123', window: 'W2', phase: 'recovery', live_edge_sha: base().baseline_edge_sha,
       controls: { hosted_mcp_consent_refresh: true, dcr_registration_consent: true, cimd_consent: true, human_recovery: true, worker_command_read: true },
       consent_receipt_sha256: digest(consent), producer_sha256: producerSha, dcr_client_ids: ['dcr-close-window'] });
     writeFileSync(join(proof, 'consent-pre-W1.json'), consent); writeFileSync(join(proof, 'ordinary-recovery.json'), live);
@@ -2900,8 +2900,8 @@ test('W5 recovered close requires companion closure, bound rollback/reconciliati
   mkdirSync(join(original,'app'),{recursive:true}); writeFileSync(join(original,'app/index.html'),'baseline'); symlinkSync(original,join(site,'current'));
   const producer=join(root,'producer.mjs'), archive=join(root,'release.tar'); writeFileSync(producer,'export const fixture = true;\n');
   const tar=spawnSync('python3',['-c','import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs")',archive,producer],{encoding:'utf8'}); assert.equal(tar.status,0,tar.stderr);
-  const consent=JSON.stringify({kind:'c1-consent',release_sha:sha,consent_phase:'post-W5',measured_at:new Date(Date.now()-60_000).toISOString(),producer_sha256:digest(readFileSync(producer)),controls:{cimd_consent:true,dcr_registration_consent:true},dcr_client_ids:['w5-recovery-own'],cleanup:{grants_revoked:true,dcr_clients_expiring:[{client_id:'earlier-client',expires_after:new Date(Date.now()+86400_000).toISOString()}]}});
-  const live=JSON.stringify({release_sha:sha,window_id:'Abc123',window:'W5',phase:'recovery',controls:{hosted_mcp_consent_refresh:true,dcr_registration_consent:true,cimd_consent:true,human_recovery:true,worker_command_read:true},consent_receipt_sha256:digest(consent),producer_sha256:digest(readFileSync(producer)),dcr_client_ids:['window-client']});
+  const consent=JSON.stringify({kind:'c1-consent',release_sha:sha,live_edge_sha:sha,consent_phase:'post-W5',measured_at:new Date(Date.now()-60_000).toISOString(),producer_sha256:digest(readFileSync(producer)),controls:{cimd_consent:true,dcr_registration_consent:true},dcr_client_ids:['w5-recovery-own'],cleanup:{grants_revoked:true,dcr_clients_expiring:[{client_id:'earlier-client',expires_after:new Date(Date.now()+86400_000).toISOString()}]}});
+  const live=JSON.stringify({release_sha:sha,window_id:'Abc123',window:'W5',phase:'recovery',live_edge_sha:sha,controls:{hosted_mcp_consent_refresh:true,dcr_registration_consent:true,cimd_consent:true,human_recovery:true,worker_command_read:true},consent_receipt_sha256:digest(consent),producer_sha256:digest(readFileSync(producer)),dcr_client_ids:['window-client']});
   const fixture=(outcome:string)=>{
     const proof=mkdtempSync(join(root,'proof-')), evidence=join(proof,'site-recovery'); mkdirSync(evidence);
     const input=join(proof,'inputs.json'); writeFileSync(input,JSON.stringify({...base(),window:'W5',baseline_site_target:original,archive_sha256:digest(readFileSync(archive))}));
@@ -3778,11 +3778,11 @@ test('C1-18: recovered-close extracted rollback then close; no marker leaves iss
   const producerSha = digest(readFileSync(producerFile)), archiveSha = digest(readFileSync(archive));
   const controls = { hosted_mcp_consent_refresh: true, dcr_registration_consent: true, cimd_consent: true, human_recovery: true, worker_command_read: true };
   const pre = JSON.stringify({
-    kind: 'c1-consent', release_sha: sha, consent_phase: 'pre-W1', measured_at: new Date(Date.now() - 60_000).toISOString(),
+    kind: 'c1-consent', release_sha: sha, live_edge_sha: base().baseline_edge_sha, consent_phase: 'pre-W1', measured_at: new Date(Date.now() - 60_000).toISOString(),
     producer_sha256: producerSha, controls: { cimd_consent: true, dcr_registration_consent: true }, dcr_client_ids: ['dcr-close-own'], cleanup: null,
   });
   const liveFor = (window: string) => JSON.stringify({
-    release_sha: sha, window_id: 'Abc123', window, phase: 'recovery', controls,
+    release_sha: sha, window_id: 'Abc123', window, phase: 'recovery', live_edge_sha: base().baseline_edge_sha, controls,
     consent_receipt_sha256: digest(pre), producer_sha256: producerSha, dcr_client_ids: ['dcr-close-window'],
   });
   const shim = join(root, 'shims'); mkdirSync(shim); writeFileSync(join(shim, 'systemctl'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
@@ -3970,7 +3970,7 @@ test('C1-20: lost-shell recovery env reaches session and close; mismatch, wrong 
   const producerSha = digest(readFileSync(producerFile));
   const emptyLedger = digest('');
   const inputs = {
-    window, release_sha: sha, window_id: wid,
+    window, release_sha: sha, window_id: wid, baseline_edge_sha: base().baseline_edge_sha,
     archive_sha256: digest(readFileSync(archive)),
     plan_sha256: digest(plan),
     baseline_ledger_sha256: emptyLedger,
@@ -3984,13 +3984,13 @@ test('C1-20: lost-shell recovery env reaches session and close; mismatch, wrong 
   writeFileSync(join(proof, 'open.txt'), 'opened\n');
   writeFileSync(join(proof, 'ledger-at-open.txt'), '');
   const consent = JSON.stringify({
-    kind: 'c1-consent', release_sha: sha, consent_phase: 'pre-W1', measured_at: new Date(Date.now() - 60_000).toISOString(),
+    kind: 'c1-consent', release_sha: sha, live_edge_sha: base().baseline_edge_sha, consent_phase: 'pre-W1', measured_at: new Date(Date.now() - 60_000).toISOString(),
     producer_sha256: producerSha, controls: { cimd_consent: true, dcr_registration_consent: true },
     dcr_client_ids: ['fixture-client'], cleanup: null,
   });
   writeFileSync(join(proof, 'consent-pre-W1.json'), consent);
   writeFileSync(join(proof, 'ordinary-recovery.json'), JSON.stringify({
-    release_sha: sha, window_id: wid, window, phase: 'recovery',
+    release_sha: sha, window_id: wid, window, phase: 'recovery', live_edge_sha: base().baseline_edge_sha,
     controls: { hosted_mcp_consent_refresh: true, dcr_registration_consent: true, cimd_consent: true, human_recovery: true, worker_command_read: true },
     consent_receipt_sha256: digest(consent), producer_sha256: producerSha, dcr_client_ids: ['fixture-client'],
   }));
@@ -4943,4 +4943,104 @@ test('admin release plan: edge-login producer writes 0600 service files from SWA
     assert.notEqual(wrongUser.status, 0);
     assert.doesNotMatch(wrongUser.stdout + wrongUser.stderr, /other|postgres:\/\//);
   } finally { removeStage(stage); }
+});
+
+test('C1-38: live controls bind the measured edge SHA for every window phase and both consent phases', () => {
+  const root = realpathSync(mkdtempSync(join(scratch, 'live-edge-binding-')));
+  const producerFile = join(root, 'producer.mjs'), archive = join(root, 'release.tar');
+  writeFileSync(producerFile, 'export const fixture = true;\n');
+  const packed = spawnSync('python3', ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs")', archive, producerFile], { encoding: 'utf8' });
+  assert.equal(packed.status, 0, packed.stderr);
+  const producerSha = digest(readFileSync(producerFile));
+  const inputs = join(root, 'inputs.json'), liveFile = join(root, 'live.json'), consentFile = join(root, 'consent.json');
+  const env = { INPUTS_FILE: inputs, LIVE_CONTROLS_FILE: liveFile, CONSENT_RECEIPT_FILE: consentFile,
+    BOX_ARCHIVE_PATH: archive, PROOF_DIR: root, LIVE_CONTROLS_RETAIN: 'no' };
+  const w4Proof = join(root, 'w4-proof'); mkdirSync(w4Proof);
+  const controls = { hosted_mcp_consent_refresh: true, dcr_registration_consent: true, cimd_consent: true, human_recovery: true, worker_command_read: true };
+  for (const window of ['W1', 'W2', 'W2b', 'W3', 'W4', 'W5', 'W6', 'W7']) for (const phase of ['before', 'after', 'recovery']) {
+    const initial = base().baseline_edge_sha;
+    const baseline = ['W5','W6','W7'].includes(window) ? sha : initial;
+    const edge = ['W1', 'W2', 'W2b', 'W3'].includes(window) || (window === 'W4' && phase !== 'after') ? baseline : sha;
+    const consentPhase = ['W1', 'W2', 'W2b', 'W3', 'W4'].includes(window) || (window === 'W5' && phase === 'before') ? 'pre-W1' : 'post-W5';
+    const consentEdge = consentPhase === 'pre-W1' ? initial : sha;
+    const consent = { kind: 'c1-consent', release_sha: sha, live_edge_sha: consentEdge, consent_phase: consentPhase,
+      measured_at: new Date(Date.now() - 60_000).toISOString(), producer_sha256: producerSha,
+      controls: { cimd_consent: true, dcr_registration_consent: true }, dcr_client_ids: ['own-client'],
+      cleanup: consentPhase === 'pre-W1' ? null : { grants_revoked: true,
+        dcr_clients_expiring: [{ client_id: 'old-client', expires_after: new Date(Date.now() + 86400_000).toISOString() }] } };
+    const live = { release_sha: sha, live_edge_sha: edge, window_id: 'Abc123', window, phase, controls,
+      consent_receipt_sha256: '', producer_sha256: producerSha, dcr_client_ids: ['window-client'] };
+    writeFileSync(inputs, JSON.stringify({ ...base(), window, baseline_edge_sha: baseline, archive_sha256: digest(readFileSync(archive)) }));
+    const retainedConsent = JSON.stringify(consent);
+    writeFileSync(join(w4Proof, 'inputs.json'), JSON.stringify({ ...base(), window: 'W4', window_id: 'W4Fx01', archive_sha256: digest(readFileSync(archive)) }));
+    writeFileSync(join(w4Proof, 'consent-pre-W1.json'), retainedConsent);
+    writeFileSync(join(w4Proof, 'ordinary-before.json'), JSON.stringify({ ...live, window: 'W4', phase: 'before', window_id: 'W4Fx01', live_edge_sha: initial, consent_receipt_sha256: digest(retainedConsent) }));
+    writeFileSync(join(w4Proof, 'closed.txt'), '2026-10-04T09:00:00Z\n');
+    writeFileSync(join(w4Proof, 'close-result.json'), JSON.stringify({ release_sha: sha, window: 'W4', window_id: 'W4Fx01', result: 'success', closed_at: '2026-10-04T09:00:00Z' }));
+    const attempt = (r: Record<string, unknown>, c: Record<string, unknown>) => {
+      const bytes = JSON.stringify(c); writeFileSync(consentFile, bytes);
+      writeFileSync(liveFile, JSON.stringify({ ...r, consent_receipt_sha256: digest(bytes) }));
+      return run(block('ai-live-controls'), { ...env, W4_PROOF_DIR: w4Proof, LIVE_CONTROLS_EXPECT_PHASE: phase });
+    };
+    const positive = attempt(live, consent);
+    assert.equal(positive.status, 0, `${window}/${phase}: ${positive.stderr}`);
+    for (const bad of [edge === sha ? initial : sha, 'abc1234', null]) {
+      const negative = attempt({ ...live, live_edge_sha: bad }, consent);
+      assert.notEqual(negative.status, 0); assert.match(negative.stderr, /FAIL ai-live-controls: live live_edge_sha expected phase-live-edge-sha got mismatch; STOP/);
+    }
+    if (window === 'W5' && phase === 'before') {
+      assert.equal(attempt(live, consent).status, 0);
+      const unprovable = run(block('ai-live-controls'), { ...env, W4_PROOF_DIR: join(root, 'absent-proof'), LIVE_CONTROLS_EXPECT_PHASE: phase });
+      assert.notEqual(unprovable.status, 0); assert.match(unprovable.stderr, /W4_PROOF_DIR expected absolute-retained-W4-proof-directory/);
+      const wrong = { ...consent, live_edge_sha: 'c'.repeat(40) }, bytes = JSON.stringify(wrong);
+      writeFileSync(join(w4Proof, 'consent-pre-W1.json'), bytes);
+      const before = JSON.parse(readFileSync(join(w4Proof, 'ordinary-before.json'), 'utf8'));
+      writeFileSync(join(w4Proof, 'ordinary-before.json'), JSON.stringify({ ...before, consent_receipt_sha256: digest(bytes) }));
+      const refused = attempt(live, wrong);
+      assert.notEqual(refused.status, 0); assert.match(refused.stderr, /consent live_edge_sha expected consent-phase-live-edge-sha got mismatch/);
+      writeFileSync(join(w4Proof, 'consent-pre-W1.json'), retainedConsent);
+      writeFileSync(join(w4Proof, 'ordinary-before.json'), JSON.stringify(before));
+    }
+    const forgedConsent = attempt(live, { ...consent, live_edge_sha: consentEdge === sha ? initial : sha });
+    assert.notEqual(forgedConsent.status, 0); assert.match(forgedConsent.stderr, /FAIL ai-live-controls: (consent live_edge_sha expected consent-phase-live-edge-sha got mismatch|W4 opening binding expected verified-before-and-identical-pre-W1-consent got mismatch); STOP/);
+    for (const target of ['live', 'consent']) {
+      const missingLive: Record<string, unknown> = { ...live }, missingConsent: Record<string, unknown> = { ...consent };
+      delete (target === 'live' ? missingLive : missingConsent).live_edge_sha;
+      const missing = attempt(missingLive, missingConsent);
+      assert.notEqual(missing.status, 0); assert.ok(missing.stderr.includes(`${target} receipt keys expected exact-schema-set got other-set`), missing.stderr);
+    }
+  }
+});
+
+// The retained receipt schema is a real pre-C1-38 artifact; compatibility belongs
+// only to the proof-check caller, never to an ordinary/current receipt path.
+test('C1-38b: historical W2b receipts pass proof-check only; current release requires both live edge SHAs', () => {
+  const old = proofCheckFixture('W2b');
+  assert.equal(old.check().status, 0);
+  const validate = (f: ReturnType<typeof proofCheckFixture>, extra: Record<string, string> = {}) => run(block('ai-live-controls'), {
+    INPUTS_FILE: join(f.dir, 'inputs.json'), BOX_ARCHIVE_PATH: f.archive, PROOF_DIR: f.dir,
+    LIVE_CONTROLS_FILE: join(f.dir, 'ordinary-after.json'), CONSENT_RECEIPT_FILE: join(f.dir, 'consent-pre-W1.json'),
+    LIVE_CONTROLS_EXPECT_PHASE: 'after', LIVE_CONTROLS_RETAIN: 'no', ...extra,
+  });
+  const normal = validate(old);
+  assert.notEqual(normal.status, 0); assert.match(normal.stderr, /live receipt keys expected exact-schema-set/);
+  const current = proofCheckFixture('W2b', { sha, id: 'Now123' });
+  const missingBoth = current.check();
+  assert.notEqual(missingBoth.status, 0); assert.match(missingBoth.stderr, /live receipt keys expected exact-schema-set/);
+  const forgedMode = validate(current, { LIVE_CONTROLS_MODE: 'historical-w2-proof', LIVE_CONTROLS_CURRENT_RELEASE_SHA: sha });
+  assert.notEqual(forgedMode.status, 0); assert.match(forgedMode.stderr, /historical proof binding expected retained-W2-or-W2b-of-another-release/);
+  const consent = { ...JSON.parse(current.consent), live_edge_sha: base().baseline_edge_sha };
+  const consentText = JSON.stringify(consent);
+  const live = { ...JSON.parse(current.live('after')), live_edge_sha: base().baseline_edge_sha, consent_receipt_sha256: digest(consentText) };
+  current.put('consent-pre-W1.json', consentText); current.put('ordinary-after.json', JSON.stringify(live));
+  current.put('inputs.json', JSON.stringify({ ...JSON.parse(readFileSync(join(current.dir, 'inputs.json'), 'utf8')), baseline_edge_sha: base().baseline_edge_sha }));
+  assert.equal(current.check().status, 0);
+  for (const kind of ['live', 'consent']) {
+    const c: Record<string, unknown> = { ...consent }, r: Record<string, unknown> = { ...live };
+    delete (kind === 'live' ? r : c).live_edge_sha;
+    const bytes = JSON.stringify(c); r.consent_receipt_sha256 = digest(bytes);
+    current.put('consent-pre-W1.json', bytes); current.put('ordinary-after.json', JSON.stringify(r));
+    const refused = current.check(); assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, new RegExp(kind + ' receipt keys expected exact-schema-set'));
+  }
 });

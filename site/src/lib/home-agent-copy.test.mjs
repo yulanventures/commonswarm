@@ -6,15 +6,21 @@ import {
   disconnectedBanner,
   doneRecentlyLimit,
   emptyLine,
+  factsIntro,
   fixActionLabel,
   fixControlAllowed,
   footerNote,
+  lastActiveLine,
+  lineTitle,
   notYetNoteGate,
   notYetTimeGate,
   notYetTodoGate,
   ownershipLine,
+  policyChangeLabel,
+  removeLabel,
   setTimeCopy,
   steeringMay,
+  waitingLine,
 } from "./home-agent-copy.ts";
 
 const steer = { up: true, down: true, startNow: true, notYet: true, release: true };
@@ -40,6 +46,16 @@ test("empty line and footer name the agent and the workspace", () => {
   assert.equal(emptyLine("Claude"), "Nothing in Claude’s line. Assign it a to-do from any to-do page.");
   assert.equal(footerNote("Claude", "Home"), "This page shows Claude in Home.");
   assert.equal(AGENT_COPY.notFound, "Nothing with this link in Home.");
+});
+
+test("line title and the waiting count use the line vocabulary", () => {
+  assert.equal(lineTitle("Claude"), "Claude’s line");
+  assert.equal(waitingLine(1), "1 to-do is waiting in its line.");
+  assert.equal(waitingLine(6), "6 to-dos are waiting in its line.");
+  assert.equal(waitingLine(0), null);
+  assert.equal(waitingLine(-1), null);
+  assert.equal(waitingLine(1.5), null);
+  assert.doesNotMatch(lineTitle("Claude"), /queue/i);
 });
 
 test("R4 set-time copy joins the line and never starts a model", () => {
@@ -111,9 +127,29 @@ test("agent view copy stays in plain words", () => {
     disconnectedBanner("Key turned off"),
     emptyLine("Claude"),
     footerNote("Claude", "Home"),
+    lineTitle("Claude"),
+    waitingLine(1),
+    waitingLine(3),
     setTimeCopy("Claude", "9:00 pm"),
     notYetTodoGate("Get quotes", "Claude"),
+    factsIntro("Claude", "Home"),
+    lastActiveLine("3 hours ago"),
+    policyChangeLabel("owner"),
+    policyChangeLabel("anyone"),
+    removeLabel("Claude", "Home"),
     ...Object.values(AGENT_COPY),
   ];
   for (const sample of samples) assert.doesNotMatch(sample, BANNED);
+});
+
+test("Facts, work policy and removal copy name the workspace and the measured values only", () => {
+  assert.equal(factsIntro("Claude", "Home"), "How Claude connects to Home and what it may use here.");
+  assert.equal(lastActiveLine("3 hours ago"), "Last active: 3 hours ago.");
+  assert.equal(lastActiveLine("Not reported"), "Last active: Not reported.");
+  assert.equal(policyChangeLabel("owner"), "Change to only you");
+  assert.equal(policyChangeLabel("anyone"), "Change to anyone in the workspace");
+  assert.equal(removeLabel("Claude", "Home"), "Remove Claude from Home");
+  // Removal ends access to one workspace (the people dialog confirmation), never the whole product.
+  assert.doesNotMatch(removeLabel("Claude", "Home"), /CommonSwarm/u);
+  assert.doesNotMatch(AGENT_COPY.policyLock, /\b(?:see|sees|visible)\b/iu);
 });

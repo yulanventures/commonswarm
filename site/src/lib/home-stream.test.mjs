@@ -107,3 +107,15 @@ test("a message carries its ask, its files and its to-do together", () => {
   assert.deepEqual(extras.attachments.map((card) => [card.title, card.meta]), [["a.pdf", "1.5 KB"], ["b.png", "2.5 MB"]]);
   assert.equal(extras.todo.title, "Call the plumber");
 });
+
+// Space.dc.html: the cards under a message carry no picture. The author line names the sender and the to-do's
+// line names who has it, so a picture would only repeat them.
+test("cards under a message carry no picture, even when the sender and the assignee are known", () => {
+  const todos = new Map([[ID, { id: ID, title: "Call the plumber", href: "#", meta: "Nikki · in Doing", who: person, done: false }]]);
+  const attachments = [{ fileId: "f1", versionN: 1, name: "a.pdf", contentType: "application/pdf", sizeBytes: 1500, href: "#a" }];
+  const extras = deriveStreamExtras(signal({ about: `todo:${ID}`, attachments }), { workspace, todos });
+  assert.deepEqual(extras.attachments.map((card) => card.who), [null]);
+  assert.equal(extras.todo.who, null);
+  assert.equal(extras.todo.meta, "Nikki · in Doing", "the to-do's own line still names who has it");
+  assert.equal(todos.get(ID).who, person, "the shared to-do model is not changed");
+});

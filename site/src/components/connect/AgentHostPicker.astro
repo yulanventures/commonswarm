@@ -1,9 +1,23 @@
 ---
 /*
- * ADD AN AGENT, BY THE APP IT LIVES IN (UI-SPEC 3.7).
+ * ADD AN AGENT, BY THE APP IT LIVES IN (UI-SPEC 3.7; canvas Add-Agent artboard).
  *
  * Setter: /app add-agent pane. Joiner: legacy embed; /invite uses its own connect step.
  * Host copy and steps come from agent-hosts.ts. Styles live in styles/home/onboarding.css.
+ *
+ * ONE PAGE. The breadcrumb, the title, the app pills and the chosen app's connection stay on
+ * screen together: choosing a pill fills in the panel under it (the pills stay, the chosen one
+ * ink-filled). The panel is the canvas one: a short summary with an action pill only when the
+ * app has a real address (Claude's web app, Cursor's install link); "How to connect, step by
+ * step" is a compact toggle on the step title's line that opens every numbered step, the testing
+ * steps and the notes under that title; then the one sentence to copy and the waiting line. A host
+ * status other than Ready is quiet text beside the step title. The person invite is a quiet line
+ * at the foot of the page, so the header is the canvas title and lead only.
+ *
+ * NOT BUILT (RULINGS.md 5). The canvas "Name its seat" field: on the hosted route the agent names
+ * itself when it joins (the sentence it is told to say); no command lets this page name or hold
+ * a place for it first. The lime "Add to Home" footer: there is nothing to submit before the
+ * agent joins, so the lime action is the joined step's Done, which opens the agent that joined.
  */
 import "../../styles/home/onboarding.css";
 import {
@@ -13,6 +27,8 @@ import {
   MENU_LABELS_NOTE,
   TURN_ONLY_NOTE,
   agentHostsFor,
+  hostConnectLine,
+  hostJoinPrompt,
   privacyNote,
   type AgentHost,
   type AgentHostGroup,
@@ -38,18 +54,6 @@ const pieces = (text: string): Array<{ kind: "text" | "workspace" | "email"; val
       : part === "{email}" ? { kind: "email", value: "your account" }
         : { kind: "text", value: part });
 
-const orbLetters = (host: AgentHost): string =>
-  host.id === "terminal" ? ">_" : host.id === "other-app" ? "+" : host.id === "claude-code" ? "CC" : host.name.slice(0, 1);
-
-const orbHue: Record<string, string> = {
-  claude: "peach",
-  "claude-code": "peach",
-  codex: "sky",
-  chatgpt: "sky",
-  "other-app": "sage",
-  terminal: "lavender",
-};
-
 const stepsOf = (host: AgentHost): readonly AgentHostStep[] => host.steps;
 const connects = (host: AgentHost): boolean => (host.status !== null && host.status !== "waiting") || Boolean(host.testing);
 const notesOf = (host: AgentHost): string[] => [
@@ -58,138 +62,81 @@ const notesOf = (host: AgentHost): string[] => [
   ...host.notes,
   MENU_LABELS_NOTE,
 ];
+const linkOf = (host: AgentHost) => host.steps.find((step) => step.link)?.link ?? null;
+/* The panel's pill: the app's own web address, else the step link (Cursor's install link). */
+const actionOf = (host: AgentHost) => host.open ?? linkOf(host);
+const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent" : host.name;
 ---
 
 <agent-host-picker class:list={["hm-ahp", className]} data-audience={audience}>
-  <div class="hm-ahp__view" data-ahp-view="grid">
-    <button class="hm-ahp__back" type="button" data-ahp-home-back hidden={audience === "joiner"}>
-      <span aria-hidden="true">←</span> Home
-    </button>
+  <div class="hm-ahp__view hm-ahp__grid" data-ahp-view="grid">
     <header class="hm-ahp__head">
+      <button class="hm-ahp__crumb" type="button" data-ahp-home-back hidden={audience === "joiner"}>
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3L5 8l5 5"></path></svg>
+        <span>Home</span>
+      </button>
       <h1 class="hm-ahp__title" tabindex="-1" data-ahp-grid-title>
-        Add one of your agents to Home
+        Add one of your agents to <span data-ahp-slot="workspace-plain">this workspace</span>
       </h1>
       <p class="hm-ahp__lead" data-ahp-ownership-line></p>
     </header>
 
-    <section aria-labelledby="hm-ahp-step-which">
-      <h2 class="hm-ahp__step-title" id="hm-ahp-step-which">1. Which app?</h2>
-      <ul class="hm-ahp__chips" role="list">
-        {primaryHosts.map((host) => (
-          <li>
-            <button
-              class="hm-ahp__chip-btn"
-              type="button"
-              data-ahp-host={host.id}
-              data-agent-owner-self={host.id === "terminal" ? "" : undefined}
-              aria-pressed="false"
-            >
-              <span class:list={["hm-ahp__orb", host.logo ? "hm-ahp__orb--logo" : `hm-ahp__orb--${orbHue[host.id] ?? "lavender"}`]} aria-hidden="true">
-                {host.logo
-                  ? <img src={host.logo.src} alt="" width="18" height="18" loading="lazy" class:list={[{ "hm-ahp__logo--tile": host.logo.tile }]} />
-                  : <span>{orbLetters(host)}</span>}
-              </span>
-              <span data-ahp-host-name>{host.name}</span>
-              <span class="hm-ahp__selected-check" aria-hidden="true">✓</span>
-            </button>
-          </li>
-        ))}
-      </ul>
-      {more.length > 0 && (
-        <details class="hm-ahp__more">
-          <summary>More apps</summary>
-          <ul class="hm-ahp__chips" role="list">
-            {more.map((host) => (
-              <li>
-                <button
-                  class="hm-ahp__chip-btn"
-                  type="button"
-                  data-ahp-host={host.id}
-                  data-agent-owner-self={host.id === "terminal" ? "" : undefined}
-                  aria-pressed="false"
-                >
-                  <span class:list={["hm-ahp__orb", host.logo ? "hm-ahp__orb--logo" : `hm-ahp__orb--${orbHue[host.id] ?? "lavender"}`]} aria-hidden="true">
-                    {host.logo
-                      ? <img src={host.logo.src} alt="" width="18" height="18" loading="lazy" class:list={[{ "hm-ahp__logo--tile": host.logo.tile }]} />
-                      : <span>{orbLetters(host)}</span>}
-                  </span>
-                  <span data-ahp-host-name>{host.name}</span>
-                  <span class="hm-ahp__selected-check" aria-hidden="true">✓</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
+    <section class="hm-ahp__section" aria-labelledby={`hm-ahp-${audience}-which`}>
+      <h2 class="hm-ahp__step-title" id={`hm-ahp-${audience}-which`}>1. Which app?</h2>
+      <div class="hm-ahp__chip-row">
+        <ul class="hm-ahp__chips" role="list">
+          {primaryHosts.map((host) => (
+            <li>
+              <button
+                class="hm-ahp__chip-btn"
+                type="button"
+                data-ahp-host={host.id}
+                data-agent-owner-self={host.id === "terminal" ? "" : undefined}
+                aria-pressed="false"
+              >
+                <span data-ahp-host-name>{host.name}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+        {more.length > 0 && (
+          <details class="hm-ahp__more">
+            <summary>More apps</summary>
+            <ul class="hm-ahp__chips" role="list">
+              {more.map((host) => (
+                <li>
+                  <button
+                    class="hm-ahp__chip-btn"
+                    type="button"
+                    data-ahp-host={host.id}
+                    data-agent-owner-self={host.id === "terminal" ? "" : undefined}
+                    aria-pressed="false"
+                  >
+                    <span data-ahp-host-name>{host.name}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </div>
     </section>
-
-    {audience === "setter" && (
-      <p class="hm-ahp__footer">
-        Someone else's agent? Invite the person; they connect it themselves.
-        <button class="hm-ahp__link" type="button" data-agent-owner-teammate>Invite someone</button>
-      </p>
-    )}
   </div>
 
   {detailHosts.map((host) => (
-    <section class="hm-ahp__view" data-ahp-detail={host.id} aria-labelledby={`ahp-${audience}-${host.id}-title`} hidden>
+    <section class="hm-ahp__view hm-ahp__section hm-ahp__detail" data-ahp-detail={host.id} aria-labelledby={`ahp-${audience}-${host.id}-title`} hidden>
       <button class="hm-ahp__back" type="button" data-ahp-back>
         <span aria-hidden="true">←</span> Which app?
       </button>
-      <h2 class="hm-ahp__step-title">2. Connect it</h2>
-      <header class="hm-ahp__detail-head">
-        <span class:list={["hm-ahp__orb", "hm-ahp__orb--large", host.logo ? "hm-ahp__orb--logo" : `hm-ahp__orb--${orbHue[host.id] ?? "lavender"}`]} aria-hidden="true">
-          {host.logo
-            ? <img src={host.logo.src} alt="" width="28" height="28" loading="lazy" class:list={[{ "hm-ahp__logo--tile": host.logo.tile }]} />
-            : <span>{orbLetters(host)}</span>}
-        </span>
-        <div>
-          <h1 class="hm-ahp__title" id={`ahp-${audience}-${host.id}-title`} tabindex="-1">Connect {host.name}</h1>
-          {host.status && (
-            <span class="hm-ahp__status-chip" data-status={host.status}>{AGENT_HOST_STATUS_LABELS[host.status]}</span>
-          )}
-        </div>
-      </header>
-
-      <ol class="hm-ahp__steps">
-        {stepsOf(host).map((step) => (
-          <li class="hm-ahp__step">
-            <p>
-              {pieces(step.text).map((piece) =>
-                piece.kind === "workspace" ? <strong data-ahp-slot="workspace">{piece.value}</strong>
-                  : piece.kind === "email" ? <span data-ahp-slot="email">{piece.value}</span>
-                    : piece.value)}
-            </p>
-            {step.address && (
-              <div class="hm-ahp__copyable">
-                <code class="hm-ahp__value">{AGENT_CONNECTOR_ADDRESS}</code>
-                <button class="hm-ahp__copy" type="button" data-ahp-copy={AGENT_CONNECTOR_ADDRESS} aria-label="Copy the connector address">Copy</button>
-              </div>
-            )}
-            {step.code && (
-              <div class="hm-ahp__copyable">
-                <pre class="hm-ahp__value">{step.code}</pre>
-                <button class="hm-ahp__copy" type="button" data-ahp-copy={step.code} aria-label="Copy the command">Copy</button>
-              </div>
-            )}
-            {step.say && (
-              <div class="hm-ahp__copyable hm-ahp__copyable--say">
-                <q class="hm-ahp__value">{step.say}</q>
-                <button class="hm-ahp__copy" type="button" data-ahp-copy={step.say} aria-label="Copy the sentence">Copy</button>
-              </div>
-            )}
-            {step.link && (
-              <a class="hm-ahp__button" href={step.link.href} rel="nofollow">{step.link.label}</a>
-            )}
-          </li>
-        ))}
-      </ol>
-
-      {host.testing && (
-        <details class="hm-ahp__testing">
-          <summary>{host.testing.heading}</summary>
+      <div class="hm-ahp__detail-title">
+        <h2 class="hm-ahp__step-title hm-ahp__title-anchor" id={`ahp-${audience}-${host.id}-title`} tabindex="-1">2. Connect {host.name}</h2>
+        {host.status && host.status !== "ready" && (
+          <span class="hm-ahp__status-note" data-status={host.status}>{AGENT_HOST_STATUS_LABELS[host.status]}</span>
+        )}
+        <details class="hm-ahp__how" open={host.status === "waiting" ? true : undefined}>
+          <summary>How to connect, step by step</summary>
           <ol class="hm-ahp__steps">
-            {host.testing.steps.map((step) => (
+            {stepsOf(host).map((step) => (
               <li class="hm-ahp__step">
                 <p>
                   {pieces(step.text).map((piece) =>
@@ -203,21 +150,79 @@ const notesOf = (host: AgentHost): string[] => [
                     <button class="hm-ahp__copy" type="button" data-ahp-copy={AGENT_CONNECTOR_ADDRESS} aria-label="Copy the connector address">Copy</button>
                   </div>
                 )}
+                {step.code && (
+                  <div class="hm-ahp__copyable">
+                    <pre class="hm-ahp__value">{step.code}</pre>
+                    <button class="hm-ahp__copy" type="button" data-ahp-copy={step.code} aria-label="Copy the command">Copy</button>
+                  </div>
+                )}
                 {step.say && (
-                  <div class="hm-ahp__copyable hm-ahp__copyable--say">
-                    <q class="hm-ahp__value">{step.say}</q>
+                  <div class="hm-ahp__copyable">
+                    <p class="hm-ahp__value">{step.say}</p>
                     <button class="hm-ahp__copy" type="button" data-ahp-copy={step.say} aria-label="Copy the sentence">Copy</button>
                   </div>
+                )}
+                {step.link && (
+                  <a class="hm-ahp__button" href={step.link.href} rel="nofollow">{step.link.label}</a>
                 )}
               </li>
             ))}
           </ol>
-        </details>
-      )}
 
-      <ul class="hm-ahp__notes" role="list">
-        {notesOf(host).map((note) => <li>{note}</li>)}
-      </ul>
+          {host.testing && (
+            <details class="hm-ahp__testing">
+              <summary>{host.testing.heading}</summary>
+              <ol class="hm-ahp__steps">
+                {host.testing.steps.map((step) => (
+                  <li class="hm-ahp__step">
+                    <p>
+                      {pieces(step.text).map((piece) =>
+                        piece.kind === "workspace" ? <strong data-ahp-slot="workspace">{piece.value}</strong>
+                          : piece.kind === "email" ? <span data-ahp-slot="email">{piece.value}</span>
+                            : piece.value)}
+                    </p>
+                    {step.address && (
+                      <div class="hm-ahp__copyable">
+                        <code class="hm-ahp__value">{AGENT_CONNECTOR_ADDRESS}</code>
+                        <button class="hm-ahp__copy" type="button" data-ahp-copy={AGENT_CONNECTOR_ADDRESS} aria-label="Copy the connector address">Copy</button>
+                      </div>
+                    )}
+                    {step.say && (
+                      <div class="hm-ahp__copyable">
+                        <p class="hm-ahp__value">{step.say}</p>
+                        <button class="hm-ahp__copy" type="button" data-ahp-copy={step.say} aria-label="Copy the sentence">Copy</button>
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ol>
+            </details>
+          )}
+
+          <ul class="hm-ahp__notes" role="list">
+            {notesOf(host).map((note) => <li>{note}</li>)}
+          </ul>
+        </details>
+      </div>
+
+      <div class="hm-ahp__connect">
+        <p class="hm-ahp__connect-line">{hostConnectLine(host)}</p>
+        {actionOf(host) && (
+          host.open
+            ? <a class="hm-ahp__connect-action" href={host.open.href} target="_blank" rel="noopener noreferrer">{host.open.label}</a>
+            : <a class="hm-ahp__connect-action" href={linkOf(host)!.href} rel="nofollow">{linkOf(host)!.label}</a>
+        )}
+      </div>
+
+      {hostJoinPrompt(host) && (
+        <div class="hm-ahp__prompt">
+          <p class="hm-ahp__caption">Then say this to {sayTo(host)}</p>
+          <div class="hm-ahp__copyable hm-ahp__copyable--prompt">
+            <p class="hm-ahp__value">{hostJoinPrompt(host)}</p>
+            <button class="hm-ahp__copy" type="button" data-ahp-copy={hostJoinPrompt(host)!} aria-label="Copy the sentence">Copy</button>
+          </div>
+        </div>
+      )}
 
       {host.status && host.status !== "waiting" && audience === "setter" && (
         <p class="hm-ahp__waiting" data-ahp-waiting role="status" aria-live="polite" hidden>
@@ -225,21 +230,27 @@ const notesOf = (host: AgentHost): string[] => [
           <span data-ahp-waiting-text></span>
         </p>
       )}
-      <p class="hm-ahp__waiting" data-ahp-joined-line role="status" aria-live="polite" hidden></p>
+      <p class="hm-ahp__waiting hm-ahp__waiting--done" data-ahp-joined-line role="status" aria-live="polite" hidden></p>
     </section>
   ))}
 
   <section class="hm-ahp__view hm-ahp__joined" data-ahp-joined aria-labelledby={`ahp-${audience}-joined-title`} hidden>
-    <h2 class="hm-ahp__step-title">3. What it can use in Home</h2>
-    <span class="hm-ahp__orb hm-ahp__orb--large hm-ahp__orb--sage" aria-hidden="true"><span>✓</span></span>
-    <h1 class="hm-ahp__title" id={`ahp-${audience}-joined-title`} tabindex="-1" data-ahp-joined-title></h1>
-    <p class="hm-ahp__lead" data-ahp-joined-lead>Let it use Lists &amp; docs here, or skip for now.</p>
+    <h2 class="hm-ahp__joined-title visually-hidden" id={`ahp-${audience}-joined-title`} tabindex="-1" data-ahp-joined-title></h2>
     <div class="hm-ahp__actions">
-      <button class="hm-ahp__button" type="button" data-ahp-approve>Let it use Lists &amp; docs</button>
-      <button class="hm-ahp__button" type="button" data-ahp-done hidden={audience === "joiner"}>Done</button>
-      <button class="hm-ahp__button hm-ahp__button--quiet" type="button" data-ahp-another>Add another agent</button>
+      <button class="hm-ahp__button hm-ahp__button--done" type="button" data-ahp-done hidden={audience === "joiner"}>Done</button>
+      <button class="hm-ahp__button hm-ahp__button--quiet" type="button" data-ahp-approve>Let it use Lists &amp; docs</button>
+      <button class="hm-ahp__button hm-ahp__button--text" type="button" data-ahp-another>Add another agent</button>
     </div>
+    <p class="hm-ahp__joined-lead" data-ahp-joined-lead>Let it use Lists &amp; docs here, or skip for now.</p>
   </section>
+
+
+  {audience === "setter" && (
+    <p class="hm-ahp__footer">
+      Someone else's agent? Invite the person; they connect it themselves.
+      <button class="hm-ahp__link" type="button" data-agent-owner-teammate>Invite someone</button>
+    </p>
+  )}
 
   <p class="hm-ahp__status" role="status" aria-live="polite" data-ahp-status></p>
 </agent-host-picker>
@@ -254,6 +265,8 @@ const notesOf = (host: AgentHost): string[] => [
     static observedAttributes = ["workspace-name", "account-email", "viewer-first-name"];
 
     #hostId = "";
+    /* The app whose panel is on screen; it stays on screen after its agent joins. */
+    #shownHost = "";
     #joinedPrincipalId = "";
     #waitingTimer: number | undefined;
     #copyTimer: number | undefined;
@@ -321,6 +334,7 @@ const notesOf = (host: AgentHost): string[] => [
 
     reset(): void {
       this.#hostId = "";
+      this.#shownHost = "";
       this.#joinedPrincipalId = "";
       window.clearTimeout(this.#waitingTimer);
       this.#show("grid");
@@ -337,13 +351,14 @@ const notesOf = (host: AgentHost): string[] => [
       const panel = this.querySelector<HTMLElement>(`[data-ahp-detail="${CSS.escape(id)}"]`);
       if (!panel) return;
       this.#hostId = id;
+      this.#shownHost = id;
       for (const chip of this.querySelectorAll<HTMLButtonElement>("[data-ahp-host]")) {
         chip.setAttribute("aria-pressed", chip.dataset.ahpHost === id ? "true" : "false");
       }
       this.#show(id);
       this.#resetWaiting(panel, id);
       this.#render();
-      panel.querySelector<HTMLElement>(".hm-ahp__title")?.focus({ preventScroll: true });
+      panel.querySelector<HTMLElement>(".hm-ahp__title-anchor")?.focus({ preventScroll: true });
       this.#scrollToTop(panel);
       this.dispatchEvent(new CustomEvent("agent-host-selected", { bubbles: true, detail: { host: id } }));
     }
@@ -356,7 +371,10 @@ const notesOf = (host: AgentHost): string[] => [
       const title = this.querySelector<HTMLElement>("[data-ahp-joined-title]");
       const lead = this.querySelector<HTMLElement>("[data-ahp-joined-lead]");
       const approve = this.querySelector<HTMLButtonElement>("[data-ahp-approve]");
-      const joinedLine = this.querySelector<HTMLElement>("[data-ahp-joined-line]");
+      const panel = this.#shownHost
+        ? this.querySelector<HTMLElement>(`[data-ahp-detail="${CSS.escape(this.#shownHost)}"]`)
+        : null;
+      const joinedLine = panel?.querySelector<HTMLElement>("[data-ahp-joined-line]") ?? null;
       if (title) title.textContent = joinedText;
       if (lead) lead.textContent = "Let it use Lists & docs here, or skip for now.";
       if (approve) {
@@ -400,10 +418,13 @@ const notesOf = (host: AgentHost): string[] => [
       }
     }
 
+    /* One page: the title and the app pills never leave; the chosen app's panel sits under them,
+       and stays there with the lime joined line once its agent joins. */
     #show(view: string): void {
-      this.querySelector<HTMLElement>("[data-ahp-view='grid']")!.hidden = view !== "grid";
+      this.querySelector<HTMLElement>("[data-ahp-view='grid']")!.hidden = false;
+      const panelId = view === "joined" ? this.#shownHost : view;
       for (const panel of this.querySelectorAll<HTMLElement>("[data-ahp-detail]")) {
-        panel.hidden = panel.dataset.ahpDetail !== view;
+        panel.hidden = panel.dataset.ahpDetail !== panelId;
       }
       const joined = this.querySelector<HTMLElement>("[data-ahp-joined]");
       if (joined) joined.hidden = view !== "joined";

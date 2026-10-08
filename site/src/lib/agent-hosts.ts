@@ -88,6 +88,11 @@ export interface AgentHost {
   notes: readonly string[];
   /** Steps for testing only, collapsed under their own heading. */
   testing?: { heading: string; steps: readonly AgentHostStep[] };
+  /**
+   * The app's own web address, for the add-agent panel's "Open <app>" pill (canvas Add-Agent).
+   * Only where the status evidence was measured on that address; it opens the app, nothing more.
+   */
+  open?: { href: string; label: string };
 }
 
 /** The sentence that makes a connected agent join. Kept here so every host says the same thing. */
@@ -156,6 +161,7 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
       "Tested for messages on claude.ai. Lists & docs and the Claude desktop and mobile apps are not tested yet.",
       "A Claude Free account can add one custom connector.",
     ],
+    open: { href: "https://claude.ai/", label: "Open Claude" },
   },
   {
     id: "chatgpt",
@@ -325,6 +331,26 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
   },
 ] satisfies AgentHost[]);
 
+/**
+ * The add-agent page's one-line summary of a host's route (the canvas Add-Agent connection panel).
+ * It names the same three acts the numbered steps spell out; the steps stay one tap away under
+ * "How to connect, step by step", inside the same panel. A host that cannot connect yet keeps its
+ * own first step.
+ */
+export function hostConnectLine(host: AgentHost): string {
+  if (host.status === "waiting") return host.steps[0]?.text ?? "";
+  const app = host.id === "other-app" ? "the app" : host.name;
+  const start = host.steps.some((step) => step.link)
+    ? `Open the link to add CommonSwarm to ${app}`
+    : `Add CommonSwarm in ${app}`;
+  return `${start}, sign in with the account you use here, then say the sentence below.`;
+}
+
+/** The sentence the add-agent page puts in its one copy block: the host's last "say" step. */
+export function hostJoinPrompt(host: AgentHost): string | null {
+  return [...host.steps].reverse().find((step) => step.say)?.say ?? null;
+}
+
 /** Hosts in display order for one audience. */
 export function agentHostsFor(audience: "setter" | "joiner"): AgentHost[] {
   if (audience === "setter") return [...AGENT_HOSTS];
@@ -353,9 +379,15 @@ export const TURN_ONLY_NOTE =
 /** Said once on every host page; menu names are the vendors' documented ones. */
 export const MENU_LABELS_NOTE = "Menu names come from each app's help pages and can differ in your version.";
 
-/** /invite connect step footnote (UI-SPEC 3.9; directed messages stay private per SECURITY.md). */
+/*
+ * /invite connect step (UI-SPEC 3.9; directed messages stay private per SECURITY.md). One statement
+ * in two places, as the canvas Phone-Connect draws it: who it is (under the title) and who can see
+ * and remove it (the fine print under the actions).
+ */
+export const INVITE_CONNECT_LEAD =
+  "Only you can connect it: it signs in with your account. Its messages show its own name, with yours beside it.";
 export const INVITE_CONNECT_FOOTNOTE =
-  "Only you can connect it: it signs in with your account. Its messages show its own name, with yours beside it. What it posts to the shared channel is visible to everyone in Home. Owners and admins can remove any agent from Home.";
+  "What it posts to the shared channel is visible to everyone in Home. Owners and admins can remove any agent from Home.";
 
 /** Assistants a joiner may preset for step 2 (chat apps first, then more). */
 export function inviteAssistantHosts(): AgentHost[] {

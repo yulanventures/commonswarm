@@ -10,6 +10,10 @@ const EDGE = "docs/evidence/2026-10-02-edge-mcp-release/RELEASE.md";
 const DCR = "docs/evidence/2026-10-02-dcr-release/RELEASE-V2.md";
 const SITE = "docs/evidence/2026-10-02-site-release/SITE-RELEASE.md";
 const temporaryParent = realpathSync(tmpdir());
+const controlInputs = {
+  control_user_id: "11111111-1111-4111-8111-111111111111",
+  control_workspace_id: "22222222-2222-8222-a222-222222222222",
+};
 const inputs = {
   EXPECTED_EDGE_SHA: "a".repeat(40),
   EXPECTED_OAUTH_SHA: "b".repeat(40),
@@ -29,7 +33,7 @@ function block(file: string, step: string): string {
   assert.equal(matches.length, 1, `${file}: ${step} must be uniquely marked`);
   return matches[0]!;
 }
-function bash(source: string, env: Record<string, string> = {}) {
+function bash(source: string, env: Record<string, string | undefined> = {}) {
   return spawnSync("/bin/bash", ["-euo", "pipefail"], { encoding: "utf8", input: source, env: { ...process.env, ...env } });
 }
 function output(result: ReturnType<typeof bash>) { return `${result.stdout}\n${result.stderr}`; }
@@ -170,10 +174,10 @@ test("DCR checks the exact box migration set, permitting order changes only", ()
 });
 
 test("site input and measured-source comparison require the full resolved SHA", () => {
-  const env = { EXPECTED_SITE_SHA: inputs.EXPECTED_SITE_SHA };
+  const env = { EXPECTED_SITE_SHA: inputs.EXPECTED_SITE_SHA, ...controlInputs };
   assert.equal(bash(block(SITE, "site2-plan-inputs"), env).status, 0);
   for (const invalid of ["", "d".repeat(12), "D".repeat(40)]) {
-    const result = bash(block(SITE, "site2-plan-inputs"), { EXPECTED_SITE_SHA: invalid });
+    const result = bash(block(SITE, "site2-plan-inputs"), { ...env, EXPECTED_SITE_SHA: invalid });
     assert.notEqual(result.status, 0);
     assert.match(output(result), /invalid EXPECTED_SITE_SHA; STOP/);
   }
@@ -196,6 +200,32 @@ test("site input and measured-source comparison require the full resolved SHA", 
     const bad = bash(measuredCheck, { ...context, [expectedVar!]: mismatch });
     assert.notEqual(bad.status, 0);
     assert.match(output(bad), new RegExp(`EXPECTED_SITE_SHA expected=${mismatch} observed=${observed}; STOP`));
+  }
+});
+
+test("site control identity comes from required non-nil lowercase UUID inputs", () => {
+  const plan = readFileSync(SITE, "utf8");
+  for (const retired of ["d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc", "c2ea0541-f56d-4c73-bf71-56c5405c4934"]) {
+    assert.ok(!plan.includes(retired), `site plan still pins ${retired}`);
+  }
+  const gate = block(SITE, "site2-plan-inputs");
+  const env = { EXPECTED_SITE_SHA: inputs.EXPECTED_SITE_SHA, ...controlInputs };
+  const valid = bash(`${gate}
+python3 - <<'PY'
+import os
+assert os.environ["control_user_id"] == "${controlInputs.control_user_id}"
+assert os.environ["control_workspace_id"] == "${controlInputs.control_workspace_id}"
+PY
+`, env);
+  assert.equal(valid.status, 0, output(valid));
+  for (const field of Object.keys(controlInputs)) {
+    for (const invalid of [undefined, "", "not-a-uuid", "00000000-0000-0000-0000-000000000000",
+      "abcdefab-cdef-4abc-8abc-abcdefabcdef".toUpperCase(),
+      "11111111-1111-9111-8111-111111111111", "11111111-1111-4111-7111-111111111111"]) {
+      const result = bash(gate, { ...env, [field]: invalid });
+      assert.notEqual(result.status, 0, `${field} accepted ${invalid}`);
+      assert.match(output(result), new RegExp(`FAIL: invalid ${field}; STOP`));
+    }
   }
 });
 
