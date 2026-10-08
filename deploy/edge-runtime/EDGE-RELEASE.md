@@ -88,7 +88,7 @@ success, ERR, INT or TERM. An inactive timer forbids every close.
 | 5 | edge-apply | box | Ready; deadline valid | Commit close/invalidation, stop guarded timer, switch/recreate, atomically rebind and measure |
 | 6 | edge-probes | box | PROBE_PHASE=forward | Local Caddy gate, canonical admin, discovery and public MCP 401 controls |
 | 7 | edge-close | box | CLOSE_RESULT=success | Verify active timer, gate/fence, bindings and invariants; record success |
-| R0 | edge-abort | box | No attempt receipt | Prove baseline unchanged, no recreation |
+| R0 | edge-abort | box | No attempt receipt, including partial open | Prove baseline unchanged; partial open skips routes and removes its secret stage; no recreation |
 | R1 | edge-rollback | box | Attempt or uncertain apply; HezLead directs | Commit invalidation, restore exact binding/hook state and baseline source; remeasure CLOSED |
 | R2 | edge-release-aside | box | Baseline live and abort/rollback proven | Move only receipt-backed failed edge/helper trees aside |
 | R3 | edge-probes | box | Rollback and aside complete; PROBE_PHASE=recovery; skip after R0 | Verify restored baseline routes; no deadline |
@@ -105,6 +105,19 @@ STOP for HezLead. Never silently reuse a tree. Retain incomplete incidents and
 all archives/helper roots still referenced. After success retain BOTH old and
 new artifacts through verified close; this plan also retains them afterward.
 No pruning occurs. Same-SHA retry requires a fresh window after recovery/aside.
+
+If open fails before `PASS open`, use R0 → R4 with CLOSE_RESULT=aborted,
+including failures before session.sh or database snapshots exist. R0 uses the
+early partial-session.sh, requires opened.txt and no open PASS or forward
+receipts, verifies the lock and measured baseline files/bindings/containers,
+and removes only the recorded secret stage through the rm guard. It records
+PROOF_DIR, LOCK and the stage path in partial-open-aborted.json. R2/R3 are
+excluded: no release trees or services changed. R4 repeats the partial checks,
+requires the stage absent and an active timer, records an aborted close and
+releases OPEN. Routes and the database gate remain explicitly unverified; no
+route probe can block this recovery. Recovery files are prepared before OPEN
+is acquired. A failure while preparing them leaves an unowned proof directory,
+without a window lock or secret stage; report that path for HezLead.
 
 The unauthenticated tools/call with params._meta must return HTTP 401 and no
 JSON-RPC -32602. Authentication precedes parsing: this proves ingress/auth only.
@@ -139,7 +152,7 @@ printf 'PASS target hostname and root Bash access\n'
 set +e # Keep a failed subshell from exiting a persistent parent with errexit.
 (
 set -eEuo pipefail
-trap 'printf "FAIL edge-open: line %s; STOP\n" "$LINENO" >&2' ERR
+trap 'printf "FAIL edge-open: line %s; PROOF_DIR=%s; LOCK=%s; SECRET_STAGE=%s; STOP\n" "$LINENO" "${PROOF_DIR:-not-created}" "${LOCK:-not-created}" "${SECRET_STAGE:-not-created}" >&2' ERR
 umask 077
 test "$(id -u)" = 0
 : "${INPUTS_FILE:?}" "${CHECKER_FILE:?}" "${PLAN_FILE:?}" "${CADDY_CA_FILE:?}"
@@ -210,13 +223,86 @@ LOCK=/home/commonswarm/edge/release-proofs/OPEN
 install -d -o root -g root -m 0700 /home/commonswarm/edge/release-proofs
 test ! -e "$PROOF_DIR"
 test ! -L "$PROOF_DIR"
-mkdir -m 0700 "$LOCK" # Existing incident lock forbids another window.
+test ! -e "$LOCK"
+test ! -L "$LOCK"
 mkdir -m 0700 "$PROOF_DIR"
-printf '%s\n' "$PROOF_DIR" >"$LOCK/proof.path"
 printf 'Partial/open proof path: PROOF_DIR=%s\n' "$PROOF_DIR"
 install -m 0600 "$INPUTS_FILE" "$PROOF_DIR/inputs.json"
 install -m 0600 "$PLAN_FILE" "$PROOF_DIR/plan.md"
 install -m 0600 "$CHECKER_FILE" "$PROOF_DIR/checker.json"
+date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/opened.txt"
+cat >"$PROOF_DIR/partial-session.sh" <<'PARTIAL_SH'
+edge_partial_admit() {
+ python3 - "$PROOF_DIR" <<'PY'
+import hashlib,json,os,pathlib,re,stat,sys
+p=pathlib.Path(sys.argv[1]); d=json.loads((p/'inputs.json').read_bytes())
+assert re.fullmatch('[0-9a-f]{40}',d['release_sha']) and re.fullmatch('[A-Za-z0-9]{6}',d['window_id'])
+assert p==pathlib.Path('/home/commonswarm/edge/release-proofs')/(d['release_sha']+'-'+d['window_id'])
+assert p.is_dir() and not p.is_symlink() and p.resolve()==p
+assert p.stat().st_uid==0 and stat.S_IMODE(p.stat().st_mode)==0o700
+for name in ('inputs.json','plan.md','checker.json','opened.txt','partial-session.sh'):
+ f=p/name; assert f.is_file() and not f.is_symlink()
+assert hashlib.sha256((p/'plan.md').read_bytes()).hexdigest()==d['plan_sha256']
+assert hashlib.sha256((p/'checker.json').read_bytes()).hexdigest()==d['checker_sha256']
+r=json.loads((p/'checker.json').read_bytes())
+assert all(r[k]==d[k] for k in ('release_sha','plan_sha256','archive_sha256'))
+assert all(r[k]=='PASS' for k in ('result','server_suite','meta_regression'))
+for name in ('open.txt','edge-attempted.txt','preflight.txt','ready.txt','applied.txt','rollback.txt','closed.txt','close-result.json','edge-tree-created.json','helper-tree-created.json'):
+ assert not os.path.lexists(p/name), 'FAIL partial-open forward/terminal receipt; STOP'
+lock=p.parent/'OPEN'
+assert lock.is_dir() and not lock.is_symlink() and lock.resolve()==lock
+f=lock/'proof.path'; assert f.is_file() and not f.is_symlink() and f.read_text()==str(p)+'\n'
+for root in ('/home/commonswarm/edge/releases/','/home/commonswarm/admin-issuance/releases/'):
+ assert not os.path.lexists(root+d['release_sha']), 'FAIL partial-open release tree exists; STOP'
+PY
+}
+edge_partial_baseline() {
+ # Read-only host checks; no DB connection, HTTP, service stop/start or recreation.
+ python3 - "$PROOF_DIR/inputs.json" <<'PY'
+import hashlib,json,pathlib,subprocess,sys
+d=json.load(open(sys.argv[1]))
+def digest(name,key):
+ p=pathlib.Path(name); assert p.is_file() and not p.is_symlink()
+ assert hashlib.sha256(p.read_bytes()).hexdigest()==d[key], 'FAIL partial-open baseline drift; STOP'
+for surface in ('edge','oauth','stack'):
+ assert str(pathlib.Path('/home/commonswarm/'+surface+'/current').resolve(strict=True))=='/home/commonswarm/'+surface+'/releases/'+d['baseline_'+surface+'_sha']
+assert str(pathlib.Path('/srv/commonswarm/site/current').resolve(strict=True))==d['baseline_site_target']
+for name,key in [('/home/commonswarm/.env','edge_env_sha256'),('/home/commonswarm/edge/current/deploy/edge-runtime/compose.override.yaml','override_sha256'),('/etc/caddy/Caddyfile','caddyfile_sha256'),('/etc/caddy/sites/10-commonswarm-api.caddy','api_caddy_sha256'),('/etc/caddy/sites/20-commonswarm-mcp.caddy','mcp_caddy_sha256'),('/etc/commonswarm-admin-release/recycle.json','recycle_json_sha256'),('/usr/local/libexec/commonswarm-admin-edge-recycle','recycle_hook_sha256'),('/etc/systemd/system/'+d['edge_recycle_service']+'.d/50-admin-measurement.conf','recycle_dropin_sha256')]: digest(name,key)
+for unit,key in [(d['edge_recycle_timer'],'recycle_timer_sha256'),(d['edge_recycle_service'],'recycle_unit_sha256')]:
+ assert hashlib.sha256(subprocess.check_output(['systemctl','cat',unit])).hexdigest()==d[key]
+subprocess.run(['systemctl','is-active','--quiet',d['edge_recycle_timer']],check=True)
+assert subprocess.check_output(['systemctl','show','-p','ActiveState','--value',d['edge_recycle_service']],text=True).strip()=='inactive'
+for name,key in [('commonswarm-edge-edge-runtime-1','baseline_edge_image'),('commonswarm-oauth-oauth-1','baseline_oauth_image'),('commonswarm-postgres','baseline_postgres_image')]:
+ c=json.loads(subprocess.check_output(['docker','inspect',name],stderr=subprocess.DEVNULL))[0]
+ assert c['Image']==d[key] and c['State']['Running']
+ if name=='commonswarm-edge-edge-runtime-1':
+  assert c['State']['Health']['Status']=='healthy'
+  assert c['Config']['Labels']['com.docker.compose.project.working_dir']=='/home/commonswarm/edge/releases/'+d['baseline_edge_sha']+'/deploy/edge-runtime'
+PY
+}
+edge_partial_stage() {
+ # Print only a validated nonsecret path; a missing pointer means no stage existed.
+ python3 - "$PROOF_DIR/secret-stage.path" "$1" <<'PY'
+import os,pathlib,re,stat,sys
+p=pathlib.Path(sys.argv[1]); mode=sys.argv[2]
+if not os.path.lexists(p): raise SystemExit
+assert p.is_file() and not p.is_symlink()
+name=p.read_text(); assert name.endswith('\n') and name.count('\n')==1
+name=name[:-1]
+def permitted(x): return re.fullmatch(r'/tmp/anvil-secret\.[A-Za-z0-9]{6}',x) is not None
+for bad in ('','/',str(pathlib.Path.home()),'/tmp/other','/tmp/anvil-secret.abcdef/child'): assert not permitted(bad)
+assert permitted(name), 'FAIL partial-open unsafe stage; STOP'
+s=pathlib.Path(name)
+if mode=='cleanup':
+ if os.path.lexists(s): assert s.is_dir() and not s.is_symlink() and s.resolve()==s and s.stat().st_uid==0 and stat.S_IMODE(s.stat().st_mode)==0o700
+else:
+ assert mode=='absent' and not os.path.lexists(s), 'FAIL partial-open secret stage remains; STOP'
+print(name)
+PY
+}
+PARTIAL_SH
+mkdir -m 0700 "$LOCK" # Existing incident lock forbids another window.
+printf '%s\n' "$PROOF_DIR" >"$LOCK/proof.path"
 SECRET_STAGE=$(mktemp -d /tmp/anvil-secret.XXXXXX)
 chmod 0700 "$SECRET_STAGE"
 printf '%s\n' "$SECRET_STAGE" >"$PROOF_DIR/secret-stage.path"
@@ -264,7 +350,6 @@ for name,key in [('commonswarm-oauth-oauth-1','baseline_oauth_image'),('commonsw
 (p/'resources.json').write_text(json.dumps(resources,sort_keys=True)+'\n')
 v={'PROOF_DIR':str(p),'SECRET_STAGE':str(stage),'INPUTS_FILE':str(p/'inputs.json'),'CADDY_CA_FILE':str(p/'caddy-ca.pem'),'RELEASE_SHA':d['release_sha'],'WINDOW_ID':d['window_id'],'OLD_EDGE':edge,'NEW_EDGE':new,'OLD_HELPER':r['release_root'],'NEW_HELPER':helper,'OLD_ARCHIVE':r['archive'],'OLD_ARCHIVE_DIGEST':r['artifact_digest'],'BOX_ARCHIVE_PATH':'/tmp/admin-issuance-'+d['release_sha']+'-'+d['window_id']+'.tar','POSTGRES_IMAGE':d['baseline_postgres_image'],'EDGE_RECYCLE_TIMER':d['edge_recycle_timer'],'EDGE_RECYCLE_SERVICE':d['edge_recycle_service'],'RECYCLE_JSON':config,'RECYCLE_HOOK':hook,'RECYCLE_DROPIN':drop,'LOCK':str(p.parent/'OPEN')}
 (p/'session.sh').write_text(''.join(k+'='+shlex.quote(val)+'\n' for k,val in v.items()))
-(p/'opened.txt').write_text(datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')+'\n')
 PY
 cat >>"$PROOF_DIR/session.sh" <<'SH'
 
@@ -564,28 +649,35 @@ class LocalTLS(http.client.HTTPSConnection):
  def connect(self):
   import socket
   self.sock=ctx.wrap_socket(socket.create_connection(('127.0.0.1',443),15),server_hostname=self.host)
-def request(host,path,method='GET',body=None):
- c=LocalTLS(host,context=ctx,timeout=15); c.request(method,path,body,{'Origin':'https://commonswarm.com','Content-Type':'application/json','Accept':'application/json'})
+def request(host,path,method='GET',body=None,headers=None):
+ c=LocalTLS(host,context=ctx,timeout=15); c.request(method,path,body,headers or {})
  r=c.getresponse(); data=r.read(65537); assert len(data)<=65536
  headers=dict((k.lower(),v) for k,v in r.getheaders()); status=r.status; c.close(); return status,headers,data
+# Only gate reads model the site's credential-free browser/CORS request.
+# admin-gate.js emits wildcard ACAO unconditionally; no origin allowlist is assumed.
+gate_headers={'Origin':'https://commonswarm.com','Accept':'*/*'}
+discovery_headers={'Accept':'application/json'}
+# MCP connector/CLI backends send no Origin. Match Streamable HTTP's JSON/SSE Accept.
+mcp_headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'}
 for method in ('GET','HEAD'):
- status,h,b=request('mcp.commonswarm.com','/admin/gate',method)
+ status,h,b=request('mcp.commonswarm.com','/admin/gate',method,headers=gate_headers)
  assert status==200 and h.get('access-control-allow-origin')=='*' and 'no-store' in h.get('cache-control','')
  assert json.loads(b)=={'state':'closed'} if method=='GET' else b==b''
-status,h,b=request('api.commonswarm.com','/admin','POST','{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
+status,h,b=request('api.commonswarm.com','/admin','POST','{"jsonrpc":"2.0","id":1,"method":"tools/list"}',headers=mcp_headers)
 assert status==401
-status,h,b=request('api.commonswarm.com','/.well-known/oauth-protected-resource/admin')
+status,h,b=request('api.commonswarm.com','/.well-known/oauth-protected-resource/admin',headers=discovery_headers)
 assert status==200; d=json.loads(b)
 assert d['resource']=='https://api.commonswarm.com/admin' and d['authorization_servers']==['https://mcp.commonswarm.com']
-status,h,b=request('api.commonswarm.com','/.well-known/oauth-protected-resource/admin','HEAD'); assert status==405
-status,h,b=request('mcp.commonswarm.com','/.well-known/oauth-authorization-server'); assert status==200
+status,h,b=request('api.commonswarm.com','/.well-known/oauth-protected-resource/admin','HEAD',headers=discovery_headers); assert status==405
+status,h,b=request('mcp.commonswarm.com','/.well-known/oauth-authorization-server',headers=discovery_headers); assert status==200
 assert json.loads(b)['issuer']=='https://mcp.commonswarm.com'
-status,h,b=request('mcp.commonswarm.com','/.well-known/oauth-protected-resource'); assert status==200
+status,h,b=request('mcp.commonswarm.com','/.well-known/oauth-protected-resource/mcp',headers=discovery_headers); assert status==200
+assert json.loads(b)=={'resource':'https://mcp.commonswarm.com/mcp','authorization_servers':['https://mcp.commonswarm.com'],'bearer_methods_supported':['header'],'scopes_supported':['mcp'],'resource_name':'CommonSwarm hosted MCP'}
 for meta in (False,True):
  params={'name':'cswarm_check','arguments':{}}
  if meta: params['_meta']={'progressToken':'edge-release-public-probe'}
  body=json.dumps({'jsonrpc':'2.0','id':1,'method':'tools/call','params':params})
- status,h,b=request('mcp.commonswarm.com','/mcp','POST',body); assert status==401
+ status,h,b=request('mcp.commonswarm.com','/mcp','POST',body,headers=mcp_headers); assert status==401
  try: value=json.loads(b)
  except ValueError: value={}
  error=value.get('error') if isinstance(value,dict) else None
@@ -814,6 +906,28 @@ set +e # Keep a failed subshell from exiting a persistent parent with errexit.
 set -eEuo pipefail
 trap 'printf "FAIL edge-abort: line %s; STOP\n" "$LINENO" >&2' ERR
 : "${PROOF_DIR:?PROOF_DIR required}"
+if test ! -e "$PROOF_DIR/open.txt" && test ! -L "$PROOF_DIR/open.txt"; then
+ test -f "$PROOF_DIR/partial-session.sh"
+ test ! -L "$PROOF_DIR/partial-session.sh"
+ . "$PROOF_DIR/partial-session.sh"
+ edge_partial_admit
+ edge_partial_baseline
+ PARTIAL_STAGE=$(edge_partial_stage cleanup)
+ if test -n "$PARTIAL_STAGE" && test -e "$PARTIAL_STAGE"; then
+  rm -r -- "$PARTIAL_STAGE" || { printf 'FAIL rm guard refused %s; retain guard message; STOP\n' "$PARTIAL_STAGE" >&2; exit 1; }
+ fi
+ edge_partial_stage absent >/dev/null
+ python3 - "$PROOF_DIR" "$PARTIAL_STAGE" <<'PY'
+import json,pathlib,sys
+p=pathlib.Path(sys.argv[1]); d=json.loads((p/'inputs.json').read_bytes())
+r={'release_sha':d['release_sha'],'window_id':d['window_id'],'proof_dir':str(p),'lock':str(p.parent/'OPEN'),'secret_stage':sys.argv[2] or None,'routes':'skipped-partial-open','admin_gate':'not-verified-partial-open','services':'not-mutated'}
+(p/'partial-open-aborted.json').write_text(json.dumps(r,sort_keys=True)+'\n')
+PY
+ printf 'PASS partial-open abort: PROOF_DIR=%s; LOCK=%s; SECRET_STAGE=%s removed/absent; routes unverified; run R4 CLOSE_RESULT=aborted\n' "$PROOF_DIR" "${PROOF_DIR%/*}/OPEN" "${PARTIAL_STAGE:-none}"
+ exit 0
+fi
+test -f "$PROOF_DIR/open.txt"
+test ! -L "$PROOF_DIR/open.txt"
 . "$PROOF_DIR/session.sh"
 edge_admit
 
@@ -917,6 +1031,33 @@ set +e # Keep a failed subshell from exiting a persistent parent with errexit.
 set -eEuo pipefail
 trap 'printf "FAIL edge-close: line %s; STOP\n" "$LINENO" >&2' ERR
 : "${PROOF_DIR:?PROOF_DIR required}"
+if test ! -e "$PROOF_DIR/open.txt" && test ! -L "$PROOF_DIR/open.txt"; then
+ test "${CLOSE_RESULT:?}" = aborted
+ test -f "$PROOF_DIR/partial-session.sh"
+ test ! -L "$PROOF_DIR/partial-session.sh"
+ . "$PROOF_DIR/partial-session.sh"
+ edge_partial_admit
+ edge_partial_baseline
+ PARTIAL_STAGE=$(edge_partial_stage absent)
+ python3 - "$PROOF_DIR" "$PARTIAL_STAGE" <<'PY'
+import datetime,json,pathlib,sys
+p=pathlib.Path(sys.argv[1]); d=json.loads((p/'inputs.json').read_bytes()); f=p/'partial-open-aborted.json'
+assert f.is_file() and not f.is_symlink()
+r=json.loads(f.read_bytes())
+assert r=={'release_sha':d['release_sha'],'window_id':d['window_id'],'proof_dir':str(p),'lock':str(p.parent/'OPEN'),'secret_stage':sys.argv[2] or None,'routes':'skipped-partial-open','admin_gate':'not-verified-partial-open','services':'not-mutated'}
+closed={'release_sha':d['release_sha'],'baseline_edge_sha':d['baseline_edge_sha'],'window_id':d['window_id'],'target':d['target'],'result':'aborted','closed_at':datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),'timer':'active','admin_gate':r['admin_gate'],'routes':r['routes'],'services':r['services'],'authenticated_meta_operator_check':'not-applicable'}
+with (p/'close-result.json').open('x') as f: f.write(json.dumps(closed,sort_keys=True)+'\n')
+(p/'closed.txt').write_text(closed['closed_at']+'\n')
+PY
+ LOCK="${PROOF_DIR%/*}/OPEN"
+ test "$(cat "$LOCK/proof.path")" = "$PROOF_DIR"
+ rm -- "$LOCK/proof.path" || { printf 'FAIL rm guard refused lock receipt; STOP\n' >&2; exit 1; }
+ rmdir "$LOCK"
+ printf 'PASS partial-open close: aborted; timer active; services unchanged; routes and gate unverified\n'
+ exit 0
+fi
+test -f "$PROOF_DIR/open.txt"
+test ! -L "$PROOF_DIR/open.txt"
 . "$PROOF_DIR/session.sh"
 edge_admit
 
