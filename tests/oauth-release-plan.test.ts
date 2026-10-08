@@ -591,3 +591,9 @@ oauth_compose "$OLD_OAUTH" up -d --force-recreate oauth
     rejected(f.run(source.replace(unset, unset + `\n ${key}=fixture-reset`), vars), /FAIL fixture-compose: .*; STOP/);
   }
 });
+
+test('every Mac-side ssh that does not feed a heredoc uses -n, so a pipe-fed operator shell keeps its own stdin', () => {
+  const plan = readFileSync(new URL('../deploy/mcp-auth/OAUTH-RELEASE.md', import.meta.url), 'utf8');
+  const offenders = plan.split('\n').filter((line) => /\bssh\s/.test(line) && !/<<'?[A-Z]+'?\s*$/.test(line) && !/\bssh\s+-n\b/.test(line) && !/^\s*#/.test(line) && !/`ssh/.test(line));
+  assert.deepEqual(offenders, []);
+});

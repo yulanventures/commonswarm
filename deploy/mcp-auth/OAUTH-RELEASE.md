@@ -101,7 +101,7 @@ case "$TARGET" in
  staging) EXPECTED_HOST=c1-staging-20261006;;
  *) printf 'FAIL oauth-root-shell: invalid target; STOP\n' >&2; exit 1;;
 esac
-MEASURED_HOST=$(ssh "$BOX_HOST" hostname)
+MEASURED_HOST=$(ssh -n "$BOX_HOST" hostname)
 test "$MEASURED_HOST" = "$EXPECTED_HOST" || { printf 'FAIL oauth-root-shell: measured hostname mismatch; STOP\n' >&2; exit 1; }
 ssh "$BOX_HOST" 'sudo -n -i /bin/bash -s' <<'BOX'
 (
@@ -728,7 +728,7 @@ mkdir -m 0700 "$EVIDENCE_DIR"
 # Ancestry may be absent after an early archive failure; it stays in box proofs
 # when measured. No env, session.sh, stage pointer or diagnostics in copy-back.
 for FILE in inputs.json opened.txt close-result.json closed.txt; do
- ssh "$BOX_HOST" "sudo -n cat '$PROOF_DIR/$FILE'" >"$EVIDENCE_DIR/$FILE"
+ ssh -n "$BOX_HOST" "sudo -n cat '$PROOF_DIR/$FILE'" >"$EVIDENCE_DIR/$FILE"
 done
 python3 - "$EVIDENCE_DIR" "$INPUTS_FILE" <<'PY'
 import json,pathlib,sys
