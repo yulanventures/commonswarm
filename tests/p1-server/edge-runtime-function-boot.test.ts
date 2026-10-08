@@ -129,7 +129,7 @@ test("every edge function boots in the self-hosted edge-runtime image", { timeou
     runtime?.close();
     guardedRemove(workDir);
   });
-  runtime = startComposeEdgeRuntime({ workDir });
+  runtime = await startComposeEdgeRuntime({ workDir });
   await awaitHealth(runtime.baseUrl);
   const failures: string[] = [];
   for (const name of names) {
@@ -161,7 +161,7 @@ test("a function with a bare unmapped specifier fails the boot check", { timeout
     join(copy, "activity", "index.ts"),
     'import "c1-27-unmapped-specifier";\nDeno.serve(() => new Response("should not boot"));\n',
   );
-  runtime = startComposeEdgeRuntime({ workDir, functionsRoot: copy });
+  runtime = await startComposeEdgeRuntime({ workDir, functionsRoot: copy });
   await awaitHealth(runtime.baseUrl);
   const result = await bootFunction(runtime, "activity");
   assert.equal(result.classification.ok, false, `negative control booted: HTTP ${result.status} ${result.body.slice(0, 200)}`);

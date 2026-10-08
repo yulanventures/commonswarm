@@ -70,8 +70,10 @@ class Agent {
 }
 
 function form(html) {
-  const action = /<form[^>]*action="([^"]+)"/u.exec(html)?.[1];
-  const field = name => new RegExp(`<input[^>]*name="${name}"[^>]*value="([^"]*)"`, 'u').exec(html)?.[1];
+  const consent = [...html.matchAll(/<form\b[^>]*action="([^"]+)"[^>]*>([\s\S]*?)<\/form>/gu)]
+    .find(([, action]) => action.endsWith('/consent'));
+  const action = consent?.[1];
+  const field = name => new RegExp(`<input[^>]*name="${name}"[^>]*value="([^"]*)"`, 'u').exec(consent?.[2] ?? '')?.[1];
   const csrf = field('csrf_token'), version = field('selection_version');
   assert.ok(action && csrf && version !== undefined, 'consent form has action, CSRF and selection version');
   return { action, csrf, version, home: field('home_workspace_id') };
@@ -158,7 +160,10 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
       const signins = new Map();
       gotrue = createServer(async (request, response) => {
         const url = new URL(request.url, 'http://fixture');
-        if (request.method === 'GET' && url.pathname === '/authorize') {
+        if (request.method === 'GET' && url.pathname === '/settings') {
+          response.writeHead(200, { 'content-type': 'application/json' });
+          response.end(JSON.stringify({ external: { github: true } }));
+        } else if (request.method === 'GET' && url.pathname === '/authorize') {
           const code = randomBytes(32).toString('base64url');
           signins.set(code, url.searchParams.get('code_challenge'));
           const callback = new URL(url.searchParams.get('redirect_to'));
@@ -357,8 +362,9 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         const session = [...agent.cookies.values()].find(cookie => cookie.name === SESSION_COOKIE).value;
         await pool.query('UPDATE commonswarm_oauth.browser_sessions SET user_id = $1 WHERE session_hash = $2', [other, hashOpaque(session)]);
         const otherAccount = await submit(fields());
-        assert.equal(otherAccount.status, 403, 'interaction cannot be submitted by another authenticated account');
-        assert.equal((await otherAccount.json()).error, 'authentication_required');
+        assert.equal(otherAccount.status, 409, 'interaction cannot be submitted by another authenticated account');
+        assert.match(otherAccount.headers.get('content-type') ?? '', /^text\/html/u);
+        assert.match(await otherAccount.text(), /You signed in as a different account; start again/u);
         await pool.query('UPDATE commonswarm_oauth.browser_sessions SET user_id = $1 WHERE session_hash = $2', [owner, hashOpaque(session)]);
         const noHome = await submit(fields().filter(([name]) => name !== 'home_workspace_id'));
         assert.equal(noHome.status, 400, 'R7: multiple selected workspaces require a home');

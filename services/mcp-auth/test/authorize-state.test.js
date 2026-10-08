@@ -91,7 +91,7 @@ async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnab
           row.provider_grant_id === values[0] && row.completed);
         return rows(active ? {} : null);
       }
-      if (sql.includes("SELECT 1 FROM commonswarm_oauth.browser_sessions")) {
+      if (sql.trimStart().startsWith("SELECT 1 FROM commonswarm_oauth.browser_sessions")) {
         assert.equal(values[0], USER);
         return rows([...sessions.values()].find((row) => row.user_id === USER &&
           row.authenticated_at !== null && row.status === "valid"));
@@ -104,6 +104,14 @@ async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnab
         const row = { session_hash: values[0], user_id: null, authenticated_at: null, status: "valid" };
         sessions.set(values[0].toString("hex"), row);
         return rows(row);
+      }
+      if (sql.includes("JOIN commonswarm_oauth.browser_sessions")) {
+        const [uid, sessionHash] = values;
+        const row = interactions.get(uid);
+        const session = sessions.get(sessionHash.toString("hex"));
+        return rows(row && row.session_hash.equals(sessionHash) && session?.status === "valid" &&
+          session.authenticated_at && row.user_id === session.user_id
+          ? { ...row, unexpired: true } : null);
       }
       if (sql.includes("INSERT INTO commonswarm_oauth.interactions")) {
         const previous = interactions.get(values[0]);
@@ -153,7 +161,7 @@ async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnab
         return rows({ ...row });
       }
       if (sql.includes("SET completed_at")) {
-        interactions.get(values[0]).completed = true;
+        Object.assign(interactions.get(values[0]), { completed: true, completed_at: new Date() });
         return rows({});
       }
       throw new Error("unexpected fixture database operation");
@@ -180,7 +188,7 @@ async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnab
       mcpHandler: createInteractionHandler({
         provider, store: new InteractionStore(pool),
         gotrue: { begin: () => ({ url: new URL("https://api.commonswarm.com/auth/v1/authorize"),
-          state: "synthetic-sign-in-state", verifier: "synthetic-sign-in-verifier" }) },
+          provider: "github", state: "synthetic-sign-in-state", verifier: "synthetic-sign-in-verifier" }) },
         consentOrchestrator: createConsentOrchestrator({ command: async (body, identity) => {
           commands.push({ body, identity });
           return { status: 200, body: { ok: true } };
@@ -353,7 +361,7 @@ test("provider error events log a thrown hook with request id and source locatio
 
 function assertConsentPolicy(response) {
   assert.equal(response.getHeader("content-security-policy"),
-    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://claude.ai; frame-ancestors 'none'; base-uri 'none'");
+    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://claude.ai; frame-ancestors 'none'; base-uri 'none'; script-src 'self'; script-src-attr 'none'");
   assert.equal(response.getHeader("referrer-policy"), "same-origin");
 }
 
@@ -450,8 +458,11 @@ test("one workspace consent completes Claude authorization and token exchange", 
             assert.equal(begin.body.command.grant_id, bound.commonswarm_grant_id);
             assert.equal(begin.body.command.manifest_digest, bound.manifest_digest.toString("hex"));
             const replay = await h.run(`${path}/consent`, "POST", form.toString());
-            assert.equal(replay.statusCode, 410);
-            assert.equal(h.commands.length, 3);
+            assert.equal(replay.statusCode, 409);
+            assert.match(replay.getHeader("content-type"), /text\/html/u);
+            assert.match(replay.body, /Already approved/u);
+            assert.equal(await h.provider.Interaction.find(path.split("/").at(-1)), undefined);
+            assert.equal(h.commands.length, 3, "the repeat runs no second grant commands");
           });
         }
       }
@@ -517,7 +528,7 @@ test("consent CSP allows provider-approved native loopback origins", async (t) =
       const page = await h.run(start.getHeader("location"));
       assert.equal(page.statusCode, 200);
       assert.equal(page.getHeader("content-security-policy"),
-        `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' http://${host}:49152; frame-ancestors 'none'; base-uri 'none'`);
+        `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' http://${host}:49152; frame-ancestors 'none'; base-uri 'none'; script-src 'self'; script-src-attr 'none'`);
     });
   }
   await t.test("web loopback is refused before interaction or consent", async () => {
@@ -551,6 +562,7 @@ test("production startServer keeps ordinary DCR enabled only with public authori
   // Exercise the real composition root and PostgreSQL registration adapter.
   // Only SQL persistence and listen are replaced; no database or socket opens.
   const registrations = new Map();
+  t.mock.method(globalThis, "fetch", async () => Response.json({ external: { github: true } }));
   t.mock.method(pg.Pool.prototype, "query", async (sql, values) => {
     if (sql.includes("DELETE FROM commonswarm_oauth.registered_clients")) return { rowCount: 0, rows: [] };
     if (sql.includes("INSERT INTO commonswarm_oauth.registered_clients")) {
@@ -626,7 +638,7 @@ test("DCR registration completes the same workspace consent and PKCE token flow 
       queries.push(sql);
       if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) return { rows: [], rowCount: 0 };
       let row;
-      if (sql.includes("FROM commonswarm_oauth.browser_sessions")) {
+      if (sql.trimStart().startsWith("SELECT") && sql.includes("FROM commonswarm_oauth.browser_sessions")) {
         row = { user_id: USER, authenticated_at: new Date().toISOString() };
       } else if (sql.includes("FROM commonswarm_oauth.admin_verified_clients")) {
         assert.equal(values[0], clientId); row = verification;

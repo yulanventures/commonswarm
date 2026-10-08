@@ -18,6 +18,7 @@ export class ClientError extends Error {
 
 const INTERACTION_RESPONSES = new Map([
   ["invalid_callback", 400],
+  ["different_account", 409],
   ["interaction_binding_mismatch", 409],
   ["interaction_mismatch", 409],
   ["interaction_expired", 410],

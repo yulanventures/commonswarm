@@ -21,6 +21,10 @@ const LATEST_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_V
 const INTERNAL_METADATA_PATH = `/mcp${PROTECTED_RESOURCE_METADATA_PATH}`;
 const REQUEST_NODE_LIMIT = 1_000;
 const REQUEST_DEPTH_LIMIT = 32;
+const REQUEST_PARAM_KEYS = {
+  "tools/list": ["cursor", "_meta"],
+  "tools/call": ["name", "arguments", "_meta"],
+} as const;
 
 export interface McpProtocolLimits {
   maxBodyBytes: number;
@@ -50,6 +54,17 @@ function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+function requestParams(value: unknown, acceptedKeys?: readonly string[]): Record<string, unknown> | null {
+  const params = value === undefined ? {} : record(value);
+  // JSON.parse has already restricted values to JSON. Metadata is opaque and
+  // never becomes tool arguments, authorization context, or log content.
+  if (params === null || (Object.hasOwn(params, "_meta") && record(params._meta) === null) ||
+      (acceptedKeys !== undefined && Object.keys(params).some((key) => !acceptedKeys.includes(key)))) {
+    return null;
+  }
+  return params;
 }
 
 function json(status: number, value: unknown, extra: HeadersInit = {}): Response {
@@ -286,7 +301,11 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
       if (message.id === undefined) return new Response(null, { status: 202, headers: { "cache-control": "no-store" } });
       let result: unknown;
       if (message.method === "initialize") {
-        const requested = record(message.params)?.protocolVersion;
+        const params = requestParams(message.params);
+        if (params === null) {
+          return failed(400, rpcError(message.id, -32602, "Invalid params"));
+        }
+        const requested = params.protocolVersion;
         if (typeof requested !== "string") {
           return failed(400, rpcError(message.id, -32602, "Unsupported protocol version"));
         }
@@ -299,20 +318,20 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
           instructions: "Use an explicit seat handle for every CommonSwarm tool call.",
         };
       } else if (message.method === "ping") {
+        if (requestParams(message.params) === null) {
+          return failed(400, rpcError(message.id, -32602, "Invalid params"));
+        }
         result = {};
       } else if (message.method === "tools/list") {
-        const params = message.params === undefined ? {} : record(message.params);
-        if (params === null || Object.keys(params).some((key) => !["cursor", "_meta"].includes(key)) ||
-            (params.cursor !== undefined && typeof params.cursor !== "string") ||
-            (params._meta !== undefined && record(params._meta) === null)) {
+        const params = requestParams(message.params, REQUEST_PARAM_KEYS["tools/list"]);
+        if (params === null || (params.cursor !== undefined && typeof params.cursor !== "string")) {
           return failed(400, rpcError(message.id, -32602, "Invalid params"));
         }
         // Pagination is not implemented: every valid cursor receives the full list.
         result = { tools: HOSTED_TOOL_TABLE };
       } else if (message.method === "tools/call") {
-        const params = record(message.params);
-        if (params === null || Object.keys(params).some((key) => !["name", "arguments"].includes(key)) ||
-            typeof params.name !== "string" || !hostedToolName(params.name)) {
+        const params = requestParams(message.params, REQUEST_PARAM_KEYS["tools/call"]);
+        if (params === null || typeof params.name !== "string" || !hostedToolName(params.name)) {
           return failed(400, rpcError(message.id, -32602,
             `Invalid tools/call params. Send name (${HOSTED_TOOL_TABLE.map((tool) => tool.name).join(", ")}) and arguments as a JSON object.`));
         }

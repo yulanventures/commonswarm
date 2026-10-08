@@ -16,6 +16,7 @@ const DB_ERROR = Object.assign(new Error("synthetic database connection details 
 });
 
 async function harness(t, { enabled = true, unavailable = false } = {}) {
+  t.mock.method(globalThis, "fetch", async () => Response.json({ external: { google: true } }));
   const logs = [];
   const queries = [];
   const clients = new Map();

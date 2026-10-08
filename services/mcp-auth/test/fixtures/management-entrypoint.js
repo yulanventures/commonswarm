@@ -1,3 +1,5 @@
+import "./gotrue-settings.js";
+
 // Run in a fresh child so ESM caches cannot hide an OFF-mode import.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

@@ -1,0 +1,75 @@
+{"event":"request_failed","error_code":"unauthorized","method":null}
+{"event":"request_failed","error_code":"unauthorized","method":null}
+{"event":"request_failed","error_code":"origin_not_allowed","method":null}
+{"event":"request_failed","error_code":"origin_not_allowed","method":null}
+{"event":"request_failed","error_code":"unauthorized","method":null}
+{"event":"request_failed","error_code":"unauthorized","method":null}
+{"event":"request_failed","error_code":"unauthorized","method":null}
+{"event":"request_failed","error_code":"unauthorized","method":null}
+{"event":"request_failed","error_code":"origin_not_allowed","method":null}
+{"event":"request_failed","error_code":"origin_not_allowed","method":null}
+{"event":"request_failed","error_code":"unauthorized","method":null}
+{"event":"request_failed","error_code":"unauthorized","method":null}
+{"event":"request_failed","error_code":"unauthorized","method":null}
+{"event":"request_failed","error_code":"unauthorized","method":null}
+{"event":"request_failed","error_code":"unauthorized","method":null}
+{"event":"request_failed","error_code":"unauthorized","method":null}
+﹣ every block and persisted helper parses in Bash 5 (0.421875ms) # Bash 5 is not installed on this Mac; Linux CI requires it
+✔ every block and persisted helper parses in macOS /bin/bash 3.2 (40.139541ms)
+✔ every block is labeled; embedded Python compiles; heredoc substitutions refuse (803.76875ms)
+✔ inputs require the exact measured set and grammar; table agrees with enforcing validator (2792.459333ms)
+✔ staging requires its host, root marker bytes and mode; production rejects staging layout (237.966791ms)
+✔ OAuth timing rule refuses opening at or within 35 minutes before every recycle (763.949625ms)
+✔ run-order rows 0..8 and R0..R4 refer only to executable steps (0.284708ms)
+✔ archive override is admitted, baseline bytes and metadata win, and both trees are verified (1128.240584ms)
+✔ missing, symlinked or changed baseline override refuses before creating release trees (689.08575ms)
+✔ real git archive of repository HEAD passes archive admission and exact helper/edge content checks (4263.904875ms)
+✔ abort runs R0 → R2 → R4 with baseline probes, no deadline or recreate, and refuses further forward work (778.271125ms)
+✔ partial open recovers by R0 → R4 without session, routes, DB or service mutations (1371.590958ms)
+✔ apply rebinds new identity and rollback restores exact JSON bytes and baseline tree (604.406375ms)
+✔ real forward admission refuses missing open, terminal receipts and changed plan bytes before mutation (731.267375ms)
+✔ second apply refuses the existing regular attempt without overwriting it or recreating (175.021458ms)
+✔ real forward deadline rechecks the OAuth boundary and expiry before an attempt (2290.785875ms)
+✔ a failed complete block stops its work and preserves a parent shell with inherited errexit (255.83075ms)
+✔ success close refuses an inactive timer before cleaning or recording close (202.028667ms)
+✔ ERR in an extracted-block function prints FAIL STOP, stops work and restores the timer (220.165125ms)
+✔ binding rejects baseline tampering and unrelated live drift before a restart (367.215417ms)
+✔ real legacy-fence SQL refuses restored swarm_read SELECT plus a permissive policy and every canonical fence drift (5042.738959ms)
+✔ every extracted probe request has a route in parsed deployed Caddy; bare metadata fails (215.9575ms)
+✔ extracted route probes use real MCP origin/auth checks; refuse injected Origin, metadata drift and _meta error (635.750917ms)
+✔ every complete release block parses in Bash, and embedded Python compiles (381.85875ms)
+✔ shell blocks refuse heredocs inside command substitutions (1.008708ms)
+✔ extracted input validator rejects missing, extra, duplicate and malformed keys (1070.444791ms)
+✔ extracted target gate isolates staging markers, hostname and window IDs (318.781458ms)
+✔ extracted clock gate refuses every recycle band and boundary, with positive controls (898.244584ms)
+✔ run-order table names only complete steps and covers every block (0.940584ms)
+✔ open refuses every existing release path before any file change, with absent-path control (248.788583ms)
+✔ rolled-back close requires absence only for a receipt-backed tree, with absent-tree controls (323.296584ms)
+✔ abort-before-attempt closes as aborted without recreate or rollback (830.468667ms)
+✔ aside and recovered close leave unrecorded trees untouched, and reject unsafe receipts (584.982542ms)
+✔ baseline probe failures refuse open and apply before the attempt; forward and recovery reuse the probes (1481.574583ms)
+✔ ERR inside a helper function prints FAIL and STOP in every trapped block (23.855584ms)
+✔ Compose helper preserves Docker client settings and clears file-derived interpolation overrides (84.856709ms)
+✔ every Mac-side ssh that does not feed a heredoc uses -n, so a pipe-fed operator shell keeps its own stdin (0.694291ms)
+✔ optional provider input accepts absent/null and ordered IDs, and rejects invalid or duplicate lists (412.952292ms)
+✔ absent/null provider step preserves release-1 bytes and never queries settings; close records no step (1104.261666ms)
+✔ provider switch removes the singular line and adds exactly one ordered list before restart, with proof and close (713.920833ms)
+✔ identical provider assignment is a byte and inode no-op with enabled-provider evidence (545.367875ms)
+✔ provider validation refuses conflicts, invalid lists, catalog and GoTrue failures before attempt; R0 stays available (7944.488458ms)
+✔ unrelated service.env differences stop switch, forward proof, rollback and close without overwriting drift (3140.195375ms)
+✔ rollback restores exact snapshot and open digest before baseline restart; recovered close records the step (2284.275375ms)
+✔ snapshot tampering stops provider switch and rollback before restarting (1382.057375ms)
+✔ atomic provider write preserves a non-default fixture mode and replaces its inode (416.5885ms)
+✔ real oauth_env accepts the switched digest and refuses unrelated service.env drift (669.37075ms)
+✔ switched env passes the exact 2ab464ae provider parser; retaining the singular key refuses startup providers (536.15625ms)
+✔ release catalog must be readable and recognized before receipt; catalog IDs come from the release tree (1454.542959ms)
+✔ switched provider step rerun is a byte and inode no-op (598.450125ms)
+✔ atomic write failure before rename removes the same-directory secret temp and prints only its path (688.779917ms)
+ℹ tests 51
+ℹ suites 0
+ℹ pass 50
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 1
+ℹ todo 0
+ℹ duration_ms 28264.7355

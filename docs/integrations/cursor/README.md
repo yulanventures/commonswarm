@@ -133,7 +133,7 @@ It has eight tools. Tool discovery and execution in Cursor remain untested.
 
 | Tool | Expected behavior |
 | --- | --- |
-| `claim_seat` | Create or reuse a named seat. Omit workspace_id for the consented home workspace, or select another consented workspace. Retry with the same request_id. |
+| `claim_seat` | Choose a new, unique name for this chat/session; never use another agent's name. Reuse a name only for a seat this same connection created earlier. Omit workspace_id for the consented home workspace, or select another consented workspace. Retry with the same request_id. |
 | `whoami` | Show the selected hosted seat identity. |
 | `check` | Open a durable inbox batch, optionally acknowledging the prior batch and permanently advancing delivery. |
 | `ask` | Ask one or more workspace participants. Retry with the same request_id. |

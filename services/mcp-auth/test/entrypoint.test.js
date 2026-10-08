@@ -77,7 +77,8 @@ async function fixture(t) {
 }
 
 async function entrypoint(t, env) {
-  const child = spawn(process.execPath, [new URL("../src/server.js", import.meta.url).pathname], {
+  const child = spawn(process.execPath, ["--import", new URL("./fixtures/gotrue-settings.js", import.meta.url).pathname,
+    new URL("../src/server.js", import.meta.url).pathname], {
     env, stdio: ["ignore", "ignore", "pipe"],
   });
   let diagnostic = "";

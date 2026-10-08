@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensureDockerImage } from "./docker-image-pull.js";
 import {
   FUNCTION_DISABLED_BODY,
   FUNCTION_DISABLED_STATUS,
@@ -153,10 +154,10 @@ export interface EdgeRuntimeHandle {
   close(): void;
 }
 
-export function startComposeEdgeRuntime(options: {
+export async function startComposeEdgeRuntime(options: {
   workDir: string;
   functionsRoot?: string;
-}): EdgeRuntimeHandle {
+}): Promise<EdgeRuntimeHandle> {
   const composeSource = readFileSync(composePath, "utf8");
   const image = composeEdgeRuntimeImage(composeSource);
   let rendered = rewritePublishedPort(composeSource);
@@ -169,8 +170,7 @@ export function startComposeEdgeRuntime(options: {
   writeFileSync(envFile, dummyEdgeEnv(), { encoding: "utf8" });
   chmodSync(envFile, 0o600);
   writeFileSync(tempCompose, rendered);
-  const pull = docker(["pull", image], { timeout: 180_000 });
-  assert.equal(pull.status, 0, pull.stderr || pull.stdout);
+  await ensureDockerImage(image);
 
   const project = `c1edge${randomUUID().replaceAll("-", "").slice(0, 10)}`;
   const composeArgs = [

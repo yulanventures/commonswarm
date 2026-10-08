@@ -3313,16 +3313,19 @@ function ownerJwt(amr: unknown) {
   return `${encode({ alg: 'none', typ: 'JWT' })}.${encode({ amr })}.sig`;
 }
 
-function ownerClientJs(source: string, opts: { accessToken?: string; commandStatus?: number; commandBody?: unknown } = {}) {
+type OwnerClientOptions = { accessToken?: string; commandStatus?: number; commandBody?: unknown; nowSeconds?: number };
+
+function ownerClientJs(source: string, opts: OwnerClientOptions = {}) {
   const js = source.match(/<<'JS'\n([\s\S]*?)^JS$/m)![1]!;
   const imports = js.split('\n').filter(l => l.startsWith('import ') && (l.includes('node:fs') || l.includes('node:crypto') || l.includes('fresh-auth'))).join('\n');
   const body = js.split('\n').filter(l => !l.startsWith('import ')).join('\n');
   const canon = 'canonical-client';
   const metadata = digest(canon);
-  const token = opts.accessToken ?? ownerJwt([{ method: 'password', timestamp: Math.floor(Date.now() / 1000) }]);
+  const token = opts.accessToken ?? ownerJwt([{ method: 'password', timestamp: opts.nowSeconds ?? Math.floor(Date.now() / 1000) }]);
   const commandStatus = opts.commandStatus ?? 200;
   const commandBody = opts.commandBody ?? { status: 'accepted' };
   const mocks = `
+${opts.nowSeconds === undefined ? '' : `Date.now = () => ${opts.nowSeconds * 1000};`}
 function canonicalAdminJson(){ return ${JSON.stringify(canon)}; }
 async function credentialStore(){ return {}; }
 async function refreshedCredential(){ return { userId: '22222222-2222-4222-8222-222222222222', accessToken: ${JSON.stringify(token)} }; }
@@ -3340,7 +3343,7 @@ globalThis.fetch = async (url, init) => {
   return { js: `${imports}\n${mocks}\n${body}\n`, metadata };
 }
 
-function runOwnerClient(source: string, proof: string, action: string, opts: { accessToken?: string; commandStatus?: number; commandBody?: unknown } = {}) {
+function runOwnerClient(source: string, proof: string, action: string, opts: OwnerClientOptions = {}) {
   const { js, metadata } = ownerClientJs(source, opts);
   const inputs = join(proof, 'C1-inputs.json');
   const target = join(proof, 'target.json');
@@ -3506,9 +3509,12 @@ test('C1-31: owner-client-command sends Origin, prechecks AMR freshness at 240 s
   }
   assert.match(plan, /the owner signs in again interactively in the owner file-store CLI session, then execute ai-w6-owner-client-command/);
 
-  const now = Math.floor(Date.now() / 1000);
+  const boundNow = Math.floor(Date.now() / 1000);
+  // Freeze the child process clock before the unchanged plan body reads AMR age.
+  const runAtBoundNow = (proof: string, action: string, opts: OwnerClientOptions = {}) =>
+    runOwnerClient(current, proof, action, { nowSeconds: boundNow, ...opts });
   const originOk = mkdtempSync(join(scratch, 'occ-c131-origin-'));
-  const sent = runOwnerClient(current, originOk, 'approve');
+  const sent = runAtBoundNow(originOk, 'approve');
   assert.equal(sent.status, 0, sent.stderr + sent.stdout);
   const commandCalls = ownerFetchLog(originOk).filter(c => c.command);
   assert.equal(commandCalls.length, 1);
@@ -3516,14 +3522,14 @@ test('C1-31: owner-client-command sends Origin, prechecks AMR freshness at 240 s
 
   for (const method of interactiveMethods) {
     const d = mkdtempSync(join(scratch, 'occ-c131-amr-'));
-    const r = runOwnerClient(current, d, 'approve', { accessToken: ownerJwt([{ method, timestamp: now - 1 }]) });
+    const r = runAtBoundNow(d, 'approve', { accessToken: ownerJwt([{ method, timestamp: boundNow - 1 }]) });
     assert.equal(r.status, 0, `${method}: ${r.stderr}`);
     assert.ok(ownerFetchLog(d).some(c => c.command), method);
   }
   const excluded = mkdtempSync(join(scratch, 'occ-c131-amr-ex-'));
   const excludedMethod = interactiveMethods.includes('token_refresh') ? `${interactiveMethods[0]}-alias` : 'token_refresh';
-  const missingMethod = runOwnerClient(current, excluded, 'approve', {
-    accessToken: ownerJwt([{ method: excludedMethod, timestamp: now - 1 }]),
+  const missingMethod = runAtBoundNow(excluded, 'approve', {
+    accessToken: ownerJwt([{ method: excludedMethod, timestamp: boundNow - 1 }]),
   });
   assert.notEqual(missingMethod.status, 0);
   assert.match(missingMethod.stderr, /FAIL owner client command; interactive owner sign-in expected under 240 s got missing; sign in again with the owner file-store CLI session and rerun this block; STOP/);
@@ -3531,7 +3537,7 @@ test('C1-31: owner-client-command sends Origin, prechecks AMR freshness at 240 s
   assert.ok(!existsSync(join(excluded, 'approve-request-id')));
 
   const stringAmr = mkdtempSync(join(scratch, 'occ-c131-amr-str-'));
-  const stringOnly = runOwnerClient(current, stringAmr, 'withdraw', { accessToken: ownerJwt(['password']) });
+  const stringOnly = runAtBoundNow(stringAmr, 'withdraw', { accessToken: ownerJwt(['password']) });
   assert.notEqual(stringOnly.status, 0);
   assert.match(stringOnly.stderr, /got missing/);
   assert.equal(ownerFetchLog(stringAmr).length, 0);
@@ -3539,43 +3545,54 @@ test('C1-31: owner-client-command sends Origin, prechecks AMR freshness at 240 s
 
   const stale = mkdtempSync(join(scratch, 'occ-c131-stale-'));
   writeFileSync(join(stale, 'unrelated.txt'), 'keep\n');
-  const staleRun = runOwnerClient(current, stale, 'withdraw', {
-    accessToken: ownerJwt([{ method: interactiveMethods[0], timestamp: now - 241 }]),
+  const staleRun = runAtBoundNow(stale, 'withdraw', {
+    accessToken: ownerJwt([{ method: interactiveMethods[0], timestamp: boundNow - 241 }]),
   });
   assert.notEqual(staleRun.status, 0);
   assert.match(staleRun.stderr, /FAIL owner client command; interactive owner sign-in expected under 240 s got stale; sign in again with the owner file-store CLI session and rerun this block; STOP/);
   assert.equal(ownerFetchLog(stale).length, 0);
   assert.ok(!existsSync(join(stale, 'withdraw-request-id')));
-  const rerun = runOwnerClient(current, stale, 'withdraw');
+  const rerun = runAtBoundNow(stale, 'withdraw');
   assert.equal(rerun.status, 0, rerun.stderr + rerun.stdout);
   assert.ok(existsSync(join(stale, 'withdraw-request-id')));
 
-  const boundNow = Math.floor(Date.now() / 1000);
   for (const [label, offset] of [['near-stale', -239], ['skew-ok', 3]] as const) {
     const d = mkdtempSync(join(scratch, `occ-c131-${label}-`));
-    const r = runOwnerClient(current, d, 'approve', {
+    const r = runAtBoundNow(d, 'approve', {
       accessToken: ownerJwt([{ method: interactiveMethods[0], timestamp: boundNow + offset }]),
     });
     assert.equal(r.status, 0, `${label}: ${r.stderr}`);
     assert.ok(ownerFetchLog(d).some(c => c.command), label);
   }
+  // Negative control: the same near-stale token must refuse when the injected
+  // clock advances, proving that the child actually uses the supplied time.
+  const clockControl = mkdtempSync(join(scratch, 'occ-c131-clock-control-'));
+  const clockRefusal = runAtBoundNow(clockControl, 'approve', {
+    nowSeconds: boundNow + 3600,
+    accessToken: ownerJwt([{ method: interactiveMethods[0], timestamp: boundNow - 239 }]),
+  });
+  assert.notEqual(clockRefusal.status, 0);
+  assert.match(clockRefusal.stderr, /interactive owner sign-in expected under 240 s got stale/);
+  assert.equal(ownerFetchLog(clockControl).length, 0);
+  assert.ok(!existsSync(join(clockControl, 'approve-request-id')));
+
   const future = mkdtempSync(join(scratch, 'occ-c131-future-'));
   writeFileSync(join(future, 'unrelated.txt'), 'keep\n');
-  const futureRun = runOwnerClient(current, future, 'withdraw', {
+  const futureRun = runAtBoundNow(future, 'withdraw', {
     accessToken: ownerJwt([{ method: interactiveMethods[0], timestamp: boundNow + 10 }]),
   });
   assert.notEqual(futureRun.status, 0);
   assert.match(futureRun.stderr, /FAIL owner client command; interactive owner sign-in expected under 240 s got future; sign in again with the owner file-store CLI session and rerun this block; STOP/);
   assert.equal(ownerFetchLog(future).length, 0);
   assert.ok(!existsSync(join(future, 'withdraw-request-id')));
-  const futureRerun = runOwnerClient(current, future, 'withdraw');
+  const futureRerun = runAtBoundNow(future, 'withdraw');
   assert.equal(futureRerun.status, 0, futureRerun.stderr + futureRerun.stdout);
   assert.ok(existsSync(join(future, 'withdraw-request-id')));
 
   const saved = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   const refused = mkdtempSync(join(scratch, 'occ-c131-403-'));
   writeFileSync(join(refused, 'approve-request-id'), saved + '\n', { mode: 0o600 });
-  const stored = runOwnerClient(current, refused, 'approve', {
+  const stored = runAtBoundNow(refused, 'approve', {
     commandStatus: 403,
     commandBody: { error: 'human_confirmation_required' },
   });
@@ -4808,7 +4825,7 @@ test('admin release plan: W6 edge oauth-runtime grant is after ai-db-session, be
   assert.match(revoke, /edge-oauth-runtime-revoke-grantors\.txt\.tmp/);
   assert.match(revoke, /mv -f "\$PROOF_DIR\/edge-oauth-runtime-revoke-grantors\.txt\.tmp" "\$PROOF_DIR\/edge-oauth-runtime-revoke-grantors\.txt"/);
   assert.match(revoke, /rm -f "\$PROOF_DIR\/edge-oauth-runtime-revoke-grantors\.txt\.tmp"/);
-  assert.match(revoke, /a started revoke is never re-run/);
+  assert.doesNotMatch(revoke, /a started revoke is never re-run/);
   assert.match(revoke, /no this-window grant evidence; revoke skipped/);
   assert.match(revoke, /Pre-existing exact SET grant/);
   assert.match(revoke, /membership absent at recovery/);
@@ -4837,7 +4854,7 @@ test('admin release plan: W6 edge oauth-runtime grant is after ai-db-session, be
     /edge-oauth-runtime-membership-one-fft/);
 });
 
-test('admin release plan: edge oauth-runtime grant refuses closed-issuance, missing roles, drift and a started retry', () => {
+test('admin release plan: edge oauth-runtime grant refuses open issuance, missing roles and a started retry', () => {
   const grant = block('ai-w6-edge-oauth-runtime-grant');
   const proof = mkdtempSync(join(scratch, 'edge-grant-'));
   const env = { WINDOW: 'W6', PROOF_DIR: proof, SECRET_STAGE: makeStage(), PSQL_IMAGE: 'fixture-postgres' };
@@ -4852,7 +4869,7 @@ test('admin release plan: edge oauth-runtime grant refuses closed-issuance, miss
   assert.notEqual(missingRoles.status, 0);
   assert.match(missingRoles.stderr, /FAIL ai-w6-edge-oauth-runtime-grant: roles commonswarm_edge and commonswarm_oauth_runtime expected present got absent; STOP/);
   writeFileSync(join(proof, 'edge-oauth-runtime-grant-attempted.txt'), '2026-10-07T00:00:00Z\n');
-  const started = run(harness('case "$*" in *admin_issuance_enabled*) printf t;; *pg_roles*) printf t;; *) printf issuer-row;; esac') + grant, env);
+  const started = run('python3() { return 0; }\n' + harness('case "$*" in *admin_issuance_enabled*) printf t;; *pg_roles*) printf t;; *) printf issuer-row;; esac') + grant, env);
   assert.notEqual(started.status, 0);
   assert.match(started.stderr, /FAIL ai-w6-edge-oauth-runtime-grant: a started grant is never re-run; STOP/);
   assert.ok(!existsSync(join(proof, 'edge-oauth-runtime-grant.txt')));
@@ -4864,7 +4881,7 @@ test('admin release plan: edge oauth-runtime revoke follows the attempted marker
   const sqlHasPerGrantorRevoke = 'grep -q "REVOKE commonswarm_oauth_runtime FROM commonswarm_edge GRANTED BY %I" "$PROOF_DIR/edge-oauth-runtime-revoke.sql" 2>/dev/null && ! grep -q commonswarm_admin_issuer "$PROOF_DIR/edge-oauth-runtime-revoke.sql" 2>/dev/null';
   const membership = (count: string, afterSql = '0') =>
     `ai_ro() { case "$*" in *pg_auth_members*) if ${sqlHasPerGrantorRevoke}; then printf '${afterSql}\\n'; else printf '${count}\\n'; fi;; *) printf 'UNEXPECTED\\n'; return 9;; esac; }\n`;
-  const dbOk = `ai_db() { ${sqlHasPerGrantorRevoke} || return 9; printf '%s\\n' "$*" >>"$PROOF_DIR/ai_db.log"; printf 'postgres\\n'; return 0; }\n`;
+  const dbOk = `ai_db() { test -f "$PROOF_DIR/edge-oauth-runtime-revoke-attempted.txt" || return 8; ${sqlHasPerGrantorRevoke} || return 9; printf '%s\\n' "$*" >>"$PROOF_DIR/ai_db.log"; printf 'postgres\\n'; return 0; }\n`;
   const dbFail = `ai_db() { printf 'unexpected-ai_db\\n' >&2; return 9; }\n`;
   const skipProof = mkdtempSync(join(scratch, 'edge-revoke-skip-'));
   const skip = run(revoke, { WINDOW: 'W6', PROOF_DIR: skipProof });
@@ -4875,9 +4892,20 @@ test('admin release plan: edge oauth-runtime revoke follows the attempted marker
   const startedProof = mkdtempSync(join(scratch, 'edge-revoke-started-'));
   writeFileSync(join(startedProof, 'edge-oauth-runtime-grant.txt'), GRANT_PASS + '\n');
   writeFileSync(join(startedProof, 'edge-oauth-runtime-revoke-attempted.txt'), '2026-10-07T00:00:00Z\n');
-  const started = run(revoke, { WINDOW: 'W6', PROOF_DIR: startedProof });
-  assert.notEqual(started.status, 0);
-  assert.match(started.stderr, /FAIL ai-w6-edge-oauth-runtime-revoke: a started revoke is never re-run; STOP/);
+  const started = run(membership('0') + dbFail + revoke, { WINDOW: 'W6', PROOF_DIR: startedProof });
+  assert.equal(started.status, 0, started.stderr);
+  assert.equal(readFileSync(join(startedProof, 'edge-oauth-runtime-absent.txt'), 'utf8'), ABSENT_PASS + '; reconciled after started revoke\n');
+  assert.ok(!existsSync(join(startedProof, 'edge-oauth-runtime-revoke.txt')));
+  const startedPresentProof = mkdtempSync(join(scratch, 'edge-revoke-started-present-'));
+  writeFileSync(join(startedPresentProof, 'edge-oauth-runtime-grant.txt'), GRANT_PASS + '\n');
+  const originalMarker = '2026-10-07T00:00:00Z\n';
+  writeFileSync(join(startedPresentProof, 'edge-oauth-runtime-revoke-attempted.txt'), originalMarker);
+  const startedPresent = run(membership('2') + dbOk + revoke, { WINDOW: 'W6e', PROOF_DIR: startedPresentProof });
+  assert.equal(startedPresent.status, 0, startedPresent.stderr);
+  assert.equal(readFileSync(join(startedPresentProof, 'edge-oauth-runtime-revoke.txt'), 'utf8'), REVOKE_PASS + '\n');
+  assert.equal(readFileSync(join(startedPresentProof, 'edge-oauth-runtime-revoke-attempted.txt'), 'utf8'), originalMarker);
+  assert.equal(readFileSync(join(startedPresentProof, 'ai_db.log'), 'utf8').trim().split('\n').length, 1);
+  assert.ok(!existsSync(join(startedPresentProof, 'edge-oauth-runtime-absent.txt')));
   const committedProof = mkdtempSync(join(scratch, 'edge-revoke-committed-'));
   writeFileSync(join(committedProof, 'edge-oauth-runtime-grant-attempted.txt'), '2026-10-07T00:00:00Z\n');
   const committed = run(membership('1') + dbOk + revoke, { WINDOW: 'W6', PROOF_DIR: committedProof });
@@ -4913,6 +4941,26 @@ test('admin release plan: edge oauth-runtime revoke follows the attempted marker
   assert.equal(readFileSync(join(absentProof, 'edge-oauth-runtime-absent.txt'), 'utf8'), ABSENT_PASS + '\n');
   assert.ok(!existsSync(join(absentProof, 'edge-oauth-runtime-revoke.txt')));
   assert.ok(!existsSync(join(absentProof, 'ai_db.log')));
+  assert.ok(!existsSync(join(absentProof, 'edge-oauth-runtime-revoke-attempted.txt')));
+  for (const phase of ['before', 'after', 'started'] as const) {
+    const proof = mkdtempSync(join(scratch, `edge-revoke-read-failure-${phase}-`));
+    writeFileSync(join(proof, 'edge-oauth-runtime-grant-attempted.txt'), '2026-10-07T00:00:00Z\n');
+    if (phase === 'started') writeFileSync(join(proof, 'edge-oauth-runtime-revoke-attempted.txt'), '2026-10-07T00:00:00Z\n');
+    const ro = phase === 'after'
+      ? `ai_ro() { if test -f "$PROOF_DIR/ai_db.log"; then return 9; fi; test ! -e "$PROOF_DIR/edge-oauth-runtime-revoke-attempted.txt" || return 8; printf '1\\n'; }\n`
+      : `ai_ro() { return 9; }\n`;
+    const result = run(ro + dbOk + revoke, { WINDOW: 'W6', PROOF_DIR: proof });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /STOP \(retryable: re-run to reconcile\)/);
+    assert.ok(!existsSync(join(proof, 'edge-oauth-runtime-revoke.txt')));
+    assert.ok(!existsSync(join(proof, 'edge-oauth-runtime-absent.txt')));
+    assert.equal(existsSync(join(proof, 'edge-oauth-runtime-revoke-attempted.txt')), phase !== 'before');
+    assert.equal(existsSync(join(proof, 'ai_db.log')), phase === 'after');
+    const retry = run(membership(phase === 'before' ? '1' : '0') + dbOk + revoke, { WINDOW: 'W6', PROOF_DIR: proof });
+    assert.equal(retry.status, 0, retry.stderr);
+    const receipt = phase === 'before' ? 'edge-oauth-runtime-revoke.txt' : 'edge-oauth-runtime-absent.txt';
+    assert.ok(existsSync(join(proof, receipt)));
+  }
   const successClose = close.indexOf('test -f "$PROOF_DIR/edge-oauth-runtime-grant.txt" && test ! -L "$PROOF_DIR/edge-oauth-runtime-grant.txt"');
   const preActClose = close.indexOf('W6 edge-oauth-runtime-grant-pre-activation.txt expected exact-PASS-line');
   const recoveredClose = close.indexOf('revoke-or-absent evidence expected present after this-window grant attempt');
@@ -4921,6 +4969,31 @@ test('admin release plan: edge oauth-runtime revoke follows the attempted marker
   assert.match(close, new RegExp(REVOKE_PASS.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(close, new RegExp(ABSENT_PASS.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(close, new RegExp(PRE_ACT_PASS.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
+test('admin release plan: reconciled absence permits recovered close only with a live zero count', () => {
+  const close = block('ai-close');
+  const start = close.indexOf('if test "$CLOSE_RESULT" = recovered && { test "$WINDOW" = W6 || test "$WINDOW" = W6e; }; then\n GRANT_ATTEMPTED=0');
+  const end = close.indexOf('test ! -e "$PROOF_DIR/closed.txt"', start);
+  assert.ok(start > 0 && end > start);
+  const proof = mkdtempSync(join(scratch, 'edge-reconciled-close-'));
+  writeFileSync(join(proof, 'edge-oauth-runtime-grant-attempted.txt'), '2026-10-07T00:00:00Z\n');
+  writeFileSync(join(proof, 'edge-oauth-runtime-revoke-attempted.txt'), '2026-10-07T00:00:00Z\n');
+  writeFileSync(join(proof, 'edge-oauth-runtime-absent.txt'), ABSENT_PASS + '; reconciled after started revoke\n');
+  const clause = 'set -euo pipefail\n' + close.slice(start, end);
+  for (const count of ['0', '1', 'error']) {
+    const harness = count === 'error' ? 'ai_ro() { return 9; }\n' : `ai_ro() { printf '${count}\\n'; }\n`;
+    const result = run(harness + clause, { WINDOW: 'W6e', CLOSE_RESULT: 'recovered', PROOF_DIR: proof });
+    if (count === '0') assert.equal(result.status, 0, result.stderr);
+    else {
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /membership expected absent at close/);
+    }
+  }
+  writeFileSync(join(proof, 'edge-oauth-runtime-absent.txt'), 'unproven absence\n');
+  const invalid = run('ai_ro() { printf 0; }\n' + clause, { WINDOW: 'W6e', CLOSE_RESULT: 'recovered', PROOF_DIR: proof });
+  assert.notEqual(invalid.status, 0);
+  assert.match(invalid.stderr, /revoke-or-absent evidence expected present/);
 });
 
 test('admin release plan: edge-login producer writes 0600 service files from SWARM_DATABASE_URL and never prints', () => {
@@ -4943,6 +5016,39 @@ test('admin release plan: edge-login producer writes 0600 service files from SWA
     assert.notEqual(wrongUser.status, 0);
     assert.doesNotMatch(wrongUser.stdout + wrongUser.stderr, /other|postgres:\/\//);
   } finally { removeStage(stage); }
+});
+
+test('admin release plan: invalid edge-login URL stops before grant; valid files exist when grant runs', () => {
+  for (const valid of [false, true]) {
+    const stage = makeStage();
+    try {
+      const proof = mkdtempSync(join(scratch, 'edge-grant-preflight-'));
+      const envFile = join(proof, 'box.env');
+      writeFileSync(envFile, `SWARM_DATABASE_URL=postgres://${valid ? 'commonswarm_edge' : 'postgres'}:fixture-password@db.commonswarm.internal:5432/postgres\n`, { mode: 0o600 });
+      writeFileSync(join(stage, 'service.conf'), '[target]\nhost=db.commonswarm.internal\nport=5432\ndbname=postgres\nuser=supabase_admin\nsslmode=verify-full\n', { mode: 0o600 });
+      const grant = block('ai-w6-edge-oauth-runtime-grant').replace('python3 - /home/commonswarm/.env', `python3 - "${envFile}"`);
+      const harness = `
+        ai_ro() { case "$*" in *admin_issuance_enabled*|*pg_roles*|*edge-oauth-runtime-readback.sql*) printf t;; *) printf 'issuer-row\\n';; esac; }
+        ai_db() {
+          test -f "$SECRET_STAGE/edge-login-service.conf" && test -f "$SECRET_STAGE/edge-login-pass" || return 8
+          printf 'grant-called\\n' >>"$PROOF_DIR/ai_db.log"
+        }
+        docker() { printf 'commonswarm_edge\\ncommonswarm_oauth_runtime\\ncommonswarm_edge\\ncommonswarm_oauth_runtime\\ncommonswarm_edge\\n'; }
+      `;
+      const result = run(harness + grant, { WINDOW: 'W6', PROOF_DIR: proof, SECRET_STAGE: stage, PSQL_IMAGE: 'fixture-postgres' });
+      if (valid) {
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(readFileSync(join(proof, 'ai_db.log'), 'utf8'), 'grant-called\n');
+        assert.equal(readFileSync(join(proof, 'edge-oauth-runtime-grant.txt'), 'utf8'), GRANT_PASS + '\n');
+      } else {
+        assert.notEqual(result.status, 0);
+        assert.match(result.stderr, /edge-login files from SWARM_DATABASE_URL expected prepared got refused; STOP/);
+        assert.ok(!existsSync(join(proof, 'ai_db.log')));
+        assert.ok(!existsSync(join(proof, 'edge-oauth-runtime-grant-attempted.txt')));
+        assert.ok(!existsSync(join(proof, 'edge-oauth-runtime-grant.txt')));
+      }
+    } finally { removeStage(stage); }
+  }
 });
 
 test('C1-38: live controls bind the measured edge SHA for every window phase and both consent phases', () => {
@@ -5043,4 +5149,142 @@ test('C1-38b: historical W2b receipts pass proof-check only; current release req
     const refused = current.check(); assert.notEqual(refused.status, 0);
     assert.match(refused.stderr, new RegExp(kind + ' receipt keys expected exact-schema-set'));
   }
+});
+
+// Administrative close has its own executable boundary: fixture paths replace
+// fixed Mac roots; only urllib's external ingress is stubbed. No real home writes.
+test('W5 administrative close records released evidence once, retains opening receipts and guards cleanup', () => {
+  const root = mkdtempSync(join(realpathSync(scratch), 'w5-admin-close.'));
+  const bin = join(root, 'bin'), proofs = join(root, 'proofs'); mkdirSync(bin); mkdirSync(proofs);
+  const pythonPath = spawnSync('which', ['python3'], { encoding: 'utf8' }).stdout.trim();
+  const rmPath = spawnSync('which', ['rm'], { encoding: 'utf8' }).stdout.trim();
+  const httpCalls = join(root, 'http-calls'), rmCalls = join(root, 'rm-calls');
+  writeFileSync(join(bin, 'sitecustomize.py'), `import json,os,urllib.request
+class Response:
+    status=200
+    headers={'Access-Control-Allow-Origin':'*','Cache-Control':'no-store'}
+    def __init__(self,method): self.method=method
+    def __enter__(self): return self
+    def __exit__(self,*args): pass
+    def read(self,n):
+        if self.method=='HEAD': return b'x' if os.environ.get('BAD_HEAD') else b''
+        return json.dumps({'state':os.environ.get('GATE_STATE','closed')}).encode()
+def urlopen(req,timeout):
+    assert req.full_url=='https://mcp.commonswarm.com/admin/gate'
+    assert req.get_header('Origin')=='https://commonswarm.com'
+    with open(os.environ['HTTP_CALLS'],'a') as f: f.write(req.method+'\\n')
+    return Response(req.method)
+urllib.request.urlopen=urlopen
+`);
+  // Delegates to the installed guarded rm, never /bin/rm; a refusal preserves prep.
+  writeFileSync(join(bin, 'rm'), `#!/bin/bash\nprintf '%s\\n' "$*" >>"$RM_CALLS"\nif test "$REFUSE_RM" = yes; then printf 'fixture guard refusal\\n' >&2; exit 1; fi\nexec '${rmPath}' "$@"\n`, { mode: 0o700 });
+  writeFileSync(join(bin, 'python3'), `#!/bin/bash\nexec '${pythonPath}' "$@"\n`, { mode: 0o700 });
+  const production = block('ai-w5-admin-close');
+  assert.equal(production.split('/Users/yulanbot/work/hm37-live-release').length - 1, 1);
+  assert.equal(production.split("r'/private/tmp/admin-issuance-prep\\.").length - 1, 2);
+  const source = production.replaceAll('/Users/yulanbot/work/hm37-live-release', proofs)
+    .replaceAll("r'/private/tmp/admin-issuance-prep\\.", `r'${root.replace(/[.]/g, '\\.')}/admin-issuance-prep\\.`)
+    .replaceAll('/Users/yulanbot/.local/bin/rm', join(bin, 'rm'));
+  const fixture = (receipts = true) => {
+    const prep = mkdtempSync(join(root, 'admin-issuance-prep.')); chmodSync(prep, 0o700);
+    const site = mkdtempSync(join(root, 'site.'));
+    const inputs = join(prep, 'INPUTS.json');
+    const windowId = basename(prep).slice(-6), proof = join(proofs, `${sha}-W5-${windowId}`);
+    const archive = `W5 release archive ${windowId}\n`;
+    writeFileSync(join(prep, 'release.tar'), archive);
+    // Historical INPUTS binds its own old plan. Approval must bind THIS plan.
+    writeFileSync(inputs, JSON.stringify({ ...base(), window: 'W5', window_id: windowId, plan_sha256: hex, archive_sha256: digest(archive) }));
+    const approvalFile = join(root, `${windowId}-approval.json`);
+    const approved = { approver: 'HezLead', action: 'w5-administrative-close', release_sha: sha, window_id: windowId, plan_sha256: digest(plan), prompt_ref: 'task/ruling-option-A' };
+    writeFileSync(approvalFile, JSON.stringify(approved));
+    writeFileSync(join(site, 'receipt.txt'), 'site released\n');
+    const manifest = JSON.stringify([{ path: 'receipt.txt', sha256: digest('site released\n') }]);
+    writeFileSync(join(site, 'manifest.json'), manifest);
+    const close = `CLOSED=yes\nOUTCOME=released\nPIN_RELEASED=yes\nMANIFEST_SHA256=${digest(manifest)}\n`;
+    writeFileSync(join(site, 'CLOSE.txt'), close);
+    if (receipts) {
+      mkdirSync(join(prep, 'w5-live-before'));
+      for (const name of ['ordinary-before.json', 'consent-pre-W1.json']) writeFileSync(join(prep, 'w5-live-before', name), JSON.stringify({ retained: name }));
+    }
+    const env = { W5_INPUTS_FILE: inputs, W5_SITE_EVIDENCE: site, W5_PREP_DIR: prep,
+      W5_ADMIN_REASON: 'owner-retired-seat-name-held', W5_ADMIN_APPROVAL_FILE: approvalFile,
+      PLAN_FILE: planPath, PYTHONPATH: bin, PATH: `${bin}:${process.env.PATH}`, HTTP_CALLS: httpCalls, RM_CALLS: rmCalls };
+    return { prep, site, inputs, approved, approvalFile, proof, env, close, manifest, windowId };
+  };
+  const execute = (f: ReturnType<typeof fixture>, extra: Record<string, string> = {}) => run(source, { ...f.env, ...extra });
+  const good = fixture();
+  const positive = execute(good);
+  assert.equal(positive.status, 0, positive.stderr);
+  assert.equal(positive.stdout, `PASS W5 closed-administrative: ${sha} ${good.windowId} owner-retired-seat-name-held\n`);
+  assert.equal(existsSync(good.prep), false);
+  assert.equal(readFileSync(httpCalls, 'utf8'), 'GET\nHEAD\n');
+  assert.deepEqual(readdirSync(good.proof).sort(), ['closed-administrative.json', 'consent-pre-W1.json', 'ordinary-before.json']);
+  const recordPath = join(good.proof, 'closed-administrative.json');
+  const record = JSON.parse(readFileSync(recordPath, 'utf8'));
+  assert.equal(lstatSync(recordPath).mode & 0o777, 0o600);
+  const evidence: Record<string, {path: string; sha256: string}> = {
+    site_close: { path: join(good.site, 'CLOSE.txt'), sha256: digest(good.close) },
+    manifest: { path: join(good.site, 'manifest.json'), sha256: digest(good.manifest) },
+  };
+  for (const name of ['ordinary-before.json', 'consent-pre-W1.json']) {
+    assert.equal(lstatSync(join(good.proof, name)).mode & 0o777, 0o600);
+    evidence[name] = { path: join(good.proof, name), sha256: digest(JSON.stringify({ retained: name })) };
+    assert.equal(digest(readFileSync(evidence[name].path)), evidence[name].sha256);
+  }
+  assert.match(record.recorded_at, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+  assert.deepEqual(record, { result: 'closed-administrative', release_sha: sha, window_id: good.windowId,
+    reason: 'owner-retired-seat-name-held', approval_sha256: digest(readFileSync(good.approvalFile)),
+    site_close_sha256: digest(good.close), manifest_sha256: digest(good.manifest), gate: 'closed', recorded_at: record.recorded_at, evidence });
+  const noReceipts = fixture(false); const optional = execute(noReceipts);
+  assert.equal(optional.status, 0, optional.stderr);
+  assert.deepEqual(readdirSync(noReceipts.proof), ['closed-administrative.json']);
+  type Fixture = ReturnType<typeof fixture>;
+  const approvePlan = (f: Fixture, text: string) => {
+    const file = join(root, `${f.windowId}-plan.md`); writeFileSync(file, text);
+    writeFileSync(f.approvalFile, JSON.stringify({ ...f.approved, plan_sha256: digest(text) }));
+    return { PLAN_FILE: file };
+  };
+  const cases: [string, (f: Fixture) => Record<string, string> | void, RegExp][] = [
+    ['plan without admin block', f => approvePlan(f, plan.replace('# step: ai-w5-admin-close\n', '# step: retired-w5-admin-close\n')), /PLAN_FILE expected exactly one ai-w5-admin-close block got 0/],
+    ['plan with duplicate admin block', f => approvePlan(f, plan + '\n```sh\n' + production + '```\n'), /PLAN_FILE expected exactly one ai-w5-admin-close block got 2/],
+    ['prep archive mismatch', f => writeFileSync(join(f.prep, 'release.tar'), 'other window archive'), /W5_PREP_DIR\/release\.tar bytes expected input-archive_sha256 got mismatch/],
+    ['INPUTS array', f => writeFileSync(f.inputs, '[]'), /INPUTS expected JSON object got other/],
+    ['INPUTS null', f => writeFileSync(f.inputs, 'null'), /INPUTS expected JSON object got other/],
+    ['outcome', f => writeFileSync(join(f.site, 'CLOSE.txt'), f.close.replace('OUTCOME=released', 'OUTCOME=rolled-back')), /site manifest.*refused/],
+    ['manifest row', f => writeFileSync(join(f.site, 'receipt.txt'), 'wrong'), /site manifest.*refused/],
+    ['manifest binding', f => writeFileSync(join(f.site, 'CLOSE.txt'), f.close.replace(digest(f.manifest), hex)), /site manifest.*refused/],
+    ['gate OPEN', () => ({ GATE_STATE: 'open' }), /GET \/admin\/gate body expected closed got open/],
+    ['HEAD nonempty', () => ({ BAD_HEAD: 'yes' }), /HEAD \/admin\/gate body expected empty got nonempty/],
+    ['closed.txt', f => { mkdirSync(f.proof, {mode:0o700}); writeFileSync(join(f.proof, 'closed.txt'), 'existing'); }, /closed\.txt expected absent got present/],
+    ['existing admin', f => { mkdirSync(f.proof, {mode:0o700}); writeFileSync(join(f.proof, 'closed-administrative.json'), 'existing'); }, /closed-administrative\.json expected absent got present/],
+    ['approval action', f => writeFileSync(f.approvalFile, JSON.stringify({...f.approved, action:'activate-admin-issuance-and-smoke'})), /approval expected six-key/],
+    ['approval plan', f => writeFileSync(f.approvalFile, JSON.stringify({...f.approved, plan_sha256:hex})), /approval expected six-key/],
+    ['approval window', f => writeFileSync(f.approvalFile, JSON.stringify({...f.approved, window_id:'Abc123'})), /approval expected six-key/],
+    ['unknown reason', () => ({ W5_ADMIN_REASON: 'another-reason' }), /reason expected reviewed reason got unknown/],
+    ['prep outside regex', () => ({ W5_PREP_DIR: root }), /prep directory expected reviewed prep-dir regex got other/],
+    ['prep mode', f => chmodSync(f.prep, 0o755), /prep directory expected real directory mode 0700 got other/],
+    ['non-W5', f => writeFileSync(f.inputs, JSON.stringify({...base(),window:'W4'})), /INPUTS window expected W5 got other/],
+  ];
+  for (const [label, mutate, expected] of cases) {
+    const f = fixture(); const extra = mutate(f) || {};
+    const before = existsSync(f.proof) ? readdirSync(f.proof).map(name => [name, readFileSync(join(f.proof, name), 'utf8')]) : [];
+    const deletionCalls = readFileSync(rmCalls, 'utf8');
+    const result = execute(f, extra);
+    assert.notEqual(result.status, 0, `${label} admitted`);
+    assert.match(result.stderr, expected, `${label}: ${result.stderr}`);
+    assert.match(result.stderr, /^FAIL ai-w5-admin-close: .*; STOP\n$/);
+    assert.doesNotMatch(result.stdout, /PASS W5/);
+    assert.ok(existsSync(f.prep), `${label} removed prep`);
+    assert.equal(readFileSync(rmCalls, 'utf8'), deletionCalls, `${label} attempted deletion`);
+    assert.deepEqual(existsSync(f.proof) ? readdirSync(f.proof).map(name => [name, readFileSync(join(f.proof, name), 'utf8')]) : [], before, `${label} changed close root`);
+  }
+  const refused = fixture(); const cleanup = execute(refused, { REFUSE_RM: 'yes' });
+  assert.notEqual(cleanup.status, 0); assert.match(cleanup.stderr, /fixture guard refusal/);
+  assert.match(cleanup.stderr, /FAIL cleanup refused .*; report exact guard message; STOP/);
+  assert.ok(existsSync(refused.prep)); assert.ok(existsSync(join(refused.proof, 'closed-administrative.json')));
+  assert.doesNotMatch(cleanup.stdout, /PASS W5/);
+  const retained = readFileSync(join(refused.proof, 'closed-administrative.json'));
+  const again = execute(refused);
+  assert.notEqual(again.status, 0); assert.match(again.stderr, /closed-administrative\.json expected absent got present/);
+  assert.deepEqual(readFileSync(join(refused.proof, 'closed-administrative.json')), retained);
 });

@@ -115,6 +115,37 @@ jobs:
         if: matrix.suite == 'server-repeat'
         with:
           version: 2.118.0
+      - name: Read the pinned edge-runtime image
+        if: matrix.suite == 'server' || matrix.suite == 'server-repeat'
+        id: edge-runtime-image
+        run: node --import tsx scripts/ci-edge-runtime-image.mjs metadata >> "$GITHUB_OUTPUT"
+      - name: Cache the pinned edge-runtime image
+        if: matrix.suite == 'server' || matrix.suite == 'server-repeat'
+        id: edge-runtime-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/edge-runtime-image.tar
+          key: ${{ runner.os }}-${{ runner.arch }}-edge-runtime-v1-${{ steps.edge-runtime-image.outputs.key }}
+      - name: Prepare the pinned edge-runtime image
+        if: matrix.suite == 'server' || matrix.suite == 'server-repeat'
+        env:
+          EDGE_RUNTIME_IMAGE: ${{ steps.edge-runtime-image.outputs.image }}
+          EDGE_RUNTIME_CACHE: ${{ runner.temp }}/edge-runtime-image.tar
+          EDGE_RUNTIME_CACHE_HIT: ${{ steps.edge-runtime-cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          cache_needs_save=true
+          if [ "$EDGE_RUNTIME_CACHE_HIT" = true ]; then
+            if docker load --input "$EDGE_RUNTIME_CACHE" && docker image inspect "$EDGE_RUNTIME_IMAGE" >/dev/null 2>&1; then
+              cache_needs_save=false
+            else
+              echo "Warning: Cached edge-runtime image could not be restored; preparing the pinned image."
+            fi
+          fi
+          node --import tsx scripts/ci-edge-runtime-image.mjs ensure
+          if [ "$cache_needs_save" = true ]; then
+            docker save --output "$EDGE_RUNTIME_CACHE" "$EDGE_RUNTIME_IMAGE"
+          fi
       - name: Start the local stack
         if: matrix.suite == 'server'
         # A fresh volume has no swarm_read schema until db reset runs, so PostgREST fails its first health check.

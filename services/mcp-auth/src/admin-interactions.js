@@ -1,9 +1,10 @@
 import { assertAllowedOrigin, consentSecurityHeaders, INTERACTION_SECURITY_HEADERS, randomOpaque } from "./browser-security.js";
 import { ClientError, InteractionStateError } from "./client-error.js";
-import { bindingFromDetails, ensureSession, identity, readBody, respond } from "./interactions.js";
+import { bindingFromDetails, ensureSession, identity, oidcLogin, readBody, respond } from "./interactions.js";
 import { ADMIN_RESOURCE } from "./admin-policy.generated.js";
 import { AdminConsentError, requireFreshAdminSession } from "./admin-consent.js";
 import { effectiveAdminGate } from "./admin-gate.js";
+import { CONSENT_SUBMIT_PATH, renderSignInPage } from "./interaction-page.js";
 import { renderAdminConsentPage } from "./admin-interaction-page.js";
 
 export function createResourceInteractionHandler({ mcpHandler, adminHandler }) {
@@ -20,11 +21,12 @@ export function createResourceInteractionHandler({ mcpHandler, adminHandler }) {
 export function createAdminInteractionHandler({ provider, store, service, gotrue, workspaceReader,
   allowedOrigins, callbackUrl, maxBodyBytes = 64 * 1024, bodyReadTimeoutMs = 10_000 }) {
   return async (request, response, url, suppliedDetails, context) => {
-    const match = /^\/interaction\/([^/]+)(?:\/(selection|consent))?$/u.exec(url.pathname);
+    const match = /^\/interaction\/([^/]+)(?:\/(selection|consent|sign-in))?$/u.exec(url.pathname);
     if (!match) return false;
     let uid;
     try { uid = decodeURIComponent(match[1]); }
     catch { throw new InteractionStateError("interaction_expired"); }
+    if (`/interaction/${uid}` === CONSENT_SUBMIT_PATH) return false;
     const operation = match[2] ?? "view";
     const details = suppliedDetails ?? await provider.interactionDetails(request, response);
     if (details.uid !== uid) throw new InteractionStateError("interaction_mismatch");
@@ -35,7 +37,17 @@ export function createAdminInteractionHandler({ provider, store, service, gotrue
       requireFreshAdminSession(browser.session);
     } catch (error) {
       if (!(error instanceof AdminConsentError) || request.method !== "GET") throw error;
-      const signIn = gotrue.begin({ callbackUrl, interactionUid: uid });
+      const choices = gotrue.providers ?? [];
+      const selectedProvider = url.searchParams.get("provider");
+      if (selectedProvider !== null && !choices.includes(selectedProvider)) throw new ClientError(400);
+      const selectAccount = url.searchParams.get("select_account") === "1";
+      if (selectedProvider === null && (choices.length > 1 || operation === "sign-in")) {
+        response.writeHead(200, { ...INTERACTION_SECURITY_HEADERS, "content-type": "text/html; charset=utf-8" });
+        response.end(renderSignInPage({ interactionUid: uid, providers: choices, selectAccount }));
+        return true;
+      }
+      const signIn = gotrue.begin({ callbackUrl, interactionUid: uid,
+        provider: selectedProvider ?? choices[0], selectAccount });
       await store.beginSignIn(uid, browser.id, signIn);
       response.writeHead(303, { ...INTERACTION_SECURITY_HEADERS, location: signIn.url.toString() });
       response.end();
@@ -51,7 +63,7 @@ export function createAdminInteractionHandler({ provider, store, service, gotrue
       response.end(renderAdminConsentPage({ uid, params: details.params, user: identity(browser.session),
         workspaces: await workspaceReader(identity(browser.session)), ...result, scriptNonce }));
     }
-    if (request.method === "GET" && operation === "view") {
+    if (request.method === "GET" && ["view", "sign-in"].includes(operation)) {
       let result;
       try { result = await service.view(input); }
       catch (error) {
@@ -113,7 +125,7 @@ export function createAdminInteractionHandler({ provider, store, service, gotrue
     }
     const grantId = await service.confirm(input, body);
     const finished = details.prompt?.name === "login"
-      ? { login: { accountId: browser.session.user_id }, consent: { grantId } }
+      ? { login: oidcLogin(browser.session, details), consent: { grantId } }
       : { consent: { grantId } };
     await provider.interactionFinished(request, response, finished);
     return true;

@@ -1,0 +1,25 @@
+release_sha=02e25e1973d1470306d0a1be05df2b6e6d6a0215
+archive_sha256=76c60d2e89a48bc01f761f28abd73a5ddbab9671d4ddaadf1000c0f5ac765611
+members=4910
+normalized_unique=4910
+types={"directory": 732, "file": 4177, "symlink": 1}
+absolute_or_parent_paths=0
+root_RELEASE_SHA=False
+symlink=site/CLAUDE.md -> AGENTS.md; target_type=file
+required=deploy/edge-runtime/compose.yaml; type=file; mode=0o664
+required=deploy/edge-runtime/compose.override.yaml; type=file; mode=0o664
+required=deploy/edge-runtime/bootstrap.sh; type=file; mode=0o664
+required=deploy/edge-runtime/h0-deno.json; type=file; mode=0o664
+required=deploy/edge-runtime/main; type=directory; mode=0o775
+required=supabase/functions; type=directory; mode=0o775
+required=src; type=directory; mode=0o775
+required=docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md; type=file; mode=0o664
+required=deploy/supabase-stack/migrate/make-pg-service.mjs; type=file; mode=0o664
+repo_override_sha256=492676590faf4a269fc7b72331b31e0ab70a4fd92f96fbdd5ef1480de931df0c
+staging_override_sha256=492676590faf4a269fc7b72331b31e0ab70a4fd92f96fbdd5ef1480de931df0c
+staging_equals_repo=True
+production_override=not-measured
+hook_blocks=1
+hook_sha256=3f03038e7dde0e6402f3359f4abcf5815d847ca3d7fefcefa8ec0e31c7a5b5e6
+C1_W4_baseline_copy=True
+C1_hook_live_archive_file_comparison=True

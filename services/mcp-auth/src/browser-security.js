@@ -66,6 +66,6 @@ export function consentSecurityHeaders(redirectUri, { allowLoopback = false } = 
   return {
     ...INTERACTION_SECURITY_HEADERS,
     "content-security-policy": INTERACTION_SECURITY_HEADERS["content-security-policy"]
-      .replace("form-action 'self'", `form-action 'self' ${origin}`),
+      .replace("form-action 'self'", `form-action 'self' ${origin}`) + "; script-src 'self'; script-src-attr 'none'",
   };
 }

@@ -46,6 +46,7 @@ const EXPECTED_MAC_STEPS = [
   'ai-w6-activation-approval', 'ai-w6-activation-probes', 'ai-w6-c1-inputs', 'ai-w6-preflight', 'ai-w6-prepare', 'ai-w6-transfer',
   'ai-w6-owner-client-command', 'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-fence-driver', 'ai-w6-human-revoke',
   'ai-w6-report', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-w6-close-state', 'ai-mac-recovery-env', 'ai-mac-close',
+  'ai-w5-admin-close',
 ];
 // Blocks that the dry run must drive to exit 0. This proves the harness reaches the
 // command paths instead of refusing every block at its first line.
@@ -55,7 +56,7 @@ const MUST_PASS = [
   'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-w6-close-state', 'ai-mac-close',
 ];
 // Blocks that contact public ingress from Python urllib; the sandbox denies the network.
-const NETWORK_DENIED = ['ai-ordinary-probes', 'ai-w3-probes', 'ai-w4-probes', 'ai-w5-closed', 'ai-w6-activation-probes'];
+const NETWORK_DENIED = ['ai-ordinary-probes', 'ai-w3-probes', 'ai-w4-probes', 'ai-w5-closed', 'ai-w6-activation-probes', 'ai-w5-admin-close'];
 
 // Command-position GUI launches in executable block text. Prose and Python string values
 // (e.g. the 'headless-bundled-chromium' authorization value) are not command positions.
@@ -238,6 +239,12 @@ writeFileSync(join(workRoot, 'c1-run', `probe-credentials-W2-${windowId}.json`),
   human_access_token: 'dry-run-not-a-token', human_token_exp: Math.floor(Date.now() / 1000) + 7200 }), { mode: 0o600 });
 const fixturePrepDir = join(privateTmp, 'admin-issuance-prep.Fixtu1');
 mkdirSync(fixturePrepDir, { mode: 0o700 }); chmodSync(fixturePrepDir, 0o700);
+// Created immediately before administrative close: ai-mac-close removes its own
+// prep first, and ai-mac-recovery-env must not see two matching archive fixtures.
+const w5AdminPrepDir = join(privateTmp, 'admin-issuance-prep.Admin1');
+const w5AdminApprovalFile = join(scratch, 'w5-admin-approval.json');
+writeFileSync(w5AdminApprovalFile, JSON.stringify({ approver: 'HezLead', action: 'w5-administrative-close',
+  release_sha: releaseSha, window_id: windowId, plan_sha256: digest(plan), prompt_ref: 'task/dry-run-fixture' }));
 const fixtureStage = join(privateTmp, 'anvil-secret.Fixtu2');
 mkdirSync(fixtureStage, { mode: 0o700 }); chmodSync(fixtureStage, 0o700);
 const specScope = /\bworkspaces:create\b/.test(readFileSync(specPath, 'utf8')) ? 'workspaces:create' : 'admin:read';
@@ -472,6 +479,10 @@ test('gui-denied dry run: every Mac block runs sandboxed with stubs; none attemp
   let prepDir = fixturePrepDir, stage = fixtureStage, runnerPid = '2147483646';
   macBlocks.forEach((source, index) => {
     const step = stepOf(source)!;
+    if (step === 'ai-w5-admin-close') {
+      mkdirSync(w5AdminPrepDir, { mode: 0o700 }); chmodSync(w5AdminPrepDir, 0o700);
+      writeFileSync(join(w5AdminPrepDir, 'release.tar'), archiveBytes);
+    }
     const env: Record<string, string> = {
       INPUTS_FILE: inputsFor(windowOf(step)), PLAN_FILE: planPath, GATE_RECEIPT_FILE: gateReceiptFile,
       W4_PROOF_DIR: w4ProofDir, EDGE_MEASUREMENT_FILE: edgeMeasurementFile, EDGE_RECEIPT_REMOTE: '1',
@@ -483,6 +494,10 @@ test('gui-denied dry run: every Mac block runs sandboxed with stubs; none attemp
       LIVE_CONTROLS_FILE: step === 'ai-w5-preflight' ? liveBeforeFile : liveControlsFile,
       CONSENT_RECEIPT_FILE: step === 'ai-w5-preflight' ? preConsentFile : consentFile,
       W5_CLOSED_FILE: join(w5Dir, 'closed.txt'), BROWSER_READY_FILE: browserReady,
+      ...(step === 'ai-w5-admin-close' ? {
+        W5_INPUTS_FILE: inputsFor('W5'), W5_SITE_EVIDENCE: siteEvidence, W5_PREP_DIR: w5AdminPrepDir,
+        W5_ADMIN_REASON: 'owner-retired-seat-name-held', W5_ADMIN_APPROVAL_FILE: w5AdminApprovalFile,
+      } : {}),
       // ai-live-controls also runs in the W5 Mac shell: validate the W5 after pair, producer
       // read from the verified release tar, retained copies in a task-owned proof directory.
       ...(step === 'ai-live-controls' ? { INPUTS_FILE: inputsFor('W5'), BOX_ARCHIVE_PATH: archiveFile, PROOF_DIR: liveControlsProof } : {}),
@@ -543,6 +558,19 @@ test('gui-denied dry run: every Mac block runs sandboxed with stubs; none attemp
     assert.notEqual(o.status, 0, `${step} reached the network`);
     assert.ok(denials.some(d => d.id === o.id && d.kind === 'net'), `${step} did not stop at the sandbox network denial`);
   }
+  // Positive control for the refusal boundary: valid inputs, archive, approval and
+  // released site close reach urllib.request.urlopen(req,timeout=15) for the first
+  // GET /admin/gate. The tagged network denial above proves this path was reached,
+  // rather than failing on an unset variable or an invalid local fixture.
+  const adminClose = byStep.get('ai-w5-admin-close')!;
+  assert.equal(adminClose.status, 1);
+  assert.equal(adminClose.stderrTail, 'FAIL ai-w5-admin-close: inputs, site manifest, gate or retained evidence expected valid got refused; STOP');
+  assert.deepEqual(adminClose.stubCalls, [], 'administrative close must stop before cleanup or GUI launchers');
+  assert.equal(digest(readFileSync(join(w5AdminPrepDir, 'release.tar'))), digest(archiveBytes), 'network refusal must retain the prep archive');
+  const adminCloseRoot = join(workRoot, 'hm37-live-release', `${releaseSha}-W5-${windowId}`);
+  for (const name of ['closed.txt', 'closed-administrative.json', 'W5-closed.json']) {
+    assert.ok(!existsSync(join(adminCloseRoot, name)), `network refusal must not write ${name}`);
+  }
   // Fail-closed stubs: the credential-reading owner client command is refused, never run.
   assert.ok(byStep.get('ai-w6-owner-client-command')!.stubCalls.some(c => /^node .*--import tsx/.test(c)));
   assert.notEqual(byStep.get('ai-w6-owner-client-command')!.status, 0);
@@ -579,5 +607,5 @@ test('C1-16 sandbox classifier: first Mac|box token, not any Mac substring', () 
   assert.ok(!EXPECTED_MAC_STEPS.includes('ai-w7-proof'));
   assert.ok(!EXPECTED_MAC_STEPS.includes('ai-live-controls'));
   assert.ok(!EXPECTED_MAC_STEPS.includes('ai-edge-receipt'));
-  assert.equal(macBlocks.length, 32);
+  assert.equal(macBlocks.length, 33);
 });

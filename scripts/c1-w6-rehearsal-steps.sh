@@ -224,8 +224,9 @@ edge_oauth_membership() {
 }
 w6_edge_grant() { # proof_dir
   test -f "$T/blocks/w6-edge-grant.sh" || return 0
-  say "EMUL ai-w6-edge-oauth-runtime-grant: live edge-login proof not run (docker SET LOCAL ROLE as commonswarm_edge is not modelled); catalog GRANT, refusals and readback ran"
   PROOF_DIR=$1 WINDOW=W6 step ai-w6-edge-oauth-runtime-grant "$T/blocks/w6-edge-grant.sh"
+  # step captures stderr; publish only the grant's fixed EMUL notices in the rehearsal report.
+  grep '^EMUL ai-w6-edge-oauth-runtime-grant: ' "$T/step.err"
 }
 w6_edge_revoke() { # proof_dir
   test -f "$T/blocks/w6-edge-revoke.sh" || return 0
@@ -261,9 +262,20 @@ ai_run() {
   esac
 }
 # C1-37: SET grant after ai-db-session and before prepare/activation. Catalog GRANT/readback/refusals
-# run; the docker live edge-login SET LOCAL ROLE proof is not modelled (EMUL at the call site).
+# run; edge-login file preparation and the docker live SET LOCAL ROLE proof are EMULATED.
 if grep -q '^# step: ai-w6-edge-oauth-runtime-grant$' "$PLANC"; then
-  { x ai-w6-edge-oauth-runtime-grant lines 'test "$WINDOW" = W6' 'cat >"$PROOF_DIR/edge-oauth-runtime-live.sql"'
+  x ai-w6-edge-oauth-runtime-grant lines 'test "$WINDOW" = W6' 'cat >"$PROOF_DIR/edge-oauth-runtime-live.sql"' >"$T/blocks/w6-edge-grant-prefix.sh"
+  # Match the preparation's own refusal text, so an earlier python invocation stays in the slice.
+  EDGE_LOGIN_PREP='edge-login files from SWARM_DATABASE_URL expected prepared got refused'
+  { if grep -Fq "$EDGE_LOGIN_PREP" "$T/blocks/w6-edge-grant-prefix.sh"; then
+      x ai-w6-edge-oauth-runtime-grant lines 'test "$WINDOW" = W6' "$EDGE_LOGIN_PREP"
+      printf '%s\n' 'printf "EMUL ai-w6-edge-oauth-runtime-grant: edge-login file preparation not run (production SWARM_DATABASE_URL is not read)\n" >&2'
+      x ai-w6-edge-oauth-runtime-grant lines 'if test -f "$PROOF_DIR/edge-oauth-runtime-grant.txt"' 'cat >"$PROOF_DIR/edge-oauth-runtime-live.sql"'
+    else # historical C1_W6_PLAN_FROM controls prepared edge-login files after the live.sql anchor
+      cat "$T/blocks/w6-edge-grant-prefix.sh"
+      printf '%s\n' 'printf "EMUL ai-w6-edge-oauth-runtime-grant: edge-login file preparation not run (production SWARM_DATABASE_URL is not read)\n" >&2'
+    fi
+    printf '%s\n' 'printf "EMUL ai-w6-edge-oauth-runtime-grant: live edge-login proof not run (docker SET LOCAL ROLE as commonswarm_edge is not modelled); catalog GRANT, refusals and readback ran\n" >&2'
     x ai-w6-edge-oauth-runtime-grant from 'printf '\''%s\n'\'' "$GRANT_PASS" >"$PROOF_DIR/edge-oauth-runtime-grant.txt"'; } >"$T/blocks/w6-edge-grant.sh"
 fi
 if grep -q '^# step: ai-w6-edge-oauth-runtime-revoke$' "$PLANC"; then

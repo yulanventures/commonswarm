@@ -1,0 +1,1 @@
+{"admin_gate": "closed", "authenticated_meta_operator_check": "not-applicable", "baseline_edge_sha": "1388b0ee73b76de111f9fabf196ed916566c37fd", "closed_at": "2026-10-08T19:43:09Z", "release_sha": "02e25e1973d1470306d0a1be05df2b6e6d6a0215", "result": "aborted", "target": "staging", "timer": "active", "window_id": "STG4Nz"}

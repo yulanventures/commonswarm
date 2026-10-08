@@ -301,7 +301,7 @@ test("failed form consent keeps the submitted home workspace on its retry page",
   assert.match(response.body, /After you approve, you return to <strong>claude\.ai<\/strong>/u);
   assert.match(response.body, /Client ID URL host: <strong>client\.example<\/strong>/u);
   assert.equal(response.headers["content-security-policy"],
-    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://claude.ai; frame-ancestors 'none'; base-uri 'none'");
+    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://claude.ai; frame-ancestors 'none'; base-uri 'none'; script-src 'self'; script-src-attr 'none'");
   assert.match(response.body,
     new RegExp(`type="hidden" name="home_workspace_id" value="${W2}"`, "u"));
   assert.match(response.body,

@@ -37,11 +37,12 @@ const block = (id: string, command = 'printf hello\n') =>
   `\n\n\`\`\`sh\n# step: ${id}\n# readonly: yes\n# host: Mac\n${command}\`\`\`\n`;
 const windows = ['W1', 'W2', 'W2b', 'W3', 'W4', 'W5', 'W6', 'W6e', 'W7'];
 const modes = ['forward', 'rollback', 'recovered-close'];
+const orders = windows.flatMap(w => modes.map(m => [w, m])).concat([['W5', 'admin-close']]);
 const explicit = (steps: string) => {
   const ids = steps.split(' → ');
   const lines = ids.map(id => JSON.stringify({ id, host: 'mac' })).join('\n');
   return '## Run orders (machine-read by scripts/c1-task-from-plan.mjs)\n\n' +
-    windows.flatMap(w => modes.map(m => `\`\`\`c1-order ${w} ${m}\n${lines}\n\`\`\`\n`)).join('\n') + '\n## Blocks\n';
+    orders.map(([w, m]) => `\`\`\`c1-order ${w} ${m}\n${lines}\n\`\`\`\n`).join('\n') + '\n## Blocks\n';
 };
 const refusal = (path: string, window: string, mode: string, expected: string) => {
   const result = run(path, window, mode);
@@ -78,7 +79,7 @@ function verify(task: Task, bytes: Buffer, window: string, mode: string) {
   visit(task.steps);
 }
 
-test('real plan: every one of 27 window/mode tasks retains exact blocks, manual text and conditions at their offsets', () => {
+test('real plan: every one of 28 window/mode tasks retains exact blocks, manual text and conditions at their offsets', () => {
   const defined = new Set([...text.matchAll(/^# step: (ai-[a-z0-9-]+)$/gm)].map(m => m[1]));
   const used = new Set<string>();
   const visit = (steps: Task['steps']) => {
@@ -88,7 +89,7 @@ test('real plan: every one of 27 window/mode tasks retains exact blocks, manual 
       visit(step.dispatched_blocks ?? []);
     }
   };
-  for (const window of windows) for (const mode of modes) {
+  for (const [window, mode] of orders) {
     const result = run(planPath, window, mode);
     assert.equal(result.status, 0, `${window} ${mode}: ${result.stderr}`);
     const task: Task = JSON.parse(result.stdout);
@@ -406,4 +407,36 @@ test('C1-20: recovered-close lost-shell ai-db-session has ai-recovery-env immedi
   const frozenW2 = frozen.stdout.match(/```c1-order W2 recovered-close\n([\s\S]*?)```/)![1]!;
   assert.doesNotMatch(frozenW2, /ai-recovery-env/);
   assert.match(frozenW2, /"id":"ai-db-session"/);
+});
+
+
+test('W5 administrative close emits one Mac row; other windows refuse; existing orders retain bytes except W5AC source-line repins and revoke reconciliation inputs', () => {
+  const result = run(planPath, 'W5', 'admin-close');
+  assert.equal(result.status, 0, result.stderr);
+  const task: Task = JSON.parse(result.stdout);
+  verify(task, plan, 'W5', 'admin-close');
+  assert.deepEqual(task.steps.map(s => [s.id, s.execution_host]), [['ai-w5-admin-close', 'mac']]);
+  refusal(planPath, 'W3', 'admin-close', 'admin-close is W5-only');
+  const prior = spawnSync('git', ['show', '84077ee1:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+  assert.equal(prior.status, 0, prior.stderr);
+  const oldOrders = [...prior.stdout.matchAll(/^```c1-order [^\n]+\n[\s\S]*?^```$/gm)].map(m => m[0]);
+  assert.equal(oldOrders.length, 27);
+  const newOrders = [...text.matchAll(/^```c1-order [^\n]+\n[\s\S]*?^```$/gm)].map(m => m[0]);
+  assert.equal(newOrders.length, 28);
+  // W5AC-C adds 13 lines in the grant/revoke blocks. Only these six later
+  // prose locations move. W5AC-D also corrects the four revoke caller inputs;
+  // step IDs, quote bytes and all other order bytes stay pinned.
+  const repins = new Map([[5686, 5699], [6117, 6130], [6256, 6269],
+    [6515, 6528], [7226, 7239], [7417, 7430]]);
+  const oldRevokeInput = 'If this window wrote grant-attempted.txt or grant.txt: measure live membership; revoke if present, record absent-at-recovery if not; a started revoke is never re-run';
+  const reconciledRevokeInput = 'If this window wrote grant-attempted.txt or grant.txt: measure live membership; revoke if present, record absent-at-recovery if not; reconcile a started revoke on re-run: re-measure; absent gives reconciled absent evidence; present runs one more per-grantor REVOKE with zero-row readback';
+  assert.equal(prior.stdout.split(oldRevokeInput).length - 1, 4);
+  assert.equal(text.split(reconciledRevokeInput).length - 1, 4);
+  assert.ok(!text.includes(oldRevokeInput));
+  for (const order of oldOrders) {
+    const expected = order.replace(/"line":(\d+)/g, (pin, line) =>
+      repins.has(Number(line)) ? `"line":${repins.get(Number(line))}` : pin)
+      .replace(oldRevokeInput, reconciledRevokeInput);
+    assert.ok(newOrders.includes(expected), 'existing order bytes changed beyond approved source-line repins and revoke reconciliation inputs');
+  }
 });

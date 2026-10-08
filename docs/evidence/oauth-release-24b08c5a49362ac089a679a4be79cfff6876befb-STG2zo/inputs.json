@@ -1,0 +1,11 @@
+{
+ "release_sha": "24b08c5a49362ac089a679a4be79cfff6876befb",
+ "archive_sha256": "22b6b334710699f812fc81bd8340a941293b220b538654a8585b492278fb6d64",
+ "window_id": "STG2zo",
+ "window_end_utc": "2026-10-08T04:15:59Z",
+ "baseline_oauth_sha": "1388b0ee73b76de111f9fabf196ed916566c37fd",
+ "baseline_oauth_image": "sha256:be75e0b351cffd6a9398847ef878065f1c19a19bc7a394998144b48bbc9609b9",
+ "compose_env_sha256": "76bb05941da7a3e230003b34cdac93ef7d468a0da76c275c9accc5634b089584",
+ "service_env_sha256": "7c19a150e0e0dac3bf5f6cba1f6b8175d5f60fbd45c2427f788b3331c2158715",
+ "target": "staging"
+}
