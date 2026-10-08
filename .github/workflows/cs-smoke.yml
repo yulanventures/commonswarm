@@ -1,0 +1,189 @@
+name: CommonSwarm post-release smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_kind:
+        description: Released surface (dispatch once per surface switch, including rollback)
+        required: true
+        type: choice
+        options: [site, oauth, edge]
+      release_sha:
+        description: Full 40-character SHA released on this surface
+        required: true
+        type: string
+      release_utc:
+        description: Release completion UTC (YYYY-MM-DDTHH:mm:ssZ)
+        required: true
+        type: string
+      site_sha:
+        description: Full SHA of the live site whose hooks the fixture review covers
+        required: true
+        type: string
+      workflow_ref:
+        description: Reviewed workflow branch or tag name used for dispatch
+        required: true
+        type: string
+      workflow_sha:
+        description: Full reviewed SHA of the workflow ref
+        required: true
+        type: string
+      probe_sha:
+        description: Full immutable reviewed SHA to check out for probes and dependency lock
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: commonswarm-smoke-test-account
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    # All labels must match: a variable can never route this job to GitHub-hosted or macOS.
+    # HezLead sets CS_SMOKE_RUNS_ON=prompteden-hetzner or a CommonSwarm Linux runner label.
+    runs-on:
+      - self-hosted
+      - Linux
+      - ${{ vars.CS_SMOKE_RUNS_ON || vars.CI_RUNS_ON || 'self-hosted' }}
+    timeout-minutes: 15
+    # Disposable job container: --no-sandbox is confined here; installs do not alter the host.
+    container:
+      image: node:22.12.0-bookworm
+    defaults:
+      run:
+        shell: bash
+    env:
+      RELEASE_KIND: ${{ inputs.release_kind }}
+      RELEASE_SHA: ${{ inputs.release_sha }}
+      RELEASE_UTC: ${{ inputs.release_utc }}
+      SITE_SHA: ${{ inputs.site_sha }}
+      WORKFLOW_REF: ${{ inputs.workflow_ref }}
+      WORKFLOW_SHA: ${{ inputs.workflow_sha }}
+      PROBE_SHA: ${{ inputs.probe_sha }}
+      CS_ACTUAL_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      CS_TOOL_ROOT: ${{ github.workspace }}/.cs-smoke-tools
+      CS_EVIDENCE_DIR: ${{ github.workspace }}/cs-smoke-evidence
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/cs-smoke-chromium-${{ github.run_id }}-${{ github.run_attempt }}
+      CS_RECOVERY_RECIPIENT: ${{ vars.CS_SMOKE_RECOVERY_AGE_RECIPIENT }}
+    steps:
+      - name: Validate dispatch receipts before checkout or credentials
+        env:
+          ACTUAL_WORKFLOW_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [ "$(uname -s)" = Linux ]
+          node <<'NODE'
+          const e = process.env;
+          const sha = value => /^[0-9a-f]{40}$/.test(value || '');
+          const valid = ['site', 'oauth', 'edge'].includes(e.RELEASE_KIND) &&
+            ['RELEASE_SHA', 'SITE_SHA', 'WORKFLOW_SHA', 'PROBE_SHA'].every(key => sha(e[key])) &&
+            /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(e.RELEASE_UTC || '') &&
+            Number.isFinite(Date.parse(e.RELEASE_UTC)) &&
+            /^[A-Za-z0-9._/-]+$/.test(e.WORKFLOW_REF || '') &&
+            e.WORKFLOW_REF === e.ACTUAL_WORKFLOW_REF &&
+            e.WORKFLOW_SHA === e.CS_ACTUAL_WORKFLOW_SHA;
+          if (!valid) { console.error('Invalid release or workflow receipt.'); process.exit(1); }
+          NODE
+
+      - name: Provision tools in the disposable container
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          apt-get update -q
+          apt-get install -y --no-install-recommends ca-certificates curl git unzip age coreutils util-linux procps
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.probe_sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.12.0
+
+      - name: Verify probe checkout and initialize status-only evidence
+        run: |
+          set -euo pipefail
+          CS_ACTUAL_PROBE_SHA=$(git rev-parse HEAD)
+          [ "$CS_ACTUAL_PROBE_SHA" = "$PROBE_SHA" ]
+          printf 'CS_ACTUAL_PROBE_SHA=%s\n' "$CS_ACTUAL_PROBE_SHA" >> "$GITHUB_ENV"
+          mkdir -p "$CS_EVIDENCE_DIR"
+          printf -v receipt_seconds '%(%s)T' -1
+          node scripts/smoke/smoke.mjs init "$CS_EVIDENCE_DIR" "$((receipt_seconds * 1000))" \
+            "$RELEASE_KIND" "$RELEASE_SHA" "$RELEASE_UTC" "$SITE_SHA" "$PROBE_SHA" \
+            "$WORKFLOW_REF" "$WORKFLOW_SHA" "$CS_ACTUAL_PROBE_SHA" "$CS_ACTUAL_WORKFLOW_SHA"
+
+      - uses: 1Password/install-cli-action@9b82e19ce89f957763220d632ec1de246084f78a # v1
+        with:
+          version: 2.32.0
+
+      - name: Install locked smoke dependencies and bundled Chromium
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          mkdir -p "$CS_TOOL_ROOT"
+          cp scripts/smoke/package.json scripts/smoke/package-lock.json "$CS_TOOL_ROOT/"
+          npm ci --prefix "$CS_TOOL_ROOT" --ignore-scripts --no-audit --no-fund
+          node "$CS_TOOL_ROOT/node_modules/playwright/cli.js" install --with-deps chromium
+          [ "$(op --version)" = 2.32.0 ]
+          command -v timeout
+          command -v setsid
+          command -v age
+          [ -n "$CS_RECOVERY_RECIPIENT" ]
+
+      - name: Run the assigned smoke
+        id: probe
+        env:
+          # This is the only step that receives the service-account secret.
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.CS_SMOKE_OP_SERVICE_ACCOUNT_TOKEN }}
+        run: bash scripts/smoke/run.sh
+
+      - name: Upload only RESULT evidence and optional encrypted recovery
+        id: evidence
+        if: always()
+        timeout-minutes: 1
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cs-smoke-result
+          path: |
+            cs-smoke-evidence/report.md
+            cs-smoke-evidence/result.json
+            cs-smoke-evidence/refresh-recovery.age
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Require finalized PASS and an artifact receipt
+        if: always()
+        env:
+          PROBE_OUTCOME: ${{ steps.probe.outcome }}
+          ARTIFACT_OUTCOME: ${{ steps.evidence.outcome }}
+          ARTIFACT_ID: ${{ steps.evidence.outputs.artifact-id }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const e = process.env;
+          try {
+            const result = JSON.parse(fs.readFileSync(path.join(e.CS_EVIDENCE_DIR, 'result.json'), 'utf8'));
+            const checks = ['A', 'B', 'C', 'D1', 'D2', 'E0', 'E1', 'F'];
+            const valid = e.PROBE_OUTCOME === 'success' && e.ARTIFACT_OUTCOME === 'success' &&
+              /^[0-9]+$/.test(e.ARTIFACT_ID || '') && result.finalized === true && result.overall === 'PASS' &&
+              checks.every(id => result.checks?.[id]?.status === 'PASS') &&
+              result.fixture_use === 'allowed' && ['none', 'saved'].includes(result.rotation) &&
+              result.cleanup === 'REMOVED' && result.total_elapsed_ms <= 300000 &&
+              result.actual_workflow_sha === e.WORKFLOW_SHA && result.actual_probe_sha === e.PROBE_SHA &&
+              result.release_kind === e.RELEASE_KIND && result.release_sha === e.RELEASE_SHA &&
+              result.release_utc === e.RELEASE_UTC && result.site_sha === e.SITE_SHA &&
+              !fs.existsSync(path.join(e.CS_EVIDENCE_DIR, 'refresh-recovery.age'));
+            const report = fs.readFileSync(path.join(e.CS_EVIDENCE_DIR, 'report.md'), 'utf8');
+            if (!report.startsWith('RESULT\n') || !valid) throw new Error();
+            fs.appendFileSync(e.GITHUB_STEP_SUMMARY, report);
+          } catch {
+            console.error('Smoke failed, evidence is unfinished, or artifact delivery is unverified. HezLead must reconcile fixture state before reuse.');
+            process.exit(1);
+          }
+          NODE
