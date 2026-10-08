@@ -1,0 +1,10 @@
+{
+  "name": "commonswarm-smoke-tools",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "imapflow": "2.3.0",
+    "mailparser": "3.9.37",
+    "playwright": "1.63.0"
+  }
+}
