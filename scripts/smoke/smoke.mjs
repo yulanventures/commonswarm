@@ -93,6 +93,7 @@ async function main() {
     save(r); render(r); return;
   }
   must(mode === 'run');
+  prerequisite(process.platform === 'linux');
   const [dir, out, tools, start] = argv; evidence = out;
   const r = loadReport(), t0 = Number(start);
   const secret = name => path.join(dir, name);
@@ -291,7 +292,7 @@ async function main() {
     prerequisite(typeof process.env.PLAYWRIGHT_BROWSERS_PATH === 'string' && process.env.PLAYWRIGHT_BROWSERS_PATH.length > 0);
     const executable = fs.realpathSync(chromium.executablePath());
     must(executable.startsWith(fs.realpathSync(process.env.PLAYWRIGHT_BROWSERS_PATH) + path.sep));
-    context = await chromium.launchPersistentContext(secret('profile'), { headless: true, executablePath: executable,
+    context = await chromium.launchPersistentContext(fs.mkdtempSync(secret('profile-')), { headless: true, executablePath: executable,
       args: ['--password-store=basic', '--use-mock-keychain', '--no-sandbox'], acceptDownloads: true, viewport: { width: 1440, height: 1000 }, timeout: remaining(20_000),
       serviceWorkers: 'block' });
     liveContext = context;
