@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { extname, join, relative, resolve } from "node:path";
 import { test } from "node:test";
@@ -8,6 +9,10 @@ const repoRoot = resolve(import.meta.dirname, "../..");
 const launcher = join(repoRoot, "site/tests/chrome.ts");
 const cdpLauncher = join(repoRoot, "tests/p1-local/human-seen-browser.test.ts");
 const smokeLauncher = join(repoRoot, "scripts/smoke/smoke.mjs");
+// Hash exact file bytes with: shasum -a 256 scripts/smoke/smoke.mjs
+// Re-review against chrome.ts before updating this pin; AST assertions below are secondary checks.
+const SMOKE_LAUNCHER_SHA256 = "600bd015c26db61582d7e0a5e109fe1a1d8f30df660aaf5369b71163cd599b17";
+const smokePinMessage = "scripts/smoke/smoke.mjs changed: re-review its browser launch against site/tests/chrome.ts safety rules, then update SMOKE_LAUNCHER_SHA256";
 const sourceRoots = ["src", "tests", "scripts", "site", "deploy", "services"];
 const sourceExtensions = new Set([".js", ".mjs", ".ts", ".tsx", ".sh"]);
 const browserFreeChecks = new Set([
@@ -46,19 +51,68 @@ function smokeLaunchViolations(source: string): string[] {
     return ["smoke must launch only one bundled Chromium context"];
   }
   const violations: string[] = [];
-  if (nodes.some((node) => ts.isCallExpression(node) && ts.isIdentifier(node.expression)
-    && /^(?:execFile|spawn|run)$/u.test(node.expression.text) && node.arguments[0]
-    && /chrome|chromium/iu.test(node.arguments[0].getText(tree)))) {
+  const subprocessNames = new Set(["spawn", "exec", "execFile", "fork", "spawnSync", "execSync", "execFileSync"]);
+  const launchNames = new Set(["launch", "launchPersistentContext"]);
+  if (nodes.some((node) => ts.isElementAccessExpression(node)
+    && ts.isStringLiteralLike(node.argumentExpression)
+    && (launchNames.has(node.argumentExpression.text) || subprocessNames.has(node.argumentExpression.text)))) {
+    violations.push("smoke must not use computed launch or subprocess access");
+  }
+  if (nodes.some((node) => {
+    if (ts.isBindingElement(node)) {
+      const name = node.propertyName ?? node.name;
+      if ((ts.isIdentifier(name) || ts.isStringLiteralLike(name))
+        && (subprocessNames.has(name.text) || launchNames.has(name.text))) return true;
+    }
+    if (ts.isIdentifier(node) && subprocessNames.has(node.text)) {
+      const parent = node.parent;
+      if (ts.isImportSpecifier(parent)) return !!parent.propertyName || parent.name.text !== "spawn";
+      if (ts.isPropertyAccessExpression(parent) && parent.name === node) return false;
+      if (ts.isVariableDeclaration(parent) && parent.name === node) return false;
+      return !(ts.isCallExpression(parent) && parent.expression === node);
+    }
+    if (ts.isPropertyAccessExpression(node) && (subprocessNames.has(node.name.text)
+      || (compact(node.expression) === "chromium" && launchNames.has(node.name.text)))) {
+      return !(ts.isCallExpression(node.parent) && node.parent.expression === node);
+    }
+    return false;
+  })) violations.push("smoke must not alias launch or subprocess functions");
+  const subprocesses = nodes.filter((node): node is ts.CallExpression => ts.isCallExpression(node)
+    && ((ts.isIdentifier(node.expression) && (subprocessNames.has(node.expression.text) || node.expression.text === "run"))
+      || (ts.isPropertyAccessExpression(node.expression) && subprocessNames.has(node.expression.name.text))));
+  // The only child process is the existing OP edit, with its fixed executable, arguments and options.
+  const approvedOp = "spawn('op',['item','edit',item.id,'--vault','CommonSwarmSmoke','--template',secret('item-next.json')],{env:{...process.env,OP_SERVICE_ACCOUNT_TOKEN:fs.readFileSync(secret('op-token.txt'),'utf8')},stdio:['ignore',fd,err],})";
+  if (subprocesses.length !== 1 || subprocesses.some((node) => compact(node) !== approvedOp)) {
     violations.push("smoke must not launch a browser subprocess outside Playwright");
   }
-  const beforeLaunch = (text: string): boolean => nodes.some((node) => node.end < launch.pos && compact(node) === text);
-  for (const [label, text] of [
-    ["Linux guard", "prerequisite(process.platform==='linux')"],
-    ["Playwright cache prerequisite", "prerequisite(typeofprocess.env.PLAYWRIGHT_BROWSERS_PATH==='string'&&process.env.PLAYWRIGHT_BROWSERS_PATH.length>0)"],
-    ["bundled executable", "executable=fs.realpathSync(chromium.executablePath())"],
-    ["realpath cache containment", "must(executable.startsWith(fs.realpathSync(process.env.PLAYWRIGHT_BROWSERS_PATH)+path.sep))"],
-  ]) {
-    if (!beforeLaunch(text!)) violations.push(`smoke missing ${label}`);
+  const functionBody = (node: ts.Node): ts.Block | undefined => {
+    for (let parent = node.parent; parent; parent = parent.parent) {
+      if (ts.isFunctionDeclaration(parent) || ts.isFunctionExpression(parent) || ts.isArrowFunction(parent)) {
+        return parent.body && ts.isBlock(parent.body) ? parent.body : undefined;
+      }
+    }
+    return undefined;
+  };
+  const launchBody = functionBody(launch);
+  const main = tree.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === "main");
+  const mainBody = main?.body && main.body.pos < launch.pos && main.body.end > launch.end ? main.body : undefined;
+  // Guards must be direct function-body statements, not matches in dead or conditional blocks.
+  const beforeLaunch = (text: string, body: ts.Block | undefined): boolean => !!body?.statements.some((statement) =>
+    statement.end < launch.pos && (ts.isExpressionStatement(statement) ? compact(statement.expression) === text
+      : ts.isVariableStatement(statement) && !!(statement.declarationList.flags & ts.NodeFlags.Const)
+        && statement.declarationList.declarations.length === 1 && compact(statement.declarationList.declarations[0]!) === text));
+  for (const [label, text, body] of [
+    ["Linux guard", "prerequisite(process.platform==='linux')", mainBody],
+    ["Playwright cache prerequisite", "prerequisite(typeofprocess.env.PLAYWRIGHT_BROWSERS_PATH==='string'&&process.env.PLAYWRIGHT_BROWSERS_PATH.length>0)", launchBody],
+    ["bundled executable", "executable=fs.realpathSync(chromium.executablePath())", launchBody],
+    ["realpath cache containment", "must(executable.startsWith(fs.realpathSync(process.env.PLAYWRIGHT_BROWSERS_PATH)+path.sep))", launchBody],
+  ] as const) {
+    if (!beforeLaunch(text, body)) violations.push(`smoke missing ${label}`);
+  }
+  if (nodes.filter((node) => ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === "executable").length !== 1
+    || nodes.some((node) => ts.isBinaryExpression(node) && ts.isIdentifier(node.left) && node.left.text === "executable"
+      && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment)) {
+    violations.push("smoke bundled executable must not be shadowed or reassigned");
   }
   if (launch.arguments.length !== 2 || !launch.arguments[0]
     || compact(launch.arguments[0]) !== "fs.mkdtempSync(secret('profile-'))") {
@@ -86,8 +140,12 @@ function smokeLaunchViolations(source: string): string[] {
   return violations;
 }
 
-function directLaunchViolations(file: string, source: string): string[] {
-  if (file === smokeLauncher) return smokeLaunchViolations(source);
+function directLaunchViolations(file: string, bytes: string | Buffer): string[] {
+  const source = bytes.toString();
+  if (file === smokeLauncher) {
+    const pinViolations = createHash("sha256").update(bytes).digest("hex") === SMOKE_LAUNCHER_SHA256 ? [] : [smokePinMessage];
+    return [...pinViolations, ...smokeLaunchViolations(source)];
+  }
   // The CDP test owns a long-lived process, but shares admission, realpath validation and flags.
   if (file === cdpLauncher && ["requireBrowserTests", "resolveChromePath", "buildChromeArgs"]
     .every((helper) => new RegExp(`\\b${helper}\\s*\\(`, "u").test(source))) return [];
@@ -187,9 +245,17 @@ test("the sweep rejects eager setup but admits lazy setup inside browser callbac
 });
 
 test("the smoke exception admits only its exact path and rejects unsafe launch variants", async (t) => {
-  const source = await readFile(smokeLauncher, "utf8");
+  const bytes = await readFile(smokeLauncher);
+  const source = bytes.toString("utf8");
   await t.test("current smoke is the positive control", () => {
-    assert.deepEqual(directLaunchViolations(smokeLauncher, source), []);
+    assert.deepEqual(directLaunchViolations(smokeLauncher, bytes), []);
+  });
+  await t.test("one character change requires launcher re-review even when properties remain safe", () => {
+    const variant = source.replace("CommonSwarm smoke test.", "CommonSwarm smoke test!");
+    assert.equal(variant.length, source.length);
+    assert.equal([...source].filter((character, index) => character !== variant[index]).length, 1);
+    assert.deepEqual(smokeLaunchViolations(variant), []);
+    assert.deepEqual(directLaunchViolations(smokeLauncher, Buffer.from(variant)), [smokePinMessage]);
   });
   const cases = [
     ["installed Chrome channel", "headless: true,", 'headless: true, channel: "chrome",', "must not select a channel"],
@@ -204,12 +270,34 @@ test("the smoke exception admits only its exact path and rejects unsafe launch v
     ["hidden launch options", "headless: true,", "...overrides, headless: true,", "hide options"],
     ["additional launch", "liveContext = context;", "await chromium.launch({ channel: 'chrome' }); liveContext = context;", "only one bundled Chromium context"],
     ["installed browser subprocess", "liveContext = context;", "spawn('/usr/bin/google-chrome', []); liveContext = context;", "browser subprocess outside Playwright"],
+    ["dead Linux guard", "prerequisite(process.platform === 'linux');", "if (false) { prerequisite(process.platform === 'linux'); }", "Linux guard"],
+    ["dead containment check", "must(executable.startsWith(fs.realpathSync(process.env.PLAYWRIGHT_BROWSERS_PATH) + path.sep));", "if (false) { must(executable.startsWith(fs.realpathSync(process.env.PLAYWRIGHT_BROWSERS_PATH) + path.sep)); }", "realpath cache containment"],
+    ["dead safe declaration shadowed by installed executable", "const executable = fs.realpathSync(chromium.executablePath());\n    must(executable.startsWith(fs.realpathSync(process.env.PLAYWRIGHT_BROWSERS_PATH) + path.sep));", "if (false) { const executable = fs.realpathSync(chromium.executablePath()); must(executable.startsWith(fs.realpathSync(process.env.PLAYWRIGHT_BROWSERS_PATH) + path.sep)); } const executable = fs.realpathSync('/usr/bin/google-chrome');", "bundled executable"],
+    ["computed Chromium launch", "liveContext = context;", "await chromium['launch']({ channel: 'chrome' }); liveContext = context;", "computed launch or subprocess access"],
+    ["aliased spawn", "liveContext = context;", "const startBrowser = spawn; startBrowser('/usr/bin/google-chrome', []); liveContext = context;", "alias launch or subprocess functions"],
+    ["aliased Chromium launch", "liveContext = context;", "const startBrowser = chromium.launch; await startBrowser({ channel: 'chrome' }); liveContext = context;", "alias launch or subprocess functions"],
+    ["namespace subprocess", "liveContext = context;", "child_process.execFile('/usr/bin/google-chrome', []); liveContext = context;", "browser subprocess outside Playwright"],
+    ["subprocess alias assignment", "liveContext = context;", "let startBrowser; startBrowser = spawn; startBrowser('/usr/bin/google-chrome', []); liveContext = context;", "alias launch or subprocess functions"],
+    ["destructured subprocess alias", "liveContext = context;", "const { spawn: startBrowser } = child_process; startBrowser('/usr/bin/google-chrome', []); liveContext = context;", "alias launch or subprocess functions"],
+    ["destructured Chromium launch alias", "liveContext = context;", "const { launch: startBrowser } = chromium; await startBrowser({ channel: 'chrome' }); liveContext = context;", "alias launch or subprocess functions"],
+    ["reassigned executable", "const executable = fs.realpathSync(chromium.executablePath());\n    must(executable.startsWith(fs.realpathSync(process.env.PLAYWRIGHT_BROWSERS_PATH) + path.sep));", "let executable = fs.realpathSync(chromium.executablePath());\n    must(executable.startsWith(fs.realpathSync(process.env.PLAYWRIGHT_BROWSERS_PATH) + path.sep)); executable = '/usr/bin/google-chrome';", "must not be shadowed or reassigned"],
   ] as const;
   for (const [name, from, to, reason] of cases) {
     await t.test(name, () => {
       const variant = source.replace(from, to);
       assert.notEqual(variant, source, "negative control must change the real smoke source");
-      assert.ok(directLaunchViolations(smokeLauncher, variant).some((violation) => violation.includes(reason)), reason);
+      const violations = directLaunchViolations(smokeLauncher, variant);
+      assert.ok(violations.includes(smokePinMessage), "every source edit must fail the content pin");
+      assert.ok(violations.some((violation) => violation.includes(reason)), reason);
+    });
+  }
+  for (const method of ["launch", "launchPersistentContext", "spawn", "exec", "execFile", "fork"]) {
+    await t.test(`computed ${method} on another object`, () => {
+      const variant = source.replace("liveContext = context;", `other['${method}'](); liveContext = context;`);
+      assert.notEqual(variant, source);
+      const violations = directLaunchViolations(smokeLauncher, variant);
+      assert.ok(violations.includes(smokePinMessage));
+      assert.ok(violations.includes("smoke must not use computed launch or subprocess access"));
     });
   }
   await t.test("another file cannot use the smoke exception", () => {
@@ -219,20 +307,22 @@ test("the smoke exception admits only its exact path and rejects unsafe launch v
 });
 
 test("repository browser launches use the shared safety helpers and gated test registration", async () => {
-  const sources = new Map(await Promise.all(
+  const sourceBytes = new Map(await Promise.all(
     (await Promise.all(sourceRoots.map((root) => sourceFiles(join(repoRoot, root))))).flat()
       .filter((file) => file !== launcher && !browserFreeChecks.has(file))
-      .map(async (file) => [file, await readFile(file, "utf8")] as const),
+      .map(async (file) => [file, await readFile(file)] as const),
   ));
+  const sources = new Map([...sourceBytes].map(([file, bytes]) => [file, bytes.toString("utf8")] as const));
   const browserFiles = new Set<string>();
   const violations: string[] = [];
   for (const [file, source] of sources) {
     const hasHeadlessFlag = /["']--headless(?:=|["'])/u.test(source);
     const launchesChrome = /\b(?:execFile|spawn|run)\s*\(\s*(?:await\s+)?(?:\w*chrome\w*|["'][^"']*(?:chrome|chromium)[^"']*["'])/iu.test(source);
     const launchesBrowserLibrary = /\b(?:chromium|puppeteer|browserType)\s*\.\s*launch(?:PersistentContext)?\s*\(/u.test(source);
-    if (hasHeadlessFlag || launchesChrome || launchesBrowserLibrary) {
+    // Check smoke's exact bytes even if an edit removes every recognized launch pattern.
+    if (file === smokeLauncher || hasHeadlessFlag || launchesChrome || launchesBrowserLibrary) {
       browserFiles.add(file);
-      violations.push(...directLaunchViolations(file, source)
+      violations.push(...directLaunchViolations(file, sourceBytes.get(file)!)
         .map((violation) => `${relative(repoRoot, file)}: ${violation}`));
     }
     if (/\b(?:findChrome|launchChrome)\b/u.test(source)) browserFiles.add(file);
