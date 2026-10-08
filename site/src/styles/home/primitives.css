@@ -247,8 +247,9 @@ button.hm-switch-row { cursor: pointer; }
 .hm-switch-word { font-size: var(--t-sm); font-weight: 600; flex: none; }
 .hm-switch-track { display: inline-flex; align-items: center; inline-size: 44px; block-size: 26px; flex: none; padding: 3px; border: 0; border-radius: var(--radius-pill); background: var(--home-field-border); }
 .hm-switch-knob { inline-size: 20px; block-size: 20px; border-radius: 50%; background: var(--home-card); }
+/* Checked knob/track and track/row: --home-card vs --home-ink, light 13.64:1 / dark 13.04:1. */
 .hm-switch-row[aria-checked="true"] .hm-switch-track { background: var(--home-ink); }
-.hm-switch-row[aria-checked="true"] .hm-switch-knob { margin-inline-start: auto; background: var(--home-accent); }
+.hm-switch-row[aria-checked="true"] .hm-switch-knob { margin-inline-start: auto; background: var(--home-card); }
 
 .hm-queue-row { display: grid; grid-template-columns: 2rem minmax(0, 1fr); gap: 8px; padding-block: 12px; border-block-end: 1px solid var(--home-hairline); color: var(--home-ink); }
 .hm-queue-position { align-self: start; padding-block-start: 8px; color: var(--home-ink-muted); font-weight: 700; font-variant-numeric: tabular-nums; }
