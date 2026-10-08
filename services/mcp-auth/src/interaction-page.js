@@ -1,8 +1,10 @@
+import { AUTH_PROVIDER_CATALOG } from "./auth-provider-catalog.js";
+
 const CONSENT_WARNING = "Chats using this Claude connection can use any seat created by the connection. Seat names do not isolate chats. These seats check messages during a chat turn; they do not run a listener.";
 
 // Sign-in providers the page may name. Any other value (null, unknown, inherited
 // object keys) renders the account without a provider, never the raw value.
-const PROVIDER_LABELS = new Map([["google", "Google"], ["github", "GitHub"], ["email", "email"]]);
+const PROVIDER_LABELS = new Map([...AUTH_PROVIDER_CATALOG.map(({ id, name }) => [id, name]), ["email", "email"]]);
 
 // Above this many rows the workspace list becomes a bounded scroll area.
 const LONG_WORKSPACE_LIST = 8;
@@ -109,63 +111,7 @@ function renderAccount(identity, csrfToken, switchAccount) {
     </div>`;
 }
 
-export function renderConsentPage({
-  interactionUid,
-  clientDisplay,
-  redirectUri,
-  identity,
-  workspaces,
-  selectedWorkspaceIds = [],
-  homeWorkspaceId = null,
-  selectionLocked = false,
-  selectionVersion,
-  csrfToken,
-  progress = [],
-  failure = null,
-  validationError = null,
-  switchAccount = null,
-}) {
-  const selected = new Set(selectedWorkspaceIds);
-  const names = new Map(workspaces.map((workspace) => [workspace.id, workspace.name]));
-  const choices = selectionLocked
-    ? selectedWorkspaceIds.map((id) => ({ id, name: names.get(id) ?? id, fixed: true }))
-    : workspaces.map((workspace) => ({ ...workspace, fixed: false }));
-  const workspaceRows = choices.map((workspace) => {
-    const checked = selected.has(workspace.id) ? " checked" : "";
-    const fixed = workspace.fixed ? " disabled" : "";
-    const hidden = workspace.fixed
-      ? `<input type="hidden" name="workspace_ids" value="${escapeHtml(workspace.id)}">`
-      : "";
-    return `<li class="workspace-choice">
-      ${hidden}<label class="workspace-pick"><input type="checkbox" name="workspace_ids" value="${escapeHtml(workspace.id)}"${checked}${fixed}> <span>${escapeHtml(workspace.name)}</span></label>
-      <label class="home-choice"><input type="radio" name="home_workspace_id" value="${escapeHtml(workspace.id)}"${homeWorkspaceId === workspace.id ? " checked" : ""}${fixed}> Home workspace</label>
-    </li>`;
-  }).join("");
-  const lockedHome = selectionLocked && homeWorkspaceId !== null
-    ? `<input type="hidden" name="home_workspace_id" value="${escapeHtml(homeWorkspaceId)}">`
-    : "";
-  const longList = choices.length > LONG_WORKSPACE_LIST;
-  const countText = `${choices.length} workspace${choices.length === 1 ? "" : "s"}${longList ? " · scroll for more" : ""}`;
-  const pickerHelp = selectionLocked
-    ? "These choices are locked because this connection has already started."
-    : "Check each workspace this app may reach. If you select more than one workspace, choose one of them as Home workspace.";
-  const emptyRow = choices.length === 0
-    ? `<li class="workspace-empty">You have no workspaces to choose from. Create one in CommonSwarm first.</li>`
-    : "";
-  const completed = progress.filter((step) => step.complete);
-  const progressMarkup = completed.length || failure
-    ? `<section class="progress" aria-live="polite"><h2>Consent progress</h2>
-        ${completed.length ? `<p>Completed:</p><ul>${completed.map((step) => `<li>${escapeHtml(stepLabel(step, names))}</li>`).join("")}</ul>` : ""}
-        ${failure ? `<p class="error" role="alert">${escapeHtml(failure)} The connection stays inactive. Reloading this page safely resumes the unfinished steps.</p>` : ""}
-      </section>`
-    : "";
-  const client = renderClientIdentity(clientDisplay);
-  return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light dark">
-<title>Connect an app to CommonSwarm</title>
-<style>
-:root{
+const CONSENT_STYLES = `:root{
   color-scheme:light dark;
   --canvas:#EEF2EA;--card:#FCFDFA;--soft:#F1F5EC;--soft-strong:#E7EDE1;--hair:#E3E9DD;--border:#D3DBCC;--lip:#C9D2C1;
   --ink:#17231C;--muted:#4F5E54;--lime:#D4F04A;--lime-ink:#17231C;
@@ -302,6 +248,86 @@ form[action$="/consent"]>.warning svg{margin-top:2px}
   .actions a{justify-content:center}
 }
 @media (forced-colors:active){.home-choice,.badge,.account,.workspace-list,.warning,.destination{border:1px solid CanvasText}}
+`;
+
+export function renderSignInPage({ interactionUid, providers, selectAccount = false }) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark">
+    <title>Sign in to CommonSwarm</title><style>${CONSENT_STYLES}</style></head>
+    <body><main class="page"><header class="top"><span class="brand">${BRAND_MARK}<span>CommonSwarm</span></span></header>
+    <div class="card"><h1>Sign in to CommonSwarm</h1><p class="lede">Choose an account to continue connecting your app.</p>
+    <div class="actions">${providers.map((id) => {
+      const entry = AUTH_PROVIDER_CATALOG.find((candidate) => candidate.id === id);
+      if (!entry) throw new TypeError("unknown sign-in provider");
+      const query = new URLSearchParams({ provider: id });
+      if (selectAccount) query.set("select_account", "1");
+      return `<a href="/interaction/${encodeURIComponent(interactionUid)}/sign-in?${escapeHtml(query.toString())}">Continue with ${escapeHtml(entry.name)}</a>`;
+    }).join("")}</div></div></main></body></html>`;
+}
+
+export function renderDifferentAccountPage() {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Start again</title><style>${CONSENT_STYLES}</style></head><body><main class="page"><div class="card">
+    <h1>You signed in as a different account; start again</h1><p>Start a new connection from your app.</p></div></main></body></html>`;
+}
+
+export function renderConsentPage({
+  interactionUid,
+  clientDisplay,
+  redirectUri,
+  identity,
+  workspaces,
+  selectedWorkspaceIds = [],
+  homeWorkspaceId = null,
+  selectionLocked = false,
+  selectionVersion,
+  csrfToken,
+  progress = [],
+  failure = null,
+  validationError = null,
+  switchAccount = null,
+}) {
+  const selected = new Set(selectedWorkspaceIds);
+  const names = new Map(workspaces.map((workspace) => [workspace.id, workspace.name]));
+  const choices = selectionLocked
+    ? selectedWorkspaceIds.map((id) => ({ id, name: names.get(id) ?? id, fixed: true }))
+    : workspaces.map((workspace) => ({ ...workspace, fixed: false }));
+  const workspaceRows = choices.map((workspace) => {
+    const checked = selected.has(workspace.id) ? " checked" : "";
+    const fixed = workspace.fixed ? " disabled" : "";
+    const hidden = workspace.fixed
+      ? `<input type="hidden" name="workspace_ids" value="${escapeHtml(workspace.id)}">`
+      : "";
+    return `<li class="workspace-choice">
+      ${hidden}<label class="workspace-pick"><input type="checkbox" name="workspace_ids" value="${escapeHtml(workspace.id)}"${checked}${fixed}> <span>${escapeHtml(workspace.name)}</span></label>
+      <label class="home-choice"><input type="radio" name="home_workspace_id" value="${escapeHtml(workspace.id)}"${homeWorkspaceId === workspace.id ? " checked" : ""}${fixed}> Home workspace</label>
+    </li>`;
+  }).join("");
+  const lockedHome = selectionLocked && homeWorkspaceId !== null
+    ? `<input type="hidden" name="home_workspace_id" value="${escapeHtml(homeWorkspaceId)}">`
+    : "";
+  const longList = choices.length > LONG_WORKSPACE_LIST;
+  const countText = `${choices.length} workspace${choices.length === 1 ? "" : "s"}${longList ? " · scroll for more" : ""}`;
+  const pickerHelp = selectionLocked
+    ? "These choices are locked because this connection has already started."
+    : "Check each workspace this app may reach. If you select more than one workspace, choose one of them as Home workspace.";
+  const emptyRow = choices.length === 0
+    ? `<li class="workspace-empty">You have no workspaces to choose from. Create one in CommonSwarm first.</li>`
+    : "";
+  const completed = progress.filter((step) => step.complete);
+  const progressMarkup = completed.length || failure
+    ? `<section class="progress" aria-live="polite"><h2>Consent progress</h2>
+        ${completed.length ? `<p>Completed:</p><ul>${completed.map((step) => `<li>${escapeHtml(stepLabel(step, names))}</li>`).join("")}</ul>` : ""}
+        ${failure ? `<p class="error" role="alert">${escapeHtml(failure)} The connection stays inactive. Reloading this page safely resumes the unfinished steps.</p>` : ""}
+      </section>`
+    : "";
+  const client = renderClientIdentity(clientDisplay);
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Connect an app to CommonSwarm</title>
+<style>
+${CONSENT_STYLES}
 </style></head><body><main class="page">
   <header class="top"><span class="brand">${BRAND_MARK}<span>CommonSwarm</span></span><span class="top-note">Connect an app</span></header>
   <div class="card${client.verified ? "" : " unverified"}">
@@ -315,7 +341,7 @@ form[action$="/consent"]>.warning svg{margin-top:2px}
     <div class="app-facts">${client.facts}</div>
     ${client.warning}
   </section>
-  ${renderAccount(identity, csrfToken, switchAccount)}
+  ${renderAccount(identity, csrfToken, selectionLocked ? null : switchAccount)}
   <section class="scope" aria-labelledby="scope-title">
     <h2 id="scope-title">What this connection can do</h2>
     <ul>

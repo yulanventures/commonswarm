@@ -256,8 +256,10 @@ test("workspace picker marks long lists with the is-long class, reports the coun
   assert.match(short, /3 workspaces</u);
   assert.match(page({ workspaces: [{ id: W1, name: "Only" }] }), /1 workspace</u);
 
-  const locked = page({ selectionLocked: true, selectedWorkspaceIds: [W1, W2], homeWorkspaceId: W2, selectionVersion: 1 });
+  const locked = page({ switchAccount: SWITCH, selectionLocked: true, selectedWorkspaceIds: [W1, W2], homeWorkspaceId: W2, selectionVersion: 1 });
   const tree = htmlTree(locked);
+  assert.equal(find(tree, (node) => node.tag === "form").length, 1);
+  assert.doesNotMatch(locked, /Use a different account|\/switch-account/u);
   const hidden = find(tree, (node) => node.tag === "input" && node.attrs.type === "hidden").map((node) => [node.attrs.name, node.attrs.value]);
   assert.deepEqual(hidden, [["selection_version", "1"], ["csrf_token", CSRF], ["home_workspace_id", W2],
     ["workspace_ids", W1], ["workspace_ids", W2]]);

@@ -13,6 +13,7 @@ import { ClientError, InteractionStateError } from "./client-error.js";
 import { INTERACTION_SECURITY_HEADERS } from "./browser-security.js";
 import { createConsentOrchestrator, createPostgresConsentProgress } from "./consent.js";
 import { createGoTrueClient } from "./gotrue.js";
+import { renderDifferentAccountPage } from "./interaction-page.js";
 import { InteractionStore } from "./interaction-store.js";
 import { createInteractionHandler } from "./interactions.js";
 import { createAdminConsentService, PostgresAdminConsentStore } from "./admin-consent.js";
@@ -76,7 +77,7 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
         return;
       }
       const interactionReadsBody = request.method === "POST" &&
-        /^\/interaction\/[^/]+\/(?:selection|consent)$/u.test(path);
+        /^\/interaction\/[^/]+\/(?:selection|consent|switch-account)$/u.test(path);
       if (!interactionReadsBody) {
         // Observe bytes only when the route's reader pulls them. Adding a data
         // listener to an unpaused IncomingMessage starts flowing and can discard
@@ -113,13 +114,14 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
       logger.info({ event: "request_failed", request_id: requestId, method: request.method,
         path, status, error_code: clientResponse?.body.error ?? error?.code ?? "internal_error" });
       if (!response.headersSent) {
-        if (error instanceof InteractionStateError && request.method === "GET" &&
+        if (error instanceof InteractionStateError && (request.method === "GET" ||
+            error.code === "different_account" || error.code === "interaction_binding_mismatch") &&
             !String(request.headers.accept ?? "").includes("application/json")) {
           response.writeHead(status, {
             ...INTERACTION_SECURITY_HEADERS,
             "content-type": "text/html; charset=utf-8",
           });
-          response.end("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Start the connection again</title><p>This connection attempt expired or was opened in another window. Start the connection again from your app.</p></html>");
+          response.end(error.code === "different_account" ? renderDifferentAccountPage() : "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Start the connection again</title><p>This connection attempt expired or was opened in another window. Start the connection again from your app.</p></html>");
         } else {
           json(response, status, clientResponse?.body ?? { error: "internal_error", request_id: requestId });
         }
@@ -177,6 +179,14 @@ export async function startServer({
   if (config.publicAuthorizationEnabled &&
       (typeof managementCommand !== "function" || typeof managementWorkspaceReader !== "function")) {
     throw new Error("public authorization requires lane-2 management command and workspace-read bindings");
+  }
+  const gotrue = createGoTrueClient({ baseUrl: config.gotrueUrl, anonKey: config.supabaseAnonKey,
+    providers: config.gotrueProviders ?? [config.gotrueProvider] });
+  try { await gotrue.verifyProviders(); }
+  catch (error) {
+    createLogger(writeLog).info({ event: "startup_refused", error_code: error.code,
+      reason: "Configured sign-in providers must be enabled in GoTrue /auth/v1/settings" });
+    throw error;
   }
   const runtimePool = createPool(config);
   const issuerPool = config.adminIssuer ? new Pool({ ...config.database,
@@ -247,11 +257,7 @@ export async function startServer({
     ? createInteractionHandler({
         provider,
         store: new InteractionStore(pool),
-        gotrue: createGoTrueClient({
-          baseUrl: config.gotrueUrl,
-          anonKey: config.supabaseAnonKey,
-          provider: config.gotrueProvider,
-        }),
+        gotrue,
         consentOrchestrator: createConsentOrchestrator({
           command: managementCommand,
           progress: createPostgresConsentProgress(pool),
@@ -269,8 +275,7 @@ export async function startServer({
       provider, store: new InteractionStore(pool),
       service: createAdminConsentService({ store: new PostgresAdminConsentStore(pool), provider,
         completeInTransaction: (...args) => adminLifecycle.completeConsent(...args) }),
-      gotrue: createGoTrueClient({ baseUrl: config.gotrueUrl, anonKey: config.supabaseAnonKey,
-        provider: config.gotrueProvider }),
+      gotrue,
       workspaceReader: async identity => {
         if (!adminTransactionContext(false)) return managementWorkspaceReader(identity);
         return withAdminRole("swarm_command", async () => (await adminQuery(`SELECT w.workspace_id AS id,w.name

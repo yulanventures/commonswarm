@@ -3,6 +3,8 @@ import { open } from "node:fs/promises";
 
 import { Pool } from "pg";
 
+import { AUTH_PROVIDER_CATALOG } from "./auth-provider-catalog.js";
+
 import { ISSUER, RESOURCE } from "./provider.js";
 
 const FILE_SETTINGS = Object.freeze({
@@ -41,6 +43,22 @@ function required(env, name) {
   const value = env[name];
   if (typeof value !== "string" || value.length === 0) throw new Error(`${name} is required`);
   return value;
+}
+
+export function parseGoTrueProviders(env) {
+  const legacy = env.MCP_OAUTH_GOTRUE_PROVIDER || undefined;
+  const list = env.MCP_OAUTH_GOTRUE_PROVIDERS;
+  const values = list === undefined ? [required(env, "MCP_OAUTH_GOTRUE_PROVIDER")]
+    : list.split(",").map((id) => id.trim());
+  const known = new Set(AUTH_PROVIDER_CATALOG.map(({ id }) => id));
+  if (!values.length || values.some((id) => !/^[a-z0-9_-]{1,64}$/u.test(id) || !known.has(id)) ||
+      new Set(values).size !== values.length) {
+    throw new Error("MCP_OAUTH_GOTRUE_PROVIDERS requires distinct supported provider ids");
+  }
+  if (legacy !== undefined && (values.length !== 1 || values[0] !== legacy)) {
+    throw new Error("MCP_OAUTH_GOTRUE_PROVIDER and MCP_OAUTH_GOTRUE_PROVIDERS disagree");
+  }
+  return Object.freeze(values);
 }
 
 function positiveInteger(env, name, fallback) {
@@ -209,6 +227,7 @@ export async function loadConfig(env = process.env) {
     }
     adminIssuer = credential;
   }
+  const gotrueProviders = parseGoTrueProviders(env);
   return {
     adminIssuer,
     adminIssuanceEnabled,
@@ -221,7 +240,8 @@ export async function loadConfig(env = process.env) {
     nativeLoopbackEnabled: env.MCP_OAUTH_NATIVE_LOOPBACK_ENABLED === "1",
     allowedOrigins,
     gotrueUrl: required(env, "MCP_OAUTH_GOTRUE_URL"),
-    gotrueProvider: required(env, "MCP_OAUTH_GOTRUE_PROVIDER"),
+    gotrueProvider: gotrueProviders[0],
+    gotrueProviders,
     supabaseAnonKey: required(env, "SUPABASE_ANON_KEY"),
     activeSigningKid,
     jwks: parseSigningKeys(signingKeysText, activeSigningKid),

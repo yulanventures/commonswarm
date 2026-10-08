@@ -127,7 +127,7 @@ async function harness() {
     provider, store,
     gotrue: { begin: () => ({
       url: new URL("https://api.commonswarm.com/auth/v1/authorize"),
-      state: "sign-in-state-long-enough", verifier: "sign-in-verifier-long-enough",
+      provider: "github", state: "sign-in-state-long-enough", verifier: "sign-in-verifier-long-enough",
     }) },
     consentOrchestrator: { status: async () => [] },
     workspaceReader: async () => [{ id: WORKSPACE, name: "Workspace One" }],
@@ -234,12 +234,18 @@ test("interaction bound to browser A refuses browser B with 409 and still admits
   assert.equal((await h.run(request)).statusCode, 200);
   request.headers.cookie = request.headers.cookie.replace(SESSION_A, SESSION_B);
   expectPage(await h.run(request), 409);
+  request.method = "POST";
+  request.url += "/switch-account";
+  request.headers["content-type"] = "application/x-www-form-urlencoded";
+  expectPage(await h.run(request), 409);
   assert.ok(h.logs.some((entry) => entry.event === "request_failed" &&
     entry.status === 409 && entry.error_code === "interaction_binding_mismatch"));
   request.headers.accept = "application/json";
   const json = await h.run(request);
   assert.equal(json.statusCode, 409);
   assert.deepEqual(JSON.parse(json.body), { error: "interaction_binding_mismatch" });
+  request.method = "GET";
+  request.url = request.url.replace("/switch-account", "");
   request.headers.cookie = request.headers.cookie.replace(SESSION_B, SESSION_A);
   assert.equal((await h.run(request)).statusCode, 200);
 });

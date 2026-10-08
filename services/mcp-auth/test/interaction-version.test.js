@@ -27,7 +27,7 @@ test("PostgreSQL consent counters keep selection, reload and confirmation on the
       let receipt, cutoverReads = 0;
       const tx = { release() {}, async query(sql, values) {
         if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) return rows();
-        if (sql.includes("FROM commonswarm_oauth.browser_sessions")) return rows({ user_id: OWNER, authenticated_at: new Date() });
+        if (sql.trimStart().startsWith("SELECT") && sql.includes("FROM commonswarm_oauth.browser_sessions")) return rows({ user_id: OWNER, authenticated_at: new Date() });
         if (sql.includes("FROM commonswarm_oauth.admin_verified_clients")) return rows(verification);
         if (sql.includes("FROM commonswarm_oauth.admin_client_owner_approvals")) return rows({ owner_user_id: OWNER,
           client_id: CLIENT, verification_version: 1, approval_event_id: "event", approval_command_id: "command" });
@@ -70,13 +70,13 @@ test("PostgreSQL consent counters keep selection, reload and confirmation on the
 });
 
 test("all interaction row APIs return a safe numeric CAS counter without depending on pg parser state", async () => {
-  const raw = { selection_version: types.getTypeParser(types.builtins.INT8)("7"), signin_state_hash: hashOpaque("signin-state") };
+  const raw = { selection_version: types.getTypeParser(types.builtins.INT8)("7"), signin_state_hash: hashOpaque("google:signin-state") };
   const tx = { query: async () => rows(raw), release() {} };
   const store = new InteractionStore({ query: tx.query, connect: async () => tx });
   const binding = { interactionUid: "uid", sessionId: SESSION, userId: OWNER, clientId: CLIENT,
     redirectUri: params.redirect_uri, resource: params.resource, scopes: ["openid"], pkceChallenge: params.code_challenge };
   const choice = { ...binding, token: "consent-token", selectionVersion: 7, workspaceIds: [OWNER] };
-  for (const row of [await store.bindInteraction(binding), await store.consumeSignIn("uid", SESSION, "signin-state"),
+  for (const row of [await store.bindInteraction(binding), await store.consumeSignIn("uid", SESSION, "signin-state", "google"),
     await store.attachUser("uid", SESSION, { id: OWNER }), (await store.selectWithToken(choice)).interaction,
     await store.bindProviderGrant("uid", "family", OWNER), await store.consumeConsent(choice), await store.selectAndConsumeConsent(choice)]) {
     assert.equal(row.selection_version, 7);

@@ -91,7 +91,7 @@ async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnab
           row.provider_grant_id === values[0] && row.completed);
         return rows(active ? {} : null);
       }
-      if (sql.includes("SELECT 1 FROM commonswarm_oauth.browser_sessions")) {
+      if (sql.trimStart().startsWith("SELECT 1 FROM commonswarm_oauth.browser_sessions")) {
         assert.equal(values[0], USER);
         return rows([...sessions.values()].find((row) => row.user_id === USER &&
           row.authenticated_at !== null && row.status === "valid"));
@@ -180,7 +180,7 @@ async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnab
       mcpHandler: createInteractionHandler({
         provider, store: new InteractionStore(pool),
         gotrue: { begin: () => ({ url: new URL("https://api.commonswarm.com/auth/v1/authorize"),
-          state: "synthetic-sign-in-state", verifier: "synthetic-sign-in-verifier" }) },
+          provider: "github", state: "synthetic-sign-in-state", verifier: "synthetic-sign-in-verifier" }) },
         consentOrchestrator: createConsentOrchestrator({ command: async (body, identity) => {
           commands.push({ body, identity });
           return { status: 200, body: { ok: true } };
@@ -551,6 +551,7 @@ test("production startServer keeps ordinary DCR enabled only with public authori
   // Exercise the real composition root and PostgreSQL registration adapter.
   // Only SQL persistence and listen are replaced; no database or socket opens.
   const registrations = new Map();
+  t.mock.method(globalThis, "fetch", async () => Response.json({ external: { github: true } }));
   t.mock.method(pg.Pool.prototype, "query", async (sql, values) => {
     if (sql.includes("DELETE FROM commonswarm_oauth.registered_clients")) return { rowCount: 0, rows: [] };
     if (sql.includes("INSERT INTO commonswarm_oauth.registered_clients")) {
@@ -626,7 +627,7 @@ test("DCR registration completes the same workspace consent and PKCE token flow 
       queries.push(sql);
       if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) return { rows: [], rowCount: 0 };
       let row;
-      if (sql.includes("FROM commonswarm_oauth.browser_sessions")) {
+      if (sql.trimStart().startsWith("SELECT") && sql.includes("FROM commonswarm_oauth.browser_sessions")) {
         row = { user_id: USER, authenticated_at: new Date().toISOString() };
       } else if (sql.includes("FROM commonswarm_oauth.admin_verified_clients")) {
         assert.equal(values[0], clientId); row = verification;

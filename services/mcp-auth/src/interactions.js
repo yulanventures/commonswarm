@@ -1,3 +1,5 @@
+import { AUTH_PROVIDER_CATALOG } from "./auth-provider-catalog.js";
+
 import { randomUUID } from "node:crypto";
 import { errors } from "oidc-provider";
 
@@ -10,9 +12,9 @@ import {
   sessionCookie,
 } from "./browser-security.js";
 import { ClientError, InteractionStateError } from "./client-error.js";
-import { renderConsentPage } from "./interaction-page.js";
+import { renderConsentPage, renderSignInPage, renderDifferentAccountPage } from "./interaction-page.js";
 import { metadataUrlAllowed } from "./metadata-fetch.js";
-import { RESOURCE_SCOPES } from "./provider.js";
+import { RESOURCE, RESOURCE_SCOPES } from "./provider.js";
 
 export function respond(response, status, body, headers = {}) {
   response.writeHead(status, {
@@ -79,16 +81,26 @@ export async function readBody(request, maximumBytes, timeoutMs) {
   }
 }
 
-export function identity(session) {
+export function identity(session, oidcSession, lastLogin) {
+  const login = lastLogin?.accountId === session.user_id ? lastLogin : oidcSession;
+  const provider = login?.accountId === session.user_id && Array.isArray(login.amr)
+    ? AUTH_PROVIDER_CATALOG.find(({ id }) => login.amr.includes(id))?.id ?? null
+    : null;
   return {
     userId: session.user_id,
     email: session.user_email,
+    provider,
     displayName: session.user_display_name,
     identityVerified: session.authenticated_at !== null,
     interactiveAuthAtSeconds: session.authenticated_at === null
       ? null
       : Math.floor(new Date(session.authenticated_at).getTime() / 1000),
   };
+}
+
+export function oidcLogin(session, details) {
+  const { provider } = identity(session, details.session, details.lastSubmission?.login);
+  return { accountId: session.user_id, ...(provider ? { amr: [provider] } : {}) };
 }
 
 async function findClient(provider, clientId) {
@@ -185,17 +197,28 @@ export function createInteractionHandler({
       const interactionUid = url.searchParams.get("interaction");
       const state = url.searchParams.get("state");
       const code = url.searchParams.get("code");
+      const selectedProvider = url.searchParams.get("provider");
       const sessionId = parseCookies(request.headers.cookie).get(SESSION_COOKIE);
-      if (!interactionUid || !state || !code || !sessionId) {
+      if (request.method !== "GET" || !interactionUid || !state || !code || !sessionId ||
+          !gotrue.providers?.includes(selectedProvider)) {
         throw new InteractionStateError("invalid_callback");
       }
-      const pending = await store.consumeSignIn(interactionUid, sessionId, state);
-      const result = await gotrue.exchange({ code, verifier: pending.signin_pkce_verifier });
+      const pending = await store.consumeSignIn(interactionUid, sessionId, state, selectedProvider);
+      const result = await gotrue.exchange({ code, verifier: pending.signin_pkce_verifier, provider: selectedProvider });
       await store.attachUser(interactionUid, sessionId, {
         id: result.identity.userId,
         email: result.identity.email,
         displayName: result.identity.displayName,
       });
+      // Only hosted MCP uses this callback write. Admin artifacts retain their
+      // existing transaction boundary. The provider/state pair was checked above.
+      if (pending.resource === RESOURCE) {
+        const interaction = await provider.Interaction.find(interactionUid);
+        if (!interaction) throw new InteractionStateError("interaction_expired");
+        interaction.lastSubmission = { ...interaction.lastSubmission,
+          login: { accountId: result.identity.userId, amr: [selectedProvider] } };
+        await interaction.persist();
+      }
       const rotated = await store.rotateSession(sessionId);
       response.writeHead(303, {
         ...INTERACTION_SECURITY_HEADERS,
@@ -206,7 +229,7 @@ export function createInteractionHandler({
       return true;
     }
 
-    const match = /^\/interaction\/([^/]+)(?:\/(selection|consent))?$/u.exec(url.pathname);
+    const match = /^\/interaction\/([^/]+)(?:\/(selection|consent|switch-account|sign-in))?$/u.exec(url.pathname);
     if (!match) return false;
     let interactionUid;
     try {
@@ -218,7 +241,7 @@ export function createInteractionHandler({
     const operation = match[2] ?? "view";
     let parsed;
     let body;
-    if (request.method === "POST" && ["selection", "consent"].includes(operation)) {
+    if (request.method === "POST" && ["selection", "consent", "switch-account"].includes(operation)) {
       parsed = await readBody(request, maxBodyBytes, bodyReadTimeoutMs);
       body = parsed.value;
       if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -253,6 +276,11 @@ export function createInteractionHandler({
       bindingFromDetails(interactionUid, browser.id, details, browser.session),
     );
     const session = await store.requireSession(browser.id);
+    if (bound.user_id && session?.user_id && bound.user_id !== session.user_id) {
+      respondHtml(response, 409, renderDifferentAccountPage());
+      return true;
+    }
+    const switchAccount = { action: `/interaction/${encodeURIComponent(interactionUid)}/switch-account` };
 
     async function consentHeaders() {
       const redirectUri = details.params.redirect_uri;
@@ -264,9 +292,21 @@ export function createInteractionHandler({
       return consentSecurityHeaders(redirectUri, { allowLoopback: client?.applicationType === "native" });
     }
 
-    if (request.method === "GET" && operation === "view") {
+    if (request.method === "GET" && ["view", "sign-in"].includes(operation)) {
       if (!session?.user_id) {
-        const signIn = gotrue.begin({ callbackUrl, interactionUid });
+        const choices = gotrue.providers ?? [];
+        const selectedProvider = url.searchParams.get("provider");
+        if (selectedProvider !== null && !choices.includes(selectedProvider)) {
+          respond(response, 400, { error: "invalid_provider" });
+          return true;
+        }
+        const selectAccount = url.searchParams.get("select_account") === "1";
+        if (selectedProvider === null && (choices.length > 1 || operation === "sign-in")) {
+          respondHtml(response, 200, renderSignInPage({ interactionUid, providers: choices, selectAccount }));
+          return true;
+        }
+        const signIn = gotrue.begin({ callbackUrl, interactionUid,
+          provider: selectedProvider ?? choices[0], selectAccount });
         await store.beginSignIn(interactionUid, browser.id, signIn);
         response.writeHead(303, { ...INTERACTION_SECURITY_HEADERS, location: signIn.url.toString() });
         response.end();
@@ -274,13 +314,13 @@ export function createInteractionHandler({
       }
       if (details.prompt?.name === "login") {
         await provider.interactionFinished(request, response, {
-          login: { accountId: session.user_id },
+          login: oidcLogin(session, details),
         }, { mergeWithLastSubmission: false });
         return true;
       }
       if (details.prompt?.name !== "consent") throw new Error("unsupported interaction prompt");
       consentPromptDetails(details);
-      const currentIdentity = identity(session);
+      const currentIdentity = identity(session, details.session, details.lastSubmission?.login);
       const workspaces = await workspaceReader(currentIdentity);
       const progress = await consentOrchestrator.status?.(interactionUid) ?? [];
       const homeWorkspaceId = progress.find((step) => step.kind === "begin")?.workspaceId ?? null;
@@ -290,6 +330,7 @@ export function createInteractionHandler({
         redirectUri: details.params.redirect_uri,
         clientDisplay: await clientConsentDisplay(provider, details.params.client_id, details.params.redirect_uri),
         identity: currentIdentity,
+        switchAccount,
         workspaces,
         selectedWorkspaceIds: bound.selected_workspace_ids ?? [],
         homeWorkspaceId,
@@ -301,8 +342,8 @@ export function createInteractionHandler({
       return true;
     }
 
-    if (request.method !== "POST" || !["selection", "consent"].includes(operation)) {
-      respond(response, 405, { error: "method_not_allowed" }, { allow: operation === "view" ? "GET" : "POST" });
+    if (request.method !== "POST" || !["selection", "consent", "switch-account"].includes(operation)) {
+      respond(response, 405, { error: "method_not_allowed" }, { allow: ["view", "sign-in"].includes(operation) ? "GET" : "POST" });
       return true;
     }
     try {
@@ -323,6 +364,15 @@ export function createInteractionHandler({
       respond(response, 403, { error: "csrf_required" });
       return true;
     }
+    if (operation === "switch-account") {
+      const next = await store.switchAccount({ interactionUid, sessionId: browser.id,
+        userId: session.user_id, token: csrfToken });
+      response.writeHead(303, { ...INTERACTION_SECURITY_HEADERS,
+        "set-cookie": [sessionCookie(browser.id, { clear: true }), sessionCookie(next)],
+        location: `/interaction/${encodeURIComponent(interactionUid)}/sign-in?select_account=1` });
+      response.end();
+      return true;
+    }
     async function invalidRequest(message, selectedWorkspaceIds = [], workspaces, refreshToken = false) {
       if (parsed.format !== "form" || operation !== "consent") {
         respond(response, 400, { error: "invalid_request" });
@@ -335,7 +385,8 @@ export function createInteractionHandler({
         interactionUid,
         redirectUri: details.params.redirect_uri,
         clientDisplay: await clientConsentDisplay(provider, details.params.client_id, details.params.redirect_uri),
-        identity: identity(session),
+        identity: identity(session, details.session, details.lastSubmission?.login),
+        switchAccount,
         workspaces: workspaces ?? await workspaceReader(identity(session)),
         selectedWorkspaceIds,
         selectionLocked: bound.commonswarm_grant_id != null,
@@ -451,7 +502,7 @@ export function createInteractionHandler({
         interactionRef: interactionUid,
         providerGrantId: consent.provider_grant_id,
         clientId: consent.client_id,
-        identity: identity(session),
+        identity: identity(session, details.session, details.lastSubmission?.login),
         workspaceIds: consent.selected_workspace_ids,
         homeWorkspaceId: body.home_workspace_id,
         grantId: consent.commonswarm_grant_id,
@@ -476,7 +527,8 @@ export function createInteractionHandler({
         interactionUid,
         redirectUri: details.params.redirect_uri,
         clientDisplay: await clientConsentDisplay(provider, consent.client_id, details.params.redirect_uri),
-        identity: identity(session),
+        identity: identity(session, details.session, details.lastSubmission?.login),
+        switchAccount: null,
         workspaces,
         selectedWorkspaceIds: consent.selected_workspace_ids,
         homeWorkspaceId: body.home_workspace_id,
@@ -490,6 +542,8 @@ export function createInteractionHandler({
     }
     await store.complete(interactionUid);
     await provider.interactionFinished(request, response, {
+      ...(details.session?.accountId && details.session.accountId !== session.user_id
+        ? { login: oidcLogin(session, details) } : {}),
       consent: { grantId: consent.provider_grant_id },
     });
     return true;
