@@ -1,5 +1,6 @@
 tests/admin-release-plan.test.ts
 tests/oauth-release-plan.test.ts
+tests/edge-release-plan.test.ts
 tests/admin-release-plan-sandbox.test.ts
 tests/admin-release-live-failclosed-w123.test.ts
 tests/admin-release-live-failclosed-w45.test.ts
