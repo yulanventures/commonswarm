@@ -239,13 +239,14 @@ test("tools/list accepts optional cursor and metadata without pagination", async
     { name: "empty compatibility control", params: {}, status: 200 },
     { name: "cursor", params: { cursor: "x" }, status: 200 },
     { name: "empty metadata", params: { _meta: {} }, status: 200 },
+    { name: "string progress metadata", params: { _meta: { progressToken: "abc" } }, status: 200 },
     { name: "progress metadata", params: { _meta: { progressToken: 1 } }, status: 200 },
     { name: "cursor and metadata", params: { cursor: "", _meta: { progressToken: "progress" } }, status: 200 },
     { name: "unknown key", params: { bogus: 1 }, status: 400 },
     { name: "unknown key with cursor", params: { cursor: "x", bogus: 1 }, status: 400 },
     ...[null, [], "x", 1, false].map((params) => ({ name: `non-object ${JSON.stringify(params)}`, params, status: 400 })),
     ...[null, 1, [], {}].map((cursor) => ({ name: `invalid cursor ${JSON.stringify(cursor)}`, params: { cursor }, status: 400 })),
-    ...[null, 1, [], "x"].map((_meta) => ({ name: `invalid metadata ${JSON.stringify(_meta)}`, params: { _meta }, status: 400 })),
+    ...[null, 1, [], "x", false].map((_meta) => ({ name: `invalid metadata ${JSON.stringify(_meta)}`, params: { _meta }, status: 400 })),
   ];
   for (const { name, params, status } of cases) {
     await t.test(name, async () => {
@@ -268,6 +269,114 @@ test("tools/list accepts optional cursor and metadata without pagination", async
   assert.equal(logging.mock.callCount(), cases.filter(({ status }) => status === 400).length);
 });
 
+test("request metadata is ignored, including the claim_seat regression from repro.mjs", async (t) => {
+  const calls: Array<{ name: string; arguments: Record<string, unknown>; token: typeof verified }> = [];
+  const serve = handler({ executeTool: async (call) => {
+    assert.equal(Object.hasOwn(call, "_meta"), false, "metadata never reaches the executor");
+    calls.push({ name: call.name, arguments: call.arguments, token: call.token });
+    return { reachedExecutor: true };
+  } });
+  const logging = t.mock.method(console, "error", () => undefined);
+  // Replay the shape in the investigator's repro.mjs, including numeric progressToken.
+  const arguments_ = { name: "MrMarketing", request_id: "mrmarketing-claude-2026-10-08" };
+  const methods = [
+    { method: "tools/call", params: { name: "claim_seat", arguments: arguments_ } },
+    { method: "initialize", params: {
+      protocolVersion: "2025-06-18", capabilities: {},
+      clientInfo: { name: "claude-ai", version: "0.1.0" },
+    } },
+    { method: "ping", params: {} },
+  ];
+  const cases = [
+    { name: "empty", _meta: {}, status: 200 },
+    { name: "string progress", _meta: { progressToken: "abc" }, status: 200 },
+    { name: "numeric progress (repro.mjs)", _meta: { progressToken: 1 }, status: 200 },
+    { name: "opaque contents", _meta: {
+      progressToken: null, subject: "metadata-must-not-change-identity",
+      providerGrantId: "metadata-must-not-change-grant", name: "whoami",
+      arguments: { workspace_id: "metadata-must-not-route" },
+      nested: [null, { private: "metadata-must-not-be-logged" }],
+    }, status: 200 },
+    ...[[], null, "x", 1, false].map((_meta) => ({
+      name: `invalid ${JSON.stringify(_meta)}`, _meta, status: 400,
+    })),
+  ];
+  for (const { method, params } of methods) {
+    await t.test(method, async (t) => {
+      const send = (params: unknown) => serve(post({
+        jsonrpc: "2.0", id: 1, method, params,
+      }, { origin: "https://claude.ai" }));
+      const control = await send(params);
+      assert.equal(control.status, 200, "call without metadata is a positive control");
+      const expected = await control.json();
+      if (method === "tools/call") {
+        assert.deepEqual(expected.result, { content: [{ type: "text", text: JSON.stringify({ reachedExecutor: true }) }] });
+      }
+      for (const { name, _meta, status } of cases) {
+        await t.test(name, async () => {
+          const before = calls.length;
+          const response = await send({ ...params, _meta });
+          assert.equal(response.status, status);
+          const envelope = await response.json();
+          assert.equal(calls.length - before, status === 200 && method === "tools/call" ? 1 : 0);
+          if (status === 200) {
+            assert.deepEqual(envelope, expected, "metadata does not change the response");
+            if (method === "tools/call") {
+              assert.deepEqual(calls.at(-1), { name: "claim_seat", arguments: arguments_, token: verified });
+            }
+          } else {
+            assert.equal(envelope.jsonrpc, "2.0");
+            assert.equal(envelope.id, 1);
+            assert.equal(envelope.error.code, -32602);
+            if (method !== "tools/call") assert.equal(envelope.error.message, "Invalid params");
+          }
+        });
+      }
+      if (method === "tools/call") {
+        const before = calls.length;
+        const unknown = await send({ ...params, _meta: {}, bogus: true });
+        const invalidMeta = await send({ ...params, _meta: null });
+        assert.equal(unknown.status, 400, "other unknown params keys remain refused");
+        assert.deepEqual(await unknown.json(), await invalidMeta.json(), "same -32602 error shape");
+        assert.equal(calls.length, before);
+      } else {
+        const extra = await send({ ...params, _meta: {}, bogus: true });
+        assert.equal(extra.status, 200, "initialize and ping retain their existing extra-params behavior");
+        assert.deepEqual(await extra.json(), expected);
+      }
+    });
+  }
+  assert.deepEqual(logging.mock.calls.map(({ arguments: args }) => JSON.parse(args[0])), [
+    ...Array.from({ length: 7 }, () => ({ event: "request_failed", error_code: -32602, method: "tools/call" })),
+    ...Array.from({ length: 5 }, () => ({ event: "request_failed", error_code: -32602, method: "initialize" })),
+    ...Array.from({ length: 5 }, () => ({ event: "request_failed", error_code: -32602, method: "ping" })),
+  ], "metadata values never enter failure logs");
+});
+
+test("ping null params and initialize missing version retain their existing errors", async (t) => {
+  const serve = handler();
+  t.mock.method(console, "error", () => undefined);
+  const cases = [
+    { method: "ping", params: null, code: -32600, message: "Invalid Request" },
+    { method: "initialize", params: {}, code: -32602, message: "Unsupported protocol version" },
+  ];
+  for (const { method, params, code, message } of cases) {
+    await t.test(`${method} ${JSON.stringify(params)}`, async () => {
+      const control = await serve(post({
+        jsonrpc: "2.0", id: 1, method,
+        params: method === "initialize" ? { protocolVersion: "2025-06-18" } : {},
+      }));
+      assert.equal(control.status, 200, "valid params reach the same method");
+      const response = await serve(post({ jsonrpc: "2.0", id: 1, method, params }));
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), {
+        jsonrpc: "2.0", id: method === "ping" ? null : 1,
+        error: { code, message },
+      });
+    });
+  }
+});
+
 test("MCP denials log only stable error codes and known method names", async (t) => {
   const fixture = await authenticatedHandler();
   const logging = t.mock.method(console, "error", () => undefined);
@@ -284,7 +393,7 @@ test("MCP denials log only stable error codes and known method names", async (t)
   for (const params of [{}, { protocolVersion: null }, { protocolVersion: 42 }, { protocolVersion: {} }]) {
     const invalid = await fixture.serve(post(initialize(params), fixture.headers));
     assert.equal(invalid.status, 400);
-    assert.equal((await invalid.json()).error.code, -32602);
+    assert.deepEqual((await invalid.json()).error, { code: -32602, message: "Unsupported protocol version" });
   }
   const list = { jsonrpc: "2.0", id, method: "tools/list" };
   const later = await fixture.serve(post(list, {
