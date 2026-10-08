@@ -4337,7 +4337,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             else { homeGateEditorId = row.todoId; void navigateHome({ view: "todo", workspaceId: workspace.id, todoId: row.todoId }, "push"); }
           } })]); return;
       }
-      if (homeTodosState === "absent") { slot.replaceChildren(); slot.hidden = true; return; }
+      if (homeTodosState === "absent") {
+        if (homeRoute.view === "todo") homePaneMessage("Could not load this to-do.", "");
+        else { slot.replaceChildren(); slot.hidden = true; }
+        return;
+      }
       if (homeTodosState === "refused" || homeTodosState === "failed") { homePaneMessage("Could not load to-dos.", homeTodoReceipt); return; }
       if (homeRoute.view === "todos") {
         replaceHomeRegion(slot, "todos", [todosPane(document, { filter: homeTodoFilter, rows: homeTodosState === "ready" ? homeTodoModels().map(todo => ({ todo, href: homeTodoCard(todo, ctx.now).href })) : null,
@@ -4568,6 +4572,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const back = document.createElement("a"); back.href = homeLink?.href ?? routeHref({ view: "chat", workspaceId: activeWorkspaceId }); back.textContent = homeLink?.label ?? workspace?.name ?? "Workspace";
       back.addEventListener("click", event => { event.preventDefault(); navigateHomeHref(back.href); });
       slot.replaceChildren(title, text, back); slot.hidden = false;
+      if (homeRoute.view === "todo") focusHomeView();
     };
     const applyHomePane = (): void => {
       const catchUp = one<HTMLElement>("[data-home-catchup]");

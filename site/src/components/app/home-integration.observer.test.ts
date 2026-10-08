@@ -7,12 +7,13 @@ import { HomeToolsUnavailable, HomeCommandRefused } from '../../lib/home/client'
 import { CommandOutcomeUnknown, FreshLoginRequired, WorkspaceRoleRefused, BROWSER_SIGNAL_COLUMNS, browserSignalFromRow } from '../../lib/commonswarm';
 import { createLatestRead } from '../../lib/latest-read';
 import { buildAuthorLine, buildStreamExtras, deriveStreamExtras } from '../../lib/home-stream';
-import { homeParty, mapHomePeople, homeAskAnswered } from '../../lib/home-map';
+import { homeParty, mapHomePeople, homeAskAnswered, homeViewTitle } from '../../lib/home-map';
 import { peopleRoleBeginSave, peopleRoleErrorCode, peopleRoleFinishSave, peopleRoleReceipt, peopleRoleRefusal } from '../../lib/people-dialog-view';
 import { addAgentOwnershipLine, agentLabelInSentence, personFirstName } from '../../lib/home-names';
 import { canStartThread, THREAD_REPLY_CONTROL_LABEL, threadReplyPlace, threadReplyTargetText } from '../../lib/thread-reply';
 import { channelLabel } from '../../lib/channels';
-import { parentRoute } from '../../lib/home-route';
+import { parentRoute, routeHref } from '../../lib/home-route';
+import { todoView } from '../../lib/home-todo';
 
 /** Execute the dashboard's read/write lifecycle, replacing only the DOM paint boundaries.
  * No browser, model, network or customer data. Expected surface states come from UI-SPEC 3.3. */
@@ -90,6 +91,79 @@ test('standalone details hide the account door and restore the same DOM to works
   assert.equal(account.hidden, false);
   assert.equal(account.trigger, trigger, 'restoration preserves the original trigger and its handlers');
   assert.equal(account.menu, menu, 'restoration preserves the original menu and its handlers');
+});
+
+test('applyHomePane keeps standalone to-do states readable, with a back link and heading focus when tools become unavailable', async () => {
+  const focused: PaneNode[] = [], frames: (() => void)[] = [];
+  class PaneNode extends RowNode {
+    hidden = false; tabIndex = 0; href = '';
+    get parentElement() { return this.parent; }
+    prepend(node: PaneNode) { node.remove(); node.parent = this; this.children.unshift(node); }
+    toggleAttribute(name: string, enabled: boolean) {
+      if (enabled) this.setAttribute(name, ''); else this.attributes.delete(name);
+    }
+    getClientRects(): unknown[] {
+      for (let node: RowNode | null = this; node; node = node.parent) if ((node as PaneNode).hidden) return [];
+      return [{}];
+    }
+    focus() { focused.push(this); }
+  }
+  const document = { title: '', createElement: (tag: string) => new PaneNode(tag),
+    createElementNS: (_namespace: string, tag: string) => new PaneNode(tag) };
+  const frame = new PaneNode('div'), main = new PaneNode('main'), rail = new PaneNode('nav');
+  const slot = new PaneNode('section'), channel = new PaneNode('section'), account = new PaneNode('div');
+  frame.append(rail, main); rail.append(account); main.append(slot, channel);
+  const nodes = new Map<string, PaneNode>([['.hm-frame', frame], ['.hm-frame__main', main], ['.hm-frame__rail', rail],
+    ['[data-home-route-pane]', slot], ['.dashboard__channel', channel], ['[data-user-menu-root]', account]]);
+  const context = createContext({ document, routeHref, homeViewTitle, todoView,
+    window: { requestAnimationFrame: (callback: () => void) => frames.push(callback) },
+    one: (selector: string) => nodes.get(selector) ?? null,
+    all: (selector: string) => selector === '[data-home-route-pane] h1' ? slot.querySelectorAll('h1') : [],
+    // Paint replacement has its own focus tests; keep the production to-do DOM builder here.
+    replaceHomeRegion: (region: PaneNode, _key: string, children: PaneNode[]) => region.replaceChildren(...children),
+  });
+  runInContext(`
+    const app={dataset:{state:'channel',channelView:'feed'}}, activeWorkspaceId='W', workspaces=[{id:'W',name:'Home'}];
+    const homeRoute={view:'todo',workspaceId:'W',todoId:'T'}, sampleMode=false;
+    let homeTodosState='pending', homeQueueRead='pending', homeTodoReceipt='';
+    const homeTodoRead=null, homeTodoRows=[], homeQueue=null, homePolicies=new Map(), homeDetailKey='';
+    const homeTodoSave='idle', homeTodoNotice=null, homeGateEditorId=null;
+    const homeTodoContext=()=>({now:0,viewerId:'tom',editor:true,people:{groups:[],other:[]}}), homeServer=()=>null;
+    const parkPeopleHosts=()=>{}, renderHomeSide=()=>{}, syncFeedChrome=()=>{};
+  `, context);
+  runInContext(await dashboardFunctions(['syncStandalonePage', 'homePaneMessage', 'renderHomeObjectPane', 'loadHomeObject', 'applyHomePane', 'focusHomeView']), context);
+  const flushFocus = () => { for (const callback of frames.splice(0)) callback(); };
+  const assertPage = (label: string, expectedHref: string) => {
+    assert.equal(frame.getAttribute('data-home-standalone'), '', `${label}: this exercises the standalone route`);
+    assert.equal(account.hidden, true, `${label}: workspace account access uses the back link`);
+    assert.equal(channel.hidden, true);
+    assert.equal(slot.hidden, false, `${label}: the standalone detail page must not be blank`);
+    const back = slot.querySelectorAll('a').find(node => (node as PaneNode).href === expectedHref) as PaneNode | undefined;
+    assert.ok(back, `${label}: a back link returns to the workspace`);
+    assert.ok(back.getClientRects().length, `${label}: the back link is visible`);
+    const title = slot.querySelector('h1') as PaneNode | null;
+    assert.ok(title?.textContent, `${label}: the page has a message`);
+    assert.equal(title.tabIndex, -1, `${label}: the heading accepts scripted focus`);
+    assert.ok(title.getClientRects().length, `${label}: the focus target is visible`);
+    assert.equal(focused.at(-1), title, `${label}: focus reaches the current heading`);
+  };
+  for (const [state, queue, receipt, label, expectedHref] of [
+    ['absent', 'failed', 'Could not load to-dos. Reload to try again.', 'unavailable tools', '/app?w=W'],
+    ['failed', 'pending', 'Could not load to-dos. Reload to try again.', 'failed workspace read', '/app?w=W'],
+    ['refused', 'pending', 'Open Lists & docs to choose your access.', 'refused workspace read', '/app?w=W'],
+    ['ready', 'failed', 'Could not load this page. Reload to try again.', 'failed detail read', '/app?w=W'],
+    ['ready', 'failed', 'not-found', 'missing to-do', '/app?w=W'],
+    ['pending', 'pending', '', 'loading to-do', '/app?w=W&v=todos'],
+  ]) {
+    runInContext(`homeTodosState=${JSON.stringify(state)}; homeQueueRead=${JSON.stringify(queue)}; homeTodoReceipt=${JSON.stringify(receipt)}; applyHomePane(); focusHomeView();`, context);
+    flushFocus();
+    assertPage(label, expectedHref);
+  }
+  // The workspace read can settle after navigation's focus call. Repainting alone must focus its message.
+  focused.length = 0;
+  runInContext("homeTodosState='absent'; homeQueueRead='failed'; applyHomePane();", context);
+  flushFocus();
+  assertPage('tools become unavailable after loading', '/app?w=W');
 });
 
 async function readFixture(server: unknown, postCommand?: (...args: unknown[]) => Promise<unknown>) {
