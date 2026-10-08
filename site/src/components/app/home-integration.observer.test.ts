@@ -102,7 +102,7 @@ test('a routed To-dos pane becomes visible after rendering and hides again when 
     const activeWorkspaceId='W', workspaces=[{id:'W',name:'Home'}], homeRoute={view:'todos'};
     let homeTodosState='ready'; const homeTodoReceipt='', homeTodoFilter='open', homeTodoSave='idle', sampleMode=false;
     const one=()=>slot, homeTodoContext=()=>({now:0,editor:true,people:{groups:[]}}), homeTodoModels=()=>[];
-    const personNames=()=>new Map(), todosPane=()=>({}), document={}, replaceHomeRegion=()=>{};
+    const personNames=()=>new Map(), todosPane=()=>({}), document={}, replaceHomeRegion=()=>{}, parkPeopleHosts=()=>{};
   `, context);
   runInContext(await dashboardFunctions(['renderHomeObjectPane']), context);
   runInContext('renderHomeObjectPane()', context);
@@ -121,7 +121,7 @@ async function routedTodoFixture() {
     const homeTodoRead={todo:{todo_id:'T',offer:{offer_id:'O',decider_user_id:'tom'}}};
     const one=()=>slot, homeTodoContext=()=>ctx, routeHref=()=>'?w=W', mapHomeTodo=()=>({id:'T',title:'Book plumber',assignee:null});
     let receivedVM, receipt;
-    const todoView=(doc,vm)=>{receivedVM=vm; return {};}, replaceHomeRegion=()=>{};
+    const todoView=(doc,vm)=>{receivedVM=vm; return {};}, replaceHomeRegion=()=>{}, parkPeopleHosts=()=>{};
     const homeWrite=async(run,copy)=>{await run({answerRequest:async(w,input)=>{globalThis.answer=input.answer; return {}; }},'R'); receipt=copy({},[]);};
     const document={createElement(){return {setAttribute(name,value){this[name]=value;},addEventListener(name,fn){this[name]=fn;}};}};
   `, context);

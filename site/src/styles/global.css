@@ -1100,6 +1100,15 @@ a.card:focus-visible,
     outline: 3px solid Highlight;
     outline-offset: 2px;
   }
+  /* Many component rules draw focus with box-shadow and set `outline: none` at a higher specificity
+     than the rule above (the home controls: people.css, pickers.css, shell.css, rail.css ...). Forced
+     colours drop the shadow, so there the outline must win over every such rule, present or future:
+     a specificity race cannot promise that, `!important` can. Headings that are only programmatic
+     route targets (tabindex -1) keep their quiet form, as above. Code review, release 7. */
+  :focus-visible:not(:is(h1, h2, h3, h4, h5, h6)[tabindex="-1"]) {
+    outline: 3px solid Highlight !important;
+    outline-offset: 2px !important;
+  }
 }
 
 .skip-link {
