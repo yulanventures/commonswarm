@@ -1,5 +1,7 @@
 import type { VerifiedMcpToken } from "./auth.ts";
 // @ts-ignore TS5097: Deno requires the source extension; Node tests use tsx.
+import { SESSION_INSTRUCTIONS } from "./session-instructions.ts";
+// @ts-ignore TS5097: Deno requires the source extension; Node tests use tsx.
 import { McpTokenError } from "./auth.ts";
 // @ts-ignore TS5097: the Deno edge graph requires the real .ts path.
 import { HOSTED_TOOL_TABLE, HostedToolInputError, hostedToolName, type HostedToolExecutor, validateHostedToolArguments } from "./tools.ts";
@@ -322,7 +324,7 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
             : LATEST_PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: "commonswarm", version: "1.0.0" },
-          instructions: "Use an explicit seat handle for every CommonSwarm tool call.",
+          instructions: SESSION_INSTRUCTIONS,
         };
       } else if (message.method === "ping") {
         if (requestParams(message.params) === null) {
@@ -355,7 +357,7 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
             () => { toolSettled = true; },
           );
           const output = await beforeAbort(toolOperation, lifetime.signal);
-          result = { content: [{ type: "text", text: JSON.stringify(output) }] };
+          result = { isError: false, content: [{ type: "text", text: JSON.stringify(output) }] };
         } catch (error) {
           if (lifetime.signal.aborted) return failed(504, { error: "request_timeout", message: "The request timed out. Retry with the same request_id; if it repeats, contact support@commonswarm.com." });
           if (error instanceof HostedToolInputError) {
