@@ -22,7 +22,7 @@ const description = "Continue to CommonSwarm to open a workspace for home or wor
   bareHeader
   bareFooter
 >
-  <section class="handoff" aria-labelledby="handoff-title">
+  <section data-marketing class="handoff" aria-labelledby="handoff-title">
     <a class="handoff__wordmark" href="/" aria-label="CommonSwarm home">CommonSwarm</a>
     <div class="handoff__copy">
       <p class="handoff__eyebrow">Opening your workspace</p>
@@ -54,10 +54,12 @@ const description = "Continue to CommonSwarm to open a workspace for home or wor
 
 <style>
   .handoff {
-    min-block-size: 100svh;
+    min-block-size: min(40rem, calc(100svh - var(--s-12)));
     inline-size: min(100% - var(--gutter) * 2, 42rem);
-    margin-inline: auto;
-    padding-block: var(--s-12);
+    margin: var(--s-6) auto;
+    padding: clamp(var(--s-6), 5vw, var(--s-12));
+    background: var(--bg-raised);
+    border-radius: var(--radius-xl);
     display: grid;
     align-content: center;
     justify-items: start;
@@ -89,7 +91,6 @@ const description = "Continue to CommonSwarm to open a workspace for home or wor
   .handoff h1 {
     max-inline-size: 16ch;
     margin: 0;
-    font-size: clamp(var(--t-2xl), 6vw, var(--t-4xl));
     line-height: 1.02;
     letter-spacing: var(--track-head);
     text-wrap: balance;
@@ -112,7 +113,7 @@ const description = "Continue to CommonSwarm to open a workspace for home or wor
     background: var(--accent);
     border: 1px solid var(--accent);
     border-radius: var(--radius);
-    box-shadow: var(--shadow-sm);
+    box-shadow: none;
     font-size: var(--t-sm);
     font-weight: var(--weight-semibold);
     line-height: 1;
@@ -120,8 +121,7 @@ const description = "Continue to CommonSwarm to open a workspace for home or wor
   }
 
   .handoff__button:hover {
-    background: var(--accent-hover);
-    border-color: var(--accent-hover);
-    transform: translateY(-1px);
+    background: var(--accent-bright);
+    border-color: var(--accent-bright);
   }
 </style>

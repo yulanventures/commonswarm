@@ -119,7 +119,7 @@ const PLATFORMS = [
 ] as const;
 ---
 
-<section class="dl-hero" aria-labelledby="dl-title">
+<section data-marketing class="dl-hero" aria-labelledby="dl-title">
   <div class="page dl-hero__inner">
     {/* "Install", not "Download" — the nav, the footer and the h1 all say Install, and one
         destination should not answer to four names. The route stays /download; only the
@@ -351,10 +351,10 @@ const PLATFORMS = [
     max-width: 46rem;
     margin-top: var(--s-10);
     text-align: start;
-    background: var(--surface);
-    border: 1px solid var(--border);
+    background: var(--bg-raised);
+    border: 0;
     border-radius: var(--radius-xl);
-    box-shadow: var(--shadow-floating);
+    box-shadow: none;
     overflow: hidden;
   }
 
@@ -608,6 +608,10 @@ const PLATFORMS = [
   }
 
   .dl-next a {
+    display: inline-flex;
+    align-items: center;
+    min-block-size: 44px;
+    padding-inline: 8px;
     color: var(--text);
     text-decoration: underline;
     text-decoration-color: var(--border-strong);
@@ -639,8 +643,8 @@ const PLATFORMS = [
   /* -------------------------------------------------------- platforms ---- */
   .dl-plat {
     padding: var(--pad-card-lg);
-    border-top: 1px solid var(--border);
-    background: var(--bg-raised);
+    border-top: 0;
+    background: var(--work-tint);
   }
 
   .dl-plat__head {
@@ -684,6 +688,7 @@ const PLATFORMS = [
   }
 
   .dl-seg__btn {
+    min-block-size: 44px;
     appearance: none;
     border: 0;
     background: none;
@@ -706,9 +711,9 @@ const PLATFORMS = [
   }
 
   .dl-seg__btn[aria-selected="true"] {
-    background: var(--accent-dim);
+    background: var(--surface);
     color: var(--accent-bright);
-    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 34%, transparent);
+    box-shadow: none;
   }
 
   .dl-seg__btn:focus-visible {

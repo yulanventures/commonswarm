@@ -1,29 +1,12 @@
 ---
-/*
- * Wordmark — the CommonSwarm mark and word, in one place (Daylight Orbs, 2026-10-01).
- *
- * The mark is five disjoint circles on a 48 x 48 grid, radius 5.5 each: an ink centre at
- * (24,24) and four satellites — lavender north, peach east, sage south, cobalt west — with a
- * 5-unit gap to the centre. It is drawn here and nowhere else; favicon.svg, the app icon and
- * the social card copy the same geometry, so change all four together.
- *
- * The four satellite hues are brand literals (they do not change by mode). The centre and
- * the west satellite read --mark-center and --mark-west, which tokens.css flips in dark mode
- * to the light ink and the pale cobalt, as the brand's monochrome rule asks. No outlines,
- * orbit lines or blur inside the mark, at any size.
- *
- * Lockups: 32px mark, 10px gap, 22/28 Plus Jakarta Sans 600 at -0.04em in the bar; 26px
- * mark, 8px gap, 18/24 on phones. `markSize` sets a fixed mark size for other placements.
- *
- * Accessible name: when this is a link, the visible word "CommonSwarm" names it and the SVG
- * is hidden. A mark-only link must pass `label` (e.g. "CommonSwarm home").
- *
- * 320px: the bar holds the lockup, a compact CTA and the menu button. SiteHeader drops the
- * CTA (it is repeated in the menu sheet) before this word is ever allowed to wrap or shrink
- * below the mobile lockup; `white-space: nowrap` keeps "CommonSwarm" one word.
- */
+/* Shared wordmark. The original five-circle SVG and lockup remain the app default.
+ * Public marketing explicitly opts into the person-circle / agent-square mark.
+ * Mark-only non-links are named images; links retain their existing home label.
+ * Explicit whitespace around the conditional preserves the app default HTML byte for byte. */
 
 interface Props {
+  /** Public-site mark; the app keeps the original default. */
+  marketing?: boolean;
   href?: string;
   markSize?: number;
   /** Accessible name for a mark-only placement. */
@@ -33,18 +16,22 @@ interface Props {
   class?: string;
 }
 
-const { href, markSize, label, markOnly = false, class: klass = "" } = Astro.props;
+const { marketing = false, href, markSize, label, markOnly = false, class: klass = "" } = Astro.props;
 
 const Tag = href ? "a" : "span";
 const sized = typeof markSize === "number";
 ---
 
 <Tag
-  class:list={["wm", { "wm--sized": sized, "wm--mark-only": markOnly }, klass]}
+  class:list={["wm", { "wm--sized": sized, "wm--mark-only": markOnly, "wm--marketing": marketing }, klass]}
   href={href}
-  aria-label={markOnly ? (label ?? "CommonSwarm home") : undefined}
+  role={!href && markOnly ? "img" : undefined}
+  aria-label={markOnly ? (href ? (label ?? "CommonSwarm home") : "CommonSwarm") : undefined}
   style={sized ? `--wm-mark: ${markSize}px` : undefined}
 >
+  {'\n  '}{marketing ? (
+    <span class="wm__mark" aria-hidden="true"></span>
+  ) : (
   <svg class="wm__mark" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
     <circle cx="24" cy="24" r="5.5" style="fill: var(--mark-center)"></circle>
     <circle cx="24" cy="8" r="5.5" fill="#B8ADF2"></circle>
@@ -52,6 +39,7 @@ const sized = typeof markSize === "number";
     <circle cx="24" cy="40" r="5.5" fill="#AACBB7"></circle>
     <circle cx="8" cy="24" r="5.5" style="fill: var(--mark-west)"></circle>
   </svg>
+  )}{'\n  '}
   {!markOnly && <span class="wm__word">CommonSwarm</span>}
 </Tag>
 
@@ -83,6 +71,37 @@ const sized = typeof markSize === "number";
     flex: none;
     inline-size: var(--wm-mark);
     block-size: var(--wm-mark);
+  }
+
+  /* Marketing alone uses the person circle and outlined agent square.
+     Keep the app's default lockup declarations and SVG unchanged. */
+  .wm--marketing {
+    min-block-size: 44px;
+  }
+
+  .wm--marketing .wm__mark {
+    position: relative;
+  }
+
+  .wm--marketing .wm__mark::before,
+  .wm--marketing .wm__mark::after {
+    content: "";
+    position: absolute;
+    inline-size: 56%;
+    block-size: 56%;
+  }
+
+  .wm--marketing .wm__mark::before {
+    inset: 6% auto auto 6%;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+  .wm--marketing .wm__mark::after {
+    inset: auto 6% 6% auto;
+    border: 2px solid currentColor;
+    border-radius: 30%;
+    box-sizing: border-box;
   }
 
   .wm__word {

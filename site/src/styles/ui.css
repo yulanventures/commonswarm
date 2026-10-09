@@ -1005,3 +1005,11 @@ textarea.ui-field__control {
 .ui-avatars > *:first-child {
   margin-inline-start: 0;
 }
+
+/* Marketing code samples live on the same neutral planes as the page's cards. */
+:root:has([data-marketing], .seo-page) .ui-code {
+  border-color: transparent;
+  background: var(--bg-raised);
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+}

@@ -82,7 +82,7 @@ const isCurrent = (href: string) => !href.includes("#") && href === path;
 
 <header class="hdr" data-header>
   <div class="page hdr__inner">
-    <Wordmark href="/" class="hdr__brand" />
+    <Wordmark marketing href="/" class="hdr__brand" />
 
     <nav class="hdr__nav" aria-label="Primary">
       {
@@ -132,7 +132,7 @@ const isCurrent = (href: string) => !href.includes("#") && href === path;
     <div class="page mnav__bar">
       {/* No href: the bar behind this sheet already has the brand as a link home, and two
           nested "go home" targets a thumb-width apart is a mis-tap waiting to happen. */}
-      <Wordmark />
+      <Wordmark marketing />
       <button class="mnav__close" type="button" data-menu-close>
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
           <path
@@ -285,8 +285,8 @@ const isCurrent = (href: string) => !href.includes("#") && href === path;
     top: 0;
     z-index: 100;
     background: color-mix(in oklab, var(--bg) 72%, transparent);
-    -webkit-backdrop-filter: blur(16px) saturate(1.7);
-    backdrop-filter: blur(16px) saturate(1.7);
+    -webkit-backdrop-filter: blur(16px);
+    backdrop-filter: blur(16px);
     border-bottom: 1px solid transparent;
     transition:
       background var(--dur-2) var(--ease-standard),
@@ -327,7 +327,7 @@ const isCurrent = (href: string) => !href.includes("#") && href === path;
   .hdr__nav {
     display: flex;
     align-items: center;
-    gap: var(--s-6);
+    gap: var(--s-2);
     margin-left: auto;
     min-width: 0;
   }
@@ -337,6 +337,7 @@ const isCurrent = (href: string) => !href.includes("#") && href === path;
     display: inline-flex;
     align-items: center;
     min-block-size: 44px;
+    padding-inline: var(--s-3);
     color: var(--text-muted);
     font-size: 0.9375rem;
     font-weight: var(--weight-medium);
@@ -352,6 +353,8 @@ const isCurrent = (href: string) => !href.includes("#") && href === path;
   }
 
   .hdr__link[aria-current="page"] {
+    background: var(--surface-2);
+    border-radius: var(--radius-pill);
     color: var(--text);
   }
 

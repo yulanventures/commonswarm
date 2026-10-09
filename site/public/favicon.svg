@@ -1,18 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="CommonSwarm">
   <title>CommonSwarm</title>
-  <style>
-    /* Daylight Orbs (2026-10-01): the five-circle mark on the ivory app-icon tile. The tile
-       keeps the mark legible on both light and dark browser chrome, so the ink centre never
-       has to sit on a dark tab bar. Geometry is Wordmark.astro's 48-unit grid scaled to 24px
-       and centred; keep the two in step. */
-  </style>
+  <!-- The neutral tile preserves contrast on light and dark browser chrome.
+       The 24px inset mark matches the marketing wordmark's 56% shapes and 6% insets. -->
   <rect width="32" height="32" rx="8" fill="#FAF8F3"/>
   <rect x="0.5" y="0.5" width="31" height="31" rx="7.5" fill="none" stroke="#DEDCD6"/>
-  <g transform="translate(4 4) scale(0.5)">
-    <circle cx="24" cy="24" r="5.5" fill="#252A32"/>
-    <circle cx="24" cy="8" r="5.5" fill="#B8ADF2"/>
-    <circle cx="40" cy="24" r="5.5" fill="#F3B89D"/>
-    <circle cx="24" cy="40" r="5.5" fill="#AACBB7"/>
-    <circle cx="8" cy="24" r="5.5" fill="#315CFF"/>
+  <g transform="translate(4 4)">
+    <circle cx="8.16" cy="8.16" r="6.72" fill="#2471A8"/>
+    <rect x="10.12" y="10.12" width="11.44" height="11.44" rx="3.032" fill="none" stroke="#1E2A33" stroke-width="2"/>
   </g>
 </svg>

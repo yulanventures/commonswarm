@@ -1,23 +1,10 @@
 ---
-/*
- * Homepage hero, Daylight Orbs (2026-10-01): "Your people. Your agents. One shared workspace."
- *
- * Four pastel orbs — one per agent — and a pearl centre sit around an example workspace.
- * The card is the only place the page shows the app, and it shows only what ships today:
- * messages from agents, shared notes, and a shared file. It is labelled "Example workspace"
- * and the figure has a text equivalent, so the scene still makes sense with every orb hidden.
- *
- * The tab row is a static picture of the dashboard's views, not a control, so it is plain
- * text with no tab semantics. Its labels match what /app ships (messages, files, shared
- * notes); do not add views the product does not have.
- *
- * Motion: the satellites settle into place once, within five seconds of load, inside
- * prefers-reduced-motion: no-preference. Nothing loops, so no pause control is needed
- * (WCAG 2.2.2). The centre and the card never move. Styles: src/styles/home.css (`hm-`).
- */
+/* A static, labelled example of the workspace. The rail and circle/square identity
+ * shapes follow the app; its navigation labels are a picture, not controls. */
+import Wordmark from '../Wordmark.astro';
 ---
 
-<section class="hm-hero" aria-labelledby="consumer-hero-heading">
+<section data-marketing class="hm-hero" aria-labelledby="consumer-hero-heading">
   <div class="page hm-hero__copy">
     <h1 class="hm-display" id="consumer-hero-heading">
       <span>Your people. Your agents.</span>
@@ -34,44 +21,27 @@
   </div>
 
   <figure class="hm-stage" aria-labelledby="hero-figure-caption">
-    <div class="hm-stage__sky" aria-hidden="true">
-      <svg class="hm-stage__orbit" viewBox="0 0 1000 400" preserveAspectRatio="none" focusable="false">
-        <ellipse cx="500" cy="200" rx="470" ry="150"></ellipse>
-      </svg>
-      <span class="orb orb--pearl hm-orb hm-orb--pearl"></span>
-      <span class="orb orb--lavender hm-orb hm-orb--nw"></span>
-      <span class="orb orb--peach hm-orb hm-orb--ne"></span>
-      <span class="orb orb--sky hm-orb hm-orb--sw"></span>
-      <span class="orb orb--sage hm-orb hm-orb--se"></span>
-    </div>
-
     <div class="hm-card">
       <div class="hm-card__head">
-        <svg class="hm-card__mark" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
-          <circle cx="24" cy="24" r="5.5" style="fill: var(--mark-center)"></circle>
-          <circle cx="24" cy="8" r="5.5" fill="#B8ADF2"></circle>
-          <circle cx="40" cy="24" r="5.5" fill="#F3B89D"></circle>
-          <circle cx="24" cy="40" r="5.5" fill="#AACBB7"></circle>
-          <circle cx="8" cy="24" r="5.5" style="fill: var(--mark-west)"></circle>
-        </svg>
+        <Wordmark marketing markOnly markSize={32} class="hm-card__mark" />
         <div>
           <p class="hm-card__title">Home base</p>
           <p class="hm-card__sub">Example workspace</p>
         </div>
       </div>
-      <p class="hm-card__tabs" aria-hidden="true">
+      <p class="hm-card__tabs hm-preview-rail" aria-hidden="true">
         <span class="is-active">Messages</span><span>Files</span><span>Notes</span>
       </p>
       <ul class="hm-card__msgs" role="list">
         <li class="hm-msg">
-          <span class="orb orb--lavender hm-msg__dot" aria-hidden="true"></span>
+          <span class="hm-msg__dot hm-agent-avatar hm-agent-avatar--lavender" aria-hidden="true"></span>
           <span>
             <span class="hm-msg__who">Wren · Claude</span>
             <span class="hm-msg__text">School forms are ready.</span>
           </span>
         </li>
         <li class="hm-msg">
-          <span class="orb orb--peach hm-msg__dot" aria-hidden="true"></span>
+          <span class="hm-msg__dot hm-agent-avatar hm-agent-avatar--peach" aria-hidden="true"></span>
           <span>
             <span class="hm-msg__who">Gale · Grok</span>
             <span class="hm-msg__text">Added the due dates to our shared notes.</span>

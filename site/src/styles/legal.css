@@ -32,9 +32,7 @@
   padding-block: var(--s-16) var(--pad-section-tight);
 }
 
-/* Two columns above 68rem: a sticky contents rail and the document. Below that the rail
-   collapses into a plain list at the top of the page — a sticky element on a phone eats a
-   third of the viewport for navigation the reader has already scrolled past. */
+/* Two columns above 68rem, a top contents card on tablets, and a disclosure on phones. */
 .lgl__grid {
   display: grid;
   grid-template-columns: 14rem minmax(0, 1fr);
@@ -153,8 +151,8 @@
   display: grid;
   grid-template-columns: 1.6rem minmax(0, 1fr);
   gap: var(--s-1);
-  font-size: var(--t-xs);
-  line-height: var(--lh-xs);
+  font-size: var(--t-sm);
+  line-height: var(--marketing-contents-line);
   color: var(--text-muted);
   text-decoration: none;
   border-radius: var(--radius-sm);
@@ -188,9 +186,9 @@
   gap: var(--s-2);
   align-items: baseline;
   margin: 0 0 var(--s-4);
-  font-size: var(--t-lg);
+  font-size: var(--marketing-section-title);
   font-weight: var(--weight-head);
-  line-height: var(--lh-lg);
+  line-height: var(--marketing-section-line);
   letter-spacing: var(--track-xl);
   color: var(--text);
   /* Scroll-margin so a deep link from the rail does not park the heading under the header.
@@ -223,8 +221,8 @@
 
 .lgl__p {
   margin: 0;
-  font-size: var(--t-sm);
-  line-height: var(--lh-base);
+  font-size: var(--t-base);
+  line-height: var(--marketing-reading-line);
   color: var(--text-muted);
 }
 
@@ -244,8 +242,8 @@
   gap: var(--s-2);
   margin: 0;
   padding-left: var(--s-5);
-  font-size: var(--t-sm);
-  line-height: var(--lh-base);
+  font-size: var(--t-base);
+  line-height: var(--marketing-reading-line);
   color: var(--text-muted);
 }
 
@@ -260,8 +258,8 @@
   margin: 0;
   padding: var(--s-1) 0 var(--s-1) var(--s-5);
   border-left: 2px solid var(--border-strong);
-  font-size: var(--t-sm);
-  line-height: var(--lh-base);
+  font-size: var(--t-base);
+  line-height: var(--marketing-reading-line);
   color: var(--text);
 }
 
@@ -352,4 +350,121 @@
   .lgl__sec-n {
     display: block;
   }
+}
+
+/* Reading surfaces: a calm contents rail and unbroken document text. */
+.lgl .lgl__head {
+  max-width: none;
+  padding: clamp(var(--s-6), 4vw, var(--s-10));
+  border-radius: var(--radius-xl);
+  background: var(--bg-raised);
+}
+
+.lgl .lgl__head > .lgl__lede,
+.lgl .lgl__head > .lgl__dates {
+  max-width: var(--measure-wide);
+}
+
+.lgl .lgl__toc {
+  padding: var(--s-5);
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+}
+
+.lgl .lgl__toc-link {
+  align-items: center;
+  min-block-size: 44px;
+  padding-inline: var(--s-2);
+  color: var(--text-muted);
+}
+
+.lgl .lgl__toc-link:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.lgl .lgl__toc-n {
+  color: var(--text-muted);
+}
+
+.support .support__body {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-width: none;
+  gap: var(--s-6);
+}
+
+.support .lgl__sec {
+  padding: var(--s-8);
+  margin: 0;
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+}
+
+.support .lgl__sec:first-child {
+  grid-column: 1 / -1;
+  background: var(--work-tint);
+}
+
+@media (max-width: 47.999rem) {
+  .support .support__body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .support .lgl__sec {
+    padding: var(--s-6);
+  }
+}
+
+/* Shared reading scale and native contents disclosure. The heading stays visible on desktop. */
+.lgl .lgl__title {
+  font-size: var(--marketing-page-title);
+  line-height: 1.1;
+}
+
+.support .lgl__sub {
+  font-family: var(--font-display);
+  font-size: var(--marketing-section-title);
+  line-height: var(--marketing-section-line);
+  margin-bottom: var(--s-6);
+}
+
+.lgl__toc-summary {
+  display: block;
+  list-style: none;
+  pointer-events: none;
+}
+
+.lgl__toc-summary::-webkit-details-marker { display: none; }
+.lgl__toc-summary .lgl__toc-h { margin: 0 0 var(--s-4); }
+
+@media (max-width: 47.999rem) {
+  .lgl .lgl__title {
+    font-size: var(--marketing-mobile-title);
+  }
+
+  .lgl__grid {
+    margin-top: var(--s-6);
+    gap: var(--s-6);
+  }
+
+  .lgl .lgl__toc {
+    padding-block: 0;
+  }
+
+  .lgl__toc-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-block-size: 48px;
+    pointer-events: auto;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+  }
+
+  .lgl__toc-summary .lgl__toc-h { margin: 0; }
+  .lgl__toc-summary::after { content: '+'; font-size: var(--t-lg); }
+  .lgl__contents[open] .lgl__toc-summary::after { content: '−'; }
+  .lgl__contents[open] .lgl__toc-list { padding-block: 0 var(--s-4); }
 }

@@ -43,3 +43,16 @@ const { runtime = "standard" } = Astro.props;
   <p class="about-swarm__proof">Open free tier.</p>
   <a class="btn btn--primary" href="/app">Sign up</a>
 </aside>
+
+<script>
+  document.querySelectorAll<HTMLElement>('.seo-table-frame').forEach(frame => {
+    const region = frame.querySelector<HTMLElement>('.seo-table-wrap');
+    if (!region) return;
+    const sync = () => {
+      frame.classList.toggle('has-more-columns', region.scrollLeft + region.clientWidth < region.scrollWidth - 1);
+    };
+    region.addEventListener('scroll', sync, { passive: true });
+    new ResizeObserver(sync).observe(region);
+    sync();
+  });
+</script>
