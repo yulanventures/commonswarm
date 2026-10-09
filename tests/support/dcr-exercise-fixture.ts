@@ -18,6 +18,8 @@ const serve = createMcpProtocolHandler({
   limits: { maxBodyBytes: 128 * 1024, maxResponseBytes: 64 * 1024, requestTimeoutMs: 2000, maxConcurrentRequests: 2 },
   verifyToken: async () => ({ providerGrantId: 'synthetic-grant', subject: workspace, expiresAt: 1900000000 }),
   executeTool: async ({ name, arguments: args }) => {
+    // Match the phase 2 dispatcher scaffold; lifecycle dispatch belongs to phase 4.
+    if (name === 'close_session') throw new HostedToolFailure('upgrade_required');
     if (name === 'claim_seat') {
       claims++;
       const handle = `seat_${String(claims).padStart(32, 'a')}`;
@@ -64,6 +66,9 @@ globalThis.fetch = async (url: any, options: any) => {
         calls.push(rpc.params);
         if (scenario === 'transport_failure' && rpc.params.name === 'note') throw new Error(privateValue);
         if (scenario === 'negative_succeeds' && rpc.params.name === 'directory_review_unknown_tool') {
+          return Response.json({ jsonrpc: '2.0', id: rpc.id, result: { content: [{ type: 'text', text: '{}' }] } });
+        }
+        if (scenario === 'close_succeeds' && rpc.params.name === 'close_session') {
           return Response.json({ jsonrpc: '2.0', id: rpc.id, result: { content: [{ type: 'text', text: '{}' }] } });
         }
       }

@@ -40,4 +40,5 @@ test('OAuth MCP contract pins the sorted hosted tool inventory', () => {
 
 test('DCR round trip pins the same hosted tool inventory', () => {
   assert.deepEqual(pinnedNames('scripts/dcr-roundtrip.mjs', 'TOOL_NAMES').sort(), hostedNames);
+  assert.deepEqual(pinnedNames('scripts/live-ordinary-controls.mjs', 'ORDINARY_TOOLS').sort(), hostedNames);
 });

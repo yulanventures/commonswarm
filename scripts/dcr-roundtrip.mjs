@@ -15,7 +15,7 @@ const VERSION = '2025-06-18';
 const SCOPES = new Set(['openid', 'offline_access', 'mcp']);
 // Must match supabase/functions/mcp/tools.ts after this release. The service-free
 // DCR exercise test compares this explicit release inventory with the hosted table.
-const TOOL_NAMES = new Set(['claim_seat', 'whoami', 'check', 'ask', 'note', 'reply', 'working_on', 'members']);
+const TOOL_NAMES = new Set(['claim_seat', 'whoami', 'close_session', 'check', 'ask', 'note', 'reply', 'working_on', 'members']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const HANDLE = /^seat_[A-Za-z0-9_-]{22,64}$/u;
 const SHAPE_KEYS = new Set(['grant_id', 'seat_id', 'handle', 'workspace_id', 'principal_id',
@@ -123,7 +123,7 @@ function safeToolReceipt(row) {
   return {
     tool: TOOL_NAMES.has(row.tool) || row.tool === 'directory_review_unknown_tool' ? row.tool : 'other',
     ok: row.ok === true,
-    error_code: [-32602, 'hosted_seat_forbidden'].includes(row.error_code) ? row.error_code
+    error_code: [-32602, 'hosted_seat_forbidden', 'upgrade_required'].includes(row.error_code) ? row.error_code
       : row.error_code == null ? null : 'other',
     duration_ms: Number.isSafeInteger(row.duration_ms) && row.duration_ms >= 0 &&
       row.duration_ms <= 60_000 ? row.duration_ms : null,
@@ -229,7 +229,12 @@ async function exerciseHostedTools(catalog, workspaceId, rpc, receipts) {
   requireThat(UUID.test(note.signal_id) && note.kind === 'note', 'exercise_signal_failed');
   const work = await call('working_on', { seat: a, body: 'Checking the synthetic review checklist.', request_id: requestId('work') });
   requireThat(UUID.test(work.signal_id) && work.kind === 'working_on', 'exercise_signal_failed');
-  // No release/delete tool exists. Do not ACK: a batch can also include existing workspace signals.
+  // Phase 2 advertises the close contract; phase 4 will wire its lifecycle.
+  // Require the current fail-closed scaffold rather than fabricate cleanup.
+  const closeArgs = { seat: a, request_id: requestId('close') };
+  requireThat(matchesSchema(closeArgs, schemas.get('close_session')), 'exercise_schema_failed');
+  await call('close_session', closeArgs, 'upgrade_required');
+  // Do not ACK: a batch can also include existing workspace signals.
 }
 
 export function dryRunPlan({ exerciseTools = false, workspaceId } = {}) {
@@ -248,8 +253,8 @@ export function dryRunPlan({ exerciseTools = false, workspaceId } = {}) {
       { method: 'POST', url: RESOURCE, authorization: 'Bearer <memory only>', rpc: 'notifications/initialized' },
       { method: 'POST', url: RESOURCE, authorization: 'Bearer <memory only>', rpc: 'tools/list' },
       ...(exerciseTools ? [{ method: 'POST', url: RESOURCE, rpc: 'tools/call',
-        plan: 'two synthetic seats; identity/roster; ask/check/reply/check; note/current work; three negative probes',
-        workspace_id_prefix: workspaceId.slice(0, 8), cleanup: 'No release/delete tool; no ACK of existing signals.' }] : []),
+        plan: 'two synthetic seats; identity/roster; ask/check/reply/check; note/current work; three negative probes; close_session unavailable control',
+        workspace_id_prefix: workspaceId.slice(0, 8), cleanup: 'close_session must return upgrade_required until lifecycle wiring; no cleanup or ACK of existing signals.' }] : []),
     ],
   };
 }

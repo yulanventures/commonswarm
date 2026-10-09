@@ -436,10 +436,10 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         assert.equal(response.status, 200);
         const listed = await response.json();
         // Must match supabase/functions/mcp/tools.ts; hosted-tool-pins.test.ts guards this plain-JS list.
-        const expectedTools = ['ask', 'check', 'claim_seat', 'members', 'note', 'reply', 'whoami', 'working_on'];
-        assert.equal(listed.result.tools.length, 8);
+        const expectedTools = ['ask', 'check', 'claim_seat', 'close_session', 'members', 'note', 'reply', 'whoami', 'working_on'];
+        assert.equal(listed.result.tools.length, expectedTools.length);
         assert.deepEqual(listed.result.tools.map(tool => tool.name).sort(), expectedTools,
-          'hosted discovery includes structured objects, to-dos and comments and excludes gated file transport');
+          'hosted discovery includes the session contract and keeps household tools hidden');
         assert.ok(listed.result.tools.every(tool => tool.inputSchema?.type === 'object'));
         const grant = await pool.query('SELECT state FROM swarm.hosted_mcp_grants WHERE interaction_ref = $1', [uid]);
         assert.equal(grant.rows[0]?.state, 'active', 'token and MCP success follows actual authority activation');

@@ -24,10 +24,11 @@ const REDIRECT = 'https://c1-controls.invalid/callback';
 const SCOPE = 'openid offline_access mcp';
 const UA = 'curl/8.7.1';
 const VERSION = '2025-06-18';
-export const ORDINARY_TOOLS = ['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on'];
+export const ORDINARY_TOOLS = ['claim_seat', 'whoami', 'close_session', 'members', 'ask', 'check', 'reply', 'note', 'working_on'];
 const PROTOCOL_MODULE = new URL('../supabase/functions/_shared/protocol.js', import.meta.url);
 const PRODUCER_TREE = fileURLToPath(new URL('../', import.meta.url));
 const PROTOCOL_PATH = 'supabase/functions/_shared/protocol.js';
+const CORE_TOOLS_PATH = 'supabase/functions/mcp/tools.ts';
 const HOUSEHOLD_RELEASE_PATH = 'supabase/functions/mcp/household-release.ts';
 const seatName = release => `c1-controls-runner-${release.slice(0, 8)}`;
 const uuidOK = id => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id) &&
@@ -49,13 +50,13 @@ const demand = (ok, expected, got = 'contract mismatch') => { if (!ok) throw new
 // tools.ts admits HOUSEHOLD_TOOLS minus file-only rows unless hostedFileTransport.
 // HOUSEHOLD_FEATURE_GATES lives in household-feature-gates.ts, not protocol.js.
 export const hostedFileTransportEnabled = (env = process.env) => env.SWARM_HOUSEHOLD_HOSTED_FILE_TRANSPORT === '1';
-export function hostedHouseholdToolNames(tools, registry, hostedFileTransport) {
+export function hostedHouseholdToolNames(tools, registry, hostedFileTransport, coreNames = ORDINARY_TOOLS) {
   demand(Array.isArray(tools) && Array.isArray(registry), 'release household tool registry', 'invalid protocol exports');
   const names = [];
   const seen = new Set();
   for (const tool of tools) {
     demand(tool && typeof tool.name === 'string' && tool.name.length > 0, 'named household tool', 'invalid household tool');
-    demand(!seen.has(tool.name) && !ORDINARY_TOOLS.includes(tool.name), 'unique household tool names', 'duplicate tool name');
+    demand(!seen.has(tool.name) && !coreNames.includes(tool.name), 'unique household tool names', 'duplicate tool name');
     const definition = registry.find(row => row && row.name === tool.name);
     demand(definition && Array.isArray(definition.objectTypes), 'household registry row', 'missing household registry row');
     seen.add(tool.name);
@@ -63,10 +64,10 @@ export function hostedHouseholdToolNames(tools, registry, hostedFileTransport) {
   }
   return names;
 }
-export function expectedMcpToolNames(householdNames) {
+export function expectedMcpToolNames(householdNames, coreNames = ORDINARY_TOOLS) {
   demand(Array.isArray(householdNames) && householdNames.every(n => typeof n === 'string' && n.length > 0),
     'household tool names', 'invalid household names');
-  const expected = [...ORDINARY_TOOLS, ...householdNames];
+  const expected = [...coreNames, ...householdNames];
   demand(new Set(expected).size === expected.length, 'unique MCP tool names', 'duplicate tool name');
   return expected;
 }
@@ -110,6 +111,63 @@ export function expectedToolScope({ command, window, phase } = {}) {
   return mapped;
 }
 
+// Parse names, never evaluate the measured TypeScript. Support the two reviewed
+// catalog shapes: historical inline rows and the separate core/effect table.
+// Dynamic names, row spreads and unfamiliar catalog assembly fail closed.
+async function liveCoreToolNames(source) {
+  const { default: ts } = await import('typescript');
+  const refuse = ok => demand(ok, 'literal live core tool table', 'malformed core tool table');
+  const file = ts.createSourceFile(CORE_TOOLS_PATH, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  refuse(file.parseDiagnostics.length === 0);
+  const tables = { CORE_TOOL_TABLE: [], HOSTED_TOOL_TABLE: [] };
+  const visit = node => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && Object.hasOwn(tables, node.name.text)) {
+      tables[node.name.text].push(node);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  refuse(tables.CORE_TOOL_TABLE.length <= 1 && tables.HOSTED_TOOL_TABLE.length === 1);
+  const array = declaration => {
+    const list = declaration.parent, statement = list.parent;
+    refuse(ts.isVariableDeclarationList(list) && list.flags === ts.NodeFlags.Const && list.declarations.length === 1 &&
+      ts.isVariableStatement(statement) && statement.parent === file &&
+      statement.modifiers?.length === 1 && statement.modifiers[0].kind === ts.SyntaxKind.ExportKeyword);
+    const value = declaration.initializer;
+    refuse(value && ts.isAsExpression(value) && value.type.getText(file) === 'const' && ts.isArrayLiteralExpression(value.expression));
+    return [...value.expression.elements];
+  };
+  const hosted = array(tables.HOSTED_TOOL_TABLE[0]);
+  const householdSpread = '...hostedHouseholdTools.map(row => ({ ...row, securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }] }))';
+  let rows;
+  if (tables.CORE_TOOL_TABLE.length) {
+    refuse(hosted.length === 2 && hosted[0].getText(file) === '...CORE_TOOL_TABLE.map(({ effect: _effect, ...tool }) => tool)' &&
+      hosted[1].getText(file) === householdSpread);
+    rows = array(tables.CORE_TOOL_TABLE[0]);
+  } else {
+    if (hosted.at(-1) && ts.isSpreadElement(hosted.at(-1))) {
+      refuse(hosted.pop().getText(file) === householdSpread);
+    }
+    rows = hosted;
+  }
+  refuse(rows.length > 0);
+  const names = rows.map(row => {
+    refuse(ts.isObjectLiteralExpression(row));
+    const keys = [], properties = [];
+    for (const property of row.properties) {
+      refuse(ts.isPropertyAssignment(property) && ts.isIdentifier(property.name));
+      keys.push(property.name.text);
+      if (property.name.text === 'name') properties.push(property.initializer);
+    }
+    refuse(new Set(keys).size === keys.length && properties.length === 1);
+    const name = properties[0];
+    refuse(ts.isStringLiteral(name) && /^["'][a-z][a-z0-9_]*["']$/.test(name.getText(file)));
+    return name.text;
+  });
+  refuse(new Set(names).size === names.length);
+  return names;
+}
+
 async function liveMcpToolNames(o) {
   expectedToolScope({ command: o.command, window: o.window, phase: o.phase });
   const root = await realpath(PRODUCER_TREE);
@@ -128,6 +186,9 @@ async function liveMcpToolNames(o) {
     demand((await git(['cat-file', '-t', sha])).trim() === 'commit', 'edge and release commit SHAs', 'not a commit');
   }
   await git(['merge-base', '--is-ancestor', live, release]);
+  demand(/^100644 blob [a-f0-9]{40}\t/.test((await git(['ls-tree', live, '--', CORE_TOOLS_PATH])).trim()),
+    'literal live core tool table', 'core tool table is not a regular source file');
+  const coreNames = await liveCoreToolNames(await git(['show', `${live}:${CORE_TOOLS_PATH}`]));
   const switchEntry = (await git(['ls-tree', live, '--', HOUSEHOLD_RELEASE_PATH])).trim();
   if (switchEntry) {
     demand(/^100644 blob [a-f0-9]{40}\t/.test(switchEntry),
@@ -144,15 +205,15 @@ async function liveMcpToolNames(o) {
       'export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = false;',
       'export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = true;',
     ].includes(lines[0]), 'literal hosted household release switch', 'malformed release switch');
-    if (lines[0] === 'export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = false;') return [...ORDINARY_TOOLS];
+    if (lines[0] === 'export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = false;') return coreNames;
   }
   const bytes = await git(['show', `${live}:${PROTOCOL_PATH}`]);
   let protocol;
   try { protocol = await import(`data:text/javascript;base64,${Buffer.from(bytes).toString('base64')}`); }
   catch { throw new Failure('readable live edge protocol bundle', 'protocol import failed'); }
-  if (!Object.hasOwn(protocol, 'HOUSEHOLD_TOOLS')) return [...ORDINARY_TOOLS];
+  if (!Object.hasOwn(protocol, 'HOUSEHOLD_TOOLS')) return coreNames;
   return expectedMcpToolNames(hostedHouseholdToolNames(
-    protocol.HOUSEHOLD_TOOLS, protocol.HOUSEHOLD_TOOL_REGISTRY, hostedFileTransportEnabled()));
+    protocol.HOUSEHOLD_TOOLS, protocol.HOUSEHOLD_TOOL_REGISTRY, hostedFileTransportEnabled(), coreNames), coreNames);
 }
 
 function options(args) {

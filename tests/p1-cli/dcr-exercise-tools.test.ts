@@ -12,15 +12,16 @@ const script = fileURLToPath(new URL('../../scripts/dcr-roundtrip.mjs', import.m
 const fixture = new URL('../support/dcr-exercise-fixture.ts', import.meta.url).href;
 const workspace = '12345678-1234-4234-8234-123456789abc';
 const privateValue = 'PRIVATE_RESPONSE_CONTENT_TOKEN_abcdefgh';
-// Three negative probes plus a second claim, identity and inbox check.
-const exerciseCallCount = 14;
+// Three negative probes plus a second claim, identity and inbox check;
+// close_session exercises the phase 2 unavailable scaffold.
+const exerciseCallCount = 15;
 
 test('release probe explicit inventory matches the registry-driven hosted catalog', () => {
   const source = readFileSync(script, 'utf8');
   const inventory = source.match(/const TOOL_NAMES = new Set\(\[([\s\S]*?)\]\);/u);
   assert.ok(inventory, 'release probe keeps its explicit inventory');
   const names = [...inventory[1]!.matchAll(/'([^']+)'/gu)].map(match => match[1]);
-  assert.equal(names.length, 8, 'only the eight core coordination tools');
+  assert.equal(names.length, 9, 'the nine core coordination and session tools');
   assert.deepEqual(new Set(names), new Set(HOSTED_TOOL_TABLE.map(tool => tool.name)));
 });
 async function run(scenario = 'success') {
@@ -58,11 +59,11 @@ test('exercise CLI calls every live tool with schema-valid arguments and synthet
   assert.equal(code, 0);
   assert.equal(receipt.ok, true);
   assert.equal(calls.length, exerciseCallCount);
-  assert.equal(calls.length, 14, 'eight core tools plus six dependency/negative probes');
+  assert.equal(calls.length, 15, 'nine core tools plus six dependency/negative probes');
   const negatives = new Set([0, 1, 6]);
-  const positives = calls.filter((_, i) => !negatives.has(i));
-  assert.deepEqual(new Set(positives.map(c => c.name)), new Set(HOSTED_TOOL_TABLE.map(t => t.name)));
-  for (const call of positives) validateHostedToolArguments(call.name, call.arguments);
+  const validCalls = calls.filter((_, i) => !negatives.has(i));
+  assert.deepEqual(new Set(validCalls.map(c => c.name)), new Set(HOSTED_TOOL_TABLE.map(t => t.name)));
+  for (const call of validCalls) validateHostedToolArguments(call.name, call.arguments);
   const claims = calls.filter(c => c.name === 'claim_seat');
   assert.equal(claims.length, 2);
   assert.ok(claims.every(c => c.arguments.workspace_id === workspace));
@@ -77,10 +78,12 @@ test('exercise CLI calls every live tool with schema-valid arguments and synthet
   assert.equal(ask.arguments.recipients[0].id, '00000000-0000-4000-8000-000000000002');
   assert.equal(reply.arguments.signal_id, '00000000-0000-4000-8000-000000000010');
   assert.deepEqual(calls[12].arguments.recipients, ask.arguments.recipients);
+  assert.equal(calls[14].name, 'close_session');
+  assert.equal(calls[14].arguments.seat, ask.arguments.seat);
   assert.ok(calls.filter(c => c.name === 'check').every(c => !('ack' in c.arguments)));
-  const ids = positives.map(c => c.arguments.request_id).filter(Boolean);
+  const ids = validCalls.map(c => c.arguments.request_id).filter(Boolean);
   assert.equal(new Set(ids).size, ids.length);
-  for (const value of positives.flatMap(c => {
+  for (const value of validCalls.flatMap(c => {
     const schema = HOSTED_TOOL_TABLE.find(t => t.name === c.name)!.inputSchema as any;
     // Public enum words (for example "up_next") can also be safe shape keys.
     return Object.entries(c.arguments).filter(([key, value]) => typeof value === 'string' &&
@@ -94,7 +97,7 @@ test('exercise CLI calls every live tool with schema-valid arguments and synthet
     assert.ok(Array.isArray(row.result_shape));
   }
   assert.deepEqual(receipt.tool_calls.filter((r: any) => !r.ok).map((r: any) => r.error_code),
-    [-32602, 'hosted_seat_forbidden', -32602]);
+    [-32602, 'hosted_seat_forbidden', -32602, 'upgrade_required']);
   assert.ok(receipt.tool_calls.some((r: any) => r.result_shape.includes('[redacted-key]')));
 });
 
@@ -103,6 +106,7 @@ for (const [scenario, reason, maxCalls] of [
   ['schema_changed', 'exercise_schema_failed', 2],
   ['negative_succeeds', 'exercise_unexpected_outcome', 1],
   ['transport_failure', 'request_or_runtime_failed', 13],
+  ['close_succeeds', 'exercise_unexpected_outcome', 15],
   ['unexpected_tool', 'exercise_catalog_failed', 0],
   ['missing_tool', 'exercise_catalog_failed', 0],
 ] as const) {

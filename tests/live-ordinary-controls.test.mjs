@@ -15,7 +15,7 @@ import {
   hostedFileTransportEnabled, hostedHouseholdToolNames, loadReleaseHouseholdExports,
 } from '../scripts/live-ordinary-controls.mjs';
 
-import { baselineEdgeSha, earlierEdgeSha, releaseSha, catalogAt } from './support/live-edge-catalog.mjs';
+import { baselineEdgeSha, earlierEdgeSha, releaseSha } from './support/live-edge-catalog.mjs';
 
 const script = fileURLToPath(new URL('../scripts/live-ordinary-controls.mjs', import.meta.url));
 const guardedRm = process.platform === 'darwin' ? '/Users/yulanbot/.local/bin/rm' : 'rm';
@@ -25,8 +25,13 @@ const issuer = 'https://mcp.commonswarm.com', api = 'https://api.commonswarm.com
 const client = 'https://yulanventures.com/oauth/c1-controls/client.json';
 const redirect = 'https://c1-controls.invalid/callback', resource = `${issuer}/mcp`;
 const release = releaseSha, scope = 'openid offline_access mcp';
-const baselineTools = (await catalogAt(baselineEdgeSha, ORDINARY_TOOLS)).names;
-const releaseTools = (await catalogAt(releaseSha, ORDINARY_TOOLS)).names;
+// Independent wire inventories: never take core expectations from the producer.
+const baselineTools = ['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on'];
+const householdTools = ['object_list', 'object_read', 'object_history', 'object_create', 'object_update',
+  'todo_list', 'todo_read', 'todo_queue', 'comment_list', 'todo_create', 'todo_comment',
+  'todo_update', 'todo_assign', 'todo_start', 'todo_set_state'];
+const releaseTools = [...baselineTools, ...householdTools];
+const phase2Tools = ['claim_seat', 'whoami', 'close_session', 'members', 'ask', 'check', 'reply', 'note', 'working_on'];
 const hash = b => createHash('sha256').update(b).digest('hex');
 const b64hash = b => createHash('sha256').update(b).digest('base64url');
 const uid = '11111111-1111-4111-8111-111111111111', wid = 'c2ea0541-f56d-4c73-bf71-56c5405c4934';
@@ -315,6 +320,13 @@ test('live catalog follows the verified SHA release switch, never the working fi
   assert.equal(bundle.status, 0, bundle.stderr);
   await writeFile(join(root, 'supabase/functions/_shared/protocol.js'), bundle.stdout);
   await symlink(fileURLToPath(new URL('../dist', import.meta.url)), join(root, 'dist'));
+  await symlink(fileURLToPath(new URL('../node_modules', import.meta.url)), join(root, 'node_modules'));
+  const toolsPath = join(root, 'supabase/functions/mcp/tools.ts');
+  const toolsAt = sha => {
+    const r = spawnSync('git', ['--no-replace-objects', 'show', `${sha}:supabase/functions/mcp/tools.ts`], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr); return r.stdout;
+  };
+  await writeFile(toolsPath, toolsAt(releaseSha));
   git(['add', 'scripts', 'supabase']);
   const commit = parent => git(['commit-tree', git(['write-tree']), ...(parent ? ['-p', parent] : [])], 'catalog fixture\n');
   const historical = commit();
@@ -325,6 +337,7 @@ test('live catalog follows the verified SHA release switch, never the working fi
   const disabled = 'export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = false;';
   const enabled = 'export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = true;';
   const currentSource = await readFile(new URL('../supabase/functions/mcp/household-release.ts', import.meta.url), 'utf8');
+  await writeFile(toolsPath, toolsAt('a2debf4d'));
   const off = await revision(currentSource, historical);
   const on = await revision(currentSource.replace(disabled, enabled), off);
   const malformed = [];
@@ -353,19 +366,35 @@ test('live catalog follows the verified SHA release switch, never the working fi
     ]),
     ['true hidden in block comment across fake line ending', `//\u2028/*\n${enabled}\n// */\u2028${disabled}`],
   ]) { latest = await revision(source + '\n', latest); malformed.push([name, latest]); }
+  const malformedCore = [];
+  const validCore = toolsAt('a2debf4d');
+  for (const [name, source] of [
+    ['computed name', validCore.replace('name: "claim_seat"', 'name: String("claim_seat")')],
+    ['computed key', validCore.replace('name: "claim_seat"', '["name"]: "claim_seat"')],
+    ['duplicate name field', validCore.replace('name: "claim_seat"', 'name: "claim_seat", name: "whoami"')],
+    ['duplicate tool', validCore.replace('name: "whoami"', 'name: "claim_seat"')],
+    ['row spread', validCore.replace('name: "claim_seat"', '...{ name: "claim_seat" }')],
+    ['table spread', validCore.replace('export const CORE_TOOL_TABLE = [', 'export const CORE_TOOL_TABLE = [ ...otherTools,')],
+    ['nonliteral table', validCore.replace('export const CORE_TOOL_TABLE = [', 'export const CORE_TOOL_TABLE = otherTools || [')],
+    ['duplicate declaration', validCore + '\nexport const CORE_TOOL_TABLE = [] as const;\n'],
+    ['malformed syntax', validCore.replace('name: "claim_seat"', 'name:')],
+    ['unexpected hosted assembly', validCore.replace('...CORE_TOOL_TABLE.map(({ effect: _effect, ...tool }) => tool)', '...otherTools')],
+    ['executable name', validCore.replace('name: "claim_seat"', 'name: (() => { throw new Error("CORE_EVALUATED"); })()')],
+  ]) {
+    await writeFile(toolsPath, source); latest = await revision(currentSource, latest);
+    malformedCore.push([name, latest]);
+  }
   // A contrary, uncommitted value must never supply the expected catalog.
+  await writeFile(toolsPath, 'throw new Error("WORKING_CORE_EVALUATED");\n');
   await writeFile(switchPath, 'throw new Error("WORKING_FILE_EVALUATED");\n');
-  const core = ['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on'];
-  const household = ['object_list', 'object_read', 'object_history', 'object_create', 'object_update',
-    'todo_list', 'todo_read', 'todo_queue', 'comment_list', 'todo_create', 'todo_comment',
-    'todo_update', 'todo_assign', 'todo_start', 'todo_set_state'];
+  const core = phase2Tools, household = householdTools;
   for (const [name, liveEdgeSha, fileGate, listedTools, count] of [
-    ['pre-switch', historical, '0', [...core, ...household], 23],
-    ['pre-switch with files', historical, '1', [...core, ...household, ...FILE_ONLY], 26],
-    ['exact current file: switch off', off, '0', core, 8],
-    ['switch off with files', off, '1', core, 8],
-    ['current file with switch on', on, '0', [...core, ...household], 23],
-    ['switch on with files', on, '1', [...core, ...household, ...FILE_ONLY], 26],
+    ['pre-switch', historical, '0', releaseTools, 23],
+    ['pre-switch with files', historical, '1', [...releaseTools, ...FILE_ONLY], 26],
+    ['exact current file: switch off', off, '0', core, 9],
+    ['switch off with files', off, '1', core, 9],
+    ['current file with switch on', on, '0', [...core, ...household], 24],
+    ['switch on with files', on, '1', [...core, ...household, ...FILE_ONLY], 27],
   ]) await t.test(name, async t => {
     assert.equal(listedTools.length, count);
     const f = await fixture(t, { script: producer, releaseSha: latest, liveEdgeSha, listedTools });
@@ -373,9 +402,16 @@ test('live catalog follows the verified SHA release switch, never the working fi
     const consent = await f.run('consent', [], { env }); assert.equal(consent.exit, 0, consent.output); f.consent = consent.out;
     const window = await f.run('window', [], { env }); assert.equal(window.exit, 0, window.output);
     assert.ok(Object.values(window.receipt.controls).every(value => value === true));
-    f.config.listedTools = count === 8 ? [...core, ...household] : core;
+    f.config.listedTools = count === 9 ? [...core, ...household] : core;
     const negative = await f.run('window', [], { env }); assert.equal(negative.exit, 1, negative.output);
     assert.match(negative.output, /expected exact ordinary MCP tool set/); await missing(negative.out);
+  });
+  for (const [name, liveEdgeSha] of malformedCore) await t.test(`core ${name} refuses before HTTP`, async t => {
+    const f = await fixture(t, { script: producer, releaseSha: latest, liveEdgeSha, listedTools: core });
+    const result = await f.run('consent'); assert.equal(result.exit, 1, result.output);
+    assert.match(result.output, /expected literal live core tool table/);
+    assert.doesNotMatch(result.output, /CORE_EVALUATED|WORKING_CORE_EVALUATED/);
+    assert.equal(f.events.length, 0); await missing(result.out);
   });
   for (const [name, liveEdgeSha] of malformed) await t.test(`${name} refuses before HTTP`, async t => {
     const f = await fixture(t, { script: producer, releaseSha: latest, liveEdgeSha, listedTools: core });
@@ -386,10 +422,32 @@ test('live catalog follows the verified SHA release switch, never the working fi
   });
 });
 
-test('hosted MCP catalog accepts the reviewed release ordinary-plus-household set', async () => {
+test('independent historical catalogs: 1388b0ee 23/26, d518d4c9 8, a2debf4d 9', async t => {
+  const phase2Sha = 'a2debf4d3474fa903123d8bd130384bdae5b77e0';
+  for (const [name, liveEdgeSha, listedTools, count, fileGate] of [
+    ['1388b0ee', releaseSha, releaseTools, 23, '0'],
+    ['1388b0ee with files', releaseSha, [...releaseTools, ...FILE_ONLY], 26, '1'],
+    ['d518d4c9', 'd518d4c9489131e8e121e0c99fcbd2a03e156eab', baselineTools, 8, '0'],
+    ['a2debf4d phase 2', phase2Sha, phase2Tools, 9, '0'],
+  ]) await t.test(`${name}: ${count} tools`, async t => {
+    assert.equal(listedTools.length, count);
+    const f = await fixture(t, { releaseSha: phase2Sha, liveEdgeSha, listedTools });
+    const env = { SWARM_HOUSEHOLD_HOSTED_FILE_TRANSPORT: fileGate };
+    const consent = await f.run('consent', [], { env }); assert.equal(consent.exit, 0, consent.output);
+    f.consent = consent.out;
+    const window = await f.run('window', ['--window', 'W4', '--phase', 'recovery'], { env });
+    assert.equal(window.exit, 0, window.output);
+    f.config.listedTools = liveEdgeSha === phase2Sha ? baselineTools : [...listedTools, 'close_session'];
+    const negative = await f.run('window', [], { env });
+    assert.equal(negative.exit, 1, negative.output); await missing(negative.out);
+    assert.match(negative.output, /expected exact ordinary MCP tool set/);
+  });
+});
+
+test('hosted MCP catalog helper accepts the current ordinary-plus-household set', async () => {
   assert.equal(releaseTools.length, 23);
   assert.equal(baselineTools.length, 8);
-  assert.deepEqual(await expectedReleaseMcpToolNames(), releaseTools);
+  assert.deepEqual(new Set(await expectedReleaseMcpToolNames()), new Set([...phase2Tools, ...householdTools]));
   assert.equal(exactMcpToolSet(releaseTools, releaseTools), true);
 });
 
@@ -403,7 +461,7 @@ test('hosted MCP catalog refuses a list with an unknown extra tool', async () =>
   assert.equal(exactMcpToolSet([...expected, 'not_a_real_tool'], expected), false);
 });
 
-test('hosted MCP catalog refuses the old 8-only list when the release has household tools', async () => {
+test('hosted MCP catalog refuses the core-only list when the release has household tools', async () => {
   const expected = await expectedReleaseMcpToolNames();
   assert.ok(expected.length > ORDINARY_TOOLS.length);
   assert.equal(exactMcpToolSet(ORDINARY_TOOLS, expected), false);
@@ -459,7 +517,7 @@ test('each tool scope accepts only its exact set', async () => {
 
 test('second-pass pre-W1, W3 and W4 before/recovery use the earlier live C1 release catalog', async t => {
   const liveEdgeSha = earlierEdgeSha;
-  const f = await fixture(t, { liveEdgeSha, listedTools: (await catalogAt(liveEdgeSha, ORDINARY_TOOLS)).names });
+  const f = await fixture(t, { liveEdgeSha, listedTools: releaseTools });
   const consent = await pre(f);
   assert.equal(consent.receipt.live_edge_sha, liveEdgeSha);
   for (const [window, phase] of [['W3', 'before'], ['W3', 'after'], ['W3', 'recovery'], ['W4', 'before'], ['W4', 'recovery']]) {
@@ -470,14 +528,14 @@ test('second-pass pre-W1, W3 and W4 before/recovery use the earlier live C1 rele
   }
 });
 
-test('live edge SHA refuses missing, malformed, unknown, non-ancestor and unreadable bundle inputs before HTTP', async t => {
+test('live edge SHA refuses missing, malformed, unknown, non-ancestor and missing core table inputs before HTTP', async t => {
   const positive = await fixture(t); await pre(positive);
   for (const [name, config, extra, failure] of [
     ['missing', { omitLiveEdgeSha: true }, [], /FAIL options: invocation expected 40 hex live edge SHA/],
     ['malformed', {}, ['--live-edge-sha', 'abc1234'], /FAIL options: invocation expected 40 hex live edge SHA/],
     ['unknown', { liveEdgeSha: '0'.repeat(40) }, [], /FAIL live_edge: control expected known live edge SHA ancestral to release SHA with readable protocol bundle/],
     ['non-ancestor', { releaseSha: baselineEdgeSha, liveEdgeSha: releaseSha }, [], /FAIL live_edge: control expected known live edge SHA ancestral to release SHA with readable protocol bundle/],
-    ['unreadable bundle', { liveEdgeSha: 'b5e8df8097763f7553c8be189ceea0a5ed56b31e' }, [], /FAIL live_edge: control expected known live edge SHA ancestral to release SHA with readable protocol bundle/],
+    ['missing core table', { liveEdgeSha: 'b5e8df8097763f7553c8be189ceea0a5ed56b31e' }, [], /FAIL live_edge: control expected literal live core tool table/],
   ]) await t.test(name, async t => {
     const f = await fixture(t, config), r = await f.run('consent', extra);
     assert.equal(r.exit, 1, r.output); assert.match(r.output, failure);

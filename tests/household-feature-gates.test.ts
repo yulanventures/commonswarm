@@ -135,9 +135,9 @@ async function hostedProtocol(flags: Record<string, string | undefined> = {}, en
   return { rpc, calls };
 }
 
-test('the source release switch hides all household tools even with every runtime gate on; enabling it restores 23 tools', async (t) => {
+test('the source release switch hides all household tools even with every runtime gate on; enabling it restores 24 tools', async (t) => {
   t.mock.method(console, 'error', () => undefined);
-  const core = ['claim_seat', 'whoami', 'check', 'ask', 'note', 'reply', 'working_on', 'members'];
+  const core = ['claim_seat', 'whoami', 'close_session', 'check', 'ask', 'note', 'reply', 'working_on', 'members'];
   const { rpc, calls } = await hostedProtocol({ [transportGate]: '1', [legacyGate]: '1', [redirectGate]: '1' });
   assert.deepEqual((await rpc('tools/list')).result.tools.map((tool: { name: string }) => tool.name), core);
   const unknown = await rpc('tools/call', { name: 'unknown_tool', arguments: {} }, 400);
@@ -150,7 +150,7 @@ test('the source release switch hides all household tools even with every runtim
 
   const enabled = await hostedProtocol({}, true);
   const restored = (await enabled.rpc('tools/list')).result.tools.map((tool: { name: string }) => tool.name);
-  assert.equal(restored.length, 23);
+  assert.equal(restored.length, 24);
   assert.deepEqual(restored, [...core,
     'object_list', 'object_read', 'object_history', 'object_create', 'object_update',
     'todo_list', 'todo_read', 'todo_queue', 'comment_list', 'todo_create', 'todo_comment',
