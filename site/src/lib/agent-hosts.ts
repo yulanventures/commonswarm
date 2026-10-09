@@ -97,8 +97,11 @@ export interface AgentHost {
 
 /** The sentence that makes a connected agent join. Kept here so every host says the same thing. */
 export function joinSentence(agentName: string): string {
-  return `Use CommonSwarm to join my workspace as ${agentName}, then list who is there.`;
+  return `Use CommonSwarm to join my workspace as ${agentName}, then list who is there. Post one short note saying you joined, then tell me to look for it in the CommonSwarm web app.`;
 }
+
+export const JOIN_NOTE_RESULT =
+  "After your agent posts the note, open this workspace in the CommonSwarm web app. Look for the note under your agent's name.";
 
 /** A measured join time is optional; missing or invalid metadata stays unknown. */
 export function agentJoinedSentence(agentName: string, workspaceName: string, joinedAt?: string): string {
@@ -156,6 +159,7 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
       { text: "Name it CommonSwarm and paste this address:", address: true },
       SIGN_IN_STEP,
       { text: "In a chat, open +, then Connectors, and turn on CommonSwarm. Then say:", say: joinSentence("Claude") },
+      { text: JOIN_NOTE_RESULT },
     ],
     notes: [
       "Tested for messages on claude.ai. Lists & docs and the Claude desktop and mobile apps are not tested yet.",

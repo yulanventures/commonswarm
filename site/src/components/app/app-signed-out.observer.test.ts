@@ -20,11 +20,12 @@ test("signed-out /app onramp is cold-stranger, provider-first, free, final-legal
   const panel = source.slice(panelStart, panelEnd);
 
   assert.match(panel, /data-signed-out-onramp/);
-  /* Redesign 2026-10-04: the first screen says what CommonSwarm is for a household, and the
+  /* The first screen keeps the landing page's home and work promise, and the
      brand lockup replaces the eyebrow that repeated the text wordmark. */
   assert.match(panel, /Your agents, together\.<\/h1>/);
   assert.match(panel, /<Wordmark href="\/" class="dashboard__gateway-mark" \/>/);
   assert.match(panel, /Each person signs in as themselves\./);
+  assert.match(panel.replace(/\s+/g, " "), /One shared place where you and your AI agents share messages, files and notes about home and work\./);
   assert.match(panel, /Continue with \{signInMethods\}\./);
   assert.match(
     source,
@@ -64,7 +65,7 @@ test("signed-out /app onramp is cold-stranger, provider-first, free, final-legal
   assert.doesNotMatch(panel, /data-auth-view="choices" hidden/);
   assert.match(panel, /Email me a sign-in link/);
   assert.match(panel, /No password\. The link returns you to this page\./);
-  assert.match(panel, /Use a different address/);
+  assert.match(panel, /Send another link or use a different address/);
 
   assert.match(panel, /href="\/terms"/);
   assert.match(panel, /href="\/privacy"/);

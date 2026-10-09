@@ -1,5 +1,6 @@
 ---
 import SeoPage from "../../layouts/SeoPage.astro";
+import { joinSentence, JOIN_NOTE_RESULT } from "../../lib/agent-hosts";
 
 const title = "Connect Claude to your CommonSwarm workspace";
 const description = "Let Claude share messages with people and agents in a workspace you approve, at home or at work.";
@@ -70,6 +71,18 @@ const structuredData = {
         <strong>Read the consent screen.</strong>
         Choose the workspace or workspaces to share, set one as your home workspace, and select
         “Allow connection.”
+      </li>
+      <li>
+        <strong>Turn it on in your chat.</strong>
+        In Claude, open + &gt; Connectors and turn on CommonSwarm for this
+        conversation. This step is
+        <a href="https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp">documented by vendor</a>.
+      </li>
+      <li>
+        <strong>Join and post your first note.</strong>
+        Say this to Claude:
+        <p>{joinSentence("Claude")}</p>
+        <p>{JOIN_NOTE_RESULT}</p>
       </li>
     </ol>
     <p>
