@@ -186,7 +186,7 @@ async function resolveSeatBinding(
 async function seatCapability(
   token: VerifiedMcpToken,
   binding: SeatBinding,
-  tool: Exclude<HostedToolName, "claim_seat">,
+  tool: Exclude<HostedToolName, "claim_seat" | "close_session">,
 ): Promise<HostedSeatCapability | null> {
   const content = HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === tool);
   const use = tool === "whoami" || tool === "members" || content?.effect === "read" ? "read" : "command";
@@ -235,6 +235,8 @@ function hostedCommand(
 async function executeTool(call: HostedToolCall): Promise<Record<string, unknown>> {
   if (call.signal.aborted) throw call.signal.reason;
   const args = call.arguments;
+  // Phase 4 owns close dispatch. Never fall through to a signal mutation.
+  if (call.name === "close_session") throw new HostedToolFailure("upgrade_required");
   if (call.name === "claim_seat") {
     return commandOutput(await executeClaimSeat(call, {
       withAuthTransaction: async <T>(run: (tx: Sql) => Promise<T>): Promise<T> =>

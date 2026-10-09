@@ -8,6 +8,8 @@ import { MCP_ISSUER, MCP_RESOURCE, McpJwtVerifier } from "../supabase/functions/
 import { createMcpProtocolHandler, PROTECTED_RESOURCE_METADATA_PATH, RESOURCE_METADATA_URL, WWW_AUTHENTICATE } from "../supabase/functions/mcp/protocol.ts";
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
 import { CORE_TOOL_TABLE, HOSTED_TOOL_TABLE, validateHostedToolArguments, type HostedToolExecutor } from "../supabase/functions/mcp/tools.ts";
+// @ts-expect-error TS5097: exercise the Deno instructions through tsx.
+import { SESSION_INSTRUCTIONS, CLAIM_SEAT_DESCRIPTION } from "../supabase/functions/mcp/session-instructions.ts";
 import { HOUSEHOLD_TOOL_REGISTRY } from "../src/protocol/household-tool-registry.js";
 
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
@@ -128,7 +130,7 @@ test("Claude initialization negotiates versions before initialized and tools/lis
             protocolVersion: negotiated,
             capabilities: { tools: { listChanged: false } },
             serverInfo: { name: "commonswarm", version: "1.0.0" },
-            instructions: "Use an explicit seat handle for every CommonSwarm tool call.",
+            instructions: SESSION_INSTRUCTIONS,
           },
         });
         const headers = { ...fixture.headers, "mcp-protocol-version": negotiated };
@@ -144,7 +146,7 @@ test("Claude initialization negotiates versions before initialized and tools/lis
         const tools = await listed.json();
         ListToolsResultSchema.parse(tools.result);
         assert.equal(tools.id, `${id}-list`);
-        assert.equal(tools.result.tools.length, 8);
+        assert.equal(tools.result.tools.length, 9);
         assert.ok(tools.result.tools.every((tool: { name: unknown; inputSchema: unknown }) =>
           typeof tool.name === "string" && typeof tool.inputSchema === "object"));
         for (const tool of tools.result.tools) {
@@ -181,6 +183,7 @@ test("tools/list preserves coordination titles, safety annotations and OAuth sec
   const expected = [
     ["claim_seat", "Claim a named seat", false, true, true],
     ["whoami", "Show seat identity", true, false, true],
+    ["close_session", "Close this chat identity", false, true, true],
     ["check", "Check and acknowledge inbox", false, true, false],
     ["ask", "Ask workspace participants", false, true, true],
     ["note", "Share a workspace note", false, true, true],
@@ -189,7 +192,7 @@ test("tools/list preserves coordination titles, safety annotations and OAuth sec
     ["members", "List workspace participants", true, false, true],
   ] as const;
   const tools = envelope.result.tools;
-  assert.equal(tools.length, 8);
+  assert.equal(tools.length, 9);
   assert.deepEqual(tools.map((tool: { name: string }) => tool.name), expected.map(([name]) => name));
   for (const [index, [name, title, readOnlyHint, destructiveHint, idempotentHint]] of expected.entries()) {
     await t.test(name, () => {
@@ -209,7 +212,7 @@ test("every tools/list annotation follows the declared effect and the catalog co
   const declared = [
     ...CORE_TOOL_TABLE.map(row => ({ name: row.name, read: row.effect === "read", idempotent: row.name !== "check" })),
   ];
-  assert.equal(tools.length, 8);
+  assert.equal(tools.length, 9);
   assert.equal(declared.length, tools.length);
   assert.equal(new Set(declared.map(row => row.name)).size, tools.length);
   assert.deepEqual(tools.map((row: { name: string }) => row.name).sort(), declared.map(row => row.name).sort());
@@ -221,7 +224,7 @@ test("every tools/list annotation follows the declared effect and the catalog co
     }, row.name);
     assert.equal("effect" in tool, false, "effect declarations stay off the MCP wire");
   }
-  assert.equal(declared.filter(row => !row.read).length, 6);
+  assert.equal(declared.filter(row => !row.read).length, 7);
   assert.equal(declared.filter(row => row.read).length, 2);
 });
 
@@ -241,7 +244,7 @@ test("every household tool, including file tools, receives the unknown-tool refu
   assert.deepEqual(expected, {
     jsonrpc: "2.0", id: "hidden-tool", error: {
       code: -32602,
-      message: "Invalid tools/call params. Send name (claim_seat, whoami, check, ask, note, reply, working_on, members) and arguments as a JSON object.",
+      message: "Invalid tools/call params. Send name (claim_seat, whoami, close_session, check, ask, note, reply, working_on, members) and arguments as a JSON object.",
     },
   });
   assert.equal(HOUSEHOLD_TOOL_REGISTRY.length, 18, "enumerate all fifteen household and three gated file tools");
@@ -321,7 +324,7 @@ test("tool auth errors carry safe WWW-Authenticate metadata while ordinary error
     const output = JSON.parse(result.content[0].text);
     if (code === "ok") assert.deepEqual(output, { ok: true });
     else assert.equal(output.error, ["private-error-must-not-leak", "hosted_command_failed"].includes(code) ? "tool_failed" : code);
-    assert.equal(result.isError, code === "ok" ? undefined : true);
+    assert.equal(result.isError, code === "ok" ? false : true);
   }
 });
 
@@ -404,7 +407,7 @@ test("request metadata is ignored, including the claim_seat regression from repr
       assert.equal(control.status, 200, "call without metadata is a positive control");
       const expected = await control.json();
       if (method === "tools/call") {
-        assert.deepEqual(expected.result, { content: [{ type: "text", text: JSON.stringify({ reachedExecutor: true }) }] });
+        assert.deepEqual(expected.result, { isError: false, content: [{ type: "text", text: JSON.stringify({ reachedExecutor: true }) }] });
       }
       for (const { name, _meta, status } of cases) {
         await t.test(name, async () => {
@@ -553,7 +556,7 @@ test("protected-resource metadata and the unauthenticated challenge name exact U
 
 test("hosted tool table is closed and exposes no local or credential operations", () => {
   assert.deepEqual(HOSTED_TOOL_TABLE.map(({ name }) => name), [
-    "claim_seat", "whoami", "check", "ask", "note", "reply", "working_on", "members",
+    "claim_seat", "whoami", "close_session", "check", "ask", "note", "reply", "working_on", "members",
   ]);
   for (const tool of HOSTED_TOOL_TABLE) {
     assert.equal(tool.inputSchema.additionalProperties, false);
@@ -577,15 +580,15 @@ test("claim_seat advertises and accepts an omitted workspace_id beside an explic
   }));
   const explicit = await call({ ...base, workspace_id: verified.subject });
   assert.equal(explicit.status, 200, "explicit UUID positive control");
-  assert.equal((await explicit.json()).result.isError, undefined);
+  assert.equal((await explicit.json()).result.isError, false);
   const omitted = await call(base);
   assert.equal(omitted.status, 200, "omitted workspace reaches the executor");
-  assert.equal((await omitted.json()).result.isError, undefined);
+  assert.equal((await omitted.json()).result.isError, false);
   const listed = await serve(post({ jsonrpc: "2.0", id: 2, method: "tools/list" }));
   const claim = (await listed.json()).result.tools.find((tool: { name: string }) => tool.name === "claim_seat");
-  assert.deepEqual(claim.inputSchema.required, ["name", "request_id"]);
+  assert.deepEqual(claim.inputSchema.required, ["request_id"]);
   assert.equal(claim.inputSchema.properties.workspace_id.type, "string");
-  assert.equal(claim.description, "Choose a new, unique name for this chat/session; never use another agent's name. Reuse a name only for a seat this same connection created earlier. Omit workspace_id for the consented home workspace, or select another consented workspace. Retry with the same request_id.");
+  assert.equal(claim.description, CLAIM_SEAT_DESCRIPTION);
 });
 
 test("claim_seat routes through the grant home and preserves explicit consent checks", async () => {
@@ -652,9 +655,9 @@ test("claim_seat routes through the grant home and preserves explicit consent ch
     const output = JSON.parse(result.content[0].text);
     if (expected === "hosted_grant_forbidden") {
       assert.equal(result.isError, true);
-      assert.deepEqual(output, { error: expected, message: "Workspace access is missing or no longer authorized. Ask a workspace admin to restore your membership, then reconnect and approve this workspace." });
+      assert.deepEqual(output, { error: expected, message: "Workspace access is missing or no longer authorized. Ask a workspace admin to restore your membership, then reconnect and approve this workspace.", can_start_new: false });
     } else {
-      assert.equal(result.isError, undefined);
+      assert.equal(result.isError, false);
       assert.deepEqual(output, { workspace_id: expected });
     }
   }
@@ -669,7 +672,7 @@ test("claim_seat routes through the grant home and preserves explicit consent ch
     params: { name: "claim_seat", arguments: base },
   }));
   const revokedResult = (await revoked.json()).result;
-  assert.deepEqual(JSON.parse(revokedResult.content[0].text), { error: "hosted_grant_forbidden", message: "Workspace access is missing or no longer authorized. Ask a workspace admin to restore your membership, then reconnect and approve this workspace." });
+  assert.deepEqual(JSON.parse(revokedResult.content[0].text), { error: "hosted_grant_forbidden", message: "Workspace access is missing or no longer authorized. Ask a workspace admin to restore your membership, then reconnect and approve this workspace.", can_start_new: false });
   assert.equal(revokedResult.isError, true);
   CallToolResultSchema.parse(revokedResult);
   assert.deepEqual(revokedResult._meta, {
@@ -726,7 +729,7 @@ test("origin and schema denials include authenticated positive controls", async 
     origin: "https://claude.ai",
   }));
   assert.equal(list.status, 200);
-  assert.equal((await list.json()).result.tools.length, 8);
+  assert.equal((await list.json()).result.tools.length, 9);
 
   const originDenied = await serve(post({ jsonrpc: "2.0", id: 2, method: "tools/list" }, {
     origin: "https://attacker.invalid",

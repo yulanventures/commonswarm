@@ -36,9 +36,11 @@ test("hosted input errors name the field and expected form without echoing suppl
     ["whoami", null, "Expected an object of tool arguments. Send arguments as a JSON object."],
     ["whoami", [], "Expected an object of tool arguments. Send arguments as a JSON object."],
     ["whoami", { seat, secret_token: "private-secret" }, "Unknown tool argument. Use only: seat."],
-    ["whoami", {}, "Missing seat: provide the seat_ handle returned by claim_seat (22 to 64 letters, digits, underscores or hyphens after seat_)."],
+    ["members", {}, "Missing seat: provide the seat_ handle returned by claim_seat (22 to 64 letters, digits, underscores or hyphens after seat_)."],
     ["whoami", { seat: "private-secret" }, "Invalid seat: provide the seat_ handle returned by claim_seat (22 to 64 letters, digits, underscores or hyphens after seat_)."],
     ["claim_seat", { name: " bad", request_id: base.request_id }, "Invalid name: provide 1 to 80 characters with no surrounding spaces or control characters."],
+    ["claim_seat", { name: "Agent\u2028 ", request_id: base.request_id }, "Invalid name: provide 1 to 80 characters with no surrounding spaces or control characters."],
+    ["claim_seat", { name: "Agent\u2029 ", request_id: base.request_id }, "Invalid name: provide 1 to 80 characters with no surrounding spaces or control characters."],
     ["claim_seat", { name: "Seat", request_id: "!" }, "Invalid request_id: provide 8 to 72 letters, digits, underscores or hyphens; reuse it only for the same request."],
     ["claim_seat", { name: "Seat", request_id: base.request_id, workspace_id: "bad" }, "Invalid workspace_id: provide a real workspace UUID or omit it to use the grant's home workspace."],
     ["check", { seat, ack: "bad" }, "Invalid ack: provide the batch UUID returned by check, or omit ack to open the inbox."],
@@ -55,7 +57,14 @@ test("hosted input errors name the field and expected form without echoing suppl
   }
   assert.equal(executed, 0, "invalid input never reaches authorization or execution");
   assert.equal((await serve(request("note", base))).status, 200);
-  assert.equal(executed, 1, "valid input reaches the executor");
+  for (const name of ["Agent\u2028X", "Agent\u2029X"]) {
+    const response = await serve(request("claim_seat", { name, request_id: base.request_id }));
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).result, {
+      isError: false, content: [{ type: "text", text: '{"ok":true}' }],
+    });
+  }
+  assert.equal(executed, 3, "valid note and both separator names reach the executor");
 });
 
 const accessMessage = "Workspace access is missing or no longer authorized. Ask a workspace admin to restore your membership, then reconnect and approve this workspace.";
@@ -95,13 +104,13 @@ test("hosted command and read failures return exact stable codes and safe recove
     assert.equal(body.jsonrpc, "2.0");
     assert.equal(body.id, 1);
     assert.equal(body.result.isError, true);
-    assert.deepEqual(body.result.content, [{ type: "text", text: JSON.stringify({ error: code, message }) }]);
+    assert.deepEqual(body.result.content, [{ type: "text", text: JSON.stringify({ error: code, message, can_start_new: ["hosted_seat_revoked", "hosted_seat_name_invalid", "hosted_seat_name_taken"].includes(code) }) }]);
   }
   assert.equal(logging.mock.callCount(), rows.length);
   assert.ok(logging.mock.calls.every(({ arguments: args }) => args[0] === JSON.stringify({ event: "request_failed", error_code: "tool_failed", method: "tools/call" })), "logging remains code-only");
   const read = handler(async () => readOutput({ status: 403, body: { error: "forbidden", message: "private-token" } }));
   const response = await read(request("members", { seat }));
-  assert.deepEqual(JSON.parse((await response.json()).result.content[0].text), { error: "forbidden", message: accessMessage });
+  assert.deepEqual(JSON.parse((await response.json()).result.content[0].text), { error: "forbidden", message: accessMessage, can_start_new: false });
 });
 
 test("reply and recipient denials do not distinguish missing resources from inaccessible ones", async (t) => {
@@ -110,13 +119,13 @@ test("reply and recipient denials do not distinguish missing resources from inac
   for (const signal_id of [uuid, "22222222-2222-4222-8222-222222222222"]) {
     const response = await serve(request("reply", { ...base, signal_id }));
     assert.deepEqual(JSON.parse((await response.json()).result.content[0].text), {
-      error: "forbidden", message: "The signal is unavailable for this seat, or reply access is missing. Check signal_id in check output and reply from the addressed seat; ask a workspace admin if access is missing.",
+      error: "forbidden", message: "The signal is unavailable for this seat, or reply access is missing. Check signal_id in check output and reply from the addressed seat; ask a workspace admin if access is missing.", can_start_new: false,
     });
   }
   for (const name of ["ask", "note"]) {
     const response = await serve(request(name, { ...base, recipients: [{ kind: "user", id: uuid }] }));
     assert.deepEqual(JSON.parse((await response.json()).result.content[0].text), {
-      error: "forbidden", message: "Workspace access or recipient access is missing. Ask a workspace admin to restore access, reconnect, and use members to select current recipients.",
+      error: "forbidden", message: "Workspace access or recipient access is missing. Ask a workspace admin to restore access, reconnect, and use members to select current recipients.", can_start_new: false,
     });
   }
 });
@@ -134,7 +143,7 @@ test("unknown exceptions and untrusted backend fields cannot leak or select a kn
     const serve = handler(async () => { throw failure; });
     const response = await serve(request("whoami", { seat }));
     assert.deepEqual((await response.json()).result, {
-      isError: true, content: [{ type: "text", text: JSON.stringify({ error: "tool_failed", message: genericMessage }) }],
+      isError: true, content: [{ type: "text", text: JSON.stringify({ error: "tool_failed", message: genericMessage, can_start_new: false }) }],
     });
   }
   for (const output of [commandOutput, readOutput]) {
@@ -142,13 +151,13 @@ test("unknown exceptions and untrusted backend fields cannot leak or select a kn
       error: "hosted_private_code", message: "SELECT secret_sql", user_id: "another-user-id",
     } }));
     const response = await serve(request("whoami", { seat }));
-    assert.deepEqual(JSON.parse((await response.json()).result.content[0].text), { error: "tool_failed", message: genericMessage });
+    assert.deepEqual(JSON.parse((await response.json()).result.content[0].text), { error: "tool_failed", message: genericMessage, can_start_new: false });
   }
   for (const resets_at of [undefined, "private-token", "2026-10-03T12:01:00Z private-token"]) {
     const serve = handler(async () => commandOutput({ status: 429, body: { error: "rate_limited", resets_at } }));
     const response = await serve(request("note", base));
     assert.deepEqual(JSON.parse((await response.json()).result.content[0].text), {
-      error: "rate_limited", message: "Too many requests. Retry after the current rate-limit window resets; reuse the same request_id.",
+      error: "rate_limited", message: "Too many requests. Retry after the current rate-limit window resets; reuse the same request_id.", can_start_new: false,
     });
   }
 });
@@ -162,11 +171,11 @@ test("successful signal, claim and read result shapes stay unchanged", async () 
   for (const [body, expected] of rows) {
     const serve = handler(async () => commandOutput({ status: 200, body: body as Record<string, unknown> }));
     const response = await serve(request("whoami", { seat }));
-    assert.deepEqual((await response.json()).result, { content: [{ type: "text", text: JSON.stringify(expected) }] });
+    assert.deepEqual((await response.json()).result, { isError: false, content: [{ type: "text", text: JSON.stringify(expected) }] });
   }
   const serve = handler(async () => readOutput({ status: 200, body: { members: [], agents: [] } }));
   const response = await serve(request("members", { seat }));
-  assert.deepEqual((await response.json()).result, { content: [{ type: "text", text: '{"members":[],"agents":[]}' }] });
+  assert.deepEqual((await response.json()).result, { isError: false, content: [{ type: "text", text: '{"members":[],"agents":[]}' }] });
 });
 
 test("unknown tool names receive a safe tools/call correction with the existing JSON-RPC code", async (t) => {
@@ -175,7 +184,7 @@ test("unknown tool names receive a safe tools/call correction with the existing 
   const serve = handler(async () => { executed++; return { ok: true }; });
   const response = await serve(request("private-token", { seat }));
   assert.equal(response.status, 400);
-  assert.equal(HOSTED_TOOL_TABLE.length, 8, "only the eight core coordination tools");
+  assert.equal(HOSTED_TOOL_TABLE.length, 9, "the nine core tools include context closure");
   assert.deepEqual(await response.json(), { jsonrpc: "2.0", id: 1, error: {
     code: -32602,
     message: `Invalid tools/call params. Send name (${HOSTED_TOOL_TABLE.map(tool => tool.name).join(", ")}) and arguments as a JSON object.`,

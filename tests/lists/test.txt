@@ -22,6 +22,8 @@ tests/hm6-box-window-plan.test.ts
 tests/hosted-mcp-auth.test.ts
 tests/hosted-mcp-protocol.test.ts
 tests/hosted-mcp-errors.test.ts
+tests/hosted-context-tools.test.ts
+tests/hosted-context-discovery.test.ts
 tests/hm5-router-box.test.ts
 tests/read-handler-main-only.test.ts
 tests/protocol-hosted-authority.test.ts
