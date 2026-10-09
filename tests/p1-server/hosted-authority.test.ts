@@ -449,6 +449,7 @@ async function seedHostedFixture(grantBOwnerIsOther = false): Promise<HostedFixt
     otherJwt: other.jwt,
   };
   await sql.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(1936142700, hashtext('hosted-context-allocation'))`;
     await tx`UPDATE swarm.config SET value='true'::jsonb WHERE key='hosted_context_allocation_enabled'`;
     await tx`
       INSERT INTO swarm.users (user_id, display_name)

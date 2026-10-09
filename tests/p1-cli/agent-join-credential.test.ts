@@ -86,56 +86,82 @@ test("the schema holds a digest and separate locator with database bounds", asyn
   assert.match(sql, /registrar_principal_id = p\.principal_id/);
 });
 
-test("every principal-ceiling count takes the workspace lock first, in the one shared helper", () => {
-  /* WHY THIS IS STRUCTURAL. A server test fires six concurrent mints with room for one and expects
-   * exactly one to succeed. With the lock REMOVED that test still passed 16/16 locally: the local edge
-   * runtime does not interleave those transactions, so the race it guards against never happens there.
-   * A control that cannot fail proves nothing about the lock, so the lock is pinned here instead:
-   *  - the helper takes pg_advisory_xact_lock BEFORE its count;
-   *  - it is the ONLY place in the command edge that counts swarm.agent_principals, so no ceiling
-   *    check can bypass it (enumerated by AST: one such count exists);
-   *  - every named ceiling check calls it: credential mint, seat registration,
-   *    ordinary principal creation, and hosted-seat claim. */
-  const path = new URL("../../supabase/functions/command/index.ts", import.meta.url);
-  const source = readFileSync(path, "utf8");
-  const file = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true);
-  const enclosingFunction = (node: ts.Node): string => {
-    let parent: ts.Node | undefined = node.parent;
-    while (parent && !ts.isFunctionDeclaration(parent)) parent = parent.parent;
-    return parent && ts.isFunctionDeclaration(parent) && parent.name ? parent.name.text : "<top>";
-  };
-  const helper = "lockAndCountLivePrincipals";
-  const counts: { at: number; fn: string }[] = [];
+function verifyPrincipalCeilings(source: string, routine: string): void {
+  // Retained structural guard: the old concurrency positive still passed 16/16
+  // with its lock removed. This enumerates SQL counts and call order independently.
+  const helper = 'lockAndCountLivePrincipals', counter = 'countLiveDurablePrincipals';
+  const counts: { fn: string; text: string; variable: string; file: string }[] = [];
   const locks: { at: number; fn: string }[] = [];
-  const helperCallers: string[] = [];
-  const visit = (node: ts.Node): void => {
-    if (ts.isTaggedTemplateExpression(node)) {
-      const text = node.template.getText(file);
-      /* ANY count form, not only `count(*)`: an arm noted a new inline ceiling check written as
-       * `count(1)` or `count(p.principal_id)` would have slipped past the one-count rule. */
-      if (/\bcount\s*\(/i.test(text) && /swarm\.agent_principals/.test(text)) {
-        counts.push({ at: node.getStart(file), fn: enclosingFunction(node) });
-      }
-      if (/pg_advisory_xact_lock/.test(text) && /principal-ceiling/.test(text)) {
-        locks.push({ at: node.getStart(file), fn: enclosingFunction(node) });
-      }
-    }
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === helper) {
-      helperCallers.push(enclosingFunction(node));
-    }
-    ts.forEachChild(node, visit);
+  const calls: { at: number; fn: string; callee: string; file: string }[] = [];
+  const workspaceLocks: number[] = [];
+  const enclosingFunction = (node: ts.Node): string => {
+    let parent = node.parent;
+    while (parent && !ts.isFunctionDeclaration(parent)) parent = parent.parent;
+    return parent?.name?.text ?? '<top>';
   };
-  visit(file);
+  for (const [name, text] of [['index.ts', source], ['admin-routine.ts', routine]]) {
+    const file = ts.createSourceFile(name!, text!, ts.ScriptTarget.Latest, true);
+    const visit = (node: ts.Node): void => {
+      if (ts.isTaggedTemplateExpression(node)) {
+        const sql = node.template.getText(file), fn = enclosingFunction(node);
+        if (/\bcount\s*\(/i.test(sql) && /swarm\.agent_principals/.test(sql)) {
+          let parent: ts.Node | undefined = node.parent;
+          while (parent && !ts.isVariableDeclaration(parent)) parent = parent.parent;
+          counts.push({ fn, text: sql, variable: parent?.name.getText(file) ?? '', file: name! });
+        }
+        if (/pg_advisory_xact_lock/.test(sql) && /principal-ceiling/.test(sql)) locks.push({ at: node.getStart(file), fn });
+        if (name === 'admin-routine.ts' && /FROM swarm\.workspaces/.test(sql) && /FOR UPDATE/.test(sql)) workspaceLocks.push(node.getStart(file));
+      }
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && [helper, counter].includes(node.expression.text)) {
+        calls.push({ at: node.getStart(file), fn: enclosingFunction(node), callee: node.expression.text, file: name! });
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+  }
+  const principalCounts = counts.filter(row => /FROM\s+swarm\.agent_principals\b/i.test(row.text));
+  assert.equal(principalCounts.length, 1, 'one shared durable-principal count across both edge modules');
+  assert.equal(principalCounts[0]!.fn, counter);
+  assert.equal(principalCounts[0]!.file, 'admin-routine.ts');
+  assert.match(principalCounts[0]!.text, /p\.identity_lifetime\s*=\s*'durable'/);
+  // Phase 1 also counts active contexts and durable hosted seats. These two
+  // queries JOIN principals but count their own resources, not the workspace ceiling.
+  const quotaCounts = counts.filter(row => row !== principalCounts[0]);
+  assert.deepEqual(quotaCounts.map(row => [row.file, row.fn, row.variable]), [
+    ['index.ts', 'claimHostedSeat', '[counts]'], ['index.ts', 'claimHostedSeat', '[seatCount]'],
+  ], 'only the two hosted quotas may join principals in another count');
+  assert.match(quotaCounts[0]!.text, /FROM swarm\.hosted_agent_contexts/);
+  assert.match(quotaCounts[1]!.text, /FROM swarm\.hosted_mcp_seats/);
+  assert.equal(locks.length, 1, 'exactly one principal-ceiling advisory lock');
+  assert.equal(locks[0]!.fn, helper);
+  const direct = calls.filter(row => row.callee === counter);
+  assert.deepEqual(direct.map(row => [row.file, row.fn]), [
+    ['index.ts', helper], ['admin-routine.ts', 'prepareAdminRoutine'],
+  ], 'no issuance path may bypass the shared locked helper');
+  assert.ok(locks[0]!.at < direct[0]!.at, 'ceiling lock precedes shared count');
+  // Option A preserves the existing admin workspace lock and its order.
+  assert.equal(workspaceLocks.length, 1);
+  assert.ok(workspaceLocks[0]! < direct[1]!.at, 'admin workspace lock precedes shared count');
+  assert.deepEqual(calls.filter(row => row.callee === helper).map(row => row.fn), [
+    'registerAgentSeat', 'mintAgentJoinCredential', 'enforceFreeTierBudget', 'claimHostedSeat',
+  ], 'every hosted/local principal-creating path uses the locked helper');
+}
 
-  assert.equal(counts.length, 1, `principal counts in the command edge: ${counts.length}`);
-  assert.equal(counts[0]!.fn, helper, "the only principal count must live in the shared helper");
-  assert.equal(locks.length, 1, "exactly one principal-ceiling lock");
-  assert.equal(locks[0]!.fn, helper, "the lock must be taken inside the helper");
-  assert.ok(locks[0]!.at < counts[0]!.at, "the lock must be taken BEFORE the count");
-  /* Hosted-seat claim is the fourth caller because accepting a hosted seat creates a live principal. */
-  assert.deepEqual(
-    helperCallers,
-    ["registerAgentSeat", "mintAgentJoinCredential", "enforceFreeTierBudget", "claimHostedSeat"],
-    "only the named principal-creating paths may use the shared locked ceiling helper",
-  );
+test('every principal-ceiling count takes the workspace lock first, in the one shared helper', () => {
+  const source = readFileSync(new URL('../../supabase/functions/command/index.ts', import.meta.url), 'utf8');
+  const routine = readFileSync(new URL('../../supabase/functions/command/admin-routine.ts', import.meta.url), 'utf8');
+  verifyPrincipalCeilings(source, routine);
+  const withoutLock = source.replace("hashtext('principal-ceiling')", "hashtext('wrong-ceiling')");
+  assert.notEqual(withoutLock, source, 'lock mutation reaches the real lock');
+  assert.throws(() => verifyPrincipalCeilings(withoutLock, routine), /exactly one principal-ceiling advisory lock/);
+  const bypass = source.replace('const livePrincipals = await lockAndCountLivePrincipals(tx, route.workspaceId);',
+    'const livePrincipals = await countLiveDurablePrincipals(tx, route.workspaceId);');
+  assert.notEqual(bypass, source, 'helper-bypass mutation reaches hosted issuance');
+  assert.throws(() => verifyPrincipalCeilings(bypass, routine), /no issuance path may bypass/);
+  const inline = source + '\nasync function unlocked(tx: any) { return tx`SELECT count(1) FROM swarm.agent_principals`; }';
+  assert.throws(() => verifyPrincipalCeilings(inline, routine), /one shared durable-principal count/);
+  // Target the workspace lock, retaining the preceding owner lock.
+  const withoutWorkspaceLock = routine.replace(/(FROM swarm\.workspaces[^`]+)FOR UPDATE/, '$1');
+  assert.notEqual(withoutWorkspaceLock, routine);
+  assert.throws(() => verifyPrincipalCeilings(source, withoutWorkspaceLock));
 });

@@ -64,7 +64,7 @@ export const AGENT_TOKEN_MAX_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
  *
  * The horizon is now read off `horizon_expires_at` in the accepted response, for BOTH grant
  * kinds — see mintedHorizon. A standing grant returns null there
- * (supabase/functions/command/index.ts:12590-12594), so the two facts come from one place. */
+ * (supabase/functions/command/index.ts:12593-12597), so the two facts come from one place. */
 
 /**
  * How this browser's device row is labelled, so a second visit reuses the row rather than
@@ -566,7 +566,7 @@ export async function mintAgentCredential(
  * used any other horizon. One field answers both cases, so the two can never disagree.
  *
  * `horizon_expires_at` is returned unconditionally on an accepted mint
- * (supabase/functions/command/index.ts:12590-12594) — an ISO string for timeboxed, null for
+ * (supabase/functions/command/index.ts:12593-12597) — an ISO string for timeboxed, null for
  * standing — and the idempotent replay path carries it through (index.ts:2969-2972).
  *
  * ABSENT READS AS UNKNOWN, NOT AS A GUESS. A deployment old enough to omit the field answers

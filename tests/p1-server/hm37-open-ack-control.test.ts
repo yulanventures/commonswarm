@@ -1,7 +1,7 @@
 /** End-to-end coverage for the production-window HM37 control harness. */
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { randomBytes, randomInt, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -61,8 +61,93 @@ let sql: postgres.Sql;
 let admin: SupabaseClient;
 const oauthRuntimePassword = randomUUID();
 const roots: string[] = [];
+let priorAllocationGate: postgres.Row | undefined;
+let fixtureReleaseRoot: string;
+
+// The reviewed HM37 harness measures legacy handles/checks. Phase 3 changes
+// those resolvers. Keep its production bytes intact and use this CI-only facade
+// beside the existing hosted-authority test bridge during phase-1 integration.
+function legacyFixtureRelease(root: string): string {
+  const facade = join(root, 'release');
+  const command = join(facade, 'supabase/functions/command');
+  mkdirSync(command, { recursive: true });
+  // Deno keys modules by URL, even through symlinks. Forward runtime imports to
+  // the original URLs so opaque capabilities retain the command's WeakMap binding.
+  for (const path of [
+    'supabase/functions/_shared/hosted-seat-auth.ts',
+    'supabase/functions/_shared/database-options.ts',
+    'services/mcp-auth/src/postgres-adapter.js',
+  ]) {
+    const target = join(facade, path);
+    mkdirSync(resolve(target, '..'), { recursive: true });
+    writeFileSync(target, `export * from ${JSON.stringify(pathToFileURL(join(releaseRoot, path)).href)};\n`);
+  }
+  // The harness reads SQL through this path; it never imports a module from it.
+  symlinkSync(join(releaseRoot, 'deploy'), join(facade, 'deploy'));
+  const module = pathToFileURL(join(releaseRoot, 'supabase/functions/command/index.ts')).href;
+  writeFileSync(join(command, 'index.ts'), `
+export * from ${JSON.stringify(module)};
+import {db,handleHostedCommand as claim} from ${JSON.stringify(module)};
+export async function handleHostedCommand(input, capability) {
+  const body = input?.command?.kind === 'claim_hosted_seat'
+    ? {...input,command:{...input.command,intent:'new',lifetime:'durable'}} : input;
+  const result = await claim(body,capability);
+  if (result.status===200 && result.body.outcome==='created') {
+    const r=result.body;
+    await db.begin(async tx=>{
+      await tx\`SELECT set_config('role','swarm_command',true)\`;
+      await tx\`INSERT INTO swarm.hosted_mcp_seat_handles(handle,seat_id,grant_id,workspace_id,principal_id,created_at)
+        VALUES(\${r.handle},\${r.seat_id}::uuid,\${r.grant_id}::uuid,\${r.workspace_id}::uuid,\${r.principal_id}::uuid,\${new Date(r.created_at)})\`;
+    });
+  }
+  return result;
+}
+`);
+  return facade;
+}
+
+function assertSharedCapabilityRegistry(facade: string): void {
+  const commandUrl = pathToFileURL(join(releaseRoot, 'supabase/functions/command/index.ts'));
+  // Resolve exactly the auth URL used by the original command's relative import.
+  const commandAuthUrl = new URL('../_shared/hosted-seat-auth.ts', commandUrl).href;
+  const harnessAuthUrl = pathToFileURL(join(facade, 'supabase/functions/_shared/hosted-seat-auth.ts')).href;
+  const source = `
+    import assert from 'node:assert/strict';
+    import * as harnessAuth from ${JSON.stringify(harnessAuthUrl)};
+    import * as commandAuth from ${JSON.stringify(commandAuthUrl)};
+    const providerGrantId = 'hm37-registry-probe';
+    const capability = await harnessAuth.authenticateHostedGrantCapability(
+      async () => [{provider_grant_id: providerGrantId}],
+      {grantId: '00000000-0000-4000-8000-000000000001',
+       ownerUserId: '00000000-0000-4000-8000-000000000002',
+       workspaceId: '00000000-0000-4000-8000-000000000003',
+       providerGrantId, tool: 'claim_hosted_seat', providerStatus: async () => ({active: true})},
+    );
+    assert.ok(capability, 'HM37 registry probe could not construct its control capability');
+    const result = {
+      constructorRecognizes: harnessAuth.hostedCapabilityTool(capability),
+      commandModuleRecognizes: commandAuth.hostedCapabilityTool(capability),
+      sameGrantConstructor: harnessAuth.authenticateHostedGrantCapability === commandAuth.authenticateHostedGrantCapability,
+      sameSeatConstructor: harnessAuth.authenticateHostedSeatCapability === commandAuth.authenticateHostedSeatCapability,
+      forgedCapabilityRecognized: commandAuth.hostedCapabilityTool({kind: 'hosted_grant'}),
+    };
+    console.log(JSON.stringify(result));
+    assert.equal(result.commandModuleRecognizes, 'claim_hosted_seat',
+      'HM37 facade capability registry split: command auth does not recognize the harness capability');
+    assert.ok(result.sameGrantConstructor && result.sameSeatConstructor,
+      'HM37 facade must share the command auth constructors');
+    assert.equal(result.forgedCapabilityRecognized, null);
+  `;
+  execFileSync('deno', ['eval', '--no-lock', '--config', denoConfig, source], {
+    cwd: releaseRoot, encoding: 'utf8', timeout: 30_000,
+  });
+}
 
 before(async () => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), 'hm37-release-'));
+  roots.push(fixtureRoot);
+  fixtureReleaseRoot = legacyFixtureRelease(fixtureRoot);
+  assertSharedCapabilityRegistry(fixtureReleaseRoot);
   const status = JSON.parse(execFileSync("supabase", ["status", "-o", "json"], {
     encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
   })) as Partial<LocalEnvironment>;
@@ -71,6 +156,12 @@ before(async () => {
   const target = new URL(local.DB_URL);
   assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(target.hostname));
   sql = postgres(local.DB_URL, { prepare: false, max: 4 });
+  await sql.begin(async tx => {
+    await tx`SELECT pg_advisory_xact_lock(1936142700, hashtext('hosted-context-allocation'))`;
+    [priorAllocationGate] = await tx`SELECT value FROM swarm.config WHERE key='hosted_context_allocation_enabled'`;
+    assert.ok(priorAllocationGate, 'phase-1 allocation reserve exists');
+    await tx`UPDATE swarm.config SET value='true'::jsonb WHERE key='hosted_context_allocation_enabled'`;
+  });
   admin = createClient(local.API_URL, local.SERVICE_ROLE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
@@ -80,7 +171,15 @@ before(async () => {
 });
 
 after(async () => {
+  if (!sql) {
+    for (const root of roots) rmSync(root, { recursive: true, force: true });
+    return;
+  }
   await sql`ALTER ROLE commonswarm_oauth_runtime PASSWORD NULL`;
+  await sql.begin(async tx => {
+    await tx`SELECT pg_advisory_xact_lock(1936142700, hashtext('hosted-context-allocation'))`;
+    if (priorAllocationGate) await tx`UPDATE swarm.config SET value=${tx.json(priorAllocationGate.value as postgres.JSONValue)} WHERE key='hosted_context_allocation_enabled'`;
+  });
   await sql.end();
   for (const root of roots) rmSync(root, { recursive: true, force: true });
 });
@@ -156,9 +255,9 @@ function invoke(
 ): { status: number | null; stdout: string; stderr: string; output: HarnessOutput } {
   const args = [
     "run", "--no-lock", "--config", denoConfig,
-    "--allow-env", "--allow-net", `--allow-read=${releaseRoot},${value.root}`,
+    "--allow-env", "--allow-net", `--allow-read=${releaseRoot},${fixtureReleaseRoot},${value.root}`,
     `--allow-write=${value.journalDir}`, harness,
-    "--release-root", releaseRoot,
+    "--release-root", fixtureReleaseRoot,
     "--oauth-database-config-file", value.oauthFile,
   ];
   if (!options.omitSession) args.push("--human-session-file", value.sessionFile);

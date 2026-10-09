@@ -534,7 +534,7 @@ test("`reply` is addressed by in_reply_to and by nothing else", () => {
 test("`working-on` addresses nobody, because the server refuses a recipient on it", () => {
   /* A PER-VERB RULE, which the vocabulary comparison structurally cannot see: `to` IS a member of
    * SignalCommand, so naming it on any verb passes that check. The server refuses it for this one
-   * verb specifically — `supabase/functions/command/index.ts:1866` accepts a working-on signal
+   * verb specifically — `supabase/functions/command/index.ts` (the working-on validator) accepts a working-on signal
    * only when `to_user_id`, `to_agent_principal_id`, `in_reply_to` are all null and no recipient
    * list is present, with the comment "a working-on signal says what you are doing and is
    * addressed to nobody".

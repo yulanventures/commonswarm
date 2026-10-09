@@ -25,6 +25,64 @@ async function relocateIncomingSeatFk(tx: postgres.TransactionSql) {
     FOREIGN KEY (seat_id,grant_id,workspace_id,principal_id)
     REFERENCES swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,principal_id)`);
 }
+/** Reuse the proof's exact sets and predicates; emit catalog names only. */
+async function catalogDiagnostics(db: postgres.Sql, query: string) {
+  const aggregate = 'SELECT COALESCE((SELECT bool_and(ok) FROM checks),false) AS catalog_ok;';
+  assert.ok(query.includes(aggregate), 'diagnostics require the labelled proof aggregate');
+  const prefix = query.slice(0, query.indexOf(aggregate));
+  const sets = [
+    ['columns', 'expected_columns', 'actual_columns', "'hosted_agent_contexts.'||name"],
+    ['indexes', 'expected_indexes', 'actual_indexes', "substring(definition FROM 'INDEX ([^ ]+)')"],
+    ['table_acl', 'expected_table_acl', 'actual_table_acl', "tab||':'||pg_get_userbyid(grantor)||':'||CASE WHEN grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(grantee) END||':'||privilege||CASE WHEN is_grantable THEN ':WITH GRANT OPTION' ELSE '' END"],
+    ['function_acl', 'expected_function_acl', 'actual_function_acl', "'hosted_predecessor_status:'||pg_get_userbyid(grantor)||':'||CASE WHEN grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(grantee) END||':'||privilege||CASE WHEN is_grantable THEN ':WITH GRANT OPTION' ELSE '' END"],
+    ['original_columns_defaults', 'original_expected', 'original_actual', "tab||'.'||name"],
+    ['incoming_fks', 'incoming_expected', 'incoming_actual', 'tab'],
+  ];
+  const rows = [];
+  for (const [comparison, expected, actual, member] of sets) {
+    // The full tuples decide equality, including types/defaults/ACL grantors.
+    // Only identifiers are projected out of the missing/extra tuples.
+    const [row] = await db.unsafe(`${prefix}
+      SELECT '${comparison}' AS comparison,
+        ARRAY(SELECT ${member} FROM (SELECT * FROM ${expected} EXCEPT ALL SELECT * FROM ${actual}) missing ORDER BY 1) AS missing,
+        ARRAY(SELECT ${member} FROM (SELECT * FROM ${actual} EXCEPT ALL SELECT * FROM ${expected}) extra ORDER BY 1) AS extra`);
+    rows.push(row);
+  }
+  // The named constraint comparison also checks options and exact definitions.
+  rows.push(...await db.unsafe(`${prefix}
+    SELECT 'named_constraints' AS comparison,
+      ARRAY(SELECT tab||'.'||name FROM constraint_diff ORDER BY tab,name) AS missing,
+      ARRAY(SELECT d.tab||'.'||d.name FROM constraint_diff d JOIN pg_constraint c
+        ON c.conrelid=to_regclass('swarm.'||d.tab) AND c.conname=d.name ORDER BY d.tab,d.name) AS extra`));
+  rows.push(...await db.unsafe(`${prefix}
+    SELECT 'original_constraints' AS comparison,
+      ARRAY(SELECT d.tab FROM original_constraints_diff d JOIN original_constraints e USING(tab,definition) ORDER BY 1) AS missing,
+      ARRAY(SELECT d.tab FROM original_constraints_diff d JOIN original_constraints_actual a USING(tab,definition) ORDER BY 1) AS extra`));
+  rows.push(...await db.unsafe(`${prefix}
+    SELECT 'context_constraint_names' AS comparison,
+      ARRAY(SELECT name FROM (SELECT name FROM expected_constraints WHERE tab='hosted_agent_contexts'
+        UNION SELECT 'hosted_agent_contexts_clocks_check') e
+        WHERE NOT EXISTS(SELECT 1 FROM pg_constraint c WHERE c.conrelid=to_regclass('swarm.hosted_agent_contexts') AND c.conname=e.name) ORDER BY 1) AS missing,
+      ARRAY(SELECT conname::text FROM pg_constraint c WHERE c.conrelid=to_regclass('swarm.hosted_agent_contexts')
+        AND c.conname<>'hosted_agent_contexts_clocks_check'
+        AND NOT EXISTS(SELECT 1 FROM expected_constraints e WHERE e.tab='hosted_agent_contexts' AND e.name=c.conname) ORDER BY 1) AS extra`));
+  rows.push(...await db.unsafe(`${prefix}
+    SELECT 'context_defaults' AS comparison, ARRAY[]::text[] AS missing,
+      ARRAY(SELECT a.attname::text FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid=d.adrelid AND a.attnum=d.adnum
+        WHERE d.adrelid=to_regclass('swarm.hosted_agent_contexts') ORDER BY 1) AS extra`));
+  rows.push(...await db.unsafe(`${prefix}
+    SELECT 'column_acl' AS comparison, ARRAY[]::text[] AS missing,
+      ARRAY(SELECT c.relname||'.'||a.attname||':'||CASE WHEN acl.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END||':'||acl.privilege_type
+        FROM proof_tables t JOIN pg_class c ON c.oid=to_regclass('swarm.'||t.tab)
+        JOIN pg_attribute a ON a.attrelid=c.oid CROSS JOIN LATERAL aclexplode(a.attacl) acl
+        WHERE a.attnum>0 AND NOT a.attisdropped ORDER BY 1) AS extra`));
+  // Every remaining scalar predicate has a stable catalog label, including
+  // ownership, RLS, column ACLs, clocks and the complete function/ACL contract.
+  rows.push(...await db.unsafe(`${prefix}
+    SELECT name AS comparison, CASE WHEN ok THEN ARRAY[]::text[] ELSE ARRAY[name] END AS missing,
+      ARRAY[]::text[] AS extra FROM checks ORDER BY name`));
+  console.error('SID_CATALOG_DIAGNOSTICS '+JSON.stringify(rows));
+}
 const harness = `
 const config=JSON.parse(await new Response(Deno.stdin.readable).text());
 Deno.env.set('SWARM_ENV','test');Deno.env.set('SWARM_DATABASE_URL',config.local.DB_URL);
@@ -50,6 +108,28 @@ async function count(w){return (await db\x60SELECT count(*)::int AS n FROM swarm
 try {
 const w=await space(),g=await grant([w]);
 check((await claim(g,w)).body.error==='identity_allocation_disabled','false gate refuses new');
+// Exercise the real command while the reviewed rollback owns the exclusive gate.
+// A removed shared lock would finish early and fail the waiting-lock control.
+await db\x60UPDATE swarm.config SET value='true'::jsonb WHERE key='hosted_context_allocation_enabled'\x60;
+let pendingClaim;
+await db.begin(async tx=>{
+  await tx.unsafe(${JSON.stringify(repoSql('deploy/release-proofs/session-identity/20261006000003-allocation-rollback.sql'))});
+  pendingClaim=claim(g,w);
+  const deadline=performance.now()+2000;let waiting=false;
+  while(performance.now()<deadline){
+    const [lock]=await tx\x60SELECT EXISTS(SELECT 1 FROM pg_locks
+      WHERE locktype='advisory' AND classid=1936142700::oid
+        AND objid=hashtext('hosted-context-allocation')::oid AND objsubid=2
+        AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
+        AND mode='ShareLock' AND NOT granted) AS waiting\x60;
+    if(lock.waiting){waiting=true;break;}
+    await new Promise(resolve=>setTimeout(resolve,10));
+  }
+  check(waiting,'real allocation waits for rollback gate');
+  check((await tx\x60SELECT count(*)::int AS n FROM swarm.hosted_agent_contexts\x60)[0].n===0,'blocked allocation persists no contexts');
+});
+check((await pendingClaim).body.error==='identity_allocation_disabled','rollback commit refuses waiting allocation');
+
 await db\x60UPDATE swarm.config SET value='{}'::jsonb WHERE key='hosted_context_allocation_enabled'\x60;
 check((await claim(g,w)).body.error==='identity_allocation_disabled','malformed gate refuses new');
 await db\x60DELETE FROM swarm.config WHERE key='hosted_context_allocation_enabled'\x60;
@@ -205,6 +285,7 @@ test('hosted allocation, replay, Q1/Q3 and hosted/local last-slot races commit c
     await isolated.db`INSERT INTO swarm.config(key,value) VALUES('min_client_version','"0.1.0"') ON CONFLICT(key) DO UPDATE SET value=excluded.value`;
     const catalogQuery=releaseCatalogQuery(repoSql('deploy/release-proofs/session-identity/20261006000003-catalog.sql'),'catalog_ok');
     const [catalog]=await isolated.db.unsafe(catalogQuery);
+    if (catalog?.catalog_ok !== true) await catalogDiagnostics(isolated.db, catalogQuery);
     assert.equal(catalog!.catalog_ok,true,'exact source-built reserve catalog');
     // Baseline column/FK inventory and complete privilege sets: every mutation
     // runs inside a rolled-back transaction, then checks the restored catalog.

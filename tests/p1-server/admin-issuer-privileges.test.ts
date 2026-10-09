@@ -17,6 +17,8 @@ const allowlist = JSON.parse(readFileSync(new URL('../support/admin-issuer-privi
 // SELECT/INSERT (AM7). These fifteen command-parent grants are intentional;
 // swarm_admin retains ownership and history mutation remains forbidden.
 // The human overview/predicate add no issuer or PUBLIC grants.
+// Phase 1 adds context SELECT/INSERT/UPDATE and bounded predecessor EXECUTE.
+// Each literal ACL records its purpose; swarm_admin owns both new objects.
 const literal = JSON.stringify(allowlist.map((entry: unknown[]) => entry.slice(0, 5))).replaceAll("'", "''");
 // Enumerate explicit ACLs across the whole database, not a selected set of known
 // tables. The saved schemas belong to runSql's rollback-only isolation fixture.

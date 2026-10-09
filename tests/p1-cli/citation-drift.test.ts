@@ -109,7 +109,7 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "site/src/lib/agent-connect.ts (mintedHorizon)",
     file: "supabase/functions/command/index.ts",
-    lines: [12590, 12590],
+    lines: [12593, 12593],
     contains: "horizon_expires_at: prepared.command.renewal_horizon_ms === null",
   },
   {
@@ -130,7 +130,7 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "site/src/lib/agent-connect.ts (the agent scope check)",
     file: "supabase/functions/command/index.ts",
-    lines: [10942, 10942],
+    lines: [10945, 10945],
     contains: "!auth.agent.scopes.includes(validation.command.kind)",
   },
   {

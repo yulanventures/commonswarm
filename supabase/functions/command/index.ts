@@ -10161,6 +10161,9 @@ async function claimHostedSeat(
   }
   return await db.begin(HOSTED_TRANSACTION_ISOLATION, async (tx) => {
     await setTransaction(tx);
+    // A global rollback would need every workspace stream row to fence allocation.
+    // Take this gate before table/stream locks; rollback takes it first too, with no reverse order.
+    await tx`SELECT pg_advisory_xact_lock_shared(1936142700, hashtext('hosted-context-allocation'))`;
     let resolved = await revalidateHostedGrantCommand(tx, capability);
     if (!resolved || resolved.workspace_id !== input.workspace_id) return { status: 403, body: { error: "identity_resume_unavailable", message: hostedContextErrorMessage("identity_resume_unavailable", false), can_start_new: false } };
     const route: Route = { workspaceId: resolved.workspace_id, streamId: resolved.stream_id, membershipRole: null, membershipRevokedAt: null };
@@ -10239,7 +10242,7 @@ async function claimHostedSeat(
         idle_expires_at: c.idle_expires_at?.toISOString() ?? null, absolute_expires_at: c.absolute_expires_at?.toISOString() ?? null,
         seat: input.command.seat, handle: input.command.seat, outcome: "continued", original_outcome: "continued", name_adjusted: false, adjustment_reason: null, assurance: "portable" } };
     }
-    const [configuration] = await tx<{ value: unknown }[]>`SELECT value FROM swarm.config WHERE key='hosted_context_allocation_enabled' FOR SHARE`;
+    const [configuration] = await tx<{ value: unknown }[]>`SELECT value FROM swarm.config WHERE key='hosted_context_allocation_enabled'`;
     if (configuration?.value !== true) return failure("identity_allocation_disabled", false);
     const seats = await tx<{
       seat_id: string; principal_id: string; grant_id: string; owner_user_id: string; client_id: string;
