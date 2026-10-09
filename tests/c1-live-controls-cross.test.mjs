@@ -15,9 +15,8 @@ import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { readFile, writeFile, chmod, mkdir, stat, lstat, mkdtemp, rm } from 'node:fs/promises';
-import { ORDINARY_TOOLS } from '../scripts/live-ordinary-controls.mjs';
 
-import { baselineEdgeSha, releaseSha, catalogAt } from './support/live-edge-catalog.mjs';
+import { baselineEdgeSha, releaseSha } from './support/live-edge-catalog.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const script = join(repo, 'scripts/live-ordinary-controls.mjs');
@@ -41,8 +40,14 @@ const issuer = 'https://mcp.commonswarm.com', api = 'https://api.commonswarm.com
 const client = 'https://yulanventures.com/oauth/c1-controls/client.json';
 const redirect = 'https://c1-controls.invalid/callback', resource = `${issuer}/mcp`;
 const release = releaseSha, scope = 'openid offline_access mcp';
-const baselineTools = (await catalogAt(baselineEdgeSha, ORDINARY_TOOLS)).names;
-const releaseTools = (await catalogAt(releaseSha, ORDINARY_TOOLS)).names;
+// Independent historical wire inventories, matching live-ordinary-controls.test.mjs:
+// b0cbaef5 has eight core tools; 1388b0ee adds fifteen non-file household tools.
+// Neither SHA has close_session. Today's core inventory cannot seed these fixtures.
+const baselineTools = ['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on'];
+const releaseTools = [...baselineTools,
+  'object_list', 'object_read', 'object_history', 'object_create', 'object_update',
+  'todo_list', 'todo_read', 'todo_queue', 'comment_list', 'todo_create', 'todo_comment',
+  'todo_update', 'todo_assign', 'todo_start', 'todo_set_state'];
 const windowId = 'ABC123';
 const hash = b => createHash('sha256').update(b).digest('hex');
 const b64hash = b => createHash('sha256').update(b).digest('base64url');
