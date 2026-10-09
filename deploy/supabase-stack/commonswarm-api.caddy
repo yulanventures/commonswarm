@@ -66,12 +66,12 @@ api.commonswarm.com {
 			handle @signed_upload {
 				@upload_preflight {
 					method OPTIONS
-					expression `{http.request.header.Origin} in ["https://commonswarm.com", "https://www.commonswarm.com"]`
+					expression `{http.request.header.Origin} in ["https://commonswarm.com", "https://www.commonswarm.com", "https://site-staging.commonswarm.com"]`
 					header Access-Control-Request-Method PUT
 				}
 				@upload_put {
 					method PUT
-					expression `{http.request.header.Origin} in ["https://commonswarm.com", "https://www.commonswarm.com"]`
+					expression `{http.request.header.Origin} in ["https://commonswarm.com", "https://www.commonswarm.com", "https://site-staging.commonswarm.com"]`
 				}
 				# Overwrite at response time to avoid duplicate upstream values.
 				# Vary also covers denied/no-Origin responses for shared caches.

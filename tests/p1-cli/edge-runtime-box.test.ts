@@ -778,7 +778,15 @@ test("Caddy keeps function parity and uses an HTTP/1.1 realtime upstream", async
   );
   assert.match(
     liveApi,
-    /handle \/storage\/v1\/\* \{\s*uri strip_prefix \/storage\/v1\s*reverse_proxy 127\.0\.0\.1:18004/,
+    /handle \/storage\/v1\/\* \{\s*route \{/,
+  );
+  assert.match(
+    liveApi,
+    /uri strip_prefix \/storage\/v1\s*reverse_proxy 127\.0\.0\.1:18004 \{\s*(?:#[^\n]*\n\s*)*header_down -Access-Control-\*\s*\}/,
+  );
+  assert.match(
+    liveApi,
+    /handle \{\s*uri strip_prefix \/storage\/v1\s*reverse_proxy 127\.0\.0\.1:18004\s*\}/,
   );
   assert.match(
     liveApi,

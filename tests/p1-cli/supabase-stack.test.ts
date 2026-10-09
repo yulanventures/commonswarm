@@ -717,6 +717,8 @@ function routeFrame(source: string): string[] {
     "handle /auth/v1/* {",
     "handle /rest/v1/* {",
     "handle /storage/v1/* {",
+    "route {",
+    "handle @signed_upload {",
     "@supabase_realtime path /realtime/v1 /realtime/v1/*",
     "handle @supabase_realtime {",
     "handle {",
@@ -745,6 +747,24 @@ function maintenanceProblems(publicSite: string, stagingSite: string): string[] 
 }
 
 test("live and maintenance Caddy files keep the box route frame", () => {
+  assert.deepEqual(routeFrame(apiCaddy), [
+    "@edge_functions path /functions/v1 /functions/v1/*",
+    "handle @edge_functions {",
+    "header_up X-Forwarded-For {http.request.client_ip}",
+    "response_header_timeout 165s",
+    "handle_errors {",
+    "@edge_function_error path /functions/v1 /functions/v1/*",
+    'header Access-Control-Allow-Origin "*"',
+    "handle /auth/v1/* {",
+    "handle /rest/v1/* {",
+    "handle /storage/v1/* {",
+    "route {",
+    "handle @signed_upload {",
+    "handle {",
+    "@supabase_realtime path /realtime/v1 /realtime/v1/*",
+    "handle @supabase_realtime {",
+    "handle {",
+  ]);
   assert.deepEqual(routeFrame(apiCaddy), routeFrame(edgeStagingCaddy));
   assert.deepEqual(routeFrame(apiCaddy), routeFrame(edgeStagingMaintenanceCaddy));
   for (const [name, source] of [
@@ -1031,6 +1051,30 @@ function syntheticLivePair(): JsonObject {
             transport: { versions: ["1.1"] },
             flush_interval: -1,
             headers: { request: { set: { Host: ["realtime-dev"] } } },
+          },
+          {
+            handler: "headers",
+            response: {
+              deferred: true,
+              set: { "Access-Control-Allow-Origin": ["{http.request.header.Origin}"] },
+            },
+          },
+          {
+            handler: "headers",
+            response: {
+              deferred: true,
+              set: {
+                "Access-Control-Allow-Headers": ["content-type"],
+                "Access-Control-Allow-Methods": ["PUT, OPTIONS"],
+                "Access-Control-Allow-Origin": ["{http.request.header.Origin}"],
+                "Access-Control-Max-Age": ["600"],
+              },
+            },
+          },
+          {
+            handler: "reverse_proxy",
+            upstreams: [{ dial: "127.0.0.1:18004" }],
+            headers: { response: { delete: ["Access-Control-*"] } },
           },
           { handler: "reverse_proxy", upstreams: [{ dial: "127.0.0.1:18004" }] },
           {

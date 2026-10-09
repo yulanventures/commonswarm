@@ -68,6 +68,7 @@ const localDials = [
   "127.0.0.1:18002",
   "127.0.0.1:18003",
   "127.0.0.1:18004",
+  "127.0.0.1:18004",
   "127.0.0.1:9000",
 ];
 const apiHosts = [
@@ -132,7 +133,34 @@ function routeHosts(route) {
 function assertLiveSite(server, host, site = siteSubroute(server, host)) {
   assert.deepEqual(proxyDials(site).sort(), localDials, `${host} route dials`);
   assertProxyDetails(proxiesIn(site));
-  assert.equal(originHeaders(site).length, 0, `${host} route CORS`);
+  const storageProxies = proxiesIn(site).filter((proxy) =>
+    proxy.upstreams?.[0]?.dial === "127.0.0.1:18004"
+  );
+  assert.deepEqual(
+    storageProxies[0].headers?.response?.delete,
+    ["Access-Control-*"],
+    `${host} signed upload upstream CORS deletion`,
+  );
+  assert.equal(
+    storageProxies[1].headers?.response,
+    undefined,
+    `${host} fallback Storage upstream CORS unchanged`,
+  );
+  assert.deepEqual(originHeaders(site).map((handler) => handler.response), [
+    {
+      deferred: true,
+      set: { "Access-Control-Allow-Origin": ["{http.request.header.Origin}"] },
+    },
+    {
+      deferred: true,
+      set: {
+        "Access-Control-Allow-Headers": ["content-type"],
+        "Access-Control-Allow-Methods": ["PUT, OPTIONS"],
+        "Access-Control-Allow-Origin": ["{http.request.header.Origin}"],
+        "Access-Control-Max-Age": ["600"],
+      },
+    },
+  ], `${host} route CORS`);
   assertErrorCors(server, host);
 }
 
