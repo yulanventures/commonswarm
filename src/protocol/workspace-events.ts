@@ -96,6 +96,7 @@ export interface WorkspaceInvitation {
 }
 
 export interface WorkspacePrincipal {
+  identity_lifetime?: 'durable' | 'ephemeral';
   principal_id: string;
   owner_user_id: string;
   name: string;
@@ -248,6 +249,7 @@ export interface AgentTokenRevoked {
 }
 
 export interface HostedMcpSeatClaimed {
+  identity_lifetime?: 'durable' | 'ephemeral';
   seat_id: string;
   grant_id: string;
   workspace_id: string;

@@ -33,6 +33,23 @@ export interface AdminWorkerDelivery {
 const date = (n: number | null) => n === null ? null : new Date(n);
 const json = (tx: Sql, value: unknown) => tx.json(value as postgres.JSONValue);
 
+/** Caller owns its existing locks; this definition is shared by all issuance paths. */
+export async function countLiveDurablePrincipals(tx: Sql, workspaceId: string): Promise<number> {
+  const [row] = await tx<{ live: string }[]>`
+    SELECT count(*)::text AS live
+    FROM swarm.agent_principals AS p
+    WHERE p.workspace_id = ${workspaceId}::uuid
+      AND p.revoked_at IS NULL
+      AND p.identity_lifetime = 'durable'
+      AND NOT EXISTS (
+        SELECT 1 FROM swarm.agent_join_credentials AS c
+        WHERE c.registrar_principal_id = p.principal_id
+          AND (c.revoked_at IS NOT NULL OR c.expires_at <= statement_timestamp())
+      )
+  `;
+  return Number(row?.live ?? '0');
+}
+
 /** All facts are read under the same grant/account and workspace locks as the write. */
 export async function prepareAdminRoutine(
   tx: Sql,
@@ -92,6 +109,7 @@ export async function prepareAdminRoutine(
           name: String(p.name),
           model: p.model as string | null,
           transport: p.transport as "local" | "hosted_mcp",
+          identity_lifetime: p.identity_lifetime === 'ephemeral' ? 'ephemeral' : 'durable',
           turn_only: p.turn_only === true,
           created_at: stamp(p.created_at)!,
           revoked_at: stamp(p.revoked_at),
@@ -130,9 +148,7 @@ export async function prepareAdminRoutine(
   )}) + (SELECT count(*) FROM swarm.admin_routine_invitations WHERE owner_user_id=${owner}::uuid AND created_at > ${new Date(
     ctx.now - 86400000,
   )}))::text AS n`;
-  const [principals] = await tx<
-    { n: string }[]
-  >`SELECT count(*)::text AS n FROM swarm.agent_principals WHERE workspace_id=${command.workspace_id}::uuid AND revoked_at IS NULL`;
+  const livePrincipals = await countLiveDurablePrincipals(tx, command.workspace_id);
   const [members] = await tx<
     { n: string }[]
   >`SELECT ((SELECT count(*) FROM swarm.memberships WHERE workspace_id=${command.workspace_id}::uuid AND revoked_at IS NULL) + (SELECT count(*) FROM swarm.invitations WHERE workspace_id=${command.workspace_id}::uuid AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at>${
@@ -260,7 +276,7 @@ export async function prepareAdminRoutine(
     owned_workspaces: Number(owned!.n),
     workspace_creations_last_day: Number(created!.n),
     invitations_last_day: Number(invites!.n),
-    live_principals: Number(principals!.n),
+    live_principals: livePrincipals,
     live_members_and_invitations: Number(members!.n),
     live_agent_invitations_person: Number(joins!.mine) +
       Number(routineJoins!.mine),

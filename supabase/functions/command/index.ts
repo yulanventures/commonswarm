@@ -2,7 +2,8 @@ import { humanInvitationTransaction } from './household-invitations.ts';
 import { parseHouseholdAttachment, HouseholdAttachmentError } from "./household-attachments.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
 import postgres from "npm:postgres@3.4.9";
-import type { HostedCommandInput, CommandResult } from "./contract.d.ts";
+import type { HostedCommandInput, CommandResult, HostedContextClaimFields as HostedContextClaim } from "./contract.d.ts";
+import { countLiveDurablePrincipals } from "./admin-routine.ts";
 import { commandRequiredConfig } from "./required-config.ts";
 import {
   adminTransaction, adminDigest, recordAdminFailure,
@@ -169,6 +170,8 @@ import {
   requestHash,
   SCHEMA_VERSION,
   decideHostedAuthority, decideHostedCheck,
+  decideHostedContextAllocation, hostedContextClaimValid, hostedContextLive, hostedSuffixName, hostedContextErrorMessage,
+  HOSTED_MCP_RESOURCE,
   HOSTED_CHECK_BATCH_LIMIT, hostedCheckMillisecondTimestamp, hostedSeatNameValid,
   HOSTED_MCP_SEAT_LIMIT,
   HOSTED_SEAT_NAME_TAKEN,
@@ -191,6 +194,8 @@ interface Actor {
   agent_principal: string | null;
   run: string | null;
 }
+
+type HostedContextKind = NonNullable<HostedContextClaim["kind"]>;
 
 type Command =
   | { kind: "create"; task_id: string; slug: string }
@@ -412,6 +417,7 @@ interface WorkspaceState {
     model: string | null;
     transport: "local" | "hosted_mcp";
     turn_only: boolean;
+    identity_lifetime?: 'durable' | 'ephemeral';
     created_at: number;
     revoked_at: number | null;
   }>;
@@ -3490,6 +3496,7 @@ async function loadWorkspaceState(
       model: row.model === null ? null : String(row.model),
       transport: row.transport as "local" | "hosted_mcp",
       turn_only: row.turn_only === true,
+      identity_lifetime: row.identity_lifetime === 'ephemeral' ? 'ephemeral' : 'durable',
       created_at: millis(row.created_at) ?? 0,
       revoked_at: millis(row.revoked_at),
     };
@@ -5897,7 +5904,8 @@ type RevokeAgentJoinCredentialCommand = Extract<
 /**
  * Lock the workspace's principal ceiling, then count the principals that consume it.
  *
- * ONE HELPER FOR EVERY CEILING CHECK, so the join mint and create_agent_principal cannot drift. Two
+ * All issuance paths use countLiveDurablePrincipals; this wrapper adds the
+ * existing ceiling lock for hosted/local issuance. Two
  * review findings live here:
  *  - EXPIRED REGISTRARS NEVER FREED THEIR SLOT. A registrar is revoked only when its credential is
  *    explicitly revoked. A credential that simply expired left its registrar live forever, counted
@@ -5909,6 +5917,11 @@ type RevokeAgentJoinCredentialCommand = Extract<
  *    check; it is released at commit or rollback. Lock order is ceiling first, then any per-name
  *    lock, everywhere, so the two cannot deadlock.
  */
+// Pre-existing cycle: admin-delegation.ts:195 locks owner FOR UPDATE;
+// admin-routine.ts:63/65/69 then locks owner -> workspace -> stream. Local and
+// hosted issuance lock stream -> ceiling -> name and later need FK KEY SHARE
+// on owner/workspace. Admin issuance is CLOSED in production; C1 build B must
+// fix that cycle before opening it. Its admin races are a required deferred gate.
 async function lockAndCountLivePrincipals(tx: Sql, workspaceId: string): Promise<number> {
   await tx`
     SELECT pg_advisory_xact_lock(
@@ -5916,19 +5929,7 @@ async function lockAndCountLivePrincipals(tx: Sql, workspaceId: string): Promise
       hashtext('principal-ceiling')
     )
   `;
-  const rows = await tx<{ live: string }[]>`
-    SELECT count(*)::text AS live
-    FROM swarm.agent_principals AS p
-    WHERE p.workspace_id = ${workspaceId}::uuid
-      AND p.revoked_at IS NULL
-      AND NOT EXISTS (
-        SELECT 1
-        FROM swarm.agent_join_credentials AS c
-        WHERE c.registrar_principal_id = p.principal_id
-          AND (c.revoked_at IS NOT NULL OR c.expires_at <= statement_timestamp())
-      )
-  `;
-  return Number(rows[0]?.live ?? "0");
+  return await countLiveDurablePrincipals(tx, workspaceId);
 }
 
 /** Lock order is stream -> principal ceiling -> exact name -> hosted grant. */
@@ -8164,7 +8165,7 @@ async function resumeRenewalGrant(
    * was told 403; a retry then answered `renewal_grant_not_suspended`, because the resume it
    * had denied had in fact happened.
    *
-   * Same shape as the renewal preflight read at index.ts:3987 (`preflight[0]?.code ?? null`):
+   * Same shape as the renewal preflight read at index.ts:3994 (`preflight[0]?.code ?? null`):
    * preserve NULL, refuse only on a code we assign.
    *
    * WHY A REFUSAL BELOW STILL COMMITS, DELIBERATELY. `refuse` must commit — its whole job is
@@ -9598,7 +9599,7 @@ interface HostedSeatClaimInput extends RequestBody {
   command_id: string;
   workspace_id: string;
   stream: { kind: "workspace" };
-  command: { kind: "claim_hosted_seat"; name: string };
+  command: { kind: "claim_hosted_seat"; context_kind?: HostedContextKind } & Omit<HostedContextClaim, "kind">;
 }
 
 export type { HostedCommandInput, CommandResult } from "./contract.d.ts";
@@ -9628,9 +9629,9 @@ function hostedClaimInput(value: RequestBody): HostedSeatClaimInput | null {
     typeof value.command_id !== "string" || !COMMAND_ID_RE.test(value.command_id) ||
     typeof value.workspace_id !== "string" || !UUID_RE.test(value.workspace_id) ||
     !stream || !exactKeys(stream, ["kind"]) || stream.kind !== "workspace" ||
-    !command || !exactKeys(command, ["kind", "name"]) ||
+    !command || Object.keys(command).some(key => !["kind", "name", "intent", "seat", "lifetime", "context_kind", "parent_context"].includes(key)) ||
     command.kind !== "claim_hosted_seat" ||
-    !hostedSeatNameValid(command.name)
+    !hostedContextClaimValid({ ...command, kind: command.context_kind } as HostedContextClaim)
   ) return null;
   return value as HostedSeatClaimInput;
 }
@@ -9798,6 +9799,7 @@ function hostedProjectionBefore(grant: HostedGrantRow, seat: ReturnType<typeof r
       workspace_id: String(seat.workspace_id),
       owner_user_id: String(seat.owner_user_id),
       name: String(seat.name),
+      identity_lifetime: seat.identity_lifetime === 'ephemeral' ? 'ephemeral' : 'durable',
       transport: "hosted_mcp" as const,
       turn_only: true as const,
       created_at: Number(seat.created_at),
@@ -9931,12 +9933,13 @@ async function handleHostedManagement(
       principal_id: string; name: string; handle: string; created_at: Date;
       revoked_at: Date | null; handle_revoked_at: Date | null;
       principal_revoked_at: Date | null; transport: "local" | "hosted_mcp";
+      identity_lifetime: 'durable' | 'ephemeral';
       turn_only: boolean;
     }[]>`
       SELECT hs.seat_id, hs.grant_id, hs.workspace_id, hs.owner_user_id,
              hs.principal_id, hs.name, hs.created_at, hs.revoked_at,
              h.handle, h.revoked_at AS handle_revoked_at,
-             p.revoked_at AS principal_revoked_at, p.transport, p.turn_only
+             p.revoked_at AS principal_revoked_at, p.transport, p.turn_only, p.identity_lifetime
       FROM swarm.hosted_mcp_seats AS hs
       JOIN swarm.hosted_mcp_seat_handles AS h ON h.seat_id = hs.seat_id
       JOIN swarm.agent_principals AS p ON p.principal_id = hs.principal_id
@@ -10159,387 +10162,238 @@ async function claimHostedSeat(
   return await db.begin(HOSTED_TRANSACTION_ISOLATION, async (tx) => {
     await setTransaction(tx);
     let resolved = await revalidateHostedGrantCommand(tx, capability);
-    if (resolved === null || resolved.workspace_id !== input.workspace_id) {
-      return { status: 403, body: { error: "forbidden" } };
-    }
-    const route: Route = {
-      workspaceId: resolved.workspace_id,
-      streamId: resolved.stream_id,
-      membershipRole: null,
-      membershipRevokedAt: null,
-    };
+    if (!resolved || resolved.workspace_id !== input.workspace_id) return { status: 403, body: { error: "identity_resume_unavailable", message: hostedContextErrorMessage("identity_resume_unavailable", false), can_start_new: false } };
+    const route: Route = { workspaceId: resolved.workspace_id, streamId: resolved.stream_id, membershipRole: null, membershipRevokedAt: null };
+    const [workspace] = await tx<{ name: string }[]>`SELECT name FROM swarm.workspaces WHERE workspace_id=${route.workspaceId}::uuid`;
+    if (!workspace) return { status: 403, body: { error: "workspace_unavailable", message: hostedContextErrorMessage("workspace_unavailable"), can_start_new: false } };
     const frame = await lockRegistrationStream(tx, route);
     const livePrincipals = await lockAndCountLivePrincipals(tx, route.workspaceId);
-    await lockPrincipalName(tx, route, input.command);
-
-    const lockedGrantRows = await tx<{
-      grant_id: string;
-      owner_user_id: string;
-      home_workspace_id: string;
-      provider_grant_id: string;
-      client_id: string;
-      resource: string;
-      interaction_ref: string;
-      owner_is_live_member: boolean;
-      workspace_archived: boolean;
-      workspace_consented: boolean;
-      state: "pending" | "active" | "revoked";
-      manifest_digest: Uint8Array;
-      selected_workspace_ids: string[];
-    }[]>`
-      SELECT grant_id, owner_user_id, home_workspace_id, provider_grant_id,
-             client_id, resource, interaction_ref,
-             state, manifest_digest, selected_workspace_ids,
-             EXISTS (
-               SELECT 1 FROM swarm.memberships AS m
-               WHERE m.workspace_id = ${route.workspaceId}::uuid
-                 AND m.user_id = hosted_mcp_grants.owner_user_id
-                 AND m.revoked_at IS NULL
-             ) AS owner_is_live_member,
-             EXISTS (
-               SELECT 1 FROM swarm.workspaces AS w
-               WHERE w.workspace_id = ${route.workspaceId}::uuid
-                 AND w.archived_at IS NOT NULL
-             ) AS workspace_archived,
-             EXISTS (
-               SELECT 1 FROM swarm.hosted_mcp_grant_workspaces AS c
-               WHERE c.grant_id = hosted_mcp_grants.grant_id
-                 AND c.workspace_id = ${route.workspaceId}::uuid
-                 AND c.revoked_at IS NULL
-             ) AS workspace_consented
-      FROM swarm.hosted_mcp_grants
-      WHERE grant_id = ${resolved.grant_id}::uuid
-      FOR UPDATE
+    const base = input.command.name ?? "Agent"; // No authenticated registered-app label mapping exists here.
+    const suffix = () => Array.from(crypto.getRandomValues(new Uint8Array(4)), b => "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"[b & 31]).join("");
+    const candidates = [base, ...Array.from({ length: 5 }, () => hostedSuffixName(base, suffix()))];
+    // Ceiling serializes local/hosted issuance; names are also taken in byte order.
+    for (const name of [...new Set(candidates)].sort()) await lockPrincipalName(tx, route, { name });
+    // Advisory only: do not take the owner row FOR UPDATE after a stream lock.
+    // This owner-wide budget lock never waits for a second workspace stream.
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${resolved.owner_user_id}::text, 1936142699))`;
+    const related = await tx<{ grant_id: string }[]>`
+      SELECT DISTINCT hs.grant_id FROM swarm.hosted_mcp_seats hs
+      WHERE hs.workspace_id=${route.workspaceId}::uuid AND hs.name=ANY(${candidates}::text[])
+      UNION SELECT ${resolved.grant_id}::uuid AS grant_id
+      ORDER BY grant_id
     `;
-    const grant = lockedGrantRows[0];
+    for (const row of related) await tx`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=${row.grant_id}::uuid FOR UPDATE`;
     resolved = await revalidateHostedGrantCommand(tx, capability);
-    if (grant === undefined || resolved === null ||
-        resolved.workspace_id !== route.workspaceId ||
-        grant.provider_grant_id !== resolved.provider_grant_id) {
-      return { status: 403, body: { error: "forbidden" } };
-    }
-
+    if (!resolved) return { status: 403, body: { error: "identity_resume_unavailable", message: hostedContextErrorMessage("identity_resume_unavailable", false), can_start_new: false } };
+    const [grant] = await tx<{ grant_id: string; owner_user_id: string; client_id: string }[]>`
+      SELECT grant_id, owner_user_id, client_id FROM swarm.hosted_mcp_grants WHERE grant_id=${resolved.grant_id}::uuid
+    `;
+    if (!grant) return { status: 403, body: { error: "identity_resume_unavailable", message: hostedContextErrorMessage("identity_resume_unavailable", false), can_start_new: false } };
+    const [clock] = await tx<{ now: Date }[]>`SELECT clock_timestamp() AS now`;
+    const now = clock!.now.getTime();
     const hash = await hostedRequestHash("hosted_grant", grant.grant_id, input);
-    const storedRows = await tx<{
-      workspace_id: string;
-      stream_id: string;
-      request_hash: string;
-      response: unknown;
-    }[]>`
-      SELECT workspace_id, stream_id, request_hash, response
-      FROM swarm.idempotency_keys
-      WHERE principal_kind = 'hosted_grant'
-        AND principal_id = ${grant.grant_id}
-        AND command_id = ${input.command_id}
-      LIMIT 1
+    const [stored] = await tx<{ request_hash: string; workspace_id: string; stream_id: string; response: unknown }[]>`
+      SELECT request_hash, workspace_id, stream_id, response FROM swarm.idempotency_keys
+      WHERE principal_kind='hosted_grant' AND principal_id=${grant.grant_id} AND command_id=${input.command_id}
     `;
-    const stored = storedRows[0];
-    if (stored !== undefined) {
-      if (stored.request_hash !== hash || stored.workspace_id !== route.workspaceId ||
-          stored.stream_id !== route.streamId) {
-        return { status: 409, body: { error: "command_id_conflict" } };
-      }
+    const failure = (error: string, can_start_new = true): HttpResult => ({ status: 403, body: { error, message: hostedContextErrorMessage(error, can_start_new), can_start_new } });
+    const contextRows = async (handle: string) => await tx<{
+      context_id: string; seat_id: string; principal_id: string; name: string;
+      lifetime: "durable" | "ephemeral"; kind: HostedContextKind; display_name: string; disambiguator: string | null;
+      created_at: Date; last_business_at: Date; idle_expires_at: Date | null; absolute_expires_at: Date | null; closed_at: Date | null;
+    }[]>`
+      SELECT c.context_id, hs.seat_id, hs.principal_id, hs.name, p.identity_lifetime AS lifetime,
+        c.kind, COALESCE(hs.display_name,hs.name) AS display_name, hs.disambiguator,
+        c.created_at, c.last_business_at, c.idle_expires_at, c.absolute_expires_at, c.closed_at
+      FROM swarm.hosted_agent_contexts c JOIN swarm.hosted_mcp_seats hs USING(seat_id)
+      JOIN swarm.agent_principals p ON p.principal_id=hs.principal_id
+      WHERE c.handle=${handle} AND hs.grant_id=${grant.grant_id}::uuid
+        AND hs.workspace_id=${route.workspaceId}::uuid AND hs.owner_user_id=${grant.owner_user_id}::uuid
+        AND p.workspace_id=hs.workspace_id AND p.owner_user_id=hs.owner_user_id
+        AND hs.revoked_at IS NULL AND p.revoked_at IS NULL AND p.transport='hosted_mcp' AND p.turn_only
+        AND NOT EXISTS (SELECT 1 FROM swarm.revocation_tombstones t
+          WHERE (t.kind='principal' AND t.target_id=hs.principal_id) OR (t.kind='hosted_seat' AND t.target_id=hs.seat_id))
+      FOR UPDATE OF c, hs, p
+    `;
+    const validity = (c: { closed_at: Date | null; idle_expires_at: Date | null; absolute_expires_at: Date | null }) =>
+      c.closed_at !== null ? failure("context_closed") : !hostedContextLive({ closed_at: null,
+        idle_expires_at: c.idle_expires_at?.getTime() ?? null, absolute_expires_at: c.absolute_expires_at?.getTime() ?? null }, now)
+        ? { status: 403, body: { error: "context_expired", message: "This chat identity expired. Start a new identity to continue; shared work is still here.", can_start_new: true } } : null;
+    if (stored) {
+      if (stored.request_hash !== hash || stored.workspace_id !== route.workspaceId || stored.stream_id !== route.streamId) return { status: 409, body: { error: "command_id_conflict" } };
       const response = record(stored.response);
-      if (!response || typeof response.seat_id !== "string" ||
-          typeof response.handle !== "string" || typeof response.principal_id !== "string") {
-        throw new Error("invalid hosted-seat idempotency response");
-      }
-      const replayRows = await tx<{ seat_id: string }[]>`
-        SELECT hs.seat_id
-        FROM swarm.hosted_mcp_seats AS hs
-        JOIN swarm.hosted_mcp_seat_handles AS h
-          ON h.seat_id = hs.seat_id
-         AND h.grant_id = hs.grant_id
-         AND h.workspace_id = hs.workspace_id
-         AND h.principal_id = hs.principal_id
-        JOIN swarm.agent_principals AS p
-          ON p.principal_id = hs.principal_id
-         AND p.workspace_id = hs.workspace_id
-         AND p.owner_user_id = hs.owner_user_id
-        WHERE hs.seat_id = ${response.seat_id}::uuid
-          AND hs.grant_id = ${grant.grant_id}::uuid
-          AND hs.workspace_id = ${route.workspaceId}::uuid
-          AND hs.principal_id = ${response.principal_id}::uuid
-          AND h.handle = ${response.handle}
-          AND hs.revoked_at IS NULL
-          AND h.revoked_at IS NULL
-          AND p.revoked_at IS NULL
-          AND p.transport = 'hosted_mcp'
-          AND p.turn_only = true
-        FOR UPDATE OF hs, h, p
-      `;
-      if (replayRows.length !== 1) {
-        return { status: 403, body: { error: "hosted_seat_revoked" } };
-      }
-      return { status: 200, body: { ...response, status: "accepted", replayed: true } };
+      if (!response || typeof response.handle !== "string") throw new Error("invalid hosted context replay");
+      const [c] = await contextRows(response.handle);
+      if (!c) return failure("identity_resume_unavailable");
+      const denied = validity(c); if (denied) return denied;
+      return { status: 200, body: { ...response, status: "accepted", outcome: "replayed", replayed: true } };
     }
-
-    const existingRows = await tx<{
-      seat_id: string;
-      grant_id: string;
-      workspace_id: string;
-      owner_user_id: string;
-      principal_id: string;
-      name: string;
-      handle: string;
-      created_at: Date;
-      revoked_at: Date | null;
-      handle_revoked_at: Date | null;
-      principal_revoked_at: Date | null;
-      transport: "local" | "hosted_mcp";
-      turn_only: boolean;
+    // Phase 3 completes handle renewal and legacy backfill. This path never
+    // allocates or converts lifetime, and remains independent of the gate.
+    if (input.command.seat !== undefined) {
+      const [c] = await contextRows(input.command.seat);
+      if (!c || (input.command.name !== undefined && input.command.name !== c.name)) return failure("identity_resume_unavailable");
+      const denied = validity(c); if (denied) return denied;
+      return { status: 200, body: { status: "accepted", ok: true, event_ids: [], grant_id: grant.grant_id,
+        workspace_id: route.workspaceId, workspace: { id: route.workspaceId, name: workspace.name }, ...c, created_at: c.created_at.toISOString(), last_business_at: c.last_business_at.toISOString(),
+        idle_expires_at: c.idle_expires_at?.toISOString() ?? null, absolute_expires_at: c.absolute_expires_at?.toISOString() ?? null,
+        seat: input.command.seat, handle: input.command.seat, outcome: "continued", original_outcome: "continued", name_adjusted: false, adjustment_reason: null, assurance: "portable" } };
+    }
+    const [configuration] = await tx<{ value: unknown }[]>`SELECT value FROM swarm.config WHERE key='hosted_context_allocation_enabled' FOR SHARE`;
+    if (configuration?.value !== true) return failure("identity_allocation_disabled", false);
+    const seats = await tx<{
+      seat_id: string; principal_id: string; grant_id: string; owner_user_id: string; client_id: string;
+      name: string; display_name: string; disambiguator: string | null; lifetime: "durable" | "ephemeral";
+      live: boolean; hosted: boolean; predecessor_unavailable: boolean;
     }[]>`
-      SELECT hs.seat_id, hs.grant_id, hs.workspace_id, hs.owner_user_id,
-             hs.principal_id, hs.name, h.handle, hs.created_at, hs.revoked_at,
-             h.revoked_at AS handle_revoked_at,
-             p.revoked_at AS principal_revoked_at,
-             p.transport, p.turn_only
-      FROM swarm.hosted_mcp_seats AS hs
-      JOIN swarm.hosted_mcp_seat_handles AS h ON h.seat_id = hs.seat_id
-      JOIN swarm.agent_principals AS p ON p.principal_id = hs.principal_id
-      WHERE hs.grant_id = ${grant.grant_id}::uuid
-        AND hs.workspace_id = ${route.workspaceId}::uuid
-        AND hs.name = ${input.command.name}
-        AND hs.revoked_at IS NULL
-        AND h.revoked_at IS NULL
-        AND p.revoked_at IS NULL
-        AND p.transport = 'hosted_mcp'
-        AND p.turn_only = true
+      SELECT hs.seat_id, hs.principal_id, hs.grant_id, hs.owner_user_id, g.client_id, hs.name,
+        COALESCE(hs.display_name,hs.name) AS display_name, hs.disambiguator, p.identity_lifetime AS lifetime,
+        (hs.revoked_at IS NULL AND p.revoked_at IS NULL AND NOT EXISTS (
+          SELECT 1 FROM swarm.revocation_tombstones t WHERE
+            (t.kind='principal' AND t.target_id=p.principal_id) OR (t.kind='hosted_seat' AND t.target_id=hs.seat_id))) AS live,
+        (p.transport='hosted_mcp' AND p.turn_only) AS hosted,
+        CASE WHEN ${input.command.intent === "continue"} AND hs.grant_id<>${grant.grant_id}::uuid
+          AND hs.owner_user_id=${grant.owner_user_id}::uuid AND g.client_id=${grant.client_id}
+          THEN COALESCE((SELECT s.predecessor_unavailable FROM swarm.hosted_predecessor_status(hs.grant_id) s), false)
+          ELSE false END AS predecessor_unavailable
+      FROM swarm.hosted_mcp_seats hs JOIN swarm.agent_principals p USING(principal_id)
+      JOIN swarm.hosted_mcp_grants g ON g.grant_id=hs.grant_id
+      WHERE hs.workspace_id=${route.workspaceId}::uuid AND hs.name=${base}
       ORDER BY hs.seat_id
-      LIMIT 1
-      FOR UPDATE OF hs, h, p
     `;
-    const exactPrincipals = await tx<{
-      principal_id: string;
-      owner_user_id: string;
-      revoked: boolean;
-    }[]>`
-      SELECT principal_id, owner_user_id, revoked_at IS NOT NULL AS revoked
-      FROM swarm.agent_principals
-      WHERE workspace_id = ${route.workspaceId}::uuid
-        AND name = ${input.command.name}
-      ORDER BY principal_id
+    // A successor inherits every still-live context of the selected seat.
+    // Read this as per-seat facts; the core chooses the only eligible seat.
+    const successionCounts = await tx<{ seat_id: string; active: string; workspace_excluded: string }[]>`
+      SELECT c.seat_id, count(*)::text AS active,
+        count(*) FILTER (WHERE g.state<>'active')::text AS workspace_excluded
+      FROM swarm.hosted_agent_contexts c JOIN swarm.hosted_mcp_seats hs USING(seat_id)
+      JOIN swarm.hosted_mcp_grants g ON g.grant_id=hs.grant_id
+      WHERE c.seat_id=ANY(${seats.map(s => s.seat_id)}::uuid[])
+        AND c.closed_at IS NULL
+        AND (c.idle_expires_at IS NULL OR c.idle_expires_at>${new Date(now)})
+        AND (c.absolute_expires_at IS NULL OR c.absolute_expires_at>${new Date(now)})
+      GROUP BY c.seat_id
     `;
-    const seatCountRows = await tx<{ live: string }[]>`
-      SELECT count(*)::text AS live
-      FROM swarm.hosted_mcp_seats
-      WHERE grant_id = ${grant.grant_id}::uuid AND revoked_at IS NULL
+    const names = [];
+    for (const name of candidates) {
+      const [reservation] = await tx<{ reserved: boolean }[]>`
+        SELECT EXISTS (SELECT 1 FROM swarm.agent_principals p
+          WHERE p.workspace_id=${route.workspaceId}::uuid AND p.name=${name}
+            AND (p.revoked_at IS NULL OR p.owner_user_id<>${grant.owner_user_id}::uuid)) AS reserved
+      `;
+      names.push({ name, reserved: reservation!.reserved });
+    }
+    const [parent] = input.command.parent_context === undefined ? [] : await tx<{ valid: boolean }[]>`
+      SELECT true AS valid FROM swarm.hosted_agent_contexts c JOIN swarm.hosted_mcp_seats hs USING(seat_id)
+      WHERE c.context_id=${input.command.parent_context}::uuid AND hs.grant_id=${grant.grant_id}::uuid
     `;
-    // Live seats of this grant left behind by the app's generic Remove for this exact name and
-    // owner. A successful reclaim closes exactly these before its insert, so they do not count
-    // against the limit for this claim. Read as rows, not a count: the one principal-ceiling
-    // count stays in lockAndCountLivePrincipals (tests/p1-cli/agent-join-credential.test.ts).
-    const reclaimableSeats = await tx<{ seat_id: string }[]>`
-      SELECT hs.seat_id
-      FROM swarm.hosted_mcp_seats AS hs
-      JOIN swarm.agent_principals AS p
-        ON p.principal_id = hs.principal_id AND p.workspace_id = hs.workspace_id
-      WHERE hs.grant_id = ${grant.grant_id}::uuid
-        AND hs.workspace_id = ${route.workspaceId}::uuid
-        AND hs.revoked_at IS NULL
-        AND p.revoked_at IS NOT NULL
-        AND p.name = ${input.command.name}
-        AND p.owner_user_id = ${grant.owner_user_id}::uuid
+    const [counts] = await tx<{ active_grant: string; active_workspace: string; owner_day: string; workspace_day: string; retry_after_seconds: number }[]>`
+      WITH contexts AS (
+        SELECT c.*, hs.grant_id, hs.workspace_id, hs.owner_user_id,
+          (c.closed_at IS NULL AND hs.revoked_at IS NULL AND p.revoked_at IS NULL AND g.state='active'
+           AND (c.idle_expires_at IS NULL OR c.idle_expires_at>${new Date(now)})
+           AND (c.absolute_expires_at IS NULL OR c.absolute_expires_at>${new Date(now)})) AS active
+        FROM swarm.hosted_agent_contexts c JOIN swarm.hosted_mcp_seats hs USING(seat_id)
+        JOIN swarm.agent_principals p USING(principal_id) JOIN swarm.hosted_mcp_grants g ON g.grant_id=hs.grant_id
+        WHERE (hs.owner_user_id=${grant.owner_user_id}::uuid OR hs.workspace_id=${route.workspaceId}::uuid)
+          AND (c.created_at>${new Date(now - 86400000)} OR (c.closed_at IS NULL
+            AND (c.idle_expires_at IS NULL OR c.idle_expires_at>${new Date(now)})
+            AND (c.absolute_expires_at IS NULL OR c.absolute_expires_at>${new Date(now)})))
+      ) SELECT
+        count(*) FILTER (WHERE active AND grant_id=${grant.grant_id}::uuid)::text AS active_grant,
+        count(*) FILTER (WHERE active AND workspace_id=${route.workspaceId}::uuid)::text AS active_workspace,
+        count(*) FILTER (WHERE origin<>'legacy' AND owner_user_id=${grant.owner_user_id}::uuid AND created_at>${new Date(now - 86400000)})::text AS owner_day,
+        count(*) FILTER (WHERE origin<>'legacy' AND workspace_id=${route.workspaceId}::uuid AND created_at>${new Date(now - 86400000)})::text AS workspace_day,
+        86400::int AS retry_after_seconds FROM contexts
     `;
-    const liveSeatCount = Number(seatCountRows[0]?.live ?? "0") - reclaimableSeats.length;
-    const seatId = crypto.randomUUID();
-    const principalId = crypto.randomUUID();
+    const [seatCount] = await tx<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM swarm.hosted_mcp_seats hs JOIN swarm.agent_principals p USING(principal_id)
+      WHERE hs.grant_id=${grant.grant_id}::uuid AND hs.revoked_at IS NULL AND p.revoked_at IS NULL AND p.identity_lifetime='durable'
+    `;
+    const allocation = decideHostedContextAllocation({ ...input.command, kind: input.command.context_kind }, { now, grant_id: grant.grant_id, owner_user_id: grant.owner_user_id,
+      client_id: grant.client_id, authorized: true, allocation_enabled: true, parent_valid: parent?.valid === true,
+      default_name: "Agent", exact_seats: seats, names, active_grant: Number(counts!.active_grant), active_workspace: Number(counts!.active_workspace),
+      owner_day: Number(counts!.owner_day), workspace_day: Number(counts!.workspace_day), durable_seats: Number(seatCount!.n),
+      succession_contexts: successionCounts.map(c => ({ seat_id: c.seat_id, active: Number(c.active), workspace_excluded: Number(c.workspace_excluded) })),
+      durable_principals: livePrincipals, retry_after_seconds: counts!.retry_after_seconds });
+    if ("error" in allocation) { const { ok: _ok, ...error } = allocation; return { status: 403, body: error }; }
+    const seatId = allocation.seat?.seat_id ?? crypto.randomUUID();
+    const principalId = allocation.seat?.principal_id ?? crypto.randomUUID();
+    const contextId = crypto.randomUUID();
     const handle = `seat_${randomBase64Url(18)}`;
-    let nextSeq = frame.headSeq;
-    const decision = decideHostedAuthority({
-      kind: "claim_hosted_seat",
-      grant_id: grant.grant_id,
-      seat_id: seatId,
-      handle,
-      principal_id: principalId,
-      workspace_id: route.workspaceId,
-      owner_user_id: grant.owner_user_id,
-      name: input.command.name,
-    }, {
-      grant: {
-        grant_id: grant.grant_id,
-        provider_grant_id: grant.provider_grant_id,
-        owner_user_id: grant.owner_user_id,
-        home_workspace_id: grant.home_workspace_id,
-        client_id: grant.client_id,
-        resource: grant.resource,
-        state: grant.state,
-        manifest_digest: bytesToHex(grant.manifest_digest),
-        interaction_ref: grant.interaction_ref,
-        selected_workspace_ids: grant.selected_workspace_ids,
-        consented_workspace_ids: [route.workspaceId],
-      },
-      seat: existingRows[0]
-        ? {
-          ...existingRows[0],
-          created_at: existingRows[0].created_at.getTime(),
-          revoked_at: existingRows[0].revoked_at?.getTime() ?? null,
-          handle_revoked_at: existingRows[0].handle_revoked_at?.getTime() ?? null,
-          principal_revoked_at: existingRows[0].principal_revoked_at?.getTime() ?? null,
-          transport: existingRows[0].transport as "hosted_mcp",
-          turn_only: existingRows[0].turn_only as true,
-        }
-        : null,
-      owner_is_live_member: grant.owner_is_live_member,
-      workspace_archived: grant.workspace_archived,
-      workspace_consented: grant.workspace_consented,
-      all_required_consents: true,
-      all_required_memberships: true,
-      exact_name_principals: exactPrincipals,
-      live_seat_count: liveSeatCount,
-    }, {
-      now: frame.now,
-      actor: { user: grant.owner_user_id, agent_principal: null, run: null },
-      credential_kind: "hosted_grant",
-      command_id: input.command_id,
-      workspace_id: route.workspaceId,
-      stream_id: route.streamId,
-      nextSeq: () => ++nextSeq,
-      nextEventId: () => crypto.randomUUID(),
-    }) as Decision & { reuse?: typeof existingRows[number]; reclaimed_principal_ids?: readonly string[] };
-
-    const auditAuth: HostedGrantAuditContext = {
-      credentialKind: "hosted_grant",
-      credentialId: grant.grant_id,
-      deviceId: null,
-      actor: { user: grant.owner_user_id, agent_principal: null, run: null },
-    };
-    if (!decision.ok) {
-      await insertAudit(tx, {
-        auth: auditAuth,
-        commandKind: "claim_hosted_seat",
-        workspaceId: route.workspaceId,
-        streamId: route.streamId,
-        outcome: decision.class,
-        reason: decision.reason,
-        detail: decision.detail,
-        hash,
-      });
-      return {
-        status: decision.reason === HOSTED_SEAT_NAME_TAKEN.code ? 409 : 403,
-        body: { error: decision.reason, message: decision.detail },
-      };
-    }
-
-    const reused = decision.reuse;
-    let closedSeatIds: string[] = [];
-    if (reused === undefined) {
-      if (livePrincipals >= FREE_TIER_PRINCIPAL_LIMIT) {
-        return { status: 403, body: { error: "principal_limit_reached", limit: FREE_TIER_PRINCIPAL_LIMIT } };
-      }
-      if (liveSeatCount >= HOSTED_MCP_SEAT_LIMIT) {
-        return { status: 403, body: { error: "hosted_seat_limit_reached", limit: HOSTED_MCP_SEAT_LIMIT } };
-      }
-      const hostedProjection = reduceHostedAuthority(null, decision.events[0]);
-      const foldedSeat = hostedProjection.seats[seatId];
-      const foldedPrincipal = hostedProjection.principals[principalId];
-      if (!foldedSeat || !foldedPrincipal) {
-        throw new Error("hosted seat event did not fold to complete projections");
-      }
-      const workspaceProjection = reduceWorkspace(
-        await loadWorkspaceState(tx, route),
-        decision.events[0],
-      );
-      const workspacePrincipal = workspaceProjection.principals[principalId];
-      if (!workspacePrincipal ||
-          workspacePrincipal.name !== foldedPrincipal.name ||
-          workspacePrincipal.transport !== foldedPrincipal.transport ||
-          workspacePrincipal.turn_only !== foldedPrincipal.turn_only) {
-        throw new Error("hosted and workspace principal folds disagree");
-      }
+    let events: EventEnvelope[] = [];
+    let reclaimAudit: { principals: readonly string[]; seats: string[] } | null = null;
+    if (allocation.outcome === "created") {
+      const exactPrincipals = await tx<{ principal_id: string; owner_user_id: string; revoked: boolean }[]>`
+        SELECT principal_id, owner_user_id, revoked_at IS NOT NULL AS revoked FROM swarm.agent_principals
+        WHERE workspace_id=${route.workspaceId}::uuid AND name=${allocation.name} ORDER BY principal_id
+      `;
+      let nextSeq = frame.headSeq;
+      const decision = decideHostedAuthority({ kind: "claim_hosted_seat", grant_id: grant.grant_id, seat_id: seatId, handle,
+        principal_id: principalId, workspace_id: route.workspaceId, owner_user_id: grant.owner_user_id, name: allocation.name,
+        identity_lifetime: allocation.lifetime }, {
+        grant: { ...grant!, provider_grant_id: resolved.provider_grant_id, home_workspace_id: route.workspaceId, resource: HOSTED_MCP_RESOURCE,
+          state: "active", manifest_digest: resolved.manifest_digest, interaction_ref: "context-allocation", selected_workspace_ids: [route.workspaceId], consented_workspace_ids: [route.workspaceId] },
+        seat: null, owner_is_live_member: true, workspace_archived: false, workspace_consented: true, all_required_consents: true,
+        all_required_memberships: true, exact_name_principals: exactPrincipals, live_seat_count: Number(seatCount!.n),
+      }, { now, actor: { user: grant.owner_user_id, agent_principal: null, run: null }, credential_kind: "hosted_grant",
+        command_id: input.command_id, workspace_id: route.workspaceId, stream_id: route.streamId, nextSeq: () => ++nextSeq, nextEventId: () => crypto.randomUUID() }) as Decision & { reclaimed_principal_ids?: readonly string[] };
+      if (!decision.ok) return failure(decision.reason);
+      events = decision.events;
+      const folded = reduceHostedAuthority(null, decision.events[0]);
+      const projected = reduceWorkspace(await loadWorkspaceState(tx, route), decision.events[0]);
+      if (projected.principals[principalId]?.identity_lifetime !== folded.principals[principalId]?.identity_lifetime) throw new Error("hosted lifetime fold mismatch");
+      // Retire dangling same-owner seats before reclaim; preserve their history.
       if (decision.reclaimed_principal_ids?.length) {
-        // The app's generic principal removal can leave hosted rows live.
-        // Close only seats of the reclaimed principals; their history stays intact.
-        const closedSeats = await tx<{ seat_id: string }[]>`
-          UPDATE swarm.hosted_mcp_seats
-          SET revoked_at = ${new Date(frame.now)}
-          WHERE workspace_id = ${route.workspaceId}::uuid
-            AND principal_id = ANY(${decision.reclaimed_principal_ids}::uuid[])
-            AND revoked_at IS NULL
-          RETURNING seat_id
-        `;
-        closedSeatIds = closedSeats.map((seat) => seat.seat_id).sort();
-        if (closedSeatIds.length) {
-          await tx`
-            UPDATE swarm.hosted_mcp_seat_handles
-            SET revoked_at = ${new Date(frame.now)}
-            WHERE workspace_id = ${route.workspaceId}::uuid
-              AND seat_id = ANY(${closedSeatIds}::uuid[])
-              AND revoked_at IS NULL
-          `;
-        }
+        await tx`UPDATE swarm.hosted_mcp_seat_handles SET revoked_at=${new Date(now)} WHERE principal_id=ANY(${decision.reclaimed_principal_ids}::uuid[]) AND revoked_at IS NULL`;
+        const closed = await tx<{ seat_id: string }[]>`UPDATE swarm.hosted_mcp_seats SET revoked_at=${new Date(now)} WHERE principal_id=ANY(${decision.reclaimed_principal_ids}::uuid[]) AND revoked_at IS NULL RETURNING seat_id`;
+        reclaimAudit = { principals: decision.reclaimed_principal_ids, seats: closed.map(row => row.seat_id).sort() };
       }
-      await tx`
-        INSERT INTO swarm.agent_principals (
-          principal_id, workspace_id, owner_user_id, name, model,
-          transport, turn_only, created_at, revoked_at
-        ) VALUES (
-          ${foldedPrincipal.principal_id}::uuid,
-          ${foldedPrincipal.workspace_id}::uuid,
-          ${foldedPrincipal.owner_user_id}::uuid,
-          ${foldedPrincipal.name}, NULL,
-          ${foldedPrincipal.transport}, ${foldedPrincipal.turn_only},
-          ${new Date(foldedPrincipal.created_at)}, NULL
-        )
-      `;
-      await tx`
-        INSERT INTO swarm.hosted_mcp_seats (
-          seat_id, grant_id, workspace_id, owner_user_id,
-          principal_id, name, created_at, revoked_at
-        ) VALUES (
-          ${foldedSeat.seat_id}::uuid, ${foldedSeat.grant_id}::uuid,
-          ${foldedSeat.workspace_id}::uuid, ${foldedSeat.owner_user_id}::uuid,
-          ${foldedSeat.principal_id}::uuid, ${foldedSeat.name},
-          ${new Date(foldedSeat.created_at)}, NULL
-        )
-      `;
-      await tx`
-        INSERT INTO swarm.hosted_mcp_seat_handles (
-          handle, seat_id, grant_id, workspace_id, principal_id, created_at, revoked_at
-        ) VALUES (
-          ${foldedSeat.handle}, ${foldedSeat.seat_id}::uuid,
-          ${foldedSeat.grant_id}::uuid, ${foldedSeat.workspace_id}::uuid,
-          ${foldedSeat.principal_id}::uuid,
-          ${new Date(foldedSeat.created_at)}, NULL
-        )
-      `;
+      await tx`INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,model,transport,turn_only,created_at,identity_lifetime)
+        VALUES(${principalId}::uuid,${route.workspaceId}::uuid,${grant.owner_user_id}::uuid,${allocation.name},NULL,'hosted_mcp',true,${new Date(now)},${allocation.lifetime})`;
+      await tx`INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,display_name,disambiguator,created_at)
+        VALUES(${seatId}::uuid,${grant.grant_id}::uuid,${route.workspaceId}::uuid,${grant.owner_user_id}::uuid,${principalId}::uuid,
+          ${allocation.name},${allocation.display_name},${allocation.disambiguator},${new Date(now)})`;
       await appendRegistrationEvents(tx, route, frame, decision.events);
+    } else if (allocation.grant_succession) {
+      // Phase 3 replaces legacy-handle/check composite FKs before release.
+      // Updating only the seat here preserves historical grant bindings. Until
+      // then a referenced legacy seat must fail closed, not rewrite history.
+      const [legacy] = await tx<{ present: boolean }[]>`
+        SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint c
+          WHERE c.confrelid='swarm.hosted_mcp_seats'::regclass AND c.contype='f'
+            AND cardinality(c.confkey)=4) AND (
+          EXISTS(SELECT 1 FROM swarm.hosted_mcp_seat_handles WHERE seat_id=${seatId}::uuid)
+          OR EXISTS(SELECT 1 FROM swarm.hosted_mcp_check_cursors WHERE seat_id=${seatId}::uuid)
+          OR EXISTS(SELECT 1 FROM swarm.hosted_mcp_check_batches WHERE seat_id=${seatId}::uuid)) AS present
+      `;
+      if (legacy!.present) return failure("identity_resume_unavailable");
+      await tx`UPDATE swarm.hosted_mcp_seats SET grant_id=${grant.grant_id}::uuid WHERE seat_id=${seatId}::uuid AND grant_id=${allocation.predecessor_grant_id}::uuid`;
     }
-    const response: StoredResponse = {
-      ok: true,
-      event_ids: decision.events.map((entry) => entry.event_id),
-      grant_id: grant.grant_id,
-      workspace_id: route.workspaceId,
-      seat_id: reused?.seat_id ?? seatId,
-      principal_id: reused?.principal_id ?? principalId,
-      handle: reused?.handle ?? handle,
-      name: input.command.name,
-    };
-    const inserted = await tx<{ command_id: string }[]>`
-      INSERT INTO swarm.idempotency_keys (
-        principal_kind, principal_id, command_id,
-        workspace_id, stream_id, request_hash, response
-      ) VALUES (
-        'hosted_grant', ${grant.grant_id}, ${input.command_id},
-        ${route.workspaceId}::uuid, ${route.streamId}::uuid, ${hash},
-        ${tx.json(response as unknown as postgres.JSONValue)}::jsonb
-      )
-      ON CONFLICT (principal_kind, principal_id, command_id) DO NOTHING
-      RETURNING command_id
-    `;
-    if (inserted.length !== 1) throw new Error("hosted seat claim lost its idempotency race");
-    await insertAudit(tx, {
-      auth: auditAuth,
-      commandKind: "claim_hosted_seat",
-      workspaceId: route.workspaceId,
-      streamId: route.streamId,
-      outcome: reused ? "replayed" : "accepted",
-      ...(decision.reclaimed_principal_ids?.length ? {
-        reason: "hosted_seat_name_reclaimed",
-        detail: `reclaimed=${decision.reclaimed_principal_ids.length}; closed_seats=${closedSeatIds.length}; principal_ids=${decision.reclaimed_principal_ids.join(",")}; closed_seat_ids=${closedSeatIds.join(",")}`,
-      } : {}),
-      hash,
-    });
+    const clocks = allocation.clocks;
+    await tx`INSERT INTO swarm.hosted_agent_contexts(context_id,handle,seat_id,kind,created_at,last_business_at,idle_expires_at,absolute_expires_at,parent_context,origin)
+      VALUES(${contextId}::uuid,${handle},${seatId}::uuid,${allocation.kind},${new Date(now)},${new Date(now)},
+        ${new Date(clocks.idle_expires_at)},${new Date(clocks.absolute_expires_at)},${input.command.parent_context ?? null}::uuid,${allocation.origin})`;
+    const response = { ok: true, event_ids: events.map(e => e.event_id), grant_id: grant.grant_id, workspace_id: route.workspaceId,
+      workspace: { id: route.workspaceId, name: workspace.name },
+      seat_id: seatId, principal_id: principalId, context_id: contextId, handle, seat: handle, name: allocation.name,
+      display_name: allocation.display_name, disambiguator: allocation.disambiguator, assurance: allocation.assurance, lifetime: allocation.lifetime,
+      kind: allocation.kind, created_at: new Date(now).toISOString(), last_business_at: new Date(now).toISOString(),
+      idle_expires_at: new Date(clocks.idle_expires_at).toISOString(), absolute_expires_at: new Date(clocks.absolute_expires_at).toISOString(),
+      outcome: allocation.outcome, original_outcome: allocation.outcome, name_adjusted: allocation.name_adjusted, adjustment_reason: allocation.adjustment_reason };
+    await tx`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response)
+      VALUES('hosted_grant', ${grant.grant_id},${input.command_id},${route.workspaceId}::uuid,${route.streamId}::uuid,${hash},${tx.json(response as unknown as postgres.JSONValue)})`;
+    if (reclaimAudit) await insertAudit(tx, { auth: { credentialKind: "hosted_grant", credentialId: grant.grant_id, deviceId: null,
+      actor: { user: grant.owner_user_id, agent_principal: null, run: null } }, commandKind: "claim_hosted_seat", workspaceId: route.workspaceId,
+      streamId: route.streamId, outcome: "accepted", reason: "hosted_seat_name_reclaimed",
+      detail: `reclaimed=${reclaimAudit.principals.length}; closed_seats=${reclaimAudit.seats.length}; principal_ids=${reclaimAudit.principals.join(",")}; closed_seat_ids=${reclaimAudit.seats.join(",")}`, hash });
+    await insertAudit(tx, { auth: { credentialKind: "hosted_grant", credentialId: grant.grant_id, deviceId: null,
+      actor: { user: grant.owner_user_id, agent_principal: null, run: null } }, commandKind: "claim_hosted_seat", workspaceId: route.workspaceId,
+      streamId: route.streamId, outcome: "accepted", reason: allocation.grant_succession ? "hosted_grant_succession" : allocation.outcome,
+      detail: JSON.stringify({ context_id: contextId, principal_id: principalId, client_id: grant.client_id, lifetime: allocation.lifetime,
+        assurance: "portable", intent: input.command.intent ?? "new", resume_source: allocation.outcome === "continued" ? "name" : null,
+        command_id: input.command_id, kind: allocation.kind, name_adjusted: allocation.name_adjusted, parent_context: input.command.parent_context ?? null,
+        grant_succession: allocation.grant_succession, predecessor_grant_id: allocation.predecessor_grant_id, successor_grant_id: allocation.successor_grant_id }), hash });
     return { status: 200, body: { status: "accepted", ...response } };
   });
 }

@@ -3164,6 +3164,7 @@ function reduceWorkspace(prev, env3) {
             name: p.name,
             model: null,
             transport: "hosted_mcp",
+            identity_lifetime: p.identity_lifetime ?? "durable",
             turn_only: true,
             created_at: p.created_at,
             revoked_at: null
@@ -3361,8 +3362,11 @@ function decideHostedAuthority(command, facts, ctx) {
     return refuse("domain", "hosted_seat_name_invalid", "Seat names must be 1 to 80 characters, have no leading or trailing spaces, and contain no control characters.");
   }
   const liveNamePrincipals = facts.exact_name_principals.filter((p) => !p.revoked);
-  if (facts.seat !== null) {
+  if (facts.seat !== null && command.intent === "continue") {
     const seat2 = facts.seat;
+    if (seat2.grant_id !== grant.grant_id || seat2.owner_user_id !== grant.owner_user_id || seat2.workspace_id !== ctx.workspace_id || seat2.name !== command.name || seat2.identity_lifetime === "ephemeral") {
+      return refuse("authz", "identity_resume_unavailable", "This connection cannot resume that identity.");
+    }
     if (seat2.revoked_at !== null || seat2.handle_revoked_at !== null || seat2.principal_revoked_at !== null || seat2.transport !== "hosted_mcp" || seat2.turn_only !== true) {
       return refuse("domain", "hosted_seat_revoked", "This seat was removed and cannot be restored. Call claim_seat with a new request_id to get a new seat; its owner may reuse the same name.");
     }
@@ -3376,7 +3380,7 @@ function decideHostedAuthority(command, facts, ctx) {
   )) {
     return refuse("domain", HOSTED_SEAT_NAME_TAKEN.code, HOSTED_SEAT_NAME_TAKEN.message);
   }
-  if (facts.live_seat_count >= HOSTED_MCP_SEAT_LIMIT) {
+  if ((command.identity_lifetime ?? "durable") === "durable" && facts.live_seat_count >= HOSTED_MCP_SEAT_LIMIT) {
     return refuse("domain", "hosted_seat_limit_reached", `This connection already has ${HOSTED_MCP_SEAT_LIMIT} live seats.`);
   }
   return {
@@ -3501,6 +3505,7 @@ function reduceHostedAuthority(previous, event2) {
       principal_id: principalId,
       name: String(p2.name),
       handle: String(p2.handle),
+      identity_lifetime: p2.identity_lifetime === "ephemeral" ? "ephemeral" : "durable",
       transport: "hosted_mcp",
       turn_only: true,
       created_at: Number(p2.created_at),
@@ -3516,6 +3521,7 @@ function reduceHostedAuthority(previous, event2) {
         workspace_id: seat3.workspace_id,
         owner_user_id: seat3.owner_user_id,
         name: seat3.name,
+        identity_lifetime: p2.identity_lifetime === "ephemeral" ? "ephemeral" : "durable",
         transport: "hosted_mcp",
         turn_only: true,
         created_at: seat3.created_at,
@@ -3556,6 +3562,103 @@ function reduceHostedAuthorityStream(events) {
     lastSeq = event2.seq;
   }
   return state ?? { grants: {}, consents: {}, seats: {}, principals: {} };
+}
+
+// src/protocol/hosted-context.ts
+var HOSTED_ACTIVE_CONTEXTS_PER_GRANT = 25;
+var HOSTED_ACTIVE_CONTEXTS_PER_WORKSPACE = 100;
+var HOSTED_CONTEXT_CREATIONS_PER_OWNER_DAY = 100;
+var HOSTED_CONTEXT_CREATIONS_PER_WORKSPACE_DAY = 500;
+var HOSTED_CONTEXT_KINDS = ["chat", "task", "scheduled", "subagent"];
+function hostedContextClaimValid(c) {
+  if (c.intent !== void 0 && c.intent !== "new" && c.intent !== "continue") return false;
+  if (c.name !== void 0 && (typeof c.name !== "string" || !hostedSeatNameValid(c.name))) return false;
+  if (c.seat !== void 0 && (typeof c.seat !== "string" || !/^seat_[A-Za-z0-9_-]{22,64}$/u.test(c.seat))) return false;
+  if (c.kind !== void 0 && !HOSTED_CONTEXT_KINDS.includes(c.kind)) return false;
+  if (c.parent_context !== void 0 && (typeof c.parent_context !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(c.parent_context))) return false;
+  if (c.lifetime !== void 0 && c.lifetime !== "durable" && c.lifetime !== "ephemeral") return false;
+  if ((c.intent ?? "new") === "new") return c.seat === void 0 && (c.lifetime !== "durable" || c.name !== void 0);
+  return c.lifetime === void 0 && (c.seat !== void 0 || c.name !== void 0) && (c.seat === void 0 || c.kind === void 0 && c.parent_context === void 0);
+}
+function hostedContextClocks(kind, now) {
+  const hour = 36e5;
+  const limits = { chat: [24 * hour, 30 * 24 * hour], task: [12 * hour, 7 * 24 * hour], scheduled: [hour / 2, 24 * hour], subagent: [hour / 4, 4 * hour] };
+  const [idle, absolute] = limits[kind];
+  return { created_at: now, last_business_at: now, idle_expires_at: now + idle, absolute_expires_at: now + absolute };
+}
+function hostedContextLive(c, now) {
+  return c.closed_at === null && (c.idle_expires_at === null || now < c.idle_expires_at) && (c.absolute_expires_at === null || now < c.absolute_expires_at);
+}
+function hostedSuffixName(base, suffix) {
+  if (typeof suffix !== "string" || !/^[A-Z2-7]{4}$/u.test(suffix)) throw new Error("invalid hosted suffix candidate");
+  return `${Array.from(base).slice(0, 75).join("")}-${suffix}`;
+}
+function hostedContextErrorMessage(error, canStartNew = true) {
+  if (error === "identity_resume_unavailable" && !canStartNew) return "This connection is unavailable. Reconnect before starting a new identity.";
+  const messages = {
+    identity_resume_unavailable: "This connection cannot resume that identity. Start a separate identity for shared work.",
+    identity_allocation_disabled: "New chat identities are unavailable on this connection.",
+    session_capacity_reached: "Chat identity capacity is full. Close a context or wait, then try again.",
+    name_allocation_busy: "A separate name could not be allocated. Try again.",
+    hosted_seat_limit_reached: "This connection has reached its durable agent limit. Remove a durable agent, then try again.",
+    principal_limit_reached: "This workspace has reached its durable agent limit. Remove a durable agent, then try again.",
+    context_closed: "This chat identity was closed. Start a new identity to continue.",
+    workspace_unavailable: "This workspace is unavailable. Choose an authorized workspace to continue.",
+    invalid_request: "The identity request is invalid. Correct the arguments and try again."
+  };
+  return messages[error] ?? "This chat identity is unavailable.";
+}
+function decideHostedContextAllocation(c, f) {
+  const deny = (error, can_start_new = true) => ({ ok: false, error, message: hostedContextErrorMessage(error, can_start_new), can_start_new });
+  if (!hostedContextClaimValid(c)) return deny("invalid_request", false);
+  if (!f.authorized) return deny("identity_resume_unavailable", false);
+  if (c.seat !== void 0) return deny("identity_resume_unavailable");
+  if (!f.allocation_enabled) return deny("identity_allocation_disabled", false);
+  if (c.parent_context !== void 0 && !f.parent_valid) return deny("identity_resume_unavailable");
+  const continuation = c.intent === "continue";
+  let seat2;
+  let succession = false;
+  const lifetime = continuation ? "durable" : c.lifetime ?? "ephemeral";
+  if (continuation) {
+    const candidates = f.exact_seats.filter((s) => s.live && s.hosted && s.lifetime === "durable" && s.owner_user_id === f.owner_user_id && s.client_id === f.client_id && s.name === c.name && (s.grant_id === f.grant_id || s.predecessor_unavailable));
+    if (candidates.length !== 1 || f.exact_seats.some((s) => s.live && s.seat_id !== candidates[0].seat_id)) return deny("identity_resume_unavailable");
+    seat2 = candidates[0];
+    succession = seat2.grant_id !== f.grant_id;
+  }
+  const inherited = succession ? f.succession_contexts.find((c2) => c2.seat_id === seat2.seat_id) : void 0;
+  if (f.active_grant + (inherited?.active ?? 0) >= HOSTED_ACTIVE_CONTEXTS_PER_GRANT || f.active_workspace + (inherited?.workspace_excluded ?? 0) >= HOSTED_ACTIVE_CONTEXTS_PER_WORKSPACE || f.owner_day >= HOSTED_CONTEXT_CREATIONS_PER_OWNER_DAY || f.workspace_day >= HOSTED_CONTEXT_CREATIONS_PER_WORKSPACE_DAY) {
+    return { ok: false, error: "session_capacity_reached", message: hostedContextErrorMessage("session_capacity_reached"), can_start_new: true, retry_after_seconds: Math.max(1, f.retry_after_seconds) };
+  }
+  if (lifetime === "durable" && (!continuation || succession) && f.durable_seats >= HOSTED_MCP_SEAT_LIMIT) return deny("hosted_seat_limit_reached");
+  if (lifetime === "durable" && !continuation && f.durable_principals >= 50) return deny("principal_limit_reached");
+  const base = c.name ?? f.default_name;
+  if (!hostedSeatNameValid(base)) return deny("invalid_request", false);
+  const collision = f.names.find((n) => n.name === base)?.reserved !== false;
+  let name = seat2?.name ?? base;
+  let disambiguator = seat2?.disambiguator ?? null;
+  if (!continuation && (lifetime === "ephemeral" || collision)) {
+    const candidate = f.names.slice(1, 6).find((n) => !n.reserved && hostedSeatNameValid(n.name) && typeof n.name === "string" && /^[A-Z2-7]{4}$/u.test(n.name.slice(-4)) && n.name === hostedSuffixName(base, n.name.slice(-4)));
+    if (!candidate) return { ok: false, error: "name_allocation_busy", message: hostedContextErrorMessage("name_allocation_busy"), can_start_new: true, retry_after_seconds: 1 };
+    name = candidate.name;
+    disambiguator = name.slice(-4);
+  }
+  return {
+    ok: true,
+    outcome: continuation ? "continued" : "created",
+    lifetime,
+    name,
+    display_name: seat2?.display_name ?? base,
+    disambiguator,
+    name_adjusted: !continuation && name !== base,
+    adjustment_reason: continuation || name === base ? null : collision ? "collision" : "ephemeral_address",
+    kind: c.kind ?? "chat",
+    assurance: "portable",
+    origin: continuation ? "continue" : "new",
+    clocks: hostedContextClocks(c.kind ?? "chat", f.now),
+    seat: seat2,
+    grant_succession: succession,
+    ...succession ? { predecessor_grant_id: seat2.grant_id, successor_grant_id: f.grant_id } : {}
+  };
 }
 
 // src/protocol/hosted-check.ts
@@ -5302,7 +5405,12 @@ export {
   FEEDBACK_CONTEXT_MAX_BYTES,
   FILE_VERSION_PRECONDITION_FAILED,
   H0_SEAT_TOKEN_TTL_MS,
+  HOSTED_ACTIVE_CONTEXTS_PER_GRANT,
+  HOSTED_ACTIVE_CONTEXTS_PER_WORKSPACE,
   HOSTED_CHECK_BATCH_LIMIT,
+  HOSTED_CONTEXT_CREATIONS_PER_OWNER_DAY,
+  HOSTED_CONTEXT_CREATIONS_PER_WORKSPACE_DAY,
+  HOSTED_CONTEXT_KINDS,
   HOSTED_MCP_RESOURCE,
   HOSTED_MCP_SEAT_LIMIT,
   HOSTED_SEAT_NAME_TAKEN,
@@ -5380,6 +5488,7 @@ export {
   decideAdminRoutine,
   decideHostedAuthority,
   decideHostedCheck,
+  decideHostedContextAllocation,
   decideHouseholdObject,
   decideHumanInvite,
   decideTodo,
@@ -5392,7 +5501,12 @@ export {
   fileVersionPreconditionMessage,
   fileVersionPreconditionSatisfied,
   hostedCheckMillisecondTimestamp,
+  hostedContextClaimValid,
+  hostedContextClocks,
+  hostedContextErrorMessage,
+  hostedContextLive,
   hostedSeatNameValid,
+  hostedSuffixName,
   householdAccessRefusal,
   householdObjectUsage,
   householdToolInvocation,

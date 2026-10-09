@@ -17,3 +17,12 @@ export interface CommandResult {
   headers?: Record<string, string>;
   body: Record<string, unknown>;
 }
+
+/** Internal command discriminator stays kind; MCP's context kind is translated
+ * to context_kind at this boundary. Runtime validation uses the protocol core. */
+export interface HostedContextClaimFields {
+  intent?: 'new' | 'continue'; name?: string; seat?: string;
+  lifetime?: 'ephemeral' | 'durable';
+  kind?: 'chat' | 'task' | 'scheduled' | 'subagent';
+  parent_context?: string;
+}

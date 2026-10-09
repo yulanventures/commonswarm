@@ -151,6 +151,21 @@ test("claim emits hosted turn-only identity and folds deterministically", () => 
   assert.equal(foldedWorkspace.principals[principal]?.transport, "hosted_mcp");
 });
 
+test("name continuation after a claim fold retains lifetime and defaults legacy events to durable", () => {
+  for (const identity_lifetime of ['ephemeral', 'durable', undefined] as const) {
+    const created = decideHostedAuthority({ ...claim, ...(identity_lifetime ? { identity_lifetime } : {}) },
+      facts(), context('hosted_grant'));
+    assert.equal(created.ok, true);
+    if (!created.ok) continue;
+    const folded = reduceHostedAuthorityStream(created.events);
+    assert.equal(folded.principals[principal]?.identity_lifetime, identity_lifetime ?? 'durable');
+    const continued = decideHostedAuthority({ ...claim, intent: 'continue' },
+      facts({ seat: folded.seats[seatId]!, exact_name_principals: [namePrincipal()] }), context('hosted_grant'));
+    assert.equal(continued.ok, identity_lifetime !== 'ephemeral');
+    if (!continued.ok) assert.equal(continued.reason, 'identity_resume_unavailable');
+  }
+});
+
 test("stable reuse never adopts a collision or resurrects a revoked seat", () => {
   const liveSeat = {
     seat_id: seatId, grant_id: grantId, workspace_id: workspace,
@@ -160,7 +175,7 @@ test("stable reuse never adopts a collision or resurrects a revoked seat", () =>
     revoked_at: null, handle_revoked_at: null, principal_revoked_at: null,
   };
   const reuse = decideHostedAuthority(
-    claim,
+    { ...claim, intent: "continue" },
     facts({ seat: liveSeat, exact_name_principals: [namePrincipal()] }),
     context("hosted_grant"),
   );
@@ -169,14 +184,24 @@ test("stable reuse never adopts a collision or resurrects a revoked seat", () =>
     assert.equal(reuse.reuse, liveSeat);
     assert.deepEqual(reuse.events, []);
   }
-  const historical = decideHostedAuthority(claim, facts({ seat: liveSeat,
+  const fresh = decideHostedAuthority(claim,
+    facts({ seat: liveSeat, exact_name_principals: [namePrincipal()] }), context("hosted_grant"));
+  assert.equal(fresh.ok, false, "default-new never silently reuses an existing seat");
+  for (const changed of [{ grant_id: "different-grant" }, { owner_user_id: "different-owner" },
+    { workspace_id: "different-workspace" }, { name: "different-exact-name" }, { identity_lifetime: "ephemeral" as const }]) {
+    const refused = decideHostedAuthority({ ...claim, intent: "continue" },
+      facts({ seat: { ...liveSeat, ...changed }, exact_name_principals: [namePrincipal()] }), context("hosted_grant"));
+    assert.equal(refused.ok, false);
+    if (!refused.ok) assert.equal(refused.reason, "identity_resume_unavailable");
+  }
+  const historical = decideHostedAuthority({ ...claim, intent: "continue" }, facts({ seat: liveSeat,
     exact_name_principals: [namePrincipal(), namePrincipal("old", true, "foreign")],
     live_seat_count: HOSTED_MCP_SEAT_LIMIT,
   }), context("hosted_grant"));
   assert.equal(historical.ok, true, "live reuse precedes historical reservations and the cap");
   if (historical.ok) assert.equal(historical.reuse, liveSeat);
   const collision = decideHostedAuthority(
-    claim,
+    { ...claim, intent: "continue" },
     facts({ seat: liveSeat, exact_name_principals: [namePrincipal(), namePrincipal("other")] }),
     context("hosted_grant"),
   );
@@ -189,7 +214,7 @@ test("stable reuse never adopts a collision or resurrects a revoked seat", () =>
     { revoked_at: 1000 }, { handle_revoked_at: 1000 }, { principal_revoked_at: 1000 },
   ]) {
     const revoked = decideHostedAuthority(
-      claim,
+      { ...claim, intent: "continue" },
       facts({ seat: { ...liveSeat, ...changed }, exact_name_principals: [namePrincipal()] }),
       context("hosted_grant"),
     );

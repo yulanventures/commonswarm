@@ -451,6 +451,7 @@ export function reduceWorkspace(
             name: p.name,
             model: null,
             transport: 'hosted_mcp',
+            identity_lifetime: p.identity_lifetime ?? 'durable',
             turn_only: true,
             created_at: p.created_at,
             revoked_at: null,

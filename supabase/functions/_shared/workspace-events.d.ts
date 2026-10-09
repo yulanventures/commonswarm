@@ -37,6 +37,7 @@ export interface WorkspaceInvitation {
     revoked_at: number | null;
 }
 export interface WorkspacePrincipal {
+    identity_lifetime?: 'durable' | 'ephemeral';
     principal_id: string;
     owner_user_id: string;
     name: string;
@@ -170,6 +171,7 @@ export interface AgentTokenRevoked {
     revoked_at: number;
 }
 export interface HostedMcpSeatClaimed {
+    identity_lifetime?: 'durable' | 'ephemeral';
     seat_id: string;
     grant_id: string;
     workspace_id: string;

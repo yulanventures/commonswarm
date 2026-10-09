@@ -34,15 +34,34 @@ test("public hosted-only refusal precedes the GoTrue positive control", async ()
   assert.ok(getUser >= 0 && getClaims >= 0);
 });
 
-test("every internal operation revalidates durable authorization", async () => {
-  const [command, read] = await Promise.all([
-    readFile(commandUrl, "utf8"), readFile(readUrl, "utf8"),
-  ]);
+function assertInternalRevalidation(command: string, read: string): void {
   assert.match(command, /await revalidateHostedGrantCommand\(tx, capability\)/);
   assert.match(command, /await revalidateHostedSeatCommand\(tx, hostedSeatCapability\)/);
   assert.match(read, /await revalidateHostedSeatRead\(tx, capability\)/);
   assert.match(command, /ledgerCredentialKind: "hosted_seat"/);
   assert.match(command, /'hosted_grant', \$\{grant\.grant_id\}/);
+}
+
+test("durable authorization pin rejects each internal operation without revalidation", async () => {
+  const [command, read] = await Promise.all([readFile(commandUrl, "utf8"), readFile(readUrl, "utf8")]);
+  assertInternalRevalidation(command, read);
+  for (const call of [
+    "await revalidateHostedGrantCommand(tx, capability)",
+    "await revalidateHostedSeatCommand(tx, hostedSeatCapability)",
+    "await revalidateHostedSeatRead(tx, capability)",
+  ]) {
+    const mutatedCommand = command.replaceAll(call, "undefined");
+    const mutatedRead = read.replaceAll(call, "undefined");
+    assert.ok(mutatedCommand !== command || mutatedRead !== read, `positive control finds ${call}`);
+    assert.throws(() => assertInternalRevalidation(mutatedCommand, mutatedRead), assert.AssertionError, call);
+  }
+});
+
+test("every internal operation revalidates durable authorization", async () => {
+  const [command, read] = await Promise.all([
+    readFile(commandUrl, "utf8"), readFile(readUrl, "utf8"),
+  ]);
+  assertInternalRevalidation(command, read);
 });
 
 test("human hosted-management idempotency keeps UUID users in the text ledger namespace", async () => {
