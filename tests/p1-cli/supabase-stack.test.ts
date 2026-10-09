@@ -8,6 +8,8 @@ import test from "node:test";
 
 const root = process.cwd();
 const stackDir = join(root, "deploy", "supabase-stack");
+const { STORAGE_UPLOAD_ORIGINS } = await import(join(root, "deploy", "edge-runtime", "check-caddy-adapted.mjs"));
+const storageUploadOrigins = STORAGE_UPLOAD_ORIGINS as readonly string[];
 const [
   compose,
   envExample,
@@ -973,15 +975,28 @@ test("adapted Caddy checker accepts the split pair and rejects host and route ga
   }
 });
 
-test("deployment Caddy files adapt with Caddy 2.11", async (context) => {
-  const docker = spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  if (docker.status !== 0) {
-    context.skip("Docker is absent");
-    return;
+test("deployment Caddy files adapt and reject Storage CORS scope mutations", async (context) => {
+  // CI uses Caddy 2.11 in Docker; a supplied binary runs the same controls locally.
+  const caddyBinary = process.env.CADDY_BINARY;
+  if (!caddyBinary) {
+    const docker = spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if (docker.status !== 0) {
+      context.skip("Docker is absent and CADDY_BINARY is unset");
+      return;
+    }
   }
+  const adapt = (directory: string) => caddyBinary
+    ? spawnSync(caddyBinary, ["adapt", "--config", "Caddyfile"], {
+      cwd: directory, encoding: "utf8", timeout: 120_000,
+      env: { ...process.env, MCP_OAUTH_HOST_PORT: "3490" },
+    })
+    : spawnSync("docker", [
+      "run", "--rm", "-e", "MCP_OAUTH_HOST_PORT=3490", "-v", `${directory}:/srv:ro`, "-w", "/srv",
+      "caddy:2.11", "caddy", "adapt", "--config", "/srv/Caddyfile",
+    ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120_000 });
   const checker = join(root, "deploy", "edge-runtime", "check-caddy-adapted.mjs");
   const fixture = join(root, "deploy", "edge-runtime", "build-caddy-validation-fixture.mjs");
   const profiles = [
@@ -1001,16 +1016,104 @@ test("deployment Caddy files adapt with Caddy 2.11", async (context) => {
       try {
         const built = spawnSync(process.execPath, [fixture, directory, trustMode, ...sitePaths], { encoding: "utf8" });
         assert.equal(built.status, 0, built.stderr);
-        const adapted = spawnSync("docker", [
-          "run", "--rm", "-e", "MCP_OAUTH_HOST_PORT=3490", "-v", `${directory}:/srv:ro`, "-w", "/srv",
-          "caddy:2.11", "caddy", "adapt", "--config", "/srv/Caddyfile",
-        ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120_000 });
+        const adapted = adapt(directory);
         assert.equal(adapted.status, 0, `${profile} ${trustMode}: ${adapted.stderr.slice(-500)}`);
         if (profile === "mcp-oauth") continue;
         const jsonPath = join(directory, "adapted.json");
         await writeFile(jsonPath, adapted.stdout);
         const checked = spawnSync(process.execPath, [checker, jsonPath, profile, trustMode], { encoding: "utf8" });
         assert.equal(checked.status, 0, `${profile} ${trustMode}: ${checked.stderr}`);
+        if (profile === "live" && trustMode === "without-trusted-proxies") {
+          const sitePath = join(directory, "sites", "10-commonswarm-api.caddy");
+          const original = await readFile(sitePath, "utf8");
+          const sourceControls: Array<[string, string, RegExp]> = [
+            ["upload matcher moved to fallback", original
+              .replace("handle @signed_upload {", "handle {")
+              .replace("# Preserve every other Storage route and method.\n\t\t\thandle {",
+                "# Preserve every other Storage route and method.\n\t\t\thandle @signed_upload {"),
+              /signed upload before fallback/],
+            ["upload Origin expressions removed", original.replace(/^\s*expression `.*Origin.*`\n/gm, ""),
+              /signed upload matcher-bound CORS/],
+            ["upload path broadened", original.replace("path /storage/v1/object/upload/sign/*", "path /storage/v1/*"),
+              /signed upload path and methods/],
+          ];
+          for (const [name, source, expected] of sourceControls) {
+            await context.test(`rejects ${name}`, async () => {
+              assert.notEqual(source, original, "control must mutate the source");
+              await writeFile(sitePath, source);
+              const mutated = adapt(directory);
+              assert.equal(mutated.status, 0, mutated.stderr);
+              await assertCheckerRejects(directory, checker, JSON.parse(mutated.stdout), "source-control.json",
+                profile, trustMode, expected);
+            });
+          }
+          await writeFile(sitePath, original);
+          const jsonControls: Array<[string, (site: JsonObject) => void, RegExp]> = [
+            ["swapped Storage proxy header policies", (site) => {
+              const proxies = jsonObjects(site).filter((value) => value.handler === "reverse_proxy" &&
+                (value.upstreams as JsonObject[])?.[0]?.dial === "127.0.0.1:18004");
+              assert.equal(proxies.length, 2);
+              [proxies[0]!.headers, proxies[1]!.headers] = [proxies[1]!.headers, proxies[0]!.headers];
+            }, /signed upload matcher-bound CORS/],
+            ["missing Storage proxy", (site) => {
+              assert.equal(removeProxyDial(site, "127.0.0.1:18004"), true);
+            }, /api\.commonswarm\.com route dials/],
+            ["upload methods broadened", (site) => {
+              const route = uploadBranch(site);
+              (route.match as JsonObject[])[0]!.method = ["OPTIONS", "PUT", "GET"];
+            }, /signed upload path and methods/],
+            ["preflight request method changed", (site) => {
+              for (const value of jsonObjects(site)) {
+                if (value.header) (value.header as JsonObject)["Access-Control-Request-Method"] = ["POST"];
+              }
+            }, /signed upload matcher-bound CORS/],
+            ["204 response without preflight matcher", (site) => {
+              const route = jsonObjects(site).find((value) =>
+                (value.handle as JsonObject[] | undefined)?.some((handler) => handler.status_code === 204));
+              assert.ok(route);
+              delete route.match;
+            }, /signed upload matcher-bound CORS/],
+            ["upload prefix stripping removed", (site) => {
+              const rewrite = jsonObjects(uploadBranch(site)).find((value) => value.handler === "rewrite");
+              assert.ok(rewrite);
+              delete rewrite.strip_path_prefix;
+            }, /signed upload matcher-bound CORS/],
+            ["PUT header without matcher", (site) => {
+              const route = jsonObjects(uploadBranch(site)).find((value) =>
+                (value.match as JsonObject[] | undefined)?.[0]?.method?.toString() === "PUT");
+              assert.ok(route);
+              delete route.match;
+            }, /signed upload matcher-bound CORS/],
+            ["preflight header no longer deferred", (site) => {
+              const response = jsonObjects(uploadBranch(site)).find((value) =>
+                (value.set as JsonObject | undefined)?.["Access-Control-Max-Age"]);
+              assert.ok(response);
+              delete response.deferred;
+            }, /signed upload matcher-bound CORS/],
+            ["extra allowed Origin", (site) => {
+              for (const value of jsonObjects(uploadBranch(site))) {
+                if (typeof value.expr === "string") value.expr = value.expr.replace("]", ', "https://untrusted.example"]');
+              }
+            }, /signed upload matcher-bound CORS/],
+            ["fallback prefix stripping removed", (site) => {
+              const rewrite = jsonObjects(site).filter((value) => value.handler === "rewrite" &&
+                value.strip_path_prefix === "/storage/v1").at(-1);
+              assert.ok(rewrite);
+              delete rewrite.strip_path_prefix;
+            }, /fallback Storage prefix and unchanged upstream CORS/],
+          ];
+          for (const [name, mutate, expected] of jsonControls) {
+            await context.test(`rejects ${name}`, async () => {
+              const config = JSON.parse(adapted.stdout) as unknown;
+              const site = adaptedRoutes(config).find((route) => testRouteHosts(route).includes("api.commonswarm.com"));
+              assert.ok(site);
+              const before = JSON.stringify(site);
+              mutate(site);
+              assert.notEqual(JSON.stringify(site), before, "control must mutate adapted JSON");
+              await assertCheckerRejects(directory, checker, config, "json-control.json", profile, trustMode, expected);
+            });
+          }
+        }
         if (profile === "maintenance" && trustMode === "without-trusted-proxies") {
           const hostMutation = adapted.stdout.replace("127.0.0.1:9000", "example.supabase.co:443");
           const hostPath = join(directory, "host.json");
@@ -1053,38 +1156,13 @@ function syntheticLivePair(): JsonObject {
             headers: { request: { set: { Host: ["realtime-dev"] } } },
           },
           {
-            handler: "headers",
-            response: {
-              deferred: true,
-              set: { "Access-Control-Allow-Origin": ["{http.request.header.Origin}"] },
-            },
-          },
-          {
-            handler: "headers",
-            response: {
-              deferred: true,
-              set: {
-                "Access-Control-Allow-Headers": ["content-type"],
-                "Access-Control-Allow-Methods": ["PUT, OPTIONS"],
-                "Access-Control-Allow-Origin": ["{http.request.header.Origin}"],
-                "Access-Control-Max-Age": ["600"],
-              },
-            },
-          },
-          {
-            handler: "reverse_proxy",
-            upstreams: [{ dial: "127.0.0.1:18004" }],
-            headers: { response: { delete: ["Access-Control-*"] } },
-          },
-          { handler: "reverse_proxy", upstreams: [{ dial: "127.0.0.1:18004" }] },
-          {
             handler: "reverse_proxy",
             upstreams: [{ dial: "127.0.0.1:9000" }],
             headers: { request: { set: { "X-Forwarded-For": ["{http.request.client_ip}"] } } },
             transport: { response_header_timeout: 165_000_000_000 },
           },
         ],
-      }],
+      }, syntheticStorageRoute()],
     }],
   });
   const errorRoute = (host: string): JsonObject => ({
@@ -1112,6 +1190,60 @@ function syntheticLivePair(): JsonObject {
       },
     },
   };
+}
+
+function syntheticStorageRoute(): JsonObject {
+  const expression = {
+    expr: `{http.request.header.Origin} in ${JSON.stringify(storageUploadOrigins).replaceAll(",", ", ")}`,
+  };
+  const put = [{ expression: { ...expression, name: "upload_put" }, method: ["PUT"] }];
+  const preflight = [{ expression: { ...expression, name: "upload_preflight" },
+    header: { "Access-Control-Request-Method": ["PUT"] }, method: ["OPTIONS"] }];
+  const rewrite = { handler: "rewrite", strip_path_prefix: "/storage/v1" };
+  const proxy = { handler: "reverse_proxy", upstreams: [{ dial: "127.0.0.1:18004" }] };
+  return {
+    match: [{ path: ["/storage/v1/*"] }],
+    handle: [{ handler: "subroute", routes: [{
+      handle: [{ handler: "subroute", routes: [
+        {
+          group: "storage",
+          match: [{ path: ["/storage/v1/object/upload/sign/*"], method: ["OPTIONS", "PUT"] }],
+          handle: [{ handler: "subroute", routes: [
+            { match: put, handle: [{ handler: "headers", response: {
+              deferred: true, set: { "Access-Control-Allow-Origin": ["{http.request.header.Origin}"] },
+            } }] },
+            { match: preflight, handle: [{ handler: "headers", response: {
+              deferred: true, set: {
+                "Access-Control-Allow-Headers": ["content-type"],
+                "Access-Control-Allow-Methods": ["PUT, OPTIONS"],
+                "Access-Control-Allow-Origin": ["{http.request.header.Origin}"],
+                "Access-Control-Max-Age": ["600"],
+              },
+            } }] },
+            { handle: [{ handler: "headers", response: { deferred: true, set: { Vary: ["Origin"] } } }, rewrite] },
+            { match: preflight, handle: [{ handler: "static_response", status_code: 204 }] },
+            { handle: [{ ...proxy, headers: { response: { delete: ["Access-Control-*"] } } }] },
+          ] }],
+        },
+        { group: "storage", handle: [{ handler: "subroute", routes: [{ handle: [rewrite, proxy] }] }] },
+      ] }],
+    }] }],
+  };
+}
+
+function jsonObjects(value: unknown, out: JsonObject[] = []): JsonObject[] {
+  if (!value || typeof value !== "object") return out;
+  if (!Array.isArray(value)) out.push(value as JsonObject);
+  for (const child of Object.values(value)) jsonObjects(child, out);
+  return out;
+}
+
+function uploadBranch(site: JsonObject): JsonObject {
+  const route = jsonObjects(site).find((value) =>
+    (value.match as JsonObject[] | undefined)?.some((matcher) =>
+      (matcher.path as string[] | undefined)?.includes("/storage/v1/object/upload/sign/*")));
+  assert.ok(route);
+  return route;
 }
 
 function adaptedRoutes(config: unknown): JsonObject[] {

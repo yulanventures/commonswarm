@@ -1,67 +1,13 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const path = process.argv[2];
-const profile = process.argv[3];
-const trustMode = process.argv[4] ?? "with-trusted-proxies";
-if (!path || (profile !== "live" && profile !== "maintenance")) {
-  throw new Error(
-    "usage: node check-caddy-adapted.mjs <adapted-json> " +
-      "<live|maintenance> [with-trusted-proxies|without-trusted-proxies]",
-  );
-}
-assert.ok(
-  trustMode === "with-trusted-proxies" ||
-    trustMode === "without-trusted-proxies",
-);
-
-const config = JSON.parse(await readFile(path, "utf8"));
-const supabaseHost = collectStrings(config).find((value) =>
-  /supabase\.co\b/i.test(value)
-);
-assert.equal(supabaseHost, undefined, `supabase.co host ${supabaseHost ?? ""}`);
-
-const servers = Object.values(config.apps?.http?.servers ?? {});
-assert.equal(servers.length, 1);
-const server = servers[0];
-
-const cloudflareRanges = [
-  "173.245.48.0/20",
-  "103.21.244.0/22",
-  "103.22.200.0/22",
-  "103.31.4.0/22",
-  "141.101.64.0/18",
-  "108.162.192.0/18",
-  "190.93.240.0/20",
-  "188.114.96.0/20",
-  "197.234.240.0/22",
-  "198.41.128.0/17",
-  "162.158.0.0/15",
-  "104.16.0.0/13",
-  "104.24.0.0/14",
-  "172.64.0.0/13",
-  "131.0.72.0/22",
-  "2400:cb00::/32",
-  "2606:4700::/32",
-  "2803:f800::/32",
-  "2405:b500::/32",
-  "2405:8100::/32",
-  "2a06:98c0::/29",
-  "2c0f:f248::/32",
-];
-if (trustMode === "with-trusted-proxies") {
-  assert.equal(server.trusted_proxies?.source, "static");
-  assert.deepEqual(server.trusted_proxies?.ranges, cloudflareRanges);
-  assert.equal(server.trusted_proxies_strict, 1);
-  assert.deepEqual(server.client_ip_headers, [
-    "CF-Connecting-IP",
-    "X-Forwarded-For",
-  ]);
-} else {
-  assert.equal(server.trusted_proxies, undefined);
-  assert.equal(server.trusted_proxies_strict, undefined);
-  assert.equal(server.client_ip_headers, undefined);
-}
+export const STORAGE_UPLOAD_ORIGINS = Object.freeze([
+  "https://commonswarm.com",
+  "https://www.commonswarm.com",
+  "https://site-staging.commonswarm.com",
+]);
 
 const localDials = [
   "127.0.0.1:18001",
@@ -71,29 +17,94 @@ const localDials = [
   "127.0.0.1:18004",
   "127.0.0.1:9000",
 ];
-const apiHosts = [
-  "api.commonswarm.com",
-  "edge-staging.commonswarm.com",
-];
 
-if (profile === "live") {
-  for (const host of apiHosts) assertLiveSite(server, host);
-} else {
-  const publicSite = siteSubroute(server, "api.commonswarm.com");
-  const stagingSite = siteSubroute(server, "edge-staging.commonswarm.com");
-  assert.deepEqual(proxyDials(publicSite), [], "public upstream");
-  assertMaintenanceResponses(publicSite);
-  assert.equal(
-    hostRoutes(server.errors?.routes, "api.commonswarm.com").length,
-    0,
-    "public error routes",
+async function main() {
+  const path = process.argv[2];
+  const profile = process.argv[3];
+  const trustMode = process.argv[4] ?? "with-trusted-proxies";
+  if (!path || (profile !== "live" && profile !== "maintenance")) {
+    throw new Error(
+      "usage: node check-caddy-adapted.mjs <adapted-json> " +
+        "<live|maintenance> [with-trusted-proxies|without-trusted-proxies]",
+    );
+  }
+  assert.ok(
+    trustMode === "with-trusted-proxies" ||
+      trustMode === "without-trusted-proxies",
   );
-  assertLiveSite(server, "edge-staging.commonswarm.com", stagingSite);
-}
 
-process.stdout.write(
-  `adapted Caddy JSON (${profile}, ${trustMode}) verified\n`,
-);
+  const config = JSON.parse(await readFile(path, "utf8"));
+  const supabaseHost = collectStrings(config).find((value) =>
+    /supabase\.co\b/i.test(value)
+  );
+  assert.equal(supabaseHost, undefined, `supabase.co host ${supabaseHost ?? ""}`);
+
+  const servers = Object.values(config.apps?.http?.servers ?? {});
+  assert.equal(servers.length, 1);
+  const server = servers[0];
+
+  const cloudflareRanges = [
+    "173.245.48.0/20",
+    "103.21.244.0/22",
+    "103.22.200.0/22",
+    "103.31.4.0/22",
+    "141.101.64.0/18",
+    "108.162.192.0/18",
+    "190.93.240.0/20",
+    "188.114.96.0/20",
+    "197.234.240.0/22",
+    "198.41.128.0/17",
+    "162.158.0.0/15",
+    "104.16.0.0/13",
+    "104.24.0.0/14",
+    "172.64.0.0/13",
+    "131.0.72.0/22",
+    "2400:cb00::/32",
+    "2606:4700::/32",
+    "2803:f800::/32",
+    "2405:b500::/32",
+    "2405:8100::/32",
+    "2a06:98c0::/29",
+    "2c0f:f248::/32",
+  ];
+  if (trustMode === "with-trusted-proxies") {
+    assert.equal(server.trusted_proxies?.source, "static");
+    assert.deepEqual(server.trusted_proxies?.ranges, cloudflareRanges);
+    assert.equal(server.trusted_proxies_strict, 1);
+    assert.deepEqual(server.client_ip_headers, [
+      "CF-Connecting-IP",
+      "X-Forwarded-For",
+    ]);
+  } else {
+    assert.equal(server.trusted_proxies, undefined);
+    assert.equal(server.trusted_proxies_strict, undefined);
+    assert.equal(server.client_ip_headers, undefined);
+  }
+
+  const apiHosts = [
+    "api.commonswarm.com",
+    "edge-staging.commonswarm.com",
+  ];
+
+  if (profile === "live") {
+    for (const host of apiHosts) assertLiveSite(server, host);
+  } else {
+    const publicSite = siteSubroute(server, "api.commonswarm.com");
+    const stagingSite = siteSubroute(server, "edge-staging.commonswarm.com");
+    assert.deepEqual(proxyDials(publicSite), [], "public upstream");
+    assertMaintenanceResponses(publicSite);
+    assert.equal(
+      hostRoutes(server.errors?.routes, "api.commonswarm.com").length,
+      0,
+      "public error routes",
+    );
+    assertLiveSite(server, "edge-staging.commonswarm.com", stagingSite);
+  }
+
+  process.stdout.write(
+    `adapted Caddy JSON (${profile}, ${trustMode}) verified\n`,
+  );
+}
 
 function collectStrings(value, out = []) {
   if (typeof value === "string") out.push(value);
@@ -133,35 +144,111 @@ function routeHosts(route) {
 function assertLiveSite(server, host, site = siteSubroute(server, host)) {
   assert.deepEqual(proxyDials(site).sort(), localDials, `${host} route dials`);
   assertProxyDetails(proxiesIn(site));
-  const storageProxies = proxiesIn(site).filter((proxy) =>
-    proxy.upstreams?.[0]?.dial === "127.0.0.1:18004"
-  );
-  assert.deepEqual(
-    storageProxies[0].headers?.response?.delete,
-    ["Access-Control-*"],
-    `${host} signed upload upstream CORS deletion`,
-  );
-  assert.equal(
-    storageProxies[1].headers?.response,
-    undefined,
-    `${host} fallback Storage upstream CORS unchanged`,
-  );
-  assert.deepEqual(originHeaders(site).map((handler) => handler.response), [
-    {
-      deferred: true,
-      set: { "Access-Control-Allow-Origin": ["{http.request.header.Origin}"] },
-    },
-    {
-      deferred: true,
-      set: {
-        "Access-Control-Allow-Headers": ["content-type"],
-        "Access-Control-Allow-Methods": ["PUT, OPTIONS"],
-        "Access-Control-Allow-Origin": ["{http.request.header.Origin}"],
-        "Access-Control-Max-Age": ["600"],
-      },
-    },
-  ], `${host} route CORS`);
+  assertStorageRoutes(site, host);
   assertErrorCors(server, host);
+}
+
+// Find Storage branches by their enclosing routes, never by proxy traversal order.
+function assertStorageRoutes(site, host) {
+  const storageRoutes = routesIn(site).filter((route) =>
+    route.match?.some((matcher) => matcher.path?.includes("/storage/v1/*")) &&
+    storageProxiesIn(route).length === 2
+  );
+  assert.equal(storageRoutes.length, 1, `${host} Storage route exactly once`);
+  const storage = storageRoutes[0];
+  assert.deepEqual(storage.match, [{ path: ["/storage/v1/*"] }], `${host} Storage path`);
+  const branchSets = subroutesIn(storage).map((subroute) => subroute.routes).filter((routes) =>
+    routes.some((route) =>
+      route.handle?.some((handler) => handler.handler === "subroute") &&
+      storageProxiesIn(route).length === 1
+    )
+  );
+  assert.equal(branchSets.length, 1, `${host} Storage branch set exactly once`);
+  const branches = branchSets[0];
+  assert.equal(branches.length, 2, `${host} Storage upload and fallback branches`);
+  const upload = branches.find((route) => route.match !== undefined);
+  const fallback = branches.find((route) => route.match === undefined);
+  assert.ok(upload && fallback, `${host} matched upload and unconditional fallback`);
+  assert.deepEqual(upload.match, [{
+    method: ["OPTIONS", "PUT"],
+    path: ["/storage/v1/object/upload/sign/*"],
+  }], `${host} signed upload path and methods`);
+  assert.equal(branches.indexOf(upload), 0, `${host} signed upload before fallback`);
+  assert.ok(upload.group, `${host} Storage exclusive branch group`);
+  assert.equal(upload.group, fallback.group, `${host} Storage exclusive branch group`);
+
+  const expression = {
+    expr: `{http.request.header.Origin} in ${JSON.stringify(STORAGE_UPLOAD_ORIGINS).replaceAll(",", ", ")}`,
+  };
+  const put = [{ expression, method: ["PUT"] }];
+  const preflight = [{
+    expression,
+    header: { "Access-Control-Request-Method": ["PUT"] },
+    method: ["OPTIONS"],
+  }];
+  const rewrite = { handler: "rewrite", strip_path_prefix: "/storage/v1" };
+  const proxy = { handler: "reverse_proxy", upstreams: [{ dial: "127.0.0.1:18004" }] };
+  const uploadSubroute = branchSubroute(upload, `${host} signed upload`);
+  // Expression names are diagnostic labels; the predicate itself is the contract.
+  const routes = JSON.parse(JSON.stringify(uploadSubroute.routes, (key, value) =>
+    key === "expression" && value && typeof value === "object"
+      ? Object.fromEntries(Object.entries(value).filter(([field]) => field !== "name"))
+      : value
+  ));
+  assert.deepEqual(routes, [
+    {
+      match: put,
+      handle: [{ handler: "headers", response: {
+        deferred: true,
+        set: { "Access-Control-Allow-Origin": ["{http.request.header.Origin}"] },
+      } }],
+    },
+    {
+      match: preflight,
+      handle: [{ handler: "headers", response: {
+        deferred: true,
+        set: {
+          "Access-Control-Allow-Headers": ["content-type"],
+          "Access-Control-Allow-Methods": ["PUT, OPTIONS"],
+          "Access-Control-Allow-Origin": ["{http.request.header.Origin}"],
+          "Access-Control-Max-Age": ["600"],
+        },
+      } }],
+    },
+    { handle: [{ handler: "headers", response: {
+      deferred: true, set: { Vary: ["Origin"] },
+    } }, rewrite] },
+    { match: preflight, handle: [{ handler: "static_response", status_code: 204 }] },
+    { handle: [{ ...proxy, headers: { response: { delete: ["Access-Control-*"] } } }] },
+  ], `${host} signed upload matcher-bound CORS, preflight, prefix and proxy`);
+  assert.deepEqual(branchSubroute(fallback, `${host} fallback Storage`).routes, [
+    { handle: [rewrite, proxy] },
+  ], `${host} fallback Storage prefix and unchanged upstream CORS`);
+  assert.equal(originHeaders(site).length, 2, `${host} route CORS only on signed upload`);
+}
+
+function branchSubroute(route, label) {
+  assert.equal(route.handle?.length, 1, `${label} handler count`);
+  assert.equal(route.handle[0].handler, "subroute", `${label} subroute`);
+  return route.handle[0];
+}
+
+function storageProxiesIn(value) {
+  return proxiesIn(value).filter((proxy) => proxy.upstreams?.[0]?.dial === "127.0.0.1:18004");
+}
+
+function routesIn(value, out = []) {
+  if (!value || typeof value !== "object") return out;
+  if (Array.isArray(value.routes)) out.push(...value.routes);
+  for (const child of Object.values(value)) routesIn(child, out);
+  return out;
+}
+
+function subroutesIn(value, out = []) {
+  if (!value || typeof value !== "object") return out;
+  if (value.handler === "subroute") out.push(value);
+  for (const child of Object.values(value)) subroutesIn(child, out);
+  return out;
 }
 
 function proxiesIn(value, out = []) {
@@ -326,4 +413,8 @@ function headerMap(route) {
     }
   }
   return headers;
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await main();
 }
