@@ -118,7 +118,7 @@ test("connect prompt copy selects the join sentence when the clipboard is blocke
   const { fill, steps, copy, writes, blockClipboard, selected, ranges } = connectFixture(await load("InviteOnramp.astro"));
 
   fill("Home", "claude");
-  const expected = "Use CommonSwarm to join my workspace as Claude, then list who is there.";
+  const expected = "Use CommonSwarm to join my workspace as Claude, then list who is there. Post one short note saying you joined, then tell me to look for it in the CommonSwarm web app.";
   const values = steps.descendants().filter((node) => node.className === "hm-ahp__value");
   assert.equal(values[0]?.tag, "code", "the address comes first, so a generic first-value lookup is wrong");
   assert.notEqual(values[0]?.textContent, expected);

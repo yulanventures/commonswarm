@@ -26,6 +26,7 @@ import {
   DESKTOP_SIGN_IN_NOTE,
   MENU_LABELS_NOTE,
   TURN_ONLY_NOTE,
+  JOIN_NOTE_RESULT,
   agentHostsFor,
   hostConnectLine,
   hostJoinPrompt,
@@ -221,6 +222,7 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
             <p class="hm-ahp__value">{hostJoinPrompt(host)}</p>
             <button class="hm-ahp__copy" type="button" data-ahp-copy={hostJoinPrompt(host)!} aria-label="Copy the sentence">Copy</button>
           </div>
+          <p class="hm-ahp__caption">{JOIN_NOTE_RESULT}</p>
         </div>
       )}
 

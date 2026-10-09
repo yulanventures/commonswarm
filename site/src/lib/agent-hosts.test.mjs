@@ -114,7 +114,7 @@ test("the picker chips use joiner primary hosts, then More apps, for every audie
 });
 
 test("the join sentence names the agent and CommonSwarm", () => {
-  assert.equal(joinSentence("Muse"), "Use CommonSwarm to join my workspace as Muse, then list who is there.");
+  assert.equal(joinSentence("Muse"), "Use CommonSwarm to join my workspace as Muse, then list who is there. Post one short note saying you joined, then tell me to look for it in the CommonSwarm web app.");
 });
 
 test("the Cursor link decodes to exactly the public address and nothing else", () => {
