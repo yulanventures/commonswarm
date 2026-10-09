@@ -57,8 +57,46 @@ api.commonswarm.com {
 	}
 
 	handle /storage/v1/* {
-		uri strip_prefix /storage/v1
-		reverse_proxy 127.0.0.1:18004
+		route {
+			# Evaluate upload matchers before stripping the Storage prefix.
+			@signed_upload {
+				path /storage/v1/object/upload/sign/*
+				method OPTIONS PUT
+			}
+			handle @signed_upload {
+				@upload_preflight {
+					method OPTIONS
+					expression `{http.request.header.Origin} in ["https://commonswarm.com", "https://www.commonswarm.com"]`
+					header Access-Control-Request-Method PUT
+				}
+				@upload_put {
+					method PUT
+					expression `{http.request.header.Origin} in ["https://commonswarm.com", "https://www.commonswarm.com"]`
+				}
+				# Overwrite at response time to avoid duplicate upstream values.
+				# Vary also covers denied/no-Origin responses for shared caches.
+				header >Vary Origin
+				header @upload_put >Access-Control-Allow-Origin {http.request.header.Origin}
+				header @upload_preflight {
+					Access-Control-Allow-Origin {http.request.header.Origin}
+					Access-Control-Allow-Methods "PUT, OPTIONS"
+					Access-Control-Allow-Headers content-type
+					Access-Control-Max-Age 600
+					defer
+				}
+				respond @upload_preflight "" 204
+				uri strip_prefix /storage/v1
+				reverse_proxy 127.0.0.1:18004 {
+					# Upstream CORS cannot bypass the allowlist or add credentials.
+					header_down -Access-Control-*
+				}
+			}
+			# Preserve every other Storage route and method.
+			handle {
+				uri strip_prefix /storage/v1
+				reverse_proxy 127.0.0.1:18004
+			}
+		}
 	}
 
 	@supabase_realtime path /realtime/v1 /realtime/v1/*
