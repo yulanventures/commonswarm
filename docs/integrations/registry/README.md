@@ -83,6 +83,12 @@ full OAuth lifecycle. No CommonSwarm service was contacted by D2.
 **Measured in stored source review:** workspace messages and inbox checks are
 part of the eight-tool hosted catalog. The description refers to that scope.
 The catalog and argument examples come from the enforcement table.
+The source-controlled `HOSTED_HOUSEHOLD_TOOLS_ENABLED` switch is off in
+[`household-release.ts`](../../../supabase/functions/mcp/household-release.ts).
+All household tools, including file tools, are hidden from listing and refused
+like unknown names before execution. Runtime environment values cannot enable
+them. A later reviewed household release can enable the source switch; file
+tools also require their separate transport gate.
 [Stored hosted catalog](../../evidence/2026-10-03-reviewer-packet/REVIEWER-ACCESS.md#try-every-hosted-tool),
 [current enforcement table](../../../supabase/functions/mcp/tools.ts).
 **NOT VERIFIED by D2:** delegated completion, per-host support, Registry

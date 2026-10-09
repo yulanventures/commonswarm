@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { build } from 'esbuild';
+import { hostedHouseholdRelease } from './support/hosted-household-release.js';
+import { HOUSEHOLD_TOOL_REGISTRY } from '../src/protocol/household-tool-registry.js';
 
 const owner = '11111111-1111-4111-8111-111111111111';
 const workspace = '22222222-2222-4222-8222-222222222222';
@@ -112,19 +114,8 @@ test('household_legacy is unreachable with its gate off even in a managed worksp
   assert.equal(unmanaged.legacyCalls.length, 0);
 });
 
-async function hostedProtocol(flags: Record<string, string | undefined> = {}) {
-  const bundled = await build({
-    entryPoints: ['supabase/functions/mcp/protocol.ts'], bundle: true, write: false,
-    platform: 'node', format: 'esm', target: 'es2022', logLevel: 'silent',
-    banner: { js: `
-      const settings = ${JSON.stringify(flags)};
-      const priorDeno = Object.getOwnPropertyDescriptor(globalThis, 'Deno');
-      Object.defineProperty(globalThis, 'Deno', { value: { env: { get: name => settings[name] } }, configurable: true });` },
-    footer: { js: `
-      if (priorDeno) Object.defineProperty(globalThis, 'Deno', priorDeno); else Reflect.deleteProperty(globalThis, 'Deno');
-      // ${randomUUID()}` },
-  });
-  const entry = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0]!.text).toString('base64')}`);
+async function hostedProtocol(flags: Record<string, string | undefined> = {}, enabled = false) {
+  const entry = await hostedHouseholdRelease(enabled, flags);
   const calls: string[] = [];
   const serve = entry.createMcpProtocolHandler({
     issuer: 'https://mcp.example.test', resource: 'https://mcp.example.test/mcp', publicEnabled: true,
@@ -144,7 +135,32 @@ async function hostedProtocol(flags: Record<string, string | undefined> = {}) {
   return { rpc, calls };
 }
 
-test('unfinished hosted file tools are absent and cannot execute unless their server gate is explicitly on', async () => {
+test('the source release switch hides all household tools even with every runtime gate on; enabling it restores 23 tools', async (t) => {
+  t.mock.method(console, 'error', () => undefined);
+  const core = ['claim_seat', 'whoami', 'check', 'ask', 'note', 'reply', 'working_on', 'members'];
+  const { rpc, calls } = await hostedProtocol({ [transportGate]: '1', [legacyGate]: '1', [redirectGate]: '1' });
+  assert.deepEqual((await rpc('tools/list')).result.tools.map((tool: { name: string }) => tool.name), core);
+  const unknown = await rpc('tools/call', { name: 'unknown_tool', arguments: {} }, 400);
+  for (const { name } of HOUSEHOLD_TOOL_REGISTRY) {
+    assert.deepEqual(await rpc('tools/call', { name, arguments: {} }, 400), unknown, name);
+  }
+  assert.deepEqual(calls, [], 'runtime gates cannot admit household reads or handlers');
+  assert.ok((await rpc('tools/call', { name: 'whoami', arguments: { seat: 'seat_' + 'a'.repeat(22) } })).result);
+  assert.deepEqual(calls, ['whoami']);
+
+  const enabled = await hostedProtocol({}, true);
+  const restored = (await enabled.rpc('tools/list')).result.tools.map((tool: { name: string }) => tool.name);
+  assert.equal(restored.length, 23);
+  assert.deepEqual(restored, [...core,
+    'object_list', 'object_read', 'object_history', 'object_create', 'object_update',
+    'todo_list', 'todo_read', 'todo_queue', 'comment_list', 'todo_create', 'todo_comment',
+    'todo_update', 'todo_assign', 'todo_start', 'todo_set_state',
+  ]);
+  assert.ok((await enabled.rpc('tools/call', { name: 'object_list', arguments: { seat: 'seat_' + 'a'.repeat(22), offset: 0, limit: 10 } })).result);
+  assert.deepEqual(enabled.calls, ['object_list'], 'enabled control restores admission as well as discovery');
+});
+
+test('future household release keeps file tools hidden until their transport gate is explicitly on', async () => {
   const seat = 'seat_' + 'a'.repeat(22);
   const examples = {
     file_read: { seat, object_id: 'attachment' },
@@ -154,7 +170,7 @@ test('unfinished hosted file tools are absent and cannot execute unless their se
     file_upload_commit: { seat, request_id: 'request_001', reservation_id: 'upload_001', operation: 'create' },
   };
   for (const flags of [{}, { [transportGate]: '0' }, { [transportGate]: 'true' }, { [legacyGate]: '1', [redirectGate]: '1' }]) {
-    const { rpc, calls } = await hostedProtocol(flags);
+    const { rpc, calls } = await hostedProtocol(flags, true);
     const listed = (await rpc('tools/list')).result.tools.map((tool: { name: string }) => tool.name);
     for (const [name, args] of Object.entries(examples)) {
       assert.ok(!listed.includes(name), `${name} must not be advertised`);
@@ -166,7 +182,7 @@ test('unfinished hosted file tools are absent and cannot execute unless their se
     assert.ok(control.result);
     assert.deepEqual(calls, ['object_list'], 'same handler still admits completed tools');
   }
-  const { rpc, calls } = await hostedProtocol({ [transportGate]: '1' });
+  const { rpc, calls } = await hostedProtocol({ [transportGate]: '1' }, true);
   const listed = (await rpc('tools/list')).result.tools.map((tool: { name: string }) => tool.name);
   for (const [name, args] of Object.entries(examples)) {
     assert.ok(listed.includes(name));

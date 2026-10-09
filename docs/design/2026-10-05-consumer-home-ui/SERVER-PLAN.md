@@ -192,7 +192,7 @@ The proofs for 000002 follow the same convention in `supabase/home-overview-rese
 
 ### Registry rows (agents and humans)
 
-These go in `HOUSEHOLD_TOOL_REGISTRY`. Each row gets `objectTypes: ['todo']`, with the type widened to `HouseholdObjectType | 'todo'`. An empty array would be filtered out as "file-only" (`mcp/tools.ts:11-15`). The rows then flow automatically into the hosted tool table and allowlists (`hosted-seat-auth.ts:8-9`), stdio MCP (`src/mcp/tools.ts:42`), `cswarm object …` (`cli.ts:10212`) and the consent copy.
+These go in `HOUSEHOLD_TOOL_REGISTRY`. Each row gets `objectTypes: ['todo']`, with the type widened to `HouseholdObjectType | 'todo'`. An empty array would be filtered out as "file-only" (`mcp/tools.ts:11-15`). The rows remain hidden from hosted discovery and admission while `HOSTED_HOUSEHOLD_TOOLS_ENABLED` in `supabase/functions/mcp/household-release.ts` is off (Tom, 2026-10-09, EDGE-R3). The current hosted catalog contains only eight core coordination tools. A reviewed household release can enable the source switch; file tools additionally need their transport gate. Enabled rows flow into the hosted tool table and allowlists (`hosted-seat-auth.ts:8-9`), stdio MCP (`src/mcp/tools.ts:42`), `cswarm object …` (`cli.ts:10212`) and the consent copy.
 
 | Tool | Op | Input (writes also take `seat` and `request_id`) | Output |
 |---|---|---|---|
@@ -458,7 +458,7 @@ export interface HomeServer {
 - `src/protocol/index.ts`
 - `scripts/build-admin-types.mjs` (roots list and `emitted.size !== 12`)
 - the generated `supabase/functions/_shared/protocol.js` and `*.d.ts`
-- the pinned counts: `tests/household-tool-registry.test.ts:49` (8), `tests/hosted-mcp-protocol.test.ts:144,522` (13), and `tests/p1-cli/fixtures/command-dispatch-baseline-counts.json`
+- the pinned counts: `tests/household-tool-registry.test.ts` (18 registry rows), `tests/hosted-mcp-protocol.test.ts` (8 hosted tools), and `tests/p1-cli/fixtures/command-dispatch-baseline-counts.json`
 - `tests/p1-cli/citation-drift.test.ts` and `tests/p1-cli/mcp-stdio.test.ts`
 
 The Lead alone edits `tests/lists/*` and `package.json`.
@@ -491,7 +491,7 @@ The Lead alone edits `tests/lists/*` and `package.json`.
   - add a `householdNotice` closure beside `postSignal`, passed in at `index.ts:10807`;
   - regenerate the bundle once.
 - **Tests:**
-  - count updates: 8 to 18 registry rows, 13 to 23 hosted tools, plus the baseline fixture;
+  - count updates: 18 registry rows, exactly 8 default hosted tools (2 reads, 6 writes), and a source-switch-on control restoring 23 tools; file tools stay separately gated. Retain the baseline fixture;
   - CI: `tests/p1-server/household-todo-mcp.test.ts`, a hosted round trip (create → assign to agent → `todo_queue` → `todo_start` → done), checking a `signal_deliveries` row for the agent, no second signal on replay, human-only kinds refused for hosted and local agents, and seat A unable to read workspace B.
 - **Checks:** two checkers.
 

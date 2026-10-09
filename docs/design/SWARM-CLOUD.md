@@ -33,6 +33,8 @@ renaming inside a spec risks changing a design decision by accident. Read `swarm
 
 > Vision note (2026-10-05): the current product vision is docs/product/VISION.md; where this document differs on what CommonSwarm is or who it is for, VISION.md wins.
 
+**Hosted MCP catalog (Tom, 2026-10-09, EDGE-R3):** expose only the eight core coordination tools in `CORE_TOOL_TABLE` (`supabase/functions/mcp/tools.ts`), in their existing order and with the edge-release-2 annotations: 2 reads and 6 writes. Household tools remain implemented but hidden by `HOSTED_HOUSEHOLD_TOOLS_ENABLED = false` in `supabase/functions/mcp/household-release.ts`. Neither runtime environment nor client input can activate them. Listing and call admission use the same filtered catalog; hidden names receive the ordinary unknown-tool refusal before any household handler or data read. A reviewed household release enables the source switch; file-only tools additionally require `HOUSEHOLD_FEATURE_GATES.hostedFileTransport`.
+
 ---
 
 # Part I — Cloud service specification

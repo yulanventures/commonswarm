@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { mkdtemp, mkdir, readFile, writeFile, chmod, stat, lstat, symlink, link, rm, unlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, chmod, stat, lstat, symlink, link, unlink } from 'node:fs/promises';
 import { join, dirname, sep, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -18,6 +18,7 @@ import {
 import { baselineEdgeSha, earlierEdgeSha, releaseSha, catalogAt } from './support/live-edge-catalog.mjs';
 
 const script = fileURLToPath(new URL('../scripts/live-ordinary-controls.mjs', import.meta.url));
+const guardedRm = process.platform === 'darwin' ? '/Users/yulanbot/.local/bin/rm' : 'rm';
 const preload = 'data:text/javascript;base64,' + Buffer.from((await readFile(new URL('./support/live-ordinary-controls-transport.mjs', import.meta.url), 'utf8'))
   .replace("'https://commonswarm.com'", "'https://yulanventures.com'")).toString('base64');
 const issuer = 'https://mcp.commonswarm.com', api = 'https://api.commonswarm.com';
@@ -200,7 +201,8 @@ async function fixture(t, config = {}) {
     assert.deepEqual(violations, [], 'independent wire contract');
     assert.ok(root.startsWith(join(realpathSync(tmpdir()), 'anvil-secret.')));
     assert.equal(realpathSync(root), root, 'cleanup stays at the test-owned mkdtemp root');
-    await rm(root, { recursive: true }); });
+    const removed = spawnSync(guardedRm, ['-r', root], { encoding: 'utf8' });
+    assert.equal(removed.status, 0, removed.stderr); });
   const profileId = hash(api).slice(0, 24);
   await privateWrite(join(human, 'target.json'), { url: api, anon_key: anon });
   await privateWrite(join(human, `${profileId}.json`), { version: 1, refreshToken: humanRefresh, generation: 0, deviceId: randomUUID(), userId: uid });
@@ -226,7 +228,7 @@ async function fixture(t, config = {}) {
     for (let i = 0; i < extra.length; i++) { const arg = extra[i]; const n = args.indexOf(arg);
       if (n >= 0) args.splice(n, 2);
       args.push(arg); if (arg !== '--dry-run') args.push(extra[++i]); }
-    const child = spawn(process.execPath, ['--import', preload, script, ...args, ...(command === 'final-cleanup' || workspaceId === null ? [] : ['--workspace-id', workspaceId]), '--release-sha', releaseSha, '--cred-dir', credDir, '--out', out,
+    const child = spawn(process.execPath, ['--import', preload, config.script ?? script, ...args, ...(command === 'final-cleanup' || workspaceId === null ? [] : ['--workspace-id', workspaceId]), '--release-sha', releaseSha, '--cred-dir', credDir, '--out', out,
       '--request-timeout-ms', '1000', '--consent-timeout-ms', '2000', '--total-timeout-ms', '12000'], { env: { ...process.env, LIVE_CONTROLS_FIXTURE_ORIGIN: origin, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '', done = false, handoffError;
     child.stdout.on('data', b => { output += b; }); child.stderr.on('data', b => { output += b; });
@@ -287,6 +289,103 @@ async function pre(f) {
 }
 
 const FILE_ONLY = ['file_read', 'file_upload_begin', 'file_upload_commit'];
+test('live catalog follows the verified SHA release switch, never the working file or tools/list', async t => {
+  const prefix = join(realpathSync(tmpdir()), 'r3b-catalog.');
+  const root = await mkdtemp(prefix);
+  t.after(() => {
+    assert.equal(realpathSync(root), root);
+    assert.ok(root.startsWith(prefix));
+    const result = spawnSync(guardedRm, ['-r', root], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+  });
+  const gitEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
+  Object.assign(gitEnv, { GIT_AUTHOR_NAME: 'Catalog fixture', GIT_AUTHOR_EMAIL: 'fixture@example.test',
+    GIT_COMMITTER_NAME: 'Catalog fixture', GIT_COMMITTER_EMAIL: 'fixture@example.test' });
+  const git = (args, input) => {
+    const r = spawnSync('git', ['--no-replace-objects', '-C', root, ...args], { env: gitEnv, input, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr); return r.stdout.trim();
+  };
+  git(['init', '--quiet']);
+  await mkdir(join(root, 'scripts'));
+  await mkdir(join(root, 'supabase/functions/_shared'), { recursive: true });
+  await mkdir(join(root, 'supabase/functions/mcp'));
+  const producer = join(root, 'scripts/live-ordinary-controls.mjs');
+  await writeFile(producer, await readFile(script));
+  const bundle = spawnSync('git', ['--no-replace-objects', 'show', `${releaseSha}:supabase/functions/_shared/protocol.js`], { encoding: 'utf8' });
+  assert.equal(bundle.status, 0, bundle.stderr);
+  await writeFile(join(root, 'supabase/functions/_shared/protocol.js'), bundle.stdout);
+  await symlink(fileURLToPath(new URL('../dist', import.meta.url)), join(root, 'dist'));
+  git(['add', 'scripts', 'supabase']);
+  const commit = parent => git(['commit-tree', git(['write-tree']), ...(parent ? ['-p', parent] : [])], 'catalog fixture\n');
+  const historical = commit();
+  const switchPath = join(root, 'supabase/functions/mcp/household-release.ts');
+  const revision = async (source, parent) => {
+    await writeFile(switchPath, source); git(['add', 'supabase']); return commit(parent);
+  };
+  const disabled = 'export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = false;';
+  const enabled = 'export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = true;';
+  const currentSource = await readFile(new URL('../supabase/functions/mcp/household-release.ts', import.meta.url), 'utf8');
+  const off = await revision(currentSource, historical);
+  const on = await revision(currentSource.replace(disabled, enabled), off);
+  const malformed = [];
+  let latest = on;
+  for (const [name, source] of [
+    ['computed value', 'export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = Boolean(0);'],
+    ['indented declaration', ` ${disabled}`],
+    ['trailing comment', `${disabled} // comment`],
+    ['second declaration', `${disabled}\n${enabled}`],
+    ['executable code', `${disabled}\nthrow new Error("SWITCH_EVALUATED");`],
+    ['commented declaration', `// ${disabled}`],
+    ['identifier in comment', `${disabled}\n// HOSTED_HOUSEHOLD_TOOLS_ENABLED`],
+    ['identifier in string', `${disabled}\nconst label = "HOSTED_HOUSEHOLD_TOOLS_ENABLED";`],
+    ['identifier in commented string', `${disabled}\n// "HOSTED_HOUSEHOLD_TOOLS_ENABLED"`],
+    ['CR', `${disabled}\n// comment\r`],
+    ['CRLF', currentSource.replaceAll('\n', '\r\n')],
+    ['U+2028', `${disabled}\n// comment\u2028`],
+    ['U+2029', `${disabled}\n// comment\u2029`],
+    ['U+0085', `${disabled}\n// comment\u0085`],
+    ['NUL', `${disabled}\n// comment\0`],
+    ['non-ASCII', `${disabled}\n// caf\u00e9`],
+    ['ASCII control', `${disabled}\n// comment\x0b`],
+    ['DEL', `${disabled}\n// comment\x7f`],
+    ...['\r', '\u2028', '\u2029'].map(ending => [
+      `comment confusion ${JSON.stringify(ending)}`, `//${ending}/*\n${disabled}\n// */${ending}${enabled}`,
+    ]),
+    ['true hidden in block comment across fake line ending', `//\u2028/*\n${enabled}\n// */\u2028${disabled}`],
+  ]) { latest = await revision(source + '\n', latest); malformed.push([name, latest]); }
+  // A contrary, uncommitted value must never supply the expected catalog.
+  await writeFile(switchPath, 'throw new Error("WORKING_FILE_EVALUATED");\n');
+  const core = ['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on'];
+  const household = ['object_list', 'object_read', 'object_history', 'object_create', 'object_update',
+    'todo_list', 'todo_read', 'todo_queue', 'comment_list', 'todo_create', 'todo_comment',
+    'todo_update', 'todo_assign', 'todo_start', 'todo_set_state'];
+  for (const [name, liveEdgeSha, fileGate, listedTools, count] of [
+    ['pre-switch', historical, '0', [...core, ...household], 23],
+    ['pre-switch with files', historical, '1', [...core, ...household, ...FILE_ONLY], 26],
+    ['exact current file: switch off', off, '0', core, 8],
+    ['switch off with files', off, '1', core, 8],
+    ['current file with switch on', on, '0', [...core, ...household], 23],
+    ['switch on with files', on, '1', [...core, ...household, ...FILE_ONLY], 26],
+  ]) await t.test(name, async t => {
+    assert.equal(listedTools.length, count);
+    const f = await fixture(t, { script: producer, releaseSha: latest, liveEdgeSha, listedTools });
+    const env = { SWARM_HOUSEHOLD_HOSTED_FILE_TRANSPORT: fileGate };
+    const consent = await f.run('consent', [], { env }); assert.equal(consent.exit, 0, consent.output); f.consent = consent.out;
+    const window = await f.run('window', [], { env }); assert.equal(window.exit, 0, window.output);
+    assert.ok(Object.values(window.receipt.controls).every(value => value === true));
+    f.config.listedTools = count === 8 ? [...core, ...household] : core;
+    const negative = await f.run('window', [], { env }); assert.equal(negative.exit, 1, negative.output);
+    assert.match(negative.output, /expected exact ordinary MCP tool set/); await missing(negative.out);
+  });
+  for (const [name, liveEdgeSha] of malformed) await t.test(`${name} refuses before HTTP`, async t => {
+    const f = await fixture(t, { script: producer, releaseSha: latest, liveEdgeSha, listedTools: core });
+    const result = await f.run('consent'); assert.equal(result.exit, 1, result.output);
+    assert.match(result.output, /expected literal hosted household release switch/);
+    assert.doesNotMatch(result.output, /SWITCH_EVALUATED|WORKING_FILE_EVALUATED/);
+    assert.equal(f.events.length, 0); await missing(result.out);
+  });
+});
+
 test('hosted MCP catalog accepts the reviewed release ordinary-plus-household set', async () => {
   assert.equal(releaseTools.length, 23);
   assert.equal(baselineTools.length, 8);

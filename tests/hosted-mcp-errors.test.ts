@@ -175,7 +175,7 @@ test("unknown tool names receive a safe tools/call correction with the existing 
   const serve = handler(async () => { executed++; return { ok: true }; });
   const response = await serve(request("private-token", { seat }));
   assert.equal(response.status, 400);
-  assert.equal(HOSTED_TOOL_TABLE.length, 23, "eight core tools, five object tools and ten to-do/comment tools");
+  assert.equal(HOSTED_TOOL_TABLE.length, 8, "only the eight core coordination tools");
   assert.deepEqual(await response.json(), { jsonrpc: "2.0", id: 1, error: {
     code: -32602,
     message: `Invalid tools/call params. Send name (${HOSTED_TOOL_TABLE.map(tool => tool.name).join(", ")}) and arguments as a JSON object.`,

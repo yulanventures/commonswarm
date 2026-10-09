@@ -13,6 +13,8 @@ inputs are reports, not proof. `docs/design/SWARM-CLOUD.md` remains canonical.
 
 ## 1. Durable shared objects over MCP
 
+**Release decision (Tom, 2026-10-09, EDGE-R3):** hosted MCP exposes only the eight core tools listed below. Household implementations remain in the repository but are hidden by the source-controlled `HOSTED_HOUSEHOLD_TOOLS_ENABLED = false` in `supabase/functions/mcp/household-release.ts`. Hidden names receive the ordinary unknown-tool refusal before execution. A later reviewed household release enables this switch; file tools also require the separate transport gate. This is a source contract, not a deployment receipt.
+
 **Measured:** hosted MCP has exactly eight tools: `claim_seat`, `whoami`, `check`,
 `ask`, `note`, `reply`, `working_on`, and `members`
 (`supabase/functions/mcp/tools.ts:29`). Its content writes are append-only signals,

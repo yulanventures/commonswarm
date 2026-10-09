@@ -28,6 +28,7 @@ export const ORDINARY_TOOLS = ['claim_seat', 'whoami', 'members', 'ask', 'check'
 const PROTOCOL_MODULE = new URL('../supabase/functions/_shared/protocol.js', import.meta.url);
 const PRODUCER_TREE = fileURLToPath(new URL('../', import.meta.url));
 const PROTOCOL_PATH = 'supabase/functions/_shared/protocol.js';
+const HOUSEHOLD_RELEASE_PATH = 'supabase/functions/mcp/household-release.ts';
 const seatName = release => `c1-controls-runner-${release.slice(0, 8)}`;
 const uuidOK = id => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id) &&
   id !== '00000000-0000-4000-8000-000000000000';
@@ -127,6 +128,24 @@ async function liveMcpToolNames(o) {
     demand((await git(['cat-file', '-t', sha])).trim() === 'commit', 'edge and release commit SHAs', 'not a commit');
   }
   await git(['merge-base', '--is-ancestor', live, release]);
+  const switchEntry = (await git(['ls-tree', live, '--', HOUSEHOLD_RELEASE_PATH])).trim();
+  if (switchEntry) {
+    demand(/^100644 blob [a-f0-9]{40}\t/.test(switchEntry),
+      'literal hosted household release switch', 'release switch is not a regular source file');
+    const source = await git(['show', `${live}:${HOUSEHOLD_RELEASE_PATH}`]);
+    // Reject non-ASCII and non-LF line endings before filtering comments: the
+    // TypeScript lexer would otherwise see declarations that this reader hides.
+    demand(!/[^\x09\x0A\x20-\x7E]/.test(source),
+      'literal hosted household release switch', 'malformed release switch');
+    // Parse source text only. Permit comments and blank lines around one exact
+    // declaration; refuse any other identifier occurrence, including comments.
+    const lines = source.split('\n').filter(line => line.trim() !== '' && !line.startsWith('//'));
+    demand(source.split('HOSTED_HOUSEHOLD_TOOLS_ENABLED').length === 2 && lines.length === 1 && [
+      'export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = false;',
+      'export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = true;',
+    ].includes(lines[0]), 'literal hosted household release switch', 'malformed release switch');
+    if (lines[0] === 'export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = false;') return [...ORDINARY_TOOLS];
+  }
   const bytes = await git(['show', `${live}:${PROTOCOL_PATH}`]);
   let protocol;
   try { protocol = await import(`data:text/javascript;base64,${Buffer.from(bytes).toString('base64')}`); }

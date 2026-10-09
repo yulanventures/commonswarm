@@ -144,7 +144,7 @@ test("Claude initialization negotiates versions before initialized and tools/lis
         const tools = await listed.json();
         ListToolsResultSchema.parse(tools.result);
         assert.equal(tools.id, `${id}-list`);
-        assert.equal(tools.result.tools.length, 23);
+        assert.equal(tools.result.tools.length, 8);
         assert.ok(tools.result.tools.every((tool: { name: unknown; inputSchema: unknown }) =>
           typeof tool.name === "string" && typeof tool.inputSchema === "object"));
         for (const tool of tools.result.tools) {
@@ -189,10 +189,8 @@ test("tools/list preserves coordination titles, safety annotations and OAuth sec
     ["members", "List workspace participants", true, false, true],
   ] as const;
   const tools = envelope.result.tools;
-  // Five existing hosted object tools plus ten to-do/comment tools (files remain gated).
-  assert.equal(tools.length, 23);
-  assert.deepEqual(tools.slice(8).map((tool: { name: string }) => tool.name), HOUSEHOLD_TOOL_REGISTRY.filter(tool => tool.objectTypes.some(kind => kind !== 'file')).map(tool => tool.name));
-  assert.deepEqual(tools.slice(0, 8).map((tool: { name: string }) => tool.name), expected.map(([name]) => name));
+  assert.equal(tools.length, 8);
+  assert.deepEqual(tools.map((tool: { name: string }) => tool.name), expected.map(([name]) => name));
   for (const [index, [name, title, readOnlyHint, destructiveHint, idempotentHint]] of expected.entries()) {
     await t.test(name, () => {
       assert.deepEqual({ title: tools[index].title, annotations: tools[index].annotations, securitySchemes: tools[index].securitySchemes }, {
@@ -210,10 +208,8 @@ test("every tools/list annotation follows the declared effect and the catalog co
   const tools = (await response.json()).result.tools;
   const declared = [
     ...CORE_TOOL_TABLE.map(row => ({ name: row.name, read: row.effect === "read", idempotent: row.name !== "check" })),
-    ...HOUSEHOLD_TOOL_REGISTRY.filter(row => row.objectTypes.some(kind => kind !== "file"))
-      .map(row => ({ name: row.name, read: row.effect === "read", idempotent: true })),
   ];
-  assert.equal(tools.length, 23);
+  assert.equal(tools.length, 8);
   assert.equal(declared.length, tools.length);
   assert.equal(new Set(declared.map(row => row.name)).size, tools.length);
   assert.deepEqual(tools.map((row: { name: string }) => row.name).sort(), declared.map(row => row.name).sort());
@@ -225,8 +221,40 @@ test("every tools/list annotation follows the declared effect and the catalog co
     }, row.name);
     assert.equal("effect" in tool, false, "effect declarations stay off the MCP wire");
   }
-  assert.equal(declared.filter(row => !row.read).length, 14);
-  assert.equal(declared.filter(row => row.read).length, 9);
+  assert.equal(declared.filter(row => !row.read).length, 6);
+  assert.equal(declared.filter(row => row.read).length, 2);
+});
+
+test("every household tool, including file tools, receives the unknown-tool refusal before execution", async (t) => {
+  const calls: string[] = [];
+  const serve = handler({ executeTool: async ({ name }) => { calls.push(name); return { ok: true }; } });
+  t.mock.method(console, "error", () => undefined);
+  const call = (name: string, args: unknown) => serve(post({
+    jsonrpc: "2.0", id: "hidden-tool", method: "tools/call", params: { name, arguments: args },
+  }));
+  const control = await call("whoami", { seat: "seat_ABCDEFGHIJKLMNOPQRSTUV" });
+  assert.equal(control.status, 200);
+  assert.deepEqual(calls, ["whoami"], "authenticated positive control reaches execution");
+  const unknown = await call("unknown_tool", {});
+  assert.equal(unknown.status, 400);
+  const expected = await unknown.json();
+  assert.deepEqual(expected, {
+    jsonrpc: "2.0", id: "hidden-tool", error: {
+      code: -32602,
+      message: "Invalid tools/call params. Send name (claim_seat, whoami, check, ask, note, reply, working_on, members) and arguments as a JSON object.",
+    },
+  });
+  assert.equal(HOUSEHOLD_TOOL_REGISTRY.length, 18, "enumerate all fifteen household and three gated file tools");
+  for (const { name } of HOUSEHOLD_TOOL_REGISTRY) {
+    // Validity of arguments must never reveal a hidden tool's schema.
+    for (const args of [{ seat: "seat_ABCDEFGHIJKLMNOPQRSTUV" }, null]) {
+      const response = await call(name, args);
+      assert.equal(response.status, unknown.status, name);
+      assert.deepEqual(await response.json(), expected, name);
+    }
+    assert.throws(() => validateHostedToolArguments(name, {}), /Unknown or unavailable tool\./u, name);
+  }
+  assert.deepEqual(calls, ["whoami"], "hidden names never reach a handler or household reads");
 });
 
 test("signed JWT scope is required before every protected MCP method; invalid tokens still return 401", async (t) => {
@@ -524,7 +552,7 @@ test("protected-resource metadata and the unauthenticated challenge name exact U
 });
 
 test("hosted tool table is closed and exposes no local or credential operations", () => {
-  assert.deepEqual(HOSTED_TOOL_TABLE.slice(0, 8).map(({ name }) => name), [
+  assert.deepEqual(HOSTED_TOOL_TABLE.map(({ name }) => name), [
     "claim_seat", "whoami", "check", "ask", "note", "reply", "working_on", "members",
   ]);
   for (const tool of HOSTED_TOOL_TABLE) {
@@ -698,7 +726,7 @@ test("origin and schema denials include authenticated positive controls", async 
     origin: "https://claude.ai",
   }));
   assert.equal(list.status, 200);
-  assert.equal((await list.json()).result.tools.length, 23);
+  assert.equal((await list.json()).result.tools.length, 8);
 
   const originDenied = await serve(post({ jsonrpc: "2.0", id: 2, method: "tools/list" }, {
     origin: "https://attacker.invalid",

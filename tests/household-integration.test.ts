@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-// @ts-expect-error TS5097: edge source is exercised through tsx.
-import { HOSTED_TOOL_TABLE, validateHostedToolArguments, HostedToolInputError } from '../supabase/functions/mcp/tools.ts';
+import { hostedHouseholdRelease } from './support/hosted-household-release.js';
 // @ts-expect-error TS5097: edge source is exercised through tsx.
 import { parseHouseholdAttachment, HouseholdAttachmentError } from '../supabase/functions/command/household-attachments.ts';
 
-test('hosted content admission accepts valid patches and rejects model-supplied transfers before execution', () => {
+test('future household release content admission accepts valid patches and rejects model-supplied transfers before execution', async () => {
+  const { HOSTED_TOOL_TABLE, validateHostedToolArguments, HostedToolInputError } = await hostedHouseholdRelease(true);
   const args = { seat: 'seat_' + 'a'.repeat(22), request_id: 'request_001', object_id: 'notes',
     title: 'Notes', content: { kind: 'doc', markdown: 'Synthetic notes' } };
   assert.deepEqual(validateHostedToolArguments('object_create', args), args);
