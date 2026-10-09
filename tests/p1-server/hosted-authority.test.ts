@@ -102,7 +102,7 @@ const commandInput = (workspaceId, name, commandId) => ({
   client_version: "0.1.0",
   workspace_id: workspaceId,
   stream: { kind: "workspace" },
-  command: { kind: "claim_hosted_seat", name },
+  command: { kind: "claim_hosted_seat", name, intent: "new", lifetime: "durable" },
 });
 
 async function capability(grantId, ownerUserId, workspaceId) {
@@ -128,15 +128,20 @@ function reportNon2xx(label, result) {
 }
 
 async function claim(spec, existingCapability) {
-  const cap = existingCapability ?? await capability(
-    spec.grantId,
-    spec.ownerUserId,
-    spec.workspaceId,
-  );
-  return reportNon2xx("hosted", await handleHostedCommand(
-    commandInput(spec.workspaceId, spec.name, spec.commandId),
-    cap,
-  ));
+  const cap = existingCapability ?? await capability(spec.grantId, spec.ownerUserId, spec.workspaceId);
+  const result = reportNon2xx("hosted", await handleHostedCommand(commandInput(spec.workspaceId, spec.name, spec.commandId), cap));
+  // Legacy authority tests below retain their pre-cutover handle/check fixtures.
+  // New allocation/replay/quotas are exercised without this bridge in
+  // hosted-context-allocation.test.ts. Phase 3 replaces these legacy resolvers.
+  if (result.status === 200 && result.body.outcome === "created") {
+    const r = result.body;
+    await db.begin(async tx => {
+      await tx\`SELECT set_config('role','swarm_command',true)\`;
+      await tx\`INSERT INTO swarm.hosted_mcp_seat_handles(handle,seat_id,grant_id,workspace_id,principal_id,created_at)
+        VALUES(\${r.handle},\${r.seat_id}::uuid,\${r.grant_id}::uuid,\${r.workspace_id}::uuid,\${r.principal_id}::uuid,\${new Date(r.created_at)})\`;
+    });
+  }
+  return result;
 }
 
 async function publicCommand(bearer, workspaceId, body, commandId = crypto.randomUUID()) {
@@ -216,6 +221,13 @@ async function race() {
         commandId: crypto.randomUUID(),
       }, secondCapability);
     }
+    if (input.competitor === "mint") {
+      const minted=await publicCommand(input.ownerJwt,hostedSpec.workspaceId,{
+        kind:"mint_agent_join_credential",seat_cap:1,ttl_hours:4,
+      });
+      delete minted.body.join_credential;
+      return minted;
+    }
     if (input.competitor === "h0") {
       return await publicCommand(joinCredential, crypto.randomUUID(), {
         kind: "register_agent_seat",
@@ -229,17 +241,47 @@ async function race() {
       ...(input.competitor === "duplicate" ? { allow_duplicate_name: true } : {}),
     });
   };
-  if (input.order === "concurrent") {
-    return await Promise.all([claim(hostedSpec, firstCapability), runCompetitor()]);
+  if (input.ceilingRace) {
+    const [existing] = await db\`SELECT count(*)::int AS n FROM swarm.agent_principals WHERE workspace_id=\${hostedSpec.workspaceId}::uuid AND revoked_at IS NULL AND identity_lifetime='durable'\`;
+    for (let i=existing.n;i<49;i++) await db\`INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name)
+      VALUES(\${crypto.randomUUID()}::uuid,\${hostedSpec.workspaceId}::uuid,\${hostedSpec.ownerUserId}::uuid,\${'capacity-'+i})\`;
   }
-  if (input.order === "competitor-first") {
-    const competitor = await runCompetitor();
-    const hosted = await claim(hostedSpec, firstCapability);
-    return [hosted, competitor];
-  }
-  const hosted = await claim(hostedSpec, firstCapability);
-  const competitor = await runCompetitor();
-  return [hosted, competitor];
+  const postgres = (await import("npm:postgres@3.4.9")).default;
+  const observer = postgres(Deno.env.get("SWARM_DATABASE_URL"), {max:2,prepare:false});
+  const started=performance.now();
+  let left, right, blocked=0;
+  try {
+    await observer.begin(async barrier => {
+      const [holder]=await barrier\`SELECT pg_backend_pid() AS pid\`;
+      await barrier\`SELECT pg_advisory_xact_lock(hashtext(\${hostedSpec.workspaceId}::text),hashtext('principal-ceiling'))\`;
+      const waitForBlocked = async count => {
+        const deadline=performance.now()+10_000;
+        while(performance.now()<deadline){
+          const [row]=await observer\`
+            WITH RECURSIVE waiting(pid) AS (
+              SELECT pid FROM pg_stat_activity WHERE \${holder.pid}::int=ANY(pg_blocking_pids(pid))
+              UNION
+              SELECT a.pid FROM pg_stat_activity a JOIN waiting w ON w.pid=ANY(pg_blocking_pids(a.pid))
+            ) SELECT count(DISTINCT pid)::int AS n FROM waiting\`;
+          if(row.n>=count){blocked=row.n;return;}
+          await new Promise(resolve=>setTimeout(resolve,20));
+        }
+        throw new Error('creation transactions did not overlap at ceiling barrier');
+      };
+      // Force both queue orders; neither transaction may commit before release.
+      if(input.order==='competitor-first'){
+        right=runCompetitor();right.catch(()=>{});await waitForBlocked(1);
+        left=claim(hostedSpec,firstCapability);left.catch(()=>{});
+      }else{
+        left=claim(hostedSpec,firstCapability);left.catch(()=>{});await waitForBlocked(1);
+        right=runCompetitor();right.catch(()=>{});
+      }
+      await waitForBlocked(2);
+    });
+    const results=await Promise.all([left,right]);
+    return {results,blocked,elapsed:performance.now()-started};
+  }finally{await observer.end({timeout:2});}
+
 }
 
 async function capRace() {
@@ -407,6 +449,7 @@ async function seedHostedFixture(grantBOwnerIsOther = false): Promise<HostedFixt
     otherJwt: other.jwt,
   };
   await sql.begin(async (tx) => {
+    await tx`UPDATE swarm.config SET value='true'::jsonb WHERE key='hosted_context_allocation_enabled'`;
     await tx`
       INSERT INTO swarm.users (user_id, display_name)
       VALUES (${fixture.owner}::uuid, 'HM owner'), (${fixture.other}::uuid, 'HM other')
@@ -485,6 +528,7 @@ function runHostedHarness<T>(input: Record<string, unknown>): T {
       PATH: process.env.PATH ?? "",
       ...(process.env.DENO_DIR ? { DENO_DIR: process.env.DENO_DIR } : {}),
       SWARM_ENV: "test",
+      ...(input.operation === "race" ? { SWARM_CMD_TEST_SLEEP_AFTER_STEP: "2:50" } : {}),
       SWARM_DATABASE_URL: local.DB_URL,
       SUPABASE_DB_URL: local.DB_URL,
       SUPABASE_URL: local.API_URL,
@@ -605,6 +649,7 @@ test("catalog rollback preserves every receipt kind and reapply is search-path i
     // M1 adds a real FK to hosted grants. Reverse newer, data-free schema first
     // in an empty DDL snapshot; retain every original grant/artifact/receipt.
     await tx.unsafe(emptySchema);
+    await tx.unsafe(repoSql("deploy/release-proofs/session-identity/20261006000003-rollback.sql"));
     for (const version of [...adminVersions].reverse()) {
       await tx.unsafe(repoSql(`supabase/admin-delegation-reserve/${version}-rollback.sql`));
     }
@@ -689,104 +734,69 @@ test("catalog rollback preserves every receipt kind and reapply is search-path i
   });
 });
 
-test("all five hosted-name races enter the real command paths", { timeout: 180_000 }, async () => {
-  const fixture = await seedHostedFixture();
-  const cases: Array<{
-    label: string;
-    competitor: "hosted" | "ordinary" | "duplicate" | "h0";
-    grantId: string;
-  }> = [
-    { label: "same-grant", competitor: "hosted", grantId: fixture.grantA },
-    { label: "different-grant", competitor: "hosted", grantId: fixture.grantB },
-    { label: "ordinary", competitor: "ordinary", grantId: fixture.grantA },
-    { label: "duplicate-enabled", competitor: "duplicate", grantId: fixture.grantA },
-    { label: "h0-registration", competitor: "h0", grantId: fixture.grantA },
-  ];
-  for (const { label, competitor, grantId } of cases) {
+interface RaceReceipt { results: HarnessResult[]; blocked: number; elapsed: number }
+
+test("overlapping hosted/local name transactions commit unique addresses in both queue orders", { timeout: 240_000 }, async () => {
+  for (const competitor of ["hosted", "ordinary", "duplicate", "h0"] as const) {
     for (const order of ["hosted-first", "competitor-first"] as const) {
-      const caseLabel = `${label}/${order}`;
-      const name = `race-${label}-${randomUUID().slice(0, 8)}`;
-      const results = runHostedHarness<HarnessResult[]>({
-        operation: "race",
-        order,
-        competitor,
-        competingGrantId: grantId,
-        ownerJwt: fixture.ownerJwt,
-        hosted: claimSpec(fixture, fixture.grantA, fixture.workspaceA, name),
-      });
-      assert.equal(results.length, 2, caseLabel);
-      if (label === "same-grant") {
-        assert.deepEqual(results.map((result) => result.status), [200, 200], caseLabel);
-        assert.equal(results[0]?.body.seat_id, results[1]?.body.seat_id,
-          "the same grant/workspace/name reuses one seat");
+      const fixture = await seedHostedFixture();
+      const name = `race-${randomUUID().slice(0,8)}`;
+      const receipt = runHostedHarness<RaceReceipt>({ operation: "race", order, competitor,
+        competingGrantId: fixture.grantB, ownerJwt: fixture.ownerJwt,
+        hosted: claimSpec(fixture, fixture.grantA, fixture.workspaceA, name) });
+      const results = receipt.results;
+      assert.equal(receipt.blocked, 2, "both real command transactions wait before barrier release");
+      assert.ok(receipt.elapsed < 30_000, "bounded completion without deadlock or hang");
+      assert.equal(results[0]?.status, 200, "hosted new chooses an available address");
+      if (competitor === "hosted") {
+        assert.equal(results[1]?.status, 200);
+        assert.notEqual(results[0]?.body.principal_id, results[1]?.body.principal_id);
+        assert.notEqual(results[0]?.body.name, results[1]?.body.name);
+      } else if (order === "competitor-first") {
+        assert.equal(results[1]?.status, 200, "local same-route creation succeeds when first");
+        assert.equal(results[0]?.body.adjustment_reason, "collision");
+        assert.notEqual(results[0]?.body.name, name);
+      } else if (competitor === "h0") {
+        assert.equal(results[1]?.status, 409);
+        assert.equal(results[1]?.body.reason, "hosted_seat_name_taken");
       } else {
-        const winner = order === "hosted-first" ? results[0] : results[1];
-        const loser = order === "hosted-first" ? results[1] : results[0];
-        assert.equal(winner?.status, 200, `${caseLabel}: winner status`);
-        assert.equal(winner?.body.status, "accepted", `${caseLabel}: winner body`);
-        if (competitor === "hosted" || competitor === "h0" ||
-            order === "competitor-first") {
-          assert.equal(loser?.status, 409, `${caseLabel}: hosted loser status`);
-          assert.equal(
-            loser?.body.error,
-            "hosted_seat_name_taken",
-            `${caseLabel}: hosted loser code`,
-          );
-          assert.equal(
-            loser?.body.message,
-            "That name is taken in this workspace; choose another.",
-            `${caseLabel}: hosted loser message`,
-          );
-          if (competitor === "h0" && order === "hosted-first") {
-            assert.equal(
-              loser?.body.reason,
-              "hosted_seat_name_taken",
-              `${caseLabel}: H0 loser reason`,
-            );
-          }
-        } else {
-          assert.equal(loser?.status, 200, `${caseLabel}: ordinary loser status`);
-          assert.equal(
-            loser?.body.reason,
-            "principal_name_taken",
-            `${caseLabel}: ordinary loser code`,
-          );
-        }
+        assert.equal(results[1]?.body.reason, "principal_name_taken");
       }
-      const rows = await sql<{ n: string }[]>`
-        SELECT count(*)::text AS n FROM swarm.agent_principals
-        WHERE workspace_id = ${fixture.workspaceA}::uuid AND name = ${name}
-      `;
-      assert.equal(Number(rows[0]?.n), 1, caseLabel);
+      const [row] = await sql`SELECT count(*)::int AS n FROM swarm.agent_principals WHERE workspace_id=${fixture.workspaceA}::uuid AND name=${name}`;
+      assert.equal(row!.n, 1, "one exact address committed");
+      const [duplicates] = await sql`SELECT count(*)::int AS n FROM (
+        SELECT name FROM swarm.agent_principals WHERE workspace_id=${fixture.workspaceA}::uuid AND revoked_at IS NULL
+        GROUP BY name HAVING count(*)>1) duplicates`;
+      assert.equal(duplicates!.n, 0, "every committed live address is unique");
+      const [counts] = await sql`SELECT count(*)::int AS durable FROM swarm.agent_principals
+        WHERE workspace_id=${fixture.workspaceA}::uuid AND revoked_at IS NULL AND identity_lifetime='durable'`;
+      assert.equal(counts!.durable, competitor === "hosted" ? 2 : competitor === "h0" ? (order === "competitor-first" ? 3 : 2) : order === "competitor-first" ? 2 : 1,
+        "only successful identities and the live H0 registrar consume capacity");
     }
   }
 });
 
-test("claim path keeps every creation path on the shared locks", async () => {
-  const source = await readFile(commandUrl, "utf8");
-  const claimStart = source.indexOf("async function claimHostedSeat(");
-  const claimEnd = source.indexOf("\nasync function handleTransaction(", claimStart);
-  assert.ok(claimStart >= 0 && claimEnd > claimStart);
-  const claim = source.slice(claimStart, claimEnd);
-  assert.match(claim, /await lockPrincipalName\(tx, route, input\.command\)/);
-  const grantLockStart = claim.indexOf("const lockedGrantRows =");
-  const grantLockEnd = claim.indexOf("const grant = lockedGrantRows[0]", grantLockStart);
-  assert.ok(grantLockStart >= 0 && grantLockEnd > grantLockStart);
-  assert.match(
-    claim.slice(grantLockStart, grantLockEnd),
-    /FROM swarm\.hosted_mcp_grants[\s\S]*WHERE grant_id = \$\{resolved\.grant_id\}::uuid\s+FOR UPDATE\s+`/,
-    "the real claim transaction locks the grant before counting seats",
-  );
-  assert.equal(
-    [...source.matchAll(/await lockPrincipalName\(/gu)].length,
-    4,
-    "registration, join mint, ordinary creation, and hosted claim all take the shared name lock",
-  );
-  assert.equal(
-    [...source.matchAll(/await hostedNameReserved\(/gu)].length,
-    3,
-    "every non-hosted principal creation path refuses a live hosted reservation",
-  );
+test("overlapping hosted, H0, local and join-mint creation serialize the last durable slot", { timeout: 300_000 }, async () => {
+  for (const competitor of ["hosted", "ordinary", "duplicate", "h0", "mint"] as const) {
+    for (const order of ["hosted-first", "competitor-first"] as const) {
+      const fixture = await seedHostedFixture();
+      const receipt = runHostedHarness<RaceReceipt>({operation:"race",ceilingRace:true,order,competitor,
+        competingGrantId:fixture.grantB,ownerJwt:fixture.ownerJwt,
+        hosted:claimSpec(fixture,fixture.grantA,fixture.workspaceA,`last-${randomUUID().slice(0,8)}`)});
+      assert.equal(receipt.blocked, 2, `${competitor}/${order}: transactions really overlap`);
+      assert.ok(receipt.elapsed < 30_000, `${competitor}/${order}: bounded completion`);
+      assert.equal(receipt.results.filter(r=>r.status===200).length,1,"exactly one last-slot winner");
+      assert.equal(receipt.results[order === "hosted-first" ? 0 : 1]?.status,200,"same-route positive control in each queue order");
+      assert.equal(receipt.results.find(r=>r.status!==200)?.body.error,"principal_limit_reached","loser reaches the durable ceiling");
+      const [count]=await sql`SELECT count(*)::int AS n FROM swarm.agent_principals
+        WHERE workspace_id=${fixture.workspaceA}::uuid AND revoked_at IS NULL AND identity_lifetime='durable'`;
+      assert.equal(count!.n,50,"committed durable count never exceeds 50");
+      const [duplicates]=await sql`SELECT count(*)::int AS n FROM (
+        SELECT name FROM swarm.agent_principals WHERE workspace_id=${fixture.workspaceA}::uuid AND revoked_at IS NULL
+        GROUP BY name HAVING count(*)>1) duplicates`;
+      assert.equal(duplicates!.n,0,"capacity race preserves unique committed names");
+    }
+  }
 });
 
 test("real claim path serializes the ten-seat cap across workspaces", { timeout: 120_000 }, async () => {
@@ -840,7 +850,7 @@ test("revocation is rechecked by the real claim idempotency replay", { timeout: 
   `;
   const refused = runHostedHarness<HarnessResult>({ operation: "claim", claim });
   assert.equal(refused.status, 403);
-  assert.equal(refused.body.error, "hosted_seat_revoked");
+  assert.equal(refused.body.error, "identity_resume_unavailable");
 });
 
 test("real hosted entry avoids GoTrue while the real human handler calls it", { timeout: 120_000 }, async () => {
@@ -1070,8 +1080,9 @@ test("same-owner hosted reclaim makes fresh identities and preserves removed row
   for (const field of ["seat", "principal", "handle"]) assert.ok(oldRevoked[0]![field].revoked_at);
   const sameGrant = claimSeat(fixture, fixture.grantA, name);
   const reused = claimSeat(fixture, fixture.grantA, name);
-  for (const field of ["seat_id", "principal_id", "handle"]) assert.equal(reused.body[field], sameGrant.body[field]);
-  assert.deepEqual(reused.body.event_ids, [], "live replacement reuses despite revoked same-name history");
+  for (const field of ["seat_id", "principal_id", "handle"]) assert.notEqual(reused.body[field], sameGrant.body[field]);
+  assert.equal(reused.body.adjustment_reason, "collision", "fresh intent creates a separate suffixed identity");
+  assert.equal((reused.body.event_ids as unknown[]).length, 1);
   for (const field of ["seat_id", "principal_id", "handle"]) assert.notEqual(sameGrant.body[field], old.body[field]);
   assert.deepEqual(await hostedRows(old.body.seat_id), oldRevoked, "reclaim never edits removed identity rows");
   const signalsAfter = await sql`
@@ -1176,7 +1187,7 @@ test("app-removed orphan is reclaimable at the hosted seat limit while new names
   assert.equal(catalog?.catalog_ok, true, "010 catalog still proves the live-name schema after app reclaim");
 });
 
-test("foreign-owner revoked name is refused with a same-owner positive control", { timeout: 120_000 }, async () => {
+test("foreign-owner revoked name stays reserved while new chooses a separate suffix", { timeout: 120_000 }, async () => {
   const fixture = await seedHostedFixture(true);
   const name = `foreign-${randomUUID()}`;
   const old = claimSeat(fixture, fixture.grantA, name);
@@ -1184,9 +1195,9 @@ test("foreign-owner revoked name is refused with a same-owner positive control",
   const refused = runHostedHarness<HarnessResult>({ operation: "claim", claim: {
     ...claimSpec(fixture, fixture.grantB, fixture.workspaceA, name), ownerUserId: fixture.other,
   } });
-  assert.equal(refused.status, 409);
-  assert.equal(refused.body.error, "hosted_seat_name_taken");
-  assert.equal(refused.body.message, "That name is taken in this workspace; choose another.");
+  assert.equal(refused.status, 200);
+  assert.equal(refused.body.adjustment_reason, "collision");
+  assert.notEqual(refused.body.name, name);
   claimSeat(fixture, fixture.grantA, name);
 });
 
@@ -1200,7 +1211,7 @@ test("revoked grant cannot reclaim using a previously authenticated capability",
   });
   assert.equal(result.revoked.status, 200);
   assert.equal(result.refused.status, 403);
-  assert.equal(result.refused.body.error, "forbidden");
+  assert.equal(result.refused.body.error, "identity_resume_unavailable");
   claimSeat(fixture, fixture.grantB, name);
 });
 
@@ -1218,23 +1229,22 @@ test("old hosted handle is refused and replacement handle authenticates", { time
   assertAcceptedSeatNote(accepted, next.body.principal_id);
 });
 
-test("concurrent claims of a revoked name yield exactly one new live identity", { timeout: 180_000 }, async () => {
+test("concurrent fresh claims of a revoked name create distinct identities with one exact base address", { timeout: 180_000 }, async () => {
   const fixture = await seedHostedFixture();
   for (const competingGrantId of [fixture.grantA, fixture.grantB]) {
     const name = `concurrent-reclaim-${randomUUID()}`;
     const old = claimSeat(fixture, fixture.grantA, name);
     await removeHostedSeat(fixture, fixture.grantA, old.body.seat_id);
-    const results = runHostedHarness<HarnessResult[]>({ operation: "race", order: "concurrent",
+    const receipt = runHostedHarness<RaceReceipt>({ operation: "race", order: "concurrent",
       competitor: "hosted", competingGrantId,
       hosted: claimSpec(fixture, fixture.grantA, fixture.workspaceA, name),
     });
-    if (competingGrantId === fixture.grantA) {
-      assert.deepEqual(results.map(row => row.status), [200, 200]);
-      assert.equal(results[0]!.body.seat_id, results[1]!.body.seat_id);
-    } else {
-      assert.deepEqual(results.map(row => row.status).sort(), [200, 409]);
-      assert.equal(results.find(row => row.status === 409)?.body.error, "hosted_seat_name_taken");
-    }
+    assert.equal(receipt.blocked, 2, "transactions really overlap");
+    assert.ok(receipt.elapsed < 30_000, "bounded completion");
+    const results = receipt.results;
+    assert.deepEqual(results.map(row => row.status), [200, 200]);
+    assert.notEqual(results[0]!.body.seat_id, results[1]!.body.seat_id);
+    assert.notEqual(results[0]!.body.name, results[1]!.body.name);
     const principals = await sql<{ principal_id: string; revoked_at: Date | null }[]>`
       SELECT principal_id, revoked_at FROM swarm.agent_principals
       WHERE workspace_id = ${fixture.workspaceA}::uuid AND name = ${name}

@@ -60,6 +60,8 @@ export type HostedAuthorityCommand =
       workspace_id: string;
       owner_user_id: string;
       name: string;
+      intent?: 'new' | 'continue';
+      identity_lifetime?: 'durable' | 'ephemeral';
     };
 
 export type HostedAuthorityEventType =
@@ -103,6 +105,7 @@ export interface HostedSeatFacts {
   revoked_at: number | null;
   handle_revoked_at: number | null;
   principal_revoked_at: number | null;
+  identity_lifetime?: 'durable' | 'ephemeral';
 }
 
 export interface HostedAuthorityFacts {
@@ -157,6 +160,7 @@ export interface HostedAuthorityState {
     turn_only: true;
     created_at: number;
     revoked_at: number | null;
+    identity_lifetime?: 'durable' | 'ephemeral';
   }>;
 }
 
@@ -351,8 +355,13 @@ export function decideHostedAuthority(
     return refuse('domain', 'hosted_seat_name_invalid', 'Seat names must be 1 to 80 characters, have no leading or trailing spaces, and contain no control characters.');
   }
   const liveNamePrincipals = facts.exact_name_principals.filter((p) => !p.revoked);
-  if (facts.seat !== null) {
+  if (facts.seat !== null && command.intent === 'continue') {
     const seat = facts.seat;
+    if (seat.grant_id !== grant.grant_id || seat.owner_user_id !== grant.owner_user_id ||
+        seat.workspace_id !== ctx.workspace_id || seat.name !== command.name ||
+        seat.identity_lifetime === 'ephemeral') {
+      return refuse('authz', 'identity_resume_unavailable', 'This connection cannot resume that identity.');
+    }
     if (seat.revoked_at !== null || seat.handle_revoked_at !== null ||
         seat.principal_revoked_at !== null || seat.transport !== 'hosted_mcp' ||
         seat.turn_only !== true) {
@@ -369,7 +378,7 @@ export function decideHostedAuthority(
   )) {
     return refuse('domain', HOSTED_SEAT_NAME_TAKEN.code, HOSTED_SEAT_NAME_TAKEN.message);
   }
-  if (facts.live_seat_count >= HOSTED_MCP_SEAT_LIMIT) {
+  if ((command.identity_lifetime ?? 'durable') === 'durable' && facts.live_seat_count >= HOSTED_MCP_SEAT_LIMIT) {
     return refuse('domain', 'hosted_seat_limit_reached', `This connection already has ${HOSTED_MCP_SEAT_LIMIT} live seats.`);
   }
   return {
@@ -480,6 +489,7 @@ export function reduceHostedAuthority(
       principal_id: principalId,
       name: String(p.name),
       handle: String(p.handle),
+      identity_lifetime: p.identity_lifetime === 'ephemeral' ? 'ephemeral' : 'durable',
       transport: 'hosted_mcp',
       turn_only: true,
       created_at: Number(p.created_at),
@@ -495,6 +505,7 @@ export function reduceHostedAuthority(
         workspace_id: seat.workspace_id,
         owner_user_id: seat.owner_user_id,
         name: seat.name,
+        identity_lifetime: p.identity_lifetime === 'ephemeral' ? 'ephemeral' : 'durable',
         transport: 'hosted_mcp',
         turn_only: true,
         created_at: seat.created_at,
