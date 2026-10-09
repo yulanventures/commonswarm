@@ -1,0 +1,1 @@
+{"admin_gate": "closed", "authenticated_meta_operator_check": "not-applicable", "baseline_edge_sha": "510943ef25c47cafb4a3baecb863895e7bd03ddd", "closed_at": "2026-10-09T15:36:12Z", "release_sha": "d518d4c9489131e8e121e0c99fcbd2a03e156eab", "result": "rolled-back", "target": "staging", "timer": "active", "window_id": "STGV3B"}
