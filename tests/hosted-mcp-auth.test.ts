@@ -180,6 +180,18 @@ test("insufficient scope logs a client host and exact UTF-8 fingerprint without 
     { client_id: "https://private-user:private-password@BÜCHER.Example:8443/private-hostile-path?private-hostile-query=value", kind: "url", host: "xn--bcher-kva.example", forbidden: ["private-user", "private-password", "8443", "private-hostile-path", "private-hostile-query"] },
     { client_id: "https://bad_host.example/private-invalid-host-path", kind: "url", host: null, forbidden: ["bad_host", "private-invalid-host-path"] },
     { client_id: "https://127.0.0.1/private-ip-path", kind: "url", host: null, forbidden: ["127.0.0.1", "private-ip-path"] },
+    { client_id: "custom://127.1/x", kind: "url", host: null },
+    { client_id: "custom://2130706433/x", kind: "url", host: null },
+    { client_id: "custom://0x7f000001/x", kind: "url", host: null },
+    { client_id: "custom://connector.example/x", kind: "url", host: null },
+    { client_id: "http://connector.example/x", kind: "url", host: null },
+    { client_id: "https://127.1/x", kind: "url", host: null, forbidden: ["127.0.0.1"] },
+    { client_id: "https://2130706433/x", kind: "url", host: null, forbidden: ["127.0.0.1"] },
+    { client_id: "https://0x7f000001/x", kind: "url", host: null, forbidden: ["127.0.0.1"] },
+    { client_id: "https://Connector.Example./x", kind: "url", host: "connector.example." },
+    { client_id: "https://connector.example../x", kind: "url", host: null },
+    { client_id: "https://127.0.0.1./x", kind: "url", host: null, forbidden: ["127.0.0.1"] },
+    { client_id: "https://127.1./x", kind: "url", host: null, forbidden: ["127.0.0.1"] },
     { client_id: "https://[::1]/private-ipv6-path", kind: "url", host: null, forbidden: ["::1", "private-ipv6-path"] },
     { client_id: "https://not a url/private-malformed-path", kind: "opaque", host: null, forbidden: ["not a url", "private-malformed-path"] },
     { client_id: "tiny", kind: "opaque", host: null },
@@ -207,6 +219,44 @@ test("insufficient scope logs a client host and exact UTF-8 fingerprint without 
       client_id_sha256_12: typeof client_id === "string"
         ? createHash("sha256").update(client_id, "utf8").digest("hex").slice(0, 12)
         : null,
+    });
+  }
+});
+
+test("insufficient scope survives digest and logger failures without unhandled rejections", async (t) => {
+  const signing = await key("logging-failures");
+  const source = jwksFetch([{ keys: [signing.publicJwk] }]);
+  const verifier = new McpJwtVerifier({ fetch: source.fetch, now: () => now });
+  const valid = await token(signing);
+  const insufficient = await token(signing, { scope: "openid" });
+
+  for (const failure of ["synchronous digest", "asynchronous digest", "console.warn"] as const) {
+    await t.test(failure, async (t) => {
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        const logging = t.mock.method(console, "warn", () => {
+          if (failure === "console.warn") throw new Error("injected logger failure");
+        });
+        const digest = failure === "console.warn" ? null : t.mock.method(crypto.subtle, "digest", () => {
+          if (failure === "synchronous digest") throw new Error("injected digest failure");
+          return Promise.reject(new Error("injected digest rejection"));
+        });
+        assert.deepEqual(await verifier.verify(valid), {
+          providerGrantId: "provider-grant-1", subject, expiresAt: now + 300,
+        });
+        assert.equal(logging.mock.callCount(), 0);
+        assert.equal(digest?.mock.callCount() ?? 0, 0);
+        await assert.rejects(verifier.verify(insufficient), (error: unknown) =>
+          error instanceof McpTokenError && error.code === "insufficient_scope");
+        assert.equal(logging.mock.callCount(), failure === "console.warn" ? 1 : 0);
+        if (digest !== null) assert.equal(digest.mock.callCount(), 1);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.deepEqual(unhandled, []);
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+      }
     });
   }
 });

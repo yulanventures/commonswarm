@@ -286,14 +286,19 @@ export class McpJwtVerifier {
         let clientHost: string | null = null;
         if (clientId !== null) {
           try {
-            const hostname = new URL(clientId).hostname.toLowerCase();
+            const clientUrl = new URL(clientId);
             clientKind = "url";
-            const dnsName = hostname.endsWith(".") ? hostname.slice(0, -1) : hostname;
-            if (dnsName.length > 0 && dnsName.length <= 253 &&
-                !/^\d+(?:\.\d+){3}$/u.test(dnsName) &&
-                dnsName.split(".").every((label) =>
-                  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label))) {
-              clientHost = hostname;
+            // HTTPS CIMD URLs canonicalize IP spellings; custom schemes keep
+            // opaque hosts that could otherwise pass as DNS names.
+            if (clientUrl.protocol === "https:") {
+              const hostname = clientUrl.hostname.toLowerCase();
+              const dnsName = hostname.endsWith(".") ? hostname.slice(0, -1) : hostname;
+              if (dnsName.length > 0 && dnsName.length <= 253 &&
+                  !/^\d+(?:\.\d+){3}$/u.test(dnsName) && !hostname.startsWith("[") &&
+                  dnsName.split(".").every((label) =>
+                    /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label))) {
+                clientHost = hostname;
+              }
             }
           } catch {
             // An unparseable ID remains opaque; never log the parser error.
