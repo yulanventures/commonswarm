@@ -806,10 +806,15 @@ test("live and maintenance Caddy files keep the box route frame", () => {
 
 const ACCESS_LOG_HEADERS = [
   "Authorization",
+  "DPoP",
+  "Dpop",
+  "DPoP-Nonce",
+  "Dpop-Nonce",
   "Cookie",
   "Set-Cookie",
   "Proxy-Authorization",
   "Apikey",
+  "apikey",
 ] as const;
 
 function accessLogProblems(source: string, fileName: string): string[] {
@@ -830,8 +835,12 @@ function accessLogProblems(source: string, fileName: string): string[] {
         errors.push(`access log exposes ${location}>${header}`);
       }
     }
-    if (!source.includes(`${location}>apikey delete`)) {
-      errors.push(`access log exposes lowercase ${location}>apikey`);
+    const actual = source.split("\n").filter((line) =>
+      line.trim().startsWith(`${location}>`) && line.trim().endsWith(" delete")
+    );
+    const expected = ACCESS_LOG_HEADERS.map((header) => `\t\t\t${location}>${header} delete`);
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      errors.push(`access log ${location} exact redaction list`);
     }
   }
   for (const required of ["request>method", "status", "duration", "size", "ts"]) {
@@ -864,6 +873,28 @@ test("API, maintenance, and MCP access logs are bounded JSON without credentials
     accessLogProblems(caddy.replace("roll_size 10MiB", ""), "api.commonswarm.com").join("\n"),
     /roll size/,
   );
+});
+
+test("all five Caddy sources carry the exact C1 DPoP insertion after Authorization", () => {
+  const sites = [
+    ["commonswarm-api.caddy", apiCaddy],
+    ["commonswarm-mcp.caddy", mcpCaddy],
+    ["commonswarm-edge-staging.caddy", edgeStagingCaddy],
+    ["commonswarm-api-maintenance.caddy", apiMaintenanceCaddy],
+    ["commonswarm-edge-staging-maintenance.caddy", edgeStagingMaintenanceCaddy],
+  ] as const;
+  // Independent C1 W4 contract: three tabs, these four spellings, this order.
+  const c1Headers = ["DPoP", "Dpop", "DPoP-Nonce", "Dpop-Nonce"] as const;
+  for (const [name, source] of sites) {
+    const lines = source.split("\n");
+    for (const prefix of ["request>headers", "resp_headers"]) {
+      const anchor = `\t\t\t${prefix}>Authorization delete`;
+      assert.equal(lines.filter((line) => line === anchor).length, 1, `${name}: ${prefix} anchor`);
+      const expected = c1Headers.map((header) => `\t\t\t${prefix}>${header} delete`);
+      const index = lines.indexOf(anchor);
+      assert.deepEqual(lines.slice(index + 1, index + 5), expected, `${name}: ${prefix} C1 bytes`);
+    }
+  }
 });
 
 const SUPABASE_HOST = /supabase\.co\b/i;

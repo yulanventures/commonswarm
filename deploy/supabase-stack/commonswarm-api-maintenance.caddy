@@ -14,12 +14,20 @@ api.commonswarm.com {
 		format filter {
 			request>uri regexp "\?.*$" ""
 			request>headers>Authorization delete
+			request>headers>DPoP delete
+			request>headers>Dpop delete
+			request>headers>DPoP-Nonce delete
+			request>headers>Dpop-Nonce delete
 			request>headers>Cookie delete
 			request>headers>Set-Cookie delete
 			request>headers>Proxy-Authorization delete
 			request>headers>Apikey delete
 			request>headers>apikey delete
 			resp_headers>Authorization delete
+			resp_headers>DPoP delete
+			resp_headers>Dpop delete
+			resp_headers>DPoP-Nonce delete
+			resp_headers>Dpop-Nonce delete
 			resp_headers>Cookie delete
 			resp_headers>Set-Cookie delete
 			resp_headers>Proxy-Authorization delete
