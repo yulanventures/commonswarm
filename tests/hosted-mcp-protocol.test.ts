@@ -7,7 +7,7 @@ import { MCP_ISSUER, MCP_RESOURCE, McpJwtVerifier } from "../supabase/functions/
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
 import { createMcpProtocolHandler, PROTECTED_RESOURCE_METADATA_PATH, RESOURCE_METADATA_URL, WWW_AUTHENTICATE } from "../supabase/functions/mcp/protocol.ts";
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
-import { HOSTED_TOOL_TABLE, validateHostedToolArguments, type HostedToolExecutor } from "../supabase/functions/mcp/tools.ts";
+import { CORE_TOOL_TABLE, HOSTED_TOOL_TABLE, validateHostedToolArguments, type HostedToolExecutor } from "../supabase/functions/mcp/tools.ts";
 import { HOUSEHOLD_TOOL_REGISTRY } from "../src/protocol/household-tool-registry.js";
 
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
@@ -48,7 +48,7 @@ function post(body: unknown, headers: Record<string, string> = {}): Request {
   });
 }
 
-async function authenticatedHandler() {
+async function authenticatedHandler(executeTool: HostedToolExecutor = async () => { throw new Error("initialize and list must not execute a tool"); }) {
   const now = 1_800_000_000;
   const pair = await crypto.subtle.generateKey(
     { name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"],
@@ -64,16 +64,18 @@ async function authenticatedHandler() {
   const header = Buffer.from(JSON.stringify({
     alg: "ES256", kid: publicJwk.kid, typ: "at+jwt",
   })).toString("base64url");
-  const payload = Buffer.from(JSON.stringify({
-    iss: MCP_ISSUER, aud: MCP_RESOURCE, sub: verified.subject,
-    grant_id: verified.providerGrantId, iat: now, exp: now + 300,
-    scope: "mcp", client_id: "claude-fixture-client",
-  })).toString("base64url");
-  const signature = await crypto.subtle.sign(
-    { name: "ECDSA", hash: "SHA-256" }, pair.privateKey,
-    Buffer.from(`${header}.${payload}`),
-  );
-  const authorization = `Bearer ${header}.${payload}.${Buffer.from(signature).toString("base64url")}`;
+  async function authorization(overrides: Record<string, unknown> = {}) {
+    const payload = Buffer.from(JSON.stringify({
+      iss: MCP_ISSUER, aud: MCP_RESOURCE, sub: verified.subject,
+      grant_id: verified.providerGrantId, iat: now, exp: now + 300,
+      scope: "mcp", client_id: "claude-fixture-client", ...overrides,
+    })).toString("base64url");
+    const signature = await crypto.subtle.sign(
+      { name: "ECDSA", hash: "SHA-256" }, pair.privateKey,
+      Buffer.from(`${header}.${payload}`),
+    );
+    return `Bearer ${header}.${payload}.${Buffer.from(signature).toString("base64url")}`;
+  }
   const serve = createMcpProtocolHandler({
     issuer: MCP_ISSUER, resource: MCP_RESOURCE, publicEnabled: true,
     allowedOrigins: new Set(["https://claude.ai"]),
@@ -82,12 +84,12 @@ async function authenticatedHandler() {
       requestTimeoutMs: 2_000, maxConcurrentRequests: 2,
     },
     verifyToken: (token: string, signal: AbortSignal) => verifier.verify(token, signal),
-    executeTool: async () => { throw new Error("initialize and list must not execute a tool"); },
+    executeTool,
   });
   return {
-    serve,
+    serve, authorization,
     headers: {
-      authorization, "user-agent": "Claude-User",
+      authorization: await authorization(), "user-agent": "Claude-User",
       accept: "application/json, text/event-stream",
     },
   };
@@ -177,13 +179,13 @@ test("tools/list preserves coordination titles, safety annotations and OAuth sec
   // Independent review contract: read-only, destructive, idempotent.
   // check can acknowledge a batch and advance the durable inbox cursor.
   const expected = [
-    ["claim_seat", "Claim a named seat", false, false, true],
+    ["claim_seat", "Claim a named seat", false, true, true],
     ["whoami", "Show seat identity", true, false, true],
     ["check", "Check and acknowledge inbox", false, true, false],
-    ["ask", "Ask workspace participants", false, false, true],
-    ["note", "Share a workspace note", false, false, true],
-    ["reply", "Reply to a signal", false, false, true],
-    ["working_on", "Share current work", false, false, true],
+    ["ask", "Ask workspace participants", false, true, true],
+    ["note", "Share a workspace note", false, true, true],
+    ["reply", "Reply to a signal", false, true, true],
+    ["working_on", "Share current work", false, true, true],
     ["members", "List workspace participants", true, false, true],
   ] as const;
   const tools = envelope.result.tools;
@@ -200,6 +202,70 @@ test("tools/list preserves coordination titles, safety annotations and OAuth sec
       });
     });
   }
+});
+
+test("every tools/list annotation follows the declared effect and the catalog count reconciles", async () => {
+  const response = await handler()(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }));
+  assert.equal(response.status, 200);
+  const tools = (await response.json()).result.tools;
+  const declared = [
+    ...CORE_TOOL_TABLE.map(row => ({ name: row.name, read: row.effect === "read", idempotent: row.name !== "check" })),
+    ...HOUSEHOLD_TOOL_REGISTRY.filter(row => row.objectTypes.some(kind => kind !== "file"))
+      .map(row => ({ name: row.name, read: row.effect === "read", idempotent: true })),
+  ];
+  assert.equal(tools.length, 23);
+  assert.equal(declared.length, tools.length);
+  assert.equal(new Set(declared.map(row => row.name)).size, tools.length);
+  assert.deepEqual(tools.map((row: { name: string }) => row.name).sort(), declared.map(row => row.name).sort());
+  for (const row of declared) {
+    const tool = tools.find((tool: { name: string }) => tool.name === row.name);
+    assert.deepEqual(tool.annotations, {
+      title: tool.title, readOnlyHint: row.read, destructiveHint: !row.read,
+      idempotentHint: row.idempotent, openWorldHint: false,
+    }, row.name);
+    assert.equal("effect" in tool, false, "effect declarations stay off the MCP wire");
+  }
+  assert.equal(declared.filter(row => !row.read).length, 14);
+  assert.equal(declared.filter(row => row.read).length, 9);
+});
+
+test("signed JWT scope is required before every protected MCP method; invalid tokens still return 401", async (t) => {
+  let executions = 0;
+  const fixture = await authenticatedHandler(async () => { executions += 1; return { ok: true }; });
+  t.mock.method(console, "warn", () => undefined);
+  t.mock.method(console, "error", () => undefined);
+  const requests = [
+    { method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "scope-test", version: "1" } } },
+    { method: "tools/list" },
+    { method: "tools/call", params: { name: "whoami", arguments: { seat: "seat_ABCDEFGHIJKLMNOPQRSTUV" } } },
+    { method: "ping" },
+    { method: "notifications/initialized" },
+  ];
+  for (const scope of ["mcp", "openid mcp offline_access", undefined, "", "openid offline_access", "openid", "mcpx"]) {
+    const accepted = scope === "mcp" || scope === "openid mcp offline_access";
+    const authorization = await fixture.authorization({ scope });
+    for (const rpc of requests) {
+      const before = executions;
+      const response = await fixture.serve(post({ jsonrpc: "2.0", id: 1, ...rpc }, { authorization }));
+      assert.equal(response.status, accepted ? (rpc.method === "notifications/initialized" ? 202 : 200) : 403,
+        `${rpc.method}: ${String(scope)}`);
+      if (!accepted) {
+        assert.deepEqual(await response.json(), { error: "insufficient_scope" });
+        assert.equal(response.headers.get("www-authenticate"), `${WWW_AUTHENTICATE}, error="insufficient_scope", scope="mcp"`);
+        assert.equal(executions, before, "insufficient scope cannot dispatch");
+      }
+    }
+  }
+  for (const overrides of [{ scope: undefined, aud: `${MCP_RESOURCE}/wrong` }, { scope: undefined, exp: 1_799_999_000 }]) {
+    const authorization = await fixture.authorization(overrides);
+    for (const rpc of requests) {
+      const response = await fixture.serve(post({ jsonrpc: "2.0", id: 1, ...rpc }, { authorization }));
+      assert.equal(response.status, 401, "claim validation precedes insufficient scope");
+      assert.deepEqual(await response.json(), { error: "unauthorized" });
+      assert.equal(response.headers.get("www-authenticate"), WWW_AUTHENTICATE);
+    }
+  }
+  assert.equal(executions, 2, "only the two mcp-scoped tool calls ran");
 });
 
 test("tool auth errors carry safe WWW-Authenticate metadata while ordinary errors and success do not", async (t) => {

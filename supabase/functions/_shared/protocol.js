@@ -4666,7 +4666,7 @@ var HOUSEHOLD_TOOLS = HOUSEHOLD_TOOL_REGISTRY.map((row) => ({
   annotations: {
     title: row.title,
     readOnlyHint: row.effect === "read",
-    destructiveHint: false,
+    destructiveHint: row.effect !== "read",
     idempotentHint: true,
     openWorldHint: false
   }

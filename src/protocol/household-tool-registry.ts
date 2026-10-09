@@ -384,7 +384,7 @@ export const HOUSEHOLD_TOOLS = HOUSEHOLD_TOOL_REGISTRY.map((row) => ({
   name: row.name, title: row.title,
   description: row.description + (row.effect === 'read' ? '' : ' Retry an unknown outcome with the same request_id and identical input.'),
   inputSchema: row.inputSchema,
-  annotations: { title: row.title, readOnlyHint: row.effect === 'read', destructiveHint: false,
+  annotations: { title: row.title, readOnlyHint: row.effect === 'read', destructiveHint: row.effect !== 'read',
     idempotentHint: true, openWorldHint: false },
 }));
 

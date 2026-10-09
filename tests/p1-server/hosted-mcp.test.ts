@@ -32,6 +32,7 @@ async function fixture() {
       aud: audience,
       sub: subject,
       grant_id: "provider-grant-server-suite",
+      scope: "mcp",
       iat: now,
       exp: now + 300,
     })));

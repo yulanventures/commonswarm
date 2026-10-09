@@ -277,15 +277,42 @@ export class McpJwtVerifier {
             claims.nbf > claims.exp))) {
       throw new McpTokenError("invalid_token");
     }
-    // Measure only after signature and claim validation; retain legacy access.
-    // Follow-up: enforce after 7 days of zero missing-scope events.
     if (typeof claims.scope !== "string" || !claims.scope.split(" ").includes("mcp")) {
-      // Bound and sanitize the prefix, and never emit even a short full ID.
-      const clientIdPrefix = typeof claims.client_id === "string"
-        ? claims.client_id.slice(0, Math.min(8, Math.max(0, claims.client_id.length - 1)))
-          .replace(/[^A-Za-z0-9_-]/gu, "_")
-        : null;
-      console.warn(JSON.stringify({ event: "mcp_missing_scope", client_id_prefix: clientIdPrefix }));
+      // Never emit a full client ID. Operators match the fingerprint against
+      // OAuth clients; URL hosts identify connectors without paths or queries.
+      try {
+        const clientId = typeof claims.client_id === "string" ? claims.client_id : null;
+        let clientKind = clientId === null ? "absent" : "opaque";
+        let clientHost: string | null = null;
+        if (clientId !== null) {
+          try {
+            const hostname = new URL(clientId).hostname.toLowerCase();
+            clientKind = "url";
+            const dnsName = hostname.endsWith(".") ? hostname.slice(0, -1) : hostname;
+            if (dnsName.length > 0 && dnsName.length <= 253 &&
+                !/^\d+(?:\.\d+){3}$/u.test(dnsName) &&
+                dnsName.split(".").every((label) =>
+                  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label))) {
+              clientHost = hostname;
+            }
+          } catch {
+            // An unparseable ID remains opaque; never log the parser error.
+          }
+        }
+        const fingerprint = clientId === null ? null : Array.from(
+          new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(clientId))),
+          (byte) => byte.toString(16).padStart(2, "0"),
+        ).join("").slice(0, 12);
+        console.warn(JSON.stringify({
+          event: "insufficient_scope",
+          client_kind: clientKind,
+          client_host: clientHost,
+          client_id_sha256_12: fingerprint,
+        }));
+      } finally {
+        // Logging must not change the refusal, even if hashing fails.
+        throw new McpTokenError("insufficient_scope");
+      }
     }
     return {
       providerGrantId: claims.grant_id,

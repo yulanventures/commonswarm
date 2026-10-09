@@ -68,7 +68,7 @@ test('all eighteen tool contracts validate and map to lane 1 with spec hints and
     assert.equal(invocation.request_id, readOnlyHint ? undefined : 'request_1');
     assert.deepEqual(HOUSEHOLD_TOOLS.find((tool) => tool.name === name)!.annotations, {
       title: HOUSEHOLD_TOOLS.find((tool) => tool.name === name)!.title,
-      readOnlyHint, destructiveHint: false, idempotentHint: true, openWorldHint: false,
+      readOnlyHint, destructiveHint: !readOnlyHint, idempotentHint: true, openWorldHint: false,
     });
   }
   assert.deepEqual(householdToolInvocation('object_read', { seat, object_id: 'shopping' }, host).objectTypes, ['list', 'doc']);
