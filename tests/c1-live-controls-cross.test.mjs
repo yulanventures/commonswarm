@@ -43,7 +43,7 @@ const redirect = 'https://c1-controls.invalid/callback', resource = `${issuer}/m
 const release = releaseSha, scope = 'openid offline_access mcp';
 const baselineTools = (await catalogAt(baselineEdgeSha, ORDINARY_TOOLS)).names;
 const releaseTools = (await catalogAt(releaseSha, ORDINARY_TOOLS)).names;
-const windowId = 'ABC123';
+const windowId = 'ABC123', controlsPass = 'pass0001';
 const hash = b => createHash('sha256').update(b).digest('hex');
 const b64hash = b => createHash('sha256').update(b).digest('base64url');
 const uid = '11111111-1111-4111-8111-111111111111', wid = 'c2ea0541-f56d-4c73-bf71-56c5405c4934';
@@ -126,9 +126,9 @@ async function liveFixture(t) {
         else if (body.method === 'tools/call') {
           assert.equal(req.headers['mcp-protocol-version'], '2025-06-18');
           assert.equal(body.params.name, 'claim_seat');
-          assert.deepEqual(body.params.arguments, { workspace_id: wid, name: `c1-controls-runner-${release.slice(0, 8)}`,
-            request_id: `c1_controls_claim_${hash(`${release}:${wid}:c1-controls-runner-${release.slice(0, 8)}`).slice(0, 40)}` });
-          result = { content: [{ type: 'text', text: JSON.stringify({ workspace_id: wid, name: `c1-controls-runner-${release.slice(0, 8)}`,
+          assert.deepEqual(body.params.arguments, { workspace_id: wid, name: `c1-controls-runner-${release.slice(0, 8)}-${controlsPass}`,
+            request_id: `c1_controls_claim_${hash(`${release}:${wid}:c1-controls-runner-${release.slice(0, 8)}-${controlsPass}`).slice(0, 40)}` });
+          result = { content: [{ type: 'text', text: JSON.stringify({ workspace_id: wid, name: `c1-controls-runner-${release.slice(0, 8)}-${controlsPass}`,
             seat_id: '44444444-4444-4444-8444-444444444444', handle: 'seat_' + 'a'.repeat(32) }) }] };
         } else {
           assert.equal(body.method, 'tools/list');
@@ -187,6 +187,7 @@ async function liveFixture(t) {
       command === 'final-cleanup' ? ['final-cleanup', '--consent-receipt', f.consent] :
         command === 'probe-credentials' ? ['probe-credentials', '--window', 'W2', '--window-id', windowId, '--consent-receipt', f.consent, '--human-profile', human] :
         ['window', '--phase', 'before', '--window', 'W1', '--window-id', windowId, '--consent-receipt', f.consent, '--human-profile', human, '--seat-profile', seat];
+    if (command === 'window') args.push('--controls-pass', controlsPass);
     if (command !== 'final-cleanup') {
       const phase = extra[extra.indexOf('--phase') + 1], window = extra[extra.indexOf('--window') + 1];
       const switched = phase === 'post-W5' || ['W5', 'W6', 'W7'].includes(window) || (window === 'W4' && phase === 'after');
