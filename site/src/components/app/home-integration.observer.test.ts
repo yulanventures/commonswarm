@@ -14,6 +14,7 @@ import { canStartThread, THREAD_REPLY_CONTROL_LABEL, threadReplyPlace, threadRep
 import { channelLabel } from '../../lib/channels';
 import { parentRoute, routeHref } from '../../lib/home-route';
 import { todoView } from '../../lib/home-todo';
+import { hostedContextChatAuthor } from '../../lib/hosted-context-label';
 
 /** Execute the dashboard's read/write lifecycle, replacing only the DOM paint boundaries.
  * No browser, model, network or customer data. Expected surface states come from UI-SPEC 3.3. */
@@ -419,7 +420,7 @@ test('replying from a stream row preserves the agent ownership label and the roo
   const document = { createElement: (tag: string) => new RowNode(tag) };
   const input = { placeholder: '', setAttribute() {}, focus() {} };
   const target = { textContent: '' };
-  const context = createContext({ document, HTMLElement: RowNode, input, target, mapHomePeople, homeParty,
+  const context = createContext({ document, HTMLElement: RowNode, input, target, mapHomePeople, homeParty, hostedContextChatAuthor,
     buildAuthorLine, buildStreamExtras, deriveStreamExtras, canStartThread, THREAD_REPLY_CONTROL_LABEL,
     threadReplyPlace, threadReplyTargetText, agentLabelInSentence, homeAskAnswered, channelLabel, window: { requestAnimationFrame() {} },
     setSanitizedMessageMarkdown: (node: RowNode, body: string) => { node.textContent = body; }, linkifyBrainTopics() {},
@@ -467,7 +468,7 @@ test('an ask card keeps the full sanitized question, links, topic controls and S
   const frames: (() => void)[] = [];
   const question = 'Which option should we take? '.repeat(24) + '[Read the options](https://example.test/options) Budget';
   let withoutTitle = false;
-  const context = createContext({ document, HTMLElement: RowNode, buildAuthorLine,
+  const context = createContext({ document, HTMLElement: RowNode, buildAuthorLine, hostedContextChatAuthor,
     buildStreamExtras: (...args: Parameters<typeof buildStreamExtras>) => { const result = buildStreamExtras(...args); if (withoutTitle) (result as unknown as RowNode)?.querySelector('.hm-needs-title')?.remove(); return result; }, deriveStreamExtras, question, homeAskAnswered,
     window: { requestAnimationFrame: (callback: () => void) => frames.push(callback) },
     setSanitizedMessageMarkdown: (node: RowNode, body: string) => { node.textContent = body;

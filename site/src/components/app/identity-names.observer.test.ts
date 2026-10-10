@@ -4,6 +4,7 @@ import { test } from "node:test";
 
 const peopleView = readFileSync(new URL("../../lib/people-dialog-view.ts", import.meta.url), "utf8");
 const dashboard = readFileSync(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
+const hostedLabels = readFileSync(new URL("../../lib/hosted-context-label.ts", import.meta.url), "utf8");
 const connect = readFileSync(
   new URL("../connect/AgentConnect.astro", import.meta.url),
   "utf8",
@@ -15,7 +16,9 @@ const agentConnect = readFileSync(
 
 test("selections, chips, drafts and roster rows keep principal UUIDs", () => {
   assert.match(dashboard, /dataset\.composerToChip = recipientKey\(entity\)/);
-  assert.match(dashboard, /return \{ id: agent\.principalId, name: identityDisplayLabel/);
+  assert.match(dashboard, /return \{ id: agent\.principalId, \.\.\.hostedContextPeopleLabel\(agent, rosterNames\)/);
+  assert.match(hostedLabels, /name: hasDisplay \? context\.label : identityDisplayLabel\(\{ id: agent\.principalId, name: agent\.name \}, roster\)/);
+  assert.match(hostedLabels, /exactName: hasDisplay \? context\.exactName : undefined/);
   assert.match(peopleView, /dataset\.agentRow = agent\.id/);
   assert.match(dashboard, /mentionOptionId\(candidate\)/);
   assert.match(dashboard, /identityDisplayLabel/);

@@ -10,6 +10,7 @@ import { peopleDialogAccessUntil, peopleDialogCanAct } from "../../lib/people-di
 import { agentStatus, peopleAgentStatus } from "../../lib/agent-status";
 import { classifyAgentPresence } from "../../../../src/cloud/agent-presence";
 import { grantRiskBadge, STANDING_GRANT_COPY } from "../../lib/standing-grants";
+import { hostedContextPeopleLabel } from "../../lib/hosted-context-label";
 
 /*
  * Source-level guards for the 2026-10-04 household redesign of /app (setup checklist, Add an
@@ -212,7 +213,7 @@ function dialogConnectionsFixture() {
     agents: [{ principalId: "principal", name: "Muse", ownerUserId: "person", model: null, transport: "local" }],
     accessStatuses: [], pendingAgentsLoadFailed: false, people: new Map([["person", "Tom"]]),
     householdConnections: [], householdConnectionsReadState: "pending", householdReceipts: new Map(),
-    peopleDialogReceipts: new Map(), identityRoster: () => ({ agents: [] }), identityDisplayLabel: (agent: any) => agent.name,
+    peopleDialogReceipts: new Map(), identityRoster: () => ({ agents: [] }), hostedContextPeopleLabel,
     workspaces: [{id:"workspace",name:"Home"}], agentStatus, peopleAgentStatus, classifyAgentPresence, grantRiskBadge, STANDING_GRANT_COPY,
     agentPresenceLine: () => null, wakePathMark: () => null, currentPendingAccessRows: () => [],
     formatTime: () => ({ relative: "just now" }), createLatestRead, uuid: () => "command-id",
