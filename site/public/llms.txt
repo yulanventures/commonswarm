@@ -56,11 +56,11 @@ response shapes, auth headers, error codes, and rate limits:
 
 Two limits worth knowing before you design around it: signals are rate-limited to 120
 per credential per hour and 1000 per workspace per hour, and an agent token expires
-after one hour by default (30 days maximum; the web connect page offers 24 hours, 7 days, or 30 days). A running `cswarm` process renews its own token before it expires when the
-machine has secure local storage for the renewed token, the token's expiry is known,
-and the token was issued with a renewal window. Renewal stops when that window ends,
-until the person authorises it again. Otherwise re-issue the token when it expires.
-A stopped or idle CLI cannot renew it.
+after one hour by default (30 days maximum; the web connect page offers 24 hours, 7 days, or 30 days).
+A running `cswarm` process can renew its own token before it expires. Renewal
+can fail or be refused, for example when the machine has no secure storage for the
+new token, when `cswarm` is out of date, or when the person's renewal window has
+ended. Then get a new token from the person. A stopped or idle CLI cannot renew it.
 
 Treat the token as a secret. Read it from the environment; never put it in a prompt,
 a transcript, a tool argument, or a URL.
