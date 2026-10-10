@@ -22,31 +22,32 @@ import {
 export type HouseholdPurpose = "shared" | "personal";
 
 /**
- * The purpose decides whether the workspace accepts invitations: "personal" blocks them permanently. It does
- * not change who sees messages or files; everyone already in the workspace keeps posting and seeing them.
+ * The purpose decides who can use Lists & docs and whether invitations work: "personal" limits Lists & docs
+ * to the owner and blocks invitations, permanently. It does not change messages or ordinary Files; members
+ * of the workspace keep posting messages and seeing its files.
  */
-export const PURPOSE_QUESTION = "Will you invite people to this workspace?";
+export const PURPOSE_QUESTION = "Who can use Lists & docs here?";
 export const PURPOSE_COPY: Readonly<Record<HouseholdPurpose, { label: string; detail: string }>> = Object.freeze({
   shared: {
     label: "Me and people I invite",
-    detail: "You can invite people. Everyone in this workspace can post messages and see its files.",
+    detail: "People you invite can join and use Lists & docs. Everyone in this workspace can post messages and see its files.",
   },
   personal: {
     label: "Just me",
     detail:
-      "Invitations to this workspace will not work, and this cannot be changed later. People already in it can still post messages and see its files. To share with people later, create another workspace.",
+      "Only you can use Lists & docs here, and invitations to this workspace will not work. This cannot be changed later. People already in it can still post messages and see its files. To share with people later, create another workspace.",
   },
 });
 
 /** Creation describes the future audience; the legacy access card describes existing members. */
 export const CREATE_PURPOSE_DETAILS: Readonly<Record<HouseholdPurpose, string>> = Object.freeze({
-  shared: "You can invite people to this workspace.",
-  personal: "Nobody can be invited to this workspace. This cannot be changed later.",
+  shared: "You can invite people, and they can use Lists & docs.",
+  personal: "Only you can use Lists & docs, and nobody can be invited. This cannot be changed later.",
 });
 
 export const CONTENT_ROLE_COPY: Readonly<Record<HouseholdContentRole, { label: string; detail: string }>> = Object.freeze({
-  editor: { label: "Editor", detail: "Messages and files are not affected." },
-  reader: { label: "Reader", detail: "Messages and files are not affected." },
+  editor: { label: "Editor", detail: "Add and change lists, docs and their files." },
+  reader: { label: "Reader", detail: "See lists, docs and their files." },
 });
 
 export const CONTENT_OPERATION_LABELS: Readonly<Record<HouseholdContentOperation, string>> = Object.freeze({
@@ -65,7 +66,7 @@ export const CONTENT_OPERATIONS: readonly HouseholdContentOperation[] = HOUSEHOL
  */
 const REFUSALS: Readonly<Record<string, string>> = Object.freeze({
   owner_confirmation_required:
-    "The workspace owner chooses whether to invite people first. Ask them to open Workspace access.",
+    "The workspace owner chooses who can use Lists & docs first. Ask them to open Lists & docs.",
   workspace_boundary_mismatch:
     "This workspace was already set up the other way. Choose the option its owner chose.",
   workspace_access_refused: "You are no longer a member of this workspace. Nothing was changed.",

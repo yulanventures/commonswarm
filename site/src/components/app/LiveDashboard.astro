@@ -147,7 +147,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       <div class="dashboard__gateway-copy">
         <h1 id="dashboard-create-title" data-create-title>Create your first workspace.</h1>
         <p data-create-description>
-          It's where your agents and the people you invite share messages, notes and files.
+          It's where your agents and the people you invite share lists, docs and messages.
         </p>
       </div>
       <form class="dashboard__create-form" data-create-form novalidate>
@@ -173,7 +173,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             </label>
           ))}
         </fieldset>
-        <p data-create-access>Your access: {CONTENT_ROLE_COPY.editor.label}. {CONTENT_ROLE_COPY.editor.detail}</p>
+        <p data-create-access>Your access: {CONTENT_ROLE_COPY.editor.label}. You can {CONTENT_ROLE_COPY.editor.detail.charAt(0).toLowerCase() + CONTENT_ROLE_COPY.editor.detail.slice(1)}</p>
         <p data-create-personal-warning aria-live="polite"></p>
         <button class="dashboard__button dashboard__button--primary" type="submit" data-create-button>
           Create workspace
@@ -376,8 +376,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 <li class="dashboard__setup-step" data-setup-step="access">
                   <span class="dashboard__setup-mark" aria-hidden="true"></span>
                   <span class="dashboard__setup-copy">
-                    <strong data-setup-title>Choose whether to invite people</strong>
-                    <span data-setup-detail>Invitations need this choice.</span>
+                    <strong data-setup-title>Choose who can use Lists &amp; docs</strong>
+                    <span data-setup-detail>Shared lists and invitations both need this choice.</span>
                   </span>
                   <button class="dashboard__button dashboard__button--secondary" type="button" data-setup-access>
                     Choose
@@ -554,9 +554,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             <section class="dashboard__objects-view" data-channel-view="objects" hidden>
               <h1 class="hm-pane-title" tabindex="-1">Lists</h1>
               <form class="dashboard__access-card" data-household-consent hidden>
-                <h2 class="dashboard__access-title">Workspace access</h2>
+                <h2 class="dashboard__access-title">Turn on Lists &amp; docs</h2>
                 <p class="dashboard__access-lead">
-                  Confirm your access to this workspace. The owner also chooses whether to invite people.
+                  Confirm your access to Lists &amp; docs in this workspace. The owner also chooses whether to invite people.
                 </p>
                 <fieldset class="dashboard__choice-cards" data-household-purpose-set>
                   <legend>{PURPOSE_QUESTION}</legend>
@@ -592,8 +592,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               <section class="dashboard__agent-approvals" data-household-agents hidden aria-labelledby="dashboard-agent-approvals-title">
                 <h2 class="dashboard__access-title" id="dashboard-agent-approvals-title">Let your agents use Lists &amp; docs</h2>
                 <p class="dashboard__access-lead">
-                  Each of your agents needs your OK, here, for this workspace. An agent that lives
-                  in a chat app keeps it until you withdraw it. A computer agent keeps it until its key ends or you withdraw it.
+                  Each of your agents needs your OK, here, for this workspace. A computer agent keeps it until its key ends or you withdraw it.
+                  Lists &amp; docs is not available through the Claude connector yet, so an agent in a chat app cannot use it.
                 </p>
                 <p data-household-agent-result hidden></p>
                 <ul class="dashboard__approval-list" data-household-agent-list></ul>
@@ -1012,6 +1012,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { statusLine, needsYouCard } from "../../lib/home-primitives";
   import { buildNewWorkspaceForm, newWorkspaceCanCreate, newWorkspacePreviewTitle } from "../../lib/home-new-workspace";
   import { PURPOSE_COPY, CREATE_PURPOSE_DETAILS } from "../../lib/household-access";
+  import { HOSTED_LISTS_NOTE } from "../../lib/agent-hosts";
   import { agentLabelInSentence, personFirstName, personTint } from "../../lib/home-names";
   import { homeAskAnswered } from "../../lib/home-map";
   import { createHouseholdDashboard } from "../../lib/household-dashboard";
@@ -7722,6 +7723,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             .map((input) => input.value);
           void approveAgent(connection, operations, allow, status);
         });
+        /* Display only: Lists & docs is not available through the Claude connector yet, so an
+           agent in a chat app shows the note instead of the approval controls. An existing
+           approval keeps its controls so it can still be changed or withdrawn. */
+        if (connection.kind === "hosted") {
+          const note = document.createElement("small");
+          note.dataset.approvalHostedNote = "";
+          note.textContent = HOSTED_LISTS_NOTE;
+          copy.append(note);
+          if (!approval) { choices.hidden = true; allow.hidden = true; }
+        }
         row.append(orb, copy, choices, allow, status);
         if (approval) {
           const withdraw = document.createElement("button");
@@ -7871,7 +7882,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const role = one<HTMLInputElement>("[data-household-role]:checked")?.value;
       if ((purpose !== "shared" && purpose !== "personal") || (role !== "editor" && role !== "reader")) {
         if (notice) notice.textContent = owner
-          ? "Choose whether to invite people and your access, then confirm."
+          ? "Choose who can use Lists & docs and your access, then confirm."
           : "Choose your access, then confirm.";
         return;
       }
@@ -8026,13 +8037,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           if (!joined) return;
           stopHostJoinWatch();
           const picker = one<HTMLElement & {
-            showJoined?: (agent: { name: string; principalId: string; canApprove: boolean; joinedAt?: string }) => void;
+            showJoined?: (agent: { name: string; principalId: string; canApprove: boolean; hosted: boolean; joinedAt?: string }) => void;
           }>("agent-host-picker");
           picker?.showJoined?.({
             name: joined.name,
             joinedAt: joined.joinedAt ?? undefined,
             principalId: joined.principalId,
             canApprove: householdAccess.status === "ok" && householdAccess.workspaceId === workspaceId,
+            hosted: joined.transport === "hosted_mcp",
           });
         }).catch(() => undefined);
       }, 5_000);
@@ -8729,7 +8741,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           if (receipt) {
             delete receipt.dataset.agentConnectedReceiptId;
             receipt.dataset.setupWorkspaceId = madeWorkspace.id;
-            receipt.textContent = "Your workspace is ready. Choose whether to invite people in the steps below.";
+            receipt.textContent = "Your workspace is ready. Choose who can use Lists & docs in the steps below.";
             receipt.hidden = false;
           }
           void refreshHouseholdAccess();
@@ -9257,7 +9269,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       const purpose = one<HTMLInputElement>("[data-create-purpose]:checked")?.value;
       if (purpose !== "shared" && purpose !== "personal") {
-        setCreateError("Choose whether you will invite people.");
+        setCreateError("Choose who can use Lists & docs here.");
         one<HTMLInputElement>("[data-create-purpose]")?.focus();
         return;
       }

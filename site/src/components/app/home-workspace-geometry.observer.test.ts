@@ -121,7 +121,7 @@ test("W right column and stream decorations have usable geometry and keep hostil
       assert.deepEqual(geometry.noTodoOrder, ["lists", "files", "shared", "wiki"]);
       assert.deepEqual(geometry.doorOrder, ["todos", "objects", "shared", "wiki"]);
       assert.equal(geometry.doorButtons, 1); assert.equal(geometry.doorCalls, 1);
-      assert.equal(geometry.doorTitle, "Workspace access", "the door carries the Lists pane's own heading"); assert.equal(geometry.doorButtonText, "Workspace access");
+      assert.equal(geometry.doorTitle, "Turn on Lists & docs", "the door carries the Lists pane's own heading"); assert.equal(geometry.doorButtonText, "Turn on Lists & docs");
       assert.deepEqual([geometry.sampleChecks, geometry.sampleAdd, geometry.sampleDoor], [0, 0, 0], "sample mode renders no actions");
       assert.deepEqual(geometry.shared, ["Everyone in Home sees what is posted here, including what agents post.", "Your Claude can use Lists & docs here, until you withdraw it."]);
       assert.equal(geometry.hostileElements, 0); assert.equal(geometry.hostileTitleText, true); assert.equal(geometry.hostileAuthorText, true);

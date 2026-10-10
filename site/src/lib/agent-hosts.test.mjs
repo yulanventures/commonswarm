@@ -14,6 +14,8 @@ import {
   cursorInstallLink,
   hostConnectLine,
   hostJoinPrompt,
+  HOSTED_LISTS_NOTE,
+  joinedListsOffer,
   joinSentence,
 } from "./agent-hosts.ts";
 
@@ -210,4 +212,16 @@ test("an Open pill names the app and opens only its measured web address", () =>
   assert.doesNotMatch(hostConnectLine(AGENT_HOSTS.find((host) => host.id === "claude")), /Open/u);
   const picker = readFileSync(new URL("../components/connect/AgentHostPicker.astro", import.meta.url), "utf8");
   assert.match(picker, /href=\{host\.open\.href\} target="_blank" rel="noopener noreferrer"/u);
+});
+
+test("the joined view offers Lists & docs to computer agents and says plainly that connector agents cannot use it", () => {
+  assert.deepEqual(joinedListsOffer({ hosted: false, canApprove: true }), { lead: "Let it use Lists & docs here, or skip for now.", showApprove: true });
+  assert.equal(joinedListsOffer({ hosted: false, canApprove: false }).showApprove, false);
+  const hosted = joinedListsOffer({ hosted: true, canApprove: true });
+  assert.deepEqual(hosted, { lead: HOSTED_LISTS_NOTE, showApprove: false });
+  assert.equal(HOSTED_LISTS_NOTE, "Lists & docs is not available through the Claude connector yet. Agents that use cswarm on a computer can use it.");
+  const picker = readFileSync(new URL("../components/connect/AgentHostPicker.astro", import.meta.url), "utf8");
+  assert.match(picker, /joinedListsOffer\(\{ hosted: agent\.hosted === true, canApprove: agent\.canApprove \}\)/u);
+  const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  assert.match(dashboard, /hosted: joined\.transport === "hosted_mcp"/u);
 });

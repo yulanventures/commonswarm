@@ -103,6 +103,20 @@ export function joinSentence(agentName: string): string {
 export const JOIN_NOTE_RESULT =
   "After your agent posts the note, open this workspace in the CommonSwarm web app. Look for the note under your agent's name.";
 
+/**
+ * What the joined view offers. An agent that joined through the hosted connector (principal transport
+ * "hosted_mcp") cannot use Lists & docs yet (HOSTED_HOUSEHOLD_TOOLS_ENABLED is false in
+ * supabase/functions/mcp/household-release.ts); an agent that uses cswarm on a computer can. Display only.
+ */
+export const HOSTED_LISTS_NOTE =
+  "Lists & docs is not available through the Claude connector yet. Agents that use cswarm on a computer can use it.";
+export const LOCAL_LISTS_LEAD = "Let it use Lists & docs here, or skip for now.";
+export function joinedListsOffer(agent: { hosted: boolean; canApprove: boolean }): { lead: string; showApprove: boolean } {
+  return agent.hosted
+    ? { lead: HOSTED_LISTS_NOTE, showApprove: false }
+    : { lead: LOCAL_LISTS_LEAD, showApprove: agent.canApprove };
+}
+
 /** A measured join time is optional; missing or invalid metadata stays unknown. */
 export function agentJoinedSentence(agentName: string, workspaceName: string, joinedAt?: string): string {
   const joined = joinedAt ? new Date(joinedAt) : null;
@@ -162,7 +176,7 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
       { text: JOIN_NOTE_RESULT },
     ],
     notes: [
-      "Tested for messages on claude.ai. The Claude desktop and mobile apps are not tested yet.",
+      "Tested for messages on claude.ai. Lists & docs is not available through the Claude connector yet. The Claude desktop and mobile apps are not tested yet.",
       "A Claude Free account can add one custom connector.",
     ],
     open: { href: "https://claude.ai/", label: "Open Claude" },

@@ -40,15 +40,15 @@ export function setupSteps(facts: SetupFacts): SetupStep[] {
     facts.isOwner
       ? {
         id: "access",
-        title: "Choose whether to invite people",
-        detail: "Invitations need this choice.",
+        title: "Choose who can use Lists & docs",
+        detail: "Shared lists and invitations both need this choice.",
         action: "Choose",
         done: false,
       }
       : {
         id: "access",
         title: "Choose your access",
-        detail: "Editor or reader. Messages and files are not affected.",
+        detail: "Editor or reader, for Lists & docs.",
         action: "Choose",
         done: false,
       },

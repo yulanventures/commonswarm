@@ -65,7 +65,7 @@ test("person-facing redesign markup uses plain words, not protocol words", () =>
     previous = visible;
     visible = visible.replace(/\{[^{}]*\}/g, " ");
   }
-  assert.match(visible, /Choose whether to invite people/, "positive control: visible text survives the strip");
+  assert.match(visible, /Choose who can use Lists &amp; docs/, "positive control: visible text survives the strip");
   assert.doesNotMatch(visible, /\b(seat|grant|claim|OAuth|MCP|signal|principal|purpose|content access)\b/i);
   // Control: the instrument fires on the retired sentence it replaced.
   assert.match("the workspace owner must choose Shared in content settings and confirm content access", /content access/i);
@@ -148,12 +148,12 @@ test("creation asks for purpose without a default and states the owner's Editor 
   assert.match(create, /input.type = "radio"/);
   assert.match(create, /input.checked = purposeChoices.value === option.value/);
   assert.match(create, /label: option.label/);
-  assert.match(create, /Your access: \$\{CONTENT_ROLE_COPY.editor.label\}\. \$\{CONTENT_ROLE_COPY.editor.detail\}/);
+  assert.match(create, /Your access: \$\{CONTENT_ROLE_COPY.editor.label\}\. You can/);
   assert.match(script, /detail: CREATE_PURPOSE_DETAILS\[purpose as HouseholdPurpose\]/);
   assert.match(create, /personalWarning.dataset.createPersonalWarning = ""/);
   assert.match(create, /personalWarning.setAttribute\("aria-live", "polite"\)/);
   assert.match(create, /personalWarning.textContent = newWorkspacePersonalWarning\(vm.purpose\)/);
-  assert.match(script, /setCreateError\("Choose whether you will invite people\."\)/);
+  assert.match(script, /setCreateError\("Choose who can use Lists & docs here\."\)/);
   assert.match(script, /one<HTMLInputElement>\("\[data-create-purpose\]"\)\?\.focus\(\)/);
 });
 
@@ -180,7 +180,10 @@ test("active approvals expose Save and withdrawal in both places, owned agents o
   assert.match(withdraw, /kind: "household_withdraw_connection", principal_id: principalId/);
   assert.match(withdraw, /withdrawRefusalMessage\(result.body.reason\)/);
   assert.match(withdraw, /await loadHouseholdConnections\(\)/);
-  assert.match(markup, /keeps it until you withdraw it/);
+  assert.match(markup, /A computer agent keeps it until its key ends or you withdraw it/);
+  assert.match(markup, /Lists &amp; docs is not available through the Claude connector yet, so an agent in a chat app cannot use it/);
+  /* Hosted rows show the note and keep controls only for an existing approval (withdraw stays reachable). */
+  assert.match(cards, /connection.kind === "hosted"[\s\S]*?HOSTED_LISTS_NOTE[\s\S]*?if \(!approval\) \{ choices.hidden = true; allow.hidden = true; \}/);
   assert.doesNotMatch(markup, /24 hours|Three short steps/);
 });
 
@@ -341,7 +344,7 @@ test("submit retries permissions with the saved id; refusal and uncertain outcom
     assert.equal(f.events.includes("open"), true);
     assert.equal(f.ctx.saved === null, outcome !== "unknown", "uncertain permissions keep the retry intent");
     if (outcome !== "committed") {
-      assert.equal(f.receipt.textContent, "Your workspace is ready. Choose whether to invite people in the steps below.");
+      assert.equal(f.receipt.textContent, "Your workspace is ready. Choose who can use Lists & docs in the steps below.");
       assert.equal(f.receipt.hidden, false);
       assert.equal(f.ctx.householdAccess.status, outcome === "refused" ? "refused" : "unknown");
     }
@@ -439,7 +442,7 @@ test("the real creation submit blocks a missing purpose, then reuses only matchi
   await handler({ preventDefault: () => {} });
   assert.equal(creations.length, 0);
   assert.equal(saved, null);
-  assert.equal(error, "Choose whether you will invite people.");
+  assert.equal(error, "Choose who can use Lists & docs here.");
   assert.equal(focus, "purpose");
   choice = "shared";
   await handler({ preventDefault: () => {} });

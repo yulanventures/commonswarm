@@ -23,14 +23,15 @@ test("every enforced role and operation has plain words, and no extra ones exist
   assert.deepEqual(Object.keys(PURPOSE_COPY).sort(), ["personal", "shared"]);
 });
 
-test("the personal choice is scoped to sharing, says it is final and blocks invitations", () => {
-  assert.match(PURPOSE_COPY.personal.detail, /^Invitations to this workspace will not work/u);
+test("the personal choice is scoped to Lists & docs, says it is final and blocks invitations", () => {
+  assert.match(PURPOSE_COPY.personal.detail, /^Only you can use Lists & docs here, and invitations to this workspace will not work\./u);
+  assert.match(PURPOSE_COPY.personal.detail, /invitations to this workspace will not work/u);
   assert.match(PURPOSE_COPY.personal.detail, /cannot be changed later/u);
   assert.match(PURPOSE_COPY.personal.detail, /To share with people later, create another workspace/u);
   /* Messages and Files are not governed by this choice; the copy must not imply privacy for them. */
   assert.match(PURPOSE_COPY.personal.detail, /can still post messages and see its files/u);
   assert.doesNotMatch(PURPOSE_COPY.personal.detail, /Private to you/u);
-  assert.match(PURPOSE_COPY.shared.detail, /You can invite people\. Everyone in this workspace can post messages and see its files/u);
+  assert.match(PURPOSE_COPY.shared.detail, /People you invite can join and use Lists & docs\. Everyone in this workspace can post messages and see its files/u);
 });
 
 test("refusals map by stable code, and unknown codes say nothing changed", () => {
@@ -60,8 +61,8 @@ test("a removed identity's name is labelled without changing its spelling", () =
   assert.equal(removedAgentLabel("<img src=x>"), "<img src=x> (removed)");
 });
 
-test("creation details describe whether people can be invited, with finality for the personal choice", () => {
+test("creation details describe the people invited next, with finality only in the warning", () => {
   assert.deepEqual(Object.keys(CREATE_PURPOSE_DETAILS).sort(), Object.keys(PURPOSE_COPY).sort());
-  assert.equal(CREATE_PURPOSE_DETAILS.shared, "You can invite people to this workspace.");
-  assert.equal(CREATE_PURPOSE_DETAILS.personal, "Nobody can be invited to this workspace. This cannot be changed later.");
+  assert.equal(CREATE_PURPOSE_DETAILS.shared, "You can invite people, and they can use Lists & docs.");
+  assert.equal(CREATE_PURPOSE_DETAILS.personal, "Only you can use Lists & docs, and nobody can be invited. This cannot be changed later.");
 });
