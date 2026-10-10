@@ -39,6 +39,7 @@ test("dashboard danger rules use the danger tokens", () => {
   assert.match(rule(".dashboard__button--danger"), /color:\s*var\(--danger\)/u);
   assert.match(rule(".dashboard__button--danger:hover:not(:disabled)"), /background:\s*var\(--danger\)/u);
   assert.match(rule(".dashboard__text-button--danger:hover:not(:disabled)"), /text-decoration-thickness:\s*2px/u);
+  assert.match(rule(".dashboard__text-button--danger:disabled"), /color:\s*var\(--danger\)/u);
   assert.match(dashboard, /\.dashboard__text-button--danger,\s*\.dashboard__text-button--danger:hover:not\(:disabled\)\s*\{\s*color:\s*var\(--danger\)/u);
 });
 
