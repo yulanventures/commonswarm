@@ -92,23 +92,9 @@ try {
   } finally {db.begin=begin;}
   check(observedClaims>0,'real command transaction role was observed');
   check(result.status===200&&result.body.status==='accepted'&&result.body.outcome==='created','real hosted claim succeeds');
-  step='committed-principal';
-  // A fresh transaction observes the principal, seat, context and stream event
-  // after the command returned, rather than reading uncommitted fixture writes.
-  await commandTransaction(async tx=>{
-    const [committed]=await tx\x60SELECT p.principal_id,p.workspace_id,p.owner_user_id,p.name,
-      p.transport,p.turn_only,p.identity_lifetime,c.context_id,hs.seat_id
-      FROM swarm.agent_principals p JOIN swarm.hosted_mcp_seats hs USING(principal_id)
-      JOIN swarm.hosted_agent_contexts c USING(seat_id)
-      WHERE p.principal_id=\x24{result.body.principal_id}::uuid\x60;
-    check(committed?.workspace_id===config.workspace&&committed.owner_user_id===config.owner
-      &&committed.name==='Grants regression'&&committed.transport==='hosted_mcp'
-      &&committed.turn_only&&committed.identity_lifetime==='durable'
-      &&committed.seat_id===result.body.seat_id&&committed.context_id===result.body.context_id,'committed hosted principal');
-    const [event]=await tx\x60SELECT count(*)::int AS n FROM swarm.events
-      WHERE workspace_id=\x24{config.workspace}::uuid AND event_id=ANY(\x24{result.body.event_ids}::uuid[])\x60;
-    check(result.body.event_ids.length>0&&event.n===result.body.event_ids.length,'committed claim event');
-  });
+  // Return only public identifiers for the fixture connection's committed read.
+  console.log('SID_PRODUCTION_GRANTS_RESULT '+JSON.stringify({principal_id:result.body.principal_id,
+    seat_id:result.body.seat_id,context_id:result.body.context_id,event_ids:result.body.event_ids}));
   console.log('SID_PRODUCTION_GRANTS_OK');
 } catch(error) {
   // Raw SQL/driver diagnostics may include credentials or fixture parameters.
@@ -125,7 +111,7 @@ test('hosted claim commits under exact migrated swarm_command grants; old config
   let isolated: Awaited<ReturnType<typeof adminEdgeDatabase>> | undefined;
   try {
     // Copy the migrated schema and its ACLs. No role/table/function grants are
-    // added by this test; privileged setup only seeds the isolated fixture.
+    // added by this test; the privileged connection seeds and verifies the fixture.
     isolated = await adminEdgeDatabase(local.DB_URL);
     const owner=randomUUID(),workspace=randomUUID(),grant=randomUUID(),provider=`grants-${randomUUID()}`;
     await isolated.db.begin(async tx=>{
@@ -147,6 +133,42 @@ test('hosted claim commits under exact migrated swarm_command grants; old config
     const receipt=run.stdout.split(/\r?\n/u).find(line=>/^SID_PRODUCTION_GRANTS_(?:OK|FAILED \{"step":"[a-z-]+","code":(?:null|"[A-Z0-9]{5}"),"current_user":(?:null|"[a-zA-Z0-9_]+"),"session_user":(?:null|"[a-zA-Z0-9_]+")\})$/u.test(line));
     assert.equal(run.status,0,receipt??'grants harness failed; raw credential-bearing output withheld');
     assert.equal(receipt,'SID_PRODUCTION_GRANTS_OK');
+    let step='committed-result';
+    let roles: { current_user: string | null; session_user: string | null }={current_user:null,session_user:null};
+    try {
+      const resultLine=run.stdout.split(/\r?\n/u).find(line=>line.startsWith('SID_PRODUCTION_GRANTS_RESULT '));
+      let result: { principal_id: string; seat_id: string; context_id: string; event_ids: string[] } | undefined;
+      try {result=JSON.parse(resultLine?.slice('SID_PRODUCTION_GRANTS_RESULT '.length)??'');} catch {}
+      const uuid=/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u;
+      assert.ok(result&&uuid.test(result.principal_id)&&uuid.test(result.seat_id)&&uuid.test(result.context_id)
+        &&Array.isArray(result.event_ids)&&result.event_ids.every(id=>typeof id==='string'&&uuid.test(id)),
+        'grants harness must return valid committed identifiers; raw output withheld');
+      step='committed-role';
+      // Read after the real command returned, using the same privileged
+      // connection as setup: swarm_command can append events, but cannot read them.
+      await isolated.db.begin(async tx=>{
+        const [role]=await tx<{ current_user: string; session_user: string }[]>`SELECT current_user,session_user`;
+        roles={current_user:role!.current_user,session_user:role!.session_user};
+        step='committed-principal';
+        const [committed]=await tx`SELECT p.principal_id,p.workspace_id,p.owner_user_id,p.name,
+          p.transport,p.turn_only,p.identity_lifetime,c.context_id,hs.seat_id
+          FROM swarm.agent_principals p JOIN swarm.hosted_mcp_seats hs USING(principal_id)
+          JOIN swarm.hosted_agent_contexts c USING(seat_id)
+          WHERE p.principal_id=${result.principal_id}::uuid`;
+        assert.ok(committed?.workspace_id===workspace&&committed.owner_user_id===owner
+          &&committed.name==='Grants regression'&&committed.transport==='hosted_mcp'
+          &&committed.turn_only&&committed.identity_lifetime==='durable'
+          &&committed.seat_id===result.seat_id&&committed.context_id===result.context_id,'committed hosted principal');
+        step='committed-event';
+        const [event]=await tx`SELECT count(*)::int AS n FROM swarm.events
+          WHERE workspace_id=${workspace}::uuid AND event_id=ANY(${result.event_ids}::uuid[])`;
+        assert.ok(result.event_ids.length>0&&event!.n===result.event_ids.length,'committed claim event');
+      });
+    } catch(error) {
+      const rawCode=typeof error==='object'&&error!==null&&'code' in error?error.code:null;
+      const code=typeof rawCode==='string'&&/^[A-Z0-9]{5}$/u.test(rawCode)?rawCode:null;
+      assert.fail('SID_PRODUCTION_GRANTS_FAILED '+JSON.stringify({step,code,...roles}));
+    }
   } finally {
     try {await isolated?.close();} finally {
       const root=realpathSync(process.platform==='darwin'?'/private/tmp':tmpdir());
