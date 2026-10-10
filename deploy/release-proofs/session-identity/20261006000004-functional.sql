@@ -9,7 +9,7 @@ BEGIN
     WHERE c.context_id IS NULL OR c.origin<>'legacy' OR c.kind<>'chat'
       OR c.created_at<>h.created_at OR c.last_business_at<h.created_at
       OR c.idle_expires_at IS NOT NULL OR c.absolute_expires_at IS NOT NULL) THEN
-    RAISE EXCEPTION 'legacy handle missing durable context' USING ERRCODE='23514';
+    RAISE EXCEPTION 'sid7-functional-legacy-handle-missing-durable-context' USING ERRCODE='23514';
   END IF;
 END
 $legacy_backfill$;
@@ -483,7 +483,7 @@ BEGIN
   BEGIN
     IF swarm.hosted_context_interval('chat')<>interval '24 hours' OR swarm.hosted_context_interval('task')<>interval '12 hours'
       OR swarm.hosted_context_interval('scheduled')<>interval '30 minutes' OR swarm.hosted_context_interval('subagent')<>interval '15 minutes' THEN
-      RAISE EXCEPTION 'functional TTL clocks changed';
+      RAISE EXCEPTION 'sid7-functional-functional-ttl-clocks-changed';
     END IF;
     INSERT INTO auth.users(id,aud,role,email) VALUES(u,'authenticated','authenticated',u::text||'@example.test');
     INSERT INTO swarm.users(user_id,display_name) VALUES(u,'Lifecycle proof');
@@ -506,42 +506,42 @@ BEGIN
     INSERT INTO swarm.household_todos(workspace_id,todo_id,version,title,state,created_by_user,created_at,assignee_principal,assigned_by_user,assigned_at,state_by_user,state_at,last_seq)
       VALUES(w,todo,1,'Synthetic retained assignment','open',u,v_at,ephemeral_principal,u,v_at,u,v_at,0);
     v_identity:=swarm.resolve_hosted_context(g,'seat_'||replace(a::text,'-',''),'whoami','read');
-    IF v_identity IS NULL OR v_identity->>'context_error' IS NOT NULL THEN RAISE EXCEPTION 'own live context positive control'; END IF;
+    IF v_identity IS NULL OR v_identity->>'context_error' IS NOT NULL THEN RAISE EXCEPTION 'sid7-functional-own-live-context-positive-control'; END IF;
     SELECT last_business_at INTO v_before FROM swarm.hosted_agent_contexts WHERE context_id=a;
     PERFORM swarm.resolve_hosted_context(g,'seat_'||replace(a::text,'-',''),'members','read');
-    IF (SELECT last_business_at FROM swarm.hosted_agent_contexts WHERE context_id=a)<>v_before THEN RAISE EXCEPTION 'read-only members renewed'; END IF;
+    IF (SELECT last_business_at FROM swarm.hosted_agent_contexts WHERE context_id=a)<>v_before THEN RAISE EXCEPTION 'sid7-functional-read-only-members-renewed'; END IF;
     PERFORM swarm.record_hosted_context_activity(a);
-    IF (SELECT idle_expires_at<>last_business_at+interval '24 hours' OR absolute_expires_at<>v_at+interval '30 days' FROM swarm.hosted_agent_contexts WHERE context_id=a) THEN RAISE EXCEPTION 'activity clocks changed'; END IF;
+    IF (SELECT idle_expires_at<>last_business_at+interval '24 hours' OR absolute_expires_at<>v_at+interval '30 days' FROM swarm.hosted_agent_contexts WHERE context_id=a) THEN RAISE EXCEPTION 'sid7-functional-activity-clocks-changed'; END IF;
     v_identity:=swarm.resolve_hosted_context(g,'seat_'||replace(e::text,'-',''),'whoami','read');
-    IF v_identity->>'context_error'<>'context_expired' THEN RAISE EXCEPTION 'stopped sweep prolonged access'; END IF;
+    IF v_identity->>'context_error'<>'context_expired' THEN RAISE EXCEPTION 'sid7-functional-stopped-sweep-prolonged-access'; END IF;
     BEGIN
       PERFORM swarm.record_hosted_context_activity(e);
-      RAISE EXCEPTION 'expired activity admitted' USING ERRCODE='ZX001';
+      RAISE EXCEPTION 'sid7-functional-expired-activity-admitted' USING ERRCODE='ZX001';
     EXCEPTION WHEN SQLSTATE 'SC001' THEN NULL; END;
     INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response,created_at,context_id)
       VALUES('hosted_grant',g::text,'old_active_outcome',w,st,repeat('0',64),'{}',v_at-interval '40 days',a),
         ('hosted_grant',g::text,'old_expired_outcome',w,st,repeat('0',64),'{}',v_at-interval '40 days',e);
     PERFORM swarm.purge_expired_idempotency_keys(100);
-    IF (SELECT count(*) FROM swarm.idempotency_keys WHERE context_id IN (a,e))<>2 THEN RAISE EXCEPTION 'active/unswept outcomes purged'; END IF;
+    IF (SELECT count(*) FROM swarm.idempotency_keys WHERE context_id IN (a,e))<>2 THEN RAISE EXCEPTION 'sid7-functional-active-unswept-outcomes-purged'; END IF;
     n:=swarm.expire_hosted_agent_contexts(100);
-    IF n<>1 OR (SELECT revoked_at IS NULL FROM swarm.agent_principals WHERE principal_id=ephemeral_principal) THEN RAISE EXCEPTION 'expiry failed retirement'; END IF;
-    IF NOT EXISTS(SELECT 1 FROM swarm.household_todos WHERE todo_id=todo AND assignee_principal=ephemeral_principal AND state='open') THEN RAISE EXCEPTION 'retained assignment changed'; END IF;
-    IF NOT EXISTS(SELECT 1 FROM swarm.events WHERE workspace_id=w AND type='HostedMcpSeatRevoked' AND payload->>'context_id'=e::text) THEN RAISE EXCEPTION 'retirement event missing'; END IF;
+    IF n<>1 OR (SELECT revoked_at IS NULL FROM swarm.agent_principals WHERE principal_id=ephemeral_principal) THEN RAISE EXCEPTION 'sid7-functional-expiry-failed-retirement'; END IF;
+    IF NOT EXISTS(SELECT 1 FROM swarm.household_todos WHERE todo_id=todo AND assignee_principal=ephemeral_principal AND state='open') THEN RAISE EXCEPTION 'sid7-functional-retained-assignment-changed'; END IF;
+    IF NOT EXISTS(SELECT 1 FROM swarm.events WHERE workspace_id=w AND type='HostedMcpSeatRevoked' AND payload->>'context_id'=e::text) THEN RAISE EXCEPTION 'sid7-functional-retirement-event-missing'; END IF;
     PERFORM swarm.purge_expired_idempotency_keys(100);
-    IF NOT EXISTS(SELECT 1 FROM swarm.idempotency_keys WHERE context_id=e) THEN RAISE EXCEPTION 'outcome not retained 30 days after closure'; END IF;
+    IF NOT EXISTS(SELECT 1 FROM swarm.idempotency_keys WHERE context_id=e) THEN RAISE EXCEPTION 'sid7-functional-outcome-not-retained-30-days-after-closure'; END IF;
     v_closed:=swarm.close_hosted_agent_context(a,'closed');
-    IF v_closed->>'principal_state'<>'retained' THEN RAISE EXCEPTION 'durable principal retired'; END IF;
-    IF swarm.close_hosted_agent_context(a,'closed')->>'closed_at'<>v_closed->>'closed_at' THEN RAISE EXCEPTION 'close time changed'; END IF;
-    IF swarm.resolve_hosted_context(g,'seat_'||replace(b::text,'-',''),'whoami','read')->>'context_error' IS NOT NULL THEN RAISE EXCEPTION 'A close cancelled B'; END IF;
+    IF v_closed->>'principal_state'<>'retained' THEN RAISE EXCEPTION 'sid7-functional-durable-principal-retired'; END IF;
+    IF swarm.close_hosted_agent_context(a,'closed')->>'closed_at'<>v_closed->>'closed_at' THEN RAISE EXCEPTION 'sid7-functional-close-time-changed'; END IF;
+    IF swarm.resolve_hosted_context(g,'seat_'||replace(b::text,'-',''),'whoami','read')->>'context_error' IS NOT NULL THEN RAISE EXCEPTION 'sid7-functional-a-close-cancelled-b'; END IF;
     IF (SELECT count(*) FROM swarm.hosted_agent_contexts WHERE seat_id=seat AND closed_at IS NULL)<>1
-      OR (SELECT count(*) FROM swarm.hosted_agent_contexts WHERE seat_id=seat AND created_at>v_at-interval '24 hours')<>2 THEN RAISE EXCEPTION 'active release changed rolling creation budget'; END IF;
+      OR (SELECT count(*) FROM swarm.hosted_agent_contexts WHERE seat_id=seat AND created_at>v_at-interval '24 hours')<>2 THEN RAISE EXCEPTION 'sid7-functional-active-release-changed-rolling-creation-budget'; END IF;
     BEGIN
       EXECUTE v_reserve;
-      RAISE EXCEPTION 'occupied reserve admitted' USING ERRCODE='ZX001';
+      RAISE EXCEPTION 'sid7-functional-occupied-reserve-admitted' USING ERRCODE='ZX001';
     EXCEPTION WHEN SQLSTATE '55000' THEN NULL; END;
     IF NOT EXISTS(SELECT 1 FROM swarm.hosted_agent_contexts WHERE context_id=a)
-      OR to_regprocedure('swarm.sweep_hosted_agent_contexts()') IS NULL THEN RAISE EXCEPTION 'refused reserve changed data or catalog'; END IF;
-    RAISE EXCEPTION 'functional fixture rollback' USING ERRCODE='ZP003';
+      OR to_regprocedure('swarm.sweep_hosted_agent_contexts()') IS NULL THEN RAISE EXCEPTION 'sid7-functional-refused-reserve-changed-data-or-catalog'; END IF;
+    RAISE EXCEPTION 'sid7-functional-functional-fixture-rollback' USING ERRCODE='ZP003';
   EXCEPTION WHEN SQLSTATE 'ZP003' THEN NULL;
   END;
 END

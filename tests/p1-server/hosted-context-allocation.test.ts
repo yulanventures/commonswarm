@@ -355,7 +355,16 @@ test('hosted allocation, replay, Q1/Q3 and hosted/local last-slot races commit c
     await stage.unsafe(helper);
     const [restored]=await stage.unsafe(releaseCatalogQuery(repoSql('deploy/release-proofs/session-identity/20261006000003-catalog.sql'),'catalog_ok'));
     assert.equal(restored!.catalog_ok,true,'restored helper positive control');
-    await stage.unsafe(repoSql('deploy/release-proofs/session-identity/20261006000003-functional.sql'));
+    // The standalone proof's ROLLBACK would also undo our phase-3 inverse.
+    // Give its synthetic rows a savepoint inside the existing stage transaction.
+    const functionalRollback=new Error('phase-1 functional fixture rollback');
+    const functional=repoSql('deploy/release-proofs/session-identity/20261006000003-functional.sql');
+    assert.equal((functional.match(/^BEGIN;$/gm)??[]).length,1);
+    assert.equal((functional.match(/^ROLLBACK;$/gm)??[]).length,1);
+    await stage.savepoint(async tx=>{
+      await tx.unsafe(functional.replace(/^BEGIN;$/m,'').replace(/^ROLLBACK;$/m,''));
+      throw functionalRollback;
+    }).catch(error=>{if(error!==functionalRollback)throw error;});
     await stage.unsafe(repoSql('deploy/release-proofs/session-identity/20261006000003-rollback.sql'));
     const [inverse]=await stage.unsafe(releaseCatalogQuery(repoSql('deploy/release-proofs/session-identity/20261006000003-rollback-catalog.sql'),'rollback_ok'));
     assert.equal(inverse!.rollback_ok,true,'data-free reserve restores prerequisite stage');
