@@ -12,7 +12,7 @@
  * statuses and booleans: never SQL text, driver messages, bodies or credentials. */
 import { execFileSync, spawn } from 'node:child_process';
 import { X509Certificate, createHash, randomBytes, randomUUID } from 'node:crypto';
-import { chmodSync, lstatSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -283,9 +283,76 @@ async function restoredDatabaseTarget(binding, tlsCaPem, issuance) {
   return { ...target, ensureAdminIssuance: () => ensureAdminIssuance(sql, issuance), close: () => sql.end({ timeout: 5 }) };
 }
 
+/** A harness setup failure. Callers branch on `code`, never on the message. */
+export class LockOrderSetupFailure extends Error {
+  constructor(code) {
+    super(`lock-order setup failed: ${code}`);
+    this.name = 'LockOrderSetupFailure';
+    this.code = code;
+  }
+}
+const setupFailure = (code) => { throw new LockOrderSetupFailure(code); };
+
+/** The X.Y.Z core that command/index.ts SEMVER_RE accepts; the races send this minimum as their
+ * client_version, so compareSemver returns 0. */
+const SEMVER_CORE_RE = /^\d+\.\d+\.\d+$/u;
+/** min_client_version is public configuration: a value is echoed only when it is this short and plain. */
+const OBSERVABLE_VERSION_RE = /^[0-9A-Za-z.+-]{1,32}$/u;
+/** One row of the swarm.config seed statement (20260723000001_p1_schema.sql:439-443). */
+const MIN_CLIENT_VERSION_ROW_RE = /^ {2}\('min_client_version', '"([^"'\\\n]*)"'::jsonb\),?$/gmu;
+const CONFIG_SEED_STATEMENT_RE = /^INSERT INTO swarm\.config \(key, value\)\nVALUES\n(?: {2}\('[a-z_]+', '[^'\n]*'::jsonb\),\n)* {2}\('[a-z_]+', '[^'\n]*'::jsonb\)\nON CONFLICT \(key\) DO NOTHING;$/u;
+
+/** Every supabase/migrations/*.sql file as { name, text }, in name order. */
+export function readMigrations(root = REPO_ROOT) {
+  try {
+    const directory = join(root, 'supabase/migrations');
+    return readdirSync(directory).filter((name) => name.endsWith('.sql')).sort()
+      .map((name) => ({ name, text: readFileSync(join(directory, name), 'utf8') }));
+  } catch {
+    return setupFailure('seed_migrations_unreadable');
+  }
+}
+
+/** The CI seed source: the migrations' own min_client_version, never a row of the shared CI
+ * database. The key must appear exactly once in all migrations, as one row of
+ * `INSERT INTO swarm.config (key, value) VALUES ... ON CONFLICT (key) DO NOTHING;` whose value is
+ * a JSON string X.Y.Z. Any other mention (a second seed, a later UPDATE or upsert, a comment)
+ * refuses: a fresh migrate might then hold another value. */
+export function migrationMinClientVersion(migrations) {
+  if (!Array.isArray(migrations) || migrations.length === 0) setupFailure('seed_migrations_unreadable');
+  const mentions = migrations.flatMap(({ name, text }) => (text.match(/min_client_version/gu) ?? []).map(() => name));
+  if (mentions.length !== 1) setupFailure('seed_min_client_version_not_unique');
+  const { text } = migrations.find((file) => file.name === mentions[0]);
+  const rows = [...text.matchAll(MIN_CLIENT_VERSION_ROW_RE)];
+  if (rows.length !== 1) setupFailure('seed_min_client_version_row_unparsed');
+  const start = text.lastIndexOf('INSERT INTO', rows[0].index);
+  const end = text.indexOf(';', rows[0].index);
+  if (start === -1 || end === -1 || !CONFIG_SEED_STATEMENT_RE.test(text.slice(start, end + 1))) {
+    setupFailure('seed_min_client_version_statement_unparsed');
+  }
+  if (!SEMVER_CORE_RE.test(rows[0][1])) setupFailure('seed_min_client_version_non_semver');
+  return rows[0][1];
+}
+
+/** One read of swarm.config min_client_version as `SELECT jsonb_typeof(value) AS type,
+ * value #>> '{}' AS text` (undefined: no row). Used by the CI seed read-back and by every Deno run. */
+export function classifyMinClientVersion(row) {
+  if (row === undefined || row === null) return { ok: false, code: 'min_client_version_missing' };
+  if (row.type !== 'string' || typeof row.text !== 'string') return { ok: false, code: 'min_client_version_non_string' };
+  if (!SEMVER_CORE_RE.test(row.text)) {
+    return OBSERVABLE_VERSION_RE.test(row.text)
+      ? { ok: false, code: 'min_client_version_non_semver', observed: row.text }
+      : { ok: false, code: 'min_client_version_non_semver' };
+  }
+  return { ok: true, version: row.text };
+}
+/** The stage error for a refused read: the code, and the observed value only when it may be echoed. */
+export const minClientVersionDiagnostic = (check) => (check.observed === undefined ? check.code : `${check.code}:observed=${check.observed}`);
+
 const DUMP_SCHEMAS = ['auth', 'swarm', 'swarm_read', 'commonswarm_oauth', 'commonswarm_ops', 'supabase_migrations'];
 /** CI only: a throwaway database on the CLI cluster, as adminEdgeDatabase builds one, but from
- * the verified container. Admin issuance opens only inside it; seed rows come from the bound source. */
+ * the verified container. Only its DDL comes from the shared database; its seed rows are the
+ * migrations' own, so earlier server files cannot change them. Admin issuance opens only inside it. */
 async function isolatedDatabaseTarget(binding, docker, issuance) {
   if (binding.mode !== 'ci') throw new Error('isolated_database_ci_only');
   const { default: postgres } = await import('postgres');
@@ -308,8 +375,10 @@ async function isolatedDatabaseTarget(binding, docker, issuance) {
       } finally { await master.end({ timeout: 5 }); }
     }
   };
-  let phase = 'source';
+  let phase = 'seed-source';
   try {
+    const minimum = migrationMinClientVersion(readMigrations());
+    phase = 'source';
     const [present] = await master`SELECT bool_and(to_regnamespace(s) IS NOT NULL) AS ok,
       to_regclass('commonswarm_oauth.admin_cutover_state') IS NOT NULL AS cutover
       FROM unnest(${DUMP_SCHEMAS}::text[]) AS s`;
@@ -327,18 +396,25 @@ async function isolatedDatabaseTarget(binding, docker, issuance) {
     await db.unsafe(dump.replace(/^\\(?:un)?restrict \S+\r?$/gmu, ''));
     await db.unsafe('RESET ALL');
     phase = 'seed';
-    // A schema-only copy has no seed rows; the command paths read swarm.config (min_client_version).
-    const config = await master`SELECT key, value::text AS value FROM swarm.config ORDER BY key`;
-    const wake = await master`SELECT applied_at FROM swarm.wake_path_release`;
+    // A schema-only copy has no seed rows. The command module reads only min_client_version
+    // from swarm.config. Its value is a text parameter: postgres.js describes a `${json}::jsonb`
+    // parameter as jsonb and JSON-encodes the text again ('"0.1.0"' became "\"0.1.0\"").
+    // The two singletons are the migrations' own inserts, with their column defaults
+    // (20260925000001_unclaimed_observed_ack.sql:69, 20261003000003_admin_oauth_cutover.sql:223).
     await db.begin(async (tx) => {
-      for (const row of config) await tx`INSERT INTO swarm.config (key, value) VALUES (${row.key}, ${row.value}::jsonb)`;
-      for (const row of wake) await tx`INSERT INTO swarm.wake_path_release (singleton, applied_at) VALUES (true, ${row.applied_at})`;
+      await tx`INSERT INTO swarm.config (key, value) VALUES ('min_client_version', to_jsonb(${minimum}::text))`;
+      await tx`INSERT INTO swarm.wake_path_release (singleton) VALUES (true)`;
       await tx`INSERT INTO commonswarm_oauth.admin_cutover_state(singleton) VALUES(true)`;
     });
+    phase = 'seed-readback';
+    const [seeded] = await db`SELECT jsonb_typeof(value) AS type, value #>> '{}' AS text FROM swarm.config WHERE key = 'min_client_version'`;
+    const check = classifyMinClientVersion(seeded);
+    if (!check.ok) setupFailure(minClientVersionDiagnostic(check));
+    if (check.version !== minimum) setupFailure('min_client_version_readback_mismatch');
     return { url: target.toString(), mode: binding.mode, tlsCaPem: null, ensureAdminIssuance: () => ensureAdminIssuance(db, issuance), close };
   } catch (error) {
     try { await close(); } catch { /* the setup failure below is the result */ }
-    throw new Error(`isolated_database_setup_failed:${phase}:${sqlstate(error)}`);
+    throw new Error(`isolated_database_setup_failed:${phase}:${error instanceof LockOrderSetupFailure ? error.code : sqlstate(error)}`);
   }
 }
 
@@ -612,14 +688,18 @@ async function denoMain() {
     out.sqlstate_capture_control = failures.codes.join(',');
     if (out.sqlstate_capture_control !== '22012') fail('sqlstate_capture_control_failed');
     failures.codes.length = 0;
+    out.stage = 'deadlock-timeout';
     const [timing] = await observer`SELECT setting::int AS ms FROM pg_settings WHERE name = 'deadlock_timeout'`;
     out.deadlock_timeout_ms = Number(timing?.ms);
     out.lock_timeout_ms = LOCK_TIMEOUT_MS;
     if (!(out.deadlock_timeout_ms < LOCK_TIMEOUT_MS)) fail('deadlock_timeout_not_below_lock_timeout');
-    // A restored target keeps its own minimum (D4); no command path branches on client_version
-    // except this minimum (command/index.ts swarm.config reads).
-    const [minimum] = await observer`SELECT value #>> '{}' AS version FROM swarm.config WHERE key = 'min_client_version'`;
-    if (typeof minimum?.version !== 'string' || !/^\d+\.\d+\.\d+$/u.test(minimum.version)) fail('min_client_version_unreadable');
+    // A restored target keeps its own minimum (D4); the CI target holds the migrations' own
+    // (isolatedDatabaseTarget). No command path branches on client_version except this minimum
+    // (command/index.ts swarm.config reads). An unreadable minimum is a STOP in both modes.
+    out.stage = 'min-client-version';
+    const [row] = await observer`SELECT jsonb_typeof(value) AS type, value #>> '{}' AS text FROM swarm.config WHERE key = 'min_client_version'`;
+    const minimum = classifyMinClientVersion(row);
+    if (!minimum.ok) fail(minClientVersionDiagnostic(minimum));
     out.client_version = minimum.version;
     // D4: names and ids unique to this run (fresh workspace, users and grants per scenario).
     const ctx = { command, db, observer, failures, jwks, out, tag: randomUUID().replaceAll('-', '').slice(0, 10), clientVersion: minimum.version };

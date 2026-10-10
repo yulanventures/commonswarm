@@ -1,7 +1,8 @@
 /** Round-C F4 and LANE-2-DELTA D1-D3: the X2 lock-order files reach a database only through one
  * verified binding. Every refusal happens before the connector (the only SQL path) runs, and
  * nothing calls fetch. Synthetic docker inspect results and binding files only: no Docker, no
- * database. The certificate below is a public, self-signed test certificate (P-256, named
+ * database. The same applies to the CI seed source (the migrations' own min_client_version) and
+ * the min_client_version classification that every run applies before its scenario. The certificate below is a public, self-signed test certificate (P-256, named
  * curve, IP:127.0.0.1); its key was discarded. X509Certificate parsing does not check validity
  * dates, so its long lifetime does not affect the test. */
 import assert from "node:assert/strict";
@@ -36,7 +37,13 @@ interface Harness {
   }): Promise<unknown>;
   tlsClientOptions(target: { url: string; tlsCaPem: string | null }): Record<string, unknown>;
   migrationTreeLine(git?: (args: string[]) => string): string;
+  LockOrderSetupFailure: new (code: string) => Error & { code: string };
+  readMigrations(): { name: string; text: string }[];
+  migrationMinClientVersion(migrations: unknown): string;
+  classifyMinClientVersion(row: { type: string | null; text: string | null } | undefined): MinimumCheck;
+  minClientVersionDiagnostic(check: MinimumCheck): string;
 }
+type MinimumCheck = { ok: true; version: string } | { ok: false; code: string; observed?: string };
 const harness = await import(new URL("../support/admin-principal-lock-order-harness.mjs", import.meta.url).href) as Harness;
 
 const PROJECT = "c1b-x2-abcd1234";
@@ -519,4 +526,59 @@ test("the binding file never reaches output: refusals carry codes, not values", 
   assertRefused(record, "live_published_port");
   assert.equal(String((record.outcome as Error).message).includes(secret), false);
   assert.equal(readFileSync(join(directory, `binding-${fileCounter}.json`), "utf8").includes(secret), true, "control: the secret was in the file");
+});
+
+test("min_client_version classification: missing, non-string, non-semver and valid", () => {
+  const check = (row: { type: string | null; text: string | null } | undefined) => harness.classifyMinClientVersion(row);
+  const diagnostic = (row: { type: string | null; text: string | null } | undefined) => harness.minClientVersionDiagnostic(check(row));
+  assert.deepEqual(check(undefined), { ok: false, code: "min_client_version_missing" });
+  for (const [type, text] of [["number", "1"], ["null", null], ["object", "{\"v\": \"0.1.0\"}"], ["array", "[\"0.1.0\"]"], ["boolean", "true"]]) {
+    assert.deepEqual(check({ type, text }), { ok: false, code: "min_client_version_non_string" }, `${type} is not a string`);
+    assert.equal(diagnostic({ type, text }), "min_client_version_non_string", `${type}: no value is echoed`);
+  }
+  // Round 2's seed defect: the string held its own JSON quotes. It is classified, never echoed.
+  assert.deepEqual(check({ type: "string", text: "\"0.1.0\"" }), { ok: false, code: "min_client_version_non_semver" });
+  assert.equal(diagnostic({ type: "string", text: "\"0.1.0\"" }), "min_client_version_non_semver");
+  for (const value of ["0.1", "0.1.0-rc.1", "v0.1.0", "0.1.0+build.7", "-"]) {
+    assert.deepEqual(check({ type: "string", text: value }), { ok: false, code: "min_client_version_non_semver", observed: value });
+    assert.equal(diagnostic({ type: "string", text: value }), `min_client_version_non_semver:observed=${value}`);
+  }
+  for (const value of ["", " 0.1.0", "0.1.0 secret", "0.1.0\n", "postgres://user:pw@h/db", "9".repeat(33)]) {
+    assert.deepEqual(check({ type: "string", text: value }), { ok: false, code: "min_client_version_non_semver" }, "only a short plain value is echoed");
+    assert.equal(diagnostic({ type: "string", text: value }), "min_client_version_non_semver");
+  }
+  // Positive controls.
+  assert.deepEqual(check({ type: "string", text: "0.1.0" }), { ok: true, version: "0.1.0" });
+  assert.deepEqual(check({ type: "string", text: "12.34.567" }), { ok: true, version: "12.34.567" });
+});
+
+test("the CI seed takes min_client_version from the migrations' own default", () => {
+  const refusedWith = (code: string) => (error: unknown) =>
+    error instanceof harness.LockOrderSetupFailure && error.code === code;
+  // Positive control: the real migrations of this checkout.
+  // supabase/migrations/20260723000001_p1_schema.sql:441 seeds ('min_client_version', '"0.1.0"'::jsonb).
+  const migrations = harness.readMigrations();
+  assert.ok(migrations.some((file) => file.name === "20260723000001_p1_schema.sql"));
+  assert.equal(harness.migrationMinClientVersion(migrations), "0.1.0");
+  const seed = (row = "('min_client_version', '\"0.1.0\"'::jsonb)", conflict = "DO NOTHING") =>
+    `INSERT INTO swarm.config (key, value)\nVALUES\n  ${row},\n  ('idempotency_retention_days', '30'::jsonb)\nON CONFLICT (key) ${conflict};\n`;
+  const file = (text: string, name = "20260101000001_seed.sql") => ({ name, text });
+  // Positive control: the synthetic form the refusals below change one part of.
+  assert.equal(harness.migrationMinClientVersion([file(seed())]), "0.1.0");
+  assert.equal(harness.migrationMinClientVersion([file(seed("('min_client_version', '\"2.10.3\"'::jsonb)"))]), "2.10.3");
+  assert.throws(() => harness.migrationMinClientVersion([]), refusedWith("seed_migrations_unreadable"));
+  assert.throws(() => harness.migrationMinClientVersion([file("SELECT 1;\n")]), refusedWith("seed_min_client_version_not_unique"));
+  assert.throws(() => harness.migrationMinClientVersion([file(seed()), file(
+    "UPDATE swarm.config SET value = '\"0.2.0\"'::jsonb WHERE key = 'min_client_version';\n", "20260101000002_bump.sql")]),
+  refusedWith("seed_min_client_version_not_unique"), "a later override refuses");
+  assert.throws(() => harness.migrationMinClientVersion([file(`${seed()}-- min_client_version is public\n`)]),
+    refusedWith("seed_min_client_version_not_unique"));
+  assert.throws(() => harness.migrationMinClientVersion([file(seed("('min_client_version', '1'::jsonb)"))]),
+    refusedWith("seed_min_client_version_row_unparsed"), "a non-string default");
+  assert.throws(() => harness.migrationMinClientVersion([file(seed("('min_client_version', '\"0.1\"'::jsonb)"))]),
+    refusedWith("seed_min_client_version_non_semver"));
+  assert.throws(() => harness.migrationMinClientVersion([file(seed(undefined, "DO UPDATE SET value = EXCLUDED.value"))]),
+    refusedWith("seed_min_client_version_statement_unparsed"), "an upsert is not the default seed");
+  assert.throws(() => harness.migrationMinClientVersion([file(seed().replace("swarm.config", "swarm.other_config"))]),
+    refusedWith("seed_min_client_version_statement_unparsed"), "another table");
 });
