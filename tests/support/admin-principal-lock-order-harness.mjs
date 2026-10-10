@@ -896,13 +896,25 @@ async function holderSide(ctx, kind, fixture) {
     };
   }
   if (kind === 'remove') {
+    // remove_member needs a fresh interactive sign-in (fresh-auth.ts:82-83). Without one,
+    // command/index.ts:11352-11380 returns 401 fresh_auth_required before the step-8 workspace
+    // and stream locks (:12350-12357). Production takes the time from the JWT's newest interactive
+    // AMR (:13323); here it is the database clock that the check compares with (:11353), read
+    // just before each command.
+    const remove = async (user) => {
+      const [clock] = await ctx.observer`SELECT extract(epoch FROM statement_timestamp())::float8 AS seconds`;
+      const signedIn = { ...owner, identity: { ...owner.identity, interactiveAuthAtSeconds: Number(clock.seconds) } };
+      const result = await manage(ctx, signedIn, workspaceId, { kind: 'remove_member', user_id: user.userId });
+      return { ...summary(result), ok: result.status === 200 && result.body?.status === 'accepted' };
+    };
     const removed = await human(ctx, 'removed');
+    const warmRemoved = await human(ctx, 'warm-removed');
     await member(ctx, workspaceId, removed, 'member');
+    await member(ctx, workspaceId, warmRemoved, 'member');
     return {
-      start: async () => {
-        const result = await manage(ctx, owner, workspaceId, { kind: 'remove_member', user_id: removed.userId });
-        return { ...summary(result), ok: result.status === 200 && result.body?.status === 'accepted' };
-      },
+      // Positive control: the same command on another member is accepted before the race.
+      warm: () => remove(warmRemoved),
+      start: () => remove(removed),
       writes: async () => ({ removed_membership_revoked: (await ctx.observer`SELECT count(*)::int AS n FROM swarm.memberships
         WHERE workspace_id = ${workspaceId}::uuid AND user_id = ${removed.userId}::uuid AND revoked_at IS NOT NULL`)[0].n === 1 }),
     };
@@ -992,6 +1004,11 @@ async function adminSide(ctx, fixture, label = 'admin') {
 }
 
 const settleSide = (promise) => promise.then((value) => value, (error) => ({ ok: false, thrown: sqlstate(error) }));
+/** `<status>:<code>` of a settled side: its HTTP status and its body error code or SQLSTATE. */
+const returnedCode = (side) => {
+  const code = side.error ?? side.thrown;
+  return `${Number.isInteger(side.status) ? side.status : 'none'}:${typeof code === 'string' && /^[A-Za-z0-9_]{1,64}$/u.test(code) ? code : 'none'}`;
+};
 
 async function raceScenario(ctx, scenario) {
   const race = RACES[scenario];
@@ -1005,12 +1022,12 @@ async function raceScenario(ctx, scenario) {
   const holder = await holderSide(ctx, race.waiting, fixture);
   out.stage = 'warm-up';
   const warmCreation = await creator.warm();
-  if (!warmCreation.ok) { out.warm_creation = warmCreation; fail('creation_positive_control_failed'); }
+  if (!warmCreation.ok) { out.warm_creation = warmCreation; fail(`creation_positive_control_failed:${returnedCode(warmCreation)}`); }
   if (holder.warm) {
     const warmHolder = await holder.warm();
     if (!warmHolder.ok || (warmHolder.audit && warmHolder.audit.join(',') !== 'committed')) {
       out.warm_holder = warmHolder;
-      fail('holder_positive_control_failed');
+      fail(`holder_positive_control_failed:${returnedCode(warmHolder)}`);
     }
   }
   if (holder.arm) await holder.arm();
@@ -1042,15 +1059,20 @@ async function raceScenario(ctx, scenario) {
     parking.creation_waits_on_ceiling_after_stream = parkedPid !== null;
     if (parkedPid === null) fail('creation_did_not_park');
     out.stage = 'park-holder';
-    waiting = settleSide(holder.start());
+    let holderReturned = null;
+    waiting = settleSide(holder.start()).then((outcome) => { holderReturned = outcome; return outcome; });
     const waitingPid = await waitForBlocked(observer, parkedPid, tupleOnStreams(observer));
     parking.holder_waits_on_stream_held_by_creation = waitingPid !== null;
-    if (waitingPid === null) fail('holder_did_not_wait_for_stream');
+    // A holder that returned without waiting names its HTTP status and error code.
+    if (waitingPid === null) {
+      fail(holderReturned === null ? 'holder_did_not_wait_for_stream' : `holder_returned_before_stream:${returnedCode(holderReturned)}`);
+    }
   } finally {
-    out.stage = 'release';
+    // A failed parking keeps its own stage; the blocker is released either way.
     releaseBlocker();
     await blocker.catch(() => {});
   }
+  out.stage = 'release';
   const sides = await Promise.race([Promise.all([parked, waiting]), new Promise((resolve) => setTimeout(() => resolve(null), 60_000))]);
   failures.recording = false;
   if (sides === null) fail('race_timeout');
@@ -1085,7 +1107,7 @@ async function adminPairScenario(ctx) {
   out.stage = 'warm-up';
   for (const admin of admins) {
     const warmed = await admin.warm();
-    if (!warmed.ok || warmed.audit.join(',') !== 'committed') { out.warm_holder = warmed; fail('holder_positive_control_failed'); }
+    if (!warmed.ok || warmed.audit.join(',') !== 'committed') { out.warm_holder = warmed; fail(`holder_positive_control_failed:${returnedCode(warmed)}`); }
     await admin.arm();
   }
   out.stage = 'blocker';
@@ -1125,10 +1147,11 @@ async function adminPairScenario(ctx) {
     // coordinated order (the second queues on the workspace tuple lock).
     out.second_admin_blocked_by = secondWait.blockedBy;
   } finally {
-    out.stage = 'release';
+    // A failed parking keeps its own stage; the blocker is released either way.
     releaseBlocker();
     await blocker.catch(() => {});
   }
+  out.stage = 'release';
   const sides = await Promise.race([Promise.all([parked, waiting]), new Promise((resolve) => setTimeout(() => resolve(null), 60_000))]);
   failures.recording = false;
   if (sides === null) fail('race_timeout');
