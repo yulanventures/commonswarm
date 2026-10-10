@@ -193,6 +193,11 @@ elif name=='ai_run':
     if args==['ai-backup-gate-check'] and cfg.get('backup_gate_refused'): raise SystemExit(1)
 elif name=='ai_db':
     if args==['-q','--command','BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;']: pass
+    elif args==['-q','--file',str(root/'proof/w4-rollback-measure.sql')]:
+        import re
+        sql=owned(args[2]).read_text(); fields=dict(re.findall(r"(measured_edge_release_sha|measured_edge_target|measured_mount|measured_image_digest|measured_artifact_digest|measurement_evidence_ref)='([^']*)'",sql))
+        assert len(fields)==6 and 'measured_generation=release_generation+1' in sql and 'invalidated_at=statement_timestamp()' in sql
+        (root/'rollback-fields.json').write_text(json.dumps(fields))
     elif args==['-q','--file',str(root/'proof/measure.sql')]: owned(args[2]).read_text(); (root/'measured.flag').write_text('1')
     else: refuse()
 elif name=='ai_ro':
@@ -200,6 +205,10 @@ elif name=='ai_ro':
     elif args==['-Atq','--command','SELECT release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND invalidated_at IS NULL AND measured_generation=release_generation;']: print('7')
     elif args==['-Atq','--command',"SELECT json_build_object('admin_issuance_enabled',admin_issuance_enabled,'invalidated',invalidated_at IS NOT NULL,'release_generation',release_generation,'measured_generation',measured_generation,'measured_edge_release_sha',measured_edge_release_sha)::text FROM commonswarm_oauth.admin_cutover_state WHERE singleton;"]:
         print(json.dumps({'admin_issuance_enabled':False,'invalidated':True,'release_generation':8,'measured_generation':7,'measured_edge_release_sha':cfg.get('baseline','b'*40)}))
+    elif len(args)==3 and args[:2]==['-Atq','--command'] and args[2].startswith("SELECT json_build_object('admin_issuance_enabled',admin_issuance_enabled,") and "'measured_edge_target'," in args[2]:
+        fields=json.loads((root/'rollback-fields.json').read_text())
+        print(json.dumps({'admin_issuance_enabled':False,'invalidated':True,'release_generation':8,'measured_generation':8,
+          **fields,'measured_at':'2026-10-03T12:00:00+00:00'}))
     # ai-w4-apply's A6 readbacks (their checks run in admin-release-w4-second-pass.test.ts): the fence projection and the
     # 19-column singleton, before and after the measurement statement file ran.
     elif len(args)==3 and args[:2]==['-Atq','--command'] and "'fence_complete'," in args[2] and 'revoked_roles' in args[2]:
@@ -243,7 +252,8 @@ elif name=='mv':
     if len(args)!=3 or args[0]!='-Tf': refuse()
     owned(args[1]).replace(owned(args[2]))
 elif name=='docker':
-    edge=str(root/'edge/releases'/cfg['sha']); compose=edge+'/deploy/edge-runtime'
+    compose=(root/'edge-working-dir').read_text() if (root/'edge-working-dir').exists() else str(root/'edge/releases'/cfg['sha']/'deploy/edge-runtime')
+    edge=compose[:-len('/deploy/edge-runtime')]
     if args==['inspect','--format','{{.State.Health.Status}}','commonswarm-edge-edge-runtime-1']: print('healthy')
     elif args==['inspect','--format','{{.Image}}','commonswarm-edge-edge-runtime-1']: print(cfg.get('running_image',cfg['image']))
     elif args==['inspect','--format','{{index .Config.Labels "com.docker.compose.project.working_dir"}}','commonswarm-edge-edge-runtime-1']:
@@ -376,6 +386,7 @@ function fixture(config: Record<string, unknown> = {}, parent = scratch) {
     });
     assert.ifError(result.error); assert.equal(result.signal, null);
     assert.doesNotMatch(result.stdout + result.stderr, /UNMODELLED/);
+    if (result.status === 0) assert.doesNotMatch(result.stderr, /unbound variable|parameter (?:null or not set|not set)/, 'missing fixture inputs must not succeed on Bash 3.2');
     for (const file of ['caddy-validate.log', 'caddy-live-validate.log', 'edge-apply.log', 'caddy-rollback.log', 'edge-rollback.log'])
       if (existsSync(join(stage, file))) assert.doesNotMatch(readFileSync(join(stage, file), 'utf8'), /UNMODELLED/);
     return { ...result, calls: lines('commands.jsonl'), requests: lines('http.jsonl') };
@@ -384,7 +395,7 @@ function fixture(config: Record<string, unknown> = {}, parent = scratch) {
     for (const [from, to] of [
       ['/Users/yulanbot/work/hm37-live-release', receipts], ['/etc/caddy', join(root, 'etc/caddy')],
       ['/home/commonswarm/edge', join(root, 'edge')], ['/home/commonswarm/.env', join(root, 'box/.env')],
-      ['/tmp/admin-issuance-', join(root, 'archive/admin-issuance-')], ['/proof/measure.sql', join(proof, 'measure.sql')],
+      ['/tmp/admin-issuance-', join(root, 'archive/admin-issuance-')], ['/proof/w4-rollback-measure.sql', join(proof, 'w4-rollback-measure.sql')], ['/proof/measure.sql', join(proof, 'measure.sql')],
       ['/etc/systemd/system', join(root, 'systemd')],
       ['/usr/local/libexec', join(root, 'libexec')], ['/etc/commonswarm-admin-release', join(root, 'admin-release')],
     ] as const) source = source.split(from).join(to);
@@ -428,6 +439,13 @@ function rollbackFixture(config: Record<string, unknown> = {}, ignored = false) 
   symlinkSync(join(f.root,'edge/releases',sha),join(f.root,'edge/current'));
   symlinkSync(join(f.root,'edge/releases',sha),join(f.root,'edge/current.admin-issuance'));
   f.put('edge-working-dir',join(f.root,'edge/releases',sha,'deploy/edge-runtime'));
+  f.put(`edge/releases/${baseline}/RELEASE_SHA`, baseline+'\n');
+  const archive = join(f.root, 'archive', `admin-issuance-${baseline}-Leg123.tar`);
+  const tar = spawnSync('/usr/bin/python3', ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t:\n    t.add(sys.argv[2],arcname="deploy/edge-runtime/compose.yaml"); t.add(sys.argv[3],arcname="deploy/edge-runtime/compose.override.yaml")',
+    archive, join(f.root, `edge/releases/${baseline}/deploy/edge-runtime/compose.yaml`), join(f.root, `edge/releases/${baseline}/deploy/edge-runtime/compose.override.yaml`)], { encoding: 'utf8' });
+  assert.equal(tar.status, 0, tar.stderr); chmodSync(archive, 0o600);
+  f.put('proof/w4-state/recycle-baseline.json', { archive: { path: archive, sha256: hash(readFileSync(archive)) } });
+  f.put('proof/w4-state/roots-before.json', { cutover: { release_generation: 6 }, entries: {} });
   f.put('timer-state','active');
   f.put('etc/caddy/sites/20-commonswarm-mcp.caddy','failed candidate MCP\n');
   f.put('etc/caddy/sites/10-commonswarm-api.caddy','failed candidate API\n');
@@ -471,6 +489,8 @@ test('same-version retry / w4-rollback-refusals: each failure stops before the a
   assert.equal(before.status,0,before.stderr);
   const old=[...before.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m=>m[1]!).find(b=>b.startsWith('# step: ai-w4-rollback\n'))!;
   const control=rollbackFixture({fail_call:['ai_run','ai-recycle-rollback']},true);
+  const oldGuard = [...before.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m=>m[1]!).find(b=>b.startsWith('# step: ai-timer-guard\n'))!;
+  control.put('timer.sh', control.remap(oldGuard.replace('set -euo pipefail', 'set +e')));
   const oldIgnored='# modelled ignored errexit (left side of ||)\n( '+old.replace('set -euo pipefail','set +e')+'\n) || { printf "CALLER: rollback failure seen\\n" >&2; exit 1; }';
   const escaped=control.run([rollbackShim,oldIgnored]); pass(control,escaped);
   assert.match(escaped.stdout,/Apply body completed/); assert.ok(existsSync(join(control.proof,'edge-aside.json')));

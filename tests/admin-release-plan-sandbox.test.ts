@@ -87,9 +87,10 @@ const stubLogDir = join(scratch, 'stub-argv');
 const blockDir = join(scratch, 'blocks');
 const profileDir = join(scratch, 'profiles');
 const workRoot = join(scratch, 'work');                 // stands in for /Users/yulanbot/work
+const fixturePointer = join(workRoot, 'dcr-rt', 'production', 'c1-smoke.pointer');
 const privateTmp = join(scratch, 'private-tmp');        // stands in for /private/tmp
 const blockTmp = join(scratch, 'tmp');                  // TMPDIR: bash 3.2 writes each heredoc here
-for (const dir of [stubDir, stubLogDir, blockDir, profileDir, workRoot, privateTmp, blockTmp]) mkdirSync(dir, { recursive: true, mode: 0o700 });
+for (const dir of [stubDir, stubLogDir, blockDir, profileDir, workRoot, dirname(fixturePointer), privateTmp, blockTmp]) mkdirSync(dir, { recursive: true, mode: 0o700 });
 
 // Countable literal rewrites, as in tests/admin-release-plan.test.ts portable().
 const REWRITES: Array<[string, string]> = [
@@ -508,7 +509,7 @@ test('gui-denied dry run: every Mac block runs sandboxed with stubs; none attemp
       // withdraw: the approve mode first requires the pointer that ai-w6-pointer publishes later.
       C1_INPUTS_FILE: c1InputsFile, C1_PROOF_DIR: c1ProofDir, C1_CLIENT_ACTION: 'withdraw',
       C1_TRANSFER_DIRECTION: 'download', C1_TRANSFER_FILE: 'C1-client-check.txt',
-      C1_SECRET_STAGE: stage, C1_POINTER: join(workRoot, 'dcr-rt', 'c1-smoke.pointer'), C1_RUNNER_PID: runnerPid,
+      C1_SECRET_STAGE: stage, C1_POINTER: fixturePointer, C1_RUNNER_PID: runnerPid,
     };
     const outcome = runSandboxed(String(index), step, source, env);
     outcomes.push(outcome);
@@ -608,4 +609,21 @@ test('C1-16 sandbox classifier: first Mac|box token, not any Mac substring', () 
   assert.ok(!EXPECTED_MAC_STEPS.includes('ai-live-controls'));
   assert.ok(!EXPECTED_MAC_STEPS.includes('ai-edge-receipt'));
   assert.equal(macBlocks.length, 33);
+});
+
+// This contract does not launch a GUI or a sandbox: execute the producer's actual validator with the harness caller.
+test('release-plan-contract / sandbox-pointer-caller: validator refuses the old caller and admits the production caller', () => {
+  const source = portable(blocks.find(b => stepOf(b) === 'ai-w6-pointer')!).result;
+  const python = source.split("<<'PY'\n")[1]!.split('\nPY')[0]!;
+  const stage = mkdtempSync(join(privateTmp, 'anvil-secret.')); chmodSync(stage, 0o700);
+  writeFileSync(join(stage, 'request-plan.json'), JSON.stringify({ client_id: 'https://commonswarm.com/oauth/c1-smoke/client.json', resource: 'https://api.commonswarm.com/admin', scope: 'openid offline_access admin:read' }));
+  const cfile = join(stage, 'cfile.json'), inputs = join(stage, 'inputs.json');
+  writeFileSync(cfile, JSON.stringify({ smoke_workspace_name: 'Fixture' }));
+  writeFileSync(inputs, JSON.stringify({ release_sha: releaseSha, window_id: windowId, window_end_utc: new Date(Date.now() + 3600_000).toISOString() }));
+  for (const [pointer, expected] of [[join(workRoot, 'dcr-rt', 'c1-smoke.pointer'), 1], [fixturePointer, 0]] as const) {
+    const r = spawnSync('python3', ['-', stage, pointer, cfile, inputs, specPath], { input: python, encoding: 'utf8' });
+    assert.equal(r.status, expected, r.stdout + r.stderr);
+    if (expected === 0) assert.equal(JSON.parse(readFileSync(pointer, 'utf8')).window_id, windowId);
+    else assert.match(r.stderr, /AssertionError/);
+  }
 });
