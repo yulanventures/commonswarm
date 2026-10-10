@@ -191,9 +191,12 @@ for (const upgrade of [false, true]) test(upgrade
   : 'hosted to-do reads use the household read path and refuse another workspace', { timeout: 120_000 }, () => {
   const local = JSON.parse(execFileSync('supabase', ['status', '-o', 'json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
   const f = fixture(!upgrade);
-  const schema = emptyApplicationSchema() + repoSql('supabase/household-todo-reserve/20261006000001-rollback.sql')
+  // Reverse lifecycle while its triggers still exist, before rebuilding to-dos.
+  // The normal fixture reinstalls lifecycle; the upgrade fixture seeds old handles first.
+  const schema = emptyApplicationSchema() + repoSql('deploy/release-proofs/session-identity/20261006000004-rollback.sql')
+    + repoSql('supabase/household-todo-reserve/20261006000001-rollback.sql')
     + repoSql('supabase/migrations/20261006000001_household_todos.sql')
-    + (upgrade ? repoSql('deploy/release-proofs/session-identity/20261006000004-rollback.sql') : '');
+    + (upgrade ? '' : repoSql('supabase/migrations/20261006000004_hosted_context_lifecycle.sql'));
   const lifecycle = upgrade ? repoSql('supabase/migrations/20261006000004_hosted_context_lifecycle.sql') : '';
   const result = spawnSync('deno', ['eval', '--no-lock', '--config', 'supabase/functions/command/deno.json', harness], {
     cwd: process.cwd(), encoding: 'utf8', input: JSON.stringify({ f, schema, setup: f.setup, lifecycle }),

@@ -753,7 +753,6 @@ END;
 )
 RETURNS integer
 LANGUAGE plpgsql
-VOLATILE
 SECURITY DEFINER
 SET search_path TO ''swarm'', ''pg_catalog''
 AS $function$
