@@ -556,8 +556,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               <form class="dashboard__access-card" data-household-consent hidden>
                 <h2 class="dashboard__access-title">Workspace access</h2>
                 <p class="dashboard__access-lead">
-                  Choose whether to invite people to this workspace, and your own access.
-                  Invitations need this choice.
+                  Confirm your access to this workspace. The owner also chooses whether to invite people.
                 </p>
                 <fieldset class="dashboard__choice-cards" data-household-purpose-set>
                   <legend>{PURPOSE_QUESTION}</legend>
@@ -1984,7 +1983,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
     /* An expired or reused sign-in link returns here with the error in the address. Read it once,
        at load, before the auth client can rewrite the address. Display only. */
-    const returnedAuthError = authReturnError(window.location);
+    let returnedAuthError = authReturnError(window.location);
     const authLinkError = (message: string | null): void => {
       const box = one<HTMLElement>("[data-auth-link-error]");
       if (!box) return;
@@ -9056,6 +9055,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           showAuthView("choices");
           showPanel("signed-out");
           authLinkError(returnedAuthError);
+          returnedAuthError = null;
           return;
         }
         const who = accountName(session);

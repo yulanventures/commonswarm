@@ -176,7 +176,7 @@ export function authReturnError(location: { hash: string; search: string }): str
   if (!code && !find("error") && !find("error_description")) return null;
   return code === "otp_expired"
     ? "That sign-in link has expired or was already used."
-    : "That sign-in link did not work.";
+    : "That sign-in did not work.";
 }
 
 export async function currentSession(): Promise<Session | null> {

@@ -17,7 +17,7 @@ test("the same error in the query string is read the same way", () => {
 
 test("another auth error gets a plain sentence and never the raw description", () => {
   const message = authReturnError({ hash: "#error=server_error&error_description=secret+detail", search: "" });
-  assert.equal(message, "That sign-in link did not work.");
+  assert.equal(message, "That sign-in did not work.");
 });
 
 test("control: an address without an auth error shows no message", () => {
@@ -27,9 +27,9 @@ test("control: an address without an auth error shows no message", () => {
 
 test("the sign-in view reads the error once and offers a resend action; the button is wired", () => {
   const source = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
-  assert.match(source, /const returnedAuthError = authReturnError\(window\.location\)/);
+  assert.match(source, /let returnedAuthError = authReturnError\(window\.location\)/);
   assert.match(source, /data-auth-link-error-text/);
   assert.match(source, /data-auth-resend>Send a new link<\/button>/);
-  assert.match(source, /authLinkError\(returnedAuthError\)/);
+  assert.match(source, /authLinkError\(returnedAuthError\);\s*returnedAuthError = null;/);
   assert.match(source, /\[data-auth-resend\]"\)\?\.addEventListener\("click"/);
 });

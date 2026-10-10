@@ -28,6 +28,7 @@ interface Observation {
   emailSentVisible: boolean;
   sentTo: string;
   messageAfterSend: boolean;
+  reboot?: { signedInState: string; signedOutState: string; choicesVisible: boolean; messageVisible: boolean; messageText: string };
 }
 
 const observe = `<script>
@@ -54,19 +55,38 @@ const observe = `<script>
       resend.click();
       await waitFor(() => shown(one('[data-auth-view="email-sent"]')));
     }
+    let reboot;
+    if (__REBOOT__) {
+      // Another document signs in and then out through the real auth client; each broadcast makes this page boot again.
+      const app = one("live-dashboard");
+      const other = src => new Promise(resolve => { const frame = document.createElement("iframe"); frame.onload = resolve; frame.src = src; document.body.append(frame); });
+      await other("/signin");
+      await waitFor(() => app.dataset.state !== "signed-out" && app.dataset.state !== "loading");
+      const signedInState = app.dataset.state;
+      await other("/signout");
+      await waitFor(() => app.dataset.state === "signed-out");
+      reboot = { signedInState, signedOutState: app.dataset.state, choicesVisible: shown(one('[data-auth-view="choices"]')), messageVisible: shown(box), messageText: one("[data-auth-link-error-text]").textContent };
+    }
     report({
-      messageVisible, messageText, resendVisible, focusedWithoutAddress, otpRequests: window.otpRequests,
+      reboot, messageVisible, messageText, resendVisible, focusedWithoutAddress, otpRequests: window.otpRequests,
       emailSentVisible: shown(one('[data-auth-view="email-sent"]')), sentTo: one("[data-auth-email]").textContent,
       messageAfterSend: shown(box),
     });
   })().catch(error => report({ error: String(error) }));
 </script>`;
 
+// A second document that signs in with a session the stubbed user endpoint accepts.
+const user = { id: "11111111-1111-4111-8111-111111111111", aud: "authenticated", role: "authenticated", email: "synthetic@example.test", app_metadata: {}, user_metadata: {}, created_at: new Date(0).toISOString() };
+const segment = (value: object) => Buffer.from(JSON.stringify(value)).toString("base64url");
+const token = `${segment({ alg: "HS256", typ: "JWT" })}.${segment({ sub: user.id, aud: "authenticated", role: "authenticated", exp: Math.floor(Date.now() / 1000) + 3600 })}.synthetic`;
+
 // Mock only the HTTP boundary. The component, auth client and email helper are real.
 const setup = `<script>
   window.otpRequests = [];
   window.fetch = async (input, init) => {
     const request = new Request(input, init);
+    if (request.url.endsWith("/auth/v1/user")) return Response.json(${JSON.stringify(user)});
+    if (request.url.includes("/auth/v1/logout")) return new Response(null, { status: 204 });
     if (request.url.startsWith("https://api.test.invalid/auth/v1/otp")) {
       window.otpRequests.push({ email: (await request.json()).email });
       return Response.json({});
@@ -75,19 +95,23 @@ const setup = `<script>
   };
 </script>`;
 
-async function observeSignIn(suffix: string): Promise<Observation> {
+async function observeSignIn(suffix: string, reboot = false): Promise<Observation> {
   const component = fileURLToPath(new URL("./LiveDashboard.astro", import.meta.url));
   const source = await readFile(component, "utf8");
   const script = source.split("<script>")[1]?.split("</script>")[0]; assert.ok(script);
-  const bundle = (await build({
-    stdin: { contents: script, loader: "ts", resolveDir: dirname(component) }, bundle: true, write: false,
+  const bundleScript = async (contents: string) => (await build({
+    stdin: { contents, loader: "ts", resolveDir: dirname(component) }, bundle: true, write: false,
     format: "iife", platform: "browser", define: { "import.meta.env": JSON.stringify({ PUBLIC_SUPABASE_URL: "https://api.test.invalid", PUBLIC_SUPABASE_ANON_KEY: "synthetic-public-key" }) },
   })).outputFiles[0]!.text;
+  const bundle = await bundleScript(script);
+  const signIn = await bundleScript(`import { client } from "../../lib/commonswarm"; void client()!.auth.setSession({ access_token: ${JSON.stringify(token)}, refresh_token: "synthetic-refresh" });`);
+  const signOut = await bundleScript('import { client } from "../../lib/commonswarm"; void client()!.auth.signOut({ scope: "local" });');
   const markup = source.replace(/^---[\s\S]*?---\n/u, "").split("<script>")[0]!;
-  const html = `<!doctype html><html><body>${markup}${setup}<script>${bundle}</script>${observe}</body></html>`;
-  const server = createServer((_request, response) => {
+  const html = `<!doctype html><html><body>${markup}${setup}<script>${bundle}</script>${observe.replace("__REBOOT__", String(reboot))}</body></html>`;
+  const server = createServer((request, response) => {
     response.writeHead(200, { "Content-Type": "text/html" });
-    response.end(html);
+    const other = request.url === "/signin" ? signIn : request.url === "/signout" ? signOut : null;
+    response.end(other ? `<!doctype html><html><body>${setup}<script>${other}</script></body></html>` : html);
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const root = await realpath(tmpdir()), profile = await mkdtemp(join(root, "cswarm-auth-return."));
@@ -132,4 +156,18 @@ test("control: the sign-in view without an auth error shows no message", { skip:
   assert.equal(result.messageText, "");
   assert.equal(result.resendVisible, false);
   assert.deepEqual(result.otpRequests, []);
+});
+
+test("a later signed-out boot in the same tab does not show the returned error again", { skip: process.platform === "darwin", timeout: 90000 }, async () => {
+  const result = await observeSignIn(`#${ERROR}`, true);
+  assert.equal(result.error, undefined);
+  assert.equal(result.messageVisible, true);
+  assert.equal(result.messageText, EXPIRED);
+  assert.ok(result.reboot, "the page must report the re-boot");
+  // Positive control: the page left the signed-out panel for a signed-in boot, then booted signed-out again.
+  assert.notEqual(result.reboot.signedInState, "signed-out");
+  assert.equal(result.reboot.signedOutState, "signed-out");
+  assert.equal(result.reboot.choicesVisible, true);
+  assert.equal(result.reboot.messageVisible, false);
+  assert.equal(result.reboot.messageText, "");
 });

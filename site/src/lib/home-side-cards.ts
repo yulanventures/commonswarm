@@ -10,7 +10,7 @@ import { agentOrb, objectCard, personAvatar } from "./home-primitives";
  * button here opens the pane at that form instead of repeating its choices.
  */
 export const LISTS_DOOR_TITLE = "Workspace access";
-export const LISTS_DOOR_LEAD = "Choose whether to invite people to this workspace, and your own access. Invitations need this choice.";
+export const LISTS_DOOR_LEAD = "Confirm your access to this workspace. The owner also chooses whether to invite people.";
 
 /** UI-SPEC 3.3: To-dos show up to 6 open rows; Lists and Files show up to 5 each. */
 export const SIDE_TODO_LIMIT = 6;
