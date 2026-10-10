@@ -3,13 +3,15 @@
  * staging fixture only: it needs Docker and a stack reached through the verified binding
  * (C1B_LOCK_ORDER_BINDING, or the CLI project binding under GitHub Actions). A fixture is a
  * restored, non-empty database: every scenario creates its own run-unique rows and asserts
- * only on them; the three admin races also need admin issuance open (LANE-2-DELTA D4).
+ * only on them; the admin races also need admin issuance open (LANE-2-DELTA D4).
  *
  * Each race parks a creation path after its workspace-stream lock on the principal-ceiling
  * advisory lock (supabase/functions/command/index.ts:5914) with a blocker session, waits with
  * pg_blocking_pids until the lock-holding path waits for that stream, then releases the
  * blocker. The base order deadlocks (SQLSTATE 40P01); the coordinated order does not.
  * The admin-vs-admin race parks both admins on a workspace row that a blocker holds FOR SHARE.
+ * The three crossed admin races (round 6) park two admins whose workspace locks cross; the
+ * withdraw race (round 6) holds two owners' own users rows at a barrier.
  * Deadlock is detected by SQLSTATE only. */
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
@@ -147,4 +149,61 @@ test(ADMIN_PAIR, { timeout: 240_000 }, async () => {
   // adminAccessState ran for both admins and both delegated requests committed.
   assert.deepEqual(result.admin_audit, ["committed", "committed"], `${ADMIN_PAIR}: OAuth admin request audits`);
   assert.equal(result.http_refused, 0, `${ADMIN_PAIR}: no HTTP call`);
+});
+
+// Review B (round 6): two OAuth admins whose workspace locks cross. The base deadlocks on B1 (each
+// creates a workspace with the other owner's existing id). B2 (a read outside the grant) and the
+// delegated grant_admin_delegation deadlock only after the round-4 pre-lock (b6f5f4b5), not on the base.
+const ADMIN_CROSS_RACES: Record<string, { writes: Record<string, boolean>; admin_audit: string[] }> = {
+  "admin-oauth-create-existing-workspace-crossed": {
+    writes: { first_target_unchanged: true, second_target_unchanged: true }, admin_audit: ["refused", "refused"],
+  },
+  "admin-oauth-read-outside-grant-vs-admin-oauth-routine": {
+    writes: { second_admin_principal_live: true }, admin_audit: ["refused", "committed"],
+  },
+  "admin-oauth-grant-admin-delegation-vs-admin-oauth-routine": {
+    writes: { second_admin_principal_live: true }, admin_audit: ["refused", "committed"],
+  },
+};
+for (const [name, expected] of Object.entries(ADMIN_CROSS_RACES)) {
+  test(name, { timeout: 240_000 }, async () => {
+    const result = await harness.runScenario(bound(), name);
+    assert.equal(result.stage, "complete", `${name}: stopped at ${result.stage} (${result.error ?? "no code"})`);
+    assert.equal(result.sqlstate_capture_control, "22012", `${name}: SQLSTATE capture positive control`);
+    assert.ok(result.deadlock_timeout_ms! < result.lock_timeout_ms!, `${name}: deadlock_timeout must be below lock_timeout`);
+    assert.deepEqual(result.parking, {
+      first_admin_waits_on_workspace: true,
+      second_admin_waits_on_workspace: true,
+    }, `${name}: parking points`);
+    const sqlstates = result.sqlstates ?? [];
+    const deadlocks = sqlstates.filter((code) => code === "40P01").length;
+    assert.equal(deadlocks, 0, `${name}: SQLSTATE 40P01 (deadlock_detected) in ${deadlocks} transaction(s)`);
+    assert.deepEqual(sqlstates, [], `${name}: no transaction may fail`);
+    // Each side gives its exact result: the unchanged refusal code, or the created seat.
+    assert.equal(result.parked?.ok, true, `${name}: first admin result ${JSON.stringify(result.parked)}`);
+    assert.equal(result.waiting?.ok, true, `${name}: second admin result ${JSON.stringify(result.waiting)}`);
+    assert.deepEqual(result.writes, expected.writes, `${name}: writes`);
+    // adminAccessState ran for both admins; each request recorded its outcome.
+    assert.deepEqual(result.admin_audit, expected.admin_audit, `${name}: OAuth admin request audits`);
+    assert.equal(result.http_refused, 0, `${name}: no HTTP call`);
+  });
+}
+
+// Round 6 inventory: two owners each withdraw a workspace from the other's grant. The base and
+// head''' lock the grantor's users row after the withdrawing owner's own users-row upsert: 40P01.
+const ADMIN_WITHDRAW = "admin-human-withdraw-crossed-grants";
+test(ADMIN_WITHDRAW, { timeout: 240_000 }, async () => {
+  const result = await harness.runScenario(bound(), ADMIN_WITHDRAW);
+  assert.equal(result.stage, "complete", `${ADMIN_WITHDRAW}: stopped at ${result.stage} (${result.error ?? "no code"})`);
+  assert.equal(result.sqlstate_capture_control, "22012", `${ADMIN_WITHDRAW}: SQLSTATE capture positive control`);
+  assert.ok(result.deadlock_timeout_ms! < result.lock_timeout_ms!, `${ADMIN_WITHDRAW}: deadlock_timeout must be below lock_timeout`);
+  assert.deepEqual(result.parking, { both_sides_hold_own_users_row: true }, `${ADMIN_WITHDRAW}: parking points`);
+  const sqlstates = result.sqlstates ?? [];
+  const deadlocks = sqlstates.filter((code) => code === "40P01").length;
+  assert.equal(deadlocks, 0, `${ADMIN_WITHDRAW}: SQLSTATE 40P01 (deadlock_detected) in ${deadlocks} transaction(s)`);
+  assert.deepEqual(sqlstates, [], `${ADMIN_WITHDRAW}: no transaction may fail`);
+  assert.equal(result.parked?.ok, true, `${ADMIN_WITHDRAW}: first owner result ${JSON.stringify(result.parked)}`);
+  assert.equal(result.waiting?.ok, true, `${ADMIN_WITHDRAW}: second owner result ${JSON.stringify(result.waiting)}`);
+  assert.deepEqual(result.writes, { first_withdrawal_recorded: true, second_withdrawal_recorded: true }, `${ADMIN_WITHDRAW}: writes`);
+  assert.equal(result.http_refused, 0, `${ADMIN_WITHDRAW}: no HTTP call`);
 });
