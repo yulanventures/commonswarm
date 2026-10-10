@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync as nodeSpawnSync, type SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -45,6 +45,7 @@ function python(source: string) {
 const validator = python(block('edge-open'));
 const helpers = /cat >>"\$PROOF_DIR\/session.sh" <<'SH'\n([\s\S]*?)^SH$/m.exec(block('edge-open'))![1]!;
 const partialHelpers = /cat >"\$PROOF_DIR\/partial-session.sh" <<'PARTIAL_SH'\n([\s\S]*?)^PARTIAL_SH$/m.exec(block('edge-open'))![1]!;
+const archiveLibrary = /edge_archive_library\(\) \{ cat <<'ARCHIVE_PY'\n([\s\S]*?)^ARCHIVE_PY$/m.exec(block('edge-open'))![1]!;
 // The extracted plan checks canonical paths; TMPDIR may point through a symlink.
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'edge-release-contract-')));
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
@@ -265,7 +266,22 @@ function lifecycle(trees = true) {
   d.recycle_unit_sha256 = hash('baseline service'); d.recycle_timer_sha256 = hash('baseline timer');
   const current = join(home, 'edge/current'); symlinkSync(old, current);
   const binding = join(root, 'recycle.json');
-  const baseline = Buffer.from(' { "release_sha":"' + d.baseline_edge_sha + '", "target":"' + old + '", "image_digest":"' + d.baseline_edge_image + '", "artifact_digest":"' + d.recycle_archive_sha256 + '", "archive":"/tmp/admin-issuance-baseline.tar", "postgres_image":"' + d.baseline_postgres_image + '", "release_root":"/retained/baseline-helper" }\n');
+  const transport = join(root, 'tmp'), state = join(root, 'var/lib/commonswarm-admin-release'), archives = join(state, 'archives');
+  mkdirSync(transport, { recursive: true }); mkdirSync(archives, { recursive: true, mode: 0o700 }); chmodSync(state, 0o700);
+  const oldArchive = join(transport, `admin-issuance-${d.baseline_edge_sha}-Old123.tar`);
+  const rescueArchive = join(archives, `${d.baseline_edge_sha}-Old123.tar`);
+  const durableArchive = join(archives, `${d.release_sha}-${d.window_id}.tar`);
+  const upload = join(transport, `admin-issuance-${d.release_sha}-${d.window_id}.tar`);
+  writeFileSync(oldArchive, 'baseline archive bytes', { mode: 0o600 });
+  writeFileSync(rescueArchive, readFileSync(oldArchive), { mode: 0o600 });
+  d.recycle_archive_sha256 = hash(readFileSync(oldArchive));
+  d.archive_sha256 = hash('candidate archive bytes');
+  if (trees) writeFileSync(durableArchive, 'candidate archive bytes', { mode: 0o600 });
+  const mapArchives = (source: string) => source.replace(/(?<![\w/.-])\/var\/lib\/commonswarm-admin-release/g, state)
+    .replace(/(?<![\w/.-])\/tmp\/admin-issuance-/g, transport + '/admin-issuance-')
+    .replace(/(?<![\w/.-])\/usr\/local\/libexec\//g, root + '/libexec/').replace(/(?<![\w/.-])\/etc\//g, root + '/etc/');
+  writeFileSync(join(proof, 'edge-archives.py'), mapArchives(archiveLibrary));
+  const baseline = Buffer.from(' { "release_sha":"' + d.baseline_edge_sha + '", "target":"' + old + '", "image_digest":"' + d.baseline_edge_image + '", "artifact_digest":"' + d.recycle_archive_sha256 + '", "archive":"' + oldArchive + '", "postgres_image":"' + d.baseline_postgres_image + '", "release_root":"/retained/baseline-helper" }\n');
   writeFileSync(binding, baseline, { mode: 0o600 }); writeFileSync(join(proof, 'recycle.baseline.json'), baseline);
   writeFileSync(join(proof, 'plan.md'), plan);
   const checker = JSON.stringify({ release_sha: d.release_sha, plan_sha256: hash(plan), archive_sha256: d.archive_sha256, result: 'PASS', server_suite: 'PASS', meta_regression: 'PASS' });
@@ -297,6 +313,8 @@ edge_parent=home/'edge/releases'
 pwd.getpwnam=lambda name: type('Account',(),{'pw_uid':1234})() if name=='commonswarm' else None
 def stat(self,*a,**kw):
  s=actual(self,*a,**kw)
+ if str(self).startswith(os.environ['FIXTURE_ARCHIVES_STATE']):
+  fields=list(s); fields[4]=fields[5]=int(os.environ.get('FIXTURE_ARCHIVE_UID','0')) if str(self)==os.environ.get('FIXTURE_BAD_METADATA_PATH') else 0; return os.stat_result(fields)
  if self==edge_parent:
   fields=list(s); fields[4]=fields[5]=int(os.environ.get('FIXTURE_PARENT_UID','1234')); return os.stat_result(fields)
  if self.parent in (edge_parent,home/'admin-issuance/releases') or self.name=='RELEASE_SHA' or str(self).endswith('/deploy/edge-runtime/compose.override.yaml'):
@@ -305,6 +323,18 @@ def stat(self,*a,**kw):
   fields=list(s); fields[4]=fields[5]=0; return os.stat_result(fields)
  return s
 pathlib.Path.stat=stat
+pathlib.Path.lstat=lambda self,*a,**kw: stat(self,*a,follow_symlinks=False,**kw)
+real_open=os.open; real_fstat=os.fstat; descriptor_paths={}
+def opened(path,*a,**kw):
+ fd=real_open(path,*a,**kw)
+ parent=descriptor_paths.get(kw.get('dir_fd'),'')
+ descriptor_paths[fd]=os.path.normpath(os.path.join(parent,str(path))); return fd
+def fstat(fd):
+ s=real_fstat(fd); name=descriptor_paths.get(fd,'')
+ if name.startswith(os.environ['FIXTURE_ARCHIVES_STATE']) or '/tmp/admin-issuance-' in name or name==os.environ.get('FIXTURE_UPLOAD') or name==os.environ['PROOF_DIR'] or name.startswith(os.environ['PROOF_DIR']+'/'):
+  fields=list(s); fields[4]=fields[5]=int(os.environ.get('FIXTURE_ARCHIVE_UID','0')) if name==os.environ.get('FIXTURE_BAD_METADATA_PATH') else 0; return os.stat_result(fields)
+ return s
+os.open=opened; os.fstat=fstat
 actual_chown=os.fchown
 def chown(fd,uid,gid):
  if (uid,gid)==(0,0): return actual_chown(fd,os.getuid(),os.getgid())
@@ -336,7 +366,7 @@ subprocess.run=run
 plan_globals={'__name__':'__main__'}
 exec(compile(sys.stdin.read(),'<extracted-plan-python>','exec'),plan_globals)
 `));
-  const mapped = helpers.replaceAll('/home/commonswarm', home);
+  const mapped = mapArchives(helpers.replaceAll('/home/commonswarm', home));
   const session = `
 PROOF_DIR=${JSON.stringify(proof)}
 INPUTS_FILE="$PROOF_DIR/inputs.json"
@@ -349,7 +379,8 @@ NEW_HELPER=${JSON.stringify(helper)}
 RECYCLE_JSON=${JSON.stringify(binding)}
 SECRET_STAGE=${JSON.stringify(stage)}
 LOCK=${JSON.stringify(lock)}
-BOX_ARCHIVE_PATH=/tmp/admin-issuance-${d.release_sha}-${d.window_id}.tar
+BOX_ARCHIVE_PATH=${JSON.stringify(upload)}
+DURABLE_ARCHIVE_PATH=${JSON.stringify(durableArchive)}
 EDGE_RECYCLE_TIMER=commonswarm-edge-recycle.timer
 EDGE_RECYCLE_SERVICE=commonswarm-edge-recycle.service
 ${mapped}
@@ -382,8 +413,14 @@ systemctl() {
     .replaceAll('/etc/commonswarm-admin-release/recycle.json', binding).replaceAll('/etc/', root + '/etc/')
     .replaceAll('/usr/local/libexec/', root + '/libexec/').replaceAll('/srv/commonswarm/', root + '/srv/commonswarm/');
   writeFileSync(join(proof, 'partial-session.sh'), `python3() { ${quotedPythonExecutable} ${JSON.stringify(wrapper)} "$@"; }\n${partial}\n`);
-  return { root, proof, home, current, binding, baseline, old, fresh, helper, stage, lock, run(source: string, extra: Record<string,string> = {}) {
-    return spawnSync('/bin/bash', ['-s'], { input: source.replaceAll('/home/commonswarm', home).replaceAll('/tmp/anvil-secret', root + '/anvil-secret'), encoding: 'utf8', env: { ...process.env, PROOF_DIR: proof, FIXTURE_BINDING: binding, FIXTURE_CLOCK: clock, FIXTURE_STAGE: stage, FIXTURE_OLD_EDGE: old, ...extra } });
+  const baseEnvironment = { ...process.env, PROOF_DIR: proof, FIXTURE_BINDING: binding, FIXTURE_CLOCK: clock, FIXTURE_STAGE: stage, FIXTURE_OLD_EDGE: old, FIXTURE_ARCHIVES_STATE: state, FIXTURE_UPLOAD: upload };
+  // Run the admission owner to capture descriptor metadata and bytes, rather than fabricating its receipt.
+  passed(spawnSync(archivePython!, [wrapper, '-', proof], { input: `import importlib.util,json,os,pathlib,sys
+p=pathlib.Path(sys.argv[1]); spec=importlib.util.spec_from_file_location('edge_archives',p/'edge-archives.py'); a=importlib.util.module_from_spec(spec); spec.loader.exec_module(a)
+a.receipt(p,'archive-baseline.json',a.admit(json.loads((p/'recycle.baseline.json').read_bytes())))
+`, encoding: 'utf8', env: baseEnvironment }));
+  return { root, proof, home, current, binding, baseline, old, fresh, helper, stage, lock, transport, state, archives, oldArchive, rescueArchive, durableArchive, upload, mapArchives, run(source: string, extra: Record<string,string> = {}) {
+    return spawnSync('/bin/bash', ['-s'], { input: mapArchives(source.replaceAll('/home/commonswarm', home).replaceAll('/tmp/anvil-secret', root + '/anvil-secret')), encoding: 'utf8', env: { ...baseEnvironment, ...extra } });
   }, append(source: string) { writeFileSync(join(proof, 'session.sh'), readFileSync(join(proof, 'session.sh'), 'utf8') + '\n' + source); } };
 }
 
@@ -425,7 +462,7 @@ const reviewedHook = '#!/bin/bash\n' + hookBlocks[0]![1];
 const repoOverride = readFileSync(resolve(overridePath), 'utf8');
 const repoCompose = readFileSync(resolve('deploy/edge-runtime/compose.yaml'), 'utf8');
 function archiveLifecycle(options: { archiveOverride?: string; baseline?: string; realArchive?: boolean } = {}) {
-  const f = lifecycle(false), archive = join(f.root, 'release.tar');
+  const f = lifecycle(false), archive = f.upload;
   chmodSync(resolve(f.old, '..'), 0o750); chmodSync(f.old, 0o700);
   const baselineHelper = join(f.home, 'admin-issuance/releases', fixture().baseline_edge_sha);
   mkdirSync(baselineHelper, { recursive: true, mode: 0o700 });
@@ -476,8 +513,9 @@ with tarfile.open(sys.argv[1],'w') as t:
   writeFileSync(input, JSON.stringify(d));
   writeFileSync(archive.replace(/\.tar$/, '.ancestry.json'), JSON.stringify({ release_sha: d.release_sha, origin_main_sha: d.release_sha, is_ancestor: true, baseline_site_sha: d.baseline_site_sha, measured_at: clock }));
   const treeChecker = /^edge_tree_check\(\) \{[\s\S]*?^\}/m.exec(helpers)![0];
-  f.append(`RELEASE_SHA=${d.release_sha}\nNEW_EDGE=${JSON.stringify(fresh)}\nNEW_HELPER=${JSON.stringify(helper)}\nBOX_ARCHIVE_PATH=${JSON.stringify(archive)}\nRECYCLE_HOOK=${JSON.stringify(hook)}\n${treeChecker}`);
-  return { ...f, fresh, helper, archive, d };
+  const durableArchive = join(f.archives, `${d.release_sha}-${d.window_id}.tar`);
+  f.append(`DURABLE_ARCHIVE_PATH=${JSON.stringify(durableArchive)}\nRELEASE_SHA=${d.release_sha}\nNEW_EDGE=${JSON.stringify(fresh)}\nNEW_HELPER=${JSON.stringify(helper)}\nBOX_ARCHIVE_PATH=${JSON.stringify(archive)}\nRECYCLE_HOOK=${JSON.stringify(hook)}\n${treeChecker}`);
+  return { ...f, fresh, helper, archive, durableArchive, d };
 }
 
 test('archive override is admitted, baseline bytes and metadata win, and both trees are verified', () => {
@@ -643,8 +681,8 @@ test('apply rebinds new identity and rollback restores exact JSON bytes and base
   const applied = JSON.parse(readFileSync(f.binding, 'utf8'));
   assert.equal(applied.release_sha, fixture().release_sha);
   assert.equal(applied.release_root, f.helper);
-  assert.equal(applied.archive, `/tmp/admin-issuance-${fixture().release_sha}-${fixture().window_id}.tar`);
-  assert.equal(applied.artifact_digest, fixture().archive_sha256);
+  assert.equal(applied.archive, f.durableArchive);
+  assert.equal(applied.artifact_digest, hash('candidate archive bytes'));
   assert.equal(applied.postgres_image, fixture().baseline_postgres_image);
   assert.equal(readlinkSync(f.current), f.fresh);
   assert.equal(readFileSync(join(f.proof, 'timer'), 'utf8'), 'active');
@@ -991,4 +1029,273 @@ exec(compile(payload['source'],'<extracted-local-caddy-probes>','exec'),plan_glo
     const { result: bad } = await run(source, [], kind);
     assert.notEqual(bad.status, 0); assert.match(bad.stderr, /AssertionError/);
   }
+});
+
+// Archive safety belongs to E's persisted library and complete lifecycle blocks.
+// These rows protect durable admission/promotion and exact legacy recovery; the
+// existing lifecycle covered only a /tmp binding and never lost its baseline tar.
+function archiveRun(f: ReturnType<typeof lifecycle>, source: string, extra: Record<string, string> = {}) {
+  return f.run(`(
+set -eEuo pipefail
+trap 'printf "FAIL archive fixture: STOP\\n" >&2' ERR
+. "$PROOF_DIR/session.sh"
+python3 - "$PROOF_DIR" <<'PY'
+import importlib.util,json,os,pathlib,sys
+p=pathlib.Path(sys.argv[1]); spec=importlib.util.spec_from_file_location('edge_archives',p/'edge-archives.py'); a=importlib.util.module_from_spec(spec); spec.loader.exec_module(a)
+r=json.loads((p/'recycle.baseline.json').read_bytes())
+${source}
+PY
+)
+`, extra);
+}
+function durableBaseline(f: ReturnType<typeof lifecycle>) {
+  const r = JSON.parse(f.baseline.toString()); r.archive = f.rescueArchive;
+  const bytes = Buffer.from('  ' + JSON.stringify(r) + '\n');
+  writeFileSync(f.binding, bytes); writeFileSync(join(f.proof, 'recycle.baseline.json'), bytes);
+  const inputs = join(f.proof, 'inputs.json'), d = JSON.parse(readFileSync(inputs, 'utf8'));
+  d.recycle_json_sha256 = hash(bytes); writeFileSync(inputs, JSON.stringify(d));
+  renameSync(join(f.proof, 'archive-baseline.json'), join(f.proof, 'archive-baseline.legacy.json'));
+  passed(archiveRun(f, "a.receipt(p,'archive-baseline.json',a.admit(r))"));
+  return bytes;
+}
+
+test('archive admission accepts legacy and durable names using the binding SHA; refuses a third prefix', () => {
+  const f = lifecycle(); passed(archiveRun(f, 'a.admit(r)'));
+  const bytes = durableBaseline(f); passed(archiveRun(f, 'a.admit(r)'));
+  for (const archive of [join(f.root, 'other', `${fixture().baseline_edge_sha}-Old123.tar`), f.durableArchive]) {
+    stopped(archiveRun(f, `r['archive']=${JSON.stringify(archive)}; a.admit(r)`), /exact legacy or durable archive name.*STOP/);
+  }
+  assert.deepEqual(readFileSync(f.binding), bytes);
+  passed(archiveRun(f, 'a.admit(r)'));
+});
+
+test('preflight promotes verified bytes exclusively: fresh and equal copies pass; a different copy stops before tree mutation', () => {
+  for (const existing of ['fresh', 'fresh-directories', 'equal', 'different']) {
+    const f = archiveLifecycle();
+    // Prove the baseline rescue is produced when C1 has not left an equal copy.
+    if (existing === 'fresh') renameSync(f.rescueArchive, f.rescueArchive + '.retained');
+    if (existing === 'fresh-directories') renameSync(f.state, f.state + '.retained');
+    if (existing === 'equal' || existing === 'different') writeFileSync(f.durableArchive, existing === 'equal' ? readFileSync(f.archive) : Buffer.from('conflict'), { mode: 0o600 });
+    const result = f.run(block('edge-preflight'));
+    if (existing === 'different') {
+      stopped(result, /conflicting existing archive.*STOP/);
+      assert.equal(existsSync(f.fresh), false); assert.equal(existsSync(f.helper), false);
+      assert.equal(existsSync(join(f.proof, 'events')), false);
+      assert.equal(readFileSync(f.durableArchive, 'utf8'), 'conflict');
+    } else {
+      passed(result); assert.deepEqual(readFileSync(f.durableArchive), readFileSync(f.archive));
+      assert.equal(lstatSync(f.durableArchive).mode & 0o777, 0o600);
+      assert.deepEqual(readFileSync(f.rescueArchive), readFileSync(f.oldArchive));
+      const mapping = JSON.parse(readFileSync(join(f.proof, 'archive-rescue.json'), 'utf8'));
+      assert.deepEqual(mapping, { legacy: f.oldArchive, durable: f.rescueArchive, sha256: hash(readFileSync(f.oldArchive)) });
+      assert.equal(existsSync(f.archive.replace(/\.tar$/, '.ancestry.json')), true);
+      passed(f.run(block('edge-ready')));
+    }
+  }
+});
+
+test('legacy rollback retains a present tar or exclusively restages a missing tar before exact JSON restoration', () => {
+  for (const missing of [false, true]) {
+    const f = archiveLifecycle(); passed(f.run(block('edge-preflight'))); passed(f.run(block('edge-ready'))); passed(f.run(block('edge-apply')));
+    const original = readFileSync(f.oldArchive);
+    if (missing) renameSync(f.oldArchive, f.oldArchive + '.retained');
+    passed(f.run(block('edge-rollback')));
+    assert.deepEqual(readFileSync(f.oldArchive), original); assert.deepEqual(readFileSync(f.binding), f.baseline);
+    assert.equal(lstatSync(f.oldArchive).mode & 0o777, 0o600);
+    // edge_binding repeats the idempotent restore check, so the first restage
+    // proof must remain true after its second call.
+    assert.equal(JSON.parse(readFileSync(join(f.proof, 'archive-restore.json'), 'utf8')).restaged, missing);
+    assert.equal(readlinkSync(f.current), f.old);
+    passed(f.run(block('edge-release-aside'))); passed(f.run(block('edge-probes'), { PROBE_PHASE: 'recovery' }));
+    passed(f.run(block('edge-close'), { CLOSE_RESULT: 'rolled-back' }));
+  }
+  const conflict = lifecycle(); passed(conflict.run(block('edge-apply')));
+  writeFileSync(conflict.oldArchive, 'unrelated existing baseline');
+  const before = readFileSync(join(conflict.proof, 'events')), binding = readFileSync(conflict.binding);
+  stopped(conflict.run(block('edge-rollback')), /conflicting existing archive.*STOP/);
+  assert.deepEqual(readFileSync(join(conflict.proof, 'events')), before); assert.deepEqual(readFileSync(conflict.binding), binding);
+  assert.equal(readlinkSync(conflict.current), conflict.fresh);
+});
+
+test('durable admission and promotion refuse symlinks, wrong owner and wrong mode with a positive control', () => {
+  const control = archiveLifecycle(); durableBaseline(control); passed(control.run(block('edge-preflight')));
+  for (const kind of ['archive-link', 'ancestor-link', 'archive-mode', 'directory-mode', 'archive-owner', 'directory-owner']) {
+    const f = archiveLifecycle(); durableBaseline(f);
+    let metadata: Record<string, string> = {};
+    if (kind === 'archive-link') { renameSync(f.rescueArchive, f.rescueArchive + '.real'); symlinkSync(f.rescueArchive + '.real', f.rescueArchive); }
+    if (kind === 'ancestor-link') { renameSync(f.archives, f.archives + '.real'); symlinkSync(f.archives + '.real', f.archives); }
+    if (kind === 'archive-mode') chmodSync(f.rescueArchive, 0o644);
+    if (kind === 'directory-mode') chmodSync(f.state, 0o755);
+    if (kind === 'archive-owner' || kind === 'directory-owner') metadata = { FIXTURE_BAD_METADATA_PATH: kind === 'archive-owner' ? f.rescueArchive : f.state, FIXTURE_ARCHIVE_UID: '501' };
+    stopped(archiveRun(f, 'a.admit(r)', metadata), /(?:canonical non-symlink|root:root).*STOP/);
+    stopped(f.run(block('edge-preflight'), metadata), /(?:canonical non-symlink|root:root).*STOP/);
+    assert.equal(existsSync(f.fresh), false); assert.equal(existsSync(f.helper), false);
+  }
+  for (const kind of ['link', 'mode', 'owner']) {
+    const f = archiveLifecycle(); writeFileSync(f.durableArchive, readFileSync(f.archive), { mode: 0o600 });
+    if (kind === 'link') { renameSync(f.durableArchive, f.durableArchive + '.real'); symlinkSync(f.durableArchive + '.real', f.durableArchive); }
+    if (kind === 'mode') chmodSync(f.durableArchive, 0o644);
+    const metadata: Record<string, string> = kind === 'owner' ? { FIXTURE_BAD_METADATA_PATH: f.durableArchive, FIXTURE_ARCHIVE_UID: '501' } : {};
+    stopped(f.run(block('edge-preflight'), metadata), /(?:canonical non-symlink|conflicting existing archive).*STOP/);
+    assert.equal(existsSync(f.fresh), false); assert.equal(existsSync(f.helper), false);
+  }
+  passed(archiveRun(control, 'a.admit(r)'));
+});
+
+test('each keeper file refuses opening, preflight and apply before any archive, tree or service mutation', () => {
+  const inventory = lifecycle(), result = archiveRun(inventory, 'print(json.dumps(a.KEEPER))'); passed(result);
+  const keepers: string[] = JSON.parse(result.stdout); assert.equal(keepers.length, 5); assert.equal(new Set(keepers).size, 5);
+  // Execute the actual pre-proof open guard with the same library, under mapped paths.
+  const start = block('edge-open').indexOf('edge_archive_library()');
+  const guard = block('edge-open').slice(start, block('edge-open').indexOf('RELEASE_SHA=$(python3 -c'));
+  for (const [index] of keepers.entries()) {
+    const f = archiveLifecycle(), keeper = keepers[index]!.replaceAll(inventory.root, f.root);
+    mkdirSync(resolve(keeper, '..'), { recursive: true }); writeFileSync(keeper, 'installed keeper fixture');
+    stopped(f.run('set -eEuo pipefail\n' + guard), /keeper files present.*STOP/);
+    stopped(f.run(block('edge-preflight')), /keeper files present.*STOP/);
+    assert.equal(existsSync(f.durableArchive), false); assert.equal(existsSync(f.fresh), false); assert.equal(existsSync(f.helper), false);
+    stopped(f.run(block('edge-apply')), /keeper files present.*STOP/);
+    assert.equal(existsSync(join(f.proof, 'events')), false); assert.equal(existsSync(join(f.proof, 'edge-attempted.txt')), false);
+    assert.deepEqual(readFileSync(f.binding), f.baseline);
+  }
+  const control = archiveLifecycle(); passed(control.run('set -eEuo pipefail\n' + guard));
+  passed(control.run(block('edge-preflight'))); passed(control.run(block('edge-ready'))); passed(control.run(block('edge-apply')));
+});
+
+test('full forward close requires the durable binding and bytes; durable baseline rollback restores exact JSON', () => {
+  const f = archiveLifecycle(); passed(f.run(block('edge-preflight'))); passed(f.run(block('edge-ready'))); passed(f.run(block('edge-apply')));
+  passed(f.run(block('edge-probes'), { PROBE_PHASE: 'forward' }));
+  const valid = readFileSync(f.binding), r = JSON.parse(valid.toString()); r.archive = f.archive; writeFileSync(f.binding, JSON.stringify(r));
+  stopped(f.run(block('edge-close'), { CLOSE_RESULT: 'success' }), /AssertionError/);
+  assert.equal(existsSync(join(f.proof, 'closed.txt')), false);
+  writeFileSync(f.binding, valid); renameSync(f.durableArchive, f.durableArchive + '.retained');
+  stopped(f.run(block('edge-close'), { CLOSE_RESULT: 'success' })); assert.equal(existsSync(join(f.proof, 'closed.txt')), false);
+  renameSync(f.durableArchive + '.retained', f.durableArchive);
+  passed(f.run(block('edge-close'), { CLOSE_RESULT: 'success' }));
+  assert.equal(JSON.parse(readFileSync(f.binding, 'utf8')).archive, f.durableArchive);
+  assert.equal(JSON.parse(readFileSync(join(f.proof, 'close-result.json'), 'utf8')).result, 'success');
+  const rollback = archiveLifecycle(), baseline = durableBaseline(rollback);
+  passed(rollback.run(block('edge-preflight'))); passed(rollback.run(block('edge-ready'))); passed(rollback.run(block('edge-apply')));
+  passed(rollback.run(block('edge-rollback'))); assert.deepEqual(readFileSync(rollback.binding), baseline);
+  passed(rollback.run(block('edge-release-aside'))); passed(rollback.run(block('edge-probes'), { PROBE_PHASE: 'recovery' }));
+  passed(rollback.run(block('edge-close'), { CLOSE_RESULT: 'rolled-back' }));
+});
+
+// Filesystem interleavings belong at the archive/proof writer boundary. These
+// hooks alter real syscalls in the fixture, without a release-plan test switch.
+test('proof receipts refuse symlinks and unrelated existing bytes or metadata; equal receipts stay unchanged', () => {
+  const control = archiveLifecycle(); passed(control.run(block('edge-preflight')));
+  for (const name of ['archive-rescue.json', 'archive-promotion.json']) {
+    const expected = readFileSync(join(control.proof, name), 'utf8').replaceAll(control.root, '__ROOT__');
+    for (const kind of ['symlink', 'bytes', 'mode', 'owner', 'equal']) {
+      const f = archiveLifecycle(), receipt = join(f.proof, name), target = join(f.root, 'unrelated-receipt');
+      const bytes = kind === 'equal' || kind === 'mode' || kind === 'owner'
+        ? Buffer.from(expected.replaceAll('__ROOT__', f.root)) : Buffer.from('unrelated operator bytes\n');
+      writeFileSync(kind === 'symlink' ? target : receipt, bytes, { mode: 0o600 });
+      if (kind === 'symlink') symlinkSync(target, receipt);
+      if (kind === 'mode') chmodSync(receipt, 0o644);
+      const identity = lstatSync(receipt);
+      const result = f.run(block('edge-preflight'), kind === 'owner' ? { FIXTURE_BAD_METADATA_PATH: receipt, FIXTURE_ARCHIVE_UID: '501' } : {});
+      if (kind === 'equal') passed(result); else stopped(result);
+      assert.deepEqual(readFileSync(kind === 'symlink' ? target : receipt), bytes);
+      assert.equal(lstatSync(receipt).ino, identity.ino);
+      if (kind !== 'equal') assert.equal(existsSync(f.fresh), false);
+    }
+  }
+  for (const kind of ['symlink', 'unrelated-json']) {
+    const f = lifecycle(); passed(f.run(block('edge-apply')));
+    const receipt = join(f.proof, 'archive-restore.json'), target = join(f.root, 'unrelated-restore.json');
+    const bytes = Buffer.from(JSON.stringify({ archive: f.oldArchive, sha256: hash(readFileSync(f.oldArchive)), restaged: false, unrelated: true }));
+    writeFileSync(kind === 'symlink' ? target : receipt, bytes, { mode: 0o600 });
+    if (kind === 'symlink') symlinkSync(target, receipt);
+    const binding = readFileSync(f.binding), events = readFileSync(join(f.proof, 'events'));
+    stopped(f.run(block('edge-rollback')));
+    assert.deepEqual(readFileSync(kind === 'symlink' ? target : receipt), bytes);
+    assert.deepEqual(readFileSync(f.binding), binding); assert.deepEqual(readFileSync(join(f.proof, 'events')), events);
+  }
+  const rollback = lifecycle(); passed(rollback.run(block('edge-apply'))); passed(rollback.run(block('edge-rollback')));
+  const receipt = join(rollback.proof, 'archive-restore.json'), before = lstatSync(receipt), bytes = readFileSync(receipt);
+  passed(archiveRun(rollback, 'a.restore(str(p))'));
+  assert.deepEqual(readFileSync(receipt), bytes); assert.equal(lstatSync(receipt).ino, before.ino);
+  assert.equal(lstatSync(receipt).mtimeMs, before.mtimeMs, 'repeated restore must keep the original receipt');
+});
+
+test('an interrupted proof receipt write stops and a retry refuses the partial receipt without truncation', () => {
+  const control = archiveLifecycle(); passed(control.run('umask 000\n' + block('edge-preflight')));
+  for (const name of ['archive-rescue.json', 'archive-promotion.json']) assert.equal(lstatSync(join(control.proof, name)).mode & 0o777, 0o600);
+  const f = archiveLifecycle(), receipt = join(f.proof, 'archive-rescue.json');
+  stopped(archiveRun(f, `
+original_open=os.open; original_write=os.write; target_fd=None; partial=False
+def opened(name,flags,*args,**kwargs):
+ global target_fd
+ fd=original_open(name,flags,*args,**kwargs)
+ if os.path.basename(str(name))=='archive-rescue.json' and flags & os.O_CREAT: target_fd=fd
+ return fd
+def interrupted(fd,body):
+ global partial
+ if fd==target_fd:
+  if partial: raise OSError('fixture interrupted receipt write')
+  partial=True; return original_write(fd,body[:7])
+ return original_write(fd,body)
+os.open=opened; os.write=interrupted
+a.rescue(str(p))
+`));
+  const partial = readFileSync(receipt); assert.equal(partial.length, 7);
+  stopped(archiveRun(f, 'a.rescue(str(p))'));
+  assert.deepEqual(readFileSync(receipt), partial); assert.equal(existsSync(f.fresh), false);
+  passed(archiveRun(control, 'a.rescue(str(p))'));
+});
+
+test('archive promotion refuses an ancestor replaced after validation with no write in the unrelated directory', () => {
+  const control = archiveLifecycle(); passed(control.run(block('edge-preflight')));
+  const f = archiveLifecycle(), unrelated = join(f.root, 'unrelated-parent'); mkdirSync(unrelated, { mode: 0o700 });
+  stopped(archiveRun(f, `
+destination=a.ARCHIVES+'/'+r['release_sha']+'-Race12.tar'
+original_open=os.open; swapped=False
+def swap_parent(name,flags,*args,**kwargs):
+ global swapped
+ if os.path.basename(str(name))==os.path.basename(destination) and flags & os.O_CREAT and not swapped:
+  swapped=True; os.rename(a.ARCHIVES,a.ARCHIVES+'.retained'); os.symlink(${JSON.stringify(unrelated)},a.ARCHIVES)
+ return original_open(name,flags,*args,**kwargs)
+os.open=swap_parent
+a.promote(destination,b'candidate bytes')
+`));
+  assert.equal(existsSync(join(unrelated, fixture().baseline_edge_sha + '-Race12.tar')), false);
+  // The pinned original directory may hold an interrupted owned create; it is never a success receipt.
+  assert.equal(existsSync(join(f.proof, 'archive-promotion.json')), false);
+});
+
+test('archive promotion refuses a leaf replaced at final fsync and uses one descriptor through write and verification', () => {
+  const control = archiveLifecycle(); passed(control.run(block('edge-preflight')));
+  const f = archiveLifecycle();
+  stopped(archiveRun(f, `
+destination=a.ARCHIVES+'/'+r['release_sha']+'-Race34.tar'
+original_open=os.open; original_fsync=os.fsync; target_fd=None; swapped=False
+def opened(name,flags,*args,**kwargs):
+ global target_fd
+ fd=original_open(name,flags,*args,**kwargs)
+ if os.path.basename(str(name))==os.path.basename(destination): target_fd=fd
+ return fd
+def swap_at_sync(fd):
+ global swapped
+ original_fsync(fd)
+ if fd==target_fd and not swapped:
+  swapped=True; os.rename(destination,destination+'.verified'); pathlib.Path(destination).write_bytes(b'unrelated conflicting bytes')
+os.open=opened; os.fsync=swap_at_sync
+a.promote(destination,b'candidate bytes')
+`));
+  const destination = join(f.archives, fixture().baseline_edge_sha + '-Race34.tar');
+  assert.equal(readFileSync(destination, 'utf8'), 'unrelated conflicting bytes');
+  assert.equal(existsSync(join(f.proof, 'archive-promotion.json')), false);
+  const descriptorControl = archiveLifecycle();
+  passed(archiveRun(descriptorControl, `
+destination=a.ARCHIVES+'/'+r['release_sha']+'-Read12.tar'
+original_open=os.open; opens=[]
+def opened(name,flags,*args,**kwargs):
+ if os.path.basename(str(name))==os.path.basename(destination): opens.append(flags)
+ return original_open(name,flags,*args,**kwargs)
+os.open=opened
+a.promote(destination,b'candidate bytes')
+assert len(opens)==1 and opens[0] & os.O_ACCMODE==os.O_RDWR
+`));
 });
