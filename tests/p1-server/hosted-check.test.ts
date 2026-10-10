@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
+import { emptyApplicationSchema, repoSql } from "../support/admin-schema-db.js";
 
 const migrationUrl = new URL(
   "../../supabase/migrations/20260928000004_hm_hosted_check.sql", import.meta.url,
@@ -259,6 +260,9 @@ async function seedFixture(): Promise<Fixture> {
         ${handle}, ${seat}::uuid, ${fixture.grant}::uuid,
         ${fixture.workspace}::uuid, ${principal}::uuid, statement_timestamp()
       )`;
+      await tx`INSERT INTO swarm.hosted_agent_contexts(context_id,handle,seat_id,kind,created_at,last_business_at,idle_expires_at,absolute_expires_at,origin)
+        SELECT gen_random_uuid(),h.handle,h.seat_id,'chat',h.created_at,h.created_at,NULL,NULL,'legacy'
+        FROM swarm.hosted_mcp_seat_handles h WHERE h.handle=${handle}`;
     }
   });
   return fixture;
@@ -348,6 +352,9 @@ test("lane-3 catalog is false before migration, true after, and denies clients/r
   ]);
   const query = catalog.replace(/\\gset\s*$/u, "");
   await sql.begin(async (tx) => {
+    await tx.unsafe(emptyApplicationSchema());
+    await tx.unsafe(repoSql('deploy/release-proofs/session-identity/20261006000004-rollback.sql'));
+    await tx.unsafe(repoSql('deploy/release-proofs/session-identity/20261006000003-rollback.sql'));
     assert.equal((await tx.unsafe<{ catalog_ok: boolean }[]>(query))[0]?.catalog_ok, true,
       "positive control: applied catalog");
     await tx.unsafe(rollback);

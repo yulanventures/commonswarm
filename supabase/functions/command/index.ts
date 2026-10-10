@@ -1,6 +1,5 @@
 import { humanInvitationTransaction } from './household-invitations.ts';
 import { parseHouseholdAttachment, HouseholdAttachmentError } from "./household-attachments.ts";
-import { hostedContextReceiptId, hostedContextAuditResult, HOUSEHOLD_TOOL_REGISTRY } from "../_shared/protocol.js";
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
 import postgres from "npm:postgres@3.4.9";
 import type { HostedCommandInput, CommandResult, HostedContextClaimFields as HostedContextClaim } from "./contract.d.ts";
@@ -157,6 +156,7 @@ import {
   HouseholdToolInputError,
   applyCommand,
   canonicalPrincipal,
+  hostedContextReceiptId, hostedContextAuditResult, HOUSEHOLD_TOOL_REGISTRY,
   decideWorkspace,
   DISPOSITIONS,
   FEEDBACK_CATEGORIES,
@@ -8169,7 +8169,7 @@ async function resumeRenewalGrant(
    * was told 403; a retry then answered `renewal_grant_not_suspended`, because the resume it
    * had denied had in fact happened.
    *
-   * Same shape as the renewal preflight read at index.ts:3994 (`preflight[0]?.code ?? null`):
+   * Same shape as the renewal preflight read at index.ts:3998 (`preflight[0]?.code ?? null`):
    * preserve NULL, refuse only on a code we assign.
    *
    * WHY A REFUSAL BELOW STILL COMMITS, DELIBERATELY. `refuse` must commit — its whole job is

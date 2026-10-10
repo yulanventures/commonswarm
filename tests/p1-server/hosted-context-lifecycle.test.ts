@@ -7,10 +7,11 @@ import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { adminEdgeDatabase } from '../support/admin-edge-database.js';
-import { repoSql, runSql } from '../support/admin-schema-db.js';
+import { dbAssert, repoSql, runSql } from '../support/admin-schema-db.js';
 const proof='deploy/release-proofs/session-identity/20261006000004-';
 function catalog(path:string,expected:boolean) {
-  return repoSql(path)+`\nSELECT :'catalog_ok'::boolean=${expected} AS lifecycle_proof\n\\gset\n\\if :lifecycle_proof\n\\else\nDO $fail$ BEGIN RAISE EXCEPTION 'phase-3 catalog mismatch'; END $fail$;\n\\endif\n`;
+  const alias=path.endsWith('before-catalog.sql')?'before_ok':path.endsWith('rollback-catalog.sql')?'rollback_ok':'catalog_ok';
+  return repoSql(path)+`\nSELECT :'${alias}'::boolean=${expected} AS lifecycle_proof\n\\gset\n\\if :lifecycle_proof\n\\else\nDO $fail$ BEGIN RAISE EXCEPTION 'phase-3 catalog mismatch'; END $fail$;\n\\endif\n`;
 }
 test('source-built prerequisite, full migration, function-fence perturbation and exact reserve',()=>{
   const up=repoSql('supabase/migrations/20261006000004_hosted_context_lifecycle.sql');
@@ -29,6 +30,95 @@ test('source-built prerequisite, full migration, function-fence perturbation and
   const helper=up.slice(up.indexOf('CREATE OR REPLACE FUNCTION swarm.resolve_hosted_context'),up.indexOf('CREATE OR REPLACE FUNCTION swarm.resolve_hosted_seat_command_authorization'));
   runSql(`INSERT INTO swarm.config(key,value) VALUES('hosted_context_allocation_enabled','false');\n${reserve}\n${catalog(proof+'before-catalog.sql',true)}\n${up}\n${catalog(proof+'catalog.sql',true)}\n${helper.replace("g.state='active'","g.state='pending'")}\n${catalog(proof+'catalog.sql',false)}\n${helper}\n${catalog(proof+'catalog.sql',true)}\n${repoSql(proof+'functional.sql')}\n${reserve}\n${catalog(proof+'rollback-catalog.sql',true)}\n${catalog(proof+'catalog.sql',false)}`);
 });
+// The owning rollback boundary must work after the real migration backfill.
+// Each refusal first runs and unwinds a successful rollback in the same fixture.
+function reserveFixture() {
+  const owner=randomUUID(),workspace=randomUUID(),stream=randomUUID(),grant=randomUUID();
+  const principals=[randomUUID(),randomUUID(),randomUUID()],seats=[randomUUID(),randomUUID(),randomUUID()];
+  const seat=seats[0]!;
+  const handles=[randomUUID(),randomUUID(),randomUUID()].map(id=>'seat_'+id.replaceAll('-',''));
+  const setup=`
+INSERT INTO auth.users(id,aud,role,email) VALUES('${owner}','authenticated','authenticated','${owner}@example.test');
+INSERT INTO swarm.users(user_id,display_name) VALUES('${owner}','Reserve fixture');
+INSERT INTO swarm.workspaces(workspace_id,name,created_by) VALUES('${workspace}','Reserve fixture','${owner}');
+INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES('${workspace}','${owner}','owner');
+INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES('${stream}','${workspace}','workspace');
+INSERT INTO swarm.hosted_mcp_grants(grant_id,provider_grant_id,owner_user_id,home_workspace_id,client_id,resource,selected_workspace_ids,manifest_digest,interaction_ref,state,created_at,activated_at)
+  VALUES('${grant}','reserve-${grant}','${owner}','${workspace}','reserve-client','https://mcp.commonswarm.com/mcp',ARRAY['${workspace}']::uuid[],decode(repeat('a',64),'hex'),'reserve-fixture','active',statement_timestamp(),statement_timestamp());
+INSERT INTO swarm.hosted_mcp_grant_workspaces(grant_id,workspace_id,owner_user_id,manifest_digest,consent_receipt_id,consented_at)
+  VALUES('${grant}','${workspace}','${owner}',decode(repeat('a',64),'hex'),'${randomUUID()}',statement_timestamp());
+INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only)
+  VALUES ${principals.map((principal,i)=>`('${principal}','${workspace}','${owner}','Reserve agent ${i}','hosted_mcp',true)`).join(',')};
+INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,created_at)
+  VALUES ${seats.map((id,i)=>`('${id}','${grant}','${workspace}','${owner}','${principals[i]}','Reserve agent ${i}',statement_timestamp())`).join(',')};
+INSERT INTO swarm.hosted_mcp_seat_handles(handle,seat_id,grant_id,workspace_id,principal_id,created_at,revoked_at)
+  VALUES ${handles.map((handle,i)=>`('${handle}','${seats[i]}','${grant}','${workspace}','${principals[i]}',statement_timestamp(),${i===2?'statement_timestamp()':'NULL'})`).join(',')};
+CREATE TEMP TABLE reserve_original_handles AS SELECT * FROM swarm.hosted_mcp_seat_handles;
+`;
+  const preserved=dbAssert(`NOT EXISTS ((SELECT * FROM reserve_original_handles EXCEPT SELECT * FROM swarm.hosted_mcp_seat_handles)
+    UNION ALL (SELECT * FROM swarm.hosted_mcp_seat_handles EXCEPT SELECT * FROM reserve_original_handles))`,'handle ledger changed');
+  const oldAccess=handles.map((handle,i)=>dbAssert(`
+    (SELECT count(*) FROM swarm.resolve_hosted_seat_command_authorization('${grant}','${handle}','note'))=${i===2?0:1}
+    AND (SELECT count(*) FROM swarm.resolve_hosted_seat_read_authorization('${grant}','${handle}','whoami'))=${i===2?0:1}
+    AND (SELECT count(*) FROM swarm.resolve_hosted_mcp_check_authorization('${grant}','${handle}'))=${i===2?0:1}`,
+    'original handle access changed')).join('\n');
+  return {grant,workspace,stream,seat,handles,setup,preserved,oldAccess};
+}
+for(const scenario of ['backfill','closed-live','non-legacy','parent','receipt','household-outcome','denial-audit'] as const) {
+  test(`reserve rollback after legacy backfill: ${scenario}`,()=>{
+    const f=reserveFixture(),reserve=repoSql(proof+'rollback.sql');
+    const up=repoSql('supabase/migrations/20261006000004_hosted_context_lifecycle.sql');
+    const context=`(SELECT context_id FROM swarm.hosted_agent_contexts WHERE handle='${f.handles[0]}')`;
+    const mutations={
+      'closed-live':`SELECT swarm.close_hosted_agent_context(${context},'closed');`,
+      'non-legacy':`INSERT INTO swarm.hosted_agent_contexts(context_id,handle,seat_id,kind,created_at,last_business_at,idle_expires_at,absolute_expires_at,origin)
+        VALUES('${randomUUID()}','seat_${randomUUID().replaceAll('-','')}','${f.seat}','chat',statement_timestamp(),statement_timestamp(),statement_timestamp()+interval '1 day',statement_timestamp()+interval '30 days','new');`,
+      parent:`ALTER TABLE swarm.hosted_agent_contexts DISABLE TRIGGER hosted_context_guard;
+        UPDATE swarm.hosted_agent_contexts SET parent_context=${context} WHERE handle='${f.handles[1]}';
+        ALTER TABLE swarm.hosted_agent_contexts ENABLE TRIGGER hosted_context_guard;`,
+      receipt:`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response,context_id)
+        VALUES('hosted_grant','${f.grant}','reserve_receipt','${f.workspace}','${f.stream}',repeat('0',64),'{}',${context});`,
+      'household-outcome':`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response)
+        VALUES('hosted_grant','${f.grant}','reserve_household','${f.workspace}','${f.stream}',repeat('0',64),jsonb_build_object('value',jsonb_build_object('context_id',${context})));`,
+      'denial-audit':`SELECT swarm.audit_hosted_authorization_denial('${f.grant}','reserve-${f.grant}','note');`,
+    };
+    const reason=scenario==='closed-live'?'hosted context access would reopen'
+      :scenario==='non-legacy'||scenario==='parent'?'hosted context identity':'hosted context history';
+    const denial=scenario==='backfill'?'':`
+${mutations[scenario]}
+CREATE TEMP TABLE reserve_candidate_contexts AS SELECT * FROM swarm.hosted_agent_contexts;
+DO $deny$ BEGIN BEGIN
+  EXECUTE $rollback$${reserve}$rollback$;
+  RAISE EXCEPTION 'occupied reserve admitted' USING ERRCODE='ZX001';
+EXCEPTION WHEN SQLSTATE '55000' THEN
+  IF SQLERRM<>'reserve rollback refused: ${reason}' THEN RAISE; END IF;
+END; END $deny$;
+${catalog(proof+'catalog.sql',true)}
+${f.preserved}
+${dbAssert(`NOT EXISTS ((SELECT * FROM reserve_candidate_contexts EXCEPT SELECT * FROM swarm.hosted_agent_contexts)
+  UNION ALL (SELECT * FROM swarm.hosted_agent_contexts EXCEPT SELECT * FROM reserve_candidate_contexts))`,'refused reserve changed contexts')}
+`;
+    runSql(`INSERT INTO swarm.config(key,value) VALUES('hosted_context_allocation_enabled','false');
+${reserve}
+${f.setup}
+${catalog(proof+'before-catalog.sql',true)}
+${f.oldAccess}
+${up}
+${dbAssert('SELECT count(*)=3 FROM swarm.hosted_agent_contexts','backfill did not enumerate every handle')}
+UPDATE swarm.hosted_agent_contexts SET last_business_at=clock_timestamp();
+${dbAssert('SELECT bool_and(last_business_at>created_at) FROM swarm.hosted_agent_contexts','activity positive control')}
+${catalog(proof+'catalog.sql',true)}
+SAVEPOINT derived_positive;
+${reserve}
+${catalog(proof+'rollback-catalog.sql',true)}
+${catalog(proof+'catalog.sql',false)}
+${dbAssert('NOT EXISTS(SELECT 1 FROM swarm.hosted_agent_contexts)','derived contexts remain')}
+${f.preserved}
+${f.oldAccess}
+ROLLBACK TO SAVEPOINT derived_positive;
+${denial}`);
+  });
+}
 const commandUrl=new URL('../../supabase/functions/command/index.ts',import.meta.url).href;
 const readUrl=new URL('../../supabase/functions/read/index.ts',import.meta.url).href;
 const authUrl=new URL('../../supabase/functions/_shared/hosted-seat-auth.ts',import.meta.url).href;
@@ -41,13 +131,13 @@ const {db,handleHostedCommand,handleHostedManagementCommand}=await import(COMMAN
 const {handleHostedRead}=await import(READ_URL);
 const {authenticateHostedGrantCapability,authenticateHostedSeatCapability}=await import(AUTH_URL);
 const core=await import(new URL('../_shared/protocol.js',COMMAND_URL).href);
-const id=()=>crypto.randomUUID();const ms=value=>new Date(value).getTime();let assertions=0;
-const check=(value,label)=>{assertions++;if(!value)throw new Error(label);};
+const id=()=>crypto.randomUUID();const ms=value=>new Date(value).getTime();let assertions=0,lastCheckpoint='setup';
+const check=(value,label)=>{assertions++;lastCheckpoint=label;if(!value)throw new Error(label);};
 const sql=(text,parameters=[])=>db.unsafe(text,parameters);
 const owner=config.owner,workspace=id(),stream=id();
 async function grant(client='lifecycle-registered-client'){
- const g=id();await sql("INSERT INTO swarm.hosted_mcp_grants(grant_id,provider_grant_id,owner_user_id,home_workspace_id,client_id,resource,selected_workspace_ids,manifest_digest,interaction_ref,state,created_at,activated_at) VALUES($1,'provider-'||$1,$2,$3,$4,'https://mcp.commonswarm.com/mcp',ARRAY[$3::uuid],decode(repeat('00',32),'hex'),'fixture','active',statement_timestamp(),statement_timestamp())",[g,owner,workspace,client]);
- await sql("INSERT INTO swarm.hosted_mcp_grant_workspaces(grant_id,workspace_id,owner_user_id,manifest_digest,consent_receipt_id,consented_at) VALUES($1,$2,$3,decode(repeat('00',32),'hex'),$4,statement_timestamp())",[g,workspace,owner,id()]);return g;
+ const g=id();await sql("INSERT INTO swarm.hosted_mcp_grants(grant_id,provider_grant_id,owner_user_id,home_workspace_id,client_id,resource,selected_workspace_ids,manifest_digest,interaction_ref,state,created_at,activated_at) VALUES($1::uuid,'provider-'||$1::text,$2::uuid,$3::uuid,$4,'https://mcp.commonswarm.com/mcp',ARRAY[$3::uuid],decode(repeat('00',32),'hex'),'fixture','active',statement_timestamp(),statement_timestamp())",[g,owner,workspace,client]);
+ await sql("INSERT INTO swarm.hosted_mcp_grant_workspaces(grant_id,workspace_id,owner_user_id,manifest_digest,consent_receipt_id,consented_at) VALUES($1::uuid,$2::uuid,$3::uuid,decode(repeat('00',32),'hex'),$4::uuid,statement_timestamp())",[g,workspace,owner,id()]);return g;
 }
 async function claim(g,args={},request=id()){
  const cap=await db.begin(tx=>authenticateHostedGrantCapability(tx,{grantId:g,ownerUserId:owner,providerGrantId:'provider-'+g,workspaceId:workspace,tool:'claim_hosted_seat',providerStatus:async()=>({active:true})}));
@@ -259,7 +349,7 @@ try{
  check((await inspect(winner,b.handle)).status===200,'durable B still authorized');
  check(await cap(winner,b.handle,'note','command',false)===null,'provider revocation negative control');
  console.log('SID_LIFECYCLE_OK '+JSON.stringify({assertions}));
-}catch(_error){console.log('SID_LIFECYCLE_FAILED '+JSON.stringify({assertions}));Deno.exitCode=1;}finally{await db.end();}
+}catch(error){console.log('SID_LIFECYCLE_FAILED '+JSON.stringify({assertions,lastCheckpoint,code:/^[A-Z0-9]{5}$/.test(error?.code??'')?error.code:null}));Deno.exitCode=1;}finally{await db.end();}
 `;
 test('real hosted lifecycle: clocks, ACK ownership, shared work, close and succession races',{timeout:240_000},async()=>{
  const local=JSON.parse(execFileSync('supabase',['status','-o','json'],{encoding:'utf8',stdio:['ignore','pipe','ignore']}));
@@ -273,6 +363,8 @@ test('real hosted lifecycle: clocks, ACK ownership, shared work, close and succe
   const source=harness.replaceAll('COMMAND_URL',JSON.stringify(commandUrl)).replace('READ_URL',JSON.stringify(readUrl)).replace('AUTH_URL',JSON.stringify(authUrl));
   const path=join(directory,'harness.mjs');writeFileSync(path,source,{mode:0o600});
   const run=spawnSync('deno',['run','--no-lock','--config','supabase/functions/command/deno.json','--allow-read','--allow-env','--allow-net',path],{encoding:'utf8',timeout:210_000,input:JSON.stringify({owner,local:{...local,DB_URL:isolated.url}})});
+  const failed=run.stdout.split(/\r?\n/u).find(line=>line.startsWith('SID_LIFECYCLE_FAILED '));
+  if(failed){const {assertions,lastCheckpoint,code}=JSON.parse(failed.slice('SID_LIFECYCLE_FAILED '.length));console.log('SID_LIFECYCLE_FAILED',JSON.stringify({assertions,lastCheckpoint,code}));}
   assert.equal(run.status,0,'lifecycle fixture failed; credential-bearing output withheld');
   const receipt=run.stdout.split(/\r?\n/u).find(line=>line.startsWith('SID_LIFECYCLE_OK '));assert.ok(receipt);console.log(receipt);
  }finally{await isolated.close();}

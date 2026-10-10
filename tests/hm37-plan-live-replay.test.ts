@@ -172,13 +172,13 @@ function buildPublicRead(plan: string): string {
   );
 }
 
-function buildPublicProbe(plan: string): string {
+function buildPublicProbe(plan: string, authorityPath: string): string {
   const step = extractStep(plan, "hm37-public-boundaries");
   const kindsProgram = extractPythonHeredoc(
     step,
     "python3 - src/protocol/hosted-authority.ts",
   );
-  const kinds = spawnSync("python3", ["-", HOSTED_AUTHORITY], {
+  const kinds = spawnSync("python3", ["-", authorityPath], {
     encoding: "utf8",
     input: kindsProgram,
   });
@@ -275,7 +275,13 @@ test("HM37 plan probes replay the recorded lane 6 responses and reject bad media
     const currentPrecondition = extractPrecondition(currentPlan);
     const currentRefusalPrecondition = extractRefusalPrecondition(currentPlan);
     const currentPublicRead = buildPublicRead(currentPlan);
-    const currentPublicProbe = buildPublicProbe(currentPlan);
+    // This is a replay of six historical requests. Resolve the authority input
+    // at the recording's revision; the current close command has no recording.
+    const authority = spawnSync("git", ["show", `${PREVIOUS_REVISION}:${HOSTED_AUTHORITY}`], { encoding: "utf8" });
+    assert.equal(authority.status, 0, authority.stderr);
+    const authorityPath = join(temporaryRoot, "hosted-authority.ts");
+    await writeFile(authorityPath, authority.stdout);
+    const currentPublicProbe = buildPublicProbe(currentPlan, authorityPath);
     const recordingText = await readFile(RECORDING, "utf8");
     const recording = JSON.parse(recordingText) as Recording;
 
@@ -332,7 +338,7 @@ test("HM37 plan probes replay the recorded lane 6 responses and reject bad media
     assert.equal(previous.status, 0, previous.stderr);
     for (const [label, program, args] of [
       ["old-precondition", extractPrecondition(previous.stdout), [BASE]],
-      ["old-public", buildPublicProbe(previous.stdout), ["mcp", BASE]],
+      ["old-public", buildPublicProbe(previous.stdout, authorityPath), ["mcp", BASE]],
     ] as const) {
       assert.match(program, /assert "application\/json" in content_type/);
       const result = await runProgram(

@@ -1,5 +1,12 @@
 -- Complete source-built inverse at prerequisite 539b5e83279ec856ea78b56995e583c5291d6852.
-SELECT cron.unschedule(jobid) FROM cron.job WHERE jobname='hosted-agent-context-expiry' AND database=current_database() AND username=current_user;
+DO $unschedule$
+BEGIN
+  IF to_regclass('cron.job') IS NOT NULL THEN
+    PERFORM cron.unschedule(jobid) FROM cron.job
+      WHERE jobname='hosted-agent-context-expiry' AND database=current_database() AND username=current_user;
+  END IF;
+END
+$unschedule$;
 
 DROP TRIGGER hosted_household_event_context ON swarm.household_object_events;
 
@@ -12,6 +19,9 @@ DROP TRIGGER hosted_outcome_context ON swarm.idempotency_keys;
 DROP TRIGGER hosted_legacy_handle_guard ON swarm.hosted_mcp_seat_handles;
 
 DROP TRIGGER hosted_context_guard ON swarm.hosted_agent_contexts;
+
+-- The reserve has proved these open legacy rows are derived from the handle ledger.
+DELETE FROM swarm.hosted_agent_contexts;
 
 DROP VIEW swarm_read.agent_principals;
 CREATE OR REPLACE VIEW swarm_read.agent_principals

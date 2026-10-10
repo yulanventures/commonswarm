@@ -26,7 +26,7 @@ async function relocateIncomingSeatFk(tx: postgres.TransactionSql) {
     REFERENCES swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,principal_id)`);
 }
 /** Reuse the proof's exact sets and predicates; emit catalog metadata only. */
-async function catalogDiagnostics(db: postgres.Sql, query: string) {
+async function catalogDiagnostics(db: postgres.Sql | postgres.TransactionSql, query: string) {
   const aggregate = 'SELECT COALESCE((SELECT bool_and(ok) FROM checks),false) AS catalog_ok;';
   assert.ok(query.includes(aggregate), 'diagnostics require the labelled proof aggregate');
   const prefix = query.slice(0, query.indexOf(aggregate));
@@ -195,7 +195,9 @@ check((await claim(g,w,{name:'Local reserved',intent:'continue'})).body.error===
 const foreignPrincipal=id();await db\x60INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,revoked_at) VALUES(\x24{foreignPrincipal}::uuid,\x24{w}::uuid,\x24{other}::uuid,'Foreign reserved',statement_timestamp())\x60;
 check((await claim(g,w,{name:'Foreign reserved',lifetime:'durable'})).body.adjustment_reason==='collision','foreign revoked name stays reserved');
 const before=d.body.last_business_at;
+await db.unsafe('ALTER TABLE swarm.hosted_agent_contexts DISABLE TRIGGER hosted_context_guard');
 await db\x60UPDATE swarm.hosted_agent_contexts SET last_business_at=statement_timestamp()-interval '3 days',created_at=statement_timestamp()-interval '3 days',idle_expires_at=statement_timestamp()-interval '2 days' WHERE context_id=\x24{d.body.context_id}::uuid\x60;
+await db.unsafe('ALTER TABLE swarm.hosted_agent_contexts ENABLE TRIGGER hosted_context_guard');
 check((await claim(g,w,args,request)).body.error==='context_expired','expired replay cannot resurrect');
 check((await claim(g,w,{intent:'continue',seat:d.body.handle})).body.error==='context_expired','expired handle cannot select replacement');
 for(const kind of ['chat','task','scheduled','subagent']){const r=await claim(g,w,{context_kind:kind});check(r.status===200&&r.body.kind===kind,'kind clock allocation');}
@@ -206,13 +208,15 @@ await db\x60INSERT INTO commonswarm_oauth.provider_artifacts(model,artifact_id_h
 VALUES('Grant',rtrim(translate(encode(sha256(convert_to(\x24{'provider-'+old},'UTF8')),'base64'),'+/','-_'),'='),\x24{db.json({accountId:owner,clientId:client})},statement_timestamp()-interval '1 second',statement_timestamp(),statement_timestamp())\x60;
 for(let i=0;i<24;i++)check((await claim(successor,w)).status===200,'successor grant below-cap control');
 check((await claim(successor,w,{intent:'continue',name:'Successor'})).body.error==='session_capacity_reached','succession cannot exceed 25 by inheriting predecessor contexts');
+await db.unsafe('ALTER TABLE swarm.hosted_agent_contexts DISABLE TRIGGER hosted_context_guard');
 await db\x60UPDATE swarm.hosted_agent_contexts SET created_at=statement_timestamp()-interval '3 days',last_business_at=statement_timestamp()-interval '3 days',idle_expires_at=statement_timestamp()-interval '2 days' WHERE context_id=\x24{legacy.body.context_id}::uuid\x60;
+await db.unsafe('ALTER TABLE swarm.hosted_agent_contexts ENABLE TRIGGER hosted_context_guard');
 const succession=await claim(successor,w,{intent:'continue',name:'Successor'});
 check(succession.status===200&&succession.body.principal_id===legacy.body.principal_id,'proven expired Q3 successor');
 check((await db\x60SELECT count(*)::int AS n FROM swarm.hosted_agent_contexts c JOIN swarm.hosted_mcp_seats hs USING(seat_id) WHERE hs.grant_id=\x24{successor}::uuid AND c.closed_at IS NULL AND c.idle_expires_at>statement_timestamp() AND c.absolute_expires_at>statement_timestamp()\x60)[0].n===25,'committed successor active count stays 25');
 check((await db\x60SELECT idle_expires_at<statement_timestamp() AS expired FROM swarm.hosted_agent_contexts WHERE context_id=\x24{legacy.body.context_id}::uuid\x60)[0].expired,'succession preserves old expired context');
 check((await db\x60SELECT grant_id FROM swarm.hosted_mcp_seats WHERE seat_id=\x24{legacy.body.seat_id}::uuid\x60)[0].grant_id===successor,'atomic seat rebind');
-check((await db\x60SELECT count(*)::int AS n FROM swarm.audit_log WHERE reason='hosted_grant_succession' AND detail::jsonb->>'grant_succession'='true'\x60)[0].n===1,'succession audit');
+check((await db\x60SELECT count(*)::int AS n FROM swarm.audit_log WHERE reason='hosted_grant_succession' AND context_details->>'grant_succession'='true' AND context_details->>'predecessor_grant_id'=\x24{old} AND context_details->>'successor_grant_id'=\x24{successor}\x60)[0].n===1,'succession audit');
 // Last durable slot: hosted and local share the same ceiling locks.
 for(let iteration=0;iteration<3;iteration++){const rw=await space(),rg=await grant([rw]);await durable(rw,49);
 check((await claim(rg,rw)).status===200,'ephemeral accepted at durable boundary');
@@ -229,7 +233,9 @@ check((await db\x60SELECT count(*)::int AS n FROM (SELECT name FROM swarm.agent_
 const cw=await space(),cg=await grant([cw]);const durableSeat=await claim(cg,cw,{name:'Capacity',lifetime:'durable'});
 for(let i=1;i<25;i++)check((await claim(cg,cw)).status===200,'active grant below-cap control');
 check((await claim(cg,cw,{name:'Capacity',intent:'continue'})).body.error==='session_capacity_reached','continuation consumes active capacity');
+await db.unsafe('ALTER TABLE swarm.hosted_agent_contexts DISABLE TRIGGER hosted_context_guard');
 await db\x60UPDATE swarm.hosted_agent_contexts SET created_at=statement_timestamp()-interval '3 days',last_business_at=statement_timestamp()-interval '3 days',idle_expires_at=statement_timestamp()-interval '2 days' WHERE context_id=\x24{durableSeat.body.context_id}::uuid\x60;
+await db.unsafe('ALTER TABLE swarm.hosted_agent_contexts ENABLE TRIGGER hosted_context_guard');
 check((await claim(cg,cw)).status===200,'unswept expiry releases active capacity');
 // Durable hosted ceiling retains 10 while ephemeral seats remain excluded.
 const dw=await space(),dg=await grant([dw]);
@@ -245,7 +251,9 @@ check((await claim(visitor,bw,{},id(),other)).status===200,'workspace positive c
 for(let i=0;i<99;i++)await db\x60INSERT INTO swarm.hosted_agent_contexts(context_id,handle,seat_id,kind,created_at,last_business_at,idle_expires_at,absolute_expires_at,origin)
 VALUES(\x24{id()}::uuid,\x24{'seat_'+id().replaceAll('-','')},\x24{bs}::uuid,'chat',statement_timestamp(),statement_timestamp(),statement_timestamp()+interval '24 hours',statement_timestamp()+interval '30 days','continue')\x60;
 check((await claim(visitor,bw,{},id(),other)).body.error==='session_capacity_reached','100 active workspace contexts across grants');
+await db.unsafe('ALTER TABLE swarm.hosted_agent_contexts DISABLE TRIGGER hosted_context_guard');
 await db\x60UPDATE swarm.hosted_agent_contexts SET created_at=statement_timestamp()-interval '2 hours',last_business_at=statement_timestamp()-interval '2 hours',idle_expires_at=statement_timestamp()-interval '1 hour' WHERE seat_id=\x24{bs}::uuid\x60;
+await db.unsafe('ALTER TABLE swarm.hosted_agent_contexts ENABLE TRIGGER hosted_context_guard');
 check((await claim(visitor,bw,{},id(),other)).status===200,'unswept workspace expiry releases active slots');
 for(let i=101;i<499;i++)await db\x60INSERT INTO swarm.hosted_agent_contexts(context_id,handle,seat_id,kind,created_at,last_business_at,idle_expires_at,absolute_expires_at,origin)
 VALUES(\x24{id()}::uuid,\x24{'seat_'+id().replaceAll('-','')},\x24{bs}::uuid,'scheduled',statement_timestamp()-interval '2 hours',statement_timestamp()-interval '2 hours',statement_timestamp()-interval '1 hour',statement_timestamp()+interval '1 hour','continue')\x60;
@@ -254,7 +262,9 @@ check(workspaceRace.filter(r=>r.status===200).length===1&&workspaceRace.some(r=>
 check((await db\x60SELECT count(*)::int AS n FROM swarm.hosted_agent_contexts c JOIN swarm.hosted_mcp_seats hs USING(seat_id) WHERE hs.workspace_id=\x24{bw}::uuid AND c.created_at>statement_timestamp()-interval '24 hours'\x60)[0].n===500,'committed workspace rolling budget is 500');
 // Exclude the workspace-only synthetic budget rows from the owner's later
 // last-slot fixture without deleting retained rows.
+await db.unsafe('ALTER TABLE swarm.hosted_agent_contexts DISABLE TRIGGER hosted_context_guard');
 await db\x60UPDATE swarm.hosted_agent_contexts SET created_at=statement_timestamp()-interval '3 days' WHERE seat_id=\x24{bs}::uuid\x60;
+await db.unsafe('ALTER TABLE swarm.hosted_agent_contexts ENABLE TRIGGER hosted_context_guard');
 // Owner rolling budget spans grants AND workspaces. Seed expired synthetic
 // contexts so only creation accounting, not active capacity, reaches its fence.
 const ow1=await space(),ow2=await space(),og1=await grant([ow1]),og2=await grant([ow2]);
@@ -289,17 +299,20 @@ test('hosted allocation, replay, Q1/Q3 and hosted/local last-slot races commit c
       await isolated.db`INSERT INTO auth.users(id,aud,role,email) VALUES(${created.data.user.id}::uuid,'authenticated','authenticated',${email})`;
       await isolated.db`INSERT INTO swarm.users(user_id,display_name) VALUES(${created.data.user.id}::uuid,'SID fixture')`;
     }
-    const [context]=await isolated.db`SELECT to_regclass('swarm.hosted_agent_contexts') IS NOT NULL AS present`;
-    if(!context!.present) await isolated.db.unsafe(repoSql('supabase/migrations/20261006000003_hosted_agent_contexts.sql'));
-    else await isolated.db`INSERT INTO swarm.config(key,value) VALUES('hosted_context_allocation_enabled','false')`;
-    await isolated.db`INSERT INTO swarm.config(key,value) VALUES('min_client_version','"0.1.0"') ON CONFLICT(key) DO UPDATE SET value=excluded.value`;
+    const stageRollback=new Error('phase-1 stage rehearsal rollback');
+    await isolated.db.begin(async stage=>{
+    await stage.unsafe(repoSql('deploy/release-proofs/session-identity/20261006000004-rollback.sql'));
+    const [context]=await stage`SELECT to_regclass('swarm.hosted_agent_contexts') IS NOT NULL AS present`;
+    if(!context!.present) await stage.unsafe(repoSql('supabase/migrations/20261006000003_hosted_agent_contexts.sql'));
+    else await stage`INSERT INTO swarm.config(key,value) VALUES('hosted_context_allocation_enabled','false')`;
+    await stage`INSERT INTO swarm.config(key,value) VALUES('min_client_version','"0.1.0"') ON CONFLICT(key) DO UPDATE SET value=excluded.value`;
     const catalogQuery=releaseCatalogQuery(repoSql('deploy/release-proofs/session-identity/20261006000003-catalog.sql'),'catalog_ok');
-    const [catalog]=await isolated.db.unsafe(catalogQuery);
-    if (catalog?.catalog_ok !== true) await catalogDiagnostics(isolated.db, catalogQuery);
+    const [catalog]=await stage.unsafe(catalogQuery);
+    if (catalog?.catalog_ok !== true) await catalogDiagnostics(stage, catalogQuery);
     assert.equal(catalog!.catalog_ok,true,'exact source-built reserve catalog');
     // Extension visibility changes only deparsed qualification, not the default.
     for (const path of ['pg_catalog', 'pg_catalog, extensions']) {
-      await isolated.db.begin(async tx=>{
+      await stage.savepoint(async tx=>{
         await tx`SELECT set_config('search_path',${path},true)`;
         const [visible]=await tx.unsafe(catalogQuery);
         assert.equal(visible!.catalog_ok,true,`exact catalog under ${path}`);
@@ -321,14 +334,14 @@ test('hosted allocation, replay, Q1/Q3 and hosted/local last-slot races commit c
       ['misplaced incoming FK with unchanged count', ''],
     ]) {
       const rollback=new Error('catalog fixture rollback');
-      await isolated.db.begin(async tx=>{
+      await stage.savepoint(async tx=>{
         if(label==='misplaced incoming FK with unchanged count') await relocateIncomingSeatFk(tx);
         else await tx.unsafe(mutation);
         const [wrong]=await tx.unsafe(catalogQuery);
         assert.equal(wrong!.catalog_ok,false,`${label}: immutable proof refuses drift`);
         throw rollback;
       }).catch(error=>{if(error!==rollback)throw error;});
-      const [restored]=await isolated.db.unsafe(catalogQuery);
+      const [restored]=await stage.unsafe(catalogQuery);
       assert.equal(restored!.catalog_ok,true,`${label}: source restoration passes`);
     }
     // Perturb the exact expiry fence in the stored function definition; the
@@ -336,29 +349,33 @@ test('hosted allocation, replay, Q1/Q3 and hosted/local last-slot races commit c
     const up=repoSql('supabase/migrations/20261006000003_hosted_agent_contexts.sql');
     const helper=up.slice(up.indexOf('CREATE FUNCTION swarm.hosted_predecessor_status'),up.indexOf('-- Canonical data-free reserve begins.'))
       .replace('CREATE FUNCTION','CREATE OR REPLACE FUNCTION');
-    await isolated.db.unsafe(helper.replace('a.expires_at <= statement_timestamp()','a.expires_at >= statement_timestamp()'));
-    const [wrong]=await isolated.db.unsafe(releaseCatalogQuery(repoSql('deploy/release-proofs/session-identity/20261006000003-catalog.sql'),'catalog_ok'));
+    await stage.unsafe(helper.replace('a.expires_at <= statement_timestamp()','a.expires_at >= statement_timestamp()'));
+    const [wrong]=await stage.unsafe(releaseCatalogQuery(repoSql('deploy/release-proofs/session-identity/20261006000003-catalog.sql'),'catalog_ok'));
     assert.equal(wrong!.catalog_ok,false,'immutable catalog rejects expiry-fence drift');
-    await isolated.db.unsafe(helper);
-    const [restored]=await isolated.db.unsafe(releaseCatalogQuery(repoSql('deploy/release-proofs/session-identity/20261006000003-catalog.sql'),'catalog_ok'));
+    await stage.unsafe(helper);
+    const [restored]=await stage.unsafe(releaseCatalogQuery(repoSql('deploy/release-proofs/session-identity/20261006000003-catalog.sql'),'catalog_ok'));
     assert.equal(restored!.catalog_ok,true,'restored helper positive control');
-    await isolated.db.unsafe(repoSql('deploy/release-proofs/session-identity/20261006000003-functional.sql'));
-    await isolated.db.unsafe(repoSql('deploy/release-proofs/session-identity/20261006000003-rollback.sql'));
-    const [inverse]=await isolated.db.unsafe(releaseCatalogQuery(repoSql('deploy/release-proofs/session-identity/20261006000003-rollback-catalog.sql'),'rollback_ok'));
+    await stage.unsafe(repoSql('deploy/release-proofs/session-identity/20261006000003-functional.sql'));
+    await stage.unsafe(repoSql('deploy/release-proofs/session-identity/20261006000003-rollback.sql'));
+    const [inverse]=await stage.unsafe(releaseCatalogQuery(repoSql('deploy/release-proofs/session-identity/20261006000003-rollback-catalog.sql'),'rollback_ok'));
     assert.equal(inverse!.rollback_ok,true,'data-free reserve restores prerequisite stage');
     const inverseQuery=releaseCatalogQuery(repoSql('deploy/release-proofs/session-identity/20261006000003-rollback-catalog.sql'),'rollback_ok');
     const inverseDrill=new Error('rollback catalog fixture rollback');
-    await isolated.db.begin(async tx=>{
+    await stage.savepoint(async tx=>{
       await relocateIncomingSeatFk(tx);
       const [wrong]=await tx.unsafe(inverseQuery);
       assert.equal(wrong!.rollback_ok,false,'inverse rejects misplaced FK despite unchanged total');
       throw inverseDrill;
     }).catch(error=>{if(error!==inverseDrill)throw error;});
-    const [inverseRestored]=await isolated.db.unsafe(inverseQuery);
+    const [inverseRestored]=await stage.unsafe(inverseQuery);
     assert.equal(inverseRestored!.rollback_ok,true,'inverse restoration passes');
-    const [absent]=await isolated.db.unsafe(releaseCatalogQuery(repoSql('deploy/release-proofs/session-identity/20261006000003-catalog.sql'),'catalog_ok'));
+    const [absent]=await stage.unsafe(releaseCatalogQuery(repoSql('deploy/release-proofs/session-identity/20261006000003-catalog.sql'),'catalog_ok'));
     assert.equal(absent!.catalog_ok,false,'absent table/helper is an error-safe false');
-    await isolated.db.unsafe(up);
+    await stage.unsafe(up);
+    throw stageRollback;
+    }).catch(error=>{if(error!==stageRollback)throw error;});
+    await isolated.db`INSERT INTO swarm.config(key,value) VALUES('hosted_context_allocation_enabled','false') ON CONFLICT(key) DO UPDATE SET value=excluded.value`;
+    await isolated.db`INSERT INTO swarm.config(key,value) VALUES('min_client_version','"0.1.0"') ON CONFLICT(key) DO UPDATE SET value=excluded.value`;
     const path=join(directory,'harness.mjs');writeFileSync(path,harness,{mode:0o600});
     const run=spawnSync('deno',['run','--no-lock','--config','supabase/functions/command/deno.json','--allow-read','--allow-env','--allow-net',path],
       {encoding:'utf8',timeout:210000,input:JSON.stringify({local,owner:users[0],other:users[1],jwt})});
