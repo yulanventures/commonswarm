@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { canonicalAdminJson } from '../src/protocol/admin-policy.js';
@@ -24,10 +24,13 @@ const block = (id: string, source = blocks) => {
   return matches[0]!;
 };
 const run = (source: string, env: Record<string, string> = {}, timeout = 20_000) => spawnSync('/bin/bash', [], {
-  input: source, encoding: 'utf8', env: { ...process.env, ...env }, timeout,
+  input: source, encoding: 'utf8', env: { ...process.env, OWNER_STATE_ROOT:ownerRoot, ...env }, timeout,
 });
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'admin-w6-ready-')));
 after(() => rmSync(root, { recursive: true, force: true }));
+const ownerRoot = join(root, 'owner');
+mkdirSync(join(ownerRoot,'.cswarm','credentials.d'),{recursive:true,mode:0o700});
+const ownerHomeTest = {skip: process.platform === 'darwin' && process.env.CI !== 'true' ? 'HezLead ruling 23: HOME-changing test is CI-only on this Mac' : false};
 const sha = 'a'.repeat(40), hex = 'b'.repeat(64);
 const base = () => ({
   release_sha: sha, plan_sha256: digest(plan), archive_sha256: hex,
@@ -40,6 +43,46 @@ const base = () => ({
   edge_recycle_service: 'fixture-edge-recycle.service', edge_recycle_timer: 'fixture-edge-recycle.timer', edge_recycle_sha256: hex,
 } as Record<string, unknown>);
 let inputCount = 0;
+
+// I1a protects the owner-session boundary. The guard tests never change HOME; only the path-equality
+// test needs the real default resolver in a child with a different HOME, so ruling 23 makes it CI-only here.
+const ownerGuard = () => {
+  const source = block('ai-w6-human-revoke');
+  const start = source.indexOf('# I1a / HezLead ruling 23:');
+  const end = source.indexOf('export OWNER_STATE_ROOT', start);
+  assert.ok(start > 0 && end > start);
+  return source.slice(start, end);
+};
+test('I1a / owner-root-refusals: invalid roots stop before the child; each refusal has a valid root control', () => {
+  const valid = realpathSync(mkdtempSync(join(root, 'owner-guard-')));
+  chmodSync(valid, 0o700);
+  mkdirSync(join(valid, '.cswarm', 'credentials.d'), {recursive:true,mode:0o700});
+  const linked = join(root, 'owner-linked'); symlinkSync(valid, linked);
+  const missing = realpathSync(mkdtempSync(join(root, 'owner-missing-'))); chmodSync(missing, 0o700);
+  const wrongMode = realpathSync(mkdtempSync(join(root, 'owner-mode-'))); chmodSync(wrongMode, 0o755);
+  const credentialsLink = realpathSync(mkdtempSync(join(root, 'owner-credentials-link-'))); chmodSync(credentialsLink,0o700);
+  mkdirSync(join(credentialsLink,'.cswarm'),{mode:0o700}); symlinkSync(join(valid,'.cswarm','credentials.d'),join(credentialsLink,'.cswarm','credentials.d'));
+  const actualHome = spawnSync('python3',['-c','import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)'],{encoding:'utf8'}).stdout.trim();
+  for (const [label, value] of [['empty',''], ['relative','relative-root'], ['symlinked',linked],
+    ['real home',realpathSync(actualHome)], ['root','/'], ['home ancestor', realpathSync(join(actualHome,'..'))],
+    ['missing credentials.d',missing], ['wrong mode',wrongMode], ['symlinked credentials.d',credentialsLink]] as const) {
+    const invoke = (state: string) => run('set -euo pipefail\n' + ownerGuard() + "printf 'CHILD-REACHED\\n'\n", {OWNER_STATE_ROOT:state});
+    const bad = invoke(value);
+    assert.notEqual(bad.status,0,label); assert.equal(bad.stderr.trim(),'FAIL owner state root refused; STOP',label);
+    assert.doesNotMatch(bad.stdout,/CHILD-REACHED/,label);
+    const good = invoke(valid); assert.equal(good.status,0,`${label}: ${good.stderr}`); assert.match(good.stdout,/CHILD-REACHED/);
+  }
+});
+test('I1a / owner-path-equality: readers and the CLI default resolve the same protected credentials directory', ownerHomeTest, () => {
+  const admitted = run('set -euo pipefail\n' + ownerGuard(), {OWNER_STATE_ROOT:ownerRoot});
+  assert.equal(admitted.status,0,admitted.stderr);
+  const expected = join(ownerRoot,'.cswarm','credentials.d');
+  const actual = spawnSync('env',[`HOME=${ownerRoot}`,'node','--import','tsx','--input-type=module','-e',
+    "import {defaultCredentialStateDirectory} from './src/cloud/storage.ts'; console.log(defaultCredentialStateDirectory());"],
+    {encoding:'utf8',cwd:resolve('.')});
+  assert.equal(actual.status,0,actual.stderr); assert.equal(actual.stdout.trim(),expected);
+  assert.equal(homedir(),process.env.HOME,'the parent HOME is unchanged');
+});
 const inputFile = (input: Record<string, unknown>) => { const p = join(root, `inputs-${++inputCount}.json`); writeFileSync(p, JSON.stringify(input)); return p; };
 const approval = (input: Record<string, unknown>, action: string) => ({ approver: 'HezLead', action, release_sha: input.release_sha,
   window_id: input.window_id, plan_sha256: input.plan_sha256, prompt_ref: 'delegated-by-Tom:2026-10-04T14:55Z:HezLead-chat' });
@@ -405,7 +448,7 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'node revoke\\n' >>"${calls
   if (fence.driverDelayMs) await new Promise(done => setTimeout(done, fence.driverDelayMs));
   const started = Date.now();
   const r = await new Promise<{ status: number | null; stdout: string; stderr: string }>(done => {
-    const child = spawn('/bin/bash', [], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, PLAN_FILE: planCopy, INPUTS_FILE: inputs, C1_PROOF_DIR: proof,
+    const child = spawn('/bin/bash', [], { env: { ...process.env, OWNER_STATE_ROOT:ownerRoot, PATH: `${bin}:${process.env.PATH}`, PLAN_FILE: planCopy, INPUTS_FILE: inputs, C1_PROOF_DIR: proof,
       C1_INPUTS_FILE: join(proof, 'C1-inputs.json'), C1_BOX_STDIN_FD: '9', ...(budget ? { C1_FENCE_BUDGET_SECONDS: String(budget) } : {}) }, stdio: ['pipe', 'pipe', 'pipe', 'ignore', 'ignore', 'ignore', 'ignore', 'ignore', 'ignore', 'pipe'] });
     const dispatch = child.stdio[9] as import('node:stream').Readable;
     let command = '';
@@ -493,7 +536,7 @@ test('ai-w6-fence-driver: the deadline is the RUNNER cutoff: a delayed driver, a
   assert.ok(!expired.trace.includes('node revoke'));
 });
 
-test('ai-w6-human-revoke refuses an approval withdrawal made before it (withdrawal itself fences the family)', () => {
+test('ai-w6-human-revoke refuses an approval withdrawal made before it (withdrawal itself fences the family)', ownerHomeTest, () => {
   const dir = realpathSync(mkdtempSync(join(root, 'revoke-order-')));
   writeFileSync(join(dir, 'client-withdraw.json'), '{}'); writeFileSync(join(dir, 'secret-stage.path'), '/nonexistent\n'); writeFileSync(join(dir, 'runner.pid'), '1\n');
   const r = run(block('ai-w6-human-revoke'), { C1_PROOF_DIR: dir, C1_INPUTS_FILE: join(dir, 'c1.json') });
@@ -575,7 +618,7 @@ test('ai-close W7: success compares the retained retirement gate state; a recove
 });
 
 // ---------------- the human revoke: both owner refreshes and the revoke request end at the revoke cutoff ----------------
-test('ai-w6-human-revoke: refreshes and the revoke request are bounded by the fence deadline; after it only a labelled recovery revoke', { timeout: 120_000 }, () => {
+test('ai-w6-human-revoke: refreshes and the revoke request are bounded by the fence deadline; after it only a labelled recovery revoke', { ...ownerHomeTest, timeout: 120_000 }, () => {
   const source = block('ai-w6-human-revoke');
   const realNode = spawnSync('/bin/sh', ['-c', 'command -v node'], { encoding: 'utf8' }).stdout.trim();
   const now = () => Math.floor(Date.now() / 1000);
@@ -596,7 +639,7 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke-start\\n' >>'${call
       // Production shape: ai-w6-fence-driver runs the block in its own bash -c process. The slow stubs exec
       // one process (as node is), so the alarm on that process ends the call.
       const r = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8', timeout: 60_000,
-        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, C1_PROOF_DIR: proof, C1_INPUTS_FILE: join(proof, 'C1-inputs.json'), C1_SECRET_STAGE: stage, C1_RUNNER_PID: '2147483646', ...env } });
+        env: { ...process.env, OWNER_STATE_ROOT:ownerRoot, PATH: `${bin}:${process.env.PATH}`, C1_PROOF_DIR: proof, C1_INPUTS_FILE: join(proof, 'C1-inputs.json'), C1_SECRET_STAGE: stage, C1_RUNNER_PID: '2147483646', ...env } });
       return { r, seconds: (Date.now() - started) / 1000, calls: readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean), fenced: existsSync(join(stage, 'fenced')) };
     };
     return { proof, go };
@@ -628,7 +671,7 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke-start\\n' >>'${call
   assert.ok(existsSync(join(recovery.proof, 'human-revoke-recovery.json')) && !existsSync(join(recovery.proof, 'human-revoke.json')) && !rec.fenced);
 });
 
-test('C1-14 W6B2-2: recovery revoke reuses a saved request id; frozen noclobber dies on reentry', () => {
+test('C1-14 W6B2-2: recovery revoke reuses a saved request id; frozen noclobber dies on reentry', ownerHomeTest, () => {
   const saved = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
   const current = block('ai-w6-human-revoke');
   const frozenPlan = spawnSync('git', ['show', '86673f1f:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
@@ -652,7 +695,7 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke %s\\n' "$*" >>'${ca
  *" --input-type=module - "*) cat >/dev/null; printf 'preflight\\n' >>'${calls}';;
  *) exec '${realNode}' "$@";; esac\n`, { mode: 0o700 });
     const r = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8', timeout: 20_000,
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, C1_PROOF_DIR: proof, C1_INPUTS_FILE: join(proof, 'C1-inputs.json'), C1_SECRET_STAGE: stage, C1_RUNNER_PID: '2147483646', C1_RECOVERY_REVOKE: '1' } });
+      env: { ...process.env, OWNER_STATE_ROOT:ownerRoot, PATH: `${bin}:${process.env.PATH}`, C1_PROOF_DIR: proof, C1_INPUTS_FILE: join(proof, 'C1-inputs.json'), C1_SECRET_STAGE: stage, C1_RUNNER_PID: '2147483646', C1_RECOVERY_REVOKE: '1' } });
     return { r, proof, calls: readFileSync(calls, 'utf8') };
   };
   const old = make(frozen);
@@ -675,7 +718,7 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke %s\\n' "$*" >>'${ca
   writeFileSync(join(reusedBin, 'node'), `#!/bin/bash
 case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke\\n' >>'${reusedCalls}';; *) exit 64;; esac\n`, { mode: 0o700 });
   const second = spawnSync('/bin/bash', ['-c', current], { encoding: 'utf8', timeout: 20_000,
-    env: { ...process.env, PATH: `${reusedBin}:${process.env.PATH}`, C1_PROOF_DIR: reusedProof, C1_INPUTS_FILE: join(reusedProof, 'C1-inputs.json'), C1_SECRET_STAGE: reusedStage, C1_RUNNER_PID: '2147483646', C1_RECOVERY_REVOKE: '1' } });
+    env: { ...process.env, OWNER_STATE_ROOT:ownerRoot, PATH: `${reusedBin}:${process.env.PATH}`, C1_PROOF_DIR: reusedProof, C1_INPUTS_FILE: join(reusedProof, 'C1-inputs.json'), C1_SECRET_STAGE: reusedStage, C1_RUNNER_PID: '2147483646', C1_RECOVERY_REVOKE: '1' } });
   assert.equal(second.status, 0, second.stderr);
   assert.match(second.stdout, /RECOVERY ai-w6-human-revoke: .*NOT C1 refusal proof/);
   assert.equal(readFileSync(reusedCalls, 'utf8'), '');
@@ -686,7 +729,7 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke\\n' >>'${reusedCall
   writeFileSync(join(mismatchProof, 'revoke-request-id'), saved + '\n', { mode: 0o600 });
   writeFileSync(join(mismatchProof, 'human-revoke-recovery.json'), JSON.stringify({ state: 'revoked', request_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' }) + '\n');
   const mismatch = spawnSync('/bin/bash', ['-c', current], { encoding: 'utf8', timeout: 20_000,
-    env: { ...process.env, C1_PROOF_DIR: mismatchProof, C1_INPUTS_FILE: join(mismatchProof, 'C1-inputs.json'), C1_SECRET_STAGE: mismatchProof, C1_RUNNER_PID: '2147483646', C1_RECOVERY_REVOKE: '1' } });
+    env: { ...process.env, OWNER_STATE_ROOT:ownerRoot, C1_PROOF_DIR: mismatchProof, C1_INPUTS_FILE: join(mismatchProof, 'C1-inputs.json'), C1_SECRET_STAGE: mismatchProof, C1_RUNNER_PID: '2147483646', C1_RECOVERY_REVOKE: '1' } });
   assert.notEqual(mismatch.status, 0);
   assert.match(mismatch.stderr, /retained revoke receipt expected revoked-for-this-grant-and-saved-id got mismatch/);
 });
@@ -865,7 +908,7 @@ eval "$cmd"\n`, { mode: 0o700 });
 dest="\${@: -1}"; dest="\${dest#ops@100.115.66.74:}"; mkdir -p "${boxRoot}/tmp"
 cp "\${@: -2:1}" "$(python3 '${BOX_MAPPER}' '${boxRoot}' "$dest")"\n`, { mode: 0o700 });
     const r = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8', timeout: 20_000,
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, C1_PROOF_DIR: proof,
+      env: { ...process.env, OWNER_STATE_ROOT:ownerRoot, PATH: `${bin}:${process.env.PATH}`, C1_PROOF_DIR: proof,
         C1_TRANSFER_DIRECTION: opts.download ? 'download' : 'upload', C1_TRANSFER_FILE: file,
         RELEASE_SHA: sha, WINDOW_ID: windowId } });
     return { r, leftover, boxProof, dest: join(proof, file) };
@@ -899,7 +942,7 @@ assert.equal(frozen6fPlan.status, 0, frozen6fPlan.stderr);
 const frozen6fBlocks = [...frozen6fPlan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!);
 const frozen6fBlock = (id: string) => block(id, frozen6fBlocks);
 
-test('C1-16: recovery revoke binds grant_id and saved request id; incomplete receipts do not block', () => {
+test('C1-16: recovery revoke binds grant_id and saved request id; incomplete receipts do not block', ownerHomeTest, () => {
   const grant = '11111111-1111-4111-8111-111111111111';
   const saved = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
   const currentPy = block('ai-w6-human-revoke').match(/C1_REVOKE_RECEIPT_STATE=\$\(python3 - "\$C1_EXISTING" "\$C1_REVOKE_REQUEST_ID" "\$C1_GRANT_ID" <<'PY'[^\n]*\n([\s\S]*?)^PY$/m)![1]!;
@@ -938,7 +981,7 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke %s\\n' "$*" >>'${ca
  *" --input-type=module - "*) cat >/dev/null; printf 'preflight\\n' >>'${calls}';;
  *) exec '${realNode}' "$@";; esac\n`, { mode: 0o700 });
     const r = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8', timeout: 20_000,
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, C1_PROOF_DIR: proof, C1_INPUTS_FILE: join(proof, 'C1-inputs.json'), C1_SECRET_STAGE: stage, C1_RUNNER_PID: '2147483646', C1_RECOVERY_REVOKE: '1' } });
+      env: { ...process.env, OWNER_STATE_ROOT:ownerRoot, PATH: `${bin}:${process.env.PATH}`, C1_PROOF_DIR: proof, C1_INPUTS_FILE: join(proof, 'C1-inputs.json'), C1_SECRET_STAGE: stage, C1_RUNNER_PID: '2147483646', C1_RECOVERY_REVOKE: '1' } });
     return { r, calls: readFileSync(calls, 'utf8'), proof };
   };
   const skipped = make(frozen00Block('ai-w6-human-revoke'), wrongGrant);
@@ -952,7 +995,7 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke %s\\n' "$*" >>'${ca
   assert.match(empty.calls, /admin revoke/);
 });
 
-test('C1-17: completed human-revoke.json plus a partial recovery receipt PASSes without parsing the partial; frozen 6f4a0ac9 dies', () => {
+test('C1-17: completed human-revoke.json plus a partial recovery receipt PASSes without parsing the partial; frozen 6f4a0ac9 dies', ownerHomeTest, () => {
   const grant = '11111111-1111-4111-8111-111111111111';
   const saved = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
   const oldRevoke = frozen6fBlock('ai-w6-human-revoke');
@@ -973,7 +1016,7 @@ printf 'cli %s\\n' "$*" >>'${calls}'
 exit 64
 `, { mode: 0o700 });
     const r = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8', timeout: 20_000,
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, C1_PROOF_DIR: proof, C1_INPUTS_FILE: join(proof, 'C1-inputs.json'), C1_SECRET_STAGE: stage, C1_RUNNER_PID: '2147483646', C1_RECOVERY_REVOKE: '1' } });
+      env: { ...process.env, OWNER_STATE_ROOT:ownerRoot, PATH: `${bin}:${process.env.PATH}`, C1_PROOF_DIR: proof, C1_INPUTS_FILE: join(proof, 'C1-inputs.json'), C1_SECRET_STAGE: stage, C1_RUNNER_PID: '2147483646', C1_RECOVERY_REVOKE: '1' } });
     return { r, calls: readFileSync(calls, 'utf8'), proof };
   };
   const old = makeBoth(oldRevoke);
@@ -1083,7 +1126,7 @@ eval "$cmd"\n`, { mode: 0o700 });
 dest="\${@: -1}"; dest="\${dest#ops@100.115.66.74:}"; mkdir -p "${boxRoot}/tmp"
 cp "\${@: -2:1}" "$(python3 '${BOX_MAPPER}' '${boxRoot}' "$dest")"\n`, { mode: 0o700 });
     const r = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8', timeout: 20_000,
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, C1_PROOF_DIR: proof,
+      env: { ...process.env, OWNER_STATE_ROOT:ownerRoot, PATH: `${bin}:${process.env.PATH}`, C1_PROOF_DIR: proof,
         C1_TRANSFER_DIRECTION: 'download', C1_TRANSFER_FILE: 'C1-finish.json',
         RELEASE_SHA: sha, WINDOW_ID: 'Abc123' } });
     return { r, dest: join(proof, 'C1-finish.json') };

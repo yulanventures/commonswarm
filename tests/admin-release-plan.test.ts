@@ -22,10 +22,14 @@ const block = (id: string) => {
 // Inputs binding the in-repository plan bytes, for blocks that run ai_run.
 const releasedPlanInputs = (dir: string) => { const file = join(dir, 'released-plan-inputs.json'); writeFileSync(file, JSON.stringify({ plan_sha256: digest(plan) })); return file; };
 const run = (source: string, env: Record<string, string> = {}) => spawnSync('/bin/bash', [], {
-  input: source, encoding: 'utf8', env: { ...process.env, ...env }, timeout: 10_000,
+  input: source, encoding: 'utf8', env: { ...process.env, OWNER_STATE_ROOT: ownerRoot, ...env }, timeout: 10_000,
 });
 // Nonsecret fixtures are retained under the task's temporary root; no HOME change/deletion.
-const scratch = mkdtempSync(join(tmpdir(), 'admin-plan-contract-'));
+const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'admin-plan-contract-')));
+const ownerRoot = join(scratch, 'owner');
+const ownerState = join(ownerRoot, '.cswarm', 'credentials.d');
+mkdirSync(ownerState, {recursive:true,mode:0o700});
+writeFileSync(join(ownerState,'current-target.json'), '{}\n');
 // Valid-looking substituted plans: the executed validators become no-ops (digest differs).
 const substitutedPlan = join(scratch, 'substituted-RELEASE.md');
 writeFileSync(substitutedPlan, plan.split('# step: ai-edge-receipt\n').join('# step: ai-edge-receipt\nexit 0\n')
@@ -290,7 +294,13 @@ test('admin release plan: W4 requires separate terminal fence approval and W6 re
 test('admin release plan: no operational SHA literals, secret output, HOME changes or guard bypasses', () => {
   assert.doesNotMatch(plan, /\b[0-9a-f]{40}\b/);
   for (const source of blocks) {
-    assert.doesNotMatch(source, /(?:^|[;\s])(?:export\s+|env\s+)?HOME=/m);
+    // Ruling 23 permits exactly the guarded one-child override, never a shell assignment.
+    const override = 'c1_revoke_bounded env HOME="$OWNER_STATE_ROOT" node --import tsx src/cli.ts admin revoke';
+    if (source.startsWith('# step: ai-w6-human-revoke\n')) {
+      assert.equal(source.split(override).length - 1, 1);
+      assert.ok(source.indexOf('FAIL owner state root refused; STOP') < source.indexOf(override));
+    }
+    assert.doesNotMatch(source.replace(override, 'c1_revoke_bounded node --import tsx src/cli.ts admin revoke'), /(?:^|[;\s])(?:export\s+|env\s+)?HOME=/m);
     assert.doesNotMatch(source, /(?:^|[\s;"'])\/(?:usr\/)?bin\/rm\b|command rm\b|find[^\n]*-delete/m);
     assert.doesNotMatch(source, /gh\s+(?:workflow\s+run|run\s+rerun)|open -a|\/Applications\/Google Chrome/);
     assert.doesNotMatch(source, /set -x|print\(.*(?:password|access_token|refresh_token)/);
@@ -665,13 +675,13 @@ test('admin release plan: C1 owner inputs and exact workspace name refuse when a
   input.approval = approval(input, 'activate-admin-issuance-and-smoke');
   const c1 = { release_sha: input.release_sha, window_id: input.window_id, plan_sha256: input.plan_sha256,
     owner_user_id: 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa', smoke_workspace_id: 'bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
-    verification_version: 1, metadata_digest: hex, target_file: receiptFile, state_directory: scratch,
+    verification_version: 1, metadata_digest: hex, target_file: join(ownerState,'current-target.json'), state_directory: ownerState,
     smoke_workspace_name: 'C1 exact existing workspace' };
   const c1File = join(scratch, 'c1-inputs.json');
   const check = (c: Input) => {
     writeFileSync(c1File, JSON.stringify(c));
-    const body = block('ai-w6-preflight').match(/^python3 - "\$INPUTS_FILE" "\$C1_INPUTS_FILE" <<'PY'\n([\s\S]*?)^PY$/m)![1]!;
-    return spawnSync('python3', ['-', inputFile(input), c1File], {input: body, encoding:'utf8'});
+    const body = block('ai-w6-preflight').match(/^python3 - "\$INPUTS_FILE" "\$C1_INPUTS_FILE" "\$OWNER_STATE_ROOT" <<'PY'\n([\s\S]*?)^PY$/m)![1]!;
+    return spawnSync('python3', ['-', inputFile(input), c1File, ownerRoot], {input: body, encoding:'utf8'});
   };
   assert.equal(check(c1).status, 0, 'positive C1 input control');
   for (const key of Object.keys(c1)) {
@@ -3388,19 +3398,19 @@ globalThis.fetch = async (url, init) => {
 function runOwnerClient(source: string, proof: string, action: string, opts: OwnerClientOptions = {}) {
   const { js, metadata } = ownerClientJs(source, opts);
   const inputs = join(proof, 'C1-inputs.json');
-  const target = join(proof, 'target.json');
+  const target = join(ownerState, 'current-target.json');
   writeFileSync(target, JSON.stringify({ url: 'https://api.commonswarm.com', anonKey: 'anon' }));
   writeFileSync(inputs, JSON.stringify({
     owner_user_id: '22222222-2222-4222-8222-222222222222',
     target_file: target,
-    state_directory: proof,
+    state_directory: ownerState,
     metadata_digest: metadata,
     verification_version: 1,
     release_sha: sha,
     window_id: 'New123',
     plan_sha256: 'a'.repeat(64),
   }));
-  return spawnSync('node', ['--import', 'tsx', '--input-type=module', '-', inputs, proof, action], { input: js, encoding: 'utf8', timeout: 15_000, cwd: resolve('.') });
+  return spawnSync('node', ['--import', 'tsx', '--input-type=module', '-', inputs, proof, action], { input: js, encoding: 'utf8', timeout: 15_000, cwd: resolve('.'), env: {...process.env, OWNER_STATE_ROOT:ownerRoot} });
 }
 
 function ownerFetchLog(proof: string) {

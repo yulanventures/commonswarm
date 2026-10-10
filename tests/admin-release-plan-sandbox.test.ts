@@ -216,14 +216,14 @@ writeFileSync(join(w4ProofDir, 'ordinary-before.json'), JSON.stringify({ ...JSON
 writeFileSync(join(w4ProofDir, 'closed.txt'), '2026-10-04T09:00:00Z\n');
 writeFileSync(join(w4ProofDir, 'close-result.json'), JSON.stringify({ release_sha: releaseSha, window: 'W4', window_id: 'W4Fx01', result: 'success', closed_at: '2026-10-04T09:00:00Z' }));
 // C1 inputs: synthetic owner/workspace, fixture target file (no key) and state directory.
-const c1Dir = join(scratch, 'c1'); mkdirSync(join(c1Dir, 'state'), { recursive: true, mode: 0o700 });
-writeFileSync(join(c1Dir, 'target.json'), JSON.stringify({ url: 'https://api.commonswarm.com', anonKey: 'dry-run-fixture-not-a-key' }) + '\n');
+const c1Dir = join(scratch, 'c1'); mkdirSync(join(c1Dir, '.cswarm', 'credentials.d'), { recursive: true, mode: 0o700 });
+writeFileSync(join(c1Dir, '.cswarm', 'credentials.d', 'current-target.json'), JSON.stringify({ url: 'https://api.commonswarm.com', anonKey: 'dry-run-fixture-not-a-key' }) + '\n');
 const c1InputsFile = join(c1Dir, 'C1-inputs.json');
 writeFileSync(c1InputsFile, JSON.stringify({
   release_sha: releaseSha, window_id: windowId, plan_sha256: digest(plan),
   owner_user_id: '00000000-0000-4000-8000-000000000001', smoke_workspace_id: '00000000-0000-4000-8000-000000000002',
   smoke_workspace_name: 'Dry run smoke workspace', verification_version: 1, metadata_digest: hex,
-  target_file: join(c1Dir, 'target.json'), state_directory: join(c1Dir, 'state'),
+  target_file: join(c1Dir, '.cswarm', 'credentials.d', 'current-target.json'), state_directory: join(c1Dir, '.cswarm', 'credentials.d'),
 }) + '\n');
 const c1ProofDir = join(workRoot, 'hm37-live-release', `c1-${releaseSha}-${windowId}`);
 // W7 proof: C1-12 put Mac on the host line. Box helpers are PATH stubs; python3
@@ -409,7 +409,7 @@ function profile(id: string) {
   return path;
 }
 const baseEnv = () => ({
-  PATH: `${stubDir}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: process.env.HOME ?? realHome, LANG: 'en_US.UTF-8', TMPDIR: blockTmp + '/',
+  OWNER_STATE_ROOT:c1Dir, PATH: `${stubDir}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: process.env.HOME ?? realHome, LANG: 'en_US.UTF-8', TMPDIR: blockTmp + '/',
   C1GUI_SCRATCH: scratch, C1GUI_RELEASE_SHA: releaseSha, C1GUI_KNOWN_SHAS: `${releaseSha} ${siteSha}`,
   C1GUI_PLAN: planPath, C1GUI_SITE_PLAN: sitePlanPath, C1GUI_PRODUCER: producerFile, C1GUI_ARCHIVE: archiveFile, C1GUI_REAL_NODE: realNode,
   C1GUI_POSTGRES_IMAGE: `sha256:${hex}`, C1GUI_EDGE_OBSERVED: edgeObserved,
