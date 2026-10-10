@@ -103,6 +103,18 @@ const base = () => ({
   edge_recycle_service: 'fixture-edge-recycle.service', edge_recycle_timer: 'fixture-edge-recycle.timer', edge_recycle_sha256: hex,
 });
 type Input = Record<string, unknown>;
+// W4-only recycle and keeper inputs: fresh mode has no keeper (null keeper keys); the other modes carry the U10 values.
+const w4Keys = (mode = 'fresh'): Input => ({
+  recycle_install_mode: mode, recycle_baseline_sha256: hex,
+  ...(mode === 'fresh' ? Object.fromEntries(['keeper_install_receipt_sha256', 'keeper_host', 'keeper_upload_owner', 'keeper_baseline', 'keeper_install_vars_path',
+    'keeper_install_md_sha256', 'keeper_install_excerpts'].map(k => [k, null])) : {
+    keeper_install_receipt_sha256: hex, keeper_host: 'yulan-vps-1', keeper_upload_owner: 'ops',
+    keeper_baseline: ['/etc/commonswarm-admin-release/recycle.json', '/usr/local/libexec/commonswarm-admin-edge-recycle',
+      '/etc/systemd/system/commonswarm-edge-recycle.service.d/50-admin-measurement.conf'].map(path => `${hex}  ${path}`).join('\n'),
+    keeper_install_vars_path: '/root/keeper-install-20261010T165121Z.vars', keeper_install_md_sha256: hex,
+    keeper_install_excerpts: { shell_options: { lines: [41, 42], sha256: hex }, bundle: { lines: [57, 61], sha256: hex }, quiet: { lines: [63, 75], sha256: hex }, section4: { lines: [516, 599], sha256: hex } },
+  }),
+});
 const inputFile = (input: Input) => {
   const path = join(scratch, 'inputs.json');
   writeFileSync(path, JSON.stringify(input));
@@ -258,7 +270,7 @@ test('admin release plan: W6 and W7 approval is action/release/window/plan bound
 });
 
 test('admin release plan: W4 requires separate terminal fence approval and W6 refuses absent approval inputs', () => {
-  const edge: Input = { ...base(), window: 'W4', rollback_decision: 'restore-service' };
+  const edge: Input = { ...base(), window: 'W4', rollback_decision: 'restore-service', ...w4Keys() };
   assert.match(validate(edge).stderr, /terminal-legacy-db-fence approval required/);
   edge.legacy_fence_approval = approval(edge, 'terminal-legacy-db-fence');
   assert.equal(validate(edge).status, 0);
@@ -697,11 +709,17 @@ test('admin release plan: recycle invalidates before restart, remeasures after a
   assert.match(install, /ExecStartPost=\/usr\/local\/libexec\/commonswarm-admin-edge-recycle after/);
   assert.match(hook, /invalidated_at=statement_timestamp\(\),release_generation=release_generation\+1/);
   assert.match(hook, /measured_generation=release_generation/);
-  assert.match(hook, /tarfile.open\(archive\)/);
+  // One no-follow read: the same in-memory bytes are hashed and tar-parsed (A4).
+  assert.match(hook, /hashlib\.sha256\(archive_bytes\)/);
+  assert.match(hook, /tarfile\.open\(fileobj=io\.BytesIO\(archive_bytes\)\)/);
+  assert.doesNotMatch(hook, /tarfile\.open\(archive\)/);
   assert.match(hook, /State.*Health/);
-  assert.match(rollback, /rm -- "\$RECYCLE_DROPIN"/);
-  assert.ok(rollback.indexOf('admin_issuance_enabled=false') < rollback.indexOf('rm -- "$RECYCLE_DROPIN"'), 'close before removing hook');
-  assert.match(rollback, /systemctl daemon-reload/);
+  // The RESTORED set (A3): only objects this window created are removed; a pre-existing drop-in stays.
+  // Fixture proofs: tests/admin-release-w4-second-pass.test.ts (F1-F3 and the three A1 modes).
+  assert.doesNotMatch(rollback, /rm -- "\$RECYCLE_DROPIN"/);
+  assert.match(rollback, /if not base\['present'\]:\n\s+guarded_rm\(path\); continue/);
+  assert.ok(rollback.indexOf('admin_issuance_enabled=false') < rollback.indexOf("python3 - "), 'close before restoring the recycle installation');
+  assert.match(rollback, /'systemctl','daemon-reload'/);
   assert.match(block('ai-w6-activation-rollback'), /MCP_OAUTH_ADMIN_ISSUANCE_ENABLED/);
   assert.doesNotMatch(block('ai-w6-activation-rollback'), /-f "\$OAUTH_TARGET\/deploy\/mcp-auth\/compose.admin-issuer.yaml"/);
 });
@@ -870,13 +888,24 @@ test('admin release plan: C1 report requires ordered approval/withdrawal/revoke 
 test('admin release plan: W1-W5 need no activation or consent approval; W4 binds the terminal fence', () => {
   for(const window of ['W1','W2','W3','W4','W5']) {
     const input:Input={...base(),window,rollback_decision:['W1','W2'].includes(window)?'retain-additive':'restore-service'};
-    if(window==='W4') input.legacy_fence_approval=approval(input,'terminal-legacy-db-fence');
+    if(window==='W4') {
+      input.legacy_fence_approval=approval(input,'terminal-legacy-db-fence');
+      // The recycle and keeper inputs are exact and W4-only.
+      assert.match(validate(input).stderr,/W4 recycle and keeper inputs/,'W4 without its recycle and keeper inputs');
+      for(const mode of ['accept-existing','upgrade-existing']) assert.equal(validate({...input,...w4Keys(mode)}).status,0,`W4 ${mode}`);
+      assert.match(validate({...input,...w4Keys(),keeper_host:'yulan-vps-1'}).stderr,/W4 fresh mode keeper inputs null/);
+      assert.match(validate({...input,...w4Keys('accept-existing'),keeper_install_vars_path:'/tmp/keeper.vars'}).stderr,/W4 keeper_install_vars_path/);
+      assert.match(validate({...input,...w4Keys('accept-existing'),keeper_baseline:'x'}).stderr,/W4 keeper_baseline/);
+      assert.match(validate({...input,...w4Keys('reinstall')}).stderr,/W4 recycle_install_mode/);
+      Object.assign(input,w4Keys());
+    }
     if(window==='W2') {
       // W2 alone names the probe workspace; it is required there and refused elsewhere.
       assert.notEqual(validate(input).status,0,'W2 without probe_workspace_id');
       assert.notEqual(validate({...input,probe_workspace_id:'not-a-uuid'}).status,0);
       input.probe_workspace_id='c2ea0541-f56d-4c73-bf71-56c5405c4934';
     } else assert.notEqual(validate({...input,probe_workspace_id:'c2ea0541-f56d-4c73-bf71-56c5405c4934'}).status,0,`${window} refuses probe_workspace_id`);
+    if(window!=='W4') assert.match(validate({...input,recycle_install_mode:'fresh'}).stderr,/recycle and keeper inputs are W4-only/,`${window} refuses W4 inputs`);
     assert.equal(validate(input).status,0,`${window} closed preparation inputs`);
     assert.notEqual(validate({...input,approval:approval(input,'activate-admin-issuance-and-smoke')}).status,0);
   }
@@ -1064,7 +1093,8 @@ test('admin release plan: W2b close needs its backup gate, preconditions and iss
   const close=portable(block('ai-close'),{stage:2,pointer:0}).split('/etc/commonswarm-oauth/').join(etc+'/');
   const gateFile=join(root,'gate-check.sh'); writeFileSync(gateFile,block('ai-backup-gate-check'));
   const harness=(role:string)=>`ai_ro() { case "$*" in *'SELECT NOT admin_issuance_enabled'*) printf 't\\n';; *'FROM pg_catalog.pg_authid'*) printf '${role}\\n';; *) printf 'f\\n';; esac; }\n`
-    +`ai_run() { test "$1" = ai-backup-gate-check || return 1; eval "$(cat '${gateFile}')"; }\n`;
+    // ai-w4-state's own checks run in admin-release-w4-second-pass.test.ts; here it records the requested action.
+    +`ai_run() { case "$1" in ai-backup-gate-check) eval "$(cat '${gateFile}')";; ai-w4-state) printf '%s\\n' "$W4_STATE_ACTION" >>'${root}/w4-state-calls';; *) return 1;; esac; }\n`;
   const stamp=(ms:number)=>new Date(Date.now()-ms).toISOString().replace(/\.\d{3}Z$/,'Z');
   // backup-gate.json exactly as ai-w1-backup-gate writes it, bound to the window's inputs.json.
   const gateReceipt=(window:string,change:Record<string,unknown>={})=>{
@@ -1121,6 +1151,7 @@ test('admin release plan: W2b close needs its backup gate, preconditions and iss
   // W4 shares the backup gate: its success close needs backup-gate.json as well as its readback.
   r=attempt('success',['backup-gate.json','W4-readback.txt'],'t','W4'); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
   assert.equal(JSON.parse(r.record).window,'W4');
+  assert.equal(readFileSync(join(root,'w4-state-calls'),'utf8'),'success\n','the W4 success close proves the admitted installation');
   for(const gate of [undefined,'PASS',gateReceipt('W2b'),gateReceipt('W4',{backup_verified_at:stamp(3600_000)})]) {
     r=attempt('success',gate===undefined?['W4-readback.txt']:['backup-gate.json','W4-readback.txt'],'t','W4',gate); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
     assert.match(r.result.stderr,/FAIL ai-close: W4: backup-gate\.json expected valid-bound-fresh-receipt got refused; STOP/);
@@ -1191,22 +1222,26 @@ test('same-version retry / w4-recovered-close: a recovered W4 closes only with t
     const stage=makeStage(), proof=mkdtempSync(join(root,'proof-'));
     writeFileSync(join(proof,'secret-stage.path'),stage+'\n'); writeFileSync(join(proof,'consent-pre-W1.json'),pre);
     writeFileSync(join(proof,'ordinary-recovery.json'),recovery); writeFileSync(join(proof,'inputs.json'),readFileSync(inputs));
-    const result=run(`ai_ro() { printf 't\\n'; }\n`+close,{WINDOW:'W4',SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',EDGE_RECYCLE_SERVICE:'fixture.service',
+    // ai-w4-state (the exact RESTORED/RETAINED/keeper sets) runs in admin-release-w4-second-pass.test.ts; here it records its action.
+    const result=run(`ai_ro() { printf 't\\n'; }\nai_run() { test "$1" = ai-w4-state || return 1; printf '%s\\n' "$W4_STATE_ACTION" >>'${box}/w4-state-calls'; }\n`+close,{WINDOW:'W4',SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',EDGE_RECYCLE_SERVICE:'fixture.service',
       INPUTS_FILE:inputs,PLAN_FILE:planPath,BOX_ARCHIVE_PATH:archive,CLOSE_RESULT:'recovered',PATH:shim+':'+process.env.PATH});
     const closed=existsSync(join(proof,'closed.txt')); if(existsSync(stage)) removeStage(stage);
-    return {result,closed};
+    const calls=existsSync(join(box,'w4-state-calls'))?readFileSync(join(box,'w4-state-calls'),'utf8'):'';
+    return {result,closed,calls};
   };
-  let r=attempt(()=>undefined); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
+  let r=attempt(()=>undefined); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed); assert.equal(r.calls,'recovered\n');
   r=attempt(b=>mkdirSync(join(b,'edge/failed-attempts',sha+'-W4-Abc123'),{recursive:true})); assert.equal(r.result.status,0,r.result.stderr);
-  const refusal=/FAIL ai-close: recovered W4 edge current, Caddy bytes, drop-in and release tree expected baseline-baseline-absent-absent got other; run ai-w4-rollback; STOP/;
+  // A pre-existing drop-in is RESTORED by keeping it (A3); this check no longer requires its absence.
+  r=attempt(b=>writeFileSync(join(b,'systemd/fixture.service.d/50-admin-measurement.conf'),'[Service]\n')); assert.equal(r.result.status,0,r.result.stderr);
+  const refusal=/FAIL ai-close: recovered W4 edge current, Caddy bytes and release tree expected baseline-baseline-absent got other; run ai-w4-rollback; STOP/;
   for(const [name,setup] of [
     ['tree at this release',(b:string)=>mkdirSync(join(b,'edge/releases',sha))],
     ['current on the new tree',(b:string)=>{ mkdirSync(join(b,'edge/releases',sha)); rmSync(join(b,'edge/current')); symlinkSync(join(b,'edge/releases',sha),join(b,'edge/current')); }],
     ['candidate Caddy left live',(b:string)=>writeFileSync(join(b,'caddy/sites/20-commonswarm-mcp.caddy'),'candidate\n')],
     ['Caddyfile changed',(b:string)=>writeFileSync(join(b,'caddy/Caddyfile'),'other\n')],
-    ['drop-in left',(b:string)=>writeFileSync(join(b,'systemd/fixture.service.d/50-admin-measurement.conf'),'[Service]\n')],
   ] as const) {
     r=attempt(setup); assert.notEqual(r.result.status,0,name); assert.ok(!r.closed,name); assert.match(r.result.stderr,refusal,name); assert.doesNotMatch(r.result.stderr,/Traceback/,name);
+    assert.equal(r.calls,'',`${name}: refused before the exact-set check`);
   }
   // The rollback derives its paths from INPUTS and moves the tree aside only after current is back on the baseline.
   const rollback=block('ai-w4-rollback');
@@ -1566,7 +1601,7 @@ subprocess.check_output = fixture_output
     ['$(mktemp -d /private/tmp/anvil-secret.XXXXXX)', `$(mktemp -d ${secretRoot}/anvil-secret.XXXXXX)`],
     ['$(mktemp -d /tmp/anvil-secret.XXXXXX)', `$(mktemp -d ${secretRoot}/anvil-secret.XXXXXX)`],
   ]) source = source.split(from).join(to);
-  const imports = 'import hashlib,json,os,pathlib,re,stat,subprocess,sys,tarfile,time\n';
+  const imports = 'import hashlib,io,json,os,pathlib,re,stat,subprocess,sys,tarfile,time\n';
   assert.equal(source.split(imports).length - 1, 1);
   source = source.replace(imports, imports + boundary);
   const hook = (mode: string, failed = false, extra: Record<string, string> = {}) => run(`set -- ${mode}\n${source}`, {

@@ -521,14 +521,17 @@ test('ai-w6-human-revoke refuses an approval withdrawal made before it (withdraw
 test('W6 activation checks require the retained recycle archive with its digest (G4)', () => {
   const checks = block('ai-w6-activation-checks');
   const body = checks.match(/^python3 - "\$RELEASE_SHA" "\$INPUTS_FILE" <<'PY'\n([\s\S]*?)^PY$/m)![1]!;
-  const make = (change: { archive?: string | null; recycle?: Record<string, unknown>; mode?: number } = {}) => {
+  const make = (change: { archive?: string | null; recycle?: Record<string, unknown>; mode?: number; durable?: boolean } = {}) => {
     const dir = realpathSync(mkdtempSync(join(root, 'g4-')));
     const tmpRoot = join(dir, 'tmp'); mkdirSync(tmpRoot);
+    const durableRoot = join(dir, 'archives'); mkdirSync(durableRoot);
     const archiveBytes = 'release archive bytes';
-    const archive = join(tmpRoot, `admin-issuance-${sha}-W4abcd.tar`);
-    if (change.archive !== null) writeFileSync(archive, change.archive ?? archiveBytes);
+    // The two admitted names: the per-window /tmp upload and the durable copy W4 binds (A4).
+    const archive = change.durable ? join(durableRoot, `${sha}-W4abcd.tar`) : join(tmpRoot, `admin-issuance-${sha}-W4abcd.tar`);
+    if (change.archive !== null) writeFileSync(archive, change.archive ?? archiveBytes, { mode: 0o600 });
     writeFileSync(join(dir, 'recycle.json'), JSON.stringify({ release_sha: sha, artifact_digest: digest(archiveBytes), archive, ...change.recycle }), { mode: change.mode ?? 0o600 });
-    const source = body.split('/etc/commonswarm-admin-release').join(dir).split("r'/tmp/admin-issuance-'").join(`r'${tmpRoot}/admin-issuance-'`);
+    const source = body.split('/etc/commonswarm-admin-release').join(dir).split('/tmp/admin-issuance-').join(`${tmpRoot}/admin-issuance-`)
+      .split('/var/lib/commonswarm-admin-release/archives/').join(`${durableRoot}/`);
     return spawnSync('python3', ['-', sha, inputFile({ ...base(), archive_sha256: digest(archiveBytes) })], { input: source, encoding: 'utf8' });
   };
   assert.equal(make().status, 0, make().stderr);
@@ -537,6 +540,9 @@ test('W6 activation checks require the retained recycle archive with its digest 
     ['archive changed', { archive: 'other bytes' }, /recycle archive digest expected recycle.json artifact_digest got mismatch/],
     ['other release', { recycle: { release_sha: 'c'.repeat(40) } }, /recycle.json release\/artifact expected this-release-archive got other/],
     ['loose mode', { mode: 0o644 }, /recycle.json expected 0600-regular-file got other/],
+    ['third prefix', { recycle: { archive: `/srv/admin-issuance-${sha}-W4abcd.tar` } }, /recycle archive expected retained-regular-file got missing/],
+    // The durable name passes the name check and reaches its root:root 0600 check (this test does not run as root).
+    ['durable name, non-root owner', { durable: true }, /durable recycle archive expected root-0600 got other/],
   ] as const) {
     const r = make(change as Parameters<typeof make>[0]); assert.notEqual(r.status, 0, name); assert.match(r.stderr, message, `${name}: ${r.stderr}`);
   }

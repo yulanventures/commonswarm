@@ -419,9 +419,14 @@ test('W5 administrative close emits one Mac row; other windows refuse; existing 
   refusal(planPath, 'W3', 'admin-close', 'admin-close is W5-only');
   const prior = spawnSync('git', ['show', '84077ee1:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
   assert.equal(prior.status, 0, prior.stderr);
-  const oldOrders = [...prior.stdout.matchAll(/^```c1-order [^\n]+\n[\s\S]*?^```$/gm)].map(m => m[0]);
+  const base = spawnSync('git', ['show', '7efbb67d:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+  assert.equal(base.status, 0, base.stderr);
+  const orders = (source: string) => [...source.matchAll(/^```c1-order [^\n]+\n[\s\S]*?^```$/gm)].map(m => m[0]);
+  const oldOrders = orders(prior.stdout);
   assert.equal(oldOrders.length, 27);
-  const newOrders = [...text.matchAll(/^```c1-order [^\n]+\n[\s\S]*?^```$/gm)].map(m => m[0]);
+  const baseOrders = orders(base.stdout);
+  assert.equal(baseOrders.length, 28);
+  const newOrders = orders(text);
   assert.equal(newOrders.length, 28);
   // W5AC-C adds 13 lines in the grant/revoke blocks. Only these six later
   // prose locations move. W5AC-D also corrects the four revoke caller inputs;
@@ -431,12 +436,30 @@ test('W5 administrative close emits one Mac row; other windows refuse; existing 
   const oldRevokeInput = 'If this window wrote grant-attempted.txt or grant.txt: measure live membership; revoke if present, record absent-at-recovery if not; a started revoke is never re-run';
   const reconciledRevokeInput = 'If this window wrote grant-attempted.txt or grant.txt: measure live membership; revoke if present, record absent-at-recovery if not; reconcile a started revoke on re-run: re-measure; absent gives reconciled absent evidence; present runs one more per-grantor REVOKE with zero-row readback';
   assert.equal(prior.stdout.split(oldRevokeInput).length - 1, 4);
-  assert.equal(text.split(reconciledRevokeInput).length - 1, 4);
-  assert.ok(!text.includes(oldRevokeInput));
+  for (const source of [base.stdout, text]) {
+    assert.equal(source.split(reconciledRevokeInput).length - 1, 4);
+    assert.ok(!source.includes(oldRevokeInput));
+  }
   for (const order of oldOrders) {
     const expected = order.replace(/"line":(\d+)/g, (pin, line) =>
       repins.has(Number(line)) ? `"line":${repins.get(Number(line))}` : pin)
       .replace(oldRevokeInput, reconciledRevokeInput);
-    assert.ok(newOrders.includes(expected), 'existing order bytes changed beyond approved source-line repins and revoke reconciliation inputs');
+    assert.ok(baseOrders.includes(expected), 'existing order bytes changed beyond approved source-line repins and revoke reconciliation inputs');
   }
+  // Build B re-derives each "line" anchor from its unchanged quote (verify() above re-checks every one)
+  // and adds only these W4 forward rows; every other order byte equals the base 7efbb67d.
+  const buildB = new Map([['W4 forward', [['{"id":"ai-w4-caddy-candidate","host":"box"}', '{"id":"ai-w4-keeper-retire","host":"box"}', '{"id":"ai-w4-apply","host":"box"}']]]]);
+  const header = (order: string) => order.split('\n')[0]!.slice('```c1-order '.length);
+  const unpinned = (rows: string[]) => rows.join('\n').replace(/"line":\d+/g, '"line":N');
+  assert.deepEqual(newOrders.map(header), baseOrders.map(header));
+  newOrders.forEach((order, i) => {
+    const rows = order.split('\n'), added = new Set<string>();
+    for (const [before, row, after] of buildB.get(header(order)) ?? []) {
+      assert.equal(rows.filter(r => r === row).length, 1, `${header(order)}: ${row}`);
+      const at = rows.indexOf(row);
+      assert.deepEqual([rows[at - 1], rows[at + 1]], [before, after], `${header(order)}: ${row} position`);
+      added.add(row);
+    }
+    assert.equal(unpinned(rows.filter(r => !added.has(r))), unpinned(baseOrders[i]!.split('\n')), `${header(order)}: only re-derived anchors and the build-B rows differ from the base`);
+  });
 });

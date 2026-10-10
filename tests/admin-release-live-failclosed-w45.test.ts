@@ -127,20 +127,17 @@ if name=='python3':
     real_popen=subprocess.Popen
     def popen(argv,**kw):
         allowed=[['node','scripts/admin-smoke.mjs','--print-client-metadata'],['docker','inspect','commonswarm-edge-edge-runtime-1'],['/bin/bash'],['/bin/bash','-n']] # /bin/bash: the plan's extract-and-run of ai-live-controls; -n: in-memory syntax checks
+        # ai-recycle-install's read-only unit observations, answered by the systemctl stub below.
+        allowed+=[['systemctl','cat','fixture-recycle.service'],['systemctl','cat','fixture-recycle.timer'],['systemctl','show','-p','ActiveState','--value','fixture-recycle.service'],
+            ['systemctl','is-enabled','fixture-recycle.timer'],['systemctl','is-active','fixture-recycle.timer']]
         if argv not in allowed or kw.get('shell'): refuse()
         return real_popen(argv,**kw)
     subprocess.Popen=popen
-    if cfg.get('install_root'):
+    if cfg.get('record_fchown'):
         # Ownership boundary: a non-root test cannot chown to 0:0; record the request instead.
         def fchown(fd,uid,gid):
             with (root/'fchown.jsonl').open('a') as log: log.write(json.dumps([uid,gid])+'\n')
         os.fchown=fchown
-        if cfg.get('corrupt_install'):
-            # Corrupt the installed hook immediately after the plan's single write.
-            real_write=os.write
-            def write(fd,data):
-                n=real_write(fd,data); real_write(fd,b'# tampered after write\n'); return n
-            os.write=write
     exec(compile(source,'<complete-plan-block>','exec'))
 elif name=='node':
     if args!=['scripts/admin-smoke.mjs','--print-client-metadata']: refuse()
@@ -158,8 +155,6 @@ elif name=='ssh':
 elif name=='dirname':
     if len(args)!=1: refuse()
     print(os.path.dirname(args[0]))
-elif name=='mkdir' and args and args[0]=='-p' and cfg.get('install_root'):
-    for value in args[1:]: owned(value).mkdir(parents=True,exist_ok=True)
 elif name=='mkdir' and args and args[0]=='-p':
     # Positive-control boundary: every guard admitted before the first directory creation.
     print('ADMITTED mkdir -p'); raise SystemExit(97)
@@ -173,8 +168,6 @@ elif name=='cp':
             live=owned(args[1]); live.rename(root/'live-sites-aside'); live.mkdir()
     elif len(args)==2: shutil.copyfile(owned(args[0]),owned(args[1]))
     else: refuse()
-elif name=='chmod' and len(args)==2 and args[0] in ('0700','0644') and cfg.get('install_root'):
-    owned(args[1]).chmod(int(args[0],8))
 elif name=='chmod':
     if args!=['-R','go-rwx',str(root/'stage')]: refuse()
     for p in [root/'stage']+list((root/'stage').rglob('*')): p.chmod(p.stat().st_mode & ~0o077)
@@ -192,7 +185,7 @@ elif name=='caddy':
 elif name=='ai_deadline':
     if args: refuse()
 elif name=='ai_run':
-    if args not in [['ai-inputs'],['ai-gates'],['ai-gates-bind'],['ai-timer-guard'],['ai-recycle-install'],['ai-backup-gate-check'],['ai-recycle-rollback']]: refuse()
+    if args not in [['ai-inputs'],['ai-gates'],['ai-gates-bind'],['ai-timer-guard'],['ai-recycle-install'],['ai-w4-state'],['ai-backup-gate-check'],['ai-recycle-rollback']]: refuse()
     if args==['ai-recycle-rollback']:
         dropin=root/'systemd/fixture-recycle.service.d/50-admin-measurement.conf'
         if dropin.exists(): dropin.unlink()
@@ -205,6 +198,8 @@ elif name=='ai_db':
 elif name=='ai_ro':
     if args==['-Atq','--command','SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;']: print('t')
     elif args==['-Atq','--command','SELECT release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND invalidated_at IS NULL AND measured_generation=release_generation;']: print('7')
+    elif args==['-Atq','--command',"SELECT json_build_object('admin_issuance_enabled',admin_issuance_enabled,'invalidated',invalidated_at IS NOT NULL,'release_generation',release_generation,'measured_generation',measured_generation,'measured_edge_release_sha',measured_edge_release_sha)::text FROM commonswarm_oauth.admin_cutover_state WHERE singleton;"]:
+        print(json.dumps({'admin_issuance_enabled':False,'invalidated':True,'release_generation':8,'measured_generation':7,'measured_edge_release_sha':cfg['baseline']}))
     else: refuse()
 elif name=='date':
     if args!=['-u','+%Y-%m-%dT%H:%M:%SZ']: refuse()
@@ -219,10 +214,9 @@ elif name=='systemctl':
         (root/'timer-state').write_text('active')
     elif args==['reload','caddy']: pass
     elif args==['show','-p','ActiveState','--value','fixture-recycle.service']: print('inactive')
-    elif args==['daemon-reload'] and cfg.get('install_root'): pass
-    elif args==['cat','fixture-recycle.service'] and cfg.get('install_root'):
-        dropin=root/'systemd/fixture-recycle.service.d/50-admin-measurement.conf'
-        print('# fixture-recycle.service\n[Service]\nExecStart=/bin/true\n# '+str(dropin)+'\n'+dropin.read_text())
+    elif args in (['cat','fixture-recycle.service'],['cat','fixture-recycle.timer']): print('# /etc/systemd/system/'+args[1]+'\n[Unit]\nDescription=fixture')
+    elif args==['is-enabled','fixture-recycle.timer']: print('enabled')
+    elif args==['is-active','fixture-recycle.timer']: print((root/'timer-state').read_text() if (root/'timer-state').exists() else 'active')
     else: refuse()
 elif name=='cmp':
     if len(args)!=3 or args[0]!='-s': refuse()
@@ -309,6 +303,9 @@ function fixture(config: Record<string, unknown> = {}, parent = scratch) {
   // Close-path fixtures start from a passed W5 opening staged under PREP_DIR.
   put('prep/w5-live-before/ordinary-before.json', liveReceipt('before', preText)); put('prep/w5-live-before/consent-pre-W1.json', preText);
   put('commands.jsonl', ''); put('http.jsonl', '');
+  // ai-w4-keeper-retire's record for this window; its own checks run in admin-release-w4-second-pass.test.ts.
+  put('proof/keeper-adoption.json', '{}\n');
+  put('proof/keeper-retired.json', { kind: 'c1-w4-keeper-retired', release_sha: sha, window_id: data.window_id, adoption_sha256: hash('{}\n'), install_md_sha256: null, excerpts: null });
   put('bin/_dispatch', dispatcher);
   chmodSync(join(bin, '_dispatch'), 0o700);
   for (const name of ['python3', 'node', 'ssh', 'psql', 'docker', 'curl', 'caddy', 'systemctl', 'sudo', 'git',
@@ -652,7 +649,11 @@ test('edge-caddy-route / caddy-validate-reload: fails closed before reload on ca
     assert.notEqual(refused.status, 0);
     assert.ok(refused.stderr.includes(`FAIL ${step}: Caddy validation exit status expected 0 got 3; STOP`), refused.stderr);
     assert.ok(!refused.calls.some(c => c[0] === 'systemctl' && c[1] === 'reload'), 'reload stub must NOT be called');
-    assert.ok(!refused.calls.some(c => c[0] === 'ai_run' && c[1] === 'ai-recycle-install'), 'no post-reload recycle install');
+    // ai-w4-apply's only earlier ai-recycle-install is the read-only recheck after the timer hold.
+    const failedValidation = refused.calls.reduce((last: number, c, i) => c[0] === 'caddy' ? i : last, -1);
+    const installs = refused.calls.flatMap((c, i) => c[0] === 'ai_run' && c[1] === 'ai-recycle-install' ? [i] : []);
+    assert.equal(installs.length, step === 'ai-w4-apply' ? 1 : 0, 'recheck only');
+    assert.ok(installs.every(i => i < failedValidation), 'no post-reload recycle install');
     assert.ok(!existsSync(failureMarker), 'no later action after validation refusal');
     assert.doesNotMatch(refused.stdout, /PASS W4 both|Apply body completed/);
     if (step === 'ai-w4-apply') {
@@ -822,15 +823,51 @@ test('release-plan-contract / w4-preflight-override-and-new-edge-guards: refuses
   guardRefused(dangling, dangling.run(['ai-w4-preflight']), 'FAIL ai-w4-preflight: new edge release directory expected not-symlink got symlink; STOP');
   assert.ok(!existsSync(join(dangling.root, 'absent-edge')));
 });
+// Fresh mode of the three-mode ai-recycle-install, at admission (ai-w4-preflight). The other modes, the install
+// itself and recycle-install-verified-write run in tests/admin-release-w4-second-pass.test.ts.
 test('release-plan-contract / recycle-install-dropin-guards: refuses an existing or symlinked recycle drop-in', () => {
-  const good = fixture(); admitted(good.run(['ai-recycle-install']), 'ADMITTED mkdir -p');
   const dropin = 'systemd/fixture-recycle.service.d/50-admin-measurement.conf';
-  const present = fixture(); present.put(dropin, '[Service]\n');
-  guardRefused(present, present.run(['ai-recycle-install']), 'FAIL ai-recycle-install: recycle drop-in expected absent got present; STOP');
-  assert.equal(readFileSync(join(present.root, dropin), 'utf8'), '[Service]\n');
-  const linked = fixture(); mkdirSync(dirname(join(linked.root, dropin)), { recursive: true });
-  symlinkSync(join(linked.root, 'absent-dropin'), join(linked.root, dropin));
-  guardRefused(linked, linked.run(['ai-recycle-install']), 'FAIL ai-recycle-install: recycle drop-in expected not-symlink got symlink; STOP');
+  const pyJson = (o: Record<string, unknown>) => '{' + Object.keys(o).sort().map(k => `${JSON.stringify(k)}: ${JSON.stringify(o[k])}`).join(', ') + '}';
+  const unitDigest = (unit: string) => hash(`# /etc/systemd/system/${unit}\n[Unit]\nDescription=fixture\n`);
+  const freshAdmit = (receiptChange: (r: Record<string, any>) => void = () => {}) => {
+    const f = fixture({ record_fchown: true });
+    const d = { ...JSON.parse(readFileSync(join(f.root, 'inputs.json'), 'utf8')), window: 'W4', baseline_edge_sha: baseline, baseline_postgres_image: image,
+      edge_recycle_sha256: unitDigest('fixture-recycle.service'), recycle_install_mode: 'fresh' };
+    const absent = (rel: string) => ({ path: join(f.root, rel), present: false, sha256: null, uid: null, gid: null, mode: null });
+    const absentDir = (rel: string) => ({ path: join(f.root, rel), present: false, uid: null, gid: null, mode: null, entries: null });
+    const durable = `/var/lib/commonswarm-admin-release/archives/${sha}-${d.window_id}.tar`, helper = `/home/commonswarm/admin-issuance/releases/${sha}`;
+    const receipt: Record<string, any> = {
+      kind: 'c1-w4-recycle-baseline', release_sha: sha, window: 'W4', window_id: d.window_id, plan_sha256: d.plan_sha256, mode: 'fresh',
+      hook: absent('libexec/commonswarm-admin-edge-recycle'), config: absent('admin-release/recycle.json'), dropin: absent(dropin), intent: absent('admin-release/recycle-intent.json'),
+      config_dir: absentDir('admin-release'), dropin_dir: absentDir('systemd/fixture-recycle.service.d'),
+      service: { unit: 'fixture-recycle.service', sha256: unitDigest('fixture-recycle.service'), active_state: 'inactive' },
+      timer: { unit: 'fixture-recycle.timer', sha256: unitDigest('fixture-recycle.timer'), active_state: 'active', enabled: 'enabled' },
+      archive: null, helper: null, edge: { release_sha: baseline, image }, keeper: null, approval: null,
+      expected: { hook_sha256: hash('#!/bin/bash\n' + block('ai-recycle-hook')),
+        dropin_sha256: hash(f.remap('[Service]\nEnvironment=COMMONSWARM_RECYCLE_UNIT=%n\nExecStartPre=/usr/local/libexec/commonswarm-admin-edge-recycle before\nExecStartPost=/usr/local/libexec/commonswarm-admin-edge-recycle after\n')),
+        archive: durable, binding_sha256: hash(pyJson({ release_sha: sha, target: f.remap('/home/commonswarm/edge/releases/') + sha, image_digest: image, artifact_digest: d.archive_sha256,
+          archive: durable, postgres_image: image, release_root: helper }) + '\n') },
+    };
+    receiptChange(receipt);
+    const text = JSON.stringify(receipt); f.put('recycle-baseline.json', text);
+    f.put('inputs.json', { ...d, recycle_baseline_sha256: hash(text) });
+    const env = { RECYCLE_INSTALL_ACTION: 'admit', RECYCLE_BASELINE_FILE: join(f.root, 'recycle-baseline.json'), RELEASE_ROOT: helper };
+    return { f, admit: () => f.run(['ai-recycle-install'], env) };
+  };
+  const good = freshAdmit(); const admitted = good.admit(); pass(good.f, admitted);
+  assert.match(admitted.stdout, /PASS ai-recycle-install admit: fresh baseline receipt verified against the live installation; exact bytes saved/);
+  assert.deepEqual(readFileSync(join(good.f.proof, 'w4-state/recycle-baseline.json')), readFileSync(join(good.f.root, 'recycle-baseline.json')));
+  // A drop-in written after HezLead's measurement differs from the receipt: refused before any write, the file left as found.
+  const present = freshAdmit(); present.f.put(dropin, '[Service]\n');
+  guardRefused(present.f, present.admit(), `FAIL ai-recycle-install: ${join(present.f.root, dropin)} expected baseline-receipt-bytes-and-metadata got drift; STOP`);
+  assert.equal(readFileSync(join(present.f.root, dropin), 'utf8'), '[Service]\n'); assert.ok(!existsSync(join(present.f.proof, 'w4-state')));
+  // A receipt that records an existing drop-in is not a fresh installation.
+  const recorded = freshAdmit(r => { r.dropin = { ...r.dropin, present: true, sha256: hash('[Service]\n'), uid: 0, gid: 0, mode: '0644' }; });
+  guardRefused(recorded.f, recorded.admit(), 'FAIL ai-recycle-install: fresh installation expected hook-config-drop-in-intent-absent got present; STOP');
+  const linked = freshAdmit(); mkdirSync(dirname(join(linked.f.root, dropin)), { recursive: true });
+  symlinkSync(join(linked.f.root, 'absent-dropin'), join(linked.f.root, dropin));
+  guardRefused(linked.f, linked.admit(), `FAIL ai-recycle-install: ${join(linked.f.root, dropin)} expected regular-file-or-absent got symlink-or-other; STOP`);
+  assert.ok(!existsSync(join(linked.f.root, 'absent-dropin'))); assert.ok(!existsSync(join(linked.f.proof, 'w4-state')));
 });
 test('release-plan-contract / w6-prepare-checkout-and-proof-guards: refuses a wrong HEAD, dirty tree, or existing or symlinked C1 proof directory', () => {
   const env = { WINDOW: 'W6' };
@@ -928,30 +965,4 @@ test('ordinary-paths-unchanged / w5-opening-live-controls: ai-w5-preflight refus
     refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-live-controls: BOX_ARCHIVE_PATH bytes expected input-archive_sha256 got mismatch; STOP'); }
   { const f = fixture(); mkdirSync(join(f.root, 'prep-open/w5-live-before'));
     refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-w5-preflight: live-controls staging expected absent got present; STOP'); }
-});
-
-// ai-recycle-install's single write + post-install comparison, executed in a temporary root.
-test('release-plan-contract / recycle-install-verified-write: installs exactly the verified hook bytes and refuses a corrupted install before registering the drop-in', () => {
-  const hookBlock = blocks.filter(b => b.startsWith('# step: ai-recycle-hook\n'));
-  assert.equal(hookBlock.length, 1);
-  const dropin = 'systemd/fixture-recycle.service.d/50-admin-measurement.conf', installed = 'libexec/commonswarm-admin-edge-recycle';
-  const good = fixture({ install_root: true }); const r = good.run(['ai-recycle-install']); pass(good, r);
-  assert.equal(readFileSync(join(good.root, installed), 'utf8'), '#!/bin/bash\n' + hookBlock[0], 'installed bytes are the verified extraction');
-  assert.equal(statSync(join(good.root, installed)).mode & 0o777, 0o700);
-  assert.equal(readFileSync(join(good.root, 'fchown.jsonl'), 'utf8').trim(), '[0, 0]');
-  assert.match(readFileSync(join(good.root, dropin), 'utf8'), /ExecStartPre=.*commonswarm-admin-edge-recycle before/);
-  assert.ok(r.calls.some(c => c[0] === 'systemctl' && c[1] === 'daemon-reload'), 'drop-in registered');
-  assert.ok(existsSync(join(good.proof, 'recycle-unit-after.txt')));
-  assert.match(r.stdout, /PASS recycle pre-invalidation\/post-measurement hooks installed/);
-  // Negative: the installed file is corrupted after the single write.
-  const bad = fixture({ install_root: true, corrupt_install: true }); const refused = bad.run(['ai-recycle-install']);
-  stopped(bad, refused, 'FAIL ai-recycle-install: installed hook expected verified-bytes got changed; STOP');
-  assert.ok(!existsSync(join(bad.root, dropin)), 'drop-in not written'); assert.ok(!refused.calls.some(c => c[0] === 'systemctl' && c[1] === 'daemon-reload'), 'no daemon-reload');
-  assert.ok(!existsSync(join(bad.proof, 'recycle-unit-after.txt')));
-  // Negative: a symlink planted at the install path is never written through.
-  const planted = fixture({ install_root: true }); planted.put('victim.txt', 'must survive\n');
-  mkdirSync(join(planted.root, 'libexec'), { recursive: true }); symlinkSync(join(planted.root, 'victim.txt'), join(planted.root, installed));
-  const blocked = planted.run(['ai-recycle-install']);
-  stopped(planted, blocked, 'FAIL ai-recycle-install: installed hook expected writable-regular-file got symlink-or-unwritable; STOP');
-  assert.equal(readFileSync(join(planted.root, 'victim.txt'), 'utf8'), 'must survive\n'); assert.ok(!existsSync(join(planted.root, dropin)));
 });
