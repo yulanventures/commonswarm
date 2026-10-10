@@ -4,6 +4,7 @@ import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts
 import { withDatabaseTls } from "../_shared/database-options.ts";
 import {
   authenticateHostedSeatCapability,
+  authenticateHostedGrantCapability,
   type HostedCapability,
   type HostedSeatCapability,
   type ProviderGrantStatus,
@@ -18,6 +19,7 @@ import {
   type VerifiedMcpToken,
 } from "./auth.ts";
 import { executeClaimSeat } from "./claim-seat.ts";
+import { assembleDiscovery, type DiscoveryData } from "./discovery.ts";
 import { commandOutput, readOutput, HostedToolFailure } from "./tool-errors.ts";
 import {
   createMcpProtocolHandler,
@@ -147,7 +149,7 @@ async function handleHostedCommand(
 
 async function handleHostedRead(
   input: HostedReadInput,
-  capability: HostedSeatCapability,
+  capability: HostedCapability,
 ): Promise<ReadResult> {
   const read = await import("../read/index.ts");
   return await read.handleHostedRead(input, capability);
@@ -167,7 +169,13 @@ async function resolveSeatBinding(
     }[]>`
       SELECT g.grant_id, g.owner_user_id, h.workspace_id, h.handle
       FROM swarm.hosted_mcp_grants AS g
-      JOIN swarm.hosted_mcp_seat_handles AS h ON h.grant_id = g.grant_id
+      JOIN (
+        SELECT s.grant_id, s.workspace_id, c.handle
+        FROM swarm.hosted_agent_contexts AS c
+        JOIN swarm.hosted_mcp_seats AS s ON s.seat_id = c.seat_id
+        UNION
+        SELECT grant_id, workspace_id, handle FROM swarm.hosted_mcp_seat_handles
+      ) AS h ON h.grant_id = g.grant_id
       WHERE g.provider_grant_id = ${token.providerGrantId}
         AND g.owner_user_id = ${token.subject}::uuid
         AND h.handle = ${handle}
@@ -186,7 +194,7 @@ async function resolveSeatBinding(
 async function seatCapability(
   token: VerifiedMcpToken,
   binding: SeatBinding,
-  tool: Exclude<HostedToolName, "claim_seat" | "close_session">,
+  tool: Exclude<HostedToolName, "claim_seat">,
 ): Promise<HostedSeatCapability | null> {
   const content = HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === tool);
   const use = tool === "whoami" || tool === "members" || content?.effect === "read" ? "read" : "command";
@@ -235,8 +243,6 @@ function hostedCommand(
 async function executeTool(call: HostedToolCall): Promise<Record<string, unknown>> {
   if (call.signal.aborted) throw call.signal.reason;
   const args = call.arguments;
-  // Phase 4 owns close dispatch. Never fall through to a signal mutation.
-  if (call.name === "close_session") throw new HostedToolFailure("upgrade_required");
   if (call.name === "claim_seat") {
     return commandOutput(await executeClaimSeat(call, {
       withAuthTransaction: async <T>(run: (tx: Sql) => Promise<T>): Promise<T> =>
@@ -248,11 +254,42 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
       handleCommand: handleHostedCommand,
     }));
   }
+  if (call.name === "whoami" && args.seat === undefined) {
+    const capability = await authDb.begin("isolation level read committed", async (tx) => {
+      // The private grant table is visible only to the command role. The
+      // discovery resolver and actual read still use read authorization.
+      await setRole(tx, "swarm_command");
+      const rows = await tx<{ grant_id: string; owner_user_id: string }[]>`
+        SELECT grant_id, owner_user_id FROM swarm.hosted_mcp_grants
+        WHERE provider_grant_id = ${call.token.providerGrantId}
+          AND owner_user_id = ${call.token.subject}::uuid
+        LIMIT 2
+      `;
+      if (rows.length !== 1) return null;
+      await setRole(tx, "swarm_read");
+      return await authenticateHostedGrantCapability(tx, {
+        grantId: rows[0]!.grant_id, ownerUserId: rows[0]!.owner_user_id,
+        providerGrantId: call.token.providerGrantId, tool: "whoami", providerStatus,
+      });
+    });
+    if (capability === null) throw new HostedToolFailure("identity_resume_unavailable");
+    const data = readOutput(await handleHostedRead({ resource: "discovery" }, capability));
+    return { ...assembleDiscovery(data as unknown as DiscoveryData) };
+  }
   const handle = String(args.seat);
   const binding = await resolveSeatBinding(call.token, handle);
-  if (binding === null) throw new HostedToolFailure("hosted_seat_forbidden");
+  if (binding === null) throw new HostedToolFailure("identity_resume_unavailable");
   const capability = await seatCapability(call.token, binding, call.name);
-  if (capability === null) throw new HostedToolFailure("hosted_seat_forbidden");
+  if (capability === null) throw new HostedToolFailure("identity_resume_unavailable");
+  if (call.name === "close_session") {
+    // Command authorization allows an own expired/closed context to close;
+    // the real command rechecks consent and supplies context attribution.
+    return commandOutput(await handleHostedCommand({
+      command_id: args.request_id, client_version: "0.1.80",
+      workspace_id: binding.workspaceId, stream: { kind: "workspace" },
+      command: { kind: "close_hosted_session", seat: handle },
+    }, capability));
+  }
   if (HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === call.name)) {
     const row = HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === call.name)!;
     const result = row.effect === "read"
@@ -260,8 +297,7 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
       : await handleHostedCommand({ command_id: args.request_id ?? `read_${crypto.randomUUID()}`,
       client_version: "0.1.80", workspace_id: binding.workspaceId, stream: { kind: "workspace" },
       command: { kind: "household_tool", tool: call.name, arguments: args } }, capability);
-    if (result.status !== 200) throw new HostedToolFailure("hosted_seat_forbidden");
-    return result.body;
+    return readOutput(result);
   }
   if (call.name === "whoami" || call.name === "members") {
     const output = readOutput(await handleHostedRead({
@@ -269,16 +305,7 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
       workspace_id: binding.workspaceId,
     }, capability));
     if (call.name === "whoami") {
-      return {
-        grant_id: output.grant_id,
-        seat_id: output.seat_id,
-        handle: output.handle,
-        workspace_id: output.workspace_id,
-        principal_id: output.principal_id,
-        name: output.name,
-        transport: output.transport,
-        turn_only: output.turn_only,
-      };
+      return commandOutput({ status: 200, body: output });
     }
     return {
       members: Array.isArray(output.members)
