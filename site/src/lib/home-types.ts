@@ -20,7 +20,7 @@ export interface NeedsYouVM { id: Id; kind: "ask" | "agent-fix" | "todo" | "requ
   secondary?: { label: string; href?: string; action?: string } }
 export interface ChoiceVM<V extends string> { name: string; legend: string; value: V | null;
   options: { value: V; label: string; hint?: string; disabled?: boolean }[] }
-export interface SwitchRowVM { id: Id; label: string; detail: string; state: "on" | "off" | "always" | "never"; busy?: boolean; disabled?: boolean }
+export interface SwitchRowVM { id: Id; label: string; detail: string; state: "on" | "off" | "always" | "never" | "unavailable"; busy?: boolean; disabled?: boolean }
 export type Assignee = { kind: "person"; person: PersonVM } | { kind: "agent"; agent: AgentVM } | null;
 export type Gate = { kind: "todo"; todo: { id: Id; title: string; href: string; done: boolean } } | { kind: "time"; at: string } | { kind: "note"; note: string };
 export interface TodoVM { id: Id; workspaceId: Id; title: string; notes: string; state: "open" | "doing" | "done" | "dropped";

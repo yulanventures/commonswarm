@@ -1002,6 +1002,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import type { TodoVM, AgentVM, ObjectCardVM } from "../../lib/home-types";
   import { mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
   import { agentPage } from "../../lib/home-agent";
+  import { listsAndDocsFact } from "../../lib/home-agent-copy";
   import { todosPane, type TodoFilter } from "../../lib/home-todo-list";
   import { todoView, type TodoStartInput } from "../../lib/home-todo";
   import { todoStatus, todoSubline, TODO_RESULT_UNKNOWN, TODO_SAVE_FAILED, type TodoNotice } from "../../lib/home-todo-copy";
@@ -1029,7 +1030,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { setupProgress, setupSteps } from "../../lib/setup-checklist";
   import { createLatestRead } from "../../lib/latest-read";
   import { agentStatus, peopleAgentStatus, peopleAgentActivityTime, agentResumeReceipt } from "../../lib/agent-status";
-  import { renderPeopleDialog, peopleDialogCounts, peopleDialogCanAct, showPeopleConfirmation,
+  import { renderPeopleDialog, withdrawConfirmText, peopleDialogCounts, peopleDialogCanAct, showPeopleConfirmation,
     type PeopleDialogModel, type PeopleDialogState, type PeopleDialogFocus, type PeopleDialogAction, type PeopleConfirmAction } from "../../lib/people-dialog-view";
   import { classifyAgentPresence } from "../../../../src/cloud/agent-presence";
   import type { Session } from "@supabase/supabase-js";
@@ -4321,7 +4322,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const receive = rosterAgent ? agentStatus({ transport: rosterAgent.transport, turnOnly: rosterAgent.turnOnly, presence: rosterAgent.presence, own: agent.yours, ownerFirstName: agent.ownerFirstName }).receive : null;
         const vm = mapHomeAgentPage(agent, homeQueue?.principal_id === id ? homeQueue : null, homeTodoRows, ctx, workspace.name,
           receive ?? "Message checks have not been reported.", { model: detail?.model ?? null, receive: receive ?? "Not reported", lastActive: detail?.lastActive ?? "Not reported",
-            listsAndDocs: agent.yours && detail?.accessReadState === "succeeded" ? { id: "lists", label: "Lists & docs", detail: approval ? `Allowed until ${approval.until ?? "you withdraw it"}.` : "Not allowed.", state: approval ? "on" : "off" } : null,
+            listsAndDocs: agent.yours && detail?.accessReadState === "succeeded" ? listsAndDocsFact(detail.hosted || rosterAgent?.transport === "hosted_mcp", approval) : null,
             postsHere: agent.yours ? { id: "posts", label: "What it posts here", detail: "", state: "always" } : null },
           view ? { ageLabel: view.ageLabel, phaseLabel: view.phaseLabel, toolTitle: view.toolTitle, emptyMessage: view.emptyMessage } : null);
         vm.lineNotice = homeQueueRead !== "ready" ? homeQueueRead === "pending" ? "Checking the line…" : homeTodosState === "absent" ? "The line is not available here yet." : "Could not load the line. Reload to try again." : null;
@@ -7836,7 +7837,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     ): Promise<void> => {
       const scope = householdScope();
       if (!scope || (!confirmed && button.disabled)) return;
-      if (!confirmed && !window.confirm(`Withdraw Lists & docs access for ${agentName}? It can no longer see or change lists and docs here until you allow it again.`)) return;
+      if (!confirmed && !window.confirm(withdrawConfirmText(agentName, agents.find((entry) => entry.principalId === principalId)?.transport === "hosted_mcp"))) return;
       button.disabled = true;
       status.textContent = "Withdrawing…";
       const settle = (message: string): void => {

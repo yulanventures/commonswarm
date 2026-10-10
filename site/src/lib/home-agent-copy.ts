@@ -1,3 +1,4 @@
+import { HOSTED_LISTS_NOTE } from "./agent-hosts";
 import type { AgentStateVM, QueueRowVM } from "./home-types";
 
 /** Typographic apostrophe used in every possessive on this view. */
@@ -88,8 +89,17 @@ export function policyChangeLabel(next: "owner" | "anyone"): string {
 }
 
 /** The value word of a plain fact row (Lists & docs, What it posts here); the same words the switch row used. */
-export function switchWord(state: "on" | "off" | "always" | "never"): string {
-  return { on: "On", off: "Off", always: AGENT_COPY.postsHereAlways, never: "Never" }[state];
+export function switchWord(state: "on" | "off" | "always" | "never" | "unavailable"): string {
+  return { on: "On", off: "Off", always: AGENT_COPY.postsHereAlways, never: "Never", unavailable: "Not available" }[state];
+}
+
+/**
+ * The Lists & docs fact on the agent page. An agent in a chat app (hosted connector) cannot use Lists & docs yet,
+ * so it shows the hosted note and never "On", whether or not an approval is stored. Display only.
+ */
+export function listsAndDocsFact(hosted: boolean, approval: { until: string | null } | null | undefined) {
+  if (hosted) return { id: "lists", label: "Lists & docs", detail: HOSTED_LISTS_NOTE, state: "unavailable" as const };
+  return { id: "lists", label: "Lists & docs", detail: approval ? `Allowed until ${approval.until ?? "you withdraw it"}.` : "Not allowed.", state: approval ? "on" as const : "off" as const };
 }
 
 /** The danger entry point; removal ends access to this workspace only (people dialog confirmation). */

@@ -190,7 +190,7 @@ export function switchRow(doc: Document, s: SwitchRowVM, onToggle: (s: SwitchRow
   root.className = "hm-switch-row"; root.dataset.switchId = s.id;
   const copy = node(doc, "span", "hm-switch-copy"); copy.append(node(doc, "strong", "hm-switch-label", s.label), node(doc, "span", "hm-switch-detail", s.detail));
   root.append(copy);
-  const words = { on: "On", off: "Off", always: "Always", never: "Never" };
+  const words = { on: "On", off: "Off", always: "Always", never: "Never", unavailable: "Not available" };
   if (interactive) {
     const b = root as HTMLButtonElement; b.setAttribute("role", "switch"); b.setAttribute("aria-checked", String(s.state === "on"));
     b.disabled = !!s.busy || !!s.disabled; b.setAttribute("aria-busy", String(!!s.busy));

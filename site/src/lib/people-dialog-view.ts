@@ -105,6 +105,11 @@ export function peopleDialogCanAct(model: PeopleDialogModel, action: PeopleDialo
   if (action === "turn-off-key") return agent.mayManage && agent.liveKey;
   return action === "remove-agent" && agent.mayManage;
 }
+/** The `window.confirm` text of the withdraw button on the Lists & docs card. */
+export function withdrawConfirmText(name: string, hosted: boolean): string {
+  return hosted ? `Remove the stored Lists & docs approval for ${name}? ${HOSTED_LISTS_NOTE}`
+    : `Withdraw Lists & docs access for ${name}? It can no longer see or change lists and docs here until you allow it again.`;
+}
 export function peopleConfirmationCopy(action: PeopleConfirmAction, item: { name: string; hosted?: boolean; kind?: string }) {
   const name = item.name;
   if (action === "remove-agent") return { title: `Remove ${name}?`, button: `Remove ${name}`,
@@ -113,6 +118,9 @@ export function peopleConfirmationCopy(action: PeopleConfirmAction, item: { name
   if (action === "turn-off-key") return { title: `Turn off ${name}’s key?`, button: "Turn off key",
     stops: [`${name} stops when its current access ends.`, "This key cannot be used again."],
     stays: ["Its identity and history stay here.", "Its owner can get a new key to bring it back."] };
+  if (action === "withdraw" && item.hosted) return { title: "Withdraw Lists & docs?", button: "Withdraw access",
+    stops: [`This removes the stored Lists & docs approval for ${name}.`],
+    stays: ["Existing lists, docs and history stay.", HOSTED_LISTS_NOTE] };
   if (action === "withdraw") return { title: "Withdraw Lists & docs?", button: "Withdraw access",
     stops: [`${name} will no longer be able to use Lists & docs here.`],
     stays: ["Existing lists, docs and history stay.", "You can allow access again on the Lists & docs card."] };

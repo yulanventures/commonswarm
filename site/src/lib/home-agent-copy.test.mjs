@@ -153,3 +153,17 @@ test("Facts, work policy and removal copy name the workspace and the measured va
   assert.doesNotMatch(removeLabel("Claude", "Home"), /CommonSwarm/u);
   assert.doesNotMatch(AGENT_COPY.policyLock, /\b(?:see|sees|visible)\b/iu);
 });
+
+test("the Lists & docs fact never reads On for a hosted agent; a local agent keeps its words", async () => {
+  const { listsAndDocsFact, switchWord } = await import("./home-agent-copy");
+  const { HOSTED_LISTS_NOTE } = await import("./agent-hosts");
+  for (const approval of [null, { until: null }, { until: "Oct 9, 2026" }]) {
+    const fact = listsAndDocsFact(true, approval);
+    assert.deepEqual(fact, { id: "lists", label: "Lists & docs", detail: HOSTED_LISTS_NOTE, state: "unavailable" });
+    assert.equal(switchWord(fact.state), "Not available");
+  }
+  assert.deepEqual(listsAndDocsFact(false, { until: null }), { id: "lists", label: "Lists & docs", detail: "Allowed until you withdraw it.", state: "on" });
+  assert.deepEqual(listsAndDocsFact(false, { until: "Oct 9, 2026" }), { id: "lists", label: "Lists & docs", detail: "Allowed until Oct 9, 2026.", state: "on" });
+  assert.deepEqual(listsAndDocsFact(false, null), { id: "lists", label: "Lists & docs", detail: "Not allowed.", state: "off" });
+  assert.deepEqual(["on", "off", "never"].map(switchWord), ["On", "Off", "Never"]);
+});

@@ -198,3 +198,17 @@ test("the self-change confirm is a native alertdialog with its own Escape, not a
   assert.doesNotMatch(body, /role", "group"/);
   assert.match(source, /confirm\.showModal\(\)/);
 });
+
+test("withdraw copy for a hosted agent removes the stored approval and carries the hosted note; local copy is unchanged", async () => {
+  const { withdrawConfirmText } = await import("./people-dialog-view");
+  const { HOSTED_LISTS_NOTE } = await import("./agent-hosts");
+  const hosted = peopleConfirmationCopy("withdraw", { name: "Muse", hosted: true });
+  assert.deepEqual(hosted.stops, ["This removes the stored Lists & docs approval for Muse."]);
+  assert.deepEqual(hosted.stays, ["Existing lists, docs and history stay.", HOSTED_LISTS_NOTE]);
+  assert.doesNotMatch(JSON.stringify(hosted), /no longer be able to use|allow access again/);
+  const local = peopleConfirmationCopy("withdraw", { name: "Muse" });
+  assert.deepEqual(local.stops, ["Muse will no longer be able to use Lists & docs here."]);
+  assert.deepEqual(local.stays, ["Existing lists, docs and history stay.", "You can allow access again on the Lists & docs card."]);
+  assert.equal(withdrawConfirmText("Muse", true), `Remove the stored Lists & docs approval for Muse? ${HOSTED_LISTS_NOTE}`);
+  assert.equal(withdrawConfirmText("Muse", false), "Withdraw Lists & docs access for Muse? It can no longer see or change lists and docs here until you allow it again.");
+});
