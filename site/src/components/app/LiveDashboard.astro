@@ -117,6 +117,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         </button>
       </div>
 
+      <div class="dashboard__form-error" role="alert" data-auth-link-error hidden>
+        <p data-auth-link-error-text></p>
+        <button class="dashboard__text-button" type="button" data-auth-resend>Send a new link</button>
+      </div>
       <p class="dashboard__form-error" role="alert" data-auth-error hidden></p>
       {/* Both documents are final (terms.astro and privacy.astro set draft={false}; live /privacy
           reads "Effective 2 October 2026"). The sentence that called them unfinished drafts was a
@@ -143,7 +147,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       <div class="dashboard__gateway-copy">
         <h1 id="dashboard-create-title" data-create-title>Create your first workspace.</h1>
         <p data-create-description>
-          It's where your agents and the people you invite share lists, docs and messages.
+          It's where your agents and the people you invite share messages, notes and files.
         </p>
       </div>
       <form class="dashboard__create-form" data-create-form novalidate>
@@ -372,8 +376,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 <li class="dashboard__setup-step" data-setup-step="access">
                   <span class="dashboard__setup-mark" aria-hidden="true"></span>
                   <span class="dashboard__setup-copy">
-                    <strong data-setup-title>Choose who shares Lists &amp; docs</strong>
-                    <span data-setup-detail>Shared lists and invitations both need this.</span>
+                    <strong data-setup-title>Choose who can share here</strong>
+                    <span data-setup-detail>Invitations need this choice.</span>
                   </span>
                   <button class="dashboard__button dashboard__button--secondary" type="button" data-setup-access>
                     Choose
@@ -552,8 +556,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               <form class="dashboard__access-card" data-household-consent hidden>
                 <h2 class="dashboard__access-title">Turn on Lists &amp; docs</h2>
                 <p class="dashboard__access-lead">
-                  Lists, docs and files that you and your agents can read and change. Every saved
-                  version is kept, with who made it.
+                  Choose who can share and see things in this workspace, and your own access.
+                  Invitations need this choice.
                 </p>
                 <fieldset class="dashboard__choice-cards" data-household-purpose-set>
                   <legend>{PURPOSE_QUESTION}</legend>
@@ -1056,6 +1060,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     createWorkspace,
     changeWorkspaceRole,
     currentSession,
+    authReturnError,
     deployment,
     fileDownloadUrl,
     inviteWorkspaceMember,
@@ -1977,11 +1982,23 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       target.hidden = message === null;
     };
 
+    /* An expired or reused sign-in link returns here with the error in the address. Read it once,
+       at load, before the auth client can rewrite the address. Display only. */
+    const returnedAuthError = authReturnError(window.location);
+    const authLinkError = (message: string | null): void => {
+      const box = one<HTMLElement>("[data-auth-link-error]");
+      if (!box) return;
+      const text = box.querySelector<HTMLElement>("[data-auth-link-error-text]");
+      if (text) text.textContent = message ?? "";
+      box.hidden = message === null;
+    };
+
     const showAuthView = (name: "choices" | "email-sent"): void => {
       for (const view of all<HTMLElement>("[data-auth-view]")) {
         view.hidden = view.dataset.authView !== name;
       }
       authError(null);
+      authLinkError(null);
       /* The gate consumes only on choices presentations. Its first presentation
          skips the email move; on a signed-in boot that can be the first explicit
          sign-out, where showPanel already moves context to the signed-out heading.
@@ -7855,7 +7872,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const role = one<HTMLInputElement>("[data-household-role]:checked")?.value;
       if ((purpose !== "shared" && purpose !== "personal") || (role !== "editor" && role !== "reader")) {
         if (notice) notice.textContent = owner
-          ? "Choose who can use Lists & docs here and your access, then confirm."
+          ? "Choose who can share here and your access, then confirm."
           : "Choose your access, then confirm.";
         return;
       }
@@ -8713,7 +8730,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           if (receipt) {
             delete receipt.dataset.agentConnectedReceiptId;
             receipt.dataset.setupWorkspaceId = madeWorkspace.id;
-            receipt.textContent = "Your workspace is ready. Lists & docs is not set up yet. Choose who can use it in the steps below.";
+            receipt.textContent = "Your workspace is ready. Choose who can share here in the steps below.";
             receipt.hidden = false;
           }
           void refreshHouseholdAccess();
@@ -9038,6 +9055,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           resetWorkspaceSessionState();
           showAuthView("choices");
           showPanel("signed-out");
+          authLinkError(returnedAuthError);
           return;
         }
         const who = accountName(session);
@@ -9185,6 +9203,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       button.addEventListener("click", () => showAuthView("choices"));
     }
 
+    /* Send a new link: with an address already typed it submits the email form, otherwise it
+       moves to the address field. */
+    one<HTMLButtonElement>("[data-auth-resend]")?.addEventListener("click", () => {
+      const form = one<HTMLFormElement>(".dashboard__email");
+      const input = one<HTMLInputElement>("#dashboard-email");
+      if (form && input?.value.trim()) form.requestSubmit();
+      else input?.focus();
+    });
+
     one<HTMLFormElement>(".dashboard__email")?.addEventListener("submit", async (event) => {
       event.preventDefault();
       const form = event.currentTarget as HTMLFormElement;
@@ -9230,7 +9257,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       const purpose = one<HTMLInputElement>("[data-create-purpose]:checked")?.value;
       if (purpose !== "shared" && purpose !== "personal") {
-        setCreateError("Choose who can use Lists & docs here.");
+        setCreateError("Choose who can share and see things here.");
         one<HTMLInputElement>("[data-create-purpose]")?.focus();
         return;
       }

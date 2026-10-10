@@ -162,7 +162,7 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
       { text: JOIN_NOTE_RESULT },
     ],
     notes: [
-      "Tested for messages on claude.ai. Lists & docs and the Claude desktop and mobile apps are not tested yet.",
+      "Tested for messages on claude.ai. The Claude desktop and mobile apps are not tested yet.",
       "A Claude Free account can add one custom connector.",
     ],
     open: { href: "https://claude.ai/", label: "Open Claude" },

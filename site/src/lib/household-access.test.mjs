@@ -23,15 +23,15 @@ test("every enforced role and operation has plain words, and no extra ones exist
   assert.deepEqual(Object.keys(PURPOSE_COPY).sort(), ["personal", "shared"]);
 });
 
-test("the personal choice is scoped to Lists & docs, says it is final and blocks invitations", () => {
-  assert.match(PURPOSE_COPY.personal.detail, /^Only you can use Lists & docs here\./u);
+test("the personal choice is scoped to sharing, says it is final and blocks invitations", () => {
+  assert.match(PURPOSE_COPY.personal.detail, /^Only you can share and see things here\./u);
   assert.match(PURPOSE_COPY.personal.detail, /Invitations to this workspace will not work/u);
   assert.match(PURPOSE_COPY.personal.detail, /cannot be changed later/u);
   assert.match(PURPOSE_COPY.personal.detail, /To share with people later, create another workspace/u);
   /* Messages and Files are not governed by this choice; the copy must not imply privacy for them. */
   assert.match(PURPOSE_COPY.personal.detail, /still see its messages and files/u);
   assert.doesNotMatch(PURPOSE_COPY.personal.detail, /Private to you/u);
-  assert.match(PURPOSE_COPY.shared.detail, /including their history/u);
+  assert.match(PURPOSE_COPY.shared.detail, /Everyone in this workspace can share and see things here/u);
 });
 
 test("refusals map by stable code, and unknown codes say nothing changed", () => {
@@ -63,6 +63,6 @@ test("a removed identity's name is labelled without changing its spelling", () =
 
 test("creation details describe the people invited next, with finality only in the warning", () => {
   assert.deepEqual(Object.keys(CREATE_PURPOSE_DETAILS).sort(), Object.keys(PURPOSE_COPY).sort());
-  assert.equal(CREATE_PURPOSE_DETAILS.shared, "You and the people you invite can see and use Lists & docs, including their history.");
-  assert.equal(CREATE_PURPOSE_DETAILS.personal, "Only you can use Lists & docs. Nobody can be invited to this workspace.");
+  assert.equal(CREATE_PURPOSE_DETAILS.shared, "You and the people you invite can share and see things here.");
+  assert.equal(CREATE_PURPOSE_DETAILS.personal, "Only you can share and see things here. Nobody can be invited to this workspace.");
 });

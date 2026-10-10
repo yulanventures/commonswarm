@@ -156,6 +156,29 @@ async function clearDeadSession(c: SupabaseClient): Promise<void> {
   await c.auth.signOut({ scope: "local" });
 }
 
+/**
+ * The error an email sign-in link carries back to /app, as plain words, or null when the address
+ * carries none. GoTrue puts error, error_code and error_description in the hash (implicit flow)
+ * or the query string. The raw description is never shown; only the code picks the sentence.
+ * Display only: it does not read, store or validate a session.
+ */
+export function authReturnError(location: { hash: string; search: string }): string | null {
+  const read = (raw: string): URLSearchParams => new URLSearchParams(raw.replace(/^[#?]/, ""));
+  const params = [read(location.hash), read(location.search)];
+  const find = (name: string): string | null => {
+    for (const p of params) {
+      const value = p.get(name);
+      if (value) return value;
+    }
+    return null;
+  };
+  const code = find("error_code");
+  if (!code && !find("error") && !find("error_description")) return null;
+  return code === "otp_expired"
+    ? "That sign-in link has expired or was already used."
+    : "That sign-in link did not work.";
+}
+
 export async function currentSession(): Promise<Session | null> {
   const c = client();
   if (!c) return null;

@@ -10,7 +10,7 @@ import { agentOrb, objectCard, personAvatar } from "./home-primitives";
  * button here opens the pane at that form instead of repeating its choices.
  */
 export const LISTS_DOOR_TITLE = "Turn on Lists & docs";
-export const LISTS_DOOR_LEAD = "Lists, docs and files that you and your agents can read and change. Every saved version is kept, with who made it.";
+export const LISTS_DOOR_LEAD = "Choose who can share and see things in this workspace, and your own access. Invitations need this choice.";
 
 /** UI-SPEC 3.3: To-dos show up to 6 open rows; Lists and Files show up to 5 each. */
 export const SIDE_TODO_LIMIT = 6;

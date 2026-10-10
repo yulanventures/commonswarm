@@ -16,7 +16,7 @@ test("an owner with refused access sees three open steps in order", () => {
   const steps = setupSteps(owner);
   assert.deepEqual(steps.map((step) => step.id), ["access", "agent", "invite"]);
   assert.deepEqual(steps.map((step) => step.done), [false, false, false]);
-  assert.equal(steps[0].title, "Choose who shares Lists & docs");
+  assert.equal(steps[0].title, "Choose who can share here");
   assert.deepEqual(setupProgress(steps), { done: 0, total: 3, complete: false });
 });
 

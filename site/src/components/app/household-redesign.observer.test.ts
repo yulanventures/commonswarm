@@ -65,7 +65,7 @@ test("person-facing redesign markup uses plain words, not protocol words", () =>
     previous = visible;
     visible = visible.replace(/\{[^{}]*\}/g, " ");
   }
-  assert.match(visible, /Choose who shares Lists &amp; docs/, "positive control: visible text survives the strip");
+  assert.match(visible, /Choose who can share here/, "positive control: visible text survives the strip");
   assert.doesNotMatch(visible, /\b(seat|grant|claim|OAuth|MCP|signal|principal|purpose|content access)\b/i);
   // Control: the instrument fires on the retired sentence it replaced.
   assert.match("the workspace owner must choose Shared in content settings and confirm content access", /content access/i);
@@ -153,7 +153,7 @@ test("creation asks for purpose without a default and states the owner's Editor 
   assert.match(create, /personalWarning.dataset.createPersonalWarning = ""/);
   assert.match(create, /personalWarning.setAttribute\("aria-live", "polite"\)/);
   assert.match(create, /personalWarning.textContent = newWorkspacePersonalWarning\(vm.purpose\)/);
-  assert.match(script, /setCreateError\("Choose who can use Lists & docs here\."\)/);
+  assert.match(script, /setCreateError\("Choose who can share and see things here\."\)/);
   assert.match(script, /one<HTMLInputElement>\("\[data-create-purpose\]"\)\?\.focus\(\)/);
 });
 
@@ -341,7 +341,7 @@ test("submit retries permissions with the saved id; refusal and uncertain outcom
     assert.equal(f.events.includes("open"), true);
     assert.equal(f.ctx.saved === null, outcome !== "unknown", "uncertain permissions keep the retry intent");
     if (outcome !== "committed") {
-      assert.equal(f.receipt.textContent, "Your workspace is ready. Lists & docs is not set up yet. Choose who can use it in the steps below.");
+      assert.equal(f.receipt.textContent, "Your workspace is ready. Choose who can share here in the steps below.");
       assert.equal(f.receipt.hidden, false);
       assert.equal(f.ctx.householdAccess.status, outcome === "refused" ? "refused" : "unknown");
     }
@@ -439,7 +439,7 @@ test("the real creation submit blocks a missing purpose, then reuses only matchi
   await handler({ preventDefault: () => {} });
   assert.equal(creations.length, 0);
   assert.equal(saved, null);
-  assert.equal(error, "Choose who can use Lists & docs here.");
+  assert.equal(error, "Choose who can share and see things here.");
   assert.equal(focus, "purpose");
   choice = "shared";
   await handler({ preventDefault: () => {} });
