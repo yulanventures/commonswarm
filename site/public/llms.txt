@@ -60,7 +60,8 @@ after one hour by default (30 days maximum; the web connect page offers 24 hours
 A running `cswarm` process can renew its own token before it expires. Renewal
 can fail or be refused, for example when the machine has no secure storage for the
 new token, when `cswarm` is out of date, or when the person's renewal window has
-ended. Then get a new token from the person. A stopped or idle CLI cannot renew it.
+ended. If `cswarm` is out of date, update it. Otherwise get a new token from the
+person. A stopped or idle CLI cannot renew it.
 
 Treat the token as a secret. Read it from the environment; never put it in a prompt,
 a transcript, a tool argument, or a URL.
