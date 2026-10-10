@@ -22,31 +22,31 @@ import {
 export type HouseholdPurpose = "shared" | "personal";
 
 /**
- * The purpose governs what is shared from now on, not the whole workspace: messages and ordinary Files stay
- * visible to everyone already in it (R2 review). The words say exactly that.
+ * The purpose decides whether the workspace accepts invitations: "personal" blocks them permanently. It does
+ * not change who sees messages or files; everyone already in the workspace keeps posting and seeing them.
  */
-export const PURPOSE_QUESTION = "Who can share and see things in this workspace?";
+export const PURPOSE_QUESTION = "Will you invite people to this workspace?";
 export const PURPOSE_COPY: Readonly<Record<HouseholdPurpose, { label: string; detail: string }>> = Object.freeze({
   shared: {
     label: "Me and people I invite",
-    detail: "Everyone in this workspace can share and see things here.",
+    detail: "You can invite people. Everyone in this workspace can post messages and see its files.",
   },
   personal: {
     label: "Just me",
     detail:
-      "Only you can share and see things here. Invitations to this workspace will not work, and this cannot be changed later. People already in it still see its messages and files. To share with people later, create another workspace.",
+      "Invitations to this workspace will not work, and this cannot be changed later. People already in it can still post messages and see its files. To share with people later, create another workspace.",
   },
 });
 
 /** Creation describes the future audience; the legacy access card describes existing members. */
 export const CREATE_PURPOSE_DETAILS: Readonly<Record<HouseholdPurpose, string>> = Object.freeze({
-  shared: "You and the people you invite can share and see things here.",
-  personal: "Only you can share and see things here. Nobody can be invited to this workspace.",
+  shared: "You can invite people to this workspace.",
+  personal: "Nobody can be invited to this workspace. This cannot be changed later.",
 });
 
 export const CONTENT_ROLE_COPY: Readonly<Record<HouseholdContentRole, { label: string; detail: string }>> = Object.freeze({
-  editor: { label: "Editor", detail: "Add and change what is shared here." },
-  reader: { label: "Reader", detail: "See what is shared here, but not change it." },
+  editor: { label: "Editor", detail: "Messages and files are not affected." },
+  reader: { label: "Reader", detail: "Messages and files are not affected." },
 });
 
 export const CONTENT_OPERATION_LABELS: Readonly<Record<HouseholdContentOperation, string>> = Object.freeze({

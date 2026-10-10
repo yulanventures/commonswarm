@@ -62,5 +62,5 @@ test("the refused Lists & docs door uses the words of the Lists pane form it sta
   const plain = form.slice(0, form.indexOf("</p>")).replace(/<[^>]+>/gu, " ").replace(/&amp;/gu, "&").replace(/\s+/gu, " ");
   assert.ok(plain.includes(LISTS_DOOR_TITLE), `the pane form says "${LISTS_DOOR_TITLE}"`);
   assert.ok(plain.includes(LISTS_DOOR_LEAD), "the pane form carries the same lead sentence");
-  assert.equal(LISTS_DOOR_TITLE, "Turn on Lists & docs");
+  assert.equal(LISTS_DOOR_TITLE, "Workspace access");
 });

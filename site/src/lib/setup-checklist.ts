@@ -40,7 +40,7 @@ export function setupSteps(facts: SetupFacts): SetupStep[] {
     facts.isOwner
       ? {
         id: "access",
-        title: "Choose who can share here",
+        title: "Choose whether to invite people",
         detail: "Invitations need this choice.",
         action: "Choose",
         done: false,
@@ -48,7 +48,7 @@ export function setupSteps(facts: SetupFacts): SetupStep[] {
       : {
         id: "access",
         title: "Choose your access",
-        detail: "Editor or reader, for what is shared here.",
+        detail: "Editor or reader. Messages and files are not affected.",
         action: "Choose",
         done: false,
       },

@@ -270,7 +270,7 @@ export function buildNewWorkspaceForm(
 
   const access = doc.createElement("p"); access.dataset.createAccess = "";
   access.className = "hm-new-workspace__access";
-  access.textContent = `Your access: ${CONTENT_ROLE_COPY.editor.label}. You can ${CONTENT_ROLE_COPY.editor.detail.charAt(0).toLowerCase() + CONTENT_ROLE_COPY.editor.detail.slice(1)}`;
+  access.textContent = `Your access: ${CONTENT_ROLE_COPY.editor.label}. ${CONTENT_ROLE_COPY.editor.detail}`;
   footer.append(access);
   formCard.append(footer);
   {

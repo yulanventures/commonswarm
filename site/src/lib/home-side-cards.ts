@@ -9,8 +9,8 @@ import { agentOrb, objectCard, personAvatar } from "./home-primitives";
  * `data-household-consent` form): same heading, same lead. That form lives in the Lists pane, so the
  * button here opens the pane at that form instead of repeating its choices.
  */
-export const LISTS_DOOR_TITLE = "Turn on Lists & docs";
-export const LISTS_DOOR_LEAD = "Choose who can share and see things in this workspace, and your own access. Invitations need this choice.";
+export const LISTS_DOOR_TITLE = "Workspace access";
+export const LISTS_DOOR_LEAD = "Choose whether to invite people to this workspace, and your own access. Invitations need this choice.";
 
 /** UI-SPEC 3.3: To-dos show up to 6 open rows; Lists and Files show up to 5 each. */
 export const SIDE_TODO_LIMIT = 6;

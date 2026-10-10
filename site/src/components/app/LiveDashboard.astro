@@ -173,7 +173,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             </label>
           ))}
         </fieldset>
-        <p data-create-access>Your access: {CONTENT_ROLE_COPY.editor.label}. You can {CONTENT_ROLE_COPY.editor.detail.charAt(0).toLowerCase() + CONTENT_ROLE_COPY.editor.detail.slice(1)}</p>
+        <p data-create-access>Your access: {CONTENT_ROLE_COPY.editor.label}. {CONTENT_ROLE_COPY.editor.detail}</p>
         <p data-create-personal-warning aria-live="polite"></p>
         <button class="dashboard__button dashboard__button--primary" type="submit" data-create-button>
           Create workspace
@@ -376,7 +376,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 <li class="dashboard__setup-step" data-setup-step="access">
                   <span class="dashboard__setup-mark" aria-hidden="true"></span>
                   <span class="dashboard__setup-copy">
-                    <strong data-setup-title>Choose who can share here</strong>
+                    <strong data-setup-title>Choose whether to invite people</strong>
                     <span data-setup-detail>Invitations need this choice.</span>
                   </span>
                   <button class="dashboard__button dashboard__button--secondary" type="button" data-setup-access>
@@ -554,9 +554,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             <section class="dashboard__objects-view" data-channel-view="objects" hidden>
               <h1 class="hm-pane-title" tabindex="-1">Lists</h1>
               <form class="dashboard__access-card" data-household-consent hidden>
-                <h2 class="dashboard__access-title">Turn on Lists &amp; docs</h2>
+                <h2 class="dashboard__access-title">Workspace access</h2>
                 <p class="dashboard__access-lead">
-                  Choose who can share and see things in this workspace, and your own access.
+                  Choose whether to invite people to this workspace, and your own access.
                   Invitations need this choice.
                 </p>
                 <fieldset class="dashboard__choice-cards" data-household-purpose-set>
@@ -7872,7 +7872,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const role = one<HTMLInputElement>("[data-household-role]:checked")?.value;
       if ((purpose !== "shared" && purpose !== "personal") || (role !== "editor" && role !== "reader")) {
         if (notice) notice.textContent = owner
-          ? "Choose who can share here and your access, then confirm."
+          ? "Choose whether to invite people and your access, then confirm."
           : "Choose your access, then confirm.";
         return;
       }
@@ -8730,7 +8730,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           if (receipt) {
             delete receipt.dataset.agentConnectedReceiptId;
             receipt.dataset.setupWorkspaceId = madeWorkspace.id;
-            receipt.textContent = "Your workspace is ready. Choose who can share here in the steps below.";
+            receipt.textContent = "Your workspace is ready. Choose whether to invite people in the steps below.";
             receipt.hidden = false;
           }
           void refreshHouseholdAccess();
@@ -9257,7 +9257,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       const purpose = one<HTMLInputElement>("[data-create-purpose]:checked")?.value;
       if (purpose !== "shared" && purpose !== "personal") {
-        setCreateError("Choose who can share and see things here.");
+        setCreateError("Choose whether you will invite people.");
         one<HTMLInputElement>("[data-create-purpose]")?.focus();
         return;
       }
