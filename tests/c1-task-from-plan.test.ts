@@ -447,13 +447,18 @@ test('W5 administrative close emits one Mac row; other windows refuse; existing 
     assert.ok(baseOrders.includes(expected), 'existing order bytes changed beyond approved source-line repins and revoke reconciliation inputs');
   }
   // Build B re-derives each "line" anchor from its unchanged quote (verify() above re-checks every one)
-  // and adds only these W4 forward rows; every other order byte equals the base 7efbb67d.
-  const buildB = new Map([['W4 forward', [['{"id":"ai-w4-caddy-candidate","host":"box"}', '{"id":"ai-w4-keeper-retire","host":"box"}', '{"id":"ai-w4-apply","host":"box"}']]]]);
+  // and adds only these W4 forward rows (shown with "line":N); every other order byte equals the base 7efbb67d.
+  const u10 = `{"host":"box","manual":{"line":N,"quote":${JSON.stringify("STOP unless HezLead's U10 measurement exists, was taken after the production keeper install receipt, and its digest equals `keeper_install_receipt_sha256`; and unless the keeper inputs come from that receipt and `keeper_install_md_sha256` and `keeper_install_excerpts` equal the reviewed INSTALL values recorded in this plan.")}}}`;
+  const u7 = `{"host":"box","manual":{"line":N,"quote":${JSON.stringify("STOP unless HezLead's signed U7 record exists for this pass: a fresh verified backup and a REAL restore into a named throwaway target (never production, never a staging stub), with host, database, restore time, schema checksum and key-table row counts against the source.")}}}`;
+  const buildB = new Map([['W4 forward', [
+    ['{"id":"ai-w1-backup-gate","host":"box"}', u10, u7], [u10, u7, '{"id":"ai-w4-preflight","host":"box"}'],
+    ['{"id":"ai-w4-caddy-candidate","host":"box"}', '{"id":"ai-w4-keeper-retire","host":"box"}', '{"id":"ai-w4-apply","host":"box"}']]]]);
   const header = (order: string) => order.split('\n')[0]!.slice('```c1-order '.length);
-  const unpinned = (rows: string[]) => rows.join('\n').replace(/"line":\d+/g, '"line":N');
+  const unpin = (row: string) => row.replace(/"line":\d+/g, '"line":N');
+  const unpinned = (rows: string[]) => rows.map(unpin).join('\n');
   assert.deepEqual(newOrders.map(header), baseOrders.map(header));
   newOrders.forEach((order, i) => {
-    const rows = order.split('\n'), added = new Set<string>();
+    const rows = order.split('\n').map(unpin), added = new Set<string>();
     for (const [before, row, after] of buildB.get(header(order)) ?? []) {
       assert.equal(rows.filter(r => r === row).length, 1, `${header(order)}: ${row}`);
       const at = rows.indexOf(row);

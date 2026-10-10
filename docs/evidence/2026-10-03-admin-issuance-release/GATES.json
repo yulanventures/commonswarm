@@ -272,6 +272,30 @@
       "fresh-verified-database-and-object-backup",
       "complete-isolated-restore-receipt",
       "stale-or-failed-status-refused"
+    ],
+    "admin-principal-lock-order-ci": [
+      "positive-control-raw-sql-base-order-deadlocks",
+      "admin-oauth-vs-hosted-claim-seat",
+      "admin-oauth-vs-local-join-registration",
+      "admin-oauth-vs-local-command-creation",
+      "accept-invitation-vs-hosted-claim-seat",
+      "accept-invitation-vs-local-join-registration",
+      "remove-member-vs-hosted-claim-seat",
+      "remove-member-vs-local-join-registration",
+      "household-invitation-vs-hosted-claim-seat",
+      "household-invitation-vs-local-join-registration"
+    ],
+    "admin-principal-lock-order-staging": [
+      "positive-control-raw-sql-base-order-deadlocks",
+      "admin-oauth-vs-hosted-claim-seat",
+      "admin-oauth-vs-local-join-registration",
+      "admin-oauth-vs-local-command-creation",
+      "accept-invitation-vs-hosted-claim-seat",
+      "accept-invitation-vs-local-join-registration",
+      "remove-member-vs-hosted-claim-seat",
+      "remove-member-vs-local-join-registration",
+      "household-invitation-vs-hosted-claim-seat",
+      "household-invitation-vs-local-join-registration"
     ]
   },
   "windows": {
@@ -348,13 +372,17 @@
       "site-build-qa",
       "admin-issuer-credential-provisioning",
       "admin-c1-smoke",
-      "edge-oauth-runtime-set-grant"
+      "edge-oauth-runtime-set-grant",
+      "admin-principal-lock-order-ci",
+      "admin-principal-lock-order-staging"
     ],
     "W7": [
       "legacy-admin-unreachable",
       "legacy-db-fence",
       "admin-delegation-v1-denied",
-      "admin-c1-smoke"
+      "admin-c1-smoke",
+      "admin-principal-lock-order-ci",
+      "admin-principal-lock-order-staging"
     ]
   }
 }

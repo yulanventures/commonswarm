@@ -1280,3 +1280,148 @@ test('A8 / w4-preflight-r-tree-absent: an R edge tree present at preflight refus
   assert.match(block('ai-w4-preflight'), /^test ! -e "\$NEW_EDGE" \|\|/m);
 });
 
+
+// X2: ai-gates (Mac) opens the two lock-order receipts and checks them against INPUTS and the repository (rules 1-12).
+const lockGates = ['admin-principal-lock-order-ci', 'admin-principal-lock-order-staging'] as const;
+const gatesContract = JSON.parse(readFileSync(join(dirname(planPath), 'GATES.json'), 'utf8')) as { gates: Record<string, string[]>; windows: Record<string, string[]> };
+const lockControls = gatesContract.gates['admin-principal-lock-order-ci']!;
+function x2(options: { treesDiffer: boolean }) {
+  const root = realpathSync(mkdtempSync(join(scratch, 'x2-'))), bin = join(root, 'bin'), evidence = join(root, 'evidence');
+  mkdirSync(bin); mkdirSync(evidence);
+  const T = 'e'.repeat(40), R = sha, TEST = 'tests/p1-server/admin-principal-lock-order.test.ts', testBytes = 'lock-order test bytes\n';
+  const versionsT = ['20261001000001', '20261002000001'], onlyR = options.treesDiffer ? ['20261011000001', '20261011000002'] : [];
+  const tree = (versions: string[]) => versions.map(v => `supabase/migrations/${v}_fixture.sql`).concat(['supabase/migrations/README.md']).join('\n') + '\n';
+  const git = { show: { [`${R}:${TEST}`]: testBytes, [`${T}:${TEST}`]: testBytes }, diff: 0,
+    trees: { [T]: '1'.repeat(40), [R]: options.treesDiffer ? '2'.repeat(40) : '1'.repeat(40) },
+    ls: { [T]: tree(versionsT), [R]: tree([...versionsT, ...onlyR]) } };
+  writeFileSync(join(bin, 'git'), String.raw`#!/usr/bin/python3
+import json,os,sys
+cfg=json.load(open(os.path.join(os.environ['X2_ROOT'],'git.json'))); a=sys.argv[1:]
+with open(os.path.join(os.environ['X2_ROOT'],'git-calls.jsonl'),'a') as log: log.write(json.dumps(a)+'\n')
+if len(a)==2 and a[0]=='show' and a[1] in cfg['show']: sys.stdout.write(cfg['show'][a[1]])
+elif a[:2]==['diff','--quiet'] and len(a)>=5 and a[4]=='--': raise SystemExit(cfg['diff'])
+elif len(a)==2 and a[0]=='rev-parse' and a[1].endswith(':supabase/migrations') and a[1][:40] in cfg['trees']: print(cfg['trees'][a[1][:40]])
+elif a[:2]==['ls-tree','--name-only'] and len(a)==5 and a[3:]==['--','supabase/migrations/'] and a[2] in cfg['ls']: sys.stdout.write(cfg['ls'][a[2]])
+else: sys.stderr.write('UNMODELLED git '+repr(a)+'\n'); raise SystemExit(99)
+`, { mode: 0o700 });
+  const results = (run: 'base' | 'lane') => Object.fromEntries(lockControls.map((c, i) => [c, run === 'lane' || i === 0 ? 'PASS' : 'FAIL-40P01']));
+  const ci: any = { kind: 'ci', release_sha: R, base_variant_sha: T, test_file_sha256: hash(testBytes), runs: {
+    base: { run_url: 'https://github.com/yulanventures/commonswarm/actions/runs/101', run_id: 101, sha: T, migration_sha: git.trees[T], results: results('base') },
+    lane: { run_url: 'https://github.com/yulanventures/commonswarm/actions/runs/102', run_id: 102, sha: R, migration_sha: git.trees[R], results: results('lane') } } };
+  const project = 'c1b-x2-ab12cd34';
+  const stagingRun = (run: 'base' | 'lane', runSha: string, file: string, digit: string) => ({ sha: runSha, migration_sha: git.trees[runSha],
+    backup: { file, sha256: digit.repeat(64), source_host: 'c1-staging-1', dump_completed_at: '2026-10-10T10:00:00Z' },
+    restore: { db_container_id: digit.repeat(64).replace(/^./, 'f'), database: 'postgres', restore_started_at: '2026-10-10T10:10:00Z', restored_at: '2026-10-10T10:12:00Z', ledger_versions: [...versionsT] },
+    applied_versions: run === 'base' ? [] : [...onlyR], results: results(run) });
+  const st: any = { kind: 'staging', release_sha: R, base_variant_sha: T, test_file_sha256: hash(testBytes), host: 'c1-staging-1', compose_project: project,
+    compose_network: `${project}-net`, compose_volume: `${project}-pgdata`, postgres_image_digest: postgresImage,
+    runs: { base: stagingRun('base', T, '/srv/c1-staging/x2/base.dump', 'a'), lane: stagingRun('lane', R, '/srv/c1-staging/x2/lane.dump', 'b') } };
+  const inputs: any = { release_sha: R, window: 'W6', lock_order_base_variant_sha: T };
+  const run = (change: (c: { ci: any; st: any; git: any; inputs: any; receipt: any }) => void = () => {}) => {
+    const c = { ci: structuredClone(ci), st: structuredClone(st), git: structuredClone(git), inputs: structuredClone(inputs), receipt: null as any };
+    const files: Record<string, string> = {};
+    for (const name of gatesContract.windows.W6!) files[name] = name === lockGates[0] ? '' : name === lockGates[1] ? '' : JSON.stringify({ gate: name }) + '\n';
+    c.receipt = { release_sha: R, evidence_root: evidence, gates: Object.fromEntries(gatesContract.windows.W6!.map(name => [name, { status: 'PASS', controls: gatesContract.gates[name], file: `${name}.json`, sha256: '' }])) };
+    change(c);
+    files[lockGates[0]] = JSON.stringify(c.ci) + '\n'; files[lockGates[1]] = JSON.stringify(c.st) + '\n';
+    for (const [name, gate] of Object.entries(c.receipt.gates) as Array<[string, any]>) {
+      if (!gate || typeof gate !== 'object' || gate.sha256 !== '') continue;
+      const body = files[name] ?? '{}\n'; writeFileSync(join(evidence, gate.file), body); gate.sha256 = hash(body);
+    }
+    writeFileSync(join(root, 'git.json'), JSON.stringify(c.git)); writeFileSync(join(root, 'inputs.json'), JSON.stringify(c.inputs)); writeFileSync(join(root, 'receipt.json'), JSON.stringify(c.receipt));
+    const r = spawnSync('/bin/bash', [], { input: 'set -euo pipefail\n' + block('ai-gates'), encoding: 'utf8', timeout: 30_000, cwd: root,
+      env: { PATH: `${bin}:/usr/bin:/bin`, X2_ROOT: root, INPUTS_FILE: join(root, 'inputs.json'), GATE_RECEIPT_FILE: join(root, 'receipt.json'), PLAN_FILE: planPath } });
+    assert.ifError(r.error); assert.doesNotMatch(r.stderr, /UNMODELLED|Traceback/);
+    return r;
+  };
+  const gitCalls = () => readFileSync(join(root, 'git-calls.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l)[0]);
+  return { run, T, R, onlyR, versionsT, gitCalls };
+}
+
+test('X2 / lock-order-gates-contract: GATES.json lists both gates with the ten controls in W6 and every later window that can open issuance', () => {
+  assert.deepEqual(lockControls, ['positive-control-raw-sql-base-order-deadlocks', 'admin-oauth-vs-hosted-claim-seat', 'admin-oauth-vs-local-join-registration',
+    'admin-oauth-vs-local-command-creation', 'accept-invitation-vs-hosted-claim-seat', 'accept-invitation-vs-local-join-registration',
+    'remove-member-vs-hosted-claim-seat', 'remove-member-vs-local-join-registration', 'household-invitation-vs-hosted-claim-seat',
+    'household-invitation-vs-local-join-registration']);
+  assert.deepEqual(gatesContract.gates['admin-principal-lock-order-staging'], lockControls);
+  const withGates = Object.entries(gatesContract.windows).filter(([, names]) => lockGates.every(g => names.includes(g))).map(([w]) => w);
+  assert.deepEqual(withGates, ['W6', 'W7']);
+  assert.ok(!Object.values(gatesContract.windows).some(names => lockGates.some(g => names.includes(g)) && !lockGates.every(g => names.includes(g))));
+  // The windows whose blocks can set admin_issuance_enabled true: W6 activation (enabled=true) and W7's remeasure reopen.
+  assert.match(block('ai-w6-activation-apply'), /admin_issuance_enabled=true/);
+  assert.match(plan, /reopens only a previously open/);
+  assert.doesNotMatch(plan, /479a3458/, 'no migration-tree SHA constant in C');
+});
+
+test('X2 / lock-order-receipts-admit: both receipts admit with equal and with different migration trees, and at the interval bounds', () => {
+  for (const treesDiffer of [false, true]) {
+    const f = x2({ treesDiffer });
+    const ok = f.run(); assert.equal(ok.status, 0, ok.stderr); assert.match(ok.stdout, /PASS ai-gates/);
+    assert.deepEqual([...new Set(f.gitCalls())].sort(), ['diff', 'ls-tree', 'rev-parse', 'show'], 'the positive control reached every repository check');
+    for (const restore of ['2026-10-10T10:00:00Z', '2026-10-10T11:00:00Z']) {
+      const r = f.run(c => { for (const run of ['base', 'lane']) { c.st.runs[run].restore.restore_started_at = restore; c.st.runs[run].restore.restored_at = '2026-10-10T11:05:00Z'; } });
+      assert.equal(r.status, 0, `interval to ${restore}: ${r.stderr}`);
+    }
+  }
+});
+
+test('X2 / lock-order-receipts-refuse: each rule refuses its drifted receipt, input or repository fact', () => {
+  const f = x2({ treesDiffer: true }), T = f.T;
+  const cases: Array<[string, (c: any) => void, string]> = [
+    ['missing CI gate', c => { delete c.receipt.gates['admin-principal-lock-order-ci']; }, 'admin-principal-lock-order-ci PASS'],
+    ['missing staging gate', c => { delete c.receipt.gates['admin-principal-lock-order-staging']; }, 'admin-principal-lock-order-staging PASS'],
+    ['both gates name the same file', c => { c.receipt.gates['admin-principal-lock-order-staging'].file = 'admin-principal-lock-order-ci.json'; c.st = c.ci; }, 'lock-order rule 1'],
+    ['staging receipt of kind ci', c => { c.st.kind = 'ci'; }, 'lock-order rule 2: staging receipt keys and kind'],
+    ['one lane control FAIL', c => { c.ci.runs.lane.results[lockControls[3]!] = 'FAIL-40P01'; }, 'lock-order rule 8: CI lane results'],
+    ['one base race control PASS', c => { c.st.runs.base.results[lockControls[5]!] = 'PASS'; }, 'lock-order rule 8: staging base results'],
+    ['stale lane run SHA', c => { c.ci.runs.lane.sha = 'c'.repeat(40); }, 'lock-order rule 5: CI run SHAs'],
+    ['base run SHA not the base variant', c => { c.st.runs.base.sha = 'c'.repeat(40); }, 'lock-order rule 5: staging run SHAs'],
+    ['base_variant_sha other than the input', c => { c.inputs.lock_order_base_variant_sha = 'c'.repeat(40); }, 'lock-order rule 4: CI base_variant_sha'],
+    ['lock_order_base_variant_sha missing', c => { delete c.inputs.lock_order_base_variant_sha; }, 'FAIL ai-gates: lock_order_base_variant_sha; STOP'],
+    ['test digests differ between receipts', c => { c.st.test_file_sha256 = 'e'.repeat(64); }, 'lock-order rule 6: equal test_file_sha256'],
+    ['test digest not the bytes at R', c => { c.git.show[`${f.R}:tests/p1-server/admin-principal-lock-order.test.ts`] = 'other bytes\n'; }, 'lock-order rule 6: test bytes at R and T'],
+    ['test-side files differ between T and R', c => { c.git.diff = 1; }, 'lock-order repository check git diff'],
+    ['CI base migration tree', c => { c.ci.runs.base.migration_sha = '3'.repeat(40); }, 'lock-order rule 7: CI run migration trees'],
+    ['CI lane migration tree', c => { c.ci.runs.lane.migration_sha = '3'.repeat(40); }, 'lock-order rule 7: CI run migration trees'],
+    ['staging base migration tree', c => { c.st.runs.base.migration_sha = '3'.repeat(40); }, 'lock-order rule 7: staging run migration trees'],
+    ['staging lane migration tree', c => { c.st.runs.lane.migration_sha = '3'.repeat(40); }, 'lock-order rule 7: staging run migration trees'],
+    ['base and lane trees swapped', c => { for (const rec of [c.ci, c.st]) [rec.runs.base.migration_sha, rec.runs.lane.migration_sha] = [rec.runs.lane.migration_sha, rec.runs.base.migration_sha]; }, 'lock-order rule 7: CI run migration trees'],
+    ['run without migration_sha', c => { delete c.ci.runs.base.migration_sha; }, 'lock-order rule 2: CI base run keys'],
+    ['round-D top-level migration_sha', c => { c.ci.migration_sha = '1'.repeat(40); }, 'lock-order rule 2: CI receipt keys and kind'],
+    ['staging image_digests', c => { c.st.image_digests = {}; }, 'lock-order rule 2: staging receipt keys and kind'],
+    ['staging without postgres_image_digest', c => { delete c.st.postgres_image_digest; }, 'lock-order rule 2: staging receipt keys and kind'],
+    ['malformed postgres_image_digest', c => { c.st.postgres_image_digest = 'sha256:' + 'A'.repeat(64); }, 'lock-order rule 9: postgres_image_digest'],
+    ['live compose project', c => { c.st.compose_project = 'commonswarm-supabase-stack'; c.st.compose_network = 'commonswarm-supabase-stack-net'; c.st.compose_volume = 'commonswarm-supabase-stack-pgdata'; }, 'lock-order rule 9: compose_project'],
+    ['live network', c => { c.st.compose_network = 'commonswarm-net'; }, 'lock-order rule 9: network and volume of the project'],
+    ['project outside the pattern', c => { c.st.compose_project = 'c1b-x2-AB12CD34'; c.st.compose_network = 'c1b-x2-AB12CD34-net'; c.st.compose_volume = 'c1b-x2-AB12CD34-pgdata'; }, 'lock-order rule 9: compose_project'],
+    ['volume not derived from the project', c => { c.st.compose_volume = 'pgdata'; }, 'lock-order rule 9: network and volume of the project'],
+    ['run without backup', c => { delete c.st.runs.lane.backup; }, 'lock-order rule 2: staging lane run keys'],
+    ['round-E top-level backup', c => { c.st.backup = c.st.runs.base.backup; }, 'lock-order rule 2: staging receipt keys and kind'],
+    ['backup extra key', c => { c.st.runs.base.backup.size = 1; }, 'lock-order rule 2: staging base backup keys'],
+    ['restore missing key', c => { delete c.st.runs.base.restore.database; }, 'lock-order rule 2: staging base restore keys'],
+    ['relative backup file', c => { c.st.runs.base.backup.file = 'base.dump'; }, 'lock-order rule 10: base backup identity'],
+    ['malformed backup digest', c => { c.st.runs.lane.backup.sha256 = 'b'.repeat(63); }, 'lock-order rule 10: lane backup identity'],
+    ['backup from another host', c => { c.st.runs.lane.backup.source_host = 'yulan-vps-1'; }, 'lock-order rule 10: lane backup identity'],
+    ['missing dump_completed_at', c => { delete c.st.runs.base.backup.dump_completed_at; }, 'lock-order rule 2: staging base backup keys'],
+    ['missing restore_started_at', c => { delete c.st.runs.base.restore.restore_started_at; }, 'lock-order rule 2: staging base restore keys'],
+    ['malformed dump_completed_at', c => { c.st.runs.base.backup.dump_completed_at = '2026-10-10 10:00:00'; }, 'lock-order rule 10: base backup.dump_completed_at'],
+    ['malformed restore_started_at', c => { c.st.runs.lane.restore.restore_started_at = '2026-10-10T10:10:00+00:00'; }, 'lock-order rule 10: lane restore.restore_started_at'],
+    ['negative interval', c => { c.st.runs.base.restore.restore_started_at = '2026-10-10T09:59:59Z'; }, 'lock-order rule 10: base dump-to-restore interval 0-3600 s'],
+    ['interval over 60 minutes', c => { c.st.runs.base.restore.restore_started_at = '2026-10-10T11:00:01Z'; c.st.runs.base.restore.restored_at = '2026-10-10T11:02:00Z'; }, 'lock-order rule 10: base dump-to-restore interval 0-3600 s'],
+    ['shared backup file', c => { c.st.runs.lane.backup.file = c.st.runs.base.backup.file; }, 'lock-order rule 10: one backup per run'],
+    ['shared backup digest', c => { c.st.runs.lane.backup.sha256 = c.st.runs.base.backup.sha256; }, 'lock-order rule 10: one backup per run'],
+    ['restored before its start', c => { c.st.runs.lane.restore.restored_at = '2026-10-10T10:09:59Z'; }, 'lock-order rule 11: lane restored after its start'],
+    ['same container in both runs', c => { c.st.runs.lane.restore.db_container_id = c.st.runs.base.restore.db_container_id; }, 'lock-order rule 11: one restore per run'],
+    ['base ledger with an R-only version', c => { c.st.runs.base.restore.ledger_versions = [...f.versionsT, f.onlyR[0]]; c.st.runs.base.applied_versions = []; }, 'lock-order rule 12: base restored ledger within its tree'],
+    ['applied misses a tree version', c => { c.st.runs.lane.applied_versions = [f.onlyR[0]]; }, 'lock-order rule 12: lane applied_versions'],
+    ['applied holds a restored version', c => { c.st.runs.lane.applied_versions = [f.versionsT[1], ...f.onlyR]; }, 'lock-order rule 12: lane applied_versions'],
+    ['applied unsorted', c => { c.st.runs.lane.applied_versions = [...f.onlyR].reverse(); }, 'lock-order rule 12: lane applied_versions'],
+  ];
+  for (const [name, change, message] of cases) {
+    const r = f.run(change);
+    assert.notEqual(r.status, 0, `${name}: must refuse`);
+    assert.ok(r.stderr.includes(message), `${name}: expected ${message}; observed ${r.stderr}`);
+    assert.doesNotMatch(r.stdout, /PASS ai-gates/, name);
+  }
+  assert.ok(T !== f.R);
+});

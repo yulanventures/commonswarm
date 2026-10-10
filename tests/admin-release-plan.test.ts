@@ -115,6 +115,8 @@ const w4Keys = (mode = 'fresh'): Input => ({
     keeper_install_excerpts: { shell_options: { lines: [41, 42], sha256: hex }, bundle: { lines: [57, 61], sha256: hex }, quiet: { lines: [63, 75], sha256: hex }, section4: { lines: [516, 599], sha256: hex } },
   }),
 });
+// X2: Lane 2's lock-order base variant T, exact in the windows whose GATES.json list names the lock-order gates (W6, W7).
+const lockOrder: Input = { lock_order_base_variant_sha: 'e'.repeat(40) };
 const inputFile = (input: Input) => {
   const path = join(scratch, 'inputs.json');
   writeFileSync(path, JSON.stringify(input));
@@ -215,7 +217,7 @@ test('admin release plan: W2b inputs bind the earlier W2 by w2_release_sha and w
     const refused = validate(input); assert.notEqual(refused.status, 0, window); assert.match(refused.stderr, /w2_release_sha\/w2_window_id are W2b-only/);
   }
   // W6 binds the W2b by w2b_release_sha and w2b_window_id; that W2b may be at an EARLIER release (yYGHEd ran at a5cb8251). No other window may.
-  const w6: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_release_sha: 'd'.repeat(40), w2b_window_id: 'Xyz789' };
+  const w6: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_release_sha: 'd'.repeat(40), w2b_window_id: 'Xyz789', ...lockOrder };
   w6.approval = approval(w6, 'activate-admin-issuance-and-smoke');
   const w6good = validate(w6); assert.equal(w6good.status, 0, w6good.stderr);
   // Required for W6: at the W3-W7 release the issuer credential exists only through W2b.
@@ -243,12 +245,15 @@ test('admin release plan: W6 and W7 approval is action/release/window/plan bound
     ['W6', 'activate-admin-issuance-and-smoke', 'ai-w6-activation-approval'],
     ['W7', 'retire-legacy-admin-mint', 'ai-w7-approval'],
   ]) {
-    const input: Input = { ...base(), window, rollback_decision: 'close-and-reconcile', ...(window === 'W6' ? { w2b_release_sha: 'd'.repeat(40), w2b_window_id: 'Xyz789' } : { w6_window_id: 'W6win1' }) };
+    const input: Input = { ...base(), window, rollback_decision: 'close-and-reconcile', ...(window === 'W6' ? { w2b_release_sha: 'd'.repeat(40), w2b_window_id: 'Xyz789' } : { w6_window_id: 'W6win1' }), ...lockOrder };
     const noApproval = run(block(id!), { INPUTS_FILE: inputFile(input) });
     assert.notEqual(noApproval.status, 0);
     assert.match(noApproval.stderr, /explicit .* approval required/);
     input.approval = approval(input, action!);
     assert.equal(validate(input).status, 0);
+    const noBase = { ...input }; delete noBase.lock_order_base_variant_sha;
+    assert.match(validate(noBase).stderr, /FAIL ai-inputs: lock_order_base_variant_sha; STOP/, `${window} requires the lock-order input`);
+    assert.match(validate({ ...input, lock_order_base_variant_sha: input.release_sha }).stderr, /FAIL ai-inputs: lock_order_base_variant_sha; STOP/, `${window}: T differs from R`);
     const positive = run(block(id!), { INPUTS_FILE: inputFile(input) });
     assert.equal(positive.status, 0, positive.stderr);
     for (const [key, bad] of [['action', 'some-other-action'], ['release_sha', 'b'.repeat(40)],
@@ -274,7 +279,7 @@ test('admin release plan: W4 requires separate terminal fence approval and W6 re
   assert.match(validate(edge).stderr, /terminal-legacy-db-fence approval required/);
   edge.legacy_fence_approval = approval(edge, 'terminal-legacy-db-fence');
   assert.equal(validate(edge).status, 0);
-  const smoke: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_release_sha: 'd'.repeat(40), w2b_window_id: 'Xyz789' };
+  const smoke: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_release_sha: 'd'.repeat(40), w2b_window_id: 'Xyz789', ...lockOrder };
   smoke.approval = approval(smoke, 'activate-admin-issuance-and-smoke');
   assert.equal(validate(smoke).status, 0);
   const result = run(block('ai-w6-preflight'), { INPUTS_FILE: inputFile(smoke) });
@@ -751,7 +756,7 @@ test('admin release plan: W6 absent or stale BROWSER-READY refuses before openin
 });
 
 test('admin release plan: keep-open defaults false and requires its own exact activation/window approval', () => {
-  const input: Input={...base(),window:'W6',rollback_decision:'close-and-reconcile',w2b_release_sha:'d'.repeat(40),w2b_window_id:'Xyz789'};
+  const input: Input={...base(),window:'W6',rollback_decision:'close-and-reconcile',w2b_release_sha:'d'.repeat(40),w2b_window_id:'Xyz789',...lockOrder};
   input.approval=approval(input,'activate-admin-issuance-and-smoke');
   assert.equal(validate(input).status,0);
   assert.notEqual(validate({...input,keep_open:true}).status,0);
@@ -906,6 +911,7 @@ test('admin release plan: W1-W5 need no activation or consent approval; W4 binds
       input.probe_workspace_id='c2ea0541-f56d-4c73-bf71-56c5405c4934';
     } else assert.notEqual(validate({...input,probe_workspace_id:'c2ea0541-f56d-4c73-bf71-56c5405c4934'}).status,0,`${window} refuses probe_workspace_id`);
     if(window!=='W4') assert.match(validate({...input,recycle_install_mode:'fresh'}).stderr,/recycle and keeper inputs are W4-only/,`${window} refuses W4 inputs`);
+    assert.match(validate({...input,...lockOrder}).stderr,/lock_order_base_variant_sha only where GATES.json lists the lock-order gates/,`${window} refuses the lock-order input`);
     assert.equal(validate(input).status,0,`${window} closed preparation inputs`);
     assert.notEqual(validate({...input,approval:approval(input,'activate-admin-issuance-and-smoke')}).status,0);
   }
@@ -4782,7 +4788,10 @@ test('C1-25: box-hosted blocks never call ai_run ai-gates or open evidence_root;
     assert.doesNotMatch(block(id), boxAiGatesCall, id);
     assert.match(frozenC125Block(id), id === 'ai-w7-proof' ? /Mac already ran ai-gates/ : boxAiGatesCall, id);
   }
-  assert.equal(block('ai-gates'), frozenC125Block('ai-gates'));
+  // ai-gates is the frozen block plus only build B's X2 section (the two lock-order receipts; admin-release-w4-second-pass.test.ts).
+  const gates = block('ai-gates'), x2Start = gates.indexOf('# X2: the two lock-order receipts'), x2End = gates.indexOf("print('PASS ai-gates:");
+  assert.ok(x2Start > 0 && x2End > x2Start);
+  assert.equal(gates.slice(0, x2Start) + gates.slice(x2End), frozenC125Block('ai-gates'));
   assert.match(block('ai-gates'), boxEvidenceOpen);
   assert.doesNotMatch(block('ai-gates-bind'), boxEvidenceOpen);
   assert.doesNotMatch(block('ai-gates-bind'), /\.is_dir\(|\.is_file\(|\.read_bytes\(/);
