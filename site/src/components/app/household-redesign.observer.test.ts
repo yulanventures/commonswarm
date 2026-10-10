@@ -6,7 +6,7 @@ import ts from "typescript";
 import { setupSteps, setupProgress } from "../../lib/setup-checklist";
 import { createLatestRead } from "../../lib/latest-read";
 import { approvalUntil, accessRefusalMessage, withdrawRefusalMessage, PERSONAL_PURPOSE_WARNING } from "../../lib/household-access";
-import { peopleDialogAccessUntil, peopleDialogCanAct } from "../../lib/people-dialog-view";
+import { peopleDialogAccessUntil, peopleDialogCanAct, withdrawConfirmText } from "../../lib/people-dialog-view";
 import { agentStatus, peopleAgentStatus } from "../../lib/agent-status";
 import { classifyAgentPresence } from "../../../../src/cloud/agent-presence";
 import { grantRiskBadge, STANDING_GRANT_COPY } from "../../lib/standing-grants";
@@ -176,7 +176,7 @@ test("active approvals expose Save and withdrawal in both places, owned agents o
   assert.match(script, /withdrawAgent\(id, agent.name, button, notice, true\)/,
     "the dialog's nested confirmation suppresses the card's native confirmation");
   const withdraw = section(script, "const withdrawAgent = async", "const confirmOwnAccess = async");
-  assert.match(withdraw, /window.confirm\(`/);
+  assert.match(withdraw, /window.confirm\(withdrawConfirmText\(agentName, /);
   assert.match(withdraw, /kind: "household_withdraw_connection", principal_id: principalId/);
   assert.match(withdraw, /withdrawRefusalMessage\(result.body.reason\)/);
   assert.match(withdraw, /await loadHouseholdConnections\(\)/);
@@ -373,7 +373,7 @@ test("the Just me warning is final, names the way out, and clears when Shared is
 });
 
 test("approval sends only connection consent, withdrawal uses the principal, and cancelled withdrawal sends nothing", async () => {
-  const calls: any[] = [], messages: string[] = [], receipt = { textContent: "" };
+  const calls: any[] = [], messages: string[] = [], confirms: string[] = [], receipt = { textContent: "" };
   const scope = { workspaceId: "workspace", session: { user: { id: "person" } } };
   let current = true, confirm = true, reply: any = { status: "committed", expires_at: null };
   const ctx = {
@@ -381,9 +381,10 @@ test("approval sends only connection consent, withdrawal uses the principal, and
     postCommand: async (_session: any, _id: string, body: any, envelope: any) => {
       calls.push(JSON.parse(JSON.stringify({ body, envelope }))); return { status: 200, body: reply };
     },
-    uuid: () => "command-id", approvalUntil, accessRefusalMessage, withdrawRefusalMessage,
+    uuid: () => "command-id", approvalUntil, accessRefusalMessage, withdrawRefusalMessage, withdrawConfirmText,
+    agents: [{ principalId: "principal", transport: "local" }],
     householdReceipts: new Map(), one: () => receipt,
-    loadHouseholdConnections: async () => messages.push("reload"), window: { confirm: () => confirm },
+    loadHouseholdConnections: async () => messages.push("reload"), window: { confirm: (text: string) => { confirms.push(text); return confirm; } },
   };
   const commands = execute(`${section(script, "const approveAgent = async", "/** The person's own access")}; ({ approveAgent, withdrawAgent });`, ctx);
   const connection = { kind: "hosted", connection_id: "connection", grant_id: "grant", principal_id: "principal" };
@@ -396,6 +397,7 @@ test("approval sends only connection consent, withdrawal uses the principal, and
   confirm = false;
   await commands.withdrawAgent("principal", "Muse", button, status);
   assert.equal(calls.length, 1);
+  assert.deepEqual(confirms, [withdrawConfirmText("Muse", false)], "a local agent sees the local confirm text");
   confirm = true; reply = { status: "refused", reason: "connection_access_refused" };
   await commands.withdrawAgent("principal", "Muse", button, status);
   assert.equal(status.textContent, "Only the person who connected this agent can withdraw its Lists & docs access. Nothing was changed.");
