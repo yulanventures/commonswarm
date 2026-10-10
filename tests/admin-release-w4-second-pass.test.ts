@@ -232,12 +232,26 @@ elif name in ('ai_db','ai_ro'):
      "SELECT json_build_object('admin_issuance_enabled',admin_issuance_enabled,'invalidated',invalidated_at IS NOT NULL,'release_generation',release_generation,'measured_generation',measured_generation,'measured_edge_release_sha',measured_edge_release_sha)::text FROM commonswarm_oauth.admin_cutover_state WHERE singleton;":lambda: json.dumps({'admin_issuance_enabled':db['enabled'],'invalidated':db['invalidated'],'release_generation':db['generation'],'measured_generation':db['measured_generation'],'measured_edge_release_sha':db['measured']}),
     }
     for q,v in cfg.get('db_answers',{}).items(): queries[q]=(lambda v=v: v)
+    # ai-w4-apply's A6 readbacks, keyed on stable parts of their SQL: the fence projection and the 19-column singleton.
+    def fence():
+        closed=db.get('legacy_closed',True)
+        return json.dumps({'admin_issuance_enabled':db['enabled'],'legacy_closed':closed,'fence_complete':closed and not cfg.get('fence_drift')})
+    def singleton():
+        stamp=lambda flag: '2026-10-10T12:00:00+00:00' if flag else None
+        measured=db['measured']; target='/home/commonswarm/edge/releases/'+measured if measured else None
+        return json.dumps({'singleton':True,'admin_issuance_enabled':db['enabled'],'legacy_closed':db.get('legacy_closed',True),'legacy_closed_at':stamp(db.get('legacy_closed',True)),
+            'legacy_fence_evidence_ref':'W4/E3571B/ai-w4-apply','approved_edge_release_sha':db['approved'],'auth_contract_version':2,'required_migrations':{},
+            'lane8_evidence_digest':None,'measured_edge_release_sha':measured,'measured_edge_target':target,'measured_artifact_digest':'f'*64,
+            'measured_image_digest':cfg['image'],'measured_mount':target,'release_generation':db['generation'],'measured_generation':db['measured_generation'],
+            'measured_at':stamp(True),'measurement_evidence_ref':'fixture','invalidated_at':stamp(db['invalidated'])})
     if name=='ai_db' and a==['-q','--command',close]:
         db.update(enabled=False,invalidated=True,generation=db['generation']+1); save('cutover.json',db)
     elif name=='ai_db' and a==['-q','--file',str(root/'proof/measure.sql')]:
         sql=owned(a[2]).read_text(); assert 'apply_legacy_admin_fence' in sql and "measured_edge_release_sha='"+cfg['sha']+"'" in sql
-        db.update(enabled=False,invalidated=False,generation=db['generation']+1,measured_generation=db['generation']+1,measured=cfg['sha'],approved=cfg['sha']); save('cutover.json',db)
+        db.update(enabled=False,invalidated=False,generation=db['generation']+1,measured_generation=db['generation']+1,measured=cfg['sha'],approved=cfg['sha'],legacy_closed=True); save('cutover.json',db)
     elif len(a)==3 and a[:2]==['-Atq','--command'] and a[2] in queries: print(queries[a[2]]())
+    elif name=='ai_ro' and len(a)==3 and a[:2]==['-Atq','--command'] and "'fence_complete'," in a[2] and 'revoked_roles' in a[2]: print(fence())
+    elif name=='ai_ro' and len(a)==3 and a[:2]==['-Atq','--command'] and a[2].startswith("SELECT json_build_object('singleton',singleton,"): print(singleton())
     else: refuse()
 elif name=='docker':
     edge=load('docker.json',{}); live=edge['working_dir']; rel_=live[:-len('/deploy/edge-runtime')]
@@ -1060,6 +1074,8 @@ test('A7 / w4-success-close: each wrong item refuses the success close', () => {
     ['keeper file still present', [() => f.put('libexec/commonswarm-recycle-archive', keeperHelper(f.root), 0o700), () => spawnSync('rm', ['--', join(f.root, 'libexec/commonswarm-recycle-archive')])]],
     ['timer inactive', [() => f.put('units.json', { ...unitsNow, [timer]: { ...unitsNow[timer], active: 'inactive' } }), () => f.put('units.json', unitsNow)]],
     ['measurement', [() => f.put('cutover.json', { ...db, invalidated: true }), () => f.put('cutover.json', db)]],
+    ['measurement receipt missing', [() => renameSync(join(f.root, 'proof/w4-measurement.json'), join(f.root, 'moved-measurement.json')), () => renameSync(join(f.root, 'moved-measurement.json'), join(f.root, 'proof/w4-measurement.json'))]],
+    ['measurement receipt of another release', swap('proof/w4-measurement.json', readFileSync(join(f.root, 'proof/w4-measurement.json'), 'utf8').replaceAll(sha, baseline))],
   ];
   for (const [name, [change, restore]] of cases) {
     change(); const r = close();
@@ -1174,3 +1190,93 @@ test('H1(d)(j) / ai-prepare-keeper-install-md: W4 verifies KEEPER_INSTALL_MD_FIL
   assert.deepEqual(other.transport.map(c => c[0]), ['ssh', 'scp'], 'a non-W4 window uploads only the archive');
   assert.match(other.r.stdout, /^PASS ai-prepare: archive retained at [^;]+; upload [^ ]+\.tar$/m);
 });
+
+// A5: the Caddy candidate from the live snapshots, run as a complete block through the fixture.
+test('A5 / caddy-candidate-route-states: absent inserts, present-equal keeps the bytes, partial/duplicate/different refuse; one delete per DPoP field', () => {
+  const baseBlock = blocksOf(basePlan.stdout).find(b => b.startsWith('# step: ai-w4-caddy-candidate\n'))!;
+  const route = 'FAIL ai-w4-caddy-candidate: existing admin route expected absent-or-exact-reviewed-snippets-imports-and-placement got partial-duplicate-or-different; STOP';
+  const candidate = (mcp: string, api: string, source?: string) => {
+    const f = fixture(); f.put('stage/mcp.caddy', mcp); f.put('stage/api.caddy', api);
+    const r = f.run([source === undefined ? 'ai-w4-caddy-candidate' : '# the base block\n' + f.remap(source)]);
+    const out = (name: string) => existsSync(join(f.root, 'stage', name)) ? readFileSync(join(f.root, 'stage', name), 'utf8') : null;
+    return { r, mcp: out('mcp.new.caddy'), api: out('api.new.caddy'), f };
+  };
+  const f0 = fixture(), liveMcp = readFileSync(join(f0.root, 'stage/mcp.caddy'), 'utf8'), liveApi = readFileSync(join(f0.root, 'stage/api.caddy'), 'utf8');
+  // Absent: the reviewed insertion, byte for byte what the base block produced from the same live files.
+  const absent = candidate(liveMcp, liveApi), old = candidate(liveMcp, liveApi, baseBlock);
+  pass(absent.r, 'absent'); pass(old.r, 'base block');
+  assert.equal(absent.mcp, old.mcp); assert.equal(absent.api, old.api);
+  assert.match(absent.r.stdout, /admin route absent; reviewed snippets and imports inserted; 16 DPoP field deletes inserted/);
+  assert.match(absent.r.stdout, /PASS W4 both Caddy candidate routes validated; CORS preserved/);
+  // Present and equal (the first pass's result): the live bytes are kept exactly.
+  const equal = candidate(absent.mcp!, absent.api!);
+  pass(equal.r, 'present-equal'); assert.equal(equal.mcp, absent.mcp); assert.equal(equal.api, absent.api);
+  assert.match(equal.r.stdout, /admin route present and equal to the reviewed route; bytes kept; 0 DPoP field deletes inserted/);
+  const refusals: Array<[string, string, string, string]> = [
+    ['partial: snippet without its import', absent.mcp!, absent.api!.replace('\timport admin_resource_active\n\n', ''), route],
+    ['partial: MCP import only', absent.mcp!, liveApi, route],
+    ['duplicate import', absent.mcp!.replace('import admin_gate_active', 'import admin_gate_active\n\t\timport admin_gate_active'), absent.api!, route],
+    ['duplicate snippet', absent.mcp!, absent.api! + absent.api!.slice(0, absent.api!.indexOf('api.commonswarm.com {')), route],
+    ['different upstream timeout', absent.mcp!, absent.api!.replace('response_header_timeout 165s', 'response_header_timeout 60s'), route],
+    ['DPoP duplicated', liveMcp.replace('request>headers>Authorization delete', 'request>headers>Authorization delete\n\t\t\trequest>headers>DPoP delete\n\t\t\trequest>headers>DPoP delete'), liveApi,
+      'FAIL ai-w4-caddy-candidate: mcp.new.caddy request>headers>DPoP expected at-most-one got duplicate; STOP'],
+    ['DPoP conflicting definition', liveMcp, liveApi.replace('resp_headers>Authorization delete', 'resp_headers>Authorization delete\n\t\t\tresp_headers>Dpop-Nonce replace x'),
+      'FAIL ai-w4-caddy-candidate: api.new.caddy resp_headers>Dpop-Nonce expected delete got conflicting-definition; STOP'],
+  ];
+  for (const [name, mcp, api, message] of refusals) {
+    const r = candidate(mcp, api);
+    refused(r.r, message); assert.equal(r.mcp, null, `${name}: no candidate written`); assert.equal(r.api, null, name);
+    assert.ok(!existsSync(join(r.f.root, 'stage/sites')), `${name}: refused before the full candidate`);
+  }
+  // DPoP partly present: only the missing fields are inserted, each field once.
+  const partly = candidate(liveMcp.replace('request>headers>Authorization delete', 'request>headers>Authorization delete\n\t\t\trequest>headers>Dpop delete'), liveApi);
+  pass(partly.r, 'DPoP partly present'); assert.match(partly.r.stdout, /15 DPoP field deletes inserted/);
+  for (const field of ['DPoP', 'Dpop', 'DPoP-Nonce', 'Dpop-Nonce']) assert.equal(partly.mcp!.split(`request>headers>${field} delete\n`).length - 1, 1, field);
+});
+
+// A6: ai-w4-apply's read-only fence and OPEN checks precede every write; the singleton is kept before and after.
+test('A6 / w4-apply-fence-and-measurement: a drifted fence or OPEN issuance refuses before any write; a canonical snapshot before the overwrite and a receipt after it', () => {
+  const noWrite = (f: Fixture, r: ReturnType<Fixture['run']>, message: string, label: string) => {
+    refused(r, message);
+    assert.ok(!r.calls.some(c => c[0] === 'ai_db'), `${label}: no database write`);
+    assert.ok(!proofHas(f, 'edge-attempted.txt') && !proofHas(f, 'cutover-before-measurement.json'), `${label}: stopped before the attempt`);
+    assert.equal(f.json('units.json')[timer].active, 'active', `${label}: the timer was never stopped`);
+  };
+  const drift = fixture({ fence_drift: true });
+  noWrite(drift, drift.run(forward()), 'FAIL ai-w4-apply: existing legacy fence expected complete got drifted; STOP', 'fence drift');
+  const open = fixture(); open.put('cutover.json', { ...open.json('cutover.json'), enabled: true });
+  noWrite(open, open.run(forward()), 'FAIL ai-w4-apply: admin issuance expected CLOSED before the W4 close got OPEN; HezLead inspects it; STOP', 'issuance OPEN');
+  // Positive control: the snapshot is canonical, taken before the measurement statement; the receipt binds it.
+  const f = fixture(), r = f.run(forward()); pass(r, 'forward');
+  const raw = readFileSync(join(f.root, 'proof/cutover-before-measurement.json'), 'utf8'), row = JSON.parse(raw);
+  const canonical = (v: unknown): string => Array.isArray(v) ? '[' + v.map(canonical).join(',') + ']' : v !== null && typeof v === 'object'
+    ? '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + canonical((v as Record<string, unknown>)[k])).join(',') + '}' : JSON.stringify(v);
+  assert.equal(raw, canonical(row) + '\n'); assert.equal(Object.keys(row).length, 19);
+  assert.equal(row.invalidated_at === null, false, 'taken after the close/invalidate update');
+  const snapshotAt = r.calls.findIndex(c => c[0] === 'ai_ro' && c[2] === '--command' && String(c[3]).startsWith("SELECT json_build_object('singleton',singleton,"));
+  const measureAt = r.calls.findIndex(c => c[0] === 'ai_db' && c[2] === '--file' && c[3] === join(f.root, 'proof/measure.sql'));
+  assert.ok(snapshotAt >= 0 && measureAt > snapshotAt, 'snapshot before the measurement overwrite');
+  const receipt = JSON.parse(readFileSync(join(f.root, 'proof/w4-measurement.json'), 'utf8'));
+  assert.deepEqual([receipt.kind, receipt.release_sha, receipt.before_sha256, receipt.after.measured_edge_release_sha, receipt.legacy_fence_complete],
+    ['c1-w4-measurement', sha, hash(raw), sha, true]);
+  assert.ok(receipt.after.release_generation > row.release_generation);
+  // The fence predicates are EDGE-RELEASE.md's edge_fence projection (E:430-447), line for line.
+  const edgeRelease = readFileSync('deploy/edge-runtime/EDGE-RELEASE.md', 'utf8');
+  const projection = edgeRelease.slice(edgeRelease.indexOf('WITH revoked_roles(role_name) AS ('), edgeRelease.indexOf('= t\n}\nedge_invalidate()'));
+  const predicates = projection.split('\n').map(l => l.trim().replace(/^AND /, '').replace(/\)+;"\)"( = t)?$/, '')).filter(l => /admin_credentials|admin_grants|revoked_roles WHERE/.test(l));
+  assert.equal(predicates.length, 7, 'the E projection has seven predicate lines');
+  for (const line of predicates) assert.ok(block('ai-w4-apply').includes(line), `E predicate in ai-w4-apply: ${line}`);
+  // A first fence (legacy_closed false) is applied by apply_legacy_admin_fence in the same statement file.
+  const first = fixture(); first.put('cutover.json', { ...first.json('cutover.json'), legacy_closed: false });
+  pass(first.run(forward()), 'first fence');
+});
+
+// A8: the edge reaches R only through W4; a tree at R before W4's preflight refuses.
+test('A8 / w4-preflight-r-tree-absent: an R edge tree present at preflight refuses before the copy', () => {
+  const f = fixture(); f.put(`edge/releases/${sha}/marker.txt`, 'left by another path\n');
+  const r = f.run(['ai-w4-preflight']);
+  refused(r, 'FAIL ai-w4-preflight: new edge release directory expected absent got present');
+  assert.deepEqual(readdirSync(join(f.root, 'edge/releases', sha)), ['marker.txt'], 'nothing was copied into it');
+  assert.match(block('ai-w4-preflight'), /^test ! -e "\$NEW_EDGE" \|\|/m);
+});
+

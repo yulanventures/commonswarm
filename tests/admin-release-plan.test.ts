@@ -1771,7 +1771,8 @@ test('edge-release-measurement-paths: W4 records generation and W6 binds the fre
   const measured = { release_sha: sha, target, mount: target, image_digest: `sha256:${hex}`, artifact_digest: hex };
   const w4 = block('ai-w4-apply');
   const start = w4.indexOf('EDGE_MEASUREMENT_GENERATION=');
-  const end = w4.indexOf('cmp -s /etc/caddy/sites/', start);
+  // The A6 measurement receipt that follows is exercised in admin-release-w4-second-pass.test.ts.
+  const end = w4.indexOf('# A6: the new measurement receipt', start);
   assert.ok(start > 0 && end > start);
   const source = w4.slice(start, end);
   writeFileSync(receipt, JSON.stringify(measured));

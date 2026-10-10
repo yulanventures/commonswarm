@@ -193,13 +193,24 @@ elif name=='ai_run':
     if args==['ai-backup-gate-check'] and cfg.get('backup_gate_refused'): raise SystemExit(1)
 elif name=='ai_db':
     if args==['-q','--command','BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;']: pass
-    elif args==['-q','--file',str(root/'proof/measure.sql')]: owned(args[2]).read_text()
+    elif args==['-q','--file',str(root/'proof/measure.sql')]: owned(args[2]).read_text(); (root/'measured.flag').write_text('1')
     else: refuse()
 elif name=='ai_ro':
     if args==['-Atq','--command','SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;']: print('t')
     elif args==['-Atq','--command','SELECT release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND invalidated_at IS NULL AND measured_generation=release_generation;']: print('7')
     elif args==['-Atq','--command',"SELECT json_build_object('admin_issuance_enabled',admin_issuance_enabled,'invalidated',invalidated_at IS NOT NULL,'release_generation',release_generation,'measured_generation',measured_generation,'measured_edge_release_sha',measured_edge_release_sha)::text FROM commonswarm_oauth.admin_cutover_state WHERE singleton;"]:
-        print(json.dumps({'admin_issuance_enabled':False,'invalidated':True,'release_generation':8,'measured_generation':7,'measured_edge_release_sha':cfg['baseline']}))
+        print(json.dumps({'admin_issuance_enabled':False,'invalidated':True,'release_generation':8,'measured_generation':7,'measured_edge_release_sha':cfg.get('baseline','b'*40)}))
+    # ai-w4-apply's A6 readbacks (their checks run in admin-release-w4-second-pass.test.ts): the fence projection and the
+    # 19-column singleton, before and after the measurement statement file ran.
+    elif len(args)==3 and args[:2]==['-Atq','--command'] and "'fence_complete'," in args[2] and 'revoked_roles' in args[2]:
+        print(json.dumps({'admin_issuance_enabled':False,'legacy_closed':True,'fence_complete':True}))
+    elif len(args)==3 and args[:2]==['-Atq','--command'] and args[2].startswith("SELECT json_build_object('singleton',singleton,"):
+        done=(root/'measured.flag').exists(); at='2026-10-03T12:00:00+00:00'; edge=cfg['sha'] if done else cfg.get('baseline','b'*40)
+        print(json.dumps({'singleton':True,'admin_issuance_enabled':False,'legacy_closed':True,'legacy_closed_at':at,'legacy_fence_evidence_ref':'fixture',
+            'approved_edge_release_sha':edge,'auth_contract_version':2,'required_migrations':{},'lane8_evidence_digest':None,'measured_edge_release_sha':edge,
+            'measured_edge_target':'/home/commonswarm/edge/releases/'+edge,'measured_artifact_digest':'f'*64,'measured_image_digest':cfg['image'],
+            'measured_mount':'/home/commonswarm/edge/releases/'+edge,'release_generation':8 if done else 7,'measured_generation':8 if done else 6,
+            'measured_at':at,'measurement_evidence_ref':'fixture','invalidated_at':None if done else at}))
     else: refuse()
 elif name=='date':
     if args!=['-u','+%Y-%m-%dT%H:%M:%SZ']: refuse()
