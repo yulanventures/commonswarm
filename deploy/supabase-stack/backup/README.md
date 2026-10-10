@@ -56,6 +56,7 @@ that lock, the other exits 75 and does not start.
 3. Use the existing local-rehearsal identity settings, then run `restore-target.sh`,
    `prepare-target.sh`, `restore-cron-jobs.sh`, and `verify-counts.sh` in that order.
    All selected table counts and all cron definitions must match the artifact.
+   commonswarm_ops holds the C1 migration checksums; a restore without it must re-apply the C1 migrations before admin issuance (FOLLOW-UPS-C1 #38).
 4. Check the offsite `objects/` keys against `physical-object-keys.txt`, including
    cardinality. Restore those exact physical keys into a separate test bucket,
    preserve database object versions, and prove a Storage API download against

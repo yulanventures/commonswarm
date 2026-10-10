@@ -33,7 +33,7 @@ target_counts="$(mktemp "${TMPDIR:-/tmp}/commonswarm-target-counts.XXXXXX")"
 target_cron_jobs="$(mktemp "${TMPDIR:-/tmp}/commonswarm-target-cron.XXXXXX")"
 trap 'rm -f "$query_file" "$cron_query" "$target_counts" "$target_cron_jobs"' EXIT
 chmod 0600 "$target_counts" "$target_cron_jobs"
-cat >"$query_file" <<'SQL'
+cat >"$query_file" <<SQL
 SELECT format(
   'SELECT %L, count(*)::bigint FROM %I.%I;',
   schemaname || '.' || tablename,
@@ -41,7 +41,7 @@ SELECT format(
   tablename
 )
 FROM pg_tables
-WHERE schemaname = ANY (string_to_array('auth,public,realtime,storage,supabase_migrations,swarm,swarm_read,commonswarm_oauth', ','))
+WHERE schemaname = ANY (string_to_array('$(selected_schema_csv)', ','))
   AND NOT (schemaname = 'realtime' AND (tablename = 'messages' OR tablename LIKE 'messages_%'))
   AND NOT (schemaname = 'public' AND tablename IN ('commonswarm_cutover_probe', 'commonswarm_cutover_state'))
 ORDER BY schemaname, tablename

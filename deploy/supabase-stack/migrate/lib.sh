@@ -299,6 +299,10 @@ make_temp_sql() {
   printf '%s\n' "$file"
 }
 
+# The one bash copy of the backup schema set. commonswarm_ops holds the C1 migration checksums.
+SELECTED_SCHEMAS=(auth public realtime storage supabase_migrations swarm swarm_read commonswarm_oauth commonswarm_ops)
+
 selected_schema_csv() {
-  printf '%s' "auth,public,realtime,storage,supabase_migrations,swarm,swarm_read,commonswarm_oauth"
+  local IFS=,
+  printf '%s' "${SELECTED_SCHEMAS[*]}"
 }
