@@ -4283,7 +4283,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (homeRoute.view !== "todo" && homeRoute.view !== "todos" && homeRoute.view !== "agent") return;
       const slot = one<HTMLElement>("[data-home-route-pane]"); if (!slot) return;
       parkPeopleHosts();
-      const workspace = workspaces.find(row => row.id === activeWorkspaceId); if (!workspace) return;
+      const workspace = workspaces.find(row => row.id === activeWorkspaceId);
+      if (!workspace) { homePaneMessage("Could not open this workspace.", "Reload to try again."); return; }
       slot.hidden = false;
       const ctx = homeTodoContext();
       const appendReceipt = (): void => { if (!homeTodoReceipt || homeTodoReceipt === "not-found") return;
@@ -6883,7 +6884,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           if (!seat.effectiveRevoked && connection.status !== "revoked") {
             const revoke = document.createElement("button");
             revoke.type = "button";
-            revoke.className = "dashboard__text-button";
+            revoke.className = "dashboard__text-button dashboard__text-button--danger";
             revoke.textContent = "Revoke seat";
             revoke.addEventListener("click", async () => {
               if (!session || revoke.disabled) return;
@@ -6921,7 +6922,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (connection.status !== "revoked") {
           const revoke = document.createElement("button");
           revoke.type = "button";
-          revoke.className = "dashboard__button dashboard__button--secondary";
+          revoke.className = "dashboard__button dashboard__button--danger";
           revoke.textContent = "Revoke connection";
           revoke.addEventListener("click", async () => {
             if (!session || revoke.disabled) return;
@@ -11256,6 +11257,22 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     border-color: var(--border-interactive);
   }
 
+  /* Contrast on --surface (dialog card): --danger text 5.02:1 light (#b43a3a on #ffffff
+     under --danger-dim), 7.11:1 dark (#ffb4ab on #222832 under --d-danger-dim). */
+  .dashboard__button--danger {
+    color: var(--danger);
+    background: var(--danger-dim);
+    border-color: color-mix(in oklab, var(--danger) 45%, var(--border));
+  }
+
+  /* Hover fill: --danger-ink on --danger 5.82:1 light (#ffffff on #b43a3a),
+     11.58:1 dark (#1a0505 on #ffb4ab). */
+  .dashboard__button--danger:hover:not(:disabled) {
+    color: var(--danger-ink);
+    background: var(--danger);
+    border-color: var(--danger);
+  }
+
   .dashboard__text-button,
   .dashboard__back-button {
     min-block-size: 2.75rem;
@@ -11281,6 +11298,22 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   .dashboard__text-button:hover,
   .dashboard__back-button:hover {
     color: var(--text);
+  }
+
+  /* Text on --surface: --danger 5.82:1 light (#b43a3a on #ffffff), 8.73:1 dark
+     (#ffb4ab on #222832). Placed after the generic hover so it wins. */
+  .dashboard__text-button--danger,
+  .dashboard__text-button--danger:hover:not(:disabled) {
+    color: var(--danger);
+  }
+
+  .dashboard__text-button--danger:hover:not(:disabled) {
+    text-decoration-thickness: 2px;
+  }
+
+  .dashboard__text-button--danger:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
   }
 
   .dashboard__signin-choices,

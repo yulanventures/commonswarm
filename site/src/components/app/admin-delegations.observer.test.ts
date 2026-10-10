@@ -95,6 +95,7 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
         renewalButtons: [...one("[data-admin-grants]").querySelectorAll("button")].filter(b => /renew|consent/i.test(b.textContent)).length,
         injected: typeof window.injected,
       };
+      const revokeTone = revokeButton().dataset.tone;
       revokeButton().click();
       await waitFor(() => one("[data-admin-status]").textContent.includes("result is unavailable"));
       const unknown = one("[data-admin-status]").textContent;
@@ -103,10 +104,12 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
       await waitFor(() => one("[data-admin-indicator-title]").textContent === "Admin clients and history");
       const revokeButtons = revokeButton() ? 1 : 0;
       const approvalButton = label => [...one("[data-admin-clients]").querySelectorAll("button")].find(b => b.textContent === label);
+      const withdrawTone = approvalButton("Withdraw client approval").dataset.tone;
       approvalButton("Withdraw client approval").click();
       await waitFor(() => one("[data-admin-status]").textContent.includes("Your client approval was withdrawn"));
       window.adminFixtureChangeMetadata(); one("[data-admin-refresh]").click();
       await waitFor(() => approvalButton("Approve client version 3") && !approvalButton("Approve client version 3").disabled);
+      const approveTone = approvalButton("Approve client version 3").dataset.tone;
       const commandsBeforeReapproval = requests.length;
       approvalButton("Approve client version 3").click();
       await waitFor(() => one("[data-admin-status]").textContent.includes("Your client approval was recorded"));
@@ -124,7 +127,7 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
       // A second document signs out through the real auth client and broadcasts to this view.
       const other = document.createElement("iframe"); other.src = "/signout"; document.body.append(other);
       await waitFor(() => one("admin-delegations").hidden);
-      report({ fullAccount, inert, requests, unknown, revokeButtons, automaticCommands, commandsBeforeReapproval, noSecrets, foreignRowsRemoved, historyEntryVisible, indicatorHidden: one("[data-admin-indicator]").hidden,
+      report({ revokeTone, withdrawTone, approveTone, fullAccount, inert, requests, unknown, revokeButtons, automaticCommands, commandsBeforeReapproval, noSecrets, foreignRowsRemoved, historyEntryVisible, indicatorHidden: one("[data-admin-indicator]").hidden,
         privateRows: one("[data-admin-grants]").textContent });
     })().catch(error => report({ error: String(error) }));
   </script>`;
@@ -159,6 +162,7 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
     assert.ok(result.inert.labels.includes("Registry version 2"));
     assert.ok(result.inert.labels.includes("To renew, reconnect from your assistant; you will be asked to approve again."));
     assert.equal(result.inert.renewalButtons, 0);
+    assert.equal(result.revokeTone, "danger"); assert.equal(result.withdrawTone, "danger"); assert.equal(result.approveTone, undefined);
     const requests = result.requests;
     assert.ok(result.unknown.includes(requests[0].command_id));
     assert.equal(result.automaticCommands, 0); assert.equal(result.commandsBeforeReapproval, 3);
