@@ -30,14 +30,26 @@ function fixture() {
   type Sql = Parameters<Parameters<Dependencies['withAuthTransaction']>[0]>[0];
   const commands: Record<string, unknown>[] = [];
   let providerActive = true;
+  let home: string | null = workspace;
+  let homeUsable = true;
+  const contextWorkspace = '88888888-8888-4888-8888-888888888888';
   let response = { status: 200, body: { ...identity, status: 'committed', ok: true } as Record<string, unknown> };
   const tx = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const query = strings.join('?');
+    if (query.includes('swarm.resolve_hosted_discovery')) {
+      return [{ data: { provider_grant_id: 'synthetic-provider' } }];
+    }
+    if (query.includes('FROM swarm.hosted_agent_contexts')) {
+      return values[0] === handle && values[1] === grant && values[2] === owner
+        ? [{ workspace_id: contextWorkspace }] : [];
+    }
     if (strings.join('?').includes('FROM swarm.hosted_mcp_grants')) {
       return values[0] === 'synthetic-provider' && values[1] === owner
-        ? [{ grant_id: grant, owner_user_id: owner, home_workspace_id: workspace }] : [];
+        ? [{ grant_id: grant, owner_user_id: owner, home_workspace_id: home }] : [];
     }
-    return values[0] === grant && values[1] === owner && values[2] === workspace ? [{
-      grant_id: grant, owner_user_id: owner, provider_grant_id: 'synthetic-provider', workspace_id: workspace,
+    return values[0] === grant && values[1] === owner &&
+      (values[2] === contextWorkspace || (values[2] === workspace && homeUsable)) ? [{
+      grant_id: grant, owner_user_id: owner, provider_grant_id: 'synthetic-provider', workspace_id: values[2],
       stream_id: '77777777-7777-4777-8777-777777777777', manifest_digest: 'a'.repeat(64),
     }] : [];
   }) as unknown as Sql;
@@ -53,7 +65,8 @@ function fixture() {
       },
     })),
   });
-  return { commands, revoke: () => { providerActive = false; }, respond: (value: typeof response) => { response = value; },
+  return { commands, contextWorkspace, home: (value: string | null, usable = true) => { home = value; homeUsable = usable; },
+    revoke: () => { providerActive = false; }, respond: (value: typeof response) => { response = value; },
     call: async (args: Record<string, unknown>) => {
       const reply = await serve(new Request('https://mcp.commonswarm.com/mcp', { method: 'POST',
         headers: { authorization: 'Bearer synthetic.jwt.value', 'content-type': 'application/json' },
@@ -86,10 +99,48 @@ test('explicit continue is forwarded without lifetime promotion or an invented n
   const f = fixture();
   await f.call({ request_id: 'continue_route_1', intent: 'continue', name: 'Marketing', kind: 'task' });
   assert.deepEqual(f.commands[0].command, { kind: 'claim_hosted_seat', intent: 'continue', name: 'Marketing', context_kind: 'task' });
-  await f.call({ request_id: 'continue_route_2', intent: 'continue', seat: handle, name: 'Marketing', workspace_id: workspace });
+  await f.call({ request_id: 'continue_route_2', intent: 'continue', seat: handle, name: 'Marketing', workspace_id: f.contextWorkspace });
   assert.deepEqual(f.commands[1].command, { kind: 'claim_hosted_seat', intent: 'continue', seat: handle, name: 'Marketing' });
   const refused = await f.call({ request_id: 'continue_route_3', intent: 'continue', seat: handle, lifetime: 'durable' });
   assert.equal(refused.status, 400); assert.equal(f.commands.length, 2);
+});
+
+test('handle continuation uses its context workspace, refuses mismatch and never falls back to home', async () => {
+  const f = fixture();
+  f.home(null);
+  const args = { request_id: 'handle_workspace_1', intent: 'continue', seat: handle };
+  assert.equal((await f.call(args)).rpc.result.isError, false);
+  assert.equal(f.commands[0].workspace_id, f.contextWorkspace);
+  const mismatch = (await f.call({ ...args, workspace_id: workspace })).rpc.result;
+  assert.equal(mismatch.isError, true);
+  assert.equal(JSON.parse(mismatch.content[0].text).error, 'workspace_mismatch');
+  const unknown = (await f.call({ ...args, seat: 'seat_ZZZZZZZZZZZZZZZZZZZZZZ' })).rpc.result;
+  assert.equal(unknown.isError, true);
+  assert.equal(JSON.parse(unknown.content[0].text).error, 'identity_resume_unavailable');
+  assert.equal(f.commands.length, 1);
+  f.revoke();
+  const denied = (await f.call({ ...args, workspace_id: workspace })).rpc.result;
+  assert.equal(JSON.parse(denied.content[0].text).can_start_new, false);
+  assert.equal(f.commands.length, 1, 'invalid grant cannot disclose a workspace mismatch');
+});
+
+test('missing or unusable home refuses allocation while explicit authorized workspace remains available', async () => {
+  for (const home of [null, workspace]) {
+    const f = fixture();
+    f.home(home, false);
+    const refused = (await f.call({ request_id: 'no_home_context_1' })).rpc.result;
+    assert.equal(refused.isError, true);
+    assert.equal(JSON.parse(refused.content[0].text).error, 'workspace_unavailable');
+    assert.equal(f.commands.length, 0);
+    const positive = (await f.call({ request_id: 'explicit_workspace_1', workspace_id: f.contextWorkspace })).rpc.result;
+    assert.equal(positive.isError, false);
+    assert.equal(f.commands[0].workspace_id, f.contextWorkspace);
+    f.revoke();
+    const denied = (await f.call({ request_id: 'no_home_revoked_1' })).rpc.result;
+    assert.equal(JSON.parse(denied.content[0].text).error, 'hosted_grant_forbidden');
+    assert.equal(JSON.parse(denied.content[0].text).can_start_new, false);
+    assert.equal(f.commands.length, 1);
+  }
 });
 
 test('allocation capacity and expiry failures keep recovery metadata and never retry under a new identity', async () => {

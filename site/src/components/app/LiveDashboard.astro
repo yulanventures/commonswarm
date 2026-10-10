@@ -2154,7 +2154,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const { data, error } = await api
           .schema("swarm_read")
           .from("agent_principals")
-          .select("principal_id,name,model,transport,turn_only,owner_user_id,revoked_at,workspace_id,created_at")
+          .select("principal_id,name,model,transport,turn_only,owner_user_id,revoked_at,workspace_id,created_at,display_name,disambiguator,identity_lifetime,app,context_activity")
           .eq("workspace_id", workspaceId)
           .is("revoked_at", null)
           .order("name", { ascending: true })

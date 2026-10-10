@@ -13,7 +13,7 @@ const second = "22222222-2222-4222-8222-222222222222";
 const rows = [
   { principal_id: first, name: "Claude-7K2P", display_name: "Claude", disambiguator: "7K2P",
     identity_lifetime: "ephemeral", transport: "hosted_mcp", owner_user_id: "owner",
-    app: { client_id: "registered-app", display_name: "Claude" }, last_business_at: "2026-10-10T12:00:00Z" },
+    app: { client_id: "registered-app", display_name: "Claude" }, context_activity: { last_business_at: "2026-10-10T12:00:00Z", active_contexts: 1 } },
   { principal_id: second, name: "Claude-8N3Q", display_name: "Claude", disambiguator: "8N3Q",
     identity_lifetime: "ephemeral", transport: "hosted_mcp", owner_user_id: "owner",
     app: { client_id: "registered-app", display_name: "Claude" } },

@@ -37,7 +37,7 @@ export interface RosterAgentRow {
   disambiguator?: unknown;
   identity_lifetime?: unknown;
   app?: unknown;
-  last_business_at?: unknown;
+  context_activity?: unknown;
 }
 
 export type ParticipantGroup<TMember extends RailMember, TAgent extends RailAgent> =
@@ -109,7 +109,9 @@ export const rosterAgentsFromRows = (rows: RosterAgentRow[]): RosterAgent[] =>
         ...(row.identity_lifetime === 'durable' || row.identity_lifetime === 'ephemeral'
           ? { identityLifetime: row.identity_lifetime } : {}),
         app: rosterApp(row.app),
-        lastBusinessAt: typeof row.last_business_at === 'string' ? row.last_business_at : null,
+        lastBusinessAt: row.context_activity !== null && typeof row.context_activity === 'object'
+          && typeof (row.context_activity as Record<string, unknown>).last_business_at === 'string'
+          ? (row.context_activity as { last_business_at: string }).last_business_at : null,
       }),
     }))
     .filter((agent) => agent.principalId.length > 0);
