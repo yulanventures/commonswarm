@@ -5931,7 +5931,7 @@ async function lockAndCountLivePrincipals(tx: Sql, workspaceId: string): Promise
   return Number(rows[0]?.live ?? "0");
 }
 
-/** Lock order is stream -> principal ceiling -> exact name -> hosted grant. */
+/** Lock order: owner users row, then workspaces row, both FOR NO KEY UPDATE (never FOR UPDATE: principal inserts hold the stream and take FOR KEY SHARE on both rows); several workspaces rows in workspace_id order, each in its strongest mode at its first lock (never SHARE, then a stronger lock); then stream -> principal ceiling -> exact name -> hosted grant. */
 async function lockPrincipalName(
   tx: Sql,
   route: { workspaceId: string },
@@ -12347,7 +12347,7 @@ async function handleTransaction(
       };
     }
 
-    await beforeStep(8); if (kind === "accept_invitation" || kind === "remove_member") { const lockedWorkspace = await tx<{ workspace_id: string }[]>`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id = ${route.workspaceId}::uuid FOR UPDATE`; if (!lockedWorkspace[0]) throw new Error("validated workspace disappeared"); }
+    await beforeStep(8); if (kind === "accept_invitation" || kind === "remove_member") { const lockedWorkspace = await tx<{ workspace_id: string }[]>`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id = ${route.workspaceId}::uuid FOR NO KEY UPDATE`; if (!lockedWorkspace[0]) throw new Error("validated workspace disappeared"); } // Lock order: lockPrincipalName.
     const streamRows = await tx<{ head_seq: string | number }[]>`
       SELECT head_seq
       FROM swarm.streams

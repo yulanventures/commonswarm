@@ -58,7 +58,7 @@ export async function adminAccessState(tx: Sql, admission: AdminAdmission): Prom
     }
     await adminDbRole(tx, 'swarm_command');
     await tx`SELECT active FROM commonswarm_oauth.lock_admin_client_verification(${t.client_id}, ${locator.verification_version})`;
-    await tx`SELECT user_id FROM swarm.users WHERE user_id=${t.owner_user_id}::uuid FOR UPDATE`;
+    await tx`SELECT user_id FROM swarm.users WHERE user_id=${t.owner_user_id}::uuid FOR NO KEY UPDATE`; // Lock order: lockPrincipalName in command/index.ts.
     await tx`SELECT owner_user_id FROM swarm.admin_accounts WHERE owner_user_id=${t.owner_user_id}::uuid FOR UPDATE`;
     await adminDbRole(tx, 'commonswarm_oauth_runtime');
     const [row] = await tx<{ active: boolean; capabilities: string[]; scope_names: string[]; registry_version: number;

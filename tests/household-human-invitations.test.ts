@@ -257,7 +257,7 @@ test('the locked household boundary check refuses before consumption, and an ord
   entry.setLiveLegacyInvite(true);
   const raced = await invitationHttp(entry, body);
   assert.equal(raced.body.error, 'recipient_consent_required');
-  const workspaceLock = entry.queries.findIndex(row => row.query.includes('FROM swarm.workspaces') && /FOR (?:NO KEY )?UPDATE/.test(row.query));
+  const workspaceLock = entry.queries.findIndex(row => row.query.includes('FROM swarm.workspaces') && row.query.includes('FOR NO KEY UPDATE'));
   const streamLock = entry.queries.findIndex(row => row.query.includes('FROM swarm.streams') && row.query.includes('FOR UPDATE'));
   assert.ok(workspaceLock !== -1 && streamLock !== -1 && workspaceLock < streamLock);
   assert.ok(!entry.queries.some(row => row.query.includes('UPDATE swarm.invitations') && row.query.includes('consumed_at')));

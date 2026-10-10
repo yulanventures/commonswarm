@@ -192,7 +192,12 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
       if (!(error instanceof Error) || !('code' in error) || error.code !== 'P0001') throw error;
     }
   }
-  await tx`SELECT user_id FROM swarm.users WHERE user_id=${owner}::uuid FOR UPDATE`;
+  // Lock order: lockPrincipalName in command/index.ts. A human who withdraws another owner's
+  // grant already holds their own users row (authenticateHuman), so the grantor's row is
+  // KEY SHARE: two owners who withdraw each other's grants cannot wait on each other's row.
+  // Withdrawal creates no principal; admin_accounts FOR UPDATE below orders it with the grantor.
+  if (authentication.kind === 'human' && owner !== authentication.identity.user_id) await tx`SELECT user_id FROM swarm.users WHERE user_id=${owner}::uuid FOR KEY SHARE`;
+  else await tx`SELECT user_id FROM swarm.users WHERE user_id=${owner}::uuid FOR NO KEY UPDATE`;
   // Only humans create account streams. No grant ID chosen by an admin creates state.
   if (authentication.kind === 'human') await tx`INSERT INTO swarm.admin_accounts(owner_user_id, stream_id) VALUES (${owner}::uuid, ${crypto.randomUUID()}::uuid) ON CONFLICT(owner_user_id) DO NOTHING`;
   const accounts = await tx<{ stream_id: string; seq: string | number; projection: AdminAccountState }[]>`SELECT stream_id, seq, projection FROM swarm.admin_accounts WHERE owner_user_id = ${owner}::uuid FOR UPDATE`;
@@ -213,6 +218,22 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
     revoked_at: row.revoked_at?.getTime() ?? null, suspended_at: row.suspended_at?.getTime() ?? null })));
   if (!reconciled) throw new Error('admin projection inconsistent');
   state = reconciled;
+  // Lock order: lockPrincipalName in command/index.ts. A routine reads its grant's workspaces
+  // FOR SHARE (currentRights), then locks its target (admin-routine.ts:48). Take all of them
+  // first, once, in workspace_id order and in the stronger mode, so two owners can neither
+  // both hold SHARE and wait to raise it, nor lock two workspaces in opposite orders. As in
+  // currentRights, only workspaces where the owner has a membership row are locked, except an
+  // admin_create_workspace target: admin-routine.ts:48 locks an existing one (workspace_exists).
+  const routineTarget = token ? parseAdminRoutineCommand(raw) : null;
+  const routineGrant = routineTarget ? state.grants[token!.admin_grant_id] : undefined;
+  const createTarget = routineTarget?.kind === 'admin_create_workspace' ? routineTarget.workspace_id : null;
+  if (routineTarget && routineGrant) await tx`
+    SELECT w.workspace_id FROM swarm.workspaces w
+    WHERE w.workspace_id = ANY(${[routineTarget.workspace_id,
+      ...routineGrant.workspace_ids.filter(w => !routineGrant.withdrawn_workspace_ids.includes(w))]}::uuid[])
+      AND (w.workspace_id = ${createTarget}::uuid OR EXISTS (SELECT 1 FROM swarm.memberships m
+        WHERE m.workspace_id = w.workspace_id AND m.user_id = ${owner}::uuid))
+    ORDER BY w.workspace_id FOR NO KEY UPDATE OF w`;
   if (token) {
     const bound = state.grants[token.admin_grant_id];
     if (!bound || bound.owner_user_id !== token.owner_user_id || bound.admin_identity_id !== token.admin_identity_id ||
@@ -316,8 +337,16 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
   }
   const grant = token ? state.grants[token.admin_grant_id] : command && 'grant_id' in command ? state.grants[command.grant_id] : undefined;
   const manifest = command?.kind === 'prepare_admin_consent' ? command.consent.manifest : command?.kind === 'grant_admin_delegation' ? state.consents[command.consent_receipt_id]?.manifest : grant;
-  context.current_workspace_rights = manifest ? await currentRights(tx, owner, manifest.workspace_ids.filter(w => !grant?.withdrawn_workspace_ids.includes(w)), manifest.scope_names) : false;
-  if (command?.kind === 'admin_read_metadata' && command.workspace_id !== null) context.current_workspace_rights = await currentRights(tx, owner, [command.workspace_id]);
+  // Lock order: lockPrincipalName in command/index.ts. No workspace is locked after the grant's own
+  // (the token check above, or this statement), so these reads cannot invert a routine's sorted
+  // workspace locks. The core decides without these rights for a delegated grant_admin_delegation
+  // (human_confirmation_required) and for a read outside the grant (workspace_forbidden, or the
+  // owner's own read, which ignores the workspace).
+  const rightsManifest = token && manifest !== grant ? undefined : manifest;
+  context.current_workspace_rights = rightsManifest ? await currentRights(tx, owner, rightsManifest.workspace_ids.filter(w => !grant?.withdrawn_workspace_ids.includes(w)), rightsManifest.scope_names) : false;
+  if (command?.kind === 'admin_read_metadata' && command.workspace_id !== null) context.current_workspace_rights = !!grant &&
+    grant.workspace_ids.includes(command.workspace_id) && !grant.withdrawn_workspace_ids.includes(command.workspace_id) &&
+    await currentRights(tx, owner, [command.workspace_id]);
   if (command?.kind === 'withdraw_admin_workspace_access' && authentication.kind === 'human') {
     const rows = await tx`SELECT user_id FROM swarm.memberships WHERE workspace_id = ${command.workspace_id}::uuid AND user_id = ${authentication.identity.user_id}::uuid AND role = 'owner' AND revoked_at IS NULL FOR SHARE`;
     context.withdrawing_workspace_owner = rows.length === 1;
@@ -450,7 +479,7 @@ export async function recordAdminFailure(tx: Sql, input: AdminInput, authenticat
   const raw = adminRecord(input.command);
   const owner = oauth ? oauth.token.owner_user_id : authentication.kind === 'human' ? authentication.identity.user_id : undefined;
   const grantId = oauth ? oauth.token.admin_grant_id : id(raw?.grant_id) ? raw.grant_id : undefined;
-  if (owner) await tx`SELECT user_id FROM swarm.users WHERE user_id=${owner}::uuid FOR UPDATE`;
+  if (owner) await tx`SELECT user_id FROM swarm.users WHERE user_id=${owner}::uuid FOR NO KEY UPDATE`; // Lock order: lockPrincipalName in command/index.ts.
   const rows = owner ? await tx<{ stream_id: string; seq: string | number; projection: AdminAccountState }[]>`
     SELECT stream_id, seq, projection FROM swarm.admin_accounts WHERE owner_user_id = ${owner}::uuid FOR UPDATE
   ` : [];
