@@ -40,6 +40,7 @@ interface Harness {
   LockOrderSetupFailure: new (code: string) => Error & { code: string };
   readMigrations(): { name: string; text: string }[];
   migrationMinClientVersion(migrations: unknown): string;
+  sqlLexicalContexts(text: string): Uint8Array;
   classifyMinClientVersion(row: { type: string | null; text: string | null } | undefined): MinimumCheck;
   minClientVersionDiagnostic(check: MinimumCheck): string;
 }
@@ -581,4 +582,24 @@ test("the CI seed takes min_client_version from the migrations' own default", ()
     refusedWith("seed_min_client_version_statement_unparsed"), "an upsert is not the default seed");
   assert.throws(() => harness.migrationMinClientVersion([file(seed().replace("swarm.config", "swarm.other_config"))]),
     refusedWith("seed_min_client_version_statement_unparsed"), "another table");
+  // Review A F3: only a statement that runs counts. The real migrations above are the executable
+  // positive control; the same seed inside a comment refuses.
+  assert.throws(() => harness.migrationMinClientVersion([file(`/*\n${seed()}*/\n`)]),
+    refusedWith("seed_min_client_version_not_executable"), "a block-commented seed");
+  assert.throws(() => harness.migrationMinClientVersion([file(seed().replace(/^/gmu, "-- "))]),
+    refusedWith("seed_min_client_version_not_executable"), "a line-commented seed");
+  assert.throws(() => harness.migrationMinClientVersion([file(`/* outer /* inner */\n${seed()}*/\n`)]),
+    refusedWith("seed_min_client_version_not_executable"), "block comments nest, as in PostgreSQL");
+  assert.throws(() => harness.migrationMinClientVersion([file(`DO $seed$\nBEGIN\n${seed()}END\n$seed$;\n`)]),
+    refusedWith("seed_min_client_version_not_executable"), "a seed inside a dollar-quoted body");
+  assert.throws(() => harness.migrationMinClientVersion([file(`PREPARE seed AS\n${seed()}`)]),
+    refusedWith("seed_min_client_version_not_executable"), "a seed that is not its own top-level statement");
+  // Positive control: comments around the statement, and comment markers inside a literal, are allowed.
+  assert.equal(harness.migrationMinClientVersion([file("-- header\n/* block /* nested */ still */\n" +
+    "INSERT INTO swarm.config (key, value)\nVALUES\n  ('min_client_version', '\"0.1.0\"'::jsonb),\n" +
+    "  ('note', '\"-- /* not a comment\"'::jsonb)\nON CONFLICT (key) DO NOTHING; -- trailing\n")]), "0.1.0");
+  // The lexer: an E'' escape and a $$ body do not end early; a -- inside them is not a comment.
+  const sample = "SELECT E'a\\'-- b', $x$ -- c $x$; -- d";
+  const contexts = harness.sqlLexicalContexts(sample);
+  assert.deepEqual(["SELECT", "-- b", "-- c", "-- d"].map((part) => contexts[sample.indexOf(part)]), [0, 2, 2, 1]);
 });

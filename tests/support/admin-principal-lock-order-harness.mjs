@@ -35,6 +35,8 @@ const DATA_DIRECTORY = '/var/lib/postgresql/data';
 const CI_ADMIN_ROLE = 'supabase_admin';
 const LOCK_TIMEOUT_MS = 5000; // setTransaction (command/index.ts:1601) and adminDbRole (admin-oauth-db.ts:10)
 
+/** Round 4 (review A F1(i)): two OAuth admins, different owners and issuer kids, one workspace. */
+export const ADMIN_PAIR = 'admin-oauth-vs-admin-oauth-shared-workspace';
 const RACES = Object.freeze({
   'admin-oauth-vs-hosted-claim-seat': { parked: 'hosted', waiting: 'admin' },
   'admin-oauth-vs-local-join-registration': { parked: 'join', waiting: 'admin' },
@@ -45,6 +47,7 @@ const RACES = Object.freeze({
   'remove-member-vs-local-join-registration': { parked: 'join', waiting: 'remove' },
   'household-invitation-vs-hosted-claim-seat': { parked: 'hosted', waiting: 'household' },
   'household-invitation-vs-local-join-registration': { parked: 'join', waiting: 'household' },
+  [ADMIN_PAIR]: { parked: 'admin', waiting: 'admin' },
 });
 
 /** A refused target. Callers branch on `code`, never on the message. */
@@ -313,22 +316,93 @@ export function readMigrations(root = REPO_ROOT) {
   }
 }
 
+/** Lexical context of each character of a PostgreSQL script: code, comment, or quoted text
+ * (a '...' literal with '' doubling, an E'...' literal with backslash escapes, a "..." identifier,
+ * or a $tag$...$tag$ body). Comments run from -- to the end of the line, or are slash-star
+ * blocks, which nest as in PostgreSQL. */
+const SQL_CODE = 0, SQL_COMMENT = 1, SQL_QUOTED = 2;
+const SQL_IDENTIFIER_CHAR_RE = /[A-Za-z0-9_$\u0080-\uffff]/u;
+const SQL_DOLLAR_TAG_RE = /^\$(?:[A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*)?\$/u;
+export function sqlLexicalContexts(text) {
+  const context = new Uint8Array(text.length);
+  let i = 0;
+  const mark = (from, to, kind) => { context.fill(kind, from, Math.min(to, text.length)); return Math.min(to, text.length); };
+  while (i < text.length) {
+    const c = text[i], next = text[i + 1], previous = i > 0 ? text[i - 1] : '';
+    if (c === '-' && next === '-') {
+      const end = text.indexOf('\n', i);
+      i = mark(i, end === -1 ? text.length : end, SQL_COMMENT);
+    } else if (c === '/' && next === '*') {
+      let depth = 0, j = i;
+      while (j < text.length) {
+        if (text[j] === '/' && text[j + 1] === '*') { depth += 1; j += 2; } else if (text[j] === '*' && text[j + 1] === '/') {
+          depth -= 1; j += 2; if (depth === 0) break;
+        } else j += 1;
+      }
+      i = mark(i, j, SQL_COMMENT);
+    } else if (c === "'") {
+      const escapes = /[Ee]/u.test(previous) && !SQL_IDENTIFIER_CHAR_RE.test(i > 1 ? text[i - 2] : '');
+      let j = i + 1;
+      while (j < text.length) {
+        if (escapes && text[j] === '\\') j += 2;
+        else if (text[j] === "'" && text[j + 1] === "'") j += 2;
+        else if (text[j] === "'") { j += 1; break; } else j += 1;
+      }
+      i = mark(i, j, SQL_QUOTED);
+    } else if (c === '"') {
+      let j = i + 1;
+      while (j < text.length) {
+        if (text[j] === '"' && text[j + 1] === '"') j += 2;
+        else if (text[j] === '"') { j += 1; break; } else j += 1;
+      }
+      i = mark(i, j, SQL_QUOTED);
+    } else if (c === '$' && !SQL_IDENTIFIER_CHAR_RE.test(previous) && SQL_DOLLAR_TAG_RE.test(text.slice(i, i + 64))) {
+      const tag = text.slice(i).match(SQL_DOLLAR_TAG_RE)[0];
+      const close = text.indexOf(tag, i + tag.length);
+      i = mark(i, close === -1 ? text.length : close + tag.length, SQL_QUOTED);
+    } else i += 1;
+  }
+  return context;
+}
+/** The text with every UTF-16 unit of the given contexts replaced by a space (newlines kept). */
+function sqlMask(text, context, kinds) {
+  let masked = '';
+  for (let i = 0; i < text.length; i += 1) masked += kinds.includes(context[i]) && text[i] !== '\n' ? ' ' : text[i];
+  return masked;
+}
+
 /** The CI seed source: the migrations' own min_client_version, never a row of the shared CI
  * database. The key must appear exactly once in all migrations, as one row of
  * `INSERT INTO swarm.config (key, value) VALUES ... ON CONFLICT (key) DO NOTHING;` whose value is
  * a JSON string X.Y.Z. Any other mention (a second seed, a later UPDATE or upsert, a comment)
- * refuses: a fresh migrate might then hold another value. */
+ * refuses: a fresh migrate might then hold another value. The statement must also run: it is
+ * matched only outside comments, starts as a top-level statement (not in a comment, a quoted
+ * body, parentheses, a BEGIN ATOMIC body, or after other words of the same statement) and
+ * contains no comment. */
 export function migrationMinClientVersion(migrations) {
   if (!Array.isArray(migrations) || migrations.length === 0) setupFailure('seed_migrations_unreadable');
   const mentions = migrations.flatMap(({ name, text }) => (text.match(/min_client_version/gu) ?? []).map(() => name));
   if (mentions.length !== 1) setupFailure('seed_min_client_version_not_unique');
   const { text } = migrations.find((file) => file.name === mentions[0]);
-  const rows = [...text.matchAll(MIN_CLIENT_VERSION_ROW_RE)];
+  const context = sqlLexicalContexts(text);
+  // Comments become spaces; quoted text stays, since the key and the value are literals.
+  const executable = sqlMask(text, context, [SQL_COMMENT]);
+  // Comments and quoted text become spaces: only code is left.
+  const code = sqlMask(text, context, [SQL_COMMENT, SQL_QUOTED]);
+  if (!executable.includes('min_client_version')) setupFailure('seed_min_client_version_not_executable');
+  const rows = [...executable.matchAll(MIN_CLIENT_VERSION_ROW_RE)];
   if (rows.length !== 1) setupFailure('seed_min_client_version_row_unparsed');
-  const start = text.lastIndexOf('INSERT INTO', rows[0].index);
-  const end = text.indexOf(';', rows[0].index);
+  // The row's own parenthesis is code, not text inside a literal or a $$ body.
+  if (context[rows[0].index + 2] !== SQL_CODE) setupFailure('seed_min_client_version_not_executable');
+  const start = code.lastIndexOf('INSERT INTO', rows[0].index);
+  const end = code.indexOf(';', rows[0].index);
   if (start === -1 || end === -1 || !CONFIG_SEED_STATEMENT_RE.test(text.slice(start, end + 1))) {
     setupFailure('seed_min_client_version_statement_unparsed');
+  }
+  const before = code.slice(0, start);
+  const depth = [...before].reduce((n, c) => n + (c === '(' ? 1 : c === ')' ? -1 : 0), 0);
+  if (before.slice(before.lastIndexOf(';') + 1).trim() !== '' || depth !== 0 || /\bBEGIN\s+ATOMIC\b/iu.test(code)) {
+    setupFailure('seed_min_client_version_not_executable');
   }
   if (!SEMVER_CORE_RE.test(rows[0][1])) setupFailure('seed_min_client_version_non_semver');
   return rows[0][1];
@@ -703,7 +777,8 @@ async function denoMain() {
     out.client_version = minimum.version;
     // D4: names and ids unique to this run (fresh workspace, users and grants per scenario).
     const ctx = { command, db, observer, failures, jwks, out, tag: randomUUID().replaceAll('-', '').slice(0, 10), clientVersion: minimum.version };
-    const result = scenario === 'golden' ? await golden(ctx) : await raceScenario(ctx, scenario);
+    const result = scenario === 'golden' ? await golden(ctx)
+      : scenario === ADMIN_PAIR ? await adminPairScenario(ctx) : await raceScenario(ctx, scenario);
     out.stage = 'complete';
     console.log('LOCK_ORDER_RESULT ' + JSON.stringify({ ...out, ...result, http_refused: http.refused }));
   } catch (error) {
@@ -848,14 +923,15 @@ async function holderSide(ctx, kind, fixture) {
   return { warm: preview, start: preview, writes: async () => ({}) };
 }
 
-async function adminSide(ctx, fixture) {
+async function adminSide(ctx, fixture, label = 'admin') {
   const { owner, workspaceId } = fixture;
   const policy = await import('../../supabase/functions/_shared/protocol.js');
   const { adminTransaction } = await import('../../supabase/functions/command/admin-delegation.ts');
   const { oauthFixture } = await import('./admin-edge-oauth-fixture.mjs');
   const signing = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
-  const jwk = { ...await crypto.subtle.exportKey('jwk', signing.publicKey), kid: `lock-order-${ctx.tag}`, alg: 'ES256', use: 'sig' };
-  ctx.jwks.body = JSON.stringify({ keys: [jwk] });
+  // One issuer kid and one client per admin side; the in-process JWKS serves every side's key.
+  const jwk = { ...await crypto.subtle.exportKey('jwk', signing.publicKey), kid: `lock-order-${ctx.tag}-${label}`, alg: 'ES256', use: 'sig' };
+  ctx.jwks.body = JSON.stringify({ keys: [...(ctx.jwks.body === null ? [] : JSON.parse(ctx.jwks.body).keys), jwk] });
   const humanAuth = { kind: 'human', identity: { user_id: owner.userId, session_binding: 'a'.repeat(64),
     interactive_at_seconds: Date.now() / 1000, csrf_verified: true } };
   const wire = (command, commandId = id()) => ({ command_id: commandId, stream: { kind: 'account' }, resource: policy.ADMIN_RESOURCE, command });
@@ -866,7 +942,7 @@ async function adminSide(ctx, fixture) {
   const now = Date.now(), connection = id();
   const scopeNames = policy.adminConsentOptions().filter((option) => option.available).map((option) => option.scope);
   const manifest = {
-    connection_id: connection, client_id: `lock-order-runtime-${ctx.tag}`, resource: policy.ADMIN_RESOURCE, mode: 'granular',
+    connection_id: connection, client_id: `lock-order-runtime-${ctx.tag}-${label}`, resource: policy.ADMIN_RESOURCE, mode: 'granular',
     registry_version: policy.ADMIN_REGISTRY_VERSION, scope_names: scopeNames,
     capability_names: policy.adminAvailableCapabilities(scopeNames),
     availability_digest: policy.adminAvailabilityDigest(policy.ADMIN_REGISTRY_VERSION),
@@ -901,11 +977,11 @@ async function adminSide(ctx, fixture) {
   const audit = async (commandId) => (await ctx.observer`SELECT outcome FROM commonswarm_oauth.admin_oauth_audit
     WHERE admin_grant_id = ${grant}::uuid AND request_id = ${commandId} ORDER BY occurred_at, audit_id`).map((row) => row.outcome);
   let race = null;
-  const name = `race-admin-seat-${ctx.tag}`;
+  const name = `race-${label}-seat-${ctx.tag}`;
   return {
     name,
     warm: async () => {
-      const warmed = await send(await armed(`warm-admin-seat-${ctx.tag}`));
+      const warmed = await send(await armed(`warm-${label}-seat-${ctx.tag}`));
       return { ...warmed, audit: await audit(warmed.command_id) };
     },
     arm: async () => { race = await armed(name); },
@@ -987,6 +1063,108 @@ async function raceScenario(ctx, scenario) {
   };
   if (holder.audit) result.admin_audit = await holder.audit();
   return result;
+}
+
+/** Admin vs admin (review A F1(i)): two owners, each with an OAuth grant signed under its own
+ * issuer kid (so the issuer-key advisory lock does not serialize them), create a seat in one
+ * shared workspace. A blocker session holds that workspace row FOR SHARE: every admin SHARE read
+ * passes it and every stronger admin lock waits for it. The first admin parks on the blocker; the
+ * second then parks on the same row. In the base order both already hold SHARE (currentRights,
+ * admin-delegation.ts) and wait to raise it (admin-routine.ts:48): both wait for the blocker, and
+ * the release deadlocks. In the coordinated order the stronger mode comes first: the second waits
+ * for the first, and they serialize. */
+async function adminPairScenario(ctx) {
+  const { out, observer, failures } = ctx;
+  out.stage = 'fixture';
+  const owner = await human(ctx, 'owner');
+  const coAdmin = await human(ctx, 'co-admin');
+  const { workspaceId } = await workspace(ctx, owner, false);
+  await member(ctx, workspaceId, coAdmin, 'admin');
+  // Both keys are in the JWKS before the first OAuth request reads it.
+  const admins = [await adminSide(ctx, { owner, workspaceId }, 'first'), await adminSide(ctx, { owner: coAdmin, workspaceId }, 'second')];
+  out.stage = 'warm-up';
+  for (const admin of admins) {
+    const warmed = await admin.warm();
+    if (!warmed.ok || warmed.audit.join(',') !== 'committed') { out.warm_holder = warmed; fail('holder_positive_control_failed'); }
+    await admin.arm();
+  }
+  out.stage = 'blocker';
+  let releaseBlocker;
+  const released = new Promise((resolve) => { releaseBlocker = resolve; });
+  let blockerReady;
+  const ready = new Promise((resolve) => { blockerReady = resolve; });
+  let blockerPid = 0;
+  const blocker = observer.begin(async (tx) => {
+    await tx`SELECT set_config('lock_timeout', '30s', true)`;
+    blockerPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+    // The blocker holds this one row lock and nothing else.
+    await tx`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id = ${workspaceId}::uuid FOR SHARE`;
+    blockerReady();
+    await released;
+  });
+  await ready;
+  const parking = {};
+  out.parking = parking;
+  failures.codes.length = 0;
+  failures.recording = true;
+  let parked = null;
+  let waiting = null;
+  try {
+    out.stage = 'park-first-admin';
+    parked = settleSide(admins[0].start());
+    // Only the shared workspace row can make a backend wait for the blocker.
+    const firstPid = await waitForBlocked(observer, blockerPid, async () => true);
+    parking.first_admin_waits_on_shared_workspace = firstPid !== null;
+    if (firstPid === null) fail('first_admin_did_not_park');
+    out.stage = 'park-second-admin';
+    waiting = settleSide(admins[1].start());
+    const secondWait = await waitForSecondAdmin(observer, blockerPid, firstPid);
+    parking.second_admin_waits_on_shared_workspace = secondWait !== null;
+    if (secondWait === null) fail('second_admin_did_not_park');
+    // Diagnostic only: the blocker in the base order (both raise SHARE), the first admin in the
+    // coordinated order (the second queues on the workspace tuple lock).
+    out.second_admin_blocked_by = secondWait.blockedBy;
+  } finally {
+    out.stage = 'release';
+    releaseBlocker();
+    await blocker.catch(() => {});
+  }
+  const sides = await Promise.race([Promise.all([parked, waiting]), new Promise((resolve) => setTimeout(() => resolve(null), 60_000))]);
+  failures.recording = false;
+  if (sides === null) fail('race_timeout');
+  out.stage = 'writes';
+  return {
+    parked: { side: 'admin', ...sides[0] },
+    waiting: { side: 'admin', ...sides[1] },
+    sqlstates: [...failures.codes],
+    writes: {
+      first_admin_principal_live: await principalLive(ctx, workspaceId, admins[0].name),
+      second_admin_principal_live: await principalLive(ctx, workspaceId, admins[1].name),
+    },
+    admin_audit: [...await admins[0].audit(), ...await admins[1].audit()],
+  };
+}
+
+/** The one backend other than the first admin that waits for the blocker (base order) or for the
+ * first admin on a swarm.workspaces tuple lock (coordinated order). */
+async function waitForSecondAdmin(sql, blockerPid, firstPid, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = await sql`SELECT pid, pg_blocking_pids(pid) AS blockers FROM pg_stat_activity
+      WHERE pid <> ${firstPid}::int
+        AND (${blockerPid}::int = ANY(pg_blocking_pids(pid)) OR ${firstPid}::int = ANY(pg_blocking_pids(pid)))`;
+    if (rows.length === 1) {
+      const pid = Number(rows[0].pid), blockers = rows[0].blockers.map(Number);
+      if (blockers.every((b) => b === blockerPid || b === firstPid)) {
+        if (blockers.includes(blockerPid)) return { pid, blockedBy: 'blocker' };
+        const [tuple] = await sql`SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid = ${pid}::int AND locktype = 'tuple'
+          AND relation = 'swarm.workspaces'::regclass AND NOT granted) AS ok`;
+        if (tuple.ok === true) return { pid, blockedBy: 'first_admin' };
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return null;
 }
 
 /** Golden run: the real MCP protocol module and tool rendering over the real claim and read

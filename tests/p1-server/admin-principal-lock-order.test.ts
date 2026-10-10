@@ -9,6 +9,7 @@
  * advisory lock (supabase/functions/command/index.ts:5914) with a blocker session, waits with
  * pg_blocking_pids until the lock-holding path waits for that stream, then releases the
  * blocker. The base order deadlocks (SQLSTATE 40P01); the coordinated order does not.
+ * The admin-vs-admin race parks both admins on a workspace row that a blocker holds FOR SHARE.
  * Deadlock is detected by SQLSTATE only. */
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
@@ -30,6 +31,7 @@ interface RaceResult {
   writes?: Record<string, boolean>;
   admin_audit?: string[];
   admin_issuance?: string;
+  second_admin_blocked_by?: string;
   http_refused?: number;
 }
 interface ControlResult {
@@ -121,3 +123,28 @@ for (const name of RACE_TESTS) {
     assert.equal(result.http_refused, 0, `${name}: no HTTP call`);
   });
 }
+
+// Review A F1(i) (round 4): two OAuth admins with different owners and issuer kids create a seat
+// in one shared workspace. The base order holds SHARE on it and then waits to raise it.
+const ADMIN_PAIR = "admin-oauth-vs-admin-oauth-shared-workspace";
+test(ADMIN_PAIR, { timeout: 240_000 }, async () => {
+  const result = await harness.runScenario(bound(), ADMIN_PAIR);
+  assert.equal(result.stage, "complete", `${ADMIN_PAIR}: stopped at ${result.stage} (${result.error ?? "no code"})`);
+  assert.equal(result.sqlstate_capture_control, "22012", `${ADMIN_PAIR}: SQLSTATE capture positive control`);
+  assert.ok(result.deadlock_timeout_ms! < result.lock_timeout_ms!, `${ADMIN_PAIR}: deadlock_timeout must be below lock_timeout`);
+  assert.deepEqual(result.parking, {
+    first_admin_waits_on_shared_workspace: true,
+    second_admin_waits_on_shared_workspace: true,
+  }, `${ADMIN_PAIR}: parking points`);
+  // The base lock order fails here.
+  const sqlstates = result.sqlstates ?? [];
+  const deadlocks = sqlstates.filter((code) => code === "40P01").length;
+  assert.equal(deadlocks, 0, `${ADMIN_PAIR}: SQLSTATE 40P01 (deadlock_detected) in ${deadlocks} transaction(s)`);
+  assert.deepEqual(sqlstates, [], `${ADMIN_PAIR}: no transaction may fail`);
+  assert.equal(result.parked?.ok, true, `${ADMIN_PAIR}: first admin result ${JSON.stringify(result.parked)}`);
+  assert.equal(result.waiting?.ok, true, `${ADMIN_PAIR}: second admin result ${JSON.stringify(result.waiting)}`);
+  assert.deepEqual(result.writes, { first_admin_principal_live: true, second_admin_principal_live: true }, `${ADMIN_PAIR}: no lost write`);
+  // adminAccessState ran for both admins and both delegated requests committed.
+  assert.deepEqual(result.admin_audit, ["committed", "committed"], `${ADMIN_PAIR}: OAuth admin request audits`);
+  assert.equal(result.http_refused, 0, `${ADMIN_PAIR}: no HTTP call`);
+});
