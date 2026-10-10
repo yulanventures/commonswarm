@@ -78,7 +78,7 @@ const observe = `<script>
 // A second document that signs in with a session the stubbed user endpoint accepts.
 const user = { id: "11111111-1111-4111-8111-111111111111", aud: "authenticated", role: "authenticated", email: "synthetic@example.test", app_metadata: {}, user_metadata: {}, created_at: new Date(0).toISOString() };
 const segment = (value: object) => Buffer.from(JSON.stringify(value)).toString("base64url");
-const token = `${segment({ alg: "HS256", typ: "JWT" })}.${segment({ sub: user.id, aud: "authenticated", role: "authenticated", exp: Math.floor(Date.now() / 1000) + 3600 })}.synthetic`;
+const token = `${segment({ alg: "HS256", typ: "JWT" })}.${segment({ sub: user.id, aud: "authenticated", role: "authenticated", exp: Math.floor(Date.now() / 1000) + 3600 })}.${Buffer.from("synthetic").toString("base64url")}`;
 
 // Mock only the HTTP boundary. The component, auth client and email helper are real.
 const setup = `<script>
