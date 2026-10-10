@@ -90,3 +90,12 @@ file-size-limit-agreement 0 (45 pass); admin-release-plan 0 (111); p1-cli/n-db-t
 
 ### Full validation (round 3)
 Python from a temp dir via `discover -p`: restore_drill 23 OK, upload_snapshot 9 OK, notify_healthcheck 9 OK, exit 0 each. `bash -n` lib/dump/verify: 0. `tsc --noEmit`: 0. `check:tests`: exit 2, 54 diagnostics (base count). `git diff --check`: 0. Nothing committed.
+
+## Round 4
+
+CI at b5daee4c failed "no other file under deploy/supabase-stack holds a schema-list literal" on `__pycache__/*.pyc` written by the Python wrapper earlier in the same job.
+
+- `tests/p1-cli/backup-schema-set.test.ts`: the scan now lists files with `git ls-files -z -- deploy/supabase-stack` (run from the repository root with `execFileSync`), so build artifacts never count. The scan body is a function, `scanForLiterals(files, root)`, that takes an explicit file list.
+- `tests/p1-cli/backup-python-unit.test.ts`: python3 runs with `-I -B`, and `PYTHONDONTWRITEBYTECODE=1` is set in the child environment only.
+- New control `the scan ignores untracked files and still catches a tracked one`: a synthetic file with a schema-list literal sits in a temporary root. Passed in the file list (the "tracked" case), the scan reports it. It is not in `git ls-files`, so the real scan never lists it. The scan over the real tracked list, minus that path, reports no holders. The positive control for the excluded H0 holders stays in the main scan test.
+- Validation: wrapper then scan in CI order, exit 0, 8 of 8 pass (Python: 23, 9 and 9 OK). No `__pycache__` under `deploy/supabase-stack` after the run (find returned nothing; nothing to delete). `tsc --noEmit` 0. `git diff --check` 0. Nothing committed. The agent-channel idle canary failure is the known unrelated flake and was not touched.

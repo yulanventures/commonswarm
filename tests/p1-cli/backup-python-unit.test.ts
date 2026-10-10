@@ -16,8 +16,8 @@ for (const file of PYTHON_TESTS) {
     try {
       const run = spawnSync(
         "python3",
-        ["-I", "-m", "unittest", "discover", "-s", BACKUP_DIR, "-p", file],
-        { cwd, encoding: "utf8", env: { PATH: process.env.PATH ?? "" } },
+        ["-I", "-B", "-m", "unittest", "discover", "-s", BACKUP_DIR, "-p", file],
+        { cwd, encoding: "utf8", env: { PATH: process.env.PATH ?? "", PYTHONDONTWRITEBYTECODE: "1" } },
       );
       const lines = run.stderr.split("\n").filter((l) => /^(Ran \d+ tests?|OK|FAILED)/.test(l));
       assert.equal(run.status, 0, `${file}: ${lines.join(" ")}`);

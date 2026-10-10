@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 const REPO = new URL("../../", import.meta.url).pathname;
-const STACK = join(REPO, "deploy/supabase-stack");
+const STACK_DIR = "deploy/supabase-stack";
 const read = (rel: string): string => readFileSync(join(REPO, rel), "utf8");
 
 const LIB_SH = "deploy/supabase-stack/migrate/lib.sh";
@@ -97,28 +99,47 @@ test("the sixth-copy scan sees multi-line, CSV and quoted lists", () => {
   assert.ok(!shape.test(`schemas=(${names.slice(0, 3).join(" ")})\nthe auth and public schemas`));
 });
 
-test("no other file under deploy/supabase-stack holds a schema-list literal", () => {
+// Git-tracked files only, so a build artifact such as __pycache__ never counts.
+function trackedStackFiles(): string[] {
+  const out = execFileSync("git", ["ls-files", "-z", "--", STACK_DIR], { cwd: REPO, encoding: "utf8", timeout: 10_000 });
+  return out.split("\0").filter(Boolean);
+}
+
+// Scan the named files (paths relative to the repository root, read from `root`).
+function scanForLiterals(files: string[], root: string): { holders: string[]; excludedHit: number } {
   const shape = literalShape();
-  const files: string[] = [];
-  const walk = (dir: string): void => {
-    for (const entry of readdirSync(dir)) {
-      const path = join(dir, entry);
-      const info = statSync(path);
-      if (info.isDirectory()) walk(path);
-      else if (info.isFile() && info.size < 2_000_000) files.push(path);
-    }
-  };
-  walk(STACK);
   const holders: string[] = [];
   let excludedHit = 0;
-  for (const path of files) {
-    const rel = relative(REPO, path);
+  for (const rel of files) {
+    const path = join(root, rel);
+    const info = statSync(path);
+    if (!info.isFile() || info.size >= 2_000_000) continue;
     // Whole-file text, so a list split across lines is found.
     if (!shape.test(readFileSync(path, "utf8"))) continue;
     if (EXCLUDED_LITERAL_HOLDERS.has(rel)) excludedHit += 1;
     else if (!SOURCE_FILES.has(rel)) holders.push(rel);
   }
+  return { holders, excludedHit };
+}
+
+test("no other file under deploy/supabase-stack holds a schema-list literal", () => {
+  const { holders, excludedHit } = scanForLiterals(trackedStackFiles(), REPO);
   assert.deepEqual(holders, [], "unexpected schema-list literal; derive it from lib.sh SELECTED_SCHEMAS");
   // Positive control: the scan reaches the files it excludes, so an empty result is not a blind scan.
   assert.equal(excludedHit, EXCLUDED_LITERAL_HOLDERS.size, "scan did not reach every excluded holder");
+});
+
+test("the scan ignores untracked files and still catches a tracked one", () => {
+  const dir = mkdtempSync(join(tmpdir(), "schema-scan-"));
+  try {
+    const rel = `${STACK_DIR}/backup/fake.pyc`;
+    mkdirSync(join(dir, STACK_DIR, "backup"), { recursive: true });
+    writeFileSync(join(dir, rel), `x="${bashArray(LIB_SH).join(",")}"\n`);
+    // Tracked (named in the list): caught. Untracked (absent from `git ls-files`): never listed, so ignored.
+    assert.deepEqual(scanForLiterals([rel], dir).holders, [rel]);
+    assert.ok(!trackedStackFiles().includes(rel), "the synthetic file must not be tracked");
+    assert.deepEqual(scanForLiterals(trackedStackFiles().filter((f) => f !== rel), REPO).holders, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
