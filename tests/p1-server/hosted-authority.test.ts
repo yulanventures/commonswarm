@@ -129,7 +129,9 @@ function reportNon2xx(label, result) {
 
 async function claim(spec, existingCapability) {
   const cap = existingCapability ?? await capability(spec.grantId, spec.ownerUserId, spec.workspaceId);
-  const result = reportNon2xx("hosted", await handleHostedCommand(commandInput(spec.workspaceId, spec.name, spec.commandId), cap));
+  const body=commandInput(spec.workspaceId, spec.name, spec.commandId);
+  if(spec.intent==='continue')body.command={kind:'claim_hosted_seat',name:spec.name,intent:'continue'};
+  const result = reportNon2xx("hosted", await handleHostedCommand(body, cap));
   // Legacy authority tests below retain their pre-cutover handle/check fixtures.
   // New allocation/replay/quotas are exercised without this bridge in
   // hosted-context-allocation.test.ts. Phase 3 replaces these legacy resolvers.
@@ -188,6 +190,8 @@ async function managementCommand(
 
 async function race() {
   const hostedSpec = input.hosted;
+  // Capacity races must reach the ceiling rather than an earlier name guard.
+  const competitorName=input.ceilingRace ? 'competitor-'+crypto.randomUUID() : hostedSpec.name;
   const firstCapability = await capability(
     hostedSpec.grantId,
     hostedSpec.ownerUserId,
@@ -217,6 +221,7 @@ async function race() {
     if (input.competitor === "hosted") {
       return await claim({
         ...hostedSpec,
+        name: competitorName,
         grantId: input.competingGrantId,
         commandId: crypto.randomUUID(),
       }, secondCapability);
@@ -232,19 +237,27 @@ async function race() {
       return await publicCommand(joinCredential, crypto.randomUUID(), {
         kind: "register_agent_seat",
         attempt_id: crypto.randomUUID(),
-        name: hostedSpec.name,
+        name: competitorName,
       });
     }
     return await publicCommand(input.ownerJwt, hostedSpec.workspaceId, {
       kind: "create_agent_principal",
-      name: hostedSpec.name,
+      name: competitorName,
       ...(input.competitor === "duplicate" ? { allow_duplicate_name: true } : {}),
     });
   };
   if (input.ceilingRace) {
+    const [seats]=await db\`SELECT count(*)::int AS n FROM swarm.hosted_mcp_seats hs
+      JOIN swarm.agent_principals p USING(principal_id)
+      WHERE hs.grant_id=ANY(\${[hostedSpec.grantId,input.competingGrantId]}::uuid[])
+        AND hs.revoked_at IS NULL AND p.revoked_at IS NULL AND p.identity_lifetime='durable'\`;
+    if(seats.n!==0)throw new Error('last-slot fixture must start below the hosted connection limit');
     const [existing] = await db\`SELECT count(*)::int AS n FROM swarm.agent_principals WHERE workspace_id=\${hostedSpec.workspaceId}::uuid AND revoked_at IS NULL AND identity_lifetime='durable'\`;
     for (let i=existing.n;i<49;i++) await db\`INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name)
       VALUES(\${crypto.randomUUID()}::uuid,\${hostedSpec.workspaceId}::uuid,\${hostedSpec.ownerUserId}::uuid,\${'capacity-'+i})\`;
+    const [seeded]=await db\`SELECT count(*)::int AS n FROM swarm.agent_principals
+      WHERE workspace_id=\${hostedSpec.workspaceId}::uuid AND revoked_at IS NULL AND identity_lifetime='durable'\`;
+    if(seeded.n!==49)throw new Error('last-slot fixture must start with exactly 49 durable principals');
   }
   const postgres = (await import("npm:postgres@3.4.9")).default;
   const observer = postgres(Deno.env.get("SWARM_DATABASE_URL"), {max:2,prepare:false});
@@ -786,12 +799,18 @@ test("overlapping hosted, H0, local and join-mint creation serialize the last du
         hosted:claimSpec(fixture,fixture.grantA,fixture.workspaceA,`last-${randomUUID().slice(0,8)}`)});
       assert.equal(receipt.blocked, 2, `${competitor}/${order}: transactions really overlap`);
       assert.ok(receipt.elapsed < 30_000, `${competitor}/${order}: bounded completion`);
-      assert.equal(receipt.results.filter(r=>r.status===200).length,1,"exactly one last-slot winner");
-      assert.equal(receipt.results[order === "hosted-first" ? 0 : 1]?.status,200,"same-route positive control in each queue order");
-      assert.equal(receipt.results.find(r=>r.status!==200)?.body.error,"principal_limit_reached","loser reaches the durable ceiling");
       const [count]=await sql`SELECT count(*)::int AS n FROM swarm.agent_principals
         WHERE workspace_id=${fixture.workspaceA}::uuid AND revoked_at IS NULL AND identity_lifetime='durable'`;
-      assert.equal(count!.n,50,"committed durable count never exceeds 50");
+      const context=`${competitor}/${order}: committed durable=${count!.n}; `+
+        JSON.stringify(receipt.results.map(r=>({status:r.status,outcome:r.body.status,error:r.body.error,reason:r.body.reason})));
+      assert.equal(count!.n,50,`${context}: committed durable count is exactly 50`);
+      const winners=receipt.results.filter(r=>r.status===200&&r.body.status==='accepted');
+      assert.equal(winners.length,1,`${context}: exactly one committed last-slot winner`);
+      const first=receipt.results[order === "hosted-first" ? 0 : 1];
+      assert.equal(first?.body.status,'accepted',`${context}: same-route positive control in each queue order`);
+      const loser=receipt.results.find(r=>r.body.status!=='accepted');
+      assert.equal(loser?.status,403,`${context}: ceiling refusal status`);
+      assert.equal(loser?.body.error,"principal_limit_reached",`${context}: loser reaches the durable ceiling`);
       const [duplicates]=await sql`SELECT count(*)::int AS n FROM (
         SELECT name FROM swarm.agent_principals WHERE workspace_id=${fixture.workspaceA}::uuid AND revoked_at IS NULL
         GROUP BY name HAVING count(*)>1) duplicates`;
@@ -1306,10 +1325,22 @@ test("same-owner revoked local principal is reclaimable through the hosted comma
   assert.equal(foreignRevoked.body.status, "accepted");
   const [foreignBefore] = await sql`SELECT * FROM swarm.agent_principals WHERE principal_id = ${foreignPrincipal!.principal_id}::uuid`;
   assert.ok(foreignBefore?.revoked_at);
+  // Q1 permits explicit hosted durable continuation; new claims never adopt a
+  // foreign/local principal (PHASES.md:10,46; phase-1 dispatch Q1=YES).
   const refused = runHostedHarness<HarnessResult>({ operation: "claim",
+    claim: {...claimSpec(fixture, fixture.grantA, fixture.workspaceA, foreignName),intent:'continue'} });
+  assert.equal(refused.status, 403);
+  assert.equal(refused.body.error, "identity_resume_unavailable");
+  const [refusedPrincipal] = await sql`SELECT * FROM swarm.agent_principals WHERE principal_id = ${foreignPrincipal!.principal_id}::uuid`;
+  assert.deepEqual(refusedPrincipal, foreignBefore);
+  const fresh = runHostedHarness<HarnessResult>({ operation: "claim",
     claim: claimSpec(fixture, fixture.grantA, fixture.workspaceA, foreignName) });
-  assert.equal(refused.status, 409);
-  assert.equal(refused.body.error, "hosted_seat_name_taken");
+  assert.equal(fresh.status, 200);
+  assert.equal(fresh.body.status, 'accepted');
+  assert.equal(fresh.body.outcome, 'created');
+  assert.equal(fresh.body.adjustment_reason, 'collision');
+  assert.notEqual(fresh.body.name, foreignName);
+  assert.notEqual(fresh.body.principal_id, foreignPrincipal!.principal_id);
   const [foreignAfter] = await sql`SELECT * FROM swarm.agent_principals WHERE principal_id = ${foreignPrincipal!.principal_id}::uuid`;
   assert.deepEqual(foreignAfter, foreignBefore);
   const audits = await sql<{ outcome: string; detail: string }[]>`

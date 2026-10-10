@@ -17,46 +17,85 @@ Deno.env.set('SUPABASE_URL',config.apiUrl);Deno.env.set('SUPABASE_ANON_KEY',conf
 const {db,handleHostedCommand}=await import(${JSON.stringify(commandUrl)});
 const {authenticateHostedGrantCapability}=await import(${JSON.stringify(authUrl)});
 let step='role';
+let roles={current_user:null,session_user:null};
 const check=(condition,label)=>{if(!condition)throw new Error(label);};
+async function observeRole(tx){
+  const [role]=await tx\x60SELECT current_user,session_user,rolsuper,rolbypassrls
+    FROM pg_roles WHERE rolname=current_user\x60;
+  roles={current_user:role.current_user,session_user:role.session_user};
+  check(role.current_user==='swarm_command'&&!role.rolsuper&&!role.rolbypassrls,
+    'non-superuser command transaction');
+}
+async function commandTransaction(callback){
+  return await db.begin(async tx=>{
+    // Match setTransaction in command/index.ts; session_user remains the
+    // authenticated pool user while current_user supplies command privileges.
+    await tx\x60SELECT set_config('role','swarm_command',true),
+      set_config('search_path','swarm, pg_catalog',true),set_config('lock_timeout','5s',true)\x60;
+    await observeRole(tx);
+    return await callback(tx);
+  });
+}
 try {
-  // Startup session_authorization restricts every pool connection, including
-  // reconnects. Both the session and effective user must be the migrated role.
-  const [role]=await db\x60SELECT current_user AS effective,session_user AS session,
-    rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user\x60;
-  check(role.effective==='swarm_command'&&role.session==='swarm_command'
-    &&!role.rolsuper&&!role.rolbypassrls,'non-superuser command session');
-  const [acl]=await db\x60SELECT has_table_privilege(current_user,'swarm.config','SELECT') AS read,
-    has_table_privilege(current_user,'swarm.config','UPDATE') AS update,
-    has_table_privilege(current_user,'swarm.config','DELETE') AS remove,
-    has_table_privilege(current_user,'swarm.config','TRUNCATE') AS truncate\x60;
-  check(acl.read&&!acl.update&&!acl.remove&&!acl.truncate,'migrated config grants are read-only');
-  const [keys]=await db\x60SELECT hashtext('hosted-context-allocation')<>hashtext('principal-ceiling')
-    AND hashtext('hosted-context-allocation')<>hashtext('deployment') AS distinct\x60;
-  check(keys.distinct,'global gate differs from variable-namespace ceiling/admission locks');
+  const [session]=await db\x60SELECT current_user,session_user\x60;
+  roles={current_user:session.current_user,session_user:session.session_user};
+  await commandTransaction(async tx=>{
+    const [acl]=await tx\x60SELECT has_table_privilege(current_user,'swarm.config','SELECT') AS read,
+      has_table_privilege(current_user,'swarm.config','UPDATE') AS update,
+      has_table_privilege(current_user,'swarm.config','DELETE') AS remove,
+      has_table_privilege(current_user,'swarm.config','TRUNCATE') AS truncate\x60;
+    check(acl.read&&!acl.update&&!acl.remove&&!acl.truncate,'migrated config grants are read-only');
+    const [keys]=await tx\x60SELECT hashtext('hosted-context-allocation')<>hashtext('principal-ceiling')
+      AND hashtext('hosted-context-allocation')<>hashtext('deployment') AS distinct\x60;
+    check(keys.distinct,'global gate differs from variable-namespace ceiling/admission locks');
+  });
   step='old-read';
   let denied=false;
   try {
-    await db.begin(tx=>tx\x60SELECT value FROM swarm.config
+    await commandTransaction(tx=>tx\x60SELECT value FROM swarm.config
       WHERE key='hosted_context_allocation_enabled' FOR SHARE\x60);
   } catch(error) {if(error.code!=='42501')throw error;denied=true;}
   check(denied,'old locking read must fail with 42501');
   step='plain-read';
-  const [gate]=await db\x60SELECT value FROM swarm.config WHERE key='hosted_context_allocation_enabled'\x60;
+  const [gate]=await commandTransaction(tx=>tx\x60SELECT value FROM swarm.config WHERE key='hosted_context_allocation_enabled'\x60);
   check(gate?.value===true,'plain read reaches the enabled fixture gate');
   step='authorize';
-  const capability=await db.begin(tx=>authenticateHostedGrantCapability(tx,{
+  const capability=await commandTransaction(tx=>authenticateHostedGrantCapability(tx,{
     grantId:config.grant,ownerUserId:config.owner,providerGrantId:config.provider,
     workspaceId:config.workspace,tool:'claim_hosted_seat',providerStatus:async()=>({active:true})}));
   check(capability!==null,'real grant authorization');
   step='claim';
-  const result=await handleHostedCommand({command_id:crypto.randomUUID(),client_version:'0.1.80',
-    workspace_id:config.workspace,stream:{kind:'workspace'},
-    command:{kind:'claim_hosted_seat',name:'Grants regression',lifetime:'durable'}},capability);
+  // Observe the real command transaction before commit. This observer never
+  // selects a role: the production callback must run setTransaction itself.
+  const begin=db.begin.bind(db);
+  let observedClaims=0;
+  db.begin=(...args)=>{
+    const callback=args.pop();
+    return begin(...args,async tx=>{
+      try {
+        const value=await callback(tx);
+        await observeRole(tx);observedClaims++;
+        return value;
+      } catch(error) {
+        // An aborted SQL transaction cannot answer another query. Preserve its
+        // SQLSTATE and the last observed role instead of masking it with 25P02.
+        try {await observeRole(tx);} catch {}
+        throw error;
+      }
+    });
+  };
+  let result;
+  try {
+    result=await handleHostedCommand({command_id:crypto.randomUUID(),client_version:'0.1.80',
+      workspace_id:config.workspace,stream:{kind:'workspace'},
+      command:{kind:'claim_hosted_seat',name:'Grants regression',lifetime:'durable'}},capability);
+  } finally {db.begin=begin;}
+  check(observedClaims>0,'real command transaction role was observed');
   check(result.status===200&&result.body.status==='accepted'&&result.body.outcome==='created','real hosted claim succeeds');
   step='committed-principal';
   // A fresh transaction observes the principal, seat, context and stream event
   // after the command returned, rather than reading uncommitted fixture writes.
-  await db.begin(async tx=>{
+  await commandTransaction(async tx=>{
     const [committed]=await tx\x60SELECT p.principal_id,p.workspace_id,p.owner_user_id,p.name,
       p.transport,p.turn_only,p.identity_lifetime,c.context_id,hs.seat_id
       FROM swarm.agent_principals p JOIN swarm.hosted_mcp_seats hs USING(principal_id)
@@ -74,7 +113,7 @@ try {
 } catch(error) {
   // Raw SQL/driver diagnostics may include credentials or fixture parameters.
   const code=typeof error?.code==='string'&&/^[A-Z0-9]{5}$/.test(error.code)?error.code:null;
-  console.log('SID_PRODUCTION_GRANTS_FAILED '+JSON.stringify({step,code}));Deno.exitCode=1;
+  console.log('SID_PRODUCTION_GRANTS_FAILED '+JSON.stringify({step,code,...roles}));Deno.exitCode=1;
 } finally {await db.end();}
 `;
 
@@ -102,15 +141,10 @@ test('hosted claim commits under exact migrated swarm_command grants; old config
       await tx`SELECT pg_advisory_xact_lock(1936142700,hashtext('hosted-context-allocation'))`;
       await tx`INSERT INTO swarm.config(key,value) VALUES('hosted_context_allocation_enabled','true'::jsonb)`;
     });
-    const restricted = new URL(isolated.url);
-    // Keep swarm_command's login settings and migrated grants intact. The local
-    // administrator authenticates, then startup drops session authorization
-    // before the harness executes any query; no superuser session runs claims.
-    restricted.searchParams.set('options','-c session_authorization=swarm_command');
     const path=join(directory,'production-grants.mjs');writeFileSync(path,harness,{mode:0o600});
     const run=spawnSync('deno',['run','--no-lock','--config','supabase/functions/command/deno.json','--allow-read','--allow-env','--allow-net',path],
-      {encoding:'utf8',timeout:90000,input:JSON.stringify({commandDbUrl:restricted.toString(),apiUrl:local.API_URL,anonKey:local.ANON_KEY,owner,workspace,grant,provider})});
-    const receipt=run.stdout.split(/\r?\n/u).find(line=>/^SID_PRODUCTION_GRANTS_(?:OK|FAILED \{"step":"[a-z-]+","code":(?:null|"[A-Z0-9]{5}")\})$/u.test(line));
+      {encoding:'utf8',timeout:90000,input:JSON.stringify({commandDbUrl:isolated.url,apiUrl:local.API_URL,anonKey:local.ANON_KEY,owner,workspace,grant,provider})});
+    const receipt=run.stdout.split(/\r?\n/u).find(line=>/^SID_PRODUCTION_GRANTS_(?:OK|FAILED \{"step":"[a-z-]+","code":(?:null|"[A-Z0-9]{5}"),"current_user":(?:null|"[a-zA-Z0-9_]+"),"session_user":(?:null|"[a-zA-Z0-9_]+")\})$/u.test(line));
     assert.equal(run.status,0,receipt??'grants harness failed; raw credential-bearing output withheld');
     assert.equal(receipt,'SID_PRODUCTION_GRANTS_OK');
   } finally {

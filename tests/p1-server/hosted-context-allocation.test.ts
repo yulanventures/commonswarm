@@ -25,7 +25,7 @@ async function relocateIncomingSeatFk(tx: postgres.TransactionSql) {
     FOREIGN KEY (seat_id,grant_id,workspace_id,principal_id)
     REFERENCES swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,principal_id)`);
 }
-/** Reuse the proof's exact sets and predicates; emit catalog names only. */
+/** Reuse the proof's exact sets and predicates; emit catalog metadata only. */
 async function catalogDiagnostics(db: postgres.Sql, query: string) {
   const aggregate = 'SELECT COALESCE((SELECT bool_and(ok) FROM checks),false) AS catalog_ok;';
   assert.ok(query.includes(aggregate), 'diagnostics require the labelled proof aggregate');
@@ -41,13 +41,19 @@ async function catalogDiagnostics(db: postgres.Sql, query: string) {
   const rows = [];
   for (const [comparison, expected, actual, member] of sets) {
     // The full tuples decide equality, including types/defaults/ACL grantors.
-    // Only identifiers are projected out of the missing/extra tuples.
+    // Identifiers name missing/extra tuples; defaults get expressions below.
     const [row] = await db.unsafe(`${prefix}
       SELECT '${comparison}' AS comparison,
         ARRAY(SELECT ${member} FROM (SELECT * FROM ${expected} EXCEPT ALL SELECT * FROM ${actual}) missing ORDER BY 1) AS missing,
         ARRAY(SELECT ${member} FROM (SELECT * FROM ${actual} EXCEPT ALL SELECT * FROM ${expected}) extra ORDER BY 1) AS extra`);
     rows.push(row);
   }
+  rows.push(...await db.unsafe(`${prefix}
+    SELECT 'default_expressions' AS comparison,
+      COALESCE(jsonb_agg(jsonb_build_object('column',COALESCE(e.tab,a.tab)||'.'||COALESCE(e.name,a.name),
+        'expected',e.default_expression,'actual',a.default_expression) ORDER BY COALESCE(e.tab,a.tab),COALESCE(e.name,a.name))
+        FILTER (WHERE e.default_expression IS DISTINCT FROM a.default_expression), '[]'::jsonb) AS mismatches
+    FROM original_expected e FULL JOIN original_actual a USING(tab,name)`));
   // The named constraint comparison also checks options and exact definitions.
   rows.push(...await db.unsafe(`${prefix}
     SELECT 'named_constraints' AS comparison,
@@ -69,7 +75,11 @@ async function catalogDiagnostics(db: postgres.Sql, query: string) {
   rows.push(...await db.unsafe(`${prefix}
     SELECT 'context_defaults' AS comparison, ARRAY[]::text[] AS missing,
       ARRAY(SELECT a.attname::text FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid=d.adrelid AND a.attnum=d.adnum
-        WHERE d.adrelid=to_regclass('swarm.hosted_agent_contexts') ORDER BY 1) AS extra`));
+        WHERE d.adrelid=to_regclass('swarm.hosted_agent_contexts') ORDER BY 1) AS extra,
+      ARRAY(SELECT jsonb_build_object('column','hosted_agent_contexts.'||a.attname,
+        'expected',NULL,'actual',pg_get_expr(d.adbin,d.adrelid))
+        FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid=d.adrelid AND a.attnum=d.adnum
+        WHERE d.adrelid=to_regclass('swarm.hosted_agent_contexts') ORDER BY a.attname) AS mismatches`));
   rows.push(...await db.unsafe(`${prefix}
     SELECT 'column_acl' AS comparison, ARRAY[]::text[] AS missing,
       ARRAY(SELECT c.relname||'.'||a.attname||':'||CASE WHEN acl.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END||':'||acl.privilege_type
@@ -287,11 +297,20 @@ test('hosted allocation, replay, Q1/Q3 and hosted/local last-slot races commit c
     const [catalog]=await isolated.db.unsafe(catalogQuery);
     if (catalog?.catalog_ok !== true) await catalogDiagnostics(isolated.db, catalogQuery);
     assert.equal(catalog!.catalog_ok,true,'exact source-built reserve catalog');
+    // Extension visibility changes only deparsed qualification, not the default.
+    for (const path of ['pg_catalog', 'pg_catalog, extensions']) {
+      await isolated.db.begin(async tx=>{
+        await tx`SELECT set_config('search_path',${path},true)`;
+        const [visible]=await tx.unsafe(catalogQuery);
+        assert.equal(visible!.catalog_ok,true,`exact catalog under ${path}`);
+      });
+    }
     // Baseline column/FK inventory and complete privilege sets: every mutation
     // runs inside a rolled-back transaction, then checks the restored catalog.
     for(const [label,mutation] of [
       ['parent column', 'ALTER TABLE swarm.agent_principals DROP COLUMN parent_admin_grant_id'],
       ['parent FK', 'ALTER TABLE swarm.agent_principals DROP CONSTRAINT agent_principals_parent_admin_grant_id_fkey'],
+      ['wake default', "ALTER TABLE swarm.agent_principals ALTER COLUMN wake_id SET DEFAULT 'invalid'::text"],
       ['required seat UPDATE', 'REVOKE UPDATE ON swarm.hosted_mcp_seats FROM swarm_command'],
       ['extra seat DELETE', 'GRANT DELETE ON swarm.hosted_mcp_seats TO swarm_command'],
       ['required principal INSERT', 'REVOKE INSERT ON swarm.agent_principals FROM swarm_command'],

@@ -74,7 +74,12 @@ WITH expected_columns(name,typ,required) AS (VALUES
  ('agent_principals','revoked_at','timestamp with time zone',false,NULL::text),
  ('agent_principals','model','text',false,NULL::text),
  ('agent_principals','managed_at','timestamp with time zone',false,NULL::text),
- ('agent_principals','wake_id','text',true,$default$translate(encode(extensions.gen_random_bytes(32), 'base64'::text), '+/='::text, '-_'::text)$default$),
+ -- pg_get_expr omits the schema only when this exact extension function is
+ -- visible. Preserve the exact function, arguments and PostgreSQL text casts.
+ ('agent_principals','wake_id','text',true,
+   CASE WHEN pg_function_is_visible('extensions.gen_random_bytes(integer)'::regprocedure)
+   THEN $default$translate(encode(gen_random_bytes(32), 'base64'::text), '+/='::text, '-_'::text)$default$
+   ELSE $default$translate(encode(extensions.gen_random_bytes(32), 'base64'::text), '+/='::text, '-_'::text)$default$ END),
  ('agent_principals','transport','text',true,$default$'local'::text$default$),
  ('agent_principals','turn_only','boolean',true,$default$false$default$),
  ('agent_principals','parent_admin_grant_id','uuid',false,NULL::text),
