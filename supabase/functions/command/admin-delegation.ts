@@ -464,9 +464,9 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
 }
 
 /** A failed transaction retains only its failure card, in a new transaction.
- * No exception message, SQL parameter, secret or success event is copied here.
+ * No exception message, SQL parameter, secret or success event is copied here. A retryable (40P01) card caches no result.
  */
-export async function recordAdminFailure(tx: Sql, input: AdminInput, authentication: AdminAuthentication, operation?: AdminAuditKind): Promise<void> {
+export async function recordAdminFailure(tx: Sql, input: AdminInput, authentication: AdminAuthentication, operation?: AdminAuditKind, retryable = false): Promise<void> {
   const oauth = authentication.kind === 'oauth' && isVerifiedAdminAdmission(authentication.admission) ? authentication.admission : null;
   if (authentication.kind !== 'human' && !oauth) { await adminSecurityFailure(tx, 'unknown_admin_credential'); return; }
   if (oauth) {
@@ -512,7 +512,7 @@ export async function recordAdminFailure(tx: Sql, input: AdminInput, authenticat
     VALUES (${owner}::uuid, ${event.seq}, ${event.event_id}::uuid, ${event.command_id}, ${tx.json(event as unknown as postgres.JSONValue)})`;
   const projection = reduceAdminAuthority(account.projection, event);
   await tx`UPDATE swarm.admin_accounts SET seq = ${event.seq}, projection = ${tx.json(projection as unknown as postgres.JSONValue)} WHERE owner_user_id = ${owner}::uuid`;
-  if (typeof input.command_id === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(input.command_id)) {
+  if (!retryable && typeof input.command_id === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(input.command_id)) {
     const actorKey = actor.kind === 'human' ? `human:${actor.user_id}` : `delegated_admin:${actor.admin_identity_id}`;
     await tx`INSERT INTO swarm.admin_command_results(owner_user_id, actor_key, command_id, request_digest, response)
       VALUES (${owner}::uuid, ${actorKey}, ${input.command_id}, ${await adminDigest(input)}, ${tx.json(errorResult(503, 'admin_command_failed') as unknown as postgres.JSONValue)})

@@ -79,7 +79,7 @@ import {
   newestInteractiveAmrSeconds,
 } from "./fresh-auth.ts";
 import {
-  classifyCommandFailure,
+  adminFailureRetryable, adminOAuthFailureResult, classifyCommandFailure,
   dbCode,
   durableCommandFailure,
   finishCommandFailure,
@@ -13180,12 +13180,12 @@ async function runAdminOAuthCommand(input: AdminInput, admission: AdminAdmission
       return result;
     });
     return outcome.result;
-  } catch {
+  } catch (error) {
     console.error('admin_command_failed', 'transaction_failed');
-    // Replay admission has already committed; rollback cannot make it reusable.
-    try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication, kind); }); }
-    catch { return { status: 503, body: { error: 'admin_failure_audit_unavailable' } }; }
-    return { status: 503, body: { error: 'admin_command_failed' } };
+    // Replay admission has already committed; rollback cannot make it reusable. A 40P01 caches no result: retryable.
+    try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication, kind, adminFailureRetryable(error)); }); }
+    catch { return adminOAuthFailureResult(error, 'admin_failure_audit_unavailable'); }
+    return adminOAuthFailureResult(error, 'admin_command_failed');
   }
 }
 
@@ -14517,10 +14517,10 @@ export async function handleAdminWorkerCommand(
       return result;
     });
     return Date.now() < admission.token.expires_at && !deadline.signal.aborted ? outcome.result : { status: 401, body: { error: 'credential_expired' } };
-  } catch {
-    try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication); }); }
-    catch { return { status: 503, body: { error: 'admin_failure_audit_unavailable' } }; }
-    return { status: 503, body: { error: 'admin_command_failed' } };
+  } catch (error) {
+    try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication, undefined, adminFailureRetryable(error)); }); }
+    catch { return adminOAuthFailureResult(error, 'admin_failure_audit_unavailable'); }
+    return adminOAuthFailureResult(error, 'admin_command_failed');
   } finally {
     clearTimeout(timer); request.signal.removeEventListener('abort', abort);
   }

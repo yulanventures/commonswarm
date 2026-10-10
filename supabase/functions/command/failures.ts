@@ -107,3 +107,19 @@ export async function finishCommandFailure(
     ? { status: 503, body: { error: "temporarily_unavailable" } }
     : { status: 500, body: { error: "internal_error" } };
 }
+
+/** An OAuth admin transaction that ended in SQLSTATE 40P01 rolled back in full, and its
+ * failure card caches no result (recordAdminFailure), so the same command_id can run again.
+ * Read by code, never by message. */
+export function adminFailureRetryable(error: unknown): boolean {
+  return dbCode(error) === "40P01";
+}
+
+/** OAuth admin failure response. A retryable failure adds `retryable: true` (the
+ * `{ error, request_id, retryable }` envelope the clients parse); every other body is unchanged. */
+export function adminOAuthFailureResult(
+  error: unknown,
+  code: "admin_command_failed" | "admin_failure_audit_unavailable",
+): { status: 503; body: { error: string; retryable?: true } } {
+  return { status: 503, body: adminFailureRetryable(error) ? { error: code, retryable: true } : { error: code } };
+}
