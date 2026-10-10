@@ -1,3 +1,4 @@
+import { emptyApplicationSchema, repoSql } from "../support/admin-schema-db.js";
 /**
  * Managed delivery pending-surface against the served command function.
  *
@@ -1275,10 +1276,11 @@ test("section 5 catalog proof accepts the installed view and refuses an old heal
 test("HM catalog proof rejects a wake view without the turn-only fence", { timeout: 30_000 }, async () => {
   const proof = readFileSync(new URL("20260928000001-catalog.sql", HM_PROOF_DIR), "utf8")
     .replace(/\\gset\s*$/, "");
-  const [installed] = await sql.unsafe<{ catalog_ok: boolean }[]>(proof);
-  assert.equal(installed?.catalog_ok, true);
-
   await sql.begin(async (tx) => {
+    await tx.unsafe(emptyApplicationSchema());
+    await tx.unsafe(repoSql('deploy/release-proofs/session-identity/20261006000004-rollback.sql'));
+    const [installed] = await tx.unsafe<{ catalog_ok: boolean }[]>(proof);
+    assert.equal(installed?.catalog_ok, true);
     const withoutFence = replaceOnce(
       hmEligibleViewBody(),
       "  AND p.turn_only = false\n",

@@ -254,7 +254,7 @@ $function$$expected$,'[[:space:];]','','g')
    WHERE p.oid=to_regprocedure('swarm.resolve_hosted_seat_command_authorization(uuid, text, text)') AND r.rolname='swarm_admin' AND l.lanname='sql' AND p.prosecdef=true
      AND p.proconfig=ARRAY['search_path=swarm, pg_catalog']::text[] AND p.provolatile='s' AND p.prokind='f'
      AND NOT p.proisstrict AND NOT p.proleakproof AND p.proparallel='u' AND p.prosupport=0 AND p.procost=100
-     AND pg_get_function_result(p.oid)='TABLE( grant_id uuid, provider_grant_id text, seat_id uuid, handle text, workspace_id uuid, stream_id uuid, owner_user_id uuid, principal_id uuid, name text )' AND pg_get_function_identity_arguments(p.oid)='p_grant_id uuid, p_handle text, p_tool text'
+     AND regexp_replace(pg_get_function_result(p.oid),'[[:space:]]','','g')=regexp_replace('TABLE( grant_id uuid, provider_grant_id text, seat_id uuid, handle text, workspace_id uuid, stream_id uuid, owner_user_id uuid, principal_id uuid, name text )','[[:space:]]','','g') AND pg_get_function_identity_arguments(p.oid)='p_grant_id uuid, p_handle text, p_tool text'
      AND p.prosrc='
   SELECT g.grant_id, g.provider_grant_id, hs.seat_id, h.handle,
          hs.workspace_id, st.stream_id, hs.owner_user_id,
@@ -353,7 +353,7 @@ $function$;'),'[[:space:];]','','g')
    WHERE p.oid=to_regprocedure('swarm.resolve_hosted_seat_read_authorization(uuid, text, text)') AND r.rolname='swarm_admin' AND l.lanname='sql' AND p.prosecdef=true
      AND p.proconfig=ARRAY['search_path=swarm, pg_catalog']::text[] AND p.provolatile='s' AND p.prokind='f'
      AND NOT p.proisstrict AND NOT p.proleakproof AND p.proparallel='u' AND p.prosupport=0 AND p.procost=100
-     AND pg_get_function_result(p.oid)='TABLE( grant_id uuid, provider_grant_id text, seat_id uuid, handle text, workspace_id uuid, stream_id uuid, owner_user_id uuid, principal_id uuid, name text )' AND pg_get_function_identity_arguments(p.oid)='p_grant_id uuid, p_handle text, p_tool text'
+     AND regexp_replace(pg_get_function_result(p.oid),'[[:space:]]','','g')=regexp_replace('TABLE( grant_id uuid, provider_grant_id text, seat_id uuid, handle text, workspace_id uuid, stream_id uuid, owner_user_id uuid, principal_id uuid, name text )','[[:space:]]','','g') AND pg_get_function_identity_arguments(p.oid)='p_grant_id uuid, p_handle text, p_tool text'
      AND p.prosrc='
   SELECT g.grant_id, g.provider_grant_id, hs.seat_id, h.handle,
          hs.workspace_id, st.stream_id, hs.owner_user_id,
@@ -452,7 +452,7 @@ $function$;'),'[[:space:];]','','g')
    WHERE p.oid=to_regprocedure('swarm.resolve_hosted_mcp_check_authorization(uuid, text)') AND r.rolname='swarm_admin' AND l.lanname='sql' AND p.prosecdef=true
      AND p.proconfig=ARRAY['search_path=swarm, pg_catalog']::text[] AND p.provolatile='s' AND p.prokind='f'
      AND NOT p.proisstrict AND NOT p.proleakproof AND p.proparallel='u' AND p.prosupport=0 AND p.procost=100
-     AND pg_get_function_result(p.oid)='TABLE( grant_id uuid, provider_grant_id text, seat_id uuid, handle text, workspace_id uuid, stream_id uuid, owner_user_id uuid, principal_id uuid, name text )' AND pg_get_function_identity_arguments(p.oid)='p_grant_id uuid, p_handle text'
+     AND regexp_replace(pg_get_function_result(p.oid),'[[:space:]]','','g')=regexp_replace('TABLE( grant_id uuid, provider_grant_id text, seat_id uuid, handle text, workspace_id uuid, stream_id uuid, owner_user_id uuid, principal_id uuid, name text )','[[:space:]]','','g') AND pg_get_function_identity_arguments(p.oid)='p_grant_id uuid, p_handle text'
      AND p.prosrc='
   SELECT *
   FROM swarm.resolve_hosted_seat_read_authorization(p_grant_id, p_handle, ''check'')
@@ -846,5 +846,5 @@ $function$;'),'[[:space:];]','','g')
  ('legacy_cursor_fk',COALESCE((EXISTS(SELECT 1 FROM pg_constraint c WHERE c.conrelid=to_regclass('swarm.hosted_mcp_check_batches') AND c.confrelid=to_regclass('swarm.hosted_mcp_check_cursors') AND c.contype='f' AND pg_get_constraintdef(c.oid)='FOREIGN KEY (seat_id, grant_id, workspace_id, principal_id) REFERENCES swarm.hosted_mcp_check_cursors(seat_id, grant_id, workspace_id, principal_id)')),false)),
  ('legacy_batch_index',COALESCE((EXISTS(SELECT 1 FROM pg_index i WHERE i.indexrelid=to_regclass('swarm.hosted_mcp_check_batches_one_active') AND pg_get_indexdef(i.indexrelid)='CREATE UNIQUE INDEX hosted_mcp_check_batches_one_active ON swarm.hosted_mcp_check_batches USING btree (seat_id) WHERE (acknowledged_at IS NULL)')),false)),
  ('cron.absent',COALESCE((CASE WHEN to_regclass('cron.job') IS NULL THEN true ELSE (xpath('/table/row/n/text()',query_to_xml('SELECT count(*) AS n FROM cron.job WHERE jobname=''hosted-agent-context-expiry'' AND database=current_database()',false,true,'')))[1]::text='0' END),false)))
-SELECT COALESCE((SELECT bool_and(ok) FROM (SELECT ok FROM checks UNION ALL SELECT ok FROM lifecycle_checks) all_checks),false) AS catalog_ok
+SELECT COALESCE((SELECT bool_and(ok) FROM (SELECT ok FROM checks UNION ALL SELECT ok FROM lifecycle_checks) all_checks),false) AS before_ok
 \gset

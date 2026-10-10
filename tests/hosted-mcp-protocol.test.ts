@@ -622,6 +622,10 @@ test("claim_seat routes through the grant home and preserves explicit consent ch
       assert.match(query, /SELECT grant_id, owner_user_id, home_workspace_id/u);
       return [{ grant_id: grantId, owner_user_id: verified.subject, home_workspace_id: home }];
     }
+    if (query.includes("swarm.audit_hosted_authorization_denial")) {
+      assert.deepEqual(values, [grantId, verified.providerGrantId, "claim_hosted_seat"]);
+      return [];
+    }
     assert.match(query, /swarm.resolve_hosted_grant_authorization/u);
     assert.equal(values[3], "claim_hosted_seat");
     authorizedWorkspaces.push(values[2]);

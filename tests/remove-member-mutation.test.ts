@@ -94,11 +94,11 @@ test("idempotency replay is resolved before remove_member fresh-auth refusal", a
   const between = source.slice(step7, afterStep7);
   assert.match(
     between,
-    /SELECT workspace_id, stream_id, request_hash, response\s+FROM swarm\.idempotency_keys/,
+    /SELECT workspace_id, stream_id, request_hash, response, context_id\s+FROM swarm\.idempotency_keys/,
   );
   assert.match(
     between,
-    /\? replayResult\(storedResponse\(existing\.response\), kind\)/,
+    /const replay=replayResult\(storedResponse\(existing\.response\),kind\);return hostedSeat\?\{\.\.\.replay,body:\{\.\.\.replay\.body,replayed:true\}\}:replay;/,
   );
   assert.doesNotMatch(
     between,

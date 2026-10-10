@@ -212,6 +212,10 @@ WITH expected_columns(name,typ,required) AS (VALUES
      OR pg_get_expr(polqual,polrelid)<>'true' OR pg_get_expr(polwithcheck,polrelid)<>'true'))),false)),
  ('hosted_agent_contexts.index_owners', COALESCE(((SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid
    WHERE i.indrelid=to_regclass('swarm.hosted_agent_contexts') AND c.relowner=(SELECT oid FROM pg_roles WHERE rolname='swarm_admin'))=7),false)),
+ ('legacy_handles.context_backfill', COALESCE((NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_seat_handles h
+   LEFT JOIN swarm.hosted_agent_contexts c ON c.handle=h.handle AND c.seat_id=h.seat_id
+   WHERE c.context_id IS NULL OR c.origin<>'legacy' OR c.kind<>'chat' OR c.created_at<>h.created_at
+     OR c.idle_expires_at IS NOT NULL OR c.absolute_expires_at IS NOT NULL)),false)),
  ('config.hosted_context_allocation_enabled', COALESCE((EXISTS(SELECT 1 FROM swarm.config WHERE key='hosted_context_allocation_enabled' AND value='false'::jsonb)),false)),
  ('hosted_agent_contexts_clocks_check', COALESCE((EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('swarm.hosted_agent_contexts')
    AND conname='hosted_agent_contexts_clocks_check' AND convalidated AND NOT condeferrable
@@ -684,7 +688,7 @@ $function$;'),'[[:space:];]','','g')
    WHERE p.oid=to_regprocedure('swarm.resolve_hosted_seat_command_authorization(uuid, text, text)') AND r.rolname='swarm_admin' AND l.lanname='sql' AND p.prosecdef=true
      AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND p.provolatile='v' AND p.prokind='f'
      AND NOT p.proisstrict AND NOT p.proleakproof AND p.proparallel='u' AND p.prosupport=0 AND p.procost=100
-     AND pg_get_function_result(p.oid)='TABLE(grant_id uuid, provider_grant_id text, seat_id uuid, handle text, workspace_id uuid, stream_id uuid, owner_user_id uuid, principal_id uuid, name text)' AND pg_get_function_identity_arguments(p.oid)='p_grant_id uuid, p_handle text, p_tool text'
+     AND regexp_replace(pg_get_function_result(p.oid),'[[:space:]]','','g')=regexp_replace('TABLE(grant_id uuid, provider_grant_id text, seat_id uuid, handle text, workspace_id uuid, stream_id uuid, owner_user_id uuid, principal_id uuid, name text)','[[:space:]]','','g') AND pg_get_function_identity_arguments(p.oid)='p_grant_id uuid, p_handle text, p_tool text'
      AND p.prosrc='
 SELECT (j->>''grant_id'')::uuid,j->>''provider_grant_id'',(j->>''seat_id'')::uuid,j->>''handle'',
       (j->>''workspace_id'')::uuid,(j->>''stream_id'')::uuid,(j->>''owner_user_id'')::uuid,(j->>''principal_id'')::uuid,j->>''name''
@@ -707,7 +711,7 @@ $function$;'),'[[:space:];]','','g')
    WHERE p.oid=to_regprocedure('swarm.resolve_hosted_seat_read_authorization(uuid, text, text)') AND r.rolname='swarm_admin' AND l.lanname='sql' AND p.prosecdef=true
      AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND p.provolatile='v' AND p.prokind='f'
      AND NOT p.proisstrict AND NOT p.proleakproof AND p.proparallel='u' AND p.prosupport=0 AND p.procost=100
-     AND pg_get_function_result(p.oid)='TABLE(grant_id uuid, provider_grant_id text, seat_id uuid, handle text, workspace_id uuid, stream_id uuid, owner_user_id uuid, principal_id uuid, name text)' AND pg_get_function_identity_arguments(p.oid)='p_grant_id uuid, p_handle text, p_tool text'
+     AND regexp_replace(pg_get_function_result(p.oid),'[[:space:]]','','g')=regexp_replace('TABLE(grant_id uuid, provider_grant_id text, seat_id uuid, handle text, workspace_id uuid, stream_id uuid, owner_user_id uuid, principal_id uuid, name text)','[[:space:]]','','g') AND pg_get_function_identity_arguments(p.oid)='p_grant_id uuid, p_handle text, p_tool text'
      AND p.prosrc='
 SELECT (j->>''grant_id'')::uuid,j->>''provider_grant_id'',(j->>''seat_id'')::uuid,j->>''handle'',
       (j->>''workspace_id'')::uuid,(j->>''stream_id'')::uuid,(j->>''owner_user_id'')::uuid,(j->>''principal_id'')::uuid,j->>''name''
@@ -730,7 +734,7 @@ $function$;'),'[[:space:];]','','g')
    WHERE p.oid=to_regprocedure('swarm.resolve_hosted_mcp_check_authorization(uuid, text)') AND r.rolname='swarm_admin' AND l.lanname='sql' AND p.prosecdef=true
      AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND p.provolatile='v' AND p.prokind='f'
      AND NOT p.proisstrict AND NOT p.proleakproof AND p.proparallel='u' AND p.prosupport=0 AND p.procost=100
-     AND pg_get_function_result(p.oid)='TABLE(grant_id uuid, provider_grant_id text, seat_id uuid, handle text, workspace_id uuid, stream_id uuid, owner_user_id uuid, principal_id uuid, name text)' AND pg_get_function_identity_arguments(p.oid)='p_grant_id uuid, p_handle text'
+     AND regexp_replace(pg_get_function_result(p.oid),'[[:space:]]','','g')=regexp_replace('TABLE(grant_id uuid, provider_grant_id text, seat_id uuid, handle text, workspace_id uuid, stream_id uuid, owner_user_id uuid, principal_id uuid, name text)','[[:space:]]','','g') AND pg_get_function_identity_arguments(p.oid)='p_grant_id uuid, p_handle text'
      AND p.prosrc='
 SELECT (j->>''grant_id'')::uuid,j->>''provider_grant_id'',(j->>''seat_id'')::uuid,j->>''handle'',
       (j->>''workspace_id'')::uuid,(j->>''stream_id'')::uuid,(j->>''owner_user_id'')::uuid,(j->>''principal_id'')::uuid,j->>''name''
@@ -996,7 +1000,7 @@ SELECT jsonb_build_object(''display_name'',COALESCE(hs.display_name,p.name),''di
   ''active_contexts'',(SELECT count(*) FROM swarm.hosted_agent_contexts c WHERE c.seat_id=hs.seat_id AND c.closed_at IS NULL AND (c.idle_expires_at IS NULL OR c.idle_expires_at>statement_timestamp()) AND (c.absolute_expires_at IS NULL OR c.absolute_expires_at>statement_timestamp())))
   FROM swarm.agent_principals p JOIN swarm.hosted_mcp_seats hs USING(principal_id) JOIN swarm.hosted_mcp_grants g USING(grant_id)
   LEFT JOIN commonswarm_oauth.cimd_cache cache ON cache.client_id=g.client_id AND cache.expires_at>statement_timestamp()
-  WHERE p.principal_id=p_principal_id AND swarm.is_member(p.workspace_id,auth.uid())
+  WHERE p.principal_id=p_principal_id AND swarm.is_member(p.workspace_id,COALESCE(NULLIF(current_setting(''request.jwt.claim.sub'',true),'''')::uuid,(NULLIF(current_setting(''request.jwt.claims'',true),'''')::jsonb->>''sub'')::uuid))
     AND NOT EXISTS(SELECT 1 FROM swarm.agent_join_credentials c WHERE c.registrar_principal_id=p.principal_id)
 '
      AND regexp_replace(upper(pg_get_functiondef(p.oid)),'[[:space:];]','','g')=regexp_replace(upper('CREATE OR REPLACE FUNCTION swarm.hosted_principal_context_summary(p_principal_id uuid)
@@ -1010,7 +1014,7 @@ SELECT jsonb_build_object(''display_name'',COALESCE(hs.display_name,p.name),''di
   ''active_contexts'',(SELECT count(*) FROM swarm.hosted_agent_contexts c WHERE c.seat_id=hs.seat_id AND c.closed_at IS NULL AND (c.idle_expires_at IS NULL OR c.idle_expires_at>statement_timestamp()) AND (c.absolute_expires_at IS NULL OR c.absolute_expires_at>statement_timestamp())))
   FROM swarm.agent_principals p JOIN swarm.hosted_mcp_seats hs USING(principal_id) JOIN swarm.hosted_mcp_grants g USING(grant_id)
   LEFT JOIN commonswarm_oauth.cimd_cache cache ON cache.client_id=g.client_id AND cache.expires_at>statement_timestamp()
-  WHERE p.principal_id=p_principal_id AND swarm.is_member(p.workspace_id,auth.uid())
+  WHERE p.principal_id=p_principal_id AND swarm.is_member(p.workspace_id,COALESCE(NULLIF(current_setting(''request.jwt.claim.sub'',true),'''')::uuid,(NULLIF(current_setting(''request.jwt.claims'',true),'''')::jsonb->>''sub'')::uuid))
     AND NOT EXISTS(SELECT 1 FROM swarm.agent_join_credentials c WHERE c.registrar_principal_id=p.principal_id)
 $function$;'),'[[:space:];]','','g')
      AND (SELECT array_agg(pg_get_userbyid(a.grantee)||':'||a.privilege_type||':'||pg_get_userbyid(a.grantor)||':'||a.is_grantable::text ORDER BY pg_get_userbyid(a.grantee)||':'||a.privilege_type||':'||pg_get_userbyid(a.grantor)||':'||a.is_grantable::text)

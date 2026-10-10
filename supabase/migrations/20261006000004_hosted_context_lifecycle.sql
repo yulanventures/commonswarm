@@ -1,5 +1,5 @@
 -- Phase 3 lifecycle. Operator owns the transaction and ledger.
--- No backfill and no allocation activation in this migration.
+-- Backfill every existing handle; allocation remains disabled.
 SELECT pg_advisory_xact_lock(1936142700, hashtext('hosted-context-allocation'));
 ALTER TABLE swarm.hosted_mcp_seats ADD CONSTRAINT hosted_mcp_seats_current_identity UNIQUE(seat_id, workspace_id, principal_id);
 ALTER TABLE swarm.hosted_mcp_check_cursors ADD CONSTRAINT hosted_mcp_check_cursors_identity UNIQUE(seat_id, workspace_id, principal_id);
@@ -34,6 +34,12 @@ ALTER TABLE swarm.audit_log ADD COLUMN context_id uuid REFERENCES swarm.hosted_a
 ALTER TABLE swarm.idempotency_keys ADD COLUMN context_id uuid REFERENCES swarm.hosted_agent_contexts(context_id);
 CREATE INDEX hosted_outcomes_context ON swarm.idempotency_keys(context_id) WHERE context_id IS NOT NULL;
 CREATE INDEX hosted_audit_context ON swarm.audit_log(context_id,occurred_at) WHERE context_id IS NOT NULL;
+
+-- Preserve every issued handle, including revoked handles, without reviving it.
+-- Existing grants/seats/handle revocation checks remain in the resolver.
+INSERT INTO swarm.hosted_agent_contexts(context_id,handle,seat_id,kind,created_at,last_business_at,idle_expires_at,absolute_expires_at,origin)
+SELECT gen_random_uuid(),h.handle,h.seat_id,'chat',h.created_at,h.created_at,NULL,NULL,'legacy'
+FROM swarm.hosted_mcp_seat_handles h;
 
 CREATE OR REPLACE FUNCTION swarm.hosted_mcp_check_cursors_guard()
 RETURNS trigger
@@ -455,7 +461,7 @@ SELECT jsonb_build_object('display_name',COALESCE(hs.display_name,p.name),'disam
   'active_contexts',(SELECT count(*) FROM swarm.hosted_agent_contexts c WHERE c.seat_id=hs.seat_id AND c.closed_at IS NULL AND (c.idle_expires_at IS NULL OR c.idle_expires_at>statement_timestamp()) AND (c.absolute_expires_at IS NULL OR c.absolute_expires_at>statement_timestamp())))
   FROM swarm.agent_principals p JOIN swarm.hosted_mcp_seats hs USING(principal_id) JOIN swarm.hosted_mcp_grants g USING(grant_id)
   LEFT JOIN commonswarm_oauth.cimd_cache cache ON cache.client_id=g.client_id AND cache.expires_at>statement_timestamp()
-  WHERE p.principal_id=p_principal_id AND swarm.is_member(p.workspace_id,auth.uid())
+  WHERE p.principal_id=p_principal_id AND swarm.is_member(p.workspace_id,COALESCE(NULLIF(current_setting('request.jwt.claim.sub',true),'')::uuid,(NULLIF(current_setting('request.jwt.claims',true),'')::jsonb->>'sub')::uuid))
     AND NOT EXISTS(SELECT 1 FROM swarm.agent_join_credentials c WHERE c.registrar_principal_id=p.principal_id)
 $sid$;
 
@@ -693,13 +699,37 @@ CREATE TRIGGER hosted_household_event_context BEFORE INSERT ON swarm.household_o
 CREATE TRIGGER hosted_household_event_context BEFORE INSERT ON swarm.household_todo_events FOR EACH ROW EXECUTE FUNCTION swarm.hosted_household_event_context();
 
 -- Canonical data-free reserve begins. Decode bare "--" as empty; otherwise strip exactly "-- ".
--- -- Data-free reserve only, in the operator-owned transaction.
+-- -- Reserve in the operator-owned transaction; open legacy backfill is derived state.
 -- SELECT pg_advisory_xact_lock(1936142700, hashtext('hosted-context-allocation'));
+-- -- Keep the admission facts and history stable until the inverse completes.
+-- LOCK TABLE swarm.hosted_agent_contexts, swarm.hosted_mcp_seat_handles,
+--   swarm.hosted_mcp_seats, swarm.hosted_mcp_check_batches, swarm.audit_log,
+--   swarm.idempotency_keys, swarm.events, swarm.household_object_events,
+--   swarm.household_todo_events, swarm.household_object_streams IN SHARE ROW EXCLUSIVE MODE;
 -- DO $reserve$
 -- BEGIN
---   IF EXISTS (SELECT 1 FROM swarm.hosted_agent_contexts)
---     OR EXISTS (SELECT 1 FROM swarm.hosted_mcp_check_batches WHERE context_id IS NOT NULL)
---     OR EXISTS (SELECT 1 FROM swarm.audit_log WHERE context_id IS NOT NULL OR context_details @? '$.**.context_id')
+--   IF EXISTS (SELECT 1 FROM swarm.hosted_agent_contexts
+--     WHERE origin<>'legacy' OR parent_context IS NOT NULL) THEN
+--     RAISE EXCEPTION 'reserve rollback refused: hosted context identity' USING ERRCODE='55000';
+--   END IF;
+--   -- A deadline is terminal before the sweep too. Seat or handle revocation survives
+--   -- the inverse; context closure/deadlines alone do not survive the old resolver.
+--   IF EXISTS (SELECT 1 FROM swarm.hosted_agent_contexts c
+--     JOIN swarm.hosted_mcp_seat_handles h ON h.handle=c.handle AND h.seat_id=c.seat_id
+--     JOIN swarm.hosted_mcp_seats s ON s.seat_id=c.seat_id
+--     WHERE (c.closed_at IS NOT NULL OR c.idle_expires_at<=clock_timestamp()
+--       OR c.absolute_expires_at<=clock_timestamp())
+--       AND h.revoked_at IS NULL AND s.revoked_at IS NULL) THEN
+--     RAISE EXCEPTION 'reserve rollback refused: hosted context access would reopen' USING ERRCODE='55000';
+--   END IF;
+--   -- Only open, parentless legacy rows backed by the original handle are derived.
+--   -- Closed rows remain history even when another revocation already denies access.
+--   IF EXISTS (SELECT 1 FROM swarm.hosted_agent_contexts c WHERE c.closed_at IS NOT NULL
+--       OR NOT EXISTS (SELECT 1 FROM swarm.hosted_mcp_seat_handles h
+--         WHERE h.handle=c.handle AND h.seat_id=c.seat_id))
+--     OR EXISTS (SELECT 1 FROM swarm.hosted_mcp_check_batches
+--       WHERE context_id IS NOT NULL OR cancelled_at IS NOT NULL OR cancel_reason IS NOT NULL)
+--     OR EXISTS (SELECT 1 FROM swarm.audit_log WHERE context_id IS NOT NULL OR context_details IS NOT NULL)
 --     OR EXISTS (SELECT 1 FROM swarm.idempotency_keys WHERE context_id IS NOT NULL OR response @? '$.**.context_id')
 --     OR EXISTS (SELECT 1 FROM swarm.events WHERE payload @? '$.**.context_id')
 --     OR EXISTS (SELECT 1 FROM swarm.household_object_events WHERE event @? '$.**.context_id')
@@ -710,7 +740,14 @@ CREATE TRIGGER hosted_household_event_context BEFORE INSERT ON swarm.household_t
 -- END
 -- $reserve$;
 -- -- Complete source-built inverse at prerequisite 539b5e83279ec856ea78b56995e583c5291d6852.
--- SELECT cron.unschedule(jobid) FROM cron.job WHERE jobname='hosted-agent-context-expiry' AND database=current_database() AND username=current_user;
+-- DO $unschedule$
+-- BEGIN
+--   IF to_regclass('cron.job') IS NOT NULL THEN
+--     PERFORM cron.unschedule(jobid) FROM cron.job
+--       WHERE jobname='hosted-agent-context-expiry' AND database=current_database() AND username=current_user;
+--   END IF;
+-- END
+-- $unschedule$;
 --
 -- DROP TRIGGER hosted_household_event_context ON swarm.household_object_events;
 --
@@ -723,6 +760,9 @@ CREATE TRIGGER hosted_household_event_context BEFORE INSERT ON swarm.household_t
 -- DROP TRIGGER hosted_legacy_handle_guard ON swarm.hosted_mcp_seat_handles;
 --
 -- DROP TRIGGER hosted_context_guard ON swarm.hosted_agent_contexts;
+--
+-- -- The reserve has proved these open legacy rows are derived from the handle ledger.
+-- DELETE FROM swarm.hosted_agent_contexts;
 --
 -- DROP VIEW swarm_read.agent_principals;
 -- CREATE OR REPLACE VIEW swarm_read.agent_principals

@@ -37,6 +37,9 @@ function fixture() {
     INSERT INTO swarm.agent_runs(run_id,principal_id,device_id) VALUES ('${run}','${local}','${device}');
     INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,scopes,token_hash,expires_at,lineage_id)
       VALUES ('${credential}','${local}','${run}','[]',decode(repeat('b',64),'hex'),clock_timestamp()+interval '1 hour','${randomUUID()}');
+    INSERT INTO swarm.hosted_agent_contexts(context_id,handle,seat_id,kind,created_at,last_business_at,idle_expires_at,absolute_expires_at,origin)
+      SELECT gen_random_uuid(),h.handle,h.seat_id,'chat',h.created_at,h.created_at,NULL,NULL,'legacy'
+      FROM swarm.hosted_mcp_seat_handles h;
     INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at,hosted_grant_id)
       VALUES ('${connection}','${grant}','${workspace}','${principal}','${owner}','shared',ARRAY['read','create','update'],'${consent}',NULL,'${grant}'),
         ('${credential}','${run}','${workspace}','${local}','${owner}','shared',ARRAY['read','create','update'],'${consent}',clock_timestamp()+interval '1 hour',NULL);

@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { emptyApplicationSchema, localClusterAdminUrl, repoSql } from '../support/admin-schema-db.js';
 
-function fixture() {
+function fixture(seedContexts = true) {
   const owner = randomUUID(), other = randomUUID(), workspace = randomUUID(), foreign = randomUUID(), consent = randomUUID();
   const principal = randomUUID(), grant = randomUUID(), connection = randomUUID();
   const foreignPrincipal = randomUUID(), foreignGrant = randomUUID(), foreignConnection = randomUUID(), foreignReceipt = randomUUID();
@@ -42,6 +42,11 @@ function fixture() {
     INSERT INTO swarm.hosted_mcp_seat_handles(handle,seat_id,grant_id,workspace_id,principal_id,created_at) VALUES
       ('${handle}','${connection}','${grant}','${workspace}','${principal}',clock_timestamp()),
       ('${foreignHandle}','${foreignConnection}','${foreignGrant}','${foreign}','${foreignPrincipal}',clock_timestamp());
+    ${seedContexts ? `
+    INSERT INTO swarm.hosted_agent_contexts(context_id,handle,seat_id,kind,created_at,last_business_at,idle_expires_at,absolute_expires_at,origin)
+      SELECT gen_random_uuid(),h.handle,h.seat_id,'chat',h.created_at,h.created_at,NULL,NULL,'legacy'
+      FROM swarm.hosted_mcp_seat_handles h;
+    ` : ""}
     INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at,hosted_grant_id)
       VALUES ('${connection}','${grant}','${workspace}','${principal}','${owner}','shared',ARRAY['read','create','update'],'${consent}',NULL,'${grant}');
   `;
@@ -70,6 +75,7 @@ try {
     };
     await tx.unsafe(input.schema);
     await tx.unsafe(input.setup);
+    if (input.lifecycle) await tx.unsafe(input.lifecycle);
     api.db.begin = (async (...args: unknown[]) => {
       await restore();
       const result = await (args.at(-1) as (sql: typeof tx) => Promise<unknown>)(tx);
@@ -91,6 +97,24 @@ try {
     };
     const home = { grantId: f.grant, providerGrantId: 'synthetic-' + f.grant, handle: f.handle };
     const away = { grantId: f.foreignGrant, providerGrantId: 'synthetic-' + f.foreignGrant, handle: f.foreignHandle };
+    if (input.lifecycle) {
+      const contexts = await tx\`SELECT h.handle, c.kind, c.origin, c.created_at=h.created_at AS original_created,
+        c.last_business_at=h.created_at AS original_activity, c.idle_expires_at, c.absolute_expires_at,
+        c.closed_at, c.close_reason, c.parent_context
+        FROM swarm.hosted_mcp_seat_handles h LEFT JOIN swarm.hosted_agent_contexts c USING(handle,seat_id)\`;
+      assert.equal(contexts.length, 2, 'migration maps both pre-phase-3 handles');
+      for (const c of contexts) assert.deepEqual({ ...c, handle: undefined }, {
+        handle: undefined, kind: 'chat', origin: 'legacy', original_created: true, original_activity: true,
+        idle_expires_at: null, absolute_expires_at: null, closed_at: null, close_reason: null, parent_context: null,
+      }, 'exact durable legacy backfill shape');
+      const checkCap = await capability('check', home);
+      const checked = await api.handleHostedCommand({ command_id: crypto.randomUUID(), client_version: '0.1.80',
+        workspace_id: f.workspace, stream: { kind: 'workspace' },
+        command: { kind: 'open_hosted_mcp_check_batch', seat: f.handle },
+      }, checkCap);
+      assert.equal(checked.status, 200, 'pre-phase-3 handle checks immediately after migration');
+    }
+
     const read = async (tool: string, fields: Record<string, unknown>, binding = home, workspace: string = f.workspace) => readApi.handleHostedRead({
       resource: 'household', workspace_id: workspace, tool,
       arguments: { seat: binding.handle, ...fields },
@@ -160,13 +184,19 @@ try {
 }
 `;
 
-test('hosted to-do reads use the household read path and refuse another workspace', { timeout: 120_000 }, () => {
+// The migration case owns the upgrade regression: older coverage seeded a
+// context after schema restore, so it could not detect a missing live backfill.
+for (const upgrade of [false, true]) test(upgrade
+  ? 'pre-phase-3 handles keep check and to-do access immediately after migration 0004'
+  : 'hosted to-do reads use the household read path and refuse another workspace', { timeout: 120_000 }, () => {
   const local = JSON.parse(execFileSync('supabase', ['status', '-o', 'json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
-  const f = fixture();
+  const f = fixture(!upgrade);
   const schema = emptyApplicationSchema() + repoSql('supabase/household-todo-reserve/20261006000001-rollback.sql')
-    + repoSql('supabase/migrations/20261006000001_household_todos.sql');
+    + repoSql('supabase/migrations/20261006000001_household_todos.sql')
+    + (upgrade ? repoSql('deploy/release-proofs/session-identity/20261006000004-rollback.sql') : '');
+  const lifecycle = upgrade ? repoSql('supabase/migrations/20261006000004_hosted_context_lifecycle.sql') : '';
   const result = spawnSync('deno', ['eval', '--no-lock', '--config', 'supabase/functions/command/deno.json', harness], {
-    cwd: process.cwd(), encoding: 'utf8', input: JSON.stringify({ f, schema, setup: f.setup }),
+    cwd: process.cwd(), encoding: 'utf8', input: JSON.stringify({ f, schema, setup: f.setup, lifecycle }),
     env: { PATH: process.env.PATH ?? '', ...(process.env.DENO_DIR ? { DENO_DIR: process.env.DENO_DIR } : {}),
       SWARM_ENV: 'test', SWARM_DATABASE_URL: localClusterAdminUrl(local.DB_URL),
       SUPABASE_URL: 'https://storage.example.test', SUPABASE_ANON_KEY: 'synthetic-anon', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-storage' },

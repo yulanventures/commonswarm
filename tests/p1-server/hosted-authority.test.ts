@@ -621,16 +621,12 @@ test("HM hosted catalogs enforce RLS, least privilege, composite ownership, and 
       AND NOT has_function_privilege('swarm_command',
         'swarm.resolve_hosted_seat_read_authorization(uuid,text,text)', 'EXECUTE')
       AS functions_ok,
-      (
-        SELECT count(*) >= 2
-        FROM pg_constraint
-        WHERE contype = 'f'
-          AND conrelid = ANY(ARRAY[
-            'swarm.hosted_mcp_seats'::regclass,
-            'swarm.hosted_mcp_seat_handles'::regclass
-          ])
-          AND pg_get_constraintdef(oid) LIKE '%grant_id%workspace_id%'
-      ) AS composites_ok,
+      EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='swarm.hosted_mcp_seats'::regclass
+        AND contype='f' AND pg_get_constraintdef(oid)='FOREIGN KEY (grant_id, workspace_id, owner_user_id) REFERENCES swarm.hosted_mcp_grant_workspaces(grant_id, workspace_id, owner_user_id)')
+      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='swarm.hosted_mcp_seat_handles'::regclass
+        AND contype='f' AND pg_get_constraintdef(oid)='FOREIGN KEY (seat_id, workspace_id, principal_id) REFERENCES swarm.hosted_mcp_seats(seat_id, workspace_id, principal_id)')
+      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='swarm.hosted_mcp_seat_handles'::regclass
+        AND contype='f' AND pg_get_constraintdef(oid)='FOREIGN KEY (grant_id) REFERENCES swarm.hosted_mcp_grants(grant_id)') AS composites_ok,
       (
         SELECT pg_get_constraintdef(oid) LIKE '%join%hosted_grant%hosted_seat%'
         FROM pg_constraint
@@ -663,6 +659,7 @@ test("catalog rollback preserves every receipt kind and reapply is search-path i
     // M1 adds a real FK to hosted grants. Reverse newer, data-free schema first
     // in an empty DDL snapshot; retain every original grant/artifact/receipt.
     await tx.unsafe(emptySchema);
+    await tx.unsafe(repoSql("deploy/release-proofs/session-identity/20261006000004-rollback.sql"));
     await tx.unsafe(repoSql("deploy/release-proofs/session-identity/20261006000003-rollback.sql"));
     for (const version of [...adminVersions].reverse()) {
       await tx.unsafe(repoSql(`supabase/admin-delegation-reserve/${version}-rollback.sql`));
