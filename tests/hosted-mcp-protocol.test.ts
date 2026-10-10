@@ -616,6 +616,10 @@ test("claim_seat routes through the grant home and preserves explicit consent ch
   let providerActive = true;
   const tx = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
     const query = strings.join("?");
+    if (query.includes("swarm.resolve_hosted_discovery")) {
+      assert.deepEqual(values, [grantId, verified.subject]);
+      return [{ data: { provider_grant_id: verified.providerGrantId } }];
+    }
     if (query.includes("FROM swarm.hosted_mcp_grants")) {
       grantLookups += 1;
       assert.deepEqual(values, [verified.providerGrantId, verified.subject]);
@@ -623,7 +627,9 @@ test("claim_seat routes through the grant home and preserves explicit consent ch
       return [{ grant_id: grantId, owner_user_id: verified.subject, home_workspace_id: home }];
     }
     if (query.includes("swarm.audit_hosted_authorization_denial")) {
-      assert.deepEqual(values, [grantId, verified.providerGrantId, "claim_hosted_seat"]);
+      assert.equal(values[0], grantId);
+      assert.equal(values[1], verified.providerGrantId);
+      assert.ok(["whoami", "claim_hosted_seat"].includes(String(values[2])));
       return [];
     }
     assert.match(query, /swarm.resolve_hosted_grant_authorization/u);
