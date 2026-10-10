@@ -8,6 +8,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
+import { ADMIN_READ_RESOURCES } from '../src/cloud/admin-delegations-contract.js';
 
 const planPath = resolve('docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md');
 const plan = readFileSync(planPath, 'utf8');
@@ -54,7 +55,7 @@ const varsName = 'keeper-install-20261010T165121Z.vars';
 const remaps: Array<[string, string]> = [
   ['/private/tmp/admin-issuance-prep', 'mac-tmp/admin-issuance-prep'], ['/etc/caddy', 'etc/caddy'], ['/home/commonswarm/edge', 'edge'], ['/home/commonswarm/.env', 'box/.env'],
   ['/home/commonswarm/admin-issuance', 'admin-issuance'], ['/tmp/admin-issuance-', 'tmp/admin-issuance-'],
-  ['/proof/measure.sql', 'proof/measure.sql'], ['/etc/systemd/system', 'systemd'], ['/usr/local/libexec', 'libexec'],
+  ['/proof/w4-rollback-measure.sql', 'proof/w4-rollback-measure.sql'], ['/proof/measure.sql', 'proof/measure.sql'], ['/etc/systemd/system', 'systemd'], ['/usr/local/libexec', 'libexec'],
   ['/etc/commonswarm-admin-release', 'admin-release'], ['/var/lib/commonswarm-admin-release', 'var-lib-admin-release'],
   ['/var/lib/commonswarm-release', 'var-lib-release'], ['/etc/tmpfiles.d', 'tmpfiles.d'], ['/root/keeper-install-', 'root/keeper-install-'],
   ['/root/recycle-archive-keeper', 'keeper-bundle'], ['/tmp/anvil-secret', 'tmp/anvil-secret'],
@@ -231,6 +232,12 @@ elif name in ('ai_db','ai_ro'):
      'SELECT release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton;':lambda: str(db['generation']),
      "SELECT json_build_object('admin_issuance_enabled',admin_issuance_enabled,'invalidated',invalidated_at IS NOT NULL,'release_generation',release_generation,'measured_generation',measured_generation,'measured_edge_release_sha',measured_edge_release_sha)::text FROM commonswarm_oauth.admin_cutover_state WHERE singleton;":lambda: json.dumps({'admin_issuance_enabled':db['enabled'],'invalidated':db['invalidated'],'release_generation':db['generation'],'measured_generation':db['measured_generation'],'measured_edge_release_sha':db['measured']}),
     }
+    def measured_projection():
+        m=db.get('identities',{})
+        return json.dumps({'admin_issuance_enabled':db['enabled'],'invalidated':db['invalidated'],'release_generation':db['generation'],
+            'measured_generation':db['measured_generation'],'measured_edge_release_sha':db['measured'],
+            'measured_edge_target':m.get('target'),'measured_mount':m.get('mount'),'measured_image_digest':m.get('image_digest'),
+            'measured_artifact_digest':m.get('artifact_digest'),'measured_at':db.get('measured_at'),'measurement_evidence_ref':db.get('evidence_ref')})
     for q,v in cfg.get('db_answers',{}).items(): queries[q]=(lambda v=v: v)
     # ai-w4-apply's A6 readbacks, keyed on stable parts of their SQL: the fence projection and the 19-column singleton.
     def fence():
@@ -251,6 +258,16 @@ elif name in ('ai_db','ai_ro'):
         db.update(enabled=False,invalidated=False,generation=db['generation']+1,measured_generation=db['generation']+1,measured=cfg['sha'],approved=cfg['sha'],legacy_closed=True); save('cutover.json',db)
     elif len(a)==3 and a[:2]==['-Atq','--command'] and a[2] in queries: print(queries[a[2]]())
     elif name=='ai_ro' and len(a)==3 and a[:2]==['-Atq','--command'] and "'fence_complete'," in a[2] and 'revoked_roles' in a[2]: print(fence())
+    elif name=='ai_ro' and len(a)==3 and a[:2]==['-Atq','--command'] and a[2].startswith("SELECT json_build_object('admin_issuance_enabled',admin_issuance_enabled,") and "'measured_edge_target'," in a[2]: print(measured_projection())
+    elif name=='ai_db' and a==['-q','--file',str(root/'proof/w4-rollback-measure.sql')]:
+        import re
+        sql=owned(a[2]).read_text()
+        fields=dict(re.findall(r"(measured_edge_release_sha|measured_edge_target|measured_mount|measured_image_digest|measured_artifact_digest|measurement_evidence_ref)='([^']*)'",sql))
+        assert len(fields)==6 and 'measured_generation=release_generation+1' in sql and 'invalidated_at=statement_timestamp()' in sql and not db['enabled']
+        db.update(enabled=False,invalidated=True,generation=db['generation']+1,measured_generation=db['generation']+1,
+            measured=fields['measured_edge_release_sha'],measured_at=clock,evidence_ref=fields['measurement_evidence_ref'],
+            identities={k:fields[v] for k,v in [('target','measured_edge_target'),('mount','measured_mount'),('image_digest','measured_image_digest'),('artifact_digest','measured_artifact_digest')]})
+        save('cutover.json',db)
     elif name=='ai_ro' and len(a)==3 and a[:2]==['-Atq','--command'] and a[2].startswith("SELECT json_build_object('singleton',singleton,"): print(singleton())
     else: refuse()
 elif name=='docker':
@@ -262,7 +279,7 @@ elif name=='docker':
     elif args==['inspect','--format','{{index .Config.Labels "com.docker.compose.project.config_files"}}','commonswarm-edge-edge-runtime-1']: print(','.join(compose_files(live)))
     elif args==['inspect','commonswarm-edge-edge-runtime-1']:
         print(json.dumps([{'Image':cfg['image'],'State':{'Health':{'Status':'healthy'}},'Config':{'Labels':{'com.docker.compose.project.working_dir':live},'Env':['PATH=/usr/bin','SWARM_MCP_PUBLIC_ENABLED=1']},
-            'HostConfig':{'NetworkMode':'commonswarm-net','Memory':2147483648},'Mounts':[{'Destination':dst,'Source':rel_+'/'+src,'RW':False} for dst,src in [('/home/deno/main','deploy/edge-runtime/main'),('/home/deno/functions-source','supabase/functions'),('/var/src','src')]]}]))
+            'HostConfig':{'NetworkMode':'commonswarm-net','Memory':2147483648},'Mounts':[{'Destination':dst,'Source':(rel_ if not cfg.get('mount_drift') else str(root/'edge/releases'/cfg['sha']))+'/'+src,'RW':False} for dst,src in [('/home/deno/main','deploy/edge-runtime/main'),('/home/deno/functions-source','supabase/functions'),('/var/src','src')]]}]))
     elif args==['image','inspect',cfg['image']]: print(json.dumps([{'Config':{'Env':['PATH=/usr/bin']}}]))
     elif args[:2]==['run','--rm'] and '--entrypoint' in args and args[args.index('--entrypoint')+1]=='psql':
         # The recycle hook's database session: answer each read-only-mounted statement file it writes.
@@ -553,9 +570,12 @@ function fixture(config: Record<string, unknown> = {}, options: { mode?: string;
   put(`admin-issuance/releases/${baseline}/deploy/supabase-stack/migrate/make-pg-service.mjs`, '// helper\n', 0o644);
   // Legacy /tmp binding, first-pass hook, drop-in and intent.
   const legacy = `tmp/admin-issuance-${baseline}-${legacyWid}.tar`;
-  put(legacy, 'legacy archive bytes\n', 0o600);
+  const legacyTar = spawnSync('/usr/bin/python3', ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t:\n    for name in ["deploy/edge-runtime/compose.yaml","deploy/edge-runtime/compose.override.yaml","src/reviewed.txt"]: t.add(sys.argv[2]+"/"+name,arcname=name)',
+    join(root, legacy), join(root, 'edge/releases', baseline)], { encoding: 'utf8' });
+  assert.equal(legacyTar.status, 0, legacyTar.stderr); chmodSync(join(root, legacy), 0o600);
+  const legacyBytes = readFileSync(join(root, legacy)), legacyHash = hash(legacyBytes);
   dir('admin-release', 0o700);
-  const binding = { release_sha: baseline, target: join(root, 'edge/releases', baseline), image_digest: edgeImage, artifact_digest: hash('legacy archive bytes\n'),
+  const binding = { release_sha: baseline, target: join(root, 'edge/releases', baseline), image_digest: edgeImage, artifact_digest: legacyHash,
     archive: join(root, legacy), postgres_image: postgresImage, release_root: join(root, 'admin-issuance/releases', baseline) };
   if (mode !== 'fresh') {
     put('admin-release/recycle.json', JSON.stringify(binding, null, 0) + '\n', 0o600);
@@ -571,8 +591,8 @@ function fixture(config: Record<string, unknown> = {}, options: { mode?: string;
     for (const [, target, fileMode, bytes] of keeperFiles(root)) put(target, bytes, fileMode);
     for (const link of keeperLinks) { mkdirSync(dirname(join(root, 'systemd', link)), { recursive: true, mode: 0o755 }); symlinkSync(join(root, 'systemd', link.split('/')[1]!), join(root, 'systemd', link)); }
     dir('var-lib-admin-release', 0o700); dir('var-lib-admin-release/archives', 0o700);
-    put(`var-lib-admin-release/archives/${baseline}-${legacyWid}.tar`, 'legacy archive bytes\n', 0o600);
-    put('var-lib-admin-release/archives.json', JSON.stringify([{ name: `${baseline}-${legacyWid}.tar`, sha256: hash('legacy archive bytes\n'),
+    put(`var-lib-admin-release/archives/${baseline}-${legacyWid}.tar`, legacyBytes, 0o600);
+    put('var-lib-admin-release/archives.json', JSON.stringify([{ name: `${baseline}-${legacyWid}.tar`, sha256: legacyHash,
       source: `/tmp/admin-issuance-${baseline}-${legacyWid}.tar`, time: '2026-10-10T16:52:00Z', uid: 1001, gid: 1001, mode: 0o600 }], null, 2) + '\n', 0o600);
     put('var-lib-admin-release/source-metadata.json', '{}\n', 0o600);
   }
@@ -619,8 +639,10 @@ function fixture(config: Record<string, unknown> = {}, options: { mode?: string;
     keeper_install_excerpts: keeper ? excerptPins(install) : null,
   };
   const env = (extra: Record<string, string> = {}) => ({
-    PATH: join(root, 'bin'), PYTHONDONTWRITEBYTECODE: '1', W4B_ROOT: root, HOME: process.env.HOME ?? root,
+    ...process.env,
+    PATH: join(root, 'bin'), PYTHONDONTWRITEBYTECODE: '1', W4B_ROOT: root,
     INPUTS_FILE: join(root, 'inputs.json'), PLAN_FILE: planPath, PROOF_DIR: join(root, 'proof'), SECRET_STAGE: join(root, 'stage'),
+    NEW_EDGE: join(root, 'edge/releases', sha), OLD_EDGE: join(root, 'edge/releases', baseline),
     RELEASE_ROOT: join(root, release), RELEASE_SHA: sha, WINDOW: 'W4', WINDOW_ID: wid, BOX_ARCHIVE_PATH: join(root, upload),
     EDGE_RECYCLE_SERVICE: service, EDGE_RECYCLE_TIMER: timer, RECYCLE_BASELINE_FILE: join(root, 'inputs/recycle-baseline.json'),
     LIVE_CONTROLS_FILE: join(root, 'proof/ordinary-before.json'), CONSENT_RECEIPT_FILE: join(root, 'proof/consent-pre-W1.json'), ...extra,
@@ -647,7 +669,7 @@ function fixture(config: Record<string, unknown> = {}, options: { mode?: string;
       dropin: metadata(`systemd/${service}.d/50-admin-measurement.conf`), intent: metadata('admin-release/recycle-intent.json'),
       config_dir: dirMeta('admin-release'), dropin_dir: dirMeta(`systemd/${service}.d`),
       service: { unit: service, sha256: hash(cat(service)), active_state: 'inactive' }, timer: { unit: timer, sha256: hash(cat(timer)), active_state: 'active', enabled: 'enabled' },
-      archive: mode === 'fresh' ? null : { path: join(root, legacy), sha256: hash('legacy archive bytes\n'), uid: 0, gid: 0, mode: '0600' },
+      archive: mode === 'fresh' ? null : { path: join(root, legacy), sha256: legacyHash, uid: 0, gid: 0, mode: '0600' },
       helper: mode === 'fresh' ? null : { release_sha: baseline, path: join(root, 'admin-issuance/releases', baseline) },
       edge: { release_sha: baseline, image: edgeImage },
       keeper: keeper ? {
@@ -655,7 +677,7 @@ function fixture(config: Record<string, unknown> = {}, options: { mode?: string;
         files: Object.fromEntries(keeperFiles(root).map(([, target, fileMode, bytes]) => [join(root, target), { sha256: hash(bytes), uid: 0, gid: 0, mode: fileMode.toString(8).padStart(4, '0') }])),
         links: Object.fromEntries(keeperLinks.map(link => [join(root, 'systemd', link), readlinkSync(join(root, 'systemd', link))])),
         state: { path: join(root, 'var-lib-admin-release'), mode: '0700', archives_mode: '0700', ledger_sha256: hash(readFileSync(join(root, 'var-lib-admin-release/archives.json'))),
-          archives: { [`${baseline}-${legacyWid}.tar`]: hash('legacy archive bytes\n') } },
+          archives: { [`${baseline}-${legacyWid}.tar`]: legacyHash } },
       } : null,
       expected: { hook_sha256: hash(candidateHook), dropin_sha256: hash(reviewedDropin(root)), archive: join(root, 'var-lib-admin-release/archives', `${sha}-${wid}.tar`),
         binding_sha256: hash(JSON.stringify(Object.fromEntries(Object.entries({ ...binding, release_sha: sha, target: join(root, 'edge/releases', sha), artifact_digest: archiveSha,
@@ -690,10 +712,11 @@ function fixture(config: Record<string, unknown> = {}, options: { mode?: string;
     const result = spawnSync('/bin/bash', [], { input: 'set -euo pipefail\n' + shim + '\n' + source + '\n', encoding: 'utf8', timeout: 60_000, cwd: root, env: env(extra) });
     assert.ifError(result.error); assert.equal(result.signal, null, result.stderr);
     assert.doesNotMatch(result.stdout + result.stderr, /UNMODELLED/);
+    if (result.status === 0) assert.doesNotMatch(result.stderr, /unbound variable|parameter (?:null or not set|not set)/, 'Bash 3.2 must not mask a missing input');
     return { ...result, calls: lines('commands.jsonl') };
   }
   function lines(path: string): any[] { return readFileSync(join(root, path), 'utf8').trim().split('\n').filter(Boolean).map(s => JSON.parse(s)); }
-  return { root, put, run, remap, inputs, writeInputs, receipt, install, installUpload, upload, legacy, release, archiveSha, binding, keeper, mode,
+  return { root, put, run, remap, legacyBytes, legacyHash, inputs, writeInputs, receipt, install, installUpload, upload, legacy, release, archiveSha, binding, keeper, mode,
     json: (rel: string) => JSON.parse(readFileSync(join(root, rel), 'utf8')), fixtureConfig: (change: Record<string, unknown>) => put('fixture.json', { ...JSON.parse(readFileSync(join(root, 'fixture.json'), 'utf8')), ...change }) };
 }
 function isLink(path: string) { try { return lstatSync(path).isSymbolicLink(); } catch { return false; } }
@@ -761,6 +784,8 @@ for (const fault of ['F1', 'F2', 'F3'] as const) test(`${fault} / w4-second-pass
     exactRestoration(f, before, monitored(f), { retired: true, promoted: fault === 'F3' });
     assert.equal(units(f)[timer].active, 'active');
     const db = cutover(f);
+    assert.equal(db.measured, baseline); assert.equal(db.measured_generation, db.generation);
+    assert.equal(db.identities.artifact_digest, f.legacyHash);
     assert.ok(!db.enabled && db.invalidated && db.generation > generation, `${fault}: issuance CLOSED at a higher generation ${JSON.stringify(db)}`);
     assert.ok(close.stdout.includes(phrase), `${fault}: recovered close output carries the ruling-11 phrase`);
     assert.ok(readFileSync(join(f.root, 'proof/W4-recovered-close.txt'), 'utf8').includes(phrase), `${fault}: close record carries the ruling-11 phrase`);
@@ -810,7 +835,7 @@ test('H1(d)(a,i) / keeper-retire-adopts-and-retires: valid inputs reach section 
   assert.deepEqual(['var-lib-admin-release', 'var-lib-admin-release/archives', 'var-lib-admin-release/archives.json', `var-lib-admin-release/archives/${baseline}-${legacyWid}.tar`, 'var-lib-admin-release/source-metadata.json'].map(p => entryOf(f, p)), durable, 'durable state kept');
   assert.equal(units(f)[timer].active, 'active', 'section 4 ends with the edge recycle timer active');
   const adoption = f.json('proof/keeper-adoption.json');
-  assert.equal(adoption.sha256, hash('legacy archive bytes\n'));
+  assert.equal(adoption.sha256, f.legacyHash);
   const retired = f.json('proof/keeper-retired.json');
   assert.deepEqual(Object.keys(retired).sort(), ['adoption_sha256', 'ended_at', 'excerpts', 'install_md_sha256', 'install_md_upload', 'keeper_upload_owner', 'kind', 'release_sha', 'started_at', 'window_id']);
   assert.equal(retired.install_md_sha256, hash(f.install)); assert.equal(retired.install_md_upload, join(f.root, f.installUpload));
@@ -1637,4 +1662,142 @@ test('MOA / open-abort-refuses-attempt-markers: each window attempt marker in PR
   const clean = realpathSync(mkdtempSync(join(scratch, 'moa-proof-')));
   const ok = abort(clean); pass(ok, 'no marker');
   assert.match(ok.stdout, /PASS ai-open-abort: aborted before mutation/); assert.ok(existsSync(join(clean, 'aborted-before-mutation.txt')));
+});
+
+test('Fix M1 / rollback freshly measures the baseline; recovered close refuses stale generation and every stale identity', () => {
+  const f = fixture(); pass(f.run(forward()), 'forward'); pass(f.run(['ai-w4-rollback']), 'rollback');
+  const db = cutover(f), measurement = f.json('proof/w4-rollback-measurement.json');
+  assert.equal(db.measured, baseline); assert.equal(db.measured_generation, db.generation);
+  assert.equal(db.identities.artifact_digest, f.legacyHash); assert.equal(measurement.source.archive, join(f.root, f.legacy));
+  const close = () => f.run(['ai-close'], { CLOSE_RESULT: 'recovered', LIVE_CONTROLS_FILE: join(f.root, 'proof/ordinary-recovery.json') });
+  for (const change of [{ measured: sha }, { measured_generation: db.generation - 1 }, { generation: db.generation + 1 },
+    { identities: { ...db.identities, target: join(f.root, 'edge/releases', sha) } },
+    { identities: { ...db.identities, mount: join(f.root, 'edge/releases', sha) } },
+    { identities: { ...db.identities, image_digest: 'sha256:' + 'e'.repeat(64) } },
+    { identities: { ...db.identities, artifact_digest: 'e'.repeat(64) } }, { measured_at: null }, { evidence_ref: 'stale' }]) {
+    f.put('cutover.json', { ...db, ...change });
+    refused(close(), 'CLOSED-invalidated-and-freshly-measured-baseline-at-live-generation');
+    assert.ok(!proofHas(f, 'closed.txt'));
+  }
+  f.put('cutover.json', db); f.fixtureConfig({ mount_drift: true });
+  refused(close(), 'measured-baseline-source-readonly'); assert.ok(!proofHas(f, 'closed.txt'));
+  f.fixtureConfig({ mount_drift: false }); pass(close(), 'fresh baseline control');
+  // A source byte drift reaches the measurement boundary, before SQL is written or the timer re-arm.
+  const drift = fixture(); prepared(drift); drift.put(`edge/releases/${baseline}/src/reviewed.txt`, 'drift\n', 0o644);
+  refused(drift.run(['ai-w4-rollback']), 'baseline archive/source target mount image expected verified got other');
+  assert.ok(!proofHas(drift, 'w4-rollback-measurement.json'));
+  drift.put(`edge/releases/${baseline}/src/reviewed.txt`, 'baseline tracked bytes\n', 0o644);
+  pass(drift.run(['ai-w4-rollback']), 'source byte control');
+});
+
+test('Fix M2 / rollback restages a missing legacy archive, preserves an intact one and refuses unsafe paths or unrelated bytes', () => {
+  for (const missing of [false, true]) {
+    const f = fixture(); prepared(f); pass(f.run(['ai-w4-keeper-retire']), 'adopt and retire');
+    const path = join(f.root, f.legacy), before = statSync(path);
+    if (missing) renameSync(path, join(f.root, 'saved-legacy.tar'));
+    pass(f.run(['ai-w4-rollback']), missing ? 'missing restaged' : 'intact preserved');
+    assert.deepEqual(readFileSync(path), f.legacyBytes); assert.equal(statSync(path).mode & 0o7777, before.mode & 0o7777);
+    if (!missing) assert.equal(statSync(path).ino, before.ino, 'intact archive is not replaced');
+    pass(f.run(['ai-close'], { CLOSE_RESULT: 'recovered', LIVE_CONTROLS_FILE: join(f.root, 'proof/ordinary-recovery.json') }), 'recovered control');
+  }
+  for (const kind of ['unrelated', 'symlink', 'durable-byte', 'unsafe-path', 'durable-parent'] as const) {
+    const f = fixture(); prepared(f); pass(f.run(['ai-w4-keeper-retire']), 'adopt');
+    const legacy = join(f.root, f.legacy), durable = join(f.root, 'var-lib-admin-release/archives', `${baseline}-${legacyWid}.tar`);
+    if (kind === 'unrelated') writeFileSync(legacy, 'unrelated bytes\n');
+    if (kind === 'symlink') { renameSync(legacy, join(f.root, 'saved-legacy.tar')); symlinkSync(join(f.root, 'saved-legacy.tar'), legacy); }
+    if (kind === 'durable-byte') writeFileSync(durable, 'wrong durable bytes\n');
+    if (kind === 'durable-parent') chmodSync(dirname(durable), 0o777);
+    if (kind === 'unsafe-path') {
+      const path = 'proof/w4-state/recycle-baseline.json', r = f.json(path); r.archive.path = join(f.root, 'unrelated.tar');
+      const bytes = JSON.stringify(r); f.put(path, bytes); f.put('inputs.json', { ...f.json('inputs.json'), recycle_baseline_sha256: hash(bytes) });
+    }
+    const result = f.run(['ai-w4-rollback']);
+    refused(result, kind === 'unrelated' ? 'unrelated-existing-bytes-or-metadata' : kind === 'symlink' ? 'symlink-or-other' : kind === 'unsafe-path' ? 'unsafe-path' : kind === 'durable-parent' ? 'unsafe-path-or-metadata' : 'admitted-receipt-bytes-root-0600');
+    assert.ok(!proofHas(f, 'w4-rollback-measurement.json'), kind);
+    if (kind === 'unrelated') assert.equal(readFileSync(legacy, 'utf8'), 'unrelated bytes\n');
+  }
+});
+
+test('Fix M3 / recovered INTACT refuses load, active and enable drift on every keeper unit, with an unchanged control', () => {
+  const f = fixture(); prepared(f); pass(f.run(['ai-w4-rollback']), 'intact rollback');
+  const original = units(f);
+  const close = () => f.run(['ai-close'], { CLOSE_RESULT: 'recovered', LIVE_CONTROLS_FILE: join(f.root, 'proof/ordinary-recovery.json') });
+  for (const u of keeperUnits) for (const [field, value] of [['load', 'not-found'], ['active', original[u].active === 'active' ? 'inactive' : 'active'], ['enabled', 'disabled']]) {
+    f.put('units.json', { ...original, [u]: { ...original[u], [field!]: value } });
+    refused(close(), 'keeper expected RETIRED-or-INTACT got partial-retirement'); assert.ok(!proofHas(f, 'closed.txt'));
+  }
+  f.put('units.json', original); pass(close(), 'all three units unchanged');
+});
+
+test('Fix M4 / pre-existing regular temporary files survive refused admission and rollback; interrupted window-created files recover', () => {
+  const rel = `libexec/.commonswarm-admin-edge-recycle.${wid}.new`;
+  const f = fixture(); f.put(rel, 'pre-existing bytes\n', 0o700); const old = statSync(join(f.root, rel));
+  refused(f.run(['ai-w4-preflight']), 'expected absent got present');
+  refused(f.run(['ai-w4-rollback']), 'temporary recycle files expected absent-without-admission got present');
+  assert.equal(readFileSync(join(f.root, rel), 'utf8'), 'pre-existing bytes\n'); assert.equal(statSync(join(f.root, rel)).ino, old.ino);
+  const good = fixture({ interrupt_replace: ['libexec/commonswarm-admin-edge-recycle'] });
+  refused(good.run(forward()), 'install expected admitted got refused'); assert.ok(existsSync(join(good.root, rel)));
+  good.fixtureConfig({ interrupt_replace: [] }); pass(good.run(['ai-w4-rollback']), 'interrupted owned-file control');
+  assert.ok(!existsSync(join(good.root, rel)));
+  pass(good.run(['ai-close'], { CLOSE_RESULT: 'recovered', LIVE_CONTROLS_FILE: join(good.root, 'proof/ordinary-recovery.json') }), 'close owned-file control');
+});
+
+test('Fix M5 / config directory admits only a canonical root-owned 0700 path and refuses unsafe metadata before writes and at close', () => {
+  for (const kind of ['mode', 'uid', 'gid', 'symlink'] as const) {
+    const f = fixture({}, { mode: 'fresh' }), path = join(f.root, 'admin-release');
+    if (kind === 'mode') { chmodSync(path, 0o777); f.writeInputs(); }
+    if (kind === 'uid' || kind === 'gid') {
+      f.fixtureConfig({ owners: { 'admin-release': kind === 'uid' ? [1001, 0] : [0, 1001] } });
+      f.writeInputs({}, r => { r.config_dir[kind] = 1001; });
+    }
+    if (kind === 'symlink') { renameSync(path, path + '.real'); symlinkSync(path + '.real', path); }
+    refused(f.run(['ai-w4-preflight']), kind === 'symlink' ? 'unsafe-path' : 'root-0700-directory-or-absent');
+    assert.ok(!existsSync(join(f.root, 'proof/w4-state')) && !existsSync(join(f.root, 'edge/releases', sha)), kind);
+  }
+  const good = fixture({}, { mode: 'fresh' }); pass(good.run([...forward(), 'ai-w4-readback']), 'safe directory');
+  const close = () => good.run(['ai-close'], { CLOSE_RESULT: 'success', LIVE_CONTROLS_FILE: join(good.root, 'proof/ordinary-after.json') });
+  chmodSync(join(good.root, 'admin-release'), 0o777); refused(close(), 'root-0700-directory');
+  chmodSync(join(good.root, 'admin-release'), 0o700); pass(close(), 'safe directory control');
+});
+
+test('Fix CI / W4 traps fail closed on missing input even on Bash 3.2; complete fixtures reach the measurement and install', () => {
+  const f = fixture(); prepared(f); pass(f.run(['ai-w4-keeper-retire']), 'retired');
+  const bad = f.run(['ai-w4-apply'], { NEW_EDGE: '' }); refused(bad, 'NEW_EDGE required');
+  assert.ok(!proofHas(f, 'edge-attempted.txt'), 'refused before mutation');
+  const good = f.run(['ai-w4-apply']); pass(good, 'all inputs provided');
+  assert.ok(proofHas(f, 'edge-measurement.json') && existsSync(join(f.root, 'proof/w4-state/install-after.json')), 'the positive control runs the complete apply');
+  const masked = f.run(['# nounset inside the real trap lifetime\n(\nai_run ai-timer-guard\nunset W4_UNSET\nprintf \"%s\\n\" \"$W4_UNSET\"\n)']);
+  assert.notEqual(masked.status, 0); assert.match(masked.stderr, /unbound variable/);
+  // The actual trap must fail a zero-status, incomplete body, and preserve a completed zero status.
+  for (const done of ['0', '1']) {
+    const r = f.run(['# trap control\n(\nai_run ai-timer-guard\nW4_BLOCK_DONE=' + done + '\n)']);
+    assert.equal(r.status, done === '1' ? 0 : 1, r.stderr);
+  }
+});
+
+
+test('Fix ruling 25 / admin recovery read inventory is generated from C and its callers; an unlisted read refuses', () => {
+  const record = JSON.parse(plan.match(/^\{"admin_recovery_read_steps":.*\}$/m)![0]);
+  // Resource names come from the read's enforced contract; CLI verbs come from its dispatch table.
+  const cli = readFileSync('src/cli.ts', 'utf8');
+  const verbs = [...cli.matchAll(/^\s*(\w+): commandEntry\(.*handler: runAdminRead,/gm)].map(m => m[1]!);
+  assert.ok(verbs.length > 0);
+  const sql = readFileSync('supabase/functions/read/admin-recovery.sql', 'utf8');
+  const fn = sql.match(/CREATE OR REPLACE FUNCTION (\w+\.\w+)\(/)![1]!;
+  const resources = ADMIN_READ_RESOURCES.join('|');
+  const call = new RegExp(`(?:resource\\s*[:=]\\s*['"](?:${resources})['"]|\\badmin\\s+(?:${verbs.join('|')})\\b|\\b(?:readAdminDelegations|readAdminRecovery)\\s*\\(|${fn.replaceAll('.', '\\.')})`);
+  const inventory = (source: string) => blocksOf(source).filter(b => call.test(b.split('\n').filter(l => !/^\s*#/.test(l)).join('\n')))
+    .map(b => b.split('\n')[0]!.slice('# step: '.length)).sort();
+  assert.deepEqual(inventory(plan), record.admin_recovery_read_steps);
+  // Reconcile every external JS/CLI caller present in the executable plan, including the ordinary-controls producer.
+  for (const path of ['scripts/live-ordinary-controls.mjs', 'scripts/admin-smoke.mjs']) {
+    assert.ok(plan.includes(path), `${path} is an actual plan caller`);
+    assert.equal(call.test(readFileSync(path, 'utf8')), false, `${path} must not silently add a recovery read`);
+  }
+  const recovery = cli.slice(cli.indexOf('async function runAdminRecovery('), cli.indexOf('const page = await readAdminDelegations'));
+  assert.match(recovery, /if \(grantId !== null\) \{[\s\S]*revokeAdminDelegation[\s\S]*return;\n  \}/, 'revoke returns before the read path');
+  // Negative and positive controls in one invocation: a real admitted resource call adds an unlisted step.
+  const changed = plan + `\n\`\`\`sh\n# step: ai-new-owner-read\n# readonly: yes\n# host: box root\nbody={resource:'${ADMIN_READ_RESOURCES[0]}'}\n\`\`\`\n`;
+  assert.notDeepEqual(inventory(changed), record.admin_recovery_read_steps);
+  assert.deepEqual(inventory(plan), record.admin_recovery_read_steps);
 });

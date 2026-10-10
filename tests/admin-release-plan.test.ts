@@ -601,7 +601,7 @@ esac
   const harness = session.slice(session.indexOf('ai_run() {'), session.indexOf('ai_deadline() {'));
   const execute = (body: string, guard = block('ai-timer-guard'), fail = false) => {
     writeFileSync(state, 'active'); writeFileSync(calls, '');
-    return run(harness + guard + '\nsystemctl stop "$EDGE_RECYCLE_TIMER"\n' + body, {
+    return run(harness + guard + '\nsystemctl stop "$EDGE_RECYCLE_TIMER"\n' + body + '\nW4_BLOCK_DONE=1\n', {
       PATH: root + ':' + process.env.PATH, EDGE_RECYCLE_TIMER: 'fixture.timer',
       TIMER_STATE: state, TIMER_CALLS: calls, TIMER_RECOVERY_FAIL: fail ? '1' : '0',
       RELEASE_ROOT: resolve('.'), SECRET_STAGE: root, INPUTS_FILE: releasedPlanInputs(root),
