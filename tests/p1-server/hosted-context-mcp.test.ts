@@ -52,16 +52,16 @@ const {FILE_BUCKET}=await import(${JSON.stringify(moduleUrl('command/file-artifa
 globalThis.fetch=async (target,options)=>{
  const url=String(target);
  if(url==='https://mcp.commonswarm.com/jwks')return new Response(JSON.stringify({keys:[jwk]}),{headers:{'content-type':'application/json'}});
- assert.ok(url.startsWith(storagePrefix),'only synthetic JWKS and fixture storage I/O are allowed');
+ (step='storage-01',assert.ok(url.startsWith(storagePrefix),'only synthetic JWKS and fixture storage I/O are allowed'));
  const headers=new Headers(options?.headers);
- assert.equal(headers.get('authorization'),'Bearer synthetic-storage-fixture');
- assert.equal(headers.get('apikey'),'synthetic-storage-fixture');
- const reading=(options?.method??'GET')==='GET';assert.ok(reading||options?.method==='POST');
+ (step='storage-02',assert.equal(headers.get('authorization'),'Bearer synthetic-storage-fixture'));
+ (step='storage-03',assert.equal(headers.get('apikey'),'synthetic-storage-fixture'));
+ const reading=(options?.method??'GET')==='GET';(step='storage-04',assert.ok(reading||options?.method==='POST'));
  const suffix=url.slice(storagePrefix.length);const path=suffix.startsWith('authenticated/')?suffix.slice('authenticated/'.length):suffix;
- assert.ok(path.startsWith(FILE_BUCKET+'/'));assert.equal(path.split('/').length,4);
+ (step='storage-05',assert.ok(path.startsWith(FILE_BUCKET+'/')));(step='storage-06',assert.equal(path.split('/').length,4));
  if(reading)return blobs.has(path)?new Response(blobs.get(path)):new Response(null,{status:404});
- assert.equal(headers.get('x-upsert'),'false');assert.equal(blobs.has(path),false);
- assert.ok(options.body instanceof Uint8Array);blobs.set(path,new Uint8Array(options.body));return new Response(null,{status:200});
+ (step='storage-07',assert.equal(headers.get('x-upsert'),'false'));(step='storage-08',assert.equal(blobs.has(path),false));
+ (step='storage-09',assert.ok(options.body instanceof Uint8Array));blobs.set(path,new Uint8Array(options.body));return new Response(null,{status:200});
 };
 const {handleRequest:serve}=await import(${JSON.stringify(moduleUrl('mcp/index.ts'))});
 async function tool(name,args,bearer=token){lastFailure=null;httpStatus=null;
@@ -71,7 +71,7 @@ async function tool(name,args,bearer=token){lastFailure=null;httpStatus=null;
  httpStatus??=response.status;
  const rpc=await response.json();return {status:response.status,rpc,value:rpc.result?JSON.parse(rpc.result.content[0].text):null};}
 async function household(name,args){lastFailure=null;httpStatus=null;
- const row=HOUSEHOLD_TOOL_REGISTRY.find(row=>row.name===name);assert.ok(row);
+ const row=HOUSEHOLD_TOOL_REGISTRY.find(row=>row.name===name);(step='household-01',assert.ok(row));
  const use=row.effect==='read'?'read':'command';
  try{
   const capability=await api.db.begin(async tx=>{
@@ -91,91 +91,91 @@ async function household(name,args){lastFailure=null;httpStatus=null;
 }
 async function assertBound(identity,owner=input.owner,grant=input.grant){
  const selected=await tool('whoami',{seat:identity.seat},owner===input.owner?token:await tokenFor(owner,grant));
- assert.equal(selected.status,200);assert.equal(selected.rpc.result.isError,false);
- assert.equal(selected.value.context_status,'active');assert.equal(selected.value.transport,'hosted');assert.equal(selected.value.turn_only,true);
- for(const field of ['context_id','seat_id','principal_id','grant_id','workspace_id','workspace','handle','seat','name','display_name','disambiguator','lifetime','kind','assurance'])assert.deepEqual(selected.value[field],identity[field],field);
+ (step='bound-01',assert.equal(selected.status,200));(step='bound-02',assert.equal(selected.rpc.result.isError,false));
+ (step='bound-03',assert.equal(selected.value.context_status,'active'));(step='bound-04',assert.equal(selected.value.transport,'hosted'));(step='bound-05',assert.equal(selected.value.turn_only,true));
+ for(const field of ['context_id','seat_id','principal_id','grant_id','workspace_id','workspace','handle','seat','name','display_name','disambiguator','lifetime','kind','assurance'])(step='bound-06',assert.deepEqual(selected.value[field],identity[field],field));
  const [bound]=await api.db.unsafe('SELECT c.context_id,c.handle,c.closed_at,s.seat_id,s.principal_id,s.grant_id,s.owner_user_id,s.workspace_id,p.owner_user_id AS principal_owner FROM swarm.hosted_agent_contexts c JOIN swarm.hosted_mcp_seats s USING(seat_id) JOIN swarm.agent_principals p USING(principal_id) WHERE c.context_id=$1',[identity.context_id]);
- assert.ok(bound);assert.equal(bound.closed_at,null);assert.equal(bound.owner_user_id,owner);assert.equal(bound.principal_owner,owner);
- for(const field of ['context_id','handle','seat_id','principal_id','grant_id','workspace_id'])assert.equal(bound[field],identity[field],field);
+ (step='bound-07',assert.ok(bound));(step='bound-08',assert.equal(bound.closed_at,null));(step='bound-09',assert.equal(bound.owner_user_id,owner));(step='bound-10',assert.equal(bound.principal_owner,owner));
+ for(const field of ['context_id','handle','seat_id','principal_id','grant_id','workspace_id'])(step='bound-11',assert.equal(bound[field],identity[field],field));
 }
  const call=args=>tool('claim_seat',args);
  const discovery=await tool('whoami',{});
- assert.equal(discovery.status,200);assert.equal(discovery.rpc.result.isError,false);
- assert.equal(discovery.value.context_status,'unselected');assert.equal(discovery.value.home_workspace_id,input.home);
- assert.equal(discovery.value.owner.user_id,input.owner);assert.equal(discovery.value.app.client_id,'synthetic-app');
- assert.equal(discovery.value.suggested_name,'Agent');assert.equal(discovery.value.next_action,'claim_seat');
- assert.deepEqual(discovery.value.workspaces.map(row=>row.id).sort(),[input.home,input.workspace].sort());
- for(const field of ['seat','handle','principal_id','members','provider_grant_id'])assert.equal(Object.hasOwn(discovery.value,field),false);
- assert.equal((await api.db.unsafe('SELECT count(*)::int AS n FROM swarm.hosted_agent_contexts'))[0].n,0);
+ (step='discovery-01',assert.equal(discovery.status,200));(step='discovery-02',assert.equal(discovery.rpc.result.isError,false));
+ (step='discovery-03',assert.equal(discovery.value.context_status,'unselected'));(step='discovery-04',assert.equal(discovery.value.home_workspace_id,input.home));
+ (step='discovery-05',assert.equal(discovery.value.owner.user_id,input.owner));(step='discovery-06',assert.equal(discovery.value.app.client_id,'synthetic-app'));
+ (step='discovery-07',assert.equal(discovery.value.suggested_name,'Agent'));(step='discovery-08',assert.equal(discovery.value.next_action,'claim_seat'));
+ (step='discovery-09',assert.deepEqual(discovery.value.workspaces.map(row=>row.id).sort(),[input.home,input.workspace].sort()));
+ for(const field of ['seat','handle','principal_id','members','provider_grant_id'])(step='discovery-10',assert.equal(Object.hasOwn(discovery.value,field),false));
+ (step='discovery-11',assert.equal((await api.db.unsafe('SELECT count(*)::int AS n FROM swarm.hosted_agent_contexts'))[0].n,0));
  // Case: first-message. Keep diagnostic steps in the shared allowlist.
  step='first-claim';
  const firstMessage=await call({request_id:'server_first_message_1'});
- assert.equal(firstMessage.status,200);assert.equal(firstMessage.rpc.result.isError,false);
- assert.equal(firstMessage.value.workspace_id,input.home);assert.equal(firstMessage.value.workspace.name,'Synthetic home');
- assert.equal(firstMessage.value.outcome,'created');assert.equal(firstMessage.value.original_outcome,'created');
- assert.equal(firstMessage.value.lifetime,'ephemeral');assert.equal(firstMessage.value.kind,'chat');assert.equal(firstMessage.value.assurance,'portable');
- assert.equal(firstMessage.value.display_name,'Agent');assert.match(firstMessage.value.disambiguator,/^[A-Z2-7]{4}$/u);
- assert.equal(firstMessage.value.name,'Agent-'+firstMessage.value.disambiguator);
- assert.equal(firstMessage.value.name_adjusted,true);assert.equal(firstMessage.value.adjustment_reason,'ephemeral_address');
+ (step='first-message-01',assert.equal(firstMessage.status,200));(step='first-message-02',assert.equal(firstMessage.rpc.result.isError,false));
+ (step='first-message-03',assert.equal(firstMessage.value.workspace_id,input.home));(step='first-message-04',assert.equal(firstMessage.value.workspace.name,'Synthetic home'));
+ (step='first-message-05',assert.equal(firstMessage.value.outcome,'created'));(step='first-message-06',assert.equal(firstMessage.value.original_outcome,'created'));
+ (step='first-message-07',assert.equal(firstMessage.value.lifetime,'ephemeral'));(step='first-message-08',assert.equal(firstMessage.value.kind,'chat'));(step='first-message-09',assert.equal(firstMessage.value.assurance,'portable'));
+ (step='first-message-10',assert.equal(firstMessage.value.display_name,'Agent'));(step='first-message-11',assert.match(firstMessage.value.disambiguator,/^[A-Z2-7]{4}$/u));
+ (step='first-message-12',assert.equal(firstMessage.value.name,'Agent-'+firstMessage.value.disambiguator));
+ (step='first-message-13',assert.equal(firstMessage.value.name_adjusted,true));(step='first-message-14',assert.equal(firstMessage.value.adjustment_reason,'ephemeral_address'));
  await assertBound(firstMessage.value);
  step='first-claim';
  const request={request_id:'server_claim_context_1',name:'Marketing',lifetime:'durable',kind:'scheduled',workspace_id:input.workspace};
- const first=await call(request);assert.equal(first.status,200);assert.equal(first.rpc.result.isError,false);
- assert.equal(first.value.name,'Marketing');assert.equal(first.value.display_name,'Marketing');
- assert.equal(first.value.kind,'scheduled');assert.equal(first.value.lifetime,'durable');
- assert.equal(first.value.assurance,'portable');assert.equal(first.value.seat,first.value.handle);
- assert.equal(first.value.outcome,'created');assert.equal(first.value.original_outcome,'created');
- assert.equal(first.value.name_adjusted,false);assert.equal(first.value.adjustment_reason,null);assert.equal(first.value.disambiguator,null);
- assert.notEqual(first.value.context_id,firstMessage.value.context_id);assert.notEqual(first.value.principal_id,firstMessage.value.principal_id);
- for(const field of ['context_id','principal_id','seat_id','created_at','last_business_at','idle_expires_at','absolute_expires_at'])assert.ok(first.value[field],field);
- for(const field of ['ok','status','event_ids'])assert.equal(Object.hasOwn(first.value,field),false);
+ const first=await call(request);(step='durable-new-01',assert.equal(first.status,200));(step='durable-new-02',assert.equal(first.rpc.result.isError,false));
+ (step='durable-new-03',assert.equal(first.value.name,'Marketing'));(step='durable-new-04',assert.equal(first.value.display_name,'Marketing'));
+ (step='durable-new-05',assert.equal(first.value.kind,'scheduled'));(step='durable-new-06',assert.equal(first.value.lifetime,'durable'));
+ (step='durable-new-07',assert.equal(first.value.assurance,'portable'));(step='durable-new-08',assert.equal(first.value.seat,first.value.handle));
+ (step='durable-new-09',assert.equal(first.value.outcome,'created'));(step='durable-new-10',assert.equal(first.value.original_outcome,'created'));
+ (step='durable-new-11',assert.equal(first.value.name_adjusted,false));(step='durable-new-12',assert.equal(first.value.adjustment_reason,null));(step='durable-new-13',assert.equal(first.value.disambiguator,null));
+ (step='durable-new-14',assert.notEqual(first.value.context_id,firstMessage.value.context_id));(step='durable-new-15',assert.notEqual(first.value.principal_id,firstMessage.value.principal_id));
+ for(const field of ['context_id','principal_id','seat_id','created_at','last_business_at','idle_expires_at','absolute_expires_at'])(step='durable-new-16',assert.ok(first.value[field],field));
+ for(const field of ['ok','status','event_ids'])(step='durable-new-17',assert.equal(Object.hasOwn(first.value,field),false));
  step='replay';
- const replay=await call(request);assert.equal(replay.value.outcome,'replayed');assert.equal(replay.value.context_id,first.value.context_id);
- const selected=await tool('whoami',{seat:first.value.seat});assert.equal(selected.rpc.result.isError,false);
+ const replay=await call(request);(step='replay-01',assert.equal(replay.value.outcome,'replayed'));(step='replay-02',assert.equal(replay.value.context_id,first.value.context_id));
+ const selected=await tool('whoami',{seat:first.value.seat});(step='replay-03',assert.equal(selected.rpc.result.isError,false));
  for(const field of ['grant_id','workspace_id','workspace','seat_id','principal_id','context_id','seat','handle','name',
  'display_name','disambiguator','assurance','lifetime','kind','created_at','last_business_at','idle_expires_at','absolute_expires_at']){
-  assert.deepEqual(selected.value[field],first.value[field],field);
+  (step='replay-04',assert.deepEqual(selected.value[field],first.value[field],field));
  }
- assert.equal(selected.value.context_status,'active');assert.equal(selected.value.transport,'hosted');assert.equal(selected.value.turn_only,true);
- assert.equal(Object.hasOwn(selected.value,'client_id'),false);assert.equal(Object.hasOwn(selected.value,'owner_user_id'),false);
+ (step='replay-05',assert.equal(selected.value.context_status,'active'));(step='replay-06',assert.equal(selected.value.transport,'hosted'));(step='replay-07',assert.equal(selected.value.turn_only,true));
+ (step='replay-08',assert.equal(Object.hasOwn(selected.value,'client_id'),false));(step='replay-09',assert.equal(Object.hasOwn(selected.value,'owner_user_id'),false));
  // Case: durable-continuation. Keep diagnostic steps in the shared allowlist.
  step='continue';
  const continued=await call({request_id:'server_continue_context_1',intent:'continue',name:'Marketing',kind:'task',workspace_id:input.workspace});
- assert.equal(continued.rpc.result.isError,false);assert.equal(continued.value.principal_id,first.value.principal_id);
- assert.notEqual(continued.value.context_id,first.value.context_id);assert.equal(continued.value.kind,'task');
- assert.notEqual(continued.value.seat,first.value.seat);assert.equal(continued.value.seat_id,first.value.seat_id);
- assert.equal(continued.value.outcome,'continued');assert.equal(continued.value.original_outcome,'continued');assert.equal(continued.value.lifetime,'durable');
- assert.equal(continued.value.name,'Marketing');assert.equal(continued.value.name_adjusted,false);assert.equal(continued.value.adjustment_reason,null);
+ (step='continue-01',assert.equal(continued.rpc.result.isError,false));(step='continue-02',assert.equal(continued.value.principal_id,first.value.principal_id));
+ (step='continue-03',assert.notEqual(continued.value.context_id,first.value.context_id));(step='continue-04',assert.equal(continued.value.kind,'task'));
+ (step='continue-05',assert.notEqual(continued.value.seat,first.value.seat));(step='continue-06',assert.equal(continued.value.seat_id,first.value.seat_id));
+ (step='continue-07',assert.equal(continued.value.outcome,'continued'));(step='continue-08',assert.equal(continued.value.original_outcome,'continued'));(step='continue-09',assert.equal(continued.value.lifetime,'durable'));
+ (step='continue-10',assert.equal(continued.value.name,'Marketing'));(step='continue-11',assert.equal(continued.value.name_adjusted,false));(step='continue-12',assert.equal(continued.value.adjustment_reason,null));
  await assertBound(continued.value);
  const retained=await call({request_id:'server_handle_context_1',intent:'continue',seat:first.value.seat});
- assert.equal(retained.rpc.result.isError,false);assert.equal(retained.value.workspace_id,input.workspace);
- assert.equal(retained.value.context_id,first.value.context_id,'handle never falls back to a different home');
+ (step='continue-13',assert.equal(retained.rpc.result.isError,false));(step='continue-14',assert.equal(retained.value.workspace_id,input.workspace));
+ (step='continue-15',assert.equal(retained.value.context_id,first.value.context_id,'handle never falls back to a different home'));
  const mismatch=await call({request_id:'server_handle_mismatch_1',intent:'continue',seat:first.value.seat,workspace_id:input.home});
- assert.equal(mismatch.rpc.result.isError,true);assert.equal(mismatch.value.error,'workspace_mismatch');
+ (step='continue-16',assert.equal(mismatch.rpc.result.isError,true));(step='continue-17',assert.equal(mismatch.value.error,'workspace_mismatch'));
  // Case: ephemeral-durable-collision. Keep diagnostic steps in the shared allowlist.
  step='separate-claim';
  const separate=await call({request_id:'server_new_context_2',name:'Marketing',workspace_id:input.workspace});
- assert.equal(separate.rpc.result.isError,false);assert.equal(separate.value.display_name,'Marketing');
- assert.equal(separate.value.adjustment_reason,'collision');assert.notEqual(separate.value.principal_id,first.value.principal_id);
- assert.equal(separate.value.outcome,'created');assert.equal(separate.value.original_outcome,'created');assert.equal(separate.value.lifetime,'ephemeral');
- assert.equal(separate.value.name_adjusted,true);assert.match(separate.value.disambiguator,/^[A-Z2-7]{4}$/u);
- assert.equal(separate.value.name,'Marketing-'+separate.value.disambiguator);
- assert.notEqual(separate.value.seat_id,first.value.seat_id);assert.notEqual(separate.value.context_id,first.value.context_id);
+ (step='collision-01',assert.equal(separate.rpc.result.isError,false));(step='collision-02',assert.equal(separate.value.display_name,'Marketing'));
+ (step='collision-03',assert.equal(separate.value.adjustment_reason,'collision'));(step='collision-04',assert.notEqual(separate.value.principal_id,first.value.principal_id));
+ (step='collision-05',assert.equal(separate.value.outcome,'created'));(step='collision-06',assert.equal(separate.value.original_outcome,'created'));(step='collision-07',assert.equal(separate.value.lifetime,'ephemeral'));
+ (step='collision-08',assert.equal(separate.value.name_adjusted,true));(step='collision-09',assert.match(separate.value.disambiguator,/^[A-Z2-7]{4}$/u));
+ (step='collision-10',assert.equal(separate.value.name,'Marketing-'+separate.value.disambiguator));
+ (step='collision-11',assert.notEqual(separate.value.seat_id,first.value.seat_id));(step='collision-12',assert.notEqual(separate.value.context_id,first.value.context_id));
  await assertBound(separate.value);await assertBound(first.value);
  const separateDurable=await call({request_id:'server_durable_collision_1',name:'Marketing',lifetime:'durable',workspace_id:input.workspace});
- assert.equal(separateDurable.rpc.result.isError,false);assert.equal(separateDurable.value.outcome,'created');assert.equal(separateDurable.value.original_outcome,'created');
- assert.equal(separateDurable.value.lifetime,'durable');assert.equal(separateDurable.value.display_name,'Marketing');
- assert.equal(separateDurable.value.name_adjusted,true);assert.equal(separateDurable.value.adjustment_reason,'collision');
- assert.match(separateDurable.value.disambiguator,/^[A-Z2-7]{4}$/u);assert.equal(separateDurable.value.name,'Marketing-'+separateDurable.value.disambiguator);
- for(const existing of [first.value,separate.value])for(const field of ['principal_id','seat_id','context_id','seat','name'])assert.notEqual(separateDurable.value[field],existing[field],field);
+ (step='collision-13',assert.equal(separateDurable.rpc.result.isError,false));(step='collision-14',assert.equal(separateDurable.value.outcome,'created'));(step='collision-15',assert.equal(separateDurable.value.original_outcome,'created'));
+ (step='collision-16',assert.equal(separateDurable.value.lifetime,'durable'));(step='collision-17',assert.equal(separateDurable.value.display_name,'Marketing'));
+ (step='collision-18',assert.equal(separateDurable.value.name_adjusted,true));(step='collision-19',assert.equal(separateDurable.value.adjustment_reason,'collision'));
+ (step='collision-20',assert.match(separateDurable.value.disambiguator,/^[A-Z2-7]{4}$/u));(step='collision-21',assert.equal(separateDurable.value.name,'Marketing-'+separateDurable.value.disambiguator));
+ for(const existing of [first.value,separate.value])for(const field of ['principal_id','seat_id','context_id','seat','name'])(step='collision-22',assert.notEqual(separateDurable.value[field],existing[field],field));
  await assertBound(separateDurable.value);await assertBound(first.value);
  step='committed-context';lastFailure=null;httpStatus=null;
  const contexts=await api.db.unsafe('SELECT kind,handle FROM swarm.hosted_agent_contexts WHERE context_id=$1::uuid',[first.value.context_id]);
- assert.equal(contexts.length,1);assert.equal(contexts[0].kind,'scheduled');assert.equal(contexts[0].handle,first.value.handle);
+ (step='persisted-01',assert.equal(contexts.length,1));(step='persisted-02',assert.equal(contexts[0].kind,'scheduled'));(step='persisted-03',assert.equal(contexts[0].handle,first.value.handle));
  step='malformed';
- const invalid=await call({...request,seat:first.value.handle});assert.equal(invalid.status,400);assert.equal(invalid.rpc.error.code,-32602);
+ const invalid=await call({...request,seat:first.value.handle});(step='malformed-01',assert.equal(invalid.status,400));(step='malformed-02',assert.equal(invalid.rpc.error.code,-32602));
  step='conflict';
- const conflict=await call({...request,name:'Different'});assert.equal(conflict.rpc.result.isError,true);assert.equal(conflict.value.error,'command_id_conflict');
+ const conflict=await call({...request,name:'Different'});(step='conflict-01',assert.equal(conflict.rpc.result.isError,true));(step='conflict-02',assert.equal(conflict.value.error,'command_id_conflict'));
  step='committed-context';
  const objectId=crypto.randomUUID();
  await api.db.unsafe("INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at,hosted_grant_id) VALUES($1,$2,$3,$4,$5,'shared',ARRAY['read','create','update'],$6,NULL,$2)",
@@ -184,65 +184,65 @@ async function assertBound(identity,owner=input.owner,grant=input.grant){
  // Case: public-household-refusal. Keep diagnostic steps in the shared allowlist.
  step='malformed';
  for(const [name,args] of [['object_create',createArgs],['object_read',{seat:first.value.seat,object_id:objectId}]]){
-  const refused=await tool(name,args);assert.equal(refused.status,400);assert.equal(refused.rpc.error.code,-32602);assert.equal(Object.hasOwn(refused.rpc,'result'),false);
+  const refused=await tool(name,args);(step='public-household-01',assert.equal(refused.status,400));(step='public-household-02',assert.equal(refused.rpc.error.code,-32602));(step='public-household-03',assert.equal(Object.hasOwn(refused.rpc,'result'),false));
  }
  // Case: prepared-household. Keep diagnostic steps in the shared allowlist.
  step='committed-context';
- const created=await household('object_create',createArgs);assert.equal(created.isError,false);assert.equal(created.value.status,'committed');
- assert.equal(created.value.revision.workspace_id,input.workspace);assert.equal(created.value.revision.object_id,objectId);assert.ok(created.value.revision.token);
+ const created=await household('object_create',createArgs);(step='prepared-household-01',assert.equal(created.isError,false));(step='prepared-household-02',assert.equal(created.value.status,'committed'));
+ (step='prepared-household-03',assert.equal(created.value.revision.workspace_id,input.workspace));(step='prepared-household-04',assert.equal(created.value.revision.object_id,objectId));(step='prepared-household-05',assert.ok(created.value.revision.token));
  const readArgs={seat:first.value.seat,object_id:objectId};
- function assertRetained(result){assert.equal(result.isError,false);assert.equal(result.value.status,'ok');assert.equal(result.value.kind,'object_read');
-  assert.equal(result.value.revision.revision.object_id,objectId);assert.deepEqual(result.value.revision.revision,created.value.revision);
-  assert.equal(result.value.revision.title,'Synthetic retained doc');assert.deepEqual(result.value.content,{kind:'doc',markdown:'synthetic shared content'});}
+ function assertRetained(result){(step='prepared-household-06',assert.equal(result.isError,false));(step='prepared-household-07',assert.equal(result.value.status,'ok'));(step='prepared-household-08',assert.equal(result.value.kind,'object_read'));
+  (step='prepared-household-09',assert.equal(result.value.revision.revision.object_id,objectId));(step='prepared-household-10',assert.deepEqual(result.value.revision.revision,created.value.revision));
+  (step='prepared-household-11',assert.equal(result.value.revision.title,'Synthetic retained doc'));(step='prepared-household-12',assert.deepEqual(result.value.content,{kind:'doc',markdown:'synthetic shared content'}));}
  assertRetained(await household('object_read',readArgs));
  const unknownRead=await household('object_read',{...readArgs,seat:'seat_ZZZZZZZZZZZZZZZZZZZZZZ'});
- assert.equal(unknownRead.isError,true);assert.equal(unknownRead.value.error,'identity_resume_unavailable');assert.equal(unknownRead.value.can_start_new,false);
+ (step='prepared-household-13',assert.equal(unknownRead.isError,true));(step='prepared-household-14',assert.equal(unknownRead.value.error,'identity_resume_unavailable'));(step='prepared-household-15',assert.equal(unknownRead.value.can_start_new,false));
  const note=await tool('note',{seat:first.value.seat,request_id:'server_attributed_note_1',body:'Synthetic shared note'});
- assert.equal(note.rpc.result.isError,false);assert.ok(note.value.signal_id);
+ (step='prepared-household-16',assert.equal(note.rpc.result.isError,false));(step='prepared-household-17',assert.ok(note.value.signal_id));
  const audit=await api.db.unsafe("SELECT context_id,context_details FROM swarm.audit_log WHERE context_id=$1 AND context_details->>'command_id'=$2",
   [first.value.context_id,'server_attributed_note_1']);
- assert.ok(audit.length>0);assert.equal(audit[0].context_details.principal_id,first.value.principal_id);
- assert.equal(audit[0].context_details.workspace_id,input.workspace);assert.equal(audit[0].context_details.client_id,'synthetic-app');
- assert.equal(JSON.stringify(audit).includes(first.value.handle),false);
+ (step='prepared-household-18',assert.ok(audit.length>0));(step='prepared-household-19',assert.equal(audit[0].context_details.principal_id,first.value.principal_id));
+ (step='prepared-household-20',assert.equal(audit[0].context_details.workspace_id,input.workspace));(step='prepared-household-21',assert.equal(audit[0].context_details.client_id,'synthetic-app'));
+ (step='prepared-household-22',assert.equal(JSON.stringify(audit).includes(first.value.handle),false));
  const contentAudit=await api.db.unsafe("SELECT context_id,context_details FROM swarm.audit_log WHERE context_id=$1 AND context_details->>'command_id'=$2",[first.value.context_id,createArgs.request_id]);
- assert.ok(contentAudit.length>0);assert.equal(contentAudit[0].context_details.principal_id,first.value.principal_id);
- assert.equal(contentAudit[0].context_details.workspace_id,input.workspace);assert.equal(contentAudit[0].context_details.client_id,'synthetic-app');
+ (step='prepared-household-23',assert.ok(contentAudit.length>0));(step='prepared-household-24',assert.equal(contentAudit[0].context_details.principal_id,first.value.principal_id));
+ (step='prepared-household-25',assert.equal(contentAudit[0].context_details.workspace_id,input.workspace));(step='prepared-household-26',assert.equal(contentAudit[0].context_details.client_id,'synthetic-app'));
  const rows=await api.db.begin(async tx=>{
   await tx.unsafe("SELECT set_config('role','swarm_read',true),set_config('request.jwt.claims',$1,true)",[JSON.stringify({sub:input.owner,role:'authenticated'})]);
   return await tx.unsafe('SELECT principal_id,name,display_name,disambiguator,identity_lifetime,app,context_activity FROM swarm_read.agent_principals WHERE workspace_id=$1::uuid AND revoked_at IS NULL',[input.workspace]);
  });
- assert.equal(rows.length,3);const durable=rows.find(row=>row.principal_id===first.value.principal_id);
- assert.equal(durable.display_name,'Marketing');assert.equal(durable.identity_lifetime,'durable');
- assert.equal(durable.app.client_id,'synthetic-app');assert.equal(durable.app.display_name,'Agent');
- assert.equal(durable.context_activity.active_contexts,2);assert.ok(durable.context_activity.last_business_at);
+ (step='prepared-household-27',assert.equal(rows.length,3));const durable=rows.find(row=>row.principal_id===first.value.principal_id);
+ (step='prepared-household-28',assert.equal(durable.display_name,'Marketing'));(step='prepared-household-29',assert.equal(durable.identity_lifetime,'durable'));
+ (step='prepared-household-30',assert.equal(durable.app.client_id,'synthetic-app'));(step='prepared-household-31',assert.equal(durable.app.display_name,'Agent'));
+ (step='prepared-household-32',assert.equal(durable.context_activity.active_contexts,2));(step='prepared-household-33',assert.ok(durable.context_activity.last_business_at));
  const ephemeral=rows.find(row=>row.principal_id===separate.value.principal_id);
- assert.equal(ephemeral.disambiguator,separate.value.disambiguator);assert.equal(ephemeral.identity_lifetime,'ephemeral');
+ (step='prepared-household-34',assert.equal(ephemeral.disambiguator,separate.value.disambiguator));(step='prepared-household-35',assert.equal(ephemeral.identity_lifetime,'ephemeral'));
  // Case: cannot-resume. Keep diagnostic steps in the shared allowlist.
  step='continue';
  const foreign=await tool('claim_seat',{request_id:'server_foreign_context_1',name:'Other owner agent',lifetime:'durable',workspace_id:input.workspace},await tokenFor(input.foreignOwner,input.foreignGrant));
- assert.equal(foreign.rpc.result.isError,false);assert.equal(foreign.value.outcome,'created');await assertBound(foreign.value,input.foreignOwner,input.foreignGrant);
+ (step='cannot-resume-01',assert.equal(foreign.rpc.result.isError,false));(step='cannot-resume-02',assert.equal(foreign.value.outcome,'created'));await assertBound(foreign.value,input.foreignOwner,input.foreignGrant);
  const beforeRefusal=(await api.db.unsafe('SELECT count(*)::int AS n FROM swarm.hosted_agent_contexts'))[0].n;
- // Name-only refusal can offer new; a foreign handle gives no binding
- // disclosure. Neither may fall back to a different identity or allocate one.
+ // DESIGN 4.3 permits new after identity-only refusal under a valid grant,
+ // including a foreign handle. No binding is disclosed or replacement allocated.
  for(const [args,canStartNew] of [
   [{name:foreign.value.name},true],
   [{name:separate.value.name},true],
-  [{seat:foreign.value.seat},false],
+  [{seat:foreign.value.seat},true],
  ]){
   const refused=await call({request_id:crypto.randomUUID(),intent:'continue',workspace_id:input.workspace,...args});
-  assert.equal(refused.status,200);assert.equal(refused.rpc.result.isError,true);
-  assert.equal(refused.value.error,'identity_resume_unavailable');assert.equal(refused.value.can_start_new,canStartNew);
-  for(const field of ['context_id','seat','handle','principal_id'])assert.equal(Object.hasOwn(refused.value,field),false);
+  (step='cannot-resume-03',assert.equal(refused.status,200));(step='cannot-resume-04',assert.equal(refused.rpc.result.isError,true));
+  (step='cannot-resume-05',assert.equal(refused.value.error,'identity_resume_unavailable'));(step='cannot-resume-06',assert.equal(refused.value.can_start_new,canStartNew));
+  for(const field of ['context_id','seat','handle','principal_id'])(step='cannot-resume-07',assert.equal(Object.hasOwn(refused.value,field),false));
  }
  const foreignSelected=await tool('whoami',{seat:foreign.value.seat});
- assert.equal(foreignSelected.rpc.result.isError,true);assert.equal(foreignSelected.value.error,'identity_resume_unavailable');assert.equal(foreignSelected.value.can_start_new,false);
- assert.equal((await api.db.unsafe('SELECT count(*)::int AS n FROM swarm.hosted_agent_contexts'))[0].n,beforeRefusal);
+ (step='cannot-resume-08',assert.equal(foreignSelected.rpc.result.isError,true));(step='cannot-resume-09',assert.equal(foreignSelected.value.error,'identity_resume_unavailable'));(step='cannot-resume-10',assert.equal(foreignSelected.value.can_start_new,false));
+ (step='cannot-resume-11',assert.equal((await api.db.unsafe('SELECT count(*)::int AS n FROM swarm.hosted_agent_contexts'))[0].n,beforeRefusal));
  await assertBound(first.value);await assertBound(continued.value);await assertBound(foreign.value,input.foreignOwner,input.foreignGrant);
  await api.db.unsafe('UPDATE swarm.workspaces SET archived_at=statement_timestamp() WHERE workspace_id=$1',[input.home]);
- const noHome=await call({request_id:'server_missing_home_1'});assert.equal(noHome.rpc.result.isError,true);assert.equal(noHome.value.error,'workspace_unavailable');
- const noHomeDiscovery=await tool('whoami',{});assert.equal(noHomeDiscovery.rpc.result.isError,false);assert.equal(noHomeDiscovery.value.home_workspace_id,null);
+ const noHome=await call({request_id:'server_missing_home_1'});(step='cannot-resume-12',assert.equal(noHome.rpc.result.isError,true));(step='cannot-resume-13',assert.equal(noHome.value.error,'workspace_unavailable'));
+ const noHomeDiscovery=await tool('whoami',{});(step='cannot-resume-14',assert.equal(noHomeDiscovery.rpc.result.isError,false));(step='cannot-resume-15',assert.equal(noHomeDiscovery.value.home_workspace_id,null));
  const noHomeContinue=await call({request_id:'server_no_home_continue_1',intent:'continue',seat:first.value.seat});
- assert.equal(noHomeContinue.rpc.result.isError,false);assert.equal(noHomeContinue.value.context_id,first.value.context_id);
+ (step='expiry-01',assert.equal(noHomeContinue.rpc.result.isError,false));(step='expiry-02',assert.equal(noHomeContinue.value.context_id,first.value.context_id));
  await api.db.begin(async tx=>{
   await tx.unsafe('ALTER TABLE swarm.hosted_agent_contexts DISABLE TRIGGER hosted_context_guard');
   // Shift the actual issued clocks together; retain each kind's idle and
@@ -252,52 +252,52 @@ async function assertBound(identity,owner=input.owner,grant=input.grant){
  });
  const expiry={error:'context_expired',message:'This chat identity expired. Start a new identity to continue; shared work is still here.',can_start_new:true};
  for(const [name,args] of [['whoami',{seat:first.value.seat}],['claim_seat',{request_id:'server_expired_handle_1',intent:'continue',seat:first.value.seat}]]){
-  const result=await tool(name,args);assert.equal(result.status,200);assert.equal(result.rpc.result.isError,true);assert.deepEqual(result.value,expiry);
+  const result=await tool(name,args);(step='expiry-03',assert.equal(result.status,200));(step='expiry-04',assert.equal(result.rpc.result.isError,true));(step='expiry-05',assert.deepEqual(result.value,expiry));
  }
  for(const [name,args] of [['object_read',readArgs],['object_create',{...createArgs,request_id:'server_expired_write_1',object_id:crypto.randomUUID()}]]){
-  const result=await household(name,args);assert.equal(result.isError,true);assert.deepEqual(result.value,expiry);
+  const result=await household(name,args);(step='expiry-06',assert.equal(result.isError,true));(step='expiry-07',assert.deepEqual(result.value,expiry));
  }
  // Case: new-after-expiry. Keep diagnostic steps in the shared allowlist.
  step='separate-claim';
  const beforeNew=(await api.db.unsafe('SELECT count(*)::int AS n FROM swarm.hosted_agent_contexts'))[0].n;
  const fresh=await call({request_id:'server_new_after_expiry_1',name:'Marketing',workspace_id:input.workspace});
- assert.equal(fresh.rpc.result.isError,false);assert.equal(fresh.value.outcome,'created');assert.equal(fresh.value.original_outcome,'created');
- assert.equal(fresh.value.lifetime,'ephemeral');assert.equal(fresh.value.kind,'chat');assert.equal(fresh.value.display_name,'Marketing');
- assert.equal(fresh.value.name_adjusted,true);assert.equal(fresh.value.adjustment_reason,'collision');
- assert.match(fresh.value.disambiguator,/^[A-Z2-7]{4}$/u);assert.equal(fresh.value.name,'Marketing-'+fresh.value.disambiguator);
- for(const existing of [first.value,continued.value,separate.value,separateDurable.value,foreign.value,firstMessage.value])for(const field of ['context_id','seat','seat_id','principal_id'])assert.notEqual(fresh.value[field],existing[field],field);
- assert.equal((await api.db.unsafe('SELECT count(*)::int AS n FROM swarm.hosted_agent_contexts'))[0].n,beforeNew+1);
+ (step='new-after-expiry-01',assert.equal(fresh.rpc.result.isError,false));(step='new-after-expiry-02',assert.equal(fresh.value.outcome,'created'));(step='new-after-expiry-03',assert.equal(fresh.value.original_outcome,'created'));
+ (step='new-after-expiry-04',assert.equal(fresh.value.lifetime,'ephemeral'));(step='new-after-expiry-05',assert.equal(fresh.value.kind,'chat'));(step='new-after-expiry-06',assert.equal(fresh.value.display_name,'Marketing'));
+ (step='new-after-expiry-07',assert.equal(fresh.value.name_adjusted,true));(step='new-after-expiry-08',assert.equal(fresh.value.adjustment_reason,'collision'));
+ (step='new-after-expiry-09',assert.match(fresh.value.disambiguator,/^[A-Z2-7]{4}$/u));(step='new-after-expiry-10',assert.equal(fresh.value.name,'Marketing-'+fresh.value.disambiguator));
+ for(const existing of [first.value,continued.value,separate.value,separateDurable.value,foreign.value,firstMessage.value])for(const field of ['context_id','seat','seat_id','principal_id'])(step='new-after-expiry-11',assert.notEqual(fresh.value[field],existing[field],field));
+ (step='new-after-expiry-12',assert.equal((await api.db.unsafe('SELECT count(*)::int AS n FROM swarm.hosted_agent_contexts'))[0].n,beforeNew+1));
  await assertBound(fresh.value);
- assert.ok(Date.parse(fresh.value.idle_expires_at)>Date.now());assert.ok(Date.parse(fresh.value.absolute_expires_at)>Date.now());
+ (step='new-after-expiry-13',assert.ok(Date.parse(fresh.value.idle_expires_at)>Date.now()));(step='new-after-expiry-14',assert.ok(Date.parse(fresh.value.absolute_expires_at)>Date.now()));
  for(const old of [first.value,separate.value]){
-  const expired=await tool('whoami',{seat:old.seat});assert.equal(expired.rpc.result.isError,true);assert.deepEqual(expired.value,expiry);
+  const expired=await tool('whoami',{seat:old.seat});(step='new-after-expiry-15',assert.equal(expired.rpc.result.isError,true));(step='new-after-expiry-16',assert.deepEqual(expired.value,expiry));
  }
  // Case: expiry-close. Keep diagnostic steps in the shared allowlist.
  step='committed-context';
  const closeArgs={seat:first.value.seat,request_id:'server_expired_close_1'};
- const closed=await tool('close_session',closeArgs);assert.equal(closed.rpc.result.isError,false);
- assert.equal(closed.value.outcome,'closed');assert.equal(closed.value.context_id,first.value.context_id);assert.equal(closed.value.principal_state,'retained');assert.ok(closed.value.closed_at);
- const closeReplay=await tool('close_session',closeArgs);assert.equal(closeReplay.rpc.result.isError,false);assert.equal(closeReplay.value.outcome,'replayed');assert.equal(closeReplay.value.closed_at,closed.value.closed_at);
- const closeAgain=await tool('close_session',{...closeArgs,request_id:'server_expired_close_2'});assert.equal(closeAgain.rpc.result.isError,false);assert.equal(closeAgain.value.outcome,'closed');assert.equal(closeAgain.value.closed_at,closed.value.closed_at);
- const closedRead=await tool('whoami',{seat:first.value.seat});assert.equal(closedRead.rpc.result.isError,true);assert.equal(closedRead.value.error,'context_closed');
- const sibling=await tool('whoami',{seat:continued.value.seat});assert.equal(sibling.rpc.result.isError,false);
+ const closed=await tool('close_session',closeArgs);(step='expiry-close-01',assert.equal(closed.rpc.result.isError,false));
+ (step='expiry-close-02',assert.equal(closed.value.outcome,'closed'));(step='expiry-close-03',assert.equal(closed.value.context_id,first.value.context_id));(step='expiry-close-04',assert.equal(closed.value.principal_state,'retained'));(step='expiry-close-05',assert.ok(closed.value.closed_at));
+ const closeReplay=await tool('close_session',closeArgs);(step='expiry-close-06',assert.equal(closeReplay.rpc.result.isError,false));(step='expiry-close-07',assert.equal(closeReplay.value.outcome,'replayed'));(step='expiry-close-08',assert.equal(closeReplay.value.closed_at,closed.value.closed_at));
+ const closeAgain=await tool('close_session',{...closeArgs,request_id:'server_expired_close_2'});(step='expiry-close-09',assert.equal(closeAgain.rpc.result.isError,false));(step='expiry-close-10',assert.equal(closeAgain.value.outcome,'closed'));(step='expiry-close-11',assert.equal(closeAgain.value.closed_at,closed.value.closed_at));
+ const closedRead=await tool('whoami',{seat:first.value.seat});(step='expiry-close-12',assert.equal(closedRead.rpc.result.isError,true));(step='expiry-close-13',assert.equal(closedRead.value.error,'context_closed'));
+ const sibling=await tool('whoami',{seat:continued.value.seat});(step='expiry-close-14',assert.equal(sibling.rpc.result.isError,false));
  assertRetained(await household('object_read',{...readArgs,seat:continued.value.seat}));
- const closedContent=await household('object_read',readArgs);assert.equal(closedContent.isError,true);assert.equal(closedContent.value.error,'context_closed');
+ const closedContent=await household('object_read',readArgs);(step='expiry-close-15',assert.equal(closedContent.isError,true));(step='expiry-close-16',assert.equal(closedContent.value.error,'context_closed'));
  await assertBound(continued.value);await assertBound(fresh.value);
  const retired=await tool('close_session',{seat:separate.value.seat,request_id:'server_ephemeral_close_1'});
- assert.equal(retired.rpc.result.isError,false);assert.equal(retired.value.principal_state,'retired');
+ (step='expiry-close-17',assert.equal(retired.rpc.result.isError,false));(step='expiry-close-18',assert.equal(retired.value.principal_state,'retired'));
  const retiredAgain=await tool('close_session',{seat:separate.value.seat,request_id:'server_ephemeral_close_2'});
- assert.equal(retiredAgain.rpc.result.isError,false);assert.equal(retiredAgain.value.closed_at,retired.value.closed_at);
- const retiredRead=await tool('whoami',{seat:separate.value.seat});assert.equal(retiredRead.rpc.result.isError,true);assert.equal(retiredRead.value.error,'context_closed');
+ (step='expiry-close-19',assert.equal(retiredAgain.rpc.result.isError,false));(step='expiry-close-20',assert.equal(retiredAgain.value.closed_at,retired.value.closed_at));
+ const retiredRead=await tool('whoami',{seat:separate.value.seat});(step='expiry-close-21',assert.equal(retiredRead.rpc.result.isError,true));(step='expiry-close-22',assert.equal(retiredRead.value.error,'context_closed'));
  step='revoked';
  await api.db.unsafe('INSERT INTO commonswarm_oauth.refresh_family_tombstones(grant_id,revoked_at) VALUES($1,statement_timestamp())',['provider-'+input.grant]);
- const denied=await call({request_id:'server_denied_context_1'});assert.equal(denied.rpc.result.isError,true);assert.equal(denied.value.can_start_new,false);
- const deniedDiscovery=await tool('whoami',{});assert.equal(deniedDiscovery.rpc.result.isError,true);assert.equal(deniedDiscovery.value.error,'identity_resume_unavailable');
+ const denied=await call({request_id:'server_denied_context_1'});(step='revoked-01',assert.equal(denied.rpc.result.isError,true));(step='revoked-02',assert.equal(denied.value.can_start_new,false));
+ const deniedDiscovery=await tool('whoami',{});(step='revoked-03',assert.equal(deniedDiscovery.rpc.result.isError,true));(step='revoked-04',assert.equal(deniedDiscovery.value.error,'identity_resume_unavailable'));
  const deniedClose=await tool('close_session',{seat:continued.value.seat,request_id:'server_denied_close_1'});
- assert.equal(deniedClose.rpc.result.isError,true);assert.equal(deniedClose.value.error,'identity_resume_unavailable');assert.equal(deniedClose.value.can_start_new,false);
- const siblingState=await api.db.unsafe('SELECT closed_at FROM swarm.hosted_agent_contexts WHERE context_id=$1',[continued.value.context_id]);assert.equal(siblingState[0].closed_at,null);
+ (step='revoked-05',assert.equal(deniedClose.rpc.result.isError,true));(step='revoked-06',assert.equal(deniedClose.value.error,'identity_resume_unavailable'));(step='revoked-07',assert.equal(deniedClose.value.can_start_new,false));
+ const siblingState=await api.db.unsafe('SELECT closed_at FROM swarm.hosted_agent_contexts WHERE context_id=$1',[continued.value.context_id]);(step='revoked-08',assert.equal(siblingState[0].closed_at,null));
  step='committed-count';lastFailure=null;httpStatus=null;
- const count=await api.db.unsafe('SELECT count(*)::int AS n FROM swarm.hosted_agent_contexts');assert.equal(count[0].n,7);
+ const count=await api.db.unsafe('SELECT count(*)::int AS n FROM swarm.hosted_agent_contexts');(step='count-01',assert.equal(count[0].n,7));
  step='cleanup';
 } finally {if(api)await api.db.end();}
  console.log('SID_MCP_CLAIM_OK '+JSON.stringify({allocations:7,malformed_refused:true,revoked_refused:true,replay_preserved:true,index_lifecycle:true,expiry_close:true,public_household_refused:true,retained_content:true,typed_identity_cases:5}));

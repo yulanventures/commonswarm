@@ -6,7 +6,7 @@ import ts from 'typescript';
 // @ts-expect-error TS5097: exercise the production Deno class through tsx.
 import { HostedToolFailure } from '../supabase/functions/mcp/tool-errors.ts';
 import {
-  HOSTED_CONTEXT_FAILURE_PREFIX, HOSTED_TOOL_FAILURE_CODES,
+  HOSTED_CONTEXT_FAILURE_PREFIX, HOSTED_CONTEXT_STEPS, HOSTED_TOOL_FAILURE_CODES,
   classifyHostedContextFailure, parseHostedContextDiagnostic, rebuildHostedContextDiagnostic,
 } from './support/hosted-context-diagnostic.js';
 
@@ -36,6 +36,7 @@ test('diagnostic hosted failure inventory equals the production normalized code 
 
 test('parent rebuilds valid diagnostics, including database and hosted positive controls', () => {
   for (const fields of [valid,
+    ...HOSTED_CONTEXT_STEPS.map(step => ({ ...valid, step, error_code: 'ERR_ASSERTION', http_status: 200 })),
     { ...valid, error_code: 'hosted_grant_forbidden', http_status: 403 },
     { ...valid, error_code: 'ERR_ASSERTION', http_status: 100 },
     { ...valid, sqlstate: '23505', http_status: 599 },

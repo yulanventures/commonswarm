@@ -117,6 +117,7 @@ test('handle continuation uses its context workspace, refuses mismatch and never
   const unknown = (await f.call({ ...args, seat: 'seat_ZZZZZZZZZZZZZZZZZZZZZZ' })).rpc.result;
   assert.equal(unknown.isError, true);
   assert.equal(JSON.parse(unknown.content[0].text).error, 'identity_resume_unavailable');
+  assert.equal(JSON.parse(unknown.content[0].text).can_start_new, true);
   assert.equal(f.commands.length, 1);
   f.revoke();
   const denied = (await f.call({ ...args, workspace_id: workspace })).rpc.result;
