@@ -232,6 +232,121 @@ for f,key in ((c,'checker_sha256'),(p,'plan_sha256')):
 r=json.loads(c.read_bytes()); assert set(r)=={'release_sha','plan_sha256','archive_sha256','result','server_suite','meta_regression'}
 assert all(r[k]==d[k] for k in ('release_sha','plan_sha256','archive_sha256')) and all(r[k]=='PASS' for k in ('result','server_suite','meta_regression'))
 PY
+edge_archive_library() { cat <<'ARCHIVE_PY'
+import hashlib,json,os,pathlib,re,stat
+STATE='/var/lib/commonswarm-admin-release'
+ARCHIVES=STATE+'/archives'
+KEEPER=['/usr/local/libexec/commonswarm-recycle-archive','/etc/systemd/system/commonswarm-recycle-archive-keep.service','/etc/systemd/system/commonswarm-recycle-archive-keep.timer','/etc/systemd/system/commonswarm-recycle-archive-restore.service','/etc/tmpfiles.d/commonswarm-recycle-archive.conf']
+def need(ok,label):
+    if not ok: raise SystemExit('FAIL edge archives: '+label+'; STOP')
+def keeper_absent():
+    present=[name for name in KEEPER if os.path.lexists(name)]
+    need(not present,'keeper files present '+','.join(present))
+    return {'keeper_files_present':present}
+def canonical(name):
+    p=pathlib.Path(name)
+    need(p.is_absolute() and os.path.realpath(name)==name,'canonical non-symlink archive path required')
+    for q in (p,*p.parents):
+        if os.path.lexists(q): need(not stat.S_ISLNK(q.lstat().st_mode),'symlink archive or ancestor refused')
+def sync_dir(name):
+    fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+def directories(create=False):
+    for name in (STATE,ARCHIVES):
+        canonical(name)
+        if create and not os.path.lexists(name):
+            os.mkdir(name,0o700)
+            sync_dir(str(pathlib.Path(name).parent))
+        st=pathlib.Path(name).lstat()
+        need(stat.S_ISDIR(st.st_mode) and (st.st_uid,st.st_gid,stat.S_IMODE(st.st_mode))==(0,0,0o700),'durable directories require root:root 0700')
+def names(name,sha):
+    need(isinstance(sha,str) and re.fullmatch('[0-9a-f]{40}',sha) is not None,'binding SHA required')
+    need(isinstance(name,str),'archive name required')
+    legacy=re.fullmatch('/tmp/admin-issuance-'+sha+r'-([A-Za-z0-9]{6})\.tar',name)
+    durable=re.fullmatch(ARCHIVES+'/'+sha+r'-([A-Za-z0-9]{6})\.tar',name)
+    need(legacy is not None or durable is not None,'exact legacy or durable archive name required')
+    window=(legacy or durable).group(1)
+    return durable is not None,ARCHIVES+'/'+sha+'-'+window+'.tar'
+def read(name,durable=False):
+    canonical(name)
+    if durable: directories()
+    fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        st=os.fstat(fd)
+        need(stat.S_ISREG(st.st_mode),'regular archive descriptor required')
+        metadata={'uid':st.st_uid,'gid':st.st_gid,'mode':oct(stat.S_IMODE(st.st_mode))}
+        if durable: need(metadata=={'uid':0,'gid':0,'mode':'0o600'},'durable archive requires root:root 0600')
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: break
+            chunks.append(chunk)
+        body=b''.join(chunks)
+        return body,dict(metadata,sha256=hashlib.sha256(body).hexdigest(),path=name)
+    finally: os.close(fd)
+def create_or_equal(name,body,metadata):
+    canonical(name)
+    if not os.path.lexists(name):
+        fd=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        try:
+            os.fchown(fd,metadata['uid'],metadata['gid']); os.fchmod(fd,int(metadata['mode'],8))
+            view=memoryview(body)
+            while view:
+                size=os.write(fd,view); need(size>0,'archive write failed'); view=view[size:]
+            os.fsync(fd)
+        finally: os.close(fd)
+    kept,record=read(name)
+    need(kept==body and all(record[k]==metadata[k] for k in ('uid','gid','mode')),'conflicting existing archive bytes or metadata')
+    fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+    sync_dir(str(pathlib.Path(name).parent))
+    return record
+def promote(name,body):
+    keeper_absent(); directories(create=True)
+    need(str(pathlib.Path(name).parent)==ARCHIVES,'promotion destination must be durable')
+    return create_or_equal(name,body,{'uid':0,'gid':0,'mode':'0o600'})
+def admit(binding):
+    keeper_absent()
+    durable,rescue=names(binding['archive'],binding['release_sha'])
+    body,record=read(binding['archive'],durable)
+    need(record['sha256']==binding['artifact_digest'],'baseline archive digest mismatch')
+    return dict(record,durable=durable,rescue=rescue)
+def baseline_record(proof):
+    p=pathlib.Path(proof); raw,_=read(str(p/'recycle.baseline.json'))
+    inputs=json.loads((p/'inputs.json').read_bytes())
+    need(hashlib.sha256(raw).hexdigest()==inputs['recycle_json_sha256'],'baseline binding digest mismatch')
+    binding=json.loads(raw); baseline=json.loads((p/'archive-baseline.json').read_bytes())
+    durable,name=names(binding['archive'],binding['release_sha'])
+    need((baseline['path'],baseline['sha256'],baseline['durable'],baseline['rescue'])==(binding['archive'],binding['artifact_digest'],durable,name),'baseline rescue mapping drift')
+    return p,baseline
+
+def rescue(proof):
+    p,baseline=baseline_record(proof)
+    body,record=read(baseline['path'],baseline['durable'])
+    need(all(record[k]==baseline[k] for k in record),'baseline archive changed before rescue')
+    kept=promote(baseline['rescue'],body)
+    receipt={'legacy':None if baseline['durable'] else baseline['path'],'durable':baseline['rescue'],'sha256':kept['sha256']}
+    (p/'archive-rescue.json').write_text(json.dumps(receipt,sort_keys=True)+'\n')
+def restore(proof):
+    keeper_absent(); p,baseline=baseline_record(proof); durable=baseline['durable']
+    body,record=read(baseline['rescue'],True)
+    need(record['sha256']==baseline['sha256'],'durable rescue digest mismatch')
+    missing=not os.path.lexists(baseline['path'])
+    # C:5233–5261: same durable name; exclusive restage with admitted baseline metadata.
+    if not durable: create_or_equal(baseline['path'],body,baseline)
+    live,record=read(baseline['path'],durable)
+    need(live==body and all(record[k]==baseline[k] for k in record),'baseline archive bytes or metadata differ')
+    receipt=p/'archive-restore.json'
+    if receipt.exists():
+        previous=json.loads(receipt.read_bytes())
+        need(previous['archive']==baseline['path'] and previous['sha256']==record['sha256'],'restage receipt drift')
+        missing=missing or previous['restaged']
+    receipt.write_text(json.dumps({'archive':baseline['path'],'sha256':record['sha256'],'restaged':missing},sort_keys=True)+'\n')
+ARCHIVE_PY
+}
+edge_archive_library | python3 -c 'import json,sys; scope={}; exec(sys.stdin.read(),scope); print(json.dumps(scope["keeper_absent"](),sort_keys=True))'
 RELEASE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_sha"])' "$INPUTS_FILE")
 WINDOW_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window_id"])' "$INPUTS_FILE")
 PROOF_DIR=/home/commonswarm/edge/release-proofs/$RELEASE_SHA-$WINDOW_ID
@@ -317,13 +432,17 @@ print(name)
 PY
 }
 PARTIAL_SH
+edge_archive_library >"$PROOF_DIR/edge-archives.py"
 mkdir -m 0700 "$LOCK" # Existing incident lock forbids another window.
 printf '%s\n' "$PROOF_DIR" >"$LOCK/proof.path"
 SECRET_STAGE=$(mktemp -d /tmp/anvil-secret.XXXXXX)
 chmod 0700 "$SECRET_STAGE"
 printf '%s\n' "$SECRET_STAGE" >"$PROOF_DIR/secret-stage.path"
 python3 - "$PROOF_DIR" "$SECRET_STAGE" "$CADDY_CA_FILE" <<'PY'
-import datetime,hashlib,json,pathlib,re,shlex,stat,subprocess,sys
+import datetime,hashlib,importlib.util,json,pathlib,re,shlex,stat,subprocess,sys
+p=pathlib.Path(sys.argv[1])
+spec=importlib.util.spec_from_file_location('edge_archives',p/'edge-archives.py'); archives=importlib.util.module_from_spec(spec); spec.loader.exec_module(archives)
+(p/'keeper.json').write_text(json.dumps(archives.keeper_absent(),sort_keys=True)+'\n')
 p=pathlib.Path(sys.argv[1]); stage=pathlib.Path(sys.argv[2]); d=json.load(open(p/'inputs.json'))
 def safe(name):
  f=pathlib.Path(name); assert f.is_file() and not f.is_symlink(); return f.read_bytes()
@@ -345,9 +464,9 @@ r=json.loads((p/'recycle.baseline.json').read_bytes())
 assert set(r)=={'release_sha','target','image_digest','artifact_digest','archive','postgres_image','release_root'}
 assert r['release_sha']==d['baseline_edge_sha'] and r['target']==edge and r['image_digest']==d['baseline_edge_image'] and r['postgres_image']==d['baseline_postgres_image']
 assert r['artifact_digest']==d['recycle_archive_sha256']
-assert re.fullmatch('/tmp/admin-issuance-'+r['release_sha']+r'-[A-Za-z0-9]{6}\.tar',r['archive'])
+archive_baseline=archives.admit(r)
+(p/'archive-baseline.json').write_text(json.dumps(archive_baseline,sort_keys=True)+'\n')
 assert r['release_root']=='/home/commonswarm/admin-issuance/releases/'+r['release_sha'] and pathlib.Path(r['release_root']).resolve()==pathlib.Path(r['release_root'])
-assert hashlib.sha256(safe(r['archive'])).hexdigest()==r['artifact_digest']
 for unit,out,key in [(d['edge_recycle_service'],'unit.baseline','recycle_unit_sha256'),(d['edge_recycle_timer'],'timer.baseline','recycle_timer_sha256')]:
  raw=subprocess.check_output(['systemctl','cat',unit]); assert hashlib.sha256(raw).hexdigest()==d[key]; (p/out).write_bytes(raw)
 intent=pathlib.Path('/etc/commonswarm-admin-release/recycle-intent.json')
@@ -364,7 +483,7 @@ for name,key in [('commonswarm-oauth-oauth-1','baseline_oauth_image'),('commonsw
  c=json.loads(subprocess.check_output(['docker','inspect',name],stderr=subprocess.DEVNULL))[0]
  assert c['Image']==d[key] and c['State']['Running']; resources[name]={'Id':c['Id'],'Image':c['Image'],'StartedAt':c['State']['StartedAt']}
 (p/'resources.json').write_text(json.dumps(resources,sort_keys=True)+'\n')
-v={'PROOF_DIR':str(p),'SECRET_STAGE':str(stage),'INPUTS_FILE':str(p/'inputs.json'),'CADDY_CA_FILE':str(p/'caddy-ca.pem'),'RELEASE_SHA':d['release_sha'],'WINDOW_ID':d['window_id'],'OLD_EDGE':edge,'NEW_EDGE':new,'OLD_HELPER':r['release_root'],'NEW_HELPER':helper,'OLD_ARCHIVE':r['archive'],'OLD_ARCHIVE_DIGEST':r['artifact_digest'],'BOX_ARCHIVE_PATH':'/tmp/admin-issuance-'+d['release_sha']+'-'+d['window_id']+'.tar','POSTGRES_IMAGE':d['baseline_postgres_image'],'EDGE_RECYCLE_TIMER':d['edge_recycle_timer'],'EDGE_RECYCLE_SERVICE':d['edge_recycle_service'],'RECYCLE_JSON':config,'RECYCLE_HOOK':hook,'RECYCLE_DROPIN':drop,'LOCK':str(p.parent/'OPEN')}
+v={'PROOF_DIR':str(p),'SECRET_STAGE':str(stage),'INPUTS_FILE':str(p/'inputs.json'),'CADDY_CA_FILE':str(p/'caddy-ca.pem'),'RELEASE_SHA':d['release_sha'],'WINDOW_ID':d['window_id'],'OLD_EDGE':edge,'NEW_EDGE':new,'OLD_HELPER':r['release_root'],'NEW_HELPER':helper,'OLD_ARCHIVE':r['archive'],'OLD_ARCHIVE_DIGEST':r['artifact_digest'],'BOX_ARCHIVE_PATH':'/tmp/admin-issuance-'+d['release_sha']+'-'+d['window_id']+'.tar','DURABLE_ARCHIVE_PATH':archives.ARCHIVES+'/'+d['release_sha']+'-'+d['window_id']+'.tar','POSTGRES_IMAGE':d['baseline_postgres_image'],'EDGE_RECYCLE_TIMER':d['edge_recycle_timer'],'EDGE_RECYCLE_SERVICE':d['edge_recycle_service'],'RECYCLE_JSON':config,'RECYCLE_HOOK':hook,'RECYCLE_DROPIN':drop,'LOCK':str(p.parent/'OPEN')}
 (p/'session.sh').write_text(''.join(k+'='+shlex.quote(val)+'\n' for k,val in v.items()))
 PY
 cat >>"$PROOF_DIR/session.sh" <<'SH'
@@ -516,9 +635,26 @@ for dst,rel in [('/home/deno/main','deploy/edge-runtime/main'),('/home/deno/func
  assert len(m)==1 and m[0]['Source']==target+'/'+rel and m[0]['RW'] is False
 PY
 }
+edge_archives() {
+ python3 - "$1" "$PROOF_DIR" "$DURABLE_ARCHIVE_PATH" "$INPUTS_FILE" <<'PY'
+import importlib.util,json,pathlib,sys
+mode,proof,name,inputs=sys.argv[1:]; p=pathlib.Path(proof)
+spec=importlib.util.spec_from_file_location('edge_archives',p/'edge-archives.py'); a=importlib.util.module_from_spec(spec); spec.loader.exec_module(a)
+a.keeper_absent()
+if mode=='restore': a.restore(proof)
+else:
+ assert mode=='ready'
+ d=json.load(open(inputs)); durable,expected=a.names(name,d['release_sha']); assert durable and name==expected
+ body,record=a.read(name,True); a.need(record['sha256']==d['archive_sha256'],'promoted archive digest mismatch')
+ _,baseline=a.baseline_record(proof)
+ body,record=a.read(baseline['rescue'],True); a.need(record['sha256']==baseline['sha256'],'rescue archive digest mismatch')
+PY
+}
 edge_binding() {
- # Atomic update or exact-byte restore. No hook or drop-in code change.
- python3 - "$1" "$INPUTS_FILE" "$PROOF_DIR" "$RECYCLE_JSON" "$NEW_HELPER" "$BOX_ARCHIVE_PATH" <<'PY'
+ # Bind the verified durable promotion, or restore exact baseline JSON after archive restaging.
+ # No hook/drop-in change; E never installs, runs or retires the keeper.
+ case "$1" in apply) edge_archives ready;; restore) edge_archives restore;; *) fail 'binding mode refused';; esac
+ python3 - "$1" "$INPUTS_FILE" "$PROOF_DIR" "$RECYCLE_JSON" "$NEW_HELPER" "$DURABLE_ARCHIVE_PATH" <<'PY'
 import hashlib,json,os,pathlib,stat,sys,tempfile
 mode,inputs,proof,name,helper,archive=sys.argv[1:]; d=json.load(open(inputs)); p=pathlib.Path(proof); dest=pathlib.Path(name)
 def regular(x):
@@ -804,9 +940,11 @@ edge_forward_admit
 edge_deadline
 edge_identity "$OLD_EDGE"; edge_invariants; edge_timer_active
 python3 - "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$NEW_EDGE" "$NEW_HELPER" "$RECYCLE_HOOK" "$OLD_EDGE/deploy/edge-runtime/compose.override.yaml" <<'PY'
-import datetime,hashlib,json,os,pathlib,pwd,re,shutil,stat,sys,tarfile
+import datetime,hashlib,importlib.util,io,json,os,pathlib,pwd,re,shutil,stat,sys,tarfile
 inputs,archive,proof,edge,helper,hook,baseline=sys.argv[1:]; d=json.load(open(inputs)); p=pathlib.Path(proof); a=pathlib.Path(archive)
-assert a.is_file() and not a.is_symlink() and hashlib.sha256(a.read_bytes()).hexdigest()==d['archive_sha256']
+spec=importlib.util.spec_from_file_location('edge_archives',p/'edge-archives.py'); archives=importlib.util.module_from_spec(spec); spec.loader.exec_module(archives)
+archives.keeper_absent()
+archive_bytes,upload=archives.read(str(a)); assert upload['sha256']==d['archive_sha256']
 r=json.load(open(a.with_suffix('.ancestry.json')))
 assert r['release_sha']==d['release_sha'] and re.fullmatch('[0-9a-f]{40}',r['origin_main_sha']) and r['is_ancestor'] is True and r['baseline_site_sha']==d['baseline_site_sha']
 at=datetime.datetime.fromisoformat(r['measured_at'].replace('Z','+00:00')); now=datetime.datetime.now(datetime.timezone.utc)
@@ -835,7 +973,7 @@ assert baseline.is_file() and not baseline.is_symlink(), 'FAIL baseline override
 baseline_stat=baseline.stat(); baseline_hash=hashlib.sha256(baseline.read_bytes()).hexdigest()
 assert baseline_hash==d['override_sha256'], 'FAIL baseline override digest differs from measured input; STOP'
 override='deploy/edge-runtime/compose.override.yaml'
-with tarfile.open(a) as t:
+with tarfile.open(fileobj=io.BytesIO(archive_bytes)) as t:
  seen={}
  for m in t.getmembers():
   q=pathlib.PurePosixPath(m.name); name=q.as_posix()
@@ -865,6 +1003,10 @@ with tarfile.open(a) as t:
  source=t.extractfile('docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md').read().decode()
  found=re.findall(r'^```sh\n(# step: ai-recycle-hook\n.*?)^```$',source,re.M|re.S); assert len(found)==1
  assert ('#!/bin/bash\n'+found[0]).encode()==pathlib.Path(hook).read_bytes(), 'FAIL hook differs; STOP for reviewed hook investigation'
+ # Before release-tree/service/binding mutation: retain the exact baseline and promote the verified upload.
+ archives.rescue(proof)
+ promoted=archives.promote(archives.ARCHIVES+'/'+d['release_sha']+'-'+d['window_id']+'.tar',archive_bytes)
+ (p/'archive-promotion.json').write_text(json.dumps(promoted,sort_keys=True)+'\n')
  archive_hash=hashlib.sha256(t.extractfile(override).read()).hexdigest()
  for row in layout:
   root,kind=row['path'],row['part']; tree=pathlib.Path(root)
@@ -913,7 +1055,8 @@ edge_forward_admit
 
 edge_deadline
 test "$(cat "$PROOF_DIR/preflight.txt")" = PASS
-# The unchanged C1 hook compares each live file with archive bytes at recycle.
+# The unchanged C1 hook verifies the durable archive and compares its bytes at recycle.
+edge_archives ready
 python3 - "$PROOF_DIR/override.json" "$INPUTS_FILE" <<'PY'
 import json,sys
 r=json.load(open(sys.argv[1])); d=json.load(open(sys.argv[2]))
@@ -944,6 +1087,7 @@ test "$(cat "$PROOF_DIR/ready.txt")" = PASS
 test ! -e "$PROOF_DIR/edge-attempted.txt"
 test ! -L "$PROOF_DIR/edge-attempted.txt"
 edge_invariants; edge_render "$NEW_EDGE"
+edge_archives ready # Refuse keeper/promotion/rescue drift before any apply mutation.
 # Receipt precedes even the DB mutation, so every uncertain mutation takes R1.
 date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/edge-attempted.txt"
 edge_timer_guard
@@ -1048,12 +1192,14 @@ trap 'printf "FAIL edge-rollback: line %s; STOP\n" "$LINENO" >&2' ERR
 edge_admit
 
 test -f "$PROOF_DIR/edge-attempted.txt" && test ! -L "$PROOF_DIR/edge-attempted.txt" || fail 'regular attempt receipt required; HezLead recovery'
+edge_archives restore
 edge_timer_guard
 edge_invalidate
 systemctl stop "$EDGE_RECYCLE_TIMER"
 test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_TIMER")" = inactive
 test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive
-# Hook/drop-in were never modified. Any drift stops; never overwrite another operator.
+# Hook/drop-in were never modified. The retained durable rescue restages a missing legacy tar
+# at its exact old path with admitted metadata before exact-byte binding restore. Any conflict stops.
 edge_invariants
 edge_binding restore
 cmp -s "$RECYCLE_JSON" "$PROOF_DIR/recycle.baseline.json"
@@ -1160,9 +1306,10 @@ case "${CLOSE_RESULT:?success, rolled-back or aborted}" in
   test "$(cat "$PROOF_DIR/probes-forward.txt")" = PASS
   edge_identity "$NEW_EDGE"; edge_readback "$RELEASE_SHA"
   digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["archive_sha256"])' "$INPUTS_FILE")
-  edge_tree_check "$NEW_EDGE" "$BOX_ARCHIVE_PATH" "$digest"
-  edge_tree_check "$NEW_HELPER" "$BOX_ARCHIVE_PATH" "$digest"
-  python3 - "$RECYCLE_JSON" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$NEW_HELPER" <<'PY'
+  edge_archives ready
+  edge_tree_check "$NEW_EDGE" "$DURABLE_ARCHIVE_PATH" "$digest"
+  edge_tree_check "$NEW_HELPER" "$DURABLE_ARCHIVE_PATH" "$digest"
+  python3 - "$RECYCLE_JSON" "$INPUTS_FILE" "$DURABLE_ARCHIVE_PATH" "$NEW_HELPER" <<'PY'
 import json,sys
 r=json.load(open(sys.argv[1])); d=json.load(open(sys.argv[2]))
 assert r['release_sha']==d['release_sha'] and r['target']=='/home/commonswarm/edge/releases/'+d['release_sha'] and r['archive']==sys.argv[3] and r['release_root']==sys.argv[4] and r['artifact_digest']==d['archive_sha256'] and r['image_digest']==d['baseline_edge_image']
@@ -1248,7 +1395,7 @@ for FILE in inputs.json opened.txt close-result.json closed.txt; do
  ssh -n "$BOX_HOST" "sudo -n cat '$PROOF_DIR/$FILE'" >"$EVIDENCE_DIR/$FILE"
 done
 # Preflight provenance is optional only when it stopped before each receipt.
-for FILE in override.json tree-layout.json; do
+for FILE in override.json tree-layout.json keeper.json archive-baseline.json archive-rescue.json archive-promotion.json archive-restore.json; do
  ssh -n "$BOX_HOST" "if sudo -n test -e '$PROOF_DIR/$FILE' || sudo -n test -L '$PROOF_DIR/$FILE'; then sudo -n test -f '$PROOF_DIR/$FILE' && ! sudo -n test -L '$PROOF_DIR/$FILE' && sudo -n cat '$PROOF_DIR/$FILE'; else printf '%s\n' '{\"status\":\"not-created\"}'; fi" >"$EVIDENCE_DIR/$FILE"
 done
 python3 - "$EVIDENCE_DIR" "$INPUTS_FILE" <<'PY'
@@ -1282,13 +1429,26 @@ SHA. edge_binding updates all seven config fields atomically while the timer is
 stopped; postgres_image is preserved. edge_measure commits the new approval and
 measurement with CLOSED issuance. Rollback restores byte-identical recycle.json,
 never removes the existing hook/drop-in, and creates a fresh baseline measurement.
-Old helper/archive and immutable baseline trees remain checked and retained.
+Old helper/archive and immutable baseline trees remain checked and retained. E admits exactly
+the legacy /tmp/admin-issuance-<binding-sha>-<6alnum>.tar or the durable
+/var/lib/commonswarm-admin-release/archives/<binding-sha>-<6alnum>.tar.
+Before release-tree/service/binding mutation it preserves the verified baseline at the same
+durable name used by C1 W4, then promotes the exact verified transport bytes exclusively
+(root:root 0600 under canonical root:root 0700 directories; equal existing copies only).
+BOX_ARCHIVE_PATH remains the /tmp transport, with its ancestry file retained;
+DURABLE_ARCHIVE_PATH is the binding and success-close path. Rollback restages a missing
+legacy tar exclusively at its exact original path, verifies bytes and admitted metadata,
+fsyncs file and parent, then restores exact baseline JSON (C:5233–5261).
+Keeper file presence STOPs before opening E or any archive/service/binding mutation;
+E never installs, runs or retires the keeper.
 Hook/drop-in bytes, ownership/modes and the baseline recycle-intent.json
 (or its absence) are snapshotted and independently checked before/after.
 Neither apply nor rollback invokes the hook, so its intent state stays exact;
 intent drift STOPs instead of restoring an unrelated operator's state.
-If hook bytes, config schema, timer schedule or path conventions differ, STOP:
-this procedure does not install a different hook or reinterpret its contract.
+If hook bytes, config schema, timer schedule or either admitted archive convention differs,
+STOP: this procedure does not install a different hook or reinterpret its contract.
+After build B lands, main edge releases require the new C1 W4 hook already installed;
+the candidate hook equality check remains mandatory.
 
 Source map (C1 is docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md):
 
