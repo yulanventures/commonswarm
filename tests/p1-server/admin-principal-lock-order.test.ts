@@ -1,0 +1,123 @@
+/** X2 (FOLLOW-UPS-C1 #33, #35; HezLead ruling 4): one coordinated lock order across admin,
+ * hosted and local principal creation and the #35 sibling paths. Server suite and the
+ * staging fixture only: it needs Docker and a stack reached through the verified binding
+ * (C1B_LOCK_ORDER_BINDING, or the CLI project binding under GitHub Actions). A fixture is a
+ * restored, non-empty database: every scenario creates its own run-unique rows and asserts
+ * only on them; the three admin races also need admin issuance open (LANE-2-DELTA D4).
+ *
+ * Each race parks a creation path after its workspace-stream lock on the principal-ceiling
+ * advisory lock (supabase/functions/command/index.ts:5914) with a blocker session, waits with
+ * pg_blocking_pids until the lock-holding path waits for that stream, then releases the
+ * blocker. The base order deadlocks (SQLSTATE 40P01); the coordinated order does not.
+ * Deadlock is detected by SQLSTATE only. */
+import assert from "node:assert/strict";
+import { after, before, test } from "node:test";
+import { enableIssuanceForTest, measureIssuanceForTest, recordChecksumEvidenceForTest } from "../support/admin-schema-db.js";
+
+interface Target { url: string; mode: string; close(): Promise<void> }
+interface SideOutcome { side: string; ok: boolean; status?: number; body_status?: string | null; error?: string | null; thrown?: string }
+interface RaceResult {
+  scenario: string;
+  stage: string;
+  error?: string;
+  sqlstate_capture_control?: string;
+  deadlock_timeout_ms?: number;
+  lock_timeout_ms?: number;
+  parking?: Record<string, boolean>;
+  parked?: SideOutcome;
+  waiting?: SideOutcome;
+  sqlstates?: string[];
+  writes?: Record<string, boolean>;
+  admin_audit?: string[];
+  admin_issuance?: string;
+  http_refused?: number;
+}
+interface ControlResult {
+  stage: string;
+  error?: string;
+  deadlock_timeout_ms?: number;
+  lock_timeout_ms?: number;
+  holder_waits_on_stream?: boolean;
+  sqlstates?: string[];
+}
+interface Harness {
+  openLockOrderTarget(options: { connector: unknown }): Promise<Target>;
+  lockOrderConnector(issuance: { record: string; measure: string; enable: string }): unknown;
+  runScenario(target: Target, scenario: string): Promise<RaceResult>;
+  rawSqlPositiveControl(target: Target): Promise<ControlResult>;
+  migrationTreeLine(): string;
+}
+const harness = await import(new URL("../support/admin-principal-lock-order-harness.mjs", import.meta.url).href) as Harness;
+
+// LANE-2-DELTA D3: one line per run, before the first test, read into the receipt's migration_sha.
+process.stdout.write(`${harness.migrationTreeLine()}\n`);
+
+let target: Target | undefined;
+before(async () => {
+  target = await harness.openLockOrderTarget({ connector: harness.lockOrderConnector({
+    record: recordChecksumEvidenceForTest, measure: measureIssuanceForTest, enable: enableIssuanceForTest,
+  }) });
+}, { timeout: 180_000 });
+after(async () => {
+  await target?.close();
+});
+
+function bound(): Target {
+  assert.ok(target, "the verified target was not opened");
+  return target;
+}
+
+test("positive-control-raw-sql-base-order-deadlocks", { timeout: 120_000 }, async () => {
+  const result = await harness.rawSqlPositiveControl(bound());
+  assert.equal(result.stage, "complete", `control stopped at ${result.stage} (${result.error ?? "no SQLSTATE"})`);
+  assert.equal(result.holder_waits_on_stream, true, "the row holder must wait for the stream before the insert");
+  assert.ok(result.deadlock_timeout_ms! < result.lock_timeout_ms!, "deadlock detection must precede the lock timeout");
+  assert.deepEqual(result.sqlstates, ["40P01"], "the base lock order must fail with SQLSTATE 40P01 in exactly one session");
+});
+
+const EXPECTED_WRITES: Record<string, Record<string, boolean>> = {
+  admin: { creation_principal_live: true, admin_principal_live: true },
+  accept: { creation_principal_live: true, invitee_membership_live: true },
+  remove: { creation_principal_live: true, removed_membership_revoked: true },
+  household: { creation_principal_live: true },
+};
+
+// These names are copied into GATES.json (Lane 1); keep them byte-identical to the brief.
+const RACE_TESTS = [
+  "admin-oauth-vs-hosted-claim-seat",
+  "admin-oauth-vs-local-join-registration",
+  "admin-oauth-vs-local-command-creation",
+  "accept-invitation-vs-hosted-claim-seat",
+  "accept-invitation-vs-local-join-registration",
+  "remove-member-vs-hosted-claim-seat",
+  "remove-member-vs-local-join-registration",
+  "household-invitation-vs-hosted-claim-seat",
+  "household-invitation-vs-local-join-registration",
+] as const;
+
+for (const name of RACE_TESTS) {
+  test(name, { timeout: 240_000 }, async () => {
+    const result = await harness.runScenario(bound(), name);
+    // Preconditions: the harness reached the interleaving it claims, on both variants.
+    assert.equal(result.stage, "complete", `${name}: stopped at ${result.stage} (${result.error ?? "no code"})`);
+    assert.equal(result.sqlstate_capture_control, "22012", `${name}: SQLSTATE capture positive control`);
+    assert.ok(result.deadlock_timeout_ms! < result.lock_timeout_ms!, `${name}: deadlock_timeout must be below lock_timeout`);
+    assert.deepEqual(result.parking, {
+      creation_waits_on_ceiling_after_stream: true,
+      holder_waits_on_stream_held_by_creation: true,
+    }, `${name}: parking points`);
+    // The base lock order fails here.
+    const sqlstates = result.sqlstates ?? [];
+    const deadlocks = sqlstates.filter((code) => code === "40P01").length;
+    assert.equal(deadlocks, 0, `${name}: SQLSTATE 40P01 (deadlock_detected) in ${deadlocks} transaction(s)`);
+    assert.deepEqual(sqlstates, [], `${name}: no transaction may fail`);
+    assert.equal(result.parked?.ok, true, `${name}: ${result.parked?.side} result ${JSON.stringify(result.parked)}`);
+    assert.equal(result.waiting?.ok, true, `${name}: ${result.waiting?.side} result ${JSON.stringify(result.waiting)}`);
+    assert.deepEqual(result.writes, EXPECTED_WRITES[result.waiting!.side], `${name}: no lost write`);
+    if (result.waiting!.side === "admin") {
+      // adminAccessState ran (admin-delegation.ts:140) and the delegated request committed.
+      assert.deepEqual(result.admin_audit, ["committed"], `${name}: OAuth admin request audit`);
+    }
+    assert.equal(result.http_refused, 0, `${name}: no HTTP call`);
+  });
+}

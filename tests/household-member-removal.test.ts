@@ -46,7 +46,7 @@ test('removal locks workspace, then membership, then content, and does not stamp
   assert.equal(queries.length, 6);
   assert.match(queries[0]!, /set_config\('cswarm\.household_command', 'remove_member', true\)/);
   assert.match(queries[1]!, /FROM swarm\.workspaces/);
-  assert.match(queries[1]!, /FOR UPDATE/);
+  assert.match(queries[1]!, /FOR (?:NO KEY )?UPDATE/);
   assert.match(queries[2]!, /FROM swarm\.memberships/);
   assert.match(queries[2]!, /FOR UPDATE/);
   assert.equal(/SET revoked_at/.test(queries[2]!), false);
@@ -59,7 +59,7 @@ test('removal locks workspace, then membership, then content, and does not stamp
   assert.match(queries[5]!, /UPDATE swarm\.admin_routine_invitations/);
   assert.match(queries[5]!, /accepted_at IS NULL/);
   assert.match(queries[5]!, /revoked_at IS NULL/);
-  const workspaceLock = queries.findIndex((query) => /FROM swarm\.workspaces/.test(query) && /FOR UPDATE/.test(query));
+  const workspaceLock = queries.findIndex((query) => /FROM swarm\.workspaces/.test(query) && /FOR (?:NO KEY )?UPDATE/.test(query));
   const membershipLock = queries.findIndex((query) => /FROM swarm\.memberships/.test(query) && /FOR UPDATE/.test(query));
   const contentRole = queries.findIndex((query) => /UPDATE swarm\.household_member_content_roles/.test(query));
   const connection = queries.findIndex((query) => /UPDATE swarm\.household_content_connections/.test(query));

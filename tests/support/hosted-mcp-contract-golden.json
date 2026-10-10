@@ -1,0 +1,653 @@
+{
+  "about": "Hosted MCP contract golden (HezLead ruling 3). Generated at 7efbb67d from the real protocol module; the test must pass byte-unchanged at T and at the lane head. Backend entries normalize only generated values: UUIDs that the fixture chose are named (<grant_id>, <workspace_id>), server-generated UUIDs become <uuid_N> and seat handles <handle_N>, numbered by first appearance across the backend sequence.",
+  "catalog": [
+    {
+      "label": "initialize",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "init",
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-06-18",
+          "capabilities": {},
+          "clientInfo": {
+            "name": "golden",
+            "version": "1.0.0"
+          }
+        }
+      },
+      "execute": {
+        "kind": "none"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"init\",\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"commonswarm\",\"version\":\"1.0.0\"},\"instructions\":\"Use an explicit seat handle for every CommonSwarm tool call.\"}}"
+    },
+    {
+      "label": "tools/list",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "list",
+        "method": "tools/list",
+        "params": {}
+      },
+      "execute": {
+        "kind": "none"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"list\",\"result\":{\"tools\":[{\"name\":\"claim_seat\",\"title\":\"Claim a named seat\",\"securitySchemes\":[{\"type\":\"oauth2\",\"scopes\":[\"mcp\"]}],\"description\":\"Choose a new, unique name for this chat/session; never use another agent's name. Reuse a name only for a seat this same connection created earlier. Omit workspace_id for the consented home workspace, or select another consented workspace. Retry with the same request_id.\",\"annotations\":{\"title\":\"Claim a named seat\",\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":true,\"openWorldHint\":false},\"inputSchema\":{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\",\"minLength\":36,\"maxLength\":36,\"pattern\":\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$\",\"not\":{\"enum\":[\"00000000-0000-0000-0000-000000000000\",\"00000000-0000-4000-8000-000000000000\"]}},\"name\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":80},\"request_id\":{\"type\":\"string\",\"minLength\":8,\"maxLength\":72,\"pattern\":\"^[A-Za-z0-9_-]{8,72}$\"}},\"required\":[\"name\",\"request_id\"],\"additionalProperties\":false}},{\"name\":\"whoami\",\"title\":\"Show seat identity\",\"securitySchemes\":[{\"type\":\"oauth2\",\"scopes\":[\"mcp\"]}],\"description\":\"Show the selected hosted seat identity.\",\"annotations\":{\"title\":\"Show seat identity\",\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false},\"inputSchema\":{\"type\":\"object\",\"properties\":{\"seat\":{\"type\":\"string\",\"minLength\":27,\"maxLength\":69,\"pattern\":\"^seat_[A-Za-z0-9_-]{22,64}$\"}},\"required\":[\"seat\"],\"additionalProperties\":false}},{\"name\":\"check\",\"title\":\"Check and acknowledge inbox\",\"securitySchemes\":[{\"type\":\"oauth2\",\"scopes\":[\"mcp\"]}],\"description\":\"Open a durable inbox batch, optionally acknowledging the prior batch and permanently advancing delivery.\",\"annotations\":{\"title\":\"Check and acknowledge inbox\",\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false},\"inputSchema\":{\"type\":\"object\",\"properties\":{\"seat\":{\"type\":\"string\",\"minLength\":27,\"maxLength\":69,\"pattern\":\"^seat_[A-Za-z0-9_-]{22,64}$\"},\"ack\":{\"type\":\"string\",\"minLength\":36,\"maxLength\":36,\"pattern\":\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$\"}},\"required\":[\"seat\"],\"additionalProperties\":false}},{\"name\":\"ask\",\"title\":\"Ask workspace participants\",\"securitySchemes\":[{\"type\":\"oauth2\",\"scopes\":[\"mcp\"]}],\"description\":\"Ask one or more workspace participants. Retry with the same request_id.\",\"annotations\":{\"title\":\"Ask workspace participants\",\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":true,\"openWorldHint\":false},\"inputSchema\":{\"type\":\"object\",\"properties\":{\"seat\":{\"type\":\"string\",\"minLength\":27,\"maxLength\":69,\"pattern\":\"^seat_[A-Za-z0-9_-]{22,64}$\"},\"recipients\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"kind\":{\"type\":\"string\",\"enum\":[\"user\",\"agent\"]},\"id\":{\"type\":\"string\",\"minLength\":36,\"maxLength\":36,\"pattern\":\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$\"}},\"required\":[\"kind\",\"id\"],\"additionalProperties\":false},\"minItems\":1,\"maxItems\":20},\"body\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":8000},\"request_id\":{\"type\":\"string\",\"minLength\":8,\"maxLength\":72,\"pattern\":\"^[A-Za-z0-9_-]{8,72}$\"}},\"required\":[\"seat\",\"recipients\",\"body\",\"request_id\"],\"additionalProperties\":false}},{\"name\":\"note\",\"title\":\"Share a workspace note\",\"securitySchemes\":[{\"type\":\"oauth2\",\"scopes\":[\"mcp\"]}],\"description\":\"Share a note, optionally with recipients. Retry with the same request_id.\",\"annotations\":{\"title\":\"Share a workspace note\",\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":true,\"openWorldHint\":false},\"inputSchema\":{\"type\":\"object\",\"properties\":{\"seat\":{\"type\":\"string\",\"minLength\":27,\"maxLength\":69,\"pattern\":\"^seat_[A-Za-z0-9_-]{22,64}$\"},\"recipients\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"kind\":{\"type\":\"string\",\"enum\":[\"user\",\"agent\"]},\"id\":{\"type\":\"string\",\"minLength\":36,\"maxLength\":36,\"pattern\":\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$\"}},\"required\":[\"kind\",\"id\"],\"additionalProperties\":false},\"minItems\":1,\"maxItems\":20},\"body\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":8000},\"request_id\":{\"type\":\"string\",\"minLength\":8,\"maxLength\":72,\"pattern\":\"^[A-Za-z0-9_-]{8,72}$\"}},\"required\":[\"seat\",\"body\",\"request_id\"],\"additionalProperties\":false}},{\"name\":\"reply\",\"title\":\"Reply to a signal\",\"securitySchemes\":[{\"type\":\"oauth2\",\"scopes\":[\"mcp\"]}],\"description\":\"Reply privately to a signal. Retry with the same request_id.\",\"annotations\":{\"title\":\"Reply to a signal\",\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":true,\"openWorldHint\":false},\"inputSchema\":{\"type\":\"object\",\"properties\":{\"seat\":{\"type\":\"string\",\"minLength\":27,\"maxLength\":69,\"pattern\":\"^seat_[A-Za-z0-9_-]{22,64}$\"},\"signal_id\":{\"type\":\"string\",\"minLength\":36,\"maxLength\":36,\"pattern\":\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$\"},\"body\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":8000},\"request_id\":{\"type\":\"string\",\"minLength\":8,\"maxLength\":72,\"pattern\":\"^[A-Za-z0-9_-]{8,72}$\"}},\"required\":[\"seat\",\"signal_id\",\"body\",\"request_id\"],\"additionalProperties\":false}},{\"name\":\"working_on\",\"title\":\"Share current work\",\"securitySchemes\":[{\"type\":\"oauth2\",\"scopes\":[\"mcp\"]}],\"description\":\"Share current work. Retry with the same request_id.\",\"annotations\":{\"title\":\"Share current work\",\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":true,\"openWorldHint\":false},\"inputSchema\":{\"type\":\"object\",\"properties\":{\"seat\":{\"type\":\"string\",\"minLength\":27,\"maxLength\":69,\"pattern\":\"^seat_[A-Za-z0-9_-]{22,64}$\"},\"body\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":8000},\"request_id\":{\"type\":\"string\",\"minLength\":8,\"maxLength\":72,\"pattern\":\"^[A-Za-z0-9_-]{8,72}$\"}},\"required\":[\"seat\",\"body\",\"request_id\"],\"additionalProperties\":false}},{\"name\":\"members\",\"title\":\"List workspace participants\",\"securitySchemes\":[{\"type\":\"oauth2\",\"scopes\":[\"mcp\"]}],\"description\":\"List members and agents in the selected seat's workspace.\",\"annotations\":{\"title\":\"List workspace participants\",\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false},\"inputSchema\":{\"type\":\"object\",\"properties\":{\"seat\":{\"type\":\"string\",\"minLength\":27,\"maxLength\":69,\"pattern\":\"^seat_[A-Za-z0-9_-]{22,64}$\"}},\"required\":[\"seat\"],\"additionalProperties\":false}}]}}"
+    },
+    {
+      "label": "claim_seat invalid name",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "in-1",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": " padded",
+            "request_id": "golden-request-0001"
+          }
+        }
+      },
+      "execute": {
+        "kind": "none"
+      },
+      "http_status": 400,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"in-1\",\"error\":{\"code\":-32602,\"message\":\"Invalid name: provide 1 to 80 characters with no surrounding spaces or control characters.\"}}"
+    },
+    {
+      "label": "claim_seat missing request_id",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "in-2",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": "golden-seat"
+          }
+        }
+      },
+      "execute": {
+        "kind": "none"
+      },
+      "http_status": 400,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"in-2\",\"error\":{\"code\":-32602,\"message\":\"Missing request_id: provide 8 to 72 letters, digits, underscores or hyphens; reuse it only for the same request.\"}}"
+    },
+    {
+      "label": "claim_seat invalid request_id",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "in-3",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": "golden-seat",
+            "request_id": "short"
+          }
+        }
+      },
+      "execute": {
+        "kind": "none"
+      },
+      "http_status": 400,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"in-3\",\"error\":{\"code\":-32602,\"message\":\"Invalid request_id: provide 8 to 72 letters, digits, underscores or hyphens; reuse it only for the same request.\"}}"
+    },
+    {
+      "label": "claim_seat nil workspace_id",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "in-4",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "workspace_id": "00000000-0000-0000-0000-000000000000",
+            "name": "golden-seat",
+            "request_id": "golden-request-0001"
+          }
+        }
+      },
+      "execute": {
+        "kind": "none"
+      },
+      "http_status": 400,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"in-4\",\"error\":{\"code\":-32602,\"message\":\"Invalid workspace_id: provide a real workspace UUID or omit it to use the grant's home workspace.\"}}"
+    },
+    {
+      "label": "claim_seat unknown argument",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "in-5",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": "golden-seat",
+            "request_id": "golden-request-0001",
+            "seat": "seat_AAAAAAAAAAAAAAAAAAAAAA"
+          }
+        }
+      },
+      "execute": {
+        "kind": "none"
+      },
+      "http_status": 400,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"in-5\",\"error\":{\"code\":-32602,\"message\":\"Unknown tool argument. Use only: workspace_id, name, request_id.\"}}"
+    },
+    {
+      "label": "whoami invalid seat",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "in-6",
+        "method": "tools/call",
+        "params": {
+          "name": "whoami",
+          "arguments": {
+            "seat": "seat_short"
+          }
+        }
+      },
+      "execute": {
+        "kind": "none"
+      },
+      "http_status": 400,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"in-6\",\"error\":{\"code\":-32602,\"message\":\"Invalid seat: provide the seat_ handle returned by claim_seat (22 to 64 letters, digits, underscores or hyphens after seat_).\"}}"
+    },
+    {
+      "label": "whoami missing seat",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "in-7",
+        "method": "tools/call",
+        "params": {
+          "name": "whoami",
+          "arguments": {}
+        }
+      },
+      "execute": {
+        "kind": "none"
+      },
+      "http_status": 400,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"in-7\",\"error\":{\"code\":-32602,\"message\":\"Missing seat: provide the seat_ handle returned by claim_seat (22 to 64 letters, digits, underscores or hyphens after seat_).\"}}"
+    },
+    {
+      "label": "whoami unknown argument",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "in-8",
+        "method": "tools/call",
+        "params": {
+          "name": "whoami",
+          "arguments": {
+            "seat": "seat_AAAAAAAAAAAAAAAAAAAAAA",
+            "name": "x"
+          }
+        }
+      },
+      "execute": {
+        "kind": "none"
+      },
+      "http_status": 400,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"in-8\",\"error\":{\"code\":-32602,\"message\":\"Unknown tool argument. Use only: seat.\"}}"
+    },
+    {
+      "label": "claim_seat refusal hosted_grant_forbidden",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "claim-error-1",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": "golden-seat",
+            "request_id": "golden-request-0001"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw",
+        "code": "hosted_grant_forbidden"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"claim-error-1\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"hosted_grant_forbidden\\\",\\\"message\\\":\\\"Workspace access is missing or no longer authorized. Ask a workspace admin to restore your membership, then reconnect and approve this workspace.\\\"}\"}],\"_meta\":{\"mcp/www_authenticate\":[\"Bearer resource_metadata=\\\"https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp\\\", error=\\\"invalid_token\\\", error_description=\\\"Authorization is no longer valid. Reconnect your account.\\\"\"]}}}"
+    },
+    {
+      "label": "claim_seat refusal hosted_grant_unavailable",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "claim-error-2",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": "golden-seat",
+            "request_id": "golden-request-0001"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw",
+        "code": "hosted_grant_unavailable"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"claim-error-2\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"hosted_grant_unavailable\\\",\\\"message\\\":\\\"Workspace access is missing or no longer authorized. Ask a workspace admin to restore your membership, then reconnect and approve this workspace.\\\"}\"}]}}"
+    },
+    {
+      "label": "claim_seat refusal hosted_grant_binding_mismatch",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "claim-error-3",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": "golden-seat",
+            "request_id": "golden-request-0001"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw",
+        "code": "hosted_grant_binding_mismatch"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"claim-error-3\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"hosted_grant_binding_mismatch\\\",\\\"message\\\":\\\"Workspace access is missing or no longer authorized. Ask a workspace admin to restore your membership, then reconnect and approve this workspace.\\\"}\"}]}}"
+    },
+    {
+      "label": "claim_seat refusal forbidden",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "claim-error-4",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": "golden-seat",
+            "request_id": "golden-request-0001"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw",
+        "code": "forbidden"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"claim-error-4\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"forbidden\\\",\\\"message\\\":\\\"Workspace access is missing or no longer authorized. Ask a workspace admin to restore your membership, then reconnect and approve this workspace.\\\"}\"}]}}"
+    },
+    {
+      "label": "claim_seat refusal credential_kind_forbidden",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "claim-error-5",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": "golden-seat",
+            "request_id": "golden-request-0001"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw",
+        "code": "credential_kind_forbidden"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"claim-error-5\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"credential_kind_forbidden\\\",\\\"message\\\":\\\"This connection cannot perform this operation. Reconnect your CommonSwarm account and approve workspace access.\\\"}\"}]}}"
+    },
+    {
+      "label": "claim_seat refusal unauthenticated",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "claim-error-6",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": "golden-seat",
+            "request_id": "golden-request-0001"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw",
+        "code": "unauthenticated"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"claim-error-6\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"unauthenticated\\\",\\\"message\\\":\\\"Your connection is no longer authenticated. Reconnect your CommonSwarm account and retry.\\\"}\"}]}}"
+    },
+    {
+      "label": "claim_seat refusal hosted_seat_revoked",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "claim-error-7",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": "golden-seat",
+            "request_id": "golden-request-0001"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw",
+        "code": "hosted_seat_revoked"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"claim-error-7\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"hosted_seat_revoked\\\",\\\"message\\\":\\\"This seat was removed and cannot be restored. Call claim_seat with a new request_id to get a new seat; its owner may reuse the same name.\\\"}\"}],\"_meta\":{\"mcp/www_authenticate\":[\"Bearer resource_metadata=\\\"https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp\\\", error=\\\"invalid_token\\\", error_description=\\\"Authorization is no longer valid. Reconnect your account.\\\"\"]}}}"
+    },
+    {
+      "label": "claim_seat refusal hosted_seat_name_invalid",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "claim-error-8",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": "golden-seat",
+            "request_id": "golden-request-0001"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw",
+        "code": "hosted_seat_name_invalid"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"claim-error-8\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"hosted_seat_name_invalid\\\",\\\"message\\\":\\\"The seat name is invalid. Use 1 to 80 characters with no surrounding spaces or control characters.\\\"}\"}]}}"
+    },
+    {
+      "label": "claim_seat refusal hosted_seat_name_taken",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "claim-error-9",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": "golden-seat",
+            "request_id": "golden-request-0001"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw",
+        "code": "hosted_seat_name_taken"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"claim-error-9\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"hosted_seat_name_taken\\\",\\\"message\\\":\\\"That seat name is taken in this workspace. Call claim_seat with another name and a new request_id.\\\"}\"}]}}"
+    },
+    {
+      "label": "claim_seat refusal hosted_seat_limit_reached",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "claim-error-10",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": "golden-seat",
+            "request_id": "golden-request-0001"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw",
+        "code": "hosted_seat_limit_reached"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"claim-error-10\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"hosted_seat_limit_reached\\\",\\\"message\\\":\\\"This connection has reached its seat limit. Reuse a seat returned by claim_seat, or ask a workspace admin to revoke an unused seat.\\\"}\"}]}}"
+    },
+    {
+      "label": "claim_seat refusal principal_limit_reached",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "claim-error-11",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": "golden-seat",
+            "request_id": "golden-request-0001"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw",
+        "code": "principal_limit_reached"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"claim-error-11\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"principal_limit_reached\\\",\\\"message\\\":\\\"This workspace has reached its agent limit. Reuse an existing seat, or ask a workspace admin to revoke an unused agent.\\\"}\"}]}}"
+    },
+    {
+      "label": "claim_seat refusal command_id_conflict",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "claim-error-12",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": "golden-seat",
+            "request_id": "golden-request-0001"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw",
+        "code": "command_id_conflict"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"claim-error-12\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"command_id_conflict\\\",\\\"message\\\":\\\"This request_id was already used for different arguments. Retry the original request unchanged, or use a new request_id for a different request.\\\"}\"}]}}"
+    },
+    {
+      "label": "claim_seat refusal invalid_request",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "claim-error-13",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": "golden-seat",
+            "request_id": "golden-request-0001"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw",
+        "code": "invalid_request"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"claim-error-13\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"invalid_request\\\",\\\"message\\\":\\\"The request arguments were rejected. Check the tool's input schema and correct the arguments before retrying.\\\"}\"}]}}"
+    },
+    {
+      "label": "claim_seat refusal upgrade_required",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "claim-error-14",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": "golden-seat",
+            "request_id": "golden-request-0001"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw",
+        "code": "upgrade_required"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"claim-error-14\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"upgrade_required\\\",\\\"message\\\":\\\"This hosted connection needs a service update. Contact support@commonswarm.com, then retry with the same request_id.\\\"}\"}]}}"
+    },
+    {
+      "label": "claim_seat refusal rate_limited",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "claim-error-15",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": "golden-seat",
+            "request_id": "golden-request-0001"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw",
+        "code": "rate_limited"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"claim-error-15\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"rate_limited\\\",\\\"message\\\":\\\"Too many requests. Retry after the current rate-limit window resets; reuse the same request_id.\\\"}\"}]}}"
+    },
+    {
+      "label": "claim_seat internal failure",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "claim-error-internal",
+        "method": "tools/call",
+        "params": {
+          "name": "claim_seat",
+          "arguments": {
+            "name": "golden-seat",
+            "request_id": "golden-request-0001"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw_plain"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"claim-error-internal\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"tool_failed\\\",\\\"message\\\":\\\"Something failed on our side; retry with the same request_id; if it repeats, contact support@commonswarm.com\\\"}\"}]}}"
+    },
+    {
+      "label": "whoami refusal hosted_seat_forbidden",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "whoami-error-1",
+        "method": "tools/call",
+        "params": {
+          "name": "whoami",
+          "arguments": {
+            "seat": "seat_AAAAAAAAAAAAAAAAAAAAAA"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw",
+        "code": "hosted_seat_forbidden"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"whoami-error-1\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"hosted_seat_forbidden\\\",\\\"message\\\":\\\"This seat is unavailable to your connection. Call claim_seat and use its returned handle; if access is still denied, ask a workspace admin to restore your membership and reconnect.\\\"}\"}],\"_meta\":{\"mcp/www_authenticate\":[\"Bearer resource_metadata=\\\"https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp\\\", error=\\\"invalid_token\\\", error_description=\\\"Authorization is no longer valid. Reconnect your account.\\\"\"]}}}"
+    },
+    {
+      "label": "whoami refusal forbidden",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "whoami-error-2",
+        "method": "tools/call",
+        "params": {
+          "name": "whoami",
+          "arguments": {
+            "seat": "seat_AAAAAAAAAAAAAAAAAAAAAA"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw",
+        "code": "forbidden"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"whoami-error-2\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"forbidden\\\",\\\"message\\\":\\\"Workspace access is missing or no longer authorized. Ask a workspace admin to restore your membership, then reconnect and approve this workspace.\\\"}\"}]}}"
+    },
+    {
+      "label": "whoami refusal unauthenticated",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "whoami-error-3",
+        "method": "tools/call",
+        "params": {
+          "name": "whoami",
+          "arguments": {
+            "seat": "seat_AAAAAAAAAAAAAAAAAAAAAA"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw",
+        "code": "unauthenticated"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"whoami-error-3\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"unauthenticated\\\",\\\"message\\\":\\\"Your connection is no longer authenticated. Reconnect your CommonSwarm account and retry.\\\"}\"}]}}"
+    },
+    {
+      "label": "whoami internal failure",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "whoami-error-internal",
+        "method": "tools/call",
+        "params": {
+          "name": "whoami",
+          "arguments": {
+            "seat": "seat_AAAAAAAAAAAAAAAAAAAAAA"
+          }
+        }
+      },
+      "execute": {
+        "kind": "throw_plain"
+      },
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"whoami-error-internal\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"tool_failed\\\",\\\"message\\\":\\\"Something failed on our side; retry with the same request_id; if it repeats, contact support@commonswarm.com\\\"}\"}]}}"
+    }
+  ],
+  "backend": [
+    {
+      "label": "claim_seat success",
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"golden-1\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"grant_id\\\":\\\"<grant_id>\\\",\\\"workspace_id\\\":\\\"<workspace_id>\\\",\\\"seat_id\\\":\\\"<uuid_1>\\\",\\\"principal_id\\\":\\\"<uuid_2>\\\",\\\"handle\\\":\\\"<handle_1>\\\",\\\"name\\\":\\\"golden-seat\\\"}\"}]}}"
+    },
+    {
+      "label": "claim_seat replay",
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"golden-2\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"grant_id\\\":\\\"<grant_id>\\\",\\\"workspace_id\\\":\\\"<workspace_id>\\\",\\\"seat_id\\\":\\\"<uuid_1>\\\",\\\"principal_id\\\":\\\"<uuid_2>\\\",\\\"handle\\\":\\\"<handle_1>\\\",\\\"name\\\":\\\"golden-seat\\\"}\"}]}}"
+    },
+    {
+      "label": "claim_seat reuse",
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"golden-3\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"grant_id\\\":\\\"<grant_id>\\\",\\\"workspace_id\\\":\\\"<workspace_id>\\\",\\\"seat_id\\\":\\\"<uuid_1>\\\",\\\"principal_id\\\":\\\"<uuid_2>\\\",\\\"handle\\\":\\\"<handle_1>\\\",\\\"name\\\":\\\"golden-seat\\\"}\"}]}}"
+    },
+    {
+      "label": "claim_seat name taken",
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"golden-4\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"hosted_seat_name_taken\\\",\\\"message\\\":\\\"That seat name is taken in this workspace. Call claim_seat with another name and a new request_id.\\\"}\"}]}}"
+    },
+    {
+      "label": "claim_seat workspace not consented",
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"golden-5\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"hosted_grant_forbidden\\\",\\\"message\\\":\\\"Workspace access is missing or no longer authorized. Ask a workspace admin to restore your membership, then reconnect and approve this workspace.\\\"}\"}],\"_meta\":{\"mcp/www_authenticate\":[\"Bearer resource_metadata=\\\"https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp\\\", error=\\\"invalid_token\\\", error_description=\\\"Authorization is no longer valid. Reconnect your account.\\\"\"]}}}"
+    },
+    {
+      "label": "claim_seat request_id conflict",
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"golden-6\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"command_id_conflict\\\",\\\"message\\\":\\\"This request_id was already used for different arguments. Retry the original request unchanged, or use a new request_id for a different request.\\\"}\"}]}}"
+    },
+    {
+      "label": "whoami success",
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"golden-7\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"grant_id\\\":\\\"<grant_id>\\\",\\\"seat_id\\\":\\\"<uuid_1>\\\",\\\"handle\\\":\\\"<handle_1>\\\",\\\"workspace_id\\\":\\\"<workspace_id>\\\",\\\"principal_id\\\":\\\"<uuid_2>\\\",\\\"name\\\":\\\"golden-seat\\\",\\\"transport\\\":\\\"hosted_mcp\\\",\\\"turn_only\\\":true}\"}]}}"
+    },
+    {
+      "label": "whoami unknown seat",
+      "http_status": 200,
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"golden-8\",\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"hosted_seat_forbidden\\\",\\\"message\\\":\\\"This seat is unavailable to your connection. Call claim_seat and use its returned handle; if access is still denied, ask a workspace admin to restore your membership and reconnect.\\\"}\"}],\"_meta\":{\"mcp/www_authenticate\":[\"Bearer resource_metadata=\\\"https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp\\\", error=\\\"invalid_token\\\", error_description=\\\"Authorization is no longer valid. Reconnect your account.\\\"\"]}}}"
+    }
+  ]
+}
