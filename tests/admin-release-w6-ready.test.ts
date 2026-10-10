@@ -409,7 +409,7 @@ async function fenceRun(LATENCY: number, stallUpload = false, budget = 0, fence:
   for (const d of [bin, secret, boxRoot, proof]) mkdirSync(d, { recursive: true, mode: 0o700 });
   const stage = mkdtempSync(join(secret, 'mac-anvil-secret.')); chmodSync(stage, 0o700);
   const pointer = join(dir, 'c1-smoke.pointer');
-  const copy = plan.split('/private/tmp/anvil-secret').join(join(secret, 'mac-anvil-secret')).split('/tmp/anvil-secret').join(join(secret, 'anvil-secret')).split('/Users/yulanbot/work/dcr-rt/c1-smoke.pointer').join(pointer);
+  const copy = plan.split('/private/tmp/anvil-secret').join(join(secret, 'mac-anvil-secret')).split('/tmp/anvil-secret').join(join(secret, 'anvil-secret')).split('/Users/yulanbot/work/dcr-rt/production/c1-smoke.pointer').join(pointer);
   const planCopy = join(dir, 'RELEASE.md'); writeFileSync(planCopy, copy);
   const inputs = inputFile({ ...base(), window: 'W6', plan_sha256: digest(copy) });
   const boxProof = join(boxRoot, `home/commonswarm/admin-issuance/release-proofs/${sha}-W6-Abc123`); mkdirSync(boxProof, { recursive: true });
@@ -472,7 +472,7 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'node revoke\\n' >>"${calls
   return { r, elapsed, trace, proof, stage, runId, calls };
 }
 
-test('ai-w6-fence-driver: agent receipt, upload, audit, download and human revoke inside the fence budget (R7, stubbed latency)', { timeout: 120_000 }, async () => {
+test('ai-w6-fence-driver: agent receipt, upload, audit, download and human revoke inside the fence budget (R7, stubbed latency)', { ...ownerHomeTest, timeout: 120_000 }, async () => {
   const LATENCY = Number(process.env.C1_FENCE_LATENCY_SECONDS ?? '1.5'); // conservative per ssh/scp round trip
   const { r, elapsed, trace, proof, stage, runId } = await fenceRun(LATENCY);
   assert.equal(r.status, 0, r.stderr + r.stdout);
@@ -494,7 +494,7 @@ test('ai-w6-fence-driver: agent receipt, upload, audit, download and human revok
   assert.equal(JSON.parse(readFileSync(join(proof, 'agent.json'), 'utf8')).ok, false, 'the fence-window receipt precedes the runner result');
 });
 
-test('ai-w6-fence-driver: a stalled transport is cut at the absolute fence deadline; no revoke is attempted', { timeout: 120_000 }, async () => {
+test('ai-w6-fence-driver: a stalled transport is cut at the absolute fence deadline; no revoke is attempted', { ...ownerHomeTest, timeout: 120_000 }, async () => {
   const { r, elapsed, trace } = await fenceRun(0, true, 5);
   assert.notEqual(r.status, 0);
   assert.ok(elapsed < 30, `the stalled upload must end at the deadline, not after 600 s: ${elapsed} s`);
@@ -502,7 +502,7 @@ test('ai-w6-fence-driver: a stalled transport is cut at the absolute fence deadl
   assert.ok(!trace.includes('node revoke'), trace.join('\n'));
 });
 
-test('ai-w6-fence-driver: with less than 45 s of fence budget left it refuses BEFORE the human revoke', { timeout: 120_000 }, async () => {
+test('ai-w6-fence-driver: with less than 45 s of fence budget left it refuses BEFORE the human revoke', { ...ownerHomeTest, timeout: 120_000 }, async () => {
   const { r, trace } = await fenceRun(0, false, 40);
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /FAIL ai-w6-fence-driver: fence budget before the human revoke expected at-least-45-s got \d+ s; revoke NOT attempted;/);
@@ -518,7 +518,7 @@ test('ai-w6-fence-driver: with less than 45 s of fence budget left it refuses BE
   assert.notEqual(inherited.status, 0); assert.match(inherited.stderr, /C1_RECOVERY_REVOKE expected unset in the fence window got 1/);
 });
 
-test('ai-w6-fence-driver: the deadline is the RUNNER cutoff: a delayed driver, a shortened token and an expired runner refuse normal revocation', { timeout: 120_000 }, async () => {
+test('ai-w6-fence-driver: the deadline is the RUNNER cutoff: a delayed driver, a shortened token and an expired runner refuse normal revocation', { ...ownerHomeTest, timeout: 120_000 }, async () => {
   // Delayed driver: the ready line is retained, but the runner's cutoff passed and the runner really exited.
   const late = await fenceRun(0, false, 0, { cutoffInMs: 1_000, driverDelayMs: 3_000 });
   assert.notEqual(late.r.status, 0);

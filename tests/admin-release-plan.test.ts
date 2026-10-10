@@ -57,7 +57,7 @@ assert.match(secretRoot, /^[A-Za-z0-9/_.-]+$/, 'fixture root must be a plain pat
 const PRODUCTION_STAGE_RE = "r'/private/tmp/anvil-secret\\.";
 const PRODUCTION_BOX_STAGE_RE = "r'/tmp/anvil-secret\\.";
 const FIXTURE_STAGE_RE = `r'${secretRoot.replace(/[.-]/g, '\\$&')}/anvil-secret\\.`;
-const PRODUCTION_POINTER = '/Users/yulanbot/work/dcr-rt/c1-smoke.pointer';
+const PRODUCTION_POINTER = '/Users/yulanbot/work/dcr-rt/production/c1-smoke.pointer';
 const PRODUCTION_PLAN_PATH = '"$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md"';
 function portable(source: string, expected: { stage: number; pointer: number }) {
   const mac = source.split(PRODUCTION_STAGE_RE).length - 1;
@@ -162,11 +162,11 @@ test('admin release plan: every complete marked block parses in Bash 3.2 and emb
 
 test('admin release plan: production secret window and pointer stay pinned; fixtures are portable rewrites only', () => {
   // The executed fixtures rewrite these literals; the plan must still carry them.
-  assert.equal(plan.split(PRODUCTION_STAGE_RE).length - 1, 3, 'Mac secret-window checks keep /private/tmp/anvil-secret');
+  assert.equal(plan.split(PRODUCTION_STAGE_RE).length - 1, 5, 'Mac secret-window checks keep /private/tmp/anvil-secret');
   assert.equal(plan.split(PRODUCTION_BOX_STAGE_RE).length - 1, 10, 'box secret-window checks use /tmp/anvil-secret (Ubuntu has no /private)');
   assert.equal(plan.split('$(mktemp -d /private/tmp/anvil-secret.XXXXXX)').length - 1, 1, 'Mac stage is a fresh /private/tmp/anvil-secret.XXXXXX');
   assert.equal(plan.split('$(mktemp -d /tmp/anvil-secret.XXXXXX)').length - 1, 4, 'box stages are a fresh /tmp/anvil-secret.XXXXXX');
-  assert.match(block('ai-w6-pointer'), /assert str\(pointer\)=='\/Users\/yulanbot\/work\/dcr-rt\/c1-smoke\.pointer'/);
+  assert.match(block('ai-w6-pointer'), /assert str\(pointer\)=='\/Users\/yulanbot\/work\/dcr-rt\/production\/c1-smoke\.pointer'/);
   assert.match(block('ai-w6-start'), /mktemp -d \/private\/tmp\/anvil-secret\.XXXXXX/);
   assert.match(block('ai-close'), /re\.fullmatch\(r'\/tmp\/anvil-secret\\\.\[A-Za-z0-9\]\{6\}',str\(p\)\)/);
   assert.match(block('ai-w2-between-probes'), /re\.fullmatch\(r'\/tmp\/anvil-secret\\\.\[A-Za-z0-9\]\{6\}',str\(stage\)\)/);
@@ -474,7 +474,7 @@ urllib.request.build_opener=lambda *args: Opener()
   // The dispatcher extracts nested blocks from the plan on disk; give it the
   // portable rewrite of the whole plan (only the secret-window regex changes).
   const planCopy = join(root, 'RELEASE.md');
-  writeFileSync(planCopy, portable(plan, { stage: 13, pointer: 9 }));
+  writeFileSync(planCopy, portable(plan, { stage: 15, pointer: 11 }));
   const released = block('ai-db-session').split('ai_run() {\n')[1]!.split('\nai_deadline() {')[0]!;
   assert.equal(released.split(PRODUCTION_PLAN_PATH).length - 1, 1);
   const dispatcher = released.split(PRODUCTION_PLAN_PATH).join(`'${planCopy}'`);
@@ -751,7 +751,7 @@ const readinessEnv = () => ({INPUTS_FILE:inputFile({...base(),window:'W6'}),W5_C
 test('admin release plan: W6 absent or stale BROWSER-READY refuses before opening; fresh W5-bound marker passes', () => {
   let result=run(block('ai-open'), readinessEnv());
   assert.notEqual(result.status,0); assert.match(result.stderr,/fresh BROWSER-READY required/);
-  writeFileSync(readyFile,'nonsecret readiness\n'); utimesSync(readyFile,new Date(0),new Date(0));
+  writeFileSync(readyFile,'production\n'); utimesSync(readyFile,new Date(0),new Date(0));
   result=run(block('ai-open'),readinessEnv());
   assert.notEqual(result.status,0); assert.match(result.stderr,/newer than W5 close/);
   utimesSync(readyFile,new Date(),new Date());
@@ -822,7 +822,7 @@ ai_ro() { printf 't\\n'; }\n`;
   }
 });
 
-test('admin release plan: D8 pointer emits only paths, consent choices and UTC expiry; secret-shaped name refuses', () => {
+test('admin release plan: D8 pointer binds production/window, paths, consent choices and UTC expiry; secret-shaped name refuses', () => {
   // Never the real Mac pointer: the fixture pointer is under this file's scratch.
   const pointer=fixturePointer, source=portable(block('ai-w6-pointer'),{stage:1,pointer:2});
   assert.ok(!existsSync(pointer),'refuse to touch an existing smoke pointer'); assert.ok(outsideHome(pointer));
@@ -832,7 +832,7 @@ test('admin release plan: D8 pointer emits only paths, consent choices and UTC e
   try {
     writeFileSync(c1,JSON.stringify({smoke_workspace_name:'C1 exact workspace'}));
     // Controls: the rewritten window and pointer checks still execute.
-    const other=mkdtempSync(join(secretRoot,'other-secret.'));
+    const other=mkdtempSync(join(secretRoot,'anvil-secret-staging.'));
     try {
       const wrongStage=run(source,{C1_SECRET_STAGE:other,C1_POINTER:pointer,C1_INPUTS_FILE:c1,INPUTS_FILE:inputFile(base())});
       assert.notEqual(wrongStage.status,0,'stage outside the anvil-secret window accepted'); assert.ok(!existsSync(pointer));
@@ -840,11 +840,14 @@ test('admin release plan: D8 pointer emits only paths, consent choices and UTC e
     const wrongPointer=run(source,{C1_SECRET_STAGE:stage,C1_POINTER:join(pointerDir,'other.pointer'),C1_INPUTS_FILE:c1,INPUTS_FILE:inputFile(base())});
     assert.notEqual(wrongPointer.status,0,'non-pinned pointer path accepted'); assert.ok(!existsSync(join(pointerDir,'other.pointer')));
     rmSync(join(stage,'request-plan.json'),{force:true});
+    const stagingWindow=run(source,{C1_SECRET_STAGE:stage,C1_POINTER:pointer,C1_INPUTS_FILE:c1,INPUTS_FILE:inputFile({...base(),window_id:'STGabc'})});
+    assert.notEqual(stagingWindow.status,0); assert.match(stagingWindow.stderr,/FAIL production smoke pointer refused; STOP/);
+    assert.ok(!existsSync(pointer),'the staging window cannot publish the production pointer');
     const result=run(source,{C1_SECRET_STAGE:stage,C1_POINTER:pointer,C1_INPUTS_FILE:c1,INPUTS_FILE:inputFile(base())});
     assert.equal(result.status,0,result.stderr);
     assert.equal(statSync(pointer).mode & 0o777,0o600);
     const r=JSON.parse(readFileSync(pointer,'utf8'));
-    assert.deepEqual(Object.keys(r).sort(),['authorize_url_file','callback_file','consent_choices','expires_at']);
+    assert.deepEqual(Object.keys(r).sort(),['authorize_url_file','callback_file','consent_choices','environment','expires_at','release_sha','window_id']);
     assert.equal(r.authorize_url_file,join(stage,'authorize.url')); assert.equal(r.callback_file,join(stage,'callback.url'));
     assert.equal(r.consent_choices.workspace_name,'C1 exact workspace'); assert.equal(r.consent_choices.home,false); assert.equal(r.consent_choices.full_account,false);
     const canonical=JSON.parse(spawnSync('node',['scripts/admin-smoke.mjs','--dry-run'],{encoding:'utf8'}).stdout);
@@ -866,6 +869,53 @@ test('admin release plan: D8 pointer emits only paths, consent choices and UTC e
   } finally {
     if(existsSync(pointer)) removePointer();
     removeStage(stage);
+  }
+});
+
+test('M19 / production-handoffs: every marker and pointer reader refuses staging identities with production controls', () => {
+  const dir=realpathSync(mkdtempSync(join(scratch,'production-handoff-')));
+  const marker=join(dir,'BROWSER-READY'), pointer=join(dir,'c1-smoke.pointer'), inputs=join(dir,'inputs.json');
+  const identity={release_sha:sha,window_id:'Fix123'};
+  const payload={environment:'production',...identity,authorize_url_file:'/private/tmp/anvil-secret.Abc123/authorize.url',callback_file:'/private/tmp/anvil-secret.Abc123/callback.url'};
+  const snippet=(step:string,label:string) => {
+    const source=block(step), start=source.indexOf(`# M19: ${label}`);
+    assert.ok(start>=0,step);
+    const end=source.indexOf('\nPY\n',start); assert.ok(end>start,step);
+    return source.slice(start,end+4).replaceAll('/Users/yulanbot/work/production/BROWSER-READY',marker)
+      .replaceAll(PRODUCTION_POINTER,pointer);
+  };
+  for (const step of ['ai-w6-readiness-transfer','ai-w6-preflight','ai-w6-start']) {
+    const source=snippet(step,'canonical production marker');
+    for (const [label,bytes,wid] of [['staging marker','staging\n','Fix123'],['staging window','production\n','STGabc'],
+      ['staging stage in marker','/private/tmp/anvil-secret-staging.Abc123\n','Fix123']] as const) {
+      writeFileSync(inputs,JSON.stringify({...identity,window_id:wid})); writeFileSync(marker,bytes);
+      const bad=run(source,{INPUTS_FILE:inputs,BROWSER_READY_FILE:marker}); assert.notEqual(bad.status,0,`${step}: ${label}`);
+      assert.match(bad.stderr,/FAIL production browser marker refused; STOP/);
+      writeFileSync(inputs,JSON.stringify(identity));writeFileSync(marker,'production\n');
+      const good=run(source,{INPUTS_FILE:inputs,BROWSER_READY_FILE:marker});assert.equal(good.status,0,`${step}: ${good.stderr}`);
+    }
+  }
+  const w5=join(dir,'w5'); mkdirSync(w5);
+  const close=join(w5,'closed.txt'); writeFileSync(close,new Date(Date.now()-60_000).toISOString()+'\n');
+  writeFileSync(join(w5,'W5-closed.json'),'{"state":"closed"}');
+  const boxReadiness=(bytes:string,windowId:string,w5Id:string) => {
+    writeFileSync(inputs,JSON.stringify({...identity,window_id:windowId}));writeFileSync(marker,bytes);
+    writeFileSync(join(w5,'inputs.json'),JSON.stringify({...identity,window:'W5',window_id:w5Id}));
+    return run(block('ai-w6-readiness'),{INPUTS_FILE:inputs,W5_CLOSED_FILE:close,BROWSER_READY_FILE:marker});
+  };
+  for (const [bytes,wid,w5id] of [['staging\n','Fix123','Fix456'],['production\n','STGabc','Fix456'],['production\n','Fix123','STGabc']] as const) {
+    const bad=boxReadiness(bytes,wid,w5id);assert.notEqual(bad.status,0);assert.match(bad.stderr,/FAIL production browser marker refused; STOP/);
+    const good=boxReadiness('production\n','Fix123','Fix456');assert.equal(good.status,0,good.stderr);
+  }
+  for (const step of ['ai-w6-owner-client-command','ai-w6-secret-close']) {
+    const source=snippet(step,'read a handoff');
+    for (const change of [{environment:'staging'},{window_id:'STGabc'},
+      {authorize_url_file:'/private/tmp/anvil-secret-staging.Abc123/authorize.url',callback_file:'/private/tmp/anvil-secret-staging.Abc123/callback.url'}]) {
+      writeFileSync(inputs,JSON.stringify(identity));writeFileSync(pointer,JSON.stringify({...payload,...change}),{mode:0o600});
+      const bad=run(source,{INPUTS_FILE:inputs,C1_POINTER:pointer});assert.notEqual(bad.status,0,step);assert.match(bad.stderr,/FAIL production smoke pointer refused; STOP/);
+      writeFileSync(pointer,JSON.stringify(payload));
+      const good=run(source,{INPUTS_FILE:inputs,C1_POINTER:pointer});assert.equal(good.status,0,`${step}: ${good.stderr}`);
+    }
   }
 });
 
@@ -4009,7 +4059,7 @@ test('C1-20: lost-shell recovery env reaches session and close; mismatch, wrong 
   assert.doesNotMatch(recoverySource, /0700-root-owned/);
   assert.match(recoverySource, /\) \|\| exit 1\neval "\$out"/);
   assert.doesNotMatch(recoverySource, /^\s*exit 0\s*$/m);
-  assert.match(macSource, /^unset PREP_DIR$/m);
+  assert.match(macSource, /^unset PREP_DIR RELEASE_SHA WINDOW_ID$/m);
   assert.ok(macSource.indexOf('unset PREP_DIR') < macSource.indexOf(': "${INPUTS_FILE:?FAIL'));
   assert.match(macSource, /out=\$\(python3 - "\$INPUTS_FILE" <<'PY'/);
 
@@ -4197,7 +4247,9 @@ printf 'leaked WINDOW=%s\\n' "\${WINDOW-unset}"
   const remappedMac = macSource.split('/private/tmp/').join(macDir + '/');
   const tarBytes = Buffer.from('mac-prep-archive\n');
   const macInputs = join(macDir, 'inputs.json');
-  writeFileSync(macInputs, JSON.stringify({ archive_sha256: digest(tarBytes) }));
+  // M15/M16: INPUTS carries the window identity, and each prep directory its binding from ai-prepare.
+  const macBinding = { release_sha: 'a'.repeat(40), window: 'W6', window_id: 'Rc0v20' };
+  writeFileSync(macInputs, JSON.stringify({ archive_sha256: digest(tarBytes), ...macBinding }));
   const runMac = (extra: Record<string, string> = {}) => {
     const env: NodeJS.ProcessEnv = { ...process.env, INPUTS_FILE: macInputs, ...extra };
     delete env.PREP_DIR;
@@ -4212,6 +4264,7 @@ printf 'leaked WINDOW=%s\\n' "\${WINDOW-unset}"
   mkdirSync(one, { mode: 0o700 });
   chmodSync(one, 0o700);
   writeFileSync(join(one, 'release.tar'), tarBytes, { mode: 0o600 });
+  writeFileSync(join(one, 'binding.json'), JSON.stringify(macBinding), { mode: 0o600 });
   const okMac = runMac();
   assert.equal(okMac.status, 0, okMac.stderr + okMac.stdout);
   assert.match(okMac.stdout, /PASS ai-mac-recovery-env: PREP_DIR set from matching prep directory/);
@@ -4221,6 +4274,7 @@ printf 'leaked WINDOW=%s\\n' "\${WINDOW-unset}"
   mkdirSync(two, { mode: 0o700 });
   chmodSync(two, 0o700);
   writeFileSync(join(two, 'release.tar'), tarBytes, { mode: 0o600 });
+  writeFileSync(join(two, 'binding.json'), JSON.stringify(macBinding), { mode: 0o600 });
   const several = runMac();
   assert.notEqual(several.status, 0);
   assert.match(several.stderr, /PREP_DIR expected one matching-prep-dir got several/);

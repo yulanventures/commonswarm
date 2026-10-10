@@ -718,7 +718,9 @@ const keeperPaths = [...keeperFiles('/x').map(([, target]) => target), ...keeper
 function exactRestoration(f: Fixture, before: Map<string, Entry>, after: Map<string, Entry>, { retired, promoted }: { retired: boolean; promoted: boolean }) {
   const residue = (rel: string) => rel === 'edge/failed-attempts' || rel.startsWith(`edge/failed-attempts/${sha}-W4-${wid}`)
     || rel.startsWith(`${f.release}`) || rel === f.upload || rel === f.installUpload
-    || (promoted && rel === `var-lib-admin-release/archives/${sha}-${wid}.tar`);
+    || (promoted && rel === `var-lib-admin-release/archives/${sha}-${wid}.tar`)
+    // A fresh install creates the durable state directories; they stay with the promoted archive (RETAINED).
+    || (promoted && ['var-lib-admin-release', 'var-lib-admin-release/archives'].includes(rel) && !before.has(rel));
   const problems: string[] = [];
   for (const rel of new Set([...before.keys(), ...after.keys()])) {
     if (residue(rel)) continue;
@@ -1424,4 +1426,215 @@ test('X2 / lock-order-receipts-refuse: each rule refuses its drifted receipt, in
     assert.doesNotMatch(r.stdout, /PASS ai-gates/, name);
   }
   assert.ok(T !== f.R);
+});
+
+// FU #12: the rollback removes a drop-in or config directory that this window created; one that existed is kept.
+test('#12 / w4-rollback-created-directories: a W4-created drop-in or config directory ends absent; a pre-existing one ends present', () => {
+  for (const [label, prepare, expectDropin, expectConfig] of [
+    ['W4 created the drop-in directory', (_f: Fixture) => {}, false, true],
+    ['the drop-in directory pre-existed (empty)', (f: Fixture) => { mkdirSync(join(f.root, `systemd/${service}.d`), { mode: 0o755 }); chmodSync(join(f.root, `systemd/${service}.d`), 0o755); }, true, true],
+    ['W4 created the config directory too', (f: Fixture) => { spawnSync('rmdir', ['--', join(f.root, 'admin-release')]); }, false, false],
+  ] as const) {
+    const f = fixture({}, { mode: 'fresh' });
+    prepare(f); f.writeInputs();
+    const before = monitored(f);
+    const r = f.run(forward(), { W4B_FAULT: 'F3' });
+    assert.match(r.stderr, /DRIVER FAULT F3 after ai-recycle-install completed/, `${label}: ${r.stderr}`);
+    assert.ok(existsSync(join(f.root, `systemd/${service}.d/50-admin-measurement.conf`)), `${label}: the fresh install wrote the drop-in`);
+    pass(f.run(['ai-w4-rollback']), `${label}: rollback`);
+    assert.equal(existsSync(join(f.root, `systemd/${service}.d`)), expectDropin, `${label}: drop-in directory`);
+    assert.equal(existsSync(join(f.root, 'admin-release')), expectConfig, `${label}: config directory`);
+    if (expectDropin) assert.deepEqual(readdirSync(join(f.root, `systemd/${service}.d`)), [], `${label}: kept empty`);
+    pass(f.run(['ai-close'], { CLOSE_RESULT: 'recovered', LIVE_CONTROLS_FILE: join(f.root, 'proof/ordinary-recovery.json') }), `${label}: recovered close`);
+    exactRestoration(f, before, monitored(f), { retired: false, promoted: true });
+  }
+});
+
+
+test('M13 / w4-preflight-override-equals-archive: a one-byte drift of the baseline override refuses in preflight before any write; the equal file passes', () => {
+  const override = `edge/releases/${baseline}/deploy/edge-runtime/compose.override.yaml`;
+  for (const [label, bytes] of [['one byte changed', 'reviewed overridf\n'], ['one byte appended', 'reviewed override\n\n']] as const) {
+    const f = fixture(); f.put(override, bytes, 0o644);
+    const before = monitored(f), proofBefore = readdirSync(join(f.root, 'proof')).sort();
+    const r = f.run(['ai-w4-preflight']);
+    refused(r, 'FAIL ai-w4-preflight: baseline compose.override.yaml expected equal-to-the-verified-archive-member got different-or-unreadable; STOP');
+    assert.deepEqual(monitored(f), before, `${label}: no monitored write`);
+    assert.deepEqual(readdirSync(join(f.root, 'proof')).sort(), proofBefore, `${label}: no admission or snapshot receipt`);
+    assert.ok(!existsSync(join(f.root, 'edge/releases', sha)), `${label}: no R tree`);
+  }
+  // Positive control in the same fixture shape: the equal file passes, and the R tree receives those bytes.
+  const good = fixture(); pass(good.run(['ai-w4-preflight']), 'equal override');
+  assert.equal(readFileSync(join(good.root, 'edge/releases', sha, 'deploy/edge-runtime/compose.override.yaml'), 'utf8'), 'reviewed override\n');
+});
+
+// M14: every AND-list meant as a STOP is one guarded test per line. Each site is cut from the reviewed block and run under set -e.
+const baseBlocks = blocksOf(basePlan.stdout);
+const baseBlock = (step: string) => baseBlocks.find(b => b.startsWith(`# step: ${step}\n`))!;
+const unguardedAnd = (source: string) => source.match(/^[ \t]*test [^\n|]*&&[^\n|]*$/gm) ?? [];
+function underSetE(snippet: string, env: Record<string, string>, args: string[] = []) {
+  const r = spawnSync('/bin/bash', ['-c', `set -euo pipefail\n${snippet}\nprintf 'REACHED\\n'\n`, 'm14', ...args],
+    { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', ...env } });
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+}
+function stopsWith(r: ReturnType<typeof underSetE>, fail: string, label: string) {
+  assert.notEqual(r.status, 0, `${label}: must stop`); assert.ok(r.stderr.includes(fail), `${label}: expected ${fail}; observed ${JSON.stringify(r.stderr)}`);
+  assert.doesNotMatch(r.stdout, /REACHED/, `${label}: nothing after the check runs`);
+}
+function reaches(r: ReturnType<typeof underSetE>, label: string) { assert.equal(r.status, 0, `${label}: ${r.stderr}`); assert.match(r.stdout, /REACHED/, label); }
+
+test('M14 / and-list-stops: each rewritten site stops with its FAIL line when either test is false and passes when both are true', () => {
+  // Enumerate: the five base AND-lists are gone and no new one appeared.
+  assert.equal(baseBlocks.flatMap(unguardedAnd).length, 5, 'positive control: the scan finds the five base sites');
+  assert.deepEqual(blocks.flatMap(unguardedAnd), []);
+  const dir = realpathSync(mkdtempSync(join(scratch, 'm14-')));
+  const file = (name: string) => { const path = join(dir, name); writeFileSync(path, 'bytes\n'); return path; };
+  const link = (name: string, target: string) => { const path = join(dir, name); symlinkSync(target, path); return path; };
+  const one = (source: string, re: RegExp, count: number) => { const m = source.match(re) ?? []; assert.equal(m.length, count, String(re)); return m.join('\n'); };
+
+  // Site 1: ai-w5-recovery-transfer, the Mac transfer loop (every file, including a non-final one).
+  const loop = one(block('ai-w5-recovery-transfer'), /^for SITE_C1_FILE in [^\n]*\n(?: [^\n]*\n)*?done$/gm, 1);
+  const loopEnv = { INPUTS_FILE: file('inputs.json'), LIVE_CONTROLS_FILE: file('live.json'), CONSENT_RECEIPT_FILE: file('consent.json'), PREP_DIR: dir };
+  file('release.tar'); reaches(underSetE(loop, loopEnv), 'site 1 all regular');
+  stopsWith(underSetE(loop, { ...loopEnv, INPUTS_FILE: join(dir, 'absent.json') }), `FAIL ai-w5-recovery-transfer: ${join(dir, 'absent.json')} expected regular-file got missing-or-other; STOP`, 'site 1 first test false');
+  stopsWith(underSetE(loop, { ...loopEnv, INPUTS_FILE: link('inputs-link.json', loopEnv.INPUTS_FILE) }), `FAIL ai-w5-recovery-transfer: ${join(dir, 'inputs-link.json')} expected not-symlink got symlink; STOP`, 'site 1 second test false');
+  const baseLoop = one(baseBlock('ai-w5-recovery-transfer'), /^for SITE_C1_FILE in [^\n]*\n(?: [^\n]*\n)*?done$/gm, 1);
+  reaches(underSetE(baseLoop, { ...loopEnv, INPUTS_FILE: join(dir, 'absent.json') }), 'control: the base loop continued past a missing first file');
+
+  // Site 2: ai-w5-recovery-transfer, the box upload check ($1 is the upload).
+  const upload = one(block('ai-w5-recovery-transfer'), /^test (?:-f|! -L) "\$upload" \|\|[^\n]*$/gm, 2);
+  const real = file('site-recovery.tar');
+  reaches(underSetE('upload=$1\n' + upload, {}, [real]), 'site 2 regular');
+  stopsWith(underSetE('upload=$1\n' + upload, {}, [join(dir, 'absent.tar')]), 'FAIL ai-w5-recovery-transfer: site-recovery upload expected regular-file got missing-or-other; STOP', 'site 2 first test false');
+  stopsWith(underSetE('upload=$1\n' + upload, {}, [link('upload-link.tar', real)]), 'FAIL ai-w5-recovery-transfer: site-recovery upload expected not-symlink got symlink; STOP', 'site 2 second test false');
+  const baseUpload = one(baseBlock('ai-w5-recovery-transfer'), /^test -f "\$upload" && test ! -L "\$upload"$/gm, 1);
+  reaches(underSetE('upload=$1\n' + baseUpload, {}, [join(dir, 'absent.tar')]), 'control: the base check continued past a missing upload');
+
+  // Site 3: ai-w5-recovery-env, its final assertion (an assertion, not a conditional: nothing branches on it).
+  const env = one(block('ai-w5-recovery-env'), /^test "\$(?:WINDOW|CLOSE_RESULT)" = [^\n]*\|\|[^\n]*$/gm, 2);
+  reaches(underSetE(env, { WINDOW: 'W5', CLOSE_RESULT: 'recovered' }), 'site 3 W5 recovered');
+  stopsWith(underSetE(env, { WINDOW: 'W6', CLOSE_RESULT: 'recovered' }), 'FAIL ai-w5-recovery-env: WINDOW expected W5 got other; STOP', 'site 3 first test false');
+  stopsWith(underSetE(env, { WINDOW: 'W5', CLOSE_RESULT: 'success' }), 'FAIL ai-w5-recovery-env: CLOSE_RESULT expected recovered got other; STOP', 'site 3 second test false');
+
+  // Sites 4 and 5: ai-close, the W5 recovered close markers.
+  const close = one(block('ai-close'), /^ test ! -[eL] "\$PROOF_DIR\/(?:closed\.txt|close-result\.json)" \|\|[^\n]*$/gm, 4);
+  for (const name of ['closed.txt', 'close-result.json']) {
+    const proof = realpathSync(mkdtempSync(join(dir, 'proof-')));
+    reaches(underSetE(close, { PROOF_DIR: proof }), `${name}: absent`);
+    writeFileSync(join(proof, name), 'earlier close\n');
+    stopsWith(underSetE(close, { PROOF_DIR: proof }), `FAIL ai-close: W5 ${name} expected absent got present; STOP`, `${name}: first test false`);
+    reaches(underSetE(one(baseBlock('ai-close'), /^ test ! -e "\$PROOF_DIR\/(?:closed\.txt|close-result\.json)" && [^\n]*$/gm, 2), { PROOF_DIR: proof }),
+      `control: the base close continued past an existing ${name}`);
+    spawnSync('/bin/mv', [join(proof, name), join(proof, `${name}.moved`)]);
+    symlinkSync(join(proof, 'absent-target'), join(proof, name));
+    stopsWith(underSetE(close, { PROOF_DIR: proof }), `FAIL ai-close: W5 ${name} expected not-symlink got symlink; STOP`, `${name}: second test false (dangling link)`);
+  }
+});
+
+// M15/M16: ai-mac-recovery-env as a complete block in a fresh /bin/bash, /private/tmp/ remapped to a fixture directory.
+function macRecovery() {
+  const root = realpathSync(mkdtempSync(join(scratch, 'mac-rec-'))), bin = join(root, 'bin'), proof = join(root, 'c1-proof');
+  mkdirSync(bin); mkdirSync(proof);
+  const source = block('ai-mac-recovery-env');
+  assert.equal(source.split('/private/tmp/').length - 1, 2, 'the two /private/tmp/ literals are the only remapped text');
+  const remapped = source.split('/private/tmp/').join(root + '/');
+  const tar = Buffer.from('mac recovery archive\n');
+  const ids = { release_sha: sha, window: 'W6', window_id: 'Rc0v20' };
+  const inputs = join(root, 'inputs.json');
+  const writeInputs = (change: Record<string, unknown> = {}) => writeFileSync(inputs, JSON.stringify({ archive_sha256: hash(tar), ...ids, ...change }));
+  writeInputs();
+  const prep = (name: string, binding: Record<string, string> | null, bytes: Buffer = tar) => {
+    const p = join(root, `admin-issuance-prep.${name}`); mkdirSync(p, { mode: 0o700 }); chmodSync(p, 0o700);
+    writeFileSync(join(p, 'release.tar'), bytes, { mode: 0o600 });
+    if (binding) writeFileSync(join(p, 'binding.json'), JSON.stringify(binding, Object.keys(binding).sort()) + '\n', { mode: 0o600 });
+    return p;
+  };
+  // ssh/scp record their arguments; the only remote output modelled is the upload stage name.
+  writeFileSync(join(bin, 'ssh'), `#!/bin/bash\nprintf 'ssh %s\\n' "\${@: -1}" >>"$STUB_LOG"\ncase "\${@: -1}" in 'umask 077; mktemp -d /tmp/admin-c1.XXXXXX') printf '/tmp/admin-c1.Abc123\\n';; esac\n`, { mode: 0o700 });
+  writeFileSync(join(bin, 'scp'), `#!/bin/bash\nprintf 'scp %s\\n' "\${@: -1}" >>"$STUB_LOG"\n`, { mode: 0o700 });
+  const log = join(root, 'stub.log');
+  const run = (after = '', withRecovery = true) => spawnSync('/bin/bash', [], {
+    input: (withRecovery ? remapped + '\n' : '') + after, encoding: 'utf8',
+    env: { PATH: `${bin}:/usr/bin:/bin`, INPUTS_FILE: inputs, STUB_LOG: log, C1_TRANSFER_DIRECTION: 'upload', C1_TRANSFER_FILE: 'C1-inputs.json', C1_PROOF_DIR: proof } });
+  return { root, ids, inputs, writeInputs, prep, run, tar, proof, log };
+}
+
+test('M16 / prep-dir-binding: ai-prepare records the window binding at creation; recovery selects the one matching directory and refuses zero or several', () => {
+  // ai-prepare writes binding.json in the new prep directory, before the archive.
+  const f = fixture();
+  f.put('inputs.json', { ...f.json('inputs.json'), baseline_site_sha: 'c'.repeat(40), window: 'W3', ...Object.fromEntries(['recycle_install_mode', 'recycle_baseline_sha256',
+    'keeper_install_receipt_sha256', 'keeper_host', 'keeper_upload_owner', 'keeper_baseline', 'keeper_install_vars_path', 'keeper_install_md_sha256', 'keeper_install_excerpts'].map(k => [k, undefined])) });
+  f.put('git-plan.md', planBytes);
+  f.fixtureConfig({ git: { rev: { [sha]: sha, ['c'.repeat(12)]: 'c'.repeat(40) }, archive: join(f.root, f.upload), plan: join(f.root, 'git-plan.md') } });
+  const prepared = f.run(['ai-prepare'], { PLAN_FILE: join(f.root, 'git-plan.md'), KEEPER_INSTALL_MD_FILE: '' }); pass(prepared, 'ai-prepare');
+  const prepDir = /PASS ai-prepare: archive retained at ([^;]+);/.exec(prepared.stdout)![1]!;
+  assert.equal(readFileSync(join(prepDir, 'binding.json'), 'utf8'), JSON.stringify({ release_sha: sha, window: 'W3', window_id: wid },['release_sha','window','window_id']) + '\n');
+  assert.equal(statSync(join(prepDir, 'binding.json')).mode & 0o777, 0o600);
+  const p = block('ai-prepare');
+  assert.ok(p.indexOf('binding.json') < p.indexOf('git archive --format=tar'), 'the binding is written when the directory is created');
+
+  // None: a directory with the right archive but no recorded binding (made before M16) is never selected.
+  const none = macRecovery(); none.prep('Old001', null);
+  const zero = none.run(); assert.notEqual(zero.status, 0); assert.match(zero.stderr, /FAIL ai-mac-recovery-env: PREP_DIR expected one matching-prep-dir got zero; STOP/);
+  // Same archive, different windows: the directory whose binding equals INPUTS is selected; a different archive with the right binding is not.
+  const m = macRecovery();
+  const match = m.prep('Win006', m.ids);
+  m.prep('Win007', { ...m.ids, window: 'W7', window_id: 'Oth007' });
+  m.prep('Wid006', { ...m.ids, window_id: 'Oth006' });
+  m.prep('Tar006', m.ids, Buffer.from('another archive\n'));
+  const one = m.run('printf "SELECTED %s\\n" "$PREP_DIR"\n'); pass(one, 'one match');
+  assert.match(one.stdout, new RegExp(`^SELECTED ${match.replace(/[.]/g, '\\.')}$`, 'm'));
+  // Two for the same window: refuse.
+  m.prep('Dup006', m.ids);
+  const several = m.run(); assert.notEqual(several.status, 0); assert.match(several.stderr, /PREP_DIR expected one matching-prep-dir got several; STOP/);
+});
+
+test('M15 / mac-recovery-window-identity: a fresh Mac shell after ai-mac-recovery-env has RELEASE_SHA and WINDOW_ID from INPUTS and the W6 transfer row runs', () => {
+  const m = macRecovery(); m.prep('Win006', m.ids);
+  writeFileSync(join(m.proof, 'C1-inputs.json'), '{}\n', { mode: 0o600 });
+  // Exported: a child process of the recovered shell sees both values equal to INPUTS.
+  const child = m.run(`/bin/bash -c 'printf "CHILD %s %s\\n" "$RELEASE_SHA" "$WINDOW_ID"'\n`); pass(child, 'exported');
+  assert.match(child.stdout, new RegExp(`^CHILD ${sha} Rc0v20$`, 'm'));
+  // The W6 transfer row runs in that shell and installs into this window's proof directory.
+  const transfer = m.run(block('ai-w6-transfer')); pass(transfer, 'W6 transfer after recovery');
+  const proofDir = `/home/commonswarm/admin-issuance/release-proofs/${sha}-W6-Rc0v20`;
+  assert.ok(readFileSync(m.log, 'utf8').split('\n').some(l => l.startsWith('ssh sudo -n install -o root -g root -m 0600 /tmp/admin-c1.Abc123/C1-inputs.json ' + proofDir + '/C1-inputs.json')),
+    readFileSync(m.log, 'utf8'));
+  // Control: the same row in a fresh shell without the recovery block stops on the unset identity.
+  const bare = m.run(block('ai-w6-transfer'), false); assert.notEqual(bare.status, 0); assert.match(bare.stderr, /RELEASE_SHA: unbound variable/);
+  // A malformed value in INPUTS refuses; nothing is exported.
+  for (const [change, message] of [[{ release_sha: 'A'.repeat(40) }, 'inputs release_sha expected 40-hex got other'], [{ window_id: 'bad-01' }, 'inputs window_id expected 6-alphanumeric got other'],
+    [{ window: 'W8' }, 'inputs window expected W1-W7-or-W2b got other']] as const) {
+    m.writeInputs(change);
+    const r = m.run(`printf 'LEAKED %s\\n' "\${RELEASE_SHA-unset}"\n`);
+    assert.notEqual(r.status, 0, message); assert.ok(r.stderr.includes(`FAIL ai-mac-recovery-env: ${message}; STOP`), r.stderr); assert.doesNotMatch(r.stdout, /LEAKED/);
+  }
+});
+
+test('MOA / open-abort-refuses-attempt-markers: each window attempt marker in PROOF_DIR refuses the abort; none present passes', () => {
+  // Enumerate the markers from the plan itself (git grep 'attempted'), not from a typed list.
+  const markers = [...new Set([...plan.matchAll(/[a-z0-9-]+-attempted\.txt/g)].map(m => m[0]))].sort();
+  for (const name of ['edge-attempted.txt', 'activation-attempted.txt', 'keeper-retire-attempted.txt', 'edge-oauth-runtime-revoke-attempted.txt',
+    'edge-oauth-runtime-grant-attempted.txt', 'issuer-provisioning-attempted.txt', 'oauth-attempted.txt', 'dcr-probe-revoke-attempted.txt'])
+    assert.ok(markers.includes(name), `${name} is enumerated`);
+  const source = block('ai-open-abort');
+  assert.equal(source.split('\n')[2], baseBlock('ai-open-abort').split('\n')[2], 'the host line is byte-identical');
+  const tmpNs = realpathSync(mkdtempSync(join(scratch, 'moa-tmp-')));
+  assert.equal(source.split("os.listdir('/tmp')").length - 1, 1); assert.equal(source.split("path='/tmp/'+").length - 1, 1);
+  const remapped = source.split("os.listdir('/tmp')").join(`os.listdir(${JSON.stringify(tmpNs)})`).split("path='/tmp/'+").join(`path=${JSON.stringify(tmpNs + '/')}+`);
+  const abort = (proof: string) => spawnSync('/bin/bash', [], { input: remapped, encoding: 'utf8', env: { PATH: '/usr/bin:/bin', PROOF_DIR: proof } });
+  for (const name of markers) for (const shape of ['file', 'dangling link'] as const) {
+    const proof = realpathSync(mkdtempSync(join(scratch, 'moa-proof-')));
+    if (shape === 'file') writeFileSync(join(proof, name), '2026-10-10T00:00:00Z\n'); else symlinkSync(join(proof, 'absent'), join(proof, name));
+    const r = abort(proof);
+    refused(r, `FAIL ai-open-abort: window attempt markers expected none got ${name}; a production operation was attempted: use the window rollback and the recovered ai-close; STOP`);
+    assert.ok(!existsSync(join(proof, 'aborted-before-mutation.txt')), `${name} (${shape}): no abort record`);
+  }
+  // A recorded secret stage is left in place when a marker refuses the abort.
+  const staged = realpathSync(mkdtempSync(join(scratch, 'moa-proof-'))), stage = join(tmpNs, 'anvil-secret.Moa001');
+  mkdirSync(stage, { mode: 0o700 }); writeFileSync(join(staged, 'secret-stage.path'), stage + '\n'); writeFileSync(join(staged, 'edge-attempted.txt'), 'x\n');
+  refused(abort(staged), 'got edge-attempted.txt;'); assert.ok(existsSync(stage), 'the stage is not removed');
+  // Positive control: no marker passes and records the abort.
+  const clean = realpathSync(mkdtempSync(join(scratch, 'moa-proof-')));
+  const ok = abort(clean); pass(ok, 'no marker');
+  assert.match(ok.stdout, /PASS ai-open-abort: aborted before mutation/); assert.ok(existsSync(join(clean, 'aborted-before-mutation.txt')));
 });

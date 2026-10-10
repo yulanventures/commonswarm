@@ -172,11 +172,11 @@ const siteQaFile = join(scratch, 'site-qa.json');
 writeFileSync(siteQaFile, JSON.stringify({ approver: 'HezLead', release_sha: releaseSha, task_ref: 'task/dry-run-fixture', browser: 'headless-bundled-chromium' }) + '\n');
 // W5 closed directory and a BROWSER-READY marker newer than the close.
 const w5Dir = join(scratch, 'w5'); mkdirSync(w5Dir, { mode: 0o700 });
-writeFileSync(join(w5Dir, 'inputs.json'), JSON.stringify({ release_sha: releaseSha, window: 'W5' }) + '\n');
+writeFileSync(join(w5Dir, 'inputs.json'), JSON.stringify({ release_sha: releaseSha, window: 'W5', window_id:windowId }) + '\n');
 writeFileSync(join(w5Dir, 'W5-closed.json'), JSON.stringify({ state: 'closed', site_ownership_close: 'PASS' }) + '\n');
 writeFileSync(join(w5Dir, 'closed.txt'), new Date(Date.now() - 120_000).toISOString().replace(/\.\d{3}Z$/, 'Z') + '\n');
-const browserReady = join(workRoot, 'BROWSER-READY');
-writeFileSync(browserReady, 'dry-run fixture\n');
+const browserReady = join(workRoot, 'production','BROWSER-READY'); mkdirSync(join(workRoot,'production'),{mode:0o700});
+writeFileSync(browserReady, 'production\n');
 utimesSync(browserReady, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
 // Site evidence with a valid close and manifest, so ai-w5-closed reaches its network step.
 const siteEvidence = join(scratch, 'site-evidence'); mkdirSync(siteEvidence, { mode: 0o700 });

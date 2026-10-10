@@ -447,7 +447,7 @@ test('W5 administrative close emits one Mac row; other windows refuse; existing 
     assert.ok(baseOrders.includes(expected), 'existing order bytes changed beyond approved source-line repins and revoke reconciliation inputs');
   }
   // Build B re-derives each "line" anchor from its unchanged quote (verify() above re-checks every one)
-  // and adds only these W4 forward rows (shown with "line":N); every other order byte equals the base 7efbb67d.
+  // Adds these W4 rows and M19's production BROWSER-READY producer contract; other order bytes equal the base.
   const u10 = `{"host":"box","manual":{"line":N,"quote":${JSON.stringify("STOP unless HezLead's U10 measurement exists, was taken after the production keeper install receipt, and its digest equals `keeper_install_receipt_sha256`; and unless the keeper inputs come from that receipt and `keeper_install_md_sha256` and `keeper_install_excerpts` equal the reviewed INSTALL values recorded in this plan.")}}}`;
   const u7 = `{"host":"box","manual":{"line":N,"quote":${JSON.stringify("STOP unless HezLead's signed U7 record exists for this pass: a fresh verified backup and a REAL restore into a named throwaway target (never production, never a staging stub), with host, database, restore time, schema checksum and key-table row counts against the source.")}}}`;
   const buildB = new Map([['W4 forward', [
@@ -455,7 +455,18 @@ test('W5 administrative close emits one Mac row; other windows refuse; existing 
     ['{"id":"ai-w4-caddy-candidate","host":"box"}', '{"id":"ai-w4-keeper-retire","host":"box"}', '{"id":"ai-w4-apply","host":"box"}']]]]);
   const header = (order: string) => order.split('\n')[0]!.slice('```c1-order '.length);
   const unpin = (row: string) => row.replace(/"line":\d+/g, '"line":N');
-  const unpinned = (rows: string[]) => rows.map(unpin).join('\n');
+  const unpinned = (rows: string[]) => rows.map(unpin).map(row => {
+    if (!row.startsWith('{')) return row;
+    const value = JSON.parse(row.replaceAll('"line":N', '"line":0'));
+    if (!value.manual?.quote.startsWith('- **BROWSER-READY**')) return row;
+    // The generator separately verifies the full quote at its anchor. Permit only this named producer row.
+    value.manual.quote = 'M19 production BROWSER-READY producer contract';
+    return JSON.stringify(value);
+  }).join('\n');
+  const markerRow = JSON.parse(newOrders.find(order => header(order) === 'W6 forward')!.split('\n')
+    .find(row => row.includes('- **BROWSER-READY**'))!);
+  assert.match(markerRow.manual.quote, /\/work\/production\/BROWSER-READY/);
+  assert.match(markerRow.manual.quote, /require exactly `production\\n`/);
   assert.deepEqual(newOrders.map(header), baseOrders.map(header));
   newOrders.forEach((order, i) => {
     const rows = order.split('\n').map(unpin), added = new Set<string>();

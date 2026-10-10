@@ -341,8 +341,12 @@ function fixture(config: Record<string, unknown> = {}, parent = scratch) {
   mkdirSync(dirname(archive));
   // The release archive also carries the producer; W5 reads it from PREP_DIR/release.tar.
   const producerFile = `edge/releases/${sha}/scripts/live-ordinary-controls.mjs`; put(producerFile, producerSource);
+  // The tracked edge override, which ai-w4-preflight compares with the baseline override (M13);
+  // the R tree holds the same bytes after preflight's copy.
+  put('archive-src/compose.override.yaml', 'reviewed override\n');
+  put(`edge/releases/${sha}/deploy/edge-runtime/compose.override.yaml`, 'reviewed override\n');
   const archived = spawnSync('/usr/bin/python3', ['-c',
-    'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t:\n    t.add(sys.argv[2],arcname="src/reviewed.txt"); t.add(sys.argv[3],arcname="scripts/live-ordinary-controls.mjs")', archive, join(root, edgeFile), join(root, producerFile)], { encoding: 'utf8' });
+    'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t:\n    t.add(sys.argv[2],arcname="src/reviewed.txt"); t.add(sys.argv[3],arcname="scripts/live-ordinary-controls.mjs"); t.add(sys.argv[4],arcname="deploy/edge-runtime/compose.override.yaml")', archive, join(root, edgeFile), join(root, producerFile), join(root, 'archive-src/compose.override.yaml')], { encoding: 'utf8' });
   assert.equal(archived.status, 0, archived.stderr); data.archive_sha256 = hash(readFileSync(archive));
   for (const prep of ['prep', 'prep-open']) { copyFileSync(archive, join(root, prep, 'release.tar')); chmodSync(join(root, prep, 'release.tar'), 0o600); }
   for (const version of ['20261001000001','20261001000002','20261001000003','20261001000004','20261001000005',
