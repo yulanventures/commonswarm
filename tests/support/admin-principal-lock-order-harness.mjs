@@ -37,6 +37,14 @@ const LOCK_TIMEOUT_MS = 5000; // setTransaction (command/index.ts:1601) and admi
 
 /** Round 4 (review A F1(i)): two OAuth admins, different owners and issuer kids, one workspace. */
 export const ADMIN_PAIR = 'admin-oauth-vs-admin-oauth-shared-workspace';
+/** Round 6 (review B B1, B2): two OAuth admins whose workspace locks cross (adminCrossScenario). */
+export const ADMIN_CROSS = Object.freeze({
+  CREATE_EXISTING: 'admin-oauth-create-existing-workspace-crossed',
+  READ_OUTSIDE_GRANT: 'admin-oauth-read-outside-grant-vs-admin-oauth-routine',
+  GRANT_COMMAND: 'admin-oauth-grant-admin-delegation-vs-admin-oauth-routine',
+});
+/** Round 6 (inventory): two owners each withdraw a workspace from the other's grant (adminWithdrawScenario). */
+export const ADMIN_WITHDRAW = 'admin-human-withdraw-crossed-grants';
 const RACES = Object.freeze({
   'admin-oauth-vs-hosted-claim-seat': { parked: 'hosted', waiting: 'admin' },
   'admin-oauth-vs-local-join-registration': { parked: 'join', waiting: 'admin' },
@@ -48,6 +56,8 @@ const RACES = Object.freeze({
   'household-invitation-vs-hosted-claim-seat': { parked: 'hosted', waiting: 'household' },
   'household-invitation-vs-local-join-registration': { parked: 'join', waiting: 'household' },
   [ADMIN_PAIR]: { parked: 'admin', waiting: 'admin' },
+  ...Object.fromEntries(Object.values(ADMIN_CROSS).map((name) => [name, { parked: 'admin', waiting: 'admin' }])),
+  [ADMIN_WITHDRAW]: { parked: 'admin', waiting: 'admin' },
 });
 
 /** A refused target. Callers branch on `code`, never on the message. */
@@ -778,7 +788,9 @@ async function denoMain() {
     // D4: names and ids unique to this run (fresh workspace, users and grants per scenario).
     const ctx = { command, db, observer, failures, jwks, out, tag: randomUUID().replaceAll('-', '').slice(0, 10), clientVersion: minimum.version };
     const result = scenario === 'golden' ? await golden(ctx)
-      : scenario === ADMIN_PAIR ? await adminPairScenario(ctx) : await raceScenario(ctx, scenario);
+      : scenario === ADMIN_PAIR ? await adminPairScenario(ctx)
+      : Object.values(ADMIN_CROSS).includes(scenario) ? await adminCrossScenario(ctx, scenario)
+      : scenario === ADMIN_WITHDRAW ? await adminWithdrawScenario(ctx) : await raceScenario(ctx, scenario);
     out.stage = 'complete';
     console.log('LOCK_ORDER_RESULT ' + JSON.stringify({ ...out, ...result, http_refused: http.refused }));
   } catch (error) {
@@ -795,8 +807,8 @@ async function human(ctx, label) {
   await ctx.observer`INSERT INTO swarm.users (user_id, display_name, email) VALUES (${userId}::uuid, ${displayName}, ${email})`;
   return { userId, email, identity: { userId, email, displayName, identityVerified: true, interactiveAuthAtSeconds: null } };
 }
-async function workspace(ctx, owner, household) {
-  const workspaceId = id(), streamId = id();
+async function workspace(ctx, owner, household, workspaceId = id()) {
+  const streamId = id();
   await ctx.observer.begin(async (tx) => {
     await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${workspaceId}::uuid, ${`Lock-order race ${ctx.tag}`}, ${owner.userId}::uuid)`;
     await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${workspaceId}::uuid, ${owner.userId}::uuid, 'owner')`;
@@ -935,7 +947,10 @@ async function holderSide(ctx, kind, fixture) {
   return { warm: preview, start: preview, writes: async () => ({}) };
 }
 
-async function adminSide(ctx, fixture, label = 'admin') {
+/** One OAuth admin. Round-6 options: `grantWorkspaceIds`, the grant's selected workspaces (default
+ * the fixture workspace, where the warm-up seat goes); `extraConsentWorkspaceIds`, a second consent
+ * that is prepared and never granted; `race`, the race command and the result it must give. */
+async function adminSide(ctx, fixture, label = 'admin', options = {}) {
   const { owner, workspaceId } = fixture;
   const policy = await import('../../supabase/functions/_shared/protocol.js');
   const { adminTransaction } = await import('../../supabase/functions/command/admin-delegation.ts');
@@ -958,7 +973,7 @@ async function adminSide(ctx, fixture, label = 'admin') {
     registry_version: policy.ADMIN_REGISTRY_VERSION, scope_names: scopeNames,
     capability_names: policy.adminAvailableCapabilities(scopeNames),
     availability_digest: policy.adminAvailabilityDigest(policy.ADMIN_REGISTRY_VERSION),
-    workspace_selector: 'selected', workspace_ids: [workspaceId],
+    workspace_selector: 'selected', workspace_ids: options.grantWorkspaceIds ?? [workspaceId],
     created_workspace_policy: { scope_names: ['seats:create', 'seats:revoke'] },
     target_rules: { seat_ids: [], own_seats: true, grant_created_seats: true, recipient_user_ids: [owner.userId],
       recipient_connection_ids: [connection], transports: ['local', 'hosted_mcp'] },
@@ -974,30 +989,42 @@ async function adminSide(ctx, fixture, label = 'admin') {
   const activated = (await transact(wire({ kind: 'grant_admin_delegation', grant_id: grant,
     consent_receipt_id: prepared.body.consent_receipt_id, replaces_grant_id: null }))).result;
   if (activated.status !== 200) fail('admin_grant_refused');
+  let extraConsent = null;
+  if (options.extraConsentWorkspaceIds) {
+    const other = id();
+    const extra = (await transact(wire({ kind: 'prepare_admin_consent', manifest: { ...manifest, connection_id: other,
+      workspace_ids: options.extraConsentWorkspaceIds, target_rules: { ...manifest.target_rules, recipient_connection_ids: [other] } },
+    full_account_selected: false }))).result;
+    if (extra.status !== 200) fail('admin_extra_consent_refused');
+    extraConsent = extra.body.consent_receipt_id;
+  }
   const oauth = await oauthFixture(ctx.db, grant, signing, jwk.kid);
+  const seat = (seatName) => ({ kind: 'admin_create_seat', grant_id: grant, workspace_id: workspaceId, name: seatName, model: null, transport: 'local' });
+  const seatCreated = (result) => result.status === 200 && Array.isArray(result.body?.events) && result.body.events.some((event) => event.type === 'AdminSeatCreated');
   // The DPoP request is built before the race so the parked side waits only for the edge path.
-  const armed = async (name) => {
-    const input = wire({ kind: 'admin_create_seat', grant_id: grant, workspace_id: workspaceId, name, model: null, transport: 'local' });
+  const armed = async (command) => {
+    const input = wire(command);
     return { input, request: await oauth.request(input) };
   };
-  const send = async ({ input, request }) => {
+  const send = async ({ input, request }, ok = seatCreated) => {
     const response = await ctx.command.handleRequest(request);
     const result = { status: response.status, body: await response.json() };
-    return { ...summary(result), command_id: input.command_id,
-      ok: result.status === 200 && Array.isArray(result.body?.events) && result.body.events.some((event) => event.type === 'AdminSeatCreated') };
+    return { ...summary(result), command_id: input.command_id, ok: ok(result) };
   };
   const audit = async (commandId) => (await ctx.observer`SELECT outcome FROM commonswarm_oauth.admin_oauth_audit
     WHERE admin_grant_id = ${grant}::uuid AND request_id = ${commandId} ORDER BY occurred_at, audit_id`).map((row) => row.outcome);
   let race = null;
   const name = `race-${label}-seat-${ctx.tag}`;
+  const raceCommand = options.race ? options.race({ grant, extraConsent }) : { command: seat(name), ok: seatCreated };
   return {
     name,
+    grant,
     warm: async () => {
-      const warmed = await send(await armed(`warm-${label}-seat-${ctx.tag}`));
+      const warmed = await send(await armed(seat(`warm-${label}-seat-${ctx.tag}`)));
       return { ...warmed, audit: await audit(warmed.command_id) };
     },
-    arm: async () => { race = await armed(name); },
-    start: () => send(race),
+    arm: async () => { race = await armed(raceCommand.command); },
+    start: () => send(race, raceCommand.ok),
     writes: async () => ({ admin_principal_live: await principalLive(ctx, workspaceId, name) }),
     audit: () => audit(race.input.command_id),
   };
@@ -1188,6 +1215,213 @@ async function waitForSecondAdmin(sql, blockerPid, firstPid, timeoutMs = 15_000)
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   return null;
+}
+
+/** Round 6 (review B B1, B2): two OAuth admins, different owners and issuer kids, whose workspace
+ * locks cross. A blocker session holds only workspace rows. The first admin parks on a blocked row
+ * while it holds another workspace row; the second then parks on a row that the blocker or the
+ * first admin holds. Workspace ids are sorted: low < high < top.
+ * - CREATE_EXISTING (B1): each owner's grant selects only its own workspace, and each sends
+ *   admin_create_workspace with the other owner's existing id. The blocker holds both rows FOR SHARE.
+ *   The base and head''' lock the own row (currentRights or the membership-only pre-lock), then the
+ *   other at admin-routine.ts:48: 40P01. Round 6 locks both first, in order: both 403 workspace_exists.
+ * - READ_OUTSIDE_GRANT (B2) and GRANT_COMMAND: the first owner's grant selects high and top. It reads
+ *   low (outside the grant: 403 workspace_forbidden), or sends grant_admin_delegation with its own
+ *   consent for low (403 human_confirmation_required). The second owner's routine (grant low and
+ *   high) creates a seat in high. The blocker holds top FOR NO KEY UPDATE, so the first holds high
+ *   FOR SHARE and waits; the routine then waits for high. After the release, head''' locks low FOR
+ *   SHARE while the routine holds it FOR NO KEY UPDATE (round-4 pre-lock): 40P01. The base routine
+ *   holds low only FOR SHARE, so the base does not deadlock. Round 6 does not lock low here. */
+async function adminCrossScenario(ctx, scenario) {
+  const { out, observer, failures } = ctx;
+  out.stage = 'fixture';
+  const first = await human(ctx, 'first');
+  const second = await human(ctx, 'second');
+  const [low, high, top] = [id(), id(), id()].sort();
+  const create = scenario === ADMIN_CROSS.CREATE_EXISTING;
+  let admins;
+  if (create) {
+    await workspace(ctx, first, false, high);
+    await workspace(ctx, second, false, low);
+    const createIn = (target) => ({ grant }) => ({
+      command: { kind: 'admin_create_workspace', grant_id: grant, workspace_id: target, name: `race-workspace-${ctx.tag}` },
+      ok: (result) => result.status === 403 && result.body?.error === 'workspace_exists' });
+    // Both keys are in the JWKS before the first OAuth request reads it.
+    admins = [await adminSide(ctx, { owner: first, workspaceId: high }, 'first', { race: createIn(low) }),
+      await adminSide(ctx, { owner: second, workspaceId: low }, 'second', { race: createIn(high) })];
+  } else {
+    await workspace(ctx, second, false, low);
+    await workspace(ctx, second, false, high);
+    await workspace(ctx, first, false, top);
+    await member(ctx, low, first, 'admin');
+    await member(ctx, high, first, 'admin');
+    const read = scenario === ADMIN_CROSS.READ_OUTSIDE_GRANT;
+    admins = [await adminSide(ctx, { owner: first, workspaceId: top }, 'first', {
+      grantWorkspaceIds: [high, top],
+      ...(read ? {} : { extraConsentWorkspaceIds: [low] }),
+      race: read
+        ? ({ grant }) => ({ command: { kind: 'admin_read_metadata', grant_id: grant, resource_kind: 'grant', workspace_id: low },
+          ok: (result) => result.status === 403 && result.body?.error === 'workspace_forbidden' })
+        : ({ extraConsent }) => ({ command: { kind: 'grant_admin_delegation', grant_id: id(), consent_receipt_id: extraConsent, replaces_grant_id: null },
+          ok: (result) => result.status === 403 && result.body?.error === 'human_confirmation_required' }),
+    }), await adminSide(ctx, { owner: second, workspaceId: high }, 'second', { grantWorkspaceIds: [low, high] })];
+  }
+  out.stage = 'warm-up';
+  for (const admin of admins) {
+    const warmed = await admin.warm();
+    if (!warmed.ok || warmed.audit.join(',') !== 'committed') { out.warm_holder = warmed; fail(`holder_positive_control_failed:${returnedCode(warmed)}`); }
+    await admin.arm();
+  }
+  out.stage = 'blocker';
+  let releaseBlocker;
+  const released = new Promise((resolve) => { releaseBlocker = resolve; });
+  let blockerReady;
+  const ready = new Promise((resolve) => { blockerReady = resolve; });
+  let blockerPid = 0;
+  const blocker = observer.begin(async (tx) => {
+    await tx`SELECT set_config('lock_timeout', '30s', true)`;
+    blockerPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+    // The blocker holds these workspace rows and nothing else.
+    if (create) await tx`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id = ANY(${[low, high]}::uuid[]) ORDER BY workspace_id FOR SHARE`;
+    else await tx`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id = ${top}::uuid FOR NO KEY UPDATE`;
+    blockerReady();
+    await released;
+  });
+  await ready;
+  const parking = {};
+  out.parking = parking;
+  failures.codes.length = 0;
+  failures.recording = true;
+  let parked = null;
+  let waiting = null;
+  try {
+    out.stage = 'park-first-admin';
+    parked = settleSide(admins[0].start());
+    // The blocker holds only workspace rows; the first admin waits for one of them.
+    const firstPid = await waitForBlocked(observer, blockerPid, async (pid) => (await observer`SELECT EXISTS (SELECT 1 FROM pg_locks
+      WHERE pid = ${pid}::int AND locktype = 'tuple' AND relation = 'swarm.workspaces'::regclass) AS ok`)[0].ok === true);
+    parking.first_admin_waits_on_workspace = firstPid !== null;
+    if (firstPid === null) fail('first_admin_did_not_park');
+    out.stage = 'park-second-admin';
+    waiting = settleSide(admins[1].start());
+    const secondWait = await waitForCrossSecondAdmin(observer, blockerPid, firstPid);
+    parking.second_admin_waits_on_workspace = secondWait !== null;
+    if (secondWait === null) fail('second_admin_did_not_park');
+    // Diagnostic only: who the second admin waits for, and whether it queues on a workspace tuple.
+    out.second_admin_blocked_by = secondWait.blockedBy;
+  } finally {
+    // A failed parking keeps its own stage; the blocker is released either way.
+    releaseBlocker();
+    await blocker.catch(() => {});
+  }
+  out.stage = 'release';
+  const sides = await Promise.race([Promise.all([parked, waiting]), new Promise((resolve) => setTimeout(() => resolve(null), 60_000))]);
+  failures.recording = false;
+  if (sides === null) fail('race_timeout');
+  out.stage = 'writes';
+  const noMembership = async (workspaceId, user) => (await observer`SELECT count(*)::int AS n FROM swarm.memberships
+    WHERE workspace_id = ${workspaceId}::uuid AND user_id = ${user.userId}::uuid`)[0].n === 0;
+  return {
+    parked: { side: 'admin', ...sides[0] },
+    waiting: { side: 'admin', ...sides[1] },
+    sqlstates: [...failures.codes],
+    writes: create
+      ? { first_target_unchanged: await noMembership(low, first), second_target_unchanged: await noMembership(high, second) }
+      : { second_admin_principal_live: await principalLive(ctx, high, admins[1].name) },
+    admin_audit: [...await admins[0].audit(), ...await admins[1].audit()],
+  };
+}
+
+/** The one backend other than the first admin that waits only for the blocker and/or the first admin.
+ * In these fixtures the blocker holds only workspace rows, and the two admins (different owners,
+ * kids and clients) share no other row in a conflicting mode, so that wait is on a workspace row. */
+async function waitForCrossSecondAdmin(sql, blockerPid, firstPid, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = await sql`SELECT pid, pg_blocking_pids(pid) AS blockers FROM pg_stat_activity
+      WHERE pid <> ${firstPid}::int
+        AND (${blockerPid}::int = ANY(pg_blocking_pids(pid)) OR ${firstPid}::int = ANY(pg_blocking_pids(pid)))`;
+    if (rows.length === 1) {
+      const pid = Number(rows[0].pid), blockers = rows[0].blockers.map(Number);
+      if (blockers.length > 0 && blockers.every((b) => b === blockerPid || b === firstPid)) {
+        const names = [blockers.includes(blockerPid) ? 'blocker' : null, blockers.includes(firstPid) ? 'first_admin' : null].filter(Boolean);
+        return { pid, blockedBy: names.join('+') };
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return null;
+}
+
+/** Round 6 (inventory): two owners, each an admin member of the other's workspace and granting over
+ * it, withdraw the other's grant from their own workspace at the same time. A human admin command
+ * runs runAdminAccountCommand (command/index.ts:13437-13447): setTransaction (:1596-1603), the
+ * authenticateHuman users-row upsert (:3072-3087), then adminTransaction. runAdminAccountCommand
+ * is not exported and its only entry, handleRequest, verifies the sign-in with GoTrue, so each side
+ * runs the first two steps here with the same SQL. Both sides hold their own users row (the upsert)
+ * before either calls adminTransaction, which then locks the grantor's users row: FOR UPDATE at
+ * T''' and FOR NO KEY UPDATE at head''' (admin-delegation.ts:195), so each side waits for the
+ * other's upsert: 40P01. Round 6 takes the grantor's row FOR KEY SHARE, which the upsert does not
+ * block: both withdrawals are accepted. */
+async function adminWithdrawScenario(ctx) {
+  const { out, observer, failures } = ctx;
+  out.stage = 'fixture';
+  const first = await human(ctx, 'first');
+  const second = await human(ctx, 'second');
+  const { workspaceId: firstWorkspace } = await workspace(ctx, first, false);
+  const { workspaceId: secondWorkspace } = await workspace(ctx, second, false);
+  await member(ctx, firstWorkspace, second, 'admin');
+  await member(ctx, secondWorkspace, first, 'admin');
+  // Each owner's grant selects the other owner's workspace.
+  const firstGrant = (await adminSide(ctx, { owner: first, workspaceId: secondWorkspace }, 'first')).grant;
+  const secondGrant = (await adminSide(ctx, { owner: second, workspaceId: firstWorkspace }, 'second')).grant;
+  const policy = await import('../../supabase/functions/_shared/protocol.js');
+  const { adminTransaction } = await import('../../supabase/functions/command/admin-delegation.ts');
+  const withdraw = (grant, workspaceId) => ({ command_id: id(), stream: { kind: 'account' }, resource: policy.ADMIN_RESOURCE,
+    command: { kind: 'withdraw_admin_workspace_access', grant_id: grant, workspace_id: workspaceId, reason_code: 'withdrawn' } });
+  const sides = [
+    { user: first, input: withdraw(secondGrant, firstWorkspace) },
+    { user: second, input: withdraw(firstGrant, secondWorkspace) },
+  ];
+  let arrived = 0, allArrived;
+  const barrier = new Promise((resolve) => { allArrived = resolve; });
+  const parking = {};
+  out.parking = parking;
+  const run = ({ user, input }) => ctx.db.begin('isolation level read committed', async (tx) => {
+    await tx`SELECT set_config('role', 'swarm_command', true), set_config('search_path', 'swarm, pg_catalog', true),
+      set_config('lock_timeout', '5s', true)`;
+    await tx`INSERT INTO swarm.users (user_id, display_name, email) VALUES (${user.userId}::uuid, ${user.identity.displayName}, ${user.email})
+      ON CONFLICT (user_id) DO UPDATE SET display_name = EXCLUDED.display_name, email = coalesce(EXCLUDED.email, swarm.users.email)
+      RETURNING user_id, email`;
+    if (++arrived === sides.length) allArrived();
+    await barrier;
+    const [clock] = await tx`SELECT extract(epoch FROM statement_timestamp())::float8 AS seconds`;
+    return await adminTransaction(tx, input, { kind: 'human', identity: { user_id: user.userId, session_binding: 'a'.repeat(64),
+      interactive_at_seconds: Number(clock.seconds), csrf_verified: true } });
+  }).then(({ result }) => ({ ...summary(result), ok: result.status === 200 && result.body?.status === 'accepted' &&
+    result.body.events.some((event) => event.type === 'AdminWorkspaceAccessWithdrawn') }));
+  failures.codes.length = 0;
+  failures.recording = true;
+  out.stage = 'race';
+  const started = sides.map((side) => settleSide(run(side)));
+  const held = await Promise.race([barrier.then(() => true), new Promise((resolve) => setTimeout(() => resolve(false), 15_000))]);
+  parking.both_sides_hold_own_users_row = held;
+  const settled = await Promise.race([Promise.all(started), new Promise((resolve) => setTimeout(() => resolve(null), 60_000))]);
+  failures.recording = false;
+  if (!held) fail('sides_did_not_reach_barrier');
+  if (settled === null) fail('race_timeout');
+  out.stage = 'writes';
+  const withdrawn = async (grant, workspaceId) => (await observer`SELECT ${workspaceId}::uuid = ANY(withdrawn_workspace_ids) AS ok
+    FROM swarm.admin_grants WHERE grant_id = ${grant}::uuid`)[0]?.ok === true;
+  return {
+    parked: { side: 'admin', ...settled[0] },
+    waiting: { side: 'admin', ...settled[1] },
+    sqlstates: [...failures.codes],
+    writes: {
+      first_withdrawal_recorded: await withdrawn(secondGrant, firstWorkspace),
+      second_withdrawal_recorded: await withdrawn(firstGrant, secondWorkspace),
+    },
+  };
 }
 
 /** Golden run: the real MCP protocol module and tool rendering over the real claim and read
