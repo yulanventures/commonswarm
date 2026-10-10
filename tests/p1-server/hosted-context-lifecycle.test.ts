@@ -13,7 +13,7 @@ const proof='deploy/release-proofs/session-identity/20261006000004-';
 function fixtureAssert(expression:string,label:string) {
   return sqlPhase(label,dbAssert(expression,label));
 }
-function beforePredicates(source:string) {
+function beforePredicates(source:string,cronAbsent=true) {
   const aggregate='\nSELECT COALESCE((SELECT bool_and(ok) FROM (SELECT ok FROM checks UNION ALL SELECT ok FROM lifecycle_checks) all_checks),false) AS before_ok\n\\gset\n';
   assert.ok(source.endsWith(aggregate),'before proof aggregate contract');
   const start=source.indexOf('), checks(name,ok) AS (VALUES');
@@ -31,9 +31,49 @@ function beforePredicates(source:string) {
     `bool_and(ok) FILTER (WHERE ordinal=${i+1}) AS sid8_before_${id}`).join(',\n')
     +' FROM (SELECT ordinal,ok FROM checks UNION ALL SELECT ordinal,ok FROM lifecycle_checks) before_checks\n\\gset\n';
   return sqlPhase('sid8-before-evaluate',query)+ids.map(id=>{
-    const label=`sid8-before-${id}`;
-    return sqlPhase(label,`\\if :sid8_before_${id}\n\\else\nDO $fail$ BEGIN RAISE EXCEPTION '${label}'; END $fail$;\n\\endif\n`);
+    const label=cronAbsent?`sid8-before-${id}`:`sid9-cron-present-${id}`;
+    const failure=`DO $fail$ BEGIN RAISE EXCEPTION '${label}'; END $fail$;`;
+    return sqlPhase(label,!cronAbsent&&id==='69'
+      ?`\\if :sid8_before_${id}\n${failure}\n\\endif\n`
+      :`\\if :sid8_before_${id}\n\\else\n${failure}\n\\endif\n`);
   }).join('');
+}
+const expiryJob="jobname='hosted-agent-context-expiry' AND database=current_database()";
+const expiryCommand="command='SELECT swarm.sweep_hosted_agent_contexts()'";
+const scheduleExpiry="SELECT cron.schedule('hosted-agent-context-expiry','*/5 * * * *','SELECT swarm.sweep_hosted_agent_contexts()');";
+function runLifecycleSql(sql:string) {
+  // db:reset migrates as postgres; runSql rehearses as supabase_admin. cron
+  // is shared across the renamed schema copies. Remove only the reset job,
+  // through its owner's API, within the transaction that runSql rolls back.
+  runSql(`${sqlPhase('sid9-reset-job-isolation',`
+SET LOCAL ROLE postgres;
+DO $isolate$ BEGIN
+  PERFORM cron.unschedule(jobid) FROM cron.job
+    WHERE ${expiryJob} AND username=current_user AND ${expiryCommand} AND schedule='*/5 * * * *';
+END $isolate$;
+RESET ROLE;
+`)}
+${fixtureAssert("current_user='supabase_admin' AND current_database()='postgres'",'sid9-fixture-context')}
+${scheduleExpiry}
+${fixtureAssert(`(SELECT count(*) FROM cron.job WHERE ${expiryJob} AND username=current_user AND ${expiryCommand})=1`,'sid9-fixture-job')}
+${sql}`,{
+    beforeTransaction:sqlPhase('sid9-reset-job-snapshot',`
+${dbAssert("current_user='supabase_admin' AND current_database()='postgres'",'sid9-runner-context')}
+${dbAssert(`(SELECT count(*) FROM cron.job WHERE ${expiryJob} AND username='postgres' AND ${expiryCommand} AND schedule='*/5 * * * *')=1`,'sid9-reset-job-owner')}
+SELECT COALESCE(jsonb_agg(to_jsonb(j) ORDER BY jobid),'[]'::jsonb) AS sid9_original_cron_jobs FROM cron.job j
+\\gset
+`),
+    // psql variables survive ROLLBACK. Compare every job field, including jobid,
+    // without printing commands or any other catalog values.
+    afterRollback:sqlPhase('sid9-cron-restored',`
+SELECT COALESCE(jsonb_agg(to_jsonb(j) ORDER BY jobid),'[]'::jsonb)=:'sid9_original_cron_jobs'::jsonb AS sid9_cron_restored FROM cron.job j
+\\gset
+\\if :sid9_cron_restored
+\\else
+DO $fail$ BEGIN RAISE EXCEPTION 'sid9-cron-restored'; END $fail$;
+\\endif
+`),
+  });
 }
 function catalog(path:string,expected:boolean,label:string) {
   const alias=path.endsWith('before-catalog.sql')?'before_ok':path.endsWith('rollback-catalog.sql')?'rollback_ok':'catalog_ok';
@@ -56,7 +96,23 @@ test('source-built prerequisite, full migration, function-fence perturbation and
   // The CI source stack is already at phase 3. Rehearse its inverse before the
   // prerequisite proof; no customer rows are copied by emptyApplicationSchema.
   const helper=up.slice(up.indexOf('CREATE OR REPLACE FUNCTION swarm.resolve_hosted_context'),up.indexOf('CREATE OR REPLACE FUNCTION swarm.resolve_hosted_seat_command_authorization'));
-  runSql(`INSERT INTO swarm.config(key,value) VALUES('hosted_context_allocation_enabled','false');\n${reserve}\n${catalog(proof+'before-catalog.sql',true,'sid7-catalog-01')}\n${up}\n${catalog(proof+'catalog.sql',true,'sid7-catalog-02')}\n${helper.replace("g.state='active'","g.state='pending'")}\n${catalog(proof+'catalog.sql',false,'sid7-catalog-03')}\n${helper}\n${catalog(proof+'catalog.sql',true,'sid7-catalog-04')}\n${repoSql(proof+'functional.sql')}\n${reserve}\n${catalog(proof+'rollback-catalog.sql',true,'sid7-catalog-05')}\n${catalog(proof+'catalog.sql',false,'sid7-catalog-06')}`);
+  runLifecycleSql(`INSERT INTO swarm.config(key,value) VALUES('hosted_context_allocation_enabled','false');
+${reserve}
+${catalog(proof+'before-catalog.sql',true,'sid7-catalog-01')}
+SAVEPOINT cron_absent_control;
+${scheduleExpiry}
+${beforePredicates(repoSql(proof+'before-catalog.sql'),false)}
+ROLLBACK TO SAVEPOINT cron_absent_control;
+${up}
+${catalog(proof+'catalog.sql',true,'sid7-catalog-02')}
+${helper.replace("g.state='active'","g.state='pending'")}
+${catalog(proof+'catalog.sql',false,'sid7-catalog-03')}
+${helper}
+${catalog(proof+'catalog.sql',true,'sid7-catalog-04')}
+${repoSql(proof+'functional.sql')}
+${reserve}
+${catalog(proof+'rollback-catalog.sql',true,'sid7-catalog-05')}
+${catalog(proof+'catalog.sql',false,'sid7-catalog-06')}`);
 });
 // The owning rollback boundary must work after the real migration backfill.
 // Each refusal first runs and unwinds a successful rollback in the same fixture.
@@ -128,7 +184,7 @@ ${f.preserved}
 ${fixtureAssert(`NOT EXISTS ((SELECT * FROM reserve_candidate_contexts EXCEPT SELECT * FROM swarm.hosted_agent_contexts)
   UNION ALL (SELECT * FROM swarm.hosted_agent_contexts EXCEPT SELECT * FROM reserve_candidate_contexts))`,'sid7-refused-contexts')}
 `;
-    runSql(`INSERT INTO swarm.config(key,value) VALUES('hosted_context_allocation_enabled','false');
+    runLifecycleSql(`INSERT INTO swarm.config(key,value) VALUES('hosted_context_allocation_enabled','false');
 ${reserve}
 ${f.setup}
 ${catalog(proof+'before-catalog.sql',true,'sid7-catalog-08')}

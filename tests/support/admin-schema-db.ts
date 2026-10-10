@@ -49,12 +49,16 @@ export function emptyApplicationSchema(): string {
     + '\n' + sql + '\nSET LOCAL search_path=pg_catalog;\nSET LOCAL row_security=on;\nSET LOCAL check_function_bodies=on;\n'
     + 'INSERT INTO commonswarm_oauth.admin_cutover_state(singleton) VALUES(true);\n';
 }
-export function runSql(sql: string): void {
+/** Optional read-only checks can measure catalog restoration after ROLLBACK. */
+export function runSql(sql: string, outsideTransaction: {
+  beforeTransaction?: string;
+  afterRollback?: string;
+} = {}): void {
   const emptySchema = emptyApplicationSchema();
   runSqlProcess('docker', ['exec', '-i', databaseContainer(), 'psql', '-X', '-Atq',
     '-U', clusterAdministrator, '-d', 'postgres', '-v', 'ON_ERROR_STOP=1',
     '-v', 'VERBOSITY=verbose', '-v', 'SHOW_CONTEXT=never', '-f', '/dev/stdin'],
-  `BEGIN;\n${sqlPhase('empty-application-schema', emptySchema)}\n${sqlPhase('test-body', sql)}\nROLLBACK;\n`);
+  `${outsideTransaction.beforeTransaction ?? ''}BEGIN;\n${sqlPhase('empty-application-schema', emptySchema)}\n${sqlPhase('test-body', sql)}\nROLLBACK;\n${outsideTransaction.afterRollback ?? ''}`);
 }
 export function dbAssert(expression: string, label: string): string {
   return `DO $assert$ BEGIN IF NOT coalesce((${expression}),false) THEN RAISE EXCEPTION '${label}'; END IF; END $assert$;`;
