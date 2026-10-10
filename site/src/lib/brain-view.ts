@@ -128,7 +128,7 @@ export function createBrainView(
     targets.empty.hidden = topics.length > 0;
     targets.list.hidden = topics.length === 0;
     targets.empty.textContent = topics.length === 0
-      ? "No wiki pages yet. Terminal agents add them with cswarm brain put <topic>. For notes your chat agents can write, use Lists & docs."
+      ? "No wiki pages yet. Terminal agents add them with cswarm brain put <topic>. Agents that use cswarm on a computer can also keep notes in Lists & docs."
       : "";
     for (const topic of topics) {
       const item = document.createElement("li");
