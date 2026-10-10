@@ -28,6 +28,7 @@ tests/hm5-router-box.test.ts
 tests/read-handler-main-only.test.ts
 tests/protocol-hosted-authority.test.ts
 tests/protocol-hosted-context-allocation.test.ts
+tests/protocol-hosted-context-lifecycle.test.ts
 tests/protocol-hosted-check.test.ts
 tests/hosted-auth-boundary.test.ts
 tests/release-proof-format.test.ts
