@@ -18,6 +18,12 @@ import {
 import { baselineEdgeSha, earlierEdgeSha, releaseSha } from './support/live-edge-catalog.mjs';
 
 const script = fileURLToPath(new URL('../scripts/live-ordinary-controls.mjs', import.meta.url));
+// Resolve this checkout's committed catalog: lane SHAs change when rebased.
+const checkoutRevision = spawnSync('git', ['--no-replace-objects', '-C', dirname(dirname(script)), 'rev-parse', 'HEAD'], {
+  env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))), encoding: 'utf8',
+});
+assert.equal(checkoutRevision.status, 0, checkoutRevision.stderr);
+const checkoutSha = checkoutRevision.stdout.trim();
 const guardedRm = process.platform === 'darwin' ? '/Users/yulanbot/.local/bin/rm' : 'rm';
 const preload = 'data:text/javascript;base64,' + Buffer.from((await readFile(new URL('./support/live-ordinary-controls-transport.mjs', import.meta.url), 'utf8'))
   .replace("'https://commonswarm.com'", "'https://yulanventures.com'")).toString('base64');
@@ -294,6 +300,23 @@ async function pre(f) {
 }
 
 const FILE_ONLY = ['file_read', 'file_upload_begin', 'file_upload_commit'];
+test('historical control SHA literals are ancestors of origin/main', async () => {
+  const root = fileURLToPath(new URL('../', import.meta.url));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
+  const git = args => spawnSync('git', ['--no-replace-objects', '-C', root, ...args], { env, encoding: 'utf8' });
+  assert.equal(git(['rev-parse', '--verify', 'origin/main^{commit}']).status, 0,
+    'historical controls require origin/main and full Git history (fetch-depth: 0)');
+  for (const path of ['tests/support/live-edge-catalog.mjs', 'tests/live-ordinary-controls.test.mjs',
+    'tests/c1-live-controls-cross.test.mjs']) {
+    const source = await readFile(join(root, path), 'utf8');
+    for (const match of source.matchAll(/(['"`])([a-f0-9]{8}|[a-f0-9]{40})\1/g)) {
+      const sha = match[2], line = source.slice(0, match.index).split('\n').length;
+      assert.equal(git(['merge-base', '--is-ancestor', sha, 'origin/main']).status, 0,
+        `${path}:${line}: historical control SHA ${sha} must be an ancestor of origin/main; resolve lane revisions at test time instead`);
+    }
+  }
+});
+
 test('live catalog follows the verified SHA release switch, never the working file or tools/list', async t => {
   const prefix = join(realpathSync(tmpdir()), 'r3b-catalog.');
   const root = await mkdtemp(prefix);
@@ -337,7 +360,7 @@ test('live catalog follows the verified SHA release switch, never the working fi
   const disabled = 'export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = false;';
   const enabled = 'export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = true;';
   const currentSource = await readFile(new URL('../supabase/functions/mcp/household-release.ts', import.meta.url), 'utf8');
-  await writeFile(toolsPath, toolsAt('a2debf4d'));
+  await writeFile(toolsPath, toolsAt(checkoutSha));
   const off = await revision(currentSource, historical);
   const on = await revision(currentSource.replace(disabled, enabled), off);
   const malformed = [];
@@ -367,7 +390,7 @@ test('live catalog follows the verified SHA release switch, never the working fi
     ['true hidden in block comment across fake line ending', `//\u2028/*\n${enabled}\n// */\u2028${disabled}`],
   ]) { latest = await revision(source + '\n', latest); malformed.push([name, latest]); }
   const malformedCore = [];
-  const validCore = toolsAt('a2debf4d');
+  const validCore = toolsAt(checkoutSha);
   for (const [name, source] of [
     ['computed name', validCore.replace('name: "claim_seat"', 'name: String("claim_seat")')],
     ['computed key', validCore.replace('name: "claim_seat"', '["name"]: "claim_seat"')],
@@ -422,22 +445,21 @@ test('live catalog follows the verified SHA release switch, never the working fi
   });
 });
 
-test('independent historical catalogs: 1388b0ee 23/26, d518d4c9 8, a2debf4d 9', async t => {
-  const phase2Sha = 'a2debf4d3474fa903123d8bd130384bdae5b77e0';
+test('independent catalogs: 1388b0ee 23/26, d518d4c9 8, checkout HEAD phase 2 9', async t => {
   for (const [name, liveEdgeSha, listedTools, count, fileGate] of [
     ['1388b0ee', releaseSha, releaseTools, 23, '0'],
     ['1388b0ee with files', releaseSha, [...releaseTools, ...FILE_ONLY], 26, '1'],
     ['d518d4c9', 'd518d4c9489131e8e121e0c99fcbd2a03e156eab', baselineTools, 8, '0'],
-    ['a2debf4d phase 2', phase2Sha, phase2Tools, 9, '0'],
+    ['checkout HEAD phase 2', checkoutSha, phase2Tools, 9, '0'],
   ]) await t.test(`${name}: ${count} tools`, async t => {
     assert.equal(listedTools.length, count);
-    const f = await fixture(t, { releaseSha: phase2Sha, liveEdgeSha, listedTools });
+    const f = await fixture(t, { releaseSha: checkoutSha, liveEdgeSha, listedTools });
     const env = { SWARM_HOUSEHOLD_HOSTED_FILE_TRANSPORT: fileGate };
     const consent = await f.run('consent', [], { env }); assert.equal(consent.exit, 0, consent.output);
     f.consent = consent.out;
     const window = await f.run('window', ['--window', 'W4', '--phase', 'recovery'], { env });
     assert.equal(window.exit, 0, window.output);
-    f.config.listedTools = liveEdgeSha === phase2Sha ? baselineTools : [...listedTools, 'close_session'];
+    f.config.listedTools = liveEdgeSha === checkoutSha ? baselineTools : [...listedTools, 'close_session'];
     const negative = await f.run('window', [], { env });
     assert.equal(negative.exit, 1, negative.output); await missing(negative.out);
     assert.match(negative.output, /expected exact ordinary MCP tool set/);
