@@ -55,7 +55,8 @@ test("a hosted agent's approval is shown as withdrawable but not usable; a local
   assert.equal(peopleDialogAccessLabel(hosted), `, ${note}`);
   assert.equal(peopleDialogAccessUntil(hosted), `Allowed until you withdraw it. ${note}`);
   assert.equal(peopleDialogAccessUntil({ ...hosted, access: { until: "Oct 9, 2026" } }), `Allowed until Oct 9, 2026. ${note}`);
-  assert.equal(peopleDialogAccessUntil({ ...hosted, access: null }), "Not allowed.");
+  assert.equal(peopleDialogAccessUntil({ ...hosted, access: null }), note, "no dead-end Not allowed. for a hosted agent");
+  assert.equal(peopleDialogAccessUntil({ ...local, access: null }), "Not allowed.");
   assert.equal(peopleDialogCanAct({ ...model(), agents: [hosted] }, "withdraw", hosted.id), true);
 });
 test("read-only, elevated, owner and sample action gates are distinct", () => {

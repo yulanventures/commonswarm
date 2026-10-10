@@ -593,7 +593,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 <h2 class="dashboard__access-title" id="dashboard-agent-approvals-title">Let your agents use Lists &amp; docs</h2>
                 <p class="dashboard__access-lead">
                   Each of your agents needs your OK, here, for this workspace. A computer agent keeps it until its key ends or you withdraw it.
-                  Lists &amp; docs is not available through the Claude connector yet, so an agent in a chat app cannot use it.
+                  Lists &amp; docs is not available through the CommonSwarm connector yet, so an agent in a chat app cannot use it.
                 </p>
                 <p data-household-agent-result hidden></p>
                 <ul class="dashboard__approval-list" data-household-agent-list></ul>
@@ -4980,7 +4980,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (action === "connected-apps") { one<HTMLButtonElement>("[data-connected-apps-open]")?.click(); return; }
       if (action === "allow") { await navigateHome({ view: "lists", workspaceId }, "push"); one<HTMLElement>("[data-household-consent]")?.scrollIntoView({ block: "start" }); return; }
       let receipt = "";
-      if (action === "withdraw" && agent) { await withdrawAgent(id, agent.name, button, notice, true); return; }
+      if (action === "withdraw" && agent) { await withdrawAgent(id, agent.name, agent.transport === "hosted_mcp", button, notice, true); return; }
       if (action === "resume" && grant && agent) { await resumeRenewalGrant(session, uuid(), workspaceId, grant.grantId); receipt = agentResumeReceipt(agent.name); }
       if (action === "turn-off-key" && grant && agent) { await revokeAgentToken(session, uuid(), workspaceId, grant.tokenId); receipt = `Key turned off. ${agent.name} stops when its current access ends.`; }
       if (action === "remove-agent" && agent) { await revokeAgentPrincipal(session, uuid(), workspaceId, id); receipt = `${agent.name} removed. Its history stays as “${agent.name} (removed)”.`;
@@ -7741,7 +7741,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           withdraw.className = "dashboard__button dashboard__button--secondary dashboard__approval-withdraw";
           withdraw.textContent = "Withdraw access";
           withdraw.dataset.withdrawApproval = principalId;
-          withdraw.addEventListener("click", () => { void withdrawAgent(principalId, agentName, withdraw, status); });
+          withdraw.addEventListener("click", () => { void withdrawAgent(principalId, agentName, connection.kind === "hosted", withdraw, status); });
           row.append(withdraw);
         }
         list.append(row);
@@ -7831,13 +7831,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const withdrawAgent = async (
       principalId: string,
       agentName: string,
+      hosted: boolean,
       button: HTMLButtonElement,
       status: HTMLElement,
       confirmed = false,
     ): Promise<void> => {
       const scope = householdScope();
       if (!scope || (!confirmed && button.disabled)) return;
-      if (!confirmed && !window.confirm(withdrawConfirmText(agentName, agents.find((entry) => entry.principalId === principalId)?.transport === "hosted_mcp"))) return;
+      if (!confirmed && !window.confirm(withdrawConfirmText(agentName, hosted))) return;
       button.disabled = true;
       status.textContent = "Withdrawing…";
       const settle = (message: string): void => {
@@ -7852,7 +7853,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         );
         if (!householdCurrent(scope)) return;
         if (result.status === 200 && result.body.status === "committed") {
-          const message = `Withdrawn. ${agentName} can no longer use Lists & docs here.`;
+          const message = hosted ? `Withdrawn. The stored Lists & docs approval for ${agentName} was removed.` : `Withdrawn. ${agentName} can no longer use Lists & docs here.`;
           householdReceipts.set(principalId, message);
           settle(message);
           await loadHouseholdConnections();

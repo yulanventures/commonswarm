@@ -1,4 +1,4 @@
-import { HOSTED_LISTS_NOTE } from "./agent-hosts";
+import { HOSTED_LISTS_NOTE } from "./hosted-lists-note";
 import type { AgentStateVM, QueueRowVM } from "./home-types";
 
 /** Typographic apostrophe used in every possessive on this view. */

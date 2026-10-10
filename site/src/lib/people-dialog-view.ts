@@ -1,4 +1,5 @@
-import { AGENT_HOSTS, HOSTED_LISTS_NOTE } from "./agent-hosts";
+import { AGENT_HOSTS } from "./agent-hosts";
+import { HOSTED_LISTS_NOTE } from "./hosted-lists-note";
 import { buildAgentModelEditor } from "./agent-model-editor";
 import type { PeopleAgentStatus } from "./agent-status";
 import { personTint } from "./home-names";
@@ -83,7 +84,8 @@ export function peopleDialogCounts(model: PeopleDialogModel): string {
 }
 export function peopleDialogAccessUntil(agent: PeopleDialogAgent): string | null {
   if (!agent.own || agent.accessReadState !== "succeeded") return null;
-  if (!agent.access) return "Not allowed.";
+  // A hosted agent cannot use Lists & docs yet, so "Not allowed." would lead to an Allow that does not exist.
+  if (!agent.access) return agent.hosted ? HOSTED_LISTS_NOTE : "Not allowed.";
   const until = `Allowed until ${agent.access.until ?? "you withdraw it"}.`;
   // A hosted agent's approval exists and can be withdrawn, but it cannot use Lists & docs yet.
   return agent.hosted ? `${until} ${HOSTED_LISTS_NOTE}` : until;
@@ -625,7 +627,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       fact("Model", agent.model ?? "Not set", edit); fact("Messages", agent.receive ?? "Message checks have not been reported."); fact("Last active", agent.lastActive);
       const accessFact = peopleDialogAccessUntil(agent);
       if (accessFact !== null) {
-        const accessAction = peopleDialogCanAct(model, "withdraw", agent.id) ? actionButton("withdraw", agent, "Withdraw", notice, "data-withdraw-agent-access") : peopleDialogCanAct(model, "allow", agent.id) ? actionButton("allow", agent, "Allow…", notice) : undefined;
+        const accessAction = peopleDialogCanAct(model, "withdraw", agent.id) ? actionButton("withdraw", agent, "Withdraw", notice, "data-withdraw-agent-access") : !agent.hosted && peopleDialogCanAct(model, "allow", agent.id) ? actionButton("allow", agent, "Allow…", notice) : undefined;
         accessAction?.classList.add("pd-quiet-link"); fact("Lists & docs", accessFact, accessAction);
       }
       if (agent.key !== null) fact("Key", agent.key, peopleDialogCanAct(model, "new-key", agent.id) ? actionButton("new-key", agent, "New key", notice, "data-get-agent-prompt") : undefined);

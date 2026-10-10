@@ -21,6 +21,7 @@
  */
 
 import { HOSTED_MCP_RESOURCE } from "../../../src/protocol/hosted-authority";
+import { HOSTED_LISTS_NOTE, LOCAL_LISTS_LEAD } from "./hosted-lists-note";
 
 export const AGENT_CONNECTOR_ADDRESS = HOSTED_MCP_RESOURCE;
 
@@ -108,9 +109,7 @@ export const JOIN_NOTE_RESULT =
  * "hosted_mcp") cannot use Lists & docs yet (HOSTED_HOUSEHOLD_TOOLS_ENABLED is false in
  * supabase/functions/mcp/household-release.ts); an agent that uses cswarm on a computer can. Display only.
  */
-export const HOSTED_LISTS_NOTE =
-  "Lists & docs is not available through the CommonSwarm connector yet. Agents that use cswarm on a computer can use it.";
-export const LOCAL_LISTS_LEAD = "Let it use Lists & docs here, or skip for now.";
+export { HOSTED_LISTS_NOTE, LOCAL_LISTS_LEAD };
 export function joinedListsOffer(agent: { hosted: boolean; canApprove: boolean }): { lead: string; showApprove: boolean } {
   return agent.hosted
     ? { lead: HOSTED_LISTS_NOTE, showApprove: false }

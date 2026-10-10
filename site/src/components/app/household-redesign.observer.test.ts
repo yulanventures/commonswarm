@@ -173,15 +173,19 @@ test("active approvals expose Save and withdrawal in both places, owned agents o
   assert.match(peopleView, /fact\("Lists & docs", accessFact, accessAction\)/,
     "withdrawal now belongs to the detail fact; the surface has only its quiet access indicator");
   assert.match(peopleView, /"Can use Lists & docs"/);
-  assert.match(script, /withdrawAgent\(id, agent.name, button, notice, true\)/,
+  assert.match(peopleView, /!agent\.hosted && peopleDialogCanAct\(model, "allow", agent\.id\)/,
+    "a hosted agent without an approval has no Allow button: the Lists pane offers none for it");
+  assert.match(script, /withdrawAgent\(id, agent.name, agent.transport === "hosted_mcp", button, notice, true\)/,
     "the dialog's nested confirmation suppresses the card's native confirmation");
   const withdraw = section(script, "const withdrawAgent = async", "const confirmOwnAccess = async");
-  assert.match(withdraw, /window.confirm\(withdrawConfirmText\(agentName, /);
+  assert.match(withdraw, /window.confirm\(withdrawConfirmText\(agentName, hosted\)\)/);
+  assert.match(script, /withdrawAgent\(principalId, agentName, connection.kind === "hosted", withdraw, status\)/,
+    "a card row decides hosted from its own connection, not from a roster lookup");
   assert.match(withdraw, /kind: "household_withdraw_connection", principal_id: principalId/);
   assert.match(withdraw, /withdrawRefusalMessage\(result.body.reason\)/);
   assert.match(withdraw, /await loadHouseholdConnections\(\)/);
   assert.match(markup, /A computer agent keeps it until its key ends or you withdraw it/);
-  assert.match(markup, /Lists &amp; docs is not available through the Claude connector yet, so an agent in a chat app cannot use it/);
+  assert.match(markup, /Lists &amp; docs is not available through the CommonSwarm connector yet, so an agent in a chat app cannot use it/);
   /* Hosted rows show the note and keep controls only for an existing approval (withdraw stays reachable). */
   assert.match(cards, /connection.kind === "hosted"[\s\S]*?HOSTED_LISTS_NOTE[\s\S]*?if \(!approval\) \{ choices.hidden = true; allow.hidden = true; \}/);
   assert.doesNotMatch(markup, /24 hours|Three short steps/);
@@ -395,22 +399,29 @@ test("approval sends only connection consent, withdrawal uses the principal, and
   assert.deepEqual(messages, ["reload"]);
   assert.equal(receipt.textContent, "", "approval is announced only on its card");
   confirm = false;
-  await commands.withdrawAgent("principal", "Muse", button, status);
+  await commands.withdrawAgent("principal", "Muse", false, button, status);
   assert.equal(calls.length, 1);
   assert.deepEqual(confirms, [withdrawConfirmText("Muse", false)], "a local agent sees the local confirm text");
   confirm = true; reply = { status: "refused", reason: "connection_access_refused" };
-  await commands.withdrawAgent("principal", "Muse", button, status);
+  await commands.withdrawAgent("principal", "Muse", false, button, status);
   assert.equal(status.textContent, "Only the person who connected this agent can withdraw its Lists & docs access. Nothing was changed.");
   reply = { status: "committed", withdrawn: 1 };
-  await commands.withdrawAgent("principal", "Muse", button, status);
+  await commands.withdrawAgent("principal", "Muse", false, button, status);
   assert.deepEqual(calls[2].body, { kind: "household_withdraw_connection", principal_id: "principal" });
   assert.equal(status.textContent, "Withdrawn. Muse can no longer use Lists & docs here.");
+  /* The fixture's roster entry is local while the connection is hosted: the row's own flag decides. */
+  confirm = false;
+  await commands.withdrawAgent("principal", "Muse", true, button, status);
+  assert.deepEqual(confirms.at(-1), withdrawConfirmText("Muse", true), "a hosted row sees the hosted confirm text");
+  confirm = true;
+  await commands.withdrawAgent("principal", "Muse", true, button, status);
+  assert.equal(status.textContent, "Withdrawn. The stored Lists & docs approval for Muse was removed.");
   assert.equal(receipt.textContent, "", "withdrawal has no duplicate section receipt");
-  assert.deepEqual(messages, ["reload", "reload"]);
+  assert.deepEqual(messages, ["reload", "reload", "reload"]);
   current = false;
   status.textContent = "other workspace";
   await commands.approveAgent(connection, ["read"], button, status);
-  assert.equal(messages.length, 2, "stale committed replies do not reload the current workspace");
+  assert.equal(messages.length, 3, "stale committed replies do not reload the current workspace");
 });
 
 test("approval reads distinguish active permanent and local approvals from expired or missing ones", () => {

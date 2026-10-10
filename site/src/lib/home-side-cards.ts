@@ -2,7 +2,7 @@
 // builders: (doc, vm, callbacks) => HTMLElement. User text goes in through textContent only; sample mode
 // renders no actions; nothing here reads the network or the clock.
 import type { AgentVM, ObjectCardVM, PersonVM } from "./home-types";
-import { HOSTED_LISTS_NOTE } from "./agent-hosts";
+import { HOSTED_LISTS_NOTE } from "./hosted-lists-note";
 import { agentOrb, objectCard, personAvatar } from "./home-primitives";
 
 /**
