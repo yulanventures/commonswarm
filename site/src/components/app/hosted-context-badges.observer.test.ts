@@ -6,7 +6,8 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
-import { browserTest as test, findChrome, launchChrome } from '../../../tests/chrome.js';
+import { browserTest as test } from '../../../tests/chrome.js';
+import { findChrome, launchChrome } from '../../../tests/chrome.js';
 
 const first = '11111111-1111-4111-8111-111111111111';
 const second = '22222222-2222-4222-8222-222222222222';

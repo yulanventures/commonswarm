@@ -1251,7 +1251,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   } from "../../lib/connected-apps";
 
   // Phase 3 must supply this metadata through the membership-gated roster projection.
-  import { hostedContextLabel, hostedContextPeopleLabel, hostedContextChatAuthor, type HostedContextLabelInput } from "../../lib/hosted-context-label";
+  import { hostedContextPeopleLabel, hostedContextChatAuthor, type HostedContextLabelInput } from "../../lib/hosted-context-label";
 
   interface Workspace extends CloseableWorkspace {}
 
@@ -2850,11 +2850,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       return name === undefined ? null : removedAgentLabel(name);
     };
 
-    const entityName = (entity: EntityRef, addressing = false): string => {
+    // Recipient controls and mentions use exact addresses; chat authors have their own display mapping.
+    const entityName = (entity: EntityRef): string => {
       if (entity.kind === "agent") {
         const agent = agents.find((row) => row.principalId === entity.id);
         if (!agent) return historicalAgentName(entity.id) ?? "Unknown agent";
-        if (!addressing && agent.transport === "hosted_mcp" && agent.displayName != null) return hostedContextLabel(agent).label;
         return identityDisplayLabel(
           { id: agent.principalId, name: agent.name },
           combinedIdentityRoster(),
@@ -2980,7 +2980,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
 
     /** The name a chip shows. `entityName` already answers for both kinds. */
-    const composerRecipientName = (entity: ComposerRecipient): string => entityName(entity, true);
+    const composerRecipientName = (entity: ComposerRecipient): string => entityName(entity);
 
     /**
      * DRAWING ONLY. It reads `composerTo` and writes the DOM; it decides nothing and changes
@@ -3779,8 +3779,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
        * resolve leaves too: writing it into the body would look addressed and reach nobody. */
       return candidates.filter((candidate) =>
         !composerHasRecipient(candidate) &&
-        isTaggable(entityName(candidate, true)) &&
-        entityName(candidate, true).toLocaleLowerCase().includes(query)
+        isTaggable(entityName(candidate)) &&
+        entityName(candidate).toLocaleLowerCase().includes(query)
       );
     };
 
@@ -3791,7 +3791,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const search = mentionSearch();
       if (!input || !search) return;
       const cursor = input.selectionStart ?? input.value.length;
-      const tag = `@${entityName(mention, true)} `;
+      const tag = `@${entityName(mention)} `;
       input.value = `${input.value.slice(0, search.start)}${tag}${input.value.slice(cursor)}`;
       const caret = search.start + tag.length;
       input.setSelectionRange(caret, caret);
@@ -3847,7 +3847,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           content.removeAttribute("role"); content.removeAttribute("aria-selected");
           button.append(...Array.from(content.childNodes));
           button.classList.add("hm-pick-option");
-        } else button.textContent = entityName(candidate, true);
+        } else button.textContent = entityName(candidate);
         button.addEventListener("pointerdown", (event) => event.preventDefault());
         button.addEventListener("click", () => selectMention(candidate));
         picker.append(button);
@@ -5996,7 +5996,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           mentionRow.className = "dashboard__message-mentions";
           for (const mention of mentions) {
             mentionRow.append(entityControl(
-              `@${entityName(mention, true)}`,
+              `@${entityName(mention)}`,
               mention,
               "dashboard__mention-chip dashboard__message-mention",
             ), " ");
