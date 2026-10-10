@@ -1,5 +1,6 @@
 import { humanInvitationTransaction } from './household-invitations.ts';
 import { parseHouseholdAttachment, HouseholdAttachmentError } from "./household-attachments.ts";
+import { hostedContextReceiptId, hostedContextAuditResult, HOUSEHOLD_TOOL_REGISTRY } from "../_shared/protocol.js";
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
 import postgres from "npm:postgres@3.4.9";
 import type { HostedCommandInput, CommandResult, HostedContextClaimFields as HostedContextClaim } from "./contract.d.ts";
@@ -170,7 +171,7 @@ import {
   requestHash,
   SCHEMA_VERSION,
   decideHostedAuthority, decideHostedCheck,
-  decideHostedContextAllocation, hostedContextClaimValid, hostedContextLive, hostedSuffixName, hostedContextErrorMessage,
+  decideHostedContextLifecycle, decideHostedContextAllocation, hostedContextClaimValid, hostedContextLive, hostedSuffixName, hostedContextErrorMessage,
   HOSTED_MCP_RESOURCE,
   HOSTED_CHECK_BATCH_LIMIT, hostedCheckMillisecondTimestamp, hostedSeatNameValid,
   HOSTED_MCP_SEAT_LIMIT,
@@ -182,6 +183,7 @@ import {
 import {
   revalidateHouseholdSeat,
   hostedCapabilityTool,
+  hostedContextFailure, renewHostedContext, auditHostedContext,
   revalidateHostedGrantCommand,
   revalidateHostedSeatCommand,
   type HostedCapability,
@@ -1376,6 +1378,8 @@ interface Audit {
   outcome: string;
   reason?: string | null;
   detail?: string | null;
+  contextId?: string | null;
+  contextDetails?: Record<string, unknown>;
   hash?: string | null;
 }
 
@@ -1648,7 +1652,7 @@ async function insertAudit(tx: Sql, audit: Audit): Promise<void> {
       actor_user, actor_agent_principal, actor_run,
       credential_kind, credential_id, device_id,
       command_kind, workspace_id, stream_id,
-      outcome, reason, detail, request_hash, ip
+      outcome, reason, detail, request_hash, ip, context_id, context_details
     ) VALUES (
       ${auth?.actor.user ?? null}::uuid,
       ${auth?.actor.agent_principal ?? null}::uuid,
@@ -1663,7 +1667,7 @@ async function insertAudit(tx: Sql, audit: Audit): Promise<void> {
       ${stripControls(audit.reason)},
       ${stripControls(audit.detail)},
       ${audit.hash ?? null},
-      NULL
+      NULL, ${audit.contextId ?? null}::uuid, ${audit.contextDetails ? tx.json(audit.contextDetails as postgres.JSONValue) : null}
     )
   `;
 }
@@ -10101,21 +10105,9 @@ async function handleHostedManagement(
           foldedPrincipal.revoked_at) {
         throw new Error("hosted and workspace revocation folds disagree");
       }
-      await tx`
-        UPDATE swarm.hosted_mcp_seats
-        SET revoked_at = ${new Date(foldedSeat.revoked_at)}
-        WHERE seat_id = ${command.seat_id}::uuid AND revoked_at IS NULL
-      `;
-      await tx`
-        UPDATE swarm.hosted_mcp_seat_handles
-        SET revoked_at = ${new Date(foldedSeat.handle_revoked_at)}
-        WHERE seat_id = ${command.seat_id}::uuid AND revoked_at IS NULL
-      `;
-      await tx`
-        UPDATE swarm.agent_principals
-        SET revoked_at = ${new Date(foldedPrincipal.revoked_at)}
-        WHERE principal_id = ${seat.principal_id}::uuid AND revoked_at IS NULL
-      `;
+      // The event projection trigger below applies this same fold for human
+      // revocation and database-scheduled context retirement in the transaction.
+
     }
     await appendRegistrationEvents(tx, route, frame, decision.events);
   }
@@ -10161,6 +10153,7 @@ async function claimHostedSeat(
   }
   return await db.begin(HOSTED_TRANSACTION_ISOLATION, async (tx) => {
     await setTransaction(tx);
+    const result = await (async (): Promise<HttpResult> => {
     // A global rollback would need every workspace stream row to fence allocation.
     // Take this gate before table/stream locks; rollback takes it first too, with no reverse order.
     await tx`SELECT pg_advisory_xact_lock_shared(1936142700, hashtext('hosted-context-allocation'))`;
@@ -10202,24 +10195,27 @@ async function claimHostedSeat(
     const failure = (error: string, can_start_new = true): HttpResult => ({ status: 403, body: { error, message: hostedContextErrorMessage(error, can_start_new), can_start_new } });
     const contextRows = async (handle: string) => await tx<{
       context_id: string; seat_id: string; principal_id: string; name: string;
-      lifetime: "durable" | "ephemeral"; kind: HostedContextKind; display_name: string; disambiguator: string | null;
+      lifetime: "durable" | "ephemeral"; kind: HostedContextKind; close_reason: string | null; display_name: string; disambiguator: string | null;
       created_at: Date; last_business_at: Date; idle_expires_at: Date | null; absolute_expires_at: Date | null; closed_at: Date | null;
     }[]>`
       SELECT c.context_id, hs.seat_id, hs.principal_id, hs.name, p.identity_lifetime AS lifetime,
         c.kind, COALESCE(hs.display_name,hs.name) AS display_name, hs.disambiguator,
-        c.created_at, c.last_business_at, c.idle_expires_at, c.absolute_expires_at, c.closed_at
+        c.created_at, c.last_business_at, c.idle_expires_at, c.absolute_expires_at, c.closed_at, c.close_reason
       FROM swarm.hosted_agent_contexts c JOIN swarm.hosted_mcp_seats hs USING(seat_id)
       JOIN swarm.agent_principals p ON p.principal_id=hs.principal_id
       WHERE c.handle=${handle} AND hs.grant_id=${grant.grant_id}::uuid
         AND hs.workspace_id=${route.workspaceId}::uuid AND hs.owner_user_id=${grant.owner_user_id}::uuid
         AND p.workspace_id=hs.workspace_id AND p.owner_user_id=hs.owner_user_id
-        AND hs.revoked_at IS NULL AND p.revoked_at IS NULL AND p.transport='hosted_mcp' AND p.turn_only
+        AND (c.origin <> 'legacy' OR EXISTS (SELECT 1 FROM swarm.hosted_mcp_seat_handles h
+          WHERE h.handle=c.handle AND h.seat_id=hs.seat_id AND h.workspace_id=hs.workspace_id
+            AND h.principal_id=hs.principal_id AND h.revoked_at IS NULL))
+        AND (hs.revoked_at IS NULL AND p.revoked_at IS NULL OR p.identity_lifetime='ephemeral' AND c.closed_at IS NOT NULL AND hs.revoked_at=c.closed_at AND p.revoked_at=c.closed_at) AND p.transport='hosted_mcp' AND p.turn_only
         AND NOT EXISTS (SELECT 1 FROM swarm.revocation_tombstones t
           WHERE (t.kind='principal' AND t.target_id=hs.principal_id) OR (t.kind='hosted_seat' AND t.target_id=hs.seat_id))
       FOR UPDATE OF c, hs, p
     `;
-    const validity = (c: { closed_at: Date | null; idle_expires_at: Date | null; absolute_expires_at: Date | null }) =>
-      c.closed_at !== null ? failure("context_closed") : !hostedContextLive({ closed_at: null,
+    const validity = (c: { close_reason: string | null; closed_at: Date | null; idle_expires_at: Date | null; absolute_expires_at: Date | null }) =>
+      c.closed_at !== null ? failure(c.close_reason === "expired" ? "context_expired" : "context_closed") : !hostedContextLive({ closed_at: null,
         idle_expires_at: c.idle_expires_at?.getTime() ?? null, absolute_expires_at: c.absolute_expires_at?.getTime() ?? null }, now)
         ? { status: 403, body: { error: "context_expired", message: "This chat identity expired. Start a new identity to continue; shared work is still here.", can_start_new: true } } : null;
     if (stored) {
@@ -10231,16 +10227,22 @@ async function claimHostedSeat(
       const denied = validity(c); if (denied) return denied;
       return { status: 200, body: { ...response, status: "accepted", outcome: "replayed", replayed: true } };
     }
-    // Phase 3 completes handle renewal and legacy backfill. This path never
-    // allocates or converts lifetime, and remains independent of the gate.
+    // Handle continuation renews this context under the same locks, never allocating or promoting it.
     if (input.command.seat !== undefined) {
       const [c] = await contextRows(input.command.seat);
       if (!c || (input.command.name !== undefined && input.command.name !== c.name)) return failure("identity_resume_unavailable");
       const denied = validity(c); if (denied) return denied;
-      return { status: 200, body: { status: "accepted", ok: true, event_ids: [], grant_id: grant.grant_id,
-        workspace_id: route.workspaceId, workspace: { id: route.workspaceId, name: workspace.name }, ...c, created_at: c.created_at.toISOString(), last_business_at: c.last_business_at.toISOString(),
-        idle_expires_at: c.idle_expires_at?.toISOString() ?? null, absolute_expires_at: c.absolute_expires_at?.toISOString() ?? null,
-        seat: input.command.seat, handle: input.command.seat, outcome: "continued", original_outcome: "continued", name_adjusted: false, adjustment_reason: null, assurance: "portable" } };
+      const [renewed] = await tx<{ state: { last_business_at: string; idle_expires_at: string | null } }[]>`SELECT swarm.record_hosted_context_activity(${c.context_id}::uuid) AS state`;
+      const response = { ok: true, event_ids: [], grant_id: grant.grant_id,
+        workspace_id: route.workspaceId, workspace: { id: route.workspaceId, name: workspace.name }, ...c, created_at: c.created_at.toISOString(),
+        absolute_expires_at: c.absolute_expires_at?.toISOString() ?? null,
+        seat: input.command.seat, handle: input.command.seat, outcome: "continued", original_outcome: "continued", name_adjusted: false, adjustment_reason: null, assurance: "portable", last_business_at: renewed!.state.last_business_at, idle_expires_at: renewed!.state.idle_expires_at };
+      await tx`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response,context_id)
+        VALUES('hosted_grant',${grant.grant_id},${input.command_id},${route.workspaceId}::uuid,${route.streamId}::uuid,${hash},${tx.json(response as unknown as postgres.JSONValue)},${c.context_id}::uuid)`;
+      await insertAudit(tx,{ auth: { credentialKind: 'hosted_grant',credentialId: grant.grant_id,deviceId:null,actor:{user:grant.owner_user_id,agent_principal:c.principal_id,run:null}},
+        commandKind:'claim_hosted_seat',workspaceId:route.workspaceId,streamId:route.streamId,outcome:'accepted',reason:'continued',contextId:c.context_id,
+        contextDetails:{ grant_id:grant.grant_id, client_id:grant.client_id, resume_source:'handle', assurance:'portable', lifetime:c.lifetime, kind:c.kind, command_id:input.command_id } });
+      return { status:200,body:{status:'accepted',...response} };
     }
     const [configuration] = await tx<{ value: unknown }[]>`SELECT value FROM swarm.config WHERE key='hosted_context_allocation_enabled'`;
     if (configuration?.value !== true) return failure("identity_allocation_disabled", false);
@@ -10323,6 +10325,7 @@ async function claimHostedSeat(
     const seatId = allocation.seat?.seat_id ?? crypto.randomUUID();
     const principalId = allocation.seat?.principal_id ?? crypto.randomUUID();
     const contextId = crypto.randomUUID();
+    await tx`SELECT set_config('swarm.hosted_context_id',${contextId},true)`;
     const handle = `seat_${randomBase64Url(18)}`;
     let events: EventEnvelope[] = [];
     let reclaimAudit: { principals: readonly string[]; seats: string[] } | null = null;
@@ -10359,18 +10362,8 @@ async function claimHostedSeat(
           ${allocation.name},${allocation.display_name},${allocation.disambiguator},${new Date(now)})`;
       await appendRegistrationEvents(tx, route, frame, decision.events);
     } else if (allocation.grant_succession) {
-      // Phase 3 replaces legacy-handle/check composite FKs before release.
-      // Updating only the seat here preserves historical grant bindings. Until
-      // then a referenced legacy seat must fail closed, not rewrite history.
-      const [legacy] = await tx<{ present: boolean }[]>`
-        SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint c
-          WHERE c.confrelid='swarm.hosted_mcp_seats'::regclass AND c.contype='f'
-            AND cardinality(c.confkey)=4) AND (
-          EXISTS(SELECT 1 FROM swarm.hosted_mcp_seat_handles WHERE seat_id=${seatId}::uuid)
-          OR EXISTS(SELECT 1 FROM swarm.hosted_mcp_check_cursors WHERE seat_id=${seatId}::uuid)
-          OR EXISTS(SELECT 1 FROM swarm.hosted_mcp_check_batches WHERE seat_id=${seatId}::uuid)) AS present
-      `;
-      if (legacy!.present) return failure("identity_resume_unavailable");
+      // Legacy handles/cursors/batches retain their immutable issuance grant.
+      // Phase-3 FKs bind immutable seat/workspace/principal instead.
       await tx`UPDATE swarm.hosted_mcp_seats SET grant_id=${grant.grant_id}::uuid WHERE seat_id=${seatId}::uuid AND grant_id=${allocation.predecessor_grant_id}::uuid`;
     }
     const clocks = allocation.clocks;
@@ -10384,8 +10377,8 @@ async function claimHostedSeat(
       kind: allocation.kind, created_at: new Date(now).toISOString(), last_business_at: new Date(now).toISOString(),
       idle_expires_at: new Date(clocks.idle_expires_at).toISOString(), absolute_expires_at: new Date(clocks.absolute_expires_at).toISOString(),
       outcome: allocation.outcome, original_outcome: allocation.outcome, name_adjusted: allocation.name_adjusted, adjustment_reason: allocation.adjustment_reason };
-    await tx`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response)
-      VALUES('hosted_grant', ${grant.grant_id},${input.command_id},${route.workspaceId}::uuid,${route.streamId}::uuid,${hash},${tx.json(response as unknown as postgres.JSONValue)})`;
+    await tx`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response,context_id)
+      VALUES('hosted_grant', ${grant.grant_id},${input.command_id},${route.workspaceId}::uuid,${route.streamId}::uuid,${hash},${tx.json(response as unknown as postgres.JSONValue)},${contextId}::uuid)`;
     if (reclaimAudit) await insertAudit(tx, { auth: { credentialKind: "hosted_grant", credentialId: grant.grant_id, deviceId: null,
       actor: { user: grant.owner_user_id, agent_principal: null, run: null } }, commandKind: "claim_hosted_seat", workspaceId: route.workspaceId,
       streamId: route.streamId, outcome: "accepted", reason: "hosted_seat_name_reclaimed",
@@ -10393,11 +10386,20 @@ async function claimHostedSeat(
     await insertAudit(tx, { auth: { credentialKind: "hosted_grant", credentialId: grant.grant_id, deviceId: null,
       actor: { user: grant.owner_user_id, agent_principal: null, run: null } }, commandKind: "claim_hosted_seat", workspaceId: route.workspaceId,
       streamId: route.streamId, outcome: "accepted", reason: allocation.grant_succession ? "hosted_grant_succession" : allocation.outcome,
-      detail: JSON.stringify({ context_id: contextId, principal_id: principalId, client_id: grant.client_id, lifetime: allocation.lifetime,
+      contextId, contextDetails: { ...clocks, context_id: contextId, principal_id: principalId, client_id: grant.client_id, lifetime: allocation.lifetime,
         assurance: "portable", intent: input.command.intent ?? "new", resume_source: allocation.outcome === "continued" ? "name" : null,
         command_id: input.command_id, kind: allocation.kind, name_adjusted: allocation.name_adjusted, parent_context: input.command.parent_context ?? null,
-        grant_succession: allocation.grant_succession, predecessor_grant_id: allocation.predecessor_grant_id, successor_grant_id: allocation.successor_grant_id }), hash });
+        grant_succession: allocation.grant_succession, predecessor_grant_id: allocation.predecessor_grant_id, successor_grant_id: allocation.successor_grant_id }, hash });
     return { status: 200, body: { status: "accepted", ...response } };
+    })();
+    if (result.body.error || result.body.replayed === true) {
+      const grant = await revalidateHostedGrantCommand(tx,capability);
+      if (grant) await insertAudit(tx,{auth:{credentialKind:'hosted_grant',credentialId:grant.grant_id,deviceId:null,actor:{user:grant.owner_user_id,agent_principal:null,run:null}},
+        commandKind:'claim_hosted_seat',workspaceId:grant.workspace_id,streamId:grant.stream_id,outcome:result.body.replayed===true?'replayed':'authz',
+        reason: typeof result.body.error==='string'?result.body.error:null,
+        contextDetails:{grant_id:grant.grant_id,command_id:input.command_id,intent:input.command.intent??'new',resume_source:input.command.intent==='continue'?(input.command.seat?'handle':'name'):null,assurance:'portable'}});
+    }
+    return result;
   });
 }
 
@@ -10413,19 +10415,35 @@ async function handleTransaction(
   const kind = commandKind(body);
   const commandId = String(body.command_id);
   return await db.begin("isolation level read committed", async (tx) => {
+    const hostedExecution = { replayed: false };
     let authenticatedAgent: AgentAuthRow | null = null;
+    let hostedSeat: ResolvedHostedSeat | null = null;
     let acceptedPresenceRoute: PresenceRoute | null = null;
     const result = await (async (): Promise<HttpResult> => {
     await beforeStep(2);
     await setTransaction(tx);
     await afterStep(2);
 
-    const hostedSeat = hostedSeatCapability === null
+    hostedSeat = hostedSeatCapability === null
       ? null
       : kind === "household_tool" ? await revalidateHouseholdSeat(tx, hostedSeatCapability, setTransaction)
       : await revalidateHostedSeatCommand(tx, hostedSeatCapability);
-    if (hostedSeatCapability !== null && hostedSeat === null) {
-      return { status: 403, body: { error: "forbidden" } };
+    if (hostedSeatCapability !== null) {
+      const denied = hostedContextFailure(hostedSeat);
+      if (denied) {
+        if (hostedSeat) await auditHostedContext(tx, hostedSeat, hostedCapabilityTool(hostedSeatCapability)!, 'authz', String(denied.body.error), commandId);
+        return denied;
+      }
+      await tx`SELECT set_config('swarm.hosted_context_id',${hostedSeat!.context_id},true)`;
+      if (kind === 'household_tool') {
+        const [receipt] = await tx<{context_id:string}[]>`SELECT context_id FROM swarm.idempotency_keys
+          WHERE principal_kind='hosted_seat' AND principal_id=${hostedSeat!.principal_id} AND command_id=${hostedContextReceiptId(commandId)}`;
+        if (receipt) {
+          const [original] = await tx<{identity:ResolvedHostedSeat|null}[]>`SELECT swarm.resolve_hosted_context(${hostedSeat!.grant_id}::uuid,
+            (SELECT handle FROM swarm.hosted_agent_contexts WHERE context_id=${receipt.context_id}::uuid),'note','command') AS identity`;
+          const denied = hostedContextFailure(original?.identity ?? null); if (denied) return denied;
+        }
+      }
     }
 
     if (kind === REGISTER_AGENT_SEAT_KIND) {
@@ -10722,7 +10740,7 @@ async function handleTransaction(
       const recheck = async (checkTx: Sql) => {
         if (hostedSeatCapability) {
           const seat = await revalidateHouseholdSeat(checkTx, hostedSeatCapability, setTransaction);
-          return seat !== null && seat.workspace_id === route.workspaceId && seat.principal_id === identity.principal_id;
+          return seat !== null && seat.context_error === null && seat.workspace_id === route.workspaceId && seat.principal_id === identity.principal_id;
         }
         return !await revoked(checkTx, auth, route);
       };
@@ -10742,8 +10760,7 @@ async function handleTransaction(
           ? await provisionHouseholdPermissions(tx, route.workspaceId, identity, commandId, surface, recheck)
           : await executeHouseholdSurface(tx, route.workspaceId, identity, commandId, surface, recheck, body.household_attachment instanceof Uint8Array ? body.household_attachment : undefined, householdNotice(route, auth));
         await insertAudit(tx, { auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
-          outcome: output.status === "refused" ? "authz" : "accepted",
-          reason: output.status === "refused" ? String(output.reason) : null });
+          ...hostedContextAuditResult({ status: 200, body: output }, "replayed" in output && output.replayed === true) });
         return { status: 200, body: output };
       } catch (error) {
         if (error instanceof HouseholdToolInputError) return { status: 400, body: { status: "refused", reason: error.code } };
@@ -11062,10 +11079,10 @@ async function handleTransaction(
         workspace_id: string;
         stream_id: string;
         request_hash: string;
-        response: unknown;
+        response: unknown; context_id: string | null;
       }[]
     >`
-      SELECT workspace_id, stream_id, request_hash, response
+      SELECT workspace_id, stream_id, request_hash, response, context_id
       FROM swarm.idempotency_keys
       WHERE principal_kind = ${auth.ledgerCredentialKind}
         AND principal_id = ${auth.ledgerPrincipalId}
@@ -11074,6 +11091,17 @@ async function handleTransaction(
     `;
     const existing = existingRows[0];
     if (existing) {
+      hostedExecution.replayed = hostedSeat !== null;
+      if (hostedSeat && existing.context_id) {
+        const [original] = await tx<{closed_at:Date|null;close_reason:string|null;idle_expires_at:Date|null;absolute_expires_at:Date|null;now:Date}[]>`
+          SELECT c.closed_at,c.close_reason,c.idle_expires_at,c.absolute_expires_at,clock_timestamp() AS now
+          FROM swarm.hosted_agent_contexts c JOIN swarm.hosted_mcp_seats hs USING(seat_id)
+          WHERE c.context_id=${existing.context_id}::uuid AND hs.grant_id=${hostedSeat.grant_id}::uuid AND hs.principal_id=${hostedSeat.principal_id}::uuid`;
+        if (!original) return hostedContextFailure(null)!;
+        const error = original.closed_at !== null ? original.close_reason === 'expired' ? 'context_expired' : 'context_closed' :
+          !hostedContextLive({closed_at:null,idle_expires_at:original.idle_expires_at?.getTime()??null,absolute_expires_at:original.absolute_expires_at?.getTime()??null},original.now.getTime()) ? 'context_expired' : null;
+        if (error) return {status:403,body:{error,message:hostedContextErrorMessage(error),can_start_new:true}};
+      }
       const matches = existing.request_hash === hash &&
         existing.workspace_id === route.workspaceId &&
         existing.stream_id === route.streamId;
@@ -11160,7 +11188,7 @@ async function handleTransaction(
           };
         }
         return matches
-          ? replayResult(storedResponse(existing.response), kind)
+          ? (()=>{const replay=replayResult(storedResponse(existing.response),kind);return hostedSeat?{...replay,body:{...replay.body,replayed:true}}:replay;})()
           : { status: 409, body: { error: "command_id_conflict" } };
       }
       renewalRecovery = true;
@@ -12818,6 +12846,24 @@ async function handleTransaction(
     await afterStep(15);
     return result;
     })();
+    const completionSeat = hostedSeat as ResolvedHostedSeat | null;
+    if (completionSeat && hostedSeatCapability) {
+      const tool = hostedCapabilityTool(hostedSeatCapability)!;
+      const observed = hostedContextAuditResult(result);
+      const succeeded = result.status >= 200 && result.status < 300 && observed.outcome === 'accepted';
+      let replayed = hostedExecution.replayed || result.body.replayed === true || result.body.status === 'idempotent';
+      if (kind === 'household_tool' && HOUSEHOLD_TOOL_REGISTRY.some(row=>row.name===tool && row.effect!=='read')) {
+        const [prior] = await tx<{context_id:string}[]>`SELECT context_id FROM swarm.idempotency_keys
+          WHERE principal_kind='hosted_seat' AND principal_id=${completionSeat.principal_id} AND command_id=${hostedContextReceiptId(commandId)}`;
+        replayed ||= prior !== undefined;
+        if (!replayed && result.body.request_id === commandId) await tx`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response,context_id)
+          VALUES('hosted_seat',${completionSeat.principal_id},${hostedContextReceiptId(commandId)},${completionSeat.workspace_id}::uuid,${completionSeat.stream_id}::uuid,
+          ${await hostedRequestHash('hosted_seat',completionSeat.principal_id,{kind:'context_receipt',request_id:commandId})},${tx.json({context_id:completionSeat.context_id})},${completionSeat.context_id}::uuid)`;
+      }
+      if (succeeded && !replayed) await renewHostedContext(tx, completionSeat);
+      const audit = hostedContextAuditResult(result, replayed);
+      await auditHostedContext(tx, completionSeat, tool, audit.outcome, audit.reason, commandId);
+    }
     if (
       result.status >= 200 && result.status < 300 && authenticatedAgent !== null
     ) {
@@ -12868,10 +12914,10 @@ async function resolveLedgerRace(
         workspace_id: string;
         stream_id: string;
         request_hash: string;
-        response: unknown;
+        response: unknown; context_id: string | null;
       }[]
     >`
-      SELECT workspace_id, stream_id, request_hash, response
+      SELECT workspace_id, stream_id, request_hash, response, context_id
       FROM swarm.idempotency_keys
       WHERE principal_kind = ${error.auth.ledgerCredentialKind}
         AND principal_id = ${error.auth.ledgerPrincipalId}
@@ -13354,6 +13400,8 @@ interface HostedCheckCursorRow {
 interface HostedCheckBatchRow {
   batch_id: string;
   seat_id: string;
+  context_id: string;
+  cancelled_at: Date | null;
   grant_id: string;
   workspace_id: string;
   signal_ids: string[];
@@ -13373,6 +13421,8 @@ function hostedCheckBatchFact(row: HostedCheckBatchRow | undefined) {
   return row === undefined ? null : {
     batch_id: row.batch_id,
     seat_id: row.seat_id,
+    context_id: row.context_id,
+    cancelled: row.cancelled_at !== null,
     grant_id: row.grant_id,
     workspace_id: row.workspace_id,
     signal_ids: row.signal_ids,
@@ -13395,6 +13445,8 @@ async function handleHostedCheck(
   return await db.begin("isolation level read committed", async (tx) => {
     await setTransaction(tx);
     const seat = await revalidateHostedSeatCommand(tx, capability);
+    const contextDenied = hostedContextFailure(seat);
+    if (contextDenied) { if (seat) await auditHostedContext(tx,seat,'check','authz',String(contextDenied.body.error),input.command_id); return contextDenied; }
     if (seat === null || seat.workspace_id !== input.workspace_id ||
         seat.handle !== input.command.seat) {
       return { status: 403, body: { error: "forbidden" } };
@@ -13419,12 +13471,13 @@ async function handleHostedCheck(
         FROM swarm.hosted_mcp_check_batches
         WHERE batch_id = ${ackBatchId}::uuid
           AND seat_id = ${seat.seat_id}::uuid
-          AND grant_id = ${seat.grant_id}::uuid
+          AND context_id = ${seat.context_id}::uuid
           AND workspace_id = ${seat.workspace_id}::uuid
           AND principal_id = ${seat.principal_id}::uuid
         LIMIT 1
       `;
       if (authorizedRequested[0] === undefined) {
+        await auditHostedContext(tx,seat,'check','authz','hosted_check_batch_forbidden',input.command_id);
         return {
           status: 403,
           body: { error: "hosted_check_batch_forbidden" },
@@ -13447,7 +13500,6 @@ async function handleHostedCheck(
       SELECT cursor_created_at, cursor_signal_id
       FROM swarm.hosted_mcp_check_cursors
       WHERE seat_id = ${seat.seat_id}::uuid
-        AND grant_id = ${seat.grant_id}::uuid
         AND workspace_id = ${seat.workspace_id}::uuid
         AND principal_id = ${seat.principal_id}::uuid
       FOR UPDATE
@@ -13472,25 +13524,25 @@ async function handleHostedCheck(
     `;
 
     const activeRows = await tx<HostedCheckBatchRow[]>`
-      SELECT batch_id, seat_id, grant_id, workspace_id, signal_ids,
+      SELECT batch_id, seat_id, grant_id, workspace_id, context_id, cancelled_at, signal_ids,
              terminal_created_at, terminal_signal_id, acknowledged_at
       FROM swarm.hosted_mcp_check_batches
       WHERE seat_id = ${seat.seat_id}::uuid
-        AND grant_id = ${seat.grant_id}::uuid
         AND workspace_id = ${seat.workspace_id}::uuid
         AND principal_id = ${seat.principal_id}::uuid
+        AND context_id = ${seat.context_id}::uuid AND cancelled_at IS NULL
         AND acknowledged_at IS NULL
       LIMIT 1
       FOR UPDATE
     `;
     const requestedRows = ackBatchId !== null
       ? await tx<HostedCheckBatchRow[]>`
-        SELECT batch_id, seat_id, grant_id, workspace_id, signal_ids,
+        SELECT batch_id, seat_id, grant_id, workspace_id, context_id, cancelled_at, signal_ids,
                terminal_created_at, terminal_signal_id, acknowledged_at
         FROM swarm.hosted_mcp_check_batches
         WHERE batch_id = ${ackBatchId}::uuid
           AND seat_id = ${seat.seat_id}::uuid
-          AND grant_id = ${seat.grant_id}::uuid
+          AND context_id = ${seat.context_id}::uuid
           AND workspace_id = ${seat.workspace_id}::uuid
           AND principal_id = ${seat.principal_id}::uuid
         LIMIT 1
@@ -13502,6 +13554,7 @@ async function handleHostedCheck(
       ? {
         kind: "ack_hosted_mcp_check_batch" as const,
         seat_id: seat.seat_id,
+        context_id: seat.context_id,
         grant_id: seat.grant_id,
         workspace_id: seat.workspace_id,
         batch_id: ackBatchId,
@@ -13509,6 +13562,7 @@ async function handleHostedCheck(
       : {
         kind: "open_hosted_mcp_check_batch" as const,
         seat_id: seat.seat_id,
+        context_id: seat.context_id,
         grant_id: seat.grant_id,
         workspace_id: seat.workspace_id,
       };
@@ -13523,6 +13577,7 @@ async function handleHostedCheck(
     const baseFacts = {
       credential_kind: "hosted_seat" as const,
       seat_id: seat.seat_id,
+      context_id: seat.context_id,
       grant_id: seat.grant_id,
       workspace_id: seat.workspace_id,
       committed_cursor: committedCursor,
@@ -13571,25 +13626,25 @@ async function handleHostedCheck(
 
     const acknowledgeBatchId = decision.acknowledge_batch_id ?? null;
     const advanceCursor = decision.advance_cursor ?? null;
-    if (acknowledgeBatchId !== null && advanceCursor !== null) {
+    if (acknowledgeBatchId !== null) {
       const closed = await tx<{ batch_id: string }[]>`
         UPDATE swarm.hosted_mcp_check_batches
         SET acknowledged_at = date_trunc('milliseconds', statement_timestamp())
         WHERE batch_id = ${acknowledgeBatchId}::uuid
           AND seat_id = ${seat.seat_id}::uuid
-          AND grant_id = ${seat.grant_id}::uuid
+          AND context_id = ${seat.context_id}::uuid
           AND workspace_id = ${seat.workspace_id}::uuid
+          AND cancelled_at IS NULL
           AND acknowledged_at IS NULL
         RETURNING batch_id
       `;
       if (closed.length !== 1) throw new Error("hosted check ACK lost its locked batch");
-      await tx`
+      if (advanceCursor !== null) await tx`
         UPDATE swarm.hosted_mcp_check_cursors
         SET cursor_created_at = ${advanceCursor.created_at}::timestamptz,
             cursor_signal_id = ${advanceCursor.signal_id}::uuid,
             updated_at = date_trunc('milliseconds', statement_timestamp())
         WHERE seat_id = ${seat.seat_id}::uuid
-          AND grant_id = ${seat.grant_id}::uuid
           AND workspace_id = ${seat.workspace_id}::uuid
           AND principal_id = ${seat.principal_id}::uuid
       `;
@@ -13599,12 +13654,12 @@ async function handleHostedCheck(
     if (createBatch !== null) {
       await tx`
         INSERT INTO swarm.hosted_mcp_check_batches (
-          batch_id, seat_id, grant_id, workspace_id, principal_id,
+          batch_id, seat_id, grant_id, workspace_id, principal_id, context_id,
           signal_ids, terminal_created_at, terminal_signal_id
         ) VALUES (
           ${createBatch.batch_id}::uuid,
           ${seat.seat_id}::uuid, ${seat.grant_id}::uuid,
-          ${seat.workspace_id}::uuid, ${seat.principal_id}::uuid,
+          ${seat.workspace_id}::uuid, ${seat.principal_id}::uuid, ${seat.context_id}::uuid,
           ${createBatch.signal_ids}::uuid[],
           ${createBatch.terminal_cursor.created_at}::timestamptz,
           ${createBatch.terminal_cursor.signal_id}::uuid
@@ -13612,6 +13667,8 @@ async function handleHostedCheck(
       `;
     }
 
+    if (acknowledgeBatchId !== null) await renewHostedContext(tx,seat);
+    await auditHostedContext(tx,seat,'check','accepted',acknowledgeBatchId !== null ? 'fresh_ack' : 'poll',input.command_id);
     const batch = decision.return_batch;
     if (batch === null) {
       return { status: 200, body: {
@@ -13655,6 +13712,38 @@ async function handleHostedCheck(
   );
 }
 
+async function closeHostedSession(input: HostedCommandInput, capability: HostedSeatCapability): Promise<CommandResult> {
+  const command = record(input.command);
+  if (!command || command.kind !== 'close_hosted_session' || !exactKeys(command,['kind','seat']) ||
+      typeof command.seat !== 'string' || !/^seat_[A-Za-z0-9_-]{22,64}$/u.test(command.seat) ||
+      typeof input.command_id !== 'string' || !COMMAND_ID_RE.test(input.command_id)) return {status:400,body:{error:'invalid_request'}};
+  const requestId = input.command_id;
+  return await db.begin('isolation level read committed',async tx => {
+    await setTransaction(tx);
+    const seat = await revalidateHostedSeatCommand(tx,capability);
+    if (!seat || seat.handle !== command.seat) return hostedContextFailure(null)!;
+    if (input.workspace_id !== undefined && input.workspace_id !== seat.workspace_id) return {status:403,body:{error:'workspace_mismatch',message:hostedContextErrorMessage('workspace_mismatch'),can_start_new:true}};
+    const hash = await hostedRequestHash('hosted_grant',seat.grant_id,{context_id:seat.context_id,kind:'close_hosted_session'});
+    const [prior] = await tx<{request_hash:string;response:Record<string,unknown>}[]>`SELECT request_hash,response FROM swarm.idempotency_keys
+      WHERE principal_kind='hosted_grant' AND principal_id=${seat.grant_id} AND command_id=${requestId}`;
+    if (prior && prior.request_hash !== hash) return {status:409,body:{error:'command_id_conflict'}};
+    if (prior) { await auditHostedContext(tx,seat,'close_session','replayed',null,requestId); return {status:200,body:{...prior.response,outcome:'replayed'}}; }
+    const toMs = (value:string|null)=>value===null?null:Date.parse(value);
+    const transition = decideHostedContextLifecycle({...seat,created_at:Date.parse(seat.created_at),last_business_at:Date.parse(seat.last_business_at),
+      idle_expires_at:toMs(seat.idle_expires_at),absolute_expires_at:toMs(seat.absolute_expires_at),closed_at:toMs(seat.closed_at)},
+      {now:Date.parse(seat.database_now),authorized:true,use:'close'});
+    if ('error' in transition) return {status:403,body:{error:transition.error,message:transition.message,can_start_new:transition.can_start_new}};
+    const closed = transition.changed ? (await tx<{result:Record<string,unknown>}[]>`SELECT swarm.close_hosted_agent_context(${seat.context_id}::uuid,'closed') AS result`)[0] :
+      {result:{outcome:'closed',context_id:seat.context_id,principal_state:seat.lifetime==='ephemeral'?'retired':'retained',closed_at:seat.closed_at}};
+    if (!closed?.result) throw new Error('locked close lost its context');
+    if (typeof closed.result.closed_at === 'string') closed.result.closed_at = new Date(closed.result.closed_at).toISOString();
+    await tx`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response,context_id)
+      VALUES('hosted_grant',${seat.grant_id},${requestId},${seat.workspace_id}::uuid,${seat.stream_id}::uuid,${hash},${tx.json(closed.result as postgres.JSONValue)},${seat.context_id}::uuid)`;
+    await auditHostedContext(tx,seat,'close_session','accepted',transition.changed?'closed':null,requestId);
+    return {status:200,body:closed.result};
+  });
+}
+
 /**
  * Internal hosted entry point. It accepts parsed input and an opaque capability,
  * never a Request, header, cookie, bearer, or GoTrue session.
@@ -13663,10 +13752,12 @@ export async function handleHostedCommand(
   input: HostedCommandInput,
   capability: HostedCapability,
 ): Promise<CommandResult> {
+  try {
   if (capability.kind === "hosted_grant") {
     return await claimHostedSeat(input, capability);
   }
   const tool = hostedCapabilityTool(capability);
+  if (tool === "close_session") return await closeHostedSession(input, capability);
   if (!hostedToolAllowsCommand(tool, input)) {
     return { status: 403, body: { error: "forbidden" } };
   }
@@ -13682,6 +13773,10 @@ export async function handleHostedCommand(
     parseAgentSessionAcquireHeaders(new Headers()),
     capability,
   );
+  } catch (error) {
+    if (dbCode(error) === 'SC001') return {status:403,body:{error:'context_expired',message:hostedContextErrorMessage('context_expired'),can_start_new:true}};
+    throw error;
+  }
 }
 
 /**

@@ -475,7 +475,7 @@ export function reduceWorkspace(
         ...s,
         principals: {
           ...s.principals,
-          [p.principal_id]: { ...principal, revoked_at: p.revoked_at },
+          [p.principal_id]: { ...principal, revoked_at: principal.revoked_at ?? p.principal_revoked_at ?? p.revoked_at },
         },
       };
       break;

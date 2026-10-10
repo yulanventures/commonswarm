@@ -398,5 +398,11 @@
   ["swarm_command","TABLE","swarm.hosted_agent_contexts","SELECT",false,"Phase 1: resolve live contexts and enforce allocation budgets."],
   ["swarm_command","TABLE","swarm.hosted_agent_contexts","INSERT",false,"Phase 1: persist each accepted context allocation."],
   ["swarm_command","TABLE","swarm.hosted_agent_contexts","UPDATE",false,"Phase 1: lock contexts for replay/continuation and persist lifecycle changes; no DELETE."],
-  ["swarm_command","FUNCTION","swarm.hosted_predecessor_status(uuid)","EXECUTE",false,"Phase 1: bounded predecessor status for same-owner, exact-client succession; provider payloads stay private."]
+  ["swarm_command","FUNCTION","swarm.hosted_predecessor_status(uuid)","EXECUTE",false,"Phase 1: bounded predecessor status for same-owner, exact-client succession; provider payloads stay private."],
+  ["swarm_command","FUNCTION","swarm.resolve_hosted_context(uuid,text,text,text)","EXECUTE",false,"Phase 3: resolveSeat and the household origin-replay fence in command transactions."],
+  ["swarm_command","FUNCTION","swarm.record_hosted_context_activity(uuid)","EXECUTE",false,"Phase 3: renewHostedContext after fresh accepted business work or ACK."],
+  ["swarm_command","FUNCTION","swarm.close_hosted_agent_context(uuid,text)","EXECUTE",false,"Phase 3: closeHostedSession invokes the transactional event retirement path."],
+  ["swarm_command","FUNCTION","swarm.resolve_hosted_discovery(uuid,uuid)","EXECUTE",false,"Phase 3: resolveGrant for whoami authenticates its opaque grant capability under the command role."],
+  ["swarm_command","FUNCTION","swarm.audit_hosted_context(uuid,uuid,text,text,text,text)","EXECUTE",false,"Phase 3: auditHostedContext records bounded context-attributed business outcomes."],
+  ["swarm_command","FUNCTION","swarm.audit_hosted_authorization_denial(uuid,text,text)","EXECUTE",false,"Phase 3: auditAuthorizationDenial records provider and durable-authorization refusals."]
 ]

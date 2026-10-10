@@ -266,6 +266,8 @@ export interface HostedMcpSeatRevoked {
   seat_id: string;
   principal_id: string;
   revoked_at: number;
+  /** Retirement retains a prior human principal revocation independently of the seat. */
+  principal_revoked_at?: number;
 }
 
 export type WorkspaceRejectionReason =

@@ -63,6 +63,8 @@ export function hostedContextErrorMessage(error: string, canStartNew = true): st
     name_allocation_busy: 'A separate name could not be allocated. Try again.',
     hosted_seat_limit_reached: 'This connection has reached its durable agent limit. Remove a durable agent, then try again.',
     principal_limit_reached: 'This workspace has reached its durable agent limit. Remove a durable agent, then try again.',
+    context_expired: 'This chat identity expired. Start a new identity to continue; shared work is still here.',
+    workspace_mismatch: 'This handle belongs to a different workspace. Use its workspace to continue.',
     context_closed: 'This chat identity was closed. Start a new identity to continue.',
     workspace_unavailable: 'This workspace is unavailable. Choose an authorized workspace to continue.',
     invalid_request: 'The identity request is invalid. Correct the arguments and try again.',
@@ -124,4 +126,60 @@ export function decideHostedContextAllocation(c: HostedContextClaim, f: HostedCo
     kind: c.kind ?? 'chat', assurance: 'portable', origin: continuation ? 'continue' : 'new',
     clocks: hostedContextClocks(c.kind ?? 'chat', f.now), seat,
     grant_succession: succession, ...(succession ? { predecessor_grant_id: seat!.grant_id, successor_grant_id: f.grant_id } : {}) };
+}
+
+/** Inputs are current, transaction-locked authority and database time. */
+export interface HostedContextState {
+  kind: HostedContextKind; origin: 'new' | 'continue' | 'legacy';
+  lifetime: HostedIdentityLifetime; created_at: number; last_business_at: number;
+  idle_expires_at: number | null; absolute_expires_at: number | null;
+  closed_at: number | null; close_reason: string | null;
+}
+export type HostedContextUse = 'inspect' | 'poll' | 'business' | 'ack' | 'close' | 'expire';
+export type HostedContextTransition =
+  | { ok: false; error: 'identity_resume_unavailable' | 'context_expired' | 'context_closed'; message: string; can_start_new: boolean }
+  | { ok: true; state: HostedContextState; changed: boolean; retire_principal: boolean };
+export function decideHostedContextLifecycle(
+  state: HostedContextState, facts: { now: number; authorized: boolean; use: HostedContextUse; replay?: boolean; fresh_ack?: boolean },
+): HostedContextTransition {
+  const deny = (error: 'identity_resume_unavailable' | 'context_expired' | 'context_closed', can_start_new = true): HostedContextTransition =>
+    ({ ok: false, error, message: hostedContextErrorMessage(error, can_start_new), can_start_new });
+  if (!facts.authorized) return deny('identity_resume_unavailable', false);
+  const live = hostedContextLive(state, facts.now);
+  if (facts.use === 'close' || facts.use === 'expire') {
+    if (state.closed_at !== null || (facts.use === 'expire' && live)) return { ok: true, state, changed: false, retire_principal: false };
+    const next = { ...state, closed_at: facts.now, close_reason: facts.use === 'expire' ? 'expired' : 'closed' };
+    return { ok: true, state: next, changed: true, retire_principal: state.lifetime === 'ephemeral' };
+  }
+  if (state.closed_at !== null) return deny(state.close_reason === 'expired' ? 'context_expired' : 'context_closed');
+  if (!live) return deny('context_expired');
+  const renew = !facts.replay && (facts.use === 'business' || (facts.use === 'ack' && facts.fresh_ack === true));
+  if (!renew) return { ok: true, state, changed: false, retire_principal: false };
+  const idle = state.origin === 'legacy' ? null : hostedContextClocks(state.kind, facts.now).idle_expires_at;
+  const next = { ...state, last_business_at: facts.now, idle_expires_at: idle };
+  return { ok: true, state: next, changed: facts.now !== state.last_business_at, retire_principal: false };
+}
+
+/** Caller request IDs accept only letters, digits, underscore and hyphen.
+ * Colon separates internal attribution receipts from every caller ledger key. */
+export function hostedContextReceiptId(requestId: string): string {
+  return `context:${requestId}`;
+}
+
+/** Only the owning handler supplies these statuses and stable codes. Never
+ * copy other fields (content, arguments, identity names or handles) to audit. */
+export const HOSTED_CONTEXT_AUDIT_MAPPING = {
+  accepted: 'accepted', committed: 'accepted', ok: 'accepted', pending: 'accepted', released: 'accepted',
+  conflict: 'conflict', refused: 'domain', rejected: 'domain', unknown: 'domain', idempotent: 'replayed',
+} as const;
+export function hostedContextAuditResult(
+  result: { status: number; body: Record<string, unknown> }, replayed = false,
+): { outcome: 'accepted' | 'replayed' | 'authz' | 'domain' | 'conflict'; reason: string | null } {
+  const status = String(result.body.status);
+  const mapped = HOSTED_CONTEXT_AUDIT_MAPPING[status as keyof typeof HOSTED_CONTEXT_AUDIT_MAPPING];
+  const outcome = replayed ? 'replayed' : mapped ?? (result.status < 300 && !result.body.error ? 'accepted' : 'authz');
+  const candidate = result.body.reason ?? result.body.error;
+  const reason = typeof candidate === 'string' && /^[a-z][a-z0-9_]{1,79}$/u.test(candidate)
+    && !/^seat_[A-Za-z0-9_-]{22,64}$/u.test(candidate) ? candidate : null;
+  return { outcome, reason };
 }

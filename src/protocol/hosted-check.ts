@@ -12,29 +12,34 @@ export interface HostedCheckCandidate extends HostedCheckCursor {}
 export interface HostedCheckBatch {
   batch_id: string;
   seat_id: string;
+  context_id: string;
   grant_id: string;
   workspace_id: string;
   signal_ids: readonly string[];
   terminal_cursor: HostedCheckCursor;
   acknowledged: boolean;
+  cancelled?: boolean;
 }
 
 export type HostedCheckCommand =
   | {
       kind: 'open_hosted_mcp_check_batch';
       seat_id: string;
+      context_id: string;
       grant_id: string;
       workspace_id: string;
     }
   | {
       kind: 'ack_hosted_mcp_check_batch';
       seat_id: string;
+      context_id: string;
       grant_id: string;
       workspace_id: string;
       batch_id: string;
     };
 
 export interface HostedCheckFacts {
+  context_id: string;
   credential_kind: 'human' | 'hosted_grant' | 'hosted_seat';
   seat_id: string;
   grant_id: string;
@@ -77,10 +82,10 @@ export function compareHostedCheckCursor(
 }
 
 function sameAuthority(
-  value: Pick<HostedCheckBatch, 'seat_id' | 'grant_id' | 'workspace_id'>,
-  facts: Pick<HostedCheckFacts, 'seat_id' | 'grant_id' | 'workspace_id'>,
+  value: Pick<HostedCheckBatch, 'seat_id' | 'context_id' | 'workspace_id'>,
+  facts: Pick<HostedCheckFacts, 'seat_id' | 'context_id' | 'workspace_id'>,
 ): boolean {
-  return value.seat_id === facts.seat_id && value.grant_id === facts.grant_id &&
+  return value.seat_id === facts.seat_id && value.context_id === facts.context_id &&
     value.workspace_id === facts.workspace_id;
 }
 
@@ -119,10 +124,10 @@ export function decideHostedCheck(
     return { ok: false, reason: 'credential_kind_forbidden' };
   }
   if (command.seat_id !== facts.seat_id || command.grant_id !== facts.grant_id ||
-      command.workspace_id !== facts.workspace_id) {
+      command.workspace_id !== facts.workspace_id || command.context_id !== facts.context_id) {
     return { ok: false, reason: 'hosted_check_batch_forbidden' };
   }
-  if (facts.active_batch !== null && !sameAuthority(facts.active_batch, facts)) {
+  if (facts.active_batch !== null && (!sameAuthority(facts.active_batch, facts) || facts.active_batch.cancelled)) {
     return { ok: false, reason: 'hosted_check_batch_forbidden' };
   }
 
@@ -134,7 +139,7 @@ export function decideHostedCheck(
     const requested = facts.requested_batch;
     const commandBatchId = canonicalBatchId(command.batch_id);
     if (requested === null || canonicalBatchId(requested.batch_id) !== commandBatchId ||
-        !sameAuthority(requested, facts)) {
+        (!sameAuthority(requested, facts) || requested.cancelled)) {
       return { ok: false, reason: 'hosted_check_batch_forbidden' };
     }
     if (!requested.acknowledged) {
@@ -142,10 +147,11 @@ export function decideHostedCheck(
         return { ok: false, reason: 'hosted_check_batch_forbidden' };
       }
       acknowledgeBatchId = canonicalBatchId(requested.batch_id);
-      advanceCursor = {
+      const terminal = {
         created_at: hostedCheckMillisecondTimestamp(requested.terminal_cursor.created_at),
         signal_id: requested.terminal_cursor.signal_id,
       };
+      advanceCursor = facts.committed_cursor === null || compareHostedCheckCursor(terminal, facts.committed_cursor) > 0 ? terminal : null;
       active = null;
     }
     // A repeated ACK is intentionally a no-op. If a newer active batch exists,
@@ -177,6 +183,7 @@ export function decideHostedCheck(
   const batch: HostedCheckBatch = {
     batch_id: facts.next_batch_id,
     seat_id: facts.seat_id,
+    context_id: facts.context_id,
     grant_id: facts.grant_id,
     workspace_id: facts.workspace_id,
     signal_ids: candidates.map((candidate) => candidate.signal_id),

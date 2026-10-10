@@ -1,11 +1,11 @@
 import type postgres from "npm:postgres@3.4.9";
 
-import { HOUSEHOLD_TOOL_REGISTRY } from "./protocol.js";
+import { HOUSEHOLD_TOOL_REGISTRY, hostedContextErrorMessage, decideHostedContextLifecycle } from "./protocol.js";
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 
-export const HOSTED_GRANT_TOOLS = ["claim_hosted_seat"] as const;
-export const HOSTED_SEAT_COMMAND_TOOLS = ["ask", "note", "reply", "working_on", "check", ...HOUSEHOLD_TOOL_REGISTRY.filter(row => row.effect !== "read").map(row => row.name)] as const;
+export const HOSTED_GRANT_TOOLS = ["claim_hosted_seat", "whoami"] as const;
+export const HOSTED_SEAT_COMMAND_TOOLS = ["close_session", "ask", "note", "reply", "working_on", "check", ...HOUSEHOLD_TOOL_REGISTRY.filter(row => row.effect !== "read").map(row => row.name)] as const;
 export const HOSTED_SEAT_READ_TOOLS = ["whoami", "members", ...HOUSEHOLD_TOOL_REGISTRY.filter(row => row.effect === "read").map(row => row.name)] as const;
 
 export type HostedGrantTool = typeof HOSTED_GRANT_TOOLS[number];
@@ -36,7 +36,7 @@ interface GrantBinding {
   grantId: string;
   ownerUserId: string;
   providerGrantId: string;
-  workspaceId: string;
+  workspaceId?: string;
   tool: HostedGrantTool;
   providerStatus: ProviderGrantStatus;
 }
@@ -62,6 +62,14 @@ export interface ResolvedHostedGrant {
 }
 
 export interface ResolvedHostedSeat {
+  context_id: string; client_id: string; seat: string;
+  workspace: { id: string; name: string };
+  display_name: string; disambiguator: string | null; assurance: 'portable';
+  lifetime: 'ephemeral' | 'durable'; kind: 'chat' | 'task' | 'scheduled' | 'subagent';
+  origin: 'new' | 'continue' | 'legacy'; created_at: string; last_business_at: string;
+  idle_expires_at: string | null; absolute_expires_at: string | null;
+  closed_at: string | null; close_reason: string | null; database_now: string;
+  context_error: 'context_expired' | 'context_closed' | null;
   grant_id: string;
   provider_grant_id: string;
   seat_id: string;
@@ -91,7 +99,15 @@ async function resolveGrant(
   tx: Sql,
   binding: GrantBinding,
 ): Promise<ResolvedHostedGrant | null> {
-  if (!grantTool(binding.tool) || !await providerActive(binding)) return null;
+  if (!grantTool(binding.tool)) return null;
+  if (!await providerActive(binding)) { await auditAuthorizationDenial(tx,binding); return null; }
+  if (binding.tool === 'whoami') {
+    const [row] = await tx<{ data: Record<string, unknown> }[]>`SELECT swarm.resolve_hosted_discovery(${binding.grantId}::uuid,${binding.ownerUserId}::uuid) AS data`;
+    if (!row?.data || row.data.provider_grant_id !== binding.providerGrantId) return null;
+    return { grant_id: binding.grantId, owner_user_id: binding.ownerUserId, provider_grant_id: binding.providerGrantId,
+      workspace_id: '', stream_id: '', manifest_digest: '' };
+  }
+  if (!binding.workspaceId) return null;
   const rows = await tx<ResolvedHostedGrant[]>`
     SELECT grant_id, owner_user_id, provider_grant_id, workspace_id,
            stream_id, encode(manifest_digest, 'hex') AS manifest_digest
@@ -103,7 +119,8 @@ async function resolveGrant(
     )
   `;
   const row = rows[0];
-  return row?.provider_grant_id === binding.providerGrantId ? row : null;
+  if (row?.provider_grant_id !== binding.providerGrantId) { await auditAuthorizationDenial(tx,binding); return null; }
+  return row;
 }
 
 async function resolveSeat(
@@ -114,33 +131,19 @@ async function resolveSeat(
   const allowed = use === "command"
     ? (HOSTED_SEAT_COMMAND_TOOLS as readonly string[]).includes(binding.tool)
     : (HOSTED_SEAT_READ_TOOLS as readonly string[]).includes(binding.tool);
-  if (!allowed || !seatTool(binding.tool) || !await providerActive(binding)) return null;
+  if (!allowed || !seatTool(binding.tool)) return null;
+  if (!await providerActive(binding)) { await auditAuthorizationDenial(tx,binding); return null; }
   const content = HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === binding.tool);
   const databaseTool = content ? (use === "command" ? "note" : "members") : binding.tool;
-  const rows = use === "command" && binding.tool === "check"
-    ? await tx<ResolvedHostedSeat[]>`
-      SELECT * FROM swarm.resolve_hosted_mcp_check_authorization(
-        ${binding.grantId}::uuid,
-        ${binding.handle}
-      )
-    `
-    : use === "command"
-    ? await tx<ResolvedHostedSeat[]>`
-      SELECT * FROM swarm.resolve_hosted_seat_command_authorization(
-        ${binding.grantId}::uuid,
-        ${binding.handle},
-        ${databaseTool}
-      )
-    `
-    : await tx<ResolvedHostedSeat[]>`
-      SELECT * FROM swarm.resolve_hosted_seat_read_authorization(
-        ${binding.grantId}::uuid,
-        ${binding.handle},
-        ${databaseTool}
-      )
-    `;
-  const row = rows[0];
-  return row?.provider_grant_id === binding.providerGrantId ? row : null;
+  const [row] = await tx<{ identity: ResolvedHostedSeat | null }[]>`
+    SELECT swarm.resolve_hosted_context(${binding.grantId}::uuid,${binding.handle},${databaseTool},${use}) AS identity
+  `;
+  const identity = row?.identity;
+  if (identity?.provider_grant_id !== binding.providerGrantId) { await auditAuthorizationDenial(tx,binding); return null; }
+  const utc = (value:string|null) => value === null ? null : new Date(value).toISOString();
+  return { ...identity, created_at: utc(identity.created_at)!, last_business_at: utc(identity.last_business_at)!,
+    idle_expires_at: utc(identity.idle_expires_at), absolute_expires_at: utc(identity.absolute_expires_at),
+    closed_at: utc(identity.closed_at), database_now: utc(identity.database_now)! };
 }
 
 /**
@@ -226,4 +229,39 @@ export async function revalidateHouseholdSeat(
   } finally {
     await restoreCommandRole(tx);
   }
+}
+
+/** Resolve connection discovery without selecting a context or requiring a home. */
+export async function revalidateHostedDiscovery(tx: Sql, capability: HostedGrantCapability): Promise<Record<string, unknown> | null> {
+  const binding = bindings.get(capability);
+  if (binding?.kind !== 'hosted_grant' || binding.tool !== 'whoami' || !await providerActive(binding)) return null;
+  const [row] = await tx<{ data: Record<string, unknown> | null }[]>`SELECT swarm.resolve_hosted_discovery(${binding.grantId}::uuid,${binding.ownerUserId}::uuid) AS data`;
+  if (row?.data?.provider_grant_id !== binding.providerGrantId) return null;
+  const { provider_grant_id: _, ...data } = row.data;
+  return data;
+}
+export function hostedContextFailure(seat: ResolvedHostedSeat | null): { status: number; body: Record<string, unknown> } | null {
+  const error = seat === null ? 'identity_resume_unavailable' : seat.context_error;
+  if (!error) return null;
+  const can_start_new = seat !== null;
+  return { status: 403, body: { error, message: hostedContextErrorMessage(error, can_start_new), can_start_new } };
+}
+/** Lock is held from resolution through business execution and renewal. */
+export async function renewHostedContext(tx: Sql, seat: ResolvedHostedSeat): Promise<Record<string, unknown>> {
+  const toMs = (v: string | null) => v === null ? null : Date.parse(v);
+  const transition = decideHostedContextLifecycle({ ...seat, lifetime: seat.lifetime,
+    created_at: Date.parse(seat.created_at), last_business_at: Date.parse(seat.last_business_at),
+    idle_expires_at: toMs(seat.idle_expires_at), absolute_expires_at: toMs(seat.absolute_expires_at), closed_at: toMs(seat.closed_at) },
+    { now: Date.parse(seat.database_now), authorized: true, use: 'business' });
+  if (!transition.ok) throw new Error('hosted context activity lost its authorization');
+  const [row] = await tx<{ state: Record<string, unknown> }[]>`SELECT swarm.record_hosted_context_activity(${seat.context_id}::uuid) AS state`;
+  return row!.state;
+}
+/** Fixed metadata only; never record handles, tool arguments or content. */
+export async function auditHostedContext(tx: Sql, seat: ResolvedHostedSeat, tool: string, outcome: string, reason: string | null, request: string | null = null): Promise<void> {
+  await tx`SELECT swarm.audit_hosted_context(${seat.context_id}::uuid,${seat.grant_id}::uuid,${tool},${outcome},${reason},${request})`;
+}
+
+async function auditAuthorizationDenial(tx: Sql, binding: GrantBinding | SeatBinding): Promise<void> {
+  await tx`SELECT swarm.audit_hosted_authorization_denial(${binding.grantId}::uuid,${binding.providerGrantId},${binding.tool})`;
 }

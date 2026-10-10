@@ -17,7 +17,7 @@ const signalA = "50000000-0000-4000-8000-000000000001";
 const signalB = "50000000-0000-4000-8000-000000000002";
 
 const active: HostedCheckBatch = {
-  batch_id: batchId, seat_id: seat, grant_id: grant, workspace_id: workspace,
+  batch_id: batchId, seat_id: seat, context_id: "60000000-0000-4000-8000-000000000001", grant_id: grant, workspace_id: workspace,
   signal_ids: [signalA, signalB],
   terminal_cursor: { created_at: "2026-09-27T12:00:00.123Z", signal_id: signalB },
   acknowledged: false,
@@ -25,7 +25,7 @@ const active: HostedCheckBatch = {
 
 function facts(overrides: Partial<HostedCheckFacts> = {}): HostedCheckFacts {
   return {
-    credential_kind: "hosted_seat", seat_id: seat, grant_id: grant, workspace_id: workspace,
+    credential_kind: "hosted_seat", seat_id: seat, context_id: "60000000-0000-4000-8000-000000000001", grant_id: grant, workspace_id: workspace,
     committed_cursor: null, active_batch: null, requested_batch: null, candidates: [],
     next_batch_id: batchId, ...overrides,
   };
@@ -38,7 +38,7 @@ test("hosted check orders and stores the exact millisecond cursor", () => {
     { created_at: "2026-09-27T12:00:00.123001Z", signal_id: signalA },
   ) > 0, "positive control: UUID breaks a same-millisecond tie");
   const opened = decideHostedCheck({
-    kind: "open_hosted_mcp_check_batch", seat_id: seat, grant_id: grant, workspace_id: workspace,
+    kind: "open_hosted_mcp_check_batch", seat_id: seat, context_id: "60000000-0000-4000-8000-000000000001", grant_id: grant, workspace_id: workspace,
   }, facts({ candidates: [
     { created_at: "2026-09-27T12:00:00.123999Z", signal_id: signalB },
     { created_at: "2026-09-27T12:00:00.123001Z", signal_id: signalA },
@@ -53,7 +53,7 @@ test("hosted check orders and stores the exact millisecond cursor", () => {
 
 test("open replays one active batch and never persists an empty batch", () => {
   const replay = decideHostedCheck({
-    kind: "open_hosted_mcp_check_batch", seat_id: seat, grant_id: grant, workspace_id: workspace,
+    kind: "open_hosted_mcp_check_batch", seat_id: seat, context_id: "60000000-0000-4000-8000-000000000001", grant_id: grant, workspace_id: workspace,
   }, facts({ active_batch: active }));
   assert.equal(replay.ok, true);
   if (replay.ok) {
@@ -61,7 +61,7 @@ test("open replays one active batch and never persists an empty batch", () => {
     assert.equal(replay.return_batch, active);
   }
   const empty = decideHostedCheck({
-    kind: "open_hosted_mcp_check_batch", seat_id: seat, grant_id: grant, workspace_id: workspace,
+    kind: "open_hosted_mcp_check_batch", seat_id: seat, context_id: "60000000-0000-4000-8000-000000000001", grant_id: grant, workspace_id: workspace,
   }, facts());
   assert.equal(empty.ok, true);
   if (empty.ok) assert.equal(empty.create_batch, null);
@@ -70,7 +70,7 @@ test("open replays one active batch and never persists an empty batch", () => {
 test("matching ACK advances exactly to the returned terminal and can open next", () => {
   const next = "50000000-0000-4000-8000-000000000003";
   const acked = decideHostedCheck({
-    kind: "ack_hosted_mcp_check_batch", seat_id: seat, grant_id: grant,
+    kind: "ack_hosted_mcp_check_batch", seat_id: seat, context_id: "60000000-0000-4000-8000-000000000001", grant_id: grant,
     workspace_id: workspace, batch_id: batchId,
   }, facts({ active_batch: active, requested_batch: active, candidates: [
     { created_at: active.terminal_cursor.created_at, signal_id: signalA },
@@ -88,7 +88,7 @@ test("repeated ACK cannot acknowledge a newer active batch", () => {
   const newer = { ...active, batch_id: "40000000-0000-4000-8000-000000000002",
     signal_ids: ["50000000-0000-4000-8000-000000000003"] };
   const repeated = decideHostedCheck({
-    kind: "ack_hosted_mcp_check_batch", seat_id: seat, grant_id: grant,
+    kind: "ack_hosted_mcp_check_batch", seat_id: seat, context_id: "60000000-0000-4000-8000-000000000001", grant_id: grant,
     workspace_id: workspace, batch_id: batchId,
   }, facts({ active_batch: newer, requested_batch: old }));
   assert.equal(repeated.ok, true);
@@ -100,7 +100,7 @@ test("repeated ACK cannot acknowledge a newer active batch", () => {
 test("ACK batch identity uses canonical UUID text", () => {
   const upperBatchId = batchId.toUpperCase();
   const acknowledged = decideHostedCheck({
-    kind: "ack_hosted_mcp_check_batch", seat_id: seat, grant_id: grant,
+    kind: "ack_hosted_mcp_check_batch", seat_id: seat, context_id: "60000000-0000-4000-8000-000000000001", grant_id: grant,
     workspace_id: workspace, batch_id: upperBatchId,
   }, facts({ active_batch: active, requested_batch: active }));
   assert.equal(acknowledged.ok, true,
@@ -111,7 +111,7 @@ test("ACK batch identity uses canonical UUID text", () => {
 });
 
 test("wrong credential, seat, grant, workspace, or batch is refused", () => {
-  const command = { kind: "ack_hosted_mcp_check_batch" as const, seat_id: seat, grant_id: grant,
+  const command = { kind: "ack_hosted_mcp_check_batch" as const, seat_id: seat, context_id: "60000000-0000-4000-8000-000000000001", grant_id: grant,
     workspace_id: workspace, batch_id: batchId };
   for (const changed of [
     facts({ credential_kind: "human", active_batch: active, requested_batch: active }),
@@ -130,10 +130,23 @@ test("batch size is bounded and cursor never advances on open", () => {
     signal_id: `50000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
   }));
   const decision = decideHostedCheck({
-    kind: "open_hosted_mcp_check_batch", seat_id: seat, grant_id: grant, workspace_id: workspace,
+    kind: "open_hosted_mcp_check_batch", seat_id: seat, context_id: "60000000-0000-4000-8000-000000000001", grant_id: grant, workspace_id: workspace,
   }, facts({ candidates }));
   assert.equal(decision.ok, true);
   if (!decision.ok) return;
   assert.equal(decision.create_batch?.signal_ids.length, HOSTED_CHECK_BATCH_LIMIT);
   assert.equal(decision.advance_cursor, null);
+});
+
+test('contexts share a monotonic inbox cursor but cannot ACK each other or cancelled batches', () => {
+  const context = '60000000-0000-4000-8000-000000000001';
+  const command = { kind:'ack_hosted_mcp_check_batch' as const,seat_id:seat,context_id:context,grant_id:grant,workspace_id:workspace,batch_id:batchId };
+  const shared = facts({active_batch:active,requested_batch:active,committed_cursor:{created_at:'2026-09-27T12:00:01.000Z',signal_id:signalB}});
+  const accepted = decideHostedCheck(command,shared);
+  assert.equal(accepted.ok,true);
+  if(accepted.ok){assert.equal(accepted.acknowledge_batch_id,batchId);assert.equal(accepted.advance_cursor,null,'an overlapping older batch cannot move the shared cursor backwards');}
+  assert.equal(decideHostedCheck(command,{...shared,context_id:'60000000-0000-4000-8000-000000000002'}).ok,false);
+  assert.equal(decideHostedCheck(command,{...shared,requested_batch:{...active,cancelled:true}}).ok,false);
+  const successor=decideHostedCheck({...command,grant_id:'20000000-0000-4000-8000-000000000002'},{...shared,grant_id:'20000000-0000-4000-8000-000000000002'});
+  assert.equal(successor.ok,true,'historical batch grant stays immutable; the current seat binding supplies authorization');
 });

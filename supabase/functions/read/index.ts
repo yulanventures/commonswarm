@@ -27,6 +27,8 @@ import {
 import { optionalWake } from "../_shared/wake.ts";
 import {
   hostedCapabilityTool,
+  revalidateHostedDiscovery, hostedContextFailure, renewHostedContext, auditHostedContext,
+  type HostedGrantCapability,
   revalidateHostedSeatRead,
   type HostedSeatCapability,
 } from "../_shared/hosted-seat-auth.ts";
@@ -1061,6 +1063,7 @@ async function handle(
 }
 
 export type HostedReadInput =
+  | { resource: "discovery" }
   | { resource: "household"; workspace_id: string; tool: string; arguments: Record<string, unknown> }
   | { resource: "whoami"; workspace_id: string }
   | { resource: "members"; workspace_id: string }
@@ -1078,6 +1081,7 @@ export interface ReadResult {
 }
 
 function hostedReadInputValid(input: HostedReadInput): boolean {
+  if (input.resource === "discovery") return true;
   if (!UUID_RE.test(input.workspace_id)) return false;
   if (input.resource !== "signals") return true;
   const limit = input.limit ?? 50;
@@ -1093,12 +1097,21 @@ function hostedReadInputValid(input: HostedReadInput): boolean {
 /** Internal hosted read entry point: parsed input plus an opaque capability. */
 export async function handleHostedRead(
   input: HostedReadInput,
-  capability: HostedSeatCapability,
+  capability: HostedSeatCapability | HostedGrantCapability,
 ): Promise<ReadResult> {
   if (!hostedReadInputValid(input)) {
     return { status: 400, body: { error: "invalid_request" } };
   }
   const tool = hostedCapabilityTool(capability);
+  if (input.resource === 'discovery') {
+    if (capability.kind !== 'hosted_grant' || tool !== 'whoami') return {status:403,body:{error:'identity_resume_unavailable',can_start_new:false}};
+    return await withReadTransaction(async tx => {
+      await setReadTransaction(tx);
+      const data = await revalidateHostedDiscovery(tx,capability);
+      return data ? {status:200,body:data} : hostedContextFailure(null)!;
+    });
+  }
+  if (capability.kind !== 'hosted_seat') return hostedContextFailure(null)!;
   if (input.resource === "household") {
     if (tool !== input.tool || !HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === tool && row.effect === "read")) return { status: 403, body: { error: "forbidden" } };
     const content = await import("../command/index.ts");
@@ -1114,6 +1127,8 @@ export async function handleHostedRead(
   return await withReadTransaction(async (tx) => {
     await setReadTransaction(tx);
     const seat = await revalidateHostedSeatRead(tx, capability);
+    const denied = hostedContextFailure(seat);
+    if (denied) { if (seat) await auditHostedContext(tx,seat,tool!,'authz',String(denied.body.error)); return denied; }
     if (seat === null || seat.workspace_id !== input.workspace_id) {
       return { status: 403, body: { error: "forbidden" } };
     }
@@ -1133,17 +1148,9 @@ export async function handleHostedRead(
         set_config('search_path', 'swarm_read, auth, pg_catalog', true)
     `;
     if (input.resource === "whoami") {
-      return { status: 200, body: {
-        grant_id: seat.grant_id,
-        seat_id: seat.seat_id,
-        handle: seat.handle,
-        workspace_id: seat.workspace_id,
-        principal_id: seat.principal_id,
-        owner_user_id: seat.owner_user_id,
-        name: seat.name,
-        transport: "hosted_mcp",
-        turn_only: true,
-      } };
+      await auditHostedContext(tx,seat,'whoami','accepted',null);
+      const { provider_grant_id: _, stream_id: __, context_error: ___, database_now: ____, origin: _____, closed_at: ______, close_reason: _______, ...identity } = seat;
+      return {status:200,body:{...identity,context_status:'active',transport:'hosted',turn_only:true}};
     }
     if (input.resource === "members") {
       const members = await tx<Record<string, unknown>[]>`
@@ -1158,6 +1165,7 @@ export async function handleHostedRead(
         WHERE workspace_id = ${seat.workspace_id}::uuid AND revoked_at IS NULL
         ORDER BY principal_id
       `;
+      await auditHostedContext(tx,seat,'members','accepted',null);
       return { status: 200, body: { members, agents } };
     }
     const limit = input.limit ?? 50;
@@ -1194,6 +1202,7 @@ export async function handleHostedRead(
       ORDER BY date_trunc('milliseconds', s.created_at), s.id
       LIMIT ${limit}
     `;
+    await auditHostedContext(tx,seat,'check','accepted','poll');
     return { status: 200, body: { signals: rows, capabilities: SIGNAL_CAPABILITIES } };
   });
 }

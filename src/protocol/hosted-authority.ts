@@ -16,6 +16,7 @@ const PUBLIC_HOSTED_ONLY_COMMANDS = new Set([
   'consent_hosted_mcp_workspace',
   'activate_hosted_mcp_grant',
   'claim_hosted_seat',
+  'close_hosted_session',
   'open_hosted_mcp_check_batch',
   'ack_hosted_mcp_check_batch',
 ]);
@@ -341,6 +342,7 @@ export function decideHostedAuthority(
       seat_id: seat.seat_id,
       principal_id: seat.principal_id,
       revoked_at: ctx.now,
+      principal_revoked_at: seat.principal_revoked_at ?? ctx.now,
     })] };
   }
 
@@ -518,6 +520,7 @@ export function reduceHostedAuthority(
   const seat = state.seats[id];
   if (!seat) throw new Error(`unknown hosted seat "${id}"`);
   const revokedAt = Number(p.revoked_at);
+  const principalRevokedAt = Number(p.principal_revoked_at ?? p.revoked_at);
   const principal = state.principals[seat.principal_id];
   if (!principal) throw new Error(`unknown hosted principal "${seat.principal_id}"`);
   return {
@@ -526,14 +529,14 @@ export function reduceHostedAuthority(
       ...state.seats,
       [id]: {
         ...seat,
-        revoked_at: revokedAt,
-        handle_revoked_at: revokedAt,
-        principal_revoked_at: revokedAt,
+        revoked_at: seat.revoked_at ?? revokedAt,
+        handle_revoked_at: seat.handle_revoked_at ?? revokedAt,
+        principal_revoked_at: seat.principal_revoked_at ?? principalRevokedAt,
       },
     },
     principals: {
       ...state.principals,
-      [seat.principal_id]: { ...principal, revoked_at: revokedAt },
+      [seat.principal_id]: { ...principal, revoked_at: principal.revoked_at ?? principalRevokedAt },
     },
   };
 }

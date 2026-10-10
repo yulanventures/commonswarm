@@ -3188,7 +3188,7 @@ function reduceWorkspace(prev, env3) {
         ...s,
         principals: {
           ...s.principals,
-          [p.principal_id]: { ...principal, revoked_at: p.revoked_at }
+          [p.principal_id]: { ...principal, revoked_at: principal.revoked_at ?? p.principal_revoked_at ?? p.revoked_at }
         }
       };
       break;
@@ -3232,6 +3232,7 @@ var PUBLIC_HOSTED_ONLY_COMMANDS = /* @__PURE__ */ new Set([
   "consent_hosted_mcp_workspace",
   "activate_hosted_mcp_grant",
   "claim_hosted_seat",
+  "close_hosted_session",
   "open_hosted_mcp_check_batch",
   "ack_hosted_mcp_check_batch"
 ]);
@@ -3349,7 +3350,8 @@ function decideHostedAuthority(command, facts, ctx) {
       grant_id: grant.grant_id,
       seat_id: seat2.seat_id,
       principal_id: seat2.principal_id,
-      revoked_at: ctx.now
+      revoked_at: ctx.now,
+      principal_revoked_at: seat2.principal_revoked_at ?? ctx.now
     })] };
   }
   if (grant.state !== "active" || !facts.workspace_consented || !facts.owner_is_live_member || facts.workspace_archived) {
@@ -3534,6 +3536,7 @@ function reduceHostedAuthority(previous, event2) {
   const seat2 = state.seats[id2];
   if (!seat2) throw new Error(`unknown hosted seat "${id2}"`);
   const revokedAt = Number(p.revoked_at);
+  const principalRevokedAt = Number(p.principal_revoked_at ?? p.revoked_at);
   const principal = state.principals[seat2.principal_id];
   if (!principal) throw new Error(`unknown hosted principal "${seat2.principal_id}"`);
   return {
@@ -3542,14 +3545,14 @@ function reduceHostedAuthority(previous, event2) {
       ...state.seats,
       [id2]: {
         ...seat2,
-        revoked_at: revokedAt,
-        handle_revoked_at: revokedAt,
-        principal_revoked_at: revokedAt
+        revoked_at: seat2.revoked_at ?? revokedAt,
+        handle_revoked_at: seat2.handle_revoked_at ?? revokedAt,
+        principal_revoked_at: seat2.principal_revoked_at ?? principalRevokedAt
       }
     },
     principals: {
       ...state.principals,
-      [seat2.principal_id]: { ...principal, revoked_at: revokedAt }
+      [seat2.principal_id]: { ...principal, revoked_at: principal.revoked_at ?? principalRevokedAt }
     }
   };
 }
@@ -3602,6 +3605,8 @@ function hostedContextErrorMessage(error, canStartNew = true) {
     name_allocation_busy: "A separate name could not be allocated. Try again.",
     hosted_seat_limit_reached: "This connection has reached its durable agent limit. Remove a durable agent, then try again.",
     principal_limit_reached: "This workspace has reached its durable agent limit. Remove a durable agent, then try again.",
+    context_expired: "This chat identity expired. Start a new identity to continue; shared work is still here.",
+    workspace_mismatch: "This handle belongs to a different workspace. Use its workspace to continue.",
     context_closed: "This chat identity was closed. Start a new identity to continue.",
     workspace_unavailable: "This workspace is unavailable. Choose an authorized workspace to continue.",
     invalid_request: "The identity request is invalid. Correct the arguments and try again."
@@ -3660,6 +3665,46 @@ function decideHostedContextAllocation(c, f) {
     ...succession ? { predecessor_grant_id: seat2.grant_id, successor_grant_id: f.grant_id } : {}
   };
 }
+function decideHostedContextLifecycle(state, facts) {
+  const deny = (error, can_start_new = true) => ({ ok: false, error, message: hostedContextErrorMessage(error, can_start_new), can_start_new });
+  if (!facts.authorized) return deny("identity_resume_unavailable", false);
+  const live = hostedContextLive(state, facts.now);
+  if (facts.use === "close" || facts.use === "expire") {
+    if (state.closed_at !== null || facts.use === "expire" && live) return { ok: true, state, changed: false, retire_principal: false };
+    const next2 = { ...state, closed_at: facts.now, close_reason: facts.use === "expire" ? "expired" : "closed" };
+    return { ok: true, state: next2, changed: true, retire_principal: state.lifetime === "ephemeral" };
+  }
+  if (state.closed_at !== null) return deny(state.close_reason === "expired" ? "context_expired" : "context_closed");
+  if (!live) return deny("context_expired");
+  const renew = !facts.replay && (facts.use === "business" || facts.use === "ack" && facts.fresh_ack === true);
+  if (!renew) return { ok: true, state, changed: false, retire_principal: false };
+  const idle = state.origin === "legacy" ? null : hostedContextClocks(state.kind, facts.now).idle_expires_at;
+  const next = { ...state, last_business_at: facts.now, idle_expires_at: idle };
+  return { ok: true, state: next, changed: facts.now !== state.last_business_at, retire_principal: false };
+}
+function hostedContextReceiptId(requestId2) {
+  return `context:${requestId2}`;
+}
+var HOSTED_CONTEXT_AUDIT_MAPPING = {
+  accepted: "accepted",
+  committed: "accepted",
+  ok: "accepted",
+  pending: "accepted",
+  released: "accepted",
+  conflict: "conflict",
+  refused: "domain",
+  rejected: "domain",
+  unknown: "domain",
+  idempotent: "replayed"
+};
+function hostedContextAuditResult(result, replayed = false) {
+  const status = String(result.body.status);
+  const mapped = HOSTED_CONTEXT_AUDIT_MAPPING[status];
+  const outcome = replayed ? "replayed" : mapped ?? (result.status < 300 && !result.body.error ? "accepted" : "authz");
+  const candidate = result.body.reason ?? result.body.error;
+  const reason = typeof candidate === "string" && /^[a-z][a-z0-9_]{1,79}$/u.test(candidate) && !/^seat_[A-Za-z0-9_-]{22,64}$/u.test(candidate) ? candidate : null;
+  return { outcome, reason };
+}
 
 // src/protocol/hosted-check.ts
 var HOSTED_CHECK_BATCH_LIMIT = 50;
@@ -3673,7 +3718,7 @@ function compareHostedCheckCursor(left, right) {
   return time === 0 ? left.signal_id.localeCompare(right.signal_id) : Math.sign(time);
 }
 function sameAuthority(value, facts) {
-  return value.seat_id === facts.seat_id && value.grant_id === facts.grant_id && value.workspace_id === facts.workspace_id;
+  return value.seat_id === facts.seat_id && value.context_id === facts.context_id && value.workspace_id === facts.workspace_id;
 }
 function canonicalBatchId(value) {
   return value.toLowerCase();
@@ -3695,10 +3740,10 @@ function decideHostedCheck(command, facts) {
   if (facts.credential_kind !== "hosted_seat") {
     return { ok: false, reason: "credential_kind_forbidden" };
   }
-  if (command.seat_id !== facts.seat_id || command.grant_id !== facts.grant_id || command.workspace_id !== facts.workspace_id) {
+  if (command.seat_id !== facts.seat_id || command.grant_id !== facts.grant_id || command.workspace_id !== facts.workspace_id || command.context_id !== facts.context_id) {
     return { ok: false, reason: "hosted_check_batch_forbidden" };
   }
-  if (facts.active_batch !== null && !sameAuthority(facts.active_batch, facts)) {
+  if (facts.active_batch !== null && (!sameAuthority(facts.active_batch, facts) || facts.active_batch.cancelled)) {
     return { ok: false, reason: "hosted_check_batch_forbidden" };
   }
   let active = facts.active_batch;
@@ -3707,7 +3752,7 @@ function decideHostedCheck(command, facts) {
   if (command.kind === "ack_hosted_mcp_check_batch") {
     const requested = facts.requested_batch;
     const commandBatchId = canonicalBatchId(command.batch_id);
-    if (requested === null || canonicalBatchId(requested.batch_id) !== commandBatchId || !sameAuthority(requested, facts)) {
+    if (requested === null || canonicalBatchId(requested.batch_id) !== commandBatchId || (!sameAuthority(requested, facts) || requested.cancelled)) {
       return { ok: false, reason: "hosted_check_batch_forbidden" };
     }
     if (!requested.acknowledged) {
@@ -3715,10 +3760,11 @@ function decideHostedCheck(command, facts) {
         return { ok: false, reason: "hosted_check_batch_forbidden" };
       }
       acknowledgeBatchId = canonicalBatchId(requested.batch_id);
-      advanceCursor = {
+      const terminal2 = {
         created_at: hostedCheckMillisecondTimestamp(requested.terminal_cursor.created_at),
         signal_id: requested.terminal_cursor.signal_id
       };
+      advanceCursor = facts.committed_cursor === null || compareHostedCheckCursor(terminal2, facts.committed_cursor) > 0 ? terminal2 : null;
       active = null;
     }
   }
@@ -3746,6 +3792,7 @@ function decideHostedCheck(command, facts) {
   const batch = {
     batch_id: facts.next_batch_id,
     seat_id: facts.seat_id,
+    context_id: facts.context_id,
     grant_id: facts.grant_id,
     workspace_id: facts.workspace_id,
     signal_ids: candidates.map((candidate) => candidate.signal_id),
@@ -5408,6 +5455,7 @@ export {
   HOSTED_ACTIVE_CONTEXTS_PER_GRANT,
   HOSTED_ACTIVE_CONTEXTS_PER_WORKSPACE,
   HOSTED_CHECK_BATCH_LIMIT,
+  HOSTED_CONTEXT_AUDIT_MAPPING,
   HOSTED_CONTEXT_CREATIONS_PER_OWNER_DAY,
   HOSTED_CONTEXT_CREATIONS_PER_WORKSPACE_DAY,
   HOSTED_CONTEXT_KINDS,
@@ -5489,6 +5537,7 @@ export {
   decideHostedAuthority,
   decideHostedCheck,
   decideHostedContextAllocation,
+  decideHostedContextLifecycle,
   decideHouseholdObject,
   decideHumanInvite,
   decideTodo,
@@ -5501,10 +5550,12 @@ export {
   fileVersionPreconditionMessage,
   fileVersionPreconditionSatisfied,
   hostedCheckMillisecondTimestamp,
+  hostedContextAuditResult,
   hostedContextClaimValid,
   hostedContextClocks,
   hostedContextErrorMessage,
   hostedContextLive,
+  hostedContextReceiptId,
   hostedSeatNameValid,
   hostedSuffixName,
   householdAccessRefusal,
