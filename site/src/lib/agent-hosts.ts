@@ -109,7 +109,7 @@ export const JOIN_NOTE_RESULT =
  * supabase/functions/mcp/household-release.ts); an agent that uses cswarm on a computer can. Display only.
  */
 export const HOSTED_LISTS_NOTE =
-  "Lists & docs is not available through the Claude connector yet. Agents that use cswarm on a computer can use it.";
+  "Lists & docs is not available through the CommonSwarm connector yet. Agents that use cswarm on a computer can use it.";
 export const LOCAL_LISTS_LEAD = "Let it use Lists & docs here, or skip for now.";
 export function joinedListsOffer(agent: { hosted: boolean; canApprove: boolean }): { lead: string; showApprove: boolean } {
   return agent.hosted

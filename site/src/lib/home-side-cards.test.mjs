@@ -55,6 +55,15 @@ test("an approval with an end date says so instead of promising until withdrawn"
   assert.deepEqual(sharedAgentLines([{ agent: agent("Your dot", true), until: "Oct 9" }]), ["Your dot can use Lists & docs here until Oct 9, or until you withdraw it."]);
 });
 
+test("a hosted agent with an approval gets the hosted note, never a promise of access", () => {
+  const note = "Lists & docs is not available through the CommonSwarm connector yet. Agents that use cswarm on a computer can use it.";
+  assert.deepEqual(sharedAgentLines([{ agent: agent("Your Claude", true, { hosted: true }), until: null }]), [`Your Claude: ${note}`]);
+  assert.deepEqual(sharedAgentLines([{ agent: agent("Your Claude", true, { hosted: true }), until: "Oct 9" }]), [`Your Claude: ${note}`]);
+  assert.deepEqual(sharedAgentLines([{ agent: agent("Your Claude", true, { hosted: true }), until: null }, { agent: agent("Your dot", true), until: null }]),
+    [`Your Claude: ${note}`, "Your dot can use Lists & docs here, until you withdraw it."]);
+  assert.deepEqual(sharedAgentLines([{ agent: agent("Nikki’s Claude", false, { hosted: true }), until: null }]), []);
+});
+
 // Independent source: the Lists pane's own consent form, read as text. If the pane's words change, the door must follow.
 test("the refused Lists & docs door uses the words of the Lists pane form it stands for", () => {
   const pane = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");

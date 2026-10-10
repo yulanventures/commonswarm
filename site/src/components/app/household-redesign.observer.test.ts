@@ -148,7 +148,7 @@ test("creation asks for purpose without a default and states the owner's Editor 
   assert.match(create, /input.type = "radio"/);
   assert.match(create, /input.checked = purposeChoices.value === option.value/);
   assert.match(create, /label: option.label/);
-  assert.match(create, /Your access: \$\{CONTENT_ROLE_COPY.editor.label\}\. You can/);
+  assert.match(create, /Your access: \$\{CONTENT_ROLE_COPY.editor.label\}\. You can \$\{CONTENT_ROLE_COPY.editor.detail.charAt\(0\).toLowerCase\(\) \+ CONTENT_ROLE_COPY.editor.detail.slice\(1\)\}`/);
   assert.match(script, /detail: CREATE_PURPOSE_DETAILS\[purpose as HouseholdPurpose\]/);
   assert.match(create, /personalWarning.dataset.createPersonalWarning = ""/);
   assert.match(create, /personalWarning.setAttribute\("aria-live", "polite"\)/);

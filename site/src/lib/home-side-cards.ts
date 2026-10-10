@@ -2,6 +2,7 @@
 // builders: (doc, vm, callbacks) => HTMLElement. User text goes in through textContent only; sample mode
 // renders no actions; nothing here reads the network or the clock.
 import type { AgentVM, ObjectCardVM, PersonVM } from "./home-types";
+import { HOSTED_LISTS_NOTE } from "./agent-hosts";
 import { agentOrb, objectCard, personAvatar } from "./home-primitives";
 
 /**
@@ -77,7 +78,8 @@ export function sharedEveryoneLine(workspaceName: string): string {
  * while the approval lasts until withdrawn; with an end date it says so instead of promising more.
  */
 export function sharedAgentLines(agents: readonly SideSharedAgentVM[]): string[] {
-  return agents.filter(({ agent }) => agent.yours).map(({ agent, until }) => until
+  // A hosted agent's stored approval is real but unusable for now: say so instead of promising access.
+  return agents.filter(({ agent }) => agent.yours).map(({ agent, until }) => agent.hosted ? `${agent.label}: ${HOSTED_LISTS_NOTE}` : until
     ? `${agent.label} can use Lists & docs here until ${until}, or until you withdraw it.`
     : `${agent.label} can use Lists & docs here, until you withdraw it.`);
 }

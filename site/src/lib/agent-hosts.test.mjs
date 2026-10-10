@@ -219,7 +219,7 @@ test("the joined view offers Lists & docs to computer agents and says plainly th
   assert.equal(joinedListsOffer({ hosted: false, canApprove: false }).showApprove, false);
   const hosted = joinedListsOffer({ hosted: true, canApprove: true });
   assert.deepEqual(hosted, { lead: HOSTED_LISTS_NOTE, showApprove: false });
-  assert.equal(HOSTED_LISTS_NOTE, "Lists & docs is not available through the Claude connector yet. Agents that use cswarm on a computer can use it.");
+  assert.equal(HOSTED_LISTS_NOTE, "Lists & docs is not available through the CommonSwarm connector yet. Agents that use cswarm on a computer can use it.");
   const picker = readFileSync(new URL("../components/connect/AgentHostPicker.astro", import.meta.url), "utf8");
   assert.match(picker, /joinedListsOffer\(\{ hosted: agent\.hosted === true, canApprove: agent\.canApprove \}\)/u);
   const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");

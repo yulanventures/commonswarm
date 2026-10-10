@@ -1,4 +1,4 @@
-import { AGENT_HOSTS } from "./agent-hosts";
+import { AGENT_HOSTS, HOSTED_LISTS_NOTE } from "./agent-hosts";
 import { buildAgentModelEditor } from "./agent-model-editor";
 import type { PeopleAgentStatus } from "./agent-status";
 import { personTint } from "./home-names";
@@ -84,7 +84,13 @@ export function peopleDialogCounts(model: PeopleDialogModel): string {
 export function peopleDialogAccessUntil(agent: PeopleDialogAgent): string | null {
   if (!agent.own || agent.accessReadState !== "succeeded") return null;
   if (!agent.access) return "Not allowed.";
-  return `Allowed until ${agent.access.until ?? "you withdraw it"}.`;
+  const until = `Allowed until ${agent.access.until ?? "you withdraw it"}.`;
+  // A hosted agent's approval exists and can be withdrawn, but it cannot use Lists & docs yet.
+  return agent.hosted ? `${until} ${HOSTED_LISTS_NOTE}` : until;
+}
+/** The accessible-name suffix for an approved agent: usable access for a local agent, the hosted note otherwise. */
+export function peopleDialogAccessLabel(agent: Pick<PeopleDialogAgent, "hosted">): string {
+  return agent.hosted ? `, ${HOSTED_LISTS_NOTE}` : ", Can use Lists & docs";
 }
 export function peopleDialogCanAct(model: PeopleDialogModel, action: PeopleDialogAction, id: string): boolean {
   if (model.sample) return false;
@@ -427,10 +433,10 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     disclosure.dataset.pdFocus = `agent-${agent.id}`;
     disclosure.setAttribute("aria-expanded", String(state.selected?.type === "agent" && state.selected.id === agent.id)); disclosure.setAttribute("aria-controls", detail.id);
     const secondary = agent.model ?? (agent.hosted ? "In a chat app" : "On a computer");
-    disclosure.setAttribute("aria-label", `${agent.name}, ${agent.ownerName ? `${agent.ownerName}’s agent` : "Other agent"}, ${agent.app ? `${agent.app}, ` : ""}${secondary}, ${agent.status.label}${approved ? ", Can use Lists & docs" : ""}`);
+    disclosure.setAttribute("aria-label", `${agent.name}, ${agent.ownerName ? `${agent.ownerName}’s agent` : "Other agent"}, ${agent.app ? `${agent.app}, ` : ""}${secondary}, ${agent.status.label}${approved ? peopleDialogAccessLabel(agent) : ""}`);
     const copy = node(doc, "span", "pd-agent-copy"); const nameLine = node(doc, "span", "pd-agent-name-line");
     const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.name; nameLine.append(name);
-    if (approved) { const mark = node(doc, "span", "pd-access-mark", "▤"); mark.dataset.agentContentAccess = ""; mark.setAttribute("role", "img"); mark.setAttribute("aria-label", "Can use Lists & docs"); mark.title = "Can use Lists & docs"; nameLine.append(mark); }
+    if (approved && !agent.hosted) { const mark = node(doc, "span", "pd-access-mark", "▤"); mark.dataset.agentContentAccess = ""; mark.setAttribute("role", "img"); mark.setAttribute("aria-label", "Can use Lists & docs"); mark.title = "Can use Lists & docs"; nameLine.append(mark); }
     copy.append(nameLine, node(doc, "span", "pd-agent-app pd-ellipsis", secondary), chip(doc, agent.status));
     disclosure.append(orb(doc, agent, tintOf(agent)), copy, node(doc, "span", "pd-row-arrow", "›")); row.append(disclosure);
     const notice = noticeFor(agent);
@@ -448,13 +454,13 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     disclosure.dataset.pdFocus = `agent-${agent.id}`;
     disclosure.setAttribute("aria-expanded", String(state.selected?.type === "agent" && state.selected.id === agent.id)); disclosure.setAttribute("aria-controls", detail.id);
     const secondary = agent.model ?? (agent.hosted ? "In a chat app" : "On a computer");
-    disclosure.setAttribute("aria-label", `${agent.name}, ${agent.ownerName ? `${agent.ownerName}’s agent` : "Other agent"}, ${agent.app ? `${agent.app}, ` : ""}${secondary}, ${agent.status.label}${approved ? ", Can use Lists & docs" : ""}`);
+    disclosure.setAttribute("aria-label", `${agent.name}, ${agent.ownerName ? `${agent.ownerName}’s agent` : "Other agent"}, ${agent.app ? `${agent.app}, ` : ""}${secondary}, ${agent.status.label}${approved ? peopleDialogAccessLabel(agent) : ""}`);
     const copy = node(doc, "span", "pd-agent-copy"); const nameLine = node(doc, "span", "pd-agent-name-line");
     const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.name; nameLine.append(name);
     nameLine.append(chip(doc, agent.status));
     const sentence = agent.status.attention && !model.sample ? agent.status.sentence : "";
     const details = node(doc, "span", "pd-agent-app", sentence || [agent.app, secondary].filter(Boolean).join(" · "));
-    // The canvas row draws no Lists & docs glyph: the disclosure's accessible name above carries "Can use Lists & docs",
+    // The canvas row draws no Lists & docs glyph: the disclosure's accessible name above carries "Can use Lists & docs" (the hosted note for a hosted agent),
     // and the agent's details (the side card) show the Lists & docs fact.
     copy.append(nameLine, details);
     disclosure.append(orb(doc, agent, tintOf(agent)), copy); row.append(disclosure);

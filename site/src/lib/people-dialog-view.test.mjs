@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
-import { peopleDialogGroups, peopleDialogCounts, peopleDialogAccessUntil, peopleDialogCanAct, peopleConfirmationCopy,
+import { peopleDialogGroups, peopleDialogCounts, peopleDialogAccessUntil, peopleDialogAccessLabel, peopleDialogCanAct, peopleConfirmationCopy,
   peopleDialogRoleOptions, peopleRoleSelfConfirmCopy, peopleRoleReceipt, peopleRoleRefusal, peopleRoleErrorCode, peopleDialogApplyFocus,
   peopleRoleBeginSave, peopleRoleFinishSave, peopleFirstName, PEOPLE_ROLE_REFUSAL_CODES } from "./people-dialog-view.ts";
 const person = (id, name, role = "member", own = false, mayRemove = false) => ({ id, name, role, own, mayRemove });
@@ -46,6 +46,17 @@ test("Lists & docs facts require ownership and a successful connections read", (
   assert.equal(peopleDialogAccessUntil({ ...value, access: null }), "Not allowed.");
   assert.equal(peopleDialogCanAct({ ...model(), agents: [{ ...value, access: null }] }, "allow", value.id), true);
   assert.equal(peopleDialogCanAct({ ...model(), agents: [value] }, "withdraw", value.id), true);
+});
+test("a hosted agent's approval is shown as withdrawable but not usable; a local agent's is unchanged", () => {
+  const note = "Lists & docs is not available through the CommonSwarm connector yet. Agents that use cswarm on a computer can use it.";
+  const local = agent("Muse", "mei", { own: true, access: { until: null } });
+  const hosted = { ...local, hosted: true };
+  assert.equal(peopleDialogAccessLabel(local), ", Can use Lists & docs");
+  assert.equal(peopleDialogAccessLabel(hosted), `, ${note}`);
+  assert.equal(peopleDialogAccessUntil(hosted), `Allowed until you withdraw it. ${note}`);
+  assert.equal(peopleDialogAccessUntil({ ...hosted, access: { until: "Oct 9, 2026" } }), `Allowed until Oct 9, 2026. ${note}`);
+  assert.equal(peopleDialogAccessUntil({ ...hosted, access: null }), "Not allowed.");
+  assert.equal(peopleDialogCanAct({ ...model(), agents: [hosted] }, "withdraw", hosted.id), true);
 });
 test("read-only, elevated, owner and sample action gates are distinct", () => {
   const data = model(); const value = data.agents[2];
