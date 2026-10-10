@@ -65,7 +65,7 @@ export const CONTENT_OPERATIONS: readonly HouseholdContentOperation[] = HOUSEHOL
  */
 const REFUSALS: Readonly<Record<string, string>> = Object.freeze({
   owner_confirmation_required:
-    "The workspace owner chooses who can see this workspace first. Ask them to open Lists & docs.",
+    "The workspace owner chooses whether to invite people first. Ask them to open Workspace access.",
   workspace_boundary_mismatch:
     "This workspace was already set up the other way. Choose the option its owner chose.",
   workspace_access_refused: "You are no longer a member of this workspace. Nothing was changed.",
