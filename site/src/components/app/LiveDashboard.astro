@@ -1250,9 +1250,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     type ConnectedApp,
   } from "../../lib/connected-apps";
 
+  // Phase 3 must supply this metadata through the membership-gated roster projection.
+  import { hostedContextLabel, hostedContextPeopleLabel, hostedContextChatAuthor, type HostedContextLabelInput } from "../../lib/hosted-context-label";
+
   interface Workspace extends CloseableWorkspace {}
 
-  interface Agent {
+  interface Agent extends HostedContextLabelInput {
     principalId: string;
     name: string;
     model: string | null;
@@ -2847,10 +2850,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       return name === undefined ? null : removedAgentLabel(name);
     };
 
-    const entityName = (entity: EntityRef): string => {
+    const entityName = (entity: EntityRef, addressing = false): string => {
       if (entity.kind === "agent") {
         const agent = agents.find((row) => row.principalId === entity.id);
         if (!agent) return historicalAgentName(entity.id) ?? "Unknown agent";
+        if (!addressing && agent.transport === "hosted_mcp" && agent.displayName != null) return hostedContextLabel(agent).label;
         return identityDisplayLabel(
           { id: agent.principalId, name: agent.name },
           combinedIdentityRoster(),
@@ -2976,7 +2980,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
 
     /** The name a chip shows. `entityName` already answers for both kinds. */
-    const composerRecipientName = (entity: ComposerRecipient): string => entityName(entity);
+    const composerRecipientName = (entity: ComposerRecipient): string => entityName(entity, true);
 
     /**
      * DRAWING ONLY. It reads `composerTo` and writes the DOM; it decides nothing and changes
@@ -3775,8 +3779,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
        * resolve leaves too: writing it into the body would look addressed and reach nobody. */
       return candidates.filter((candidate) =>
         !composerHasRecipient(candidate) &&
-        isTaggable(entityName(candidate)) &&
-        entityName(candidate).toLocaleLowerCase().includes(query)
+        isTaggable(entityName(candidate, true)) &&
+        entityName(candidate, true).toLocaleLowerCase().includes(query)
       );
     };
 
@@ -3787,7 +3791,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const search = mentionSearch();
       if (!input || !search) return;
       const cursor = input.selectionStart ?? input.value.length;
-      const tag = `@${entityName(mention)} `;
+      const tag = `@${entityName(mention, true)} `;
       input.value = `${input.value.slice(0, search.start)}${tag}${input.value.slice(cursor)}`;
       const caret = search.start + tag.length;
       input.setSelectionRange(caret, caret);
@@ -3843,7 +3847,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           content.removeAttribute("role"); content.removeAttribute("aria-selected");
           button.append(...Array.from(content.childNodes));
           button.classList.add("hm-pick-option");
-        } else button.textContent = entityName(candidate);
+        } else button.textContent = entityName(candidate, true);
         button.addEventListener("pointerdown", (event) => event.preventDefault());
         button.addEventListener("click", () => selectMention(candidate));
         picker.append(button);
@@ -4784,9 +4788,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               newHostAt: grant.newHostAt, suspendedAt: grant.suspendedAt, revokedAt: grant.grantRevokedAt ?? grant.revokedAt });
             if (risk) { grantRisk = risk; technical.push(risk); }
           }
-          return { id: agent.principalId, name: identityDisplayLabel({ id: agent.principalId, name: agent.name }, rosterNames),
-            ownerId: agent.ownerUserId, ownerName, model: agent.model, app: null, hosted: agent.transport === "hosted_mcp", status, receive,
-            lastActive: agent.presence === undefined ? "Not reported" : agent.presence?.last_command_at ? peopleAgentActivityTime(agent.presence.last_command_at, now) : "Not active yet",
+          return { id: agent.principalId, ...hostedContextPeopleLabel(agent, rosterNames), identityLifetime: agent.identityLifetime,
+            appClientId: agent.app?.client_id ?? null,
+            ownerId: agent.ownerUserId, ownerName, model: agent.model, app: agent.app?.display_name ?? null, hosted: agent.transport === "hosted_mcp", status, receive,
+            lastActive: agent.transport === "hosted_mcp" && agent.lastBusinessAt ? peopleAgentActivityTime(agent.lastBusinessAt, now) : agent.presence === undefined ? "Not reported" : agent.presence?.last_command_at ? peopleAgentActivityTime(agent.presence.last_command_at, now) : "Not active yet",
             technical, grantRisk, updateAvailable: presence.client.kind === "update available", access: approval ? { until: approval.expires_at === null ? null : new Date(approval.expires_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) } : null,
             key: grant ? ["key-off", "key-ended", "paused", "key-ends-soon"].includes(status.kind) ? status.kind === "key-off" ? "Turned off. A new key can bring it back." : status.label + "." : "Uses a key to connect." : null,
             accessReadState: householdConnectionsReadState,
@@ -5844,7 +5849,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           : signal.fromKind === "user" && people.has(signal.from)
           ? { kind: "person" as const, id: signal.from }
           : null;
-        const homeAuthor = homeParty({ kind: signal.fromKind === "agent" ? "agent" : "user", id: signal.from }, homePeople);
+        const homeAuthor = hostedContextChatAuthor(
+          homeParty({ kind: signal.fromKind === "agent" ? "agent" : "user", id: signal.from }, homePeople), authorAgent);
         const authorName = homeAuthor ? "label" in homeAuthor ? homeAuthor.label : homeAuthor.name : authorEntity
           ? entityName(authorEntity)
           : people.get(signal.from) ??
@@ -5990,7 +5996,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           mentionRow.className = "dashboard__message-mentions";
           for (const mention of mentions) {
             mentionRow.append(entityControl(
-              `@${entityName(mention)}`,
+              `@${entityName(mention, true)}`,
               mention,
               "dashboard__mention-chip dashboard__message-mention",
             ), " ");
@@ -11015,6 +11021,19 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 </script>
 
 <style is:global>
+  .dashboard [data-context-badge] {
+    display: inline-block;
+    flex: none;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--home-soft);
+    color: var(--home-ink-muted);
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .dashboard .pd-chat-group > p { margin: 8px 0 4px; }
+
   .dashboard {
     --dashboard-rail: 18.5rem;
     position: relative;

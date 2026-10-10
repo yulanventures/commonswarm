@@ -1,5 +1,5 @@
 import { modelFamily, modelGlyphSvg } from './model-glyph.js';
-import { identityDisplayLabel } from './identity-label.js';
+import { hostedContextLabel, hostedContextPeopleLabel, type HostedContextLabelInput } from './hosted-context-label.js';
 import { agentStatus } from './agent-status.js';
 import type { AgentPresenceRow } from '../../../src/cloud/agent-presence.js';
 
@@ -9,7 +9,7 @@ export interface RailMember {
   role: "owner" | "admin" | "member";
 }
 
-export interface RailAgent {
+export interface RailAgent extends Omit<HostedContextLabelInput, "name"> {
   principalId: string;
   name: string;
   ownerUserId: string;
@@ -33,6 +33,11 @@ export interface RosterAgentRow {
   owner_user_id?: unknown;
   transport?: unknown;
   turn_only?: unknown;
+  display_name?: unknown;
+  disambiguator?: unknown;
+  identity_lifetime?: unknown;
+  app?: unknown;
+  last_business_at?: unknown;
 }
 
 export type ParticipantGroup<TMember extends RailMember, TAgent extends RailAgent> =
@@ -81,6 +86,13 @@ export const groupParticipantsByOwner = <
   return groups;
 };
 
+function rosterApp(value: unknown): HostedContextLabelInput["app"] {
+  if (value === null || typeof value !== 'object') return null;
+  const app = value as Record<string, unknown>;
+  return typeof app.client_id === 'string' && typeof app.display_name === 'string'
+    ? { client_id: app.client_id, display_name: app.display_name } : null;
+}
+
 /** Normalizes roster rows without discarding agents whose owner cannot be resolved. */
 export const rosterAgentsFromRows = (rows: RosterAgentRow[]): RosterAgent[] =>
   rows
@@ -91,6 +103,14 @@ export const rosterAgentsFromRows = (rows: RosterAgentRow[]): RosterAgent[] =>
       transport: row.transport === 'hosted_mcp' ? 'hosted_mcp' : 'local',
       turnOnly: row.turn_only === true,
       ownerUserId: String(row.owner_user_id ?? ''),
+      ...(row.transport !== 'hosted_mcp' ? {} : {
+        displayName: typeof row.display_name === 'string' ? row.display_name : null,
+        disambiguator: typeof row.disambiguator === 'string' ? row.disambiguator : null,
+        ...(row.identity_lifetime === 'durable' || row.identity_lifetime === 'ephemeral'
+          ? { identityLifetime: row.identity_lifetime } : {}),
+        app: rosterApp(row.app),
+        lastBusinessAt: typeof row.last_business_at === 'string' ? row.last_business_at : null,
+      }),
     }))
     .filter((agent) => agent.principalId.length > 0);
 
@@ -124,13 +144,22 @@ export const renderSidebarParticipants = <
     const copy = document.createElement('span');
     copy.className = 'dashboard__sidebar-participant-copy';
     const name = document.createElement('strong');
-    const label = identityDisplayLabel(
-      { id: agent.principalId, name: agent.name },
-      identityRoster,
-    );
-    name.textContent = label;
-    name.title = label;
+    const label = hostedContextPeopleLabel(agent, identityRoster);
+    const context = hostedContextLabel(agent);
+    name.textContent = label.name;
+    name.title = label.exactName ?? label.name;
     copy.append(name);
+    if (context.badge) {
+      const badge = document.createElement('small');
+      badge.dataset.contextBadge = context.badge;
+      badge.textContent = `Badge ${context.badge}`;
+      copy.append(badge);
+    }
+    if (context.distinction) {
+      const distinction = document.createElement('span');
+      distinction.textContent = context.distinction;
+      copy.append(distinction);
+    }
     /* One plain status instead of the wire transport (Tom's plain-words rule). The transport
        stays in the profile panel for support. */
     const status = agentStatus({ transport: agent.transport, turnOnly: agent.turnOnly, presence: agent.presence });

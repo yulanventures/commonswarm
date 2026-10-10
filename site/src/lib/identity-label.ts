@@ -1,5 +1,8 @@
 /**
  * Display names are labels. Principal and member UUIDs are the identity.
+ * Roster `name` is the exact address, including a server-allocated badge.
+ * Hosted base labels belong in ordinary chat; recipient lookup keeps this
+ * exact-name roster and UUID keys. Never reconstruct addresses from labels.
  *
  * Duplicate names stay selectable through a short UUID suffix. A generated
  * suffix must be unique across every raw name and every other generated label.

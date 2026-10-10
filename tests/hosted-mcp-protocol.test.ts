@@ -664,7 +664,7 @@ test("claim_seat routes through the grant home and preserves explicit consent ch
   assert.deepEqual(authorizedWorkspaces, [home, home, other, other, forbidden]);
   assert.deepEqual(commands, [home, other].map((workspace_id) => ({
     command_id: base.request_id, client_version: "0.1.80", workspace_id,
-    stream: { kind: "workspace" }, command: { kind: "claim_hosted_seat", name: base.name },
+    stream: { kind: "workspace" }, command: { kind: "claim_hosted_seat", intent: "new", name: base.name },
   })));
   providerActive = false;
   const revoked = await serve(post({

@@ -52,6 +52,13 @@ export async function executeClaimSeat(
     client_version: "0.1.80",
     workspace_id: authorized.workspaceId,
     stream: { kind: "workspace" },
-    command: { kind: "claim_hosted_seat", name: call.arguments.name },
+    command: {
+      kind: "claim_hosted_seat",
+      intent: call.arguments.intent ?? "new",
+      ...Object.fromEntries(["name", "seat", "lifetime", "parent_context"]
+        .filter(key => call.arguments[key] !== undefined)
+        .map(key => [key, call.arguments[key]])),
+      ...(call.arguments.kind === undefined ? {} : { context_kind: call.arguments.kind }),
+    },
   }, authorized.capability);
 }

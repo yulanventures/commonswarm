@@ -1,10 +1,13 @@
 import { AGENT_HOSTS } from "./agent-hosts";
 import { buildAgentModelEditor } from "./agent-model-editor";
 import type { PeopleAgentStatus } from "./agent-status";
+import { hostedContextLabel } from "./hosted-context-label";
 import { personTint } from "./home-names";
 
 export interface PeopleDialogPerson { id: string; name: string; role: "owner" | "admin" | "member"; own: boolean; mayRemove: boolean }
 export interface PeopleDialogAgent {
+  exactName?: string; disambiguator?: string | null; identityLifetime?: "durable" | "ephemeral";
+  appClientId?: string | null;
   id: string; name: string; ownerId: string; ownerName: string | null; model: string | null;
   app: string | null; hosted: boolean; status: PeopleAgentStatus; receive: string | null;
   lastActive: string; technical: string[]; grantRisk?: string | null; updateAvailable: boolean;
@@ -67,10 +70,15 @@ export interface PeopleDialogCallbacks {
 /** The filter includes a person's whole group when their name matches. Orphans stay separate. */
 export function peopleDialogGroups(model: PeopleDialogModel, query: string) {
   const needle = query.trim().toLocaleLowerCase();
-  const matches = (agent: PeopleDialogAgent) => [agent.name, agent.app, agent.model, agent.ownerName]
+  const matches = (agent: PeopleDialogAgent) => [agent.name, agent.exactName, agent.disambiguator, agent.app, agent.model, agent.ownerName]
     .some((value) => value?.toLocaleLowerCase().includes(needle));
-  const groups = model.people.map((person) => ({ person, agents: model.agents.filter((agent) =>
-    agent.ownerId === person.id && (!needle || person.name.toLocaleLowerCase().includes(needle) || matches(agent))) }))
+  const byApp = (agents: PeopleDialogAgent[]) => [...agents].sort((left, right) => {
+    const key = (agent: PeopleDialogAgent) => agent.hosted && agent.identityLifetime === "ephemeral"
+      ? `1:${agent.appClientId ?? agent.app ?? ""}` : "0";
+    return key(left).localeCompare(key(right));
+  });
+  const groups = model.people.map((person) => ({ person, agents: byApp(model.agents.filter((agent) =>
+    agent.ownerId === person.id && (!needle || person.name.toLocaleLowerCase().includes(needle) || matches(agent)))) }))
     .filter(({ person, agents }) => !needle || person.name.toLocaleLowerCase().includes(needle) || agents.length);
   const other = model.agents.filter((agent) => !model.people.some((person) => person.id === agent.ownerId) && (!needle || matches(agent)));
   const invites = model.invites.filter((invite) => !needle || invite.name.toLocaleLowerCase().includes(needle));
@@ -419,6 +427,16 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   if (state.query.trim()) { const shown = groups.reduce((count, group) => count + group.agents.length, other.length);
     const result = node(doc, "p", "pd-muted", `${shown} of ${model.agents.length} agents shown · “${state.query.trim()}”`); result.setAttribute("role", "status"); host.append(result); }
   const grid = node(doc, "div", "pd-member-grid"); grid.dataset.memberList = "";
+  const contextOf = (agent: PeopleDialogAgent) => hostedContextLabel({
+    name: agent.exactName ?? agent.name, displayName: agent.name,
+    transport: agent.hosted ? "hosted_mcp" : "local",
+    disambiguator: agent.disambiguator, identityLifetime: agent.identityLifetime,
+  });
+  const badgeFor = (agent: PeopleDialogAgent, line: HTMLElement) => {
+    const badge = contextOf(agent).badge;
+    if (badge) { const mark = node(doc, "small", "pd-muted", `Badge ${badge}`);
+      mark.dataset.contextBadge = badge; line.append(mark); }
+  };
   const agentRow = (agent: PeopleDialogAgent) => {
     if (page) return pageAgentRow(agent);
     const approved = peopleDialogAccessUntil(agent) !== null && !!agent.access;
@@ -426,10 +444,10 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     const disclosure = button(doc, "", () => select("agent", agent.id), "pd-agent-disclosure"); disclosure.id = `pd-agent-${agent.id}`;
     disclosure.dataset.pdFocus = `agent-${agent.id}`;
     disclosure.setAttribute("aria-expanded", String(state.selected?.type === "agent" && state.selected.id === agent.id)); disclosure.setAttribute("aria-controls", detail.id);
-    const secondary = agent.model ?? (agent.hosted ? "In a chat app" : "On a computer");
-    disclosure.setAttribute("aria-label", `${agent.name}, ${agent.ownerName ? `${agent.ownerName}’s agent` : "Other agent"}, ${agent.app ? `${agent.app}, ` : ""}${secondary}, ${agent.status.label}${approved ? ", Can use Lists & docs" : ""}`);
+    const secondary = [contextOf(agent).distinction, agent.app, agent.model ?? (agent.hosted ? "In a chat app" : "On a computer")].filter(Boolean).join(" · ");
+    disclosure.setAttribute("aria-label", `${agent.exactName ?? agent.name}, ${agent.ownerName ? `${agent.ownerName}’s agent` : "Other agent"}, ${agent.app ? `${agent.app}, ` : ""}${secondary}, ${agent.status.label}${approved ? ", Can use Lists & docs" : ""}`);
     const copy = node(doc, "span", "pd-agent-copy"); const nameLine = node(doc, "span", "pd-agent-name-line");
-    const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.name; nameLine.append(name);
+    const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.exactName ?? agent.name; nameLine.append(name); badgeFor(agent, nameLine);
     if (approved) { const mark = node(doc, "span", "pd-access-mark", "▤"); mark.dataset.agentContentAccess = ""; mark.setAttribute("role", "img"); mark.setAttribute("aria-label", "Can use Lists & docs"); mark.title = "Can use Lists & docs"; nameLine.append(mark); }
     copy.append(nameLine, node(doc, "span", "pd-agent-app pd-ellipsis", secondary), chip(doc, agent.status));
     disclosure.append(orb(doc, agent, tintOf(agent)), copy, node(doc, "span", "pd-row-arrow", "›")); row.append(disclosure);
@@ -447,13 +465,13 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     const disclosure = button(doc, "", () => select("agent", agent.id), "pd-agent-disclosure"); disclosure.id = `pd-agent-${agent.id}`;
     disclosure.dataset.pdFocus = `agent-${agent.id}`;
     disclosure.setAttribute("aria-expanded", String(state.selected?.type === "agent" && state.selected.id === agent.id)); disclosure.setAttribute("aria-controls", detail.id);
-    const secondary = agent.model ?? (agent.hosted ? "In a chat app" : "On a computer");
-    disclosure.setAttribute("aria-label", `${agent.name}, ${agent.ownerName ? `${agent.ownerName}’s agent` : "Other agent"}, ${agent.app ? `${agent.app}, ` : ""}${secondary}, ${agent.status.label}${approved ? ", Can use Lists & docs" : ""}`);
+    const secondary = [contextOf(agent).distinction, agent.app, agent.model ?? (agent.hosted ? "In a chat app" : "On a computer")].filter(Boolean).join(" · ");
+    disclosure.setAttribute("aria-label", `${agent.exactName ?? agent.name}, ${agent.ownerName ? `${agent.ownerName}’s agent` : "Other agent"}, ${agent.app ? `${agent.app}, ` : ""}${secondary}, ${agent.status.label}${approved ? ", Can use Lists & docs" : ""}`);
     const copy = node(doc, "span", "pd-agent-copy"); const nameLine = node(doc, "span", "pd-agent-name-line");
-    const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.name; nameLine.append(name);
+    const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.exactName ?? agent.name; nameLine.append(name); badgeFor(agent, nameLine);
     nameLine.append(chip(doc, agent.status));
     const sentence = agent.status.attention && !model.sample ? agent.status.sentence : "";
-    const details = node(doc, "span", "pd-agent-app", sentence || [agent.app, secondary].filter(Boolean).join(" · "));
+    const details = node(doc, "span", "pd-agent-app", sentence || secondary);
     // The canvas row draws no Lists & docs glyph: the disclosure's accessible name above carries "Can use Lists & docs",
     // and the agent's details (the side card) show the Lists & docs fact.
     copy.append(nameLine, details);
@@ -512,7 +530,21 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     element.append(head);
     if (page && person && state.roleReceipt?.userId === person.id) { const done = node(doc, "p", "pd-receipt", state.roleReceipt.text); done.dataset.roleReceipt = ""; done.setAttribute("role", "status"); element.append(done); }
     const list = node(doc, "ul", "pd-agents-list"); if (person) list.id = `pd-group-${person.id}`;
-    list.hidden = !page && !!person && state.collapsed.has(person.id); agents.forEach((agent) => list.append(agentRow(agent))); element.append(list);
+    list.hidden = !page && !!person && state.collapsed.has(person.id);
+    const appGroups = new Map<string, HTMLUListElement>();
+    for (const agent of agents) {
+      if (!agent.hosted || agent.identityLifetime !== "ephemeral") { list.append(agentRow(agent)); continue; }
+      const key = agent.appClientId ?? agent.app ?? "";
+      let chats = appGroups.get(key);
+      if (!chats) {
+        const group = node(doc, "li", "pd-chat-group"); group.dataset.chatApp = key;
+        const heading = node(doc, "p", "pd-muted", `${agent.app ?? "App connection"} · Temporary chats`);
+        chats = node(doc, "ul", "pd-agents-list"); chats.setAttribute("aria-label", heading.textContent ?? "Temporary chats");
+        group.append(heading, chats); list.append(group); appGroups.set(key, chats);
+      }
+      chats.append(agentRow(agent));
+    }
+    element.append(list);
     if (!agents.length) { const none = node(doc, "p", "pd-empty-person", "No agents added yet."); if (page) none.classList.add("pd-sr-only"); element.append(none); } return element;
   };
   if (model.agents.length || state.query.trim() || model.people.length > 1) groups.forEach(({ person, agents }) => grid.append(card(person, agents)));
@@ -589,6 +621,18 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       const fact = (label: string, value: string, action?: HTMLElement) => { const row = node(doc, "div", "pd-fact-row"); row.append(node(doc, "dt", "", label), node(doc, "dd", "", value));
         if (action) { const holder = node(doc, "dd", "pd-fact-action"); holder.append(action); row.append(holder); } facts.append(row); };
       if (agent.app) fact("App", agent.app);
+      if (agent.hosted) {
+        fact("Identity", contextOf(agent).assurance!);
+        if (contextOf(agent).distinction) fact("Chats", contextOf(agent).distinction!);
+        if (agent.disambiguator) fact("Badge", agent.disambiguator);
+        if (agent.exactName) fact("Exact name", agent.exactName,
+          button(doc, "Copy name", (control) => {
+            const clipboard = doc.defaultView?.navigator.clipboard;
+            if (!clipboard) { control.textContent = "Copy unavailable"; return; }
+            void clipboard.writeText(agent.exactName!).then(() => { control.textContent = "Copied"; },
+              () => { control.textContent = "Copy unavailable"; });
+          }));
+      }
       const edit = agent.mayManage && !model.sample ? button(doc, "Change", () => {
         if (detail.querySelector("[data-model-editor]")) return;
         const editor = buildAgentModelEditor(doc, { agentName: agent.name, currentModel: agent.model,
