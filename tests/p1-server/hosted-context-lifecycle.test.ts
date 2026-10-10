@@ -13,9 +13,33 @@ const proof='deploy/release-proofs/session-identity/20261006000004-';
 function fixtureAssert(expression:string,label:string) {
   return sqlPhase(label,dbAssert(expression,label));
 }
+function beforePredicates(source:string) {
+  const aggregate='\nSELECT COALESCE((SELECT bool_and(ok) FROM (SELECT ok FROM checks UNION ALL SELECT ok FROM lifecycle_checks) all_checks),false) AS before_ok\n\\gset\n';
+  assert.ok(source.endsWith(aggregate),'before proof aggregate contract');
+  const start=source.indexOf('), checks(name,ok) AS (VALUES');
+  assert.ok(start>=0,'before proof predicate boundary');
+  let count=0;
+  // Number the actual proof rows, including duplicate readable names. Only
+  // boolean results enter psql variables; no catalog or customer values print.
+  const rows=source.slice(start,-aggregate.length)
+    .replace('checks(name,ok) AS (VALUES','checks(ordinal,name,ok) AS (VALUES')
+    .replace('lifecycle_checks(name,ok) AS (VALUES','lifecycle_checks(ordinal,name,ok) AS (VALUES')
+    .replace(/^ \('([^']+)',\s*COALESCE\(/gm,(_,name:string)=>` (${++count},'${name}',COALESCE(`);
+  assert.equal(count,69,'every before proof predicate must have a checkpoint');
+  const ids=Array.from({length:count},(_,i)=>String(i+1).padStart(2,'0'));
+  const query=source.slice(0,start)+rows+'\nSELECT '+ids.map((id,i)=>
+    `bool_and(ok) FILTER (WHERE ordinal=${i+1}) AS sid8_before_${id}`).join(',\n')
+    +' FROM (SELECT ordinal,ok FROM checks UNION ALL SELECT ordinal,ok FROM lifecycle_checks) before_checks\n\\gset\n';
+  return sqlPhase('sid8-before-evaluate',query)+ids.map(id=>{
+    const label=`sid8-before-${id}`;
+    return sqlPhase(label,`\\if :sid8_before_${id}\n\\else\nDO $fail$ BEGIN RAISE EXCEPTION '${label}'; END $fail$;\n\\endif\n`);
+  }).join('');
+}
 function catalog(path:string,expected:boolean,label:string) {
   const alias=path.endsWith('before-catalog.sql')?'before_ok':path.endsWith('rollback-catalog.sql')?'rollback_ok':'catalog_ok';
-  return sqlPhase(label,repoSql(path)+`\nSELECT :'${alias}'::boolean=${expected} AS lifecycle_proof\n\\gset\n\\if :lifecycle_proof\n\\else\nDO $fail$ BEGIN RAISE EXCEPTION '${label}'; END $fail$;\n\\endif\n`);
+  const source=repoSql(path);
+  return (alias==='before_ok' && expected ? beforePredicates(source) : '')
+    +sqlPhase(label,source+`\nSELECT :'${alias}'::boolean=${expected} AS lifecycle_proof\n\\gset\n\\if :lifecycle_proof\n\\else\nDO $fail$ BEGIN RAISE EXCEPTION '${label}'; END $fail$;\n\\endif\n`);
 }
 test('source-built prerequisite, full migration, function-fence perturbation and exact reserve',()=>{
   const up=repoSql('supabase/migrations/20261006000004_hosted_context_lifecycle.sql');
