@@ -86,7 +86,6 @@ export function peopleDialogCounts(model: PeopleDialogModel): string {
 }
 export function peopleDialogAccessUntil(agent: PeopleDialogAgent): string | null {
   if (!agent.own || agent.accessReadState !== "succeeded") return null;
-  // Hosted approval can be stored now; the note keeps tool availability separate from consent.
   if (!agent.access) return agent.hosted ? HOSTED_LISTS_NOTE : "Not allowed.";
   const until = `Allowed until ${agent.access.until ?? "you withdraw it"}.`;
   // A hosted agent's approval exists and can be withdrawn, but it cannot use Lists & docs yet.

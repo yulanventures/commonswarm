@@ -274,7 +274,7 @@ test("hosted and local owners use the same Allow controls and approval command; 
       householdAccess: { contentRole: "editor" }, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, HOSTED_LISTS_NOTE,
       initials: () => "M", markAgentAvatar: () => {}, approvalUntil, accessRefusalMessage, loadHouseholdConnections: f.load });
     const funcs = execute(`${section(script, "const connectionApproval =", "const connectionReads")}
-      ${section(script, "const approveAgent = async", "/** Withdrawal leaves")}; ({ renderAgentApprovals, approveAgent });`, f.ctx);
+      ${section(script, "const approveAgent = async", "/** Withdrawal leaves")}; ({ renderAgentApprovals, approveAgent });`, { ...f.ctx });
     funcs.renderAgentApprovals();
     const choices = dom.list.descendants().find(node => node.tag === "fieldset");
     const allow = dom.list.descendants().find(node => node.tag === "button" && node.textContent === "Allow");
