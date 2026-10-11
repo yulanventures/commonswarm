@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly cold recovery proof for CommonSwarm backups."""
+"""Weekly cold recovery proof; persist U7 identity and integrity before cleanup."""
 
 import base64
 import concurrent.futures
@@ -35,6 +35,8 @@ REQUIRED_DATABASE_SCHEMAS = frozenset({
 WORKDIR_BASE = '/var/backups/commonswarm-postgres/restore-drill'
 # DRILL_WORKDIR_KEEP = 2 counts the current run: that directory plus one earlier run.
 DRILL_WORKDIR_KEEP = 2
+KEY_TABLES = ('auth.users', 'storage.objects', 'swarm.agent_tokens',
+              'commonswarm_oauth.provider_artifacts', 'commonswarm_ops.migration_checksums')
 
 def atomic_write_status(path, status_obj):
     tmp = path.with_suffix(f'.tmp.{os.getpid()}')
@@ -53,6 +55,15 @@ def run_cmd(args, **kwargs):
             raise TimeoutError('drill budget exceeded')
         limit = min(limit, remaining)
     return subprocess.run(args, timeout=limit, **kwargs)
+
+
+def wait_ready(probe, attempts, error, expected=None):
+    for _ in range(attempts):
+        response = probe()
+        if response.returncode == 0 and (expected is None or response.stdout.strip() == expected):
+            return
+        time.sleep(1)
+    raise RuntimeError(error)
 
 
 def validate_manifest(text):
@@ -217,9 +228,7 @@ def validate_artifact(artifact, marker):
         if table in counts or not count.isdigit():
             raise ValueError('invalid table counts')
         counts[table] = int(count)
-    if not {'storage.objects', 'auth.users', 'swarm.agent_tokens',
-            'commonswarm_oauth.provider_artifacts',
-            'commonswarm_ops.migration_checksums'} <= counts.keys():
+    if not set(KEY_TABLES) <= counts.keys():
         raise ValueError('missing core table counts')
     if counts['commonswarm_ops.migration_checksums'] < 1:
         raise ValueError('C1 migration checksum table has no rows')
@@ -254,65 +263,96 @@ def assert_owned_db(info, label, network):
     return address
 
 
-def run_drill(workdir, unique_label):
+def run_drill(workdir, unique_label, result):
     destination, marker_data = find_backup(BACKUP_ROOT)
     db_artifact = workdir / 'database'
     db_artifact.mkdir(mode=0o700)
     run_cmd(['rclone', 'copy', destination + '/database', str(db_artifact), '--immutable'])
     rows, counts = validate_artifact(db_artifact, marker_data)
+    result['key_table_counts'] = {table: {'source': counts[table]} for table in KEY_TABLES}
     db_name = 'cold-db-' + secrets.token_hex(4)
     net_name = 'cold-net-' + secrets.token_hex(4)
     image = 'public.ecr.aws/supabase/postgres:17.6.1.147'
-    stack_dir = STACK_DIR
 
     run_cmd(['docker', 'network', 'create', '--internal', '--label', unique_label, net_name])
 
     pw = secrets.token_hex(24)
     jwt_secret = secrets.token_hex(32)
     env_file = workdir / 'database.env'
-    env_content = f"POSTGRES_PASSWORD={pw}\nJWT_SECRET={jwt_secret}\nJWT_EXP=3600\nBACKUP_RO_PASSWORD={secrets.token_hex(24)}\nCOMMONSWARM_EDGE_DB_PASSWORD={secrets.token_hex(24)}\n"
-    env_file.write_text(env_content)
+    env_file.write_text(f"POSTGRES_PASSWORD={pw}\nJWT_SECRET={jwt_secret}\nJWT_EXP=3600\nBACKUP_RO_PASSWORD={secrets.token_hex(24)}\nCOMMONSWARM_EDGE_DB_PASSWORD={secrets.token_hex(24)}\n")
     env_file.chmod(0o600)
 
-    run_cmd(['docker', 'run', '-d', '--name', db_name, '--network', net_name, '--network-alias', 'cold-db', '--memory', '768m', '--env-file', str(env_file), '--label', unique_label, image, 'postgres', '-D', '/etc/postgresql', '-c', 'cron.launch_active_jobs=off', '-c', 'shared_buffers=64MB', '-c', 'max_connections=40'])
+    created = run_cmd(['docker', 'run', '-d', '--name', db_name, '--network', net_name, '--network-alias', 'cold-db', '--memory', '768m', '--env-file', str(env_file), '--label', unique_label, image, 'postgres', '-D', '/etc/postgresql', '-c', 'cron.launch_active_jobs=off', '-c', 'shared_buffers=64MB', '-c', 'max_connections=40'])
+    result.update(restore_container_id=created.stdout.strip(), database='postgres')
 
     def sql(q):
         return run_cmd(['docker', 'exec', '-i', db_name, 'sh', '-c', 'PGPASSWORD="$POSTGRES_PASSWORD" psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U supabase_admin -d postgres -Atq'], input=q, check=False, timeout=15)
 
-    ready = False
-    for _ in range(180):
-        r = sql("SELECT setting FROM pg_settings WHERE name='cron.launch_active_jobs';")
-        if r.returncode == 0 and r.stdout.strip() == 'off':
-            ready = True
-            break
-        time.sleep(1)
-    if not ready:
-        raise RuntimeError("isolated database not ready/cron not disabled")
+    wait_ready(lambda: sql("SELECT setting FROM pg_settings WHERE name='cron.launch_active_jobs';"),
+               180, 'isolated database not ready/cron not disabled', 'off')
 
-    r_inspect = run_cmd(['docker', 'inspect', db_name])
-    address = assert_owned_db(json.loads(r_inspect.stdout)[0], unique_label, net_name)
+    address = assert_owned_db(json.loads(run_cmd(['docker', 'inspect', db_name]).stdout)[0], unique_label, net_name)
 
     setup_q = f"ALTER DATABASE postgres SET \"commonswarm.stack_identity\" TO 'n-db-target-v1'; ALTER DATABASE postgres SET \"commonswarm.local_rehearsal\" TO '1'; ALTER DATABASE postgres SET \"commonswarm.local_target_address\" TO '{address}';"
     if sql(setup_q).returncode != 0:
         raise RuntimeError("Failed to set local rehearsal variables")
 
     service_file = workdir / 'service'
-    service_file.write_text("[target]\nhost=cold-db\nport=5432\ndbname=postgres\nuser=supabase_admin\nsslmode=disable\n")
+    service_file.write_text(''.join(f'[{service}]\nhost=cold-db\nport=5432\ndbname={database}\nuser=supabase_admin\nsslmode=disable\n'
+                                   for service, database in (('target', 'postgres'), ('source', 'schema_source'))))
     service_file.chmod(0o600)
 
     pass_file = workdir / 'pass'
-    pass_file.write_text(f"cold-db:5432:postgres:supabase_admin:{pw}\n")
+    pass_file.write_text(f"cold-db:5432:*:supabase_admin:{pw}\n")
     pass_file.chmod(0o600)
 
-    scripts = ['restore-target.sh', 'prepare-target.sh', 'restore-cron-jobs.sh', 'verify-counts.sh']
-    for script in scripts:
-        args = ['docker', 'run', '--rm', '--network', net_name, '--env-file', str(env_file), '-e', 'MIGRATION_ARTIFACT_DIR=/artifacts', '-e', 'PGSERVICEFILE=/run/service', '-e', 'PGPASSFILE=/run/pass', '-e', 'TARGET_DATABASE_URL=isolated-cold-recovery', '-v', f"{stack_dir}:/work:ro", '-v', f"{db_artifact}:/artifacts", '-v', f"{service_file}:/run/service:ro", '-v', f"{pass_file}:/run/pass:ro", '--label', unique_label, '--entrypoint', '/bin/bash', image, f"/work/migrate/{script}"]
-        res = run_cmd(args, check=False, timeout=1800)
+    args = ['docker', 'run', '--rm', '--network', net_name, '--env-file', str(env_file), '-e', 'MIGRATION_ARTIFACT_DIR=/artifacts', '-e', 'PGSERVICEFILE=/run/service', '-e', 'PGPASSFILE=/run/pass', '-e', 'TARGET_DATABASE_URL=isolated-cold-recovery', '-v', f"{STACK_DIR}:/work:ro", '-v', f"{db_artifact}:/artifacts", '-v', f"{service_file}:/run/service:ro", '-v', f"{pass_file}:/run/pass:ro", '--label', unique_label, '--entrypoint']
+    def artifact_tool(tool, *options):
+        return run_cmd(args + [tool, image, *options], timeout=1800).stdout
+
+    # Rebuild the artifact schema in the owned container, independently of the
+    # target. Both hashes use one pg_dump filter; only its outer headers vary.
+    listing = artifact_tool('pg_restore', '--list', '/artifacts/database.dump')
+    (db_artifact / 'schema-list').write_text(''.join(line + '\n' for line in listing.splitlines()
+        if 'commonswarm_cutover_write_freeze' not in line and 'commonswarm_cutover_write_guard' not in line))
+    result['schema_checksums'] = {'algorithm': 'sha256-schema-ddl-v3'}
+    artifact_tool('psql', '--dbname=service=target', '-X', '-v', 'ON_ERROR_STOP=1', '--file=/artifacts/roles.sql')
+    artifact_tool('createdb', '--maintenance-db=service=target', '--template=postgres', 'schema_source')
+    artifact_tool('pg_restore', '--dbname=service=source', '--schema-only', '--clean', '--if-exists',
+                  '--exit-on-error',
+                  '--use-list=/artifacts/schema-list', '/artifacts/database.dump')
+    def schema_checksum(service):
+        # PG17 --schema disables include_everything and silently omits all
+        # publications/subscriptions. --exclude-schema keeps them dumpable.
+        schemas = ','.join("'" + schema + "'" for schema in sorted(REQUIRED_DATABASE_SCHEMAS))
+        excluded = artifact_tool('psql', '--dbname=service=' + service, '-XAt', '-v', 'ON_ERROR_STOP=1',
+            '-c', f'SELECT pg_catalog.quote_ident(nspname) FROM pg_catalog.pg_namespace WHERE nspname NOT IN ({schemas}) ORDER BY nspname;')
+        ddl = artifact_tool('pg_dump', '--dbname=service=' + service, '--schema-only', '--no-owner', '--no-privileges',
+            '--exclude-table=public.commonswarm_cutover_probe',
+            '--exclude-table=public.commonswarm_cutover_state', '--exclude-table=realtime.messages_*',
+            *['--exclude-schema=' + schema for schema in excluded.splitlines()])
+        # Anchors prevent header-shaped comments inside function bodies from
+        # being normalized. Keep object headers, body comments and blank lines.
+        ddl = re.sub(r'\A--\n-- PostgreSQL database dump\n--\n\n(?:\\restrict [A-Za-z0-9]+\n\n)?'
+                     r'-- Dumped from database version [^\n]+\n-- Dumped by pg_dump version [^\n]+\n\n', '', ddl)
+        ddl = re.sub(r'--\n-- PostgreSQL database dump complete\n--\n\n(?:\\unrestrict [A-Za-z0-9]+\n\n)?\Z', '', ddl)
+        return hashlib.sha256(ddl.encode('utf-8')).hexdigest()
+    result['schema_checksums']['source'] = schema_checksum('source')
+    for script in ('restore-target.sh', 'prepare-target.sh', 'restore-cron-jobs.sh', 'verify-counts.sh'):
+        res = run_cmd(args + ['/bin/bash', image, f'/work/migrate/{script}'], check=False, timeout=1800)
         (workdir / f"{script}.log").write_text(res.stdout + '\n' + res.stderr)
         if res.returncode != 0:
             raise RuntimeError(f"Script {script} failed")
+        if script == 'restore-target.sh':
+            result['restored_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            result['schema_checksums']['target'] = schema_checksum('target')
+            measured = sql(' UNION ALL '.join(f"SELECT '{table}', count(*) FROM {table}" for table in KEY_TABLES) + ';')
+            measured.check_returncode()
+            for line in measured.stdout.splitlines():
+                table, count = line.split('|')
+                result['key_table_counts'][table]['target'] = int(count)
 
-    if int(sql('SELECT count(*) FROM storage.objects;').stdout.strip()) != len(rows):
+    if result['key_table_counts']['storage.objects']['target'] != len(rows):
         raise ValueError('restored file row count mismatch')
     tenant_prefix = destination.split('yulan-vps-1-backups/', 1)[1] + '/objects/commonswarm'
     endpoint, acc_key, digest, session = generate_temp_credentials(tenant_prefix)
@@ -360,27 +400,16 @@ def run_drill(workdir, unique_label):
     run_cmd(['docker', 'network', 'connect', egress_name, storage_name])
     run_cmd(['docker', 'start', storage_name])
 
-    s_ready = False
-    for _ in range(120):
-        r = run_cmd(['docker', 'exec', storage_name, 'node', '-e', "fetch('http://127.0.0.1:5000/status',{signal:AbortSignal.timeout(5000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"], check=False, timeout=10)
-        if r.returncode == 0:
-            s_ready = True
-            break
-        time.sleep(1)
-    if not s_ready:
-        raise RuntimeError("isolated storage API not ready")
+    wait_ready(lambda: run_cmd(['docker', 'exec', storage_name, 'node', '-e', "fetch('http://127.0.0.1:5000/status',{signal:AbortSignal.timeout(5000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"], check=False, timeout=10),
+               120, 'isolated storage API not ready')
 
     items_expected = fetch_offsite_bytes(rows, endpoint, acc_key, digest, session, tenant_prefix)
     results = fetch_api_bytes(items_expected, storage_name)
 
-    if len(results) != len(rows):
-        raise RuntimeError("API results length mismatch")
-
     if sorted(x['index'] for x in results) != list(range(len(rows))):
         raise RuntimeError("Duplicate or missing indices in API results")
 
-    matched_count = sum(1 for x in results if x.get('matches') is True and x.get('status') == 200)
-    if matched_count != len(rows):
+    if any(x.get('matches') is not True or x.get('status') != 200 for x in results):
         raise RuntimeError("Object match failed for some items")
 
     return {'destination': destination, 'objects': len(rows), 'tables': len(counts),
@@ -408,17 +437,9 @@ def prune_drill_workdirs(base, keep):
     if base.is_symlink() or not base.is_dir():
         raise RuntimeError('drill work directory base is not a directory')
     base_abs = Path(os.path.abspath(base))
-    candidates = []
-    for child in base.iterdir():
-        if child.is_symlink() or not child.is_dir():
-            continue
-        if re.fullmatch(r'[0-9a-f]{32}', child.name) is None:
-            continue
-        child_abs = Path(os.path.abspath(child))
-        if child_abs.parent != base_abs:
-            continue
-        candidates.append(child_abs)
-    candidates.sort(key=lambda path: (path.stat().st_mtime_ns, path.name), reverse=True)
+    candidates = sorted((Path(os.path.abspath(child)) for child in base.iterdir()
+                         if not child.is_symlink() and child.is_dir() and re.fullmatch(r'[0-9a-f]{32}', child.name)),
+                        key=lambda path: (path.stat().st_mtime_ns, path.name), reverse=True)
     for old in candidates[keep:]:
         if old.is_symlink() or not old.is_dir() or old.parent != base_abs:
             raise RuntimeError('refusing to delete outside the drill directory')
@@ -455,7 +476,7 @@ def main():
             old_handlers[sig] = signal.signal(sig, interrupted)
         DEADLINE = time.monotonic() + 3 * 3600
         signal.alarm(3 * 3600)
-        result.update(run_drill(workdir, label))
+        result.update(run_drill(workdir, label, result))
         result['state'] = 'verified_pending_cleanup'
     except BaseException as error:
         result.update(state='failed', error_type=type(error).__name__)
@@ -466,11 +487,16 @@ def main():
             if sig in old_handlers:
                 signal.signal(sig, signal.SIG_IGN)
         try:
-            cleanup(workdir, label)
+            result['status'] = 'PASS' if result['state'] == 'verified_pending_cleanup' else 'FAIL'
+            try:
+                atomic_write_status(status_file, result)
+            finally:
+                cleanup(workdir, label)
             if result['state'] == 'verified_pending_cleanup':
                 result.update(ok=True, state='complete')
         except BaseException as error:
             result.update(ok=False, state='cleanup_failed', cleanup_error_type=type(error).__name__)
+        result['status'] = 'PASS' if result['ok'] else 'FAIL'
         result.update(at=datetime.datetime.now(datetime.timezone.utc).isoformat(), evidence=str(workdir))
         try:
             atomic_write_status(status_file, result)
