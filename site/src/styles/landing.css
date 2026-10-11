@@ -305,13 +305,27 @@
   margin-inline-end: calc(var(--av) * 0.1);
 }
 
-/* The stage: the app in a browser window, the phone view beside it, two of its messages floating out. */
+/* The stage: the app in a browser window, the phone view beside it, two of its messages floating out (the scene),
+ * then the visible caption that says which agents can do what. */
 .lp-stage {
-  position: relative;
   inline-size: min(100% - var(--gutter) * 2, 70rem);
   margin: clamp(3rem, 6vw, 5rem) auto 0;
-  padding-block-end: clamp(4rem, 9vw, 8rem);
   text-align: start;
+}
+
+.lp-stage__scene {
+  position: relative;
+  padding-block-end: clamp(4rem, 9vw, 8rem);
+}
+
+.lp-stage__caption {
+  max-inline-size: 36rem;
+  margin: var(--s-6) auto 0;
+  font-size: var(--t-sm);
+  line-height: 1.6;
+  text-align: center;
+  text-wrap: balance;
+  color: var(--text-muted);
 }
 
 @media (min-width: 80rem) {
@@ -904,7 +918,7 @@
 
 @media (max-width: 79.99rem) {
   /* Room under the window for the Wren message, clear of the app's New workspace button. */
-  .lp-stage {
+  .lp-stage__scene {
     padding-block-end: clamp(6rem, 9vw, 8rem);
   }
 
@@ -967,7 +981,7 @@
   }
 
   /* Room above and below the phone for the two messages, so neither covers the app inside it. */
-  .lp-stage {
+  .lp-stage__scene {
     display: grid;
     justify-items: center;
     padding-block: 4.5rem 5.5rem;
