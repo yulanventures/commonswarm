@@ -1830,6 +1830,13 @@ LOCK=('admin-principal-lock-order-ci','admin-principal-lock-order-staging')
 if any(name in required for name in LOCK):
     import datetime,re,subprocess
     need(all(name in required for name in LOCK),'both lock-order gates')
+    # Classes change only the base expectation; raw pairs retain duplicate map entries.
+    controls=contract['gates'][LOCK[0]]; classes=contract.get('x2_race_classes')
+    entries=[v for k,v in json.loads((pathlib.Path(sys.argv[3]).parent/'GATES.json').read_text(),object_pairs_hook=list) if k=='x2_race_classes']
+    need(len(entries)==1 and isinstance(classes,dict) and len(entries[0])==len(classes)
+         and len(controls)==len(set(controls)) and set(classes)==set(controls)
+         and contract['gates'][LOCK[1]]==controls
+         and all(c in ('positive-control','base-cycle','regression-guard') for c in classes.values()),'lock-order rule 8: x2_race_classes')
     R=d['release_sha']; T=d.get('lock_order_base_variant_sha')
     need(isinstance(T,str) and re.fullmatch('[0-9a-f]{40}',T) is not None and T!=R,'lock_order_base_variant_sha')
     def git(*argv):
@@ -1870,7 +1877,8 @@ if any(name in required for name in LOCK):
     tree={T:git('rev-parse',T+':supabase/migrations').decode().strip(),R:git('rev-parse',R+':supabase/migrations').decode().strip()}
     for label,rec in (('CI',ci),('staging',st)):
         need(rec['runs']['base']['migration_sha']==tree[T] and rec['runs']['lane']['migration_sha']==tree[R],'lock-order rule 7: '+label+' run migration trees')
-        for run,want in (('base',{c:('PASS' if i==0 else 'FAIL-40P01') for i,c in enumerate(contract['gates'][LOCK[0]])}),('lane',{c:'PASS' for c in contract['gates'][LOCK[0]]})):
+        for run in ('base','lane'):
+            want={c:('FAIL-40P01' if run=='base' and classes[c]=='base-cycle' else 'PASS') for c in controls}
             need(rec['runs'][run]['results']==want,'lock-order rule 8: '+label+' '+run+' results')
     project=st['compose_project']
     need(isinstance(project,str) and re.fullmatch('c1b-x2-[a-z0-9]{8}',project) is not None and project!='commonswarm-supabase-stack','lock-order rule 9: compose_project')

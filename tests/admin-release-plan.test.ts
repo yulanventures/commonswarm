@@ -19,6 +19,13 @@ const block = (id: string) => {
   assert.equal(matches.length, 1, `one complete ${id} block`);
   return matches[0]!;
 };
+/** The compatibility oracle is the exact pre-amendment ai-gates block, not a reimplementation. */
+const oldGatesBlock = () => {
+  const r = spawnSync('git', ['show', 'e82771087634c1feced87b0a3b9d51b555aaecda:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8', maxBuffer: 64 << 20 });
+  assert.equal(r.status, 0, r.stderr);
+  const gates = [...r.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!).filter(b => b.startsWith('# step: ai-gates\n'));
+  assert.equal(gates.length, 1); return gates[0]!;
+};
 // Inputs binding the in-repository plan bytes, for blocks that run ai_run.
 const releasedPlanInputs = (dir: string) => { const file = join(dir, 'released-plan-inputs.json'); writeFileSync(file, JSON.stringify({ plan_sha256: digest(plan) })); return file; };
 const run = (source: string, env: Record<string, string> = {}) => spawnSync('/bin/bash', [], {
@@ -329,7 +336,9 @@ test('admin release plan: reserves are verbatim and all lane gates own retained 
   }
 });
 
-test('admin release plan: checker receipt validates exact build, controls and retained file digests', () => {
+test('admin release plan: every existing W1 control receipt fixture keeps its old ai-gates verdict', () => {
+  // Ruling 40: execute the old block on these same six receipts, without copying the fixture corpus.
+  const oldGate = oldGatesBlock(); let compared = 0;
   const contract = JSON.parse(readFileSync(join(directory, 'GATES.json'), 'utf8'));
   const evidence = join(scratch, 'control.txt'); writeFileSync(evidence, 'independent nonsecret control\n');
   const receipt: { release_sha: string; evidence_root: string; gates: Record<string, unknown> } = {
@@ -342,7 +351,9 @@ test('admin release plan: checker receipt validates exact build, controls and re
   const path = join(scratch, 'full-receipt.json');
   const check = () => {
     writeFileSync(path, JSON.stringify(receipt));
-    return run(block('ai-gates'), { INPUTS_FILE: inputFile(base()), GATE_RECEIPT_FILE: path, PLAN_FILE: planPath });
+    const env = { INPUTS_FILE: inputFile(base()), GATE_RECEIPT_FILE: path, PLAN_FILE: planPath };
+    const current = run(block('ai-gates'), env), baseline = run(oldGate, env); compared++;
+    assert.deepEqual([current.status, current.stdout, current.stderr], [baseline.status, baseline.stdout, baseline.stderr]); return current;
   };
   assert.equal(check().status, 0);
   receipt.release_sha = 'b'.repeat(40);
@@ -353,6 +364,7 @@ test('admin release plan: checker receipt validates exact build, controls and re
   gate.controls = []; assert.match(check().stderr, /positive\/negative controls/); gate.controls = contract.gates[name];
   gate.file = '../outside'; assert.match(check().stderr, /relative file/); gate.file = 'control.txt';
   gate.sha256 = 'c'.repeat(64); assert.match(check().stderr, /evidence digest/);
+  assert.equal(compared, 6, 'one admission and five refusals: the complete existing W1 control receipt corpus');
 });
 
 
@@ -4869,6 +4881,7 @@ test('C1-25: box-hosted blocks never call ai_run ai-gates or open evidence_root;
 });
 
 test('C1-25: box bind passes with no evidence tree; one-byte and other-release receipts refuse; ai-gates still needs the tree', () => {
+  const oldGate = oldGatesBlock(); let compared = 0;
   const contract = JSON.parse(readFileSync(join(directory, 'GATES.json'), 'utf8')) as {
     gates: Record<string, string[]>; windows: Record<string, string[]>;
   };
@@ -4888,6 +4901,9 @@ test('C1-25: box bind passes with no evidence tree; one-byte and other-release r
     writeFileSync(receiptPath, receipt);
     writeFileSync(join(proof, 'gates.json'), extra.gatesCopy ?? receipt);
     const inputs = { ...base(), window: 'W1', gate_receipt_sha256: digest(extra.digestReceipt ?? receipt) };
+    const env = { INPUTS_FILE: inputFile(inputs), GATE_RECEIPT_FILE: receiptPath, PLAN_FILE: planPath };
+    const current = run(block('ai-gates'), env), old = run(oldGate, env); compared++;
+    assert.deepEqual([current.status, current.stdout, current.stderr], [old.status, old.stdout, old.stderr], 'every existing bind-test receipt retains its old ai-gates verdict');
     return run(block('ai-gates-bind'), {
       INPUTS_FILE: inputFile(inputs), GATE_RECEIPT_FILE: receiptPath, PLAN_FILE: planPath, PROOF_DIR: proof,
     });
@@ -4903,6 +4919,8 @@ test('C1-25: box bind passes with no evidence tree; one-byte and other-release r
   });
   assert.notEqual(stillAbsent.status, 0);
   assert.match(stillAbsent.stderr, /FAIL ai-gates: evidence root; STOP/);
+  const oldAbsent = run(oldGate, { INPUTS_FILE: inputFile({ ...base(), window: 'W1', gate_receipt_sha256: digest(matching) }), GATE_RECEIPT_FILE: join(scratch, 'c125-gates-receipt.json'), PLAN_FILE: planPath }); compared++;
+  assert.deepEqual([stillAbsent.status, stillAbsent.stdout, stillAbsent.stderr], [oldAbsent.status, oldAbsent.stdout, oldAbsent.stderr], 'the seventh W1 control fixture retains its absent-evidence verdict');
   const flipped = Buffer.from(matching);
   flipped[10] ^= 1;
   const oneByte = runBind(flipped.toString('latin1'), { digestReceipt: matching, gatesCopy: matching });
@@ -4917,6 +4935,7 @@ test('C1-25: box bind passes with no evidence tree; one-byte and other-release r
   const otherRelease = runBind(other);
   assert.notEqual(otherRelease.status, 0);
   assert.match(otherRelease.stderr, /FAIL ai-gates-bind: receipt release_sha expected input-release-sha got mismatch; STOP/);
+  assert.equal(compared, 5, 'four bind variants plus the explicit absent-evidence fixture');
 });
 
 const GRANT_PASS = 'PASS W6 edge oauth-runtime SET grant: one f/f/t membership, edge others unchanged, issuer unchanged, live SET LOCAL ROLE';
