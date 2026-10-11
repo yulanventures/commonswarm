@@ -51,7 +51,8 @@ class NotifyTests(unittest.TestCase):
         self.status();n.ping.side_effect=OSError('unavailable')
         with self.assertRaises(OSError):n.notify('backup','finish')
     def test_default_cli_matches_base_bytes(self):
-        source=subprocess.check_output(['git','show','43c09b2a:deploy/supabase-stack/backup/notify-healthcheck.py'])
+        try:source=subprocess.check_output(['git','show','43c09b2a:deploy/supabase-stack/backup/notify-healthcheck.py'],cwd=Path(__file__).resolve().parents[3])
+        except (OSError,subprocess.CalledProcessError) as error:self.fail(f'Cannot load byte-identity baseline 43c09b2a with git: {error}')
         base={"__name__":"base"};exec(compile(source,'<base-notifier>','exec'),base)
         for kind in ('backup','restore'):
             key,name,flags=n.KINDS[kind]
