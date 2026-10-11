@@ -5,8 +5,9 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { setupSteps, setupProgress } from "../../lib/setup-checklist";
 import { createLatestRead } from "../../lib/latest-read";
-import { approvalUntil, accessRefusalMessage, withdrawRefusalMessage, PERSONAL_PURPOSE_WARNING } from "../../lib/household-access";
-import { peopleDialogAccessUntil, peopleDialogCanAct, withdrawConfirmText } from "../../lib/people-dialog-view";
+import { approvalUntil, accessRefusalMessage, withdrawRefusalMessage, PERSONAL_PURPOSE_WARNING, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS } from "../../lib/household-access";
+import { peopleDialogAccessUntil, peopleDialogCanAct, renderPeopleDialog, withdrawConfirmText } from "../../lib/people-dialog-view";
+import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
 import { agentStatus, peopleAgentStatus } from "../../lib/agent-status";
 import { classifyAgentPresence } from "../../../../src/cloud/agent-presence";
 import { grantRiskBadge, STANDING_GRANT_COPY } from "../../lib/standing-grants";
@@ -173,8 +174,6 @@ test("active approvals expose Save and withdrawal in both places, owned agents o
   assert.match(peopleView, /fact\("Lists & docs", accessFact, accessAction\)/,
     "withdrawal now belongs to the detail fact; the surface has only its quiet access indicator");
   assert.match(peopleView, /"Can use Lists & docs"/);
-  assert.match(peopleView, /!agent\.hosted && peopleDialogCanAct\(model, "allow", agent\.id\)/,
-    "a hosted agent without an approval has no Allow button: the Lists pane offers none for it");
   assert.match(script, /withdrawAgent\(id, agent.name, agent.transport === "hosted_mcp", button, notice, true\)/,
     "the dialog's nested confirmation suppresses the card's native confirmation");
   const withdraw = section(script, "const withdrawAgent = async", "const confirmOwnAccess = async");
@@ -186,8 +185,6 @@ test("active approvals expose Save and withdrawal in both places, owned agents o
   assert.match(withdraw, /await loadHouseholdConnections\(\)/);
   assert.match(markup, /A computer agent keeps it until its key ends or you withdraw it/);
   assert.match(markup, /Lists &amp; docs is not available through the CommonSwarm connector yet, so an agent in a chat app cannot use it/);
-  /* Hosted rows show the note and keep controls only for an existing approval (withdraw stays reachable). */
-  assert.match(cards, /connection.kind === "hosted"[\s\S]*?HOSTED_LISTS_NOTE[\s\S]*?if \(!approval\) \{ choices.hidden = true; allow.hidden = true; \}/);
   assert.doesNotMatch(markup, /24 hours|Three short steps/);
 });
 
@@ -210,6 +207,94 @@ test("history reads removed identities separately and leaves the live roster unc
 function execute(source: string, context: Record<string, unknown>): any {
   return runInNewContext(ts.transpile(source, { target: ts.ScriptTarget.ES2022 }), context);
 }
+
+// Tree, events and visibility only: both renderers run unchanged, with transport recorded below.
+function approvalDom() {
+  const doc: any = { activeElement: null };
+  class Element {
+    children: Element[] = []; dataset: Record<string, string> = {}; attributes: Record<string, string> = {};
+    textContent = ""; className = ""; hidden = false; disabled = false; checked = false; value = "";
+    ownerDocument = doc; events = new Map<string, () => void>();
+    classList = { add: (...names: string[]) => { this.className += ` ${names.join(" ")}`; } };
+    constructor(public tag: string) {}
+    get childElementCount() { return this.children.filter(child => child.tag !== "#text").length; }
+    setAttribute(name: string, value: string) { this.attributes[name] = value; }
+    append(...nodes: Element[]) { this.children.push(...nodes); }
+    replaceChildren(...nodes: Element[]) { this.children = nodes; }
+    addEventListener(event: string, callback: () => void) { this.events.set(event, callback); }
+    click() { if (!this.disabled) this.events.get("click")?.(); }
+    closest() { return null; }
+    contains(node: Element) { return this === node || this.descendants().includes(node); }
+    descendants(): Element[] { return this.children.flatMap(child => [child, ...child.descendants()]); }
+    querySelectorAll(selector: string) {
+      const data = /^\[data-([\w-]+)\]$/.exec(selector);
+      const key = data?.[1].replace(/-([a-z])/g, (_match, letter) => letter.toUpperCase());
+      return this.descendants().filter(child => key ? key in child.dataset : child.tag === selector);
+    }
+    querySelector(selector: string) { return this.querySelectorAll(selector)[0] ?? null; }
+  }
+  doc.createElement = (tag: string) => new Element(tag);
+  doc.createElementNS = (_namespace: string, tag: string) => new Element(tag);
+  doc.createTextNode = (text: string) => Object.assign(new Element("#text"), { textContent: text });
+  return { root: new Element("section"), detail: new Element("section"), list: new Element("ul"), doc };
+}
+
+test("hosted and local owners use the same Allow controls and approval command; other viewers get no control", async () => {
+  for (const kind of ["hosted", "local"]) {
+    const f = dialogConnectionsFixture(), dom = approvalDom(), actions: any[] = [], calls: any[] = [];
+    const principal = "00000000-0000-4000-8000-000000000001";
+    const connection: any = { kind, principal_id: principal, name: "Muse", approval: null,
+      connection_id: "00000000-0000-4000-8000-000000000002", grant_id: "00000000-0000-4000-8000-000000000003" };
+    f.ctx.agents[0].principalId = principal;
+    f.ctx.agents[0].transport = kind === "hosted" ? "hosted_mcp" : "local";
+    f.ctx.postCommand = async (_session: any, _id: string, body: any, envelope: any) => {
+      if (body.kind === "household_connections") return { status: 200, body: { status: "ok", connections: [connection] } };
+      calls.push(JSON.parse(JSON.stringify({ body, envelope })));
+      return { status: 200, body: { status: "committed", expires_at: null } };
+    };
+    await f.load();
+    const paint = () => renderPeopleDialog(dom.root as any, dom.detail as any, f.model(),
+      { selected: { type: "agent", id: principal }, collapsed: new Set(), showAllAttention: false, query: "" },
+      { render: () => {}, action: (action, id) => { actions.push([action, id]); }, saveModel: async () => {},
+        confirm: () => assert.fail("Allow opens the existing Lists & docs choices") });
+    const allowButton = () => dom.detail.descendants().find(node => node.tag === "button" && node.textContent === "Allow…");
+    paint(); assert.ok(allowButton(), `${kind}: owner has Allow…`);
+    allowButton()!.click(); assert.deepEqual(actions, [["allow", principal]]);
+    for (const role of ["owner", "admin", "member"]) {
+      f.ctx.agents[0].ownerUserId = "someone-else"; f.ctx.members[0].role = role;
+      paint(); assert.equal(allowButton(), undefined, `${kind}: ${role} cannot approve another person's agent`);
+    }
+    f.ctx.agents[0].ownerUserId = "person";
+    for (const state of ["pending", "failed"]) {
+      f.ctx.householdConnectionsReadState = state; paint(); assert.equal(allowButton(), undefined);
+    }
+    f.ctx.householdConnectionsReadState = "succeeded";
+    f.ctx.sampleMode = true; paint(); assert.equal(allowButton(), undefined); f.ctx.sampleMode = false;
+    Object.assign(f.ctx, { document: dom.doc, one: (selector: string) => selector === "[data-household-agent-list]" ? dom.list : null,
+      householdAccess: { contentRole: "editor" }, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, HOSTED_LISTS_NOTE,
+      initials: () => "M", markAgentAvatar: () => {}, approvalUntil, accessRefusalMessage, loadHouseholdConnections: f.load });
+    const funcs = execute(`${section(script, "const connectionApproval =", "const connectionReads")}
+      ${section(script, "const approveAgent = async", "/** Withdrawal leaves")}; ({ renderAgentApprovals, approveAgent });`, f.ctx);
+    funcs.renderAgentApprovals();
+    const choices = dom.list.descendants().find(node => node.tag === "fieldset");
+    const allow = dom.list.descendants().find(node => node.tag === "button" && node.textContent === "Allow");
+    assert.ok(choices && !choices.hidden); assert.ok(allow && !allow.hidden);
+    assert.equal(dom.list.descendants().some(node => node.textContent === HOSTED_LISTS_NOTE), kind === "hosted");
+    allow.click();
+    // The event starts an async command; one event-loop turn drains its resolved transport and read.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.deepEqual(calls, [{ body: { kind: "household_approve_connection", connection: {
+      kind, principal_id: principal, connection_id: connection.connection_id, grant_id: connection.grant_id,
+      operations: ["read", "create", "update"] } }, envelope: { workspace_id: "workspace", stream: { kind: "workspace" } } }]);
+    assert.equal(allow.disabled, false);
+    assert.ok(dom.list.descendants().some(node => node.textContent === "Allowed until you withdraw it."));
+    connection.approval = { operations: ["read", "create", "update"], expires_at: null };
+    paint(); assert.equal(allowButton(), undefined, "an approved agent offers withdrawal instead");
+    assert.ok(dom.detail.descendants().some(node => node.tag === "button" && node.textContent === "Withdraw"));
+    funcs.renderAgentApprovals();
+    assert.ok(dom.list.descendants().some(node => node.tag === "button" && node.textContent === "Save"));
+  }
+});
 
 // Run the actual read and dialog projection together; only transport and unrelated UI are stubbed.
 function dialogConnectionsFixture() {

@@ -1,5 +1,8 @@
 ---
 /*
+ * Lists & docs: owner-scoped connections and choices in, approval receipts out.
+ * Hosted and local agents share one flow and command; the server decides permission.
+ *
  * /app is the product surface. The browser owns the state machine because the page is
  * statically built while auth, workspaces, agents, and signals belong to the signed-in
  * session. Static markup contains every panel so focus, loading, and failure states stay
@@ -7724,15 +7727,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             .map((input) => input.value);
           void approveAgent(connection, operations, allow, status);
         });
-        /* Display only: Lists & docs is not available through the Claude connector yet, so an
-           agent in a chat app shows the note instead of the approval controls. An existing
-           approval keeps its controls so it can still be changed or withdrawn. */
+        /* Hosted consent uses the same controls; this note describes tool availability. */
         if (connection.kind === "hosted") {
           const note = document.createElement("small");
           note.dataset.approvalHostedNote = "";
           note.textContent = HOSTED_LISTS_NOTE;
           copy.append(note);
-          if (!approval) { choices.hidden = true; allow.hidden = true; }
         }
         row.append(orb, copy, choices, allow, status);
         if (approval) {
