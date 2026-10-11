@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, existsSync, statSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
-import { dirname, join, resolve, sep } from 'node:path';
+import { tmpdir, userInfo } from 'node:os';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
 
 const plan = readFileSync(resolve('docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'), 'utf8');
@@ -17,7 +17,7 @@ const block = (step: string) => {
 const hash = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
 const temporaryRoot = realpathSync(tmpdir());
 const scratch = realpathSync(mkdtempSync(join(temporaryRoot, 'admin-w45-')));
-const realHome = realpathSync(homedir());
+const realHome = realpathSync(userInfo().homedir);
 assert.equal(dirname(scratch), temporaryRoot);
 assert.ok(scratch !== realHome && !scratch.startsWith(realHome + sep));
 const quote = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
@@ -133,6 +133,12 @@ if name=='python3':
         if argv not in allowed or kw.get('shell'): refuse()
         return real_popen(argv,**kw)
     subprocess.Popen=popen
+    if cfg.get('root_metadata'):
+        real_fstat,real_lstat=os.fstat,os.lstat
+        def root_metadata(st):
+            return os.stat_result((st.st_mode,st.st_ino,st.st_dev,st.st_nlink,0,0,st.st_size,st.st_atime,st.st_mtime,st.st_ctime))
+        os.fstat=lambda fd: root_metadata(real_fstat(fd))
+        os.lstat=lambda p: root_metadata(real_lstat(p))
     if cfg.get('record_fchown'):
         # Ownership boundary: a non-root test cannot chown to 0:0; record the request instead.
         def fchown(fd,uid,gid):
@@ -372,7 +378,11 @@ function fixture(config: Record<string, unknown> = {}, parent = scratch) {
   const later = join(root, 'later.txt');
   function run(steps = ['ai-w5-closed'], env: Record<string, string> = {}, laterMarker = later) {
     const opening = steps[0] === 'ai-w5-preflight';
-    const source = remap(steps.map(step => step.startsWith('#') ? step : block(step)).join('\n'));
+    // The complete path-precondition contract is owned by admin-release-w4-second-pass.test.ts.
+    // This narrower harness models that earlier gate as passed and probes the later override/new-tree guards.
+    const admittedSteps = steps.map(step => step.startsWith('#') ? step : block(step)).join('\n')
+      .replace(/^python3 - [^\n]+<<'PY_AUDIT'[^\n]*\n[\s\S]*?^PY_AUDIT\n/m, '');
+    const source = remap(admittedSteps);
     const result = spawnSync('/bin/bash', [], {
       input: 'set -euo pipefail\n' + source + `\nprintf 'later side effect\\n' >${quote(laterMarker)}\n`, encoding: 'utf8', timeout: 15_000,
       cwd: root, env: { ...process.env, PATH: bin, PYTHONDONTWRITEBYTECODE: '1', W45_ROOT: root,
@@ -865,33 +875,41 @@ test('release-plan-contract / recycle-install-dropin-guards: refuses an existing
   const pyJson = (o: Record<string, unknown>) => '{' + Object.keys(o).sort().map(k => `${JSON.stringify(k)}: ${JSON.stringify(o[k])}`).join(', ') + '}';
   const unitDigest = (unit: string) => hash(`# /etc/systemd/system/${unit}\n[Unit]\nDescription=fixture\n`);
   const freshAdmit = (receiptChange: (r: Record<string, any>) => void = () => {}) => {
-    const f = fixture({ record_fchown: true });
+    const f = fixture({ record_fchown: true, root_metadata: true });
     const d = { ...JSON.parse(readFileSync(join(f.root, 'inputs.json'), 'utf8')), window: 'W4', baseline_edge_sha: baseline, baseline_postgres_image: image,
       edge_recycle_sha256: unitDigest('fixture-recycle.service'), recycle_install_mode: 'fresh' };
     const absent = (rel: string) => ({ path: join(f.root, rel), present: false, sha256: null, uid: null, gid: null, mode: null });
     const absentDir = (rel: string) => ({ path: join(f.root, rel), present: false, uid: null, gid: null, mode: null, entries: null });
     const durable = `/var/lib/commonswarm-admin-release/archives/${sha}-${d.window_id}.tar`, helper = `/home/commonswarm/admin-issuance/releases/${sha}`;
+    const baselineArchive = f.remap(`/tmp/admin-issuance-${baseline}-Base01.tar`);
+    const baselineBytes = 'fresh baseline archive metadata fixture\n';
+    f.put(relative(f.root, baselineArchive), baselineBytes);
     const receipt: Record<string, any> = {
       kind: 'c1-w4-recycle-baseline', release_sha: sha, window: 'W4', window_id: d.window_id, plan_sha256: d.plan_sha256, mode: 'fresh',
       hook: absent('libexec/commonswarm-admin-edge-recycle'), config: absent('admin-release/recycle.json'), dropin: absent(dropin), intent: absent('admin-release/recycle-intent.json'),
       config_dir: absentDir('admin-release'), dropin_dir: absentDir('systemd/fixture-recycle.service.d'),
       service: { unit: 'fixture-recycle.service', sha256: unitDigest('fixture-recycle.service'), active_state: 'inactive' },
       timer: { unit: 'fixture-recycle.timer', sha256: unitDigest('fixture-recycle.timer'), active_state: 'active', enabled: 'enabled' },
-      archive: null, helper: null, edge: { release_sha: baseline, image }, keeper: null, approval: null,
+      archive: null, helper: null, edge: { release_sha: baseline, image, archive: { path: baselineArchive, sha256: hash(baselineBytes), uid: 0, gid: 0, mode: '0600' } }, keeper: null, approval: null,
       expected: { hook_sha256: hash('#!/bin/bash\n' + block('ai-recycle-hook')),
         dropin_sha256: hash(f.remap('[Service]\nEnvironment=COMMONSWARM_RECYCLE_UNIT=%n\nExecStartPre=/usr/local/libexec/commonswarm-admin-edge-recycle before\nExecStartPost=/usr/local/libexec/commonswarm-admin-edge-recycle after\n')),
         archive: durable, binding_sha256: hash(pyJson({ release_sha: sha, target: f.remap('/home/commonswarm/edge/releases/') + sha, image_digest: image, artifact_digest: d.archive_sha256,
           archive: durable, postgres_image: image, release_root: helper }) + '\n') },
     };
     receiptChange(receipt);
-    const text = JSON.stringify(receipt); f.put('recycle-baseline.json', text);
-    f.put('inputs.json', { ...d, recycle_baseline_sha256: hash(text) });
-    const env = { RECYCLE_INSTALL_ACTION: 'admit', RECYCLE_BASELINE_FILE: join(f.root, 'recycle-baseline.json'), RELEASE_ROOT: helper };
+    const stage = join(f.root, 'var-lib-admin-release/w4', d.window_id);
+    mkdirSync(stage, { recursive: true, mode: 0o700 });
+    const text = JSON.stringify(receipt);
+    f.put(relative(f.root, join(stage, 'recycle-baseline.json')), text);
+    f.put(relative(f.root, join(stage, 'inputs.json')), { ...d, recycle_baseline_sha256: hash(text) });
+    f.put(relative(f.root, join(stage, 'RELEASE.md')), readFileSync(planPath, 'utf8'));
+    const env = { RECYCLE_INSTALL_ACTION: 'admit', INPUTS_FILE: join(stage, 'inputs.json'),
+      RECYCLE_BASELINE_FILE: join(stage, 'recycle-baseline.json'), PLAN_FILE: join(stage, 'RELEASE.md'), RELEASE_ROOT: helper };
     return { f, admit: () => f.run(['ai-recycle-install'], env) };
   };
   const good = freshAdmit(); const admitted = good.admit(); pass(good.f, admitted);
   assert.match(admitted.stdout, /PASS ai-recycle-install admit: fresh baseline receipt verified against the live installation; exact bytes saved/);
-  assert.deepEqual(readFileSync(join(good.f.proof, 'w4-state/recycle-baseline.json')), readFileSync(join(good.f.root, 'recycle-baseline.json')));
+  assert.deepEqual(readFileSync(join(good.f.proof, 'w4-state/recycle-baseline.json')), readFileSync(join(good.f.root, 'var-lib-admin-release/w4/Fix123/recycle-baseline.json')));
   // A drop-in written after HezLead's measurement differs from the receipt: refused before any write, the file left as found.
   const present = freshAdmit(); present.f.put(dropin, '[Service]\n');
   guardRefused(present.f, present.admit(), `FAIL ai-recycle-install: ${join(present.f.root, dropin)} expected baseline-receipt-bytes-and-metadata got drift; STOP`);

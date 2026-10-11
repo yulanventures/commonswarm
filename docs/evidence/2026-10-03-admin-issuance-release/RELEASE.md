@@ -78,11 +78,16 @@ never requires STG; its own filesystem cannot authorize a staging id.
 | probe_workspace_id | W2 only (absent in every other window): the UUID of HezLead's authorized ordinary smoke workspace that the W2 probe credentials must name |
 | w2_release_sha, w2_window_id | W2b only (required there, absent in every other window): the full RELEASE_SHA and window ID of the W2 that committed the schema. W2 may have run at an earlier release (W2 RGLqZX ran at 5f64fab4); its proof directory is bound by these two fields, not by RELEASE_SHA |
 | w6_window_id | W7 only, REQUIRED there: the window ID of the W6 of this release that closed success. W7 reads that W6's C1.json and close-result.json from its box proof directory and measures the digest itself |
-| recycle_install_mode, recycle_baseline_sha256 | W4 only (required there, absent in every other window): `fresh`, `accept-existing` or `upgrade-existing`, and the SHA-256 of HezLead's nonsecret A1 baseline receipt. ai-w4-preflight reads that receipt from `RECYCLE_BASELINE_FILE` (an absolute box path, like `INPUTS_FILE`) and keeps a root-only copy in `$PROOF_DIR/w4-state/`. See "W4 second pass" below |
+| recycle_install_mode, recycle_baseline_sha256 | W4 only (required there, absent in every other window): `fresh`, `accept-existing` or `upgrade-existing`, and the SHA-256 of HezLead's nonsecret A1 baseline receipt. ai-w4-preflight reads that receipt from `RECYCLE_BASELINE_FILE` (`/var/lib/commonswarm-admin-release/w4/<WINDOW_ID>/recycle-baseline.json`) and keeps a root-only copy in `$PROOF_DIR/w4-state/`. See "W4 second pass" below |
 | keeper_install_receipt_sha256, keeper_host, keeper_upload_owner, keeper_baseline, keeper_install_vars_path, keeper_install_md_sha256, keeper_install_excerpts | W4 only (required there; each is `null` in fresh mode; absent in every other window). The values come from HezLead's keeper install receipt, `/Users/yulanbot/work/keeper-install-prod/REPORT.md` (HezLead rulings 13 and 16), and from the reviewed INSTALL.md; they are filled at the U10 STOP row and never typed into this plan: the receipt's SHA-256, `ARCHIVE_KEEPER_HOST`, `ARCHIVE_KEEPER_UPLOAD_OWNER`, the three-line `ARCHIVE_KEEPER_BASELINE` printout (INSTALL:169-172), the root-only VARS path `/root/keeper-install-<UTC>.vars`, the INSTALL.md SHA-256 and the four excerpt pins `{"lines":[N,M],"sha256":...}` |
 | w2b_release_sha, w2b_window_id | W6 only, REQUIRED there (absent in every other window): the full RELEASE_SHA and window ID of the W2b that provisioned the issuer credential. W2b may have run at an EARLIER release (W2b yYGHEd ran at a5cb8251; W2b cannot run again once the issuer has LOGIN), exactly as W2b binds W2. W6 activation checks refuse unless that W2b closed success with w2b-preconditions.txt, issuer-credential.txt and w2b-forward-catalogs.txt (validated against THAT release's archive and inputs), and ai-w6-issuer-live re-verifies the credential live: role LOGIN with a password, the installed file 0440 root:986, a TLS login as the issuer with the installed credential, and all five forward catalogs true |
 
 `PLAN_FILE`, `INPUTS_FILE`, `GATE_RECEIPT_FILE` are absolute regular files.
+For every W4 box reader, export `INPUTS_FILE=/var/lib/commonswarm-admin-release/w4/<WINDOW_ID>/inputs.json`,
+`RECYCLE_BASELINE_FILE=/var/lib/commonswarm-admin-release/w4/<WINDOW_ID>/recycle-baseline.json`,
+and `PLAN_FILE=/var/lib/commonswarm-admin-release/w4/<WINDOW_ID>/RELEASE.md`.
+`ai-prepare` creates this exact root:root 0700 directory and streams all three files as root:root 0600.
+Mac readers keep their local paths. Never transfer these W4 inputs to `/home/ops` or `/tmp`.
 Every block that extracts and runs plan text (ai-extract, ai_run, the ai-edge-receipt
 and ai-live-controls runners, ai-recycle-install) reads the plan once as bytes,
 refuses a symlink or non-regular file and any sha256 other than INPUTS
@@ -171,29 +176,29 @@ site-plan: {"path":"docs/evidence/2026-10-02-site-release/SITE-RELEASE.md","sha2
 {"id":"ai-inputs","host":"box"}
 {"id":"ai-box-preflight","host":"box"}
 {"id":"ai-open","host":"box"}
-{"id":"ai-open-abort","host":"box","input":"Failure branch only: no production operation occurred; STOP forward order after abort","when":{"line":8587,"quote":"# host: box root; no production operation occurred before failed open"}}
+{"id":"ai-open-abort","host":"box","input":"Failure branch only: no production operation occurred; STOP forward order after abort","when":{"line":8969,"quote":"# host: box root; no production operation occurred before failed open"}}
 {"id":"ai-db-session","host":"box"}
 {"id":"ai-w1-backup-gate","host":"box"}
 {"id":"ai-ordinary-probes","host":"mac"}
 {"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=after; use independently produced after receipt and matching consent receipt"}
-{"host":"box","manual":{"line":663,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"host":"box","manual":{"line":668,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
 {"id":"ai-close","host":"box","input":"CLOSE_RESULT=success"}
-{"host":"mac","manual":{"line":8801,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"host":"mac","manual":{"line":9173,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
 {"id":"ai-mac-close","host":"mac"}
 ```
 ```c1-order W1 rollback
 {"host":"box","manual":{"line":75,"quote":"`retain-additive` W1\u2013W2 and W2b;"}}
 ```
 ```c1-order W1 recovered-close
-{"id":"ai-recovery-env","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
-{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-recovery-env","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
 {"host":"box","manual":{"line":75,"quote":"`retain-additive` W1\u2013W2 and W2b;"}}
 {"id":"ai-ordinary-probes","host":"mac"}
 {"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=recovery; independently produced recovery receipt"}
-{"host":"box","manual":{"line":663,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"host":"box","manual":{"line":668,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
 {"id":"ai-close","host":"box","input":"CLOSE_RESULT=recovered; existing proof/secret paths; every embedded rollback outcome check must pass"}
-{"host":"mac","manual":{"line":8801,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
-{"id":"ai-mac-recovery-env","host":"mac","input":"Only if original Mac shell was lost; recover PREP_DIR from the single matching prep directory","when":{"line":662,"quote":"If the Mac shell is lost, STOP: a recovered close opens one new persistent Mac /bin/bash 3.2 shell, runs ai-mac-recovery-env in it, then ai-mac-close."}}
+{"host":"mac","manual":{"line":9173,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"id":"ai-mac-recovery-env","host":"mac","input":"Only if original Mac shell was lost; recover PREP_DIR from the single matching prep directory","when":{"line":667,"quote":"If the Mac shell is lost, STOP: a recovered close opens one new persistent Mac /bin/bash 3.2 shell, runs ai-mac-recovery-env in it, then ai-mac-close."}}
 {"id":"ai-mac-close","host":"mac"}
 ```
 
@@ -205,55 +210,55 @@ site-plan: {"path":"docs/evidence/2026-10-02-site-release/SITE-RELEASE.md","sha2
 {"id":"ai-inputs","host":"box"}
 {"id":"ai-box-preflight","host":"box"}
 {"id":"ai-open","host":"box","input":"W2 refuses before mkdir if all five 20261003 versions are already present"}
-{"id":"ai-open-abort","host":"box","input":"Failure branch only: no production operation occurred; STOP forward order after abort","when":{"line":8587,"quote":"# host: box root; no production operation occurred before failed open"}}
+{"id":"ai-open-abort","host":"box","input":"Failure branch only: no production operation occurred; STOP forward order after abort","when":{"line":8969,"quote":"# host: box root; no production operation occurred before failed open"}}
 {"id":"ai-db-session","host":"box"}
 {"id":"ai-w2-stage-probes","host":"mac"}
 {"id":"ai-w2-preflight","host":"box","input":"BACKFILL_FILE; HISTORICAL_ARCHIVES_DIR; W1_CLOSED_FILE: the fresh W1 close"}
-{"id":"ai-w2-apply","host":"box","when":{"line":670,"quote":"5. **W2 apply-time gate.** ai-w2-apply starts only when `window_end_utc - now\n   >= 600 s` on the box clock; otherwise STOP before the fence and close\n   pre-fence. No deadline check runs after the fence."}}
+{"id":"ai-w2-apply","host":"box","when":{"line":675,"quote":"5. **W2 apply-time gate.** ai-w2-apply starts only when `window_end_utc - now\n   >= 600 s` on the box clock; otherwise STOP before the fence and close\n   pre-fence. No deadline check runs after the fence."}}
 {"id":"ai-w2-reconcile","host":"box"}
 {"id":"ai-w2-probes","host":"box"}
 {"id":"ai-w2-issuer-credential","host":"box"}
 {"id":"ai-ordinary-probes","host":"mac"}
 {"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=after; use independently produced after receipt and matching consent receipt"}
-{"host":"box","manual":{"line":663,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"host":"box","manual":{"line":668,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
 {"id":"ai-close","host":"box","input":"CLOSE_RESULT=success"}
-{"host":"mac","manual":{"line":8801,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"host":"mac","manual":{"line":9173,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
 {"id":"ai-mac-close","host":"mac"}
 ```
 
 ```c1-order W2 rollback
-{"host":"box","manual":{"line":142,"quote":"Failure: STOP, reconcile the committed prefix, retain it; no retry or automatic reserve."}}
-{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
-{"id":"ai-w2-reconcile","host":"box","when":{"line":2209,"quote":"Mid-sequence failure: STOP; committed migrations and ledger rows stay. After\nM4 their exact checksum/backfill rows stay too. Issuance remains OFF. A durable\napply-started marker refuses ALL reruns, including a failure before M1."},"input":"Only after apply-started.txt; read-only reconciliation. An incomplete prefix records schema-prefix.json then STOPs: retain it, do not continue this order. No apply, retry or reserve."}
-{"id":"ai-w2-issuer-rollback","host":"box","when":{"line":3233,"quote":"Rollback disables login and clears the new password; it retains additive schema."},"input":"Only when this window wrote issuer-provisioning-attempted.txt before mutation; otherwise refuse and leave the live issuer; no schema rollback"}
-{"host":"box","manual":{"line":2218,"quote":"No automatic or\npost-COMMIT production schema rollback is authorized."}}
+{"host":"box","manual":{"line":147,"quote":"Failure: STOP, reconcile the committed prefix, retain it; no retry or automatic reserve."}}
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-w2-reconcile","host":"box","when":{"line":2292,"quote":"Mid-sequence failure: STOP; committed migrations and ledger rows stay. After\nM4 their exact checksum/backfill rows stay too. Issuance remains OFF. A durable\napply-started marker refuses ALL reruns, including a failure before M1."},"input":"Only after apply-started.txt; read-only reconciliation. An incomplete prefix records schema-prefix.json then STOPs: retain it, do not continue this order. No apply, retry or reserve."}
+{"id":"ai-w2-issuer-rollback","host":"box","when":{"line":3316,"quote":"Rollback disables login and clears the new password; it retains additive schema."},"input":"Only when this window wrote issuer-provisioning-attempted.txt before mutation; otherwise refuse and leave the live issuer; no schema rollback"}
+{"host":"box","manual":{"line":2301,"quote":"No automatic or\npost-COMMIT production schema rollback is authorized."}}
 ```
 
 ```c1-order W2 recovered-close
-{"host":"box","manual":{"line":142,"quote":"Failure: STOP, reconcile the committed prefix, retain it; no retry or automatic reserve."}}
-{"id":"ai-recovery-env","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
-{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
-{"id":"ai-w2-reconcile","host":"box","when":{"line":2209,"quote":"Mid-sequence failure: STOP; committed migrations and ledger rows stay. After\nM4 their exact checksum/backfill rows stay too. Issuance remains OFF. A durable\napply-started marker refuses ALL reruns, including a failure before M1."},"input":"Only after apply-started.txt; read-only reconciliation. An incomplete prefix records schema-prefix.json then STOPs: retain it, do not continue this order. No apply, retry or reserve."}
-{"id":"ai-w2-issuer-rollback","host":"box","when":{"line":3261,"quote":"# Ownership marker BEFORE any mutation: rollback and recovered close consult this file."},"input":"Only when this window wrote issuer-provisioning-attempted.txt before mutation; otherwise refuse and leave the live issuer; pre-fence/pre-mutation recovery omits it and closes on the captured ledger baseline"}
-{"host":"box","manual":{"line":2218,"quote":"No automatic or\npost-COMMIT production schema rollback is authorized."}}
+{"host":"box","manual":{"line":147,"quote":"Failure: STOP, reconcile the committed prefix, retain it; no retry or automatic reserve."}}
+{"id":"ai-recovery-env","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-w2-reconcile","host":"box","when":{"line":2292,"quote":"Mid-sequence failure: STOP; committed migrations and ledger rows stay. After\nM4 their exact checksum/backfill rows stay too. Issuance remains OFF. A durable\napply-started marker refuses ALL reruns, including a failure before M1."},"input":"Only after apply-started.txt; read-only reconciliation. An incomplete prefix records schema-prefix.json then STOPs: retain it, do not continue this order. No apply, retry or reserve."}
+{"id":"ai-w2-issuer-rollback","host":"box","when":{"line":3344,"quote":"# Ownership marker BEFORE any mutation: rollback and recovered close consult this file."},"input":"Only when this window wrote issuer-provisioning-attempted.txt before mutation; otherwise refuse and leave the live issuer; pre-fence/pre-mutation recovery omits it and closes on the captured ledger baseline"}
+{"host":"box","manual":{"line":2301,"quote":"No automatic or\npost-COMMIT production schema rollback is authorized."}}
 {"id":"ai-ordinary-probes","host":"mac"}
 {"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=recovery; independently produced recovery receipt"}
-{"host":"box","manual":{"line":663,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"host":"box","manual":{"line":668,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
 {"id":"ai-close","host":"box","input":"CLOSE_RESULT=recovered; existing proof/secret paths; pre-fence: unchanged ledger-at-open, no issuer-rollback; issuer wipe only if this window wrote issuer-provisioning-attempted.txt"}
-{"host":"mac","manual":{"line":8801,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
-{"id":"ai-mac-recovery-env","host":"mac","input":"Only if original Mac shell was lost; recover PREP_DIR from the single matching prep directory","when":{"line":662,"quote":"If the Mac shell is lost, STOP: a recovered close opens one new persistent Mac /bin/bash 3.2 shell, runs ai-mac-recovery-env in it, then ai-mac-close."}}
+{"host":"mac","manual":{"line":9173,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"id":"ai-mac-recovery-env","host":"mac","input":"Only if original Mac shell was lost; recover PREP_DIR from the single matching prep directory","when":{"line":667,"quote":"If the Mac shell is lost, STOP: a recovered close opens one new persistent Mac /bin/bash 3.2 shell, runs ai-mac-recovery-env in it, then ai-mac-close."}}
 {"id":"ai-mac-close","host":"mac"}
 ```
 
 ```c1-order W2b forward
-{"id":"ai-inputs","host":"mac","when":{"line":143,"quote":"Only when W2 committed and reconciled all five migrations but its issuer credential failed and was rolled back."}}
+{"id":"ai-inputs","host":"mac","when":{"line":148,"quote":"Only when W2 committed and reconciled all five migrations but its issuer credential failed and was rolled back."}}
 {"id":"ai-gates","host":"mac"}
 {"id":"ai-prepare","host":"mac"}
 {"id":"ai-ordinary-probes","host":"mac"}
 {"id":"ai-inputs","host":"box"}
 {"id":"ai-box-preflight","host":"box"}
 {"id":"ai-open","host":"box"}
-{"id":"ai-open-abort","host":"box","input":"Failure branch only: no production operation occurred; STOP forward order after abort","when":{"line":8587,"quote":"# host: box root; no production operation occurred before failed open"}}
+{"id":"ai-open-abort","host":"box","input":"Failure branch only: no production operation occurred; STOP forward order after abort","when":{"line":8969,"quote":"# host: box root; no production operation occurred before failed open"}}
 {"id":"ai-db-session","host":"box"}
 {"id":"ai-w1-backup-gate","host":"box"}
 {"id":"ai-w2b-preflight","host":"box"}
@@ -261,29 +266,29 @@ site-plan: {"path":"docs/evidence/2026-10-02-site-release/SITE-RELEASE.md","sha2
 {"id":"ai-w2b-forward-catalogs","host":"box"}
 {"id":"ai-ordinary-probes","host":"mac"}
 {"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=after; use independently produced after receipt and matching consent receipt"}
-{"host":"box","manual":{"line":663,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"host":"box","manual":{"line":668,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
 {"id":"ai-close","host":"box","input":"CLOSE_RESULT=success"}
-{"host":"mac","manual":{"line":8801,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"host":"mac","manual":{"line":9173,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
 {"id":"ai-mac-close","host":"mac"}
 ```
 
 ```c1-order W2b rollback
-{"host":"box","manual":{"line":143,"quote":"Only when W2 committed and reconciled all five migrations but its issuer credential failed and was rolled back."},"when":{"line":143,"quote":"Only when W2 committed and reconciled all five migrations but its issuer credential failed and was rolled back."}}
-{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
-{"id":"ai-w2-issuer-rollback","host":"box","when":{"line":3393,"quote":"ai-w2-issuer-rollback and a recovered close."},"input":"Only when this window wrote issuer-provisioning-attempted.txt before mutation; otherwise refuse and leave the live issuer"}
+{"host":"box","manual":{"line":148,"quote":"Only when W2 committed and reconciled all five migrations but its issuer credential failed and was rolled back."},"when":{"line":148,"quote":"Only when W2 committed and reconciled all five migrations but its issuer credential failed and was rolled back."}}
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-w2-issuer-rollback","host":"box","when":{"line":3476,"quote":"ai-w2-issuer-rollback and a recovered close."},"input":"Only when this window wrote issuer-provisioning-attempted.txt before mutation; otherwise refuse and leave the live issuer"}
 ```
 
 ```c1-order W2b recovered-close
-{"host":"box","manual":{"line":143,"quote":"Only when W2 committed and reconciled all five migrations but its issuer credential failed and was rolled back."},"when":{"line":143,"quote":"Only when W2 committed and reconciled all five migrations but its issuer credential failed and was rolled back."}}
-{"id":"ai-recovery-env","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
-{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
-{"id":"ai-w2-issuer-rollback","host":"box","when":{"line":3261,"quote":"# Ownership marker BEFORE any mutation: rollback and recovered close consult this file."},"input":"Only when this window wrote issuer-provisioning-attempted.txt before mutation; otherwise refuse and leave the live issuer"}
+{"host":"box","manual":{"line":148,"quote":"Only when W2 committed and reconciled all five migrations but its issuer credential failed and was rolled back."},"when":{"line":148,"quote":"Only when W2 committed and reconciled all five migrations but its issuer credential failed and was rolled back."}}
+{"id":"ai-recovery-env","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-w2-issuer-rollback","host":"box","when":{"line":3344,"quote":"# Ownership marker BEFORE any mutation: rollback and recovered close consult this file."},"input":"Only when this window wrote issuer-provisioning-attempted.txt before mutation; otherwise refuse and leave the live issuer"}
 {"id":"ai-ordinary-probes","host":"mac"}
 {"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=recovery; independently produced recovery receipt"}
-{"host":"box","manual":{"line":663,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"host":"box","manual":{"line":668,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
 {"id":"ai-close","host":"box","input":"CLOSE_RESULT=recovered; existing proof/secret paths; issuer wipe only if this window wrote issuer-provisioning-attempted.txt"}
-{"host":"mac","manual":{"line":8801,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
-{"id":"ai-mac-recovery-env","host":"mac","input":"Only if original Mac shell was lost; recover PREP_DIR from the single matching prep directory","when":{"line":662,"quote":"If the Mac shell is lost, STOP: a recovered close opens one new persistent Mac /bin/bash 3.2 shell, runs ai-mac-recovery-env in it, then ai-mac-close."}}
+{"host":"mac","manual":{"line":9173,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"id":"ai-mac-recovery-env","host":"mac","input":"Only if original Mac shell was lost; recover PREP_DIR from the single matching prep directory","when":{"line":667,"quote":"If the Mac shell is lost, STOP: a recovered close opens one new persistent Mac /bin/bash 3.2 shell, runs ai-mac-recovery-env in it, then ai-mac-close."}}
 {"id":"ai-mac-close","host":"mac"}
 ```
 
@@ -295,36 +300,36 @@ site-plan: {"path":"docs/evidence/2026-10-02-site-release/SITE-RELEASE.md","sha2
 {"id":"ai-inputs","host":"box"}
 {"id":"ai-box-preflight","host":"box"}
 {"id":"ai-open","host":"box"}
-{"id":"ai-open-abort","host":"box","input":"Failure branch only: no production operation occurred; STOP forward order after abort","when":{"line":8587,"quote":"# host: box root; no production operation occurred before failed open"}}
+{"id":"ai-open-abort","host":"box","input":"Failure branch only: no production operation occurred; STOP forward order after abort","when":{"line":8969,"quote":"# host: box root; no production operation occurred before failed open"}}
 {"id":"ai-db-session","host":"box"}
 {"id":"ai-w3-preflight","host":"box"}
 {"id":"ai-w3-build","host":"box"}
 {"id":"ai-w3-apply","host":"box"}
 {"id":"ai-w3-local-gate","host":"box"}
-{"id":"ai-w3-probes","host":"mac","when":{"line":3735,"quote":"ai-w3-probes only if baseline Caddy already serves that route; W4 makes it\nmandatory with CORS. Baseline route availability is measured, never guessed."}}
+{"id":"ai-w3-probes","host":"mac","when":{"line":3818,"quote":"ai-w3-probes only if baseline Caddy already serves that route; W4 makes it\nmandatory with CORS. Baseline route availability is measured, never guessed."}}
 {"id":"ai-ordinary-probes","host":"mac"}
 {"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=after; use independently produced after receipt and matching consent receipt"}
-{"host":"box","manual":{"line":663,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"host":"box","manual":{"line":668,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
 {"id":"ai-close","host":"box","input":"CLOSE_RESULT=success"}
-{"host":"mac","manual":{"line":8801,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"host":"mac","manual":{"line":9173,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
 {"id":"ai-mac-close","host":"mac"}
 ```
 
 ```c1-order W3 rollback
-{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
 {"id":"ai-w3-rollback","host":"box"}
 ```
 
 ```c1-order W3 recovered-close
-{"id":"ai-recovery-env","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
-{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-recovery-env","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
 {"id":"ai-w3-rollback","host":"box"}
 {"id":"ai-ordinary-probes","host":"mac"}
 {"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=recovery; independently produced recovery receipt"}
-{"host":"box","manual":{"line":663,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"host":"box","manual":{"line":668,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
 {"id":"ai-close","host":"box","input":"CLOSE_RESULT=recovered; existing proof/secret paths; every embedded rollback outcome check must pass"}
-{"host":"mac","manual":{"line":8801,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
-{"id":"ai-mac-recovery-env","host":"mac","input":"Only if original Mac shell was lost; recover PREP_DIR from the single matching prep directory","when":{"line":662,"quote":"If the Mac shell is lost, STOP: a recovered close opens one new persistent Mac /bin/bash 3.2 shell, runs ai-mac-recovery-env in it, then ai-mac-close."}}
+{"host":"mac","manual":{"line":9173,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"id":"ai-mac-recovery-env","host":"mac","input":"Only if original Mac shell was lost; recover PREP_DIR from the single matching prep directory","when":{"line":667,"quote":"If the Mac shell is lost, STOP: a recovered close opens one new persistent Mac /bin/bash 3.2 shell, runs ai-mac-recovery-env in it, then ai-mac-close."}}
 {"id":"ai-mac-close","host":"mac"}
 ```
 
@@ -336,11 +341,11 @@ site-plan: {"path":"docs/evidence/2026-10-02-site-release/SITE-RELEASE.md","sha2
 {"id":"ai-inputs","host":"box"}
 {"id":"ai-box-preflight","host":"box"}
 {"id":"ai-open","host":"box"}
-{"id":"ai-open-abort","host":"box","input":"Failure branch only: no production operation occurred; STOP forward order after abort","when":{"line":8587,"quote":"# host: box root; no production operation occurred before failed open"}}
+{"id":"ai-open-abort","host":"box","input":"Failure branch only: no production operation occurred; STOP forward order after abort","when":{"line":8969,"quote":"# host: box root; no production operation occurred before failed open"}}
 {"id":"ai-db-session","host":"box"}
 {"id":"ai-w1-backup-gate","host":"box"}
-{"host":"box","manual":{"line":3924,"quote":"STOP unless HezLead's U10 measurement exists, was taken after the production keeper install receipt, and its digest equals `keeper_install_receipt_sha256`; and unless the keeper inputs come from that receipt and `keeper_install_md_sha256` and `keeper_install_excerpts` equal the reviewed INSTALL values recorded in this plan."}}
-{"host":"box","manual":{"line":3926,"quote":"STOP unless HezLead's signed U7 record exists for this pass: a fresh verified backup and a REAL restore into a named throwaway target (never production, never a staging stub), with host, database, restore time, schema checksum and key-table row counts against the source."}}
+{"host":"box","manual":{"line":4009,"quote":"STOP unless HezLead's U10 measurement exists, was taken after the production keeper install receipt, and its digest equals `keeper_install_receipt_sha256`; and unless the keeper inputs come from that receipt and `keeper_install_md_sha256` and `keeper_install_excerpts` equal the reviewed INSTALL values recorded in this plan."}}
+{"host":"box","manual":{"line":4011,"quote":"STOP unless HezLead's signed U7 record exists for this pass: a fresh verified backup and a REAL restore into a named throwaway target (never production, never a staging stub), with host, database, restore time, schema checksum and key-table row counts against the source."}}
 {"id":"ai-w4-preflight","host":"box"}
 {"id":"ai-w4-caddy-candidate","host":"box"}
 {"id":"ai-w4-keeper-retire","host":"box"}
@@ -349,29 +354,29 @@ site-plan: {"path":"docs/evidence/2026-10-02-site-release/SITE-RELEASE.md","sha2
 {"id":"ai-w4-readback","host":"box"}
 {"id":"ai-ordinary-probes","host":"mac"}
 {"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=after; use independently produced after receipt and matching consent receipt"}
-{"host":"box","manual":{"line":663,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"host":"box","manual":{"line":668,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
 {"id":"ai-close","host":"box","input":"CLOSE_RESULT=success"}
-{"host":"mac","manual":{"line":8801,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"host":"mac","manual":{"line":9173,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
 {"id":"ai-mac-close","host":"mac"}
 ```
 
 ```c1-order W4 rollback
-{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
 {"id":"ai-w4-rollback","host":"box"}
-{"id":"ai-w4-timer-recovery","host":"box","input":"Only after timer recovery failure; retains no close claim","when":{"line":4666,"quote":"# host: box root; also available after a failed rollback; not a close receipt"}}
+{"id":"ai-w4-timer-recovery","host":"box","input":"Only after timer recovery failure; retains no close claim","when":{"line":4998,"quote":"# host: box root; also available after a failed rollback; not a close receipt"}}
 ```
 
 ```c1-order W4 recovered-close
-{"id":"ai-recovery-env","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
-{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-recovery-env","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
 {"id":"ai-w4-rollback","host":"box"}
-{"id":"ai-w4-timer-recovery","host":"box","input":"Only after timer recovery failure; retains no close claim","when":{"line":4666,"quote":"# host: box root; also available after a failed rollback; not a close receipt"}}
+{"id":"ai-w4-timer-recovery","host":"box","input":"Only after timer recovery failure; retains no close claim","when":{"line":4998,"quote":"# host: box root; also available after a failed rollback; not a close receipt"}}
 {"id":"ai-ordinary-probes","host":"mac"}
 {"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=recovery; independently produced recovery receipt"}
-{"host":"box","manual":{"line":663,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"host":"box","manual":{"line":668,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
 {"id":"ai-close","host":"box","input":"CLOSE_RESULT=recovered; existing proof/secret paths; every embedded rollback outcome check must pass"}
-{"host":"mac","manual":{"line":8801,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
-{"id":"ai-mac-recovery-env","host":"mac","input":"Only if original Mac shell was lost; recover PREP_DIR from the single matching prep directory","when":{"line":662,"quote":"If the Mac shell is lost, STOP: a recovered close opens one new persistent Mac /bin/bash 3.2 shell, runs ai-mac-recovery-env in it, then ai-mac-close."}}
+{"host":"mac","manual":{"line":9173,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"id":"ai-mac-recovery-env","host":"mac","input":"Only if original Mac shell was lost; recover PREP_DIR from the single matching prep directory","when":{"line":667,"quote":"If the Mac shell is lost, STOP: a recovered close opens one new persistent Mac /bin/bash 3.2 shell, runs ai-mac-recovery-env in it, then ai-mac-close."}}
 {"id":"ai-mac-close","host":"mac"}
 ```
 
@@ -380,7 +385,7 @@ site-plan: {"path":"docs/evidence/2026-10-02-site-release/SITE-RELEASE.md","sha2
 {"id":"ai-gates","host":"mac"}
 {"id":"ai-prepare","host":"mac"}
 {"id":"ai-ordinary-probes","host":"mac"}
-{"id":"ai-edge-refresh","host":"box","input":"Only stale receipt; new EDGE_MEASUREMENT_OUT; replace EDGE_MEASUREMENT_FILE with successful fresh receipt","when":{"line":1128,"quote":"ai-close. Before a W5/W6/W7 open whose receipt is stale, HezLead runs\n`ai-edge-refresh`, which owns the timer for that step only and always re-arms it."}}
+{"id":"ai-edge-refresh","host":"box","input":"Only stale receipt; new EDGE_MEASUREMENT_OUT; replace EDGE_MEASUREMENT_FILE with successful fresh receipt","when":{"line":1199,"quote":"ai-close. Before a W5/W6/W7 open whose receipt is stale, HezLead runs\n`ai-edge-refresh`, which owns the timer for that step only and always re-arms it."}}
 {"id":"ai-w5-preflight","host":"mac","input":"W4_PROOF_DIR exported: retained successful same-release W4 proof and pre-W1 consent copy"}
 {"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site-release-shared-preflight; first companion step"}
 {"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-plan-inputs"}
@@ -399,33 +404,33 @@ site-plan: {"path":"docs/evidence/2026-10-02-site-release/SITE-RELEASE.md","sha2
 {"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-06"}
 {"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-07-manifest-close"}
 {"id":"ai-w5-closed","host":"mac"}
-{"host":"mac","manual":{"line":8801,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"host":"mac","manual":{"line":9173,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
 {"id":"ai-mac-close","host":"mac"}
 ```
 
 ```c1-order W5 rollback
-{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-04-reconcile-failure; only once after failed/disconnected site2-04","when":{"line":5841,"quote":"| `site2-04` fails / disconnects | `site2-04-reconcile-failure` exactly once: unchanged baseline records failed-before-switch; target current restores pin; a third state STOPs for incident handling. Then `site2-06`, `site2-07-manifest-close` if readbacks pass. |"}}
-{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-06","when":{"line":5840,"quote":"| `site2-00-a-close-ingest`, `site2-00-build-env`, `site2-02`, `site2-03-browser-session-preflight` or `site2-03` fails before pin invocation | Stop forward work; `site2-06`, then `site2-07-pre-pin-manifest-close` verifies baseline unchanged and closes without a pin. |\n| `site2-04` fails / disconnects | `site2-04-reconcile-failure` exactly once: unchanged baseline records failed-before-switch; target current restores pin; a third state STOPs for incident handling. Then `site2-06`, `site2-07-manifest-close` if readbacks pass. |\n| `site2-05` or blocking `site2-05-browser-acceptance` fails | Automatic pin restore; `site2-06`, then `site2-07-manifest-close` only after required rollback receipts pass. |"}}
-{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-07-pre-pin-manifest-close; only failure before pin invocation","when":{"line":5840,"quote":"| `site2-00-a-close-ingest`, `site2-00-build-env`, `site2-02`, `site2-03-browser-session-preflight` or `site2-03` fails before pin invocation | Stop forward work; `site2-06`, then `site2-07-pre-pin-manifest-close` verifies baseline unchanged and closes without a pin. |"}}
-{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-07-manifest-close; only reconciled deployment/public/browser failure","when":{"line":5841,"quote":"| `site2-04` fails / disconnects | `site2-04-reconcile-failure` exactly once: unchanged baseline records failed-before-switch; target current restores pin; a third state STOPs for incident handling. Then `site2-06`, `site2-07-manifest-close` if readbacks pass. |\n| `site2-05` or blocking `site2-05-browser-acceptance` fails | Automatic pin restore; `site2-06`, then `site2-07-manifest-close` only after required rollback receipts pass. |"}}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-04-reconcile-failure; only once after failed/disconnected site2-04","when":{"line":6216,"quote":"| `site2-04` fails / disconnects | `site2-04-reconcile-failure` exactly once: unchanged baseline records failed-before-switch; target current restores pin; a third state STOPs for incident handling. Then `site2-06`, `site2-07-manifest-close` if readbacks pass. |"}}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-06","when":{"line":6215,"quote":"| `site2-00-a-close-ingest`, `site2-00-build-env`, `site2-02`, `site2-03-browser-session-preflight` or `site2-03` fails before pin invocation | Stop forward work; `site2-06`, then `site2-07-pre-pin-manifest-close` verifies baseline unchanged and closes without a pin. |\n| `site2-04` fails / disconnects | `site2-04-reconcile-failure` exactly once: unchanged baseline records failed-before-switch; target current restores pin; a third state STOPs for incident handling. Then `site2-06`, `site2-07-manifest-close` if readbacks pass. |\n| `site2-05` or blocking `site2-05-browser-acceptance` fails | Automatic pin restore; `site2-06`, then `site2-07-manifest-close` only after required rollback receipts pass. |"}}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-07-pre-pin-manifest-close; only failure before pin invocation","when":{"line":6215,"quote":"| `site2-00-a-close-ingest`, `site2-00-build-env`, `site2-02`, `site2-03-browser-session-preflight` or `site2-03` fails before pin invocation | Stop forward work; `site2-06`, then `site2-07-pre-pin-manifest-close` verifies baseline unchanged and closes without a pin. |"}}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-07-manifest-close; only reconciled deployment/public/browser failure","when":{"line":6216,"quote":"| `site2-04` fails / disconnects | `site2-04-reconcile-failure` exactly once: unchanged baseline records failed-before-switch; target current restores pin; a third state STOPs for incident handling. Then `site2-06`, `site2-07-manifest-close` if readbacks pass. |\n| `site2-05` or blocking `site2-05-browser-acceptance` fails | Automatic pin restore; `site2-06`, then `site2-07-manifest-close` only after required rollback receipts pass. |"}}
 ```
 
 ```c1-order W5 recovered-close
-{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-04-reconcile-failure; only once after failed/disconnected site2-04","when":{"line":5841,"quote":"| `site2-04` fails / disconnects | `site2-04-reconcile-failure` exactly once: unchanged baseline records failed-before-switch; target current restores pin; a third state STOPs for incident handling. Then `site2-06`, `site2-07-manifest-close` if readbacks pass. |"}}
-{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-06","when":{"line":5840,"quote":"| `site2-00-a-close-ingest`, `site2-00-build-env`, `site2-02`, `site2-03-browser-session-preflight` or `site2-03` fails before pin invocation | Stop forward work; `site2-06`, then `site2-07-pre-pin-manifest-close` verifies baseline unchanged and closes without a pin. |\n| `site2-04` fails / disconnects | `site2-04-reconcile-failure` exactly once: unchanged baseline records failed-before-switch; target current restores pin; a third state STOPs for incident handling. Then `site2-06`, `site2-07-manifest-close` if readbacks pass. |\n| `site2-05` or blocking `site2-05-browser-acceptance` fails | Automatic pin restore; `site2-06`, then `site2-07-manifest-close` only after required rollback receipts pass. |"}}
-{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-07-pre-pin-manifest-close; only failure before pin invocation","when":{"line":5840,"quote":"| `site2-00-a-close-ingest`, `site2-00-build-env`, `site2-02`, `site2-03-browser-session-preflight` or `site2-03` fails before pin invocation | Stop forward work; `site2-06`, then `site2-07-pre-pin-manifest-close` verifies baseline unchanged and closes without a pin. |"}}
-{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-07-manifest-close; only reconciled deployment/public/browser failure","when":{"line":5841,"quote":"| `site2-04` fails / disconnects | `site2-04-reconcile-failure` exactly once: unchanged baseline records failed-before-switch; target current restores pin; a third state STOPs for incident handling. Then `site2-06`, `site2-07-manifest-close` if readbacks pass. |\n| `site2-05` or blocking `site2-05-browser-acceptance` fails | Automatic pin restore; `site2-06`, then `site2-07-manifest-close` only after required rollback receipts pass. |"}}
-{"id":"ai-ordinary-probes","host":"mac","input":"Recovery receipt and matching post-W5 consent receipt","when":{"line":5844,"quote":"W5 C1 recovered close runs only after site2-07-manifest-close has recorded\nCLOSED=yes with OUTCOME=rolled-back or OUTCOME=failed-before-switch, released\nthe pin, and completed cleanup; GO and partial-pin failures stay open."}}
-{"id":"ai-w5-recovery-transfer","host":"mac","when":{"line":5844,"quote":"W5 C1 recovered close runs only after site2-07-manifest-close has recorded\nCLOSED=yes with OUTCOME=rolled-back or OUTCOME=failed-before-switch, released\nthe pin, and completed cleanup; GO and partial-pin failures stay open."}}
-{"id":"ai-w5-recovery-env","host":"box","input":"Fresh persistent box root shell; derive WINDOW/PROOF_DIR/INPUTS_FILE/BOX_ARCHIVE_PATH/SITE_RECOVERY_EVIDENCE/PLAN_FILE/CLOSE_RESULT from transferred inputs; never ai-open or ai-db-session","when":{"line":5844,"quote":"W5 C1 recovered close runs only after site2-07-manifest-close has recorded\nCLOSED=yes with OUTCOME=rolled-back or OUTCOME=failed-before-switch, released\nthe pin, and completed cleanup; GO and partial-pin failures stay open."}}
-{"id":"ai-close","host":"box","input":"CLOSE_RESULT=recovered; W5 nonsecret proof paths from recovery transfer; SITE_RECOVERY_EVIDENCE=$PROOF_DIR/site-recovery","when":{"line":5844,"quote":"W5 C1 recovered close runs only after site2-07-manifest-close has recorded\nCLOSED=yes with OUTCOME=rolled-back or OUTCOME=failed-before-switch, released\nthe pin, and completed cleanup; GO and partial-pin failures stay open."}}
-{"host":"mac","manual":{"line":8801,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."},"when":{"line":5844,"quote":"W5 C1 recovered close runs only after site2-07-manifest-close has recorded\nCLOSED=yes with OUTCOME=rolled-back or OUTCOME=failed-before-switch, released\nthe pin, and completed cleanup; GO and partial-pin failures stay open."}}
-{"id":"ai-mac-close","host":"mac","when":{"line":5844,"quote":"W5 C1 recovered close runs only after site2-07-manifest-close has recorded\nCLOSED=yes with OUTCOME=rolled-back or OUTCOME=failed-before-switch, released\nthe pin, and completed cleanup; GO and partial-pin failures stay open."}}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-04-reconcile-failure; only once after failed/disconnected site2-04","when":{"line":6216,"quote":"| `site2-04` fails / disconnects | `site2-04-reconcile-failure` exactly once: unchanged baseline records failed-before-switch; target current restores pin; a third state STOPs for incident handling. Then `site2-06`, `site2-07-manifest-close` if readbacks pass. |"}}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-06","when":{"line":6215,"quote":"| `site2-00-a-close-ingest`, `site2-00-build-env`, `site2-02`, `site2-03-browser-session-preflight` or `site2-03` fails before pin invocation | Stop forward work; `site2-06`, then `site2-07-pre-pin-manifest-close` verifies baseline unchanged and closes without a pin. |\n| `site2-04` fails / disconnects | `site2-04-reconcile-failure` exactly once: unchanged baseline records failed-before-switch; target current restores pin; a third state STOPs for incident handling. Then `site2-06`, `site2-07-manifest-close` if readbacks pass. |\n| `site2-05` or blocking `site2-05-browser-acceptance` fails | Automatic pin restore; `site2-06`, then `site2-07-manifest-close` only after required rollback receipts pass. |"}}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-07-pre-pin-manifest-close; only failure before pin invocation","when":{"line":6215,"quote":"| `site2-00-a-close-ingest`, `site2-00-build-env`, `site2-02`, `site2-03-browser-session-preflight` or `site2-03` fails before pin invocation | Stop forward work; `site2-06`, then `site2-07-pre-pin-manifest-close` verifies baseline unchanged and closes without a pin. |"}}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-07-manifest-close; only reconciled deployment/public/browser failure","when":{"line":6216,"quote":"| `site2-04` fails / disconnects | `site2-04-reconcile-failure` exactly once: unchanged baseline records failed-before-switch; target current restores pin; a third state STOPs for incident handling. Then `site2-06`, `site2-07-manifest-close` if readbacks pass. |\n| `site2-05` or blocking `site2-05-browser-acceptance` fails | Automatic pin restore; `site2-06`, then `site2-07-manifest-close` only after required rollback receipts pass. |"}}
+{"id":"ai-ordinary-probes","host":"mac","input":"Recovery receipt and matching post-W5 consent receipt","when":{"line":6219,"quote":"W5 C1 recovered close runs only after site2-07-manifest-close has recorded\nCLOSED=yes with OUTCOME=rolled-back or OUTCOME=failed-before-switch, released\nthe pin, and completed cleanup; GO and partial-pin failures stay open."}}
+{"id":"ai-w5-recovery-transfer","host":"mac","when":{"line":6219,"quote":"W5 C1 recovered close runs only after site2-07-manifest-close has recorded\nCLOSED=yes with OUTCOME=rolled-back or OUTCOME=failed-before-switch, released\nthe pin, and completed cleanup; GO and partial-pin failures stay open."}}
+{"id":"ai-w5-recovery-env","host":"box","input":"Fresh persistent box root shell; derive WINDOW/PROOF_DIR/INPUTS_FILE/BOX_ARCHIVE_PATH/SITE_RECOVERY_EVIDENCE/PLAN_FILE/CLOSE_RESULT from transferred inputs; never ai-open or ai-db-session","when":{"line":6219,"quote":"W5 C1 recovered close runs only after site2-07-manifest-close has recorded\nCLOSED=yes with OUTCOME=rolled-back or OUTCOME=failed-before-switch, released\nthe pin, and completed cleanup; GO and partial-pin failures stay open."}}
+{"id":"ai-close","host":"box","input":"CLOSE_RESULT=recovered; W5 nonsecret proof paths from recovery transfer; SITE_RECOVERY_EVIDENCE=$PROOF_DIR/site-recovery","when":{"line":6219,"quote":"W5 C1 recovered close runs only after site2-07-manifest-close has recorded\nCLOSED=yes with OUTCOME=rolled-back or OUTCOME=failed-before-switch, released\nthe pin, and completed cleanup; GO and partial-pin failures stay open."}}
+{"host":"mac","manual":{"line":9173,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."},"when":{"line":6219,"quote":"W5 C1 recovered close runs only after site2-07-manifest-close has recorded\nCLOSED=yes with OUTCOME=rolled-back or OUTCOME=failed-before-switch, released\nthe pin, and completed cleanup; GO and partial-pin failures stay open."}}
+{"id":"ai-mac-close","host":"mac","when":{"line":6219,"quote":"W5 C1 recovered close runs only after site2-07-manifest-close has recorded\nCLOSED=yes with OUTCOME=rolled-back or OUTCOME=failed-before-switch, released\nthe pin, and completed cleanup; GO and partial-pin failures stay open."}}
 ```
 
 ```c1-order W6 forward
 {"id":"ai-w6-activation-approval","host":"mac"}
-{"host":"mac","manual":{"line":6872,"quote":"- **BROWSER-READY** (`/Users/yulanbot/work/production/BROWSER-READY`, Mac). Producer: HezLead\n  on Tom's unlocked Mac, by writing exactly `production\\n` AFTER the W5 close at this release and\n  shortly before the W6 open. Contract: a regular non-symlink file; only its\n  modification time matters (newer than the W5 `closed.txt` time and not in the\n  future: ai-w6-readiness, ai-w6-preflight, ai-open). The production readers\n  require exactly `production\\n` and refuse reserved STG window IDs; ai-open\n  consumes the copy after that validation and keeps its original time check. A file\n  touched before the W5 close STOPs W6; write it again after the close."}}
+{"host":"mac","manual":{"line":7254,"quote":"- **BROWSER-READY** (`/Users/yulanbot/work/production/BROWSER-READY`, Mac). Producer: HezLead\n  on Tom's unlocked Mac, by writing exactly `production\\n` AFTER the W5 close at this release and\n  shortly before the W6 open. Contract: a regular non-symlink file; only its\n  modification time matters (newer than the W5 `closed.txt` time and not in the\n  future: ai-w6-readiness, ai-w6-preflight, ai-open). The production readers\n  require exactly `production\\n` and refuse reserved STG window IDs; ai-open\n  consumes the copy after that validation and keeps its original time check. A file\n  touched before the W5 close STOPs W6; write it again after the close."}}
 {"id":"ai-w6-c1-inputs","host":"mac"}
 {"id":"ai-w6-preflight","host":"mac"}
 {"id":"ai-inputs","host":"mac"}
@@ -436,10 +441,10 @@ site-plan: {"path":"docs/evidence/2026-10-02-site-release/SITE-RELEASE.md","sha2
 {"id":"ai-box-preflight","host":"box"}
 {"id":"ai-w6-readiness-transfer","host":"mac"}
 {"id":"ai-edge-receipt","host":"box","input":"EDGE_MEASUREMENT_FILE=W4 edge-measurement.json; INPUTS_FILE exported or passed to every child"}
-{"id":"ai-edge-refresh","host":"box","input":"Only stale receipt; new output; use fresh receipt","when":{"line":1128,"quote":"ai-close. Before a W5/W6/W7 open whose receipt is stale, HezLead runs\n`ai-edge-refresh`, which owns the timer for that step only and always re-arms it."}}
+{"id":"ai-edge-refresh","host":"box","input":"Only stale receipt; new output; use fresh receipt","when":{"line":1199,"quote":"ai-close. Before a W5/W6/W7 open whose receipt is stale, HezLead runs\n`ai-edge-refresh`, which owns the timer for that step only and always re-arms it."}}
 {"id":"ai-box-preflight","host":"box"}
 {"id":"ai-open","host":"box"}
-{"id":"ai-open-abort","host":"box","input":"Failure branch only: no production operation occurred; STOP forward order after abort","when":{"line":8587,"quote":"# host: box root; no production operation occurred before failed open"}}
+{"id":"ai-open-abort","host":"box","input":"Failure branch only: no production operation occurred; STOP forward order after abort","when":{"line":8969,"quote":"# host: box root; no production operation occurred before failed open"}}
 {"id":"ai-db-session","host":"box"}
 {"id":"ai-w6-edge-oauth-runtime-grant","host":"box"}
 {"id":"ai-w6-prepare","host":"mac"}
@@ -458,9 +463,9 @@ site-plan: {"path":"docs/evidence/2026-10-02-site-release/SITE-RELEASE.md","sha2
 {"id":"ai-w6-secret-close","host":"mac","input":"Operator-directed only after a stale-pointer refusal: Earlier window's C1_PROOF_DIR; only stopped runner; do not remove another window's pointer by hand"}
 {"id":"ai-w6-pointer","host":"mac","input":"Operator-directed only after a stale-pointer refusal: Current window after prior-window cleanup; restore current variables"}
 {"id":"ai-w6-owner-client-command","host":"mac","input":"C1_CLIENT_ACTION=approve; owner interactive sign-in in the owner file-store CLI session immediately before this approve; immediately before separately assigned consent"}
-{"host":"mac","manual":{"line":7425,"quote":"HezLead's browser worker reads the pointer, waits for the 0600 authorize file,\nrefuses an expired pointer, follows consent_choices exactly (granular: workspace, scopes and home=false, full_account=false),\nthen atomically writes the full callback URL as 0600 to\nthe secret callback path without logging it. This is a separate browser-worker\nassignment; this plan never launches the installed Chrome app. HezLead starts"}}
+{"host":"mac","manual":{"line":7807,"quote":"HezLead's browser worker reads the pointer, waits for the 0600 authorize file,\nrefuses an expired pointer, follows consent_choices exactly (granular: workspace, scopes and home=false, full_account=false),\nthen atomically writes the full callback URL as 0600 to\nthe secret callback path without logging it. This is a separate browser-worker\nassignment; this plan never launches the installed Chrome app. HezLead starts"}}
 {"id":"ai-w6-fence-driver","host":"mac","input":"Start concurrently with the separate consent worker on Mac; owns agent receipt/upload, audit dispatch into existing B stdin, audit download and normal human revoke; no other owner-session caller","dispatches":["ai-w6-audit"]}
-{"host":"box","manual":{"line":7564,"quote":"# Dispatch only after upload completed; B runs once and never polls for its input."}}
+{"host":"box","manual":{"line":7946,"quote":"# Dispatch only after upload completed; B runs once and never polls for its input."}}
 {"id":"ai-w6-agent-receipt","host":"mac"}
 {"id":"ai-w6-owner-client-command","host":"mac","input":"C1_CLIENT_ACTION=withdraw; owner interactive sign-in in the owner file-store CLI session immediately before this withdraw; after runner exits"}
 {"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=client-withdraw.json"}
@@ -475,73 +480,73 @@ site-plan: {"path":"docs/evidence/2026-10-02-site-release/SITE-RELEASE.md","sha2
 {"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=C1-cleanup.txt"}
 {"id":"ai-ordinary-probes","host":"mac"}
 {"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=after; use independently produced after receipt and matching consent receipt"}
-{"host":"box","manual":{"line":663,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"host":"box","manual":{"line":668,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
 {"id":"ai-close","host":"box","input":"CLOSE_RESULT=success"}
-{"host":"mac","manual":{"line":8801,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"host":"mac","manual":{"line":9173,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
 {"id":"ai-mac-close","host":"mac"}
 ```
 
 ```c1-order W6 rollback
-{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
 {"id":"ai-emergency-close","host":"box"}
 {"id":"ai-w6-edge-oauth-runtime-revoke","host":"box","input":"If this window wrote grant-attempted.txt or grant.txt: measure live membership; revoke if present, record absent-at-recovery if not; reconcile a started revoke on re-run: re-measure; absent gives reconciled absent evidence; present runs one more per-grantor REVOKE with zero-row readback"}
-{"id":"ai-w6-human-revoke","host":"mac","input":"Only committed grant needing recovery; C1_RECOVERY_REVOKE=1; obtain run-specific C1-audit.json first; saved request ID must be reconciled after unknown outcome; cleanup never C1 proof","when":{"line":680,"quote":"7. **Missed fence.** If the W6 fence driver misses its cutoff (the normal\n   human revoke is refused after the cutoff), the close is pre-decided:\n   ai-emergency-close, then the recovery revoke (`C1_RECOVERY_REVOKE=1`,\n   recorded as `human-revoke-recovery.json`, never as C1 refusal proof), then\n   the owner withdraw, then a recovered close, then report STOP. Keep-open is"}}
+{"id":"ai-w6-human-revoke","host":"mac","input":"Only committed grant needing recovery; C1_RECOVERY_REVOKE=1; obtain run-specific C1-audit.json first; saved request ID must be reconciled after unknown outcome; cleanup never C1 proof","when":{"line":685,"quote":"7. **Missed fence.** If the W6 fence driver misses its cutoff (the normal\n   human revoke is refused after the cutoff), the close is pre-decided:\n   ai-emergency-close, then the recovery revoke (`C1_RECOVERY_REVOKE=1`,\n   recorded as `human-revoke-recovery.json`, never as C1 refusal proof), then\n   the owner withdraw, then a recovered close, then report STOP. Keep-open is"}}
 {"id":"ai-w6-owner-client-command","host":"mac","input":"C1_CLIENT_ACTION=withdraw; owner interactive sign-in in the owner file-store CLI session immediately before this withdraw; only existing approval; after recovery revoke"}
 {"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=client-withdraw.json; only produced receipt"}
-{"id":"ai-w6-secret-close","host":"mac","input":"Only if runner/stage exist and runner has stopped","when":{"line":7845,"quote":"# host: HezLead Mac; success or stopped runner, guarded private cleanup"}}
+{"id":"ai-w6-secret-close","host":"mac","input":"Only if runner/stage exist and runner has stopped","when":{"line":8227,"quote":"# host: HezLead Mac; success or stopped runner, guarded private cleanup"}}
 {"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=C1-cleanup.txt; only produced cleanup receipt"}
 ```
 
 ```c1-order W6 recovered-close
-{"id":"ai-recovery-env","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
-{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-recovery-env","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
 {"id":"ai-emergency-close","host":"box"}
 {"id":"ai-w6-edge-oauth-runtime-revoke","host":"box","input":"If this window wrote grant-attempted.txt or grant.txt: measure live membership; revoke if present, record absent-at-recovery if not; reconcile a started revoke on re-run: re-measure; absent gives reconciled absent evidence; present runs one more per-grantor REVOKE with zero-row readback"}
-{"id":"ai-w6-human-revoke","host":"mac","input":"Only committed grant needing recovery; C1_RECOVERY_REVOKE=1; obtain run-specific C1-audit.json first; saved request ID must be reconciled after unknown outcome; cleanup never C1 proof","when":{"line":680,"quote":"7. **Missed fence.** If the W6 fence driver misses its cutoff (the normal\n   human revoke is refused after the cutoff), the close is pre-decided:\n   ai-emergency-close, then the recovery revoke (`C1_RECOVERY_REVOKE=1`,\n   recorded as `human-revoke-recovery.json`, never as C1 refusal proof), then\n   the owner withdraw, then a recovered close, then report STOP. Keep-open is"}}
+{"id":"ai-w6-human-revoke","host":"mac","input":"Only committed grant needing recovery; C1_RECOVERY_REVOKE=1; obtain run-specific C1-audit.json first; saved request ID must be reconciled after unknown outcome; cleanup never C1 proof","when":{"line":685,"quote":"7. **Missed fence.** If the W6 fence driver misses its cutoff (the normal\n   human revoke is refused after the cutoff), the close is pre-decided:\n   ai-emergency-close, then the recovery revoke (`C1_RECOVERY_REVOKE=1`,\n   recorded as `human-revoke-recovery.json`, never as C1 refusal proof), then\n   the owner withdraw, then a recovered close, then report STOP. Keep-open is"}}
 {"id":"ai-w6-owner-client-command","host":"mac","input":"C1_CLIENT_ACTION=withdraw; owner interactive sign-in in the owner file-store CLI session immediately before this withdraw; only existing approval; after recovery revoke"}
 {"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=client-withdraw.json; only produced receipt"}
-{"id":"ai-w6-secret-close","host":"mac","input":"Only if runner/stage exist and runner has stopped","when":{"line":7845,"quote":"# host: HezLead Mac; success or stopped runner, guarded private cleanup"}}
+{"id":"ai-w6-secret-close","host":"mac","input":"Only if runner/stage exist and runner has stopped","when":{"line":8227,"quote":"# host: HezLead Mac; success or stopped runner, guarded private cleanup"}}
 {"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=C1-cleanup.txt; only produced cleanup receipt"}
 {"id":"ai-ordinary-probes","host":"mac"}
 {"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=recovery; independently produced recovery receipt"}
-{"host":"box","manual":{"line":663,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"host":"box","manual":{"line":668,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
 {"id":"ai-w6-close-state","host":"mac","input":"Retained C1_PROOF_DIR from this window; measures secret-stage.path, never the box stage marker; runner stopped"}
 {"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=C1-close-state.json"}
 {"id":"ai-close","host":"box","input":"CLOSE_RESULT=recovered; existing proof/secret paths; every embedded rollback outcome check must pass"}
-{"host":"mac","manual":{"line":8801,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
-{"id":"ai-mac-recovery-env","host":"mac","input":"Only if original Mac shell was lost; recover PREP_DIR from the single matching prep directory","when":{"line":662,"quote":"If the Mac shell is lost, STOP: a recovered close opens one new persistent Mac /bin/bash 3.2 shell, runs ai-mac-recovery-env in it, then ai-mac-close."}}
+{"host":"mac","manual":{"line":9173,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"id":"ai-mac-recovery-env","host":"mac","input":"Only if original Mac shell was lost; recover PREP_DIR from the single matching prep directory","when":{"line":667,"quote":"If the Mac shell is lost, STOP: a recovered close opens one new persistent Mac /bin/bash 3.2 shell, runs ai-mac-recovery-env in it, then ai-mac-close."}}
 {"id":"ai-mac-close","host":"mac"}
 ```
 
 ```c1-order W6e forward
-{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
 {"id":"ai-emergency-close","host":"box"}
 ```
 
 ```c1-order W6e rollback
-{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
 {"id":"ai-emergency-close","host":"box"}
 {"id":"ai-w6-edge-oauth-runtime-revoke","host":"box","input":"If this window wrote grant-attempted.txt or grant.txt: measure live membership; revoke if present, record absent-at-recovery if not; reconcile a started revoke on re-run: re-measure; absent gives reconciled absent evidence; present runs one more per-grantor REVOKE with zero-row readback"}
 ```
 
 ```c1-order W6e recovered-close
-{"id":"ai-recovery-env","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
-{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-recovery-env","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
 {"id":"ai-emergency-close","host":"box"}
 {"id":"ai-w6-edge-oauth-runtime-revoke","host":"box","input":"If this window wrote grant-attempted.txt or grant.txt: measure live membership; revoke if present, record absent-at-recovery if not; reconcile a started revoke on re-run: re-measure; absent gives reconciled absent evidence; present runs one more per-grantor REVOKE with zero-row readback"}
-{"id":"ai-w6-human-revoke","host":"mac","input":"Only committed grant needing recovery; C1_RECOVERY_REVOKE=1; obtain run-specific C1-audit.json first; saved request ID must be reconciled after unknown outcome; cleanup never C1 proof","when":{"line":680,"quote":"7. **Missed fence.** If the W6 fence driver misses its cutoff (the normal\n   human revoke is refused after the cutoff), the close is pre-decided:\n   ai-emergency-close, then the recovery revoke (`C1_RECOVERY_REVOKE=1`,\n   recorded as `human-revoke-recovery.json`, never as C1 refusal proof), then\n   the owner withdraw, then a recovered close, then report STOP. Keep-open is"}}
+{"id":"ai-w6-human-revoke","host":"mac","input":"Only committed grant needing recovery; C1_RECOVERY_REVOKE=1; obtain run-specific C1-audit.json first; saved request ID must be reconciled after unknown outcome; cleanup never C1 proof","when":{"line":685,"quote":"7. **Missed fence.** If the W6 fence driver misses its cutoff (the normal\n   human revoke is refused after the cutoff), the close is pre-decided:\n   ai-emergency-close, then the recovery revoke (`C1_RECOVERY_REVOKE=1`,\n   recorded as `human-revoke-recovery.json`, never as C1 refusal proof), then\n   the owner withdraw, then a recovered close, then report STOP. Keep-open is"}}
 {"id":"ai-w6-owner-client-command","host":"mac","input":"C1_CLIENT_ACTION=withdraw; owner interactive sign-in in the owner file-store CLI session immediately before this withdraw; only existing approval; after recovery revoke"}
 {"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=client-withdraw.json; only produced receipt"}
-{"id":"ai-w6-secret-close","host":"mac","input":"Only if runner/stage exist and runner has stopped","when":{"line":7845,"quote":"# host: HezLead Mac; success or stopped runner, guarded private cleanup"}}
+{"id":"ai-w6-secret-close","host":"mac","input":"Only if runner/stage exist and runner has stopped","when":{"line":8227,"quote":"# host: HezLead Mac; success or stopped runner, guarded private cleanup"}}
 {"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=C1-cleanup.txt; only produced cleanup receipt"}
 {"id":"ai-ordinary-probes","host":"mac"}
 {"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=recovery; independently produced recovery receipt"}
-{"host":"box","manual":{"line":663,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"host":"box","manual":{"line":668,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
 {"id":"ai-w6-close-state","host":"mac","input":"Retained C1_PROOF_DIR from this window; measures secret-stage.path, never the box stage marker; runner stopped"}
 {"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=C1-close-state.json"}
 {"id":"ai-close","host":"box","input":"CLOSE_RESULT=recovered; existing proof/secret paths; every embedded rollback outcome check must pass"}
-{"host":"mac","manual":{"line":8801,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
-{"id":"ai-mac-recovery-env","host":"mac","input":"Only if original Mac shell was lost; recover PREP_DIR from the single matching prep directory","when":{"line":662,"quote":"If the Mac shell is lost, STOP: a recovered close opens one new persistent Mac /bin/bash 3.2 shell, runs ai-mac-recovery-env in it, then ai-mac-close."}}
+{"host":"mac","manual":{"line":9173,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"id":"ai-mac-recovery-env","host":"mac","input":"Only if original Mac shell was lost; recover PREP_DIR from the single matching prep directory","when":{"line":667,"quote":"If the Mac shell is lost, STOP: a recovered close opens one new persistent Mac /bin/bash 3.2 shell, runs ai-mac-recovery-env in it, then ai-mac-close."}}
 {"id":"ai-mac-close","host":"mac"}
 ```
 
@@ -554,37 +559,37 @@ site-plan: {"path":"docs/evidence/2026-10-02-site-release/SITE-RELEASE.md","sha2
 {"id":"ai-inputs","host":"box"}
 {"id":"ai-box-preflight","host":"box"}
 {"id":"ai-edge-receipt","host":"box","input":"EDGE_MEASUREMENT_FILE=W6 edge-measurement-final.json"}
-{"id":"ai-edge-refresh","host":"box","input":"Only stale receipt; retain new receipt and use it","when":{"line":1128,"quote":"ai-close. Before a W5/W6/W7 open whose receipt is stale, HezLead runs\n`ai-edge-refresh`, which owns the timer for that step only and always re-arms it."}}
+{"id":"ai-edge-refresh","host":"box","input":"Only stale receipt; retain new receipt and use it","when":{"line":1199,"quote":"ai-close. Before a W5/W6/W7 open whose receipt is stale, HezLead runs\n`ai-edge-refresh`, which owns the timer for that step only and always re-arms it."}}
 {"id":"ai-box-preflight","host":"box"}
 {"id":"ai-open","host":"box"}
-{"id":"ai-open-abort","host":"box","input":"Failure branch only: no production operation occurred; STOP forward order after abort","when":{"line":8587,"quote":"# host: box root; no production operation occurred before failed open"}}
+{"id":"ai-open-abort","host":"box","input":"Failure branch only: no production operation occurred; STOP forward order after abort","when":{"line":8969,"quote":"# host: box root; no production operation occurred before failed open"}}
 {"id":"ai-db-session","host":"box"}
 {"id":"ai-w7-timer-hold","host":"box","input":"Source in the persistent W7 shell; hold recycle timer through proof and close; verify recycle service inactive"}
 {"id":"ai-w7-preflight","host":"box"}
 {"id":"ai-w7-proof","host":"box"}
 {"id":"ai-ordinary-probes","host":"mac"}
 {"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=after; use independently produced after receipt and matching consent receipt"}
-{"host":"box","manual":{"line":663,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"host":"box","manual":{"line":668,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
 {"id":"ai-close","host":"box","input":"CLOSE_RESULT=success"}
-{"host":"mac","manual":{"line":8801,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"host":"mac","manual":{"line":9173,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
 {"id":"ai-mac-close","host":"mac"}
 ```
 
 ```c1-order W7 rollback
-{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
 {"id":"ai-w7-recovery","host":"box","input":"Preserve W6 measured OPEN/CLOSED state; restore recycle timer; never activation rollback"}
 ```
 
 ```c1-order W7 recovered-close
-{"id":"ai-recovery-env","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
-{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":660,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-recovery-env","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":665,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
 {"id":"ai-w7-recovery","host":"box","input":"Preserve W6 measured OPEN/CLOSED state; restore recycle timer; never activation rollback"}
 {"id":"ai-ordinary-probes","host":"mac"}
 {"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=recovery; independently produced recovery receipt"}
-{"host":"box","manual":{"line":663,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"host":"box","manual":{"line":668,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
 {"id":"ai-close","host":"box","input":"CLOSE_RESULT=recovered; existing proof/secret paths; every embedded rollback outcome check must pass"}
-{"host":"mac","manual":{"line":8801,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
-{"id":"ai-mac-recovery-env","host":"mac","input":"Only if original Mac shell was lost; recover PREP_DIR from the single matching prep directory","when":{"line":662,"quote":"If the Mac shell is lost, STOP: a recovered close opens one new persistent Mac /bin/bash 3.2 shell, runs ai-mac-recovery-env in it, then ai-mac-close."}}
+{"host":"mac","manual":{"line":9173,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"id":"ai-mac-recovery-env","host":"mac","input":"Only if original Mac shell was lost; recover PREP_DIR from the single matching prep directory","when":{"line":667,"quote":"If the Mac shell is lost, STOP: a recovered close opens one new persistent Mac /bin/bash 3.2 shell, runs ai-mac-recovery-env in it, then ai-mac-close."}}
 {"id":"ai-mac-close","host":"mac"}
 ```
 
@@ -899,13 +904,72 @@ with open(copy,'rb') as f: assert hashlib.sha256(f.read()).hexdigest()==want
 PY
  BOX_KEEPER_INSTALL_MD=/tmp/admin-issuance-${RELEASE_SHA}-${WINDOW_ID}-keeper-INSTALL.md
 fi
-printf -v REMOTE 'test ! -e %q && (set -C; umask 077; : > %q)' "$BOX_ARCHIVE_PATH" "$BOX_ARCHIVE_PATH"
-ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 "$REMOTE"
-scp -p "$PREP_DIR/release.tar" "ops@100.115.66.74:$BOX_ARCHIVE_PATH"
-if test -n "$BOX_KEEPER_INSTALL_MD"; then
- printf -v REMOTE 'test ! -e %q && (set -C; umask 077; : > %q)' "$BOX_KEEPER_INSTALL_MD" "$BOX_KEEPER_INSTALL_MD"
+# Stream W4's exact archive/INSTALL and operator inputs into exclusive root descriptors.
+# W4 input directory is root:root 0700; never stage input, baseline or plan under /home/ops or /tmp.
+ai_w4_upload() {
+ local source=$1 destination=$2 code remote
+ code=$(cat <<'W4_UPLOAD_PY'
+import os,re,stat,sys
+path=sys.argv[1]
+if os.geteuid()!=0: raise SystemExit('FAIL W4 upload: caller expected root got other; STOP')
+if re.fullmatch(r'/tmp/admin-issuance-[0-9a-f]{40}-[A-Za-z0-9]{6}(?:\.tar|-keeper-INSTALL\.md)',path):
+    parent='/tmp'
+    st=os.lstat(parent)
+    if not stat.S_ISDIR(st.st_mode) or (st.st_uid,st.st_gid,stat.S_IMODE(st.st_mode))!=(0,0,0o1777): raise SystemExit('FAIL W4 upload: /tmp expected real root:root 01777 directory got other; STOP')
+elif re.fullmatch(r'/var/lib/commonswarm-admin-release/w4/[A-Za-z0-9]{6}/(?:inputs\.json|recycle-baseline\.json|RELEASE\.md)',path):
+    parent=os.path.dirname(path)
+    for directory in ('/','/var','/var/lib','/var/lib/commonswarm-admin-release','/var/lib/commonswarm-admin-release/w4',parent):
+        if directory in ('/var/lib/commonswarm-admin-release/w4',parent):
+            try: os.mkdir(directory,0o700)
+            except FileExistsError: pass
+        st=os.lstat(directory)
+        if not stat.S_ISDIR(st.st_mode) or (st.st_uid,st.st_gid)!=(0,0) or st.st_mode & 0o022 or (directory in ('/var/lib/commonswarm-admin-release', '/var/lib/commonswarm-admin-release/w4',parent) and stat.S_IMODE(st.st_mode)!=0o700):
+            raise SystemExit('FAIL W4 upload: '+directory+' expected real root:root directory with exact private mode got unsafe-owner-mode-or-type; STOP')
+else: raise SystemExit('FAIL W4 upload: path expected exact window upload got other; STOP')
+try: fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+except OSError: raise SystemExit('FAIL W4 upload: destination expected absent got pre-created-or-unwritable; STOP') from None
+try:
+    os.fchown(fd,0,0); os.fchmod(fd,0o600)
+    while True:
+        raw=sys.stdin.buffer.read(1048576)
+        if not raw: break
+        view=memoryview(raw)
+        while view: view=view[os.write(fd,view):]
+    os.fsync(fd)
+finally: os.close(fd)
+fd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+try: os.fsync(fd)
+finally: os.close(fd)
+W4_UPLOAD_PY
+ )
+ printf -v remote 'sudo -n python3 -c %q %q' "$code" "$destination"
+ ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 "$remote" <"$source"
+}
+PREP_UPLOAD_WINDOW=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window"])' "$INPUTS_FILE")
+
+if test "$PREP_UPLOAD_WINDOW" = W4; then
+ : "${RECYCLE_BASELINE_FILE:?FAIL ai-prepare: W4 baseline file required; STOP}"
+ python3 - "$INPUTS_FILE" "$RECYCLE_BASELINE_FILE" <<'PY_W4_BASELINE' || exit 1
+import hashlib,json,os,stat,sys
+fd=os.open(sys.argv[2],os.O_RDONLY|os.O_NOFOLLOW)
+with os.fdopen(fd,'rb') as f:
+    if not stat.S_ISREG(os.fstat(f.fileno()).st_mode): raise SystemExit('FAIL W4 upload: baseline expected regular file; STOP')
+    raw=f.read()
+if hashlib.sha256(raw).hexdigest()!=json.load(open(sys.argv[1]))['recycle_baseline_sha256']: raise SystemExit('FAIL W4 upload: baseline digest differs; STOP')
+PY_W4_BASELINE
+ BOX_W4_INPUT_ROOT=/var/lib/commonswarm-admin-release/w4/${WINDOW_ID}
+ ai_w4_upload "$INPUTS_FILE" "$BOX_W4_INPUT_ROOT/inputs.json"
+ ai_w4_upload "$RECYCLE_BASELINE_FILE" "$BOX_W4_INPUT_ROOT/recycle-baseline.json"
+ ai_w4_upload "$PLAN_FILE" "$BOX_W4_INPUT_ROOT/RELEASE.md"
+ printf 'PASS W4 inputs uploaded: on the box export INPUTS_FILE=%s/inputs.json RECYCLE_BASELINE_FILE=%s/recycle-baseline.json PLAN_FILE=%s/RELEASE.md\n' "$BOX_W4_INPUT_ROOT" "$BOX_W4_INPUT_ROOT" "$BOX_W4_INPUT_ROOT"
+ ai_w4_upload "$PREP_DIR/release.tar" "$BOX_ARCHIVE_PATH"
+else
+ printf -v REMOTE 'test ! -e %q && (set -C; umask 077; : > %q)' "$BOX_ARCHIVE_PATH" "$BOX_ARCHIVE_PATH"
  ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 "$REMOTE"
- scp -p "$PREP_DIR/keeper-INSTALL.md" "ops@100.115.66.74:$BOX_KEEPER_INSTALL_MD"
+ scp -p "$PREP_DIR/release.tar" "ops@100.115.66.74:$BOX_ARCHIVE_PATH"
+fi
+if test -n "$BOX_KEEPER_INSTALL_MD"; then
+ ai_w4_upload "$PREP_DIR/keeper-INSTALL.md" "$BOX_KEEPER_INSTALL_MD"
  printf -v REMOTE 'sha256sum -- %q' "$BOX_KEEPER_INSTALL_MD"
  PREP_REMOTE_KEEPER_MD=$(ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 "$REMOTE")
  test "${PREP_REMOTE_KEEPER_MD%% *}" = "$PREP_KEEPER_MD_SHA256" || { printf 'FAIL ai-prepare: uploaded keeper INSTALL.md digest expected keeper_install_md_sha256 got other; STOP\n' >&2; exit 1; }
@@ -1056,6 +1120,13 @@ query=r'''
 set -euo pipefail
 umask 077
 EDGE_QUERY_STAGE=$(mktemp -d /tmp/anvil-secret.XXXXXX)
+if test "$3" = W4; then
+ python3 - "$EDGE_QUERY_STAGE" <<'QUERY_STAGE' || exit 1
+import os,re,stat,sys
+p=sys.argv[1]; st=os.lstat(p)
+if re.fullmatch(r'/tmp/anvil-secret\.[A-Za-z0-9]{6}',p) is None or not stat.S_ISDIR(st.st_mode) or (st.st_uid,st.st_gid,stat.S_IMODE(st.st_mode))!=(0,0,0o700): raise SystemExit('FAIL exact created query stage: expected real root:root 0700 directory; STOP')
+QUERY_STAGE
+fi
 edge_query_cleanup() {
  python3 - "$EDGE_QUERY_STAGE" <<'EDGE_QUERY_CLEANUP' || return 1
 import pathlib,re,sys
@@ -1078,7 +1149,7 @@ docker run --rm --network commonswarm-net --add-host db.commonswarm.internal:172
  --command 'SET default_transaction_read_only=on;' \
  --command 'SELECT row_to_json(r) FROM (SELECT release_generation,measured_generation,invalidated_at,approved_edge_release_sha,measured_edge_release_sha,measured_edge_target,measured_mount,measured_image_digest,measured_artifact_digest FROM commonswarm_oauth.admin_cutover_state WHERE singleton) r;' 2>"$EDGE_QUERY_STAGE/query.log"
 '''
-args=['/bin/bash','-s','--',sha,image]
+args=['/bin/bash','-s','--',sha,image,d.get('window','')]
 if os.environ.get('EDGE_RECEIPT_REMOTE')=='1':
     args=['ssh','-o','BatchMode=yes','-o','ConnectTimeout=10','ops@100.115.66.74','sudo -n '+shlex.join(args)]
 try:
@@ -1200,7 +1271,7 @@ need(stat.S_IMODE(os.stat('/etc/commonswarm-admin-release/recycle.json').st_mode
 r=json.loads(r_raw)
 need(r.get('release_sha')==sha and r.get('target')=='/home/commonswarm/edge/releases/'+sha,'recycle.json release','this-release','other')
 try:
-    row=json.loads(subprocess.check_output(['/bin/bash','-s','--',sha,d['baseline_postgres_image']],input=query[0]+'\n',text=True,stderr=subprocess.DEVNULL))
+    row=json.loads(subprocess.check_output(['/bin/bash','-s','--',sha,d['baseline_postgres_image'],d.get('window','')],input=query[0]+'\n',text=True,stderr=subprocess.DEVNULL))
 except Exception:
     raise SystemExit('FAIL ai-edge-remeasure: cutover row expected readable got failure; STOP') from None
 gen=row.get('release_generation')
@@ -1313,6 +1384,10 @@ fi
 RELEASE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_sha"])' "$INPUTS_FILE")
 WINDOW_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window_id"])' "$INPUTS_FILE")
 WINDOW=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window"])' "$INPUTS_FILE")
+if test "$WINDOW" = W4; then
+ W4_INPUT_ROOT=/var/lib/commonswarm-admin-release/w4/${WINDOW_ID}
+ test "$INPUTS_FILE" = "$W4_INPUT_ROOT/inputs.json" && test "$RECYCLE_BASELINE_FILE" = "$W4_INPUT_ROOT/recycle-baseline.json" && test "$PLAN_FILE" = "$W4_INPUT_ROOT/RELEASE.md" || { printf 'FAIL ai-open: W4 inputs expected exact uploaded paths got other; STOP\n' >&2; exit 1; }
+fi
 BOX_ARCHIVE_PATH=/tmp/admin-issuance-${RELEASE_SHA}-${WINDOW_ID}.tar
 PROOF_DIR=/home/commonswarm/admin-issuance/release-proofs/${RELEASE_SHA}-${WINDOW}-${WINDOW_ID}
 RELEASE_ROOT=/home/commonswarm/admin-issuance/releases/$RELEASE_SHA
@@ -1485,6 +1560,12 @@ fi
 # Pointer in the same statement as mktemp: a crash between them cannot leave an unrecorded stage.
 SECRET_STAGE=$(mktemp -d /tmp/anvil-secret.XXXXXX) && printf '%s\n' "$SECRET_STAGE" >"$PROOF_DIR/secret-stage.path"
 chmod 0700 "$SECRET_STAGE"
+python3 - "$SECRET_STAGE" "$INPUTS_FILE" <<'PY_STAGE' || exit 1
+import json,os,re,stat,sys
+if json.load(open(sys.argv[2])).get("window")=="W4":
+    p=sys.argv[1]; st=os.lstat(p)
+    if re.fullmatch(r'/tmp/anvil-secret\.[A-Za-z0-9]{6}',p) is None or not stat.S_ISDIR(st.st_mode) or (st.st_uid,st.st_gid,stat.S_IMODE(st.st_mode))!=(0,0,0o700): raise SystemExit('FAIL exact created secret stage: expected real root:root 0700 directory; STOP')
+PY_STAGE
 install -m 0600 "$INPUTS_FILE" "$PROOF_DIR/inputs.json"
 install -m 0600 "$GATE_RECEIPT_FILE" "$PROOF_DIR/gates.json"
 case "$WINDOW" in W5|W6|W7)
@@ -1670,7 +1751,9 @@ ai_run() {
  # A failure BEFORE the block runs (allowlist, plan verification, lookup, syntax) is 2: it confirms nothing, so it
  # can never read as a status-contract block's confirmed-CLOSED 1.
  case "$STEP_NAME" in ai-release-aside|ai-w6-issuer-live|ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-gates-bind|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-w4-state|ai-timer-guard|ai-w4-timer-recovery|ai-w6-activation-rollback|ai-emergency-close|ai-w2-measure|ai-w2-between-probes|ai-w2-reconcile|ai-w2-backfill|ai-w2-revoke-probes|ai-w2b-proof-check|ai-backup-gate-check|ai-w2-issuer-rollback|ai-edge-remeasure|ai-w6-audit|ai-w6-closed-gate-probe) ;; *) printf 'FAIL ai_run: step %s expected allowlisted got unsupported; STOP\n' "$STEP_NAME" >&2; return 2;; esac
- local AI_RUN_SOURCE
+ local AI_RUN_SOURCE AI_RUN_PLAN
+ AI_RUN_PLAN="$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md"
+ if test "${WINDOW:-}" = W4; then AI_RUN_PLAN=$PLAN_FILE; fi
  # The verified block reaches the shell only through this substitution: no staged path.
  AI_RUN_SOURCE=$(python3 -c '
 import hashlib,json,os,re,stat,sys
@@ -1694,7 +1777,7 @@ blocks=re.findall(r"^`{3}sh\n(.*?)^`{3}$",verified_plan(sys.argv[1],sys.argv[3],
 found=[b for b in blocks if b.startswith("# step: "+sys.argv[2]+"\n")]
 if len(found)!=1: raise SystemExit("FAIL ai_run: block "+sys.argv[2]+" expected one got "+str(len(found))+"; STOP")
 sys.stdout.write(found[0])
-' "$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md" "$STEP_NAME" "$INPUTS_FILE") || return 2
+' "$AI_RUN_PLAN" "$STEP_NAME" "$INPUTS_FILE") || return 2
  printf '%s\n' "$AI_RUN_SOURCE" | /bin/bash -n || return 2
  eval "$AI_RUN_SOURCE"
 }
@@ -3877,7 +3960,9 @@ An earlier pass may have installed the recycle hook, its drop-in and binding, an
   that HezLead's approval in the receipt pins; only the hook is replaced and the drop-in is kept. HezLead's A1
   baseline receipt records the measured files, directories, units, archive, helper, U10 keeper values and the
   expected result. ai-w4-preflight admits it against the live box before any W4 write and saves the exact bytes;
-  ai-w4-apply checks it again after the timer hold and installs last. Anything partial, unknown, symlinked, or
+  ai-w4-apply checks it again after the timer hold and installs last. In `fresh` mode, `edge.archive` records
+  the exact root:root 0600 single-link baseline tar path and SHA-256 for snapshot and rollback; no `/tmp` discovery.
+  Anything partial, unknown, symlinked, or
   with other bytes, owner or mode STOPs.
 - **Durable archive (A4).** The install promotes the verified upload, exclusively, to
   `/var/lib/commonswarm-admin-release/archives/<release_sha>-<window_id>.tar` (root 0600 in root 0700
@@ -3936,6 +4021,256 @@ install path, never a section 9 or API_CADDY_PAIR stack install (HezLead ruling 
 set -euo pipefail
 test "$WINDOW" = W4
 ai_deadline
+# HezLead rulings 28 B / 34 / FU #44: measure the root-or-operator pathname-race precondition BEFORE any W4 write.
+# This is a precondition, not descriptor hardening; a concurrent root actor still needs the post-C1 fix.
+python3 - "$INPUTS_FILE" "$RECYCLE_BASELINE_FILE" "$PROOF_DIR" "$SECRET_STAGE" "$PLAN_FILE" "$BOX_ARCHIVE_PATH" <<'PY_AUDIT' || exit 1
+import datetime,errno,grp,json,os,pathlib,pwd,re,stat,subprocess,sys
+# Pinned audit inventory ONCE. Columns: absolute box path/template, type, allowed absence, C lines at a438c6ea.
+# create = C creates it later; fresh = only fresh installation; fresh-restage = fresh or missing legacy upload.
+# No /tmp glob: future hook stages are checked at creation using mktemp's returned exact path.
+W4_PATH_AUDIT = [
+    ('/','dir','never','4193-4212;4764-4789;4803-4816;4837-4847;5090-5170;5201-5261;5287-5310'),
+    ('/etc','dir','never','4774-4776;4260;4284;5138-5170;5287-5310'),
+    ('/etc/commonswarm-admin-release','dir','fresh','4774-4776;4837-4847;5160-5165;5287-5310'),
+    ('/etc/commonswarm-admin-release/recycle.json','file','fresh','4774-4776;4260;4284;5163-5165;5287-5310'),
+    ('/etc/commonswarm-admin-release/recycle-intent.json','file','create','4837-4847;5109-5111;5287-5310'),
+    ('/etc/systemd','dir','never','4284;5157-5161;5287-5310'),
+    ('/etc/systemd/system','dir','never','4284;5157-5161;5287-5310'),
+    ('/etc/systemd/system/{service}.d','dir','fresh','4284;5157-5161;5287-5310'),
+    ('/etc/systemd/system/{service}.d/50-admin-measurement.conf','file','fresh','4284;5157-5161;5287-5310'),
+    ('/etc/commonswarm-release','dir','never','4802'),
+    ('/etc/commonswarm-release/target.env','file','never','4802'),
+    ('/etc/ssl','dir','never','4815'),
+    ('/etc/ssl/yulan-internal-ca.pem','file','never','4815'),
+    ('/usr','dir','never','4284;5122-5132;5153;5287-5310'),
+    ('/usr/local','dir','never','4284;5122-5132;5153;5287-5310'),
+    ('/usr/local/libexec','dir','never','4284;5122-5132;5153;5287-5310'),
+    ('/usr/local/libexec/commonswarm-admin-edge-recycle','file','fresh','4284;5122-5132;5153;5287-5310'),
+    ('/var','dir','never','4764-4770;4784-4789;4263-4269;4296-4301;5138-5149;5235-5261'),
+    ('/var/lib','dir','never','4764-4770;4784-4789;4263-4269;4296-4301;5138-5149;5235-5261'),
+    ('/var/lib/commonswarm-release','dir','create','4764-4770'),
+    ('/var/lib/commonswarm-release/admin-issuance-closed.log','file','create','4767-4770'),
+    ('/var/lib/commonswarm-admin-release','dir','create','4784-4789;4263;4296-4301;5138-5142;5235-5261'),
+    ('/var/lib/commonswarm-admin-release/archives','dir','create','4784-4789;4267;4296-4301 (enumerate exact children);5138-5149;5235-5261'),
+    ('/var/lib/commonswarm-admin-release/archives.json','file','fresh','4263;4298'),
+    ('/var/lib/commonswarm-admin-release/archives/{release_sha}-{window_id}.tar','file','create','4784-4789;5143-5149'),
+    ('/var/lib/commonswarm-admin-release/archives/{legacy_name}','file','fresh','4267;5235-5261'),
+    ('/home','dir','never','4776;4800-4804'),
+    ('/home/commonswarm','dir','never','4802'), # Measured commonswarm:commonswarm 0750; closed inert-account exception.
+    ('/home/commonswarm/.env','file','never','4802'),
+    ('/home/commonswarm/edge','dir','never','4776'), # Measured commonswarm:commonswarm 0755; closed inert-account exception.
+    ('/home/commonswarm/edge/releases','dir','never','4776'), # Measured commonswarm:commonswarm 0750; closed inert-account exception.
+    ('/home/commonswarm/edge/releases/{baseline_edge_sha}','dir','never','4776'),
+    ('/home/commonswarm/edge/releases/{release_sha}','dir','create','4776'),
+    ('/home/commonswarm/admin-issuance','dir','never','4800-4804'),
+    ('/home/commonswarm/admin-issuance/releases','dir','never','4800-4804'),
+    ('/home/commonswarm/admin-issuance/releases/{helper_sha}','dir','never','4800-4804'),
+    ('/home/commonswarm/admin-issuance/releases/{helper_sha}/deploy','dir','never','4804'),
+    ('/home/commonswarm/admin-issuance/releases/{helper_sha}/deploy/supabase-stack','dir','never','4804'),
+    ('/home/commonswarm/admin-issuance/releases/{helper_sha}/deploy/supabase-stack/migrate','dir','never','4804'),
+    ('/home/commonswarm/admin-issuance/releases/{helper_sha}/deploy/supabase-stack/migrate/make-pg-service.mjs','file','never','4804'),
+    ('/root','dir','never','4271-4284'),
+    ('{keeper_vars}','file','fresh','4271-4284'),
+    ('/tmp','dir','never','4260-4267;4803-4816;5235-5261'), # Exact path only: real directory, root:root, mode exactly 01777.
+    ('/tmp/admin-issuance-{release_sha}-{window_id}-keeper-INSTALL.md','file','fresh','4227;4246'),
+    ('{fresh_baseline_archive}','file','never','fix-3e exact fresh rollback input'),
+    ('{legacy_archive}','file','fresh-restage','4260-4267;4784-4789;5235-5261'),
+    ('{BOX_ARCHIVE_PATH}','file','never','5143-5149'),
+    ('{SECRET_STAGE}','dir','never','4803-4816 (W4 stage; future hook stages checked at creation)'),
+    ('/var/lib/commonswarm-admin-release/w4','dir','never','fix-3e root upload'),
+    ('/var/lib/commonswarm-admin-release/w4/{window_id}','dir','never','fix-3e root upload'),
+    ('{INPUTS_FILE}','file','never','4215;5110;5224;5287-5310'),
+    ('{RECYCLE_BASELINE_FILE}','file','never','5103-5111 (admission input)'),
+    ('{PLAN_FILE}','file','never','5122-5132 (candidate source)'),
+    ('{PROOF_DIR}','dir','never','4205-4212;4301;5103-5111;5168-5170;5287-5310'),
+    ('{PROOF_DIR}/w4-path-preflight.json','file','create','fix-3b precondition receipt'),
+    ('{PROOF_DIR}/keeper-absent.json','file','create','4227'),
+    ('{PROOF_DIR}/keeper-INSTALL.md','file','create','4246'),
+    ('{PROOF_DIR}/keeper-adoption.json','file','create','4269;4301'),
+    ('{PROOF_DIR}/keeper-retire-attempted.txt','file','create','4287'),
+    ('{PROOF_DIR}/keeper-retired.json','file','create','4301'),
+    ('{PROOF_DIR}/w4-state','dir','create','5103-5111;5168-5170;5287-5310'),
+    ('{PROOF_DIR}/w4-state/recycle-baseline.json','file','create','4219;5109'),
+    ('{PROOF_DIR}/w4-state/{key}.bytes','file','create','5110-5111;5287-5310'),
+    ('{object_parent}/.{object_name}.{window_id}.new','file','create','5122-5132;5287-5310'),
+    ('{PROOF_DIR}/w4-state/.{object_name}.{window_id}.new.identity.json','file','create','5126;5287-5310'),
+    ('{PROOF_DIR}/w4-state/install-after.json','file','create','5168-5170'),
+    ('{PROOF_DIR}/w4-state/{key}.rollback-identity.json','file','create','5287-5310 (fix-3 nonce receipt)'),
+    ('{PROOF_DIR}/w4-state/rollback-identity.','file-prefix','create','5287-5310'),
+    ('{object_parent}/.{object_name}.{window_id}.new.rollback.','file-prefix','create','5287-5310 (fix-3 nonce temporary)'),
+]
+# HezLead rulings 31-32 and 34(c): CLOSED typed allow list; all other paths (including release children) stay root-only.
+COMMONSWARM_OWNED_PATHS = {'/home/commonswarm':'dir','/home/commonswarm/edge':'dir','/home/commonswarm/edge/releases':'dir','/home/commonswarm/.env':'file'}
+# Small read boundaries; fixtures replace observations, never the inert decision or path enforcement.
+def account_entry(): return pwd.getpwnam('commonswarm')
+def group_entry(gid): return grp.getgrgid(gid)
+def passwd_entries(): return pwd.getpwall()
+def proc_pids(): return sorted(p for p in os.listdir('/proc') if p.isdecimal())
+def proc_status(pid):
+    with open('/proc/'+pid+'/status') as f: return f.read()
+def docker_output(argv):
+    return subprocess.check_output(['docker']+argv,text=True,stdin=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+inert_checks={}
+values=dict(zip(('INPUTS_FILE','RECYCLE_BASELINE_FILE','PROOF_DIR','SECRET_STAGE','PLAN_FILE','BOX_ARCHIVE_PATH'),sys.argv[1:]))
+checked={}
+def stop(path,property):
+    receipt={'kind':'c1-w4-path-preflight','result':'STOP','path':path,'failed_property':property,'audit_base':'a438c6ea','inert_checks':inert_checks}
+    print(json.dumps(receipt,sort_keys=True)) # failure receipt to operator log; NO filesystem write on a refusal
+    raise SystemExit('FAIL ai-w4-preflight: '+path+' failed '+property+'; STOP')
+def measure_inert():
+    try: account=account_entry()
+    except (KeyError,OSError): stop('/home/commonswarm','commonswarm-account-resolvable')
+    # No root alias can satisfy the service-account exception.
+    if account.pw_uid==0 or account.pw_gid==0: stop('/home/commonswarm','commonswarm-nonroot-uid-gid')
+    scanned=vanished=matches=0
+    try:
+        for pid in proc_pids():
+            try: text=proc_status(pid)
+            except OSError as error:
+                if error.errno not in (errno.ENOENT,errno.ESRCH): stop('/proc/'+pid+'/status','proc-status-readable')
+                vanished+=1; continue
+            rows=[line.split()[1:] for line in text.splitlines() if line.startswith('Uid:')]
+            if len(rows)!=1 or len(rows[0])!=4 or not all(v.isdecimal() for v in rows[0]): stop('/proc/'+pid+'/status','four-uid-fields')
+            scanned+=1; matches+=sum(int(v)==account.pw_uid for v in rows[0])
+    except OSError: stop('/proc','proc-status-readable')
+    inert_checks['processes']={'result':'STOP' if matches else 'PASS','scanned':scanned,'vanished':vanished,'matching_uid_fields':matches}
+    if matches: stop('/home/commonswarm','inert-no-uid-process')
+    try:
+        supplementary=len(group_entry(account.pw_gid).gr_mem)
+        primary=sum(p.pw_gid==account.pw_gid and p.pw_name!=account.pw_name for p in passwd_entries())
+    except (KeyError,OSError): stop('/home/commonswarm','group-passwd-readable')
+    inert_checks['group']={'result':'STOP' if supplementary or primary else 'PASS','supplementary_members':supplementary,'other_primary_members':primary}
+    if supplementary or primary: stop('/home/commonswarm','inert-empty-group')
+    try:
+        ids=docker_output(['ps','-q','--no-trunc']).splitlines()
+        if any(re.fullmatch('[0-9a-f]{64}',cid) is None for cid in ids): stop('/home/commonswarm','docker-running-ids')
+        mounts=[json.loads(line) for line in docker_output(['inspect','--format','{{json .Mounts}}']+ids).splitlines()] if ids else []
+        if len(mounts)!=len(ids) or any(not isinstance(row,list) for row in mounts): stop('/home/commonswarm','docker-mounts-json')
+        writable=0; count=0
+        for row in mounts:
+            for mount in row:
+                if not isinstance(mount,dict) or not isinstance(mount.get('Source'),str) or type(mount.get('RW')) is not bool: stop('/home/commonswarm','docker-mounts-json')
+                count+=1; writable+=mount['Source']=='/home/commonswarm' and mount['RW']
+    except (OSError,subprocess.CalledProcessError,ValueError): stop('/home/commonswarm','docker-commands-readable')
+    inert_checks['containers']={'result':'STOP' if writable else 'PASS','running':len(ids),'mounts':count,'writable_home_mounts':writable}
+    if writable: stop('/home/commonswarm','inert-no-writable-home-container')
+    return account
+# Exactly once per preflight, before any mutation; all four allow-list entries reuse these results.
+commonswarm_account=measure_inert()
+def check(path,kind,absence,lines):
+    if not isinstance(path,str) or not path.startswith('/') or os.path.normpath(path)!=path: stop(str(path),'absolute-normalized-path')
+    # Root first. lstat each ancestor; never traverse a symlink to inspect a child.
+    parents=list(pathlib.PurePosixPath(path).parents)
+    for parent in reversed(parents):
+        p=str(parent)
+        if p not in checked: check(p,'dir','create' if absence else '',lines)
+        if not checked[p]['present'] and not absence: stop(path,'missing-required-path')
+    if path in checked:
+        if checked[path]['type']!=kind: stop(path,'conflicting-expected-type')
+        if not checked[path]['present'] and not absence: stop(path,'missing-required-path')
+        return
+    try: info=os.lstat(path)
+    except FileNotFoundError:
+        if not absence: stop(path,'missing-required-path')
+        checked[path]={'path':path,'type':kind,'present':False,'created_later':True,'base_lines':lines}; return
+    except OSError: stop(path,'lstat-readable')
+    if stat.S_ISLNK(info.st_mode): stop(path,'not-symlink')
+    if kind=='dir' and not stat.S_ISDIR(info.st_mode): stop(path,'directory')
+    if kind=='file' and not stat.S_ISREG(info.st_mode): stop(path,'regular-file')
+    if path in COMMONSWARM_OWNED_PATHS:
+        if kind!=COMMONSWARM_OWNED_PATHS[path]: stop(path,'allow-list-type')
+        if (info.st_uid,info.st_gid)!=(commonswarm_account.pw_uid,commonswarm_account.pw_gid): stop(path,'commonswarm-owner-uid-gid')
+        if kind=='file':
+            if stat.S_IMODE(info.st_mode)!=0o600: stop(path,'mode-exact-0600')
+            if info.st_nlink!=1: stop(path,'one-link')
+    elif path==values.get('legacy_archive'):
+        if (info.st_uid,info.st_gid)!=(legacy['uid'],legacy['gid']): stop(path,'keeper-upload-owner-uid-gid')
+        if stat.S_IMODE(info.st_mode)!=0o600: stop(path,'mode-exact-0600')
+        if info.st_nlink!=1: stop(path,'one-link')
+    elif info.st_uid!=0: stop(path,'owner-uid-0')
+    if path==values.get('fresh_baseline_archive'):
+        if info.st_gid!=0: stop(path,'group-gid-0')
+        if stat.S_IMODE(info.st_mode)!=0o600: stop(path,'mode-exact-0600')
+        if info.st_nlink!=1: stop(path,'one-link')
+    if path.startswith('/var/lib/commonswarm-admin-release/w4'):
+        if info.st_gid!=0: stop(path,'group-gid-0')
+        if stat.S_IMODE(info.st_mode)!=(0o700 if kind=='dir' else 0o600): stop(path,'mode-exact-'+('0700' if kind=='dir' else '0600'))
+        if kind=='file' and info.st_nlink!=1: stop(path,'one-link')
+    if path=='/tmp':
+        if info.st_gid!=0: stop(path,'group-gid-0')
+        if stat.S_IMODE(info.st_mode)!=0o1777: stop(path,'mode-exact-01777')
+    else:
+        if info.st_mode & 0o020: stop(path,'not-group-writable')
+        if info.st_mode & 0o002: stop(path,'not-world-writable')
+    checked[path]={'path':path,'type':kind,'present':True,'uid':info.st_uid,'gid':info.st_gid,'mode':'%04o'%stat.S_IMODE(info.st_mode),'base_lines':lines}
+# Check the bootstrap reads and proof destination before reading any JSON.
+for template,kind,missing,lines in W4_PATH_AUDIT:
+    if template in ('{INPUTS_FILE}','{RECYCLE_BASELINE_FILE}','{PROOF_DIR}','{SECRET_STAGE}','{PLAN_FILE}','{BOX_ARCHIVE_PATH}'):
+        check(template.format(**values),kind,False,lines)
+d=json.load(open(values['INPUTS_FILE'])); base=json.load(open(values['RECYCLE_BASELINE_FILE']))
+mode=d.get('recycle_install_mode')
+values.update(release_sha=d['release_sha'],baseline_edge_sha=d['baseline_edge_sha'],window_id=d['window_id'],service=d['edge_recycle_service'])
+if mode not in ('fresh','accept-existing','upgrade-existing'): stop(values['INPUTS_FILE'],'known-install-mode')
+for k in ('release_sha','baseline_edge_sha'):
+    if re.fullmatch('[0-9a-f]{40}',values[k]) is None: stop(values['INPUTS_FILE'],k+'-40-hex')
+if re.fullmatch('[A-Za-z0-9]{6}',values['window_id']) is None or re.fullmatch('[A-Za-z0-9_.@-]+',values['service']) is None: stop(values['INPUTS_FILE'],'window-and-service-path-components')
+legacy=base.get('archive')
+if mode=='fresh':
+    fresh_archive=base.get('edge',{}).get('archive')
+    if not isinstance(fresh_archive,dict) or re.fullmatch('/tmp/admin-issuance-'+values['baseline_edge_sha']+r'-[A-Za-z0-9]{6}\.tar',fresh_archive.get('path','')) is None: stop(values['RECYCLE_BASELINE_FILE'],'exact-fresh-baseline-archive-path')
+    values['fresh_baseline_archive']=fresh_archive['path']
+if mode!='fresh':
+    if not isinstance(legacy,dict) or re.fullmatch('/tmp/admin-issuance-'+values['baseline_edge_sha']+r'-[A-Za-z0-9]{6}\.tar',legacy.get('path','')) is None: stop(values['RECYCLE_BASELINE_FILE'],'exact-legacy-archive-path')
+    if any(type(legacy.get(k)) is not int or legacy[k]<0 for k in ('uid','gid')): stop(values['RECYCLE_BASELINE_FILE'],'keeper-upload-owner-uid-gid')
+    values.update(legacy_archive=legacy['path'],legacy_name=os.path.basename(legacy['path'])[len('admin-issuance-'):],keeper_vars=d['keeper_install_vars_path'])
+    if not isinstance(values['keeper_vars'],str) or re.fullmatch(r'/root/keeper-install-[0-9]{8}T[0-9]{6}Z\.vars',values['keeper_vars']) is None: stop(values['INPUTS_FILE'],'exact-keeper-vars-path')
+stage_root='/var/lib/commonswarm-admin-release/w4/'+values['window_id']
+for key,name in (('INPUTS_FILE','inputs.json'),('RECYCLE_BASELINE_FILE','recycle-baseline.json'),('PLAN_FILE','RELEASE.md')):
+    if values[key]!=stage_root+'/'+name: stop(values[key],'exact-w4-input-path')
+object_keys={'commonswarm-admin-edge-recycle':'hook','recycle.json':'config','50-admin-measurement.conf':'dropin','recycle-intent.json':'intent'}
+objects=[(object_keys[os.path.basename(t)],t.format(**values)) for t,kind,_,_ in W4_PATH_AUDIT if kind=='file' and os.path.basename(t) in object_keys]
+def enumerate_files(parent,prefix,missing,lines):
+    # Check the directory before listing it, then check every selected child by its exact path.
+    check(parent,'dir',missing,lines)
+    if not checked[parent]['present']: return
+    try: names=sorted(os.listdir(parent))
+    except OSError: stop(parent,'list-readable')
+    for name in names:
+        if name.startswith(prefix): check(os.path.join(parent,name),'file',False,lines)
+for template,kind,missing,lines in W4_PATH_AUDIT:
+    if mode!='fresh' and '{fresh_baseline_archive}' in template: continue
+    if mode=='fresh' and any('{'+k+'}' in template for k in ('legacy_archive','legacy_name','keeper_vars')): continue
+    cases=[values]
+    if '{key}' in template or '{object_' in template:
+        cases=[dict(values,key=k,object_parent=os.path.dirname(p),object_name=os.path.basename(p)) for k,p in objects]
+    if '{helper_sha}' in template:
+        cases=[dict(values,helper_sha=s) for s in sorted({values['release_sha'],values['baseline_edge_sha']} if mode!='fresh' else {values['release_sha']})]
+    for case in cases:
+        path=template.format(**case)
+        absence=missing=='create' or (missing=='fresh' and mode=='fresh') or missing=='fresh-restage'
+        if any(c in path for c in '*?['): stop(path,'exact-tmp-path-no-glob' if path.startswith('/tmp/') else 'exact-path-no-glob')
+        if kind=='file-prefix': enumerate_files(os.path.dirname(path),os.path.basename(path),absence,lines)
+        else: check(path,kind,absence,lines)
+        if template=='/var/lib/commonswarm-admin-release/archives':
+            # A fixture may relocate /var/lib under /tmp; this still never discovers /tmp transports.
+            enumerate_files(path,'',absence,'4300')
+receipt={'kind':'c1-w4-path-preflight','result':'PASS','audit_base':'a438c6ea','at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+         'release_sha':d['release_sha'],'window_id':d['window_id'],'paths':[checked[p] for p in sorted(checked)],'inert_checks':inert_checks}
+# Only after ALL checks: one nonsecret exclusive root-owned receipt. No keeper, source or state mutation.
+path=values['PROOF_DIR']+'/w4-path-preflight.json'
+try: fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+except FileExistsError: stop(path,'precondition-receipt-already-exists-use-new-proof-directory')
+try:
+    os.fchown(fd,0,0); os.fchmod(fd,0o600)
+    raw=(json.dumps(receipt,sort_keys=True)+'\n').encode(); view=memoryview(raw)
+    while view: view=view[os.write(fd,view):]
+    os.fsync(fd)
+finally: os.close(fd)
+fd=os.open(values['PROOF_DIR'],os.O_RDONLY|os.O_NOFOLLOW|os.O_DIRECTORY)
+try: os.fsync(fd)
+finally: os.close(fd)
+print('PASS W4 pathname precondition: '+str(len(checked))+' paths and ancestors; exact /tmp root:root 01777; three inert commonswarm-owned directories and .env; exact admitted keeper-owned legacy archive; all others root-owned; no symlink or other group/world write')
+PY_AUDIT
 BACKUP_GATE_DIR="$PROOF_DIR"
 ( ai_run ai-backup-gate-check ) >/dev/null || { printf 'FAIL ai-w4-preflight: W4: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP\n' >&2; exit 1; }
 unset BACKUP_GATE_DIR
@@ -4574,11 +4909,8 @@ d=json.load(open(sys.argv[1])); proof=pathlib.Path(sys.argv[2]); target=pathlib.
 assert str(target)=='/home/commonswarm/edge/releases/'+d['baseline_edge_sha'] and os.path.realpath('/home/commonswarm/edge/current')==str(target)
 snapshot=json.loads((proof/'w4-state/roots-before.json').read_bytes())
 r=json.loads((proof/'w4-state/recycle-baseline.json').read_bytes())
-if r['archive'] is not None: archive=r['archive']['path']; expected=r['archive']['sha256']
-else:
-    found=[(p,e) for p,e in snapshot['entries'].items() if re.fullmatch(r'/tmp/admin-issuance-'+d['baseline_edge_sha']+r'-[A-Za-z0-9]{6}\.tar',p) and e['type']=='file']
-    assert len(found)==1
-    archive,e=found[0]; expected=e['sha256']
+baseline_archive=r['archive'] if r['archive'] is not None else r['edge']['archive']
+archive=baseline_archive['path']; expected=baseline_archive['sha256']
 assert os.path.realpath(archive)==archive and re.fullmatch(r'/tmp/admin-issuance-'+d['baseline_edge_sha']+r'-[A-Za-z0-9]{6}\.tar',archive)
 fd=os.open(archive,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
 with os.fdopen(fd,'rb') as f:
@@ -4737,6 +5069,11 @@ case "$1" in before|after|close) ;; *) exit 1;; esac
 umask 077
 HOOK_SECRET_STAGE=$(mktemp -d /tmp/anvil-secret.XXXXXX)
 chmod 0700 "$HOOK_SECRET_STAGE"
+python3 - "$HOOK_SECRET_STAGE" <<'PY_STAGE' || exit 1
+import os,re,stat,sys
+p=sys.argv[1]; st=os.lstat(p)
+if re.fullmatch(r'/tmp/anvil-secret\.[A-Za-z0-9]{6}',p) is None or not stat.S_ISDIR(st.st_mode) or (st.st_uid,st.st_gid,stat.S_IMODE(st.st_mode))!=(0,0,0o700): raise SystemExit('FAIL exact created secret stage: expected real root:root 0700 directory; STOP')
+PY_STAGE
 ai_hook_cleanup() {
  python3 - "$HOOK_SECRET_STAGE" <<'PY'
 import pathlib,re,sys
@@ -4800,7 +5137,10 @@ try:
     root=pathlib.Path(r['release_root']); assert str(root)=='/home/commonswarm/admin-issuance/releases/'+sha and root.resolve()==root
     approved=sha; reason='database-session-failed'
     env={k:v for k,v in os.environ.items() if k!='NODE_OPTIONS' and not k.startswith('ADMIN_SMOKE_')}; env.update(PG_SERVICE_OUTPUT=str(stage/'service.conf'),PG_PASS_OUTPUT=str(stage/'pass'),COMMONSWARM_ENV_FILE='/home/commonswarm/.env',COMMONSWARM_MIGRATION_ENV_FILE='/etc/commonswarm-release/target.env')
-    with (stage/'session.log').open('w') as log:
+    # Reserve helper outputs exclusively; the helper overwrites only these root-owned private-stage entries.
+    for name in ('service.conf','pass','db.log'):
+        fd=os.open(str(stage/name),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600); os.close(fd)
+    with (stage/'session.log').open('x') as log:
         subprocess.run(['node',str(root/'deploy/supabase-stack/migrate/make-pg-service.mjs')],env=env,stdout=log,stderr=log,check=True)
     for name in ['service.conf','pass']: (stage/name).chmod(0o600)
     assert re.fullmatch('sha256:[0-9a-f]{64}',r['postgres_image'])
@@ -4813,7 +5153,7 @@ try:
         with os.fdopen(fd,'w') as f: f.write(sql)
         os.chmod(name,0o600)
         args=['docker','run','--rm','--network','commonswarm-net','--add-host','db.commonswarm.internal:172.31.0.10','--env','PGSERVICE=target','--env','PGSERVICEFILE=/run/service.conf','--env','PGPASSFILE=/run/pass','--volume',str(stage/'service.conf')+':/run/service.conf:ro','--volume',str(stage/'pass')+':/run/pass:ro','--volume','/etc/ssl/yulan-internal-ca.pem:/etc/ssl/yulan-internal-ca.pem:ro','--volume',name+':/run/statement.sql:ro','--entrypoint','psql',r['postgres_image'],'-X','--set=ON_ERROR_STOP=1','-Atq','--file','/run/statement.sql']
-        with (stage/'db.log').open('w') as log:
+        with (stage/'db.log').open('a') as log:
             return subprocess.check_output(args,stdin=subprocess.DEVNULL,text=True,stderr=log).strip()
     intent=pathlib.Path('/etc/commonswarm-admin-release/recycle-intent.json')
     def confirm_closed():
@@ -5007,7 +5347,15 @@ for key,path in [('config_dir',CONFIG_DIR),('dropin_dir',DROPIN_DIR)]:
     need(isinstance(v,dict) and set(v)==DIR_KEYS and v['path']==path and type(v['present']) is bool,'baseline receipt '+key,'exact-directory-record','other')
 need(r['service']=={'unit':service,'sha256':d['edge_recycle_sha256'],'active_state':'inactive'},'baseline receipt service','measured-unit-digest-inactive','other')
 need(isinstance(r['timer'],dict) and set(r['timer'])=={'unit','sha256','active_state','enabled'} and r['timer']['unit']==timer and r['timer']['active_state']=='active' and r['timer']['enabled']=='enabled' and isinstance(r['timer']['sha256'],str) and HEX.fullmatch(r['timer']['sha256']) is not None,'baseline receipt timer','measured-unit-digest-active-enabled','other')
-need(r['edge']=={'release_sha':d['baseline_edge_sha'],'image':d['baseline_edge_image']},'baseline receipt edge','input-baseline-edge','other')
+edge_expected={'release_sha':d['baseline_edge_sha'],'image':d['baseline_edge_image']}
+if mode=='fresh':
+    fresh_archive=r['edge'].get('archive') if isinstance(r['edge'],dict) else None
+    need(isinstance(fresh_archive,dict) and set(fresh_archive)=={'path','sha256','uid','gid','mode'} and isinstance(fresh_archive['path'],str)
+         and re.fullmatch(r'/tmp/admin-issuance-'+d['baseline_edge_sha']+r'-[A-Za-z0-9]{6}\.tar',fresh_archive['path']) is not None,'fresh baseline archive','exact-baseline-path-and-metadata','other')
+    observed,_=observe(fresh_archive['path']); info=os.lstat(fresh_archive['path'])
+    need({k:observed[k] for k in fresh_archive}==fresh_archive and owned(observed,'0600') and info.st_nlink==1,'fresh baseline archive','root-0600-one-link-receipt-bytes','other')
+    edge_expected['archive']=fresh_archive
+need(r['edge']==edge_expected,'baseline receipt edge','input-baseline-edge','other')
 need(r['expected']=={'hook_sha256':sha256(candidate),'dropin_sha256':sha256(DROPIN_BYTES),'archive':durable,'binding_sha256':sha256(binding_bytes)},'baseline receipt expected','candidate-hook-reviewed-drop-in-durable-binding','other')
 if mode=='upgrade-existing':
     a=r['approval']
@@ -5187,7 +5535,7 @@ set -euo pipefail
 ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null || { printf 'FAIL ai-recycle-rollback: issuance close and invalidation expected committed got failure; STOP\n' >&2; exit 1; }
 test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_TIMER")" = inactive || { printf 'FAIL ai-recycle-rollback: recycle timer expected stopped got other; STOP\n' >&2; exit 1; }
 python3 - "$INPUTS_FILE" "$PROOF_DIR" "$EDGE_RECYCLE_SERVICE" <<'PY' || { printf 'FAIL ai-recycle-rollback: recycle installation expected restored-to-saved-baseline got refused; STOP\n' >&2; exit 1; }
-import hashlib,json,os,pathlib,re,stat,subprocess,sys,tempfile
+import hashlib,json,os,pathlib,re,secrets,stat,subprocess,sys,tempfile
 inputs,proof,service=sys.argv[1:4]
 def need(ok,what,expected,got):
     if not ok: raise SystemExit('FAIL ai-recycle-rollback: '+what+' expected '+expected+' got '+got+'; STOP')
@@ -5267,6 +5615,46 @@ for _,path in OBJECTS:
         want=json.loads(identity.read_bytes())
         need(want=={'path':tmp,'dev':st.st_dev,'ino':st.st_ino,'uid':st.st_uid,'gid':st.st_gid,'mode':'%04o'%stat.S_IMODE(st.st_mode)},tmp,'exact-window-creation-identity','other')
         guarded_rm(tmp)
+def rollback_receipt(key): return state/(key+'.rollback-identity.json')
+def read_rollback_receipt(key,path):
+    receipt=rollback_receipt(key)
+    fd=os.open(str(receipt),os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        st=os.fstat(fd)
+        need(stat.S_ISREG(st.st_mode) and st.st_nlink==1 and (st.st_uid,st.st_gid,stat.S_IMODE(st.st_mode))==(0,0,0o600),str(receipt),'root-0600-single-link-receipt','other')
+        pending=json.loads(os.read(fd,1048576))
+    finally: os.close(fd)
+    nonce=pending.get('nonce')
+    need(set(pending)=={'path','nonce','identity'} and isinstance(nonce,str) and re.fullmatch('[0-9a-f]{32}',nonce) is not None
+         and pending['path']==temporary(path)+'.rollback.'+nonce,str(receipt),'exact-window-nonce-path','other')
+    return pending
+def save_rollback_receipt(key,pending):
+    raw=(json.dumps(pending,sort_keys=True)+'\n').encode()
+    fd,tmp=tempfile.mkstemp(prefix='rollback-identity.',dir=str(state))
+    try:
+        os.fchown(fd,0,0); os.fchmod(fd,0o600)
+        view=memoryview(raw)
+        while view: view=view[os.write(fd,view):]
+        os.fsync(fd)
+    finally: os.close(fd)
+    os.replace(tmp,str(rollback_receipt(key)))
+    fd=os.open(str(state),os.O_RDONLY)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+# A nonce is durably recorded BEFORE exclusive creation. In the create-to-identity window, only that
+# unpredictable path with empty, regular, single-link root:root baseline-mode bytes can be removed.
+# Once recorded, the inode identity is mandatory even for an empty file. Unrelated files still refuse.
+for key,path in OBJECTS:
+    if not os.path.lexists(str(rollback_receipt(key))): continue
+    pending=read_rollback_receipt(key,path); tmp=pending['path']
+    if not os.path.lexists(tmp): continue
+    st=os.lstat(tmp); base=r[key]
+    need(base['present'] and stat.S_ISREG(st.st_mode) and st.st_nlink==1
+         and (st.st_uid,st.st_gid,stat.S_IMODE(st.st_mode))==(0,0,int(base['mode'],8)),tmp,'single-link-root-baseline-mode-rollback-file','other')
+    identity={'path':tmp,'dev':st.st_dev,'ino':st.st_ino,'uid':st.st_uid,'gid':st.st_gid,'mode':'%04o'%stat.S_IMODE(st.st_mode)}
+    need((pending['identity'] is None and st.st_size==0) or pending['identity']==identity,
+         tmp,'recorded-pending-empty-file-or-exact-creation-identity','other')
+    guarded_rm(tmp)
 changed=False
 for key,path in OBJECTS:
     base=r[key]; live,_=observe(path)
@@ -5277,38 +5665,19 @@ for key,path in OBJECTS:
     if not base['present']:
         guarded_rm(path); continue
     data=pathlib.Path(state/(key+'.bytes')).read_bytes(); need(sha256(data)==base['sha256'],'saved '+key+' bytes','baseline-receipt-digest','mismatch')
-    tmp=temporary(path)
-    fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    nonce=secrets.token_hex(16); tmp=temporary(path)+'.rollback.'+nonce
+    pending={'path':tmp,'nonce':nonce,'identity':None}
+    save_rollback_receipt(key,pending)
+    # Exact baseline mode at creation, including the empty-file interruption window; this is a
+    # root-only exclusive unpredictable path. Restore the process umask immediately after the open.
+    prior_umask=os.umask(0)
+    try: fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,int(base['mode'],8))
+    finally: os.umask(prior_umask)
     try:
-        os.fchown(fd,base['uid'],base['gid']); os.fchmod(fd,int(base['mode'],8))
-        # The earlier temporary file was absent or proved and removed above. Record this exclusive creation,
-        # including a new rollback inode, before writing bytes so an interrupted recovery can be retried.
-        identity=state/(os.path.basename(tmp)+'.identity.json')
-        if os.path.lexists(str(identity)):
-            receipt_fd=os.open(str(identity),os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
-            try:
-                receipt_st=os.fstat(receipt_fd)
-                need(stat.S_ISREG(receipt_st.st_mode) and receipt_st.st_nlink==1 and receipt_st.st_uid==0 and receipt_st.st_gid==0
-                     and stat.S_IMODE(receipt_st.st_mode)==0o600,str(identity),'root-0600-single-link-identity-receipt','other')
-                prior=json.loads(os.read(receipt_fd,1048576))
-                need(set(prior)=={'path','dev','ino','uid','gid','mode'} and prior['path']==tmp,
-                     str(identity),'identity-for-this-window-temporary-path','other')
-            finally: os.close(receipt_fd)
         st=os.fstat(fd)
-        raw=(json.dumps({'path':tmp,'dev':st.st_dev,'ino':st.st_ino,'uid':st.st_uid,'gid':st.st_gid,
-                        'mode':'%04o'%stat.S_IMODE(st.st_mode)},sort_keys=True)+'\n').encode()
-        # Exclusive receipt staging and atomic replacement preserve a complete receipt across interruption.
-        receipt_fd,receipt_tmp=tempfile.mkstemp(prefix='rollback-identity.',dir=str(state))
-        try:
-            os.fchown(receipt_fd,0,0); os.fchmod(receipt_fd,0o600)
-            view=memoryview(raw)
-            while view: view=view[os.write(receipt_fd,view):]
-            os.fsync(receipt_fd)
-        finally: os.close(receipt_fd)
-        os.replace(receipt_tmp,str(identity))
-        parent_fd=os.open(str(state),os.O_RDONLY)
-        try: os.fsync(parent_fd)
-        finally: os.close(parent_fd)
+        need(stat.S_ISREG(st.st_mode) and st.st_nlink==1 and (st.st_uid,st.st_gid,stat.S_IMODE(st.st_mode))==(0,0,int(base['mode'],8)),tmp,'exclusive-root-baseline-mode-file','other')
+        pending['identity']={'path':tmp,'dev':st.st_dev,'ino':st.st_ino,'uid':st.st_uid,'gid':st.st_gid,'mode':'%04o'%stat.S_IMODE(st.st_mode)}
+        save_rollback_receipt(key,pending)
         view=memoryview(data)
         while view: view=view[os.write(fd,view):]
         os.fsync(fd)
@@ -5361,11 +5730,17 @@ KEEPER_UNITS=['commonswarm-recycle-archive-keep.timer','commonswarm-recycle-arch
 # Monitored roots of the exact-restoration sets: every entry with type, owner, mode and byte digest (TLS material
 # under /etc/caddy/certs is recorded by metadata only and never opened).
 def roots():
-    tmp=os.path.dirname(TMP_PREFIX); stem=os.path.basename(TMP_PREFIX)
     found=['/etc/commonswarm-admin-release','/usr/local/libexec','/etc/caddy',EDGE+'/current',EDGE+'/releases',EDGE+'/failed-attempts',HELPERS,STATE_ROOT,
            '/etc/tmpfiles.d/commonswarm-recycle-archive.conf',SYSTEMD+'/'+service,SYSTEMD+'/'+timer,SYSTEMD+'/'+service+'.d']+[SYSTEMD+'/'+u for u in KEEPER_UNITS]
     found+=[SYSTEMD+'/'+n for n in sorted(os.listdir(SYSTEMD)) if n.endswith('.wants')]
-    found+=[tmp+'/'+n for n in sorted(os.listdir(tmp)) if n.startswith(stem) and re.fullmatch(re.escape(stem)+r'[0-9a-f]{40}-[A-Za-z0-9]{6}(\.tar|-keeper-INSTALL\.md)',n)]
+    # Closed exact upload set; older /tmp transports are outside this window.
+    found += [TMP_PREFIX+sha+'-'+wid+'.tar',TMP_PREFIX+sha+'-'+wid+'-keeper-INSTALL.md']
+    baseline=read_json(state/'recycle-baseline.json','w4-state/recycle-baseline.json')
+    baseline_archive=baseline['archive'] if baseline['archive'] is not None else baseline['edge']['archive']
+    if baseline_archive is not None:
+        legacy=baseline_archive['path']
+        need(isinstance(legacy,str) and re.fullmatch(re.escape(TMP_PREFIX)+d['baseline_edge_sha']+r'-[A-Za-z0-9]{6}\.tar',legacy) is not None,'legacy archive','exact-admitted-tmp-path','other')
+        found.append(legacy)
     return found
 def entry(path):
     try: st=os.lstat(path)
@@ -6354,6 +6729,13 @@ fi
 # host: box root; DB read-only; Mac already ran ai-gates; box binds receipt digest
 set -euo pipefail
 test "$WINDOW" = W6
+# Read-only preflight STOP row, before any activation preparation or issuance opening.
+# Lane 2 R8.8 LATENT: admin_child_live can lock parent grants under the agent_tokens access policy.
+# No runtime route currently writes child tokens; a nonzero count invalidates that premise.
+W6_CHILD_TOKENS=$(ai_ro -Atq --command 'SELECT count(*) FROM swarm.agent_tokens WHERE parent_admin_grant_id IS NOT NULL') || { printf 'FAIL ai-w6-activation-checks: child-token count expected readable-zero got unreadable; Lane 2 R8.8 LATENT admin_child_live; STOP\n' >&2; exit 1; }
+printf '%s\n' "$W6_CHILD_TOKENS" >"$PROOF_DIR/W6-child-token-count.txt"
+chmod 0600 "$PROOF_DIR/W6-child-token-count.txt"
+test "$W6_CHILD_TOKENS" = 0 || { printf 'FAIL ai-w6-activation-checks: child-token count expected 0 got %s; Lane 2 R8.8 LATENT admin_child_live; STOP\n' "$W6_CHILD_TOKENS" >&2; exit 1; }
 ai_run ai-w6-readiness
 python3 - "$PLAN_FILE" "$INPUTS_FILE" "$EDGE_MEASUREMENT_FILE" ai-w6-activation-checks <<'PY'
 import hashlib,json,os,pathlib,re,stat,subprocess,sys
@@ -8603,30 +8985,7 @@ elif test -e "$PROOF_DIR/probe-staged.txt" || test -L "$PROOF_DIR/probe-staged.t
  printf 'FAIL ai-open-abort: a W2 DCR probe grant was staged; use the recovered ai-close, which revokes it; STOP\n' >&2; exit 1
 elif test ! -e "$PROOF_DIR/secret-stage.path"; then
  test ! -L "$PROOF_DIR/secret-stage.path" || { printf 'FAIL ai-open-abort: secret-stage.path expected absent-or-regular got symlink; STOP\n' >&2; exit 1; }
- ABORT_SCAN=$(python3 - "$PROOF_DIR" <<'PY'
-import os,re,stat,sys
-root=sys.argv[1]
-p=os.path.join(root,'secret-stage.path')
-assert not os.path.lexists(p)
-found=[]
-try: names=os.listdir('/tmp')
-except OSError: names=[]
-for name in names:
-    if re.fullmatch(r'anvil-secret\.[A-Za-z0-9]{6}',name) is None: continue
-    path='/tmp/'+name
-    try:
-        st=os.lstat(path)
-        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode): continue
-        if stat.S_IMODE(st.st_mode)!=0o700: continue
-        if st.st_uid not in (0, os.geteuid()): continue
-        if os.listdir(path): continue
-    except OSError: continue
-    found.append(path)
-print('PASS ai-open-abort: no secret stage was recorded; candidates listed for manual review')
-if found:
-    print('\n'.join(sorted(found)))
-PY
-) || { printf 'FAIL ai-open-abort: unrecorded-stage listing expected success got failure; STOP\n' >&2; exit 1; }
+ ABORT_SCAN='PASS ai-open-abort: no secret stage was recorded; any unrecorded stage requires separate operator review by exact path'
  date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/aborted-before-mutation.txt"
  printf '%s\n' "$ABORT_SCAN" >>"$PROOF_DIR/aborted-before-mutation.txt"
  printf '%s\n' "$ABORT_SCAN"
@@ -8703,6 +9062,18 @@ if not (archive.is_file() and not archive.is_symlink()): refuse('BOX_ARCHIVE_PAT
 if stat.S_IMODE(archive.stat().st_mode)!=0o600: refuse('BOX_ARCHIVE_PATH expected mode 0600 got other')
 if hashlib.sha256(archive.read_bytes()).hexdigest()!=d.get('archive_sha256'): refuse('BOX_ARCHIVE_PATH digest expected inputs archive_sha256 got mismatch')
 plan=root/'docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'
+if window=='W4':
+    w4=pathlib.Path('/var/lib/commonswarm-admin-release/w4/'+wid)
+    if src!=w4/'inputs.json': refuse('INPUTS_FILE expected exact W4 uploaded input path got other')
+    plan=w4/'RELEASE.md'
+    baseline_file=w4/'recycle-baseline.json'
+    for directory in (w4.parent,w4):
+        resolved(directory,'W4 input directory','dir'); st=os.lstat(directory)
+        if (st.st_uid,st.st_gid,stat.S_IMODE(st.st_mode))!=(0,0,0o700): refuse('W4 input directory expected root:root 0700 got other')
+    for file in (src,plan,baseline_file):
+        resolved(file,'W4 input file','file'); st=os.lstat(file)
+        if (st.st_uid,st.st_gid,stat.S_IMODE(st.st_mode),st.st_nlink)!=(0,0,0o600,1): refuse('W4 input file expected root:root 0600 one link got other')
+    if hashlib.sha256(baseline_file.read_bytes()).hexdigest()!=d.get('recycle_baseline_sha256'): refuse('W4 baseline digest differs')
 resolved(plan,'PLAN_FILE','file')
 if hashlib.sha256(plan.read_bytes()).hexdigest()!=want_plan: refuse('PLAN_FILE digest expected inputs plan_sha256 got mismatch')
 pointer=proof/'secret-stage.path'
@@ -8720,6 +9091,7 @@ def sh(name,value):
 sh('WINDOW',window); sh('WINDOW_ID',wid); sh('RELEASE_SHA',sha)
 sh('PROOF_DIR',str(proof)); sh('RELEASE_ROOT',str(root)); sh('BOX_ARCHIVE_PATH',str(archive))
 sh('PLAN_FILE',str(plan)); sh('SECRET_STAGE',str(p))
+if window=='W4': sh('RECYCLE_BASELINE_FILE',str(baseline_file))
 print("printf '%s\\n' "+json.dumps('PASS ai-recovery-env: WINDOW WINDOW_ID RELEASE_SHA PROOF_DIR RELEASE_ROOT BOX_ARCHIVE_PATH PLAN_FILE SECRET_STAGE set from existing proof'))
 PY
 ) || exit 1

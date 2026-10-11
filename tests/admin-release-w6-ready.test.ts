@@ -324,6 +324,31 @@ test('W6 client verification: canonical digest equals canonicalAdminJson; the re
 });
 
 // ---------------- W7 binds its W6 ----------------
+test('Fix round 3 / W6 latent child-token preflight: zero passes; one or an unreadable count stops before mutation', () => {
+  const checks = block('ai-w6-activation-checks');
+  const end = checks.indexOf('ai_run ai-w6-readiness');
+  assert.ok(end > 0);
+  const prefix = checks.slice(0, end);
+  assert.doesNotMatch(prefix, /\bai_db\b/);
+  const apply = block('ai-w6-activation-apply');
+  assert.ok(apply.indexOf('ai_run ai-w6-activation-checks') < apply.indexOf('ai_db -q --file /proof/activate.sql'));
+  for (const count of ['0', '1', 'error']) {
+    const dir = realpathSync(mkdtempSync(join(root, 'child-count-')));
+    const calls = join(dir, 'calls');
+    const out = run(`ai_ro() { printf '%s\\n' "$*" > "$PROOF_DIR/calls"; test "$CHILD_COUNT" != error || return 1; printf '%s\\n' "$CHILD_COUNT"; }\n` +
+      prefix + `printf 'mutation-reached\\n' > "$PROOF_DIR/mutation"\n`, { WINDOW: 'W6', PROOF_DIR: dir, CHILD_COUNT: count });
+    assert.equal(readFileSync(calls, 'utf8').trim(), '-Atq --command SELECT count(*) FROM swarm.agent_tokens WHERE parent_admin_grant_id IS NOT NULL');
+    if (count === '0') {
+      assert.equal(out.status, 0, out.stderr); assert.ok(existsSync(join(dir, 'mutation')));
+      assert.equal(readFileSync(join(dir, 'W6-child-token-count.txt'), 'utf8'), '0\n');
+    } else {
+      assert.notEqual(out.status, 0); assert.match(out.stderr, /Lane 2 R8\.8 LATENT admin_child_live; STOP/);
+      assert.ok(!existsSync(join(dir, 'mutation')));
+      if (count === '1') assert.equal(readFileSync(join(dir, 'W6-child-token-count.txt'), 'utf8'), '1\n');
+    }
+  }
+});
+
 test('W7 preflight binds the closed-success W6 of this release by w6_window_id and measures the C1 digest', () => {
   const pre = block('ai-w7-preflight');
   const make = (change: { record?: Record<string, unknown> | null; report?: Record<string, unknown>; reportBytes?: Buffer; smokeSha?: string; inputs?: Record<string, unknown>; closed?: string } = {}) => {
