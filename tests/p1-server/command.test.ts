@@ -5134,7 +5134,8 @@ async function renewalTableSnapshot(): Promise<Record<string, string>> {
 test("§2.3 fence transaction abort preserves recovery and revocation wins on retry", { timeout: 90_000 }, async () => {
   // HezLead ruling 38: a 40P01 must not commit the recovery audit or overwrite
   // the successful ledger with predecessor_superseded. 40001 also escapes the
-  // savepoint; main retains its existing 500 mapping for BOTH SQLSTATEs.
+  // savepoint. In C1 (Lane 2 rounds 9/11) 40P01 maps to the existing 503
+  // temporarily_unavailable with a lock_timeout diagnostic; 40001 keeps 500.
   for (const code of ["40P01", "40001"]) {
     for (const afterAbort of ["recover", "revoke", "first_use"]) {
       await scenario(async (f) => {
@@ -5170,9 +5171,8 @@ test("§2.3 fence transaction abort preserves recovery and revocation wins on re
             FROM swarm.command_failures
           `;
           const aborted = await issueRenewal(f, predecessor.token, id);
-          assert.equal(aborted.status, 500, "main's retryable-by-status response");
-          assert.deepEqual(aborted.body, { error: "internal_error" });
-          assert.equal("retryable" in aborted.body, false, "main has no retryable field");
+          assert.equal(aborted.status, code === "40P01" ? 503 : 500, "retryable-by-status response");
+          assert.deepEqual(aborted.body, { error: code === "40P01" ? "temporarily_unavailable" : "internal_error" });
           assert.deepEqual(await renewalTableSnapshot(), before,
             "all authority rows, including pre-savepoint audit and ledger, roll back");
           const diagnostics = await sql<{ command_kind: string; reason: string; db_code: string; detail: string }[]>`
@@ -5181,7 +5181,7 @@ test("§2.3 fence transaction abort preserves recovery and revocation wins on re
           `;
           assert.equal(diagnostics.length, 1, "exactly one post-rollback diagnostic");
           assert.equal(diagnostics[0]?.command_kind, "renew_agent_token");
-          assert.equal(diagnostics[0]?.reason, "internal_error");
+          assert.equal(diagnostics[0]?.reason, code === "40P01" ? "lock_timeout" : "internal_error");
           assert.equal(diagnostics[0]?.db_code, code);
           assert.match(diagnostics[0]!.detail, /forced renewal transaction abort/,
             "negative probe reached the intended UPDATE");
