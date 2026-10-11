@@ -121,7 +121,7 @@ if name=='python3':
     # Ownership boundary: the test user's files read as root:root; cfg owners names a path's other owner.
     is_path_audit='W4_PATH_AUDIT = [' in source; audit_owned_dirs=set()
     uid0,gid0=os.getuid(),os.getgid(); owners=cfg.get('owners',{}); fdpath={}
-    real_stat,real_lstat,real_fstat,real_open,real_close=os.stat,os.lstat,os.fstat,os.open,os.close
+    real_stat,real_fstat,real_open,real_close=os.stat,os.fstat,os.open,os.close
     def rel(path):
         try: p=os.path.abspath(os.fsdecode(path))
         except TypeError: return None
@@ -134,16 +134,14 @@ if name=='python3':
         if key in owners: uid,gid=owners[key]
         return os.stat_result((st.st_mode,st.st_ino,st.st_dev,st.st_nlink,uid,gid,st.st_size,int(st.st_atime),int(st.st_mtime),int(st.st_ctime)))
     def stat_(path,*a,**kw):
-        st=real_stat(path,*a,**kw)
-        return as_root(st,fdpath.get(path) if isinstance(path,int) else (path if kw.get('follow_symlinks',True) is False else os.path.realpath(path)))
-    def lstat_(path,*a,**kw):
-        # The W4 audit now measures every box ancestor. Model those outside the remapped fixture;
-        # do not inspect the Mac's /tmp, /var symlinks or host permissions as if they were box facts.
-        if (is_path_audit or '00-w4-exclusion.conf' in source or 'NOTIFY_SHA256' in source) and rel(path) is None and str(path)!=os.environ.get('PLAN_FILE'):
-            st=as_root(real_lstat(root/'audit-box-ancestor',*a,**kw),path)
+        # Python 3.9 lstat and 3.12 stat(follow_symlinks=False) share the box-ancestor model.
+        if kw.get('follow_symlinks',True) is False and (is_path_audit or '00-w4-exclusion.conf' in source or 'NOTIFY_SHA256' in source) and rel(path) is None and str(path)!=os.environ.get('PLAN_FILE'):
+            st=as_root(real_stat(root/'audit-box-ancestor',*a,**kw),path)
             if is_path_audit and str(path)=='/tmp': st=os.stat_result((stat.S_IFDIR|0o1777,st.st_ino,st.st_dev,st.st_nlink,0,0,st.st_size,st.st_atime,st.st_mtime,st.st_ctime))
             return st
-        return as_root(real_lstat(path,*a,**kw),path)
+        st=real_stat(path,*a,**kw)
+        return as_root(st,fdpath.get(path) if isinstance(path,int) else (path if kw.get('follow_symlinks',True) is False else os.path.realpath(path)))
+    def lstat_(path,*a,**kw): return stat_(path,*a,follow_symlinks=False,**kw)
     def fstat_(fd): return as_root(real_fstat(fd),fdpath.get(fd))
     def open_(path,flags,*a,**kw):
         fd=real_open(path,flags,*a,**kw); fdpath[fd]=os.path.realpath(path) if not flags & getattr(os,'O_NOFOLLOW',0) else os.path.abspath(path)
