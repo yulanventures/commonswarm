@@ -12031,28 +12031,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     border-block-start: 1px solid color-mix(in oklab, var(--border) 72%, transparent);
   }
 
-  /* The roster fills the rail's leftover height instead of sitting content-tall
-     with dead space beneath it: the participants section grows, its list takes
-     the slack and scrolls when the roster is long, and the ownership note stays
-     pinned at the bottom. min-block-size:0 lets the inner list actually scroll
-     inside a flex/grid parent rather than overflow the rail. */
-  .dashboard__rail-section--participants {
-    flex: 1 1 auto;
-    min-block-size: 0;
-    grid-template-rows: auto 1fr auto;
-  }
-
-  .dashboard__rail-section--participants .dashboard__sidebar-agent-list {
-    min-block-size: 0;
-    /* Override the base 14rem cap: in the sidebar the roster is the 1fr row of a
-       flex:1 section, so it should take ALL the rail's leftover height and scroll
-       within that — not clip at ~5 rows with dead space beneath. The 14rem cap is
-       for the header-dialog copy of this list, which is not inside a growing rail. */
-    max-block-size: none;
-    overflow-y: auto;
-    align-content: start;
-  }
-
   .dashboard__rail-details-body {
     display: grid;
     gap: var(--s-3);
@@ -12158,45 +12136,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     font-family: var(--font-mono);
     font-size: var(--t-base);
     text-align: center;
-  }
-
-  .dashboard__sidebar-agent-list {
-    display: grid;
-    gap: var(--s-1);
-    padding: 0;
-    margin: 0;
-    list-style: none;
-  }
-
-  .dashboard__sidebar-agent-list {
-    max-block-size: 14rem;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    scrollbar-gutter: stable;
-  }
-
-  .dashboard__sidebar-model-mark {
-    inline-size: 1.5rem;
-    block-size: 1.5rem;
-    display: grid;
-    place-items: center;
-    color: var(--text-muted);
-  }
-
-  .dashboard__sidebar-model-glyph {
-    inline-size: 0.875rem;
-    block-size: 0.875rem;
-  }
-
-  .dashboard__presence-dot {
-    position: absolute;
-    inset-inline-end: -0.08rem;
-    inset-block-end: -0.08rem;
-    inline-size: 0.52rem;
-    block-size: 0.52rem;
-    border: 2px solid var(--bg-raised);
-    border-radius: 50%;
-    background: var(--success);
   }
 
   .dashboard__agent-ownership-note {
@@ -12446,10 +12385,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     position: relative;
     display: grid;
     gap: var(--s-3);
-    /* No margin-block-start:auto here on purpose. The owner-grouped roster is back in the
-       sidebar (dashboard__rail-section--participants, flex:1), and that section growing is
-       what pushes the footer down — an auto margin would win over its flex-grow and eat the
-       slack, leaving the roster content-tall with dead space beneath it. */
     padding: var(--s-3) var(--s-2) 0;
     border-block-start: 1px solid var(--border);
     color: var(--text-muted);
@@ -15217,8 +15152,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     }
 
     .dashboard__workspace-context,
-    .dashboard__rail-section--places,
-    .dashboard__rail-section--participants {
+    .dashboard__rail-section--places {
       display: none;
     }
 
@@ -15283,8 +15217,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     }
 
     .dashboard__workspace-context,
-    .dashboard__rail-section--places,
-    .dashboard__rail-section--participants {
+    .dashboard__rail-section--places {
       display: none;
     }
 
@@ -15702,11 +15635,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
    * every edge inside the frame was set transparent, the result was looked at, and the ones that
    * were MISSED were restored. Nothing here is a guess about what looks better.
    *
-   * TWO survive, and only two:
    *   .dashboard__composer-input — a text field has to look like a text field. It is the one
    *     place a user is expected to click INTO rather than ON, and nothing else marks it.
-   *   .dashboard__presence-dot — its "border" is the background colour punching the dot out of
-   *     the avatar underneath. That is a mask, not a line; removing it merges two shapes.
    *
    * WHY THE REST WERE REDUNDANT, measured rather than asserted:
    *   - The rail/channel divider: the surfaces differ already, rgb(13,15,20) against

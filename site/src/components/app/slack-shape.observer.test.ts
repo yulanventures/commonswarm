@@ -369,7 +369,6 @@ test("participant navigation has no person presence dot and gives agents measure
           needs_you: { asks: [], assigned: [], waiting: [] } }] },
         models: [["atlas", "Claude"], ["away", "GPT-6.1"]],
       });
-  assert.doesNotMatch(rail.innerHtml, /presence-dot/);
   assert.equal((rail.innerHtml.match(/class="hm-agent-orb"/g) ?? []).length, 3);
   const knownRow = rail.innerHtml.match(/<button\b[^>]*data-rail-agent="atlas"[\s\S]*?<\/button>/u)?.[0];
   assert.ok(knownRow);
@@ -380,7 +379,7 @@ test("participant navigation has no person presence dot and gives agents measure
   assert.ok(awayRow, "the agent from the workspace that is not open reaches the real rail");
   assert.match(awayRow, /GPT-6\.1/); assert.match(awayRow, /OpenAI · reported/);
   assert.match(knownRow, /class="hm-model-family" role="img" aria-label="reported"/);
-  assert.doesNotMatch(rail.innerHtml, /class="[^"]*(?:vendor-mark|dashboard__sidebar-model-mark|dashboard__sidebar-model-glyph)/);
+  assert.doesNotMatch(rail.innerHtml, /class="[^"]*vendor-mark/);
   assert.equal((rail.innerHtml.match(/class="hm-model-family"/g) ?? []).length, 2);
   const unknownRow = rail.innerHtml.match(/<button\b[^>]*data-rail-agent="orphan"[\s\S]*?<\/button>/u)?.[0];
   assert.ok(unknownRow, "the hosted seat without a model reaches the real row renderer");

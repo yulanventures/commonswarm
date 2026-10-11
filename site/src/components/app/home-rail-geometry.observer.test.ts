@@ -95,7 +95,7 @@ test("the home rail and shell keep a bounded people list, 44 px targets and no o
               currentWorkspace: rail.querySelector('[data-rail-workspace][aria-current="page"]')?.dataset.railWorkspace ?? null,
               moreLabel: rail.querySelector('.hm-rail__more')?.textContent ?? null,
               firstGroupIsViewer: list.firstElementChild?.hasAttribute('data-rail-viewer') ?? false,
-              participantHook: !!list, presenceDots: rail.querySelectorAll('.dashboard__presence-dot, [data-presence]').length,
+              participantHook: !!list, presenceDots: rail.querySelectorAll('[data-presence]').length,
               groupAgentCounts: [...list.querySelectorAll(':scope > .hm-rail__group:not(.hm-rail__group--other)')].map((group) => group.querySelectorAll('[data-rail-agent]').length),
               otherAgents: list.querySelectorAll('.hm-rail__group--other [data-rail-agent]').length,
             };
