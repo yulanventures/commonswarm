@@ -1,5 +1,7 @@
-/** Unwired local tools. The registry owns admission/schema/annotations; the
- * authenticated host supplies the transport and protected attachment channel.
+/** Household tools for the local `cswarm mcp` server and `cswarm object`. They are served
+ * through MCP_TOOLS (src/mcp/tools.ts) and dispatched by the local server (src/mcp/server.ts).
+ * The registry owns admission/schema/annotations; the authenticated host supplies the
+ * transport and protected attachment channel.
  */
 import { HOUSEHOLD_TOOLS, HouseholdToolInputError, validateHouseholdToolArguments,
   type HouseholdToolHostContext } from '../protocol/household-tool-registry.js';
