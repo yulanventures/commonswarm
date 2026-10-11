@@ -512,6 +512,19 @@ var init_household_tool_registry = __esm({
   }
 });
 
+// src/protocol/household-next-steps.ts
+function householdRefusalNextStep(reason) {
+  const place = "CommonSwarm: People & agents \u2192 this agent \u2192 Lists & docs \u2192 Allow\u2026";
+  if (reason === "content_consent_required" || reason === "connection_access_refused") return `Ask a workspace member to allow this agent in ${place}`;
+  if (reason === "workspace_access_refused") return `If this agent has not been allowed yet, ask a workspace member to allow it in ${place}`;
+  return void 0;
+}
+var init_household_next_steps = __esm({
+  "src/protocol/household-next-steps.ts"() {
+    "use strict";
+  }
+});
+
 // src/cloud/household-todos.ts
 function requireValue(ok) {
   if (!ok) throw new InvalidResponse();
@@ -56077,7 +56090,7 @@ var init_errors3 = __esm({
 
 // src/mcp/household-tools.ts
 function householdMcpResult(result) {
-  const next_action = result.status === "error" ? "Retry the read." : result.status === "unknown" ? result.request_id ? "Retry identical input with the same request_id to recover the recorded outcome." : "Retry the read." : result.status === "pending" ? "The upload is reserved; no revision is committed. Complete the protected upload, then call file_upload_commit with a new request_id." : result.status === "conflict" ? "kind" in result && result.kind === "todo" ? "Read the current to-do and review the change. Submit it with the current version and a new request_id." : "Recover the retained draft, read the current revision, and review the merge. Submit the reviewed patch with a new request_id." : result.status === "refused" ? "Resolve the refusal before submitting another request." : result.status === "ok" && result.kind === "object_read" && result.revision.kind === "file" ? "File metadata is available. Use the host protected attachment channel for bytes; access must be rechecked." : null;
+  const next_action = result.status === "error" ? "Retry the read." : result.status === "unknown" ? result.request_id ? "Retry identical input with the same request_id to recover the recorded outcome." : "Retry the read." : result.status === "pending" ? "The upload is reserved; no revision is committed. Complete the protected upload, then call file_upload_commit with a new request_id." : result.status === "conflict" ? "kind" in result && result.kind === "todo" ? "Read the current to-do and review the change. Submit it with the current version and a new request_id." : "Recover the retained draft, read the current revision, and review the merge. Submit the reviewed patch with a new request_id." : result.status === "refused" ? householdRefusalNextStep(result.reason) ?? "Resolve the refusal before submitting another request." : result.status === "ok" && result.kind === "object_read" && result.revision.kind === "file" ? "File metadata is available. Use the host protected attachment channel for bytes; access must be rechecked." : null;
   const output2 = { ...result, next_action };
   const raw = JSON.stringify(output2);
   const response = {
@@ -56121,6 +56134,7 @@ var init_household_tools = __esm({
     "use strict";
     init_household_tool_registry();
     init_tools();
+    init_household_next_steps();
     HOUSEHOLD_MCP_TOOLS = HOUSEHOLD_TOOLS;
   }
 });
@@ -56909,6 +56923,7 @@ __export(cli_exports, {
 });
 module.exports = __toCommonJS(cli_exports);
 init_household_tool_registry();
+init_household_next_steps();
 init_household_objects();
 init_household_http();
 var import_node_crypto30 = require("node:crypto");
@@ -78480,7 +78495,8 @@ async function runHouseholdObject(args) {
     { seat: LOCAL_HOUSEHOLD_SEAT, ...input },
     { upload: { reservation_id: "server_pending", expires_at: 0 } }
   ).send();
-  process.stdout.write(JSON.stringify(result) + "\n");
+  const next_action = result.status === "refused" ? householdRefusalNextStep(result.reason) : void 0;
+  process.stdout.write(JSON.stringify(next_action ? { ...result, next_action } : result) + "\n");
   if (["refused", "unknown", "conflict", "error"].includes(result.status)) process.exitCode = 1;
 }
 var AGENT_COMMANDS = {
