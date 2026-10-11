@@ -11984,16 +11984,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     inline-size: 100%;
   }
 
-  .dashboard__workspace-context {
-    display: grid;
-    gap: var(--s-1);
-    /* --s-1 inline, not --s-2. Measured: the rail had FOUR text insets — labels and item rows at
-     * 20px, this counts line at 24, the ownership note at 28 — so text began somewhere different
-     * in every block. One inset gives the eye a single left edge to follow down the rail. */
-    padding: var(--s-3) var(--s-1) var(--s-4);
-    border-block-end: 1px solid var(--border);
-  }
-
   .dashboard__workspace-summary {
     display: flex;
     flex-wrap: wrap;
@@ -12018,47 +12008,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     font-weight: var(--weight-semibold);
     letter-spacing: var(--track-eyebrow);
     text-transform: uppercase;
-  }
-
-  .dashboard__rail-section {
-    display: grid;
-    gap: var(--s-2);
-    padding: var(--s-4) var(--s-1);
-    border-block-start: 0;
-  }
-
-  .dashboard__rail-section + .dashboard__rail-section {
-    border-block-start: 1px solid color-mix(in oklab, var(--border) 72%, transparent);
-  }
-
-  .dashboard__rail-details-body {
-    display: grid;
-    gap: var(--s-3);
-  }
-
-  .dashboard__rail-details {
-    padding-block: var(--s-4);
-    border-block-start: 1px solid var(--border);
-  }
-
-  .dashboard__rail-details > summary {
-    min-block-size: 2.75rem;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--s-3);
-    color: var(--text-muted);
-    font-size: var(--t-xs);
-    font-weight: var(--weight-semibold);
-    cursor: pointer;
-  }
-
-  .dashboard__rail-details > summary:focus-visible {
-    outline: none;
-    box-shadow: var(--focus-ring);
-  }
-
-  .dashboard__rail-details-body {
-    padding-block-start: var(--s-3);
   }
 
   .dashboard__workspace-id {
@@ -12129,21 +12078,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   .dashboard__sidebar-place:focus-visible {
     outline: none;
     box-shadow: var(--focus-ring);
-  }
-
-  .dashboard__sidebar-place-mark {
-    color: var(--text-muted);
-    font-family: var(--font-mono);
-    font-size: var(--t-base);
-    text-align: center;
-  }
-
-  .dashboard__agent-ownership-note {
-    /* Inline margin dropped to meet the rail's single text inset — it sat 8px further in. */
-    margin: var(--s-1) 0 0;
-    color: var(--text-faint);
-    font-size: 0.62rem;
-    line-height: 1.45;
   }
 
   .dashboard__workspace-list {
@@ -12883,14 +12817,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   }
 
   /* ── Channels ───────────────────────────────────────────────────────────────────── */
-
-  /* The + beside the CHANNELS heading. It is the icon button the head already uses, at the
-     size the label row can carry, rather than the full-width dashed rail-add control. */
-  .dashboard__rail-section-add {
-    inline-size: 1.75rem;
-    min-block-size: 1.75rem;
-    padding: 0;
-  }
 
   /* The phone's channel control. `display: none` here and shown only at ≤52rem, exactly the
      split the view switcher uses: above that width the rail lists the channels. */
@@ -15146,18 +15072,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       display: flex;
     }
 
-    .dashboard__rail-section {
-      padding: 0;
-      border: 0;
-    }
-
-    .dashboard__workspace-context,
-    .dashboard__rail-section--places {
-      display: none;
-    }
-
-    .dashboard__rail-label-row,
-    .dashboard__rail-details {
+    .dashboard__rail-label-row {
       display: none;
     }
 
@@ -15214,11 +15129,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       inset-block-end: auto;
       inset-block-start: calc(100% + var(--s-2));
       inset-inline: auto 0;
-    }
-
-    .dashboard__workspace-context,
-    .dashboard__rail-section--places {
-      display: none;
     }
 
     .dashboard__workspace-control {
@@ -15655,12 +15565,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
    * did not appear. Listing them means a new component starts with its own edges and someone
    * decides deliberately. */
   .dashboard__rail,
-  .dashboard__rail-section,
-  .dashboard__rail-details,
   .dashboard__rail-foot,
   .dashboard__rail-add,
   .dashboard__channel-head,
-  .dashboard__workspace-context,
   .dashboard__workspace-trigger,
   .dashboard__workspace-menu,
   .dashboard__workspace-menu-create,
@@ -15681,12 +15588,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   }
 
   /* Three that the single-class list above could not reach, and the reason is worth keeping:
-   * `.dashboard__rail-section + .dashboard__rail-section` and `.dashboard__message + .dashboard__message`
-   * are SIBLING selectors — specificity
+   * `.dashboard__message + .dashboard__message`
+   * specificity
    * (0,2,0) — so a one-class override loses to it wherever it sits in the file. The toolbar and
    * composer edges were simply missed on the first pass; they were found by re-enumerating the
    * painted edges on the DEPLOYED page rather than by re-reading the source. */
-  .dashboard__rail-section + .dashboard__rail-section,
   .dashboard__message + .dashboard__message,
   .dashboard__feed-toolbar,
   .dashboard__composer,
