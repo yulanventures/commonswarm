@@ -7664,7 +7664,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       return approvalUntil(approval.expires_at);
     };
 
-    /** One approval card per agent this person owns, from household_connections. */
+    /** One approval card per agent this person owns, from household_connections.
+     * Lists & docs: owner-scoped connections and choices in, approval receipts out.
+     * Hosted and local agents share one flow and command; the server decides permission.
+     */
     const renderAgentApprovals = (): void => {
       const list = one<HTMLUListElement>("[data-household-agent-list]");
       const empty = one<HTMLElement>("[data-household-agent-empty]");
@@ -7673,6 +7676,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (empty) empty.hidden = householdConnections.length > 0;
       const editor = householdAccess.contentRole === "editor";
       for (const connection of householdConnections) {
+        const hosted = connection.kind === "hosted";
         const principalId = String(connection.principal_id ?? "");
         const agentName = String(connection.name ?? "Your agent");
         const approval = connectionApproval(connection);
@@ -7689,7 +7693,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const name = document.createElement("strong");
         name.textContent = agentName;
         const owner = document.createElement("small");
-        owner.textContent = connection.kind === "hosted" ? "Your agent, in a chat app" : "Your agent, on a computer";
+        owner.textContent = hosted ? "Your agent, in a chat app" : "Your agent, on a computer";
         copy.append(name, owner);
         const choices = document.createElement("fieldset");
         choices.className = "dashboard__approval-choices";
@@ -7724,15 +7728,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             .map((input) => input.value);
           void approveAgent(connection, operations, allow, status);
         });
-        /* Display only: Lists & docs is not available through the Claude connector yet, so an
-           agent in a chat app shows the note instead of the approval controls. An existing
-           approval keeps its controls so it can still be changed or withdrawn. */
-        if (connection.kind === "hosted") {
+        /* Hosted consent uses the same controls; this note describes tool availability. */
+        if (hosted) {
           const note = document.createElement("small");
           note.dataset.approvalHostedNote = "";
           note.textContent = HOSTED_LISTS_NOTE;
           copy.append(note);
-          if (!approval) { choices.hidden = true; allow.hidden = true; }
         }
         row.append(orb, copy, choices, allow, status);
         if (approval) {
@@ -7741,7 +7742,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           withdraw.className = "dashboard__button dashboard__button--secondary dashboard__approval-withdraw";
           withdraw.textContent = "Withdraw access";
           withdraw.dataset.withdrawApproval = principalId;
-          withdraw.addEventListener("click", () => { void withdrawAgent(principalId, agentName, connection.kind === "hosted", withdraw, status); });
+          withdraw.addEventListener("click", () => { void withdrawAgent(principalId, agentName, hosted, withdraw, status); });
           row.append(withdraw);
         }
         list.append(row);
