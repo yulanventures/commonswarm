@@ -6,7 +6,11 @@ import { test } from 'node:test';
 
 const driver = new URL('../../scripts/c1-staging-u9/faults.py', import.meta.url).pathname;
 const plan = new URL('../../docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md', import.meta.url).pathname;
-const run = (code: string) => spawnSync('python3', ['-B', '-c', code, driver, plan], { encoding: 'utf8' });
+const run = (code: string) => spawnSync('python3', ['-B', '-c', `import contextlib,pathlib,tempfile
+with contextlib.ExitStack() as stack:
+ root=pathlib.Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='u9-'))).resolve()
+ exec(compile(${JSON.stringify(code)}, '<u9-test>', 'exec'))
+`, driver, plan], { encoding: 'utf8' });
 
 test('all three derived W4 bodies differ by one fault at the specified boundary', () => {
   const r = run(String.raw`
@@ -39,11 +43,10 @@ print('F1 F2 F3 positive and negative checkpoints PASS')
 
 test('emission binds the real reviewed context, reuses rollback/close bytes and guards copied output', () => {
   const r = run(String.raw`
-import contextlib,hashlib,importlib.util,io,json,os,pathlib,socket,stat,subprocess,sys,tempfile
+import contextlib,hashlib,importlib.util,io,json,os,pathlib,socket,stat,subprocess,sys
 from unittest.mock import patch
 spec=importlib.util.spec_from_file_location('u9',sys.argv[1]); u=importlib.util.module_from_spec(spec); spec.loader.exec_module(u)
 plan=str(pathlib.Path(sys.argv[2]).resolve()); source=pathlib.Path(plan).read_text()
-root=pathlib.Path(tempfile.mkdtemp(prefix='u9-emitter.',dir=os.environ['TMPDIR'])).resolve()
 d={'release_sha':'a'*40,'window':'W4','window_id':'Test12','plan_sha256':hashlib.sha256(source.encode()).hexdigest()}
 inputs=root/'inputs.json'; inputs.write_text(json.dumps(d)); inputs.chmod(0o600)
 marker=root/'marker'; marker.write_bytes(b'test-only-machine-bytes\n'); marker.chmod(0o600)
@@ -117,10 +120,9 @@ with patch.object(os,'open',return_value=9876) as opened,patch.object(os,'fdopen
 
 test('receipt uses exact nonsecret keys/mode, refuses overwrite; root-owned file read refuses wrong owner', () => {
   const r = run(String.raw`
-import hashlib,importlib.util,json,os,pathlib,stat,sys,tempfile
+import hashlib,importlib.util,json,os,pathlib,stat,sys
 from unittest.mock import patch
 spec=importlib.util.spec_from_file_location('u9',sys.argv[1]); u=importlib.util.module_from_spec(spec); spec.loader.exec_module(u)
-root=pathlib.Path(tempfile.mkdtemp(prefix='u9-contract.',dir=os.environ['TMPDIR'])).resolve()
 row={'release_sha':'a'*40,'window_id':'Test12','plan_sha256':'b'*64}
 real=os.fstat
 def metadata(fd,uid):
@@ -181,13 +183,12 @@ with patch.object(os,'fstat',side_effect=lambda fd:metadata(fd,1000)):
 // These doubles replace host/filesystem observations only inside Python tests.
 // Production has no configurable identity or backup path.
 const localHarness = String.raw`
-import contextlib,datetime,hashlib,importlib.util,io,json,os,pathlib,stat,sys,tempfile,socket,subprocess
+import contextlib,datetime,hashlib,importlib.util,io,json,os,pathlib,stat,sys,socket,subprocess
 from unittest.mock import patch
 from types import SimpleNamespace
 sys.path.insert(0,str(pathlib.Path(sys.argv[1]).parent))
 import common as c
 import status as s
-root=pathlib.Path(tempfile.mkdtemp(prefix='u9-local.',dir=os.environ['TMPDIR'])).resolve()
 backup=root/'backup'; backup.mkdir(mode=0o700)
 proof=root/'proof'; proof.mkdir(mode=0o700)
 dump=root/'dump'; dump.mkdir(mode=0o700)
@@ -196,13 +197,14 @@ os.utime(dump_file,(c.now().timestamp()-5,)*2)
 s.STATUS=str(backup/'status.json'); s.RESTORE=str(backup/'restore-status.json')
 machine=root/'machine-id'; machine.write_bytes(b'test-machine-id-with-newline\n'); c.MACHINE_ID=str(machine)
 real_digest,real_stat,real_fstat=c.digest,os.lstat,os.fstat
-real_rm=lambda p:subprocess.run(['/Users/yulanbot/.local/bin/rm','--',str(p)],check=True,capture_output=True)
+def real_rm(p):
+ assert p.parent.resolve().is_relative_to(root)
+ os.rmdir(p) if p.is_dir() and not p.is_symlink() else os.unlink(p)
 def owned(meta,path=''):
  mode=meta.st_mode
- if str(path) in ('/private/tmp','/tmp'): mode &= ~0o022
+ if str(path) in (tempfile.gettempdir(),str(pathlib.Path(tempfile.gettempdir()).resolve())): mode &= ~0o022
  fields={key:getattr(meta,key) for key in dir(meta) if key.startswith('st_')}
  return SimpleNamespace(**dict(fields,st_mode=mode,st_uid=0,st_gid=0))
-stack=contextlib.ExitStack()
 stack.enter_context(patch.object(os,'geteuid',return_value=0))
 stack.enter_context(patch.object(socket,'gethostname',return_value=c.HOST))
 stack.enter_context(patch.object(c,'digest',side_effect=lambda raw:c.MACHINE_SHA256 if raw==machine.read_bytes() else real_digest(raw)))
@@ -245,7 +247,6 @@ assert not p.exists()
 # The mode and dump-file checks are real filesystem refusals.
 dump.chmod(0o755); refuses(lambda:invoke('write','bad-dir.json','before.json')); dump.chmod(0o700)
 dump_file.chmod(0o644); refuses(lambda:invoke('write','bad-dump.json','before.json')); dump_file.chmod(0o600)
-stack.close()
 `);
   assert.equal(r.status, 0, r.stderr);
 });
@@ -255,10 +256,12 @@ test('remover validates both gates before any guarded call and retains bound bef
 invoke('before','before.json'); drill(); writer=invoke('write','writer.json','before.json')
 p=pathlib.Path(s.STATUS); q=pathlib.Path(s.RESTORE); raw=p.read_bytes(); restore=q.read_bytes()
 log=root/'rm-argv.jsonl'; guarded=root/'guarded-rm'
-guarded.write_text('#!'+sys.executable+'\nimport json,pathlib,subprocess,sys\n'
+guarded.write_text('#!'+sys.executable+'\nimport json,os,pathlib,sys\n'
  'assert pathlib.Path('+repr(str(proof/'removed.json.before'))+').is_file()\n'
+ 'assert len(sys.argv)==3 and sys.argv[1]=="--" and sys.argv[2] in '+repr((str(p),str(q)))+'\n'
+ 'p=pathlib.Path(sys.argv[2]); assert p.parent.resolve().is_relative_to(pathlib.Path('+repr(str(root))+'))\n'
  'with pathlib.Path('+repr(str(log))+').open("a") as f: f.write(json.dumps(sys.argv[1:])+"\\n")\n'
- 'subprocess.run(["/Users/yulanbot/.local/bin/rm",*sys.argv[1:]],check=True)\n'); guarded.chmod(0o700)
+ 'os.unlink(p)\n'); guarded.chmod(0o700)
 stack.enter_context(patch.dict(os.environ,U9_GUARDED_RM=str(guarded)))
 def rejected():
  saved={str(f):f.lstat() if f.is_symlink() else f.read_bytes() for f in (p,q)}
@@ -307,7 +310,6 @@ err=io.StringIO()
 with contextlib.redirect_stderr(err): refuses(lambda:invoke('remove','refused.json','writer.json'))
 assert p.read_bytes()==raw and q.read_bytes()==restore and (proof/'refused.json.before').exists()
 assert not (proof/'refused.json').exists() and 'BLOCKED by rm guard:' in err.getvalue() and str(p) in err.getvalue()
-stack.close()
 `);
   assert.equal(r.status, 0, r.stderr);
 });
@@ -391,7 +393,6 @@ state.update(service='inactive',result='success',started='recovered-start'); cut
 phase('recovered'); state['timer']='active'; done=phase('done')
 assert done['observation']['timer_active']=='active' and done['window_id']=='Test12'
 assert len(list(proof.glob('u9-ARCH-*.json')))==8
-stack.close()
 `);
   assert.equal(r.status, 0, r.stderr);
 });
@@ -508,7 +509,7 @@ phase('restore')
 assert tar.read_bytes()==expected and tar.stat().st_nlink==1 and not aside.exists()
 assert stat.S_IMODE(tar.stat().st_mode)==before['archive_mode']==0o600 and rescue_tar.read_bytes()==expected
 state.update(service='inactive',result='success',started='recovered-start'); cutover['release_generation']=cutover['measured_generation']=3
-phase('recovered'); state['timer']='active'; phase('done'); stack.close()
+phase('recovered'); state['timer']='active'; phase('done')
 `);
     assert.equal(r.status, 0, `${scenario}: ${r.stderr}`);
   }

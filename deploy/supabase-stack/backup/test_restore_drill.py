@@ -286,8 +286,11 @@ class DrillTests(unittest.TestCase):
     def test_no_flag_output_and_status_bytes_match_base(self):
         baseline = ModuleType('baseline_drill')
         baseline.__file__ = drill.__file__
-        source = subprocess.run(['git', 'show', '12e4caa9:deploy/supabase-stack/backup/restore-drill.py'],
-                                check=True, capture_output=True, text=True).stdout
+        try:
+            source = subprocess.run(['git', 'show', '12e4caa9:deploy/supabase-stack/backup/restore-drill.py'],
+                                    cwd=Path(__file__).resolve().parents[3], check=True, capture_output=True, text=True).stdout
+        except (OSError, subprocess.CalledProcessError) as error:
+            self.fail(f'Cannot load byte-identity baseline 12e4caa9 with git: {getattr(error, "stderr", None) or error}')
         exec(compile(source, baseline.__file__, 'exec'), baseline.__dict__)
         for key in ('LOCK_PATH', 'STATUS_FILE', 'WORKDIR_BASE', 'run_cmd', 'generate_temp_credentials', 'fetch_offsite_bytes', 'fetch_api_bytes'):
             baseline.__dict__[key] = drill.__dict__[key]

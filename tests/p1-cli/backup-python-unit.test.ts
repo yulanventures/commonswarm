@@ -19,10 +19,9 @@ for (const file of PYTHON_TESTS) {
         ["-I", "-B", "-m", "unittest", "discover", "-s", BACKUP_DIR, "-p", file],
         { cwd, encoding: "utf8", env: { PATH: process.env.PATH ?? "", PYTHONDONTWRITEBYTECODE: "1" } },
       );
-      const lines = run.stderr.split("\n").filter((l) => /^(Ran \d+ tests?|OK|FAILED)/.test(l));
-      assert.equal(run.status, 0, `${file}: ${lines.join(" ")}`);
+      assert.equal(run.status, 0, `${file}: ${run.stderr.slice(-4000)}`);
       assert.match(run.stderr, /^Ran [1-9]\d* tests? in /m, `${file}: ran no tests`);
-      console.log(`${file}: ${lines.join(" ")}`);
+      console.log(`${file}: ${run.stderr.split("\n").filter((l) => /^(Ran \d+ tests?|OK|FAILED)/.test(l)).join(" ")}`);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
