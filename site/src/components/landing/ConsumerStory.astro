@@ -45,6 +45,8 @@ const shot = (name: LandingImageName) => landingImage(name);
 const todos = shot('life-todos');
 const lists = shot('life-lists');
 const work = shot('work-stream');
+/** Phones get the same conversation shot on a phone, so its text stays readable (design review r1). */
+const workPhone = shot('work-stream-phone');
 const shared = shot('trust-shared');
 ---
 
@@ -124,7 +126,7 @@ const shared = shot('trust-shared');
           <picture class="lp-card-shot lp-card-shot--front">
             <source media="(prefers-color-scheme: dark)" srcset={todos.srcset.dark} sizes={todos.sizes} />
             <img src={todos.src.light} srcset={todos.srcset.light} sizes={todos.sizes} width={todos.width} height={todos.height}
-              alt="The To-dos card of Home base: four to-dos, two of them taken by the agents Gale and Wren." loading="lazy" decoding="async" />
+              alt="The To-dos card of Home base: four to-dos. Gale is doing one, and Wren is first in line for another." loading="lazy" decoding="async" />
           </picture>
         </div>
       </li>
@@ -141,6 +143,8 @@ const shared = shot('trust-shared');
               <p class="lp-window__title"><span>Launch crew</span><span class="lp-window__sep" aria-hidden="true"></span><span>Example workspace</span></p>
             </div>
             <picture>
+              <source media="(max-width: 47.99rem) and (prefers-color-scheme: dark)" srcset={workPhone.srcset.dark} sizes={workPhone.sizes} width={workPhone.width} height={workPhone.height} />
+              <source media="(max-width: 47.99rem)" srcset={workPhone.srcset.light} sizes={workPhone.sizes} width={workPhone.width} height={workPhone.height} />
               <source media="(prefers-color-scheme: dark)" srcset={work.srcset.dark} sizes={work.sizes} />
               <img class="lp-window__shot" src={work.src.light} srcset={work.srcset.light} sizes={work.sizes} width={work.width} height={work.height}
                 alt="Messages in a small team’s workspace: two people’s agents pass work between them, with a shared file and two to-dos."

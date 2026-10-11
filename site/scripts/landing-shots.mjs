@@ -6,12 +6,14 @@
  * backend and the curated marketing world (sample people Maya and Jordan, their agents Wren and Gale), shot by headless
  * Playwright Chromium at a device scale factor of 2. Shoot command, from the harness folder:
  *
- *   SHOOT_BASE=http://127.0.0.1:<dev port> ./shoot.sh <run> MHomeTall,MPhone,MLaunch,MPhoneNew,MPhoneAddAgent \
+ *   SHOOT_BASE=http://127.0.0.1:<dev port> ./shoot.sh <run> MHomeTall,MPhone,MLaunch,MPhoneLaunch,MPhoneNew,MPhoneAddAgent \
  *     --states marketing --themes dark,light
  *
  * Usage: node scripts/landing-shots.mjs <run>   (<run> holds dark/ and light/ folders of <id>-screen-<width>.png)
  *
- * Crops are in CSS pixels of the shot (the PNGs are 2x); boxes were measured from the app's own elements.
+ * Crops are in CSS pixels of the shot (the PNGs are 2x); boxes were measured from the app's own elements. Each crop
+ * starts and ends in a gap between elements, so no picture cuts through text, a card or the phone's tab bar. The
+ * step-connect crop starts below the "Which app?" chips: Works with lists Claude only.
  * Every visible word in these images is sample content; keep it true to what the product does (see STRINGS.md of the lane).
  * The WebP files are the shipping artifacts: open and inspect them after every regeneration.
  */
@@ -33,12 +35,13 @@ const SCALE = 2;
 const IMAGES = [
   { name: "home", shot: "MHomeTall-screen-1440.png", crop: null, widths: [2400, 1600, 960] },
   { name: "phone", shot: "MPhone-screen-390.png", crop: null, widths: [720, 400] },
-  { name: "step-open", shot: "MPhoneNew-screen-390.png", crop: { x: 0, y: 182, w: 390, h: 400 }, widths: [720, 400] },
-  { name: "step-connect", shot: "MPhoneAddAgent-screen-390.png", crop: { x: 0, y: 392, w: 390, h: 400 }, widths: [720, 400] },
-  { name: "step-steer", shot: "MPhone-screen-390.png", crop: { x: 0, y: 444, w: 390, h: 400 }, widths: [720, 400] },
+  { name: "step-open", shot: "MPhoneNew-screen-390.png", crop: { x: 0, y: 182, w: 390, h: 423 }, widths: [720, 400] },
+  { name: "step-connect", shot: "MPhoneAddAgent-screen-390.png", crop: { x: 0, y: 385, w: 390, h: 470 }, widths: [720, 400] },
+  { name: "step-steer", shot: "MPhone-screen-390.png", crop: { x: 0, y: 440, w: 390, h: 403 }, widths: [720, 400] },
   { name: "life-todos", shot: "MHomeTall-screen-1440.png", crop: { x: 1141, y: 20, w: 279, h: 310 }, widths: [558] },
   { name: "life-lists", shot: "MHomeTall-screen-1440.png", crop: { x: 1141, y: 346, w: 279, h: 230 }, widths: [558] },
   { name: "work-stream", shot: "MLaunch-screen-1440.png", crop: { x: 257, y: 140, w: 743, h: 630 }, widths: [1486, 760] },
+  { name: "work-stream-phone", shot: "MPhoneLaunch-screen-390.png", crop: { x: 0, y: 136, w: 390, h: 672 }, widths: [780, 400] },
   { name: "trust-shared", shot: "MHomeTall-screen-1440.png", crop: { x: 1141, y: 838, w: 279, h: 146 }, widths: [558] },
 ];
 

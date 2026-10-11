@@ -3,24 +3,22 @@
 
 type Theme = "light" | "dark";
 
-/** CSS-pixel size of the picture (the shot or its crop) and the pixel widths the script writes. */
-const IMAGES = {
-  home: { width: 1440, height: 1000, widths: [2400, 1600, 960], sizes: "(min-width: 80rem) 1180px, 92vw" },
-  phone: { width: 390, height: 844, widths: [720, 400], sizes: "(min-width: 48rem) 264px, 280px" },
-  "step-open": { width: 390, height: 400, widths: [720, 400], sizes: "(min-width: 64rem) 330px, (min-width: 40rem) 45vw, 86vw" },
-  "step-connect": { width: 390, height: 400, widths: [720, 400], sizes: "(min-width: 64rem) 330px, (min-width: 40rem) 45vw, 86vw" },
-  "step-steer": { width: 390, height: 400, widths: [720, 400], sizes: "(min-width: 64rem) 330px, (min-width: 40rem) 45vw, 86vw" },
-  "life-todos": { width: 279, height: 310, widths: [558], sizes: "300px" },
-  "life-lists": { width: 279, height: 230, widths: [558], sizes: "300px" },
-  "work-stream": { width: 743, height: 630, widths: [1486, 760], sizes: "(min-width: 64rem) 620px, 92vw" },
-  "trust-shared": { width: 279, height: 146, widths: [558], sizes: "(min-width: 40rem) 360px, 86vw" },
+/** CSS-pixel size of the picture (the shot or its crop), the pixel widths the script writes, and the display widths
+ * for `sizes` (measured from landing.css at 1440, 1280, 1024, 768 and 390; landing-images.test.mjs checks the files). */
+export const IMAGES = {
+  home: { width: 1440, height: 1000, widths: [2400, 1600, 960], sizes: "(min-width: 80rem) 1120px, 92vw" },
+  phone: { width: 390, height: 844, widths: [720, 400], sizes: "(min-width: 80rem) 246px, (min-width: 48rem) 18vw, (min-width: 25rem) 262px, 67vw" },
+  "step-open": { width: 390, height: 423, widths: [720, 400], sizes: "(min-width: 80rem) 328px, (min-width: 64rem) 23vw, (min-width: 26rem) 328px, 73vw" },
+  "step-connect": { width: 390, height: 470, widths: [720, 400], sizes: "(min-width: 80rem) 328px, (min-width: 64rem) 23vw, (min-width: 26rem) 328px, 73vw" },
+  "step-steer": { width: 390, height: 403, widths: [720, 400], sizes: "(min-width: 80rem) 328px, (min-width: 64rem) 23vw, (min-width: 26rem) 328px, 73vw" },
+  "life-todos": { width: 279, height: 310, widths: [558], sizes: "(min-width: 80rem) 279px, (min-width: 64rem) 21vw, 279px" },
+  "life-lists": { width: 279, height: 230, widths: [558], sizes: "(min-width: 80rem) 279px, (min-width: 64rem) 21vw, 279px" },
+  "work-stream": { width: 743, height: 630, widths: [1486, 760], sizes: "(min-width: 80rem) 580px, (min-width: 64rem) 45vw, 82vw" },
+  "work-stream-phone": { width: 390, height: 672, widths: [780, 400], sizes: "(min-width: 26rem) 390px, 82vw" },
+  "trust-shared": { width: 279, height: 146, widths: [558], sizes: "279px" },
 } as const;
 
 export type LandingImageName = keyof typeof IMAGES;
-
-/** Every image the homepage uses, with the pixel widths it expects on disk (landing-images.test.mjs checks the files). */
-export const LANDING_IMAGES: { name: LandingImageName; width: number; height: number; widths: readonly number[] }[] =
-  (Object.keys(IMAGES) as LandingImageName[]).map((name) => ({ name, width: IMAGES[name].width, height: IMAGES[name].height, widths: IMAGES[name].widths }));
 
 export interface LandingImage {
   width: number;
