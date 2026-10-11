@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { cloudTarget } from "../../src/cloud/config.js";
 import { encodeInviteLink, type InviteLinkPayload } from "../../src/cloud/invite-link.js";
 import { credentialStore } from "../../src/cloud/storage.js";
-import { HOUSEHOLD_TOOL_REGISTRY } from "../../src/protocol/household-tool-registry.js";
+import { HOUSEHOLD_TOOLS } from "../../src/protocol/household-tool-registry.js";
 import { usage } from "../../src/cli.js";
 import { createLaneTempHome, removeLaneTempHome } from "../support/lane-temp-home.js";
 
@@ -75,7 +75,7 @@ function dispatchBaselineShard(): number | null {
  * any drift from this inventory.
  */
 const LEGACY_COMMAND_ENTRY_COVERAGE: readonly CommandEntryCoverage[] = [
-  ...[...HOUSEHOLD_TOOL_REGISTRY.map(row => row.name), "refusal"].map(key => ({ key: `object.${key}`, variants: ["default"], profile: "expand" as const, hostSessionId: "drop" as const, errorMode: "standard" as const, workspaceErrorJson: false })),
+  ...[...HOUSEHOLD_TOOLS.map(row => row.name), "refusal"].map(key => ({ key: `object.${key}`, variants: ["default"], profile: "expand" as const, hostSessionId: "drop" as const, errorMode: "standard" as const, workspaceErrorJson: false })),
   ...["grants", "history", "revoke", "refusal"].map(key => ({ key: `admin.${key}`, variants: ["default"], profile: "refuse" as const, hostSessionId: "drop" as const, errorMode: "standard" as const, workspaceErrorJson: false })),
   // Item K's profile routes run through the focused dispatcher baseline below.
   ...["ls", "refusal"].map(key => ({ key: `profile.${key}`, variants: ["default"], profile: "refuse" as const, hostSessionId: "drop" as const, errorMode: key === "ls" ? "onboarding" as const : "standard" as const, workspaceErrorJson: false })),
@@ -599,7 +599,7 @@ function selectedErrorFixtures(
 }
 
 async function fixtures(): Promise<Fixture[]> {
-  const core = [...coreFixtures(), ...HOUSEHOLD_TOOL_REGISTRY.map(row => ({
+  const core = [...coreFixtures(), ...HOUSEHOLD_TOOLS.map(row => ({
     id: `object.${row.name}`, argv: ["object", row.name, "--profile", "<PROFILE>"],
   }))];
   const coverage = await commandEntryCoverage();
