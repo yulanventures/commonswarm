@@ -16,12 +16,14 @@ import subprocess
 import sys
 
 from common import canonical, digest, directory, guard, need, read, sync_directory, write
-from faults import context, preflight
+from faults import context
 
 CONFIG = '/etc/commonswarm-admin-release/recycle.json'
 HOOK = '/usr/local/libexec/commonswarm-admin-edge-recycle'
 SERVICE = 'commonswarm-edge-recycle.service'
 TIMER = 'commonswarm-edge-recycle.timer'
+# Ruling 53(b): measured live legacy hook, never the upgraded plan block.
+LEGACY_HOOK_SHA256 = '3f03038e7dde0e6402f3359f4abcf5815d847ca3d7fefcefa8ec0e31c7a5b5e6'
 SQL = "SELECT json_build_object('admin_issuance_enabled',admin_issuance_enabled,'release_generation',release_generation,'measured_generation',measured_generation,'invalidated',invalidated_at IS NOT NULL,'release_sha',measured_edge_release_sha,'target',measured_edge_target,'mount',measured_mount,'image_digest',measured_image_digest,'artifact_digest',measured_artifact_digest)::text FROM commonswarm_oauth.admin_cutover_state WHERE singleton;"
 
 
@@ -98,7 +100,7 @@ def observation(cutover):
                 cutover=cutover)
 
 
-def execute(phase, d, text, proof, cutover, rc=0):
+def execute(phase, d, proof, cutover, rc=0):
     guard()
     current = observation(cutover)
     def path(name): return proof + '/u9-ARCH-' + name + '.json'
@@ -118,9 +120,7 @@ def execute(phase, d, text, proof, cutover, rc=0):
         s = os.lstat(archive)
         if s.st_uid == s.st_gid == 0: owner = (0, 0)
         need(digest(read(archive, owner)) == current['artifact_digest'], 'legacy archive digest mismatch')
-        # Installed compatibility hook must be the reviewed plan's exact block.
-        expected = digest(('#!/bin/bash\n' + preflight.blocks(text)['ai-recycle-hook']).encode())
-        need(current['hook_sha256'] == expected and current['timer_active'] == 'active'
+        need(current['hook_sha256'] == LEGACY_HOOK_SHA256 and current['timer_active'] == 'active'
              and current['service_state'] == 'inactive', 'reviewed compatibility hook and idle active timer required')
         receipt.update(archive_owner=list(owner), archive_mode=stat.S_IMODE(s.st_mode),
                        aside=proof + '/u9-ARCH-legacy.tar', archive_identity=file_id(archive),
@@ -242,10 +242,14 @@ def main():
         phase, args.plan, args.inputs, args.proof, rc = args.rest
     else:
         args.plan, args.inputs, args.proof = args.rest
-    d, text = context(args.plan, args.inputs, args.proof)
+    # Ruling 53(c): ARCH controls precede W4X; never start around its exclusion.
+    need(not os.path.lexists('/var/lib/commonswarm-admin-release/w4-exclusion.json')
+         and not os.path.lexists('/usr/local/lib/systemd/system/' + SERVICE + '.d/00-w4-exclusion.conf'),
+         'W4X exclusion present; ARCH controls require their admitted pre-exclusion step')
+    d, _ = context(args.plan, args.inputs, args.proof)
     if args.action == 'execute':
         cutover = json.load(sys.stdin)
-        execute(phase, d, text, args.proof, cutover, int(rc))
+        execute(phase, d, args.proof, cutover, int(rc))
     elif args.action != 'check':
         print(emit(args.action, args, d))
 

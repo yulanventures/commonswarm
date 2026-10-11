@@ -325,13 +325,19 @@ tar=root/'legacy.tar'; tar.write_bytes(b'exact legacy archive'); tar.chmod(0o600
 rescue_tar=rescue/'archive.tar'; rescue_tar.write_bytes(tar.read_bytes()); rescue_tar.chmod(0o600)
 config={'release_sha':sha,'target':'/home/commonswarm/edge/releases/'+sha,'release_root':'/home/commonswarm/admin-issuance/releases/'+sha,'archive':legacy,'artifact_digest':hashlib.sha256(tar.read_bytes()).hexdigest()}
 a.CONFIG=str(root/'config.json'); cfg=pathlib.Path(a.CONFIG); cfg.write_text(json.dumps(config,indent=3)+'\n'); cfg.chmod(0o600); raw_config=cfg.read_bytes()
-a.HOOK=str(root/'hook'); hook=pathlib.Path(a.HOOK); hook.write_text('#!/bin/bash\n'+a.preflight.blocks(source)['ai-recycle-hook']); hook.chmod(0o700)
+a.HOOK=str(root/'hook'); hook=pathlib.Path(a.HOOK); legacy_hook=b'legacy hook fixture\n'; hook.write_bytes(legacy_hook); hook.chmod(0o700)
+# Only the measured legacy digest is available; keep the R hook bytes independent.
+stack.enter_context(patch.object(a,'digest',side_effect=lambda raw:'3f03038e7dde0e6402f3359f4abcf5815d847ca3d7fefcefa8ec0e31c7a5b5e6' if raw==legacy_hook else real_digest(raw)))
 real_open,real_link,real_unlink,real_realpath,real_resolve=os.open,os.link,os.unlink,os.path.realpath,pathlib.Path.resolve
 helper=root/'helper'; helper.mkdir(mode=0o700)
 mapping={legacy:str(tar),durable:str(rescue_tar),str(pathlib.Path(durable).parent):str(rescue),config['release_root']:str(helper),'/tmp':str(root)}
 def mapped(p):
  p=str(p)
  return str(proof)+p[len(logical_proof):] if p==logical_proof or p.startswith(logical_proof+'/') else mapping.get(p,p)
+# Validate real fixture paths while preserving admitted box names.
+canonical=c.canonical
+def local_canonical(p): canonical(mapped(p)); return str(p)
+for module in (c,a): stack.enter_context(patch.object(module,'canonical',side_effect=local_canonical))
 def resolved(p,strict=False):
  if str(p) in ('/home/commonswarm/edge/current','/home/commonswarm/admin-issuance/releases/'+sha):
   return pathlib.Path('/home/commonswarm/'+('edge' if 'edge/current' in str(p) else 'admin-issuance')+'/releases/'+sha)
@@ -361,10 +367,11 @@ def phase(name,rc=0):
 
 test('ARCH 1–3 emit guarded bodies and retain bound loss/recovery receipts with exact restoration', () => {
   const r = run(archiveHarness + String.raw`
-for step in ('1','2','3','undo'):
+for step in ('1','2','3','undo','check'):
  sys.argv=['archive',step,plan,str(inputs),logical_proof]; out=io.StringIO()
  with contextlib.redirect_stdout(out): a.main()
  body=out.getvalue()
+ if step=='check': assert body==''; continue
  if step=='2': assert 'systemctl start '+a.SERVICE+' || U9_ARCH_RC=$?' in body and 'u9_arch negative "$U9_ARCH_RC"' in body
  if step in ('3','undo'): assert body.index('u9_arch restore') < body.index('systemctl reset-failed '+a.SERVICE) < body.index('systemctl start '+a.SERVICE)
  else: assert 'reset-failed' not in body
@@ -372,7 +379,12 @@ for step in ('1','2','3','undo'):
  shell_env=dict(os.environ,PLAN_FILE=plan,INPUTS_FILE=str(inputs),PROOF_DIR=logical_proof,RELEASE_SHA=d['release_sha'],WINDOW='W4',WINDOW_ID=d['window_id'])
  refused=subprocess.run(['/bin/bash','-c',body],env=shell_env,text=True,capture_output=True)
  assert refused.returncode==2 and 'STOP U9 ARCH' in refused.stderr
-before=phase('before'); assert state['timer']=='inactive'
+from faults import preflight
+hook.write_text('#!/bin/bash\n'+preflight.blocks(source)['ai-recycle-hook'])
+assert real_digest(hook.read_bytes())=='a72246de70b48e51178338333569c6affc84bcf5a61554b3b43b035bc951c8f7'
+refuses(lambda:phase('before')); assert state['timer']=='active' and not list(proof.iterdir())
+hook.write_bytes(legacy_hook)
+before=phase('before'); assert state['timer']=='inactive' and before['observation']['hook_sha256']=='3f03038e7dde0e6402f3359f4abcf5815d847ca3d7fefcefa8ec0e31c7a5b5e6'
 assert (proof/'u9-ARCH-config.json').read_bytes()==raw_config
 assert set(before)=={'kind','phase','release_sha','window','window_id','plan_sha256','identity','observation','service_exit','archive_owner','archive_mode','aside','archive_identity','aside_identity','config_bytes_sha256'}
 cutover['release_generation']=cutover['measured_generation']=2; state['started']='positive-start'
@@ -405,19 +417,27 @@ scenario=${JSON.stringify(scenario)}
 import errno
 aside=proof/'u9-ARCH-legacy.tar'; expected=tar.read_bytes(); snapshot=proof/'u9-ARCH-config.json'
 fsync=os.fsync
-if scenario=='symlink-aside':
- # Translate box paths before the real canonical/realpath checks (Mac /home is a symlink).
- canonical=c.canonical
- def local_canonical(p):
-  canonical(mapped(p)); return str(p)
- stack.enter_context(patch.object(c,'canonical',side_effect=local_canonical))
- stack.enter_context(patch.object(a,'canonical',side_effect=local_canonical))
- context,logical_paths=a.context,os.path.realpath
- def admitted_context(*args):
-  # Admission checks the box's logical proof name; execution checks real temp paths.
-  with patch.object(os.path,'realpath',side_effect=logical_paths): return context(*args)
- stack.enter_context(patch.object(a,'context',side_effect=admitted_context))
- stack.enter_context(patch.object(os.path,'realpath',side_effect=real_realpath))
+if scenario=='exdev':
+ import runpy
+ sys.argv=['archive','check',plan,str(inputs),logical_proof]; runpy.run_path(a.__file__,run_name='__main__')
+ actions=[['1'],['2'],['3'],['undo'],['check']]+[['execute',p] for p in ('before','positive','loss','negative','restore','recovered','done')]
+ for path in ('/var/lib/commonswarm-admin-release/w4-exclusion.json','/usr/local/lib/systemd/system/commonswarm-edge-recycle.service.d/00-w4-exclusion.conf'):
+  blocker=root/'exclusion'; mapping[path]=str(blocker)
+  for kind in ('regular','symlink','dangling'):
+   if kind=='regular': blocker.write_bytes(b'held')
+   else: blocker.symlink_to(tar if kind=='symlink' else root/'absent')
+   def tree(): return {str(p):(p.lstat(),p.read_bytes() if p.is_file() and not p.is_symlink() else None) for p in root.rglob('*')}
+   saved=tree()
+   with patch.object(subprocess,'check_output',side_effect=AssertionError('excluded service observation')):
+    for action in actions:
+     sys.argv=['archive']+action+[plan,str(inputs),logical_proof]+(['0'] if action[0]=='execute' else [])
+     with patch.object(sys,'stdin',io.StringIO(json.dumps(cutover))),contextlib.redirect_stdout(io.StringIO()) as out:
+      try: runpy.run_path(a.__file__,run_name='__main__')
+      except SystemExit as stop: assert stop.code and 'STOP U9 ARCH' in str(stop.code) and not out.getvalue()
+      else: raise AssertionError('W4X exclusion accepted: '+repr(action))
+   assert saved==tree() and state['timer']=='active'
+   real_unlink(blocker)
+  mapping.pop(path)
 if scenario=='exdev':
  def cross_device(p,*args):
   if str(p)==logical_proof+'/u9-ARCH-legacy.tar': raise OSError(errno.EXDEV,'injected copy failure')
@@ -427,43 +447,27 @@ elif scenario=='digest':
  def corrupt(p,owner=(0,0)):
   return b'corrupt copy' if str(p)==logical_proof+'/u9-ARCH-legacy.tar' else c.read(p,owner)
  with patch.object(a,'read',side_effect=corrupt): refuses(lambda:phase('before'))
-elif scenario.endswith('fsync'):
- target={'copy-fsync':aside,'copy-dir-fsync':proof,'snapshot-fsync':snapshot,'receipt-fsync':proof/'u9-ARCH-before.json'}[scenario]
- failed=[]
+elif scenario.endswith('fsync') or scenario.startswith('foreign-') or scenario=='symlink-aside':
+ receipt_path=proof/'u9-ARCH-before.json'; held=proof/'held-original'; failed=[]
+ targets={'copy-fsync':aside,'copy-dir-fsync':proof,'snapshot-fsync':snapshot,'receipt-fsync':receipt_path,'foreign-aside':aside,'foreign-snapshot':snapshot,'symlink-aside':aside}
+ target=targets[scenario]; replace=not scenario.endswith('fsync'); trigger=receipt_path if replace else target
  def fail_sync(fd):
-  if not failed and target.exists() and real_fstat(fd).st_ino==real_stat(target).st_ino:
-   failed.append(True); raise OSError(errno.EIO,'injected fsync failure')
+  if not failed and trigger.exists() and real_fstat(fd).st_ino==real_stat(trigger).st_ino:
+   failed.append(True)
+   if replace:
+    real_link(target,held); real_unlink(target)
+    if scenario=='symlink-aside': target.symlink_to(held)
+    else: target.write_bytes(b'foreign replacement'); target.chmod(0o600)
+   raise OSError(errno.EIO,'injected fsync failure')
   return fsync(fd)
  with patch.object(os,'fsync',side_effect=fail_sync): refuses(lambda:phase('before'))
- assert failed==[True]
-elif scenario=='symlink-aside':
- held=proof/'held-original'; failed=[]
- def symlink_then_fail(fd):
-  receipt_path=proof/'u9-ARCH-before.json'
-  if not failed and receipt_path.exists() and real_fstat(fd).st_ino==real_stat(receipt_path).st_ino:
-   failed.append(True); real_link(aside,held); real_unlink(aside); aside.symlink_to(held)
-   raise OSError(errno.EIO,'receipt failure after symlink replacement')
-  return fsync(fd)
- with patch.object(os,'fsync',side_effect=symlink_then_fail): refuses(lambda:phase('before'))
- assert failed==[True] and aside.is_symlink() and aside.readlink()==held, 'symlink injection not reached/retained'
- assert held.read_bytes()==expected and state['timer']=='active'
- assert not snapshot.exists(), 'symlinked aside stranded its config snapshot'
- assert not (proof/'u9-ARCH-before.json').exists()
- real_unlink(aside); real_unlink(held)
-elif scenario.startswith('foreign-'):
- target=aside if scenario=='foreign-aside' else snapshot
- held=proof/'held-original'; failed=[]
- def replace_then_fail(fd):
-  receipt_path=proof/'u9-ARCH-before.json'
-  if not failed and receipt_path.exists() and real_fstat(fd).st_ino==real_stat(receipt_path).st_ino:
-   failed.append(True); real_link(target,held); real_unlink(target)
-   target.write_bytes(b'foreign replacement'); target.chmod(0o600)
-   raise OSError(errno.EIO,'receipt failure after inode replacement')
-  return fsync(fd)
- with patch.object(os,'fsync',side_effect=replace_then_fail): refuses(lambda:phase('before'))
- assert failed==[True] and target.read_bytes()==b'foreign replacement'
- assert not (snapshot if target==aside else aside).exists()
- real_unlink(target); real_unlink(held)
+ assert failed==[True] and state['timer']=='active' and not receipt_path.exists()
+ if replace:
+  assert not (snapshot if target==aside else aside).exists()
+  assert held.read_bytes()==(expected if target==aside else raw_config)
+  if scenario=='symlink-aside': assert target.is_symlink() and target.readlink()==held
+  else: assert target.read_bytes()==b'foreign replacement'
+  real_unlink(target); real_unlink(held)
 if scenario not in ('unlink','shared'):
  assert tar.read_bytes()==expected and rescue_tar.read_bytes()==expected and state['timer']=='active'
  assert not aside.exists(), 'failed before stranded its aside'
