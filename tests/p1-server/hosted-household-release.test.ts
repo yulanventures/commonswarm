@@ -3,7 +3,7 @@
  * Input: local Supabase and the pinned edge-runtime image; switch
  * SWARM_MCP_TODOS_LISTS_ENABLED. Copied workers answer /h6-env with credential
  * names, never values. Output: catalog, seat reads, and the owner next step.
- * The storage key follows the H1 brief. Main keeps it to boot; the closed worker deletes it before the probe.
+ * The storage key follows the H1 brief.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -18,7 +18,7 @@ import { HOSTED_TODO_LIST_TOOLS } from "../../src/protocol/household-tool-regist
 import { MCP_ISSUER, MCP_JWKS_URL, MCP_RESOURCE } from "../../supabase/functions/mcp/auth.js";
 import { DOCKER_UNAVAILABLE, awaitHealth, dockerAvailable, functionsRoot, startComposeEdgeRuntime, type EdgeRuntimeHandle } from "../support/edge-runtime-function-boot.js";
 
-const KEY = "SUPABASE_SERVICE_ROLE_KEY", OAUTH = "MCP_OAUTH_SIGNING_KEYS_FILE", MARKER = "H6ListItemMarker"; let omitStorage = false;
+const KEY = "SUPABASE_SERVICE_ROLE_KEY", OAUTH = "MCP_OAUTH_SIGNING_KEYS_FILE", MARKER = "H6ListItemMarker";
 const coreNames = ["claim_seat", "whoami", "check", "ask", "note", "reply", "working_on", "members"];
 const hostedNames = [...coreNames, ...HOSTED_TODO_LIST_TOOLS.map((tool) => tool.name)];
 const b64 = (value: Uint8Array) => Buffer.from(value).toString("base64url");
@@ -51,7 +51,7 @@ async function signer(): Promise<{ jwks: string; issue: (sub: string, grantId: s
 
 /** Credential-name probe on copied workers. JWKS fetch is injected into the MCP verifier constructor. */
 function instrument(root: string, jwks: string): void {
-  const shim = `const __h6=(handler:(request:Request)=>Response|Promise<Response>)=>(request:Request)=>{if(request.headers.get("x-h6-omit-storage")==="1")Deno.env.delete(${JSON.stringify(KEY)});if(new URL(request.url).pathname.endsWith("/h6-env")){const names=[${JSON.stringify(KEY)},"SWARM_DATABASE_URL",${JSON.stringify(OAUTH)}] as const;return new Response(JSON.stringify({present:names.filter((name)=>Deno.env.get(name)!==undefined),flag:Deno.env.get("SWARM_MCP_TODOS_LISTS_ENABLED")??null}),{headers:{"content-type":"application/json"}});}return handler(request);};\n`;
+  const shim = `const __h6=(handler:(request:Request)=>Response|Promise<Response>)=>(request:Request)=>{if(new URL(request.url).pathname.endsWith("/h6-env")){const names=[${JSON.stringify(KEY)},"SWARM_DATABASE_URL",${JSON.stringify(OAUTH)}] as const;return new Response(JSON.stringify({present:names.filter((name)=>Deno.env.get(name)!==undefined),flag:Deno.env.get("SWARM_MCP_TODOS_LISTS_ENABLED")??null}),{headers:{"content-type":"application/json"}});}return handler(request);};\n`;
   const verifierNeedle = "clockSkewSeconds: boundedInteger(\"SWARM_MCP_CLOCK_SKEW_SECONDS\", 30, 0, 60),\n});";
   const verifierLive = `clockSkewSeconds: boundedInteger("SWARM_MCP_CLOCK_SKEW_SECONDS", 30, 0, 60),\n  fetch: async () => new Response(${JSON.stringify(jwks)}, { status: 200 }),\n});`;
   for (const name of ["mcp", "read", "command"]) {
@@ -91,17 +91,19 @@ function seed(owner: string, workspace: string, principal: string, other: string
 }
 
 async function probe(base: string, name: string, secret: string, storage: boolean, flag?: string | null): Promise<void> {
-  const response = await fetch(`${base}/functions/v1/${name}/h6-env`, { method: "POST", body: "{}", signal: AbortSignal.timeout(180_000), headers: omitStorage ? { "x-h6-omit-storage": "1" } : {} });
+  const response = await fetch(`${base}/functions/v1/${name}/h6-env`, { method: "POST", body: "{}", signal: AbortSignal.timeout(180_000) });
   const text = await response.text();
   assert.equal(text.indexOf(secret), -1); assert.equal(response.status, 200, `${name} probe status ${response.status}`);
   const body = JSON.parse(text) as { present: string[]; flag: string | null };
-  assert.equal(body.present.includes("SWARM_DATABASE_URL") && body.present.includes(KEY) === storage && !body.present.includes(OAUTH), true);
+  assert.equal(body.present.includes("SWARM_DATABASE_URL"), true, "database URL present");
+  assert.equal(body.present.includes(KEY), storage, "storage key presence == expected");
+  assert.equal(body.present.includes(OAUTH), false, "OAuth key absent");
   if (flag !== undefined) assert.equal(body.flag, flag);
 }
 
 type Rpc = { result?: { tools?: { name: string }[]; isError?: boolean; content?: { text: string }[] }; error?: { code: number } };
 async function rpc(base: string, token: string, secret: string, method: string, params: Record<string, unknown>) {
-  const response = await fetch(`${base}/functions/v1/mcp`, { method: "POST", signal: AbortSignal.timeout(180_000), headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "mcp-protocol-version": "2025-06-18", ...(omitStorage ? { "x-h6-omit-storage": "1" } : {}) }, body: JSON.stringify({ jsonrpc: "2.0", id: "h6", method, params }) });
+  const response = await fetch(`${base}/functions/v1/mcp`, { method: "POST", signal: AbortSignal.timeout(180_000), headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "mcp-protocol-version": "2025-06-18" }, body: JSON.stringify({ jsonrpc: "2.0", id: "h6", method, params }) });
   const text = await response.text();
   assert.equal(text.indexOf(secret), -1);
   return { status: response.status, json: JSON.parse(text) as Rpc };
@@ -157,9 +159,5 @@ test("edge router admits hosted to-do and list tools only with the storage brief
   assert.deepEqual([refusal.status, refusal.reason, refusal.next_action], ["refused", "workspace_access_refused", householdRefusalNextStep("workspace_access_refused")]);
   assert.equal(await title(approved), "H6 shared todo");
   assert.equal(((await call(on, live, "list_read", { seat: approved, object_id: "h6list" })).content as { items: { text: string }[] }).items[0]?.text, MARKER);
-  omitStorage = true; const closed = await boot(true), bare = await issue(owner, grantId);
-  await probe(closed, "mcp", secret, false, "1");
-  assert.equal(((await call(closed, bare, "todo_read", { seat: approved, todo_id: todoId })).todo as { title?: string }).title, "H6 shared todo");
-  const meta = await call(closed, bare, "list_list", { seat: approved, offset: 0, limit: 10 }); assert.deepEqual([meta.status, meta.kind, (meta.objects as { object_id: string }[]).some((row) => row.object_id === "h6list")], ["ok", "object_list", true]);
-  const denied = await rpc(closed, bare, secret, "tools/call", { name: "list_read", arguments: { seat: approved, object_id: "h6list" } }); assert.deepEqual([denied.status, denied.json.result?.isError, denied.json.result?.content?.[0]?.text], [200, true, JSON.stringify({ error: "tool_failed", message: "Something failed on our side; retry with the same request_id; if it repeats, contact support@commonswarm.com" })]);
+  // The storage-absent fail-closed path is proven at worker level by tests/household-lazy-storage.test.ts ("authorized dispatch leaves storage untouched until a blob read and retains revocation checks") because production main boot requires the key.
 });
