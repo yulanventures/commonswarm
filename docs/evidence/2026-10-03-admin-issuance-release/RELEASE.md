@@ -6043,7 +6043,7 @@ if action=='release':
     dropins=unit('show','--value','-p','DropInPaths',service); conditions=unit('show','--value','-p','ExecCondition',service)
     need(dropins.returncode==conditions.returncode==0 and str(exclusion) not in dropins.stdout
          and str(hold_script) not in conditions.stdout,'loaded exclusion','removed-before-record-unlink','present; record retained; rerun release')
-    # Keep alert enabled until the skip gate is unloaded AND the record is gone.
+    # Order: skip gate unloaded (above), then alert removed, then record unlinked; a leftover record cannot skip a recycle.
     for u,path in alert_paths.items():
         if path.exists(): need(entry(str(path))==dict(uid=0,gid=0,mode='0600',type='file',size=len(alert_bytes[u]),sha256=hashlib.sha256(alert_bytes[u]).hexdigest()),str(path),'exact-root-alert-unit','drift')
     if os.path.lexists(str(alert_link)): need(alert_link.is_symlink() and os.readlink(alert_link)==str(alert_paths[alert_timer]),'alert enable link','pinned-timer-path','other')
