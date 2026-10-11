@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { HOUSEHOLD_TOOL_REGISTRY, type Schema } from "./protocol/household-tool-registry.js";
+import { householdRefusalNextStep } from "./protocol/household-next-steps.js";
 import { HouseholdObjectClient } from "./cloud/household-objects.js";
 import { createHouseholdHttpTransport, LOCAL_HOUSEHOLD_SEAT } from "./cloud/household-http.js";
 import { randomUUID } from "node:crypto";
@@ -10204,8 +10205,9 @@ async function runHouseholdObject(args: Arguments): Promise<void> {
     authenticate: async () => ({ credential: context.selected.bearer, fetcher: context.selected.fetcher }) }), context.selected.selectedWorkspace);
   const result = await client.prepare(args.positionals[1]!, { seat: LOCAL_HOUSEHOLD_SEAT, ...input },
     { upload: { reservation_id: "server_pending", expires_at: 0 } }).send();
-  process.stdout.write(JSON.stringify(result) + "\n");
-  if (["refused", "unknown", "conflict"].includes(result.status)) process.exitCode = 1;
+  const next_action = result.status === 'refused' ? householdRefusalNextStep(result.reason) : undefined;
+  process.stdout.write(JSON.stringify(next_action ? { ...result, next_action } : result) + "\n");
+  if (["refused", "unknown", "conflict", "error"].includes(result.status)) process.exitCode = 1;
 }
 
 export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {

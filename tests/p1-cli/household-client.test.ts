@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { HouseholdObjectClient, type HouseholdTransport } from '../../src/cloud/household-objects.js';
+import { createHouseholdHttpTransport, LOCAL_HOUSEHOLD_SEAT } from '../../src/cloud/household-http.js';
+import { CLIENT_PROTOCOL_VERSION } from '../../src/cloud/config.js';
+import { CLI_BUILD_VERSION } from '../../src/cloud/client-build.js';
 import { createHouseholdMcpTools } from '../../src/mcp/household-tools.js';
 import { MCP_RESULT_MAX_BYTES } from '../../src/mcp/tools.js';
 import { HOUSEHOLD_TOOLS, HouseholdToolInputError, type HouseholdToolInvocation } from '../../src/protocol/household-tool-registry.js';
@@ -21,10 +24,76 @@ const access: HouseholdAccessFacts = { workspace_id: workspace, archived_at: nul
   actor: { user_id: 'human-a', principal_id: null, run_id: null }, credential: { kind: 'human' },
   member: { user_id: 'human-a', workspace_id: workspace, revoked_at: null, content_role: 'editor', content_consent_id: 'consent-a' } };
 
+test('household reads use the command envelope and authenticated headers', async () => {
+  for (const [tool, args, response] of [
+    ['todo_list', { scope: 'open' }, { status: 'ok', todos: [], next_offset: null }],
+    ['object_read', { object_id: 'shopping', revision: ref() }, { status: 'ok', kind: 'object_read',
+      revision: readRevision(), live: true, content: { kind: 'doc', markdown: 'tea' } }],
+  ] as const) {
+    let received: Record<string, unknown> | undefined;
+    let requestUrl: string | undefined, requestOptions: RequestInit | undefined;
+    const client = new HouseholdObjectClient(createHouseholdHttpTransport({
+      target: { url: 'https://edge.invalid', anonKey: 'fake-anon', profileId: 'test' },
+      authenticate: async () => ({ credential: 'fake-agent', fetcher: async (url, init) => {
+        requestUrl = String(url); requestOptions = init;
+        received = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify(response));
+      } }),
+    }), workspace);
+    const request = client.prepare(tool, { seat: LOCAL_HOUSEHOLD_SEAT, ...args });
+    assert.equal((await request.send()).status, 'ok');
+    assert.equal(requestUrl, 'https://edge.invalid/functions/v1/command');
+    assert.equal(requestOptions?.method, 'POST');
+    assert.deepEqual(requestOptions?.headers, { authorization: 'Bearer fake-agent', apikey: 'fake-anon', 'content-type': 'application/json' });
+    assert.match(String(received?.command_id), /^[0-9a-f-]{36}$/);
+    assert.deepEqual(received, { command_id: received?.command_id, client_version: CLIENT_PROTOCOL_VERSION,
+      client_build: CLI_BUILD_VERSION, workspace_id: workspace, stream: { kind: 'workspace' },
+      command: { kind: 'household_tool', tool, arguments: { seat: LOCAL_HOUSEHOLD_SEAT, ...args } } });
+  }
+});
+
+test('HTTP server failures distinguish reads from ambiguous writes and retain identical retry input', async () => {
+  for (const [status, body, reason] of [
+    [500, JSON.stringify({ error: 'storage_unavailable' }), 'server_error'],
+    [500, '<html>private server details</html>', 'server_error'],
+    [403, JSON.stringify({ error: 'content_consent_required' }), 'content_consent_required'],
+    [0, '', 'transport_interrupted'],
+  ] as const) {
+    for (const write of [false, true]) {
+      const seen: unknown[] = [];
+      const client = new HouseholdObjectClient(createHouseholdHttpTransport({
+        target: { url: 'https://edge.invalid', anonKey: 'fake-anon', profileId: 'test' },
+        authenticate: async () => ({ credential: 'fake-agent', fetcher: async (_url, init) => {
+          seen.push(JSON.parse(String(init?.body)));
+          if (write && seen.length > 1) return new Response(JSON.stringify({ status: 'committed', object_id: 'shopping', revision: ref() }));
+          if (!status) throw new TypeError('private transport details');
+          return new Response(body, { status });
+        } }),
+      }), workspace);
+      const tools = createHouseholdMcpTools(client);
+      const request = client.prepare(write ? 'object_create' : 'todo_list', write ? create() : { seat, scope: 'open' });
+      const result = await request.send();
+      assert.deepEqual(result, { status: status === 403 ? 'refused' : status === 500 && !write ? 'error' : 'unknown',
+        ...(write ? { request_id: 'create_001' } : {}), reason });
+      if (!write) {
+        const rendered = await tools.retry(request);
+        assert.equal(rendered.isError, true);
+        assert.equal(JSON.parse(rendered.content[0]!.text).reason, reason);
+        if (status === 500) assert.equal(JSON.parse(rendered.content[0]!.text).next_action, 'Retry the read.');
+      } else {
+        assert.equal((seen[0] as { command_id: string }).command_id, 'create_001');
+        const rendered = await tools.retry(request);
+        assert.equal(JSON.parse(rendered.content[0]!.text).status, status === 403 ? 'refused' : 'committed');
+        assert.equal(seen.length, status === 403 ? 1 : 2);
+        if (seen.length === 2) assert.deepEqual(seen[1], seen[0]);
+      }
+    }
+  }
+});
+
 /** In-process protocol boundary, not a database or hosted-permission proof.
  * Receipts/revisions/conflicts come from the real reducer rather than canned
- * success responses. The host supplies verified proposals as lane 2 requires.
- */
+ * success responses. */
 function coreHost() {
   let state = emptyHouseholdObjectState(workspace, 'household-stream');
   const contents: HouseholdVerifiedContent[] = [];
