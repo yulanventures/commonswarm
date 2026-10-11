@@ -13,6 +13,7 @@ const style = dashboard.match(/<style\b[^>]*>([\s\S]*?)<\/style>/)?.[1];
 assert.ok(style, "LiveDashboard must expose its component stylesheet to the geometry fixture");
 
 type Geometry = { width: number; listWidth: number; detailWidth: number; rowOverflow: boolean; touchTargets: boolean;
+  rowFamilyText: string; rowFamilyName: string; detailFamilyText: string; unknownFamilyTags: number;
   hostileElements: number; hostileText: boolean; accessMark: string | null; localAccessMark: string | null; hostedRowLabel: string | null; hostedDetailText: string; modelValues: (string | null)[];
   confirmRole: string | null; safeConfirmFocus: boolean; detailTouchTargets: boolean; closeIconSize: number; backIconSize: number; cancelRestoresOpener: boolean; outerStillOpen: boolean; technicalClosed: boolean };
 
@@ -24,11 +25,12 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
     entryPoints: ["src/lib/people-dialog-view.ts"], format: "iife", globalName: "PeopleView", platform: "browser", write: false });
   const script = bundle.outputFiles[0]?.text; assert.ok(script);
   const tokens = await readFile(new URL("../../styles/tokens.css", import.meta.url), "utf8");
+  const primitivesCss = await readFile(new URL("../../styles/home/primitives.css", import.meta.url), "utf8");
   try {
     await writeFile(fixture, `<!doctype html><html><head><style>
       * { box-sizing: border-box; } body { margin: 0; font-family: sans-serif; }
       .dashboard [hidden] { display: none !important; }
-      ${tokens} ${style}
+      ${tokens} ${primitivesCss} ${style}
     </style></head><body><main class="dashboard"><dialog class="dashboard__roster-dialog" data-roster-dialog aria-labelledby="dashboard-roster-title">
       <header class="dashboard__roster-dialog-head"><h2 id="dashboard-roster-title">People &amp; agents</h2><button class="dashboard__icon-button" data-roster-close aria-label="Close People &amp; agents">×</button></header>
       <div class="dashboard__roster-dialog-body"><div class="dashboard__roster-dialog-list" id="roster"></div><section class="pd-detail" id="detail" hidden></section></div>
@@ -36,7 +38,7 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
       <script>${script}</script><script>
       (async () => {
         const hostile = '<img src=x onerror="document.title=1">';
-        const agent = { id: 'agent', name: 'Alexandria Montgomery-Sutherland '+hostile, ownerId: 'person', ownerName: 'Mei Langridge', model: hostile,
+        const agent = { id: 'agent', name: 'Alexandria Montgomery-Sutherland '+hostile, ownerId: 'person', ownerName: 'Mei Langridge', model: 'Claude Opus 5.5 ' + hostile,
           app: 'Claude', hosted: true, own: true, mayManage: true, liveKey: true, key: 'Uses a key to connect.',
           status: { kind: 'paused', label: 'Paused: unused for 14 days', sentence: 'Resume it so it can connect again.', attention: true, fix: { action: 'resume', allowed: true } },
           receive: 'Checks messages when you chat with it.', lastActive: '15 days ago', technical: ['Agent ID: agent'], updateAvailable: false, access: { until: null }, accessReadState: 'succeeded', receipt: '' };
@@ -55,6 +57,9 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         const touchTargets = visibleButtons(outer).length > 0 && visibleButtons(outer).every(button => button.getBoundingClientRect().height >= 44);
         const closeIconSize = parseFloat(getComputedStyle(outer.querySelector('[data-roster-close]')).fontSize);
         const listWidth = outer.getBoundingClientRect().width;
+        const rowFamilyText = roster.querySelector('[data-agent-row="agent"] .hm-model-family').textContent;
+        const rowFamilyName = roster.querySelector('[data-agent-row="agent"] .hm-model-family').getAttribute('aria-label');
+        const unknownFamilyTags = roster.querySelectorAll('[data-agent-row="local"] .hm-model-family').length;
         roster.querySelector('#pd-agent-agent').click();
         const detailWidth = outer.getBoundingClientRect().width;
         const detailTouchTargets = visibleButtons(detail).length > 0 && visibleButtons(detail).every(button => button.getBoundingClientRect().height >= 44);
@@ -64,6 +69,7 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         const localAccessMark = roster.querySelector('[data-agent-row="local"] [data-agent-content-access]')?.getAttribute('aria-label') ?? null;
         const hostedRowLabel = roster.querySelector('#pd-agent-agent')?.getAttribute('aria-label') ?? null;
         const hostedDetailText = detail.textContent ?? '';
+        const detailFamilyText = detail.querySelector('.hm-model-family').textContent;
         detail.querySelector('[data-edit-model]').click();
         const form = detail.querySelector('[data-model-editor]'), input = form.querySelector('input');
         input.value = '   '; form.requestSubmit(); await Promise.resolve(); await Promise.resolve();
@@ -71,6 +77,7 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         const confirmRole = confirm.getAttribute('role'); const safeConfirmFocus = document.activeElement.textContent === 'Go back';
         confirm.dispatchEvent(new Event('cancel', { cancelable: true, bubbles: true }));
         const metrics = { width: innerWidth, listWidth, detailWidth, rowOverflow, touchTargets, detailTouchTargets, closeIconSize, backIconSize, hostileElements: document.querySelectorAll('img').length,
+          rowFamilyText, rowFamilyName, detailFamilyText, unknownFamilyTags,
           hostileText: detail.querySelector('h2').textContent.includes(hostile), accessMark, localAccessMark, hostedRowLabel, hostedDetailText, modelValues, confirmRole, safeConfirmFocus,
           cancelRestoresOpener: document.activeElement === opener, outerStillOpen: outer.open, technicalClosed: !detail.querySelector('details').open };
         document.documentElement.dataset.metrics = btoa(unescape(encodeURIComponent(JSON.stringify(metrics))));
@@ -89,6 +96,8 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
       assert.ok(Math.abs(geometry.listWidth - (width === 390 ? 390 : 640)) <= 2);
       assert.ok(Math.abs(geometry.detailWidth - (width === 390 ? 390 : 960)) <= 2);
       assert.equal(geometry.hostileElements, 0); assert.equal(geometry.hostileText, true);
+      assert.equal(geometry.rowFamilyText, "Claude · reported"); assert.equal(geometry.rowFamilyName, "Claude, reported");
+      assert.equal(geometry.detailFamilyText, "Claude · reported"); assert.equal(geometry.unknownFamilyTags, 0);
       assert.equal(geometry.accessMark, null, `${width}px a hosted agent's row draws no Lists & docs access mark`);
       assert.equal(geometry.localAccessMark, "Can use Lists & docs", `${width}px a local agent's row keeps the access mark`);
       assert.ok(geometry.hostedRowLabel?.endsWith(HOSTED_LISTS_NOTE), `${width}px the hosted row's accessible name carries the hosted note`);

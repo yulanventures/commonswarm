@@ -3,6 +3,8 @@ import { HOSTED_LISTS_NOTE } from "./hosted-lists-note";
 import { buildAgentModelEditor } from "./agent-model-editor";
 import type { PeopleAgentStatus } from "./agent-status";
 import { personTint } from "./home-names";
+import { modelFamily } from "./model-glyph";
+import { modelFamilyTag, reportedFamilyName } from "./home-primitives";
 
 export interface PeopleDialogPerson { id: string; name: string; role: "owner" | "admin" | "member"; own: boolean; mayRemove: boolean }
 export interface PeopleDialogAgent {
@@ -435,6 +437,8 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   if (state.query.trim()) { const shown = groups.reduce((count, group) => count + group.agents.length, other.length);
     const result = node(doc, "p", "pd-muted", `${shown} of ${model.agents.length} agents shown · “${state.query.trim()}”`); result.setAttribute("role", "status"); host.append(result); }
   const grid = node(doc, "div", "pd-member-grid"); grid.dataset.memberList = "";
+  /** Agent inputs become dialog entries: neutral shapes only, reported never verified;
+   *  null family shows no tag and the orb is unchanged. */
   const agentRow = (agent: PeopleDialogAgent) => {
     if (page) return pageAgentRow(agent);
     const approved = peopleDialogAccessUntil(agent) !== null && !!agent.access;
@@ -443,11 +447,14 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     disclosure.dataset.pdFocus = `agent-${agent.id}`;
     disclosure.setAttribute("aria-expanded", String(state.selected?.type === "agent" && state.selected.id === agent.id)); disclosure.setAttribute("aria-controls", detail.id);
     const secondary = agent.model ?? (agent.hosted ? "In a chat app" : "On a computer");
-    disclosure.setAttribute("aria-label", `${agent.name}, ${agent.ownerName ? `${agent.ownerName}’s agent` : "Other agent"}, ${agent.app ? `${agent.app}, ` : ""}${secondary}, ${agent.status.label}${approved ? peopleDialogAccessLabel(agent) : ""}`);
+    const family = modelFamily(agent.model);
+    disclosure.setAttribute("aria-label", `${agent.name}, ${agent.ownerName ? `${agent.ownerName}’s agent` : "Other agent"}, ${agent.app ? `${agent.app}, ` : ""}${secondary}, ${family ? `${reportedFamilyName(family)}, ` : ""}${agent.status.label}${approved ? peopleDialogAccessLabel(agent) : ""}`);
     const copy = node(doc, "span", "pd-agent-copy"); const nameLine = node(doc, "span", "pd-agent-name-line");
     const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.name; nameLine.append(name);
     if (approved && !agent.hosted) { const mark = node(doc, "span", "pd-access-mark", "▤"); mark.dataset.agentContentAccess = ""; mark.setAttribute("role", "img"); mark.setAttribute("aria-label", "Can use Lists & docs"); mark.title = "Can use Lists & docs"; nameLine.append(mark); }
-    copy.append(nameLine, node(doc, "span", "pd-agent-app pd-ellipsis", secondary), chip(doc, agent.status));
+    const modelLine = node(doc, "span", family ? "pd-agent-app" : "pd-agent-app pd-ellipsis", secondary);
+    const tag = modelFamilyTag(doc, family); if (tag) modelLine.append(" ", tag);
+    copy.append(nameLine, modelLine, chip(doc, agent.status));
     disclosure.append(orb(doc, agent, tintOf(agent)), copy, node(doc, "span", "pd-row-arrow", "›")); row.append(disclosure);
     const notice = noticeFor(agent);
     if (agent.status.attention && !model.sample) { const help = node(doc, "div", "pd-row-help"); help.append(node(doc, "p", "", agent.status.sentence)); const next = fix(agent, notice); if (next) help.append(next); row.append(help); }
@@ -457,6 +464,8 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   // Page row (canvas Members): the name block stays the disclosure (same id, name and controls); the status pill sits on
   // the name line, a problem's sentence replaces the secondary line, and the actions sit on the row: the one fix
   // (Resume / Get a new key) as the Reconnect pill, Manage (the agent page) and Remove (the same confirmation).
+  /** Agent inputs become page entries: neutral shapes only, reported never verified;
+   *  null family shows no tag and a fault never hides a known model's tag. */
   const pageAgentRow = (agent: PeopleDialogAgent) => {
     const approved = peopleDialogAccessUntil(agent) !== null && !!agent.access;
     const row = node(doc, "li", "pd-agent"); row.dataset.agentRow = agent.id; row.dataset.attention = String(agent.status.attention);
@@ -464,7 +473,8 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     disclosure.dataset.pdFocus = `agent-${agent.id}`;
     disclosure.setAttribute("aria-expanded", String(state.selected?.type === "agent" && state.selected.id === agent.id)); disclosure.setAttribute("aria-controls", detail.id);
     const secondary = agent.model ?? (agent.hosted ? "In a chat app" : "On a computer");
-    disclosure.setAttribute("aria-label", `${agent.name}, ${agent.ownerName ? `${agent.ownerName}’s agent` : "Other agent"}, ${agent.app ? `${agent.app}, ` : ""}${secondary}, ${agent.status.label}${approved ? peopleDialogAccessLabel(agent) : ""}`);
+    const family = modelFamily(agent.model);
+    disclosure.setAttribute("aria-label", `${agent.name}, ${agent.ownerName ? `${agent.ownerName}’s agent` : "Other agent"}, ${agent.app ? `${agent.app}, ` : ""}${secondary}, ${family ? `${reportedFamilyName(family)}, ` : ""}${agent.status.label}${approved ? peopleDialogAccessLabel(agent) : ""}`);
     const copy = node(doc, "span", "pd-agent-copy"); const nameLine = node(doc, "span", "pd-agent-name-line");
     const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.name; nameLine.append(name);
     nameLine.append(chip(doc, agent.status));
@@ -473,6 +483,11 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     // The canvas row draws no Lists & docs glyph: the disclosure's accessible name above carries "Can use Lists & docs" (the hosted note for a hosted agent),
     // and the agent's details (the side card) show the Lists & docs fact.
     copy.append(nameLine, details);
+    const tag = modelFamilyTag(doc, family);
+    if (tag) {
+      const modelLine = sentence ? node(doc, "span", "pd-agent-app", secondary) : details;
+      modelLine.append(" ", tag); if (sentence) copy.append(modelLine);
+    }
     disclosure.append(orb(doc, agent, tintOf(agent)), copy); row.append(disclosure);
     const notice = noticeFor(agent);
     const actions = node(doc, "span", "pd-agent-actions");
@@ -602,8 +617,9 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       if (!agent.mayManage && !model.sample) detail.append(node(doc, "p", "pd-permission-note", `${agent.ownerName?.split(/\s+/)[0] ?? "The space owner or an admin"} manages this agent.`));
       if (agent.status.attention && !model.sample) { const guidance = node(doc, "section", "pd-guidance"); guidance.append(node(doc, "h3", "", "What to do"), node(doc, "p", "", agent.status.sentence)); const next = fix(agent, notice); if (next) guidance.append(next); detail.append(guidance); }
       const facts = node(doc, "dl", "pd-fact-sheet");
+      // Fact inputs become rows; model decoration uses neutral shapes and reported (never verified), null adds nothing.
       const fact = (label: string, value: string, action?: HTMLElement) => { const row = node(doc, "div", "pd-fact-row"); row.append(node(doc, "dt", "", label), node(doc, "dd", "", value));
-        if (action) { const holder = node(doc, "dd", "pd-fact-action"); holder.append(action); row.append(holder); } facts.append(row); };
+        if (action) { const holder = node(doc, "dd", "pd-fact-action"); holder.append(action); row.append(holder); } facts.append(row); return row; };
       if (agent.app) fact("App", agent.app);
       const edit = agent.mayManage && !model.sample ? button(doc, "Change", () => {
         if (detail.querySelector("[data-model-editor]")) return;
@@ -624,7 +640,9 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
         facts.after(editor); input?.focus();
       }) : undefined;
       if (edit) { edit.dataset.editModel = agent.id; edit.dataset.pdFocus = `edit-${agent.id}`; }
-      fact("Model", agent.model ?? "Not set", edit); fact("Messages", agent.receive ?? "Message checks have not been reported."); fact("Last active", agent.lastActive);
+      const modelFact = fact("Model", agent.model ?? "Not set", edit);
+      const familyTag = modelFamilyTag(doc, modelFamily(agent.model)); if (familyTag) modelFact.querySelector("dd")!.append(" ", familyTag);
+      fact("Messages", agent.receive ?? "Message checks have not been reported."); fact("Last active", agent.lastActive);
       const accessFact = peopleDialogAccessUntil(agent);
       if (accessFact !== null) {
         const accessAction = peopleDialogCanAct(model, "withdraw", agent.id) ? actionButton("withdraw", agent, "Withdraw", notice, "data-withdraw-agent-access") : !agent.hosted && peopleDialogCanAct(model, "allow", agent.id) ? actionButton("allow", agent, "Allow…", notice) : undefined;

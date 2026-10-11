@@ -17,6 +17,21 @@
   min-inline-size: 44px;
 }
 
+/* Reported family tags take neutral SVG + text inputs: muted inline output, no vendor marks;
+   never verified. Null family emits no element. */
+.hm-model-family {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-inline-size: 100%;
+  color: var(--home-ink-muted);
+  font: 400 11px/1.4 var(--home-font-body);
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.hm-model-family svg { flex: none; inline-size: 10px; block-size: 10px; }
+.pd-agent-app:has(.hm-model-family) { overflow-wrap: anywhere; }
+
 /* The 1.5px stroke (outline pills, agent avatars). Chromium snaps a fractional border-width down to a whole CSS px:
    `border: 1.5px` computes and paints as 1px at DPR 1 and DPR 2. So a 1.5px edge is an inset shadow with no border:
        border: 0; box-shadow: inset 0 0 0 1.5px <colour token>;

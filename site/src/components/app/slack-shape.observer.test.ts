@@ -26,6 +26,7 @@ const siteRoot = join(componentDir, "..", "..", "..");
 const dashboard = readFileSync(join(componentDir, "LiveDashboard.astro"), "utf8");
 const homeRail = readFileSync(join(siteRoot, "src/lib/home-rail.ts"), "utf8");
 const homeRailCss = readFileSync(join(siteRoot, "src/styles/home/rail.css"), "utf8");
+const homePrimitivesCss = readFileSync(join(siteRoot, "src/styles/home/primitives.css"), "utf8");
 const homeShellCss = readFileSync(join(siteRoot, "src/styles/home/shell.css"), "utf8");
 const tokensCss = readFileSync(join(siteRoot, "src/styles/tokens.css"), "utf8");
 const dashboardStyle = dashboard.match(/<style\b[^>]*>([\s\S]*?)<\/style>/)?.[1];
@@ -51,7 +52,7 @@ const renderRailGeometry = async (): Promise<RailGeometry> => {
   const rows = (count: number) => Array.from({ length: count }, (_, index) => ({
     principal_id: `agent-${index + 1}`,
     name: `Agent ${String(index + 1).padStart(2, "0")}`,
-    model: `Model ${index + 1}`,
+    model: `Claude Opus ${index + 1}`,
     owner_user_id: "dana",
   }));
   const [threeRows, fiftyRows] = await Promise.all([
@@ -91,7 +92,7 @@ const renderRailGeometry = async (): Promise<RailGeometry> => {
       }
       * { box-sizing: border-box; }
       body { margin: 0; font-family: Arial, sans-serif; }
-      ${tokensCss} ${homeShellCss} ${homeRailCss}
+      ${tokensCss} ${homeShellCss} ${homePrimitivesCss} ${homeRailCss}
       .fixture { display: flex; align-items: flex-start; gap: 2rem; }
       .fixture .hm-shell__rail { inline-size: 15.5rem; }
     </style>
@@ -350,10 +351,18 @@ test("sidebar counts come from loaded signals and the shared field ships both sc
 test("participant navigation has no person presence dot and gives agents measured status and owner labels", async () => {
   const rail = await renderParticipantRailFixture(
     [{ userId: "dana", name: "Dana Rivera", role: "owner" }],
-    [{ principal_id: "atlas", name: "Atlas", transport: "local", owner_user_id: "dana" },
+    [{ principal_id: "atlas", name: "Atlas", model: "Claude Opus 5.5", transport: "local", owner_user_id: "dana" },
       { principal_id: "orphan", name: "Orphan", transport: "hosted_mcp", owner_user_id: "former" }], "dana");
   assert.doesNotMatch(rail.innerHtml, /presence-dot/);
   assert.equal((rail.innerHtml.match(/class="hm-agent-orb"/g) ?? []).length, 2);
+  assert.match(rail.innerHtml, /Claude Opus 5\.5/);
+  assert.match(rail.innerHtml, /Claude · reported/);
+  assert.match(rail.innerHtml, /aria-label="Claude, reported"/);
+  assert.doesNotMatch(rail.innerHtml, /class="[^"]*(?:vendor-mark|dashboard__sidebar-model-mark|dashboard__sidebar-model-glyph)/);
+  assert.equal((rail.innerHtml.match(/class="hm-model-family"/g) ?? []).length, 1);
+  const unknownRow = rail.innerHtml.match(/<button\b[^>]*data-rail-agent="orphan"[\s\S]*?<\/button>/u)?.[0];
+  assert.ok(unknownRow, "the hosted seat without a model reaches the real row renderer");
+  assert.doesNotMatch(unknownRow, /hm-model-family|· reported/);
   assert.equal((rail.innerHtml.match(/class="hm-status-word">Idle</g) ?? []).length, 2);
   assert.match(rail.innerHtml, /No activity reported yet/);
   assert.match(rail.innerHtml, /Orphan \(owner left\)/);

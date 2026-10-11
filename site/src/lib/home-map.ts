@@ -2,6 +2,7 @@
 import { homeAgentState, type HomeAgentStatusInput } from "./agent-status";
 import { agentLabel, firstNames, initials, formatWhen, personTint } from "./home-names";
 import { foldIdentityName } from "./identity-label";
+import { modelFamily } from "./model-glyph";
 import { disambiguateVisibleLabels } from "./home-visible-labels";
 import { groupParticipantsByOwner, type RailAgent, type RailMember } from "./participant-rail";
 import { parseRoute, routeHref, type HomeRoute } from "./home-route";
@@ -48,6 +49,8 @@ function applyNestedLabels(agents: readonly AgentVM[]): void {
   for (const group of scopes.values()) applyVisibleLabel(group, "nestedLabel");
 }
 
+/** Roster inputs become people/agent UI models. Model family is reported, never verified;
+ *  no vendor marks are emitted and an unknown model maps to null (no tag). */
 export function mapHomePeople(input: HomePeopleInput): HomePeople {
   const names = firstNames(input.members.map(member => ({ id: member.userId, name: member.name })));
   const me = input.members.find(member => member.userId === input.viewerId);
@@ -78,6 +81,7 @@ export function mapHomePeople(input: HomePeopleInput): HomePeople {
         : work?.facts.working_on ? { createdAt: work.facts.working_on.at, until: work.facts.working_on.until } : null };
     const labelInput = { name: raw, ownerId: owner ? row.ownerUserId : null, ownerName: owner?.name, ownerFirstName: names.get(row.ownerUserId), yours };
     return { id: row.principalId, name: raw, label: agentLabel(labelInput), nestedLabel: agentLabel(labelInput, { nested: true }),
+      model: row.model ?? null, family: modelFamily(row.model),
       ownerId: owner ? row.ownerUserId : null, ownerFirstName: names.get(row.ownerUserId) ?? null,
       ownerInitial: owner ? Array.from(initials(owner.name))[0] ?? "" : "", yours, tint: personTint(owner ? row.ownerUserId : null, yours) ?? 0,
       hosted: facts.transport === "hosted_mcp", state: homeAgentState(facts, input.now) };

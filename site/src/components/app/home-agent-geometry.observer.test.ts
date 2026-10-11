@@ -18,6 +18,9 @@ type Geometry = {
   hostileInQueue: boolean;
   hostileInGate: boolean;
   hostileInModel: boolean;
+  modelFamilyText: string;
+  modelFamilyName: string;
+  unknownFamilyTags: number;
   hostileInActivity: boolean;
   readonlySteerButtons: number;
   sampleSteerButtons: number;
@@ -63,6 +66,7 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
         });
         const agent = (overrides) => ({
           id: 'agent', name: 'Claude ' + hostile, label: 'Your Claude ' + hostile, nestedLabel: 'Claude',
+          model: 'Claude ' + hostile, family: 'claude',
           ownerId: 'tom', ownerFirstName: 'Tom', ownerInitial: 'T', yours: true, tint: 0, hosted: true,
           state: state('working', 'Working', "Doing ‘Book plumber’ since 9:40 am", false,
             { action: null, allowed: false, askWho: null, sentence: '' }),
@@ -94,6 +98,7 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
           found: true, sample: false, homeHref: '?v=catchup',
           agent: agent({
             id: 'muse', name: 'Muse', label: 'Nikki’s Muse', nestedLabel: 'Muse', ownerId: 'nikki',
+            model: 'Muse Spark', family: null,
             ownerFirstName: 'Nikki', ownerInitial: 'N', yours: false, tint: 1,
             state: state('idle', 'Idle', 'Active 2 hours ago', true, { action: 'resume', allowed: true, askWho: 'Nikki', sentence: 'Ask Nikki to resume it.' }),
           }),
@@ -148,9 +153,12 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
           return value && value.textContent.includes(hostile);
         });
         const hostileInActivity = page.querySelector('[data-agent-activity]').textContent.includes(hostile);
+        const modelFamilyText = page.querySelector('.hm-model-family').textContent;
+        const modelFamilyName = page.querySelector('.hm-model-family').getAttribute('aria-label');
         root.replaceChildren();
         const other = HomeAgent.agentPage(document, nikki, { onManage() {}, onQueueAction() {}, onFix() {}, onListsToggle() {} });
         root.append(other);
+        const unknownFamilyTags = other.querySelectorAll('.hm-model-family').length;
         const readonlySteerButtons = other.querySelectorAll('[data-hm-up-next] button, [data-hm-not-yet] button').length;
         const foreignFixButtons = other.querySelectorAll('[data-hm-fix-action]').length;
         const fixSentenceCount = other.textContent.split('Ask Nikki to resume it.').length - 1;
@@ -182,6 +190,7 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
           hostileInQueue,
           hostileInGate,
           hostileInModel,
+          modelFamilyText, modelFamilyName, unknownFamilyTags,
           hostileInActivity,
           readonlySteerButtons,
           sampleSteerButtons,
@@ -214,6 +223,9 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
       assert.equal(geometry.hostileInQueue, true);
       assert.equal(geometry.hostileInGate, true);
       assert.equal(geometry.hostileInModel, true);
+      assert.equal(geometry.modelFamilyText, "Claude · reported");
+      assert.equal(geometry.modelFamilyName, "Claude, reported");
+      assert.equal(geometry.unknownFamilyTags, 0);
       assert.equal(geometry.hostileInActivity, true);
       assert.equal(geometry.readonlySteerButtons, 0);
       assert.equal(geometry.sampleSteerButtons, 0);

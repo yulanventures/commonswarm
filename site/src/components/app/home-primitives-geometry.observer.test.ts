@@ -13,9 +13,12 @@ const P = HomeView, root = document.querySelector('#fixture');
 const hostile = '<img src=x onerror="document.title=1"><script>document.title=2</script>';
 const person = { id:'tom', name:'Tom '+hostile, firstName:'Tom', initials:'TL', you:true, role:'owner' };
 const state = { kind:'idle', word:'Idle', detail:'No activity reported yet', attention:false, fix:{action:null,allowed:false,askWho:null,sentence:''} };
-const agent = { id:'claude', name:'Claude', label:'Your Claude', nestedLabel:'Claude', ownerId:'tom', ownerFirstName:'Tom', ownerInitial:'T', yours:true, tint:0, hosted:true, state };
+const agent = { id:'claude', name:'Claude', label:'Your Claude', nestedLabel:'Claude', model:'Claude Opus 5.5', family:'claude', ownerId:'tom', ownerFirstName:'Tom', ownerInitial:'T', yours:true, tint:0, hosted:true, state };
 let choices = [], switches = [], actions = [];
 root.append(P.personAvatar(document, person, 48), P.agentOrb(document, agent, {size:60,badge:true}));
+const familyTags = ['claude','openai','gemini','grok'].map(family => P.modelFamilyTag(document, family));
+root.append(...familyTags);
+const nullFamilyTag = P.modelFamilyTag(document, null);
 root.append(P.capsule(document, {person, agents:[agent,agent,agent,agent]}, {compact:true,onOpen:()=>actions.push('capsule')}));
 const states = [{...state,kind:'working',word:'Working',detail:'Doing ‘Budget’ since 9:40 am'}, state,
  {...state,kind:'disconnected',word:'Disconnected',detail:'Key turned off',attention:true,fix:{action:'new-key',allowed:true,askWho:null,sentence:'Get a new key.'}}];
@@ -56,7 +59,10 @@ const metrics = { width:innerWidth, overflow:document.documentElement.scrollWidt
  sampleActions:sample.querySelectorAll('button,a,input').length,alwaysRole:root.querySelector('[data-switch-id="always"]').getAttribute('role'),
  busyDisabled:root.querySelector('[data-switch-id="busy"]').disabled,doneWord:root.querySelector('[data-done="true"]').textContent.includes('Done'),
  doneStrike:getComputedStyle(root.querySelector('[data-done="true"] .hm-object-title')).textDecorationLine,
- capsulePlus:root.querySelector('.hm-capsule-more').textContent,ownerBadgeHidden:root.querySelector('.hm-owner-badge').getAttribute('aria-hidden') };
+ capsulePlus:root.querySelector('.hm-capsule-more').textContent,ownerBadgeHidden:root.querySelector('.hm-owner-badge').getAttribute('aria-hidden'),
+ nullFamilyTag: nullFamilyTag === null,
+ familyTags:familyTags.map(tag=>({text:tag.textContent,label:tag.getAttribute('aria-label'),hidden:tag.querySelector('svg').getAttribute('aria-hidden'),
+ width:tag.querySelector('svg').getBoundingClientRect().width,stroke:tag.querySelector('svg').getAttribute('stroke'),vendorPaths:tag.querySelectorAll('path').length})) };
 document.documentElement.dataset.metrics=btoa(unescape(encodeURIComponent(JSON.stringify(metrics))));
 `;
 
@@ -88,6 +94,12 @@ test("home primitives have 44px targets, plain hostile text and explicit states 
         assert.equal(m.readOnlyButtons, 0); assert.equal(m.sampleActions, 0);
         assert.equal(m.doneWord, true); assert.match(m.doneStrike, /line-through/u);
         assert.equal(m.capsulePlus, "+1"); assert.equal(m.ownerBadgeHidden, "true");
+        assert.equal(m.nullFamilyTag, true);
+        assert.deepEqual(m.familyTags.map((tag: {text:string;label:string}) => [tag.text,tag.label]), [
+          ["Claude · reported", "Claude, reported"], ["OpenAI · reported", "OpenAI, reported"],
+          ["Gemini · reported", "Gemini, reported"], ["Grok · reported", "Grok, reported"],
+        ]);
+        for (const tag of m.familyTags) { assert.equal(tag.hidden, "true"); assert.equal(tag.width, 10); assert.equal(tag.stroke, "currentColor"); assert.equal(tag.vendorPaths, 0); }
       }
     }
   } finally {

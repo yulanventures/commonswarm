@@ -1,5 +1,6 @@
 import {
   agentOrb,
+  modelFamilyTag,
   lockIcon,
   notice,
   queueRow,
@@ -199,6 +200,8 @@ function todoLinkRow(doc: Document, href: string, title: string, meta: string, e
   return item;
 }
 
+/** Agent page inputs become DOM facts and actions. Family is reported, never verified;
+ *  neutral shapes only, null family shows no tag, orb unchanged. */
 export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCallbacks = {}): HTMLElement {
   if (!vm.found) return notFoundPage(doc, vm);
 
@@ -396,7 +399,10 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
   // Plain ruled rows (the canvas's seat rows): the current values only. Changing Lists & docs happens in
   // People & agents, which the header's Manage action opens.
   const list = el(doc, "dl", "hm-agent__fact-list");
-  if (vm.facts.model) appendFact(doc, list, AGENT_COPY.model, vm.facts.model, "model");
+  if (vm.facts.model) {
+    const fact = appendFact(doc, list, AGENT_COPY.model, vm.facts.model, "model");
+    const tag = modelFamilyTag(doc, agent.family); if (tag) fact.querySelector("dd")!.append(" ", tag);
+  }
   if (canAct && agent.yours && vm.facts.listsAndDocs) {
     const row = vm.facts.listsAndDocs;
     const lists = appendFact(doc, list, row.label, switchWord(row.state), "lists", row.detail);

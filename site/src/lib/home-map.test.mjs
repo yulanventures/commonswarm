@@ -30,6 +30,14 @@ test("mapping groups the viewer first and preserves agent ownership and unknown 
   const work = { id: "claim", from: "A", fromKind: "agent", kind: "working-on", body: "Budget", until: "2026-10-06T12:00:00Z", createdAt: "2026-10-05T11:59:00Z" };
   assert.equal(mapHomePeople({ ...input, signals: [work] }).groups[0].agents[0].state.word, "Working");
 });
+test("mapping keeps model text and only reports a family from a known model label", () => {
+  for (const [model, family] of [["Claude Opus 5.5", "claude"], ["GPT-6.1", "openai"], ["mystery-model", null], [null, null], [undefined, null]]) {
+    const people = mapHomePeople({ ...input, agents: [{ ...input.agents[0], model }] });
+    const agent = people.groups[0].agents[0];
+    assert.equal(agent.model, model ?? null);
+    assert.equal(agent.family, family, "an agent called Claude does not imply a model family");
+  }
+});
 test("rail badges require measured counts for every workspace", () => {
   const vm = mapHomeRail(workspaces, { view: "catchup" }, null, false, new Map([["W", 2]]));
   assert.equal(vm.catchUp.needsYou, null);

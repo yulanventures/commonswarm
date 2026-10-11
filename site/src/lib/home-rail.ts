@@ -1,7 +1,7 @@
 // Home UI left rail (UI-SPEC.md 1.1 and 2.4, lane R). Pure DOM: (doc, vm, callbacks) => HTMLElement.
 // User and agent text goes in through textContent only. The rail has no management controls and
 // no presence dot on people; a person row opens People & agents, an agent row opens the Agent view.
-import { agentOrb, personAvatar, statusLine } from "./home-primitives";
+import { agentOrb, modelFamilyTag, reportedFamilyName, personAvatar, statusLine } from "./home-primitives";
 import type { AgentVM, CapsuleVM, Id, PersonVM, RailVM } from "./home-types";
 
 export const RAIL_WORKSPACE_CAP = 6;
@@ -139,9 +139,11 @@ export function railAgentOwnerPhrase(agent: AgentVM): string | null {
   return agent.yours ? "your agent" : agent.ownerFirstName ? `${agent.ownerFirstName}’s agent` : null;
 }
 
-/** "Muse, Nikki’s agent, Idle, Active 2 hours ago". The measured detail is always in the name. */
+/** Agent input becomes the row name with measured status and reported family (never verified).
+ *  No vendor marks; null family adds nothing. */
 export function railAgentName(agent: AgentVM): string {
-  return [agent.nestedLabel, railAgentOwnerPhrase(agent), agent.state.word, agent.state.detail].filter((part) => part).join(", ");
+  return [agent.nestedLabel, railAgentOwnerPhrase(agent), agent.state.word, agent.state.detail,
+    agent.model, reportedFamilyName(agent.family)].filter((part) => part).join(", ");
 }
 
 function node<K extends keyof HTMLElementTagNameMap>(doc: Document, tag: K, className = "", text?: string): HTMLElementTagNameMap[K] {
@@ -209,6 +211,8 @@ function personRow(doc: Document, person: PersonVM, sample: boolean, callbacks: 
   return row;
 }
 
+/** Agent input becomes a rail row: model beside reported family, never verified;
+ *  neutral shapes only, null family has no tag, orb unchanged. */
 function agentRow(doc: Document, agent: AgentVM, sample: boolean, callbacks: RailCallbacks, currentAgentId?: Id): HTMLLIElement {
   const item = node(doc, "li", "hm-rail__agent-item");
   const row = interactiveRow(doc, "hm-rail__agent", sample, () => callbacks.openAgent(agent.id));
@@ -224,6 +228,12 @@ function agentRow(doc: Document, agent: AgentVM, sample: boolean, callbacks: Rai
   const status = node(doc, "span", "hm-rail__status");
   status.append(statusLine(doc, agent.state, { form: "word" }));
   row.append(orb, name, status);
+  if (agent.model) {
+    const model = node(doc, "span", "hm-rail__model");
+    model.append(node(doc, "span", "hm-rail__model-text", agent.model));
+    const tag = modelFamilyTag(doc, agent.family); if (tag) model.append(tag);
+    row.append(model);
+  }
   item.append(row);
   return item;
 }
