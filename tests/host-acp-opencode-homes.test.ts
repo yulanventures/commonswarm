@@ -3,6 +3,7 @@
  * ★ Named in npm test.
  */
 import assert from "node:assert/strict";
+import { rmSync } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -66,8 +67,9 @@ test("assertForcedAskPermissionMap requires every forced tool (or wildcard ask)"
   );
 });
 
-test("sweep never removes a live-owner home even when mtime is >1h old", async () => {
+test("sweep never removes a live-owner home even when mtime is >1h old", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-oc-sweep-root-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, `${OPENCODE_HOME_PREFIX}live`);
   await mkdir(home, { mode: 0o700 });
   await chmod(home, 0o700);
@@ -89,8 +91,9 @@ test("sweep never removes a live-owner home even when mtime is >1h old", async (
   await stat(home); // still exists
 });
 
-test("sweep removes home when owner PID is dead (positive reclaim)", async () => {
+test("sweep removes home when owner PID is dead (positive reclaim)", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-oc-sweep-root-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, `${OPENCODE_HOME_PREFIX}dead`);
   await mkdir(home, { mode: 0o700 });
   await chmod(home, 0o700);

@@ -1,10 +1,10 @@
 /** Cross lane: real live-ordinary-controls receipts through extracted RELEASE.md blocks. */
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { after } from 'node:test';
 import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import {
-  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync,
+  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 const temporaryRoot = realpathSync(tmpdir());
@@ -375,6 +375,8 @@ else: refuse()
 `;
 
 const scratch = mkdtempSync(join(temporaryRoot, 'c1-cross-plan-'));
+// Per-test hooks remove children only. These two roots are this file's mkdtempSync.
+after(() => { for (const dir of [secretParent, scratch]) rmSync(dir, { recursive: true, force: true }); });
 const planScratch = join(scratch, 'receipts');
 mkdirSync(planScratch, { recursive: true, mode: 0o700 });
 

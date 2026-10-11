@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import { rmSync } from "node:fs";
 import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import type {
   SignalRecord,
   SenderOwnerRelation,
@@ -18,6 +19,15 @@ import {
   type ListenerModel,
   type ListenerReplyPoster,
 } from "../src/listener/index.js";
+
+/** Directories this file's mkdtemp created. Removed after the file. */
+const createdTemps: string[] = [];
+after(() => { for (const dir of createdTemps) rmSync(dir, { recursive: true, force: true }); });
+async function ownedTemp(prefix: string): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), prefix));
+  createdTemps.push(root);
+  return root;
+}
 
 const SIGNAL_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const REPLY_ID = "33333333-3333-4333-8333-333333333333";
@@ -148,7 +158,7 @@ function tagged(
 async function forbidStore(
   prefix: string,
 ): Promise<{ store: FileListenerEffectStore; path: string }> {
-  const root = await mkdtemp(join(tmpdir(), prefix));
+  const root = await ownedTemp(prefix);
   const store = new FileListenerEffectStore({
     profileId: "profile-test",
     workspaceId: "11111111-1111-4111-8111-111111111111",
@@ -218,7 +228,7 @@ test("v1 records upcast to v2 ask records with every durable field preserved", (
 });
 
 test("v1 read never rewrites the durable file", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-effect-v1-"));
+  const root = await ownedTemp("cswarm-effect-v1-");
   const store = new FileListenerEffectStore({
     profileId: "profile-test",
     workspaceId: "11111111-1111-4111-8111-111111111111",
@@ -264,7 +274,7 @@ test("v2 ask records round-trip through the parser and the file store", async ()
   const record = v2AskRow();
   assert.deepEqual(parse(record), record);
 
-  const root = await mkdtemp(join(tmpdir(), "cswarm-effect-ask-"));
+  const root = await ownedTemp("cswarm-effect-ask-");
   const store = new FileListenerEffectStore({
     profileId: "profile-test",
     workspaceId: "11111111-1111-4111-8111-111111111111",
@@ -293,7 +303,7 @@ test("v2 observed-note records round-trip with zero prompt/post effects", async 
   assert.equal(note.senderOwnerRelation, "cross_owner");
   assert.deepEqual(parse(note), note);
 
-  const root = await mkdtemp(join(tmpdir(), "cswarm-effect-note-"));
+  const root = await ownedTemp("cswarm-effect-note-");
   const store = new FileListenerEffectStore({
     profileId: "profile-test",
     workspaceId: "11111111-1111-4111-8111-111111111111",
@@ -323,7 +333,7 @@ test("listener effects preserve signal bodies beyond an older server maximum", a
   assert.equal(parse(ask).askBody, body);
   assert.equal(parse(note).askBody, body);
 
-  const root = await mkdtemp(join(tmpdir(), "cswarm-effect-forward-body-"));
+  const root = await ownedTemp("cswarm-effect-forward-body-");
   const store = new FileListenerEffectStore({
     profileId: "profile-test",
     workspaceId: "11111111-1111-4111-8111-111111111111",
@@ -370,7 +380,7 @@ test("notes cannot carry reply, post, or failure effects", () => {
 });
 
 test("notes with reply/post effects fail closed on write", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-effect-badwrite-"));
+  const root = await ownedTemp("cswarm-effect-badwrite-");
   const store = new FileListenerEffectStore({
     profileId: "profile-test",
     workspaceId: "11111111-1111-4111-8111-111111111111",
@@ -422,7 +432,7 @@ test("v1 and v2 readers ignore unknown future fields without returning them", as
     v2AskRow(),
   );
 
-  const root = await mkdtemp(join(tmpdir(), "cswarm-effect-forward-read-"));
+  const root = await ownedTemp("cswarm-effect-forward-read-");
   const store = new FileListenerEffectStore({
     profileId: "profile-test",
     workspaceId: "11111111-1111-4111-8111-111111111111",
@@ -438,7 +448,7 @@ test("v1 and v2 readers ignore unknown future fields without returning them", as
 });
 
 test("an on-disk file with a forbidden extra fails on read for v1 and v2", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-effect-forbid-read-"));
+  const root = await ownedTemp("cswarm-effect-forbid-read-");
   const store = new FileListenerEffectStore({
     profileId: "profile-test",
     workspaceId: "11111111-1111-4111-8111-111111111111",

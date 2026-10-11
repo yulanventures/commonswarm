@@ -4,6 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { rmSync } from "node:fs";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -854,8 +855,9 @@ test("parseListenerWake is closed and refuses topic keys", () => {
   );
 });
 
-test("a status file cannot store a topic key or a topic-shaped lastErrorDetail", async () => {
+test("a status file cannot store a topic key or a topic-shaped lastErrorDetail", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-wake-status-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   const paths = listenerPaths({
     profileId: "profile-wake",
     workspaceId: randomUUID(),

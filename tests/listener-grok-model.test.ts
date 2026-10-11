@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import { rmSync } from "node:fs";
 import { lstat, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import type { SignalRecord } from "../src/cloud/command-client.js";
 import type {
   GrokAcpHandle,
@@ -22,6 +23,15 @@ import {
   GrokListenerModel,
   type OpenGrokSession,
 } from "../src/listener/grok-model.js";
+
+/** Directories this file's mkdtemp created. Removed after the file. */
+const createdTemps: string[] = [];
+after(() => { for (const dir of createdTemps) rmSync(dir, { recursive: true, force: true }); });
+async function workerCwd(): Promise<string> {
+  const cwd = await mkdtemp(join(tmpdir(), "cswarm-worker-test-"));
+  createdTemps.push(cwd);
+  return cwd;
+}
 
 const REQUEST: PermissionRequest = {
   sessionId: "session",
@@ -92,7 +102,7 @@ function fakeOpen(records: Array<{
 }
 
 test("Grok canary uses the measured shell sentinel and enables prompts after denial", async () => {
-  const cwd = await mkdtemp(join(tmpdir(), "cswarm-worker-test-"));
+  const cwd = await workerCwd();
   const attempts: Array<{ attempt: number; total: number; passed: boolean }> = [];
   let probeText = "";
   let timeoutMs: number | undefined;
@@ -145,7 +155,7 @@ test("Grok canary uses the measured shell sentinel and enables prompts after den
 });
 
 test("Grok canary removes a written sentinel and reports that denial did not block it", async () => {
-  const cwd = await mkdtemp(join(tmpdir(), "cswarm-worker-test-"));
+  const cwd = await workerCwd();
   let sentinelPath = "";
   const adapter = new GrokListenerModel({
     cwd,
@@ -185,7 +195,7 @@ test("Grok canary removes a written sentinel and reports that denial did not blo
 });
 
 test("worker canary always denies before explicit same-owner allow mode", async () => {
-  const cwd = await mkdtemp(join(tmpdir(), "cswarm-worker-test-"));
+  const cwd = await workerCwd();
   const records: Parameters<typeof fakeOpen>[0] = [];
   const adapter = new GrokListenerModel({
     cwd,
@@ -212,7 +222,7 @@ test("worker canary always denies before explicit same-owner allow mode", async 
 });
 
 test("cross-owner turns reach the operator worker, cwd, home, and permission mode", async () => {
-  const cwd = await mkdtemp(join(tmpdir(), "cswarm-worker-test-"));
+  const cwd = await workerCwd();
   const records: Parameters<typeof fakeOpen>[0] = [];
   const adapter = new GrokListenerModel({
     cwd,
@@ -249,7 +259,7 @@ test("cross-owner turns reach the operator worker, cwd, home, and permission mod
 });
 
 test("listener cancel reaches active host handles without logging prompts", async () => {
-  const cwd = await mkdtemp(join(tmpdir(), "cswarm-worker-test-"));
+  const cwd = await workerCwd();
   const records: Parameters<typeof fakeOpen>[0] = [];
   const adapter = new GrokListenerModel({
     cwd,
@@ -262,7 +272,7 @@ test("listener cancel reaches active host handles without logging prompts", asyn
 });
 
 test("Grok prompt surfaces child_exit_timeout instead of opening a replacement", async () => {
-  const cwd = await mkdtemp(join(tmpdir(), "cswarm-worker-test-"));
+  const cwd = await workerCwd();
   const timeout = new AcpHostError(
     "child_exit_timeout",
     "Grok bridge did not exit after SIGTERM and SIGKILL",
@@ -305,7 +315,7 @@ test("Grok prompt surfaces child_exit_timeout instead of opening a replacement",
 });
 
 test("Grok runtime close surfaces child_exit_timeout", async () => {
-  const cwd = await mkdtemp(join(tmpdir(), "cswarm-worker-test-"));
+  const cwd = await workerCwd();
   const timeout = new AcpHostError(
     "child_exit_timeout",
     "Grok bridge did not exit after SIGTERM and SIGKILL",
@@ -338,7 +348,7 @@ test("Grok runtime close surfaces child_exit_timeout", async () => {
 });
 
 test("Grok failed canary surfaces cleanup child_exit_timeout", async () => {
-  const cwd = await mkdtemp(join(tmpdir(), "cswarm-worker-test-"));
+  const cwd = await workerCwd();
   const timeout = new AcpHostError(
     "child_exit_timeout",
     "Grok bridge did not exit after SIGTERM and SIGKILL",
