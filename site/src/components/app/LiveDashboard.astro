@@ -12175,74 +12175,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     scrollbar-gutter: stable;
   }
 
-  .dashboard__sidebar-owner-group,
-  .dashboard__sidebar-owner-agents {
-    min-inline-size: 0;
-    display: grid;
-    gap: 0;
-    padding: 0;
-    margin: 0;
-    list-style: none;
-  }
-
-  .dashboard__sidebar-owner-group + .dashboard__sidebar-owner-group {
-    margin-block-start: var(--s-1);
-  }
-
-  /* Indentation carries ownership without adding another rail divider or repeated caption. */
-  .dashboard__sidebar-owner-agents {
-    margin-inline-start: 0.875rem;
-    padding-inline-start: var(--s-3);
-  }
-
-  .dashboard__sidebar-person,
-  .dashboard__sidebar-agent {
-    min-inline-size: 0;
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    align-items: center;
-    gap: var(--s-2);
-    padding: var(--s-1) var(--s-2);
-  }
-
-  .dashboard__sidebar-person--unresolved {
-    color: var(--text-muted);
-  }
-
-  .dashboard__sidebar-unresolved-mark {
-    inline-size: 1.75rem;
-    block-size: 1.75rem;
-    display: grid;
-    place-items: center;
-    color: var(--text-muted);
-    background: var(--surface);
-    border-radius: 50%;
-    font-family: var(--font-mono);
-    font-size: var(--t-xs);
-  }
-
-  .dashboard__sidebar-person--unresolved > strong {
-    overflow: hidden;
-    font-size: var(--t-xs);
-    font-weight: var(--weight-semibold);
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .dashboard__sidebar-person-avatar {
-    inline-size: 1.75rem;
-    block-size: 1.75rem;
-    display: grid;
-    place-items: center;
-    color: var(--text);
-    background: var(--surface);
-    border: 1px solid var(--border-strong);
-    border-radius: 50%;
-    font-family: var(--font-mono);
-    font-size: 0.58rem;
-    font-weight: var(--weight-semibold);
-  }
-
   .dashboard__sidebar-model-mark {
     inline-size: 1.5rem;
     block-size: 1.5rem;
@@ -12256,14 +12188,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     block-size: 0.875rem;
   }
 
-  .dashboard__sidebar-avatar-wrap {
-    position: relative;
-    inline-size: 1.75rem;
-    block-size: 1.75rem;
-    display: grid;
-    place-items: center;
-  }
-
   .dashboard__presence-dot {
     position: absolute;
     inset-inline-end: -0.08rem;
@@ -12273,43 +12197,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     border: 2px solid var(--bg-raised);
     border-radius: 50%;
     background: var(--success);
-  }
-
-  .dashboard__sidebar-participant-copy {
-    min-inline-size: 0;
-    display: grid;
-    gap: 0.08rem;
-  }
-
-  .dashboard__sidebar-participant-copy > strong {
-    overflow: hidden;
-    color: var(--text);
-    font-family: var(--font-sans);
-    font-size: var(--t-xs);
-    font-weight: var(--weight-semibold);
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .dashboard__sidebar-agent .dashboard__sidebar-participant-copy > strong {
-    font-weight: var(--weight-medium);
-  }
-
-  .dashboard__sidebar-participant-copy > span {
-    min-inline-size: 0;
-    display: flex;
-    align-items: center;
-    gap: var(--s-1);
-    overflow: hidden;
-    color: var(--text-muted);
-    font-size: 0.62rem;
-    line-height: 1.3;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .dashboard__sidebar-participant-copy > .dashboard__sidebar-orphan-owner {
-    color: var(--text-faint);
   }
 
   .dashboard__agent-ownership-note {
@@ -15852,7 +15739,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   .dashboard__workspace-details-dialog,
   .dashboard__roster-dialog,
   .dashboard__message-avatar,
-  .dashboard__sidebar-person-avatar,
   .dashboard__entity-avatar,
   .dashboard__agent-avatar.dashboard__avatar--tinted,
   .dashboard__message-avatar.dashboard__avatar--tinted,
@@ -16505,11 +16391,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     .pd-confirm-actions .dashboard__button { inline-size: 100%; }
   }
   @media (prefers-reduced-motion: reduce) { .dashboard__roster-dialog, .pd-confirm { animation: none; transition: none; scroll-behavior: auto; } }
-
-  .dashboard__sidebar-participant-copy > .dashboard__sidebar-agent-status[data-agent-status="inactive"],
-  .dashboard__sidebar-participant-copy > .dashboard__sidebar-agent-status[data-agent-status="suspended"] {
-    color: var(--warning);
-  }
 
   @media (max-width: 52rem) {
     .dashboard__setup,
