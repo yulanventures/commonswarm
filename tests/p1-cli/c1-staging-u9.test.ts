@@ -414,22 +414,21 @@ test('ARCH entry point retries failed copies and proof writes; undo rejects drif
     const r = run(archiveHarness + `
 scenario=${JSON.stringify(scenario)}
 ` + String.raw`
-import errno
+import errno,runpy
 aside=proof/'u9-ARCH-legacy.tar'; expected=tar.read_bytes(); snapshot=proof/'u9-ARCH-config.json'
 fsync=os.fsync
 if scenario=='exdev':
- import runpy
  sys.argv=['archive','check',plan,str(inputs),logical_proof]; runpy.run_path(a.__file__,run_name='__main__')
- actions=[['1'],['2'],['3'],['undo'],['check']]+[['execute',p] for p in ('before','positive','loss','negative','restore','recovered','done')]
  for path in ('/var/lib/commonswarm-admin-release/w4-exclusion.json','/usr/local/lib/systemd/system/commonswarm-edge-recycle.service.d/00-w4-exclusion.conf'):
   blocker=root/'exclusion'; mapping[path]=str(blocker)
   for kind in ('regular','symlink','dangling'):
    if kind=='regular': blocker.write_bytes(b'held')
    else: blocker.symlink_to(tar if kind=='symlink' else root/'absent')
-   def tree(): return {str(p):(p.lstat(),p.read_bytes() if p.is_file() and not p.is_symlink() else None) for p in root.rglob('*')}
+   # Snapshot reads/traversal can update atime on Linux; retain every other stat field.
+   def tree(): return {str(p):((m:=p.lstat())[:7]+m[8:],p.read_bytes() if p.is_file() and not p.is_symlink() else None) for p in root.rglob('*')}
    saved=tree()
    with patch.object(subprocess,'check_output',side_effect=AssertionError('excluded service observation')):
-    for action in actions:
+    for action in [['1'],['2'],['3'],['undo'],['check']]+[['execute',p] for p in ('before','positive','loss','negative','restore','recovered','done')]:
      sys.argv=['archive']+action+[plan,str(inputs),logical_proof]+(['0'] if action[0]=='execute' else [])
      with patch.object(sys,'stdin',io.StringIO(json.dumps(cutover))),contextlib.redirect_stdout(io.StringIO()) as out:
       try: runpy.run_path(a.__file__,run_name='__main__')
