@@ -6,7 +6,7 @@ import { HouseholdObjectClient } from '../../src/cloud/household-objects.js';
 import { createHouseholdHttpTransport, LOCAL_HOUSEHOLD_SEAT as seat } from '../../src/cloud/household-http.js';
 import { createHouseholdMcpTools } from '../../src/mcp/household-tools.js';
 import { MCP_RESULT_MAX_BYTES } from '../../src/mcp/tools.js';
-import { HOUSEHOLD_TOOLS } from '../../src/protocol/household-tool-registry.js';
+import { HOUSEHOLD_TOOL_REGISTRY, HOUSEHOLD_TOOLS } from '../../src/protocol/household-tool-registry.js';
 import { decideTodo, emptyHouseholdTodoState, reduceTodoEvents, type Todo, type TodoCommand } from '../../src/protocol/household-todos.js';
 import type { HouseholdAccessFacts } from '../../src/protocol/household-object-policy.js';
 
@@ -45,13 +45,14 @@ test('local HTTP and MCP round trip creates, assigns, queues, starts and complet
   const fetcher: typeof fetch = async (url, init) => {
     const body = JSON.parse(String(init?.body));
     assert.equal(body.workspace_id, workspace);
-    const wire = body.resource ? body : body.command;
-    assert.equal(String(url).endsWith(body.resource ? '/read' : '/command'), true);
+    const wire = body.command;
+    assert.equal(String(url), 'https://example.invalid/functions/v1/command');
+    assert.equal(wire.kind, 'household_tool');
     const { seat: local, request_id, ...fields } = wire.arguments;
     assert.equal(local, seat);
     calls.push({ tool: wire.tool, args: fields });
     let response: unknown;
-    if (body.resource) {
+    if (HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === wire.tool)!.effect === 'read') {
       const todo = state.todos[todoId]!;
       response = wire.tool === 'todo_queue' ? { status: 'ok', queue: queue([summary(todo)]) }
         : wire.tool === 'todo_list' ? { status: 'ok', todos: [summary(todo)], next_offset: null }
@@ -59,7 +60,6 @@ test('local HTTP and MCP round trip creates, assigns, queues, starts and complet
         : { status: 'ok', todo: detail(todo), comments: Object.values(state.comments), next_comment_offset: null };
     } else {
       assert.equal(body.command_id, request_id);
-      assert.equal(wire.kind, 'household_tool');
       const command = { kind: wire.tool, ...fields } as TodoCommand;
       const decision = decideTodo(state, command, { access, now: Date.parse(at), command_id: request_id,
         request_digest: createHash('sha256').update(JSON.stringify(command)).digest('hex'), seq: state.last_seq + 1,

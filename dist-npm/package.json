@@ -1,6 +1,6 @@
 {
   "name": "commonswarm",
-  "version": "0.1.80",
+  "version": "0.1.81",
   "description": "The cswarm CLI for CommonSwarm, a shared workspace for people and their agents at home and at work.",
   "bin": {
     "cswarm": "cswarm.cjs"

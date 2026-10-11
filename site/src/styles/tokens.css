@@ -424,10 +424,6 @@
   --ease-accelerate: cubic-bezier(0.3, 0, 1, 1);
   --ease-spring: cubic-bezier(0.22, 1.2, 0.36, 1);
 
-  /* Legacy motion names. No live stylesheet names these. */
-  --ease: cubic-bezier(0.22, 1, 0.36, 1);
-  --dur: 200ms;
-
   /* ======================================================================
      10. THE PARKED DARK PALETTE
      ======================================================================

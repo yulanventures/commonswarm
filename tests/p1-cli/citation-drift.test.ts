@@ -66,50 +66,50 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "identity client r6 C9 (lazy host/claude load)",
     file: "src/cli.ts",
-    lines: [463, 463],
+    lines: [464, 464],
     contains: "import(\"./host/claude.js\")",
   },
   {
     citedBy: "identity client r6 C9 (lazy host/codex load)",
     file: "src/cli.ts",
-    lines: [467, 467],
+    lines: [468, 468],
     contains: "import(\"./host/codex.js\")",
   },
   {
     citedBy: "identity client r6 C9 (lazy host/opencode load)",
     file: "src/cli.ts",
-    lines: [471, 471],
+    lines: [472, 472],
     contains: "import(\"./host/opencode.js\")",
   },
   {
     citedBy: "identity client r6 C9 (claude canary classifier, host-free)",
     file: "src/cli.ts",
-    lines: [456, 456],
+    lines: [457, 457],
     contains: "classifyClaudeCanaryFailure",
   },
   {
     citedBy: "identity client r6 C9 (explicit Claude executable path)",
     file: "src/cli.ts",
-    lines: [6851, 6851],
+    lines: [6852, 6852],
     contains: "(await loadHostClaude()).resolveClaudeExecutable",
   },
   {
     citedBy: "identity client r6 C9 (explicit Codex executable path)",
     file: "src/cli.ts",
-    lines: [6877, 6877],
+    lines: [6878, 6878],
     contains: "(await loadHostCodex()).resolveCodexExecutable",
   },
   {
     citedBy: "identity client r6 C9 (explicit OpenCode executable path)",
     file: "src/cli.ts",
-    lines: [7509, 7509],
+    lines: [7510, 7510],
     contains: "(await loadHostOpenCode()).resolveOpenCodeExecutable",
   },
   // site/src/lib/agent-connect.ts — mintedHorizon and the retired-constant note
   {
     citedBy: "site/src/lib/agent-connect.ts (mintedHorizon)",
     file: "supabase/functions/command/index.ts",
-    lines: [12736, 12736],
+    lines: [12740, 12740],
     contains: "horizon_expires_at: prepared.command.renewal_horizon_ms === null",
   },
   {
@@ -130,7 +130,7 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "site/src/lib/agent-connect.ts (the agent scope check)",
     file: "supabase/functions/command/index.ts",
-    lines: [11088, 11088],
+    lines: [11092, 11092],
     contains: "!auth.agent.scopes.includes(validation.command.kind)",
   },
   {
@@ -167,7 +167,7 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "agent-connect-mint.observer.test.ts (standing binds to the request device)",
     file: "supabase/functions/command/index.ts",
-    lines: [4963, 4963],
+    lines: [4967, 4967],
     contains: "standing ? prepared.wire.device_id : null",
   },
   // supabase/functions/command/index.ts — the resume handler's own comment
