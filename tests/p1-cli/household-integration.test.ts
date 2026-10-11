@@ -16,7 +16,8 @@ test('local household HTTP dispatch preserves exact request IDs and binds reads 
     const body = JSON.parse(Buffer.concat(chunks).toString());
     requests.push({ url: request.url!, body, auth: request.headers.authorization });
     response.setHeader('content-type', 'application/json');
-    response.end(JSON.stringify(body.resource ? { status: 'ok', kind: 'object_list', objects: [], next_offset: null }
+    // Every household call posts /functions/v1/command (D9); reads are told apart by tool name.
+    response.end(JSON.stringify(body.command?.tool === 'object_list' ? { status: 'ok', kind: 'object_list', objects: [], next_offset: null }
       : { status: 'committed', object_id: 'notes', revision: { workspace_id: 'workspace-one', object_id: 'notes', token: 'a'.repeat(32) } }));
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -36,7 +37,7 @@ test('local household HTTP dispatch preserves exact request IDs and binds reads 
     const read = client.prepare('object_list', { seat: LOCAL_HOUSEHOLD_SEAT, offset: 0, limit: 10 });
     assert.equal((await read.send()).status, 'ok');
     assert.equal((await read.retry()).status, 'ok');
-    assert.deepEqual(requests.map(row => row.url), ['/functions/v1/command', '/functions/v1/read', '/functions/v1/read']);
+    assert.deepEqual(requests.map(row => row.url), ['/functions/v1/command', '/functions/v1/command', '/functions/v1/command']);
     assert.equal(requests[0]!.body.client_version, CLIENT_PROTOCOL_VERSION);
     assert.equal(requests[0]!.body.client_build, CLI_BUILD_VERSION);
     assert.equal(requests[0]!.body.command_id, 'retry_0001');
