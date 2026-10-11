@@ -1,19 +1,22 @@
+/** Exercise hosted list argument admission and the separate attachment parser.
+ * Synthetic payloads must not admit docs, files or model-supplied transfers. */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { hostedHouseholdRelease } from './support/hosted-household-release.js';
 // @ts-expect-error TS5097: edge source is exercised through tsx.
 import { parseHouseholdAttachment, HouseholdAttachmentError } from '../supabase/functions/command/household-attachments.ts';
 
-test('future household release content admission accepts valid patches and rejects model-supplied transfers before execution', async () => {
+test('hosted list admission accepts list creation and refuses docs, files and model-supplied transfers', async () => {
   const { HOSTED_TOOL_TABLE, validateHostedToolArguments, HostedToolInputError } = await hostedHouseholdRelease(true);
   const args = { seat: 'seat_' + 'a'.repeat(22), request_id: 'request_001', object_id: 'notes',
-    title: 'Notes', content: { kind: 'doc', markdown: 'Synthetic notes' } };
-  assert.deepEqual(validateHostedToolArguments('object_create', args), args);
-  assert.throws(() => validateHostedToolArguments('object_create', { ...args, url: 'https://example.test/file' }), HostedToolInputError);
-  assert.throws(() => validateHostedToolArguments('object_create', { ...args, content: { kind: 'file', name: 'x.txt', media_type: 'text/plain' } }), HostedToolInputError);
-  const tool = HOSTED_TOOL_TABLE.find(row => row.name === 'object_create')!;
+    title: 'Notes', content: { kind: 'list', items: [] } };
+  assert.deepEqual(validateHostedToolArguments('list_create', args), args);
+  assert.throws(() => validateHostedToolArguments('list_create', { ...args, url: 'https://example.test/file' }), HostedToolInputError);
+  for (const content of [{ kind: 'doc', markdown: 'Synthetic notes' }, { kind: 'file', name: 'x.txt', media_type: 'text/plain' }])
+    assert.throws(() => validateHostedToolArguments('list_create', { ...args, content }), HostedToolInputError);
+  const tool = HOSTED_TOOL_TABLE.find(row => row.name === 'list_create')!;
   assert.equal(tool.annotations.readOnlyHint, false);
-  assert.equal(HOSTED_TOOL_TABLE.find(row => row.name === 'object_history')!.annotations.readOnlyHint, true);
+  assert.equal(HOSTED_TOOL_TABLE.find(row => row.name === 'list_history')!.annotations.readOnlyHint, true);
 });
 
 test('protected attachment parser carries bytes separately and refuses foreign metadata and extra parts', async () => {
