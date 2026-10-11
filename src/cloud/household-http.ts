@@ -1,12 +1,19 @@
-import type { CloudTarget } from './config.js';
+import { randomUUID } from 'node:crypto';
+import { commandEndpoint, CLIENT_PROTOCOL_VERSION, type CloudTarget } from './config.js';
 import { withClientBuild } from './client-build.js';
-import { CLIENT_PROTOCOL_VERSION } from './config.js';
 import type { HouseholdTransport } from './household-objects.js';
 import type { HouseholdToolInvocation } from '../protocol/household-tool-registry.js';
 /** Local credentials select identity. The seat field only preserves the shared
  * registry schema and is never resolved as a hosted handle by this transport. */
 import { HOUSEHOLD_LOCAL_SEAT, HOUSEHOLD_TOOL_REGISTRY } from '../protocol/household-tool-registry.js';
 export const LOCAL_HOUSEHOLD_SEAT = HOUSEHOLD_LOCAL_SEAT;
+
+export class ServerError extends Error {
+  constructor(readonly status: number) {
+    super('Household server error');
+    this.name = 'ServerError';
+  }
+}
 
 export function householdWireRequest(invocation: HouseholdToolInvocation): { tool: string; arguments: Record<string, unknown> } {
   const args: Record<string, unknown> = { seat: LOCAL_HOUSEHOLD_SEAT,
@@ -34,15 +41,12 @@ export function createHouseholdHttpTransport(options: { target: CloudTarget;
     async execute(invocation, { signal }) {
       const wire = householdWireRequest(invocation);
       const { credential, fetcher = fetch } = await options.authenticate();
-      const reading = 'query' in invocation;
-      const response = await fetcher(`${options.target.url}/functions/v1/${reading ? 'read' : 'command'}`, {
+      const response = await fetcher(commandEndpoint(options.target), {
         method: 'POST', headers: { authorization: `Bearer ${credential}`, apikey: options.target.anonKey, 'content-type': 'application/json' },
-        body: JSON.stringify(reading
-          ? { resource: 'household', workspace_id: invocation.workspace_id, ...wire }
-          : withClientBuild({ command_id: invocation.request_id, client_version: CLIENT_PROTOCOL_VERSION, workspace_id: invocation.workspace_id,
-            stream: { kind: 'workspace' }, command: { kind: 'household_tool', ...wire } })), signal,
+        body: JSON.stringify(withClientBuild({ command_id: invocation.request_id ?? randomUUID(), client_version: CLIENT_PROTOCOL_VERSION,
+          workspace_id: invocation.workspace_id, stream: { kind: 'workspace' }, command: { kind: 'household_tool', ...wire } })), signal,
       });
-      if (response.status >= 500) throw new Error('household transport unavailable');
+      if (response.status >= 500) throw new ServerError(response.status);
       if (!response.ok) {
         // Only stable codes cross this boundary; raw error text can hold secrets.
         let body: unknown;

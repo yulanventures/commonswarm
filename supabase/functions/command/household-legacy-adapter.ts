@@ -1,7 +1,8 @@
-/** Unwired lane 4B preparation. The host supplies authenticated, locked facts
- * and a transaction that resolves ONLY after COMMIT. No HTTP/auth changes here.
- * Legacy upload creation requires a protected staged attachment: declarations
- * alone cannot reserve verified household content. Integration must supply it.
+/** Legacy household commands. The command function calls executeHouseholdLegacy
+ * with authenticated, locked facts and a transaction that resolves only after
+ * COMMIT. No HTTP/auth changes here. Legacy upload creation requires a
+ * protected staged attachment: declarations alone cannot reserve verified
+ * household content. Integration must supply it.
  */
 import type { HouseholdAccessFacts, HouseholdContentOperation } from '../_shared/household-object-policy.d.ts';
 import type { HouseholdContent, HouseholdOutcome, HouseholdRevision, HouseholdRevisionRef } from '../_shared/household-object-events.d.ts';

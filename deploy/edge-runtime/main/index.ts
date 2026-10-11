@@ -1,8 +1,8 @@
+/** Edge gateway: validated host configuration and requests create isolated
+ * workers with scoped environment entries; errors become bounded responses. */
 import {
-  COMMAND_TEST_HOOKS,
-  FUNCTION_ENV_NAMES,
+  environmentFor,
   handleGatewayRequest,
-  type FunctionName,
   isMcpPublicEnabled,
   isWorkerLimitError,
   mainEnvironmentProblems,
@@ -83,21 +83,6 @@ function assertRequiredEnvironment(): void {
 
 assertRequiredEnvironment();
 
-function environmentFor(functionName: FunctionName): Array<[string, string]> {
-  const isTest = Deno.env.get("SWARM_ENV") === "test";
-  const entries: Array<[string, string]> = [];
-  for (const name of FUNCTION_ENV_NAMES[functionName]) {
-    // These hooks can change command transaction timing or force rollback.
-    // Keep them out of a non-test worker even if a stale host file has them.
-    if (!isTest && COMMAND_TEST_HOOKS.has(name)) continue;
-    const value = name === MCP_PUBLIC_ENABLED_ENV
-      ? mcpPublicEnvironmentValue
-      : Deno.env.get(name);
-    if (value !== undefined) entries.push([name, value]);
-  }
-  return entries;
-}
-
 async function handle(request: Request): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname === "/health") {
@@ -125,7 +110,8 @@ async function handle(request: Request): Promise<Response> {
           memoryLimitMb: USER_WORKER_MEMORY_MB,
           workerTimeoutMs: USER_WORKER_TIMEOUT_MS,
           noModuleCache: false,
-          envVars: environmentFor(route.functionName),
+          envVars: environmentFor(route.functionName, (name) => name === MCP_PUBLIC_ENABLED_ENV
+            ? mcpPublicEnvironmentValue : Deno.env.get(name)),
         });
         const forwarded = rewriteFunctionRequest(original, route.pathname);
         EdgeRuntime.applySupabaseTag(original, forwarded);

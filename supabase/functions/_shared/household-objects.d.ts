@@ -106,15 +106,18 @@ export type HouseholdReadQuery = {
     kind: 'object_list';
     offset: number;
     limit: number;
+    kind_filter?: 'list';
 } | {
     kind: 'object_read';
     object_id: string;
     revision?: HouseholdRevisionRef;
+    kind_filter?: 'list';
 } | {
     kind: 'object_history';
     object_id: string;
     offset: number;
     limit: number;
+    kind_filter?: 'list';
 } | {
     kind: 'draft_read';
     draft_id: string;

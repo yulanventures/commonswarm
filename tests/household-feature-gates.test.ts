@@ -1,9 +1,11 @@
+/** Exercise real command and hosted MCP gates with inert external transports.
+ * Server settings alone select reachable tools; client input cannot opt in. */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { build } from 'esbuild';
 import { hostedHouseholdRelease } from './support/hosted-household-release.js';
-import { HOUSEHOLD_TOOL_REGISTRY } from '../src/protocol/household-tool-registry.js';
+import { HOUSEHOLD_TOOL_REGISTRY, HOSTED_TODO_LIST_TOOLS } from '../src/protocol/household-tool-registry.js';
 
 const owner = '11111111-1111-4111-8111-111111111111';
 const workspace = '22222222-2222-4222-8222-222222222222';
@@ -135,7 +137,7 @@ async function hostedProtocol(flags: Record<string, string | undefined> = {}, en
   return { rpc, calls };
 }
 
-test('the source release switch hides all household tools even with every runtime gate on; enabling it restores 23 tools', async (t) => {
+test('only the to-do/list server gate enables its hosted catalog and calls', async (t) => {
   t.mock.method(console, 'error', () => undefined);
   const core = ['claim_seat', 'whoami', 'check', 'ask', 'note', 'reply', 'working_on', 'members'];
   const { rpc, calls } = await hostedProtocol({ [transportGate]: '1', [legacyGate]: '1', [redirectGate]: '1' });
@@ -151,16 +153,12 @@ test('the source release switch hides all household tools even with every runtim
   const enabled = await hostedProtocol({}, true);
   const restored = (await enabled.rpc('tools/list')).result.tools.map((tool: { name: string }) => tool.name);
   assert.equal(restored.length, 23);
-  assert.deepEqual(restored, [...core,
-    'object_list', 'object_read', 'object_history', 'object_create', 'object_update',
-    'todo_list', 'todo_read', 'todo_queue', 'comment_list', 'todo_create', 'todo_comment',
-    'todo_update', 'todo_assign', 'todo_start', 'todo_set_state',
-  ]);
-  assert.ok((await enabled.rpc('tools/call', { name: 'object_list', arguments: { seat: 'seat_' + 'a'.repeat(22), offset: 0, limit: 10 } })).result);
-  assert.deepEqual(enabled.calls, ['object_list'], 'enabled control restores admission as well as discovery');
+  assert.deepEqual(restored, [...core, ...HOSTED_TODO_LIST_TOOLS.map(row => row.name)]);
+  assert.ok((await enabled.rpc('tools/call', { name: 'list_list', arguments: { seat: 'seat_' + 'a'.repeat(22), offset: 0, limit: 10 } })).result);
+  assert.deepEqual(enabled.calls, ['list_list'], 'enabled control restores admission as well as discovery');
 });
 
-test('future household release keeps file tools hidden until their transport gate is explicitly on', async () => {
+test('hosted to-do/list release keeps files hidden even when the transport gate is on', async () => {
   const seat = 'seat_' + 'a'.repeat(22);
   const examples = {
     file_read: { seat, object_id: 'attachment' },
@@ -169,7 +167,7 @@ test('future household release keeps file tools hidden until their transport gat
     } },
     file_upload_commit: { seat, request_id: 'request_001', reservation_id: 'upload_001', operation: 'create' },
   };
-  for (const flags of [{}, { [transportGate]: '0' }, { [transportGate]: 'true' }, { [legacyGate]: '1', [redirectGate]: '1' }]) {
+  for (const flags of [{}, { [transportGate]: '0' }, { [transportGate]: 'true' }, { [transportGate]: '1' }, { [legacyGate]: '1', [redirectGate]: '1' }]) {
     const { rpc, calls } = await hostedProtocol(flags, true);
     const listed = (await rpc('tools/list')).result.tools.map((tool: { name: string }) => tool.name);
     for (const [name, args] of Object.entries(examples)) {
@@ -178,15 +176,8 @@ test('future household release keeps file tools hidden until their transport gat
       assert.equal(result.error.code, -32602, `${name} must fail admission`);
     }
     assert.deepEqual(calls, []);
-    const control = await rpc('tools/call', { name: 'object_list', arguments: { seat, offset: 0, limit: 10 } });
+    const control = await rpc('tools/call', { name: 'list_list', arguments: { seat, offset: 0, limit: 10 } });
     assert.ok(control.result);
-    assert.deepEqual(calls, ['object_list'], 'same handler still admits completed tools');
+    assert.deepEqual(calls, ['list_list'], 'same handler still admits completed tools');
   }
-  const { rpc, calls } = await hostedProtocol({ [transportGate]: '1' }, true);
-  const listed = (await rpc('tools/list')).result.tools.map((tool: { name: string }) => tool.name);
-  for (const [name, args] of Object.entries(examples)) {
-    assert.ok(listed.includes(name));
-    assert.ok((await rpc('tools/call', { name, arguments: args })).result);
-  }
-  assert.deepEqual(calls, Object.keys(examples), 'only an explicit server opt-in reaches the executor');
 });

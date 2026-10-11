@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { HOUSEHOLD_TOOL_REGISTRY, type Schema } from "./protocol/household-tool-registry.js";
+import { HOUSEHOLD_TOOLS, HOUSEHOLD_TOOL_REGISTRY, type Schema } from "./protocol/household-tool-registry.js";
+import { householdRefusalNextStep } from "./protocol/household-next-steps.js";
 import { HouseholdObjectClient } from "./cloud/household-objects.js";
 import { createHouseholdHttpTransport, LOCAL_HOUSEHOLD_SEAT } from "./cloud/household-http.js";
 import { randomUUID } from "node:crypto";
@@ -10204,13 +10205,14 @@ async function runHouseholdObject(args: Arguments): Promise<void> {
     authenticate: async () => ({ credential: context.selected.bearer, fetcher: context.selected.fetcher }) }), context.selected.selectedWorkspace);
   const result = await client.prepare(args.positionals[1]!, { seat: LOCAL_HOUSEHOLD_SEAT, ...input },
     { upload: { reservation_id: "server_pending", expires_at: 0 } }).send();
-  process.stdout.write(JSON.stringify(result) + "\n");
-  if (["refused", "unknown", "conflict"].includes(result.status)) process.exitCode = 1;
+  const next_action = result.status === 'refused' ? householdRefusalNextStep(result.reason) : undefined;
+  process.stdout.write(JSON.stringify(next_action ? { ...result, next_action } : result) + "\n");
+  if (["refused", "unknown", "conflict", "error"].includes(result.status)) process.exitCode = 1;
 }
 
 export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
-  object: group(Object.fromEntries(HOUSEHOLD_TOOL_REGISTRY.map(row => [row.name, commandEntry({
-    tool: row.name, mcp: true, handler: runHouseholdObject, description: row.description, mutates: row.effect !== "read",
+  object: group(Object.fromEntries(HOUSEHOLD_TOOLS.map(row => [row.name, commandEntry({
+    tool: row.name, mcp: true, handler: runHouseholdObject, description: HOUSEHOLD_TOOL_REGISTRY.find(entry => entry.name === row.name)!.description, mutates: !row.annotations.readOnlyHint,
     flags: HOUSEHOLD_INPUT_ACCEPTED_FLAGS, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true,
     help: [`cswarm object ${row.name} --input-file <path> [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]`],
   })])), args => args.positionals[1], (_args, names) => new UsageError(`cswarm object takes ${formatOrList(names)}`), {
@@ -10429,7 +10431,7 @@ function mergeHelpFlags(...lists: readonly (readonly string[])[]): readonly stri
 }
 
 export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
-  ...Object.fromEntries(HOUSEHOLD_TOOL_REGISTRY.map(row => [`object.${row.name}`, HOUSEHOLD_INPUT_ACCEPTED_FLAGS])),
+  ...Object.fromEntries(HOUSEHOLD_TOOLS.map(row => [`object.${row.name}`, HOUSEHOLD_INPUT_ACCEPTED_FLAGS])),
   "admin.grants": ADMIN_READ_ACCEPTED_FLAGS,
   "admin.history": ADMIN_READ_ACCEPTED_FLAGS,
   "admin.revoke": ADMIN_REVOKE_ACCEPTED_FLAGS,
@@ -10565,17 +10567,15 @@ export interface AgentToolDescription {
 
 export function agentToolsForTransport(transport: AgentCommandTransport): AgentToolDescription[] {
   const tools: AgentToolDescription[] = [];
-  for (const root of Object.values(AGENT_COMMANDS)) {
-    for (const entry of commandEntries(root)) {
-      if (entry.tool === null || !entry.transports.includes(transport)) continue;
-      tools.push({
-        name: entry.tool,
-        description: entry.description,
-        inputSchema: (HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === entry.tool)?.inputSchema as AgentCommandArgumentSchema | undefined) ?? entry.argumentSchema,
-        mutates: entry.mutates,
-        flags: entry.flags,
-      });
-    }
+  for (const entry of Object.values(AGENT_COMMANDS).flatMap(commandEntries)) {
+    if (entry.tool === null || !entry.transports.includes(transport)) continue;
+    tools.push({
+      name: entry.tool,
+      description: entry.description,
+      inputSchema: (HOUSEHOLD_TOOLS.find(row => row.name === entry.tool)?.inputSchema as AgentCommandArgumentSchema | undefined) ?? entry.argumentSchema,
+      mutates: entry.mutates,
+      flags: entry.flags,
+    });
   }
   return tools;
 }

@@ -1,10 +1,13 @@
-/** Unwired local tools. The registry owns admission/schema/annotations; the
- * authenticated host supplies the transport and protected attachment channel.
+/** Household tools for the local `cswarm mcp` server and `cswarm object`. They are served
+ * through MCP_TOOLS (src/mcp/tools.ts) and dispatched by the local server (src/mcp/server.ts).
+ * The registry owns admission/schema/annotations; the authenticated host supplies the
+ * transport and protected attachment channel.
  */
 import { HOUSEHOLD_TOOLS, HouseholdToolInputError, validateHouseholdToolArguments,
   type HouseholdToolHostContext } from '../protocol/household-tool-registry.js';
 import { HouseholdObjectClient, type HouseholdClientResult, type HouseholdPreparedRequest } from '../cloud/household-objects.js';
 import { MCP_RESULT_MAX_BYTES } from './tools.js';
+import { householdRefusalNextStep } from '../protocol/household-next-steps.js';
 
 export const HOUSEHOLD_MCP_TOOLS: typeof HOUSEHOLD_TOOLS = HOUSEHOLD_TOOLS;
 export interface HouseholdMcpResult {
@@ -20,18 +23,18 @@ export interface HouseholdMcpTools {
 
 /** The client supplies a closed projection with no transfer credentials. */
 function householdMcpResult(result: HouseholdClientResult): HouseholdMcpResult {
-  const next_action = result.status === 'unknown'
+  const next_action = result.status === 'error' ? 'Retry the read.' : result.status === 'unknown'
     ? result.request_id ? 'Retry identical input with the same request_id to recover the recorded outcome.' : 'Retry the read.'
     : result.status === 'pending' ? 'The upload is reserved; no revision is committed. Complete the protected upload, then call file_upload_commit with a new request_id.'
     : result.status === 'conflict' ? 'kind' in result && result.kind === 'todo'
       ? 'Read the current to-do and review the change. Submit it with the current version and a new request_id.'
       : 'Recover the retained draft, read the current revision, and review the merge. Submit the reviewed patch with a new request_id.'
-    : result.status === 'refused' ? 'Resolve the refusal before submitting another request.'
+    : result.status === 'refused' ? householdRefusalNextStep(result.reason) ?? 'Resolve the refusal before submitting another request.'
     : result.status === 'ok' && result.kind === 'object_read' && result.revision.kind === 'file'
       ? 'File metadata is available. Use the host protected attachment channel for bytes; access must be rechecked.' : null;
   const output = { ...result, next_action };
   const raw = JSON.stringify(output);
-  const response = { isError: result.status === 'refused' || result.status === 'unknown' || result.status === 'conflict',
+  const response = { isError: result.status === 'refused' || result.status === 'unknown' || result.status === 'conflict' || result.status === 'error',
     content: [{ type: 'text' as const, text: raw }] };
   // AM13 budgets the escaped text inside the transport envelope. The server's
   // 28 KiB pages fit this local 32 KiB cap, including cursors and next_action.

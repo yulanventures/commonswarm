@@ -111,6 +111,8 @@ export function expectedToolScope({ command, window, phase } = {}) {
   return mapped;
 }
 
+/** Read an immutable live SHA's catalog switch without executing its source.
+ * The exact server env opt-in defaults off; historical catalogs stay readable. */
 async function liveMcpToolNames(o) {
   expectedToolScope({ command: o.command, window: o.window, phase: o.phase });
   const root = await realpath(PRODUCER_TREE);
@@ -130,27 +132,39 @@ async function liveMcpToolNames(o) {
   }
   await git(['merge-base', '--is-ancestor', live, release]);
   const switchEntry = (await git(['ls-tree', live, '--', HOUSEHOLD_RELEASE_PATH])).trim();
+  let todoLists = false;
   if (switchEntry) {
     demand(/^100644 blob [a-f0-9]{40}\t/.test(switchEntry),
-      'literal hosted household release switch', 'release switch is not a regular source file');
+      'verified hosted household release switch', 'release switch is not a regular source file');
     const source = await git(['show', `${live}:${HOUSEHOLD_RELEASE_PATH}`]);
     // Reject non-ASCII and non-LF line endings before filtering comments: the
     // TypeScript lexer would otherwise see declarations that this reader hides.
     demand(!/[^\x09\x0A\x20-\x7E]/.test(source),
-      'literal hosted household release switch', 'malformed release switch');
-    // Parse source text only. Permit comments and blank lines around one exact
-    // declaration; refuse any other identifier occurrence, including comments.
-    const lines = source.split('\n').filter(line => line.trim() !== '' && !line.startsWith('//'));
-    demand(source.split('HOSTED_HOUSEHOLD_TOOLS_ENABLED').length === 2 && lines.length === 1 && [
+      'verified hosted household release switch', 'malformed release switch');
+    // Only a leading doc comment and whole-line comments may surround the
+    // exact declaration. Never evaluate source or guess an unknown env design.
+    const code = source.replace(/^\/\*\*[\s\S]*?\*\/\n/u, '').split('\n')
+      .filter(line => line.trim() !== '' && !line.startsWith('//')).join('\n');
+    const envSwitch = `const runtime = (globalThis as typeof globalThis & {
+  Deno?: { env: { get(name: string): string | undefined } };
+}).Deno;
+export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = runtime?.env.get('SWARM_MCP_TODOS_LISTS_ENABLED') === '1';`;
+    demand(source.split('HOSTED_HOUSEHOLD_TOOLS_ENABLED').length === 2 && [
+      envSwitch,
       'export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = false;',
       'export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = true;',
-    ].includes(lines[0]), 'literal hosted household release switch', 'malformed release switch');
-    if (lines[0] === 'export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = false;') return [...ORDINARY_TOOLS];
+    ].includes(code), 'verified hosted household release switch', 'malformed release switch');
+    todoLists = code === envSwitch;
+    if (code.endsWith('= false;') || (todoLists && process.env.SWARM_MCP_TODOS_LISTS_ENABLED !== '1')) return [...ORDINARY_TOOLS];
   }
   const bytes = await git(['show', `${live}:${PROTOCOL_PATH}`]);
   let protocol;
   try { protocol = await import(`data:text/javascript;base64,${Buffer.from(bytes).toString('base64')}`); }
   catch { throw new Failure('readable live edge protocol bundle', 'protocol import failed'); }
+  if (todoLists) {
+    demand(Array.isArray(protocol.HOSTED_TODO_LIST_TOOLS), 'release HOSTED_TODO_LIST_TOOLS', 'missing protocol export');
+    return expectedMcpToolNames(protocol.HOSTED_TODO_LIST_TOOLS.map(row => row.name));
+  }
   if (!Object.hasOwn(protocol, 'HOUSEHOLD_TOOLS')) return [...ORDINARY_TOOLS];
   return expectedMcpToolNames(hostedHouseholdToolNames(
     protocol.HOUSEHOLD_TOOLS, protocol.HOUSEHOLD_TOOL_REGISTRY, hostedFileTransportEnabled()));

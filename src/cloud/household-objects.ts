@@ -10,6 +10,7 @@ import type {
   HouseholdContent, HouseholdObjectType, HouseholdRevisionRef,
 } from '../protocol/household-object-events.js';
 import { decodeHouseholdTodoResponse, type HouseholdTodoClientResult } from './household-todos.js';
+import { ServerError } from './household-http.js';
 
 export interface HouseholdTransport {
   /** Return a store decision, read result, or readBytes result. The host must
@@ -36,7 +37,8 @@ export type HouseholdClientResult =
   | { status: 'pending'; request_id: string; object_id: string; reservation_id: string }
   | { status: 'conflict'; request_id: string; object_id: string; current: HouseholdRevisionRef; draft_id: string }
   | { status: 'refused'; request_id?: string; reason: string }
-  | { status: 'unknown'; request_id?: string; reason: 'transport_interrupted' | 'invalid_response' }
+  | { status: 'error'; reason: 'server_error' }
+  | { status: 'unknown'; request_id?: string; reason: 'transport_interrupted' | 'invalid_response' | 'server_error' }
   | { status: 'ok'; kind: 'object_list'; objects: readonly {
       object_id: string; kind: HouseholdObjectType; title: string; revision: HouseholdRevisionRef;
     }[]; next_offset: number | null }
@@ -80,10 +82,12 @@ export class HouseholdObjectClient {
           // Each attempt has its own copy: a host must not mutate retry input.
           const response = await this.transport.execute(structuredClone(snapshot), options);
           result = decodeResponse(response, snapshot);
-        } catch {
+        } catch (error) {
           // A thrown error says nothing about whether the transaction committed.
           // Never echo raw errors; they can contain URLs, headers or credentials.
-          result = unknown(snapshot, 'transport_interrupted');
+          result = error instanceof ServerError
+            ? 'query' in snapshot ? { status: 'error', reason: 'server_error' } : unknown(snapshot, 'server_error')
+            : unknown(snapshot, 'transport_interrupted');
         }
         last = result;
         return structuredClone(result);
