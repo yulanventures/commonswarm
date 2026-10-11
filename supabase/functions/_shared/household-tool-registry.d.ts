@@ -64,7 +64,7 @@ type CoreOperation = {
 };
 type Effect = 'read' | 'commit' | 'reserve';
 /** The sole inventory: validation, MCP schemas/hints and consent use these rows. */
-export declare const HOUSEHOLD_TOOL_REGISTRY: readonly [{
+declare const BASE_HOUSEHOLD_TOOL_REGISTRY: readonly [{
     inputSchema: Schema;
     description: string;
     operation: (args: Arguments) => HouseholdContentOperation;
@@ -245,7 +245,204 @@ export declare const HOUSEHOLD_TOOL_REGISTRY: readonly [{
     toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
     name: "todo_set_state";
 }];
-export type HouseholdToolName = typeof HOUSEHOLD_TOOL_REGISTRY[number]['name'];
+export type HouseholdToolName = typeof BASE_HOUSEHOLD_TOOL_REGISTRY[number]['name'];
+/** Additive hosted list definitions reuse object schemas and commands. Reads
+ * carry a server-owned kind filter; writes retain exact bases and before-values.
+ * These rows never enter HOUSEHOLD_TOOLS or the local MCP catalog. */
+export declare const HOUSEHOLD_LIST_TOOL_REGISTRY: ({
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+} | {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+} | {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+} | {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+} | {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+} | {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+} | {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+} | {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+} | {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+} | {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+} | {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+} | {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+} | {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+} | {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+} | {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+} | {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+} | {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+} | {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+})[];
+/** Dispatch inventory includes additive variants; local publication stays on the
+ * original rows until its own release. No existing definition is rewritten. */
+export declare const HOUSEHOLD_TOOL_REGISTRY: {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+}[];
 export declare class HouseholdToolInputError extends Error {
     readonly code: 'unknown_tool' | 'invalid_arguments' | 'revision_binding_mismatch' | 'host_context_required';
     constructor(code: 'unknown_tool' | 'invalid_arguments' | 'revision_binding_mismatch' | 'host_context_required');
@@ -283,6 +480,28 @@ export declare const HOUSEHOLD_TOOLS: {
         openWorldHint: boolean;
     };
 }[];
+/** One hosted catalog/set for gates and pins. Existing to-do entries are reused;
+ * only this surface narrows comment targets to to-dos and lists. */
+export declare const HOSTED_TODO_LIST_TOOLS: {
+    name: string;
+    title: string;
+    description: string;
+    inputSchema: Schema;
+    annotations: {
+        title: string;
+        readOnlyHint: boolean;
+        destructiveHint: boolean;
+        idempotentHint: boolean;
+        openWorldHint: boolean;
+    };
+}[];
+/** Hosted admission takes model arguments and returns validated input. Check the
+ * scoped catalog first, so doc/file comments cannot reach the shared handlers. */
+export declare function validateHostedTodoListToolArguments(name: string, value: unknown): Arguments;
+/** Bound decoded list responses by escaped UTF-8 bytes, reserving envelope room
+ * below the default 64 KiB host cap. Pages continue explicitly; a single list or
+ * revision that cannot fit is refused. The host still checks its final envelope. */
+export declare function boundHouseholdListResult(result: Record<string, unknown>, offset?: number, maxBytes?: number): Record<string, unknown>;
 /** These are content permissions, not OAuth scopes. Audience and history are
  * explicit, and administration does not confer content editing permission.
  */
