@@ -5,7 +5,8 @@
 // The operator supplies PATH (including any cswarm shim); never prepend a CLI path.
 // Human CLI library calls are awaited one at a time under the run/profile locks.
 // Do not run external cswarm commands against --human-profile concurrently.
-// A window writes <out>.report.json (0600) with its claimed seat, even if a later
+// --controls-pass is required for window; reuse one pass id across its windows.
+// A window writes <out>.report.json (0600) with its pass and claimed seat, even if a later
 // leg fails. The report is setup evidence; only <out> is the binding receipt.
 import { constants } from 'node:fs';
 import { execFile } from 'node:child_process';
@@ -29,11 +30,11 @@ const PROTOCOL_MODULE = new URL('../supabase/functions/_shared/protocol.js', imp
 const PRODUCER_TREE = fileURLToPath(new URL('../', import.meta.url));
 const PROTOCOL_PATH = 'supabase/functions/_shared/protocol.js';
 const HOUSEHOLD_RELEASE_PATH = 'supabase/functions/mcp/household-release.ts';
-const seatName = release => `c1-controls-runner-${release.slice(0, 8)}`;
+const seatName = (release, pass) => `c1-controls-runner-${release.slice(0, 8)}-${pass}`;
 const uuidOK = id => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id) &&
   id !== '00000000-0000-4000-8000-000000000000';
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
-const seatRequestId = (release, workspace) => `c1_controls_claim_${sha256(`${release}:${workspace}:${seatName(release)}`).slice(0, 40)}`;
+const seatRequestId = (release, workspace, pass) => `c1_controls_claim_${sha256(`${release}:${workspace}:${seatName(release, pass)}`).slice(0, 40)}`;
 const challenge = verifier => createHash('sha256').update(verifier).digest('base64url');
 const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 const exact = (v, keys) => object(v) && Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v, k));
@@ -159,6 +160,7 @@ function options(args) {
   const o = { command: args.shift(), requestMs: 10_000, consentMs: 1_500_000, totalMs: 3_300_000 };
   demand(['consent', 'window', 'final-cleanup', 'probe-credentials'].includes(o.command), 'consent, window, final-cleanup or probe-credentials', 'invalid subcommand');
   const common = ['release-sha', 'cred-dir', 'out', ...(o.command === 'final-cleanup' ? [] : ['workspace-id', 'live-edge-sha']),
+    ...(o.command === 'window' ? ['controls-pass'] : []),
     ...(['consent', 'window'].includes(o.command) ? ['phase'] : [])];
   const allowed = [...common, ...(o.command === 'consent' ? ['pointer-dir', 'prior-consent'] :
     ['window', 'probe-credentials'].includes(o.command) ? ['window', 'window-id', 'consent-receipt', 'human-profile',
@@ -180,6 +182,11 @@ function options(args) {
   demand(/^[a-f0-9]{40}$/.test(o['release-sha'] ?? ''), '40 hex release SHA', 'invalid SHA');
   if (o.command !== 'final-cleanup') demand(/^[a-f0-9]{40}$/.test(o['live-edge-sha'] ?? ''), '40 hex live edge SHA', 'missing or invalid SHA');
   demand(['final-cleanup', 'probe-credentials'].includes(o.command) || (o.command === 'consent' ? ['pre-W1', 'post-W5'] : ['before', 'after', 'recovery']).includes(o.phase), 'valid phase', 'invalid phase');
+  if (o.command === 'window') {
+    demand(typeof o['controls-pass'] === 'string', 'required --controls-pass', 'missing --controls-pass');
+    demand(o['controls-pass'].length === 8 && /^[a-z0-9]{8}$/.test(o['controls-pass']),
+      '8 lowercase alphanumeric controls pass', 'invalid --controls-pass');
+  }
   const required = [...common, ...(o.command === 'consent' ? ['pointer-dir', ...(o.phase === 'post-W5' ? ['prior-consent'] : [])] :
     ['window', 'probe-credentials'].includes(o.command) ? ['window', 'window-id', 'consent-receipt', 'human-profile',
       ...(o.command === 'window' ? ['seat-profile'] : [])] : ['consent-receipt'])];
@@ -320,8 +327,8 @@ function plan(o) {
   else requests.push(
     { method: 'POST', url: '<token endpoint>', body: 'refresh retained CIMD grant' },
     { method: 'POST', url: RESOURCE, rpc: 'initialize, notifications/initialized, tools/list' },
-    { method: 'POST', url: RESOURCE, rpc: 'tools/call claim_seat', name: seatName(o['release-sha']), workspace_id: o['workspace-id'],
-      request_id: seatRequestId(o['release-sha'], o['workspace-id']),
+    { method: 'POST', url: RESOURCE, rpc: 'tools/call claim_seat', name: seatName(o['release-sha'], o['controls-pass']), workspace_id: o['workspace-id'],
+      request_id: seatRequestId(o['release-sha'], o['workspace-id'], o['controls-pass']),
       report: `${o.out}.report.json` },
     { method: 'POST', url: '<registration endpoint>', body: 'fresh public client; journal id immediately' },
     { method: 'GET', url: CLIENT }, { method: 'GET', url: '<authorize endpoint>', expected: '303 /interaction/, no consent click' },
@@ -447,7 +454,7 @@ async function run(o) {
         exactMcpToolSet(names, expected), 'exact ordinary MCP tool set');
       if (claimSeat) {
         leg = 'seat_setup';
-        const name = seatName(release), requestId = seatRequestId(release, o['workspace-id']);
+        const name = seatName(release, o['controls-pass']), requestId = seatRequestId(release, o['workspace-id'], o['controls-pass']);
         const claim = await rpc(3, 'tools/call', { name: 'claim_seat', arguments: {
           workspace_id: o['workspace-id'], name, request_id: requestId,
         } });
@@ -458,6 +465,7 @@ async function run(o) {
         demand(seat.workspace_id === o['workspace-id'] && seat.name === name && uuidOK(seat.seat_id) &&
           typeof seat.handle === 'string' && /^seat_[A-Za-z0-9_-]{22,64}$/.test(seat.handle), 'claimed test seat identity');
         await writePrivate(`${o.out}.report.json`, JSON.stringify({ kind: 'c1-controls-run', release_sha: release,
+          controls_pass: o['controls-pass'],
           live_edge_sha: o['live-edge-sha'],
           window_id: o['window-id'], window: o.window, phase: o.phase, measured_at: new Date().toISOString(), producer_sha256: producer,
           workspace_id: o['workspace-id'], seat: { name, request_id: requestId, seat_id: seat.seat_id, handle: seat.handle } }, null, 2) + '\n');
