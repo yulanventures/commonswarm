@@ -370,6 +370,7 @@ test("participant navigation has no person presence dot and gives agents measure
         models: [["atlas", "Claude"], ["away", "GPT-6.1"]],
       });
   assert.equal((rail.innerHtml.match(/class="hm-agent-orb"/g) ?? []).length, 3);
+  assert.doesNotMatch(rail.innerHtml, /presence/);
   const knownRow = rail.innerHtml.match(/<button\b[^>]*data-rail-agent="atlas"[\s\S]*?<\/button>/u)?.[0];
   assert.ok(knownRow);
   assert.equal((knownRow.replace(/<[^>]*>/gu, "").match(/Claude/gu) ?? []).length, 1, "visible row text names the model family once");

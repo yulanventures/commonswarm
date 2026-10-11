@@ -125,7 +125,7 @@ export function modelFamilyTag(doc: Document, family: ModelFamily | null, model?
   for (const [name, value] of [["viewBox", "0 0 10 10"], ["width", "10"], ["height", "10"],
     ["fill", "currentColor"], ["stroke", "currentColor"], ["aria-hidden", "true"], ["focusable", "false"]]) svg.setAttribute(name, value);
   const shape = doc.createElementNS(SVG_NS, "polygon");
-  const attributes = { points: family === "claude" ? "1.5,1.5 8.5,1.5 5,8.5"
+  const attributes = { points: family === "claude" ? "1.5,1.5 1.5,8.5 8.5,8.5"
     : family === "openai" ? "1,3 9,3 9,7 1,7"
     : family === "gemini" ? "5,1.5 8.5,8.5 1.5,8.5" : "1,1 5,4 9,1 9,9 5,6 1,9" };
   for (const [name, value] of Object.entries(attributes)) shape.setAttribute(name, value);

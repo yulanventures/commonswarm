@@ -14,7 +14,7 @@ assert.ok(style, "LiveDashboard must expose its component stylesheet to the geom
 
 type Geometry = { width: number; listWidth: number; detailWidth: number; rowOverflow: boolean; touchTargets: boolean;
   rowFamilyText: string; rowFamilyName: string; detailFamilyText: string; unknownFamilyTags: number;
-  modelClipped: boolean; modelTitle: string; modelText: string; familyVisible: boolean;
+  modelClipped: boolean; modelTitle: string; modelText: string; familyVisible: boolean; shortFamilyGap: number;
   hostileElements: number; hostileText: boolean; accessMark: string | null; localAccessMark: string | null; hostedRowLabel: string | null; hostedDetailText: string; modelValues: (string | null)[];
   confirmRole: string | null; safeConfirmFocus: boolean; detailTouchTargets: boolean; closeIconSize: number; backIconSize: number; cancelRestoresOpener: boolean; outerStillOpen: boolean; technicalClosed: boolean };
 
@@ -46,7 +46,8 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
           receive: 'Checks messages when you chat with it.', lastActive: '15 days ago', technical: ['Agent ID: agent'], updateAvailable: false, access: { until: null }, accessReadState: 'succeeded', receipt: '' };
         const local = { ...agent, id: 'local', name: 'Local Agent', model: null, app: 'Codex', hosted: false, liveKey: false, key: null,
           status: { kind: 'active', label: 'Active', sentence: '', attention: false, fix: null }, updateAvailable: false };
-        const model = { people: [{ id: 'person', name: 'Mei Langridge', role: 'member', own: true, mayRemove: false }], agents: [agent, local], invites: [], sample: false, pendingFailed: false };
+        const short = { ...local, id: 'short', name: 'Short Model Agent', model: 'Claude' };
+        const model = { people: [{ id: 'person', name: 'Mei Langridge', role: 'member', own: true, mayRemove: false }], agents: [agent, local, short], invites: [], sample: false, pendingFailed: false };
         const state = { selected: null, collapsed: new Set(), showAllAttention: false, query: '' };
         const outer = document.querySelector('[data-roster-dialog]'), roster = document.querySelector('#roster'), detail = document.querySelector('#detail'), confirm = document.querySelector('#confirm');
         const modelValues = [];
@@ -65,6 +66,10 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         const modelText = modelLine.querySelector('.pd-ellipsis'), family = modelLine.querySelector('.hm-model-family');
         const modelClipped = modelText.scrollWidth > modelText.clientWidth && getComputedStyle(modelText).textOverflow === 'ellipsis' && getComputedStyle(modelText).whiteSpace === 'nowrap';
         const familyVisible = family.getBoundingClientRect().right <= modelLine.getBoundingClientRect().right && family.querySelector('svg').getAttribute('aria-hidden') === 'true';
+        // Short labels must keep the reported tag beside the model, even when the row has free space.
+        const shortModelLine = roster.querySelector('[data-agent-row="short"] .pd-agent-model');
+        const shortModelText = shortModelLine.querySelector('.pd-ellipsis'), shortFamily = shortModelLine.querySelector('.hm-model-family');
+        const shortFamilyGap = shortFamily.getBoundingClientRect().left - shortModelText.getBoundingClientRect().right;
         const unknownFamilyTags = roster.querySelectorAll('[data-agent-row="local"] .hm-model-family').length;
         roster.querySelector('#pd-agent-agent').click();
         const detailWidth = outer.getBoundingClientRect().width;
@@ -84,7 +89,7 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         confirm.dispatchEvent(new Event('cancel', { cancelable: true, bubbles: true }));
         const metrics = { width: innerWidth, listWidth, detailWidth, rowOverflow, touchTargets, detailTouchTargets, closeIconSize, backIconSize, hostileElements: document.querySelectorAll('img').length,
           rowFamilyText, rowFamilyName, detailFamilyText, unknownFamilyTags,
-          modelClipped, modelTitle:modelLine.title, modelText:modelText.textContent, familyVisible,
+          modelClipped, modelTitle:modelLine.title, modelText:modelText.textContent, familyVisible, shortFamilyGap,
           hostileText: detail.querySelector('h2').textContent.includes(hostile), accessMark, localAccessMark, hostedRowLabel, hostedDetailText, modelValues, confirmRole, safeConfirmFocus,
           cancelRestoresOpener: document.activeElement === opener, outerStillOpen: outer.open, technicalClosed: !detail.querySelector('details').open };
         document.documentElement.dataset.metrics = btoa(unescape(encodeURIComponent(JSON.stringify(metrics))));
@@ -108,6 +113,7 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
       assert.equal(geometry.modelClipped, true, `${width}px a long model label stays on one ellipsis line`);
       assert.equal(geometry.modelTitle, geometry.modelText); assert.match(geometry.modelText, /^Claude Opus 5\.5 listener label/);
       assert.equal(geometry.familyVisible, true, `${width}px model clipping leaves the decorative shape and reported tag visible`);
+      assert.ok(geometry.shortFamilyGap >= 0 && geometry.shortFamilyGap <= 8, `${width}px the reported tag stays within 8px of the short model text`);
       assert.equal(geometry.accessMark, null, `${width}px a hosted agent's row draws no Lists & docs access mark`);
       assert.equal(geometry.localAccessMark, "Can use Lists & docs", `${width}px a local agent's row keeps the access mark`);
       assert.ok(geometry.hostedRowLabel?.endsWith(HOSTED_LISTS_NOTE), `${width}px the hosted row's accessible name carries the hosted note`);

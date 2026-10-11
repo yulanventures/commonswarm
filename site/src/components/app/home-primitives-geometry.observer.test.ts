@@ -109,10 +109,20 @@ test("home primitives have 44px targets, plain text and distinct family shapes a
           assert.equal(tag.hidden, "true"); assert.equal(tag.width, 10); assert.equal(tag.stroke, "currentColor");
           assert.equal(tag.fill, "currentColor", "solid geometry stays distinct from the hollow idle ring at 1x");
           assert.equal(tag.vendorPaths, 0); assert.equal(tag.statusOrLegendShapes, 0, "family geometry is distinct from status and legend shapes");
+          if (tag.points.length === 3) {
+            const menuTriangle = tag.points.some((apex: number[], i: number, points: number[][]) => {
+              const a = points[(i + 1) % 3], b = points[(i + 2) % 3];
+              const down = a[1] === b[1] && apex[0] === (a[0] + b[0]) / 2 && apex[1] > a[1];
+              const right = a[0] === b[0] && apex[1] === (a[1] + b[1]) / 2 && apex[0] > a[0];
+              return down || right;
+            });
+            assert.equal(menuTriangle, false, "family triangles must not resemble down or right menu carets");
+          }
         }
         const [claude, openai, gemini, grok] = m.familyTags.map((tag: { points: number[][] }) => tag.points);
         assert.equal(claude.length, 3); assert.equal(gemini.length, 3);
-        assert.equal(claude[0][1], claude[1][1]); assert.ok(claude[2][1] > claude[0][1], "Claude points down");
+        assert.equal(claude[0][0], claude[1][0]); assert.equal(claude[1][1], claude[2][1]);
+        assert.ok(claude[0][1] < claude[1][1] && claude[1][0] < claude[2][0], "Claude is a right-angle wedge at the lower left");
         assert.equal(gemini[1][1], gemini[2][1]); assert.ok(gemini[0][1] < gemini[1][1], "Gemini points up");
         assert.equal(openai.length, 4);
         const extent = (points: number[][], axis: number) => Math.max(...points.map(p => p[axis])) - Math.min(...points.map(p => p[axis]));

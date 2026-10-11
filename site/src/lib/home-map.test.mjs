@@ -768,13 +768,13 @@ test("workspace identifiers extend past a shared UUID prefix", async () => {
 });
 
 test("the rail lists everyone the viewer shares a loaded workspace with, each person once, viewer first", async () => {
-  const { homeRailPeople, catchUpRailPeople } = await import("./home-map.ts");
+  const { homeRailPeople } = await import("./home-map.ts");
   const { orderRailPeople } = await import("./home-rail.ts");
   const base = { viewerId: "zoe", now, sample: false, access: [], signals: [] };
   const zoe = { userId: "zoe", name: "Zoe", role: "owner" }, amy = { userId: "amy", name: "Amy Ash", role: "member" }, bo = { userId: "bo", name: "Bo", role: "member" };
   const home = mapHomePeople({ ...base, members: [zoe, amy], agents: [{ principalId: "A", name: "Claude", ownerUserId: "zoe" }, { principalId: "M", name: "Muse", ownerUserId: "amy" }] });
   const trip = mapHomePeople({ ...base, members: [amy, zoe, bo], agents: [{ principalId: "M", name: "Muse", ownerUserId: "amy" }, { principalId: "G", name: "Grok", ownerUserId: "bo" }, { principalId: "E", name: "Echo", ownerUserId: "gone" }] });
-  const rail = catchUpRailPeople([{ detail: { people: home } }, {}, { detail: { people: trip } }]);
+  const rail = homeRailPeople([{ detail: { people: home } }, {}, { detail: { people: trip } }]);
   const ordered = orderRailPeople(rail);
   assert.deepEqual(ordered.groups.map(group => group.person.id), ["zoe", "amy", "bo"], "everyone once, the viewer first; no invented people");
   assert.deepEqual(ordered.groups.map(group => group.agents.map(agent => agent.id)), [["A"], ["M"], ["G"]], "an agent in two workspaces appears once");

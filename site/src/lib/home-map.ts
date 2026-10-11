@@ -143,11 +143,6 @@ export function homeRailPeople(entries: readonly { detail?: { people?: HomePeopl
   return result;
 }
 
-/** Catch up's rail: every person and agent from the workspaces Catch up has read. */
-export function catchUpRailPeople(entries: readonly { detail?: { people?: HomePeople } }[]): HomePeople {
-  return homeRailPeople(entries);
-}
-
 /** Membership is checked before a workspace is opened. A foreign address falls back to boot. */
 export function homeBootRoute(workspaces: readonly HomeWorkspace[]): HomeRoute {
   return workspaces.length === 1 ? { view: "chat", workspaceId: workspaces[0].id } : { view: "catchup" };

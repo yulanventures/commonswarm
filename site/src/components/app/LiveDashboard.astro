@@ -15635,6 +15635,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
    * every edge inside the frame was set transparent, the result was looked at, and the ones that
    * were MISSED were restored. Nothing here is a guess about what looks better.
    *
+   * One survives:
    *   .dashboard__composer-input — a text field has to look like a text field. It is the one
    *     place a user is expected to click INTO rather than ON, and nothing else marks it.
    *
@@ -16184,7 +16185,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   .pd-agent-app { font-size: 12px; color: var(--text-muted); }
   /* Model text clips like the rail; the reported neutral tag keeps its own width. */
   .pd-agent-model { display: flex; align-items: center; gap: 6px; min-inline-size: 0; }
-  .pd-agent-model > .pd-ellipsis { flex: 1; }
   .pd-agent-model > .hm-model-family { flex: none; }
   .pd-access-mark { flex: none; color: var(--text-muted); font-size: 14px; }
   .pd-row-arrow { color: var(--text-muted); align-self: center; }

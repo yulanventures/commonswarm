@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { foldIdentityName } from "./identity-label.ts";
 import { disambiguateVisibleLabels } from "./home-visible-labels.ts";
 import { catchUpSubline } from "./home-catchup.ts";
-import { mapHomePeople, homeNeedsYouCount, catchUpRailPeople, homeRailPeople, catchUpDetailFromOverview, mapHomeRail, mapCatchUp } from "./home-map.ts";
+import { mapHomePeople, homeNeedsYouCount, homeRailPeople, catchUpDetailFromOverview, mapHomeRail, mapCatchUp } from "./home-map.ts";
 import { agentAccessibleName } from "./home-primitives.ts";
 import { buildHomeRail, railAgentName } from "./home-rail.ts";
 
@@ -352,19 +352,19 @@ test("Catch up suffixes two own agents that were unique inside different workspa
   const trip = mapHomePeople({ ...base, agents: [{ principalId: claudeB, name: "Claude", ownerUserId: "zoe" }] });
   assert.equal(home.groups[0].agents[0].nestedLabel, "Claude");
   assert.equal(trip.groups[0].agents[0].nestedLabel, "Claude");
-  const rail = catchUpRailPeople([{ detail: { people: home } }, { detail: { people: trip } }]);
+  const rail = homeRailPeople([{ detail: { people: home } }, { detail: { people: trip } }]);
   // The Catch-up rail now joins everyone the viewer shares a workspace with (canvas Main artboard), so the title is the
   // ruled section name, not "You and your agents".
   assert.equal(rail.title, "People & agents");
   assert.deepEqual(rail.groups[0].agents.map(agent => agent.nestedLabel), ["Claude · 3dab8f40", "Claude · 9c0e1a22"]);
   assert.equal(home.groups[0].agents[0].nestedLabel, "Claude", "the workspace label stays bare");
   assert.equal(trip.groups[0].agents[0].nestedLabel, "Claude");
-  const same = catchUpRailPeople([{ detail: { people: home } }, { detail: { people: home } }]);
+  const same = homeRailPeople([{ detail: { people: home } }, { detail: { people: home } }]);
   assert.deepEqual(same.groups[0].agents.map(agent => [agent.id, agent.nestedLabel]), [[claudeA, "Claude"]]);
   const museHome = mapHomePeople({ ...base, agents: [{ principalId: muse, name: "Muse", ownerUserId: "zoe" }] });
-  const distinct = catchUpRailPeople([{ detail: { people: home } }, { detail: { people: museHome } }]);
+  const distinct = homeRailPeople([{ detail: { people: home } }, { detail: { people: museHome } }]);
   assert.deepEqual(distinct.groups[0].agents.map(agent => agent.nestedLabel), ["Claude", "Muse"]);
-  // Since be00f9b8 every route's rail is homeRailPeople(catchUpData, current) (catchUpRailPeople is its Catch-up form); the same
+  // Since be00f9b8 every route's rail is homeRailPeople(catchUpData, current); the same
   // suffix rule must hold when a workspace view's own people are read first.
   const joined = homeRailPeople([{ detail: { people: home } }, { detail: { people: trip } }], home);
   assert.deepEqual(joined.groups[0].agents.map(agent => agent.nestedLabel), ["Claude · 3dab8f40", "Claude · 9c0e1a22"]);
