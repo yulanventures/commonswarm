@@ -7,6 +7,7 @@ import { HOUSEHOLD_TOOLS, HouseholdToolInputError, validateHouseholdToolArgument
   type HouseholdToolHostContext } from '../protocol/household-tool-registry.js';
 import { HouseholdObjectClient, type HouseholdClientResult, type HouseholdPreparedRequest } from '../cloud/household-objects.js';
 import { MCP_RESULT_MAX_BYTES } from './tools.js';
+import { householdRefusalNextStep } from '../protocol/household-next-steps.js';
 
 export const HOUSEHOLD_MCP_TOOLS: typeof HOUSEHOLD_TOOLS = HOUSEHOLD_TOOLS;
 export interface HouseholdMcpResult {
@@ -28,7 +29,7 @@ function householdMcpResult(result: HouseholdClientResult): HouseholdMcpResult {
     : result.status === 'conflict' ? 'kind' in result && result.kind === 'todo'
       ? 'Read the current to-do and review the change. Submit it with the current version and a new request_id.'
       : 'Recover the retained draft, read the current revision, and review the merge. Submit the reviewed patch with a new request_id.'
-    : result.status === 'refused' ? 'Resolve the refusal before submitting another request.'
+    : result.status === 'refused' ? householdRefusalNextStep(result.reason) ?? 'Resolve the refusal before submitting another request.'
     : result.status === 'ok' && result.kind === 'object_read' && result.revision.kind === 'file'
       ? 'File metadata is available. Use the host protected attachment channel for bytes; access must be rechecked.' : null;
   const output = { ...result, next_action };
