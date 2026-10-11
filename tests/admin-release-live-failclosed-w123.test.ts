@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 
@@ -1028,10 +1028,10 @@ after(() => {
   assert.equal(dirname(scratch), realpathSync(tmpdir()));
   assert.match(basename(scratch), /^admin-live-w123-[A-Za-z0-9]{6}$/);
   assert.equal(realpathSync(scratch), scratch);
-  const home = realpathSync(homedir());
+  const home = realpathSync(userInfo().homedir);
   assert.ok(scratch !== home && !scratch.startsWith(home + '/'));
   const removed = spawnSync('rm', ['-r', '--', scratch], {
-    encoding: 'utf8', env: { ...process.env, PATH: join(homedir(), '.local/bin') + ':' + process.env.PATH },
+    encoding: 'utf8', env: { ...process.env, PATH: join(home, '.local/bin') + ':' + process.env.PATH },
   });
   assert.equal(removed.status, 0, `guard refused cleanup ${scratch}: ${removed.stderr}`);
 });

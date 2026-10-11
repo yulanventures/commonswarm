@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync,
   statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
 import { ADMIN_READ_RESOURCES } from '../src/cloud/admin-delegations-contract.js';
@@ -24,7 +24,7 @@ const block = (step: string) => {
 const hash = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
 const temporaryRoot = realpathSync(tmpdir());
 const scratch = realpathSync(mkdtempSync(join(temporaryRoot, 'admin-w4b-')));
-const realHome = realpathSync(homedir());
+const realHome = realpathSync(userInfo().homedir);
 assert.equal(dirname(scratch), temporaryRoot);
 assert.ok(scratch !== realHome && !scratch.startsWith(realHome + sep));
 after(() => {
@@ -187,7 +187,7 @@ if name=='python3':
         head,tail=source.split('commonswarm_account=measure_inert()',1)
         exec(compile(head,'<complete-plan-block>','exec'),namespace)
         audit_owned_dirs.update(namespace['COMMONSWARM_OWNED_PATHS'])
-        namespace.update(account_entry=lambda: types.SimpleNamespace(pw_name='commonswarm',pw_uid=1002,pw_gid=1002),
+        namespace.update(account_entry=lambda name='commonswarm': types.SimpleNamespace(pw_name=name,pw_uid=1002 if name=='commonswarm' else 1000,pw_gid=1002 if name=='commonswarm' else 1000),
             group_entry=lambda gid: types.SimpleNamespace(gr_mem=[]),passwd_entries=lambda: [],proc_pids=lambda: [],docker_output=lambda argv: '')
         source='commonswarm_account=measure_inert()'+tail
     exec(compile(source,'<complete-plan-block>','exec'),namespace)
@@ -573,7 +573,7 @@ function fixture(config: Record<string, unknown> = {}, options: { mode?: string;
   const dir = (path: string, dirMode = 0o700) => { mkdirSync(join(root, path), { recursive: true, mode: dirMode }); chmodSync(join(root, path), dirMode); };
   for (const d of ['bin', 'stage', 'proof', 'tmp', 'mac-tmp', 'edge/releases', 'admin-issuance/releases', 'etc/caddy/sites', 'box', 'inputs', 'var-lib-release']) dir(d);
   dir('audit-box-ancestor', 0o755);
-  dir('libexec', 0o755); dir('systemd', 0o755); dir('tmpfiles.d', 0o755);
+  dir('libexec', 0o711); dir('systemd', 0o755); dir('tmpfiles.d', 0o755);
   put('bin/_dispatch', dispatcher, 0o700);
   for (const name of ['python3', 'systemctl', 'ai_db', 'ai_ro', 'docker', 'date', 'hostname', 'sha256sum', 'rm', 'rmdir', 'awk', 'mkdir', 'cp', 'chmod',
     'caddy', 'ai_deadline', 'ai_run', 'cmp', 'ln', 'mv', 'timeout', 'install', 'readlink', 'cat', 'stat', 'dirname', 'node', 'ssh', 'scp', 'curl', 'git', 'sudo',
@@ -615,7 +615,7 @@ function fixture(config: Record<string, unknown> = {}, options: { mode?: string;
     put('admin-release/recycle.json', JSON.stringify(binding, null, 0) + '\n', 0o600);
     put('admin-release/recycle-intent.json', '{"reopen": false, "generation": 7}\n', 0o600);
     put('libexec/commonswarm-admin-edge-recycle', mode === 'accept-existing' ? candidateHook : legacyHook, 0o700);
-    dir(`systemd/${service}.d`, 0o755);
+    dir(`systemd/${service}.d`, 0o700);
     put(`systemd/${service}.d/50-admin-measurement.conf`, reviewedDropin(root), 0o644);
   }
   put(`systemd/${service}`, '[Service]\nType=oneshot\nExecStart=/usr/bin/docker restart commonswarm-edge-edge-runtime-1\n', 0o644);
@@ -1065,6 +1065,7 @@ test('A1 / recycle-install-modes: fresh, accept-existing and upgrade-existing ar
     pass(r, mode);
     assert.equal(readFileSync(join(f.root, 'libexec/commonswarm-admin-edge-recycle'), 'utf8'), candidateHook, `${mode}: the candidate hook is installed`);
     assert.equal(readFileSync(join(f.root, `systemd/${service}.d/50-admin-measurement.conf`), 'utf8'), reviewedDropin(f.root), `${mode}: the reviewed drop-in`);
+    assert.equal(statSync(join(f.root, `systemd/${service}.d`)).mode & 0o7777, 0o700, `${mode}: measured root-private drop-in directory`);
     const binding = JSON.parse(readFileSync(join(f.root, 'admin-release/recycle.json'), 'utf8'));
     assert.deepEqual(Object.keys(binding).sort(), ['archive', 'artifact_digest', 'image_digest', 'postgres_image', 'release_root', 'release_sha', 'target']);
     assert.equal(binding.archive, join(f.root, 'var-lib-admin-release/archives', `${sha}-${wid}.tar`), `${mode}: bound to the durable archive`);
@@ -1530,7 +1531,7 @@ test('X2 / lock-order-receipts-refuse: each rule refuses its drifted receipt, in
 test('#12 / w4-rollback-created-directories: a W4-created drop-in or config directory ends absent; a pre-existing one ends present', () => {
   for (const [label, prepare, expectDropin, expectConfig] of [
     ['W4 created the drop-in directory', (_f: Fixture) => {}, false, true],
-    ['the drop-in directory pre-existed (empty)', (f: Fixture) => { mkdirSync(join(f.root, `systemd/${service}.d`), { mode: 0o755 }); chmodSync(join(f.root, `systemd/${service}.d`), 0o755); }, true, true],
+    ['the drop-in directory pre-existed (empty)', (f: Fixture) => { mkdirSync(join(f.root, `systemd/${service}.d`), { mode: 0o700 }); chmodSync(join(f.root, `systemd/${service}.d`), 0o700); }, true, true],
     ['W4 created the config directory too', (f: Fixture) => { spawnSync('rmdir', ['--', join(f.root, 'admin-release')]); }, false, false],
   ] as const) {
     const f = fixture({}, { mode: 'fresh' });
@@ -2009,7 +2010,7 @@ def translate(path):
     assert isinstance(path,str) and path.startswith('/'), 'absolute box paths only'
     return root+path if path!='/' else root
 def lstat(path):
-    st=real_lstat(translate(path)); default=1002 if path in ('/home/commonswarm','/home/commonswarm/edge','/home/commonswarm/edge/releases','/home/commonswarm/.env') else 1000 if path.startswith('/tmp/admin-issuance-'+('b'*40)+'-') else 0
+    st=real_lstat(translate(path)); default=1002 if path in ('/home/commonswarm','/home/commonswarm/edge','/home/commonswarm/edge/releases','/home/commonswarm/.env') else 1000 if path=='/tmp/admin-issuance-'+('b'*40)+'-E3571B.tar' else 0
     owner=request.get('owners',{}).get(path,default)
     group=request.get('groups',{}).get(path,default)
     return os.stat_result((st.st_mode,st.st_ino,st.st_dev,st.st_nlink,owner,group,st.st_size,st.st_atime,st.st_mtime,st.st_ctime))
@@ -2027,7 +2028,10 @@ head,tail=source.split('commonswarm_account=measure_inert()',1)
 namespace={'__name__':'__main__'}; exec(compile(head,'<C-W4-path-preflight>','exec'),namespace)
 observations=request.get('observations',{}); calls={}
 def called(name): calls[name]=calls.get(name,0)+1
-def account():
+def account(name='commonswarm'):
+    if name!='commonswarm':
+        if name!='ops' or observations.get('missing_keeper_account'): raise KeyError(name)
+        return types.SimpleNamespace(pw_uid=1000,pw_gid=1000)
     called('account')
     if observations.get('missing_account'): raise KeyError('fixture missing account')
     return types.SimpleNamespace(pw_name='commonswarm',pw_uid=1002,pw_gid=1002)
@@ -2080,11 +2084,12 @@ function auditFixture() {
     }
   }
   put(values.INPUTS_FILE!, JSON.stringify({ release_sha: sha, baseline_edge_sha: baseline, window_id: wid, edge_recycle_service: service,
-    recycle_install_mode: 'upgrade-existing', keeper_install_vars_path: values.keeper_vars }));
-  put(values.RECYCLE_BASELINE_FILE!, JSON.stringify({ archive: { path: values.legacy_archive, uid: 1000, gid: 1000, mode: '0600' } }));
+    recycle_install_mode: 'upgrade-existing', keeper_install_vars_path: values.keeper_vars, keeper_upload_owner: 'ops' }));
+  put(values.RECYCLE_BASELINE_FILE!, JSON.stringify({ archive: { path: values.legacy_archive, uid: 1000, gid: 1000, mode: '0600' }, edge: { archive: { path: values.fresh_baseline_archive } } }));
   chmodSync(root + '/var/lib/commonswarm-admin-release/w4', 0o700);
   chmodSync(root + `/var/lib/commonswarm-admin-release/w4/${wid}`, 0o700);
   chmodSync(root + '/tmp', 0o1777); // Linux box contract; only this exact directory has the sticky exception.
+  chmodSync(root + '/usr/local/libexec', 0o711); chmodSync(root + `/etc/systemd/system/${service}.d`, 0o700);
   const run = (source = pathAuditPython(), owners: Record<string, number> = {}, groups: Record<string, number> = {}, observations: Record<string, unknown> = {}) => spawnSync('/usr/bin/python3', ['-c', auditRunner], {
     input: JSON.stringify({ root, source, owners, groups, observations, argv: ['INPUTS_FILE', 'RECYCLE_BASELINE_FILE', 'PROOF_DIR', 'SECRET_STAGE', 'PLAN_FILE', 'BOX_ARCHIVE_PATH'].map(k => values[k]) }), encoding: 'utf8',
   });
@@ -2098,7 +2103,27 @@ function auditFixture() {
     };
     walk(root); return entries;
   };
-  return { root, values, rows, objects, put, run, snapshot, receipt: root + proof + '/w4-path-preflight.json' };
+  const receipt = root + proof + '/w4-path-preflight.json';
+  // Shared raw filesystem changes and refusal proof; the plan still owns every enforcement decision.
+  const tamper = (path: string, change: string | number): [Record<string, number>, Record<string, number>] => {
+    const disk = root + path, owners: Record<string, number> = {}, groups: Record<string, number> = {};
+    if (typeof change === 'number') chmodSync(disk, change);
+    else if (change === 'owner' || change === 'root-owner') owners[path] = change === 'owner' ? 1003 : 0;
+    else if (change === 'group') groups[path] = 1003;
+    else if (change === 'links') linkSync(disk, disk + '.link');
+    else { renameSync(disk, disk + '.real'); if (change === 'symlink') symlinkSync(disk + '.real', disk);
+      if (change === 'file') writeFileSync(disk, 'other\n', { mode: 0o600 }); if (change === 'dir') mkdirSync(disk, { mode: 0o700 }); }
+    return [owners, groups];
+  };
+  const reject = (path: string, property: string, ...args: Parameters<typeof run>) => {
+    const before = snapshot(), r = run(...args); refused(r, `${path} failed ${property}; STOP`);
+    assert.doesNotMatch(r.stderr, /Traceback/); assert.deepEqual(snapshot(), before);
+    assert.ok(!existsSync(receipt) && !existsSync(join(root, 'mutation-sentinel')));
+    const { inert_checks, ...failure } = JSON.parse(r.stdout);
+    assert.deepEqual(failure, { kind: 'c1-w4-path-preflight', result: 'STOP', path, failed_property: property, audit_base: 'a438c6ea' });
+    return inert_checks;
+  };
+  return { root, values, rows, objects, put, run, snapshot, tamper, reject, receipt };
 }
 
 test('Fix round 3b / full audit list passes; fix-3c sticky /tmp and unsafe owner, modes, types and symlinks stop before any fixture mutation', () => {
@@ -2111,43 +2136,27 @@ test('Fix round 3b / full audit list passes; fix-3c sticky /tmp and unsafe owner
   assert.ok(receipt.paths.some((p: any) => p.path.includes('.new.rollback.FixtureABC')));
   assert.ok(existsSync(join(good.root, 'mutation-sentinel')));
   assert.equal(lstatSync(good.receipt).mode & 0o777, 0o600);
-  for (const [kind, path, property] of [
-    ['group-ancestor', '/home/commonswarm', 'not-group-writable'],
-    ['world-file', '/etc/commonswarm-admin-release/recycle.json', 'not-world-writable'],
-    ['non-root', '/var/lib/commonswarm-admin-release/archives.json', 'owner-uid-0'],
-    ['symlink-directory', '/var/lib/commonswarm-admin-release/archives', 'not-symlink'],
-    ['symlink-ancestor', '/usr/local', 'not-symlink'],
-    ['tmp-no-sticky', '/tmp', 'mode-exact-01777'],
-    ['tmp-private-mode', '/tmp', 'mode-exact-01777'],
-    ['tmp-non-root', '/tmp', 'owner-uid-0'],
-    ['tmp-non-root-group', '/tmp', 'group-gid-0'],
-    ['symlink-tmp', '/tmp', 'not-symlink'],
-    ['tmp-child-writable', '/tmp/anvil-secret.Stage1', 'not-group-writable'],
-    ['precreated-non-root', good.values.legacy_archive!, 'keeper-upload-owner-uid-gid'],
-    ['file-as-directory', '/var/lib/commonswarm-release', 'directory'],
-    ['directory-as-file', '/etc/commonswarm-admin-release/recycle.json', 'regular-file'],
-    ['missing-required', '/etc/commonswarm-release/target.env', 'missing-required-path'],
-  ]) {
-    const f = auditFixture(), p = f.root + path!, owners: Record<string, number> = {}, groups: Record<string, number> = {};
-    if (kind === 'group-ancestor') chmodSync(p, 0o775);
-    if (kind === 'world-file') chmodSync(p, 0o602);
-    if (kind === 'tmp-no-sticky') chmodSync(p, 0o777);
-    if (kind === 'tmp-private-mode') chmodSync(p, 0o755);
-    if (kind === 'tmp-child-writable') chmodSync(p, 0o1777);
-    if (kind === 'non-root' || kind === 'tmp-non-root' || kind === 'precreated-non-root') owners[path!] = 1001;
-    if (kind === 'tmp-non-root-group') groups[path!] = 1001;
-    if (kind!.startsWith('symlink')) { renameSync(p, p + '.real'); symlinkSync(p + '.real', p); }
-    if (kind === 'file-as-directory') { renameSync(p, p + '.real'); writeFileSync(p, 'other\n', { mode: 0o600 }); }
-    if (kind === 'directory-as-file') { renameSync(p, p + '.real'); mkdirSync(p, { mode: 0o700 }); }
-    if (kind === 'missing-required') renameSync(p, p + '.saved');
-    const before = f.snapshot(), r = f.run(undefined, owners, groups);
-    assert.notEqual(r.status, 0, `${kind}: ${path} must STOP`);
-    refused(r, `${path} failed ${property}; STOP`);
-    assert.deepEqual(f.snapshot(), before, `${kind}: no fixture entry, bytes, inode, owner, mode or mtime changed`);
-    assert.ok(!existsSync(f.receipt) && !existsSync(join(f.root, 'mutation-sentinel')), kind);
-    const { inert_checks, ...failure } = JSON.parse(r.stdout);
-    assert.deepEqual(failure, { kind: 'c1-w4-path-preflight', result: 'STOP', path, failed_property: property, audit_base: 'a438c6ea' });
-    assert.equal(Object.keys(inert_checks).length, 3);
+  for (const [change, path, property] of [
+    [0o775, '/home/commonswarm', 'not-group-writable'],
+    [0o602, '/etc/commonswarm-admin-release/recycle.json', 'not-world-writable'],
+    ['owner', '/var/lib/commonswarm-admin-release/archives.json', 'owner-uid-0'],
+    ['symlink', '/var/lib/commonswarm-admin-release/archives', 'not-symlink'],
+    ['symlink', '/usr/local', 'not-symlink'],
+    [0o777, '/tmp', 'mode-exact-01777'], [0o755, '/tmp', 'mode-exact-01777'],
+    ['owner', '/tmp', 'owner-uid-0'], ['group', '/tmp', 'group-gid-0'], ['symlink', '/tmp', 'not-symlink'],
+    [0o1777, '/tmp/anvil-secret.Stage1', 'not-group-writable'],
+    ['owner', good.values.legacy_archive!, 'keeper-upload-owner-uid-gid'],
+    ['file', '/var/lib/commonswarm-release', 'directory'],
+    ['dir', '/etc/commonswarm-admin-release/recycle.json', 'regular-file'],
+    ['missing', '/etc/commonswarm-release/target.env', 'missing-required-path'],
+    ...(['/usr/local/libexec', `/etc/systemd/system/${service}.d`] as const).flatMap(path => [
+      ['owner', path, 'owner-uid-0'], ['group', path, 'group-gid-0'],
+      [0o755, path, path.endsWith('.d') ? 'mode-exact-0700' : 'mode-exact-0711'],
+      ['missing', path, path.endsWith('.d') ? 'missing-drop-in-directory-no-reviewed-create-step' : 'missing-required-path'],
+    ] as const),
+  ] as const) {
+    const f = auditFixture();
+    assert.equal(Object.keys(f.reject(path, property, undefined, ...f.tamper(path, change))).length, 3);
   }
   // Only a path C creates later may be missing; its checked existing parent remains in the PASS receipt.
   const missing = auditFixture(), log = missing.root + '/var/lib/commonswarm-release/admin-issuance-closed.log';
@@ -2160,34 +2169,42 @@ test('Fix round 3b / full audit list passes; fix-3c sticky /tmp and unsafe owner
 
 test('Fix round 3e / admitted ops archive and inert commonswarm env require exact owner, 0600 and one link; receipt rerun refuses by name', () => {
   const good = auditFixture(); pass(good.run(), 'measured ops archive and commonswarm env positive control');
-  const receipt = JSON.parse(readFileSync(good.receipt, 'utf8'));
-  assert.ok(receipt.paths.some((p: any) => p.path === good.values.legacy_archive && p.uid === 1000 && p.gid === 1000 && p.mode === '0600'));
-  assert.ok(receipt.paths.some((p: any) => p.path === '/home/commonswarm/.env' && p.uid === 1002 && p.gid === 1002 && p.type === 'file' && p.mode === '0600'));
   const beforeRerun = good.snapshot(), rerun = good.run();
   refused(rerun, 'precondition-receipt-already-exists-use-new-proof-directory; STOP');
   assert.doesNotMatch(rerun.stderr, /Traceback/); assert.deepEqual(good.snapshot(), beforeRerun);
-  for (const key of ['legacy_archive', 'env']) for (const change of ['owner', 'group', 'mode', 'links', 'symlink']) {
-    const f = auditFixture(), path = key === 'env' ? '/home/commonswarm/.env' : f.values.legacy_archive!, disk = f.root + path;
-    const owners: Record<string, number> = {}, groups: Record<string, number> = {};
-    let property = key === 'env' ? 'commonswarm-owner-uid-gid' : 'keeper-upload-owner-uid-gid';
-    if (change === 'owner') owners[path] = 1003;
-    if (change === 'group') groups[path] = 1003;
-    if (change === 'mode') { chmodSync(disk, 0o640); property = 'mode-exact-0600'; }
-    if (change === 'links') { linkSync(disk, disk + '.link'); property = 'one-link'; }
-    if (change === 'symlink') { renameSync(disk, disk + '.real'); symlinkSync(disk + '.real', disk); property = 'not-symlink'; }
-    const before = f.snapshot(); refused(f.run(undefined, owners, groups), `${path} failed ${property}; STOP`);
-    assert.deepEqual(f.snapshot(), before); assert.ok(!existsSync(f.receipt) && !existsSync(join(f.root, 'mutation-sentinel')));
+  for (const key of ['legacy_archive', 'env']) for (const change of ['owner', 'group', 0o640, 'links', 'symlink']) {
+    const f = auditFixture(), path = key === 'env' ? '/home/commonswarm/.env' : f.values.legacy_archive!;
+    const property = typeof change === 'number' ? 'mode-exact-0600' : change === 'links' ? 'one-link' : change === 'symlink' ? 'not-symlink'
+      : key === 'env' ? 'commonswarm-owner-uid-gid' : 'keeper-upload-owner-uid-gid';
+    f.reject(path, property, undefined, ...f.tamper(path, change));
   }
-  const noException = auditFixture();
-  const strictLegacy = pathAuditPython().replace("elif path==values.get('legacy_archive'):", 'elif False:');
-  refused(noException.run(strictLegacy), `${noException.values.legacy_archive} failed owner-uid-0; STOP`);
-  const strictEnv = pathAuditPython().replace(",'/home/commonswarm/.env':'file'", '');
-  assert.notEqual(strictEnv, pathAuditPython());
-  refused(auditFixture().run(strictEnv), '/home/commonswarm/.env failed owner-uid-0; STOP');
   // Unrelated old /tmp transport entries do not participate in this window or any /tmp enumeration.
   const exact = auditFixture(); exact.put('/tmp/admin-issuance-unrelated', 'old ops upload');
   mkdirSync(exact.root + '/tmp/anvil-secret.Unrelated', { mode: 0o777 });
   pass(exact.run(undefined, { '/tmp/admin-issuance-unrelated': 1000, '/tmp/anvil-secret.Unrelated': 1000 }), 'only exact W4 paths are audited');
+  // A self-consistent archive receipt and file still STOP when the named ops account disagrees.
+  for (const change of ['uid', 'gid', 'missing-account']) {
+    const f = auditFixture(), archive = JSON.parse(readFileSync(f.root + f.values.RECYCLE_BASELINE_FILE!, 'utf8'));
+    if (change !== 'missing-account') archive.archive[change] = 1003;
+    f.put(f.values.RECYCLE_BASELINE_FILE!, JSON.stringify(archive));
+    f.reject(change === 'missing-account' ? f.values.INPUTS_FILE! : f.values.RECYCLE_BASELINE_FILE!,
+      change === 'missing-account' ? 'keeper-upload-owner-account-resolvable' : 'keeper-upload-owner-uid-gid', undefined,
+      change === 'uid' ? { [f.values.legacy_archive!]: 1003 } : {}, change === 'gid' ? { [f.values.legacy_archive!]: 1003 } : {},
+      { missing_keeper_account: change === 'missing-account' });
+  }
+});
+
+test('Ruling 39 / absent service drop-ins name the reviewed fresh creation step; other installation modes STOP on the gap', () => {
+  for (const unit of [service, 'other-recycle.service']) for (const mode of ['fresh', 'upgrade-existing', 'accept-existing']) {
+    const f = auditFixture(), path = `/etc/systemd/system/${unit}.d`;
+    if (unit === service) renameSync(f.root + path, f.root + path + '.saved');
+    f.put(f.values.INPUTS_FILE!, JSON.stringify({ ...JSON.parse(readFileSync(f.root + f.values.INPUTS_FILE!, 'utf8')), edge_recycle_service: unit, recycle_install_mode: mode }));
+    if (mode !== 'fresh') { f.reject(path, 'missing-drop-in-directory-no-reviewed-create-step'); continue; }
+    pass(f.run(), `${unit}: absent until reviewed fresh creation`);
+    const row = JSON.parse(readFileSync(f.receipt, 'utf8')).paths.find((p: any) => p.path === path);
+    assert.deepEqual([row.present, row.absent_until_reviewed_step, row.expected_uid, row.expected_gid, row.expected_mode],
+      [false, 'ai-recycle-install (fresh)', 0, 0, unit === service ? '0700' : '0755']);
+  }
 });
 
 test('Fix round 3d / closed commonswarm exceptions require all three inert checks exactly once; every refusal leaves the fixture unchanged', () => {
@@ -2205,11 +2222,7 @@ test('Fix round 3d / closed commonswarm exceptions require all three inert check
       { account: 1, proc: 1, group: 1, passwd: 1, docker_ps: 1, docker_inspect: 1 });
     for (const p of allow) assert.ok(receipt.paths.some((row: any) => row.path === p && row.uid === 1002 && row.gid === 1002));
   }
-  const reject = (observations: Record<string, unknown>, property: string, path = '/home/commonswarm') => {
-    const f = auditFixture(), before = f.snapshot();
-    refused(f.run(undefined, {}, {}, observations), `${path} failed ${property}; STOP`);
-    assert.deepEqual(f.snapshot(), before); assert.ok(!existsSync(f.receipt) && !existsSync(join(f.root, 'mutation-sentinel')));
-  };
+  const reject = (observations: Record<string, unknown>, property: string, path = '/home/commonswarm') => auditFixture().reject(path, property, undefined, {}, {}, observations);
   for (let field = 0; field < 4; field++) {
     const uids = [0, 0, 0, 0]; uids[field] = 1002;
     reject({ proc: { '17': `Uid: ${uids.join(' ')}\n` } }, 'inert-no-uid-process');
@@ -2227,31 +2240,13 @@ test('Fix round 3d / closed commonswarm exceptions require all three inert check
     const vanished = auditFixture(); pass(vanished.run(undefined, {}, {}, { proc: { '17': status } }), 'vanished process is permitted');
     assert.equal(JSON.parse(readFileSync(vanished.receipt, 'utf8')).inert_checks.processes.vanished, 1);
   }
-  for (const path of allow) for (const kind of ['group-write', 'world-write', 'other-uid', 'other-gid', 'root-owner', 'symlink']) {
-    const f = auditFixture(), p = f.root + path, owners: Record<string, number> = {}, groups: Record<string, number> = {};
-    let property = 'commonswarm-owner-uid-gid';
-    if (kind === 'group-write') { chmodSync(p, 0o775); property = 'not-group-writable'; }
-    if (kind === 'world-write') { chmodSync(p, 0o757); property = 'not-world-writable'; }
-    if (kind === 'other-uid') owners[path] = 1003;
-    if (kind === 'other-gid') groups[path] = 1003;
-    if (kind === 'root-owner') owners[path] = 0;
-    if (kind === 'symlink') { renameSync(p, p + '.real'); symlinkSync(p + '.real', p); property = 'not-symlink'; }
-    const before = f.snapshot(); refused(f.run(undefined, owners, groups), `${path} failed ${property}; STOP`);
-    assert.deepEqual(f.snapshot(), before); assert.ok(!existsSync(f.receipt) && !existsSync(join(f.root, 'mutation-sentinel')));
+  for (const path of allow) for (const change of [0o775, 0o757, 'owner', 'group', 'root-owner', 'symlink']) {
+    const f = auditFixture(), property = change === 0o775 ? 'not-group-writable' : change === 0o757 ? 'not-world-writable'
+      : change === 'symlink' ? 'not-symlink' : 'commonswarm-owner-uid-gid';
+    f.reject(path, property, undefined, ...f.tamper(path, change));
   }
-  for (const path of ['/home/commonswarm/admin-issuance', `/home/commonswarm/edge/releases/${baseline}`]) {
-    const f = auditFixture(), before = f.snapshot();
-    refused(f.run(undefined, { [path]: 1002 }, { [path]: 1002 }), `${path} failed owner-uid-0; STOP`);
-    assert.deepEqual(f.snapshot(), before); assert.ok(!existsSync(f.receipt) && !existsSync(join(f.root, 'mutation-sentinel')));
-  }
-  const strict = auditFixture(), strictBefore = strict.snapshot();
-  const strictSource = pathAuditPython().replace('if path in COMMONSWARM_OWNED_PATHS:', 'if False:');
-  refused(strict.run(strictSource), '/home/commonswarm failed owner-uid-0; STOP');
-  assert.deepEqual(strict.snapshot(), strictBefore, 'pre-ruling root-only rule refuses the measured positive control');
-  const bypassed = auditFixture();
-  const bypass = pathAuditPython().replace(/def measure_inert\(\):[\s\S]*?    return account\n/, 'def measure_inert(): return account_entry()\n');
-  assert.notEqual(bypass, pathAuditPython());
-  pass(bypassed.run(bypass, {}, {}, { proc: { '17': 'Uid: 0 1002 0 0\n' } }), 'omitted inert check mutation improperly reaches the next mutation');
+  for (const path of ['/home/commonswarm/admin-issuance', `/home/commonswarm/edge/releases/${baseline}`])
+    auditFixture().reject(path, 'owner-uid-0', undefined, { [path]: 1002 }, { [path]: 1002 });
 
 });
 
