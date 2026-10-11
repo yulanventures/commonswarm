@@ -58,13 +58,13 @@ export function safeAdminError(error: unknown): string {
   return boundedSafeText(redact(`${error.name}: ${error.message}`), 512);
 }
 
-/** Preserve the current response classification while making it explicit for tests. */
+/** By SQLSTATE, never by message: 55P03 and 40P01 rolled back in full, so both get the retryable 503. */
 export function classifyCommandFailure(
   isTestRollback: boolean,
   code: string | null,
 ): CommandFailureReason {
   if (isTestRollback) return "test_rollback";
-  return code === "55P03" ? "lock_timeout" : "internal_error";
+  return code === "55P03" || code === "40P01" ? "lock_timeout" : "internal_error";
 }
 
 /** Build the allowlisted row; request bodies and credentials are not inputs. */
@@ -122,4 +122,13 @@ export function adminOAuthFailureResult(
   code: "admin_command_failed" | "admin_failure_audit_unavailable",
 ): { status: 503; body: { error: string; retryable?: true } } {
   return { status: 503, body: adminFailureRetryable(error) ? { error: code, retryable: true } : { error: code } };
+}
+
+/** Activity edge failure response (HezLead ruling 30). By SQLSTATE, never by message: a 40P01
+ * rolled back in full, so it gets the 503 of finishCommandFailure; 55P03 and every other failure
+ * keep the activity edge's 500. */
+export function activityFailureResult(error: unknown): CommandFailureResult {
+  return dbCode(error) === "40P01"
+    ? { status: 503, body: { error: "temporarily_unavailable" } }
+    : { status: 500, body: { error: "internal_error" } };
 }

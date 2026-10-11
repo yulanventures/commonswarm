@@ -4299,15 +4299,19 @@ async function fenceRenewal(
       return true;
     });
   } catch (error) {
-    // 23505 is the lineage-fork CAS losing; 55000 is any named refusal raised
-    // by the successor fence; 40P01 is the documented renewal-vs-revocation
-    // deadlock, which the migration says must resolve toward refusal. All three
-    // roll back to the savepoint, leaving the transaction usable so the caller
-    // can re-read state and turn the race into a named domain refusal.
+    // HezLead ruling 38: 40P01/40001 must abort the whole command transaction,
+    // including recovery audit and idempotency writes outside this savepoint.
+    // Renewal-vs-revocation still resolves toward refusal: after the 503 the
+    // same-command_id retry re-reads state in authentication or preparation,
+    // then refuses revoked tokens/grants (20260728000002_worker_token_renewal.sql:714;
+    // 20260728000004_stranded_successor_accounting.sql:361). 40001 keeps its 500.
+    // 23505 (lineage CAS), 55000 (named fence refusal), and RenewalFenceLost
+    // still roll back only this savepoint so the caller can re-read and refuse.
     const code = dbCode(error);
+    if (code === "40P01" || code === "40001") throw error;
     if (
       error instanceof RenewalFenceLost ||
-      code === "23505" || code === "55000" || code === "40P01"
+      code === "23505" || code === "55000"
     ) return false;
     throw error;
   }
@@ -13399,9 +13403,9 @@ let verifiedHuman: VerifiedHuman | null = null;
       reason,
       safeError(error),
     );
-    // 40001 (serialization failure) and 40P01 (deadlock) deliberately still
-    // fall through to the existing 500. The durable SQLSTATE will provide the
-    // data needed to decide a later retryable-503 change in its own lane.
+    // 40P01 (deadlock) returns the 503 of 55P03 (HezLead ruling 27); its row keeps
+    // db_code 40P01. 40001 (serialization failure) deliberately still falls
+    // through to the existing 500 until a retryable-503 change in its own lane.
     const failure = durableCommandFailure({
       commandKind: kind,
       reason,
