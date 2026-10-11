@@ -25,8 +25,14 @@
 W6R=$T/w6
 mkdir -p "$W6R/bin" "$W6R/etc" "$W6R/secret" "$W6R/libexec" "$W6R/tmp" "$W6R/home" || die w6-setup 'cannot create the W6 fixture root'
 chmod 0700 "$W6R/etc" "$W6R/secret" || die w6-setup 'chmod failed'
+# BSD temporary directories inherit their parent's group; make the modelled root group explicit.
+python3 -c 'import os,sys; os.chown(sys.argv[1],-1,os.getgid())' "$W6R/secret" || die w6-setup 'secret fixture group setup failed'
 REAL_NODE=$(command -v node) || die w6-setup 'node expected present got missing'
-PLANC=$W6R/RELEASE.md
+W4_ID=W4rhs1 W6_ID=W6rhs1 W7_ID=W7rhs1
+W4_INPUT_ROOT=$W6R/var-lib-admin-release/w4/$W4_ID
+mkdir -p "$W4_INPUT_ROOT" || die w6-setup 'cannot create W4 input directory'
+chmod 0700 "$W6R/var-lib-admin-release" "$W6R/var-lib-admin-release/w4" "$W4_INPUT_ROOT" || die w6-setup 'chmod W4 input directory failed'
+PLANC=$W4_INPUT_ROOT/RELEASE.md
 # Test control: C1_W6_PLAN_FROM=<sha> rehearses the W4/W6/W7 blocks of the plan at that commit instead.
 W6_PLAN_SRC=$PLAN
 if test -n "${C1_W6_PLAN_FROM:-}"; then
@@ -54,11 +60,14 @@ raw=open(src,encoding='utf-8',newline='').read()
 subs=[('/private/tmp/anvil-secret',root+'/secret/mac-anvil-secret'),('/tmp/anvil-secret',root+'/secret/anvil-secret'),('/etc/commonswarm-admin-release',root+'/etc'),
       ('/usr/local/libexec/commonswarm-admin-edge-recycle',root+'/libexec/commonswarm-admin-edge-recycle'),
       ('/home/commonswarm',root+'/home'),('/tmp/admin-issuance-',root+'/tmp/admin-issuance-'),('/var/lib/commonswarm-release',root+'/var-lib'),('/var/backups/commonswarm-postgres',root+'/backups'),
-      ('path.stat().st_uid==0','path.stat().st_uid==os.getuid()')]
+      ('path.stat().st_uid==0','path.stat().st_uid==os.getuid()'),
+      # Ruling 34(d): exact mktemp-stage ownership now includes gid; model box root with this fixture's uid/gid.
+      ('(st.st_uid,st.st_gid,stat.S_IMODE(st.st_mode))!=(0,0,0o700)',
+       '(st.st_uid,st.st_gid,stat.S_IMODE(st.st_mode))!=(os.getuid(),os.getgid(),0o700)')]
 count={a:raw.count(a) for a,_ in subs}
 # The closed-issuance marker path exists only from 04d09c3d on; box /tmp/anvil-secret exists only after C1-12;
 # a C1_W6_PLAN_FROM control may lack either.
-optional=('path.stat().st_uid==0','/var/lib/commonswarm-release','/tmp/anvil-secret')
+optional=('path.stat().st_uid==0','/var/lib/commonswarm-release','/tmp/anvil-secret','(st.st_uid,st.st_gid,stat.S_IMODE(st.st_mode))!=(0,0,0o700)')
 assert count['path.stat().st_uid==0']==1 and all(v for k,v in count.items() if k not in optional[1:])
 forward=dict(subs); inverse={b:a for a,b in subs}
 assert not any(b in raw for b in inverse)
@@ -70,7 +79,6 @@ print('REMAP plan copy: '+'; '.join(a+' -> '+b.replace(root,'<w6>')+' x'+str(cou
 PY
 
 # ---- fixture: edge release tree and archive, recycle.json, INPUTS, modelled container ----
-W4_ID=W4rhs1 W6_ID=W6rhs1 W7_ID=W7rhs1
 python3 - "$W6R" "$RELEASE_SHA" "$PLANC" "$W4_ID" "$W6_ID" "$W7_ID" <<'PY' || die w6-fixture 'fixture files could not be written'
 import datetime,hashlib,io,json,os,pathlib,sys,tarfile
 root,sha,planc,w4,w6,w7=sys.argv[1:7]; root=pathlib.Path(root)
@@ -108,7 +116,10 @@ def inputs(window,wid,**extra):
 for name,d in [('inputs-W4.json',inputs('W4',w4)),('inputs-W6.json',inputs('W6',w6,w2b_release_sha='d'*40,w2b_window_id='W2brh1',keep_open=False)),
                ('inputs-W6-keep.json',inputs('W6',w6,w2b_release_sha='d'*40,w2b_window_id='W2brh1',keep_open=True)),('inputs-W7.json',inputs('W7',w7,w6_window_id=w6)),
                ('inputs-W7-other.json',inputs('W7',w7,w6_window_id='W6zzz9'))]:
-    (root/name).write_text(json.dumps(d,sort_keys=True)+'\n')
+    path=root/'var-lib-admin-release/w4'/w4/'inputs.json' if name=='inputs-W4.json' else root/name
+    fd=os.open(str(path),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,'w') as f: f.write(json.dumps(d,sort_keys=True)+'\n')
+pathlib.Path(planc).chmod(0o600)
 PY
 printf 'active' >"$W6R/timer"; printf 'good' >"$W6R/docker-mode"; printf ok >"$W6R/logger-mode"; : >"$W6R/calls"
 python3 - "$W6R" "$PG_BIN" "$T" "$PORT" <<'PY' || die w6-stubs 'stubs could not be written'
@@ -184,7 +195,7 @@ say "EMUL w6-fixture: edge release tree, archive (W4 and W6 names, same bytes), 
 W4_PROOF=$T/proof-W4 W6_PROOF=$T/proof-W6 W6K_PROOF=$T/proof-W6-keep W7_PROOF=$T/proof-W7
 mkdir -p "$W4_PROOF" "$W6_PROOF" "$W6K_PROOF" "$W7_PROOF" || exit 1
 TARGET_EDGE=$W6R/home/edge/releases/$RELEASE_SHA
-W4_INPUTS=$W6R/inputs-W4.json W6_INPUTS=$W6R/inputs-W6.json W6K_INPUTS=$W6R/inputs-W6-keep.json W7_INPUTS=$W6R/inputs-W7.json
+W4_INPUTS=$W4_INPUT_ROOT/inputs.json W6_INPUTS=$W6R/inputs-W6.json W6K_INPUTS=$W6R/inputs-W6-keep.json W7_INPUTS=$W6R/inputs-W7.json
 export PLAN_FILE=$PLANC RELEASE_SHA
 EDGE_RECYCLE_TIMER=rehearsal-edge-recycle.timer EDGE_RECYCLE_SERVICE=rehearsal-edge-recycle.service
 HOOK=$W6R/libexec/commonswarm-admin-edge-recycle
