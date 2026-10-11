@@ -117,6 +117,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         </button>
       </div>
 
+      <div class="dashboard__form-error" role="alert" data-auth-link-error hidden>
+        <p data-auth-link-error-text></p>
+        <button class="dashboard__text-button" type="button" data-auth-resend>Send a new link</button>
+      </div>
       <p class="dashboard__form-error" role="alert" data-auth-error hidden></p>
       {/* Both documents are final (terms.astro and privacy.astro set draft={false}; live /privacy
           reads "Effective 2 October 2026"). The sentence that called them unfinished drafts was a
@@ -143,7 +147,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       <div class="dashboard__gateway-copy">
         <h1 id="dashboard-create-title" data-create-title>Create your first workspace.</h1>
         <p data-create-description>
-          It's where your agents and the people you invite share lists, docs and messages.
+          It's where you, the people you invite and your agents share messages, and where people share lists and docs.
         </p>
       </div>
       <form class="dashboard__create-form" data-create-form novalidate>
@@ -372,8 +376,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 <li class="dashboard__setup-step" data-setup-step="access">
                   <span class="dashboard__setup-mark" aria-hidden="true"></span>
                   <span class="dashboard__setup-copy">
-                    <strong data-setup-title>Choose who shares Lists &amp; docs</strong>
-                    <span data-setup-detail>Shared lists and invitations both need this.</span>
+                    <strong data-setup-title>Choose who can use Lists &amp; docs</strong>
+                    <span data-setup-detail>Shared lists and invitations both need this choice.</span>
                   </span>
                   <button class="dashboard__button dashboard__button--secondary" type="button" data-setup-access>
                     Choose
@@ -552,8 +556,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               <form class="dashboard__access-card" data-household-consent hidden>
                 <h2 class="dashboard__access-title">Turn on Lists &amp; docs</h2>
                 <p class="dashboard__access-lead">
-                  Lists, docs and files that you and your agents can read and change. Every saved
-                  version is kept, with who made it.
+                  Confirm your access to Lists &amp; docs in this workspace. The owner also chooses whether to invite people.
                 </p>
                 <fieldset class="dashboard__choice-cards" data-household-purpose-set>
                   <legend>{PURPOSE_QUESTION}</legend>
@@ -589,8 +592,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               <section class="dashboard__agent-approvals" data-household-agents hidden aria-labelledby="dashboard-agent-approvals-title">
                 <h2 class="dashboard__access-title" id="dashboard-agent-approvals-title">Let your agents use Lists &amp; docs</h2>
                 <p class="dashboard__access-lead">
-                  Each of your agents needs your OK, here, for this workspace. An agent that lives
-                  in a chat app keeps it until you withdraw it. A computer agent keeps it until its key ends or you withdraw it.
+                  Each of your agents needs your OK, here, for this workspace. A computer agent keeps it until its key ends or you withdraw it.
+                  Lists &amp; docs is not available through the CommonSwarm connector yet, so an agent in a chat app cannot use it.
                 </p>
                 <p data-household-agent-result hidden></p>
                 <ul class="dashboard__approval-list" data-household-agent-list></ul>
@@ -999,6 +1002,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import type { TodoVM, AgentVM, ObjectCardVM } from "../../lib/home-types";
   import { mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
   import { agentPage } from "../../lib/home-agent";
+  import { listsAndDocsFact } from "../../lib/home-agent-copy";
   import { todosPane, type TodoFilter } from "../../lib/home-todo-list";
   import { todoView, type TodoStartInput } from "../../lib/home-todo";
   import { todoStatus, todoSubline, TODO_RESULT_UNKNOWN, TODO_SAVE_FAILED, type TodoNotice } from "../../lib/home-todo-copy";
@@ -1009,6 +1013,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { statusLine, needsYouCard } from "../../lib/home-primitives";
   import { buildNewWorkspaceForm, newWorkspaceCanCreate, newWorkspacePreviewTitle } from "../../lib/home-new-workspace";
   import { PURPOSE_COPY, CREATE_PURPOSE_DETAILS } from "../../lib/household-access";
+  import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
   import { agentLabelInSentence, personFirstName, personTint } from "../../lib/home-names";
   import { homeAskAnswered } from "../../lib/home-map";
   import { createHouseholdDashboard } from "../../lib/household-dashboard";
@@ -1025,7 +1030,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { setupProgress, setupSteps } from "../../lib/setup-checklist";
   import { createLatestRead } from "../../lib/latest-read";
   import { agentStatus, peopleAgentStatus, peopleAgentActivityTime, agentResumeReceipt } from "../../lib/agent-status";
-  import { renderPeopleDialog, peopleDialogCounts, peopleDialogCanAct, showPeopleConfirmation,
+  import { renderPeopleDialog, withdrawConfirmText, peopleDialogCounts, peopleDialogCanAct, showPeopleConfirmation,
     type PeopleDialogModel, type PeopleDialogState, type PeopleDialogFocus, type PeopleDialogAction, type PeopleConfirmAction } from "../../lib/people-dialog-view";
   import { classifyAgentPresence } from "../../../../src/cloud/agent-presence";
   import type { Session } from "@supabase/supabase-js";
@@ -1056,6 +1061,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     createWorkspace,
     changeWorkspaceRole,
     currentSession,
+    authReturnError,
     deployment,
     fileDownloadUrl,
     inviteWorkspaceMember,
@@ -1977,11 +1983,23 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       target.hidden = message === null;
     };
 
+    /* An expired or reused sign-in link returns here with the error in the address. Read it once,
+       at load, before the auth client can rewrite the address. Display only. */
+    let returnedAuthError = authReturnError(window.location);
+    const authLinkError = (message: string | null): void => {
+      const box = one<HTMLElement>("[data-auth-link-error]");
+      if (!box) return;
+      const text = box.querySelector<HTMLElement>("[data-auth-link-error-text]");
+      if (text) text.textContent = message ?? "";
+      box.hidden = message === null;
+    };
+
     const showAuthView = (name: "choices" | "email-sent"): void => {
       for (const view of all<HTMLElement>("[data-auth-view]")) {
         view.hidden = view.dataset.authView !== name;
       }
       authError(null);
+      authLinkError(null);
       /* The gate consumes only on choices presentations. Its first presentation
          skips the email move; on a signed-in boot that can be the first explicit
          sign-out, where showPanel already moves context to the signed-out heading.
@@ -4304,7 +4322,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const receive = rosterAgent ? agentStatus({ transport: rosterAgent.transport, turnOnly: rosterAgent.turnOnly, presence: rosterAgent.presence, own: agent.yours, ownerFirstName: agent.ownerFirstName }).receive : null;
         const vm = mapHomeAgentPage(agent, homeQueue?.principal_id === id ? homeQueue : null, homeTodoRows, ctx, workspace.name,
           receive ?? "Message checks have not been reported.", { model: detail?.model ?? null, receive: receive ?? "Not reported", lastActive: detail?.lastActive ?? "Not reported",
-            listsAndDocs: agent.yours && detail?.accessReadState === "succeeded" ? { id: "lists", label: "Lists & docs", detail: approval ? `Allowed until ${approval.until ?? "you withdraw it"}.` : "Not allowed.", state: approval ? "on" : "off" } : null,
+            listsAndDocs: agent.yours && detail?.accessReadState === "succeeded" ? listsAndDocsFact(detail.hosted || rosterAgent?.transport === "hosted_mcp", approval) : null,
             postsHere: agent.yours ? { id: "posts", label: "What it posts here", detail: "", state: "always" } : null },
           view ? { ageLabel: view.ageLabel, phaseLabel: view.phaseLabel, toolTitle: view.toolTitle, emptyMessage: view.emptyMessage } : null);
         vm.lineNotice = homeQueueRead !== "ready" ? homeQueueRead === "pending" ? "Checking the line…" : homeTodosState === "absent" ? "The line is not available here yet." : "Could not load the line. Reload to try again." : null;
@@ -4962,7 +4980,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (action === "connected-apps") { one<HTMLButtonElement>("[data-connected-apps-open]")?.click(); return; }
       if (action === "allow") { await navigateHome({ view: "lists", workspaceId }, "push"); one<HTMLElement>("[data-household-consent]")?.scrollIntoView({ block: "start" }); return; }
       let receipt = "";
-      if (action === "withdraw" && agent) { await withdrawAgent(id, agent.name, button, notice, true); return; }
+      if (action === "withdraw" && agent) { await withdrawAgent(id, agent.name, agent.transport === "hosted_mcp", button, notice, true); return; }
       if (action === "resume" && grant && agent) { await resumeRenewalGrant(session, uuid(), workspaceId, grant.grantId); receipt = agentResumeReceipt(agent.name); }
       if (action === "turn-off-key" && grant && agent) { await revokeAgentToken(session, uuid(), workspaceId, grant.tokenId); receipt = `Key turned off. ${agent.name} stops when its current access ends.`; }
       if (action === "remove-agent" && agent) { await revokeAgentPrincipal(session, uuid(), workspaceId, id); receipt = `${agent.name} removed. Its history stays as “${agent.name} (removed)”.`;
@@ -7706,6 +7724,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             .map((input) => input.value);
           void approveAgent(connection, operations, allow, status);
         });
+        /* Display only: Lists & docs is not available through the Claude connector yet, so an
+           agent in a chat app shows the note instead of the approval controls. An existing
+           approval keeps its controls so it can still be changed or withdrawn. */
+        if (connection.kind === "hosted") {
+          const note = document.createElement("small");
+          note.dataset.approvalHostedNote = "";
+          note.textContent = HOSTED_LISTS_NOTE;
+          copy.append(note);
+          if (!approval) { choices.hidden = true; allow.hidden = true; }
+        }
         row.append(orb, copy, choices, allow, status);
         if (approval) {
           const withdraw = document.createElement("button");
@@ -7713,7 +7741,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           withdraw.className = "dashboard__button dashboard__button--secondary dashboard__approval-withdraw";
           withdraw.textContent = "Withdraw access";
           withdraw.dataset.withdrawApproval = principalId;
-          withdraw.addEventListener("click", () => { void withdrawAgent(principalId, agentName, withdraw, status); });
+          withdraw.addEventListener("click", () => { void withdrawAgent(principalId, agentName, connection.kind === "hosted", withdraw, status); });
           row.append(withdraw);
         }
         list.append(row);
@@ -7803,13 +7831,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const withdrawAgent = async (
       principalId: string,
       agentName: string,
+      hosted: boolean,
       button: HTMLButtonElement,
       status: HTMLElement,
       confirmed = false,
     ): Promise<void> => {
       const scope = householdScope();
       if (!scope || (!confirmed && button.disabled)) return;
-      if (!confirmed && !window.confirm(`Withdraw Lists & docs access for ${agentName}? It can no longer see or change lists and docs here until you allow it again.`)) return;
+      if (!confirmed && !window.confirm(withdrawConfirmText(agentName, hosted))) return;
       button.disabled = true;
       status.textContent = "Withdrawing…";
       const settle = (message: string): void => {
@@ -7824,7 +7853,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         );
         if (!householdCurrent(scope)) return;
         if (result.status === 200 && result.body.status === "committed") {
-          const message = `Withdrawn. ${agentName} can no longer use Lists & docs here.`;
+          const message = hosted ? `Withdrawn. The stored Lists & docs approval for ${agentName} was removed.` : `Withdrawn. ${agentName} can no longer use Lists & docs here.`;
           householdReceipts.set(principalId, message);
           settle(message);
           await loadHouseholdConnections();
@@ -7855,7 +7884,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const role = one<HTMLInputElement>("[data-household-role]:checked")?.value;
       if ((purpose !== "shared" && purpose !== "personal") || (role !== "editor" && role !== "reader")) {
         if (notice) notice.textContent = owner
-          ? "Choose who can use Lists & docs here and your access, then confirm."
+          ? "Choose who can use Lists & docs and your access, then confirm."
           : "Choose your access, then confirm.";
         return;
       }
@@ -8010,13 +8039,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           if (!joined) return;
           stopHostJoinWatch();
           const picker = one<HTMLElement & {
-            showJoined?: (agent: { name: string; principalId: string; canApprove: boolean; joinedAt?: string }) => void;
+            showJoined?: (agent: { name: string; principalId: string; canApprove: boolean; hosted: boolean; joinedAt?: string }) => void;
           }>("agent-host-picker");
           picker?.showJoined?.({
             name: joined.name,
             joinedAt: joined.joinedAt ?? undefined,
             principalId: joined.principalId,
             canApprove: householdAccess.status === "ok" && householdAccess.workspaceId === workspaceId,
+            hosted: joined.transport === "hosted_mcp",
           });
         }).catch(() => undefined);
       }, 5_000);
@@ -8713,7 +8743,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           if (receipt) {
             delete receipt.dataset.agentConnectedReceiptId;
             receipt.dataset.setupWorkspaceId = madeWorkspace.id;
-            receipt.textContent = "Your workspace is ready. Lists & docs is not set up yet. Choose who can use it in the steps below.";
+            receipt.textContent = "Your workspace is ready. Choose who can use Lists & docs in the steps below.";
             receipt.hidden = false;
           }
           void refreshHouseholdAccess();
@@ -9038,6 +9068,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           resetWorkspaceSessionState();
           showAuthView("choices");
           showPanel("signed-out");
+          authLinkError(returnedAuthError);
+          returnedAuthError = null;
           return;
         }
         const who = accountName(session);
@@ -9184,6 +9216,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     for (const button of all<HTMLButtonElement>("[data-use-email]")) {
       button.addEventListener("click", () => showAuthView("choices"));
     }
+
+    /* Send a new link: with an address already typed it submits the email form, otherwise it
+       moves to the address field. */
+    one<HTMLButtonElement>("[data-auth-resend]")?.addEventListener("click", () => {
+      const form = one<HTMLFormElement>(".dashboard__email");
+      const input = one<HTMLInputElement>("#dashboard-email");
+      if (form && input?.value.trim()) form.requestSubmit();
+      else input?.focus();
+    });
 
     one<HTMLFormElement>(".dashboard__email")?.addEventListener("submit", async (event) => {
       event.preventDefault();

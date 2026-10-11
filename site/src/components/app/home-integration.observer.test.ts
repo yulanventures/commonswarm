@@ -658,7 +658,7 @@ test('the Add agent poll passes the measured joined time and ignores another own
   runInContext(await dashboardFunctions(['stopHostJoinWatch','startHostJoinWatch']),context);
   runInContext('startHostJoinWatch()',context); tick(); await new Promise(resolve=>setImmediate(resolve));
   assert.deepEqual(intervals,[5000]);
-  assert.deepEqual(joined,[{name:'Claude',principalId:'own',canApprove:true,joinedAt:'2026-10-05T11:32:00Z'}]);
+  assert.deepEqual(joined,[{name:'Claude',principalId:'own',canApprove:true,hosted:false,joinedAt:'2026-10-05T11:32:00Z'}]);
 });
 
 

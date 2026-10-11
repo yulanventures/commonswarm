@@ -6,13 +6,14 @@ import { build } from "esbuild";
 import { join } from "node:path";
 import { browserTest as test } from "../../../tests/chrome.js";
 import { findChrome, launchChrome } from "../../../tests/chrome.js";
+import { HOSTED_LISTS_NOTE } from "../../lib/agent-hosts.js";
 
 const dashboard = await readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
 const style = dashboard.match(/<style\b[^>]*>([\s\S]*?)<\/style>/)?.[1];
 assert.ok(style, "LiveDashboard must expose its component stylesheet to the geometry fixture");
 
 type Geometry = { width: number; listWidth: number; detailWidth: number; rowOverflow: boolean; touchTargets: boolean;
-  hostileElements: number; hostileText: boolean; accessMark: string | null; modelValues: (string | null)[];
+  hostileElements: number; hostileText: boolean; accessMark: string | null; localAccessMark: string | null; hostedRowLabel: string | null; hostedDetailText: string; modelValues: (string | null)[];
   confirmRole: string | null; safeConfirmFocus: boolean; detailTouchTargets: boolean; closeIconSize: number; backIconSize: number; cancelRestoresOpener: boolean; outerStillOpen: boolean; technicalClosed: boolean };
 
 // CI only: build the production DOM builder rather than recreating obsolete row markup.
@@ -39,7 +40,9 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
           app: 'Claude', hosted: true, own: true, mayManage: true, liveKey: true, key: 'Uses a key to connect.',
           status: { kind: 'paused', label: 'Paused: unused for 14 days', sentence: 'Resume it so it can connect again.', attention: true, fix: { action: 'resume', allowed: true } },
           receive: 'Checks messages when you chat with it.', lastActive: '15 days ago', technical: ['Agent ID: agent'], updateAvailable: false, access: { until: null }, accessReadState: 'succeeded', receipt: '' };
-        const model = { people: [{ id: 'person', name: 'Mei Langridge', role: 'member', own: true, mayRemove: false }], agents: [agent], invites: [], sample: false, pendingFailed: false };
+        const local = { ...agent, id: 'local', name: 'Local Agent', model: null, app: 'Codex', hosted: false, liveKey: false, key: null,
+          status: { kind: 'active', label: 'Active', sentence: '', attention: false, fix: null }, updateAvailable: false };
+        const model = { people: [{ id: 'person', name: 'Mei Langridge', role: 'member', own: true, mayRemove: false }], agents: [agent, local], invites: [], sample: false, pendingFailed: false };
         const state = { selected: null, collapsed: new Set(), showAllAttention: false, query: '' };
         const outer = document.querySelector('[data-roster-dialog]'), roster = document.querySelector('#roster'), detail = document.querySelector('#detail'), confirm = document.querySelector('#confirm');
         const modelValues = [];
@@ -56,7 +59,11 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         const detailWidth = outer.getBoundingClientRect().width;
         const detailTouchTargets = visibleButtons(detail).length > 0 && visibleButtons(detail).every(button => button.getBoundingClientRect().height >= 44);
         const backIconSize = parseFloat(getComputedStyle(detail.querySelector('.pd-back-icon')).fontSize);
-        const accessMark = roster.querySelector('[data-agent-content-access]').getAttribute('aria-label');
+        // A hosted agent's row draws no access mark (it cannot use Lists & docs yet); a local agent's row does.
+        const accessMark = roster.querySelector('[data-agent-row="agent"] [data-agent-content-access]')?.getAttribute('aria-label') ?? null;
+        const localAccessMark = roster.querySelector('[data-agent-row="local"] [data-agent-content-access]')?.getAttribute('aria-label') ?? null;
+        const hostedRowLabel = roster.querySelector('#pd-agent-agent')?.getAttribute('aria-label') ?? null;
+        const hostedDetailText = detail.textContent ?? '';
         detail.querySelector('[data-edit-model]').click();
         const form = detail.querySelector('[data-model-editor]'), input = form.querySelector('input');
         input.value = '   '; form.requestSubmit(); await Promise.resolve(); await Promise.resolve();
@@ -64,7 +71,7 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         const confirmRole = confirm.getAttribute('role'); const safeConfirmFocus = document.activeElement.textContent === 'Go back';
         confirm.dispatchEvent(new Event('cancel', { cancelable: true, bubbles: true }));
         const metrics = { width: innerWidth, listWidth, detailWidth, rowOverflow, touchTargets, detailTouchTargets, closeIconSize, backIconSize, hostileElements: document.querySelectorAll('img').length,
-          hostileText: detail.querySelector('h2').textContent.includes(hostile), accessMark, modelValues, confirmRole, safeConfirmFocus,
+          hostileText: detail.querySelector('h2').textContent.includes(hostile), accessMark, localAccessMark, hostedRowLabel, hostedDetailText, modelValues, confirmRole, safeConfirmFocus,
           cancelRestoresOpener: document.activeElement === opener, outerStillOpen: outer.open, technicalClosed: !detail.querySelector('details').open };
         document.documentElement.dataset.metrics = btoa(unescape(encodeURIComponent(JSON.stringify(metrics))));
       })();
@@ -82,7 +89,11 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
       assert.ok(Math.abs(geometry.listWidth - (width === 390 ? 390 : 640)) <= 2);
       assert.ok(Math.abs(geometry.detailWidth - (width === 390 ? 390 : 960)) <= 2);
       assert.equal(geometry.hostileElements, 0); assert.equal(geometry.hostileText, true);
-      assert.equal(geometry.accessMark, "Can use Lists & docs"); assert.deepEqual(geometry.modelValues, [null]);
+      assert.equal(geometry.accessMark, null, `${width}px a hosted agent's row draws no Lists & docs access mark`);
+      assert.equal(geometry.localAccessMark, "Can use Lists & docs", `${width}px a local agent's row keeps the access mark`);
+      assert.ok(geometry.hostedRowLabel?.endsWith(HOSTED_LISTS_NOTE), `${width}px the hosted row's accessible name carries the hosted note`);
+      assert.ok(geometry.hostedDetailText.includes(HOSTED_LISTS_NOTE), `${width}px the hosted agent's Lists & docs fact carries the hosted note`);
+      assert.deepEqual(geometry.modelValues, [null]);
       assert.equal(geometry.confirmRole, "alertdialog"); assert.equal(geometry.safeConfirmFocus, true);
       assert.equal(geometry.cancelRestoresOpener, true); assert.equal(geometry.outerStillOpen, true); assert.equal(geometry.technicalClosed, true);
     }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
-import { peopleDialogGroups, peopleDialogCounts, peopleDialogAccessUntil, peopleDialogCanAct, peopleConfirmationCopy,
+import { peopleDialogGroups, peopleDialogCounts, peopleDialogAccessUntil, peopleDialogAccessLabel, peopleDialogCanAct, peopleConfirmationCopy,
   peopleDialogRoleOptions, peopleRoleSelfConfirmCopy, peopleRoleReceipt, peopleRoleRefusal, peopleRoleErrorCode, peopleDialogApplyFocus,
   peopleRoleBeginSave, peopleRoleFinishSave, peopleFirstName, PEOPLE_ROLE_REFUSAL_CODES } from "./people-dialog-view.ts";
 const person = (id, name, role = "member", own = false, mayRemove = false) => ({ id, name, role, own, mayRemove });
@@ -46,6 +46,18 @@ test("Lists & docs facts require ownership and a successful connections read", (
   assert.equal(peopleDialogAccessUntil({ ...value, access: null }), "Not allowed.");
   assert.equal(peopleDialogCanAct({ ...model(), agents: [{ ...value, access: null }] }, "allow", value.id), true);
   assert.equal(peopleDialogCanAct({ ...model(), agents: [value] }, "withdraw", value.id), true);
+});
+test("a hosted agent's approval is shown as withdrawable but not usable; a local agent's is unchanged", () => {
+  const note = "Lists & docs is not available through the CommonSwarm connector yet. Agents that use cswarm on a computer can use it.";
+  const local = agent("Muse", "mei", { own: true, access: { until: null } });
+  const hosted = { ...local, hosted: true };
+  assert.equal(peopleDialogAccessLabel(local), ", Can use Lists & docs");
+  assert.equal(peopleDialogAccessLabel(hosted), `, ${note}`);
+  assert.equal(peopleDialogAccessUntil(hosted), `Allowed until you withdraw it. ${note}`);
+  assert.equal(peopleDialogAccessUntil({ ...hosted, access: { until: "Oct 9, 2026" } }), `Allowed until Oct 9, 2026. ${note}`);
+  assert.equal(peopleDialogAccessUntil({ ...hosted, access: null }), note, "no dead-end Not allowed. for a hosted agent");
+  assert.equal(peopleDialogAccessUntil({ ...local, access: null }), "Not allowed.");
+  assert.equal(peopleDialogCanAct({ ...model(), agents: [hosted] }, "withdraw", hosted.id), true);
 });
 test("read-only, elevated, owner and sample action gates are distinct", () => {
   const data = model(); const value = data.agents[2];
@@ -186,4 +198,18 @@ test("the self-change confirm is a native alertdialog with its own Escape, not a
   assert.match(body, /dialog\.oncancel = \(event\) => \{ event\.preventDefault\(\); event\.stopPropagation\(\)/);
   assert.doesNotMatch(body, /role", "group"/);
   assert.match(source, /confirm\.showModal\(\)/);
+});
+
+test("withdraw copy for a hosted agent removes the stored approval and carries the hosted note; local copy is unchanged", async () => {
+  const { withdrawConfirmText } = await import("./people-dialog-view");
+  const { HOSTED_LISTS_NOTE } = await import("./agent-hosts");
+  const hosted = peopleConfirmationCopy("withdraw", { name: "Muse", hosted: true });
+  assert.deepEqual(hosted.stops, ["This removes the stored Lists & docs approval for Muse."]);
+  assert.deepEqual(hosted.stays, ["Existing lists, docs and history stay.", HOSTED_LISTS_NOTE]);
+  assert.doesNotMatch(JSON.stringify(hosted), /no longer be able to use|allow access again/);
+  const local = peopleConfirmationCopy("withdraw", { name: "Muse" });
+  assert.deepEqual(local.stops, ["Muse will no longer be able to use Lists & docs here."]);
+  assert.deepEqual(local.stays, ["Existing lists, docs and history stay.", "You can allow access again on the Lists & docs card."]);
+  assert.equal(withdrawConfirmText("Muse", true), `Remove the stored Lists & docs approval for Muse? ${HOSTED_LISTS_NOTE}`);
+  assert.equal(withdrawConfirmText("Muse", false), "Withdraw Lists & docs access for Muse? It can no longer see or change lists and docs here until you allow it again.");
 });

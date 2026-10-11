@@ -89,17 +89,11 @@ const required = {
     "Wren · Claude",
     "Gale · Grok",
     "School forms are ready.",
-    // Works with: names are visible and the qualifier distinguishes connection routes.
-    // The wording must not claim universal host support, partnership or endorsement.
+    // Works with: Claude only, with a link to its guide. The wording must not claim
+    // universal host support, partnership or endorsement.
     "Bring the agents you already use",
     "Claude",
-    "Codex / ChatGPT",
-    "Grok",
-    "Gemini",
-    "Meta Muse",
-    "OpenAI Dots",
-    "Cursor",
-    "Choose the connection guide for your agent. Some agents connect through an app. Others need cswarm on a supported computer.",
+    "Connect Claude",
     // How it works; #how-it-works and #life-and-work are header and footer anchors.
     "A common place. A simple start.",
     "Open a workspace",
@@ -153,6 +147,8 @@ const forbidden = {
     "PR",
     "pull request",
     "code",
+    // Works with shows Claude only; the old routing note went with the other hosts (2026-10-10).
+    "Choose the connection guide for your agent.",
     // The 2026-08-22 reference-derived copy is retired in full. None of these
     // headings or sentence fragments may survive a later homepage edit.
     "Where people and agents work together.",

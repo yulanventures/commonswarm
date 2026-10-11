@@ -12,11 +12,11 @@
  * public/brand/works-with/ (see SOURCES.md there for each source and its usage rules). They
  * sit on a constant light disc in both themes because several owners supply only a dark
  * mark and ask that it not be recoloured. The wording says "works with", never partner,
- * certified or endorsed, and the footer carries the trademark note. The note under the row is
- * load-bearing: connection guides distinguish apps from agents using cswarm on a supported
- * computer. Host acceptance is separate from the presence of a guide.
+ * certified or endorsed, and the footer carries the trademark note. The block lists Claude only
+ * (launch fixes 3 and 8, 2026-10-10). A host returns here only when it has its own public guide
+ * and a passing acceptance run; host acceptance is separate from the presence of a guide.
  *
- * NAME-ONLY ENTRIES: Claude and Codex / ChatGPT are plain-text chips, without a mark. Anthropic's
+ * NAME-ONLY ENTRIES: Claude is a plain-text chip, without a mark. Anthropic's
  * guidelines need prior approval for its marks, and OpenAI's only standalone blossom is a
  * clear-space construction sheet that may not be cropped. Add a `src` only when SOURCES.md
  * records the approval or an unmodified display file. Never draw a stand-in mark here.
@@ -29,15 +29,7 @@
 import Art from './HomeArt.astro';
 import Wordmark from '../Wordmark.astro';
 
-const agents = [
-  { name: 'Claude' },
-  { name: 'Codex / ChatGPT' },
-  { name: 'Grok', src: '/brand/works-with/grok.svg' },
-  { name: 'Gemini', src: '/brand/works-with/gemini.webp' },
-  { name: 'Meta Muse', src: '/brand/works-with/meta-muse.webp', tile: true },
-  { name: 'OpenAI Dots', src: '/brand/works-with/openai-dots.svg' },
-  { name: 'Cursor', src: '/brand/works-with/cursor.svg', tile: true },
-];
+const agents = [{ name: 'Claude' }];
 
 const steps = [
   { n: '01', art: 'step-open', title: 'Open a workspace', body: 'Open a workspace for home or work.' },
@@ -73,7 +65,7 @@ const steps = [
         </li>
       ))}
     </ul>
-    <p class="hm-note">Choose the connection guide for your agent. Some agents connect through an app. Others need cswarm on a supported computer.</p>
+    <p class="hm-note"><a href="/guides/claude-connector">Connect Claude</a></p>
   </div>
 </section>
 
@@ -196,6 +188,6 @@ const steps = [
       <a class="btn btn--lg btn--primary" href="/app">Start a workspace</a>
       <a class="btn btn--lg btn--ghost" href="/app">Log in</a>
     </div>
-    <p class="hm-fine">Free for 10 workspaces. No card required. Open source under the MIT License.</p>
+    <p class="hm-fine"><a href="/acceptable-use#limits">Free for 10 workspaces. No card required.</a> Open source under the MIT License.</p>
   </div>
 </section>
