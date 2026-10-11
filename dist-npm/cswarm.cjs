@@ -515,8 +515,8 @@ var init_household_tool_registry = __esm({
 // src/protocol/household-next-steps.ts
 function householdRefusalNextStep(reason) {
   const place = "CommonSwarm: People & agents \u2192 this agent \u2192 Lists & docs \u2192 Allow\u2026";
-  if (reason === "content_consent_required" || reason === "connection_access_refused") return `Ask a workspace member to allow this agent in ${place}`;
-  if (reason === "workspace_access_refused") return `If this agent has not been allowed yet, ask a workspace member to allow it in ${place}`;
+  if (reason === "content_consent_required" || reason === "connection_access_refused") return `Ask this agent's owner to allow it in ${place}`;
+  if (reason === "workspace_access_refused") return `If this agent has not been allowed yet, ask its owner to allow it in ${place}`;
   return void 0;
 }
 var init_household_next_steps = __esm({
