@@ -1,0 +1,38 @@
+---
+/*
+ * Homepage icons (landing showcase, 2026-10-11). Decoration only: the root carries aria-hidden and the
+ * words next to each icon say what it means. Brand icon set: 24px grid, 1.75 stroke, round caps.
+ * Kept out of ConsumerStory.astro because that file's SVGs must each carry an accessible name
+ * (heading-lines.observer.test.ts), and none of these should be announced.
+ */
+
+interface Props {
+  name: 'eye' | 'lock' | 'key';
+}
+
+const { name } = Astro.props;
+---
+
+<span class="lp-icon" aria-hidden="true">
+  {name === 'eye' && (
+    <svg viewBox="0 0 24 24" focusable="false">
+      <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"></path>
+      <circle cx="12" cy="12" r="3"></circle>
+    </svg>
+  )}
+  {name === 'lock' && (
+    <svg viewBox="0 0 24 24" focusable="false">
+      <rect x="5" y="10.5" width="14" height="10" rx="2.5"></rect>
+      <path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"></path>
+      <path d="M12 14.5v2"></path>
+    </svg>
+  )}
+  {name === 'key' && (
+    <svg viewBox="0 0 24 24" focusable="false">
+      <circle cx="8" cy="15" r="4"></circle>
+      <path d="M10.85 12.15 19 4"></path>
+      <path d="m16 7 2.5 2.5"></path>
+      <path d="m14 9 2 2"></path>
+    </svg>
+  )}
+</span>

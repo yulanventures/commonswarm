@@ -5105,6 +5105,136 @@ async function useToken(f: Fixture, token: string): Promise<CommandResponse> {
   });
 }
 
+/** Fingerprint every authority table, including tables a future renewal may write. */
+async function renewalTableSnapshot(): Promise<Record<string, string>> {
+  const tables = await sql<{ name: string }[]>`
+    SELECT c.relname AS name FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'swarm' AND c.relkind IN ('r', 'p')
+      AND c.relname <> 'command_failures'
+    ORDER BY c.relname
+  `;
+  const snapshot: Record<string, string> = {};
+  for (const { name } of tables) {
+    const [row] = await sql<{ digest: string }[]>`
+      SELECT md5(COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text),
+        '[]'::jsonb)::text) AS digest FROM swarm.${sql(name)} r
+    `;
+    assert.ok(row);
+    snapshot[name] = row.digest;
+  }
+  assert.equal(Object.keys(snapshot).length, tables.length, "enumerated set reconciles");
+  for (const name of ["agent_tokens", "renewal_grants", "revocation_tombstones",
+    "audit_log", "events", "streams", "idempotency_keys", "agent_presence"]) {
+    assert.ok(name in snapshot, `snapshot includes renewal writer ${name}`);
+  }
+  return snapshot;
+}
+
+test("§2.3 fence transaction abort preserves recovery and revocation wins on retry", { timeout: 90_000 }, async () => {
+  // HezLead ruling 38: a 40P01 must not commit the recovery audit or overwrite
+  // the successful ledger with predecessor_superseded. 40001 also escapes the
+  // savepoint; main retains its existing 500 mapping for BOTH SQLSTATEs.
+  for (const code of ["40P01", "40001"]) {
+    for (const afterAbort of ["recover", "revoke", "first_use"]) {
+      await scenario(async (f) => {
+        const grantId = await seedRenewalGrant(f);
+        const predecessor = await seedPredecessor(f, { grantId });
+        const id = commandId("renewabort");
+        const issued = await issueRenewal(f, predecessor.token, id);
+        assert.equal(issued.status, 200);
+        assert.equal(issued.body.status, "accepted");
+        const strandedId = String(issued.body.token_id);
+        const strandedToken = String(issued.body.agent_token);
+        registerAgentCredential(f, strandedToken);
+        assert.equal((await tokenLifecycle(strandedId)).firstUsedAt, null);
+
+        // A fixture-only trigger forces the SQLSTATE at discardStrandedSuccessor's
+        // UPDATE. It touches only this unused successor, never auth's stamp or
+        // another fixture. No production hook or handwritten schema is needed.
+        const fault = `renewal_abort_${randomBytes(8).toString("hex")}`;
+        assert.match(strandedId, /^[0-9a-f-]{36}$/);
+        try {
+          await sql.unsafe(`CREATE FUNCTION swarm.${fault}() RETURNS trigger
+            LANGUAGE plpgsql AS $$ BEGIN
+              RAISE EXCEPTION 'forced renewal transaction abort' USING ERRCODE = TG_ARGV[0];
+            END $$`);
+          await sql.unsafe(`CREATE TRIGGER ${fault} BEFORE UPDATE OF revoked_at
+            ON swarm.agent_tokens FOR EACH ROW
+            WHEN (OLD.token_id = '${strandedId}'::uuid AND OLD.first_used_at IS NULL
+              AND OLD.revoked_at IS NULL AND NEW.revoked_at IS NOT NULL)
+            EXECUTE FUNCTION swarm.${fault}('${code}')`);
+          const before = await renewalTableSnapshot();
+          const [{ floor, count }] = await sql<{ floor: string; count: string }[]>`
+            SELECT COALESCE(max(failure_id), 0)::text AS floor, count(*)::text AS count
+            FROM swarm.command_failures
+          `;
+          const aborted = await issueRenewal(f, predecessor.token, id);
+          assert.equal(aborted.status, 500, "main's retryable-by-status response");
+          assert.deepEqual(aborted.body, { error: "internal_error" });
+          assert.equal("retryable" in aborted.body, false, "main has no retryable field");
+          assert.deepEqual(await renewalTableSnapshot(), before,
+            "all authority rows, including pre-savepoint audit and ledger, roll back");
+          const diagnostics = await sql<{ command_kind: string; reason: string; db_code: string; detail: string }[]>`
+            SELECT command_kind, reason, db_code, detail FROM swarm.command_failures
+            WHERE failure_id > ${floor}::bigint ORDER BY failure_id
+          `;
+          assert.equal(diagnostics.length, 1, "exactly one post-rollback diagnostic");
+          assert.equal(diagnostics[0]?.command_kind, "renew_agent_token");
+          assert.equal(diagnostics[0]?.reason, "internal_error");
+          assert.equal(diagnostics[0]?.db_code, code);
+          assert.match(diagnostics[0]!.detail, /forced renewal transaction abort/,
+            "negative probe reached the intended UPDATE");
+          const [total] = await sql<{ count: string }[]>`SELECT count(*)::text AS count FROM swarm.command_failures`;
+          assert.equal(Number(total?.count), Number(count) + 1);
+        } finally {
+          await sql.unsafe(`DROP TRIGGER IF EXISTS ${fault} ON swarm.agent_tokens`);
+          await sql.unsafe(`DROP FUNCTION IF EXISTS swarm.${fault}()`);
+        }
+
+        if (afterAbort === "revoke") {
+          // The winning revoke commits before the client retries. The real
+          // cascade revokes T0 and S1, so auth refuses before the domain fence.
+          await sql`UPDATE swarm.renewal_grants
+            SET revoked_at = statement_timestamp(), revoked_by = ${f.ua}::uuid
+            WHERE renewal_grant_id = ${grantId}::uuid`;
+          const refused = await issueRenewal(f, predecessor.token, id);
+          assert.equal(refused.status, 403);
+          assert.deepEqual(refused.body, { error: "forbidden" });
+          assert.equal(await lineageTokenCount(predecessor.lineageId), 2);
+        } else if (afterAbort === "first_use") {
+          // Ruling 38 also covers a successor holder completing the handover:
+          // retrying T0 then gets 401, but S1 remains usable (no token loss).
+          const read = await fetch(`${local.API_URL}/functions/v1/read`, {
+            method: "POST", headers: { authorization: `Bearer ${strandedToken}`,
+              "content-type": "application/json" },
+            body: JSON.stringify({ resource: "members", workspace_id: f.workspaceA }),
+          });
+          assert.equal(read.status, 200);
+          assert.equal((await issueRenewal(f, predecessor.token, id)).status, 401);
+          const working = await useToken(f, strandedToken);
+          assert.equal(working.status, 200);
+          assert.equal(working.body.status, "accepted");
+        } else {
+          // Positive control at the SAME boundary, with the SAME command_id:
+          // removing the fault must issue a fresh, genuinely usable successor.
+          const retry = await issueRenewal(f, predecessor.token, id);
+          assert.equal(retry.status, 200);
+          assert.equal(retry.body.status, "accepted");
+          assert.notEqual(retry.body.token_id, strandedId);
+          const freshToken = String(retry.body.agent_token);
+          registerAgentCredential(f, freshToken);
+          const working = await useToken(f, freshToken);
+          assert.equal(working.status, 200);
+          assert.equal(working.body.status, "accepted");
+          assert.equal(await effectiveSpend(grantId), 1);
+          assert.notEqual((await tokenLifecycle(strandedId)).revokedAt, null);
+        }
+      });
+    }
+  }
+});
+
 async function latestAuditId(): Promise<string> {
   const [row] = await sql<{ audit_id: string }[]>`
     SELECT COALESCE(max(audit_id), 0)::text AS audit_id

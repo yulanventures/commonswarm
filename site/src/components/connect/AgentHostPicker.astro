@@ -259,7 +259,7 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
 
 <script>
   import { addAgentOwnershipLine } from "../../lib/home-names";
-  import { agentJoinedSentence } from "../../lib/agent-hosts";
+  import { agentJoinedSentence, joinedListsOffer } from "../../lib/agent-hosts";
   const WAITING_HINT_MS = 120_000;
   const JOIN_POLL_MS = 5_000;
 
@@ -365,7 +365,7 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
       this.dispatchEvent(new CustomEvent("agent-host-selected", { bubbles: true, detail: { host: id } }));
     }
 
-    showJoined(agent: { name: string; principalId: string; canApprove: boolean; joinedAt?: string }): void {
+    showJoined(agent: { name: string; principalId: string; canApprove: boolean; hosted?: boolean; joinedAt?: string }): void {
       window.clearTimeout(this.#waitingTimer);
       this.#joinedPrincipalId = agent.principalId;
       const workspace = this.getAttribute("workspace-name")?.trim() || "Home";
@@ -378,10 +378,11 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
         : null;
       const joinedLine = panel?.querySelector<HTMLElement>("[data-ahp-joined-line]") ?? null;
       if (title) title.textContent = joinedText;
-      if (lead) lead.textContent = "Let it use Lists & docs here, or skip for now.";
+      const offer = joinedListsOffer({ hosted: agent.hosted === true, canApprove: agent.canApprove });
+      if (lead) lead.textContent = offer.lead;
       if (approve) {
         approve.textContent = `Let ${agent.name} use Lists & docs`;
-        approve.hidden = !agent.canApprove;
+        approve.hidden = !offer.showApprove;
       }
       if (joinedLine) {
         joinedLine.textContent = joinedText;

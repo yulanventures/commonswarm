@@ -64,7 +64,7 @@ export const AGENT_TOKEN_MAX_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
  *
  * The horizon is now read off `horizon_expires_at` in the accepted response, for BOTH grant
  * kinds — see mintedHorizon. A standing grant returns null there
- * (supabase/functions/command/index.ts:12740-12740), so the two facts come from one place. */
+ * (supabase/functions/command/index.ts:12740-12744), so the two facts come from one place. */
 
 /**
  * How this browser's device row is labelled, so a second visit reuses the row rather than
@@ -461,7 +461,7 @@ export interface AgentCredential {
  * (supabase/migrations/20260723000001_p1_schema.sql:196), so a generated id is accepted rather
  * than dangling. What this page did NOT establish is how that binding behaves for the lease
  * verbs — the only authorisation check on an agent credential that was read while writing this
- * is the scope check at supabase/functions/command/index.ts:11071-11089, which is what
+ * is the scope check at supabase/functions/command/index.ts:11075-11093, which is what
  * `post_signal` needs.
  *
  * NO AUTOMATIC RETRY. The CLI's comment on command ids records what a blind retry cost once:
@@ -566,7 +566,7 @@ export async function mintAgentCredential(
  * used any other horizon. One field answers both cases, so the two can never disagree.
  *
  * `horizon_expires_at` is returned unconditionally on an accepted mint
- * (supabase/functions/command/index.ts:12740-12740) — an ISO string for timeboxed, null for
+ * (supabase/functions/command/index.ts:12740-12744) — an ISO string for timeboxed, null for
  * standing — and the idempotent replay path carries it through (index.ts:2963-2966).
  *
  * ABSENT READS AS UNKNOWN, NOT AS A GUESS. A deployment old enough to omit the field answers

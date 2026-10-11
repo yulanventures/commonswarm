@@ -111,7 +111,7 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
         for (const line of adminGrantLines(g, policy)) card.append(text("p", line));
         card.append(renderDiff(g));
         if (scope === "account" && g.owner_user_id === session?.user.id && g.state !== "revoked") {
-          const button = document.createElement("button"); button.type = "button"; button.textContent = "Revoke grant"; button.disabled = busy;
+          const button = document.createElement("button"); button.type = "button"; button.textContent = "Revoke grant"; button.dataset.tone = "danger"; button.disabled = busy;
           button.addEventListener("click", async () => {
             if (!session || busy) return;
             const ownSession = session, at = generation;
@@ -145,6 +145,7 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
         if (action && scope === "account") {
           const button = document.createElement("button"); button.type = "button";
           button.textContent = action === "approve" ? `Approve client version ${c.verification_version}` : "Withdraw client approval";
+          if (action !== "approve") button.dataset.tone = "danger";
           button.disabled = busy;
           button.addEventListener("click", async () => {
             if (!session || busy) return;
@@ -309,6 +310,10 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
   admin-delegations[hidden], [hidden] { display: none !important; }
   .admin-indicator { display: none !important; }
   admin-delegations :global(button) { font: inherit; color: var(--text-primary); background: var(--surface); border: 1px solid var(--border-interactive); border-radius: .5rem; padding: .6rem .85rem; cursor: pointer; }
+  /* Contrast on --surface: --danger text on --danger-dim 5.02:1 light, 7.11:1 dark;
+     hover fill --danger-ink on --danger 5.82:1 light, 11.58:1 dark. */
+  admin-delegations :global(button[data-tone=danger]) { color: var(--danger); background: var(--danger-dim); border-color: color-mix(in oklab, var(--danger) 45%, var(--border)); }
+  admin-delegations :global(button[data-tone=danger]:hover:not(:disabled)) { color: var(--danger-ink); background: var(--danger); border-color: var(--danger); }
   admin-delegations :global(button:focus-visible) { outline: 2px solid var(--accent); outline-offset: 3px; }
   admin-delegations :global(button:disabled) { opacity: .6; cursor: wait; }
   .admin-indicator[data-full-account=true], admin-delegations :global(article[data-mode=full_account]) { border: 2px solid var(--warning); background: var(--surface-2); }
