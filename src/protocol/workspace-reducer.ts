@@ -1,3 +1,4 @@
+import { AGENT_AVATAR_EVENT_TYPES, modelProvenance, type AgentAvatarEvent } from './agent-avatars.js';
 import { ADMIN_ROUTINE_EVENT_TYPES, reduceAdminRoutine } from './admin-routine.js';
 import type { AdminAccountEvent } from './admin-authority.js';
 import { SCHEMA_VERSION } from './events.js';
@@ -136,6 +137,30 @@ export function reduceWorkspace(
     throw new StreamIntegrityError(`event "${env.type}" before WorkspaceCreated (seq ${env.seq})`);
   }
   if ((ADMIN_ROUTINE_EVENT_TYPES as readonly string[]).includes(env.type)) { if (!env.grant_id || !env.admin_identity_id || !env.grant_manifest_digest || env.actor_user !== null || env.actor_agent_principal !== null) throw new StreamIntegrityError('invalid delegated workspace actor'); return { ...prev, admin_routine: reduceAdminRoutine(prev.admin_routine, env as unknown as AdminAccountEvent) }; }
+  if ((AGENT_AVATAR_EVENT_TYPES as readonly string[]).includes(env.type)) {
+    const p = req<AgentAvatarEvent>(env.payload, ['principal_id'], env.type, env.seq);
+    const priorAvatar = prev.avatars?.[p.principal_id];
+    if (env.type === 'AgentAvatarUploadBegun' && (!p.job || p.job.state !== 'pending' || p.job.declared_at !== null)
+      || env.type === 'AgentAvatarSet' && (!p.avatar || !p.job || p.avatar.generation !== p.job.generation
+        || (p.job.state === 'pending' ? p.avatar.generation !== (priorAvatar?.generation ?? 0) + 1
+          : p.job.state !== 'done' || p.avatar.generation !== priorAvatar?.generation))
+      || (env.type === 'AgentAvatarCleared' || env.type === 'AgentAvatarRemoved') && (!p.avatar || !p.reason
+        || p.avatar.source !== null || p.avatar.person_locked || p.avatar.generation !== (priorAvatar?.generation ?? 0) + 1)
+      || env.type === 'AgentAvatarRefused' && (!p.code || !['stale','precedence','principal_gone'].includes(p.code)
+        || p.avatar || p.job && (p.job.state !== 'refused' || p.job.refusal_code !== p.code))) {
+      throw new StreamIntegrityError('invalid avatar event or generation transition');
+    }
+    if (p.avatar && (p.avatar.principal_id !== p.principal_id || !Number.isSafeInteger(p.avatar.generation) || p.avatar.generation < 0)) {
+      throw new StreamIntegrityError('invalid avatar generation or principal');
+    }
+    if (p.job && (p.job.principal_id !== p.principal_id || !Number.isSafeInteger(p.job.generation) || p.job.generation < 0)) {
+      throw new StreamIntegrityError('invalid avatar job generation or principal');
+    }
+    return { ...prev,
+      ...(p.avatar ? { avatars: { ...prev.avatars, [p.principal_id]: p.avatar } } : {}),
+      ...(p.job ? { avatar_jobs: { ...prev.avatar_jobs, [p.job.job_id]: p.job } } : {}),
+    };
+  }
   const s = prev; let next: WorkspaceState;
 
   switch (env.type) {
@@ -325,6 +350,8 @@ export function reduceWorkspace(
           },
         },
       };
+      if (p.model != null) next.model_provenance = { ...s.model_provenance,
+        [p.principal_id]: modelProvenance(p.principal_id, { user: env.actor_user, agent_principal: env.actor_agent_principal }, p.created_at) };
       break;
     }
     case 'FeedbackSubmitted': {
@@ -361,6 +388,7 @@ export function reduceWorkspace(
           ...s.principals,
           [p.principal_id]: { ...declaredFor, model: p.model ?? null },
         },
+        model_provenance: { ...s.model_provenance, [p.principal_id]: modelProvenance(p.principal_id, { user: env.actor_user, agent_principal: env.actor_agent_principal }, p.declared_at) },
       };
       break;
     }

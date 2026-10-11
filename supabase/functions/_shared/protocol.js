@@ -343,6 +343,58 @@ function upcastEnvelope(raw) {
 }
 registerUpcaster("TaskCreated", 0, (p) => ({ task_id: p.id, slug: p.name }));
 
+// src/protocol/agent-avatars.ts
+var AGENT_AVATAR_BUCKET = "agent-avatars";
+var AGENT_AVATAR_SOURCES = ["uploaded_by_person", "declared_by_agent", "client_metadata"];
+var AGENT_AVATAR_PUBLIC_COMMANDS = [
+  "begin_agent_avatar_upload",
+  "declare_agent_avatar",
+  "clear_own_agent_avatar",
+  "set_agent_avatar",
+  "clear_agent_avatar",
+  "remove_agent_avatar"
+];
+var AGENT_AVATAR_EVENT_TYPES = [
+  "AgentAvatarUploadBegun",
+  "AgentAvatarSet",
+  "AgentAvatarCleared",
+  "AgentAvatarRemoved",
+  "AgentAvatarRefused"
+];
+function emptyAgentAvatar(principal_id, generation = 0) {
+  return {
+    principal_id,
+    generation,
+    person_locked: false,
+    source: null,
+    source_ref: null,
+    set_by_user_id: null,
+    set_by_principal_id: null,
+    set_at: null
+  };
+}
+function modelProvenance(principal_id, actor, set_at) {
+  return {
+    principal_id,
+    model_set_by: actor.agent_principal ? "agent" : actor.user ? "person" : "unknown",
+    set_by_user_id: actor.agent_principal ? null : actor.user,
+    set_at
+  };
+}
+function pendingPersonAvatar(state, principal_id) {
+  return Object.values(state.avatar_jobs ?? {}).some((job) => job.principal_id === principal_id && job.source === "uploaded_by_person" && job.state === "pending" && job.declared_at !== null);
+}
+function normalizedAvatarReason(reason) {
+  if (typeof reason !== "string") return null;
+  const value = reason.trim();
+  return value.length >= 1 && value.length <= 200 && !/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(value) ? value : null;
+}
+function validAvatarImage(result, workspace_id, principal_id) {
+  if (!result || typeof result !== "object") return false;
+  const p = result;
+  return typeof p.sha256 === "string" && /^[a-f0-9]{64}$/.test(p.sha256) && p.object_prefix === `${workspace_id}/${principal_id}/${p.sha256}` && p.content_type === "image/webp" && p.width === 256 && p.height === 256 && Number.isSafeInteger(p.byte_size) && p.byte_size > 0 && p.byte_size <= 2 * 1024 * 1024;
+}
+
 // src/protocol/admin-routine-events.ts
 var ADMIN_ROUTINE_EVENT_TYPES = [
   "AdminWorkspaceCreated",
@@ -363,6 +415,7 @@ var WORKSPACE_ROLES = ["owner", "admin", "member"];
 var AGENT_TRANSPORTS = ["local", "hosted_mcp"];
 var WORKSPACE_EVENT_TYPES = [
   ...ADMIN_ROUTINE_EVENT_TYPES,
+  ...AGENT_AVATAR_EVENT_TYPES,
   "WorkspaceCreated",
   "WorkspaceArchived",
   "MemberInvited",
@@ -413,6 +466,9 @@ var HUMAN_ONLY_COMMANDS = /* @__PURE__ */ new Set([
   "create_agent_principal",
   "revoke_agent_principal",
   "set_agent_model",
+  "set_agent_avatar",
+  "clear_agent_avatar",
+  "remove_agent_avatar",
   "mint_agent_token",
   "mint_agent_join_credential",
   "revoke_agent_join_credential",
@@ -586,6 +642,40 @@ function ownerOrAdmin(role) {
   return role === "owner" || role === "admin";
 }
 function decideWorkspace(state, cmd, ctx) {
+  if (cmd.kind === "complete_agent_avatar_job" || ctx.credential_kind === "avatar_service") {
+    if (cmd.kind !== "complete_agent_avatar_job" || ctx.credential_kind !== "avatar_service" || ctx.actor.user !== null || ctx.actor.agent_principal !== null || ctx.actor.run !== null) {
+      return authz2("credential_kind_forbidden", "avatar completion requires the image worker service actor");
+    }
+    if (!state) return authz2("workspace_not_found", "workspace is unavailable");
+    const job = state.avatar_jobs?.[cmd.job_id];
+    if (!job || job.declared_at === null || job.state !== "pending") {
+      return domain2(ctx, cmd.kind, "avatar_upload_not_found", "avatar job is not pending");
+    }
+    const avatar = state.avatars?.[job.principal_id] ?? emptyAgentAvatar(job.principal_id);
+    const principal = state.principals[job.principal_id];
+    const code2 = !principal || principal.revoked_at !== null || state.workspace.archived_at !== null ? "principal_gone" : avatar.generation !== job.generation ? "stale" : job.source === "declared_by_agent" && (avatar.person_locked || pendingPersonAvatar(state, job.principal_id)) ? "precedence" : null;
+    if (code2) return accept2([env2(ctx, "AgentAvatarRefused", {
+      principal_id: job.principal_id,
+      code: code2,
+      job: { ...job, state: "refused", refusal_code: code2, completed_at: ctx.now }
+    })]);
+    if (!validAvatarImage(cmd.result, ctx.workspace_id, job.principal_id)) {
+      return domain2(ctx, cmd.kind, "avatar_invalid", "avatar result must name the immutable re-encoded WebP set");
+    }
+    return accept2([env2(ctx, "AgentAvatarSet", {
+      principal_id: job.principal_id,
+      avatar: {
+        ...avatar,
+        ...cmd.result,
+        source: job.source,
+        source_ref: null,
+        set_by_user_id: job.requested_by_principal_id ? null : job.requested_by_user_id,
+        set_by_principal_id: job.requested_by_principal_id,
+        set_at: ctx.now
+      },
+      job: { ...job, state: "done", completed_at: ctx.now }
+    })]);
+  }
   const user_id = callerUser(ctx);
   if (!user_id) {
     return authz2("bad_state", "credential has no server-derived human owner");
@@ -721,7 +811,7 @@ function decideWorkspace(state, cmd, ctx) {
     ]);
   }
   const actorRole = ctx.role(user_id);
-  if (actorRole === null) {
+  if (actorRole === null && !(cmd.kind === "remove_agent_avatar" && ctx.operatorAllowed(ctx.actor))) {
     return authz2("bad_state", "caller is not a current workspace member");
   }
   switch (cmd.kind) {
@@ -880,6 +970,8 @@ function decideWorkspace(state, cmd, ctx) {
       ]);
     }
     case "create_agent_principal": {
+      const model = normalizedModel(cmd.model ?? null);
+      if (!model.ok) return domain2(ctx, cmd.kind, "model_invalid", model.message);
       if (state.principals[cmd.principal_id] || !cmd.allow_duplicate_name && Object.values(state.principals).some((principal) => principal.name === cmd.name)) {
         return domain2(ctx, cmd.kind, PRINCIPAL_NAME_TAKEN.code, PRINCIPAL_NAME_TAKEN.message);
       }
@@ -888,7 +980,7 @@ function decideWorkspace(state, cmd, ctx) {
           principal_id: cmd.principal_id,
           owner_user_id: user_id,
           name: cmd.name,
-          model: cmd.model ?? null,
+          model: model.model,
           transport: "local",
           turn_only: false,
           created_at: ctx.now
@@ -1007,6 +1099,73 @@ function decideWorkspace(state, cmd, ctx) {
           expires_at: ctx.now + ttl
         })
       ]);
+    }
+    case "begin_agent_avatar_upload":
+    case "declare_agent_avatar":
+    case "clear_own_agent_avatar":
+    case "set_agent_avatar":
+    case "clear_agent_avatar":
+    case "remove_agent_avatar": {
+      if (state.workspace.archived_at !== null) return domain2(ctx, cmd.kind, "workspace_already_archived", "workspace is closed");
+      const own3 = cmd.kind === "declare_agent_avatar" || cmd.kind === "clear_own_agent_avatar" || cmd.kind === "begin_agent_avatar_upload" && ctx.credential_kind === "agent";
+      if (own3 && (ctx.credential_kind !== "agent" || !ctx.actor.agent_principal)) {
+        return authz2("credential_kind_forbidden", "own avatar commands require the presenting agent");
+      }
+      if (cmd.kind === "begin_agent_avatar_upload" && ctx.credential_kind !== "human" && ctx.credential_kind !== "agent") {
+        return authz2("credential_kind_forbidden", "upload requires a person or agent");
+      }
+      if (own3 && "principal_id" in cmd) return authz2("credential_kind_forbidden", "agent avatar commands have no target");
+      const principalId = own3 ? ctx.actor.agent_principal : "principal_id" in cmd ? cmd.principal_id : null;
+      const principal = principalId ? state.principals[principalId] : null;
+      if (!principal) return domain2(ctx, cmd.kind, "principal_not_found", "agent principal does not exist");
+      if (principal.revoked_at !== null) return domain2(ctx, cmd.kind, "principal_revoked", "agent principal is revoked");
+      if (cmd.kind === "remove_agent_avatar") {
+        if (!ctx.operatorAllowed(ctx.actor)) return authz2("operator_not_allowed", "caller is not allowed to remove an avatar");
+      } else if (!own3 && !ownerOrAdmin(actorRole) && principal.owner_user_id !== user_id) {
+        return domain2(ctx, cmd.kind, "principal_not_owned", "Member may change only their own agent picture");
+      }
+      const avatar = state.avatars?.[principal.principal_id] ?? emptyAgentAvatar(principal.principal_id);
+      const refusal = () => accept2([env2(ctx, "AgentAvatarRefused", { principal_id: principal.principal_id, code: "precedence" })]);
+      if (own3 && (avatar.person_locked || pendingPersonAvatar(state, principal.principal_id))) return refusal();
+      if (cmd.kind === "begin_agent_avatar_upload") {
+        if (state.avatar_jobs?.[cmd.upload_id]) return domain2(ctx, cmd.kind, "avatar_invalid", "upload already exists");
+        return accept2([env2(ctx, "AgentAvatarUploadBegun", { principal_id: principal.principal_id, job: {
+          job_id: cmd.upload_id,
+          principal_id: principal.principal_id,
+          generation: avatar.generation,
+          quarantine_key: `${ctx.workspace_id}/${principal.principal_id}/quarantine/${cmd.upload_id}`,
+          source: own3 ? "declared_by_agent" : "uploaded_by_person",
+          requested_by_user_id: user_id,
+          requested_by_principal_id: own3 ? principal.principal_id : null,
+          state: "pending",
+          refusal_code: null,
+          created_at: ctx.now,
+          declared_at: null,
+          completed_at: null
+        } })]);
+      }
+      if (cmd.kind === "set_agent_avatar" || cmd.kind === "declare_agent_avatar") {
+        const job = state.avatar_jobs?.[cmd.upload_id];
+        if (!job || job.principal_id !== principal.principal_id || job.state !== "pending" || job.declared_at !== null || job.requested_by_user_id !== user_id || job.requested_by_principal_id !== ctx.actor.agent_principal) {
+          return domain2(ctx, cmd.kind, "avatar_upload_not_found", "upload is unavailable to the presenting actor");
+        }
+        if (!Number.isSafeInteger(avatar.generation + 1)) return domain2(ctx, cmd.kind, "avatar_invalid", "avatar generation is exhausted");
+        return accept2([env2(ctx, "AgentAvatarSet", {
+          principal_id: principal.principal_id,
+          avatar: { ...avatar, generation: avatar.generation + 1, person_locked: own3 ? avatar.person_locked : true },
+          job: { ...job, generation: avatar.generation + 1, declared_at: ctx.now }
+        })]);
+      }
+      if (cmd.kind === "clear_own_agent_avatar" && avatar.source !== "declared_by_agent") return refusal();
+      const reason = cmd.kind === "remove_agent_avatar" ? normalizedAvatarReason(cmd.reason) : cmd.kind === "clear_own_agent_avatar" ? "agent_clear" : "person_clear";
+      if (reason === null) return domain2(ctx, cmd.kind, "avatar_invalid", "removal reason must be 1 to 200 plain characters");
+      if (!Number.isSafeInteger(avatar.generation + 1)) return domain2(ctx, cmd.kind, "avatar_invalid", "avatar generation is exhausted");
+      return accept2([env2(ctx, cmd.kind === "remove_agent_avatar" ? "AgentAvatarRemoved" : "AgentAvatarCleared", {
+        principal_id: principal.principal_id,
+        avatar: emptyAgentAvatar(principal.principal_id, avatar.generation + 1),
+        reason,
+        ...cmd.kind === "remove_agent_avatar" ? { removed_by: user_id } : {}
+      })]);
     }
     case "declare_agent_model": {
       if (ctx.credential_kind !== "agent") {
@@ -2840,6 +2999,24 @@ function reduceWorkspace(prev, env3) {
     if (!env3.grant_id || !env3.admin_identity_id || !env3.grant_manifest_digest || env3.actor_user !== null || env3.actor_agent_principal !== null) throw new StreamIntegrityError("invalid delegated workspace actor");
     return { ...prev, admin_routine: reduceAdminRoutine(prev.admin_routine, env3) };
   }
+  if (AGENT_AVATAR_EVENT_TYPES.includes(env3.type)) {
+    const p = req2(env3.payload, ["principal_id"], env3.type, env3.seq);
+    const priorAvatar = prev.avatars?.[p.principal_id];
+    if (env3.type === "AgentAvatarUploadBegun" && (!p.job || p.job.state !== "pending" || p.job.declared_at !== null) || env3.type === "AgentAvatarSet" && (!p.avatar || !p.job || p.avatar.generation !== p.job.generation || (p.job.state === "pending" ? p.avatar.generation !== (priorAvatar?.generation ?? 0) + 1 : p.job.state !== "done" || p.avatar.generation !== priorAvatar?.generation)) || (env3.type === "AgentAvatarCleared" || env3.type === "AgentAvatarRemoved") && (!p.avatar || !p.reason || p.avatar.source !== null || p.avatar.person_locked || p.avatar.generation !== (priorAvatar?.generation ?? 0) + 1) || env3.type === "AgentAvatarRefused" && (!p.code || !["stale", "precedence", "principal_gone"].includes(p.code) || p.avatar || p.job && (p.job.state !== "refused" || p.job.refusal_code !== p.code))) {
+      throw new StreamIntegrityError("invalid avatar event or generation transition");
+    }
+    if (p.avatar && (p.avatar.principal_id !== p.principal_id || !Number.isSafeInteger(p.avatar.generation) || p.avatar.generation < 0)) {
+      throw new StreamIntegrityError("invalid avatar generation or principal");
+    }
+    if (p.job && (p.job.principal_id !== p.principal_id || !Number.isSafeInteger(p.job.generation) || p.job.generation < 0)) {
+      throw new StreamIntegrityError("invalid avatar job generation or principal");
+    }
+    return {
+      ...prev,
+      ...p.avatar ? { avatars: { ...prev.avatars, [p.principal_id]: p.avatar } } : {},
+      ...p.job ? { avatar_jobs: { ...prev.avatar_jobs, [p.job.job_id]: p.job } } : {}
+    };
+  }
   const s = prev;
   let next;
   switch (env3.type) {
@@ -3032,6 +3209,10 @@ function reduceWorkspace(prev, env3) {
           }
         }
       };
+      if (p.model != null) next.model_provenance = {
+        ...s.model_provenance,
+        [p.principal_id]: modelProvenance(p.principal_id, { user: env3.actor_user, agent_principal: env3.actor_agent_principal }, p.created_at)
+      };
       break;
     }
     case "FeedbackSubmitted": {
@@ -3060,7 +3241,8 @@ function reduceWorkspace(prev, env3) {
         principals: {
           ...s.principals,
           [p.principal_id]: { ...declaredFor, model: p.model ?? null }
-        }
+        },
+        model_provenance: { ...s.model_provenance, [p.principal_id]: modelProvenance(p.principal_id, { user: env3.actor_user, agent_principal: env3.actor_agent_principal }, p.declared_at) }
       };
       break;
     }
@@ -5288,6 +5470,10 @@ export {
   ADMIN_WORKER_RENEWAL_LIMITS,
   ADMIN_WORKSPACES_CREATED_PER_GRANT,
   ADMIN_WORKSPACE_CREATE_PER_DAY,
+  AGENT_AVATAR_BUCKET,
+  AGENT_AVATAR_EVENT_TYPES,
+  AGENT_AVATAR_PUBLIC_COMMANDS,
+  AGENT_AVATAR_SOURCES,
   AGENT_TOKEN_DEFAULT_TTL_MS,
   AGENT_TOKEN_MAX_TTL_MS,
   AGENT_TRANSPORTS,
@@ -5386,6 +5572,7 @@ export {
   decideWorkspace,
   emptyAdminAccount,
   emptyAdminRoutine,
+  emptyAgentAvatar,
   emptyHouseholdObjectState,
   emptyHouseholdTodoState,
   evaluateGate,
@@ -5405,11 +5592,14 @@ export {
   leaseLive,
   legacyHouseholdAcceptRefusal,
   legacyRemovalRejoinRefusal,
+  modelProvenance,
+  normalizedAvatarReason,
   normalizedFeedbackBody,
   normalizedFeedbackContext,
   parseAdminClientApprovalCommand,
   parseAdminRoutineCommand,
   parseHumanInviteCommand,
+  pendingPersonAvatar,
   planFileVersionWindow,
   publicHostedCommandForbidden,
   readHouseholdObjects,
@@ -5429,6 +5619,7 @@ export {
   todoNoticeAbout,
   upcastEnvelope,
   upcastPayload,
+  validAvatarImage,
   validateHouseholdHumanCommand,
   validateHouseholdToolArguments
 };

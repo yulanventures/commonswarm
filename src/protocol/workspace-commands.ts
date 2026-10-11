@@ -1,3 +1,4 @@
+import { type AgentAvatarCommand, type AgentAvatarEvent, emptyAgentAvatar, pendingPersonAvatar, normalizedAvatarReason, validAvatarImage } from './agent-avatars.js';
 // Pure workspace-authority decision core (§3.4).
 //
 // Authorization facts are injected as transaction-time oracles. Credential
@@ -65,7 +66,7 @@ export const RENEWAL_MAX_SUCCESSORS_DEFAULT = 800;
  */
 export const RENEWAL_IDLE_PAUSE_DAYS = 14;
 
-export type WorkspaceCommand =
+export type WorkspaceCommand = AgentAvatarCommand
   | { kind: 'create_workspace'; workspace_id: string; name: string }
   | { kind: 'archive_workspace' }
   | {
@@ -304,7 +305,7 @@ export interface RenewalFacts {
 export interface DecideWorkspaceCtx {
   now: number;
   actor: Actor;
-  credential_kind: 'human' | 'agent' | 'join' | 'hosted_grant' | 'hosted_seat';
+  credential_kind: 'human' | 'agent' | 'join' | 'hosted_grant' | 'hosted_seat' | 'avatar_service';
   /** Exact presenting token, populated only for an agent capability credential. */
   presenting_token_id: string | null;
   command_id: string;
@@ -423,6 +424,9 @@ export const HUMAN_ONLY_COMMANDS = new Set<WorkspaceCommand['kind']>([
   'create_agent_principal',
   'revoke_agent_principal',
   'set_agent_model',
+  'set_agent_avatar',
+  'clear_agent_avatar',
+  'remove_agent_avatar',
   'mint_agent_token',
   'mint_agent_join_credential',
   'revoke_agent_join_credential',
@@ -648,6 +652,39 @@ export function decideWorkspace(
   cmd: WorkspaceCommand,
   ctx: DecideWorkspaceCtx,
 ): WorkspaceDecision {
+  // Server-only service capability: it carries no human identity and authorizes
+  // exactly completion. The HTTP validator never accepts this command kind.
+  if (cmd.kind === 'complete_agent_avatar_job' || ctx.credential_kind === 'avatar_service') {
+    if (cmd.kind !== 'complete_agent_avatar_job' || ctx.credential_kind !== 'avatar_service'
+      || ctx.actor.user !== null || ctx.actor.agent_principal !== null || ctx.actor.run !== null) {
+      return authz('credential_kind_forbidden', 'avatar completion requires the image worker service actor');
+    }
+    if (!state) return authz('workspace_not_found', 'workspace is unavailable');
+    const job = state.avatar_jobs?.[cmd.job_id];
+    if (!job || job.declared_at === null || job.state !== 'pending') {
+      return domain(ctx, cmd.kind, 'avatar_upload_not_found', 'avatar job is not pending');
+    }
+    const avatar = state.avatars?.[job.principal_id] ?? emptyAgentAvatar(job.principal_id);
+    const principal = state.principals[job.principal_id];
+    const code = !principal || principal.revoked_at !== null || state.workspace.archived_at !== null
+      ? 'principal_gone' : avatar.generation !== job.generation ? 'stale'
+      : job.source === 'declared_by_agent' && (avatar.person_locked || pendingPersonAvatar(state, job.principal_id))
+        ? 'precedence' : null;
+    if (code) return accept([env(ctx, 'AgentAvatarRefused', {
+      principal_id: job.principal_id, code,
+      job: { ...job, state: 'refused', refusal_code: code, completed_at: ctx.now },
+    } satisfies AgentAvatarEvent)]);
+    if (!validAvatarImage(cmd.result, ctx.workspace_id, job.principal_id)) {
+      return domain(ctx, cmd.kind, 'avatar_invalid', 'avatar result must name the immutable re-encoded WebP set');
+    }
+    return accept([env(ctx, 'AgentAvatarSet', {
+      principal_id: job.principal_id,
+      avatar: { ...avatar, ...cmd.result, source: job.source, source_ref: null,
+        set_by_user_id: job.requested_by_principal_id ? null : job.requested_by_user_id,
+        set_by_principal_id: job.requested_by_principal_id, set_at: ctx.now },
+      job: { ...job, state: 'done', completed_at: ctx.now },
+    } satisfies AgentAvatarEvent)]);
+  }
   const user_id = callerUser(ctx);
   if (!user_id) {
     return authz('bad_state', 'credential has no server-derived human owner');
@@ -818,7 +855,7 @@ export function decideWorkspace(
   }
 
   const actorRole = ctx.role(user_id);
-  if (actorRole === null) {
+  if (actorRole === null && !(cmd.kind === 'remove_agent_avatar' && ctx.operatorAllowed(ctx.actor))) {
     return authz('bad_state', 'caller is not a current workspace member');
   }
 
@@ -1004,6 +1041,8 @@ export function decideWorkspace(
     }
 
     case 'create_agent_principal': {
+      const model = normalizedModel(cmd.model ?? null);
+      if (!model.ok) return domain(ctx, cmd.kind, 'model_invalid', model.message);
       if (
         state.principals[cmd.principal_id]
         || (!cmd.allow_duplicate_name && Object.values(state.principals).some((principal: any) => principal.name === cmd.name))
@@ -1015,7 +1054,7 @@ export function decideWorkspace(
           principal_id: cmd.principal_id,
           owner_user_id: user_id,
           name: cmd.name,
-          model: cmd.model ?? null,
+          model: model.model,
           transport: 'local',
           turn_only: false,
           created_at: ctx.now,
@@ -1152,6 +1191,68 @@ export function decideWorkspace(
           expires_at: ctx.now + ttl,
         }),
       ]);
+    }
+
+    case 'begin_agent_avatar_upload':
+    case 'declare_agent_avatar':
+    case 'clear_own_agent_avatar':
+    case 'set_agent_avatar':
+    case 'clear_agent_avatar':
+    case 'remove_agent_avatar': {
+      if (state.workspace.archived_at !== null) return domain(ctx, cmd.kind, 'workspace_already_archived', 'workspace is closed');
+      const own = cmd.kind === 'declare_agent_avatar' || cmd.kind === 'clear_own_agent_avatar'
+        || (cmd.kind === 'begin_agent_avatar_upload' && ctx.credential_kind === 'agent');
+      if (own && (ctx.credential_kind !== 'agent' || !ctx.actor.agent_principal)) {
+        return authz('credential_kind_forbidden', 'own avatar commands require the presenting agent');
+      }
+      if (cmd.kind === 'begin_agent_avatar_upload' && ctx.credential_kind !== 'human' && ctx.credential_kind !== 'agent') {
+        return authz('credential_kind_forbidden', 'upload requires a person or agent');
+      }
+      // Reject extra targets even when the pure core is called without the wire validator.
+      if (own && 'principal_id' in cmd) return authz('credential_kind_forbidden', 'agent avatar commands have no target');
+      const principalId = own ? ctx.actor.agent_principal : 'principal_id' in cmd ? cmd.principal_id : null;
+      const principal = principalId ? state.principals[principalId] : null;
+      if (!principal) return domain(ctx, cmd.kind, 'principal_not_found', 'agent principal does not exist');
+      if (principal.revoked_at !== null) return domain(ctx, cmd.kind, 'principal_revoked', 'agent principal is revoked');
+      if (cmd.kind === 'remove_agent_avatar') {
+        if (!ctx.operatorAllowed(ctx.actor)) return authz('operator_not_allowed', 'caller is not allowed to remove an avatar');
+      } else if (!own && !ownerOrAdmin(actorRole) && principal.owner_user_id !== user_id) {
+        return domain(ctx, cmd.kind, 'principal_not_owned', 'Member may change only their own agent picture');
+      }
+      const avatar = state.avatars?.[principal.principal_id] ?? emptyAgentAvatar(principal.principal_id);
+      const refusal = () => accept([env(ctx, 'AgentAvatarRefused', { principal_id: principal.principal_id, code: 'precedence' } satisfies AgentAvatarEvent)]);
+      if (own && (avatar.person_locked || pendingPersonAvatar(state, principal.principal_id))) return refusal();
+      if (cmd.kind === 'begin_agent_avatar_upload') {
+        if (state.avatar_jobs?.[cmd.upload_id]) return domain(ctx, cmd.kind, 'avatar_invalid', 'upload already exists');
+        return accept([env(ctx, 'AgentAvatarUploadBegun', { principal_id: principal.principal_id, job: {
+          job_id: cmd.upload_id, principal_id: principal.principal_id, generation: avatar.generation,
+          quarantine_key: `${ctx.workspace_id}/${principal.principal_id}/quarantine/${cmd.upload_id}`,
+          source: own ? 'declared_by_agent' : 'uploaded_by_person', requested_by_user_id: user_id,
+          requested_by_principal_id: own ? principal.principal_id : null,
+          state: 'pending', refusal_code: null, created_at: ctx.now, declared_at: null, completed_at: null,
+        } } satisfies AgentAvatarEvent)]);
+      }
+      if (cmd.kind === 'set_agent_avatar' || cmd.kind === 'declare_agent_avatar') {
+        const job = state.avatar_jobs?.[cmd.upload_id];
+        if (!job || job.principal_id !== principal.principal_id || job.state !== 'pending' || job.declared_at !== null
+          || job.requested_by_user_id !== user_id || job.requested_by_principal_id !== ctx.actor.agent_principal) {
+          return domain(ctx, cmd.kind, 'avatar_upload_not_found', 'upload is unavailable to the presenting actor');
+        }
+        if (!Number.isSafeInteger(avatar.generation + 1)) return domain(ctx, cmd.kind, 'avatar_invalid', 'avatar generation is exhausted');
+        return accept([env(ctx, 'AgentAvatarSet', { principal_id: principal.principal_id,
+          avatar: { ...avatar, generation: avatar.generation + 1, person_locked: own ? avatar.person_locked : true },
+          job: { ...job, generation: avatar.generation + 1, declared_at: ctx.now },
+        } satisfies AgentAvatarEvent)]);
+      }
+      if (cmd.kind === 'clear_own_agent_avatar' && avatar.source !== 'declared_by_agent') return refusal();
+      const reason = cmd.kind === 'remove_agent_avatar' ? normalizedAvatarReason(cmd.reason)
+        : cmd.kind === 'clear_own_agent_avatar' ? 'agent_clear' : 'person_clear';
+      if (reason === null) return domain(ctx, cmd.kind, 'avatar_invalid', 'removal reason must be 1 to 200 plain characters');
+      if (!Number.isSafeInteger(avatar.generation + 1)) return domain(ctx, cmd.kind, 'avatar_invalid', 'avatar generation is exhausted');
+      return accept([env(ctx, cmd.kind === 'remove_agent_avatar' ? 'AgentAvatarRemoved' : 'AgentAvatarCleared', {
+        principal_id: principal.principal_id, avatar: emptyAgentAvatar(principal.principal_id, avatar.generation + 1),
+        reason, ...(cmd.kind === 'remove_agent_avatar' ? { removed_by: user_id } : {}),
+      } satisfies AgentAvatarEvent)]);
     }
 
     case 'declare_agent_model': {
