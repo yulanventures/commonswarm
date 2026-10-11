@@ -55,7 +55,7 @@ local_proof=root/'proof'; local_proof.mkdir(mode=0o700)
 real_open,real_stat,real_fstat,real_resolve=os.open,os.lstat,os.fstat,os.path.realpath
 def local(p): return str(marker) if str(p)==u.guard.__globals__['MACHINE_ID'] else str(local_proof) if str(p)==proof else p
 def owned(s): return os.stat_result((s.st_mode,s.st_ino,s.st_dev,s.st_nlink,0,0,s.st_size,s.st_atime,s.st_mtime,s.st_ctime))
-with patch.object(os,'geteuid',return_value=0),patch.object(socket,'gethostname',return_value=u.HOST),patch.dict(u.guard.__globals__,digest=lambda raw:u.guard.__globals__['MACHINE_SHA256'] if raw==b'test-only-machine-bytes\n' else hashlib.sha256(raw).hexdigest()),patch.object(os,'open',side_effect=lambda p,*a:real_open(local(p),*a)),patch.object(os,'lstat',side_effect=lambda p:owned(real_stat(local(p)))),patch.object(os,'fstat',side_effect=lambda fd:owned(real_fstat(fd))),patch.object(os.path,'realpath',side_effect=lambda p:str(p) if str(p) in (u.guard.__globals__['MACHINE_ID'],proof) else real_resolve(p)):
+with patch.object(os,'geteuid',return_value=0),patch.object(socket,'gethostname',return_value=u.HOST),patch.dict(u.guard.__globals__,digest=lambda raw:u.guard.__globals__['MACHINE_SHA256'] if raw==b'test-only-machine-bytes\n' else hashlib.sha256(raw).hexdigest()),patch.object(os,'open',side_effect=lambda p,*a,**kw:real_open(local(p),*a,**kw)),patch.object(os,'lstat',side_effect=lambda p,*a,**kw:owned(real_stat(local(p),*a,**kw))),patch.object(os,'fstat',side_effect=lambda fd:owned(real_fstat(fd))),patch.object(os.path,'realpath',side_effect=lambda p,*a,**kw:str(p) if str(p) in (u.guard.__globals__['MACHINE_ID'],proof) else real_resolve(p,*a,**kw)):
  for action in ('fault','undo','close'):
   for case in ('F1','F2','F3'):
    sys.argv=['u9',action,case,plan,str(inputs),proof]; out=io.StringIO()
@@ -197,18 +197,17 @@ os.utime(dump_file,(c.now().timestamp()-5,)*2)
 s.STATUS=str(backup/'status.json'); s.RESTORE=str(backup/'restore-status.json')
 machine=root/'machine-id'; machine.write_bytes(b'test-machine-id-with-newline\n'); c.MACHINE_ID=str(machine)
 real_digest,real_stat,real_fstat=c.digest,os.lstat,os.fstat
+temp_paths={tempfile.gettempdir(),str(pathlib.Path(tempfile.gettempdir()).resolve())}
 def real_rm(p):
  assert p.parent.resolve().is_relative_to(root)
  os.rmdir(p) if p.is_dir() and not p.is_symlink() else os.unlink(p)
 def owned(meta,path=''):
- mode=meta.st_mode
- if str(path) in (tempfile.gettempdir(),str(pathlib.Path(tempfile.gettempdir()).resolve())): mode &= ~0o022
  fields={key:getattr(meta,key) for key in dir(meta) if key.startswith('st_')}
- return SimpleNamespace(**dict(fields,st_mode=mode,st_uid=0,st_gid=0))
+ return SimpleNamespace(**dict(fields,st_mode=meta.st_mode & ~0o022 if str(path) in temp_paths else meta.st_mode,st_uid=0,st_gid=0))
 stack.enter_context(patch.object(os,'geteuid',return_value=0))
 stack.enter_context(patch.object(socket,'gethostname',return_value=c.HOST))
 stack.enter_context(patch.object(c,'digest',side_effect=lambda raw:c.MACHINE_SHA256 if raw==machine.read_bytes() else real_digest(raw)))
-stack.enter_context(patch.object(os,'lstat',side_effect=lambda p:owned(real_stat(p),p)))
+stack.enter_context(patch.object(os,'lstat',side_effect=lambda p,*a,**kw:owned(real_stat(p,*a,**kw),p)))
 stack.enter_context(patch.object(os,'fstat',side_effect=lambda fd:owned(real_fstat(fd))))
 stack.enter_context(patch.object(os,'fchown'))
 def invoke(action,name,source=None):
@@ -337,9 +336,9 @@ def resolved(p,strict=False):
  if str(p) in ('/home/commonswarm/edge/current','/home/commonswarm/admin-issuance/releases/'+sha):
   return pathlib.Path('/home/commonswarm/'+('edge' if 'edge/current' in str(p) else 'admin-issuance')+'/releases/'+sha)
  return real_resolve(p,strict=strict)
-stack.enter_context(patch.object(os,'open',side_effect=lambda p,*args:real_open(mapped(p),*args)))
-stack.enter_context(patch.object(os,'lstat',side_effect=lambda p:owned(real_stat(mapped(p)),mapped(p))))
-stack.enter_context(patch.object(os.path,'realpath',side_effect=lambda p:str(p) if mapped(p)!=str(p) else real_realpath(p)))
+stack.enter_context(patch.object(os,'open',side_effect=lambda p,*args,**kw:real_open(mapped(p),*args,**kw)))
+stack.enter_context(patch.object(os,'lstat',side_effect=lambda p,*args,**kw:owned(real_stat(mapped(p),*args,**kw),mapped(p))))
+stack.enter_context(patch.object(os.path,'realpath',side_effect=lambda p,*args,**kw:str(p) if mapped(p)!=str(p) else real_realpath(p,*args,**kw)))
 stack.enter_context(patch.object(pathlib.Path,'resolve',resolved))
 stack.enter_context(patch.object(os,'link',side_effect=lambda src,dst,**kw:real_link(mapped(src),mapped(dst),**kw)))
 stack.enter_context(patch.object(os,'unlink',side_effect=lambda p:real_unlink(mapped(p))))
