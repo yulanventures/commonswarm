@@ -1384,7 +1384,7 @@ test('A8 / w4-preflight-r-tree-absent: an R edge tree present at preflight refus
 
 /** X2 receipts exercise the marked validator; existing fixtures also run the pinned old block. */
 const lockGates = ['admin-principal-lock-order-ci', 'admin-principal-lock-order-staging'] as const;
-const gatesContract = JSON.parse(readFileSync(join(dirname(planPath), 'GATES.json'), 'utf8')) as { gates: Record<string, string[]>; windows: Record<string, string[]> };
+const gatesContract = JSON.parse(readFileSync(join(dirname(planPath), 'GATES.json'), 'utf8')) as { gates: Record<string, string[]>; windows: Record<string, string[]>; x2_race_classes: Record<string, string> };
 const x2Base = 'e82771087634c1feced87b0a3b9d51b555aaecda';
 const oldFile = (file: string) => {
   const r = spawnSync('git', ['show', `${x2Base}:${file}`], { encoding: 'utf8', maxBuffer: 64 << 20 });
@@ -1394,9 +1394,7 @@ const oldGatesBlock = blocksOf(oldFile(relative(process.cwd(), planPath))).find(
 const oldContract = JSON.parse(oldFile(relative(process.cwd(), join(dirname(planPath), 'GATES.json'))));
 const lockControls: string[] = oldContract.gates[lockGates[0]];
 const legacyClasses = Object.fromEntries(lockControls.map((name, i) => [name, i ? 'base-cycle' : 'positive-control']));
-const mixedClasses: Record<string, string> = { ...legacyClasses, 'admin-oauth-vs-admin-oauth-shared-workspace': 'base-cycle',
-  'admin-oauth-create-existing-workspace-crossed': 'base-cycle', 'admin-oauth-read-outside-grant-vs-admin-oauth-routine': 'regression-guard',
-  'admin-oauth-grant-admin-delegation-vs-admin-oauth-routine': 'regression-guard', 'admin-human-withdraw-crossed-grants': 'base-cycle' };
+const mixedClasses = gatesContract.x2_race_classes;
 function x2(options: { treesDiffer: boolean; mixed?: boolean }) {
   let legacyVerdicts = 0;
   const root = realpathSync(mkdtempSync(join(scratch, 'x2-'))), bin = join(root, 'bin'), evidence = join(root, 'evidence');
@@ -1432,8 +1430,8 @@ else: sys.stderr.write('UNMODELLED git '+repr(a)+'\n'); raise SystemExit(99)
     runs: { base: stagingRun('base', T, '/srv/c1-staging/x2/base.dump', 'a'), lane: stagingRun('lane', R, '/srv/c1-staging/x2/lane.dump', 'b') } };
   const inputs: any = { release_sha: R, window: 'W6', lock_order_base_variant_sha: T };
   const run = (change: (c: any) => void = () => {}, source = block('ai-gates')) => {
-    const contract = { ...structuredClone(oldContract), x2_race_classes: { ...classes } };
-    for (const gate of lockGates) contract.gates[gate] = [...controls];
+    const contract = structuredClone(options.mixed ? gatesContract : oldContract);
+    if (!options.mixed) contract.x2_race_classes = { ...classes };
     const c = { ci: structuredClone(ci), st: structuredClone(st), git: structuredClone(git), inputs: structuredClone(inputs), receipt: null as any, contract, duplicate: '', duplicateMap: false };
     const files: Record<string, string> = {};
     for (const name of contract.windows.W6) files[name] = JSON.stringify({ gate: name }) + '\n';
@@ -1461,7 +1459,9 @@ else: sys.stderr.write('UNMODELLED git '+repr(a)+'\n'); raise SystemExit(99)
   return { run, T, R, onlyR, versionsT, gitCalls, compared: () => legacyVerdicts };
 }
 
-test('X2 / lock-order-gates-contract: both arrays belong to W6 and W7', () => {
+test('X2 / lock-order-gates-contract: both 15-name arrays match the class map and belong to W6 and W7', () => {
+  assert.equal(Object.keys(mixedClasses).length, 15);
+  assert.deepEqual(gatesContract.gates[lockGates[0]], Object.keys(mixedClasses));
   assert.deepEqual(gatesContract.gates[lockGates[1]], gatesContract.gates[lockGates[0]]);
   const withGates = Object.entries(gatesContract.windows).filter(([, names]) => lockGates.every(g => names.includes(g))).map(([w]) => w);
   assert.deepEqual(withGates, ['W6', 'W7']);
@@ -1486,6 +1486,10 @@ test('X2 / lock-order-receipts-admit: both receipts admit with equal and with di
 });
 
 test('X2 / every existing control receipt fixture keeps the old verdict: enumerate all refusals and admissions', () => {
+  // Oracle corpus: 65 compared (6 W1, 6 X2 admissions, 48 X2 refusals, 5 bind receipts).
+  // One excluded: admin-release-plan-sandbox.test.ts's ai-gates receipt runs in W3,
+  // whose required gates contain neither X2 gate, so the amended branch cannot run.
+  assert.deepEqual(gatesContract.windows.W3!.filter(name => lockGates.some(gate => gate === name)), [], 'W3 sandbox receipt is outside the X2 oracle');
   const f = x2({ treesDiffer: true }), T = f.T;
   const cases: Array<[string, (c: any) => void, string]> = [
     ['missing CI gate', c => { delete c.receipt.gates['admin-principal-lock-order-ci']; }, 'admin-principal-lock-order-ci PASS'],
@@ -1548,10 +1552,13 @@ test('X2 / every existing control receipt fixture keeps the old verdict: enumera
   assert.ok(T !== f.R);
 });
 
-test('X2 / mixed classes: exact scalar results and a complete unique classes map, with passing controls', () => {
+test('X2 / real GATES.json mixed receipts admit in W6 and W7; wrong scalar results and class maps refuse', () => {
   const f = x2({ treesDiffer: true, mixed: true }), controls = Object.keys(mixedClasses);
   assert.equal(controls.length, 15); assert.deepEqual(Object.values(mixedClasses).sort(), [...Array(12).fill('base-cycle'), 'positive-control', 'regression-guard', 'regression-guard']);
-  const good = f.run(); assert.equal(good.status, 0, good.stderr);
+  for (const window of ['W6', 'W7']) {
+    const good = f.run(c => { c.inputs.window = window; }); assert.equal(good.status, 0, `${window}: ${good.stderr}`);
+    assert.match(good.stdout, /PASS ai-gates/);
+  }
   const old = f.run(() => {}, oldGatesBlock); assert.match(old.stderr, /lock-order rule 8: CI base results/, 'the mixed set fails before the amendment');
   const reject = (change: (c: any) => void, reason: string) => {
     const r = f.run(change); assert.notEqual(r.status, 0); assert.ok(r.stderr.includes(reason), r.stderr);
