@@ -173,7 +173,7 @@ test('admin release plan: every complete marked block parses in Bash 3.2 and emb
 test('admin release plan: production secret window and pointer stay pinned; fixtures are portable rewrites only', () => {
   // The executed fixtures rewrite these literals; the plan must still carry them.
   assert.equal(plan.split(PRODUCTION_STAGE_RE).length - 1, 5, 'Mac secret-window checks keep /private/tmp/anvil-secret');
-  assert.equal(plan.split(PRODUCTION_BOX_STAGE_RE).length - 1, 13, 'box secret-window checks use /tmp/anvil-secret (Ubuntu has no /private)');
+  assert.equal(plan.split(PRODUCTION_BOX_STAGE_RE).length - 1, 14, 'box secret-window checks use /tmp/anvil-secret (Ubuntu has no /private)');
   assert.equal(plan.split('$(mktemp -d /private/tmp/anvil-secret.XXXXXX)').length - 1, 1, 'Mac stage is a fresh /private/tmp/anvil-secret.XXXXXX');
   assert.equal(plan.split('$(mktemp -d /tmp/anvil-secret.XXXXXX)').length - 1, 4, 'box stages are a fresh /tmp/anvil-secret.XXXXXX');
   assert.match(block('ai-w6-pointer'), /assert str\(pointer\)=='\/Users\/yulanbot\/work\/dcr-rt\/production\/c1-smoke\.pointer'/);
@@ -489,7 +489,7 @@ urllib.request.build_opener=lambda *args: Opener()
   // The dispatcher extracts nested blocks from the plan on disk; give it the
   // portable rewrite of the whole plan (only the secret-window regex changes).
   const planCopy = join(root, 'RELEASE.md');
-  writeFileSync(planCopy, portable(plan, { stage: 18, pointer: 11 }));
+  writeFileSync(planCopy, portable(plan, { stage: 19, pointer: 11 }));
   const released = block('ai-db-session').split('ai_run() {\n')[1]!.split('\nai_deadline() {')[0]!;
   assert.equal(released.split(PRODUCTION_PLAN_PATH).length - 1, 1);
   const dispatcher = released.split(PRODUCTION_PLAN_PATH).join(`'${planCopy}'`);
@@ -1173,6 +1173,9 @@ test('admin release plan: W2b close needs its backup gate, preconditions and iss
   const etc=join(root,'etc'); mkdirSync(etc);
   const close=portable(block('ai-close'),{stage:2,pointer:0}).split('/etc/commonswarm-oauth/').join(etc+'/');
   const gateFile=join(root,'gate-check.sh'); writeFileSync(gateFile,block('ai-backup-gate-check'));
+  const baseClosePlan=spawnSync('git',['show','43c09b2a:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'],{encoding:'utf8',maxBuffer:64<<20});
+  assert.equal(baseClosePlan.status,0,baseClosePlan.stderr);
+  const baseClose=portable([...baseClosePlan.stdout.matchAll(/^```sh\n([\s\S]*?)^```/gm)].find(m=>m[1]!.startsWith('# step: ai-close\n'))![1]!,{stage:2,pointer:0}).split('/etc/commonswarm-oauth/').join(etc+'/');
   const harness=(role:string)=>`ai_ro() { case "$*" in *'SELECT NOT admin_issuance_enabled'*) printf 't\\n';; *'FROM pg_catalog.pg_authid'*) printf '${role}\\n';; *) printf 'f\\n';; esac; }\n`
     // ai-w4-state's own checks run in admin-release-w4-second-pass.test.ts; here it records the requested action.
     +`ai_run() { case "$1" in ai-backup-gate-check) eval "$(cat '${gateFile}')";; ai-w4-state) printf '%s\\n' "$W4_STATE_ACTION" >>'${root}/w4-state-calls';; *) return 1;; esac; }\n`;
@@ -1184,22 +1187,42 @@ test('admin release plan: W2b close needs its backup gate, preconditions and iss
     return '{'+Object.keys(receipt).sort().map(k=>JSON.stringify(k)+': '+JSON.stringify(receipt[k])).join(', ')+'}\n';
   };
   const FORWARD='PASS W2b forward catalogs: all five true after the issuer credential\n';
-  const attempt=(outcome:string,files:string[],role='t',window='W2b',gate?:string)=>{
-    const stage=makeStage(), proof=mkdtempSync(join(root,'proof-'));
+  const attempt=(outcome:string,files:string[],role='t',window='W2b',gate?:string,source=close,fault?:'bad-mode'|'bad-path')=>{
+    const originalStage=makeStage(), stage=fault==='bad-path'?originalStage+'bad':originalStage, proof=mkdtempSync(join(root,'proof-'));
+    if(fault==='bad-path') renameSync(originalStage,stage);
+    if(fault==='bad-mode') chmodSync(stage,0o750);
     writeFileSync(join(proof,'secret-stage.path'),stage+'\n'); writeFileSync(join(proof,'consent-pre-W1.json'),pre);
     writeFileSync(join(proof,'ordinary-after.json'),liveFor('after',window)); writeFileSync(join(proof,'ordinary-recovery.json'),liveFor('recovery',window));
     writeFileSync(join(proof,'inputs.json'),readFileSync(window==='W4'?w4Inputs:inputs)); writeFileSync(join(proof,'open.txt'),stamp(300_000)+'\n');
     for(const file of files) writeFileSync(join(proof,file),file==='backup-gate.json'?(gate??gateReceipt(window)):file==='w2b-forward-catalogs.txt'?FORWARD:'PASS');
-    const result=run(harness(role)+close,{WINDOW:window,SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:window==='W4'?w4Inputs:inputs,PLAN_FILE:planPath,
+    const result=run(harness(role)+source,{WINDOW:window,SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:window==='W4'?w4Inputs:inputs,PLAN_FILE:planPath,
       BOX_ARCHIVE_PATH:archive,CLOSE_RESULT:outcome,PATH:shim+':'+process.env.PATH});
     const closed=existsSync(join(proof,'closed.txt'));
     const record=existsSync(join(proof,'close-result.json'))?readFileSync(join(proof,'close-result.json'),'utf8'):'';
     const closedAt=closed?readFileSync(join(proof,'closed.txt'),'utf8').trim():'';
-    if(existsSync(stage)) removeStage(stage);
-    return {result,closed,record,closedAt};
+    const retained=existsSync(stage);
+    if(retained) {
+      if(fault==='bad-path') renameSync(stage,originalStage);
+      if(fault==='bad-mode') chmodSync(originalStage,0o700);
+      removeStage(originalStage);
+    }
+    return {result,closed,record,closedAt,retained};
   };
   const W2B_OK=['backup-gate.json','w2b-forward-catalogs.txt','w2b-preconditions.txt','issuer-credential.txt'];
   let r=attempt('success',W2B_OK); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
+  for(const [outcome,files] of [['success',W2B_OK],['recovered',[]]] as const) {
+    const current=attempt(outcome,[...files]), prior=attempt(outcome,[...files],'t','W2b',undefined,baseClose);
+    assert.deepEqual([current.result.status,current.result.stdout,current.result.stderr],[prior.result.status,prior.result.stdout,prior.result.stderr],'non-W4 close output stays byte-identical to the base');
+  }
+  // Execute the complete current/base close bodies: invalid stages must stop before deletion or terminal records.
+  for(const fault of ['bad-mode','bad-path'] as const) for(const [outcome,files] of [['success',W2B_OK],['recovered',[]]] as const) {
+    const current=attempt(outcome,[...files],'t','W2b',undefined,close,fault);
+    const prior=attempt(outcome,[...files],'t','W2b',undefined,baseClose,fault);
+    assert.notEqual(prior.result.status,0,`${fault}: base reaches and refuses the stage validator`);
+    assert.match(prior.result.stderr,/AssertionError/);
+    assert.deepEqual([current.result.status,current.result.stdout,current.result.stderr],[prior.result.status,prior.result.stdout,prior.result.stderr],`${fault}: unmodified close matches base failure`);
+    for(const result of [current,prior]) { assert.ok(result.retained,fault); assert.ok(!result.closed,fault); assert.equal(result.record,'',fault); }
+  }
   // The explicit terminal record W6 reads: exact sorted JSON bound to the window, at the closed.txt time.
   assert.deepEqual(JSON.parse(r.record),{closed_at:r.closedAt,release_sha:sha,result:'success',window:'W2b',window_id:'Abc123'});
   assert.equal(r.record,'{'+Object.entries({closed_at:r.closedAt,release_sha:sha,result:'success',window:'W2b',window_id:'Abc123'}).map(([k,v])=>JSON.stringify(k)+': '+JSON.stringify(v)).join(', ')+'}\n');
@@ -1232,7 +1255,7 @@ test('admin release plan: W2b close needs its backup gate, preconditions and iss
   // W4 shares the backup gate: its success close needs backup-gate.json as well as its readback.
   r=attempt('success',['backup-gate.json','W4-readback.txt'],'t','W4'); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
   assert.equal(JSON.parse(r.record).window,'W4');
-  assert.equal(readFileSync(join(root,'w4-state-calls'),'utf8'),'success\n','the W4 success close proves the admitted installation');
+  assert.equal(readFileSync(join(root,'w4-state-calls'),'utf8'),'success\nrelease\n','the W4 success close proves the admitted installation');
   for(const gate of [undefined,'PASS',gateReceipt('W2b'),gateReceipt('W4',{backup_verified_at:stamp(3600_000)})]) {
     r=attempt('success',gate===undefined?['W4-readback.txt']:['backup-gate.json','W4-readback.txt'],'t','W4',gate); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
     assert.match(r.result.stderr,/FAIL ai-close: W4: backup-gate\.json expected valid-bound-fresh-receipt got refused; STOP/);
@@ -1310,7 +1333,7 @@ test('same-version retry / w4-recovered-close: a recovered W4 closes only with t
     const calls=existsSync(join(box,'w4-state-calls'))?readFileSync(join(box,'w4-state-calls'),'utf8'):'';
     return {result,closed,calls};
   };
-  let r=attempt(()=>undefined); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed); assert.equal(r.calls,'recovered\n');
+  let r=attempt(()=>undefined); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed); assert.equal(r.calls,'recovered\nrelease\n');
   r=attempt(b=>mkdirSync(join(b,'edge/failed-attempts',sha+'-W4-Abc123'),{recursive:true})); assert.equal(r.result.status,0,r.result.stderr);
   // A pre-existing drop-in is RESTORED by keeping it (A3); this check no longer requires its absence.
   r=attempt(b=>writeFileSync(join(b,'systemd/fixture.service.d/50-admin-measurement.conf'),'[Service]\n')); assert.equal(r.result.status,0,r.result.stderr);
