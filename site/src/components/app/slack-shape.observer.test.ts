@@ -41,8 +41,8 @@ const builtAssets = assetPaths
   .join("\n");
 
 type RailGeometry = {
-  three: { clientHeight: number; scrollHeight: number; railHeight: number; overflowY: string };
-  fifty: { clientHeight: number; scrollHeight: number; railHeight: number; overflowY: string };
+  three: { clientHeight: number; scrollHeight: number; railHeight: number; overflowY: string; longRowHeight: number; modelTitle: string; clipped: boolean };
+  fifty: { clientHeight: number; scrollHeight: number; railHeight: number; overflowY: string; longRowHeight: number; modelTitle: string; clipped: boolean };
 };
 
 const renderRailGeometry = async (): Promise<RailGeometry> => {
@@ -52,7 +52,7 @@ const renderRailGeometry = async (): Promise<RailGeometry> => {
   const rows = (count: number) => Array.from({ length: count }, (_, index) => ({
     principal_id: `agent-${index + 1}`,
     name: `Agent ${String(index + 1).padStart(2, "0")}`,
-    model: `Claude Opus ${index + 1}`,
+    model: index === 0 ? "claude (claude-agent-acp 0.64.2)" : `Claude Opus ${index + 1}`,
     owner_user_id: "dana",
   }));
   const [threeRows, fiftyRows] = await Promise.all([
@@ -111,6 +111,9 @@ const renderRailGeometry = async (): Promise<RailGeometry> => {
           scrollHeight: list.scrollHeight,
           railHeight: rail.getBoundingClientRect().height,
           overflowY: getComputedStyle(list).overflowY,
+          longRowHeight: list.querySelector('[data-rail-agent="agent-1"]').getBoundingClientRect().height,
+          modelTitle: list.querySelector('.hm-rail__model').title,
+          clipped: list.querySelector('.hm-rail__model-text').scrollWidth > list.querySelector('.hm-rail__model-text').clientWidth,
         };
       };
       document.documentElement.dataset.metrics = btoa(JSON.stringify({
@@ -164,6 +167,11 @@ test("the rail carries one bounded workspace list and nested people without mana
 
 test("the participant list shrinks when short and fills+scrolls the rail when long", async () => {
   const geometry = await renderRailGeometry();
+  for (const list of [geometry.three, geometry.fifty]) {
+    assert.equal(list.longRowHeight, 44, "a real listener label keeps the 44px row height");
+    assert.equal(list.modelTitle, "claude (claude-agent-acp 0.64.2)");
+    assert.equal(list.clipped, true, "the long label reaches the ellipsis path");
+  }
 
   // Short roster: the list shrinks to its content, no scroll.
   assert.equal(geometry.three.scrollHeight, geometry.three.clientHeight, JSON.stringify(geometry));
@@ -351,19 +359,33 @@ test("sidebar counts come from loaded signals and the shared field ships both sc
 test("participant navigation has no person presence dot and gives agents measured status and owner labels", async () => {
   const rail = await renderParticipantRailFixture(
     [{ userId: "dana", name: "Dana Rivera", role: "owner" }],
-    [{ principal_id: "atlas", name: "Atlas", model: "Claude Opus 5.5", transport: "local", owner_user_id: "dana" },
-      { principal_id: "orphan", name: "Orphan", transport: "hosted_mcp", owner_user_id: "former" }], "dana");
+    [{ principal_id: "atlas", name: "Atlas", model: "Claude", transport: "local", owner_user_id: "dana" },
+      { principal_id: "orphan", name: "Orphan", transport: "hosted_mcp", owner_user_id: "former" }], "dana", {
+        data: { viewer_user_id: "dana", generated_at: "2026-10-05T12:00:00Z", workspaces: [{
+          workspace_id: "X", name: "Other workspace", role: "owner", last_seen_at: null, new_messages: 0, content: null,
+          people: [{ user_id: "dana", display_name: "Dana Rivera", role: "owner", is_viewer: true, agents: [{
+            principal_id: "away", name: "Away", status: { work: "idle", facts: { transport: "hosted_mcp", turn_only: true,
+              connection: "live", last_activity_at: null, messages_waiting_since: null, doing: null, working_on: null } }, queue: null }] }],
+          needs_you: { asks: [], assigned: [], waiting: [] } }] },
+        models: [["atlas", "Claude"], ["away", "GPT-6.1"]],
+      });
   assert.doesNotMatch(rail.innerHtml, /presence-dot/);
-  assert.equal((rail.innerHtml.match(/class="hm-agent-orb"/g) ?? []).length, 2);
-  assert.match(rail.innerHtml, /Claude Opus 5\.5/);
-  assert.match(rail.innerHtml, /Claude · reported/);
+  assert.equal((rail.innerHtml.match(/class="hm-agent-orb"/g) ?? []).length, 3);
+  const knownRow = rail.innerHtml.match(/<button\b[^>]*data-rail-agent="atlas"[\s\S]*?<\/button>/u)?.[0];
+  assert.ok(knownRow);
+  assert.equal((knownRow.replace(/<[^>]*>/gu, "").match(/Claude/gu) ?? []).length, 1, "visible row text names the model family once");
+  assert.equal((knownRow.match(/aria-label="([^"]*)"/u)?.[1].match(/Claude/gu) ?? []).length, 1, "the row's accessible name names the model family once");
+  assert.match(knownRow, />reported<\/span>/u);
+  const awayRow = rail.innerHtml.match(/<button\b[^>]*data-rail-agent="away"[\s\S]*?<\/button>/u)?.[0];
+  assert.ok(awayRow, "the agent from the workspace that is not open reaches the real rail");
+  assert.match(awayRow, /GPT-6\.1/); assert.match(awayRow, /OpenAI · reported/);
   assert.match(rail.innerHtml, /aria-label="Claude, reported"/);
   assert.doesNotMatch(rail.innerHtml, /class="[^"]*(?:vendor-mark|dashboard__sidebar-model-mark|dashboard__sidebar-model-glyph)/);
-  assert.equal((rail.innerHtml.match(/class="hm-model-family"/g) ?? []).length, 1);
+  assert.equal((rail.innerHtml.match(/class="hm-model-family"/g) ?? []).length, 2);
   const unknownRow = rail.innerHtml.match(/<button\b[^>]*data-rail-agent="orphan"[\s\S]*?<\/button>/u)?.[0];
   assert.ok(unknownRow, "the hosted seat without a model reaches the real row renderer");
   assert.doesNotMatch(unknownRow, /hm-model-family|· reported/);
-  assert.equal((rail.innerHtml.match(/class="hm-status-word">Idle</g) ?? []).length, 2);
+  assert.equal((rail.innerHtml.match(/class="hm-status-word">Idle</g) ?? []).length, 3);
   assert.match(rail.innerHtml, /No activity reported yet/);
   assert.match(rail.innerHtml, /Orphan \(owner left\)/);
   assert.match(rail.innerHtml, /Other agents/);

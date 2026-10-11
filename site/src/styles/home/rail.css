@@ -259,12 +259,11 @@
 /* Status words: 12px muted; working = blue dot, disconnected = amber diamond and word, idle = hollow ring. */
 .hm-rail__agent { flex-wrap: nowrap; }
 .hm-rail__status { display: inline-flex; align-items: center; flex: none; white-space: nowrap; }
-/* Agent/model inputs keep the name and status above model + reported family: no vendor marks,
-   never verified, null family has no tag. The orb retains its original size and slot. */
-.hm-rail__agent:has(.hm-rail__model) { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; column-gap: 10px; row-gap: 0; padding-block: 4px; }
-.hm-rail__model { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 2px 6px; min-inline-size: 0; color: var(--home-rail-muted); font-size: 11px; }
-.hm-rail__model-text { min-inline-size: 0; overflow-wrap: anywhere; }
-.hm-rail__model .hm-model-family { color: var(--home-rail-muted); }
+/* Keep the name and status above a single clipped model line. */
+.hm-rail__agent:has(.hm-rail__model) { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; column-gap: 10px; row-gap: 0; padding-block: 3px; }
+.hm-rail__model { grid-column: 2 / -1; display: flex; gap: 6px; min-inline-size: 0; color: var(--home-rail-muted); font-size: 11px; font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hm-rail__model-text { min-inline-size: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hm-rail__model .hm-model-family { flex: none; color: var(--home-rail-muted); }
 .hm-rail .hm-status { flex-wrap: nowrap; gap: 6px; color: var(--home-rail-muted); font-size: 12px; white-space: nowrap; }
 .hm-rail .hm-status-word { font-weight: 400; }
 .hm-rail .hm-status-shape { border-color: var(--home-rail-muted); }

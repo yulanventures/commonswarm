@@ -8,7 +8,7 @@ export type AgentStateKind = "working" | "idle" | "disconnected";
 export interface AgentStateVM { kind: AgentStateKind; word: "Working" | "Idle" | "Disconnected" | "Not picking up";
   detail: string /* what was measured, with when */; attention: boolean;
   fix: { action: "resume" | "new-key" | "guide-chat" | "guide-local" | null; allowed: boolean; askWho: string | null; sentence: string } }
-// Reported model inputs for UI output: no vendor marks or verification; null family shows no tag.
+// Model text and its nullable family are display inputs.
 export interface AgentVM { id: Id; name: string; label: string /* section 2.3 */; nestedLabel: string; model: string | null; family: ModelFamily | null; ownerId: Id | null;
   ownerFirstName: string | null; ownerInitial: string; yours: boolean; tint: Tint; hosted: boolean; state: AgentStateVM; dashed?: boolean }
 export interface CapsuleVM { person: PersonVM; agents: AgentVM[] }

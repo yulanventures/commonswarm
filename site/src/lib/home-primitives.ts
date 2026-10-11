@@ -111,25 +111,26 @@ export function objectIcon(doc: Document, kind: ObjectCardVM["kind"] | "ask"): H
 }
 const SVG_NS = "http://www.w3.org/2000/svg";
 const FAMILY_NAMES: Record<ModelFamily, string> = { claude: "Claude", openai: "OpenAI", gemini: "Gemini", grok: "Grok" };
-/** Family input becomes accessible text: reported, never verified; null is empty, no vendor marks. */
-export function reportedFamilyName(family: ModelFamily | null): string {
-  return family == null ? "" : `${FAMILY_NAMES[family]}, reported`;
+export function reportedFamilyName(family: ModelFamily | null, model?: string | null): string {
+  if (family == null) return "";
+  return model?.trim().toLowerCase().startsWith(FAMILY_NAMES[family].toLowerCase()) ? "reported" : `${FAMILY_NAMES[family]}, reported`;
 }
-/** Family input becomes a tag or null: our neutral geometry, no vendor marks;
- *  reported, never verified. Decoration is hidden and null shows nothing. */
-export function modelFamilyTag(doc: Document, family: ModelFamily | null): HTMLElement | null {
+/** Family and model text become a neutral tag: reported, never verified; no vendor marks; null shows nothing.
+ *  The accessible name keeps the family; visible text omits it when the model already starts with it. */
+export function modelFamilyTag(doc: Document, family: ModelFamily | null, model?: string | null): HTMLElement | null {
   if (family == null) return null;
   const tag = node(doc, "span", "hm-model-family");
   tag.setAttribute("role", "img"); tag.setAttribute("aria-label", reportedFamilyName(family));
   const svg = doc.createElementNS(SVG_NS, "svg");
   for (const [name, value] of [["viewBox", "0 0 10 10"], ["width", "10"], ["height", "10"],
     ["fill", "none"], ["stroke", "currentColor"], ["aria-hidden", "true"], ["focusable", "false"]]) svg.setAttribute(name, value);
-  const shape = doc.createElementNS(SVG_NS, family === "claude" ? "circle" : family === "openai" ? "rect" : "polygon");
-  const attributes: Record<string, string> = family === "claude" ? { cx: "5", cy: "5", r: "3.5" }
-    : family === "openai" ? { x: "1.5", y: "1.5", width: "7", height: "7" }
-    : { points: family === "gemini" ? "5,1.5 8.5,8.5 1.5,8.5" : "5,1 9,5 5,9 1,5" };
+  const shape = doc.createElementNS(SVG_NS, family === "openai" ? "polyline" : "polygon");
+  const attributes = { points: family === "claude" ? "3,1.5 7,1.5 9,5 7,8.5 3,8.5 1,5"
+    : family === "openai" ? "5,1 5,9 5,5 1,5 9,5"
+    : family === "gemini" ? "5,1.5 8.5,8.5 1.5,8.5" : "5,1 9,4 7.5,9 2.5,9 1,4" };
   for (const [name, value] of Object.entries(attributes)) shape.setAttribute(name, value);
-  svg.append(shape); tag.append(svg, decorative(node(doc, "span", "", `${FAMILY_NAMES[family]} · reported`)));
+  const text = reportedFamilyName(family, model) === "reported" ? "reported" : `${FAMILY_NAMES[family]} · reported`;
+  svg.append(shape); tag.append(svg, decorative(node(doc, "span", "", text)));
   return tag;
 }
 /** The canvas's 16 px padlock (Todo.dc.html: rect 3,7 10x7 rx 1.8 and the shackle, stroke 1.6), drawn in currentColor;

@@ -200,8 +200,7 @@ function todoLinkRow(doc: Document, href: string, title: string, meta: string, e
   return item;
 }
 
-/** Agent page inputs become DOM facts and actions. Family is reported, never verified;
- *  neutral shapes only, null family shows no tag, orb unchanged. */
+/** Agent page inputs become DOM facts and actions. */
 export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCallbacks = {}): HTMLElement {
   if (!vm.found) return notFoundPage(doc, vm);
 
@@ -401,7 +400,7 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
   const list = el(doc, "dl", "hm-agent__fact-list");
   if (vm.facts.model) {
     const fact = appendFact(doc, list, AGENT_COPY.model, vm.facts.model, "model");
-    const tag = modelFamilyTag(doc, agent.family); if (tag) fact.querySelector("dd")!.append(" ", tag);
+    const tag = modelFamilyTag(doc, agent.family, vm.facts.model); if (tag) fact.querySelector("dd")!.append(" ", tag);
   }
   if (canAct && agent.yours && vm.facts.listsAndDocs) {
     const row = vm.facts.listsAndDocs;

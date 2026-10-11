@@ -17,8 +17,7 @@
   min-inline-size: 44px;
 }
 
-/* Reported family tags take neutral SVG + text inputs: muted inline output, no vendor marks;
-   never verified. Null family emits no element. */
+/* Muted inline family geometry and text. */
 .hm-model-family {
   display: inline-flex;
   align-items: center;

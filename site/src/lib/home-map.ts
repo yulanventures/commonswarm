@@ -49,8 +49,7 @@ function applyNestedLabels(agents: readonly AgentVM[]): void {
   for (const group of scopes.values()) applyVisibleLabel(group, "nestedLabel");
 }
 
-/** Roster inputs become people/agent UI models. Model family is reported, never verified;
- *  no vendor marks are emitted and an unknown model maps to null (no tag). */
+/** Roster inputs become people/agent UI models; unknown models have no family. */
 export function mapHomePeople(input: HomePeopleInput): HomePeople {
   const names = firstNames(input.members.map(member => ({ id: member.userId, name: member.name })));
   const me = input.members.find(member => member.userId === input.viewerId);
@@ -108,7 +107,7 @@ function railStateRank(agent: AgentVM): number {
  *  used; nobody is invented. `current` is the workspace in view: its reading of a person or agent wins.
  *  Labels were settled inside each workspace, so they are settled again on the combined list.
  *  Copies keep each workspace's own labels unchanged. */
-export function homeRailPeople(entries: readonly { detail?: { people?: HomePeople } }[], current: HomePeople | null = null): HomePeople {
+export function homeRailPeople(entries: readonly { detail?: { people?: HomePeople } }[], current: HomePeople | null = null, models: ReadonlyMap<string, string | null> | null = null): HomePeople {
   const sources = [...(current ? [current] : []), ...entries.flatMap(entry => entry.detail?.people ? [entry.detail.people] : [])];
   const people = new Map<string, PersonVM>();
   const owned = new Map<string, Map<string, AgentVM>>();
@@ -135,6 +134,10 @@ export function homeRailPeople(entries: readonly { detail?: { people?: HomePeopl
   const grouped = new Set(groups.flatMap(group => group.agents.map(agent => agent.id)));
   const result: HomePeople = { title: "People & agents", groups, other: [...other.values()].filter(agent => !grouped.has(agent.id)) };
   const all = [...result.groups.flatMap(group => group.agents), ...result.other];
+  if (models !== null) for (const agent of all) {
+    agent.model = models.get(agent.id) ?? null;
+    agent.family = modelFamily(agent.model);
+  }
   applyVisibleLabel(all, "label");
   applyNestedLabels(all);
   return result;
@@ -247,11 +250,11 @@ function countedNeedIds(row: WorkspaceCatchUp, now: number): Set<string> {
     ...row.needs_you.waiting.map(todo => todo.todo_id),
   ]);
 }
-export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: string, now: number, sample: boolean, signals: Signal[] = []): CatchUpDetail {
+export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: string, now: number, sample: boolean, signals: Signal[] = [], models: ReadonlyMap<string, string | null> = new Map()): CatchUpDetail {
   const people = mapHomePeople({ viewerId, now, sample, access: [], signals: [],
     members: row.people.map(person => ({ userId: person.user_id, name: person.display_name, role: person.role })),
     agents: row.people.flatMap(person => person.agents.map(agent => ({ principalId: agent.principal_id, name: agent.name,
-      ownerUserId: person.user_id, work: agent.status }))) });
+      ownerUserId: person.user_id, work: agent.status, model: models.get(agent.principal_id) ?? null }))) });
   const workspace = { id: row.workspace_id, name: row.name, href: routeHref({ view: "chat", workspaceId: row.workspace_id }) };
   const needsYou: NeedsYouVM[] = [];
   for (const ask of row.needs_you.asks) {
@@ -270,11 +273,11 @@ export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: strin
     measuredNeedsYou: needsYou.length + homeAgentFixCards(people, workspace).length };
 }
 /** Reconcile against the membership list, never let an overview add an unauthorized address. */
-export function overviewCatchUpData(data: CatchUpData[], overview: HomeOverview, sample: boolean, messages: ReadonlyMap<string, Signal[]> = new Map()): CatchUpData[] {
+export function overviewCatchUpData(data: CatchUpData[], overview: HomeOverview, sample: boolean, messages: ReadonlyMap<string, Signal[]> = new Map(), models: ReadonlyMap<string, string | null> = new Map()): CatchUpData[] {
   return data.map((entry, index) => {
     if (index >= 8) return entry;
     const row = overview.workspaces.find(workspace => workspace.workspace_id === entry.workspace.id);
-    return row ? { ...entry, state: "ready", detail: catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sample, messages.get(row.workspace_id)) }
+    return row ? { ...entry, state: "ready", detail: catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sample, messages.get(row.workspace_id), models) }
       : { ...entry, state: "failed" };
   });
 }

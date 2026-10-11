@@ -91,7 +91,7 @@ All of these are pure DOM builders: `(doc, vm, callbacks) => HTMLElement`.
 
 ### 2.1 View models (`site/src/lib/home-types.ts`, frozen by lane P)
 
-Amendment (avatars A): `AgentVM` adds `model: string | null` and `family: ModelFamily | null` from `modelFamily(model)` for neutral family tags beside model text, labelled reported; null shows no tag and the orb stays unchanged.
+Amendment (avatars A): `AgentVM` adds `model: string | null` and `family: ModelFamily | null` from `modelFamily(model)` for neutral family tags beside model text in the rail, Agent view and People, labelled reported; null shows no tag and the orb stays unchanged.
 
 ```ts
 export type Id = string; export type Tint = 0 | 1 | 2 | 3;

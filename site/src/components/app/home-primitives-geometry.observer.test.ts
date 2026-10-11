@@ -18,6 +18,7 @@ let choices = [], switches = [], actions = [];
 root.append(P.personAvatar(document, person, 48), P.agentOrb(document, agent, {size:60,badge:true}));
 const familyTags = ['claude','openai','gemini','grok'].map(family => P.modelFamilyTag(document, family));
 root.append(...familyTags);
+const prefixTag = P.modelFamilyTag(document, 'claude', 'cLaUdE'); root.append(prefixTag);
 const nullFamilyTag = P.modelFamilyTag(document, null);
 root.append(P.capsule(document, {person, agents:[agent,agent,agent,agent]}, {compact:true,onOpen:()=>actions.push('capsule')}));
 const states = [{...state,kind:'working',word:'Working',detail:'Doing ‘Budget’ since 9:40 am'}, state,
@@ -60,9 +61,10 @@ const metrics = { width:innerWidth, overflow:document.documentElement.scrollWidt
  busyDisabled:root.querySelector('[data-switch-id="busy"]').disabled,doneWord:root.querySelector('[data-done="true"]').textContent.includes('Done'),
  doneStrike:getComputedStyle(root.querySelector('[data-done="true"] .hm-object-title')).textDecorationLine,
  capsulePlus:root.querySelector('.hm-capsule-more').textContent,ownerBadgeHidden:root.querySelector('.hm-owner-badge').getAttribute('aria-hidden'),
- nullFamilyTag: nullFamilyTag === null,
+ nullFamilyTag: nullFamilyTag === null, prefixTagText:prefixTag.textContent, prefixTagName:prefixTag.getAttribute('aria-label'),
  familyTags:familyTags.map(tag=>({text:tag.textContent,label:tag.getAttribute('aria-label'),hidden:tag.querySelector('svg').getAttribute('aria-hidden'),
- width:tag.querySelector('svg').getBoundingClientRect().width,stroke:tag.querySelector('svg').getAttribute('stroke'),vendorPaths:tag.querySelectorAll('path').length})) };
+ width:tag.querySelector('svg').getBoundingClientRect().width,stroke:tag.querySelector('svg').getAttribute('stroke'),vendorPaths:tag.querySelectorAll('path').length,
+ statusOrLegendShapes:tag.querySelectorAll('circle,rect,polygon[points="5,1 9,5 5,9 1,5"]').length})) };
 document.documentElement.dataset.metrics=btoa(unescape(encodeURIComponent(JSON.stringify(metrics))));
 `;
 
@@ -95,11 +97,15 @@ test("home primitives have 44px targets, plain hostile text and explicit states 
         assert.equal(m.doneWord, true); assert.match(m.doneStrike, /line-through/u);
         assert.equal(m.capsulePlus, "+1"); assert.equal(m.ownerBadgeHidden, "true");
         assert.equal(m.nullFamilyTag, true);
+        assert.equal(m.prefixTagText, "reported"); assert.equal(m.prefixTagName, "Claude, reported");
         assert.deepEqual(m.familyTags.map((tag: {text:string;label:string}) => [tag.text,tag.label]), [
           ["Claude · reported", "Claude, reported"], ["OpenAI · reported", "OpenAI, reported"],
           ["Gemini · reported", "Gemini, reported"], ["Grok · reported", "Grok, reported"],
         ]);
-        for (const tag of m.familyTags) { assert.equal(tag.hidden, "true"); assert.equal(tag.width, 10); assert.equal(tag.stroke, "currentColor"); assert.equal(tag.vendorPaths, 0); }
+        for (const tag of m.familyTags) {
+          assert.equal(tag.hidden, "true"); assert.equal(tag.width, 10); assert.equal(tag.stroke, "currentColor");
+          assert.equal(tag.vendorPaths, 0); assert.equal(tag.statusOrLegendShapes, 0, "family geometry is distinct from status and legend shapes");
+        }
       }
     }
   } finally {

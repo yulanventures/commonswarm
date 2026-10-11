@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { findChrome, launchChrome } from "../../../tests/chrome.js";
 import type { RailMember, RosterAgentRow } from "../../lib/participant-rail.js";
+import type { HomeOverview } from "../../lib/home/contract.js";
 
 const componentDir = dirname(fileURLToPath(import.meta.url));
 const siteRoot = join(componentDir, "..", "..", "..");
@@ -25,13 +26,14 @@ export const renderParticipantRailFixture = async (
   members: RailMember[],
   rows: RosterAgentRow[],
   viewerId: string | null = null,
+  overview?: { data: HomeOverview; models: [string, string | null][] },
 ): Promise<ParticipantRailSnapshot> => {
   const directory = await mkdtemp(join(tmpdir(), "commonswarm-participant-rail-"));
   const fixture = join(directory, "index.html");
   const bundle = await build({
     absWorkingDir: siteRoot,
     bundle: true,
-    stdin: { contents: 'export { mapHomePeople } from "./src/lib/home-map.ts"; export { buildHomeRail } from "./src/lib/home-rail.ts"; export { rosterAgentsFromRows } from "./src/lib/participant-rail.ts";', resolveDir: siteRoot },
+    stdin: { contents: 'export { mapHomePeople, homeRailPeople, overviewCatchUpData, initialCatchUpData } from "./src/lib/home-map.ts"; export { buildHomeRail } from "./src/lib/home-rail.ts"; export { rosterAgentsFromRows } from "./src/lib/participant-rail.ts";', resolveDir: siteRoot },
     format: "iife",
     globalName: "ParticipantRail",
     platform: "browser",
@@ -47,9 +49,18 @@ export const renderParticipantRailFixture = async (
     <script>
       const members = ${JSON.stringify(members)};
       const rows = ${JSON.stringify(rows)};
-      const people = ParticipantRail.mapHomePeople({ members, agents: ParticipantRail.rosterAgentsFromRows(rows),
+      let people = ParticipantRail.mapHomePeople({ members, agents: ParticipantRail.rosterAgentsFromRows(rows),
         viewerId: ${JSON.stringify(viewerId)}, access: [], signals: [], now: 1791201600000, sample: false });
-      const rail = ParticipantRail.buildHomeRail(document, { sample: false, people, workspaces: [],
+      const overview = ${JSON.stringify(overview ?? null)};
+      const workspaces = overview ? [{ id: 'W', name: 'Open workspace', href: '/app?w=W', current: true, needsYou: null }] : [];
+      if (overview) {
+        const models = new Map(overview.models);
+        const memberships = overview.data.workspaces.map(row => ({ id: row.workspace_id, name: row.name }));
+        const entries = ParticipantRail.overviewCatchUpData(ParticipantRail.initialCatchUpData(memberships), overview.data, false, undefined, models);
+        people = ParticipantRail.homeRailPeople(entries, people, models);
+        workspaces.push(...memberships.map(row => ({ ...row, href: '/app?w=' + row.id, current: false, needsYou: null })));
+      }
+      const rail = ParticipantRail.buildHomeRail(document, { sample: false, people, workspaces,
         catchUp: { href: '/app?v=catchup', current: false, needsYou: null } }, { openPerson: () => {}, openAgent: () => {} });
       document.body.prepend(rail);
       const list = rail.querySelector('[data-sidebar-participant-list]');

@@ -223,7 +223,7 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
       assert.equal(geometry.hostileInQueue, true);
       assert.equal(geometry.hostileInGate, true);
       assert.equal(geometry.hostileInModel, true);
-      assert.equal(geometry.modelFamilyText, "Claude · reported");
+      assert.equal(geometry.modelFamilyText, "reported");
       assert.equal(geometry.modelFamilyName, "Claude, reported");
       assert.equal(geometry.unknownFamilyTags, 0);
       assert.equal(geometry.hostileInActivity, true);

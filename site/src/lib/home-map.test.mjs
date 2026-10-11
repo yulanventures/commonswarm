@@ -274,6 +274,7 @@ test("live Catch up keeps a successful overview when ask previews fail, without 
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
       initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount,
       homeOverview: async () => overview,
+      overviewAgentModels: async () => new Map(), railModels: null,
       homeOverviewAsks: async (workspaceId, ids) => {
         reads.push("asks"); assert.equal(workspaceId, "W"); assert.deepEqual(Array.from(ids), ["ask"]);
         if (failure) throw failure;
@@ -499,6 +500,7 @@ test("Catch up names no assigner, skips a to-do read per card, and keeps one cou
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
       initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount,
       homeOverview: async () => ({ viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: [row] }),
+      overviewAgentModels: async () => new Map(), railModels: null,
       homeOverviewAsks: async () => { if (askFailure) throw askFailure; return [ask]; },
       feed: async () => [],
       homeServer: () => ({ readTodo: async (workspaceId, todoId) => {
@@ -700,6 +702,7 @@ test("the live loader keeps the overview list and does not treat a short feed as
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
       initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount, mapHomePeople, homeFileCount,
       homeOverview: async () => overview,
+      overviewAgentModels: async () => new Map(), railModels: null,
       homeOverviewAsks: async (_workspaceId, ids) => ids.length ? [directedAsk] : [],
       feed: async (_workspaceId, limit) => { const rows = pageFor(limit); pages.push({ limit, rows: rows.length }); return rows; },
       memberRoster: async () => ({ members: input.members }), roster: async () => input.agents,
@@ -810,4 +813,60 @@ test("on an agent's page the agent is the current rail row and its workspace is 
   const chat = mapHomeRail(workspaces, { view: "chat", workspaceId: "W" }, null, false);
   assert.equal(chat.currentAgentId, undefined);
   assert.deepEqual(chat.workspaces.map(row => row.current), [true, false]);
+});
+
+test("overview models reach other workspaces and override the current roster consistently, including a failed model read", async () => {
+  const { homeRailPeople } = await import("./home-map.ts");
+  const status = { work: "idle", facts: { transport: "hosted_mcp", turn_only: true, connection: "live",
+    last_activity_at: null, messages_waiting_since: null, doing: null, working_on: null } };
+  const row = { ...overviewRow, needs_you: { asks: [], assigned: [], waiting: [] }, people: [{
+    ...overviewRow.people[0], agents: [{ principal_id: "A", name: "Atlas", status, queue: null }] }] };
+  const trip = { ...row, workspace_id: "X", name: "Trip", people: [{ ...row.people[0], agents: [
+    { principal_id: "away", name: "Away", status, queue: null },
+    { principal_id: "unknown", name: "Claude", status, queue: null },
+    { principal_id: "unset", name: "Dot", status, queue: null }] }] };
+  const overview = { viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: [row, trip] };
+  const models = new Map([["A", "Claude"], ["away", "GPT-6.1"], ["unknown", "mystery-model"]]);
+  const data = overviewCatchUpData(initialCatchUpData(workspaces), overview, false, undefined, models);
+  const agents = people => people.groups.flatMap(group => group.agents).concat(people.other);
+  assert.deepEqual(agents(data[1].detail.people).map(agent => [agent.id, agent.model, agent.family]), [
+    ["away", "GPT-6.1", "openai"], ["unknown", "mystery-model", null], ["unset", null, null] ]);
+  const current = mapHomePeople({ ...input, agents: [{ ...input.agents[0], name: "Atlas", model: "Grok" }] });
+  assert.equal(agents(homeRailPeople(data, current, models)).find(agent => agent.id === "A").model, "Claude");
+  const refreshed = catchUpDetailFromOverview(trip, "zoe", now, false, [], models);
+  assert.deepEqual(agents(refreshed.people).map(agent => agent.model), ["GPT-6.1", "mystery-model", null]);
+  const failed = new Map();
+  const hidden = homeRailPeople(overviewCatchUpData(initialCatchUpData(workspaces), overview, false, undefined, failed), current, failed);
+  assert.equal(agents(hidden).length, 4);
+  assert.ok(agents(hidden).every(agent => agent.model === null && agent.family === null), "failed reads never mix current-roster tags with untagged overview rows");
+  assert.equal(agents(current)[0].model, "Grok", "the rail does not change the Agent view's roster");
+});
+
+test("the overview model read pages all workspace ids and discards partial results after a refusal or transport failure", async () => {
+  const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  const file = ts.createSourceFile("dashboard.ts", dashboard.match(/<script>([\s\S]*?)<\/script>/u)[1], ts.ScriptTarget.Latest, true);
+  let reader;
+  const visit = node => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(file) === "overviewAgentModels") reader = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(file); assert.ok(reader);
+  const script = ts.transpile(`const ${reader.getText(file)}; overviewAgentModels(ids);`, { target: ts.ScriptTarget.ES2022 });
+  const first = Array.from({ length: 200 }, (_, index) => ({ principal_id: `a${index}`, model: "Claude" }));
+  const read = async (lastPage, throws = false) => {
+    const ranges = [], filters = [];
+    const query = { schema: () => query, from: () => query, select: () => query,
+      in: (field, ids) => { filters.push([field, ids]); return query; }, is: () => query, order: () => query,
+      range: async (start, end) => { ranges.push([start, end]);
+        if (start && throws) throw new Error("transport failed");
+        return start ? lastPage : { data: first, error: null }; } };
+    const result = await runInNewContext(script, { client: () => query, ids: ["W", "X"] });
+    assert.deepEqual(ranges, [[0, 199], [200, 399]]);
+    assert.deepEqual(filters, [["workspace_id", ["W", "X"]], ["workspace_id", ["W", "X"]]]);
+    return result;
+  };
+  const complete = await read({ data: [{ principal_id: "away", model: "GPT-6.1" }], error: null });
+  assert.equal(complete.size, 201); assert.equal(complete.get("away"), "GPT-6.1");
+  assert.equal((await read({ data: null, error: { code: "42501" } })).size, 0);
+  assert.equal((await read(null, true)).size, 0);
 });
