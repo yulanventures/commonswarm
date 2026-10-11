@@ -127,3 +127,5 @@ tests/hosted-tool-pins.test.ts
 tests/household-member-removal.test.ts
 tests/household-managed-file-fence.test.ts
 tests/household-member-removal-backfill.test.ts
+tests/protocol-agent-avatars.test.ts
+tests/agent-avatar-mcp-boundary.test.ts

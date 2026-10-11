@@ -1,4 +1,8 @@
-/** D1 effective application privileges: literal reviewed ACL inventory, CI/Docker only. */
+/**
+ * CI-only D1 privilege fixture: real catalog ACLs/roles/owners are compared with
+ * a literal reviewed inventory. Mutation controls must expose widening; command
+ * projection grants never imply issuer ownership, extra roles or direct grants.
+ */
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -17,6 +21,10 @@ const allowlist = JSON.parse(readFileSync(new URL('../support/admin-issuer-privi
 // SELECT/INSERT (AM7). These fifteen command-parent grants are intentional;
 // swarm_admin retains ownership and history mutation remains forbidden.
 // The human overview/predicate add no issuer or PUBLIC grants.
+// Avatar phase 2 follows agent_principals/agent_execution_sessions: command-parent
+// SELECT/INSERT/UPDATE loads and persists reducer projections, with swarm_admin
+// ownership. 20261015000001_agent_avatars.sql grants no issuer or PUBLIC authority;
+// swarm_read.agent_identity_marks grants only authenticated/swarm_read SELECT.
 const literal = JSON.stringify(allowlist.map((entry: unknown[]) => entry.slice(0, 5))).replaceAll("'", "''");
 // Enumerate explicit ACLs across the whole database, not a selected set of known
 // tables. The saved schemas belong to runSql's rollback-only isolation fixture.

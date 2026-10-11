@@ -1,3 +1,8 @@
+/**
+ * Public pure protocol surface: command/state contracts and event reducers
+ * are exported for clients and the generated edge bundle. Inputs produce
+ * decisions/projections without I/O; avatar and model authority stays in events.
+ */
 // SWARM-CLOUD protocol core — public surface.
 // The reducer-complete authority core (§2.1 protocol / §2.2 task-lease state
 // machine). Pure: no I/O. P1 wires it behind the Supabase command function.
@@ -26,3 +31,5 @@ export * from './household-invitations.js';
 
 export * from './household-todos.js';
 export * from './household-todo-policy.js';
+
+export * from './agent-avatars.js';

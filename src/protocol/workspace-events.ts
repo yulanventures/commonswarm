@@ -1,3 +1,9 @@
+/**
+ * Workspace event/state contracts shared by decision and reducer callers.
+ * Reducer-complete payloads yield replayable authority, including independent
+ * avatar/jobs and model provenance; raw invitation/token material is excluded.
+ */
+import { AGENT_AVATAR_EVENT_TYPES, type AgentAvatarEventType, type AgentAvatar, type AgentAvatarJob, type AgentModelProvenance } from './agent-avatars.js';
 // Pure workspace-authority event model (§3.4).
 //
 // These events share the canonical EventEnvelope with task events. Payloads
@@ -15,7 +21,7 @@ export const WORKSPACE_ROLES: readonly WorkspaceRole[] = ['owner', 'admin', 'mem
 export type AgentTransport = 'local' | 'hosted_mcp';
 export const AGENT_TRANSPORTS: readonly AgentTransport[] = ['local', 'hosted_mcp'] as const;
 
-export type WorkspaceEventType = AdminRoutineEventType
+export type WorkspaceEventType = AgentAvatarEventType | AdminRoutineEventType
   | 'WorkspaceCreated'
   | 'WorkspaceArchived'
   | 'MemberInvited'
@@ -40,6 +46,7 @@ export type WorkspaceEventType = AdminRoutineEventType
 
 export const WORKSPACE_EVENT_TYPES: readonly WorkspaceEventType[] = [
   ...ADMIN_ROUTINE_EVENT_TYPES,
+  ...AGENT_AVATAR_EVENT_TYPES,
   'WorkspaceCreated',
   'WorkspaceArchived',
   'MemberInvited',
@@ -121,6 +128,9 @@ export interface WorkspaceAgentToken {
 
 export interface WorkspaceState {
   admin_routine?: AdminRoutineState;
+  avatars?: Record<string, AgentAvatar>;
+  avatar_jobs?: Record<string, AgentAvatarJob>;
+  model_provenance?: Record<string, AgentModelProvenance>;
   workspace: WorkspaceRecord;
   members: Record<string, WorkspaceMember>;
   invitations: Record<string, WorkspaceInvitation>;
@@ -294,6 +304,8 @@ export type WorkspaceRejectionReason =
   | 'scope_denylisted'
   | 'binding_required'
   | 'token_ttl_invalid'
+  | 'avatar_invalid'
+  | 'avatar_upload_not_found'
   | 'model_invalid'
   | 'feedback_invalid'
   | 'principal_not_presented'

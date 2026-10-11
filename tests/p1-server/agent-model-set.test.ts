@@ -3,7 +3,8 @@
  * the HUMAN mirror of agent-model-declare.test.ts. The gate under test is
  * revoke_agent_principal's convention: owner/admin relabel any principal in
  * the workspace, a plain member only their own; agents are refused on this
- * kind outright (they have declare_agent_model for themselves).
+ * kind outright (they have declare_agent_model for themselves). Unchanged
+ * authorized submissions preserve events and durable provenance across actors.
  *
  * Reached by `npm run test:p1-server` (globs tests/p1-server/**; serial via
  * --test-concurrency=1 because each file owns the one local runtime).
@@ -329,6 +330,11 @@ test("S3 an agent token is refused on this kind", async () => {
 });
 
 test("S4 an unchanged set is an accepted no-op appending nothing", async () => {
+  const provenanceBefore = await sql`
+    SELECT * FROM swarm.agent_model_provenance
+    WHERE principal_id = ${f.principalMember}::uuid
+  `;
+  assert.equal(provenanceBefore[0]?.set_by_user_id, f.memberId);
   const eventsBefore = await sql<{ n: string }[]>`
     SELECT count(*)::text AS n FROM swarm.events
     WHERE workspace_id = ${f.workspace}::uuid
@@ -342,6 +348,11 @@ test("S4 an unchanged set is an accepted no-op appending nothing", async () => {
     WHERE workspace_id = ${f.workspace}::uuid
   `;
   assert.equal(eventsBefore[0]?.n, eventsAfter[0]?.n);
+  const provenanceAfter = await sql`
+    SELECT * FROM swarm.agent_model_provenance
+    WHERE principal_id = ${f.principalMember}::uuid
+  `;
+  assert.deepEqual(provenanceAfter, provenanceBefore);
 });
 
 test("S5 empty clears, and the wire refuses an over-bound value", async () => {

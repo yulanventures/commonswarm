@@ -1,3 +1,12 @@
+/**
+ * Transactional command edge: validated requests and trusted internal calls
+ * produce receipts/events and PostgreSQL projections under stream locks.
+ * Avatar completion is internal-only; worker image data cannot set authority.
+ * Authorized unchanged model commands return before append/provenance writes.
+ */
+import { loadAgentAvatarState, projectAgentAvatarEvent, projectAgentModelProvenance } from './agent-avatars.ts';
+import type { AgentAvatarCommand, AgentAvatar, AgentAvatarJob, AgentAvatarEvent, AgentAvatarImage, AgentModelProvenance } from '../_shared/agent-avatars.d.ts';
+type AvatarWireCommand = Exclude<AgentAvatarCommand, {kind: 'complete_agent_avatar_job'} | {kind: 'begin_agent_avatar_upload'}> | {kind: 'begin_agent_avatar_upload'; principal_id?: string};
 import { humanInvitationTransaction } from './household-invitations.ts';
 import { parseHouseholdAttachment, HouseholdAttachmentError } from "./household-attachments.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
@@ -156,6 +165,7 @@ import {
   applyCommand,
   canonicalPrincipal,
   decideWorkspace,
+  AGENT_AVATAR_PUBLIC_COMMANDS, AGENT_AVATAR_EVENT_TYPES, AGENT_AVATAR_BUCKET, normalizedAvatarReason,
   DISPOSITIONS,
   FEEDBACK_CATEGORIES,
   H0_SEAT_TOKEN_TTL_MS,
@@ -226,7 +236,7 @@ type Command =
   }
   | { kind: "reopen"; task_id: string; epoch: number };
 
-type ConnectCommand =
+type ConnectCommand = AvatarWireCommand
   | { kind: "invite_member"; email: string; ttl_ms?: number }
   | { kind: "revoke_invitation"; invitation_id: string }
   | { kind: "accept_invitation"; token: string }
@@ -379,6 +389,9 @@ type ValidatedCommand =
 type WorkspaceRole = "owner" | "admin" | "member";
 
 interface WorkspaceState {
+  avatars?: Record<string, AgentAvatar>;
+  avatar_jobs?: Record<string, AgentAvatarJob>;
+  model_provenance?: Record<string, AgentModelProvenance>;
   workspace: {
     workspace_id: string;
     name: string;
@@ -429,7 +442,7 @@ interface WorkspaceState {
   owners_count: number;
 }
 
-type WorkspaceCommand =
+type WorkspaceCommand = AgentAvatarCommand
   | { kind: "archive_workspace" }
   | {
     kind: "invite_member";
@@ -568,6 +581,10 @@ interface StoredResponse {
   version_n?: number;
   name?: string;
   upload_path?: string;
+  upload_id?: string;
+  avatar_processing?: "pending" | "refused";
+  refusal_code?: string;
+  bucket?: string;
   upload_token?: string;
   upload_expires_in_seconds?: number;
   commit_deadline_note?: string;
@@ -1037,6 +1054,7 @@ const LOCAL_TRANSPORT_ONLY_KINDS = new Set([
 ]);
 
 const COMMAND_KINDS = [
+  ...AGENT_AVATAR_PUBLIC_COMMANDS,
   "create",
   "acquire",
   "renew",
@@ -1091,6 +1109,7 @@ const TASK_COMMAND_KINDS = [
  * WORKSPACE_COMMAND_KINDS).
  */
 const CONNECT_COMMAND_KINDS = [
+  "set_agent_avatar", "clear_agent_avatar", "remove_agent_avatar",
   "invite_member",
   "revoke_invitation",
   "accept_invitation",
@@ -1113,6 +1132,7 @@ const CONNECT_COMMAND_KINDS = [
  * to token+renew and so is permanently denylisted as a scope by design.
  */
 const WORKSPACE_COMMAND_KINDS = [
+  ...AGENT_AVATAR_PUBLIC_COMMANDS,
   ...CONNECT_COMMAND_KINDS,
   "revoke_agent_token",
   "declare_agent_model",
@@ -2247,6 +2267,27 @@ function validateCommand(
   // reducer's model_invalid rule and agent_principals_model_bounded in
   // 20260730000001_workspace_access_lifecycle.sql — a hand-written duplicate
   // here has drifted before (the 8h→24h TTL constant above).
+  if ((AGENT_AVATAR_PUBLIC_COMMANDS as readonly string[]).includes(String(cmd.kind))) {
+    const kind = cmd.kind as AvatarWireCommand['kind'];
+    const required = kind === 'set_agent_avatar' ? ['principal_id', 'upload_id']
+      : kind === 'declare_agent_avatar' ? ['upload_id']
+      : kind === 'clear_agent_avatar' ? ['principal_id']
+      : kind === 'remove_agent_avatar' ? ['principal_id', 'reason'] : [];
+    const optional = kind === 'begin_agent_avatar_upload' ? ['principal_id'] : [];
+    if (!exactKeys(cmd, ['kind', ...required, ...optional.filter(field => Object.hasOwn(cmd, field))])) return { ok: false, status: 400,
+      reason: commandFieldsMessage(kind, required, optional) };
+    for (const field of ['principal_id', 'upload_id']) {
+      if (field in cmd && (typeof cmd[field] !== 'string' || !UUID_RE.test(cmd[field] as string))) {
+        return { ok: false, status: 400, reason: `${field} must be a UUID` };
+      }
+    }
+    if (kind === 'remove_agent_avatar') {
+      const reason = normalizedAvatarReason(cmd.reason);
+      if (reason === null) return { ok: false, status: 400, reason: 'reason must be 1 to 200 plain characters' };
+      return { ok: true, command: { kind, principal_id: cmd.principal_id as string, reason } };
+    }
+    return { ok: true, command: cmd as unknown as AvatarWireCommand };
+  }
   if (cmd.kind === "declare_agent_model") {
     /* KEYS, then TYPE, in two steps. Bundled, `{model: 123}` -- exactly the
      * right keys, wrong type -- was answered with the field-list sentence,
@@ -2990,6 +3031,10 @@ function storedResponse(value: unknown): StoredResponse {
     ...(typeof response.version_id === "string" ? { version_id: response.version_id } : {}),
     ...(typeof response.version_n === "number" ? { version_n: response.version_n } : {}),
     ...(typeof response.name === "string" ? { name: response.name } : {}),
+    ...(typeof response.upload_id === "string" ? { upload_id: response.upload_id } : {}),
+    ...(typeof response.bucket === "string" ? { bucket: response.bucket } : {}),
+    ...(response.avatar_processing === "pending" || response.avatar_processing === "refused" ? { avatar_processing: response.avatar_processing } : {}),
+    ...(typeof response.refusal_code === "string" ? { refusal_code: response.refusal_code } : {}),
     ...(typeof response.upload_path === "string" ? { upload_path: response.upload_path } : {}),
     ...(typeof response.upload_token === "string" ? { upload_token: response.upload_token } : {}),
     ...(typeof response.upload_expires_in_seconds === "number"
@@ -3027,7 +3072,7 @@ function replayResult(
   return {
     status: 200,
     body: {
-      status: response.ok ? "accepted" : "rejected",
+      status: response.refusal_code ? "refused" : response.ok ? "accepted" : "rejected",
       ...response,
     },
   };
@@ -3511,6 +3556,7 @@ async function loadWorkspaceState(
   }
 
   return {
+    ...await loadAgentAvatarState(tx, route.workspaceId),
     workspace: {
       workspace_id: String(workspace.workspace_id),
       name: String(workspace.name),
@@ -3671,6 +3717,10 @@ async function prepareWorkspaceCommand(
       kind: REVOKE_AGENT_JOIN_CREDENTIAL_KIND,
       join_credential_id: wire.join_credential_id,
     };
+  } else if (wire.kind === "begin_agent_avatar_upload") {
+    command = { ...wire, upload_id: crypto.randomUUID() };
+  } else if (wire.kind === "declare_agent_avatar" || wire.kind === "clear_own_agent_avatar" || wire.kind === "set_agent_avatar" || wire.kind === "clear_agent_avatar" || wire.kind === "remove_agent_avatar") {
+    command = wire;
   } else if (wire.kind === "declare_agent_model") {
     command = { kind: "declare_agent_model", model: wire.model };
   } else if (wire.kind === "submit_feedback") {
@@ -4492,7 +4542,9 @@ async function updateWorkspaceProjection(
     const payload = record(event.payload);
     if (!payload || event.type === "CommandRejected") continue;
 
-    if (event.type === "WorkspaceArchived") {
+    if ((AGENT_AVATAR_EVENT_TYPES as readonly string[]).includes(event.type)) {
+      await projectAgentAvatarEvent(tx, route.workspaceId, payload as unknown as AgentAvatarEvent);
+    } else if (event.type === "WorkspaceArchived") {
       if (typeof payload.archived_at !== "number") {
         throw new Error("WorkspaceArchived payload is malformed");
       }
@@ -4628,6 +4680,8 @@ async function updateWorkspaceProjection(
           NULL
         )
       `;
+      const provenance = projection.model_provenance?.[principal.principal_id];
+      if (provenance) await projectAgentModelProvenance(tx, route.workspaceId, provenance);
     } else if (event.type === "AgentModelDeclared") {
       // Bounds were enforced by the reducer, mirroring
       // agent_principals_model_bounded — a violation here means the mirror
@@ -4651,6 +4705,9 @@ async function updateWorkspaceProjection(
           "AgentModelDeclared projection did not update exactly one principal",
         );
       }
+      const provenance = projection.model_provenance?.[String(payload.principal_id)];
+      if (!provenance) throw new Error('folded model provenance missing');
+      await projectAgentModelProvenance(tx, route.workspaceId, provenance);
     } else if (event.type === "FeedbackSubmitted") {
       // Bounds were enforced by the reducer, mirroring feedback_body_bounded —
       // a violation here means the mirror drifted, and the constraint failing
@@ -8164,7 +8221,7 @@ async function resumeRenewalGrant(
    * was told 403; a retry then answered `renewal_grant_not_suspended`, because the resume it
    * had denied had in fact happened.
    *
-   * Same shape as the renewal preflight read at index.ts:3987 (`preflight[0]?.code ?? null`):
+   * Same shape as the renewal preflight read at index.ts:4037 (`preflight[0]?.code ?? null`):
    * preserve NULL, refuse only on a code we assign.
    *
    * WHY A REFUSAL BELOW STILL COMMITS, DELIBERATELY. `refuse` must commit — its whole job is
@@ -10990,6 +11047,7 @@ async function handleTransaction(
     // confines the command to the presenting principal (it has no target
     // field), and existing minted tokens could never carry a new scope. This
     // only opens the door to the reducer's own agent-only check.
+    const isAvatarSelf = validation.command.kind === "declare_agent_avatar" || validation.command.kind === "clear_own_agent_avatar" || validation.command.kind === "begin_agent_avatar_upload";
     const isModelDeclare =
       validation.command.kind === "declare_agent_model";
     // Feedback needs no scope for the same reason self-description does: a
@@ -11073,6 +11131,7 @@ async function handleTransaction(
       !isRenewal &&
       !isAgentTokenRevoke &&
       !isModelDeclare &&
+      !isAvatarSelf &&
       !isFeedback &&
       !isChannelCommand &&
       !isDeliveryCommand &&
@@ -12689,11 +12748,23 @@ async function handleTransaction(
           throw new Error("renewal fence lost without a domain state change");
         }
       }
-      const response: StoredResponse = decision.ok
+      const avatarRefusal = decision.events.find(event => event.type === 'AgentAvatarRefused');
+      const response: StoredResponse = avatarRefusal ? {
+        ok: false, event_ids: decision.events.map(event => event.event_id), workspace_id: route.workspaceId,
+        reason: 'avatar_refused', detail: `Avatar change refused: ${(avatarRefusal.payload as AgentAvatarEvent).code}.`,
+        refusal_code: (avatarRefusal.payload as AgentAvatarEvent).code, avatar_processing: 'refused',
+      } : decision.ok
         ? {
           ok: true,
           event_ids: decision.events.map((event) => event.event_id),
-          ...(prepared.command.kind === "invite_member"
+          ...(prepared.command.kind === "begin_agent_avatar_upload"
+            ? (decision.events[0]?.type === 'AgentAvatarUploadBegun' ? { upload_id: prepared.command.upload_id,
+                bucket: AGENT_AVATAR_BUCKET, upload_path: (decision.events[0].payload as AgentAvatarEvent).job!.quarantine_key,
+                note: "Upload path prepared; image upload is not yet available." }
+              : { workspace_id: route.workspaceId })
+            : prepared.command.kind === "set_agent_avatar" || prepared.command.kind === "declare_agent_avatar"
+            ? { workspace_id: route.workspaceId, avatar_processing: 'pending' }
+            : prepared.command.kind === "invite_member"
             ? { invitation_id: prepared.command.invitation_id }
             : prepared.command.kind === "create_agent_principal"
             ? { principal_id: prepared.command.principal_id }
@@ -12943,7 +13014,7 @@ async function handleTransaction(
       ? {
         status: 200,
         body: {
-          status: "accepted",
+          status: outcome.response.refusal_code ? "refused" : "accepted",
           ...outcome.response,
           events: outcome.events,
           min_client_version: minClientVersion,
@@ -13844,6 +13915,49 @@ export async function handleHostedManagementCommand(
     parseAgentSessionProofHeaders(new Headers()),
     parseAgentSessionAcquireHeaders(new Headers()),
   );
+}
+
+/** Internal worker port. Phase 3 must supply a reviewed service authentication
+ * transport. It cannot be selected by a public request or an MCP capability. */
+export async function completeAgentAvatarJob(jobId: string, result: AgentAvatarImage): Promise<CommandResult> {
+  if (!UUID_RE.test(jobId)) return { status: 400, body: { error: 'invalid_job' } };
+  return await db.begin('isolation level read committed', async tx => {
+    await setTransaction(tx);
+    const jobs = await tx<{workspace_id: string}[]>`SELECT workspace_id FROM swarm.agent_avatar_jobs WHERE job_id=${jobId}::uuid`;
+    if (!jobs[0]) return { status: 404, body: { error: 'job_not_found' } };
+    const workspaceId = jobs[0].workspace_id;
+    // Use the ordinary workspace stream lock. Taking the workspace row first
+    // would invert archive/create's stream-then-projection lock order.
+    const streams = await tx<{stream_id: string; head_seq: string | number}[]>`
+      SELECT stream_id,head_seq FROM swarm.streams WHERE workspace_id=${workspaceId}::uuid AND kind='workspace' FOR UPDATE`;
+    if (streams.length !== 1) throw new Error('avatar worker requires exactly one workspace stream');
+    const route: Route = { workspaceId, streamId: streams[0]!.stream_id, membershipRole: null, membershipRevokedAt: null };
+    const state = await loadWorkspaceState(tx, route);
+    const job = state.avatar_jobs?.[jobId];
+    if (!job) throw new Error('locked avatar job disappeared');
+    if (job.state !== 'pending') return { status: 200, body: { status: job.state, refusal_code: job.refusal_code,
+      current_object_prefix: state.avatars?.[job.principal_id]?.object_prefix ?? null } };
+    const times = await tx<{now_ms: string | number}[]>`SELECT floor(extract(epoch FROM statement_timestamp())*1000)::bigint AS now_ms`;
+    let seq = Number(streams[0]!.head_seq);
+    const decision = decideWorkspace(state, { kind: 'complete_agent_avatar_job', job_id: jobId, result }, {
+      now: Number(times[0]!.now_ms), actor: { user: null, agent_principal: null, run: null }, credential_kind: 'avatar_service',
+      presenting_token_id: null, command_id: `avatar-job-${jobId}`, workspace_id: workspaceId, stream_id: route.streamId,
+      operatorAllowed: () => false, role: () => null, inviteeAlreadyMember: () => false, identityVerified: () => false,
+      humanRights: () => [], landingAuthorityChangeResolved: () => false,
+      nextSeq: () => ++seq, nextEventId: () => crypto.randomUUID(),
+    }) as Decision;
+    if (!decision.ok) return { status: 400, body: { error: decision.reason } };
+    await appendEvents(tx, decision.events);
+    let projection = state;
+    for (const event of decision.events) {
+      projection = reduceWorkspace(projection, event) as WorkspaceState;
+      await projectAgentAvatarEvent(tx, workspaceId, event.payload as AgentAvatarEvent);
+    }
+    await tx`UPDATE swarm.streams SET head_seq=${seq} WHERE stream_id=${route.streamId}::uuid`;
+    const payload = decision.events[0]!.payload as AgentAvatarEvent;
+    return { status: 200, body: { status: payload.job!.state, refusal_code: payload.job!.refusal_code,
+      current_object_prefix: payload.avatar?.object_prefix ?? state.avatars?.[job.principal_id]?.object_prefix ?? null } };
+  });
 }
 
 if (import.meta.main) Deno.serve(handleRequest);
