@@ -269,7 +269,8 @@ function lifecycle(trees = true) {
   mkdirSync(d.baseline_site_target, { recursive: true }); symlinkSync(d.baseline_site_target, join(root, 'srv/commonswarm/site/current'));
   d.recycle_unit_sha256 = hash('baseline service'); d.recycle_timer_sha256 = hash('baseline timer');
   const current = join(home, 'edge/current'); symlinkSync(old, current);
-  const binding = join(root, 'recycle.json');
+  const binding = join(root, 'etc/commonswarm-admin-release/recycle.json');
+  mkdirSync(resolve(binding, '..'), { mode: 0o700 });
   const transport = join(root, 'tmp'), state = join(root, 'var/lib/commonswarm-admin-release'), archives = join(state, 'archives');
   mkdirSync(transport, { recursive: true }); mkdirSync(archives, { recursive: true, mode: 0o700 }); chmodSync(state, 0o700);
   chmodSync(transport, 0o1777); // The box upload directory is root-owned sticky /tmp.
@@ -473,7 +474,7 @@ systemctl() {
 `;
   writeFileSync(join(proof, 'session.sh'), session); writeFileSync(join(proof, 'baseline.cutover.json'), '{"closed":true}\n');
   const partial = partialHelpers.replaceAll('/home/commonswarm', home).replaceAll('/tmp/anvil-secret', root + '/anvil-secret')
-    .replaceAll('/etc/commonswarm-admin-release/recycle.json', binding).replaceAll('/etc/', root + '/etc/')
+    .replaceAll('/etc/', root + '/etc/')
     .replaceAll('/usr/local/libexec/', root + '/libexec/').replaceAll('/srv/commonswarm/', root + '/srv/commonswarm/');
   writeFileSync(join(proof, 'partial-session.sh'), `python3() { ${quotedPythonExecutable} ${JSON.stringify(wrapper)} "$@"; }\n${partial}\n`);
   const baseEnvironment = { ...process.env, PROOF_DIR: proof, FIXTURE_BINDING: binding, FIXTURE_CLOCK: clock, FIXTURE_STAGE: stage, FIXTURE_OLD_EDGE: old, FIXTURE_ARCHIVES_STATE: state, FIXTURE_UPLOAD: upload };
@@ -1529,21 +1530,16 @@ a.read(r['archive'])
   assert.equal(readFileSync(join(f.proof, 'read-drift-triggered'), 'utf8'), 'read');
 });
 
-test('preflight measures every directory ancestor before archive or release mutation', () => {
+test('preflight measures binding parent and directory ancestors before any mutation', () => {
   const control = archiveLifecycle(); passed(control.run(block('edge-preflight')));
-  for (const kind of ['group-writable', 'non-root', 'symlink']) {
-    const f = archiveLifecycle(), ancestor = join(f.home, 'admin-issuance');
-    const before = [f.binding, f.oldArchive, f.rescueArchive, f.upload].map(path => readFileSync(path));
+  for (const location of ['admin-issuance', 'binding-parent']) for (const kind of ['group-writable', 'non-root', 'symlink']) {
+    const f = archiveLifecycle(), ancestor = location === 'binding-parent' ? resolve(f.binding, '..') : join(f.home, 'admin-issuance');
     if (kind === 'group-writable') chmodSync(ancestor, 0o770);
     if (kind === 'symlink') { renameSync(ancestor, ancestor + '.retained'); symlinkSync(ancestor + '.retained', ancestor); }
-    const result = f.run(block('edge-preflight'), kind === 'non-root' ? { FIXTURE_PRECONDITION_BAD_OWNER: ancestor } : {});
-    stopped(result, kind === 'group-writable' ? /preflight directory .* is group- or world-writable.*STOP/
+    const result = unchangedPreflight(f, kind === 'non-root' ? { FIXTURE_PRECONDITION_BAD_OWNER: ancestor } : {},
+      kind === 'group-writable' ? /preflight directory .* is group- or world-writable.*STOP/
       : kind === 'non-root' ? /preflight directory .* owner uid must be 0.*STOP/ : /preflight directory .* is a symlink.*STOP/);
     assert.ok(result.stderr.includes(ancestor), 'STOP must identify the failing path');
-    for (const path of [f.fresh, f.helper, f.durableArchive, join(f.proof, 'archive-rescue.json'), join(f.proof, 'archive-promotion.json'), join(f.proof, 'tree-layout.json'), join(f.proof, 'events')]) {
-      assert.equal(existsSync(path), false, `${kind}: preflight mutated ${path}`);
-    }
-    assert.deepEqual([f.binding, f.oldArchive, f.rescueArchive, f.upload].map(path => readFileSync(path)), before);
   }
 });
 
@@ -1570,8 +1566,9 @@ function inertPreflightControl(kind = 'home-ro') {
 }
 function unchangedPreflight(f: ReturnType<typeof archiveLifecycle>, extra: Record<string, string>, pattern: RegExp) {
   const before = fixtureSnapshot(f.root);
-  stopped(f.run(block('edge-preflight'), extra), pattern);
+  const result = f.run(block('edge-preflight'), extra); stopped(result, pattern);
   assert.deepEqual(fixtureSnapshot(f.root), before, 'refused preflight must not mutate any fixture entry');
+  return result;
 }
 function directoryPreflight(f: ReturnType<typeof archiveLifecycle>) {
   // Exercise the directory owner directly as well as the lifecycle's earlier
@@ -1605,6 +1602,8 @@ test('inert-account preflight fails closed on missing account, unreadable proces
   unchangedPreflight(unreadable, {}, /commonswarm process measurement failed.*STOP/);
   const malformed = archiveLifecycle(); writeFileSync(join(malformed.proc, 'status'), 'Uid:\t0\t0\n');
   unchangedPreflight(malformed, {}, /commonswarm process Uid measurement invalid.*STOP/);
+  const nonUtf8 = archiveLifecycle(); writeFileSync(join(nonUtf8.proc, 'status'), Buffer.from('Name:\t\xff\nUid:\t0\t0\t0\t0\n', 'latin1'));
+  assert.doesNotMatch(unchangedPreflight(nonUtf8, {}, /commonswarm process measurement failed.*STOP/).stderr, /Traceback/);
   const denied = archiveLifecycle();
   const before = fixtureSnapshot(denied.root);
   stopped(archiveRun(denied, `
