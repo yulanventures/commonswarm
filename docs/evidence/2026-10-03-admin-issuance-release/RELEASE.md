@@ -4027,6 +4027,8 @@ python3 - "$INPUTS_FILE" "$RECYCLE_BASELINE_FILE" "$PROOF_DIR" "$SECRET_STAGE" "
 import datetime,errno,grp,json,os,pathlib,pwd,re,stat,subprocess,sys
 # Pinned audit inventory ONCE. Columns: absolute box path/template, type, allowed absence, C lines at a438c6ea.
 # create = C creates it later; fresh = only fresh installation; fresh-restage = fresh or missing legacy upload.
+# Ruling 39: /usr/local/libexec measured root:root 0711; commonswarm-edge-recycle.service.d root:root 0700.
+# Other service.d paths may be absent only until ai-recycle-install (fresh), which creates root:root 0755.
 # No /tmp glob: future hook stages are checked at creation using mktemp's returned exact path.
 W4_PATH_AUDIT = [
     ('/','dir','never','4193-4212;4764-4789;4803-4816;4837-4847;5090-5170;5201-5261;5287-5310'),
@@ -4102,7 +4104,7 @@ W4_PATH_AUDIT = [
 # HezLead rulings 31-32 and 34(c): CLOSED typed allow list; all other paths (including release children) stay root-only.
 COMMONSWARM_OWNED_PATHS = {'/home/commonswarm':'dir','/home/commonswarm/edge':'dir','/home/commonswarm/edge/releases':'dir','/home/commonswarm/.env':'file'}
 # Small read boundaries; fixtures replace observations, never the inert decision or path enforcement.
-def account_entry(): return pwd.getpwnam('commonswarm')
+def account_entry(name='commonswarm'): return pwd.getpwnam(name)
 def group_entry(gid): return grp.getgrgid(gid)
 def passwd_entries(): return pwd.getpwall()
 def proc_pids(): return sorted(p for p in os.listdir('/proc') if p.isdecimal())
@@ -4171,8 +4173,11 @@ def check(path,kind,absence,lines):
         return
     try: info=os.lstat(path)
     except FileNotFoundError:
-        if not absence: stop(path,'missing-required-path')
-        checked[path]={'path':path,'type':kind,'present':False,'created_later':True,'base_lines':lines}; return
+        dropin=path=='/etc/systemd/system/'+values.get('service','')+'.d'
+        if not absence: stop(path,'missing-drop-in-directory-no-reviewed-create-step' if dropin else 'missing-required-path')
+        checked[path]={'path':path,'type':kind,'present':False,'created_later':True,'base_lines':lines}
+        if dropin: checked[path].update(absent_until_reviewed_step='ai-recycle-install (fresh)',expected_uid=0,expected_gid=0,expected_mode='0700' if values['service']=='commonswarm-edge-recycle.service' else '0755')
+        return
     except OSError: stop(path,'lstat-readable')
     if stat.S_ISLNK(info.st_mode): stop(path,'not-symlink')
     if kind=='dir' and not stat.S_ISDIR(info.st_mode): stop(path,'directory')
@@ -4180,26 +4185,20 @@ def check(path,kind,absence,lines):
     if path in COMMONSWARM_OWNED_PATHS:
         if kind!=COMMONSWARM_OWNED_PATHS[path]: stop(path,'allow-list-type')
         if (info.st_uid,info.st_gid)!=(commonswarm_account.pw_uid,commonswarm_account.pw_gid): stop(path,'commonswarm-owner-uid-gid')
-        if kind=='file':
-            if stat.S_IMODE(info.st_mode)!=0o600: stop(path,'mode-exact-0600')
-            if info.st_nlink!=1: stop(path,'one-link')
     elif path==values.get('legacy_archive'):
         if (info.st_uid,info.st_gid)!=(legacy['uid'],legacy['gid']): stop(path,'keeper-upload-owner-uid-gid')
-        if stat.S_IMODE(info.st_mode)!=0o600: stop(path,'mode-exact-0600')
-        if info.st_nlink!=1: stop(path,'one-link')
     elif info.st_uid!=0: stop(path,'owner-uid-0')
-    if path==values.get('fresh_baseline_archive'):
-        if info.st_gid!=0: stop(path,'group-gid-0')
-        if stat.S_IMODE(info.st_mode)!=0o600: stop(path,'mode-exact-0600')
-        if info.st_nlink!=1: stop(path,'one-link')
-    if path.startswith('/var/lib/commonswarm-admin-release/w4'):
-        if info.st_gid!=0: stop(path,'group-gid-0')
-        if stat.S_IMODE(info.st_mode)!=(0o700 if kind=='dir' else 0o600): stop(path,'mode-exact-'+('0700' if kind=='dir' else '0600'))
+    # Reuse the exact root metadata rule for measured parents and private W4 inputs.
+    exact_modes={'/usr/local/libexec':0o711,'/tmp':0o1777}
+    if 'service' in values: exact_modes['/etc/systemd/system/'+values['service']+'.d']=0o700 if values['service']=='commonswarm-edge-recycle.service' else 0o755
+    exact_mode=exact_modes.get(path)
+    account_file=kind=='file' and (path in COMMONSWARM_OWNED_PATHS or path==values.get('legacy_archive'))
+    if path.startswith('/var/lib/commonswarm-admin-release/w4') or path==values.get('fresh_baseline_archive') or account_file: exact_mode=0o700 if kind=='dir' else 0o600
+    if exact_mode is not None:
+        if info.st_gid!=0 and not account_file: stop(path,'group-gid-0')
+        if stat.S_IMODE(info.st_mode)!=exact_mode: stop(path,'mode-exact-'+('01777' if path=='/tmp' else '%04o'%exact_mode))
         if kind=='file' and info.st_nlink!=1: stop(path,'one-link')
-    if path=='/tmp':
-        if info.st_gid!=0: stop(path,'group-gid-0')
-        if stat.S_IMODE(info.st_mode)!=0o1777: stop(path,'mode-exact-01777')
-    else:
+    if path!='/tmp':
         if info.st_mode & 0o020: stop(path,'not-group-writable')
         if info.st_mode & 0o002: stop(path,'not-world-writable')
     checked[path]={'path':path,'type':kind,'present':True,'uid':info.st_uid,'gid':info.st_gid,'mode':'%04o'%stat.S_IMODE(info.st_mode),'base_lines':lines}
@@ -4221,7 +4220,9 @@ if mode=='fresh':
     values['fresh_baseline_archive']=fresh_archive['path']
 if mode!='fresh':
     if not isinstance(legacy,dict) or re.fullmatch('/tmp/admin-issuance-'+values['baseline_edge_sha']+r'-[A-Za-z0-9]{6}\.tar',legacy.get('path','')) is None: stop(values['RECYCLE_BASELINE_FILE'],'exact-legacy-archive-path')
-    if any(type(legacy.get(k)) is not int or legacy[k]<0 for k in ('uid','gid')): stop(values['RECYCLE_BASELINE_FILE'],'keeper-upload-owner-uid-gid')
+    try: keeper_owner=account_entry(d['keeper_upload_owner'])
+    except (KeyError,OSError,TypeError): stop(values['INPUTS_FILE'],'keeper-upload-owner-account-resolvable')
+    if any(type(legacy.get(k)) is not int for k in ('uid','gid')) or (legacy['uid'],legacy['gid'])!=(keeper_owner.pw_uid,keeper_owner.pw_gid): stop(values['RECYCLE_BASELINE_FILE'],'keeper-upload-owner-uid-gid')
     values.update(legacy_archive=legacy['path'],legacy_name=os.path.basename(legacy['path'])[len('admin-issuance-'):],keeper_vars=d['keeper_install_vars_path'])
     if not isinstance(values['keeper_vars'],str) or re.fullmatch(r'/root/keeper-install-[0-9]{8}T[0-9]{6}Z\.vars',values['keeper_vars']) is None: stop(values['INPUTS_FILE'],'exact-keeper-vars-path')
 stage_root='/var/lib/commonswarm-admin-release/w4/'+values['window_id']
@@ -5503,7 +5504,8 @@ else:
     after['hook']=replace(HOOK,candidate,0o700,r['hook'])
 if mode=='fresh':
     if not os.path.lexists(DROPIN_DIR):
-        os.mkdir(DROPIN_DIR,0o755); os.chown(DROPIN_DIR,0,0); os.chmod(DROPIN_DIR,0o755); after['created_dirs'].append(DROPIN_DIR)
+        dropin_mode=0o700 if service=='commonswarm-edge-recycle.service' else 0o755
+        os.mkdir(DROPIN_DIR,dropin_mode); os.chown(DROPIN_DIR,0,0); os.chmod(DROPIN_DIR,dropin_mode); after['created_dirs'].append(DROPIN_DIR)
     if not os.path.lexists(CONFIG_DIR):
         os.mkdir(CONFIG_DIR,0o700); os.chown(CONFIG_DIR,0,0); os.chmod(CONFIG_DIR,0o700); after['created_dirs'].append(CONFIG_DIR)
     after['dropin']=replace(DROPIN,DROPIN_BYTES,0o644,r['dropin'])
