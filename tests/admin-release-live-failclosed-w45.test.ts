@@ -372,7 +372,11 @@ function fixture(config: Record<string, unknown> = {}, parent = scratch) {
   const later = join(root, 'later.txt');
   function run(steps = ['ai-w5-closed'], env: Record<string, string> = {}, laterMarker = later) {
     const opening = steps[0] === 'ai-w5-preflight';
-    const source = remap(steps.map(step => step.startsWith('#') ? step : block(step)).join('\n'));
+    // The complete path-precondition contract is owned by admin-release-w4-second-pass.test.ts.
+    // This narrower harness models that earlier gate as passed and probes the later override/new-tree guards.
+    const admittedSteps = steps.map(step => step.startsWith('#') ? step : block(step)).join('\n')
+      .replace(/^python3 - [^\n]+<<'PY_AUDIT'[^\n]*\n[\s\S]*?^PY_AUDIT\n/m, '');
+    const source = remap(admittedSteps);
     const result = spawnSync('/bin/bash', [], {
       input: 'set -euo pipefail\n' + source + `\nprintf 'later side effect\\n' >${quote(laterMarker)}\n`, encoding: 'utf8', timeout: 15_000,
       cwd: root, env: { ...process.env, PATH: bin, PYTHONDONTWRITEBYTECODE: '1', W45_ROOT: root,

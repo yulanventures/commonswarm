@@ -1768,7 +1768,7 @@ subprocess.check_output = observe
   const stop = `printf 'ADMITTED\\n'; exit 0`;
   // The W5 site path's first operation after admission is its verified site-plan extraction;
   // the stub returns the stop as the extracted block, which the plan then evaluates.
-  const harness = `ai_run() { case "$1" in ai-w6-readiness) :;; *) ${stop};; esac; }\ntest() { case "$*" in *'/home/commonswarm/admin-issuance/release-proofs/'*) ${stop};; *) builtin test "$@";; esac; }\ngit() { printf 'ADMITTED\\n' >&2; exit 0; }\npython3() { case "$1:$2" in -c:*SITE-RELEASE.md*) printf '%s\\n' "${stop}";; *) command python3 "$@";; esac; }\n`;
+  const harness = `ai_ro() { builtin test "$*" = '-Atq --command SELECT count(*) FROM swarm.agent_tokens WHERE parent_admin_grant_id IS NOT NULL' || return 64; printf '0\\n'; }\nai_run() { case "$1" in ai-w6-readiness) :;; *) ${stop};; esac; }\ntest() { case "$*" in *'/home/commonswarm/admin-issuance/release-proofs/'*) ${stop};; *) builtin test "$@";; esac; }\ngit() { printf 'ADMITTED\\n' >&2; exit 0; }\npython3() { case "$1:$2" in -c:*SITE-RELEASE.md*) printf '%s\\n' "${stop}";; *) command python3 "$@";; esac; }\n`;
   writeFileSync(readyFile, 'nonsecret readiness\n'); utimesSync(readyFile, new Date(), new Date());
   const admissions: Array<[string, string, string]> = [
     ['W5 common open', 'ai-open', 'W5'], ['W6 open', 'ai-open', 'W6'], ['later reopen', 'ai-open', 'W7'],
@@ -1779,7 +1779,7 @@ subprocess.check_output = observe
     const input: Input = { ...base(), window };
     if (window === 'W6') input.approval = approval(input, 'activate-admin-issuance-and-smoke');
     const env = { INPUTS_FILE: inputFile(input), PLAN_FILE: planPath, EDGE_MEASUREMENT_FILE: receipt,
-      EDGE_OBSERVED: observed, EDGE_QUERY_LOG: queries, PATH: shim+':'+process.env.PATH,
+      PROOF_DIR: root, EDGE_OBSERVED: observed, EDGE_QUERY_LOG: queries, PATH: shim+':'+process.env.PATH,
       WINDOW: window, W5_CLOSED_FILE: closeFile, BROWSER_READY_FILE: readyFile,
       SITE_STEP: 'site2-01', SITE_RELEASE_REPO: root, PREP_DIR: root, SITE_RELEASE_SHA: sha };
     writeFileSync(receipt, JSON.stringify(current)); writeFileSync(queries, '');

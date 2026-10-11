@@ -324,6 +324,49 @@ test('W6 client verification: canonical digest equals canonicalAdminJson; the re
 });
 
 // ---------------- W7 binds its W6 ----------------
+test('Fix round 3 / W6 binding-owner account locks precede every approval read in the closed transaction', () => {
+  const ordered = (sql: string) => {
+    assert.match(sql, /^BEGIN;/); assert.match(sql, /COMMIT;\s*$/);
+    const accounts = sql.indexOf('PERFORM 1 FROM swarm.admin_accounts');
+    const approvals = [...sql.matchAll(/FROM commonswarm_oauth\.admin_client_owner_approvals/g)].map(m => m.index!);
+    assert.ok(accounts >= 0 && approvals.length >= 4);
+    assert.ok(approvals.every(index => accounts < index), 'owner-account lock must precede every approvals read');
+    assert.match(sql.slice(accounts, approvals[0]), /ORDER BY a\.owner_user_id FOR UPDATE OF a;/);
+    assert.match(sql.slice(0, accounts), /NOT admin_issuance_enabled FOR UPDATE/);
+    assert.match(sql.slice(0, accounts), /IF FOUND THEN RESET ROLE;\s*$/); // privileged account lock, then approvals
+  };
+  const ok = verification(); assert.equal(ok.r.status, 0, ok.r.stderr); ordered(ok.sql!);
+  // A real emitted SQL shape with the old order must be rejected in this same invocation.
+  const lock = ok.sql!.match(/PERFORM 1 FROM swarm\.admin_accounts[\s\S]*?FOR UPDATE OF a; /)![0];
+  const bad = ok.sql!.replace(lock, '').replace('LOCK TABLE commonswarm_oauth.admin_client_owner_approvals', lock + 'LOCK TABLE commonswarm_oauth.admin_client_owner_approvals');
+  assert.throws(() => ordered(bad), /owner-account lock must precede/);
+});
+
+test('Fix round 3 / W6 latent child-token preflight: zero passes; one or an unreadable count stops before mutation', () => {
+  const checks = block('ai-w6-activation-checks');
+  const end = checks.indexOf('ai_run ai-w6-readiness');
+  assert.ok(end > 0);
+  const prefix = checks.slice(0, end);
+  assert.doesNotMatch(prefix, /\bai_db\b/);
+  const apply = block('ai-w6-activation-apply');
+  assert.ok(apply.indexOf('ai_run ai-w6-activation-checks') < apply.indexOf('ai_db -q --file /proof/activate.sql'));
+  for (const count of ['0', '1', 'error']) {
+    const dir = realpathSync(mkdtempSync(join(root, 'child-count-')));
+    const calls = join(dir, 'calls');
+    const out = run(`ai_ro() { printf '%s\\n' "$*" > "$PROOF_DIR/calls"; test "$CHILD_COUNT" != error || return 1; printf '%s\\n' "$CHILD_COUNT"; }\n` +
+      prefix + `printf 'mutation-reached\\n' > "$PROOF_DIR/mutation"\n`, { WINDOW: 'W6', PROOF_DIR: dir, CHILD_COUNT: count });
+    assert.equal(readFileSync(calls, 'utf8').trim(), '-Atq --command SELECT count(*) FROM swarm.agent_tokens WHERE parent_admin_grant_id IS NOT NULL');
+    if (count === '0') {
+      assert.equal(out.status, 0, out.stderr); assert.ok(existsSync(join(dir, 'mutation')));
+      assert.equal(readFileSync(join(dir, 'W6-child-token-count.txt'), 'utf8'), '0\n');
+    } else {
+      assert.notEqual(out.status, 0); assert.match(out.stderr, /Lane 2 R8\.8 LATENT admin_child_live; STOP/);
+      assert.ok(!existsSync(join(dir, 'mutation')));
+      if (count === '1') assert.equal(readFileSync(join(dir, 'W6-child-token-count.txt'), 'utf8'), '1\n');
+    }
+  }
+});
+
 test('W7 preflight binds the closed-success W6 of this release by w6_window_id and measures the C1 digest', () => {
   const pre = block('ai-w7-preflight');
   const make = (change: { record?: Record<string, unknown> | null; report?: Record<string, unknown>; reportBytes?: Buffer; smokeSha?: string; inputs?: Record<string, unknown>; closed?: string } = {}) => {
