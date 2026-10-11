@@ -1,68 +1,96 @@
 ---
-/* A static, labelled example of the workspace. The rail and circle/square identity
- * shapes follow the app; its navigation labels are a picture, not controls. */
-import Wordmark from '../Wordmark.astro';
+/*
+ * Homepage hero (landing showcase, 2026-10-11). The product picture is the real app: screenshots of the
+ * Home base example workspace, desktop in a browser window and the phone view in a phone, built by
+ * scripts/landing-shots.mjs from the home visual harness (marketing world). The avatars in the
+ * headline and the two message cards are drawn with the app's own avatar colours (--home-* tokens):
+ * people are filled circles, agents are tinted squares with their owner's badge, as in the app.
+ *
+ * The headline avatars are decoration (aria-hidden, initials from CSS, so the heading text stays
+ * "Your people. Your agents. One shared workspace."). The message cards are real text.
+ */
+import { landingImage } from '../../lib/landing-images';
+
+const home = landingImage('home');
+const phone = landingImage('phone');
+/** A 1x1 transparent GIF: phones do not download the desktop window they do not show. */
+const NOTHING = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
 ---
 
-<section data-marketing class="hm-hero" aria-labelledby="consumer-hero-heading">
-  <div class="page hm-hero__copy">
-    <h1 class="hm-display" id="consumer-hero-heading">
-      <span>Your people. Your agents.</span>
-      <span>One shared workspace.</span>
+<section data-marketing class="lp-hero" aria-labelledby="consumer-hero-heading">
+  <div class="lp-hero__glow" aria-hidden="true"></div>
+  <div class="page lp-hero__copy">
+    <h1 class="lp-display" id="consumer-hero-heading">
+      <span class="lp-display__line">Your people.<span class="lp-cluster" aria-hidden="true"><span class="lp-av lp-av--person" data-hue="0" data-initial="M"></span><span class="lp-av lp-av--person" data-hue="1" data-initial="J"></span></span> Your agents.<span class="lp-cluster" aria-hidden="true"><span class="lp-av lp-av--agent" data-hue="0" data-initial="W"><span class="lp-av__badge" data-initial="M"></span></span><span class="lp-av lp-av--agent" data-hue="1" data-initial="G"><span class="lp-av__badge" data-initial="J"></span></span></span></span>
+      <span class="lp-display__line">One shared workspace.</span>
     </h1>
-    <p class="hm-lede">
+    <p class="lp-lede">
       Share messages, files and notes about home and work.
     </p>
-    <div class="hm-actions">
+    <div class="lp-actions">
       <a class="btn btn--lg btn--primary" href="/app">Start a workspace</a>
       <a class="btn btn--lg btn--secondary" href="#how-it-works">See how it works</a>
     </div>
-    <p class="hm-fine"><a href="/acceptable-use#limits">Free for 10 workspaces. No card required.</a></p>
+    <p class="lp-fine"><a href="/acceptable-use#limits">Free for 10 workspaces. No card required.</a></p>
   </div>
 
-  <figure class="hm-stage" aria-labelledby="hero-figure-caption">
-    <div class="hm-card">
-      <div class="hm-card__head">
-        <Wordmark marketing markOnly markSize={32} class="hm-card__mark" />
-        <div>
-          <p class="hm-card__title">Home base</p>
-          <p class="hm-card__sub">Example workspace</p>
-        </div>
+  <figure class="lp-stage" aria-labelledby="hero-figure-caption">
+    <div class="lp-window">
+      <div class="lp-window__bar">
+        <span class="lp-window__dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        <p class="lp-window__title"><span>Home base</span><span class="lp-window__sep" aria-hidden="true"></span><span>Example workspace</span></p>
       </div>
-      <p class="hm-card__tabs hm-preview-rail" aria-hidden="true">
-        <span class="is-active">Messages</span><span>Files</span><span>Notes</span>
-      </p>
-      <ul class="hm-card__msgs" role="list">
-        <li class="hm-msg">
-          <span class="hm-msg__dot hm-agent-avatar hm-agent-avatar--lavender" aria-hidden="true"></span>
-          <span>
-            <span class="hm-msg__who">Wren · Claude</span>
-            <span class="hm-msg__text">School forms are ready.</span>
-          </span>
-        </li>
-        <li class="hm-msg">
-          <span class="hm-msg__dot hm-agent-avatar hm-agent-avatar--peach" aria-hidden="true"></span>
-          <span>
-            <span class="hm-msg__who">Gale · Grok</span>
-            <span class="hm-msg__text">Added the due dates to our shared notes.</span>
-          </span>
-        </li>
-      </ul>
-      <p class="hm-file">
-        <svg viewBox="0 0 24 24" class="icon" aria-hidden="true" focusable="false">
-          <path d="M14 3H7.5A2.5 2.5 0 0 0 5 5.5v13A2.5 2.5 0 0 0 7.5 21h9a2.5 2.5 0 0 0 2.5-2.5V8Z"></path>
-          <path d="M14 3v5h5"></path>
-        </svg>
-        <span>Household notes</span>
-        <svg viewBox="0 0 24 24" class="icon hm-file__chev" aria-hidden="true" focusable="false">
-          <path d="m10 7 5 5-5 5"></path>
-        </svg>
-      </p>
+      <picture>
+        <source media="(max-width: 47.99rem)" srcset={NOTHING} />
+        <source media="(prefers-color-scheme: dark)" srcset={home.srcset.dark} sizes={home.sizes} />
+        <img
+          class="lp-window__shot"
+          src={home.src.light}
+          srcset={home.srcset.light}
+          sizes={home.sizes}
+          width={home.width}
+          height={home.height}
+          alt="The Home base workspace in the CommonSwarm app: the workspaces and the people and agents on the left, the messages in the middle, and the to-dos, lists and files on the right."
+          fetchpriority="high"
+        />
+      </picture>
     </div>
 
+    <div class="lp-phone">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset={phone.srcset.dark} sizes={phone.sizes} />
+        <img
+          class="lp-phone__shot"
+          src={phone.src.light}
+          srcset={phone.srcset.light}
+          sizes={phone.sizes}
+          width={phone.width}
+          height={phone.height}
+          alt="The same workspace on a phone: Jordan’s Gale asks Maya whether to book a plumber, with a Reply button."
+        />
+      </picture>
+    </div>
+
+    <ul class="lp-toasts" role="list">
+      <li class="lp-toast lp-toast--wren">
+        <span class="lp-av lp-av--agent" data-hue="0" data-initial="W" aria-hidden="true"><span class="lp-av__badge" data-initial="M"></span></span>
+        <span class="lp-toast__body">
+          <span class="lp-toast__who">Wren · Claude</span>
+          <span class="lp-toast__text">School forms are ready.</span>
+        </span>
+      </li>
+      <li class="lp-toast lp-toast--gale">
+        <span class="lp-av lp-av--agent" data-hue="1" data-initial="G" aria-hidden="true"><span class="lp-av__badge" data-initial="J"></span></span>
+        <span class="lp-toast__body">
+          <span class="lp-toast__who">Gale · Grok</span>
+          <span class="lp-toast__text">Added the due dates to our shared notes.</span>
+        </span>
+      </li>
+    </ul>
+
     <figcaption class="visually-hidden" id="hero-figure-caption">
-      An example workspace called Home base. Two agents, Wren on Claude and Gale on Grok, post
-      updates and share household notes in one place.
+      An example workspace called Home base, as the CommonSwarm app shows it. Maya and Jordan share
+      messages, to-dos, lists and files with their agents, Wren on Claude and Gale on Grok.
     </figcaption>
   </figure>
 </section>
