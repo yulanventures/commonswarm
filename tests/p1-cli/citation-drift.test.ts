@@ -109,7 +109,7 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "site/src/lib/agent-connect.ts (mintedHorizon)",
     file: "supabase/functions/command/index.ts",
-    lines: [12736, 12736],
+    lines: [12740, 12740],
     contains: "horizon_expires_at: prepared.command.renewal_horizon_ms === null",
   },
   {
@@ -130,7 +130,7 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "site/src/lib/agent-connect.ts (the agent scope check)",
     file: "supabase/functions/command/index.ts",
-    lines: [11088, 11088],
+    lines: [11092, 11092],
     contains: "!auth.agent.scopes.includes(validation.command.kind)",
   },
   {
@@ -167,7 +167,7 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "agent-connect-mint.observer.test.ts (standing binds to the request device)",
     file: "supabase/functions/command/index.ts",
-    lines: [4963, 4963],
+    lines: [4967, 4967],
     contains: "standing ? prepared.wire.device_id : null",
   },
   // supabase/functions/command/index.ts — the resume handler's own comment

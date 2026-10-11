@@ -56,8 +56,8 @@ export async function revokeRemovedMemberHousehold(
     SELECT workspace_id
     FROM swarm.workspaces
     WHERE workspace_id = ${workspaceId}::uuid
-    FOR UPDATE
-  `;
+    FOR NO KEY UPDATE
+  `; // Lock order: lockPrincipalName in command/index.ts.
   await tx`
     SELECT user_id
     FROM swarm.memberships

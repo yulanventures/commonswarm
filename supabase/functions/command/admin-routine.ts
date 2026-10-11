@@ -43,9 +43,9 @@ export async function prepareAdminRoutine(
 ): Promise<AdminRoutineContext> {
   const owner = ctx.owner_user_id;
   // Also serializes with human account resource creation and invitation counters.
-  await tx`SELECT user_id FROM swarm.users WHERE user_id = ${owner}::uuid FOR UPDATE`;
+  await tx`SELECT user_id FROM swarm.users WHERE user_id = ${owner}::uuid FOR NO KEY UPDATE`; // Lock order: lockPrincipalName in command/index.ts.
   const workspaces =
-    await tx`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id = ${command.workspace_id}::uuid FOR UPDATE`;
+    await tx`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id = ${command.workspace_id}::uuid FOR NO KEY UPDATE`; // Lock order: lockPrincipalName in command/index.ts.
   const streams = workspaces.length
     ? await tx<
       { stream_id: string; head_seq: string | number }[]

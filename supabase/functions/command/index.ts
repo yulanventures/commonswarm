@@ -79,7 +79,7 @@ import {
   newestInteractiveAmrSeconds,
 } from "./fresh-auth.ts";
 import {
-  classifyCommandFailure,
+  adminFailureRetryable, adminOAuthFailureResult, classifyCommandFailure,
   dbCode,
   durableCommandFailure,
   finishCommandFailure,
@@ -4299,15 +4299,19 @@ async function fenceRenewal(
       return true;
     });
   } catch (error) {
-    // 23505 is the lineage-fork CAS losing; 55000 is any named refusal raised
-    // by the successor fence; 40P01 is the documented renewal-vs-revocation
-    // deadlock, which the migration says must resolve toward refusal. All three
-    // roll back to the savepoint, leaving the transaction usable so the caller
-    // can re-read state and turn the race into a named domain refusal.
+    // HezLead ruling 38: 40P01/40001 must abort the whole command transaction,
+    // including recovery audit and idempotency writes outside this savepoint.
+    // Renewal-vs-revocation still resolves toward refusal: after the 503 the
+    // same-command_id retry re-reads state in authentication or preparation,
+    // then refuses revoked tokens/grants (20260728000002_worker_token_renewal.sql:714;
+    // 20260728000004_stranded_successor_accounting.sql:361). 40001 keeps its 500.
+    // 23505 (lineage CAS), 55000 (named fence refusal), and RenewalFenceLost
+    // still roll back only this savepoint so the caller can re-read and refuse.
     const code = dbCode(error);
+    if (code === "40P01" || code === "40001") throw error;
     if (
       error instanceof RenewalFenceLost ||
-      code === "23505" || code === "55000" || code === "40P01"
+      code === "23505" || code === "55000"
     ) return false;
     throw error;
   }
@@ -5931,7 +5935,7 @@ async function lockAndCountLivePrincipals(tx: Sql, workspaceId: string): Promise
   return Number(rows[0]?.live ?? "0");
 }
 
-/** Lock order is stream -> principal ceiling -> exact name -> hosted grant. */
+/** Lock order: owner users row, then workspaces row, both FOR NO KEY UPDATE (never FOR UPDATE: principal inserts hold the stream and take FOR KEY SHARE on both rows); several workspaces rows in workspace_id order, each in its strongest mode at its first lock (never SHARE, then a stronger lock); then stream -> principal ceiling -> exact name -> hosted grant. */
 async function lockPrincipalName(
   tx: Sql,
   route: { workspaceId: string },
@@ -12347,7 +12351,7 @@ async function handleTransaction(
       };
     }
 
-    await beforeStep(8); if (kind === "accept_invitation" || kind === "remove_member") { const lockedWorkspace = await tx<{ workspace_id: string }[]>`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id = ${route.workspaceId}::uuid FOR UPDATE`; if (!lockedWorkspace[0]) throw new Error("validated workspace disappeared"); }
+    await beforeStep(8); if (kind === "accept_invitation" || kind === "remove_member") { const lockedWorkspace = await tx<{ workspace_id: string }[]>`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id = ${route.workspaceId}::uuid FOR NO KEY UPDATE`; if (!lockedWorkspace[0]) throw new Error("validated workspace disappeared"); } // Lock order: lockPrincipalName.
     const streamRows = await tx<{ head_seq: string | number }[]>`
       SELECT head_seq
       FROM swarm.streams
@@ -13180,12 +13184,12 @@ async function runAdminOAuthCommand(input: AdminInput, admission: AdminAdmission
       return result;
     });
     return outcome.result;
-  } catch {
+  } catch (error) {
     console.error('admin_command_failed', 'transaction_failed');
-    // Replay admission has already committed; rollback cannot make it reusable.
-    try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication, kind); }); }
-    catch { return { status: 503, body: { error: 'admin_failure_audit_unavailable' } }; }
-    return { status: 503, body: { error: 'admin_command_failed' } };
+    // Replay admission has already committed; rollback cannot make it reusable. A 40P01 caches no result: retryable.
+    try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication, kind, adminFailureRetryable(error)); }); }
+    catch { return adminOAuthFailureResult(error, 'admin_failure_audit_unavailable'); }
+    return adminOAuthFailureResult(error, 'admin_command_failed');
   }
 }
 
@@ -13399,9 +13403,9 @@ let verifiedHuman: VerifiedHuman | null = null;
       reason,
       safeError(error),
     );
-    // 40001 (serialization failure) and 40P01 (deadlock) deliberately still
-    // fall through to the existing 500. The durable SQLSTATE will provide the
-    // data needed to decide a later retryable-503 change in its own lane.
+    // 40P01 (deadlock) returns the 503 of 55P03 (HezLead ruling 27); its row keeps
+    // db_code 40P01. 40001 (serialization failure) deliberately still falls
+    // through to the existing 500 until a retryable-503 change in its own lane.
     const failure = durableCommandFailure({
       commandKind: kind,
       reason,
@@ -14517,10 +14521,10 @@ export async function handleAdminWorkerCommand(
       return result;
     });
     return Date.now() < admission.token.expires_at && !deadline.signal.aborted ? outcome.result : { status: 401, body: { error: 'credential_expired' } };
-  } catch {
-    try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication); }); }
-    catch { return { status: 503, body: { error: 'admin_failure_audit_unavailable' } }; }
-    return { status: 503, body: { error: 'admin_command_failed' } };
+  } catch (error) {
+    try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication, undefined, adminFailureRetryable(error)); }); }
+    catch { return adminOAuthFailureResult(error, 'admin_failure_audit_unavailable'); }
+    return adminOAuthFailureResult(error, 'admin_command_failed');
   } finally {
     clearTimeout(timer); request.signal.removeEventListener('abort', abort);
   }

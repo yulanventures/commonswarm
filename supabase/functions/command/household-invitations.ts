@@ -29,7 +29,7 @@ export async function humanInvitationTransaction(tx: Sql, commandId: string, val
   let account: { stream_id: string; seq: number | string; projection: AdminAccountState } | undefined;
   let grant: AdminGrant | undefined;
   if (delegated) {
-    await tx`SELECT user_id FROM swarm.users WHERE user_id=${inviter}::uuid FOR UPDATE`;
+    await tx`SELECT user_id FROM swarm.users WHERE user_id=${inviter}::uuid FOR NO KEY UPDATE`; // Lock order: lockPrincipalName in command/index.ts.
     [account] = await tx<{ stream_id: string; seq: number | string; projection: AdminAccountState }[]>`SELECT stream_id,seq,projection FROM swarm.admin_accounts WHERE owner_user_id=${inviter}::uuid FOR UPDATE`;
     const grants = await tx`SELECT * FROM swarm.admin_grants WHERE owner_user_id=${inviter}::uuid ORDER BY grant_id FOR UPDATE`;
     const [bound] = await tx`SELECT parent_admin_grant_id FROM swarm.admin_routine_invitations WHERE invitation_id=${invitationId}::uuid`;
@@ -37,7 +37,7 @@ export async function humanInvitationTransaction(tx: Sql, commandId: string, val
     if (durable && account && account.projection.grants[String(durable.grant_id)]?.manifest_digest === durable.manifest_digest) grant = { ...account.projection.grants[String(durable.grant_id)], ...durable,
       expires_at: new Date(durable.expires_at as string).getTime(), refresh_deadline: new Date(durable.refresh_deadline as string).getTime() } as AdminGrant;
   }
-  const [workspace] = await tx`SELECT name,archived_at FROM swarm.workspaces WHERE workspace_id=${workspaceId}::uuid FOR UPDATE`;
+  const [workspace] = await tx`SELECT name,archived_at FROM swarm.workspaces WHERE workspace_id=${workspaceId}::uuid FOR NO KEY UPDATE`; // Lock order: lockPrincipalName in command/index.ts.
   const [stream] = await tx`SELECT stream_id,head_seq FROM swarm.streams WHERE workspace_id=${workspaceId}::uuid AND kind='workspace' FOR UPDATE`;
   if (!workspace || !stream || workspace.archived_at !== null) return unavailable();
   const [invite] = delegated
