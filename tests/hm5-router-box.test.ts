@@ -48,9 +48,8 @@ test("admin public and internal ingress reach one worker; unknown names never in
   }
 });
 
-async function source(path: string): Promise<string> {
-  return await readFile(resolve(repoRoot, path), "utf8");
-}
+/** Load repository-relative fixtures as UTF-8, preserving read failures. */
+const source = (path: string): Promise<string> => readFile(resolve(repoRoot, path), "utf8");
 
 test("HM7 keeps MCP dark in the main router until explicitly enabled", async () => {
   assert.deepEqual(FUNCTION_NAMES, [
