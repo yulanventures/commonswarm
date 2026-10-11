@@ -2,10 +2,10 @@
 import assert from 'node:assert/strict';
 import { spawnSync as nodeSpawnSync, type SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { createMcpProtocolHandler } from '../supabase/functions/mcp/protocol.ts';
 
 // Enforce a portable per-argument budget even on macOS, where Linux's
@@ -47,6 +47,7 @@ const helpers = /cat >>"\$PROOF_DIR\/session.sh" <<'SH'\n([\s\S]*?)^SH$/m.exec(b
 const partialHelpers = /cat >"\$PROOF_DIR\/partial-session.sh" <<'PARTIAL_SH'\n([\s\S]*?)^PARTIAL_SH$/m.exec(block('edge-open'))![1]!;
 // The extracted plan checks canonical paths; TMPDIR may point through a symlink.
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'edge-release-contract-')));
+after(() => rmSync(scratch, { recursive: true, force: true }));
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 const clock = '2031-02-03T12:00:00Z';
 const fixture = () => ({

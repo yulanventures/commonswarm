@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, symlinkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
 import { FRESH_INTERACTIVE_AUTH_CLOCK_SKEW_SECONDS } from '../supabase/functions/command/fresh-auth.ts';
@@ -47,7 +47,7 @@ const sha = 'a'.repeat(40), hex = 'b'.repeat(64);
 // temporary root and execute blocks whose two path literals are rewritten to
 // that parent, exactly and countably. RELEASE.md itself is unchanged (pinned by
 // the static test below), so its digest and production rule do not move.
-const temporaryRoot = realpathSync(tmpdir()), realHome = realpathSync(homedir());
+const temporaryRoot = realpathSync(tmpdir()), realHome = realpathSync(userInfo().homedir);
 const outsideHome = (path: string) => path !== realHome && !path.startsWith(realHome + sep);
 const secretRoot = mkdtempSync(join(temporaryRoot, 'admin-plan-secret-root.'));
 const pointerDir = join(realpathSync(scratch), 'dcr-rt'); mkdirSync(pointerDir, { mode: 0o700 });
@@ -75,7 +75,9 @@ function portable(source: string, expected: { stage: number; pointer: number }) 
   return result;
 }
 function remapAbortTmp(source: string, tmpNs: string) {
-  assert.equal(source.split("os.listdir('/tmp')").length - 1, 1, 'abort lists /tmp once');
+  // Remap the frozen negative control's old sweep only. Current C never enumerates /tmp.
+  if (!source.includes("os.listdir('/tmp')")) return source;
+  assert.equal(source.split("os.listdir('/tmp')").length - 1, 1, 'frozen abort lists /tmp once');
   assert.equal(source.split("path='/tmp/'+").length - 1, 1, 'abort builds /tmp candidate paths once');
   return source
     .split("os.listdir('/tmp')").join(`os.listdir(${JSON.stringify(tmpNs)})`)
@@ -163,7 +165,7 @@ test('admin release plan: every complete marked block parses in Bash 3.2 and emb
 test('admin release plan: production secret window and pointer stay pinned; fixtures are portable rewrites only', () => {
   // The executed fixtures rewrite these literals; the plan must still carry them.
   assert.equal(plan.split(PRODUCTION_STAGE_RE).length - 1, 5, 'Mac secret-window checks keep /private/tmp/anvil-secret');
-  assert.equal(plan.split(PRODUCTION_BOX_STAGE_RE).length - 1, 10, 'box secret-window checks use /tmp/anvil-secret (Ubuntu has no /private)');
+  assert.equal(plan.split(PRODUCTION_BOX_STAGE_RE).length - 1, 13, 'box secret-window checks use /tmp/anvil-secret (Ubuntu has no /private)');
   assert.equal(plan.split('$(mktemp -d /private/tmp/anvil-secret.XXXXXX)').length - 1, 1, 'Mac stage is a fresh /private/tmp/anvil-secret.XXXXXX');
   assert.equal(plan.split('$(mktemp -d /tmp/anvil-secret.XXXXXX)').length - 1, 4, 'box stages are a fresh /tmp/anvil-secret.XXXXXX');
   assert.match(block('ai-w6-pointer'), /assert str\(pointer\)=='\/Users\/yulanbot\/work\/dcr-rt\/production\/c1-smoke\.pointer'/);
@@ -474,7 +476,7 @@ urllib.request.build_opener=lambda *args: Opener()
   // The dispatcher extracts nested blocks from the plan on disk; give it the
   // portable rewrite of the whole plan (only the secret-window regex changes).
   const planCopy = join(root, 'RELEASE.md');
-  writeFileSync(planCopy, portable(plan, { stage: 15, pointer: 11 }));
+  writeFileSync(planCopy, portable(plan, { stage: 18, pointer: 11 }));
   const released = block('ai-db-session').split('ai_run() {\n')[1]!.split('\nai_deadline() {')[0]!;
   assert.equal(released.split(PRODUCTION_PLAN_PATH).length - 1, 1);
   const dispatcher = released.split(PRODUCTION_PLAN_PATH).join(`'${planCopy}'`);
@@ -1658,7 +1660,11 @@ subprocess.run = fixture_run
 subprocess.check_output = fixture_output
 `;
   writeFileSync(join(shim, 'python3'), `#!/bin/bash\nexec '${python}' "$@"\n`, { mode: 0o700 });
-  let source = portable(block('ai-recycle-hook'), { stage: 1, pointer: 0 });
+  let source = portable(block('ai-recycle-hook'), { stage: 2, pointer: 0 });
+  const createdStageObservation = 'import os,re,stat,sys\n';
+  assert.equal(source.split(createdStageObservation).length - 1, 1);
+  source = source.replace(createdStageObservation, createdStageObservation +
+    'real_stage_lstat=os.lstat\ndef fixture_stage_lstat(p):\n    st=real_stage_lstat(p)\n    return os.stat_result((st.st_mode,st.st_ino,st.st_dev,st.st_nlink,0,0,st.st_size,st.st_atime,st.st_mtime,st.st_ctime))\nos.lstat=fixture_stage_lstat\n');
   // Remap the complete hook's paths to the owned fixture; no live path is used.
   for (const [from, to] of [
     ['/etc/commonswarm-admin-release', configDir], ['/home/commonswarm/edge', edgeRoot],
@@ -1768,7 +1774,7 @@ subprocess.check_output = observe
   const stop = `printf 'ADMITTED\\n'; exit 0`;
   // The W5 site path's first operation after admission is its verified site-plan extraction;
   // the stub returns the stop as the extracted block, which the plan then evaluates.
-  const harness = `ai_run() { case "$1" in ai-w6-readiness) :;; *) ${stop};; esac; }\ntest() { case "$*" in *'/home/commonswarm/admin-issuance/release-proofs/'*) ${stop};; *) builtin test "$@";; esac; }\ngit() { printf 'ADMITTED\\n' >&2; exit 0; }\npython3() { case "$1:$2" in -c:*SITE-RELEASE.md*) printf '%s\\n' "${stop}";; *) command python3 "$@";; esac; }\n`;
+  const harness = `ai_ro() { builtin test "$*" = '-Atq --command SELECT count(*) FROM swarm.agent_tokens WHERE parent_admin_grant_id IS NOT NULL' || return 64; printf '0\\n'; }\nai_run() { case "$1" in ai-w6-readiness) :;; *) ${stop};; esac; }\ntest() { case "$*" in *'/home/commonswarm/admin-issuance/release-proofs/'*) ${stop};; *) builtin test "$@";; esac; }\ngit() { printf 'ADMITTED\\n' >&2; exit 0; }\npython3() { case "$1:$2" in -c:*SITE-RELEASE.md*) printf '%s\\n' "${stop}";; *) command python3 "$@";; esac; }\n`;
   writeFileSync(readyFile, 'nonsecret readiness\n'); utimesSync(readyFile, new Date(), new Date());
   const admissions: Array<[string, string, string]> = [
     ['W5 common open', 'ai-open', 'W5'], ['W6 open', 'ai-open', 'W6'], ['later reopen', 'ai-open', 'W7'],
@@ -1779,7 +1785,7 @@ subprocess.check_output = observe
     const input: Input = { ...base(), window };
     if (window === 'W6') input.approval = approval(input, 'activate-admin-issuance-and-smoke');
     const env = { INPUTS_FILE: inputFile(input), PLAN_FILE: planPath, EDGE_MEASUREMENT_FILE: receipt,
-      EDGE_OBSERVED: observed, EDGE_QUERY_LOG: queries, PATH: shim+':'+process.env.PATH,
+      PROOF_DIR: root, EDGE_OBSERVED: observed, EDGE_QUERY_LOG: queries, PATH: shim+':'+process.env.PATH,
       WINDOW: window, W5_CLOSED_FILE: closeFile, BROWSER_READY_FILE: readyFile,
       SITE_STEP: 'site2-01', SITE_RELEASE_REPO: root, PREP_DIR: root, SITE_RELEASE_SHA: sha };
     writeFileSync(receipt, JSON.stringify(current)); writeFileSync(queries, '');
@@ -3315,9 +3321,9 @@ test('C1-13 ai-open-abort PASSes when secret-stage.path is absent; frozen 86673f
   const missing = mkdtempSync(join(scratch, 'abort-missing-'));
   const abort = run(remapAbortTmp(block('ai-open-abort'), tmpNs) + "\nprintf 'SHELL_ALIVE\\n'\n", { PROOF_DIR: missing });
   assert.equal(abort.status, 0, abort.stderr);
-  assert.match(abort.stdout, /PASS ai-open-abort: no secret stage was recorded; candidates listed for manual review/);
+  assert.match(abort.stdout, /PASS ai-open-abort: no secret stage was recorded; any unrecorded stage requires separate operator review by exact path/);
   assert.match(abort.stdout, /SHELL_ALIVE/);
-  assert.match(readFileSync(join(missing, 'aborted-before-mutation.txt'), 'utf8'), /no secret stage was recorded; candidates listed for manual review/);
+  assert.match(readFileSync(join(missing, 'aborted-before-mutation.txt'), 'utf8'), /no secret stage was recorded; any unrecorded stage requires separate operator review by exact path/);
   const never = join(scratch, 'abort-never-created');
   const beforeMkdir = run(remapAbortTmp(block('ai-open-abort'), tmpNs), { PROOF_DIR: never });
   assert.equal(beforeMkdir.status, 0, beforeMkdir.stderr);
@@ -3839,9 +3845,9 @@ test('C1-16: abort publishes the pointer with mktemp in the same statement', () 
   assert.doesNotMatch(frozen00Block('ai-open'), /mktemp -d \/tmp\/anvil-secret\.XXXXXX\) && printf/);
 });
 
-test('C1-17: abort lists another window\'s recorded empty stage and deletes nothing; frozen 6f4a0ac9 removes it', () => {
+test('C1-17: abort leaves another window\'s recorded stage untouched without discovery; frozen 6f4a0ac9 removes it', () => {
   const current = block('ai-open-abort');
-  assert.match(current, /no secret stage was recorded; candidates listed for manual review/);
+  assert.match(current, /no secret stage was recorded; any unrecorded stage requires separate operator review by exact path/);
   assert.doesNotMatch(current, /os\.rmdir|removed unrecorded|st_mtime/);
   const oldAbort = frozen6fBlock('ai-open-abort');
   assert.match(oldAbort, /os\.rmdir\(path\)/);
@@ -3861,12 +3867,12 @@ test('C1-17: abort lists another window\'s recorded empty stage and deletes noth
   chmodSync(otherStage, 0o700);
   const cur = go(current);
   assert.equal(cur.status, 0, cur.stderr + cur.stdout);
-  assert.match(cur.stdout, /no secret stage was recorded; candidates listed for manual review/);
-  assert.match(cur.stdout, /anvil-secret\.AbCdEf/);
+  assert.match(cur.stdout, /no secret stage was recorded; any unrecorded stage requires separate operator review by exact path/);
+  assert.doesNotMatch(cur.stdout, /anvil-secret\.AbCdEf/);
   assert.match(cur.stdout, /SHELL_ALIVE/);
   assert.ok(existsSync(otherStage), 'other window stage must remain');
   assert.equal(readFileSync(join(otherProof, 'secret-stage.path'), 'utf8').trim(), otherStage);
-  assert.match(readFileSync(join(ourProof, 'aborted-before-mutation.txt'), 'utf8'), /candidates listed for manual review/);
+  assert.match(readFileSync(join(ourProof, 'aborted-before-mutation.txt'), 'utf8'), /separate operator review by exact path/);
 });
 
 test('tests never use HEAD as an immutable comparison baseline', () => {
@@ -5396,4 +5402,34 @@ urllib.request.urlopen=urlopen
   const again = execute(refused);
   assert.notEqual(again.status, 0); assert.match(again.stderr, /closed-administrative\.json expected absent got present/);
   assert.deepEqual(readFileSync(join(refused.proof, 'closed-administrative.json')), retained);
+});
+
+test('Fix round 3f / W6 fixture remaps the exact hook stage owner check; unsafe stage mode still stops', () => {
+  const rehearsal = readFileSync(resolve('scripts/c1-w6-rehearsal-steps.sh'), 'utf8');
+  const remapper = rehearsal.match(/python3 - "\$W6_PLAN_SRC" "\$PLANC" "\$W6R" <<'PY'[^\n]*\n([\s\S]*?)^PY$/m)![1]!;
+  const root = mkdtempSync(join(scratch, 'w6-stage-'));
+  mkdirSync(join(root, 'secret'), { mode: 0o700 });
+  const group = spawnSync('python3', ['-c', 'import os,sys; os.chown(sys.argv[1],-1,os.getgid())', join(root, 'secret')], { encoding: 'utf8' });
+  assert.equal(group.status, 0, group.stderr);
+  const copy = join(root, 'RELEASE.md');
+  const mapped = spawnSync('python3', ['-c', remapper, planPath, copy, root], { encoding: 'utf8' });
+  assert.equal(mapped.status, 0, mapped.stderr);
+  assert.match(mapped.stdout, /the reverse map restores the plan bytes exactly/);
+  const hook = [...readFileSync(copy, 'utf8').matchAll(/^```sh\n([\s\S]*?)^```$/gm)].map(m => m[1]!).find(b => b.startsWith('# step: ai-recycle-hook\n'))!;
+  const head = 'set -- before\n' + hook.slice(0, hook.indexOf('\nPY_STAGE\n') + '\nPY_STAGE\n'.length);
+  assert.ok(head.endsWith('\nPY_STAGE\n'), 'execute the hook through its exact-stage check');
+  const good = run(head);
+  assert.equal(good.status, 0, 'fixture uid/gid models box root for the new lstat check: ' + good.stderr);
+  const badMode = run(head.replace('chmod 0700 "$HOOK_SECRET_STAGE"', 'chmod 0750 "$HOOK_SECRET_STAGE"'));
+  assert.equal(badMode.status, 1);
+  assert.match(badMode.stderr, /FAIL exact created secret stage: expected real root:root 0700 directory; STOP/);
+  // Reproduce candidate E: its remap covered path.stat ownership only, leaving this new lstat check at root.
+  const oldMapping = head.replace('(os.getuid(),os.getgid(),0o700)', '(0,0,0o700)');
+  const uid = spawnSync('python3', ['-c', 'import os; print(os.getuid())'], { encoding: 'utf8' });
+  assert.equal(uid.status, 0);
+  if (uid.stdout.trim() !== '0') {
+    const before = run(oldMapping);
+    assert.equal(before.status, 1);
+    assert.match(before.stderr, /FAIL exact created secret stage/);
+  }
 });
