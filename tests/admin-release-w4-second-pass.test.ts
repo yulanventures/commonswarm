@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync,
+import { chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync,
   statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
@@ -30,7 +30,7 @@ assert.ok(scratch !== realHome && !scratch.startsWith(realHome + sep));
 after(() => {
   assert.equal(dirname(scratch), temporaryRoot);
   assert.match(scratch.slice(temporaryRoot.length + 1), /^admin-w4b-[A-Za-z0-9]{6}$/);
-  const cleanup = spawnSync('rm', ['-r', '--', scratch], { encoding: 'utf8' });
+  const cleanup = spawnSync(process.platform === 'darwin' ? join(userInfo().homedir,'.local/bin/rm') : 'rm', ['-r', '--', scratch], { encoding: 'utf8' });
   assert.equal(cleanup.status, 0, `fixture cleanup refused ${scratch}: ${cleanup.stderr}`);
 });
 
@@ -44,6 +44,7 @@ const candidateHook = '#!/bin/bash\n' + block('ai-recycle-hook');
 
 const sha = 'a'.repeat(40), baseline = 'b'.repeat(40), wid = 'Fix123', legacyWid = 'E3571B';
 const edgeImage = 'sha256:' + 'c'.repeat(64), postgresImage = 'sha256:' + 'd'.repeat(64);
+const alertService = 'commonswarm-w4-hold-alert.service', alertTimer = 'commonswarm-w4-hold-alert.timer';
 const service = 'commonswarm-edge-recycle.service', timer = 'commonswarm-edge-recycle.timer';
 const producerSource = 'export const fixtureProducer = "live-ordinary-controls";\n';
 const keeperUnits = ['commonswarm-recycle-archive-keep.timer', 'commonswarm-recycle-archive-keep.service', 'commonswarm-recycle-archive-restore.service'];
@@ -53,7 +54,7 @@ const varsName = 'keeper-install-20261010T165121Z.vars';
 
 // Root-relative fixture names for the production paths the W4 blocks touch.
 const remaps: Array<[string, string]> = [
-  ['/etc/ssl', 'etc/ssl'], ['/etc/commonswarm-release', 'etc/commonswarm-release'],
+  ['/opt/commonswarm-backup', 'backup-installed'], ['/sys/fs/cgroup/system.slice', 'cgroup'], ['/usr/local/lib/systemd/system', 'systemd-local'], ['/etc/ssl', 'etc/ssl'], ['/etc/commonswarm-release', 'etc/commonswarm-release'],
   ['/private/tmp/admin-issuance-prep', 'mac-tmp/admin-issuance-prep'], ['/etc/caddy', 'etc/caddy'], ['/home/commonswarm/edge', 'edge'], ['/home/commonswarm/.env', 'box/.env'],
   ['/home/commonswarm/admin-issuance', 'admin-issuance'], ['/tmp/admin-issuance-', 'tmp/admin-issuance-'],
   ['/proof/w4-rollback-measure.sql', 'proof/w4-rollback-measure.sql'], ['/proof/measure.sql', 'proof/measure.sql'], ['/etc/systemd/system', 'systemd'], ['/usr/local/libexec', 'libexec'],
@@ -78,7 +79,7 @@ function liveReceipt(phase: string, consentText: string, edge: string) {
 // replaces only external observations: root ownership (the test user's uid/gid read as 0), the clock, fchown,
 // systemd, Docker, the database and the host name.
 const dispatcher = String.raw`#!/usr/bin/python3
-import datetime,hashlib,io,json,os,pathlib,shutil,socket,stat,subprocess,sys
+import datetime,hashlib,io,json,os,pathlib,re,shutil,socket,stat,subprocess,sys
 root=pathlib.Path(os.environ['W4B_ROOT']); cfg=json.loads((root/'fixture.json').read_text())
 name=pathlib.Path(sys.argv[0]).name; args=sys.argv[1:]
 with (root/'commands.jsonl').open('a') as log: log.write(json.dumps([name]+args)+'\n')
@@ -96,14 +97,19 @@ socket.socket.connect=refuse; socket.create_connection=refuse
 clock=cfg.get('clock','2026-10-10T12:00:00Z')
 UNIT_DIR=root/'systemd'
 def unit_cat(u):
-    out='# /etc/systemd/system/'+u+'\n'+(UNIT_DIR/u).read_text()
-    d=UNIT_DIR/(u+'.d')
-    if d.is_dir():
-        for c in sorted(d.iterdir()): out+='\n# /etc/systemd/system/'+u+'.d/'+c.name+'\n'+c.read_text()
+    base=UNIT_DIR if (UNIT_DIR/u).exists() else root/'systemd-local'
+    out='# '+('/etc/systemd/system/'+u if base==UNIT_DIR else str(base/u))+'\n'+(base/u).read_text()
+    for base in [root/'systemd-local',UNIT_DIR]:
+        d=base/(u+'.d')
+        if d.is_dir():
+            for c in sorted(d.iterdir()):
+                if not c.name.endswith('.conf'): continue
+                out+='\n# '+('/etc/systemd/system/'+u+'.d/'+c.name if base==UNIT_DIR else str(c))+'\n'+c.read_text()
     return out
 if name=='python3':
     if args and args[0]=='-': source=sys.stdin.read(); sys.argv=['-']+args[1:]
     elif len(args)>=2 and args[0]=='-c': source=args[1]; sys.argv=['-c']+args[2:]
+    elif args and owned(args[0]).is_file(): source=owned(args[0]).read_text(); sys.argv=list(args)
     else: refuse()
     fixed=datetime.datetime.strptime(clock,'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
     class FixedDateTime(datetime.datetime):
@@ -115,7 +121,7 @@ if name=='python3':
     # Ownership boundary: the test user's files read as root:root; cfg owners names a path's other owner.
     is_path_audit='W4_PATH_AUDIT = [' in source; audit_owned_dirs=set()
     uid0,gid0=os.getuid(),os.getgid(); owners=cfg.get('owners',{}); fdpath={}
-    real_stat,real_lstat,real_fstat,real_open,real_close=os.stat,os.lstat,os.fstat,os.open,os.close
+    real_stat,real_fstat,real_open,real_close=os.stat,os.fstat,os.open,os.close
     def rel(path):
         try: p=os.path.abspath(os.fsdecode(path))
         except TypeError: return None
@@ -128,16 +134,14 @@ if name=='python3':
         if key in owners: uid,gid=owners[key]
         return os.stat_result((st.st_mode,st.st_ino,st.st_dev,st.st_nlink,uid,gid,st.st_size,int(st.st_atime),int(st.st_mtime),int(st.st_ctime)))
     def stat_(path,*a,**kw):
+        # Python 3.9 lstat and 3.12 stat(follow_symlinks=False) share the box-ancestor model.
+        if kw.get('follow_symlinks',True) is False and (is_path_audit or '00-w4-exclusion.conf' in source or 'NOTIFY_SHA256' in source) and rel(path) is None and str(path)!=os.environ.get('PLAN_FILE'):
+            st=as_root(real_stat(root/'audit-box-ancestor',*a,**kw),path)
+            if is_path_audit and str(path)=='/tmp': st=os.stat_result((stat.S_IFDIR|0o1777,st.st_ino,st.st_dev,st.st_nlink,0,0,st.st_size,st.st_atime,st.st_mtime,st.st_ctime))
+            return st
         st=real_stat(path,*a,**kw)
         return as_root(st,fdpath.get(path) if isinstance(path,int) else (path if kw.get('follow_symlinks',True) is False else os.path.realpath(path)))
-    def lstat_(path,*a,**kw):
-        # The W4 audit now measures every box ancestor. Model those outside the remapped fixture;
-        # do not inspect the Mac's /tmp, /var symlinks or host permissions as if they were box facts.
-        if is_path_audit and rel(path) is None and str(path)!=os.environ.get('PLAN_FILE'):
-            st=as_root(real_lstat(root/'audit-box-ancestor',*a,**kw),path)
-            if str(path)=='/tmp': st=os.stat_result((stat.S_IFDIR|0o1777,st.st_ino,st.st_dev,st.st_nlink,0,0,st.st_size,st.st_atime,st.st_mtime,st.st_ctime))
-            return st
-        return as_root(real_lstat(path,*a,**kw),path)
+    def lstat_(path,*a,**kw): return stat_(path,*a,follow_symlinks=False,**kw)
     def fstat_(fd): return as_root(real_fstat(fd),fdpath.get(fd))
     def open_(path,flags,*a,**kw):
         fd=real_open(path,flags,*a,**kw); fdpath[fd]=os.path.realpath(path) if not flags & getattr(os,'O_NOFOLLOW',0) else os.path.abspath(path)
@@ -178,9 +182,31 @@ if name=='python3':
     real_popen=subprocess.Popen
     def popen(argv,*a,**kw):
         if kw.get('shell') or not isinstance(argv,list) or not argv: refuse()
-        if not (argv[0] in stubs or argv[0]=='/bin/bash'): refuse()
+        if cfg.get('shell_only_read') and argv[0]=='ai_ro': refuse() # Production ai_ro is a shell function.
+        if not (argv[0] in stubs or argv[0] in ('/bin/bash','/bin/test')): refuse()
         return real_popen(argv,*a,**kw)
     subprocess.Popen=popen
+    # Fake HTTP transport only: execute the installed notifier, validate its requests, never open a socket.
+    import urllib.request
+    class PingResponse:
+        status=200
+        def __enter__(self): return self
+        def __exit__(self,*a): pass
+    class PingEndpoint:
+        def open(self,request,timeout):
+            assert request.full_url.startswith('https://hc-ping.com/') and request.method=='POST' and timeout==15
+            with (root/'healthcheck-pings.jsonl').open('a') as log: log.write(json.dumps({'suffix':'/fail' if request.full_url.endswith('/fail') else ''})+'\n')
+            if cfg.get('ping_refused'): raise OSError('fixture ping unavailable')
+            return PingResponse()
+    urllib.request.build_opener=lambda *handlers: PingEndpoint()
+    if cfg.get('trace_hold_loader'):
+        import builtins
+        real_exec=builtins.exec
+        def trace_exec(code,namespace,local=None):
+            if getattr(code,'co_filename',None)=='<W4-hold>':
+                with (root/'hold-loads.jsonl').open('a') as log: log.write(json.dumps({'action':sys.argv[1],'name':namespace.get('__name__')})+'\n')
+            return real_exec(code,namespace,local)
+        builtins.exec=trace_exec
     namespace={'__name__':'__main__','__builtins__':__builtins__}
     if 'W4_PATH_AUDIT = [' in source:
         import types
@@ -193,6 +219,11 @@ if name=='python3':
     exec(compile(source,'<complete-plan-block>','exec'),namespace)
 elif name=='systemctl':
     units=load('units.json',{})
+    with (root/'alert-lifecycle.jsonl').open('a') as log:
+        log.write(json.dumps({'record':(root/'var-lib-admin-release/w4-exclusion.json').exists(),
+            'gate':'00-w4-exclusion.conf' in load('loaded-unit.json',{}).get('commonswarm-edge-recycle.service',''),
+            'timer':units.get('commonswarm-w4-hold-alert.timer',{}).get('active')=='active',
+            'loaded':units.get('commonswarm-w4-hold-alert.timer',{}).get('load')=='loaded'})+'\n')
     a=[x for x in args if x!='--quiet']; quiet='--quiet' in args
     def unit(u): return units.setdefault(u,{'load':'not-found','active':'inactive','enabled':'not-found'})
     if a[:1]==['show']:
@@ -201,8 +232,11 @@ elif name=='systemctl':
             if a[i]=='-p': prop=a[i+1]; i+=2
             elif a[i]=='--value': value=True; i+=1
             else: u=a[i]; i+=1
-        if not value or u is None or prop not in ('ActiveState','LoadState'): refuse()
-        print(unit(u)['active' if prop=='ActiveState' else 'load'])
+        if not value or u is None or prop not in ('ActiveState','LoadState','ExecCondition','SuccessExitStatus','DropInPaths'): refuse()
+        if prop=='SuccessExitStatus': print('')
+        elif prop=='DropInPaths': print(' '.join(re.findall(r'^# (.+/[^/]+\.conf)$',load('loaded-unit.json',{}).get(u,''),re.M)))
+        elif prop=='ExecCondition': print(' '.join(re.findall(r'^ExecCondition=(.+)$',load('loaded-unit.json',{}).get(u,''),re.M)))
+        else: print(unit(u)['active' if prop=='ActiveState' else 'load'])
     elif a[:1]==['is-active'] and len(a)==2:
         state=unit(a[1])['active']
         if not quiet: print(state)
@@ -210,7 +244,41 @@ elif name=='systemctl':
     elif a[:1]==['is-enabled'] and len(a)==2:
         state=unit(a[1])['enabled']; print(state); raise SystemExit(0 if state=='enabled' else 1)
     elif a[:1] in (['stop'],['start']) and len(a)==2:
-        unit(a[1])['active']='inactive' if a[0]=='stop' else 'active'; save('units.json',units)
+        if a[0]=='start' and a[1]=='commonswarm-edge-recycle.service':
+            # A unit activation from either source uses the loaded service conditions, before any hook.
+            text=load('loaded-unit.json',{}).get(a[1],unit_cat(a[1]))
+            for dependency in re.findall(r'^Requires=(commonswarm-w4-hold-alert.timer)$',text,re.M):
+                if unit(dependency)['active']!='active':
+                    save('units.json',units); result=subprocess.run(['systemctl','start',dependency]); assert result.returncode==0
+                    units=load('units.json',{})
+            with (root/'alert-activations.jsonl').open('a') as log:
+                log.write(json.dumps({'gate':'00-w4-exclusion.conf' in text,'alert':unit('commonswarm-w4-hold-alert.timer')['active']=='active'})+'\n')
+            for command in re.findall(r'^ExecCondition=(.+)$',text,re.M):
+                argv=command.split(); argv[0]=argv[0].lstrip('+')
+                if argv[0]=='/usr/bin/python3': argv[0]=str(root/'bin/python3')
+                status=subprocess.run(argv).returncode
+                # systemd.service(5), ExecCondition: 1..254 skip; 255 or abnormal termination fails.
+                # https://raw.githubusercontent.com/systemd/systemd/main/man/systemd.service.xml
+                if 1<=status<=254:
+                    unit(a[1])['active']='inactive'; save('units.json',units); raise SystemExit(0)
+                if status:
+                    unit(a[1])['active']='failed'; save('units.json',units); raise SystemExit(1)
+            # Model the observed recycle effect at this boundary (both baseline and candidate hook do it).
+            db=load('cutover.json',{}); db['generation']+=1; db.update(invalidated=False,measured_generation=db['generation'],evidence_ref='systemd/recycle/'+str(db['generation'])); save('cutover.json',db)
+            (root/'admin-release/recycle-intent.json').write_text('timer-or-manual-intent-drift\n')
+            unit(a[1])['active']='inactive'
+        elif a==['start','commonswarm-w4-hold-alert.service']:
+            text=load('loaded-unit.json',{}).get(a[1],unit_cat(a[1]))
+            command=re.search(r'^ExecStart=(.+)$',text,re.M).group(1).split(); command[0]=str(root/'bin/python3')
+            result=subprocess.run(command); unit(a[1])['active']='inactive'; save('units.json',units)
+            raise SystemExit(result.returncode)
+        else:
+            if a==['stop','commonswarm-edge-recycle.service'] and unit(a[1])['active']!='inactive' and cfg.get('inflight_before'):
+                # The job already passed ExecCondition: run the real installed before hook while stop waits.
+                result=subprocess.run(['/bin/bash',str(root/'libexec/inflight-hook'),'before'],env=dict(os.environ,COMMONSWARM_RECYCLE_UNIT=a[1]))
+                if result.returncode: raise SystemExit(result.returncode)
+            unit(a[1])['active']='inactive' if a[0]=='stop' else 'active'
+        save('units.json',units)
     elif a[:2]==['disable','--now'] and len(a)>2:
         for u in a[2:]:
             unit(u).update(active='inactive',enabled='disabled')
@@ -218,7 +286,10 @@ elif name=='systemctl':
                 if os.path.lexists(wants/u): (wants/u).unlink()
         save('units.json',units)
     elif a==['daemon-reload']:
+        with (root/'exclusion-reloads.jsonl').open('a') as log: log.write(json.dumps({'record':(root/'var-lib-admin-release/w4-exclusion.json').exists(),'dropin':(root/'systemd-local/commonswarm-edge-recycle.service.d/00-w4-exclusion.conf').exists()})+'\n')
+        save('loaded-unit.json',{u:unit_cat(u) for base in [UNIT_DIR,root/'systemd-local'] for p in base.glob('*.service') for u in [p.name]} | {'commonswarm-edge-recycle.service':unit_cat('commonswarm-edge-recycle.service')})
         for u,v in units.items():
+            if u.startswith('commonswarm-w4-hold-alert'): v['load']='loaded' if (root/'systemd-local'/u).exists() else 'not-found'
             if u.startswith('commonswarm-recycle-archive') and not os.path.lexists(UNIT_DIR/u): v.update(load='not-found',active='inactive',enabled='not-found')
         save('units.json',units)
     elif a==['reload','caddy']: pass
@@ -261,6 +332,7 @@ elif name in ('ai_db','ai_ro'):
      "SELECT NOT EXISTS(SELECT 1 FROM swarm.admin_grants WHERE registry_version=1 AND state='active') AND NOT has_table_privilege('swarm_command','swarm.admin_credentials','SELECT,INSERT,UPDATE') AND (SELECT relforcerowsecurity FROM pg_class WHERE oid='swarm.admin_credentials'::regclass);":lambda: 't',
      'SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;':lambda: 't' if not db['enabled'] else 'f',
      'SELECT release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton;':lambda: str(db['generation']),
+     'SELECT approved_edge_release_sha FROM commonswarm_oauth.admin_cutover_state WHERE singleton;':lambda: db['approved'] or '',
      "SELECT json_build_object('admin_issuance_enabled',admin_issuance_enabled,'invalidated',invalidated_at IS NOT NULL,'release_generation',release_generation,'measured_generation',measured_generation,'measured_edge_release_sha',measured_edge_release_sha)::text FROM commonswarm_oauth.admin_cutover_state WHERE singleton;":lambda: json.dumps({'admin_issuance_enabled':db['enabled'],'invalidated':db['invalidated'],'release_generation':db['generation'],'measured_generation':db['measured_generation'],'measured_edge_release_sha':db['measured']}),
     }
     def measured_projection():
@@ -295,6 +367,11 @@ elif name in ('ai_db','ai_ro'):
         sql=owned(a[2]).read_text()
         fields=dict(re.findall(r"(measured_edge_release_sha|measured_edge_target|measured_mount|measured_image_digest|measured_artifact_digest|measurement_evidence_ref)='([^']*)'",sql))
         assert len(fields)==6 and 'measured_generation=release_generation+1' in sql and 'invalidated_at=statement_timestamp()' in sql and not db['enabled']
+        approval=re.search(r",approved_edge_release_sha='([^']*)'",sql)
+        if approval and not cfg.get('ignore_approval_write'):
+            expected=re.search(r"COALESCE\(approved_edge_release_sha,''\)='([^']*)'",sql)
+            assert expected and expected.group(1)==(db['approved'] or '')
+            db['approved']=approval.group(1)
         db.update(enabled=False,invalidated=True,generation=db['generation']+1,measured_generation=db['generation']+1,
             measured=fields['measured_edge_release_sha'],measured_at=clock,evidence_ref=fields['measurement_evidence_ref'],
             identities={k:fields[v] for k,v in [('target','measured_edge_target'),('mount','measured_mount'),('image_digest','measured_image_digest'),('artifact_digest','measured_artifact_digest')]})
@@ -309,8 +386,11 @@ elif name=='docker':
     elif args==['inspect','--format','{{index .Config.Labels "com.docker.compose.project.working_dir"}}','commonswarm-edge-edge-runtime-1']: print(live)
     elif args==['inspect','--format','{{index .Config.Labels "com.docker.compose.project.config_files"}}','commonswarm-edge-edge-runtime-1']: print(','.join(compose_files(live)))
     elif args==['inspect','commonswarm-edge-edge-runtime-1']:
-        print(json.dumps([{'Image':cfg['image'],'State':{'Health':{'Status':'healthy'}},'Config':{'Labels':{'com.docker.compose.project.working_dir':live},'Env':['PATH=/usr/bin','SWARM_MCP_PUBLIC_ENABLED=1']},
+        print(json.dumps([{'Image':cfg['image'],'Id':'d'*64,'State':{'Running':True,'StartedAt':edge.get('started_at',cfg.get('started_at',(datetime.datetime.strptime(clock,'%Y-%m-%dT%H:%M:%SZ')-datetime.timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ'))),'Health':{'Status':cfg.get('edge_health','healthy')}},'Config':{'Labels':{'com.docker.compose.project.working_dir':live},'Env':['PATH=/usr/bin','SWARM_MCP_PUBLIC_ENABLED=1']},
             'HostConfig':{'NetworkMode':'commonswarm-net','Memory':2147483648},'Mounts':[{'Destination':dst,'Source':(rel_ if not cfg.get('mount_drift') else str(root/'edge/releases'/cfg['sha']))+'/'+src,'RW':False} for dst,src in [('/home/deno/main','deploy/edge-runtime/main'),('/home/deno/functions-source','supabase/functions'),('/var/src','src')]]}]))
+    elif args==['restart','--time','30','commonswarm-edge-edge-runtime-1']:
+        edge['started_at']=clock; save('docker.json',edge)
+        (root/'cgroup'/('docker-'+('d'*64)+'.scope')/'memory.current').write_text(str(cfg.get('after_memory',268435456)))
     elif args==['image','inspect',cfg['image']]: print(json.dumps([{'Config':{'Env':['PATH=/usr/bin']}}]))
     elif args[:2]==['run','--rm'] and '--entrypoint' in args and args[args.index('--entrypoint')+1]=='psql':
         # The recycle hook's database session: answer each read-only-mounted statement file it writes.
@@ -322,7 +402,9 @@ elif name=='docker':
             db.update(enabled=False,invalidated=True,generation=db['generation']+1); save('cutover.json',db); print('f\n'+str(db['generation']))
         elif sql.startswith('SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL'): print('t' if not db['enabled'] and db['invalidated'] else 'f')
         elif sql.startswith('BEGIN; DO $$'):
-            db.update(invalidated=False,measured_generation=db['generation'],measured=cfg['sha']); save('cutover.json',db)
+            expected=re.search(r"approved_edge_release_sha='([^']*)' AND release_generation=(\d+)",sql)
+            assert expected and db['approved']==expected.group(1) and db['generation']==int(expected.group(2)) and not db['enabled'] and db['invalidated'] and db.get('legacy_closed',True)
+            db.update(invalidated=False,measured_generation=db['generation'],measured=expected.group(1)); save('cutover.json',db)
         elif 'FOR UPDATE' in sql:
             db.update(enabled=False,invalidated=True,generation=db['generation']+1); save('cutover.json',db); print('f')
         else: refuse()
@@ -572,6 +654,8 @@ function fixture(config: Record<string, unknown> = {}, options: { mode?: string;
   };
   const dir = (path: string, dirMode = 0o700) => { mkdirSync(join(root, path), { recursive: true, mode: dirMode }); chmodSync(join(root, path), dirMode); };
   for (const d of ['bin', 'stage', 'proof', 'tmp', 'mac-tmp', 'edge/releases', 'admin-issuance/releases', 'etc/caddy/sites', 'box', 'inputs', 'var-lib-release']) dir(d);
+  put(`cgroup/docker-${'d'.repeat(64)}.scope/memory.current`, '536870912\n');
+  put(`cgroup/docker-${'d'.repeat(64)}.scope/memory.max`, '2147483648\n');
   dir('audit-box-ancestor', 0o755);
   dir('libexec', 0o711); dir('systemd', 0o755); dir('tmpfiles.d', 0o755);
   put('bin/_dispatch', dispatcher, 0o700);
@@ -582,6 +666,7 @@ function fixture(config: Record<string, unknown> = {}, options: { mode?: string;
   // Release R: helper tree (ai-open's RELEASE_ROOT), its upload and the reviewed migrations the W4 measurement hashes.
   const release = `admin-issuance/releases/${sha}`;
   const tracked: Record<string, string> = {
+    'deploy/supabase-stack/backup/notify-healthcheck.py': readFileSync(resolve('deploy/supabase-stack/backup/notify-healthcheck.py'), 'utf8'),
     'src/reviewed.txt': 'reviewed tracked bytes at R\n', 'scripts/live-ordinary-controls.mjs': producerSource,
     'deploy/edge-runtime/compose.yaml': 'services: {}\n', 'deploy/edge-runtime/compose.override.yaml': 'reviewed override\n',
     'deploy/supabase-stack/migrate/make-pg-service.mjs': '// helper\n',
@@ -589,6 +674,8 @@ function fixture(config: Record<string, unknown> = {}, options: { mode?: string;
   };
   for (const version of ['20261001000001', '20261001000002', '20261001000003', '20261001000004', '20261001000005', '20260928000003', '20261002000001',
     '20261003000001', '20261003000002', '20261003000003', '20261003000004', '20261003000005']) tracked[`supabase/migrations/${version}_fixture.sql`] = '-- reviewed migration fixture\n';
+  put('admin-release/w4-healthcheck.env', 'HC_BACKUP_URL=https://hc-ping.com/00000000-0000-0000-0000-000000000000\n');
+  put(`backup-installed/releases/${sha}/backup/notify-healthcheck.py`, tracked['deploy/supabase-stack/backup/notify-healthcheck.py']!, 0o444);
   for (const [path, bytes] of Object.entries(tracked)) put(`${release}/${path}`, bytes, 0o644);
   put(`${release}/RELEASE_SHA`, sha + '\n', 0o644);
   const upload = `tmp/admin-issuance-${sha}-${wid}.tar`;
@@ -734,7 +821,8 @@ function fixture(config: Record<string, unknown> = {}, options: { mode?: string;
   for (const name of blockFiles) if (has(name)) put(`blocks/${name}.sh`, remap(block(name)));
   // The window shell's ai_run evaluates the verified block in place; the stub records the call and may fail it.
   // W4B_FAULT=F3 is the staging driver's fault right after ai-recycle-install completes (outside the plan).
-  const shim = `ai_run() {
+  const shim = `ai_ro() { command ai_ro \"$@\"; }
+ai_run() {
  case "$1" in
   ${blockFiles.join('|')})
    command ai_run "$@" || return $?
@@ -767,7 +855,7 @@ function monitored(f: Fixture) {
     else if (st.isDirectory()) { out.set(rel, { type: 'dir', mode: st.mode & 0o7777 }); for (const name of readdirSync(path).sort()) walk(join(rel, name)); }
     else out.set(rel, { type: 'file', mode: st.mode & 0o7777, sha256: hash(readFileSync(path)) });
   };
-  for (const rel of ['admin-release', 'libexec', 'systemd', 'tmpfiles.d', 'etc/caddy', 'edge/current', 'edge/releases', 'edge/failed-attempts',
+  for (const rel of ['systemd-local', 'admin-release', 'libexec', 'systemd', 'tmpfiles.d', 'etc/caddy', 'edge/current', 'edge/releases', 'edge/failed-attempts',
     'admin-issuance/releases', 'var-lib-admin-release']) walk(rel);
   for (const name of readdirSync(join(f.root, 'tmp')).filter(n => /^admin-issuance-/.test(n)).sort()) walk(join('tmp', name));
   return out;
@@ -1077,9 +1165,8 @@ test('A1 / recycle-install-modes: fresh, accept-existing and upgrade-existing ar
   }
 });
 
-test('A1 / recycle-install-admission-refusals: each mismatch refuses in preflight before any write; positive control in the same fixture', () => {
-  const f = fixture();
-  const hook = join(f.root, 'libexec/commonswarm-admin-edge-recycle'), dropin = join(f.root, `systemd/${service}.d/50-admin-measurement.conf`);
+test('A1 / recycle-install-admission-refusals: each mismatch refuses before release writes; exclusive exclusion retained; restored control admits', () => {
+  let f: Fixture, hook: string, dropin: string;
   const cases: Array<[string, () => void, () => void, string]> = [
     ['hook byte', () => writeFileSync(hook, legacyHook + '#'), () => writeFileSync(hook, legacyHook), 'expected baseline-receipt-bytes-and-metadata got drift'],
     ['hook uid', () => f.fixtureConfig({ owners: { 'libexec/commonswarm-admin-edge-recycle': [1001, 0] } }), () => f.fixtureConfig({ owners: {} }), 'failed owner-uid-0'],
@@ -1087,7 +1174,7 @@ test('A1 / recycle-install-admission-refusals: each mismatch refuses in prefligh
     ['hook mode', () => chmodSync(hook, 0o755), () => chmodSync(hook, 0o700), 'expected baseline-receipt-bytes-and-metadata got drift'],
     ['hook symlink', () => { renameSync(hook, hook + '.real'); symlinkSync(hook + '.real', hook); }, () => { spawnSync('rm', ['--', hook]); renameSync(hook + '.real', hook); }, 'failed not-symlink'],
     ['drop-in missing', () => renameSync(dropin, join(f.root, 'moved-dropin')), () => renameSync(join(f.root, 'moved-dropin'), dropin), 'failed missing-required-path'],
-    ['extra drop-in file', () => f.put(`systemd/${service}.d/60-extra.conf`, '[Service]\n', 0o644), () => spawnSync('rm', ['--', join(f.root, `systemd/${service}.d/60-extra.conf`)]), 'expected baseline-receipt-directory-and-entries got drift-or-extra-entry'],
+    ['extra drop-in file', () => f.put(`systemd/${service}.d/60-extra.conf`, '[Service]\n', 0o644), () => spawnSync('rm', ['--', join(f.root, `systemd/${service}.d/60-extra.conf`)]), 'input-baseline-unit-bytes got drift'],
     ['wrong mode selected', () => f.writeInputs({ recycle_install_mode: 'accept-existing' }, r => { r.mode = 'accept-existing'; r.approval = null; }), () => f.writeInputs(), 'existing hook digest expected candidate got other'],
     ['receipt mode differs from INPUTS', () => f.writeInputs({}, r => { r.mode = 'accept-existing'; }), () => f.writeInputs(), 'baseline receipt mode expected input-recycle_install_mode got other'],
     ['missing approval', () => f.writeInputs({}, r => { r.approval = null; }), () => f.writeInputs(), 'hook upgrade approval expected HezLead-approval-object got missing-or-other'],
@@ -1096,17 +1183,21 @@ test('A1 / recycle-install-admission-refusals: each mismatch refuses in prefligh
     ['keeper file', () => chmodSync(join(f.root, 'tmpfiles.d/commonswarm-recycle-archive.conf'), 0o644), () => chmodSync(join(f.root, 'tmpfiles.d/commonswarm-recycle-archive.conf'), 0o600), 'expected U10-keeper-file got drift-or-absent'],
   ];
   for (const [name, change, restore, message] of cases) {
+    f = fixture(); hook = join(f.root, 'libexec/commonswarm-admin-edge-recycle'); dropin = join(f.root, `systemd/${service}.d/50-admin-measurement.conf`);
     change();
     const r = f.run(['ai-w4-preflight']);
     refused(r, message);
-    if (!message.startsWith('failed ')) assert.ok(r.stderr.includes('FAIL ai-w4-preflight: recycle installation, keeper and A1 baseline receipt expected admitted got refused; STOP'), name);
+    if (!message.startsWith('failed ') && !message.startsWith('input-baseline-unit-bytes')) assert.ok(r.stderr.includes('FAIL ai-w4-preflight: recycle installation, keeper and A1 baseline receipt expected admitted got refused; STOP'), name);
     assert.ok(!existsSync(join(f.root, 'proof/w4-state')), `${name}: no proof storage written`);
-    assert.ok(!existsSync(join(f.root, 'edge/releases', sha)), `${name}: no W4 write`);
+    assert.ok(!existsSync(join(f.root, 'edge/releases', sha)), `${name}: no release write`);
     restore();
     const auditReceipt = join(f.root, 'proof/w4-path-preflight.json');
     if (existsSync(auditReceipt)) renameSync(auditReceipt, join(f.root, `saved-path-preflight-${name.replaceAll(' ', '-')}.json`));
+    // A refused A1 can retain its exclusive exclusion; revalidate in that same held window.
+    // A refusal before take can use normal preflight. Every restored case reaches admission.
+    const held = existsSync(join(f.root, 'var-lib-admin-release/w4-exclusion.json'));
+    pass(f.run(held ? ['# restored A1 under the retained exclusion\nRECYCLE_INSTALL_ACTION=admit\nai_run ai-recycle-install\nW4_STATE_ACTION=snapshot\nai_run ai-w4-state'] : ['ai-w4-preflight']), `${name}: restored positive control`);
   }
-  pass(f.run(['ai-w4-preflight']), 'positive control');
   for (const name of ['recycle-baseline.json', 'hook.bytes', 'config.bytes', 'dropin.bytes', 'intent.bytes', 'roots-before.json']) assert.ok(existsSync(join(f.root, 'proof/w4-state', name)), name);
   assert.equal(readFileSync(join(f.root, 'proof/w4-state/hook.bytes'), 'utf8'), legacyHook, 'old hook bytes saved for rollback');
 });
@@ -1188,6 +1279,7 @@ test('A7 / w4-success-close: each wrong item refuses the success close', () => {
 // The reviewed hook, run as systemd runs it, against a bound archive of each shape.
 function hookFixture(shape: 'durable' | 'tmp', config: Record<string, unknown> = {}) {
   const f = fixture(config);
+  f.put('cutover.json', { ...f.json('cutover.json'), approved: sha });
   const live = join(f.root, 'edge/releases', sha);
   spawnSync('/usr/bin/python3', ['-c', 'import shutil,sys; shutil.copytree(sys.argv[1],sys.argv[2],symlinks=True)', join(f.root, f.release), live]);
   spawnSync('rm', ['--', join(f.root, 'edge/current')]); symlinkSync(live, join(f.root, 'edge/current'));
@@ -1382,11 +1474,21 @@ test('A8 / w4-preflight-r-tree-absent: an R edge tree present at preflight refus
 });
 
 
-// X2: ai-gates (Mac) opens the two lock-order receipts and checks them against INPUTS and the repository (rules 1-12).
+/** X2 receipts exercise the marked validator; existing fixtures also run the pinned old block. */
 const lockGates = ['admin-principal-lock-order-ci', 'admin-principal-lock-order-staging'] as const;
-const gatesContract = JSON.parse(readFileSync(join(dirname(planPath), 'GATES.json'), 'utf8')) as { gates: Record<string, string[]>; windows: Record<string, string[]> };
-const lockControls = gatesContract.gates['admin-principal-lock-order-ci']!;
-function x2(options: { treesDiffer: boolean }) {
+const gatesContract = JSON.parse(readFileSync(join(dirname(planPath), 'GATES.json'), 'utf8')) as { gates: Record<string, string[]>; windows: Record<string, string[]>; x2_race_classes: Record<string, string> };
+const x2Base = 'e82771087634c1feced87b0a3b9d51b555aaecda';
+const oldFile = (file: string) => {
+  const r = spawnSync('git', ['show', `${x2Base}:${file}`], { encoding: 'utf8', maxBuffer: 64 << 20 });
+  assert.equal(r.status, 0, r.stderr); return r.stdout;
+};
+const oldGatesBlock = blocksOf(oldFile(relative(process.cwd(), planPath))).find(b => b.startsWith('# step: ai-gates\n'))!;
+const oldContract = JSON.parse(oldFile(relative(process.cwd(), join(dirname(planPath), 'GATES.json'))));
+const lockControls: string[] = oldContract.gates[lockGates[0]];
+const legacyClasses = Object.fromEntries(lockControls.map((name, i) => [name, i ? 'base-cycle' : 'positive-control']));
+const mixedClasses = gatesContract.x2_race_classes;
+function x2(options: { treesDiffer: boolean; mixed?: boolean }) {
+  let legacyVerdicts = 0;
   const root = realpathSync(mkdtempSync(join(scratch, 'x2-'))), bin = join(root, 'bin'), evidence = join(root, 'evidence');
   mkdirSync(bin); mkdirSync(evidence);
   const T = 'e'.repeat(40), R = sha, TEST = 'tests/p1-server/admin-principal-lock-order.test.ts', testBytes = 'lock-order test bytes\n';
@@ -1405,7 +1507,8 @@ elif len(a)==2 and a[0]=='rev-parse' and a[1].endswith(':supabase/migrations') a
 elif a[:2]==['ls-tree','--name-only'] and len(a)==5 and a[3:]==['--','supabase/migrations/'] and a[2] in cfg['ls']: sys.stdout.write(cfg['ls'][a[2]])
 else: sys.stderr.write('UNMODELLED git '+repr(a)+'\n'); raise SystemExit(99)
 `, { mode: 0o700 });
-  const results = (run: 'base' | 'lane') => Object.fromEntries(lockControls.map((c, i) => [c, run === 'lane' || i === 0 ? 'PASS' : 'FAIL-40P01']));
+  const classes = options.mixed ? mixedClasses : legacyClasses, controls = Object.keys(classes);
+  const results = (run: 'base' | 'lane') => Object.fromEntries(controls.map(c => [c, run === 'base' && classes[c] === 'base-cycle' ? 'FAIL-40P01' : 'PASS']));
   const ci: any = { kind: 'ci', release_sha: R, base_variant_sha: T, test_file_sha256: hash(testBytes), runs: {
     base: { run_url: 'https://github.com/yulanventures/commonswarm/actions/runs/101', run_id: 101, sha: T, migration_sha: git.trees[T], results: results('base') },
     lane: { run_url: 'https://github.com/yulanventures/commonswarm/actions/runs/102', run_id: 102, sha: R, migration_sha: git.trees[R], results: results('lane') } } };
@@ -1418,11 +1521,13 @@ else: sys.stderr.write('UNMODELLED git '+repr(a)+'\n'); raise SystemExit(99)
     compose_network: `${project}-net`, compose_volume: `${project}-pgdata`, postgres_image_digest: postgresImage,
     runs: { base: stagingRun('base', T, '/srv/c1-staging/x2/base.dump', 'a'), lane: stagingRun('lane', R, '/srv/c1-staging/x2/lane.dump', 'b') } };
   const inputs: any = { release_sha: R, window: 'W6', lock_order_base_variant_sha: T };
-  const run = (change: (c: { ci: any; st: any; git: any; inputs: any; receipt: any }) => void = () => {}) => {
-    const c = { ci: structuredClone(ci), st: structuredClone(st), git: structuredClone(git), inputs: structuredClone(inputs), receipt: null as any };
+  const run = (change: (c: any) => void = () => {}, source = block('ai-gates')) => {
+    const contract = structuredClone(options.mixed ? gatesContract : oldContract);
+    if (!options.mixed) contract.x2_race_classes = { ...classes };
+    const c = { ci: structuredClone(ci), st: structuredClone(st), git: structuredClone(git), inputs: structuredClone(inputs), receipt: null as any, contract, duplicate: '', duplicateMap: false };
     const files: Record<string, string> = {};
-    for (const name of gatesContract.windows.W6!) files[name] = name === lockGates[0] ? '' : name === lockGates[1] ? '' : JSON.stringify({ gate: name }) + '\n';
-    c.receipt = { release_sha: R, evidence_root: evidence, gates: Object.fromEntries(gatesContract.windows.W6!.map(name => [name, { status: 'PASS', controls: gatesContract.gates[name], file: `${name}.json`, sha256: '' }])) };
+    for (const name of contract.windows.W6) files[name] = JSON.stringify({ gate: name }) + '\n';
+    c.receipt = { release_sha: R, evidence_root: evidence, gates: Object.fromEntries(contract.windows.W6.map((name: string) => [name, { status: 'PASS', controls: contract.gates[name], file: `${name}.json`, sha256: '' }])) };
     change(c);
     files[lockGates[0]] = JSON.stringify(c.ci) + '\n'; files[lockGates[1]] = JSON.stringify(c.st) + '\n';
     for (const [name, gate] of Object.entries(c.receipt.gates) as Array<[string, any]>) {
@@ -1430,21 +1535,26 @@ else: sys.stderr.write('UNMODELLED git '+repr(a)+'\n'); raise SystemExit(99)
       const body = files[name] ?? '{}\n'; writeFileSync(join(evidence, gate.file), body); gate.sha256 = hash(body);
     }
     writeFileSync(join(root, 'git.json'), JSON.stringify(c.git)); writeFileSync(join(root, 'inputs.json'), JSON.stringify(c.inputs)); writeFileSync(join(root, 'receipt.json'), JSON.stringify(c.receipt));
-    const r = spawnSync('/bin/bash', [], { input: 'set -euo pipefail\n' + block('ai-gates'), encoding: 'utf8', timeout: 30_000, cwd: root,
-      env: { PATH: `${bin}:/usr/bin:/bin`, X2_ROOT: root, INPUTS_FILE: join(root, 'inputs.json'), GATE_RECEIPT_FILE: join(root, 'receipt.json'), PLAN_FILE: planPath } });
+    const contractText = JSON.stringify(c.contract).replace('"x2_race_classes":{', '"x2_race_classes":{' + c.duplicate);
+    writeFileSync(join(root, 'GATES.json'), c.duplicateMap ? contractText.slice(0, -1) + ',"x2_race_classes":' + JSON.stringify(classes) + '}' : contractText);
+    const execute = (source: string) => spawnSync('/bin/bash', [], { input: 'set -euo pipefail\n' + source, encoding: 'utf8', timeout: 30_000, cwd: root,
+      env: { PATH: `${bin}:/usr/bin:/bin`, X2_ROOT: root, INPUTS_FILE: join(root, 'inputs.json'), GATE_RECEIPT_FILE: join(root, 'receipt.json'), PLAN_FILE: join(root, 'RELEASE.md') } });
+    const r = execute(source);
     assert.ifError(r.error); assert.doesNotMatch(r.stderr, /UNMODELLED|Traceback/);
+    if (!options.mixed) {
+      const old = execute(oldGatesBlock); assert.ifError(old.error);
+      assert.deepEqual([r.status, r.stdout, r.stderr], [old.status, old.stdout, old.stderr], 'every legacy X2 fixture keeps its old verdict'); legacyVerdicts++;
+    }
     return r;
   };
   const gitCalls = () => readFileSync(join(root, 'git-calls.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l)[0]);
-  return { run, T, R, onlyR, versionsT, gitCalls };
+  return { run, T, R, onlyR, versionsT, gitCalls, compared: () => legacyVerdicts };
 }
 
-test('X2 / lock-order-gates-contract: GATES.json lists both gates with the ten controls in W6 and every later window that can open issuance', () => {
-  assert.deepEqual(lockControls, ['positive-control-raw-sql-base-order-deadlocks', 'admin-oauth-vs-hosted-claim-seat', 'admin-oauth-vs-local-join-registration',
-    'admin-oauth-vs-local-command-creation', 'accept-invitation-vs-hosted-claim-seat', 'accept-invitation-vs-local-join-registration',
-    'remove-member-vs-hosted-claim-seat', 'remove-member-vs-local-join-registration', 'household-invitation-vs-hosted-claim-seat',
-    'household-invitation-vs-local-join-registration']);
-  assert.deepEqual(gatesContract.gates['admin-principal-lock-order-staging'], lockControls);
+test('X2 / lock-order-gates-contract: both 15-name arrays match the class map and belong to W6 and W7', () => {
+  assert.equal(Object.keys(mixedClasses).length, 15);
+  assert.deepEqual(gatesContract.gates[lockGates[0]], Object.keys(mixedClasses));
+  assert.deepEqual(gatesContract.gates[lockGates[1]], gatesContract.gates[lockGates[0]]);
   const withGates = Object.entries(gatesContract.windows).filter(([, names]) => lockGates.every(g => names.includes(g))).map(([w]) => w);
   assert.deepEqual(withGates, ['W6', 'W7']);
   assert.ok(!Object.values(gatesContract.windows).some(names => lockGates.some(g => names.includes(g)) && !lockGates.every(g => names.includes(g))));
@@ -1463,10 +1573,15 @@ test('X2 / lock-order-receipts-admit: both receipts admit with equal and with di
       const r = f.run(c => { for (const run of ['base', 'lane']) { c.st.runs[run].restore.restore_started_at = restore; c.st.runs[run].restore.restored_at = '2026-10-10T11:05:00Z'; } });
       assert.equal(r.status, 0, `interval to ${restore}: ${r.stderr}`);
     }
+    assert.equal(f.compared(), 3, 'one admission and both interval bounds ran both validators');
   }
 });
 
-test('X2 / lock-order-receipts-refuse: each rule refuses its drifted receipt, input or repository fact', () => {
+test('X2 / every existing control receipt fixture keeps the old verdict: enumerate all refusals and admissions', () => {
+  // Oracle corpus: 65 compared (6 W1, 6 X2 admissions, 48 X2 refusals, 5 bind receipts).
+  // One excluded: admin-release-plan-sandbox.test.ts's ai-gates receipt runs in W3,
+  // whose required gates contain neither X2 gate, so the amended branch cannot run.
+  assert.deepEqual(gatesContract.windows.W3!.filter(name => lockGates.some(gate => gate === name)), [], 'W3 sandbox receipt is outside the X2 oracle');
   const f = x2({ treesDiffer: true }), T = f.T;
   const cases: Array<[string, (c: any) => void, string]> = [
     ['missing CI gate', c => { delete c.receipt.gates['admin-principal-lock-order-ci']; }, 'admin-principal-lock-order-ci PASS'],
@@ -1524,15 +1639,44 @@ test('X2 / lock-order-receipts-refuse: each rule refuses its drifted receipt, in
     assert.ok(r.stderr.includes(message), `${name}: expected ${message}; observed ${r.stderr}`);
     assert.doesNotMatch(r.stdout, /PASS ai-gates/, name);
   }
+  assert.equal(cases.length, 48, 'enumerated pre-amendment refusal fixtures');
+  assert.equal(f.compared(), cases.length, 'every refusal fixture ran both validators');
   assert.ok(T !== f.R);
 });
 
-// FU #12: the rollback removes a drop-in or config directory that this window created; one that existed is kept.
-test('#12 / w4-rollback-created-directories: a W4-created drop-in or config directory ends absent; a pre-existing one ends present', () => {
+test('X2 / real GATES.json mixed receipts admit in W6 and W7; wrong scalar results and class maps refuse', () => {
+  const f = x2({ treesDiffer: true, mixed: true }), controls = Object.keys(mixedClasses);
+  assert.equal(controls.length, 15); assert.deepEqual(Object.values(mixedClasses).sort(), [...Array(12).fill('base-cycle'), 'positive-control', 'regression-guard', 'regression-guard']);
+  for (const window of ['W6', 'W7']) {
+    const good = f.run(c => { c.inputs.window = window; }); assert.equal(good.status, 0, `${window}: ${good.stderr}`);
+    assert.match(good.stdout, /PASS ai-gates/);
+  }
+  const old = f.run(() => {}, oldGatesBlock); assert.match(old.stderr, /lock-order rule 8: CI base results/, 'the mixed set fails before the amendment');
+  const reject = (change: (c: any) => void, reason: string) => {
+    const r = f.run(change); assert.notEqual(r.status, 0); assert.ok(r.stderr.includes(reason), r.stderr);
+    assert.doesNotMatch(r.stdout, /PASS ai-gates/);
+  };
+  for (const receipt of ['ci', 'st']) for (const run of ['base', 'lane']) for (const name of controls) {
+    reject(c => { c[receipt].runs[run].results[name] = run === 'base' && mixedClasses[name] === 'base-cycle' ? 'PASS' : 'FAIL-40P01'; }, `lock-order rule 8: ${receipt === 'ci' ? 'CI' : 'staging'} ${run} results`);
+  }
+  for (const change of [
+    (c: any) => { delete c.contract.x2_race_classes; }, (c: any) => { c.contract.x2_race_classes = null; },
+    (c: any) => { delete c.contract.x2_race_classes[controls[0]!]; }, (c: any) => { c.contract.x2_race_classes.extra = 'base-cycle'; },
+    (c: any) => { c.contract.x2_race_classes[controls[0]!] = 'unknown'; },
+    (c: any) => { c.duplicate = JSON.stringify(controls[0]) + ':"positive-control",'; }, (c: any) => { c.duplicateMap = true; },
+    (c: any) => { c.contract.x2_race_classes = Object.entries(mixedClasses); },
+    (c: any) => { delete c.contract.x2_race_classes[controls[0]!]; c.contract.x2_race_classes.other = 'positive-control'; },
+    (c: any) => { c.contract.gates[lockGates[0]].push(controls[0]); },
+    (c: any) => { c.contract.gates[lockGates[1]].pop(); },
+  ]) reject(change, 'lock-order rule 8: x2_race_classes');
+  assert.equal(f.run().status, 0, 'unchanged positive control after every refusal');
+});
+
+// FU #12: remove a W4-created drop-in directory; preserve existing directories, including the required alert config.
+test('#12 / w4-rollback-created-directories: a W4-created drop-in directory ends absent; pre-existing directories stay present', () => {
   for (const [label, prepare, expectDropin, expectConfig] of [
     ['W4 created the drop-in directory', (_f: Fixture) => {}, false, true],
     ['the drop-in directory pre-existed (empty)', (f: Fixture) => { mkdirSync(join(f.root, `systemd/${service}.d`), { mode: 0o700 }); chmodSync(join(f.root, `systemd/${service}.d`), 0o700); }, true, true],
-    ['W4 created the config directory too', (f: Fixture) => { spawnSync('rmdir', ['--', join(f.root, 'admin-release')]); }, false, false],
   ] as const) {
     const f = fixture({}, { mode: 'fresh' });
     prepare(f); f.writeInputs();
@@ -2463,4 +2607,463 @@ print(json.dumps({'created_owner':owner_writes[0]}))
       assert.deepEqual(f.snapshot(), before, 'O_EXCL refuses any pre-created entry regardless of uid without adopting or writing it');
     }
   }
+});
+
+// Ruling 45(1,4,5): one boundary owner for service admission, persistence and terminal release.
+const w4xBase = spawnSync('git', ['show', '43c09b2a:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8', maxBuffer: 64 << 20 });
+assert.equal(w4xBase.status, 0, w4xBase.stderr);
+const w4xBlock = (id: string) => blocksOf(w4xBase.stdout).find(b => b.startsWith(`# step: ${id}\n`))!;
+const exclusionPath = 'var-lib-admin-release/w4-exclusion.json';
+const startRecycle = (f: Fixture, source: 'timer' | 'manual') => {
+  // A timer trigger and a manual request both queue this same service activation in systemd.
+  if (source === 'timer') assert.equal(f.json('units.json')[timer].active, 'active');
+  pass(f.run([`# ${source} activation\nsystemctl start ${service}`]), `${source} service start request`);
+};
+const closeW4 = (f: Fixture, result: string) => f.run(['ai-close'], { CLOSE_RESULT: result,
+  LIVE_CONTROLS_FILE: join(f.root, `proof/ordinary-${result === 'success' ? 'after' : 'recovery'}.json`) });
+
+test('W4X3 / baseline approval reconciles in rollback; old rollback reproduces G6 in the real after hook', () => {
+  for (const old of [true, false]) {
+    const f = fixture({ mode: 'accept-existing' }); prepared(f);
+    pass(f.run(['ai-w4-keeper-retire', 'ai-w4-apply']), 'forward measurement');
+    assert.equal(cutover(f).approved, sha);
+    pass(f.run([old ? f.remap(w4xBlock('ai-w4-rollback')) : 'ai-w4-rollback']), 'restore baseline');
+    assert.equal(cutover(f).approved, old ? sha : baseline);
+    if (!old) {
+      const receipt = f.json('proof/w4-baseline-approval.json');
+      assert.deepEqual(receipt, { release_sha: sha, window: 'W4', window_id: wid, baseline_binding_sha: baseline,
+        before: sha, after: baseline, release_generation: cutover(f).generation });
+      assert.equal(statSync(join(f.root, 'proof/w4-baseline-approval.json')).mode & 0o777, 0o600);
+      pass(closeW4(f, 'recovered'), 'reconciled recovered close releases');
+    }
+    // Execute the restored candidate hooks, including their SQL gate, rather than systemd's effect model.
+    f.put('libexec/commonswarm-admin-edge-recycle', f.remap(candidateHook), 0o700);
+    const hook = '# baseline service hook\nexport COMMONSWARM_RECYCLE_UNIT=' + service + '\n/bin/bash ' + join(f.root, 'libexec/commonswarm-admin-edge-recycle');
+    pass(f.run([hook + ' before']), 'first normal before hook');
+    const after = f.run([hook + ' after']);
+    if (old) {
+      refused(after, 'FAIL recycle hook; issuance CLOSED (confirmed by readback)');
+      assert.ok(readFileSync(join(f.root, 'hook-sql.jsonl'), 'utf8').includes("approved_edge_release_sha='" + baseline + "'"));
+      const marker = JSON.parse(JSON.parse(readFileSync(join(f.root, 'logger.jsonl'), 'utf8').trim().split('\n').at(-1)!).at(-1));
+      assert.equal(marker.reason, 'database-measurement-refused');
+      assert.equal(cutover(f).invalidated, true);
+    } else {
+      pass(after, 'first normal after hook accepts baseline approval');
+      assert.equal(cutover(f).invalidated, false); assert.equal(cutover(f).measured, baseline);
+    }
+  }
+});
+
+test('W4X3 / unreconciled approval, missing receipt and mismatched binding refuse close and release with exclusion retained', () => {
+  for (const fault of ['approval', 'receipt', 'binding', 'window'] as const) {
+    const f = fixture({ mode: 'accept-existing' }); prepared(f);
+    pass(f.run(['ai-w4-keeper-retire', 'ai-w4-apply', 'ai-w4-rollback']), 'rollback positive control');
+    const receipt = readFileSync(join(f.root, 'proof/w4-baseline-approval.json'));
+    const bindingBytes = readFileSync(join(f.root, 'admin-release/recycle.json')), db = cutover(f);
+    if (fault === 'approval') f.put('cutover.json', { ...db, approved: sha });
+    if (fault === 'receipt') {
+      const erased = spawnSync('rm', ['--', join(f.root, 'proof/w4-baseline-approval.json')], { encoding: 'utf8' });
+      assert.equal(erased.status, 0, erased.stderr);
+    }
+    if (fault === 'window') f.put('proof/w4-baseline-approval.json', { ...JSON.parse(receipt.toString()), window_id: 'Other1' });
+    // A config drift is also refused by the unchanged recovered restoration check; release checks it independently.
+    if (fault !== 'binding') {
+      refused(closeW4(f, 'recovered'), 'baseline approval');
+      assert.ok(!proofHas(f, 'closed.txt') && !proofHas(f, 'close-result.json'), 'failed pre-close keeps window open');
+    }
+    if (fault === 'binding') f.put('admin-release/recycle.json', { ...f.binding, release_sha: sha });
+    f.put('proof/close-result.json', { release_sha: sha, window: 'W4', window_id: wid, result: 'recovered', closed_at: '2026-10-10T12:00:00Z' });
+    f.put('proof/closed.txt', '2026-10-10T12:00:00Z\n');
+    refused(f.run(['ai-w4-state'], { W4_STATE_ACTION: 'release' }), 'baseline approval');
+    assert.ok(existsSync(join(f.root, exclusionPath)) && !proofHas(f, 'w4-exclusion-released.json'));
+    f.put('cutover.json', db); f.put('proof/w4-baseline-approval.json', receipt); f.put('admin-release/recycle.json', bindingBytes);
+    pass(f.run(['ai-w4-state'], { W4_STATE_ACTION: 'release' }), 'reconciled release positive control');
+  }
+  for (const fault of ['failed-write', 'ignored-write'] as const) {
+    const f = fixture({ mode: 'accept-existing' }); prepared(f); pass(f.run(['ai-w4-keeper-retire', 'ai-w4-apply']), 'apply');
+    const fail = ['ai_db', '-q', '--file', join(f.root, 'proof/w4-rollback-measure.sql')];
+    f.fixtureConfig(fault === 'failed-write' ? { fail_calls: [fail] } : { ignore_approval_write: true });
+    refused(f.run(['ai-w4-rollback']), fault === 'failed-write' ? 'expected committed got failure' : 'reconciliation refused');
+    assert.ok(existsSync(join(f.root, exclusionPath)) && !proofHas(f, 'closed.txt') && !proofHas(f, 'w4-baseline-approval.json'));
+    f.fixtureConfig({ fail_calls: [], ignore_approval_write: false });
+    pass(f.run(['ai-w4-rollback']), 'retry write'); pass(closeW4(f, 'recovered'), 'retry close');
+  }
+});
+
+test('W4X3 / success close has no approval reconciliation read, write or receipt', () => {
+  const f = fixture({ mode: 'accept-existing' }); prepared(f); pass(f.run(['ai-w4-keeper-retire', 'ai-w4-apply']), 'apply');
+  pass(f.run(['ai-w4-readback']), 'success readback');
+  const calls = f.run(['# reset command observations\n: >"$W4B_ROOT/commands.jsonl"']); pass(calls, 'reset');
+  const closed = closeW4(f, 'success'); pass(closed, 'unchanged success close');
+  assert.equal(cutover(f).approved, sha); assert.ok(!proofHas(f, 'w4-baseline-approval.json'));
+  assert.ok(!closed.calls.some(c => c[0] === 'ai_db' || (c[0] === 'ai_ro' && String(c.at(-1)).includes('SELECT approved_edge_release_sha'))));
+  assert.equal(f.json('proof/w4-exclusion-released.json').result, 'success');
+});
+
+test('W4X1 / timer and manual starts cannot change intent with either live hook; terminal success alone releases', () => {
+  const f = fixture(); prepared(f);
+  const retained = readFileSync(join(f.root, exclusionPath));
+  assert.deepEqual(JSON.parse(retained.toString()).window, 'W4');
+  assert.equal(lstatSync(join(f.root, exclusionPath)).mode & 0o777, 0o600);
+  for (const phase of ['baseline', 'candidate']) {
+    if (phase === 'candidate') pass(f.run(['ai-w4-keeper-retire', 'ai-w4-apply']), 'candidate apply');
+    const intent = readFileSync(join(f.root, 'admin-release/recycle-intent.json')), db = f.json('cutover.json');
+    for (const source of ['timer', 'manual'] as const) {
+      startRecycle(f, source);
+      assert.deepEqual(readFileSync(join(f.root, 'admin-release/recycle-intent.json')), intent);
+      assert.deepEqual(f.json('cutover.json'), db);
+      assert.equal(f.json('units.json')[service].active, 'inactive');
+    }
+    assert.deepEqual(readFileSync(join(f.root, exclusionPath)), retained, 'apply EXIT re-arm retains record bytes');
+  }
+  refused(f.run(['ai-w4-state'], { W4_STATE_ACTION: 'release' }), 'terminal close-result.json');
+  assert.ok(existsSync(join(f.root, exclusionPath)));
+  pass(f.run(['ai-w4-readback']), 'readback before success close');
+  pass(closeW4(f, 'success'), 'terminal success close');
+  assert.ok(!existsSync(join(f.root, exclusionPath)));
+  assert.equal(f.json('proof/w4-exclusion-released.json').result, 'success');
+  const before = f.json('cutover.json').generation;
+  startRecycle(f, 'manual'); assert.equal(f.json('cutover.json').generation, before + 1, 'released service positive control');
+});
+
+test('W4X1 / 21:30 slot, failed 21:32 readback probe, reboot and reconnect still permit exact rollback and recovered close; base fails', () => {
+  for (const old of [false, true]) {
+    const f = fixture({ clock: '2026-10-11T21:05:00Z' });
+    f.writeInputs({ window_end_utc: '2026-10-11T21:35:00Z' });
+    pass(f.run([old ? f.remap(w4xBlock('ai-w4-preflight')) : 'ai-w4-preflight', 'ai-w4-caddy-candidate']), '21:05 inputs/preflight');
+    f.fixtureConfig({ clock: '2026-10-11T21:10:00Z' }); pass(f.run(['ai-w4-keeper-retire']), 'retire 1200s before slot');
+    f.fixtureConfig({ clock: '2026-10-11T21:20:00Z' }); pass(f.run(['ai-w4-apply']), 'apply re-arms');
+    f.fixtureConfig({ clock: '2026-10-11T21:30:00Z' }); startRecycle(f, 'timer');
+    f.fixtureConfig({ clock: '2026-10-11T21:32:00Z', fail_calls: [['ai_ro', '-Atq', '--command', 'SELECT count(*) FROM commonswarm_ops.migration_checksum_failures();']] });
+    const prior = f.run(['# prior query count']).calls.length, failed = f.run(['ai-w4-readback']);
+    assert.notEqual(failed.status, 0, 'readback probe fails through its actual query');
+    assert.ok(failed.calls.slice(prior).some(c => c[0] === 'ai_ro' && c.at(-1) === 'SELECT count(*) FROM commonswarm_ops.migration_checksum_failures();'), 'failed probe reaches the injected query');
+    f.fixtureConfig({ fail_calls: [] });
+    if (old) { refused(f.run(['ai-w4-rollback']), 'recycle-intent.json expected unchanged-by-this-window got unrelated-drift'); continue; }
+    const held = readFileSync(join(f.root, exclusionPath));
+    // Lose manager memory as on reboot; reload persistent unit files in a fresh process/shell.
+    f.put('loaded-unit.json', {}); pass(f.run(['# reboot reload\nsystemctl daemon-reload', 'ai-w4-timer-recovery']), 'reboot and reconnect recovery');
+    startRecycle(f, 'manual'); assert.deepEqual(readFileSync(join(f.root, exclusionPath)), held);
+    const proof = join(f.root, 'admin-issuance/release-proofs', `${sha}-W4-${wid}`), stage = join(f.root, 'tmp/anvil-secret.Rec123');
+    cpSync(join(f.root, 'proof'), proof, { recursive: true }); chmodSync(proof, 0o700);
+    writeFileSync(join(proof, 'inputs.json'), readFileSync(join(f.root, 'var-lib-admin-release/w4/Fix123/inputs.json')), { mode: 0o600 });
+    cpSync(join(f.root, 'stage'), stage, { recursive: true }); chmodSync(stage, 0o700);
+    writeFileSync(join(proof, 'secret-stage.path'), stage + '\n', { mode: 0o600 });
+    pass(f.run(['ai-recovery-env']), 'lost-shell reconstruction');
+    assert.deepEqual(readFileSync(join(f.root, exclusionPath)), held, 'reconstruction retains the record');
+    pass(f.run(['ai-w4-rollback']), 'rollback after timer boundary');
+    startRecycle(f, 'timer');
+    assert.deepEqual(readFileSync(join(f.root, exclusionPath)), held, 'rollback EXIT also retains exclusion');
+    pass(closeW4(f, 'recovered'), 'post-reboot recovered close');
+    assert.ok(!existsSync(join(f.root, exclusionPath)));
+    assert.equal(f.json('proof/w4-exclusion-released.json').result, 'recovered');
+  }
+});
+
+test('W4X1 / ordinary recycle hook bytes and run outside W4 equal the pinned base; protected refusal and recovery checks unchanged', () => {
+  // Complete non-W4 close bodies, including failing stage validators, execute against the base in admin-release-plan.test.ts.
+  assert.equal(block('ai-recycle-hook'), w4xBlock('ai-recycle-hook'));
+  for (const id of ['ai-timer-guard', 'ai-w4-timer-recovery', 'ai-recovery-env', 'ai-w4-apply', 'ai-recycle-rollback'])
+    assert.equal(block(id).replace(/# W4-only recovery hold check;[\s\S]*?\nfi\n/, '').replace(/if test \"\$\{WINDOW:-\}\" = W4 && test -e[^\n]+; then\n python3[^\n]+\nfi\n/, ''), w4xBlock(id), `${id}: non-W4 base step bytes unchanged`);
+  const protectedChecks = w4xBase.stdout.split('\n').slice(5881, 5893).join('\n');
+  assert.ok(plan.includes(protectedChecks), 'base C:5882-5893 remain byte-identical');
+  const h = hookFixture('durable'), initial = h.f.json('cutover.json');
+  const results = [w4xBlock('ai-recycle-hook'), block('ai-recycle-hook')].map(source => {
+    h.f.put('cutover.json', initial); h.f.put('hook-sql.jsonl', ''); h.f.put('libexec/hook-under-test', h.f.remap('#!/bin/bash\n' + source), 0o700);
+    pass(h.run('before'), 'ordinary before hook positive control'); pass(h.run('after'), 'ordinary after hook positive control');
+    return JSON.stringify({ state: h.f.json('cutover.json'), markers: h.markers(),
+      intent: readFileSync(join(h.f.root, 'admin-release/recycle-intent.json'), 'utf8'),
+      sql: readFileSync(join(h.f.root, 'hook-sql.jsonl'), 'utf8') }).replaceAll(h.f.root, '<box>');
+  });
+  assert.deepEqual(results[0], results[1], 'same production hook results without a W4 exclusion');
+});
+
+
+test('W4X1 / an in-flight before hook refuses admission, recovered close and direct release; a stopped clean job can close', () => {
+  for (const drift of [false, true]) {
+    const f = fixture(), units = f.json('units.json');
+    f.put('units.json', { ...units, [service]: { ...units[service], active: 'activating' } });
+    f.fixtureConfig({ inflight_before: drift });
+    f.put('libexec/inflight-hook', f.remap(legacyHook), 0o700);
+    const beforeIntent = readFileSync(join(f.root, 'admin-release/recycle-intent.json')), beforeGeneration = f.json('cutover.json').generation;
+    const take = f.run(['ai-w4-state'], { W4_STATE_ACTION: 'take' });
+    if (drift) {
+      refused(take, 'unchanged-admission-intent-and-generation');
+      assert.notDeepEqual(readFileSync(join(f.root, 'admin-release/recycle-intent.json')), beforeIntent, 'real before hook rewrites intent');
+      assert.ok(f.json('cutover.json').generation > beforeGeneration, 'real before hook raises generation');
+      assert.ok(!existsSync(join(f.root, 'proof/w4-exclusion-taken.json')));
+      assert.ok(!existsSync(join(f.root, 'proof/w4-state/roots-before.json')));
+      refused(closeW4(f, 'recovered'), 'unchanged-admission-intent-and-generation');
+      assert.ok(!existsSync(join(f.root, 'proof/close-result.json')));
+      const closedAt = '2026-10-11T21:32:00Z';
+      f.put('proof/close-result.json', { release_sha: sha, window: 'W4', window_id: wid, result: 'recovered', closed_at: closedAt });
+      f.put('proof/closed.txt', closedAt + '\n');
+      refused(f.run(['ai-w4-state'], { W4_STATE_ACTION: 'release' }), 'unchanged-admission-intent-and-generation');
+      assert.ok(existsSync(join(f.root, exclusionPath)), 'drift never releases exclusion');
+    } else {
+      pass(take, 'stop a job with unchanged intent and generation');
+      assert.equal(f.json('units.json')[service].active, 'inactive');
+      startRecycle(f, 'manual');
+      assert.deepEqual(readFileSync(join(f.root, 'admin-release/recycle-intent.json')), beforeIntent);
+      assert.equal(f.json('cutover.json').generation, beforeGeneration);
+      const reloads = () => readFileSync(join(f.root, 'exclusion-reloads.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      assert.deepEqual(reloads().find(r=>r.dropin), { record: true, dropin: true }, 'take publishes its gate only after a durable record exists');
+      const stage=join(f.root,'tmp/anvil-secret.Rty123');
+      mkdirSync(stage,{mode:0o700}); writeFileSync(join(stage,'query.headers'),'nonsecret fixture credential bytes');
+      f.put('proof/secret-stage.path',stage+'\n');
+      f.fixtureConfig({ fail_calls: [['systemctl', 'daemon-reload']] });
+      const failedClose=closeW4(f, 'recovered'); refused(failedClose, 'release daemon-reload');
+      assert.ok(existsSync(stage),'release failure retains query credentials for retry');
+      assert.ok(existsSync(join(f.root,'proof/closed.txt')),'terminal record prevents another close');
+      assert.ok(!existsSync(join(f.root,'proof/w4-exclusion-released.json')));
+
+      assert.ok(existsSync(join(f.root, exclusionPath)), 'failed release reload keeps the record');
+      assert.ok(f.json('loaded-unit.json')[service].includes('00-w4-exclusion.conf'), 'old gate stays loaded until reload');
+      startRecycle(f, 'manual'); assert.equal(f.json('cutover.json').generation, beforeGeneration);
+      f.fixtureConfig({ fail_calls: [['systemctl', 'show', '--value', '-p', 'DropInPaths', service]] });
+      refused(f.run(['ai-w4-state'], { W4_STATE_ACTION: 'release', SECRET_STAGE: stage }), 'loaded exclusion');
+      assert.ok(existsSync(join(f.root, exclusionPath)), 'unreadable loaded drop-ins never authorize record removal');
+      f.fixtureConfig({ fail_calls: [] });
+      renameSync(stage,stage+'bad'); f.put('proof/secret-stage.path',stage+'bad\n');
+      refused(f.run(['ai-w4-state'], { W4_STATE_ACTION: 'release', SECRET_STAGE: stage+'bad' }), 'exact-box-stage-path');
+      assert.ok(existsSync(stage+'bad'),'released receipt never permits an invalid cleanup path');
+      assert.deepEqual(reloads().at(-1), { record: true, dropin: false }, 'release reloads the gate away while its record exists');
+      renameSync(stage+'bad',stage); f.put('proof/secret-stage.path',stage+'\n'); chmodSync(stage,0o750);
+      refused(f.run(['ai-w4-state'], { W4_STATE_ACTION: 'release', SECRET_STAGE: stage }), 'canonical-0700-directory');
+      assert.ok(existsSync(stage),'bad-mode retry keeps the directory');
+      assert.equal(f.json('proof/w4-exclusion-released.json').result,'recovered','receipt precedes cleanup');
+      chmodSync(stage,0o700);
+      pass(f.run(['ai-w4-state'], { W4_STATE_ACTION: 'release', SECRET_STAGE: stage }), 'resume terminal release after interrupted reload');
+      assert.ok(!f.json('loaded-unit.json')[service].includes('00-w4-exclusion.conf'));
+      assert.ok(!existsSync(join(f.root, exclusionPath)));
+      assert.equal(f.json('proof/w4-exclusion-released.json').result,'recovered');
+      assert.ok(!existsSync(stage),'successful release retry removes the retained stage');
+      assert.match(failedClose.stderr,/W4_STATE_ACTION=release.*validated secret-stage cleanup/);
+      pass(f.run(['ai-w4-state'], { W4_STATE_ACTION: 'release', SECRET_STAGE: stage }), 'cleanup retry is idempotent');
+    }
+  }
+});
+
+// Ruling 45(2,5): independent byte/time fixtures exercise the stored condition and recovery owner.
+const memoryPath = `cgroup/docker-${'d'.repeat(64)}.scope/`;
+const heldCheck = (f: Fixture) => f.run(['ai-w4-state'], { W4_STATE_ACTION: 'hold' });
+test('W4X2c / real state loader uses an explicit library name through take, hold, recycle and recovered close', () => {
+  const f = fixture({ trace_hold_loader: true }); prepared(f);
+  const script = join(f.root, 'systemd-local', service + '.d/w4-hold.py');
+  assert.ok(existsSync(script), 'take installs the CLI after writing the exclusion');
+  const held = readFileSync(join(f.root, exclusionPath)), before = cutover(f);
+  pass(heldCheck(f), 'real loader hold'); startRecycle(f, 'manual');
+  assert.deepEqual(cutover(f), before, 'held activation leaves authority state unchanged');
+  assert.deepEqual(readFileSync(join(f.root, exclusionPath)), held);
+  pass(f.run(['ai-w4-state'], { W4_STATE_ACTION: 'rollback-recycle' }), 'real loader rollback recycle');
+  assert.equal(readdirSync(join(f.root, 'proof')).filter(n => n.startsWith('w4-rollback-aware-recycle-')).length, 1);
+  pass(f.run(['ai-w4-rollback']), 'restore baseline before recovered close');
+  pass(closeW4(f, 'recovered'), 'real loader recovered close');
+  assert.equal(f.json('proof/w4-exclusion-released.json').result, 'recovered');
+  assert.ok(!existsSync(script)); assert.ok(!existsSync(join(f.root, exclusionPath)));
+  const loads = readFileSync(join(f.root, 'hold-loads.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  for (const action of ['take', 'hold', 'rollback-recycle', 'recovered', 'release']) {
+    assert.ok(loads.some(row => row.action === action), `${action} executes the actual embedded loader`);
+  }
+  // CPython's old {} loader resolves builtins.__name__; require the module's own non-main name.
+  assert.deepEqual(loads.map(row => row.name), loads.map(() => 'w4-hold'), 'library loads must bind __name__ explicitly');
+});
+
+test('W4X2c / installed ExecCondition returns exactly 1 held and 0 absent; systemd skips 1..254 and fails 255', () => {
+  const f = fixture(); prepared(f);
+  const script = `systemd-local/${service}.d/w4-hold.py`, bytes = readFileSync(join(f.root, script));
+  const condition = () => f.run([`# installed ExecCondition\npython3 ${join(f.root, script)}`]);
+  assert.equal(condition().status, 1, 'held CLI skip status');
+  renameSync(join(f.root, exclusionPath), join(f.root, exclusionPath + '.saved'));
+  assert.equal(condition().status, 0, 'absent exclusion permits activation');
+  renameSync(join(f.root, exclusionPath + '.saved'), join(f.root, exclusionPath));
+  const before = cutover(f), intent = readFileSync(join(f.root, 'admin-release/recycle-intent.json'));
+  for (const code of [1, 2, 254, 255]) {
+    f.put(script, `raise SystemExit(${code})\n`);
+    const result = f.run([`# condition exit ${code}\nsystemctl start ${service}`]);
+    assert.equal(result.status, code === 255 ? 1 : 0);
+    assert.equal(units(f)[service].active, code === 255 ? 'failed' : 'inactive');
+    assert.deepEqual(cutover(f), before); assert.deepEqual(readFileSync(join(f.root, 'admin-release/recycle-intent.json')), intent);
+  }
+  f.put(script, bytes); startRecycle(f, 'manual');
+  assert.equal(units(f)[service].active, 'inactive'); assert.equal(condition().status, 1, 'restored installed CLI');
+});
+
+test('W4X2 / ceiling, max and restart-time boundaries alert while every activation stays skipped', () => {
+  const cases = [
+    { label: 'below ceiling', memory: 1610612735, stop: false },
+    { label: 'at ceiling', memory: 1610612736, stop: true },
+    { label: 'above ceiling', memory: 1610612737, stop: true },
+    { label: 'changed max', memory: 536870912, max: 1073741824, stop: true },
+    { label: 'below restart cap', memory: 536870912, started: '2026-10-10T06:00:01Z', stop: false },
+    { label: 'at restart cap', memory: 536870912, started: '2026-10-10T06:00:00Z', stop: true },
+  ];
+  for (const row of cases) {
+    const f = fixture(); prepared(f);
+    f.put(memoryPath + 'memory.current', String(row.memory));
+    f.put(memoryPath + 'memory.max', String(row.max ?? 2147483648));
+    if (row.started) f.fixtureConfig({ started_at: row.started });
+    const record = readFileSync(join(f.root, exclusionPath)), intent = readFileSync(join(f.root, 'admin-release/recycle-intent.json')), state = cutover(f);
+    for (const source of ['timer', 'manual'] as const) {
+      const prior = existsSync(join(f.root, 'logger.jsonl')) ? readFileSync(join(f.root, 'logger.jsonl'), 'utf8').trim().split('\n').length : 0;
+      const r = f.run([`# ${source} activation\nsystemctl start ${service}`]); pass(r, row.label);
+      assert.equal(r.stderr.includes('STOP W4 hold'), row.stop, row.label);
+      assert.ok(existsSync(join(f.root, 'logger.jsonl')), 'skipped recycle must journal its window id and age');
+      const messages = readFileSync(join(f.root, 'logger.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      assert.equal(messages.length - prior, 1, 'one journal line per skip');
+      assert.equal(messages.at(-1).at(-1), 'W4 recycle skipped window_id=Fix123 age_seconds=0');
+      assert.deepEqual(readFileSync(join(f.root, exclusionPath)), record);
+      assert.deepEqual(readFileSync(join(f.root, 'admin-release/recycle-intent.json')), intent);
+      assert.deepEqual(cutover(f), state);
+    }
+    f.put(memoryPath + 'memory.current', '536870912'); f.put(memoryPath + 'memory.max', '2147483648');
+    f.fixtureConfig({ started_at: '2026-10-10T11:00:00Z' });
+    const good = heldCheck(f); pass(good, row.label + ' restored observation'); assert.doesNotMatch(good.stderr, /STOP W4 hold/);
+  }
+});
+
+test('W4X2 / malformed records and missing or nonregular cgroup files refuse readers and visibly skip starts; restored controls pass', () => {
+  for (const field of ['window_id', 'created_at', 'hold_limit', 'naive-UTC', 'missing-current', 'missing-max', 'nonregular-current', 'nonregular-max']) {
+    const f = fixture(); prepared(f); const original = readFileSync(join(f.root, exclusionPath));
+    if (field.startsWith('missing-') || field.startsWith('nonregular-')) {
+      const name = memoryPath + 'memory.' + field.split('-')[1];
+      renameSync(join(f.root, name), join(f.root, name + '.saved'));
+      if (field.startsWith('nonregular')) symlinkSync(join(f.root, name + '.saved'), join(f.root, name));
+    } else {
+      const held = JSON.parse(original.toString());
+      if (field === 'naive-UTC') held.created_at = '2026-10-10T12:00:00'; else delete held[field];
+      f.put(exclusionPath, held);
+    }
+    const bad = heldCheck(f); assert.notEqual(bad.status, 0, field); assert.match(bad.stderr, /durable exclusion|hold observation/);
+    const skipped = f.run([`# invalid ${field}\nsystemctl start ${service}`]); pass(skipped, field + ' skip');
+    assert.match(skipped.stderr, /STOP W4 hold: invalid record or cgroup observation/);
+    assert.equal(f.json('units.json')[service].active, 'inactive'); assert.ok(existsSync(join(f.root, exclusionPath)));
+    f.put(exclusionPath, original);
+    for (const name of ['memory.current', 'memory.max']) {
+      if (existsSync(join(f.root, memoryPath + name + '.saved'))) {
+        // The fixture's guarded rm removes only this known symlink before restoring the owned file.
+        if (isLink(join(f.root, memoryPath + name))) pass(f.run([`# remove fixture symlink\nrm -- ${join(f.root, memoryPath + name)}`]), 'fixture cleanup');
+        renameSync(join(f.root, memoryPath + name + '.saved'), join(f.root, memoryPath + name));
+      }
+    }
+    pass(heldCheck(f), field + ' restored positive control');
+  }
+});
+
+test('W4X2 / stale record alerts without a release shell and never releases; a fresh restart cannot hide record age', () => {
+  const f = fixture(); prepared(f); const record = readFileSync(join(f.root, exclusionPath));
+  f.fixtureConfig({ clock: '2026-10-10T18:00:00Z', started_at: '2026-10-10T17:59:00Z' });
+  const skip = f.run([`# fresh process, no release shell\nsystemctl start ${service}`]); pass(skip, 'stale skip');
+  assert.match(skip.stderr, /STOP W4 hold Fix123/);
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'logger.jsonl'), 'utf8').trim()).at(-1), 'W4 recycle skipped window_id=Fix123 age_seconds=21600');
+  assert.deepEqual(readFileSync(join(f.root, exclusionPath)), record);
+  f.fixtureConfig({ clock: '2026-10-10T17:59:59Z' });
+  const control = heldCheck(f); pass(control, 'one second before age cap'); assert.doesNotMatch(control.stderr, /STOP W4 hold/);
+  pass(f.run([`# scheduled host check without a release shell\nsystemctl start ${alertService}`]), 'periodic alert');
+  assert.equal(JSON.parse(readFileSync(join(f.root,'healthcheck-pings.jsonl'),'utf8').trim().split('\n').at(-1)!).suffix, '');
+});
+
+test('W4X2 / direct recycle records healthy bound evidence without hooks or authority writes; rollback and recovered close still pass', () => {
+  for (const phase of ['baseline', 'candidate', 'rolled-back']) {
+    const f = fixture({ clock: '2026-10-11T21:05:00Z', shell_only_read: true }); f.writeInputs({ window_end_utc: '2026-10-11T21:35:00Z' });
+    prepared(f);
+    if (phase !== 'baseline') {
+      f.fixtureConfig({ clock: '2026-10-11T21:10:00Z' }); pass(f.run(['ai-w4-keeper-retire', 'ai-w4-apply']), 'apply');
+    }
+    if (phase === 'rolled-back') pass(f.run(['ai-w4-rollback']), 'rollback before emergency recycle');
+    f.fixtureConfig({ clock: '2026-10-11T21:32:00Z', started_at: '2026-10-11T15:30:00Z' });
+    const before = cutover(f), intent = readFileSync(join(f.root, 'admin-release/recycle-intent.json')), held = readFileSync(join(f.root, exclusionPath));
+    const restart = f.run(['ai-w4-state'], { W4_STATE_ACTION: 'rollback-recycle' }); pass(restart, phase);
+    assert.match(restart.stderr, /STOP W4 hold Fix123/);
+    assert.deepEqual(cutover(f), before); assert.deepEqual(readFileSync(join(f.root, 'admin-release/recycle-intent.json')), intent);
+    assert.deepEqual(readFileSync(join(f.root, exclusionPath)), held);
+    assert.ok(restart.calls.some(c => JSON.stringify(c) === JSON.stringify(['docker', 'restart', '--time', '30', 'commonswarm-edge-edge-runtime-1'])));
+    const receipts = readdirSync(join(f.root, 'proof')).filter(name => name.startsWith('w4-rollback-aware-recycle-'));
+    assert.equal(receipts.length, 1); const receipt = f.json('proof/' + receipts[0]);
+    assert.deepEqual({ release_sha: receipt.release_sha, window: receipt.window, window_id: receipt.window_id }, { release_sha: sha, window: 'W4', window_id: wid });
+    assert.equal(receipt.exclusion_sha256, hash(held));
+    assert.deepEqual(receipt.before, { started_at: '2026-10-11T15:30:00Z', memory_current: 536870912, healthy: true });
+    assert.deepEqual(receipt.after, { started_at: '2026-10-11T21:32:00Z', memory_current: 268435456, healthy: true });
+    if (phase !== 'rolled-back') pass(f.run(['ai-w4-rollback']), 'rollback after direct recycle');
+    pass(closeW4(f, 'recovered'), 'recovered close accepts receipt as evidence');
+    assert.ok(!existsSync(join(f.root, exclusionPath))); assert.ok(existsSync(join(f.root, 'proof', receipts[0]!)));
+  }
+});
+
+// Ruling 45(7): the real preflight/installed host reader own config admission and timer lifetime.
+test('W4X2b / URL and notifier faults STOP before take and A1; a valid installed alert passes', () => {
+  const configPath = 'admin-release/w4-healthcheck.env', notifyPath = `backup-installed/releases/${sha}/backup/notify-healthcheck.py`;
+  for (const fault of ['absent', 'symlink', 'owner', 'mode', 'bad-key', 'bad-url', 'directory', 'notifier-digest', 'notifier-absent', 'ping']) {
+    const f = fixture();
+    if (fault === 'absent' || fault === 'symlink' || fault === 'directory') {
+      renameSync(join(f.root, configPath), join(f.root, configPath + '.saved'));
+      if (fault === 'symlink') symlinkSync(join(f.root, configPath + '.saved'), join(f.root, configPath));
+      if (fault === 'directory') mkdirSync(join(f.root, configPath));
+    } else if (fault === 'owner') f.fixtureConfig({ owners: { [configPath]: [1000, 0] } });
+    else if (fault === 'mode') chmodSync(join(f.root, configPath), 0o644);
+    else if (fault === 'bad-key') f.put(configPath, 'HC_RESTORE_URL=https://hc-ping.com/00000000-0000-0000-0000-000000000000\n');
+    else if (fault === 'bad-url') f.put(configPath, 'HC_BACKUP_URL=https://example.invalid/\n');
+    else if (fault === 'notifier-digest') { chmodSync(join(f.root,notifyPath),0o600); f.put(notifyPath, '# unreviewed\n', 0o444); }
+    else if (fault === 'notifier-absent') renameSync(join(f.root, notifyPath), join(f.root, notifyPath + '.saved'));
+    else f.fixtureConfig({ ping_refused: true });
+    const r = f.run(['ai-w4-preflight']); assert.notEqual(r.status, 0, fault);
+    assert.match(r.stderr, fault === 'ping' ? /initial W4 alert ping/ : /W4 Healthchecks config\/notifier/, fault);
+    assert.ok(!existsSync(join(f.root, 'proof/w4-state/roots-before.json')), 'no A1 snapshot');
+    assert.ok(!existsSync(join(f.root, 'systemd-local', service + '.d/00-w4-exclusion.conf')), 'no recycle skip without delivered alert');
+    if (fault !== 'ping') assert.ok(!existsSync(join(f.root, exclusionPath)), 'invalid URL/notifier never takes exclusion');
+    else {
+      f.fixtureConfig({ ping_refused:false }); pass(closeW4(f,'recovered'), 'failed first ping closes without A1 or a skip gate');
+      assert.ok(!existsSync(join(f.root,exclusionPath))); assert.ok(!existsSync(join(f.root,'systemd-local',alertTimer)));
+    }
+  }
+  const good = fixture(); prepared(good);
+  assert.equal(good.json('units.json')[alertTimer].active, 'active');
+  assert.equal(JSON.parse(readFileSync(join(good.root,'healthcheck-pings.jsonl'),'utf8').trim()).suffix, '');
+});
+
+test('W4X2b / scheduled host reader pings fail at stale/time/ceiling boundaries and OK below; only terminal release removes alert', () => {
+  const f = fixture(); prepared(f);
+  const properties = (unit:string) => Object.fromEntries(readFileSync(join(f.root,'systemd-local',unit),'utf8').split('\n').filter(line=>line.includes('=')).map(line=>line.split('=')));
+  assert.equal(properties(alertTimer).OnUnitActiveSec,'5min'); assert.equal(properties(alertTimer).Unit,alertService);
+  assert.equal(properties(alertService).Type,'oneshot');
+  const ping = () => {
+    pass(f.run([`# independent systemd oneshot activation\nsystemctl start ${alertService}`]), 'host alert');
+    return JSON.parse(readFileSync(join(f.root,'healthcheck-pings.jsonl'),'utf8').trim().split('\n').at(-1)!).suffix;
+  };
+  for (const row of [
+    { time: '2026-10-10T17:59:59Z', memory: 1610612735, suffix: '' },
+    { time: '2026-10-10T18:00:00Z', memory: 536870912, suffix: '/fail' },
+    { time: '2026-10-10T18:00:01Z', memory: 536870912, suffix: '/fail' },
+    { time: '2026-10-10T12:00:00Z', memory: 1610612736, suffix: '/fail' },
+    { time: '2026-10-10T12:00:00Z', memory: 1610612735, suffix: '' },
+  ]) {
+    f.fixtureConfig({ clock: row.time, started_at: new Date(Date.parse(row.time)-60000).toISOString().replace('.000Z','Z') }); f.put(memoryPath+'memory.current', String(row.memory));
+    assert.equal(ping(), row.suffix);
+    startRecycle(f,'timer'); startRecycle(f,'manual');
+    assert.equal(f.json('units.json')[alertTimer].active, 'active');
+    assert.ok(existsSync(join(f.root,exclusionPath)));
+  }
+  f.fixtureConfig({ clock:'2026-10-10T12:00:00Z', started_at:'2026-10-10T11:00:00Z' }); f.put(memoryPath+'memory.current','536870912');
+  f.put('loaded-unit.json',{});
+  const units=f.json('units.json'); units[alertTimer].active='inactive'; f.put('units.json',units);
+  assert.ok(isLink(join(f.root,'systemd/timers.target.wants',alertTimer)), 'boot target retains timer');
+  pass(f.run(['# boot reload\nsystemctl daemon-reload']), 'reboot reload');
+  startRecycle(f,'manual');
+  pass(f.run(['ai-w4-timer-recovery']), 'reconnect retains alert'); assert.equal(ping(),'');
+  refused(f.run(['ai-w4-state'], { W4_STATE_ACTION:'release' }), 'terminal close-result.json');
+  assert.ok(existsSync(join(f.root,'systemd-local',alertTimer)));
+  pass(f.run(['ai-w4-keeper-retire','ai-w4-apply','ai-w4-readback']), 'apply and EXIT retain alert'); assert.equal(ping(),'');
+  pass(closeW4(f,'success'), 'terminal close releases');
+  for (const name of [alertTimer, alertService]) {
+    assert.ok(!existsSync(join(f.root,'systemd-local',name))); assert.equal(f.json('units.json')[name].active,'inactive');
+  }
+  assert.ok(!existsSync(join(f.root,'systemd/timers.target.wants',alertTimer)));
+  assert.ok(!existsSync(join(f.root,exclusionPath)));
+  const boundaries=readFileSync(join(f.root,'alert-lifecycle.jsonl'),'utf8').trim().split('\n').map(line=>JSON.parse(line));
+  assert.ok(boundaries.every(b=>!b.loaded || b.record), 'never a loaded timer without its record');
+  const attempts=readFileSync(join(f.root,'alert-activations.jsonl'),'utf8').trim().split('\n').map(line=>JSON.parse(line));
+  assert.ok(attempts.every(b=>!b.gate || b.alert), 'every recycle skip has an active independent alert, including after reboot');
+  const calls=f.run(['# inspect lifetime']).calls;
+  const takeGate=calls.findIndex(c=>c[0]==='systemctl' && c[1]==='show' && c.includes('ExecCondition'));
+  assert.ok(calls.findIndex(c=>c.join(' ')==='systemctl start '+alertTimer)<takeGate, 'active alert before loaded skip');
 });

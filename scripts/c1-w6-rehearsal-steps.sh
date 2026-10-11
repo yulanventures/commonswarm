@@ -321,12 +321,17 @@ mkdir -p "$W6R/backups" "$T/proof-W4-gate" || exit 1
 cp "$REPO/tests/fixtures/box-time/status.json" "$REPO/tests/fixtures/box-time/restore-status.json" "$W6R/backups/" || exit 1
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["window_end_utc"]="2026-10-04T22:47:31Z"; open(sys.argv[2],"w").write(json.dumps(d))' "$W4_INPUTS" "$T/proof-W4-gate/inputs.json" || exit 1
 printf '2026-10-04T22:17:31Z\n' >"$T/proof-W4-gate/open.txt"
+x ai-db-session slice 'ai_backup_gate() {' 'ai_run() {' >"$T/blocks/w4-backup-helper.sh"
+python3 - "$T/blocks/w4-backup-helper.sh" "$REPO/tests/fixtures/box-time/sitecustomize.py" <<'PY' || die w4-backup-gate 'fixed clock prelude failed'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]); p.write_text(p.read_text().replace("<<'PY'\n", "<<'PY'\n"+pathlib.Path(sys.argv[2]).read_text()+'\n',1))
+PY
 x ai-w1-backup-gate block >"$T/blocks/w4-backup-gate.sh"
 x ai-backup-gate-check block >"$T/blocks/w6-ai-backup-gate-check.sh"
 say "EMUL w4-backup-gate: status.json/restore-status.json are the box writer's exact samples; clock pinned to 2026-10-04T22:20:00Z (test-only sitecustomize)"
 ai_run_box_gate() { test "$1" = ai-backup-gate-check || return 2; eval "$(cat "$T/blocks/w6-ai-backup-gate-check.sh")"; }
-printf '%s\n' 'ai_run() { ai_run_box_gate "$@"; }' "$(cat "$T/blocks/w4-backup-gate.sh")" >"$T/blocks/w4-backup-gate-run.sh"
-PYTHONPATH=$REPO/tests/fixtures/box-time C1_TEST_FIXED_NOW=2026-10-04T22:20:00Z PROOF_DIR=$T/proof-W4-gate INPUTS_FILE=$T/proof-W4-gate/inputs.json WINDOW=W4 \
+printf '%s\n' "$(cat "$T/blocks/w4-backup-helper.sh")" 'ai_run() { ai_run_box_gate "$@"; }' "$(cat "$T/blocks/w4-backup-gate.sh")" >"$T/blocks/w4-backup-gate-run.sh"
+C1_TEST_FIXED_NOW=2026-10-04T22:20:00Z PROOF_DIR=$T/proof-W4-gate INPUTS_FILE=$T/proof-W4-gate/inputs.json WINDOW=W4 \
   step ai-w1-backup-gate:W4-exact-box-formats "$T/blocks/w4-backup-gate-run.sh"
 python3 - "$T/proof-W4-gate/backup-gate.json" <<'PY' || die w4-backup-gate 'receipt expected the box strings as written got other'
 import json,sys
@@ -338,7 +343,7 @@ say "PASS w4-backup-gate-receipt: backup_verified_at and restore_completed_at ke
 cat >"$T/box-utc.py" <<'PY'
 import datetime,json,re,sys
 src=open(sys.argv[1]).read(); defs=re.findall(r'^def box_utc\(value\):\n(?: {4}.*\n)+',src,re.M)
-assert len(defs)==7 and len(set(defs))==1, 'box_utc copies'
+assert len(defs)==6 and len(set(defs))==1, 'box_utc copies'
 exec(defs[0])
 bad=[v for v in sys.argv[2:] if box_utc(v) is None]
 if bad: raise SystemExit('FAIL box_utc refused '+json.dumps(bad))

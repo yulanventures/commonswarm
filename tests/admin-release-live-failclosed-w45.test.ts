@@ -204,10 +204,14 @@ elif name=='ai_db':
         sql=owned(args[2]).read_text(); fields=dict(re.findall(r"(measured_edge_release_sha|measured_edge_target|measured_mount|measured_image_digest|measured_artifact_digest|measurement_evidence_ref)='([^']*)'",sql))
         assert len(fields)==6 and 'measured_generation=release_generation+1' in sql and 'invalidated_at=statement_timestamp()' in sql
         (root/'rollback-fields.json').write_text(json.dumps(fields))
+        approval=re.search(r",approved_edge_release_sha='([^']*)'",sql)
+        if approval: (root/'rollback-approval.txt').write_text(approval.group(1))
     elif args==['-q','--file',str(root/'proof/measure.sql')]: owned(args[2]).read_text(); (root/'measured.flag').write_text('1')
     else: refuse()
 elif name=='ai_ro':
-    if args==['-Atq','--command','SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;']: print('t')
+    if args==['-Atq','--command','SELECT approved_edge_release_sha FROM commonswarm_oauth.admin_cutover_state WHERE singleton;']:
+        print((root/'rollback-approval.txt').read_text() if (root/'rollback-approval.txt').exists() else cfg['sha'])
+    elif args==['-Atq','--command','SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;']: print('t')
     elif args==['-Atq','--command','SELECT release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND invalidated_at IS NULL AND measured_generation=release_generation;']: print('7')
     elif args==['-Atq','--command',"SELECT json_build_object('admin_issuance_enabled',admin_issuance_enabled,'invalidated',invalidated_at IS NOT NULL,'release_generation',release_generation,'measured_generation',measured_generation,'measured_edge_release_sha',measured_edge_release_sha)::text FROM commonswarm_oauth.admin_cutover_state WHERE singleton;"]:
         print(json.dumps({'admin_issuance_enabled':False,'invalidated':True,'release_generation':8,'measured_generation':7,'measured_edge_release_sha':cfg.get('baseline','b'*40)}))

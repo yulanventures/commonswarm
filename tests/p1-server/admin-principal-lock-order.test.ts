@@ -71,7 +71,8 @@ function bound(): Target {
   return target;
 }
 
-test("positive-control-raw-sql-base-order-deadlocks", { timeout: 120_000 }, async () => {
+const POSITIVE_CONTROL = "positive-control-raw-sql-base-order-deadlocks";
+test(POSITIVE_CONTROL, { timeout: 120_000 }, async () => {
   const result = await harness.rawSqlPositiveControl(bound());
   assert.equal(result.stage, "complete", `control stopped at ${result.stage} (${result.error ?? "no SQLSTATE"})`);
   assert.equal(result.holder_waits_on_stream, true, "the row holder must wait for the stream before the insert");
@@ -154,14 +155,16 @@ test(ADMIN_PAIR, { timeout: 240_000 }, async () => {
 // Review B (round 6): two OAuth admins whose workspace locks cross. The base deadlocks on B1 (each
 // creates a workspace with the other owner's existing id). B2 (a read outside the grant) and the
 // delegated grant_admin_delegation deadlock only after the round-4 pre-lock (b6f5f4b5), not on the base.
-const ADMIN_CROSS_RACES: Record<string, { writes: Record<string, boolean>; admin_audit: string[] }> = {
+const ADMIN_CROSS_RACES: Record<string, { writes: Record<string, boolean>; admin_audit: string[]; raceClass?: "regression-guard" }> = {
   "admin-oauth-create-existing-workspace-crossed": {
     writes: { first_target_unchanged: true, second_target_unchanged: true }, admin_audit: ["refused", "refused"],
   },
   "admin-oauth-read-outside-grant-vs-admin-oauth-routine": {
+    raceClass: "regression-guard",
     writes: { second_admin_principal_live: true }, admin_audit: ["refused", "committed"],
   },
   "admin-oauth-grant-admin-delegation-vs-admin-oauth-routine": {
+    raceClass: "regression-guard",
     writes: { second_admin_principal_live: true }, admin_audit: ["refused", "committed"],
   },
 };
@@ -192,6 +195,17 @@ for (const [name, expected] of Object.entries(ADMIN_CROSS_RACES)) {
 // Round 6 inventory: two owners each withdraw a workspace from the other's grant. The base and
 // head''' lock the grantor's users row after the withdrawing owner's own users-row upsert: 40P01.
 const ADMIN_WITHDRAW = "admin-human-withdraw-crossed-grants";
+
+/** HezLead ruling 40: X2's single class map for both GATES.json arrays. Regression guards
+ * PASS at T and head; CI evidence run 38086941694 caught their intermediate-order deadlocks.
+ * The raw SQL positive control stays PASS at both variants with exactly one 40P01. */
+export const X2_RACE_CLASSES: Readonly<Record<string, "positive-control" | "base-cycle" | "regression-guard">> = Object.freeze({
+  [POSITIVE_CONTROL]: "positive-control",
+  ...Object.fromEntries([...RACE_TESTS, ADMIN_PAIR].map(name => [name, "base-cycle"])),
+  ...Object.fromEntries(Object.entries(ADMIN_CROSS_RACES).map(([name, expected]) => [name, expected.raceClass ?? "base-cycle"])),
+  [ADMIN_WITHDRAW]: "base-cycle",
+});
+
 test(ADMIN_WITHDRAW, { timeout: 240_000 }, async () => {
   const result = await harness.runScenario(bound(), ADMIN_WITHDRAW);
   assert.equal(result.stage, "complete", `${ADMIN_WITHDRAW}: stopped at ${result.stage} (${result.error ?? "no code"})`);

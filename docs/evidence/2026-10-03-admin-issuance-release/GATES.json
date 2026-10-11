@@ -283,7 +283,12 @@
       "remove-member-vs-hosted-claim-seat",
       "remove-member-vs-local-join-registration",
       "household-invitation-vs-hosted-claim-seat",
-      "household-invitation-vs-local-join-registration"
+      "household-invitation-vs-local-join-registration",
+      "admin-oauth-vs-admin-oauth-shared-workspace",
+      "admin-oauth-create-existing-workspace-crossed",
+      "admin-oauth-read-outside-grant-vs-admin-oauth-routine",
+      "admin-oauth-grant-admin-delegation-vs-admin-oauth-routine",
+      "admin-human-withdraw-crossed-grants"
     ],
     "admin-principal-lock-order-staging": [
       "positive-control-raw-sql-base-order-deadlocks",
@@ -295,8 +300,30 @@
       "remove-member-vs-hosted-claim-seat",
       "remove-member-vs-local-join-registration",
       "household-invitation-vs-hosted-claim-seat",
-      "household-invitation-vs-local-join-registration"
+      "household-invitation-vs-local-join-registration",
+      "admin-oauth-vs-admin-oauth-shared-workspace",
+      "admin-oauth-create-existing-workspace-crossed",
+      "admin-oauth-read-outside-grant-vs-admin-oauth-routine",
+      "admin-oauth-grant-admin-delegation-vs-admin-oauth-routine",
+      "admin-human-withdraw-crossed-grants"
     ]
+  },
+  "x2_race_classes": {
+    "positive-control-raw-sql-base-order-deadlocks": "positive-control",
+    "admin-oauth-vs-hosted-claim-seat": "base-cycle",
+    "admin-oauth-vs-local-join-registration": "base-cycle",
+    "admin-oauth-vs-local-command-creation": "base-cycle",
+    "accept-invitation-vs-hosted-claim-seat": "base-cycle",
+    "accept-invitation-vs-local-join-registration": "base-cycle",
+    "remove-member-vs-hosted-claim-seat": "base-cycle",
+    "remove-member-vs-local-join-registration": "base-cycle",
+    "household-invitation-vs-hosted-claim-seat": "base-cycle",
+    "household-invitation-vs-local-join-registration": "base-cycle",
+    "admin-oauth-vs-admin-oauth-shared-workspace": "base-cycle",
+    "admin-oauth-create-existing-workspace-crossed": "base-cycle",
+    "admin-oauth-read-outside-grant-vs-admin-oauth-routine": "regression-guard",
+    "admin-oauth-grant-admin-delegation-vs-admin-oauth-routine": "regression-guard",
+    "admin-human-withdraw-crossed-grants": "base-cycle"
   },
   "windows": {
     "W1": [

@@ -17,7 +17,15 @@ const digest = (value: string | Buffer) => createHash('sha256').update(value).di
 const block = (id: string) => {
   const matches = blocks.filter(s => s.startsWith(`# step: ${id}\n`));
   assert.equal(matches.length, 1, `one complete ${id} block`);
-  return matches[0]!;
+  return matches[0]!.replace(/^ai_backup_gate (write|check).*$/m, line => block('ai-db-session').match(/^ai_backup_gate\(\) \{\n[\s\S]*?^}\n/m)![0] + line)
+    .replace('os.uname().nodename', JSON.stringify('yulan-vps-1')).replace("read('/etc/machine-id')", "b'fixture-machine-id\\n'");
+};
+/** The compatibility oracle is the exact pre-amendment ai-gates block, not a reimplementation. */
+const oldGatesBlock = () => {
+  const r = spawnSync('git', ['show', 'e82771087634c1feced87b0a3b9d51b555aaecda:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8', maxBuffer: 64 << 20 });
+  assert.equal(r.status, 0, r.stderr);
+  const gates = [...r.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!).filter(b => b.startsWith('# step: ai-gates\n'));
+  assert.equal(gates.length, 1); return gates[0]!;
 };
 // Inputs binding the in-repository plan bytes, for blocks that run ai_run.
 const releasedPlanInputs = (dir: string) => { const file = join(dir, 'released-plan-inputs.json'); writeFileSync(file, JSON.stringify({ plan_sha256: digest(plan) })); return file; };
@@ -146,7 +154,7 @@ test('admin release plan: every complete marked block parses in Bash 3.2 and emb
     assert.ok(!seen.has(lines[0]!), 'duplicate step marker'); seen.add(lines[0]!);
     const shell = spawnSync('/bin/bash', ['-n'], { input: source, encoding: 'utf8' });
     assert.equal(shell.status, 0, `${lines[0]}: ${shell.stderr}`);
-    for (const match of source.matchAll(/^python3[^\n]*<<'PY'[^\n]*\n([\s\S]*?)^PY$/gm)) {
+    for (const match of source.matchAll(/^[ \t]*(?:\/usr\/bin\/)?python3[^\n]*<<'PY'[^\n]*\n([\s\S]*?)^PY$/gm)) {
       const python = spawnSync('python3', ['-c', 'import sys; compile(sys.stdin.read(), "<plan-python>", "exec")'], {
         input: match[1], encoding: 'utf8',
       });
@@ -165,7 +173,7 @@ test('admin release plan: every complete marked block parses in Bash 3.2 and emb
 test('admin release plan: production secret window and pointer stay pinned; fixtures are portable rewrites only', () => {
   // The executed fixtures rewrite these literals; the plan must still carry them.
   assert.equal(plan.split(PRODUCTION_STAGE_RE).length - 1, 5, 'Mac secret-window checks keep /private/tmp/anvil-secret');
-  assert.equal(plan.split(PRODUCTION_BOX_STAGE_RE).length - 1, 13, 'box secret-window checks use /tmp/anvil-secret (Ubuntu has no /private)');
+  assert.equal(plan.split(PRODUCTION_BOX_STAGE_RE).length - 1, 14, 'box secret-window checks use /tmp/anvil-secret (Ubuntu has no /private)');
   assert.equal(plan.split('$(mktemp -d /private/tmp/anvil-secret.XXXXXX)').length - 1, 1, 'Mac stage is a fresh /private/tmp/anvil-secret.XXXXXX');
   assert.equal(plan.split('$(mktemp -d /tmp/anvil-secret.XXXXXX)').length - 1, 4, 'box stages are a fresh /tmp/anvil-secret.XXXXXX');
   assert.match(block('ai-w6-pointer'), /assert str\(pointer\)=='\/Users\/yulanbot\/work\/dcr-rt\/production\/c1-smoke\.pointer'/);
@@ -329,7 +337,9 @@ test('admin release plan: reserves are verbatim and all lane gates own retained 
   }
 });
 
-test('admin release plan: checker receipt validates exact build, controls and retained file digests', () => {
+test('admin release plan: every existing W1 control receipt fixture keeps its old ai-gates verdict', () => {
+  // Ruling 40: execute the old block on these same six receipts, without copying the fixture corpus.
+  const oldGate = oldGatesBlock(); let compared = 0;
   const contract = JSON.parse(readFileSync(join(directory, 'GATES.json'), 'utf8'));
   const evidence = join(scratch, 'control.txt'); writeFileSync(evidence, 'independent nonsecret control\n');
   const receipt: { release_sha: string; evidence_root: string; gates: Record<string, unknown> } = {
@@ -342,7 +352,9 @@ test('admin release plan: checker receipt validates exact build, controls and re
   const path = join(scratch, 'full-receipt.json');
   const check = () => {
     writeFileSync(path, JSON.stringify(receipt));
-    return run(block('ai-gates'), { INPUTS_FILE: inputFile(base()), GATE_RECEIPT_FILE: path, PLAN_FILE: planPath });
+    const env = { INPUTS_FILE: inputFile(base()), GATE_RECEIPT_FILE: path, PLAN_FILE: planPath };
+    const current = run(block('ai-gates'), env), baseline = run(oldGate, env); compared++;
+    assert.deepEqual([current.status, current.stdout, current.stderr], [baseline.status, baseline.stdout, baseline.stderr]); return current;
   };
   assert.equal(check().status, 0);
   receipt.release_sha = 'b'.repeat(40);
@@ -353,6 +365,7 @@ test('admin release plan: checker receipt validates exact build, controls and re
   gate.controls = []; assert.match(check().stderr, /positive\/negative controls/); gate.controls = contract.gates[name];
   gate.file = '../outside'; assert.match(check().stderr, /relative file/); gate.file = 'control.txt';
   gate.sha256 = 'c'.repeat(64); assert.match(check().stderr, /evidence digest/);
+  assert.equal(compared, 6, 'one admission and five refusals: the complete existing W1 control receipt corpus');
 });
 
 
@@ -476,7 +489,7 @@ urllib.request.build_opener=lambda *args: Opener()
   // The dispatcher extracts nested blocks from the plan on disk; give it the
   // portable rewrite of the whole plan (only the secret-window regex changes).
   const planCopy = join(root, 'RELEASE.md');
-  writeFileSync(planCopy, portable(plan, { stage: 18, pointer: 11 }));
+  writeFileSync(planCopy, portable(plan, { stage: 19, pointer: 11 }));
   const released = block('ai-db-session').split('ai_run() {\n')[1]!.split('\nai_deadline() {')[0]!;
   assert.equal(released.split(PRODUCTION_PLAN_PATH).length - 1, 1);
   const dispatcher = released.split(PRODUCTION_PLAN_PATH).join(`'${planCopy}'`);
@@ -1160,6 +1173,9 @@ test('admin release plan: W2b close needs its backup gate, preconditions and iss
   const etc=join(root,'etc'); mkdirSync(etc);
   const close=portable(block('ai-close'),{stage:2,pointer:0}).split('/etc/commonswarm-oauth/').join(etc+'/');
   const gateFile=join(root,'gate-check.sh'); writeFileSync(gateFile,block('ai-backup-gate-check'));
+  const baseClosePlan=spawnSync('git',['show','43c09b2a:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'],{encoding:'utf8',maxBuffer:64<<20});
+  assert.equal(baseClosePlan.status,0,baseClosePlan.stderr);
+  const baseClose=portable([...baseClosePlan.stdout.matchAll(/^```sh\n([\s\S]*?)^```/gm)].find(m=>m[1]!.startsWith('# step: ai-close\n'))![1]!,{stage:2,pointer:0}).split('/etc/commonswarm-oauth/').join(etc+'/');
   const harness=(role:string)=>`ai_ro() { case "$*" in *'SELECT NOT admin_issuance_enabled'*) printf 't\\n';; *'FROM pg_catalog.pg_authid'*) printf '${role}\\n';; *) printf 'f\\n';; esac; }\n`
     // ai-w4-state's own checks run in admin-release-w4-second-pass.test.ts; here it records the requested action.
     +`ai_run() { case "$1" in ai-backup-gate-check) eval "$(cat '${gateFile}')";; ai-w4-state) printf '%s\\n' "$W4_STATE_ACTION" >>'${root}/w4-state-calls';; *) return 1;; esac; }\n`;
@@ -1171,22 +1187,42 @@ test('admin release plan: W2b close needs its backup gate, preconditions and iss
     return '{'+Object.keys(receipt).sort().map(k=>JSON.stringify(k)+': '+JSON.stringify(receipt[k])).join(', ')+'}\n';
   };
   const FORWARD='PASS W2b forward catalogs: all five true after the issuer credential\n';
-  const attempt=(outcome:string,files:string[],role='t',window='W2b',gate?:string)=>{
-    const stage=makeStage(), proof=mkdtempSync(join(root,'proof-'));
+  const attempt=(outcome:string,files:string[],role='t',window='W2b',gate?:string,source=close,fault?:'bad-mode'|'bad-path')=>{
+    const originalStage=makeStage(), stage=fault==='bad-path'?originalStage+'bad':originalStage, proof=mkdtempSync(join(root,'proof-'));
+    if(fault==='bad-path') renameSync(originalStage,stage);
+    if(fault==='bad-mode') chmodSync(stage,0o750);
     writeFileSync(join(proof,'secret-stage.path'),stage+'\n'); writeFileSync(join(proof,'consent-pre-W1.json'),pre);
     writeFileSync(join(proof,'ordinary-after.json'),liveFor('after',window)); writeFileSync(join(proof,'ordinary-recovery.json'),liveFor('recovery',window));
     writeFileSync(join(proof,'inputs.json'),readFileSync(window==='W4'?w4Inputs:inputs)); writeFileSync(join(proof,'open.txt'),stamp(300_000)+'\n');
     for(const file of files) writeFileSync(join(proof,file),file==='backup-gate.json'?(gate??gateReceipt(window)):file==='w2b-forward-catalogs.txt'?FORWARD:'PASS');
-    const result=run(harness(role)+close,{WINDOW:window,SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:window==='W4'?w4Inputs:inputs,PLAN_FILE:planPath,
+    const result=run(harness(role)+source,{WINDOW:window,SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:window==='W4'?w4Inputs:inputs,PLAN_FILE:planPath,
       BOX_ARCHIVE_PATH:archive,CLOSE_RESULT:outcome,PATH:shim+':'+process.env.PATH});
     const closed=existsSync(join(proof,'closed.txt'));
     const record=existsSync(join(proof,'close-result.json'))?readFileSync(join(proof,'close-result.json'),'utf8'):'';
     const closedAt=closed?readFileSync(join(proof,'closed.txt'),'utf8').trim():'';
-    if(existsSync(stage)) removeStage(stage);
-    return {result,closed,record,closedAt};
+    const retained=existsSync(stage);
+    if(retained) {
+      if(fault==='bad-path') renameSync(stage,originalStage);
+      if(fault==='bad-mode') chmodSync(originalStage,0o700);
+      removeStage(originalStage);
+    }
+    return {result,closed,record,closedAt,retained};
   };
   const W2B_OK=['backup-gate.json','w2b-forward-catalogs.txt','w2b-preconditions.txt','issuer-credential.txt'];
   let r=attempt('success',W2B_OK); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
+  for(const [outcome,files] of [['success',W2B_OK],['recovered',[]]] as const) {
+    const current=attempt(outcome,[...files]), prior=attempt(outcome,[...files],'t','W2b',undefined,baseClose);
+    assert.deepEqual([current.result.status,current.result.stdout,current.result.stderr],[prior.result.status,prior.result.stdout,prior.result.stderr],'non-W4 close output stays byte-identical to the base');
+  }
+  // Execute the complete current/base close bodies: invalid stages must stop before deletion or terminal records.
+  for(const fault of ['bad-mode','bad-path'] as const) for(const [outcome,files] of [['success',W2B_OK],['recovered',[]]] as const) {
+    const current=attempt(outcome,[...files],'t','W2b',undefined,close,fault);
+    const prior=attempt(outcome,[...files],'t','W2b',undefined,baseClose,fault);
+    assert.notEqual(prior.result.status,0,`${fault}: base reaches and refuses the stage validator`);
+    assert.match(prior.result.stderr,/AssertionError/);
+    assert.deepEqual([current.result.status,current.result.stdout,current.result.stderr],[prior.result.status,prior.result.stdout,prior.result.stderr],`${fault}: unmodified close matches base failure`);
+    for(const result of [current,prior]) { assert.ok(result.retained,fault); assert.ok(!result.closed,fault); assert.equal(result.record,'',fault); }
+  }
   // The explicit terminal record W6 reads: exact sorted JSON bound to the window, at the closed.txt time.
   assert.deepEqual(JSON.parse(r.record),{closed_at:r.closedAt,release_sha:sha,result:'success',window:'W2b',window_id:'Abc123'});
   assert.equal(r.record,'{'+Object.entries({closed_at:r.closedAt,release_sha:sha,result:'success',window:'W2b',window_id:'Abc123'}).map(([k,v])=>JSON.stringify(k)+': '+JSON.stringify(v)).join(', ')+'}\n');
@@ -1219,7 +1255,7 @@ test('admin release plan: W2b close needs its backup gate, preconditions and iss
   // W4 shares the backup gate: its success close needs backup-gate.json as well as its readback.
   r=attempt('success',['backup-gate.json','W4-readback.txt'],'t','W4'); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
   assert.equal(JSON.parse(r.record).window,'W4');
-  assert.equal(readFileSync(join(root,'w4-state-calls'),'utf8'),'success\n','the W4 success close proves the admitted installation');
+  assert.equal(readFileSync(join(root,'w4-state-calls'),'utf8'),'success\nrelease\n','the W4 success close proves the admitted installation');
   for(const gate of [undefined,'PASS',gateReceipt('W2b'),gateReceipt('W4',{backup_verified_at:stamp(3600_000)})]) {
     r=attempt('success',gate===undefined?['W4-readback.txt']:['backup-gate.json','W4-readback.txt'],'t','W4',gate); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
     assert.match(r.result.stderr,/FAIL ai-close: W4: backup-gate\.json expected valid-bound-fresh-receipt got refused; STOP/);
@@ -1297,7 +1333,7 @@ test('same-version retry / w4-recovered-close: a recovered W4 closes only with t
     const calls=existsSync(join(box,'w4-state-calls'))?readFileSync(join(box,'w4-state-calls'),'utf8'):'';
     return {result,closed,calls};
   };
-  let r=attempt(()=>undefined); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed); assert.equal(r.calls,'recovered\n');
+  let r=attempt(()=>undefined); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed); assert.equal(r.calls,'recovered\nrelease\n');
   r=attempt(b=>mkdirSync(join(b,'edge/failed-attempts',sha+'-W4-Abc123'),{recursive:true})); assert.equal(r.result.status,0,r.result.stderr);
   // A pre-existing drop-in is RESTORED by keeping it (A3); this check no longer requires its absence.
   r=attempt(b=>writeFileSync(join(b,'systemd/fixture.service.d/50-admin-measurement.conf'),'[Service]\n')); assert.equal(r.result.status,0,r.result.stderr);
@@ -2808,10 +2844,12 @@ test('admin release plan: W2 pre-fence close proves an empty ledger and needs a 
 const BOX_TIME = { verified_at: '2026-10-04T22:12:09.199316+00:00', retention_policy_observed_at: '2026-09-18T00:13:29.059720+00:00',
   restore_at: '2026-10-04T04:48:05.055995+00:00' };
 const boxTimeDir = resolve('tests/fixtures/box-time');
+// Isolation ignores PYTHONPATH, so load this test's fixed clock explicitly into its copied heredoc.
+const fixedBackupClock = (source: string) => source.replace("<<'PY'\n", "<<'PY'\n" + readFileSync(join(boxTimeDir, 'sitecustomize.py'), 'utf8') + '\n');
 
 test('box times: every box_utc copy is identical; it accepts the exact box samples and Z, and refuses other offsets, naive and 7 digits', () => {
   const copies = [...plan.matchAll(/^def box_utc\(value\):\n(?: {4}.*\n)+/gm)].map(m => m[0]);
-  assert.equal(copies.length, 7, 'producer, check, W2 status and W1/W5 closed.txt readers');
+  assert.equal(copies.length, 6, 'shared backup policy, W2 status and W1/W5 closed.txt readers');
   assert.equal(new Set(copies).size, 1, 'all copies identical');
   const parser = join(scratch, 'box-utc.py');
   writeFileSync(parser, `import datetime,json,re,sys\n${copies[0]}print(json.dumps([None if (t:=box_utc(v)) is None else t.isoformat() for v in json.loads(sys.argv[1])]))\n`);
@@ -2833,8 +2871,8 @@ test('box times: the plan\'s ai-w1-backup-gate and ai-backup-gate-check PASS on 
     writeFileSync(join(backups, 'status.json'), readFileSync(statusFile)); writeFileSync(join(backups, 'restore-status.json'), readFileSync(restoreFile));
     const inputs = { ...base(), window: 'W2b', window_id: 'Abc123', window_end_utc: '2026-10-04T22:50:00Z' };
     writeFileSync(join(proof, 'inputs.json'), JSON.stringify(inputs)); writeFileSync(join(proof, 'open.txt'), '2026-10-04T22:05:00Z\n');
-    writeFileSync(join(dir, 'check.sh'), gateBlock);
-    const producer = block('ai-w1-backup-gate').split('/var/backups/commonswarm-postgres').join(backups);
+    writeFileSync(join(dir, 'check.sh'), fixedBackupClock(gateBlock));
+    const producer = fixedBackupClock(block('ai-w1-backup-gate')).split('/var/backups/commonswarm-postgres').join(backups);
     const r = run(`ai_deadline() { :; }\nai_run() { test "$1" = ai-backup-gate-check || return 1; eval "$(cat '${join(dir, 'check.sh')}')"; }\n${producer}`,
       { WINDOW: 'W2b', PROOF_DIR: proof, INPUTS_FILE: join(proof, 'inputs.json'), PYTHONPATH: boxTimeDir, C1_TEST_FIXED_NOW: '2026-10-04T22:20:00Z' });
     return { r, proof };
@@ -2878,7 +2916,7 @@ test('box times: the exact Y W2b receipt (mixed +00:00 and Z) passes ai-backup-g
     writeFileSync(join(dir, 'backup-gate.json'), receipt + '\n');
     writeFileSync(join(dir, 'inputs.json'), JSON.stringify({ ...base(), release_sha: '14bf1604f3299885070a01b46c610c6dda02db0e', window: 'W2b', window_id: 'PLWaBd', window_end_utc: '2026-10-04T22:47:31Z' }));
     writeFileSync(join(dir, 'open.txt'), '2026-10-04T22:17:31Z\n');
-    return run(gateBlock, { BACKUP_GATE_DIR: dir, PYTHONPATH: boxTimeDir, C1_TEST_FIXED_NOW: '2026-10-04T22:20:00Z' });
+    return run(fixedBackupClock(gateBlock), { BACKUP_GATE_DIR: dir, PYTHONPATH: boxTimeDir, C1_TEST_FIXED_NOW: '2026-10-04T22:20:00Z' });
   };
   const good = check(Y_W2B_RECEIPT); assert.equal(good.status, 0, good.stderr);
   assert.match(good.stdout, /^PASS ai-backup-gate-check: W2b PLWaBd backup and restore fresh at gate 2026-10-04T22:18:24\.257697Z$/m);
@@ -4869,6 +4907,7 @@ test('C1-25: box-hosted blocks never call ai_run ai-gates or open evidence_root;
 });
 
 test('C1-25: box bind passes with no evidence tree; one-byte and other-release receipts refuse; ai-gates still needs the tree', () => {
+  const oldGate = oldGatesBlock(); let compared = 0;
   const contract = JSON.parse(readFileSync(join(directory, 'GATES.json'), 'utf8')) as {
     gates: Record<string, string[]>; windows: Record<string, string[]>;
   };
@@ -4888,6 +4927,9 @@ test('C1-25: box bind passes with no evidence tree; one-byte and other-release r
     writeFileSync(receiptPath, receipt);
     writeFileSync(join(proof, 'gates.json'), extra.gatesCopy ?? receipt);
     const inputs = { ...base(), window: 'W1', gate_receipt_sha256: digest(extra.digestReceipt ?? receipt) };
+    const env = { INPUTS_FILE: inputFile(inputs), GATE_RECEIPT_FILE: receiptPath, PLAN_FILE: planPath };
+    const current = run(block('ai-gates'), env), old = run(oldGate, env); compared++;
+    assert.deepEqual([current.status, current.stdout, current.stderr], [old.status, old.stdout, old.stderr], 'every existing bind-test receipt retains its old ai-gates verdict');
     return run(block('ai-gates-bind'), {
       INPUTS_FILE: inputFile(inputs), GATE_RECEIPT_FILE: receiptPath, PLAN_FILE: planPath, PROOF_DIR: proof,
     });
@@ -4903,6 +4945,8 @@ test('C1-25: box bind passes with no evidence tree; one-byte and other-release r
   });
   assert.notEqual(stillAbsent.status, 0);
   assert.match(stillAbsent.stderr, /FAIL ai-gates: evidence root; STOP/);
+  const oldAbsent = run(oldGate, { INPUTS_FILE: inputFile({ ...base(), window: 'W1', gate_receipt_sha256: digest(matching) }), GATE_RECEIPT_FILE: join(scratch, 'c125-gates-receipt.json'), PLAN_FILE: planPath }); compared++;
+  assert.deepEqual([stillAbsent.status, stillAbsent.stdout, stillAbsent.stderr], [oldAbsent.status, oldAbsent.stdout, oldAbsent.stderr], 'the seventh W1 control fixture retains its absent-evidence verdict');
   const flipped = Buffer.from(matching);
   flipped[10] ^= 1;
   const oneByte = runBind(flipped.toString('latin1'), { digestReceipt: matching, gatesCopy: matching });
@@ -4917,6 +4961,7 @@ test('C1-25: box bind passes with no evidence tree; one-byte and other-release r
   const otherRelease = runBind(other);
   assert.notEqual(otherRelease.status, 0);
   assert.match(otherRelease.stderr, /FAIL ai-gates-bind: receipt release_sha expected input-release-sha got mismatch; STOP/);
+  assert.equal(compared, 5, 'four bind variants plus the explicit absent-evidence fixture');
 });
 
 const GRANT_PASS = 'PASS W6 edge oauth-runtime SET grant: one f/f/t membership, edge others unchanged, issuer unchanged, live SET LOCAL ROLE';

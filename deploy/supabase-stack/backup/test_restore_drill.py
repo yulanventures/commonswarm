@@ -2,7 +2,9 @@
 """Fault controls for the real drill orchestration; no Docker or cloud access."""
 import base64
 import datetime
+import fnmatch
 import hashlib
+import io
 import importlib.util
 import json
 import os
@@ -15,6 +17,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import ExitStack, redirect_stdout
+from types import SimpleNamespace, ModuleType
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('drill', Path(__file__).with_name('restore-drill.py'))
@@ -25,7 +29,7 @@ spec.loader.exec_module(drill)
 class DrillTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.source = self.root / 'source'
         self.source.mkdir()
         self.name = '20260918T010000Z-' + 'a' * 32
@@ -39,25 +43,32 @@ class DrillTests(unittest.TestCase):
             'format=commonswarm-n-db-v2\n'
             'schemas=auth,public,realtime,storage,supabase_migrations,swarm,swarm_read,commonswarm_oauth,commonswarm_ops\n'
         )
-        (self.source / 'source-counts.tsv').write_text(
-            'auth.users|1\nstorage.objects|1\nswarm.agent_tokens|1\n'
-            'commonswarm_oauth.provider_artifacts|1\ncommonswarm_ops.migration_checksums|1\n'
-        )
+        self.counts = {table: 1 for table in drill.KEY_TABLES}
+        self.write_counts()
         self.rows = [dict(bucket='b', name='n', version='v')]
         (self.source / 'storage-backend-objects.ndjson').write_text(json.dumps(self.rows[0])+'\n')
         (self.source / 'physical-object-keys.txt').write_text('commonswarm/b/n/v\n')
         (self.source / 'offsite-binding.json').write_text(json.dumps(dict(destination=self.dest, objects=1)))
         self.sums()
         self.calls = []
-        self.label = None
-        self.network = None
         self.resources = {'container': {}, 'network': {}}
         self.ip = '172.25.0.2'
         self.fail_script = None
+        self.ddl = 'CREATE TABLE swarm.agent_tokens (token_id uuid);\n\nCREATE FUNCTION swarm.proof() RETURNS integer LANGUAGE plpgsql AS $$\n-- keep this body comment\nBEGIN RETURN 1; END\n$$;\n'
+        self.schema = [('swarm', 'agent_tokens', 'TABLE', self.ddl)]
+        self.databases = {}
+        self.target_ddl = None
+        self.target_extra = []
+        self.target_remove = set()
+        self.write_schema()
+        self.removed_statuses = []
+        self.database_env = ''
         self.cleanup_fail = False
         self.owner_wrong = False
         self.results = [dict(index=0,status=200,matches=True)]
+        token_hex = drill.secrets.token_hex
         self.patches = [patch.object(drill,'LOCK_PATH',str(self.root/'lock')),
+                        patch.object(drill.secrets, 'token_hex', side_effect=lambda n: 'f' * 48 if n == 24 else token_hex(n)),
                         patch.object(drill,'STATUS_FILE',str(self.root/'status.json')),
                         patch.object(drill,'WORKDIR_BASE',str(self.root/'work')),
                         patch.object(drill,'run_cmd',side_effect=self.command),
@@ -72,7 +83,16 @@ class DrillTests(unittest.TestCase):
         self.temp.cleanup()
 
     def sums(self):
-        (self.source/'SHA256SUMS').write_text(''.join(hashlib.sha256((self.source/n).read_bytes()).hexdigest()+'  '+n+'\n' for n in sorted(drill.REQUIRED_FILES)))
+        files = drill.LOCAL_FILES if getattr(self, 'local', False) else drill.REQUIRED_FILES
+        (self.source/'SHA256SUMS').write_text(''.join(hashlib.sha256((self.source/n).read_bytes()).hexdigest()+'  '+n+'\n' for n in sorted(files)))
+
+    def write_counts(self):
+        (self.source / 'source-counts.tsv').write_text(''.join(f'{table}|{count}\n' for table, count in self.counts.items()))
+        self.sums()
+
+    def write_schema(self):
+        (self.source / 'database.dump').write_text(json.dumps(self.schema))
+        self.sums()
 
     def command(self,args,**kw):
         self.calls.append(args)
@@ -89,13 +109,54 @@ class DrillTests(unittest.TestCase):
         elif args[:2] in (['docker','run'],['docker','create']):
             if '--name' in args:
                 self.resources['container'][args[args.index('--name')+1]]=self.label
+            if args[:2] == ['docker', 'run'] and '-d' in args:
+                output = 'c' * 64 + '\n'
+                self.database_env = Path(args[args.index('--env-file') + 1]).read_text()
+            if '--entrypoint' in args:
+                tool = args[args.index('--entrypoint') + 1]
+                artifact = next((Path(a.split(':')[0]) for a in args if a.endswith(':/artifacts')), self.source)
+                if tool == 'pg_restore':
+                    objects = json.loads((artifact / 'database.dump').read_text())
+                    if '--list' in args:
+                        output = ''.join(f'{i}; 0 0 {kind} {schema} {name} postgres\n' for i, (schema, name, kind, _) in enumerate(objects, 1))
+                    elif '--dbname=service=source' in args:
+                        self.databases['source'] = [obj for obj in objects
+                            if not (obj[2].startswith('PUBLICATION') and '--no-publications' in args)
+                            and not (obj[2] == 'SUBSCRIPTION' and '--no-subscriptions' in args)]
+                    else:  # Pre-fix pg_restore emits unfiltered archive DDL.
+                        output = self.dump_headers('source', ''.join(obj[3] for obj in objects))
+                elif tool == 'pg_dump':
+                    service = next(a.removeprefix('--dbname=service=') for a in args if a.startswith('--dbname=service='))
+                    schemas = [a.removeprefix('--schema=') for a in args if a.startswith('--schema=')]
+                    exclusions = [a.removeprefix('--exclude-table=') for a in args if a.startswith('--exclude-table=')]
+                    excluded_schemas = [a.removeprefix('--exclude-schema=') for a in args if a.startswith('--exclude-schema=')]
+                    # PG17 pg_dump.c: --schema clears include_everything, so selectDumpablePublicationObject
+                    # and selectDumpableObject skip publications, their membership and subscriptions.
+                    output = self.dump_headers(service, ''.join(ddl for schema, name, kind, ddl in self.databases[service]
+                        if (kind in ('SUBSCRIPTION', 'PUBLICATION') or
+                            (not schemas or schema in schemas) and schema not in excluded_schemas)
+                        and not (kind in ('TABLE', 'PUBLICATION TABLE') and any(fnmatch.fnmatchcase(schema + '.' + name.split()[-1], p) for p in exclusions))
+                        and not (kind.startswith('PUBLICATION') and (schemas or '--no-publications' in args))
+                        and not (kind == 'SUBSCRIPTION' and (schemas or '--no-subscriptions' in args))))
+                elif tool == 'psql' and '-c' in args:
+                    service = next(a.removeprefix('--dbname=service=') for a in args if a.startswith('--dbname=service='))
+                    output = ''.join(schema + '\n' for schema in sorted({obj[0] for obj in self.databases[service]}
+                        - drill.REQUIRED_DATABASE_SCHEMAS - {'-'}))
             if args[-1].startswith('/work/migrate/') and args[-1].endswith(str(self.fail_script)):
                 return subprocess.CompletedProcess(args,1,'','injected partial restore')
+            if args[-1].endswith('/restore-target.sh'):
+                replacements = {(obj[0], obj[1]) for obj in self.target_extra}
+                self.databases['target'] = [obj for obj in json.loads((artifact / 'database.dump').read_text())
+                                            if (obj[0], obj[1]) not in replacements and tuple(obj[:3]) not in self.target_remove] + self.target_extra
+                if self.target_ddl is not None:
+                    self.databases['target'][0][3] = self.target_ddl
         elif args[:2]==['docker','inspect']:
             output=json.dumps([{'Config':{'Labels':dict([self.label.split('=',1)])},'HostConfig':{'PortBindings':{}},
                                'NetworkSettings':{'Networks':{self.network:{'IPAddress':self.ip}}}}])
         elif args[:2]==['docker','exec'] and 'psql' in args[-1]:
-            output='off\n' if 'pg_settings' in kw.get('input','') else '1\n'
+            query = kw.get('input', '')
+            output = ((self.source / 'source-counts.tsv').read_text() if 'UNION ALL' in query else
+                      'off\n' if 'pg_settings' in query else '1\n')
         elif args[:3]==['docker','ps','-aq']:output='\n'.join(self.resources['container'])
         elif args[:3]==['docker','network','ls']:output='\n'.join(self.resources['network'])
         elif args[0]=='docker' and args[1] in ('container','network') and args[2]=='inspect':
@@ -106,43 +167,278 @@ class DrillTests(unittest.TestCase):
         elif args[:2]==['docker','rm'] or args[:3]==['docker','network','rm']:
             if self.cleanup_fail:raise subprocess.CalledProcessError(1,args)
             kind='container' if args[1]=='rm' else 'network'
+            if kind == 'container':
+                self.removed_statuses.append(self.status())
             del self.resources[kind][args[-1]]
         return subprocess.CompletedProcess(args,0,output,'')
 
-    def status(self):return json.loads((self.root/'status.json').read_text())
+    def status(self):return json.loads(Path(drill.STATUS_FILE).read_text())
+
+    def test_local_identity_and_path_refusals_before_artifact_io(self):
+        raw = b'measured-machine-id\n'
+        machine = self.root / 'machine-id'
+        machine.write_bytes(raw)
+        link = self.root / 'machine-link'
+        link.symlink_to(machine)
+        fifo = self.root / 'machine-fifo'
+        os.mkfifo(fifo)
+        directory_link = self.root / 'source-link'
+        directory_link.symlink_to(self.source, target_is_directory=True)
+        relative = Path(os.path.relpath(self.source))
+        self.assertTrue(relative.is_dir())
+        real_open, real_hash = os.open, hashlib.sha256
+        production = '6b63dad34fa7ced95e4f653aecb7e37ea7aa2a32902bdd593e23e93bb9877b22'
+        cases = [(drill.STAGING_HOST, drill.STAGING_MACHINE_SHA256, machine, self.source, True),
+                 ('yulan-vps-1', production, machine, self.source, False),
+                 (drill.STAGING_HOST, production, machine, self.source, False),
+                 ('yulan-vps-1', drill.STAGING_MACHINE_SHA256, machine, self.source, False),
+                 (drill.STAGING_HOST, drill.STAGING_MACHINE_SHA256, link, self.source, False),
+                 (drill.STAGING_HOST, drill.STAGING_MACHINE_SHA256, fifo, self.source, False),
+                 (drill.STAGING_HOST, drill.STAGING_MACHINE_SHA256, self.root, self.source, False),
+                 (drill.STAGING_HOST, drill.STAGING_MACHINE_SHA256, self.root / 'missing', self.source, False),
+                 (drill.STAGING_HOST, drill.STAGING_MACHINE_SHA256, machine, relative, False),
+                 (drill.STAGING_HOST, drill.STAGING_MACHINE_SHA256, machine, directory_link, False)]
+        for host, digest, identity_path, artifact, accepted in cases:
+            with self.subTest(host=host, identity=identity_path, artifact=artifact), ExitStack() as stack:
+                if identity_path == fifo:
+                    writer = stack.enter_context(subprocess.Popen([
+                        sys.executable, '-I', '-B', '-c',
+                        'import os, sys; fd = os.open(sys.argv[1], os.O_WRONLY); '
+                        'os.write(fd, bytes.fromhex(sys.argv[2])); os.close(fd)', str(fifo), raw.hex()]))
+                    stack.callback(lambda: writer.kill() if writer.poll() is None else None)
+                def open_identity(path, flags, *args):
+                    if accepted and path == drill.LOCK_PATH:
+                        raise AssertionError('admitted lock boundary')
+                    self.assertEqual(path, '/etc/machine-id')
+                    self.assertEqual(flags, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    fd = real_open(identity_path, flags, *args)
+                    if identity_path == fifo:
+                        try:
+                            self.assertEqual(writer.wait(timeout=3), 0)
+                        except BaseException:
+                            os.close(fd)
+                            raise
+                    return fd
+                stack.enter_context(patch.object(drill.os, 'open', side_effect=open_identity))
+                stack.enter_context(patch.object(drill.os, 'uname', return_value=SimpleNamespace(nodename=host)))
+                hashed = stack.enter_context(patch.object(drill.hashlib, 'sha256', side_effect=lambda data: SimpleNamespace(hexdigest=lambda: digest) if data == raw else real_hash(data)))
+                stack.enter_context(patch.object(sys, 'argv', ['restore-drill.py', '--local-artifact', str(artifact)]))
+                stack.enter_context(patch.object(Path, 'open', side_effect=AssertionError('artifact read before admission')))
+                if accepted:
+                    # A positive admission reaches the first status write; no real file/tool work.
+                    with self.assertRaisesRegex(AssertionError, 'admitted lock boundary'):
+                        drill.main()  # The next os.open is the lock, proving admission.
+                    hashed.assert_called_once_with(raw)
+                else:
+                    self.assertEqual(drill.main(), 64)
+                self.assertEqual(self.calls, [])
+
+    def test_local_restore_status_cleanup_and_checksum_failures(self):
+        self.local = True
+        self.sums()
+        with patch.object(drill, 'staging_guard'), patch.object(sys, 'argv', ['restore-drill.py', '--local-artifact', str(self.source)]):
+            for fault in (None, 'restore-target.sh', 'prepare-target.sh', 'exception', 'checksum', 'corruption'):
+                with self.subTest(fault=fault):
+                    self.calls.clear()
+                    self.removed_statuses.clear()
+                    self.fail_script = fault
+                    if fault == 'checksum':
+                        (self.source / 'SHA256SUMS').write_text('')
+                    if fault == 'corruption':
+                        self.sums()
+                        (self.source / 'database.dump').write_text('corruption')
+                    original = self.command
+                    def command(args, **kwargs):
+                        if fault == 'exception' and args[-1].endswith('restore-target.sh'):
+                            raise InterruptedError('injected interruption')
+                        return original(args, **kwargs)
+                    with patch.object(drill, 'run_cmd', side_effect=command):
+                        self.assertEqual(drill.main(), int(fault is not None))
+                    status = self.status()
+                    self.assertEqual((status['source'], status['objects'], status['scope']),
+                                     ('local-staging:' + str(self.source), 'not-in-local-dump', 'database-only'))
+                    self.assertEqual(status['status'], 'PASS' if fault is None else 'FAIL')
+                    self.assertFalse(any(self.resources.values()))
+                    self.assertFalse(any(call[0] == 'rclone' for call in self.calls))
+                    for boundary in (drill.generate_temp_credentials, drill.fetch_offsite_bytes, drill.fetch_api_bytes):
+                        boundary.assert_not_called()
+                    if fault in ('checksum', 'corruption'):
+                        self.assertFalse(any('--entrypoint' in call for call in self.calls))
+                    else:
+                        self.assert_status_before_removal(status)
+                    if fault is None:
+                        self.assertIs(status['all_files_verified'], False)
+                        self.assertEqual([call[-1] for call in self.calls if call[-1].startswith('/work/migrate/')],
+                                         ['/work/migrate/' + name for name in ('restore-target.sh', 'prepare-target.sh', 'restore-cron-jobs.sh', 'verify-counts.sh')])
+                        self.assertEqual(status['schema_checksums']['algorithm'], 'sha256-schema-ddl-v3')
+                        self.assertEqual(status['schema_checksums']['source'], status['schema_checksums']['target'])
+                        self.assertEqual(status['key_table_counts'], {table: dict(source=1, target=1) for table in drill.KEY_TABLES})
+                        self.assertEqual(datetime.datetime.fromisoformat(status['restored_at']).utcoffset(), datetime.timedelta(0))
+
+    def test_staging_pins_match_u9_and_release(self):
+        root = Path(__file__).resolve().parents[3]
+        u9 = (root / 'scripts/c1-staging-u9/common.py').read_text()
+        release = (root / 'docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md').read_text()
+        for text in (u9, release):
+            for pin in (drill.STAGING_HOST, drill.STAGING_MACHINE_SHA256):
+                self.assertEqual(text.count("'" + pin + "'"), 1)
+
+    def test_no_flag_output_and_status_bytes_match_base(self):
+        baseline = ModuleType('baseline_drill')
+        baseline.__file__ = drill.__file__
+        try:
+            source = subprocess.run(['git', 'show', '12e4caa9:deploy/supabase-stack/backup/restore-drill.py'],
+                                    cwd=Path(__file__).resolve().parents[3], check=True, capture_output=True, text=True).stdout
+        except (OSError, subprocess.CalledProcessError) as error:
+            self.fail(f'Cannot load byte-identity baseline 12e4caa9 with git: {getattr(error, "stderr", None) or error}')
+        exec(compile(source, baseline.__file__, 'exec'), baseline.__dict__)
+        for key in ('LOCK_PATH', 'STATUS_FILE', 'WORKDIR_BASE', 'run_cmd', 'generate_temp_credentials', 'fetch_offsite_bytes', 'fetch_api_bytes'):
+            baseline.__dict__[key] = drill.__dict__[key]
+        fixed = datetime.datetime(2026, 10, 11, tzinfo=datetime.timezone.utc)
+        class Clock(datetime.datetime):
+            @classmethod
+            def now(cls, tz=None): return fixed
+        with patch.object(drill.datetime, 'datetime', Clock), patch.object(drill.secrets, 'token_hex', side_effect=lambda n: 'a' * (2*n)), patch.object(sys, 'argv', ['restore-drill.py']):
+            for fault in (None, 'prepare-target.sh'):
+                snapshots = []
+                self.fail_script = fault
+                for module in (drill, baseline):
+                    self.calls.clear()
+                    self.removed_statuses.clear()
+                    output = io.StringIO()
+                    with redirect_stdout(output): code = module.main()
+                    snapshots.append((code, output.getvalue().encode(), Path(drill.STATUS_FILE).read_bytes(), list(self.calls), list(self.removed_statuses)))
+                    work = self.root / 'work'
+                    work.rename(self.root / ('saved-' + module.__name__ + '-' + str(fault)))
+                self.assertEqual(snapshots[0], snapshots[1])
+
+    def dump_headers(self, key, ddl):
+        return f'--\n-- PostgreSQL database dump\n--\n\n\\restrict {key}\n\n-- Dumped from database version 17.6\n-- Dumped by pg_dump version 17.6\n\n{ddl}--\n-- PostgreSQL database dump complete\n--\n\n\\unrestrict {key}\n\n'
+
+    def assert_failed(self, before_docker=False):
+        self.assertEqual(drill.main(), 1)
+        self.assertFalse(self.status()['ok'])
+        self.assertFalse(any(self.resources.values()))
+        if before_docker:
+            self.assertFalse(any(a[0] == 'docker' and 'create' in a for a in self.calls))
 
     def test_full_orchestration_success_and_cleanup(self):
-        self.assertEqual(drill.main(),0)
-        self.assertTrue(self.status()['ok'])
-        self.assertEqual(self.status()['objects'],1)
+        self.assertEqual((drill.main(), self.status()['ok'], self.status()['objects']), (0, True, 1))
         self.assertFalse(any(self.resources.values()))
         scripts=[a[-1] for a in self.calls if a[-1].startswith('/work/migrate/')]
         self.assertEqual(scripts, ['/work/migrate/'+s for s in ['restore-target.sh','prepare-target.sh','restore-cron-jobs.sh','verify-counts.sh']])
         self.assertFalse(list((self.root/'work').rglob('*.env')))
         self.assertFalse(list((self.root/'work').rglob('pass')))
+        status = self.status()
+        self.assertEqual(status['status'], 'PASS')
+        self.assertEqual(status['restore_container_id'], 'c' * 64)
+        self.assertEqual(status['database'], 'postgres')
+        restored = datetime.datetime.fromisoformat(status['restored_at'])
+        self.assertEqual(restored.utcoffset(), datetime.timedelta(0))
+        self.assertLessEqual(restored, datetime.datetime.fromisoformat(status['at']))
+        digest = hashlib.sha256(self.ddl.encode()).hexdigest()
+        self.assertEqual(status['schema_checksums'], dict(algorithm='sha256-schema-ddl-v3', source=digest, target=digest))
+        self.assertEqual(status['key_table_counts'], {
+            table: {'source': 1, 'target': 1} for table in drill.KEY_TABLES})
+        self.assert_status_before_removal(status)
+
+    def test_schema_checksums_detect_body_comment_and_column_changes(self):
+        for source, target in ((self.ddl, self.ddl.replace('-- keep this body comment', '-- changed body comment')),
+                               (self.ddl, self.ddl.replace('token_id uuid', 'token_id uuid, added integer')),
+                               (self.ddl.replace('-- keep this body comment', '-- Dumped by pg_dump version 17.6'),
+                                self.ddl.replace('-- keep this body comment', '-- Dumped by pg_dump version 99.0'))):
+            with self.subTest(source=source, target=target):
+                self.schema[0] = ('swarm', 'agent_tokens', 'TABLE', source)
+                self.write_schema()
+                self.target_ddl = target
+                self.assertEqual(drill.main(), 0)
+                checksums = self.status()['schema_checksums']
+                self.assertNotEqual(checksums['source'], checksums['target'])
+
+    def test_schema_checksums_match_with_different_excluded_objects(self):
+        publication = ('-', 'live', 'PUBLICATION', "CREATE PUBLICATION live WITH (publish = 'insert');\n")
+        self.schema.append(publication)
+        self.schema += [('public', 'commonswarm_cutover_probe', 'TABLE', 'CREATE TABLE public.commonswarm_cutover_probe (a int);\n'),
+                        ('public', 'commonswarm_cutover_state', 'TABLE', 'CREATE TABLE public.commonswarm_cutover_state (a int);\n'),
+                        ('realtime', 'messages_old', 'TABLE', 'CREATE TABLE realtime.messages_old (a int);\n'),
+                        ('public', 'live commonswarm_cutover_probe', 'PUBLICATION TABLE', 'ALTER PUBLICATION live ADD TABLE ONLY public.commonswarm_cutover_probe;\n'),
+                        ('public', 'live commonswarm_cutover_state', 'PUBLICATION TABLE', 'ALTER PUBLICATION live ADD TABLE ONLY public.commonswarm_cutover_state;\n'),
+                        ('realtime', 'live messages_old', 'PUBLICATION TABLE', 'ALTER PUBLICATION live ADD TABLE ONLY realtime.messages_old;\n'),
+                        ('outside', 'extra', 'TABLE', 'CREATE TABLE outside.extra (a int);\n'),
+                        ('outside', 'live extra', 'PUBLICATION TABLE', 'ALTER PUBLICATION live ADD TABLE ONLY outside.extra;\n'),
+                        ('outside', 'live outside', 'PUBLICATION TABLES IN SCHEMA', 'ALTER PUBLICATION live ADD TABLES IN SCHEMA outside;\n')]
+        self.target_extra = [(schema, name, kind, ddl.replace('(a int)', '(b text)').replace(';\n', ' /* different */;\n'))
+                             for schema, name, kind, ddl in self.schema[2:]]
+        self.write_schema()
+        self.assertEqual(drill.main(), 0)
+        checksums = self.status()['schema_checksums']
+        self.assertEqual(checksums['source'], checksums['target'])
+        self.assertEqual(checksums['source'], hashlib.sha256((self.ddl + publication[3]).encode()).hexdigest())
+
+    def test_schema_checksums_include_publications_memberships_and_subscriptions(self):
+        publication = ('-', 'live', 'PUBLICATION', "CREATE PUBLICATION live WITH (publish = 'insert, update');\n")
+        membership = ('swarm', 'live agent_tokens', 'PUBLICATION TABLE', 'ALTER PUBLICATION live ADD TABLE ONLY swarm.agent_tokens;\n')
+        namespace = ('swarm', 'live swarm', 'PUBLICATION TABLES IN SCHEMA', 'ALTER PUBLICATION live ADD TABLES IN SCHEMA swarm;\n')
+        subscription = ('-', 'feed', 'SUBSCRIPTION', "CREATE SUBSCRIPTION feed CONNECTION 'host=example.invalid' PUBLICATION live WITH (connect = false, slot_name = NONE);\n")
+        for name, source, target in (
+            ('publication added', [], [publication]), ('publication removed', [publication], []),
+            ('membership added', [publication], [publication, membership]),
+            ('membership removed', [publication, membership], [publication]),
+            ('publish options', [publication], [(*publication[:3], publication[3].replace('insert, update', 'insert'))]),
+            ('membership filter', [publication, membership], [publication, (*membership[:3], membership[3].replace(';', ' (token_id) WHERE (token_id IS NOT NULL);'))]),
+            ('schema membership', [publication], [publication, namespace]),
+            ('subscription added', [], [subscription]), ('subscription removed', [subscription], []),
+            ('subscription options', [subscription], [(*subscription[:3], subscription[3].replace('slot_name = NONE', 'slot_name = NONE, binary = true'))]),
+            ('correct restore', [publication, membership, namespace, subscription], [publication, membership, namespace, subscription]),
+        ):
+            with self.subTest(change=name):
+                self.schema = [('swarm', 'agent_tokens', 'TABLE', self.ddl)] + source
+                self.target_extra = target
+                self.target_remove = {tuple(obj[:3]) for obj in source}
+                self.write_schema()
+                self.assertEqual(drill.main(), 0)
+                checksums = self.status()['schema_checksums']
+                self.assertNotIn('host=example.invalid', json.dumps(self.status()))
+                self.assertEqual(checksums['source'], hashlib.sha256((self.ddl + ''.join(obj[3] for obj in source)).encode()).hexdigest())
+                if name == 'correct restore':
+                    self.assertEqual(checksums['source'], checksums['target'])
+                else:
+                    self.assertNotEqual(checksums['source'], checksums['target'])
 
     def test_partial_restore_fails_and_cleans(self):
-        self.fail_script='prepare-target.sh'
-        self.assertEqual(drill.main(),1)
-        self.assertFalse(self.status()['ok'])
-        self.assertFalse(any(self.resources.values()))
-        self.assertFalse(any(a[-1].endswith('verify-counts.sh') for a in self.calls))
+        for script in ('restore-target.sh', 'prepare-target.sh'):
+            with self.subTest(script=script):
+                self.fail_script = script
+                self.removed_statuses.clear()
+                self.assertEqual(drill.main(), 1)
+                status = self.status()
+                self.assertFalse(status['ok'])
+                self.assertEqual(status['status'], 'FAIL')
+                self.assertEqual('restored_at' in status, script == 'prepare-target.sh')
+                self.assertEqual('target' in status['schema_checksums'], script == 'prepare-target.sh')
+                self.assertEqual(status['key_table_counts'], {table: dict(source=1, **({'target': 1} if script == 'prepare-target.sh' else {})) for table in drill.KEY_TABLES})
+                self.assertFalse(any(self.resources.values()))
+                self.assertFalse(any(a[-1].endswith('verify-counts.sh') for a in self.calls))
+                self.assert_status_before_removal(status)
+
+    def assert_status_before_removal(self, final):
+        self.assertTrue(self.removed_statuses)
+        for saved in self.removed_statuses:
+            self.assertEqual(saved['restore_container_id'], 'c' * 64)
+            for key in ('status', 'restore_container_id', 'database', 'restored_at', 'schema_checksums', 'key_table_counts'):
+                self.assertEqual(saved.get(key), final.get(key))
+            raw = json.dumps(saved)
+            password = 'f' * 48
+            self.assertIn(password, self.database_env)  # Positive control: stub consumed the credential file.
+            self.assertNotIn(password, raw)
+            self.assertNotRegex(raw, r'(?i)postgres(?:ql)?://|(?:password|secret|service_key|session_token)=|eyJ[\w-]+\.')
+        self.assertNotIn(password, Path(drill.STATUS_FILE).read_text())
 
     def test_corrupt_file_fails(self):
-        self.results=[dict(index=0,status=200,matches=False)]
-        self.assertEqual(drill.main(),1)
-        self.assertFalse(self.status()['ok'])
-        self.assertFalse(any(self.resources.values()))
-
-    def test_missing_api_result_fails(self):
-        self.results=[]
-        self.assertEqual(drill.main(),1)
-        self.assertFalse(self.status()['ok'])
-
-    def test_wrong_api_index_fails(self):
-        self.results=[dict(index=9,status=200,matches=True)]
-        self.assertEqual(drill.main(),1)
-        self.assertFalse(self.status()['ok'])
+        for results in ([dict(index=0,status=200,matches=False)], [], [dict(index=9,status=200,matches=True)]):
+            with self.subTest(results=results):
+                self.results = results
+                self.assert_failed()
 
     def test_production_address_refused_before_restore(self):
         self.ip='172.31.0.10'
@@ -174,13 +470,11 @@ class DrillTests(unittest.TestCase):
 
     def test_bad_checksum_inventory_fails_before_docker(self):
         (self.source/'SHA256SUMS').write_text('')
-        self.assertEqual(drill.main(),1)
-        self.assertFalse(any(a[0]=='docker' and 'create' in a for a in self.calls))
+        self.assert_failed(before_docker=True)
 
     def test_corrupt_artifact_fails_before_docker(self):
         (self.source/'database.dump').write_text('corruption')
-        self.assertEqual(drill.main(),1)
-        self.assertFalse(any(a[0]=='docker' and 'create' in a for a in self.calls))
+        self.assert_failed(before_docker=True)
 
     def test_manifest_without_commonswarm_ops_is_refused(self):
         (self.source/'manifest.txt').write_text(
@@ -188,44 +482,27 @@ class DrillTests(unittest.TestCase):
             'schemas=auth,public,realtime,storage,supabase_migrations,swarm,swarm_read,commonswarm_oauth\n'
         )
         self.sums()
-        self.assertEqual(drill.main(),1)
-        self.assertFalse(self.status()['ok'])
-        self.assertFalse(any(a[0]=='docker' and 'create' in a for a in self.calls))
+        self.assert_failed(before_docker=True)
 
     def test_counts_without_migration_checksums_are_refused(self):
-        (self.source/'source-counts.tsv').write_text(
-            'auth.users|1\nstorage.objects|1\nswarm.agent_tokens|1\n'
-            'commonswarm_oauth.provider_artifacts|1\n'
-        )
-        self.sums()
-        self.assertEqual(drill.main(),1)
-        self.assertFalse(self.status()['ok'])
-        self.assertFalse(any(a[0]=='docker' and 'create' in a for a in self.calls))
-
-    def _ops_count(self, count):
-        (self.source/'source-counts.tsv').write_text(
-            'auth.users|1\nstorage.objects|1\nswarm.agent_tokens|1\n'
-            'commonswarm_oauth.provider_artifacts|1\n'
-            'commonswarm_ops.migration_checksums|%s\n' % count
-        )
-        self.sums()
+        del self.counts['commonswarm_ops.migration_checksums']
+        self.write_counts()
+        self.assert_failed(before_docker=True)
 
     def test_zero_migration_checksum_rows_are_refused(self):
-        self._ops_count(0)
-        self.assertEqual(drill.main(),1)
-        self.assertFalse(self.status()['ok'])
-        self.assertFalse(any(a[0]=='docker' and 'create' in a for a in self.calls))
+        self.counts['commonswarm_ops.migration_checksums'] = 0
+        self.write_counts()
+        self.assert_failed(before_docker=True)
 
     def test_positive_migration_checksum_rows_pass_validation(self):
-        self._ops_count(7)
-        self.assertEqual(drill.main(),0)
-        self.assertTrue(self.status()['ok'])
+        self.counts['commonswarm_ops.migration_checksums'] = 7
+        self.write_counts()
+        self.assertEqual((drill.main(), self.status()['ok']), (0, True))
 
     def test_cardinality_mismatch_fails(self):
         (self.source/'storage-backend-objects.ndjson').write_text('')
         self.sums()
-        self.assertEqual(drill.main(),1)
-        self.assertFalse(self.status()['ok'])
+        self.assert_failed(before_docker=True)
 
     def test_newer_incomplete_snapshot_skipped(self):
         newer='20990101T000000Z-'+'b'*32
@@ -238,8 +515,7 @@ class DrillTests(unittest.TestCase):
 
     def test_stale_completed_backup_fails(self):
         self.marker['verified_at']='2020-01-01T00:00:00Z'
-        self.assertEqual(drill.main(),1)
-        self.assertFalse(self.status()['ok'])
+        self.assert_failed(before_docker=True)
 
     def test_old_drill_directories_stay_inside_the_keep_bound(self):
         self.assertEqual(drill.DRILL_WORKDIR_KEEP, 2)
@@ -316,11 +592,6 @@ class UnitFileTests(unittest.TestCase):
         self.assertEqual(drill.LOCK_PATH, '/var/lock/commonswarm-postgres-maintenance.lock')
         backup = self.text('run-backup.sh')
         self.assertIn(drill.LOCK_PATH, backup)
-        self.assertIn('flock -n 9', backup)
-        self.assertIn('LOCK_PATH', Path(__file__).with_name('restore-drill.py').read_text())
-        source = Path(__file__).with_name('restore-drill.py').read_text()
-        self.assertIn('counts the current run', source)
-        self.assertIn('DRILL_WORKDIR_KEEP = 2', source)
         readme = Path(__file__).with_name('README.md').read_text()
         self.assertIn("current run's directory plus one earlier run", readme)
         self.assertIn('`DRILL_WORKDIR_KEEP = 2`', readme)
@@ -329,53 +600,29 @@ class UnitFileTests(unittest.TestCase):
             ('RUNBOOK.md', Path(__file__).resolve().parents[1].joinpath('RUNBOOK.md').read_text()),
         ):
             self.assertNotIn('try-restart', text, label)
-            stop = text.index('systemctl stop commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer')
-            check = text.index('systemctl is-active commonswarm-postgres-backup.service commonswarm-postgres-restore.service')
-            switch = text.index('ln -sfn /home/commonswarm/stack/releases/<sha> /home/commonswarm/stack/current')
-            reload = text.index('systemctl daemon-reload')
-            start = text.index('systemctl start commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer')
-            listed = text.index('systemctl list-timers commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer')
-            self.assertLess(stop, check, label)
-            self.assertLess(check, switch, label)
-            self.assertLess(switch, reload, label)
-            self.assertLess(reload, start, label)
-            self.assertLess(start, listed, label)
+            positions = [text.index(step) for step in (
+                'systemctl stop commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer',
+                'systemctl is-active commonswarm-postgres-backup.service commonswarm-postgres-restore.service',
+                'ln -sfn /home/commonswarm/stack/releases/<sha> /home/commonswarm/stack/current',
+                'systemctl daemon-reload',
+                'systemctl start commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer',
+                'systemctl list-timers commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer')]
+            self.assertEqual(positions, sorted(set(positions)), label)
             self.assertIn('Do not proceed while either line is `active`', text, label)
             self.assertIn('Do not start', text, label)
             self.assertNotIn('systemctl start commonswarm-postgres-backup.service', text, label)
             self.assertNotIn('systemctl start commonswarm-postgres-restore.service', text, label)
 
 
-BACKUP_LOCK_PATH = '/var/lock/commonswarm-postgres-maintenance.lock'
 FLOCK_SHIM = '''#!/usr/bin/env python3
 import fcntl
 import sys
-args = sys.argv[1:]
-nonblock = False
-shared = False
-fd = None
-for arg in args:
-    if arg in ('-n', '--nb', '--nonblock'):
-        nonblock = True
-    elif arg in ('-s', '--shared'):
-        shared = True
-    elif arg in ('-x', '--exclusive'):
-        shared = False
-    elif arg.isdigit():
-        fd = int(arg)
-    else:
-        sys.stderr.write('flock shim: unsupported arg %s\\n' % arg)
-        sys.exit(2)
-if fd is None:
+if sys.argv[1:] != ['-n', '9']:
     sys.exit(2)
-op = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
-if nonblock:
-    op |= fcntl.LOCK_NB
 try:
-    fcntl.flock(fd, op)
+    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError:
     sys.exit(1)
-sys.exit(0)
 '''
 
 
@@ -384,17 +631,15 @@ def backup_lock_script():
     lines = Path(__file__).with_name('run-backup.sh').read_text().splitlines()
     exec_line = next(line for line in lines if line.startswith('exec 9>'))
     flock_line = next(line for line in lines if line.startswith('flock '))
-    if BACKUP_LOCK_PATH not in exec_line:
+    if drill.LOCK_PATH not in exec_line:
         raise AssertionError('backup lock path missing from exec line')
-    exec_line = exec_line.replace(BACKUP_LOCK_PATH, '"$LOCK_PATH"')
-    return '\n'.join([
-        'set -euo pipefail',
-        exec_line,
-        flock_line,
-        ': > "$WORK_MARKER"',
-        'while [ ! -e "$RELEASE_PATH" ]; do sleep 0.05; done',
-        '',
-    ])
+    exec_line = exec_line.replace(drill.LOCK_PATH, '"$LOCK_PATH"')
+    return f'''set -euo pipefail
+{exec_line}
+{flock_line}
+: > "$WORK_MARKER"
+while [ ! -e "$RELEASE_PATH" ]; do sleep 0.05; done
+'''
 
 
 def maintenance_lock_child(argv):
@@ -470,15 +715,12 @@ class LockBehaviourTests(unittest.TestCase):
 
         def finish(proc, timeout):
             try:
-                code = proc.wait(timeout=timeout)
+                _, err = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait(timeout=5)
-                self.close_pipes(proc)
+                proc.communicate(timeout=5)
                 self.fail('process still running: %s' % proc.args)
-            err = proc.stderr.read() if proc.stderr else ''
-            self.close_pipes(proc)
-            return code, err
+            return proc.returncode, err
 
         def start_backup(work_name, release_name):
             env = os.environ.copy()
@@ -490,7 +732,7 @@ class LockBehaviourTests(unittest.TestCase):
 
         def start_drill(role, drill_root):
             return spawn([
-                sys.executable, str(Path(__file__).resolve()),
+                sys.executable, '-I', '-B', str(Path(__file__).resolve()),
                 '--maintenance-lock-child', role, str(drill_root), lock_path,
             ])
 
@@ -518,7 +760,7 @@ class LockBehaviourTests(unittest.TestCase):
             self.assertEqual(second_code, 75, second_err)
             self.assertFalse((root / 'backup-second-work').exists())
             probe = spawn([
-                sys.executable, str(Path(__file__).resolve()),
+                sys.executable, '-I', '-B', str(Path(__file__).resolve()),
                 '--shared-lock-probe', lock_path, str(root / 'shared-work'),
             ])
             probe_code, probe_err = finish(probe, 15)
@@ -530,13 +772,7 @@ class LockBehaviourTests(unittest.TestCase):
             for proc in procs:
                 if proc.poll() is None:
                     proc.kill()
-                    proc.wait(timeout=5)
-                self.close_pipes(proc)
-
-    def close_pipes(self, proc):
-        for pipe in (proc.stdout, proc.stderr):
-            if pipe is not None and not pipe.closed:
-                pipe.close()
+                proc.communicate(timeout=5)
 
     def wait_until(self, path, proc, timeout=20):
         deadline = time.time() + timeout
@@ -544,8 +780,7 @@ class LockBehaviourTests(unittest.TestCase):
             if path.exists():
                 return
             if proc.poll() is not None:
-                err = proc.stderr.read() if proc.stderr else ''
-                self.close_pipes(proc)
+                _, err = proc.communicate()
                 self.fail('%s exited %s before %s: %s' % (proc.args, proc.returncode, path.name, err))
             time.sleep(0.05)
         if proc.poll() is None:
