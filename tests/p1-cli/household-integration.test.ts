@@ -14,8 +14,8 @@ import { HOUSEHOLD_TOOL_REGISTRY } from '../../src/protocol/household-tool-regis
 import { createHouseholdMcpTools } from '../../src/mcp/household-tools.js';
 
 test('approval refusals tell local MCP and CLI callers where to allow the agent; other refusals keep their guidance', async () => {
-  const allow = 'Ask a workspace member to allow this agent in CommonSwarm: People & agents → this agent → Lists & docs → Allow…';
-  const conditional = 'If this agent has not been allowed yet, ask a workspace member to allow it in CommonSwarm: People & agents → this agent → Lists & docs → Allow…';
+  const allow = 'Ask this agent\'s owner to allow it in CommonSwarm: People & agents → this agent → Lists & docs → Allow…';
+  const conditional = 'If this agent has not been allowed yet, ask its owner to allow it in CommonSwarm: People & agents → this agent → Lists & docs → Allow…';
   const dir = mkdtempSync(join(tmpdir(), 'household-refusal-'));
   const input = join(dir, 'input.json'), token = join(dir, 'agent-token');
   writeFileSync(token, `swm_agt_${'b'.repeat(43)}`, { mode: 0o600 });
