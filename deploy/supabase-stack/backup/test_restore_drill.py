@@ -37,11 +37,11 @@ class DrillTests(unittest.TestCase):
             (self.source / name).write_text('fixture\n')
         (self.source / 'manifest.txt').write_text(
             'format=commonswarm-n-db-v2\n'
-            'schemas=auth,public,realtime,storage,supabase_migrations,swarm,swarm_read,commonswarm_oauth\n'
+            'schemas=auth,public,realtime,storage,supabase_migrations,swarm,swarm_read,commonswarm_oauth,commonswarm_ops\n'
         )
         (self.source / 'source-counts.tsv').write_text(
             'auth.users|1\nstorage.objects|1\nswarm.agent_tokens|1\n'
-            'commonswarm_oauth.provider_artifacts|1\n'
+            'commonswarm_oauth.provider_artifacts|1\ncommonswarm_ops.migration_checksums|1\n'
         )
         self.rows = [dict(bucket='b', name='n', version='v')]
         (self.source / 'storage-backend-objects.ndjson').write_text(json.dumps(self.rows[0])+'\n')
@@ -181,6 +181,45 @@ class DrillTests(unittest.TestCase):
         (self.source/'database.dump').write_text('corruption')
         self.assertEqual(drill.main(),1)
         self.assertFalse(any(a[0]=='docker' and 'create' in a for a in self.calls))
+
+    def test_manifest_without_commonswarm_ops_is_refused(self):
+        (self.source/'manifest.txt').write_text(
+            'format=commonswarm-n-db-v2\n'
+            'schemas=auth,public,realtime,storage,supabase_migrations,swarm,swarm_read,commonswarm_oauth\n'
+        )
+        self.sums()
+        self.assertEqual(drill.main(),1)
+        self.assertFalse(self.status()['ok'])
+        self.assertFalse(any(a[0]=='docker' and 'create' in a for a in self.calls))
+
+    def test_counts_without_migration_checksums_are_refused(self):
+        (self.source/'source-counts.tsv').write_text(
+            'auth.users|1\nstorage.objects|1\nswarm.agent_tokens|1\n'
+            'commonswarm_oauth.provider_artifacts|1\n'
+        )
+        self.sums()
+        self.assertEqual(drill.main(),1)
+        self.assertFalse(self.status()['ok'])
+        self.assertFalse(any(a[0]=='docker' and 'create' in a for a in self.calls))
+
+    def _ops_count(self, count):
+        (self.source/'source-counts.tsv').write_text(
+            'auth.users|1\nstorage.objects|1\nswarm.agent_tokens|1\n'
+            'commonswarm_oauth.provider_artifacts|1\n'
+            'commonswarm_ops.migration_checksums|%s\n' % count
+        )
+        self.sums()
+
+    def test_zero_migration_checksum_rows_are_refused(self):
+        self._ops_count(0)
+        self.assertEqual(drill.main(),1)
+        self.assertFalse(self.status()['ok'])
+        self.assertFalse(any(a[0]=='docker' and 'create' in a for a in self.calls))
+
+    def test_positive_migration_checksum_rows_pass_validation(self):
+        self._ops_count(7)
+        self.assertEqual(drill.main(),0)
+        self.assertTrue(self.status()['ok'])
 
     def test_cardinality_mismatch_fails(self):
         (self.source/'storage-backend-objects.ndjson').write_text('')

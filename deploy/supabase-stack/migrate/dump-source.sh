@@ -20,7 +20,7 @@ esac
 start_log "dump-$origin"
 assert_dump_origin "$origin"
 
-schemas=(auth public realtime storage supabase_migrations swarm swarm_read commonswarm_oauth)
+schemas=("${SELECTED_SCHEMAS[@]}")
 schema_args=()
 for schema in "${schemas[@]}"; do schema_args+=(--schema "$schema"); done
 
@@ -134,14 +134,14 @@ PGSERVICE="$origin" pg_dump \
   >>"$LOG_FILE" 2>&1 </dev/null
 chmod 0600 "$dump_file"
 
-cat >"$counts_query" <<'SQL'
+cat >"$counts_query" <<SQL
 \getenv snapshot_id COMMONSWARM_EXPORTED_SNAPSHOT
 BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SET TRANSACTION SNAPSHOT :'snapshot_id';
 SELECT format('SELECT %L, count(*)::bigint FROM %I.%I;',
   schemaname || '.' || tablename, schemaname, tablename)
 FROM pg_tables
-WHERE schemaname = ANY (string_to_array('auth,public,realtime,storage,supabase_migrations,swarm,swarm_read,commonswarm_oauth', ','))
+WHERE schemaname = ANY (string_to_array('$(selected_schema_csv)', ','))
   AND NOT (schemaname = 'realtime' AND (tablename = 'messages' OR tablename LIKE 'messages_%'))
   AND NOT (schemaname = 'public' AND tablename = 'commonswarm_cutover_probe')
   AND NOT (schemaname = 'public' AND tablename = 'commonswarm_cutover_state')

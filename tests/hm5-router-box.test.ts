@@ -290,12 +290,19 @@ test("nightly backup and restore paths include the OAuth schema", async () => {
       }
     };
     requireList("canonical selected schemas", values.lib,
-      /selected_schema_csv\(\) \{\s*printf '%s' "([^"]+)"/);
-    requireList("pg_dump schemas", values.dump, /^schemas=\(([^)]+)\)$/m);
-    requireList("dump table counts", values.dump,
-      /FROM pg_tables\s+WHERE schemaname = ANY \(string_to_array\('([^']+)'/);
-    requireList("restore table-count verification", values.verify,
-      /FROM pg_tables\s+WHERE schemaname = ANY \(string_to_array\('([^']+)'/);
+      /^SELECTED_SCHEMAS=\(([^)]+)\)$/m);
+    if (!/selected_schema_csv\(\) \{[^}]*"\$\{SELECTED_SCHEMAS\[\*\]\}"/.test(values.lib)) {
+      errors.push("selected_schema_csv does not derive from SELECTED_SCHEMAS");
+    }
+    // The consumers take the set from lib.sh; a literal list here would be a second copy.
+    if (!/^schemas=\("\$\{SELECTED_SCHEMAS\[@\]\}"\)$/m.test(values.dump)) {
+      errors.push("pg_dump schemas do not derive from SELECTED_SCHEMAS");
+    }
+    const countsQuery = /FROM pg_tables\s+WHERE schemaname = ANY \(string_to_array\('\$\(selected_schema_csv\)', ','\)\)/;
+    if (!countsQuery.test(values.dump)) errors.push("dump table counts do not derive from selected_schema_csv");
+    if (!countsQuery.test(values.verify)) {
+      errors.push("restore table-count verification does not derive from selected_schema_csv");
+    }
     requireList("post-upgrade table-count verification", values.verifyPostUpgrade,
       /FROM pg_tables\s+WHERE schemaname = ANY \(string_to_array\('([^']+)'/);
     requireList("H0 restore-verification fixture", values.testH0Upgrade,
@@ -332,12 +339,24 @@ test("nightly backup and restore paths include the OAuth schema", async () => {
 
   assert.deepEqual(audit(sources), []);
 
-  // Positive controls: each independently maintained schema list must fail
+  // Positive controls: the shared source and each independently maintained list must fail
   // the same audit when its OAuth entry is removed.
   for (const name of [
-    "lib", "dump", "verify", "verifyPostUpgrade", "testH0Upgrade", "upload", "restoreDrill",
+    "lib", "verifyPostUpgrade", "testH0Upgrade", "upload", "restoreDrill",
   ] as const) {
     const mutated = { ...sources, [name]: sources[name].replace(oauthSchema, "removed_oauth_schema") };
     assert.match(audit(mutated).join("\n"), new RegExp(`lacks ${oauthSchema}`), name);
+  }
+  // Each derived consumer must fail when it stops using the shared source.
+  const derived = [
+    ["dump", "schemas=(\"${SELECTED_SCHEMAS[@]}\")", "schemas=(auth public)", /pg_dump schemas do not derive/],
+    ["dump", "schemaname = ANY (string_to_array('$(selected_schema_csv)'", "schemaname = ANY (string_to_array('auth,public'", /dump table counts do not derive/],
+    ["verify", "schemaname = ANY (string_to_array('$(selected_schema_csv)'", "schemaname = ANY (string_to_array('auth,public'", /restore table-count verification does not derive/],
+    ["lib", "${SELECTED_SCHEMAS[*]}", "auth", /selected_schema_csv does not derive/],
+  ] as const;
+  for (const [name, from, to, expected] of derived) {
+    assert.ok(sources[name].includes(from), `${name} holds ${from}`);
+    const mutated = { ...sources, [name]: sources[name].replace(from, to) };
+    assert.match(audit(mutated).join("\n"), expected, `${name}: ${from}`);
   }
 });

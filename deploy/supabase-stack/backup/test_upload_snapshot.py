@@ -24,11 +24,31 @@ class UploadFailures(unittest.TestCase):
                 (artifact / name).chmod(0o600)
             (artifact / 'manifest.txt').write_text(
                 'format=commonswarm-n-db-v2\n'
-                'schemas=auth,public,realtime,storage,supabase_migrations,swarm,swarm_read,commonswarm_oauth\n'
+                'schemas=auth,public,realtime,storage,supabase_migrations,swarm,swarm_read,commonswarm_oauth,commonswarm_ops\n'
             )
             (artifact / 'source-counts.tsv').write_text(
                 'storage.objects|2\ncommonswarm_oauth.provider_artifacts|1\n'
+                'commonswarm_ops.migration_checksums|1\n'
             )
+            if failure == 'no-ops-schema':
+                (artifact / 'manifest.txt').write_text(
+                    'format=commonswarm-n-db-v2\n'
+                    'schemas=auth,public,realtime,storage,supabase_migrations,swarm,swarm_read,commonswarm_oauth\n'
+                )
+            if failure == 'no-ops-count':
+                (artifact / 'source-counts.tsv').write_text(
+                    'storage.objects|2\ncommonswarm_oauth.provider_artifacts|1\n'
+                )
+            if failure == 'zero-ops-count':
+                (artifact / 'source-counts.tsv').write_text(
+                    'storage.objects|2\ncommonswarm_oauth.provider_artifacts|1\n'
+                    'commonswarm_ops.migration_checksums|0\n'
+                )
+            if failure == 'positive-ops-count':
+                (artifact / 'source-counts.tsv').write_text(
+                    'storage.objects|2\ncommonswarm_oauth.provider_artifacts|1\n'
+                    'commonswarm_ops.migration_checksums|7\n'
+                )
             rows = [{'bucket': 'swarm-files', 'name': name, 'version': 'version'} for name in ['a', 'b']]
             keys = module.physical_keys(rows)
             (artifact / 'storage-backend-objects.ndjson').write_text(''.join(json.dumps(row) + '\n' for row in rows))
@@ -62,7 +82,10 @@ class UploadFailures(unittest.TestCase):
                 return subprocess.CompletedProcess(args, code, stdout=output, stderr='')
 
             with patch.dict(os.environ, {'COMMONSWARM_ENV_FILE': str(env)}), patch.object(module.subprocess, 'run', fake_run):
-                if failure:
+                if failure in ('no-ops-schema', 'no-ops-count', 'zero-ops-count'):
+                    with self.assertRaises(ValueError):
+                        module.upload(artifact, evidence)
+                elif failure not in (None, 'positive-ops-count'):
                     with self.assertRaises(RuntimeError):
                         module.upload(artifact, evidence)
                 else:
@@ -71,7 +94,9 @@ class UploadFailures(unittest.TestCase):
                     self.assertTrue(result['database_bytes_verified'])
                     self.assertTrue(result['object_bytes_verified'])
             marker_writes = [args for args in calls if len(args) > 1 and args[1] == 'copyto']
-            self.assertEqual(len(marker_writes), 1 if failure in (None, 'wrong-marker') else 0)
+            self.assertEqual(len(marker_writes), 1 if failure in (None, 'wrong-marker', 'positive-ops-count') else 0)
+            if failure in ('no-ops-schema', 'no-ops-count', 'zero-ops-count'):
+                self.assertFalse(any(len(args) > 1 and args[1] in ('copy', 'copyto') for args in calls))
             self.assertFalse(any(args[1] in ('delete', 'purge', 'sync', 'move') for args in calls))
 
     def test_complete_backup_checks_both_streams(self): self.exercise()
@@ -79,6 +104,10 @@ class UploadFailures(unittest.TestCase):
     def test_corrupt_object_cannot_publish_completion(self): self.exercise('corrupt-object')
     def test_partial_database_cannot_publish_completion(self): self.exercise('partial-database')
     def test_bad_remote_marker_cannot_report_success(self): self.exercise('wrong-marker')
+    def test_manifest_without_commonswarm_ops_is_refused(self): self.exercise('no-ops-schema')
+    def test_counts_without_migration_checksums_are_refused(self): self.exercise('no-ops-count')
+    def test_zero_migration_checksum_rows_are_refused(self): self.exercise('zero-ops-count')
+    def test_positive_migration_checksum_rows_are_accepted(self): self.exercise('positive-ops-count')
 
 
 if __name__ == '__main__': unittest.main()
