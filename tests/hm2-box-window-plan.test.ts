@@ -221,9 +221,11 @@ test("HM2 plan accepts the released mint artifact and rejects a missing agent_to
       serializerSource(releasedCli),
       "HEAD serializer must remain identical to released cswarm 0.1.80",
     );
-    const packageJson = JSON.parse(await readFile("package.json", "utf8")) as {
-      version?: string;
-    };
+    // The plan pins the RELEASED artifact, so read the version at RELEASE_COMMIT: a later
+    // CLI version bump on HEAD must not break this pin while the serializer stays identical.
+    const packageJson = JSON.parse(
+      execFileSync("git", ["show", `${RELEASE_COMMIT}:package.json`], { encoding: "utf8" }),
+    ) as { version?: string };
     assert.equal(packageJson.version, "0.1.80");
 
     const credential = await credentialFromRealSerializer(directory);
