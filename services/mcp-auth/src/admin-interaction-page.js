@@ -15,9 +15,9 @@ function limits(values) {
     .map(([key, value]) => `<dt>${e(LIMIT_LABELS[key])}</dt><dd>${e(value)}</dd>`).join("")}</dl>`;
 }
 function words(value) { return value.length ? value.map(e).join(", ") : "None"; }
-
+/** Render consent copy from the shared issuance gate state supplied by the handler. */
 export function renderAdminConsentPage({ uid, user, params, policy, csrfToken, version,
-  workspaces = [], receipt, summary, scriptNonce }) {
+  workspaces = [], receipt, summary, scriptNonce, issuanceState }) {
   const verified = !!policy?.verification && !!policy?.approval;
   const manifest = receipt?.manifest;
   const requested = new Set(policy?.resourceScopes ?? []);
@@ -77,6 +77,6 @@ export function renderAdminConsentPage({ uid, user, params, policy, csrfToken, v
   }
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Review CommonSwarm admin access</title>
     <style>body{font-family:system-ui;max-width:48rem;margin:3rem auto;padding:1rem}label{display:block;margin:.7rem 0}fieldset{margin:1rem 0}dt{font-weight:bold}dd{margin-bottom:.5rem}button{padding:.7rem 1rem}.notice{border:1px solid;padding:1rem}</style></head>
-    <body><main><h1>Review admin access</h1>${identity}<p>Admin connections are not available yet. Reviewing a selection does not connect the client.</p>${form}<form method="get" action="https://commonswarm.com/app"><button type="submit">Cancel and return to /app</button></form></main>
+    <body><main><h1>Review admin access</h1>${identity}<p>${issuanceState === "open" ? "Confirming your selection connects the client with exactly your chosen permissions, and you can revoke this access in /app." : "Admin connections are not available yet. Reviewing a selection does not connect the client."}</p>${form}<form method="get" action="https://commonswarm.com/app"><button type="submit">Cancel and return to /app</button></form></main>
     ${manifest && scriptNonce ? `<script nonce="${e(scriptNonce)}">const expiry=document.getElementById("local-expiry");expiry.textContent=new Date(expiry.dateTime).toLocaleString();document.getElementById("expiry-zone").textContent=" (your local time)";</script>` : ""}</body></html>`;
 }

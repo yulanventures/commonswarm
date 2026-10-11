@@ -61,7 +61,7 @@ export function createAdminInteractionHandler({ provider, store, service, gotrue
         ...security, "content-security-policy": `${security["content-security-policy"]}; script-src 'nonce-${scriptNonce}'`,
         "content-type": "text/html; charset=utf-8" });
       response.end(renderAdminConsentPage({ uid, params: details.params, user: identity(browser.session),
-        workspaces: await workspaceReader(identity(browser.session)), ...result, scriptNonce }));
+        workspaces: await workspaceReader(identity(browser.session)), ...result, scriptNonce, issuanceState: await effectiveAdminGate() }));
     }
     if (request.method === "GET" && ["view", "sign-in"].includes(operation)) {
       let result;

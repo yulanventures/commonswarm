@@ -52,7 +52,7 @@ test('admin-site-lifecycle: second-confirmation-accessibility on hosted consent;
   const tree = htmlTree(renderAdminConsentPage({ uid: 'exact-interaction', user: { userId: 'owner-1', displayName: 'Owner' },
     params: { client_id: 'https://client.example/oauth.json', redirect_uri: 'https://callback.example/return' },
     policy: { metadata: { client_name: 'Admin <app> & "friends"' }, verification: { publisher_identity: 'Reviewed publisher', verification_version: 2 }, approval: { owner_user_id: 'owner-1' } },
-    version: 3, receipt: { manifest }, summary: { token: 'csrf-exact', secondToken: 'second-exact', digest: 'digest-exact' },
+    version: 3, issuanceState: 'open', receipt: { manifest }, summary: { token: 'csrf-exact', secondToken: 'second-exact', digest: 'digest-exact' },
     workspaces: [{ id: 'workspace-1', name: 'Selected <workspace>' }],
   }));
   const confirmation = one(tree, node => node.tag === 'input' && node.attrs.name === 'confirm_full_account');
