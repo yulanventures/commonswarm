@@ -8,6 +8,7 @@ import {
   loadAgentCredential,
 } from "../_shared/agent-auth.ts";
 import { parseAgentSessionProofHeaders } from "../../../src/cloud/session-wire.ts";
+import { activityFailureResult } from "../command/failures.ts";
 import {
   ACTIVITY_EVENT,
   ACTIVITY_REQUEST_MAX_BYTES,
@@ -182,8 +183,9 @@ async function handle(request: Request): Promise<Response> {
 }
 
 Deno.serve((request) =>
-  handle(request).catch(() => {
+  handle(request).catch((error) => {
     console.error("activity publish failed");
-    return json(500, { error: "internal_error" });
+    const failure = activityFailureResult(error);
+    return json(failure.status, failure.body);
   })
 );
