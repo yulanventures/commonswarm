@@ -777,16 +777,16 @@ export class AgentCredentialSession {
         /* rootTokenId is compared ON THE SAME TERMS as the principal below: only when BOTH
          * sides name one. It was strict equality, and that DELETED A LIVE SUCCESSOR.
          *
-         * The bare credential form carries no token id — `tokenId: null` at cli.ts:587, against
-         * cli.ts:644 for the artifact form. So an agent that renewed under the artifact form and
+         * The bare credential form carries no token id — `tokenId: null` at agent-credential-input.ts:111, against
+         * agent-credential-input.ts:207 for the artifact form. So an agent that renewed under the artifact form and
          * then ran ANY command under the bare form of the SAME SECRET failed this check and had
          * its stored successor deleted. That is reachable today and not hypothetical: `listen
          * start` REQUIRES the artifact form while `members` accepts a bare token, so alternating
          * subcommands is enough (D-082).
          *
          * A null id cannot mean "someone else's lineage". The store filename is
-         * `credentialLineageKey(agent.token)` = sha256 of the PRESENTED SECRET (cli.ts:2023,
-         * agent-credential.ts:89-91), so finding this record at all already proves the caller
+         * `credentialLineageKey(agent.token)` = sha256 of the PRESENTED SECRET (cli.ts:3211,
+         * agent-credential.ts:90-92), so finding this record at all already proves the caller
          * holds the same root token. The id is corroboration, not identification.
          *
          * The comment above records this exact bug happening once before, to the principal, and
