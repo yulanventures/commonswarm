@@ -1,5 +1,5 @@
-/** Household HTTP/MCP boundary. Identities and credential rechecks come from
- * the existing command transaction, never from tool arguments. */
+/** Household HTTP/MCP boundary: authenticated transaction inputs produce scoped
+ * results. Rechecks never use tool arguments; only byte access needs storage. */
 import type postgres from 'postgres';
 import * as core from '../_shared/protocol.js';
 import { createHouseholdObjectStore, type HouseholdIdentity, type HouseholdCredentialRecheck } from './household-objects.ts';
@@ -21,13 +21,21 @@ export const householdRevisionMetadata = (revision: HouseholdRevision) => ({
   author: revision.author, occurred_at_server: revision.occurred_at_server, command_id: revision.command_id,
 });
 
+/** Build a transaction store with lazy byte I/O. Missing configuration fails
+ * closed at read/put; metadata and authorization retain their existing paths. */
 export function householdStore(recheckCredential: HouseholdCredentialRecheck, newFileIdentity?: (objectId: string) => { file_id: string; name: string }) {
-  const base = Deno.env.get('SUPABASE_URL');
-  const credential = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  if (!base || !credential) throw new transfers.HouseholdTransferError('storage_unavailable');
+  let storage: transfers.HouseholdStorage | undefined;
+  const resolveStorage = () => {
+    if (storage) return storage;
+    const base = Deno.env.get('SUPABASE_URL');
+    const credential = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    if (!base || !credential) throw new transfers.HouseholdTransferError('storage_unavailable');
+    return storage = transfers.createHouseholdTransferStorage({ storageBaseUrl: `${base.replace(/\/$/, '')}/storage/v1`,
+      bucket: FILE_BUCKET, serviceCredential: credential });
+  };
   return createHouseholdObjectStore({ core: core as unknown as Parameters<typeof createHouseholdObjectStore>[0]['core'], transfers, fileContentAllowed, recheckCredential, newFileIdentity,
-    storage: transfers.createHouseholdTransferStorage({ storageBaseUrl: `${base.replace(/\/$/, '')}/storage/v1`,
-      bucket: FILE_BUCKET, serviceCredential: credential }) });
+    storage: { read: (path, maximumBytes) => resolveStorage().read(path, maximumBytes),
+      putImmutable: (path, bytes) => resolveStorage().putImmutable(path, bytes) } });
 }
 
 /** Reserved IDs/expiry are server facts recovered from the durable projection.
