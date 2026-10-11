@@ -439,7 +439,7 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         const expectedTools = ['ask', 'check', 'claim_seat', 'members', 'note', 'reply', 'whoami', 'working_on'];
         assert.equal(listed.result.tools.length, 8);
         assert.deepEqual(listed.result.tools.map(tool => tool.name).sort(), expectedTools,
-          'hosted discovery includes structured objects, to-dos and comments and excludes gated file transport');
+          'with the to-do/list switch OFF, hosted discovery exposes only the eight core coordination tools');
         assert.ok(listed.result.tools.every(tool => tool.inputSchema?.type === 'object'));
         const grant = await pool.query('SELECT state FROM swarm.hosted_mcp_grants WHERE interaction_ref = $1', [uid]);
         assert.equal(grant.rows[0]?.state, 'active', 'token and MCP success follows actual authority activation');

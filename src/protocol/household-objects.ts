@@ -513,9 +513,9 @@ export function reduceHouseholdObjectStream(
 }
 
 export type HouseholdReadQuery =
-  | { kind: 'object_list'; offset: number; limit: number }
-  | { kind: 'object_read'; object_id: string; revision?: HouseholdRevisionRef }
-  | { kind: 'object_history'; object_id: string; offset: number; limit: number }
+  | { kind: 'object_list'; offset: number; limit: number; kind_filter?: 'list' }
+  | { kind: 'object_read'; object_id: string; revision?: HouseholdRevisionRef; kind_filter?: 'list' }
+  | { kind: 'object_history'; object_id: string; offset: number; limit: number; kind_filter?: 'list' }
   | { kind: 'draft_read'; draft_id: string };
 
 export type HouseholdReadResult =
@@ -539,7 +539,8 @@ export function readHouseholdObjects(
     if (!nonnegative(query.offset) || !Number.isSafeInteger(query.limit) || query.limit <= 0) return { status: 'refused', reason: 'invalid_page' };
   }
   if (query.kind === 'object_list') {
-    const all = Object.values(state.objects).sort((a, b) => a.object_id < b.object_id ? -1 : a.object_id > b.object_id ? 1 : 0);
+    const all = Object.values(state.objects).filter(object => !query.kind_filter || object.kind === query.kind_filter)
+      .sort((a, b) => a.object_id < b.object_id ? -1 : a.object_id > b.object_id ? 1 : 0);
     return { status: 'ok', kind: query.kind, objects: all.slice(query.offset, query.offset + query.limit).map((object) => {
       const revision = object.history.at(-1)!;
       return { object_id: object.object_id, kind: object.kind, title: revision.title, revision: structuredClone(revision.revision) };
@@ -555,6 +556,8 @@ export function readHouseholdObjects(
   }
   const object: HouseholdObject | undefined = own(state.objects, query.object_id);
   if (!object) return { status: 'refused', reason: 'object_not_found' };
+  // Registry-owned list queries refuse other kinds before inspecting revisions.
+  if (query.kind_filter && object.kind !== query.kind_filter) return { status: 'refused', reason: 'object_type_mismatch' };
   const liveStart = Math.max(0, object.history.length - HOUSEHOLD_LIVE_REVISION_LIMIT);
   if (query.kind === 'object_history') return { status: 'ok', kind: query.kind,
     revisions: object.history.slice(query.offset, query.offset + query.limit).map((revision, index) => ({

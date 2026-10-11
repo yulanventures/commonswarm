@@ -1,3 +1,5 @@
+/** Exercise hosted JSON-RPC requests and responses with synthetic auth/execution.
+ * Pin core wire contracts and OFF refusals; hosted-household-catalog-switch covers server activation. */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
@@ -244,7 +246,12 @@ test("every household tool, including file tools, receives the unknown-tool refu
       message: "Invalid tools/call params. Send name (claim_seat, whoami, check, ask, note, reply, working_on, members) and arguments as a JSON object.",
     },
   });
-  assert.equal(HOUSEHOLD_TOOL_REGISTRY.length, 18, "enumerate all fifteen household and three gated file tools");
+  assert.deepEqual(HOUSEHOLD_TOOL_REGISTRY.map(row => row.name), [
+    "object_list", "object_read", "object_history", "object_create", "object_update",
+    "file_read", "file_upload_begin", "file_upload_commit", "todo_list", "todo_read", "todo_queue",
+    "comment_list", "todo_create", "todo_comment", "todo_update", "todo_assign", "todo_start", "todo_set_state",
+    "list_list", "list_read", "list_history", "list_create", "list_update",
+  ]);
   for (const { name } of HOUSEHOLD_TOOL_REGISTRY) {
     // Validity of arguments must never reveal a hidden tool's schema.
     for (const args of [{ seat: "seat_ABCDEFGHIJKLMNOPQRSTUV" }, null]) {
@@ -252,7 +259,7 @@ test("every household tool, including file tools, receives the unknown-tool refu
       assert.equal(response.status, unknown.status, name);
       assert.deepEqual(await response.json(), expected, name);
     }
-    assert.throws(() => validateHostedToolArguments(name, {}), /Unknown or unavailable tool\./u, name);
+    assert.throws(() => validateHostedToolArguments(name as Parameters<typeof validateHostedToolArguments>[0], {}), /Unknown or unavailable tool\./u, name);
   }
   assert.deepEqual(calls, ["whoami"], "hidden names never reach a handler or household reads");
 });

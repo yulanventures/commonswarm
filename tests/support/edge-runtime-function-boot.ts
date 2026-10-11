@@ -157,6 +157,8 @@ export interface EdgeRuntimeHandle {
 export async function startComposeEdgeRuntime(options: {
   workDir: string;
   functionsRoot?: string;
+  envText?: string;
+  composeEnv?: NodeJS.ProcessEnv;
 }): Promise<EdgeRuntimeHandle> {
   const composeSource = readFileSync(composePath, "utf8");
   const image = composeEdgeRuntimeImage(composeSource);
@@ -167,7 +169,7 @@ export async function startComposeEdgeRuntime(options: {
   mkdirSync(options.workDir, { recursive: true });
   const envFile = join(options.workDir, "edge.env");
   const tempCompose = join(options.workDir, "compose.yaml");
-  writeFileSync(envFile, dummyEdgeEnv(), { encoding: "utf8" });
+  writeFileSync(envFile, options.envText ?? dummyEdgeEnv(), { encoding: "utf8" });
   chmodSync(envFile, 0o600);
   writeFileSync(tempCompose, rendered);
   await ensureDockerImage(image);
@@ -182,7 +184,8 @@ export async function startComposeEdgeRuntime(options: {
     "--project-directory",
     edgeRuntimeDir,
   ];
-  const env = { ...process.env, COMMONSWARM_EDGE_ENV_FILE: envFile };
+  const env = { ...process.env, ...options.composeEnv, COMMONSWARM_EDGE_ENV_FILE: envFile };
+  const hostNetwork = options.composeEnv?.COMMONSWARM_EDGE_NETWORK_MODE === "host";
   const close = (): void => {
     docker([...composeArgs, "down", "-v", "--remove-orphans"], { timeout: 120_000, env });
   };
@@ -196,16 +199,20 @@ export async function startComposeEdgeRuntime(options: {
     assert.equal(id.status, 0, id.stderr);
     const container = id.stdout.trim();
     assert.ok(container, "compose up did not start edge-runtime");
-    const published = docker([...composeArgs, "port", "edge-runtime", "9000"], { env });
-    assert.equal(published.status, 0, published.stderr);
-    const port = published.stdout.trim().split(":").at(-1);
-    assert.ok(port, published.stdout);
+    let baseUrl = "http://127.0.0.1:9000";
+    if (!hostNetwork) {
+      const published = docker([...composeArgs, "port", "edge-runtime", "9000"], { env });
+      assert.equal(published.status, 0, published.stderr);
+      const port = published.stdout.trim().split(":").at(-1);
+      assert.ok(port, published.stdout);
+      baseUrl = `http://127.0.0.1:${port}`;
+    }
     const runningImage = docker(["inspect", "--format", "{{.Config.Image}}", container]);
     assert.equal(runningImage.stdout.trim(), image, runningImage.stderr);
     return {
       project,
       image,
-      baseUrl: `http://127.0.0.1:${port}`,
+      baseUrl,
       container,
       logs: () => {
         const result = docker(["logs", container], { timeout: 30_000 });

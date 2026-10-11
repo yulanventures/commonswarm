@@ -1,20 +1,15 @@
+/** Publish the core catalog plus server-enabled registry to-do/list entries.
+ * Model names/arguments use that catalog; OAuth/execution stay with the caller, and docs/files stay unavailable. */
 import type { VerifiedMcpToken } from "./auth.ts";
 // @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
 import { SIGNAL_UNSAFE_GLOBAL_RE } from "../_shared/signal-text.ts";
 
-import { HOUSEHOLD_TOOLS, HOUSEHOLD_TOOL_REGISTRY, validateHouseholdToolArguments, HouseholdToolInputError } from "../_shared/protocol.js";
-// @ts-ignore TS5097: Node tests import this Deno module through tsx.
-import { HOUSEHOLD_FEATURE_GATES } from "../_shared/household-feature-gates.ts";
+import { HOSTED_TODO_LIST_TOOLS, validateHostedTodoListToolArguments, HouseholdToolInputError } from "../_shared/protocol.js";
+import type { HouseholdToolName } from "../_shared/household-tool-registry.d.ts";
 // @ts-ignore TS5097: Node tests import this Deno module through tsx.
 import { HOSTED_HOUSEHOLD_TOOLS_ENABLED } from "./household-release.ts";
 
-// The registry includes prepared file definitions. Hosted admission excludes
-// file-only tools until protected byte transport has been completed and reviewed.
-const hostedHouseholdTools = HOUSEHOLD_TOOLS.filter(tool => {
-  const definition = HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === tool.name)!;
-  return HOSTED_HOUSEHOLD_TOOLS_ENABLED && (HOUSEHOLD_FEATURE_GATES.hostedFileTransport ||
-    !definition.objectTypes.every((kind: string) => kind === "file"));
-});
+const hostedHouseholdTools = HOSTED_HOUSEHOLD_TOOLS_ENABLED ? HOSTED_TODO_LIST_TOOLS : [];
 
 const UUID_PATTERN = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$";
 const HANDLE_PATTERN = "^seat_[A-Za-z0-9_-]{22,64}$";
@@ -107,7 +102,9 @@ export const HOSTED_TOOL_TABLE = [
   ...hostedHouseholdTools.map(row => ({ ...row, securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }] })),
 ] as const;
 
-export type HostedToolName = typeof HOSTED_TOOL_TABLE[number]["name"];
+export type HostedToolName = typeof CORE_TOOL_TABLE[number]["name"]
+  | Extract<HouseholdToolName, `todo_${string}` | "comment_list">
+  | `list_${Extract<HouseholdToolName, `object_${string}`> extends `object_${infer Operation}` ? Operation : never}`;
 export type HostedToolArguments = Record<string, unknown>;
 
 export interface HostedToolCall {
@@ -204,13 +201,14 @@ export function validateHostedToolArguments(
   value: unknown,
 ): HostedToolArguments {
   if (!hostedToolName(name)) throw new HostedToolInputError("Unknown or unavailable tool.");
-  if (HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === name)) {
-    try { return validateHouseholdToolArguments(name, value); }
+  if (hostedHouseholdTools.some(row => row.name === name)) {
+    try { return validateHostedTodoListToolArguments(name, value); }
     catch (error) { if (error instanceof HouseholdToolInputError) throw new HostedToolInputError(error.code); throw error; }
   }
   const args = record(value);
   if (args === null) throw new HostedToolInputError("Expected an object of tool arguments. Send arguments as a JSON object.");
-  const shape = KEYS[name]!;
+  const shape = KEYS[name];
+  if (!shape) throw new HostedToolInputError("Unknown or unavailable tool.");
   if (Object.keys(args).some((key) => !shape.allowed.includes(key))) {
     // Unknown keys and supplied values can contain secrets; list trusted keys.
     throw new HostedToolInputError(`Unknown tool argument. Use only: ${shape.allowed.join(", ")}.`);

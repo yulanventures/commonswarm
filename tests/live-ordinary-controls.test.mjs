@@ -1,3 +1,5 @@
+/** Exercise release controls against synthetic HTTP and immutable Git inputs.
+ * Catalog expectations come from verified server switches, never discovery. */
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createServer } from 'node:http';
@@ -311,9 +313,8 @@ test('live catalog follows the verified SHA release switch, never the working fi
   await mkdir(join(root, 'supabase/functions/mcp'));
   const producer = join(root, 'scripts/live-ordinary-controls.mjs');
   await writeFile(producer, await readFile(script));
-  const bundle = spawnSync('git', ['--no-replace-objects', 'show', `${releaseSha}:supabase/functions/_shared/protocol.js`], { encoding: 'utf8' });
-  assert.equal(bundle.status, 0, bundle.stderr);
-  await writeFile(join(root, 'supabase/functions/_shared/protocol.js'), bundle.stdout);
+  await writeFile(join(root, 'supabase/functions/_shared/protocol.js'),
+    await readFile(new URL('../supabase/functions/_shared/protocol.js', import.meta.url)));
   await symlink(fileURLToPath(new URL('../dist', import.meta.url)), join(root, 'dist'));
   git(['add', 'scripts', 'supabase']);
   const commit = parent => git(['commit-tree', git(['write-tree']), ...(parent ? ['-p', parent] : [])], 'catalog fixture\n');
@@ -326,10 +327,12 @@ test('live catalog follows the verified SHA release switch, never the working fi
   const enabled = 'export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = true;';
   const currentSource = await readFile(new URL('../supabase/functions/mcp/household-release.ts', import.meta.url), 'utf8');
   const off = await revision(currentSource, historical);
-  const on = await revision(currentSource.replace(disabled, enabled), off);
   const malformed = [];
-  let latest = on;
+  let latest = off;
   for (const [name, source] of [
+    ['wrong env name', currentSource.replace('SWARM_MCP_TODOS_LISTS_ENABLED', 'SWARM_OTHER_ENABLED')],
+    ['wrong opt-in value', currentSource.replace("=== '1'", "=== 'true'")],
+    ['defaults on', currentSource.replace("=== '1'", "!== '0'")],
     ['computed value', 'export const HOSTED_HOUSEHOLD_TOOLS_ENABLED = Boolean(0);'],
     ['indented declaration', ` ${disabled}`],
     ['trailing comment', `${disabled} // comment`],
@@ -359,17 +362,21 @@ test('live catalog follows the verified SHA release switch, never the working fi
   const household = ['object_list', 'object_read', 'object_history', 'object_create', 'object_update',
     'todo_list', 'todo_read', 'todo_queue', 'comment_list', 'todo_create', 'todo_comment',
     'todo_update', 'todo_assign', 'todo_start', 'todo_set_state'];
-  for (const [name, liveEdgeSha, fileGate, listedTools, count] of [
-    ['pre-switch', historical, '0', [...core, ...household], 23],
-    ['pre-switch with files', historical, '1', [...core, ...household, ...FILE_ONLY], 26],
-    ['exact current file: switch off', off, '0', core, 8],
-    ['switch off with files', off, '1', core, 8],
-    ['current file with switch on', on, '0', [...core, ...household], 23],
-    ['switch on with files', on, '1', [...core, ...household, ...FILE_ONLY], 26],
+  const { HOSTED_TODO_LIST_TOOLS } = await import('../supabase/functions/_shared/protocol.js');
+  const hosted = HOSTED_TODO_LIST_TOOLS.map(row => row.name);
+  for (const [name, liveEdgeSha, todoGate, fileGate, listedTools, count] of [
+    ['pre-switch', historical, undefined, '0', [...core, ...household], 23],
+    ['pre-switch with files', historical, '1', '1', [...core, ...household, ...FILE_ONLY], 26],
+    ['exact current file: switch unset', off, undefined, '0', core, 8],
+    ['switch off with files', off, '0', '1', core, 8],
+    ['invalid opt-in with files', off, 'invalid', '1', core, 8],
+    ['non-exact opt-in with files', off, 'true', '1', core, 8],
+    ['current file with switch on', off, '1', '0', [...core, ...hosted], 23],
+    ['switch on with files', off, '1', '1', [...core, ...hosted], 23],
   ]) await t.test(name, async t => {
     assert.equal(listedTools.length, count);
     const f = await fixture(t, { script: producer, releaseSha: latest, liveEdgeSha, listedTools });
-    const env = { SWARM_HOUSEHOLD_HOSTED_FILE_TRANSPORT: fileGate };
+    const env = { SWARM_MCP_TODOS_LISTS_ENABLED: todoGate, SWARM_HOUSEHOLD_HOSTED_FILE_TRANSPORT: fileGate };
     const consent = await f.run('consent', [], { env }); assert.equal(consent.exit, 0, consent.output); f.consent = consent.out;
     const window = await f.run('window', [], { env }); assert.equal(window.exit, 0, window.output);
     assert.ok(Object.values(window.receipt.controls).every(value => value === true));
@@ -380,7 +387,7 @@ test('live catalog follows the verified SHA release switch, never the working fi
   for (const [name, liveEdgeSha] of malformed) await t.test(`${name} refuses before HTTP`, async t => {
     const f = await fixture(t, { script: producer, releaseSha: latest, liveEdgeSha, listedTools: core });
     const result = await f.run('consent'); assert.equal(result.exit, 1, result.output);
-    assert.match(result.output, /expected literal hosted household release switch/);
+    assert.match(result.output, /expected verified hosted household release switch/);
     assert.doesNotMatch(result.output, /SWITCH_EVALUATED|WORKING_FILE_EVALUATED/);
     assert.equal(f.events.length, 0); await missing(result.out);
   });

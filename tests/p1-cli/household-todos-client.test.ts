@@ -6,7 +6,7 @@ import { HouseholdObjectClient } from '../../src/cloud/household-objects.js';
 import { createHouseholdHttpTransport, LOCAL_HOUSEHOLD_SEAT as seat } from '../../src/cloud/household-http.js';
 import { createHouseholdMcpTools } from '../../src/mcp/household-tools.js';
 import { MCP_RESULT_MAX_BYTES } from '../../src/mcp/tools.js';
-import { HOUSEHOLD_TOOL_REGISTRY } from '../../src/protocol/household-tool-registry.js';
+import { HOUSEHOLD_TOOL_REGISTRY, HOUSEHOLD_TOOLS } from '../../src/protocol/household-tool-registry.js';
 import { decideTodo, emptyHouseholdTodoState, reduceTodoEvents, type Todo, type TodoCommand } from '../../src/protocol/household-todos.js';
 import type { HouseholdAccessFacts } from '../../src/protocol/household-object-policy.js';
 
@@ -180,9 +180,9 @@ test('malformed and foreign to-do responses are unknown, paired with valid contr
   }
 });
 
-test('source CLI help lists every registry command with its JSON input route without building', () => {
+test('source CLI help lists every local household command with its JSON input route without building', () => {
   const help = execFileSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'object', '--help'], { encoding: 'utf8' });
   const advertised = [...help.matchAll(/cswarm object (\w+) --input-file <path>/g)].map(match => match[1]);
-  assert.deepEqual(advertised.sort(), HOUSEHOLD_TOOL_REGISTRY.map(row => row.name).sort());
-  for (const row of HOUSEHOLD_TOOL_REGISTRY) assert.match(help, new RegExp(`cswarm object ${row.name} .*\\[--json\\]`));
+  assert.deepEqual(advertised.sort(), HOUSEHOLD_TOOLS.map(row => row.name).sort());
+  for (const row of HOUSEHOLD_TOOLS) assert.match(help, new RegExp(`cswarm object ${row.name} .*\\[--json\\]`));
 });

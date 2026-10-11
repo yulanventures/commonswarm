@@ -10,7 +10,7 @@ import { HouseholdObjectClient } from '../../src/cloud/household-objects.js';
 import { createHouseholdHttpTransport, LOCAL_HOUSEHOLD_SEAT } from '../../src/cloud/household-http.js';
 import { CLI_BUILD_VERSION } from '../../src/cloud/client-build.js';
 import { CLIENT_PROTOCOL_VERSION } from '../../src/cloud/config.js';
-import { HOUSEHOLD_TOOL_REGISTRY } from '../../src/protocol/household-tool-registry.js';
+import { HOUSEHOLD_TOOLS } from '../../src/protocol/household-tool-registry.js';
 import { createHouseholdMcpTools } from '../../src/mcp/household-tools.js';
 
 test('approval refusals tell local MCP and CLI callers where to allow the agent; other refusals keep their guidance', async () => {
@@ -101,7 +101,7 @@ test('local household HTTP dispatch preserves exact request IDs and binds reads 
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
 });
 
-test('CLI publishes every registry operation with the reviewed input-file route', () => {
-  const help = execFileSync(process.execPath, ['dist/cli.js', 'object', '--help'], { encoding: 'utf8' });
-  for (const row of HOUSEHOLD_TOOL_REGISTRY) assert.ok(help.includes(`cswarm object ${row.name} --input-file <path>`));
+test('CLI publishes every local household operation with the reviewed input-file route', () => {
+  const names = execFileSync(process.execPath, ['dist/cli.js', 'object', '--help'], { encoding: 'utf8' }).matchAll(/cswarm object (\w+) --input-file <path>/g);
+  assert.deepEqual(Array.from(names, match => match[1]), HOUSEHOLD_TOOLS.map(row => row.name));
 });
