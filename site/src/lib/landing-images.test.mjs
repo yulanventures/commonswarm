@@ -49,12 +49,14 @@ test("the build script writes exactly the images the homepage uses, and nothing 
  * hand into a <picture>, or a helper bug, cannot pass. CI builds the site right before this suite. Locally a missing
  * or stale dist is a skip with the reason, never a silent pass on old output. */
 const built = join(site, "dist", "index.html");
-const sources = [
-  join(site, "src", "components", "landing", "ConsumerHero.astro"),
-  join(site, "src", "components", "landing", "ConsumerStory.astro"),
-  join(site, "src", "lib", "landing-images.ts"),
-  ...shipped().map((file) => join(publicDir, "landing", file)),
-];
+/* Any page, layout or component can change what the homepage renders, so the whole source tree counts, as in
+ * consumer-copy.observer.mjs; tests and observers do not. */
+const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+  const full = join(dir, entry.name);
+  if (entry.isDirectory()) return walk(full);
+  return /\.(astro|ts|mjs|js|md)$/.test(entry.name) && !/\.(observer|test)\.(mjs|ts)$/.test(entry.name) ? [full] : [];
+});
+const sources = [...walk(join(site, "src")), ...shipped().map((file) => join(publicDir, "landing", file))];
 const staleReason = !existsSync(built)
   ? "no site/dist/index.html: run npm --prefix site run build"
   : sources.some((file) => statSync(file).mtimeMs > statSync(built).mtimeMs)
@@ -83,10 +85,22 @@ test("every image URL in the built homepage exists at the width its srcset decla
     assert.deepEqual(shipped().filter((file) => !used.has(file)), [], "shipped landing files the built page never references");
     const pictures = [...html.matchAll(/<picture\b[\s\S]*?<\/picture>/g)].map(([markup]) => markup);
     assert.ok(pictures.length >= 9, `expected the homepage pictures, found ${pictures.length}`);
+    const nameOf = (url) => (url.match(/^\/landing\/([a-z-]+?)-(?:light|dark)-\d+\.webp$/) ?? [])[1];
     for (const markup of pictures) {
       const img = markup.match(/<img\b[^>]*\ssrc="([^"]*)"[^>]*>/);
       assert.ok(img && img[1].startsWith("/landing/"), `a <picture> image does not load from /landing/: ${markup.slice(0, 160)}`);
-      assert.match(img[0], /\swidth="\d+"/, "every homepage image carries width and height");
+      const name = nameOf(img[1]);
+      assert.ok(name in IMAGES, `${img[1]} is not a known homepage image`);
+      assert.match(img[0], new RegExp(`\\swidth="${IMAGES[name].width}"`), `${name}: img width is not ${IMAGES[name].width}`);
+      assert.match(img[0], new RegExp(`\\sheight="${IMAGES[name].height}"`), `${name}: img height is not ${IMAGES[name].height}`);
       assert.match(img[0], /\salt="[^"]+"/, "every homepage image carries alt text");
+      // A source that swaps in a different picture (art direction) must reserve that picture's own shape.
+      for (const [source] of markup.matchAll(/<source\b[^>]*>/g)) {
+        const url = (source.match(/\ssrcset="([^"\s,]+)/) ?? [])[1] ?? "";
+        const other = nameOf(url);
+        if (!other || other === name) continue;
+        assert.match(source, new RegExp(`\\swidth="${IMAGES[other].width}"`), `${other}: <source> width is not ${IMAGES[other].width}`);
+        assert.match(source, new RegExp(`\\sheight="${IMAGES[other].height}"`), `${other}: <source> height is not ${IMAGES[other].height}`);
+      }
     }
   });

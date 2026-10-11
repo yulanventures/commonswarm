@@ -945,6 +945,11 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
+  /* Stacked under the picture, each card takes its own height. */
+  .lp-trust {
+    grid-template-rows: none;
+  }
+
   .lp-toast--gale {
     display: none;
   }
@@ -965,7 +970,7 @@
   .lp-stage {
     display: grid;
     justify-items: center;
-    padding-block: 4.5rem;
+    padding-block: 4.5rem 5.5rem;
   }
 
   .lp-stage .lp-window {
@@ -975,7 +980,7 @@
   .lp-phone {
     position: relative;
     inset: auto;
-    inline-size: min(17.5rem, 72vw);
+    inline-size: min(22rem, 90vw, 100%);
   }
 
   .lp-toast {
