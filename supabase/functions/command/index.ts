@@ -4299,15 +4299,19 @@ async function fenceRenewal(
       return true;
     });
   } catch (error) {
-    // 23505 is the lineage-fork CAS losing; 55000 is any named refusal raised
-    // by the successor fence; 40P01 is the documented renewal-vs-revocation
-    // deadlock, which the migration says must resolve toward refusal. All three
-    // roll back to the savepoint, leaving the transaction usable so the caller
+    // 40P01 and 40001 must abort the whole transaction, including writes made
+    // before this savepoint (HezLead ruling 38). Renewal-vs-revocation still
+    // resolves toward refusal: the client's retry re-reads state and sees the
+    // revoked token. See supabase/migrations/20260728000002_worker_token_renewal.sql:714
+    // and supabase/migrations/20260728000004_stranded_successor_accounting.sql:361.
+    // 23505 is the lineage-fork CAS losing; 55000 is a named fence refusal.
+    // These and RenewalFenceLost roll back only the savepoint so the caller
     // can re-read state and turn the race into a named domain refusal.
     const code = dbCode(error);
+    if (code === "40P01" || code === "40001") throw error;
     if (
       error instanceof RenewalFenceLost ||
-      code === "23505" || code === "55000" || code === "40P01"
+      code === "23505" || code === "55000"
     ) return false;
     throw error;
   }
