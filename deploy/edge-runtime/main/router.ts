@@ -1,3 +1,5 @@
+/** Gateway routes and per-worker environment boundaries. Request paths and host
+ * configuration select workers; unlisted credentials never cross the boundary. */
 export const FUNCTION_NAMES = [
   "command",
   "read",
@@ -44,6 +46,7 @@ export const FUNCTION_DISABLED_BODY = {
 } as const;
 export const FUNCTION_DISABLED_STATUS = 503;
 export const MCP_PUBLIC_ENABLED_ENV = "SWARM_MCP_PUBLIC_ENABLED";
+export const MCP_TODOS_LISTS_ENABLED_ENV = "SWARM_MCP_TODOS_LISTS_ENABLED";
 export const REQUIRED_MAIN_ENV = [
   "SUPABASE_URL",
   "SUPABASE_ANON_KEY",
@@ -268,13 +271,13 @@ const H0_COMMAND_ENV = COMMAND_ENV.filter(
   (name) => !H0_COMMAND_ENV_EXCLUSIONS.some((excluded) => excluded === name),
 );
 
-// This is the complete environment boundary for the future hosted MCP resource
-// worker. It intentionally contains public Supabase configuration and the
-// worker's own database connection, but no OAuth-service credential material.
+// MCP receives the storage key only for enabled to-do/list tools. OAuth-service
+// credential material never crosses this environment boundary.
 export const MCP_ENV_NAMES = [
   ...DATABASE_ENV,
   "SUPABASE_URL",
   "SUPABASE_ANON_KEY",
+  "SUPABASE_SERVICE_ROLE_KEY",
   "SWARM_ENV",
   "SWARM_MCP_ISSUER",
   "SWARM_MCP_RESOURCE",
@@ -287,6 +290,7 @@ export const MCP_ENV_NAMES = [
   "SWARM_MCP_JWKS_CACHE_TTL_SECONDS",
   "SWARM_MCP_CLOCK_SKEW_SECONDS",
   MCP_PUBLIC_ENABLED_ENV,
+  MCP_TODOS_LISTS_ENABLED_ENV,
 ] as const;
 
 export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {
@@ -295,6 +299,7 @@ export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {
     ...DATABASE_ENV,
     "SUPABASE_URL",
     "SUPABASE_ANON_KEY",
+    "SUPABASE_SERVICE_ROLE_KEY",
     "SWARM_ENV",
     "SWARM_COMMAND_ALLOWED_ORIGINS",
   ],
@@ -317,3 +322,21 @@ export const COMMAND_TEST_HOOKS = new Set([
   "SWARM_CMD_TEST_SLEEP_AFTER_STEP",
   "SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP",
 ]);
+
+/** Resolve defined host names to worker entries. Storage reaches MCP only at
+ * exact flag value "1"; transaction test hooks stay out of non-test workers. */
+export function environmentFor(
+  functionName: FunctionName,
+  get: (name: string) => string | undefined,
+): Array<[string, string]> {
+  const isTest = get("SWARM_ENV") === "test";
+  const mcpStorageEnabled = functionName === "mcp" && get(MCP_TODOS_LISTS_ENABLED_ENV) === "1";
+  const entries: Array<[string, string]> = [];
+  for (const name of FUNCTION_ENV_NAMES[functionName]) {
+    if (!isTest && COMMAND_TEST_HOOKS.has(name)) continue;
+    if (functionName === "mcp" && name === "SUPABASE_SERVICE_ROLE_KEY" && !mcpStorageEnabled) continue;
+    const value = get(name);
+    if (value !== undefined) entries.push([name, value]);
+  }
+  return entries;
+}

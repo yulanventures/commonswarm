@@ -1,3 +1,5 @@
+/** Worker-boundary contracts: synthetic host names produce exact environment
+ * entries, preserving credential exclusions and gateway behavior. */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -6,6 +8,7 @@ import {
   DISABLED_FUNCTION_NAMES,
   FUNCTION_ENV_NAMES,
   FUNCTION_NAMES,
+  environmentFor,
   handleGatewayRequest,
   rewriteFunctionRequest,
   MCP_ENV_NAMES,
@@ -111,13 +114,18 @@ test("HM7 keeps MCP dark in the main router until explicitly enabled", async () 
   );
 });
 
-test("HM5 MCP environment is explicit and excludes OAuth secrets", () => {
+test("H1 worker environments admit storage only where needed and exclude OAuth secrets", () => {
+  const database = ["SWARM_DATABASE_URL", "SUPABASE_DB_URL", "SWARM_DATABASE_TLS_CA_B64"];
+  const hooks = ["SWARM_CMD_TEST_SLEEP_AFTER_STEP", "SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP"];
+  const command = [...database, "SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY",
+    "SWARM_ENV", "SWARM_COMMAND_ALLOWED_ORIGINS", "SWARM_CAPABILITY_URLS", "SWARM_SELF_SERVE", ...hooks];
   const expected = [
     "SWARM_DATABASE_URL",
     "SUPABASE_DB_URL",
     "SWARM_DATABASE_TLS_CA_B64",
     "SUPABASE_URL",
     "SUPABASE_ANON_KEY",
+    "SUPABASE_SERVICE_ROLE_KEY",
     "SWARM_ENV",
     "SWARM_MCP_ISSUER",
     "SWARM_MCP_RESOURCE",
@@ -130,14 +138,58 @@ test("HM5 MCP environment is explicit and excludes OAuth secrets", () => {
     "SWARM_MCP_JWKS_CACHE_TTL_SECONDS",
     "SWARM_MCP_CLOCK_SKEW_SECONDS",
     "SWARM_MCP_PUBLIC_ENABLED",
+    "SWARM_MCP_TODOS_LISTS_ENABLED",
   ];
   assert.deepEqual(MCP_ENV_NAMES, expected);
   assert.deepEqual(FUNCTION_ENV_NAMES.mcp, expected);
 
-  const forbidden =
-    /SERVICE_ROLE|SIGNING|COOKIE|REFRESH|DATABASE_CREDENTIAL|PASSWORD|PRIVATE_KEY|SECRET|TOKEN/;
-  assert.deepEqual(MCP_ENV_NAMES.filter((name) => forbidden.test(name)), []);
-  assert.equal(MCP_ENV_NAMES.includes("SUPABASE_SERVICE_ROLE_KEY" as never), false);
+  const allowlists = {
+    command, admin: command,
+    read: [...database, "SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY",
+      "SWARM_ENV", "SWARM_COMMAND_ALLOWED_ORIGINS"],
+    h0: command.filter(name => name !== "SUPABASE_SERVICE_ROLE_KEY"),
+    activity: database,
+    capability: [...database, "SWARM_ENV", "SWARM_CAPABILITY_URLS", "SWARM_CAPABILITY_ALLOWED_ORIGINS"],
+    mcp: expected,
+  };
+  assert.deepEqual(FUNCTION_ENV_NAMES, allowlists);
+  const oauthSecrets = ["MCP_OAUTH_SIGNING_KEYS_FILE", "MCP_OAUTH_COOKIE_KEYS_FILE",
+    "MCP_OAUTH_DATABASE_CREDENTIALS_FILE", "MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE",
+    "MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE", "OAUTH_CLIENT_SECRET"];
+  const host = Object.fromEntries([...new Set([...Object.values(allowlists).flat(), ...oauthSecrets])]
+    .map(name => [name, `synthetic:${name}`]));
+  for (const flag of [undefined, "", "0", "true", "01", "1 ", "1"]) {
+    for (const mode of ["production", "test"]) {
+      const get = (name: string) => name === "SWARM_ENV" ? mode
+        : name === "SWARM_MCP_TODOS_LISTS_ENABLED" ? flag : host[name];
+      for (const worker of FUNCTION_NAMES) {
+        const entries = environmentFor(worker, get);
+        const names = entries.map(([name]) => name);
+        const admitted = allowlists[worker].filter(name => (mode === "test" || !hooks.includes(name))
+          && (worker !== "mcp" || name !== "SUPABASE_SERVICE_ROLE_KEY" || flag === "1")
+          && get(name) !== undefined);
+        assert.deepEqual(entries, admitted.map(name => [name, get(name)]), `${worker}/${mode}/${flag}`);
+        assert.ok(names.includes("SWARM_DATABASE_URL"), `${worker} must receive its positive control`);
+        assert.deepEqual(names.filter(name => oauthSecrets.includes(name)), []);
+        if (["h0", "activity", "capability"].includes(worker)) {
+          assert.equal(names.includes("SUPABASE_SERVICE_ROLE_KEY"), false);
+        }
+        if (worker === "command" || worker === "admin" || worker === "read") {
+          assert.ok(names.includes("SUPABASE_SERVICE_ROLE_KEY"), `${worker} storage control`);
+        }
+        if (worker === "mcp") assert.equal(names.includes("SUPABASE_SERVICE_ROLE_KEY"), flag === "1");
+      }
+    }
+  }
+  assert.deepEqual(environmentFor("read", () => undefined), [], "undefined host names are omitted");
+});
+
+test("H1 edge env example remains names-only and declares the hosted to-do/list flag", async () => {
+  const example = await source("deploy/edge-runtime/env.example");
+  const assignments = [...example.matchAll(/^([A-Z][A-Z0-9_]*)=(.*)$/gm)];
+  assert.ok(assignments.some(match => match[1] === "SWARM_MCP_TODOS_LISTS_ENABLED"));
+  assert.deepEqual(assignments.filter(match => match[2] !== ""), []);
+  assert.equal(new Set(assignments.map(match => match[1])).size, assignments.length);
 });
 
 test("HM5 OAuth Compose fixes the box resource and secret-file boundaries", async () => {
