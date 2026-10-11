@@ -126,8 +126,8 @@ class DrillTests(unittest.TestCase):
                     schemas = [a.removeprefix('--schema=') for a in args if a.startswith('--schema=')]
                     exclusions = [a.removeprefix('--exclude-table=') for a in args if a.startswith('--exclude-table=')]
                     excluded_schemas = [a.removeprefix('--exclude-schema=') for a in args if a.startswith('--exclude-schema=')]
-                    # PG17 pg_dump.c:517-523,1980-1985,2012-2024: --schema
-                    # suppresses even namespace-associated publication membership.
+                    # PG17 pg_dump.c: --schema clears include_everything, so selectDumpablePublicationObject
+                    # and selectDumpableObject skip publications, their membership and subscriptions.
                     output = self.dump_headers(service, ''.join(ddl for schema, name, kind, ddl in self.databases[service]
                         if (kind in ('SUBSCRIPTION', 'PUBLICATION') or
                             (not schemas or schema in schemas) and schema not in excluded_schemas)
