@@ -122,7 +122,9 @@ test("one-shot bearer preserves a9846955 outcomes across renewal answers", { tim
     { name: "upgrade", status: 426, body: '{"error":"upgrade_required","min_client_version":"9.0.0"}', outcome: "warn", warning: "This copy of cswarm is older than the deployment accepts (minimum 9.0.0)" },
     { name: "http 400", status: 400, body: '{}', outcome: "latch", warning: "this deployment does not offer credential renewal yet" },
     { name: "http 404", status: 404, body: '{}', outcome: "latch" },
-    { name: "http 500", status: 500, body: '{}', outcome: "warn" },
+    // HezLead ruling 38: main's aborted renewal has no retryable field; the
+    // 500 status must preserve the command_id for the next renewal attempt.
+    { name: "http 500", status: 500, body: '{"error":"internal_error"}', outcome: "warn" },
     { name: "http 429", status: 429, body: '{"error":"rate_limited"}', outcome: "warn", warning: "The deployment did not renew this credential (HTTP 429)" },
     { name: "http 418", status: 418, body: '{}', outcome: "warn" },
     { name: "http 302", status: 302, body: '{}', outcome: "warn" },
@@ -140,12 +142,17 @@ test("one-shot bearer preserves a9846955 outcomes across renewal answers", { tim
   let checked = 0;
   for (const row of cases) {
     let calls = 0;
+    const commandIds: string[] = [];
     const warnings: string[] = [];
     const credential = await AgentCredentialSession.open({
       target, workspaceId: randomUUID(),
       presented: { token, tokenId: randomUUID(), principalId: randomUUID(), runId: randomUUID(), expiresAt: NOW + 60_000 },
       store: store(), now: () => NOW, warn: (warning) => warnings.push(warning),
-      fetcher: (async () => { calls++; return new Response(row.body, { status: row.status }); }) as typeof fetch,
+      fetcher: (async (_input: unknown, init?: RequestInit) => {
+        calls++;
+        commandIds.push((JSON.parse(String(init?.body)) as { command_id: string }).command_id);
+        return new Response(row.body, { status: row.status });
+      }) as typeof fetch,
     });
     if (row.outcome === "revoked" || row.outcome === "suspended" || row.outcome === "reauthorise") {
       const expected = row.outcome === "revoked" ? RenewalRevoked
@@ -160,6 +167,11 @@ test("one-shot bearer preserves a9846955 outcomes across renewal answers", { tim
       if (row.outcome === "latch") {
         assert.equal(await credential.bearer(), token, row.name);
         assert.equal(calls, 1, row.name);
+      } else if (row.status === 500) {
+        assert.equal(await credential.bearer(), token, row.name);
+        assert.equal(calls, 2, "main's 500 is retried on the next command");
+        assert.ok(commandIds[0], "the initial attempt has a command_id");
+        assert.equal(commandIds[1], commandIds[0], "unknown outcome reuses its command_id");
       }
     }
     checked++;
