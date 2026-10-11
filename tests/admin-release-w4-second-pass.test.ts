@@ -1382,11 +1382,23 @@ test('A8 / w4-preflight-r-tree-absent: an R edge tree present at preflight refus
 });
 
 
-// X2: ai-gates (Mac) opens the two lock-order receipts and checks them against INPUTS and the repository (rules 1-12).
+/** X2 receipts exercise the marked validator; existing fixtures also run the pinned old block. */
 const lockGates = ['admin-principal-lock-order-ci', 'admin-principal-lock-order-staging'] as const;
 const gatesContract = JSON.parse(readFileSync(join(dirname(planPath), 'GATES.json'), 'utf8')) as { gates: Record<string, string[]>; windows: Record<string, string[]> };
-const lockControls = gatesContract.gates['admin-principal-lock-order-ci']!;
-function x2(options: { treesDiffer: boolean }) {
+const x2Base = 'e82771087634c1feced87b0a3b9d51b555aaecda';
+const oldFile = (file: string) => {
+  const r = spawnSync('git', ['show', `${x2Base}:${file}`], { encoding: 'utf8', maxBuffer: 64 << 20 });
+  assert.equal(r.status, 0, r.stderr); return r.stdout;
+};
+const oldGatesBlock = blocksOf(oldFile(relative(process.cwd(), planPath))).find(b => b.startsWith('# step: ai-gates\n'))!;
+const oldContract = JSON.parse(oldFile(relative(process.cwd(), join(dirname(planPath), 'GATES.json'))));
+const lockControls: string[] = oldContract.gates[lockGates[0]];
+const legacyClasses = Object.fromEntries(lockControls.map((name, i) => [name, i ? 'base-cycle' : 'positive-control']));
+const mixedClasses: Record<string, string> = { ...legacyClasses, 'admin-oauth-vs-admin-oauth-shared-workspace': 'base-cycle',
+  'admin-oauth-create-existing-workspace-crossed': 'base-cycle', 'admin-oauth-read-outside-grant-vs-admin-oauth-routine': 'regression-guard',
+  'admin-oauth-grant-admin-delegation-vs-admin-oauth-routine': 'regression-guard', 'admin-human-withdraw-crossed-grants': 'base-cycle' };
+function x2(options: { treesDiffer: boolean; mixed?: boolean }) {
+  let legacyVerdicts = 0;
   const root = realpathSync(mkdtempSync(join(scratch, 'x2-'))), bin = join(root, 'bin'), evidence = join(root, 'evidence');
   mkdirSync(bin); mkdirSync(evidence);
   const T = 'e'.repeat(40), R = sha, TEST = 'tests/p1-server/admin-principal-lock-order.test.ts', testBytes = 'lock-order test bytes\n';
@@ -1405,7 +1417,8 @@ elif len(a)==2 and a[0]=='rev-parse' and a[1].endswith(':supabase/migrations') a
 elif a[:2]==['ls-tree','--name-only'] and len(a)==5 and a[3:]==['--','supabase/migrations/'] and a[2] in cfg['ls']: sys.stdout.write(cfg['ls'][a[2]])
 else: sys.stderr.write('UNMODELLED git '+repr(a)+'\n'); raise SystemExit(99)
 `, { mode: 0o700 });
-  const results = (run: 'base' | 'lane') => Object.fromEntries(lockControls.map((c, i) => [c, run === 'lane' || i === 0 ? 'PASS' : 'FAIL-40P01']));
+  const classes = options.mixed ? mixedClasses : legacyClasses, controls = Object.keys(classes);
+  const results = (run: 'base' | 'lane') => Object.fromEntries(controls.map(c => [c, run === 'base' && classes[c] === 'base-cycle' ? 'FAIL-40P01' : 'PASS']));
   const ci: any = { kind: 'ci', release_sha: R, base_variant_sha: T, test_file_sha256: hash(testBytes), runs: {
     base: { run_url: 'https://github.com/yulanventures/commonswarm/actions/runs/101', run_id: 101, sha: T, migration_sha: git.trees[T], results: results('base') },
     lane: { run_url: 'https://github.com/yulanventures/commonswarm/actions/runs/102', run_id: 102, sha: R, migration_sha: git.trees[R], results: results('lane') } } };
@@ -1418,11 +1431,13 @@ else: sys.stderr.write('UNMODELLED git '+repr(a)+'\n'); raise SystemExit(99)
     compose_network: `${project}-net`, compose_volume: `${project}-pgdata`, postgres_image_digest: postgresImage,
     runs: { base: stagingRun('base', T, '/srv/c1-staging/x2/base.dump', 'a'), lane: stagingRun('lane', R, '/srv/c1-staging/x2/lane.dump', 'b') } };
   const inputs: any = { release_sha: R, window: 'W6', lock_order_base_variant_sha: T };
-  const run = (change: (c: { ci: any; st: any; git: any; inputs: any; receipt: any }) => void = () => {}) => {
-    const c = { ci: structuredClone(ci), st: structuredClone(st), git: structuredClone(git), inputs: structuredClone(inputs), receipt: null as any };
+  const run = (change: (c: any) => void = () => {}, source = block('ai-gates')) => {
+    const contract = { ...structuredClone(oldContract), x2_race_classes: { ...classes } };
+    for (const gate of lockGates) contract.gates[gate] = [...controls];
+    const c = { ci: structuredClone(ci), st: structuredClone(st), git: structuredClone(git), inputs: structuredClone(inputs), receipt: null as any, contract, duplicate: '', duplicateMap: false };
     const files: Record<string, string> = {};
-    for (const name of gatesContract.windows.W6!) files[name] = name === lockGates[0] ? '' : name === lockGates[1] ? '' : JSON.stringify({ gate: name }) + '\n';
-    c.receipt = { release_sha: R, evidence_root: evidence, gates: Object.fromEntries(gatesContract.windows.W6!.map(name => [name, { status: 'PASS', controls: gatesContract.gates[name], file: `${name}.json`, sha256: '' }])) };
+    for (const name of contract.windows.W6) files[name] = JSON.stringify({ gate: name }) + '\n';
+    c.receipt = { release_sha: R, evidence_root: evidence, gates: Object.fromEntries(contract.windows.W6.map((name: string) => [name, { status: 'PASS', controls: contract.gates[name], file: `${name}.json`, sha256: '' }])) };
     change(c);
     files[lockGates[0]] = JSON.stringify(c.ci) + '\n'; files[lockGates[1]] = JSON.stringify(c.st) + '\n';
     for (const [name, gate] of Object.entries(c.receipt.gates) as Array<[string, any]>) {
@@ -1430,21 +1445,24 @@ else: sys.stderr.write('UNMODELLED git '+repr(a)+'\n'); raise SystemExit(99)
       const body = files[name] ?? '{}\n'; writeFileSync(join(evidence, gate.file), body); gate.sha256 = hash(body);
     }
     writeFileSync(join(root, 'git.json'), JSON.stringify(c.git)); writeFileSync(join(root, 'inputs.json'), JSON.stringify(c.inputs)); writeFileSync(join(root, 'receipt.json'), JSON.stringify(c.receipt));
-    const r = spawnSync('/bin/bash', [], { input: 'set -euo pipefail\n' + block('ai-gates'), encoding: 'utf8', timeout: 30_000, cwd: root,
-      env: { PATH: `${bin}:/usr/bin:/bin`, X2_ROOT: root, INPUTS_FILE: join(root, 'inputs.json'), GATE_RECEIPT_FILE: join(root, 'receipt.json'), PLAN_FILE: planPath } });
+    const contractText = JSON.stringify(c.contract).replace('"x2_race_classes":{', '"x2_race_classes":{' + c.duplicate);
+    writeFileSync(join(root, 'GATES.json'), c.duplicateMap ? contractText.slice(0, -1) + ',"x2_race_classes":' + JSON.stringify(classes) + '}' : contractText);
+    const execute = (source: string) => spawnSync('/bin/bash', [], { input: 'set -euo pipefail\n' + source, encoding: 'utf8', timeout: 30_000, cwd: root,
+      env: { PATH: `${bin}:/usr/bin:/bin`, X2_ROOT: root, INPUTS_FILE: join(root, 'inputs.json'), GATE_RECEIPT_FILE: join(root, 'receipt.json'), PLAN_FILE: join(root, 'RELEASE.md') } });
+    const r = execute(source);
     assert.ifError(r.error); assert.doesNotMatch(r.stderr, /UNMODELLED|Traceback/);
+    if (!options.mixed) {
+      const old = execute(oldGatesBlock); assert.ifError(old.error);
+      assert.deepEqual([r.status, r.stdout, r.stderr], [old.status, old.stdout, old.stderr], 'every legacy X2 fixture keeps its old verdict'); legacyVerdicts++;
+    }
     return r;
   };
   const gitCalls = () => readFileSync(join(root, 'git-calls.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l)[0]);
-  return { run, T, R, onlyR, versionsT, gitCalls };
+  return { run, T, R, onlyR, versionsT, gitCalls, compared: () => legacyVerdicts };
 }
 
-test('X2 / lock-order-gates-contract: GATES.json lists both gates with the ten controls in W6 and every later window that can open issuance', () => {
-  assert.deepEqual(lockControls, ['positive-control-raw-sql-base-order-deadlocks', 'admin-oauth-vs-hosted-claim-seat', 'admin-oauth-vs-local-join-registration',
-    'admin-oauth-vs-local-command-creation', 'accept-invitation-vs-hosted-claim-seat', 'accept-invitation-vs-local-join-registration',
-    'remove-member-vs-hosted-claim-seat', 'remove-member-vs-local-join-registration', 'household-invitation-vs-hosted-claim-seat',
-    'household-invitation-vs-local-join-registration']);
-  assert.deepEqual(gatesContract.gates['admin-principal-lock-order-staging'], lockControls);
+test('X2 / lock-order-gates-contract: both arrays belong to W6 and W7', () => {
+  assert.deepEqual(gatesContract.gates[lockGates[1]], gatesContract.gates[lockGates[0]]);
   const withGates = Object.entries(gatesContract.windows).filter(([, names]) => lockGates.every(g => names.includes(g))).map(([w]) => w);
   assert.deepEqual(withGates, ['W6', 'W7']);
   assert.ok(!Object.values(gatesContract.windows).some(names => lockGates.some(g => names.includes(g)) && !lockGates.every(g => names.includes(g))));
@@ -1463,10 +1481,11 @@ test('X2 / lock-order-receipts-admit: both receipts admit with equal and with di
       const r = f.run(c => { for (const run of ['base', 'lane']) { c.st.runs[run].restore.restore_started_at = restore; c.st.runs[run].restore.restored_at = '2026-10-10T11:05:00Z'; } });
       assert.equal(r.status, 0, `interval to ${restore}: ${r.stderr}`);
     }
+    assert.equal(f.compared(), 3, 'one admission and both interval bounds ran both validators');
   }
 });
 
-test('X2 / lock-order-receipts-refuse: each rule refuses its drifted receipt, input or repository fact', () => {
+test('X2 / every existing control receipt fixture keeps the old verdict: enumerate all refusals and admissions', () => {
   const f = x2({ treesDiffer: true }), T = f.T;
   const cases: Array<[string, (c: any) => void, string]> = [
     ['missing CI gate', c => { delete c.receipt.gates['admin-principal-lock-order-ci']; }, 'admin-principal-lock-order-ci PASS'],
@@ -1524,7 +1543,34 @@ test('X2 / lock-order-receipts-refuse: each rule refuses its drifted receipt, in
     assert.ok(r.stderr.includes(message), `${name}: expected ${message}; observed ${r.stderr}`);
     assert.doesNotMatch(r.stdout, /PASS ai-gates/, name);
   }
+  assert.equal(cases.length, 48, 'enumerated pre-amendment refusal fixtures');
+  assert.equal(f.compared(), cases.length, 'every refusal fixture ran both validators');
   assert.ok(T !== f.R);
+});
+
+test('X2 / mixed classes: exact scalar results and a complete unique classes map, with passing controls', () => {
+  const f = x2({ treesDiffer: true, mixed: true }), controls = Object.keys(mixedClasses);
+  assert.equal(controls.length, 15); assert.deepEqual(Object.values(mixedClasses).sort(), [...Array(12).fill('base-cycle'), 'positive-control', 'regression-guard', 'regression-guard']);
+  const good = f.run(); assert.equal(good.status, 0, good.stderr);
+  const old = f.run(() => {}, oldGatesBlock); assert.match(old.stderr, /lock-order rule 8: CI base results/, 'the mixed set fails before the amendment');
+  const reject = (change: (c: any) => void, reason: string) => {
+    const r = f.run(change); assert.notEqual(r.status, 0); assert.ok(r.stderr.includes(reason), r.stderr);
+    assert.doesNotMatch(r.stdout, /PASS ai-gates/);
+  };
+  for (const receipt of ['ci', 'st']) for (const run of ['base', 'lane']) for (const name of controls) {
+    reject(c => { c[receipt].runs[run].results[name] = run === 'base' && mixedClasses[name] === 'base-cycle' ? 'PASS' : 'FAIL-40P01'; }, `lock-order rule 8: ${receipt === 'ci' ? 'CI' : 'staging'} ${run} results`);
+  }
+  for (const change of [
+    (c: any) => { delete c.contract.x2_race_classes; }, (c: any) => { c.contract.x2_race_classes = null; },
+    (c: any) => { delete c.contract.x2_race_classes[controls[0]!]; }, (c: any) => { c.contract.x2_race_classes.extra = 'base-cycle'; },
+    (c: any) => { c.contract.x2_race_classes[controls[0]!] = 'unknown'; },
+    (c: any) => { c.duplicate = JSON.stringify(controls[0]) + ':"positive-control",'; }, (c: any) => { c.duplicateMap = true; },
+    (c: any) => { c.contract.x2_race_classes = Object.entries(mixedClasses); },
+    (c: any) => { delete c.contract.x2_race_classes[controls[0]!]; c.contract.x2_race_classes.other = 'positive-control'; },
+    (c: any) => { c.contract.gates[lockGates[0]].push(controls[0]); },
+    (c: any) => { c.contract.gates[lockGates[1]].pop(); },
+  ]) reject(change, 'lock-order rule 8: x2_race_classes');
+  assert.equal(f.run().status, 0, 'unchanged positive control after every refusal');
 });
 
 // FU #12: the rollback removes a drop-in or config directory that this window created; one that existed is kept.
