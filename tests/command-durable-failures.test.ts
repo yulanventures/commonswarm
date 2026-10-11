@@ -32,14 +32,15 @@ test("command failure writes exactly one classified row with its SQLSTATE", asyn
     inserted.push(row);
   });
 
+  // HezLead ruling 27: a deadlock is classified with the lock timeout; the row keeps its SQLSTATE.
   assert.deepEqual(inserted, [{
     command_kind: "post_signal",
-    reason: "internal_error",
+    reason: "lock_timeout",
     db_code: "40P01",
     detail: "Error: deadlock detected",
     request_id: REQUEST_ID,
   }]);
-  assert.deepEqual(result, { status: 500, body: { error: "internal_error" } });
+  assert.deepEqual(result, { status: 503, body: { error: "temporarily_unavailable" } });
 });
 
 test("a diagnostic insert failure cannot replace the original 500 response", async () => {
@@ -133,7 +134,7 @@ test("the bounded purge removes old failures and leaves fresh failures", () => {
   assert.match(migration, /'SELECT swarm\.purge_command_failures\(\)'/u);
 });
 
-test("the edge catch uses one post-rollback insert and keeps retry policy unchanged", () => {
+test("the edge catch uses one post-rollback insert; only 40P01 joins the retryable 503", () => {
   const source = readFileSync(
     join(process.cwd(), "supabase/functions/command/index.ts"),
     "utf8",
@@ -175,9 +176,9 @@ test("the edge catch uses one post-rollback insert and keeps retry policy unchan
   assert.equal((catchBlock.match(/finishCommandFailure\(/gu) ?? []).length, 1);
   assert.doesNotMatch(catchBlock, /db\.begin|db`/u);
   assert.match(catchBlock, /await finishCommandFailure/u);
-  assert.match(catchBlock, /40001 \(serialization failure\)/u);
-  assert.match(catchBlock, /40P01 \(deadlock\)/u);
-  assert.match(catchBlock, /fall through to the existing 500/u);
+  assert.match(catchBlock, /40P01 \(deadlock\) returns the 503 of 55P03/u);
+  assert.match(catchBlock, /40001 \(serialization failure\) deliberately still falls/u);
+  assert.match(catchBlock, /through to the existing 500/u);
 });
 
 test("the failure table is operator-read and agent-append only", () => {
