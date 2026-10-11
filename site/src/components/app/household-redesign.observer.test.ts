@@ -178,7 +178,8 @@ test("active approvals expose Save and withdrawal in both places, owned agents o
     "the dialog's nested confirmation suppresses the card's native confirmation");
   const withdraw = section(script, "const withdrawAgent = async", "const confirmOwnAccess = async");
   assert.match(withdraw, /window.confirm\(withdrawConfirmText\(agentName, hosted\)\)/);
-  assert.match(script, /withdrawAgent\(principalId, agentName, connection.kind === "hosted", withdraw, status\)/,
+  assert.match(cards, /const hosted = connection.kind === "hosted";/);
+  assert.match(cards, /withdrawAgent\(principalId, agentName, hosted, withdraw, status\)/,
     "a card row decides hosted from its own connection, not from a roster lookup");
   assert.match(withdraw, /kind: "household_withdraw_connection", principal_id: principalId/);
   assert.match(withdraw, /withdrawRefusalMessage\(result.body.reason\)/);
