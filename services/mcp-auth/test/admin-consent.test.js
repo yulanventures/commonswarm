@@ -232,19 +232,22 @@ test("admin consent expiry is positive and bounded by thirty days; a shorter cho
 });
 
 const FULL_SCOPES = "openid offline_access admin:read workspaces:create seats:create seats:renew seats:revoke invites:create invites:revoke onboarding:connect";
-test("full-account-second-confirmation: no unverified option and first selection never creates a grant", async () => {
+test("full-account-second-confirmation: closed issuance copy, no unverified option and no grant on selection", async () => {
   const unknown = fixture(FULL_SCOPES);
   unknown.state.verification = null;
   const unavailable = response();
   await unknown.handler(request(), unavailable, url());
   assert.equal(unavailable.status, 403);
   assert.doesNotMatch(unavailable.body, /value="full_account"|second_token/u);
-  const unverified = renderAdminConsentPage({ uid: "test", user: { userId: ALICE },
-    params: fixture().state.details.params, policy: null });
-  assert.doesNotMatch(unverified, /value="full_account"|second_token/u);
+  for (const issuanceState of ["closed", "open"]) {
+    const unverified = renderAdminConsentPage({ uid: "test", user: { userId: ALICE },
+      params: unknown.state.details.params, policy: null, issuanceState });
+    assert.doesNotMatch(unverified, /value="full_account"|second_token/u);
+  }
   const f = fixture(FULL_SCOPES);
   const first = response();
   await f.handler(request(), first, url());
+  assert.match(first.body, /Admin connections are not available yet\. Reviewing a selection does not connect the client\./u);
   assert.match(first.body, /name="mode" value="full_account"/u);
   assert.match(first.body, /name="mode" value="granular" checked/u);
   assert.match(first.body, /name="scope_names" value="admin:read" checked/u);
@@ -354,14 +357,16 @@ async function confirmThroughHandler(f, prompt) {
   return { outcome, issued, selected };
 }
 
-test("first-time admin login renders consent and finishes login with consent", async () => {
+test("first-time admin login shows open issuance copy and finishes login with consent", async () => {
   const open = fixture();
   open.state.details.prompt.name = "login";
   const openPage = issuanceResponse();
   const opened = await openIssuanceCoordinator().run(openPage, () => open.handler(request(), openPage, url()));
   assert.equal(opened.outcome, "committed");
   assert.equal(openPage.statusCode, 200);
-  assert.match(openPage.body, /Review admin access/u);
+  assert.match(openPage.body, /Familiar &lt;img src=x&gt; name/u);
+  assert.match(openPage.body, /Confirming your selection connects the client with exactly your chosen permissions, and you can revoke this access in \/app\./u);
+  assert.doesNotMatch(openPage.body, /Admin connections are not available yet\.|<img/u);
   assert.match(openPage.body, /action="\/interaction\/admin-test\/selection"/u);
   assert.equal(open.state.finishes, 0);
 
