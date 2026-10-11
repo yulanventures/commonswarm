@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import stat
 import time
 import urllib.request
 
@@ -26,14 +27,31 @@ def ping(url, suffix):
             raise RuntimeError('ping rejected')
 
 
-def notify(kind, phase):
-    key, status_name, flags = KINDS[kind]
-    if CONFIG.stat().st_mode & 0o077:
+def read_url(config, key):
+    if config != CONFIG:
+        if not config.is_absolute():
+            raise ValueError('absolute healthcheck config required')
+        info = config.lstat()
+        if not stat.S_ISREG(info.st_mode) or (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) != (0, 0, 0o600):
+            raise ValueError('healthcheck config must be regular root:root 0600')
+    if config.stat().st_mode & 0o077:
         raise ValueError('healthcheck config must be private')
-    values = dict(line.split('=', 1) for line in CONFIG.read_text().splitlines() if line and not line.startswith('#'))
+    lines = [line for line in config.read_text().splitlines() if line and not line.startswith('#')]
+    if config != CONFIG and (len(lines) != 1 or not lines[0].startswith(key + '=')):
+        raise ValueError('expected one healthcheck key')
+    values = dict(line.split('=', 1) for line in lines)
     url = values[key].strip().strip('"').strip("'").rstrip('/')
     if not re.fullmatch(r'https://hc-ping\.com/[a-f0-9-]{36}', url):
         raise ValueError('invalid healthcheck URL')
+    return url
+
+
+def notify(kind, phase, config=None):
+    key, status_name, flags = KINDS[kind]
+    url = read_url(CONFIG if config is None else config, key)
+    if config is not None and phase in ('ok', 'fail'):
+        ping(url, '' if phase == 'ok' else '/fail')
+        return
     ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     start_file = ROOT / (kind + '-ping-start.json')
     if phase == 'start':
@@ -62,9 +80,12 @@ def notify(kind, phase):
 def main():
     os.umask(0o077)
     try:
-        if len(sys.argv) != 3:
+        config = None
+        if len(sys.argv) == 5 and sys.argv[3] == '--config':
+            config = Path(sys.argv[4])
+        elif len(sys.argv) != 3:
             raise ValueError('expected kind and phase')
-        notify(sys.argv[1], sys.argv[2])
+        notify(sys.argv[1], sys.argv[2], config)
         return 0
     except Exception as error:
         print('Healthcheck notification failed: ' + type(error).__name__, file=sys.stderr)
