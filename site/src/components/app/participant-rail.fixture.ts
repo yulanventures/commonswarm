@@ -57,7 +57,7 @@ export const renderParticipantRailFixture = async (
         const models = new Map(overview.models);
         const memberships = overview.data.workspaces.map(row => ({ id: row.workspace_id, name: row.name }));
         const entries = ParticipantRail.overviewCatchUpData(ParticipantRail.initialCatchUpData(memberships), overview.data, false, undefined, models);
-        people = ParticipantRail.homeRailPeople(entries, people, models);
+        people = ParticipantRail.homeRailPeople(entries, people);
         workspaces.push(...memberships.map(row => ({ ...row, href: '/app?w=' + row.id, current: false, needsYou: null })));
       }
       const rail = ParticipantRail.buildHomeRail(document, { sample: false, people, workspaces,

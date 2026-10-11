@@ -26,7 +26,7 @@ export async function focusFixture() {
     let people = new Map(), accessStatuses = [], homeWorkClaims = [], pendingInvites = [], pendingAgents = [];
     let pendingAgentsLoadFailed = false, freshInviteWorkspaceId = '', freshInviteId = '';
     let railExpanded = false, catchUpExpanded = false, homeShellKey = '', homeRailKey = '', homeCatchUpKey = '', renderedWakeMarkKey = '';
-    let catchUpData = [], rosterReads = 0, rosterRenders = 0;
+    let catchUpData = [], hideModels = false, rosterReads = 0, rosterRenders = 0;
     const homeOverviewCounts = new Map(), pendingRefreshGate = new PendingRefreshGate(12000,30000);
     const pendingMemberInvites = async () => [], agentAccessStatuses = async () => [];
     const pendingAgentAccess = async () => [], loadPendingAccess = async read => ({rows:await read(),failed:false});
@@ -40,10 +40,6 @@ export async function focusFixture() {
     const feedMenuState = () => null, feedMenuAction = () => {}, syncFeedChrome = () => {};
     // renderHomeShell's phone account entries (round 7). No account here: the phone ⋯ offers none and the door stays.
     const accountMenuState = () => null, accountMenuAction = () => {};
-    // renderHomeRail's joined rail (home-map homeRailPeople). The browser fixture imports catchUpRailPeople, which is
-    // homeRailPeople(entries); with the view's people as the first source it is the same rail for every state this
-    // fixture reaches (catchUpData is empty on its workspace route). Called lazily, so the vm unit test never needs it.
-    const homeRailPeople = (entries, current = null) => catchUpRailPeople(current ? [{ detail: { people: current } }, ...entries] : entries);
     const poll = async (elapsed = 30001) => { now += elapsed; await refreshPendingAccess('W',1); return {reads:rosterReads,rendered:rosterRenders}; };
   `;
   const production = (selected = names) => selected.map(name => `const ${declarations.get(name)};`).join("\n");

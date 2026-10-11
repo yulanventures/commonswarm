@@ -437,7 +437,14 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   if (state.query.trim()) { const shown = groups.reduce((count, group) => count + group.agents.length, other.length);
     const result = node(doc, "p", "pd-muted", `${shown} of ${model.agents.length} agents shown · “${state.query.trim()}”`); result.setAttribute("role", "status"); host.append(result); }
   const grid = node(doc, "div", "pd-member-grid"); grid.dataset.memberList = "";
-  /** Agent inputs become dialog entries. */
+  /** Model text becomes an ellipsis line and a reported neutral tag; null family adds no tag or vendor mark. */
+  const modelLine = (text: string, agent: PeopleDialogAgent): HTMLElement => {
+    const line = node(doc, "span", "pd-agent-app pd-agent-model"); line.title = text;
+    line.append(node(doc, "span", "pd-ellipsis", text));
+    const tag = modelFamilyTag(doc, modelFamily(agent.model), agent.model); if (tag) line.append(tag);
+    return line;
+  };
+  /** Agent inputs become dialog entries; model text clips while reported tags stay visible. */
   const agentRow = (agent: PeopleDialogAgent) => {
     if (page) return pageAgentRow(agent);
     const approved = peopleDialogAccessUntil(agent) !== null && !!agent.access;
@@ -451,9 +458,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     const copy = node(doc, "span", "pd-agent-copy"); const nameLine = node(doc, "span", "pd-agent-name-line");
     const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.name; nameLine.append(name);
     if (approved && !agent.hosted) { const mark = node(doc, "span", "pd-access-mark", "▤"); mark.dataset.agentContentAccess = ""; mark.setAttribute("role", "img"); mark.setAttribute("aria-label", "Can use Lists & docs"); mark.title = "Can use Lists & docs"; nameLine.append(mark); }
-    const modelLine = node(doc, "span", family ? "pd-agent-app" : "pd-agent-app pd-ellipsis", secondary);
-    const tag = modelFamilyTag(doc, family, agent.model); if (tag) modelLine.append(" ", tag);
-    copy.append(nameLine, modelLine, chip(doc, agent.status));
+    copy.append(nameLine, modelLine(secondary, agent), chip(doc, agent.status));
     disclosure.append(orb(doc, agent, tintOf(agent)), copy, node(doc, "span", "pd-row-arrow", "›")); row.append(disclosure);
     const notice = noticeFor(agent);
     if (agent.status.attention && !model.sample) { const help = node(doc, "div", "pd-row-help"); help.append(node(doc, "p", "", agent.status.sentence)); const next = fix(agent, notice); if (next) help.append(next); row.append(help); }
@@ -463,7 +468,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   // Page row (canvas Members): the name block stays the disclosure (same id, name and controls); the status pill sits on
   // the name line, a problem's sentence replaces the secondary line, and the actions sit on the row: the one fix
   // (Resume / Get a new key) as the Reconnect pill, Manage (the agent page) and Remove (the same confirmation).
-  /** Agent inputs become page entries; faults keep the model line visible. */
+  /** Agent inputs become page entries; faults keep the clipped model line and reported neutral tag visible. */
   const pageAgentRow = (agent: PeopleDialogAgent) => {
     const approved = peopleDialogAccessUntil(agent) !== null && !!agent.access;
     const row = node(doc, "li", "pd-agent"); row.dataset.agentRow = agent.id; row.dataset.attention = String(agent.status.attention);
@@ -477,15 +482,12 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.name; nameLine.append(name);
     nameLine.append(chip(doc, agent.status));
     const sentence = agent.status.attention && !model.sample ? agent.status.sentence : "";
-    const details = node(doc, "span", "pd-agent-app", sentence || [agent.app, secondary].filter(Boolean).join(" · "));
+    const details = sentence ? node(doc, "span", "pd-agent-app", sentence)
+      : modelLine([agent.app, secondary].filter(Boolean).join(" · "), agent);
     // The canvas row draws no Lists & docs glyph: the disclosure's accessible name above carries "Can use Lists & docs" (the hosted note for a hosted agent),
     // and the agent's details (the side card) show the Lists & docs fact.
     copy.append(nameLine, details);
-    const tag = modelFamilyTag(doc, family, agent.model);
-    if (tag) {
-      const modelLine = sentence ? node(doc, "span", "pd-agent-app", secondary) : details;
-      modelLine.append(" ", tag); if (sentence) copy.append(modelLine);
-    }
+    if (sentence && family) copy.append(modelLine(secondary, agent));
     disclosure.append(orb(doc, agent, tintOf(agent)), copy); row.append(disclosure);
     const notice = noticeFor(agent);
     const actions = node(doc, "span", "pd-agent-actions");

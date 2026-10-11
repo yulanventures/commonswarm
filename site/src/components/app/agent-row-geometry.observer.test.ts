@@ -14,6 +14,7 @@ assert.ok(style, "LiveDashboard must expose its component stylesheet to the geom
 
 type Geometry = { width: number; listWidth: number; detailWidth: number; rowOverflow: boolean; touchTargets: boolean;
   rowFamilyText: string; rowFamilyName: string; detailFamilyText: string; unknownFamilyTags: number;
+  modelClipped: boolean; modelTitle: string; modelText: string; familyVisible: boolean;
   hostileElements: number; hostileText: boolean; accessMark: string | null; localAccessMark: string | null; hostedRowLabel: string | null; hostedDetailText: string; modelValues: (string | null)[];
   confirmRole: string | null; safeConfirmFocus: boolean; detailTouchTargets: boolean; closeIconSize: number; backIconSize: number; cancelRestoresOpener: boolean; outerStillOpen: boolean; technicalClosed: boolean };
 
@@ -38,7 +39,8 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
       <script>${script}</script><script>
       (async () => {
         const hostile = '<img src=x onerror="document.title=1">';
-        const agent = { id: 'agent', name: 'Alexandria Montgomery-Sutherland '+hostile, ownerId: 'person', ownerName: 'Mei Langridge', model: 'Claude Opus 5.5 ' + hostile,
+        const longModel = 'Claude Opus 5.5 ' + 'listener label '.repeat(40) + hostile;
+        const agent = { id: 'agent', name: 'Alexandria Montgomery-Sutherland '+hostile, ownerId: 'person', ownerName: 'Mei Langridge', model: longModel,
           app: 'Claude', hosted: true, own: true, mayManage: true, liveKey: true, key: 'Uses a key to connect.',
           status: { kind: 'paused', label: 'Paused: unused for 14 days', sentence: 'Resume it so it can connect again.', attention: true, fix: { action: 'resume', allowed: true } },
           receive: 'Checks messages when you chat with it.', lastActive: '15 days ago', technical: ['Agent ID: agent'], updateAvailable: false, access: { until: null }, accessReadState: 'succeeded', receipt: '' };
@@ -59,6 +61,10 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         const listWidth = outer.getBoundingClientRect().width;
         const rowFamilyText = roster.querySelector('[data-agent-row="agent"] .hm-model-family').textContent;
         const rowFamilyName = roster.querySelector('[data-agent-row="agent"] .hm-model-family').getAttribute('aria-label');
+        const modelLine = roster.querySelector('[data-agent-row="agent"] .pd-agent-model');
+        const modelText = modelLine.querySelector('.pd-ellipsis'), family = modelLine.querySelector('.hm-model-family');
+        const modelClipped = modelText.scrollWidth > modelText.clientWidth && getComputedStyle(modelText).textOverflow === 'ellipsis' && getComputedStyle(modelText).whiteSpace === 'nowrap';
+        const familyVisible = family.getBoundingClientRect().right <= modelLine.getBoundingClientRect().right && family.querySelector('svg').getAttribute('aria-hidden') === 'true';
         const unknownFamilyTags = roster.querySelectorAll('[data-agent-row="local"] .hm-model-family').length;
         roster.querySelector('#pd-agent-agent').click();
         const detailWidth = outer.getBoundingClientRect().width;
@@ -78,6 +84,7 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         confirm.dispatchEvent(new Event('cancel', { cancelable: true, bubbles: true }));
         const metrics = { width: innerWidth, listWidth, detailWidth, rowOverflow, touchTargets, detailTouchTargets, closeIconSize, backIconSize, hostileElements: document.querySelectorAll('img').length,
           rowFamilyText, rowFamilyName, detailFamilyText, unknownFamilyTags,
+          modelClipped, modelTitle:modelLine.title, modelText:modelText.textContent, familyVisible,
           hostileText: detail.querySelector('h2').textContent.includes(hostile), accessMark, localAccessMark, hostedRowLabel, hostedDetailText, modelValues, confirmRole, safeConfirmFocus,
           cancelRestoresOpener: document.activeElement === opener, outerStillOpen: outer.open, technicalClosed: !detail.querySelector('details').open };
         document.documentElement.dataset.metrics = btoa(unescape(encodeURIComponent(JSON.stringify(metrics))));
@@ -96,8 +103,11 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
       assert.ok(Math.abs(geometry.listWidth - (width === 390 ? 390 : 640)) <= 2);
       assert.ok(Math.abs(geometry.detailWidth - (width === 390 ? 390 : 960)) <= 2);
       assert.equal(geometry.hostileElements, 0); assert.equal(geometry.hostileText, true);
-      assert.equal(geometry.rowFamilyText, "Claude · reported"); assert.equal(geometry.rowFamilyName, "Claude, reported");
-      assert.equal(geometry.detailFamilyText, "Claude · reported"); assert.equal(geometry.unknownFamilyTags, 0);
+      assert.equal(geometry.rowFamilyText, "reported"); assert.equal(geometry.rowFamilyName, "reported");
+      assert.equal(geometry.detailFamilyText, "reported"); assert.equal(geometry.unknownFamilyTags, 0);
+      assert.equal(geometry.modelClipped, true, `${width}px a long model label stays on one ellipsis line`);
+      assert.equal(geometry.modelTitle, geometry.modelText); assert.match(geometry.modelText, /^Claude Opus 5\.5 listener label/);
+      assert.equal(geometry.familyVisible, true, `${width}px model clipping leaves the decorative shape and reported tag visible`);
       assert.equal(geometry.accessMark, null, `${width}px a hosted agent's row draws no Lists & docs access mark`);
       assert.equal(geometry.localAccessMark, "Can use Lists & docs", `${width}px a local agent's row keeps the access mark`);
       assert.ok(geometry.hostedRowLabel?.endsWith(HOSTED_LISTS_NOTE), `${width}px the hosted row's accessible name carries the hosted note`);

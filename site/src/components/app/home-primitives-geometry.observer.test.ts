@@ -53,7 +53,7 @@ sample.append(P.capsule(document,{person,agents:[agent],sample:true},{onOpen:()=
 const visible = element => element.getClientRects().length > 0;
 const targets = [...root.querySelectorAll('button,a,label:has(input)')].filter(visible);
 const bounds = targets.map(element => ({kind:element.tagName,label:element.textContent,width:element.getBoundingClientRect().width,height:element.getBoundingClientRect().height}));
-const metrics = { width:innerWidth, overflow:document.documentElement.scrollWidth > innerWidth,
+const metrics = { width:innerWidth, pixelRatio:devicePixelRatio, overflow:document.documentElement.scrollWidth > innerWidth,
  targets:bounds, hostileElements:root.querySelectorAll('img,script').length, hostileText:root.querySelector('.hm-object-title').textContent.includes(hostile),
  states:[...root.querySelectorAll('.hm-status')].map(element=>({word:element.querySelector('.hm-status-word').textContent,shape:element.querySelector('.hm-status-shape').dataset.shape,label:element.getAttribute('aria-label')})),
  noPreselection,checkedMark,choices,switches,actions,movedFocus,movedReceipt,readOnlyButtons:readOnly.querySelectorAll('button').length,
@@ -64,24 +64,27 @@ const metrics = { width:innerWidth, overflow:document.documentElement.scrollWidt
  nullFamilyTag: nullFamilyTag === null, prefixTagText:prefixTag.textContent, prefixTagName:prefixTag.getAttribute('aria-label'),
  familyTags:familyTags.map(tag=>({text:tag.textContent,label:tag.getAttribute('aria-label'),hidden:tag.querySelector('svg').getAttribute('aria-hidden'),
  width:tag.querySelector('svg').getBoundingClientRect().width,stroke:tag.querySelector('svg').getAttribute('stroke'),vendorPaths:tag.querySelectorAll('path').length,
- statusOrLegendShapes:tag.querySelectorAll('circle,rect,polygon[points="5,1 9,5 5,9 1,5"]').length})) };
+ fill:tag.querySelector('svg').getAttribute('fill'),
+ points:Array.from({length:tag.querySelector('polygon').points.numberOfItems}, (_,index)=>{
+   const point=tag.querySelector('polygon').points.getItem(index); return [point.x,point.y]; }),
+ statusOrLegendShapes:tag.querySelectorAll('circle,rect,polyline,polygon[points="5,1 9,5 5,9 1,5"]').length})) };
 document.documentElement.dataset.metrics=btoa(unescape(encodeURIComponent(JSON.stringify(metrics))));
 `;
 
-test("home primitives have 44px targets, plain hostile text and explicit states at 320 and 390", { timeout: 60_000 }, async () => {
+test("home primitives have 44px targets, plain text and distinct family shapes at 1x phone and hero widths", { timeout: 120_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "commonswarm-home-primitives-"));
   const fixture = join(directory, "index.html");
   try {
     const chrome = await findChrome();
     for (const theme of ["light", "dark"] as const) {
       await writeFile(fixture, await homeFixture({ entryPoint: "src/lib/home-primitives.ts", script, theme }));
-      for (const width of [320, 390]) {
-        const { stdout } = await launchChrome(chrome, ["--allow-file-access-from-files", `--window-size=${width},900`, "--dump-dom", `file://${fixture}`],
+      for (const width of [320, 390, 960, 1600]) {
+        const { stdout } = await launchChrome(chrome, ["--force-device-scale-factor=1", "--allow-file-access-from-files", `--window-size=${width},900`, "--dump-dom", `file://${fixture}`],
           { maxBuffer: 10 * 1024 * 1024, timeout: 12_000, killSignal: "SIGKILL" });
         const encoded = stdout.match(/<html\b[^>]*\bdata-metrics="([A-Za-z0-9+/]+={0,2})"/iu)?.[1];
         assert.ok(encoded, `${theme}/${width}: the real builders completed their DOM interactions`);
         const m = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
-        assert.equal(m.width, width); assert.equal(m.overflow, false, `${theme}/${width}: no horizontal overflow`);
+        assert.equal(m.width, width); assert.equal(m.pixelRatio, 1); assert.equal(m.overflow, false, `${theme}/${width}: no horizontal overflow`);
         assert.ok(m.targets.length > 10);
         for (const target of m.targets) assert.ok(target.width >= 44 && target.height >= 44, `${theme}/${width}: ${JSON.stringify(target)}`);
         assert.equal(m.hostileElements, 0); assert.equal(m.hostileText, true);
@@ -97,15 +100,29 @@ test("home primitives have 44px targets, plain hostile text and explicit states 
         assert.equal(m.doneWord, true); assert.match(m.doneStrike, /line-through/u);
         assert.equal(m.capsulePlus, "+1"); assert.equal(m.ownerBadgeHidden, "true");
         assert.equal(m.nullFamilyTag, true);
-        assert.equal(m.prefixTagText, "reported"); assert.equal(m.prefixTagName, "Claude, reported");
+        assert.equal(m.prefixTagText, "reported"); assert.equal(m.prefixTagName, "reported");
         assert.deepEqual(m.familyTags.map((tag: {text:string;label:string}) => [tag.text,tag.label]), [
           ["Claude · reported", "Claude, reported"], ["OpenAI · reported", "OpenAI, reported"],
           ["Gemini · reported", "Gemini, reported"], ["Grok · reported", "Grok, reported"],
         ]);
         for (const tag of m.familyTags) {
           assert.equal(tag.hidden, "true"); assert.equal(tag.width, 10); assert.equal(tag.stroke, "currentColor");
+          assert.equal(tag.fill, "currentColor", "solid geometry stays distinct from the hollow idle ring at 1x");
           assert.equal(tag.vendorPaths, 0); assert.equal(tag.statusOrLegendShapes, 0, "family geometry is distinct from status and legend shapes");
         }
+        const [claude, openai, gemini, grok] = m.familyTags.map((tag: { points: number[][] }) => tag.points);
+        assert.equal(claude.length, 3); assert.equal(gemini.length, 3);
+        assert.equal(claude[0][1], claude[1][1]); assert.ok(claude[2][1] > claude[0][1], "Claude points down");
+        assert.equal(gemini[1][1], gemini[2][1]); assert.ok(gemini[0][1] < gemini[1][1], "Gemini points up");
+        assert.equal(openai.length, 4);
+        const extent = (points: number[][], axis: number) => Math.max(...points.map(p => p[axis])) - Math.min(...points.map(p => p[axis]));
+        assert.equal(extent(openai, 0) / extent(openai, 1), 2, "OpenAI is a horizontal bar, distinct from the add glyph");
+        assert.equal(grok.length, 6);
+        const sides = grok.map((p: number[], i: number) => {
+          const next = grok[(i + 1) % grok.length], after = grok[(i + 2) % grok.length];
+          return (next[0] - p[0]) * (after[1] - next[1]) - (next[1] - p[1]) * (after[0] - next[0]);
+        });
+        assert.equal(sides.filter((side: number) => side < 0).length, 2, "Grok has two inward corners, a bowtie rather than a ring-like polygon");
       }
     }
   } finally {

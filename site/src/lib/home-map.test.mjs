@@ -274,7 +274,7 @@ test("live Catch up keeps a successful overview when ask previews fail, without 
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
       initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount,
       homeOverview: async () => overview,
-      overviewAgentModels: async () => new Map(), railModels: null,
+      overviewAgentModels: async () => new Map(), hideModels: false,
       homeOverviewAsks: async (workspaceId, ids) => {
         reads.push("asks"); assert.equal(workspaceId, "W"); assert.deepEqual(Array.from(ids), ["ask"]);
         if (failure) throw failure;
@@ -500,7 +500,7 @@ test("Catch up names no assigner, skips a to-do read per card, and keeps one cou
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
       initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount,
       homeOverview: async () => ({ viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: [row] }),
-      overviewAgentModels: async () => new Map(), railModels: null,
+      overviewAgentModels: async () => new Map(), hideModels: false,
       homeOverviewAsks: async () => { if (askFailure) throw askFailure; return [ask]; },
       feed: async () => [],
       homeServer: () => ({ readTodo: async (workspaceId, todoId) => {
@@ -702,7 +702,7 @@ test("the live loader keeps the overview list and does not treat a short feed as
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
       initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount, mapHomePeople, homeFileCount,
       homeOverview: async () => overview,
-      overviewAgentModels: async () => new Map(), railModels: null,
+      overviewAgentModels: async () => new Map(), hideModels: false,
       homeOverviewAsks: async (_workspaceId, ids) => ids.length ? [directedAsk] : [],
       feed: async (_workspaceId, limit) => { const rows = pageFor(limit); pages.push({ limit, rows: rows.length }); return rows; },
       memberRoster: async () => ({ members: input.members }), roster: async () => input.agents,
@@ -815,7 +815,7 @@ test("on an agent's page the agent is the current rail row and its workspace is 
   assert.deepEqual(chat.workspaces.map(row => row.current), [true, false]);
 });
 
-test("overview models reach other workspaces and override the current roster consistently, including a failed model read", async () => {
+test("overview models reach other workspaces, preserve the current roster, and disappear only after a failed read", async () => {
   const { homeRailPeople } = await import("./home-map.ts");
   const status = { work: "idle", facts: { transport: "hosted_mcp", turn_only: true, connection: "live",
     last_activity_at: null, messages_waiting_since: null, doing: null, working_on: null } };
@@ -831,15 +831,19 @@ test("overview models reach other workspaces and override the current roster con
   const agents = people => people.groups.flatMap(group => group.agents).concat(people.other);
   assert.deepEqual(agents(data[1].detail.people).map(agent => [agent.id, agent.model, agent.family]), [
     ["away", "GPT-6.1", "openai"], ["unknown", "mystery-model", null], ["unset", null, null] ]);
-  const current = mapHomePeople({ ...input, agents: [{ ...input.agents[0], name: "Atlas", model: "Grok" }] });
-  assert.equal(agents(homeRailPeople(data, current, models)).find(agent => agent.id === "A").model, "Claude");
+  const current = mapHomePeople({ ...input, agents: [{ ...input.agents[0], name: "Atlas", model: "Grok" },
+    { ...input.agents[0], principalId: "new", name: "New agent", model: "Gemini" }] });
+  const visible = agents(homeRailPeople(data, current));
+  assert.deepEqual(visible.filter(agent => ["A", "new"].includes(agent.id)).map(agent => [agent.id, agent.model, agent.family]),
+    [["A", "Grok", "grok"], ["new", "Gemini", "gemini"]], "current and newly added agents keep their roster models, even with an older Claude overview");
   const refreshed = catchUpDetailFromOverview(trip, "zoe", now, false, [], models);
   assert.deepEqual(agents(refreshed.people).map(agent => agent.model), ["GPT-6.1", "mystery-model", null]);
-  const failed = new Map();
-  const hidden = homeRailPeople(overviewCatchUpData(initialCatchUpData(workspaces), overview, false, undefined, failed), current, failed);
-  assert.equal(agents(hidden).length, 4);
+  const hidden = homeRailPeople(overviewCatchUpData(initialCatchUpData(workspaces), overview, false, undefined, null), current, true);
+  assert.equal(agents(hidden).length, 5);
   assert.ok(agents(hidden).every(agent => agent.model === null && agent.family === null), "failed reads never mix current-roster tags with untagged overview rows");
   assert.equal(agents(current)[0].model, "Grok", "the rail does not change the Agent view's roster");
+  const empty = overviewCatchUpData(initialCatchUpData(workspaces), overview, false, undefined, new Map());
+  assert.equal(agents(homeRailPeople(empty, current)).find(agent => agent.id === "new").model, "Gemini", "a successful empty read does not hide a later roster model");
 });
 
 test("the overview model read pages all workspace ids and discards partial results after a refusal or transport failure", async () => {
@@ -867,6 +871,8 @@ test("the overview model read pages all workspace ids and discards partial resul
   };
   const complete = await read({ data: [{ principal_id: "away", model: "GPT-6.1" }], error: null });
   assert.equal(complete.size, 201); assert.equal(complete.get("away"), "GPT-6.1");
-  assert.equal((await read({ data: null, error: { code: "42501" } })).size, 0);
-  assert.equal((await read(null, true)).size, 0);
+  assert.equal(await read({ data: null, error: { code: "42501" } }), null);
+  assert.equal(await read(null, true), null);
+  assert.equal(await runInNewContext(script, { client: () => null, ids: ["W"] }), null);
+  assert.equal((await runInNewContext(script, { client: () => ({}), ids: [] })).size, 0, "no workspaces is a successful empty result");
 });

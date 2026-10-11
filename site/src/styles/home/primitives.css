@@ -29,7 +29,6 @@
   vertical-align: middle;
 }
 .hm-model-family svg { flex: none; inline-size: 10px; block-size: 10px; }
-.pd-agent-app:has(.hm-model-family) { overflow-wrap: anywhere; }
 
 /* The 1.5px stroke (outline pills, agent avatars). Chromium snaps a fractional border-width down to a whole CSS px:
    `border: 1.5px` computes and paints as 1px at DPR 1 and DPR 2. So a 1.5px edge is an inset shadow with no border:

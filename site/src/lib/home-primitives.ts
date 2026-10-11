@@ -116,18 +116,18 @@ export function reportedFamilyName(family: ModelFamily | null, model?: string | 
   return model?.trim().toLowerCase().startsWith(FAMILY_NAMES[family].toLowerCase()) ? "reported" : `${FAMILY_NAMES[family]}, reported`;
 }
 /** Family and model text become a neutral tag: reported, never verified; no vendor marks; null shows nothing.
- *  The accessible name keeps the family; visible text omits it when the model already starts with it. */
+ *  Text and accessible name omit the family when the adjacent model already starts with it. */
 export function modelFamilyTag(doc: Document, family: ModelFamily | null, model?: string | null): HTMLElement | null {
   if (family == null) return null;
   const tag = node(doc, "span", "hm-model-family");
-  tag.setAttribute("role", "img"); tag.setAttribute("aria-label", reportedFamilyName(family));
+  tag.setAttribute("role", "img"); tag.setAttribute("aria-label", reportedFamilyName(family, model));
   const svg = doc.createElementNS(SVG_NS, "svg");
   for (const [name, value] of [["viewBox", "0 0 10 10"], ["width", "10"], ["height", "10"],
-    ["fill", "none"], ["stroke", "currentColor"], ["aria-hidden", "true"], ["focusable", "false"]]) svg.setAttribute(name, value);
-  const shape = doc.createElementNS(SVG_NS, family === "openai" ? "polyline" : "polygon");
-  const attributes = { points: family === "claude" ? "3,1.5 7,1.5 9,5 7,8.5 3,8.5 1,5"
-    : family === "openai" ? "5,1 5,9 5,5 1,5 9,5"
-    : family === "gemini" ? "5,1.5 8.5,8.5 1.5,8.5" : "5,1 9,4 7.5,9 2.5,9 1,4" };
+    ["fill", "currentColor"], ["stroke", "currentColor"], ["aria-hidden", "true"], ["focusable", "false"]]) svg.setAttribute(name, value);
+  const shape = doc.createElementNS(SVG_NS, "polygon");
+  const attributes = { points: family === "claude" ? "1.5,1.5 8.5,1.5 5,8.5"
+    : family === "openai" ? "1,3 9,3 9,7 1,7"
+    : family === "gemini" ? "5,1.5 8.5,8.5 1.5,8.5" : "1,1 5,4 9,1 9,9 5,6 1,9" };
   for (const [name, value] of Object.entries(attributes)) shape.setAttribute(name, value);
   const text = reportedFamilyName(family, model) === "reported" ? "reported" : `${FAMILY_NAMES[family]} · reported`;
   svg.append(shape); tag.append(svg, decorative(node(doc, "span", "", text)));

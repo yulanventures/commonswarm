@@ -128,7 +128,7 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
       let catchUpGeneration=0, railOverviewGeneration=0, connectedAppsGeneration=0;
       let homeWorkspaceGeneration=0, homeWorkspaceRead=0, homeDetailGeneration=0;
       let connectFocusObserver=null, humanSeenObserver=null, signalExpiryTimer;
-      let catchUpData, homeWorkClaims, homePeopleReadState, homeShellKey, homeRailKey, homeCatchUpKey;
+      let catchUpData, hideModels = false, homeWorkClaims, homePeopleReadState, homeShellKey, homeRailKey, homeCatchUpKey;
       let homeTodosState, homeTodoRows, homeTodoRead, homeQueue, homeQueueRead, homeDetailKey, homeGateEditorId;
       let homeTodoSave, homeTodoReceipt, homeTodoNotice, homeObjects, connectedApps;
       let restoredComposerKey, focusedComposerWorkspaceId, pendingWorkspaceId, pendingWorkspaceCreate;

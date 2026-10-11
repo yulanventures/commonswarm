@@ -1377,7 +1377,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const homeScroll = new Map<string, number>();
     const homeOverviewCounts = new Map<string, number | null>();
     let railOverviewGeneration = 0;
-    let railModels: ReadonlyMap<string, string | null> | null = null;
+    let hideModels = false;
 
     let agents: (Agent & { work?: AgentWorkStatus })[] = [];
     let members: Member[] = [];
@@ -2161,25 +2161,26 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
     };
 
-    /** One model read for all overview workspaces; discard every page if any page fails. */
-    const overviewAgentModels = async (workspaceIds: string[]): Promise<Map<string, string | null>> => {
+    /** Membership workspace ids become model facts; null on any failed page, never partial facts. */
+    const overviewAgentModels = async (workspaceIds: string[]): Promise<Map<string, string | null> | null> => {
       const result = new Map<string, string | null>();
       const api = client();
-      if (!api || !workspaceIds.length) return result;
+      if (!api) return null;
+      if (!workspaceIds.length) return result;
       const pageSize = 200;
       try {
         for (let offset = 0; ; offset += pageSize) {
           const { data, error } = await api.schema("swarm_read").from("agent_principals")
             .select("principal_id,model").in("workspace_id", workspaceIds).is("revoked_at", null)
             .order("principal_id", { ascending: true }).range(offset, offset + pageSize - 1);
-          if (error) return new Map();
+          if (error) return null;
           const page = data ?? [];
           for (const row of page) if (typeof row.principal_id === "string") {
             result.set(row.principal_id, typeof row.model === "string" ? row.model : null);
           }
           if (page.length < pageSize) return result;
         }
-      } catch { return new Map(); }
+      } catch { return null; }
     };
 
     const roster = async (workspaceId: string): Promise<Agent[]> => {
@@ -4446,7 +4447,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (!slot) return;
       /* One rail on every route: everyone in every workspace the overview read, with the workspace in view
          read first so its own measured states win (home-map homeRailPeople). */
-      const railPeople = homeRailPeople(catchUpData, homeRoute.view === "catchup" ? null : currentHomePeople(), railModels);
+      const railPeople = homeRailPeople(catchUpData, homeRoute.view === "catchup" ? null : currentHomePeople(), hideModels);
       const vm = mapHomeRail(workspaces, homeRoute, railPeople, sampleMode, homeOverviewCounts);
       /* While New workspace is open the rail shows the workspace being started as a draft row (display only); its name
          follows the field in place (renderCreate's onNameInput), so only its presence is part of the key. */
@@ -4542,7 +4543,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const viewer = homeViewerId();
       const live = () => generation === catchUpGeneration && homeRoute.view === "catchup" && homeViewerId() === viewer;
       catchUpExpanded = false;
-      railModels = null;
+      hideModels = false;
       catchUpData = initialCatchUpData(workspaces);
       for (const entry of catchUpData) homeOverviewCounts.set(entry.workspace.id, null);
       renderHomeCatchUp(); // Membership cards appear before any detail read.
@@ -4550,18 +4551,17 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         catchUpData = catchUpData.map(entry => ({ ...entry, state: "open" })); renderHomeCatchUp(); return;
       }
       let overview;
-      try { overview = await homeOverview(); }
+      let models: ReadonlyMap<string, string | null> | null;
+      try { [overview, models] = await Promise.all([homeOverview(), overviewAgentModels(workspaces.map(workspace => workspace.id))]); }
       catch {
         if (!live()) return;
         catchUpData = catchUpData.map((entry, index) => index < 8 ? { ...entry, state: "failed" } : entry);
         renderHomeCatchUp(); return;
       }
       if (!live()) return;
-      const models = overview ? await overviewAgentModels(overview.workspaces.map(row => row.workspace_id)) : null;
-      if (!live()) return;
-      railModels = models;
+      hideModels = models === null;
       if (overview) {
-        catchUpData = overviewCatchUpData(catchUpData, overview, sampleMode, undefined, models!);
+        catchUpData = overviewCatchUpData(catchUpData, overview, sampleMode, undefined, models);
         for (const entry of catchUpData) homeOverviewCounts.set(entry.workspace.id, homeNeedsYouCount(entry));
         renderHomeCatchUp();
       }
@@ -4572,7 +4572,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           // A missing preview still leaves a Reply card. Assigned cards name nobody, so this does not read each to-do.
           const asks = await homeOverviewAsks(workspace.id, row.needs_you.asks.map(ask => ask.signal_id)).catch(() => [] as Signal[]);
           const latest = await feed(workspace.id, 50).catch(() => [] as Signal[]);
-          return { ...catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sampleMode, asks, models!), signals: latest };
+          return { ...catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sampleMode, asks, models), signals: latest };
         }
         const signalPage = 50;
         const [nextMembers, nextAgents, nextAccess, nextSignals, claims, nextFiles] = await Promise.all([
@@ -4598,12 +4598,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const generation = ++railOverviewGeneration;
       const viewer = homeViewerId();
       let overview;
-      try { overview = await homeOverview(); } catch { return; }
-      const models = overview ? await overviewAgentModels(overview.workspaces.map(row => row.workspace_id)) : null;
+      let models: ReadonlyMap<string, string | null> | null;
+      try { [overview, models] = await Promise.all([homeOverview(), overviewAgentModels(workspaces.map(workspace => workspace.id))]); } catch { return; }
       if (!overview || generation !== railOverviewGeneration || homeViewerId() !== viewer || homeRoute.view === "catchup" ||
         catchUpData.some(entry => entry.detail)) return;
-      railModels = models;
-      catchUpData = overviewCatchUpData(initialCatchUpData(workspaces), overview, sampleMode, undefined, models!);
+      hideModels = models === null;
+      catchUpData = overviewCatchUpData(initialCatchUpData(workspaces), overview, sampleMode, undefined, models);
       // The workspace in view shows its live needs-you items in the stream; a one-time snapshot count on its rail row would go
       // stale as they are answered, so it gets none here (Lead decision; the mockup's current row has no badge).
       for (const entry of catchUpData) if (entry.workspace.id !== activeWorkspaceId) homeOverviewCounts.set(entry.workspace.id, homeNeedsYouCount(entry));
@@ -6623,7 +6623,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       syncStandalonePage(true);
       catchUpGeneration += 1;
       railOverviewGeneration += 1;
-      railModels = null;
+      hideModels = false;
       catchUpData = [];
       homeScroll.clear();
       resetHomeWorkspace();
@@ -16252,6 +16252,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   .pd-agent-copy { display: grid; gap: 4px; min-inline-size: 0; flex: 1; font-size: 13px; }
   .pd-agent-name-line { display: flex; align-items: center; gap: 6px; min-inline-size: 0; }
   .pd-agent-app { font-size: 12px; color: var(--text-muted); }
+  /* Model text clips like the rail; the reported neutral tag keeps its own width. */
+  .pd-agent-model { display: flex; align-items: center; gap: 6px; min-inline-size: 0; }
+  .pd-agent-model > .pd-ellipsis { flex: 1; }
+  .pd-agent-model > .hm-model-family { flex: none; }
   .pd-access-mark { flex: none; color: var(--text-muted); font-size: 14px; }
   .pd-row-arrow { color: var(--text-muted); align-self: center; }
   .pd-ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-inline-size: 0; }
