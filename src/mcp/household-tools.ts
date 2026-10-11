@@ -22,7 +22,7 @@ export interface HouseholdMcpTools {
 
 /** The client supplies a closed projection with no transfer credentials. */
 function householdMcpResult(result: HouseholdClientResult): HouseholdMcpResult {
-  const next_action = result.status === 'unknown'
+  const next_action = result.status === 'error' ? 'Retry the read.' : result.status === 'unknown'
     ? result.request_id ? 'Retry identical input with the same request_id to recover the recorded outcome.' : 'Retry the read.'
     : result.status === 'pending' ? 'The upload is reserved; no revision is committed. Complete the protected upload, then call file_upload_commit with a new request_id.'
     : result.status === 'conflict' ? 'kind' in result && result.kind === 'todo'
@@ -33,7 +33,7 @@ function householdMcpResult(result: HouseholdClientResult): HouseholdMcpResult {
       ? 'File metadata is available. Use the host protected attachment channel for bytes; access must be rechecked.' : null;
   const output = { ...result, next_action };
   const raw = JSON.stringify(output);
-  const response = { isError: result.status === 'refused' || result.status === 'unknown' || result.status === 'conflict',
+  const response = { isError: result.status === 'refused' || result.status === 'unknown' || result.status === 'conflict' || result.status === 'error',
     content: [{ type: 'text' as const, text: raw }] };
   // AM13 budgets the escaped text inside the transport envelope. The server's
   // 28 KiB pages fit this local 32 KiB cap, including cursors and next_action.

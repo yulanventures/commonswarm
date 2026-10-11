@@ -10205,7 +10205,7 @@ async function runHouseholdObject(args: Arguments): Promise<void> {
   const result = await client.prepare(args.positionals[1]!, { seat: LOCAL_HOUSEHOLD_SEAT, ...input },
     { upload: { reservation_id: "server_pending", expires_at: 0 } }).send();
   process.stdout.write(JSON.stringify(result) + "\n");
-  if (["refused", "unknown", "conflict"].includes(result.status)) process.exitCode = 1;
+  if (["refused", "unknown", "conflict", "error"].includes(result.status)) process.exitCode = 1;
 }
 
 export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
