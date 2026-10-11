@@ -1,5 +1,5 @@
 /** Hosted list contracts exercise core admission, paging and stale writes. The
- * independently built origin/main snapshot pins all existing catalog bytes. */
+ * independently built snapshot of main before #68 (432948ef) pins all existing catalog bytes. */
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { execFileSync } from 'node:child_process';
@@ -103,8 +103,9 @@ test('stale list base retains the existing conflict shape and draft', () => {
   assert.deepEqual(result.outcome, { status: 'conflict', object_id: 'shopping', current: state.objects.shopping!.history.at(-1)!.revision, draft_id: 'draft_5' });
   assert.equal(result.events[0]!.type, 'HouseholdDraftPreserved');
 });
-test('hosted inventory and unchanged local catalog match independently built origin/main bytes', async () => {
-  const snapshot = execFileSync('git', ['show', 'origin/main:src/protocol/household-tool-registry.ts'], { encoding: 'utf8' });
+test('hosted inventory and unchanged local catalog match independently built pre-#68 main bytes', async () => {
+  // Pinned to main before the hosted list tools (#68); origin/main moves and would compare the change with itself.
+  const snapshot = execFileSync('git', ['show', '432948ef104a827269f447b64549c1723f2bb66f:src/protocol/household-tool-registry.ts'], { encoding: 'utf8' });
   const arraySource = (source: string, name: string) => {
     let bytes = ''; const visit = (node: ts.Node) => { if (ts.isVariableDeclaration(node) && node.name.getText() === name) bytes = node.initializer!.getText(); ts.forEachChild(node, visit); };
     visit(ts.createSourceFile('registry.ts', source, ts.ScriptTarget.Latest, true)); assert.ok(bytes); return bytes;
