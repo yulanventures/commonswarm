@@ -38,26 +38,32 @@ function localEnvironment(): Local {
 
 async function signer(): Promise<{ jwks: string; issue: (sub: string, grantId: string) => Promise<string> }> {
   const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
-  const publicJwk = { ...await crypto.subtle.exportKey("jwk", pair.publicKey), kid: "h6", alg: "ES256", use: "sig" };
-  delete (publicJwk as { d?: string }).d;
+  const publicJwk = { ...await crypto.subtle.exportKey("jwk", pair.publicKey), kid: "server-suite", alg: "ES256", use: "sig" };
   const issue = async (sub: string, grantId: string) => {
     const now = Math.floor(Date.now() / 1000);
-    const header = b64(Buffer.from(JSON.stringify({ alg: "ES256", kid: "h6" })));
-    const payload = b64(Buffer.from(JSON.stringify({ iss: MCP_ISSUER, aud: MCP_RESOURCE, sub, grant_id: grantId, scope: "mcp", iat: now, exp: now + 300 })));
+    const header = b64(Buffer.from(JSON.stringify({ alg: "ES256", kid: "server-suite", typ: "at+jwt" })));
+    const payload = b64(Buffer.from(JSON.stringify({ iss: MCP_ISSUER, aud: MCP_RESOURCE, sub, grant_id: grantId, client_id: "synthetic-client", scope: "mcp", iat: now, exp: now + 300 })));
     const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, Buffer.from(`${header}.${payload}`));
     return `${header}.${payload}.${b64(new Uint8Array(signature))}`;
   };
   return { jwks: JSON.stringify({ keys: [publicJwk] }), issue };
 }
 
-/** Credential-name probe and a local JWKS answer, on the copied workers only. */
+/** Credential-name probe on copied workers. JWKS fetch is injected into the MCP verifier constructor. */
 function instrument(root: string, jwks: string): void {
-  const shim = `const __h6fetch=globalThis.fetch;globalThis.fetch=((input:RequestInfo|URL,init?:RequestInit)=>{const url=typeof input==="string"?input:input instanceof URL?input.href:input.url;if(url===${JSON.stringify(MCP_JWKS_URL)})return Promise.resolve(new Response(${JSON.stringify(jwks)},{status:200,headers:{"content-type":"application/json"}}));return __h6fetch(input,init);}) as typeof fetch;const __h6=(handler:(request:Request)=>Response|Promise<Response>)=>(request:Request)=>{if(request.headers.get("x-h6-omit-storage")==="1")Deno.env.delete(${JSON.stringify(KEY)});if(new URL(request.url).pathname.endsWith("/h6-env")){const names=[${JSON.stringify(KEY)},"SWARM_DATABASE_URL",${JSON.stringify(OAUTH)}] as const;return new Response(JSON.stringify({present:names.filter((name)=>Deno.env.get(name)!==undefined),flag:Deno.env.get("SWARM_MCP_TODOS_LISTS_ENABLED")??null}),{headers:{"content-type":"application/json"}});}return handler(request);};\n`;
+  const shim = `const __h6=(handler:(request:Request)=>Response|Promise<Response>)=>(request:Request)=>{if(request.headers.get("x-h6-omit-storage")==="1")Deno.env.delete(${JSON.stringify(KEY)});if(new URL(request.url).pathname.endsWith("/h6-env")){const names=[${JSON.stringify(KEY)},"SWARM_DATABASE_URL",${JSON.stringify(OAUTH)}] as const;return new Response(JSON.stringify({present:names.filter((name)=>Deno.env.get(name)!==undefined),flag:Deno.env.get("SWARM_MCP_TODOS_LISTS_ENABLED")??null}),{headers:{"content-type":"application/json"}});}return handler(request);};\n`;
+  const verifierNeedle = "clockSkewSeconds: boundedInteger(\"SWARM_MCP_CLOCK_SKEW_SECONDS\", 30, 0, 60),\n});";
+  const verifierLive = `clockSkewSeconds: boundedInteger("SWARM_MCP_CLOCK_SKEW_SECONDS", 30, 0, 60),\n  fetch: async () => new Response(${JSON.stringify(jwks)}, { status: 200 }),\n});`;
   for (const name of ["mcp", "read", "command"]) {
     const path = join(root, name, "index.ts"), needle = "if (import.meta.main) Deno.serve(handleRequest);";
     const source = readFileSync(path, "utf8");
     assert.equal(source.includes(needle), true, `${name} serve`);
-    writeFileSync(path, source.replace(needle, `${shim}if (import.meta.main) Deno.serve(__h6(handleRequest));`));
+    let next = source.replace(needle, `${shim}if (import.meta.main) Deno.serve(__h6(handleRequest));`);
+    if (name === "mcp") {
+      assert.equal(next.includes(verifierNeedle), true, "mcp verifier");
+      next = next.replace(verifierNeedle, verifierLive);
+    }
+    writeFileSync(path, next);
   }
   const h0Path = join(root, "h0", "index.ts");
   const closed = readFileSync(h0Path, "utf8").replace("Deno.serve((request) => {", `${shim}Deno.serve(__h6((request) => {`).replace(/\}\);\n$/, "}));\n");
@@ -77,7 +83,7 @@ function seed(owner: string, workspace: string, principal: string, other: string
     `INSERT INTO swarm.config(key,value) VALUES ('min_client_version','"0.1.0"') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value; INSERT INTO swarm.workspaces(workspace_id,name,created_by) VALUES ('${workspace}','Synthetic household','${owner}')`,
     `INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES ('${workspace}','${owner}','owner'); INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES ('${stream}','${workspace}','workspace')`,
     `INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose) VALUES ('${workspace}','shared'); INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at) VALUES ('${workspace}','${owner}','editor','${consent}',clock_timestamp())`,
-    `INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only) VALUES ('${principal}','${workspace}','${owner}','Synthetic hosted seat','hosted_mcp',true),('${other}','${workspace}','${owner}','Synthetic unapproved seat','hosted_mcp',true); INSERT INTO swarm.hosted_mcp_grants(grant_id,provider_grant_id,owner_user_id,home_workspace_id,client_id,resource,selected_workspace_ids,manifest_digest,interaction_ref,state,created_at,activated_at) VALUES ('${grant}','h6-${grant}','${owner}','${workspace}','synthetic-client','${MCP_RESOURCE}',ARRAY['${workspace}']::uuid[],decode(repeat('a',64),'hex'),'synthetic-consent','active',clock_timestamp(),clock_timestamp())`,
+    `INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only) VALUES ('${principal}','${workspace}','${owner}','Synthetic hosted seat','hosted_mcp',true),('${other}','${workspace}','${owner}','Synthetic unapproved seat','hosted_mcp',true); INSERT INTO swarm.hosted_mcp_grants(grant_id,provider_grant_id,owner_user_id,home_workspace_id,client_id,resource,selected_workspace_ids,manifest_digest,interaction_ref,state,created_at,activated_at) VALUES ('${grant}','synthetic-${grant}','${owner}','${workspace}','synthetic-client','${MCP_RESOURCE}',ARRAY['${workspace}']::uuid[],decode(repeat('a',64),'hex'),'synthetic-consent','active',clock_timestamp(),clock_timestamp())`,
     `INSERT INTO swarm.hosted_mcp_grant_workspaces(grant_id,workspace_id,owner_user_id,manifest_digest,consent_receipt_id,consented_at) VALUES ('${grant}','${workspace}','${owner}',decode(repeat('a',64),'hex'),'${receipt}',clock_timestamp())`,
     `INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,created_at) VALUES ('${seat}','${grant}','${workspace}','${owner}','${principal}','Synthetic hosted seat',clock_timestamp()),('${otherSeat}','${grant}','${workspace}','${owner}','${other}','Synthetic unapproved seat',clock_timestamp()); INSERT INTO swarm.hosted_mcp_seat_handles(handle,seat_id,grant_id,workspace_id,principal_id,created_at) VALUES ('${approved}','${seat}','${grant}','${workspace}','${principal}',clock_timestamp()),('${unapproved}','${otherSeat}','${grant}','${workspace}','${other}',clock_timestamp())`,
     `INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at,hosted_grant_id) VALUES ('${seat}','${grant}','${workspace}','${principal}','${owner}','shared',ARRAY['read','create','update'],'${link}',NULL,'${grant}')`,
@@ -111,7 +117,7 @@ test("edge router admits hosted to-do and list tools only with the storage brief
   const local = localEnvironment(), secret = local.SERVICE_ROLE_KEY, { jwks, issue } = await signer();
   const owner = randomUUID(), workspace = randomUUID(), principal = randomUUID(), other = randomUUID();
   const grant = randomUUID(), seat = randomUUID(), otherSeat = randomUUID();
-  const approved = `seat_${randomUUID().replaceAll("-", "").slice(0, 22)}`, unapproved = `seat_${randomUUID().replaceAll("-", "").slice(0, 22)}`, grantId = `h6-${grant}`;
+  const approved = `seat_${randomUUID().replaceAll("-", "").slice(0, 22)}`, unapproved = `seat_${randomUUID().replaceAll("-", "").slice(0, 22)}`, grantId = `synthetic-${grant}`;
   const sql = postgres(local.DB_URL, { max: 1, prepare: false });
   const workDir = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "h6-edge.")));
   const copy = join(workDir, "functions");
