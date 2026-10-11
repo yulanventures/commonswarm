@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly cold recovery proof; persist U7 identity and integrity before cleanup."""
+"""Cold recovery proof; ruling 46 permits database-only dumps on measured staging."""
 
 import base64
 import concurrent.futures
@@ -10,6 +10,8 @@ import json
 import os
 import secrets
 import signal
+import stat
+import shutil
 import subprocess
 import sys
 import time
@@ -28,6 +30,10 @@ DEADLINE = None
 REQUIRED_FILES = {'database.dump', 'roles.sql', 'manifest.txt', 'source-counts.tsv',
                   'storage-objects.ndjson', 'storage-backend-objects.ndjson', 'cron-jobs.ndjson',
                   'globals.sql', 'physical-object-keys.txt', 'offsite-binding.json', 'retention-evidence.json'}
+# The eight artifacts inventoried by dump-database.sh (no offsite upload files).
+LOCAL_FILES = REQUIRED_FILES - {'physical-object-keys.txt', 'offsite-binding.json', 'retention-evidence.json'}
+STAGING_HOST = 'c1-staging-20261006'
+STAGING_MACHINE_SHA256 = '29e448988c239181332e852c902c4c36815d628bb58cebc7da53c23f0f443565'
 REQUIRED_DATABASE_SCHEMAS = frozenset({
     'auth', 'public', 'realtime', 'storage', 'supabase_migrations', 'swarm',
     'swarm_read', 'commonswarm_oauth', 'commonswarm_ops',
@@ -37,6 +43,17 @@ WORKDIR_BASE = '/var/backups/commonswarm-postgres/restore-drill'
 DRILL_WORKDIR_KEEP = 2
 KEY_TABLES = ('auth.users', 'storage.objects', 'swarm.agent_tokens',
               'commonswarm_oauth.provider_artifacts', 'commonswarm_ops.migration_checksums')
+
+def staging_guard():
+    # Same measured identity as U9 common.py and C's ai_backup_gate; no overrides.
+    if os.uname().nodename != STAGING_HOST:
+        raise ValueError('measured staging identity mismatch')
+    fd = os.open('/etc/machine-id', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as file:
+        if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
+            raise ValueError('regular machine-id required')
+        if hashlib.sha256(file.read()).hexdigest() != STAGING_MACHINE_SHA256:
+            raise ValueError('measured staging identity mismatch')
 
 def atomic_write_status(path, status_obj):
     tmp = path.with_suffix(f'.tmp.{os.getpid()}')
@@ -199,14 +216,14 @@ def find_backup(remote):
     raise RuntimeError('no fresh completed offsite backup')
 
 
-def validate_artifact(artifact, marker):
+def validate_artifact(artifact, marker=None):
     checksums = {}
     for line in (artifact / 'SHA256SUMS').read_text().splitlines():
         match = re.fullmatch(r'([0-9a-f]{64})  ([a-zA-Z0-9_.-]+)', line)
         if not match or match[2] in checksums:
             raise ValueError('malformed checksum inventory')
         checksums[match[2]] = match[1]
-    if set(checksums) != REQUIRED_FILES:
+    if set(checksums) != (LOCAL_FILES if marker is None else REQUIRED_FILES):
         raise ValueError('incomplete checksum inventory')
     for name, expected in checksums.items():
         file = artifact / name
@@ -218,9 +235,10 @@ def validate_artifact(artifact, marker):
                 digest.update(chunk)
         if digest.hexdigest() != expected:
             raise ValueError('artifact checksum mismatch')
-    binding = json.loads((artifact / 'offsite-binding.json').read_text())
-    if any(marker.get(k) != v for k, v in binding.items()) or binding.get('destination') != marker['destination']:
-        raise ValueError('offsite binding mismatch')
+    if marker is not None:
+        binding = json.loads((artifact / 'offsite-binding.json').read_text())
+        if any(marker.get(k) != v for k, v in binding.items()) or binding.get('destination') != marker['destination']:
+            raise ValueError('offsite binding mismatch')
     validate_manifest((artifact / 'manifest.txt').read_text())
     counts = {}
     for line in (artifact / 'source-counts.tsv').read_text().splitlines():
@@ -232,6 +250,8 @@ def validate_artifact(artifact, marker):
         raise ValueError('missing core table counts')
     if counts['commonswarm_ops.migration_checksums'] < 1:
         raise ValueError('C1 migration checksum table has no rows')
+    if marker is None:
+        return None, counts  # Local dumps contain metadata, never R2 object bytes.
     rows = [json.loads(line) for line in (artifact / 'storage-backend-objects.ndjson').read_text().splitlines()]
     keys = []
     for row in rows:
@@ -263,12 +283,19 @@ def assert_owned_db(info, label, network):
     return address
 
 
-def run_drill(workdir, unique_label, result):
-    destination, marker_data = find_backup(BACKUP_ROOT)
+def run_drill(workdir, unique_label, result, local_artifact=None):
+    if local_artifact is None:
+        destination, marker_data = find_backup(BACKUP_ROOT)
     db_artifact = workdir / 'database'
     db_artifact.mkdir(mode=0o700)
-    run_cmd(['rclone', 'copy', destination + '/database', str(db_artifact), '--immutable'])
-    rows, counts = validate_artifact(db_artifact, marker_data)
+    if local_artifact is None:
+        run_cmd(['rclone', 'copy', destination + '/database', str(db_artifact), '--immutable'])
+        rows, counts = validate_artifact(db_artifact, marker_data)
+    else:
+        rows, counts = validate_artifact(local_artifact)
+        for name in LOCAL_FILES | {'SHA256SUMS'}:
+            shutil.copyfile(local_artifact / name, db_artifact / name)
+        rows, counts = validate_artifact(db_artifact)  # Verify the bytes actually mounted.
     result['key_table_counts'] = {table: {'source': counts[table]} for table in KEY_TABLES}
     db_name = 'cold-db-' + secrets.token_hex(4)
     net_name = 'cold-net-' + secrets.token_hex(4)
@@ -352,6 +379,9 @@ def run_drill(workdir, unique_label, result):
                 table, count = line.split('|')
                 result['key_table_counts'][table]['target'] = int(count)
 
+    if local_artifact is not None:
+        return dict(destination=result['source'], tables=len(counts),
+                    database_verified=True, all_files_verified=False)
     if result['key_table_counts']['storage.objects']['target'] != len(rows):
         raise ValueError('restored file row count mismatch')
     tenant_prefix = destination.split('yulan-vps-1-backups/', 1)[1] + '/objects/commonswarm'
@@ -449,6 +479,19 @@ def prune_drill_workdirs(base, keep):
 
 
 def main():
+    local_artifact = None
+    if any(arg.split('=', 1)[0] == '--local-artifact' for arg in sys.argv[1:]):
+        try:
+            staging_guard()  # Before artifact/status/lock reads or any subprocess.
+            if len(sys.argv) != 3 or sys.argv[1] != '--local-artifact':
+                raise ValueError('usage: restore-drill.py --local-artifact <absolute dump directory>')
+            local_artifact = Path(sys.argv[2])
+            if (not local_artifact.is_absolute() or local_artifact.resolve() != local_artifact
+                    or not stat.S_ISDIR(local_artifact.lstat().st_mode)):
+                raise ValueError('real absolute artifact directory required')
+        except (OSError, ValueError) as error:
+            print('REFUSED local staging drill: ' + str(error), file=sys.stderr)
+            return 64
     import fcntl
     global DEADLINE
     os.umask(0o077)
@@ -463,6 +506,9 @@ def main():
     workdir = Path(WORKDIR_BASE) / secrets.token_hex(16)
     label = 'commonswarm.drill=' + secrets.token_hex(16)
     result = {'ok': False, 'state': 'running', 'invocation_id': os.environ.get('INVOCATION_ID'), 'at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    if local_artifact is not None:
+        result.update(source='local-staging:' + str(local_artifact),
+                      objects='not-in-local-dump', scope='database-only')
     old_handlers = {}
     def interrupted(signum, frame):
         raise InterruptedError('restore drill interrupted')
@@ -476,7 +522,7 @@ def main():
             old_handlers[sig] = signal.signal(sig, interrupted)
         DEADLINE = time.monotonic() + 3 * 3600
         signal.alarm(3 * 3600)
-        result.update(run_drill(workdir, label, result))
+        result.update(run_drill(workdir, label, result, local_artifact))
         result['state'] = 'verified_pending_cleanup'
     except BaseException as error:
         result.update(state='failed', error_type=type(error).__name__)

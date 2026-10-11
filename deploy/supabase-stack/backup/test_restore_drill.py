@@ -4,6 +4,7 @@ import base64
 import datetime
 import fnmatch
 import hashlib
+import io
 import importlib.util
 import json
 import os
@@ -16,6 +17,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import ExitStack, redirect_stdout
+from types import SimpleNamespace, ModuleType
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('drill', Path(__file__).with_name('restore-drill.py'))
@@ -26,7 +29,7 @@ spec.loader.exec_module(drill)
 class DrillTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.source = self.root / 'source'
         self.source.mkdir()
         self.name = '20260918T010000Z-' + 'a' * 32
@@ -80,7 +83,8 @@ class DrillTests(unittest.TestCase):
         self.temp.cleanup()
 
     def sums(self):
-        (self.source/'SHA256SUMS').write_text(''.join(hashlib.sha256((self.source/n).read_bytes()).hexdigest()+'  '+n+'\n' for n in sorted(drill.REQUIRED_FILES)))
+        files = drill.LOCAL_FILES if getattr(self, 'local', False) else drill.REQUIRED_FILES
+        (self.source/'SHA256SUMS').write_text(''.join(hashlib.sha256((self.source/n).read_bytes()).hexdigest()+'  '+n+'\n' for n in sorted(files)))
 
     def write_counts(self):
         (self.source / 'source-counts.tsv').write_text(''.join(f'{table}|{count}\n' for table, count in self.counts.items()))
@@ -169,6 +173,141 @@ class DrillTests(unittest.TestCase):
         return subprocess.CompletedProcess(args,0,output,'')
 
     def status(self):return json.loads(Path(drill.STATUS_FILE).read_text())
+
+    def test_local_identity_and_path_refusals_before_artifact_io(self):
+        raw = b'measured-machine-id\n'
+        machine = self.root / 'machine-id'
+        machine.write_bytes(raw)
+        link = self.root / 'machine-link'
+        link.symlink_to(machine)
+        fifo = self.root / 'machine-fifo'
+        os.mkfifo(fifo)
+        directory_link = self.root / 'source-link'
+        directory_link.symlink_to(self.source, target_is_directory=True)
+        relative = Path(os.path.relpath(self.source))
+        self.assertTrue(relative.is_dir())
+        real_open, real_hash = os.open, hashlib.sha256
+        production = '6b63dad34fa7ced95e4f653aecb7e37ea7aa2a32902bdd593e23e93bb9877b22'
+        cases = [(drill.STAGING_HOST, drill.STAGING_MACHINE_SHA256, machine, self.source, True),
+                 ('yulan-vps-1', production, machine, self.source, False),
+                 (drill.STAGING_HOST, production, machine, self.source, False),
+                 ('yulan-vps-1', drill.STAGING_MACHINE_SHA256, machine, self.source, False),
+                 (drill.STAGING_HOST, drill.STAGING_MACHINE_SHA256, link, self.source, False),
+                 (drill.STAGING_HOST, drill.STAGING_MACHINE_SHA256, fifo, self.source, False),
+                 (drill.STAGING_HOST, drill.STAGING_MACHINE_SHA256, self.root, self.source, False),
+                 (drill.STAGING_HOST, drill.STAGING_MACHINE_SHA256, self.root / 'missing', self.source, False),
+                 (drill.STAGING_HOST, drill.STAGING_MACHINE_SHA256, machine, relative, False),
+                 (drill.STAGING_HOST, drill.STAGING_MACHINE_SHA256, machine, directory_link, False)]
+        for host, digest, identity_path, artifact, accepted in cases:
+            with self.subTest(host=host, identity=identity_path, artifact=artifact), ExitStack() as stack:
+                if identity_path == fifo:
+                    writer = stack.enter_context(subprocess.Popen([
+                        sys.executable, '-I', '-B', '-c',
+                        'import os, sys; fd = os.open(sys.argv[1], os.O_WRONLY); '
+                        'os.write(fd, bytes.fromhex(sys.argv[2])); os.close(fd)', str(fifo), raw.hex()]))
+                    stack.callback(lambda: writer.kill() if writer.poll() is None else None)
+                def open_identity(path, flags, *args):
+                    if accepted and path == drill.LOCK_PATH:
+                        raise AssertionError('admitted lock boundary')
+                    self.assertEqual(path, '/etc/machine-id')
+                    self.assertEqual(flags, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    fd = real_open(identity_path, flags, *args)
+                    if identity_path == fifo:
+                        try:
+                            self.assertEqual(writer.wait(timeout=3), 0)
+                        except BaseException:
+                            os.close(fd)
+                            raise
+                    return fd
+                stack.enter_context(patch.object(drill.os, 'open', side_effect=open_identity))
+                stack.enter_context(patch.object(drill.os, 'uname', return_value=SimpleNamespace(nodename=host)))
+                hashed = stack.enter_context(patch.object(drill.hashlib, 'sha256', side_effect=lambda data: SimpleNamespace(hexdigest=lambda: digest) if data == raw else real_hash(data)))
+                stack.enter_context(patch.object(sys, 'argv', ['restore-drill.py', '--local-artifact', str(artifact)]))
+                stack.enter_context(patch.object(Path, 'open', side_effect=AssertionError('artifact read before admission')))
+                if accepted:
+                    # A positive admission reaches the first status write; no real file/tool work.
+                    with self.assertRaisesRegex(AssertionError, 'admitted lock boundary'):
+                        drill.main()  # The next os.open is the lock, proving admission.
+                    hashed.assert_called_once_with(raw)
+                else:
+                    self.assertEqual(drill.main(), 64)
+                self.assertEqual(self.calls, [])
+
+    def test_local_restore_status_cleanup_and_checksum_failures(self):
+        self.local = True
+        self.sums()
+        with patch.object(drill, 'staging_guard'), patch.object(sys, 'argv', ['restore-drill.py', '--local-artifact', str(self.source)]):
+            for fault in (None, 'restore-target.sh', 'prepare-target.sh', 'exception', 'checksum', 'corruption'):
+                with self.subTest(fault=fault):
+                    self.calls.clear()
+                    self.removed_statuses.clear()
+                    self.fail_script = fault
+                    if fault == 'checksum':
+                        (self.source / 'SHA256SUMS').write_text('')
+                    if fault == 'corruption':
+                        self.sums()
+                        (self.source / 'database.dump').write_text('corruption')
+                    original = self.command
+                    def command(args, **kwargs):
+                        if fault == 'exception' and args[-1].endswith('restore-target.sh'):
+                            raise InterruptedError('injected interruption')
+                        return original(args, **kwargs)
+                    with patch.object(drill, 'run_cmd', side_effect=command):
+                        self.assertEqual(drill.main(), int(fault is not None))
+                    status = self.status()
+                    self.assertEqual((status['source'], status['objects'], status['scope']),
+                                     ('local-staging:' + str(self.source), 'not-in-local-dump', 'database-only'))
+                    self.assertEqual(status['status'], 'PASS' if fault is None else 'FAIL')
+                    self.assertFalse(any(self.resources.values()))
+                    self.assertFalse(any(call[0] == 'rclone' for call in self.calls))
+                    for boundary in (drill.generate_temp_credentials, drill.fetch_offsite_bytes, drill.fetch_api_bytes):
+                        boundary.assert_not_called()
+                    if fault in ('checksum', 'corruption'):
+                        self.assertFalse(any('--entrypoint' in call for call in self.calls))
+                    else:
+                        self.assert_status_before_removal(status)
+                    if fault is None:
+                        self.assertIs(status['all_files_verified'], False)
+                        self.assertEqual([call[-1] for call in self.calls if call[-1].startswith('/work/migrate/')],
+                                         ['/work/migrate/' + name for name in ('restore-target.sh', 'prepare-target.sh', 'restore-cron-jobs.sh', 'verify-counts.sh')])
+                        self.assertEqual(status['schema_checksums']['algorithm'], 'sha256-schema-ddl-v3')
+                        self.assertEqual(status['schema_checksums']['source'], status['schema_checksums']['target'])
+                        self.assertEqual(status['key_table_counts'], {table: dict(source=1, target=1) for table in drill.KEY_TABLES})
+                        self.assertEqual(datetime.datetime.fromisoformat(status['restored_at']).utcoffset(), datetime.timedelta(0))
+
+    def test_staging_pins_match_u9_and_release(self):
+        root = Path(__file__).resolve().parents[3]
+        u9 = (root / 'scripts/c1-staging-u9/common.py').read_text()
+        release = (root / 'docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md').read_text()
+        for text in (u9, release):
+            for pin in (drill.STAGING_HOST, drill.STAGING_MACHINE_SHA256):
+                self.assertEqual(text.count("'" + pin + "'"), 1)
+
+    def test_no_flag_output_and_status_bytes_match_base(self):
+        baseline = ModuleType('baseline_drill')
+        baseline.__file__ = drill.__file__
+        source = subprocess.run(['git', 'show', '12e4caa9:deploy/supabase-stack/backup/restore-drill.py'],
+                                check=True, capture_output=True, text=True).stdout
+        exec(compile(source, baseline.__file__, 'exec'), baseline.__dict__)
+        for key in ('LOCK_PATH', 'STATUS_FILE', 'WORKDIR_BASE', 'run_cmd', 'generate_temp_credentials', 'fetch_offsite_bytes', 'fetch_api_bytes'):
+            baseline.__dict__[key] = drill.__dict__[key]
+        fixed = datetime.datetime(2026, 10, 11, tzinfo=datetime.timezone.utc)
+        class Clock(datetime.datetime):
+            @classmethod
+            def now(cls, tz=None): return fixed
+        with patch.object(drill.datetime, 'datetime', Clock), patch.object(drill.secrets, 'token_hex', side_effect=lambda n: 'a' * (2*n)), patch.object(sys, 'argv', ['restore-drill.py']):
+            for fault in (None, 'prepare-target.sh'):
+                snapshots = []
+                self.fail_script = fault
+                for module in (drill, baseline):
+                    self.calls.clear()
+                    self.removed_statuses.clear()
+                    output = io.StringIO()
+                    with redirect_stdout(output): code = module.main()
+                    snapshots.append((code, output.getvalue().encode(), Path(drill.STATUS_FILE).read_bytes(), list(self.calls), list(self.removed_statuses)))
+                    work = self.root / 'work'
+                    work.rename(self.root / ('saved-' + module.__name__ + '-' + str(fault)))
+                self.assertEqual(snapshots[0], snapshots[1])
 
     def dump_headers(self, key, ddl):
         return f'--\n-- PostgreSQL database dump\n--\n\n\\restrict {key}\n\n-- Dumped from database version 17.6\n-- Dumped by pg_dump version 17.6\n\n{ddl}--\n-- PostgreSQL database dump complete\n--\n\n\\unrestrict {key}\n\n'
