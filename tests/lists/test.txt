@@ -75,7 +75,9 @@ tests/listener-grok-model.test.ts
 tests/listener-claude-canary-classify.test.ts
 tests/household-legacy-adapter.test.ts
 tests/household-tool-registry.test.ts
+tests/household-list-registry.test.ts
 tests/household-objects.test.ts
+tests/household-lazy-storage.test.ts
 tests/idle-poll.test.ts
 tests/idle-cost-retention.test.ts
 tests/listener-runtime.test.ts
@@ -116,6 +118,7 @@ tests/release-preflight.test.mjs
 tests/plan-guards-errexit.test.mjs
 tests/household-integration.test.ts
 tests/household-feature-gates.test.ts
+tests/hosted-household-catalog-switch.test.ts
 tests/household-human-invitations.test.ts
 tests/hosted-name-reclaim.test.ts
 tests/household-approval.test.ts
