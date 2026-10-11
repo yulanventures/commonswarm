@@ -302,7 +302,7 @@ PREFLIGHT_DIRECTORIES=(
     '{edge}', '{helper}', '{baseline_edge}', '{baseline_helper}',
     '/home/commonswarm/edge/failed-attempts',
     '/home/commonswarm/admin-issuance/failed-attempts',
-    STATE, ARCHIVES, '{proof}', '{upload_parent}', '{baseline_archive_parent}', '/tmp',
+    STATE, ARCHIVES, '{proof}', '{upload_parent}', '{baseline_archive_parent}', '/tmp', '/etc/commonswarm-admin-release',
 )
 # Closed allow list, shared by ancestor and release-parent admission.
 COMMONSWARM_DIRECTORIES=('/home/commonswarm','/home/commonswarm/edge','/home/commonswarm/edge/releases')
@@ -350,7 +350,7 @@ def inert_account(account):
             values=process_uids(path)
             if values is None: continue
             checked+=1; matching+=int(account.pw_uid in values)
-    except OSError: need(False,'commonswarm process measurement failed')
+    except (OSError,UnicodeDecodeError): need(False,'commonswarm process measurement failed')
     need(matching==0,'commonswarm process check failed')
     try: supplementary,primary=group_member_counts(account)
     except (KeyError,OSError): need(False,'commonswarm group measurement failed')
@@ -1695,8 +1695,8 @@ printf 'PASS verified close copied to %s; supplied Mac scratch removed\n' "$EVID
 ```
 
 The current hook accepts the new identity without code changes: C1 RELEASE.md
-4201–4212 validates the SHA-derived archive/helper conventions; 4257–4275 compares
-live target/image/mounts/archive; 4287–4293 writes the measurement at the approved
+5113–5137 validates the SHA-derived archive/helper conventions; 5188–5207 compares
+live target/image/mounts/archive; 5208–5217 writes the measurement at the approved
 SHA. edge_binding updates all seven config fields atomically while the timer is
 stopped; postgres_image is preserved. edge_measure commits the new approval and
 measurement with CLOSED issuance. Rollback restores byte-identical recycle.json,
@@ -1710,7 +1710,7 @@ durable name used by C1 W4, then promotes the exact verified transport bytes exc
 BOX_ARCHIVE_PATH remains the /tmp transport, with its ancestry file retained;
 DURABLE_ARCHIVE_PATH is the binding and success-close path. Rollback restages a missing
 legacy tar exclusively at its exact original path, verifies bytes and admitted metadata,
-fsyncs file and parent, then restores exact baseline JSON (C:5233–5261).
+fsyncs file and parent, then restores exact baseline JSON (C:5579–5607).
 Keeper file presence STOPs before opening E or any archive/service/binding mutation;
 E never installs, runs or retires the keeper.
 Hook/drop-in bytes, ownership/modes and the baseline recycle-intent.json
@@ -1726,16 +1726,16 @@ Source map (C1 is docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md):
 
 | New boundary | C1 source | Adaptation |
 | --- | --- | --- |
-| open/preflight/ready | ai-w4-preflight:3716; ai-prepare/ai-extract:810/841; ai-db-session:1479 | Fresh inputs, existing hook, exact archive and rollback capture |
-| apply/invalidate/measurement | ai-w4-apply:3882 | Keep committed close/invalidation and measurement; omit initial legacy-fence mutation and Caddy install |
-| probes/readback | ai-w4-probes:3967; ai-w4-readback:4020 | Local Caddy with independently verified CA for both targets; unchanged Caddy comparison; _meta 401 control and explicit operator check |
-| rollback | ai-w4-rollback:4033 | Preserve existing hook/drop-in, restore exact recycle JSON, freshly measure baseline |
-| timer guard/recovery | ai-timer-guard:4069; ai-w4-timer-recovery:4092 | Persist helpers; EXIT/INT/TERM guard installed before stop; close requires active timer |
-| binding/compatibility | ai-recycle-hook:4158; ai-recycle-install:4314; ai-recycle-rollback:4367 | Keep hook bytes, atomic rebind instead of install; exact baseline restoration instead of removal |
-| aside | ai-release-aside:3620 | Add window-owned receipts for both edge/helper trees; retain archives |
+| open/preflight/ready | ai-w4-preflight:4018; ai-prepare/ai-extract:848/983; ai-db-session:1638 | Fresh inputs, existing hook, exact archive and rollback capture |
+| apply/invalidate/measurement | ai-w4-apply:4643 | Keep committed close/invalidation and measurement; omit initial legacy-fence mutation and Caddy install |
+| probes/readback | ai-w4-probes:4808; ai-w4-readback:4861 | Local Caddy with independently verified CA for both targets; unchanged Caddy comparison; _meta 401 control and explicit operator check |
+| rollback | ai-w4-rollback:4874 | Preserve existing hook/drop-in, restore exact recycle JSON, freshly measure baseline |
+| timer guard/recovery | ai-timer-guard:4970; ai-w4-timer-recovery:4996 | Persist helpers; EXIT/INT/TERM guard installed before stop; close requires active timer |
+| binding/compatibility | ai-recycle-hook:5063; ai-recycle-install:5246; ai-recycle-rollback:5529 | Keep hook bytes, atomic rebind instead of install; exact baseline restoration instead of removal |
+| aside | ai-release-aside:3857 | Add window-owned receipts for both edge/helper trees; retain archives |
 | run order/abort/close | deploy/mcp-auth/OAUTH-RELEASE.md:66 | Distinct success/rolled-back/aborted states; baseline abort has no recreate |
 
-Dropped ai-w4-caddy-candidate:3785 (initial ingress cutover), Caddy install/reload,
+Dropped ai-w4-caddy-candidate:4364 (initial ingress cutover), Caddy install/reload,
 initial hook/drop-in installation/removal, initial apply_legacy_admin_fence call,
 C1 consent/window/migration/activation dependencies. This edge-only release
 verifies their durable post-W4 results; it cannot complete or reopen C1.
