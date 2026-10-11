@@ -1,6 +1,6 @@
 /** Execute complete marked release blocks; substitute only box paths and command observations. */
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
@@ -12,7 +12,7 @@ const blocks = [...plan.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[
 function block(step: string) {
   const matches = blocks.filter(s => s.startsWith(`# step: ${step}\n`));
   assert.equal(matches.length, 1, `one complete ${step} block`);
-  return matches[0]!;
+  return matches[0]!.replace(/^ai_backup_gate (write|check).*$/m, line => block('ai-db-session').match(/^ai_backup_gate\(\) \{\n[\s\S]*?^}\n/m)![0] + line);
 }
 const python = spawnSync('which', ['python3'], { encoding: 'utf8' }).stdout.trim();
 assert.ok(python.startsWith('/'), 'absolute Python runtime');
@@ -53,6 +53,13 @@ elif name=='python3':
     socket.socket.connect=no_network; socket.create_connection=no_network
     if 'W2 ledger expected no complete 20261003 set before open' in source:
         source=source.replace("n=subprocess.check_output(['/bin/bash','-s','--',sha,image],input=query,text=True,stderr=subprocess.DEVNULL).strip()","n='0'")
+    source=source.replace('os.uname().nodename',"cfg.get('hostname','yulan-vps-1')").replace("hashlib.sha256(read('/etc/machine-id')).hexdigest()","cfg.get('machine_id_sha256','6b63dad34fa7ced95e4f653aecb7e37ea7aa2a32902bdd593e23e93bb9877b22')")
+    if cfg.get('fixed_now'):
+        import datetime
+        class Clock(datetime.datetime):
+            @classmethod
+            def now(cls,tz=None): return cls.fromisoformat(cfg['fixed_now'].replace('Z','+00:00')).astimezone(tz)
+        datetime.datetime=Clock
     exec(compile(source,'<complete-plan-block>','exec'))
 elif name=='ai_deadline':
     if args: refuse()
@@ -253,7 +260,7 @@ function fixture(config: Record<string, unknown> = {}) {
     BOX_ARCHIVE_PATH: archive, PLAN_FILE: resolve('docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'),
     RELEASE_ROOT: join(root, 'release'), NEW_OAUTH: join(root, 'oauth/releases', sha), PSQL_IMAGE: 'fixture-postgres' };
   function remap(text: string) {
-    let source = text;
+    let source = text.replaceAll('/usr/bin/python3 -I', `'${python}' -I '${join(bin, 'python3')}'`);
     // Remap filesystem boundaries only. SQL, shell guards and Python assertions stay verbatim.
     for (const [from, to] of [
       ['/tmp/admin-issuance-', join(root, 'archive/admin-issuance-')],
@@ -302,7 +309,7 @@ function gateWindow(f: ReturnType<typeof fixture>, window: string) {
     window_end_utc: new Date(Date.now() + 1_200_000).toISOString().replace(/\.\d{3}Z$/, 'Z') };
   f.put('inputs.json', inputs); f.put('proof/inputs.json', inputs);
   f.put('proof/open.txt', new Date(Date.now() - 120_000).toISOString().replace(/\.\d{3}Z$/, 'Z') + '\n');
-  f.put('gate-check.sh', block('ai-backup-gate-check'));
+  f.put('gate-check.sh', f.remap(block('ai-backup-gate-check')));
   return inputs as Record<string, string>;
 }
 // A bound receipt as ai-w1-backup-gate writes it (python json.dumps sort_keys).
@@ -312,62 +319,146 @@ function validGate(f: ReturnType<typeof fixture>, window: string, change: Record
     backup_verified_at: at(600_000), restore_completed_at: at(86400_000), destination: 'r2:yulan-vps-1-backups/000-commonswarm-postgres/fixture', gate_at: at(60_000), ...change };
   f.put('proof/backup-gate.json', '{' + Object.keys(receipt).sort().map(k => JSON.stringify(k) + ': ' + JSON.stringify(receipt[k])).join(', ') + '}\n');
 }
-function backupRun(b = backup(), r = restore(), window = 'W1') {
-  const f = fixture(); f.put('backup/status.json', b); f.put('backup/restore-status.json', r); gateWindow(f, window);
+function backupRun(b: Record<string, unknown> = backup(), r = restore(), window = 'W1', config: Record<string, unknown> = {}) {
+  const f = fixture(config); f.put('backup/status.json', b); f.put('backup/restore-status.json', r); gateWindow(f, window);
   return { f, result: f.run([gateShim, 'ai-w1-backup-gate'], window) };
 }
-function backupBad(b: ReturnType<typeof backup>, r: ReturnType<typeof restore>, message: string) {
-  const { f, result } = backupRun(b, r);
-  assert.ok(!existsSync(join(f.proof, 'backup-gate.json')), 'no receipt after refusal');
-  stopped(result, message);
-}
-
-test('backup-restore-gate / shared-w1-w2b-w4: W2b and W4 run the same backup gate; stale, unverified or missing backups STOP', () => {
-  for (const window of ['W2b', 'W4']) {
+test('backup-restore-gate / fresh-verified-database-and-object-backup / complete-isolated-restore-receipt / stale-or-failed-status-refused: W1/W2b/W4 bind receipts and refuse bad status', () => {
+  for (const window of ['W1', 'W2b', 'W4']) {
     const good = backupRun(backup(), restore(), window); pass(good.result);
-    assert.equal(JSON.parse(readFileSync(join(good.f.proof, 'backup-gate.json'), 'utf8')).status, 'PASS', window);
+    const receipt = JSON.parse(readFileSync(join(good.f.proof, 'backup-gate.json'), 'utf8'));
+    assert.deepEqual(Object.keys(receipt).sort(), ['backup_verified_at', 'destination', 'gate_at', 'release_sha', 'restore_completed_at', 'status', 'window', 'window_id']);
+    assert.equal(receipt.status, 'PASS'); assert.equal(receipt.window, window); assert.equal(receipt.release_sha, sha); assert.equal(receipt.window_id, 'fixture');
+    assert.match(good.result.stdout, /PASS ai-backup-gate-check:/);
     const bad: Array<[ReturnType<typeof backup>, ReturnType<typeof restore>, string]> = [
-      [{ ...backup(), verified_at: new Date(Date.now() - 3600_000).toISOString() }, restore(), 'FAIL fresh backup; STOP'],
-      [{ ...backup(), database_bytes_verified: false }, restore(), 'FAIL verified backup; STOP'],
-      [{ ...backup(), object_bytes_verified: false }, restore(), 'FAIL verified backup; STOP'],
+      ...['ok', 'database_bytes_verified', 'object_bytes_verified'].map(k => [{ ...backup(), [k]: false }, restore(), 'FAIL verified backup; STOP'] as [ReturnType<typeof backup>, ReturnType<typeof restore>, string]),
       [{ ...backup(), destination: 'r2:other-bucket/x' }, restore(), 'FAIL fresh backup; STOP'],
-      [backup(), { ...restore(), at: new Date(Date.now() - 9 * 86400_000).toISOString() }, 'FAIL restore freshness; STOP'],
-      [backup(), { ...restore(), state: 'running' }, 'FAIL complete restore drill; STOP'],
+      ...[-3600, 3600].map(seconds => [{ ...backup(), verified_at: new Date(Date.now() + seconds * 1000).toISOString() }, restore(), 'FAIL fresh backup; STOP'] as [ReturnType<typeof backup>, ReturnType<typeof restore>, string]),
+      [backup(), { ...restore(), ok: false }, 'FAIL complete restore drill; STOP'], [backup(), { ...restore(), state: 'running' }, 'FAIL complete restore drill; STOP'],
+      ...[-9 * 86400, 3600].map(seconds => [backup(), { ...restore(), at: new Date(Date.now() + seconds * 1000).toISOString() }, 'FAIL restore freshness; STOP'] as [ReturnType<typeof backup>, ReturnType<typeof restore>, string]),
     ];
-    for (const [b, r, message] of bad) {
-      const { f, result } = backupRun(b, r, window); stopped(result, message);
-      assert.ok(!existsSync(join(f.proof, 'backup-gate.json')), `${window}: no receipt after refusal`);
-    }
-    const missing = fixture(); gateWindow(missing, window); const gone = missing.run([gateShim, 'ai-w1-backup-gate'], window);
-    stopped(gone, 'FAIL backup and restore status files; STOP'); assert.ok(!existsSync(join(missing.proof, 'backup-gate.json')));
+    for (const [b, r, message] of bad) { const { f, result } = backupRun(b, r, window); stopped(result, message); assert.ok(!existsSync(join(f.proof, 'backup-gate.json'))); }
+    const missing = fixture(); gateWindow(missing, window);
+    stopped(missing.run([gateShim, 'ai-w1-backup-gate'], window), 'FAIL backup and restore status files; STOP'); assert.ok(!existsSync(join(missing.proof, 'backup-gate.json')));
   }
   for (const window of ['W2', 'W3', 'W5', 'W6']) {
     const { f, result } = backupRun(backup(), restore(), window);
     stopped(result, 'FAIL ai-w1-backup-gate: window expected W1-W2b-or-W4 got other; STOP'); assert.ok(!existsSync(join(f.proof, 'backup-gate.json')));
   }
 });
-
-test('backup-restore-gate / fresh-verified-database-and-object-backup: fails closed on unverified bytes or wrong destination', () => {
-  const good = backupRun(); pass(good.result); assert.equal(JSON.parse(readFileSync(join(good.f.proof, 'backup-gate.json'), 'utf8')).status, 'PASS');
-  // The receipt is bound to its window and carries the measured times, the destination and the gate time.
-  const receipt = JSON.parse(readFileSync(join(good.f.proof, 'backup-gate.json'), 'utf8'));
-  assert.deepEqual(Object.keys(receipt).sort(), ['backup_verified_at', 'destination', 'gate_at', 'release_sha', 'restore_completed_at', 'status', 'window', 'window_id']);
-  assert.equal(receipt.window, 'W1'); assert.equal(receipt.release_sha, sha); assert.equal(receipt.window_id, 'fixture');
-  assert.match(good.result.stdout, /PASS ai-backup-gate-check: W1 fixture backup and restore fresh at gate /);
-  for (const key of ['ok', 'database_bytes_verified', 'object_bytes_verified']) backupBad({ ...backup(), [key]: false }, restore(), 'FAIL verified backup; STOP');
-  backupBad({ ...backup(), destination: 'r2:wrong/fixture' }, restore(), 'FAIL fresh backup; STOP');
+test('backup gate staging policy: production output and receipt bytes equal the pinned base', () => {
+  const old = spawnSync('git', ['show', '10554406e75116123d0bc75aea00f4f425ce3025:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8', maxBuffer: 4 << 20 });
+  assert.equal(old.status, 0, old.stderr);
+  const oldBlock = (id: string) => [...old.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!).find(b => b.startsWith(`# step: ${id}\n`))!;
+  const fixed_now = new Date().toISOString(), b = { ...backup(), verified_at: fixed_now }, r = { ...restore(), at: fixed_now };
+  for (const window of ['W1', 'W2b', 'W4']) {
+    const current = backupRun(b, r, window, { fixed_now }); pass(current.result);
+    const receipt = readFileSync(join(current.f.proof, 'backup-gate.json'));
+    current.f.put('gate-check.sh', oldBlock('ai-backup-gate-check'));
+    const previous = current.f.run([gateShim, oldBlock('ai-w1-backup-gate')], window); pass(previous);
+    assert.equal(current.result.stdout, previous.stdout); assert.equal(current.result.stderr, previous.stderr);
+    assert.deepEqual(receipt, readFileSync(join(current.f.proof, 'backup-gate.json')));
+  }
+  const regression = backupRun(localBackup(), restore(), 'W4', stagingIdentity); pass(regression.result);
+  rmSync(join(regression.f.proof, 'backup-gate.json')); regression.f.put('gate-check.sh', oldBlock('ai-backup-gate-check'));
+  stopped(regression.f.run([gateShim, oldBlock('ai-w1-backup-gate')], 'W4'), 'FAIL verified backup; STOP'); assert.ok(!existsSync(join(regression.f.proof, 'backup-gate.json')));
 });
-test('backup-restore-gate / complete-isolated-restore-receipt: fails closed on failed or incomplete restore status', () => {
-  pass(backupRun().result);
-  backupBad(backup(), { ...restore(), ok: false }, 'FAIL complete restore drill; STOP');
-  backupBad(backup(), { ...restore(), state: 'running' }, 'FAIL complete restore drill; STOP');
+const stagingIdentity = { hostname: 'c1-staging-20261006', machine_id_sha256: '29e448988c239181332e852c902c4c36815d628bb58cebc7da53c23f0f443565' };
+const productionIdentity = { hostname: 'yulan-vps-1', machine_id_sha256: '6b63dad34fa7ced95e4f653aecb7e37ea7aa2a32902bdd593e23e93bb9877b22' };
+const localBackup = () => ({ destination: 'local-staging:/var/backups/staging-drill', dump_sha256: 'a'.repeat(64), drill: 'PASS', verified_at: new Date().toISOString() });
+test('backup gate identity read: real file hashes; symlink, FIFO, directory and missing file refuse local form without interrupting production', async () => {
+  const f = fixture(), id = join(f.root, 'machine-id'), bytes = 'fixture-staging-machine-id\n';
+  gateWindow(f, 'W4'); f.put('backup/restore-status.json', restore()); f.put('identity-target', bytes);
+  // Only hostname, filesystem boundaries and the synthetic bytes' pin change; read(), hashing and interpreter stay real.
+  const helper = block('ai-db-session').match(/^ai_backup_gate\(\) \{\n[\s\S]*?^}\n/m)![0]
+    .replace('os.uname().nodename', JSON.stringify(stagingIdentity.hostname))
+    .replace('/etc/machine-id', id).replace(stagingIdentity.machine_id_sha256, digest(bytes))
+    .replaceAll('/var/backups/commonswarm-postgres', join(f.root, 'backup'));
+  const run = (mode: string, extra: Record<string, string> = {}) => {
+    const result = spawnSync('/bin/bash', [], { input: helper + `\nai_backup_gate ${mode} '${join(f.root, 'inputs.json')}' W4\n`,
+      env: { ...process.env, BACKUP_GATE_DIR: f.proof, ...extra }, encoding: 'utf8', timeout: 2_000 });
+    assert.ifError(result.error); assert.equal(result.signal, null); return result;
+  };
+  for (const kind of ['symlink', 'fifo', 'directory', 'missing']) {
+    writeFileSync(id, bytes); f.put('backup/status.json', localBackup());
+    const good = run('write'); assert.equal(good.status, 0, good.stderr);
+    assert.equal(run('check').status, 0); // Positive control reaches the same real read() on both paths.
+    unlinkSync(id);
+    if (kind === 'symlink') symlinkSync(join(f.root, 'identity-target'), id);
+    let writer: ReturnType<typeof spawn> | undefined, finished: Promise<number | null> | undefined;
+    if (kind === 'fifo') {
+      const made = spawnSync('/usr/bin/mkfifo', [id], { encoding: 'utf8' }); assert.equal(made.status, 0, made.stderr);
+      writer = spawn('/usr/bin/python3', ['-I', '-c', 'import os,sys; fd=os.open(sys.argv[1],os.O_RDWR|os.O_NONBLOCK); os.write(fd,sys.argv[2].encode()); print("ready",flush=True); sys.stdin.read(); os.close(fd)', id, bytes], { timeout: 10_000 });
+      finished = new Promise(resolve => writer!.once('exit', resolve));
+      const ready = await new Promise<Buffer>((resolve, reject) => {
+        writer!.once('error', reject); writer!.once('exit', () => reject(new Error('FIFO writer exited before ready')));
+        writer!.stdout!.once('data', resolve);
+      });
+      assert.equal(ready.toString(), 'ready\n'); // Bytes are queued and the writer holds the FIFO open through both refusals.
+    }
+    if (kind === 'directory') mkdirSync(id);
+    try {
+      const refused = run('write'); assert.notEqual(refused.status, 0); assert.match(refused.stderr, /FAIL verified backup; STOP/);
+      const check = run('check'); assert.notEqual(check.status, 0); assert.match(check.stderr, /backup destination expected reviewed-r2-prefix got other; STOP/);
+      f.put('backup/status.json', backup()); const production = run('write'); assert.equal(production.status, 0, production.stderr);
+      assert.equal(run('check').status, 0); // None/TypeError from a refused read must leave the production path usable.
+    } finally {
+      if (writer) { writer.stdin!.end(); assert.equal(await finished, 0, 'FIFO writer must finish before its timeout'); }
+    }
+    if (kind !== 'missing') rmSync(id, { recursive: kind === 'directory' });
+  }
+  writeFileSync(id, bytes); f.put('backup/status.json', localBackup());
+  const marker = join(f.root, 'interposed');
+  f.put('sitecustomize.py', `open(${JSON.stringify(marker)},'w').write('PYTHONPATH interposed')\n`);
+  const injected = { PYTHONPATH: f.root, PYTHONSTARTUP: join(f.root, 'sitecustomize.py') };
+  const control = spawnSync('/usr/bin/python3', ['-c', 'pass'], { env: { ...process.env, ...injected }, encoding: 'utf8' });
+  assert.equal(control.status, 0, control.stderr); assert.ok(existsSync(marker)); unlinkSync(marker);
+  mkdirSync(join(f.root, 'interpose-bin'));
+  f.put('interpose-bin/python3', `#!/bin/bash\nprintf 'PATH interposed' >'${marker}'\nexit 91\n`); chmodSync(join(f.root, 'interpose-bin/python3'), 0o700);
+  const pathControl = spawnSync('/bin/bash', ['-c', 'python3 -I -c pass'], { env: { ...process.env, PATH: join(f.root, 'interpose-bin') }, encoding: 'utf8' });
+  assert.equal(pathControl.status, 91); assert.ok(existsSync(marker)); unlinkSync(marker);
+  for (const mode of ['write', 'check']) {
+    const isolated = run(mode, { ...injected, PATH: join(f.root, 'interpose-bin') });
+    assert.equal(isolated.status, 0, isolated.stderr); assert.ok(!existsSync(marker), 'absolute isolated interpreter ignores PATH and sitecustomize');
+  }
 });
-test('backup-restore-gate / stale-or-failed-status-refused: fails closed on stale, future or failed measurements', () => {
-  pass(backupRun().result);
-  for (const seconds of [-3600, 3600]) backupBad({ ...backup(), verified_at: new Date(Date.now()+seconds*1000).toISOString() }, restore(), 'FAIL fresh backup; STOP');
-  for (const seconds of [-9*86400, 3600]) backupBad(backup(), { ...restore(), at: new Date(Date.now()+seconds*1000).toISOString() }, 'FAIL restore freshness; STOP');
-  backupBad({ ...backup(), ok: false }, restore(), 'FAIL verified backup; STOP');
-  backupBad(backup(), { ...restore(), ok: false }, 'FAIL complete restore drill; STOP');
+test('backup gate staging policy: both identity halves required; inputs and environment cannot select staging; every consumer remeasures', () => {
+  const good = backupRun(localBackup(), restore(), 'W4', stagingIdentity); pass(good.result);
+  assert.equal(JSON.parse(readFileSync(join(good.f.proof, 'backup-gate.json'), 'utf8')).destination, localBackup().destination);
+  const spoof = { HOSTNAME: stagingIdentity.hostname, SWARM_ENV: 'staging', STAGING: '1', MACHINE_ID_SHA256: stagingIdentity.machine_id_sha256, BACKUP_GATE_STAGING: '1' };
+  for (const identity of [productionIdentity, { ...productionIdentity, hostname: stagingIdentity.hostname }, { ...stagingIdentity, hostname: productionIdentity.hostname }]) {
+    const control = backupRun(backup(), restore(), 'W4', identity); pass(control.result);
+    const inputs = { ...gateWindow(control.f, 'W4'), ...stagingIdentity, staging: true, ...spoof };
+    control.f.put('inputs.json', inputs); control.f.put('proof/inputs.json', inputs); control.f.put('backup/status.json', localBackup());
+    rmSync(join(control.f.proof, 'backup-gate.json'));
+    stopped(control.f.run([gateShim, 'ai-w1-backup-gate'], 'W4', spoof), 'FAIL verified backup; STOP');
+    assert.ok(!existsSync(join(control.f.proof, 'backup-gate.json')));
+    validGate(control.f, 'W4', { destination: localBackup().destination });
+    stopped(control.f.run(['ai-backup-gate-check'], 'W4', { ...spoof, BACKUP_GATE_DIR: control.f.proof }), 'backup destination expected reviewed-r2-prefix got other; STOP');
+  }
+  good.f.put('commands.json', productionIdentity);
+  stopped(good.f.run(['ai-backup-gate-check'], 'W4', { BACKUP_GATE_DIR: good.f.proof }), 'backup destination expected reviewed-r2-prefix got other; STOP');
+});
+test('backup gate staging policy: exact local form, fresh time and unchanged complete restore required; staging refuses R2', () => {
+  pass(backupRun(localBackup(), restore(), 'W4', stagingIdentity).result);
+  const bad: Array<[Record<string, unknown>, ReturnType<typeof restore>, string]> = [
+    [backup(), restore(), 'FAIL local staging backup; STOP'],
+    ...['r2:yulan-vps-1-backups/000-commonswarm-postgres/fixture', 'local-staging:relative', 'local-staging:'].map(destination => [{ ...localBackup(), destination }, restore(), 'FAIL fresh backup; STOP'] as [Record<string, unknown>, ReturnType<typeof restore>, string]),
+    ...['BAD', 'A'.repeat(64), 'a'.repeat(63), 123].map(dump_sha256 => [{ ...localBackup(), dump_sha256 }, restore(), 'FAIL local staging backup; STOP'] as [Record<string, unknown>, ReturnType<typeof restore>, string]),
+    [{ ...localBackup(), drill: 'FAIL' }, restore(), 'FAIL local staging backup; STOP'],
+    [{ ...localBackup(), extra: true }, restore(), 'FAIL local staging backup; STOP'],
+    ...Object.keys(localBackup()).map(key => [Object.fromEntries(Object.entries(localBackup()).filter(([k]) => k !== key)), restore(), 'FAIL local staging backup; STOP'] as [Record<string, unknown>, ReturnType<typeof restore>, string]),
+    ...[-3600, 3600].map(seconds => [{ ...localBackup(), verified_at: new Date(Date.now() + seconds * 1000).toISOString() }, restore(), 'FAIL fresh backup; STOP'] as [Record<string, unknown>, ReturnType<typeof restore>, string]),
+    ...['2026-10-11T00:00:00', '2026-10-11T00:00:00+01:00', 'bad'].map(verified_at => [{ ...localBackup(), verified_at }, restore(), 'FAIL backup verified_at expected aware-UTC-ISO-8601-time got other; STOP'] as [Record<string, unknown>, ReturnType<typeof restore>, string]),
+    [localBackup(), { ...restore(), ok: false }, 'FAIL complete restore drill; STOP'], [localBackup(), { ...restore(), state: 'running' }, 'FAIL complete restore drill; STOP'],
+    [localBackup(), { ...restore(), at: new Date(Date.now() - 9 * 86400_000).toISOString() }, 'FAIL restore freshness; STOP'],
+  ];
+  for (const [b, r, message] of bad) { const refused = backupRun(b, r, 'W4', stagingIdentity); stopped(refused.result, message); assert.ok(!existsSync(join(refused.f.proof, 'backup-gate.json'))); }
+  const f = backupRun(localBackup(), restore(), 'W4', stagingIdentity).f;
+  for (const destination of [backup().destination, 'local-staging:relative']) {
+    validGate(f, 'W4', { destination });
+    stopped(f.run(['ai-backup-gate-check'], 'W4', { BACKUP_GATE_DIR: f.proof }), 'backup destination expected local-staging-absolute-directory got other; STOP');
+  }
 });
 // C1 live ordinary controls (SCHEMA section 3): every ordinary-paths-unchanged
 // receipt is bound to a release consent receipt and the released producer bytes.

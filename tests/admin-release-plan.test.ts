@@ -17,7 +17,8 @@ const digest = (value: string | Buffer) => createHash('sha256').update(value).di
 const block = (id: string) => {
   const matches = blocks.filter(s => s.startsWith(`# step: ${id}\n`));
   assert.equal(matches.length, 1, `one complete ${id} block`);
-  return matches[0]!;
+  return matches[0]!.replace(/^ai_backup_gate (write|check).*$/m, line => block('ai-db-session').match(/^ai_backup_gate\(\) \{\n[\s\S]*?^}\n/m)![0] + line)
+    .replace('os.uname().nodename', JSON.stringify('yulan-vps-1')).replace("read('/etc/machine-id')", "b'fixture-machine-id\\n'");
 };
 /** The compatibility oracle is the exact pre-amendment ai-gates block, not a reimplementation. */
 const oldGatesBlock = () => {
@@ -153,7 +154,7 @@ test('admin release plan: every complete marked block parses in Bash 3.2 and emb
     assert.ok(!seen.has(lines[0]!), 'duplicate step marker'); seen.add(lines[0]!);
     const shell = spawnSync('/bin/bash', ['-n'], { input: source, encoding: 'utf8' });
     assert.equal(shell.status, 0, `${lines[0]}: ${shell.stderr}`);
-    for (const match of source.matchAll(/^python3[^\n]*<<'PY'[^\n]*\n([\s\S]*?)^PY$/gm)) {
+    for (const match of source.matchAll(/^[ \t]*(?:\/usr\/bin\/)?python3[^\n]*<<'PY'[^\n]*\n([\s\S]*?)^PY$/gm)) {
       const python = spawnSync('python3', ['-c', 'import sys; compile(sys.stdin.read(), "<plan-python>", "exec")'], {
         input: match[1], encoding: 'utf8',
       });
@@ -2820,10 +2821,12 @@ test('admin release plan: W2 pre-fence close proves an empty ledger and needs a 
 const BOX_TIME = { verified_at: '2026-10-04T22:12:09.199316+00:00', retention_policy_observed_at: '2026-09-18T00:13:29.059720+00:00',
   restore_at: '2026-10-04T04:48:05.055995+00:00' };
 const boxTimeDir = resolve('tests/fixtures/box-time');
+// Isolation ignores PYTHONPATH, so load this test's fixed clock explicitly into its copied heredoc.
+const fixedBackupClock = (source: string) => source.replace("<<'PY'\n", "<<'PY'\n" + readFileSync(join(boxTimeDir, 'sitecustomize.py'), 'utf8') + '\n');
 
 test('box times: every box_utc copy is identical; it accepts the exact box samples and Z, and refuses other offsets, naive and 7 digits', () => {
   const copies = [...plan.matchAll(/^def box_utc\(value\):\n(?: {4}.*\n)+/gm)].map(m => m[0]);
-  assert.equal(copies.length, 7, 'producer, check, W2 status and W1/W5 closed.txt readers');
+  assert.equal(copies.length, 6, 'shared backup policy, W2 status and W1/W5 closed.txt readers');
   assert.equal(new Set(copies).size, 1, 'all copies identical');
   const parser = join(scratch, 'box-utc.py');
   writeFileSync(parser, `import datetime,json,re,sys\n${copies[0]}print(json.dumps([None if (t:=box_utc(v)) is None else t.isoformat() for v in json.loads(sys.argv[1])]))\n`);
@@ -2845,8 +2848,8 @@ test('box times: the plan\'s ai-w1-backup-gate and ai-backup-gate-check PASS on 
     writeFileSync(join(backups, 'status.json'), readFileSync(statusFile)); writeFileSync(join(backups, 'restore-status.json'), readFileSync(restoreFile));
     const inputs = { ...base(), window: 'W2b', window_id: 'Abc123', window_end_utc: '2026-10-04T22:50:00Z' };
     writeFileSync(join(proof, 'inputs.json'), JSON.stringify(inputs)); writeFileSync(join(proof, 'open.txt'), '2026-10-04T22:05:00Z\n');
-    writeFileSync(join(dir, 'check.sh'), gateBlock);
-    const producer = block('ai-w1-backup-gate').split('/var/backups/commonswarm-postgres').join(backups);
+    writeFileSync(join(dir, 'check.sh'), fixedBackupClock(gateBlock));
+    const producer = fixedBackupClock(block('ai-w1-backup-gate')).split('/var/backups/commonswarm-postgres').join(backups);
     const r = run(`ai_deadline() { :; }\nai_run() { test "$1" = ai-backup-gate-check || return 1; eval "$(cat '${join(dir, 'check.sh')}')"; }\n${producer}`,
       { WINDOW: 'W2b', PROOF_DIR: proof, INPUTS_FILE: join(proof, 'inputs.json'), PYTHONPATH: boxTimeDir, C1_TEST_FIXED_NOW: '2026-10-04T22:20:00Z' });
     return { r, proof };
@@ -2890,7 +2893,7 @@ test('box times: the exact Y W2b receipt (mixed +00:00 and Z) passes ai-backup-g
     writeFileSync(join(dir, 'backup-gate.json'), receipt + '\n');
     writeFileSync(join(dir, 'inputs.json'), JSON.stringify({ ...base(), release_sha: '14bf1604f3299885070a01b46c610c6dda02db0e', window: 'W2b', window_id: 'PLWaBd', window_end_utc: '2026-10-04T22:47:31Z' }));
     writeFileSync(join(dir, 'open.txt'), '2026-10-04T22:17:31Z\n');
-    return run(gateBlock, { BACKUP_GATE_DIR: dir, PYTHONPATH: boxTimeDir, C1_TEST_FIXED_NOW: '2026-10-04T22:20:00Z' });
+    return run(fixedBackupClock(gateBlock), { BACKUP_GATE_DIR: dir, PYTHONPATH: boxTimeDir, C1_TEST_FIXED_NOW: '2026-10-04T22:20:00Z' });
   };
   const good = check(Y_W2B_RECEIPT); assert.equal(good.status, 0, good.stderr);
   assert.match(good.stdout, /^PASS ai-backup-gate-check: W2b PLWaBd backup and restore fresh at gate 2026-10-04T22:18:24\.257697Z$/m);
