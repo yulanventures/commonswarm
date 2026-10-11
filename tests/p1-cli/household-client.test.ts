@@ -93,8 +93,7 @@ test('HTTP server failures distinguish reads from ambiguous writes and retain id
 
 /** In-process protocol boundary, not a database or hosted-permission proof.
  * Receipts/revisions/conflicts come from the real reducer rather than canned
- * success responses. The host supplies verified proposals as lane 2 requires.
- */
+ * success responses. */
 function coreHost() {
   let state = emptyHouseholdObjectState(workspace, 'household-stream');
   const contents: HouseholdVerifiedContent[] = [];
