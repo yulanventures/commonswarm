@@ -51,7 +51,10 @@ export function emptyApplicationSchema(): string {
 }
 export function runSql(sql: string): void {
   const emptySchema = emptyApplicationSchema();
-  runSqlProcess('docker', ['exec', '-i', databaseContainer(), 'psql', '-X', '-Atq',
+  // item-t3/20260927000003-rollback-catalog.sql:28 needs literal auth.uid().
+  // CI differs from the box path ("$user", public, auth, extensions) on purpose.
+  runSqlProcess('docker', ['exec', '-i', '-e', 'PGOPTIONS=-c search_path=\\"$user\\",public',
+    databaseContainer(), 'psql', '-X', '-Atq',
     '-U', clusterAdministrator, '-d', 'postgres', '-v', 'ON_ERROR_STOP=1',
     '-v', 'VERBOSITY=verbose', '-v', 'SHOW_CONTEXT=never', '-f', '/dev/stdin'],
   `BEGIN;\n${sqlPhase('empty-application-schema', emptySchema)}\n${sqlPhase('test-body', sql)}\nROLLBACK;\n`);
