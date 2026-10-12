@@ -52,7 +52,7 @@ const workPhone = shot('work-stream-phone');
 const shared = shot('trust-shared');
 ---
 
-<section class="lp-section lp-with" aria-labelledby="with-title">
+<section class="lp-section" aria-labelledby="with-title">
   <div class="page lp-with__inner">
     <header class="lp-head lp-head--center">
       <p class="lp-eyebrow">Works with</p>
@@ -60,7 +60,7 @@ const shared = shot('trust-shared');
     </header>
     <ul class="lp-hosts" role="list">
       {agents.map((agent) => (
-        <li class="lp-host"><span class="lp-host__chip">{agent.name}</span></li>
+        <li><span class="lp-host__chip">{agent.name}</span></li>
       ))}
     </ul>
     <p class="lp-with__link"><a href="/guides/claude-connector">Connect Claude</a></p>
@@ -214,7 +214,7 @@ const shared = shot('trust-shared');
 <section class="lp-section lp-section--tight" aria-labelledby="soon-title">
   <div class="page">
     <div class="lp-soon">
-      <div class="lp-soon__copy">
+      <div>
         <p class="lp-chip">Coming soon</p>
         <h2 class="lp-h2" id="soon-title">Let your agents handle the setup.</h2>
         <p class="lp-copy lp-copy--lg">
