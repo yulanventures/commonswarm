@@ -190,10 +190,11 @@ jobs:
           export PGPASSWORD
           test "$(psql -X -v ON_ERROR_STOP=1 -At --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command "SELECT current_user, session_user, rolsuper FROM pg_roles WHERE rolname = current_user")" = 'supabase_admin|supabase_admin|t'
           supabase migration up --db-url postgresql://supabase_admin@127.0.0.1:54322/postgres
-          # Match the source memberships retained on the box by
-          # deploy/supabase-stack/migrate/dump-source.sh:73-82; inventory:
-          # docs/org/2026-09-16-N-EDGE-RESUME-HERE.md:189-191.
-          psql -X -v ON_ERROR_STOP=1 --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command 'GRANT swarm_admin, swarm_command, swarm_read, swarm_capability TO postgres'
+          # Box PG 17.6, HezLead read-only check 2026-10-12: postgres is a member of
+          # swarm_admin, swarm_command, swarm_read, swarm_capability; each row has
+          # admin_option=true, inherit_option=true, set_option=true. Match CI explicitly.
+          # PG16+ role options: https://www.postgresql.org/docs/17/sql-grant.html
+          psql -X -v ON_ERROR_STOP=1 --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command 'GRANT swarm_admin, swarm_command, swarm_read, swarm_capability TO postgres WITH ADMIN OPTION, INHERIT TRUE, SET TRUE'
           # Seeding and application tests still use their normal roles.
           psql -X -v ON_ERROR_STOP=1 --dbname postgresql://postgres@127.0.0.1:54322/postgres --file supabase/seed.sql
           psql -X -v ON_ERROR_STOP=1 --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command "NOTIFY pgrst, 'reload schema'"
@@ -208,8 +209,8 @@ jobs:
           test "$(psql -X -v ON_ERROR_STOP=1 -At --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'supabase_migrations.schema_migrations'::regclass")" = supabase_admin
           psql -X -v ON_ERROR_STOP=1 -At --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command 'SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version, name' > "$RUNNER_TEMP/actual-migrations"
           diff -u "$RUNNER_TEMP/expected-migrations" "$RUNNER_TEMP/actual-migrations"
-          test "$(psql -X -v ON_ERROR_STOP=1 -At --dbname postgresql://postgres@127.0.0.1:54322/postgres --command "SELECT current_user, session_user, NOT rolsuper, (SELECT bool_and(pg_has_role('postgres', r, 'SET')) FROM unnest(ARRAY['swarm_admin', 'swarm_command', 'swarm_read', 'swarm_capability']) AS roles(r)) FROM pg_roles WHERE rolname = current_user")" = 'postgres|postgres|t|t'
-          echo "Migration versions/names match $(wc -l < "$RUNNER_TEMP/expected-migrations") files; supabase_admin owns the ledger; postgres is non-superuser with SET on all four swarm roles."
+          test "$(psql -X -v ON_ERROR_STOP=1 -At --dbname postgresql://postgres@127.0.0.1:54322/postgres --command "SELECT current_user, session_user, NOT rolsuper, (SELECT count(*) = 4 AND count(DISTINCT roleid) = 4 AND bool_and(admin_option AND inherit_option AND set_option) FROM pg_auth_members WHERE member = 'postgres'::regrole AND roleid IN ('swarm_admin'::regrole, 'swarm_command'::regrole, 'swarm_read'::regrole, 'swarm_capability'::regrole)) FROM pg_roles WHERE rolname = current_user")" = 'postgres|postgres|t|t'
+          echo "Migration versions/names match $(wc -l < "$RUNNER_TEMP/expected-migrations") files; supabase_admin owns the ledger; postgres is non-superuser with ADMIN, INHERIT, SET true on each of four swarm memberships."
       - name: Server suite
         if: matrix.suite == 'server'
         run: |
