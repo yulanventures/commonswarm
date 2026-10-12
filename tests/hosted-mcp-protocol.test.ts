@@ -521,7 +521,7 @@ test("MCP denials log only stable error codes and known method names", async (t)
   const unknown = await fixture.serve(post({
     jsonrpc: "2.0", id, method: "private-method-must-not-be-logged",
   }, fixture.headers));
-  assert.equal(unknown.status, 404);
+  assert.equal(unknown.status, 200);
   assert.deepEqual(logging.mock.calls.map(({ arguments: args }) => {
     assert.equal(args.length, 1);
     return JSON.parse(args[0]);
@@ -537,6 +537,25 @@ test("MCP denials log only stable error codes and known method names", async (t)
   ]);
 });
 
+test("unknown JSON-RPC methods require authentication before dispatch", async (t) => {
+  const fixture = await authenticatedHandler();
+  t.mock.method(console, "error", () => undefined);
+  const message = { jsonrpc: "2.0", id: "unknown-method-auth", method: "unknown-method" };
+  const authenticated = await fixture.serve(post(message, fixture.headers));
+  assert.equal(authenticated.status, 200);
+  assert.deepEqual(await authenticated.json(), {
+    jsonrpc: "2.0", id: message.id,
+    error: { code: -32601, message: "Method not found" },
+  });
+
+  const request = post(message, fixture.headers);
+  request.headers.delete("authorization");
+  const unauthenticated = await fixture.serve(request);
+  assert.equal(unauthenticated.status, 401, "authentication precedes unknown-method dispatch");
+  assert.equal(unauthenticated.headers.get("www-authenticate"), WWW_AUTHENTICATE);
+  assert.deepEqual(await unauthenticated.json(), { error: "unauthorized" });
+});
+
 test("protected-resource metadata and the unauthenticated challenge name exact URLs", async () => {
   const serve = handler();
   const metadata = await serve(new Request(`https://mcp.commonswarm.com${PROTECTED_RESOURCE_METADATA_PATH}`));
@@ -545,7 +564,7 @@ test("protected-resource metadata and the unauthenticated challenge name exact U
     resource: MCP_RESOURCE,
     authorization_servers: [MCP_ISSUER],
     bearer_methods_supported: ["header"],
-    scopes_supported: ["mcp"],
+    scopes_supported: ["mcp", "offline_access"],
     resource_name: "CommonSwarm hosted MCP",
   });
   const denied = await serve(new Request(MCP_RESOURCE, {

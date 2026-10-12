@@ -1074,7 +1074,7 @@ status,h,b=request('api.commonswarm.com','/.well-known/oauth-protected-resource/
 status,h,b=request('mcp.commonswarm.com','/.well-known/oauth-authorization-server',headers=discovery_headers); assert status==200
 assert json.loads(b)['issuer']=='https://mcp.commonswarm.com'
 status,h,b=request('mcp.commonswarm.com','/.well-known/oauth-protected-resource/mcp',headers=discovery_headers); assert status==200
-assert json.loads(b)=={'resource':'https://mcp.commonswarm.com/mcp','authorization_servers':['https://mcp.commonswarm.com'],'bearer_methods_supported':['header'],'scopes_supported':['mcp'],'resource_name':'CommonSwarm hosted MCP'}
+assert json.loads(b)=={'resource':'https://mcp.commonswarm.com/mcp','authorization_servers':['https://mcp.commonswarm.com'],'bearer_methods_supported':['header'],'scopes_supported':['mcp','offline_access'],'resource_name':'CommonSwarm hosted MCP'}
 for meta in (False,True):
  params={'name':'cswarm_check','arguments':{}}
  if meta: params['_meta']={'progressToken':'edge-release-public-probe'}

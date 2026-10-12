@@ -57,7 +57,7 @@ that table. The table below records this revision's contract.
 `supabase/functions/_shared/hosted-seat-auth.ts:6`. Hosted MCP has no admin,
 file, brain/wiki, or dedicated task CRUD tools. Ordinary host file access is
 separate. The local stdio table has `file_put` and `brain_put` at
-`src/mcp/tools.ts:38`. Version `0.1.80` is current main, per `package.json:3`.
+`src/mcp/tools.ts:38`. Version `0.1.80` is the recorded baseline, per `package.json:3`.
 This is a transport and capability split, not an older-release split.
 
 ## What is live, built but undeployed, and planned
