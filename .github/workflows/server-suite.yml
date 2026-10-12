@@ -189,7 +189,11 @@ jobs:
           PGPASSWORD=$(supabase status -o json | python3 -c 'import json, sys; from urllib.parse import urlsplit, unquote; u = urlsplit(json.load(sys.stdin)["DB_URL"]); assert (u.hostname, u.port, u.username, u.path) == ("127.0.0.1", 54322, "postgres", "/postgres"); assert u.password; print(unquote(u.password))')
           export PGPASSWORD
           test "$(psql -X -v ON_ERROR_STOP=1 -At --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command "SELECT current_user, session_user, rolsuper FROM pg_roles WHERE rolname = current_user")" = 'supabase_admin|supabase_admin|t'
-          supabase migration up --db-url postgresql://supabase_admin@127.0.0.1:54322/postgres
+          # Box target_psql (migrate/lib.sh) and release_psql (RELEASE-TO-BOX.md)
+          # set no search_path: match the PG default "$user", public explicitly.
+          # Keep auth/swarm out so pg_get_viewdef retains auth.uid()/swarm.is_member().
+          # Scope PGOPTIONS to migration up; seeding/tests keep their normal paths.
+          PGOPTIONS='-c search_path="$user",public' supabase migration up --db-url postgresql://supabase_admin@127.0.0.1:54322/postgres
           # Box PG 17.6, HezLead read-only check 2026-10-12: postgres is a member of
           # swarm_admin, swarm_command, swarm_read, swarm_capability; each row has
           # admin_option=true, inherit_option=true, set_option=true. Match CI explicitly.
