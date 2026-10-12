@@ -1,4 +1,5 @@
-/** Home integration: wire facts become UI models here, never in DOM builders. */
+/** Map Home wire facts to UI models using shared copy formatting.
+ * Input: membership/overview facts; output: view models. DOM builders never interpret wire facts. */
 import { homeAgentState, type HomeAgentStatusInput } from "./agent-status";
 import { agentLabel, firstNames, initials, formatWhen, personTint } from "./home-names";
 import { foldIdentityName } from "./identity-label";
@@ -202,7 +203,6 @@ function homeAgent(people: HomePeople, id: string): AgentVM | undefined {
 function unnamedMember(): PersonVM {
   return { id: "", name: "Workspace member", firstName: "Workspace member", initials: "", you: false, role: "member" };
 }
-function quotedTitle(title: string): string { return `‘${title}’`; }
 function todoOpen(workspaceId: string, todoId: string): NeedsYouVM["primary"] {
   return { label: "Open", href: routeHref({ view: "todo", workspaceId, todoId }) };
 }
@@ -359,7 +359,7 @@ export function homeFileCount(rows: readonly { tombstonedAt: string | null }[]):
 import type { Actor, Todo, TodoSummary, Comment, Party, AgentQueue } from './home/contract';
 import type { TodoVM, ObjectCardVM, QueueRowVM } from './home-types';
 import type { AgentFoundVM } from './home-agent';
-import { ownershipLine, notYetTodoGate, notYetNoteGate, setTimeCopy } from './home-agent-copy';
+import { ownershipLine, notYetTodoGate, notYetNoteGate, setTimeCopy, quotedTitle } from './home-agent-copy';
 import { todoSubline } from './home-todo-copy';
 export interface HomeTodoContext { workspaceId: string; people: HomePeople; viewerId: string | null; editor: boolean; sample: boolean; now: number; details?: ReadonlyMap<string, Todo>; tagDelivers?: boolean }
 export function homeParty(party: Party | null, people: HomePeople): PersonVM | AgentVM | null {
