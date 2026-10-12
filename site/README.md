@@ -76,10 +76,10 @@ rm -rf dist && npm run build
 
 | Route        | What it is |
 |--------------|------------|
-| `/`          | Landing page. Positioning, an interactive demo that assembles a real `coswarm working-on` command as you type, the five-verb vocabulary, and the three-line setup. |
-| `/app`       | Dashboard **preview**. Roster, activity feed, "what changed", and a worked example of two agents reaching for the same file. Every row is sample data. |
+| `/`          | Landing page. Positioning, an interactive demo that assembles a real `cswarm working-on` command as you type, the five-verb vocabulary, and the three-line setup. |
+| `/app`       | Sign-up and the live workspace. Identity, messages, signals, and workspace data load from the configured API. |
 | `/download`  | Install page. The one-line installer, a per-platform breakdown, what the script does step by step, and other ways in. |
-| `/start`     | The workspace-creation flow: sign in → name the workspace → bring agents in. A complete front end; the submit path is a stub (see below). |
+| `/start`     | Compatibility handoff to `/app` for saved links and older sign-in returns. |
 
 ---
 
@@ -92,12 +92,12 @@ boundary — please keep it accurate if you change the site.
 
 - All four pages, all copy, all layout and responsive behaviour.
 - Copy-to-clipboard buttons (`navigator.clipboard`, with an `execCommand` fallback).
-- The landing demo builder — it composes a genuine `coswarm working-on …` invocation
+- The landing demo builder — it composes a genuine `cswarm working-on …` invocation
   from what you type and shows what the rest of the project would see. It runs
   entirely in the browser.
-- The `/app` preview-state toggle (Active / New / Loading) and the collision replay.
+- The `/app` sign-in, workspace creation, and live workspace views.
 - The `/download` platform tabs.
-- The `/start` stepper, its validation, and its keyboard and screen-reader behaviour.
+- The `/start` handoff to `/app`, preserving the incoming query and fragment.
 - The mobile navigation menu.
 - Every CLI command shown anywhere on the site.
 
@@ -124,20 +124,19 @@ The items below describe the former static prototype.
 - **`/app`** is not connected to any workspace. Every agent, signal and timestamp is
   invented, and a "Sample data" notice says so at the top of the page and on each panel.
 
-Never fake a success state here. A complete front end whose submit path is visibly a
-stub is the bar; a fake success is not.
+Success messages must describe completed work. The prototype items above are history,
+not the behavior of the current `/app` workspace.
 
-### Two placeholders that are deliberate
+### Current public origin and API configuration
 
-- **`<host>`** in the install commands. The public install host is not decided. The
-  page says so in as many words: the command will not resolve as written.
-- **`https://coswarm.invalid`** in `astro.config.mjs`, used for canonical URLs and OG
-  tags. `.invalid` is reserved by RFC 2606 and can never resolve.
+- `astro.config.mjs` uses `https://commonswarm.com` for canonical URLs and OG tags.
+- The public installer is `https://commonswarm.com/install.sh`.
+- The browser API client reads `PUBLIC_SUPABASE_URL` and `PUBLIC_SUPABASE_ANON_KEY`.
+  A build without those values renders the site and reports the missing API configuration
+  in `/app`; it does not load a sample workspace.
 
-  Do **not** substitute a plausible-sounding domain. `coswarm.dev` is a real, unrelated
-  shipping product whose `/install.sh` returns HTTP 200 — pointing the hero's copy
-  button at it would hand readers a command that root-installs a stranger's software.
-  Replace it only with a domain that has actually been registered.
+The former `coswarm.invalid` placeholder is no longer configured. `coswarm.dev` is an
+unrelated product and must not be used as a CommonSwarm install or API target.
 
 ---
 
