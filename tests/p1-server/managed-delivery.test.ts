@@ -22,6 +22,7 @@ import {
 } from "../../src/cloud/session-wire.js";
 import { awaitFunctionRunning } from "../support/edge-readiness.js";
 import { WAKE_STALE_MS } from "../../src/cloud/idle-poll.js";
+import { localClusterAdminUrl } from "../support/admin-schema-db.js";
 
 interface LocalEnvironment {
   API_URL: string;
@@ -32,6 +33,7 @@ interface LocalEnvironment {
 
 let local: LocalEnvironment;
 let sql: postgres.Sql;
+let releaseSql: postgres.Sql;
 let admin: SupabaseClient;
 let functionProcess: ReturnType<typeof spawn>;
 let functionLogs = "";
@@ -293,6 +295,7 @@ async function eligibleWakePathSignalIds(principalId: string): Promise<string[]>
 before(async () => {
   local = localEnvironment();
   sql = postgres(local.DB_URL, { prepare: false, max: 5 });
+  releaseSql = postgres(localClusterAdminUrl(local.DB_URL), { prepare: false, max: 1 });
   admin = createClient(local.API_URL, local.SERVICE_ROLE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
@@ -381,6 +384,7 @@ after(async () => {
     }
   }
   await sql?.end({ timeout: 5 });
+  await releaseSql?.end({ timeout: 5 });
   if (envDir) rmSync(envDir, { recursive: true, force: true });
 });
 
@@ -1305,7 +1309,8 @@ test("HM reviewed rollback and rollback catalog execute together transactionally
   assert.notEqual(sqlEnd, -1);
   const inverseSql = rollback.slice(sqlStart, sqlEnd);
 
-  await sql.begin(async (tx) => {
+  // Release proofs write the admin-owned ledger, as they do on the box.
+  await releaseSql.begin(async (tx) => {
     await tx.unsafe(inverseSql);
     const [proved] = await tx.unsafe<{ rollback_ok: boolean }[]>(rollbackCatalog);
     assert.equal(proved?.rollback_ok, true);

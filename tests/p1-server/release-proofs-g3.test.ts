@@ -89,7 +89,8 @@ test("G3 catalogs and reverse rollbacks execute through psql without changing th
   const runPsql = (remoteFile: string): string => {
     const result = spawnSync("docker", [
       "exec", container,
-      "psql", "-X", "-Atq", "-U", "postgres", "-d", "postgres",
+      // Catalog and rollback proofs use the box's release principal.
+      "psql", "-X", "-Atq", "-U", "supabase_admin", "-d", "postgres",
       "-v", "ON_ERROR_STOP=1", "--file", remoteFile,
     ], { encoding: "utf8", timeout: 30_000 });
     assert.ifError(result.error);

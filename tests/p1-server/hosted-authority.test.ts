@@ -10,7 +10,7 @@ import { after, before, test } from "node:test";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
 import { HOSTED_MCP_SEAT_LIMIT } from "../../src/protocol/hosted-authority.js";
-import { emptyApplicationSchema, migrationNames as adminMigrationNames, repoSql, versions as adminVersions } from "../support/admin-schema-db.js";
+import { emptyApplicationSchema, localClusterAdminUrl, migrationNames as adminMigrationNames, repoSql, versions as adminVersions } from "../support/admin-schema-db.js";
 import { releaseCatalogQuery } from "../support/release-catalog-query.js";
 
 const commandUrl = new URL("../../supabase/functions/command/index.ts", import.meta.url);
@@ -52,6 +52,7 @@ const rollbackCatalogUrl = new URL(
 );
 
 let sql: postgres.Sql;
+let releaseSql: postgres.Sql;
 let local: LocalEnvironment;
 let admin: SupabaseClient;
 let harnessDir: string;
@@ -354,6 +355,7 @@ before(async () => {
   const target = new URL(local.DB_URL);
   assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(target.hostname));
   sql = postgres(local.DB_URL, { prepare: false, max: 4 });
+  releaseSql = postgres(localClusterAdminUrl(local.DB_URL), { prepare: false, max: 1 });
   admin = createClient(local.API_URL, local.SERVICE_ROLE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
@@ -364,6 +366,7 @@ before(async () => {
 
 after(async () => {
   await sql.end();
+  await releaseSql.end();
   rmSync(harnessDir, { recursive: true, force: true });
 });
 
@@ -601,7 +604,8 @@ test("catalog rollback preserves every receipt kind and reapply is search-path i
   const rollbackCatalogQuery = releaseCatalogQuery(rollbackCatalog, 'rollback_ok');
   const emptySchema = emptyApplicationSchema();
   const rollbackDrill = new Error("ROLLBACK_HM_PROOF_DRILL");
-  await sql.begin(async (tx) => {
+  // The box replays release SQL as supabase_admin; receipt probes retain postgres.
+  await releaseSql.begin(async (tx) => {
     // M1 adds a real FK to hosted grants. Reverse newer, data-free schema first
     // in an empty DDL snapshot; retain every original grant/artifact/receipt.
     await tx.unsafe(emptySchema);
@@ -615,6 +619,7 @@ test("catalog rollback preserves every receipt kind and reapply is search-path i
     assert.equal(reclaimInverse?.rollback_ok, true, "010 inverse before HM rollback");
     const [positive] = await tx.unsafe<{ catalog_ok: boolean }[]>(catalogQuery);
     assert.equal(positive?.catalog_ok, true, "positive control: applied catalog");
+    await tx.unsafe("SET LOCAL ROLE postgres");
     // Real durable receipts must survive the inverse, including both HM kinds.
     // Random identifiers keep the drill independent of earlier server tests.
     const commandId = randomUUID();
@@ -634,11 +639,13 @@ test("catalog rollback preserves every receipt kind and reapply is search-path i
       WHERE command_id = ${commandId} ORDER BY principal_kind
     `;
     assert.equal(receiptsBefore.length, 5);
+    await tx.unsafe("RESET ROLE");
     for (const { rollback } of [...migrations].reverse()) {
       await tx.unsafe(rollback);
     }
     const [rolledBack] = await tx.unsafe<{ rollback_ok: boolean }[]>(rollbackCatalogQuery);
     assert.equal(rolledBack?.rollback_ok, true, "rollback catalog accepts exactly the retained kinds");
+    await tx.unsafe("SET LOCAL ROLE postgres");
     const receiptsAfter = await tx`
       SELECT * FROM swarm.idempotency_keys
       WHERE command_id = ${commandId} ORDER BY principal_kind
@@ -658,6 +665,7 @@ test("catalog rollback preserves every receipt kind and reapply is search-path i
       error.code === "23514" &&
       error.constraint_name === "idempotency_keys_principal_kind_check",
     "rollback still rejects an unknown kind through the real check constraint");
+    await tx.unsafe("RESET ROLE");
     const [before] = await tx.unsafe<{ catalog_ok: boolean }[]>(catalogQuery);
     assert.equal(before?.catalog_ok, false, "missing objects return false without throwing");
     for (const { migration } of migrations) {
@@ -1032,7 +1040,7 @@ test("010 catalog and empty inverse prove the exact live-name schema", async () 
   assert.equal(forward?.catalog_ok, true);
   const emptySchema = emptyApplicationSchema();
   const drill = new Error("D3_EMPTY_ROLLBACK");
-  await sql.begin(async tx => {
+  await releaseSql.begin(async tx => {
     await tx.unsafe(emptySchema);
     await tx.unsafe(reclaimRollback());
     const [inverse] = await tx.unsafe<{ rollback_ok: boolean }[]>(reclaimRollbackCatalog());
