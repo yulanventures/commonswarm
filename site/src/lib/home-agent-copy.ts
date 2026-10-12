@@ -2,7 +2,7 @@ import { HOSTED_LISTS_NOTE } from "./hosted-lists-note";
 import type { AgentStateVM, QueueRowVM } from "./home-types";
 
 /** Typographic apostrophe used in every possessive on this view. */
-export const APOSTROPHE = "\u2019";
+const APOSTROPHE = "\u2019";
 const LSQUOTE = "\u2018";
 const RSQUOTE = "\u2019";
 
@@ -39,7 +39,7 @@ const NO_STEER: QueueRowVM["may"] = {
   up: false, down: false, startNow: false, notYet: false, release: false,
 };
 
-export function possessive(name: string): string {
+function possessive(name: string): string {
   return `${name}${APOSTROPHE}s`;
 }
 
