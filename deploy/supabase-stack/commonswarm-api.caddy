@@ -1,3 +1,5 @@
+# Credential-safe access logs: request/response metadata in; status and harmless headers out.
+# Invariant: queries, credential headers, and redirect Locations never reach the log.
 # Live API site file. Auth, REST, Storage, Realtime, and functions go to the
 # containers on this server. There is no fallback to another host.
 api.commonswarm.com {
@@ -22,6 +24,7 @@ api.commonswarm.com {
 			request>headers>Proxy-Authorization delete
 			request>headers>Apikey delete
 			request>headers>apikey delete
+			resp_headers>Location delete
 			resp_headers>Authorization delete
 			resp_headers>DPoP delete
 			resp_headers>Dpop delete

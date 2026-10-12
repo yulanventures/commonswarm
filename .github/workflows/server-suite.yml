@@ -81,6 +81,29 @@ jobs:
         with:
           deno-version: v2.x
       - run: npm ci
+      # P0: measured official Caddy release + publisher checksum in; verified binary out.
+      # Invariant: both Caddy gates fail closed; no latest/custom-build fallback.
+      - name: Install box-matched Caddy for server and unit
+        if: matrix.suite == 'server' || matrix.suite == 'unit'
+        env:
+          # Official publisher SHA-512 independently confirmed by HezLead on 2026-10-12.
+          CADDY_ARCHIVE_SHA512: 8220d1f013b6f27510247b2360c9e0ca9f018feebd82515f07635318b34ff9777ccc8fd0b6e6f2486ce3a33fe389fbb7db12d05baa474f4587509fb4f5ebf1c9
+        run: |
+          set -euo pipefail
+          caddy_stage=$(mktemp -d "$RUNNER_TEMP/caddy.XXXXXX")
+          archive=caddy_2.11.4_linux_amd64.tar.gz
+          publisher=https://github.com/caddyserver/caddy/releases/download/v2.11.4
+          curl --fail --silent --show-error --location "$publisher/$archive" -o "$caddy_stage/$archive"
+          curl --fail --silent --show-error --location "$publisher/caddy_2.11.4_checksums.txt" -o "$caddy_stage/checksums.txt"
+          publisher_sha=$(awk -v name="$archive" '$2 == name { print $1; count++ } END { if (count != 1) exit 1 }' "$caddy_stage/checksums.txt")
+          [[ "$publisher_sha" =~ ^[0-9a-f]{128}$ ]]
+          printf '%s  %s\n' "$publisher_sha" "$caddy_stage/$archive" | sha512sum --check --status
+          echo "Caddy v2.11.4 linux amd64 publisher/archive SHA-512: $publisher_sha"
+          test "$publisher_sha" = "$CADDY_ARCHIVE_SHA512"
+          tar -xzf "$caddy_stage/$archive" -C "$caddy_stage" caddy
+          test "$("$caddy_stage/caddy" version)" = 'v2.11.4 h1:XKxkMTgNSizEvKG6QHue6cAsFOteU2qA61w2tKkCWi0='
+          sudo install -m 0755 "$caddy_stage/caddy" /usr/local/bin/caddy
+          echo C1_CADDY_BINARY=/usr/local/bin/caddy >> "$GITHUB_ENV"
       - name: Build the MCP auth management bundle
         # The generated bundle is gitignored; any suite that can reach services/mcp-auth needs it first.
         if: matrix.suite == 'server' || matrix.suite == 'p1-cli' || matrix.suite == 'unit'

@@ -1,3 +1,5 @@
+# Credential-safe access logs: request/response metadata in; status and harmless headers out.
+# Invariant: queries, credential headers, and redirect Locations never reach the log.
 # Hosted MCP site. Lane 6 activates only the reviewed OAuth service. The MCP
 # resource and protected-resource metadata stay dark until the edge function
 # ships in a later lane.
@@ -157,6 +159,7 @@ mcp.commonswarm.com {
 			request>headers>Proxy-Authorization delete
 			request>headers>Apikey delete
 			request>headers>apikey delete
+			resp_headers>Location delete
 			resp_headers>Authorization delete
 			resp_headers>DPoP delete
 			resp_headers>Dpop delete
