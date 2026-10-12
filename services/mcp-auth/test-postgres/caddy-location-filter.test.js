@@ -1,5 +1,6 @@
 /** Exercise all five production log filters with dummy redirects; output pass/fail only.
  * Real Caddy supplies JSON logs; request credentials must be absent from every record.
+ * Request and redirect credentials are distinct; each phase uses fresh connections.
  * Removing each Location rule must expose dummy credentials;
  * live/maintenance pair reloads must preserve filtering. Missing Caddy fails in CI. */
 import assert from 'node:assert/strict';
@@ -18,7 +19,7 @@ const redirect = 'https://client.invalid/callback?code=DUMMYCODE&state=DUMMYSTAT
 const dummies = ['DUMMYCODE', 'DUMMYSTATE', 'DUMMYACCESS', 'DUMMYREFRESH'];
 // Go's canonical header names are the keys emitted by Caddy's request logger.
 const requestCredentials = {
-  Authorization: 'Bearer DUMMYACCESS', Cookie: 'refresh_token=DUMMYREFRESH',
+  Authorization: 'Bearer DUMMYREQUESTACCESS', Cookie: 'refresh_token=DUMMYREQUESTREFRESH',
   Apikey: 'DUMMYAPIKEY', Dpop: 'DUMMYDPOP',
   'X-Cswarm-Session-Key': 'DUMMYSESSIONKEY', 'X-Cswarm-Csrf': 'DUMMYCSRF',
   'X-Cswarm-Hosted-Capability': 'DUMMYHOSTEDCAPABILITY',
@@ -139,7 +140,8 @@ for (const control of [false, true]) test(control
           // Dummy credentials only; manual redirects retain Location on the wire.
           const response = await fetch(`http://127.0.0.1:${ports[portIndex]}/auth/v1/verify?code=DUMMYCODE`, {
             redirect: 'manual', signal: AbortSignal.timeout(5000),
-            headers: { ...requestCredentials, 'X-Fixture-Harmless': 'retained' },
+            // Caddy reloads close idle sockets; do not reuse a pre-swap fetch connection.
+            headers: { ...requestCredentials, 'X-Fixture-Harmless': 'retained', Connection: 'close' },
           });
           assert.equal(response.status, 303);
           assert.ok(response.headers.get('location') === redirect, 'wire redirect is preserved');
