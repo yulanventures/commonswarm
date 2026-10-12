@@ -99,7 +99,7 @@ test("CI only: box-matched global logout invalidates all linked AS sessions", {
     const resolved = `${image.split(":v")[0]}@${manifest.digest}`;
     docker(["pull", resolved]);
     writeFileSync(envFile, ["GOTRUE_API_HOST=0.0.0.0", "GOTRUE_API_PORT=18091", "GOTRUE_DB_DRIVER=postgres",
-      `GOTRUE_DB_DATABASE_URL=${isolated.url}`, `API_EXTERNAL_URL=${baseUrl}`, `GOTRUE_JWT_ISSUER=${baseUrl}`,
+      `GOTRUE_DB_DATABASE_URL=${isolated.url}`, `API_EXTERNAL_URL=${baseUrl}`,
       "GOTRUE_SITE_URL=http://localhost", "GOTRUE_JWT_SECRET=DUMMYJWTSECRET-FOR-DISPOSABLE-CI-ONLY",
       "GOTRUE_JWT_AUD=authenticated", "GOTRUE_EXTERNAL_EMAIL_ENABLED=true", "GOTRUE_MAILER_AUTOCONFIRM=true",
       "GOTRUE_DISABLE_SIGNUP=false", "GOTRUE_SECURITY_REFRESH_TOKEN_ROTATION_ENABLED=true", "GOTRUE_LOG_LEVEL=error", ""].join("\n"), { mode: 0o600 });
@@ -119,6 +119,11 @@ test("CI only: box-matched global logout invalidates all linked AS sessions", {
       users.push({ id: signup.user?.id ?? signup.id, email });
     }
     const tokens = [await login(users[0].email), await login(users[0].email), await login(users[1].email)];
+    // The box sets only API_EXTERNAL_URL; prove the matching GoTrue issuer default.
+    for (const { access_token } of tokens) {
+      const payload = JSON.parse(Buffer.from(access_token.split(".")[1], "base64url").toString("utf8"));
+      assert.equal(payload.iss, baseUrl, "GoTrue's default issuer must equal API_EXTERNAL_URL");
+    }
     const client = accessToken => createGoTrueClient({ baseUrl, provider: "github", pool: runtime,
       fetch: (url, options) => new URL(url).pathname.endsWith("/token")
         ? Promise.resolve(Response.json({ access_token: accessToken })) : wireFetch(url, options) });

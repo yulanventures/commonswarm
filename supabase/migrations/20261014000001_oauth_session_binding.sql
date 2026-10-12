@@ -1,3 +1,4 @@
+-- Do not release P1 alone: sign-in fails closed until P8 passes runtimePool and P2 stores gotrue_session_id.
 -- Bind AS logins to GoTrue sessions and original authentication evidence.
 -- Inputs: verified session/user UUIDs and auth session removal events.
 -- Outputs: narrow live status and durable AS invalidation; never expose tokens.
@@ -8,8 +9,21 @@ UPDATE commonswarm_oauth.browser_sessions SET invalidated_at = statement_timesta
 CREATE INDEX browser_sessions_gotrue_idx
  ON commonswarm_oauth.browser_sessions(gotrue_session_id) WHERE gotrue_session_id IS NOT NULL;
 
-CREATE ROLE commonswarm_oauth_session_guard NOLOGIN NOINHERIT;
+-- Cluster roles survive database resets; follow 20260928000003_hm_oauth_store.sql.
+DO $role$
+BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'commonswarm_oauth_session_guard') THEN
+  SET LOCAL createrole_self_grant = '';
+  CREATE ROLE commonswarm_oauth_session_guard NOLOGIN NOINHERIT;
+ END IF;
+ -- Follow 20260723000001_p1_schema.sql:16 for non-superuser owner changes.
+ IF NOT (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user) THEN
+  EXECUTE format('GRANT commonswarm_oauth_session_guard TO %I WITH INHERIT TRUE, SET TRUE', current_user);
+ END IF;
+END
+$role$;
 GRANT USAGE ON SCHEMA auth, commonswarm_oauth TO commonswarm_oauth_session_guard;
+-- ALTER FUNCTION OWNER requires the new owner to have CREATE in its schema.
 GRANT CREATE ON SCHEMA commonswarm_oauth TO commonswarm_oauth_session_guard;
 GRANT SELECT (id, user_id, not_after) ON auth.sessions TO commonswarm_oauth_session_guard;
 GRANT SELECT (session_id, created_at, authentication_method) ON auth.mfa_amr_claims TO commonswarm_oauth_session_guard;
@@ -20,7 +34,7 @@ CREATE POLICY oauth_session_guard_read ON auth.users
  FOR SELECT TO commonswarm_oauth_session_guard USING (true);
 CREATE POLICY oauth_session_guard_read ON auth.mfa_amr_claims
  FOR SELECT TO commonswarm_oauth_session_guard USING (true);
-GRANT SELECT (gotrue_session_id, invalidated_at), UPDATE (invalidated_at)
+GRANT SELECT (gotrue_session_id, user_id, invalidated_at), UPDATE (invalidated_at)
  ON commonswarm_oauth.browser_sessions TO commonswarm_oauth_session_guard;
 CREATE POLICY oauth_guard_revoke ON commonswarm_oauth.browser_sessions
  FOR UPDATE TO commonswarm_oauth_session_guard USING (true) WITH CHECK (true);
@@ -49,7 +63,7 @@ CREATE FUNCTION commonswarm_oauth.invalidate_gotrue_session()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 BEGIN
  UPDATE commonswarm_oauth.browser_sessions SET invalidated_at = statement_timestamp()
- WHERE gotrue_session_id = OLD.id AND invalidated_at IS NULL;
+ WHERE gotrue_session_id = OLD.id AND user_id = OLD.user_id AND invalidated_at IS NULL;
  RETURN NULL;
 END
 $$;
@@ -59,3 +73,14 @@ REVOKE ALL ON FUNCTION commonswarm_oauth.invalidate_gotrue_session() FROM PUBLIC
 CREATE TRIGGER commonswarm_oauth_session_revocation
  AFTER DELETE ON auth.sessions
  FOR EACH ROW EXECUTE FUNCTION commonswarm_oauth.invalidate_gotrue_session();
+
+-- Restore the creator's ADMIN-only membership (hm_oauth_store.sql:48-95).
+-- Keeping ADMIN permits another database in this cluster to apply the migration.
+DO $role$
+BEGIN
+ IF NOT (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user) THEN
+  EXECUTE format('REVOKE INHERIT OPTION FOR commonswarm_oauth_session_guard FROM %I', current_user);
+  EXECUTE format('REVOKE SET OPTION FOR commonswarm_oauth_session_guard FROM %I', current_user);
+ END IF;
+END
+$role$;

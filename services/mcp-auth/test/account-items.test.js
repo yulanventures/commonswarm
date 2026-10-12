@@ -26,6 +26,11 @@ function response() {
 }
 
 function harness({ providers = ["google", "github"], authenticated = false } = {}) {
+  // Dummy verified JWT/live-row inputs let callback tests reach provider binding.
+  const sessionId = "30000000-0000-4000-8000-000000000001", now = Math.floor(Date.now() / 1000);
+  const jwt = [Buffer.from('{"alg":"HS256"}').toString("base64url"), Buffer.from(JSON.stringify({
+    iss: "https://api.commonswarm.com/auth/v1", aud: "authenticated", sub: USER, session_id: sessionId, exp: now + 3600,
+  })).toString("base64url"), "DUMMYSIGNATURE"].join(".");
   const session = { user_id: authenticated ? USER : null, authenticated_at: authenticated ? new Date().toISOString() : null,
     user_email: "current@example.test", user_display_name: "Human" };
   const binding = { user_id: session.user_id, selected_workspace_ids: [], selection_version: 0 };
@@ -49,8 +54,10 @@ function harness({ providers = ["google", "github"], authenticated = false } = {
     rotateSession: async () => "rotated-session-long-enough",
   };
   const gotrue = createGoTrueClient({ baseUrl: "https://api.commonswarm.com/auth/v1", anonKey: "test-public-key", providers,
+    pool: { query: async (_sql, [sid, uid]) => ({ rows: sid === sessionId && uid === USER
+      ? [{ session_id: sid, user_id: uid, authenticated_at: new Date((now - 60) * 1000) }] : [] }) },
     fetch: async (url) => String(url).includes("/token")
-      ? Response.json({ access_token: "fixture-access", expires_in: 3600 })
+      ? Response.json({ access_token: jwt, expires_in: 3600 })
       : Response.json({ id: USER, email: "current@example.test", email_confirmed_at: "2026-10-01T00:00:00Z",
         app_metadata: { provider: "unknown-value" }, user_metadata: { display_name: "Human" } }),
   });

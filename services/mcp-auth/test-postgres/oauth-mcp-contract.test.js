@@ -133,7 +133,7 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
     const directory = stdout.trim();
     assert.ok(/^\/private\/tmp\/anvil-secret\.[A-Za-z0-9]+$/u.test(directory));
     await chmod(directory, 0o700);
-    const sessions = new Set(), clients = new Set();
+    const sessions = new Set(), clients = new Set(), gotrueSessionId = randomUUID();
     let running, edge, metadataServer, gotrue;
     let runtimePasswordConfigured = false;
     try {
@@ -158,6 +158,7 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         await pool.query("INSERT INTO swarm.streams (stream_id, workspace_id, kind) VALUES ($1, $2, 'workspace')", [randomUUID(), workspace]);
       }
       const signins = new Map();
+      let loginToken;
       gotrue = createServer(async (request, response) => {
         const url = new URL(request.url, 'http://fixture');
         if (request.method === 'GET' && url.pathname === '/settings') {
@@ -175,13 +176,23 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
           const valid = signins.get(body.auth_code) === createHash('sha256').update(body.code_verifier).digest('base64url');
           signins.delete(body.auth_code);
           response.writeHead(valid ? 200 : 400, { 'content-type': 'application/json' });
-          response.end(JSON.stringify(valid ? { access_token: 'synthetic-login', expires_in: 3600 } : { error: 'invalid_grant' }));
-        } else if (request.method === 'GET' && url.pathname === '/user' && request.headers.authorization === 'Bearer synthetic-login') {
+          response.end(JSON.stringify(valid ? { access_token: loginToken, expires_in: 3600 } : { error: 'invalid_grant' }));
+        } else if (request.method === 'GET' && url.pathname === '/user' && request.headers.authorization === `Bearer ${loginToken}`) {
           response.writeHead(200, { 'content-type': 'application/json' });
           response.end(JSON.stringify({ id: owner, email: `${owner}@example.test`, user_metadata: { display_name: 'OAuth owner' } }));
         } else { response.writeHead(404); response.end(); }
       });
       const gotrueUrl = await listen(gotrue);
+      // Dummy token plus real auth rows exercise P1's narrow live-session check.
+      // Server wiring remains P8's responsibility; do not bypass that check here.
+      const now = Math.floor(Date.now() / 1000);
+      loginToken = [Buffer.from('{"alg":"HS256"}').toString('base64url'), Buffer.from(JSON.stringify({
+        iss: gotrueUrl, aud: 'authenticated', sub: owner, session_id: gotrueSessionId, exp: now + 3600,
+      })).toString('base64url'), 'DUMMYSIGNATURE'].join('.');
+      await pool.query(`INSERT INTO auth.sessions(id,user_id,created_at,updated_at) VALUES($1,$2,now(),now())`,
+        [gotrueSessionId, owner]);
+      await pool.query(`INSERT INTO auth.mfa_amr_claims(id,session_id,created_at,updated_at,authentication_method)
+        VALUES($1,$2,to_timestamp($3),to_timestamp($3),'oauth')`, [randomUUID(), gotrueSessionId, now - 60]);
       const metadata = new Map();
       let metadataReads = 0;
       await exec('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
@@ -463,6 +474,7 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
           await pool.query('DELETE FROM commonswarm_oauth.interactions WHERE client_id = $1', [clientId]);
         }
         for (const session of sessions) await pool.query('DELETE FROM commonswarm_oauth.browser_sessions WHERE session_hash = $1', [hashOpaque(session)]);
+        await pool.query('DELETE FROM auth.sessions WHERE id = $1', [gotrueSessionId]);
         assert.ok(stopped.every(result => result.status === 'fulfilled'), 'all task-owned fixture services stopped');
       } finally {
         try {
