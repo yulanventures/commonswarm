@@ -1,19 +1,43 @@
 // Navigation-only finish HTML for P8/P9b: renderFinishPage takes a trusted display
 // model { interactionUid, clientDisplay (consent shape), identity (displayName/email),
-// workspaceNames OR workspaceCount, homeWorkspaceName, deadline (epoch ms) }.
+// workspaceNames OR workspaceCount, homeWorkspaceName, deadline (epoch ms), nonce }.
 // renderFinishExpiredPage takes { clientDisplay }; both return HTML strings.
-// Routes apply FINISH_SECURITY_HEADERS to pages and 303s and serve FINISH_TIMER_PATH.
+// Routes createFinishNonce() per response, pass it to renderFinishPage, and apply
+// finishSecurityHeaders(nonce) to BOTH HTML responses and 303s; serve FINISH_TIMER_PATH.
+// createFinishNonce returns base64url text; finishSecurityHeaders returns frozen headers.
+// Nonces must encode at least 16 random bytes; only the timer script gets the nonce.
 // No codes/callbacks are inputs; only UID-derived fixed paths, same tab, no storage.
 // The server owns binding and expiry; pausing never extends its deadline.
+import { randomBytes } from "node:crypto";
 import { BRAND_MARK, CONSENT_STYLES, escapeHtml, renderClientIdentity } from "./interaction-page.js";
 
 export const FINISH_TIMER_PATH = "/interaction/finish-timer.js";
-export const FINISH_SECURITY_HEADERS = Object.freeze({
-  "cache-control": "no-store",
-  "referrer-policy": "no-referrer",
-  "content-security-policy": "default-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'",
-  "x-content-type-options": "nosniff",
-});
+
+export function createFinishNonce() {
+  return randomBytes(16).toString("base64url");
+}
+
+function validateFinishNonce(nonce) {
+  if (typeof nonce !== "string" || !/^(?:[A-Za-z0-9+/]+|[A-Za-z0-9_-]+)={0,2}$/u.test(nonce)) {
+    throw new TypeError("invalid finish nonce");
+  }
+  const base64 = nonce.replaceAll("-", "+").replaceAll("_", "/");
+  const bytes = Buffer.from(base64, "base64");
+  const encoded = bytes.toString("base64");
+  if (bytes.length < 16 || (base64 !== encoded && base64 !== encoded.replace(/=+$/u, ""))) {
+    throw new TypeError("invalid finish nonce");
+  }
+}
+
+export function finishSecurityHeaders(nonce) {
+  validateFinishNonce(nonce);
+  return Object.freeze({
+    "cache-control": "no-store",
+    "referrer-policy": "no-referrer",
+    "content-security-policy": `default-src 'none'; script-src 'nonce-${nonce}'; script-src-attr 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'`,
+    "x-content-type-options": "nosniff",
+  });
+}
 
 export function finishPaths(interactionUid) {
   if (typeof interactionUid !== "string" || !/^[A-Za-z0-9_-]+$/u.test(interactionUid)) {
@@ -44,7 +68,8 @@ function shell({ clientDisplay, title, content, script = "" }) {
 <div class="app-facts">${client.facts}</div>${client.warning}</div>${content}</div></main></body></html>`;
 }
 
-export function renderFinishPage({ interactionUid, clientDisplay, identity, workspaceNames = [], workspaceCount, homeWorkspaceName, deadline }) {
+export function renderFinishPage({ interactionUid, clientDisplay, identity, workspaceNames = [], workspaceCount, homeWorkspaceName, deadline, nonce }) {
+  validateFinishNonce(nonce);
   const paths = finishPaths(interactionUid);
   if (!Number.isSafeInteger(deadline) || deadline <= 0 || !homeWorkspaceName ||
       (!workspaceNames.length && (!Number.isSafeInteger(workspaceCount) || workspaceCount < 1))) {
@@ -55,7 +80,7 @@ export function renderFinishPage({ interactionUid, clientDisplay, identity, work
   const email = identity.displayName && identity.email && identity.displayName !== identity.email ? ` (${escapeHtml(identity.email)})` : "";
   const workspaces = workspaceNames.length ? workspaceNames.map(escapeHtml).join(", ")
     : `${workspaceCount} workspace${workspaceCount === 1 ? "" : "s"}`;
-  return shell({ clientDisplay, title: "Connected", script: `<script src="${FINISH_TIMER_PATH}" defer></script>`, content: `
+  return shell({ clientDisplay, title: "Connected", script: `<script src="${FINISH_TIMER_PATH}" nonce="${nonce}" defer></script>`, content: `
 <section id="finish-page" data-connected-path="${paths.connectedPath}" data-finish-path="${paths.finishPath}" data-deadline="${deadline}" data-remaining-ms="${Math.max(0, deadline - Date.now())}" data-expiry-text="${escapeHtml(expiryText(clientDisplay))}" aria-live="polite" aria-atomic="true" tabindex="-1">
 <h1 id="finish-title">Connected</h1><p id="finish-status" class="lede">${client} is connected to ${workspaces} as ${name}${email}. You can return to ${client}.</p>
 <p>Home workspace: <strong>${escapeHtml(homeWorkspaceName)}</strong></p>
