@@ -804,6 +804,8 @@ test("live and maintenance Caddy files keep the box route frame", () => {
   );
 });
 
+// Access-log contract: Caddy sources in, missing or reordered redactions out.
+// Request secrets and response Locations have separate required inventories.
 const ACCESS_LOG_HEADERS = [
   "Authorization",
   "DPoP",
@@ -816,6 +818,16 @@ const ACCESS_LOG_HEADERS = [
   "Apikey",
   "apikey",
 ] as const;
+const ACCESS_LOG_REQUEST_HEADERS = [
+  ...ACCESS_LOG_HEADERS,
+  "X-Cswarm-Session-Key",
+  "X-Cswarm-Csrf",
+  "X-Cswarm-Hosted-Capability",
+  "X-Commonswarm-Hosted-Capability",
+  "X-Cswarm-Key",
+  "X-Phoenix-Authtoken",
+] as const;
+const ACCESS_LOG_RESPONSE_HEADERS = ["Location", ...ACCESS_LOG_HEADERS] as const;
 
 function accessLogProblems(source: string, fileName: string): string[] {
   const errors: string[] = [];
@@ -829,8 +841,11 @@ function accessLogProblems(source: string, fileName: string): string[] {
   if (!source.includes('request>uri regexp "\\?.*$" ""')) errors.push("access log query removal");
   if (!source.includes("wrap json")) errors.push("access log JSON");
   if (source.includes("output discard")) errors.push("access log discarded");
-  for (const location of ["request>headers", "resp_headers"]) {
-    for (const header of ACCESS_LOG_HEADERS) {
+  for (const [location, headers] of [
+    ["request>headers", ACCESS_LOG_REQUEST_HEADERS],
+    ["resp_headers", ACCESS_LOG_RESPONSE_HEADERS],
+  ] as const) {
+    for (const header of headers) {
       if (!source.includes(`${location}>${header} delete`)) {
         errors.push(`access log exposes ${location}>${header}`);
       }
@@ -838,7 +853,7 @@ function accessLogProblems(source: string, fileName: string): string[] {
     const actual = source.split("\n").filter((line) =>
       line.trim().startsWith(`${location}>`) && line.trim().endsWith(" delete")
     );
-    const expected = ACCESS_LOG_HEADERS.map((header) => `\t\t\t${location}>${header} delete`);
+    const expected = headers.map((header) => `\t\t\t${location}>${header} delete`);
     if (JSON.stringify(actual) !== JSON.stringify(expected)) {
       errors.push(`access log ${location} exact redaction list`);
     }
@@ -859,6 +874,16 @@ test("API, maintenance, and MCP access logs are bounded JSON without credentials
   ] as const;
   for (const [name, source, fileName] of sites) {
     assert.deepEqual(accessLogProblems(source, fileName), [], name);
+    for (const [location, headers] of [
+      ["request>headers", ACCESS_LOG_REQUEST_HEADERS],
+      ["resp_headers", ACCESS_LOG_RESPONSE_HEADERS],
+    ] as const) {
+      for (const header of headers) {
+        const rule = `${location}>${header} delete`;
+        assert.ok(accessLogProblems(source.replace(rule, ""), fileName)
+          .includes(`access log exposes ${location}>${header}`), `${name}: missing ${rule}`);
+      }
+    }
   }
 
   assert.match(

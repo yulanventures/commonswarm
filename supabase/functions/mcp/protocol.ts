@@ -1,4 +1,5 @@
 import type { VerifiedMcpToken } from "./auth.ts";
+import { MCP_CONNECTION_SCOPES } from "../_shared/mcp-connection-scopes.js";
 // @ts-ignore TS5097: Deno requires the source extension; Node tests use tsx.
 import { McpTokenError } from "./auth.ts";
 // @ts-ignore TS5097: the Deno edge graph requires the real .ts path.
@@ -204,7 +205,7 @@ export function protectedResourceMetadata(issuer: string, resource: string) {
     resource,
     authorization_servers: [issuer],
     bearer_methods_supported: ["header"],
-    scopes_supported: ["mcp"],
+    scopes_supported: [...MCP_CONNECTION_SCOPES],
     resource_name: "CommonSwarm hosted MCP",
   };
 }
@@ -379,7 +380,7 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
           };
         }
       } else {
-        return failed(404, rpcError(message.id, -32601, "Method not found"));
+        return failed(200, rpcError(message.id, -32601, "Method not found"));
       }
       const envelope = { jsonrpc: "2.0", id: message.id, result };
       const encoded = JSON.stringify(envelope);

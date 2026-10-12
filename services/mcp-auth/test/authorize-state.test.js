@@ -1,6 +1,7 @@
 import { verifiedSignIn } from "./fixtures/verified-sign-in.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { IncomingMessage, Server, ServerResponse } from "node:http";
 import { PassThrough, Readable } from "node:stream";
 import { test } from "node:test";
@@ -14,8 +15,9 @@ import { createConsentOrchestrator } from "../src/consent.js";
 import { InteractionStore } from "../src/interaction-store.js";
 import { createInteractionHandler } from "../src/interactions.js";
 import { createLogger } from "../src/logger.js";
-import { createMcpProvider, ISSUER, RESOURCE } from "../src/provider.js";
+import { createMcpProvider, ISSUER, RESOURCE, REFRESH_TOKEN_TTL_SECONDS } from "../src/provider.js";
 import { createHandler, createProductionFindAccount, startServer } from "../src/server.js";
+import { MCP_CONNECTION_SCOPES } from "../../../supabase/functions/_shared/mcp-connection-scopes.js";
 
 const CLIENT = "https://claude.ai/oauth/mcp-oauth-client-metadata";
 const REDIRECT = "https://claude.ai/api/mcp/auth_callback";
@@ -72,8 +74,8 @@ function exchange(url, cookies = new Map(), body = "", { bufferedBody = false } 
 }
 
 async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnabled = false,
-  registrationEnabled = true, registrationLimiter } = {}) {
-  let clientId = CLIENT;
+  registrationEnabled = true, registrationLimiter, clientId = CLIENT, clientMetadata,
+  providerGrantActive } = {}) {
   const logs = [];
   const queries = [];
   const commands = [];
@@ -170,11 +172,11 @@ async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnab
     },
   };
   const provider = await createMcpProvider({
-    nativeLoopbackEnabled, registrationEnabled, registrationLimiter,
+    nativeLoopbackEnabled, registrationEnabled, registrationLimiter, providerGrantActive,
     findAccount: findAccount ?? createProductionFindAccount(pool),
     fetch: async (url) => {
-      assert.equal(String(url), CLIENT);
-      return Response.json({
+      assert.equal(String(url), clientId);
+      return Response.json(clientMetadata ?? {
         client_id: CLIENT, client_name: "Claude", client_uri: "https://claude.ai",
         grant_types: ["authorization_code", "refresh_token"], redirect_uris: [redirectUri],
         application_type: nativeLoopbackEnabled ? "native" : "web",
@@ -246,6 +248,121 @@ async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnab
   return { provider, pool, logs, queries, sessions, cookies, run, completedLogin, interactions, commands,
     setClient: (id) => { clientId = id; } };
 }
+
+// Public Codex CIMD: https://chatgpt.com/oauth/codex/client.json
+// HTTP 200 fetched at 2026-10-12T17:20:16Z.
+// Codex rust-v0.162.0-alpha.17.2 uses AS discovery scopes when none are explicit
+// or configured (resolve_oauth_scopes, codex-rs/codex-mcp/src/mcp/auth.rs:158-190).
+// AuthorizationRequest sets scopes, client name and optional CIMD, but no prompt
+// (codex-rs/rmcp-client/src/oauth_client_registration.rs:112-126).
+test("Codex CIMD request issues and rotates refresh only for a refresh-capable client after consent", async (t) => {
+  const codexMetadata = JSON.parse(readFileSync(new URL("fixtures/codex-client.json", import.meta.url)));
+  const clientId = codexMetadata.client_id;
+  const redirectUri = "http://127.0.0.1:1455/callback";
+  for (const { name, refreshAllowed, mcpAllowed, revoked = false } of [
+    { name: "refresh issued and rotated", refreshAllowed: true, mcpAllowed: true },
+    { name: "no refresh_token grant, no refresh", refreshAllowed: false, mcpAllowed: true },
+    { name: "no mcp scope, no refresh", refreshAllowed: true, mcpAllowed: false },
+    { name: "revoked hosted grant, no tokens", refreshAllowed: true, mcpAllowed: true, revoked: true },
+  ]) {
+    await t.test(name, async (t) => {
+      t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+      let grantActive = true;
+      const clientMetadata = refreshAllowed ? codexMetadata : {
+        ...codexMetadata, grant_types: ["authorization_code"],
+      };
+      const h = await harness({ clientId, redirectUri, clientMetadata, nativeLoopbackEnabled: true,
+        providerGrantActive: async () => grantActive });
+      const discovery = JSON.parse((await h.run("/.well-known/oauth-authorization-server")).body);
+      for (const scope of MCP_CONNECTION_SCOPES) assert.ok(discovery.scopes_supported.includes(scope));
+      // The scope control is equivalent to an explicit --scopes override;
+      // the Codex default and the metadata-grant control use discovery verbatim.
+      const scopes = discovery.scopes_supported.filter(scope => mcpAllowed || scope !== "mcp");
+      const request = authorize(undefined, scopes.join(" "), redirectUri, clientId);
+      assert.equal(new URL(request, ISSUER).searchParams.has("prompt"), false);
+      const start = await h.run(request);
+      assert.equal(start.statusCode, 303);
+      const login = await h.run(start.getHeader("location"));
+      assert.equal(login.statusCode, 303);
+      const resumed = await h.run(new URL(login.getHeader("location")).pathname);
+      assert.equal(resumed.statusCode, 303);
+      const path = resumed.getHeader("location");
+      const page = await h.run(path);
+      assert.equal(page.statusCode, 200);
+      const form = new URLSearchParams({
+        csrf_token: /name="csrf_token" value="([^"]+)"/u.exec(page.body)[1],
+        selection_version: /name="selection_version" value="([^"]+)"/u.exec(page.body)[1],
+        workspace_ids: W1,
+      });
+      const consent = await h.run(`${path}/consent`, "POST", form.toString());
+      assert.equal(consent.statusCode, 303);
+      const finished = await h.run(new URL(consent.getHeader("location")).pathname);
+      const callback = new URL(finished.getHeader("location"));
+      assert.equal(callback.origin + callback.pathname, redirectUri);
+      assert.equal(callback.searchParams.get("error"), null);
+      assert.ok(callback.searchParams.get("code"));
+      const code = await h.provider.AuthorizationCode.find(callback.searchParams.get("code"));
+      const session = await h.provider.Session.findByUid(code.sessionUid);
+      assert.ok(session);
+      grantActive = !revoked;
+      const response = await h.run("/token", "POST", new URLSearchParams({
+        grant_type: "authorization_code", client_id: clientId, redirect_uri: redirectUri,
+        resource: RESOURCE, code: callback.searchParams.get("code"), code_verifier: VERIFIER,
+      }).toString());
+      if (revoked) {
+        assert.equal(response.statusCode, 400);
+        const refused = JSON.parse(response.body);
+        assert.equal(refused.error, "invalid_grant");
+        assert.equal(refused.refresh_token, undefined);
+        assert.equal(refused.access_token, undefined);
+        return;
+      }
+      assert.equal(response.statusCode, 200);
+      const tokens = JSON.parse(response.body);
+      assert.ok(tokens.access_token);
+      assert.equal(tokens.scope ?? "", mcpAllowed ? "mcp" : "");
+      assert.ok(tokens.id_token, "Codex requests the AS-advertised openid scope too");
+      if (!refreshAllowed || !mcpAllowed) {
+        assert.equal(tokens.refresh_token, undefined);
+        return;
+      }
+      assert.ok(tokens.refresh_token, "advertised scopes must enable refresh after consent");
+      const refresh = await h.run("/token", "POST", new URLSearchParams({
+        grant_type: "refresh_token", client_id: clientId,
+        refresh_token: tokens.refresh_token, resource: RESOURCE,
+      }).toString());
+      assert.equal(refresh.statusCode, 200);
+      const rotated = JSON.parse(refresh.body);
+      assert.ok(rotated.access_token);
+      assert.ok(rotated.refresh_token);
+      assert.notEqual(rotated.refresh_token, tokens.refresh_token);
+      assert.equal(rotated.scope, "mcp");
+      // Model a returning provider session whose remaining life is one hour
+      // shorter than a fresh grant/token. Use the real Session TTL/storage,
+      // not the separate one-hour InteractionStore browser cookie.
+      await session.save(REFRESH_TOKEN_TTL_SECONDS - 3600);
+      t.mock.timers.setTime(session.exp * 1000 + 1000);
+      assert.equal(await h.provider.Session.findByUid(session.uid), undefined);
+      h.sessions.clear(); // The separate authenticated browser session ended too.
+      const renew = (refreshToken) => h.run("/token", "POST", new URLSearchParams({
+        grant_type: "refresh_token", client_id: clientId, refresh_token: refreshToken, resource: RESOURCE,
+      }).toString());
+      const afterSession = await renew(rotated.refresh_token);
+      assert.equal(afterSession.statusCode, 200, "refresh must survive provider session expiry");
+      const renewed = JSON.parse(afterSession.body);
+      assert.ok(renewed.access_token);
+      assert.ok(renewed.refresh_token);
+      assert.notEqual(renewed.refresh_token, rotated.refresh_token);
+      grantActive = false;
+      const afterRevocation = await renew(renewed.refresh_token);
+      assert.equal(afterRevocation.statusCode, 400);
+      const refused = JSON.parse(afterRevocation.body);
+      assert.equal(refused.error, "invalid_grant");
+      assert.equal(refused.refresh_token, undefined);
+      assert.equal(refused.access_token, undefined);
+    });
+  }
+});
 
 // The owner boundary is GET /authorize with real provider policies and signed
 // cookies. Earlier returning-browser tests start at /interaction and cannot

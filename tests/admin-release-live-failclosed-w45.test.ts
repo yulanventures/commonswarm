@@ -1,4 +1,5 @@
-/** Execute complete marked W4/W5 blocks; remap only filesystem boundaries and external observations. */
+/** Execute marked W4/W5 blocks from reviewed inputs; emit boundary assertions.
+ * Remap filesystem/external observations only; real Caddy is mandatory in CI. */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -557,6 +558,7 @@ test('C1-5 Caddy imports: production relative and absolute forms validate candid
   const located = spawnSync('/bin/sh', ['-c', 'command -v caddy'], { encoding: 'utf8' });
   const candidate = process.env.C1_CADDY_BINARY || located.stdout.trim();
   if (!candidate) {
+    assert.notEqual(process.env.CI, 'true', 'CI requires Caddy; install the pinned binary or set C1_CADDY_BINARY');
     t.skip('Caddy binary is unavailable; install caddy or set C1_CADDY_BINARY');
     return;
   }

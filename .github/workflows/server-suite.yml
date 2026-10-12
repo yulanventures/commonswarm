@@ -81,6 +81,29 @@ jobs:
         with:
           deno-version: v2.x
       - run: npm ci
+      # P0: measured official Caddy release + publisher checksum in; verified binary out.
+      # Invariant: both Caddy gates fail closed; no latest/custom-build fallback.
+      - name: Install box-matched Caddy for server and unit
+        if: matrix.suite == 'server' || matrix.suite == 'unit'
+        env:
+          # Official publisher SHA-512 independently confirmed by HezLead on 2026-10-12.
+          CADDY_ARCHIVE_SHA512: 8220d1f013b6f27510247b2360c9e0ca9f018feebd82515f07635318b34ff9777ccc8fd0b6e6f2486ce3a33fe389fbb7db12d05baa474f4587509fb4f5ebf1c9
+        run: |
+          set -euo pipefail
+          caddy_stage=$(mktemp -d "$RUNNER_TEMP/caddy.XXXXXX")
+          archive=caddy_2.11.4_linux_amd64.tar.gz
+          publisher=https://github.com/caddyserver/caddy/releases/download/v2.11.4
+          curl --proto '=https' --proto-redir '=https' --fail --silent --show-error --location "$publisher/$archive" -o "$caddy_stage/$archive"
+          curl --proto '=https' --proto-redir '=https' --fail --silent --show-error --location "$publisher/caddy_2.11.4_checksums.txt" -o "$caddy_stage/checksums.txt"
+          publisher_sha=$(awk -v name="$archive" '$2 == name { print $1; count++ } END { if (count != 1) exit 1 }' "$caddy_stage/checksums.txt")
+          [[ "$publisher_sha" =~ ^[0-9a-f]{128}$ ]]
+          printf '%s  %s\n' "$publisher_sha" "$caddy_stage/$archive" | sha512sum --check --status
+          echo "Caddy v2.11.4 linux amd64 publisher/archive SHA-512: $publisher_sha"
+          test "$publisher_sha" = "$CADDY_ARCHIVE_SHA512"
+          tar -xzf "$caddy_stage/$archive" -C "$caddy_stage" caddy
+          test "$("$caddy_stage/caddy" version)" = 'v2.11.4 h1:XKxkMTgNSizEvKG6QHue6cAsFOteU2qA61w2tKkCWi0='
+          sudo install -m 0755 "$caddy_stage/caddy" /usr/local/bin/caddy
+          echo C1_CADDY_BINARY=/usr/local/bin/caddy >> "$GITHUB_ENV"
       - name: Build the MCP auth management bundle
         # The generated bundle is gitignored; any suite that can reach services/mcp-auth needs it first.
         if: matrix.suite == 'server' || matrix.suite == 'p1-cli' || matrix.suite == 'unit'
@@ -147,17 +170,56 @@ jobs:
             docker save --output "$EDGE_RUNTIME_CACHE" "$EDGE_RUNTIME_IMAGE"
           fi
       - name: Start the local stack
-        if: matrix.suite == 'server'
-        # A fresh volume has no swarm_read schema until db reset runs, so PostgREST fails its first health check.
+        if: matrix.suite == 'server' || matrix.suite == 'server-repeat'
+        # The box migrates as supabase_admin (deploy/supabase-stack/migrate/lib.sh).
+        # Migrating as postgres made GRANTs on auth.* silent no-ops in run 38302463345.
+        # CLI 2.118.0 env flags override root config values for this startup only.
+        # PostgREST may be unhealthy until the deferred migrations create swarm_read.
+        env:
+          SUPABASE_DB_MIGRATIONS_ENABLED: "false"
+          SUPABASE_DB_SEED_ENABLED: "false"
         run: |
-          supabase start --ignore-health-check
-          npm run db:reset
-      - name: Start the local stack for server repeat
-        if: matrix.suite == 'server-repeat'
-        # A fresh volume has no swarm_read schema until db reset runs, so PostgREST fails its first health check.
+          set -euo pipefail
+          supabase start --ignore-health-check >/dev/null
+      - name: Apply migrations as the box superuser
+        if: matrix.suite == 'server' || matrix.suite == 'server-repeat'
         run: |
-          supabase start --ignore-health-check
-          npm run db:reset
+          set -euo pipefail
+          # Read only the local fixture password; never put it in a URL or GITHUB_ENV.
+          PGPASSWORD=$(supabase status -o json | python3 -c 'import json, sys; from urllib.parse import urlsplit, unquote; u = urlsplit(json.load(sys.stdin)["DB_URL"]); assert (u.hostname, u.port, u.username, u.path) == ("127.0.0.1", 54322, "postgres", "/postgres"); assert u.password; print(unquote(u.password))')
+          export PGPASSWORD
+          test "$(psql -X -v ON_ERROR_STOP=1 -At --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command "SELECT current_user, session_user, rolsuper FROM pg_roles WHERE rolname = current_user")" = 'supabase_admin|supabase_admin|t'
+          # CI differs from the box here ON PURPOSE. The box migrates as supabase_admin
+          # under that role's default search_path ("$user", public, auth, extensions;
+          # see docs/evidence/2026-09-28-release-9fa4217da9f6/20260928000003-diagnostic-row.txt).
+          # 20260905000010 ran on hosted Supabase as postgres, whose path had no auth, so
+          # its pg_get_viewdef self-check expects "auth.uid()". With auth on the path the
+          # text prints "uid()" and the check raises (run 38311299225). Pin the PG default
+          # "$user", public so that check passes; the CLI 2.118.0 migrate path (node-postgres)
+          # honours PGOPTIONS, a Go-path CLI would not.
+          # Scope PGOPTIONS to migration up; seeding/tests keep their normal paths.
+          PGOPTIONS='-c search_path="$user",public' supabase migration up --db-url postgresql://supabase_admin@127.0.0.1:54322/postgres
+          # Box PG 17.6, HezLead read-only check 2026-10-12: postgres is a member of
+          # swarm_admin, swarm_command, swarm_read, swarm_capability; each row has
+          # admin_option=true, inherit_option=true, set_option=true. Match CI explicitly.
+          # PG16+ role options: https://www.postgresql.org/docs/17/sql-grant.html
+          psql -X -v ON_ERROR_STOP=1 --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command 'GRANT swarm_admin, swarm_command, swarm_read, swarm_capability TO postgres WITH ADMIN OPTION, INHERIT TRUE, SET TRUE'
+          # Seeding and application tests still use their normal roles.
+          psql -X -v ON_ERROR_STOP=1 --dbname postgresql://postgres@127.0.0.1:54322/postgres --file supabase/seed.sql
+          psql -X -v ON_ERROR_STOP=1 --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command "NOTIFY pgrst, 'reload schema'"
+      - name: Check migration ledger and normal connection role
+        if: matrix.suite == 'server' || matrix.suite == 'server-repeat'
+        run: |
+          set -euo pipefail
+          PGPASSWORD=$(supabase status -o json | python3 -c 'import json, sys; from urllib.parse import urlsplit, unquote; u = urlsplit(json.load(sys.stdin)["DB_URL"]); assert (u.hostname, u.port, u.username, u.path) == ("127.0.0.1", 54322, "postgres", "/postgres"); assert u.password; print(unquote(u.password))')
+          export PGPASSWORD
+          printf '%s\n' supabase/migrations/*.sql | sed -E 's|.*/([0-9]+)_([^/]+)\.sql$|\1\|\2|' | LC_ALL=C sort > "$RUNNER_TEMP/expected-migrations"
+          # The ledger is CLI metadata owned by the migrating role, not a test connection.
+          test "$(psql -X -v ON_ERROR_STOP=1 -At --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'supabase_migrations.schema_migrations'::regclass")" = supabase_admin
+          psql -X -v ON_ERROR_STOP=1 -At --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command 'SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version, name' > "$RUNNER_TEMP/actual-migrations"
+          diff -u "$RUNNER_TEMP/expected-migrations" "$RUNNER_TEMP/actual-migrations"
+          test "$(psql -X -v ON_ERROR_STOP=1 -At --dbname postgresql://postgres@127.0.0.1:54322/postgres --command "SELECT current_user, session_user, NOT rolsuper, (SELECT count(*) = 4 AND count(DISTINCT roleid) = 4 AND bool_and(admin_option AND inherit_option AND set_option) FROM pg_auth_members WHERE member = 'postgres'::regrole AND roleid IN ('swarm_admin'::regrole, 'swarm_command'::regrole, 'swarm_read'::regrole, 'swarm_capability'::regrole)) FROM pg_roles WHERE rolname = current_user")" = 'postgres|postgres|t|t'
+          echo "Migration versions/names match $(wc -l < "$RUNNER_TEMP/expected-migrations") files; supabase_admin owns the ledger; postgres is non-superuser with ADMIN, INHERIT, SET true on each of four swarm memberships."
       - name: Server suite
         if: matrix.suite == 'server'
         run: |
