@@ -33,7 +33,7 @@ const hostCaption = [
     return [`${names} ${hosts.length === 1 ? 'is' : 'are'} ready to connect.`];
   }),
   picturedHosts.every((host) => host.status === 'ready')
-    ? 'The picture shows how they appear.' : 'The picture shows how they will appear.',
+    ? 'The picture shows how they appear.' : 'The picture shows an example of how they will appear.',
 ].join(' ');
 
 const home = landingImage('home');
@@ -76,7 +76,7 @@ const NOTHING = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAA
           sizes={home.sizes}
           width={home.width}
           height={home.height}
-          alt="The Home base workspace in the CommonSwarm app: the workspaces and the people and agents on the left, the messages in the middle, and the to-dos, lists and files on the right. The hosted agents Dot, Muse and Grok bot, which are not available yet, appear in the list on the left. In this example, the local agents use cswarm on a computer."
+          alt="The Home base workspace in the CommonSwarm app: the workspaces and the people and agents on the left, the messages in the middle, and the to-dos, lists and files on the right. The hosted agents Dot, Muse and Grok bot, which are not tested yet, appear in the list on the left. In this example, the local agents use cswarm on a computer."
           fetchpriority="high"
         />
       </picture>
