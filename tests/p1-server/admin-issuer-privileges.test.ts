@@ -1,10 +1,12 @@
-/** D1 effective application privileges: literal reviewed ACL inventory, CI/Docker only. */
+/** D1: migrated ACLs must match the literal inventory; mutation controls reject widening. CI/Docker only. */
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { catalog, dbAssert, refuses, repoSql, runSql } from '../support/admin-schema-db.js';
 
 const allowlist = JSON.parse(readFileSync(new URL('../support/admin-issuer-privileges.json', import.meta.url), 'utf8'));
+// 20261014000002_oauth_finish adds runtime SELECT, nine column INSERTs and
+// two column UPDATEs for durable resume state; immutable bindings stay protected.
 // Household permissions: lane 2 reads with FOR SHARE; M5 permits provisioning
 // INSERTs and narrowly scoped consent updates. Forbidden writes remain probed. The optional sixth allowlist field records
 // the PostgreSQL 17 lock requirement; only the first five fields describe an ACL.

@@ -1,4 +1,4 @@
-// Acceptance: real migrated PostgreSQL, independent runtime connections and
+// Acceptance: real migrated PostgreSQL, independent runtime logins and
 // disposable auth sessions produce one durable resume; restart, binding changes,
 // revocation and expiry cannot create another. Missing CI prerequisites fail.
 import assert from 'node:assert/strict';
@@ -40,7 +40,14 @@ test('CI: concurrent finish, restart, crash fence, immutable binding, expiry and
   const { Pool } = await import('pg');
   const connectionString = process.env.MCP_OAUTH_TEST_DATABASE_URL ?? 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
   const admin = new Pool({ connectionString, connectionTimeoutMillis: 2000 });
-  const runtimeOptions = { connectionString, options: '-c role=commonswarm_oauth_runtime', max: 2, connectionTimeoutMillis: 2000 };
+  // Match adapter.test.js and oauth-mcp-contract.test.js: log in as runtime,
+  // since the migration creator's ADMIN-only membership cannot SET ROLE.
+  const runtimePassword = randomUUID();
+  const runtimeDatabaseUrl = new URL(connectionString);
+  runtimeDatabaseUrl.username = 'commonswarm_oauth_runtime';
+  runtimeDatabaseUrl.password = runtimePassword;
+  const runtimeOptions = { connectionString: runtimeDatabaseUrl.toString(), max: 2, connectionTimeoutMillis: 2000 };
+  let runtimePasswordConfigured = false;
   const first = new Pool(runtimeOptions);
   let second = new Pool(runtimeOptions);
   const userId = randomUUID(), authId = randomUUID(), grantId = randomUUID();
@@ -59,6 +66,9 @@ test('CI: concurrent finish, restart, crash fence, immutable binding, expiry and
   try {
     assert.ok((await admin.query("SELECT to_regclass('commonswarm_oauth.finish_records') AS name")).rows[0].name,
       'CI must apply the reserved finish migration');
+    await admin.query(`ALTER ROLE commonswarm_oauth_runtime PASSWORD '${runtimePassword}'`);
+    runtimePasswordConfigured = true;
+    assert.equal((await first.query('SELECT current_user AS role')).rows[0].role, 'commonswarm_oauth_runtime');
     await admin.query("INSERT INTO auth.users(id,aud,role,email) VALUES($1,'authenticated','authenticated',$2)", [userId, `${userId}@example.test`]);
     await admin.query('INSERT INTO auth.sessions(id,user_id) VALUES($1,$2)', [authId, userId]);
     await admin.query(`INSERT INTO commonswarm_oauth.browser_sessions(session_hash,user_id,authenticated_at,expires_at)
@@ -119,6 +129,10 @@ test('CI: concurrent finish, restart, crash fence, immutable binding, expiry and
       await admin.query('DELETE FROM commonswarm_oauth.interactions WHERE interaction_uid=ANY($1::text[])', [uids]);
       await admin.query('DELETE FROM commonswarm_oauth.browser_sessions WHERE session_hash=$1', [sessionHash]);
       await admin.query('DELETE FROM auth.users WHERE id=$1', [userId]);
-    } finally { await admin.end(); }
+    } finally {
+      try {
+        if (runtimePasswordConfigured) await admin.query('ALTER ROLE commonswarm_oauth_runtime PASSWORD NULL');
+      } finally { await admin.end(); }
+    }
   }
 });
