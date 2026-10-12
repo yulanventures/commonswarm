@@ -221,11 +221,11 @@
 
 .lp-av__mark {
   box-sizing: border-box;
-  inline-size: 100%;
-  block-size: 100%;
+  inline-size: 90%;
+  block-size: 90%;
   border-radius: 50%;
   background: white;
-  padding: calc(var(--av) * 0.2);
+  padding: calc(var(--av) * 0.15);
 }
 
 /* Tile files already include their own white margin. Keep every vendor file unchanged. */

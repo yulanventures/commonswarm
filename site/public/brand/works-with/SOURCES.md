@@ -34,7 +34,7 @@ Claude only, and the closing row uses local agents. Each unchanged vendor file s
 on its own white disc inside the agent's rounded square tile in both colour themes.
 Non-tile marks have padding of about 0.2 times the avatar width; tile marks such as
 Muse already include white margin and get no extra padding. The owner's photo badge
-sits outside the tile's lower-right corner, with its ring clear of the vendor mark.
+overlaps the tile's lower-right corner, with its ring clear of the vendor mark.
 
 | Shown as | File | Source | Usage rules found |
 | --- | --- | --- | --- |
