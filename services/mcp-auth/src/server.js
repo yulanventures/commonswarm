@@ -1,3 +1,6 @@
+// OAuth HTTP composition: validated config/requests in, gated responses out.
+// Finish routes precede normal binding/provider dispatch; P9a owns activation.
+// GoTrue uses runtimePool, never the admin wrapper; finish verifies live binding.
 import { Pool } from "pg";
 import { adminQuery, adminTransactionContext, withAdminRole } from "./admin-transaction.js";
 import { createAdminHttpHandler } from "./admin-http.js";
@@ -11,9 +14,12 @@ import { pathToFileURL } from "node:url";
 
 import { createPool, loadConfig } from "./config.js";
 import { ClientError, InteractionStateError } from "./client-error.js";
-import { INTERACTION_SECURITY_HEADERS } from "./browser-security.js";
+import { FINISH_SECURITY_HEADERS, INTERACTION_SECURITY_HEADERS } from "./browser-security.js";
 import { createConsentOrchestrator, createPostgresConsentProgress } from "./consent.js";
-import { createGoTrueClient } from "./gotrue.js";
+import { createGoTrueClient, readGoTrueSession } from "./gotrue.js";
+import { createFinishFlow } from "./finish-flow.js";
+import { FINISH_TIMER_PATH } from "./finish-page.js";
+import { FinishStore } from "./finish-store.js";
 import { CONSENT_SUBMIT_PATH, renderDifferentAccountPage, renderConsentResultPage } from "./interaction-page.js";
 import { InteractionStore } from "./interaction-store.js";
 import { createInteractionHandler } from "./interactions.js";
@@ -33,6 +39,7 @@ const ALWAYS_AVAILABLE = new Set([
   "/.well-known/oauth-authorization-server",
 ]);
 const CONSENT_SUBMIT_SCRIPT = readFileSync(new URL("./consent-submit.js", import.meta.url));
+const FINISH_TIMER_SCRIPT = readFileSync(new URL("./finish-timer.js", import.meta.url));
 
 function json(response, status, body, headers = {}) {
   response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", ...headers });
@@ -62,6 +69,7 @@ function clientErrorResponse(error) {
 }
 
 export function createHandler({ provider, pool, publicAuthorizationEnabled, maxBodyBytes, logger,
+  finishEnabled = false, finishFlow,
   interactionHandler, adminGateHandler = createAdminGateHandler({}) }) {
   subscribeProviderErrors(provider, logger);
   const oidc = provider.callback();
@@ -69,6 +77,7 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
     const requestId = randomUUID();
     const started = Date.now();
     const path = new URL(request.url, "https://mcp.commonswarm.com").pathname;
+    const finishRoute = finishEnabled && /^\/interaction\/[^/]+\/(connected|finish)$/u.test(path);
     response.setHeader("x-request-id", requestId);
     response.setHeader("cache-control", "no-store");
     try {
@@ -104,6 +113,24 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
         json(response, 503, { error: "authorization_service_disabled" });
         return;
       }
+      // Navigation responses (including errors) keep P5's no-referrer policy.
+      if (finishRoute || finishEnabled && path === FINISH_TIMER_PATH) {
+        for (const [name, value] of Object.entries(FINISH_SECURITY_HEADERS)) response.setHeader(name, value);
+        if (path === FINISH_TIMER_PATH) {
+          if (request.method !== "GET" && request.method !== "HEAD") {
+            json(response, 405, { error: "method_not_allowed" }, { allow: "GET, HEAD" });
+          } else {
+            response.writeHead(200, { ...FINISH_SECURITY_HEADERS, "content-type": "text/javascript; charset=utf-8" });
+            response.end(request.method === "HEAD" ? undefined : FINISH_TIMER_SCRIPT);
+          }
+          return;
+        }
+        if (!finishFlow) {
+          json(response, 503, { error: "finish_service_unavailable" });
+          return;
+        }
+        if (await finishFlow.handle(request, response, new URL(request.url, provider.issuer))) return;
+      }
       if (path === CONSENT_SUBMIT_PATH) {
         if (request.method !== "GET" && request.method !== "HEAD") {
           json(response, 405, { error: "method_not_allowed" }, { allow: "GET, HEAD" });
@@ -131,7 +158,7 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
             error.code === "interaction_expired") &&
             !String(request.headers.accept ?? "").includes("application/json")) {
           response.writeHead(status, {
-            ...INTERACTION_SECURITY_HEADERS,
+            ...(finishRoute ? FINISH_SECURITY_HEADERS : INTERACTION_SECURITY_HEADERS),
             "content-type": "text/html; charset=utf-8",
           });
           response.end(error.code === "different_account" ? renderDifferentAccountPage() : renderConsentResultPage());
@@ -193,15 +220,16 @@ export async function startServer({
       (typeof managementCommand !== "function" || typeof managementWorkspaceReader !== "function")) {
     throw new Error("public authorization requires lane-2 management command and workspace-read bindings");
   }
-  const gotrue = createGoTrueClient({ baseUrl: config.gotrueUrl, anonKey: config.supabaseAnonKey,
+  const runtimePool = createPool(config);
+  const gotrue = createGoTrueClient({ pool: runtimePool, baseUrl: config.gotrueUrl, anonKey: config.supabaseAnonKey,
     providers: config.gotrueProviders ?? [config.gotrueProvider] });
   try { await gotrue.verifyProviders(); }
   catch (error) {
+    await runtimePool.end();
     createLogger(writeLog).info({ event: "startup_refused", error_code: error.code,
       reason: "Configured sign-in providers must be enabled in GoTrue /auth/v1/settings" });
     throw error;
   }
-  const runtimePool = createPool(config);
   const issuerPool = config.adminIssuer ? new Pool({ ...config.database,
     user: config.adminIssuer.user, password: config.adminIssuer.password,
     application_name: "commonswarm-admin-issuer", connectionTimeoutMillis: 2000 }) : null;
@@ -266,10 +294,20 @@ export async function startServer({
     findAccount: createProductionFindAccount(pool),
   });
   const logger = createLogger(writeLog);
+  const store = new InteractionStore(pool);
+  const finishFlow = config.publicAuthorizationEnabled && config.finishEnabled
+    ? createFinishFlow({ provider, store, finishStore: new FinishStore(runtimePool, {
+        issuer: config.issuer,
+        verifySession: async (browser, client) => {
+          const live = await readGoTrueSession(client, { sessionId: browser.gotrue_session_id, userId: browser.user_id });
+          return live !== null && live.interactiveAuthAtSeconds === Math.floor(new Date(browser.authenticated_at).getTime() / 1000);
+        },
+      }) }) : undefined;
   const mcpHandler = config.publicAuthorizationEnabled
     ? createInteractionHandler({
         provider,
-        store: new InteractionStore(pool),
+        store,
+        finishFlow,
         gotrue,
         consentOrchestrator: createConsentOrchestrator({
           command: managementCommand,
@@ -300,7 +338,7 @@ export async function startServer({
       maxBodyBytes: config.maxBodyBytes, bodyReadTimeoutMs: config.requestTimeoutMs,
     }),
   }) : undefined;
-  const handler = createHandler({ provider, pool, logger, interactionHandler,
+  const handler = createHandler({ provider, pool, logger, interactionHandler, finishFlow,
     adminGateHandler: createAdminGateHandler({ issuerPool, adminIssuanceEnabled: config.adminIssuanceEnabled }), ...config });
   const ingress = createAdminHttpHandler({ handler, runtimePool, issuerPool,
     activeKid: config.activeSigningKid, adminIssuanceEnabled: config.adminIssuanceEnabled, logger });

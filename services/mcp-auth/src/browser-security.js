@@ -1,4 +1,8 @@
+// Browser security: opaque values/origins in, cookies and response policies out.
+// Form pages retain same-origin POST; finish navigation never sends a referrer.
+// Reuse P5's canonical finish policy; never duplicate its header inventory.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+export { FINISH_SECURITY_HEADERS } from "./finish-page.js";
 
 export const SESSION_COOKIE = "__Host-cswarm-oauth";
 export const SESSION_COOKIE_ATTRIBUTES = "Secure; HttpOnly; Path=/; SameSite=Lax";
