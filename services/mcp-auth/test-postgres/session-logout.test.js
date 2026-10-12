@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { createHmac, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createGoTrueClient, readGoTrueSession } from "../src/gotrue.js";
@@ -62,7 +63,7 @@ test("CI only: box-matched global logout invalidates all linked AS sessions", {
     return fetch(target, options);
   };
   const docker = args => execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 90_000 });
-  const directory = mkdtempSync("/private/tmp/anvil-secret."), envFile = join(directory, "env");
+  const directory = mkdtempSync(join(tmpdir(), "cs-gotrue-logout-")), envFile = join(directory, "env");
   const users = [];
   let started = false, isolated, pool;
   const runtime = { query: async (...args) => {
