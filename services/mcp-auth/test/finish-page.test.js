@@ -5,11 +5,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
-import { FINISH_SECURITY_HEADERS, finishPaths, renderFinishPage, renderFinishExpiredPage } from "../src/finish-page.js";
+import { createFinishNonce, finishSecurityHeaders, finishPaths, renderFinishPage, renderFinishExpiredPage } from "../src/finish-page.js";
 import { renderConsentPage } from "../src/interaction-page.js";
 
 const model = { interactionUid: "interaction-test", clientDisplay: { verified: true, primary: "client.example.test" },
-  identity: { displayName: "Human", email: "user@example.test" }, workspaceNames: ["One", "Two"], homeWorkspaceName: "One", deadline: 120001 };
+  identity: { displayName: "Human", email: "user@example.test" }, workspaceNames: ["One", "Two"], homeWorkspaceName: "One", deadline: 120001,
+  nonce: "ZHVtbXktZmluaXNoLW5vbmNl" };
 const decode = (value) => value.replaceAll("&quot;", '"').replaceAll("&#39;", "'").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
 
 function browser(overrides = {}, clientNow = 1) {
@@ -81,10 +82,37 @@ test("finish model escapes names, retains client trust disclosure, and emits onl
   assert.doesNotMatch(renderFinishExpiredPage(model), /<script|href=/u);
 });
 
-test("navigation-only headers forbid caching, referrers, framing and third-party scripts", () => {
-  assert.equal(FINISH_SECURITY_HEADERS["cache-control"], "no-store");
-  assert.equal(FINISH_SECURITY_HEADERS["referrer-policy"], "no-referrer");
-  assert.equal(FINISH_SECURITY_HEADERS["content-security-policy"], "default-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'");
+test("navigation-only headers forbid caching, referrers and framing; only the matching script nonce is allowed", () => {
+  const headers = finishSecurityHeaders(model.nonce);
+  assert.equal(headers["cache-control"], "no-store");
+  assert.equal(headers["referrer-policy"], "no-referrer");
+  assert.equal(headers["x-content-type-options"], "nosniff");
+  assert.equal(headers["content-security-policy"], `default-src 'none'; script-src 'nonce-${model.nonce}'; script-src-attr 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'`);
+  const html = renderFinishPage(model);
+  const scripts = [...html.matchAll(/<script\b[^>]*>/gu)].map(([tag]) => tag);
+  assert.deepEqual(scripts, [`<script src="/interaction/finish-timer.js" nonce="${model.nonce}" defer>`]);
+  const differentNonce = "YW5vdGhlci1kdW1teS1ub25jZQ==";
+  assert.ok(!finishSecurityHeaders(differentNonce)["content-security-policy"].includes(`'nonce-${model.nonce}'`));
+  assert.ok(!renderFinishPage({ ...model, nonce: differentNonce }).includes(`nonce="${model.nonce}"`));
+});
+
+test("nonce helpers accept base64/base64url of at least 16 bytes and reject malformed or short nonces", () => {
+  const bytes = Buffer.alloc(16, 255); // Dummy bytes exercise both alphabets and padding.
+  for (const nonce of [bytes.toString("base64"), bytes.toString("base64").replace(/=+$/u, ""),
+    bytes.toString("base64url"), bytes.toString("base64url") + "=="]) {
+    assert.ok(finishSecurityHeaders(nonce)["content-security-policy"].includes(`'nonce-${nonce}'`));
+    assert.ok(renderFinishPage({ ...model, nonce }).includes(`nonce="${nonce}"`));
+  }
+  const generated = createFinishNonce();
+  assert.equal(Buffer.from(generated, "base64url").length, 16);
+  assert.ok(finishSecurityHeaders(generated)["content-security-policy"].includes(`'nonce-${generated}'`));
+  assert.ok(renderFinishPage({ ...model, nonce: generated }).includes(`nonce="${generated}"`));
+  for (const nonce of [undefined, null, 123, "", "short", Buffer.alloc(15).toString("base64"),
+    `${model.nonce}\n`, `${model.nonce}'`, `${model.nonce}\"`, `${model.nonce}; script-src 'self'`,
+    "/////////////////////x==", `${model.nonce}=`, `${model.nonce}===`]) {
+    assert.throws(() => finishSecurityHeaders(nonce), TypeError);
+    assert.throws(() => renderFinishPage({ ...model, nonce }), TypeError);
+  }
 });
 
 test("both pages show the account email once; consent escapes fallbacks and keeps switch separate from approval", () => {
@@ -129,7 +157,11 @@ test("server remaining time allows automatic return when the device clock is ahe
 
 test("auxclick and context menu pause automatic return without extending expiry", () => {
   for (const gesture of ["auxclick", "contextmenu"]) {
-    const paused = browser(); paused.click("finish-continue", { button: 1 }, gesture);
+    const paused = browser();
+    const event = paused.click("finish-continue", { button: 1 }, gesture);
+    assert.equal(event.defaultPrevented, gesture === "auxclick");
+    assert.equal(paused.timers.size, 1);
+    assert.equal(paused.click("finish-continue", { button: 1 }, gesture).defaultPrevented, gesture === "auxclick");
     paused.advance(3001); assert.deepEqual(paused.navigations, []);
     assert.equal(paused.elements.get("finish-return-status").textContent, "Automatic return paused. Continue when you are ready.");
     paused.advance(120001);
