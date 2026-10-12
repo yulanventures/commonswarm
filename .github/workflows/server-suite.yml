@@ -93,8 +93,8 @@ jobs:
           caddy_stage=$(mktemp -d "$RUNNER_TEMP/caddy.XXXXXX")
           archive=caddy_2.11.4_linux_amd64.tar.gz
           publisher=https://github.com/caddyserver/caddy/releases/download/v2.11.4
-          curl --fail --silent --show-error --location "$publisher/$archive" -o "$caddy_stage/$archive"
-          curl --fail --silent --show-error --location "$publisher/caddy_2.11.4_checksums.txt" -o "$caddy_stage/checksums.txt"
+          curl --proto '=https' --proto-redir '=https' --fail --silent --show-error --location "$publisher/$archive" -o "$caddy_stage/$archive"
+          curl --proto '=https' --proto-redir '=https' --fail --silent --show-error --location "$publisher/caddy_2.11.4_checksums.txt" -o "$caddy_stage/checksums.txt"
           publisher_sha=$(awk -v name="$archive" '$2 == name { print $1; count++ } END { if (count != 1) exit 1 }' "$caddy_stage/checksums.txt")
           [[ "$publisher_sha" =~ ^[0-9a-f]{128}$ ]]
           printf '%s  %s\n' "$publisher_sha" "$caddy_stage/$archive" | sha512sum --check --status

@@ -1,5 +1,6 @@
 /** Exercise all five production log filters with dummy redirects; output pass/fail only.
- * Real Caddy supplies JSON logs. Removing each Location rule must expose dummy credentials;
+ * Real Caddy supplies JSON logs; request credentials must be absent from every record.
+ * Removing each Location rule must expose dummy credentials;
  * live/maintenance pair reloads must preserve filtering. Missing Caddy fails in CI. */
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -15,6 +16,15 @@ import { test } from 'node:test';
 const names = ['mcp', 'api', 'edge-staging', 'api-maintenance', 'edge-staging-maintenance'];
 const redirect = 'https://client.invalid/callback?code=DUMMYCODE&state=DUMMYSTATE#access_token=DUMMYACCESS&refresh_token=DUMMYREFRESH';
 const dummies = ['DUMMYCODE', 'DUMMYSTATE', 'DUMMYACCESS', 'DUMMYREFRESH'];
+// Go's canonical header names are the keys emitted by Caddy's request logger.
+const requestCredentials = {
+  Authorization: 'Bearer DUMMYACCESS', Cookie: 'refresh_token=DUMMYREFRESH',
+  Apikey: 'DUMMYAPIKEY', Dpop: 'DUMMYDPOP',
+  'X-Cswarm-Session-Key': 'DUMMYSESSIONKEY', 'X-Cswarm-Csrf': 'DUMMYCSRF',
+  'X-Cswarm-Hosted-Capability': 'DUMMYHOSTEDCAPABILITY',
+  'X-Commonswarm-Hosted-Capability': 'DUMMYHOSTEDALIAS',
+  'X-Cswarm-Key': 'DUMMYLEGACYKEY', 'X-Phoenix-Authtoken': 'DUMMYPHOENIXTOKEN',
+};
 const boxVersion = 'v2.11.4 h1:XKxkMTgNSizEvKG6QHue6cAsFOteU2qA61w2tKkCWi0=';
 
 /** Execute the CI checksum gate against local bytes; no download or Caddy is needed.
@@ -116,6 +126,7 @@ for (const control of [false, true]) test(control
             ${filter}
           }
           header Location "${redirect}"
+          header Set-Cookie "fixture=DUMMYCOOKIE; HttpOnly"
           header X-Fixture-Harmless "retained"
           respond "" 303
         }`;
@@ -128,7 +139,7 @@ for (const control of [false, true]) test(control
           // Dummy credentials only; manual redirects retain Location on the wire.
           const response = await fetch(`http://127.0.0.1:${ports[portIndex]}/auth/v1/verify?code=DUMMYCODE`, {
             redirect: 'manual', signal: AbortSignal.timeout(5000),
-            headers: { Authorization: 'Bearer DUMMYACCESS', Cookie: 'refresh_token=DUMMYREFRESH' },
+            headers: { ...requestCredentials, 'X-Fixture-Harmless': 'retained' },
           });
           assert.equal(response.status, 303);
           assert.ok(response.headers.get('location') === redirect, 'wire redirect is preserved');
@@ -147,8 +158,15 @@ for (const control of [false, true]) test(control
           assert.equal(row.status, 303);
           assert.deepEqual(row.resp_headers['X-Fixture-Harmless'], ['retained']);
           assert.equal(row.request.uri, '/auth/v1/verify');
-          assert.ok(!Object.hasOwn(row.request.headers, 'Authorization'));
-          assert.ok(!Object.hasOwn(row.request.headers, 'Cookie'));
+          assert.deepEqual(row.request.headers['X-Fixture-Harmless'], ['retained']);
+          for (const header of Object.keys(requestCredentials)) {
+            assert.ok(!Object.hasOwn(row.request.headers, header), `${header} must be redacted`);
+          }
+          for (const credential of Object.values(requestCredentials)) {
+            assert.ok(!bytes.includes(credential), 'request credential bytes must be redacted');
+          }
+          assert.ok(!Object.hasOwn(row.resp_headers, 'Set-Cookie'));
+          assert.ok(!bytes.includes('DUMMYCOOKIE'));
           assert.equal(Object.hasOwn(row.resp_headers, 'Location'), !protectedLog);
           for (const dummy of dummies) assert.equal(bytes.includes(dummy), !protectedLog, 'dummy credential exposure control');
           // Never include access record bytes in assertion messages or test output.
