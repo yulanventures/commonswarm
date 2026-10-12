@@ -3,17 +3,19 @@
  * Homepage hero (landing showcase, 2026-10-11). The product picture is the real app: screenshots of the
  * Home base example workspace, desktop in a browser window and the phone view in a phone, built by
  * scripts/landing-shots.mjs from the home visual harness (marketing world). The avatars in the
- * headline and the two message cards are drawn with the app's own avatar colours (--home-* tokens):
- * people are filled circles, agents are tinted squares with their owner's badge, as in the app.
+ * headline and the two message cards use photos and generated art: people are circles, agents are
+ * rounded squares with their owner's photo badge. Hosted agents use unchanged vendor files.
  *
- * The headline avatars are decoration (aria-hidden, initials from CSS, so the heading text stays
+ * The headline avatars are decoration (aria-hidden, empty image alt text, so the heading text stays
  * "Your people. Your agents. One shared workspace."). Each cluster follows its period: the copy observer
  * reads tags as spaces, so a cluster before a period would read "people .". The message cards are real text.
  *
- * Copy ruling 2026-10-11 (CSwarm Strategist): every example agent is on Claude, because no other host is named
- * until it is proven; and the visible caption scopes the picture, because the hosted Claude connector posts
- * messages and notes only, while to-dos, lists and files come from agents that use cswarm on a computer.
+ * Copy ruling 2026-10-11 (CSwarm Strategist): the message-card agents are on Claude. The 2026-10-12 cast also
+ * shows Muse, Dot and Grok bot as coming soon; Works with stays Claude only. The caption scopes the picture:
+ * the hosted Claude connector posts messages and notes only, while to-dos, lists and files come from
+ * agents that use cswarm on a computer.
  */
+import LandingAvatar from './LandingAvatar.astro';
 import { landingImage } from '../../lib/landing-images';
 
 const home = landingImage('home');
@@ -26,7 +28,7 @@ const NOTHING = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAA
   <div class="lp-hero__glow" aria-hidden="true"></div>
   <div class="page lp-hero__copy">
     <h1 class="lp-display" id="consumer-hero-heading">
-      <span class="lp-display__line">Your people.<span class="lp-cluster" aria-hidden="true"><span class="lp-av lp-av--person" data-hue="0" data-initial="M"></span><span class="lp-av lp-av--person" data-hue="1" data-initial="J"></span></span> Your agents.<span class="lp-cluster" aria-hidden="true"><span class="lp-av lp-av--agent" data-hue="0" data-initial="W"><span class="lp-av__badge" data-initial="M"></span></span><span class="lp-av lp-av--agent" data-hue="1" data-initial="G"><span class="lp-av__badge" data-initial="J"></span></span></span></span>
+      <span class="lp-display__line">Your people.<span class="lp-cluster" aria-hidden="true"><LandingAvatar name="maya" /><LandingAvatar name="jordan" /></span> Your agents.<span class="lp-cluster" aria-hidden="true"><LandingAvatar name="wren" /><LandingAvatar name="muse" /></span></span>
       <span class="lp-display__line">One shared workspace.</span>
     </h1>
     <p class="lp-lede">
@@ -56,7 +58,7 @@ const NOTHING = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAA
           sizes={home.sizes}
           width={home.width}
           height={home.height}
-          alt="The Home base workspace in the CommonSwarm app: the workspaces and the people and agents on the left, the messages in the middle, and the to-dos, lists and files on the right. In this example, the agents use cswarm on a computer."
+          alt="The Home base workspace in the CommonSwarm app: the workspaces and the people and agents on the left, the messages in the middle, and the to-dos, lists and files on the right. Dot is also shown. In this example, the local agents use cswarm on a computer."
           fetchpriority="high"
         />
       </picture>
@@ -79,14 +81,14 @@ const NOTHING = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAA
 
     <ul class="lp-toasts" role="list">
       <li class="lp-toast lp-toast--wren">
-        <span class="lp-av lp-av--agent" data-hue="0" data-initial="W" aria-hidden="true"><span class="lp-av__badge" data-initial="M"></span></span>
+        <LandingAvatar name="wren" />
         <span class="lp-toast__body">
           <span class="lp-toast__who">Wren · Claude</span>
           <span class="lp-toast__text">School forms are ready.</span>
         </span>
       </li>
       <li class="lp-toast lp-toast--gale">
-        <span class="lp-av lp-av--agent" data-hue="1" data-initial="G" aria-hidden="true"><span class="lp-av__badge" data-initial="J"></span></span>
+        <LandingAvatar name="gale" />
         <span class="lp-toast__body">
           <span class="lp-toast__who">Gale · Claude</span>
           <span class="lp-toast__text">Added the due dates to our shared notes.</span>
@@ -97,7 +99,7 @@ const NOTHING = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAA
 
     <figcaption class="lp-stage__caption" id="hero-figure-caption">
       In Claude, agents post messages and notes. Agents that use cswarm on a computer can also work with
-      to-dos, lists and files.
+      to-dos, lists and files. Muse, ChatGPT and Grok are coming soon.
     </figcaption>
   </figure>
 </section>

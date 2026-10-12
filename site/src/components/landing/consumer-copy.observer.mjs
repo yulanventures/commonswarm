@@ -93,6 +93,7 @@ const required = {
     // notes; to-dos, lists and files come from agents that use cswarm on a computer.
     "In Claude, agents post messages and notes.",
     "Agents that use cswarm on a computer can also work with to-dos, lists and files.",
+    "Muse, ChatGPT and Grok are coming soon.",
     // Works with: Claude only, with a link to its guide. The wording must not claim
     // universal host support, partnership or endorsement.
     "Bring the agents you already use",
@@ -153,8 +154,7 @@ const forbidden = {
     "code",
     // Works with shows Claude only; the old routing note went with the other hosts (2026-10-10).
     "Choose the connection guide for your agent.",
-    // No other host is named until it is proven, and calendars do not ship (copy ruling 2026-10-11).
-    "Grok",
+    // Muse, ChatGPT and Grok may be named as coming soon (Tom, 2026-10-12); calendars do not ship.
     "calendar",
     // The 2026-08-22 reference-derived copy is retired in full. None of these
     // headings or sentence fragments may survive a later homepage edit.

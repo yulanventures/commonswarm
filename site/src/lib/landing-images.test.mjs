@@ -8,7 +8,11 @@ import { IMAGES, landingImage } from "./landing-images.ts";
 
 const site = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const publicDir = join(site, "public");
-const shipped = () => readdirSync(join(publicDir, "landing")).sort();
+const shipped = () => readdirSync(join(publicDir, "landing"), { withFileTypes: true }).flatMap((entry) => {
+  if (!entry.isDirectory()) return [entry.name];
+  assert.equal(entry.name, "avatars", "public/landing has an unexpected folder");
+  return readdirSync(join(publicDir, "landing", entry.name)).map((file) => `avatars/${file}`);
+}).sort();
 
 test("every homepage srcset file exists at its declared width and the picture's aspect ratio", async () => {
   const names = Object.keys(IMAGES);
@@ -31,6 +35,17 @@ test("every homepage srcset file exists at its declared width and the picture's 
   }
 });
 
+test("every shipped decorative avatar is a 160px square WebP", async () => {
+  const avatars = shipped().filter((file) => file.startsWith("avatars/"));
+  assert.equal(avatars.length, 8, "the decorative cast has four people and four local agents");
+  for (const file of avatars) {
+    const meta = await sharp(join(publicDir, "landing", file)).metadata();
+    assert.equal(meta.format, "webp", `${file}: not WebP`);
+    assert.equal(meta.width, 160, `${file}: not 160px wide`);
+    assert.equal(meta.height, 160, `${file}: not 160px high`);
+  }
+});
+
 test("the build script writes exactly the images the homepage uses, and nothing else is shipped", () => {
   const script = readFileSync(join(site, "scripts", "landing-shots.mjs"), "utf8");
   const declared = [...script.matchAll(/\{ name: "([a-z-]+)", shot: "[^"]+", crop: (?:null|\{[^}]*\}), widths: \[([0-9, ]+)\] \}/g)]
@@ -40,8 +55,12 @@ test("the build script writes exactly the images the homepage uses, and nothing 
     Object.fromEntries(Object.entries(IMAGES).map(([name, { widths }]) => [name, [...widths]])),
     "scripts/landing-shots.mjs IMAGES and src/lib/landing-images.ts IMAGES must list the same names and widths",
   );
-  const expected = Object.entries(IMAGES).flatMap(([name, { widths }]) =>
-    ["dark", "light"].flatMap((theme) => widths.map((width) => `${name}-${theme}-${width}.webp`))).sort();
+  const avatarNames = JSON.parse(script.match(/const names = (\[[^\]]+\]);/)[1]);
+  const expected = [
+    ...Object.entries(IMAGES).flatMap(([name, { widths }]) =>
+      ["dark", "light"].flatMap((theme) => widths.map((width) => `${name}-${theme}-${width}.webp`))),
+    ...avatarNames.map((name) => `avatars/${name.replace(/^(person|agent)-/, "")}-160.webp`),
+  ].sort();
   assert.deepEqual(shipped(), expected, "public/landing holds an unused or missing file");
 });
 
