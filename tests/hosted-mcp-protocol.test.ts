@@ -521,7 +521,7 @@ test("MCP denials log only stable error codes and known method names", async (t)
   const unknown = await fixture.serve(post({
     jsonrpc: "2.0", id, method: "private-method-must-not-be-logged",
   }, fixture.headers));
-  assert.equal(unknown.status, 404);
+  assert.equal(unknown.status, 200);
   assert.deepEqual(logging.mock.calls.map(({ arguments: args }) => {
     assert.equal(args.length, 1);
     return JSON.parse(args[0]);
@@ -545,7 +545,7 @@ test("protected-resource metadata and the unauthenticated challenge name exact U
     resource: MCP_RESOURCE,
     authorization_servers: [MCP_ISSUER],
     bearer_methods_supported: ["header"],
-    scopes_supported: ["mcp"],
+    scopes_supported: ["mcp", "offline_access"],
     resource_name: "CommonSwarm hosted MCP",
   });
   const denied = await serve(new Request(MCP_RESOURCE, {

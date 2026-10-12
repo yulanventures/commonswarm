@@ -78,6 +78,9 @@ export async function createMcpProvider({
     "account_unavailable", "End-User authentication is required", "login_required",
     (ctx) => Boolean(ctx.oidc.session.accountId && !ctx.oidc.account),
   ));
+  const renewableMcpGrant = async (client, source, resource) => resource === RESOURCE &&
+    client.grantTypeAllowed("refresh_token") && source.scopes.has("mcp") &&
+    await providerGrantActive(source.grantId);
   const provider = new Provider(ISSUER, {
     adapter: (model) => model === "Client" ? registrationStore : adapter(model),
     clientAuthMethods: ["none"],
@@ -211,6 +214,23 @@ export async function createMcpProvider({
       return grant;
     },
     interactions: { policy },
+    expiresWithSession: async (ctx, source) => {
+      // AuthorizationCode.resource is set before this hook. Keep renewable
+      // hosted consent independent of the browser's provider Session, just as
+      // offline_access would; rotation retains this choice from the code.
+      if (await renewableMcpGrant(ctx.oidc.client, source, source.resource)) return false;
+      return !source.scopes.has("offline_access");
+    },
+    issueRefreshToken: async (ctx, client, source) => {
+      if (!client.grantTypeAllowed("refresh_token")) return false;
+      // MCP's completed workspace consent authorizes a renewable connection
+      // even without prompt=consent, when oidc-provider removes offline_access.
+      if (ctx.oidc.entities.AccessToken?.aud === RESOURCE) {
+        return renewableMcpGrant(client, source, RESOURCE);
+      }
+      // Preserve the OIDC rule for other resources, including admin grants.
+      return source.scopes.has("offline_access");
+    },
     jwks: jwks ?? { keys: [await signingJwk()] },
     pkce: { required: () => true },
     responseTypes: ["code"],
