@@ -1,6 +1,8 @@
 // P9c CI fixture: dummy sign-in inputs enter the real HTTP/provider/command path.
 // Outputs collect every AS response privately for leak checks; PostgreSQL owns state.
 // Only external OAuth is synthetic; GoTrue verification/logout use v2.197.0.
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
@@ -26,7 +28,7 @@ export async function finishFlowFixture(t) {
   const logs = [], responses = [], privateValues = [], cookies = new Map();
   for (const method of ['log', 'info', 'warn', 'error', 'debug'])
     t.mock.method(console, method, (...args) => logs.push(format(...args)));
-  const directory = mkdtempSync('/private/tmp/anvil-secret.'), name = `oauth-finish-${randomUUID()}`;
+  const directory = mkdtempSync(join(tmpdir(), 'cs-oauth-finish-')), name = `oauth-finish-${randomUUID()}`;
   let isolated, pool, runtime, server, loopback, edge, started = false, enabled = true, passwordSet = false;
   const docker = args => execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 });
   t.after(async () => {
