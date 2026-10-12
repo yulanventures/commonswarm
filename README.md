@@ -336,12 +336,10 @@ is governed by its own terms, which grant no rights over the code and take none 
 The MIT licence covers the source. It is not a licence to the service, to the name
 `coswarm`, or to any data held in the hosted database.
 
-All three documents are
-**drafts** carrying unresolved placeholders. They do not bind anyone until the operator
-fills those in and publishes them with a real effective date. The page source is
-`site/src/pages/{terms,privacy,acceptable-use}.astro`; each renders a draft banner, and
-`site/src/components/legal/LegalDoc.astro` refuses to build a document marked final that
-still contains a placeholder.
+All three documents are marked final, with an effective date of 2 October 2026.
+The page source is `site/src/pages/{terms,privacy,acceptable-use}.astro`; each sets
+`draft={false}`. `site/src/components/legal/LegalDoc.astro` refuses to build a document
+marked final that still contains a placeholder.
 
 These documents were drafted by an AI agent and have **not been reviewed by a licensed
 attorney**.
