@@ -88,10 +88,12 @@ live public URL, served by Caddy on `yulan-vps-1`. The Vercel project is deleted
 
 ## 2. Release repository and installer — **RESOLVED 2026-07-29**
 
-Published releases live on the public `Ridge-io/commonswarm` repository (14 mirrored, latest v0.1.12, each carrying `cswarm` and `cswarm.sha256`). Release `v0.1.1`
-carries both `cswarm` and `cswarm.sha256`, and the installer published at
-`https://commonswarm.com/install.sh` defaults to that repository. A fresh install reports
-`cswarm 0.1.1`.
+Historical snapshot from 2026-07-29: releases were on `Ridge-io/commonswarm`
+(14 mirrored, latest v0.1.12, each carrying `cswarm` and `cswarm.sha256`).
+Release `v0.1.1` carried both assets, and the installer then served at
+`https://commonswarm.com/install.sh` installed `cswarm 0.1.1`.
+The tracked installer now defaults to `yulanventures/commonswarm`; these old
+measurements do not establish the current published or installed version.
 
 Measured again 2026-07-29: the repository is `PUBLIC`; the release has both assets;
 `/install.sh` returns 200 while `/nope.sh` returns 404; and the served script sets
@@ -310,7 +312,7 @@ closed, and leaving them listed would have made the table lie about the state of
 | # | Item | Kind | State | Unblocks |
 |---|---|---|---|---|
 | 1 | Name and domain | Operator actions | ✅ **DONE** — commonswarm.com live, apex + www, certs issued | canonical URL, contact addresses |
-| 2 | Release repo + published installer | Decision + deploy | ✅ **DONE** — repo is public, release `v0.1.1` carries `cswarm` + `cswarm.sha256`, and `commonswarm.com/install.sh` serves the repo's installer (verified end to end: a clean `curl \| sh` installed a working `cswarm 0.1.1`) | `curl \| sh` installing at all |
+| 2 | Release repo + published installer | Decision + deploy | ✅ **DONE historically** — the July 2026 check verified public releases, the installer, and `cswarm 0.1.1`; it does not establish current release state (see section 2) | `curl \| sh` installing at all |
 | 3 | State of formation | Fact to confirm | ✅ **DONE** — WA-formed LLC, TX office, venue kept | correctness of the terms |
 | 4 | DMCA agent | External filing | ◐ **HALF** — named in the document, **not registered** | the §512 safe harbour |
 | 5 | Database region | Fact | The production database is in Falkenstein, Germany. The privacy page is the owner's. | the privacy policy |
