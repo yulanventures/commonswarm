@@ -101,11 +101,18 @@ boundary — please keep it accurate if you change the site.
 - The mobile navigation menu.
 - Every CLI command shown anywhere on the site.
 
-### Stub — awaiting a backend
+### Website traffic and former prototype
 
-There is **no live backend** behind this site. The built output makes zero network
-calls: no `fetch`, no `XMLHttpRequest`, no `WebSocket`, no `sendBeacon`, no
-`localStorage`, no cookies, and no analytics of any kind.
+The `/app` workspace connects to our API and stores a sign-in session in the browser.
+Cloudflare adds its Web Analytics script to our site pages to count page views and
+measure load time. On each page view it records the page address without the query
+string, the referring page, country, browser and device type, and load timing from
+the browser's Performance API. The analytics script uses no cookies, local storage,
+or other client-side state, and does not fingerprint individuals using their IP
+address or User Agent. Cloudflare keeps detailed data for 7 days, then aggregates it
+to a sample of about 10%. Marketing and legal pages use self-hosted fonts.
+
+The items below describe the former static prototype.
 
 - **"Request an invite"** (`/`) — validates the address, then states plainly:
   *"Nothing was sent."* There is no signup service to receive it.
