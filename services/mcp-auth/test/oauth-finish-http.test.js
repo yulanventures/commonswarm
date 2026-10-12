@@ -3,7 +3,7 @@
 // no sockets, real credentials, browser or database. P4/P9c own durability.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -24,8 +24,9 @@ const params = { client_id: "https://client.example/metadata", redirect_uri: "ht
   resource: `${issuer}/mcp`, scope: "mcp", code_challenge: "a".repeat(43), state: "DUMMYSTATE" };
 const unexpected = () => assert.fail("finish route reached normal binding/provider dispatch");
 function response() {
-  return { headers: {}, statusCode: 200, body: "",
-    setHeader(k, v) { this.headers[k.toLowerCase()] = v; },
+  return { headers: {}, cspWrites: [], statusCode: 200, body: "",
+    setHeader(k, v) { this.headers[k.toLowerCase()] = v;
+      if (k.toLowerCase() === "content-security-policy") this.cspWrites.push(v); },
     writeHead(status, headers) { this.statusCode = status; Object.entries(headers).forEach(([k, v]) => this.setHeader(k, v)); },
     end(body = "") { this.body += body; } };
 }
@@ -39,10 +40,17 @@ function handler(options = {}) {
     publicAuthorizationEnabled: true, maxBodyBytes: 1024, logger: { info() {} },
     interactionHandler: unexpected, ...options });
 }
-function secured(res) {
+function navigationHeaders(res) {
   assert.equal(res.headers["cache-control"], "no-store");
   assert.equal(res.headers["referrer-policy"], "no-referrer");
-  for (const rule of ["default-src 'none'", "script-src 'self'", "base-uri 'none'", "frame-ancestors 'none'"])
+  assert.equal(res.headers["x-content-type-options"], "nosniff");
+}
+function secured(res) {
+  navigationHeaders(res);
+  assert.deepEqual(res.cspWrites, [res.headers["content-security-policy"]], "P8 must leave P9b's CSP unchanged");
+  assert.match(res.headers["content-security-policy"], /script-src 'nonce-[A-Za-z0-9_-]+'/u);
+  assert.doesNotMatch(res.headers["content-security-policy"], /script-src 'self'/u);
+  for (const rule of ["default-src 'none'", "base-uri 'none'", "frame-ancestors 'none'"])
     assert.ok(res.headers["content-security-policy"].includes(rule), rule);
 }
 
@@ -72,18 +80,21 @@ test("finish flag requires explicit 1; unset and other values keep rollout off",
 });
 
 test("timer GET/HEAD are served before binding; POST is refused and rollout gates the asset", async () => {
+  const timerBytes = await readFile(new URL("../src/finish-timer.js", import.meta.url));
   const active = handler({ finishEnabled: true });
   for (const [method, status] of [["GET", 200], ["HEAD", 200], ["POST", 405]]) {
     const res = await run(active, FINISH_TIMER_PATH, method);
-    assert.equal(res.statusCode, status); secured(res);
+    assert.equal(res.statusCode, status); navigationHeaders(res);
+    assert.equal(res.headers["content-security-policy"], undefined);
     if (status === 200) {
       assert.equal(res.headers["content-type"], "text/javascript; charset=utf-8");
-      assert.equal(res.headers["x-content-type-options"], "nosniff");
-      assert.equal(res.body.length > 0, method === "GET");
+      assert.deepEqual(Buffer.from(res.body), method === "GET" ? timerBytes : Buffer.alloc(0));
     } else assert.equal(res.headers.allow, "GET, HEAD");
   }
   const off = handler({ interactionHandler: async (_req, res) => { res.writeHead(404, {}); res.end(); return true; } });
   assert.equal((await run(off, FINISH_TIMER_PATH)).statusCode, 404);
+  const fallback = async (_req, res) => { res.writeHead(404, {}); res.end(); return true; };
+  assert.equal((await run(handler({ finishEnabled: true, interactionHandler: fallback }), `${FINISH_TIMER_PATH}/extra`)).statusCode, 404);
   assert.equal((await run(handler({ finishEnabled: true, publicAuthorizationEnabled: false }), FINISH_TIMER_PATH)).statusCode, 503);
 });
 
@@ -100,6 +111,8 @@ test("completed finish pages and saved 303 precede normal binding, with navigati
   assert.equal(page.statusCode, 200); secured(page);
   assert.match(page.body, /<h1 id="finish-title">Connected<\/h1>/u);
   assert.ok(page.body.includes(`src="${FINISH_TIMER_PATH}"`));
+  const nonce = /<script\b[^>]*\bnonce="([^"]+)"/u.exec(page.body)?.[1];
+  assert.ok(nonce); assert.ok(page.headers["content-security-policy"].includes(`'nonce-${nonce}'`));
   const resume = await run(active, `/interaction/${uid}/finish`);
   assert.equal(resume.statusCode, 303); secured(resume);
   assert.equal(resume.headers.location, `${issuer}/authorize/DUMMYRESUME`);
@@ -135,11 +148,48 @@ test("form policy retains same-origin POST and exact Origin checks while finish 
 
 test("finish failures keep navigation policy and cannot fall through to the provider", async () => {
   const unavailable = await run(handler({ finishEnabled: true }), `/interaction/${uid}/finish`);
-  assert.equal(unavailable.statusCode, 503); secured(unavailable);
+  assert.equal(unavailable.statusCode, 503); navigationHeaders(unavailable);
   for (const [error, status] of [[new InteractionStateError("interaction_expired"), 410], [new Error("DUMMYFAILURE"), 500]]) {
     const active = handler({ provider: { issuer, callback: () => unexpected }, finishEnabled: true,
       finishFlow: { handle: async () => { throw error; } } });
     const failed = await run(active, `/interaction/${uid}/connected`);
-    assert.equal(failed.statusCode, status); secured(failed);
+    assert.equal(failed.statusCode, status); navigationHeaders(failed);
+    assert.equal(failed.headers["content-type"], "application/json");
+    assert.equal(failed.headers["content-security-policy"], undefined);
   }
+});
+
+test("startup gives GoTrue the runtime pool, never the admin transaction wrapper", () => {
+  // Load the real composition root with isolated dependencies, stopping before
+  // provider/socket startup. No production injection seam or database is needed.
+  execFileSync(process.execPath, ["--experimental-vm-modules", "--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    import { readFile } from 'node:fs/promises';
+    import { SourceTextModule, SyntheticModule } from 'node:vm';
+    const url = new URL('./src/server.js', import.meta.url);
+    let received, closed = 0;
+    const runtimePool = { end: async () => { closed++; } };
+    const stop = Object.assign(new Error('DUMMYSTOP'), { code: 'DUMMYSTOP' });
+    const root = new SourceTextModule(await readFile(url, 'utf8'), {
+      initializeImportMeta: meta => { meta.url = url.href; }
+    });
+    await root.link(async specifier => {
+      const exports = { ...await import(specifier.startsWith('.') ? new URL(specifier, url).href : specifier) };
+      if (specifier === './config.js') exports.createPool = () => runtimePool;
+      if (specifier === './gotrue.js') exports.createGoTrueClient = options => {
+        received = options.pool;
+        return { verifyProviders: async () => { throw stop; } };
+      };
+      return new SyntheticModule(Object.keys(exports), function () {
+        for (const [name, value] of Object.entries(exports)) this.setExport(name, value);
+      });
+    });
+    await root.evaluate();
+    await assert.rejects(root.namespace.startServer({ config: {
+      publicAuthorizationEnabled: false, gotrueUrl: 'https://auth.example/auth/v1',
+      supabaseAnonKey: 'DUMMYANONKEY', gotrueProvider: 'github'
+    }, writeLog() {} }), error => error === stop);
+    assert.equal(received, runtimePool, 'GoTrue must receive runtimePool');
+    assert.equal(closed, 1);
+  `], { cwd: new URL("../", import.meta.url), stdio: "pipe" });
 });

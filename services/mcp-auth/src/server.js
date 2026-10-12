@@ -1,5 +1,5 @@
 // OAuth HTTP composition: validated config/requests in, gated responses out.
-// Finish routes precede normal binding/provider dispatch; P9a owns activation.
+// Finish routes precede normal binding/provider dispatch; P9b owns their CSP.
 // GoTrue uses runtimePool, never the admin wrapper; finish verifies live binding.
 import { Pool } from "pg";
 import { adminQuery, adminTransactionContext, withAdminRole } from "./admin-transaction.js";
@@ -14,7 +14,7 @@ import { pathToFileURL } from "node:url";
 
 import { createPool, loadConfig } from "./config.js";
 import { ClientError, InteractionStateError } from "./client-error.js";
-import { FINISH_SECURITY_HEADERS, INTERACTION_SECURITY_HEADERS } from "./browser-security.js";
+import { INTERACTION_SECURITY_HEADERS } from "./browser-security.js";
 import { createConsentOrchestrator, createPostgresConsentProgress } from "./consent.js";
 import { createGoTrueClient, readGoTrueSession } from "./gotrue.js";
 import { createFinishFlow } from "./finish-flow.js";
@@ -113,14 +113,15 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
         json(response, 503, { error: "authorization_service_disabled" });
         return;
       }
-      // Navigation responses (including errors) keep P5's no-referrer policy.
+      // The timer is a preloaded asset; only P9b sets a document CSP.
       if (finishRoute || finishEnabled && path === FINISH_TIMER_PATH) {
-        for (const [name, value] of Object.entries(FINISH_SECURITY_HEADERS)) response.setHeader(name, value);
+        response.setHeader("referrer-policy", "no-referrer");
+        response.setHeader("x-content-type-options", "nosniff");
         if (path === FINISH_TIMER_PATH) {
           if (request.method !== "GET" && request.method !== "HEAD") {
             json(response, 405, { error: "method_not_allowed" }, { allow: "GET, HEAD" });
           } else {
-            response.writeHead(200, { ...FINISH_SECURITY_HEADERS, "content-type": "text/javascript; charset=utf-8" });
+            response.writeHead(200, { "content-type": "text/javascript; charset=utf-8" });
             response.end(request.method === "HEAD" ? undefined : FINISH_TIMER_SCRIPT);
           }
           return;
@@ -153,12 +154,12 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
       logger.info({ event: "request_failed", request_id: requestId, method: request.method,
         path, status, error_code: clientResponse?.body.error ?? error?.code ?? "internal_error" });
       if (!response.headersSent) {
-        if (error instanceof InteractionStateError && (request.method === "GET" ||
+        if (!finishRoute && error instanceof InteractionStateError && (request.method === "GET" ||
             error.code === "different_account" || error.code === "interaction_binding_mismatch" ||
             error.code === "interaction_expired") &&
             !String(request.headers.accept ?? "").includes("application/json")) {
           response.writeHead(status, {
-            ...(finishRoute ? FINISH_SECURITY_HEADERS : INTERACTION_SECURITY_HEADERS),
+            ...INTERACTION_SECURITY_HEADERS,
             "content-type": "text/html; charset=utf-8",
           });
           response.end(error.code === "different_account" ? renderDifferentAccountPage() : renderConsentResultPage());
