@@ -182,14 +182,10 @@
   inline-size: var(--av);
   block-size: var(--av);
   border-radius: 50%;
-  font-family: var(--home-font-body);
-  font-size: calc(var(--av) * 0.4);
-  font-weight: 700;
-  line-height: 1;
-  letter-spacing: 0;
 }
 
 .lp-av > img,
+.lp-av__mark > img,
 .lp-av__badge > img {
   display: block;
   inline-size: 100%;
@@ -200,7 +196,6 @@
 
 .lp-av--person {
   background: var(--home-person-neutral);
-  color: var(--home-on-person);
 }
 
 .lp-av--person[data-hue="0"] { background: var(--home-blue); }
@@ -213,21 +208,31 @@
   border-radius: calc(var(--av) * 0.28);
   background: var(--home-soft);
   box-shadow: inset 0 0 0 max(1.5px, calc(var(--av) * 0.045)) var(--stroke);
-  color: var(--home-ink-muted);
 }
 
-.lp-av--agent[data-hue="0"] { --stroke: var(--home-blue); background: var(--home-blue-tint); color: var(--home-blue-deep); }
-.lp-av--agent[data-hue="1"] { --stroke: var(--home-orange); background: var(--home-orange-tint); color: var(--home-orange-deep); }
-.lp-av--agent[data-hue="2"] { --stroke: var(--home-purple); background: var(--home-purple-tint); color: var(--home-purple-deep); }
-.lp-av--agent[data-hue="3"] { --stroke: var(--home-teal); background: var(--home-teal-tint); color: var(--home-teal-deep); }
+.lp-av--agent[data-hue="0"] { --stroke: var(--home-blue); background: var(--home-blue-tint); }
+.lp-av--agent[data-hue="1"] { --stroke: var(--home-orange); background: var(--home-orange-tint); }
+.lp-av--agent[data-hue="2"] { --stroke: var(--home-purple); background: var(--home-purple-tint); }
+.lp-av--agent[data-hue="3"] { --stroke: var(--home-teal); background: var(--home-teal-tint); }
 
 .lp-av--hosted[data-hue] {
   background: white;
 }
 
-.lp-av--hosted > img {
+.lp-av__mark {
   box-sizing: border-box;
-  padding: calc(var(--av) * 0.14);
+  inline-size: 100%;
+  block-size: 100%;
+  border-radius: 50%;
+  background: white;
+  padding: calc(var(--av) * 0.2);
+}
+
+/* Tile files already include their own white margin. Keep every vendor file unchanged. */
+.lp-av__mark--tile { padding: 0; }
+
+.lp-av__mark > img {
+  border-radius: 0;
   object-fit: contain;
 }
 
@@ -244,9 +249,6 @@
   border-radius: 50%;
   background: var(--stroke);
   box-shadow: 0 0 0 max(2px, calc(var(--av) * 0.06)) var(--lp-ring, var(--bg));
-  color: var(--home-on-person);
-  font-size: calc(var(--av) * 0.25);
-  font-weight: 700;
 }
 
 /* ==========================================================================

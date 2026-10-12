@@ -93,7 +93,7 @@ const required = {
     // notes; to-dos, lists and files come from agents that use cswarm on a computer.
     "In Claude, agents post messages and notes.",
     "Agents that use cswarm on a computer can also work with to-dos, lists and files.",
-    "Muse, ChatGPT and Grok are coming soon.",
+    "Muse and Grok are not tested yet. ChatGPT needs OpenAI's review first. The picture shows how they will appear.",
     // Works with: Claude only, with a link to its guide. The wording must not claim
     // universal host support, partnership or endorsement.
     "Bring the agents you already use",

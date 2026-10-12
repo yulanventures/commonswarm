@@ -3,6 +3,8 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { transform } from "@astrojs/compiler-rs";
+import { experimental_AstroContainer as AstroContainer } from "astro/container";
 import sharp from "sharp";
 import { IMAGES, landingImage } from "./landing-images.ts";
 
@@ -43,6 +45,29 @@ test("every shipped decorative avatar is a 160px square WebP", async () => {
     assert.equal(meta.format, "webp", `${file}: not WebP`);
     assert.equal(meta.width, 160, `${file}: not 160px wide`);
     assert.equal(meta.height, 160, `${file}: not 160px high`);
+  }
+});
+
+// Render the fixed UI16 cast, including marks not currently used in a decorative row.
+// Dimensions and the shipped inventory cannot detect a broken component URL or owner badge.
+test("every image path rendered by LandingAvatar exists under public", async () => {
+  const source = readFileSync(join(site, "src/components/landing/LandingAvatar.astro"), "utf8");
+  const compiled = transform(source, { filename: "LandingAvatar.astro", internalURL: "astro/compiler-runtime",
+    resultScopedSlot: true, resolvePath: (specifier) => specifier });
+  assert.deepEqual(compiled.diagnostics.filter((diagnostic) => diagnostic.severity === "error"), []);
+  const code = compiled.code
+    .replaceAll('"astro/compiler-runtime"', JSON.stringify(new URL("../../node_modules/astro/dist/runtime/compiler/index.js", import.meta.url).href))
+    .replaceAll('"../../lib/agent-hosts"', JSON.stringify(new URL("./agent-hosts.ts", import.meta.url).href));
+  const component = await import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`);
+  const container = await AstroContainer.create();
+  for (const name of ["maya", "jordan", "priya", "marcus", "wren", "gale", "atlas", "pike", "muse", "dot", "grok"]) {
+    const html = await container.renderToString(component.default, { props: { name } });
+    const paths = [...html.matchAll(/<img\b[^>]*\ssrc="([^"]+)"/g)].map((match) => match[1]);
+    assert.ok(paths.length > 0, `${name}: avatar rendered no image`);
+    for (const path of paths) {
+      assert.ok(path.startsWith("/landing/avatars/") || path.startsWith("/brand/works-with/"), `${name}: unexpected image path ${path}`);
+      assert.ok(existsSync(join(publicDir, path)), `${name}: ${path} is referenced but not shipped`);
+    }
   }
 });
 

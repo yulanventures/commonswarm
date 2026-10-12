@@ -27,6 +27,15 @@ one-click. Every page footer carries "Product names and logos are trademarks of 
 Each mark sits on its own white disc with padding for clear space, in both colour themes,
 because several owners supply only a dark mark and ask that it not be altered.
 
+2026-10-12 — Tom chose to show Muse in the homepage headline and Muse, Dot and Grok bot
+as example hosted agents in the app pictures, with their availability explained in
+the hero caption; Muse and Grok bot also appear in the Coming soon orbit. Works with stays
+Claude only, and the closing row uses local agents. Each unchanged vendor file sits
+on its own white disc inside the agent's rounded square tile in both colour themes.
+Non-tile marks have padding of about 0.2 times the avatar width; tile marks such as
+Muse already include white margin and get no extra padding. The owner's photo badge
+sits outside the tile's lower-right corner, with its ring clear of the vendor mark.
+
 | Shown as | File | Source | Usage rules found |
 | --- | --- | --- | --- |
 | Grok | `grok.svg` | xAI brand pack linked from [x.ai/legal/brand-guidelines](https://x.ai/legal/brand-guidelines): `Grok_Logomark_Dark.svg` (`#0A0A0A`). | Use only to refer to xAI services, exactly as supplied, no alteration, no implied endorsement, not combined into a new mark. |

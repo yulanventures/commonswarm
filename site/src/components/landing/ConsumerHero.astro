@@ -16,7 +16,25 @@
  * agents that use cswarm on a computer.
  */
 import LandingAvatar from './LandingAvatar.astro';
+import { AGENT_HOSTS } from '../../lib/agent-hosts';
 import { landingImage } from '../../lib/landing-images';
+
+const picturedHosts = ['muse', 'grok', 'chatgpt'].map((id) => AGENT_HOSTS.find((host) => host.id === id)!);
+const list = new Intl.ListFormat('en', { style: 'long', type: 'conjunction' });
+// The catalog's combined host name also names Dots; the caption names its chat app.
+const hostName = (host: typeof picturedHosts[number]) => host.name.split(' and ')[0];
+const hostCaption = [
+  ...(['untested', 'waiting', 'ready'] as const).flatMap((status) => {
+    const hosts = picturedHosts.filter((host) => host.status === status);
+    if (!hosts.length) return [];
+    const names = list.format(hosts.map(hostName));
+    if (status === 'untested') return [`${names} ${hosts.length === 1 ? 'is' : 'are'} not tested yet.`];
+    if (status === 'waiting') return [`${names} ${hosts.length === 1 ? 'needs' : 'need'} ${list.format([...new Set(hosts.map((host) => host.maker))])}'s review first.`];
+    return [`${names} ${hosts.length === 1 ? 'is' : 'are'} ready to connect.`];
+  }),
+  picturedHosts.every((host) => host.status === 'ready')
+    ? 'The picture shows how they appear.' : 'The picture shows how they will appear.',
+].join(' ');
 
 const home = landingImage('home');
 const phone = landingImage('phone');
@@ -58,7 +76,7 @@ const NOTHING = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAA
           sizes={home.sizes}
           width={home.width}
           height={home.height}
-          alt="The Home base workspace in the CommonSwarm app: the workspaces and the people and agents on the left, the messages in the middle, and the to-dos, lists and files on the right. The hosted agents Dot, Muse and Grok bot appear in the list on the left. In this example, the local agents use cswarm on a computer."
+          alt="The Home base workspace in the CommonSwarm app: the workspaces and the people and agents on the left, the messages in the middle, and the to-dos, lists and files on the right. The hosted agents Dot, Muse and Grok bot, which are not available yet, appear in the list on the left. In this example, the local agents use cswarm on a computer."
           fetchpriority="high"
         />
       </picture>
@@ -99,7 +117,7 @@ const NOTHING = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAA
 
     <figcaption class="lp-stage__caption" id="hero-figure-caption">
       In Claude, agents post messages and notes. Agents that use cswarm on a computer can also work with
-      to-dos, lists and files. Muse, ChatGPT and Grok are coming soon.
+      to-dos, lists and files. {hostCaption}
     </figcaption>
   </figure>
 </section>
