@@ -22,6 +22,10 @@ BEGIN
  END IF;
 END
 $role$;
+-- DDL snapshots are restored as postgres, which can SET ROLE swarm_admin.
+-- Keep that owner-role path usable after the applying principal's temporary
+-- grant is removed; do not inherit the guard's narrow auth-table privileges.
+GRANT commonswarm_oauth_session_guard TO swarm_admin WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
 GRANT USAGE ON SCHEMA auth, commonswarm_oauth TO commonswarm_oauth_session_guard;
 -- ALTER FUNCTION OWNER requires the new owner to have CREATE in its schema.
 GRANT CREATE ON SCHEMA commonswarm_oauth TO commonswarm_oauth_session_guard;
