@@ -62,7 +62,7 @@
     link.focus();
   }
   pause.addEventListener("click", pauseReturn);
-  link.addEventListener("auxclick", (e) => { if (state === "navigating") { e.preventDefault(); return; } pauseReturn(); });
+  link.addEventListener("auxclick", (e) => { e.preventDefault(); pauseReturn(); });
   link.addEventListener("contextmenu", (e) => { if (state === "navigating") { e.preventDefault(); return; } pauseReturn(); });
   window.addEventListener("pagehide", () => {
     cancelReturn(); clearTimeout(expiryTimer);

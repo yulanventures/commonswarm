@@ -1,5 +1,6 @@
 // Acceptance: synthetic HTTP messages and storage with real oidc-provider
 // 9.12.2 exercise navigation, response capture/replay and binding refusals.
+// Each response has full security headers and a fresh nonce matching any script.
 // No network/browser; P4/P9c own PostgreSQL concurrency and final redemption.
 import assert from 'node:assert/strict';
 import { Readable } from 'node:stream';
@@ -107,8 +108,43 @@ function noLeaks(h) {
 function secured(res) {
   assert.equal(res.headers['cache-control'], 'no-store');
   assert.equal(res.headers['referrer-policy'], 'no-referrer');
-  assert.match(res.headers['content-security-policy'], /frame-ancestors 'none'/u);
+  assert.equal(res.headers['x-content-type-options'], 'nosniff');
+  const csp = res.headers['content-security-policy'];
+  const nonce = /script-src 'nonce-([A-Za-z0-9_-]+)'/u.exec(csp)?.[1];
+  assert.ok(nonce, 'response must carry a nonce-based script policy');
+  assert.equal(Buffer.from(nonce, 'base64url').length, 16);
+  assert.equal(csp, `default-src 'none'; script-src 'nonce-${nonce}'; script-src-attr 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'`);
+  if (res.statusCode === 200) {
+    const scripts = [...res.body.matchAll(/<script\b[^>]*>/gu)].map(([tag]) => tag);
+    assert.deepEqual(scripts, [`<script src="/interaction/finish-timer.js" nonce="${nonce}" defer>`]);
+  }
+  return nonce;
 }
+
+test('every finish response gets a fresh nonce, including replay, expiry and method refusal', async t => {
+  const h = await harness(t), { uid, binding } = h;
+  const nonces = [];
+  const check = (res, status) => {
+    assert.equal(res.statusCode, status);
+    nonces.push(secured(res));
+  };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const prepared = h.response();
+    await h.flow.prepareFinish(h.request('/consent', 'POST'), prepared, binding, input);
+    check(prepared, 303);
+    check(await h.run(`/interaction/${uid}/connected`), 200);
+    check(await h.run(`/interaction/${uid}/finish`), 303);
+    check(await h.run(`/interaction/${uid}/finish`, `${SESSION_COOKIE}=DUMMYOTHERBROWSER; ${h.providerCookies}`), 410);
+    for (const route of ['connected', 'finish']) {
+      const refused = h.response();
+      await h.flow.handle(h.request(`/interaction/${uid}/${route}`, 'POST'), refused);
+      check(refused, 405);
+      assert.equal(refused.headers.allow, 'GET');
+    }
+  }
+  assert.equal(new Set(nonces).size, nonces.length, 'nonce must be fresh for every response');
+  noLeaks(h);
+});
 
 test('form and JSON consent navigate through 303/GET; fetch caller uses the bound response.url', async t => {
   for (const contentType of ['application/x-www-form-urlencoded', 'application/json']) {
@@ -162,7 +198,9 @@ test('real provider produces code-free resume; a dropped response replays cookie
   const repeat = await h.run(`/interaction/${uid}/finish?redirect_uri=https://attacker.example/`);
   assert.equal(first.statusCode, 303); secured(first); secured(repeat);
   assert.equal(first.headers.location, h.resumeLocation);
-  assert.deepEqual(repeat.headers, first.headers);
+  // Resume data replays unchanged; each delivery still needs a fresh CSP nonce.
+  assert.notEqual(repeat.headers['content-security-policy'], first.headers['content-security-policy']);
+  assert.deepEqual({ ...repeat.headers, 'content-security-policy': first.headers['content-security-policy'] }, first.headers);
   assert.deepEqual(first.headers['set-cookie'], ['resume=DUMMYCOOKIE; Secure; HttpOnly', 'second=DUMMYCOOKIE; Secure']);
   assert.ok(h.providerCookies.includes(h.provider.cookieName('resume')));
   assert.deepEqual((await h.provider.Interaction.find(uid)).result, input.providerResult);

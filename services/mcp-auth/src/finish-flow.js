@@ -2,10 +2,11 @@
 // outputs: connected HTML or a saved code-free AS 303 with provider cookies.
 // P8 gates/routes this flow before normal binding; P9a calls prepareFinish only
 // after CSRF, live-session checks and activation. P4 owns expiry and single creation.
+// Every browser response gets a fresh CSP nonce, shared with its timer script.
 import { errors } from 'oidc-provider';
 import { parseCookies, SESSION_COOKIE } from './browser-security.js';
 import { InteractionStateError } from './client-error.js';
-import { finishPaths, FINISH_SECURITY_HEADERS, renderFinishPage, renderFinishExpiredPage } from './finish-page.js';
+import { finishPaths, createFinishNonce, finishSecurityHeaders, renderFinishPage, renderFinishExpiredPage } from './finish-page.js';
 
 const restart = () => new InteractionStateError('interaction_expired');
 // Capture without a socket: nothing reaches the browser before P4 saves it.
@@ -20,12 +21,14 @@ function captureResponse() {
   };
 }
 function redirect(response, location, cookies = []) {
-  response.writeHead(303, { ...FINISH_SECURITY_HEADERS, location,
+  response.writeHead(303, { ...finishSecurityHeaders(createFinishNonce()), location,
     ...(cookies.length ? { 'set-cookie': cookies } : {}) });
   response.end();
 }
-function html(response, status, body) {
-  response.writeHead(status, { ...FINISH_SECURITY_HEADERS, 'content-type': 'text/html; charset=utf-8' });
+function html(response, status, render) {
+  const nonce = createFinishNonce();
+  const body = render(nonce);
+  response.writeHead(status, { ...finishSecurityHeaders(nonce), 'content-type': 'text/html; charset=utf-8' });
   response.end(body);
 }
 
@@ -46,7 +49,7 @@ export function createFinishFlow({ provider, store, finishStore }) {
       const match = /^\/interaction\/([^/]+)\/(connected|finish)$/u.exec(url.pathname);
       if (!match) return false;
       if (request.method !== 'GET') {
-        response.writeHead(405, { ...FINISH_SECURITY_HEADERS, allow: 'GET' });
+        response.writeHead(405, { ...finishSecurityHeaders(createFinishNonce()), allow: 'GET' });
         response.end();
         return true;
       }
@@ -69,8 +72,8 @@ export function createFinishFlow({ provider, store, finishStore }) {
         clientDisplay = record.display_model.clientDisplay;
         if (match[2] === 'connected') {
           if (!['prepared', 'resume_ready'].includes(record.state)) throw restart();
-          html(response, 200, renderFinishPage({ ...record.display_model,
-            interactionUid: uid, deadline: new Date(record.expires_at).getTime() }));
+          html(response, 200, nonce => renderFinishPage({ ...record.display_model,
+            interactionUid: uid, deadline: new Date(record.expires_at).getTime(), nonce }));
         } else {
           const saved = await finishStore.ensureResume(binding, async row => {
             await provider.interactionFinished(request, captured, row.provider_result);
@@ -82,7 +85,7 @@ export function createFinishFlow({ provider, store, finishStore }) {
         }
       } catch (error) {
         if (!(error instanceof InteractionStateError) && !(error instanceof errors.SessionNotFound)) throw error;
-        html(response, 410, renderFinishExpiredPage({ clientDisplay }));
+        html(response, 410, () => renderFinishExpiredPage({ clientDisplay }));
       }
       return true;
     },
