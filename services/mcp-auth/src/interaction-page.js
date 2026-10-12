@@ -89,15 +89,15 @@ function renderClientIdentity(clientDisplay) {
 }
 
 function renderAccount(identity, csrfToken, switchAccount) {
-  const label = identity.displayName || identity.email || identity.userId;
+  const email = identity.email || "Email unavailable";
+  const label = identity.displayName || email;
   const provider = typeof identity.provider === "string" && PROVIDER_LABELS.has(identity.provider)
     ? identity.provider
     : null;
-  const signedIn = provider
-    ? `Signed in with ${PROVIDER_LABELS.get(provider)} as <strong>${escapeHtml(label)}</strong>`
-    : `Signed in as <strong>${escapeHtml(label)}</strong>`;
-  const email = identity.displayName && identity.email && identity.email !== identity.displayName
-    ? `<span class="account-email">${escapeHtml(identity.email)}</span>`
+  const emailSuffix = !identity.displayName && identity.email ? "" : ` (${escapeHtml(email)})`;
+  const continueAs = `Continue as <strong>${escapeHtml(label)}</strong>${emailSuffix}`;
+  const providerText = provider
+    ? `<span class="account-email">Signed in with ${PROVIDER_LABELS.get(provider)}</span>`
     : "";
   const badge = provider
     ? `<span class="provider-badge provider-${provider}">${PROVIDER_GLYPHS[provider]}</span>`
@@ -105,12 +105,12 @@ function renderAccount(identity, csrfToken, switchAccount) {
   const switchForm = switchAccount
     ? `<form method="post" action="${escapeHtml(switchAccount.action)}" class="switch-form">
         <input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}">
-        <button type="submit" class="switch-button">Use a different account</button>
+        <button type="submit" class="switch-button">Use another account</button>
       </form>`
     : "";
   return `<div class="account">
       <span class="avatar" aria-hidden="true">${initial(label)}${badge}</span>
-      <p class="account-text"><span>${signedIn}</span>${email}</p>
+      <p class="account-text"><span>${continueAs}</span>${providerText}</p>
       ${switchForm}
     </div>`;
 }
@@ -387,4 +387,4 @@ ${CONSENT_STYLES}
 </main></body></html>`;
 }
 
-export { CONSENT_WARNING, PROVIDER_LABELS, escapeHtml };
+export { CONSENT_WARNING, PROVIDER_LABELS, escapeHtml, BRAND_MARK, CONSENT_STYLES, renderClientIdentity };
