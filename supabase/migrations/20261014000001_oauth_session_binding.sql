@@ -26,20 +26,51 @@ $role$;
 -- Keep that owner-role path usable after the applying principal's temporary
 -- grant is removed; do not inherit the guard's narrow auth-table privileges.
 GRANT commonswarm_oauth_session_guard TO swarm_admin WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
-GRANT USAGE ON SCHEMA auth, commonswarm_oauth TO commonswarm_oauth_session_guard;
--- ALTER FUNCTION OWNER requires the new owner to have CREATE in its schema.
-GRANT CREATE ON SCHEMA commonswarm_oauth TO commonswarm_oauth_session_guard;
-GRANT SELECT (id, user_id, not_after) ON auth.sessions TO commonswarm_oauth_session_guard;
-GRANT SELECT (session_id, created_at, authentication_method) ON auth.mfa_amr_claims TO commonswarm_oauth_session_guard;
-GRANT SELECT (id, deleted_at, banned_until) ON auth.users TO commonswarm_oauth_session_guard;
+-- Use the owner-role path established in 20260723000001_p1_schema.sql:16.
+-- The CLI's non-superuser postgres must not rely on an inherited grant option
+-- or on GoTrue's grants to postgres. Resolve each owner instead of assuming
+-- that the auth schema and GoTrue-created tables have the same owner.
+DO $owner_grants$
+DECLARE
+ applying_role name := current_user;
+ item record;
+BEGIN
+ FOR item IN
+  SELECT n.nspowner::regrole::text AS owner, format(
+   'GRANT USAGE ON SCHEMA %I TO commonswarm_oauth_session_guard', n.nspname
+  ) AS command FROM pg_catalog.pg_namespace n WHERE n.nspname IN ('auth', 'commonswarm_oauth')
+  UNION ALL
+  -- ALTER FUNCTION OWNER requires the new owner to have CREATE in its schema.
+  SELECT n.nspowner::regrole::text, 'GRANT CREATE ON SCHEMA commonswarm_oauth TO commonswarm_oauth_session_guard'
+   FROM pg_catalog.pg_namespace n WHERE n.nspname = 'commonswarm_oauth'
+  UNION ALL
+  SELECT c.relowner::regrole::text, format(
+   'GRANT SELECT (%s) ON auth.%I TO commonswarm_oauth_session_guard', grant_columns, c.relname
+  ) FROM (VALUES
+   ('sessions', 'id, user_id, not_after'),
+   ('mfa_amr_claims', 'session_id, created_at, authentication_method'),
+   ('users', 'id, deleted_at, banned_until')
+  ) AS required(table_name, grant_columns)
+  JOIN pg_catalog.pg_class c ON c.relname = required.table_name
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'auth'
+  UNION ALL
+  SELECT c.relowner::regrole::text,
+   'GRANT SELECT (gotrue_session_id, user_id, invalidated_at), UPDATE (invalidated_at) ON commonswarm_oauth.browser_sessions TO commonswarm_oauth_session_guard'
+   FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = 'commonswarm_oauth' AND c.relname = 'browser_sessions'
+ LOOP
+  EXECUTE format('SET LOCAL ROLE %I', item.owner);
+  EXECUTE item.command;
+  EXECUTE format('SET LOCAL ROLE %I', applying_role);
+ END LOOP;
+END
+$owner_grants$;
 CREATE POLICY oauth_session_guard_read ON auth.sessions
  FOR SELECT TO commonswarm_oauth_session_guard USING (true);
 CREATE POLICY oauth_session_guard_read ON auth.users
  FOR SELECT TO commonswarm_oauth_session_guard USING (true);
 CREATE POLICY oauth_session_guard_read ON auth.mfa_amr_claims
  FOR SELECT TO commonswarm_oauth_session_guard USING (true);
-GRANT SELECT (gotrue_session_id, user_id, invalidated_at), UPDATE (invalidated_at)
- ON commonswarm_oauth.browser_sessions TO commonswarm_oauth_session_guard;
 CREATE POLICY oauth_guard_revoke ON commonswarm_oauth.browser_sessions
  FOR UPDATE TO commonswarm_oauth_session_guard USING (true) WITH CHECK (true);
 -- UPDATE with a WHERE clause also requires a SELECT policy for the guard.
@@ -58,8 +89,6 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
  GROUP BY s.id, s.user_id
 $$;
 ALTER FUNCTION commonswarm_oauth.live_gotrue_session(uuid, uuid) OWNER TO commonswarm_oauth_session_guard;
-REVOKE ALL ON FUNCTION commonswarm_oauth.live_gotrue_session(uuid, uuid) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION commonswarm_oauth.live_gotrue_session(uuid, uuid) TO commonswarm_oauth_runtime;
 
 -- GoTrue v2.197.0 global logout must delete every affected auth.sessions row.
 -- Future not_after updates stay live; expiry is checked by live_gotrue_session.
@@ -72,8 +101,19 @@ BEGIN
 END
 $$;
 ALTER FUNCTION commonswarm_oauth.invalidate_gotrue_session() OWNER TO commonswarm_oauth_session_guard;
-REVOKE CREATE ON SCHEMA commonswarm_oauth FROM commonswarm_oauth_session_guard;
-REVOKE ALL ON FUNCTION commonswarm_oauth.invalidate_gotrue_session() FROM PUBLIC;
+-- Apply ACLs as the owners, before removing the applying role's SET path.
+DO $function_grants$
+DECLARE applying_role name := current_user;
+BEGIN
+ SET LOCAL ROLE commonswarm_oauth_session_guard;
+ REVOKE ALL ON FUNCTION commonswarm_oauth.live_gotrue_session(uuid, uuid) FROM PUBLIC;
+ REVOKE ALL ON FUNCTION commonswarm_oauth.invalidate_gotrue_session() FROM PUBLIC;
+ GRANT EXECUTE ON FUNCTION commonswarm_oauth.live_gotrue_session(uuid, uuid) TO commonswarm_oauth_runtime;
+ SET LOCAL ROLE swarm_admin;
+ REVOKE CREATE ON SCHEMA commonswarm_oauth FROM commonswarm_oauth_session_guard;
+ EXECUTE format('SET LOCAL ROLE %I', applying_role);
+END
+$function_grants$;
 CREATE TRIGGER commonswarm_oauth_session_revocation
  AFTER DELETE ON auth.sessions
  FOR EACH ROW EXECUTE FUNCTION commonswarm_oauth.invalidate_gotrue_session();
@@ -88,3 +128,50 @@ BEGIN
  END IF;
 END
 $role$;
+
+-- GRANT can warn and change nothing. Verify effective access after all grants
+-- and temporary membership/CREATE revocations; a missing privilege aborts apply.
+DO $session_privileges$
+DECLARE item record;
+BEGIN
+ FOR item IN SELECT * FROM (VALUES
+  ('commonswarm_oauth_session_guard', 'auth'),
+  ('commonswarm_oauth_session_guard', 'commonswarm_oauth'),
+  ('commonswarm_oauth_runtime', 'commonswarm_oauth')
+ ) AS required(role_name, schema_name) LOOP
+  IF has_schema_privilege(item.role_name, item.schema_name, 'USAGE') IS DISTINCT FROM true THEN
+   RAISE EXCEPTION 'OAuth session privilege missing: % needs USAGE on schema %', item.role_name, item.schema_name
+    USING ERRCODE = '42501';
+  END IF;
+ END LOOP;
+ FOR item IN SELECT * FROM (VALUES
+  ('auth.sessions', 'id', 'SELECT'),
+  ('auth.sessions', 'user_id', 'SELECT'),
+  ('auth.sessions', 'not_after', 'SELECT'),
+  ('auth.mfa_amr_claims', 'session_id', 'SELECT'),
+  ('auth.mfa_amr_claims', 'created_at', 'SELECT'),
+  ('auth.mfa_amr_claims', 'authentication_method', 'SELECT'),
+  ('auth.users', 'id', 'SELECT'),
+  ('auth.users', 'deleted_at', 'SELECT'),
+  ('auth.users', 'banned_until', 'SELECT'),
+  ('commonswarm_oauth.browser_sessions', 'gotrue_session_id', 'SELECT'),
+  ('commonswarm_oauth.browser_sessions', 'user_id', 'SELECT'),
+  ('commonswarm_oauth.browser_sessions', 'invalidated_at', 'SELECT'),
+  ('commonswarm_oauth.browser_sessions', 'invalidated_at', 'UPDATE')
+ ) AS required(table_name, column_name, privilege) LOOP
+  IF has_column_privilege('commonswarm_oauth_session_guard', item.table_name, item.column_name, item.privilege)
+    IS DISTINCT FROM true THEN
+   RAISE EXCEPTION 'OAuth session privilege missing: guard needs % on %.%', item.privilege, item.table_name, item.column_name
+    USING ERRCODE = '42501';
+  END IF;
+ END LOOP;
+ IF has_function_privilege('commonswarm_oauth_runtime', 'commonswarm_oauth.live_gotrue_session(uuid,uuid)', 'EXECUTE')
+   IS DISTINCT FROM true THEN
+  RAISE EXCEPTION 'OAuth session privilege missing: runtime needs EXECUTE on live_gotrue_session'
+   USING ERRCODE = '42501';
+ END IF;
+ IF has_schema_privilege('commonswarm_oauth_session_guard', 'commonswarm_oauth', 'CREATE') THEN
+  RAISE EXCEPTION 'OAuth session guard still has temporary CREATE privilege' USING ERRCODE = '42501';
+ END IF;
+END
+$session_privileges$;

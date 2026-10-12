@@ -3,6 +3,7 @@
 // Outputs are assertions only; missing CI prerequisites fail, never skip.
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { InteractionStore } from "../src/interaction-store.js";
 import { hashOpaque, sessionCookie } from "../src/browser-security.js";
@@ -42,7 +43,7 @@ test("fresh live reuse succeeds; forced, stale, revoked and unproved reuse fail 
 test("CI only: fixed seven-day deadline and GoTrue binding survive attachment and rotation", {
   skip: process.env.CI !== "true" ? "CI only: migrated PostgreSQL required" : false,
   timeout: 30000,
-}, async () => {
+}, async t => {
   const { Pool } = await import("pg");
   const target = new URL(process.env.MCP_OAUTH_TEST_DATABASE_URL ?? "postgresql://postgres:postgres@127.0.0.1:54322/postgres");
   assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(target.hostname), "isolated local CI database required");
@@ -57,6 +58,56 @@ test("CI only: fixed seven-day deadline and GoTrue binding survive attachment an
     identityVerified: true, email: "TEST@example.test", displayName: "TEST user" };
   try {
     assert.equal((await runtime.query("SELECT current_user AS role")).rows[0].role, "commonswarm_oauth_runtime");
+    // Catalog metadata only: CI records the actual image/GoTrue object owners
+    // and whether postgres can grant directly or select the owner role.
+    const owners = await admin.query(`
+      SELECT 'auth' AS object, pg_get_userbyid(nspowner) AS owner,
+        has_schema_privilege('postgres', oid, 'USAGE WITH GRANT OPTION') AS can_grant,
+        pg_has_role('postgres', nspowner, 'SET') AS can_set_owner
+      FROM pg_namespace WHERE nspname='auth'
+      UNION ALL
+      SELECT 'auth.'||c.relname, pg_get_userbyid(c.relowner),
+        has_table_privilege('postgres', c.oid, 'SELECT WITH GRANT OPTION'),
+        pg_has_role('postgres', c.relowner, 'SET')
+      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname='auth' AND c.relname IN ('sessions','users','mfa_amr_claims')
+      ORDER BY object`);
+    assert.equal(owners.rows.length, 4, "auth schema and all three GoTrue table owners enumerated");
+    assert.ok(owners.rows.every(row => row.can_set_owner), "local migrating role must be able to use each auth owner");
+    t.diagnostic(JSON.stringify({ authPrivilegeOwners: owners.rows }));
+    // Execute the migration's actual postcondition, then remove each reviewed
+    // privilege in a rollback-only transaction. A warning-only/no-op grant must
+    // fail at this gate, before an application query discovers the missing ACL.
+    const migration = readFileSync(new URL("../../../supabase/migrations/20261014000001_oauth_session_binding.sql", import.meta.url), "utf8");
+    const gate = migration.match(/DO \$session_privileges\$[\s\S]*?\$session_privileges\$;/u)?.[0];
+    assert.ok(gate, "migration must have an executable effective-privilege postcondition");
+    const allowlist = JSON.parse(readFileSync(new URL("../../../tests/support/admin-issuer-privileges.json", import.meta.url), "utf8"));
+    const sessionPrivileges = allowlist.filter(([role, kind, object]) => role === "commonswarm_oauth_session_guard"
+      || (role === "commonswarm_oauth_runtime" && kind === "FUNCTION" && object === "commonswarm_oauth.live_gotrue_session(uuid,uuid)"));
+    assert.equal(sessionPrivileges.length, 19, "all reviewed session-guard entries remain present");
+    const mutations = sessionPrivileges.filter(([, kind]) => ["SCHEMA", "COLUMN", "FUNCTION"].includes(kind));
+    mutations.push(["commonswarm_oauth_runtime", "SCHEMA", "commonswarm_oauth", "USAGE"]);
+    const connection = await admin.connect();
+    try {
+      await connection.query("BEGIN");
+      await connection.query(gate);
+      assert.equal(mutations.length, 17, "two guard schemas, thirteen columns, runtime schema and runtime function");
+      for (const [role, kind, object, privilege] of mutations) {
+        const parts = object.split("."), column = kind === "COLUMN" ? parts.pop() : null;
+        const target = column ? parts.join(".") : object;
+        const check = kind === "COLUMN" ? "SELECT has_column_privilege($1,$2,$3,$4) AS allowed"
+          : kind === "SCHEMA" ? "SELECT has_schema_privilege($1,$2,$3) AS allowed"
+            : "SELECT has_function_privilege($1,$2,$3) AS allowed";
+        const values = column ? [role, target, column, privilege] : [role, target, privilege];
+        assert.equal((await connection.query(check, values)).rows[0].allowed, true);
+        await connection.query("SAVEPOINT missing_session_privilege");
+        await connection.query(`REVOKE ${privilege}${column ? ` (${column})` : ""} ON ${kind === "COLUMN" ? "TABLE" : kind} ${target} FROM ${role}`);
+        assert.equal((await connection.query(check, values)).rows[0].allowed, false);
+        await assert.rejects(connection.query(gate), { code: "42501", message: /^OAuth session privilege missing:/u });
+        await connection.query("ROLLBACK TO SAVEPOINT missing_session_privilege");
+        await connection.query(gate);
+      }
+    } finally { await connection.query("ROLLBACK"); connection.release(); }
     for (const [id, sid] of [[userId, authId], [controlId, controlAuth]]) {
       await admin.query("INSERT INTO auth.users(id,aud,role,email) VALUES($1,'authenticated','authenticated',$2)", [id, `${id}@example.test`]);
       await admin.query("INSERT INTO auth.sessions(id,user_id) VALUES($1,$2)", [sid, id]);
