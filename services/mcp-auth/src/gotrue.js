@@ -4,6 +4,28 @@ import { AUTH_PROVIDER_CATALOG } from "./auth-provider-catalog.js";
 
 import { randomOpaque } from "./browser-security.js";
 
+// Exchange PKCE inputs for verified identity/session/time, never retained tokens.
+// GoTrue /user verifies the signature; claims and live DB binding must also agree.
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+function unverified() {
+  const error = new Error("GoTrue session could not be verified");
+  error.code = "gotrue_session_unverified";
+  return error;
+}
+
+// Read only the narrow live-status function; absent/revoked/unproved means null.
+// Inputs are verified session/user UUIDs; output preserves original auth time.
+export async function readGoTrueSession(pool, { sessionId, userId }) {
+  if (!pool || !uuid.test(sessionId ?? "") || !uuid.test(userId ?? "")) return null;
+  const result = await pool.query(
+    "SELECT * FROM commonswarm_oauth.live_gotrue_session($1::uuid, $2::uuid)", [sessionId, userId]);
+  const row = result.rows[0];
+  const seconds = row ? Math.floor(new Date(row.authenticated_at).getTime() / 1000) : NaN;
+  return row?.session_id === sessionId && row?.user_id === userId && Number.isSafeInteger(seconds)
+    && seconds > 0 && seconds <= Math.floor(Date.now() / 1000)
+    ? { sessionId, userId, interactiveAuthAtSeconds: seconds } : null;
+}
+
 function challenge(verifier) {
   return createHash("sha256").update(verifier).digest("base64url");
 }
@@ -19,7 +41,7 @@ async function jsonOrError(response) {
   return body;
 }
 
-export function createGoTrueClient({ baseUrl, anonKey, provider, providers = [provider], fetch: fetchImplementation = globalThis.fetch }) {
+export function createGoTrueClient({ baseUrl, anonKey, provider, providers = [provider], pool, fetch: fetchImplementation = globalThis.fetch }) {
   const root = new URL(baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
   const known = new Set(AUTH_PROVIDER_CATALOG.map(({ id }) => id));
   if (!providers.length || providers.some((id) => !known.has(id))) {
@@ -74,6 +96,21 @@ export function createGoTrueClient({ baseUrl, anonKey, provider, providers = [pr
       });
       const user = await jsonOrError(userResponse);
       if (typeof user.id !== "string") throw new Error("GoTrue returned no user identity");
+      // Decode only AFTER GoTrue verified these exact token bytes. A decoded JWT
+      // alone, /user identity alone, or expires_in cannot establish the binding.
+      let claims;
+      try {
+        const parts = tokens.access_token.split(".");
+        if (parts.length !== 3) throw unverified();
+        claims = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+      } catch { throw unverified(); }
+      const now = Math.floor(Date.now() / 1000);
+      if (!claims || typeof claims !== "object" || claims.iss !== root.href.replace(/\/$/u, "") || claims.sub !== user.id
+          || !(claims.aud === "authenticated" || Array.isArray(claims.aud) && claims.aud.includes("authenticated"))
+          || !Number.isSafeInteger(claims.exp) || claims.exp <= now
+          || !uuid.test(claims.session_id ?? "")) throw unverified();
+      const binding = await readGoTrueSession(pool, { sessionId: claims.session_id, userId: user.id });
+      if (!binding) throw unverified();
       const email = user.email_confirmed_at && typeof user.email === "string" ? user.email : null;
       return {
         identity: {
@@ -85,9 +122,8 @@ export function createGoTrueClient({ baseUrl, anonKey, provider, providers = [pr
             ? user.user_metadata.display_name
             : (typeof user.user_metadata?.full_name === "string" ? user.user_metadata.full_name : email ?? "CommonSwarm user"),
           identityVerified: true,
-          interactiveAuthAtSeconds: Number.isFinite(tokens.expires_in)
-            ? Math.floor(Date.now() / 1000)
-            : null,
+          gotrueSessionId: binding.sessionId,
+          interactiveAuthAtSeconds: binding.interactiveAuthAtSeconds,
         },
       };
     },
