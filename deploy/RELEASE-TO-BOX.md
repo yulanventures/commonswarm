@@ -2213,6 +2213,7 @@ name per line; empty when none). The lead supplies both lists with the release; 
 
 ### Rollback — explicit HezLead decision; Anvil executes the named migration correction
 
+Before any real rollback of item-t3 or item-g3c, run their catalog proofs with search_path "$user", public (proofs print uid() otherwise).
 Prefer a reviewed forward fix. Run a down-migration only when it was supplied
 and reviewed in the same PR as the up-migration. A full restore requires Tom's
 explicit approval and is never the reflex for a failed migration. A failed
