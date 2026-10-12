@@ -106,11 +106,11 @@ boundary — please keep it accurate if you change the site.
 The `/app` workspace connects to our API and stores a sign-in session in the browser.
 Cloudflare adds its Web Analytics script to our site pages to count page views and
 measure load time. On each page view it records the page address without the query
-string, the referring page, country, browser and device type, and load timing from
+string, the referring page, country, browser, operating system and device type, and load timing from
 the browser's Performance API. The analytics script uses no cookies, local storage,
 or other client-side state, and does not fingerprint individuals using their IP
-address or User Agent. Cloudflare keeps detailed data for 7 days, then aggregates it
-to a sample of about 10%. Marketing and legal pages use self-hosted fonts.
+address or User Agent. Cloudflare keeps detailed data for 7 days, then keeps
+an aggregated sample. Marketing and legal pages use self-hosted fonts.
 
 The items below describe the former static prototype.
 
