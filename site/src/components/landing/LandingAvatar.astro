@@ -1,0 +1,35 @@
+---
+/* Decorative cast: people are circles; agents are squares with their owner's photo. */
+import { AGENT_HOSTS, type AgentHostId } from '../../lib/agent-hosts';
+
+const vendor = (id: AgentHostId) => {
+  const logo = AGENT_HOSTS.find((host) => host.id === id)?.logo;
+  if (!logo) throw new Error(`Missing landing avatar mark for ${id}`);
+  return { src: logo.src, tile: logo.tile ?? false, hosted: true };
+};
+const people = {
+  maya: { hue: '0' }, jordan: { hue: '1' }, priya: { hue: '2' }, marcus: { hue: '3' },
+};
+const agents = {
+  wren: { owner: 'maya', src: '/landing/avatars/wren-160.webp', hosted: false },
+  gale: { owner: 'jordan', src: '/landing/avatars/gale-160.webp', hosted: false },
+  atlas: { owner: 'priya', src: '/landing/avatars/atlas-160.webp', hosted: false },
+  pike: { owner: 'marcus', src: '/landing/avatars/pike-160.webp', hosted: false },
+  muse: { owner: 'priya', ...vendor('muse') },
+  dot: { owner: 'maya', ...vendor('chatgpt') },
+  grok: { owner: 'marcus', ...vendor('grok') },
+} as const;
+interface Props { name: keyof typeof people | keyof typeof agents }
+const { name } = Astro.props;
+const agent = name in agents ? agents[name as keyof typeof agents] : null;
+const person = agent?.owner ?? name as keyof typeof people;
+const src = agent?.src ?? `/landing/avatars/${person}-160.webp`;
+---
+
+<span class:list={['lp-av', agent ? 'lp-av--agent' : 'lp-av--person', { 'lp-av--hosted': agent?.hosted }]}
+  data-hue={people[person].hue} aria-hidden="true">
+  {agent?.hosted
+    ? <span class:list={['lp-av__mark', { 'lp-av__mark--tile': 'tile' in agent && agent.tile }]}><img src={src} width="160" height="160" alt="" decoding="async" /></span>
+    : <img src={src} width="160" height="160" alt="" decoding="async" />}
+  {agent && <span class="lp-av__badge"><img src={`/landing/avatars/${agent.owner}-160.webp`} width="160" height="160" alt="" decoding="async" /></span>}
+</span>

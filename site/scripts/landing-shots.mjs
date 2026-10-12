@@ -10,6 +10,7 @@
  *     --states marketing --themes dark,light
  *
  * Usage: node scripts/landing-shots.mjs <run>   (<run> holds dark/ and light/ folders of <id>-screen-<width>.png)
+ * Avatars only: node scripts/landing-shots.mjs avatars <generated PNG folder>
  *
  * Crops are in CSS pixels of the shot (the PNGs are 2x); boxes were measured from the app's own elements. Each crop
  * starts and ends in a gap between elements, so no picture cuts through text, a card or the phone's tab bar. The
@@ -26,8 +27,22 @@ import sharp from "sharp";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const run = process.argv[2];
 if (!run) {
-  console.error("usage: node scripts/landing-shots.mjs <harness run folder with dark/ and light/>");
+  console.error("usage: node scripts/landing-shots.mjs <harness run folder with dark/ and light/> | avatars <generated PNG folder>");
   process.exit(2);
+}
+
+if (run === "avatars") {
+  const gen = process.argv[3];
+  if (!gen) throw new Error("avatars requires a generated PNG folder");
+  const out = join(root, "public", "landing", "avatars");
+  const names = ["person-maya", "person-jordan", "person-priya", "person-marcus", "agent-wren", "agent-gale", "agent-atlas", "agent-pike"];
+  await mkdir(out, { recursive: true });
+  for (const name of names) {
+    const target = join(out, `${name.replace(/^(person|agent)-/, "")}-160.webp`);
+    await sharp(join(gen, `${name}.png`)).resize(160, 160).webp({ quality: 82, effort: 6 }).toFile(target);
+    console.log(`wrote ${target} 160x160`);
+  }
+  process.exit(0);
 }
 
 const SCALE = 2;

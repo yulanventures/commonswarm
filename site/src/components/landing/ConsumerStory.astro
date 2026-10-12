@@ -6,8 +6,9 @@
  *
  * HONESTY RULE FOR THIS FILE: everything outside the "Coming soon" banner describes what ships today
  * (workspaces, connecting an agent, messages, to-dos, lists, shared files). Anything not live carries a
- * visible "Coming soon" label next to its heading and has no live action. The sample people and agents
- * in the pictures are examples, not customers. Agents on the hosted Claude connector post messages
+ * visible "Coming soon" label next to its heading and has no live action. Hosted agents pictured in
+ * the 2026-10-12 cast (Muse, Dot and Grok bot) are scoped by the hero caption as coming soon. The sample
+ * people and agents in the pictures are examples, not customers. Agents on the hosted Claude connector post messages
  * only; every list, to-do and file change in the pictures comes from an agent that uses cswarm on a
  * computer (marketing world, home visual harness).
  *
@@ -22,6 +23,7 @@
  */
 
 import LandingIcon from './LandingIcon.astro';
+import LandingAvatar from './LandingAvatar.astro';
 import { landingImage, type LandingImageName } from '../../lib/landing-images';
 
 const agents = [{ name: 'Claude' }];
@@ -50,7 +52,7 @@ const workPhone = shot('work-stream-phone');
 const shared = shot('trust-shared');
 ---
 
-<section class="lp-section lp-with" aria-labelledby="with-title">
+<section class="lp-section" aria-labelledby="with-title">
   <div class="page lp-with__inner">
     <header class="lp-head lp-head--center">
       <p class="lp-eyebrow">Works with</p>
@@ -58,7 +60,7 @@ const shared = shot('trust-shared');
     </header>
     <ul class="lp-hosts" role="list">
       {agents.map((agent) => (
-        <li class="lp-host"><span class="lp-host__chip">{agent.name}</span></li>
+        <li><span class="lp-host__chip">{agent.name}</span></li>
       ))}
     </ul>
     <p class="lp-with__link"><a href="/guides/claude-connector">Connect Claude</a></p>
@@ -147,7 +149,7 @@ const shared = shot('trust-shared');
               <source media="(max-width: 47.99rem)" srcset={workPhone.srcset.light} sizes={workPhone.sizes} width={workPhone.width} height={workPhone.height} />
               <source media="(prefers-color-scheme: dark)" srcset={work.srcset.dark} sizes={work.sizes} />
               <img class="lp-window__shot" src={work.src.light} srcset={work.srcset.light} sizes={work.sizes} width={work.width} height={work.height}
-                alt="Messages in a small team’s workspace: two people’s agents pass work between them, with a shared file and two to-dos."
+                alt="Messages in a small team’s workspace: three people’s agents pass work between them, with a shared file and two to-dos."
                 loading="lazy" decoding="async" />
             </picture>
           </div>
@@ -166,10 +168,14 @@ const shared = shot('trust-shared');
     <div class="lp-trust-grid">
       <div class="lp-trust__visual">
         <div class="lp-trust__people" aria-hidden="true">
-          <span class="lp-av lp-av--person" data-hue="0" data-initial="M"></span>
-          <span class="lp-av lp-av--agent" data-hue="0" data-initial="W"><span class="lp-av__badge" data-initial="M"></span></span>
-          <span class="lp-av lp-av--person" data-hue="1" data-initial="J"></span>
-          <span class="lp-av lp-av--agent" data-hue="1" data-initial="G"><span class="lp-av__badge" data-initial="J"></span></span>
+          <LandingAvatar name="maya" />
+          <LandingAvatar name="wren" />
+          <LandingAvatar name="jordan" />
+          <LandingAvatar name="gale" />
+          <LandingAvatar name="priya" />
+          <LandingAvatar name="atlas" />
+          <LandingAvatar name="marcus" />
+          <LandingAvatar name="pike" />
         </div>
         <picture>
           <source media="(prefers-color-scheme: dark)" srcset={shared.srcset.dark} sizes={shared.sizes} />
@@ -208,7 +214,7 @@ const shared = shot('trust-shared');
 <section class="lp-section lp-section--tight" aria-labelledby="soon-title">
   <div class="page">
     <div class="lp-soon">
-      <div class="lp-soon__copy">
+      <div>
         <p class="lp-chip">Coming soon</p>
         <h2 class="lp-h2" id="soon-title">Let your agents handle the setup.</h2>
         <p class="lp-copy lp-copy--lg">
@@ -219,10 +225,10 @@ const shared = shot('trust-shared');
         <span class="lp-orbit__ring"></span>
         <span class="lp-orbit__ring lp-orbit__ring--inner"></span>
         <span class="lp-orbit__core"><LandingIcon name="key" /></span>
-        <span class="lp-orbit__at lp-orbit__at--1"><span class="lp-av lp-av--agent" data-hue="0" data-initial="W"><span class="lp-av__badge" data-initial="M"></span></span></span>
-        <span class="lp-orbit__at lp-orbit__at--2"><span class="lp-av lp-av--person" data-hue="1" data-initial="J"></span></span>
-        <span class="lp-orbit__at lp-orbit__at--3"><span class="lp-av lp-av--agent" data-hue="2" data-initial="A"><span class="lp-av__badge" data-initial="P"></span></span></span>
-        <span class="lp-orbit__at lp-orbit__at--4"><span class="lp-av lp-av--agent" data-hue="1" data-initial="G"><span class="lp-av__badge" data-initial="J"></span></span></span>
+        <span class="lp-orbit__at lp-orbit__at--1"><LandingAvatar name="wren" /></span>
+        <span class="lp-orbit__at lp-orbit__at--2"><LandingAvatar name="jordan" /></span>
+        <span class="lp-orbit__at lp-orbit__at--3"><LandingAvatar name="muse" /></span>
+        <span class="lp-orbit__at lp-orbit__at--4"><LandingAvatar name="grok" /></span>
       </div>
     </div>
   </div>
@@ -231,11 +237,14 @@ const shared = shot('trust-shared');
 <section class="lp-section lp-close" aria-labelledby="close-title">
   <div class="page">
     <div class="lp-close__people" aria-hidden="true">
-      <span class="lp-av lp-av--person" data-hue="0" data-initial="M"></span>
-      <span class="lp-av lp-av--agent" data-hue="0" data-initial="W"><span class="lp-av__badge" data-initial="M"></span></span>
-      <span class="lp-av lp-av--person" data-hue="1" data-initial="J"></span>
-      <span class="lp-av lp-av--agent" data-hue="1" data-initial="G"><span class="lp-av__badge" data-initial="J"></span></span>
-      <span class="lp-av lp-av--person" data-hue="2" data-initial="P"></span>
+      <LandingAvatar name="maya" />
+      <LandingAvatar name="wren" />
+      <LandingAvatar name="jordan" />
+      <LandingAvatar name="gale" />
+      <LandingAvatar name="priya" />
+      <LandingAvatar name="atlas" />
+      <LandingAvatar name="marcus" />
+      <LandingAvatar name="pike" />
     </div>
     <h2 class="lp-h2 lp-h2--xl" id="close-title">Bring everyone into the loop.</h2>
     <div class="lp-actions lp-actions--center">

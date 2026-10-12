@@ -4,9 +4,9 @@
  * app's `hm-` classes (styles/home/) and nothing leaks to another route.
  *
  * The product pictures are screenshots of the real app (public/landing/, scripts/landing-shots.mjs). The
- * avatars drawn in HTML use the app's own colour tokens (--home-blue, --home-orange-tint, ...), so a person
- * is a filled circle and an agent is a tinted square with its owner's badge, exactly as in the app, in
- * both themes. Everything else comes from the marketing tokens in tokens.css.
+ * avatars use photos and generated art with the app's circle and square shapes and owner badges.
+ * Hosted agents use unchanged vendor files on padded white squares. Everything else comes from the
+ * marketing tokens in tokens.css.
  *
  * Motion: none. A hero animation once crashed the single-process headless Chrome that
  * heading-lines.observer.test.ts launches (old home.css note, 2026-10-01). Depth comes from layering and
@@ -169,7 +169,7 @@
 
 /* ==========================================================================
    Avatars: the app's picture shapes (styles/home/primitives.css .hm-person-avatar, .hm-agent-orb,
-   .hm-owner-badge), sized by --av. Initials come from data-initial so decorative avatars add no text.
+   .hm-owner-badge), sized by --av. Pictures have empty alt text and their wrapper is aria-hidden.
    ========================================================================== */
 
 .lp-av {
@@ -182,20 +182,20 @@
   inline-size: var(--av);
   block-size: var(--av);
   border-radius: 50%;
-  font-family: var(--home-font-body);
-  font-size: calc(var(--av) * 0.4);
-  font-weight: 700;
-  line-height: 1;
-  letter-spacing: 0;
 }
 
-.lp-av::before {
-  content: attr(data-initial);
+.lp-av > img,
+.lp-av__mark > img,
+.lp-av__badge > img {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+  border-radius: inherit;
+  object-fit: cover;
 }
 
 .lp-av--person {
   background: var(--home-person-neutral);
-  color: var(--home-on-person);
 }
 
 .lp-av--person[data-hue="0"] { background: var(--home-blue); }
@@ -208,15 +208,35 @@
   border-radius: calc(var(--av) * 0.28);
   background: var(--home-soft);
   box-shadow: inset 0 0 0 max(1.5px, calc(var(--av) * 0.045)) var(--stroke);
-  color: var(--home-ink-muted);
 }
 
-.lp-av--agent[data-hue="0"] { --stroke: var(--home-blue); background: var(--home-blue-tint); color: var(--home-blue-deep); }
-.lp-av--agent[data-hue="1"] { --stroke: var(--home-orange); background: var(--home-orange-tint); color: var(--home-orange-deep); }
-.lp-av--agent[data-hue="2"] { --stroke: var(--home-purple); background: var(--home-purple-tint); color: var(--home-purple-deep); }
-.lp-av--agent[data-hue="3"] { --stroke: var(--home-teal); background: var(--home-teal-tint); color: var(--home-teal-deep); }
+.lp-av--agent[data-hue="0"] { --stroke: var(--home-blue); background: var(--home-blue-tint); }
+.lp-av--agent[data-hue="1"] { --stroke: var(--home-orange); background: var(--home-orange-tint); }
+.lp-av--agent[data-hue="2"] { --stroke: var(--home-purple); background: var(--home-purple-tint); }
+.lp-av--agent[data-hue="3"] { --stroke: var(--home-teal); background: var(--home-teal-tint); }
 
-/* The owner badge: a small filled circle in the owner's colour, ringed by the surface it sits on. */
+.lp-av--hosted[data-hue] {
+  background: white;
+}
+
+.lp-av__mark {
+  box-sizing: border-box;
+  inline-size: 90%;
+  block-size: 90%;
+  border-radius: 50%;
+  background: white;
+  padding: calc(var(--av) * 0.15);
+}
+
+/* Tile files already include their own white margin. Keep every vendor file unchanged. */
+.lp-av__mark--tile { padding: 0; }
+
+.lp-av__mark > img {
+  border-radius: 0;
+  object-fit: contain;
+}
+
+/* The owner's photo, ringed by the surface it sits on. */
 .lp-av__badge {
   position: absolute;
   inset-inline-end: calc(var(--av) * -0.19);
@@ -229,13 +249,6 @@
   border-radius: 50%;
   background: var(--stroke);
   box-shadow: 0 0 0 max(2px, calc(var(--av) * 0.06)) var(--lp-ring, var(--bg));
-  color: var(--home-on-person);
-  font-size: calc(var(--av) * 0.25);
-  font-weight: 700;
-}
-
-.lp-av__badge::before {
-  content: attr(data-initial);
 }
 
 /* ==========================================================================
@@ -730,6 +743,8 @@
 
 .lp-trust__people {
   display: flex;
+  flex-wrap: wrap;
+  max-inline-size: calc(4 * 2.75rem + 3 * 0.875rem);
   gap: 0.875rem;
 }
 
@@ -971,6 +986,14 @@
 
 /* Phones: the desktop window gives way to the phone view, which is the app on this screen. */
 @media (max-width: 47.99rem) {
+  .lp-close__people {
+    gap: 0.5rem;
+  }
+
+  .lp-close__people .lp-av {
+    --av: 1.75rem;
+  }
+
   .lp-cluster {
     display: none;
   }

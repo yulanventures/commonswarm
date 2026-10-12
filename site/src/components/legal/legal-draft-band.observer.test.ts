@@ -45,7 +45,7 @@ test("approved legal pages are final with resolved release dates and decisions",
     for (const date of ["EFFECTIVE", "UPDATED"]) {
       assert.match(
         page,
-        new RegExp(`const ${date} = "${label === "Privacy Policy" && date === "UPDATED" ? "13 October 2026" : "2 October 2026"}";`),
+        new RegExp(`const ${date} = "${label === "Privacy Policy" && date === "UPDATED" ? "12 October 2026" : "2 October 2026"}";`),
         `${label} must use the approved ${date.toLowerCase()} date`,
       );
     }

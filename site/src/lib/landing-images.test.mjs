@@ -3,12 +3,18 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { transform } from "@astrojs/compiler-rs";
+import { experimental_AstroContainer as AstroContainer } from "astro/container";
 import sharp from "sharp";
 import { IMAGES, landingImage } from "./landing-images.ts";
 
 const site = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const publicDir = join(site, "public");
-const shipped = () => readdirSync(join(publicDir, "landing")).sort();
+const shipped = () => readdirSync(join(publicDir, "landing"), { withFileTypes: true }).flatMap((entry) => {
+  if (!entry.isDirectory()) return [entry.name];
+  assert.equal(entry.name, "avatars", "public/landing has an unexpected folder");
+  return readdirSync(join(publicDir, "landing", entry.name)).map((file) => `avatars/${file}`);
+}).sort();
 
 test("every homepage srcset file exists at its declared width and the picture's aspect ratio", async () => {
   const names = Object.keys(IMAGES);
@@ -31,6 +37,40 @@ test("every homepage srcset file exists at its declared width and the picture's 
   }
 });
 
+test("every shipped decorative avatar is a 160px square WebP", async () => {
+  const avatars = shipped().filter((file) => file.startsWith("avatars/"));
+  assert.equal(avatars.length, 8, "the decorative cast has four people and four local agents");
+  for (const file of avatars) {
+    const meta = await sharp(join(publicDir, "landing", file)).metadata();
+    assert.equal(meta.format, "webp", `${file}: not WebP`);
+    assert.equal(meta.width, 160, `${file}: not 160px wide`);
+    assert.equal(meta.height, 160, `${file}: not 160px high`);
+  }
+});
+
+// Render the fixed UI16 cast, including marks not currently used in a decorative row.
+// Dimensions and the shipped inventory cannot detect a broken component URL or owner badge.
+test("every image path rendered by LandingAvatar exists under public", async () => {
+  const source = readFileSync(join(site, "src/components/landing/LandingAvatar.astro"), "utf8");
+  const compiled = transform(source, { filename: "LandingAvatar.astro", internalURL: "astro/compiler-runtime",
+    resultScopedSlot: true, resolvePath: (specifier) => specifier });
+  assert.deepEqual(compiled.diagnostics.filter((diagnostic) => diagnostic.severity === "error"), []);
+  const code = compiled.code
+    .replaceAll('"astro/compiler-runtime"', JSON.stringify(new URL("../../node_modules/astro/dist/runtime/compiler/index.js", import.meta.url).href))
+    .replaceAll('"../../lib/agent-hosts"', JSON.stringify(new URL("./agent-hosts.ts", import.meta.url).href));
+  const component = await import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`);
+  const container = await AstroContainer.create();
+  for (const name of ["maya", "jordan", "priya", "marcus", "wren", "gale", "atlas", "pike", "muse", "dot", "grok"]) {
+    const html = await container.renderToString(component.default, { props: { name } });
+    const paths = [...html.matchAll(/<img\b[^>]*\ssrc="([^"]+)"/g)].map((match) => match[1]);
+    assert.ok(paths.length > 0, `${name}: avatar rendered no image`);
+    for (const path of paths) {
+      assert.ok(path.startsWith("/landing/avatars/") || path.startsWith("/brand/works-with/"), `${name}: unexpected image path ${path}`);
+      assert.ok(existsSync(join(publicDir, path)), `${name}: ${path} is referenced but not shipped`);
+    }
+  }
+});
+
 test("the build script writes exactly the images the homepage uses, and nothing else is shipped", () => {
   const script = readFileSync(join(site, "scripts", "landing-shots.mjs"), "utf8");
   const declared = [...script.matchAll(/\{ name: "([a-z-]+)", shot: "[^"]+", crop: (?:null|\{[^}]*\}), widths: \[([0-9, ]+)\] \}/g)]
@@ -40,8 +80,12 @@ test("the build script writes exactly the images the homepage uses, and nothing 
     Object.fromEntries(Object.entries(IMAGES).map(([name, { widths }]) => [name, [...widths]])),
     "scripts/landing-shots.mjs IMAGES and src/lib/landing-images.ts IMAGES must list the same names and widths",
   );
-  const expected = Object.entries(IMAGES).flatMap(([name, { widths }]) =>
-    ["dark", "light"].flatMap((theme) => widths.map((width) => `${name}-${theme}-${width}.webp`))).sort();
+  const avatarNames = JSON.parse(script.match(/const names = (\[[^\]]+\]);/)[1]);
+  const expected = [
+    ...Object.entries(IMAGES).flatMap(([name, { widths }]) =>
+      ["dark", "light"].flatMap((theme) => widths.map((width) => `${name}-${theme}-${width}.webp`))),
+    ...avatarNames.map((name) => `avatars/${name.replace(/^(person|agent)-/, "")}-160.webp`),
+  ].sort();
   assert.deepEqual(shipped(), expected, "public/landing holds an unused or missing file");
 });
 
