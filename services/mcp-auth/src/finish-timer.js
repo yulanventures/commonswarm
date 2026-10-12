@@ -13,10 +13,10 @@
   const returnStatus = document.getElementById("finish-return-status");
   const path = page.dataset.finishPath;
   const remainingMs = Number(page.dataset.remainingMs);
-  const deadline = Date.now() + remainingMs;
+  const deadline = Date.now() - (typeof performance === "undefined" ? 0 : performance.now()) + remainingMs;
   const valid = /^\/interaction\/[A-Za-z0-9_-]+\/finish$/u.test(path) &&
     link.getAttribute("href") === path && Number.isSafeInteger(remainingMs) && remainingMs >= 0 &&
-    Number.isSafeInteger(deadline) && deadline > 0;
+    Number.isFinite(deadline) && deadline > 0;
   let state = "waiting", returnTimer, expiryTimer;
   const cancelReturn = () => clearTimeout(returnTimer);
   function expire() {
@@ -62,8 +62,8 @@
     link.focus();
   }
   pause.addEventListener("click", pauseReturn);
-  link.addEventListener("auxclick", pauseReturn);
-  link.addEventListener("contextmenu", pauseReturn);
+  link.addEventListener("auxclick", (e) => { if (state === "navigating") { e.preventDefault(); return; } pauseReturn(); });
+  link.addEventListener("contextmenu", (e) => { if (state === "navigating") { e.preventDefault(); return; } pauseReturn(); });
   window.addEventListener("pagehide", () => {
     cancelReturn(); clearTimeout(expiryTimer);
     if (state !== "expired") state = "left";

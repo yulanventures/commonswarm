@@ -40,7 +40,7 @@ function browser(overrides = {}, clientNow = 1) {
       replace: (path) => navigations.push(path), assign: (path) => navigations.push(path) } };
   const scriptPath = /<script src="([^"]+)"/u.exec(html)[1];
   runInNewContext(readFileSync(new URL(`../src/${scriptPath.split("/").at(-1)}`, import.meta.url), "utf8"), {
-    document, window, Date: { now: () => now }, clearTimeout: (id) => timers.delete(id),
+    document, window, Date: { now: () => now }, performance: { now: () => 0 }, clearTimeout: (id) => timers.delete(id),
     setTimeout: (fn, delay) => { const id = ++sequence; timers.set(id, { fn, at: now + delay }); return id; },
   });
   return { elements, timers, document, navigations, event: (name) => listeners.get(name)(),
@@ -134,6 +134,16 @@ test("auxclick and context menu pause automatic return without extending expiry"
     assert.equal(paused.elements.get("finish-return-status").textContent, "Automatic return paused. Continue when you are ready.");
     paused.advance(120001);
     assert.equal(paused.elements.get("finish-continue").getAttribute("href"), null);
+  }
+});
+
+test("auxclick and context menu are blocked once automatic return starts", () => {
+  for (const gesture of ["auxclick", "contextmenu"]) {
+    const automatic = browser(); automatic.advance(3001);
+    assert.deepEqual(automatic.navigations, ["/interaction/interaction-test/finish"]);
+    assert.equal(automatic.click("finish-continue", { button: 1 }, gesture).defaultPrevented, true);
+    automatic.advance(130001);
+    assert.deepEqual(automatic.navigations, ["/interaction/interaction-test/finish"]);
   }
 });
 
