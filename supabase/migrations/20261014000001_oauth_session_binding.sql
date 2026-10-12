@@ -27,24 +27,26 @@ $role$;
 -- grant is removed; do not inherit the guard's narrow auth-table privileges.
 GRANT commonswarm_oauth_session_guard TO swarm_admin WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
 -- Use the owner-role path established in 20260723000001_p1_schema.sql:16.
--- The CLI's non-superuser postgres must not rely on an inherited grant option
--- or on GoTrue's grants to postgres. Resolve each owner instead of assuming
--- that the auth schema and GoTrue-created tables have the same owner.
+-- Resolve each owner; the CLI's non-superuser postgres cannot select every
+-- GoTrue owner. If SET is unavailable, try the applying role's grant option
+-- and let the final effective-privilege check reject a warning-only grant.
 DO $owner_grants$
 DECLARE
  applying_role name := current_user;
+ applying_superuser boolean := (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user);
+ can_set_owner boolean;
  item record;
 BEGIN
  FOR item IN
-  SELECT n.nspowner::regrole::text AS owner, format(
+  SELECT pg_get_userbyid(n.nspowner) AS owner, format(
    'GRANT USAGE ON SCHEMA %I TO commonswarm_oauth_session_guard', n.nspname
   ) AS command FROM pg_catalog.pg_namespace n WHERE n.nspname IN ('auth', 'commonswarm_oauth')
   UNION ALL
   -- ALTER FUNCTION OWNER requires the new owner to have CREATE in its schema.
-  SELECT n.nspowner::regrole::text, 'GRANT CREATE ON SCHEMA commonswarm_oauth TO commonswarm_oauth_session_guard'
+  SELECT pg_get_userbyid(n.nspowner), 'GRANT CREATE ON SCHEMA commonswarm_oauth TO commonswarm_oauth_session_guard'
    FROM pg_catalog.pg_namespace n WHERE n.nspname = 'commonswarm_oauth'
   UNION ALL
-  SELECT c.relowner::regrole::text, format(
+  SELECT pg_get_userbyid(c.relowner), format(
    'GRANT SELECT (%s) ON auth.%I TO commonswarm_oauth_session_guard', grant_columns, c.relname
   ) FROM (VALUES
    ('sessions', 'id, user_id, not_after'),
@@ -54,14 +56,19 @@ BEGIN
   JOIN pg_catalog.pg_class c ON c.relname = required.table_name
   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'auth'
   UNION ALL
-  SELECT c.relowner::regrole::text,
+  SELECT pg_get_userbyid(c.relowner),
    'GRANT SELECT (gotrue_session_id, user_id, invalidated_at), UPDATE (invalidated_at) ON commonswarm_oauth.browser_sessions TO commonswarm_oauth_session_guard'
    FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
    WHERE n.nspname = 'commonswarm_oauth' AND c.relname = 'browser_sessions'
  LOOP
-  EXECUTE format('SET LOCAL ROLE %I', item.owner);
+  can_set_owner := applying_superuser OR pg_has_role(session_user, item.owner, 'SET');
+  IF can_set_owner THEN
+   EXECUTE format('SET LOCAL ROLE %I', item.owner);
+  END IF;
   EXECUTE item.command;
-  EXECUTE format('SET LOCAL ROLE %I', applying_role);
+  IF can_set_owner THEN
+   EXECUTE format('SET LOCAL ROLE %I', applying_role);
+  END IF;
  END LOOP;
 END
 $owner_grants$;
@@ -103,15 +110,36 @@ $$;
 ALTER FUNCTION commonswarm_oauth.invalidate_gotrue_session() OWNER TO commonswarm_oauth_session_guard;
 -- Apply ACLs as the owners, before removing the applying role's SET path.
 DO $function_grants$
-DECLARE applying_role name := current_user;
+DECLARE
+ applying_role name := current_user;
+ applying_superuser boolean := (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user);
+ can_set_owner boolean;
+ item record;
 BEGIN
- SET LOCAL ROLE commonswarm_oauth_session_guard;
- REVOKE ALL ON FUNCTION commonswarm_oauth.live_gotrue_session(uuid, uuid) FROM PUBLIC;
- REVOKE ALL ON FUNCTION commonswarm_oauth.invalidate_gotrue_session() FROM PUBLIC;
- GRANT EXECUTE ON FUNCTION commonswarm_oauth.live_gotrue_session(uuid, uuid) TO commonswarm_oauth_runtime;
- SET LOCAL ROLE swarm_admin;
- REVOKE CREATE ON SCHEMA commonswarm_oauth FROM commonswarm_oauth_session_guard;
- EXECUTE format('SET LOCAL ROLE %I', applying_role);
+ FOR item IN
+  SELECT pg_get_userbyid(p.proowner) AS owner, format(
+   'REVOKE ALL ON FUNCTION %s FROM PUBLIC', p.oid::regprocedure
+  ) AS command FROM pg_catalog.pg_proc p WHERE p.oid IN (
+   'commonswarm_oauth.live_gotrue_session(uuid,uuid)'::regprocedure,
+   'commonswarm_oauth.invalidate_gotrue_session()'::regprocedure
+  )
+  UNION ALL
+  SELECT pg_get_userbyid(p.proowner),
+   'GRANT EXECUTE ON FUNCTION commonswarm_oauth.live_gotrue_session(uuid,uuid) TO commonswarm_oauth_runtime'
+   FROM pg_catalog.pg_proc p WHERE p.oid = 'commonswarm_oauth.live_gotrue_session(uuid,uuid)'::regprocedure
+  UNION ALL
+  SELECT pg_get_userbyid(n.nspowner), 'REVOKE CREATE ON SCHEMA commonswarm_oauth FROM commonswarm_oauth_session_guard'
+   FROM pg_catalog.pg_namespace n WHERE n.nspname = 'commonswarm_oauth'
+ LOOP
+  can_set_owner := applying_superuser OR pg_has_role(session_user, item.owner, 'SET');
+  IF can_set_owner THEN
+   EXECUTE format('SET LOCAL ROLE %I', item.owner);
+  END IF;
+  EXECUTE item.command;
+  IF can_set_owner THEN
+   EXECUTE format('SET LOCAL ROLE %I', applying_role);
+  END IF;
+ END LOOP;
 END
 $function_grants$;
 CREATE TRIGGER commonswarm_oauth_session_revocation
@@ -162,6 +190,15 @@ BEGIN
   IF has_column_privilege('commonswarm_oauth_session_guard', item.table_name, item.column_name, item.privilege)
     IS DISTINCT FROM true THEN
    RAISE EXCEPTION 'OAuth session privilege missing: guard needs % on %.%', item.privilege, item.table_name, item.column_name
+    USING ERRCODE = '42501';
+  END IF;
+ END LOOP;
+ FOR item IN SELECT * FROM (VALUES
+  ('commonswarm_oauth.live_gotrue_session(uuid,uuid)'),
+  ('commonswarm_oauth.invalidate_gotrue_session()')
+ ) AS guarded(function_name) LOOP
+  IF has_function_privilege('public', item.function_name, 'EXECUTE') THEN
+   RAISE EXCEPTION 'OAuth session guard function exposed to PUBLIC: %', item.function_name
     USING ERRCODE = '42501';
   END IF;
  END LOOP;

@@ -73,7 +73,7 @@ test("CI only: fixed seven-day deadline and GoTrue binding survive attachment an
       WHERE n.nspname='auth' AND c.relname IN ('sessions','users','mfa_amr_claims')
       ORDER BY object`);
     assert.equal(owners.rows.length, 4, "auth schema and all three GoTrue table owners enumerated");
-    assert.ok(owners.rows.every(row => row.can_set_owner), "local migrating role must be able to use each auth owner");
+    assert.ok(owners.rows.every(row => row.can_grant || row.can_set_owner), "local migrating role must be able to grant directly or use each auth owner");
     t.diagnostic(JSON.stringify({ authPrivilegeOwners: owners.rows }));
     // Execute the migration's actual postcondition, then remove each reviewed
     // privilege in a rollback-only transaction. A warning-only/no-op grant must
@@ -105,6 +105,16 @@ test("CI only: fixed seven-day deadline and GoTrue binding survive attachment an
         assert.equal((await connection.query(check, values)).rows[0].allowed, false);
         await assert.rejects(connection.query(gate), { code: "42501", message: /^OAuth session privilege missing:/u });
         await connection.query("ROLLBACK TO SAVEPOINT missing_session_privilege");
+        await connection.query(gate);
+      }
+      for (const fn of ["commonswarm_oauth.live_gotrue_session(uuid,uuid)", "commonswarm_oauth.invalidate_gotrue_session()"]) {
+        const publicExecute = () => connection.query("SELECT has_function_privilege('public',$1,'EXECUTE') AS allowed", [fn]);
+        assert.equal((await publicExecute()).rows[0].allowed, false);
+        await connection.query("SAVEPOINT public_session_function");
+        await connection.query(`GRANT EXECUTE ON FUNCTION ${fn} TO PUBLIC`);
+        assert.equal((await publicExecute()).rows[0].allowed, true);
+        await assert.rejects(connection.query(gate), { code: "42501", message: /^OAuth session guard function exposed to PUBLIC:/u });
+        await connection.query("ROLLBACK TO SAVEPOINT public_session_function");
         await connection.query(gate);
       }
     } finally { await connection.query("ROLLBACK"); connection.release(); }
