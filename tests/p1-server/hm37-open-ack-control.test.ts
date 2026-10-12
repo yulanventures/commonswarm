@@ -58,6 +58,7 @@ function failureMessage(result: { stderr: string; output: HarnessOutput }): stri
 
 let local: LocalEnvironment;
 let sql: postgres.Sql;
+let superuserSql: postgres.Sql;
 let admin: SupabaseClient;
 const oauthRuntimePassword = randomUUID();
 const roots: string[] = [];
@@ -71,16 +72,19 @@ before(async () => {
   const target = new URL(local.DB_URL);
   assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(target.hostname));
   sql = postgres(local.DB_URL, { prepare: false, max: 4 });
+  target.username = "supabase_admin";
+  superuserSql = postgres(target.toString(), { prepare: false, max: 1 });
   admin = createClient(local.API_URL, local.SERVICE_ROLE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
-  await sql.unsafe(
+  await superuserSql.unsafe(
     `ALTER ROLE commonswarm_oauth_runtime PASSWORD '${oauthRuntimePassword}'`,
   );
 });
 
 after(async () => {
-  await sql`ALTER ROLE commonswarm_oauth_runtime PASSWORD NULL`;
+  await superuserSql`ALTER ROLE commonswarm_oauth_runtime PASSWORD NULL`;
+  await superuserSql.end();
   await sql.end();
   for (const root of roots) rmSync(root, { recursive: true, force: true });
 });

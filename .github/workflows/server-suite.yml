@@ -173,25 +173,14 @@ jobs:
         if: matrix.suite == 'server' || matrix.suite == 'server-repeat'
         # The box migrates as supabase_admin (deploy/supabase-stack/migrate/lib.sh).
         # Migrating as postgres made GRANTs on auth.* silent no-ops in run 38302463345.
-        # CLI 2.118.0 start --help has no skip flag; its bootstrap reads db.migrations.enabled.
+        # CLI 2.118.0 env flags override root config values for this startup only.
         # PostgREST may be unhealthy until the deferred migrations create swarm_read.
+        env:
+          SUPABASE_DB_MIGRATIONS_ENABLED: "false"
+          SUPABASE_DB_SEED_ENABLED: "false"
         run: |
           set -euo pipefail
-          config_backup=$(mktemp "$RUNNER_TEMP/supabase-config.XXXXXX")
-          cp supabase/config.toml "$config_backup"
-          trap 'cp "$config_backup" supabase/config.toml' EXIT
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-          path = Path('supabase/config.toml')
-          config = path.read_text()
-          for section in ('db.migrations', 'db.seed'):
-              config, count = re.subn(r'(\[' + re.escape(section) + r'\]\n(?:#[^\n]*\n)*)enabled = true', r'\1enabled = false', config)
-              assert count == 1, f'expected one enabled {section} section'
-          path.write_text(config)
-          PY
           supabase start --ignore-health-check >/dev/null
-          cp "$config_backup" supabase/config.toml
       - name: Apply migrations as the box superuser
         if: matrix.suite == 'server' || matrix.suite == 'server-repeat'
         run: |
@@ -201,20 +190,26 @@ jobs:
           export PGPASSWORD
           test "$(psql -X -v ON_ERROR_STOP=1 -At --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command "SELECT current_user, session_user, rolsuper FROM pg_roles WHERE rolname = current_user")" = 'supabase_admin|supabase_admin|t'
           supabase migration up --db-url postgresql://supabase_admin@127.0.0.1:54322/postgres
-          # Only migration application changes role; seeding still uses postgres.
+          # Match the source memberships retained on the box by
+          # deploy/supabase-stack/migrate/dump-source.sh:73-82; inventory:
+          # docs/org/2026-09-16-N-EDGE-RESUME-HERE.md:189-191.
+          psql -X -v ON_ERROR_STOP=1 --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command 'GRANT swarm_admin, swarm_command, swarm_read, swarm_capability TO postgres'
+          # Seeding and application tests still use their normal roles.
           psql -X -v ON_ERROR_STOP=1 --dbname postgresql://postgres@127.0.0.1:54322/postgres --file supabase/seed.sql
+          psql -X -v ON_ERROR_STOP=1 --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command "NOTIFY pgrst, 'reload schema'"
       - name: Check migration ledger and normal connection role
         if: matrix.suite == 'server' || matrix.suite == 'server-repeat'
         run: |
           set -euo pipefail
           PGPASSWORD=$(supabase status -o json | python3 -c 'import json, sys; from urllib.parse import urlsplit, unquote; u = urlsplit(json.load(sys.stdin)["DB_URL"]); assert (u.hostname, u.port, u.username, u.path) == ("127.0.0.1", 54322, "postgres", "/postgres"); assert u.password; print(unquote(u.password))')
           export PGPASSWORD
-          printf '%s\n' supabase/migrations/*.sql | sed -E 's|.*/([0-9]+)_[^/]+\.sql$|\1|' | LC_ALL=C sort > "$RUNNER_TEMP/expected-migrations"
+          printf '%s\n' supabase/migrations/*.sql | sed -E 's|.*/([0-9]+)_([^/]+)\.sql$|\1\|\2|' | LC_ALL=C sort > "$RUNNER_TEMP/expected-migrations"
           # The ledger is CLI metadata owned by the migrating role, not a test connection.
-          psql -X -v ON_ERROR_STOP=1 -At --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command 'SELECT version FROM supabase_migrations.schema_migrations ORDER BY version' > "$RUNNER_TEMP/actual-migrations"
+          test "$(psql -X -v ON_ERROR_STOP=1 -At --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'supabase_migrations.schema_migrations'::regclass")" = supabase_admin
+          psql -X -v ON_ERROR_STOP=1 -At --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command 'SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version, name' > "$RUNNER_TEMP/actual-migrations"
           diff -u "$RUNNER_TEMP/expected-migrations" "$RUNNER_TEMP/actual-migrations"
-          test "$(psql -X -v ON_ERROR_STOP=1 -At --dbname postgresql://postgres@127.0.0.1:54322/postgres --command 'SELECT current_user, session_user')" = 'postgres|postgres'
-          echo "Migration ledger matches $(wc -l < "$RUNNER_TEMP/expected-migrations") files; canary ran as postgres."
+          test "$(psql -X -v ON_ERROR_STOP=1 -At --dbname postgresql://postgres@127.0.0.1:54322/postgres --command "SELECT current_user, session_user, NOT rolsuper, (SELECT bool_and(pg_has_role('postgres', r, 'SET')) FROM unnest(ARRAY['swarm_admin', 'swarm_command', 'swarm_read', 'swarm_capability']) AS roles(r)) FROM pg_roles WHERE rolname = current_user")" = 'postgres|postgres|t|t'
+          echo "Migration versions/names match $(wc -l < "$RUNNER_TEMP/expected-migrations") files; supabase_admin owns the ledger; postgres is non-superuser with SET on all four swarm roles."
       - name: Server suite
         if: matrix.suite == 'server'
         run: |

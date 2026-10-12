@@ -111,6 +111,7 @@ interface CommandResponse {
 
 let local: LocalEnvironment;
 let sql: postgres.Sql;
+let superuserSql: postgres.Sql;
 let admin: SupabaseClient;
 let functionProcess: ReturnType<typeof spawn>;
 let functionLogs = "";
@@ -231,6 +232,9 @@ before(async () => {
   local = localEnvironment();
   assertLocalSpendResetTarget(local);
   sql = postgres(local.DB_URL, { prepare: false, max: 10 });
+  const migrationTarget = new URL(local.DB_URL);
+  migrationTarget.username = "supabase_admin";
+  superuserSql = postgres(migrationTarget.toString(), { prepare: false, max: 1 });
   await resetLocalTestSpendBreaker(local, sql);
   admin = createClient(local.API_URL, local.SERVICE_ROLE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
@@ -278,6 +282,7 @@ after(async () => {
     }
   }
   await sql?.end({ timeout: 5 });
+  await superuserSql?.end({ timeout: 5 });
   if (envDir) rmSync(envDir, { recursive: true, force: true });
 });
 
@@ -9474,10 +9479,10 @@ test("durable-delivery: table and function privilege boundaries (swarm_command D
       BEGIN
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dd_test_child_priv_role') THEN
           CREATE ROLE dd_test_child_priv_role INHERIT;
-          GRANT swarm_read TO dd_test_child_priv_role;
         END IF;
       END $$;
     `);
+    await superuserSql`GRANT swarm_read TO dd_test_child_priv_role`;
     try {
       const childVerbs = await checkRoleVerbs("dd_test_child_priv_role");
       for (const verb of verbs) {
@@ -9531,10 +9536,10 @@ test("durable-delivery: table and function privilege boundaries (swarm_command D
       BEGIN
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dd_test_child_priv_role') THEN
           CREATE ROLE dd_test_child_priv_role INHERIT;
-          GRANT swarm_read TO dd_test_child_priv_role;
         END IF;
       END $$;
     `);
+    await superuserSql`GRANT swarm_read TO dd_test_child_priv_role`;
     try {
       assert.equal(await checkFuncExec("dd_test_child_priv_role", funcF1), false, "inherited child of swarm_read is denied EXECUTE on enqueue_signal_delivery()");
       assert.equal(await checkFuncExec("dd_test_child_priv_role", funcF2), false, "inherited child of swarm_read is denied EXECUTE on purge_terminal_signal_deliveries()");
