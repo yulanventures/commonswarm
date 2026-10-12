@@ -44,13 +44,19 @@ test("CI only: fixed seven-day deadline and GoTrue binding survive attachment an
   timeout: 30000,
 }, async () => {
   const { Pool } = await import("pg");
-  const connectionString = process.env.MCP_OAUTH_TEST_DATABASE_URL ?? "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
+  const target = new URL(process.env.MCP_OAUTH_TEST_DATABASE_URL ?? "postgresql://postgres:postgres@127.0.0.1:54322/postgres");
+  assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(target.hostname), "isolated local CI database required");
+  // The migration principal's runtime membership is ADMIN-only, without SET.
+  // The local cluster administrator can start a connection as the actual runtime.
+  target.username = "supabase_admin";
+  const connectionString = target.href;
   const admin = new Pool({ connectionString, connectionTimeoutMillis: 2000 });
   const runtime = new Pool({ connectionString, options: "-c role=commonswarm_oauth_runtime", connectionTimeoutMillis: 2000 });
   const store = new InteractionStore(runtime), uid = randomUUID(), controlId = randomUUID(), controlAuth = randomUUID();
   const hashes = [], identity = { id: userId, gotrueSessionId: authId, interactiveAuthAtSeconds: at,
     identityVerified: true, email: "TEST@example.test", displayName: "TEST user" };
   try {
+    assert.equal((await runtime.query("SELECT current_user AS role")).rows[0].role, "commonswarm_oauth_runtime");
     for (const [id, sid] of [[userId, authId], [controlId, controlAuth]]) {
       await admin.query("INSERT INTO auth.users(id,aud,role,email) VALUES($1,'authenticated','authenticated',$2)", [id, `${id}@example.test`]);
       await admin.query("INSERT INTO auth.sessions(id,user_id) VALUES($1,$2)", [sid, id]);

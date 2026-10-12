@@ -1,3 +1,4 @@
+import { verifiedSignIn } from "./fixtures/verified-sign-in.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { types } from "pg";
@@ -71,13 +72,15 @@ test("PostgreSQL consent counters keep selection, reload and confirmation on the
 
 test("all interaction row APIs return a safe numeric CAS counter without depending on pg parser state", async () => {
   const raw = { selection_version: types.getTypeParser(types.builtins.INT8)("7"), signin_state_hash: hashOpaque("google:signin-state") };
-  const tx = { query: async () => rows(raw), release() {} };
+  const evidence = verifiedSignIn({ userId: OWNER });
+  const tx = { query: async (sql, values) => sql.includes("commonswarm_oauth.live_gotrue_session")
+    ? evidence.pool.query(sql, values) : rows(raw), release() {} };
   const store = new InteractionStore({ query: tx.query, connect: async () => tx });
   const binding = { interactionUid: "uid", sessionId: SESSION, userId: OWNER, clientId: CLIENT,
     redirectUri: params.redirect_uri, resource: params.resource, scopes: ["openid"], pkceChallenge: params.code_challenge };
   const choice = { ...binding, token: "consent-token", selectionVersion: 7, workspaceIds: [OWNER] };
   for (const row of [await store.bindInteraction(binding), await store.consumeSignIn("uid", SESSION, "signin-state", "google"),
-    await store.attachUser("uid", SESSION, { id: OWNER }), (await store.selectWithToken(choice)).interaction,
+    await store.attachUser("uid", SESSION, evidence.user), (await store.selectWithToken(choice)).interaction,
     await store.bindProviderGrant("uid", "family", OWNER), await store.consumeConsent(choice), await store.selectAndConsumeConsent(choice)]) {
     assert.equal(row.selection_version, 7);
   }

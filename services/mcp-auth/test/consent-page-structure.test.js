@@ -1,3 +1,4 @@
+import { verifiedSignIn } from "./fixtures/verified-sign-in.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -127,6 +128,7 @@ test("neither interaction parser treats the submit guard filename as a UID, incl
 });
 
 const USER = "10000000-0000-4000-8000-000000000001";
+const evidence = verifiedSignIn({ userId: USER });
 const W1 = "20000000-0000-4000-8000-000000000001";
 const W2 = "20000000-0000-4000-8000-000000000002";
 const W3 = "20000000-0000-4000-8000-000000000003";
@@ -412,8 +414,8 @@ test("the served consent page never renders the OAuth state", async () => {
       }),
     },
     store: {
-      requireSession: async () => ({ user_id: USER, user_email: identity.email,
-        user_display_name: identity.displayName, authenticated_at: new Date().toISOString() }),
+      pool: evidence.pool,
+      requireSession: async () => ({ ...evidence.browserSession }),
       bindInteraction: async () => ({ selected_workspace_ids: [] }),
       issueConsentToken: async () => ({ token: "csrf-token-long-enough", selectionVersion: 0 }),
     },

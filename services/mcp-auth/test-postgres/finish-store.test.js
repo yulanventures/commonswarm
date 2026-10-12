@@ -38,7 +38,12 @@ test('CI: concurrent finish, restart, crash fence, immutable binding, expiry and
   skip: process.env.CI !== 'true' && !process.env.MCP_OAUTH_TEST_DATABASE_URL ? 'CI only: migrated PostgreSQL required' : false,
 }, async () => {
   const { Pool } = await import('pg');
-  const connectionString = process.env.MCP_OAUTH_TEST_DATABASE_URL ?? 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
+  const target = new URL(process.env.MCP_OAUTH_TEST_DATABASE_URL ?? 'postgresql://postgres:postgres@127.0.0.1:54322/postgres');
+  assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(target.hostname), "isolated local CI database required");
+  // The migration principal's runtime membership is ADMIN-only, without SET.
+  // The local cluster administrator can start a connection as the actual runtime.
+  target.username = "supabase_admin";
+  const connectionString = target.href;
   const admin = new Pool({ connectionString, connectionTimeoutMillis: 2000 });
   const runtimeOptions = { connectionString, options: '-c role=commonswarm_oauth_runtime', max: 2, connectionTimeoutMillis: 2000 };
   const first = new Pool(runtimeOptions);
@@ -57,6 +62,7 @@ test('CI: concurrent finish, restart, crash fence, immutable binding, expiry and
   const make = pool => new FinishStore(pool, { issuer, verifySession });
   let calls = 0;
   try {
+    assert.equal((await first.query("SELECT current_user AS role")).rows[0].role, "commonswarm_oauth_runtime");
     assert.ok((await admin.query("SELECT to_regclass('commonswarm_oauth.finish_records') AS name")).rows[0].name,
       'CI must apply the reserved finish migration');
     await admin.query("INSERT INTO auth.users(id,aud,role,email) VALUES($1,'authenticated','authenticated',$2)", [userId, `${userId}@example.test`]);

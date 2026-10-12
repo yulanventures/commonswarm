@@ -20,6 +20,8 @@ const allowlist = JSON.parse(readFileSync(new URL('../support/admin-issuer-privi
 // 20261014000001_oauth_session_binding.sql adds the isolated session guard.
 // Inventory its narrow ACLs, safe role attributes and two function owners too;
 // the issuer must still be unable to select it or read auth tables directly.
+// P4 adds finish SELECT and column-only INSERT/UPDATE. Inventory those exact
+// grants; mutation controls must still reject writes to binding and deadline columns.
 const literal = JSON.stringify(allowlist.map((entry: unknown[]) => entry.slice(0, 5))).replaceAll("'", "''");
 // Enumerate explicit ACLs across the whole database, not a selected set of known
 // tables. The saved schemas belong to runSql's rollback-only isolation fixture.
@@ -280,6 +282,17 @@ ${[
 ${mutation}
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
 ROLLBACK TO SAVEPOINT session_guard_mutation;
+SELECT pg_temp.assert_issuer();`).join('\n')}
+-- P4 grants only resume-state writes, never mutable identity/request/deadline.
+${[
+  'GRANT UPDATE (user_id) ON commonswarm_oauth.finish_records TO commonswarm_oauth_runtime;',
+  'GRANT UPDATE (expires_at) ON commonswarm_oauth.finish_records TO commonswarm_oauth_runtime;',
+  'GRANT INSERT (resume_response) ON commonswarm_oauth.finish_records TO commonswarm_oauth_runtime;',
+  'GRANT DELETE ON commonswarm_oauth.finish_records TO commonswarm_oauth_runtime;',
+].map(mutation => `SAVEPOINT finish_mutation;
+${mutation}
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+ROLLBACK TO SAVEPOINT finish_mutation;
 SELECT pg_temp.assert_issuer();`).join('\n')}
 CREATE FUNCTION public.issuer_function_mutation() RETURNS boolean LANGUAGE sql AS 'SELECT true';
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}

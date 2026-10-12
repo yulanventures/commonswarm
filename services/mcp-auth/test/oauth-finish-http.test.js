@@ -1,3 +1,4 @@
+import { verifiedSignIn } from "./fixtures/verified-sign-in.js";
 // P8 transport acceptance: synthetic requests/config in, HTTP responses out.
 // Protect route precedence, default-off rollout and navigation/form policies;
 // no sockets, real credentials, browser or database. P4/P9c own durability.
@@ -19,7 +20,8 @@ import { consentSecurityHeaders, SESSION_COOKIE } from "../src/browser-security.
 
 const issuer = "https://mcp.commonswarm.com", uid = "DUMMYINTERACTION";
 const sessionId = "DUMMYSESSION-long-enough", csrf = "DUMMYCSRF-long-enough-for-form";
-const session = { user_id: "DUMMYUSER", authenticated_at: new Date() };
+const evidence = verifiedSignIn({ userId: "10000000-0000-4000-8000-000000000001" });
+const session = evidence.browserSession;
 const params = { client_id: "https://client.example/metadata", redirect_uri: "https://client.example/callback",
   resource: `${issuer}/mcp`, scope: "mcp", code_challenge: "a".repeat(43), state: "DUMMYSTATE" };
 const unexpected = () => assert.fail("finish route reached normal binding/provider dispatch");
@@ -129,7 +131,7 @@ test("form policy retains same-origin POST and exact Origin checks while finish 
   let switches = 0;
   const provider = { callback: () => unexpected, interactionDetails: async () => ({ uid, params }) };
   const interactionHandler = createInteractionHandler({ provider, allowedOrigins: new Set([issuer]),
-    store: { requireSession: async () => session, bindInteraction: async () => ({ user_id: session.user_id }),
+    store: { pool: evidence.pool, requireSession: async () => session, bindInteraction: async () => ({ user_id: session.user_id }),
       switchAccount: async ({ token }) => { assert.equal(token, csrf); switches++; return "DUMMYNEWSESSION"; } } });
   const active = handler({ provider, interactionHandler, finishEnabled: true });
   const policy = consentSecurityHeaders(params.redirect_uri);

@@ -1,3 +1,4 @@
+import { verifiedSignIn } from "./fixtures/verified-sign-in.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { IncomingMessage, Server, ServerResponse } from "node:http";
@@ -76,15 +77,16 @@ async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnab
   const logs = [];
   const queries = [];
   const commands = [];
+  const evidence = verifiedSignIn({ userId: USER });
   const sessions = new Map([[hashOpaque(BROWSER).toString("hex"), {
-    session_hash: hashOpaque(BROWSER), user_id: USER, authenticated_at: new Date().toISOString(),
-    user_email: "human@example.test", user_display_name: "Human", status: "valid",
+    ...evidence.browserSession, session_hash: hashOpaque(BROWSER), status: "valid",
   }]]);
   const interactions = new Map();
   const rows = (row) => ({ rowCount: row ? 1 : 0, rows: row ? [row] : [] });
   const pool = {
     async query(sql, values) {
       queries.push(sql);
+      if (sql.includes("commonswarm_oauth.live_gotrue_session")) return evidence.pool.query(sql, values);
       if (sql.includes("FROM commonswarm_oauth.resolve_hosted_grant_status")) {
         assert.equal(values[1], USER);
         const active = [...interactions.values()].some((row) =>
@@ -229,7 +231,7 @@ async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnab
     return response;
   }
   async function completedLogin() {
-    const start = await run(authorize("login", "openid mcp", redirectUri, clientId));
+    const start = await run(authorize(undefined, "openid mcp", redirectUri, clientId));
     assert.equal(start.statusCode, 303);
     const login = await run(start.getHeader("location"));
     assert.equal(login.statusCode, 303);
@@ -305,8 +307,13 @@ test("Claude authorize reauthenticates unavailable accounts before consent, incl
               // missing/expired browser sessions start GoTrue, not auto-consent.
               if (unavailable) {
                 const next = await h.run(location);
-                assert.equal(next.statusCode, 303);
-                assert.equal(next.getHeader("location"), "https://api.commonswarm.com/auth/v1/authorize");
+                if (prompt === "login") {
+                  assert.equal(next.statusCode, 400);
+                  assert.equal(JSON.parse(next.body).error, "unsupported_fresh_login");
+                } else {
+                  assert.equal(next.statusCode, 303);
+                  assert.equal(next.getHeader("location"), "https://api.commonswarm.com/auth/v1/authorize");
+                }
               }
             }
             assert.equal(h.logs.some((entry) => entry.event === "server_error"), false);

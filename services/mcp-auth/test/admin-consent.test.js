@@ -1,3 +1,4 @@
+import { verifiedSignIn } from "./fixtures/verified-sign-in.js";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { test } from "node:test";
@@ -68,8 +69,8 @@ function openIssuanceCoordinator() {
 // Fixture supplies stored rows only; policy, receipt checks, manifest creation,
 // summary/CSRF binding and refusal all run through the production service/handler.
 function fixture(scope = "openid offline_access admin:read") {
-  const session = { user_id: ALICE, user_email: "alice@example.test", user_display_name: "Alice",
-    authenticated_at: new Date().toISOString() };
+  const evidence = verifiedSignIn({ userId: ALICE, email: "alice@example.test", displayName: "Alice" });
+  const session = evidence.browserSession;
   const metadata = { client_id: CLIENT, application_type: "web", redirect_uris: ["https://client.example/callback"],
     dpop_signing_alg: "ES256", client_name: "Familiar <img src=x> name" };
   const verification = { client_id: CLIENT, verification_version: 1, application_type: "web", registration_source: "cimd",
@@ -86,7 +87,7 @@ function fixture(scope = "openid offline_access admin:read") {
     resource: ADMIN, scope, code_challenge: "a".repeat(43), code_challenge_method: "S256",
     dpop_jkt: "b".repeat(43), state: "oauth-state" }, prompt: { name: "consent", details: {} },
     session: { grantId: "old-mcp-provider-grant" } };
-  const state = { session, metadata, verification, approval, details, registered: false,
+  const state = { pool: evidence.pool, session, metadata, verification, approval, details, registered: false,
     parent: { user_id: ALICE, selection_version: 0, oauth_state: "oauth-state" }, receipt: null,
     stages: 0, grants: 0, grantFinds: 0, finishes: 0, completions: 0, cutoverReads: 0, fetches: 0,
     signIns: 0, gotrueBegins: 0, boundUserId: ALICE,
@@ -400,7 +401,8 @@ test("first-time admin login shows open issuance copy and finishes login with co
   assert.equal(loginConfirm.state.finishes, 1);
   assert.equal(loginConfirm.state.completions, 1);
   assert.deepEqual(loginConfirm.state.finishedResult, {
-    login: { accountId: ALICE }, consent: { grantId: "fresh-admin-grant" } });
+    login: { accountId: ALICE, ts: Math.floor(new Date(loginConfirm.state.session.authenticated_at).getTime() / 1000) },
+    consent: { grantId: "fresh-admin-grant" } });
   assert.equal(loginConfirm.state.finishedOpts, undefined);
 
   const consentConfirm = fixture();
@@ -427,7 +429,7 @@ test("resource dispatcher sends only scalar admin to its separate handler", asyn
   };
   const dispatch = createResourceInteractionHandler({
     mcpHandler: createInteractionHandler({ provider: f.provider,
-      store: { requireSession: async () => f.state.session,
+      store: { pool: f.state.pool, requireSession: async () => f.state.session,
         bindInteraction: async () => { bindings++; return { user_id: ALICE }; } },
       gotrue: {}, allowedOrigins: new Set([ORIGIN]) }), adminHandler: f.handler });
   const body = new URLSearchParams({ selection_version: "0", csrf_token: CSRF,
@@ -475,6 +477,7 @@ test("mcp-interaction-refuses-admin: refusal precedes grant lookup/mutation and 
       interactionFinished: async (_req, res) => { res.writeHead(204); res.end(); } };
     const handler = createInteractionHandler({ provider,
       store: {
+        pool: f.state.pool,
         requireSession: async () => f.state.session,
         bindInteraction: async () => { bindings++; return { user_id: ALICE }; },
         consumeConsent: async () => ({ client_id: CLIENT, selected_workspace_ids: [WORKSPACE],
