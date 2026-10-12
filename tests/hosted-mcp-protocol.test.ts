@@ -537,6 +537,25 @@ test("MCP denials log only stable error codes and known method names", async (t)
   ]);
 });
 
+test("unknown JSON-RPC methods require authentication before dispatch", async (t) => {
+  const fixture = await authenticatedHandler();
+  t.mock.method(console, "error", () => undefined);
+  const message = { jsonrpc: "2.0", id: "unknown-method-auth", method: "unknown-method" };
+  const authenticated = await fixture.serve(post(message, fixture.headers));
+  assert.equal(authenticated.status, 200);
+  assert.deepEqual(await authenticated.json(), {
+    jsonrpc: "2.0", id: message.id,
+    error: { code: -32601, message: "Method not found" },
+  });
+
+  const request = post(message, fixture.headers);
+  request.headers.delete("authorization");
+  const unauthenticated = await fixture.serve(request);
+  assert.equal(unauthenticated.status, 401, "authentication precedes unknown-method dispatch");
+  assert.equal(unauthenticated.headers.get("www-authenticate"), WWW_AUTHENTICATE);
+  assert.deepEqual(await unauthenticated.json(), { error: "unauthorized" });
+});
+
 test("protected-resource metadata and the unauthenticated challenge name exact URLs", async () => {
   const serve = handler();
   const metadata = await serve(new Request(`https://mcp.commonswarm.com${PROTECTED_RESOURCE_METADATA_PATH}`));

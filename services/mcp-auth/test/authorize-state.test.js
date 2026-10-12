@@ -247,8 +247,8 @@ async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnab
     setClient: (id) => { clientId = id; } };
 }
 
-// Public Codex CIMD, HTTP 200 fetched by the Strategist at 2026-10-12T17:20:16Z:
-// /Users/yulanbot/work/cswarm-vision/lanes/oauth-finish/pieces/codex-cimd.json.
+// Public Codex CIMD: https://chatgpt.com/oauth/codex/client.json
+// HTTP 200 fetched at 2026-10-12T17:20:16Z.
 // Codex rust-v0.162.0-alpha.17.2 uses AS discovery scopes when none are explicit
 // or configured (resolve_oauth_scopes, codex-rs/codex-mcp/src/mcp/auth.rs:158-190).
 // AuthorizationRequest sets scopes, client name and optional CIMD, but no prompt
