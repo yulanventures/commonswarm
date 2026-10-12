@@ -234,7 +234,7 @@ test("switch account is its own POST form outside the consent form with the same
 
   const switchButton = one(switcher, (node) => node.tag === "button");
   assert.equal(switchButton.attrs.type, "submit");
-  assert.equal(text(switchButton), "Use a different account");
+  assert.equal(text(switchButton), "Use another account");
   assert.deepEqual(find(switcher, (node) => node.tag === "input").map((input) => input.attrs),
     [{ type: "hidden", name: "csrf_token", value: CSRF }]);
 
@@ -252,19 +252,19 @@ test("without switchAccount the page keeps one form and shows the account withou
   const html = page();
   const tree = htmlTree(html);
   assert.equal(find(tree, (node) => node.tag === "form").length, 1);
-  assert.doesNotMatch(html, /Use a different account|switch-account/u);
-  assert.match(html, /Signed in as <strong>Human<\/strong>/u);
+  assert.doesNotMatch(html, /Use another account|switch-account/u);
+  assert.match(html, /Continue as <strong>Human<\/strong> \(human@example\.test\)/u);
 });
 
 test("provider label map names Google, GitHub and email; anything else falls back to the plain account text", () => {
   assert.deepEqual([...PROVIDER_LABELS], [["google", "Google"], ["github", "GitHub"], ["email", "email"]]);
   for (const [provider, label] of [["google", "Google"], ["github", "GitHub"], ["email", "email"]]) {
     const html = page({ identity: { ...identity, provider } });
-    assert.ok(html.includes(`Signed in with ${label} as <strong>Human</strong>`), provider);
+    assert.ok(html.includes(`<span>Continue as <strong>Human</strong> (human@example.test)</span><span class="account-email">Signed in with ${label}</span>`), provider);
   }
   for (const provider of [null, undefined, "", "okta", "GitHub", "constructor", "__proto__", "toString", 42, { toString: () => "github" }]) {
     const html = page({ identity: { ...identity, provider } });
-    assert.match(html, /Signed in as <strong>Human<\/strong>/u, String(provider));
+    assert.match(html, /Continue as <strong>Human<\/strong> \(human@example\.test\)/u, String(provider));
     assert.doesNotMatch(html, /Signed in with/u, String(provider));
     assert.doesNotMatch(html, /okta|constructor|__proto__|toString|class="provider-badge/u, String(provider));
   }
@@ -385,7 +385,7 @@ test("workspace picker marks long lists with the is-long class, reports the coun
   const locked = page({ switchAccount: SWITCH, selectionLocked: true, selectedWorkspaceIds: [W1, W2], homeWorkspaceId: W2, selectionVersion: 1 });
   const tree = htmlTree(locked);
   assert.equal(find(tree, (node) => node.tag === "form").length, 1);
-  assert.doesNotMatch(locked, /Use a different account|\/switch-account/u);
+  assert.doesNotMatch(locked, /Use another account|\/switch-account/u);
   const hidden = find(tree, (node) => node.tag === "input" && node.attrs.type === "hidden").map((node) => [node.attrs.name, node.attrs.value]);
   assert.deepEqual(hidden, [["selection_version", "1"], ["csrf_token", CSRF], ["home_workspace_id", W2],
     ["workspace_ids", W1], ["workspace_ids", W2]]);

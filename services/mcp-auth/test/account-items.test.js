@@ -223,11 +223,11 @@ test("chosen provider is returned in the callback and safe account chip; Google 
   persisted.prompt = { name: "consent", details: {} };
   await persisted.persist();
   const callbackPage = await h.run();
-  assert.match(callbackPage.body, /Signed in with Google as/);
+  assert.match(callbackPage.body, /Signed in with Google<\/span>/);
   assert.match(callbackPage.body, /current@example.test/);
   const signedIn = harness({ authenticated: true });
   const page = await signedIn.run();
-  assert.match(page.body, /Signed in with Google as/);
+  assert.match(page.body, /Signed in with Google<\/span>/);
   assert.match(page.body, /current@example.test/);
   assert.match(page.body, /action="\/interaction\/same-interaction\/switch-account"/);
   signedIn.oidcSession.amr = ["unknown-provider"];
