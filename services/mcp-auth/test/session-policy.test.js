@@ -58,22 +58,16 @@ test("CI only: fixed seven-day deadline and GoTrue binding survive attachment an
     identityVerified: true, email: "TEST@example.test", displayName: "TEST user" };
   try {
     assert.equal((await runtime.query("SELECT current_user AS role")).rows[0].role, "commonswarm_oauth_runtime");
-    // Catalog metadata only: CI records the actual image/GoTrue object owners
-    // and whether postgres can grant directly or select the owner role.
+    // Catalog metadata only: CI records the actual image/GoTrue object owners.
     const owners = await admin.query(`
-      SELECT 'auth' AS object, pg_get_userbyid(nspowner) AS owner,
-        has_schema_privilege('postgres', oid, 'USAGE WITH GRANT OPTION') AS can_grant,
-        pg_has_role('postgres', nspowner, 'SET') AS can_set_owner
+      SELECT 'auth' AS object, pg_get_userbyid(nspowner) AS owner
       FROM pg_namespace WHERE nspname='auth'
       UNION ALL
-      SELECT 'auth.'||c.relname, pg_get_userbyid(c.relowner),
-        has_table_privilege('postgres', c.oid, 'SELECT WITH GRANT OPTION'),
-        pg_has_role('postgres', c.relowner, 'SET')
+      SELECT 'auth.'||c.relname, pg_get_userbyid(c.relowner)
       FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
       WHERE n.nspname='auth' AND c.relname IN ('sessions','users','mfa_amr_claims')
       ORDER BY object`);
     assert.equal(owners.rows.length, 4, "auth schema and all three GoTrue table owners enumerated");
-    assert.ok(owners.rows.every(row => row.can_grant || row.can_set_owner), "local migrating role must be able to grant directly or use each auth owner");
     t.diagnostic(JSON.stringify({ authPrivilegeOwners: owners.rows }));
     // Execute the migration's actual postcondition, then remove each reviewed
     // privilege in a rollback-only transaction. A warning-only/no-op grant must
@@ -90,7 +84,11 @@ test("CI only: fixed seven-day deadline and GoTrue binding survive attachment an
     const connection = await admin.connect();
     try {
       await connection.query("BEGIN");
-      await connection.query(gate);
+      // 20261014000001_oauth_session_binding.sql explicitly reassigns both
+      // function owners to the guard; ownership cannot identify the applier.
+      // Its $session_privileges$ gate checks has_schema_privilege,
+      // has_column_privilege and has_function_privilege after migration apply.
+      await assert.doesNotReject(connection.query(gate), "session guard and runtime must hold the migration's required effective privileges");
       assert.equal(mutations.length, 17, "two guard schemas, thirteen columns, runtime schema and runtime function");
       for (const [role, kind, object, privilege] of mutations) {
         const parts = object.split("."), column = kind === "COLUMN" ? parts.pop() : null;
