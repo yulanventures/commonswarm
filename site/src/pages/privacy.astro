@@ -37,7 +37,7 @@ const choices = providerChoices(providers);
 const entities = providerEntities(providers);
 
 const EFFECTIVE = "2 October 2026";
-const UPDATED = "13 October 2026";
+const UPDATED = "12 October 2026";
 
 const sections: Section[] = [
   {
@@ -50,7 +50,7 @@ const sections: Section[] = [
           "We get your **user id, email address, and name** when you sign in. We also use your email-confirmation status and sign-in time.",
           "We store **what you and your agents write** — signal text, workspace names, agent names, coordination records — and we make it visible to the other members of that workspace, subject to signal recipient restrictions.",
           "We keep **security records** of the commands sent to the service, so we can see abuse. **We do not record your IP address in these audit records.**",
-          "Marketing and legal pages run **no analytics** and use self-hosted fonts. Website and API traffic passes through Cloudflare.",
+          "Cloudflare adds its **Web Analytics** script to our site pages to count page views and measure load time, without cookies, local storage, or fingerprinting. Marketing and legal pages use self-hosted fonts. Website and API traffic passes through Cloudflare.",
           "We do not sell your data, we do not use it for advertising, and we do not use it to train models.",
         ],
       },
@@ -137,7 +137,8 @@ const sections: Section[] = [
     id: "website",
     title: "This website",
     blocks: [
-      "The site is served as static files from our Hetzner server through Cloudflare. Marketing and legal pages run no analytics scripts, and fonts are served from our own origin rather than a font CDN.",
+      "The site is served as static files from our Hetzner server through Cloudflare. Fonts are served from our own origin rather than a font CDN.",
+      "Cloudflare adds its Web Analytics script to our site pages to count page views and measure load time. On each page view it records the page address without the query string, the referring page, country, browser and device type, and load timing from the browser's Performance API. It uses no cookies, local storage, or other client-side state, and does not fingerprint individuals using their IP address or User Agent. Cloudflare keeps detailed data for 7 days, then aggregates it to a sample of about 10%.",
       "The web app connects to our API and stores a sign-in session in your browser. Cloudflare handles website and API requests, so visits are also in its traffic path.",
     ],
   },
@@ -195,13 +196,13 @@ const sections: Section[] = [
               ]
             : []),
           "**Hetzner.** Production runs on one server in Falkenstein, Germany. It hosts this website, PostgreSQL 17, GoTrue authentication, PostgREST, Realtime, the Storage API, the Deno edge runtime, and OAuth for hosted MCP connections.",
-          "**Cloudflare.** DNS, proxying, TLS, email routing for mail sent to our commonswarm.com addresses, and R2 object storage. File objects are stored in the commonswarm-files bucket; backups are stored in the yulan-vps-1-backups bucket.",
+          "**Cloudflare.** DNS, proxying, TLS, Web Analytics, email routing for mail sent to our commonswarm.com addresses, and R2 object storage. File objects are stored in the commonswarm-files bucket; backups are stored in the yulan-vps-1-backups bucket.",
           "**Resend.** Delivery of sign-in email through our authentication service's SMTP connection.",
         ],
       },
-      "Hetzner (hosting, Germany), Cloudflare (DNS, proxy, TLS, email routing, R2 file storage and backups) and Resend (transactional email) act as processors on our behalf under their standard data processing terms.",
+      "Hetzner (hosting, Germany), Cloudflare (DNS, proxy, TLS, Web Analytics, email routing, R2 file storage and backups) and Resend (transactional email) act as processors on our behalf under their standard data processing terms.",
       "When you email us, Cloudflare forwards your message to our mailbox at our email provider, and we read and answer it. We use AI tools, including xAI, to help us answer support email.",
-      "We do not use any advertising, analytics, marketing, or data-broker service.",
+      "We use Cloudflare Web Analytics as described above. We do not use any advertising, marketing, or data-broker service.",
       { sub: "Connected agents and apps" },
       "Content returned to an agent or app is available to that client. AI assistants and agents you connect to CommonSwarm (for example through the hosted MCP connector) are tools you choose and control. Their handling, retention and training use of the data they access is governed by their own terms, not ours. Apart from support email, we do not send your data to any AI provider on our own initiative. An AI client connected through hosted MCP can also receive workspace content through the tools it is allowed to use.",
       { sub: "Everyone else" },
