@@ -1,7 +1,8 @@
 // P8 serves this external same-origin script at /interaction/finish-timer.js.
-// Inputs: finish-page.js DOM, fixed finish path and immutable epoch-ms deadline.
+// Inputs: finish-page.js DOM, fixed finish path and server-calculated remaining ms.
 // Outputs: polite status updates and a same-tab replace after three seconds.
 // No code/callback/query/storage; one navigation state; pause never extends expiry.
+// The local deadline tolerates clock skew; the server still enforces actual expiry.
 (() => {
   const page = document.getElementById("finish-page");
   if (!page) return;
@@ -11,9 +12,11 @@
   const status = document.getElementById("finish-status");
   const returnStatus = document.getElementById("finish-return-status");
   const path = page.dataset.finishPath;
-  const deadline = Number(page.dataset.deadline);
+  const remainingMs = Number(page.dataset.remainingMs);
+  const deadline = Date.now() + remainingMs;
   const valid = /^\/interaction\/[A-Za-z0-9_-]+\/finish$/u.test(path) &&
-    link.getAttribute("href") === path && Number.isSafeInteger(deadline) && deadline > 0;
+    link.getAttribute("href") === path && Number.isSafeInteger(remainingMs) && remainingMs >= 0 &&
+    Number.isSafeInteger(deadline) && deadline > 0;
   let state = "waiting", returnTimer, expiryTimer;
   const cancelReturn = () => clearTimeout(returnTimer);
   function expire() {
@@ -45,15 +48,22 @@
     if (event.defaultPrevented) { state = "paused"; return; }
     state = "navigating";
     clearTimeout(expiryTimer);
+    if (event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+      event.preventDefault();
+      window.location.assign(path);
+    }
   });
-  pause.addEventListener("click", () => {
+  function pauseReturn() {
     cancelReturn();
     if (!recheck() || state !== "waiting") return;
     state = "paused";
     pause.disabled = true;
     returnStatus.textContent = "Automatic return paused. Continue when you are ready.";
     link.focus();
-  });
+  }
+  pause.addEventListener("click", pauseReturn);
+  link.addEventListener("auxclick", pauseReturn);
+  link.addEventListener("contextmenu", pauseReturn);
   window.addEventListener("pagehide", () => {
     cancelReturn(); clearTimeout(expiryTimer);
     if (state !== "expired") state = "left";
@@ -69,6 +79,7 @@
   });
   window.addEventListener("focus", recheck);
   if (!recheck()) return;
+  pause.hidden = false;
   pause.disabled = false;
   armExpiry();
   returnTimer = setTimeout(() => {

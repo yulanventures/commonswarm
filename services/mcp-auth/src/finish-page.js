@@ -52,16 +52,16 @@ export function renderFinishPage({ interactionUid, clientDisplay, identity, work
   }
   const client = escapeHtml(clientDisplay.primary);
   const name = escapeHtml(identity.displayName || identity.email || "Email unavailable");
-  const email = identity.displayName && identity.email ? ` (${escapeHtml(identity.email)})` : "";
+  const email = identity.displayName && identity.email && identity.displayName !== identity.email ? ` (${escapeHtml(identity.email)})` : "";
   const workspaces = workspaceNames.length ? workspaceNames.map(escapeHtml).join(", ")
     : `${workspaceCount} workspace${workspaceCount === 1 ? "" : "s"}`;
   return shell({ clientDisplay, title: "Connected", script: `<script src="${FINISH_TIMER_PATH}" defer></script>`, content: `
-<section id="finish-page" data-connected-path="${paths.connectedPath}" data-finish-path="${paths.finishPath}" data-deadline="${deadline}" data-expiry-text="${escapeHtml(expiryText(clientDisplay))}" aria-live="polite" aria-atomic="true" tabindex="-1">
+<section id="finish-page" data-connected-path="${paths.connectedPath}" data-finish-path="${paths.finishPath}" data-deadline="${deadline}" data-remaining-ms="${Math.max(0, deadline - Date.now())}" data-expiry-text="${escapeHtml(expiryText(clientDisplay))}" aria-live="polite" aria-atomic="true" tabindex="-1">
 <h1 id="finish-title">Connected</h1><p id="finish-status" class="lede">${client} is connected to ${workspaces} as ${name}${email}. You can return to ${client}.</p>
 <p>Home workspace: <strong>${escapeHtml(homeWorkspaceName)}</strong></p>
 <p id="finish-return-status">We will now return you to ${client} to finish sign-in.</p></section>
 <div class="actions"><a id="finish-continue" href="${paths.finishPath}">Continue to ${client}</a>
-<button id="finish-pause" type="button" disabled>Pause automatic return</button></div>` });
+<button id="finish-pause" type="button" hidden disabled>Pause automatic return</button></div>` });
 }
 
 export function renderFinishExpiredPage({ clientDisplay }) {

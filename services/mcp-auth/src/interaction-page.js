@@ -94,7 +94,7 @@ function renderAccount(identity, csrfToken, switchAccount) {
   const provider = typeof identity.provider === "string" && PROVIDER_LABELS.has(identity.provider)
     ? identity.provider
     : null;
-  const emailSuffix = !identity.displayName && identity.email ? "" : ` (${escapeHtml(email)})`;
+  const emailSuffix = label === email ? "" : ` (${escapeHtml(email)})`;
   const continueAs = `Continue as <strong>${escapeHtml(label)}</strong>${emailSuffix}`;
   const providerText = provider
     ? `<span class="account-email">Signed in with ${PROVIDER_LABELS.get(provider)}</span>`
