@@ -3760,9 +3760,9 @@ test("controls: schema pending list accepts two versions in order and preserves 
     assert.equal(first.status, 0, first.stderr);
     assert.match(readFileSync(current, "utf8"), /^VERSION=20261014000001$/m);
     const before = readFileSync(current, "utf8");
-    const unverified = select();
-    assert.notEqual(unverified.status, 0, "the next version cannot start before verification");
-    assert.equal(readFileSync(current, "utf8"), before);
+    const retry = select();
+    assert.equal(retry.status, 0, retry.stderr);
+    assert.equal(readFileSync(current, "utf8"), before, "an unverified version is selected again");
     // Run the actual completion writer only. The live verification preceding it remains unexecuted.
     const verify = planBlock(RUNBOOK, "runbook-28").source;
     const writer = verify.match(/^  printf 'MIGRATION_VERIFIED=.*$/m)?.[0];
@@ -3774,6 +3774,9 @@ test("controls: schema pending list accepts two versions in order and preserves 
     assert.equal(second.status, 0, second.stderr);
     assert.match(readFileSync(current, "utf8"), /^VERSION=20261014000002$/m);
     assert.doesNotMatch(readFileSync(current, "utf8"), /^MIGRATION_VERIFIED=/m);
+    const retrySecond = select();
+    assert.equal(retrySecond.status, 0, retrySecond.stderr);
+    assert.match(readFileSync(current, "utf8"), /^VERSION=20261014000002$/m);
     const lastCompleted = spawnSync("/bin/bash", ["-ec", writer], { encoding: "utf8",
       env: explicitEnvironment({ PROOF_DIR: proof, VERSION: "20261014000002" }) });
     assert.equal(lastCompleted.status, 0, lastCompleted.stderr);
@@ -9599,13 +9602,13 @@ test("controls: box mode fails runbook-03 when item-resolved-inputs.env is missi
     assert.match(readFileSync(target, "utf8"), /^MIGRATION_VERSIONS='20260928000004'$/m);
     const positive = executeWholeBlock(consumer, fixture);
     // Run the unchanged consumer. Its source producer writes scalar versions (HM37:631-632),
-    // but runbook-03 uses array lengths (RELEASE-TO-BOX.md:471). A nounset failure there
+    // but runbook-03 uses array lengths (RELEASE-TO-BOX.md:472). A nounset failure there
     // is a separate plan defect, after the input file and required values were read.
     // Keep that failure in the whole-plan assertion; do not synthesize array declarations.
     if (positive.result === "failed") {
       assert.match(positive.stderr, /MIGRATION_VERSIONS: unbound variable/);
       assert.doesNotMatch(positive.stderr, /resolved item input missing|No such file or directory|CONTAINMENT UNAVAILABLE|unhandled dry-run stub/);
-      t.diagnostic("PLAN: resolved scalar MIGRATION_VERSIONS reached runbook-03's array-length read at deploy/RELEASE-TO-BOX.md:471; transfer succeeded, consumer still fails.");
+      t.diagnostic("PLAN: resolved scalar MIGRATION_VERSIONS reached runbook-03's array-length read at deploy/RELEASE-TO-BOX.md:472; transfer succeeded, consumer still fails.");
     } else {
       assert.equal(positive.result, "passed", positive.stderr);
     }

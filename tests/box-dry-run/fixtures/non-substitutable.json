@@ -988,7 +988,7 @@
   "scope": "whole-block",
   "surface": "live loopback POST to the edge's h0 note route",
   "reason": "needs the live loopback network and the live edge: the block POSTs a note body without authorization to http://127.0.0.1:9000/functions/v1/h0/note and requires status 401. M12 records that the loopback POST response was not measured, and the dry run's curl stub refuses every loopback POST with exit 69 rather than invent a response",
-  "live_proof": "The live runbook step at deploy/RELEASE-TO-BOX.md:2513-2548 must exit zero on the box: the unauthenticated loopback POST (deploy/RELEASE-TO-BOX.md:2525-2527) returns HTTP 401 (deploy/RELEASE-TO-BOX.md:2540-2546); the status, Server, CF-Ray and Content-Type are recorded in h0-note-unauth-result.json (deploy/RELEASE-TO-BOX.md:2528-2543), the body stays in h0-note-unauth.json and the headers file is removed (deploy/RELEASE-TO-BOX.md:2547).",
+  "live_proof": "The live runbook step at deploy/RELEASE-TO-BOX.md:2521-2556 must exit zero on the box: the unauthenticated loopback POST (deploy/RELEASE-TO-BOX.md:2533-2535) returns HTTP 401 (deploy/RELEASE-TO-BOX.md:2548-2554); the status, Server, CF-Ray and Content-Type are recorded in h0-note-unauth-result.json (deploy/RELEASE-TO-BOX.md:2536-2551), the body stays in h0-note-unauth.json and the headers file is removed (deploy/RELEASE-TO-BOX.md:2555).",
   "receipt_fields": [
     "pass",
     "status",
@@ -1001,21 +1001,21 @@
     {
       "output": "h0-note-unauth.json",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/h0-note-unauth.json",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:2525-2527",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2533-2535",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/h0-note-unauth.json",
       "reason": "Historical bytes, not proof that the present block ran. A real window's unauthenticated h0 note probe wrote this 401 body; the block's curl writes the live response body to the same name. Copy-back reads the file. The plan sets no mode for this file, so the seed uses the proof directory's root:root 0600 convention; no executed block reads its mode."
     },
     {
       "output": "h0-note-unauth-result.json",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/h0-note-unauth-result.json",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:2528-2545",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2536-2553",
       "evidence": null,
       "reason": "Not seeded. The writer prints the Server and CF-Ray headers of the live response; the plan documents no literal for them and no committed evidence holds this receipt. No executed block reads it. Reported by name."
     },
     {
       "output": "h0-note-unauth.headers",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/h0-note-unauth.headers",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:2525 removed at deploy/RELEASE-TO-BOX.md:2547",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2533 removed at deploy/RELEASE-TO-BOX.md:2555",
       "evidence": null,
       "reason": "Not seeded. A scratch file the block removes before it ends; no committed output bytes and no later reader. Reported by name."
     }
@@ -1028,7 +1028,7 @@
       "mode": "0600",
       "branch": "all",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/h0-note-unauth.json",
-      "source_lines": "deploy/RELEASE-TO-BOX.md:2525-2527"
+      "source_lines": "deploy/RELEASE-TO-BOX.md:2533-2535"
     }
   ],
   "shape_evidence": [
@@ -1053,7 +1053,7 @@
   "scope": "whole-block",
   "surface": "live PostgreSQL target identity assertion before the migration apply",
   "reason": "needs the live production database: run-db-tool.sh assert-database-identity.sh authenticates the target identity; runbook-16 is declared for the same reason and its database artifact directory is not produced",
-  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:1892-1909 must exit zero after the two proof writes at deploy/RELEASE-TO-BOX.md:1903-1906 and the target identity assertion at deploy/RELEASE-TO-BOX.md:1908.",
+  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:1893-1910 must exit zero after the two proof writes at deploy/RELEASE-TO-BOX.md:1904-1907 and the target identity assertion at deploy/RELEASE-TO-BOX.md:1909.",
   "receipt_fields": [
     "migration-files.txt: sorted migration file paths",
     "migration-files.sha256: sha256 of each migration file",
@@ -1063,14 +1063,14 @@
     {
       "output": "migration-files.txt",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/migration-files.txt",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:1903-1904",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:1904-1905",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/migration-files.txt",
       "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
     },
     {
       "output": "migration-files.sha256",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/migration-files.sha256",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:1905-1906",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:1906-1907",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/migration-files.sha256",
       "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
     }
@@ -1083,7 +1083,7 @@
       "mode": "0600",
       "branch": "all",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/migration-files.txt",
-      "source_lines": "deploy/RELEASE-TO-BOX.md:1903-1904"
+      "source_lines": "deploy/RELEASE-TO-BOX.md:1904-1905"
     },
     {
       "file": "migration-files.sha256",
@@ -1092,7 +1092,7 @@
       "mode": "0600",
       "branch": "all",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/migration-files.sha256",
-      "source_lines": "deploy/RELEASE-TO-BOX.md:1905-1906"
+      "source_lines": "deploy/RELEASE-TO-BOX.md:1906-1907"
     }
   ],
   "shape_evidence": [],
@@ -1103,7 +1103,7 @@
   "scope": "whole-block",
   "surface": "live migration ledger readback",
   "reason": "needs the live production database: release_psql_ro reads supabase_migrations.schema_migrations",
-  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:1918-1947 must exit zero after the ledger query at deploy/RELEASE-TO-BOX.md:1929-1931 and the pending-version comparison at deploy/RELEASE-TO-BOX.md:1932-1933.",
+  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:1919-1948 must exit zero after the ledger query at deploy/RELEASE-TO-BOX.md:1930-1932 and the pending-version comparison at deploy/RELEASE-TO-BOX.md:1933-1934.",
   "receipt_fields": [
     "ledger-before.txt: one version per line in ledger order",
     "pending-versions.txt: versions without a ledger row"
@@ -1112,14 +1112,14 @@
     {
       "output": "ledger-before.txt",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/ledger-before.txt",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:1929-1931",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:1930-1932",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/ledger-before.txt",
       "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
     },
     {
       "output": "pending-versions.txt",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/pending-versions.txt",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:1932-1933",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:1933-1934",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/pending-versions.txt",
       "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
     }
@@ -1132,7 +1132,7 @@
       "mode": "0600",
       "branch": "all",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/ledger-before.txt",
-      "source_lines": "deploy/RELEASE-TO-BOX.md:1929-1931"
+      "source_lines": "deploy/RELEASE-TO-BOX.md:1930-1932"
     },
     {
       "file": "pending-versions.txt",
@@ -1141,7 +1141,7 @@
       "mode": "0600",
       "branch": "all",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/pending-versions.txt",
-      "source_lines": "deploy/RELEASE-TO-BOX.md:1932-1933"
+      "source_lines": "deploy/RELEASE-TO-BOX.md:1933-1934"
     }
   ],
   "shape_evidence": [],
@@ -1152,7 +1152,7 @@
   "scope": "whole-block",
   "surface": "live pg_cron job-name readback before the migration",
   "reason": "needs the live production database: release_psql_ro reads cron.job",
-  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:1955-1968 must exit zero after the cron query at deploy/RELEASE-TO-BOX.md:1966-1967.",
+  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:1956-1969 must exit zero after the cron query at deploy/RELEASE-TO-BOX.md:1967-1968.",
   "receipt_fields": [
     "cron-before.txt: job names in database order"
   ],
@@ -1160,7 +1160,7 @@
     {
       "output": "cron-before.txt",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/cron-before.txt",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:1966-1967",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:1967-1968",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-before.txt",
       "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
     }
@@ -1173,7 +1173,7 @@
       "mode": "0600",
       "branch": "all",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-before.txt",
-      "source_lines": "deploy/RELEASE-TO-BOX.md:1966-1967"
+      "source_lines": "deploy/RELEASE-TO-BOX.md:1967-1968"
     }
   ],
   "shape_evidence": [],
@@ -1184,7 +1184,7 @@
   "scope": "whole-block",
   "surface": "live pre-migration ledger and catalog state",
   "reason": "needs the live production database: release_psql_ro reads the version's ledger count and runs its catalog proof",
-  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:1978-2050 must exit zero after the ledger count and catalog proof at deploy/RELEASE-TO-BOX.md:2023-2043 record ledger 0 and catalog f at deploy/RELEASE-TO-BOX.md:2044-2045.",
+  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:1979-2051 must exit zero after the ledger count and catalog proof at deploy/RELEASE-TO-BOX.md:2024-2044 record ledger 0 and catalog f at deploy/RELEASE-TO-BOX.md:2045-2046.",
   "receipt_fields": [
     "migration-state-before.txt: version=20260928000004 ledger=0 catalog=f",
     "current-migration.env: VERSION and MIGRATION_FILE"
@@ -1193,21 +1193,21 @@
     {
       "output": "migration-state-before.txt",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/migration-state-before.txt",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:2044-2045",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2045-2046",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/migration-state-before.txt",
       "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
     },
     {
       "output": "current-migration.env",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/current-migration.env",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:2020-2021",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2021-2022",
       "evidence": null,
       "reason": "Written before the database reads and consumed by runbook-27 and runbook-28, then by runbook-26 after successful verification. All are declared whole blocks. No committed receipt carries it and it is not in the curated copy-back list, so it is not seeded."
     },
     {
       "output": "box-run.log",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/box-run.log",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:2045",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2046",
       "evidence": null,
       "reason": "Appended log; no executed block reads it and no committed success receipt exists. Not seeded."
     }
@@ -1220,7 +1220,7 @@
       "mode": "0600",
       "branch": "all",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/migration-state-before.txt",
-      "source_lines": "deploy/RELEASE-TO-BOX.md:2044-2045"
+      "source_lines": "deploy/RELEASE-TO-BOX.md:2045-2046"
     }
   ],
   "shape_evidence": [],
@@ -1240,7 +1240,7 @@
   "scope": "whole-block",
   "surface": "live migration apply on the production database",
   "reason": "needs the live production database: it asserts the target identity and applies one migration file, its ledger row and catalog proof in one transaction with release_psql",
-  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:2072-2133 must exit zero after the scratch SQL at deploy/RELEASE-TO-BOX.md:2086-2128, the target identity assertion at deploy/RELEASE-TO-BOX.md:2131 and release_psql --file at deploy/RELEASE-TO-BOX.md:2132; Anvil reads the exit code before continuing.",
+  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:2073-2134 must exit zero after the scratch SQL at deploy/RELEASE-TO-BOX.md:2087-2129, the target identity assertion at deploy/RELEASE-TO-BOX.md:2132 and release_psql --file at deploy/RELEASE-TO-BOX.md:2133; Anvil reads the exit code before continuing.",
   "receipt_fields": [
     "none: no durable receipt; replacement proof is the live zero exit and the following runbook-28 readback"
   ],
@@ -1248,7 +1248,7 @@
     {
       "output": "APPLY_SQL",
       "path": "/run/commonswarm-release-{sha}-apply.sql",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:2086-2128",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2087-2129",
       "evidence": null,
       "reason": "Scratch migration SQL rewritten before each database use; no committed evidence, no executed reader. Never seeded."
     }
@@ -1266,8 +1266,8 @@
   "step": "runbook-28",
   "scope": "whole-block",
   "surface": "live post-migration ledger, catalog and functional readback",
-  "reason": "needs the live production database: release_psql_ro reads the ledger count, the catalog proof and the functional proof",
-  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:2143-2189 must exit zero after the ledger and catalog readbacks at deploy/RELEASE-TO-BOX.md:2155-2175 record ledger 1 and catalog t at deploy/RELEASE-TO-BOX.md:2176-2177 and the functional proof at deploy/RELEASE-TO-BOX.md:2185-2186.",
+  "reason": "needs the live production database: release_psql_ro reads the ledger count and catalog proof; B38 functional proofs use release_psql for their rolled-back writes, and other immediate functional proofs use release_psql_ro",
+  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:2144-2195 must exit zero after the ledger and catalog readbacks at deploy/RELEASE-TO-BOX.md:2156-2176 record ledger 1 and catalog t at deploy/RELEASE-TO-BOX.md:2177-2178 and the functional proof at deploy/RELEASE-TO-BOX.md:2191-2192.",
   "receipt_fields": [
     "migration-state-after.txt: version=20260928000004 ledger=1 catalog=t",
     "20260928000004-functional.txt equals t"
@@ -1276,21 +1276,21 @@
     {
       "output": "current-migration.env",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/current-migration.env",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:2188",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2194",
       "evidence": null,
       "reason": "Appends MIGRATION_VERIFIED only after this version's verification succeeds. The next runbook-26 consumes it; no live verification receipt exists, so it is not seeded."
     },
     {
       "output": "migration-state-after.txt",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/migration-state-after.txt",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:2176-2177",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2177-2178",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/migration-state-after.txt",
       "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
     },
     {
       "output": "20260928000004-functional.txt",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/20260928000004-functional.txt",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:2185-2186",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2191-2192",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/20260928000004-functional.txt",
       "reason": "Historical real-window readback of this functional proof (t). hm37-functional-section5 declares and seeds the same copy-back member at its own plan position; this block does not seed it."
     }
@@ -1303,7 +1303,7 @@
       "mode": "0600",
       "branch": "all",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/migration-state-after.txt",
-      "source_lines": "deploy/RELEASE-TO-BOX.md:2176-2177"
+      "source_lines": "deploy/RELEASE-TO-BOX.md:2177-2178"
     }
   ],
   "shape_evidence": [],
@@ -1319,7 +1319,7 @@
   "scope": "whole-block",
   "surface": "live pg_cron job-name readback after the migration and reconciliation",
   "reason": "needs the live production database: release_psql_ro reads cron.job after the migration",
-  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:2201-2243 must exit zero after the cron query at deploy/RELEASE-TO-BOX.md:2233-2234 and both comparisons at deploy/RELEASE-TO-BOX.md:2235-2240 show zero additions and zero removals.",
+  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:2207-2249 must exit zero after the cron query at deploy/RELEASE-TO-BOX.md:2239-2240 and both comparisons at deploy/RELEASE-TO-BOX.md:2241-2246 show zero additions and zero removals.",
   "receipt_fields": [
     "cron-after.txt: job names in database order",
     "cron-before-sorted.txt and cron-after-sorted.txt: bytewise sorted names",
@@ -1329,35 +1329,35 @@
     {
       "output": "cron-after.txt",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/cron-after.txt",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:2233-2234",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2239-2240",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-after.txt",
       "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
     },
     {
       "output": "cron-before-sorted.txt",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/cron-before-sorted.txt",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:2235",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2241",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-before-sorted.txt",
       "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
     },
     {
       "output": "cron-after-sorted.txt",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/cron-after-sorted.txt",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:2236",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2242",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-after-sorted.txt",
       "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
     },
     {
       "output": "cron-added.txt",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/cron-added.txt",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:2237-2238",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2243-2244",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-added.txt",
       "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
     },
     {
       "output": "cron-removed.txt",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/cron-removed.txt",
-      "producer_lines": "deploy/RELEASE-TO-BOX.md:2239-2240",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2245-2246",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-removed.txt",
       "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
     }
@@ -1370,7 +1370,7 @@
       "mode": "0600",
       "branch": "all",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-after.txt",
-      "source_lines": "deploy/RELEASE-TO-BOX.md:2233-2234"
+      "source_lines": "deploy/RELEASE-TO-BOX.md:2239-2240"
     },
     {
       "file": "cron-before-sorted.txt",
@@ -1379,7 +1379,7 @@
       "mode": "0600",
       "branch": "all",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-before-sorted.txt",
-      "source_lines": "deploy/RELEASE-TO-BOX.md:2235"
+      "source_lines": "deploy/RELEASE-TO-BOX.md:2241"
     },
     {
       "file": "cron-after-sorted.txt",
@@ -1388,7 +1388,7 @@
       "mode": "0600",
       "branch": "all",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-after-sorted.txt",
-      "source_lines": "deploy/RELEASE-TO-BOX.md:2236"
+      "source_lines": "deploy/RELEASE-TO-BOX.md:2242"
     },
     {
       "file": "cron-added.txt",
@@ -1397,7 +1397,7 @@
       "mode": "0600",
       "branch": "all",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-added.txt",
-      "source_lines": "deploy/RELEASE-TO-BOX.md:2237-2238"
+      "source_lines": "deploy/RELEASE-TO-BOX.md:2243-2244"
     },
     {
       "file": "cron-removed.txt",
@@ -1406,7 +1406,7 @@
       "mode": "0600",
       "branch": "all",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-removed.txt",
-      "source_lines": "deploy/RELEASE-TO-BOX.md:2239-2240"
+      "source_lines": "deploy/RELEASE-TO-BOX.md:2245-2246"
     }
   ],
   "shape_evidence": [],
@@ -1650,7 +1650,7 @@
   ]
 },
   {"step": "hm37-hosted-control-stage", "surface": "Docker OAuth Config.Env database host observation", "reason": "No measured MCP_OAUTH_DATABASE_HOST value is available. M7 recorded service.env names only and found the host name absent; the production recheck recorded health and workdir only. Compose environment names and extra_hosts do not measure the running container's host value.", "live_proof": "The live docker inspect at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:692-694 must record the effective host before staging can be verified.", "shape_evidence": [{"file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json", "shape": "M7:83-89 and production_recheck:383-386 contain no measured Config.Env host value"}], "outputs": [], "unproduced": [{"output": "oauth-database.json", "reason": "Its host field depends on the unmeasured container Config.Env observation."}]},
-  {"step": "runbook-16", "surface": "live PostgreSQL database identity", "reason": "needs the real PostgreSQL identity; Anvil proves it live. M8 measured the helper and target.env file metadata and the TARGET_DATABASE_URL name only; database reachability was not attempted. No measured server address, database-level stack marker, or superuser identity is available to serve the real helper's assertion.", "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:1320-1332 through deploy/supabase-stack/migrate/lib.sh:81-114.", "shape_evidence": [{"file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json", "shape": "M8: database reachability was not attempted"}], "outputs": []},
+  {"step": "runbook-16", "surface": "live PostgreSQL database identity", "reason": "needs the real PostgreSQL identity; Anvil proves it live. M8 measured the helper and target.env file metadata and the TARGET_DATABASE_URL name only; database reachability was not attempted. No measured server address, database-level stack marker, or superuser identity is available to serve the real helper's assertion.", "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:1321-1333 through deploy/supabase-stack/migrate/lib.sh:81-114.", "shape_evidence": [{"file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json", "shape": "M8: database reachability was not attempted"}], "outputs": []},
   {"surface": "live PostgreSQL catalog, transaction, rollback, and swarm.agent_tokens readback", "reason": "The harness checks command shape, ordering, read-only SQL, and reconciliation; only the production database can establish its current durable rows."},
   {"surface": "Docker image, container recreation, health, mounts, and network", "reason": "Measured inspect outputs seed exact shapes, but cannot establish newly pulled bytes or a live recreated container."},
   {"surface": "public and loopback HTTP refusal behavior", "reason": "The harness checks the request and response contract; only live endpoints can establish current routing and policy."},
