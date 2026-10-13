@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { AUTH_PROVIDER_CATALOG } from '../src/auth-provider-catalog.js';
 
 test('CI only: first connect, durable finish replay, one redemption, reuse, logout and flag-off', {
   skip: process.env.CI === 'true' ? false : 'CI only: requires PostgreSQL, Docker and Deno', timeout: 240000,
@@ -24,8 +25,14 @@ test('CI only: first connect, durable finish replay, one redemption, reuse, logo
   const authorize = () => view(`/authorize?${new URLSearchParams({ client_id: h.clientId, redirect_uri: h.callback,
     response_type: 'code', scope: 'openid mcp', prompt: 'consent', state, resource: h.resource,
     code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' })}`);
+  const assertChooser = page => {
+    for (const { id, name } of AUTH_PROVIDER_CATALOG) {
+      assert.ok(page.body.includes(`/sign-in?provider=${id}`));
+      assert.ok(page.body.includes(`Continue with ${name}`));
+    }
+  };
   const consent = async page => {
-    assert.equal(page.body.includes('Continue as'), true); assert.equal(page.body.includes('Sign in with GitHub'), false);
+    assert.equal(page.body.includes('Continue as'), true); assert.doesNotMatch(page.body, /\/sign-in\?provider=/u);
     const field = name => new RegExp(`name="${name}"[^>]*value="([^"]*)"`, 'u').exec(page.body)?.[1];
     const csrf = field('csrf_token'), version = field('selection_version'); assert.ok(csrf && version !== undefined);
     return h.request(`${page.path}/consent`, { method: 'POST', headers: { origin: h.issuer,
@@ -51,7 +58,7 @@ test('CI only: first connect, durable finish replay, one redemption, reuse, logo
     assert.equal(replay.status, 400); assert.equal(JSON.parse(replay.body).error, 'invalid_grant');
   };
   const chooser = await authorize();
-  for (const label of ['Sign in with Google', 'Sign in with GitHub']) assert.equal(chooser.body.includes(label), true);
+  assertChooser(chooser);
   const signedIn = await h.signIn(chooser.path); assert.equal(signedIn.status, 303);
   const first = await consent(await view(signedIn.headers.get('location'))); assert.equal(first.status, 303);
   const connectedPath = first.headers.get('location'); assert.equal(connectedPath.endsWith('/connected'), true);
@@ -90,7 +97,7 @@ test('CI only: first connect, durable finish replay, one redemption, reuse, logo
   assert.equal(await live(), 0, 'P1 trigger must invalidate every live bound session at logout');
   assert.equal((await h.request(pending.headers.get('location').replace(/connected$/u, 'finish'))).status, 410);
   assert.equal(completed.mock.callCount(), beforeLogout);
-  const afterLogout = await authorize(); assert.equal(afterLogout.body.includes('Sign in with GitHub'), true);
+  const afterLogout = await authorize(); assertChooser(afterLogout);
   h.setEnabled(false);
   for (const suffix of ['connected', 'finish']) {
     const off = await h.request(pending.headers.get('location').replace(/connected$/u, suffix));

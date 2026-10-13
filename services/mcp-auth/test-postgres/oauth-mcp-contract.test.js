@@ -17,6 +17,7 @@ import { InteractionStore } from '../src/interaction-store.js';
 import { ISSUER, RESOURCE } from '../src/provider.js';
 import { startServer } from '../src/server.js';
 import { localClusterAdminUrl } from '../../../tests/support/admin-schema-db.js';
+import { verifiedSignIn } from '../test/fixtures/verified-sign-in.js';
 
 const exec = promisify(execFile);
 const clientHost = 'metadata.oauth-contract.example';
@@ -133,7 +134,7 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
     const directory = stdout.trim();
     assert.ok(/^\/private\/tmp\/anvil-secret\.[A-Za-z0-9]+$/u.test(directory));
     await chmod(directory, 0o700);
-    const sessions = new Set(), clients = new Set(), gotrueSessionId = randomUUID();
+    const sessions = new Set(), clients = new Set(), gotrueSessions = [];
     let running, edge, metadataServer, gotrue;
     let runtimePasswordConfigured = false;
     try {
@@ -185,14 +186,17 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
       const gotrueUrl = await listen(gotrue);
       // Dummy token plus real auth rows exercise P1's narrow live-session check.
       // Server wiring remains P8's responsibility; do not bypass that check here.
-      const now = Math.floor(Date.now() / 1000);
-      loginToken = [Buffer.from('{"alg":"HS256"}').toString('base64url'), Buffer.from(JSON.stringify({
-        iss: gotrueUrl, aud: 'authenticated', sub: owner, session_id: gotrueSessionId, exp: now + 3600,
-      })).toString('base64url'), 'DUMMYSIGNATURE'].join('.');
-      await pool.query(`INSERT INTO auth.sessions(id,user_id,created_at,updated_at) VALUES($1,$2,now(),now())`,
-        [gotrueSessionId, owner]);
-      await pool.query(`INSERT INTO auth.mfa_amr_claims(id,session_id,created_at,updated_at,authentication_method)
-        VALUES($1,$2,to_timestamp($3),to_timestamp($3),'oauth')`, [randomUUID(), gotrueSessionId, now - 60]);
+      const ownerEvidence = verifiedSignIn({ userId: owner, issuer: gotrueUrl });
+      const otherEvidence = verifiedSignIn({ userId: other, issuer: gotrueUrl });
+      loginToken = ownerEvidence.accessToken;
+      for (const { identity } of [ownerEvidence, otherEvidence]) {
+        await pool.query(`INSERT INTO auth.sessions(id,user_id,created_at,updated_at) VALUES($1,$2,now(),now())`,
+          [identity.gotrueSessionId, identity.userId]);
+        gotrueSessions.push(identity.gotrueSessionId);
+        await pool.query(`INSERT INTO auth.mfa_amr_claims(id,session_id,created_at,updated_at,authentication_method)
+          VALUES($1,$2,to_timestamp($3),to_timestamp($3),'oauth')`,
+          [randomUUID(), identity.gotrueSessionId, identity.interactiveAuthAtSeconds]);
+      }
       const metadata = new Map();
       let metadataReads = 0;
       await exec('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
@@ -362,21 +366,31 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         assert.equal(wrongCsrf.status, 409, 'a swapped CSRF token cannot consume consent');
         const staleVersion = await submit(fields().map(([name, value]) => [name, name === 'selection_version' ? String(Number(value) + 1) : value]));
         assert.equal(staleVersion.status, 409, 'stale selection versions cannot consume consent');
-        const swappedSession = await new InteractionStore(pool).createSession();
+        const store = new InteractionStore(pool);
+        const session = [...agent.cookies.values()].find(cookie => cookie.name === SESSION_COOKIE).value;
+        const bindSession = async (browser, evidence) => pool.query(`UPDATE commonswarm_oauth.browser_sessions
+          SET user_id=$1, gotrue_session_id=$2, authenticated_at=to_timestamp($3) WHERE session_hash=$4`,
+          [evidence.identity.userId, evidence.identity.gotrueSessionId,
+            evidence.identity.interactiveAuthAtSeconds, hashOpaque(browser)]);
+        const swappedSession = await store.createSession();
         sessions.add(swappedSession);
-        await pool.query('UPDATE commonswarm_oauth.browser_sessions SET user_id = $1, authenticated_at = statement_timestamp() WHERE session_hash = $2', [owner, hashOpaque(swappedSession)]);
+        await bindSession(swappedSession, ownerEvidence);
+        assert.equal((await store.requireSession(swappedSession))?.user_id, owner,
+          'positive control: the other browser has a live verified session for the same account');
         const otherBrowser = new Agent(authOrigin, sessions);
         otherBrowser.cookies = new Map(agent.cookies);
         otherBrowser.cookies.set(`${SESSION_COOKIE}:/`, { name: SESSION_COOKIE, value: swappedSession, path: '/' });
         const otherSession = await submit(fields(), ISSUER, otherBrowser);
         assert.equal(otherSession.status, 409, 'consent cannot move to another browser session for the same account');
-        const session = [...agent.cookies.values()].find(cookie => cookie.name === SESSION_COOKIE).value;
-        await pool.query('UPDATE commonswarm_oauth.browser_sessions SET user_id = $1 WHERE session_hash = $2', [other, hashOpaque(session)]);
+        await bindSession(session, otherEvidence);
+        assert.equal((await store.requireSession(session))?.user_id, other,
+          'positive control: the switched account has its own live verified GoTrue session');
         const otherAccount = await submit(fields());
         assert.equal(otherAccount.status, 409, 'interaction cannot be submitted by another authenticated account');
         assert.match(otherAccount.headers.get('content-type') ?? '', /^text\/html/u);
         assert.match(await otherAccount.text(), /You signed in as a different account; start again/u);
-        await pool.query('UPDATE commonswarm_oauth.browser_sessions SET user_id = $1 WHERE session_hash = $2', [owner, hashOpaque(session)]);
+        await bindSession(session, ownerEvidence);
+        assert.equal((await store.requireSession(session))?.user_id, owner);
         const noHome = await submit(fields().filter(([name]) => name !== 'home_workspace_id'));
         assert.equal(noHome.status, 400, 'R7: multiple selected workspaces require a home');
         assertConsentHeaders(noHome); page = form(await noHome.text());
@@ -474,7 +488,7 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
           await pool.query('DELETE FROM commonswarm_oauth.interactions WHERE client_id = $1', [clientId]);
         }
         for (const session of sessions) await pool.query('DELETE FROM commonswarm_oauth.browser_sessions WHERE session_hash = $1', [hashOpaque(session)]);
-        await pool.query('DELETE FROM auth.sessions WHERE id = $1', [gotrueSessionId]);
+        await pool.query('DELETE FROM auth.sessions WHERE id = ANY($1::uuid[])', [gotrueSessions]);
         assert.ok(stopped.every(result => result.status === 'fulfilled'), 'all task-owned fixture services stopped');
       } finally {
         try {

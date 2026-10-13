@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { createHmac, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -63,7 +63,10 @@ test("CI only: box-matched global logout invalidates all linked AS sessions", {
     return fetch(target, options);
   };
   const docker = args => execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 90_000 });
-  const directory = mkdtempSync(join(tmpdir(), "cs-gotrue-logout-")), envFile = join(directory, "env");
+  const directory = mkdtempSync(join(tmpdir(), "cs-oauth-fixture-"));
+  assert.match(directory, /^\/private\/tmp\/anvil-secret\.[A-Za-z0-9]+$/u);
+  chmodSync(directory, 0o700);
+  const envFile = join(directory, "env");
   const users = [];
   let started = false, isolated, pool;
   const runtime = { query: async (...args) => {
@@ -99,7 +102,7 @@ test("CI only: box-matched global logout invalidates all linked AS sessions", {
     const resolved = `${image.split(":v")[0]}@${manifest.digest}`;
     docker(["pull", resolved]);
     writeFileSync(envFile, ["GOTRUE_API_HOST=0.0.0.0", "GOTRUE_API_PORT=18091", "GOTRUE_DB_DRIVER=postgres",
-      `GOTRUE_DB_DATABASE_URL=${isolated.url}`, `API_EXTERNAL_URL=${baseUrl}`,
+      `GOTRUE_DB_DATABASE_URL=${isolated.url}`, `API_EXTERNAL_URL=${baseUrl}`, `GOTRUE_JWT_ISSUER=${baseUrl}`,
       "GOTRUE_SITE_URL=http://localhost", "GOTRUE_JWT_SECRET=DUMMYJWTSECRET-FOR-DISPOSABLE-CI-ONLY",
       "GOTRUE_JWT_AUD=authenticated", "GOTRUE_EXTERNAL_EMAIL_ENABLED=true", "GOTRUE_MAILER_AUTOCONFIRM=true",
       "GOTRUE_DISABLE_SIGNUP=false", "GOTRUE_SECURITY_REFRESH_TOKEN_ROTATION_ENABLED=true", "GOTRUE_LOG_LEVEL=error", ""].join("\n"), { mode: 0o600 });
@@ -119,10 +122,10 @@ test("CI only: box-matched global logout invalidates all linked AS sessions", {
       users.push({ id: signup.user?.id ?? signup.id, email });
     }
     const tokens = [await login(users[0].email), await login(users[0].email), await login(users[1].email)];
-    // The box sets only API_EXTERNAL_URL; prove the matching GoTrue issuer default.
+    // Match the stack's explicit issuer; API_EXTERNAL_URL alone omits iss.
     for (const { access_token } of tokens) {
       const payload = JSON.parse(Buffer.from(access_token.split(".")[1], "base64url").toString("utf8"));
-      assert.equal(payload.iss, baseUrl, "GoTrue's default issuer must equal API_EXTERNAL_URL");
+      assert.equal(payload.iss, baseUrl, "GoTrue's configured issuer must equal API_EXTERNAL_URL");
     }
     const client = accessToken => createGoTrueClient({ baseUrl, provider: "github", pool: runtime,
       fetch: (url, options) => new URL(url).pathname.endsWith("/token")

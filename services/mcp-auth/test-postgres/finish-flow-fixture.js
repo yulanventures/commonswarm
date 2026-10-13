@@ -1,12 +1,12 @@
 // P9c CI fixture: dummy sign-in inputs enter the real HTTP/provider/command path.
 // Outputs collect every AS response privately for leak checks; PostgreSQL owns state.
 // Only external OAuth is synthetic; GoTrue verification/logout use v2.197.0.
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createServer, request as httpRequest } from 'node:http';
 import { format } from 'node:util';
 import { Pool } from 'pg';
@@ -28,7 +28,10 @@ export async function finishFlowFixture(t) {
   const logs = [], responses = [], privateValues = [], cookies = new Map();
   for (const method of ['log', 'info', 'warn', 'error', 'debug'])
     t.mock.method(console, method, (...args) => logs.push(format(...args)));
-  const directory = mkdtempSync(join(tmpdir(), 'cs-oauth-finish-')), name = `oauth-finish-${randomUUID()}`;
+  const directory = mkdtempSync(join(tmpdir(), 'cs-oauth-fixture-'));
+  assert.match(directory, /^\/private\/tmp\/anvil-secret\.[A-Za-z0-9]+$/u);
+  chmodSync(directory, 0o700);
+  const name = `oauth-finish-${randomUUID()}`;
   let isolated, pool, runtime, server, loopback, edge, started = false, enabled = true, passwordSet = false;
   const docker = args => execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 });
   t.after(async () => {
@@ -65,7 +68,7 @@ export async function finishFlowFixture(t) {
   const resolved = `${image.split(':v')[0]}@${manifest.digest}`, root = 'http://127.0.0.1:18092/auth/v1';
   docker(['pull', resolved]);
   writeFileSync(`${directory}/env`, ['GOTRUE_API_HOST=0.0.0.0', 'GOTRUE_API_PORT=18092', 'GOTRUE_DB_DRIVER=postgres',
-    `GOTRUE_DB_DATABASE_URL=${isolated.url}`, `API_EXTERNAL_URL=${root}`, 'GOTRUE_SITE_URL=http://localhost',
+    `GOTRUE_DB_DATABASE_URL=${isolated.url}`, `API_EXTERNAL_URL=${root}`, `GOTRUE_JWT_ISSUER=${root}`, 'GOTRUE_SITE_URL=http://localhost',
     'GOTRUE_JWT_SECRET=DUMMYJWTSECRET-FOR-DISPOSABLE-CI-ONLY', 'GOTRUE_JWT_AUD=authenticated',
     'GOTRUE_EXTERNAL_EMAIL_ENABLED=true', 'GOTRUE_MAILER_AUTOCONFIRM=true', 'GOTRUE_DISABLE_SIGNUP=false',
     'GOTRUE_LOG_LEVEL=error', ''].join('\n'), { mode: 0o600 });
