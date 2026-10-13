@@ -388,6 +388,43 @@ test("3. PKCE requires S256 and refuses plain or missing challenges", async () =
   }
 });
 
+// Real provider redirects must carry callback data only in Location, including
+// error responses and both content types selected by Koa's Accept negotiation.
+test("authorization redirects omit callback, code and state from response bodies", async (t) => {
+  const clientId = "https://redirect-body.example/oauth-client.json";
+  const server = await startProvider(metadataFetchFromMap(new Map([[clientId, clientMetadata(clientId)]])));
+  try {
+    for (const accept of ["text/html", "text/plain"]) {
+      for (const rejected of [false, true]) {
+        await t.test(`${accept}: ${rejected ? "PKCE refusal" : "code issuance"}`, async () => {
+          let current = authorizationUrl({ clientId, state: "DUMMYSTATE",
+            ...(rejected ? { challenge: null, challengeMethod: null } : {}) });
+          for (let step = 0; step < 10; step += 1) {
+            const response = await server.request(current, { headers: { accept } });
+            assert.equal(response.status, 303);
+            const location = new URL(response.headers.get("location"), ISSUER);
+            if (location.origin === ISSUER) { current = location; continue; }
+            assert.equal(location.origin + location.pathname === DEFAULT_REDIRECT_URI, true);
+            assert.equal(location.searchParams.get("state") === "DUMMYSTATE", true);
+            assert.equal(location.searchParams.get("iss") === ISSUER, true);
+            assert.equal(rejected ? location.searchParams.get("error") === "invalid_request"
+              : Boolean(location.searchParams.get("code")), true);
+            const body = await response.text();
+            for (const value of [DEFAULT_REDIRECT_URI, "DUMMYSTATE", location.searchParams.get("code")].filter(Boolean)) {
+              assert.equal(body.includes(value), false, "callback data appeared in redirect body");
+              assert.equal([...response.headers].some(([name, valueInHeader]) =>
+                name !== "location" && valueInHeader.includes(value)), false,
+              "callback data appeared outside Location");
+            }
+            return;
+          }
+          assert.fail("authorization did not reach the client redirect");
+        });
+      }
+    }
+  } finally { await server.close(); }
+});
+
 test("4. RFC 8707 binds authorization and token requests to the one MCP resource", async () => {
   const clientId = "https://resource.example/oauth-client.json";
   sharedDocuments.set(clientId, clientMetadata(clientId));
