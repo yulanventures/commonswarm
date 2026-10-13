@@ -1,4 +1,4 @@
-/** B38 release proofs replayed as the CLI's non-superuser migration applier. */
+/** B38 migrations replayed as supabase_admin, with non-superuser forward proofs. */
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -43,7 +43,7 @@ function replayPrefix(directory: string): string {
   return `\\set release_proof_outer_transaction 1
 BEGIN;
 -- The local reset has both migrations installed. The box release principal
--- reverses them inside this transaction before the real non-superuser replay.
+-- reverses them inside this transaction before replaying as supabase_admin.
 \\ir 20261014000002-rollback.sql
 \\ir 20261014000001-rollback.sql
 DO $identity$
@@ -52,7 +52,7 @@ BEGIN
     OR NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)
     OR NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'postgres'
       AND NOT rolsuper AND rolcreaterole) THEN
-    RAISE EXCEPTION 'B38 replay requires supabase_admin and a non-superuser postgres applier';
+    RAISE EXCEPTION 'B38 replay requires supabase_admin and a non-superuser postgres proof role';
   END IF;
 END
 $identity$;
@@ -62,31 +62,30 @@ GRANT commonswarm_oauth_runtime TO postgres WITH ADMIN TRUE, INHERIT FALSE, SET 
 CREATE TEMP TABLE b38_runtime_memberships_before ON COMMIT DROP AS
   SELECT * FROM pg_auth_members
   WHERE roleid = (SELECT oid FROM pg_roles WHERE rolname = 'commonswarm_oauth_runtime');
--- Both identities must be non-superuser: a superuser session can SET ROLE
+-- Apply as the same supabase_admin principal used by CI and the box.
+\\i ${directory}/${migrations[0]}
+INSERT INTO supabase_migrations.schema_migrations (version) VALUES ('20261014000001');
+-- Both proof identities must be non-superuser: a superuser session can SET ROLE
 -- without membership and would hide the regression in the functional proofs.
 SET LOCAL SESSION AUTHORIZATION postgres;
-DO $applier$
+DO $proof_role$
 BEGIN
   IF current_user <> 'postgres' OR session_user <> 'postgres'
     OR (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) THEN
-    RAISE EXCEPTION 'B38 forward apply must use a non-superuser session';
+    RAISE EXCEPTION 'B38 forward proofs must use a non-superuser session';
   END IF;
 END
-$applier$;
-\\i ${directory}/${migrations[0]}
-RESET SESSION AUTHORIZATION;
-INSERT INTO supabase_migrations.schema_migrations (version) VALUES ('20261014000001');
-SET LOCAL SESSION AUTHORIZATION postgres;
+$proof_role$;
 \\ir 20261014000001-catalog.sql
-${requireTrue("catalog_ok", "session catalog after non-superuser apply")}
+${requireTrue("catalog_ok", "session catalog after supabase_admin apply")}
 \\ir 20261014000001-functional.sql
 ${requireTrue("functional_ok", "session functional proof")}
-\\i ${directory}/${migrations[1]}
 RESET SESSION AUTHORIZATION;
+\\i ${directory}/${migrations[1]}
 INSERT INTO supabase_migrations.schema_migrations (version) VALUES ('20261014000002');
 SET LOCAL SESSION AUTHORIZATION postgres;
 \\ir 20261014000002-catalog.sql
-${requireTrue("catalog_ok", "finish catalog after non-superuser apply")}
+${requireTrue("catalog_ok", "finish catalog after supabase_admin apply")}
 \\ir 20261014000002-functional.sql
 ${requireTrue("functional_ok", "finish functional proof")}
 RESET SESSION AUTHORIZATION;
@@ -108,7 +107,7 @@ $membership$;
 `;
 }
 
-test("B38 non-superuser apply, all eight proofs and wrong-order rollback refusal", {
+test("B38 supabase_admin apply, all eight proofs and wrong-order rollback refusal", {
   timeout: 120_000,
 }, () => {
   const container = databaseContainer();
