@@ -1,3 +1,4 @@
+import { verifiedSignIn } from "./fixtures/verified-sign-in.js";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { test } from "node:test";
@@ -26,13 +27,18 @@ function response() {
 }
 
 function harness({ providers = ["google", "github"], authenticated = false } = {}) {
-  const session = { user_id: authenticated ? USER : null, authenticated_at: authenticated ? new Date().toISOString() : null,
-    user_email: "current@example.test", user_display_name: "Human" };
+  const evidence = verifiedSignIn({ userId: USER, email: "current@example.test" });
+  const other = verifiedSignIn({ userId: OTHER });
+  const pool = { query: (sql, values) => values[1] === OTHER
+    ? other.pool.query(sql, values) : evidence.pool.query(sql, values) };
+  const session = { ...evidence.browserSession, user_id: authenticated ? USER : null,
+    authenticated_at: authenticated ? evidence.liveRow.authenticated_at : null };
   const binding = { user_id: session.user_id, selected_workspace_ids: [], selection_version: 0 };
   const oidcSession = { accountId: authenticated ? USER : null, amr: ["google"] };
   const calls = [];
   let pending;
   const store = {
+    pool,
     requireSession: async () => ({ ...session }), bindInteraction: async () => ({ ...binding }),
     issueConsentToken: async () => ({ token: TOKEN, selectionVersion: 0 }),
     beginSignIn: async (uid, id, signIn) => { pending = signIn; calls.push({ kind: "begin", uid, id }); },
@@ -42,15 +48,16 @@ function harness({ providers = ["google", "github"], authenticated = false } = {
     },
     attachUser: async (uid, id, user) => {
       calls.push({ kind: "attach", uid, id, user });
-      Object.assign(session, { user_id: user.id, authenticated_at: new Date().toISOString(),
+      Object.assign(session, { ...evidence.browserSession, user_id: user.id,
         user_email: user.email, user_display_name: user.displayName });
       binding.user_id = user.id;
     },
     rotateSession: async () => "rotated-session-long-enough",
   };
   const gotrue = createGoTrueClient({ baseUrl: "https://api.commonswarm.com/auth/v1", anonKey: "test-public-key", providers,
+    pool,
     fetch: async (url) => String(url).includes("/token")
-      ? Response.json({ access_token: "fixture-access", expires_in: 3600 })
+      ? Response.json({ access_token: evidence.accessToken, expires_in: 3600 })
       : Response.json({ id: USER, email: "current@example.test", email_confirmed_at: "2026-10-01T00:00:00Z",
         app_metadata: { provider: "unknown-value" }, user_metadata: { display_name: "Human" } }),
   });
@@ -71,7 +78,7 @@ function harness({ providers = ["google", "github"], authenticated = false } = {
     await handler(request, result, new URL(path, ORIGIN));
     return result;
   }
-  return { run, store, gotrue, provider, session, oidcSession, binding, calls };
+  return { run, store, gotrue, provider, session, oidcSession, binding, calls, evidence, other };
 }
 
 test("provider config keeps legacy order, accepts equal settings and refuses mismatches or unknown ids", () => {
@@ -211,16 +218,17 @@ test("chosen provider is returned in the callback and safe account chip; Google 
   assert.equal(finish.status, 303);
   assert.equal(h.calls.find((entry) => entry.kind === "attach").user.email, "current@example.test");
   assert.equal((await h.run()).status, 303);
-  assert.deepEqual(submitted, { login: { accountId: USER, amr: ["google"] } });
+  assert.deepEqual(submitted, { login: { accountId: USER, amr: ["google"],
+    ts: h.evidence.identity.interactiveAuthAtSeconds } });
   const persisted = await oidc.Interaction.find(UID);
   persisted.prompt = { name: "consent", details: {} };
   await persisted.persist();
   const callbackPage = await h.run();
-  assert.match(callbackPage.body, /Signed in with Google as/);
+  assert.match(callbackPage.body, /Signed in with Google<\/span>/);
   assert.match(callbackPage.body, /current@example.test/);
   const signedIn = harness({ authenticated: true });
   const page = await signedIn.run();
-  assert.match(page.body, /Signed in with Google as/);
+  assert.match(page.body, /Signed in with Google<\/span>/);
   assert.match(page.body, /current@example.test/);
   assert.match(page.body, /action="\/interaction\/same-interaction\/switch-account"/);
   signedIn.oidcSession.amr = ["unknown-provider"];
@@ -321,7 +329,7 @@ test("switch rejects a stale CSRF digest without ending the browser session", as
 test("a different browser user is refused on render and POST before consent can create a grant", async () => {
   const h = harness({ authenticated: true });
   assert.equal((await h.run()).status, 200);
-  h.session.user_id = OTHER;
+  Object.assign(h.session, h.other.browserSession);
   for (const method of ["GET", "POST"]) {
     const result = await h.run(`/interaction/${UID}${method === "POST" ? "/consent" : ""}`, {
       method, body: method === "POST" ? `csrf_token=${TOKEN}&selection_version=0&workspace_ids=${WORKSPACE}&home_workspace_id=${WORKSPACE}` : "",
@@ -332,12 +340,14 @@ test("a different browser user is refused on render and POST before consent can 
 });
 
 test("sign-in cannot replace a user already bound to the interaction", async () => {
+  const evidence = verifiedSignIn({ userId: OTHER, email: "other@example.test" });
   let writes = 0;
-  const store = new InteractionStore({ connect: async () => ({ release() {}, query: async (sql) => {
+  const store = new InteractionStore({ connect: async () => ({ release() {}, query: async (sql, values) => {
+    if (sql.includes("commonswarm_oauth.live_gotrue_session")) return evidence.pool.query(sql, values);
     if (sql.startsWith("SELECT")) return { rowCount: 1, rows: [{ user_id: USER }] };
     if (sql.startsWith("UPDATE")) writes++;
     return { rowCount: 1, rows: [] };
   } }) });
-  await assert.rejects(store.attachUser(UID, COOKIE, { id: OTHER, email: "other@example.test" }), { code: "different_account" });
+  await assert.rejects(store.attachUser(UID, COOKIE, evidence.user), { code: "different_account" });
   assert.equal(writes, 0);
 });

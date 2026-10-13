@@ -305,6 +305,12 @@ export async function createMcpProvider({
       return;
     }
     await next();
+    // Koa copies Location into redirect bodies. Callback data belongs only in
+    // the protocol header for all provider redirects, including logout.
+    if (ctx.status >= 300 && ctx.status < 400 &&
+        ctx.response.get("location")) {
+      ctx.body = "";
+    }
     const entities = ctx.oidc?.entities;
     if ((entities?.AuthorizationCode || entities?.AccessToken) && ctx.status < 400 &&
         ctx.path.startsWith("/authorize")) {

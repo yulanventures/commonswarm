@@ -17,6 +17,11 @@ const allowlist = JSON.parse(readFileSync(new URL('../support/admin-issuer-privi
 // SELECT/INSERT (AM7). These fifteen command-parent grants are intentional;
 // swarm_admin retains ownership and history mutation remains forbidden.
 // The human overview/predicate add no issuer or PUBLIC grants.
+// 20261014000001_oauth_session_binding.sql adds the isolated session guard.
+// Inventory its narrow ACLs, safe role attributes and two function owners too;
+// the issuer must still be unable to select it or read auth tables directly.
+// P4 adds finish SELECT and column-only INSERT/UPDATE. Inventory those exact
+// grants; mutation controls must still reject writes to binding and deadline columns.
 const literal = JSON.stringify(allowlist.map((entry: unknown[]) => entry.slice(0, 5))).replaceAll("'", "''");
 // Enumerate explicit ACLs across the whole database, not a selected set of known
 // tables. The saved schemas belong to runSql's rollback-only isolation fixture.
@@ -65,11 +70,21 @@ WHERE a.grantee<>o.owner
      WHERE i.classoid='pg_proc'::regclass AND i.objoid=o.object_id AND i.objsubid=0 AND i.privtype='i'),acldefault('f',o.owner))) initial
      WHERE initial.grantee=a.grantee AND initial.privilege_type=a.privilege_type AND initial.is_grantable=a.is_grantable))
  AND (r.rolname IN ('commonswarm_admin_issuer','commonswarm_oauth_runtime','swarm_command')
+ OR r.rolname='commonswarm_oauth_session_guard'
  OR (a.grantee=0 AND (position('.' in o.name)=0
    OR EXISTS(SELECT 1 FROM pg_namespace n WHERE n.nspname=split_part(o.name,'.',1)
      AND (has_schema_privilege('commonswarm_admin_issuer',n.oid,'USAGE')
        OR has_schema_privilege('commonswarm_oauth_runtime',n.oid,'USAGE')
-       OR has_schema_privilege('swarm_command',n.oid,'USAGE'))))));
+       OR has_schema_privilege('swarm_command',n.oid,'USAGE'))))))
+UNION ALL
+SELECT r.rolname,'OWNERSHIP',o.name,'OWNER',false
+FROM objects o JOIN pg_roles r ON r.oid=o.owner
+WHERE r.rolname='commonswarm_oauth_session_guard'
+UNION ALL
+SELECT rolname,'ROLE',rolname,
+ format('LOGIN=%s INHERIT=%s SUPERUSER=%s CREATEDB=%s CREATEROLE=%s REPLICATION=%s BYPASSRLS=%s',
+   rolcanlogin,rolinherit,rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls),false
+FROM pg_roles WHERE rolname='commonswarm_oauth_session_guard';
 CREATE TEMP VIEW issuer_widening AS
 SELECT jsonb_build_array(grantee,kind,name,privilege_type,is_grantable) AS privilege FROM issuer_acl_inventory
 WHERE NOT (grantee='commonswarm_oauth_runtime' AND kind='DATABASE' AND name=current_database() AND privilege_type='CONNECT' AND NOT is_grantable)
@@ -85,7 +100,7 @@ BEGIN
    WHERE m.member='commonswarm_admin_issuer'::regrole AND NOT m.admin_option AND NOT m.inherit_option AND m.set_option)
    IS DISTINCT FROM ARRAY['commonswarm_oauth_runtime','swarm_command']::text[]
    OR (SELECT count(*) FROM pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole)<>2
-   OR EXISTS(SELECT 1 FROM pg_auth_members WHERE member IN ('commonswarm_oauth_runtime'::regrole,'swarm_command'::regrole))
+   OR EXISTS(SELECT 1 FROM pg_auth_members WHERE member IN ('commonswarm_oauth_runtime'::regrole,'swarm_command'::regrole,'commonswarm_oauth_session_guard'::regrole))
    OR EXISTS(SELECT 1 FROM pg_roles WHERE rolname IN ('commonswarm_admin_issuer','commonswarm_oauth_runtime','swarm_command')
      AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls OR NOT rolcanlogin))
    OR EXISTS(SELECT 1 FROM pg_roles WHERE rolname IN ('commonswarm_admin_issuer','commonswarm_oauth_runtime') AND rolinherit)
@@ -98,7 +113,7 @@ BEGIN
        format('ADMIN=%s INHERIT=%s SET=%s',m.admin_option,m.inherit_option,m.set_option),m.admin_option) AS privilege
      FROM pg_auth_members m JOIN pg_roles member ON member.oid=m.member
      JOIN pg_roles parent ON parent.oid=m.roleid JOIN pg_roles grantor ON grantor.oid=m.grantor
-     WHERE member.rolname IN ('commonswarm_oauth_runtime','swarm_command')
+     WHERE member.rolname IN ('commonswarm_oauth_runtime','swarm_command','commonswarm_oauth_session_guard')
        OR (member.rolname='commonswarm_admin_issuer' AND (parent.rolname NOT IN ('commonswarm_oauth_runtime','swarm_command')
          OR m.admin_option OR m.inherit_option OR NOT m.set_option
          OR (SELECT count(*) FROM pg_auth_members edge WHERE edge.member=m.member AND edge.roleid=m.roleid)<>1))
@@ -256,6 +271,29 @@ ALTER TABLE public.issuer_mutation_control OWNER TO commonswarm_admin_issuer;
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
 ALTER TABLE public.issuer_mutation_control OWNER TO supabase_admin;
 SELECT pg_temp.assert_issuer();
+-- Paired mutations prove the guard's column grants, ownership and role options
+-- remain bounded by the literal inventory; each rollback restores the control.
+${[
+  'GRANT SELECT ON auth.sessions TO commonswarm_oauth_session_guard;',
+  'GRANT UPDATE (user_id) ON commonswarm_oauth.browser_sessions TO commonswarm_oauth_session_guard;',
+  'GRANT CREATE ON SCHEMA public TO commonswarm_oauth_session_guard; ALTER TABLE public.issuer_mutation_control OWNER TO commonswarm_oauth_session_guard; REVOKE CREATE ON SCHEMA public FROM commonswarm_oauth_session_guard;',
+  'ALTER ROLE commonswarm_oauth_session_guard LOGIN;',
+].map(mutation => `SAVEPOINT session_guard_mutation;
+${mutation}
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+ROLLBACK TO SAVEPOINT session_guard_mutation;
+SELECT pg_temp.assert_issuer();`).join('\n')}
+-- P4 grants only resume-state writes, never mutable identity/request/deadline.
+${[
+  'GRANT UPDATE (user_id) ON commonswarm_oauth.finish_records TO commonswarm_oauth_runtime;',
+  'GRANT UPDATE (expires_at) ON commonswarm_oauth.finish_records TO commonswarm_oauth_runtime;',
+  'GRANT INSERT (resume_response) ON commonswarm_oauth.finish_records TO commonswarm_oauth_runtime;',
+  'GRANT DELETE ON commonswarm_oauth.finish_records TO commonswarm_oauth_runtime;',
+].map(mutation => `SAVEPOINT finish_mutation;
+${mutation}
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+ROLLBACK TO SAVEPOINT finish_mutation;
+SELECT pg_temp.assert_issuer();`).join('\n')}
 CREATE FUNCTION public.issuer_function_mutation() RETURNS boolean LANGUAGE sql AS 'SELECT true';
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
 REVOKE ALL ON FUNCTION public.issuer_function_mutation() FROM PUBLIC;

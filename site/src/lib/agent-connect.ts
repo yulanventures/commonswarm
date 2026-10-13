@@ -13,9 +13,9 @@
  * THE SEQUENCE MIRRORS THE CLI, because the CLI is the working reference and the server has
  * one command surface, not two:
  *
- *   1. register_device      src/cloud/auth.ts:342 — pre-route, no workspace_id, no stream.
- *   2. create_agent_principal   src/cli.ts:1145 (`cswarm principal create`).
- *   3. mint_agent_token         src/cli.ts:1173 (`cswarm token mint`).
+ *   1. register_device      src/cloud/auth.ts:388 — pre-route, no workspace_id, no stream.
+ *   2. create_agent_principal   src/cli.ts:2565 (`cswarm principal create`).
+ *   3. mint_agent_token         src/cli.ts:2717 (`cswarm token mint`).
  *
  * Step 1 is not optional and is the step that is easy to miss from a browser. The command
  * function checks the mint's device binding against swarm.devices directly
@@ -129,7 +129,7 @@ export class AgentNameTaken extends Error {
 
 /**
  * The mint was accepted on an earlier attempt and replayed. The server stores only a hash of
- * the credential, so a replay carries the ids and never the secret (src/cli.ts:1218-1222). The
+ * the credential, so a replay carries the ids and never the secret (src/cli.ts:2736-2740). The
  * only recovery is to mint a fresh one, which is why this is its own type: retrying blindly is
  * how you end up with two live credentials and only one of them written down.
  */

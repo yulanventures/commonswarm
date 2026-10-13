@@ -1,3 +1,4 @@
+import { verifiedSignIn } from "./fixtures/verified-sign-in.js";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { test } from "node:test";
@@ -44,21 +45,24 @@ function requestFor(uid, cookie, accept = "text/html") {
 // across requests and runs the production store methods, including token issuance.
 // It models the database contract; PostgreSQL SQL execution remains a separate gate.
 function poolFixture() {
+  const evidence = verifiedSignIn({ userId: USER });
   const sessions = new Map();
   const interactions = new Map();
   const key = (hash) => hash.toString("hex");
   const result = (row) => ({ rowCount: row ? 1 : 0, rows: row ? [row] : [] });
   function addSession(id, { authenticated = true, expired = false, invalidated = false } = {}) {
     sessions.set(key(hashOpaque(id)), {
+      ...evidence.browserSession,
       session_hash: hashOpaque(id), user_id: authenticated ? USER : null,
       user_email: "human@example.test", user_display_name: "Human",
-      authenticated_at: authenticated ? new Date().toISOString() : null,
+      authenticated_at: authenticated ? evidence.liveRow.authenticated_at : null,
       expired, invalidated,
     });
   }
   return {
     sessions, interactions, addSession,
     async query(sql, parameters) {
+      if (sql.includes("commonswarm_oauth.live_gotrue_session")) return evidence.pool.query(sql, parameters);
       if (sql.includes("INSERT INTO commonswarm_oauth.browser_sessions")) {
         sessions.set(key(parameters[0]), {
           session_hash: parameters[0], user_id: null, authenticated_at: null,
@@ -245,7 +249,8 @@ test("login prompt uses the current CommonSwarm identity and resumes with 303", 
   const response = await h.run(await h.attempt("fresh-login", { prompt: "login" }));
   assert.equal(response.statusCode, 303);
   assert.equal(response.headers.location, "/authorize/resume");
-  assert.deepEqual(submitted, { login: { accountId: USER } });
+  assert.deepEqual(submitted, { login: { accountId: USER,
+    ts: Math.floor(new Date(h.pool.sessions.get(hashOpaque(SESSION_A).toString("hex")).authenticated_at).getTime() / 1000) } });
 });
 
 test("expired or invalidated browser cookie starts fresh sign-in even with a same-user provider session", async () => {

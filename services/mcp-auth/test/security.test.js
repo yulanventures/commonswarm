@@ -86,15 +86,23 @@ test("consent orchestration uses every lane-2 management command with only verif
 });
 
 test("GoTrue PKCE sign-in round-trips the one-use state in the callback URL", async () => {
+  // Dummy JWT/live-row inputs prove PKCE returns binding without retaining tokens.
   const requests = [];
+  const userId = "10000000-0000-4000-8000-000000000001", sessionId = "10000000-0000-4000-8000-000000000002";
+  const now = Math.floor(Date.now() / 1000);
+  const jwt = [Buffer.from('{"alg":"HS256"}').toString("base64url"), Buffer.from(JSON.stringify({
+    iss: "https://api.commonswarm.com/auth/v1", aud: "authenticated", sub: userId, session_id: sessionId, exp: now + 3600,
+  })).toString("base64url"), "DUMMYSIGNATURE"].join(".");
   const client = createGoTrueClient({
     baseUrl: "https://api.commonswarm.com/auth/v1",
     anonKey: "public-test-anon-key",
     provider: "github",
+    pool: { query: async (_sql, [sid, uid]) => ({ rows: sid === sessionId && uid === userId
+      ? [{ session_id: sid, user_id: uid, authenticated_at: new Date((now - 60) * 1000) }] : [] }) },
     fetch: async (url, options) => {
       requests.push({ url: String(url), options });
-      if (String(url).includes("/token")) return Response.json({ access_token: "server-held-token", expires_in: 3600 });
-      return Response.json({ id: "10000000-0000-4000-8000-000000000001", email: "human@example.test" });
+      if (String(url).includes("/token")) return Response.json({ access_token: jwt, refresh_token: "DUMMYREFRESH" });
+      return Response.json({ id: userId, email: "human@example.test" });
     },
   });
   const begun = client.begin({
@@ -104,9 +112,12 @@ test("GoTrue PKCE sign-in round-trips the one-use state in the callback URL", as
   const redirectTo = new URL(begun.url.searchParams.get("redirect_to"));
   assert.equal(redirectTo.searchParams.get("state"), begun.state);
   assert.equal(redirectTo.searchParams.get("interaction"), "interaction-1");
-  const exchanged = await client.exchange({ code: "one-use-code", verifier: begun.verifier });
-  assert.equal(exchanged.identity.userId, "10000000-0000-4000-8000-000000000001");
-  assert.equal(JSON.stringify(exchanged).includes("server-held-token"), false);
+  const exchanged = await client.exchange({ code: "DUMMYCODE", verifier: begun.verifier });
+  assert.equal(exchanged.identity.userId, userId);
+  assert.equal(exchanged.identity.gotrueSessionId, sessionId);
+  assert.equal(exchanged.identity.interactiveAuthAtSeconds, now - 60);
+  assert.equal(JSON.stringify(exchanged).includes(jwt), false);
+  assert.equal(JSON.stringify(exchanged).includes("DUMMYREFRESH"), false);
   assert.equal(requests.length, 2);
 });
 

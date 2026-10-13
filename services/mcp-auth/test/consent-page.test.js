@@ -1,3 +1,4 @@
+import { verifiedSignIn } from "./fixtures/verified-sign-in.js";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { test } from "node:test";
@@ -8,6 +9,7 @@ import { CONSENT_WARNING, renderConsentPage } from "../src/interaction-page.js";
 import { createInteractionHandler } from "../src/interactions.js";
 
 const USER = "10000000-0000-4000-8000-000000000001";
+const evidence = verifiedSignIn({ userId: USER });
 const OTHER = "10000000-0000-4000-8000-000000000002";
 const W1 = "20000000-0000-4000-8000-000000000001";
 const W2 = "20000000-0000-4000-8000-000000000002";
@@ -71,11 +73,9 @@ test("consent interaction serves HTML from the bound browser identity and owner 
         redirectUris: ["https://unused.example/callback", "https://callback.example:8443/return?state=private"] }) },
     },
     store: {
+      pool: evidence.pool,
       requireSession: async () => ({
-        user_id: USER,
-        user_email: identity.email,
-        user_display_name: identity.displayName,
-        authenticated_at: new Date().toISOString(),
+        ...evidence.browserSession,
       }),
       bindInteraction: async () => ({ selected_workspace_ids: [] }),
       issueConsentToken: async () => ({ token: "csrf-token-long-enough", selectionVersion: 0 }),
@@ -218,11 +218,9 @@ test("GET reload restores and locks the home workspace from begin progress", asy
   const handler = createInteractionHandler({
     provider: { interactionDetails: async () => interactionDetails("interaction-reload") },
     store: {
+      pool: evidence.pool,
       requireSession: async () => ({
-        user_id: USER,
-        user_email: identity.email,
-        user_display_name: identity.displayName,
-        authenticated_at: new Date().toISOString(),
+        ...evidence.browserSession,
       }),
       bindInteraction: async () => ({
         selected_workspace_ids: [W1, W2],
@@ -263,11 +261,9 @@ test("failed form consent keeps the submitted home workspace on its retry page",
       Grant: { find: async () => ({}) },
     },
     store: {
+      pool: evidence.pool,
       requireSession: async () => ({
-        user_id: USER,
-        user_email: identity.email,
-        user_display_name: identity.displayName,
-        authenticated_at: new Date().toISOString(),
+        ...evidence.browserSession,
       }),
       bindInteraction: async () => ({ user_id: USER }),
       selectAndConsumeConsent: async () => ({
@@ -321,11 +317,9 @@ test("JSON consent without a bound workspace selection returns invalid_request",
       },
     },
     store: {
+      pool: evidence.pool,
       requireSession: async () => ({
-        user_id: USER,
-        user_email: identity.email,
-        user_display_name: identity.displayName,
-        authenticated_at: new Date().toISOString(),
+        ...evidence.browserSession,
       }),
       bindInteraction: async () => ({ user_id: USER, selected_workspace_ids: null }),
       consumeConsent: async () => ({

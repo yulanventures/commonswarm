@@ -500,6 +500,16 @@ test("the box enables the sign-in providers production enables", () => {
   }
 });
 
+test("GoTrue explicitly issues the issuer required by verified OAuth sign-in", () => {
+  const values = new Map([...envExample.matchAll(/^([A-Z][A-Z0-9_]*)=(.*)$/gm)]
+    .map((match) => [match[1]!, match[2]!]));
+  assert.equal(values.get("API_EXTERNAL_URL"), "https://api.commonswarm.com/auth/v1");
+  assert.equal(values.get("GOTRUE_JWT_ISSUER"), values.get("API_EXTERNAL_URL"),
+    "GoTrue v2.197.0 omits iss unless GOTRUE_JWT_ISSUER is configured");
+  assert.ok(requiredEnvNames(serviceBlock(compose, "gotrue")).has("GOTRUE_JWT_ISSUER"),
+    "the stack requires the explicit issuer in its protected environment file");
+});
+
 test("stack controls reject their named mutations", () => {
   const mutations: Array<[string, string, string, string, RegExp]> = [
     ["missing env", compose, envExample.replace(/^POSTGRES_PASSWORD=\n/m, ""), caddy, /env missing POSTGRES_PASSWORD/],

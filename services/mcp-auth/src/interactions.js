@@ -1,4 +1,9 @@
+// Ordinary MCP interactions: verified GoTrue callbacks and bound consent inputs
+// produce fixed-deadline login reuse or an activated P9b finish handoff.
+// OAuth freshness, live sessions, Origin/CSRF and request bindings remain required;
+// admin dispatch stays separate and provider results never enter page inputs.
 import { AUTH_PROVIDER_CATALOG } from "./auth-provider-catalog.js";
+import { sessionReuseDecision } from "./session-policy.js";
 
 import { randomUUID } from "node:crypto";
 import { errors } from "oidc-provider";
@@ -101,7 +106,9 @@ export function identity(session, oidcSession, lastLogin) {
 
 export function oidcLogin(session, details) {
   const { provider } = identity(session, details.session, details.lastSubmission?.login);
-  return { accountId: session.user_id, ...(provider ? { amr: [provider] } : {}) };
+  return { accountId: session.user_id,
+    ts: Math.floor(new Date(session.authenticated_at).getTime() / 1000),
+    ...(provider ? { amr: [provider] } : {}) };
 }
 
 async function findClient(provider, clientId) {
@@ -206,6 +213,7 @@ export function createInteractionHandler({
   gotrue,
   consentOrchestrator,
   workspaceReader,
+  finishFlow,
   allowedOrigins,
   callbackUrl,
   maxBodyBytes = 64 * 1024,
@@ -228,6 +236,9 @@ export function createInteractionHandler({
         id: result.identity.userId,
         email: result.identity.email,
         displayName: result.identity.displayName,
+        identityVerified: result.identity.identityVerified,
+        gotrueSessionId: result.identity.gotrueSessionId,
+        interactiveAuthAtSeconds: result.identity.interactiveAuthAtSeconds,
       });
       // Only hosted MCP uses this callback write. Admin artifacts retain their
       // existing transaction boundary. The provider/state pair was checked above.
@@ -235,7 +246,8 @@ export function createInteractionHandler({
         const interaction = await provider.Interaction.find(interactionUid);
         if (!interaction) throw new InteractionStateError("interaction_expired");
         interaction.lastSubmission = { ...interaction.lastSubmission,
-          login: { accountId: result.identity.userId, amr: [selectedProvider] } };
+          login: { accountId: result.identity.userId, amr: [selectedProvider],
+            ts: result.identity.interactiveAuthAtSeconds } };
         await interaction.persist();
       }
       const rotated = await store.rotateSession(sessionId);
@@ -335,6 +347,25 @@ export function createInteractionHandler({
       throw error;
     }
     const session = await store.requireSession(browser.id);
+    // P2 reads the original GoTrue authentication event, never a refresh/return
+    // timestamp. Current providers offer account selection, not forced login.
+    const reuse = await sessionReuseDecision(session, details.params, { pool: store.pool });
+    const prompts = String(details.params.prompt ?? "").split(/\s+/u);
+    if (prompts.includes("none") && (!reuse.allowed || details.prompt?.name !== "login")) {
+      await provider.interactionFinished(request, response, {
+        error: reuse.allowed ? "interaction_required" : "login_required",
+      }, { mergeWithLastSubmission: false });
+      return true;
+    }
+    if (prompts.includes("login") || session?.user_id && !reuse.allowed) {
+      const fresh = prompts.includes("login") || reuse.reason === "fresh_login_required";
+      respond(response, fresh ? 400 : 403, {
+        error: fresh ? "unsupported_fresh_login" : "authentication_required",
+        message: fresh ? "This sign-in provider cannot prove a new authentication. Return to your client and start a new connection."
+          : "Sign-in is no longer available. Return to your client and start a new connection.",
+      });
+      return true;
+    }
     if (bound.user_id && session?.user_id && bound.user_id !== session.user_id) {
       respondHtml(response, 409, renderDifferentAccountPage());
       return true;
@@ -557,6 +588,11 @@ export function createInteractionHandler({
       consent.commonswarm_grant_id = persisted.commonswarm_grant_id;
     }
     try {
+      const live = await store.requireSession(browser.id);
+      if (live?.user_id !== session.user_id ||
+          !(await sessionReuseDecision(live, details.params, { pool: store.pool })).allowed) {
+        throw new InteractionStateError("interaction_expired");
+      }
       await consentOrchestrator.activate({
         interactionRef: interactionUid,
         providerGrantId: consent.provider_grant_id,
@@ -599,12 +635,32 @@ export function createInteractionHandler({
       }), await consentHeaders());
       return true;
     }
-    await store.complete(interactionUid);
-    await provider.interactionFinished(request, response, {
+    const providerResult = {
       ...(details.session?.accountId && details.session.accountId !== session.user_id
         ? { login: oidcLogin(session, details) } : {}),
       consent: { grantId: consent.provider_grant_id },
-    });
+    };
+    if (finishFlow && details.params.resource === RESOURCE) {
+      const workspaces = available ?? await workspaceReader(identity(session));
+      const home = workspaces.find(workspace => workspace.id === body.home_workspace_id);
+      if (!home) throw new InteractionStateError("interaction_expired");
+      const { clientId, redirectUri, resource, scopes, pkceChallenge, oauthState } =
+        bindingFromDetails(interactionUid, browser.id, details, session);
+      return await finishFlow.prepareFinish(request, response, {
+        interactionUid, sessionId: browser.id, userId: session.user_id,
+        request: { clientId, redirectUri, resource, scopes, pkceChallenge, oauthState: oauthState ?? null },
+      }, {
+        providerResult,
+        displayModel: {
+          clientDisplay: await clientConsentDisplay(provider, consent.client_id, details.params.redirect_uri),
+          identity: identity(session, details.session, details.lastSubmission?.login),
+          workspaceCount: consent.selected_workspace_ids.length,
+          homeWorkspaceName: home.name,
+        },
+      });
+    }
+    await store.complete(interactionUid);
+    await provider.interactionFinished(request, response, providerResult);
     return true;
   };
 }

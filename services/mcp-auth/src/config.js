@@ -1,3 +1,5 @@
+// Server configuration: environment and protected files in, validated settings out.
+// Finish rollout is opt-in (MCP_OAUTH_FINISH_ENABLED=1); secrets stay file-backed.
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 
@@ -235,6 +237,7 @@ export async function loadConfig(env = process.env) {
     resource,
     publicOrigin,
     publicAuthorizationEnabled,
+    finishEnabled: env.MCP_OAUTH_FINISH_ENABLED === "1",
     management,
     supabaseUrl: publicAuthorizationEnabled ? required(env, "SUPABASE_URL") : undefined,
     nativeLoopbackEnabled: env.MCP_OAUTH_NATIVE_LOOPBACK_ENABLED === "1",

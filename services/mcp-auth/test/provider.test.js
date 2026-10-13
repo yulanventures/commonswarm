@@ -388,6 +388,82 @@ test("3. PKCE requires S256 and refuses plain or missing challenges", async () =
   }
 });
 
+// Real provider redirects must carry callback data only in Location, including
+// authorization errors, fragment mode, logout and Koa's Accept negotiation.
+test("provider redirects omit callback, code and state from response bodies", async (t) => {
+  const clientId = "https://redirect-body.example/oauth-client.json";
+  const logoutRedirectUri = "https://connector.example/logout/callback";
+  const metadata = { ...clientMetadata(clientId), post_logout_redirect_uris: [logoutRedirectUri] };
+  const server = await startProvider(metadataFetchFromMap(new Map([[clientId, metadata]])));
+  try {
+    for (const accept of ["text/html", "text/plain"]) {
+      for (const responseMode of ["query", "fragment"]) {
+        for (const rejected of [false, true]) {
+          await t.test(`${accept}, ${responseMode}: ${rejected ? "PKCE refusal" : "code issuance"}`, async () => {
+            let current = authorizationUrl({ clientId, state: "DUMMYSTATE",
+              ...(rejected ? { challenge: null, challengeMethod: null } : {}) });
+            current.searchParams.set("response_mode", responseMode);
+            for (let step = 0; step < 10; step += 1) {
+              const response = await server.request(current, { headers: { accept } });
+              assert.equal(response.status, 303);
+              const location = new URL(response.headers.get("location"), ISSUER);
+              if (location.origin === ISSUER) { current = location; continue; }
+              const callbackParams = responseMode === "fragment"
+                ? new URLSearchParams(location.hash.slice(1)) : location.searchParams;
+              assert.equal(location.origin + location.pathname === DEFAULT_REDIRECT_URI, true);
+              assert.equal(callbackParams.get("state") === "DUMMYSTATE", true);
+              assert.equal(callbackParams.get("iss") === ISSUER, true);
+              assert.equal(rejected ? callbackParams.get("error") === "invalid_request"
+                : Boolean(callbackParams.get("code")), true);
+              const body = await response.text();
+              assert.equal(body, "");
+              for (const value of [DEFAULT_REDIRECT_URI, "DUMMYSTATE", callbackParams.get("code")].filter(Boolean)) {
+                assert.equal(body.includes(value), false, "callback data appeared in redirect body");
+                assert.equal([...response.headers].some(([name, valueInHeader]) =>
+                  name !== "location" && valueInHeader.includes(value)), false,
+                "callback data appeared outside Location");
+              }
+              return;
+            }
+            assert.fail("authorization did not reach the client redirect");
+          });
+        }
+      }
+      await t.test(`${accept}: logout confirmation redirect and 200 page`, async () => {
+        const logoutUrl = new URL("/session/end", ISSUER);
+        logoutUrl.searchParams.set("client_id", clientId);
+        logoutUrl.searchParams.set("post_logout_redirect_uri", logoutRedirectUri);
+        logoutUrl.searchParams.set("state", "DUMMYLOGOUTSTATE");
+        const page = await server.request(logoutUrl, { headers: { accept } });
+        assert.equal(page.status, 200);
+        assert.match(page.headers.get("content-type"), /^text\/html\b/u);
+        const html = await page.text();
+        assert.match(html, /<form\b/u);
+        const xsrf = /name="xsrf" value="([^"]+)"/u.exec(html)?.[1];
+        assert.ok(xsrf, "logout page must retain the confirmation token");
+        const response = await server.request("/session/end/confirm", {
+          method: "POST",
+          headers: { accept, "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ xsrf, logout: "yes" }),
+        });
+        assert.equal(response.status, 303);
+        const location = new URL(response.headers.get("location"));
+        assert.equal(location.origin + location.pathname, logoutRedirectUri);
+        assert.equal(location.searchParams.get("state"), "DUMMYLOGOUTSTATE");
+        assert.equal(await response.text(), "");
+      });
+    }
+    await t.test("200 JSON responses retain their body", async () => {
+      const response = await server.request("/.well-known/openid-configuration");
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get("content-type"), /^application\/json\b/u);
+      const metadata = await response.json();
+      assert.equal(metadata.issuer, ISSUER);
+      assert.equal(metadata.authorization_endpoint, `${ISSUER}/authorize`);
+    });
+  } finally { await server.close(); }
+});
+
 test("4. RFC 8707 binds authorization and token requests to the one MCP resource", async () => {
   const clientId = "https://resource.example/oauth-client.json";
   sharedDocuments.set(clientId, clientMetadata(clientId));

@@ -1,3 +1,5 @@
+// Browser security: opaque values/origins in, cookies and response policies out.
+// Form pages retain same-origin POST; P9b owns finish response policies.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 export const SESSION_COOKIE = "__Host-cswarm-oauth";

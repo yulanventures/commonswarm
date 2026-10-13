@@ -44,7 +44,13 @@ export function emptyApplicationSchema(): string {
     '-U', clusterAdministrator, '-d', 'postgres', '--schema-only',
     ...schemas.map(schema => `--schema=${schema}`)], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
   // These pg_dump client directives cannot be sent through postgres.js.
-  const sql = ddl.replace(/^\\(?:un)?restrict \S+\r?$/gm, '');
+  const sql = ddl.replace(/^\\(?:un)?restrict \S+\r?$/gm, '')
+    // P1 revokes CREATE after assigning these function owners. PostgreSQL
+    // requires it again during pg_dump replay by the non-superuser postgres.
+    // Restore only that transient grant; no CREATE survives the empty fixture.
+    .replace(/ALTER FUNCTION commonswarm_oauth\.[^;]+ OWNER TO commonswarm_oauth_session_guard;/g,
+      owner => 'GRANT CREATE ON SCHEMA commonswarm_oauth TO commonswarm_oauth_session_guard;\n'
+        + owner + '\nREVOKE CREATE ON SCHEMA commonswarm_oauth FROM commonswarm_oauth_session_guard;');
   return schemas.map(schema => `ALTER SCHEMA ${schema} RENAME TO ai_saved_${schema}_${suffix};`).join('\n')
     + '\n' + sql + '\nSET LOCAL search_path=pg_catalog;\nSET LOCAL row_security=on;\nSET LOCAL check_function_bodies=on;\n'
     + 'INSERT INTO commonswarm_oauth.admin_cutover_state(singleton) VALUES(true);\n';

@@ -1,4 +1,8 @@
+// Persist browser/interaction bindings from opaque cookies and verified identities.
+// Outputs are bound rows or refusals; GoTrue evidence and fixed expiry survive rotation.
 import { AUTH_PROVIDER_CATALOG } from "./auth-provider-catalog.js";
+import { readGoTrueSession } from "./gotrue.js";
+import { SESSION_TTL_SECONDS, sessionReuseDecision } from "./session-policy.js";
 import { adminTransactionContext, joinAdminTransaction } from "./admin-transaction.js";
 import { createHash } from "node:crypto";
 
@@ -39,7 +43,7 @@ export function interactionRow(row) {
 }
 
 export class InteractionStore {
-  constructor(pool, { sessionTtlSeconds = 3600, interactionTtlSeconds = 600 } = {}) {
+  constructor(pool, { sessionTtlSeconds = SESSION_TTL_SECONDS, interactionTtlSeconds = 600 } = {}) {
     this.pool = pool;
     this.sessionTtlSeconds = sessionTtlSeconds;
     this.interactionTtlSeconds = interactionTtlSeconds;
@@ -58,14 +62,17 @@ export class InteractionStore {
   async requireSession(value) {
     if (typeof value !== "string" || value.length < 20) return null;
     const result = await this.pool.query(
-      `SELECT session_hash, user_id, user_email, user_display_name, authenticated_at
+      `SELECT session_hash, user_id, user_email, user_display_name, authenticated_at,
+              gotrue_session_id, expires_at
          FROM commonswarm_oauth.browser_sessions
         WHERE session_hash = $1 AND invalidated_at IS NULL
           AND expires_at > statement_timestamp()
         LIMIT 1`,
       [hashOpaque(value)],
     );
-    return result.rows[0] ?? null;
+    const row = result.rows[0];
+    if (row?.user_id && !(await sessionReuseDecision(row, {}, { pool: this.pool })).allowed) return null;
+    return row ?? null;
   }
 
   async rotateSession(value) {
@@ -76,19 +83,22 @@ export class InteractionStore {
             SET invalidated_at = statement_timestamp()
           WHERE session_hash = $1 AND invalidated_at IS NULL
             AND expires_at > statement_timestamp()
-          RETURNING user_id, user_email, user_display_name, authenticated_at`,
+          RETURNING user_id, user_email, user_display_name, authenticated_at,
+                    gotrue_session_id, expires_at`,
         [hashOpaque(value)],
       );
       if (current.rowCount !== 1) throw conflict("browser session is unavailable");
       const row = current.rows[0];
+      if (row.user_id && !(await sessionReuseDecision(row, {}, { pool: client })).allowed) {
+        throw conflict("browser session is unavailable");
+      }
       await client.query(
         `INSERT INTO commonswarm_oauth.browser_sessions (
            session_hash, user_id, user_email, user_display_name,
-           authenticated_at, expires_at
-         ) VALUES ($1, $2, $3, $4, $5,
-                   statement_timestamp() + ($6 * interval '1 second'))`,
+           authenticated_at, expires_at, gotrue_session_id
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [hashOpaque(next), row.user_id, row.user_email, row.user_display_name,
-          row.authenticated_at, this.sessionTtlSeconds],
+          row.authenticated_at, row.expires_at, row.gotrue_session_id],
       );
       await client.query(
         `UPDATE commonswarm_oauth.interactions
@@ -168,6 +178,11 @@ export class InteractionStore {
 
   async attachUser(interactionUid, sessionId, user) {
     return await transaction(this.pool, async (client) => {
+      const live = await readGoTrueSession(client, { sessionId: user.gotrueSessionId, userId: user.id });
+      if (user.identityVerified !== true || !live || live.interactiveAuthAtSeconds !== user.interactiveAuthAtSeconds
+          || live.interactiveAuthAtSeconds + this.sessionTtlSeconds <= Math.floor(Date.now() / 1000)) {
+        throw conflict("verified sign-in evidence is unavailable");
+      }
       const sessionHash = hashOpaque(sessionId);
       const binding = await client.query(
         `SELECT user_id FROM commonswarm_oauth.interactions
@@ -182,10 +197,17 @@ export class InteractionStore {
       const updated = await client.query(
         `UPDATE commonswarm_oauth.browser_sessions
             SET user_id = $1, user_email = $2, user_display_name = $3,
-                authenticated_at = statement_timestamp()
+                authenticated_at = to_timestamp($5), gotrue_session_id = $6::uuid,
+                expires_at = CASE WHEN authenticated_at IS NULL
+                  OR (gotrue_session_id IS DISTINCT FROM $6::uuid AND authenticated_at < to_timestamp($5))
+                  THEN to_timestamp($5) + ($7 * interval '1 second') ELSE expires_at END
           WHERE session_hash = $4 AND invalidated_at IS NULL
-            AND expires_at > statement_timestamp() AND (user_id IS NULL OR user_id = $1::uuid)`,
-        [user.id, user.email ?? null, user.displayName, sessionHash],
+            AND expires_at > statement_timestamp() AND (user_id IS NULL OR user_id = $1::uuid)
+            AND (authenticated_at IS NULL
+              OR (gotrue_session_id IS DISTINCT FROM $6::uuid AND authenticated_at < to_timestamp($5))
+              OR (authenticated_at = to_timestamp($5) AND gotrue_session_id = $6::uuid))`,
+        [user.id, user.email ?? null, user.displayName, sessionHash,
+          live.interactiveAuthAtSeconds, live.sessionId, this.sessionTtlSeconds],
       );
       if (updated.rowCount !== 1) throw new InteractionStateError("different_account");
       const interaction = await client.query(

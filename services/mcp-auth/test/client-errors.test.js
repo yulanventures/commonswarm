@@ -1,3 +1,4 @@
+import { verifiedSignIn } from "./fixtures/verified-sign-in.js";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { PassThrough, Readable } from "node:stream";
@@ -84,14 +85,13 @@ function harness({
     async save() { return "provider-grant"; }
   };
   provider.Grant.find = async () => undefined;
+  const evidence = verifiedSignIn({ userId: USER });
   const store = {
+    pool: evidence.pool,
     requireSession: async () => {
       databaseCalls.push("requireSession");
       return {
-        user_id: USER,
-        user_email: "human@example.test",
-        user_display_name: "Human",
-        authenticated_at: new Date().toISOString(),
+        ...evidence.browserSession,
       };
     },
     bindInteraction: async () => {

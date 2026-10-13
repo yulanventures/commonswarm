@@ -29,9 +29,9 @@ export interface StreamExtrasVM { ask: NeedsYouVM | null; attachments: ObjectCar
 
 export type StreamRow<T> = { type: "divider"; key: string; label: string } | { type: "item"; item: T };
 
-export const ASK_EXCERPT_MAX = 160;
+const ASK_EXCERPT_MAX = 160;
 
-export function isAgentAuthor(author: StreamAuthor): author is AgentVM { return "state" in author; }
+function isAgentAuthor(author: StreamAuthor): author is AgentVM { return "state" in author; }
 
 /** The name shown beside the author's picture. Agent labels arrive already computed in AgentVM.label. */
 export function authorLabel(author: StreamAuthor): string { return isAgentAuthor(author) ? author.label : author.name; }
