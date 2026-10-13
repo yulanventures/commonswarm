@@ -22,6 +22,7 @@ import { createFinishFlow } from '../src/finish-flow.js';
 import { createInteractionHandler } from '../src/interactions.js';
 import { createConsentOrchestrator, createPostgresConsentProgress } from '../src/consent.js';
 import { createLogger } from '../src/logger.js';
+import { GOTRUE_IMAGE_TAG, pullBoxMatchedGoTrue } from './gotrue-image.js';
 
 export async function finishFlowFixture(t) {
   assert.equal(JSON.parse(readFileSync(new URL('../node_modules/oidc-provider/package.json', import.meta.url))).version, '9.12.2');
@@ -65,11 +66,7 @@ export async function finishFlowFixture(t) {
     assert.ok(ledger.rowCount > 0, 'GoTrue schema ledger required');
     for (const { version } of ledger.rows) await pool.query('INSERT INTO auth.schema_migrations(version) VALUES($1)', [version]);
   } finally { await ledgerPool.end(); }
-  const image = 'public.ecr.aws/supabase/gotrue:v2.197.0';
-  const manifest = JSON.parse(docker(['buildx', 'imagetools', 'inspect', image, '--format', '{{json .Manifest}}']));
-  assert.match(manifest.digest, /^sha256:[a-f0-9]{64}$/u);
-  const resolved = `${image.split(':v')[0]}@${manifest.digest}`, root = 'http://127.0.0.1:18092/auth/v1';
-  docker(['pull', resolved]);
+  const resolved = pullBoxMatchedGoTrue(docker, t), root = 'http://127.0.0.1:18092/auth/v1';
   writeFileSync(`${directory}/env`, ['GOTRUE_API_HOST=0.0.0.0', 'GOTRUE_API_PORT=18092', 'GOTRUE_DB_DRIVER=postgres',
     `GOTRUE_DB_DATABASE_URL=${isolated.url}`, `API_EXTERNAL_URL=${root}`, `GOTRUE_JWT_ISSUER=${root}`, 'GOTRUE_SITE_URL=http://localhost',
     'GOTRUE_JWT_SECRET=DUMMYJWTSECRET-FOR-DISPOSABLE-CI-ONLY', 'GOTRUE_JWT_AUD=authenticated',
@@ -83,7 +80,7 @@ export async function finishFlowFixture(t) {
     if (health) break; await new Promise(resolve => setTimeout(resolve, 250));
   }
   assert.equal(health?.version, 'v2.197.0');
-  t.diagnostic(`production=${image}; CI=${health.version}; registry=${manifest.digest}`);
+  t.diagnostic(`production=${GOTRUE_IMAGE_TAG}; CI=${health.version}`);
   const auth = async (path, body, token) => {
     const res = await wire(`${root}/${path}`, { method: 'POST', headers: { 'content-type': 'application/json',
       ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body), signal: AbortSignal.timeout(10000) });

@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
 import { createGoTrueClient, readGoTrueSession } from "../src/gotrue.js";
+import { GOTRUE_IMAGE_TAG, pullBoxMatchedGoTrue } from "./gotrue-image.js";
 
 const userId = randomUUID(), sessionId = randomUUID();
 const root = "https://auth.example.test/auth/v1", now = Math.floor(Date.now() / 1000);
@@ -55,7 +56,6 @@ test("CI only: box-matched global logout invalidates all linked AS sessions", {
   // No fallback to a different runtime: missing tools/schema/image fail in CI.
   const { Pool } = await import("pg");
   const databaseUrl = process.env.MCP_OAUTH_TEST_DATABASE_URL ?? "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
-  const image = "public.ecr.aws/supabase/gotrue:v2.197.0";
   const name = `oauth-logout-${randomUUID()}`, baseUrl = "http://127.0.0.1:18091/auth/v1";
   // Direct container routes lack the gateway's /auth/v1 prefix; issuer retains it.
   const wireFetch = (url, options) => {
@@ -99,10 +99,7 @@ test("CI only: box-matched global logout invalidates all linked AS sessions", {
       assert.ok(ledger.rows.length, "GoTrue migration evidence is required");
       for (const { version } of ledger.rows) await pool.query("INSERT INTO auth.schema_migrations(version) VALUES($1)", [version]);
     } finally { await source.end(); }
-    const manifest = JSON.parse(docker(["buildx", "imagetools", "inspect", image, "--format", "{{json .Manifest}}"]));
-    assert.match(manifest.digest, /^sha256:[0-9a-f]{64}$/u);
-    const resolved = `${image.split(":v")[0]}@${manifest.digest}`;
-    docker(["pull", resolved]);
+    const resolved = pullBoxMatchedGoTrue(docker, t);
     writeFileSync(envFile, ["GOTRUE_API_HOST=0.0.0.0", "GOTRUE_API_PORT=18091", "GOTRUE_DB_DRIVER=postgres",
       `GOTRUE_DB_DATABASE_URL=${isolated.url}`, `API_EXTERNAL_URL=${baseUrl}`, `GOTRUE_JWT_ISSUER=${baseUrl}`,
       "GOTRUE_SITE_URL=http://localhost", "GOTRUE_JWT_SECRET=DUMMYJWTSECRET-FOR-DISPOSABLE-CI-ONLY",
@@ -116,7 +113,7 @@ test("CI only: box-matched global logout invalidates all linked AS sessions", {
       await new Promise(resolve => setTimeout(resolve, 250));
     }
     assert.equal(health?.version, "v2.197.0");
-    t.diagnostic(`production=${image}; CI=${health.version}; registry=${manifest.digest}`);
+    t.diagnostic(`production=${GOTRUE_IMAGE_TAG}; CI=${health.version}`);
     const login = async email => request("token?grant_type=password", { email, password: "DUMMYPASSWORD-for-CI-42!" });
     for (let i = 0; i < 2; i++) {
       const email = `oauth-${randomUUID()}@example.test`;
