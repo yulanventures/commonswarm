@@ -4,9 +4,9 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { chmodSync, readFileSync, writeFileSync, mkdtempSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { createServer, request as httpRequest } from 'node:http';
 import { format } from 'node:util';
 import { Pool } from 'pg';
@@ -28,8 +28,10 @@ export async function finishFlowFixture(t) {
   const logs = [], responses = [], privateValues = [], cookies = new Map();
   for (const method of ['log', 'info', 'warn', 'error', 'debug'])
     t.mock.method(console, method, (...args) => logs.push(format(...args)));
-  const directory = mkdtempSync(join(tmpdir(), 'cs-oauth-fixture-'));
-  assert.match(directory, /^\/private\/tmp\/anvil-secret\.[A-Za-z0-9]+$/u);
+  const temporaryRoot = realpathSync(tmpdir());
+  const directory = mkdtempSync(join(temporaryRoot, 'cs-oauth-fixture-'));
+  assert.equal(dirname(directory), temporaryRoot);
+  assert.match(basename(directory), /^cs-oauth-fixture-[A-Za-z0-9]+$/u);
   chmodSync(directory, 0o700);
   const name = `oauth-finish-${randomUUID()}`;
   let isolated, pool, runtime, server, loopback, edge, started = false, enabled = true, passwordSet = false;
@@ -44,7 +46,8 @@ export async function finishFlowFixture(t) {
         try { await runtime?.end(); if (passwordSet) await pool.query('ALTER ROLE commonswarm_oauth_runtime PASSWORD NULL'); }
         finally { try { await pool?.end(); } finally {
           try { await isolated?.close(); } finally {
-            assert.match(directory, /^\/private\/tmp\/anvil-secret\.[A-Za-z0-9]+$/u);
+            assert.equal(dirname(directory), temporaryRoot);
+            assert.match(basename(directory), /^cs-oauth-fixture-[A-Za-z0-9]+$/u);
             execFileSync('rm', ['-r', '--', directory]);
           }
         } }
