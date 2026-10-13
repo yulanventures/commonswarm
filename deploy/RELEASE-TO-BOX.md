@@ -338,7 +338,8 @@ The five switches select whole runbook blocks. `yes` includes the named group;
 Add exact relative paths from the item's box plan to `ITEM_COPY_BACK_FILES`; this is the only place to append
 item-specific evidence. Do not add `run.log`, `box-run.log`, `window.env`, any
 other `*.log`, any `*.err` file (the copy-back block handles those), or anything
-under `database/logs/`. The edge and stack recreate steps append only their
+under `database/logs/`. The item list must not name `<version>-rollback*.sql`;
+runbook-03 adds those files and stops on duplicates. The edge and stack recreate steps append only their
 bounded `<container>.<release-sha>.docker.log` files after capturing them. The
 initial manifest is built only from the explicit arrays below, never from
 `find`:
@@ -488,7 +489,7 @@ initial manifest is built only from the explicit arrays below, never from
   for VERSION in "${MIGRATION_VERSIONS[@]}"; do
     case "$VERSION" in (*[!0-9]*|'') false ;; esac
     test "${#VERSION}" -eq 14
-    COPY_BACK_FILES+=("${VERSION}-catalog.sql" "${VERSION}-functional.sql")
+    COPY_BACK_FILES+=("${VERSION}-catalog.sql" "${VERSION}-functional.sql" "${VERSION}-rollback.sql" "${VERSION}-rollback-catalog.sql")
   done
   for VERSION in "${FUNCTIONAL_VERSIONS[@]}"; do
     case "$VERSION" in (*[!0-9]*|'') false ;; esac
@@ -1762,7 +1763,12 @@ List every file from `supabase/migrations/*.sql` in bytewise filename order and
 compare it with the ledger. A version that already has a ledger row is applied
 and is skipped; the ledger's known failure is missing rows, never extra rows.
 For each version with NO ledger row, CSwarmDevLead must supply
-`$PROOF_DIR/<version>-catalog.sql`. It must be a read-only, error-safe catalog
+`$PROOF_DIR/<version>-catalog.sql`. Declare the fixed ordered `MIGRATION_VERSIONS`
+list in the release packet's `item-resolved-inputs.env` and sign that same list
+in the schedule. Each version needs its own functional proof, named guarded
+rollback reserve, `<version>-rollback.sql`, and `<version>-rollback-catalog.sql`.
+The pending list must match exactly: no more, no fewer, in the same order.
+The catalog proof must be a read-only, error-safe catalog
 query returning exactly one unaligned value: `t` only when that migration's real
 catalog/data postcondition is complete, otherwise `f`. A generic catalog query
 must be measured from the live catalog; do not infer object state from the filename. For the
@@ -1904,10 +1910,10 @@ proceed merely because the service command returned.
 )
 ```
 
-3. List the versions that have no ledger row. Only these need a catalog proof
-   (`<version>-catalog.sql`), a functional check (`<version>-functional.sql`)
-   and a decision. Any pending version older than the newest ledger row is a
-   stop until CSwarmDevLead explains it (it may need the Ledger backfill).
+3. Run once, before the first apply. Each pending version needs four proof files:
+   `<version>-catalog.sql`, `<version>-functional.sql`, `<version>-rollback.sql`,
+   and `<version>-rollback-catalog.sql`, plus a decision. Any pending version older
+   than the newest ledger row stops until CSwarmDevLead explains it (Ledger backfill).
 
 ```sh
 # step: runbook-24
@@ -1926,6 +1932,19 @@ proceed merely because the service command returned.
     >"$PROOF_DIR/ledger-before.txt"
   sed -E 's#.*/##; s/_.*//' "$PROOF_DIR/migration-files.txt" | LC_ALL=C sort \
     | comm -23 - "$PROOF_DIR/ledger-before.txt" | tee "$PROOF_DIR/pending-versions.txt"
+  unset MIGRATION_VERSIONS
+  . "$PROOF_DIR/item-resolved-inputs.env"
+  : "${MIGRATION_VERSIONS:?resolved item input missing}"
+  if ! cmp -s "$PROOF_DIR/pending-versions.txt" <(printf '%s\n' "$MIGRATION_VERSIONS" | tr ' \t' '\n' | sed '/^$/d'); then
+    printf 'STOP: pending versions differ from the signed ordered list.\n' >&2; exit 1
+  fi
+  while IFS= read -r VERSION || [ -n "$VERSION" ]; do
+    case "$VERSION" in (*[!0-9]*|'') false ;; esac
+    test "${#VERSION}" -eq 14
+    for SUFFIX in catalog functional rollback rollback-catalog; do
+      test -f "$PROOF_DIR/${VERSION}-${SUFFIX}.sql"
+    done
+  done <"$PROOF_DIR/pending-versions.txt"
 )
 ```
 
@@ -1950,8 +1969,9 @@ proceed merely because the service command returned.
 )
 ```
 
-5. For each version in `pending-versions.txt`, in order, set only `VERSION` to
-   the next HezLead-approved value. The block generates `MIGRATION_FILE` from
+5. Repeat `runbook-26`, `runbook-27`, and `runbook-28` for each approved version,
+   in order. The block selects the first version or the one after the last
+   successfully verified version, and generates `MIGRATION_FILE` from
    `migration-files.txt`; never type a migration filename by hand. It persists
    the pair for the apply and verify blocks.
 
@@ -1967,8 +1987,18 @@ proceed merely because the service command returned.
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
   . "/run/commonswarm-release-${SHA}-session.sh"
-  IFS= read -r VERSION <"$PROOF_DIR/pending-versions.txt" || [ -n "$VERSION" ]
-  test "$(wc -l <"$PROOF_DIR/pending-versions.txt" | tr -d ' ')" -eq 1
+  unset MIGRATION_VERSIONS
+  . "$PROOF_DIR/item-resolved-inputs.env"
+  : "${MIGRATION_VERSIONS:?resolved item input missing}"
+  if ! cmp -s "$PROOF_DIR/pending-versions.txt" <(printf '%s\n' "$MIGRATION_VERSIONS" | tr ' \t' '\n' | sed '/^$/d'); then
+    printf 'STOP: pending versions differ from the signed ordered list.\n' >&2; exit 1
+  fi
+  MIGRATION_VERIFIED='' VERSION=''
+  if [ -f "$PROOF_DIR/current-migration.env" ]; then
+    . "$PROOF_DIR/current-migration.env"
+    test -z "$MIGRATION_VERIFIED" || test "$MIGRATION_VERIFIED" = "$VERSION"
+  fi
+  [ -z "$MIGRATION_VERIFIED" ] && [ -n "$VERSION" ] || VERSION="$(awk -v completed="$MIGRATION_VERIFIED" 'completed == "" || previous == completed { print; exit } { previous=$0 }' "$PROOF_DIR/pending-versions.txt")"
   case "$VERSION" in (*[!0-9]*|'') false ;; esac
   test "${#VERSION}" -eq 14
   grep -Fx "$VERSION" "$PROOF_DIR/pending-versions.txt"
@@ -1983,6 +2013,8 @@ proceed merely because the service command returned.
   test -f "$STACK_RELEASE/supabase/migrations/$MIGRATION_FILE"
   test -f "$PROOF_DIR/${VERSION}-catalog.sql"
   test -f "$PROOF_DIR/${VERSION}-functional.sql"
+  test -f "$PROOF_DIR/${VERSION}-rollback.sql"
+  test -f "$PROOF_DIR/${VERSION}-rollback-catalog.sql"
   {
     printf 'VERSION=%q\n' "$VERSION"
     printf 'MIGRATION_FILE=%q\n' "$MIGRATION_FILE"
@@ -2146,20 +2178,26 @@ SQL
     | tee -a "$PROOF_DIR/migration-state-after.txt" | tee -a "$PROOF_DIR/box-run.log"
   test "$LEDGER_AFTER" = 1
   test "$CATALOG_AFTER" = t
-  # These functional proofs need observations from the NEW edge. These
-  # versions run after section 6 and their seeded command, never at this step.
-  if [ "$VERSION" != 20260925000001 ] && [ "$VERSION" != 20260926000001 ] \
+  # B38 proofs write inside rolled-back transactions. The other exemptions
+  # need the NEW edge after section 6 and their seeded command.
+  if [ "$VERSION" = 20261014000001 ] || [ "$VERSION" = 20261014000002 ]; then
+    COMMONSWARM_MIGRATION_ENV_FILE=/etc/commonswarm-release/target.env \
+      "$MIGRATE/run-db-tool.sh" assert-database-identity.sh "$PROOF_DIR/database" target
+    release_psql -q --file "$PROOF_DIR/${VERSION}-functional.sql" \
+      >"$PROOF_DIR/${VERSION}-functional.txt"
+  elif [ "$VERSION" != 20260925000001 ] && [ "$VERSION" != 20260926000001 ] \
     && [ "$VERSION" != 20260927000001 ] && [ "$VERSION" != 20260927000002 ] \
     && [ "$VERSION" != 20260927000003 ]; then
     release_psql_ro --file "$PROOF_DIR/${VERSION}-functional.sql" \
       >"$PROOF_DIR/${VERSION}-functional.txt"
   fi
+  printf 'MIGRATION_VERIFIED=%q\n' "$VERSION" >>"$PROOF_DIR/current-migration.env"
 )
 ```
 
-That last command passes the lead-supplied host file
-`$PROOF_DIR/<version>-functional.sql`; the helper maps it to the `/proof`
-read-only container mount. Complete one version before considering the next. After the last
+The release plan names `release_psql -q --file` for B38's transactional proofs.
+Functional commands pass `$PROOF_DIR/<version>-functional.sql` to the helper's
+read-only `/proof` mount. Complete one version before considering the next. After the last
 migration, save the cron job names and compare both snapshots with `LC_ALL=C`
 sorting. Set the two expected name lists from the reviewed release plan in
 bytewise order (one
@@ -2213,6 +2251,8 @@ name per line; empty when none). The lead supplies both lists with the release; 
 
 ### Rollback — explicit HezLead decision; Anvil executes the named migration correction
 
+B38 rollback order: `20261014000002`, then `20261014000001`. `item-hm/20260928000003-rollback.sql`
+is a separate decision and may run only after both; it needs `finish_records` gone.
 Before any real rollback of item-t3 or item-g3c, run their catalog proofs with search_path "$user", public (proofs print uid() otherwise).
 Prefer a reviewed forward fix. Run a down-migration only when it was supplied
 and reviewed in the same PR as the up-migration. A full restore requires Tom's

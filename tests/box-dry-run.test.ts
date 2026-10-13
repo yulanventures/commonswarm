@@ -3708,6 +3708,125 @@ function planBlock(file: string, step: string): Block {
   return block;
 }
 
+// Exercise only the file/list preflight before its first live database read.
+// Relocate the two source paths into owned temporary files; supply no database result.
+function schemaListControl(run: (select: () => SpawnSyncReturns<string>, proof: string,
+  preflight: () => SpawnSyncReturns<string>) => void): void {
+  const prefix = "commonswarm-box-dry-run-schema-list-";
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), prefix));
+  try {
+    const proof = join(temporary, "proof");
+    const migrations = join(temporary, "stack/supabase/migrations");
+    mkdirSync(proof);
+    mkdirSync(migrations, { recursive: true });
+    writeMode(join(proof, "window.env"), shellAssignments({ SHA: RELEASE_SHA }));
+    const session = join(temporary, "session.sh");
+    writeMode(session, shellAssignments({ PROOF_DIR: proof, STACK_RELEASE: join(temporary, "stack") }));
+    const versions = ["20261014000001", "20261014000002"];
+    const files = versions.map((version, index) => `${version}_oauth_${index === 0 ? "session_binding" : "finish"}.sql`);
+    writeMode(join(proof, "migration-files.txt"), files.map((file) => join(migrations, file)).join("\n") + "\n");
+    for (const [index, version] of versions.entries()) {
+      writeMode(join(migrations, files[index]!), "-- synthetic migration input\n");
+      for (const suffix of ["catalog", "functional", "rollback", "rollback-catalog"]) {
+        writeMode(join(proof, `${version}-${suffix}.sql`), "-- synthetic proof input; never executed\n");
+      }
+    }
+    writeMode(join(proof, "pending-versions.txt"), versions.join("\n") + "\n");
+    writeMode(join(proof, "item-resolved-inputs.env"), shellAssignments({ MIGRATION_VERSIONS: versions.join(" ") }));
+    const block = planBlock(RUNBOOK, "runbook-26");
+    const boundary = block.source.indexOf('  LEDGER_COUNT="$(release_psql_ro');
+    assert.ok(boundary > 0, "schema preflight must stop before the live ledger read");
+    const source = block.source.slice(0, boundary)
+      .replace('/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env', '${CONTROL_PROOF_DIR}/window.env')
+      .replace('/run/commonswarm-release-${SHA}-session.sh', '${CONTROL_SESSION}') + ")\n";
+    const select = () => spawnSync("/bin/bash", ["-c", source], { encoding: "utf8",
+      env: explicitEnvironment({ RELEASE_SHA, CONTROL_PROOF_DIR: proof, CONTROL_SESSION: session }), timeout: 10_000 });
+    // The enumeration's live query is also excluded; run its real list/proof guard tail.
+    const enumeration = planBlock(RUNBOOK, "runbook-24").source;
+    const guardStart = enumeration.indexOf("  unset MIGRATION_VERSIONS\n");
+    assert.ok(guardStart > 0, "enumeration must check the signed list after producing pending versions");
+    const preflight = () => spawnSync("/bin/bash", ["-c", "(\nset -euo pipefail\n" + enumeration.slice(guardStart)],
+      { encoding: "utf8", env: explicitEnvironment({ PROOF_DIR: proof }), timeout: 10_000 });
+    run(select, proof, preflight);
+  } finally { removeOwnedTemporary(temporary, prefix); }
+}
+
+test("controls: schema pending list accepts two versions in order and preserves the single-version case", () => {
+  schemaListControl((select, proof, preflight) => {
+    const current = join(proof, "current-migration.env");
+    const approved = preflight();
+    assert.equal(approved.status, 0, approved.stderr);
+    const first = select();
+    assert.equal(first.status, 0, first.stderr);
+    assert.match(readFileSync(current, "utf8"), /^VERSION=20261014000001$/m);
+    const before = readFileSync(current, "utf8");
+    const retry = select();
+    assert.equal(retry.status, 0, retry.stderr);
+    assert.equal(readFileSync(current, "utf8"), before, "an unverified version is selected again");
+    // Run the actual completion writer only. The live verification preceding it remains unexecuted.
+    const verify = planBlock(RUNBOOK, "runbook-28").source;
+    const writer = verify.match(/^  printf 'MIGRATION_VERIFIED=.*$/m)?.[0];
+    assert.ok(writer, "successful verification must persist the version before the next selection");
+    const completed = spawnSync("/bin/bash", ["-ec", writer], { encoding: "utf8",
+      env: explicitEnvironment({ PROOF_DIR: proof, VERSION: "20261014000001" }) });
+    assert.equal(completed.status, 0, completed.stderr);
+    const second = select();
+    assert.equal(second.status, 0, second.stderr);
+    assert.match(readFileSync(current, "utf8"), /^VERSION=20261014000002$/m);
+    assert.doesNotMatch(readFileSync(current, "utf8"), /^MIGRATION_VERIFIED=/m);
+    const retrySecond = select();
+    assert.equal(retrySecond.status, 0, retrySecond.stderr);
+    assert.match(readFileSync(current, "utf8"), /^VERSION=20261014000002$/m);
+    const lastCompleted = spawnSync("/bin/bash", ["-ec", writer], { encoding: "utf8",
+      env: explicitEnvironment({ PROOF_DIR: proof, VERSION: "20261014000002" }) });
+    assert.equal(lastCompleted.status, 0, lastCompleted.stderr);
+    const finished = readFileSync(current, "utf8");
+    assert.notEqual(select().status, 0, "an exhausted list cannot select another migration");
+    assert.equal(readFileSync(current, "utf8"), finished);
+    unlinkSync(current);
+    writeMode(join(proof, "pending-versions.txt"), "20261014000002\n");
+    writeMode(join(proof, "item-resolved-inputs.env"), shellAssignments({ MIGRATION_VERSIONS: "20261014000002" }));
+    assert.equal(preflight().status, 0);
+    const single = select();
+    assert.equal(single.status, 0, single.stderr);
+    assert.match(readFileSync(current, "utf8"), /^VERSION=20261014000002$/m);
+  });
+});
+
+test("controls: schema pending list refuses extra missing or reordered versions before database access", () => {
+  schemaListControl((select, proof, preflight) => {
+    assert.equal(preflight().status, 0);
+    const positive = select();
+    assert.equal(positive.status, 0, positive.stderr);
+    const current = join(proof, "current-migration.env");
+    const before = readFileSync(current, "utf8");
+    for (const pending of ["20261014000001\n", "20261014000001\n20261014000002\n20261014000003\n",
+      "20261014000002\n20261014000001\n", "20261014000001\n20261014000001\n"]) {
+      writeMode(join(proof, "pending-versions.txt"), pending);
+      const refused = select();
+      assert.equal(refused.status, 1, refused.stderr);
+      assert.match(refused.stderr, /STOP: pending versions differ from the signed ordered list/);
+      const refusedPreflight = preflight();
+      assert.equal(refusedPreflight.status, 1, refusedPreflight.stderr);
+      assert.match(refusedPreflight.stderr, /STOP: pending versions differ from the signed ordered list/);
+      assert.equal(readFileSync(current, "utf8"), before, "refusal must preserve the selected migration");
+    }
+    writeMode(join(proof, "pending-versions.txt"), "20261014000001\n20261014000002\n");
+    unlinkSync(current);
+    const secondRollback = join(proof, "20261014000002-rollback-catalog.sql");
+    const secondRollbackBytes = readFileSync(secondRollback);
+    unlinkSync(secondRollback);
+    assert.equal(preflight().status, 1, "every rollback proof is required before starting the first version");
+    writeMode(secondRollback, secondRollbackBytes.toString("utf8"));
+    const rollback = join(proof, "20261014000001-rollback-catalog.sql");
+    unlinkSync(rollback);
+    const missingProof = select();
+    assert.equal(missingProof.status, 1, missingProof.stderr);
+    assert.match(missingProof.stderr, /test -f .*rollback-catalog\.sql/);
+    assert.equal(existsSync(current), false, "missing rollback proof must refuse before selection is persisted");
+  });
+});
+
 // A mutation that does not change the block is a control that tests nothing, so it is an error.
 function mutatedBlock(block: Block, mutations: Array<[string, string]>): Block {
   let source = block.source;
@@ -9483,13 +9602,13 @@ test("controls: box mode fails runbook-03 when item-resolved-inputs.env is missi
     assert.match(readFileSync(target, "utf8"), /^MIGRATION_VERSIONS='20260928000004'$/m);
     const positive = executeWholeBlock(consumer, fixture);
     // Run the unchanged consumer. Its source producer writes scalar versions (HM37:631-632),
-    // but runbook-03 uses array lengths (RELEASE-TO-BOX.md:471). A nounset failure there
+    // but runbook-03 uses array lengths (RELEASE-TO-BOX.md:472). A nounset failure there
     // is a separate plan defect, after the input file and required values were read.
     // Keep that failure in the whole-plan assertion; do not synthesize array declarations.
     if (positive.result === "failed") {
       assert.match(positive.stderr, /MIGRATION_VERSIONS: unbound variable/);
       assert.doesNotMatch(positive.stderr, /resolved item input missing|No such file or directory|CONTAINMENT UNAVAILABLE|unhandled dry-run stub/);
-      t.diagnostic("PLAN: resolved scalar MIGRATION_VERSIONS reached runbook-03's array-length read at deploy/RELEASE-TO-BOX.md:471; transfer succeeded, consumer still fails.");
+      t.diagnostic("PLAN: resolved scalar MIGRATION_VERSIONS reached runbook-03's array-length read at deploy/RELEASE-TO-BOX.md:472; transfer succeeded, consumer still fails.");
     } else {
       assert.equal(positive.result, "passed", positive.stderr);
     }
