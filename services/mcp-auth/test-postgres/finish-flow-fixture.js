@@ -141,7 +141,8 @@ export async function finishFlowFixture(t) {
   server = createServer((req, res) => handlers[Number(enabled)](req, res)); const origin = await listen(server);
   const request = async (target, options = {}, drop = false) => {
     const u = new URL(target, ISSUER); assert.equal(u.origin === ISSUER, true, 'AS requests stay at issuer');
-    const headers = { host: new URL(ISSUER).host, 'x-forwarded-proto': 'https', ...options.headers,
+    const headers = { host: new URL(ISSUER).host, 'x-forwarded-host': new URL(ISSUER).host,
+      'x-forwarded-proto': 'https', ...options.headers,
       cookie: [...cookies.values()].filter(c => u.pathname === c.path || u.pathname.startsWith(c.path.endsWith('/') ? c.path : `${c.path}/`)).map(c => c.pair).join('; ') };
     if (drop) return new Promise((resolve, reject) => { const req = httpRequest(`${origin}${u.pathname}${u.search}`, { headers }, res => {
       responses.push({ status: res.statusCode, headers: new Headers(res.headers), body: '', path: u.pathname });
