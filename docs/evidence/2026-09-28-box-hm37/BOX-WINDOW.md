@@ -652,13 +652,13 @@ it, as the runbook's copy-back section requires of the evidence it reviews.
     printf 'EXPECTED_REMOVED_CRON_JOBS=%q\n' "$EXPECTED_REMOVED_CRON_JOBS"
     printf 'ARCHIVE_SHA256=%q\n' "$ARCHIVE_SHA256"
   } >"$EVIDENCE_DIR/item-resolved-inputs.env"
+  # runbook-03 adds the pending-version rollback and rollback-catalog SQL files.
+  # Keep those files out of this item-specific list to avoid duplicate entries.
   cat >"$EVIDENCE_DIR/item-copy-back-files.list" <<'FILES'
 20260928000002-catalog.sql
 20260928000002-functional.sql
 20260928000003-catalog.sql
 20260928000003-functional.sql
-20260928000004-rollback.sql
-20260928000004-rollback-catalog.sql
 hm37-hm6-schema-helpers.txt
 hm37-hm6-migration-03-catalog.txt
 hm37-hm6-migration-03-functional.txt
@@ -3070,8 +3070,6 @@ Add these exact item-relative paths without duplicating standard generated entri
 - `20260928000002-functional.sql`
 - `20260928000003-catalog.sql`
 - `20260928000003-functional.sql`
-- `20260928000004-rollback.sql`
-- `20260928000004-rollback-catalog.sql`
 - `hm37-hm6-schema-helpers.txt`
 - `hm37-hm6-migration-03-catalog.txt`
 - `hm37-hm6-migration-03-functional.txt`
