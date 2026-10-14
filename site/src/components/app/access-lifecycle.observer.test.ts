@@ -267,8 +267,12 @@ test("Done, Back, and first use converge on a channel return", () => {
   assert.match(connect, /finishPrompt\("done"\)/);
   assert.match(connect, /status\?\.firstUsedAt[\s\S]*this\.finishPrompt\("consumed"\)/);
   assert.match(dashboard, /connect\.finishPrompt\("back"\)/);
+  const start = dashboard.indexOf("const returnToChannel =");
+  const end = dashboard.indexOf("interface HouseholdScope");
+  assert.ok(start >= 0, "returnToChannel declaration must exist");
+  assert.ok(end > start, "HouseholdScope must follow returnToChannel");
   assert.match(
-    dashboard.slice(dashboard.indexOf("const returnToChannel ="), dashboard.indexOf("interface HouseholdScope")),
+    dashboard.slice(start, end),
     /showChannelView\("feed"\);\s*renderFeed\(\)/,
   );
   assert.match(
@@ -672,10 +676,11 @@ test("visible channels poll for fresh signals and preserve readable state on fai
   assert.match(dashboard, /document\.visibilityState !== "visible"/);
   assert.match(dashboard, /document\.addEventListener\("visibilitychange"/);
   assert.match(dashboard, /const next = \[\.\.\.page\.rows, \.\.\.signals\.filter/);
-  const refresh = ts.createSourceFile("refresh.ts", dashboard.slice(
-    dashboard.indexOf("const refreshLatestSignals = async"),
-    dashboard.indexOf("const feedPush ="),
-  ), ts.ScriptTarget.Latest, true);
+  const start = dashboard.indexOf("const refreshLatestSignals = async");
+  const end = dashboard.indexOf("const feedPush =");
+  assert.ok(start >= 0, "refreshLatestSignals declaration must exist");
+  assert.ok(end > start, "feedPush declaration must follow refreshLatestSignals");
+  const refresh = ts.createSourceFile("refresh.ts", dashboard.slice(start, end), ts.ScriptTarget.Latest, true);
   let catchClause: ts.CatchClause | undefined;
   const visit = (node: ts.Node): void => {
     if (ts.isCatchClause(node)) catchClause = node;

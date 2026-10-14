@@ -105,7 +105,9 @@ test("every household result is dropped once its workspace, account, version or 
   }
   const load = section(script, "const loadHouseholdConnections = async", "const approveAgent = async");
   assert.match(load, /const ticket = connectionReads\.next\(\);/);
-  assert.match(load, /\} catch \{\s*next = \[\];\s*\}[\s\S]*?if \(!connectionReads\.isLatest\(ticket\) \|\| !householdCurrent\(scope\)\) return;/);
+  const settled = section(load, "} catch {", "householdConnections = next;");
+  assert.match(settled, /^\} catch \{\s*next = \[\];\s*\}/);
+  assert.match(settled, /if \(!connectionReads\.isLatest\(ticket\) \|\| !householdCurrent\(scope\)\) return;\s*$/);
   const confirm = section(script, "const confirmOwnAccess = async", "const openHouseholdView = async");
   assert.match(confirm, /if \(button && token === householdConfirms\) button\.disabled = false;/);
   assert.match(confirm, /notice && householdCurrent\(scope\) && token === householdConfirms/);
