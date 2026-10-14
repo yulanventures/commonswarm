@@ -12,7 +12,7 @@
 # files in <dir> before deciding anything about the edge).
 set -euo pipefail
 BIN="$1"; DIR="$2"; URL="$3"; WS="$4"
-mode() { stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"; }
+mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 [ "$(mode "$DIR")" = 700 ] || { echo "input: $DIR must be mode 0700"; exit 2; }
 for f in sender.json recipient.json anon-key.txt; do
   [ -f "$DIR/$f" ] && [ "$(mode "$DIR/$f")" = 600 ] || { echo "input: $DIR/$f must exist with mode 0600"; exit 2; }
