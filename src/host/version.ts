@@ -23,7 +23,6 @@ export type ProviderVersionNotice = {
   lastMeasuredVersion: string;
 };
 
-/** Parse strict SemVer without losing ordering precision on large identifiers. */
 function parseSemVer(value: string): ParsedSemVer | null {
   if (!SEMVER_RE.test(value)) return null;
   const withoutBuild = value.split("+", 1)[0]!;
@@ -38,7 +37,6 @@ function parseSemVer(value: string): ParsedSemVer | null {
   };
 }
 
-/** Compare two strict SemVer values using SemVer precedence rules. */
 export function compareSemVer(left: string, right: string): -1 | 0 | 1 {
   const a = parseSemVer(left);
   const b = parseSemVer(right);
@@ -73,7 +71,6 @@ export function compareSemVer(left: string, right: string): -1 | 0 | 1 {
   return 0;
 }
 
-/** Extract a provider version while ignoring unrelated banner and warning lines. */
 export function parseProviderVersionOutput(
   stdout: string,
   productPattern: RegExp,
@@ -102,7 +99,6 @@ export function parseProviderVersionOutput(
   return null;
 }
 
-/** Refuse below-floor versions and report newer, not-yet-measured versions. */
 export function assertProviderVersionFloor(options: {
   provider: string;
   version: string;

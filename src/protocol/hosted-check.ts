@@ -1,5 +1,3 @@
-/** Pure transition core for durable hosted MCP `check` batches. */
-
 export const HOSTED_CHECK_BATCH_LIMIT = 50;
 
 export interface HostedCheckCursor {

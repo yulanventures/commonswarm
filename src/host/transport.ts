@@ -20,7 +20,6 @@ import {
   type JsonRpcId,
 } from "./types.js";
 
-/** Give every raw stream failure a code we assigned before it leaves here. */
 function asAcpHostError(error: unknown): AcpHostError {
   if (error instanceof AcpHostError) return error;
   return new AcpTransportError(
@@ -50,9 +49,7 @@ export type AcpTransportOptions = {
   writable: Writable;
   handlers?: TransportHandlers;
   requestTimeoutMs?: number;
-  /** Optional child-exit signal — rejects all pending when fired. */
   onChildExit?: (handler: (code: number | null, signal: NodeJS.Signals | null) => void) => void;
-  /** Bound a short stdout-EOF grace without ever waiting indefinitely for exit. */
   readableEndGraceMs?: number;
 };
 
@@ -96,8 +93,6 @@ export class AcpTransport extends EventEmitter {
         fail();
       }
     });
-    // Normalise at the boundary: everything leaving this transport carries a
-    // code we assigned, so no downstream classifier has to read a message.
     options.readable.on("error", (err: Error) => {
       this.failAll(asAcpHostError(err));
     });
@@ -164,7 +159,6 @@ export class AcpTransport extends EventEmitter {
     });
   }
 
-  /** Notification — no id field (ACP session/cancel). */
   notify(method: string, params?: unknown): void {
     if (this.closed) {
       throw new AcpProtocolError("transport closed", "closed");
@@ -196,7 +190,6 @@ export class AcpTransport extends EventEmitter {
     try {
       this.writable.end();
     } catch {
-      // ignore
     }
   }
 
@@ -215,7 +208,6 @@ export class AcpTransport extends EventEmitter {
   private onData(chunk: Buffer): void {
     if (this.closed) return;
     if (this.buffer.length + chunk.length > ACP_MAX_LINE_BYTES * 2) {
-      // Cap the reassembled buffer; drop and report.
       this.buffer = Buffer.alloc(0);
       const err = new AcpProtocolError(
         "inbound buffer exceeded safe limit",
@@ -242,7 +234,6 @@ export class AcpTransport extends EventEmitter {
       }
       const lineBuf = this.buffer.subarray(0, nl);
       this.buffer = this.buffer.subarray(nl + 1);
-      // Strip trailing CR for CRLF.
       const end = lineBuf.length > 0 && lineBuf[lineBuf.length - 1] === 0x0d
         ? lineBuf.length - 1
         : lineBuf.length;
@@ -279,7 +270,6 @@ export class AcpTransport extends EventEmitter {
     }
     const rec = msg as Record<string, unknown>;
     if (rec.jsonrpc !== "2.0") {
-      // Tolerate missing jsonrpc on some agent quirks? Spec requires it — reject.
       const err = new AcpProtocolError("missing jsonrpc 2.0", "malformed_frame");
       this.handlers.onProtocolError?.(err);
       this.emit("protocolError", err);
@@ -312,7 +302,6 @@ export class AcpTransport extends EventEmitter {
       return;
     }
 
-    // Request from agent (method + id)
     if (typeof rec.method === "string" && "id" in rec && rec.id !== null && rec.id !== undefined) {
       const id = rec.id as JsonRpcId;
       if (typeof id !== "string" && typeof id !== "number") {
@@ -326,19 +315,16 @@ export class AcpTransport extends EventEmitter {
           try {
             this.respondError(id, -32000, message);
           } catch {
-            // ignore
           }
         },
       );
       return;
     }
 
-    // Notification (method, no id)
     if (typeof rec.method === "string") {
       try {
         this.handlers.onNotification?.(rec.method, rec.params);
       } catch (err) {
-        // Host handler bugs must not kill the transport.
         this.emit("handlerError", err);
       }
       return;
@@ -353,7 +339,6 @@ export class AcpTransport extends EventEmitter {
     const key = String(rec.id);
     const pending = this.pending.get(key);
     if (!pending) {
-      // Late or unknown id — ignore safely.
       return;
     }
     clearTimeout(pending.timer);

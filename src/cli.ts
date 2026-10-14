@@ -8701,13 +8701,6 @@ async function runHook(args: Arguments): Promise<void> {
   );
 }
 
-/*
- * cswarm file — the S3 verb surface over the file-artifacts server commands
- * (FILE-ARTIFACTS.md §3). Copy rule: every success says what happened, what is
- * now true, and what happens next; every refusal arrives with the server's own
- * message, which carries the numbers (§4).
- */
-
 function formatFileSize(value: number | string | null): string {
   const bytes = Number(value ?? 0);
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
@@ -8745,8 +8738,6 @@ async function fileContext(
   return { cloud, selected };
 }
 
-/* Reads are idempotent, but both attempts share one 30s budget. The retry gets
- * only the time left after the first attempt, and is skipped near expiry. */
 async function fileRows(context: FileCliContext): Promise<FileListRow[]> {
   const { cloud, selected } = context;
   if (selected.kind === "agent") {
@@ -8777,7 +8768,6 @@ async function fileRows(context: FileCliContext): Promise<FileListRow[]> {
   );
 }
 
-/** A selector is a file id when it parses as one; anything else is a name. */
 async function resolveFileSelector(
   context: FileCliContext,
   selector: string,
@@ -8804,8 +8794,6 @@ async function uploadNamedFile(
   options: { ifVersion?: number; requestId?: string; profilePath?: string } = {},
 ): Promise<FileVersionCommitResult & { outcome?: string; conflict_check?: string }> {
   if (bytes.byteLength > FILE_MAX_VERSION_BYTES) {
-    // Preflight so a refusal costs zero upload bytes; the server enforces the
-    // same cap authoritatively at create.
     throw new Error(
       `this file is ${formatFileSize(bytes.byteLength)}; the per-file limit is ${
         formatFileSize(FILE_MAX_VERSION_BYTES)
@@ -8972,8 +8960,6 @@ async function runFileGet(args: Arguments): Promise<void> {
     (attempt) => getObject(context.cloud, grant.download_path, fetch, attempt),
     {},
   );
-  // Atomic: `wx` under the hood, so a file created since any earlier look is
-  // refused by the filesystem, never truncated (review finding 1).
   writeDestination(destination, bytes, args.has("force"), writeFileSync);
   if (args.has("json")) {
     process.stdout.write(
@@ -9209,8 +9195,6 @@ async function runBrainPut(args: Arguments): Promise<void> {
       ...(args.optional("request-id") === undefined ? {} : { requestId: args.required("request-id") }),
       ...(args.expandedProfilePath === undefined ? {} : { profilePath: args.expandedProfilePath }) },
   ).catch((error: unknown) => {
-    /* D-053: classified by the server's stable code, never by its prose. The
-     * server's own sentence carries the live version and is printed as data. */
     if (
       args.optional("request-id") === undefined && error instanceof FileCommandRefused &&
       error.code === FILE_VERSION_PRECONDITION_FAILED
@@ -9254,8 +9238,6 @@ async function runFeedback(args: Arguments): Promise<void> {
   }
   const about = args.optional("about");
   const context = await fileContext(args, FEEDBACK_ACCEPTED_FLAGS, 2);
-  /* Context is descriptive only: the CLI version and platform help the
-   * operator reproduce, and nothing here reads env vars or paths. */
   const submitted = await submitFeedback({
     target: context.cloud,
     workspaceId: context.selected.selectedWorkspace,
@@ -9286,13 +9268,6 @@ async function runFeedback(args: Arguments): Promise<void> {
   );
 }
 
-/**
- * Channels, as the CLI works them.
- *
- * `create` takes the name because that is what a person has. `rename` and
- * `archive` take the channel's ID on the wire, so this resolves a name to an id
- * first — and says plainly when it cannot, rather than guessing.
- */
 async function channelRows(context: FileCliContext): Promise<ChannelRow[]> {
   /* BOTH CREDENTIALS, two transports, one view. The read function accepts agent
    * credentials only and a person reads swarm_read over PostgREST, which is the
@@ -9331,18 +9306,6 @@ async function channelRows(context: FileCliContext): Promise<ChannelRow[]> {
   }
 }
 
-/**
- * A selector is a channel id when it parses as one; anything else is a name.
- *
- * Classifying it is PURE and runs before the credential, so a selector that is
- * neither costs nothing. A review arm found the previous version resolving it
- * after `fileContext`, which reads the credential and validates the workspace:
- * `cswarm channel archive "Not A Slug"` was told its credential was unreadable
- * rather than that its selector cannot be a channel. It also found that a
- * mistyped id — 36 characters, so over the slug bound — was told the slug rule
- * alone, which is the wrong remedy for someone who meant an id. Both rules are
- * named now, and neither is typed.
- */
 function channelSelectorKind(selector: string): "id" | "name" {
   if (UUID_RE.test(selector)) return "id";
   const problem = channelSelectorProblem(selector);
@@ -9350,15 +9313,12 @@ function channelSelectorKind(selector: string): "id" | "name" {
   return "name";
 }
 
-/** Turn an already-classified selector into a channel id. */
 async function resolveChannelSelector(
   context: FileCliContext,
   selector: string,
   kind: "id" | "name",
 ): Promise<string> {
   if (kind === "id") return selector.toLowerCase();
-  /* An agent resolves a name the same way a person does, now that channelRows
-   * answers for both. The retired refusal is quoted in src/cloud/channels.ts. */
   const rows = await channelRows(context);
   const match = findChannelBySlug(rows, selector);
   if (match === null) throw new Error(unknownChannelMessage(selector, rows));
@@ -9378,17 +9338,6 @@ async function sendChannelCommand(
   return result.channel;
 }
 
-/**
- * Shape, then content, then the network.
- *
- * `assertShape` runs before the name is judged, so a caller who typed both an
- * unknown flag and an unusable name is told about the flag rather than sent to
- * fix the name in a command that would still be rejected. The name is then
- * judged before the target and the credential are resolved, so a name that
- * cannot be a channel name costs nothing. The command edge orders its own
- * refusals the same way (field list first, slug rule second, in
- * `channel_rename`).
- */
 const CHANNEL_FLAGS = [
   ...TARGET_FLAGS,
   "workspace-id",
@@ -9754,7 +9703,6 @@ async function runLogout(args: Arguments): Promise<void> {
   process.stdout.write(logoutMessage(outcome, allDevices));
 }
 
-// Flag-selected modes stay explicit in AGENT_COMMANDS while their handler body stays unchanged.
 const runAcceptLinkStdinMode: AgentCommandHandler = async (args) => await runAccept(args);
 const runAcceptLegacyStdinMode: AgentCommandHandler = async (args) => await runAccept(args);
 const runAcceptPositionalMode: AgentCommandHandler = async (args) => await runAccept(args);
@@ -9798,7 +9746,6 @@ export type AgentCommandEntry = AgentCommandTool & {
   argumentSchema: AgentCommandArgumentSchema;
   mutates: boolean;
   flags: readonly string[];
-  /** CLI-only options intentionally absent from model tool schemas. */
   cliOnlyFlags?: readonly string[];
   transports: readonly AgentCommandTransport[];
   mcp: boolean;
@@ -9936,7 +9883,6 @@ function helpFlag(key: string, flag: string): string {
   return BOOLEAN_ARGUMENT_FLAGS.has(flag) ? `--${flag}` : `--${flag} ${enumeration ? `<${enumeration.join("|")}>` : HELP_FLAG_VALUES[flag] ?? "<value>"}`;
 }
 
-/** Every synopsis starts with a variant declared in AGENT_COMMANDS and includes its accepted flags. */
 export function visibleUsageHint(hint: string, accepted: readonly string[]): string {
   const filter = (source: string): string => {
     let result = "";
@@ -10187,10 +10133,6 @@ async function runProfileLs(args: Arguments): Promise<void> {
   if (result.profiles.length === 0) process.stdout.write("No profiles found.\n");
 }
 
-/**
- * The command table is the only verb dispatcher. Closed sub-actions are nested,
- * while flag-selected modes stay behind one key and are chosen by select().
- */
 export const MCP_SERVE_ACCEPTED_FLAGS = ["profile", "host-session-id"] as const;
 export const ADMIN_READ_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "limit", "before", "json"] as const;
 export const ADMIN_REVOKE_ACCEPTED_FLAGS = [...TARGET_FLAGS, "grant-id", "request-id", "json"] as const;
@@ -10425,7 +10367,6 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   "seed-fixture": commandEntry({ ...noTool("test fixture bridge; never a model tool"), handler: traced("runSeed", runSeed), description: "Seed a local test fixture.", mutates: true, flags: ["uid", "device-id", "workspace-id", "display-name", "workspace-name", "agent-name"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm seed-fixture --uid <auth-user-uuid> [--device-id <uuid>] [--workspace-id <uuid>]"] }),
 };
 
-/** Help uses handler shapes. The dispatch table's flags remain the recorded parser baseline. */
 function mergeHelpFlags(...lists: readonly (readonly string[])[]): readonly string[] {
   return [...new Set(lists.flat())];
 }
@@ -10683,21 +10624,11 @@ function safeError(error: unknown): string {
  */
 /**
  * sysexits EX_TEMPFAIL: "temporary failure; the user is invited to retry".
- *
- * D-056: the follow loop correctly dies on a refused read rather than retrying
- * through the server's instruction, and supervision is the remedy for a process
- * that exits. But every cswarm failure exited 1, so the supervisor forms that
- * read only an exit status — a shell until-loop, a service unit, a
- * respawn-on-nonzero runner — could not tell "refused, a later attempt may
- * succeed" from "credential revoked, do not restart". The D-055 frame serves
- * hosts that parse the NDJSON stream; this serves the ones that cannot.
  */
 export const EXIT_RESTARTABLE = 75;
 
-/** Exit status attached to an error whose failure may clear on a later run. */
 const restartableExit = new WeakMap<Error, number>();
 
-/** Mark an error so the top-level handler exits with EX_TEMPFAIL. */
 function markRestartable(error: Error): Error {
   restartableExit.set(error, EXIT_RESTARTABLE);
   return error;
@@ -10780,9 +10711,6 @@ if (isCliMain()) {
       process.exitCode = 1;
       return;
     }
-    // The renewal horizon is not a malfunction; it is the periodic human checkpoint §2.3
-    // asks for, arriving on time. Printing it as `cswarm: <flattened 403>` would tell a
-    // person their agent broke. It says instead what happened and what to run.
     if (
       error instanceof RenewalReauthorisationRequired ||
       error instanceof RenewalRevoked ||
@@ -10811,15 +10739,6 @@ if (isCliMain()) {
             );
           }
         }
-        /* D-073. This branch is the one a PERSON reads — the `--json` branch above already
-         * writes the machine form, to stdout. A trailing `JSON.stringify(structured)` here made
-         * every server-returned error appear twice: once as the sentence, then again wrapped in
-         * braces, with no `--json` requested. Client-side errors were unaffected, so the
-         * doubling followed the error CLASS rather than the verb, which is why it went unnoticed
-         * for so long — it never appeared in the failure modes anyone was testing.
-         *
-         * Removed rather than reformatted: nothing pinned it, the originating commit gives no
-         * rationale for it, and a caller wanting the object has `--json`. */
       }
       process.exitCode = 1;
       return;
@@ -10867,7 +10786,6 @@ if (isCliMain()) {
   });
 }
 
-/** The follow receiver shares the CLI's renewal credential-stop classification. */
 export function isFollowRenewalCredentialFailure(error: unknown): boolean {
   return isFollowCredentialFailure(error) ||
     error instanceof RenewalReauthorisationRequired ||
@@ -10876,7 +10794,6 @@ export function isFollowRenewalCredentialFailure(error: unknown): boolean {
     error instanceof RenewalSuspended;
 }
 
-/** Human account recovery deliberately skips workspace discovery/default selection. */
 async function runAdminRead(args: Arguments): Promise<void> {
   args.assertShape(ADMIN_READ_ACCEPTED_FLAGS, 2);
   await runAdminRecovery(args);

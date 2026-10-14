@@ -1,4 +1,3 @@
-// Proposed household v1 policy. No credential lookup or storage I/O here.
 export const HOUSEHOLD_OBJECT_LIMIT = 500;
 export const HOUSEHOLD_STORAGE_BYTE_LIMIT = 1024 * 1024 * 1024;
 export const HOUSEHOLD_VERSION_BYTE_LIMIT = 25 * 1024 * 1024;
@@ -6,7 +5,6 @@ export const HOUSEHOLD_LIVE_REVISION_LIMIT = 20;
 export const HOUSEHOLD_IDENTITY_WRITE_HOURLY_LIMIT = 600;
 export const HOUSEHOLD_WORKSPACE_WRITE_HOURLY_LIMIT = 2000;
 
-/** Also used by consent and tool generation during lane 4 integration. */
 export const HOUSEHOLD_CONTENT_OPERATIONS = ['read', 'create', 'update'] as const;
 export type HouseholdContentOperation = typeof HOUSEHOLD_CONTENT_OPERATIONS[number];
 export const HOUSEHOLD_CONTENT_ROLES = ['reader', 'editor'] as const;

@@ -27,7 +27,6 @@ export async function readAdminDelegations(
   if (!response.ok) throw new AdminRecoveryError("read_failed", `Admin access could not be read (HTTP ${response.status}). Sign in as the granting person, or view workspace history as its owner.`);
   return parseAdminRecoveryPage(await response.json());
 }
-/** Account revocation needs neither a workspace nor the delegated agent. */
 export async function revokeAdminDelegation(
   target: CloudTarget, accessToken: string, grantId: string, requestId: string = randomUUID(), fetcher: typeof fetch = fetch,
 ): Promise<{ grant_id: string; request_id: string; state: "revoked" }> {

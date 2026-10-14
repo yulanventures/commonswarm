@@ -83,7 +83,6 @@ export function isListenerProvider(value: string): value is ListenerProviderId {
   return LISTENER_PROVIDERS.some(provider => provider === value);
 }
 
-/** Consecutive terminal ack failures that make a listener hard-down. */
 export const LISTENER_DELIVERY_FAILING_THRESHOLD = 3;
 
 export interface ListenerStatus {
@@ -94,16 +93,13 @@ export interface ListenerStatus {
   profileId: string;
   workspaceId: string;
   principalId: string;
-  /** Absolute project directory selected when this listener was started. */
   projectDirectory?: string;
   /** Validated service base URL, with no credential, query, or path. */
   targetUrl?: string;
-  /** Edge that produced the last retry, when known. */
   lastRetryEdge?: "read" | "command" | "local";
   pid: number;
   state: ListenerStatusState;
   startedAt: string;
-  /** Start of this PID, recorded independently of supervisor initialization. */
   processStartedAt?: number;
   readyAt: string | null;
   updatedAt: string;
@@ -112,19 +108,13 @@ export interface ListenerStatus {
   lastErrorCode: string | null;
   /** Final local error message for diagnosis; never sent to CommonSwarm. */
   lastErrorDetail: string | null;
-  /** Stable provider-boundary reason beneath a shared outer failure code. */
   lastErrorReasonCode?: string | null;
-  /** Absolute realpath of the provider process this supervisor opened. */
   providerExecutable?: string | null;
-  /** Version measured from the exact provider executable before spawn. */
   providerVersion?: string | null;
   providerLastMeasuredVersion?: string | null;
-  /** Exact package versions bundled by a Claude bridge, when measurable. */
   providerBundledAgentSdkVersion?: string | null;
   providerBundledClaudeCodeVersion?: string | null;
-  /** Minimum Claude Code version returned by the API on a failed request. */
   providerMinimumRequiredVersion?: string | null;
-  /** The cswarm binary version reported by the running supervisor. */
   cswarmVersion?: string | null;
   /**
    * Final lines of the last failed worker's stderr, sanitized and bounded by
@@ -144,7 +134,6 @@ export interface ListenerStatus {
   lastTerminalDeliveryFailureAt: string | null;
   lastClaimAt: string | null;
   lastAckAt: string | null;
-  /** What the newest delivery acknowledgement concluded. */
   lastAckOutcome: DeliveryOutcome | null;
   /** Terminal ack failures since the last provider-proven ack; null before any ack. */
   consecutiveAckFailureCount: number | null;
@@ -191,30 +180,14 @@ export interface ListenerStatus {
   deferOverChars?: number | null;
   pendingForMainCount?: number;
   droppedForMainCount?: number;
-  /** Bounded local-only retry and claim-throughput accounting. */
   readHealth?: ListenerReadHealth;
-  /** TCP connections opened by this listener process since start. */
   connectionsOpened?: number;
-  /** HTTP requests divided by opened TCP connections; near 1 means no reuse. */
   connectionReuseRatio?: number;
-  /** Activity frame publish failures observed by this listener process. */
   activityPublishFailures?: number;
-  /** Stable code for the newest activity publish failure; local status only. */
   activityLastErrorCode?: ActivityPublishErrorCode | null;
-  /**
-   * Idle poll interval in force right now, including backoff. Optional: a
-   * status file written by a listener older than this field omits it.
-   */
   idlePollMs?: number | null;
-  /** Next planned push reconcile wait, separate from delivery processing's idle poll interval. */
   pushReconcileWaitMs?: number | null;
-  /** How the listener learns there is work. Optional: older files omit it. */
   wake?: ListenerWakeStatus;
-  /**
-   * When the supervisor will start the next attempt. Present while it is
-   * waiting through a transient failure; cleared once that attempt starts,
-   * the listener is ready, or it has stopped. Optional: older files omit it.
-   */
   nextAttemptAt?: string | null;
   /**
    * When a credential-check listener will stop if every remaining check
@@ -222,7 +195,6 @@ export interface ListenerStatus {
    * files omit it.
    */
   credentialStopAt?: string | null;
-  /** Expiry of the current token while a renewal retry is in progress. */
   renewalExpiresAt?: string | null;
   credentialCheckEdge?: "read" | "command" | null;
   claimRetryCount?: number;
@@ -385,11 +357,8 @@ export const STATUS_DELIVERY_KEYS = [
   "consecutiveAckFailureCount",
 ] as const;
 
-// This is the former appendListenerEvent-local set, hoisted so status and event
-// validation read the same delivery vocabulary as the command client.
 const deliveryOutcomes = DELIVERY_ACK_OUTCOMES;
 
-/** One delivery this listener handed back, as stored and as reported. */
 export interface ListenerHeldBackDelivery {
   signalId: string;
   at: string;
@@ -408,7 +377,6 @@ export interface ListenerHeldBackDelivery {
  */
 export const LISTENER_HELD_BACK_MAX = 16;
 
-/** Null means malformed; undefined is never returned (callers gate on that). */
 function parseHeldBackDeliveries(
   value: unknown,
 ): ListenerHeldBackDelivery[] | null {
@@ -705,8 +673,6 @@ function parseStatus(raw: string, rejectUnknownKeys = false): ListenerStatus {
   ) {
     throw new Error("stored listener status routing fields are malformed");
   }
-  // Old version-1 files predate the delivery fields: normalize the absent
-  // keys to null in memory without rewriting the stored bytes.
   const knownRow = Object.fromEntries(
     Object.entries(row).filter(([key]) => STATUS_ALLOWED_KEYS.has(key)),
   ) as unknown as ListenerStatus;
@@ -774,7 +740,6 @@ export async function writeListenerStatus(
   if (Buffer.byteLength(serialized, "utf8") > MAX_STATUS_BYTES) {
     throw new Error("listener status is too large");
   }
-  // New writes always carry all STATUS_DELIVERY_KEYS fields, even when null.
   const parsed = JSON.parse(serialized) as Record<string, unknown>;
   for (const key of STATUS_DELIVERY_KEYS) {
     if (!(key in parsed)) {
@@ -795,7 +760,6 @@ export async function readListenerStatus(
   return raw === null ? null : parseStatus(raw);
 }
 
-/** Read listener status without creating a missing instance directory. */
 export async function readListenerStatusIfPresent(
   paths: ListenerPaths,
 ): Promise<ListenerStatus | null> {
@@ -803,7 +767,6 @@ export async function readListenerStatusIfPresent(
   return raw === null ? null : parseStatus(raw);
 }
 
-/** Append one metadata-only event to an owned 0600 log. */
 export async function appendListenerEvent(
   paths: ListenerPaths,
   event: Record<string, string | number | boolean | null>,
@@ -832,7 +795,6 @@ export async function appendListenerEvent(
     "pending_delivery_count",
     "terminal_delivery_failure_count",
     "outcome",
-    // D-051 companion 2: why a listener is down, and why it stopped trying.
     "restart_attempts",
     "restartable",
     "restarts_exhausted",
@@ -847,7 +809,6 @@ export async function appendListenerEvent(
     "body_length",
     "pending_main_count",
     "dropped_count",
-    // How long one delivery held the worker seat, and why it gave it back.
     "held_ms",
     "release_reason",
     "idle_poll_ms",

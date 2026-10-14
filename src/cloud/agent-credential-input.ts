@@ -25,7 +25,6 @@ export interface AgentCredentialInput {
   principalId: string | null;
   tokenId: string | null;
   runId: string | null;
-  /** Epoch ms, when the artifact stated one. Null for a bare or pre-renewal artifact. */
   expiresAt: number | null;
   durable: boolean;
 }
@@ -41,7 +40,6 @@ export type AgentCredentialInputSource =
   | { kind: "file"; path: string }
   | { kind: "stdin" };
 
-/** A stable structural reason for rejecting an agent credential input. */
 export class AgentCredentialInputError extends Error {
   readonly name = "AgentCredentialInputError";
 

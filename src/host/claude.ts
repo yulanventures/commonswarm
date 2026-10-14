@@ -55,7 +55,6 @@ import {
 
 export type ClaudeAcpOpenOptions = {
   cwd: string;
-  /** Claude Code or claude-agent-acp path. Bare names resolve once at open. */
   executable?: string;
   permissionCallback?: PermissionCallback;
   events?: HostSessionEvents;
@@ -69,9 +68,7 @@ export type ClaudeAcpOpenOptions = {
   clientVersion?: string;
   /** When true, prompts are enabled without canary (tests only). */
   promptsEnabled?: boolean;
-  /** Report a newer-than-measured version after the floor admits it. */
   onVersionNotice?: (notice: ProviderVersionNotice) => void;
-  /** Report the exact resolved bridge and package versions before the canary. */
   onRuntimeNotice?: (notice: ClaudeBridgeRuntimeNotice) => void;
   /**
    * Bounded, sanitized stderr tail, delivered once when the child exits — for
@@ -86,11 +83,8 @@ export type ClaudeAcpHandle = {
   executable: string;
   args: string[];
   env: Record<string, string>;
-  /** Version returned by the exact executable before this child was spawned. */
   providerVersion?: string;
-  /** Exact installed SDK package resolved from the bridge package. */
   bundledAgentSdkVersion?: string;
-  /** Claude Code version declared by that exact SDK package. */
   bundledClaudeCodeVersion?: string;
   close: () => Promise<void>;
 };
@@ -196,7 +190,6 @@ function resolvedClaudeCandidate(
     : real;
 }
 
-/** Resolve bare or relative executable to one absolute realpath for probe and spawn. */
 export function resolveClaudeExecutable(
   executable = "claude-agent-acp",
   pathEnv?: string,
@@ -252,12 +245,10 @@ export function buildClaudeLaunch(
     : { command: executable, args: [...args] };
 }
 
-/** Parse bridge SemVer, including prerelease/build and leading banners. */
 export function parseClaudeVersionOutput(stdout: string): string | null {
   return parseProviderVersionOutput(stdout, /\bclaude-agent-acp\b/i);
 }
 
-/** Parse the user-facing version shape printed by the Claude Code binary. */
 export function parseClaudeCodeVersionOutput(stdout: string): string | null {
   return parseProviderVersionOutput(stdout, /\bClaude Code\b/i, false);
 }
@@ -292,7 +283,6 @@ function readPackageAtOrAbove(
   return null;
 }
 
-/** Read the SDK and bundled Claude Code versions used by this exact bridge. */
 export function measureClaudeBundleVersions(
   executable: string,
 ): ClaudeBundleVersions {
@@ -354,7 +344,6 @@ async function readClaudeVersionOutput(
   });
 }
 
-/** Inspect one resolved or resolvable bridge without opening an ACP session. */
 export async function inspectClaudeBridgeExecutable(
   executable = "claude-agent-acp",
   options?: {
@@ -379,7 +368,6 @@ export async function inspectClaudeBridgeExecutable(
   };
 }
 
-/** Run the resolved bridge with the exact environment used for its ACP process. */
 export async function assertClaudeVersionFloor(
   executable: string,
   options?: {
@@ -446,7 +434,6 @@ function waitForChildExit(
   });
 }
 
-/** Stop the bridge with SIGTERM, escalate to SIGKILL, and confirm it exited. */
 export async function terminateClaudeChild(
   child: ChildProcessWithoutNullStreams,
 ): Promise<void> {
@@ -454,14 +441,12 @@ export async function terminateClaudeChild(
   try {
     child.kill("SIGTERM");
   } catch {
-    // already dead
   }
   await waitForChildExit(child, CHILD_EXIT_WAIT_MS);
   if (child.exitCode !== null || child.signalCode !== null) return;
   try {
     child.kill("SIGKILL");
   } catch {
-    // already dead
   }
   await waitForChildExit(child, CHILD_KILL_WAIT_MS);
   if (child.exitCode === null && child.signalCode === null) {
@@ -472,7 +457,6 @@ export async function terminateClaudeChild(
   }
 }
 
-/** Open the measured Claude bridge, initialize ACP, and create one worker session. */
 export async function openClaudeAcpSession(
   options: ClaudeAcpOpenOptions,
 ): Promise<ClaudeAcpHandle> {

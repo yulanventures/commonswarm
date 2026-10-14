@@ -1,12 +1,4 @@
 /*
- * Where a renewed agent credential lives between CLI invocations.
- *
- * WHY THIS FILE EXISTS AT ALL. An agent credential arrives on stdin and, until now, died
- * with the process. That is fine for a one-hour token and fatal for the thing the product
- * is actually for: a work session that runs for days or weeks. §2.3 answers it with a
- * fenced successor operation rather than a longer token, which only works if the successor
- * outlives the invocation that obtained it — so it has to be written down somewhere.
- *
  * THE PREDECESSOR IS NEVER WRITTEN HERE. Only the live successor is, under the same
  * discipline §2.3 requires of the CLI's own credential storage: a 0600 file inside a 0700
  * directory owned by the current user, atomically replaced, never an env var and never a
@@ -60,15 +52,11 @@ export interface AgentCredentialRecord {
   tokenId: string | null;
   principalId: string | null;
   runId: string | null;
-  /** The token_id of the credential a human handed over; null for a bare token. */
   rootTokenId: string | null;
-  /** Bumped on every write, so a concurrent renewal is detectable rather than silent. */
   generation: number;
   issuedAt: number;
   expiresAt: number | null;
-  /** When a person must re-authorise. Null when the deployment did not say. */
   horizonExpiresAt: number | null;
-  /** Successors this lineage may still obtain, as last reported. Null when unknown. */
   successorsRemaining: number | null;
   /**
    * A renewal whose outcome was never learned. Keeping its command id is what makes the
@@ -139,7 +127,6 @@ function parseAgentCredentialRecord(raw: string): AgentCredentialRecord {
       value.expiresAt === null ||
       (Number.isSafeInteger(value.expiresAt) && (value.expiresAt ?? -1) >= 0)
     ) ||
-    // A live successor with no deadline could never be renewed on time.
     (value.token !== null && value.expiresAt === null) ||
     !(
       value.horizonExpiresAt === null ||
@@ -155,8 +142,6 @@ function parseAgentCredentialRecord(raw: string): AgentCredentialRecord {
   ) {
     throw new Error("stored agent credential record is malformed");
   }
-  // Normalized rather than passed through, so every reader sees `null` and not the
-  // absence of a key it forgot could be absent.
   return { ...value, pendingRenewal: value.pendingRenewal ?? null } as
     AgentCredentialRecord;
 }

@@ -55,7 +55,6 @@ import {
 
 export type CodexAcpOpenOptions = {
   cwd: string;
-  /** Absolute realpath to codex-acp. Bare names are resolved once at open. */
   executable?: string;
   permissionCallback?: PermissionCallback;
   events?: HostSessionEvents;
@@ -69,7 +68,6 @@ export type CodexAcpOpenOptions = {
   clientVersion?: string;
   /** When true, prompts are enabled without canary (tests only). */
   promptsEnabled?: boolean;
-  /** Report the admitted bridge version for listener status and notices. */
   onVersionNotice?: (notice: ProviderVersionNotice) => void;
   /**
    * Bounded, sanitized stderr tail, delivered once when the child exits — for
@@ -84,7 +82,6 @@ export type CodexAcpHandle = {
   executable: string;
   args: string[];
   env: Record<string, string>;
-  /** Version returned by the exact executable before this child was spawned. */
   providerVersion?: string;
   close: () => Promise<void>;
 };
@@ -144,7 +141,6 @@ function resolvedCodexCandidate(
     : real;
 }
 
-/** Resolve bare or relative executable to one absolute realpath for probe and spawn. */
 export function resolveCodexExecutable(
   executable = "codex-acp",
   pathEnv?: string,
@@ -200,12 +196,10 @@ export function buildCodexLaunch(
     : { command: executable, args: [...args] };
 }
 
-/** Parse bridge SemVer, including prerelease/build and leading banners. */
 export function parseCodexVersionOutput(stdout: string): string | null {
   return parseProviderVersionOutput(stdout, /@agentclientprotocol\/codex-acp\b/i);
 }
 
-/** Run the resolved bridge with the exact environment used for its ACP process. */
 export async function assertCodexVersionFloor(
   executable: string,
   options?: {
@@ -301,7 +295,6 @@ function waitForChildExit(
   });
 }
 
-/** Stop the bridge with SIGTERM, escalate to SIGKILL, and confirm it exited. */
 export async function terminateCodexChild(
   child: ChildProcessWithoutNullStreams,
 ): Promise<void> {
@@ -309,14 +302,12 @@ export async function terminateCodexChild(
   try {
     child.kill("SIGTERM");
   } catch {
-    // already dead
   }
   await waitForChildExit(child, CHILD_EXIT_WAIT_MS);
   if (child.exitCode !== null || child.signalCode !== null) return;
   try {
     child.kill("SIGKILL");
   } catch {
-    // already dead
   }
   await waitForChildExit(child, CHILD_KILL_WAIT_MS);
   if (child.exitCode === null && child.signalCode === null) {
@@ -327,7 +318,6 @@ export async function terminateCodexChild(
   }
 }
 
-/** Open the measured Codex bridge, initialize ACP, and create one worker session. */
 export async function openCodexAcpSession(
   options: CodexAcpOpenOptions,
 ): Promise<CodexAcpHandle> {

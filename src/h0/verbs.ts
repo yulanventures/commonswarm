@@ -64,7 +64,6 @@ export interface H0Verb {
   /** Wire name: the path segment POSTed to, and the key in the generated document. */
   readonly name: string;
   readonly auth: H0Auth;
-  /** One line, written for a model reading the document cold. */
   readonly summary: string;
   readonly fields: readonly H0Field[];
 }
@@ -207,7 +206,6 @@ export type H0VerbName = (typeof H0_VERBS)[number]["name"];
 
 export const H0_VERB_NAMES: readonly H0VerbName[] = H0_VERBS.map((v) => v.name);
 
-/** Derived, so it cannot drift from the table. */
 export const H0_PREAUTH_VERBS: readonly H0VerbName[] = H0_VERBS
   .filter((v) => v.auth === "join-credential")
   .map((v) => v.name);

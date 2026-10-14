@@ -90,7 +90,6 @@ function waitForRetry(signal?: AbortSignal | null): Promise<void> {
   });
 }
 
-/** One retry of the same person-token request, within its original budget. */
 export async function fetchRestReadRetrying(
   fetcher: typeof fetch,
   input: Parameters<typeof fetch>[0],

@@ -100,7 +100,6 @@ function changedTopics(
     : topics.filter((topic) => previous.topicVersions[topic.topic] !== topic.version);
 }
 
-/** One compact changed-only line; topic bodies never enter this formatter. */
 export function renderBrainDigest(
   topicCount: number,
   topics: readonly BrainTopicSnapshot[],
@@ -113,7 +112,6 @@ export function renderBrainDigest(
     `NEW/UPDATED since your last check: ${names}. Read: cswarm brain get <topic>`;
 }
 
-/** Atomic per-principal high-water shared by hook and durable worker prompts. */
 export class FileBrainDigestStore {
   readonly location: string;
   private readonly principalId: string;
@@ -126,7 +124,6 @@ export class FileBrainDigestStore {
     this.location = join(instanceDirectory, BRAIN_DIGEST_FILE);
   }
 
-  /** Read the shared high-water without advancing it. */
   async preview(topics: readonly BrainTopicSnapshot[]): Promise<string | null> {
     const raw = await readSecureJsonFileIfPresent(
       this.location,

@@ -385,7 +385,6 @@ export function agentPresenceFromMembersPayload(
   };
 }
 
-/** Read all member-visible seat presence in one workspace-scoped request. */
 export async function readWorkspaceAgentPresence(
   target: CloudTarget,
   bearer: string,
@@ -759,7 +758,6 @@ export interface WorkspaceCloseSelection {
   selectedWorkspaceId: string | null;
 }
 
-/** Moves a closed default to a live successor, or clears it when none remains. */
 export async function updateWorkspaceDefaultAfterClose(
   store: CredentialStore,
   userId: string,
@@ -895,7 +893,6 @@ export async function selectWorkspace(
   return selected;
 }
 
-/** Resolves a human workspace selector without changing the saved default. */
 export function resolveWorkspaceSelector(
   selector: string,
   workspaces: readonly WorkspaceSummary[],

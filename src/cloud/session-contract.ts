@@ -18,9 +18,7 @@ import {
   type AgentSessionErrorCode,
 } from "./session-wire.js";
 
-/** Server lease length (section 8). */
 export const AGENT_SESSION_TTL_MS = 120_000;
-/** Deterministic renew offset from last successful proof (section 8). */
 export const AGENT_SESSION_RENEW_AFTER_MS = 40_000;
 
 export const SESSION_CONTEXT_VERSION = 1 as const;

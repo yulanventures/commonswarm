@@ -242,10 +242,8 @@ export function currentTargetSummary(
   };
 }
 
-/** The deployment a cold install belongs to. Overridable so a private deployment can self-host. */
 export const DEFAULT_SITE_ORIGIN = "https://commonswarm.com";
 
-/** One meta tag's content, by name, from an HTML document. Our own markup, not the general case. */
 function metaContent(html: string, name: string): string | null {
   /* Attribute order is fixed by our own templates (name then content) and both are
    * double-quoted. Deliberately narrow: this parses ONE shape and returns null for anything
@@ -315,15 +313,6 @@ function missingTargetError(mode: "human" | "agent"): Error {
     );
   }
   return new Error(
-    /* "who invited you" assumed an inviter. Self-serve signup is live, so a reader who created
-     * their own workspace has no such person and the sentence sends them to nobody. Same family
-     * as the 3-project cap telling the account holder to ask an operator who is themselves —
-     * instruction text written for a different reader than the one receiving it. See D-067. */
-    /* The hosted reader must be able to FINISH the target-set command, not just start it: the
-     * inversion arm on this change showed every listed route was closed for the self-serve
-     * hosted reader because <key> named no source. The anon key is public (RLS-protected) and
-     * published in the meta tags of https://commonswarm.com/start — say so. Same F-1/D-067
-     * family: a route you cannot complete is not a route. */
     "no Cloud target is selected: most commands discover the hosted target from https://commonswarm.com automatically, so seeing this usually means that fetch failed — check network or your egress allowlist. Otherwise start with cswarm accept --link-stdin because invite links carry the Cloud target and save the service base URL. The service we run is https://api.commonswarm.com (run cswarm target set --url https://api.commonswarm.com --anon-key <key>). The anon key is public, in the meta tags at https://commonswarm.com/start (a deployment uses its own base URL). Scripts and CI may instead pass --url and --anon-key or set SWARM_CLOUD_URL and SWARM_CLOUD_ANON_KEY",
   );
 }

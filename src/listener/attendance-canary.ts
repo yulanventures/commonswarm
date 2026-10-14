@@ -62,7 +62,6 @@ export interface AttendedAttendanceCanaryOptions {
   /** Test seam. Production derives this from WAKE_LEASE_RENEW_MS. */
   watcherWaitMs?: number;
   readWakeLease?: () => Promise<AgentWakeLease | null>;
-  /** Notify waits here until its Monitor has emitted the accepted self-note. */
   afterAccepted?: (signalId: string) => Promise<void> | void;
 }
 
@@ -139,7 +138,6 @@ function attendedSleep(
   });
 }
 
-/** Post one self-note and prove the attended watcher and in-session check hops. */
 export async function runAttendedAttendanceCanary(
   options: AttendedAttendanceCanaryOptions,
 ): Promise<AttendedAttendanceCanaryResult> {
@@ -314,7 +312,6 @@ export async function runAttendedAttendanceCanary(
   };
 }
 
-/** Render the attended hops and the exact recovery action for the first stall. */
 export function renderAttendedAttendanceCanary(
   result: AttendedAttendanceCanaryResult,
 ): string {
@@ -415,7 +412,6 @@ async function logEvidence(
   return { claimedAt, routeDecision, routedAt };
 }
 
-/** Post one self-note and measure every listener attendance hop before the deadline. */
 export async function runListenerAttendanceCanary(
   options: ListenerAttendanceCanaryOptions,
 ): Promise<ListenerAttendanceCanaryResult> {
@@ -530,7 +526,6 @@ export async function runListenerAttendanceCanary(
   };
 }
 
-/** Render hop evidence and the exact next step for the first stalled hop. */
 export function renderListenerAttendanceCanary(
   result: ListenerAttendanceCanaryResult,
   workspaceId: string,

@@ -21,7 +21,6 @@ function looksLikeGrokBotHost(env: NodeJS.ProcessEnv, exists: (path: string) => 
   return env.CURSOR_AGENT === "1" || Boolean(env.SAND_HOST_PORT || env.CURSOR_AGENT_SOCKET) || GROK_BOT_GATEWAY_PATHS.some(exists);
 }
 
-/** Prefer the closest named host; Bot env markers apply unless a foreign CLI host bounds the walk. */
 export async function detectAgentHost(read = parentProcess, start = process.ppid, env: NodeJS.ProcessEnv = process.env, exists: (path: string) => boolean = existsSync): Promise<DetectedAgentHost> {
   let pid = start;
   const seen = new Set<number>();

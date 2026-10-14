@@ -102,11 +102,9 @@ import {
 } from "./wake.js";
 
 export const LISTENER_PAGE_LIMIT = 100;
-/** Force a read after this many consecutive claim refusals. */
 export const LISTENER_CLAIM_REFUSALS_BEFORE_READ = 3;
 export const LISTENER_IDLE_POLL_MS = IDLE_POLL_DEFAULT_MS;
 export const LISTENER_IDLE_POLL_MAX_MS = IDLE_POLL_MAX_MS;
-/** Server-fixed maximum delivery lease (§ frozen runtime budgets). */
 export const LISTENER_DELIVERY_SAFETY_MARGIN_MS = 30_000;
 export const LISTENER_ACK_ONLY_MINIMUM_MS =
   DELIVERY_REQUEST_TIMEOUT_MS + LISTENER_DELIVERY_SAFETY_MARGIN_MS;
@@ -116,23 +114,6 @@ export const LISTENER_PROMPT_START_MINIMUM_MS =
   SIGNAL_READ_TIMEOUT_MS +
   ACP_DEFAULT_REQUEST_TIMEOUT_MS +
   LISTENER_REPLY_ONLY_MINIMUM_MS;
-/**
- * Default bound on how long ONE claimed delivery may hold the single worker
- * seat, across every prompt and post attempt on that lease.
- *
- * Measured 2026-09-04 on the lead's seat: one open-ended ask used the whole
- * 10-minute turn budget and four later deliveries waited behind it; two of
- * them were byte-identical re-sends 1 to 6 minutes apart. The hold was not
- * bounded by the turn budget at all. A lease runs 15 minutes (DELIVERY_LEASE_MS
- * server-side), and the pre-bound loop, once no phase budget fitted in what was
- * left of the lease, SLEPT to lease expiry with an idle worker -- up to five
- * more minutes of a blocked seat per lease, repeated over as many as
- * DELIVERY_MAX_ATTEMPTS redeliveries of the same row.
- *
- * The bound makes one delivery cost one turn budget rather than one lease.
- * It is not a separate flag: `cswarm listen start --turn-budget` sets it, so
- * the seat hold and the turn it bounds cannot drift apart.
- */
 export const LISTENER_DELIVERY_HOLD_BUDGET_MS = LISTENER_PROMPT_TIMEOUT_MS;
 export const LISTENER_DELIVERY_RETRY_INITIAL_MS = 500;
 export const LISTENER_DELIVERY_RETRY_MAX_MS = 30_000;
@@ -143,13 +124,9 @@ export const LISTENER_HOST_PORTS_PROBE_MS = 60_000;
  * the answer that opened the window. Three checks are the floor.
  */
 export const CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS = 3;
-/** Wait between credential re-checks. The listener stays up during this wait. */
 export const CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS = 5 * 60_000;
-/** A renewal check must leave more than one attempt before a live token expires. */
 export const RENEWAL_WINDOW_RETRY_MS = 30_000;
-/** A failed request may retry at most once per second, even at or after expiry. */
 export const LISTENER_REQUEST_WAIT_FLOOR_MS = 1_000;
-/** Two renewal timeouts and pending writes, clock lead, two floors, and headroom. */
 export const RENEWAL_PENDING_WRITE_ALLOWANCE_MS = 5_000;
 export const RENEWAL_SERVER_CLOCK_LEAD_ALLOWANCE_MS = 30_000;
 export const RENEWAL_EXPIRY_HEADROOM_MS = 8_000;
@@ -157,16 +134,9 @@ export const RENEWAL_WINDOW_EXPIRY_MARGIN_MS =
   2 * RENEW_TIMEOUT_MS + RENEWAL_SERVER_CLOCK_LEAD_ALLOWANCE_MS +
   2 * LISTENER_REQUEST_WAIT_FLOOR_MS + 2 * RENEWAL_PENDING_WRITE_ALLOWANCE_MS +
   RENEWAL_EXPIRY_HEADROOM_MS;
-/**
- * Earliest permanent stop, measured from the first confirmed-loss answer.
- * `(MIN_CHECKS - 1)` intervals, so the last check lands on this window.
- * Ten minutes is the floor: a few minutes of a wrong backend must not stop
- * the listener.
- */
 export const CREDENTIAL_LOSS_CONFIRM_WINDOW_MS =
   (CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS - 1) * CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS;
 
-/** Read-edge fatal answers. Credential codes require the confirmation window. */
 export const READ_FATAL_ANSWERS = Object.freeze({
   credentialCodes: CONFIRMED_CREDENTIAL_LOSS_CODES,
   configurationCode: "delivery_configuration_missing",
@@ -176,7 +146,6 @@ export const READ_FATAL_ANSWERS = Object.freeze({
   ] as const),
 });
 
-/** Command-edge fatal answers. Credential codes require the confirmation window. */
 export const COMMAND_FATAL_ANSWERS = Object.freeze({
   credentialCodes: COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES,
   h0FenceCode: H0_SEAT_CLAIM_REFUSED_CODE,
@@ -213,7 +182,6 @@ function fatalCommandRefusal(error: DeliveryHttpError): boolean {
   );
 }
 
-/** A claim refused because this seat is served by the h0 poll, not by `cswarm listen`. */
 export class ListenerH0SeatError extends Error {
   readonly code = H0_SEAT_CLAIM_REFUSED_CODE;
   constructor() {
@@ -262,13 +230,10 @@ export class ListenerCapabilityError extends Error {
 export interface ListenerCredentialSession {
   bearer(): Promise<string>;
   readonly expiry?: number | null;
-  /** True only while this session has a store and is due to renew. */
   readonly renewalDue?: boolean;
-  /** Null if renewal is unavailable; otherwise the next due time. */
   readonly renewalAt?: number | null;
 }
 
-/** A parsed delivery response contradicts the local lease or advertised lease bound. */
 export class ListenerLeaseResponseError extends Error {
   override name = "ListenerLeaseResponseError";
 }
@@ -307,7 +272,6 @@ export type ListenerRuntimeEvent =
   | {
     type: "idle_poll";
     intervalMs: number;
-    /** Only an empty claim schedules the next push reconcile wait. */
     pushReconcileWait?: boolean;
     ts: string;
   }
@@ -451,11 +415,6 @@ export interface ListenerRuntimeOptions {
     onMalformedRow: (index: number) => void;
   }) => Promise<AgentSignalPage>;
   poster?: ListenerReplyPoster;
-  /**
-   * Provider-derived model label declared once after ready
-   * (docs/design/2026-08-03-AGENT-SELF-IDENTIFY.md). Absent = declare nothing:
-   * detection returns a value or it returns nothing, never a guess.
-   */
   declareModel?: string;
   listenerInstanceId?: string;
   deliveryJournal?: ListenerDeliveryJournalClient;
@@ -486,10 +445,6 @@ export interface ListenerRuntimeOptions {
    * release.
    */
   deliveryHoldBudgetMs?: number;
-  /**
-   * Injected wake subscriber for tests. Production constructs one on the first
-   * wake hint. Absent topic means the loop stays on the idle poll.
-   */
   wake?: WakeHandle;
   createWake?: (target: CloudTarget) => WakeHandle;
 }
@@ -543,7 +498,6 @@ export function isRestartableListenerStop(stop: ListenerRuntimeStop): boolean {
  * operator can see, while a wrong restart is work repeated against a server.
  */
 function isRestartableRuntimeError(error: unknown): boolean {
-  // An H0 seat will refuse claim on every retry. Restarting does not change the seat.
   if (
     error instanceof ListenerH0SeatError ||
     (error instanceof DeliveryHttpError &&
@@ -564,11 +518,9 @@ function isRestartableRuntimeError(error: unknown): boolean {
   if (error instanceof DeliveryResponseError) return true;
   if (error instanceof DeliveryMalformedResponseError) return true;
   if (error instanceof ListenerLeaseResponseError) return true;
-  // Locally detected claim and ACK inconsistencies remain fatal.
   if (error instanceof DeliveryProtocolError) return false;
   if (error instanceof RenewalRetryError) return true;
 
-  // Command posts: same command-surface rule.
   if (error instanceof CommandTransportError) return true;
   if (error instanceof CommandHttpError) {
     if (isConfirmedCredentialHttpFailure(error.status, error.code, "command")) {
@@ -578,7 +530,6 @@ function isRestartableRuntimeError(error: unknown): boolean {
       error.status === 401 || error.status === 403;
   }
 
-  // ACP: only codes we assigned at the boundary, never the peer's words.
   if (error instanceof AcpHostError) return TRANSIENT_ACP_CODES.has(error.code);
 
   // A foreign read service can omit wire capabilities. Local configuration
@@ -587,7 +538,6 @@ function isRestartableRuntimeError(error: unknown): boolean {
     return error.code !== READ_FATAL_ANSWERS.configurationCode;
   }
 
-  // Credential horizons are a human checkpoint, never a restart.
   if (
     error instanceof RenewalReauthorisationRequired ||
     error instanceof RenewalRevoked
@@ -595,7 +545,6 @@ function isRestartableRuntimeError(error: unknown): boolean {
     return false;
   }
 
-  // Read-path failures, themselves closed.
   return !fatalReadRefusal(error) &&
     (isRestartableReadError(error) || isForeignReadResponseFailure(error));
 }
@@ -875,7 +824,6 @@ function sameEffectSignal(
     record.senderOwnerRelation === (signal.sender_owner_relation ?? "unknown");
 }
 
-/** Bind recovered effects to the immutable fields from the authoritative lease. */
 function immutableSignalFingerprint(
   signalId: string,
   signalKind: string,
@@ -1121,7 +1069,6 @@ export async function runListenerRuntime(
           deadlineMs: now() + SIGNAL_READ_TIMEOUT_MS,
         });
       } catch {
-        // A display name is optional metadata. The durable queue keeps exact ids.
       }
     }
     // Load-bearing crash order: the atomic, fsynced local queue write must
@@ -1204,7 +1151,6 @@ export async function runListenerRuntime(
   if (abort) {
     if (abort.aborted) {
       options.model.cancel();
-      // Do not swallow close failures (e.g. child_exit_timeout): escalate.
       await options.model.close();
       return { reason: "cancelled" };
     }
@@ -1229,7 +1175,6 @@ export async function runListenerRuntime(
     try {
       ensureWake().setTopic(hint.topic);
     } catch {
-      // Parsed hints are valid; a closed subscriber is ignored.
     }
   };
 
@@ -1320,11 +1265,6 @@ export async function runListenerRuntime(
     });
   };
 
-  /**
-   * Record one sample in the confirmation window and wait for the next.
-   * Returns a stop when the window is complete or the caller aborted.
-   * `"continue"` means the listener should try the same check again.
-   */
   const holdCredentialWindow = async (
     kind: "confirmed" | "transient",
     error: unknown,
@@ -1530,12 +1470,9 @@ export async function runListenerRuntime(
       forceRead = false;
       ackReadDue = false;
       if (skipRead) {
-        /* Wake tick: claim without a read. */
       } else try {
         if (options.credentialSession.renewalDue === true) await paceRequest();
         const token = await options.credentialSession.bearer();
-        /* Same idle wait as the claim: idleSleep is the only pause in this
-         * loop, so the read POST and the claim POST share the back-off. */
         await paceRequest();
         page = await readPage({
           token,
@@ -1585,9 +1522,6 @@ export async function runListenerRuntime(
             ts: eventTime(now),
           });
         }
-        // Decay, never reset — see decayFollowAttempt. Zeroing here let an
-        // intermittently-failing receiver climb, succeed, and climb again
-        // without ever reaching the backoff cap.
         readAttempt = decayFollowAttempt(readAttempt);
       } catch (error) {
         // Exact caller abort state is authoritative, then the closed credential
@@ -1670,12 +1604,6 @@ export async function runListenerRuntime(
           cadenceMs: pollMs,
           ts: eventTime(now),
         });
-        // Self-description, once per listener start, best-effort and
-        // FIRE-AND-FORGET: a failed declaration is an event line, never a
-        // listener failure, and the declaration must never delay first-page
-        // receipt or shutdown — the awaited version could hold both for the
-        // full request timeout and ignored cancellation (landing-round
-        // finding 3). The fetch is tied to the listener's own stop signal.
         if (options.declareModel !== undefined) {
           const declaredLabel = options.declareModel;
           void (async () => {
@@ -1814,7 +1742,6 @@ export async function runListenerRuntime(
           }
           continue;
         }
-        // A still-live durable lease falls through to exact command replay.
       }
 
       if (recovery?.phase === "claim_pending") {
@@ -1839,7 +1766,6 @@ export async function runListenerRuntime(
           }
           continue;
         }
-        // A recent durable attempt falls through to exact command replay.
       }
 
       if (deliveryMode === "durable_claim") {

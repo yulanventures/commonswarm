@@ -413,7 +413,6 @@ export async function stopManagedSession(input: {
   };
 }
 
-/** Codes that mean the server already treats this execution as over. */
 export const DEAD_PROOF_ON_STOP: readonly AgentSessionErrorCode[] = [
   "session_expired",
   "session_retired",

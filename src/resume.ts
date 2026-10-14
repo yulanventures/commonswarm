@@ -50,7 +50,6 @@ export const DEFAULT_PROCESS_TABLE_COMMAND: ProcessTableCommand = {
   args: ["-axo", "pid=,command="],
 };
 
-/** Typed so callers classify by class, never by the text of a message. */
 export class ProcessTableError extends Error {
   readonly code = "process_table_unavailable";
 
@@ -159,7 +158,6 @@ function parseProcessRow(line: string): ProcessRow | null {
   return { pid, command: match[2]! };
 }
 
-/** Enough of a failing command's own output to report it, and no more. */
 const PROCESS_TABLE_STDERR_MAX_CHARS = 2_000;
 
 /**
@@ -220,8 +218,6 @@ export function systemProcessTable(
         });
         child.stderr.setEncoding("utf8");
         child.stderr.on("data", (chunk: string) => {
-          /* A hard cap: a chunk is truncated to what is left, so a child that
-           * writes megabytes to stderr cannot be buffered in full. */
           const room = PROCESS_TABLE_STDERR_MAX_CHARS - stderr.length;
           if (room > 0) stderr += chunk.slice(0, room);
         });
@@ -252,7 +248,6 @@ export function systemProcessTable(
   };
 }
 
-/** Classify a ps parent row without depending on the host process table. */
 export function parseParentProcessOutput(
   output: string,
   checkAlive: (pid: number) => void = (pid) => process.kill(pid, 0),
@@ -271,7 +266,6 @@ export function parseParentProcessOutput(
   }
 }
 
-/** A missing or init parent is independent evidence when stdout is unproved. */
 export function systemParentProcess(adapters: {
   ps?: (pid: number) => Promise<string>;
   checkAlive?: (pid: number) => void;
@@ -315,7 +309,6 @@ function isNotifyCommand(command: string): boolean {
     /(?:^|\s)--notify(?:\s|$)/.test(command);
 }
 
-/** Find only notify processes for this credential path or authenticated principal. */
 export async function findNotifyWatchers(options: {
   credentialPaths: readonly string[];
   principalId: string;
@@ -353,7 +346,6 @@ export async function findNotifyWatchers(options: {
   })));
 }
 
-/** Query a live process, then read its file without rewriting stale state. */
 export async function readOnlyListenerInspection(
   paths: ListenerPaths,
   adapters: Pick<ResumeInspectionAdapters, "queryStatus" | "readStatus"> = {},
@@ -376,7 +368,6 @@ export async function readOnlyListenerInspection(
   }
 }
 
-/** Collect the reconnect facts in the same order the command renders them. */
 export async function inspectResume(
   options: ResumeInspectionOptions,
   adapters: ResumeInspectionAdapters,
@@ -511,7 +502,6 @@ function watcherStateLine(watcher: NotifyWatcher): string {
   return `- PID ${watcher.pid}: ${state}; ${parent}; matched ${matched}.`;
 }
 
-/** Stable human output: identity, listener, watchers, brain, then inbox. */
 export function renderResume(report: ResumeInspection): string {
   const lines = [
     "Identity",
