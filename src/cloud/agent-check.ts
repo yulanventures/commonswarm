@@ -59,12 +59,6 @@ export interface AgentCheckResult {
   messages: AgentCheckMessage[];
   has_more: boolean;
   next_action: string | null;
-  /**
-   * WHICH workspace was checked, by id and by the name a person uses. Item D: `check` is the
-   * verb an agent runs every turn, so it is the surface most likely to be the only thing in a
-   * transcript naming the workspace. `workspace_name` is null when the deployment does not send
-   * one; the id is always present.
-   */
   workspace_id: string;
   workspace_name: string | null;
 }
@@ -72,11 +66,8 @@ export interface AgentCheckResult {
 interface CheckState {
   version: 1;
   cursor: SignalCursor | null;
-  /** A bounded cache of presented messages, not delivery ACKs. The service remains authoritative. */
   messages: SignalRecord[];
-  /** Only rows that were successfully presented and locally committed enter this retry queue. */
   pending_observed_ids?: string[];
-  /** Rotates transient retries so one slow row cannot starve later mail. */
   pending_observed_next?: number;
   pending_observed_retries?: Record<string, { attempts: number; first_at: number; next_at?: number }>;
 }
@@ -194,18 +185,14 @@ async function readCheckState(path: string): Promise<CheckState> {
   return state;
 }
 
-/** Always fresh: no cooldown, no listener, no background process. */
 export async function checkAgentMessages(options: {
   profilePath: string;
   hostSessionId?: string;
   full?: boolean;
   fetcher?: typeof fetch;
   timeoutMs?: number;
-  /** Absolute wall-clock deadline (epoch ms) that can only shorten the budget, e.g. a host hook's process deadline. */
   deadlineAtMs?: number;
-  /** Cursor advances only after the consumer has accepted the output. */
   present: (result: AgentCheckResult) => Promise<void>;
-  /** MCP commits only after the stdio response has been written. */
   deferCursorCommit?: (commit: (lastVisibleId?: string) => Promise<void>) => void;
 }): Promise<AgentCheckResult> {
   const startedAt = Date.now();
@@ -290,8 +277,6 @@ export async function checkAgentMessages(options: {
           consumed += 1;
         }
         const hasMore = consumed < page.signals.length || page.rawCount >= AGENT_CHECK_PAGE_SIZE;
-        /* Blank is UNKNOWN, not a manufactured label — the same rule workspaceLabel() applies
-         * in the CLI. Null renders as the id alone, which is always true. */
         const rawName = directory.identity?.workspace_name;
         const result: AgentCheckResult = {
           checked: true, cached: false, messages, has_more: hasMore,
@@ -417,7 +402,6 @@ export async function checkAgentMessages(options: {
         }
         return result;
       }, options.fetcher).finally(() => {
-        // A slow or refusing presence request never extends the turn check.
         presenceAbort?.abort();
       });
       return { result, ackAfterCommit };

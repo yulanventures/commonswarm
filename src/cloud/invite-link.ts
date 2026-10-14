@@ -21,10 +21,6 @@ const INVITE_WRAPPER_ERROR =
 const ACCEPT_INPUT_ERROR =
   "accept input was not recognized; use an https://...#invite=<payload> link, cswarm://accept/<payload>, or a swm_inv_ invitation capability";
 
-/* The production API origin is https://api.commonswarm.com. The old supabase.co host
- * is retired: an invite that still names it is refused, and the reader is asked for a
- * new invite. Before this set existed, a link carrying api.commonswarm.com was refused
- * in agent mode. */
 const RETIRED_CLOUD_ORIGIN = "https://ukezjcnxjvkpkeezxaew.supabase.co";
 
 export const PRODUCTION_CLOUD_ORIGINS: ReadonlySet<string> = new Set([
@@ -235,7 +231,6 @@ export function parseAcceptPositional(value: string): ParsedAcceptInput {
     try {
       return { mode: "link", payload: decodeInviteLink(value) };
     } catch {
-      // Raw base64url is accepted only when it is a complete v1 payload.
     }
   }
   throw new Error(`${ACCEPT_INPUT_ERROR}; use --link-stdin to keep the link out of shell history`);

@@ -69,7 +69,6 @@ export class HouseholdObjectClient {
     const invocation = householdToolInvocation(tool, structuredClone(input), {
       ...host, workspace_id: this.workspace_id,
     });
-    // Detach injected host facts as well as caller input.
     const snapshot = structuredClone(invocation);
     let last: HouseholdClientResult | undefined;
     let running: Promise<HouseholdClientResult> | undefined;

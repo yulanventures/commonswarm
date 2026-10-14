@@ -79,17 +79,9 @@ export function hookProcessDeadlineDelayMs(): number {
 }
 export const HOOK_DEFAULT_COOLDOWN_SECONDS = 30;
 export const HOOK_SURFACED_IDS_MAX = 1_024;
-/* The hook injects previews into the model's context at prompt time. Operator
- * messages on this channel are commonly 300-900 characters, so 1,000 carries
- * nearly all of them whole. The full body stays on the queue item; a cut preview
- * says how much is missing and where it is. The three tiers below keep one
- * check's rendered signals under HOOK_RENDER_BUDGET_BYTES without dropping any. */
 export const HOOK_BODY_PREVIEW_CHARS = 1_000;
-/** Fallback preview cap once the render budget is near: the value shipped before 2026-09-06. */
 export const HOOK_BODY_PREVIEW_CHARS_MIN = 240;
-/** Last tier: header and reply line only, no preview. */
 export const HOOK_BODY_PREVIEW_CHARS_NONE = 0;
-/** Tiers in the order they apply; the renderer walks down and never back up. */
 export const HOOK_BODY_PREVIEW_TIERS = [
   HOOK_BODY_PREVIEW_CHARS,
   HOOK_BODY_PREVIEW_CHARS_MIN,
@@ -99,7 +91,6 @@ export const HOOK_BODY_PREVIEW_TIERS = [
  * caps the hook-surface.json STATE FILE read, not stdout; before 2026-09-06 no
  * bound applied to rendered text at all. Same value, separate meaning. */
 export const HOOK_RENDER_BUDGET_BYTES = 128 * 1024;
-/** Where the whole body is when a preview was cut. */
 export const HOOK_FULL_TEXT_COMMAND = "cswarm inbox";
 export const HOOK_MULTI_PRINCIPAL_GUIDANCE =
   "This host runs multiple agents. The CommonSwarm hook needs --principal-id. " +
@@ -223,7 +214,6 @@ function parseListenerCredential(
   };
 }
 
-/** Keep the listener and its read-only hook on one owned 0600 credential state file. */
 export async function writeListenerCredentialState(
   instanceDirectory: string,
   input: {
@@ -256,7 +246,6 @@ export async function writeListenerCredentialState(
   ).catch(() => undefined);
 }
 
-/** Read the exact credential state used by the listener after verifying mode 0600. */
 export async function readListenerCredentialState(
   instanceDirectory: string,
 ): Promise<ListenerCredentialState | null> {
@@ -316,7 +305,6 @@ export interface HookSurfaceEvidence {
   surfacedSignalIds: readonly string[];
 }
 
-/** Stage output without advancing the high-water; commit is called only after stdout. */
 export class FileHookSurfaceStore {
   private readonly path: string;
 
@@ -327,7 +315,6 @@ export class FileHookSurfaceStore {
     this.path = join(instanceDirectory, HOOK_SURFACE_FILE);
   }
 
-  /** Preview unseen hook rows without taking a write lock or advancing state. */
   async previewUnseen<T extends { signalId: string }>(items: readonly T[]): Promise<T[]> {
     const raw = await readSecureJsonFileIfPresent(this.path, MAX_HOOK_SURFACE_BYTES);
     const seen = new Set(raw === null ? [] : parseSurface(raw).surfacedSignalIds);
@@ -341,7 +328,6 @@ export class FileHookSurfaceStore {
     return unseen;
   }
 
-  /** Read attendance evidence without advancing the hook high-water. */
   async evidence(): Promise<HookSurfaceEvidence> {
     return await withFileLock(this.instanceDirectory, HOOK_SURFACE_LOCK, async () => {
       const raw = await readSecureJsonFile(this.path, MAX_HOOK_SURFACE_BYTES);
@@ -566,7 +552,6 @@ async function discoverStoredStatusContexts(
   return contexts;
 }
 
-/** Enumerate only principal identities authenticated by a valid local status.json. */
 export async function discoverListenerHookPrincipalIds(
   stateDirectory = defaultListenerStateDirectory(),
 ): Promise<string[]> {
@@ -679,7 +664,6 @@ function preview(value: string, cap: HookPreviewCap): string {
   return `${JSON.stringify(`${text.slice(0, cap)}…`)} ${hookPreviewSuffix(hidden)}`;
 }
 
-/** The copy that names a cut; N is the run-time count of characters not shown. */
 export function hookPreviewSuffix(hiddenChars: number): string {
   return `[… ${hiddenChars} more chars — ${HOOK_FULL_TEXT_COMMAND}]`;
 }
@@ -761,7 +745,6 @@ export function renderHookSignals(
   return { blocks, caps };
 }
 
-/** Give hook and status output one restart command that preserves recorded routing. */
 export function listenerRestartCommand(status: ListenerStatus): string {
   return [
     "cswarm listen start",
@@ -808,14 +791,6 @@ async function inboxItems(
     readOptions,
     { tolerateMalformedRows: true, maxMalformedRows: 3 },
   );
-  /* THE RECIPIENT SET, not the scalar column.
-   *
-   * RETIRED 2026-09-05: this read `signal.to_agent === stored.principalId`. The
-   * read edge has returned a signal to every agent the sender named since L2
-   * (merge 060ff67) and the scalar column holds only the first, so a signal
-   * naming this agent at position 1 was fetched and then dropped here. The
-   * service now wakes that agent, so the session hook would have shown nothing
-   * for a message the model was already answering. */
   const directed = page.signals.filter((signal) =>
     (signal.kind === "ask" || signal.kind === "note") &&
     signal.workspace_id === stored.workspaceId &&
@@ -980,7 +955,6 @@ async function recordQueuedObservations(
   return new Set(results.filter((signalId): signalId is string => signalId !== null));
 }
 
-/** Print first, then advance the high-water and remove local queue entries. */
 export async function checkListenerHooks(
   options: HookCheckOptions & { signal: AbortSignal; deadlineMs: number },
 ): Promise<string> {
@@ -1116,8 +1090,6 @@ export async function checkListenerHooks(
       if (brainDigest !== null) {
         const digestBlock = surfaced.length > 0 ? `\n\n${brainDigest}` : brainDigest;
         await (options.write ?? (() => undefined))(digestBlock);
-        /* The return value is the contract for "what this hook surfaced", so it
-         * carries the digest even though the digest was written second. */
         surfaced += digestBlock;
       }
     }
@@ -1164,7 +1136,6 @@ export async function checkListenerHooks(
   }
 }
 
-/** Own the derived check ceiling and always resolve to safe stdout text. */
 export async function runListenerHookCheck(options: HookCheckOptions = {}): Promise<string> {
   const controller = new AbortController();
   const deadlineMs = Date.now() + HOOK_CHECK_TIMEOUT_MS;

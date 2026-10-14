@@ -81,7 +81,6 @@ function asStopReason(value: unknown): AcpStopReason {
   );
 }
 
-/** True when the host selected reject_* or cancelled the permission request. */
 function isHostRejectDecision(
   decision: import("./types.js").PermissionDecision,
   options: import("./types.js").PermissionOption[],
@@ -106,10 +105,6 @@ function updateKind(raw: unknown): SessionUpdateKind {
   }
 }
 
-/**
- * One host↔agent ACP session. Sequential prompts only; cancel is a notification.
- */
-/** Bounded structured terminal statuses that count as a host-correlated deny. */
 const CANARY_TERMINAL_DENY_STATUSES = new Set([
   "rejected",
   "denied",
@@ -278,7 +273,6 @@ export class AcpHostSession {
     this.promptsEnabled = true;
   }
 
-  /** Reset the canary gate (used after session/load fallback to session/new). */
   private resetPromptGate(): void {
     this.promptsEnabled = false;
     this.canaryState = {
@@ -497,7 +491,6 @@ export class AcpHostSession {
     // no-op placeholder — factories wire handlers that call session methods.
   }
 
-  /** Handle agent→client request. Public for transport wiring. */
   async handleAgentRequest(id: JsonRpcId, method: string, params: unknown): Promise<void> {
     if (method === "session/request_permission") {
       await this.handlePermissionRequest(id, params);
@@ -507,7 +500,6 @@ export class AcpHostSession {
     this.transport.respondError(id, -32601, `Method not supported by host: ${method}`);
   }
 
-  /** Handle agent notification. Public for transport wiring. */
   handleAgentNotification(method: string, params: unknown): void {
     if (method === "session/update") {
       this.handleSessionUpdate(params);
@@ -684,7 +676,6 @@ export class AcpHostSession {
     if (!isRecord(update)) return;
     const kind = updateKind(update.sessionUpdate);
     if (kind === "unknown") {
-      // Ignore unknown update shapes safely.
       this.events.notification?.("session/update", params);
       return;
     }

@@ -1321,15 +1321,12 @@ export interface SignalMember {
 export interface SignalAgent {
   /** Absent on older read edges; null means the stored model was cleared. */
   model?: string | null;
-  /** Absent on older read edges, which predate hosted transport. */
   transport?: 'local' | 'hosted_mcp';
-  /** Absent on older read edges, which predate turn-only delivery. */
   turn_only?: boolean;
   /** Own visible session only; null when the session view exposes no row. */
   generation?: number | null;
   principal_id: string;
   name: string;
-  /** Added by the current read edge; absent on older compatible deployments. */
   owner_user_id?: string;
 }
 
@@ -1349,13 +1346,10 @@ export interface SignalAgentIdentity {
   workspace_name?: string | null;
 }
 
-/** Live members and agents available as signal targets in one workspace. */
 export interface SignalDirectory {
   members: readonly SignalMember[];
   agents: readonly SignalAgent[];
-  /** Absent on older compatible deployments. */
   identity?: SignalAgentIdentity;
-  /** Session fields from this same members response, for read-only resume. */
   sessionStatus?: ServerSessionStatus;
 }
 
@@ -1482,7 +1476,6 @@ export async function readAgentSignalDirectory(
     throw new SignalMalformedError("member read returned malformed JSON");
   }
   const agentsRaw = payload.agents;
-  // Agents are additive; an older members response without agents[] still works.
   const agents = agentsRaw === undefined
     ? []
     : Array.isArray(agentsRaw)
@@ -1518,10 +1511,6 @@ export async function readAgentSignalMembers(
   return [...directory.members];
 }
 
-/**
- * Resolve --to against live members and agents. Exact UUID wins when it names
- * one live principal; exact name is accepted only when unique across both sets.
- */
 export function resolveSignalRecipient(
   selector: string,
   directory: SignalDirectory | readonly SignalMember[],
@@ -1567,7 +1556,6 @@ export function resolveSignalRecipient(
   throw new SignalRecipientError("recipient_unknown", "signal recipient is not a live member or agent of this workspace");
 }
 
-/** Parse --wait as an integer number of seconds in 1..300. */
 export function parseWaitSeconds(value: string): number {
   if (!/^[1-9]\d*$/.test(value)) {
     throw new Error("--wait must be an integer number of seconds in 1..300");
@@ -1603,12 +1591,6 @@ export interface SignalWaitResult {
   timedOut: boolean;
 }
 
-/**
- * Immediate read, then poll until a non-empty match or the deadline. After each
- * sleep — including the sleep that lands on the deadline — probe once more so a
- * signal that arrives during the last sleep is observed. Deadline aborts are a
- * successful timed-out idle state; transport/HTTP/malformed errors propagate.
- */
 export async function pollForSignals(options: {
   read: () => Promise<SignalRecord[]>;
   deadlineMs: number;
@@ -1634,14 +1616,12 @@ export async function pollForSignals(options: {
     }
   };
 
-  // Always attempt at least one read, even if the deadline is already past.
   const first = await probe();
   if (first !== "empty") return first;
 
   while (now() < options.deadlineMs) {
     const sleepMs = nextWaitSleepMs(now(), options.deadlineMs, pollMs);
     if (sleepMs > 0) await sleep(sleepMs);
-    // Probe after every sleep, including one that exhausts the wait window.
     const next = await probe();
     if (next !== "empty") return next;
   }
@@ -1670,7 +1650,6 @@ function normalizedSignalQuery(query: SignalQuery): SignalQuery {
   };
 }
 
-/** Agent read with explicit edge capabilities for safe host-adapter gating. */
 export async function readAgentSignalPage(
   target: CloudTarget,
   credential: Extract<SignalCredential, { kind: "agent" }>,
@@ -1727,7 +1706,6 @@ export async function readSignals(
     )).signals;
 }
 
-/** Drain a directed agent inbox from --since; check also pages oldest first. */
 export async function readDirectedInboxSince(
   target: CloudTarget,
   credential: Extract<SignalCredential, { kind: "agent" }>,
@@ -1787,11 +1765,6 @@ export interface SignalStatusSupplement {
 }
 
 export interface SignalAuthorLabels {
-  /**
-   * The workspace's human name, when the caller had it in hand. Optional: the human path
-   * builds these labels from a workspace status that does not carry it, and a header without a
-   * name is exactly what shipped before item D.
-   */
   workspaceName?: string | null;
   users: ReadonlyMap<string, string>;
   agents: ReadonlyMap<string, string>;
@@ -1852,7 +1825,6 @@ export function signalReadJsonPayload(
   };
 }
 
-/** JSON document for ask --wait: one document, timeout is success with no reply. */
 export function askWaitJsonPayload(
   ask: SignalRecord,
   reply: SignalRecord | null,
@@ -1896,21 +1868,6 @@ export function postSignalTargets(
   };
 }
 
-/**
- * The ask-wait timeout line, in ONE place because it is emitted from TWO — the human path in
- * `cli.ts` and the JSON payload below.
- *
- * F-5 of the 2026-08-10 dogfood. The sentence used to end at "the ask remains live", which is
- * true and leaves the reader with nothing to do. That is the defect Wren and Joist recorded on
- * `listen stop`: a state word carrying weight its sentence does not, in a success-shaped
- * response. `listen stop` was fixed by naming the confirming command, and this is the same shape.
- *
- * `cswarm inbox` is the verified answer, not a guess: the dogfood posted an ask, replied to it,
- * and read the reply back from the asker's inbox.
- *
- * Shared rather than duplicated for the reason `archiveKnownGaps` is shared — a copy in each
- * surface is a copy that drifts, and a test naming one of them cannot see the other.
- */
 export const ASK_WAIT_TIMEOUT_MESSAGE =
   "Ask shared. No reply arrived before the wait ended; the ask remains live. Check for a reply with: cswarm inbox";
 
@@ -1929,8 +1886,6 @@ function askFailureDetail(error: unknown): {
     };
   }
   if (error instanceof CommandHttpError) {
-    // Presentation cleanup only. cli.ts selects the phase by call boundary;
-    // this text never controls retry, success, or create-vs-read handling.
     return {
       detail: `HTTP ${error.status}; server detail: ${
         error.message
@@ -1948,7 +1903,6 @@ function askFailureDetail(error: unknown): {
   };
 }
 
-/** Explain an ask failure that happened before the signal had a receipt. */
 export function askCreateFailureMessage(
   workspaceId: string,
   error: unknown,
@@ -1960,7 +1914,6 @@ export function askCreateFailureMessage(
   return `Your message may not have been posted (${cause}). Check with: cswarm feed --workspace-id ${workspaceId} — and resend if it is not there.`;
 }
 
-/** Explain an ask reply-read failure only after the post returned its receipt. */
 export function askReplyReadFailureMessage(
   workspaceId: string,
   error: unknown,
@@ -1976,16 +1929,9 @@ export function renderSignals(
     includeStale: boolean;
     now?: number;
     authors?: SignalAuthorLabels;
-    /**
-     * WHICH workspace these signals are from. Item D: a reader looking at an inbox needs to
-     * know it is the inbox they meant. Omitted by callers that have no workspace in hand, and
-     * the header then reads exactly as it did before.
-     */
     workspace?: { id: string; name: string | null };
   },
 ): string {
-  /* `Inbox:` -> `Inbox — Name (id):`, or `Inbox — id:` when the name is unknown. One shape,
-   * matching what whoami, the members roster and human status print. */
   const heading = (base: string): string =>
     options.workspace === undefined
       ? `${base}:`
@@ -2031,14 +1977,6 @@ export function renderSignals(
     const about = displayedAbout === null
       ? ""
       : ` about ${JSON.stringify(displayedAbout)}`;
-    /* F-4 of the 2026-08-10 dogfood. `reply` sets in_reply_to and the field survives all the way
-     * into the JSON surface, where it was MEASURED carrying the exact ask id. The human line
-     * dropped it, so a reply arrives in the inbox rendered `[note]`, indistinguishable from an
-     * unrelated one — in a product whose core loop is ask -> reply, the reply was invisible AS a
-     * reply. Same family as D-062: the data was there and the reader could not see it.
-     *
-     * The kind stays `note` because that is what the protocol stores; only the reference was
-     * missing. `?? null` because an older edge response normalises the absent field to null. */
     const replyTo = (signal.in_reply_to ?? null) === null
       ? ""
       : ` — in reply to ${signal.in_reply_to}`;
@@ -2110,15 +2048,6 @@ export function renderSignalStatus(
   })}\n${askSummary}`;
 }
 
-// ---------------------------------------------------------------------------
-// inbox --follow --ndjson: host-neutral resilient receive stream
-//
-// This is a long-lived NDJSON stream of durable signal rows. It never claims
-// to wake a model, execute a message, or install a host daemon. Receipt is
-// at-least-once for one process: there is no durable ack, and a second run
-// may re-emit still-live rows.
-// ---------------------------------------------------------------------------
-
 export type FollowFrame =
   | {
     type: "ready";
@@ -2148,10 +2077,8 @@ export type FollowFrame =
   | {
     type: "error";
     reason: FollowStopReason;
-    /** Why the server said it failed, when it said anything. */
     server_error: string | null;
     request_id: string | null;
-    /** True only when the server explicitly refused a retry. */
     server_refused: boolean;
     message: string;
     ts: string;
@@ -2191,7 +2118,6 @@ export function followStopFrame(
   };
 }
 
-/** Bounded FIFO set of signal ids seen during one follow process. */
 export class BoundedSignalIdSet {
   private readonly order: string[] = [];
   private readonly ids = new Set<string>();
@@ -2210,7 +2136,6 @@ export class BoundedSignalIdSet {
     return this.ids.has(id);
   }
 
-  /** Insert id; returns true when it was new (should emit). */
   add(id: string): boolean {
     if (this.ids.has(id)) return false;
     this.ids.add(id);
@@ -2223,10 +2148,6 @@ export class BoundedSignalIdSet {
   }
 }
 
-/**
- * Full-jitter exponential backoff, respecting Retry-After when larger.
- * attempt is 1-based (first retry = 1).
- */
 export function nextFollowBackoffMs(
   attempt: number,
   retryAfterMs: number | null = null,
@@ -2245,40 +2166,6 @@ export function nextFollowBackoffMs(
   );
 }
 
-/**
- * D-051: `retryable: false` is a refusal, and it vetoes retry before status is
- * consulted. Retrying a rejection at a saturated ceiling is what fed the
- * concurrency that caused it. The veto is one-directional on purpose —
- * `retryable: true` does not promote a status we would otherwise refuse to
- * retry, so a server cannot talk this client into hammering a 401.
- */
-/**
- * Decay the retry attempt counter after a success rather than zeroing it.
- *
- * D-051 companion: a single success used to reset the counter to 0, so an
- * intermittently-failing receiver never reached the 30s backoff cap — it
- * climbed, succeeded, reset, and climbed again. That is the amplifier's
- * engine, and it is why one receiver produced 13.2 retry frames/min where a
- * receiver sitting at the cap produces ~2.
- *
- * Decaying by one makes the steady state track the recent failure RATE rather
- * than the current streak: the counter drifts by (2p - 1) per read at failure
- * probability p. A healthy receiver still returns to zero, one step per
- * success, so health is never penalised for long. This holds whatever the
- * server says about `retryable`, so it protects the client even on endpoints
- * that never emit the field.
- *
- * ~~Superseded (2026-08-05, now dead): "Against the measured curve that lands
- * where we want it — at 71% failures (concurrency 8) it climbs to the cap, at
- * 17% (concurrency 2) it stays pinned at 0."~~ Wren retracted that
- * dose-response curve the same day: interleaved measurement showed a roughly
- * even per-request failure chance that load barely moves, and the ascending
- * curve was a time confound. At p near 0.5 this counter random-walks rather
- * than converging either way, so do not read the tuning as validated. What
- * survives the retraction is the defect itself — a success wiping backoff the
- * failures earned is wrong under ANY failure distribution — and that is the
- * whole reason this function exists.
- */
 export function decayFollowAttempt(attempt: number): number {
   return attempt > 0 ? attempt - 1 : 0;
 }
@@ -2484,7 +2371,6 @@ const COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODE_SET: ReadonlySet<string> = new Set(
   COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES,
 );
 
-/** True when `code` confirms a dead credential on `surface`. Default is the read edge. */
 export function isConfirmedCredentialLossCode(
   code: string | null | undefined,
   surface: CredentialCheckSurface = "read",
@@ -2594,7 +2480,6 @@ function followTs(nowMs: number): string {
   return new Date(nowMs).toISOString();
 }
 
-/** Serialize one follow frame as a single NDJSON line (no trailing newline). */
 export function formatFollowFrame(frame: FollowFrame): string {
   return JSON.stringify(frame);
 }
@@ -2617,11 +2502,8 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
-/** One page request from the follow loop to the caller's arm. */
 export interface FollowArmRequest {
-  /** Strict keyset high-water; null on the first catch-up page. */
   after: SignalCursor | null;
-  /** Page size; full pages drain immediately without the idle poll. */
   limit: number;
 }
 
@@ -2644,15 +2526,10 @@ export interface FollowArmPage {
  */
 export async function runInboxFollow(options: {
   workspaceId: string;
-  /**
-   * Fetch one ascending page after the cursor. Legacy zero-arg arms still work
-   * (extra args are ignored) but cannot express lossless pagination alone.
-   */
   arm: (
     page: FollowArmRequest,
   ) => Promise<SignalRecord[] | FollowArmPage>;
   emit: (frame: FollowFrame) => void;
-  /** Runs after one page's signal frames were emitted, with only those frames. */
   afterEmitBatch?: (signals: readonly SignalRecord[]) => Promise<void> | void;
   /**
    * Optional side-effect sleep hook for tests (e.g. advance a fake clock).
@@ -2667,7 +2544,6 @@ export async function runInboxFollow(options: {
   postEmitMs?: number;
   pageLimit?: number;
   seen?: BoundedSignalIdSet;
-  /** Optional classifier for credential refusal/horizon failures from arm(). */
   isCredentialFailure?: (error: unknown) => boolean;
   /**
    * How long to keep absorbing server refusals within one burst, in ms.
@@ -2720,7 +2596,6 @@ export async function runInboxFollow(options: {
           onAbort = finish;
           abort.addEventListener("abort", onAbort, { once: true });
         }
-        // Clearable timer is the real delay; hooks may finish early for tests.
         timer = setTimeout(finish, ms);
         if (sleepHook) {
           void Promise.resolve(sleepHook(ms)).then(finish, finish);
@@ -2783,7 +2658,6 @@ export async function runInboxFollow(options: {
         ready = true;
       }
 
-      // Oldest first so a multi-row arm is deterministic for consumers.
       const ordered = sortSignals(rows, true);
 
       const emittedSignals: SignalRecord[] = [];
@@ -2807,7 +2681,6 @@ export async function runInboxFollow(options: {
       if (cancelledDuringEmit) return { reason: "cancelled" };
       const emitted = emittedSignals.length > 0;
 
-      // Full page => more backlog may exist; drain without the idle poll.
       const fullPage = canPage && rawCount >= pageLimit;
       if (fullPage && nextCursor === null) {
         throw new SignalMalformedError(
@@ -2891,9 +2764,6 @@ export async function runInboxFollow(options: {
           );
           if (ready) {
             options.emit({
-              // A DISTINCT reason, so a wrapper can tell "the server refused and
-              // we are tolerating it" from an ordinary retry. Same frame type,
-              // because consumers already parse it.
               type: "retrying",
               reason: "server_refused_tolerated",
               attempt,

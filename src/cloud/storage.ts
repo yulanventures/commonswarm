@@ -935,7 +935,6 @@ export async function readSecureJsonFileIfPresent(
   }
 }
 
-/** Removes a secure JSON file, tolerating one that was never written. */
 export async function deleteSecureJsonFile(path: string): Promise<void> {
   await secureDirectory(dirname(path));
   try {

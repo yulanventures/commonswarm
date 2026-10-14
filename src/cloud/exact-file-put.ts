@@ -1,4 +1,3 @@
-/** Durable, non-secret resume state for an explicitly identified file put. */
 import { createHash } from "node:crypto";
 import { readdir, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
@@ -73,7 +72,6 @@ async function prune(dir: string, now: number, preserve: string): Promise<void> 
   await Promise.all(rows.filter((row, index) => row.name !== preserve && (index >= MAX_RECORDS - 1 || now - row.updated > RECORD_LIFETIME_MS))
     .map(row => unlink(join(dir, row.name)).catch(() => undefined)));
 }
-/** Preflight and persist before the command edge or Storage is contacted. */
 export async function prepareExactPut(input: ExactPutInput): Promise<PreparedPut> {
   if (!H0_REQUEST_ID_RE.test(input.requestId)) throw new FilePutPreflightError("request_id_invalid", "The request id is invalid.");
   if (input.bytes.byteLength === 0 || input.bytes.byteLength > FILE_MAX_VERSION_BYTES) {

@@ -95,8 +95,6 @@ function summary(value: unknown): HouseholdTodoSummary {
   const r = record(value), g = record(r.gate);
   return { todo_id: id(r.todo_id), version: integer(r.version, 1), title: text(r.title, TODO_TITLE_LIMIT, 1), state: state(r.state),
     due_on: nullable(r.due_on, date), assignee: nullable(r.assignee, party), offer: nullable(r.offer, offerSummary),
-    // The store currently sends kind + clear only, as AM3 specifies. Optional
-    // references from contract-aware hosts are retained; absent ones are null.
     gate: { kind: gateKind(g.kind), clear: boolean(g.clear), todo_id: g.todo_id === undefined ? null : nullable(g.todo_id, id), at: g.at === undefined ? null : nullable(g.at, time) },
     queue_position: nullable(r.queue_position, v => integer(v, 1)), comment_count: integer(r.comment_count), state_at: time(r.state_at) };
 }

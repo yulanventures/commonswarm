@@ -1,14 +1,3 @@
-// SWARM-CLOUD protocol core — canonical events and task/lease projection state.
-//
-// This module is the reducer-complete authority core described in
-// docs/design/SWARM-CLOUD.md §2.1 (protocol/envelope) and §2.2 (task/lease
-// state machine). It is PURE: no I/O, no SQLite, no Supabase. P1 wires it
-// behind the command API + Postgres; the local CLI (src/tasks.ts) is the
-// legacy SQLite implementation and is intentionally NOT reused here
-// ("Canonical cloud events are reducer-complete, defined independently of the
-// legacy local audit rows" — §2.1).
-
-/** Current schema version for every task/lease event type. */
 export const SCHEMA_VERSION = 1;
 
 /**
@@ -70,8 +59,6 @@ export const EVENT_TYPES: readonly EventType[] = [
   'CommandRejected',
 ] as const;
 
-// ---- Event payloads (schema_version 1) --------------------------------------
-
 export interface TaskCreated { task_id: string; slug: string; }
 export interface LeaseAcquired { task_id: string; epoch: number; owner: string; lease_expiry: number; }
 export interface LeaseRenewed { task_id: string; epoch: number; lease_expiry: number; }
@@ -107,8 +94,6 @@ export type RejectionReason =
   | 'unknown_task'
   | 'bad_state';
 
-// ---- Task/lease projection state (§2.2) -------------------------------------
-
 export type TaskLifecycle = 'open' | 'active' | 'awaiting_review' | 'reopened' | 'done';
 
 /** Frozen on submit; survives lease expiry; invalidated by reopen / superseded by a new submit (§2.2). */
@@ -133,7 +118,6 @@ export interface TaskState {
   closed_disposition: string | null;
 }
 
-/** True iff the lease is currently held and unexpired at `now`. */
 export function leaseLive(state: TaskState, now: number): boolean {
   return state.owner !== null && state.lease_expiry !== null && state.lease_expiry > now;
 }

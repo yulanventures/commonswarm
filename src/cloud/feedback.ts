@@ -2,12 +2,10 @@ import { commandEndpoint, type CloudTarget } from "./config.js";
 import { newCommandId } from "./command-client.js";
 import { withClientBuild } from "./client-build.js";
 
-/** Transport never returned a response; retrying is safe (nothing landed). */
 export class FeedbackTransportError extends Error {
   override name = "FeedbackTransportError";
 }
 
-/** The deployment refused the submission; `code` is the server's stable code. */
 export class FeedbackRefusedError extends Error {
   override name = "FeedbackRefusedError";
   constructor(readonly code: string, message: string) {

@@ -33,7 +33,6 @@ const SENDER_OWNER_RELATIONS = new Set<SenderOwnerRelation>([
   "cross_owner",
   "unknown",
 ]);
-/** Outcomes accepted by the delivery acknowledgement endpoint. */
 export const DELIVERY_ACK_OUTCOMES: ReadonlySet<DeliveryOutcome> = new Set([
   "replied",
   "observed",
@@ -42,27 +41,23 @@ export const DELIVERY_ACK_OUTCOMES: ReadonlySet<DeliveryOutcome> = new Set([
   "failed_terminal",
 ]);
 
-/** Ack outcomes that prove this delivery was dealt with. */
 export const DELIVERY_HANDLED_OUTCOMES: ReadonlySet<DeliveryOutcome> = new Set(
   [...DELIVERY_ACK_OUTCOMES].filter((outcome) =>
     outcome === "replied" || outcome === "observed"
   ),
 );
 
-/** Ack outcomes that prove the provider produced a response. */
 export const DELIVERY_PROVIDER_PROVEN_OUTCOMES: ReadonlySet<DeliveryOutcome> =
   new Set(
     [...DELIVERY_ACK_OUTCOMES].filter((outcome) => outcome === "replied"),
   );
 
-/** Render a set as "a, b, or c" so a generated enumeration still reads as English. */
 function orList(values: readonly string[]): string {
   return values.length <= 1
     ? values.join("")
     : `${values.slice(0, -1).join(", ")}, or ${values[values.length - 1]}`;
 }
 
-/** Per-request deadline covering fetch and the response body read. */
 export const DELIVERY_REQUEST_TIMEOUT_MS = 30_000;
 
 const COMMAND_ID_VALIDATOR_RE = /^[A-Za-z0-9_-]{8,72}$/;
@@ -82,11 +77,9 @@ const FAILED_TERMINAL_CODES_SET = new Set([
  */
 export const H0_SEAT_CLAIM_REFUSED_CODE = "h0_seat_uses_poll";
 
-/** Status sentence for a listener that cannot serve an H0 seat. */
 export const H0_SEAT_LISTENER_STOP_SENTENCE =
   "This seat receives messages through the h0 poll. The listener has stopped; no further listener action is needed for this seat";
 
-/** Allowed client failure codes for failed_terminal outcomes. */
 export const DELIVERY_FAILED_TERMINAL_CODES: readonly string[] = Object.freeze([
   "provider_refused",
   "local_effect_failed",
@@ -94,7 +87,6 @@ export const DELIVERY_FAILED_TERMINAL_CODES: readonly string[] = Object.freeze([
   "credential_unavailable",
 ]);
 
-/** The bounded client-visible server error vocabulary; anything else collapses. */
 export const DELIVERY_SESSION_PROOF_CODES: readonly string[] = Object.freeze([
   "session_proof_missing",
   "session_proof_invalid",
@@ -126,7 +118,6 @@ const SERVER_ERROR_CODES_SET: ReadonlySet<string> = new Set(
 
 export const DELIVERY_UNKNOWN_ERROR_CODE = "unknown_error";
 
-/** Direct signal delivery outcome vocabulary (server closed enum). */
 export type DeliveryOutcome =
   | "replied"
   | "observed"
@@ -135,14 +126,12 @@ export type DeliveryOutcome =
   | "failed_terminal";
 
 export interface DeliveryRow {
-  /** Immutable signal the server hydrated for this claim. */
   signal: SignalRecord;
   /**
    * Row-scoped lease capability. Transport never logs or persists it; the
    * secure listener journal intentionally may persist it for exact ACK recovery.
    */
   leaseId: string;
-  /** Server lease deadline; the runtime slice decides refusal on replay. */
   leasedUntil: string;
   /**
    * Server-proven authoritative relation; the inner signal is normalized to
@@ -185,15 +174,12 @@ export interface DeliveryClaimResult {
    * transaction. Safe metadata, never content.
    */
   terminalDeliveryFailureCount: number;
-  /** Optional wake join hint. 0.1.57 servers omit it. */
   wake?: WakeHint;
 }
 
 export interface DeliveryAckResult {
   httpStatus: number;
-  /** Echoed by the server and required to equal the requested signal id. */
   signalId: string;
-  /** Echoed by the server and required to equal the requested outcome. */
   outcome: DeliveryOutcome;
 }
 
@@ -201,15 +187,9 @@ export interface DeliveryClaimRequest {
   workspaceId: string;
   /** Agent bearer; never logged or echoed into any error the client raises. */
   credential: string;
-  /**
-   * Deterministic caller-supplied id. This layer sends exactly the id it is
-   * given; retry policy and durable id storage belong to the runtime slice.
-   */
   commandId: string;
   listenerInstanceId: string;
-  /** The client's own agent principal; every claimed signal must be addressed to it. */
   expectedPrincipalId: string;
-  /** Only long-lived receive surfaces identify their server-derived presence route. */
   route?: "channel" | "listener";
 }
 
@@ -221,7 +201,6 @@ export interface DeliveryAckRequest {
   leaseId: string;
   listenerInstanceId: string;
   outcome: DeliveryOutcome;
-  /** Null for every non-failed outcome; an allowed code for failed_terminal. */
   lastErrorCode: string | null;
   /** When set, ACK is refused locally unless current proof and injection pass. */
   managedAck?: ManagedAckInput;
@@ -240,7 +219,6 @@ export interface DeliveryObservationRequest {
   signalId: string;
   /** When set, observation is refused locally unless current proof and injection pass. */
   managedAck?: ManagedAckInput;
-  /** See DeliveryAckRequest.surfaced. */
   surfaced?: boolean;
 }
 
@@ -250,7 +228,6 @@ export interface PresenceTouchRequest {
   commandId: string;
 }
 
-/** A profile check's observation, distinct from a leased ACK or hook queue promotion. */
 export interface UnclaimedObservationRequest {
   workspaceId: string;
   credential: string;
@@ -273,13 +250,11 @@ export interface DeliveryClientOptions {
   createAbortController?: () => AbortController;
 }
 
-/** Keep hook observation retries idempotent without persisting another command id. */
 export function observationCommandId(signalId: string): string {
   checkedUuidRequest(signalId, "signalId");
   return `observe_${signalId.toLowerCase().replaceAll("-", "")}`;
 }
 
-/** Transport refused the round trip before a bounded HTTP status existed. */
 export class DeliveryTransportError extends Error {
   constructor(message: string) {
     super(message);
@@ -298,9 +273,7 @@ export class DeliveryHttpError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
-    /** Parsed with the signal Retry-After semantics; bounded, never the raw header. */
     readonly retryAfterMs: number | null = null,
-    /** False when the refusal did not carry a recognized command error envelope. */
     readonly recognizedEnvelope = true,
   ) {
     super(message);
@@ -308,7 +281,6 @@ export class DeliveryHttpError extends Error {
   }
 }
 
-/** A 2xx response that violated the strict wire contract. */
 export class DeliveryProtocolError extends Error {
   constructor(message: string) {
     super(message);
@@ -316,7 +288,6 @@ export class DeliveryProtocolError extends Error {
   }
 }
 
-/** A successful HTTP answer that did not carry the command response envelope. */
 export class DeliveryResponseError extends DeliveryProtocolError {
   constructor(message: string) {
     super(message);
@@ -324,7 +295,6 @@ export class DeliveryResponseError extends DeliveryProtocolError {
   }
 }
 
-/** A parsed network answer whose fields violate the delivery wire contract. */
 export class DeliveryMalformedResponseError extends DeliveryResponseError {
   constructor(message: string) {
     super(message);
@@ -413,7 +383,6 @@ function checkedRfc3339Timestamp(value: unknown, field: string): string {
   return value;
 }
 
-/** A lease that has already elapsed cannot be claimed; the value stays out of the error. */
 function checkedLiveLease(leasedUntil: string, now: () => number): void {
   if (Date.parse(leasedUntil) <= now()) {
     throw new DeliveryMalformedResponseError(
@@ -434,7 +403,6 @@ function checkedRelation(value: unknown): SenderOwnerRelation {
   return value as SenderOwnerRelation;
 }
 
-/** Non-negative safe integer whose value is never embedded in the error. */
 function checkedNonNegativeCount(value: unknown, field: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     throw new DeliveryMalformedResponseError(
@@ -444,7 +412,6 @@ function checkedNonNegativeCount(value: unknown, field: string): number {
   return value;
 }
 
-/** Claim success requires every capability marker exactly 1. */
 function checkedClaimCapabilities(value: unknown): DeliveryClaimCapabilities {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new DeliveryMalformedResponseError(
@@ -462,7 +429,6 @@ function checkedClaimCapabilities(value: unknown): DeliveryClaimCapabilities {
   return { deliveryClaim: true, deliveryAck: true, senderOwnerRelation: true };
 }
 
-/** If event_ids is present it must be an array of valid UUID strings. */
 function checkedOptionalUuidArray(value: unknown, field: string): void {
   if (value === undefined) return;
   if (
@@ -475,7 +441,6 @@ function checkedOptionalUuidArray(value: unknown, field: string): void {
   }
 }
 
-/** If events is present it must be an array (contents are opaque envelopes). */
 function checkedOptionalArray(value: unknown, field: string): void {
   if (value === undefined) return;
   if (!Array.isArray(value)) {
@@ -485,16 +450,6 @@ function checkedOptionalArray(value: unknown, field: string): void {
   }
 }
 
-/**
- * The recipient slot on one delivery row, or a pair of nulls when the server
- * did not report it.
- *
- * Refuses a HALF answer. One field without the other cannot be rendered and
- * cannot be checked, so it is a malformed row rather than a missing one. The
- * bound it applies is the relation between the two numbers, not a copy of the
- * server's recipient cap: a maximum written here would be a second enforcement
- * point with nothing holding it equal to the one the edge reads.
- */
 function checkedRecipientSlot(
   row: Record<string, unknown>,
 ): { position: number | null; count: number | null } {
@@ -735,7 +690,6 @@ function assertAckRequest(request: DeliveryAckRequest): void {
   }
 }
 
-/** Recognize only the bounded server error vocabulary. */
 function boundedDeliveryErrorCode(body: unknown): string | null {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return null;
@@ -750,7 +704,6 @@ function boundedDeliveryErrorCode(body: unknown): string | null {
   return null;
 }
 
-/** Refusal body parsed against the allowlist; Retry-After via signal semantics. */
 function refusal(
   response: Response,
   text: string,
@@ -764,7 +717,6 @@ function refusal(
       recognizedEnvelope = true;
     }
   } catch {
-    // An unreadable refusal body is still a refusal; nothing to extract.
   }
   const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
   return new DeliveryHttpError(
@@ -919,7 +871,6 @@ export class DeliveryCommandClient {
     }
   }
 
-  /** Claim the caller's own single unacked direct-signal delivery row. */
   async claimAgentInbox(request: DeliveryClaimRequest): Promise<DeliveryClaimResult> {
     checkedCommandId(request.commandId);
     assertAgentToken(request.credential);
@@ -951,7 +902,6 @@ export class DeliveryCommandClient {
     };
   }
 
-  /** Best-effort turn presence. Callers decide retry/throttle policy. */
   async touchPresence(request: PresenceTouchRequest): Promise<{ httpStatus: number }> {
     checkedCommandId(request.commandId);
     assertAgentToken(request.credential);
@@ -964,7 +914,6 @@ export class DeliveryCommandClient {
     return { httpStatus: response.status };
   }
 
-  /** Acknowledge one leased delivery with an exact terminal outcome. */
   async ackAgentDelivery(request: DeliveryAckRequest): Promise<DeliveryAckResult> {
     if (request.managedAck !== undefined) {
       assertManagedAckAllowed(request.managedAck);
@@ -994,7 +943,6 @@ export class DeliveryCommandClient {
     };
   }
 
-  /** Mark a queued delivery observed only after the interactive hook surfaced it. */
   async observeQueuedAgentDelivery(
     request: DeliveryObservationRequest,
   ): Promise<DeliveryAckResult> {

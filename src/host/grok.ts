@@ -41,10 +41,8 @@ import {
 
 export type GrokAcpOpenOptions = {
   cwd: string;
-  /** Absolute path or bare name resolved via PATH. Default: "grok". */
   executable?: string;
   model?: string;
-  /** Maps to --reasoning-effort / --effort. */
   effort?: string;
   permissionCallback?: PermissionCallback;
   events?: HostSessionEvents;
@@ -56,7 +54,6 @@ export type GrokAcpOpenOptions = {
   clientVersion?: string;
   /** When true, prompts are enabled without canary (tests only). */
   promptsEnabled?: boolean;
-  /** Report a newer-than-measured version after the floor admits it. */
   onVersionNotice?: (notice: ProviderVersionNotice) => void;
 
   /**
@@ -78,9 +75,6 @@ export type GrokAcpHandle = {
 const CHILD_EXIT_WAIT_MS = 3_000;
 const CHILD_KILL_WAIT_MS = 1_000;
 
-/**
- * Resolve an executable path and refuse non-files / non-executables.
- */
 export function resolveGrokExecutable(executable = "grok"): string {
   if (isAbsolute(executable) || executable.includes("/")) {
     const abs = resolvePath(executable);
@@ -91,18 +85,13 @@ export function resolveGrokExecutable(executable = "grok"): string {
     }
     return abs;
   }
-  // Bare name — leave to PATH at spawn; version check uses same name.
   return executable;
 }
 
-/**
- * Parse `grok --version`, including prerelease/build and leading banners.
- */
 export function parseGrokVersionOutput(stdout: string): string | null {
   return parseProviderVersionOutput(stdout, /\bgrok\b/i);
 }
 
-/** Run `executable --version` and refuse only versions below the floor. */
 export async function assertGrokVersionFloor(
   executable: string,
   options?: {
@@ -167,7 +156,6 @@ export function buildGrokAcpArgs(options: {
   }
   args.push("stdio");
   if (args.includes("--always-approve")) {
-    // Belt and braces — must be unreachable.
     throw new AcpHostError("always_approve_forbidden", "refusing to pass --always-approve");
   }
   return args;
@@ -199,7 +187,6 @@ function waitForChildExit(
   });
 }
 
-/** Stop Grok with SIGTERM, escalate to SIGKILL, and confirm it exited. */
 export async function terminateGrokChild(
   child: ChildProcessWithoutNullStreams,
 ): Promise<void> {
@@ -207,14 +194,12 @@ export async function terminateGrokChild(
   try {
     child.kill("SIGTERM");
   } catch {
-    // already dead
   }
   await waitForChildExit(child, CHILD_EXIT_WAIT_MS);
   if (child.exitCode !== null || child.signalCode !== null) return;
   try {
     child.kill("SIGKILL");
   } catch {
-    // already dead
   }
   await waitForChildExit(child, CHILD_KILL_WAIT_MS);
   if (child.exitCode === null && child.signalCode === null) {
@@ -225,10 +210,6 @@ export async function terminateGrokChild(
   }
 }
 
-/**
- * Open a Grok ACP host session: version-check, spawn, initialize, session/new.
- * Real prompts remain blocked until session.enablePromptsAfterCanary().
- */
 export async function openGrokAcpSession(
   options: GrokAcpOpenOptions,
 ): Promise<GrokAcpHandle> {
@@ -304,10 +285,6 @@ export async function openGrokAcpSession(
   }
 }
 
-/**
- * Open a session over injected streams (pure tests / fake child).
- * Does not spawn or version-check.
- */
 export async function openAcpSessionOverStdio(options: {
   cwd: string;
   requiredModeId?: string;

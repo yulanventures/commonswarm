@@ -34,14 +34,6 @@ export const CHANNEL_SLUG_MAX = 32;
 /** Longest channel purpose. The edge and the database CHECK carry the same bound. */
 export const CHANNEL_PURPOSE_MAX = 500;
 
-/**
- * The character classes the slug pattern allows, as {regex fragment, words}.
- * BOTH the regex and the sentence are built from this table, so a class cannot
- * be added to one and left out of the other.
- *
- * `edge` is the class allowed at the first and last character; `inner` adds the
- * classes allowed only in between.
- */
 export const CHANNEL_SLUG_CLASSES = {
   edge: [
     { fragment: "a-z", words: "lowercase letters", one: "a letter" },
@@ -80,7 +72,6 @@ export const CHANNEL_SLUG_RE = new RegExp(
  */
 export const RESERVED_CHANNEL_SLUGS: readonly string[] = ["all-signals"];
 
-/** The slug rule, in words, built from the bound the validator enforces. */
 export const CHANNEL_SLUG_RULE_TEXT = `A channel name uses ${
   classList([...CHANNEL_SLUG_CLASSES.edge, ...CHANNEL_SLUG_CLASSES.inner])
 }, starts and ends with ${
@@ -93,12 +84,10 @@ export const CHANNEL_SLUG_RULE_TEXT = `A channel name uses ${
  */
 export const CHANNEL_ID_RULE_TEXT = "channel_id must be a UUID.";
 
-/** The reserved list, in words, built from the list the validator enforces. */
 export const RESERVED_CHANNEL_SLUG_TEXT = `Reserved names: ${
   RESERVED_CHANNEL_SLUGS.join(", ")
 }.`;
 
-/** Trim and lowercase. Slugs compare case-insensitively in the unique index. */
 export function normalizeChannelSlug(value: string): string {
   return value.trim().toLowerCase();
 }
@@ -152,10 +141,6 @@ export function channelSlugProblem(value: unknown): string | null {
   }
 }
 
-/**
- * A channel as the command edge returns it and as `swarm_read.channels`
- * projects it. The two shapes are the same eight columns in the same order.
- */
 export interface ChannelRow {
   channel_id: string;
   workspace_id: string;
@@ -186,44 +171,6 @@ export const CHANNEL_COLUMNS = [
   "created_at",
   "archived_at",
 ] as const;
-
-/**
- * RETIRED 2026-09-05. Two constants stood here and both are gone, because both
- * became false the moment the `read` edge learned a `channels` resource. They
- * are preserved verbatim: a reader can still meet them in an installed 0.1.55
- * build, which prints them, and in `docs/evidence/2026-09-05-chat-client/`.
- *
- *   CHANNEL_LIST_NEEDS_HUMAN_MESSAGE:
- *     "Listing channels needs a signed-in person: this deployment's read
- *      service has no channel list for an agent credential. Run cswarm channel
- *      ls from a session signed in with cswarm login, or name the channel you
- *      want by name wherever a command takes one."
- *
- *   CHANNEL_SELECTOR_NEEDS_ID_MESSAGE:
- *     "Turning a channel name into a channel id needs a signed-in person,
- *      because this deployment's read service does not list channels for an
- *      agent credential. Pass the channel id instead. cswarm channel create
- *      prints it, and cswarm channel ls shows it from a session signed in with
- *      cswarm login."
- *
- * Their measured cause was accurate when written and is no longer true:
- * `parseBody` in `supabase/functions/read/index.ts` had no channels arm. It has
- * one, `listChannelsAsAgent` below reads it, and `channelRows` in src/cli.ts no
- * longer REFUSES an agent credential, so an agent lists channels and turns a
- * name into an id exactly as a person does.
- *
- * CORRECTED: an earlier draft of this note, and the commit message that landed
- * it, said `channelRows` "no longer branches on the credential kind". It still
- * does, and it has to: the read function accepts agent credentials only and a
- * person reads swarm_read over PostgREST, so the kind picks the transport. What
- * it no longer does is throw before reading anything.
- *
- * ⚠ THE COUPLING THIS CREATES. A client carrying these removals talks to a read
- * service that may not have the arm yet. Against such a deployment
- * `listChannelsAsAgent` gets HTTP 400 and says the list was refused, which is a
- * worse sentence than the two above but is not a wrong one. Ship the `read`
- * deploy first, or in the same release.
- */
 
 /**
  * The channel list for an agent credential: the `read` edge function, the same
@@ -379,9 +326,6 @@ export async function listChannelsAsHuman(
         `The channel list was refused (HTTP ${response.status}). Nothing changed.`,
       );
     }
-    /* A body that never settles is the request not completing, so it takes the
-     * retryable sentence rather than the "shape this version does not
-     * understand" one, which would blame the server for our own timeout. */
     let raw: string;
     try {
       raw = await response.text();
@@ -410,10 +354,6 @@ export async function listChannelsAsHuman(
   }
 }
 
-/**
- * Find one channel by slug in an already-read list. Comparison is
- * case-insensitive because the unique index is.
- */
 export function findChannelBySlug(
   rows: readonly ChannelRow[],
   slug: string,
@@ -448,10 +388,6 @@ export function unknownChannelMessage(
     } in this workspace. Channels here: ${live.join(", ")}.`;
 }
 
-/**
- * The channel list a person reads. Pure, so the claims it makes are gated by a
- * unit test rather than only by a live deployment.
- */
 export function renderChannelList(
   rows: readonly ChannelRow[],
   options: { includeArchived: boolean },
@@ -480,16 +416,5 @@ export function renderChannelList(
   return `${head}\n${lines.join("\n")}${tail}\n`;
 }
 
-/**
- * What a caller is told when the deployment refuses the request WITHOUT saying
- * why. The chat commands answer every validation refusal with a `message`
- * (`supabase/functions/command/index.ts`), so a bare refusal means the request
- * never reached that validator: the envelope layer of a deployment that
- * predates channels is the reachable cause.
- *
- * It states what is known and what to do, and claims nothing about the cause it
- * cannot see. The version is the client protocol version this build speaks, so
- * the sentence moves with the build rather than naming a number by hand.
- */
 export const CHANNEL_UNSUPPORTED_MESSAGE =
   `This deployment refused the request and did not say why. Channels need a deployment whose command service knows them; this cswarm speaks protocol ${CLIENT_PROTOCOL_VERSION}. Nothing was created or changed. Ask whoever runs this deployment to update it, or drop the channel options and post as before.`;

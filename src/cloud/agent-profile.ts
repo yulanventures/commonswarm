@@ -46,7 +46,6 @@ export interface AgentProfile {
   host_session_id?: string;
 }
 
-/** Refuse a bound profile before any credential, cache, or network access. */
 export function requireProfileHost(profile: AgentProfile, hostSessionId?: string): void {
   if (profile.host_session_id === undefined) return;
   if (hostSessionId === undefined) {
@@ -168,7 +167,6 @@ export function agentProfilePath(deployment: string, workspace: string, principa
   return join(root, "agents", deployment, workspace, principal, "profile.json");
 }
 
-/** Shared root for automatic setup and MCP connect profiles. Explicit paths under this root are included too. */
 export function agentProfileRoot(): string {
   return join(homedir(), ".cswarm");
 }
@@ -243,7 +241,6 @@ export async function readAgentProfile(path: string, hostSessionId?: string, lis
   if (raw === null) throw new AgentSetupError("profile_missing", "The agent profile is missing. Run cswarm setup with the connection file.");
   let p: AgentProfile;
   try { p = JSON.parse(raw); } catch { throw new AgentSetupError("profile_invalid", "The agent profile is damaged. Run setup again."); }
-  /* Exactly the six required keys, optionally plus the older known metadata. */
   const required = ["version", "url", "anon_key", "workspace_id", "principal_id", "credential_file"];
   const keys = Object.keys(p ?? {});
   const keysAccepted = required.every(key => keys.includes(key)) &&

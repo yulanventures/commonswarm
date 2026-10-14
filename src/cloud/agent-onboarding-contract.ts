@@ -1,4 +1,3 @@
-/** Shared by the CLI, its bundled guide, and the web handoff. No I/O. */
 export const AGENT_CONNECTION_VERSION = 1 as const;
 export const RECEIVE_MODES = ["wake", "turn"] as const;
 export type ReceiveMode = (typeof RECEIVE_MODES)[number];
@@ -35,7 +34,6 @@ export const AGENT_MESSAGE_FORMAT_RULE =
   "Use Markdown for messages; write long messages to a file and post with --body-file.";
 export const MESSAGE_BLOB_MIN_LENGTH = 500;
 
-/** Pure predicate: would this body render as one wall of text? */
 export function isBlobBody(body: string): boolean {
   return typeof body === "string" && body.length >= MESSAGE_BLOB_MIN_LENGTH && !body.includes("\n");
 }
@@ -53,7 +51,6 @@ export function turnCheckInstruction(profile: string, hostSessionId?: string): s
 
 export function quoteAgentArgument(value: string): string { return `'${value.replace(/'/g, `'"'"'`)}'`; }
 
-/** Add the saved binding to concrete CLI commands in a response. */
 export function boundProfileCommands(text: string | null, profile: string, hostSessionId?: string): string | null {
   if (text === null) return null;
   if (!hostSessionId || hostSessionId === "manual") return text;

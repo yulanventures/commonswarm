@@ -71,7 +71,6 @@ export type SanitizedSessionUpdate = {
 
 export type PromptResult = {
   stopReason: AcpStopReason;
-  /** Concatenated agent_message_chunk text. */
   message: string;
   updates: SanitizedSessionUpdate[];
 };
@@ -90,7 +89,6 @@ export type HostSessionEvents = {
 
 export type HostSessionOptions = {
   cwd: string;
-  /** Provider-measured mode that must be selected after every session/new. */
   requiredModeId?: string;
   permissionCallback?: PermissionCallback;
   events?: HostSessionEvents;
@@ -134,7 +132,6 @@ export class AcpHostError extends Error {
   }
 }
 
-/** Structured JSON-RPC error fields supplied by the ACP peer. */
 export type AcpPeerError = {
   code: number;
   data?: unknown;
@@ -192,7 +189,6 @@ export class AcpVersionError extends AcpHostError {
   }
 }
 
-/** A provider version could not be parsed, so compatibility fails closed. */
 export class AcpVersionParseError extends AcpVersionError {
   constructor(message: string) {
     super(message, "version_unparseable");
@@ -200,7 +196,6 @@ export class AcpVersionParseError extends AcpVersionError {
   }
 }
 
-/** Preserve the minimum and observed versions for below-floor failures. */
 export class AcpVersionBelowFloorError extends AcpVersionError {
   constructor(
     readonly provider: string,
@@ -219,9 +214,7 @@ export class AcpPermissionCanaryError extends AcpHostError {
   constructor(
     message: string,
     readonly reasonCode: string | null = null,
-    /** Provider version floor learned from this exact failed request, when present. */
     readonly minimumRequiredVersion: string | null = null,
-    /** Peer fields retained only for provider-boundary classification. */
     readonly peerError: AcpPeerError | null = null,
   ) {
     super("permission_canary_failed", message);

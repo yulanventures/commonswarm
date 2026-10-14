@@ -19,13 +19,11 @@ import { redactCredentialText } from "./credential-redaction.js";
 const RING_CAPACITY_BYTES = 4_096;
 const TAIL_MAX_CHARS = 2_048;
 
-/** Hard bound between child exit and delivery of its final stderr tail. */
 export const STDERR_EXIT_GRACE_MS = 100;
 /** Keep stdout EOF from winning the bounded stderr-exit observation. */
 export const STDERR_READABLE_END_GRACE_MS = STDERR_EXIT_GRACE_MS + 50;
 
 export interface StderrTailRing {
-  /** Sanitized tail (last TAIL_MAX_CHARS chars) of what the child wrote. */
   read(): string;
 }
 

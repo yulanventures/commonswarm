@@ -1,7 +1,3 @@
-/**
- * Delivery journal for listener crash-recovery and claim/ACK durability (§6, §7).
- */
-
 import { isAbsolute, join } from "node:path";
 import { types } from "node:util";
 import {
@@ -98,7 +94,6 @@ export interface ListenerActiveClaim {
   signalId: string | null;
   leaseId: string | null;
   leasedUntil: string | null;
-  /** Digest of the authoritative immutable signal fields recorded with the lease. */
   signalFingerprint?: string | null;
   ack: null | {
     commandId: string;
@@ -214,7 +209,6 @@ const ALLOWED_ERROR_CODES = new Set([
   "credential_unavailable",
 ]);
 
-/** Generate deterministic claim command ID for listener instance and ordinal (§7). */
 export function claimCommandId(
   listenerInstanceId: string,
   claimOrdinal: number,
@@ -234,7 +228,6 @@ export function claimCommandId(
   return id;
 }
 
-/** Generate deterministic ACK command ID for lease UUID (§7). */
 export function ackCommandId(leaseId: string): string {
   if (!UUID_RE.test(leaseId)) {
     throw new Error("stored delivery journal is malformed");
@@ -494,7 +487,6 @@ export function parseJournalRecord(
       throw new Error("stored delivery journal is malformed");
     }
   } else {
-    // phase is "leased" or "ack_pending"
     if (active.claimLastAttemptAt === null) {
       throw new Error("stored delivery journal is malformed");
     }

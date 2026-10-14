@@ -1,24 +1,9 @@
-/**
- * The edge functions answer a failure with a machine-readable envelope —
- * `supabase/functions/read/diagnostics.ts` builds it as `PublicReadErrorBody`
- * (`{ error, request_id, retryable }`). D-051: the client read only the status
- * line, so `retryable: false` — the server telling us to stop — was discarded
- * and the failure retried, turning rejections at a saturated ceiling into more
- * concurrency. Parsing this envelope is what makes that instruction reachable.
- */
-
-/**
- * Server-supplied failure detail. Every field is nullable because a failure may
- * arrive without a body at all; `retryable: null` means the server said nothing
- * and the caller keeps its own status-based classification.
- */
 export interface ServerErrorEnvelope {
   readonly error: string | null;
   readonly requestId: string | null;
   readonly retryable: boolean | null;
 }
 
-/** The envelope of a failure that carried no readable body. */
 export const EMPTY_SERVER_ERROR_ENVELOPE: ServerErrorEnvelope = {
   error: null,
   requestId: null,
@@ -43,11 +28,6 @@ function tokenField(value: unknown, shape: RegExp): string | null {
   return shape.test(trimmed) ? trimmed : null;
 }
 
-/**
- * Read the envelope out of an already-parsed body. Total by construction: an
- * absent, non-object, or malformed body yields nulls rather than throwing, so
- * adding this to an error path cannot itself break the error path.
- */
 export function parseServerErrorEnvelope(body: unknown): ServerErrorEnvelope {
   if (body === null || typeof body !== "object" || Array.isArray(body)) {
     return EMPTY_SERVER_ERROR_ENVELOPE;
@@ -56,26 +36,14 @@ export function parseServerErrorEnvelope(body: unknown): ServerErrorEnvelope {
   return {
     error: tokenField(record.error, ERROR_SLUG_RE),
     requestId: tokenField(record.request_id, REQUEST_ID_RE),
-    // Only a literal boolean is an instruction. A string "false" is a
-    // malformed server, and inferring intent from it is how a client talks
-    // itself back into the retry it was told not to make.
     retryable: typeof record.retryable === "boolean" ? record.retryable : null,
   };
 }
 
-/**
- * True only when the server explicitly refused a retry. Silence is not refusal,
- * so an absent field leaves the caller's status classification in charge.
- */
 export function serverRefusedRetry(envelope: ServerErrorEnvelope): boolean {
   return envelope.retryable === false;
 }
 
-/**
- * Append the server's own words to a status message. `request_id` is the only
- * handle anyone has on server-side detail, so it goes in front of the operator
- * rather than staying in a discarded body.
- */
 export function describeServerError(
   prefix: string,
   envelope: ServerErrorEnvelope,

@@ -24,7 +24,6 @@ export function householdWireRequest(invocation: HouseholdToolInvocation): { too
       arguments: { ...args, ...query } };
   }
   const { kind, ...command } = invocation.command;
-  // To-do writes have the same tool and core names, with no blob reservation.
   if (invocation.objectTypes.includes('todo') && HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === kind && row.effect === 'commit')) {
     return { tool: kind, arguments: { ...args, ...command } };
   }

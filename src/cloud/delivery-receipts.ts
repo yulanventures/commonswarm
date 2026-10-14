@@ -31,17 +31,13 @@ export interface DeliveryReceipt {
   attempt_count: number;
   lease_expiry_count: number;
   last_error_code: string | null;
-  /** Present on newer servers for queued interactive-session deliveries. */
   pending_for_main_count?: number | null;
-  /** Server says this exact live, post-release row belongs to an observing seat. */
   wake_path_observing?: boolean;
 }
 
 export interface HumanDeliveryReceipt {
   recipient_user_id: string;
-  /** Present on broadcast roster rows; directed rows keep their existing wire shape. */
   display_name?: string;
-  /** Null means the member's browser has not attested focused viewport display. */
   seen_at: string | null;
 }
 
@@ -54,7 +50,6 @@ export interface BroadcastAgentReceipt {
   principal_id: string;
   recipient_agent_principal_id: string;
   display_name: string;
-  /** Null means this agent client has not attested rendering the broadcast. */
   seen_at: string | null;
   /** Retained on the wire for clients through 0.1.47. */
   tracking_state: "not_tracked";
@@ -64,7 +59,6 @@ export interface BroadcastAgentReceipt {
 export interface BroadcastRosterSection {
   total: number;
   returned: number;
-  /** The server's display cap. The server owns the value; the client only checks returned <= limit. */
   limit: number;
   truncated: boolean;
 }
@@ -85,16 +79,13 @@ export interface BroadcastRecipientRoster {
   agents: BroadcastAgentRosterSection;
 }
 
-/** `receipts` carries only the two row kinds every installed client parses. */
 export type DeliveryReceiptRow = DeliveryReceipt | HumanDeliveryReceipt;
 
 export interface DeliveryReceiptResult {
   /** Null means this credential did not author a matching signal. */
   addressed: boolean | null;
   receipts: DeliveryReceiptRow[];
-  /** Ordered oldest-first by (created_at, reply_signal_id). Absent on old servers. */
   replies?: ReplyReceipt[];
-  /** Present only for broadcasts; each section is independently capped by the server. */
   broadcast_roster?: BroadcastRecipientRoster;
 }
 
@@ -106,7 +97,6 @@ export interface ReplyReceipt {
   created_at: string;
 }
 
-/** Roster members a cut list did not show, per section, from the server's uncapped totals. */
 export interface BroadcastRosterHiddenCounts {
   seen: number;
   notSeen: number;
@@ -222,7 +212,6 @@ function parseReplyReceipt(value: unknown): ReplyReceipt {
   };
 }
 
-/** Parse the narrow agent-or-human receipt wire without inventing either kind. */
 export function parseDeliveryReceipt(value: unknown): DeliveryReceiptRow {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new DeliveryReceiptReadError(
@@ -356,8 +345,6 @@ function rosterSection(
   const row = value as Record<string, unknown>;
   const total = nonNegativeInteger(row.total, `${field}.total`);
   const returned = nonNegativeInteger(row.returned, `${field}.returned`);
-  // The server owns the cap. Pinning its value here turned a server tuning
-  // knob into a client release blocker; only its shape is checked.
   const limit = nonNegativeInteger(row.limit, `${field}.limit`);
   if (
     typeof row.truncated !== "boolean" || limit < 1 || returned > limit ||
@@ -421,10 +408,6 @@ function parseBroadcastRoster(value: unknown): BroadcastRecipientRoster {
   };
 }
 
-/**
- * How many of each section the capped list left out. Computed from the server's
- * uncapped totals so a cut section can say "N not shown" instead of "none".
- */
 export function broadcastRosterHiddenCounts(
   result: DeliveryReceiptResult,
 ): BroadcastRosterHiddenCounts {
@@ -452,7 +435,6 @@ export function broadcastRosterHiddenCounts(
   };
 }
 
-/** Parse author visibility separately from the receipt row set. */
 export function parseDeliveryReceiptResult(value: unknown): DeliveryReceiptResult {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new DeliveryReceiptReadError(
@@ -542,7 +524,6 @@ export function parseDeliveryReceiptResult(value: unknown): DeliveryReceiptResul
   };
 }
 
-/** Derive the display state without collapsing observed into replied. */
 export function deliveryReceiptState(
   receipt: DeliveryReceipt,
   nowMs: number = Date.now(),
@@ -558,7 +539,6 @@ export function deliveryReceiptState(
   return "enqueued";
 }
 
-/** Read one agent-authored signal's receipts through the agent read edge. */
 export async function readAgentDeliveryReceipts(
   target: CloudTarget,
   token: string,

@@ -62,7 +62,6 @@ const EFFECT_SENSITIVE_KEYS = new Set([
   "claim_command_id",
 ]);
 
-/** Default secure state root for long-lived listener metadata and effects. */
 export function defaultListenerStateDirectory(): string {
   return process.env.XDG_STATE_HOME
     ? join(process.env.XDG_STATE_HOME, "cswarm", "listeners")
@@ -260,8 +259,6 @@ function parseV2Record(row: Record<string, unknown>): ListenerEffectRecord {
       throw new Error("stored listener effect is malformed");
     }
   } else {
-    // Asks keep the deterministic reply command id and never carry the
-    // note-only observed state.
     if (
       typeof row.commandId !== "string" ||
       !COMMAND_ID_RE.test(row.commandId) ||
@@ -341,7 +338,6 @@ export function newObservedNoteRecord(input: {
   };
 }
 
-/** The terminal effect proving a direct message was durably queued for the main session. */
 export function newRoutedMainRecord(input: {
   signalId: string;
   signalKind: ListenerSignalKind;
@@ -443,7 +439,6 @@ function serializeEffectRecord(record: ListenerEffectRecord): string {
   });
 }
 
-/** One secure atomic file per immutable signal effect. */
 export class FileListenerEffectStore implements ListenerEffectStore {
   readonly instanceDirectory: string;
   private readonly effectsDirectory: string;

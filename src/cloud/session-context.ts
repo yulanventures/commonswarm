@@ -708,7 +708,6 @@ export function assertSameIdentity(
   }
 }
 
-/** Immutable acquire binding. Retry must present the same values. */
 export const SESSION_ACQUIRE_BINDING_FIELDS = [
   "provider",
   "mode",

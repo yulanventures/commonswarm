@@ -42,7 +42,6 @@ export interface HostInjectionCallback {
 
 let registeredHostInjection: HostInjectionCallback | null = null;
 
-/** Hosts register a callback; the CLI never manufactures one. */
 export function registerHostInjection(
   callback: HostInjectionCallback | null,
 ): void {
@@ -138,18 +137,12 @@ function defaultClaimClient(
         outcome: "observed",
         lastErrorCode: null,
         managedAck,
-        /* The gate only passes after a real injection, so this is the truth
-           the server records as surfaced_at; manual mode never reaches here. */
         surfaced: managedAck.injectionSucceeded,
       });
     },
   };
 }
 
-/**
- * One interactive pass: claim, try host injection, ACK only when the gate
- * passes. Never constructs a model. Duplicate signal ids do not ACK twice.
- */
 export async function runInteractiveReceiveOnce(
   options: InteractiveReceiverOptions,
   seen: Set<string>,

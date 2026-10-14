@@ -1,8 +1,3 @@
-/**
- * Optional wake hint on read, claim, and renewal responses (W3.4).
- * 0.1.57 servers omit it. A present value must be the closed { topic, event } object.
- */
-
 export const WAKE_EVENT = "wake";
 export const WAKE_TOPIC_PREFIX = "cswarm-wake:";
 export const WAKE_ID_LENGTH = 43;
@@ -26,10 +21,6 @@ export class WakeHintError extends Error {
   }
 }
 
-/**
- * Absent or null means the server did not send a hint. A present value is
- * checked against the same topic shape the Realtime join uses.
- */
 export function parseOptionalWakeHint(value: unknown): WakeHint | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "object" || Array.isArray(value)) {

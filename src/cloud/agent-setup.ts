@@ -66,9 +66,6 @@ export async function setupAgent(options: {
       expires_at: session.expiry === null ? null : new Date(session.expiry).toISOString(),
     };
   }, options.fetcher);
-  /* Cache the name in the profile so a person reading the file can tell WHICH workspace it
-   * points at without resolving a uuid. A cache, not the authority: a workspace can be renamed
-   * after setup, so every surface that ASSERTS the current name reads it from the server. */
   await saveAgentProfile(profilePath, connection, identity.workspace_name ?? undefined, options.hostSessionId);
   const receive = await readReceiveBinding(profilePath, options.hostSessionId);
   const wakeProviders = RECEIVE_WAKE_PROVIDERS.map(provider => ({ provider, preview: provider === RECEIVE_WAKE_PROVIDER, requires_idle_test: true }));

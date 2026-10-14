@@ -16,7 +16,6 @@ export const WAKE_COALESCE_MS = 1_000;
 export const WAKE_CLAIMS_PER_MINUTE_BUDGET = 50;
 export const WAKE_RATE_LIMIT_POLL_MS = 60_000;
 
-/** Realtime subscribe callback statuses, mapped at this boundary (D-053). */
 export const REALTIME_SUBSCRIBE_STATUS = {
   SUBSCRIBED: "SUBSCRIBED",
   CHANNEL_ERROR: "CHANNEL_ERROR",
@@ -149,7 +148,6 @@ function isSubscribeStatus(value: string): value is RealtimeSubscribeStatus {
   );
 }
 
-/** Map a Realtime subscribe status code. Never reads error.message. */
 export function wakeErrorCodeFromSubscribeStatus(
   status: string,
 ): WakeErrorCode | null {
@@ -178,7 +176,6 @@ export function emptyListenerWakeStatus(): ListenerWakeStatus {
   };
 }
 
-/** Persist status.json when the wake block changes, not on every lastWakeAt tick. */
 export function listenerWakePersistWorthy(
   previous: ListenerWakeStatus | undefined,
   next: ListenerWakeStatus,
@@ -396,7 +393,6 @@ export class WakeSubscriber implements WakeHandle {
     this.wakeClaimTimes = this.wakeClaimTimes.filter((ts) => ts >= minuteStart);
   }
 
-  /** Client budget or a server 429: do not claim on wake; poll covers the window. */
   private wakeClaimPaused(nowMs: number): boolean {
     return nowMs < this.rateLimitedUntil || this.overWakeBudget(nowMs);
   }
