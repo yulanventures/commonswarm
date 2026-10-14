@@ -76,10 +76,13 @@ test("HEAD timeout citations resolve to their exact operations", { timeout: 2_00
 async function listen(delayMs: () => number) {
   let requests = 0;
   let receivedSecret = false;
+  let elapsedDelayMs = 0;
   const server = createServer(async (request, response) => {
     requests += 1;
     receivedSecret ||= request.headers.authorization === "Bearer secret-shaped-value";
-    await new Promise(resolvePromise => setTimeout(resolvePromise, delayMs()));
+    const delay = delayMs();
+    await new Promise(resolvePromise => setTimeout(resolvePromise, delay));
+    elapsedDelayMs += delay;
     response.writeHead(200, { "content-type": "application/json" });
     response.end('{"external":{}}');
   });
@@ -92,6 +95,7 @@ async function listen(delayMs: () => number) {
     url: `http://127.0.0.1:${address.port}`,
     get requests() { return requests; },
     get receivedSecret() { return receivedSecret; },
+    get elapsedDelayMs() { return elapsedDelayMs; },
   };
 }
 
@@ -605,34 +609,39 @@ test("args default to 20 runs and runStatus fails FAIL or unacknowledged NOT MEA
 });
 
 test("delayed local endpoint makes the rendered row pass below half-budget and fail above it", async (t) => {
+  const budgetMs = 100;
   let delay = 15;
   const target = await listen(() => delay);
   t.after(() => target.server.close());
+  // Inject a clock advanced by completed endpoint delays. Wall time also includes
+  // connection/body overhead and runner scheduling, which can exhaust the 35 ms
+  // PASS margin. Real wall-time/body measurement is covered by the preload test.
+  const now = () => target.elapsedDelayMs;
   const durations: number[] = [];
   for (let index = 0; index < 5; index += 1) {
-    const started = performance.now();
+    const started = now();
     const response = await fetch(`${target.url}/functions/v1/read`);
     await response.arrayBuffer();
-    durations.push(performance.now() - started);
+    durations.push(now() - started);
   }
-  assert.equal(summarize(durations, 100).gate, "PASS");
+  assert.equal(summarize(durations, budgetMs).gate, "PASS");
 
   delay = 70;
   const slow: number[] = [];
   for (let index = 0; index < 5; index += 1) {
-    const started = performance.now();
+    const started = now();
     const response = await fetch(`${target.url}/functions/v1/read`);
     await response.arrayBuffer();
-    slow.push(performance.now() - started);
+    slow.push(now() - started);
   }
-  assert.equal(summarize(slow, 100).gate, "FAIL");
+  assert.equal(summarize(slow, budgetMs).gate, "FAIL");
   const nonUniform = [...Array(18).fill(10), 80, 80];
-  assert.equal(summarize(nonUniform, 100).gate, "FAIL");
-  assert.equal(summarize(nonUniform, 100).p95, 80);
+  assert.equal(summarize(nonUniform, budgetMs).gate, "FAIL");
+  assert.equal(summarize(nonUniform, budgetMs).p95, 80);
 
   const id = "fixture.ts:TIMEOUT_MS";
   const mapping = { rows: { [id]: { class: "network-api", scope: "per-request", endpoints: ["/functions/v1/read"], operation: { name: "fixture", class: "safe-read" } } } };
-  const inventory = [{ id, file: "fixture.ts", name: "TIMEOUT_MS", line: 1, value_ms: 100, unit_note: "milliseconds" }];
+  const inventory = [{ id, file: "fixture.ts", name: "TIMEOUT_MS", line: 1, value_ms: budgetMs, unit_note: "milliseconds" }];
   const failReport = markdownReport({
     baseUrl: target.url, inventory, mapping,
     measurements: new Map([["fixture", { durations: slow, realTimeouts: 0 }]]), startup: null,
