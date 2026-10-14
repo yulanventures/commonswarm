@@ -59,16 +59,22 @@ import type {
 } from "./agent-credential.js";
 import { parseOptionalWakeHint, type WakeHint } from "./wake.js";
 import { dayCount } from "../h0/verbs.js";
+import {
+  AGENT_TOKEN_DEFAULT_TTL_MS,
+  RENEWAL_HORIZON_DEFAULT_MS,
+  RENEWAL_HORIZON_MAX_MS,
+} from "../protocol/workspace-commands.js";
+
+export {
+  AGENT_TOKEN_DEFAULT_TTL_MS,
+  RENEWAL_HORIZON_DEFAULT_MS,
+  RENEWAL_HORIZON_MAX_MS,
+};
 
 /* THE NUMBERS. Decided centrally so the CLI, the site and the server cannot drift.
  * TTL is deliberately absent from that list: renewal does not change it. */
 
-/** Unchanged from src/protocol/workspace-commands.ts. Restated so this file can refuse. */
-export const AGENT_TOKEN_DEFAULT_TTL_MS = 60 * 60 * 1_000;
 export const AGENT_TOKEN_MAX_TTL_MS = 8 * 60 * 60 * 1_000;
-
-export const RENEWAL_HORIZON_DEFAULT_MS = 30 * 24 * 60 * 60 * 1_000;
-export const RENEWAL_HORIZON_MAX_MS = 90 * 24 * 60 * 60 * 1_000;
 
 /**
  * Honest mint narration for operators. The bearer is short; the horizon is the
