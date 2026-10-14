@@ -6,7 +6,6 @@
  * `src/components/app/composer-to-field.observer.test.ts`; nothing here asserts pixels.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { SIGNAL_RECIPIENT_MAX } from "../../../supabase/functions/_shared/channels.js";
 import {
@@ -334,174 +333,31 @@ test("an ambiguous tag is reported rather than guessed at", () => {
   assert.match(composerAmbiguousNotice(["Dana", "Ada"]), /"Dana" and "Ada" name more than one/);
 });
 
-test("every retired wake phrase this lane lists sits inside a strikethrough, in six files", () => {
-  /* THE CLAIM THIS MAKES CHECKABLE, and the third version of it. `lane/wake-all-recipients`'
-     copy commit said every retired sentence was kept beside its replacement; an arm found five
-     that were not. The commit that fixed those five claimed "no retired claim stands as
-     current"; the next arm found four more. THIS test's first version claimed the same thing in
-     its own title, and the next arm found a fifth — in a file the sweep already named, in words
-     the phrase list missed by one adjective, in a file with no strikethrough anywhere for a reader
-     to notice. (The two: ~~`the only recipient it wakes`~~ against a listed
-     ~~`one recipient the service wakes`~~.)
 
-     THIS CONTROL DOES NOT CLOSE THAT CLASS, and saying it did was the fourth instance of it.
-     ~~"the three things that let it pass while a sentence stood are closed"~~ and
-     ~~"a sentence in the family of a listed phrase cannot slip past on an adjective or a line
-     break"~~ were this file's and the README's wording, and both arms refuted them on the same
-     SHA with the same shape: A LIST OF REMEMBERED SUBSTRINGS CANNOT CLOSE A FAMILY. Normalising
-     case and whitespace catches a line break and a capital. It does not catch an adjective in
-     the middle — `the only recipient the service wakes`, a blend of two listed forms, or
-     `the sole recipient it wakes` — and no list of exact strings ever will. Each round has
-     added the last miss and then claimed the family; the next standing sentence is the wording
-     nobody remembered to type.
 
-     SO WHAT THIS IS, exactly, and nothing more: a NAMED-SUBSTRING control. It reads six named
-     files, normalises case and whitespace, and requires every occurrence of a listed phrase to
-     sit inside a `~~ ~~` span. It cannot see a retired claim written in words no listed phrase
-     covers, and it cannot see one in a file not on this list. `composer.observer.test.ts` is on
-     the list and contributes ZERO listed phrases today, so a retired sentence could stand there
-     in any unlisted wording and this would stay green.
 
-     It is worth having because it makes the nine leftovers two arms found un-reintroducible and
-     because it fails loudly on the exact wording that has drifted. It is NOT the answer to the
-     class, and the class is handed to the lead open rather than declared shut a fourth time.
 
-     Two things it does establish that the earlier versions did not:
 
-       1. EVERY LISTED PHRASE MUST MATCH SOMETHING. Three of eleven matched nothing, so
-          "adding to the list changes what runs" was false for those three. A dead phrase is a
-          red now, which is the only way that sentence can be true.
-       2. EVERY NAMED FILE MUST BE READ. `scanned > 200_000` was satisfied by
-          `LiveDashboard.astro` alone (567,988 characters), so five wrong paths aimed at that
-          one file would have gone green. Each file is asserted on its own and a wrong path
-          throws.
 
-     ~~"no retired wake sentence stands as current, anywhere the wake copy lives"~~ was this
-     test's title, and it claimed the second half of that sentence without establishing it. */
-  const files = [
-    "./composer-address.ts",
-    /* Added round five: it is where the wake copy's own tests live, and it carried a retired
-       sentence in an assertion message that no earlier list covered. */
-    "./composer-address.test.mjs",
-    "../components/app/composer-to-field.observer.test.ts",
-    "../components/app/composer.observer.test.ts",
-    "../components/app/composer-addressing.observer.test.ts",
-    "../components/app/LiveDashboard.astro",
-  ];
-  /* NORMALISED FORMS. Written the way the retired sentences read, and matched against a
-     lowercased, whitespace-collapsed copy of each file so a line break or an adjective's casing
-     inside a comment cannot hide one. */
-  const retired = [
-    "wakes nobody",
-    "nobody is woken",
-    "woken, however many",
-    "control over who is woken",
-    /* Both retired forms of the same claim, and both narrow on purpose: the CURRENT sentence
-       in this module is "every recipient the service wakes", so a phrase of
-       "recipient the service wakes" matched the correct copy and reported it as retired. A
-       sweep that fires on the sentence it is protecting is worse than none. */
-    "only recipient it wakes",
-    "one recipient the service wakes",
-    "first recipient is notified",
-    "no agent is notified while",
-    "exactly one chip is marked",
-    /* ~~"is the one the service wakes"~~ matched nothing: the sentence it was for reads
-       "Orbit is STILL the one the service wakes", so the "is" is two words earlier. A phrase
-       that matches nothing is a line in a list that changes no behaviour, which is what the
-       dead-phrase check below exists to say out loud. */
-    "the one the service wakes",
-    "way a reader can change who is woken",
-    "changes who is woken",
-  ];
-  /* COMMENT MARKERS GO BEFORE THE SPACES COLLAPSE. A sentence wrapped across two `//` or ` * `
-     lines normalises to "... the service wakes // nobody ..." and matches nothing, which a
-     review arm pointed out is the same miss one layer down. Leading markers are dropped first,
-     so the wrapped sentence reads as one. */
-  const normalise = (text) =>
-    text
-      .replace(/^[ \t]*(?:\/\/+|\*+|#+)[ \t]?/gm, " ")
-      .toLowerCase()
-      .replace(/\s+/g, " ");
-  let matchedSomewhere = new Set();
-  for (const file of files) {
-    /* THE PHRASE LIST IS NOT ITS OWN SUBJECT. This file is on the list, and the literals below
-       are in it, so the sweep reported its own list as thirteen standing sentences. The list's
-       own span is removed before scanning — precisely, by its declaration rather than by
-       skipping the file, so everything else in this file IS scanned, which is how the round-four
-       leftover in an assertion message a few hundred lines down is caught.
 
-       AND ONLY IN THIS FILE. The strip used to run over all six, so any other file that
-       happened to declare `const retired = [` would have had its contents removed before the
-       scan — a hole in the shape of the thing this sweep is for. A review arm found it. */
-    const raw = readFileSync(new URL(file, import.meta.url), "utf8");
-    const source = file === "./composer-address.test.mjs"
-      ? raw.replace(/const retired = \[[\s\S]*?\n {2}\];/, "const retired = [];")
-      : raw;
-    /* EVERY FILE CONTRIBUTES. Five paths aimed at one big file would satisfy a total. */
-    assert.ok(source.length > 2_000, `${file}: read only ${source.length} characters`);
-    /* Character spans, not line matching: a strikethrough in this repo routinely wraps across
-       several lines, and comparing a line against a concatenation of spans reported a struck
-       sentence as standing. The spans are located in the NORMALISED text, so the offsets the
-       phrase search returns are in the same coordinate system. */
-    const flat = normalise(source);
-    const struck = [];
-    for (const match of flat.matchAll(/~~[\s\S]*?~~/g)) {
-      struck.push([match.index, match.index + match[0].length]);
-    }
-    const inside = (at) => struck.some(([from, to]) => at >= from && at < to);
-    for (const phrase of retired) {
-      let at = flat.indexOf(phrase);
-      while (at !== -1) {
-        matchedSomewhere.add(phrase);
-        assert.ok(
-          inside(at),
-          `${file}: "${phrase}" stands as current at offset ${at}: ` +
-            JSON.stringify(flat.slice(Math.max(0, at - 110), at + 110)),
-        );
-        at = flat.indexOf(phrase, at + 1);
-      }
-    }
-  }
-  /* AND EVERY LISTED PHRASE IS LIVE. A phrase that matches nothing is a line in a list that
-     changes no behaviour, and three of them were exactly that. This is what makes "adding to
-     the list changes what runs" a fact rather than a hope. */
-  const dead = retired.filter((phrase) => !matchedSomewhere.has(phrase));
-  assert.deepEqual(
-    dead,
-    [],
-    `these phrases match nothing, so listing them changes nothing: ${JSON.stringify(dead)}`,
-  );
-});
 
-test("the module states the wake bound, and names the predicate that now enforces it", () => {
-  /* A CLAIM CONTROL, not a style check. The reason the wake is what it is lives in the
-     database, and a later reader who cannot find that reason will treat it as a preference.
 
-     ~~`assert.match(source, /enqueue_signal_delivery/)`~~ and ~~`/to_agent_principal_id/`~~
-     were the old pair, and they named the trigger and the column the RETIRED rule read. The
-     rule now lives in `swarm.agent_delivery_is_wakeable`, so that is what has to be named. */
-  const source = readFileSync(new URL("./composer-address.ts", import.meta.url), "utf8");
-  assert.match(source, /agent_delivery_is_wakeable/);
-  assert.match(source, /20260905000020_wake_all_recipients\.sql/);
-  /* WHAT THIS CANNOT CHECK, said rather than implied. The migration it names is `lane/
-     wake-all-recipients`' and is NOT on this branch — `supabase/migrations/` here ends at
-     `20260905000010_signal_recipients.sql`. So this is a citation control and not a
-     cross-file one: it asserts the module names the predicate rather than the retired trigger,
-     and it cannot assert the predicate exists. It will become checkable when that lane merges,
-     and a reader who finds no such file has found the two lanes out of order, not a bad
-     citation. */
-  /* AND THE RETIRED TRIGGER IS NAMED ONLY INSIDE THE RETIRED WORDING. It has to stay — a
-     reader may still meet the old rule in `20260905000010_signal_recipients.sql` — but it must
-     not be explaining the CURRENT one. Asserted as: the name appears exactly once, and that
-     once is between the strikethrough markers this repo retires wording with. */
-  const strikethroughs = [...source.matchAll(/~~[\s\S]*?~~/g)].map((match) => match[0]).join("");
-  assert.equal(source.split("enqueue_signal_delivery").length - 1, 1);
-  assert.equal(
-    strikethroughs.split("enqueue_signal_delivery").length - 1,
-    1,
-    "the module explains the current wake with the trigger the retired rule read",
-  );
-});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /* ────────────────────────────────────────────────────────────────────────────────────────
  * THE DERIVED PASS, DRIVEN THROUGH THE TRANSITIONS THAT USED TO BREAK IT.

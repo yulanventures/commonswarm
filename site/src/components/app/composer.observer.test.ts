@@ -131,7 +131,7 @@ test("composer kind defaults by recipient, and the app never opts out of the wak
 });
 
 test("browser-authored signals use the existing broadcast and direct target fields", () => {
-  const helper = between(client, "export function browserSignalCommand", "/**\n * Reads the shared feed");
+  const helper = between(client, "export function browserSignalCommand", "export const BROWSER_SIGNAL_COLUMNS =");
   assert.match(helper, /signal_kind: signalKind/);
   /* BOTH SCALARS NULL, ALWAYS. `to` replaces them and the edge refuses a body that sets one
      as well; it writes recipient 0 into the scalar column itself, so an old reader still
@@ -252,7 +252,7 @@ test("browser attachment preflight mirrors the eight-file and 25 MB limits", () 
   const upload = between(
     client,
     "export async function uploadBrowserAttachment",
-    "/** Gets a short-lived signed download URL",
+    "export async function fileDownloadUrl(",
   );
   assert.match(upload, /if \(!intent\.uploaded\)/);
   assert.match(upload, /intent\.uploaded = true/);

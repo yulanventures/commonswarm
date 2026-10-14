@@ -218,7 +218,7 @@ test("broadcast uses addressed=false and can never look pending or failed", () =
 
   const mapping = client.slice(
     client.indexOf("export function browserDeliveryIndicator"),
-    client.indexOf("/** Posts one browser-authored signal", client.indexOf("export function browserDeliveryIndicator")),
+    client.indexOf("export function browserHumanDeliveryIndicator(", client.indexOf("export function browserDeliveryIndicator")),
   );
   assert.match(mapping, /if \(result\.addressed === false\)/);
   assert.match(mapping, /state: "no-recipient"/);

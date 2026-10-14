@@ -150,7 +150,7 @@ test("the dashboard wires focused viewport rows to a best-effort command batch",
 
 function assertFocusGate(source: string): void {
   const start = source.indexOf("#queue(entry:");
-  const end = source.indexOf("/** Apply one IntersectionObserver delivery. */", start);
+  const end = source.indexOf("intersections(entries:", start);
   assert.ok(start >= 0 && end > start, "focus-gate control must reach the queue method");
   assert.match(
     source.slice(start, end),

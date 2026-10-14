@@ -268,8 +268,8 @@ test("Done, Back, and first use converge on a channel return", () => {
   assert.match(connect, /status\?\.firstUsedAt[\s\S]*this\.finishPrompt\("consumed"\)/);
   assert.match(dashboard, /connect\.finishPrompt\("back"\)/);
   assert.match(
-    dashboard,
-    /explicit exit from an add-agent view[\s\S]*showChannelView\("feed"\);\s*renderFeed\(\)/,
+    dashboard.slice(dashboard.indexOf("const returnToChannel ="), dashboard.indexOf("interface HouseholdScope")),
+    /showChannelView\("feed"\);\s*renderFeed\(\)/,
   );
   assert.match(
     dashboard,
@@ -672,10 +672,18 @@ test("visible channels poll for fresh signals and preserve readable state on fai
   assert.match(dashboard, /document\.visibilityState !== "visible"/);
   assert.match(dashboard, /document\.addEventListener\("visibilitychange"/);
   assert.match(dashboard, /const next = \[\.\.\.page\.rows, \.\.\.signals\.filter/);
-  assert.match(
-    dashboard,
-    /A live refresh never replaces a readable channel with an error/,
-  );
+  const refresh = ts.createSourceFile("refresh.ts", dashboard.slice(
+    dashboard.indexOf("const refreshLatestSignals = async"),
+    dashboard.indexOf("const feedPush ="),
+  ), ts.ScriptTarget.Latest, true);
+  let catchClause: ts.CatchClause | undefined;
+  const visit = (node: ts.Node): void => {
+    if (ts.isCatchClause(node)) catchClause = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(refresh);
+  assert.ok(catchClause, "live refresh catches read failures");
+  assert.equal(catchClause.block.statements.length, 0, "a failed refresh leaves the readable channel alone");
 });
 
 /*

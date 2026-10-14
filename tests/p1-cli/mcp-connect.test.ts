@@ -999,7 +999,7 @@ test("Fold 12 completion prepublish failure leaves no record before reporting it
     assert.equal(existsSync(complete), false);
     assert.equal((await readAgentProfile(path)).principal_id, PRINCIPAL);
     const source = await readFile(resolve("src/cloud/storage.ts"), "utf8");
-    const writer = source.slice(source.indexOf("export async function writeSecureJsonFile("), source.indexOf("/** Publish a new private file"));
+    const writer = source.slice(source.indexOf("export async function writeSecureJsonFile("), source.indexOf("export async function writeSecureJsonFileExclusive("));
     const renameAt = writer.indexOf("await rename(temporary, path);");
     assert.ok(renameAt > 0);
     const chmodAt = writer.indexOf("await handle.chmod(0o600);");

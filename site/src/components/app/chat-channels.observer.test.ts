@@ -503,7 +503,7 @@ test("an unfinished send is not resumed into a channel it was not addressed to",
   const promised = between(
     dashboard,
     "const composerAddressStillPromised = (",
-    "The sentence that retires an unfinished send",
+    "const retireComposerIntentOnAddressMove =",
   );
   assert.match(
     promised,
@@ -650,7 +650,7 @@ test("the channel commands send exactly the keys the command edge accepts", () =
   const bodies: Record<string, string> = {
     channel_create: between(client, "export async function createChannel", "export async function renameChannel"),
     channel_rename: between(client, "export async function renameChannel", "export async function archiveChannel"),
-    channel_archive: between(client, "export async function archiveChannel", "/** Reads receipts"),
+    channel_archive: between(client, "export async function archiveChannel", "export async function browserDeliveryReceipts("),
   };
   for (const [kind, body] of Object.entries(bodies)) {
     const command = between(body, `kind: "${kind}"`, '"CommonSwarm did not');
@@ -693,7 +693,7 @@ test("post_signal's chat keys each travel in their own group", () => {
    * optional key into it returns 400 on every post. Each chat key is spread on its own test
    * here, and a body that sends none is byte-identical to the one this app sent before.
    */
-  const helper = between(client, "export function browserSignalCommand", "/** Posts ONE browser-authored signal");
+  const helper = between(client, "export function browserSignalCommand", "export async function postBrowserSignal(");
   for (const [field, wire] of [
     ["channel", "channel"],
     ["threadRootId", "thread_root_id"],
@@ -773,7 +773,7 @@ test("no channel copy in the dashboard implies privacy, and none uses an em-dash
   ]);
   blocks.push([
     "composer refusals",
-    between(dashboard, "if (unknownChannelId !== null) {\n        /* The hidden composer", "const recipients: BrowserSignalAudience ="),
+    between(dashboard, "if (unknownChannelId !== null) {", "const recipients: BrowserSignalAudience ="),
   ]);
   let checked = 0;
   for (const [anchor, rawBlock] of blocks) {
