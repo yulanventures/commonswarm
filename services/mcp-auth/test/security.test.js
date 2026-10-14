@@ -255,13 +255,16 @@ test("interaction pages send a same-origin referrer policy so form POSTs carry a
   assert.throws(() => assertAllowedOrigin("null", new Set(["https://mcp.commonswarm.com"])), { code: "origin_forbidden" });
 });
 
-test("consent CSP serializes only a safe HTTPS or explicitly allowed loopback origin", () => {
+test("consent CSP serializes only a safe HTTPS, allowed loopback or registered private-use source", () => {
   for (const [uri, options, origin] of [
     ["https://claude.ai/api/mcp/auth_callback?state=synthetic", {}, "https://claude.ai"],
     ["https://client.example:8443/callback", {}, "https://client.example:8443"],
     ["http://127.0.0.1:49152/callback", { allowLoopback: true }, "http://127.0.0.1:49152"],
     ["http://localhost:49152/callback", { allowLoopback: true }, "http://localhost:49152"],
     ["http://[::1]:49152/callback", { allowLoopback: true }, "http://[::1]:49152"],
+    ["cursor://anysphere.cursor-retrieval/callback", {
+      registeredRedirectUris: ["cursor://anysphere.cursor-retrieval/callback", "com.example.app:/callback"],
+    }, "cursor:"],
   ]) {
     const headers = consentSecurityHeaders(uri, options);
     assert.equal(headers["content-security-policy"],
@@ -283,4 +286,12 @@ test("consent CSP serializes only a safe HTTPS or explicitly allowed loopback or
     assert.throws(() => consentSecurityHeaders(uri, { allowLoopback: true }), TypeError, String(uri));
   }
   assert.throws(() => consentSecurityHeaders("http://127.0.0.1:49152/callback"), TypeError);
+  const registeredRedirectUris = ["cursor://anysphere.cursor-retrieval/callback"];
+  for (const uri of ["cursor://anysphere.cursor-retrieval/wrong", "com.attacker.app:/callback",
+    "javascript:alert(1)", "file:///callback", "custom:/callback"]) {
+    assert.throws(() => consentSecurityHeaders(uri, { registeredRedirectUris }), TypeError);
+  }
+  for (const uri of ["javascript:alert(1)", "file:///callback", "custom:/callback"]) {
+    assert.throws(() => consentSecurityHeaders(uri, { registeredRedirectUris: [uri] }), TypeError);
+  }
 });

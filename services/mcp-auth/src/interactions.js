@@ -129,7 +129,8 @@ async function clientConsentDisplay(provider, clientId, redirectUri) {
   const redirect = new URL(redirectUri);
   return {
     verified: false,
-    primary: redirect.hostname.toLowerCase(),
+    primary: !redirect.hostname && !["http:", "https:"].includes(redirect.protocol)
+      ? `an app on this device (${redirect.protocol})` : redirect.hostname.toLowerCase(),
     declaredName: client?.clientName ?? null,
   };
 }
@@ -374,12 +375,14 @@ export function createInteractionHandler({
 
     async function consentHeaders() {
       const redirectUri = details.params.redirect_uri;
-      // HTTP is only a native-client loopback exception. Client metadata has
-      // already passed the provider's policy before this interaction exists.
-      const client = new URL(redirectUri).protocol === "http:"
+      // Non-HTTPS callbacks need the provider-approved native client's metadata.
+      // Pass only its registered URIs, never a request-supplied scheme allowlist.
+      const client = new URL(redirectUri).protocol !== "https:"
         ? await findClient(provider, details.params.client_id)
         : null;
-      return consentSecurityHeaders(redirectUri, { allowLoopback: client?.applicationType === "native" });
+      const native = client?.applicationType === "native";
+      return consentSecurityHeaders(redirectUri, { allowLoopback: native,
+        registeredRedirectUris: native ? client.redirectUris : [] });
     }
 
     if (request.method === "GET" && ["view", "sign-in"].includes(operation)) {

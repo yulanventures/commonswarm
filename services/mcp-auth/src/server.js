@@ -12,7 +12,7 @@ import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-import { createPool, loadConfig } from "./config.js";
+import { createPool, DcrLimitConfigurationError, loadConfig } from "./config.js";
 import { ClientError, InteractionStateError } from "./client-error.js";
 import { INTERACTION_SECURITY_HEADERS } from "./browser-security.js";
 import { createConsentOrchestrator, createPostgresConsentProgress } from "./consent.js";
@@ -30,7 +30,7 @@ import { createPinnedMetadataFetch, createPostgresCimdFetch } from "./metadata-f
 import { createPostgresAdapter } from "./postgres-adapter.js";
 import { createMcpProvider } from "./provider.js";
 import { createProductionManagementBindings } from "./management-bindings.js";
-import { createPostgresRegistrationStore } from "./registration.js";
+import { createPostgresRegistrationStore, createRegistrationLimiter } from "./registration.js";
 
 const ALWAYS_AVAILABLE = new Set([
   "/health",
@@ -250,6 +250,7 @@ export async function startServer({
     activeSigningKid: config.activeSigningKid,
     ...(registrationStore ? { registrationStore } : {}),
     registrationEnabled: config.publicAuthorizationEnabled,
+    registrationLimiter: createRegistrationLimiter(config.registrationLimits),
     cookieKeys: config.cookieKeys,
     jwks: config.jwks,
     authorizationCodeTtlSeconds: config.authorizationCodeTtlSeconds,
@@ -381,7 +382,8 @@ export async function startProductionServer() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   startProductionServer().catch((error) => {
-    process.stderr.write(`mcp-auth failed to start (${error?.code ?? "configuration_error"})\n`);
+    process.stderr.write(`mcp-auth failed to start (${error?.code ?? "configuration_error"})${
+      error instanceof DcrLimitConfigurationError ? `: ${error.message}` : ""}\n`);
     process.exitCode = 1;
   });
 }

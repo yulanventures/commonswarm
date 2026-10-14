@@ -8,6 +8,7 @@ import { Pool } from "pg";
 import { AUTH_PROVIDER_CATALOG } from "./auth-provider-catalog.js";
 
 import { ISSUER, RESOURCE } from "./provider.js";
+import { DEFAULT_DCR_LIMITS } from "./registration.js";
 
 const FILE_SETTINGS = Object.freeze({
   signingKeys: Object.freeze({
@@ -67,6 +68,25 @@ function positiveInteger(env, name, fallback) {
   if (env[name] === undefined || env[name] === "") return fallback;
   const value = Number(env[name]);
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
+  return value;
+}
+
+// Keep public registration write pressure bounded even with an override.
+export class DcrLimitConfigurationError extends Error {
+  constructor(name) {
+    super(`${name} must contain decimal digits for an integer from 1 to 10000`);
+    this.name = "DcrLimitConfigurationError";
+  }
+}
+
+function dcrLimit(env, name, fallback) {
+  if (env[name] === undefined) return fallback;
+  const raw = env[name];
+  const value = Number(raw);
+  if (typeof raw !== "string" || !/^[0-9]+$/u.test(raw) ||
+      !Number.isSafeInteger(value) || value < 1 || value > 10_000) {
+    throw new DcrLimitConfigurationError(name);
+  }
   return value;
 }
 
@@ -170,6 +190,10 @@ function exactOrigins(value) {
 }
 
 export async function loadConfig(env = process.env) {
+  const registrationLimits = {
+    perIp: dcrLimit(env, "MCP_AUTH_DCR_PER_IP_PER_HOUR", DEFAULT_DCR_LIMITS.perIp),
+    perHost: dcrLimit(env, "MCP_AUTH_DCR_PER_HOST_PER_HOUR", DEFAULT_DCR_LIMITS.perHost),
+  };
   const issuer = env.MCP_OAUTH_ISSUER || ISSUER;
   const resource = env.MCP_OAUTH_RESOURCE || RESOURCE;
   if (issuer !== ISSUER || resource !== RESOURCE) throw new Error("issuer and resource must match the CommonSwarm contract");
@@ -241,6 +265,7 @@ export async function loadConfig(env = process.env) {
     management,
     supabaseUrl: publicAuthorizationEnabled ? required(env, "SUPABASE_URL") : undefined,
     nativeLoopbackEnabled: env.MCP_OAUTH_NATIVE_LOOPBACK_ENABLED === "1",
+    registrationLimits,
     allowedOrigins,
     gotrueUrl: required(env, "MCP_OAUTH_GOTRUE_URL"),
     gotrueProvider: gotrueProviders[0],

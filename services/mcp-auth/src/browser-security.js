@@ -1,6 +1,7 @@
 // Browser security: opaque values/origins in, cookies and response policies out.
 // Form pages retain same-origin POST; P9b owns finish response policies.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { privateUseScheme } from "./registration.js";
 
 export const SESSION_COOKIE = "__Host-cswarm-oauth";
 export const SESSION_COOKIE_ATTRIBUTES = "Secure; HttpOnly; Path=/; SameSite=Lax";
@@ -51,7 +52,7 @@ export const INTERACTION_SECURITY_HEADERS = Object.freeze({
   "x-content-type-options": "nosniff",
 });
 
-export function consentSecurityHeaders(redirectUri, { allowLoopback = false } = {}) {
+export function consentSecurityHeaders(redirectUri, { allowLoopback = false, registeredRedirectUris = [] } = {}) {
   // Use only the provider-validated interaction URI. Reject URL parser
   // normalization tricks before serializing a single CSP origin source.
   if (typeof redirectUri !== "string" || /[\s\u0000-\u001f\u007f\\]/u.test(redirectUri)) {
@@ -62,12 +63,16 @@ export function consentSecurityHeaders(redirectUri, { allowLoopback = false } = 
   const https = /^https:\/\/[a-z0-9.-]+(:\d+)?$/u.test(origin);
   const loopback = allowLoopback &&
     /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/u.test(origin);
-  if (url.username || url.password || url.hash || (!https && !loopback)) {
+  const privateUse = privateUseScheme(url) && registeredRedirectUris.includes(redirectUri);
+  if (url.username || url.password || url.href.includes("#") || (!https && !loopback && !privateUse)) {
     throw new TypeError("invalid consent redirect origin");
   }
   return {
     ...INTERACTION_SECURITY_HEADERS,
     "content-security-policy": INTERACTION_SECURITY_HEADERS["content-security-policy"]
-      .replace("form-action 'self'", `form-action 'self' ${origin}`) + "; script-src 'self'; script-src-attr 'none'",
+      // Consent submits to the AS; form-action also governs the resulting
+      // redirect chain. A custom URI has an opaque origin, so name its exact
+      // registered scheme rather than serializing "null" or allowing all schemes.
+      .replace("form-action 'self'", `form-action 'self' ${privateUse ? url.protocol : origin}`) + "; script-src 'self'; script-src-attr 'none'",
   };
 }

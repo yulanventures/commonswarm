@@ -6,7 +6,21 @@ import { metadataUrlAllowed } from "./metadata-fetch.js";
 
 export const REGISTRATION_IDLE_SECONDS = 30 * 24 * 60 * 60;
 export const CLIENT_SCOPES = Object.freeze(["openid", "offline_access", "mcp"]);
+export const DEFAULT_DCR_LIMITS = Object.freeze({ perIp: 60, perHost: 300 });
 const LOOPBACKS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+// The mapping is also the branding domain for an explicitly allowed client.
+const NATIVE_CLIENT_SCHEMES = new Map([["cursor:", "cursor.com"]]);
+const DANGEROUS_SCHEMES = new Set(["javascript:", "vbscript:", "data:", "blob:", "file:", "about:"]);
+
+export function privateUseScheme(url) {
+  return !["http:", "https:"].includes(url.protocol) && !DANGEROUS_SCHEMES.has(url.protocol) &&
+    (url.protocol.includes(".") || NATIVE_CLIENT_SCHEMES.has(url.protocol));
+}
+
+function loopbackRedirect(url) {
+  return url.protocol === "http:" && LOOPBACKS.has(url.hostname);
+}
+
 const GENERIC_CC_SLD = new Set(["co", "com", "net", "org", "gov", "edu", "ac"]);
 const HOSTNAME_IN_TEXT = /\b([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+)\b/giu;
 
@@ -25,8 +39,17 @@ export function registrableDomain(hostname) {
 
 function redirectRegistrableDomains(metadata) {
   const domains = new Set();
+  const hasHttps = (metadata.redirect_uris ?? []).some(uri => new URL(uri).protocol === "https:");
   for (const uri of metadata.redirect_uris ?? []) {
-    domains.add(registrableDomain(new URL(uri).hostname));
+    const url = new URL(uri);
+    // An app scheme must not lend its brand to a web callback in the same list.
+    if (hasHttps && privateUseScheme(url)) continue;
+    // Private-use authorities identify an app route, not a DNS owner. Bind DCR
+    // branding to the known client domain or the reversed dotted scheme instead.
+    const host = privateUseScheme(url)
+      ? NATIVE_CLIENT_SCHEMES.get(url.protocol) ?? url.protocol.slice(0, -1).split(".").reverse().join(".")
+      : url.hostname;
+    domains.add(registrableDomain(host));
   }
   return domains;
 }
@@ -61,16 +84,18 @@ export function validateClientPolicy(metadata, nativeLoopbackEnabled) {
   if (metadata.token_endpoint_auth_method !== "none") {
     throw new errors.InvalidClientMetadata("only public clients are supported");
   }
-  if (metadata.application_type === "native" && !nativeLoopbackEnabled) {
+  if (metadata.application_type === "native" && !nativeLoopbackEnabled &&
+      !metadata.redirect_uris.some(uri => privateUseScheme(new URL(uri)))) {
     throw new errors.InvalidClientMetadata("native clients are disabled");
   }
   for (const uri of [...metadata.redirect_uris, ...metadata.post_logout_redirect_uris ?? []]) {
     const url = new URL(uri);
     const loopback = metadata.application_type === "native" && nativeLoopbackEnabled &&
-      url.protocol === "http:" && LOOPBACKS.has(url.hostname);
-    if (url.username || url.password || url.hash ||
-        (!loopback && (url.protocol !== "https:" || LOOPBACKS.has(url.hostname)))) {
-      throw new errors.InvalidClientMetadata("redirect URIs require HTTPS or enabled native loopback");
+      loopbackRedirect(url);
+    const privateUse = metadata.application_type === "native" && privateUseScheme(url);
+    if (url.username || url.password || url.href.includes("#") ||
+        (!privateUse && !loopback && (url.protocol !== "https:" || LOOPBACKS.has(url.hostname)))) {
+      throw new errors.InvalidClientMetadata("redirect URIs require HTTPS, a native private-use scheme or enabled native loopback");
     }
   }
   validateDcrBranding(metadata);
@@ -79,7 +104,7 @@ export function validateClientPolicy(metadata, nativeLoopbackEnabled) {
 // One container: fixed windows bound memory and registration write pressure.
 // Never evict a live bucket (which would allow key churn to reset a quota).
 // At capacity, fail closed until a window expires. Restart resets the limits.
-export function createRegistrationLimiter({ perIp = 10, perHost = 30,
+export function createRegistrationLimiter({ perIp = DEFAULT_DCR_LIMITS.perIp, perHost = DEFAULT_DCR_LIMITS.perHost,
   windowMs = 60 * 60 * 1000, maxKeys = 10_000 } = {}) {
   const buckets = new Map();
   return (ctx) => {
@@ -95,22 +120,49 @@ export function createRegistrationLimiter({ perIp = 10, perHost = 30,
     if (!Array.isArray(uris) || uris.length < 1 || uris.length > 10) {
       throw new errors.InvalidClientMetadata("register between one and ten redirect URIs");
     }
-    let hosts;
+    let urls;
     try {
-      hosts = [...new Set(uris.map((uri) => registrableDomain(new URL(uri).hostname)))];
+      urls = uris.map((uri) => new URL(uri));
     } catch { throw new errors.InvalidClientMetadata("invalid redirect URI"); }
-    const keys = [[`ip:${ctx.ip}`, perIp], ...hosts.map((host) => [`host:${host}`, perHost])];
-    const until = Math.min(...keys.map(([key]) => buckets.get(key)?.until ?? now + windowMs));
-    if (buckets.size + keys.filter(([key]) => !buckets.has(key)).length > maxKeys ||
-        keys.some(([key, limit]) => (buckets.get(key)?.count ?? 0) >= limit)) {
-      ctx.set("Retry-After", String(Math.max(1, Math.ceil((until - now) / 1000))));
-      throw new errors.InvalidRequest("registration rate limit exceeded", 429);
+    // Some MCP clients omit application_type or send web for native callbacks.
+    // Infer native only when every callback is private-use or HTTP loopback.
+    // validateClientPolicy still enforces the native loopback configuration.
+    if ((ctx.oidc.body.application_type === undefined || ctx.oidc.body.application_type === "web") &&
+        urls.every(url => privateUseScheme(url) || loopbackRedirect(url))) {
+      ctx.oidc.body.application_type = "native";
     }
-    for (const [key] of keys) {
+    // Loopback and private-use authorities do not identify an app's web origin.
+    // Charging them globally would cap every user of that app together.
+    const hosts = [...new Set(urls.filter(url => url.protocol === "https:" && !LOOPBACKS.has(url.hostname))
+      .map((url) => registrableDomain(url.hostname)))];
+    const keys = [[`ip:${ctx.ip}`, perIp, "per-ip"],
+      ...hosts.map((host) => [`host:${host}`, perHost, "per-redirect-host"])];
+    const exhausted = keys.filter(([key, limit]) => (buckets.get(key)?.count ?? 0) >= limit);
+    const atCapacity = buckets.size + keys.filter(([key]) => !buckets.has(key)).length > maxKeys;
+    if (exhausted.length || atCapacity) {
+      const until = exhausted.length
+        ? Math.max(...exhausted.map(([key]) => buckets.get(key).until))
+        : Math.min(...[...buckets.values()].map(bucket => bucket.until), now + windowMs);
+      const reason = exhausted.length ? [...new Set(exhausted.map(([, , kind]) => kind))].join(", ") : "capacity";
+      ctx.set("Retry-After", String(Math.max(1, Math.ceil((until - now) / 1000))));
+      throw new errors.InvalidRequest(`registration rate limit exceeded: ${reason}`, 429);
+    }
+    const reservation = keys.map(([key]) => {
       const bucket = buckets.get(key) ?? { count: 0, until: now + windowMs };
       bucket.count += 1;
       buckets.set(key, bucket);
-    }
+      return [key, bucket];
+    });
+    // Reserve synchronously before metadata validation/storage yields. Settle at
+    // provider completion, even if the peer disconnects during the store write.
+    // Keep bucket references so a late failure cannot debit a replacement window.
+    ctx.state.registrationSettle = (succeeded) => {
+      delete ctx.state.registrationSettle;
+      if (!succeeded) for (const [key, bucket] of reservation) {
+        bucket.count -= 1;
+        if (bucket.count === 0 && buckets.get(key) === bucket) buckets.delete(key);
+      }
+    };
     return randomBytes(24).toString("base64url");
   };
 }
