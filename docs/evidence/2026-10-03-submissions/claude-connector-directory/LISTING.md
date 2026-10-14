@@ -67,14 +67,16 @@ Exact current catalog from `supabase/functions/mcp/tools.ts:29` at the audited b
 
 | Tool | Title (also annotations.title) | readOnlyHint | destructiveHint | idempotentHint | openWorldHint |
 | --- | --- | --- | --- | --- | --- |
-| `claim_seat` | Claim a named seat | false | false | true | false |
+| `claim_seat` | Claim a named seat | false | true | true | false |
 | `whoami` | Show seat identity | true | false | true | false |
 | `check` | Check and acknowledge inbox | false | true | false | false |
-| `ask` | Ask workspace participants | false | false | true | false |
-| `note` | Share a workspace note | false | false | true | false |
-| `reply` | Reply to a signal | false | false | true | false |
-| `working_on` | Share current work | false | false | true | false |
+| `ask` | Ask workspace participants | false | true | true | false |
+| `note` | Share a workspace note | false | true | true | false |
+| `reply` | Reply to a signal | false | true | true | false |
+| `working_on` | Share current work | false | true | true | false |
 | `members` | List workspace participants | true | false | true | false |
+
+Updated 2026-10-14 to match live edge d518d4c9 (commit 5c7282e5): destructiveHint true on the five write tools; names and inputSchemas unchanged.
 
 **Reviewer instructions:** [REVIEWER-ACCESS.md](../../2026-10-03-reviewer-packet/REVIEWER-ACCESS.md), including sign-in, explicit one-step workspace creation, OAuth consent, both host paths, all eight calls, five positive/three negative cases, and HezLead ruling B: self-serve access plus the 24-hour dedicated-account offer; Tom's morning credential step is pending and does not block submission. Reviewer uses their own identity-provider and Claude/ChatGPT account. Source cannot prove both Google and GitHub are enabled for hosted OAuth.
 
