@@ -9,7 +9,6 @@ import {
   TaskSubmitted, TaskClosed, TaskReopened, CommandRejected,
 } from './events.js';
 
-/** Assert required payload fields are present, converting a malformed event into a typed halt (not a raw TypeError). */
 function req<T extends object>(payload: unknown, keys: readonly (keyof T)[], type: string, seq: number): T {
   if (!payload || typeof payload !== 'object') throw new StreamIntegrityError(`event "${type}" at seq ${seq} has a non-object payload`);
   for (const k of keys) {
@@ -28,7 +27,6 @@ export class UnknownEventTypeError extends Error {
   }
 }
 
-/** Thrown when a stream is malformed (e.g. a non-create event before the task exists). */
 export class StreamIntegrityError extends Error {
   constructor(message: string) {
     super(message);
@@ -74,9 +72,6 @@ export function reduceTask(prev: TaskState | null, env: EventEnvelope): TaskStat
   if (!prev) throw new StreamIntegrityError(`event "${env.type}" before TaskCreated (seq ${env.seq})`);
   const s = prev;
 
-  // Epoch is MONOTONIC: acquire/handoff/takeover strictly increase it. Validate
-  // after the payload has passed req(), so malformed input always produces the
-  // typed stream-integrity halt rather than a raw property-access error.
   function assertEpochIncrease(ep: number): void {
     if (typeof ep !== 'number' || ep <= s.epoch) {
       throw new StreamIntegrityError(`${env.type} at seq ${env.seq} has non-increasing epoch ${ep} (current ${s.epoch})`);
@@ -97,7 +92,6 @@ export function reduceTask(prev: TaskState | null, env: EventEnvelope): TaskStat
     case 'LeaseRenewed': {
       const p = req<LeaseRenewed>(env.payload, ['task_id', 'epoch', 'lease_expiry'], env.type, env.seq);
       if (p.epoch !== s.epoch) throw new StreamIntegrityError(`LeaseRenewed at seq ${env.seq} epoch ${p.epoch} != current ${s.epoch}`);
-      // Epoch unchanged; only the expiry moves. Lifecycle unchanged (active or awaiting_review).
       return { ...s, lease_expiry: p.lease_expiry };
     }
     case 'LeaseHandedOff': {
@@ -112,7 +106,6 @@ export function reduceTask(prev: TaskState | null, env: EventEnvelope): TaskStat
     }
     case 'TaskSubmitted': {
       const p = req<TaskSubmitted>(env.payload, ['task_id', 'epoch', 'branch', 'head_sha', 'evidence_set'], env.type, env.seq);
-      // Freeze the submission (a later submit supersedes it). Lease continues.
       return {
         ...s,
         lifecycle: 'awaiting_review',
@@ -132,7 +125,6 @@ export function reduceTask(prev: TaskState | null, env: EventEnvelope): TaskStat
       return { ...s, lifecycle: 'reopened', version: p.version, submission: null, owner: null, lease_expiry: null };
     }
     default: {
-      // Exhaustiveness guard; unreachable given the EVENT_TYPES check above.
       throw new UnknownEventTypeError(env.type, env.seq);
     }
   }

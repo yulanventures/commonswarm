@@ -32,7 +32,6 @@ export const LISTENER_MAIN_QUEUE_MAX = 200;
 export const LISTENER_DEFER_OVER_MIN = 1;
 export const LISTENER_DEFER_OVER_MAX = 10_000;
 
-/** The only route a listener may start. Parser, usage, and every refusal read this. */
 export const LISTENER_ROUTE_MODES = ["main"] as const;
 export type ListenerRouteMode = (typeof LISTENER_ROUTE_MODES)[number];
 export type ListenerRouteDecision = ListenerRouteMode;
@@ -46,7 +45,6 @@ export const LISTENER_STORED_ROUTE_DECISIONS = ["worker", "main"] as const;
 export type StoredListenerRouteDecision =
   (typeof LISTENER_STORED_ROUTE_DECISIONS)[number];
 
-/** Status JSON host_limits clauses for the only live route. */
 export const LISTENER_MAIN_HOST_LIMIT_CLAUSES = {
   host_configuration: "This listener never starts a model.",
   deny_canary_scope: "No provider worker is started, so no deny canary runs.",
@@ -158,7 +156,6 @@ export function listenerAttendingSentence(
   return `ATTENDING: ${orList(surfaces)}.`;
 }
 
-/** Main is the only live route; a split threshold is never valid. */
 export function decideListenerRoute(
   route: ListenerRouteMode,
   threshold: number | null,
@@ -188,7 +185,6 @@ export interface PendingMainEntry {
   attachmentCount?: number;
   createdAt: string;
   queuedAt: string;
-  /** True only when the delivery ledger is waiting for hook-surfaced observation. */
   observationPending?: true;
 }
 
@@ -275,7 +271,6 @@ function parseFile(raw: string, rejectUnknownKeys = false): PendingMainFile {
   return { version: 1, entries, droppedCount: row.droppedCount ?? 0 };
 }
 
-/** One bounded, locked queue beside status.json for messages reserved for the main session. */
 export class FilePendingMainQueue {
   readonly path: string;
   private readonly directory: string;
@@ -361,7 +356,6 @@ export class FilePendingMainQueue {
   }
 }
 
-/** Project one directed message into the local queue without carrying lease capabilities. */
 export function pendingMainEntry(
   signal: SignalRecord,
   principalId: string,

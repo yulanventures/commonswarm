@@ -57,19 +57,9 @@ const UUID_RE =
  * process keeps trying at `LISTENER_RESTART_SUSTAINED_MAX_MS` until it is stopped.
  */
 export const LISTENER_RESTART_MAX_ATTEMPTS = 5;
-/** First restart delay. */
 export const LISTENER_RESTART_INITIAL_MS = 1_000;
-/** Ceiling on the fast restart delay; wider than the read backoff cap on purpose. */
 export const LISTENER_RESTART_MAX_MS = 60_000;
-/**
- * Backoff ceiling after the fast attempts, for as long as the process lives.
- * Five minutes is the maximum this wait is allowed to be.
- */
 export const LISTENER_RESTART_SUSTAINED_MAX_MS = 5 * 60_000;
-/**
- * A runtime that reached ready and then kept running this long clears the
- * fast-attempt count, so the next outage starts at the short delay again.
- */
 export const LISTENER_RESTART_CLEAN_RUN_MS = 60_000;
 
 /**
@@ -81,16 +71,13 @@ export interface ListenerRestartPolicy {
   maxAttempts?: number;
   initialMs?: number;
   maxMs?: number;
-  /** Override for `LISTENER_RESTART_SUSTAINED_MAX_MS`. Clamped to five minutes. */
   sustainedMaxMs?: number;
-  /** Override for `LISTENER_RESTART_CLEAN_RUN_MS`. */
   cleanRunMs?: number;
   isRestartable?: (stop: ListenerRuntimeStop) => boolean;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   random?: () => number;
 }
 
-/** Full-jitter exponential restart delay; attempt is 1-based. */
 export function nextListenerRestartMs(
   attempt: number,
   policy: ListenerRestartPolicy = {},
@@ -103,7 +90,6 @@ export function nextListenerRestartMs(
   return Math.floor(exp * (0.5 + random() * 0.5));
 }
 
-/** Delay after the fast attempts. Never longer than five minutes. */
 export function sustainedListenerRestartMs(
   policy: ListenerRestartPolicy = {},
   random: () => number = Math.random,
@@ -113,10 +99,6 @@ export function sustainedListenerRestartMs(
   return Math.floor(cap * (0.5 + random() * 0.5));
 }
 
-/**
- * Fast exponential delay for the first `LISTENER_RESTART_MAX_ATTEMPTS` when
- * the caller did not set a hard ceiling; the sustained cap after that.
- */
 export function listenerRestartDelayMs(
   attempt: number,
   policy: ListenerRestartPolicy = {},
@@ -154,17 +136,13 @@ export interface ListenerSupervisorOptions {
   principalId: string;
   projectDirectory?: string;
   targetUrl?: string;
-  /** Host adapter id recorded in status metadata only. Default: grok. */
   provider?: ListenerProviderId;
-  /** Build version this supervisor can report while its control socket is live. */
   cswarmVersion?: string;
   permissionMode?: ListenerPermissionMode;
   routeMode?: ListenerRouteMode;
   deferOverChars?: number | null;
   now?: () => number;
-  /** Current credential expiry, including a successor adopted by a later attempt. */
   getCredentialExpiryMs?: () => number | null;
-  /** Null when renewal is unavailable; otherwise the next renewal due time. */
   getCredentialRenewalAt?: () => number | null;
   /**
    * Runs under starting.lock after the live-socket rejection check, before
@@ -184,7 +162,6 @@ export interface ListenerSupervisorOptions {
     onEvent: (event: ListenerRuntimeEvent) => void,
     listenerInstanceId: string,
   ) => Promise<ListenerRuntimeStop>;
-  /** Bounded restart for possibly-transient stops. Default: the constants above. */
   restart?: ListenerRestartPolicy;
   /**
    * Read-and-clear accessor for the newest worker stderr tail. The supervisor
@@ -194,7 +171,6 @@ export interface ListenerSupervisorOptions {
    * "error" was undiagnosable from the failing box's own log).
    */
   takeWorkerStderrTail?: () => string | null;
-  /** Read provider facts measured before the canary, including failed starts. */
   getProviderVersionNotice?: () => {
     runningVersion: string | null;
     lastMeasuredVersion: string;
@@ -209,7 +185,6 @@ export interface ListenerSupervisorOptions {
    * configured cap. Returns null when no turn has run yet.
    */
   getTurnBudgetMs?: () => number | null;
-  /** Live process-owned HTTP counters merged into every status snapshot. */
   getConnectionMetrics?: () => {
     connectionsOpened: number;
     connectionReuseRatio: number;
@@ -333,7 +308,6 @@ function fitWorkerStderrTailForLog(tail: string): string {
   }
 }
 
-/** Lifetime control socket + durable metadata around one listener runtime. */
 export async function runListenerSupervisor(
   options: ListenerSupervisorOptions,
 ): Promise<ListenerStatus> {
@@ -447,15 +421,6 @@ export async function runListenerSupervisor(
     state: ListenerStatus["state"],
     changes: Partial<ListenerStatus> = {},
   ) => {
-    /* A process that has stopped, or that is starting a fresh runtime attempt,
-       holds no delivery and is not watching the queue. Clearing HERE, keyed on
-       the state, is what keeps a later exit path from leaving the claim behind:
-       a stopped listener whose status still named a delivery in hand read
-       "Working on delivery X, claimed 3h ago", and its queue clock, which is
-       rendered against read time, read "the queue has not been empty since 3h
-       ago" from a process that stopped observing it 3h ago. Both review arms on
-       33cd24b raised the second one; the in-process restart path
-       (transition("starting")) was raised there too. */
     const notWatching = state === "starting" || state === "stopped" ||
       state === "failed";
     status = {
@@ -483,8 +448,6 @@ export async function runListenerSupervisor(
       transition("stopping");
       controller.abort();
     },
-    // Selected under starting.lock, after the live-socket rejection and
-    // before the socket can answer, before any status/event persistence.
     initialize: prepare
       ? async () => {
         const selected = await prepare(proposedInstanceId);
@@ -518,7 +481,6 @@ export async function runListenerSupervisor(
   };
 
   let lastWakePersistMs = 0;
-  /** Set when this attempt emits ready; cleared at the start of the next attempt. */
   let attemptReadyAtMs: number | null = null;
   const onEvent = (event: ListenerRuntimeEvent) => {
     if (event.type === "wake") {
@@ -657,9 +619,6 @@ export async function runListenerSupervisor(
         signal_id: event.signalId,
         status: event.status,
         failure_code: event.failureCode,
-        // Code comparison, not message matching (D-053). The budget rides
-        // only the timeout class so a reader can see what bound was hit — and
-        // it is the CLAMPED budget actually in force, not the configured cap.
         ...((): Record<string, number> => {
           if (event.failureCode !== "acptimeouterror") return {};
           const budget = options.getTurnBudgetMs?.();
@@ -844,8 +803,6 @@ export async function runListenerSupervisor(
       return;
     }
     if (event.type === "model_declared") {
-      // Outcome recorded either way: a silent best-effort failure is the
-      // D-090 family — information the next diagnosis needs, absent.
       log({
         ts: event.ts,
         event: "listener_model_declared",
@@ -943,12 +900,6 @@ export async function runListenerSupervisor(
         ...status,
         currentDeliverySignalId: null,
         currentDeliverySince: null,
-        /* Held back, NOT waiting to be claimed: the row keeps its live lease,
-           so the service cannot hand it to anyone until that lease expires.
-           Both review arms on 33cd24b measured the earlier wording counting it
-           among deliveries "waiting to be claimed". Newest first, deduplicated
-           on the id (a row can be released, redelivered and released again),
-           and bounded. */
         heldBackDeliveries: [
           { signalId: event.signalId, at: event.ts, reason: event.reason },
           ...(status.heldBackDeliveries ?? []).filter((entry) =>
@@ -985,7 +936,6 @@ export async function runListenerSupervisor(
         pendingDeliveryCountAt: null,
         currentDeliverySignalId: null,
         currentDeliverySince: null,
-        // An acknowledged row is answered and gone; drop just that one.
         heldBackDeliveries: (status.heldBackDeliveries ?? []).filter((entry) =>
           entry.signalId !== event.signalId
         ),
@@ -1054,12 +1004,6 @@ export async function runListenerSupervisor(
     let exhausted = false;
     let eligible = false;
     let stop: ListenerRuntimeStop;
-    // Each pass is a fresh runtime on the SAME instance id and control socket:
-    // prepare() ran once, so the delivery journal keeps its identity across a
-    // restart. options.run must build its own per-attempt resources — a
-    // listener model is single-use, because runListenerRuntime closes it on
-    // every exit. A transient stop does not end the process: after the fast
-    // attempts the delay stays at the sustained cap until stop aborts this sleep.
     for (;;) {
       attemptReadyAtMs = null;
       stop = await options.run(
@@ -1162,9 +1106,6 @@ export async function runListenerSupervisor(
           ? status.credentialCheckEdge ?? null : null,
         claimRetryCount: 0,
       });
-      // Record why it is down and why it stopped trying — a listener left down
-      // after exhausting restarts must be distinguishable from one that was
-      // never eligible for a restart at all.
       log({
         ts: stoppedAt,
         event: "listener_failed",
@@ -1238,7 +1179,6 @@ export async function effectiveListenerStatus(
   }
 }
 
-/** Derive a truthful dead-process view without changing the saved record. */
 export function uncleanListenerStatus(stored: ListenerStatus): ListenerStatus {
   const stoppedAt = new Date().toISOString();
   return { ...stored, state: "failed", updatedAt: stoppedAt, stoppedAt,

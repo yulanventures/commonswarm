@@ -29,7 +29,6 @@ export interface AdminCredentialLineage {
 }
 export interface AdminAccountState {
   client_approvals?: Record<string, AdminClientApproval>;
-  // Absent on pre-enrollment projections; no earlier command could create an attempt.
   connections?: Record<string, AdminConnectionAttempt>;
   routine?: AdminRoutineState;
   grants: Record<string, AdminGrant>; consents: Record<string, AdminConsent>;
@@ -133,7 +132,6 @@ export function parseAdminClientApprovalCommand(input: unknown): Extract<AdminCo
   return null;
 }
 
-/** Shared counter keys and ceilings, including identifiable refused attempts. */
 export function adminRatePolicy(actor: AdminActor, grant: AdminGrant, action: string, workspaceId: string | null, lineageId: string | null, requestedGrantId: string | null): { key: string; limit: number }[] {
   if (actor.kind === 'human' || actor.kind === 'system' ||
       (action === 'surrender_admin_delegation' && actor.kind === 'delegated_admin' && actor.grant_id === grant.grant_id && requestedGrantId === actor.grant_id)) return [];
@@ -153,7 +151,6 @@ export function adminRatePolicy(actor: AdminActor, grant: AdminGrant, action: st
 
 function subset<T>(a: readonly T[], b: readonly T[]): boolean { return a.every(x => b.includes(x)); }
 function narrowing(next: AdminManifest, prior: AdminGrant, now: number): boolean {
-  // A full-account grant can narrow to granular. No new future-space coverage.
   if (!adminManifestValid(next, now, false) || next.admin_identity_id !== prior.admin_identity_id ||
       next.connection_id !== prior.connection_id || next.client_id !== prior.client_id ||
       next.resource !== prior.resource || next.registry_version !== prior.registry_version ||
@@ -175,7 +172,6 @@ function narrowing(next: AdminManifest, prior: AdminGrant, now: number): boolean
   return Object.keys(next.issuance_limits).every(key => next.issuance_limits[key as keyof typeof next.issuance_limits] <= prior.issuance_limits[key as keyof typeof prior.issuance_limits]);
 }
 
-/** Account-only decisions. No routine admin operation is enabled by lane B. */
 export function decideAdminAuthority(command: AdminCommand, state: AdminAccountState, ctx: AdminDecisionContext): AdminDecision {
   const events: AdminAccountEvent[] = [];
   const grant = 'grant_id' in command ? state.grants[command.grant_id] : undefined;

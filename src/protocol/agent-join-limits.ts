@@ -62,7 +62,6 @@ function sameKeys(actual: readonly string[], expected: readonly string[]): boole
   return left.every((key, index) => key === right[index]);
 }
 
-/** The invite this page mints: the server's maximum seat cap and lifetime. */
 export function mintAgentJoinCredentialCommand(): MintAgentJoinCredentialCommand {
   const command: MintAgentJoinCredentialCommand = {
     kind: MINT_AGENT_JOIN_CREDENTIAL_KIND,
@@ -97,12 +96,10 @@ export function revokeAgentJoinCredentialCommand(
   return command;
 }
 
-/** Singular only for one. Every other count uses the plural. */
 export function joinSeatNoun(count: number): string {
   return count === 1 ? "agent" : "agents";
 }
 
-/** Sentences the result panel shows while Revoke is still on this page. */
 export function joinInviteBeforeDoneSentences(): readonly string[] {
   return [
     "Done leaves the invite active.",
@@ -111,11 +108,6 @@ export function joinInviteBeforeDoneSentences(): readonly string[] {
   ];
 }
 
-/**
- * Refusal copy for a live-invite ceiling. Null when `scope` is not one of the
- * two values the command edge sends. The numbers are the constants above.
- * There is no revoke control for an invite this page is not showing.
- */
 export function joinInviteLiveLimitMessage(scope: string): string | null {
   const limit = scope === "identity"
     ? AGENT_JOIN_LIVE_PER_USER_LIMIT
@@ -134,7 +126,6 @@ export function joinInviteLiveLimitMessage(scope: string): string | null {
   ].join(" ");
 }
 
-/** A mint whose response never arrived. The server may already have stored one. */
 export function joinInviteLostMintMessage(): string {
   return [
     "The answer did not come back.",
@@ -143,7 +134,6 @@ export function joinInviteLostMintMessage(): string {
   ].join(" ");
 }
 
-/** What this invite asks for. The numbers are the server limits, not a second list. */
 export function joinInviteLimitSentence(): string {
   const count = AGENT_JOIN_SEAT_CAP_MAX;
   return `Up to ${count} ${joinSeatNoun(count)} can join. This invite lasts ${AGENT_JOIN_TTL_MAX_HOURS} hours.`;

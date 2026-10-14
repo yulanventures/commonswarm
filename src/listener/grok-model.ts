@@ -50,25 +50,15 @@ export interface GrokListenerModelOptions {
    * renews the credential when due and clamps to what it can still cover.
    */
   promptTimeoutMs?: number | (() => Promise<number>);
-  /** Receives the worker's bounded stderr tail on child exit (local log only). */
   onWorkerStderrTail?: (tail: string) => void;
-  /** Receives each bounded permission-canary verdict for local diagnostics. */
   onCanaryAttempt?: ListenerCanaryAttemptCallback;
-  /** Receives one allowed newer-version notice for durable startup status. */
   onVersionNotice?: NonNullable<GrokAcpOpenOptions["onVersionNotice"]>;
-  /** Structured session updates for the ephemeral live-activity frame. */
   events?: HostSessionEvents;
 }
 
 const MAX_GROK_AUTH_BYTES = 256 * 1024;
 
 
-/**
- * Grok-backed listener model.
- *
- * Every ask shares the operator's worker session; provenance in the prompt
- * tells the worker who supplied each message.
- */
 export class GrokListenerModel implements ListenerModel {
   private readonly openSession: OpenGrokSession;
   private readonly permissionMode: ListenerPermissionMode;
@@ -88,7 +78,6 @@ export class GrokListenerModel implements ListenerModel {
     this.permissionMode = options.permissionMode ?? "deny";
   }
 
-  /** Initialize worker + deny canary before the listener reports ready. */
   async start(): Promise<void> {
     await this.validateLocalAuth();
     await this.ensureWorker();
@@ -169,7 +158,6 @@ export class GrokListenerModel implements ListenerModel {
     }
   }
 
-  /** Force Grok's measured shell permission path without changing worker cwd. */
   private async enablePromptsAfterGrokCanary(
     handle: GrokAcpHandle,
   ): Promise<void> {
@@ -208,7 +196,6 @@ export class GrokListenerModel implements ListenerModel {
     if (canaryError !== undefined) throw canaryError;
   }
 
-  /** Validate the operator's login artifact without copying or replacing its home. */
   private async validateLocalAuth(): Promise<void> {
     if (this.options.open) return;
     const parent = this.options.env ?? process.env;

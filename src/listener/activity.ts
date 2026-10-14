@@ -21,7 +21,6 @@ export type ActivityPublishErrorCode =
   | "activity_http_rejected"
   | "activity_publish_unknown";
 
-/** Stable local classification for every failure produced by the HTTP boundary. */
 export class AgentActivityPublishError extends Error {
   constructor(
     readonly code: Exclude<ActivityPublishErrorCode, "activity_publish_unknown">,
@@ -84,7 +83,6 @@ const TERMINAL_TOOL_STATUSES = new Set([
   "rejected",
 ]);
 
-/** Publish one bounded frame through the agent-authenticated activity edge. */
 export class AgentActivityEndpointTransport implements AgentActivityTransport {
   private readonly fetcher: typeof fetch;
 
@@ -185,7 +183,6 @@ export class ListenerActivityController {
     this.events = { update: (update) => this.onSessionUpdate(update) };
   }
 
-  /** Observe the listener state machine without changing its durable effect path. */
   onRuntimeEvent(event: ListenerRuntimeEvent): void {
     if (event.type === "ready") {
       this.setIdle();
@@ -198,7 +195,6 @@ export class ListenerActivityController {
     }
   }
 
-  /** Wrap one provider model so prompt and reply phases are visible. */
   instrumentModel(model: ListenerRuntimeModel): ListenerRuntimeModel {
     return {
       start: async () => await model.start(),
@@ -221,7 +217,6 @@ export class ListenerActivityController {
     };
   }
 
-  /** Stop pending local timers; a missing next frame becomes stale in the panel. */
   close(): void {
     this.closed = true;
     if (this.timer !== null) this.clock.clearTimer(this.timer);

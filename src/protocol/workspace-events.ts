@@ -130,8 +130,6 @@ export interface WorkspaceState {
   owners_count: number;
 }
 
-// ---- Reducer-complete payloads ---------------------------------------------
-
 export interface WorkspaceCreated {
   workspace_id: string;
   name: string;

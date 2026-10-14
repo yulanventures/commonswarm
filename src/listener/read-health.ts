@@ -10,7 +10,6 @@ export const LISTENER_READ_RETRY_HOUR_CAP = 25;
 export const LISTENER_READ_RETRY_MINUTE_CAP = 61;
 export const LISTENER_CLAIM_HOUR_CAP = 25;
 export const LISTENER_THROUGHPUT_LAPSE_RATIO = 0.5;
-/** Skip at most this many consecutive mode-change hours from lapse scoring. */
 export const LISTENER_MODE_CHANGE_SKIP_MAX = 1;
 
 export interface ListenerReadRetryHour {
@@ -77,7 +76,6 @@ const FAILURE_CODES = new Set<SignalReadFailureCode>([
   "unclassified",
 ]);
 
-/** Empty local health state for one new listener supervisor. */
 export function emptyListenerReadHealth(): ListenerReadHealth {
   return {
     currentEpisodeStartedAt: null,
@@ -148,7 +146,6 @@ function recordRetryMinute(
     .slice(-LISTENER_READ_RETRY_MINUTE_CAP);
 }
 
-/** Persist one classified retry and its current-episode counters. */
 export function recordListenerReadRetry(
   health: ListenerReadHealth,
   input: {
@@ -174,7 +171,6 @@ export function recordListenerReadRetry(
   };
 }
 
-/** Close exactly one retry episode and retain its bounded longest-episode facts. */
 export function recordListenerReadRecovery(
   health: ListenerReadHealth,
   input: {
@@ -219,7 +215,6 @@ function freezeClosedHourExpectedClaims(
   });
 }
 
-/** An hour is scored at the slowest cadence recorded in it. */
 export function recordListenerClaimCadence(
   health: ListenerReadHealth,
   cadenceMs: number,
@@ -245,7 +240,6 @@ export function recordListenerClaimCadence(
   };
 }
 
-/** Mark the current hour so throughput lapse scoring may skip it (capped). */
 export function recordListenerWakeModeChange(
   health: ListenerReadHealth,
   ts: string,
@@ -264,7 +258,6 @@ export function recordListenerWakeModeChange(
   };
 }
 
-/** Increment one local claim-throughput hour. */
 export function recordListenerClaim(
   health: ListenerReadHealth,
   ts: string,
@@ -302,7 +295,6 @@ function validCount(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-/** Validate and project the bounded nested status structure from local state. */
 export function parseListenerReadHealth(
   value: unknown,
   rejectUnknownKeys = false,
@@ -432,7 +424,6 @@ export function isListenerReadHealth(value: unknown): value is ListenerReadHealt
   return parseListenerReadHealth(value) !== null;
 }
 
-/** Derive rolling and completed-hour metrics without changing the durable file. */
 export function summarizeListenerReadHealth(
   health: ListenerReadHealth,
   readyAt: string | null,

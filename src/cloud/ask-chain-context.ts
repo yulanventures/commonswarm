@@ -54,7 +54,6 @@ function validatedIds(signalIds: readonly string[]): string[] {
   return ids;
 }
 
-/** A check starts a turn before any remote or presentation work can fail. */
 export async function startHandledAskTurn(
   profilePath: string,
   hostSessionId: string | undefined,
@@ -74,7 +73,6 @@ export async function startHandledAskTurn(
   });
 }
 
-/** Merge asks shown by a check only if that check still owns the current turn. */
 export async function mergeHandledAsks(
   profilePath: string,
   hostSessionId: string | undefined,
@@ -92,7 +90,6 @@ export async function mergeHandledAsks(
   });
 }
 
-/** Test/setup helper: begin a turn and populate it using production generation rules. */
 export async function replaceHandledAsks(
   profilePath: string,
   hostSessionId: string | undefined,
@@ -102,7 +99,6 @@ export async function replaceHandledAsks(
   await mergeHandledAsks(profilePath, hostSessionId, generation, signalIds);
 }
 
-/** Channel delivery adds to this turn and is deliberately not cleared by its receipt. */
 export async function appendHandledAsk(
   profilePath: string,
   hostSessionId: string,

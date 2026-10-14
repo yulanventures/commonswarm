@@ -272,7 +272,6 @@ export async function arrivalMachineHash(): Promise<string | null> {
   } catch { return null; }
 }
 
-/** Read-only host-id file inspection for resume's diagnostic wording. */
 export async function arrivalHostIdFileState(lockPath: string): Promise<"present" | "missing" | "unreadable"> {
   try {
     await readFile(join(dirname(lockPath), "host-id"), "utf8");
@@ -282,7 +281,6 @@ export async function arrivalHostIdFileState(lockPath: string): Promise<"present
   }
 }
 
-/** Stable across watcher restarts on this machine and state root. */
 export async function arrivalHostId(lockPath: string, machineHash?: string | null): Promise<string> {
   machineHash = machineHash === undefined ? await arrivalMachineHash() : machineHash;
   const path = join(dirname(lockPath), "host-id");
@@ -317,7 +315,6 @@ export async function arrivalHostId(lockPath: string, machineHash?: string | nul
         await handle.writeFile(`${JSON.stringify({ host_id: valid.host_id, machine_hash: machineHash })}\n`, "utf8");
       } finally { await handle.close(); }
       try {
-        // The host id is unchanged; the fingerprint only binds it from this start onward.
         await rename(temporary, path);
       } finally { await unlink(temporary).catch(() => undefined); }
       return valid.host_id;
@@ -478,7 +475,6 @@ export async function releaseArrivalWatchSeatLocks(
   await releaseArrivalWatchLock(paths.legacyLockPath, pid);
 }
 
-/** A matching live local lock plus the server's watcher id proves this host holds it. */
 export async function arrivalWatchLockIdentity(path: string): Promise<string | null> {
   try {
     const raw = await readFile(path, "utf8");
@@ -505,7 +501,6 @@ export async function releaseArrivalWatchLock(
   }
 }
 
-/** True when the lock file names a live pid. Never pgrep; the lock path is the evidence. */
 export async function arrivalWatchLockHeld(path: string): Promise<boolean> {
   try {
     const raw = await readFile(path, "utf8");
@@ -595,7 +590,6 @@ export function fileArrivalCursorStore(options: {
   };
 }
 
-/** True when the snippet dropped text, i.e. the one-line body exceeded the cap. */
 export function arrivalSnippetWasCut(body: string): boolean {
   return arrivalOneLine(body).length > ARRIVAL_SNIPPET_MAX;
 }
@@ -611,9 +605,6 @@ export function arrivalFullTextCommand(workspaceId: string): string {
   return `cswarm inbox --workspace-id ${workspaceId}`;
 }
 
-/* A snippet is a preview, and a preview must say where the whole text is. The
- * numbers are the run-time lengths, never typed copy, so the phrase cannot drift
- * from ARRIVAL_SNIPPET_MAX. Empty when nothing was cut. */
 export function arrivalSnippetSuffix(
   notification: Pick<ArrivalNotification, "snippet" | "body" | "workspace_id">,
 ): string {
@@ -623,7 +614,6 @@ export function arrivalSnippetSuffix(
   return ` (${shown} of ${total} chars; full text: ${arrivalFullTextCommand(notification.workspace_id)})`;
 }
 
-/** Collapse a message body to one bounded, terminal-safe notification snippet. */
 export function arrivalSnippet(body: string): string {
   const oneLine = arrivalOneLine(body);
   if (oneLine.length <= ARRIVAL_SNIPPET_MAX) return oneLine;
@@ -638,7 +628,6 @@ function arrivalOneLine(body: string): string {
   return oneLine;
 }
 
-/** The exact CLI shape needed to answer the signal named by a notification. */
 /* Matches the hook's reply hint deliberately. The url and anon key come from the
  * agent's saved target, so repeating them here only bloated every notification —
  * the anon key is a JWT, and a monitor line carrying it is unreadable on a phone
@@ -651,7 +640,6 @@ export function arrivalReplyCommand(
   return `cswarm reply ${signalId} "<answer>" --workspace-id ${workspaceId}`;
 }
 
-/** Build the stable fields shared by readable and JSON monitor output. */
 export function arrivalNotification(
   signal: SignalRecord,
   workspaceId: string,
@@ -671,7 +659,6 @@ export function arrivalNotification(
   };
 }
 
-/** Render exactly one readable line for one monitor notification. */
 export function formatArrivalNotification(
   notification: ArrivalNotification,
 ): string {
@@ -687,7 +674,6 @@ function notifyWriteError(error: Error): Error {
     : error;
 }
 
-/** Write and flush one monitor line; a dead pipe becomes a typed terminal stop. */
 export async function writeArrivalMonitorLine(
   line: string,
   stream: NodeJS.WriteStream = process.stdout,
@@ -730,25 +716,13 @@ function assertCursorPage(page: AgentSignalPage): void {
   }
 }
 
-/**
- * Read-only arrival loop. It never imports or calls delivery claim/ack code.
- * The cursor is saved after each successfully emitted line, so a normal restart
- * resumes after that line while messages received during downtime remain newer.
- *
- * A `wake` hint on the inbox page it already reads is optional. With a topic it
- * waits on the shared WakeSubscriber: a wake does one read; while subscribed
- * the only timer is the 5-minute reconcile; CHANNEL_ERROR/CLOSED return the
- * existing 60 s poll. A server without `wake` keeps today's poll unchanged.
- */
 export async function runArrivalWatch(options: {
   workspaceId: string;
   principalId: string;
   store: ArrivalCursorStore;
   readPage(request: ArrivalWatchPageRequest): Promise<AgentSignalPage>;
   emit(signal: SignalRecord): Promise<void>;
-  /** Runs after one page's lines were emitted, with only those lines. */
   afterEmitBatch?: (signals: readonly SignalRecord[]) => Promise<void> | void;
-  /** Runs once after the first safe page establishes the watcher cursor. */
   onReady?: () => Promise<void> | void;
   onRetry?: (error: Error, delayMs: number) => void;
   onRecovery?: () => void;
@@ -757,10 +731,8 @@ export async function runArrivalWatch(options: {
   pollMs?: number;
   random?: () => number;
   now?: () => number;
-  /** Shared Realtime subscriber. Absent: poll only, as before this lane. */
   wake?: WakeHandle;
   reconcileMs?: number;
-  /** Present only for the CLI monitor; other callers retain their wait behavior. */
   stdoutConsumer?: StdoutConsumerAdapter;
   stdoutCheckIntervalMs?: number;
 }): Promise<ArrivalWatchStop> {
@@ -843,7 +815,6 @@ export async function runArrivalWatch(options: {
     wake.hasTopic &&
     wake.snapshot(now()).mode === LISTENER_WAKE_MODE_PUSH;
 
-  /** Poll cadence while not subscribed; 5-minute reconcile while push. */
   const waitCapMs = (): number => {
     if (pushMode()) return reconcileMs;
     return nextIdlePollMs(pollMs, emptyIdleStreak, IDLE_POLL_MAX_MS);
@@ -855,7 +826,6 @@ export async function runArrivalWatch(options: {
     try {
       wake.setTopic(topic);
     } catch {
-      // Parsed hints are valid; a closed subscriber is ignored.
     }
   };
 
@@ -880,7 +850,6 @@ export async function runArrivalWatch(options: {
           ...(options.signal ? { signal: options.signal } : {}),
         });
         if (cancelled() || reason !== "deadline" || now() >= until) break;
-        // A deadline that has already passed must still yield to cancellation.
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
     }
@@ -919,17 +888,6 @@ export async function runArrivalWatch(options: {
       });
       assertCursorPage(page);
       applyWakeHint(page);
-      /* THE RECIPIENT SET, not the scalar column.
-       *
-       * RETIRED 2026-09-05: this refused any row whose `to_agent` was not this
-       * principal. From L2 (merge 060ff67) the read edge returns a signal to
-       * EVERY agent the sender named, and the scalar column holds only the
-       * first, so a signal naming this agent at position 1 made a correct read
-       * throw here. That was reachable in production before this lane; waking
-       * every recipient is what makes it routine.
-       *
-       * The undirected arm is unchanged: `to` and `to_agent` both null is the
-       * broadcast question and a multi-recipient signal answers it "no". */
       if (page.signals.some((row) =>
         row.workspace_id !== options.workspaceId ||
         !(

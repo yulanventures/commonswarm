@@ -67,12 +67,9 @@ export interface CommandHttpResponse extends StoredResponse {
   horizon_expires_at?: string | null;
   successors_remaining?: number | null;
   revoked_at?: string;
-  /** Grant-resume outcome. Neither field is a credential, so both replay. */
   renewal_grant_id?: string;
   resumed_at?: string;
-  /** The channel a channel_create/rename/archive settled on. */
   channel?: ChannelRow;
-  /** Present on acquire_agent_session; monotone generation from the server. */
   generation?: number;
 }
 
@@ -94,7 +91,6 @@ export type ConnectCommand =
     kind: "create_agent_principal";
     name: string;
     model?: string;
-    /** Sent only when the caller explicitly opts in. Never sent as false. */
     allow_duplicate_name?: true;
   }
   | { kind: "enable_agent_management"; principal_id: string }
@@ -194,14 +190,6 @@ export interface ChannelCommandResult {
   channel: ChannelRow;
 }
 
-/**
- * A refused channel command.
- *
- * D-053: callers branch on `status` and on `code`, which is the server's own
- * stable `error` string. Nothing branches on `message` — the message is
- * rendered and never read, which is exactly what lets the edge improve its
- * wording without changing what the CLI does.
- */
 export class ChannelCommandError extends Error {
   constructor(
     readonly status: number,
@@ -213,21 +201,6 @@ export class ChannelCommandError extends Error {
   }
 }
 
-/**
- * Turn a refused channel command into the sentence the person who typed it
- * reads.
- *
- * The command edge answers every VALIDATION refusal with a `message` it
- * generated from the constants its validator reads — the slug rule, the
- * reserved names, the field list, the archived-channel reason. Rendering that
- * verbatim is the whole point: it is the one copy of those rules, and a second
- * copy here would be the drift this codebase keeps measuring.
- *
- * A refusal with NO message did not reach that validator. On a deployment that
- * predates channels the envelope layer answers a bare `invalid_request` for a
- * command kind it does not know, which is the reachable cause and the one the
- * fallback names.
- */
 export function channelCommandError(
   status: number,
   body: unknown,
@@ -280,7 +253,6 @@ export function channelCommandError(
   );
 }
 
-/** Bounds the server's own TTL window locally, so a typo fails before a credential exists. */
 export const CAPABILITY_MIN_TTL_MS = 60_000;
 export const CAPABILITY_MAX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -290,18 +262,12 @@ export interface PostSignalCommand {
   kind: "post_signal";
   signal_kind: SignalKind;
   body: string;
-  /** Human recipient; mutually exclusive with to_agent_principal_id. */
   to_user_id: string | null;
-  /** Agent recipient; mutually exclusive with to_user_id. Always sent (null when absent). */
   to_agent_principal_id: string | null;
-  /** Correlates a reply to the signal it answers. Always sent (null when absent). */
   in_reply_to: string | null;
-  /** Declares the delivered ask this ask follows. Ask-only and omitted for a root ask. */
   parent_signal_id?: string;
-  /** Outcome attached only to a private reply. Absent remains valid for old clients. */
   reply_status?: import("./reply-status.js").ReplyStatus;
   about: string | null;
-  /** Ordered, immutable references to committed workspace file versions. */
   attachments?: Array<{ file_id: string; version_n: number }>;
   until_ms?: number;
   /**
@@ -314,15 +280,11 @@ export interface PostSignalCommand {
    * and its `exactKeys` check refuses a key it was not expecting. `sendSignal`
    * below therefore spreads each one only when the caller set it.
    */
-  /** Slug of the channel to file the signal in. */
   channel?: string;
-  /** Id of the undirected signal a thread reply is rooted on. */
   thread_root_id?: string;
-  /** Send a thread reply to the thread's channel as well. Needs thread_root_id. */
   broadcast_to_channel?: boolean;
 }
 
-/** Server-stamped same-owner vs cross-owner relation for host wake policy. */
 export type SenderOwnerRelation = "same_owner" | "cross_owner" | "unknown";
 
 export interface SignalRecord {
@@ -333,16 +295,13 @@ export interface SignalRecord {
   to: string | null;
   to_agent: string | null;
   in_reply_to: string | null;
-  /** Null for non-replies and replies written by clients predating reply status. */
   reply_status?: import("./reply-status.js").ReplyStatus | null;
   about: string | null;
   kind: SignalKind;
   body: string;
-  /** Absent on older servers; new readers normalize absence to an empty list. */
   attachments?: import("./attachments.js").SignalAttachment[];
   until: string;
   created_at: string;
-  /** Positive hop count for a follow-up ask. Absent means a root or an older row/server. */
   chain_hop?: number;
   /**
    * Present on agent-authenticated reads from a capable edge. Absent from older
@@ -379,11 +338,9 @@ export interface SignalRecord {
   recipients?: SignalRecipientRef[];
 }
 
-/** One entry in a signal's recipient list, as the read view builds it. */
 export interface SignalRecipientRef {
   kind: "user" | "agent";
   id: string;
-  /** Where the sender put them, counting from 0. */
   position: number;
 }
 
@@ -395,10 +352,8 @@ export interface SignalRecipientRef {
  */
 export const SIGNAL_REQUEST_TIMEOUT_MS = 30_000;
 
-/** Three total tries give transient failures two chances to clear without hiding an outage. */
 export const SIGNAL_WRITE_MAX_ATTEMPTS = 3;
 
-/** The first retry waits 500ms; the second doubles to 1s before jitter is applied. */
 export const SIGNAL_WRITE_RETRY_BASE_MS = 500;
 
 export interface PostSignalRequest {
@@ -417,18 +372,13 @@ export interface PostSignalRequest {
 export interface PostSignalResult {
   httpStatus: number;
   response: CommandHttpResponse;
-  /** Total write attempts, including the successful or final failed attempt. */
   attempts: number;
-  /** True when at least one transient failure was retried. */
   retried: boolean;
 }
 
 export interface ThinCommandClientOptions {
-  /** Test seam for deterministic jitter; production uses Math.random. */
   signalRetryRandom?: () => number;
-  /** Test seam for the fixed production backoff base. */
   signalRetryBaseMs?: number;
-  /** Test seam for the fixed production application deadline. */
   signalRequestTimeoutMs?: number;
 }
 
@@ -444,7 +394,6 @@ export class CommandHttpError extends Error {
     readonly status: number,
     message = `command failed (HTTP ${status})`,
     readonly code?: string,
-    /** The parsed refusal is retained only for a caller that owns its rendering. */
     readonly response?: unknown,
   ) {
     super(message);
@@ -481,10 +430,6 @@ export class ReauthenticationRequired extends CommandHttpError {
   }
 }
 
-/**
- * Creating a workspace is the one refusal a stranger meets before they have any
- * context, so it carries a sentence instead of a status code.
- */
 export class CreateWorkspaceError extends Error {
   constructor(
     readonly status: number,
@@ -496,10 +441,6 @@ export class CreateWorkspaceError extends Error {
   }
 }
 
-/**
- * Turns a refused create_workspace response into something the person who typed
- * the command can act on, rather than a raw HTTP status.
- */
 export function createWorkspaceError(
   status: number,
   body: unknown,
@@ -513,7 +454,6 @@ export function createWorkspaceError(
     return new CreateWorkspaceError(
       status,
       code,
-      /* Closing one live workspace now frees a slot; name the exact confirmed command. */
       `${
         limit === null
           ? "You have already created as many workspaces as this account allows."
@@ -658,7 +598,6 @@ export function capabilityCommandError(
   );
 }
 
-/** Bounds the name here so a typo is answered locally, in the same words the server uses. */
 export function assertWorkspaceName(value: string): void {
   if (value.length === 0) {
     throw new Error("a workspace name is required");
@@ -784,7 +723,6 @@ async function parsedJson(response: Response): Promise<unknown> {
   }
 }
 
-/** A genuine cancellation error that is never wrapped as a transport failure. */
 function signalAbortError(): Error {
   const error = new Error("signal request aborted by the caller");
   error.name = "AbortError";
@@ -826,7 +764,6 @@ async function raceSignalDeadline<T>(
   return await Promise.race(arms);
 }
 
-/** Exponential retry spacing with ±50% jitter prevents fleet-wide retry waves. */
 function signalRetryDelayMs(
   retry: number,
   baseMs: number,
@@ -874,7 +811,6 @@ export async function declareAgentModel(
     model: string | null;
     credential: string;
     commandId?: string;
-    /** Caller cancellation (the listener's stop signal); aborts the fetch. */
     signal?: AbortSignal;
   },
   fetcher: typeof fetch = fetch,
@@ -959,7 +895,6 @@ export class ThinCommandClient {
     }
 
     if (response.status === 403) {
-      // Forbidden responses carry no actionable client-side distinction.
       throw new CommandHttpError(403, `command failed (HTTP 403)`, "forbidden");
     }
     const raw = await parsedJson(response);
@@ -1066,13 +1001,10 @@ export class ThinCommandClient {
     }
 
     if (creating && !response.ok) {
-      // The one connect command whose refusals do differ for the caller: the
-      // limit is recoverable, a closed front door is not. Read the body once.
       let body: unknown = null;
       try {
         body = await parsedJson(response);
       } catch (error) {
-        // A body that never arrived is a transport fact, not a refusal.
         if (error instanceof CommandTransportError) throw error;
       }
       throw createWorkspaceError(response.status, body);
@@ -1179,7 +1111,6 @@ export class ThinCommandClient {
       try {
         body = await parsedJson(response);
       } catch (error) {
-        // A body that never arrived is a transport fact, not a refusal.
         if (error instanceof CommandTransportError) throw error;
       }
       throw capabilityCommandError(response.status, body, verb);
@@ -1286,7 +1217,6 @@ export class ThinCommandClient {
 
   async sendSignal(request: PostSignalRequest): Promise<PostSignalResult> {
     const commandId = request.commandId ?? newCommandId();
-    // New clients always send both target fields and in_reply_to (null when absent).
     const command: PostSignalCommand = {
       kind: "post_signal",
       signal_kind: request.command.signal_kind,

@@ -35,10 +35,6 @@ function agentDeliveryReceipt(
   return !humanReceipt(receipt);
 }
 
-/**
- * The line that replaces "none" when the server cut the list. "none" is a
- * claim about the whole roster; a cut section can only speak for what it shows.
- */
 function rosterCutLine(hidden: number, shown: number): string | null {
   if (hidden === 0) return null;
   return `${hidden}${shown === 0 ? "" : " more"} not shown (roster cut).`;
@@ -91,7 +87,6 @@ function newAskCommand(
   return `cswarm ask "<question>" --to ${receipt.recipient_agent_principal_id} --workspace-id ${report.workspaceId}`;
 }
 
-/** Make each delivery state lead to the sender's next useful action. */
 export function renderSignalReceiptReport(
   report: SignalReceiptReport,
   nowMs: number = Date.now(),
@@ -123,9 +118,6 @@ export function renderSignalReceiptReport(
     const seenTotal = report.broadcast_roster?.members.seen ?? seenMembers.length;
     const agentTotal = report.broadcast_roster?.agents.total ?? agents.length;
     const agentSeenTotal = report.broadcast_roster?.agents.seen ?? seenAgents.length;
-    // Per-section remainder from the uncapped totals. With 100 members and 60
-    // seen the capped list is 50 seen and 0 not-seen; "Not-seen members: none"
-    // would be false, so the section says how many the cut hid instead.
     const hidden = broadcastRosterHiddenCounts(report);
     const memberLabel = (receipt: HumanDeliveryReceipt): string =>
       receipt.display_name ?? receipt.recipient_user_id;
@@ -271,7 +263,6 @@ export function renderSignalReceiptReport(
   return [...replySections, ...humanSections, ...sections].join("\n\n");
 }
 
-/** Keep the CLI's machine state explicit while retaining every ledger field. */
 export function signalReceiptJsonPayload(
   report: SignalReceiptReport,
   nowMs: number = Date.now(),

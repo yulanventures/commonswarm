@@ -76,7 +76,6 @@ function clientKind(row: AgentPresenceRow | null): AgentPresenceClientKind {
   }
 }
 
-/** Classify raw presence facts without reading clocks, files, or the network. */
 export function classifyAgentPresence(
   row: AgentPresenceRow | null,
   now: number,

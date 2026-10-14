@@ -1,12 +1,3 @@
-/*
- * Pure policy for the reserved workspace-brain file namespace.
- *
- * The name is the durable pointer. Normal files keep the fixed 20-version cap,
- * while a brain topic keeps a rolling window of 20 live versions. Pending
- * uploads are counted separately because bytes do not become a version until
- * commit.
- */
-
 export const BRAIN_FILE_PREFIX = "brain--";
 export const BRAIN_FILE_SUFFIX = ".md";
 export const BRAIN_TOPIC_MAX_LENGTH =
@@ -74,11 +65,6 @@ export function fileVersionPreconditionMessage(
   return `${current}; the request required version ${requiredVersion}, so the new version was not saved`;
 }
 
-/**
- * Reduces the locked database counts into the next version-window action.
- * A brain create is blocked only by 20 unexpired pending uploads. At commit,
- * retire enough of the oldest live versions to leave room for this version.
- */
 export function planFileVersionWindow(
   name: string,
   liveCount: number,

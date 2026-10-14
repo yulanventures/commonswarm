@@ -64,7 +64,6 @@ const CONTENT_TYPES: ReadonlyMap<string, string> = new Map([
   [".tar.gz", "application/gzip"],
 ]);
 
-/** Longest-suffix match so `.tar.gz` wins over a hypothetical `.gz` entry. */
 export function contentTypeForName(name: string): string | null {
   const lower = name.toLowerCase();
   let best: string | null = null;
@@ -82,7 +81,6 @@ export function allowedExtensionList(): string {
   return [...CONTENT_TYPES.keys()].join(", ");
 }
 
-/** A refusal the server is entitled to make; `code` is the stable server error string. */
 export class FileCommandRefused extends Error {
   override name = "FileCommandRefused";
   constructor(
@@ -128,7 +126,6 @@ export interface FileVersionCommitResult {
   sha256: string | null;
   sha256_note: string;
   reference: string;
-  /** Present only when a brain-topic commit rolled the live window. */
   retired_version_n?: number;
 }
 
@@ -141,7 +138,6 @@ export interface FileDownloadUrlResult {
   download_path: string;
   download_url_expires_in_seconds: number;
   content_warning: string;
-  /** Additive in server 0.1.48; absent during an edge-before-client rollout. */
   version_state?: "live" | "retired";
   live_version_count?: number | string;
   retired_version_count?: number | string;
@@ -174,7 +170,6 @@ export interface FileListRow {
   created_at: string;
   committed_at: string | null;
   tombstoned_at: string | null;
-  /** Additive in migration 20260902000005; older servers omit both fields. */
   live_version_count?: number | string;
   retired_version_count?: number | string;
 }
@@ -202,7 +197,6 @@ export interface RetryBudgetOptions {
 interface SendOptions {
   target: CloudTarget;
   workspaceId: string;
-  /** Human access token or swm_agt_ token — the command surface takes either. */
   credential: string;
   fetcher?: typeof fetch;
   commandId?: string;
@@ -331,11 +325,6 @@ export function fileRestore(
   });
 }
 
-/**
- * The signed paths in create/download responses are relative to the deployment
- * URL. The client composes the absolute URL from the saved target. The record
- * of that choice is docs/evidence/2026-08-18-file-artifacts-s1/README.md.
- */
 export function absoluteStorageUrl(target: CloudTarget, path: string): string {
   if (!path.startsWith("/")) {
     throw new FileTransportError(
@@ -540,7 +529,6 @@ async function fetchWithDeadline<T>(
   }
 }
 
-/** Agent-credential list via the read function (resource: "files"). */
 export async function listFilesAsAgent(
   target: CloudTarget,
   credential: string,
@@ -615,8 +603,6 @@ export async function listFilesAsHuman(
   let response: Response;
   let rawBody: string | null;
   try {
-    /* Human and agent lists use the same body-covering deadline. This path was
-     * the missed sibling in the first read-deadline fix. */
     ({ response, body: rawBody } = await fetchWithDeadline(
       restFetcher,
       url.toString(),

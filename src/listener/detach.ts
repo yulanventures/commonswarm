@@ -16,20 +16,14 @@ export interface ListenerChildSpec {
   permissionMode: "deny" | "allow";
   provider?: "grok" | "opencode" | "claude" | "codex";
   stateDirectory?: string;
-  /** Grok binary override (provider grok). */
   executable?: string;
-  /** OpenCode binary override (provider opencode). */
   opencodeExecutable?: string;
-  /** Claude ACP bridge override (provider claude). */
   claudeExecutable?: string;
-  /** Codex ACP bridge override (provider codex). */
   codexExecutable?: string;
   model?: string;
   /** Grok-only; must not be set for opencode, claude, or codex. */
   effort?: string;
-  /** Validated --turn-budget duration string, forwarded verbatim. */
   turnBudget?: string;
-  /** Validated --poll-interval duration string, forwarded verbatim. */
   pollInterval?: string;
   route?: "main";
   deferOver?: number;
@@ -42,7 +36,6 @@ export type ListenerSpawn = (
   options: SpawnOptions,
 ) => ChildProcess;
 
-/** Validate executable paths with the syntax of the platform that will spawn them. */
 export function isNativeAbsolutePath(
   value: string,
   platform: NodeJS.Platform = process.platform,

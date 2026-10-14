@@ -60,7 +60,6 @@ function fullyDecoded(value: string): string {
   throw new Error("documentUrl has excessively nested percent-encoding");
 }
 
-/** Build the complete message that a human pastes into a fresh agent session. */
 export function h0AgentPaste(input: H0AgentPasteInput): string {
   if (!JOIN_CREDENTIAL_RE.test(input.joinCredential)) {
     throw new Error("joinCredential must be swm_join_ followed by 43 base64url characters");

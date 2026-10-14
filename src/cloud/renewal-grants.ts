@@ -94,7 +94,6 @@ function parseGrant(value: unknown): RenewalGrantStatus {
   };
 }
 
-/** Read member-scoped renewal grants through the read edge. */
 export async function readRenewalGrants(
   target: CloudTarget,
   credential: string,
@@ -165,7 +164,6 @@ function orList(items: readonly string[]): string {
  */
 export const STANDING_RESUME_ACTORS_SENTENCE = orList(STANDING_RESUME_ACTORS);
 
-/** Everything a standing grant does, one rule per enforced behaviour. */
 export const STANDING_GRANT_RULES: readonly string[] = [
   "Access does not expire.",
   `${STANDING_IDLE_PAUSE_DAYS} days with no use pauses it; ${STANDING_RESUME_ACTORS_SENTENCE} can resume it.`,

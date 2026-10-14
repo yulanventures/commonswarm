@@ -18,7 +18,6 @@ const CLAUDE_AUTH_FAILURE_RE =
 const CLAUDE_CANARY_TIMEOUT_RE =
   /^ACP request timed out: session\/prompt(?: \(failed \d+ attempts\))?$/;
 
-/** Assign a stable local reason at the Claude provider boundary. */
 export function classifyClaudeCanaryFailure(
   detail: string | null | undefined,
   typedReasonCode?: string | null,
