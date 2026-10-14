@@ -608,7 +608,6 @@ export function normalizedFeedbackBody(
   return { ok: true, body: trimmed };
 }
 
-/** Flat string map, bounded serialized — context is descriptive, never large. */
 export function normalizedFeedbackContext(
   value: unknown,
 ): { ok: true; context: Record<string, string> | null } | { ok: false; message: string } {
@@ -627,8 +626,6 @@ export function normalizedFeedbackContext(
   }
   if (entries.length === 0) return { ok: true, context: null };
   const serialized = JSON.stringify(Object.fromEntries(entries));
-  // BYTES, not characters: the field is named _MAX_BYTES and this bounds what lands
-  // in jsonb. length alone let a 1446-char CJK context store 4643 bytes (both arms).
   if (new TextEncoder().encode(serialized).length > FEEDBACK_CONTEXT_MAX_BYTES) {
     return { ok: false, message: `feedback context must serialize to at most ${FEEDBACK_CONTEXT_MAX_BYTES} bytes` };
   }
@@ -1407,8 +1404,6 @@ export function decideWorkspace(
           'the continuous-renewal horizon has passed; a human must reauthorise this run',
         );
       }
-      // A timeboxed row whose horizon exceeds the maximum, or a row whose
-      // nullability disagrees with its kind, is refused rather than honoured.
       const timeboxedHorizonValid = grant.kind === 'timeboxed'
         && Number.isFinite(grant.horizon_expires_at)
         && grant.horizon_expires_at !== null

@@ -395,7 +395,6 @@ export function decideTodo(state: HouseholdTodoState, command: TodoCommand, ctx:
     const action = command.action;
     if (!todo.assignee || todo.assignee.kind !== 'agent' || !isOpen(todo) || todo.queue_rank === null) return refuse('not_in_queue');
     const fact = agent(todo.assignee.id);
-    // Binding ruling R7 supersedes C's original-gate-setter exception.
     if (!fact || fact.owner_user_id !== actor.user_id) return refuse('owner_only');
     if (fact.revoked_at !== null) return refuse('assignee_removed');
     if (action.kind === 'move') {

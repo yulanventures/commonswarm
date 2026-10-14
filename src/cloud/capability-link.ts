@@ -47,17 +47,9 @@ export function capabilitySiteOrigin(
   explicit: string | undefined,
   environmental: string | undefined,
 ): string {
-  // Named in every message below, because the dangerous case is the one the operator
-  // cannot see: CSWARM_SITE_ORIGIN is set somewhere else and appears nowhere in the
-  // command they typed. "--site is wrong" would send them looking at the wrong thing.
   const source = explicit !== undefined ? "--site" : "CSWARM_SITE_ORIGIN";
   const raw = (explicit ?? environmental ?? CAPABILITY_SITE_ORIGIN).trim();
   if (!raw) {
-    // `source`, not a hardcoded name. `--site ""` and `--site "  "` reach this line with
-    // explicit === "" — the CLI's parser hands an empty flag value through verbatim — and
-    // the message here used to say "--site is required when CSWARM_SITE_ORIGIN is set to
-    // an empty value" in that case too, sending an operator who had just typed --site off
-    // to inspect an environment variable that was not involved. It is dead.
     throw new Error(
       `${source} is empty; it must be the site's base origin, for example ${CAPABILITY_SITE_ORIGIN}${
         explicit === undefined ? ", or unset it to use the default" : ""
@@ -96,8 +88,6 @@ export function capabilitySiteOrigin(
       }, or http://localhost / http://127.0.0.1. The link this prints is a live credential for one work item, so it may only point somewhere CommonSwarm serves. Opening /see on the site returns 404.`,
     );
   }
-  // A port would still be a CommonSwarm host, but nothing CommonSwarm serves listens on
-  // one, so it is a typo rather than a deployment.
   if (!loopback && parsed.port !== "") {
     throw new Error(
       `${source} must not carry a port; a CommonSwarm site is served on the default https port`,

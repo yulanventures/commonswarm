@@ -1,5 +1,4 @@
 /// <reference types="node" />
-// Proposed values pinned by lane B0: one registry for consent and enforcement.
 import { createHash } from 'node:crypto';
 import { isAgentScopeDenylisted } from './workspace-commands.js';
 export const ADMIN_RESOURCE = 'https://api.commonswarm.com/admin';

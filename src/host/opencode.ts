@@ -58,7 +58,6 @@ import {
   type ProviderVersionNotice,
 } from "./version.js";
 
-/** Ownership marker written into every managed OpenCode home. */
 export const OPENCODE_HOME_OWNER_FILE = ".cswarm-opencode-owner.json";
 
 export type OpenCodeHomeOwner = {
@@ -72,7 +71,6 @@ export type OpenCodeHomeOwner = {
 
 export type OpenCodeAcpOpenOptions = {
   cwd: string;
-  /** Absolute realpath to opencode. Bare names are resolved once at open. */
   executable?: string;
   model?: string;
   permissionCallback?: PermissionCallback;
@@ -87,7 +85,6 @@ export type OpenCodeAcpOpenOptions = {
   clientVersion?: string;
   /** When true, prompts are enabled without canary (tests only). */
   promptsEnabled?: boolean;
-  /** Report a newer-than-measured version after the floor admits it. */
   onVersionNotice?: (notice: ProviderVersionNotice) => void;
   /**
    * Bounded, sanitized stderr tail, delivered once when the child exits — for
@@ -120,10 +117,8 @@ const MAX_OPENCODE_AUTH_BYTES = 256 * 1024;
 export const OPENCODE_HOME_PREFIX = "cswarm-opencode-home-";
 const CHILD_EXIT_WAIT_MS = 3_000;
 const CHILD_KILL_WAIT_MS = 1_000;
-/** Orphans without a live owner may be swept after this age. */
 const STALE_HOME_MAX_AGE_MS = 60 * 60 * 1000;
 
-/** True when signal 0 reaches pid (process exists and is killable by us). */
 export function isProcessAlive(pid: number): boolean {
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
   try {
@@ -134,7 +129,6 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
-/** Resolve bare or relative executable to one absolute realpath (same for probe + spawn). */
 export function resolveOpenCodeExecutable(
   executable = "opencode",
   pathEnv?: string,
@@ -171,7 +165,6 @@ export function resolveOpenCodeExecutable(
       }
     } catch (err) {
       if (err instanceof AcpHostError) throw err;
-      // try next PATH entry
     }
   }
   throw new AcpHostError(
@@ -262,12 +255,10 @@ export async function releaseOpenCodeHome(
   }
 }
 
-/** Parse `opencode --version`, including prerelease/build and leading banners. */
 export function parseOpenCodeVersionOutput(stdout: string): string | null {
   return parseProviderVersionOutput(stdout, /\bopencode\b/i);
 }
 
-/** Run absolute executable --version with the same env the child will use. */
 export async function assertOpenCodeVersionFloor(
   executable: string,
   options?: {
@@ -335,7 +326,6 @@ export function buildOpenCodeForcedPermissionConfig(): Record<string, "ask"> {
   return permission;
 }
 
-/** Generated opencode.json (global config under private XDG). */
 export function buildOpenCodeSafeConfigJson(options?: {
   model?: string;
 }): string {
@@ -409,7 +399,6 @@ export async function readValidatedOpenCodeAuth(
   return raw;
 }
 
-/** Resolve the host's real OpenCode auth path (XDG data or legacy). */
 export function resolveOpenCodeAuthSourcePath(
   parent: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
 ): string {
@@ -433,7 +422,6 @@ export async function prepareOpenCodeIsolatedHome(options: {
   home?: string;
   /** Explicit test-only; production must not set this. */
   allowMissingAuth?: boolean;
-  /** Ownership/liveness metadata so sweep never kills a live listener home. */
   owner?: OpenCodeHomeOwner;
 }): Promise<string> {
   const home = options.home ??
@@ -694,17 +682,14 @@ export async function sweepStaleOpenCodeHomes(options?: {
           // Healthy long-lived listener home — never age-delete.
           continue;
         }
-        // Owner process is dead: safe to reclaim regardless of age.
         await rm(full, { recursive: true, force: true });
         removed += 1;
         continue;
       }
-      // No ownership marker: only reclaim after age (legacy/orphan).
       if (now - st.mtimeMs < maxAgeMs) continue;
       await rm(full, { recursive: true, force: true });
       removed += 1;
     } catch {
-      // best-effort
     }
   }
   return removed;
@@ -738,14 +723,12 @@ export async function terminateOpenCodeChild(
   try {
     child.kill("SIGTERM");
   } catch {
-    // already dead
   }
   await waitForChildExit(child, CHILD_EXIT_WAIT_MS);
   if (child.exitCode !== null || child.signalCode !== null) return;
   try {
     child.kill("SIGKILL");
   } catch {
-    // already dead
   }
   await waitForChildExit(child, CHILD_KILL_WAIT_MS);
   if (child.exitCode === null && child.signalCode === null) {
@@ -756,10 +739,6 @@ export async function terminateOpenCodeChild(
   }
 }
 
-/**
- * Open an OpenCode ACP host session: resolve absolute executable, version-check
- * and effective-config probe with the same env, spawn `acp --pure`.
- */
 export async function openOpenCodeAcpSession(
   options: OpenCodeAcpOpenOptions,
 ): Promise<OpenCodeAcpHandle> {

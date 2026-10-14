@@ -1,4 +1,3 @@
-/** Shared CLI and MCP duration grammar. */
 export const SIGNAL_DURATION_RE = /^([1-9]\d*)(m|h|d)$/;
 export const SIGNAL_DURATION_MAX_MS = 30 * 86_400_000;
 

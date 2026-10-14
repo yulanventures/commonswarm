@@ -11,23 +11,15 @@ export const ACP_DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 export const ACP_VERSION_CHECK_TIMEOUT_MS = 5_000;
 export const ACP_CANARY_TIMEOUT_MS = 30_000;
 
-/** Oldest Grok version allowed to reach the runtime permission canary. */
 export const GROK_MIN_VERSION = "0.2.117";
-/** Newest Grok version whose complete adapter behavior was measured. */
 export const GROK_LAST_MEASURED_VERSION = "0.2.117";
-/** Oldest OpenCode version allowed to reach the runtime permission canary. */
 export const OPENCODE_MIN_VERSION = "1.18.10";
-/** Newest OpenCode version whose complete adapter behavior was measured. */
 export const OPENCODE_LAST_MEASURED_VERSION = "1.18.10";
-/** Oldest claude-agent-acp version allowed to reach the runtime permission canary. */
 export const CLAUDE_ACP_MIN_VERSION = "0.64.2";
-/** Newest claude-agent-acp version whose complete adapter behavior was measured. */
 export const CLAUDE_ACP_LAST_MEASURED_VERSION = "0.64.2";
 /** Claude 0.64.2 manual mode emits host-owned permission requests. */
 export const CLAUDE_PERMISSION_MODE_ID = "default";
-/** Oldest codex-acp version allowed to reach the runtime permission canary. */
 export const CODEX_ACP_MIN_VERSION = "1.1.9";
-/** Newest codex-acp version whose complete adapter behavior was measured. */
 export const CODEX_ACP_LAST_MEASURED_VERSION = "1.8.0";
 /** Codex 1.8.0 read-only mode asks for HOME writes but permits cwd/TMPDIR writes. */
 export const CODEX_PERMISSION_MODE_ID = "read-only";

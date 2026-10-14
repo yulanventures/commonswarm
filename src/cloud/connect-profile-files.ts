@@ -25,7 +25,6 @@ export function reservedConnectProfileNames(): string {
     "<profile-name>.<pid>.<12 hex>.tmp"].join(", ");
 }
 
-/** Enumerate existing reserved paths from the same names and patterns used by writers. */
 export function connectProfileReservedPaths(profileName: string, entries: readonly string[]): string[] {
   const fixed = new Set<string>([CONNECT_PROFILE_FILES.pending, CONNECT_PROFILE_FILES.complete,
     CONNECT_PROFILE_FILES.attemptMarker, CONNECT_PROFILE_FILES.credential, CONNECT_PROFILE_FILES.setupLock,

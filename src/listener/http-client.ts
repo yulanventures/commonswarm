@@ -15,7 +15,6 @@ import {
   inflateSync,
 } from "node:zlib";
 
-/** A stopped listener leaves no idle Cloud socket past this fixed bound. */
 export const LISTENER_HTTP_IDLE_TIMEOUT_MS = 60_000;
 
 export interface ListenerHttpMetrics {
@@ -58,8 +57,6 @@ function decodeResponseBody(bytes: Buffer, headers: Headers): ArrayBuffer {
 }
 
 /**
- * Owns one bounded keep-alive pool for the lifetime of one listener process.
- *
  * Node's bundled fetch implementation does not expose its dispatcher without
  * the optional `undici` package. This native HTTP adapter is the platform
  * equivalent: one non-pipelined socket per origin, no transport retry, and an
@@ -98,7 +95,6 @@ export class ListenerHttpClient {
     this.fetch = this.request.bind(this) as typeof fetch;
   }
 
-  /** Snapshot process-local counts without exposing the agents themselves. */
   metrics(): ListenerHttpMetrics {
     return {
       requests: this.requestCount,
@@ -109,7 +105,6 @@ export class ListenerHttpClient {
     };
   }
 
-  /** Close every idle or active socket when the listener process stops. */
   close(): void {
     if (this.closed) return;
     this.closed = true;

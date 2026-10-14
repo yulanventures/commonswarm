@@ -1,4 +1,3 @@
-/** Small enough for one signal to stay readable in every receive surface. */
 export const SIGNAL_ATTACHMENT_MAX = 8;
 
 const UUID_RE =
@@ -15,12 +14,10 @@ export interface SignalAttachment extends SignalAttachmentRef {
   size_bytes: number;
 }
 
-/** Invalid attachment metadata received from the read or command edge. */
 export class SignalAttachmentMalformedError extends Error {
   override name = "SignalAttachmentMalformedError";
 }
 
-/** Parses optional attachment metadata while ignoring additive fields from newer servers. */
 export function parseSignalAttachments(
   value: unknown,
   options: { enabled?: boolean } = {},
@@ -81,7 +78,6 @@ export function attachmentRetrievalCommand(
   return `cswarm file get ${attachment.file_id.toLowerCase()} --version ${attachment.version_n} --workspace-id ${workspaceId.toLowerCase()}`;
 }
 
-/** Compact binary-size copy shared by signal receive surfaces. */
 export function formatAttachmentSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   if (bytes < 1024) return `${bytes} B`;

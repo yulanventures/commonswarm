@@ -52,7 +52,6 @@ export interface DecideCtx {
   validTakeoverGrant(task_id: string, grant_id: string | null, epoch: number, recipient: string): boolean;
   /** Is there a live close grant bound to this exact submission {version, epoch, head_sha} (§2.5 — dies on reopen)? */
   validCloseGrant(task_id: string, grant_id: string | null, submission: { version: number; epoch: number; head_sha: string }): boolean;
-  /** Is this slug already taken in the stream? (create uniqueness) */
   slugTaken(slug: string): boolean;
   nextSeq(): number;
   nextEventId(): string;
@@ -63,7 +62,6 @@ export interface DecideCtx {
 export interface DecisionAccepted {
   ok: true;
   events: EventEnvelope[];
-  /** The projected state after applying the emitted events (convenience). */
 }
 export interface DecisionRejected {
   ok: false;
@@ -96,7 +94,6 @@ function authz(reason: RejectionReason, detail: string): DecisionRejected {
   return { ok: false, class: 'authz', reason, detail, events: [] };
 }
 function domain(ctx: DecideCtx, task_id: string, command: string, reason: RejectionReason, detail: string): DecisionRejected {
-  // A domain rejection is itself a committed event (visible history, §2.1).
   const rej = env(ctx, 'CommandRejected', { task_id, command, reason, detail });
   return { ok: false, class: 'domain', reason, detail, events: [rej] };
 }
@@ -122,7 +119,6 @@ export function decide(state: TaskState | null, cmd: Command, ctx: DecideCtx): D
     return accept([env(ctx, 'TaskCreated', { task_id: cmd.task_id, slug: cmd.slug })]);
   }
 
-  // All other commands require an existing task.
   if (!state) return domain(ctx, cmd.task_id, cmd.kind, 'unknown_task', 'no such task in this stream');
   const s = state;
   const live = leaseLive(s, ctx.now);
@@ -135,7 +131,6 @@ export function decide(state: TaskState | null, cmd: Command, ctx: DecideCtx): D
 
   switch (cmd.kind) {
     case 'acquire': {
-      // open/reopened always; active/awaiting_review only when the lease is expired.
       const acquirable =
         s.lifecycle === 'open' || s.lifecycle === 'reopened' ||
         ((s.lifecycle === 'active' || s.lifecycle === 'awaiting_review') && !live);
@@ -177,7 +172,6 @@ export function decide(state: TaskState | null, cmd: Command, ctx: DecideCtx): D
           return domain(ctx, cmd.task_id, 'takeover', 'live_lease_needs_grant', 'live lease; a takeover grant bound to the current epoch and issued to you is required');
         }
       }
-      // Expired lease → behaves as acquire (reacquisition allowed even from awaiting_review).
       const epoch = s.epoch + 1;
       return accept([env(ctx, 'LeaseTakenOver', { task_id: cmd.task_id, epoch, owner: me, lease_expiry: ctx.now + cmd.ttl_ms, grant_id: live ? cmd.grant_id : null })]);
     }
@@ -188,7 +182,6 @@ export function decide(state: TaskState | null, cmd: Command, ctx: DecideCtx): D
       if (!live) return domain(ctx, cmd.task_id, 'submit', 'lease_expired', 'lease expired; re-acquire before submitting');
       if (s.lifecycle === 'done') return domain(ctx, cmd.task_id, 'submit', 'already_done', 'task is done');
       if (!ctx.evidenceComplete(cmd.task_id, cmd.evidence_set)) return domain(ctx, cmd.task_id, 'submit', 'evidence_incomplete', 'evidence bundle missing/invalid for this claim');
-      // A new submit supersedes any prior one (reducer overwrites the frozen submission).
       return accept([env(ctx, 'TaskSubmitted', { task_id: cmd.task_id, epoch: s.epoch, branch: cmd.branch, head_sha: cmd.head_sha, evidence_set: [...cmd.evidence_set] })]);
     }
 

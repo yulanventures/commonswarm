@@ -3,11 +3,6 @@ import type {
   SignalRecord,
 } from "../cloud/command-client.js";
 
-/**
- * The closed signal family a durable effect records. Asks keep the v1
- * deterministic reply path; notes are direct signals the listener observes
- * with zero model/reply effects at all.
- */
 export type ListenerSignalKind = "ask" | "note";
 
 export type ListenerEffectState =
@@ -156,15 +151,6 @@ export const LISTENER_DELIVERY_HOLD_RELEASE_REASONS = [
 export type ListenerDeliveryHoldReleaseReason =
   typeof LISTENER_DELIVERY_HOLD_RELEASE_REASONS[number];
 
-/**
- * The clause each release reason contributes to the operator's status line.
- *
- * A Record keyed by the union, so a new reason is a TYPE ERROR until it has a
- * clause. The first version of this line said "used its turn budget" for every
- * release; a `lease_budget` release runs no turn at all, so the sentence was
- * false for half the vocabulary. A review arm found that, which is what a typed
- * list inside a correct-looking sentence always costs.
- */
 export const LISTENER_DELIVERY_HOLD_RELEASE_CLAUSES: Readonly<
   Record<ListenerDeliveryHoldReleaseReason, string>
 > = {
@@ -172,25 +158,6 @@ export const LISTENER_DELIVERY_HOLD_RELEASE_CLAUSES: Readonly<
   lease_budget: "what was left of its lease could not cover the next step",
 };
 
-/**
- * What the reader should do about each reason. A Record for the same reason as
- * the clauses: one shared remedy was measured wrong for half the vocabulary.
- *
- * Only `hold_budget` names a setting. `--turn-budget` IS the seat bound, so
- * raising it is the whole answer there. `lease_budget` needs nothing raised: the
- * server lease is a fixed 15 minutes and is not an operator flag, and the row
- * comes back under a NEW lease with its full length, so the next attempt starts
- * with the room this one ran out of.
- *
- * Correction to a claim made while reviewing this, recorded because a later
- * reader may meet it: raising `--turn-budget` does NOT raise the projected
- * phase minimum that `leaseSpent` tests. `effectPhaseBudget` returns
- * `LISTENER_PROMPT_START_MINIMUM_MS` and its siblings, built from
- * `SIGNAL_READ_TIMEOUT_MS`, `ACP_DEFAULT_REQUEST_TIMEOUT_MS`,
- * `SIGNAL_REQUEST_TIMEOUT_MS`, `DELIVERY_REQUEST_TIMEOUT_MS` and the safety
- * margin. It contains no turn budget. What a larger turn budget does change is
- * how much of the fixed lease one turn can consume before that check runs.
- */
 export const LISTENER_DELIVERY_HOLD_RELEASE_REMEDIES: Readonly<
   Record<ListenerDeliveryHoldReleaseReason, string>
 > = {
@@ -200,12 +167,6 @@ export const LISTENER_DELIVERY_HOLD_RELEASE_REMEDIES: Readonly<
     "delivery for it stops helping, because the turn then outlives its lease " +
     "and the reply can no longer be acknowledged. The bound is read when the " +
     "listener starts, so stop this listener and start it again to change it",
-  /* NOT a cap: nothing clamps the turn budget to the lease, and leaseSpent
-     refuses to START a phase rather than interrupting one, so a 60m budget
-     really does hold the worker for 60m. The sentence says raising past the
-     lease stops helping, and why, which is what the code supports. An earlier
-     version read "up to the 15 minutes the service leases it for", which a
-     review arm read as a cap the code does not enforce. */
   lease_budget:
     "nothing needs raising: the row comes back under a new lease of full" +
     " length, so the next attempt starts with the room this one ran out of." +
@@ -222,7 +183,6 @@ export interface ListenerCanaryVerdict {
   reason?: string;
 }
 
-/** Reports each bounded permission-canary attempt to local listener diagnostics. */
 export type ListenerCanaryAttemptCallback = (
   attempt: number,
   total: number,
@@ -233,11 +193,8 @@ export interface ListenerSenderProvenance {
   senderName: string | null;
   operatorId: string | null;
   operatorName: string | null;
-  /** Local changed-only context; never persisted in an effect or server payload. */
   brainDigest?: string;
-  /** Broadcast rows included in this worker prompt. */
   feedDigest?: string;
-  /** Exact broadcast ids represented by feedDigest. */
   renderedBroadcastIds?: string[];
 }
 
@@ -262,7 +219,6 @@ export interface ListenerDeliveryContext {
 export interface ListenerSenderProvenanceContext {
   signal?: AbortSignal;
   deadlineMs: number;
-  /** True only for a worker prompt, never for main-route queue labeling. */
   includeBrainDigest?: boolean;
 }
 
@@ -290,10 +246,6 @@ export interface ListenerReplyPoster {
     signal: SignalRecord;
     body: string;
     commandId: string;
-    /**
-     * Caller cancellation, distinct from the internal transport deadlines. The
-     * poster wires it into its transport; it is never persisted, logged, or sent.
-     */
     abortSignal?: AbortSignal;
   }): Promise<{ signalId: string }>;
 }

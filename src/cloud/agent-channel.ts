@@ -1,4 +1,3 @@
-/** Shared receive loop for Claude stdio and the local Grok Bot gateway. Never starts a model. */
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -69,7 +68,6 @@ export interface ChannelPending {
   confirmed: boolean;
 }
 
-/** Host confirmation and server ACK are separate, including after a process restart. */
 export class ChannelReceiptGate {
   constructor(readonly hostSessionId: string, public pending: ChannelPending | null = null) {}
   confirm(signalId: unknown, receipt: unknown, hostSessionId: unknown): ChannelPending {
@@ -134,7 +132,6 @@ function isSelfAddressed(row: DeliveryRow, principalId: string): boolean {
   return row.signal.from_kind === "agent" && row.signal.from === principalId && row.signal.to_agent === principalId;
 }
 
-/** Adds channel lifetime cancellation without weakening pending-command replay safety. */
 class ChannelReplyClient extends ThinCommandClient {
   constructor(target: CloudTarget, fetcher: typeof fetch, private readonly channelSignal: AbortSignal) {
     super(target, fetcher);
@@ -149,7 +146,6 @@ class ChannelReplyClient extends ThinCommandClient {
       if (error instanceof CommandHttpError && error.code === undefined) {
         throw new CommandTransportError("reply response did not include a stable refusal code");
       }
-      // Caller cancellation can race a committed response, so it is also outcome-unknown.
       if (error instanceof Error && error.name === "AbortError") {
         throw new CommandTransportError("reply request was cancelled before its outcome was known");
       }
@@ -458,7 +454,6 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
             await persist();
             lastPoll = 0;
           } else if (Date.parse(pending.row.leasedUntil) <= Date.now()) {
-            // The row remains on the service. Reclaim before issuing another challenge.
             gate.pending = null; notified = false; await persist(); lastPoll = 0;
           } else if (!notified) {
             if ((await readReceiveBinding(profilePath, host))?.requested_mode !== "wake") break;

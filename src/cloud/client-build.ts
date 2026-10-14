@@ -20,10 +20,8 @@ function packageVersion(): string {
   }
 }
 
-/** The build sent by every command and printed by the CLI. */
 export const CLI_BUILD_VERSION = packageVersion();
 
-/** Add the one canonical build field to a command envelope. */
 export function withClientBuild<T extends Record<string, unknown>>(
   envelope: T,
 ): T & { client_build: string } {

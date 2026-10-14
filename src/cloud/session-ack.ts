@@ -76,7 +76,6 @@ export function assertManagedAckAllowed(
   if (!decision.ok) throw new ManagedAckRefusedError(decision.code);
 }
 
-/** Build the ACK gate input from a live context plus the real injection result. */
 export function managedAckInput(input: {
   context: SessionContextDocument;
   proof?: AgentSessionProof | null;

@@ -133,7 +133,6 @@ async function runTurnHook(args: OnboardingArguments): Promise<void> {
 
 export const SETUP_OPERATOR_STEP = "Stop and tell the operator. Do not open another agent's profile.";
 
-/** Ends the failure sentence, then adds the operator step. */
 export function withSetupOperatorStep(message: string): string {
   const trimmed = message.trimEnd();
   return `${/[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`} ${SETUP_OPERATOR_STEP}`;

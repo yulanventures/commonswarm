@@ -84,7 +84,6 @@ export type HumanSessionErrorCode =
   | "human_session_missing"
   | "human_session_refresh_failed";
 
-/** A stable classification for the two human-session failures a caller can recover from. */
 export class HumanSessionError extends Error {
   readonly name = "HumanSessionError";
 
@@ -624,18 +623,10 @@ export async function refreshedCredential(
  * ended". */
 export type LogoutOutcome =
   | "already-logged-out"
-  /** The server ANSWERED and accepted the sign-out. The only outcome that may claim it. */
   | "revoked"
   | "local-only"
   | "cleared-unverified";
 
-/**
- * What to tell the user after `logout`, saying only what was observed.
- *
- * A pure function because the COPY is the fix here: three earlier versions of this command
- * asserted a containment they had not established, and a string buried in a nested ternary
- * inside main() is a string no test can reach. Every line below is covered.
- */
 export function logoutMessage(
   outcome: LogoutOutcome,
   allDevices: boolean,
@@ -678,11 +669,9 @@ const TERMINAL_REFRESH_CODES: ReadonlySet<string> = new Set([
   "session_expired",
 ]);
 
-/** True only when the server answered AND named a condition that can never recover. */
 function isTerminalRefreshFailure(error: unknown): boolean {
   if (error === null || typeof error !== "object") return false;
   const named = error as { name?: unknown; code?: unknown };
-  // A missing session is terminal by TYPE: there is nothing left to revoke.
   if (named.name === "AuthSessionMissingError") return true;
   return typeof named.code === "string" && TERMINAL_REFRESH_CODES.has(named.code);
 }

@@ -68,16 +68,13 @@ export interface ListenerEngineOptions {
    * record; it never writes a terminal failure and never leaves the engine.
    */
   signal?: AbortSignal;
-  /** Resolve the sending agent's operator and optional display labels before prompting. */
   resolveSenderProvenance?: (
     signal: SignalRecord,
     context: ListenerSenderProvenanceContext,
   ) => Promise<ListenerSenderProvenance>;
-  /** Best-effort durable attestation after the model has consumed the prompt. */
   onBroadcastsConsumed?: (signalIds: readonly string[]) => Promise<void>;
 }
 
-/** Stable server idempotency key for one reply effect. */
 export function listenerReplyCommandId(
   signalId: string,
   effectOrdinal = 0,
@@ -93,7 +90,6 @@ export function listenerReplyCommandId(
   }`;
 }
 
-/** Resolve sender and operator labels from the agent-readable project directory. */
 export function listenerSenderProvenance(
   signal: SignalRecord,
   directory?: SignalDirectory,
@@ -216,7 +212,6 @@ export function buildListenerPrompt(
   ].join("\n");
 }
 
-/** Normalize a model reply to the immutable signal-body contract. */
 export function normalizeListenerReply(
   value: string,
 ): { body: string; truncated: boolean } {
@@ -268,7 +263,6 @@ function isAbort(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
-/** A genuine cancellation error; never persisted as a failure code. */
 function abortError(): Error {
   const error = new Error("listener operation cancelled");
   error.name = "AbortError";
@@ -320,7 +314,6 @@ function failureCode(error: unknown, fallback: string): string {
   return fallback;
 }
 
-/** Build the deterministic ask start used for first processing or corrupt-effect repair. */
 export function newReceivedAskRecord(
   signal: SignalRecord,
   now: number,
@@ -436,8 +429,6 @@ export class ListenerEngine {
       return { status: "failed", record };
     }
 
-    // Caller already cancelled before the prompt: restore the resumable record
-    // and start no later effect.
     if (this.signal?.aborted) {
       record = await this.write({
         ...record,
@@ -596,8 +587,6 @@ export class ListenerEngine {
     current: ListenerEffectRecord,
   ): Promise<ListenerProcessResult> {
     let record = current;
-    // Caller already cancelled before the reply post: restore the resumable
-    // record and start no later effect.
     if (this.signal?.aborted) {
       record = await this.write({
         ...record,

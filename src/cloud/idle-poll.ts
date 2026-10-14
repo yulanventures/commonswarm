@@ -1,11 +1,3 @@
-/**
- * Shared idle-poll cadence for the listener claim loop and inbox --notify.
- *
- * Empty polls back off from the configured base to IDLE_POLL_MAX_MS.
- * Any delivery (a claimed row, or a rendered arrival) resets to the base.
- * The flag parser, status sentence, and bound copy all read these constants.
- */
-
 export const IDLE_POLL_DEFAULT_MS = 15_000;
 export const IDLE_POLL_MAX_MS = 60_000;
 export const IDLE_POLL_MIN_MS = 1_000;
@@ -30,7 +22,6 @@ export const WAKE_STALE_LABEL = formatIdlePollDuration(WAKE_STALE_MS);
 
 const DURATION_RE = /^([1-9]\d*)(s|m)$/;
 
-/** Whole-second duration used in flag errors and status sentences. */
 export function formatIdlePollDuration(ms: number): string {
   if (!Number.isSafeInteger(ms) || ms <= 0) {
     throw new Error("idle poll duration must be a positive number of milliseconds");
@@ -40,7 +31,6 @@ export function formatIdlePollDuration(ms: number): string {
   throw new Error("idle poll duration must be a whole number of seconds");
 }
 
-/** A deadline can fall between whole seconds; status rounds its remaining wait up. */
 export function formatIdleWaitDuration(ms: number): string {
   return formatIdlePollDuration(Math.ceil(ms / 1_000) * 1_000);
 }
@@ -49,10 +39,6 @@ export const IDLE_POLL_MIN_LABEL = formatIdlePollDuration(IDLE_POLL_MIN_MS);
 export const IDLE_POLL_DEFAULT_LABEL = formatIdlePollDuration(IDLE_POLL_DEFAULT_MS);
 export const IDLE_POLL_MAX_LABEL = formatIdlePollDuration(IDLE_POLL_MAX_MS);
 
-/**
- * Examples in flag errors. Built from the same default, doubled default, and
- * cap the parser enforces, so a bound change cannot leave a stale list.
- */
 export function idlePollDurationExamples(): string[] {
   const midMs = Math.min(IDLE_POLL_MAX_MS, IDLE_POLL_DEFAULT_MS * 2);
   const labels: string[] = [];
@@ -76,10 +62,6 @@ export function idlePollBoundSentence(): string {
   return `between ${IDLE_POLL_MIN_LABEL} and ${IDLE_POLL_MAX_LABEL}`;
 }
 
-/**
- * Parse --poll-interval. Same shape as --turn-budget (whole number plus s or m).
- * Bounds come from IDLE_POLL_MIN_MS / IDLE_POLL_MAX_MS so the error cannot drift.
- */
 export function parseIdlePollIntervalMs(
   value: string | undefined,
   defaultMs: number = IDLE_POLL_DEFAULT_MS,
@@ -128,7 +110,6 @@ export function nextIdlePollMs(
   return Math.min(maxMs, grown);
 }
 
-/** Status sentence. Names the interval in force right now, from the same constants. */
 export function idlePollStatusSentence(currentMs: number): string {
   return `Current idle poll interval: ${formatIdleWaitDuration(currentMs)}.`;
 }

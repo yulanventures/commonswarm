@@ -9,7 +9,6 @@ import {
   type ReadDeadlineOptions,
 } from "./files.js";
 
-/** Reuse the retrying `brain ls` file-list path for an agent listener. */
 export async function listBrainRowsAsAgent(
   target: CloudTarget,
   credential: string,

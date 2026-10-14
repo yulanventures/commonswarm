@@ -21,10 +21,6 @@ const SESSION_ERROR_MESSAGES = {
     "cannot mark an ask observed on a managed agent until it was surfaced into the bound host conversation",
 } as const satisfies Record<AgentSessionErrorCode, string>;
 
-/**
- * Typed session failure. Callers branch on `code`, never on `message`.
- * The message is generated from the same code list the classifier reads.
- */
 export class AgentSessionError extends Error {
   readonly name = "AgentSessionError";
 
@@ -40,7 +36,6 @@ export function sessionErrorMessage(code: AgentSessionErrorCode): string {
   return SESSION_ERROR_MESSAGES[code];
 }
 
-/** Every code the classifier accepts, from the same list enforcement reads. */
 export function sessionErrorMessageList(): readonly string[] {
   return AGENT_SESSION_ERROR_CODE_LIST.map((code) => SESSION_ERROR_MESSAGES[code]);
 }
@@ -57,7 +52,6 @@ export function agentSessionErrorFromBody(
   return new AgentSessionError(status, error);
 }
 
-/** Classify a command-layer failure without reading error.message. */
 export const AGENT_SESSION_CLIENT_ERROR_CODES = [
   "session_generation_invalid",
 ] as const;
@@ -70,7 +64,6 @@ const SESSION_CLIENT_ERROR_MESSAGES = {
     "the session command returned a missing or invalid generation",
 } as const satisfies Record<AgentSessionClientErrorCode, string>;
 
-/** Client-side protocol failure. Not a wire session_ error. */
 export class AgentSessionClientError extends Error {
   readonly name = "AgentSessionClientError";
 

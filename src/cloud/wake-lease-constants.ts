@@ -1,9 +1,7 @@
-/** Keep operator prose and a pasteable command on separate lines. */
 export function printedCommand(prose: string, command: string): string {
   return `${prose}\n${command}`;
 }
 
-/** One renewal per watching seat per minute. Three missed renewals make it stale. */
 export const WAKE_LEASE_RENEW_MS = 60_000;
 export const WAKE_LEASE_STALE_MS = 3 * WAKE_LEASE_RENEW_MS;
 export const ATTENDED_CANARY_WATCHER_WAIT_MS = WAKE_LEASE_RENEW_MS + 30_000;
@@ -26,7 +24,6 @@ const holder = (surface: "watcher" | "h0_poll", host: string | null) => surface 
 
 const supersessionStep = "stop this watcher and use the surface that holds the lease";
 
-/** One source for each code's exit and operator sentence. Proof errors differ by phase. */
 export const NOTIFY_LEASE_RULES = {
   notify_held_elsewhere: { exit: 76, sentence: (surface, host, command) =>
     `${holder(surface, host)} holds this seat's wake surface; ${surface === "h0_poll"

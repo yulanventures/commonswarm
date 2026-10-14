@@ -11,7 +11,6 @@ const AGENT_SEEN_TIMEOUT_MS = 5_000;
 
 export type AgentSeenFailureCode = "transport" | "http" | "protocol";
 
-/** Stable receipt-write failure classification; callers never inspect prose. */
 export class AgentSeenReportError extends Error {
   constructor(
     readonly code: AgentSeenFailureCode,
@@ -29,7 +28,6 @@ export interface AgentSeenReportResult {
   failures: AgentSeenFailureCode[];
 }
 
-/** Return only broadcasts present in the page the caller actually rendered. */
 export function renderedBroadcastIds(rows: readonly SignalRecord[]): string[] {
   return [...new Set(rows.filter((row) =>
     row.to === null && row.to_agent === null
@@ -111,10 +109,6 @@ async function postAgentSeenBatch(
   }
 }
 
-/**
- * Best-effort append-only attestation. Every batch is tried, and no failure is
- * allowed to turn a successful feed/inbox read into a failed command.
- */
 export async function reportRenderedBroadcasts(
   target: CloudTarget,
   token: string,

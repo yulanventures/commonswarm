@@ -26,10 +26,6 @@ export interface SessionManagerOptions {
   onDispatchStop?: (reason: AgentSessionError | Error) => void;
 }
 
-/**
- * One deterministic receiver owns renewals. A stopped model turn does not
- * renew; this manager does, independently of any ACP child.
- */
 export class AgentSessionManager {
   private context: SessionContextDocument;
   private dispatch: SessionDispatchState = "running";

@@ -254,7 +254,6 @@ export class AgentSessionClient {
     });
   }
 
-  /** Read-only members resource: server session fields for this principal. */
   async readStatus(input: {
     credential: string;
     workspaceId: string;

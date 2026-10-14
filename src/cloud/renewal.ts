@@ -49,8 +49,6 @@ import {
   type CloudTarget,
 } from "./config.js";
 import { withClientBuild } from "./client-build.js";
-/* One list of standing-grant rules for the whole CLI. renewal-grants.ts imports
-   only ./config.js, so this direction introduces no cycle. */
 import {
   STANDING_GRANT_RULES,
   standingPausedRenewalMessage,
@@ -69,7 +67,6 @@ import { dayCount } from "../h0/verbs.js";
 export const AGENT_TOKEN_DEFAULT_TTL_MS = 60 * 60 * 1_000;
 export const AGENT_TOKEN_MAX_TTL_MS = 8 * 60 * 60 * 1_000;
 
-/** How long a run auto-renews before a person is asked again. */
 export const RENEWAL_HORIZON_DEFAULT_MS = 30 * 24 * 60 * 60 * 1_000;
 export const RENEWAL_HORIZON_MAX_MS = 90 * 24 * 60 * 60 * 1_000;
 
@@ -87,11 +84,6 @@ export function describeMintRenewal(
     return "This credential does not renew itself; re-issue one by hand when it expires.\n";
   }
   if (kind === "standing") {
-    /* The rules come from STANDING_GRANT_RULES, not from a sentence typed here.
-       The retired wording said "This does not expire. Revoke is the only kill
-       switch." while the schema already paused an idle standing grant after 14
-       days with no way back — so it named neither the pause nor its remedy, and
-       claimed a kill switch that was not the only one. */
     return (
       `Standing grant created. ${STANDING_GRANT_RULES.join(" ")} ` +
       "The bearer credential still rotates before expiry while a cswarm process remains running and secure local state is available.\n"
@@ -119,13 +111,9 @@ export function describeMintRenewal(
  */
 export const RENEWAL_MAX_SUCCESSORS_DEFAULT = 800;
 
-/** Renew once this fraction of the token's own lifetime remains. See the 800 above. */
 export const RENEWAL_LEAD_FRACTION = 0.1;
-/** Never cut it finer than this, however short the token. */
 export const RENEWAL_LEAD_FLOOR_MS = 5 * 60_000;
-/** Never renew this far ahead, however long the token; an 8h token would waste half of it. */
 export const RENEWAL_LEAD_CEILING_MS = 15 * 60_000;
-/** How long an interrupted renewal stays replayable before its command id is abandoned. */
 export const RENEWAL_PENDING_RECOVERY_MS = 60 * 60_000;
 
 export const RENEW_TIMEOUT_MS = 30_000;
@@ -143,17 +131,12 @@ export function renewalDueAt(issuedAt: number, expiresAt: number): number {
     RENEWAL_LEAD_CEILING_MS,
     Math.max(RENEWAL_LEAD_FLOOR_MS, Math.round(lifetime * RENEWAL_LEAD_FRACTION)),
   );
-  // A token shorter than the floor is renewed immediately rather than never.
   return expiresAt - Math.min(lead, lifetime);
 }
 
 /* Refusals. Each one is a distinct class because each one has a different true sentence,
  * and because "403" tells the person holding the terminal nothing they can act on. */
 
-/**
- * The run reached its continuous-renewal horizon, or spent its successor budget. This is
- * not a failure — it is the periodic human checkpoint §2.3 asks for, arriving on schedule.
- */
 export class RenewalReauthorisationRequired extends Error {
   override name = "RenewalReauthorisationRequired";
   constructor(
@@ -165,7 +148,6 @@ export class RenewalReauthorisationRequired extends Error {
   }
 }
 
-/** The lineage was revoked, or the predecessor no longer authenticates. Fail closed. */
 export class RenewalRevoked extends Error {
   override name = "RenewalRevoked";
   constructor(readonly code: string, message: string) {
@@ -173,7 +155,6 @@ export class RenewalRevoked extends Error {
   }
 }
 
-/** A standing grant lapsed or was suspended. An owner must act before renewal continues. */
 export class RenewalSuspended extends Error {
   override name = "RenewalSuspended";
   constructor(readonly code: string, message: string) {
@@ -181,7 +162,6 @@ export class RenewalSuspended extends Error {
   }
 }
 
-/** The deployment has no successor path, or this credential has no renewal window. */
 export class RenewalUnsupported extends Error {
   override name = "RenewalUnsupported";
   constructor(message: string) {
@@ -189,10 +169,6 @@ export class RenewalUnsupported extends Error {
   }
 }
 
-/**
- * Another process renewed this predecessor first. Not a failure — the successor exists and
- * is on disk; this process simply lost the race and re-reads rather than asking again.
- */
 export class RenewalSuperseded extends Error {
   override name = "RenewalSuperseded";
   constructor(message: string) {
@@ -212,7 +188,6 @@ export class RenewalOutcomeUnknown extends Error {
   }
 }
 
-/** A network answer whose renewal envelope or successor fields are malformed. */
 export class RenewalMalformedResponseError extends RenewalOutcomeUnknown {
   override name = "RenewalMalformedResponseError";
 }
@@ -225,7 +200,6 @@ export class RenewalCredentialCheckError extends Error {
   }
 }
 
-/** The listener retries renewal before using its current token again. */
 export class RenewalRetryError extends Error {
   override name = "RenewalRetryError";
   readonly code = "renewal_retry";
@@ -234,7 +208,6 @@ export class RenewalRetryError extends Error {
   }
 }
 
-/** Anything else the deployment said. */
 export class RenewalRefused extends Error {
   override name = "RenewalRefused";
   constructor(readonly status: number, readonly code: string, message: string) {
@@ -242,7 +215,6 @@ export class RenewalRefused extends Error {
   }
 }
 
-/** The command edge's version gate cannot clear until this binary is updated. */
 export class RenewalUpgradeRequiredError extends RenewalRefused {
   override name = "RenewalUpgradeRequiredError";
   constructor(minimum: string, listenerMode = false) {
@@ -262,7 +234,6 @@ export interface SuccessorCredential {
   expiresAt: number;
   horizonExpiresAt: number | null;
   successorsRemaining: number | null;
-  /** Optional wake join hint. 0.1.57 servers omit it. */
   wake?: WakeHint;
 }
 
@@ -291,7 +262,6 @@ export function newRenewalCommandId(): string {
   return `ren_${randomBytes(18).toString("base64url")}`;
 }
 
-/** Accepts either an epoch-milliseconds number or an ISO-8601 string; null otherwise. */
 function timestamp(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value) && value > 0) {
     return Math.round(value);
@@ -344,7 +314,6 @@ export const REVOCATION_REASONS_LIST = [
   "predecessor_not_owned",
 ] as const;
 
-/** A reason the deployment gives when something was genuinely revoked. */
 export type RevocationReason = (typeof REVOCATION_REASONS_LIST)[number];
 
 /**
@@ -358,7 +327,6 @@ export type RefusalCode =
 
 const REVOCATION_REASONS: ReadonlySet<string> = new Set(REVOCATION_REASONS_LIST);
 
-/** Said only where a revocation was actually named, because it asserts one happened. */
 const REVOKED_MESSAGE =
   "This agent credential is no longer accepted, and renewal cannot bring it back — that is deliberate: revoking a credential, a device, or a person's membership revokes everything descended from it. Ask whoever runs this workspace what was revoked and why, then get a new credential from them.";
 
@@ -368,17 +336,12 @@ const LOCALLY_EXPIRED_MESSAGE =
 const UNEXPLAINED_REFUSAL_MESSAGE =
   "This agent credential was refused, and the deployment does not say why — it answers every refusal identically on purpose, so that nobody can discover which credentials exist by asking. Renewal cannot get past that. Ask whoever runs this workspace for a new credential, and whether this agent's access was changed.";
 
-/**
- * One successor request. Does no storage and no scheduling — the caller owns both, so this
- * stays a reviewable statement of what goes on the wire and what comes back.
- */
 export async function requestSuccessor(options: {
   target: CloudTarget;
   workspaceId: string;
   /** The active predecessor. Presented as a bearer, never placed in the body. */
   predecessor: string;
   commandId: string;
-  /** Locally measured expiry distinguishes D-004 from D-011 for one-shot callers. */
   expiresAt?: number | null;
   listenerMode?: boolean;
   fetcher?: typeof fetch;
@@ -649,7 +612,6 @@ export async function requestSuccessor(options: {
   };
 }
 
-/** What the caller handed us on stdin, before any renewal has happened. */
 export interface PresentedCredential {
   token: string;
   tokenId: string | null;
@@ -665,15 +627,12 @@ export interface PresentedCredential {
 
 export interface AgentCredentialSessionOptions {
   target: CloudTarget;
-  /** Renewal routes on the workspace stream like every other workspace command. */
   workspaceId: string;
   presented: PresentedCredential;
-  /** Null when the lineage cannot be persisted; renewal then lasts one invocation. */
   store: AgentCredentialStore | null;
   fetcher?: typeof fetch;
   now?: () => number;
   warn?: (message: string) => void;
-  /** Listener retries expose renewal failures to its capped runtime backoff. */
   listenerMode?: boolean;
 }
 
@@ -709,7 +668,6 @@ export class AgentCredentialSession {
    * the renewal count would make it erase that record as "nothing worth keeping".
    */
   private successor = false;
-  /** Monotonic across processes: continues the adopted record's count, never restarts it. */
   private generation = 0;
   private readonly rootTokenId: string | null;
 
@@ -817,12 +775,10 @@ export class AgentCredentialSession {
     return session;
   }
 
-  /** True once this session has replaced the credential it was opened with. */
   get renewed(): boolean {
     return this.renewals > 0;
   }
 
-  /** When a person is next asked to re-authorise, if the deployment has said. */
   get horizon(): number | null {
     return this.horizonExpiresAt;
   }
@@ -835,7 +791,6 @@ export class AgentCredentialSession {
     return this.due();
   }
 
-  /** Next renewal boundary, or null when this session cannot keep a successor. */
   get renewalAt(): number | null {
     if (this.unsupported || this.options.store === null || this.expiresAt === null) return null;
     return renewalDueAt(this.issuedAt, this.expiresAt);
@@ -926,7 +881,6 @@ export class AgentCredentialSession {
     return this.token;
   }
 
-  /** Single-flight: a second caller inside this process awaits the first renewal. */
   private async renew(): Promise<void> {
     if (this.inFlight) return await this.inFlight;
     const work = this.renewOnce().finally(() => {
@@ -938,8 +892,6 @@ export class AgentCredentialSession {
 
   private async renewOnce(): Promise<void> {
     const store = this.options.store;
-    // due() already refuses without a store; this is the second half of the same rule,
-    // stated where the write would happen rather than only where it is scheduled.
     if (!store) return;
     // The lock spans read-decide-write. Two invocations racing here is the read-rotate-
     // write race pending-command.ts documents, and the loser must adopt the winner's
@@ -1034,7 +986,6 @@ export class AgentCredentialSession {
     if (store) await this.persist(store);
   }
 
-  /** Re-reads the store and takes whatever the winner of a race left there. */
   private async adoptStored(): Promise<void> {
     const store = this.options.store;
     if (!store) return;
@@ -1043,7 +994,6 @@ export class AgentCredentialSession {
     if (record && record.rootTokenId === this.rootTokenId) this.adopt(record);
   }
 
-  /** Only ever called with a record that holds a successor; callers check `token` first. */
   private adopt(record: AgentCredentialRecord): void {
     if (record.token === null || record.expiresAt === null) return;
     this.successor = true;
