@@ -2,7 +2,8 @@ import { verifiedSignIn } from "./fixtures/verified-sign-in.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { IncomingMessage, Server, ServerResponse } from "node:http";
+import { createServer, IncomingMessage, Server, ServerResponse } from "node:http";
+import { connect } from "node:net";
 import { PassThrough, Readable } from "node:stream";
 import { test } from "node:test";
 import { createLocalJWKSet, jwtVerify } from "jose";
@@ -12,10 +13,13 @@ import { adminDigest, createAdminConsentService, PostgresAdminConsentStore } fro
 import { createResourceInteractionHandler } from "../src/admin-interactions.js";
 import { hashOpaque, SESSION_COOKIE } from "../src/browser-security.js";
 import { createConsentOrchestrator } from "../src/consent.js";
+import { createFinishFlow } from "../src/finish-flow.js";
+import { FinishStore } from "../src/finish-store.js";
 import { InteractionStore } from "../src/interaction-store.js";
 import { createInteractionHandler } from "../src/interactions.js";
 import { createLogger } from "../src/logger.js";
 import { createMcpProvider, ISSUER, RESOURCE, REFRESH_TOKEN_TTL_SECONDS } from "../src/provider.js";
+import { createRegistrationLimiter } from "../src/registration.js";
 import { createHandler, createProductionFindAccount, startServer } from "../src/server.js";
 import { MCP_CONNECTION_SCOPES } from "../../../supabase/functions/_shared/mcp-connection-scopes.js";
 
@@ -75,7 +79,7 @@ function exchange(url, cookies = new Map(), body = "", { bufferedBody = false } 
 
 async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnabled = false,
   registrationEnabled = true, registrationLimiter, clientId = CLIENT, clientMetadata,
-  providerGrantActive } = {}) {
+  providerGrantActive, finishEnabled = false } = {}) {
   const logs = [];
   const queries = [];
   const commands = [];
@@ -84,10 +88,34 @@ async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnab
     ...evidence.browserSession, session_hash: hashOpaque(BROWSER), status: "valid",
   }]]);
   const interactions = new Map();
+  const finishes = new Map();
   const rows = (row) => ({ rowCount: row ? 1 : 0, rows: row ? [row] : [] });
   const pool = {
+    async connect() { return { query: pool.query.bind(pool), release() {} }; },
     async query(sql, values) {
       queries.push(sql);
+      // FinishStore owns capture and resume validation; this fixture supplies
+      // SQL rows only. The real provider still creates and consumes every code.
+      if (sql.includes("INSERT INTO commonswarm_oauth.finish_records")) {
+        finishes.set(values[0], { interaction_uid: values[0], session_hash: values[1], user_id: values[2],
+          display_model: JSON.parse(values[3]), provider_result: JSON.parse(values[4]),
+          validated_request: JSON.parse(values[5]), state: "prepared", expires_at: new Date(Date.now() + 120000) });
+        return rows({});
+      }
+      if (sql.includes("SELECT f.*")) {
+        const row = finishes.get(values[0]);
+        return rows(row && row.session_hash.equals(values[1]) && row.user_id === values[2] &&
+          JSON.stringify(row.validated_request) === values[3]
+          ? { ...row, browser: sessions.get(row.session_hash.toString("hex")) } : null);
+      }
+      if (sql.includes("pg_advisory_")) return rows({});
+      if (sql.includes("UPDATE commonswarm_oauth.finish_records")) {
+        const row = finishes.get(values[0]);
+        if (sql.includes("SET state='resume_ready'")) {
+          Object.assign(row, { state: "resume_ready", resume_response: JSON.parse(values[1]) });
+        } else row.state = "preparing_resume";
+        return rows({});
+      }
       if (sql.includes("commonswarm_oauth.live_gotrue_session")) return evidence.pool.query(sql, values);
       if (sql.includes("FROM commonswarm_oauth.resolve_hosted_grant_status")) {
         assert.equal(values[1], USER);
@@ -184,13 +212,17 @@ async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnab
       });
     },
   });
+  const store = new InteractionStore(pool);
+  const finishFlow = finishEnabled ? createFinishFlow({ provider, store,
+    finishStore: new FinishStore(pool, { issuer: ISSUER, verifySession: async () => true }) }) : undefined;
   const handler = createHandler({
     provider, pool, publicAuthorizationEnabled: true, maxBodyBytes: 64 * 1024,
+    finishEnabled, finishFlow,
     logger: createLogger((line) => logs.push(JSON.parse(line))),
     interactionHandler: createResourceInteractionHandler({
       adminHandler: () => { throw new Error("ordinary MCP must not reach admin consent"); },
       mcpHandler: createInteractionHandler({
-        provider, store: new InteractionStore(pool),
+        provider, store, finishFlow,
         gotrue: { begin: () => ({ url: new URL("https://api.commonswarm.com/auth/v1/authorize"),
           provider: "github", state: "synthetic-sign-in-state", verifier: "synthetic-sign-in-verifier" }) },
         consentOrchestrator: createConsentOrchestrator({ command: async (body, identity) => {
@@ -682,7 +714,7 @@ async function registeredHarness(options) {
   return { h, clientId: result.metadata.client_id, metadata: result.metadata };
 }
 
-test("production startServer keeps ordinary DCR enabled only with public authorization", async (t) => {
+test("production startServer gates ordinary DCR and applies configured IP/host limits", async (t) => {
   // Exercise the real composition root and PostgreSQL registration adapter.
   // Only SQL persistence and listen are replaced; no database or socket opens.
   const registrations = new Map();
@@ -706,6 +738,7 @@ test("production startServer keeps ordinary DCR enabled only with public authori
   for (const enabled of [true, false]) {
     const running = await startServer({ config: {
       database: {}, publicAuthorizationEnabled: enabled, issuer: ISSUER, port: 0,
+      registrationLimits: { perIp: 2, perHost: 3 },
       maxBodyBytes: 64 * 1024, requestTimeoutMs: 10_000,
       gotrueUrl: "https://api.commonswarm.com/auth/v1", gotrueProvider: "github",
       allowedOrigins: new Set([ISSUER]),
@@ -729,8 +762,25 @@ test("production startServer keeps ordinary DCR enabled only with public authori
         const metadata = JSON.parse(registration.response.body);
         assert.equal(metadata.scope, "openid offline_access mcp");
         assert.ok(await running.provider.Client.find(metadata.client_id));
+        for (const [ip, status, reason] of [
+          ["203.0.113.10", 201], ["203.0.113.10", 429, "per-ip"],
+          ["203.0.113.11", 201], ["203.0.113.12", 429, "per-redirect-host"],
+        ]) {
+          const attempt = exchange("/reg", new Map(), body);
+          attempt.request.method = "POST";
+          attempt.request.socket.remoteAddress = ip;
+          Object.assign(attempt.request.headers, { accept: "application/json",
+            "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) });
+          await handler(attempt.request, attempt.response);
+          assert.equal(attempt.response.statusCode, status, attempt.response.body);
+          if (reason) {
+            assert.equal(JSON.parse(attempt.response.body).error_description,
+              `registration rate limit exceeded: ${reason}`);
+            assert.ok(Number(attempt.response.getHeader("retry-after")) > 0);
+          }
+        }
       }
-      assert.equal(registrations.size, 1);
+      assert.equal(registrations.size, 3);
     } finally {
       running.server.emit("close");
       await running.pool.end();
@@ -858,9 +908,10 @@ test("DCR registration completes the same workspace consent and PKCE token flow 
 
 test("DCR refuses IP and redirect-host floods, including host reuse across ports", async (t) => {
   for (const kind of ["ip", "host"]) {
-    await t.test(kind, async () => {
+    await t.test(kind, async (t) => {
+      t.mock.method(Date, "now", () => 1_800_000_000_000);
       const { h } = await registeredHarness();
-      const limit = kind === "ip" ? 10 : 30;
+      const limit = kind === "ip" ? 60 : 300;
       for (let i = 1; i < limit; i += 1) {
         const { response } = await register(h, {
           redirect_uris: [kind === "ip" ? `https://host${i}.example/callback` : `https://claude.ai:${4000+i}/callback`],
@@ -870,15 +921,356 @@ test("DCR refuses IP and redirect-host floods, including host reuse across ports
       const refused = await register(h, { redirect_uris: [kind === "ip" ? "https://other.example/callback" : REDIRECT] },
         { ip: kind === "ip" ? "203.0.113.10" : "203.0.113.200" });
       assert.equal(refused.response.statusCode, 429);
-      assert.ok(Number(refused.response.getHeader("retry-after")) > 0);
+      assert.equal(refused.response.getHeader("retry-after"), "3600");
+      assert.equal(refused.metadata.error, "invalid_request");
+      assert.equal(refused.metadata.error_description,
+        `registration rate limit exceeded: ${kind === "ip" ? "per-ip" : "per-redirect-host"}`);
       assert.equal((await h.provider.Client.adapter.list()).length, limit);
     });
   }
 });
 
+test("DCR rejected bodies release quota before the next registration", async () => {
+  const h = await harness();
+  for (let i = 0; i < 61; i += 1) {
+    const bad = await register(h, { response_types: ["token"] });
+    assert.equal(bad.response.statusCode, 400, bad.response.body);
+    assert.equal(bad.metadata.error, "invalid_client_metadata");
+  }
+  const good = await register(h);
+  assert.equal(good.response.statusCode, 201, good.response.body);
+  assert.equal(good.metadata.token_endpoint_auth_method, "none");
+  assert.equal(good.metadata.client_secret, undefined);
+  assert.equal((await h.provider.Client.adapter.list()).length, 1);
+});
+
+test("DCR public-client refusal precedes reservation even at exhausted quota", async () => {
+  const h = await harness();
+  for (let i = 0; i < 60; i += 1) assert.equal((await register(h)).response.statusCode, 201);
+  const confidential = await register(h, { token_endpoint_auth_method: "client_secret_basic" });
+  assert.equal(confidential.response.statusCode, 400);
+  assert.equal(confidential.metadata.error_description, "only public clients are supported");
+});
+
+test("DCR Retry-After uses the latest exhausted window, ignoring unexhausted buckets", async (t) => {
+  const { createRegistrationLimiter } = await import("../src/registration.js");
+  let now = 1_800_000_000_000;
+  t.mock.method(Date, "now", () => now);
+  const h = await harness({ registrationLimiter: createRegistrationLimiter({ perIp: 2, perHost: 2 }) });
+  const old = "https://old.example/callback", newer = "https://new.example/callback";
+  assert.equal((await register(h, { redirect_uris: [old] }, { ip: "203.0.113.1" })).response.statusCode, 201);
+  now += 20_000;
+  assert.equal((await register(h, { redirect_uris: [old, newer] }, { ip: "203.0.113.2" })).response.statusCode, 201);
+  assert.equal((await register(h, { redirect_uris: [newer] }, { ip: "203.0.113.2" })).response.statusCode, 201);
+  const all = await register(h, { redirect_uris: [old, newer] }, { ip: "203.0.113.2" });
+  assert.equal(all.response.statusCode, 429);
+  assert.equal(all.response.getHeader("retry-after"), "3600");
+  assert.equal(all.metadata.error_description, "registration rate limit exceeded: per-ip, per-redirect-host");
+  const ipOnly = await register(h, { redirect_uris: ["https://fresh.example/callback"] }, { ip: "203.0.113.2" });
+  assert.equal(ipOnly.response.statusCode, 429);
+  assert.equal(ipOnly.response.getHeader("retry-after"), "3600");
+  assert.equal(ipOnly.metadata.error_description, "registration rate limit exceeded: per-ip");
+  const hostsOnly = await register(h, { redirect_uris: [old, newer] }, { ip: "203.0.113.1" });
+  assert.equal(hostsOnly.response.statusCode, 429);
+  assert.equal(hostsOnly.response.getHeader("retry-after"), "3600");
+  assert.equal(hostsOnly.metadata.error_description, "registration rate limit exceeded: per-redirect-host");
+});
+
+test("DCR concurrent in-flight writes reserve quota and failed writes release it", async (t) => {
+  for (const [kind, limit] of [["per-ip", 10], ["per-redirect-host", 30]]) {
+    await t.test(kind, async (t) => {
+      const h = await harness({ registrationLimiter: createRegistrationLimiter({ perIp: 10, perHost: 30 }) });
+      const store = h.provider.Client.adapter;
+      const upsert = store.upsert.bind(store);
+      let resume;
+      const held = new Promise(resolve => { resume = resolve; });
+      let allStarted;
+      const started = new Promise(resolve => { allStarted = resolve; });
+      let writes = 0;
+      t.mock.method(store, "upsert", async (id, metadata) => {
+        const ordinal = ++writes;
+        if (writes === limit) allStarted();
+        await held;
+        if (ordinal === 1) throw new Error("synthetic registration storage failure");
+        return upsert(id, metadata);
+      });
+      const options = i => ({ ip: kind === "per-ip" ? "203.0.113.10" : `203.0.113.${i + 10}` });
+      const pending = Array.from({ length: limit }, (_, i) => register(h, {}, options(i)));
+      try {
+        await started;
+        const extra = await register(h, {}, options(limit));
+        assert.equal(extra.response.statusCode, 429);
+        assert.equal(extra.metadata.error_description, `registration rate limit exceeded: ${kind}`);
+        assert.equal(writes, limit, "an over-limit concurrent request must not reach storage");
+      } finally {
+        resume();
+      }
+      const results = await Promise.all(pending);
+      assert.equal(results.filter(result => result.response.statusCode === 201).length, limit - 1);
+      assert.equal(results.filter(result => result.response.statusCode === 500).length, 1);
+      assert.equal((await register(h, {}, options(limit))).response.statusCode, 201,
+        "a failed storage write releases its reservation");
+      assert.equal((await register(h, {}, options(limit + 1))).response.statusCode, 429);
+      assert.equal((await store.list()).length, limit);
+    });
+  }
+});
+
+test("DCR socket disconnects during storage keep successful IP and host reservations", async (t) => {
+  const { createMemoryRegistrationStore, createRegistrationLimiter } = await import("../src/registration.js");
+  for (const kind of ["per-ip", "per-redirect-host"]) {
+    await t.test(kind, { timeout: 10_000 }, async (t) => {
+      const store = createMemoryRegistrationStore();
+      const upsert = store.upsert.bind(store);
+      let writeStarted, releaseWrite;
+      store.upsert = async (id, metadata) => {
+        const held = new Promise(resolve => { releaseWrite = resolve; });
+        writeStarted();
+        await held;
+        return upsert(id, metadata);
+      };
+      const provider = await createMcpProvider({ registrationStore: store,
+        registrationLimiter: createRegistrationLimiter(kind === "per-ip"
+          ? { perIp: 2, perHost: 100 } : { perIp: 100, perHost: 2 }) });
+      const callback = provider.callback();
+      let responseClosed;
+      const server = createServer((request, response) => {
+        response.once("close", () => responseClosed?.());
+        callback(request, response);
+      });
+      t.after(async () => {
+        releaseWrite?.();
+        server.closeAllConnections();
+        await new Promise(resolve => server.close(resolve));
+      });
+      await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+      const port = server.address().port;
+      const body = JSON.stringify({ redirect_uris: ["https://flood.example/cb"] });
+      const raw = `POST /reg HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-Proto: https\r\n` +
+        `Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
+      for (const mode of ["end", "destroy"]) {
+        const started = new Promise(resolve => { writeStarted = resolve; });
+        const closed = new Promise(resolve => { responseClosed = resolve; });
+        const stored = new Promise(resolve => provider.once("registration_create.success", resolve));
+        const socket = connect(port, "127.0.0.1", () => socket.write(raw));
+        t.after(() => socket.destroy());
+        await started;
+        // The INSERT is pending when the server observes the disconnected peer.
+        if (mode === "end") socket.end();
+        else socket.destroy();
+        await closed;
+        releaseWrite();
+        await stored;
+      }
+      // If a reservation was refunded, let the extra write finish too: the
+      // persistent count, rather than only the response status, proves the cap.
+      store.upsert = upsert;
+      const response = await fetch(`http://127.0.0.1:${port}/reg`, { method: "POST",
+        headers: { "content-type": "application/json", "x-forwarded-proto": "https" }, body });
+      const metadata = await response.json();
+      assert.equal((await store.list()).length, 2, "disconnected successful writes still consume quota");
+      assert.equal(response.status, 429);
+      assert.equal(metadata.error_description, `registration rate limit exceeded: ${kind}`);
+    });
+  }
+});
+
+test("DCR refuses branded private-use and HTTPS mixed callbacks with loopback on or off", async (t) => {
+  for (const nativeLoopbackEnabled of [false, true]) {
+    for (const application_type of [undefined, "web", "native"]) {
+      for (const [brand, body] of [
+        ["Cursor", { client_name: "Cursor (cursor.com)", client_uri: "https://cursor.com",
+          redirect_uris: ["cursor://x/cb", "https://attacker.example/cb"] }],
+        ["Google", { client_name: "accounts.google.com", client_uri: "https://google.com",
+          redirect_uris: ["com.google.x:/cb", "https://attacker.example/cb"] }],
+      ]) {
+        await t.test(`${brand}, loopback ${nativeLoopbackEnabled}, type ${application_type ?? "omitted"}`, async () => {
+          const h = await harness({ nativeLoopbackEnabled });
+          const refused = await register(h, { ...body, application_type });
+          assert.equal(refused.response.statusCode, 400, refused.response.body);
+          assert.equal(refused.metadata.error, "invalid_client_metadata");
+          assert.equal((await h.provider.Client.adapter.list()).length, 0);
+          const good = await register(h, { client_name: "Cursor", client_uri: "https://cursor.com",
+            redirect_uris: ["cursor://x/cb"] });
+          assert.equal(good.response.statusCode, 201, good.response.body);
+          assert.equal(good.metadata.application_type, "native");
+        });
+      }
+    }
+  }
+});
+
+test("DCR accepts Cursor and dotted native redirects while preserving web and branding policy", async (t) => {
+  for (const [name, metadata, applicationType] of [
+    ["Cursor omitted type", { client_name: "Cursor", redirect_uris: ["cursor://anysphere.cursor-retrieval/oauth/user-server/callback"] }, "native"],
+    ["Cursor web type and website", { application_type: "web", client_name: "cursor.com", client_uri: "https://cursor.com",
+      redirect_uris: ["cursor://anysphere.cursor-retrieval/oauth/user-server/callback"] }, "native"],
+    ["Cursor explicit native", { application_type: "native", client_name: "Cursor", client_uri: "https://cursor.com",
+      redirect_uris: ["cursor://anysphere.cursor-retrieval/oauth/user-server/callback"] }, "native"],
+    ["dotted scheme", { client_name: "App", redirect_uris: ["com.example.app:/oauth/callback"] }, "native"],
+    ["dotted scheme branding", { client_name: "example.com", client_uri: "https://example.com",
+      redirect_uris: ["com.example.app:/oauth/callback"] }, "native"],
+    ["HTTPS web", { application_type: "web", client_name: "claude.ai", client_uri: "https://claude.ai" }, "web"],
+  ]) {
+    await t.test(name, async () => {
+      const h = await harness();
+      const result = await register(h, metadata);
+      assert.equal(result.response.statusCode, 201, result.response.body);
+      assert.equal(result.metadata.application_type, applicationType);
+      assert.equal(result.metadata.token_endpoint_auth_method, "none");
+      const stored = await h.provider.Client.find(result.metadata.client_id);
+      assert.deepEqual(stored.redirectUris, result.metadata.redirect_uris);
+    });
+  }
+  await t.test("private callbacks cannot claim unrelated DNS brands", async () => {
+    const h = await harness();
+    for (const overrides of [
+      { client_uri: "https://evil.example" }, { client_name: "claude.ai" },
+      { client_name: "anysphere.cursor-retrieval" }, { logo_uri: "https://cursor.com/logo.png" },
+    ]) {
+      const result = await register(h, { redirect_uris: ["cursor://anysphere.cursor-retrieval/callback"], ...overrides });
+      assert.equal(result.response.statusCode, 400, result.response.body);
+      assert.equal(result.metadata.error, "invalid_client_metadata");
+    }
+    assert.equal((await register(h, { client_name: "Cursor", client_uri: "https://cursor.com",
+      redirect_uris: ["cursor://anysphere.cursor-retrieval/callback"] })).response.statusCode, 201);
+  });
+});
+
+test("DCR infers native for all-loopback Inspector callbacks only when enabled", async (t) => {
+  for (const host of ["localhost", "127.0.0.1", "[::1]"]) {
+    for (const application_type of [undefined, "web"]) {
+      await t.test(`${host} ${application_type ?? "omitted"}`, async () => {
+        const body = { client_name: "MCP Inspector", application_type,
+          redirect_uris: [`http://${host}:6274/oauth/callback`] };
+        const h = await harness({ nativeLoopbackEnabled: true });
+        const accepted = await register(h, body);
+        assert.equal(accepted.response.statusCode, 201, accepted.response.body);
+        assert.equal(accepted.metadata.application_type, "native");
+        assert.equal(accepted.metadata.token_endpoint_auth_method, "none");
+        assert.equal((await register(await harness(), body)).response.statusCode, 400);
+        const mixed = await register(h, { ...body, redirect_uris: [...body.redirect_uris, REDIRECT] });
+        assert.equal(mixed.response.statusCode, 400, "mixed web/loopback callbacks keep the web policy");
+        assert.equal(mixed.metadata.error, "invalid_client_metadata");
+      });
+    }
+  }
+  const all = await register(await harness({ nativeLoopbackEnabled: true }), {
+    redirect_uris: ["http://localhost/oauth/callback", "http://127.0.0.1:1/oauth/callback", "http://[::1]:65535/oauth/callback"],
+  });
+  assert.equal(all.response.statusCode, 201, all.response.body);
+  assert.equal(all.metadata.application_type, "native");
+});
+
+test("DCR loopback and private-use callbacks have only per-IP quota", async (t) => {
+  for (const uri of ["http://localhost:6274/oauth/callback", "http://127.0.0.1:6274/oauth/callback",
+    "http://[::1]:6274/oauth/callback", "cursor://anysphere.cursor-retrieval/oauth/user-commonswarm/callback",
+    "com.example.app:/oauth/callback"]) {
+    await t.test(uri, async () => {
+      const h = await harness({ nativeLoopbackEnabled: true,
+        registrationLimiter: createRegistrationLimiter({ perIp: 10, perHost: 30 }) });
+      const body = { redirect_uris: [uri] };
+      for (let i = 0; i < 31; i++) {
+        const result = await register(h, body, { ip: `203.0.113.${10 + i % 4}` });
+        assert.equal(result.response.statusCode, 201, `registration ${i + 1}: ${result.response.body}`);
+      }
+      // The first IP has eight successes above; its tenth succeeds, eleventh fails.
+      for (let i = 0; i < 2; i++) assert.equal((await register(h, body)).response.statusCode, 201);
+      const denied = await register(h, body);
+      assert.equal(denied.response.statusCode, 429);
+      assert.match(denied.metadata.error_description, /per-ip/u);
+      assert.doesNotMatch(denied.metadata.error_description, /per-redirect-host/u);
+      assert.equal((await h.provider.Client.adapter.list()).length, 33);
+    });
+  }
+});
+
+test("registered native callbacks complete consent, Connected, finish and provider redirect", async (t) => {
+  for (const redirectUri of ["cursor://anysphere.cursor-retrieval/oauth/user-commonswarm/callback",
+    "com.example.app:/oauth/callback", "http://localhost:6274/oauth/callback",
+    "http://127.0.0.1:6274/oauth/callback", "http://[::1]:6274/oauth/callback"]) {
+    await t.test(redirectUri, async () => {
+      const h = await harness({ redirectUri, nativeLoopbackEnabled: true, finishEnabled: true });
+      const registration = await register(h, { redirect_uris: [redirectUri] });
+      assert.equal(registration.response.statusCode, 201, registration.response.body);
+      const clientId = registration.metadata.client_id;
+      h.setClient(clientId);
+      const noPkce = new URL(authorize("consent", "openid mcp", redirectUri, clientId), ISSUER);
+      noPkce.searchParams.delete("code_challenge");
+      noPkce.searchParams.delete("code_challenge_method");
+      const pkceRequired = await h.run(noPkce.pathname + noPkce.search);
+      assert.equal(pkceRequired.statusCode, 303);
+      assert.equal(new URL(pkceRequired.getHeader("location")).searchParams.get("error"), "invalid_request");
+      await h.completedLogin();
+      const unregistered = await h.run(authorize("consent", "openid mcp", "com.attacker.app:/callback", clientId));
+      assert.equal(unregistered.statusCode, 400);
+      const start = await h.run(authorize("consent", "openid mcp", redirectUri, clientId));
+      assert.equal(start.statusCode, 303);
+      const path = start.getHeader("location");
+      const page = await h.run(path);
+      assert.equal(page.statusCode, 200, page.body);
+      const target = new URL(redirectUri);
+      if (!target.hostname && !["http:", "https:"].includes(target.protocol)) {
+        assert.match(page.body, /Choose workspaces for an app on this device \(com\.example\.app:\)/u);
+        assert.match(page.body, /After you approve, you return to <strong>an app on this device \(com\.example\.app:\)<\/strong>/u);
+      }
+      const source = target.protocol === "http:" ? target.origin : target.protocol;
+      assert.equal(page.getHeader("content-security-policy"),
+        `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${source}; frame-ancestors 'none'; base-uri 'none'; script-src 'self'; script-src-attr 'none'`);
+      assert.equal(page.getHeader("cache-control"), "no-store");
+      assert.equal(page.getHeader("referrer-policy"), "same-origin");
+      assert.equal(page.getHeader("x-content-type-options"), "nosniff");
+      const form = new URLSearchParams({
+        csrf_token: /name="csrf_token" value="([^"]+)"/u.exec(page.body)[1],
+        selection_version: /name="selection_version" value="([^"]+)"/u.exec(page.body)[1],
+        workspace_ids: W1, home_workspace_id: W1,
+      });
+      const consent = await h.run(`${path}/consent`, "POST", form.toString());
+      assert.equal(consent.statusCode, 303, consent.body);
+      assert.equal(consent.getHeader("location"), `${path}/connected`);
+      const connected = await h.run(consent.getHeader("location"));
+      assert.equal(connected.statusCode, 200, connected.body);
+      assert.match(connected.body, /Connected/u);
+      assert.match(connected.getHeader("content-security-policy"), /form-action 'none'/u);
+      const finish = await h.run(`${path}/finish`);
+      assert.equal(finish.statusCode, 303, finish.body);
+      const resume = new URL(finish.getHeader("location"));
+      assert.equal(resume.origin, ISSUER);
+      assert.equal(resume.search, "");
+      const final = await h.run(resume.pathname);
+      assert.equal(final.statusCode, 303, final.body);
+      const callback = new URL(final.getHeader("location"));
+      assert.ok(callback.searchParams.get("code"));
+      assert.equal(callback.searchParams.get("state"), STATE);
+      assert.equal(callback.searchParams.get("iss"), ISSUER);
+      callback.search = "";
+      assert.equal(callback.href, redirectUri);
+    });
+  }
+});
+
+test("DCR rejects unknown and dangerous schemes, userinfo, fragments and non-loopback HTTP", async () => {
+  const h = await harness({ nativeLoopbackEnabled: true });
+  for (const uri of [
+    "unknown:/callback", "javascript:alert(1)", "vbscript:msgbox(1)", "data:text/plain,callback",
+    "file:///callback", "blob:https://client.example/callback", "about:blank",
+    "http://client.example/callback", "http://127.0.0.2/callback",
+    "cursor://user:pass@anysphere.cursor-retrieval/callback", "cursor://anysphere.cursor-retrieval/callback#fragment",
+    "com.example.app:/callback#fragment", "com.example.app://user:pass@callback/path",
+  ]) {
+    const result = await register(h, { application_type: "native", redirect_uris: [uri] });
+    assert.equal(result.response.statusCode, 400, uri);
+    assert.equal(result.metadata.error, "invalid_client_metadata", uri);
+  }
+  assert.equal((await register(h, { application_type: "native",
+    redirect_uris: ["http://127.0.0.1:49152/callback"] })).response.statusCode, 201);
+  assert.equal((await h.provider.Client.adapter.list()).length, 1);
+});
+
 test("DCR per-host rate limit keys on the registrable domain, not subdomains", async (t) => {
   await t.test("sibling subdomains share one bucket", async () => {
-    const { h } = await registeredHarness();
+    const { h } = await registeredHarness({
+      registrationLimiter: createRegistrationLimiter({ perIp: 10, perHost: 30 }) });
     for (let i = 1; i <= 30; i += 1) {
       const { response } = await register(h, {
         redirect_uris: [`https://a${i}.evil.com/callback`],

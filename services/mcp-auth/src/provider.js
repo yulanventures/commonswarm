@@ -278,6 +278,10 @@ export async function createMcpProvider({
   // Production terminates TLS before this app. Tests exercise the same trusted
   // proxy shape over an ephemeral loopback HTTP server.
   provider.proxy = true;
+  provider.use(async (ctx, next) => {
+    try { await next(); }
+    finally { ctx.state.registrationSettle?.(ctx.status === 201); }
+  });
   await bindProviderAdminNonceStore(provider, async ctx => {
     if (ctx.status < 400 && adminTransactionContext(false)?.token) {
       await adminLifecycle.recordToken(ctx.body);

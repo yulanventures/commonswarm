@@ -139,6 +139,38 @@ test("enabled configuration requires the protected management credential; disabl
   assert.deepEqual(await createProductionManagementBindings(await loadConfig(env)), {});
 });
 
+test("DCR configuration defaults to 60/300 per hour and applies bounded overrides", async (t) => {
+  const env = await fixture(t);
+  delete env.MCP_AUTH_DCR_PER_IP_PER_HOUR;
+  delete env.MCP_AUTH_DCR_PER_HOST_PER_HOUR;
+  assert.deepEqual((await loadConfig(env)).registrationLimits, { perIp: 60, perHost: 300 });
+  env.MCP_AUTH_DCR_PER_IP_PER_HOUR = "2";
+  env.MCP_AUTH_DCR_PER_HOST_PER_HOUR = "3";
+  assert.deepEqual((await loadConfig(env)).registrationLimits, { perIp: 2, perHost: 3 });
+  env.MCP_AUTH_DCR_PER_IP_PER_HOUR = "1";
+  env.MCP_AUTH_DCR_PER_HOST_PER_HOUR = "10000";
+  assert.deepEqual((await loadConfig(env)).registrationLimits, { perIp: 1, perHost: 10000 });
+});
+
+test("DCR invalid limit settings refuse the real startup with the variable name", async (t) => {
+  for (const name of ["MCP_AUTH_DCR_PER_IP_PER_HOUR", "MCP_AUTH_DCR_PER_HOST_PER_HOUR"]) {
+    for (const value of ["0", "-1", "1.5", "abc", "", " 5", "5 ", "+5", "10001", "9007199254740993"]) {
+      await t.test(`${name} ${JSON.stringify(value)}`, async () => {
+        const env = { ...process.env };
+        delete env.MCP_AUTH_DCR_PER_IP_PER_HOUR;
+        delete env.MCP_AUTH_DCR_PER_HOST_PER_HOUR;
+        env[name] = value;
+        await assert.rejects(exec(process.execPath, [new URL("../src/server.js", import.meta.url).pathname],
+          { env, timeout: 10_000 }), error => {
+          assert.equal(error.code, 1);
+          assert.ok(error.stderr.includes(`${name} must contain decimal digits for an integer from 1 to 10000`));
+          return true;
+        });
+      });
+    }
+  }
+});
+
 test("production entrypoint invokes the bundled management handler; OFF imports no bundle and allocates no pool", async (t) => {
   for (const enabled of [false, true]) {
     await t.test(enabled ? "enabled real bundled handler with stub DB" : "disabled no management database", async (t) => {

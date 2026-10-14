@@ -349,6 +349,11 @@ test("the shared destination helper keeps one fact per line without this page's 
   assert.match(noHost, /After you approve, you return to <strong>a program on this computer \(localhost\)<\/strong>\./u);
 });
 
+test("hostless private-use callbacks display the app scheme as the consent destination", () => {
+  const html = renderConsentDestination({ clientName: "App", redirectUri: "com.example.app:/oauth/callback" });
+  assert.match(html, /After you approve, you return to <strong>an app on this device \(com\.example\.app:\)<\/strong>\./u);
+});
+
 test("the tab title is first-party text and never carries a client-supplied name", () => {
   // A client can name itself anything (even "CommonSwarm"); unlabelled in the tab and history it would read as a
   // first-party prompt. The body labels the client name as supplied by the client; the title stays neutral.

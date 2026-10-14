@@ -44,10 +44,12 @@ const PROVIDER_GLYPHS = {
 const BRAND_MARK = '<svg class="brand-mark" width="24" height="24" viewBox="0 0 28 28" fill="none" aria-hidden="true" focusable="false"><circle cx="10" cy="10" r="8" fill="#D4F04A"/><rect x="12" y="12" width="14" height="14" rx="4.5" stroke="currentColor" stroke-width="2"/></svg>';
 
 export function renderConsentDestination({ clientName, redirectUri, metadataHost }) {
-  const hostname = new URL(redirectUri).hostname;
+  const redirect = new URL(redirectUri);
+  const hostname = redirect.hostname;
   const destination = ["localhost", "127.0.0.1", "[::1]"].includes(hostname)
     ? "a program on this computer (localhost)"
-    : hostname;
+    : !hostname && !["http:", "https:"].includes(redirect.protocol)
+      ? `an app on this device (${redirect.protocol})` : hostname;
   // Shared with admin-interaction-page.js: line breaks stay in the markup so the
   // facts keep one line each without this page's stylesheet.
   return `<p class="notice destination"><span class="destination-line">Client name (supplied by the client): <strong>${escapeHtml(clientName ?? "Unnamed client")}</strong></span><br>
