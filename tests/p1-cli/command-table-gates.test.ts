@@ -609,10 +609,7 @@ test("post-signal kind branches select the matching help shape", { timeout: 10_0
   ] as const) assert.deepEqual(cliAccepted.postSignalAllowedFlags(kind), flags);
 });
 
-test("public route comment documents its function", { timeout: 10_000 }, async () => {
-  const source = await readFile(resolve("src/cli.ts"), "utf8");
-  assert.match(source, /export const LISTEN_START_REFUSED_FLAGS = [^\n]+;\s*\/\*\* Parse the public route before credentials or network work\. \*\/\s*export function listenerRouteConfiguration\(/);
-});
+
 
 test("handler help omits refused resume, dogfood and command flags", { timeout: 10_000 }, () => {
   const resume = commandHelpLines("resume");

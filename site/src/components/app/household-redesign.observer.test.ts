@@ -87,7 +87,7 @@ test("Lists & docs access is two described radio groups, generated from the enfo
 });
 
 test("approving an agent uses the independent server command without changing the person's role", () => {
-  const approve = section(script, "const approveAgent = async (", "/** Withdrawal leaves");
+  const approve = section(script, "const approveAgent = async (", "const withdrawAgent = async");
   assert.match(approve, /kind: "household_approve_connection"/);
   assert.doesNotMatch(approve, /readHouseholdAccess|content_role|purpose|household_permissions/);
   assert.match(approve, /approvalUntil\(/);
@@ -103,13 +103,13 @@ test("every household result is dropped once its workspace, account, version or 
     "scope.version === requestVersion", "scope.generation === householdAccessGeneration"]) {
     assert.ok(current.includes(fact), `householdCurrent must check ${fact}`);
   }
-  const load = section(script, "const loadHouseholdConnections = async", "/** Approve only the agent;");
+  const load = section(script, "const loadHouseholdConnections = async", "const approveAgent = async");
   assert.match(load, /const ticket = connectionReads\.next\(\);/);
-  assert.match(load, /\} catch \{\s*next = \[\];\s*\}\s*\/\/ Success and failure are both dropped once the scope moved on or a newer read started\.\s*if \(!connectionReads\.isLatest\(ticket\) \|\| !householdCurrent\(scope\)\) return;/);
-  const confirm = section(script, "const confirmOwnAccess = async", "/** Open Lists & docs:");
+  assert.match(load, /\} catch \{\s*next = \[\];\s*\}[\s\S]*?if \(!connectionReads\.isLatest\(ticket\) \|\| !householdCurrent\(scope\)\) return;/);
+  const confirm = section(script, "const confirmOwnAccess = async", "const openHouseholdView = async");
   assert.match(confirm, /if \(button && token === householdConfirms\) button\.disabled = false;/);
   assert.match(confirm, /notice && householdCurrent\(scope\) && token === householdConfirms/);
-  const refresh = section(script, "const refreshHouseholdAccess = async", "/** Show the access card");
+  const refresh = section(script, "const refreshHouseholdAccess = async", "const renderHouseholdAccess =");
   assert.match(refresh, /const ticket = accessReads\.next\(\);/);
   assert.match(refresh, /if \(!accessReads\.isLatest\(ticket\) \|\| !householdCurrent\(scope\)\) return;/);
   /* A workspace or account change retires every outstanding household read. */
@@ -275,7 +275,7 @@ test("hosted and local owners use the same Allow controls and approval command; 
       householdAccess: { contentRole: "editor" }, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, HOSTED_LISTS_NOTE,
       initials: () => "M", markAgentAvatar: () => {}, approvalUntil, accessRefusalMessage, loadHouseholdConnections: f.load });
     const funcs = execute(`${section(script, "const connectionApproval =", "const connectionReads")}
-      ${section(script, "const approveAgent = async", "/** Withdrawal leaves")}; ({ renderAgentApprovals, approveAgent });`, { ...f.ctx });
+      ${section(script, "const approveAgent = async", "const withdrawAgent = async")}; ({ renderAgentApprovals, approveAgent });`, { ...f.ctx });
     funcs.renderAgentApprovals();
     const choices = dom.list.descendants().find(node => node.tag === "fieldset");
     const allow = dom.list.descendants().find(node => node.tag === "button" && node.textContent === "Allow");
@@ -315,7 +315,7 @@ function dialogConnectionsFixture() {
   };
   const source = section(script, "const connectionApproval =", "const approvalDescription =")
     + section(script, "const peopleDialogModel =", "const syncPeopleDialogLayout =")
-    + section(script, "const connectionReads =", "/** Approve only the agent;");
+    + section(script, "const connectionReads =", "const approveAgent = async");
   const funcs = execute(`${source}; ({ peopleDialogModel, loadHouseholdConnections });`, ctx);
   return { ctx, model: funcs.peopleDialogModel, load: funcs.loadHouseholdConnections };
 }
@@ -405,7 +405,7 @@ function creationFixture(outcome: "committed" | "refused" | "unknown", existing 
     openWorkspace: async (id: string) => { events.push("open"); ctx.activeWorkspaceId = id; ctx.requestVersion++; ctx.householdAccessGeneration++; },
   };
   Object.assign(ctx, execute(`${section(script, "const householdSetupKey =", "let removedAgents =")}; ({ needsHouseholdSetup, setHouseholdSetupNeeded });`, ctx));
-  const source = section(script, "const syncCreatePurposeWarning =", "/* THE SAMPLE ROSTER");
+  const source = section(script, "const syncCreatePurposeWarning =", "const SAMPLE_ROSTERS:");
   const create = execute(`${source}; createFromIntent;`, ctx);
   return { ctx, create, events, commands, session, warning, radios, receipt, storage };
 }
@@ -455,7 +455,7 @@ test("a session change during creation permissions cannot clear the retry intent
 
 test("the Just me warning is final, names the way out, and clears when Shared is selected", () => {
   const f = creationFixture("committed");
-  const sync = execute(`${section(script, "const syncCreatePurposeWarning =", "/** Creation and its permissions")}; syncCreatePurposeWarning;`, { ...f.ctx });
+  const sync = execute(`${section(script, "const syncCreatePurposeWarning =", "const recordCreatePermissions = async")}; syncCreatePurposeWarning;`, { ...f.ctx });
   assert.match(PERSONAL_PURPOSE_WARNING, /cannot be changed later/);
   assert.match(PERSONAL_PURPOSE_WARNING, /create another workspace/);
   f.radios[1].checked = true; sync(); assert.equal(f.warning.textContent, PERSONAL_PURPOSE_WARNING);
@@ -476,7 +476,7 @@ test("approval sends only connection consent, withdrawal uses the principal, and
     householdReceipts: new Map(), one: () => receipt,
     loadHouseholdConnections: async () => messages.push("reload"), window: { confirm: (text: string) => { confirms.push(text); return confirm; } },
   };
-  const commands = execute(`${section(script, "const approveAgent = async", "/** The person's own access")}; ({ approveAgent, withdrawAgent });`, ctx);
+  const commands = execute(`${section(script, "const approveAgent = async", "let householdConfirms =")}; ({ approveAgent, withdrawAgent });`, ctx);
   const connection = { kind: "hosted", connection_id: "connection", grant_id: "grant", principal_id: "principal" };
   const button = { disabled: false }, status = { textContent: "" };
   await commands.approveAgent(connection, ["read"], button, status);
@@ -511,7 +511,7 @@ test("approval sends only connection consent, withdrawal uses the principal, and
 });
 
 test("approval reads distinguish active permanent and local approvals from expired or missing ones", () => {
-  const { read, describe } = execute(`${section(script, "const connectionApproval =", "/** One approval card")}; ({ read: connectionApproval, describe: approvalDescription });`, { approvalUntil });
+  const { read, describe } = execute(`${section(script, "const connectionApproval =", "const renderAgentApprovals =")}; ({ read: connectionApproval, describe: approvalDescription });`, { approvalUntil });
   assert.equal(describe({ operations: ["read", "create", "update"], expires_at: null }), "Allowed until you withdraw it.");
   assert.equal(read({ approval: null }), null);
   assert.deepEqual(JSON.parse(JSON.stringify(read({ approval: { operations: ["read"], expires_at: null } }))), { operations: ["read"], expires_at: null });
@@ -603,8 +603,8 @@ function attachAccessFixture(f: ReturnType<typeof creationFixture>) {
     readHouseholdAccess: async (scope: any) => ({ workspaceId: scope.workspaceId, status: answer, contentRole: answer === "ok" ? "editor" : null }),
     renderHouseholdAccess: () => {},
   });
-  f.ctx.renderSetupChecklist = execute(`${section(script, "const renderSetupChecklist =", "/** Notice the agent")}; renderSetupChecklist;`, f.ctx);
-  f.ctx.refreshHouseholdAccess = execute(`${section(script, "const refreshHouseholdAccess =", "/** Show the access card")}; refreshHouseholdAccess;`, f.ctx);
+  f.ctx.renderSetupChecklist = execute(`${section(script, "const renderSetupChecklist =", "const startHostJoinWatch =")}; renderSetupChecklist;`, f.ctx);
+  f.ctx.refreshHouseholdAccess = execute(`${section(script, "const refreshHouseholdAccess =", "const renderHouseholdAccess =")}; refreshHouseholdAccess;`, f.ctx);
   return { rows, progress, succeed: () => { answer = "ok"; } };
 }
 
@@ -694,7 +694,7 @@ test("failed creation plus an unknown access read keeps Choose visible, then ok 
 });
 
 test("boot resumes permissions once with the saved id and clears failed intents; legacy intent sends nothing", async () => {
-  const branch = section(script, "        const pending = readCreateIntent(session.user.id);\n        if (pending && workspaces.some", "        /* ?w=");
+  const branch = section(script, "        const pending = readCreateIntent(session.user.id);\n        if (pending && workspaces.some", "        await navigateHome(resolveHomeRoute(");
   for (const outcome of ["committed", "refused", "unknown"] as const) {
     const f = creationFixture(outcome, true);
     f.ctx.saved = { ...createIntent };

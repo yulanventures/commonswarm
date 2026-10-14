@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import ts from "typescript";
 
 const commandUrl = new URL("../supabase/functions/command/index.ts", import.meta.url);
 const readUrl = new URL("../supabase/functions/read/index.ts", import.meta.url);
@@ -10,16 +11,14 @@ test("hosted entry points accept opaque capabilities and contain no bearer ladde
   const [command, read, auth] = await Promise.all([
     readFile(commandUrl, "utf8"), readFile(readUrl, "utf8"), readFile(authUrl, "utf8"),
   ]);
-  const commandStart = command.indexOf("export async function handleHostedCommand(");
-  const commandEnd = command.indexOf(
-    "\n}\n\n/**\n * Trusted authorization-service entry point",
-    commandStart,
-  ) + 2;
-  const readStart = read.indexOf("export async function handleHostedRead(");
-  const readEnd = read.indexOf("\n}\n\n/* The dashboard", readStart) + 2;
-  assert.ok(commandStart >= 0 && readStart >= 0);
-  assert.doesNotMatch(command.slice(commandStart, commandEnd), /Request|bearer|getUser|getClaims/);
-  assert.doesNotMatch(read.slice(readStart, readEnd), /Request|bearer|getUser|getClaims/);
+  const handler = (source: string, name: string): string => {
+    const file = ts.createSourceFile("handler.ts", source, ts.ScriptTarget.Latest, true);
+    const declaration = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
+    assert.ok(declaration && ts.isFunctionDeclaration(declaration) && declaration.body, `missing handler ${name}`);
+    return declaration.getText(file);
+  };
+  assert.doesNotMatch(handler(command, "handleHostedCommand"), /Request|bearer|getUser|getClaims/);
+  assert.doesNotMatch(handler(read, "handleHostedRead"), /Request|bearer|getUser|getClaims/);
   assert.match(auth, /const bindings = new WeakMap/);
   assert.match(auth, /bindings\.get\(capability\)/);
   assert.match(auth, /providerStatus\(binding\.providerGrantId\)/);

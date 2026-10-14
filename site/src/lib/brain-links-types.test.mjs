@@ -47,10 +47,8 @@ test("POSITIVE CONTROL: the same invocation reports a brain-links type error", a
      exact defect that shipped is reintroduced in a COPY: a returned `kind` outside the union. */
   const source = readFileSync(join(libDir, "brain-links.ts"), "utf8");
   const broken = source.replace(
-    '  | { kind: "missing"; topic: string; message: string }\n' +
-      "  /** The click belongs to a workspace the reader has left. Render nothing, say nothing. */\n" +
-      '  | { kind: "abandoned"; topic: string };',
-    '  | { kind: "missing"; topic: string; message: string };',
+    '| { kind: "abandoned"; topic: string }',
+    "",
   );
   assert.notEqual(broken, source, "the union member must be there to remove");
 

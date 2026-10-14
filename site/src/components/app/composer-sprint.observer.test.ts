@@ -987,8 +987,8 @@ const mutations: Mutation[] = [
     key: "dashboard",
     /* resetComposer drops a caret remembered in text the next workspace replaces.
        Removing that one assignment is the failure this mutation has to reach. */
-    target: "The caret indexes text the next workspace is about to replace. */\n      composerCaretKnown = false;",
-    replacement: "The caret indexes text the next workspace is about to replace. */",
+    target: "\n      composerCaretKnown = false;",
+    replacement: "",
     expectedFailure: "caret-survival",
   },
   {

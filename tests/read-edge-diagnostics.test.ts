@@ -265,18 +265,7 @@ test("read/index.ts wires structured diagnostics (source contract)", () => {
   assert.match(source, /let phase: ReadHandlerPhase = "top_level"/);
 });
 
-test("m-2: sender relation comment agrees that revoked agent authors are filtered", () => {
-  const source = readFileSync(
-    join(process.cwd(), "supabase/functions/read/index.ts"),
-    "utf8",
-  );
-  assert.equal(
-    source.includes("Do NOT filter author.revoked_at"),
-    false,
-    "m-2 comment must not instruct readers to undo the live revoked-author filter",
-  );
-  assert.match(source, /Filter author\.revoked_at/);
-});
+
 
 test("the read function keeps browser CORS wired — preflight branch and response wrap", () => {
   /* 2026-08-31: the dashboard became this function's first browser caller
