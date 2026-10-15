@@ -309,7 +309,7 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         const verifier = randomBytes(32).toString('base64url'), state = randomUUID();
         const parameters = { client_id: clientId, redirect_uri: redirectUri, response_type: 'code',
           scope: 'openid mcp offline_access', resource: RESOURCE, state,
-          ...(mode === 'DCR' ? { prompt: 'login' } : mode === 'Cursor explicit' ? { prompt: 'select_account' } : {}),
+          ...(mode === 'Cursor explicit' ? { prompt: 'consent' } : {}),
           code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' };
         const authorize = async (overrides = {}) => agent.request(`${discovery.authorization_endpoint}?${new URLSearchParams({ ...parameters, ...overrides })}`);
         const unsafeResource = await authorize({ resource: `${RESOURCE}/wrong` });
@@ -527,7 +527,7 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
             'rotated JWT reaches authenticated MCP read');
           latest = next;
         }
-        assert.ok(consentRedirect, 'eligible GET took exactly one consent redirect');
+        assert.equal(consentRedirect, parameters.prompt !== 'consent', 'eligible GET without prompt=consent took exactly one consent redirect');
         const rpc = (body, token = tokens.access_token, version = '2025-11-25') => edge.request('/mcp', {
           method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, 'mcp-protocol-version': version }, body: JSON.stringify(body),
         });
@@ -558,14 +558,13 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         assert.ok(listed.result.tools.every(tool => tool.inputSchema?.type === 'object'));
         const grant = await pool.query('SELECT state FROM swarm.hosted_mcp_grants WHERE interaction_ref = $1', [uid]);
         assert.equal(grant.rows[0]?.state, 'active', 'token and MCP success follows actual authority activation');
-        // Reuse real browser/provider/DB storage, never construct token payloads.
-        const reconnect = async ({ method = 'GET', scope = parameters.scope, prompt, returning = false } = {}) => {
+        // Reuse real consent/PKCE/storage; unpatched simulates the legacy initial GET only.
+        const reconnect = async ({ unpatched = false, scope = parameters.scope, prompt, returning = false } = {}) => {
           const browser = returning ? agent : new Agent(authOrigin, sessions);
           const fields = { ...parameters, scope, state: randomUUID() }; delete fields.prompt;
           if (prompt !== undefined) fields.prompt = prompt;
-          let response = await browser.request(method === 'GET'
-            ? `${discovery.authorization_endpoint}?${new URLSearchParams(fields)}` : discovery.authorization_endpoint,
-          method === 'GET' ? {} : { method, headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields) });
+          // Duplicate unknown parameters pass through the wrapper and are ignored by the provider.
+          let response = await browser.request(`${discovery.authorization_endpoint}?${new URLSearchParams(fields)}${unpatched === true ? '&pre_fix=1&pre_fix=2' : ''}`);
           let consents = 0;
           for (let hop = 0; hop < 18; hop++) {
             if (response.status === 200) {
@@ -586,7 +585,12 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
             if (target.origin !== ISSUER) {
               assert.ok(consents > 0, 'returning browser still submits genuine consent');
               assert.ok(!target.searchParams.has('error') && target.searchParams.has('code'));
-              const exchanged = await tokenRequest({ code: target.searchParams.get('code') });
+              const code = target.searchParams.get('code');
+              if (unpatched === true) {
+                const oldCode = await running.provider.AuthorizationCode.find(code);
+                assert.ok(!oldCode.scopes.has('offline_access'), 'actual legacy GET code lacks offline_access before exchange');
+              }
+              const exchanged = await tokenRequest({ code });
               assert.equal(exchanged.status, 200);
               return await exchanged.json();
             }
@@ -599,8 +603,8 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         const silentCallback = new URL(silent.headers.get('location'), ISSUER);
         assert.ok(silentCallback.searchParams.has('error') && !silentCallback.searchParams.has('code'),
           'prompt=none cannot turn the new offline request into consent');
-        // POST is deliberately outside the GET repair, so it issues a genuine old-scope family.
-        const old = await reconnect({ method: 'POST' });
+        // Exercise the legacy scope filter through real GET consent and token issuance.
+        const old = await reconnect({ unpatched: true });
         const oldScope = (await storedRefresh(old.refresh_token)).payload.scope.split(' ');
         assert.ok(!oldScope.includes('offline_access'));
         await refusedRefresh(old.refresh_token, {}, 'invalid_scope');
