@@ -1,4 +1,5 @@
 import { readEndpoint, type CloudTarget } from "./config.js";
+import { RENEWAL_IDLE_PAUSE_DAYS } from "../protocol/workspace-commands.js";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -132,11 +133,10 @@ export async function readRenewalGrants(
  *
  * MIRRORS `interval '14 days'` in swarm.prepare_renewal_grant, installed by
  * supabase/migrations/20260904000001_standing_grant_resume.sql, and the same
- * number in site/src/lib/standing-grants.ts. No module is imported by the CLI,
- * the site, and the SQL alike, so the mirror is held by a test that reads all
- * three files: tests/p1-cli/standing-grants.test.ts.
+ * number in site/src/lib/standing-grants.ts. The CLI shares the reducer's
+ * constant; tests/p1-cli/standing-grants.test.ts checks the site and SQL mirrors.
  */
-export const STANDING_IDLE_PAUSE_DAYS = 14;
+export const STANDING_IDLE_PAUSE_DAYS = RENEWAL_IDLE_PAUSE_DAYS;
 
 /**
  * Who may resume a paused grant. MIRRORS the gate in swarm.resume_renewal_grant:
