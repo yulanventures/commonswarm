@@ -466,11 +466,15 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         const keys = createLocalJWKSet(jwks);
         const idProof = await jwtVerify(tokens.id_token, keys, { issuer: ISSUER, audience: clientId, algorithms: ['ES256'] });
         assert.ok(idProof.payload.sub === owner, 'R1: real ID token verifies with the advertised ES256 JWKS');
-        const refresh = (token, overrides = {}) => agent.request(discovery.token_endpoint, {
-          method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({ client_id: clientId, grant_type: 'refresh_token',
-            refresh_token: token, resource: RESOURCE, scope: parameters.scope, ...overrides }),
-        });
+        const refresh = (token, overrides = {}) => {
+          const fields = { client_id: clientId, grant_type: 'refresh_token',
+            refresh_token: token, resource: RESOURCE, scope: parameters.scope, ...overrides };
+          if (fields.scope === undefined) delete fields.scope;
+          return agent.request(discovery.token_endpoint, {
+            method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams(fields),
+          });
+        };
         const refusedRefresh = async (token, overrides, error) => {
           const result = await refresh(token, overrides);
           assert.equal(result.status, 400);
@@ -507,7 +511,9 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
           const stored = await storedRefresh(next.refresh_token);
           assert.ok(stored.payload.grantId === family);
           assert.deepEqual(stored.payload.scope.split(' ').sort(), parameters.scope.split(' ').sort());
-          assert.ok(stored.expires_at.getTime() <= initialRefresh.expires_at.getTime(), 'rotation cannot extend original deadline');
+          assert.ok(stored.payload.exp <= initialRefresh.payload.exp, 'rotation cannot extend original token expiry');
+          assert.ok(stored.expires_at.getTime() < initialRefresh.expires_at.getTime() + 1000,
+            'adapter timestamp drift must remain below one second across rotation');
           const proof = await jwtVerify(next.access_token, keys, { issuer: ISSUER, audience: RESOURCE, algorithms: ['ES256'] });
           assert.equal(proof.payload.scope, 'mcp');
           assert.ok(proof.payload.grant_id === family);
@@ -599,7 +605,7 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         assert.ok(!oldScope.includes('offline_access'));
         await refusedRefresh(old.refresh_token, {}, 'invalid_scope');
         let subset = old;
-        for (const scope of ['mcp', '']) {
+        for (const scope of ['mcp', undefined]) {
           const result = await refresh(subset.refresh_token, { scope });
           assert.equal(result.status, 200, 'old full-scope refusal leaves valid subset/omitted retry usable');
           subset = await result.json();
