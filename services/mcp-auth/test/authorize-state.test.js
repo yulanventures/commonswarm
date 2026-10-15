@@ -606,7 +606,12 @@ test("one workspace consent completes Claude authorization and token exchange", 
               session.grantIdFor(CLIENT, await grant.save());
               await session.persist();
             }
-            const start = await h.run(authorize(prompt, "openid offline_access mcp"));
+            let start = await h.run(authorize(prompt, "openid offline_access mcp"));
+            if (prompt === undefined) {
+              assert.equal(start.statusCode, 303);
+              assert.equal(new URL(start.getHeader("location"), ISSUER).searchParams.get("prompt"), "consent");
+              start = await h.run(start.getHeader("location"));
+            }
             assert.equal(start.statusCode, 303);
             const path = start.getHeader("location");
             const page = await h.run(`${path}?redirect_uri=https://attacker.example/callback`);
