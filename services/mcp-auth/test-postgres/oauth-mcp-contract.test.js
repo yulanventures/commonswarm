@@ -80,11 +80,11 @@ function form(html) {
   return { action, csrf, version, home: field('home_workspace_id') };
 }
 
-function assertConsentHeaders(response) {
+function assertConsentHeaders(response, callbackUri = redirectUri) {
   assert.equal(response.headers.get('referrer-policy'), 'same-origin', 'R6: same-origin forms retain their Origin');
   const policy = response.headers.get('content-security-policy') ?? '';
   const actions = /(?:^|;)\s*form-action\s+([^;]+)/u.exec(policy)?.[1].split(/\s+/u) ?? [];
-  assert.deepEqual(actions, ["'self'", new URL(redirectUri).origin], 'R8: only the validated callback origin joins self');
+  assert.deepEqual(actions, ["'self'", new URL(callbackUri).origin === 'null' ? new URL(callbackUri).protocol : new URL(callbackUri).origin], 'R8: only the validated callback origin joins self');
 }
 
 async function startEdge(directory, config) {
@@ -260,7 +260,10 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
       bridgeReady = startEdge(directory, { databaseUrl, gotrueUrl, authOrigin, bridgeKey: randomBytes(32).toString('base64url') });
       edge = await bridgeReady;
 
-      for (const mode of ['CIMD', 'DCR']) await t.test(mode, async () => {
+      for (const mode of ['CIMD', 'DCR', 'Cursor explicit', 'Cursor inferred']) await t.test(mode, async () => {
+        const redirectUri = mode.startsWith('Cursor')
+          ? 'cursor://anysphere.cursor-retrieval/oauth/user-commonswarm/callback'
+          : 'https://connector.oauth-contract.example/oauth/callback';
         const agent = new Agent(authOrigin, sessions);
         const resourceResponse = await edge.request('/.well-known/oauth-protected-resource/mcp');
         assert.equal(resourceResponse.status, 200);
@@ -282,7 +285,7 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         assert.equal(jwksResponse.status, 200);
         const jwks = await jwksResponse.json();
         assert.ok(jwks.keys.length > 0 && jwks.keys.every(key => key.alg === 'ES256' && !Object.hasOwn(key, 'd')));
-        const clientDocument = { client_name: `OAuth contract ${mode}`, redirect_uris: [redirectUri],
+        const clientDocument = { ...(mode === 'Cursor explicit' ? { application_type: 'native' } : {}), client_name: `OAuth contract ${mode}`, redirect_uris: [redirectUri],
           response_types: ['code'], grant_types: ['authorization_code', 'refresh_token'], token_endpoint_auth_method: 'none' };
         let clientId;
         if (mode === 'CIMD') {
@@ -305,16 +308,38 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         clients.add(clientId);
         const verifier = randomBytes(32).toString('base64url'), state = randomUUID();
         const parameters = { client_id: clientId, redirect_uri: redirectUri, response_type: 'code',
-          scope: 'openid mcp offline_access', prompt: 'consent', resource: RESOURCE, state,
+          scope: 'openid mcp offline_access', resource: RESOURCE, state,
+          ...(mode === 'Cursor explicit' ? { prompt: 'consent' } : {}),
           code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' };
         const authorize = async (overrides = {}) => agent.request(`${discovery.authorization_endpoint}?${new URLSearchParams({ ...parameters, ...overrides })}`);
         const unsafeResource = await authorize({ resource: `${RESOURCE}/wrong` });
         assert.equal(unsafeResource.status, 303);
         assert.equal(new URL(unsafeResource.headers.get('location')).searchParams.get('error'), 'invalid_target');
-        const noPkce = await authorize({ code_challenge: '', code_challenge_method: '' });
+        let noPkce = await authorize({ code_challenge: '', code_challenge_method: '' });
+        if (noPkce.headers.get('location')?.startsWith('/authorize?')) noPkce = await agent.request(noPkce.headers.get('location'));
         assert.equal(noPkce.status, 303);
         assert.ok(new URL(noPkce.headers.get('location')).searchParams.has('error'), 'PKCE omission cannot authorize');
+        const unknownScope = await authorize({ scope: 'openid mcp offline_access unknown' });
+        assert.equal(unknownScope.status, 400);
+        assert.equal((await unknownScope.json()).error, 'invalid_scope');
         let response = await authorize();
+        assert.equal(response.status, 303);
+        let consentRedirect = false;
+        const initialLocation = response.headers.get('location');
+        // On baseline, continue the real flow to expose the lost scope in the
+        // provider-issued code, rather than stopping at a transport assertion.
+        if (initialLocation.startsWith('/authorize?')) {
+          consentRedirect = true;
+          assert.equal(await response.text(), '');
+          assert.equal(response.headers.get('cache-control'), 'no-store');
+          assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
+          const prompted = new URL(initialLocation, ISSUER);
+          assert.equal(prompted.searchParams.get('prompt'), parameters.prompt ? `${parameters.prompt} consent` : 'consent');
+          for (const [key, value] of Object.entries(parameters)) {
+            if (key !== 'prompt') assert.ok(prompted.searchParams.get(key) === value, `preserved ${key}`);
+          }
+          response = await agent.request(initialLocation);
+        }
         assert.equal(response.status, 303, 'authorization reaches a real login interaction');
         let interactionUrl = new URL(response.headers.get('location'), ISSUER);
         assert.ok(interactionUrl.pathname.startsWith('/interaction/'));
@@ -342,7 +367,7 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         interactionUrl = new URL(response.headers.get('location'), ISSUER);
         response = await agent.request(interactionUrl);
         assert.equal(response.status, 200, 'R4: newly authenticated account can render consent');
-        assertConsentHeaders(response);
+        assertConsentHeaders(response, redirectUri);
         let page = form(await response.text());
         const uid = decodeURIComponent(interactionUrl.pathname.split('/').at(-1));
         const binding = (await pool.query('SELECT user_id FROM commonswarm_oauth.interactions WHERE interaction_uid = $1', [uid])).rows[0];
@@ -393,18 +418,18 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         assert.equal((await store.requireSession(session))?.user_id, owner);
         const noHome = await submit(fields().filter(([name]) => name !== 'home_workspace_id'));
         assert.equal(noHome.status, 400, 'R7: multiple selected workspaces require a home');
-        assertConsentHeaders(noHome); page = form(await noHome.text());
+        assertConsentHeaders(noHome, redirectUri); page = form(await noHome.text());
         const callsBefore = commandCalls.length;
         if (mode === 'DCR') faultWorkspace = workspaces[1];
         response = await submit(fields());
         if (mode === 'DCR') {
           assert.equal(response.status, 502, 'R7: interrupted consent remains resumable');
-          assertConsentHeaders(response); page = form(await response.text());
+          assertConsentHeaders(response, redirectUri); page = form(await response.text());
           const pending = await pool.query('SELECT state FROM swarm.hosted_mcp_grants WHERE interaction_ref = $1', [uid]);
           assert.equal(pending.rows[0]?.state, 'pending', 'failed consent never activates partial authority');
           const reloaded = await agent.request(interactionUrl);
           assert.equal(reloaded.status, 200, 'R7: GET reload restores consent progress');
-          assertConsentHeaders(reloaded); page = form(await reloaded.text());
+          assertConsentHeaders(reloaded, redirectUri); page = form(await reloaded.text());
           assert.equal(page.home, workspaces[0], 'R7: the reloaded form retains its locked home workspace');
           const changedSelection = await submit(fields().filter(([name, value]) => name !== 'workspace_ids' || value === workspaces[0]));
           assert.equal(changedSelection.status, 409, 'resume cannot replace its persisted workspace manifest');
@@ -420,9 +445,12 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         response = await agent.request(consentResume);
         assert.equal(response.status, 303, 'R7: provider resumes the persisted consent grant');
         const authorizationCallback = new URL(response.headers.get('location'));
-        assert.equal(authorizationCallback.origin + authorizationCallback.pathname, redirectUri);
+        const callbackBase = new URL(authorizationCallback); callbackBase.search = ''; callbackBase.hash = '';
+        assert.equal(callbackBase.href, redirectUri);
         assert.ok(authorizationCallback.searchParams.get('state') === state && authorizationCallback.searchParams.has('code') && !authorizationCallback.searchParams.has('error'));
         const code = authorizationCallback.searchParams.get('code');
+        const issuedCode = await running.provider.AuthorizationCode.find(code);
+        assert.ok(issuedCode.scopes.has('offline_access'), 'real consent retains requested offline scope before exchange');
         const tokenFields = { client_id: clientId, redirect_uri: redirectUri, grant_type: 'authorization_code', code, code_verifier: verifier, resource: RESOURCE };
         const tokenRequest = overrides => agent.request(discovery.token_endpoint, {
           method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -438,6 +466,68 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         const keys = createLocalJWKSet(jwks);
         const idProof = await jwtVerify(tokens.id_token, keys, { issuer: ISSUER, audience: clientId, algorithms: ['ES256'] });
         assert.ok(idProof.payload.sub === owner, 'R1: real ID token verifies with the advertised ES256 JWKS');
+        const refresh = (token, overrides = {}) => {
+          const fields = { client_id: clientId, grant_type: 'refresh_token',
+            refresh_token: token, resource: RESOURCE, scope: parameters.scope, ...overrides };
+          if (fields.scope === undefined) delete fields.scope;
+          return agent.request(discovery.token_endpoint, {
+            method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams(fields),
+          });
+        };
+        const refusedRefresh = async (token, overrides, error) => {
+          const result = await refresh(token, overrides);
+          assert.equal(result.status, 400);
+          const body = await result.json();
+          assert.equal(body.error, error);
+          assert.ok(!body.access_token && !body.refresh_token);
+        };
+        const storedRefresh = async token => {
+          const result = await pool.query(`SELECT payload, expires_at FROM commonswarm_oauth.provider_artifacts
+            WHERE model = 'RefreshToken' AND artifact_id_hash = $1`,
+          [createHash('sha256').update(token).digest('base64url')]);
+          assert.equal(result.rowCount, 1);
+          return result.rows[0];
+        };
+        const initialRefresh = await storedRefresh(tokens.refresh_token);
+        assert.deepEqual(initialRefresh.payload.scope.split(' ').sort(), parameters.scope.split(' ').sort(),
+          'real GET consent must retain offline_access in the issued refresh token');
+        const family = initialRefresh.payload.grantId;
+        const savedGrant = await running.provider.Grant.find(family);
+        assert.ok(savedGrant.getOIDCScope().split(' ').includes('offline_access'));
+        const wrongClient = await agent.request(discovery.registration_endpoint, { method: 'POST',
+          headers: { 'content-type': 'application/json' }, body: JSON.stringify(clientDocument) });
+        assert.equal(wrongClient.status, 201);
+        const otherClientId = (await wrongClient.json()).client_id; clients.add(otherClientId);
+        await refusedRefresh(tokens.refresh_token, { client_id: otherClientId }, 'invalid_grant');
+        await refusedRefresh(tokens.refresh_token, { scope: parameters.scope + ' unknown' }, 'invalid_scope');
+        await refusedRefresh(tokens.refresh_token, { scope: parameters.scope + ' profile' }, 'invalid_scope');
+        let latest = tokens;
+        for (let rotation = 0; rotation < 2; rotation++) {
+          const renewed = await refresh(latest.refresh_token);
+          assert.equal(renewed.status, 200, 'full originally requested scope refresh succeeds after real GET consent');
+          const next = await renewed.json();
+          assert.ok(next.refresh_token && next.refresh_token !== latest.refresh_token);
+          const stored = await storedRefresh(next.refresh_token);
+          assert.ok(stored.payload.grantId === family);
+          assert.deepEqual(stored.payload.scope.split(' ').sort(), parameters.scope.split(' ').sort());
+          assert.ok(stored.payload.exp <= initialRefresh.payload.exp, 'rotation cannot extend original token expiry');
+          assert.ok(stored.expires_at.getTime() < initialRefresh.expires_at.getTime() + 1000,
+            'adapter timestamp drift must remain below one second across rotation');
+          const proof = await jwtVerify(next.access_token, keys, { issuer: ISSUER, audience: RESOURCE, algorithms: ['ES256'] });
+          assert.equal(proof.payload.scope, 'mcp');
+          assert.ok(proof.payload.grant_id === family);
+          const identity = await edge.request('/mcp', { method: 'POST', headers: {
+            'content-type': 'application/json', authorization: `Bearer ${next.access_token}`,
+            'mcp-protocol-version': '2025-06-18' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 20 + rotation, method: 'tools/list', params: {} }) });
+          assert.equal(identity.status, 200);
+          const read = await identity.json();
+          assert.ok(!read.error && Array.isArray(read.result?.tools) && read.result.tools.some(tool => tool.name === 'whoami'),
+            'rotated JWT reaches authenticated MCP read');
+          latest = next;
+        }
+        assert.equal(consentRedirect, parameters.prompt !== 'consent', 'eligible GET without prompt=consent took exactly one consent redirect');
         const rpc = (body, token = tokens.access_token, version = '2025-11-25') => edge.request('/mcp', {
           method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, 'mcp-protocol-version': version }, body: JSON.stringify(body),
         });
@@ -468,8 +558,74 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         assert.ok(listed.result.tools.every(tool => tool.inputSchema?.type === 'object'));
         const grant = await pool.query('SELECT state FROM swarm.hosted_mcp_grants WHERE interaction_ref = $1', [uid]);
         assert.equal(grant.rows[0]?.state, 'active', 'token and MCP success follows actual authority activation');
+        // Reuse real consent/PKCE/storage; unpatched simulates the legacy initial GET only.
+        const reconnect = async ({ unpatched = false, scope = parameters.scope, prompt, returning = false } = {}) => {
+          const browser = returning ? agent : new Agent(authOrigin, sessions);
+          const fields = { ...parameters, scope, state: randomUUID() }; delete fields.prompt;
+          if (prompt !== undefined) fields.prompt = prompt;
+          // Duplicate unknown parameters pass through the wrapper and are ignored by the provider.
+          let response = await browser.request(`${discovery.authorization_endpoint}?${new URLSearchParams(fields)}${unpatched === true ? '&pre_fix=1&pre_fix=2' : ''}`);
+          let consents = 0;
+          for (let hop = 0; hop < 18; hop++) {
+            if (response.status === 200) {
+              const page = form(await response.text()); consents++;
+              response = await browser.request(page.action, { method: 'POST', headers: {
+                'content-type': 'application/x-www-form-urlencoded', origin: ISSUER },
+              body: new URLSearchParams([['csrf_token', page.csrf], ['selection_version', page.version],
+                ...workspaces.map(id => ['workspace_ids', id]), ['home_workspace_id', workspaces[0]]]) });
+              continue;
+            }
+            assert.equal(response.status, 303);
+            const target = new URL(response.headers.get('location'), ISSUER);
+            if (target.origin === new URL(gotrueUrl).origin) {
+              const signed = await fetch(target, { redirect: 'manual', signal: AbortSignal.timeout(10_000) });
+              assert.equal(signed.status, 303);
+              response = await browser.request(signed.headers.get('location')); continue;
+            }
+            if (target.origin !== ISSUER) {
+              assert.ok(consents > 0, 'returning browser still submits genuine consent');
+              assert.ok(!target.searchParams.has('error') && target.searchParams.has('code'));
+              const code = target.searchParams.get('code');
+              if (unpatched === true) {
+                const oldCode = await running.provider.AuthorizationCode.find(code);
+                assert.ok(!oldCode.scopes.has('offline_access'), 'actual legacy GET code lacks offline_access before exchange');
+              }
+              const exchanged = await tokenRequest({ code });
+              assert.equal(exchanged.status, 200);
+              return await exchanged.json();
+            }
+            response = await browser.request(target);
+          }
+          assert.fail('authorization exceeded bounded issuer hops');
+        };
+        const silent = await new Agent(authOrigin, sessions).request(`${discovery.authorization_endpoint}?${new URLSearchParams({ ...parameters, prompt: 'none', state: randomUUID() })}`);
+        assert.equal(silent.status, 303);
+        const silentCallback = new URL(silent.headers.get('location'), ISSUER);
+        assert.ok(silentCallback.searchParams.has('error') && !silentCallback.searchParams.has('code'),
+          'prompt=none cannot turn the new offline request into consent');
+        // Exercise the legacy scope filter through real GET consent and token issuance.
+        const old = await reconnect({ unpatched: true });
+        const oldScope = (await storedRefresh(old.refresh_token)).payload.scope.split(' ');
+        assert.ok(!oldScope.includes('offline_access'));
+        await refusedRefresh(old.refresh_token, {}, 'invalid_scope');
+        let subset = old;
+        for (const scope of ['mcp', undefined]) {
+          const result = await refresh(subset.refresh_token, { scope });
+          assert.equal(result.status, 200, 'old full-scope refusal leaves valid subset/omitted retry usable');
+          subset = await result.json();
+        }
+        const returning = await reconnect({ prompt: 'consent', returning: true });
+        const returned = await refresh(returning.refresh_token);
+        assert.equal(returned.status, 200);
+        const mcpOnly = await reconnect({ scope: 'openid mcp' });
+        assert.ok(!(await storedRefresh(mcpOnly.refresh_token)).payload.scope.split(' ').includes('offline_access'));
+        await refusedRefresh(mcpOnly.refresh_token, {}, 'invalid_scope');
+        await savedGrant.destroy();
+        await refusedRefresh(latest.refresh_token, {}, 'invalid_grant');
         const replay = await tokenRequest({});
         assert.equal(replay.status, 400); assert.equal((await replay.json()).error, 'invalid_grant');
+
+
       });
       assert.ok(metadataReads > 0, 'CIMD metadata came from the HTTPS fixture server');
     } finally {

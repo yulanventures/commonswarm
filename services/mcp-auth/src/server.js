@@ -28,9 +28,9 @@ import { createAdminInteractionHandler, createResourceInteractionHandler } from 
 import { createLogger, logProviderError, subscribeProviderErrors } from "./logger.js";
 import { createPinnedMetadataFetch, createPostgresCimdFetch } from "./metadata-fetch.js";
 import { createPostgresAdapter } from "./postgres-adapter.js";
-import { createMcpProvider } from "./provider.js";
+import { createMcpProvider, RESOURCE } from "./provider.js";
 import { createProductionManagementBindings } from "./management-bindings.js";
-import { createPostgresRegistrationStore, createRegistrationLimiter } from "./registration.js";
+import { CLIENT_SCOPES, createPostgresRegistrationStore, createRegistrationLimiter } from "./registration.js";
 
 const ALWAYS_AVAILABLE = new Set([
   "/health",
@@ -66,6 +66,30 @@ function clientErrorResponse(error) {
     status: error.status,
     body: { error: error.code },
   };
+}
+
+// Ask the provider for genuine consent before its offline_access scope filter.
+// Ambiguous or unsupported requests must reach the provider unchanged.
+function initialConsentLocation(request) {
+  if (request.method !== "GET") return null;
+  const url = new URL(request.url, "https://mcp.commonswarm.com");
+  if (url.pathname !== "/authorize") return null;
+  try { decodeURIComponent(url.search.slice(1).replace(/\+/gu, " ")); }
+  catch { return null; }
+  const params = url.searchParams;
+  if ([...params.keys()].some((key) => params.getAll(key).length !== 1) ||
+      params.has("request") || params.has("request_uri") ||
+      params.get("resource") !== RESOURCE || params.get("response_type") !== "code") return null;
+  const scope = params.get("scope") ?? "";
+  if (!/^[a-z_]+(?: [a-z_]+)*$/u.test(scope)) return null;
+  const scopes = scope.split(" ");
+  if (!scopes.includes("mcp") || !scopes.includes("offline_access") ||
+      scopes.some((value) => !CLIENT_SCOPES.includes(value))) return null;
+  const prompt = params.get("prompt");
+  if (prompt !== null && !/^(?:login|select_account)(?: (?:login|select_account))*$/u.test(prompt)) return null;
+  if (prompt !== null && new Set(prompt.split(" ")).size !== prompt.split(" ").length) return null;
+  params.set("prompt", prompt === null ? "consent" : `${prompt} consent`);
+  return `/authorize?${params}`;
 }
 
 export function createHandler({ provider, pool, publicAuthorizationEnabled, maxBodyBytes, logger,
@@ -111,6 +135,13 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
       }
       if (!publicAuthorizationEnabled && !ALWAYS_AVAILABLE.has(path)) {
         json(response, 503, { error: "authorization_service_disabled" });
+        return;
+      }
+      const consentLocation = initialConsentLocation(request);
+      if (consentLocation !== null) {
+        response.writeHead(303, { location: consentLocation, "cache-control": "no-store",
+          "referrer-policy": "no-referrer" });
+        response.end();
         return;
       }
       // The timer is a preloaded asset; only P9b sets a document CSP.
