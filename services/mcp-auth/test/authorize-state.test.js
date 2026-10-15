@@ -312,7 +312,12 @@ test("Codex CIMD request issues and rotates refresh only for a refresh-capable c
       const scopes = discovery.scopes_supported.filter(scope => mcpAllowed || scope !== "mcp");
       const request = authorize(undefined, scopes.join(" "), redirectUri, clientId);
       assert.equal(new URL(request, ISSUER).searchParams.has("prompt"), false);
-      const start = await h.run(request);
+      let start = await h.run(request);
+      if (mcpAllowed) {
+        assert.equal(start.statusCode, 303);
+        assert.equal(new URL(start.getHeader("location"), ISSUER).searchParams.get("prompt"), "consent");
+        start = await h.run(start.getHeader("location"));
+      }
       assert.equal(start.statusCode, 303);
       const login = await h.run(start.getHeader("location"));
       assert.equal(login.statusCode, 303);
@@ -394,6 +399,68 @@ test("Codex CIMD request issues and rotates refresh only for a refresh-capable c
       assert.equal(refused.access_token, undefined);
     });
   }
+});
+
+test("refresh scope consent redirect preserves values and bypasses ambiguous transport requests", async (t) => {
+  const forwarded = [];
+  const provider = { on() {}, callback: () => async (request, response) => {
+    forwarded.push(request.url); response.writeHead(204); response.end();
+  } };
+  const handler = createHandler({ provider, pool: {}, publicAuthorizationEnabled: true,
+    maxBodyBytes: 64 * 1024, logger: { info() {} } });
+  const send = async (url, method = "GET") => {
+    const { request, response } = exchange(url); request.method = method;
+    await handler(request, response); return response;
+  };
+  const base = new URL(authorize(undefined, "openid mcp offline_access"), ISSUER);
+  base.searchParams.set("state", "space + & % / ? ü");
+  base.searchParams.set("dpop_jkt", "synthetic-bound-key-_123");
+  for (const prompt of [undefined, "login", "select_account", "login select_account"]) {
+    await t.test(prompt ?? "absent", async () => {
+      const input = new URL(base);
+      if (prompt !== undefined) input.searchParams.set("prompt", prompt);
+      const response = await send(input.pathname + input.search);
+      assert.equal(response.statusCode, 303);
+      assert.equal(response.body, "");
+      assert.equal(response.getHeader("cache-control"), "no-store");
+      assert.equal(response.getHeader("referrer-policy"), "no-referrer");
+      const location = response.getHeader("location");
+      assert.ok(location.startsWith("/authorize?") && !location.startsWith("//"));
+      const output = new URL(location, ISSUER);
+      assert.equal(output.searchParams.get("prompt"), prompt ? `${prompt} consent` : "consent");
+      for (const [key, value] of input.searchParams) {
+        if (key !== "prompt") assert.equal(output.searchParams.get(key), value);
+      }
+      assert.equal((await send(location)).statusCode, 204, "second hop reaches existing provider exactly once");
+    });
+  }
+  const changes = [
+    ["prompt", "consent"], ["prompt", "none"], ["prompt", "consent none"],
+    ["prompt", ""], ["prompt", "login  select_account"], ["prompt", "login login"],
+    ["prompt", "login\tselect_account"], ["prompt", "unknown"],
+    ["resource", `${RESOURCE}/wrong`], ["resource", null], ["scope", "mcp"],
+    ["scope", "openid mcp offline_access unknown"], ["scope", "mcp  offline_access"],
+    ["response_type", "token"], ["request", "signed-request"], ["request_uri", "https://client.example/request"],
+  ];
+  for (const [key, value] of changes) {
+    const input = new URL(base);
+    if (value === null) input.searchParams.delete(key); else input.searchParams.set(key, value);
+    const url = input.pathname + input.search;
+    assert.equal((await send(url)).statusCode, 204);
+    assert.equal(forwarded.at(-1), url);
+  }
+  for (const key of ["state", "scope", "prompt", "resource", "client_id", "extra"]) {
+    const input = new URL(base); input.searchParams.append(key, "first"); input.searchParams.append(key, "second");
+    assert.equal((await send(input.pathname + input.search)).statusCode, 204);
+  }
+  for (const url of [base.pathname + base.search + "&bad=%ZZ", base.pathname + base.search + "&bad=%FF",
+    "/authorize/resume" + base.search]) assert.equal((await send(url)).statusCode, 204);
+  for (const method of ["POST", "HEAD", "PUT"]) assert.equal((await send(base.pathname + base.search, method)).statusCode, 204);
+  const disabled = createHandler({ provider, pool: {}, publicAuthorizationEnabled: false,
+    maxBodyBytes: 64 * 1024, logger: { info() {} } });
+  const { request, response } = exchange(base.pathname + base.search);
+  await disabled(request, response);
+  assert.equal(response.statusCode, 503, "public admission still precedes the redirect");
 });
 
 // The owner boundary is GET /authorize with real provider policies and signed
