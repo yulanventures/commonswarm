@@ -102,10 +102,8 @@ test("dashboard auth transitions include INITIAL_SESSION and coalesce reloads", 
   assert.match(source, /renderedAuthUserId = nextUserId;[\s\S]*requestVersion \+= 1/);
   assert.match(source, /queueMicrotask\(\(\) =>/);
   assert.match(source, /authReloadQueued = false;[\s\S]*runBoot\(\)/);
-  assert.match(
-    source,
-    /if \(nextSession\?\.user\.id === renderedAuthUserId\) session = nextSession/,
-  );
+  // Identity verification belongs to the real user503/user-network browser
+  // cases in dead-session.observer.test.ts, including the first-load retry UI.
   assert.match(dashboard, /if \(bootInFlight\)[\s\S]*bootAgain = true/);
   assert.match(dashboard, /do \{[\s\S]*await boot\(\);[\s\S]*\} while \(bootAgain\)/);
   assert.match(

@@ -26,7 +26,10 @@ import type { HomeOverview } from "./home/contract";
  * render honestly, not an error to hide — see SignupRefused below.
  */
 
-import { createClient, type SupabaseClient, type Session } from "@supabase/supabase-js";
+import {
+  createClient, navigatorLock, processLock, isAuthSessionMissingError,
+  AuthRetryableFetchError, type SupabaseClient, type Session,
+} from "@supabase/supabase-js";
 import { authProvider } from "./auth-providers.js";
 import {
   scalarRecipient,
@@ -132,13 +135,196 @@ export function deployment(): Deployment | null {
 let cached: SupabaseClient | null = null;
 let deadSession = false;
 
+/** An interrupted identity check is safe to retry; it is not a sign-out. */
+export class AuthRecoveryRequired extends Error {
+  override name = "AuthRecoveryRequired";
+  constructor() {
+    super("CommonSwarm could not check your sign-in. Try again when the connection recovers.");
+  }
+}
+
+const terminalRefreshCodes = new Set([
+  "refresh_token_not_found", "session_not_found",
+  "session_expired", "user_not_found", "user_banned",
+]);
+let sessionStorageKey: string | null = null;
+let removalSnapshot: string | null = null;
+const authMemory = new Map<string, string>();
+const importedStorageKeys = new Set<string>();
+let persistentStorage: Storage | null | undefined;
+function storageBackend(): Storage | null {
+  if (persistentStorage !== undefined) return persistentStorage;
+  try {
+    const storage = globalThis.localStorage;
+    const probe = `commonswarm-storage-${crypto.randomUUID()}`;
+    storage.setItem(probe, probe);
+    storage.removeItem(probe);
+    persistentStorage = storage;
+  } catch { persistentStorage = null; }
+  return persistentStorage;
+}
+function savedSession(value: string | null): Session | null {
+  try {
+    const saved = value ? JSON.parse(value) : null;
+    return saved && typeof saved.access_token === "string" && typeof saved.refresh_token === "string"
+      ? saved as Session : null;
+  } catch { return null; }
+}
+function removePersistentAuthItem(key: string): void {
+  // A quota failure can still allow removal. Bypass the cached write backend
+  // to discard superseded credentials whenever persistent removal is allowed.
+  try { globalThis.localStorage?.removeItem(key); }
+  catch { persistentStorage = null; }
+}
+// Pick one backend; mirror reads so a later write failure can transition once
+// to memory without ever returning the superseded persistent credential again.
+const authStorage = {
+  getItem(key: string): string | null {
+    const storage = storageBackend();
+    if (!storage && !importedStorageKeys.has(key)) {
+      // Import a readable existing slot once when the initial write probe fails.
+      try { const value = globalThis.localStorage?.getItem(key); if (value) authMemory.set(key, value); } catch { /* Unavailable. */ }
+    }
+    importedStorageKeys.add(key);
+    if (storage) {
+      try {
+        const value = storage.getItem(key);
+        if (value === null) authMemory.delete(key); else authMemory.set(key, value);
+      } catch { persistentStorage = null; }
+    }
+    const value = authMemory.get(key) ?? null;
+    if (savedSession(value)) sessionStorageKey = key;
+    return value;
+  },
+  setItem(key: string, value: string): void {
+    importedStorageKeys.add(key);
+    if (key === sessionStorageKey) removalSnapshot = null;
+    authMemory.set(key, value);
+    try {
+      const storage = storageBackend();
+      if (storage) storage.setItem(key, value);
+      else removePersistentAuthItem(key);
+    } catch {
+      persistentStorage = null;
+      removePersistentAuthItem(key);
+    }
+  },
+  removeItem(key: string): void {
+    if (key === sessionStorageKey && removalSnapshot !== null) {
+      const expected = removalSnapshot;
+      removalSnapshot = null;
+      // Abort SDK cleanup before SIGNED_OUT can broadcast over a successor.
+      if (authStorage.getItem(key) !== expected) {
+        throw new AuthRetryableFetchError("Sign-in changed during verification", 0);
+      }
+    }
+    importedStorageKeys.add(key);
+    authMemory.delete(key);
+    removePersistentAuthItem(key);
+  },
+};
+
+let refreshRetryAfter = 0;
+/** Adapt only refresh failures that the pinned SDK would otherwise destroy.
+ * Its retry loop retains credentials; a cooldown prevents repeated HTTP calls.
+ * Other endpoints keep their SDK method, body and error contracts.
+ */
+const authFetch: typeof fetch = async (input, init) => {
+  const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+  const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+  const isRefresh = method === "POST" && url.pathname.endsWith("/auth/v1/token") && url.searchParams.get("grant_type") === "refresh_token";
+  const isUser = method === "GET" && url.pathname.endsWith("/auth/v1/user");
+  if (!isRefresh && !isUser) return fetch(input, init);
+  if (isRefresh && Date.now() < refreshRetryAfter) {
+    // Keep the SDK's single-flight refresh pending through our cooldown. Fast
+    // failures exhaust its backoff and then cache the failure for another 60s,
+    // preventing a recovered backend from being reached by Try again.
+    // The caller's 4s deadline still owns the UI; the SDK retains its lock.
+    await new Promise(resolve => setTimeout(resolve, Math.min(refreshRetryAfter - Date.now(), 30_000)));
+    if (Date.now() < refreshRetryAfter) {
+      throw new AuthRetryableFetchError("Sign-in check interrupted", 0);
+    }
+  }
+  const savedAtStart = sessionStorageKey ? authStorage.getItem(sessionStorageKey) : null;
+  const savedCredential = savedSession(savedAtStart);
+  let requestRefresh: unknown;
+  if (isRefresh && typeof init?.body === "string") {
+    try { requestRefresh = JSON.parse(init.body)?.refresh_token; } catch { /* SDK owns request validation. */ }
+  }
+  const access = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined))
+    .get("authorization")?.replace(/^Bearer /i, "");
+  let response: Response;
+  try {
+    response = await fetch(input, { ...init, signal: AbortSignal.any([
+      ...((init?.signal ?? (input instanceof Request ? input.signal : null))
+        ? [init?.signal ?? (input as Request).signal] : []), AbortSignal.timeout(4_000),
+    ]) });
+  } catch (error) {
+    if (isRefresh) refreshRetryAfter = Date.now() + 30_000;
+    throw error;
+  }
+  if (response.ok) {
+    if (isRefresh) refreshRetryAfter = 0;
+    return response;
+  }
+  const body = await response.clone().json().catch(() => null);
+  // Match auth-js's versioned GoTrue error contract.
+  const version = response.headers.get("x-supabase-api-version");
+  const code = version && version >= "2024-01-01" && typeof body?.code === "string"
+    ? body.code : body?.error_code;
+  const terminal = [400, 401, 403, 404].includes(response.status) && terminalRefreshCodes.has(code);
+  const matches = isRefresh ? savedCredential?.refresh_token === requestRefresh
+    : savedCredential?.access_token === access;
+  if (terminal && (!matches || !savedAtStart ||
+      (sessionStorageKey && authStorage.getItem(sessionStorageKey) !== savedAtStart))) {
+    if (isRefresh) refreshRetryAfter = Date.now() + 30_000;
+    throw new AuthRetryableFetchError("Sign-in changed during verification", 0);
+  }
+  if (terminal && ((isUser && code === "session_not_found") ||
+      (isRefresh && savedCredential?.expires_at && savedCredential.expires_at * 1000 <= Date.now()))) {
+    removalSnapshot = savedAtStart;
+  }
+  if (isRefresh && !terminal) {
+    // already_used is ambiguous rotation evidence, never terminal proof.
+    const retryAfter = response.headers.get("retry-after");
+    const seconds = retryAfter === null ? NaN : Number(retryAfter);
+    const until = Number.isFinite(seconds) ? Date.now() + seconds * 1000 : Date.parse(retryAfter ?? "");
+    refreshRetryAfter = Math.max(Date.now() + 30_000, Number.isFinite(until) ? until : 0);
+    throw new AuthRetryableFetchError("Sign-in check interrupted", response.status);
+  }
+  return response;
+};
+
+// SDK retries can last one 30s tick. Let them finish under the lock while the
+// caller gets a bounded recovery panel; never steal an active peer's lock.
+async function boundedAuth<T>(operation: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([operation, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new AuthRecoveryRequired()), 4_000);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
 /** One client per page. Returns null when the build has no backend configured. */
 export function client(): SupabaseClient | null {
   if (cached) return cached;
   const d = deployment();
   if (!d) return null;
   cached = createClient(d.url, d.anonKey, {
-    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+    global: { fetch: authFetch },
+    auth: {
+      persistSession: true, autoRefreshToken: true, detectSessionInUrl: true,
+      storage: authStorage,
+      lockAcquireTimeout: -1,
+      // 2.111.0 defaults to lockless auth. Opt into the public SDK lock hook:
+      // getUser's terminal removal and refresh must serialize with other tabs.
+      lock: typeof navigator !== "undefined" && navigator.locks ? navigatorLock : processLock,
+    },
+  });
+  cached.auth.onAuthStateChange((event) => {
+    if (event === "SIGNED_OUT") { deadSession = false; removalSnapshot = null; refreshRetryAfter = 0; }
+    else if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") deadSession = false;
   });
   return cached;
 }
@@ -149,11 +335,6 @@ export class SessionExpired extends Error {
   constructor() {
     super("Your session expired — sign in again.");
   }
-}
-
-async function clearDeadSession(c: SupabaseClient): Promise<void> {
-  deadSession = true;
-  await c.auth.signOut({ scope: "local" });
 }
 
 /**
@@ -179,22 +360,54 @@ export function authReturnError(location: { hash: string; search: string }): str
     : "That sign-in did not work.";
 }
 
-export async function currentSession(): Promise<Session | null> {
+export function currentSession(): Promise<Session | null> {
+  return boundedAuth(verifiedSession());
+}
+
+async function verifiedSession(): Promise<Session | null> {
   const c = client();
   if (!c) return null;
-  const { data } = await c.auth.getSession();
-  const session = data.session ?? null;
-  if (!session) {
-    if (deadSession) throw new SessionExpired();
-    return null;
+  try {
+    const { data, error: sessionError } = await c.auth.getSession();
+    if (sessionError) {
+      if (isAuthSessionMissingError(sessionError) || terminalRefreshCodes.has(sessionError.code ?? "")) {
+        const successor = await c.auth.getSession();
+        if (successor.data.session) throw new AuthRecoveryRequired();
+        throw new SessionExpired();
+      }
+      throw new AuthRecoveryRequired();
+    }
+    const session = data.session ?? null;
+    if (!session) {
+      if (deadSession) throw new SessionExpired();
+      return null;
+    }
+    // No explicit JWT: the SDK reads and verifies the current credential while
+    // holding its lock, including terminal removal. A stale caller cannot clear a
+    // successor by validating an old token outside that lock.
+    const { data: userData, error } = await c.auth.getUser();
+    const latest = await c.auth.getSession();
+    if (error) {
+      if (latest.data.session && !sameCredentials(session, latest.data.session)) {
+        throw new AuthRecoveryRequired();
+      }
+      if (isAuthSessionMissingError(error)) { deadSession = true; throw new SessionExpired(); }
+      throw new AuthRecoveryRequired();
+    }
+    if (latest.error || !latest.data.session || !userData.user ||
+        userData.user.id !== latest.data.session.user.id) throw new AuthRecoveryRequired();
+    deadSession = false;
+    return latest.data.session;
+  } catch (error) {
+    if (error instanceof SessionExpired || error instanceof AuthRecoveryRequired) throw error;
+    // Lock contention and storage/transport exceptions also leave saved auth
+    // intact. They must reach the initial-load retry panel, not sign-in controls.
+    throw new AuthRecoveryRequired();
   }
-  const { data: userData, error } = await c.auth.getUser();
-  if (error || !userData.user || userData.user.id !== session.user.id) {
-    await clearDeadSession(c);
-    throw new SessionExpired();
-  }
-  deadSession = false;
-  return session;
+}
+
+function sameCredentials(a: Session, b: Session): boolean {
+  return a.access_token === b.access_token && a.refresh_token === b.refresh_token && a.user.id === b.user.id;
 }
 
 export interface AgentActivitySubscription {
@@ -389,6 +602,7 @@ export async function signInWithEmail(
 export async function signOut(): Promise<void> {
   deadSession = false;
   await client()?.auth.signOut();
+  deadSession = false;
 }
 
 export class NoDeployment extends Error {
@@ -548,38 +762,74 @@ export async function postCommand(
   const d = deployment();
   if (!d) throw new NoDeployment();
 
+  const wireBody = JSON.stringify({
+    command_id: commandId,
+    client_version: WEB_CLIENT_VERSION,
+    command,
+    ...extra,
+  });
+  let credential = session;
   const deadline = requestDeadline();
   try {
-    const response = await fetch(`${d.url}/functions/v1/command`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${session.access_token}`,
-        apikey: d.anonKey,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        command_id: commandId,
-        client_version: WEB_CLIENT_VERSION,
-        command,
-        ...extra,
-      }),
-      signal: deadline.controller.signal,
-    });
-    const text = await response.text();
-    let body: Record<string, unknown> = {};
-    try {
-      body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
-    } catch {
-      body = { error: "unreadable_response" };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await fetch(`${d.url}/functions/v1/command`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${credential.access_token}`,
+          apikey: d.anonKey,
+          "content-type": "application/json",
+        },
+        body: wireBody,
+        signal: deadline.controller.signal,
+      });
+      const text = await response.text();
+      let body: Record<string, unknown> = {};
+      try {
+        body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+      } catch {
+        body = { error: "unreadable_response" };
+      }
+      if (response.status === 401 && body.error === "unauthenticated") {
+        const c = client();
+        if (!c || attempt !== 0) throw new AuthRecoveryRequired();
+        const recovered = await boundedAuth(c.auth.getSession());
+        if (recovered.error) {
+          if (isAuthSessionMissingError(recovered.error) || terminalRefreshCodes.has(recovered.error.code ?? "")) {
+            throw new SessionExpired();
+          }
+          throw new AuthRecoveryRequired();
+        }
+        const active = recovered.data.session;
+        if (!active) throw new SessionExpired();
+        if (active.user.id !== session.user.id) throw new AuthRecoveryRequired();
+        if (!sameCredentials(active, credential)) {
+          credential = active;
+        } else {
+          // refreshSession() reads the CURRENT token under the SDK lock; never
+          // pass the rejected caller's possibly superseded refresh token.
+          const refreshed = await boundedAuth(c.auth.refreshSession());
+          if (refreshed.error) {
+            if (isAuthSessionMissingError(refreshed.error) ||
+                terminalRefreshCodes.has(refreshed.error.code ?? "")) {
+              // Finish matching-session cleanup through the SDK, including
+              // proactive refresh failures while the access JWT is still valid.
+              await currentSession();
+              throw new AuthRecoveryRequired();
+            }
+            throw new AuthRecoveryRequired();
+          }
+          if (!refreshed.data.session || refreshed.data.session.user.id !== session.user.id) {
+            throw new AuthRecoveryRequired();
+          }
+          credential = refreshed.data.session;
+        }
+        continue;
+      }
+      return { status: response.status, body };
     }
-    if (response.status === 401 && body.error === "unauthenticated") {
-      const c = client();
-      if (c) await clearDeadSession(c);
-      throw new SessionExpired();
-    }
-    return { status: response.status, body };
+    throw new AuthRecoveryRequired();
   } catch (error) {
-    if (error instanceof SessionExpired) throw error;
+    if (error instanceof SessionExpired || error instanceof AuthRecoveryRequired) throw error;
     if (unknownOutcome) throw new CommandOutcomeUnknown(unknownOutcome);
     if (deadline.controller.signal.aborted) {
       throw new WorkspaceOutcomeUnknown(
