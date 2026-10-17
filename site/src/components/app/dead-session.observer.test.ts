@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "node:test";
+import { browserTest as test } from "../../../tests/chrome.js";
+
+// The Node-only auth fixture below replaces global fetch. DevTools discovery
+// must still use the real loopback transport, independently of that fixture.
+const nativeFetch = globalThis.fetch.bind(globalThis);
 
 const userId = "11111111-1111-4111-8111-111111111111";
 const user = {
@@ -178,9 +182,9 @@ test("QA-010 invite form routes empty and malformed input through the validator"
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
 import { extname, join } from "node:path";
-import { browserTest, findChrome, launchChrome } from "../../../tests/chrome.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 
-browserTest("saved web sessions survive transient verification/refresh and reload; terminal proof clears them", { timeout: 360000 }, async (t) => {
+test("saved web sessions survive transient verification/refresh and reload; terminal proof clears them", { timeout: 180000, concurrency: 2 }, async (t) => {
   const { build } = await import("esbuild");
   const root = join(import.meta.dirname, "../../..");
   assert.ok(existsSync(join(root, "dist/app/index.html")), "CI must build the actual dashboard first");
@@ -192,7 +196,7 @@ browserTest("saved web sessions survive transient verification/refresh and reloa
   const rotatedAccessToken = accessToken.slice(0, accessToken.lastIndexOf(".") + 1) + encode({ rotated: true });
   const recovered = new Set<string>();
   const commandRequests = new Map<string, { bodies: string[]; writes: number }>();
-  let releaseOldUser: (() => void) | undefined;
+  const releaseOldUser = new Map<string, () => void>();
   const observed = new Map<string, { users: number; refreshes: number }>();
   const server = createServer((req, res) => {
     const url = new URL(req.url!, "http://fixture");
@@ -207,7 +211,7 @@ browserTest("saved web sessions survive transient verification/refresh and reloa
       res.end(JSON.stringify(payload));
     };
     if (url.pathname === "/probe") { json(200, counts); return; }
-    if (url.pathname === "/release") { recovered.add(mode); releaseOldUser?.(); json(200, {}); return; }
+    if (url.pathname === "/release") { recovered.add(mode); releaseOldUser.get(mode)?.(); json(200, {}); return; }
     if (url.pathname === "/functions/v1/command") {
       const record = commandRequests.get(mode) ?? { bodies: [], writes: 0 };
       commandRequests.set(mode, record);
@@ -230,7 +234,7 @@ browserTest("saved web sessions survive transient verification/refresh and reloa
       if (url.pathname.endsWith('/logout')) { res.writeHead(204).end(); return; }
       if (refresh) counts.refreshes += 1; else if (url.pathname.endsWith("/user")) counts.users += 1;
       if (["race", "race-unlocked"].includes(mode) && !refresh && counts.users === 1) {
-        releaseOldUser = () => json(403, { error_code: "session_not_found" }); return;
+        releaseOldUser.set(mode, () => json(403, { error_code: "session_not_found" })); return;
       }
       if (!recovered.has(mode)) {
         if ((mode === "user-network" && !refresh) || (mode === "refresh-network" && refresh)) {
@@ -274,7 +278,8 @@ browserTest("saved web sessions survive transient verification/refresh and reloa
           const check=(value,label)=>{if(!value)throw Error(label);};
           const wait=async(fn)=>{for(let i=0;i<500;i++){if(fn())return;await new Promise(r=>setTimeout(r,20));}throw Error('dashboard wait timed out');};
           const mode=${JSON.stringify(mode)};
-          localStorage.clear();localStorage.setItem('sb-127-auth-token',${JSON.stringify(JSON.stringify(seed))});
+          localStorage.clear();
+          localStorage.setItem('sb-127-auth-token',${JSON.stringify(JSON.stringify(seed))});
           const checkReloadSignedOut=async()=>{
             const peer=document.createElement('iframe');peer.src='/peer?mode='+mode;
             const loaded=new Promise(resolve=>peer.addEventListener('load',resolve,{once:true}));
@@ -422,29 +427,57 @@ browserTest("saved web sessions survive transient verification/refresh and reloa
       "corrupt-storage", "race-refresh429", "refresh-already-used",
       "terminal-user-modern", "terminal-refresh-modern",
     ];
-    for (const mode of modes) await t.test(mode, async () => {
+    // Independent profiles and per-mode server state let two real-time retry
+    // cases progress together within the existing 180s file gate.
+    await Promise.all(modes.map(mode => t.test(mode, async () => {
       // CDP observes real elapsed time. No virtual time or Date.now jumps.
       const reservation = createServer();
       await new Promise<void>(resolve => reservation.listen(0, "127.0.0.1", resolve));
       const port = (reservation.address() as { port: number }).port;
       await new Promise<void>(resolve => reservation.close(() => resolve()));
       const run = launchChrome(chrome, [`--remote-debugging-port=${port}`, "about:blank"], { timeout: 60000 });
-      void run.catch(() => {});
+      let launchError: unknown;
+      let exited = false;
+      const settled = run.then(() => { exited = true; }, error => { exited = true; launchError = error; });
       let socket: WebSocket | undefined;
+      let failure: unknown;
       try {
         let target: { webSocketDebuggerUrl: string } | undefined;
         for (let attempt = 0; attempt < 100 && !target; attempt++) {
-          try { target = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find((page: { type: string }) => page.type === "page"); } catch { /* Browser starting. */ }
+          if (exited) throw launchError ?? new Error("Chromium exited before DevTools discovery");
+          try { target = (await (await nativeFetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1000) })).json()).find((page: { type: string }) => page.type === "page"); } catch { /* Browser starting. */ }
           if (!target) await new Promise(resolve => setTimeout(resolve, 50));
         }
         assert.ok(target, "Chromium must expose its fresh test page");
         socket = new WebSocket(target.webSocketDebuggerUrl);
-        await new Promise<void>((resolve, reject) => { socket!.onopen = () => resolve(); socket!.onerror = reject; });
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("DevTools socket did not open")), 5000);
+          socket!.onopen = () => { clearTimeout(timer); resolve(); };
+          socket!.onerror = socket!.onclose = () => { clearTimeout(timer); reject(new Error("DevTools socket failed to open")); };
+        });
         let sequence = 0;
-        const pending = new Map<number, (result: any) => void>();
-        socket.onmessage = event => { const message = JSON.parse(String(event.data)); pending.get(message.id)?.(message); pending.delete(message.id); };
-        const send = (method: string, params = {}): Promise<any> => new Promise(resolve => {
-          const id = ++sequence; pending.set(id, resolve); socket!.send(JSON.stringify({ id, method, params }));
+        const pending = new Map<number, { resolve: (result: any) => void; reject: (error: Error) => void }>();
+        const rejectPending = () => {
+          for (const waiter of pending.values()) waiter.reject(new Error("DevTools socket closed"));
+          pending.clear();
+        };
+        socket.onclose = socket.onerror = rejectPending;
+        socket.onmessage = event => {
+          const message = JSON.parse(String(event.data));
+          const waiter = pending.get(message.id);
+          pending.delete(message.id);
+          if (message.error) waiter?.reject(new Error(message.error.message));
+          else waiter?.resolve(message);
+        };
+        const send = (method: string, params = {}): Promise<any> => new Promise((resolve, reject) => {
+          if (socket?.readyState !== WebSocket.OPEN) { reject(new Error("DevTools socket is not open")); return; }
+          const id = ++sequence;
+          const timer = setTimeout(() => { pending.delete(id); reject(new Error(`DevTools ${method} did not answer`)); }, 5000);
+          pending.set(id, {
+            resolve: value => { clearTimeout(timer); resolve(value); },
+            reject: error => { clearTimeout(timer); reject(error); },
+          });
+          socket.send(JSON.stringify({ id, method, params }));
         });
         await send("Page.navigate", { url: `${origin}/measure?mode=${mode}` });
         let result: { result?: string; failure?: string } = {};
@@ -455,11 +488,17 @@ browserTest("saved web sessions survive transient verification/refresh and reloa
           await new Promise(resolve => setTimeout(resolve, 100));
         }
         assert.equal(result.result, "passed", `${mode}: ${result.failure ?? "real-time observer timeout"}`);
+      } catch (error) {
+        failure = error;
       } finally {
         if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ id: 99999, method: "Browser.close" }));
+        // Keep the transport alive until Chrome consumes Browser.close. The
+        // shared launcher's unchanged 60s deadline owns forced termination.
+        await settled;
         socket?.close();
-        await run;
       }
+      if (failure) throw failure;
+      if (launchError) throw launchError;
       const counts = observed.get(mode)!;
       assert.ok(counts.users > 0 || counts.refreshes > 0, `${mode} must reach real SDK HTTP`);
       if (mode.startsWith("command")) {
@@ -469,7 +508,7 @@ browserTest("saved web sessions survive transient verification/refresh and reloa
         if (record.bodies.length === 2) assert.equal(record.bodies[0], record.bodies[1]);
         assert.equal(counts.refreshes, mode === "command-unknown" ? 0 : 1);
       }
-    });
+    })));
   } finally {
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
