@@ -1048,6 +1048,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     EmailRateLimited,
     NoDeployment,
     FreshLoginRequired,
+    AuthRecoveryRequired,
     SessionExpired,
     SignupRefused,
     WorkspaceOutcomeUnknown,
@@ -2105,6 +2106,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
 
     const renderWorkspaceError = (value: Session, error: unknown): void => {
+      const account = panel("workspace-error")?.querySelector<HTMLElement>(".dashboard__account-line");
+      if (account) account.hidden = false;
+      for (const button of panel("workspace-error")?.querySelectorAll<HTMLButtonElement>("[data-signout]") ?? []) {
+        button.hidden = false;
+      }
       for (const target of all<HTMLElement>("[data-account-name]")) {
         target.textContent = accountName(value);
       }
@@ -9100,6 +9106,18 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         await navigateHome(resolveHomeRoute(window.location.search, workspaces), "replace");
       } catch (error) {
         if (version !== requestVersion) return;
+        if (error instanceof AuthRecoveryRequired) {
+          const target = panel("workspace-error");
+          const account = target?.querySelector<HTMLElement>(".dashboard__account-line");
+          if (account) account.hidden = !session;
+          for (const button of target?.querySelectorAll<HTMLButtonElement>("[data-signout]") ?? []) {
+            button.hidden = !session;
+          }
+          const message = one<HTMLElement>("[data-workspace-error]");
+          if (message) message.textContent = error.message;
+          showPanel("workspace-error");
+          return;
+        }
         if (error instanceof SessionExpired) {
           householdDashboard?.clear();
           session = null;
