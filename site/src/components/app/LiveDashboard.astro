@@ -10895,7 +10895,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     /* /start now preserves its query and hash while handing old callbacks to /app, so this
        listener is the one auth-return controller for both current and compatibility links. */
     client()?.auth.onAuthStateChange((event, nextSession) => {
-      if (nextSession?.user.id === renderedAuthUserId) session = nextSession;
+      // SDK events can carry saved, unverified identity during initialization.
+      // Only update an identity this dashboard has already verified.
+      if (session && nextSession?.user.id === session.user.id) session = nextSession;
       if (
         event === "INITIAL_SESSION" ||
         event === "SIGNED_IN" ||
