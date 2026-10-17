@@ -195,7 +195,7 @@ test("saved web sessions survive transient verification/refresh and reload; term
   const helper = bundle.outputFiles[0]!.text;
   const rotatedAccessToken = accessToken.slice(0, accessToken.lastIndexOf(".") + 1) + encode({ rotated: true });
   const recovered = new Set<string>();
-  const commandRequests = new Map<string, { bodies: string[]; writes: number }>();
+  const commandRequests = new Map<string, { bodies: string[]; fetchCalls: string[]; committed: Map<string, string>; writes: number }>();
   const releaseOldUser = new Map<string, () => void>();
   const observed = new Map<string, { users: number; refreshes: number }>();
   const server = createServer((req, res) => {
@@ -213,13 +213,24 @@ test("saved web sessions survive transient verification/refresh and reload; term
     if (url.pathname === "/probe") { json(200, counts); return; }
     if (url.pathname === "/release") { recovered.add(mode); releaseOldUser.get(mode)?.(); json(200, {}); return; }
     if (url.pathname === "/functions/v1/command") {
-      const record = commandRequests.get(mode) ?? { bodies: [], writes: 0 };
+      const record = commandRequests.get(mode) ?? { bodies: [], fetchCalls: [], committed: new Map<string, string>(), writes: 0 };
       commandRequests.set(mode, record);
       let body = "";
       req.on("data", chunk => { body += chunk; });
       req.on("end", () => {
         record.bodies.push(body);
-        if (mode === "command-unknown") { record.writes += 1; req.socket.destroy(); return; }
+        record.fetchCalls.push(String(req.headers["x-fixture-fetch-call"]));
+        if (mode === "command-unknown") {
+          const id = JSON.parse(body).command_id;
+          const committed = record.committed.get(id);
+          if (committed !== undefined && committed !== body) { json(409, { error: "id_reused_with_different_body" }); return; }
+          // Model the command endpoint's durable idempotency receipt: the
+          // effect commits before the response is lost, including native HTTP
+          // retries below fetch(). A later same-ID retry reads that receipt.
+          if (committed === undefined) { record.committed.set(id, body); record.writes += 1; }
+          if (!recovered.has(mode)) { req.socket.destroy(); return; }
+          json(200, { status: "accepted", effects: record.writes }); return;
+        }
         if (mode === "command-repeat" || record.bodies.length === 1) { json(401, { error: "unauthenticated" }); return; }
         if (req.headers.authorization !== `Bearer ${rotatedAccessToken}`) { json(403, { error: "wrong_owner_or_token" }); return; }
         record.writes += 1; json(200, { status: "accepted" });
@@ -258,10 +269,17 @@ test("saved web sessions survive transient verification/refresh and reload; term
     const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     const bootstrap = `<meta name="commonswarm:url" content="${origin}"><meta name="commonswarm:anon-key" content="fixture-anon"><script>
       const nativeFetch=window.fetch.bind(window);
+      const commandFetchCalls=new Map();
       window.fetch=(input,init)=>{
         const u=new URL(typeof input==='string'?input:input.url,location.href);
         const routed=u.pathname.startsWith('/auth/v1/')||u.pathname==='/functions/v1/command';
         if(routed)u.searchParams.set('mode',${JSON.stringify(mode)});
+        if(u.pathname==='/functions/v1/command'){
+          const id=JSON.parse(init.body).command_id;
+          const count=(commandFetchCalls.get(id)||0)+1;commandFetchCalls.set(id,count);
+          const headers=new Headers(init.headers);headers.set('x-fixture-fetch-call',String(count));
+          init={...init,headers};
+        }
         return nativeFetch(routed?u:input,init);
       };
     </script>`;
@@ -357,10 +375,18 @@ test("saved web sessions survive transient verification/refresh and reload; term
           }
           if(${JSON.stringify(mode)}.startsWith('command')){
             const active=await cs.currentSession();let result,error;
-            try{result=await cs.postCommand(active,crypto.randomUUID(),{kind:'fixture'}, {}, 'outcome unknown');}catch(e){error=e;}
+            const commandId='11111111-1111-4111-8111-111111111111';
+            try{result=await cs.postCommand(active,commandId,{kind:'fixture'}, {}, 'outcome unknown');}catch(e){error=e;}
             if(${JSON.stringify(mode)}==='command-recover')check(result?.status===200,'command must recover with one resend');
             if(${JSON.stringify(mode)}==='command-repeat')check(error?.name==='AuthRecoveryRequired','repeated refusal must retain recoverable login');
-            if(${JSON.stringify(mode)}==='command-unknown')check(error?.name==='CommandOutcomeUnknown','unknown outcome must stay unknown');
+            if(mode==='command-unknown'){
+              check(error?.name==='CommandOutcomeUnknown','unknown outcome must stay unknown');
+              check(commandFetchCalls.get(commandId)===1,'unknown outcome must make exactly one application fetch');
+              await fetch('/recover?mode='+mode);
+              const receipt=await cs.postCommand(active,commandId,{kind:'fixture'}, {}, 'outcome unknown');
+              check(receipt.status===200&&receipt.body.effects===1,'same-ID retry must recover one committed effect');
+              check(commandFetchCalls.get(commandId)===2,'only the explicit same-ID retry adds an application fetch');
+            }
             check((await cs.currentSession())?.user.id===${JSON.stringify(userId)},'command failure must preserve login');
             document.body.dataset.result='passed';return;
           }
@@ -400,6 +426,7 @@ test("saved web sessions survive transient verification/refresh and reload; term
             if(mode.startsWith('refresh'))await new Promise(r=>setTimeout(r,32000));
             frame.contentDocument.querySelector('[data-retry-workspaces]').click();
             await wait(()=>state()==='create','verified recovery after retry');check(stored()?.user.id===${JSON.stringify(userId)},'retry must recover same owner');
+            if(mode.startsWith('refresh'))check(stored()?.refresh_token==='browser-rotated','recovery must persist the server-rotated credential');
           }
           document.body.dataset.result='passed';
         })().catch(e=>document.body.dataset.failure=e.message);
@@ -504,8 +531,9 @@ test("saved web sessions survive transient verification/refresh and reload; term
       if (mode.startsWith("command")) {
         const record = commandRequests.get(mode)!;
         if (mode === "command-unknown") {
-          // A fresh page invocation gets a fresh operation ID. A transport or
-          // application replay of that operation must still fail this check.
+          // Native HTTP retries reuse the first fetch-call marker. The browser
+          // also checks its application call count before explicitly recovering
+          // the same ID; the fixture must have committed exactly one effect.
           const operations = new Map<string, string[]>();
           for (const body of record.bodies) {
             const id = JSON.parse(body).command_id;
@@ -515,9 +543,15 @@ test("saved web sessions survive transient verification/refresh and reload; term
             attempts.push(body);
             operations.set(id, attempts);
           }
-          assert.ok(operations.size > 0, "unknown outcome must reach command HTTP");
-          for (const attempts of operations.values()) assert.equal(attempts.length, 1, "unknown operation must never replay");
-          assert.equal(record.writes, operations.size);
+          assert.equal(operations.size, 1, "recovery must keep the original operation ID");
+          for (const attempts of operations.values()) {
+            assert.ok(attempts.length >= 2, "lost response and explicit recovery must both reach HTTP");
+            assert.ok(attempts.every(body => body === attempts[0]), "every transport attempt must preserve the exact command");
+          }
+          assert.ok(record.fetchCalls.slice(0, -1).every(call => call === "1"), "lost-response HTTP attempts must belong to one application fetch");
+          assert.equal(record.fetchCalls.at(-1), "2", "the explicit recovery is the second application fetch");
+          assert.equal(record.committed.size, 1);
+          assert.equal(record.writes, 1, "transport retries and explicit recovery must have one effect");
         } else {
           assert.equal(record.bodies.length, 2);
           assert.equal(record.writes, mode === "command-repeat" ? 0 : 1);
