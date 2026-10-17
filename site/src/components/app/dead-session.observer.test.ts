@@ -276,7 +276,7 @@ test("saved web sessions survive transient verification/refresh and reload; term
       res.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><head>${bootstrap}<script src="/helper.js"></script></head><body><script>
         (async()=>{
           const check=(value,label)=>{if(!value)throw Error(label);};
-          const wait=async(fn)=>{for(let i=0;i<500;i++){if(fn())return;await new Promise(r=>setTimeout(r,20));}throw Error('dashboard wait timed out');};
+          const wait=async(fn,stage='dashboard')=>{for(let i=0;i<500;i++){if(fn())return;await new Promise(r=>setTimeout(r,20));}throw Error(stage+' wait timed out');};
           const mode=${JSON.stringify(mode)};
           localStorage.clear();
           localStorage.setItem('sb-127-auth-token',${JSON.stringify(JSON.stringify(seed))});
@@ -357,7 +357,7 @@ test("saved web sessions survive transient verification/refresh and reload; term
           }
           if(${JSON.stringify(mode)}.startsWith('command')){
             const active=await cs.currentSession();let result,error;
-            try{result=await cs.postCommand(active,'browser-same-intent',{kind:'fixture'}, {}, 'outcome unknown');}catch(e){error=e;}
+            try{result=await cs.postCommand(active,crypto.randomUUID(),{kind:'fixture'}, {}, 'outcome unknown');}catch(e){error=e;}
             if(${JSON.stringify(mode)}==='command-recover')check(result?.status===200,'command must recover with one resend');
             if(${JSON.stringify(mode)}==='command-repeat')check(error?.name==='AuthRecoveryRequired','repeated refusal must retain recoverable login');
             if(${JSON.stringify(mode)}==='command-unknown')check(error?.name==='CommandOutcomeUnknown','unknown outcome must stay unknown');
@@ -382,7 +382,7 @@ test("saved web sessions survive transient verification/refresh and reload; term
             document.body.dataset.result='passed';return;
           }
           const frame=document.createElement('iframe');frame.src='/app/?mode=${mode}';document.body.append(frame);
-          await wait(()=>['workspace-error','signed-out','create'].includes(frame.contentDocument?.querySelector('live-dashboard')?.dataset.state));
+          await wait(()=>['workspace-error','signed-out','create'].includes(frame.contentDocument?.querySelector('live-dashboard')?.dataset.state),'initial recovery panel');
           const state=()=>frame.contentDocument.querySelector('live-dashboard').dataset.state;
           const stored=()=>JSON.parse(localStorage.getItem('sb-127-auth-token')||'null');
           if(${JSON.stringify(mode)}.startsWith('terminal')){
@@ -394,12 +394,12 @@ test("saved web sessions survive transient verification/refresh and reload; term
             check(frame.contentDocument.querySelector('[data-panel="workspace-error"] .dashboard__account-line').hidden,'initial load must not claim a verified identity');
             const reloaded=new Promise(resolve=>frame.addEventListener('load',resolve,{once:true}));
             frame.contentWindow.location.reload(); await reloaded;
-            await wait(()=>frame.contentDocument?.querySelector('live-dashboard')?.dataset.state==='workspace-error');
+            await wait(()=>frame.contentDocument?.querySelector('live-dashboard')?.dataset.state==='workspace-error','reloaded recovery panel');
             check(stored()?.refresh_token==='browser-refresh','reload must retain refresh credentials');
             await fetch('/recover?mode=${mode}');
             if(mode.startsWith('refresh'))await new Promise(r=>setTimeout(r,32000));
             frame.contentDocument.querySelector('[data-retry-workspaces]').click();
-            await wait(()=>state()==='create');check(stored()?.user.id===${JSON.stringify(userId)},'retry must recover same owner');
+            await wait(()=>state()==='create','verified recovery after retry');check(stored()?.user.id===${JSON.stringify(userId)},'retry must recover same owner');
           }
           document.body.dataset.result='passed';
         })().catch(e=>document.body.dataset.failure=e.message);
@@ -503,9 +503,26 @@ test("saved web sessions survive transient verification/refresh and reload; term
       assert.ok(counts.users > 0 || counts.refreshes > 0, `${mode} must reach real SDK HTTP`);
       if (mode.startsWith("command")) {
         const record = commandRequests.get(mode)!;
-        assert.equal(record.bodies.length, mode === "command-unknown" ? 1 : 2);
-        assert.equal(record.writes, mode === "command-repeat" ? 0 : 1);
-        if (record.bodies.length === 2) assert.equal(record.bodies[0], record.bodies[1]);
+        if (mode === "command-unknown") {
+          // A fresh page invocation gets a fresh operation ID. A transport or
+          // application replay of that operation must still fail this check.
+          const operations = new Map<string, string[]>();
+          for (const body of record.bodies) {
+            const id = JSON.parse(body).command_id;
+            assert.equal(typeof id, "string");
+            assert.ok(id.length > 0);
+            const attempts = operations.get(id) ?? [];
+            attempts.push(body);
+            operations.set(id, attempts);
+          }
+          assert.ok(operations.size > 0, "unknown outcome must reach command HTTP");
+          for (const attempts of operations.values()) assert.equal(attempts.length, 1, "unknown operation must never replay");
+          assert.equal(record.writes, operations.size);
+        } else {
+          assert.equal(record.bodies.length, 2);
+          assert.equal(record.writes, mode === "command-repeat" ? 0 : 1);
+          assert.equal(record.bodies[0], record.bodies[1]);
+        }
         assert.equal(counts.refreshes, mode === "command-unknown" ? 0 : 1);
       }
     })));
