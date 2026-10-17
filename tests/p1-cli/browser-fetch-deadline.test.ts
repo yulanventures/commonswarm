@@ -49,18 +49,26 @@ function installDeployment(t: TestContext): void {
   });
 }
 
-async function waitFor(
-  description: string,
-  predicate: () => boolean,
-): Promise<void> {
-  for (let turn = 0; turn < 20; turn += 1) {
-    if (predicate()) return;
-    await Promise.resolve();
-  }
-  assert.fail(`observer never reached ${description}`);
+// Capture real timers before Node mocks the production deadline clock.
+const realSetTimeout = globalThis.setTimeout;
+const realClearTimeout = globalThis.clearTimeout;
+function completionSignal(description: string) {
+  let complete!: () => void;
+  const reached = new Promise<void>(resolve => { complete = resolve; });
+  return {
+    complete,
+    async wait() {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([reached, new Promise<never>((_, reject) => {
+          timer = realSetTimeout(() => reject(new Error(`observer never reached ${description}`)), 5000);
+        })]);
+      } finally { realClearTimeout(timer); }
+    },
+  };
 }
 
-function hangingFetch(observed: AbortSignal[]): typeof fetch {
+function hangingFetch(observed: AbortSignal[], entered: () => void): typeof fetch {
   return (async (_input, init) => {
     const signal = init?.signal;
     assert.ok(
@@ -68,6 +76,7 @@ function hangingFetch(observed: AbortSignal[]): typeof fetch {
       "every production browser fetch must carry its application deadline",
     );
     observed.push(signal);
+    entered();
     return await new Promise<Response>((_resolve, reject) => {
       signal.addEventListener("abort", () => {
         const error = new Error("browser request timed out");
@@ -82,7 +91,8 @@ test("D-034: create fetch settles with an explicit unknown outcome at the deadli
   t.mock.timers.enable({ apis: ["setTimeout"] });
   installDeployment(t);
   const observed: AbortSignal[] = [];
-  t.mock.method(globalThis, "fetch", hangingFetch(observed));
+  const entered = completionSignal("the production fetch call site");
+  t.mock.method(globalThis, "fetch", hangingFetch(observed, entered.complete));
 
   const creation = createWorkspace(
     SESSION,
@@ -98,7 +108,8 @@ test("D-034: create fetch settles with an explicit unknown outcome at the deadli
     return true;
   });
 
-  await waitFor("the create-workspace fetch call site", () => observed.length === 1);
+  await entered.wait();
+  assert.equal(observed.length, 1);
   t.mock.timers.tick(29_999);
   assert.equal(observed[0]?.aborted, false, "the create deadline must not fire early");
   t.mock.timers.tick(1);
@@ -110,7 +121,8 @@ test("D-034: signup membership read settles safely at the browser deadline", asy
   t.mock.timers.enable({ apis: ["setTimeout"] });
   installDeployment(t);
   const observed: AbortSignal[] = [];
-  t.mock.method(globalThis, "fetch", hangingFetch(observed));
+  const entered = completionSignal("the production fetch call site");
+  t.mock.method(globalThis, "fetch", hangingFetch(observed, entered.complete));
 
   const workspaces = myWorkspaces();
   const failure = assert.rejects(workspaces, (error: unknown) => {
@@ -120,7 +132,8 @@ test("D-034: signup membership read settles safely at the browser deadline", asy
     return true;
   });
 
-  await waitFor("the membership read fetch call site", () => observed.length === 1);
+  await entered.wait();
+  assert.equal(observed.length, 1);
   t.mock.timers.tick(29_999);
   assert.equal(observed[0]?.aborted, false, "the membership deadline must not fire early");
   t.mock.timers.tick(1);
@@ -132,7 +145,8 @@ test("D-034: dashboard feed read settles safely at the browser deadline", async 
   t.mock.timers.enable({ apis: ["setTimeout"] });
   installDeployment(t);
   const observed: AbortSignal[] = [];
-  t.mock.method(globalThis, "fetch", hangingFetch(observed));
+  const entered = completionSignal("the production fetch call site");
+  t.mock.method(globalThis, "fetch", hangingFetch(observed, entered.complete));
 
   const signals = feed(WORKSPACE_ID);
   const failure = assert.rejects(signals, (error: unknown) => {
@@ -142,7 +156,8 @@ test("D-034: dashboard feed read settles safely at the browser deadline", async 
     return true;
   });
 
-  await waitFor("the dashboard feed fetch call site", () => observed.length === 1);
+  await entered.wait();
+  assert.equal(observed.length, 1);
   t.mock.timers.tick(29_999);
   assert.equal(observed[0]?.aborted, false, "the feed deadline must not fire early");
   t.mock.timers.tick(1);
@@ -154,7 +169,7 @@ test("D-034: create deadline remains live while the response body is unreadable"
   t.mock.timers.enable({ apis: ["setTimeout"] });
   installDeployment(t);
   let bodySignal: AbortSignal | null = null;
-  let bodyReadStarted = false;
+  const bodyRead = completionSignal("the production response body read");
   t.mock.method(globalThis, "fetch", (async (_input, init) => {
     const signal = init?.signal;
     assert.ok(signal instanceof AbortSignal);
@@ -162,7 +177,7 @@ test("D-034: create deadline remains live while the response body is unreadable"
     return {
       status: 200,
       text: async () => {
-        bodyReadStarted = true;
+        bodyRead.complete();
         return await new Promise<string>((_resolve, reject) => {
           signal.addEventListener("abort", () => {
             const error = new Error("response body timed out");
@@ -186,7 +201,7 @@ test("D-034: create deadline remains live while the response body is unreadable"
     return true;
   });
 
-  await waitFor("the production response body read", () => bodyReadStarted);
+  await bodyRead.wait();
   const observedBodySignal = bodySignal as unknown as AbortSignal;
   assert.equal(observedBodySignal.aborted, false);
   t.mock.timers.tick(30_000);
