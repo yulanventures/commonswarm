@@ -236,7 +236,14 @@ const authFetch: typeof fetch = async (input, init) => {
   const isUser = method === "GET" && url.pathname.endsWith("/auth/v1/user");
   if (!isRefresh && !isUser) return fetch(input, init);
   if (isRefresh && Date.now() < refreshRetryAfter) {
-    throw new AuthRetryableFetchError("Sign-in check interrupted", 0);
+    // Keep the SDK's single-flight refresh pending through our cooldown. Fast
+    // failures exhaust its backoff and then cache the failure for another 60s,
+    // preventing a recovered backend from being reached by Try again.
+    // The caller's 4s deadline still owns the UI; the SDK retains its lock.
+    await new Promise(resolve => setTimeout(resolve, Math.min(refreshRetryAfter - Date.now(), 30_000)));
+    if (Date.now() < refreshRetryAfter) {
+      throw new AuthRetryableFetchError("Sign-in check interrupted", 0);
+    }
   }
   const savedAtStart = sessionStorageKey ? authStorage.getItem(sessionStorageKey) : null;
   const savedCredential = savedSession(savedAtStart);
