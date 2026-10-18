@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test, after } from 'node:test';
 import { createServer } from 'node:http';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
-import { readFile, writeFile, stat, chmod, symlink } from 'node:fs/promises';
+import { readFile, writeFile, stat, chmod, symlink, rename } from 'node:fs/promises';
 import { lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, sep } from 'node:path';
@@ -212,7 +212,15 @@ async function exercise(config = {}) {
           if (config.missingIssuer) url.searchParams.delete('iss');
           if (config.callbackFifo) execFileSync('mkfifo', ['-m', '600', paths.callback]);
           else if (config.callbackSymlink) { await writeFile(`${dir}/target`, url.href, { mode: 0o600 }); await symlink(`${dir}/target`, paths.callback); }
-          else if (!config.noCallback) await writeFile(paths.callback, url.href, { mode: config.unsafeCallback ? 0o644 : 0o600 });
+          else if (config.unsafeCallback) {
+            // Publish only after the unsafe mode exists, even under umask 077.
+            const pending = `${dir}/callback.pending`;
+            await writeFile(pending, url.href, { mode: 0o600 });
+            await chmod(pending, 0o644);
+            assert.equal((await stat(pending)).mode & 0o777, 0o644);
+            await rename(pending, paths.callback);
+          }
+          else if (!config.noCallback) await writeFile(paths.callback, url.href, { mode: 0o600 });
           if (!config.noCallback && !config.callbackSymlink && !config.callbackFifo) callbackMode = (await stat(paths.callback)).mode & 0o777;
         }).catch(e => failures.push(e.message));
       }

@@ -93,7 +93,7 @@ FROM node:22.23.3-bookworm
 ARG CI_UID
 ARG CI_GID
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
-RUN apt-get update -q && apt-get install -y --no-install-recommends ca-certificates curl git python3 unzip gnupg sudo util-linux procps iproute2 lsb-release lsof jq rsync && \
+RUN apt-get update -q && apt-get install -y --no-install-recommends ca-certificates curl git python3 python3-jsonschema unzip gnupg sudo util-linux procps iproute2 lsb-release lsof jq rsync && \
     install -d /etc/postgresql-common && echo 'create_main_cluster = false' >/etc/postgresql-common/createcluster.conf && \
     curl --proto '=https' --fail --silent --show-error https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg && \
     echo 'deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main' >/etc/apt/sources.list.d/pgdg.list && \

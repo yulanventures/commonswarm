@@ -2590,6 +2590,9 @@ print(json.dumps({'created_owner':owner_writes[0]}))
     for (const property of ['owner', 'mode']) {
       const bad = auditFixture(); chmodSync(bad.root + '/var/lib/commonswarm-admin-release', 0o700);
       mkdirSync(bad.root + directory, { mode: property === 'mode' ? 0o750 : 0o700 });
+      // Creation modes are masked by the CI lane's private umask.
+      chmodSync(bad.root + directory, property === 'mode' ? 0o750 : 0o700);
+      assert.equal(lstatSync(bad.root + directory).mode & 0o777, property === 'mode' ? 0o750 : 0o700);
       const before = bad.snapshot();
       refused(run(bad, directory + '/' + name, property === 'owner' ? { [directory]: 1000 } : {}), 'unsafe-owner-mode-or-type; STOP');
       assert.deepEqual(bad.snapshot(), before);
