@@ -1682,7 +1682,7 @@
             "/storage/v1/...",
             "/auth/v1/..."
           ],
-          "citation": "site/src/lib/commonswarm.ts:69,479-493",
+          "citation": "site/src/lib/commonswarm.ts:74,716-724",
           "detail": "Shared browser request deadline used by reads and commands.",
           "operation": {
             "name": "browser-shared-request",
@@ -1695,6 +1695,25 @@
         },
         "site/src/lib/commonswarm.ts:setTimeout": {
           "class": "network-api",
+          "scope": "whole-operation",
+          "endpoints": [
+            "/auth/v1/token",
+            "/auth/v1/user"
+          ],
+          "citation": "site/src/lib/commonswarm.ts:300-306,363-364,795,810",
+          "detail": "Four-second boundedAuth caller deadline for session verification and recovery. Rejects to show recovery UI while SDK retries may continue under their lock; does not abort the SDK operation.",
+          "operation": {
+            "name": "browser-auth-recovery",
+            "class": "not-run",
+            "writes": [
+              "underlying refresh may rotate session credentials"
+            ],
+            "removes": [],
+            "reason": "Browser session and recovery lifecycle; a CLI profile cannot exercise that client code or its SDK lock."
+          }
+        },
+        "site/src/lib/commonswarm.ts:setTimeout#2": {
+          "class": "network-api",
           "scope": "per-request",
           "endpoints": [
             "/functions/v1/command",
@@ -1703,7 +1722,7 @@
             "/storage/v1/...",
             "/auth/v1/..."
           ],
-          "citation": "site/src/lib/commonswarm.ts:481",
+          "citation": "site/src/lib/commonswarm.ts:718",
           "detail": "Browser requestDeadline timer for BROWSER_REQUEST_TIMEOUT_MS.",
           "operation": {
             "name": "browser-shared-request-site",
@@ -1711,6 +1730,25 @@
             "writes": [],
             "removes": [],
             "reason": "Use of BROWSER_REQUEST_TIMEOUT_MS. A CLI profile cannot exercise that client code."
+          }
+        },
+        "site/src/lib/commonswarm.ts:AbortSignal.timeout": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/auth/v1/token",
+            "/auth/v1/user"
+          ],
+          "citation": "site/src/lib/commonswarm.ts:233-237,257-261",
+          "detail": "Four-second fetch abort for browser refresh-token POST and user verification GET; composed with the caller signal.",
+          "operation": {
+            "name": "browser-auth-fetch",
+            "class": "not-run",
+            "writes": [
+              "refresh-token POST may rotate session credentials"
+            ],
+            "removes": [],
+            "reason": "Browser SDK authentication adapter; a CLI profile does not exercise this fetch path, and the tool does not refresh browser credentials."
           }
         },
         "src/cli.ts:LISTENER_STOP_WAIT_TIMEOUT_MS": {
