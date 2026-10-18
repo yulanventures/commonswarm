@@ -192,7 +192,7 @@ export function verifyDockerTarget(binding, live, docker, label) {
   if (!published.includes(new URL(binding.db_url).port)) refuse('published_port_mismatch');
 }
 
-/** GitHub Actions only: this repository's Supabase CLI project. The CLI names the database
+/** Explicit CI contexts only: this repository's Supabase CLI project. The CLI names the database
  * container, network and volume from the project id (config.go:57-66, db/start/start.go:120-124);
  * the label filter is the CLI's own project filter (docker.go:155), never a name prefix match. */
 export function ciBinding(status, docker, projectId) {
@@ -221,7 +221,7 @@ export async function openLockOrderTarget(options) {
     checkBindingShape(binding, live, { mode: 'fixture' });
     tlsCaPem = readTlsCaFile(binding.db_tls_ca_file, fs);
     label = COMPOSE_LABEL;
-  } else if (env.GITHUB_ACTIONS === 'true') {
+  } else if (env.GITHUB_ACTIONS === 'true' || (env.CI === 'true' && env.STANDALONE_CI === '1')) {
     const projectId = options.projectId ?? cliProjectId(readFileSync(join(REPO_ROOT, 'supabase/config.toml'), 'utf8'));
     binding = ciBinding((options.supabaseStatus ?? realSupabaseStatus)(), docker, projectId);
     checkBindingShape(binding, live, { mode: 'ci', project: projectId });
