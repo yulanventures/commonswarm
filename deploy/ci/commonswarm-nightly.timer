@@ -1,0 +1,10 @@
+[Unit]
+Description=CommonSwarm standalone nightly at 03:23 UTC
+
+[Timer]
+OnCalendar=*-*-* 03:23:00 UTC
+Persistent=true
+Unit=commonswarm-nightly.service
+
+[Install]
+WantedBy=timers.target

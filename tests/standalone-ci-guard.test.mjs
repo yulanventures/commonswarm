@@ -1,0 +1,220 @@
+// Independent contracts: real guard admission in disposable Linux containers;
+// controller lifecycle with real git/flock/clock and a Docker boundary fixture.
+// These catch overlapping runs, wrong source, lost failures, unsafe cleanup and
+// broad deletion. No existing test owns the new standalone entry point.
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync, readdirSync, symlinkSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { resolve, join } from 'node:path';
+import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
+
+const repo = resolve(import.meta.dirname, '..');
+const controller = join(repo, 'scripts/standalone-ci');
+function run(command, args, options = {}) {
+  return spawnSync(command, args, { encoding: 'utf8', ...options });
+}
+function good(command, args, options) {
+  const r = run(command, args, options);
+  assert.equal(r.status, 0, r.stderr || r.stdout);
+  return r.stdout.trim();
+}
+function fixture(control = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'standalone-ci-test.'));
+  const source = join(root, 'source');
+  const bin = join(root, 'bin');
+  const state = join(root, 'state');
+  mkdirSync(source); mkdirSync(bin);
+  good('git', ['init', '--quiet', '--initial-branch=main', source]);
+  good('git', ['-C', source, 'config', 'user.email', 'fixture@example.invalid']);
+  good('git', ['-C', source, 'config', 'user.name', 'Fixture']);
+  writeFileSync(join(source, 'control.json'), JSON.stringify(control));
+  writeFileSync(join(source, 'identity'), 'first source');
+  good('git', ['-C', source, 'add', '.']);
+  good('git', ['-C', source, 'commit', '--quiet', '-m', 'fixture']);
+  const sha = good('git', ['-C', source, 'rev-parse', 'HEAD']);
+  writeFileSync(join(root, 'containers.json'), JSON.stringify({unowned: {label: 'some-other-run'}}));
+  // The fixture only implements the external Docker transport. The real
+  // controller writes the receipts, resolves git, queues, times out and cleans.
+  const docker = `#!/usr/bin/env python3
+import json,pathlib,sys,time,subprocess
+root=pathlib.Path(${JSON.stringify(root)})
+p=root/'containers.json'
+args=sys.argv[1:]
+def event(action,name):
+    with (root/'events.jsonl').open('a') as f: f.write(json.dumps(dict(action=action,name=name,at=time.monotonic()))+'\\n')
+if args[0]=='run':
+    name=args[args.index('--name')+1]
+    label=args[args.index('--label')+1].split('=',1)[1]
+    store=json.loads(p.read_text()); store[name]=dict(label=label); p.write_text(json.dumps(store))
+    event('start',name)
+    if name.endswith('-worker'):
+        mounts=[args[i+1] for i,a in enumerate(args) if a=='--mount']
+        work=pathlib.Path(next(m.split(',')[1][4:] for m in mounts if 'dst=/work' in m))
+        control=json.loads((work/'control.json').read_text())
+        print((work/'identity').read_text(),flush=True)
+        time.sleep(control.get('sleep',0))
+        if control.get('tamper'):
+            store=json.loads(p.read_text()); store[name.replace('-worker','-docker')]['label']='unowned'; p.write_text(json.dumps(store))
+        event('finish',name)
+        sys.exit(control.get('exit',{}).get(args[-1],0))
+    sys.exit(0)
+if args[0]=='inspect':
+    store=json.loads(p.read_text()); found=store.get(args[-1])
+    if found: print(found['label']); sys.exit(0)
+    sys.exit(1)
+if args[0]=='rm':
+    store=json.loads(p.read_text()); store.pop(args[-1],None); p.write_text(json.dumps(store)); event('remove',args[-1]); sys.exit(0)
+if args[0]=='info': sys.exit(0)
+if args[0]=='network':
+    store=json.loads(p.read_text())
+    if args[1]=='create': store[args[-1]]=dict(label=args[args.index('--label')+1].split('=',1)[1]); p.write_text(json.dumps(store)); sys.exit(0)
+    if args[1]=='inspect':
+        found=store.get(args[-1])
+        if found: print(found['label']); sys.exit(0)
+        sys.exit(1)
+    if args[1]=='rm': store.pop(args[-1],None); p.write_text(json.dumps(store)); sys.exit(0)
+sys.exit(2)
+`;
+  writeFileSync(join(bin, 'docker'), docker); chmodSync(join(bin, 'docker'), 0o755);
+  writeFileSync(join(bin, 'pgrep'), '#!/bin/sh\nexit 1\n'); chmodSync(join(bin, 'pgrep'), 0o755);
+  const cfg = {state, controller, source_url: source, ssh_config: '/dev/null', allowed_hostname: good('hostname',['-s']),
+    controller_sha: 'a'.repeat(40), worker_image: 'sha256:' + '1'.repeat(64),
+    dind_image: 'fixture@sha256:' + '2'.repeat(64), timeout_seconds: 10};
+  const config = join(root, 'config.json');
+  writeFileSync(config, JSON.stringify(cfg));
+  const env = {...process.env, PATH: `${bin}:${process.env.PATH}`, COMMONSWARM_CI_CONFIG: config};
+  const args = (suite = 'unit', ref = ['--sha', sha]) => [join(controller, 'run.sh'), ...ref, '--suite', suite];
+  const receipts = () => readdirSync(join(state, 'runs')).sort().map(n => JSON.parse(readFileSync(join(state, 'runs', n, 'receipt.json'))));
+  return {root, source, state, sha, cfg, config, env, args, receipts};
+}
+function start(f, args = f.args()) {
+  const child = spawn('bash', args, {env: f.env});
+  let stdout = '', stderr = '';
+  child.stdout.on('data', x => stdout += x);
+  child.stderr.on('data', x => stderr += x);
+  return new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('exit', status => resolve({status, stdout, stderr}));
+  });
+}
+
+test('guard admits standalone and GHA, retaining CI/root/host/path refusals in a disposable container', () => {
+  const guard = join(repo, 'tests/box-dry-run/guard.sh');
+  const probe = (env, setup = ':', user = '0') => run('docker', ['run', '--rm', '--network', 'none',
+    '--hostname', setup === 'production' ? 'yulan-vps-1' : 'guard-fixture', '--user', user,
+    '--mount', `type=bind,src=${guard},dst=/guard.sh,readonly`, ...Object.entries(env).flatMap(([k,v]) => ['-e', `${k}=${v}`]),
+    'ubuntu:24.04', 'bash', '-c', `${setup === 'production' ? ':' : setup}; exec bash /guard.sh`]);
+  const base = {BOX_DRY_RUN:'1', CI:'true', STANDALONE_CI:'1'};
+  for (const env of [base, {BOX_DRY_RUN:'1', CI:'true', GITHUB_ACTIONS:'true'}]) {
+    const r = probe(env); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /BOX_DRY_RUN_GUARD=PASS/);
+  }
+  for (const [env, setup, user, reason] of [
+    [{...base, STANDALONE_CI:''}, ':', '0', 'GITHUB_ACTIONS=true or STANDALONE_CI=1'],
+    [{...base, CI:''}, ':', '0', 'CI=true'],
+    [{...base, BOX_DRY_RUN:''}, ':', '0', 'BOX_DRY_RUN=1'],
+    [base, 'production', '0', 'production hostname'],
+    [base, 'uname() { echo Darwin; }; export -f uname', '0', 'Linux is required'],
+    [base, ':', '65534', 'root is required'],
+    [base, 'mkdir -p /home/commonswarm', '0', '/home/commonswarm existed'],
+    [base, 'mkdir -p /srv/commonswarm', '0', '/srv/commonswarm existed'],
+  ]) { const r = probe(env, setup, user); assert.equal(r.status, 77, r.stderr); assert.ok(r.stderr.includes(reason), r.stderr); }
+});
+
+test('strict CLI rejects branches, bad SHA, unknown suites and extra flags before work', () => {
+  for (const args of [[], ['--sha','main','--suite','unit'], ['--ref','release','--suite','unit'],
+    ['--sha','a'.repeat(40),'--suite','unknown'], ['--sha','a'.repeat(40),'--suite','unit','--extra']]) {
+    const r = run('bash', [join(controller,'run.sh'), ...args]);
+    assert.notEqual(r.status, 0); assert.match(r.stderr, /REFUSE:/);
+  }
+});
+
+test('all suites aggregate failures and retain exact source provenance and log checksums', async () => {
+  const f = fixture({exit: {'p1-cli': 9}});
+  writeFileSync(join(f.source,'identity'), 'second source');
+  good('git',['-C',f.source,'commit','-qam','later source']);
+  const result = await start(f, f.args('all'));
+  assert.equal(result.status, 9, result.stderr);
+  const receipts = f.receipts();
+  assert.equal(receipts.length, 5);
+  assert.deepEqual(receipts.map(r => r.suite).sort(), ['box-dry-run','p1-cli','server','site','unit']);
+  for (const r of receipts) {
+    assert.equal(r.resolved_sha, f.sha); assert.equal(r.requested_sha, f.sha);
+    assert.equal(r.controller_sha, f.cfg.controller_sha);
+    assert.equal(r.exit_code, r.suite === 'p1-cli' ? 9 : 0);
+    assert.equal(r.timed_out, false); assert.deepEqual(r.cleanup_errors, []);
+    assert.ok(r.queued_at <= r.started_at && r.started_at <= r.ended_at);
+    assert.match(r.artifacts['suite.log'], /^[a-f0-9]{64}$/);
+    const runDir = join(f.state, 'runs', r.run_id);
+    assert.equal(r.artifacts['suite.log'], createHash('sha256').update(readFileSync(join(runDir,'suite.log'))).digest('hex'));
+    assert.match(readFileSync(join(runDir,'suite.log'),'utf8'), /first source/);
+    assert.equal(existsSync(join(runDir,'scratch')), false);
+  }
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root,'containers.json'))), {unowned: {label:'some-other-run'}});
+});
+
+test('concurrent invocations serialize actual worker lifetimes through the shared queue', async () => {
+  const f = fixture({sleep: 0.3});
+  const results = await Promise.all([start(f), start(f)]);
+  for (const r of results) assert.equal(r.status, 0, r.stderr);
+  const events = readFileSync(join(f.root,'events.jsonl'),'utf8').trim().split('\n').map(JSON.parse).filter(e => e.name.endsWith('-worker'));
+  assert.deepEqual(events.map(e => e.action), ['start','finish','remove','start','finish','remove']);
+  const receipts = f.receipts().sort((a,b) => a.started_at.localeCompare(b.started_at));
+  assert.ok(receipts[1].started_at >= receipts[0].ended_at);
+});
+
+test('timeout writes failure receipt and removes owned services without removing an unrelated container', async () => {
+  const f = fixture({sleep: 10}); f.cfg.timeout_seconds = 1;
+  writeFileSync(f.config,JSON.stringify(f.cfg));
+  const r = await start(f); assert.equal(r.status,124,r.stderr);
+  const [receipt] = f.receipts(); assert.equal(receipt.timed_out,true); assert.equal(receipt.exit_code,124);
+  assert.deepEqual(receipt.cleanup_errors,[]);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root,'containers.json'))), {unowned:{label:'some-other-run'}});
+});
+
+test('cleanup refuses an exact-name container whose ownership label changed', async () => {
+  const f = fixture({tamper:true}); const r = await start(f); assert.notEqual(r.status,0);
+  const [receipt] = f.receipts(); assert.match(receipt.cleanup_errors.join(' '),/ownership mismatch/);
+  const containers = JSON.parse(readFileSync(join(f.root,'containers.json')));
+  assert.equal(containers[receipt.run_id+'-docker'].label,'unowned');
+  assert.equal(existsSync(join(f.state,'runs',receipt.run_id,'scratch')),true);
+});
+
+test('main resolves to one exact commit and busy PromptEden workers refuse before suite start', async () => {
+  const f = fixture({sleep:0.3});
+  const running = start(f, f.args('all',['--ref','main']));
+  let entered = false;
+  for (let attempt=0; attempt<200; attempt++) {
+    const events=join(f.root,'events.jsonl');
+    if (existsSync(events) && readFileSync(events,'utf8').includes('-worker')) { entered=true; break; }
+    await delay(10);
+  }
+  assert.equal(entered,true,'first suite reached the external worker');
+  writeFileSync(join(f.source,'identity'),'main advanced during queued all invocation');
+  good('git',['-C',f.source,'commit','-qam','advance main during run']);
+  const r = await running; assert.equal(r.status,0,r.stderr);
+  for (const receipt of f.receipts()) { assert.equal(receipt.requested_sha,'main'); assert.equal(receipt.resolved_sha,f.sha); }
+  writeFileSync(join(f.root,'bin','pgrep'),'#!/bin/sh\nexit 0\n');
+  const busy = await start(f); assert.equal(busy.status,75,busy.stderr);
+  assert.equal(f.receipts().filter(x => x.exit_code === 75).length,1);
+});
+
+test('retention deletes only expired completed owned runs and rejects root/home/escape/symlink scratch paths', () => {
+  const f = fixture(); mkdirSync(join(f.state,'runs'),{recursive:true});
+  const create = (id, ended) => {
+    const dir=join(f.state,'runs','csci-'+id.repeat(32)); mkdirSync(join(dir,'scratch'),{recursive:true});
+    writeFileSync(join(dir,'receipt.json'),JSON.stringify({run_id:'csci-'+id.repeat(32),ended_at:ended,cleanup_errors:[]}));
+    return dir;
+  };
+  const old = create('a','2000-01-01T00:00:00+00:00');
+  const fresh = create('b',new Date().toISOString());
+  const outsider=join(f.root,'outside'); mkdirSync(outsider); writeFileSync(join(outsider,'keep'),'safe');
+  const link=join(f.state,'runs','csci-'+'c'.repeat(32)); symlinkSync(outsider,link);
+  const invoke = target => run('python3',[join(controller,'retain.py'),'--root',f.state,'--scratch',target]);
+  assert.equal(invoke(join(fresh,'scratch')).status,0);
+  for (const target of ['/',process.env.HOME,outsider,join(link,'scratch'),fresh]) assert.notEqual(invoke(target).status,0,target);
+  good('python3',[join(controller,'retain.py'),'--root',f.state]);
+  assert.equal(existsSync(old),false); assert.equal(existsSync(fresh),true); assert.equal(readFileSync(join(outsider,'keep'),'utf8'),'safe');
+});
