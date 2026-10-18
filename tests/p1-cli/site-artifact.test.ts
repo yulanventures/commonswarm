@@ -157,17 +157,21 @@ test(`${lane}: H0=1 requires emitted controls; explicit H0=0 omits them`, async 
 
 test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls back failures and drift`, { skip: !linuxProof }, async () => {
   const curl = (await exec('which', ['curl'])).stdout.trim();
-  for (const variant of ['success', 'root-status', 'app-status', 'root-body', 'app-body', 'curl-failure', 'asset-drift', 'current-drift', 'artifact-pin', 'build-pin', 'closed-pipe', 'closed-pipe-failure', 'find-failure', 'flip-failure', 'missing-old', 'rollback-status']) {
+  for (const variant of ['success', 'root-status', 'app-status', 'root-body', 'app-body', 'curl-failure', 'asset-drift', 'current-drift', 'artifact-pin', 'build-pin', 'closed-pipe', 'closed-pipe-failure', 'find-failure', 'flip-failure', 'missing-old', 'rollback-status', 'hup']) {
     const packet = await prepare(`run-${variant}`), site = join(root, `site-${variant}`), old = join(site, 'releases/old');
     await mkdir(join(old, 'app'), { recursive: true }); await writeFile(join(old, 'index.html'), 'old root'); await writeFile(join(old, 'app/index.html'), 'old app');
     await mkdir(join(old, '_astro'), { recursive: true }); await writeFile(join(old, '_astro/retained.js'), 'old asset');
     await symlink('releases/old', join(site, 'current')); await mkdir(join(site, 'releases/reserve'));
     const oldProbes = new Set<string>();
+    let notifyHeld!: () => void, releaseHeld!: () => void;
+    const probeHeld = new Promise<void>(r => { notifyHeld = r; });
+    const probeReleased = new Promise<void>(r => { releaseHeld = r; });
     const server = createServer(async (req, res) => {
       if (variant === 'closed-pipe-failure' && (await readlink(join(site, 'current'))) !== 'releases/old') { res.writeHead(503); res.end(); return; }
       if (variant === 'rollback-status') { res.writeHead(503); res.end(); return; }
       const route = req.url === '/app' ? 'app/index.html' : 'index.html';
       const isNew = (await readlink(join(site, 'current'))) !== 'releases/old';
+      if (isNew && variant === 'hup') { notifyHeld(); await probeReleased; }
       if (!isNew) oldProbes.add(req.url!);
       if (isNew && variant === `${req.url === '/app' ? 'app' : 'root'}-status`) { res.writeHead(503); res.end('unavailable'); return; }
       if (isNew && variant === `${req.url === '/app' ? 'app' : 'root'}-body`) { res.end('wrong HTML'); return; }
@@ -193,7 +197,7 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
       await mkdir(join(old, '_astro', asset, '..'), { recursive: true }); await writeFile(join(old, '_astro', asset), 'different bytes under same asset name');
     }
     try {
-      const run = () => exec('bash', variant.startsWith('closed-pipe') ? ['-c', 'exec 1>&- 2>&-; exec bash "$1" deploy', 'fixture', join(packet, 'run.sh')] : [join(packet, 'run.sh'), 'deploy'], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+      const run = () => exec('bash', variant.startsWith('closed-pipe') ? ['-c', 'exec 1>&- 2>&-; exec bash "$1" deploy', 'fixture', join(packet, 'run.sh')] : [join(packet, 'run.sh'), 'deploy'], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, ...(variant === 'hup' ? { timeout: 30_000 } : {}) });
       if (['success', 'closed-pipe', 'missing-old'].includes(variant)) {
         const completed = await run();
         assert.equal(completed.stdout, ''); assert.equal(completed.stderr, '');
@@ -211,11 +215,27 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
         assert.equal(await readlink(join(site, 'current')), 'releases/old');
         await exec('bash', [join(packet, 'run.sh'), 'rollback'], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
       } else {
-        await assert.rejects(run());
+        if (variant === 'hup') {
+          const running = run();
+          // Attach the rejection assertion before sending HUP; Bash defers its
+          // trap until the foreground probe returns, so never await exit first.
+          const exited = assert.rejects(running, (error: unknown) => {
+            assert.equal((error as { code: number }).code, 143); return true;
+          });
+          let timer: ReturnType<typeof setTimeout>;
+          const deadline = new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('new-release probe was not reached')), 10_000);
+          });
+          try {
+            assert.equal(await Promise.race([probeHeld.then(() => true), exited.then(() => false), deadline]), true, 'child must reach the new-release probe');
+            assert.notEqual(await readlink(join(site, 'current')), 'releases/old');
+            assert.equal(running.child.kill('SIGHUP'), true, 'send HUP to the rendered Bash child');
+          } finally { clearTimeout(timer!); releaseHeld(); await exited; }
+        } else await assert.rejects(run());
         const output = await readFile(join(packet, 'hostrun.log'), 'utf8');
         if (['root-status', 'app-status'].includes(variant)) assert.match(output, /assertion=httpstatus/);
         if (['root-body', 'app-body'].includes(variant)) assert.match(output, /assertion=httphash/);
-        if (['root-status', 'app-status', 'root-body', 'app-body', 'curl-failure', 'closed-pipe-failure'].includes(variant)) assert.match(output, /PASS rollback/);
+        if (['root-status', 'app-status', 'root-body', 'app-body', 'curl-failure', 'closed-pipe-failure', 'hup'].includes(variant)) assert.match(output, /PASS rollback/);
         if (variant === 'asset-drift') assert.match(output, /assertion=old-asset-identical/);
         if (variant === 'current-drift') assert.match(output, /assertion=exact-old-link/);
         if (variant === 'artifact-pin') assert.match(output, /assertion=artifactSHA/);
@@ -225,7 +245,7 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
         if (variant === 'find-failure') assert.match(output, /FAIL step=old-assets/);
         assert.equal(await readlink(join(site, 'current')), variant === 'current-drift' ? 'releases/reserve' : 'releases/old');
       }
-      if (['success', 'closed-pipe', 'closed-pipe-failure', 'missing-old', 'root-status', 'app-status', 'root-body', 'app-body', 'curl-failure'].includes(variant)) assert.deepEqual([...oldProbes].sort(), ['/', '/app']);
+      if (['success', 'closed-pipe', 'closed-pipe-failure', 'missing-old', 'root-status', 'app-status', 'root-body', 'app-body', 'curl-failure', 'hup'].includes(variant)) assert.deepEqual([...oldProbes].sort(), ['/', '/app']);
       assert.equal((await stat(join(packet, 'hostrun.log'))).mode & 0o777, 0o600);
       assert.ok((await readdir(join(site, 'releases'))).includes('reserve'));
       assert.equal(await readFile(join(old, '_astro/retained.js'), 'utf8'), 'old asset');
