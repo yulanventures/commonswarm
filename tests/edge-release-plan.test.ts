@@ -102,9 +102,12 @@ function stopped(r: ReturnType<typeof spawnSync>, pattern = /FAIL.*STOP/s) {
   assert.notEqual(r.status, 0, String(r.stdout)); assert.match(String(r.stderr), pattern);
 }
 // Match the box's data-filter extraction API; macOS /usr/bin/python3 is 3.9.
-const archivePython = ['python3', '/opt/homebrew/bin/python3', '/usr/local/bin/python3'].find(path =>
-  spawnSync(path, ['-c', 'import tarfile; assert hasattr(tarfile,"data_filter")'], { encoding: 'utf8' }).status === 0);
-assert.ok(archivePython, 'archive admission requires Python with tarfile.data_filter');
+const archivePythonProbes = ['python3', 'python3.12', '/opt/homebrew/bin/python3', '/usr/local/bin/python3'].map(path => {
+  const result = spawnSync(path, ['-c', 'import sys,tarfile; print(sys.executable, sys.version, tarfile.__file__, "data_filter=" + str(hasattr(tarfile,"data_filter"))); assert hasattr(tarfile,"data_filter")'], { encoding: 'utf8' });
+  return { path, status: result.status, signal: result.signal, error: result.error?.message, stdout: result.stdout, stderr: result.stderr };
+});
+const archivePython = archivePythonProbes.find(probe => probe.status === 0)?.path;
+assert.ok(archivePython, 'archive admission requires Python with tarfile.data_filter: ' + JSON.stringify(archivePythonProbes));
 const pythonPath = spawnSync(archivePython, ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' });
 passed(pythonPath);
 const quotedPythonExecutable = "'" + pythonPath.stdout.trim().replaceAll("'", "'\\''") + "'";
@@ -1500,7 +1503,7 @@ print(json.dumps(record))
 `);
   const destination = join(f.archives, fixture().baseline_edge_sha + '-Same12.tar');
   assert.equal(readFileSync(destination, 'utf8'), 'operator drift!');
-  stopped(result, /descriptor metadata changed.*STOP/);
+  stopped(result, /descriptor (?:bytes|metadata) changed.*STOP/);
   if (result.status === 0) {
     const record = JSON.parse(result.stdout);
     assert.equal(record.sha256, hash(readFileSync(destination)), 'promotion accepted an unchanged inode with drifted bytes and returned the old digest');
