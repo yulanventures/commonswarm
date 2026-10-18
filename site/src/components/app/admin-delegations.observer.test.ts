@@ -37,6 +37,7 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
     window.adminFixtureChangeMetadata = () => { metadataChanged = true; };
     window.adminFixtureForeignProjection = () => { foreignProjection = true; };
     const requests = [];
+    const fixtureFetch = window.fetch.bind(window);
     window.fetch = async (input, init) => {
       const request = new Request(input, init);
       if (request.url.endsWith("/auth/v1/user")) return Response.json(user);
@@ -67,23 +68,27 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
   </script>`;
   const seed = `<script>localStorage.setItem("sb-api-auth-token", JSON.stringify({ access_token: "synthetic-human", refresh_token: "synthetic-refresh", token_type: "bearer", expires_in: 3600, expires_at: Math.floor(Date.now() / 1000) + 3600, user }));</script>`;
   const observe = `<script>
-    const waitFor = async (predicate) => {
+    let stage = "initializing";
+    const waitFor = async (name, predicate) => {
+      stage = name;
       for (let tries = 0; tries < 150; ++tries) {
         if (predicate()) return;
-        await new Promise(resolve => setTimeout(resolve, 20));
+        // Virtual time can exhaust the poll budget before the real auth lock is granted.
+        // A fixture round trip keeps the same 20ms cadence on the server clock.
+        await fixtureFetch("/__observer-tick");
       }
-      throw new Error("Timed out waiting for the admin view");
+      throw new Error("Timed out waiting for the admin view: " + stage);
     };
     const one = selector => document.querySelector(selector);
     const revokeButton = () => [...document.querySelectorAll("[data-admin-grants] button")].find(button => button.textContent === "Revoke grant");
     const report = result => { document.documentElement.dataset.adminObservation = btoa(unescape(encodeURIComponent(JSON.stringify(result)))); };
     (async () => {
-      await waitFor(() => one("[data-admin-indicator]").hidden && one("[data-admin-indicator]").dataset.fullAccount === "true");
+      await waitFor("initial account indicator", () => one("[data-admin-indicator]").hidden && one("[data-admin-indicator]").dataset.fullAccount === "true");
       const fullAccount = one("[data-admin-indicator]").dataset.fullAccount;
       one("#hm-ws-menu-trigger").click();
-      await waitFor(() => one("#hm-ws-menu") && !one("#hm-ws-menu").hidden);
+      await waitFor("workspace menu", () => one("#hm-ws-menu") && !one("#hm-ws-menu").hidden);
       one("[data-admin-access-open]").click();
-      await waitFor(() => revokeButton() && !revokeButton().disabled);
+      await waitFor("grant rows", () => revokeButton() && !revokeButton().disabled);
       const automaticCommands = requests.length;
       const inert = {
         images: one("[data-admin-grants]").querySelectorAll("img").length,
@@ -97,25 +102,25 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
       };
       const revokeTone = revokeButton().dataset.tone;
       revokeButton().click();
-      await waitFor(() => one("[data-admin-status]").textContent.includes("result is unavailable"));
+      await waitFor("uncertain revoke", () => one("[data-admin-status]").textContent.includes("result is unavailable"));
       const unknown = one("[data-admin-status]").textContent;
       revokeButton().click();
-      await waitFor(() => one("[data-admin-status]").textContent.includes("grant is revoked"));
-      await waitFor(() => one("[data-admin-indicator-title]").textContent === "Admin clients and history");
+      await waitFor("confirmed revoke", () => one("[data-admin-status]").textContent.includes("grant is revoked"));
+      await waitFor("indicator after revoke", () => one("[data-admin-indicator-title]").textContent === "Admin clients and history");
       const revokeButtons = revokeButton() ? 1 : 0;
       const approvalButton = label => [...one("[data-admin-clients]").querySelectorAll("button")].find(b => b.textContent === label);
       const withdrawTone = approvalButton("Withdraw client approval").dataset.tone;
       approvalButton("Withdraw client approval").click();
-      await waitFor(() => one("[data-admin-status]").textContent.includes("Your client approval was withdrawn"));
+      await waitFor("withdraw approval", () => one("[data-admin-status]").textContent.includes("Your client approval was withdrawn"));
       window.adminFixtureChangeMetadata(); one("[data-admin-refresh]").click();
-      await waitFor(() => approvalButton("Approve client version 3") && !approvalButton("Approve client version 3").disabled);
+      await waitFor("new client version", () => approvalButton("Approve client version 3") && !approvalButton("Approve client version 3").disabled);
       const approveTone = approvalButton("Approve client version 3").dataset.tone;
       const commandsBeforeReapproval = requests.length;
       approvalButton("Approve client version 3").click();
-      await waitFor(() => one("[data-admin-status]").textContent.includes("Your client approval was recorded"));
+      await waitFor("approve client", () => one("[data-admin-status]").textContent.includes("Your client approval was recorded"));
       const noSecrets = !one("admin-delegations").textContent.includes("PRIVATE_OBSERVER_SENTINEL");
       window.adminFixtureForeignProjection(); one("[data-admin-refresh]").click();
-      await waitFor(() => one("[data-admin-status]").textContent.includes("could not be verified"));
+      await waitFor("foreign projection", () => one("[data-admin-status]").textContent.includes("could not be verified"));
       const foreignRowsRemoved = !one("[data-admin-grants]").textContent.includes(grant.client_id) && !one("[data-admin-clients]").textContent.includes(grant.client_id);
       one("#hm-ws-menu-trigger").click();
       const door = one("[data-admin-access-open]");
@@ -126,15 +131,23 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
         && one("[data-admin-indicator]").hidden;
       // A second document signs out through the real auth client and broadcasts to this view.
       const other = document.createElement("iframe"); other.src = "/signout"; document.body.append(other);
-      await waitFor(() => one("admin-delegations").hidden);
+      await waitFor("cross-document signout", () => one("admin-delegations").hidden);
       report({ revokeTone, withdrawTone, approveTone, fullAccount, inert, requests, unknown, revokeButtons, automaticCommands, commandsBeforeReapproval, noSecrets, foreignRowsRemoved, historyEntryVisible, indicatorHidden: one("[data-admin-indicator]").hidden,
         privateRows: one("[data-admin-grants]").textContent });
-    })().catch(error => report({ error: String(error) }));
+    })().catch(error => report({ error: String(error), stage, commands: requests.length,
+      indicatorHidden: one("[data-admin-indicator]").hidden,
+      fullAccount: one("[data-admin-indicator]").dataset.fullAccount,
+      componentHidden: one("admin-delegations").hidden,
+      hasRevokeButton: !!revokeButton() }));
   </script>`;
   const markup = source.replace(/^---[\s\S]*?---\n/u, "").split("<script>")[0]!
     .replace("data-admin-policy={JSON.stringify(policy)}", `data-admin-policy='${JSON.stringify(policy).replaceAll("&", "&amp;").replaceAll("'", "&#39;")}'`);
   const html = `<!doctype html><html><body>${markup}<script>${menu}</script>${setup}${seed}<script>${bundle}</script>${observe}</body></html>`;
   const server = createServer((request, response) => {
+    if (request.url === "/__observer-tick") {
+      setTimeout(() => { response.writeHead(204); response.end(); }, 20);
+      return;
+    }
     response.writeHead(200, { "Content-Type": "text/html" });
     response.end(request.url === "/signout" ? `<!doctype html><html><body>${setup}<script>${signOut}</script></body></html>` : html);
   });
@@ -149,7 +162,7 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
     const encoded = stdout.match(/^\s*(?:<!doctype html>\s*)?<html\b[^>]*\bdata-admin-observation="([A-Za-z0-9+/]+={0,2})"/iu)?.[1];
     assert.ok(encoded, "the rendered admin view must report its observations");
     const result = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
-    assert.equal(result.error, undefined);
+    assert.equal(result.error, undefined, JSON.stringify(result));
     assert.equal(result.fullAccount, "true");
     assert.equal(result.inert.images, 0);
     assert.ok(result.inert.labels.includes(grant.client_id));
