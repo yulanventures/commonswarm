@@ -8,52 +8,28 @@ The box still measures the declared reads and freshness in its existing gates.
 import datetime
 import hashlib
 import json
+import os
 import pathlib
 import re
 import stat
 import subprocess
 import sys
-import tempfile
 
 
 def deletion_controls(repo, temp_root='/private/tmp'):
-    # Execute the real deletion functions on task-owned paths. No HOME changes,
-    # production paths, bypass binary, or test-name matching.
-    temp_root = pathlib.Path(temp_root).resolve(strict=True)
-    root = pathlib.Path(tempfile.mkdtemp(prefix='release-delete-control.', dir=temp_root)).resolve(strict=True)
-    try:
-        allowed = root / 'allowed'
-        outside = root / 'outside'
-        allowed.mkdir()
-        outside.mkdir()
-        (outside / 'keep').write_text('keep')
-        linked = allowed / 'linked'
-        linked.symlink_to(outside)
-        for name in ('deploy.sh', 'finalize-release.sh'):
-            text = (pathlib.Path(repo) / 'deploy/site' / name).read_text()
-            start = text.index('resolve_delete_path() {')
-            end = text.index('# END DELETE SAFETY HELPERS', start)
-            function = text[start:end]
-            mode = 'child' if name == 'deploy.sh' else ''
-            def run(target):
-                return subprocess.run(['/bin/sh', '-c', function + '\nguarded_delete "$1" "$2" "$3" control',
-                                       'control', str(target), str(allowed), mode], capture_output=True, text=True)
-            for target in ('', '/', str(pathlib.Path.home()), str(outside), str(linked)):
-                result = run(target)
-                if result.returncode != 64:
-                    raise ValueError(name + ': unsafe deletion control did not refuse')
-            positive = allowed / 'positive'
-            positive.mkdir()
-            (positive / 'payload').write_text('control')
-            result = run(positive)
-            if result.returncode or positive.exists() or not (outside / 'keep').is_file():
-                raise ValueError(name + ': positive deletion control failed')
-    finally:
-        if root.parent != temp_root or not re.fullmatch(r'release-delete-control\.[A-Za-z0-9_]+', root.name):
-            raise ValueError('control cleanup boundary failed: ' + str(root))
-        result = subprocess.run(['rm', '-rf', '--', str(root)], capture_output=True, text=True)
-        if result.returncode:
-            raise ValueError('guard refused control cleanup ' + str(root) + ': ' + result.stderr)
+    # Current site releases never prune: reuse the canonical executable owner
+    # for positive deploy, genuine refusals, rollback and reserve retention.
+    # Historical inline deletion helpers belong to the pinned legacy CLI tests.
+    # The owner retains its existing Linux/root scope for rendered-script proof.
+    pathlib.Path(temp_root).resolve(strict=True)
+    environment = dict(os.environ)
+    environment.pop('NODE_TEST_CONTEXT', None)  # Run the owner, not a nested-runner no-op.
+    result = subprocess.run(['node', '--import', 'tsx', '--test',
+                             'tests/p1-cli/site-artifact.test.ts'],
+                            cwd=pathlib.Path(repo).resolve(strict=True),
+                            capture_output=True, text=True, env=environment)
+    if result.returncode or not re.search(r'^# pass [1-9][0-9]*$', result.stdout, re.M):
+        raise ValueError('current site release controls failed: ' + result.stdout + result.stderr)
 
 
 def blocks(text):

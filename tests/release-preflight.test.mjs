@@ -198,7 +198,7 @@ test('JSON gate identity tolerates prose and field order, rejects wrong/missing/
   } finally { cleanup(root); }
 });
 
-test('site deletion evidence runs genuine guard refusal and positive controls without HOME changes', () => {
+test('current site release controls prove refusal, rollback and retained reserves without HOME changes', () => {
   const result = run('python3', [tool, 'deletion-controls', repo, tempRoot]);
   assert.equal(result.status, 0, result.stdout + result.stderr);
 });

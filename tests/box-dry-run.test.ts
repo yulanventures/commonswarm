@@ -2455,7 +2455,7 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
   ];
   if (originalDeno) {
     mkdirSync(dirname(originalDeno), { recursive: true, mode: 0o700 });
-    renameSync(DENO_PATH, originalDeno);
+    moveRuntimeFile(DENO_PATH, originalDeno);
   }
   assert.equal(pathExists(DENO_PATH), false, "M1 fixture baseline requires Deno absent");
   for (const path of ["/home/commonswarm", "/srv/commonswarm"]) makeRootDirectory(path, 0o750);
@@ -2632,6 +2632,25 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
   return fixture;
 }
 
+// The CI /tmp bind mount is separate from the image containing Deno.
+function moveRuntimeFile(source: string, target: string): void {
+  try {
+    renameSync(source, target);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
+    const before = lstatSync(source);
+    assert.ok(before.isFile(), "cross-filesystem runtime must be a regular file");
+    copyFileSync(source, target);
+    chownSync(target, before.uid, before.gid);
+    chmodSync(target, before.mode & 0o7777);
+    const after = lstatSync(target);
+    assert.deepEqual([after.uid, after.gid, after.mode & 0o7777],
+      [before.uid, before.gid, before.mode & 0o7777], "runtime metadata changed during copy");
+    assert.ok(readFileSync(target).equals(readFileSync(source)), "runtime bytes changed during copy");
+    unlinkSync(source);
+  }
+}
+
 function cleanupBoxFixture(fixture: Fixture): void {
   guardedBoxFixtures.delete(fixture);
   for (const path of fixture.boxTransferTargets ?? []) {
@@ -2655,7 +2674,7 @@ function cleanupBoxFixture(fixture: Fixture): void {
   if (fixture.replacedRuntime) {
     if (pathExists(fixture.replacedRuntime.path)) rmSync(fixture.replacedRuntime.path, { force: true });
     if (fixture.replacedRuntime.backup && pathExists(fixture.replacedRuntime.backup)) {
-      renameSync(fixture.replacedRuntime.backup, fixture.replacedRuntime.path);
+      moveRuntimeFile(fixture.replacedRuntime.backup, fixture.replacedRuntime.path);
     }
   }
   if (fixture.replacedDirectory) {
@@ -3611,7 +3630,9 @@ function containedCommand(
     }
     // Explicit Linux CI branch. Only prepareBoxFixture can admit a fixture after the existing guard passes.
     const result = spawnSync(command, args, {
-      cwd: fixture.cwd, input: options.input, encoding: "utf8", env: options.env, timeout: options.timeout ?? 120_000,
+      cwd: fixture.cwd, input: options.input, encoding: "utf8",
+      // Preserve the admitted root runner's checkout-owner identity for real Git children.
+      env: { ...options.env, SUDO_UID: process.env.SUDO_UID }, timeout: options.timeout ?? 120_000,
     });
     return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
   }
@@ -4205,7 +4226,7 @@ test("Mac harness uses a temporary local clone and recorded command stubs only",
     mkdirSync(bin, { mode: 0o700 });
     const cloned = spawnSync("git", ["clone", "--no-hardlinks", "--no-checkout", ".", clone], {
       encoding: "utf8",
-      env: explicitEnvironment({ HOME: process.env.HOME }),
+      env: explicitEnvironment({ HOME: process.env.HOME, SUDO_UID: process.env.SUDO_UID }),
     });
     assert.equal(cloned.status, 0, cloned.stderr);
     for (const command of ["docker", "systemctl", "psql", "caddy", "ssh", "scp", "sudo", "op", "curl", "chown"]) {
