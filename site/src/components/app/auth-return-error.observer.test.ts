@@ -1,10 +1,8 @@
 /** CI only: shared headless launcher, fresh profile, no installed Chrome app. */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { readFile, mkdtemp, realpath } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { browserTest as test } from "../../../tests/chrome.js";
 import { build } from "esbuild";
@@ -33,7 +31,8 @@ interface Observation {
 
 const observe = `<script>
   const waitFor = async (predicate) => {
-    for (let tries = 0; tries < 250; ++tries) {
+    const deadline = performance.now() + 5000;
+    while (performance.now() < deadline) {
       if (predicate()) return;
       await new Promise(resolve => setTimeout(resolve, 20));
     }
@@ -44,6 +43,10 @@ const observe = `<script>
   const report = result => { document.documentElement.dataset.authObservation = btoa(unescape(encodeURIComponent(JSON.stringify(result)))); };
   (async () => {
     await waitFor(() => shown(one('[data-auth-view="choices"]')) && shown(one("#dashboard-email")));
+    if (one("live-dashboard").dataset.state !== "signed-out" || !shown(one('[data-panel="signed-out"]'))) throw new Error("Expected visible signed-out panel");
+    if (await window.observeCurrentSession() !== null) throw new Error("Empty storage must settle signed out");
+    if (localStorage.getItem("sb-api-auth-token") !== null) throw new Error("Empty startup created credentials");
+    if (window.authRequests !== 0) throw new Error("Absent credentials must not verify or refresh");
     const box = one("[data-auth-link-error]"), resend = one("[data-auth-resend]");
     const messageVisible = shown(box), messageText = one("[data-auth-link-error-text]").textContent;
     const resendVisible = shown(resend);
@@ -83,8 +86,10 @@ const token = `${segment({ alg: "HS256", typ: "JWT" })}.${segment({ sub: user.id
 // Mock only the HTTP boundary. The component, auth client and email helper are real.
 const setup = `<script>
   window.otpRequests = [];
+  window.authRequests = 0;
   window.fetch = async (input, init) => {
     const request = new Request(input, init);
+    if (request.url.includes("/auth/v1/user") || request.url.includes("/auth/v1/token")) window.authRequests++;
     if (request.url.endsWith("/auth/v1/user")) return Response.json(${JSON.stringify(user)});
     if (request.url.includes("/auth/v1/logout")) return new Response(null, { status: 204 });
     if (request.url.startsWith("https://api.test.invalid/auth/v1/otp")) {
@@ -103,7 +108,7 @@ async function observeSignIn(suffix: string, reboot = false): Promise<Observatio
     stdin: { contents, loader: "ts", resolveDir: dirname(component) }, bundle: true, write: false,
     format: "iife", platform: "browser", define: { "import.meta.env": JSON.stringify({ PUBLIC_SUPABASE_URL: "https://api.test.invalid", PUBLIC_SUPABASE_ANON_KEY: "synthetic-public-key" }) },
   })).outputFiles[0]!.text;
-  const bundle = await bundleScript(script);
+  const bundle = await bundleScript(script + '\nimport { currentSession as observeCurrentSession } from "../../lib/commonswarm"; window.observeCurrentSession = observeCurrentSession;');
   const signIn = await bundleScript(`import { client } from "../../lib/commonswarm"; void client()!.auth.setSession({ access_token: ${JSON.stringify(token)}, refresh_token: "synthetic-refresh" });`);
   const signOut = await bundleScript('import { client } from "../../lib/commonswarm"; void client()!.auth.signOut({ scope: "local" });');
   const markup = source.replace(/^---[\s\S]*?---\n/u, "").split("<script>")[0]!;
@@ -114,21 +119,78 @@ async function observeSignIn(suffix: string, reboot = false): Promise<Observatio
     response.end(other ? `<!doctype html><html><body>${setup}<script>${other}</script></body></html>` : html);
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-  const root = await realpath(tmpdir()), profile = await mkdtemp(join(root, "cswarm-auth-return."));
+  let socket: WebSocket | undefined;
+  let settled: Promise<void> | undefined;
+  let launchError: unknown;
   try {
     const chrome = await findChrome();
     const address = server.address(); assert.ok(address && typeof address === "object");
-    const { stdout } = await launchChrome(chrome, [
-      "--password-store=basic", `--user-data-dir=${profile}`, "--virtual-time-budget=10000", "--dump-dom", `http://127.0.0.1:${address.port}/app${suffix}`,
-    ], { maxBuffer: 10 * 1024 * 1024, timeout: 30000, killSignal: "SIGKILL" });
-    const encoded = stdout.match(/^\s*(?:<!doctype html>\s*)?<html\b[^>]*\bdata-auth-observation="([A-Za-z0-9+/]+={0,2})"/iu)?.[1];
+    const reservation = createServer();
+    await new Promise<void>(resolve => reservation.listen(0, "127.0.0.1", resolve));
+    const port = (reservation.address() as { port: number }).port;
+    await new Promise<void>(resolve => reservation.close(() => resolve()));
+    let exited = false;
+    const run = launchChrome(chrome, [`--remote-debugging-port=${port}`, "about:blank"], {
+      maxBuffer: 10 * 1024 * 1024, timeout: 30000, killSignal: "SIGKILL",
+    });
+    settled = run.then(() => { exited = true; }, error => { exited = true; launchError = error; });
+    let target: { webSocketDebuggerUrl: string } | undefined;
+    for (let attempt = 0; attempt < 100 && !target; attempt++) {
+      if (exited) throw launchError ?? new Error("Chromium exited before DevTools discovery");
+      try {
+        target = (await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1000) })).json())
+          .find((page: { type: string }) => page.type === "page");
+      } catch { /* Browser starting. */ }
+      if (!target) await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.ok(target, "Chromium must expose its fresh test page");
+    socket = new WebSocket(target.webSocketDebuggerUrl);
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("DevTools socket did not open")), 5000);
+      socket!.onopen = () => { clearTimeout(timer); resolve(); };
+      socket!.onerror = socket!.onclose = () => { clearTimeout(timer); reject(new Error("DevTools socket failed to open")); };
+    });
+    let sequence = 0;
+    const pending = new Map<number, { resolve: (result: any) => void; reject: (error: Error) => void }>();
+    socket.onclose = socket.onerror = () => {
+      for (const waiter of pending.values()) waiter.reject(new Error("DevTools socket closed"));
+      pending.clear();
+    };
+    socket.onmessage = event => {
+      const message = JSON.parse(String(event.data));
+      const waiter = pending.get(message.id); pending.delete(message.id);
+      if (message.error) waiter?.reject(new Error(message.error.message));
+      else waiter?.resolve(message);
+    };
+    const send = (method: string, params = {}): Promise<any> => new Promise((resolve, reject) => {
+      if (socket?.readyState !== WebSocket.OPEN) { reject(new Error("DevTools socket is not open")); return; }
+      const id = ++sequence;
+      const timer = setTimeout(() => { pending.delete(id); reject(new Error(`DevTools ${method} did not answer`)); }, 5000);
+      pending.set(id, {
+        resolve: value => { clearTimeout(timer); resolve(value); },
+        reject: error => { clearTimeout(timer); reject(error); },
+      });
+      socket.send(JSON.stringify({ id, method, params }));
+    });
+    await send("Page.navigate", { url: `http://127.0.0.1:${address.port}/app${suffix}` });
+    const deadline = Date.now() + 25000;
+    let encoded: string | undefined;
+    while (Date.now() < deadline && !encoded) {
+      if (exited) throw launchError ?? new Error("Chromium exited before observation");
+      const reply = await send("Runtime.evaluate", { expression: "document.documentElement.dataset.authObservation", returnByValue: true });
+      encoded = reply.result?.result?.value;
+      if (!encoded) await new Promise(resolve => setTimeout(resolve, 20));
+    }
     assert.ok(encoded, "the rendered sign-in view must report its observations");
     return JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as Observation;
   } finally {
+    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ id: 99999, method: "Browser.close" }));
+    // The launcher owns the fresh profile and unchanged 30s forced-kill cap.
+    await settled;
+    socket?.close();
+    server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-    const resolved = await realpath(profile);
-    assert.ok(dirname(resolved) === root && basename(resolved).startsWith("cswarm-auth-return.") && resolved !== process.env.HOME);
-    execFileSync("rm", ["-r", resolved], { stdio: "pipe" });
+    if (launchError) throw launchError;
   }
 }
 
