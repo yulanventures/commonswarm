@@ -1,6 +1,7 @@
 // No stack or runtime network permission. Exercise the production HTTP handlers;
 // Deno.serve is captured only to avoid opening a listener during imports.
 import assert from 'node:assert/strict';
+import { Buffer } from "node:buffer";
 import { securityReasons } from './admin-boundary-db.mjs';
 Deno.env.set('SWARM_ENV', 'test');
 Deno.env.set('SWARM_DATABASE_URL', 'postgres://fixture:fixture@127.0.0.1:1/fixture');

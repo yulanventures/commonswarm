@@ -56,7 +56,7 @@ Root installation, after independent review and contention coordination:
 1. Use a clean checkout of the reviewed controller SHA on **pe-ci-1**. As root,
    run `bash deploy/ci/provision.sh --sha <reviewed-controller-SHA>`. It refuses
    another hostname, dirty source, active runner workers or an existing install.
-   It builds isolated Node 22.14.0, Deno 2.2.3, Supabase 2.118.0, Caddy 2.11.4,
+   It builds isolated Node 22.23.3, Deno 2.2.3, Supabase 2.118.0, Caddy 2.11.4,
    Playwright 1.63.0 and PG17 tools. PG17 has no default cluster. Downloads use
    publisher checksums; Caddy also checks the independently pinned SHA-512 and
    exact binary version. Resulting worker ID and DinD digest are pinned in config.
