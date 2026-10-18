@@ -599,6 +599,8 @@ test('W6 activation checks require the retained recycle archive with its digest 
     const archive = change.durable ? join(durableRoot, `${sha}-W4abcd.tar`) : join(tmpRoot, `admin-issuance-${sha}-W4abcd.tar`);
     if (change.archive !== null) writeFileSync(archive, change.archive ?? archiveBytes, { mode: 0o600 });
     writeFileSync(join(dir, 'recycle.json'), JSON.stringify({ release_sha: sha, artifact_digest: digest(archiveBytes), archive, ...change.recycle }), { mode: change.mode ?? 0o600 });
+    chmodSync(join(dir, 'recycle.json'), change.mode ?? 0o600);
+    assert.equal(statSync(join(dir, 'recycle.json')).mode & 0o777, change.mode ?? 0o600);
     const source = body.split('/etc/commonswarm-admin-release').join(dir).split('/tmp/admin-issuance-').join(`${tmpRoot}/admin-issuance-`)
       .split('/var/lib/commonswarm-admin-release/archives/').join(`${durableRoot}/`);
     return spawnSync('python3', ['-', sha, inputFile({ ...base(), archive_sha256: digest(archiveBytes) })], { input: source, encoding: 'utf8' });
