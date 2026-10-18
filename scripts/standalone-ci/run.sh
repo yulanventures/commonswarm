@@ -15,7 +15,7 @@ import sys
 import time
 import uuid
 
-SUITES = ('server', 'p1-cli', 'site', 'box-dry-run', 'unit')
+SUITES = ('box-dry-run', 'server', 'p1-cli', 'site', 'unit')
 def refuse(message):
     sys.exit('REFUSE: ' + message)
 
@@ -271,6 +271,7 @@ with (state / 'queue.lock').open('a') as lock:
                     '''])
                     bounded(['docker', 'run', '--name', worker, '--label', label,
                              '--memory=4g', '--network', 'container:' + daemon, '--user', '0' if suite == 'box-dry-run' else 'ciworker',
+                             *(['--tmpfs', '/run:rw,mode=755'] if suite == 'box-dry-run' else []),
                              '--mount', f'type=bind,src={work},dst=/work',
                              '--mount', f'type=bind,src={tmp},dst=/tmp',
                              '--mount', f'type=bind,src={tmp},dst=/private/tmp',

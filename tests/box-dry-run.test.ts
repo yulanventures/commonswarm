@@ -2434,6 +2434,24 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
     0o644,
   );
   makeStubBin(bin, true);
+  // Only real Git needs the root runner's original checkout-owner identity.
+  // Bake it into this private adapter so plan shells keep their strict env.
+  const git = realpathSync("/usr/bin/git");
+  const gitStat = statSync(git);
+  assert.equal(gitStat.isFile() && gitStat.uid === 0 && (gitStat.mode & 0o022) === 0 &&
+    (gitStat.mode & 0o111) !== 0, true, "real Git must be a trusted root-owned executable");
+  const callerUid = process.env.SUDO_UID;
+  if (callerUid !== undefined) {
+    assert.match(callerUid, /^[1-9][0-9]*$/, "checkout caller UID must be positive decimal");
+    assert.equal(Number.isSafeInteger(Number(callerUid)), true);
+    assert.equal(statSync(REAL_CHECKOUT).uid, Number(callerUid), "caller UID must own the checkout");
+    assert.equal(statSync(join(REAL_CHECKOUT, ".git")).uid, Number(callerUid), "caller UID must own Git metadata");
+  }
+  writeFileSync(join(bin, "git"), `#!/bin/sh
+unset SUDO_UID
+${callerUid === undefined ? "" : `if [ "$(/usr/bin/id -u)" = 0 ]; then export SUDO_UID=${shellWord(callerUid)}; fi`}
+exec ${shellWord(git)} "$@"
+`, { mode: 0o755 });
   writeRootMode(log, "", 0o600);
   const originalDeno = pathExists(DENO_PATH)
     ? join(temporary, "original-runtimes", "deno")
@@ -3631,8 +3649,7 @@ function containedCommand(
     // Explicit Linux CI branch. Only prepareBoxFixture can admit a fixture after the existing guard passes.
     const result = spawnSync(command, args, {
       cwd: fixture.cwd, input: options.input, encoding: "utf8",
-      // Preserve the admitted root runner's checkout-owner identity for real Git children.
-      env: { ...options.env, SUDO_UID: process.env.SUDO_UID }, timeout: options.timeout ?? 120_000,
+      env: options.env, timeout: options.timeout ?? 120_000,
     });
     return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
   }
@@ -4730,6 +4747,19 @@ test("controls: box sudo keeps logs private and Docker state visible across the 
   try {
     const environment = executeWholeBlock(block, fixture);
     assert.equal(environment.status, 0, environment.stderr);
+    // Exercise the real adapter with the admitted checkout and a different owner.
+    const git = (args: string[]) => containedCommand(fixture, join(fixture.bin, "git"), args, { env: fixture.env });
+    const positiveGit = git(["-C", REAL_CHECKOUT, "rev-parse", "HEAD"]);
+    assert.equal(positiveGit.status, 0, positiveGit.stderr);
+    assert.match(positiveGit.stdout.trim(), /^[0-9a-f]{40}$/);
+    const foreign = join(fixture.temporary!, "foreign-git");
+    assert.equal(git(["init", "--quiet", foreign]).status, 0);
+    const foreignUid = Number(process.env.SUDO_UID) === 65534 ? 65533 : 65534;
+    chownSync(foreign, foreignUid, foreignUid);
+    chownSync(join(foreign, ".git"), foreignUid, foreignUid);
+    const refusedGit = git(["-C", foreign, "rev-parse", "--git-dir"]);
+    assert.equal(refusedGit.status, 128, refusedGit.stderr);
+    assert.match(refusedGit.stderr, /dubious ownership/);
     const shellNames = environment.stdout.trim().split("\n");
     assert.ok(shellNames.includes("PATH"), "environment enumeration must actually run");
     // Bash itself creates these three exports. Every supplied name is reconciled
