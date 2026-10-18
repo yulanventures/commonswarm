@@ -10,13 +10,16 @@ const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 const flagFile = "site/src/lib/h0-link-join-flag.ts";
 const flagName = "PUBLIC_H0_LINK_JOIN";
 
-// Every tracked mention counts, except top-level tests/docs, Markdown and test basenames.
+// The artifact validator reads explicit build inputs and verifies emitted controls;
+// it does not select application behavior. All other tracked mentions count,
+// except top-level tests/docs, Markdown and test basenames.
+const buildInputValidator = "deploy/site/validate-site-env.mjs";
 function flagReaders(root: string): string[] {
   const readers: string[] = [];
   const files = execFileSync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8" }).split("\0").filter(Boolean);
   for (const file of files) {
     const name = basename(file);
-    if (file.startsWith("tests/") || file.startsWith("docs/") || name.endsWith(".md") || /\.test\./.test(name)) continue;
+    if (file === buildInputValidator || file.startsWith("tests/") || file.startsWith("docs/") || name.endsWith(".md") || /\.test\./.test(name)) continue;
     if (readFileSync(join(root, file), "utf8").includes(flagName)) readers.push(file);
   }
   return readers.sort();
@@ -43,6 +46,7 @@ test("the flag guard applies only the allowed exemptions across the entire track
     };
     track(flagFile, readFileSync(join(repoRoot, flagFile), "utf8"));
     for (const file of [
+      buildInputValidator,
       "tests/env-list.ts",
       "docs/env-list.ts",
       "deploy/README.md",
@@ -60,6 +64,7 @@ test("the flag guard applies only the allowed exemptions across the entire track
       ["supabase/functions/second.ts", 'const enabled = Deno.env.get("PUBLIC_H0_LINK_JOIN");'],
       ["src/env-list.ts", 'const environment = ["PUBLIC_H0_LINK_JOIN=1"];'],
       ["src/comment.ts", '// PUBLIC_H0_LINK_JOIN'],
+      ["deploy/site/validate-site-env-other.mjs", 'const enabled = process.env.PUBLIC_H0_LINK_JOIN === "1";'],
       ["deploy/build.sh", 'export PUBLIC_H0_LINK_JOIN=1'],
       ["deploy/compose.yaml", 'environment:\n  - PUBLIC_H0_LINK_JOIN=1\n'],
       ["scripts/x.sh", 'export PUBLIC_H0_LINK_JOIN=1'],

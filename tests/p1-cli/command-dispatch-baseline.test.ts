@@ -717,12 +717,17 @@ async function prepareRow(root: string, origin: string, fixture: Fixture) {
   };
 }
 
-function normalize(value: string, root: string, origin: string): string {
-  return value
+function normalizePath(value: string, path: string, replacement: string): string {
+  const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // A checkout such as /work must not consume /workspaces or a path already
+  // rooted at <ROOT>. Only complete absolute path prefixes are portable.
+  return value.replace(new RegExp(`(?<![\\w./<>-])${escaped}(?=$|[/\\s"'():,\\]}])`, "g"), replacement);
+}
+
+function normalize(value: string, root: string, origin: string, checkoutRoot = repoRoot): string {
+  return normalizePath(normalizePath(value, root, "<ROOT>"), checkoutRoot, "<REPO>")
     .replaceAll(`cswarm ${packageVersion} (protocol`, "cswarm <VERSION> (protocol")
-    .replaceAll(root, "<ROOT>")
     .replaceAll(origin, "<ORIGIN>")
-    .replaceAll(repoRoot, "<REPO>")
     .replace(/credentials\.d\/[a-f0-9]{24}/g, "credentials.d/<PROFILE_ID>")
     // listen status|stop print the target profile id and a state directory keyed by it; both derive from the
     // fixture server's per-run origin, so they are normalized like the credential directory above.
@@ -761,6 +766,14 @@ test("dispatcher baseline ignores only the implicit credential backend warning",
   assert.equal(credentialBackendIndependentStderr(warning.replace("0600", "0644"), ["invite", "create"]),
     warning.replace("0600", "0644"));
   assert.equal(credentialBackendIndependentStderr(warning, ["invite", "create", "--force-file-store"]), warning);
+  for (const row of ["workspace.close", "workspaces"]) {
+    const raw = `${FILE_STORE_FALLBACK_WARNING} Path: /tmp/dispatch/${row}/.cswarm/credentials.d/${"a".repeat(24)}.json\ncswarm: not logged in; run cswarm login\n`;
+    const normalized = normalize(raw, "/tmp/dispatch", "http://127.0.0.1:9", "/work");
+    assert.equal(normalized, `${FILE_STORE_FALLBACK_WARNING} Path: <ROOT>/${row}/.cswarm/credentials.d/<PROFILE_ID>.json\ncswarm: not logged in; run cswarm login\n`);
+    assert.equal(credentialBackendIndependentStderr(normalized, [row]), "cswarm: not logged in; run cswarm login\n");
+  }
+  assert.equal(normalize("at /work/src/cli.ts:1 and /workspaces/file", "/tmp/dispatch", "http://127.0.0.1:9", "/work"),
+    "at <REPO>/src/cli.ts:1 and /workspaces/file");
 });
 
 // Help has its own table-driven gate. Keep this dispatcher baseline focused on
