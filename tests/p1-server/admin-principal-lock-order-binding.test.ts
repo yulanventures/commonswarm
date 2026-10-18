@@ -32,6 +32,7 @@ interface Harness {
     env: Record<string, string | undefined>;
     live: LiveFacts;
     docker: Docker;
+    projectId?: string;
     supabaseStatus?: () => unknown;
     connector: (binding: Binding, tools: { docker: Docker; tlsCaPem: string | null }) => Promise<unknown>;
   }): Promise<unknown>;
@@ -170,7 +171,7 @@ async function attempt(env: Record<string, string | undefined>, state: DockerSta
   const record: Attempt = { connector: 0, status: 0, binding: null, tlsCaPem: undefined, outcome: null };
   try {
     await harness.openLockOrderTarget({
-      env, live, docker: docker(state),
+      env, live, docker: docker(state), projectId: "cloud-swarm", // Synthetic Docker facts use this project, independent of the checkout.
       supabaseStatus: () => { record.status += 1; return status; },
       connector: async (binding, tools) => {
         record.connector += 1;
@@ -227,8 +228,13 @@ test("positive control: an exposed but unpublished port is not a published bindi
   assert.equal(record.connector, 1);
 });
 
-test("positive control: under GitHub Actions with no binding file, the CLI project binding is admitted", async () => {
-  const record = await attempt({ GITHUB_ACTIONS: "true" }, ciState());
+const ciContexts = [
+  ["GitHub Actions", { GITHUB_ACTIONS: "true" }],
+  ["standalone CI", { CI: "true", STANDALONE_CI: "1" }],
+] as const;
+for (const [context, env] of ciContexts) {
+test(`positive control: under ${context} with no binding file, the CLI project binding is admitted`, async () => {
+  const record = await attempt(env, ciState());
   assert.equal(record.outcome, "admitted");
   assert.equal(record.connector, 1);
   assert.equal(record.status, 1);
@@ -243,10 +249,15 @@ test("positive control: under GitHub Actions with no binding file, the CLI proje
   });
   assert.equal(fetchCalls, 0);
 });
+}
 
-test("an unset binding refuses outside GitHub Actions", async () => {
-  assertRefused(await attempt({}, ciState()), "binding_required");
-  assertRefused(await attempt({ GITHUB_ACTIONS: "false" }, ciState()), "binding_required");
+test("an unset binding refuses outside explicit CI contexts", async () => {
+  for (const env of [{}, { GITHUB_ACTIONS: "false" }, { STANDALONE_CI: "1" }, { CI: "true" },
+    { CI: "false", STANDALONE_CI: "1" }, { CI: "true", STANDALONE_CI: "0" }]) {
+    const record = await attempt(env, ciState());
+    assertRefused(record, "binding_required");
+    assert.equal(record.status, 0, "outside CI never derives a binding");
+  }
 });
 
 test("binding file refusals", async (t) => {
@@ -490,34 +501,36 @@ test("D3: the migration tree line", () => {
   assert.match(harness.migrationTreeLine(), /^C1B_LOCK_ORDER_TREE (?:head=[0-9a-f]{40} migrations=[0-9a-f]{40}|unavailable)$/u);
 });
 
-test("CI derivation refusals", async (t) => {
+for (const [context, env] of ciContexts) {
+test(`${context} derivation refusals`, async (t) => {
   await t.test("no unique CLI database container", async () => {
-    assertRefused(await attempt({ GITHUB_ACTIONS: "true" }, ciState({ listed: [] })), "ci_database_container_not_unique");
-    assertRefused(await attempt({ GITHUB_ACTIONS: "true" }, ciState({ listed: [
+    assertRefused(await attempt(env, ciState({ listed: [] })), "ci_database_container_not_unique");
+    assertRefused(await attempt(env, ciState({ listed: [
       { id: CI_ID, name: "supabase_db_cloud-swarm" }, { id: "e".repeat(64), name: "supabase_db_cloud-swarm" },
     ] })), "ci_database_container_not_unique");
   });
   await t.test("a non-loopback status URL", async () => {
-    assertRefused(await attempt({ GITHUB_ACTIONS: "true" }, ciState(),
+    assertRefused(await attempt(env, ciState(),
       { DB_URL: "postgresql://postgres:postgres@10.1.2.3:54322/postgres" }), "endpoint_not_loopback");
   });
   await t.test("an unreadable status", async () => {
-    assertRefused(await attempt({ GITHUB_ACTIONS: "true" }, ciState(), { API_URL: "http://127.0.0.1:54321" }), "ci_status_invalid");
+    assertRefused(await attempt(env, ciState(), { API_URL: "http://127.0.0.1:54321" }), "ci_status_invalid");
   });
   await t.test("a container without the CLI project label", async () => {
     const state = ciState();
     state.container.Config = { Labels: { [harness.COMPOSE_LABEL]: "cloud-swarm" } };
-    assertRefused(await attempt({ GITHUB_ACTIONS: "true" }, state), "container_label_mismatch");
+    assertRefused(await attempt(env, state), "container_label_mismatch");
   });
   await t.test("a volume or network outside the CLI project", async () => {
-    assertRefused(await attempt({ GITHUB_ACTIONS: "true" }, ciState({ volume: { Name: "supabase_db_cloud-swarm", Labels: { [harness.CLI_LABEL]: "other" } } })), "volume_label_mismatch");
-    assertRefused(await attempt({ GITHUB_ACTIONS: "true" }, ciState({ network: { Name: "supabase_network_cloud-swarm", Labels: {} } })), "network_label_mismatch");
+    assertRefused(await attempt(env, ciState({ volume: { Name: "supabase_db_cloud-swarm", Labels: { [harness.CLI_LABEL]: "other" } } })), "volume_label_mismatch");
+    assertRefused(await attempt(env, ciState({ network: { Name: "supabase_network_cloud-swarm", Labels: {} } })), "network_label_mismatch");
   });
   await t.test("the published port differs from the status URL", async () => {
-    assertRefused(await attempt({ GITHUB_ACTIONS: "true" }, ciState(),
+    assertRefused(await attempt(env, ciState(),
       { DB_URL: "postgresql://postgres:postgres@127.0.0.1:54399/postgres" }), "published_port_mismatch");
   });
 });
+}
 
 test("the binding file never reaches output: refusals carry codes, not values", async () => {
   const secret = "fixture-secret-value-0001";
