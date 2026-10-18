@@ -88,6 +88,7 @@ useradd --no-create-home --home-dir /var/lib/commonswarm-ci/home --gid commonswa
 created_user=1
 test "$(id -gn commonswarm-ci)" = commonswarm-ci
 cat >"$stage/Dockerfile" <<'DOCKERFILE'
+FROM python:3.12-slim-bookworm@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258 AS archivepython
 FROM docker:28.0.4-cli AS dockercli
 FROM node:22.23.3-bookworm
 ARG CI_UID
@@ -125,6 +126,12 @@ RUN npm install --prefix /opt/playwright --ignore-scripts --no-audit --no-fund p
 # Match the dedicated host service UID for private bind mounts, without granting host sudo.
 RUN userdel node && (getent group "$CI_GID" >/dev/null || groupadd -g "$CI_GID" ciworker) && \
     useradd -m -u "$CI_UID" -g "$CI_GID" -s /bin/bash ciworker
+# Keep Debian python3/jsonschema; only archive tests select this named runtime.
+COPY --from=archivepython /usr/local/bin/python3.12 /usr/local/bin/python3.12
+COPY --from=archivepython /usr/local/lib/libpython3.12.so* /usr/local/lib/
+COPY --from=archivepython /usr/local/lib/python3.12 /usr/local/lib/python3.12
+RUN ldconfig && python3 -c 'import jsonschema; assert jsonschema.__version__ == "4.10.3"' && \
+    python3.12 -c 'import tarfile; assert hasattr(tarfile, "data_filter")'
 DOCKERFILE
 docker build --build-arg "CI_UID=$(id -u commonswarm-ci)" --build-arg "CI_GID=$(id -g commonswarm-ci)" --tag commonswarm-ci-tools:"$reviewed_sha" "$stage"
 docker pull docker:28.0.4-dind

@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { mkdtemp, mkdir, readFile, writeFile, chmod, stat, lstat, symlink, link, unlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, chmod, stat, lstat, symlink, link, unlink, rename } from 'node:fs/promises';
 import { join, dirname, sep, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -255,7 +255,12 @@ async function fixture(t, config = {}) {
         assert.equal((await stat(path)).mode & 0o777, 0o600);
         const code = secret(); codes.set(code, { clientId: a.searchParams.get('client_id'), challenge: a.searchParams.get('code_challenge') });
         const cb = new URL(redirect); cb.search = new URLSearchParams({ code, state: config.wrongState ? secret() : a.searchParams.get('state'), iss: issuer });
-        await writeFile(join(pointer, `${name}-callback-url.txt`), cb.href, { mode: config.unsafeCallback ? 0o644 : 0o600 });
+        const callback = join(pointer, `${name}-callback-url.txt`);
+        const pending = callback + '.pending';
+        await writeFile(pending, cb.href, { mode: 0o600 });
+        await chmod(pending, config.unsafeCallback ? 0o644 : 0o600);
+        assert.equal((await stat(pending)).mode & 0o777, config.unsafeCallback ? 0o644 : 0o600);
+        await rename(pending, callback);
       }
     })().catch(e => { handoffError = e; child.kill(); });
     const exit = await completed; await handoffs; if (handoffError) throw handoffError;

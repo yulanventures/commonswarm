@@ -57,7 +57,12 @@ Root installation, after independent review and contention coordination:
    run `bash deploy/ci/provision.sh --sha <reviewed-controller-SHA>`. It refuses
    another hostname, dirty source, active runner workers or an existing install.
    It builds isolated Node 22.23.3, Deno 2.2.3, Supabase 2.118.0, Caddy 2.11.4,
-   Playwright 1.63.0 and PG17 tools. PG17 has no default cluster. Downloads use
+   Playwright 1.63.0 and PG17 tools. Debian Python 3.11.2 remains the default
+   `python3`, with apt jsonschema 4.10.3. Archive tests can select the separate
+   `python3.12` runtime from the digest-pinned official `3.12-slim-bookworm`
+   stage; admission checks actual `tarfile.data_filter` availability. Only its
+   versioned binary, shared library and standard library are copied; no default
+   Python or pip aliases change. PG17 has no default cluster. Downloads use
    publisher checksums; Caddy also checks the independently pinned SHA-512 and
    exact binary version. Resulting worker ID and DinD digest are pinned in config.
    Docker build cache contains only public tools; private source stays mode 0700.

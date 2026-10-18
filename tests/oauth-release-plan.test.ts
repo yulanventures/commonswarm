@@ -56,6 +56,8 @@ function validate(input: unknown, options: Options = {}, raw?: string) {
   const suffix = String(serial++);
   const inputFile = join(scratch, `inputs-${suffix}.json`), marker = join(scratch, `marker-${suffix}`);
   writeFileSync(inputFile, raw ?? JSON.stringify(input), { mode: options.inputMode ?? 0o600 });
+  chmodSync(inputFile, options.inputMode ?? 0o600);
+  assert.equal(statSync(inputFile).mode & 0o777, options.inputMode ?? 0o600);
   if (options.marker !== undefined) {
     writeFileSync(marker, options.marker, { mode: options.markerMode ?? 0o600 });
     chmodSync(marker, options.markerMode ?? 0o600);

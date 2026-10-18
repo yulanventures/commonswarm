@@ -515,6 +515,8 @@ def create_at(parent,leaf,body,want,label):
         before=snapshot(fd); info=metadata(fd); kept=contents(fd)
         need(kept==body and all(info[k]==want[k] for k in ('uid','gid','mode')),'conflicting existing '+label+' bytes or metadata')
         os.fsync(fd); os.fsync(parent.fd)
+        kept=contents(fd)
+        need(kept==body,'archive/proof descriptor bytes changed')
         parent.leaf(leaf,fd)
         need(snapshot(fd)==before,'archive/proof descriptor metadata changed')
         return dict(info,sha256=hashlib.sha256(kept).hexdigest(),path=parent.name+'/'+leaf)
@@ -1707,6 +1709,8 @@ the legacy /tmp/admin-issuance-<binding-sha>-<6alnum>.tar or the durable
 Before release-tree/service/binding mutation it preserves the verified baseline at the same
 durable name used by C1 W4, then promotes the exact verified transport bytes exclusively
 (root:root 0600 under canonical root:root 0700 directories; equal existing copies only).
+After fsync of file and parent, the same descriptor is reread and required to match the
+admitted bytes before final pathname/metadata checks and digest acceptance.
 BOX_ARCHIVE_PATH remains the /tmp transport, with its ancestry file retained;
 DURABLE_ARCHIVE_PATH is the binding and success-close path. Rollback restages a missing
 legacy tar exclusively at its exact original path, verifies bytes and admitted metadata,
