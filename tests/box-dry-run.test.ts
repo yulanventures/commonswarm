@@ -4322,8 +4322,8 @@ test("deploy/site/deploy.sh and finalize-release.sh run only commands the site d
     }
     assert.ok(entry.evidence.length > 0, `${command} cites no evidence`);
     for (const evidence of entry.evidence) {
-      assert.equal(existsSync(evidence.file), true, `${command}: evidence file is missing: ${evidence.file}`);
-      if (evidence.line) assert.ok(readFileSync(evidence.file, "utf8").split("\n").length >= evidence.line, `${command}: ${evidence.file} has no line ${evidence.line}`);
+      assert.equal(scripts.has(evidence.file) || existsSync(evidence.file), true, `${command}: evidence file is missing: ${evidence.file}`);
+      if (evidence.line) assert.ok((scripts.get(evidence.file) ?? readFileSync(evidence.file, "utf8")).split("\n").length >= evidence.line, `${command}: ${evidence.file} has no line ${evidence.line}`);
     }
   }
   // The flags and subcommands the scripts use are the ones the inventory lists for the stubbed commands.

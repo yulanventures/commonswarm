@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Public build inputs only. Never source a caller's shell or .env file.
-import { readFileSync as read, writeFileSync as write, mkdirSync, copyFileSync, chmodSync } from 'node:fs';
+import { readFileSync as read, writeFileSync as write, mkdirSync, copyFileSync, chmodSync, openSync, closeSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
@@ -71,7 +71,11 @@ function htmlHashes(dir, publicConfig) {
 const sourceFile = (dir, path) => execFileSync('tar', ['-xOf', join(dir, 'source.tar'), path], { maxBuffer: 8 * 1024 * 1024 });
 function provenance(dir, revision, pinnedImage) {
   check(/^[0-9a-f]{40}$/.test(revision) && pinnedImage === image, 'revision/image pin');
-  check(execFileSync('git', ['get-tar-commit-id'], { input: read(join(dir, 'source.tar')), encoding: 'utf8' }).trim() === revision, 'source revision');
+  const sourceFd = openSync(join(dir, 'source.tar'), 'r');
+  try {
+    // Git exits after the archive headers; a pipe can fail with EPIPE on larger archives.
+    check(execFileSync('git', ['get-tar-commit-id'], { stdio: [sourceFd, 'pipe', 'pipe'], encoding: 'utf8' }).trim() === revision, 'source revision');
+  } finally { closeSync(sourceFd); }
   const pub = JSON.parse(read(join(dir, 'public.json'))); config(pub, pub.PUBLIC_H0_LINK_JOIN);
   return { revision, image, source: fileHash(join(dir, 'source.tar')), config: fileHash(join(dir, 'public.json')), h0: pub.PUBLIC_H0_LINK_JOIN,
     lock: hash(sourceFile(dir, 'site/package-lock.json')), builder: hash(sourceFile(dir, 'deploy/site/build-artifact.sh')),
