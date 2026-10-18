@@ -55,3 +55,29 @@ and bounded contention failure; the existing active-suite timeout case remains.
 Delta validation is syntax only on the Mini; Root CI must execute these cases,
 all five real suites, historical probes and controlled overlap/memory/withdrawal
 measurement before provisioning activation or cutover is claimed complete.
+
+
+Claude-review repair at 1132ab41: dedicated service account/primary-group and
+UID-matched worker image; root-owned scripts with expected checksum admission;
+private state; fixed local source config/full main and tags; root worker
+SUDO_UID ownership; pinned outer Docker context/socket; loopback DinD API and
+published-port default; PE visibility control; persistent stop latch; finite
+queue/systemd/cleanup/retention bounds; exclusive fresh-install rollback.
+The root box suite now explicitly invokes the site-artifact file supplied by
+#86. Root must merge that PR before combined real CI; no site test copied here.
+Mini focused semantics: node --test tests/standalone-ci-guard.test.mjs: 18 cases,
+17 pass, 0 fail, 1 explicitly skipped Linux/Docker guard case. The platform
+boundary alone is mocked on Darwin; real git/flock/clock/process lifecycle and
+receipts run against a Docker transport fixture. This is not Linux/root proof.
+New cases protect absent origin/main (positive and negative transport), script
+tampering/private state, local source rewrite reset, root-process visibility,
+and signals during cleanup, queue wait and scratch retention. Original substantive
+assertions remain. No full suites, installs/builds, host provisioning, SSH,
+workflow dispatch, production writes, commit or push were run.
+Runtime gates remain: Root's cross-family review; real Linux controls; fresh
+install failure/rollback; dedicated UID/mount ownership and root Git; merged #86
+root rendered artifact cases; all five same-SHA suites; PE overlap withdrawal and
+measured memory headroom; actual nested loopback bindings; timer stop/owned cleanup;
+completed timer receipts; historical p1 probes; only then trigger cutover.
+Memory fit is unmeasured. Inputs float at rebuild time despite runtime image pins.
+Versioned upgrades and broader supply-chain pinning remain parked as directed.

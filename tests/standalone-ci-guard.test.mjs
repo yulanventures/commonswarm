@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync, readdirSync, symlinkSync, existsSync } from 'node:fs';
+import { mkdtempSync, realpathSync, mkdirSync, readFileSync, writeFileSync, chmodSync, readdirSync, symlinkSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import test from 'node:test';
@@ -22,10 +22,12 @@ function good(command, args, options) {
   return r.stdout.trim();
 }
 function fixture(control = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'standalone-ci-test.'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-ci-test.')));
   const source = join(root, 'source');
   const bin = join(root, 'bin');
   const state = join(root, 'state');
+  const installed = join(root, 'controller'); mkdirSync(installed);
+  for (const name of ['run.sh', 'suite.sh', 'retain.py']) writeFileSync(join(installed,name),readFileSync(join(controller,name)));
   mkdirSync(source); mkdirSync(bin);
   good('git', ['init', '--quiet', '--initial-branch=main', source]);
   good('git', ['-C', source, 'config', 'user.email', 'fixture@example.invalid']);
@@ -35,14 +37,17 @@ function fixture(control = {}) {
   good('git', ['-C', source, 'add', '.']);
   good('git', ['-C', source, 'commit', '--quiet', '-m', 'fixture']);
   const sha = good('git', ['-C', source, 'rev-parse', 'HEAD']);
+  good('git', ['-C', source, 'tag', 'fixture-tag']);
   writeFileSync(join(root, 'containers.json'), JSON.stringify({unowned: {label: 'some-other-run'}}));
   // The fixture only implements the external Docker transport. The real
   // controller writes the receipts, resolves git, queues, times out and cleans.
   const docker = `#!/usr/bin/env python3
-import json,pathlib,sys,time,subprocess
+import json,pathlib,sys,time,subprocess,os,signal
 root=pathlib.Path(${JSON.stringify(root)})
 p=root/'containers.json'
 args=sys.argv[1:]
+assert os.environ['DOCKER_CONTEXT']=='default'
+assert os.environ['DOCKER_HOST']=='unix:///var/run/docker.sock'
 def event(action,name):
     with (root/'events.jsonl').open('a') as f: f.write(json.dumps(dict(action=action,name=name,at=time.monotonic()))+'\\n')
 if args[0]=='run':
@@ -55,6 +60,8 @@ if args[0]=='run':
         work=pathlib.Path(next(m.split(',')[1][4:] for m in mounts if 'dst=/work' in m))
         control=json.loads((work/'control.json').read_text())
         print((work/'identity').read_text(),flush=True)
+        subprocess.run(['git','-C',str(work),'rev-parse','--verify','origin/main'],check=True)
+        subprocess.run(['git','-C',str(work),'rev-parse','--verify','refs/tags/fixture-tag'],check=True)
         time.sleep(control.get('sleep',0))
         if control.get('tamper'):
             store=json.loads(p.read_text()); store[name.replace('-worker','-docker')]['label']='unowned'; p.write_text(json.dumps(store))
@@ -66,6 +73,8 @@ if args[0]=='inspect':
     if found: print(found['label']); sys.exit(0)
     sys.exit(1)
 if args[0]=='rm':
+    if args[-1].endswith('-worker') and ${control.signalCleanup ? "True" : "False"}:
+        os.kill(os.getppid(),signal.SIGTERM)
     store=json.loads(p.read_text()); store.pop(args[-1],None); p.write_text(json.dumps(store)); event('remove',args[-1]); sys.exit(0)
 if args[0]=='info': sys.exit(0)
 if args[0]=='network':
@@ -79,7 +88,7 @@ if args[0]=='network':
 sys.exit(2)
 `;
   writeFileSync(join(bin, 'docker'), docker); chmodSync(join(bin, 'docker'), 0o755);
-  writeFileSync(join(bin, 'pgrep'), '#!/bin/sh\nexit 1\n'); chmodSync(join(bin, 'pgrep'), 0o755);
+  writeFileSync(join(bin, 'pgrep'), '#!/bin/sh\n[ "$4" = systemd ] && exit 0\nexit 1\n'); chmodSync(join(bin, 'pgrep'), 0o755);
   const realGit = good('which', ['git']);
   // Only the external source transport is replaced; git still resolves/clones
   // real commits. Inspect the fetch environment before redirecting it locally.
@@ -93,18 +102,33 @@ if 'fetch' in args:
     assert os.environ.get('GIT_TERMINAL_PROMPT') == '0'
     assert 'https://github.com/yulanventures/commonswarm.git' in args
     assert 'credential.helper=' in args and 'http.extraHeader=' in args
+    cfg=Path(next(a.split('=',1)[1] for a in args if a.startswith('--git-dir=')))/'config'
+    assert 'insteadOf' not in cfg.read_text() and 'include' not in cfg.read_text()
     with Path(${JSON.stringify(join(root,'fetches.jsonl'))}).open('a') as f: f.write(json.dumps(args)+'\\n')
     args[args.index('https://github.com/yulanventures/commonswarm.git')]=${JSON.stringify(source)}
+    if ${control.dropMain ? "True" : "False"} and '--tags' in args:
+        args=[a for a in args if not a.startswith('+refs/heads/main:')]+['refs/heads/main']
+        args.remove('--tags')
 os.execv(${JSON.stringify(realGit)},[${JSON.stringify(realGit)},*args])
 `;
   writeFileSync(join(bin, 'git'), git); chmodSync(join(bin, 'git'), 0o755);
-  const cfg = {state, controller, source_url: 'https://github.com/yulanventures/commonswarm.git', allowed_hostname: good('hostname',['-s']),
+  // Only the platform boundary is mocked on the Mini; real Linux/root guard
+  // admission remains a separately reported Docker case on Root's CI host.
+  if (process.platform !== 'linux') {
+    const realPython=good('which',['python3']);
+    const bootstrap=join(root,'linux-fixture.py');
+    writeFileSync(bootstrap, `import os,sys\nif sys.argv[1]=='-':\n    actual=os.uname()\n    os.uname=lambda: type(actual)(('Linux',*actual[1:]))\n    sys.argv=sys.argv[1:]\n    exec(compile(sys.stdin.read(),'<controller>','exec'))\nelse: os.execv(${JSON.stringify(realPython)},[${JSON.stringify(realPython)},*sys.argv[1:]])\n`);
+    writeFileSync(join(bin,'python3'), `#!/bin/sh\nexec '${realPython}' '${bootstrap}' "$@"\n`);
+    chmodSync(join(bin,'python3'),0o755);
+  }
+  const cfg = {state, controller: installed, service_uid:process.getuid(), service_gid:process.getgid(),
+    controller_checksums:Object.fromEntries(['run.sh','suite.sh','retain.py'].map(name=>[name,createHash('sha256').update(readFileSync(join(installed,name))).digest('hex')])), source_url: 'https://github.com/yulanventures/commonswarm.git', allowed_hostname: good('hostname',['-s']),
     controller_sha: 'a'.repeat(40), worker_image: 'sha256:' + '1'.repeat(64),
     dind_image: 'fixture@sha256:' + '2'.repeat(64), timeout_seconds: 10};
   const config = join(root, 'config.json');
   writeFileSync(config, JSON.stringify(cfg));
   const env = {...process.env, PATH: `${bin}:${process.env.PATH}`, COMMONSWARM_CI_CONFIG: config};
-  const args = (suite = 'unit', ref = ['--sha', sha]) => [join(controller, 'run.sh'), ...ref, '--suite', suite];
+  const args = (suite = 'unit', ref = ['--sha', sha]) => [join(installed, 'run.sh'), ...ref, '--suite', suite];
   const receipts = () => readdirSync(join(state, 'runs')).sort().map(n => JSON.parse(readFileSync(join(state, 'runs', n, 'receipt.json'))));
   return {root, source, state, sha, cfg, config, env, args, receipts};
 }
@@ -113,13 +137,15 @@ function start(f, args = f.args()) {
   let stdout = '', stderr = '';
   child.stdout.on('data', x => stdout += x);
   child.stderr.on('data', x => stderr += x);
-  return new Promise((resolve, reject) => {
+  const completion = new Promise((resolve, reject) => {
     child.on('error', reject);
     child.on('exit', status => resolve({status, stdout, stderr}));
   });
+  completion.child=child;
+  return completion;
 }
 
-test('guard admits standalone and GHA, retaining CI/root/host/path refusals in a disposable container', () => {
+test('guard admits standalone and GHA, retaining CI/root/host/path refusals in a disposable container', {skip:process.platform !== 'linux' ? 'requires Root Linux/Docker guard execution' : false}, () => {
   const guard = join(repo, 'tests/box-dry-run/guard.sh');
   const probe = (env, setup = ':', user = '0') => run('docker', ['run', '--rm', '--network', 'none',
     '--hostname', setup === 'production' ? 'yulan-vps-1' : 'guard-fixture', '--user', user,
@@ -224,7 +250,7 @@ test('source accepts only anonymous public HTTPS and ignores inherited Git confi
   f.env.GIT_CONFIG_KEY_0 = 'url.ssh://private/.insteadOf';
   f.env.GIT_CONFIG_VALUE_0 = 'https://github.com/';
   const ok = await start(f); assert.equal(ok.status, 0, ok.stderr);
-  assert.equal(readFileSync(join(f.root,'fetches.jsonl'),'utf8').trim().split('\n').length, 1);
+  assert.equal(readFileSync(join(f.root,'fetches.jsonl'),'utf8').trim().split('\n').length, 2);
   for (const url of ['git@github.com:yulanventures/commonswarm.git', 'https://github.com/other/repo.git']) {
     f.cfg.source_url = url; writeFileSync(f.config, JSON.stringify(f.cfg));
     const denied = await start(f); assert.notEqual(denied.status, 0);
@@ -235,7 +261,7 @@ test('source accepts only anonymous public HTTPS and ignores inherited Git confi
 test('PE starting mid-suite removes only owned services, records pending deferral, then retries the same SHA quietly', async () => {
   const f = fixture({sleep: 2});
   const busyPath = join(f.root,'pe-active');
-  writeFileSync(join(f.root,'bin','pgrep'), `#!/bin/sh\ntest -e '${busyPath}'\n`);
+  writeFileSync(join(f.root,'bin','pgrep'), `#!/bin/sh\n[ "$4" = systemd ] && exit 0\ntest -e '${busyPath}'\n`);
   const running = start(f);
   let workerStarted = false;
   for (let n=0; n<400; n++) {
@@ -266,7 +292,7 @@ test('PE starting mid-suite removes only owned services, records pending deferra
   assert.deepEqual(deferred.cleanup_errors,[]);
   assert.deepEqual(JSON.parse(readFileSync(join(f.root,'containers.json'))),{unowned:{label:'some-other-run'}});
   // The simulated PE job ends itself; the controller never cancels it.
-  writeFileSync(join(f.root,'bin','pgrep'),'#!/bin/sh\nexit 1\n');
+  writeFileSync(join(f.root,'bin','pgrep'),'#!/bin/sh\n[ "$4" = systemd ] && exit 0\nexit 1\n');
   const result = await running; assert.equal(result.status,0,result.stderr);
   const receipts = f.receipts().sort((a,b)=>a.attempt-b.attempt);
   assert.equal(receipts.length,2);
@@ -274,7 +300,7 @@ test('PE starting mid-suite removes only owned services, records pending deferra
   assert.equal(receipts[1].pending,false); assert.equal(receipts[1].exit_code,0);
   assert.deepEqual(receipts[1].prior_attempts,[deferred.run_id]);
   for (const r of receipts) assert.equal(r.resolved_sha,f.sha);
-  assert.equal(readFileSync(join(f.root,'fetches.jsonl'),'utf8').trim().split('\n').length,1);
+  assert.equal(readFileSync(join(f.root,'fetches.jsonl'),'utf8').trim().split('\n').length,2);
   const events = readFileSync(join(f.root,'events.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
   const firstWorker = events.find(e=>e.action==='start' && e.name.endsWith('-worker'));
   assert.ok(events.some(e=>e.action==='remove' && e.name===firstWorker.name));
@@ -309,4 +335,72 @@ test('retention deletes only expired completed owned runs and rejects root/home/
   for (const target of ['/',process.env.HOME,outsider,join(link,'scratch'),fresh]) assert.notEqual(invoke(target).status,0,target);
   good('python3',[join(controller,'retain.py'),'--root',f.state]);
   assert.equal(existsSync(old),false); assert.equal(existsSync(fresh),true); assert.equal(readFileSync(join(outsider,'keep'),'utf8'),'safe');
+});
+
+// These new cases exercise executable boundaries absent from the original
+// lifecycle tests: transport history, admission integrity, stop during teardown.
+test('missing origin/main fails at the worker git consumer with a successful history control', async () => {
+  const positive=fixture(); const ok=await start(positive); assert.equal(ok.status,0,ok.stderr);
+  const negative=fixture({dropMain:true}); const bad=await start(negative); assert.notEqual(bad.status,0);
+  const [receipt]=negative.receipts();
+  assert.match(readFileSync(join(negative.state,'runs',receipt.run_id,'suite.log'),'utf8'),/origin\/main/);
+});
+
+test('installed script tampering and public state refuse before fetch or Docker work', async () => {
+  const positive=fixture(); assert.equal((await start(positive)).status,0);
+  for (const kind of ['script','state']) {
+    const f=fixture();
+    if (kind==='script') writeFileSync(join(f.cfg.controller,'suite.sh'),'tampered');
+    else mkdirSync(f.state,{mode:0o755});
+    const r=await start(f); assert.notEqual(r.status,0);
+    assert.match(r.stderr,kind==='script' ? /checksum mismatch/ : /state must be private/);
+    assert.equal(existsSync(join(f.root,'fetches.jsonl')),false);
+    assert.equal(existsSync(join(f.root,'events.jsonl')),false);
+  }
+});
+
+test('local source rewrite config is replaced before the next anonymous fetch', async () => {
+  const f=fixture(); assert.equal((await start(f)).status,0);
+  good('git',['--git-dir='+join(f.state,'source.git'),'config','url.ssh://foreign/.insteadOf','https://github.com/']);
+  const r=await start(f); assert.equal(r.status,0,r.stderr);
+  assert.equal(run('git',['--git-dir='+join(f.state,'source.git'),'config','--get-regexp','^url\\.']).status,1);
+});
+
+test('signal during owned cleanup completes teardown and prevents every following suite', async () => {
+  const f=fixture({signalCleanup:true}); const r=await start(f,f.args('all'));
+  assert.equal(r.status,130,r.stderr);
+  const receipts=f.receipts(); assert.equal(receipts.length,1);
+  assert.equal(receipts[0].exit_code,130); assert.deepEqual(receipts[0].cleanup_errors,[]);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root,'containers.json'))),{unowned:{label:'some-other-run'}});
+});
+
+test('unobservable root process refuses before any source or Docker operation', async () => {
+  const f=fixture(); writeFileSync(join(f.root,'bin','pgrep'),'#!/bin/sh\nexit 1\n');
+  const r=await start(f); assert.notEqual(r.status,0); assert.match(r.stderr,/visibility unproven/);
+  assert.equal(existsSync(join(f.root,'fetches.jsonl')),false);
+});
+
+
+test('signal while queued exits without starting a second worker', async () => {
+  const f=fixture({sleep:1});
+  const first=start(f);
+  for (let n=0;n<400;n++) {
+    const path=join(f.root,'events.jsonl');
+    if (existsSync(path) && readFileSync(path,'utf8').includes('-worker')) break;
+    await delay(10);
+  }
+  const second=start(f); await delay(300); second.child.kill('SIGTERM');
+  const cancelled=await second; assert.equal(cancelled.status,130,cancelled.stderr);
+  assert.equal((await first).status,0);
+  assert.equal(f.receipts().length,1);
+});
+
+test('signal during scratch retention prevents following suites', async () => {
+  const f=fixture(); const path=join(f.cfg.controller,'retain.py');
+  writeFileSync(path,"import os,signal\nos.kill(os.getppid(),signal.SIGTERM)\n"+readFileSync(path,'utf8'));
+  f.cfg.controller_checksums['retain.py']=createHash('sha256').update(readFileSync(path)).digest('hex');
+  writeFileSync(f.config,JSON.stringify(f.cfg));
+  const r=await start(f,f.args('all')); assert.equal(r.status,130,r.stderr);
+  assert.equal(f.receipts().length,1);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root,'containers.json'))),{unowned:{label:'some-other-run'}});
 });

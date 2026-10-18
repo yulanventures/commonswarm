@@ -5,7 +5,8 @@ contention coordination, provisioning, timer activation and cutover.
 Nothing here deploys to Yulan VPS or dispatches GitHub Actions.
 
 The controller is installed from one reviewed commit. The service resolves `main`
-once under `/var/lib/commonswarm-ci/queue.lock` using `flock(2)`, then runs server,
+once under `/var/lib/commonswarm-ci/queue.lock` using `flock(2)` (queue wait
+capped at 600 seconds), then runs server,
 p1-cli, site, box-dry-run and unit serially at that exact SHA. Manual invocations
 use the same queue:
 
@@ -24,7 +25,11 @@ never mounts the host Docker socket, home, PE directories or host
 root. Only box fixtures run as root, inside the worker. DinD's privileged mode is
 required for nested Linux containers; this is appropriate only on the separate
 CI host. Root must review that tradeoff. Each daemon has a 2 GiB memory limit;
-each worker has 4 GiB. No host ports are published. Fixed Supabase ports are
+each worker has 4 GiB. These are unmeasured limits, not a memory-fit claim: Root
+must measure the full nested stack and PE overlap before timer activation.
+DinD listens only on namespace loopback and defaults nested published ports to
+127.0.0.1. No outer host ports are published. Root must inspect actual nested
+port bindings during the real run, including fixtures with explicit bindings. Fixed Supabase ports are
 checked before use inside the new namespace. Before every command and while
 waiting for its active process (at most 250 ms between probes, plus probe latency),
 the controller checks `Runner.Worker`. New PE activity withdraws CommonSwarm:
@@ -56,15 +61,41 @@ Root installation, after independent review and contention coordination:
    publisher checksums; Caddy also checks the independently pinned SHA-512 and
    exact binary version. Resulting worker ID and DinD digest are pinned in config.
    Docker build cache contains only public tools; private source stays mode 0700.
-   It installs the service/timer **disabled**, with no host sudo grant for gha.
+   It creates a dedicated `commonswarm-ci:commonswarm-ci` account, checks that
+   primary group, and builds `ciworker` with its actual UID/GID for writable
+   private mounts. It leaves PE's `gha` account, home and fleet untouched.
+   State/source/run directories are mode 0700 at `/var/lib/commonswarm-ci`;
+   the account home is its private `home/` child. Receipt files are mode 0600.
+   Scripts/config are root-owned under `/opt`.
+   Script hashes and service UID/GID are recorded in config and checked before
+   source or Docker work. Root fixtures receive only the real mount owner's
+   `SUDO_UID` for Git ownership checks; no host safe.directory setting changes.
+   The service/timer remain **disabled**, with no host sudo grant.
+   Fresh installs only: existing state/accounts/units are refused. On failure,
+   rollback removes only exclusively created paths and this invocation's new
+   account/group, then reloads systemd. It never removes existing receipts.
+   Public Docker build cache/images can remain after installation failure.
+   Images are pinned after build; floating base tags/APT inputs mean rebuilds
+   are not bit reproducible. Versioned upgrades require a separate reviewed step.
 2. Source is the public repository at exactly
    `https://github.com/yulanventures/commonswarm.git`. No deploy key or SSH policy
    is required. The controller rejects other URLs, clears inherited Git/provider
    environment, ignores global/system Git configuration, disables credential
    helpers and extra HTTP headers for fetch, and disables interactive prompts.
+   It replaces bare-repository local config before fetching full main history,
+   origin/main and tags, then any requested exact SHA. The resolved SHA remains
+   fixed across all suites and deferred attempts. Outer Docker always uses the
+   default context, host Unix socket and a dedicated credential-free config.
+   A visible root-owned systemd process is required as the PE-probe control.
    No host Git configuration changes are needed; PE credentials are not reused.
 3. Run `node --test tests/standalone-ci-guard.test.mjs` on the Linux CI host in a
-   quiet window. Then, as gha, run the exact-SHA `--suite all` command above.
+   quiet window. Then run the exact-SHA `--suite all` command as the dedicated
+   account: `runuser -u commonswarm-ci -- bash /opt/commonswarm-ci/scripts/run.sh
+   --sha <40-lowercase-hex> --suite all` (one shell line). H0 fixture runuser
+   examples must use `commonswarm-ci`, never the PE runner account.
+   Root must merge #86 first: the root box suite explicitly runs
+   `node --import tsx --test tests/p1-cli/site-artifact.test.ts`, including
+   Linux/root rendered-swap cases. This PR does not copy or edit that test.
    Inspect all five receipts and actual gate counts; do not call a zero-test or
    skipped suite passing. The new controls also run in the standalone unit gate.
 4. Enable the installed timer with `systemctl enable --now commonswarm-nightly.timer`.
@@ -86,7 +117,14 @@ other termination gets up to 60 seconds. The controller removes only exact-name,
 matching-label containers, their anonymous volumes and the matching network.
 It reclaims scratch ownership with the pinned tools image; a cleanup error
 fails the receipt and retains scratch for Root. No global Docker prune is used.
-Queue wait is outside the suite bound. A fetch has its own 120-second bound.
+Queue wait is outside the suite bound but capped at 600 seconds. Each of at
+most two source fetches has a 120-second bound. Every cleanup Docker call has
+a 20-second inspection or 60-second mutation bound; each retention invocation
+is capped at 60 seconds. The service has a finite 14400-second startup limit
+(queue, fetches, five 1800-second suites and teardown allowance); stop allows
+900 seconds, exceeding the bounded cleanup path. A persistent stop latch
+terminates active work and prevents new suites/attempts, including signals
+during queue wait, cleanup or retention. Cleanup still finishes for owned work.
 `COMMONSWARM_CI_CONFIG` selects an operator-owned config (also used by disposable
 fixture tests); `timeout_seconds` may reduce the suite limit but cannot exceed it.
 
@@ -111,5 +149,7 @@ The runner intentionally preserves failures; no product timeouts/allowlists chan
 
 Rollback: disable/stop `commonswarm-nightly.timer`, then stop its service and
 verify owned cleanup/receipts. Restore the previous GHA cron and CommonSwarm Mac
-dispatch block if already cut over. Preserve source, artifacts and caches for
-review. Do not prune host Docker objects or touch any PE service/runner.
+dispatch block if already cut over. Preserve source, artifacts, receipts and
+caches for review. Never delete existing receipts to reinstall; future upgrades need a
+separate reviewed migration step. Do not prune host Docker objects or touch
+any PE service/runner.

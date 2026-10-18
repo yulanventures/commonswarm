@@ -8,29 +8,75 @@ test "$(uname -s)" = Linux
 test "$(uname -m)" = x86_64
 test "$(hostname -s)" = pe-ci-1
 test "$(id -u)" = 0
+cd "$(git rev-parse --show-toplevel)"
 test "$(git rev-parse HEAD)" = "$reviewed_sha"
 test -z "$(git status --porcelain)"
-for tool in docker git python3 curl systemctl pgrep; do command -v "$tool" >/dev/null; done
+for tool in docker git python3 curl systemctl pgrep timeout useradd groupadd; do command -v "$tool" >/dev/null; done
 if pgrep -x Runner.Worker >/dev/null; then echo 'REFUSE: PromptEden job active' >&2; exit 75; fi
-id -u gha >/dev/null
+# Refuse hidden cross-user processes; an idle probe alone proves nothing.
+pgrep -u root -x systemd >/dev/null
+if getent passwd commonswarm-ci >/dev/null || getent group commonswarm-ci >/dev/null; then
+  echo 'REFUSE: dedicated service account/group already exists' >&2; exit 1
+fi
+export DOCKER_CONTEXT=default DOCKER_HOST=unix:///var/run/docker.sock
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS DOCKER_AUTH_CONFIG DOCKER_TLS_VERIFY DOCKER_CERT_PATH
 test ! -e /opt/commonswarm-ci
 test ! -L /opt/commonswarm-ci
 test ! -e /var/lib/commonswarm-ci
 test ! -L /var/lib/commonswarm-ci
 test ! -e /etc/systemd/system/commonswarm-nightly.service
 test ! -e /etc/systemd/system/commonswarm-nightly.timer
+test ! -L /etc/systemd/system/commonswarm-nightly.service
+test ! -L /etc/systemd/system/commonswarm-nightly.timer
 stage=$(mktemp -d /var/tmp/commonswarm-provision.XXXXXX)
 chmod 0700 "$stage"
+# Record only successful exclusive creations. A failed install never deletes
+# pre-existing state or receipts; this installer supports fresh installs only.
+created=()
+created_user=0
+created_group=0
 cleanup() {
-  python3 - "$stage" <<'PY'
+  result=$?
+  trap - EXIT
+  if (( result != 0 )); then
+    for ((i=${#created[@]}-1; i>=0; i--)); do
+      python3 - "${created[i]}" <<'PYREMOVE'
+from pathlib import Path
+import shutil, sys
+p=Path(sys.argv[1])
+allowed={Path('/opt/commonswarm-ci'), Path('/var/lib/commonswarm-ci'),
+         Path('/etc/systemd/system/commonswarm-nightly.service'),
+         Path('/etc/systemd/system/commonswarm-nightly.timer')}
+assert p in allowed and not p.is_symlink() and p.resolve() == p
+if p.is_dir(): shutil.rmtree(p)
+elif p.exists(): p.unlink()
+PYREMOVE
+    done
+    (( created_user == 0 )) || userdel commonswarm-ci
+    if (( created_group != 0 )) && getent group commonswarm-ci >/dev/null; then groupdel commonswarm-ci; fi
+    systemctl daemon-reload
+  fi
+  python3 - "$stage" <<'PYSTAGE'
 import pathlib, shutil, sys
 p=pathlib.Path(sys.argv[1])
 assert p.parent == pathlib.Path('/var/tmp') and p.name.startswith('commonswarm-provision.')
 assert not p.is_symlink() and p.resolve() == p and p != pathlib.Path.home()
 shutil.rmtree(p)
-PY
+PYSTAGE
+  exit "$result"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# Keep Docker's host context and credentials separate from every runner account.
+mkdir -m 0700 "$stage/docker-config"
+export DOCKER_CONFIG="$stage/docker-config"
+groupadd commonswarm-ci
+created_group=1
+useradd --no-create-home --home-dir /var/lib/commonswarm-ci/home --gid commonswarm-ci --shell /usr/sbin/nologin commonswarm-ci
+created_user=1
+test "$(id -gn commonswarm-ci)" = commonswarm-ci
 cat >"$stage/Dockerfile" <<'DOCKERFILE'
 FROM docker:28.0.4-cli AS dockercli
 FROM node:22.14.0-bookworm
@@ -66,28 +112,43 @@ RUN stage=$(mktemp -d /tmp/ci-tools.XXXXXX) && cd "$stage" && \
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN npm install --prefix /opt/playwright --ignore-scripts --no-audit --no-fund playwright@1.63.0 && \
     /opt/playwright/node_modules/.bin/playwright install --with-deps chromium-headless-shell && chmod -R a+rX /ms-playwright
-# Match the host gha UID for private bind mounts, without granting host sudo.
+# Match the dedicated host service UID for private bind mounts, without granting host sudo.
 RUN userdel node && (getent group "$CI_GID" >/dev/null || groupadd -g "$CI_GID" ciworker) && \
     useradd -m -u "$CI_UID" -g "$CI_GID" -s /bin/bash ciworker
 DOCKERFILE
-docker build --build-arg "CI_UID=$(id -u gha)" --build-arg "CI_GID=$(id -g gha)" --tag commonswarm-ci-tools:"$reviewed_sha" "$stage"
+docker build --build-arg "CI_UID=$(id -u commonswarm-ci)" --build-arg "CI_GID=$(id -g commonswarm-ci)" --tag commonswarm-ci-tools:"$reviewed_sha" "$stage"
 docker pull docker:28.0.4-dind
-worker_image=$(docker image inspect --format '{{.Id}}' commonswarm-ci-tools:"$reviewed_sha")
-dind_image=$(docker image inspect --format '{{index .RepoDigests 0}}' docker:28.0.4-dind)
-install -d -m 0755 /opt/commonswarm-ci /opt/commonswarm-ci/scripts
+worker_image=$(timeout 20 docker image inspect --format '{{.Id}}' commonswarm-ci-tools:"$reviewed_sha")
+dind_image=$(timeout 20 docker image inspect --format '{{index .RepoDigests 0}}' docker:28.0.4-dind)
+mkdir -m 0755 /opt/commonswarm-ci
+created+=(/opt/commonswarm-ci)
+install -d -m 0755 /opt/commonswarm-ci/scripts
 install -m 0755 scripts/standalone-ci/run.sh scripts/standalone-ci/suite.sh scripts/standalone-ci/retain.py /opt/commonswarm-ci/scripts/
-install -d -m 0700 -o gha -g "$(id -gn gha)" /var/lib/commonswarm-ci
+mkdir -m 0700 /var/lib/commonswarm-ci
+created+=(/var/lib/commonswarm-ci)
+chown commonswarm-ci:commonswarm-ci /var/lib/commonswarm-ci
+install -d -m 0700 -o commonswarm-ci -g commonswarm-ci /var/lib/commonswarm-ci/home
 python3 - "$reviewed_sha" "$worker_image" "$dind_image" <<'PY'
-import json, sys
+import hashlib, json, pwd, sys
+from pathlib import Path
+account=pwd.getpwnam("commonswarm-ci")
 cfg=dict(controller_sha=sys.argv[1],worker_image=sys.argv[2],dind_image=sys.argv[3],
          state='/var/lib/commonswarm-ci',controller='/opt/commonswarm-ci/scripts',
          source_url='https://github.com/yulanventures/commonswarm.git',
-         allowed_hostname='pe-ci-1',timeout_seconds=1800)
+         allowed_hostname='pe-ci-1',timeout_seconds=1800,
+         service_uid=account.pw_uid,service_gid=account.pw_gid,
+         controller_checksums={p.name:hashlib.sha256(p.read_bytes()).hexdigest()
+                               for p in Path('/opt/commonswarm-ci/scripts').iterdir() if p.is_file()})
 open('/opt/commonswarm-ci/config.json','w').write(json.dumps(cfg,indent=2)+'\n')
 PY
 chmod 0644 /opt/commonswarm-ci/config.json
-install -m 0644 deploy/ci/commonswarm-nightly.service deploy/ci/commonswarm-nightly.timer /etc/systemd/system/
+for unit in commonswarm-nightly.service commonswarm-nightly.timer; do
+  # noclobber is exclusive: a concurrently created unit is never ours to remove.
+  (set -o noclobber; : >"/etc/systemd/system/$unit")
+  created+=("/etc/systemd/system/$unit")
+  install -m 0644 "deploy/ci/$unit" "/etc/systemd/system/$unit"
+done
 systemctl daemon-reload
 # Installation deliberately does not enable/start a job. Public HTTPS source
 # requires no key or host Git changes. Root first verifies controls.
-echo 'Installed disabled timer and immutable tools. Root must verify before enabling.'
+echo 'Installed disabled timer and runtime-pinned tools. Root must verify before enabling.'

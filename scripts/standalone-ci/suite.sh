@@ -117,6 +117,7 @@ SH
     for user in commonswarm caddy ops; do
       id -u "$user" >/dev/null 2>&1 || useradd --no-create-home --shell /usr/sbin/nologin "$user"
     done
+    gate site-artifact node --import tsx --test tests/p1-cli/site-artifact.test.ts || failed=1
     gate box-dry-run npm run test:box-dry-run || failed=1
     ;;
 esac
