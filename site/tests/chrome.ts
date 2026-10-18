@@ -125,13 +125,13 @@ const hasFlag = (flags: readonly string[], name: string): boolean =>
 export function buildChromeArgs(
   flagsAndUrl: readonly string[],
   profile: string | undefined,
-  githubActions: boolean,
+  normalProcessModel: boolean,
 ): string[] {
   const args = flagsAndUrl.filter(
-    (flag) => !githubActions || (flag !== "--single-process" && flag !== "--no-zygote"),
+    (flag) => !normalProcessModel || (flag !== "--single-process" && flag !== "--no-zygote"),
   );
   const defaults = [
-    "--headless=new", "--disable-gpu", "--no-sandbox",
+    "--headless=new", "--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage",
     "--password-store=basic", "--use-mock-keychain",
   ];
   if (!hasFlag(args, "--user-data-dir")) {
@@ -207,8 +207,8 @@ const runAttempt = (
 
 /**
  * Run one headless Chrome load. Callers provide only the flags specific to their measurement.
- * GitHub Actions uses Chrome's normal process model; constrained local runs keep the historical
- * single-process flags. An unexpected signal death gets one fresh process before the launcher
+ * GitHub Actions and explicit standalone CI use Chrome's normal process model; local runs keep
+ * the historical single-process flags. An unexpected signal death gets one fresh process before the launcher
  * reports both attempts. A hard SIGKILL deadline covers both attempts, capped at 60 seconds.
  */
 export async function launchChrome(
@@ -223,7 +223,8 @@ export async function launchChrome(
     : await mkdtemp(join(tmpdir(), "site-chrome-"));
   try {
     return await launchAttempts(chrome, buildChromeArgs(
-      flagsAndUrl, profile, process.env.GITHUB_ACTIONS === "true",
+      flagsAndUrl, profile, process.env.GITHUB_ACTIONS === "true"
+        || (process.env.CI === "true" && process.env.STANDALONE_CI === "1"),
     ), options);
   } finally {
     // Only remove the exact mkdtemp path owned by this launch, never a caller's profile.

@@ -97,7 +97,7 @@ test("Playwright searches its explicit path, real user cache, then HOME cache", 
 
 test("Chrome arguments isolate the profile and keychain without duplicating caller flags", () => {
   const args = buildChromeArgs(["--headless=new", "--dump-dom", "about:blank"], "/tmp/fresh-profile", false);
-  for (const flag of ["--headless=new", "--password-store=basic", "--use-mock-keychain", "--user-data-dir=/tmp/fresh-profile"]) {
+  for (const flag of ["--headless=new", "--disable-dev-shm-usage", "--password-store=basic", "--use-mock-keychain", "--user-data-dir=/tmp/fresh-profile"]) {
     assert.equal(args.filter((arg) => arg === flag).length, 1);
   }
   assert.deepEqual(args.slice(-2), ["--dump-dom", "about:blank"]);
@@ -278,6 +278,41 @@ exec /bin/sleep 30
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// Exercise environment admission at the actual subprocess boundary, independently of argument building.
+test("launcher uses the normal process model only for explicit CI markers", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "chrome-guard-ci-"));
+  const keys = ["PLAYWRIGHT_BROWSERS_PATH", "RUN_BROWSER_TESTS", "GITHUB_ACTIONS", "CI", "STANDALONE_CI"] as const;
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  try {
+    process.env.PLAYWRIGHT_BROWSERS_PATH = directory;
+    process.env.RUN_BROWSER_TESTS = "1";
+    const executable = join(directory, "fake-argv");
+    await writeFile(executable, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n", { mode: 0o700 });
+    for (const [github, ci, standalone, normal] of [
+      ["true", undefined, undefined, true],
+      [undefined, "true", "1", true],
+      [undefined, "true", undefined, false],
+      [undefined, undefined, "1", false],
+      ["false", "1", "1", false],
+    ] as const) {
+      for (const [key, value] of [["GITHUB_ACTIONS", github], ["CI", ci], ["STANDALONE_CI", standalone]] as const) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      const { stdout } = await launchChrome(executable, ["--single-process", "--no-zygote", "about:blank"]);
+      const args = stdout.trim().split("\n");
+      for (const flag of ["--single-process", "--no-zygote"]) assert.equal(args.includes(flag), !normal);
+      assert.equal(process.env.GITHUB_ACTIONS, github);
+    }
+  } finally {
+    for (const key of keys) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
     }
     await rm(directory, { recursive: true, force: true });
   }
