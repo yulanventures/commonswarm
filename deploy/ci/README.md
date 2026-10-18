@@ -6,8 +6,8 @@ Nothing here deploys to Yulan VPS or dispatches GitHub Actions.
 
 The controller is installed from one reviewed commit. The service resolves `main`
 once under `/var/lib/commonswarm-ci/queue.lock` using `flock(2)` (queue wait
-capped at 600 seconds), then runs server,
-p1-cli, site, box-dry-run and unit serially at that exact SHA. Manual invocations
+capped at 600 seconds), then runs box-dry-run,
+server, p1-cli, site and unit serially at that exact SHA. Manual invocations
 use the same queue:
 
 ```sh
