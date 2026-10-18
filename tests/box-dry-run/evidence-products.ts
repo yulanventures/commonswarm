@@ -23,7 +23,7 @@ export function consumedEvidenceProducts(outputs: EvidenceProduct[], reads: Read
     assert.ok(realpathSync(evidence).startsWith(realpathSync("docs/evidence") + sep), `evidence escapes its root: ${output.evidence}`);
     const bytes = readFileSync(evidence);
     const tracked = spawnSync("git", ["show", `HEAD:${relative(process.cwd(), evidence).split(sep).join("/")}`], {
-      env: { PATH: process.env.PATH, LANG: "C" },
+      env: { PATH: process.env.PATH, LANG: "C", SUDO_UID: process.env.SUDO_UID },
     });
     assert.equal(tracked.status, 0, `no committed output: ${output.evidence}`);
     assert.ok(bytes.equals(tracked.stdout), `output differs from committed evidence: ${output.evidence}`);
