@@ -108,8 +108,8 @@ RUN stage=$(mktemp -d /tmp/ci-tools.XXXXXX) && cd "$stage" && \
     printf '%s  deno.zip\n' "$digest" | sha256sum --check --status && unzip -q deno.zip && install -m 0755 deno /usr/local/bin/deno && \
     base=https://github.com/supabase/cli/releases/download/v2.118.0 && \
     curl --proto '=https' --proto-redir '=https' -fsSL "$base/supabase_linux_amd64.tar.gz" -o supabase.tar.gz && \
-    curl --proto '=https' --proto-redir '=https' -fsSL "$base/supabase_2.118.0_checksums.txt" -o supabase.sha256 && \
-    digest=$(awk '$2 == "supabase_linux_amd64.tar.gz" {print $1; count++} END {if(count != 1) exit 1}' supabase.sha256) && \
+    curl --proto '=https' --proto-redir '=https' -fsSL "$base/checksums.txt" -o supabase.sha256 && \
+    digest=$(awk '$2 == "supabase_2.118.0_linux_amd64.tar.gz" {print $1; count++} END {if(count != 1) exit 1}' supabase.sha256) && \
     [[ "$digest" =~ ^[0-9a-f]{64}$ ]] && printf '%s  supabase.tar.gz\n' "$digest" | sha256sum --check --status && \
     tar -xzf supabase.tar.gz supabase && install -m 0755 supabase /usr/local/bin/supabase && \
     base=https://github.com/caddyserver/caddy/releases/download/v2.11.4 && \
