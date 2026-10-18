@@ -56,6 +56,7 @@ if args[0]=='run':
     store=json.loads(p.read_text()); store[name]=dict(label=label); p.write_text(json.dumps(store))
     event('start',name)
     if name.endswith('-worker'):
+        assert store.get(name.replace('-worker','-docker'),{}).get('ingress_policy'), 'worker started without ingress policy'
         mounts=[args[i+1] for i,a in enumerate(args) if a=='--mount']
         work=pathlib.Path(next(m.split(',')[1][4:] for m in mounts if 'dst=/work' in m))
         control=json.loads((work/'control.json').read_text())
@@ -68,6 +69,11 @@ if args[0]=='run':
         event('finish',name)
         sys.exit(control.get('exit',{}).get(args[-1],0))
     sys.exit(0)
+if args[0]=='exec':
+    name=args[1]
+    store=json.loads(p.read_text()); assert name in store
+    if ${control.policyFail ? "True" : "False"}: sys.exit(42)
+    store[name]['ingress_policy']=True; p.write_text(json.dumps(store)); event('policy',name); sys.exit(0)
 if args[0]=='inspect':
     if args[-1].endswith('-worker') and ${control.killInspect ? "True" : "False"}:
         os.kill(os.getppid(),signal.SIGTERM)
@@ -424,4 +430,16 @@ test('interrupted inspect records cleanup failure, retains scratch and stops lat
   assert.equal(existsSync(join(f.state,'runs',receipts[0].run_id,'scratch')),true);
   const store=JSON.parse(readFileSync(join(f.root,'containers.json')));
   assert.deepEqual(Object.keys(store).sort(),[receipts[0].run_id+'-worker','unowned'].sort());
+});
+
+// Admission failure must stop the worker and still use ownership-checked cleanup.
+test('namespace policy failure prevents worker startup and cleans owned runtime', async () => {
+  const positive=fixture(); assert.equal((await start(positive)).status,0);
+  const negative=fixture({policyFail:true}); const r=await start(negative);
+  assert.equal(r.status,42,r.stderr);
+  const [receipt]=negative.receipts(); assert.deepEqual(receipt.cleanup_errors,[]);
+  const events=readFileSync(join(negative.root,'events.jsonl'),'utf8');
+  assert.equal(events.includes('-worker'),false);
+  assert.deepEqual(JSON.parse(readFileSync(join(negative.root,'containers.json'))),{unowned:{label:'some-other-run'}});
+  assert.equal(existsSync(join(negative.state,'runs',receipt.run_id,'scratch')),false);
 });

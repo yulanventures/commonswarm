@@ -259,6 +259,16 @@ with (state / 'queue.lock').open('a') as lock:
                              '--mount', f'type=bind,src={tmp},dst=/private/tmp',
                              '--env', 'DOCKER_TLS_CERTDIR=', cfg['dind_image'],
                              'dockerd', '--host=tcp://127.0.0.1:2375', '--host=unix:///var/run/docker.sock', '--ip=127.0.0.1', '--tls=false'])
+                    # Filter in this namespace before Docker DNAT, including future bridges.
+                    # Only replies to namespace-originated traffic may enter on eth0.
+                    bounded(['docker', 'exec', daemon, 'sh', '-ec', '''
+                        for firewall in iptables ip6tables; do
+                            "$firewall" -w 5 -t mangle -I PREROUTING 1 -i eth0 \
+                                -m conntrack ! --ctstate ESTABLISHED,RELATED -j DROP
+                            "$firewall" -w 5 -t mangle -C PREROUTING -i eth0 \
+                                -m conntrack ! --ctstate ESTABLISHED,RELATED -j DROP
+                        done
+                    '''])
                     bounded(['docker', 'run', '--name', worker, '--label', label,
                              '--memory=4g', '--network', 'container:' + daemon, '--user', '0' if suite == 'box-dry-run' else 'ciworker',
                              '--mount', f'type=bind,src={work},dst=/work',
