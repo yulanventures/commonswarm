@@ -19,7 +19,7 @@ cmp "$SCRIPT/validate-site-env.mjs" "$JOB/source/deploy/site/validate-site-env.m
 [[ ! -e "$JOB/source/site/.env" && ! -e "$JOB/source/site/dist" ]]
 node "$SCRIPT/validate-site-env.mjs" config "$CONFIG" "$H0" "$OUT/public.json"
 chmod 755 "$JOB"; chmod -R a+rX "$JOB/source"; chmod 644 "$OUT/public.json"; chown 65534:65534 "$JOB/work"
-docker pull "$IMAGE" > "$OUT/build.log" 2>&1
+timeout --kill-after=5s 300 docker pull "$IMAGE" > "$OUT/build.log" 2>&1
 NAME=cswarm-site-${JOB##*.}
 trap 'docker rm -f "$NAME" >/dev/null 2>&1 || :' EXIT
 # Workspace and npm cache live on disk. Container /tmp is bounded, never HOME.

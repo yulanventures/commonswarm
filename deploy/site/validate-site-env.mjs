@@ -4,6 +4,7 @@ import { readFileSync as read, writeFileSync as write, mkdirSync, copyFileSync, 
 import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 const hash = data => createHash('sha256').update(data).digest('hex');
 const fileHash = p => hash(read(p));
 const check = (condition, label) => { if (!condition) throw Error(label); };
@@ -34,6 +35,7 @@ function members(bytes) {
     check(oct(b.subarray(148, 156)) === b.reduce((n, x, i) => n + (i >= 148 && i < 156 ? 32 : x), 0), 'tar checksum');
     const raw = (text(b.subarray(345, 500)) ? text(b.subarray(345, 500)) + '/' : '') + text(b.subarray(0, 100));
     const name = raw === './' ? '.' : raw.replace(/^\.\//, '').replace(/\/$/, ''); const type = String.fromCharCode(b[156]);
+    check(!raw.endsWith('/') || type === '5', 'regular tar member has trailing slash');
     check((type === '0' || type === '\0' || type === '5') && !text(b.subarray(157, 257)), 'tar links/special members refused');
     check(name === '.' || (/^[A-Za-z0-9_./@+-]+$/.test(name) && !name.startsWith('/') && name.split('/').every(p => p && p !== '.' && p !== '..' && !p.startsWith('.'))), 'unsafe tar member');
     check(!files.has(name), 'duplicate tar member');
@@ -92,6 +94,7 @@ try {
   } else if (mode === 'prepare') {
     check(/^[0-9a-f]{64}$/.test(arg) && fileHash(join(dir, 'BUILD.json')) === arg, 'reviewed BUILD hash mismatch');
     const receipt = JSON.parse(read(join(dir, 'BUILD.json')));
+    check(fileHash(fileURLToPath(import.meta.url)) === receipt.validator, 'preparation validator provenance mismatch');
     check(JSON.stringify(receipt) === JSON.stringify(provenance(dir, receipt.revision, receipt.image)), 'build provenance mismatch');
     const template = read(join(dir, 'finalize-release.sh'), 'utf8'); check(hash(template) === receipt.template, 'template provenance mismatch');
     check(/^\/root\/cswarm-site-[A-Za-z0-9-]+$/.test(extra), 'reserve path');

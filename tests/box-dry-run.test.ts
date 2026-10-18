@@ -4292,7 +4292,7 @@ function scriptCommandWords(script: string): string[] {
   return [...words].sort();
 }
 
-test("deploy/site/deploy.sh and finalize-release.sh run only commands the site deploy inventory lists", () => {
+test("historical lane 8 site deploy inventory lists all commands in its pinned deploy scripts", () => {
   const inventory = JSON.parse(readFileSync(SITE_DEPLOY_COMMANDS_FILE, "utf8")) as SiteDeployInventory;
   const listed = new Set([
     ...inventory.builtins, "break", "continue", "true", "false",

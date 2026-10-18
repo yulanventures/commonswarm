@@ -9,6 +9,8 @@ publish the site. The historical cutover notes below are retained as history.
 Reserve a root-owned Linux build window with HezLead. Use a disk-backed build workspace;
 never build on Yulan VPS or the Mac mini. The builder uses the pinned Node image,
 UID 65534, a disk npm cache, bounded resources and `ASTRO_TELEMETRY_DISABLED=1`.
+Image pulls stop after five minutes (with a five-second kill grace); the container build has a separate
+fifteen-minute deadline.
 It reads only the committed archive and explicitly validated public JSON.
 No credentials or secret env files belong in CI. Do not source `.env` or a profile.
 
@@ -63,31 +65,53 @@ bash deploy/site/deploy.sh deploy ops@100.115.66.74 /absolute/artifact/packet "$
 bash deploy/site/deploy.sh rollback ops@100.115.66.74 /absolute/artifact/packet "$REVIEWED_PACKET_SHA256"
 ```
 
-Staging creates a fresh root-owned reserve and checks every packet hash. The
-production script uses Bash, tar, curl and ordinary file tools; it never calls
+Staging disables macOS copy metadata, extracts without preserving source UIDs,
+and creates a fresh root-owned reserve with private modes. It checks every packet
+hash. SSH uses a 15-second connect timeout and 15-second keepalives with four
+misses allowed. The production script uses Bash, tar, curl and ordinary file tools; it never calls
 npm, Docker, a compiler or an installer. It checks provenance pins, records the
 old pointer, extracts into a new immutable release directory, retains every old
 `/_astro` asset and refuses differing bytes under the same asset name. It
 normalizes modes, refuses pointer drift, and atomically renames `current`.
 Named-user-agent HTTP probes require status 200 and exact HTML hashes for `/`
-and `/app`. Failed probes trigger automatic rollback. A manual rollback refuses
-if current no longer names this packet's release. Keep the lock on rollback
-failure and report it to HezLead. Release directories, partial attempts and all
+and `/app`. All production-script output appends to the private reserve
+`hostrun.log`, so closed SSH output cannot bypass probes or rollback; inspect that log host-side
+under the same held lock after a transport failure. Failed probes trigger
+automatic rollback. Rollback requires the old directory to exist, restores the
+exact old pointer, and requires `/` and `/app` to return 200. It reports an
+unchanged pointer when the swap never occurred or rollback already completed.
+A manual rollback refuses a pointer belonging to another release. Keep the lock
+on rollback failure and report it to HezLead. Release directories, partial attempts and all
 old reserves are retained; automatic retention pruning is retired. Separate
 reviewed maintenance may remove them later. Record statuses, hashes and release
 IDs only, never raw access-log lines or query strings.
 
-Linux verification uses real `build-artifact.sh` output, with the artifact path
-passed explicitly (the Mac runs syntax and small fixtures only):
+Current-tooling semantic verification needs no external artifact:
+
+```sh
+node --import tsx --test tests/p1-cli/site-artifact.test.ts
+```
+
+This default lane is explicitly labeled **SYNTHETIC CI artifact**. It makes small
+HTML/assets and a synthetic source archive with current tooling bytes, then asks
+the production receipt owner to compute pins. It does not prove an Astro build
+or committed-source provenance. H0, provenance, unsafe-tar and local-validator
+guards run on ordinary nonroot CI. The rendered release cases require Linux root
+and exercise local HTTP swap, manual/automatic rollback, closed output, find/swap
+failures, missing rollback target, pointer/asset drift, pins and retention. The
+separately owned standalone box CI wiring must supply Linux root; the Mac skips
+only those runtime cases.
+
+The optional **REAL builder artifact** lane uses actual `build-artifact.sh` output
+from the exact reviewed revision with H0=1, including its matching validator:
 
 ```sh
 COMMONSWARM_SITE_TEST_ARTIFACT=/absolute/artifact node --import tsx --test tests/p1-cli/site-artifact.test.ts
 ```
 
-The render fixture requires Linux root, drives a local HTTP server and exercises
-swap, manual/automatic rollback, pointer/asset drift, pins and malformed tar
-members. It skips honestly when no real build output is supplied. The existing
-historical lane 8 and deletion fixtures keep their exact historical source pins.
+This is the separate build/provenance proof. The existing historical lane 8 and
+deletion fixtures keep their exact historical source pins and checks. Preparation
+also refuses local validator bytes that differ from the build receipt.
 
 ## Historical cutover notes
 

@@ -2,10 +2,23 @@
 # Rendered off production; review and hash the packet before staging it.
 set +x; set -euo pipefail; umask 077
 B=@@RESERVE@@; S=/srv/commonswarm/site; N=$S/releases/@@RELEASE@@; STEP=guard; FLIPPED=0
+# A disconnected SSH client must not interrupt checks or automatic rollback.
+trap '' PIPE
+exec >> "$B/hostrun.log" 2>&1
 assert() { label=$1; shift; "$@" || { printf 'FAIL step=%s assertion=%s\n' "$STEP" "$label"; return 1; }; }
 hash() { sha256sum "$1" | cut -d' ' -f1; }
 flip() { ln -s "$1" "$S/current.@@RELEASE@@" && mv -Tf "$S/current.@@RELEASE@@" "$S/current"; }
-rollback() { STEP=rollback; assert current-is-new test "$(readlink -f "$S/current")" = "$N" || return 1; flip "$(cat "$B/old.link")" || return 1; assert exact-old-link test "$(readlink "$S/current")" = "$(cat "$B/old.link")" || return 1; printf 'PASS rollback\n'; }
+probe() { curl --silent --show-error --compressed --max-time 20 --max-filesize 16777216 -A CommonSwarmReleaseCheck/1.0 -H 'Cache-Control: no-cache' -o "$B/probe.html" -w '%{http_code}' "https://commonswarm.com$1"; }
+rollback() {
+  STEP=rollback; local old; old=$(cat "$B/old.link") || return 1
+  case $old in /*) assert old-directory test -d "$old";; *) assert old-directory test -d "$S/$old";; esac || return 1
+  if [[ $(readlink "$S/current") == "$old" ]]; then printf 'PASS rollback unchanged\n'; return; fi
+  assert current-is-new test "$(readlink -f "$S/current")" = "$N" || return 1
+  flip "$old" || return 1
+  assert exact-old-link test "$(readlink "$S/current")" = "$old" || return 1
+  for route in / /app; do assert rollback-httpstatus test "$(probe "$route")" = 200 || return 1; done
+  printf 'PASS rollback\n'
+}
 finish() { rc=$?; trap - EXIT; if ((rc)); then printf 'FAIL step=%s status=%s\n' "$STEP" "$rc"; if ((FLIPPED)); then rollback || printf 'FAIL rollback; retain reserve and lock\n'; fi; fi; exit "$rc"; }
 trap finish EXIT; trap 'exit 130' INT; trap 'exit 143' TERM HUP
 assert root-user test "$EUID" = 0; assert production-host test "$(hostname -s)" = yulan-vps-1; assert production-marker test ! -e /etc/commonswarm-release/STAGING-ONLY
@@ -14,11 +27,17 @@ STEP=provenance; assert buildSHA test "$(hash "$B/BUILD.json")" = '@@BUILD_SHA@@
 STEP=record-old; OLD=$(readlink -f "$S/current"); assert old-parent test "${OLD%/*}" = "$S/releases"; assert old-directory test -d "$OLD"; assert fresh-old-record test ! -e "$B/old.link"; readlink "$S/current" > "$B/old.link"
 STEP=extract; mkdir "$N"; tar -xf "$B/site.tar" -C "$N" --no-same-owner
 STEP=html; assert indexSHA test "$(hash "$N/index.html")" = '@@ROOT_SHA@@'; assert appSHA test "$(hash "$N/app/index.html")" = '@@APP_SHA@@'
-STEP=old-assets; assert old-assets-directory test -d "$OLD/_astro"; assert no-release-symlinks test -z "$(find "$OLD/_astro" "$N" -type l -print)"
-while IFS= read -r -d '' f; do dest=$N/_astro/${f#"$OLD/_astro/"}; if [[ -f "$dest" ]]; then assert old-asset-identical cmp -s "$f" "$dest"; else mkdir -p "${dest%/*}"; cp -p "$f" "$dest"; fi; done < <(find "$OLD/_astro" -type f -print0)
+STEP=old-assets; assert old-assets-directory test -d "$OLD/_astro"
+find "$OLD/_astro" "$N" -type l -print > "$B/symlinks.list"; assert no-release-symlinks test ! -s "$B/symlinks.list"
+find "$OLD/_astro" -type f -print0 > "$B/assets.list"
+while IFS= read -r -d '' f; do dest=$N/_astro/${f#"$OLD/_astro/"}; if [[ -f "$dest" ]]; then assert old-asset-identical cmp -s "$f" "$dest"; else mkdir -p "${dest%/*}"; cp -p "$f" "$dest"; fi; done < "$B/assets.list"
 find "$N" -type d -exec chmod 755 {} +; find "$N" -type f -exec chmod 644 {} +
 STEP=preflip; assert exact-old-link test "$(readlink "$S/current")" = "$(cat "$B/old.link")"; FLIPPED=1
 STEP=flip; flip "$N"
-for route in / /app; do STEP=http-root; expected='@@ROOT_SHA@@'; if [[ $route == /app ]]; then STEP=http-app; expected='@@APP_SHA@@'; fi; status=$(curl --silent --show-error --compressed --max-time 20 --max-filesize 16777216 -A CommonSwarmReleaseCheck/1.0 -H 'Cache-Control: no-cache' -o "$B/probe.html" -w '%{http_code}' "https://commonswarm.com$route"); printf 'CHECK step=%s http=%s\n' "$STEP" "$status"; assert httpstatus test "$status" = 200; assert httphash test "$(hash "$B/probe.html")" = "$expected"; done
+for route in / /app; do
+  STEP=http-root; expected='@@ROOT_SHA@@'; if [[ $route == /app ]]; then STEP=http-app; expected='@@APP_SHA@@'; fi
+  status=$(probe "$route"); printf 'CHECK step=%s http=%s\n' "$STEP" "$status"
+  assert httpstatus test "$status" = 200; assert httphash test "$(hash "$B/probe.html")" = "$expected"
+done
 STEP=verify; assert current-is-new test "$(readlink -f "$S/current")" = "$N"; FLIPPED=0; printf 'PASS deploy revision=@@REVISION@@ H0=@@H0@@\n'
 # Rollback (same held Mac release lock): sudo -n bash @@RESERVE@@/SITE-DIRECT.sh rollback
