@@ -80,7 +80,25 @@ sys.exit(2)
 `;
   writeFileSync(join(bin, 'docker'), docker); chmodSync(join(bin, 'docker'), 0o755);
   writeFileSync(join(bin, 'pgrep'), '#!/bin/sh\nexit 1\n'); chmodSync(join(bin, 'pgrep'), 0o755);
-  const cfg = {state, controller, source_url: source, ssh_config: '/dev/null', allowed_hostname: good('hostname',['-s']),
+  const realGit = good('which', ['git']);
+  // Only the external source transport is replaced; git still resolves/clones
+  // real commits. Inspect the fetch environment before redirecting it locally.
+  const git = `#!/usr/bin/env python3
+import os,sys,json
+from pathlib import Path
+args=sys.argv[1:]
+if 'fetch' in args:
+    assert os.environ.get('GIT_CONFIG_NOSYSTEM') == '1'
+    assert os.environ.get('GIT_CONFIG_GLOBAL') == '/dev/null'
+    assert os.environ.get('GIT_TERMINAL_PROMPT') == '0'
+    assert 'https://github.com/yulanventures/commonswarm.git' in args
+    assert 'credential.helper=' in args and 'http.extraHeader=' in args
+    with Path(${JSON.stringify(join(root,'fetches.jsonl'))}).open('a') as f: f.write(json.dumps(args)+'\\n')
+    args[args.index('https://github.com/yulanventures/commonswarm.git')]=${JSON.stringify(source)}
+os.execv(${JSON.stringify(realGit)},[${JSON.stringify(realGit)},*args])
+`;
+  writeFileSync(join(bin, 'git'), git); chmodSync(join(bin, 'git'), 0o755);
+  const cfg = {state, controller, source_url: 'https://github.com/yulanventures/commonswarm.git', allowed_hostname: good('hostname',['-s']),
     controller_sha: 'a'.repeat(40), worker_image: 'sha256:' + '1'.repeat(64),
     dind_image: 'fixture@sha256:' + '2'.repeat(64), timeout_seconds: 10};
   const config = join(root, 'config.json');
@@ -182,7 +200,7 @@ test('cleanup refuses an exact-name container whose ownership label changed', as
   assert.equal(existsSync(join(f.state,'runs',receipt.run_id,'scratch')),true);
 });
 
-test('main resolves to one exact commit and busy PromptEden workers refuse before suite start', async () => {
+test('main resolves to one exact commit across all suites', async () => {
   const f = fixture({sleep:0.3});
   const running = start(f, f.args('all',['--ref','main']));
   let entered = false;
@@ -196,9 +214,83 @@ test('main resolves to one exact commit and busy PromptEden workers refuse befor
   good('git',['-C',f.source,'commit','-qam','advance main during run']);
   const r = await running; assert.equal(r.status,0,r.stderr);
   for (const receipt of f.receipts()) { assert.equal(receipt.requested_sha,'main'); assert.equal(receipt.resolved_sha,f.sha); }
+});
+
+test('source accepts only anonymous public HTTPS and ignores inherited Git configuration', async () => {
+  const f = fixture();
+  f.env.GIT_CONFIG_GLOBAL = '/must-not-read-pe-config';
+  f.env.GIT_CONFIG_SYSTEM = '/must-not-read-pe-system';
+  f.env.GIT_CONFIG_COUNT = '1';
+  f.env.GIT_CONFIG_KEY_0 = 'url.ssh://private/.insteadOf';
+  f.env.GIT_CONFIG_VALUE_0 = 'https://github.com/';
+  const ok = await start(f); assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(readFileSync(join(f.root,'fetches.jsonl'),'utf8').trim().split('\n').length, 1);
+  for (const url of ['git@github.com:yulanventures/commonswarm.git', 'https://github.com/other/repo.git']) {
+    f.cfg.source_url = url; writeFileSync(f.config, JSON.stringify(f.cfg));
+    const denied = await start(f); assert.notEqual(denied.status, 0);
+    assert.match(denied.stderr, /public CommonSwarm HTTPS URL/);
+  }
+});
+
+test('PE starting mid-suite removes only owned services, records pending deferral, then retries the same SHA quietly', async () => {
+  const f = fixture({sleep: 2});
+  const busyPath = join(f.root,'pe-active');
+  writeFileSync(join(f.root,'bin','pgrep'), `#!/bin/sh\ntest -e '${busyPath}'\n`);
+  const running = start(f);
+  let workerStarted = false;
+  for (let n=0; n<400; n++) {
+    const events = join(f.root,'events.jsonl');
+    if (existsSync(events) && readFileSync(events,'utf8').includes('-worker')) {workerStarted=true; break;}
+    await delay(10);
+  }
+  assert.equal(workerStarted,true,'PE starts only after the CI worker is active');
+  writeFileSync(busyPath,'active');
+  // Advance main while deferred: the retry must retain the original snapshot.
+  writeFileSync(join(f.source,'identity'),'later source during PE contention');
+  good('git',['-C',f.source,'commit','-qam','advance during PE work']);
+  let deferred;
+  for (let n=0; n<400; n++) {
+    const runs = join(f.state,'runs');
+    for (const name of readdirSync(runs)) {
+      const path = join(runs,name,'receipt.json');
+      if (existsSync(path)) {
+        const receipt = JSON.parse(readFileSync(path));
+        if (receipt.state === 'deferred') deferred = receipt;
+      }
+    }
+    if (deferred) break;
+    await delay(10);
+  }
+  assert.ok(deferred,'withdrawal persists an unfinished receipt before PE becomes quiet');
+  assert.equal(deferred.pending,true); assert.equal(deferred.exit_code,75);
+  assert.deepEqual(deferred.cleanup_errors,[]);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root,'containers.json'))),{unowned:{label:'some-other-run'}});
+  // The simulated PE job ends itself; the controller never cancels it.
+  writeFileSync(join(f.root,'bin','pgrep'),'#!/bin/sh\nexit 1\n');
+  const result = await running; assert.equal(result.status,0,result.stderr);
+  const receipts = f.receipts().sort((a,b)=>a.attempt-b.attempt);
+  assert.equal(receipts.length,2);
+  assert.deepEqual(receipts.map(r=>r.state),['deferred','completed']);
+  assert.equal(receipts[1].pending,false); assert.equal(receipts[1].exit_code,0);
+  assert.deepEqual(receipts[1].prior_attempts,[deferred.run_id]);
+  for (const r of receipts) assert.equal(r.resolved_sha,f.sha);
+  assert.equal(readFileSync(join(f.root,'fetches.jsonl'),'utf8').trim().split('\n').length,1);
+  const events = readFileSync(join(f.root,'events.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
+  const firstWorker = events.find(e=>e.action==='start' && e.name.endsWith('-worker'));
+  assert.ok(events.some(e=>e.action==='remove' && e.name===firstWorker.name));
+  assert.ok(!events.some(e=>e.action==='finish' && e.name===firstWorker.name));
+});
+
+test('PE quiet waiting consumes the suite budget and fails rather than passing deferred work', async () => {
+  const f = fixture(); f.cfg.timeout_seconds=1;
+  writeFileSync(f.config,JSON.stringify(f.cfg));
   writeFileSync(join(f.root,'bin','pgrep'),'#!/bin/sh\nexit 0\n');
-  const busy = await start(f); assert.equal(busy.status,75,busy.stderr);
-  assert.equal(f.receipts().filter(x => x.exit_code === 75).length,1);
+  const result = await start(f); assert.equal(result.status,124,result.stderr);
+  const [receipt] = f.receipts();
+  assert.equal(receipt.timed_out,true); assert.equal(receipt.state,'failed');
+  assert.equal(receipt.pending,false); assert.equal(receipt.exit_code,124);
+  assert.ok(!existsSync(join(f.root,'events.jsonl')) || !readFileSync(join(f.root,'events.jsonl'),'utf8').includes('-worker'));
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root,'containers.json'))),{unowned:{label:'some-other-run'}});
 });
 
 test('retention deletes only expired completed owned runs and rejects root/home/escape/symlink scratch paths', () => {

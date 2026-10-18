@@ -81,13 +81,13 @@ python3 - "$reviewed_sha" "$worker_image" "$dind_image" <<'PY'
 import json, sys
 cfg=dict(controller_sha=sys.argv[1],worker_image=sys.argv[2],dind_image=sys.argv[3],
          state='/var/lib/commonswarm-ci',controller='/opt/commonswarm-ci/scripts',
-         source_url='git@github.com:yulanventures/commonswarm.git',
-         ssh_config='/opt/commonswarm-ci/ssh_config',allowed_hostname='pe-ci-1',timeout_seconds=1800)
+         source_url='https://github.com/yulanventures/commonswarm.git',
+         allowed_hostname='pe-ci-1',timeout_seconds=1800)
 open('/opt/commonswarm-ci/config.json','w').write(json.dumps(cfg,indent=2)+'\n')
 PY
 chmod 0644 /opt/commonswarm-ci/config.json
 install -m 0644 deploy/ci/commonswarm-nightly.service deploy/ci/commonswarm-nightly.timer /etc/systemd/system/
 systemctl daemon-reload
-# Installation deliberately does not enable/start a job. Root first installs
-# the new read-only deploy key and pinned SSH host key, then verifies controls.
-echo 'Installed disabled timer and immutable tools. Root must provision repository-only SSH access and verify before enabling.'
+# Installation deliberately does not enable/start a job. Public HTTPS source
+# requires no key or host Git changes. Root first verifies controls.
+echo 'Installed disabled timer and immutable tools. Root must verify before enabling.'

@@ -38,7 +38,20 @@ The channel failure remains unclassified until controlled exact-SHA isolated,
 full-suite and ten-repeat CI-host probes. No flake claim or timeout change is made.
 
 Root completion gates: independent cross-family review; coordinate pe-ci-1
-capacity; provision reviewed SHA and new read-only deploy key; run focused controls
+capacity; provision reviewed SHA using public anonymous HTTPS; run focused controls
 and all five suites; inspect exact-SHA receipts and historical probes; verify one
 timer run; then remove the two old CommonSwarm triggers. Record those receipts
 here before claiming migration, scheduler cutover or historical diagnosis complete.
+
+Follow-up delta against `19f1cc55`: public repository fetch now requires the exact
+anonymous HTTPS source URL and ignores inherited/global/system Git configuration;
+no CommonSwarm deploy key or SSH config is required. No host Git settings changed.
+Active-command polling detects new PE workers, withdraws owned work, preserves a
+deferred receipt, and retries the same snapshot when quiet under the original
+suite deadline. Cleanup failures stop retrying; expired quiet waits fail with 124.
+Focused semantic cases were authored for mid-suite PE arrival/owned cleanup/
+deferred receipt/quiet same-SHA completion, public-source configuration isolation,
+and bounded contention failure; the existing active-suite timeout case remains.
+Delta validation is syntax only on the Mini; Root CI must execute these cases,
+all five real suites, historical probes and controlled overlap/memory/withdrawal
+measurement before provisioning activation or cutover is claimed complete.
