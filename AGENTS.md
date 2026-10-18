@@ -231,7 +231,7 @@ The operational procedure is [deploy/RELEASE-TO-BOX.md](deploy/RELEASE-TO-BOX.md
 |---|---|---|
 | Stack | Reviewed repository archive for an exact SHA on `main`, unpacked at `/home/commonswarm/stack/releases/<sha>`, then released through `deploy/RELEASE-TO-BOX.md`. | No. |
 | Edge | Reviewed repository archive for an exact SHA on `main`, unpacked at `/home/commonswarm/edge/releases/<sha>`, then recreated on `commonswarm-net` through `deploy/RELEASE-TO-BOX.md`. | No. The six-hour recycle timer only mitigates the live leak. |
-| Site | `deploy/site/deploy.sh` builds `site/` from a clean archive of the checked-out `HEAD`, validates it, uploads a release, and atomically changes `/srv/commonswarm/site/current`. HezLead and Anvil own execution. | No. |
+| Site | `deploy/site/build-artifact.sh` builds the exact reviewed SHA off production with explicit public config/H0 and pinned Node; `deploy.sh prepare` renders a hash-bound packet. Anvil stages and executes static extraction, atomic swap and rollback under the held Mac release lock; old reserves remain. See `deploy/site/RUNBOOK.md`. | No. |
 | CLI | `scripts/build-release.sh` creates the checked single-file CLI and checksum. `scripts/build-npm.sh` creates the npm package from that same bundle. | No publish workflow exists in this repo. |
 | Schema | A schema change is a production operation performed once through `deploy/RELEASE-TO-BOX.md`. It is not applied by CI or by merging `main`. | No. |
 
