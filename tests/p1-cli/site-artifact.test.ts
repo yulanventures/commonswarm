@@ -157,12 +157,13 @@ test(`${lane}: H0=1 requires emitted controls; explicit H0=0 omits them`, async 
 
 test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls back failures and drift`, { skip: !linuxProof }, async () => {
   const curl = (await exec('which', ['curl'])).stdout.trim();
-  for (const variant of ['success', 'root-status', 'app-status', 'root-body', 'app-body', 'curl-failure', 'asset-drift', 'current-drift', 'artifact-pin', 'build-pin', 'closed-pipe', 'closed-pipe-failure', 'find-failure', 'flip-failure', 'missing-old', 'rollback-status', 'hup']) {
+  for (const variant of ['success', 'root-status', 'app-status', 'root-body', 'app-body', 'curl-failure', 'asset-drift', 'current-drift', 'artifact-pin', 'build-pin', 'closed-pipe', 'closed-pipe-failure', 'find-failure', 'flip-failure', 'missing-old', 'rollback-status', 'hup', 'unchanged-unhealthy']) {
     const packet = await prepare(`run-${variant}`), site = join(root, `site-${variant}`), old = join(site, 'releases/old');
     await mkdir(join(old, 'app'), { recursive: true }); await writeFile(join(old, 'index.html'), 'old root'); await writeFile(join(old, 'app/index.html'), 'old app');
     await mkdir(join(old, '_astro'), { recursive: true }); await writeFile(join(old, '_astro/retained.js'), 'old asset');
     await symlink('releases/old', join(site, 'current')); await mkdir(join(site, 'releases/reserve'));
     const oldProbes = new Set<string>();
+    let unhealthyOldApp = false;
     let notifyHeld!: () => void, releaseHeld!: () => void;
     const probeHeld = new Promise<void>(r => { notifyHeld = r; });
     const probeReleased = new Promise<void>(r => { releaseHeld = r; });
@@ -173,6 +174,7 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
       const isNew = (await readlink(join(site, 'current'))) !== 'releases/old';
       if (isNew && variant === 'hup') { notifyHeld(); await probeReleased; }
       if (!isNew) oldProbes.add(req.url!);
+      if (!isNew && unhealthyOldApp && req.url === '/app') { res.writeHead(503); res.end(); return; }
       if (isNew && variant === `${req.url === '/app' ? 'app' : 'root'}-status`) { res.writeHead(503); res.end('unavailable'); return; }
       if (isNew && variant === `${req.url === '/app' ? 'app' : 'root'}-body`) { res.end('wrong HTML'); return; }
       try { res.end(await readFile(join(site, 'current', route))); } catch { res.writeHead(404); res.end(); }
@@ -198,7 +200,7 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
     }
     try {
       const run = () => exec('bash', variant.startsWith('closed-pipe') ? ['-c', 'exec 1>&- 2>&-; exec bash "$1" deploy', 'fixture', join(packet, 'run.sh')] : [join(packet, 'run.sh'), 'deploy'], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, ...(variant === 'hup' ? { timeout: 30_000 } : {}) });
-      if (['success', 'closed-pipe', 'missing-old'].includes(variant)) {
+      if (['success', 'closed-pipe', 'missing-old', 'unchanged-unhealthy'].includes(variant)) {
         const completed = await run();
         assert.equal(completed.stdout, ''); assert.equal(completed.stderr, '');
         assert.match(await readFile(join(packet, 'hostrun.log'), 'utf8'), /PASS deploy/);
@@ -213,6 +215,18 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
         }
         await exec('bash', [join(packet, 'run.sh'), 'rollback'], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
         assert.equal(await readlink(join(site, 'current')), 'releases/old');
+        if (variant === 'unchanged-unhealthy') {
+          // Root still returns 200: the already-old path must also probe /app.
+          unhealthyOldApp = true;
+          const offset = (await readFile(join(packet, 'hostrun.log'), 'utf8')).length;
+          await assert.rejects(exec('bash', [join(packet, 'run.sh'), 'rollback'], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } }), (error: unknown) => {
+            assert.equal((error as { code: number }).code, 1); return true;
+          });
+          const failure = (await readFile(join(packet, 'hostrun.log'), 'utf8')).slice(offset);
+          assert.match(failure, /assertion=rollback-httpstatus/); assert.doesNotMatch(failure, /PASS rollback/);
+          assert.equal(await readlink(join(site, 'current')), 'releases/old');
+          unhealthyOldApp = false;
+        }
         await exec('bash', [join(packet, 'run.sh'), 'rollback'], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
       } else {
         if (variant === 'hup') {
@@ -245,7 +259,7 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
         if (variant === 'find-failure') assert.match(output, /FAIL step=old-assets/);
         assert.equal(await readlink(join(site, 'current')), variant === 'current-drift' ? 'releases/reserve' : 'releases/old');
       }
-      if (['success', 'closed-pipe', 'closed-pipe-failure', 'missing-old', 'root-status', 'app-status', 'root-body', 'app-body', 'curl-failure', 'hup'].includes(variant)) assert.deepEqual([...oldProbes].sort(), ['/', '/app']);
+      if (['success', 'closed-pipe', 'closed-pipe-failure', 'missing-old', 'root-status', 'app-status', 'root-body', 'app-body', 'curl-failure', 'hup', 'unchanged-unhealthy'].includes(variant)) assert.deepEqual([...oldProbes].sort(), ['/', '/app']);
       assert.equal((await stat(join(packet, 'hostrun.log'))).mode & 0o777, 0o600);
       assert.ok((await readdir(join(site, 'releases'))).includes('reserve'));
       assert.equal(await readFile(join(old, '_astro/retained.js'), 'utf8'), 'old asset');

@@ -75,8 +75,10 @@ old pointer, extracts into a new immutable release directory, retains every old
 normalizes modes, refuses pointer drift, and atomically renames `current`.
 Named-user-agent HTTP probes require status 200 and exact HTML hashes for `/`
 and `/app`. All production-script output appends to the private reserve
-`hostrun.log`, so closed SSH output cannot bypass probes or rollback; inspect that log host-side
-under the same held lock after a transport failure. Failed probes trigger
+`hostrun.log`, so closed SSH output cannot bypass probes or rollback. The wrapper tails
+that log only after the program finishes and preserves its exit code. After any
+nonzero exit, including transport failure, inspect the log host-side under the
+same held lock. Failed probes trigger
 automatic rollback. Rollback requires the old directory to exist, restores the
 exact old pointer, and requires `/` and `/app` to return 200. It reports an
 unchanged pointer when the swap never occurred or rollback already completed.

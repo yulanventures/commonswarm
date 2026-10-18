@@ -10,14 +10,15 @@ hash() { sha256sum "$1" | cut -d' ' -f1; }
 flip() { ln -s "$1" "$S/current.@@RELEASE@@" && mv -Tf "$S/current.@@RELEASE@@" "$S/current"; }
 probe() { curl --silent --show-error --compressed --max-time 20 --max-filesize 16777216 -A CommonSwarmReleaseCheck/1.0 -H 'Cache-Control: no-cache' -o "$B/probe.html" -w '%{http_code}' "https://commonswarm.com$1"; }
 rollback() {
-  STEP=rollback; local old; old=$(cat "$B/old.link") || return 1
+  STEP=rollback; local old unchanged=''; old=$(cat "$B/old.link") || return 1
   case $old in /*) assert old-directory test -d "$old";; *) assert old-directory test -d "$S/$old";; esac || return 1
-  if [[ $(readlink "$S/current") == "$old" ]]; then printf 'PASS rollback unchanged\n'; return; fi
-  assert current-is-new test "$(readlink -f "$S/current")" = "$N" || return 1
-  flip "$old" || return 1
-  assert exact-old-link test "$(readlink "$S/current")" = "$old" || return 1
+  if [[ $(readlink "$S/current") == "$old" ]]; then unchanged=' unchanged'; else
+    assert current-is-new test "$(readlink -f "$S/current")" = "$N" || return 1
+    flip "$old" || return 1
+    assert exact-old-link test "$(readlink "$S/current")" = "$old" || return 1
+  fi
   for route in / /app; do assert rollback-httpstatus test "$(probe "$route")" = 200 || return 1; done
-  printf 'PASS rollback\n'
+  printf 'PASS rollback%s\n' "$unchanged"
 }
 finish() { rc=$?; trap - EXIT; if ((rc)); then printf 'FAIL step=%s status=%s\n' "$STEP" "$rc"; if ((FLIPPED)); then rollback || printf 'FAIL rollback; retain reserve and lock\n'; fi; fi; exit "$rc"; }
 trap finish EXIT; trap 'exit 130' INT; trap 'exit 143' TERM HUP

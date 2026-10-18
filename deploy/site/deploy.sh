@@ -22,6 +22,6 @@ if [[ $MODE == stage ]]; then
   COPYFILE_DISABLE=1 tar -C "$PACKET" -cf - site.tar BUILD.json SITE-DIRECT.sh RESERVE PACKET.sha256 |
     ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$HOST" "sudo -n bash -c 'set -eu; umask 077; mkdir $RESERVE; tar --no-same-owner -xf - -C $RESERVE; cd $RESERVE; test \"\$(sha256sum PACKET.sha256 | cut -d\" \" -f1)\" = $PIN; sha256sum -c PACKET.sha256'"
 else
-  ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$HOST" "sudo -n bash -c 'set -eu; cd $RESERVE; test \"\$(sha256sum PACKET.sha256 | cut -d\" \" -f1)\" = $PIN; sha256sum -c PACKET.sha256; exec bash SITE-DIRECT.sh $MODE'"
+  ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$HOST" "sudo -n bash -c 'set -eu; cd $RESERVE; test \"\$(sha256sum PACKET.sha256 | cut -d\" \" -f1)\" = $PIN; sha256sum -c PACKET.sha256; rc=0; bash SITE-DIRECT.sh $MODE || rc=\$?; tail -n 40 hostrun.log || :; exit \$rc'"
 fi
 printf 'PASS %s; keep the Mac lock through verification or rollback.\n' "$MODE"
