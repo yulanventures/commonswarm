@@ -147,11 +147,12 @@ with (state / 'queue.lock').open('a') as lock:
     if not source.exists():
         cmd(['git', 'init', '--bare', str(source)], stdout=sp.DEVNULL, interruptible=True)
     # Replace repository-local transport, hooks, includes and rewrite settings.
-    # The enclosing private directory excludes other host workload identities.
+    # Private permissions exclude unprivileged identities, not root/Docker admins.
     (source / 'config').write_text('[core]\nrepositoryformatversion = 0\nbare = true\n')
     git = ['git', '-c', 'credential.helper=', '-c', 'http.extraHeader=',
            '--git-dir=' + str(source)]
-    cmd(git + ['fetch', '--quiet', '--tags', SOURCE_URL,
+    cmd(git + ['fetch', '--quiet', SOURCE_URL,
+               '+refs/tags/*:refs/tags/*',
                '+refs/heads/main:refs/heads/main',
                '+refs/heads/main:refs/remotes/origin/main'], timeout=120, interruptible=True)
     if stopping:
@@ -272,7 +273,7 @@ with (state / 'queue.lock').open('a') as lock:
                              '--env', 'DOCKER_HOST=tcp://127.0.0.1:2375', '--env', 'DOCKER_TLS_CERTDIR=',
                              '--env', 'RUNNER_TEMP=/tmp', '--env', 'PLAYWRIGHT_BROWSERS_PATH=/ms-playwright',
                              '--env', 'C1_CADDY_BINARY=/usr/local/bin/caddy',
-                             '--env', 'CSCI_PROJECT=' + run_id, cfg['worker_image'],
+                             '--env', 'CSCI_PROJECT=' + run_id, '--env', 'CSCI_REQUESTED=' + requested, cfg['worker_image'],
                              '/bin/bash', '/controller/suite.sh', suite])
                     code = 0
                 except Deferred:
@@ -299,6 +300,8 @@ with (state / 'queue.lock').open('a') as lock:
                                 if found.stdout.strip() != run_id:
                                     raise RuntimeError('ownership mismatch: ' + name)
                                 cmd(['docker', 'rm', '-fv', name], stdout=log, stderr=log, timeout=60)
+                            elif found.returncode < 0:
+                                raise RuntimeError('cleanup inspect interrupted: ' + name + ' rc=' + str(found.returncode))
                             elif sp.run(['docker', 'info'], stdout=sp.DEVNULL, stderr=sp.DEVNULL, timeout=20).returncode:
                                 raise RuntimeError('Docker unavailable during cleanup')
                         except Exception as e:
@@ -319,6 +322,8 @@ with (state / 'queue.lock').open('a') as lock:
                                 if found.stdout.strip() != run_id:
                                     raise RuntimeError('cleaner ownership mismatch')
                                 cmd(['docker', 'rm', '-fv', cleaner], stdout=log, stderr=log, timeout=60)
+                            elif found.returncode < 0:
+                                raise RuntimeError('cleanup inspect interrupted: ' + cleaner + ' rc=' + str(found.returncode))
                         except Exception as e:
                             receipt['cleanup_errors'].append(type(e).__name__ + ': ' + str(e))
                     try:
@@ -327,6 +332,8 @@ with (state / 'queue.lock').open('a') as lock:
                             if found.stdout.strip() != run_id:
                                 raise RuntimeError('network ownership mismatch')
                             cmd(['docker', 'network', 'rm', run_id], stdout=log, stderr=log, timeout=60)
+                        elif found.returncode < 0:
+                            raise RuntimeError('cleanup network inspect interrupted: rc=' + str(found.returncode))
                     except Exception as e:
                         receipt['cleanup_errors'].append(type(e).__name__ + ': ' + str(e))
             if stopping:

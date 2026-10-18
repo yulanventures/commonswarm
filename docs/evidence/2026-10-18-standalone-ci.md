@@ -81,3 +81,22 @@ measured memory headroom; actual nested loopback bindings; timer stop/owned clea
 completed timer receipts; historical p1 probes; only then trigger cutover.
 Memory fit is unmeasured. Inputs float at rebuild time despite runtime image pins.
 Versioned upgrades and broader supply-chain pinning remain parked as directed.
+
+Final review delta against cbd46e8c: KillMode=mixed preserves controller-only
+SIGTERM and bounded cgroup escalation; negative Docker inspect returns now record
+cleanup errors, retain scratch and prevent later suites through the stop latch.
+Tag fetch uses a forced refspec. Manual runuser includes the dedicated primary
+group and supplementary docker group, conditional on Root checking host CLI support.
+The site-artifact gate executes whenever present; absent older exact source records
+site-artifact-not-applicable-at-source=77, while absence on main fails the source
+gate. Provision rollback disables errexit, attempts all owned cleanup, reports
+failures and preserves the original nonzero exit. Private state does not protect
+against root/Docker administrators; gha group metadata remains a Root check.
+Mini focused validation: 19 cases, 18 pass, 0 fail, 1 expected Linux/Docker skip
+(the original 17 semantic cases plus the interrupted-inspect regression pass).
+The new regression fails against the cbd46e8c controller at the missing cleanup-error
+assertion. Three isolated shell probes prove present test execution/failure
+propagation, absent exact-source status 77, and absent-main source failure.
+Shell/Node syntax, embedded Python compilation and git diff --check pass.
+No host, production, fleet, site or fixture checkout changes; no builds, provisioning,
+SSH, Actions, full suites, commits or pushes. Root arranges final review/host gates.

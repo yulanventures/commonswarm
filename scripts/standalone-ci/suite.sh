@@ -117,7 +117,14 @@ SH
     for user in commonswarm caddy ops; do
       id -u "$user" >/dev/null 2>&1 || useradd --no-create-home --shell /usr/sbin/nologin "$user"
     done
-    gate site-artifact node --import tsx --test tests/p1-cli/site-artifact.test.ts || failed=1
+    if [[ -f tests/p1-cli/site-artifact.test.ts ]]; then
+      gate site-artifact node --import tsx --test tests/p1-cli/site-artifact.test.ts || failed=1
+    elif [[ "${CSCI_REQUESTED:?requested source required}" = main ]]; then
+      gate site-artifact-source test -f tests/p1-cli/site-artifact.test.ts || failed=1
+    else
+      printf '77\n' >/tmp/gates/site-artifact-not-applicable-at-source
+      echo 'site-artifact: not applicable at requested exact source (file absent)'
+    fi
     gate box-dry-run npm run test:box-dry-run || failed=1
     ;;
 esac

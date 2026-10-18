@@ -69,6 +69,9 @@ if args[0]=='run':
         sys.exit(control.get('exit',{}).get(args[-1],0))
     sys.exit(0)
 if args[0]=='inspect':
+    if args[-1].endswith('-worker') and ${control.killInspect ? "True" : "False"}:
+        os.kill(os.getppid(),signal.SIGTERM)
+        os.kill(os.getpid(),signal.SIGTERM)
     store=json.loads(p.read_text()); found=store.get(args[-1])
     if found: print(found['label']); sys.exit(0)
     sys.exit(1)
@@ -106,9 +109,9 @@ if 'fetch' in args:
     assert 'insteadOf' not in cfg.read_text() and 'include' not in cfg.read_text()
     with Path(${JSON.stringify(join(root,'fetches.jsonl'))}).open('a') as f: f.write(json.dumps(args)+'\\n')
     args[args.index('https://github.com/yulanventures/commonswarm.git')]=${JSON.stringify(source)}
-    if ${control.dropMain ? "True" : "False"} and '--tags' in args:
+    if ${control.dropMain ? "True" : "False"} and '+refs/tags/*:refs/tags/*' in args:
         args=[a for a in args if not a.startswith('+refs/heads/main:')]+['refs/heads/main']
-        args.remove('--tags')
+        args.remove('+refs/tags/*:refs/tags/*')
 os.execv(${JSON.stringify(realGit)},[${JSON.stringify(realGit)},*args])
 `;
   writeFileSync(join(bin, 'git'), git); chmodSync(join(bin, 'git'), 0o755);
@@ -403,4 +406,16 @@ test('signal during scratch retention prevents following suites', async () => {
   const r=await start(f,f.args('all')); assert.equal(r.status,130,r.stderr);
   assert.equal(f.receipts().length,1);
   assert.deepEqual(JSON.parse(readFileSync(join(f.root,'containers.json'))),{unowned:{label:'some-other-run'}});
+});
+
+// A killed inspect used to disappear into a successful Docker info probe.
+test('interrupted inspect records cleanup failure, retains scratch and stops later suites', async () => {
+  const f=fixture({killInspect:true}); const r=await start(f,f.args('all'));
+  assert.equal(r.status,130,r.stderr);
+  const receipts=f.receipts(); assert.equal(receipts.length,1);
+  assert.equal(receipts[0].exit_code,130);
+  assert.ok(receipts[0].cleanup_errors.some(e=>/cleanup inspect interrupted:.*rc=-15/.test(e)));
+  assert.equal(existsSync(join(f.state,'runs',receipts[0].run_id,'scratch')),true);
+  const store=JSON.parse(readFileSync(join(f.root,'containers.json')));
+  assert.deepEqual(Object.keys(store).sort(),[receipts[0].run_id+'-worker','unowned'].sort());
 });

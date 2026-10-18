@@ -15,7 +15,8 @@ ExecStart=/bin/bash /opt/commonswarm-ci/scripts/run.sh --ref main --suite all
 # Queue wait plus five serial 30m bounds and owned-service cleanup.
 TimeoutStartSec=14400
 TimeoutStopSec=900
-KillMode=control-group
+# SIGTERM reaches the controller; SIGKILL still bounds the whole cgroup.
+KillMode=mixed
 Nice=10
 IOSchedulingClass=idle
 

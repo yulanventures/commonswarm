@@ -61,6 +61,9 @@ Root installation, after independent review and contention coordination:
    publisher checksums; Caddy also checks the independently pinned SHA-512 and
    exact binary version. Resulting worker ID and DinD digest are pinned in config.
    Docker build cache contains only public tools; private source stays mode 0700.
+   Private permissions do not isolate state from root or Docker administrators,
+   who can bind-mount host paths. PE's service user is `gha`; its group metadata
+   remains pending Root verification. No PE privileges or groups are changed.
    It creates a dedicated `commonswarm-ci:commonswarm-ci` account, checks that
    primary group, and builds `ciworker` with its actual UID/GID for writable
    private mounts. It leaves PE's `gha` account, home and fleet untouched.
@@ -90,12 +93,16 @@ Root installation, after independent review and contention coordination:
    No host Git configuration changes are needed; PE credentials are not reused.
 3. Run `node --test tests/standalone-ci-guard.test.mjs` on the Linux CI host in a
    quiet window. Then run the exact-SHA `--suite all` command as the dedicated
-   account: `runuser -u commonswarm-ci -- bash /opt/commonswarm-ci/scripts/run.sh
+   account, after Root verifies host `runuser` supports `-g`/`-G`:
+   `runuser -u commonswarm-ci -g commonswarm-ci -G docker -- bash /opt/commonswarm-ci/scripts/run.sh
    --sha <40-lowercase-hex> --suite all` (one shell line). H0 fixture runuser
    examples must use `commonswarm-ci`, never the PE runner account.
-   Root must merge #86 first: the root box suite explicitly runs
+   Root must merge #86 before current-main acceptance: the root box suite runs
    `node --import tsx --test tests/p1-cli/site-artifact.test.ts`, including
-   Linux/root rendered-swap cases. This PR does not copy or edit that test.
+   Linux/root rendered-swap cases whenever the file exists. Older exact-SHA
+   sources without it record `site-artifact-not-applicable-at-source=77`,
+   separately from a test pass. Missing it on `--ref main` fails the source gate.
+   This PR does not copy or edit that test.
    Inspect all five receipts and actual gate counts; do not call a zero-test or
    skipped suite passing. The new controls also run in the standalone unit gate.
 4. Enable the installed timer with `systemctl enable --now commonswarm-nightly.timer`.
@@ -124,7 +131,10 @@ is capped at 60 seconds. The service has a finite 14400-second startup limit
 (queue, fetches, five 1800-second suites and teardown allowance); stop allows
 900 seconds, exceeding the bounded cleanup path. A persistent stop latch
 terminates active work and prevents new suites/attempts, including signals
-during queue wait, cleanup or retention. Cleanup still finishes for owned work.
+during queue wait, cleanup or retention. `KillMode=mixed` sends initial SIGTERM
+only to the controller, allowing owned cleanup and retention to finish before the
+cgroup kill deadline. A signal-killed Docker inspect is a cleanup error and retains
+scratch for Root; it cannot silently fall back to a successful Docker info probe.
 `COMMONSWARM_CI_CONFIG` selects an operator-owned config (also used by disposable
 fixture tests); `timeout_seconds` may reduce the suite limit but cannot exceed it.
 

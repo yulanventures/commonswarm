@@ -38,6 +38,7 @@ created_user=0
 created_group=0
 cleanup() {
   result=$?
+  set +e
   trap - EXIT
   if (( result != 0 )); then
     for ((i=${#created[@]}-1; i>=0; i--)); do
@@ -52,10 +53,15 @@ assert p in allowed and not p.is_symlink() and p.resolve() == p
 if p.is_dir(): shutil.rmtree(p)
 elif p.exists(): p.unlink()
 PYREMOVE
+      if (( $? != 0 )); then echo "cleanup failed: ${created[i]}" >&2; fi
     done
-    (( created_user == 0 )) || userdel commonswarm-ci
-    if (( created_group != 0 )) && getent group commonswarm-ci >/dev/null; then groupdel commonswarm-ci; fi
-    systemctl daemon-reload
+    if (( created_user != 0 )); then
+      userdel commonswarm-ci || echo 'cleanup failed: userdel commonswarm-ci' >&2
+    fi
+    if (( created_group != 0 )) && getent group commonswarm-ci >/dev/null; then
+      groupdel commonswarm-ci || echo 'cleanup failed: groupdel commonswarm-ci' >&2
+    fi
+    systemctl daemon-reload || echo 'cleanup failed: systemctl daemon-reload' >&2
   fi
   python3 - "$stage" <<'PYSTAGE'
 import pathlib, shutil, sys
@@ -64,6 +70,10 @@ assert p.parent == pathlib.Path('/var/tmp') and p.name.startswith('commonswarm-p
 assert not p.is_symlink() and p.resolve() == p and p != pathlib.Path.home()
 shutil.rmtree(p)
 PYSTAGE
+  if (( $? != 0 )); then
+    echo "cleanup failed: staging directory $stage" >&2
+    (( result != 0 )) || result=1
+  fi
   exit "$result"
 }
 trap cleanup EXIT
