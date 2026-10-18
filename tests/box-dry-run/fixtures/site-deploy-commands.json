@@ -1,6 +1,6 @@
 {
   "scripts": ["deploy/site/deploy.sh", "deploy/site/finalize-release.sh"],
-  "note": "Lane 8 step site-04 runs the real deploy/site/deploy.sh, and through it the real finalize-release.sh on the fixture box root. This file lists every command those two scripts run and how the dry run answers it: a stub (fail-closed: any other shape exits 69), a real host tool (run for real on the fixture tree), or a shell builtin. tests/box-dry-run.test.ts derives the commands from the script text and fails on one this file does not list; the stubs refuse every shape not listed here.",
+  "note": "Historical inventory binds to site_release_sha in site-release-inputs.json, independent of current artifact tooling (covered by site-artifact.test.ts). Lane 8 step site-04 runs the real deploy/site/deploy.sh, and through it the real finalize-release.sh on the fixture box root. This file lists every command those two scripts run and how the dry run answers it: a stub (fail-closed: any other shape exits 69), a real host tool (run for real on the fixture tree), or a shell builtin. tests/box-dry-run.test.ts derives the commands from the script text and fails on one this file does not list; the stubs refuse every shape not listed here.",
   "builtins": ["cd", "pwd", "printf", "command", "test", "[", "exit", "return", "trap", "set", "shift", "export"],
   "stubs": {
     "ssh": {

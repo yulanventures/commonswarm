@@ -4,13 +4,22 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, readlink, rm, stat, symlink, 
 import { createServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+// These legacy release/deletion cases describe the pre-artifact release contract.
+// Keep their protective assertions against its exact source revision; current packet
+// behavior is exercised by site-artifact.test.ts at the rendered-script boundary.
+const historicalRoot = await mkdtemp(join(tmpdir(), "commonswarm-site-historical-"));
 const deployRoot = join(repoRoot, "deploy/site");
+for (const name of ["deploy.sh", "finalize-release.sh"]) {
+  const { stdout } = await execFileAsync("git", ["-C", repoRoot, "show", `a29fca08cbd33ef7880e651207daaba97db84bb0:deploy/site/${name}`], { maxBuffer: 4 * 1024 * 1024 });
+  await writeFile(join(historicalRoot, name), name === "deploy.sh" ? stdout.replace(/repo_root=\$\(CDPATH=[^\n]+/, `repo_root="${repoRoot}"`) : stdout);
+}
+after(async () => { await rm(historicalRoot, { recursive: true, force: true }); });
 
 interface Route {
   path: string;
@@ -260,7 +269,7 @@ test("deploy dry-run refuses an empty /start backend URL", async () => {
       "utf8",
     );
     await assert.rejects(
-      execFileAsync("sh", [join(deployRoot, "deploy.sh"), "--dry-run", "--dist", fixture], {
+      execFileAsync("sh", [join(historicalRoot, "deploy.sh"), "--dry-run", "--dist", fixture], {
         cwd: repoRoot,
         encoding: "utf8",
         timeout: 10_000,
@@ -280,7 +289,7 @@ test("deploy dry-run refuses an empty /start backend URL", async () => {
     );
     const accepted = await execFileAsync(
       "sh",
-      [join(deployRoot, "deploy.sh"), "--dry-run", "--dist", fixture],
+      [join(historicalRoot, "deploy.sh"), "--dry-run", "--dist", fixture],
       { cwd: repoRoot, encoding: "utf8", timeout: 10_000 },
     );
     assert.match(accepted.stdout, /Dry run passed/);
@@ -303,11 +312,11 @@ test("deploy npm runs inside its site directory, independent of caller cwd", asy
     );
     const result = await execFileAsync(
       "sh",
-      [join(deployRoot, "deploy.sh"), "--dry-run", "--npm-ci", site],
+      [join(historicalRoot, "deploy.sh"), "--dry-run", "--npm-ci", site],
       { cwd: elsewhere, encoding: "utf8", timeout: 20_000 },
     );
     assert.match(result.stdout, /up to date/);
-    const script = await readFile(join(deployRoot, "deploy.sh"), "utf8");
+    const script = await readFile(join(historicalRoot, "deploy.sh"), "utf8");
     assert.match(script, /\(cd "\$site_dir" && npm "\$@" <\/dev\/null\)/);
     assert.doesNotMatch(script, /npm --prefix/);
   } finally {
@@ -353,7 +362,7 @@ test("release finalization keeps old assets, normalizes modes, prunes, and refus
     await chmod(temporary, 0o700);
     await chmod(join(temporary, "_astro/new.js"), 0o600);
 
-    await execFileAsync("sh", [join(deployRoot, "finalize-release.sh"), temporary, final, siteRoot], {
+    await execFileAsync("sh", [join(historicalRoot, "finalize-release.sh"), temporary, final, siteRoot], {
       cwd: fixture,
       encoding: "utf8",
       env: { ...process.env, CLICOLOR_FORCE: "1" },
@@ -372,7 +381,7 @@ test("release finalization keeps old assets, normalizes modes, prunes, and refus
     const collisionTemp = join(releases, "collision.tmp");
     await mkdir(collisionTemp);
     await assert.rejects(
-      execFileAsync("sh", [join(deployRoot, "finalize-release.sh"), collisionTemp, final, siteRoot], {
+      execFileAsync("sh", [join(historicalRoot, "finalize-release.sh"), collisionTemp, final, siteRoot], {
         cwd: fixture,
         encoding: "utf8",
         timeout: 10_000,
@@ -383,17 +392,17 @@ test("release finalization keeps old assets, normalizes modes, prunes, and refus
       },
     );
 
-    const deployScript = await readFile(join(deployRoot, "deploy.sh"), "utf8");
+    const deployScript = await readFile(join(historicalRoot, "deploy.sh"), "utf8");
     // The upload runs on the operator's mac, whose openrsync rejects --chmod; modes are normalized on the box by
     // finalize-release.sh (proved by the 0700/0600 fixture above).
     assert.match(deployScript, /rsync -a --delete "\$checkout\/site\/dist\/"/);
     assert.doesNotMatch(deployScript.replace(/^\s*#.*$/gm, ""), /--chmod/);
     assert.match(deployScript, /CDPATH= cd -P -- "\$path_to_resolve"/);
     assert.doesNotMatch(deployScript, /find .*-(?:maxdepth|printf)|date .*%N/);
-    const finalizeScript = await readFile(join(deployRoot, "finalize-release.sh"), "utf8");
+    const finalizeScript = await readFile(join(historicalRoot, "finalize-release.sh"), "utf8");
     assert.doesNotMatch(finalizeScript.replace(/^\s*#.*$/gm, ""), /\bls\b/);
     const names = await Promise.all([0, 1].map(async () =>
-      (await execFileAsync("sh", [join(deployRoot, "deploy.sh"), "--dry-run", "--release-name"], {
+      (await execFileAsync("sh", [join(historicalRoot, "deploy.sh"), "--dry-run", "--release-name"], {
         cwd: fixture,
         encoding: "utf8",
         timeout: 10_000,
@@ -435,7 +444,7 @@ exec /bin/rm "$@"
 
     const result = await execFileAsync(
       "sh",
-      [join(deployRoot, "finalize-release.sh"), temporary, final, siteRoot],
+      [join(historicalRoot, "finalize-release.sh"), temporary, final, siteRoot],
       {
         cwd: fixture,
         encoding: "utf8",
@@ -476,16 +485,16 @@ test("site env validator rejects a service-role JWT without printing it", async 
     "fixture-signature",
   ].join(".");
   try {
-    const envPath = join(fixture, ".env");
-    await writeFile(envPath, `PUBLIC_SUPABASE_URL=https://example.invalid\nPUBLIC_SUPABASE_ANON_KEY=${token("anon")}\n`);
-    await execFileAsync(process.execPath, [join(deployRoot, "validate-site-env.mjs"), envPath], {
+    const envPath = join(fixture, "public.json");
+    await writeFile(envPath, JSON.stringify({ PUBLIC_SUPABASE_URL: "https://api.commonswarm.com", PUBLIC_SUPABASE_ANON_KEY: token("anon") }));
+    await execFileAsync(process.execPath, [join(deployRoot, "validate-site-env.mjs"), "config", envPath, "1", join(fixture, "validated.json")], {
       encoding: "utf8",
       timeout: 10_000,
     });
     const serviceRole = token("service_role");
-    await writeFile(envPath, `PUBLIC_SUPABASE_URL=https://example.invalid\nPUBLIC_SUPABASE_ANON_KEY=${serviceRole}\n`);
+    await writeFile(envPath, JSON.stringify({ PUBLIC_SUPABASE_URL: "https://api.commonswarm.com", PUBLIC_SUPABASE_ANON_KEY: serviceRole }));
     await assert.rejects(
-      execFileAsync(process.execPath, [join(deployRoot, "validate-site-env.mjs"), envPath], {
+      execFileAsync(process.execPath, [join(deployRoot, "validate-site-env.mjs"), "config", envPath, "1", join(fixture, "validated.json")], {
         encoding: "utf8",
         timeout: 10_000,
       }),

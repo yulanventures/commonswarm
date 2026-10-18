@@ -4292,16 +4292,16 @@ function scriptCommandWords(script: string): string[] {
   return [...words].sort();
 }
 
-test("deploy/site/deploy.sh and finalize-release.sh run only commands the site deploy inventory lists", () => {
+test("historical lane 8 site deploy inventory lists all commands in its pinned deploy scripts", () => {
   const inventory = JSON.parse(readFileSync(SITE_DEPLOY_COMMANDS_FILE, "utf8")) as SiteDeployInventory;
   const listed = new Set([
     ...inventory.builtins, "break", "continue", "true", "false",
     ...Object.keys(inventory.stubs), ...Object.keys(inventory.box_userland), ...Object.keys(inventory.local),
   ]);
-  const scripts = new Map(inventory.scripts.map((file) => [file, readFileSync(file, "utf8")]));
+  const scripts = new Map(inventory.scripts.map((file) => [file, gitShow(SITE_SHA, file)]));
   for (const [file, text] of scripts) {
-    // Site-04 runs the scripts of the release checkout, at the release SHA. They are the scripts read here.
-    assert.equal(gitShow(SITE_SHA, file), text, `${file} at the lane 8 release SHA differs from the working tree`);
+    // Site-04 runs the exact historical release checkout, independent of current tooling.
+    assert.ok(text.length > 0, `${file} must exist at the pinned lane 8 SHA`);
     const unlisted = scriptCommandWords(text).filter((word) => !listed.has(word));
     assert.deepEqual(unlisted, [], `${file} runs a command the site deploy inventory does not list`);
   }
@@ -4322,8 +4322,8 @@ test("deploy/site/deploy.sh and finalize-release.sh run only commands the site d
     }
     assert.ok(entry.evidence.length > 0, `${command} cites no evidence`);
     for (const evidence of entry.evidence) {
-      assert.equal(existsSync(evidence.file), true, `${command}: evidence file is missing: ${evidence.file}`);
-      if (evidence.line) assert.ok(readFileSync(evidence.file, "utf8").split("\n").length >= evidence.line, `${command}: ${evidence.file} has no line ${evidence.line}`);
+      assert.equal(scripts.has(evidence.file) || existsSync(evidence.file), true, `${command}: evidence file is missing: ${evidence.file}`);
+      if (evidence.line) assert.ok((scripts.get(evidence.file) ?? readFileSync(evidence.file, "utf8")).split("\n").length >= evidence.line, `${command}: ${evidence.file} has no line ${evidence.line}`);
     }
   }
   // The flags and subcommands the scripts use are the ones the inventory lists for the stubbed commands.

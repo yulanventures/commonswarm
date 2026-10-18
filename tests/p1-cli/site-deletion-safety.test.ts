@@ -3,13 +3,22 @@ import { execFile } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const deployRoot = join(repoRoot, "deploy/site");
+// These legacy release/deletion cases describe the pre-artifact release contract.
+// Keep their protective assertions against its exact source revision; current packet
+// behavior is exercised by site-artifact.test.ts at the rendered-script boundary.
+const historicalRoot = await mkdtemp(join(tmpdir(), "commonswarm-site-historical-"));
+const deployRoot = historicalRoot;
+for (const name of ["deploy.sh", "finalize-release.sh", "validate-site-env.mjs", "RUNBOOK.md", "vercel-reference.json", "commonswarm-site.caddy", "parity-check.mjs"]) {
+  const { stdout } = await execFileAsync("git", ["-C", repoRoot, "show", `a29fca08cbd33ef7880e651207daaba97db84bb0:deploy/site/${name}`], { maxBuffer: 4 * 1024 * 1024 });
+  await writeFile(join(historicalRoot, name), name === "deploy.sh" ? stdout.replace(/repo_root=\$\(CDPATH=[^\n]+/, `repo_root="${repoRoot}"`) : stdout);
+}
+after(async () => { await rm(historicalRoot, { recursive: true, force: true }); });
 
 async function makeFunctionProbe(
   fixture: string,

@@ -48,14 +48,20 @@ teams and small businesses. See `../docs/product/VISION.md` for vision and audie
 restore copy that describes the site as a preview or invite-only.
 
 Production is static files at `/srv/commonswarm/site/current` on `yulan-vps-1`, served by
-Caddy at `commonswarm.com` behind Cloudflare. Releases use `deploy/site/deploy.sh` and are
-performed only by Anvil under HezLead's direction. Other agents must never release the site. Never use
-Vercel.
+Caddy at `commonswarm.com` behind Cloudflare. Releases build the exact reviewed SHA
+off production using `deploy/site/build-artifact.sh`, then `deploy/site/deploy.sh`
+prepares and stages a pinned static packet. Only Anvil under HezLead's direction
+executes it under the continuously held Mac release lock; see `deploy/site/RUNBOOK.md`.
+Other agents must never release the site. Never use Vercel.
 
-Site build variables live in untracked `site/.env`:
+Local development may use untracked `site/.env`. Production builds use only
+explicit allowlisted public JSON and a required H0 `0` or `1` builder argument.
+Preserve the current value approved by HezLead; never inherit it silently.
+Production public configuration:
 
 - `PUBLIC_SUPABASE_URL=https://api.commonswarm.com`
-- `PUBLIC_SUPABASE_ANON_KEY` must be an anon JWT, never a service-role key.
+- `PUBLIC_SUPABASE_ANON_KEY` must have JWT role `anon`, never a service-role key.
+- `PUBLIC_H0_LINK_JOIN` must match the explicit builder argument; the receipt binds it.
 
 Brain-link parsing uses `BRAIN_SLUG_SEPARATORS` from `src/lib/brain-links.ts`. Do not
 retype that separator set.
