@@ -229,7 +229,6 @@ export function parseAdminRecoveryPage(value: unknown): AdminRecoveryPage {
       expires_at: timestamp(a.expires_at, true), full_account_expires_at: timestamp(a.full_account_expires_at, true) } };
 }
 
-/** A failed/unreadable gate lookup is unavailable; never infer availability. */
 export function parseAdminGate(value: unknown): {state:"closed"|"open"|"unavailable"} {
   const r = record(value);
   if (Object.keys(r).length !== 1 || !["closed","open","unavailable"].includes(String(r.state))) throw new Error("Invalid admin gate response.");

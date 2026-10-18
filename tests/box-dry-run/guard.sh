@@ -7,7 +7,7 @@ refuse() {
 }
 
 [ "${BOX_DRY_RUN:-}" = 1 ] || refuse 'BOX_DRY_RUN=1 is required'
-[ "${GITHUB_ACTIONS:-}" = true ] || refuse 'GITHUB_ACTIONS=true is required'
+[ "${GITHUB_ACTIONS:-}" = true ] || [ "${STANDALONE_CI:-}" = 1 ] || refuse 'GITHUB_ACTIONS=true or STANDALONE_CI=1 is required'
 [ "${CI:-}" = true ] || refuse 'CI=true is required'
 [ "$(uname -s)" = Linux ] || refuse 'Linux is required'
 [ "$(hostname -s)" != yulan-vps-1 ] || refuse 'production hostname is forbidden'
