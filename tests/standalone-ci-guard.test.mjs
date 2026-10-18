@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, mkdirSync, readFileSync, writeFileSync, chmodSync, readdirSync, symlinkSync, existsSync } from 'node:fs';
+import { mkdtempSync, realpathSync, mkdirSync, readFileSync, writeFileSync, chmodSync, readdirSync, symlinkSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import test from 'node:test';
@@ -149,7 +149,9 @@ function start(f, args = f.args()) {
 }
 
 test('guard admits standalone and GHA, retaining CI/root/host/path refusals in a disposable container', {skip:process.platform !== 'linux' ? 'requires Root Linux/Docker guard execution' : false}, () => {
-  const guard = join(repo, 'tests/box-dry-run/guard.sh');
+  const guard = join(realpathSync(mkdtempSync(join(tmpdir(), 'standalone-ci-guard.'))), 'guard.sh');
+  writeFileSync(guard, readFileSync(join(repo, 'tests/box-dry-run/guard.sh')));
+  chmodSync(guard, 0o644);
   const probe = (env, setup = ':', user = '0') => run('docker', ['run', '--rm', '--network', 'none',
     '--hostname', setup === 'production' ? 'yulan-vps-1' : 'guard-fixture', '--user', user,
     '--mount', `type=bind,src=${guard},dst=/guard.sh,readonly`, ...Object.entries(env).flatMap(([k,v]) => ['-e', `${k}=${v}`]),
@@ -354,7 +356,11 @@ test('installed script tampering and public state refuse before fetch or Docker 
   for (const kind of ['script','state']) {
     const f=fixture();
     if (kind==='script') writeFileSync(join(f.cfg.controller,'suite.sh'),'tampered');
-    else mkdirSync(f.state,{mode:0o755});
+    else {
+      mkdirSync(f.state,{mode:0o755});
+      chmodSync(f.state,0o755);
+      assert.equal(statSync(f.state).mode & 0o777,0o755);
+    }
     const r=await start(f); assert.notEqual(r.status,0);
     assert.match(r.stderr,kind==='script' ? /checksum mismatch/ : /state must be private/);
     assert.equal(existsSync(join(f.root,'fetches.jsonl')),false);
