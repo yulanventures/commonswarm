@@ -117,11 +117,11 @@ function connectFixture(page: Parts) {
 test("connect prompt copy selects the join sentence when the clipboard is blocked", async () => {
   const { fill, steps, copy, writes, blockClipboard, selected, ranges } = connectFixture(await load("InviteOnramp.astro"));
 
-  fill("Home", "claude");
-  const expected = "Use CommonSwarm to join my workspace as Claude, then list who is there. Post one short note saying you joined, then tell me to look for it in the CommonSwarm web app.";
+  fill("Home", "claude-code");
+  const expected = "Use CommonSwarm to join my workspace as Claude Code, then list who is there. Post one short note saying you joined, then tell me to look for it in the CommonSwarm web app.";
   const values = steps.descendants().filter((node) => node.className === "hm-ahp__value");
-  assert.equal(values[0]?.tag, "code", "the address comes first, so a generic first-value lookup is wrong");
-  assert.notEqual(values[0]?.textContent, expected);
+  assert.ok(values[0] && values[0].textContent !== expected,
+    "setup code comes first, so a generic first-value lookup is wrong");
   const joinPrompt = values.find((node) => node.textContent === expected);
   assert.ok(joinPrompt, "the controller renders the catalog's join sentence");
   assert.ok(copy.onclick);
