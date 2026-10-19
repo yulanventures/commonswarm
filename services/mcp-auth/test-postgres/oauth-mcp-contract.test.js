@@ -492,6 +492,8 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         const initialRefresh = await storedRefresh(tokens.refresh_token);
         assert.deepEqual(initialRefresh.payload.scope.split(' ').sort(), parameters.scope.split(' ').sort(),
           'real GET consent must retain offline_access in the issued refresh token');
+        assert.equal(initialRefresh.expires_at,null,'first refresh credential follows permanent consent');
+        assert.equal(Object.hasOwn(initialRefresh.payload,'exp'),false);
         const family = initialRefresh.payload.grantId;
         const savedGrant = await running.provider.Grant.find(family);
         assert.ok(savedGrant.getOIDCScope().split(' ').includes('offline_access'));
@@ -511,9 +513,19 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
           const stored = await storedRefresh(next.refresh_token);
           assert.ok(stored.payload.grantId === family);
           assert.deepEqual(stored.payload.scope.split(' ').sort(), parameters.scope.split(' ').sort());
-          assert.ok(stored.payload.exp <= initialRefresh.payload.exp, 'rotation cannot extend original token expiry');
-          assert.ok(stored.expires_at.getTime() < initialRefresh.expires_at.getTime() + 1000,
-            'adapter timestamp drift must remain below one second across rotation');
+          const policy = (await pool.query(`SELECT connection_expires_at,connection_expired_at,state,revoked_at
+            FROM swarm.hosted_mcp_grants WHERE provider_grant_id=$1`,[family])).rows[0];
+          assert.equal(policy.state,'active'); assert.equal(policy.revoked_at,null);
+          assert.equal(policy.connection_expired_at,null);
+          assert.equal(policy.connection_expires_at,null,'new hosted consent is permanent by default');
+          const persistedGrant = (await pool.query(`SELECT payload,expires_at,consumed_at
+            FROM commonswarm_oauth.provider_artifacts WHERE model='Grant' AND payload->>'jti'=$1`,[family])).rows[0];
+          assert.ok(persistedGrant,'the exact provider Grant remains persisted');
+          for (const artifact of [stored,persistedGrant]) {
+            assert.equal(artifact.expires_at,null,'current NULL policy governs SQL family expiry');
+            assert.equal(Object.hasOwn(artifact.payload,'exp'),false,'current NULL policy removes payload expiry');
+            assert.equal(artifact.consumed_at,null,'the current family artifacts are unconsumed');
+          }
           const proof = await jwtVerify(next.access_token, keys, { issuer: ISSUER, audience: RESOURCE, algorithms: ['ES256'] });
           assert.equal(proof.payload.scope, 'mcp');
           assert.ok(proof.payload.grant_id === family);

@@ -57,6 +57,7 @@ let sql: postgres.Sql;
 let releaseSql: postgres.Sql;
 let oauthSql: postgres.Sql;
 let oauthDatabaseUrl: string;
+let adminIssuerDatabaseUrl: string;
 let local: LocalEnvironment;
 let admin: SupabaseClient;
 let harnessDir: string;
@@ -349,59 +350,114 @@ async function revokedGrantClaim() {
   return { revoked, refused: await claim(input.claim, cap) };
 }
 
-async function authorityWaitRace() {
+async function raceSessions(run) {
   const { default: postgres } = await import("npm:postgres@3.4.9");
-  const gateDb = postgres(Deno.env.get("SWARM_DATABASE_URL"), { prepare: false, max: 1 });
-  let first, second;
+  const options = { prepare: false, max: 1 };
+  const gateDb = postgres(Deno.env.get("SWARM_DATABASE_URL"), options);
+  const observer = postgres(Deno.env.get("SWARM_DATABASE_URL"), options);
+  try { return await run(gateDb,observer); }
+  finally { await Promise.all([gateDb.end({ timeout: 2 }),observer.end({ timeout: 2 })]); }
+}
+
+async function waitForBlocked(observer, gatePid, expected) {
+  const stop = performance.now()+3500;
+  do {
+    // Autocommit gives each poll a new activity snapshot. Follow the real
+    // blocker graph, including a second command queued behind the first.
+    const [row] = await observer.unsafe("WITH RECURSIVE blocked(pid) AS ("+
+      " SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND $1::int=ANY(pg_blocking_pids(pid))"+
+      " UNION SELECT a.pid FROM pg_stat_activity a JOIN blocked b ON b.pid=ANY(pg_blocking_pids(a.pid))"+
+      " WHERE a.datname=current_database()) SELECT count(*)::int AS n FROM blocked",[gatePid]);
+    if (row.n >= expected) return;
+    await new Promise(resolve => setTimeout(resolve,20));
+  } while (performance.now()<stop);
+  throw new Error("request did not reach the exact blocker graph before the production lock timeout");
+}
+
+async function chooseDeadline(observer, grantId) {
+  const [row] = await observer.unsafe("UPDATE swarm.hosted_mcp_grants SET connection_expires_at="+
+    "date_trunc('milliseconds',clock_timestamp())+interval '2 seconds' WHERE grant_id=$1::uuid "+
+    "RETURNING connection_expires_at::text AS deadline,connection_expires_at>clock_timestamp() AS future",[grantId]);
+  if (!row?.future) throw new Error("chosen deadline positive control is not future");
+  return row.deadline;
+}
+
+async function waitForDeadline(observer, grantId, deadline) {
+  const stop = performance.now()+3500;
+  do {
+    const [row] = await observer.unsafe("SELECT connection_expires_at::text AS deadline,clock_timestamp()::text AS now,"+
+      "connection_expires_at<=clock_timestamp() AS elapsed,connection_expires_at=$2::timestamptz AS unchanged "+
+      "FROM swarm.hosted_mcp_grants WHERE grant_id=$1::uuid",[grantId,deadline]);
+    if (!row?.unchanged) throw new Error("race changed the actual chosen deadline");
+    if (row.elapsed && new Date(row.now).getTime()>=new Date(row.deadline).getTime()) return row;
+    await new Promise(resolve => setTimeout(resolve,20));
+  } while (performance.now()<stop);
+  throw new Error("actual owner deadline did not elapse under the database clock");
+}
+
+async function authorityWaitRace() {
   const remove = () => publicCommand(input.otherJwt, input.workspaceB,
     { kind: "remove_member", user_id: input.ownerUserId });
   const activate = () => managementCommand(input.ownerUserId, input.workspaceA,
     { kind: "activate_hosted_mcp_grant", grant_id: input.grantId });
-  try {
+  return await raceSessions(async (gateDb,observer) => {
+    let first, second, chosen, elapsed;
+    if (input.operation === "policy-wait") {
+      const positive = await publicCommand(input.ownerJwt,input.workspaceA,{ kind:"set_connection_expiry",
+        connection_kind:"hosted",grant_id:input.grantId,connection_expires_at:null });
+      if (positive.status !== 200) throw new Error("live owner edit positive refused: "+positive.body.error);
+      chosen = await chooseDeadline(observer,input.grantId);
+    } else {
+      const positive = await activate();
+      if (positive.status !== 200) throw new Error("activation positive refused: "+positive.body.error);
+      await observer.unsafe("UPDATE swarm.hosted_mcp_grants SET state='pending',activated_at=NULL WHERE grant_id=$1::uuid",[input.grantId]);
+    }
     await gateDb.begin(async gate => {
-      await gate\`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=\${input.grantId}::uuid FOR UPDATE\`;
-      const waitFor = async expected => {
-        const deadline = Date.now()+10000;
-        while (Date.now()<deadline) {
-          const [row] = await gate\`SELECT count(*)::int n FROM pg_stat_activity
-            WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock'
-              AND query LIKE '%hosted_mcp_grants%'\`;
-          if (row.n >= expected) return;
-          await new Promise(resolve => setTimeout(resolve,20));
-        }
-        throw new Error("authority race did not reach its grant wait");
-      };
+      const [{ pid }] = await gate.unsafe("SELECT pg_backend_pid() AS pid");
+      await gate.unsafe("SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=$1::uuid FOR UPDATE",[input.grantId]);
       if (input.operation === "policy-wait") {
-        first = publicCommand(input.ownerJwt, input.workspaceA, { kind: "set_connection_expiry",
-          connection_kind: "hosted", grant_id: input.grantId, connection_expires_at: null });
-        await waitFor(1);
-        await gate\`SELECT pg_sleep(2.1)\`;
+        first = publicCommand(input.ownerJwt,input.workspaceA,{ kind:"set_connection_expiry",
+          connection_kind:"hosted",grant_id:input.grantId,connection_expires_at:null });
+        void first.catch(() => {});
+        await waitForBlocked(observer,pid,1);
+        elapsed = await waitForDeadline(observer,input.grantId,chosen);
       } else {
         first = input.order === "remove-first" ? remove() : activate();
-        await waitFor(1);
+        void first.catch(() => {});
+        await waitForBlocked(observer,pid,1);
         second = input.order === "remove-first" ? activate() : remove();
-        await waitFor(2);
+        void second.catch(() => {});
+        await waitForBlocked(observer,pid,2);
       }
     });
     const one = await first;
-    if (input.operation === "policy-wait") return one;
+    if (input.operation === "policy-wait") return { ...one,elapsed };
     const two = await second;
-    return input.order === "remove-first" ? { removed: one, activated: two } : { activated: one, removed: two };
-  } finally { await gateDb.end({ timeout: 2 }); }
+    return input.order === "remove-first" ? { removed:one,activated:two } : { activated:one,removed:two };
+  });
 }
 
 async function householdWait() {
   const { householdStore } = await import(${JSON.stringify(new URL("../../supabase/functions/command/household-integration.ts", import.meta.url).href)});
   const { revalidateHouseholdSeat } = authModule;
   const writing = input.waitRow === "object-write";
-  const cap = await db.begin(tx => authenticateHostedSeatCapability(tx, {
-    grantId: input.grantId, providerGrantId: "provider-"+input.grantId,
-    handle: input.handle, tool: writing ? "object_create" : "list_list", providerStatus: async () => ({ active: true }),
-  }, writing ? "command" : "read"));
+  const cap = await db.begin(async tx => {
+    await tx.unsafe("SET LOCAL ROLE "+(writing ? "swarm_command" : "swarm_read"));
+    const [identity] = await tx.unsafe("SELECT current_user AS role");
+    if (identity.role !== (writing ? "swarm_command" : "swarm_read")) throw new Error("household authentication role mismatch");
+    return await authenticateHostedSeatCapability(tx, {
+      grantId: input.grantId, providerGrantId: "provider-"+input.grantId,
+      handle: input.handle, tool: writing ? "object_create" : "list_list", providerStatus: async () => ({ active: true }),
+    }, writing ? "command" : "read");
+  });
   if (!cap) throw new Error("household positive capability missing");
   const identity = { user_id: input.ownerUserId, principal_id: input.principalId,
     run_id: null, connection: { connection_id: input.seatId, grant_id: input.grantId } };
-  const restore = tx => tx.unsafe("SET LOCAL ROLE swarm_command");
+  const restore = async tx => {
+    await tx.unsafe("SET LOCAL ROLE swarm_command");
+    await tx.unsafe("SET LOCAL search_path=swarm,pg_catalog");
+    await tx.unsafe("SET LOCAL lock_timeout='5s'");
+  };
   const recheck = async tx => {
     const current = await revalidateHouseholdSeat(tx, cap, restore);
     return current !== null && current.workspace_id === input.workspaceId && current.principal_id === identity.principal_id;
@@ -416,6 +472,8 @@ async function householdWait() {
       read:async path=>blobs.get(path)??null}}) : householdStore(recheck);
   const probe = () => db.begin(async tx => {
     await restore(tx);
+    const [identityRole] = await tx.unsafe("SELECT current_user AS role");
+    if (identityRole.role !== "swarm_command") throw new Error("household content role mismatch");
     if (writing) {
       const content = {kind:"doc",markdown:"Synthetic household proof"};
       const decision = await store.write(tx,input.workspaceId,identity,crypto.randomUUID(),
@@ -436,29 +494,25 @@ async function householdWait() {
   await db\`UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at=clock_timestamp() WHERE grant_id=\${input.grantId}::uuid AND workspace_id=\${input.workspaceId}::uuid\`;
   const removed = await probe();
   await db\`UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at=NULL WHERE grant_id=\${input.grantId}::uuid AND workspace_id=\${input.workspaceId}::uuid\`;
-  let waiting;
-  await db\`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()+interval '2 seconds' WHERE grant_id=\${input.grantId}::uuid\`;
-  await db.begin(async gate => {
-    if (input.waitRow === "workspace") await gate\`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id=\${input.workspaceId}::uuid FOR UPDATE\`;
-    else if (input.waitRow === "grant") await gate\`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=\${input.grantId}::uuid FOR UPDATE\`;
-    else await gate\`SELECT workspace_id FROM swarm.household_object_streams WHERE workspace_id=\${input.workspaceId}::uuid FOR UPDATE\`;
-    waiting = probe().catch(error => {
-      if (error instanceof transfers.HouseholdTransferError && error.code === "access_refused") return {status:"refused"};
-      throw error;
+  return await raceSessions(async (gateDb,observer) => {
+    let waiting;
+    const chosen = await chooseDeadline(observer,input.grantId);
+    let elapsed;
+    await gateDb.begin(async gate => {
+      const [{ pid }] = await gate.unsafe("SELECT pg_backend_pid() AS pid");
+      if (input.waitRow === "workspace") await gate.unsafe("SELECT workspace_id FROM swarm.workspaces WHERE workspace_id=$1::uuid FOR UPDATE",[input.workspaceId]);
+      else if (input.waitRow === "grant") await gate.unsafe("SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=$1::uuid FOR UPDATE",[input.grantId]);
+      else await gate.unsafe("SELECT workspace_id FROM swarm.household_object_streams WHERE workspace_id=$1::uuid FOR UPDATE",[input.workspaceId]);
+      waiting = probe().catch(error => {
+        if (error instanceof transfers.HouseholdTransferError && error.code === "access_refused") return {status:"refused"};
+        throw error;
+      });
+      void waiting.catch(() => {});
+      await waitForBlocked(observer,pid,1);
+      elapsed = await waitForDeadline(observer,input.grantId,chosen);
     });
-    const deadline = Date.now()+10000;
-    let reached = false;
-    while (Date.now()<deadline) {
-      const [row] = await gate\`SELECT count(*)::int n FROM pg_stat_activity
-        WHERE datname=current_database() AND pg_backend_pid()=ANY(pg_blocking_pids(pid))\`;
-      if (row.n>0) { reached=true; break; }
-      await new Promise(resolve => setTimeout(resolve,20));
-    }
-    if (!reached) throw new Error("household request missed deterministic row barrier");
-    await gate\`SELECT pg_sleep(2.1)\`;
+    return { before,fenced,removed,waited:await waiting,extraPuts:puts-putsBefore,elapsed };
   });
-  const waited = await waiting;
-  return { before, fenced, removed, waited, extraPuts:puts-putsBefore };
 }
 
 async function issuerFixture() {
@@ -488,49 +542,52 @@ async function mcpPolicy() {
     sub: input.ownerUserId, grant_id: "provider-"+input.grantId, scope: "mcp", iat: now, exp: now+300 });
   const bearer = unsigned + "." + b64(new Uint8Array(await crypto.subtle.sign(
     { name: "ECDSA", hash: "SHA-256" }, signing.privateKey, new TextEncoder().encode(unsigned))));
-  const probe = async () => {
+  const probe = async (expectedError = null) => {
     const results = [];
     for (const name of (input.household ? ["list_list"] : input.waitKind ? [input.tool] : ["whoami","note","check"])) {
-      const args = { seat: input.handle, ...(name === "list_list" ? { offset: 0, limit: 10 } : {}), ...(name === "note" ? { body: "policy probe", request_id: crypto.randomUUID() } : {}) };
+      const args = { seat: input.handle, ...(name === "list_list" ? { offset:0,limit:10 } : {}),
+        ...(name === "note" ? { body:"policy probe",request_id:crypto.randomUUID() } : {}) };
       const response = await serve(new Request("https://mcp.commonswarm.com/mcp", {
-        method: "POST", headers: { authorization: "Bearer "+bearer, "content-type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "tools/call", params: { name, arguments: args } }),
+        method:"POST",headers:{authorization:"Bearer "+bearer,"content-type":"application/json"},
+        body:JSON.stringify({jsonrpc:"2.0",id:crypto.randomUUID(),method:"tools/call",params:{name,arguments:args}}),
       }));
       const body = await response.json();
-      const content = input.household && body.result?.content?.[0]?.text
-        ? JSON.parse(body.result.content[0].text) : null;
-      results.push({ status: response.status, allowed: body.result?.isError !== true && body.error === undefined && content?.status !== "refused" });
+      const content = body.result?.content?.[0]?.text ? JSON.parse(body.result.content[0].text) : null;
+      const code = (typeof body.error === "string" ? body.error : body.error?.code) ?? content?.error ?? content?.reason ?? null;
+      const allowed = body.result !== undefined && content !== null && typeof content === "object" &&
+        body.result.isError !== true && body.error === undefined && content.status !== "refused";
+      // Keep only status and stable code in diagnostics. A timeout, transport
+      // failure or generic tool_failed can never satisfy a policy negative.
+      if (response.status !== 200 || (expectedError === null ? !allowed : allowed || code !== expectedError)) {
+        throw new Error("MCP boundary mismatch: "+JSON.stringify({tool:name,status:response.status,code,expectedError}));
+      }
+      results.push({status:response.status,allowed});
     }
     return results;
   };
   const before = await probe();
   if (input.waitKind) {
-    let waiting, removing;
-    if (input.waitKind === "expiry") await db\`UPDATE swarm.hosted_mcp_grants
-      SET connection_expires_at=clock_timestamp()+interval '2 seconds' WHERE grant_id=\${input.grantId}::uuid\`;
-    await db.begin(async gate => {
-      await gate\`SELECT stream_id FROM swarm.streams WHERE workspace_id=\${input.workspaceId}::uuid AND kind='workspace' FOR UPDATE\`;
-      for (const phase of (input.waitKind === "removal" ? ["remove", "seat"] : ["seat"])) {
-        if (phase === "remove") removing = publicCommand(input.otherJwt,input.workspaceId,
-          { kind: "remove_member", user_id: input.ownerUserId });
-        else waiting = probe();
-        const expected = phase === "seat" && removing ? 2 : 1;
-        const deadline = Date.now()+10000;
-        let reached = false;
-        while (Date.now()<deadline) {
-          const [row] = await gate\`SELECT count(*)::int n FROM pg_stat_activity
-            WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock'
-              AND query LIKE '%swarm.streams%'\`;
-          if (row.n >= expected) { reached = true; break; }
-          await new Promise(resolve => setTimeout(resolve,20));
+    return await raceSessions(async (gateDb,observer) => {
+      let waiting,removing,elapsed;
+      const chosen = input.waitKind === "expiry" ? await chooseDeadline(observer,input.grantId) : null;
+      await gateDb.begin(async gate => {
+        const [{ pid }] = await gate.unsafe("SELECT pg_backend_pid() AS pid");
+        await gate.unsafe("SELECT stream_id FROM swarm.streams WHERE workspace_id=$1::uuid AND kind='workspace' FOR UPDATE",[input.workspaceId]);
+        if (input.waitKind === "removal") {
+          removing = publicCommand(input.otherJwt,input.workspaceId,{kind:"remove_member",user_id:input.ownerUserId});
+          void removing.catch(() => {});
+          await waitForBlocked(observer,pid,1);
         }
-        if (!reached) throw new Error("old-JWT command did not reach the workspace stream wait");
-      }
-      if (input.waitKind === "expiry") await gate\`SELECT pg_sleep(2.1)\`;
+        waiting = probe("forbidden");
+        void waiting.catch(() => {});
+        await waitForBlocked(observer,pid,removing ? 2 : 1);
+        if (chosen) elapsed = await waitForDeadline(observer,input.grantId,chosen);
+      });
+      const removed = removing ? await removing : null;
+      if (removed && removed.status !== 200) throw new Error("removal positive refused: "+removed.body.error);
+      return {before,waited:await waiting,removedStatus:removed?.status ?? null,
+        jwtStillLive:Math.floor(Date.now()/1000)<now+300,elapsed};
     });
-    const removed = removing ? await removing : null;
-    return { before, waited: await waiting, removedStatus: removed?.status ?? null,
-      jwtStillLive: Math.floor(Date.now()/1000) < now+300 };
   }
 
   await db\`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()+interval '6 months'
@@ -538,7 +595,7 @@ async function mcpPolicy() {
   const future = await probe();
   await db\`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()-interval '1 second'
     WHERE grant_id=\${input.grantId}::uuid\`;
-  const elapsed = await probe();
+  const elapsed = await probe("hosted_seat_forbidden");
   return { before, future, elapsed, jwtStillLive: Math.floor(Date.now()/1000) < now+300 };
 }
 
@@ -579,10 +636,23 @@ async function adminRemoval() {
   const granted = await transact({ kind: "grant_admin_delegation", grant_id: grantId,
     consent_receipt_id: prepared.body.consent_receipt_id, replaces_grant_id: null });
   if (granted.status !== 200) return { stage: "grant", status: granted.status };
-  const oauth = await oauthFixture(db, grantId, signing, jwk.kid);
-  const response = await handleRequest(await oauth.request(wire({ kind: "admin_revoke_seat",
-    grant_id: grantId, workspace_id: input.workspaceId, principal_id: input.principalId, reason_code: "owner_requested" })));
-  return { stage: "remove", status: response.status };
+  const { default: postgres } = await import("npm:postgres@3.4.9");
+  // Privileged synthetic issuance setup is a separate fixture connection;
+  // the handler keeps the real issuer login and production role transitions.
+  const setupDb = postgres(Deno.env.get("SWARM_FIXTURE_DATABASE_URL"),{prepare:false,max:1});
+  const runtimeDb = postgres(Deno.env.get("SWARM_FIXTURE_OAUTH_DATABASE_URL"),{prepare:false,max:1});
+  try {
+    const [issuer] = await db.unsafe("SELECT session_user AS login,current_user AS role");
+    if (issuer.login !== "commonswarm_admin_issuer" || issuer.role !== issuer.login) throw new Error("admin issuer login mismatch");
+    const [runtime] = await runtimeDb.unsafe("SELECT session_user AS login,current_user AS role,NOT rolsuper AND NOT rolbypassrls AS safe FROM pg_roles WHERE rolname=current_user");
+    if (runtime.login !== "commonswarm_oauth_runtime" || runtime.role !== runtime.login || !runtime.safe) throw new Error("OAuth runtime login mismatch");
+    const oauth = await oauthFixture(setupDb,grantId,signing,jwk.kid);
+    const [live] = await runtimeDb.unsafe("SELECT active FROM commonswarm_oauth.resolve_admin_grant_status($1,$2::uuid,$3)",[oauth.provider,input.ownerUserId,jwk.kid]);
+    if (!live?.active) throw new Error("admin runtime family positive refused");
+    const response = await handleRequest(await oauth.request(wire({ kind: "admin_revoke_seat",
+      grant_id:grantId,workspace_id:input.workspaceId,principal_id:input.principalId,reason_code:"owner_requested" })));
+    return {stage:"remove",status:response.status};
+  } finally { await Promise.all([setupDb.end({timeout:2}),runtimeDb.end({timeout:2})]); }
 }
 
 let result;
@@ -636,6 +706,13 @@ before(async () => {
   runtimeTarget.password = randomBytes(32).toString("hex");
   await releaseSql.unsafe(`ALTER ROLE commonswarm_oauth_runtime PASSWORD '${runtimeTarget.password}'`);
   oauthDatabaseUrl = runtimeTarget.href;
+  // Admin HTTP uses the existing constrained issuer login. Its reviewed SET
+  // memberships already exist; the ordinary edge login gains no OAuth rights.
+  const issuerTarget = new URL(local.DB_URL);
+  issuerTarget.username = "commonswarm_admin_issuer";
+  issuerTarget.password = randomBytes(32).toString("hex");
+  await releaseSql.unsafe(`ALTER ROLE commonswarm_admin_issuer PASSWORD '${issuerTarget.password}'`);
+  adminIssuerDatabaseUrl = issuerTarget.href;
   oauthSql = postgres(oauthDatabaseUrl, { prepare: false, max: 1 });
   const [runtimeIdentity] = await oauthSql<{ role: string; safe: boolean }[]>`
     SELECT current_user AS role, NOT rolsuper AND NOT rolbypassrls AS safe
@@ -654,6 +731,7 @@ after(async () => {
   await sql.end();
   await oauthSql?.end();
   await releaseSql.unsafe("ALTER ROLE commonswarm_oauth_runtime PASSWORD NULL");
+  await releaseSql.unsafe("ALTER ROLE commonswarm_admin_issuer PASSWORD NULL");
   await releaseSql.end();
   rmSync(harnessDir, { recursive: true, force: true });
 });
@@ -782,8 +860,13 @@ function runHostedHarness<T>(input: Record<string, unknown>, options: {
       PATH: process.env.PATH ?? "",
       ...(process.env.DENO_DIR ? { DENO_DIR: process.env.DENO_DIR } : {}),
       SWARM_ENV: "test",
-      SWARM_DATABASE_URL: options.databaseUrl ?? local.DB_URL,
-      SUPABASE_DB_URL: options.databaseUrl ?? local.DB_URL,
+      SWARM_MCP_TODOS_LISTS_ENABLED: input.household === true ? "1" : "0",
+      SWARM_DATABASE_URL: options.databaseUrl ?? (input.operation === "admin-removal" ? adminIssuerDatabaseUrl : local.DB_URL),
+      SUPABASE_DB_URL: options.databaseUrl ?? (input.operation === "admin-removal" ? adminIssuerDatabaseUrl : local.DB_URL),
+      ...(input.operation === "admin-removal" ? {
+        SWARM_FIXTURE_DATABASE_URL: localClusterAdminUrl(local.DB_URL),
+        SWARM_FIXTURE_OAUTH_DATABASE_URL: oauthDatabaseUrl,
+      } : {}),
       ...(options.rollbackBeforeStep ? { SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP: String(options.rollbackBeforeStep) } : {}),
       SUPABASE_URL: local.API_URL,
       SUPABASE_ANON_KEY: local.ANON_KEY,
@@ -2084,7 +2167,10 @@ test("hosted policy immediately fences existing seat read/write/check and provid
       WHERE grant_id=${f.grantA}::uuid`;
     await assertSeatAccess(f, seat, f.workspaceA, 403);
     assert.equal(await providerActive(f.grantA), false, fence);
-    assert.equal(claimSeat(f, f.grantA, `expired-${randomUUID()}`).status, 403);
+    const refusedClaim = runHostedHarness<HarnessResult>({ operation: "claim",
+      claim: claimSpec(f,f.grantA,f.workspaceA,`expired-${randomUUID()}`) });
+    assert.equal(refusedClaim.status,403);
+    assert.equal(refusedClaim.body.error,"hosted_grant_forbidden");
     assert.equal(await providerActive(f.grantB), true, "independent family stays live");
   }
 });
@@ -2188,14 +2274,31 @@ test("runtime hosted-family helper binds its tuple and exposes no edge authority
 });
 
 async function waitForRuntimeLock(tx: postgres.TransactionSql<Record<string, unknown>>): Promise<void> {
-  const deadline = Date.now()+5000;
-  while (Date.now()<deadline) {
-    const [probe] = await tx`SELECT EXISTS(SELECT 1 FROM pg_stat_activity
-      WHERE usename='commonswarm_oauth_runtime' AND wait_event_type='Lock') AS blocked`;
+  const [gate] = await tx<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+  const deadline = performance.now()+3500;
+  do {
+    // The gate retains its transaction; this pool query uses another session
+    // and an autocommit activity snapshot for every observation.
+    const [probe] = await sql<{ blocked: boolean }[]>`SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+      WHERE usename='commonswarm_oauth_runtime' AND ${gate!.pid}::int=ANY(pg_blocking_pids(pid))) AS blocked`;
     if (probe!.blocked) return;
     await new Promise(resolve => setTimeout(resolve,20));
-  }
-  assert.fail("runtime helper did not reach its selected workspace lock");
+  } while (performance.now()<deadline);
+  assert.fail("runtime helper did not reach its exact selected workspace blocker");
+}
+
+async function waitForStoredDeadline(grantId: string, expected: Date): Promise<void> {
+  const stop = performance.now()+3500;
+  do {
+    const [row] = await sql<{ deadline: Date; now: Date; elapsed: boolean }[]>`
+      SELECT connection_expires_at AS deadline,clock_timestamp() AS now,
+        connection_expires_at<=clock_timestamp() AS elapsed FROM swarm.hosted_mcp_grants
+      WHERE grant_id=${grantId}::uuid`;
+    assert.equal(row!.deadline.getTime(),expected.getTime(),"stored chosen date stays unchanged");
+    if (row!.elapsed && row!.now.getTime()>=row!.deadline.getTime()) return;
+    await new Promise(resolve => setTimeout(resolve,20));
+  } while (performance.now()<stop);
+  assert.fail("actual stored owner deadline did not elapse");
 }
 
 test("runtime helper uses current policy after waiting on a selected workspace stream", { timeout: 30_000 }, async () => {
@@ -2204,18 +2307,16 @@ test("runtime helper uses current policy after waiting on a selected workspace s
     ${`provider-${f.grantA}`},${f.owner}::uuid,'test-client','https://mcp.commonswarm.com/mcp')`);
   assert.equal((await lock())[0]!.active, true, "positive runtime control");
   let waiting: ReturnType<typeof lock> | undefined;
-  await sql.begin(async tx => {
-    await tx`SELECT stream_id FROM swarm.streams WHERE stream_id=${f.streamB}::uuid FOR UPDATE`;
-    await tx`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()+interval '2 seconds'
-      WHERE grant_id=${f.grantA}::uuid`;
-    // Commit policy before the helper starts; keep the stream held in a separate transaction below.
-  });
+  const [chosen] = await sql<{ deadline: Date; future: boolean }[]>`
+    UPDATE swarm.hosted_mcp_grants SET connection_expires_at=date_trunc('milliseconds',clock_timestamp())+interval '2 seconds'
+    WHERE grant_id=${f.grantA}::uuid RETURNING connection_expires_at AS deadline,connection_expires_at>clock_timestamp() AS future`;
+  assert.equal(chosen!.future,true,"chosen owner date is initially future");
   await sql.begin(async tx => {
     await tx`SELECT stream_id FROM swarm.streams WHERE stream_id=${f.streamB}::uuid FOR UPDATE`;
     waiting = lock();
     // Starting the promise acquires the production runtime connection immediately.
     await waitForRuntimeLock(tx);
-    await tx`SELECT pg_sleep(2.1)`;
+    await waitForStoredDeadline(f.grantA,chosen!.deadline);
   });
   const [afterWait] = await waiting!;
   assert.equal(afterWait!.active, false, "a pre-wait clock cannot admit an elapsed policy");
@@ -2245,7 +2346,10 @@ test("member removal fences exact hosted consent and restoration cannot revive o
       grant_id: f.grantA, connection_expires_at: null } }).status, 403, "foreign owner remains refused");
   await sql`UPDATE swarm.memberships SET revoked_at=NULL WHERE workspace_id=${f.workspaceA}::uuid AND user_id=${f.owner}::uuid`;
   await assertSeatAccess(f, old, f.workspaceA, 403);
-  assert.equal(claimSeat(f, f.grantA, `restored-${randomUUID()}`).status, 403);
+  const refusedClaim = runHostedHarness<HarnessResult>({ operation: "claim",
+    claim: claimSpec(f,f.grantA,f.workspaceA,`restored-${randomUUID()}`) });
+  assert.equal(refusedClaim.status,403);
+  assert.equal(refusedClaim.body.error,"hosted_grant_forbidden");
   await assertSeatAccess(f, otherWorkspace, f.workspaceB, 200);
   assert.equal(await providerActive(f.grantA), true, "unrelated approved workspace survives");
   const [fences] = await sql`SELECT c.revoked_at IS NOT NULL AS consent,
@@ -2276,7 +2380,10 @@ test("authorized admin routine removal closes hosted consent, handle and seat wi
     ownerUserId: f.owner, workspaceId: f.workspaceA, principalId: old.body.principal_id });
   assert.deepEqual(removed, { stage: "remove", status: 200 });
   await assertSeatAccess(f, old, f.workspaceA, 403);
-  assert.equal(claimSeat(f, f.grantA, `admin-new-${randomUUID()}`).status, 403);
+  const refusedClaim = runHostedHarness<HarnessResult>({ operation: "claim",
+    claim: claimSpec(f,f.grantA,f.workspaceA,`admin-new-${randomUUID()}`) });
+  assert.equal(refusedClaim.status,403);
+  assert.equal(refusedClaim.body.error,"hosted_grant_forbidden");
   await assertSeatAccess(f, sibling, f.workspaceA, 403);
   await assertSeatAccess(f, unrelatedGrant, f.workspaceA, 200);
   const [siblingFence] = await sql`SELECT hs.revoked_at IS NOT NULL AS seat,h.revoked_at IS NOT NULL AS handle,
@@ -2320,11 +2427,12 @@ test("owner cannot clear a deadline that passes while the grant lock is awaited"
     workspaceId: f.workspaceA, command: { kind: "set_connection_expiry", connection_kind: "hosted",
       grant_id: f.grantA, connection_expires_at: new Date(Date.now()+86400000).toISOString() } });
   assert.equal(positive.status, 200);
-  await sql`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()+interval '2 seconds'
-    WHERE grant_id=${f.grantA}::uuid`;
-  const waited = runHostedHarness<HarnessResult>({ operation: "policy-wait", ownerJwt: f.ownerJwt,
+  const waited = runHostedHarness<HarnessResult & { elapsed: { deadline: string; now: string; elapsed: boolean } }>({ operation: "policy-wait", ownerJwt: f.ownerJwt,
     workspaceA: f.workspaceA, grantId: f.grantA });
   assert.equal(waited.status, 403);
+  assert.equal(waited.body.error,"connection_expired");
+  assert.equal(waited.elapsed.elapsed,true);
+  assert.ok(Date.parse(waited.elapsed.now)>=Date.parse(waited.elapsed.deadline));
   const [policy] = await sql`SELECT connection_expires_at < clock_timestamp() AS expired
     FROM swarm.hosted_mcp_grants WHERE grant_id=${f.grantA}::uuid`;
   assert.equal(policy!.expired, true);
@@ -2377,7 +2485,8 @@ for (const tool of ["note", "check"] as const) {
       await sql`UPDATE swarm.memberships SET role='owner' WHERE user_id=${f.other}::uuid`;
       const seat = claimSeat(f, f.grantA, `wait-${randomUUID()}`);
       const result = runHostedHarness<{ before: { status: number; allowed: boolean }[];
-        waited: { status: number; allowed: boolean }[]; removedStatus: number | null; jwtStillLive: boolean }>({
+        waited: { status: number; allowed: boolean }[]; removedStatus: number | null; jwtStillLive: boolean;
+        elapsed?: { deadline: string; now: string; elapsed: boolean } }>({
         operation: "mcp-policy", waitKind, tool, ownerUserId: f.owner, otherJwt: f.otherJwt,
         workspaceId: f.workspaceA, grantId: f.grantA, handle: seat.body.handle,
       });
@@ -2385,6 +2494,10 @@ for (const tool of ["note", "check"] as const) {
       assert.deepEqual(result.waited, [{ status: 200, allowed: false }]);
       assert.equal(result.jwtStillLive, true, "JWT expiration is not the refusal");
       assert.equal(result.removedStatus, waitKind === "removal" ? 200 : null);
+      if (waitKind === "expiry") {
+        assert.equal(result.elapsed?.elapsed,true);
+        assert.ok(Date.parse(result.elapsed!.now)>=Date.parse(result.elapsed!.deadline));
+      }
       const [signals] = await sql`SELECT count(*)::int n FROM swarm.signals
         WHERE from_principal=${String(seat.body.principal_id)}::uuid`;
       assert.equal(signals!.n, tool === "note" ? 1 : 0, "waited command has no signal effect");
@@ -2418,13 +2531,15 @@ for (const waitRow of ["workspace", "grant", "object", "object-write"] as const)
     assert.equal(http.future[0]!.allowed,true,"HTTP future-policy positive");
     assert.equal(http.elapsed[0]!.allowed,false,"HTTP elapsed policy refusal");
     await sql`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=NULL WHERE grant_id=${f.grantA}::uuid`;
-    const result = runHostedHarness<{before:{status:string};fenced:{status:string};removed:{status:string};waited:{status:string};extraPuts:number}>({operation:"household-wait",waitRow,
+    const result = runHostedHarness<{before:{status:string};fenced:{status:string};removed:{status:string};waited:{status:string};extraPuts:number;elapsed:{deadline:string;now:string;elapsed:boolean}}>({operation:"household-wait",waitRow,
       workspaceId:f.workspaceA,ownerUserId:f.owner,grantId:f.grantA,seatId,principalId:principal,handle:seat.body.handle});
     assert.equal(result.before.status,waitRow === "object-write" ? "committed" : "ok");
     assert.equal(result.fenced.status,"refused","terminal fence refuses the same credential");
     assert.equal(result.removed.status,"refused","removed consent scope refuses the same credential");
     assert.equal(result.waited.status,"refused","no content metadata or operation authority after deadline");
     assert.equal(result.extraPuts,0,"no bytes staged after the object-state wait");
+    assert.equal(result.elapsed.elapsed,true);
+    assert.ok(Date.parse(result.elapsed.now)>=Date.parse(result.elapsed.deadline));
     assert.equal(await providerActive(f.grantB),true,"unrelated family survives");
   });
 }
