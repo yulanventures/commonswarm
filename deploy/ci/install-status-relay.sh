@@ -46,15 +46,18 @@ def expected(directory, uid, permission):
             f'user:{uid}:{permission}', 'mask::' + permission}
 
 
-def atomic(path, data, mode, uid=0, gid=0):
+def atomic(path, data, mode, uid=0, gid=0, before_replace=None):
     temporary = path.with_name('.status-relay-' + str(os.getpid()))
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
     try:
         os.fchown(fd, uid, gid)
+        os.fchmod(fd, mode)
         with os.fdopen(fd, 'wb', closefd=False) as stream:
             stream.write(data)
             stream.flush()
         os.fsync(fd)
+        if before_replace:
+            before_replace(os.fstat(fd))
         os.replace(temporary, path)
         parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
@@ -112,9 +115,32 @@ def restore(backup):
     protected(backup / 'manifest.json')
     manifest = json.loads((backup / 'manifest.json').read_text())
     allowed = {str(config)} | {str(install / 'scripts' / n) for n in ('run.sh', 'suite.sh', 'retain.py', 'publish-status.py')}
+    # An absent original may be removed only if it is still our exact inode
+    # and bytes. Preflight before restoring any file, including the config.
+    for record in manifest['files']:
+        if not record.get('absent'):
+            continue
+        target = Path(record['path'])
+        need(target == install / 'scripts' / 'publish-status.py', 'invalid absent rollback target')
+        if not target.exists() and not target.is_symlink():
+            continue
+        protected(target)
+        info = target.stat()
+        need(record.get('created') == [info.st_dev, info.st_ino] and
+             hashlib.sha256(target.read_bytes()).hexdigest() == record['installed_sha256'],
+             'absent rollback target replaced; Root must reconcile')
     for record in manifest['files']:
         target = Path(record['path'])
         need(str(target) in allowed, 'invalid rollback target')
+        if record.get('absent'):
+            if target.exists():
+                target.unlink()
+                parent = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(parent)
+                finally:
+                    os.close(parent)
+            continue
         source = backup / record['backup']
         protected(source)
         data = source.read_bytes()
@@ -151,11 +177,15 @@ uid = account.pw_uid
 need(cfg.get('status_reader_uid') in (None, uid), 'different installed reader')
 # Validate the installed source inventory before saving or replacing anything.
 names = ('run.sh', 'suite.sh', 'retain.py', 'publish-status.py')
-need(set(cfg['controller_checksums']) == set(names), 'unexpected controller inventory')
+installed_names = set(cfg['controller_checksums'])
+need(installed_names in (set(names[:-1]), set(names)), 'unexpected controller inventory')
 for name in names:
     old = install / 'scripts' / name
-    protected(old)
-    need(hashlib.sha256(old.read_bytes()).hexdigest() == cfg['controller_checksums'][name], 'installed controller hash mismatch')
+    if name in installed_names:
+        protected(old)
+        need(hashlib.sha256(old.read_bytes()).hexdigest() == cfg['controller_checksums'][name], 'installed controller hash mismatch')
+    else:
+        need(not old.exists() and not old.is_symlink(), 'unexpected pre-existing publisher')
     new = source / 'scripts' / 'standalone-ci' / name
     need(new.resolve() == new and new.is_file() and not new.is_symlink(), 'unsafe source file')
 publisher = runpy.run_path(str(source / 'scripts/standalone-ci/publish-status.py'))
@@ -181,6 +211,10 @@ backup = backup_root / datetime.datetime.now(datetime.timezone.utc).strftime('%Y
 backup.mkdir(mode=0o700)
 manifest = dict(source_sha=args.sha, reader_uid=uid, files=[], acls=[])
 for index, path in enumerate([config] + [install / 'scripts' / n for n in names]):
+    if path.name not in installed_names and path != config:
+        data = (source / 'scripts/standalone-ci' / path.name).read_bytes()
+        manifest['files'].append(dict(path=str(path), absent=True, installed_sha256=hashlib.sha256(data).hexdigest()))
+        continue
     info = path.stat()
     data = path.read_bytes()
     name = f'file-{index}'
@@ -194,7 +228,12 @@ for index, (path, _, _) in enumerate(acl_targets):
 (backup / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
 try:
     for name in names:
-        atomic(install / 'scripts' / name, (source / 'scripts/standalone-ci' / name).read_bytes(), 0o755)
+        record = next(r for r in manifest['files'] if r['path'] == str(install / 'scripts' / name))
+        def remember_created(info):
+            record['created'] = [info.st_dev, info.st_ino]
+            atomic(backup / 'manifest.json', (json.dumps(manifest, indent=2)+'\n').encode(), 0o600)
+        atomic(install / 'scripts' / name, (source / 'scripts/standalone-ci' / name).read_bytes(), 0o755,
+               before_replace=remember_created if record.get('absent') else None)
     cfg.pop('github_status_token_file', None)
     cfg.update(controller_sha=args.sha, status_reader_uid=uid, pe_runner_uid=pe_runner_uid,
                controller_checksums={n: hashlib.sha256((install / 'scripts' / n).read_bytes()).hexdigest() for n in names})
