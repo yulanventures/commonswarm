@@ -180,6 +180,7 @@ import {
   revalidateHouseholdSeat,
   hostedCapabilityTool,
   revalidateHostedGrantCommand,
+  resolveHostedConnectionContext,
   revalidateHostedSeatCommand,
   type HostedCapability,
   type HostedGrantCapability,
@@ -10309,7 +10310,11 @@ async function claimHostedSeat(
       if (replayRows.length !== 1) {
         return { status: 403, body: { error: "hosted_seat_revoked" } };
       }
-      return { status: 200, body: { ...response, status: "accepted", replayed: true } };
+      const context = await resolveHostedConnectionContext(tx, capability, resolved, {
+        handle: response.handle, principal_id: response.principal_id,
+      });
+      if (context === null) return { status: 403, body: { error: "forbidden" } };
+      return { status: 200, body: { ...response, status: "accepted", replayed: true, context } };
     }
 
     const existingRows = await tx<{
@@ -10459,6 +10464,10 @@ async function claimHostedSeat(
       };
     }
 
+    // Resolve after the grant/stream/name/seat waits, before any seat effects.
+    // Keep context out of the idempotency receipt so replay resolves live access.
+    const context = await resolveHostedConnectionContext(tx, capability, resolved, decision.reuse);
+    if (context === null) return { status: 403, body: { error: "forbidden" } };
     const reused = decision.reuse;
     let closedSeatIds: string[] = [];
     if (reused === undefined) {
@@ -10578,7 +10587,7 @@ async function claimHostedSeat(
       } : {}),
       hash,
     });
-    return { status: 200, body: { status: "accepted", ...response } };
+    return { status: 200, body: { status: "accepted", ...response, context } };
   });
 }
 
@@ -13591,6 +13600,16 @@ async function handleHostedCheck(
       )
     `;
 
+    // Authority may change while waiting for this seat's check lock. Refuse
+    // before creating a cursor, opening a batch or acknowledging an old one.
+    const currentSeat = await revalidateHostedSeatCommand(tx, capability);
+    if (currentSeat === null || currentSeat.seat_id !== seat.seat_id ||
+        currentSeat.workspace_id !== input.workspace_id || currentSeat.handle !== input.command.seat) {
+      return { status: 403, body: { error: "forbidden" } };
+    }
+    const context = await resolveHostedConnectionContext(tx, capability, currentSeat);
+    if (context === null) return { status: 403, body: { error: "forbidden" } };
+
     const ackBatchId = input.command.kind === "ack_hosted_mcp_check_batch"
       ? input.command.ack.toLowerCase()
       : null;
@@ -13796,6 +13815,7 @@ async function handleHostedCheck(
     const batch = decision.return_batch;
     if (batch === null) {
       return { status: 200, body: {
+        context,
         batch_id: null,
         signals: [],
         cursor: advanceCursor ?? committedCursor,
@@ -13820,6 +13840,7 @@ async function handleHostedCheck(
       throw new Error("hosted check replay visibility changed for recorded ids");
     }
     return { status: 200, body: {
+      context,
       batch_id: batch.batch_id,
       signals,
       cursor: batch.terminal_cursor,

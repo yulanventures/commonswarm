@@ -227,3 +227,49 @@ export async function revalidateHouseholdSeat(
     await restoreCommandRole(tx);
   }
 }
+
+/** One response shape for hosted account context. Names come from durable rows;
+ * nullable email remains null when no verified-login email has been retained. */
+export interface HostedConnectionContext {
+  account: { user_id: string; display_name: string; email: string | null };
+  workspace: { workspace_id: string; name: string };
+  connection: {
+    grant_id: string;
+    home_workspace_id: string | null;
+    reachable_workspaces: Array<{ workspace_id: string; name: string }>;
+  };
+  summary: string;
+}
+
+/** Call after any authority-lock waits and before effects. The caller supplies
+ * only a canonical authorization result, never request-supplied owner claims.
+ * The private capability binding and SQL resolver independently fence the tuple.
+ * Claims use the existing hosted-read owner/principal visibility convention. */
+export async function resolveHostedConnectionContext(
+  tx: Sql,
+  capability: HostedCapability,
+  authorized: ResolvedHostedGrant | ResolvedHostedSeat,
+  claimedSeat?: Pick<ResolvedHostedSeat, "handle" | "principal_id">,
+): Promise<HostedConnectionContext | null> {
+  const binding = bindings.get(capability);
+  if (!binding || binding.grantId !== authorized.grant_id ||
+      binding.providerGrantId !== authorized.provider_grant_id ||
+      !await providerActive(binding)) return null;
+  const seat = "handle" in authorized ? authorized : claimedSeat ?? null;
+  if (binding.kind === "hosted_grant") {
+    if ("handle" in authorized || binding.ownerUserId !== authorized.owner_user_id ||
+        binding.workspaceId !== authorized.workspace_id) return null;
+  } else if (seat === null || seat.handle !== binding.handle) return null;
+  await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({
+    sub: authorized.owner_user_id,
+    role: "authenticated",
+    ...(seat === null ? {} : { agent_principal_id: seat.principal_id }),
+  })}, true)`;
+  const rows = await tx<{ context: HostedConnectionContext | null }[]>`
+    SELECT swarm.resolve_hosted_mcp_connection_context(
+      ${binding.grantId}::uuid, ${binding.providerGrantId}, ${binding.tool},
+      ${authorized.workspace_id}::uuid, ${seat?.handle ?? null}
+    ) AS context
+  `;
+  return rows[0]?.context ?? null;
+}

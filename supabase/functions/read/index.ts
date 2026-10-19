@@ -28,6 +28,7 @@ import { optionalWake } from "../_shared/wake.ts";
 import {
   hostedCapabilityTool,
   revalidateHostedSeatRead,
+  resolveHostedConnectionContext,
   type HostedSeatCapability,
 } from "../_shared/hosted-seat-auth.ts";
 
@@ -1132,8 +1133,11 @@ export async function handleHostedRead(
         ),
         set_config('search_path', 'swarm_read, auth, pg_catalog', true)
     `;
+    const context = await resolveHostedConnectionContext(tx, capability, seat);
+    if (context === null) return { status: 403, body: { error: "forbidden" } };
     if (input.resource === "whoami") {
       return { status: 200, body: {
+        context,
         grant_id: seat.grant_id,
         seat_id: seat.seat_id,
         handle: seat.handle,
@@ -1158,7 +1162,7 @@ export async function handleHostedRead(
         WHERE workspace_id = ${seat.workspace_id}::uuid AND revoked_at IS NULL
         ORDER BY principal_id
       `;
-      return { status: 200, body: { members, agents } };
+      return { status: 200, body: { members, agents, context } };
     }
     const limit = input.limit ?? 50;
     const afterCreatedAt = typeof input.after_created_at === "string"

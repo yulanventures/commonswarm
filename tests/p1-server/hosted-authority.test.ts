@@ -348,8 +348,55 @@ async function revokedGrantClaim() {
   return { revoked, refused: await claim(input.claim, cap) };
 }
 
+// Exercise the actual MCP HTTP owner, including its final allowlist projections.
+// Only the external JWKS is a fixture; JWT verification, binding, capabilities,
+// database roles, canonical resolvers, command receipts and reads are real.
+async function contextHttp() {
+  authPhase = "hosted";
+  const { MCP_ISSUER, MCP_RESOURCE, MCP_JWKS_URL } = await import(
+    ${JSON.stringify(new URL("../../supabase/functions/mcp/auth.ts", import.meta.url).href)}
+  );
+  const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const key = { ...await crypto.subtle.exportKey("jwk", pair.publicKey), kid: "context-fixture", alg: "ES256", use: "sig" };
+  const fetchBeforeMcp = globalThis.fetch;
+  globalThis.fetch = async (request, init) => {
+    const url = typeof request === "string" || request instanceof URL ? String(request) : request.url;
+    return url === MCP_JWKS_URL ? new Response(JSON.stringify({ keys: [key] })) : await fetchBeforeMcp(request, init);
+  };
+  const mcp = await import(${JSON.stringify(new URL("../../supabase/functions/mcp/index.ts", import.meta.url).href)});
+  const b64 = (value) => btoa(String.fromCharCode(...value)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+  const encode = (value) => b64(new TextEncoder().encode(JSON.stringify(value)));
+  const now = Math.floor(Date.now() / 1000);
+  const unsigned = encode({ alg: "ES256", kid: key.kid }) + "." + encode({
+    iss: MCP_ISSUER, aud: MCP_RESOURCE, sub: input.ownerUserId,
+    grant_id: "provider-" + input.grantId, scope: "mcp", iat: now, exp: now + 300,
+  });
+  const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, new TextEncoder().encode(unsigned));
+  const token = unsigned + "." + b64(new Uint8Array(signature));
+  let handle = input.handle;
+  const results = [];
+  for (const call of input.calls) {
+    const args = call.name === "claim_seat"
+      ? { name: input.name ?? "context-fixture-seat", request_id: call.request_id ?? crypto.randomUUID(), ...(call.workspace_id ? { workspace_id: call.workspace_id } : {}) }
+      : { seat: call.seat ?? handle, ...(call.ack ? { ack: call.ack } : {}) };
+    const response = await mcp.handleRequest(new Request(MCP_RESOURCE, {
+      method: "POST", headers: { authorization: "Bearer " + token, "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "tools/call", params: { name: call.name, arguments: args } }),
+    }));
+    const envelope = await response.json();
+    const output = envelope.result?.content?.[0]?.text;
+    const body = typeof output === "string" ? JSON.parse(output) : envelope;
+    if (call.name === "claim_seat" && typeof body.handle === "string") handle = body.handle;
+    results.push({ name: call.name, status: response.status, isError: envelope.result?.isError === true || envelope.error !== undefined || response.status !== 200, body });
+  }
+  globalThis.fetch = fetchBeforeMcp;
+  authPhase = "neutral";
+  return results;
+}
+
 let result;
-if (input.operation === "seat-read") result = await seatRead(input.seat);
+if (input.operation === "context-http") result = await contextHttp();
+else if (input.operation === "seat-read") result = await seatRead(input.seat);
 else if (input.operation === "removal-claim") result = await removalClaim();
 else if (input.operation === "seat-command") result = await seatCommand(input.seat);
 else if (input.operation === "revoked-grant-claim") result = await revokedGrantClaim();
@@ -537,6 +584,7 @@ function runHostedHarness<T>(input: Record<string, unknown>, options: {
       PATH: process.env.PATH ?? "",
       ...(process.env.DENO_DIR ? { DENO_DIR: process.env.DENO_DIR } : {}),
       SWARM_ENV: "test",
+      SWARM_MCP_PUBLIC_ENABLED: "1",
       SWARM_DATABASE_URL: options.databaseUrl ?? local.DB_URL,
       SUPABASE_DB_URL: options.databaseUrl ?? local.DB_URL,
       ...(options.rollbackBeforeStep ? { SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP: String(options.rollbackBeforeStep) } : {}),
@@ -1623,4 +1671,226 @@ test("same-owner revoked local principal is reclaimable through the hosted comma
   `;
   assert.deepEqual([...audits], [{ outcome: "accepted",
     detail: `reclaimed=1; closed_seats=0; principal_ids=${localPrincipal!.principal_id}; closed_seat_ids=` }]);
+});
+
+
+interface ContextHttpResult extends HarnessResult {
+  name: string;
+  isError: boolean;
+}
+interface ConnectionContext {
+  account: { user_id: string; display_name: string; email: string | null };
+  workspace: { workspace_id: string; name: string };
+  connection: { grant_id: string; home_workspace_id: string | null;
+    reachable_workspaces: Array<{ workspace_id: string; name: string }> };
+  summary: string;
+}
+function contextHttp(fixture: HostedFixture, options: {
+  grantId?: string; ownerUserId?: string; handle?: string; calls?: Array<Record<string, unknown>>;
+  name?: string;
+} = {}): ContextHttpResult[] {
+  return runHostedHarness<ContextHttpResult[]>({ operation: "context-http",
+    grantId: options.grantId ?? fixture.grantA, ownerUserId: options.ownerUserId ?? fixture.owner,
+    handle: options.handle, name: options.name,
+    calls: options.calls ?? ["claim_seat", "whoami", "members", "check"].map(name => ({ name })),
+  });
+}
+async function contextFixture(): Promise<HostedFixture> {
+  const fixture = await seedHostedFixture(true);
+  await sql`UPDATE swarm.users SET email = CASE WHEN user_id = ${fixture.owner}::uuid
+    THEN 'context-owner@example.test' ELSE 'context-other@example.test' END
+    WHERE user_id IN (${fixture.owner}::uuid, ${fixture.other}::uuid)`;
+  return fixture;
+}
+function assertContext(result: ContextHttpResult, fixture: HostedFixture, reachable = [fixture.workspaceA, fixture.workspaceB], other = false, current = fixture.workspaceA, home: string | null = fixture.workspaceA): ConnectionContext {
+  assert.equal(result.status, 200, result.name);
+  assert.equal(result.isError, false, JSON.stringify(result.body));
+  const context = result.body.context as ConnectionContext;
+  assert.ok(context, result.name + " retains context through the actual MCP projection");
+  assert.deepEqual(context.account, { user_id: other ? fixture.other : fixture.owner,
+    display_name: other ? "HM other" : "HM owner",
+    email: other ? "context-other@example.test" : "context-owner@example.test" });
+  assert.deepEqual(context.workspace, { workspace_id: current, name: current === fixture.workspaceA ? "HM A" : "HM B" });
+  assert.equal(context.connection.grant_id, other ? fixture.grantB : fixture.grantA);
+  assert.equal(context.connection.home_workspace_id, home);
+  assert.deepEqual(context.connection.reachable_workspaces,
+    [...reachable].sort().map(workspace_id => ({ workspace_id, name: workspace_id === fixture.workspaceA ? "HM A" : "HM B" })));
+  assert.ok(context.summary.includes(context.account.display_name));
+  assert.ok(context.summary.includes(context.account.email!));
+  assert.ok(context.summary.includes(context.workspace.name));
+  assert.ok(!/[\r\n]/u.test(context.summary));
+  return context;
+}
+
+// Authoring gate: protects the public four-tool output through the real HTTP
+// owner. It catches backend-only enrichment dropped by MCP projections. Existing
+// protocol tests replace executeTool and cannot cover that regression.
+test("hosted context explains all four HTTP tools, default claim, replay and two accounts without listing unconsented memberships", { timeout: 180_000 }, async () => {
+  const fixture = await contextFixture();
+  const unconsented = randomUUID();
+  await sql`INSERT INTO swarm.workspaces(workspace_id, name, created_by)
+    VALUES (${unconsented}::uuid, 'Private unconsented workspace', ${fixture.owner}::uuid)`;
+  await sql`INSERT INTO swarm.memberships(workspace_id, user_id, role)
+    VALUES (${unconsented}::uuid, ${fixture.owner}::uuid, 'owner')`;
+  const requestId = randomUUID();
+  const calls = [{ name: "claim_seat", request_id: requestId }, { name: "whoami" },
+    { name: "members" }, { name: "check" }, { name: "claim_seat", request_id: requestId }];
+  const ownerResults = contextHttp(fixture, { calls });
+  const contexts = ownerResults.map(row => assertContext(row, fixture));
+  for (const context of contexts) assert.deepEqual(context, contexts[0]);
+  assert.equal(ownerResults[0]!.body.handle, ownerResults[4]!.body.handle, "same request receipt replays");
+  const roster = ownerResults.find(row => row.name === "members")!.body;
+  for (const member of roster.members as Array<Record<string, unknown>>) assert.equal(Object.hasOwn(member, "email"), false);
+  const workspaceB = contextHttp(fixture, { calls: [{ name: "claim_seat", workspace_id: fixture.workspaceB },
+    { name: "whoami" }, { name: "members" }, { name: "check" }] });
+  workspaceB.forEach(row => assertContext(row, fixture, undefined, false, fixture.workspaceB));
+  const otherResults = contextHttp(fixture, { grantId: fixture.grantB, ownerUserId: fixture.other, name: "other-context-seat" });
+  otherResults.forEach(row => assertContext(row, fixture, undefined, true));
+  const foreignOwner = contextHttp(fixture, { ownerUserId: fixture.other,
+    handle: String(ownerResults[0]!.body.handle), calls: ["claim_seat", "whoami", "members", "check"].map(name => ({ name })) });
+  for (const row of foreignOwner) {
+    assert.equal(row.isError, true, row.name + " verified subject must own the stored grant");
+    assert.equal(row.body.context, undefined);
+    assert.equal(JSON.stringify(row.body).includes("context-owner@example.test"), false);
+  }
+  const crossed = contextHttp(fixture, { handle: String(otherResults[0]!.body.handle),
+    calls: ["whoami", "members", "check"].map(name => ({ name })) });
+  for (const row of crossed) {
+    assert.equal(row.isError, true, row.name);
+    assert.equal(row.body.context, undefined);
+    assert.equal(JSON.stringify(row.body).includes("context-other@example.test"), false);
+  }
+  await sql`UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at = statement_timestamp()
+    WHERE grant_id = ${fixture.grantA}::uuid AND workspace_id = ${fixture.workspaceA}::uuid`;
+  const survivingWorkspace = contextHttp(fixture, { handle: String(workspaceB[0]!.body.handle),
+    calls: ["whoami", "members", "check"].map(name => ({ name })) });
+  survivingWorkspace.forEach(row => assertContext(row, fixture, [fixture.workspaceB], false, fixture.workspaceB, null));
+});
+
+// Each row changes live durable authority after a positive HTTP invocation.
+// Omission of another consent and refusal of the current workspace are distinct
+// contracts; neither is established by protocol stubs or source inspection.
+for (const change of ["consent", "archive", "membership"] as const) {
+  test("hosted context HTTP filters withdrawn " + change + " then refuses the current workspace without effects", { timeout: 180_000 }, async () => {
+    const fixture = await contextFixture();
+    const initial = contextHttp(fixture);
+    initial.forEach(row => assertContext(row, fixture));
+    const handle = String(initial[0]!.body.handle);
+    const withdraw = async (workspaceId: string) => {
+      if (change === "consent") await sql`UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at = statement_timestamp()
+        WHERE grant_id = ${fixture.grantA}::uuid AND workspace_id = ${workspaceId}::uuid`;
+      else if (change === "archive") await sql`UPDATE swarm.workspaces SET archived_at = statement_timestamp() WHERE workspace_id = ${workspaceId}::uuid`;
+      else await sql`UPDATE swarm.memberships SET revoked_at = statement_timestamp()
+        WHERE user_id = ${fixture.owner}::uuid AND workspace_id = ${workspaceId}::uuid`;
+    };
+    await withdraw(fixture.workspaceB);
+    const live = contextHttp(fixture, { handle, calls: ["whoami", "members", "check", "claim_seat"].map(name => ({ name })) });
+    live.forEach(row => assertContext(row, fixture, [fixture.workspaceA]));
+    await withdraw(fixture.workspaceA);
+    const [before] = await sql`SELECT
+      (SELECT count(*)::text FROM swarm.hosted_mcp_seats WHERE grant_id = ${fixture.grantA}::uuid) AS seats,
+      (SELECT count(*)::text FROM swarm.hosted_mcp_check_cursors WHERE grant_id = ${fixture.grantA}::uuid) AS cursors,
+      (SELECT count(*)::text FROM swarm.hosted_mcp_check_batches WHERE grant_id = ${fixture.grantA}::uuid) AS batches`;
+    const refused = contextHttp(fixture, { handle, calls: ["whoami", "members", "check", "claim_seat"].map(name => ({ name })) });
+    for (const row of refused) {
+      assert.equal(row.isError, true, row.name);
+      assert.equal(row.body.context, undefined);
+      assert.equal(JSON.stringify(row.body).includes("context-owner@example.test"), false);
+    }
+    const [after] = await sql`SELECT
+      (SELECT count(*)::text FROM swarm.hosted_mcp_seats WHERE grant_id = ${fixture.grantA}::uuid) AS seats,
+      (SELECT count(*)::text FROM swarm.hosted_mcp_check_cursors WHERE grant_id = ${fixture.grantA}::uuid) AS cursors,
+      (SELECT count(*)::text FROM swarm.hosted_mcp_check_batches WHERE grant_id = ${fixture.grantA}::uuid) AS batches`;
+    assert.deepEqual(after, before, "context refusal leaves claim/check state unchanged");
+  });
+}
+
+for (const change of ["seat", "grant"] as const) {
+  test("hosted context HTTP refuses revoked " + change + " without leaking owner metadata", { timeout: 180_000 }, async () => {
+    const fixture = await contextFixture();
+    const initial = contextHttp(fixture);
+    initial.forEach(row => assertContext(row, fixture));
+    if (change === "seat") await sql`UPDATE swarm.hosted_mcp_seats SET revoked_at = statement_timestamp()
+      WHERE seat_id = ${String(initial[0]!.body.seat_id)}::uuid`;
+    else await sql`UPDATE swarm.hosted_mcp_grants SET state = 'revoked', revoked_at = statement_timestamp()
+      WHERE grant_id = ${fixture.grantA}::uuid`;
+    const refused = contextHttp(fixture, { handle: String(initial[0]!.body.handle),
+      calls: (change === "grant" ? ["whoami", "members", "check", "claim_seat"] : ["whoami", "members", "check"]).map(name => ({ name })) });
+    for (const row of refused) {
+      assert.equal(row.isError, true, row.name);
+      assert.equal(row.body.context, undefined);
+      assert.equal(JSON.stringify(row.body).includes("context-owner@example.test"), false);
+    }
+  });
+}
+
+test("context resolver runs under migrated read/command roles and denies forged owner, principal, provider, handle and tool bindings", { timeout: 180_000 }, async () => {
+  const fixture = await contextFixture();
+  const initial = contextHttp(fixture);
+  initial.forEach(row => assertContext(row, fixture));
+  const seat = initial[0]!.body;
+  const [acl] = await sql`SELECT p.prosecdef AS definer, p.proconfig AS config,
+    pg_get_userbyid(p.proowner) AS owner,
+    has_function_privilege('swarm_read', p.oid, 'EXECUTE') AS read,
+    has_function_privilege('swarm_command', p.oid, 'EXECUTE') AS command,
+    has_function_privilege('authenticated', p.oid, 'EXECUTE') AS human,
+    has_function_privilege('anon', p.oid, 'EXECUTE') AS anon,
+    has_function_privilege('commonswarm_oauth_runtime', p.oid, 'EXECUTE') AS oauth,
+    has_column_privilege('swarm_read', 'swarm.users', 'email', 'SELECT') AS direct_email
+    FROM pg_proc p WHERE p.oid = 'swarm.resolve_hosted_mcp_connection_context(uuid,text,text,uuid,text)'::regprocedure`;
+  assert.deepEqual(acl, { definer: true, config: ["search_path=pg_catalog"], owner: "swarm_admin",
+    read: true, command: true, human: false, anon: false, oauth: false, direct_email: false });
+  for (const role of ["swarm_read", "swarm_command"]) {
+    await sql.begin(async tx => {
+      await tx`SELECT set_config('role', ${role}, true)`;
+      const resolve = async (options: { owner?: string; principal?: string; provider?: string; handle?: string; tool?: string; grant?: string; workspace?: string } = {}) => {
+        await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: options.owner ?? fixture.owner,
+          role: "authenticated", agent_principal_id: options.principal ?? seat.principal_id })}, true)`;
+        const [row] = await tx<{ context: ConnectionContext | null }[]>`SELECT swarm.resolve_hosted_mcp_connection_context(
+          ${options.grant ?? fixture.grantA}::uuid, ${options.provider ?? `provider-${fixture.grantA}`}, ${options.tool ?? "whoami"},
+          ${options.workspace ?? fixture.workspaceA}::uuid, ${options.handle ?? String(seat.handle)}) AS context`;
+        return row!.context;
+      };
+      assert.deepEqual(await resolve(), initial[0]!.body.context, role + " positive control");
+      for (const options of [{ owner: fixture.other }, { principal: randomUUID() }, { provider: `provider-${fixture.grantB}` },
+        { handle: "seat_" + "Z".repeat(22) }, { tool: "note" }, { grant: fixture.grantB }, { workspace: fixture.workspaceB }]) {
+        assert.equal(await resolve(options), null, role + " mismatched binding refuses metadata");
+      }
+    });
+  }
+
+  // HTTP capability guards can hide an overly broad SQL resolver. Probe its
+  // independent role boundary, mutating real durable fences and rolling each
+  // transaction back so the next row has the same live positive control.
+  class ProbeRollback extends Error {}
+  for (const change of ["principal", "handle", "family", "grant-tombstone", "seat-tombstone", "principal-tombstone", "membership-tombstone"] as const) {
+    await assert.rejects(sql.begin(async tx => {
+      const resolve = async () => {
+        await tx`SELECT set_config('role', 'swarm_read', true),
+          set_config('request.jwt.claims', ${JSON.stringify({ sub: fixture.owner,
+            role: "authenticated", agent_principal_id: seat.principal_id })}, true)`;
+        const [row] = await tx<{ context: ConnectionContext | null }[]>`SELECT swarm.resolve_hosted_mcp_connection_context(
+          ${fixture.grantA}::uuid, ${`provider-${fixture.grantA}`}, 'whoami',
+          ${fixture.workspaceA}::uuid, ${String(seat.handle)}) AS context`;
+        await tx`SET LOCAL ROLE NONE`;
+        return row!.context;
+      };
+      assert.deepEqual(await resolve(), initial[0]!.body.context, change + " live positive control");
+      if (change === "principal") await tx`UPDATE swarm.agent_principals SET revoked_at = statement_timestamp()
+        WHERE principal_id = ${String(seat.principal_id)}::uuid`;
+      else if (change === "handle") await tx`UPDATE swarm.hosted_mcp_seat_handles SET revoked_at = statement_timestamp()
+        WHERE handle = ${String(seat.handle)}`;
+      else if (change === "family") await tx`INSERT INTO commonswarm_oauth.refresh_family_tombstones(grant_id, revoked_at)
+        VALUES (${`provider-${fixture.grantA}`}, statement_timestamp())`;
+      else {
+        const kind = change === "grant-tombstone" ? "hosted_grant" : change === "seat-tombstone" ? "hosted_seat"
+          : change === "principal-tombstone" ? "principal" : "membership";
+        const target = change === "grant-tombstone" ? fixture.grantA : change === "seat-tombstone" ? seat.seat_id
+          : change === "principal-tombstone" ? seat.principal_id : fixture.owner;
+        await tx`INSERT INTO swarm.revocation_tombstones(kind, target_id) VALUES (${kind}, ${String(target)}::uuid)`;
+      }
+      assert.equal(await resolve(), null, change + " denies all account metadata at the SQL boundary");
+      throw new ProbeRollback();
+    }), ProbeRollback);
+  }
 });
