@@ -127,7 +127,7 @@ fails with 124; bounded teardown can extend wall time beyond that budget.
 On PE deferral the active process gets one second to terminate before SIGKILL;
 other termination gets up to 60 seconds. The controller removes only exact-name,
 matching-label containers, their anonymous volumes and the matching network.
-It reclaims scratch ownership with the pinned tools image; a cleanup error
+It reclaims scratch and worker-artifact ownership with the pinned tools image; a cleanup error
 fails the receipt and retains scratch for Root. No global Docker prune is used.
 Queue wait is outside the suite bound but capped at 600 seconds. Each of at
 most two source fetches has a 120-second bound. Every cleanup Docker call has
@@ -143,7 +143,7 @@ scratch for Root; it cannot silently fall back to a successful Docker info probe
 `COMMONSWARM_CI_CONFIG` selects an operator-owned config (also used by disposable
 fixture tests); `timeout_seconds` may reduce the suite limit but cannot exceed it.
 
-Receipts and logs are private under `/var/lib/commonswarm-ci/runs/csci-<uuid>/`.
+Receipts and logs are stored under `/var/lib/commonswarm-ci/runs/csci-<uuid>/`.
 `receipt.json` contains requested/resolved SHA, controller SHA/checksums, queued,
 started and ended times, tool versions, per-gate statuses, exit/timeout, cleanup
 errors, attempt number/prior run IDs, shared suite start/elapsed budget,
@@ -169,64 +169,132 @@ caches for review. Never delete existing receipts to reinstall; future upgrades 
 separate reviewed migration step. Do not prune host Docker objects or touch
 any PE service/runner.
 
-## Host-side GitHub commit statuses
+## GitHub receipt reconciliation
 
-The installed controller calls `publish-status.py` after the final attempt's
-cleanup, scratch retention and any quiet-wait deadline decision. It posts only to
-`POST /repos/yulanventures/commonswarm/statuses/<resolved_sha>` on api.github.com,
-with context `hetzner/<suite>`. Both exact-SHA proof runs and `--ref main`
-nightlies use the resolved tested snapshot, even if main advances later.
-Deferred attempts publish nothing. Exit 0 publishes success; other exits publish
-failure, except controller/setup errors, timeout, cancellation and cleanup errors
-publish error. A failed setup command before the suite starts is an error;
-a nonzero suite test exit remains failure.
-Descriptions contain only the run ID and exit code. No raw logs or response bodies
-are published or printed. This uses the commit-status permission only; it does
-not call workflow, check-run, PR or comment APIs.
+The controller has no GitHub credential or HTTP publication path. After final
+cleanup, scratch retention and PE quiet-wait decisions, it atomically replaces
+`receipt.json` with controller-owned terminal metadata and
+`github_status={"state":"ready","version":1}`. Deferred/running attempts have no
+ready marker. The worker sees only `worker-artifacts/` at `/receipt`; the cleaner
+sees that child and scratch, never the run parent. Readiness/ACL failures are
+reported as sanitized `github_status: failed` and `persistence_errors`, while CI
+exits, later suites and final retention retain their normal behavior. A failed
+ready write cannot expose a partially written marker.
 
-Root must configure `github_status_token_file` in the root-owned
-`/opt/commonswarm-ci/config.json`, pointing to the **existing** CI-host GitHub
-credential. This change does not establish that credential's path or scope;
-Root must verify existing access to CommonSwarm commit statuses without minting
-a token or expanding its permissions. The publisher requires a canonical absolute
-regular file, mode 0600, owned by root or the service account and readable by the
-calling host account. Its path must be outside both configured `state` and
-`controller` trees, including all checkout, receipt and scratch mounts. The token
-is read only by the host publisher and never passed through argv, environment,
-logs or container mounts. The HTTP host is fixed; redirects are refused.
+`.github/workflows/hetzner-status.yml` reconciles at `40 * * * *` (including
+06:40 UTC) and through manual dispatch on trusted `main` in
+`yulanventures/commonswarm`. Its only permission is `statuses: write` and its
+labels require the dedicated `pe-ci-1,commonswarm-status` runner. There is no
+checkout, dependency installation or source execution from the tested SHA. The
+workflow verifies a literal SHA-256 and root ownership/nonwritability for the
+installed single-file stdlib publisher and its ancestors before executing it.
+Update that literal hash whenever publisher bytes change. Workflow concurrency
+serializes this writer; GitHub does not guarantee pending dispatch FIFO/delivery.
 
-Publication failure leaves the suite exit/result intact. The controller prints
-`"github_status": "failed"` in its JSON summary and stores a sanitized outcome in both
-`receipt.json` and `/var/lib/commonswarm-ci/statuses/<run_id>.json`. The latter is
-outside all container mounts and is retained for operator reconciliation; the
-14-day run retention does not delete it. An unset token path also produces this
-explicit failure. Publication has a 30-second host process bound per final suite.
-If publication-directory creation or either publication-record write fails, the
-controller still preserves the CI exit, runs subsequent suites and invokes final
-retention. Its stdout (captured by the service journal) includes the sanitized
-publication outcome and `persistence_errors` codes, without exception text. An
-unwritten host status record has `publication_record: null`; the other record is
-still attempted. This fallback does not change baseline receipt/filesystem errors
-outside publication persistence.
+The publisher receives only that job's ephemeral `github.token` through its step
+environment, removes it from the environment and holds it in memory. It uses only
+commit-status GET/POST endpoints at `api.github.com`, refuses redirects and never
+prints transport exceptions or response bodies. It has no config/token-file
+argument, SHA override or persistent publication records. Receipt paths and
+repository are fixed; no-follow directory-relative reads reject symlinks,
+nonregular/oversized files and inconsistent/unfinished outcomes. Scheduled scans
+skip private/unreadable older runs and attempts; explicit selection fails if its
+receipt is missing/unreadable. Only ready receipts are discovered automatically.
+Manual `run_ids` accepts at most 20 unique comma-separated IDs. The six audited
+legacy IDs below may be explicitly selected without a marker; their JSON is never
+rewritten. Other legacy receipts remain private.
 
-For an existing installation, Root must install the reviewed four controller
-files (`run.sh`, `suite.sh`, `retain.py`, `publish-status.py`) together and update
-`controller_sha` plus all four `controller_checksums` in config. Do not rerun
-fresh-install-only provisioning over existing state. Verify the exact installed
-hashes and token file metadata, then inspect a completed proof/nightly status and
-its publication record. This Maker change has not installed or backfilled them.
+Exit 0 maps to success; test exits map to failure; controller/setup errors,
+timeout, cancellation and cleanup errors map to error. Status context is
+`hetzner/<suite>` and descriptions include validated run ID, exit and completion
+time. Only the original full resolved tested SHA is used, even after main moves.
+Every candidate gets complete paginated API history before a create. A matching
+run/context/outcome is skipped even if a newer run is now current. Candidates are
+ordered by validated timezone-aware completion times. An unposted older/equal
+result cannot overwrite a newer result; unknown or conflicting provenance fails
+closed. Legacy descriptions without timestamps require their original readable
+receipt to establish chronology. HTTP insertion order is never test chronology.
+Every 201 is verified by a fresh complete-history readback of its exact ID and
+payload. A lost POST response fails visibly; the next invocation reconciles the
+history before any retry. Arbitrary external concurrent writers cannot be made
+atomic with GitHub's commit-status API.
 
-An operator can backfill an audited **final** receipt with:
+Root prerequisites: idle Linux `pe-ci-1`, Python 3, `getfacl`, `setfacl`, `runuser`,
+`sudo`, process visibility, ACL-capable filesystem and a reviewed landed source
+SHA. The installer does not install packages, rebuild images, change/start the
+06:00 timer or enroll a runner. Never rerun fresh-install `provision.sh` against
+existing state. Provision creates credential-free config with an unset reader;
+the installer assigns the verified dedicated runner UID.
+
+Root's separately reviewed private `REGISTER-RUNNER.py` launcher uses mini
+`GH_CONFIG_DIR=/Users/yulanbot/.config/gh-headless` to request a short-lived repo
+runner registration credential, keeps it in memory and sends it over SSH stdin
+through the verified CI helper (`ops@2.31.30.252`, never the `pe-ci-1` alias).
+It creates only `commonswarm-status`, home `/var/lib/commonswarm-status-runner`,
+with no supplementary groups/sudo/Docker privilege, verifies the official
+v2.338.0 runner archive against `RUNNER-RELEASE.json` SHA-256
+`af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32`, and configures
+as nonroot using `ACTIONS_RUNNER_INPUT_TOKEN`, never token argv. This input is
+[masked and removed by the official runner](https://raw.githubusercontent.com/actions/runner/v2.338.0/src/Runner.Listener/CommandSettings.cs#L101-L128).
+It neither uses `--replace` nor changes `gha` (UID 1001) or any PE service. Root
+installs a root-owned unit running only as the dedicated identity; retries verify
+its exact unit contents and own enrollment ID. Config/service output is captured
+in memory and withheld on failure. No new PAT is created. Root must also verify
+that only trusted main workflows may use this Unix identity; ACLs cannot isolate
+untrusted jobs sharing a user, root, sudo or Docker administration.
+
+After independent review and enrollment, Root runs on the verified CI host:
 
 ```sh
-python3 -I /opt/commonswarm-ci/scripts/publish-status.py --config /opt/commonswarm-ci/config.json --receipt /var/lib/commonswarm-ci/runs/<run_id>/receipt.json
+sudo bash deploy/ci/install-status-relay.sh --sha <reviewed-landed-40hex> --runner-user commonswarm-status
 ```
 
-It accepts no SHA override and refuses deferred/inconsistent receipts. Capture its
-sanitized JSON result and read back the GitHub status; manual invocation does not
-rewrite historical receipts or controller publication records. Publish oldest
-receipts before newer results for the same SHA/context. Never substitute a merge
-SHA for the resolved SHA in a receipt.
+The installer checks same-host/protected paths, exact clean source SHA and all
+four installed checksums; holds the existing queue inode exclusively in a quiet
+window; saves private controller/config and exact per-file ACL backups under
+`/var/backups/commonswarm-status/`; then installs four controller files and the
+private root-owned `0640 root:commonswarm-ci` config. Pinned images remain as
+installed. It grants named-user `--x` on state, `r-x` on runs, `--x` on the six
+selected runs and `r--` only on their receipt files. Group and other entries stay
+`---`; ACL masks legitimately change stat group bits. Exact owner/access-ACL
+validation replaces the previous mode-only check. Extra named/default ACLs are
+refused. No recursive or inherited/default ACLs are granted. The controller
+applies the same narrow ACL to future final run directories and each new atomic
+receipt inode. Logs, artifacts, scratch, queue, source, home and config remain
+private. Actual unprivileged probes cover receipt read plus write/list/log/private
+state denial; Root's Linux gate proves replacement/new-run lifecycle too.
+
+The installer prints its backup location, source SHA, hashes and the exact
+`--rollback <backup>` command. Automatic failure rollback restores saved files
+and each saved ACL without deleting receipts or changing services; an inode
+replacement during a later rollback causes refusal for Root reconciliation.
+Root must use a quiet queue for rollback. Runner rollback is separate: stop and
+disable only
+`actions.runner.yulanventures-commonswarm.pe-ci-1-commonswarm-status.service`,
+remove only that verified unit, reload systemd, and delete only the returned own
+repository runner ID with gh-headless (`gh api --method DELETE
+repos/yulanventures/commonswarm/actions/runners/<own-id>`). Preserve its home for
+review. Do not touch PE registrations, users, services or their files.
+
+Root gates at the frozen source, with absolute Root-owned HOME/TMPDIR:
+
+```sh
+node --test tests/standalone-ci-guard.test.mjs tests/standalone-ci-publisher.test.mjs
+bash -n scripts/standalone-ci/run.sh scripts/standalone-ci/suite.sh deploy/ci/provision.sh deploy/ci/install-status-relay.sh
+git diff --check
+```
+
+The guard owner proves controller/ACL/mount lifecycle; publisher owner proves
+HTTP pagination, duplicates, chronology, crash recovery, readback, legacy/path
+refusals and workflow bootstrap. Test-audit's four authoring answers are recorded
+beside each owner. Root must run the negative controls and mutation checks, then
+verify actual runner permissions, job token permissions, six original status
+outcomes and a repeat dispatch yielding six skips with no new statuses.
+
+Retention remains **14 days** and `retain.py` is unchanged. Extended publisher
+outages may outlast readable receipts; a metadata-forever/backlog guarantee is
+explicitly parked. No local acknowledgement or new retention policy is implied.
+This source preparation has not enrolled, installed, dispatched or backfilled.
 
 Read-only metadata inventory on 2026-10-19 enumerated 37 receipts and selected the
 following six for Root's backfill. The first five share resolved SHA

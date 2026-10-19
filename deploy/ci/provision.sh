@@ -11,7 +11,7 @@ test "$(id -u)" = 0
 cd "$(git rev-parse --show-toplevel)"
 test "$(git rev-parse HEAD)" = "$reviewed_sha"
 test -z "$(git status --porcelain)"
-for tool in docker git python3 curl systemctl pgrep timeout useradd groupadd; do command -v "$tool" >/dev/null; done
+for tool in docker git python3 curl systemctl pgrep timeout useradd groupadd getfacl setfacl; do command -v "$tool" >/dev/null; done
 if pgrep -x Runner.Worker >/dev/null; then echo 'REFUSE: PromptEden job active' >&2; exit 75; fi
 # Refuse hidden cross-user processes; an idle probe alone proves nothing.
 pgrep -u root -x systemd >/dev/null
@@ -152,13 +152,14 @@ account=pwd.getpwnam("commonswarm-ci")
 cfg=dict(controller_sha=sys.argv[1],worker_image=sys.argv[2],dind_image=sys.argv[3],
          state='/var/lib/commonswarm-ci',controller='/opt/commonswarm-ci/scripts',
          source_url='https://github.com/yulanventures/commonswarm.git',
-         allowed_hostname='pe-ci-1',timeout_seconds=1800,github_status_token_file=None,
+         allowed_hostname='pe-ci-1',timeout_seconds=1800,status_reader_uid=None,
          service_uid=account.pw_uid,service_gid=account.pw_gid,
          controller_checksums={p.name:hashlib.sha256(p.read_bytes()).hexdigest()
                                for p in Path('/opt/commonswarm-ci/scripts').iterdir() if p.is_file()})
 open('/opt/commonswarm-ci/config.json','w').write(json.dumps(cfg,indent=2)+'\n')
 PY
-chmod 0644 /opt/commonswarm-ci/config.json
+chown root:commonswarm-ci /opt/commonswarm-ci/config.json
+chmod 0640 /opt/commonswarm-ci/config.json
 for unit in commonswarm-nightly.service commonswarm-nightly.timer; do
   # noclobber is exclusive: a concurrently created unit is never ours to remove.
   (set -o noclobber; : >"/etc/systemd/system/$unit")
