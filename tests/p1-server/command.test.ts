@@ -2953,13 +2953,39 @@ test("T-05/T-06 accepted replay and conflicting command-id reuse", async () => {
 
 test("T-10 concurrent acquire has exactly one winner", async () => {
   await scenario(async (f) => {
+    // Diagnostics emit only known literals and bounded HTTP integers.
+    const literal = (value: unknown): string => {
+      switch (value) {
+        case "accepted": return "accepted";
+        case "rejected": return "rejected";
+        case "not_acquirable": return "not_acquirable";
+        case "internal_error": return "internal_error";
+        case "temporarily_unavailable": return "temporarily_unavailable";
+        case "unauthenticated": return "unauthenticated";
+        case "forbidden": return "forbidden";
+        case "invalid_request": return "invalid_request";
+        case "WORKER_ERROR": return "WORKER_ERROR";
+        case "WORKER_LIMIT": return "WORKER_LIMIT";
+        case "BOOT_ERROR": return "BOOT_ERROR";
+        case undefined: return "absent";
+        case null: return "null";
+        default: return "unrecognized";
+      }
+    };
+    const diagnostic = (iteration: number, responses: CommandResponse[]): string =>
+      `T-10 iteration=${iteration} ` + responses.map((response, index) => {
+        const http = Number.isInteger(response.status) && response.status >= 100 && response.status <= 599
+          ? response.status : "invalid";
+        return `response=${index} http=${http} status=${literal(response.body.status)} reason=${literal(response.body.reason)} error_class=${literal(response.body.error)} code_class=${literal(response.body.code)}`;
+      }).join("; ");
     for (let iteration = 0; iteration < 50; iteration += 1) {
       const taskId = randomUUID();
-      await issue(f, f.uaJwt, {
+      const created = await issue(f, f.uaJwt, {
         kind: "create",
         task_id: taskId,
         slug: `lease-race-${iteration}`,
       });
+      assert.equal(created.body.status, "accepted", diagnostic(iteration, [created]));
       const idA = commandId("racea");
       const idB = commandId("raceb");
       const command: Command = {
@@ -2972,15 +2998,18 @@ test("T-10 concurrent acquire has exactly one winner", async () => {
         issue(f, f.ua2Jwt, command, idB),
       ]);
       const responses = [a, b];
+      const message = diagnostic(iteration, responses);
       assert.equal(
         responses.filter((r) => r.body.status === "accepted").length,
         1,
+        message,
       );
       assert.equal(
         responses.filter((r) =>
           r.body.status === "rejected" && r.body.reason === "not_acquirable"
         ).length,
         1,
+        message,
       );
       const events = await sql<{ type: string }[]>`
         SELECT type FROM swarm.events
@@ -2990,17 +3019,19 @@ test("T-10 concurrent acquire has exactly one winner", async () => {
       assert.equal(
         events.filter((event) => event.type === "LeaseAcquired").length,
         1,
+        message,
       );
       assert.equal(
         events.filter((event) => event.type === "CommandRejected").length,
         1,
+        message,
       );
       const [replayA, replayB] = await Promise.all([
         issue(f, f.uaJwt, command, idA),
         issue(f, f.ua2Jwt, command, idB),
       ]);
-      assert.deepEqual(stored(replayA.body), stored(a.body));
-      assert.deepEqual(stored(replayB.body), stored(b.body));
+      assert.deepEqual(stored(replayA.body), stored(a.body), diagnostic(iteration, [a, replayA]));
+      assert.deepEqual(stored(replayB.body), stored(b.body), diagnostic(iteration, [b, replayB]));
     }
   });
 });

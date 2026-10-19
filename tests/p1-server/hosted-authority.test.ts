@@ -1812,16 +1812,31 @@ test("hosted context HTTP preserves null email and keeps hostile names on one su
 test("hosted context survives actual MCP check ACK and advances the stored batch", { timeout: 180_000 }, async () => {
   const fixture = await contextFixture();
   const [claimed] = contextHttp(fixture, { calls: [{ name: "claim_seat" }] });
-  const context = assertContext(claimed!, fixture);
+  const initialContext = assertContext(claimed!, fixture);
   const posted = runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: fixture.ownerJwt,
     workspaceId: fixture.workspaceA, command: { kind: "post_signal", signal_kind: "note",
       body: "Context ACK fixture", to_user_id: null, to_agent_principal_id: claimed!.body.principal_id,
       in_reply_to: null, about: null, until_ms: 600_000 } });
   assert.equal(posted.status, 200);
   assert.equal(posted.body.status, "accepted");
+  // The public JWT path syncs GoTrue's synthetic profile into the durable account.
+  const [authProfile] = await sql<{ email: string }[]>`
+    SELECT email FROM auth.users WHERE id = ${fixture.owner}::uuid`;
+  assert.match(authProfile!.email, /^hm-owner-[0-9a-f-]{36}@example\.test$/u);
+  const [account] = await sql<ConnectionContext["account"][]>`
+    SELECT user_id, display_name, email FROM swarm.users WHERE user_id = ${fixture.owner}::uuid`;
+  assert.deepEqual(account, { user_id: fixture.owner,
+    display_name: authProfile!.email.split("@")[0], email: authProfile!.email });
+  assert.notEqual(account!.display_name, initialContext.account.display_name);
+  assert.notEqual(account!.email, initialContext.account.email);
+  const expected = { displayName: account!.display_name, email: account!.email };
   const handle = String(claimed!.body.handle);
   const [opened] = contextHttp(fixture, { handle, calls: [{ name: "check" }] });
-  assert.deepEqual(assertContext(opened!, fixture), context);
+  const context = assertContext(opened!, fixture, undefined, false, undefined, undefined, expected);
+  assert.deepEqual(context.account, account);
+  assert.ok(context.summary.includes(account!.display_name));
+  assert.deepEqual(context.workspace, initialContext.workspace);
+  assert.deepEqual(context.connection, initialContext.connection);
   assert.equal(typeof opened!.body.batch_id, "string");
   const signal = posted.body.signal as { id: string };
   assert.ok((opened!.body.signals as Array<{ id: string }>).some(row => row.id === signal.id));
@@ -1829,7 +1844,7 @@ test("hosted context survives actual MCP check ACK and advances the stored batch
   const [before] = await sql`SELECT acknowledged_at FROM swarm.hosted_mcp_check_batches WHERE batch_id = ${batchId}::uuid`;
   assert.equal(before!.acknowledged_at, null);
   const [acked] = contextHttp(fixture, { handle, calls: [{ name: "check", ack: batchId }] });
-  assert.deepEqual(assertContext(acked!, fixture), context);
+  assert.deepEqual(assertContext(acked!, fixture, undefined, false, undefined, undefined, expected), context);
   assert.equal(acked!.body.acknowledged_batch_id, batchId);
   const [after] = await sql`SELECT acknowledged_at FROM swarm.hosted_mcp_check_batches WHERE batch_id = ${batchId}::uuid`;
   assert.ok(after!.acknowledged_at instanceof Date);
