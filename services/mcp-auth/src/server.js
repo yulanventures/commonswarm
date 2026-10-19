@@ -215,13 +215,18 @@ export function createProductionFindAccount(pool) {
       typeof source?.grantId === "string" ? source.grantId : null;
     if (refreshGrantId !== null) {
       const result = await pool.query(
-        `SELECT 1
+        `SELECT status.active
            FROM commonswarm_oauth.resolve_hosted_grant_status($1) AS status
-          WHERE status.owner_user_id = $2::uuid AND status.active
+          WHERE status.owner_user_id = $2::uuid
           LIMIT 1`,
         [refreshGrantId, accountId],
       );
-      return result.rowCount === 1 ? {
+      // Pending consent is omitted by the resolver: never tombstone a family
+      // before consent can activate it. Admin transactions returned above.
+      if (result.rowCount === 1 && result.rows[0]?.active === false) {
+        await createPostgresAdapter(pool)("RefreshToken").revokeByGrantId(refreshGrantId);
+      }
+      return result.rowCount === 1 && result.rows[0]?.active === true ? {
         accountId,
         claims: async () => ({ sub: accountId }),
       } : undefined;

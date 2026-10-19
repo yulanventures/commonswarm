@@ -620,8 +620,34 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         const mcpOnly = await reconnect({ scope: 'openid mcp' });
         assert.ok(!(await storedRefresh(mcpOnly.refresh_token)).payload.scope.split(' ').includes('offline_access'));
         await refusedRefresh(mcpOnly.refresh_token, {}, 'invalid_scope');
-        await savedGrant.destroy();
+        const humanSessionsBefore = await pool.query(`SELECT count(*)::int AS n
+          FROM commonswarm_oauth.browser_sessions WHERE user_id = $1 AND invalidated_at IS NULL`, [owner]);
+        const independentFamily = (await storedRefresh(subset.refresh_token)).payload.grantId;
+        await pool.query(`UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at = statement_timestamp()
+          WHERE grant_id = (SELECT grant_id FROM swarm.hosted_mcp_grants WHERE provider_grant_id = $1)
+            AND workspace_id = $2`, [family, workspaces[0]]);
+        const sharedRefresh = await refresh(latest.refresh_token);
+        assert.equal(sharedRefresh.status, 200, 'another usable workspace keeps the shared family live');
+        latest = await sharedRefresh.json();
+        await pool.query(`UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at = statement_timestamp()
+          WHERE grant_id = (SELECT grant_id FROM swarm.hosted_mcp_grants WHERE provider_grant_id = $1)`, [family]);
+        const beforeRetirement = await pool.query(`SELECT count(*)::int AS n
+          FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = $1`, [family]);
+        assert.equal(beforeRetirement.rows[0].n, 0, 'authority consent removal has not retired provider artifacts');
         await refusedRefresh(latest.refresh_token, {}, 'invalid_grant');
+        const retired = await pool.query(`SELECT
+          (SELECT count(*)::int FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = $1) AS tombstones,
+          (SELECT count(*)::int FROM commonswarm_oauth.provider_artifacts WHERE grant_id = $1) AS artifacts`, [family]);
+        assert.deepEqual(retired.rows[0], { tombstones: 1, artifacts: 0 }, 'real HTTP refresh retires the zero-consent family');
+        const independent = await refresh(subset.refresh_token);
+        assert.equal(independent.status, 200, 'independent provider family remains refreshable');
+        const independentStatus = await pool.query(`SELECT count(*)::int AS n
+          FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = $1`, [independentFamily]);
+        assert.equal(independentStatus.rows[0].n, 0);
+        const humanSessionsAfter = await pool.query(`SELECT count(*)::int AS n
+          FROM commonswarm_oauth.browser_sessions WHERE user_id = $1 AND invalidated_at IS NULL`, [owner]);
+        assert.equal(humanSessionsAfter.rows[0].n, humanSessionsBefore.rows[0].n, 'refresh retirement preserves human sessions');
+        await savedGrant.destroy();
         const replay = await tokenRequest({});
         assert.equal(replay.status, 400); assert.equal((await replay.json()).error, 'invalid_grant');
 
