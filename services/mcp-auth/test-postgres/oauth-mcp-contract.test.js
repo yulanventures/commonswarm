@@ -483,7 +483,7 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
           assert.ok(!body.access_token && !body.refresh_token);
         };
         const storedRefresh = async token => {
-          const result = await pool.query(`SELECT payload, expires_at FROM commonswarm_oauth.provider_artifacts
+          const result = await pool.query(`SELECT payload, expires_at, consumed_at FROM commonswarm_oauth.provider_artifacts
             WHERE model = 'RefreshToken' AND artifact_id_hash = $1`,
           [createHash('sha256').update(token).digest('base64url')]);
           assert.equal(result.rowCount, 1);
@@ -623,6 +623,7 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         const humanSessionsBefore = await pool.query(`SELECT count(*)::int AS n
           FROM commonswarm_oauth.browser_sessions WHERE user_id = $1 AND invalidated_at IS NULL`, [owner]);
         const independentFamily = (await storedRefresh(subset.refresh_token)).payload.grantId;
+        assert.notEqual(independentFamily, family, 'positive control has a distinct provider family');
         await pool.query(`UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at = statement_timestamp()
           WHERE grant_id = (SELECT grant_id FROM swarm.hosted_mcp_grants WHERE provider_grant_id = $1)
             AND workspace_id = $2`, [family, workspaces[0]]);
@@ -696,7 +697,15 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         const terminal = await running.pool.query(
           'SELECT active FROM commonswarm_oauth.resolve_hosted_grant_status($1)', [family]);
         assert.equal(terminal.rows[0]?.active, false, 'membership re-add after retirement cannot revive the old family');
-        const independent = await refresh(subset.refresh_token);
+        const independentToken = await storedRefresh(subset.refresh_token);
+        assert.equal(independentToken.consumed_at, null, 'positive control retains its current unspent refresh token');
+        assert.equal(independentToken.payload.clientId, clientId);
+        const independentConsent = await running.pool.query(
+          'SELECT active FROM commonswarm_oauth.resolve_hosted_grant_status($1)', [independentFamily]);
+        assert.equal(independentConsent.rows[0]?.active, true, 'independent family retains usable workspace consent');
+        // The legacy family lacks offline_access: retry its current scope,
+        // rather than requesting the full scope that was already refused above.
+        const independent = await refresh(subset.refresh_token, { scope: undefined });
         assert.equal(independent.status, 200, 'independent provider family remains refreshable');
         const independentStatus = await pool.query(`SELECT count(*)::int AS n
           FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = $1`, [independentFamily]);
