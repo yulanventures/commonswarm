@@ -998,7 +998,7 @@ test('accepted agent removals leave every current surface immediately and after 
     const commands: string[] = [];
     const context = createContext({ ...agentStatusFunctions, classifyAgentPresence, agentPresenceLine, wakePathMark,
       identityDisplayLabel, isTaggable, removedAgentLabel, peopleDialogCanAct, mapHomePeople, homeRailPeople, mapHomeRail,
-      initialCatchUpData, overviewCatchUpData, homeNeedsYouCount, homeStructureKey, buildHomeRail, assignOptions, tagOptions,
+      initialCatchUpData, overviewCatchUpData, homeNeedsYouCount, homeStructureKey, buildHomeRail, routeHref, assignOptions, tagOptions,
       one: (selector: string) => selector === '[data-home-rail-slot]' ? slot : null,
       document: { visibilityState: 'visible', createElement: (tag: string) => new RailNode(tag) },
       window: { setInterval: (fn: () => void) => { tick = fn; return 1; } },
