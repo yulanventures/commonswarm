@@ -230,12 +230,8 @@ test("Grok Bot is a default card whose panel reaches the generated prompt and it
   );
   /* The invite surface carries no keys, so a joiner cannot preset this route there. */
   assert.ok(!inviteAssistantHosts().some((host) => host.id === "grok-bot"));
-  /* Card to flow: the picker's generated-prompt panel offers the generator under the
-     same hook the Terminal chip uses, and the dashboard binds every such button. */
-  const picker = readFileSync(new URL("../components/connect/AgentHostPicker.astro", import.meta.url), "utf8");
-  assert.match(picker, /host\.status === null && \([\s\S]*?data-agent-owner-self>Generate the setup prompt</u);
-  const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
-  assert.match(dashboard, /all<HTMLButtonElement>\("\[data-agent-owner-self\]"\)[\s\S]*?addEventListener\("click", openConnect\)/u);
+  /* Card to flow is behavior, not source shape: grok-bot-browser.observer.test.ts
+     clicks the real card and Generate button through to the copied prompt. */
 });
 
 test("an Open pill names the app and opens only its measured web address", () => {
