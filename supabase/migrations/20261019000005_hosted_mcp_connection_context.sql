@@ -90,7 +90,7 @@ AS $function$
     'summary', regexp_replace(format('Connected as %s%s in %s; %s approved workspace(s) available.',
       u.display_name, CASE WHEN u.email IS NULL THEN '' ELSE format(' (%s)', u.email) END,
       w.name, (SELECT count(*) FROM reachable AS r WHERE r.grant_id = g.grant_id)),
-      '[[:cntrl:]]', ' ', 'g')
+      U&'[[:cntrl:]\2028\2029]', ' ', 'g')
   )
   FROM authorized AS g
   JOIN swarm.users AS u ON u.user_id = g.owner_user_id

@@ -1702,23 +1702,25 @@ async function contextFixture(): Promise<HostedFixture> {
     WHERE user_id IN (${fixture.owner}::uuid, ${fixture.other}::uuid)`;
   return fixture;
 }
-function assertContext(result: ContextHttpResult, fixture: HostedFixture, reachable = [fixture.workspaceA, fixture.workspaceB], other = false, current = fixture.workspaceA, home: string | null = fixture.workspaceA): ConnectionContext {
+function assertContext(result: ContextHttpResult, fixture: HostedFixture, reachable = [fixture.workspaceA, fixture.workspaceB], other = false, current = fixture.workspaceA, home: string | null = fixture.workspaceA,
+  expected: { displayName?: string; email?: string | null; workspaceAName?: string } = {}): ConnectionContext {
   assert.equal(result.status, 200, result.name);
   assert.equal(result.isError, false, JSON.stringify(result.body));
   const context = result.body.context as ConnectionContext;
   assert.ok(context, result.name + " retains context through the actual MCP projection");
   assert.deepEqual(context.account, { user_id: other ? fixture.other : fixture.owner,
-    display_name: other ? "HM other" : "HM owner",
-    email: other ? "context-other@example.test" : "context-owner@example.test" });
-  assert.deepEqual(context.workspace, { workspace_id: current, name: current === fixture.workspaceA ? "HM A" : "HM B" });
+    display_name: expected.displayName ?? (other ? "HM other" : "HM owner"),
+    email: expected.email === undefined ? (other ? "context-other@example.test" : "context-owner@example.test") : expected.email });
+  assert.deepEqual(context.workspace, { workspace_id: current, name: current === fixture.workspaceA ? expected.workspaceAName ?? "HM A" : "HM B" });
   assert.equal(context.connection.grant_id, other ? fixture.grantB : fixture.grantA);
   assert.equal(context.connection.home_workspace_id, home);
   assert.deepEqual(context.connection.reachable_workspaces,
-    [...reachable].sort().map(workspace_id => ({ workspace_id, name: workspace_id === fixture.workspaceA ? "HM A" : "HM B" })));
-  assert.ok(context.summary.includes(context.account.display_name));
-  assert.ok(context.summary.includes(context.account.email!));
-  assert.ok(context.summary.includes(context.workspace.name));
-  assert.ok(!/[\r\n]/u.test(context.summary));
+    [...reachable].sort().map(workspace_id => ({ workspace_id, name: workspace_id === fixture.workspaceA ? expected.workspaceAName ?? "HM A" : "HM B" })));
+  if (expected.displayName === undefined) assert.ok(context.summary.includes(context.account.display_name));
+  if (context.account.email !== null) assert.ok(context.summary.includes(context.account.email));
+  else assert.ok(!/null|undefined/u.test(context.summary), "missing email is not invented in summary");
+  if (expected.workspaceAName === undefined) assert.ok(context.summary.includes(context.workspace.name));
+  assert.ok(!/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(context.summary), "summary stays on one line");
   return context;
 }
 
@@ -1735,7 +1737,25 @@ test("hosted context explains all four HTTP tools, default claim, replay and two
   const requestId = randomUUID();
   const calls = [{ name: "claim_seat", request_id: requestId }, { name: "whoami" },
     { name: "members" }, { name: "check" }, { name: "claim_seat", request_id: requestId }];
-  const ownerResults = contextHttp(fixture, { calls });
+  // A claim starts without human claims. Its real seat INSERT must retain that
+  // ambient authorization context after the response-context resolver returns.
+  const probe = "context_claim_" + randomUUID().replaceAll("-", "");
+  await sql.unsafe(`CREATE FUNCTION swarm.${probe}() RETURNS trigger LANGUAGE plpgsql AS $probe$
+    BEGIN
+      IF NEW.grant_id = '${fixture.grantA}'::uuid
+        AND nullif(current_setting('request.jwt.claims', true), '') IS NOT NULL THEN
+        RAISE EXCEPTION 'claim write inherited response context claims' USING ERRCODE='ZX001';
+      END IF;
+      RETURN NEW;
+    END $probe$;
+    CREATE TRIGGER ${probe} BEFORE INSERT ON swarm.hosted_mcp_seats
+      FOR EACH ROW EXECUTE FUNCTION swarm.${probe}();`);
+  let ownerResults: ContextHttpResult[];
+  try {
+    ownerResults = contextHttp(fixture, { calls });
+  } finally {
+    await sql.unsafe(`DROP TRIGGER ${probe} ON swarm.hosted_mcp_seats; DROP FUNCTION swarm.${probe}();`);
+  }
   const contexts = ownerResults.map(row => assertContext(row, fixture));
   for (const context of contexts) assert.deepEqual(context, contexts[0]);
   assert.equal(ownerResults[0]!.body.handle, ownerResults[4]!.body.handle, "same request receipt replays");
@@ -1765,6 +1785,54 @@ test("hosted context explains all four HTTP tools, default claim, replay and two
   const survivingWorkspace = contextHttp(fixture, { handle: String(workspaceB[0]!.body.handle),
     calls: ["whoami", "members", "check"].map(name => ({ name })) });
   survivingWorkspace.forEach(row => assertContext(row, fixture, [fixture.workspaceB], false, fixture.workspaceB, null));
+});
+
+// Real stored null email and hostile durable names exercise the SQL formatter
+// and every MCP projection together; clean fixtures cannot detect this defect.
+test("hosted context HTTP preserves null email and keeps hostile names on one summary line", { timeout: 180_000 }, async () => {
+  const fixture = await contextFixture();
+  const displayName = "HM\r\nowner\u2028display\u2029name";
+  const workspaceName = "HM\r\nworkspace\u2028A\u2029name\t";
+  await sql`UPDATE swarm.users SET email = NULL, display_name = ${displayName}
+    WHERE user_id = ${fixture.owner}::uuid`;
+  await sql`UPDATE swarm.workspaces SET name = ${workspaceName}
+    WHERE workspace_id = ${fixture.workspaceA}::uuid`;
+  const results = contextHttp(fixture);
+  for (const row of results) {
+    const context = assertContext(row, fixture, undefined, false, undefined, undefined,
+      { displayName, email: null, workspaceAName: workspaceName });
+    assert.equal(context.summary,
+      "Connected as HM  owner display name in HM  workspace A name ; 2 approved workspace(s) available.");
+  }
+});
+
+// Command-level ACK tests cannot detect a field dropped by MCP's final output.
+// Post a real addressed signal, open its durable batch, then ACK via HTTP and
+// verify both the returned context and the persisted acknowledgement.
+test("hosted context survives actual MCP check ACK and advances the stored batch", { timeout: 180_000 }, async () => {
+  const fixture = await contextFixture();
+  const [claimed] = contextHttp(fixture, { calls: [{ name: "claim_seat" }] });
+  const context = assertContext(claimed!, fixture);
+  const posted = runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: fixture.ownerJwt,
+    workspaceId: fixture.workspaceA, command: { kind: "post_signal", signal_kind: "note",
+      body: "Context ACK fixture", to_user_id: null, to_agent_principal_id: claimed!.body.principal_id,
+      in_reply_to: null, about: null, until_ms: 600_000 } });
+  assert.equal(posted.status, 200);
+  assert.equal(posted.body.status, "accepted");
+  const handle = String(claimed!.body.handle);
+  const [opened] = contextHttp(fixture, { handle, calls: [{ name: "check" }] });
+  assert.deepEqual(assertContext(opened!, fixture), context);
+  assert.equal(typeof opened!.body.batch_id, "string");
+  const signal = posted.body.signal as { id: string };
+  assert.ok((opened!.body.signals as Array<{ id: string }>).some(row => row.id === signal.id));
+  const batchId = String(opened!.body.batch_id);
+  const [before] = await sql`SELECT acknowledged_at FROM swarm.hosted_mcp_check_batches WHERE batch_id = ${batchId}::uuid`;
+  assert.equal(before!.acknowledged_at, null);
+  const [acked] = contextHttp(fixture, { handle, calls: [{ name: "check", ack: batchId }] });
+  assert.deepEqual(assertContext(acked!, fixture), context);
+  assert.equal(acked!.body.acknowledged_batch_id, batchId);
+  const [after] = await sql`SELECT acknowledged_at FROM swarm.hosted_mcp_check_batches WHERE batch_id = ${batchId}::uuid`;
+  assert.ok(after!.acknowledged_at instanceof Date);
 });
 
 // Each row changes live durable authority after a positive HTTP invocation.

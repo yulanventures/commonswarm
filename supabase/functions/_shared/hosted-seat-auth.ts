@@ -260,16 +260,27 @@ export async function resolveHostedConnectionContext(
     if ("handle" in authorized || binding.ownerUserId !== authorized.owner_user_id ||
         binding.workspaceId !== authorized.workspace_id) return null;
   } else if (seat === null || seat.handle !== binding.handle) return null;
-  await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({
-    sub: authorized.owner_user_id,
-    role: "authenticated",
-    ...(seat === null ? {} : { agent_principal_id: seat.principal_id }),
-  })}, true)`;
-  const rows = await tx<{ context: HostedConnectionContext | null }[]>`
-    SELECT swarm.resolve_hosted_mcp_connection_context(
-      ${binding.grantId}::uuid, ${binding.providerGrantId}, ${binding.tool},
-      ${authorized.workspace_id}::uuid, ${seat?.handle ?? null}
-    ) AS context
+  const [previous] = await tx<{ claims: string | null }[]>`
+    SELECT current_setting('request.jwt.claims', true) AS claims
   `;
-  return rows[0]?.context ?? null;
+  try {
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({
+      sub: authorized.owner_user_id,
+      role: "authenticated",
+      ...(seat === null ? {} : { agent_principal_id: seat.principal_id }),
+    })}, true)`;
+    // A resolver SQL error must leave the transaction usable for restoration.
+    return await tx.savepoint(async scope => {
+      const rows = await scope<{ context: HostedConnectionContext | null }[]>`
+        SELECT swarm.resolve_hosted_mcp_connection_context(
+          ${binding.grantId}::uuid, ${binding.providerGrantId}, ${binding.tool},
+          ${authorized.workspace_id}::uuid, ${seat?.handle ?? null}
+        ) AS context
+      `;
+      return rows[0]?.context ?? null;
+    });
+  } finally {
+    // PostgreSQL represents an unset custom GUC as empty after its first use.
+    await tx`SELECT set_config('request.jwt.claims', ${previous?.claims ?? ""}, true)`;
+  }
 }

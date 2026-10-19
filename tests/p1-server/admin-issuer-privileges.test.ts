@@ -22,7 +22,12 @@ const allowlist = JSON.parse(readFileSync(new URL('../support/admin-issuer-privi
 // the issuer must still be unable to select it or read auth tables directly.
 // P4 adds finish SELECT and column-only INSERT/UPDATE. Inventory those exact
 // grants; mutation controls must still reject writes to binding and deadline columns.
-const literal = JSON.stringify(allowlist.map((entry: unknown[]) => entry.slice(0, 5))).replaceAll("'", "''");
+// The read-only context resolver adds only this command-parent EXECUTE ACL.
+// Keep its exact signature and grantability literal; no OAuth/issuer allowance.
+const literal = JSON.stringify([
+  ...allowlist.map((entry: unknown[]) => entry.slice(0, 5)),
+  ['swarm_command', 'FUNCTION', 'swarm.resolve_hosted_mcp_connection_context(uuid,text,text,uuid,text)', 'EXECUTE', false],
+]).replaceAll("'", "''");
 // Enumerate explicit ACLs across the whole database, not a selected set of known
 // tables. The saved schemas belong to runSql's rollback-only isolation fixture.
 // Default PUBLIC EXECUTE on system functions is the platform baseline. Explicit
@@ -167,6 +172,17 @@ ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
 REVOKE EXECUTE ON FUNCTION pg_temp.assert_issuer() FROM PUBLIC;
 SELECT pg_temp.assert_issuer();
 ${dbAssert('SELECT count(*)>200 FROM issuer_acl_inventory', 'enumeration positive control includes existing command and runtime grants')}
+-- The new literal permits neither grant options nor another callable role.
+${[
+  'GRANT EXECUTE ON FUNCTION swarm.resolve_hosted_mcp_connection_context(uuid,text,text,uuid,text) TO swarm_command WITH GRANT OPTION;',
+  'GRANT EXECUTE ON FUNCTION swarm.resolve_hosted_mcp_connection_context(uuid,text,text,uuid,text) TO commonswarm_oauth_runtime;',
+].map(mutation => `SAVEPOINT context_acl_mutation;
+${mutation}
+${dbAssert("SELECT count(*)=1 FROM issuer_widening", 'context mutation adds exactly one offending ACL')}
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+ROLLBACK TO SAVEPOINT context_acl_mutation;
+SELECT pg_temp.assert_issuer();`).join('\n')}
+
 ${[
   ['household_workspace_boundaries','workspace_id','purpose','workspace_id'],
   ['household_member_content_roles','workspace_id','user_id','workspace_id,content_role,content_consent_id,confirmed_at,revoked_at'],
