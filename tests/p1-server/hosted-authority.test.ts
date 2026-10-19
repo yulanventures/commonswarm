@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
+import { emptyHouseholdObjectState } from "../../src/protocol/household-objects.js";
 import { HOSTED_MCP_SEAT_LIMIT } from "../../src/protocol/hosted-authority.js";
 import { emptyApplicationSchema, localClusterAdminUrl, migrationNames as adminMigrationNames, repoSql, versions as adminVersions } from "../support/admin-schema-db.js";
 import { releaseCatalogQuery } from "../support/release-catalog-query.js";
@@ -389,6 +390,77 @@ async function authorityWaitRace() {
   } finally { await gateDb.end({ timeout: 2 }); }
 }
 
+async function householdWait() {
+  const { householdStore } = await import(${JSON.stringify(new URL("../../supabase/functions/command/household-integration.ts", import.meta.url).href)});
+  const { revalidateHouseholdSeat } = authModule;
+  const writing = input.waitRow === "object-write";
+  const cap = await db.begin(tx => authenticateHostedSeatCapability(tx, {
+    grantId: input.grantId, providerGrantId: "provider-"+input.grantId,
+    handle: input.handle, tool: writing ? "object_create" : "list_list", providerStatus: async () => ({ active: true }),
+  }, writing ? "command" : "read"));
+  if (!cap) throw new Error("household positive capability missing");
+  const identity = { user_id: input.ownerUserId, principal_id: input.principalId,
+    run_id: null, connection: { connection_id: input.seatId, grant_id: input.grantId } };
+  const restore = tx => tx.unsafe("SET LOCAL ROLE swarm_command");
+  const recheck = async tx => {
+    const current = await revalidateHouseholdSeat(tx, cap, restore);
+    return current !== null && current.workspace_id === input.workspaceId && current.principal_id === identity.principal_id;
+  };
+  const { createHouseholdObjectStore } = await import(${JSON.stringify(new URL("../../supabase/functions/command/household-objects.ts", import.meta.url).href)});
+  const core = await import(${JSON.stringify(new URL("../../supabase/functions/_shared/protocol.js", import.meta.url).href)});
+  const transfers = await import(${JSON.stringify(new URL("../../supabase/functions/command/household-transfers.ts", import.meta.url).href)});
+  const blobs = new Map();
+  let puts = 0;
+  const store = writing ? createHouseholdObjectStore({core,transfers,recheckCredential:recheck,fileContentAllowed:()=>true,
+    storage:{putImmutable:async (path,bytes)=>{puts++;blobs.set(path,new Uint8Array(bytes));},
+      read:async path=>blobs.get(path)??null}}) : householdStore(recheck);
+  const probe = () => db.begin(async tx => {
+    await restore(tx);
+    if (writing) {
+      const content = {kind:"doc",markdown:"Synthetic household proof"};
+      const decision = await store.write(tx,input.workspaceId,identity,crypto.randomUUID(),
+        {kind:"create_household_object",object_id:crypto.randomUUID(),title:"Synthetic proof",content},{content});
+      return {status:decision.outcome.status};
+    }
+    if (input.waitRow === "object") return await store.read(tx,input.workspaceId,identity,{kind:"object_list",offset:0,limit:10});
+    const access = await store.access(tx,input.workspaceId,identity);
+    return { status: access ? "ok" : "refused" };
+  });
+  const before = await probe();
+  if (before.status !== (writing ? "committed" : "ok")) throw new Error("household live positive refused");
+  const putsBefore = puts;
+  // Terminal and removed-scope controls exercise the same live capability.
+  await db\`UPDATE swarm.hosted_mcp_grants SET connection_expired_at=clock_timestamp() WHERE grant_id=\${input.grantId}::uuid\`;
+  const fenced = await probe();
+  await db\`UPDATE swarm.hosted_mcp_grants SET connection_expired_at=NULL WHERE grant_id=\${input.grantId}::uuid\`;
+  await db\`UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at=clock_timestamp() WHERE grant_id=\${input.grantId}::uuid AND workspace_id=\${input.workspaceId}::uuid\`;
+  const removed = await probe();
+  await db\`UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at=NULL WHERE grant_id=\${input.grantId}::uuid AND workspace_id=\${input.workspaceId}::uuid\`;
+  let waiting;
+  await db\`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()+interval '2 seconds' WHERE grant_id=\${input.grantId}::uuid\`;
+  await db.begin(async gate => {
+    if (input.waitRow === "workspace") await gate\`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id=\${input.workspaceId}::uuid FOR UPDATE\`;
+    else if (input.waitRow === "grant") await gate\`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=\${input.grantId}::uuid FOR UPDATE\`;
+    else await gate\`SELECT workspace_id FROM swarm.household_object_streams WHERE workspace_id=\${input.workspaceId}::uuid FOR UPDATE\`;
+    waiting = probe().catch(error => {
+      if (error instanceof transfers.HouseholdTransferError && error.code === "access_refused") return {status:"refused"};
+      throw error;
+    });
+    const deadline = Date.now()+10000;
+    let reached = false;
+    while (Date.now()<deadline) {
+      const [row] = await gate\`SELECT count(*)::int n FROM pg_stat_activity
+        WHERE datname=current_database() AND pg_backend_pid()=ANY(pg_blocking_pids(pid))\`;
+      if (row.n>0) { reached=true; break; }
+      await new Promise(resolve => setTimeout(resolve,20));
+    }
+    if (!reached) throw new Error("household request missed deterministic row barrier");
+    await gate\`SELECT pg_sleep(2.1)\`;
+  });
+  const waited = await waiting;
+  return { before, fenced, removed, waited, extraPuts:puts-putsBefore };
+}
+
 async function issuerFixture() {
   const signing = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
   const jwk = { ...await crypto.subtle.exportKey("jwk", signing.publicKey), kid: "hosted-removal-test", alg: "ES256", use: "sig" };
@@ -418,14 +490,16 @@ async function mcpPolicy() {
     { name: "ECDSA", hash: "SHA-256" }, signing.privateKey, new TextEncoder().encode(unsigned))));
   const probe = async () => {
     const results = [];
-    for (const name of (input.waitKind ? [input.tool] : ["whoami","note","check"])) {
-      const args = { seat: input.handle, ...(name === "note" ? { body: "policy probe", request_id: crypto.randomUUID() } : {}) };
+    for (const name of (input.household ? ["list_list"] : input.waitKind ? [input.tool] : ["whoami","note","check"])) {
+      const args = { seat: input.handle, ...(name === "list_list" ? { offset: 0, limit: 10 } : {}), ...(name === "note" ? { body: "policy probe", request_id: crypto.randomUUID() } : {}) };
       const response = await serve(new Request("https://mcp.commonswarm.com/mcp", {
         method: "POST", headers: { authorization: "Bearer "+bearer, "content-type": "application/json" },
         body: JSON.stringify({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "tools/call", params: { name, arguments: args } }),
       }));
       const body = await response.json();
-      results.push({ status: response.status, allowed: body.result?.isError !== true && body.error === undefined });
+      const content = input.household && body.result?.content?.[0]?.text
+        ? JSON.parse(body.result.content[0].text) : null;
+      results.push({ status: response.status, allowed: body.result?.isError !== true && body.error === undefined && content?.status !== "refused" });
     }
     return results;
   };
@@ -514,6 +588,7 @@ async function adminRemoval() {
 let result;
 if (input.operation === "activation-removal" || input.operation === "policy-wait") result = await authorityWaitRace();
 else if (input.operation === "mcp-policy") result = await mcpPolicy();
+else if (input.operation === "household-wait") result = await householdWait();
 else if (input.operation === "admin-removal") result = await adminRemoval();
 else if (input.operation === "seat-read") result = await seatRead(input.seat);
 else if (input.operation === "removal-claim") result = await removalClaim();
@@ -2316,4 +2391,40 @@ for (const tool of ["note", "check"] as const) {
       assert.equal(await providerActive(f.grantB), true, "independent family survives");
     });
   }
+}
+
+
+for (const waitRow of ["workspace", "grant", "object", "object-write"] as const) {
+  test(`hosted household authority expires across ${waitRow} wait`, { timeout: 120_000 }, async () => {
+    const f = await seedHostedFixture();
+    const seat = claimSeat(f,f.grantA,`household-wait-${randomUUID()}`);
+    const seatId = String(seat.body.seat_id), principal = String(seat.body.principal_id);
+    await sql.begin(async tx => {
+      await tx`INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose) VALUES (${f.workspaceA}::uuid,'shared')`;
+      const consent = randomUUID();
+      await tx`INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at)
+        VALUES (${f.workspaceA}::uuid,${f.owner}::uuid,'editor',${consent}::uuid,clock_timestamp())`;
+      await tx`INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,
+        operations,consent_receipt_id,expires_at,hosted_grant_id)
+        VALUES (${seatId}::uuid,${f.grantA}::uuid,${f.workspaceA}::uuid,${principal}::uuid,${f.owner}::uuid,'shared',
+          ARRAY['read','create','update'],${consent}::uuid,NULL,${f.grantA}::uuid)`;
+      const state = emptyHouseholdObjectState(f.workspaceA,randomUUID());
+      await tx`INSERT INTO swarm.household_object_streams(workspace_id,stream_id,last_seq,projection)
+        VALUES (${f.workspaceA}::uuid,${state.stream_id}::uuid,-1,${tx.json(state as unknown as postgres.JSONValue)})`;
+    });
+    const http = runHostedHarness<{ before: { allowed: boolean }[]; future: { allowed: boolean }[]; elapsed: { allowed: boolean }[] }>({
+      operation:"mcp-policy",household:true,ownerUserId:f.owner,grantId:f.grantA,handle:seat.body.handle });
+    assert.equal(http.before[0]!.allowed,true,"HTTP NULL-policy positive");
+    assert.equal(http.future[0]!.allowed,true,"HTTP future-policy positive");
+    assert.equal(http.elapsed[0]!.allowed,false,"HTTP elapsed policy refusal");
+    await sql`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=NULL WHERE grant_id=${f.grantA}::uuid`;
+    const result = runHostedHarness<{before:{status:string};fenced:{status:string};removed:{status:string};waited:{status:string};extraPuts:number}>({operation:"household-wait",waitRow,
+      workspaceId:f.workspaceA,ownerUserId:f.owner,grantId:f.grantA,seatId,principalId:principal,handle:seat.body.handle});
+    assert.equal(result.before.status,waitRow === "object-write" ? "committed" : "ok");
+    assert.equal(result.fenced.status,"refused","terminal fence refuses the same credential");
+    assert.equal(result.removed.status,"refused","removed consent scope refuses the same credential");
+    assert.equal(result.waited.status,"refused","no content metadata or operation authority after deadline");
+    assert.equal(result.extraPuts,0,"no bytes staged after the object-state wait");
+    assert.equal(await providerActive(f.grantB),true,"unrelated family survives");
+  });
 }
