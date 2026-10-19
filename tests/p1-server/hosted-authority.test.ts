@@ -1277,15 +1277,15 @@ async function providerRefresh(fixture: HostedFixture, options: {
   } finally { await pool.end(); }
 }
 
-function seatSpec(fixture: HostedFixture, seat: HarnessResult, workspaceId = fixture.workspaceA) {
-  return { grantId: fixture.grantA, workspaceId, handle: seat.body.handle };
+function seatSpec(fixture: HostedFixture, seat: HarnessResult, workspaceId = fixture.workspaceA, grantId = fixture.grantA) {
+  return { grantId, workspaceId, handle: seat.body.handle };
 }
 
-async function assertSeatAccess(fixture: HostedFixture, seat: HarnessResult, workspaceId: string, status: number) {
+async function assertSeatAccess(fixture: HostedFixture, seat: HarnessResult, workspaceId: string, status: number, grantId = fixture.grantA) {
   for (const tool of ["whoami", "note", "check"]) {
     const operation = tool === "whoami" ? "seat-read" : "seat-command";
     const result = runHostedHarness<HarnessResult>({ operation,
-      seat: { ...seatSpec(fixture, seat, workspaceId), tool } });
+      seat: { ...seatSpec(fixture, seat, workspaceId, grantId), tool } });
     assert.equal(result.status, status, `${tool}: ${JSON.stringify(result.body)}`);
   }
 }
@@ -1346,7 +1346,7 @@ for (const otherConsent of ["live", "revoked", "archived", "membership-removed"]
     assert.ok(artifactsBeforeRefresh.length > 0, "pre-removal refresh artifacts remain until OAuth retirement");
     assert.equal(await providerActive(fixture.grantB), true, "independent family survives intermediate state");
     const control = claimSeat(fixture, fixture.grantB, `control-${randomUUID()}`);
-    await assertSeatAccess(fixture, control, fixture.workspaceA, 200);
+    await assertSeatAccess(fixture, control, fixture.workspaceA, 200, fixture.grantB);
     assert.equal(await providerActive(fixture.grantA), otherConsent === "live");
     assert.equal(await providerRefresh(fixture), otherConsent === "live");
     // Even successful refresh in a surviving workspace cannot regain A.
