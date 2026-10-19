@@ -298,7 +298,7 @@ with (state / 'queue.lock').open('a') as lock:
                     code = 124
                 except sp.CalledProcessError as e:
                     code = e.returncode if e.returncode > 0 else 128 - e.returncode
-                    if e.cmd != suite_command:
+                    if e.cmd != suite_command or e.returncode in (125, 126, 127):
                         receipt['controller_error'] = 'setup_command_failed'
                 except StopRequested:
                     code = 130

@@ -66,6 +66,7 @@ def event(action,name):
 if args[0]=='run':
     name=args[args.index('--name')+1]
     label=args[args.index('--label')+1].split('=',1)[1]
+    if name.endswith('-worker') and ${control.workerLaunch ?? 0}: sys.exit(${control.workerLaunch ?? 0})
     store=json.loads(p.read_text()); store[name]=dict(label=label); p.write_text(json.dumps(store))
     event('start',name)
     if name.endswith('-worker'):
@@ -467,7 +468,7 @@ test('namespace policy failure prevents worker startup and cleans owned runtime'
 // regressions: requested/merge SHA attribution, premature deferred success,
 // token exposure and lost CI failures when GitHub is unavailable. Only transport
 // is redirected in the disposable installed copy; production gains no test flag.
-// F1 owner: exercise real pre-suite controller stops and a real gate exit at the
+// F1 owner: exercise pre-suite stops, Docker launch refusals and a real gate exit at the
 // API, so dropping error provenance or treating every nonzero as error fails.
 // F2 owner: cause actual mkdir/write errors at publication paths after baseline
 // receipt writes; assert CI exit, subsequent suites, retention and journal JSON.
@@ -505,6 +506,7 @@ test('final statuses use the tested snapshot and distinguish gate failures from 
     {control:{exit:{'p1-cli':9}},code:9,infrastructure:false},
     {control:{policyFail:true},code:42,infrastructure:true},
     {control:{},probeError:true,code:1,infrastructure:true},
+    ...[125,126,127].map(code=>({control:{workerLaunch:code},code,infrastructure:true})),
   ]) {
     const before=api.requests.length;
     const f=fixture({statusPort:api.port,...control});
@@ -531,6 +533,7 @@ test('final statuses use the tested snapshot and distinguish gate failures from 
     if (infrastructure) {
       const events=readFileSync(join(f.root,'events.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
       assert.ok(!events.some(e=>e.action==='start' && e.name.endsWith('-worker')),'infrastructure stopped before the suite worker');
+      if (control.workerLaunch) assert.ok(events.some(e=>e.action==='policy'),'launch refusal followed namespace admission');
     }
     assertNoToken(f,result);
   }
