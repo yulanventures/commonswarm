@@ -153,6 +153,29 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
     }
     return { payload: value, expiresAt };
   }
+  async function lockProviderGrant(client, envelope) {
+    if (!envelope.binding) return undefined;
+    // A rotation loads Grant before consume and never saves it. Lock that
+    // exact persisted Grant BEFORE the refresh artifact so both snapshots can
+    // follow the same freshly checked canonical policy without a lock cycle.
+    const row = (await client.query(`SELECT * FROM ${artifacts}
+      WHERE model='Grant' AND artifact_id_hash=$1 FOR UPDATE`, [lookupHash(envelope.family)])).rows[0];
+    // Never create a missing Grant: adapter callers may persist a refresh
+    // artifact independently; the provider validates Grant before redemption.
+    if (!row) return undefined;
+    if (row.consumed_at !== null) {
+      throw new errors.InvalidGrant("hosted Grant unavailable");
+    }
+    assertHostedPayload("Grant",envelope.family,row.payload,envelope.binding);
+    return row;
+  }
+  async function normalizeProviderGrant(client, row, policy) {
+    if (!row) return;
+    const normalized = normalize("Grant",row.payload,row.expires_at,policy);
+    await client.query(`UPDATE ${artifacts} SET payload=$2::jsonb,expires_at=$3,updated_at=clock_timestamp()
+      WHERE model='Grant' AND artifact_id_hash=$1 AND consumed_at IS NULL`,
+      [row.artifact_id_hash,JSON.stringify(normalized.payload),normalized.expiresAt]);
+  }
   async function readArtifact(model, column, value, recoveredJti, requireActive = false) {
     if (adminTransactionContext(false)) {
       // The admin unit already owns its locks and rollback boundary. Keep
@@ -250,6 +273,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
           const initial = (await client.query(`SELECT payload FROM ${artifacts} WHERE model=$1 AND artifact_id_hash=$2`, [model,lookupHash(id)])).rows[0];
           if (!initial) throw new errors.InvalidGrant(`${model} is unavailable or already used`);
           const envelope = await lockFamily(client,model,id,initial.payload);
+          const providerGrant = model === "RefreshToken" ? await lockProviderGrant(client,envelope) : undefined;
           const row = (await client.query(`SELECT * FROM ${artifacts} WHERE model=$1 AND artifact_id_hash=$2 FOR UPDATE`, [model,lookupHash(id)])).rows[0];
           if (!row) throw new errors.InvalidGrant(`${model} is unavailable or already used`);
           if (familyId(model,id,row.payload) !== familyId(model,id,initial.payload)) throw new errors.InvalidGrant("artifact family changed");
@@ -259,6 +283,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
             const policy = await currentPolicy(client,envelope.family,envelope.binding);
             if (!policy?.active) throw new errors.InvalidGrant("hosted family inactive");
             if (row.consumed_at === null && model === "RefreshToken") {
+              await normalizeProviderGrant(client,providerGrant,policy);
               const normalized = normalize(model,row.payload,row.expires_at,policy);
               await client.query(`UPDATE ${artifacts} SET payload=$3::jsonb,expires_at=$4 WHERE model=$1 AND artifact_id_hash=$2 AND consumed_at IS NULL`,
                 [model,lookupHash(id),JSON.stringify(normalized.payload),normalized.expiresAt]);
@@ -387,6 +412,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
 
       await transaction(pool, async (client) => {
         const envelope = await lockFamily(client,model,id,payload);
+        const providerGrant = model === "RefreshToken" ? await lockProviderGrant(client,envelope) : undefined;
         const existing = adminTransactionContext(false) ? undefined :
           (await client.query(`SELECT * FROM ${artifacts} WHERE model=$1 AND artifact_id_hash=$2 FOR UPDATE`,
             [model,lookupHash(id)])).rows[0];
@@ -405,6 +431,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
         // A consumed conflict keeps its complete terminal snapshot. Never
         // normalize it, erase consumption, or let save rewrite replay evidence.
         if (existing?.consumed_at !== null && existing?.consumed_at !== undefined) return;
+        await normalizeProviderGrant(client,providerGrant,policy);
         const normalized = normalize(model,stored,expiresAt,policy);
 
         await client.query(

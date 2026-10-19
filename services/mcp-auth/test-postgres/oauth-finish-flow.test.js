@@ -168,7 +168,8 @@ test('CI only: first connect, durable finish replay, one redemption, reuse, logo
   const removed = await consent(await authorize());
   assert.equal(removed.status,502); assert.equal(await countCodes(),codeCount);
   const retryRemoved = await consent({ ...removed,path: removed.path.replace(/\/consent$/u,'') });
-  assert.equal(retryRemoved.status,502,'activation/promotion retries cannot revive removed consent');
+  assert.equal(retryRemoved.status,409,'completed consent retry is a terminal conflict after removal');
+  assert.equal(retryRemoved.headers.has('location'),false,'removed consent cannot resume authorization');
   assert.equal(await countCodes(),codeCount);
   assert.equal((await h.pool.query('SELECT count(*)::int AS n FROM commonswarm_oauth.finish_records')).rows[0].n,finishCount);
   removal.mock.restore();
