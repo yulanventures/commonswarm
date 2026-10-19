@@ -15,7 +15,7 @@ const repoRoot = process.cwd();
  * "pure" claim below is unchanged. The pre/post hook assertions still hold,
  * because the precondition is part of the command rather than an npm hook. */
 const pureCliCommand =
-  "node scripts/require-cli-build.mjs && node --import tsx --test --test-timeout=300000 tests/p1-cli/**/*.test.ts";
+  "node scripts/require-cli-build.mjs && node scripts/run-test-list.mjs -- --test-timeout=300000 tests/p1-cli/**/*.test.ts";
 /* The chat-channel migration control added a seventh stack-touching file;
  * --test-concurrency=1 because each
  * p1-local file spawns the one local functions runtime (same reason p1-server
@@ -52,10 +52,11 @@ async function findTestFiles(directory: string): Promise<string[]> {
 
 /* A script that runs `scripts/run-test-list.mjs <list>` takes its test paths
  * from that list file (one path per line, # comments); the strictness is the
- * same as for paths written inline in the command. */
+ * same as for paths written inline in the command. Node-args mode (`--`)
+ * falls through to the inline path extraction below. */
 function listFilePatterns(segment: string): string[] | null {
   const match = segment.match(/(?:^|\s)node\s+scripts\/run-test-list\.mjs\s+(\S+)/);
-  if (match === null) return null;
+  if (match === null || match[1] === "--") return null;
   return readFileSync(resolve(repoRoot, match[1]!), "utf8")
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -70,7 +71,7 @@ function testPathPatterns(command: string): string[] {
       const fromList = listFilePatterns(segment);
       if (fromList !== null) return fromList;
       const tokens = segment.trim().split(/\s+/);
-      const testFlag = tokens.indexOf("--test");
+      const testFlag = tokens.indexOf(tokens.includes("scripts/run-test-list.mjs") ? "--" : "--test");
       if (testFlag === -1) return [];
       return tokens
         .slice(testFlag + 1)

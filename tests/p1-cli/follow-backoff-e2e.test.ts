@@ -18,9 +18,9 @@
  * producing.
  */
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -135,6 +135,12 @@ async function followUntil(
   refusalToleranceMs = "0",
 ): Promise<{ frames: FollowFrameLine[]; unparsed: string[]; code: number | null }> {
   const home = await mkdtemp(join(tmpdir(), "cswarm-e2e-home-"));
+  // The home is owned from this line on. Everything below runs under the finally at
+  // the end of this function, so a synchronous spawn throw (which leaves liveChild
+  // unset) or any later setup failure still removes it, after the child has closed.
+  let liveChild: ChildProcess | undefined;
+  let childClosed: Promise<void> | undefined;
+  try {
   const child = spawn(
     process.execPath,
     [
@@ -168,22 +174,35 @@ async function followUntil(
       stdio: ["pipe", "pipe", "pipe"],
     },
   );
+  liveChild = child;
 
   const frames: FollowFrameLine[] = [];
   const unparsed: string[] = [];
   let buffer = "";
   let settled = false;
+  let timedOut = false;
+  let markClosed: () => void = () => {};
+  const closed = new Promise<void>((resolveClosed) => {
+    markClosed = resolveClosed;
+  });
+  childClosed = closed;
 
   const done = new Promise<number | null>((resolveCode) => {
     const finish = (code: number | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(killTimer);
       resolveCode(code);
     };
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
     const timer = setTimeout(() => {
+      // Stop and reap the child before finishing: resolving here would let
+      // the caller proceed (and any cleanup delete the home) while the CLI
+      // could still recreate files in it.
+      timedOut = true;
       child.kill("SIGTERM");
-      finish(null);
+      killTimer = setTimeout(() => child.kill("SIGKILL"), 2_000);
     }, timeoutMs);
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
@@ -202,21 +221,47 @@ async function followUntil(
         child.kill("SIGTERM");
       }
     });
-    child.once("exit", (code) => finish(code));
-    child.once("error", () => finish(null));
+    // close, not exit: the child is reaped and its stdio is drained. A spawn
+    // error also settles both promises, as there is no process left to reap.
+    child.once("close", (code) => {
+      markClosed();
+      finish(timedOut ? null : code);
+    });
+    child.once("error", () => {
+      markClosed();
+      finish(null);
+    });
   });
 
-  child.stdin.end(AGENT_TOKEN);
-  const code = await done;
-  // Drain any final partial line the exit raced.
-  if (buffer.trim().length > 0) {
-    try {
-      frames.push(JSON.parse(buffer) as FollowFrameLine);
-    } catch {
-      unparsed.push(buffer);
+    child.stdin.on("error", () => {});
+    child.stdin.end(AGENT_TOKEN);
+    const code = await done;
+    // Drain any final partial line the close raced.
+    if (buffer.trim().length > 0) {
+      try {
+        frames.push(JSON.parse(buffer) as FollowFrameLine);
+      } catch {
+        unparsed.push(buffer);
+      }
     }
+    return { frames, unparsed, code };
+  } finally {
+    // Whatever path finished the run, the home is removed only after the child
+    // (if one was ever spawned) has closed and can no longer recreate it.
+    if (liveChild && liveChild.exitCode === null && liveChild.signalCode === null) {
+      const stopping = liveChild;
+      const waitClosed = childClosed ??
+        new Promise<void>((resolveClosed) => stopping.once("close", () => resolveClosed()));
+      stopping.kill("SIGTERM");
+      const killTimer = setTimeout(() => stopping.kill("SIGKILL"), 2_000);
+      await Promise.race([
+        waitClosed,
+        new Promise<void>((resolveWait) => setTimeout(resolveWait, 7_000)),
+      ]);
+      clearTimeout(killTimer);
+    }
+    await rm(home, { recursive: true, force: true });
   }
-  return { frames, unparsed, code };
 }
 
 test("D-051: an isolated success does not wipe earned backoff, through the real CLI", async () => {
