@@ -76,12 +76,14 @@ export function hasFreshInteractiveAuth(
 }
 
 /**
- * Membership commands a stale interactive session must not run. Idempotency
- * replay stays in front of this check: a stored result is returned as stored.
+ * Membership and connection policy commands use the existing AMR age bounds.
+ * Membership handlers resolve stored replay first; hosted policy replay also
+ * rechecks the current owner, policy and interactive authentication.
  */
 export const FRESH_INTERACTIVE_COMMAND_KINDS = [
   "remove_member",
   "change_role",
+  "set_connection_expiry",
 ] as const;
 
 const FRESH_AUTH_REFUSAL_MESSAGE: Record<
@@ -90,6 +92,8 @@ const FRESH_AUTH_REFUSAL_MESSAGE: Record<
 > = {
   remove_member:
     "Sign in again, then retry member removal. No membership change was recorded.",
+  set_connection_expiry:
+    "Sign in again, then retry the connection date change. No connection change was recorded.",
   change_role:
     "Sign in again, then retry the role change. No membership change was recorded.",
 };
@@ -115,7 +119,9 @@ export function freshInteractiveAuthRefusal(
   ) {
     return null;
   }
-  const message = kind === "change_role"
+  const message = kind === "set_connection_expiry"
+    ? FRESH_AUTH_REFUSAL_MESSAGE.set_connection_expiry
+    : kind === "change_role"
     ? FRESH_AUTH_REFUSAL_MESSAGE.change_role
     : FRESH_AUTH_REFUSAL_MESSAGE.remove_member;
   return { error: "fresh_auth_required", message };

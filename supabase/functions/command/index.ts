@@ -1,3 +1,4 @@
+import { revokeHostedWorkspaceApproval } from "./admin-routine.ts";
 import { humanInvitationTransaction } from './household-invitations.ts';
 import { parseHouseholdAttachment, HouseholdAttachmentError } from "./household-attachments.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
@@ -611,6 +612,8 @@ interface StoredResponse {
   grant_id?: string;
   seat_id?: string;
   handle?: string;
+  connection_expires_at?: string | null;
+  previous_connection_expires_at?: string | null;
 }
 
 interface EventEnvelope {
@@ -1019,6 +1022,7 @@ const HOSTED_MANAGEMENT_KINDS = new Set([
   "activate_hosted_mcp_grant",
   "revoke_hosted_mcp_grant",
   "revoke_hosted_mcp_seat",
+  "set_connection_expiry",
 ]);
 
 /** Hosted seats are turn-only and never enter local session/listener machinery. */
@@ -2968,6 +2972,10 @@ function storedResponse(value: unknown): StoredResponse {
         response.successors_remaining === null
       ? { successors_remaining: response.successors_remaining as number | null }
       : {}),
+    ...(typeof response.connection_expires_at === "string" || response.connection_expires_at === null
+      ? { connection_expires_at: response.connection_expires_at as string | null } : {}),
+    ...(typeof response.previous_connection_expires_at === "string" || response.previous_connection_expires_at === null
+      ? { previous_connection_expires_at: response.previous_connection_expires_at as string | null } : {}),
     ...(typeof response.revoked_at === "string"
       ? { revoked_at: response.revoked_at }
       : {}),
@@ -4578,6 +4586,8 @@ async function updateWorkspaceProjection(
       ) {
         throw new Error("MemberRemoved payload is malformed");
       }
+      await revokeHostedWorkspaceApproval(tx, route.workspaceId, new Date(payload.revoked_at),
+        event.actor_user, { ownerUserId: payload.user_id });
       await revokeRemovedMemberHousehold(tx, route.workspaceId, payload.user_id, new Date(payload.revoked_at), event.actor_user, event.command_id, requestDigest); const updated = await tx<{ user_id: string }[]>`
         UPDATE swarm.memberships
         SET revoked_at = ${new Date(payload.revoked_at)}
@@ -4718,36 +4728,8 @@ async function updateWorkspaceProjection(
           "AgentPrincipalRevoked projection did not revoke exactly one principal",
         );
       }
-      // The workspace stream is already locked, as in claim/consent. Lock every
-      // linked grant in a stable order before changing consent, so claims in
-      // another workspace and simultaneous removals see a single decision.
-      const hostedGrants = await tx<HostedGrantRow[]>`
-        SELECT g.* FROM swarm.hosted_mcp_grants AS g
-        WHERE EXISTS (
-          SELECT 1 FROM swarm.hosted_mcp_seats AS hs
-          WHERE hs.grant_id = g.grant_id
-            AND hs.workspace_id = ${route.workspaceId}::uuid
-            AND hs.principal_id = ${principalId}::uuid
-        )
-        ORDER BY g.grant_id FOR UPDATE OF g
-      `;
-      for (const grant of hostedGrants) {
-        const seats = await tx<{ seat_id: string }[]>`
-          SELECT seat_id FROM swarm.hosted_mcp_seats
-          WHERE grant_id = ${grant.grant_id}::uuid
-            AND workspace_id = ${route.workspaceId}::uuid
-            AND principal_id = ${principalId}::uuid
-          ORDER BY seat_id FOR UPDATE
-        `;
-        for (const seat of seats) {
-          await projectHostedSeatRevocation(tx, seat.seat_id, revokedAt, createdBy);
-        }
-        await tx`
-          UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at = ${revokedAt}
-          WHERE grant_id = ${grant.grant_id}::uuid
-            AND workspace_id = ${route.workspaceId}::uuid AND revoked_at IS NULL
-        `;
-      }
+      await revokeHostedWorkspaceApproval(tx, route.workspaceId, revokedAt, createdBy,
+        { principalId });
       await rotateWakeId(tx, principalId);
       await tx`
         INSERT INTO swarm.revocation_tombstones (kind, target_id, created_by)
@@ -9706,7 +9688,9 @@ type HostedManagementCommand =
   }
   | { kind: "activate_hosted_mcp_grant"; grant_id: string }
   | { kind: "revoke_hosted_mcp_grant"; grant_id: string }
-  | { kind: "revoke_hosted_mcp_seat"; grant_id: string; seat_id: string };
+  | { kind: "revoke_hosted_mcp_seat"; grant_id: string; seat_id: string }
+  | { kind: "set_connection_expiry"; connection_kind: "hosted"; grant_id: string;
+      connection_expires_at: string | null };
 
 interface HostedGrantRow {
   grant_id: string;
@@ -9722,6 +9706,8 @@ interface HostedGrantRow {
   created_at: Date;
   activated_at: Date | null;
   revoked_at: Date | null;
+  connection_expires_at: Date | null;
+  connection_expired_at: Date | null;
 }
 
 // Close seat identity under the command role; OAuth owns provider retirement.
@@ -9776,6 +9762,17 @@ function parseHostedManagementCommand(value: unknown): HostedManagementCommand |
         typeof command.manifest_digest !== "string" ||
         !/^[0-9a-f]{64}$/u.test(command.manifest_digest)) return null;
     return command as HostedManagementCommand;
+  }
+  if (command.kind === "set_connection_expiry") {
+    const expiry = command.connection_expires_at;
+    return exactKeys(command, ["kind", "connection_kind", "grant_id", "connection_expires_at"]) &&
+        command.connection_kind === "hosted" &&
+        typeof command.grant_id === "string" && UUID_RE.test(command.grant_id) &&
+        (expiry === null || (typeof expiry === "string" &&
+          /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u.test(expiry) &&
+          Number.isFinite(Date.parse(expiry)) &&
+          new Date(expiry).toISOString() === (expiry.length === 20 ? expiry.slice(0,-1) + ".000Z" : expiry)))
+      ? command as HostedManagementCommand : null;
   }
   if (command.kind === "activate_hosted_mcp_grant" ||
       command.kind === "revoke_hosted_mcp_grant") {
@@ -9913,7 +9910,7 @@ async function handleHostedManagement(
     WHERE w.workspace_id = ${routeWorkspaceId}::uuid
     LIMIT 1
   `;
-  const routeRow = routeRows[0];
+  let routeRow = routeRows[0];
   if (!routeRow) return { status: 403, body: { error: "forbidden" } };
   const route: Route = {
     workspaceId: routeWorkspaceId,
@@ -9939,6 +9936,40 @@ async function handleHostedManagement(
   if (command.kind !== "begin_hosted_mcp_grant" &&
       (grant === null || grant.owner_user_id !== auth.actor.user)) {
     return { status: 403, body: { error: "forbidden" } };
+  }
+
+  // Fresh statement after stream/grant waits: pre-lock route facts and time
+  // cannot authorize a policy edit or activation.
+  const [freshRoute] = await tx<{ stream_id: string; archived_at: Date | null;
+    live_member: boolean; now_ms: string | number }[]>`
+    SELECT s.stream_id,w.archived_at,
+      EXISTS (SELECT 1 FROM swarm.memberships m WHERE m.workspace_id=w.workspace_id
+        AND m.user_id=${auth.actor.user}::uuid AND m.revoked_at IS NULL) AS live_member,
+      floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now_ms
+    FROM swarm.workspaces w JOIN swarm.streams s ON s.workspace_id=w.workspace_id AND s.kind='workspace'
+    WHERE w.workspace_id=${routeWorkspaceId}::uuid AND s.stream_id=${route.streamId}::uuid
+  `;
+  if (!freshRoute) return { status: 403, body: { error: "forbidden" } };
+  routeRow = freshRoute;
+  frame.now = Number(freshRoute.now_ms);
+  if (grant !== null && command.kind !== "revoke_hosted_mcp_grant" &&
+      command.kind !== "revoke_hosted_mcp_seat" &&
+      (grant.connection_expired_at !== null ||
+       (grant.connection_expires_at !== null && grant.connection_expires_at.getTime() <= frame.now))) {
+    return { status: 403, body: { error: "connection_expired" } };
+  }
+  if (command.kind === "set_connection_expiry") {
+    const refusal = freshInteractiveAuthRefusal(command.kind, auth.credentialKind,
+      auth.interactiveAuthAtSeconds, frame.now);
+    if (refusal !== null) return { status: 403, body: refusal };
+    const [eligible] = await tx`SELECT grant_id FROM swarm.resolve_hosted_grant_authorization(
+      ${command.grant_id}::uuid,${auth.actor.user}::uuid,${route.workspaceId}::uuid,'claim_hosted_seat')`;
+    if (!auth.identityVerified || !eligible || !routeRow.live_member || routeRow.archived_at !== null) {
+      return { status: 403, body: { error: "forbidden" } };
+    }
+    if (command.connection_expires_at !== null && Date.parse(command.connection_expires_at) <= frame.now) {
+      return { status: 400, body: { error: "invalid_connection_expiry" } };
+    }
   }
 
   const hash = await hostedRequestHash("user", auth.actor.user, body);
@@ -10040,7 +10071,11 @@ async function handleHostedManagement(
     return replayResult(storedResponse(replay.response), command.kind);
   }
   let nextSeq = frame.headSeq;
-  const decision = decideHostedAuthority(command, {
+  const decision: Decision = command.kind === "set_connection_expiry"
+    // Policy has no workspace-core event type. Its typed before/after receipt
+    // lives in the existing command ledger, with the verified actor and audit.
+    ? { ok: true, events: [] }
+    : decideHostedAuthority(command, {
     grant: grant === null ? null : hostedGrantFacts(
       grant,
       consentRows.map((row) => row.workspace_id),
@@ -10070,6 +10105,19 @@ async function handleHostedManagement(
     };
   }
 
+  if (command.kind === "set_connection_expiry") {
+    const changed = await tx<{ grant_id: string }[]>`UPDATE swarm.hosted_mcp_grants
+      SET connection_expires_at = ${command.connection_expires_at}::timestamptz
+      WHERE grant_id = ${command.grant_id}::uuid
+        AND state = 'active' AND revoked_at IS NULL AND connection_expired_at IS NULL
+        AND (connection_expires_at IS NULL OR connection_expires_at > clock_timestamp())
+        AND (${command.connection_expires_at}::timestamptz IS NULL
+          OR ${command.connection_expires_at}::timestamptz > clock_timestamp())
+      RETURNING grant_id`;
+    if (changed.length !== 1) {
+      return { status: 403, body: { error: "connection_expiry_unavailable" } };
+    }
+  }
   const event = decision.events[0];
   if (event) {
     if (event.type === "HostedMcpGrantBegun") {
@@ -10161,6 +10209,10 @@ async function handleHostedManagement(
     grant_id: command.grant_id,
     workspace_id: route.workspaceId,
     ...(command.kind === "revoke_hosted_mcp_seat" ? { seat_id: command.seat_id } : {}),
+    ...(command.kind === "set_connection_expiry" ? {
+      previous_connection_expires_at: grant?.connection_expires_at?.toISOString() ?? null,
+      connection_expires_at: command.connection_expires_at,
+    } : {}),
   };
   const inserted = await tx<{ command_id: string }[]>`
     INSERT INTO swarm.idempotency_keys (
@@ -10180,7 +10232,7 @@ async function handleHostedManagement(
     commandKind: command.kind,
     workspaceId: route.workspaceId,
     streamId: route.streamId,
-    outcome: event ? "accepted" : "replayed",
+    outcome: event || command.kind === "set_connection_expiry" ? "accepted" : "replayed",
     hash,
   });
   return { status: 200, body: { status: "accepted", ...response, events: decision.events } };
@@ -10257,6 +10309,10 @@ async function claimHostedSeat(
       return { status: 403, body: { error: "forbidden" } };
     }
 
+    const [freshClock] = await tx<{ now_ms: string | number }[]>`
+      SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now_ms`;
+    frame.now = Number(freshClock.now_ms);
+
     const hash = await hostedRequestHash("hosted_grant", grant.grant_id, input);
     const storedRows = await tx<{
       workspace_id: string;
@@ -10308,6 +10364,9 @@ async function claimHostedSeat(
       `;
       if (replayRows.length !== 1) {
         return { status: 403, body: { error: "hosted_seat_revoked" } };
+      }
+      if (await revalidateHostedGrantCommand(tx, capability) === null) {
+        return { status: 403, body: { error: "forbidden" } };
       }
       return { status: 200, body: { ...response, status: "accepted", replayed: true } };
     }
@@ -10379,6 +10438,9 @@ async function claimHostedSeat(
         AND p.name = ${input.command.name}
         AND p.owner_user_id = ${grant.owner_user_id}::uuid
     `;
+    if (await revalidateHostedGrantCommand(tx, capability) === null) {
+      return { status: 403, body: { error: "forbidden" } };
+    }
     const liveSeatCount = Number(seatCountRows[0]?.live ?? "0") - reclaimableSeats.length;
     const seatId = crypto.randomUUID();
     const principalId = crypto.randomUUID();
