@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
-"""Host-only final commit statuses; stdin is controller-owned result metadata.
-
-For audited historical backfills, --receipt reads an operator-selected final
-receipt. It never accepts a SHA override: the receipt's resolved SHA is tested.
-Only the GitHub commit-status API is used; no checks, comments or workflow API.
-"""
+"""Reconcile read-only CI receipts with GitHub using this job's ephemeral token."""
 import argparse
+import datetime as dt
 import http.client
 import json
 import os
-from pathlib import Path
 import re
 import stat
 import sys
+import time
+
+RUNS = '/var/lib/commonswarm-ci/runs'
+REPO = '/repos/yulanventures/commonswarm'
+ID = r'csci-[0-9a-f]{32}'
+SUITES = ('box-dry-run', 'server', 'p1-cli', 'site', 'unit')
+LEGACY = frozenset(('csci-2bcf14681e054e21b6706774db5a609a',
+    'csci-0973a9b8bf7f4559bcbde822aaf23f95', 'csci-6707cacfa0064ebbae06842f6800f37b',
+    'csci-163e0902286d4e40a6fff68a83d91824', 'csci-94eed54bd36b4f6fbaf796d9c337caf2',
+    'csci-e6717ca3385d4f27a47cc52771525922'))
+LIMIT = 1048576
 
 
 class Refused(Exception):
@@ -24,89 +30,191 @@ def need(condition, reason):
         raise Refused(reason)
 
 
-def status_payload(result):
+def timestamp(value):
+    need(isinstance(value, str) and len(value) <= 40, 'invalid_completion_time')
+    try:
+        result = dt.datetime.fromisoformat(value.replace('Z', '+00:00'))
+        need(result.tzinfo is not None and result.utcoffset() is not None, 'naive_completion_time')
+        return result.astimezone(dt.timezone.utc)
+    except ValueError:
+        raise Refused('invalid_completion_time') from None
+
+
+def directory(path):
+    # Open every component relative to the preceding directory, never a symlink.
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        parts = path.strip('/').split('/')
+        for index, part in enumerate(parts):
+            flag = os.O_RDONLY if index == len(parts) - 1 else os.O_PATH
+            new = os.open(part, flag | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = new
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def read_receipt(root, run_id):
+    need(re.fullmatch(ID, run_id), 'invalid_run_id')
+    # Run ACL permits traversal, never listing; O_PATH also works with --x only.
+    run = os.open(run_id, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+    try:
+        fd = os.open('receipt.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=run)
+        try:
+            info = os.fstat(fd)
+            need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= LIMIT,
+                 'unsafe_receipt')
+            with os.fdopen(fd, 'rb', closefd=False) as stream:
+                raw = stream.read(LIMIT + 1)
+            need(len(raw) <= LIMIT, 'receipt_too_large')
+            result = json.loads(raw)
+            need(isinstance(result, dict) and result.get('run_id') == run_id, 'receipt_identity_mismatch')
+            return result
+        finally:
+            os.close(fd)
+    finally:
+        os.close(run)
+
+
+def candidate(result):
     sha, suite, run_id = (result.get(k) for k in ('resolved_sha', 'suite', 'run_id'))
     need(isinstance(sha, str) and re.fullmatch('[0-9a-f]{40}', sha), 'invalid_resolved_sha')
-    need(suite in ('server', 'p1-cli', 'site', 'box-dry-run', 'unit'), 'invalid_suite')
-    need(isinstance(run_id, str) and re.fullmatch('csci-[0-9a-f]{32}', run_id), 'invalid_run_id')
+    need(suite in SUITES, 'invalid_suite')
+    need(isinstance(run_id, str) and re.fullmatch(ID, run_id), 'invalid_run_id')
     code = result.get('exit_code')
     need(type(code) is int and 0 <= code <= 255, 'invalid_exit_code')
-    need(result.get('state') in ('completed', 'failed') and result.get('pending') is False,
-         'unfinished_result')
+    need(result.get('state') in ('completed', 'failed') and result.get('pending') is False, 'unfinished_result')
     need((result['state'] == 'completed') == (code == 0), 'inconsistent_result')
     need(type(result.get('timed_out')) is bool, 'invalid_timeout')
-    cleanup_failed = result.get('cleanup_failed', bool(result.get('cleanup_errors')))
-    need(type(cleanup_failed) is bool, 'invalid_cleanup')
-    controller_failed = result.get('controller_failed', bool(result.get('controller_error')))
-    need(type(controller_failed) is bool, 'invalid_controller_error')
-    need(code != 0 or not (result['timed_out'] or cleanup_failed or controller_failed), 'inconsistent_result')
-    state = ('error' if result['timed_out'] or cleanup_failed or controller_failed or code == 130
-             else 'success' if code == 0 else 'failure')
-    # Include only validated controller metadata; never logs, gate text or URLs.
-    return sha, dict(state=state, context='hetzner/' + suite,
-                     description=f'{run_id} exit {code}')
+    need(isinstance(result.get('cleanup_errors'), list), 'invalid_cleanup')
+    infrastructure = bool(result['timed_out'] or result['cleanup_errors'] or result.get('controller_error') or code == 130)
+    need(code != 0 or not infrastructure, 'inconsistent_result')
+    ended = timestamp(result.get('ended_at'))
+    started = timestamp(result.get('started_at'))
+    need(started <= ended <= dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5), 'invalid_chronology')
+    state = 'error' if infrastructure else 'success' if code == 0 else 'failure'
+    payload = dict(state=state, context='hetzner/' + suite,
+                   description=f'{run_id} exit {code} ended {ended.isoformat()}')
+    return dict(sha=sha, run_id=run_id, ended=ended, payload=payload, code=code)
 
 
-def token_from_file(cfg):
-    name = cfg.get('github_status_token_file')
-    need(isinstance(name, str) and name, 'token_file_unconfigured')
-    path = Path(name)
-    need(path.is_absolute() and path.resolve() == path and not path.is_symlink(), 'unsafe_token_path')
-    # State (including checkout/scratch/receipts) and controller are exposed to
-    # workers in bind mounts. A credential must never reside in either tree.
-    for key in ('state', 'controller'):
-        root = Path(cfg[key]).resolve()
-        need(path != root and root not in path.parents, 'token_in_container_tree')
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    try:
-        metadata = os.fstat(fd)
-        need(stat.S_ISREG(metadata.st_mode) and metadata.st_uid in (0, os.getuid())
-             and metadata.st_mode & 0o777 == 0o600, 'unsafe_token_permissions')
-        with os.fdopen(fd, 'r', closefd=False) as stream:
-            token = stream.read(4097).strip()
-        need(0 < len(token) <= 4096 and all(33 <= ord(c) <= 126 for c in token), 'invalid_token_file')
-        return token
-    finally:
-        os.close(fd)
+class API:
+    def __init__(self, token):
+        self.token = token
+        self.deadline = time.monotonic() + 120
+
+    def request(self, method, path, payload=None):
+        need(time.monotonic() < self.deadline, 'github_deadline')
+        connection = http.client.HTTPSConnection('api.github.com', timeout=min(15, max(0.1, self.deadline-time.monotonic())))
+        try:
+            connection.request(method, REPO + path, body=None if payload is None else json.dumps(payload), headers={
+                'Authorization': 'Bearer ' + self.token, 'Accept': 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json',
+                'User-Agent': 'commonswarm-hetzner-ci'})
+            response = connection.getresponse()
+            need(response.status == (201 if method == 'POST' else 200), 'github_http_' + str(response.status))
+            raw = response.read(LIMIT + 1)
+            need(len(raw) <= LIMIT, 'github_response_too_large')
+            return json.loads(raw)
+        finally:
+            connection.close()
+
+    def history(self, sha):
+        rows, seen = [], set()
+        for page in range(1, 1001):
+            batch = self.request('GET', f'/commits/{sha}/statuses?per_page=100&page={page}')
+            need(isinstance(batch, list) and len(batch) <= 100, 'invalid_history')
+            for row in batch:
+                need(isinstance(row, dict) and type(row.get('id')) is int and row['id'] > 0
+                     and row.get('state') in ('error', 'failure', 'pending', 'success')
+                     and isinstance(row.get('context'), str) and isinstance(row.get('description'), (str, type(None))),
+                     'invalid_status')
+                need(row['id'] not in seen, 'history_changed_during_pagination')
+                seen.add(row['id'])
+                rows.append(row)
+            if len(batch) < 100:
+                return rows
+        raise Refused('history_page_limit')
 
 
-def publish(cfg, result):
-    sha, payload = status_payload(result)
-    token = token_from_file(cfg)
-    # Fixed host/path, no redirects, proxies, shell, subprocess or response bodies.
-    # Thus a remote error cannot redirect the Authorization header or echo it.
-    connection = http.client.HTTPSConnection('api.github.com', timeout=15)
-    try:
-        connection.request('POST', '/repos/yulanventures/commonswarm/statuses/' + sha,
-                           body=json.dumps(payload), headers={
-                               'Authorization': 'Bearer ' + token,
-                               'Accept': 'application/vnd.github+json',
-                               'X-GitHub-Api-Version': '2022-11-28',
-                               'Content-Type': 'application/json',
-                               'User-Agent': 'commonswarm-hetzner-ci'})
-        response = connection.getresponse()
-        need(response.status == 201, 'github_http_' + str(response.status))
-    finally:
-        connection.close()
-    return dict(state='published', context=payload['context'], status=payload['state'])
+def reconcile(api, root, item):
+    payload = item['payload']
+    history = api.history(item['sha'])
+    context = [r for r in history if r['context'] == payload['context']]
+    legacy_description = f"{item['run_id']} exit {item['code']}"
+    matches = [r for r in context if r['description'] in (payload['description'], legacy_description)
+               and r['state'] == payload['state']]
+    if matches:
+        return 'skipped'
+    # Every earlier same-context status needs known completion provenance. API
+    # insertion order alone says nothing about the time the tests finished.
+    for row in context:
+        description = row['description'] or ''
+        match = re.fullmatch(f'({ID}) exit ([0-9]{{1,3}})(?: ended (.+))?', description)
+        need(match is not None, 'unknown_status_provenance')
+        prior_id, code, ended = match.groups()
+        need(prior_id != item['run_id'], 'conflicting_run_status')
+        if ended is None:
+            prior = candidate(read_receipt(root, prior_id))
+            need(prior['sha'] == item['sha'] and prior['payload']['context'] == payload['context']
+                 and prior['code'] == int(code) and prior['payload']['state'] == row['state'], 'invalid_legacy_provenance')
+            completed = prior['ended']
+        else:
+            need(int(code) <= 255 and row['state'] != 'pending', 'invalid_status_provenance')
+            completed = timestamp(ended)
+        need(completed < item['ended'], 'newer_or_ambiguous_result')
+    created = api.request('POST', '/statuses/' + item['sha'], payload)
+    need(isinstance(created, dict) and type(created.get('id')) is int and created['id'] > 0, 'invalid_create_response')
+    readback = api.history(item['sha'])
+    need(any(r['id'] == created['id'] and all(r.get(k) == v for k, v in payload.items()) for r in readback),
+         'status_readback_failed')
+    return 'published'
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', required=True)
-    parser.add_argument('--receipt', help='operator-audited final receipt for backfill')
+    parser.add_argument('--run-ids', default='', help='up to 20 comma-separated audited run IDs; empty discovers ready receipts')
     args = parser.parse_args()
+    root = None
     try:
-        cfg = json.loads(Path(args.config).read_text())
-        result = json.loads(Path(args.receipt).read_text() if args.receipt else sys.stdin.read())
-        publication = publish(cfg, result)
+        raw = args.run_ids
+        need(len(raw) <= 800, 'too_many_run_ids')
+        selected = raw.split(',') if raw else []
+        need(len(selected) <= 20 and len(selected) == len(set(selected))
+             and all(re.fullmatch(ID, value) for value in selected), 'invalid_run_ids')
+        token = os.environ.pop('GITHUB_TOKEN', '')
+        need(0 < len(token) <= 4096 and all(33 <= ord(c) <= 126 for c in token), 'invalid_job_token')
+        root = directory(RUNS)
+        items = []
+        for run_id in selected or sorted(n for n in os.listdir(root) if re.fullmatch(ID, n)):
+            try:
+                receipt = read_receipt(root, run_id)
+            except (FileNotFoundError, PermissionError):
+                need(not selected, 'selected_receipt_missing')
+                continue
+            ready = receipt.get('github_status') == dict(state='ready', version=1)
+            if not selected and not ready:
+                continue
+            need(ready or run_id in LEGACY, 'selected_receipt_not_ready')
+            items.append(candidate(receipt))
+        items.sort(key=lambda i: (i['sha'], i['payload']['context'], i['ended'], i['run_id']))
+        counts = dict(published=0, skipped=0, eligible=len(items))
+        api = API(token)
+        for item in items:
+            counts[reconcile(api, root, item)] += 1
+        print(json.dumps(dict(state='reconciled', **counts)))
+        return 0
     except Refused as error:
-        publication = dict(state='failed', error=str(error))
+        print(json.dumps(dict(state='failed', error=str(error))))
     except Exception:
-        # Never format exceptions or print HTTP response content.
-        publication = dict(state='failed', error='publisher_unavailable')
-    print(json.dumps(publication))
-    return 0 if publication['state'] == 'published' else 1
+        # Neither exception messages nor response bodies can enter logs.
+        print(json.dumps(dict(state='failed', error='publisher_unavailable')))
+    finally:
+        if root is not None:
+            os.close(root)
+    return 1
 
 
 if __name__ == '__main__':

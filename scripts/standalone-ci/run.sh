@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import stat
 import subprocess as sp
 import sys
 import time
@@ -38,8 +39,83 @@ state = Path(cfg['state'])
 if not state.is_absolute() or state.is_symlink() or state.resolve() != state or state == Path('/') or state == Path.home():
     refuse('state must be a canonical dedicated absolute directory')
 state.mkdir(mode=0o700, parents=True, exist_ok=True)
-if state.stat().st_uid != os.getuid() or state.stat().st_mode & 0o077:
-    refuse('state must be private and owned by the service user')
+reader = cfg.get('status_reader_uid')
+if reader is not None and (type(reader) is not int or reader <= 0 or reader == os.getuid()):
+    refuse('invalid status reader UID')
+pe_runner_uid = cfg.get('pe_runner_uid')
+if type(pe_runner_uid) is not int or pe_runner_uid <= 0 or pe_runner_uid in (os.getuid(), reader):
+    refuse('invalid PE runner UID; require a positive integer distinct from service and reader')
+def access_entries(fd):
+    result = sp.check_output(['getfacl', '-cpn', '/proc/self/fd/' + str(fd)],
+                             pass_fds=(fd,), text=True, stderr=sp.DEVNULL, timeout=5)
+    return {line.split('#', 1)[0].strip() for line in result.splitlines() if line.strip()}
+def private_directory(path, permission=None, grant=False):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o700 != 0o700:
+            raise ValueError('directory owner mismatch')
+        base = {'user::rwx', 'group::---', 'other::---'}
+        allowed = base | {f'user:{reader}:{permission}', 'mask::' + permission}
+        entries = access_entries(fd) if reader is not None else None
+        if reader is None:
+            if info.st_mode & 0o077:
+                raise ValueError('private directory permissions')
+        elif entries != base and entries != allowed:
+            raise ValueError('unsupported directory ACL')
+        if grant:
+            sp.run(['setfacl', '-m', f'u:{reader}:{permission},m::{permission}',
+                    '/proc/self/fd/' + str(fd)], pass_fds=(fd,), check=True,
+                   stdout=sp.DEVNULL, stderr=sp.DEVNULL, timeout=5)
+            if access_entries(fd) != allowed:
+                raise ValueError('directory ACL readback failed')
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+try:
+    os.close(private_directory(state, '--x'))
+except Exception:
+    refuse('state owner/access ACL mismatch')
+def persist_receipt(run, receipt, ready=False):
+    # The worker never sees this directory or temporary inode. Rename publishes
+    # the complete controller-owned object, including its final access ACL.
+    directory = os.open(run, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    temporary = '.receipt-' + uuid.uuid4().hex
+    installed = False
+    try:
+        if ready:
+            if reader is None:
+                raise ValueError('reader unconfigured')
+            for path, permission in ((state, '--x'), (state / 'runs', 'r-x'), (run, '--x')):
+                os.close(private_directory(path, permission, grant=True))
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+        try:
+            if ready:
+                sp.run(['setfacl', '-m', f'u:{reader}:r--,m::r--', '/proc/self/fd/' + str(fd)],
+                       pass_fds=(fd,), check=True, stdout=sp.DEVNULL, stderr=sp.DEVNULL, timeout=5)
+                if access_entries(fd) != {'user::rw-', 'group::---', 'other::---', f'user:{reader}:r--', 'mask::r--'}:
+                    raise ValueError('receipt ACL readback failed')
+            data = json.dumps(receipt, indent=2).encode() + b'\n'
+            with os.fdopen(fd, 'wb', closefd=False) as stream:
+                stream.write(data)
+                stream.flush()
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(temporary, 'receipt.json', src_dir_fd=directory, dst_dir_fd=directory)
+        installed = True
+        os.fsync(directory)
+    except BaseException:
+        if ready and installed:
+            os.unlink('receipt.json', dir_fd=directory)
+        raise
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+        os.close(directory)
 if (cfg.get('service_uid'), cfg.get('service_gid')) != (os.getuid(), os.getgid()):
     refuse('dedicated service identity mismatch')
 os.umask(0o077)
@@ -167,7 +243,6 @@ with (state / 'queue.lock').open('a') as lock:
     cmd(git + ['update-ref', 'refs/heads/ci-input', resolved], interruptible=True)
     suites = SUITES if selection == 'all' else (selection,)
     overall = 0
-    status_dir = state / 'statuses'
     for suite in suites:
         if stopping:
             overall = 130
@@ -185,6 +260,8 @@ with (state / 'queue.lock').open('a') as lock:
             run_id = 'csci-' + uuid.uuid4().hex
             run = state / 'runs' / run_id
             run.mkdir(parents=True, mode=0o700)
+            artifacts = run / 'worker-artifacts'
+            artifacts.mkdir(mode=0o700)
             scratch = run / 'scratch'
             scratch.mkdir()
             work = scratch / 'work'
@@ -211,7 +288,7 @@ with (state / 'queue.lock').open('a') as lock:
                     pass
                 def check_capacity():
                     check_stopping()
-                    probe = sp.run(['pgrep', '-x', 'Runner.Worker'], stdout=sp.DEVNULL, timeout=2)
+                    probe = sp.run(['pgrep', '-u', str(pe_runner_uid), '-x', 'Runner.Worker'], stdout=sp.DEVNULL, timeout=2)
                     if probe.returncode == 0:
                         raise Deferred()
                     if probe.returncode != 1:
@@ -278,7 +355,7 @@ with (state / 'queue.lock').open('a') as lock:
                              '--mount', f'type=bind,src={tmp},dst=/tmp',
                              '--mount', f'type=bind,src={tmp},dst=/private/tmp',
                              '--mount', f'type=bind,src={controller},dst=/controller,readonly',
-                             '--mount', f'type=bind,src={run},dst=/receipt',
+                             '--mount', f'type=bind,src={artifacts},dst=/receipt',
                              '--workdir', '/work', '--env', 'SUDO_UID=' + str(os.getuid()),
                              '--env', 'GIT_CONFIG_NOSYSTEM=1', '--env', 'GIT_CONFIG_GLOBAL=/dev/null',
                              '--env', 'GIT_CONFIG_SYSTEM=/dev/null', '--env', 'GIT_TERMINAL_PROMPT=0',
@@ -326,8 +403,9 @@ with (state / 'queue.lock').open('a') as lock:
                     # including receipt artifacts. Reclaim only this run's mount.
                     try:
                         cmd(['docker', 'run', '--name', cleaner, '--label', label, '--network', 'none', '--user', '0',
-                             '--mount', f'type=bind,src={run},dst=/receipt', cfg['worker_image'],
-                             'chown', '-R', f'{os.getuid()}:{os.getgid()}', '/receipt'], stdout=log, stderr=log, timeout=60)
+                             '--mount', f'type=bind,src={artifacts},dst=/receipt',
+                             '--mount', f'type=bind,src={scratch},dst=/scratch', cfg['worker_image'],
+                             'chown', '-R', f'{os.getuid()}:{os.getgid()}', '/receipt', '/scratch'], stdout=log, stderr=log, timeout=60)
                     except Exception as e:
                         receipt['cleanup_errors'].append(type(e).__name__ + ': ' + str(e))
                     finally:
@@ -363,18 +441,32 @@ with (state / 'queue.lock').open('a') as lock:
             receipt.update(exit_code=code, ended_at=stamp(),
                            elapsed_seconds=round(time.monotonic() - suite_clock, 3),
                            pending=receipt['state'] == 'deferred')
-            for name in ('gates.json', 'versions.json'):
-                if (run / name).exists():
-                    try:
-                        receipt[name.removesuffix('.json')] = json.loads((run / name).read_text())
-                    except (ValueError, OSError):
-                        receipt['artifact_error'] = 'invalid ' + name
-                        if receipt['state'] != 'deferred':
-                            code = code or 1
-                            receipt.update(exit_code=code, state='failed', pending=False)
-            receipt['artifacts'] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-                                    for p in sorted(run.iterdir()) if p.is_file() and p.name != 'receipt.json'}
-            (run / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+            def artifact_bytes(path):
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                try:
+                    info = os.fstat(fd)
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 1048576:
+                        raise ValueError('unsafe worker artifact')
+                    with os.fdopen(fd, 'rb', closefd=False) as stream:
+                        data = stream.read(1048577)
+                    if len(data) > 1048576:
+                        raise ValueError('oversized worker artifact')
+                    return data
+                finally:
+                    os.close(fd)
+            receipt['artifacts'] = {'suite.log': hashlib.sha256((run / 'suite.log').read_bytes()).hexdigest()}
+            for path in sorted(artifacts.iterdir()):
+                try:
+                    data = artifact_bytes(path)
+                    receipt['artifacts'][path.name] = hashlib.sha256(data).hexdigest()
+                    if path.name in ('gates.json', 'versions.json'):
+                        receipt[path.stem] = json.loads(data)
+                except (ValueError, OSError):
+                    receipt['artifact_error'] = 'invalid worker artifact'
+                    if receipt['state'] != 'deferred':
+                        code = code or 1
+                        receipt.update(exit_code=code, state='failed', pending=False)
+            persist_receipt(run, receipt)
             # Scratch includes generated test credentials. Retention removes it only
             # after owned services are gone; logs/receipts remain private for 14 days.
             if not receipt['cleanup_errors']:
@@ -385,11 +477,11 @@ with (state / 'queue.lock').open('a') as lock:
                     receipt['exit_code'] = code
                     receipt.update(state='failed', pending=False)
                     receipt['cleanup_errors'].append('scratch: ' + type(e).__name__)
-                    (run / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+                    persist_receipt(run, receipt)
             if stopping:
                 code = 130
                 receipt.update(exit_code=130, state='failed', pending=False)
-                (run / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+                persist_receipt(run, receipt)
             print(json.dumps({'receipt': str(run / 'receipt.json'), 'suite': suite, 'state': receipt['state'], 'exit_code': code}), flush=True)
             if receipt['state'] == 'deferred':
                 # Deferred is unfinished work, never a suite pass. Retry this snapshot
@@ -407,54 +499,31 @@ with (state / 'queue.lock').open('a') as lock:
                     code = 124
                     receipt.update(state='failed', pending=False, timed_out=True, exit_code=code, ended_at=stamp(),
                                    elapsed_seconds=round(time.monotonic() - suite_clock, 3))
-                    (run / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+                    persist_receipt(run, receipt)
                 except (Exception, KeyboardInterrupt, StopRequested) as e:
                     code = 130 if isinstance(e, (KeyboardInterrupt, StopRequested)) else 1
                     receipt.update(state='failed', pending=False, exit_code=code, ended_at=stamp(),
                                    controller_error=type(e).__name__)
-                    (run / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+                    persist_receipt(run, receipt)
                 else:
                     prior_attempts.append(run_id)
                     continue
-            # Only a final attempt may publish. Use host-owned values in memory,
-            # never a receipt re-read from the worker-writable mount. In particular,
-            # a deferred attempt that exhausts its quiet wait is now a final error.
-            result = dict(resolved_sha=resolved, suite=suite, run_id=run_id,
-                          state=receipt['state'], pending=receipt['pending'],
-                          exit_code=code, timed_out=receipt['timed_out'],
-                          controller_failed=bool(receipt.get('controller_error')),
-                          cleanup_failed=bool(receipt['cleanup_errors']))
+            # Readiness failures are visible but never change CI exits or skip
+            # later suites/retention. A failed attempt never exposes a ready inode.
+            receipt['github_status'] = dict(state='ready', version=1)
+            errors = []
             try:
-                published = sp.run([sys.executable, '-I', str(controller / 'publish-status.py'),
-                                    '--config', str(cfg_path.resolve())],
-                                   input=json.dumps(result), text=True, capture_output=True, timeout=30)
-                publication = json.loads(published.stdout)
-                if published.returncode or publication.get('state') != 'published':
-                    publication = dict(state='failed', error=publication.get('error', 'publisher_failed'))
+                persist_receipt(run, receipt, ready=True)
             except Exception:
-                # No exception strings: transports and responses can echo secrets.
-                publication = dict(state='failed', error='publisher_unavailable')
-            publication.update(resolved_sha=resolved, suite=suite, run_id=run_id, attempted_at=stamp())
-            # This host-only directory is never mounted into test containers. Keep
-            # failures for operator retry without changing the underlying CI exit.
-            publication_record = status_dir / (run_id + '.json')
-            persistence_errors = []
-            try:
-                status_dir.mkdir(mode=0o700, exist_ok=True)
-                publication_record.write_text(json.dumps(publication, indent=2) + '\n')
-            except OSError:
-                persistence_errors.append('status_record_unavailable')
-            receipt['github_status'] = publication
-            try:
-                (run / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
-            except OSError:
-                persistence_errors.append('receipt_record_unavailable')
+                receipt['github_status'] = dict(state='failed', error='readiness_unavailable')
+                errors.append('readiness_unavailable')
+                try:
+                    persist_receipt(run, receipt)
+                except Exception:
+                    errors.append('receipt_record_unavailable')
             print(json.dumps({'suite': suite, 'resolved_sha': resolved,
-                              'github_status': publication['state'],
-                              'publication': publication,
-                              'persistence_errors': persistence_errors,
-                              'publication_record': None if 'status_record_unavailable' in persistence_errors
-                              else str(publication_record)}), flush=True)
+                              'github_status': receipt['github_status']['state'],
+                              'persistence_errors': errors}), flush=True)
             overall = overall or code
             break
         if stopping or code == 130:

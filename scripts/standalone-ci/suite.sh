@@ -102,7 +102,7 @@ SH
     ;;
   p1-cli) gate p1-cli npm run test:p1-cli || failed=1 ;;
   unit)
-    gate standalone-controls node --test tests/standalone-ci-guard.test.mjs || failed=1
+    gate standalone-controls node --test tests/standalone-ci-guard.test.mjs tests/standalone-ci-publisher.test.mjs || failed=1
     gate unit npm test || failed=1
     ;;
   site)
