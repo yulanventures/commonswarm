@@ -35,12 +35,16 @@ function metadata(clientId) {
 }
 
 async function startProvider(clientId, beforeConsume, database = pool) {
-  const owner = randomUUID(), workspace = randomUUID(), hosted = randomUUID();
+  const owner = randomUUID(), workspace = randomUUID(), hosted = randomUUID(), stream = randomUUID();
   await database.query("INSERT INTO auth.users(id,aud,role,email) VALUES($1,'authenticated','authenticated',$2)",
     [owner, `${owner}@example.test`]);
   await database.query("INSERT INTO swarm.users(user_id,display_name) VALUES($1,'MCP HTTP owner')", [owner]);
   await database.query("INSERT INTO swarm.workspaces(workspace_id,name,created_by) VALUES($1,'MCP HTTP control',$2)",
     [workspace, owner]);
+  await database.query("INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES($1,$2,'owner')",
+    [workspace, owner]);
+  await database.query("INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES($1,$2,'workspace')",
+    [stream, workspace]);
   const provider = await createMcpProvider({
     adapter: createPostgresAdapter(database, { beforeConsume }),
     // These are the ordinary production hooks, available before M1.
@@ -79,6 +83,11 @@ async function startProvider(clientId, beforeConsume, database = pool) {
               'active',statement_timestamp(),statement_timestamp())
             ON CONFLICT(provider_grant_id) DO NOTHING`,
           [hosted, grantId, owner, workspace, clientId, RESOURCE, details.uid]);
+          await database.query(`INSERT INTO swarm.hosted_mcp_grant_workspaces
+            (grant_id,workspace_id,owner_user_id,manifest_digest,consent_receipt_id,consented_at)
+            VALUES($1,$2,$3,decode(repeat('ab',32),'hex'),$4,statement_timestamp())
+            ON CONFLICT(grant_id,workspace_id) DO NOTHING`,
+          [hosted, workspace, owner, randomUUID()]);
           await provider.interactionFinished(request, response, { consent: { grantId } });
         })()
       : callback(request, response);
@@ -113,7 +122,10 @@ async function startProvider(clientId, beforeConsume, database = pool) {
       return response;
     },
     async cleanup() {
+      await database.query("DELETE FROM swarm.hosted_mcp_grant_workspaces WHERE grant_id=$1", [hosted]);
       await database.query("DELETE FROM swarm.hosted_mcp_grants WHERE grant_id=$1", [hosted]);
+      await database.query("DELETE FROM swarm.streams WHERE stream_id=$1", [stream]);
+      await database.query("DELETE FROM swarm.memberships WHERE workspace_id=$1 AND user_id=$2", [workspace, owner]);
       await database.query("DELETE FROM swarm.workspaces WHERE workspace_id=$1", [workspace]);
       await database.query("DELETE FROM swarm.users WHERE user_id=$1", [owner]);
       await database.query("DELETE FROM auth.users WHERE id=$1", [owner]);

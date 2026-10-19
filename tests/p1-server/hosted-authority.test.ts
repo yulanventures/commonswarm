@@ -54,6 +54,8 @@ const rollbackCatalogUrl = new URL(
 
 let sql: postgres.Sql;
 let releaseSql: postgres.Sql;
+let oauthSql: postgres.Sql;
+let oauthDatabaseUrl: string;
 let local: LocalEnvironment;
 let admin: SupabaseClient;
 let harnessDir: string;
@@ -386,6 +388,19 @@ before(async () => {
   assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(target.hostname));
   sql = postgres(local.DB_URL, { prepare: false, max: 4 });
   releaseSql = postgres(localClusterAdminUrl(local.DB_URL), { prepare: false, max: 1 });
+  // Use the existing OAuth service login, as in oauth-mcp-contract.test.js.
+  // The edge/admin login intentionally has no runtime SET ROLE authority.
+  const runtimeTarget = new URL(local.DB_URL);
+  runtimeTarget.username = "commonswarm_oauth_runtime";
+  runtimeTarget.password = randomBytes(32).toString("hex");
+  await releaseSql.unsafe(`ALTER ROLE commonswarm_oauth_runtime PASSWORD '${runtimeTarget.password}'`);
+  oauthDatabaseUrl = runtimeTarget.href;
+  oauthSql = postgres(oauthDatabaseUrl, { prepare: false, max: 1 });
+  const [runtimeIdentity] = await oauthSql<{ role: string; safe: boolean }[]>`
+    SELECT current_user AS role, NOT rolsuper AND NOT rolbypassrls AS safe
+    FROM pg_roles WHERE rolname = current_user`;
+  assert.equal(runtimeIdentity?.role, "commonswarm_oauth_runtime");
+  assert.equal(runtimeIdentity?.safe, true);
   admin = createClient(local.API_URL, local.SERVICE_ROLE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
@@ -396,6 +411,8 @@ before(async () => {
 
 after(async () => {
   await sql.end();
+  await oauthSql?.end();
+  await releaseSql.unsafe("ALTER ROLE commonswarm_oauth_runtime PASSWORD NULL");
   await releaseSql.end();
   rmSync(harnessDir, { recursive: true, force: true });
 });
@@ -1217,10 +1234,9 @@ test("historical orphan is reclaimable at the hosted seat limit while new names 
 });
 
 // The production provider's refresh findAccount uses this status function;
-// role-scoped calls prove the same persistent fence without issuing a bearer.
+// the service login proves the same persistent fence without issuing a bearer.
 async function providerActive(grantId: string): Promise<boolean> {
-  return await sql.begin(async tx => {
-    await tx.unsafe("SET LOCAL ROLE commonswarm_oauth_runtime");
+  return await oauthSql.begin(async tx => {
     const [row] = await tx<{ active: boolean }[]>`
       SELECT active FROM commonswarm_oauth.resolve_hosted_grant_status(${`provider-${grantId}`})`;
     return row?.active === true;
@@ -1234,9 +1250,8 @@ async function providerRefresh(fixture: HostedFixture, options: {
 } = {}): Promise<boolean> {
   const requireService = createRequire(new URL("../../services/mcp-auth/package.json", import.meta.url));
   const { Pool } = requireService("pg");
-  const pool = new Pool({ connectionString: local.DB_URL, max: 1 });
+  const pool = new Pool({ connectionString: oauthDatabaseUrl, max: 1 });
   try {
-    await pool.query("SET ROLE commonswarm_oauth_runtime");
     const { createProductionFindAccount } = await import(new URL(
       "../../services/mcp-auth/src/server.js", import.meta.url).href);
     const { createPostgresAdapter } = await import(new URL(
