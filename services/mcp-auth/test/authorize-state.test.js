@@ -121,7 +121,7 @@ async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnab
         assert.equal(values[1], USER);
         const active = [...interactions.values()].some((row) =>
           row.provider_grant_id === values[0] && row.completed);
-        return rows(active ? {} : null);
+        return rows(active ? { active } : null);
       }
       if (sql.trimStart().startsWith("SELECT 1 FROM commonswarm_oauth.browser_sessions")) {
         assert.equal(values[0], USER);
