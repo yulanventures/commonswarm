@@ -311,7 +311,8 @@ test('catalogs detect privilege drift and reverse rollbacks restore the pre-lane
   const inviteProof = (suffix: string) => readFileSync(new URL(`../../deploy/release-proofs/household-invites/20261004000006-${suffix}.sql`, import.meta.url), 'utf8');
   // Migration 05 intentionally widens the lane-2 confirmation tables. Undo its
   // overlay first to test the original exact catalogs; this entire drill rolls back.
-  let script = 'BEGIN;\n' + removalProof('catalog') + requireProof('catalog_ok',true)
+  // Project away the later permanent-connection overlay only inside this rolled-back historical drill.
+  let script = 'BEGIN;\nALTER TABLE swarm.household_content_connections DROP COLUMN IF EXISTS renewal_grant_id;\n' + removalProof('catalog') + requireProof('catalog_ok',true)
     + removalProof('rollback') + removalProof('rollback-catalog') + requireProof('rollback_ok',true)
     + approvalProof('catalog') + requireProof('catalog_ok',true)
     + approvalProof('rollback') + approvalProof('rollback-catalog') + requireProof('rollback_ok',true)
