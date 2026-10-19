@@ -106,7 +106,19 @@ if args[0]=='network':
 sys.exit(2)
 `;
   writeFileSync(join(bin, 'docker'), docker); chmodSync(join(bin, 'docker'), 0o755);
-  writeFileSync(join(bin, 'pgrep'), '#!/bin/sh\n[ "$4" = systemd ] && exit 0\nexit 1\n'); chmodSync(join(bin, 'pgrep'), 0o755);
+  // Model process ownership at the subprocess boundary; never start a fake
+  // Runner.Worker under the real host's gha account (operator watches see it).
+  // Own status work is always present, so an unscoped probe is genuinely busy.
+  writeFileSync(join(bin, 'pgrep'), `#!/usr/bin/env python3
+import pathlib,sys
+args=sys.argv[1:]
+processes=[(0,'systemd'),(1003,'Runner.Worker')]
+if pathlib.Path(${JSON.stringify(join(root,'pe-active'))}).exists(): processes.append((1001,'Runner.Worker'))
+uid=args[args.index('-u')+1] if '-u' in args else None
+uid=0 if uid=='root' else int(uid) if uid is not None else None
+name=args[args.index('-x')+1]
+sys.exit(0 if any(pname==name and (uid is None or owner==uid) for owner,pname in processes) else 1)
+`); chmodSync(join(bin, 'pgrep'), 0o755);
   const realGit = good('which', ['git']);
   // Only the external source transport is replaced; git still resolves/clones
   // real commits. Inspect the fetch environment before redirecting it locally.
@@ -142,7 +154,7 @@ os.execv(${JSON.stringify(realGit)},[${JSON.stringify(realGit)},*args])
   const cfg = {state, controller: installed, service_uid:process.getuid(), service_gid:process.getgid(),
     controller_checksums:Object.fromEntries(['run.sh','suite.sh','retain.py','publish-status.py'].map(name=>[name,createHash('sha256').update(readFileSync(join(installed,name))).digest('hex')])), source_url: 'https://github.com/yulanventures/commonswarm.git', allowed_hostname: good('hostname',['-s']),
     controller_sha: 'a'.repeat(40), worker_image: 'sha256:' + '1'.repeat(64),
-    dind_image: 'fixture@sha256:' + '2'.repeat(64), timeout_seconds: 10, status_reader_uid: process.platform === 'linux' ? 65534 : null};
+    dind_image: 'fixture@sha256:' + '2'.repeat(64), timeout_seconds: 10, pe_runner_uid: 1001, status_reader_uid: process.platform === 'linux' ? 65534 : null};
   const config = join(root, 'config.json');
   writeFileSync(config, JSON.stringify(cfg), {mode:0o600});
   const env = {...process.env, PATH: `${bin}:${process.env.PATH}`, COMMONSWARM_CI_CONFIG: config};
@@ -279,10 +291,13 @@ test('source accepts only anonymous public HTTPS and ignores inherited Git confi
   }
 });
 
-test('PE starting mid-suite removes only owned services, records pending deferral, then retries the same SHA quietly', async () => {
+// Test-audit: the controller must distinguish the two runner roles by UID.
+// The old generic probe blocks on own status work; a wrong/nonexistent PE UID
+// misses actual PE activity. Existing fixtures had no process ownership. This
+// paired lifecycle proof owns both controls, with no production test seam.
+test('own status worker permits CI; PE starting mid-suite defers owned work then retries the same SHA quietly', async () => {
   const f = fixture({sleep: 2});
   const busyPath = join(f.root,'pe-active');
-  writeFileSync(join(f.root,'bin','pgrep'), `#!/bin/sh\n[ "$4" = systemd ] && exit 0\ntest -e '${busyPath}'\n`);
   const running = start(f);
   let workerStarted = false;
   for (let n=0; n<400; n++) {
@@ -290,7 +305,7 @@ test('PE starting mid-suite removes only owned services, records pending deferra
     if (existsSync(events) && readFileSync(events,'utf8').includes('-worker')) {workerStarted=true; break;}
     await delay(10);
   }
-  assert.equal(workerStarted,true,'PE starts only after the CI worker is active');
+  assert.equal(workerStarted,true,'own status worker must permit CI before PE starts');
   writeFileSync(busyPath,'active');
   // Advance main while deferred: the retry must retain the original snapshot.
   writeFileSync(join(f.source,'identity'),'later source during PE contention');
@@ -314,7 +329,7 @@ test('PE starting mid-suite removes only owned services, records pending deferra
   assert.deepEqual(deferred.cleanup_errors,[]);
   assert.deepEqual(JSON.parse(readFileSync(join(f.root,'containers.json'))),{unowned:{label:'some-other-run'}});
   // The simulated PE job ends itself; the controller never cancels it.
-  writeFileSync(join(f.root,'bin','pgrep'),'#!/bin/sh\n[ "$4" = systemd ] && exit 0\nexit 1\n');
+  renameSync(busyPath,join(f.root,'pe-finished'));
   const result = await running; assert.equal(result.status,0,result.stderr);
   const receipts = f.receipts().sort((a,b)=>a.attempt-b.attempt);
   assert.equal(receipts.length,2);
@@ -332,13 +347,38 @@ test('PE starting mid-suite removes only owned services, records pending deferra
 test('PE quiet waiting consumes the suite budget and fails rather than passing deferred work', async () => {
   const f = fixture(); f.cfg.timeout_seconds=1;
   writeFileSync(f.config,JSON.stringify(f.cfg));
-  writeFileSync(join(f.root,'bin','pgrep'),'#!/bin/sh\nexit 0\n');
+  writeFileSync(join(f.root,'pe-active'),'active');
   const result = await start(f); assert.equal(result.status,124,result.stderr);
   const [receipt] = f.receipts();
   assert.equal(receipt.timed_out,true); assert.equal(receipt.state,'failed');
   assert.equal(receipt.pending,false); assert.equal(receipt.exit_code,124);
   assert.ok(!existsSync(join(f.root,'events.jsonl')) || !readFileSync(join(f.root,'events.jsonl'),'utf8').includes('-worker'));
   assert.deepEqual(JSON.parse(readFileSync(join(f.root,'containers.json'))),{unowned:{label:'some-other-run'}});
+});
+
+// Test-audit: invalid identity config must refuse before fetch/worker startup.
+// Python bools pass isinstance(int), and aliasing either service/reader would
+// defeat role separation. Lifecycle coverage supplies only a valid identity;
+// this admission table adds the distinct config failure boundary, without hooks.
+test('PE runner UID requires a positive integer distinct from service and reader before work', async () => {
+  const f=fixture();
+  const reader=f.cfg.status_reader_uid;
+  for (const uid of [undefined,null,true,false,0,-1,1.5,'1001',process.getuid()]) {
+    f.cfg.pe_runner_uid=uid; writeFileSync(f.config,JSON.stringify(f.cfg));
+    const r=await start(f);
+    assert.notEqual(r.status,0); assert.match(r.stderr,/invalid PE runner UID/);
+    assert.equal(existsSync(join(f.root,'fetches.jsonl')),false);
+    assert.equal(existsSync(join(f.root,'events.jsonl')),false);
+  }
+  f.cfg.pe_runner_uid=1001; f.cfg.status_reader_uid=1001;
+  writeFileSync(f.config,JSON.stringify(f.cfg));
+  const overlap=await start(f);
+  assert.notEqual(overlap.status,0); assert.match(overlap.stderr,/invalid PE runner UID/);
+  assert.equal(existsSync(join(f.root,'fetches.jsonl')),false);
+  assert.equal(existsSync(join(f.root,'events.jsonl')),false);
+  f.cfg.status_reader_uid=reader; writeFileSync(f.config,JSON.stringify(f.cfg));
+  const positive=await start(f); assert.equal(positive.status,0,positive.stderr);
+  assert.equal(f.receipts().length,1);
 });
 
 test('retention deletes only expired completed owned runs and rejects root/home/escape/symlink scratch paths', () => {

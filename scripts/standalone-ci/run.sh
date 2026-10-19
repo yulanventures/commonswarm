@@ -42,6 +42,9 @@ state.mkdir(mode=0o700, parents=True, exist_ok=True)
 reader = cfg.get('status_reader_uid')
 if reader is not None and (type(reader) is not int or reader <= 0 or reader == os.getuid()):
     refuse('invalid status reader UID')
+pe_runner_uid = cfg.get('pe_runner_uid')
+if type(pe_runner_uid) is not int or pe_runner_uid <= 0 or pe_runner_uid in (os.getuid(), reader):
+    refuse('invalid PE runner UID; require a positive integer distinct from service and reader')
 def access_entries(fd):
     result = sp.check_output(['getfacl', '-cpn', '/proc/self/fd/' + str(fd)],
                              pass_fds=(fd,), text=True, stderr=sp.DEVNULL, timeout=5)
@@ -285,7 +288,7 @@ with (state / 'queue.lock').open('a') as lock:
                     pass
                 def check_capacity():
                     check_stopping()
-                    probe = sp.run(['pgrep', '-x', 'Runner.Worker'], stdout=sp.DEVNULL, timeout=2)
+                    probe = sp.run(['pgrep', '-u', str(pe_runner_uid), '-x', 'Runner.Worker'], stdout=sp.DEVNULL, timeout=2)
                     if probe.returncode == 0:
                         raise Deferred()
                     if probe.returncode != 1:

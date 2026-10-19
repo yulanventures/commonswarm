@@ -77,8 +77,10 @@ need(os.geteuid() == 0 and os.uname().sysname == 'Linux' and socket.gethostname(
 for tool in ('getfacl', 'setfacl', 'runuser', 'git', 'pgrep', 'sudo'):
     need(shutil.which(tool), 'missing tool ' + tool)
 need(sp.run(['pgrep', '-u', 'root', '-x', 'systemd'], stdout=sp.DEVNULL).returncode == 0, 'process visibility unproven')
-probe = sp.run(['pgrep', '-x', 'Runner.Worker'], stdout=sp.DEVNULL)
-need(probe.returncode == 1, 'runner active or quiet probe failed')
+pe_runner_uid = pwd.getpwnam('gha').pw_uid
+need(type(pe_runner_uid) is int and pe_runner_uid > 0, 'invalid PE runner UID')
+probe = sp.run(['pgrep', '-u', str(pe_runner_uid), '-x', 'Runner.Worker'], stdout=sp.DEVNULL)
+need(probe.returncode == 1, 'PE runner active or quiet probe failed')
 state = Path('/var/lib/commonswarm-ci')
 install = Path('/opt/commonswarm-ci')
 config = install / 'config.json'
@@ -89,6 +91,9 @@ cfg = json.loads(config.read_text())
 need(cfg['state'] == str(state) and cfg['controller'] == str(install / 'scripts') and cfg['allowed_hostname'] == 'pe-ci-1', 'installed path/host mismatch')
 service = pwd.getpwnam('commonswarm-ci')
 need((cfg['service_uid'], cfg['service_gid']) == (service.pw_uid, service.pw_gid), 'service identity mismatch')
+need(pe_runner_uid not in (service.pw_uid, cfg.get('status_reader_uid')), 'PE identity overlaps service or reader')
+installed_pe_uid = cfg.get('pe_runner_uid')
+need(installed_pe_uid is None or (type(installed_pe_uid) is int and installed_pe_uid == pe_runner_uid), 'installed PE identity differs from gha')
 # No writable ancestor, symlink or replacement queue inode is accepted.
 for path in (state, state / 'runs'):
     need(path.resolve() == path and not path.is_symlink() and path.is_dir() and path.stat().st_uid == service.pw_uid, 'unsafe state path')
@@ -138,7 +143,7 @@ need(args.sha and re.fullmatch('[0-9a-f]{40}', args.sha) and args.runner_user ==
 source = Path(call(['git', 'rev-parse', '--show-toplevel']).strip())
 need(call(['git', '-C', str(source), 'rev-parse', 'HEAD']).strip() == args.sha and not call(['git', '-C', str(source), 'status', '--porcelain']).strip(), 'source is not clean exact reviewed SHA')
 account = pwd.getpwnam(args.runner_user)
-need(account.pw_uid > 0 and account.pw_uid != service.pw_uid and account.pw_dir == '/var/lib/commonswarm-status-runner', 'unexpected runner identity')
+need(account.pw_uid > 0 and account.pw_uid not in (service.pw_uid, pe_runner_uid) and account.pw_dir == '/var/lib/commonswarm-status-runner', 'unexpected runner identity')
 need(call(['id', '-G', args.runner_user]).strip() == str(account.pw_gid), 'runner has supplementary groups')
 sudo = sp.run(['sudo', '-n', '-l', '-U', args.runner_user], capture_output=True, text=True)
 need(sudo.returncode != 0, 'runner may have sudo privileges; Root must resolve')
@@ -191,7 +196,7 @@ try:
     for name in names:
         atomic(install / 'scripts' / name, (source / 'scripts/standalone-ci' / name).read_bytes(), 0o755)
     cfg.pop('github_status_token_file', None)
-    cfg.update(controller_sha=args.sha, status_reader_uid=uid,
+    cfg.update(controller_sha=args.sha, status_reader_uid=uid, pe_runner_uid=pe_runner_uid,
                controller_checksums={n: hashlib.sha256((install / 'scripts' / n).read_bytes()).hexdigest() for n in names})
     atomic(config, (json.dumps(cfg, indent=2)+'\n').encode(), 0o640, 0, service.pw_gid)
     for path, permission, isdir in acl_targets:

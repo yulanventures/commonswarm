@@ -186,7 +186,7 @@ test('workflow independently restricts permissions, trusted triggers, runner and
   assert.match(workflow,/permissions:\n  statuses: write\n/);
   assert.equal((workflow.match(/permissions:/g)||[]).length,1);
   assert.match(workflow,/cron: '40 \* \* \* \*'/); assert.match(workflow,/workflow_dispatch:/);
-  assert.doesNotMatch(workflow,/pull_request|push:|uses:|contents:|actions: write/);
+  assert.doesNotMatch(workflow,/\bpull_request|\bpush:|\buses:|\bcontents:|\bactions: write/);
   assert.match(workflow,/github.repository == 'yulanventures\/commonswarm'/);
   assert.match(workflow,/github.ref == 'refs\/heads\/main'/);
   assert.match(workflow,/runs-on: \[self-hosted, Linux, X64, pe-ci-1, commonswarm-status\]/);

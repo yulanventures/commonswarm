@@ -12,9 +12,23 @@ cd "$(git rev-parse --show-toplevel)"
 test "$(git rev-parse HEAD)" = "$reviewed_sha"
 test -z "$(git status --porcelain)"
 for tool in docker git python3 curl systemctl pgrep timeout useradd groupadd getfacl setfacl; do command -v "$tool" >/dev/null; done
-if pgrep -x Runner.Worker >/dev/null; then echo 'REFUSE: PromptEden job active' >&2; exit 75; fi
 # Refuse hidden cross-user processes; an idle probe alone proves nothing.
 pgrep -u root -x systemd >/dev/null
+pe_runner_uid=$(python3 - <<'PYPE'
+import pwd
+uid = pwd.getpwnam('gha').pw_uid
+if type(uid) is not int or uid <= 0:
+    raise SystemExit('REFUSE: invalid PE runner UID')
+print(uid)
+PYPE
+)
+pe_probe=0
+pgrep -u "$pe_runner_uid" -x Runner.Worker >/dev/null || pe_probe=$?
+case "$pe_probe" in
+  0) echo 'REFUSE: PromptEden job active' >&2; exit 75 ;;
+  1) ;;
+  *) echo 'REFUSE: PromptEden worker probe failed' >&2; exit 1 ;;
+esac
 if getent passwd commonswarm-ci >/dev/null || getent group commonswarm-ci >/dev/null; then
   echo 'REFUSE: dedicated service account/group already exists' >&2; exit 1
 fi
@@ -145,14 +159,17 @@ mkdir -m 0700 /var/lib/commonswarm-ci
 created+=(/var/lib/commonswarm-ci)
 chown commonswarm-ci:commonswarm-ci /var/lib/commonswarm-ci
 install -d -m 0700 -o commonswarm-ci -g commonswarm-ci /var/lib/commonswarm-ci/home
-python3 - "$reviewed_sha" "$worker_image" "$dind_image" <<'PY'
+python3 - "$reviewed_sha" "$worker_image" "$dind_image" "$pe_runner_uid" <<'PY'
 import hashlib, json, pwd, sys
 from pathlib import Path
 account=pwd.getpwnam("commonswarm-ci")
+pe_runner_uid=pwd.getpwnam('gha').pw_uid
+if type(pe_runner_uid) is not int or pe_runner_uid <= 0 or pe_runner_uid == account.pw_uid or str(pe_runner_uid) != sys.argv[4]:
+    raise SystemExit('REFUSE: PE runner identity invalid or changed during provisioning')
 cfg=dict(controller_sha=sys.argv[1],worker_image=sys.argv[2],dind_image=sys.argv[3],
          state='/var/lib/commonswarm-ci',controller='/opt/commonswarm-ci/scripts',
          source_url='https://github.com/yulanventures/commonswarm.git',
-         allowed_hostname='pe-ci-1',timeout_seconds=1800,status_reader_uid=None,
+         allowed_hostname='pe-ci-1',timeout_seconds=1800,status_reader_uid=None,pe_runner_uid=pe_runner_uid,
          service_uid=account.pw_uid,service_gid=account.pw_gid,
          controller_checksums={p.name:hashlib.sha256(p.read_bytes()).hexdigest()
                                for p in Path('/opt/commonswarm-ci/scripts').iterdir() if p.is_file()})

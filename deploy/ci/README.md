@@ -32,7 +32,12 @@ DinD listens only on namespace loopback and defaults nested published ports to
 port bindings during the real run, including fixtures with explicit bindings. Fixed Supabase ports are
 checked before use inside the new namespace. Before every command and while
 waiting for its active process (at most 250 ms between probes, plus probe latency),
-the controller checks `Runner.Worker`. New PE activity withdraws CommonSwarm:
+the controller checks `Runner.Worker` owned by the configured `pe_runner_uid`.
+Provision and the existing-install installer resolve PE's `gha` account (UID
+1001 on pe-ci-1) and record its actual UID in root-owned config. The controller
+requires a positive integer, distinct from its service and status-reader UIDs.
+The separate CommonSwarm status worker therefore permits CI to continue.
+New PE activity withdraws CommonSwarm:
 it terminates its own process and removes only exact-name, matching-label owned
 containers/network. The attempt receipt says `state=deferred`, `pending=true`,
 exit 75; this is unfinished work. After PE becomes quiet the same resolved SHA
@@ -55,7 +60,7 @@ Root installation, after independent review and contention coordination:
 
 1. Use a clean checkout of the reviewed controller SHA on **pe-ci-1**. As root,
    run `bash deploy/ci/provision.sh --sha <reviewed-controller-SHA>`. It refuses
-   another hostname, dirty source, active runner workers or an existing install.
+   another hostname, dirty source, active PE runner workers or an existing install.
    It builds isolated Node 22.23.3, Deno 2.2.3, Supabase 2.118.0, Caddy 2.11.4,
    Playwright 1.63.0 and PG17 tools. Debian Python 3.11.2 remains the default
    `python3`, with apt jsonschema 4.10.3. Archive tests can select the separate
@@ -75,8 +80,8 @@ Root installation, after independent review and contention coordination:
    State/source/run directories are mode 0700 at `/var/lib/commonswarm-ci`;
    the account home is its private `home/` child. Receipt files are mode 0600.
    Scripts/config are root-owned under `/opt`.
-   Script hashes and service UID/GID are recorded in config and checked before
-   source or Docker work. Root fixtures receive only the real mount owner's
+   Script hashes, PE runner UID and service UID/GID are recorded in config and
+   checked before source or Docker work. Root fixtures receive only the real mount owner's
    `SUDO_UID` for Git ownership checks; no host safe.directory setting changes.
    The service/timer remain **disabled**, with no host sudo grant.
    Fresh installs only: existing state/accounts/units are refused. On failure,
@@ -224,7 +229,9 @@ Root prerequisites: idle Linux `pe-ci-1`, Python 3, `getfacl`, `setfacl`, `runus
 SHA. The installer does not install packages, rebuild images, change/start the
 06:00 timer or enroll a runner. Never rerun fresh-install `provision.sh` against
 existing state. Provision creates credential-free config with an unset reader;
-the installer assigns the verified dedicated runner UID.
+the installer assigns the verified dedicated runner UID and resolves `gha` for
+the PE probe. Both installers retain the visible-root-systemd control and refuse
+an active PE worker or a failed probe; own status work does not trip that guard.
 
 Root's separately reviewed private `REGISTER-RUNNER.py` launcher uses mini
 `GH_CONFIG_DIR=/Users/yulanbot/.config/gh-headless` to request a short-lived repo
