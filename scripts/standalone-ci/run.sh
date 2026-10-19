@@ -54,7 +54,7 @@ for key in ('worker_image', 'dind_image'):
         refuse('images must be resolved immutable digests')
 controller = Path(cfg['controller']).resolve()
 expected = cfg.get('controller_checksums', {})
-if set(expected) != {'run.sh', 'suite.sh', 'retain.py'} or any(
+if set(expected) != {'run.sh', 'suite.sh', 'retain.py', 'publish-status.py'} or any(
         hashlib.sha256((controller / name).read_bytes()).hexdigest() != digest
         for name, digest in expected.items()):
     refuse('installed controller checksum mismatch')
@@ -167,6 +167,8 @@ with (state / 'queue.lock').open('a') as lock:
     cmd(git + ['update-ref', 'refs/heads/ci-input', resolved], interruptible=True)
     suites = SUITES if selection == 'all' else (selection,)
     overall = 0
+    status_dir = state / 'statuses'
+    status_dir.mkdir(mode=0o700, exist_ok=True)
     for suite in suites:
         if stopping:
             overall = 130
@@ -411,6 +413,32 @@ with (state / 'queue.lock').open('a') as lock:
                 else:
                     prior_attempts.append(run_id)
                     continue
+            # Only a final attempt may publish. Use host-owned values in memory,
+            # never a receipt re-read from the worker-writable mount. In particular,
+            # a deferred attempt that exhausts its quiet wait is now a final error.
+            result = dict(resolved_sha=resolved, suite=suite, run_id=run_id,
+                          state=receipt['state'], pending=receipt['pending'],
+                          exit_code=code, timed_out=receipt['timed_out'],
+                          cleanup_failed=bool(receipt['cleanup_errors']))
+            try:
+                published = sp.run([sys.executable, '-I', str(controller / 'publish-status.py'),
+                                    '--config', str(cfg_path.resolve())],
+                                   input=json.dumps(result), text=True, capture_output=True, timeout=30)
+                publication = json.loads(published.stdout)
+                if published.returncode or publication.get('state') != 'published':
+                    publication = dict(state='failed', error=publication.get('error', 'publisher_failed'))
+            except Exception:
+                # No exception strings: transports and responses can echo secrets.
+                publication = dict(state='failed', error='publisher_unavailable')
+            publication.update(resolved_sha=resolved, suite=suite, run_id=run_id, attempted_at=stamp())
+            # This host-only directory is never mounted into test containers. Keep
+            # failures for operator retry without changing the underlying CI exit.
+            (status_dir / (run_id + '.json')).write_text(json.dumps(publication, indent=2) + '\n')
+            receipt['github_status'] = publication
+            (run / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+            print(json.dumps({'suite': suite, 'resolved_sha': resolved,
+                              'github_status': publication['state'],
+                              'publication_record': str(status_dir / (run_id + '.json'))}), flush=True)
             overall = overall or code
             break
         if stopping or code == 130:

@@ -140,7 +140,7 @@ dind_image=$(timeout 20 docker image inspect --format '{{index .RepoDigests 0}}'
 mkdir -m 0755 /opt/commonswarm-ci
 created+=(/opt/commonswarm-ci)
 install -d -m 0755 /opt/commonswarm-ci/scripts
-install -m 0755 scripts/standalone-ci/run.sh scripts/standalone-ci/suite.sh scripts/standalone-ci/retain.py /opt/commonswarm-ci/scripts/
+install -m 0755 scripts/standalone-ci/run.sh scripts/standalone-ci/suite.sh scripts/standalone-ci/retain.py scripts/standalone-ci/publish-status.py /opt/commonswarm-ci/scripts/
 mkdir -m 0700 /var/lib/commonswarm-ci
 created+=(/var/lib/commonswarm-ci)
 chown commonswarm-ci:commonswarm-ci /var/lib/commonswarm-ci
@@ -152,7 +152,7 @@ account=pwd.getpwnam("commonswarm-ci")
 cfg=dict(controller_sha=sys.argv[1],worker_image=sys.argv[2],dind_image=sys.argv[3],
          state='/var/lib/commonswarm-ci',controller='/opt/commonswarm-ci/scripts',
          source_url='https://github.com/yulanventures/commonswarm.git',
-         allowed_hostname='pe-ci-1',timeout_seconds=1800,
+         allowed_hostname='pe-ci-1',timeout_seconds=1800,github_status_token_file=None,
          service_uid=account.pw_uid,service_gid=account.pw_gid,
          controller_checksums={p.name:hashlib.sha256(p.read_bytes()).hexdigest()
                                for p in Path('/opt/commonswarm-ci/scripts').iterdir() if p.is_file()})
