@@ -9,7 +9,8 @@ import { fileURLToPath } from "node:url";
 import { transform } from "@astrojs/compiler-rs";
 import { experimental_AstroContainer as AstroContainer } from "astro/container";
 import { build } from "esbuild";
-import { browserTest as test, findChrome, launchChrome } from "../../../tests/chrome.js";
+import { browserTest as test } from "../../../tests/chrome.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 
 // Authoring gate: helper/server cases cannot detect inert real click bindings or
 // a rendered result retaining the secret after revoke. No production seam is needed.
