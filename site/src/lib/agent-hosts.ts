@@ -307,8 +307,8 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
     joiner: "more",
     desktopSignIn: true,
     steps: [
-      { text: "In a terminal, run:", code: `claude mcp add --transport http commonswarm ${AGENT_CONNECTOR_ADDRESS}` },
-      { text: "In Claude Code, type /mcp, choose commonswarm and sign in with the same account you use here ({email}). Tick {workspace} and choose Allow connection." },
+      { text: "In a terminal, run:", code: `claude mcp add --transport http --scope user commonswarm ${AGENT_CONNECTOR_ADDRESS}` },
+      { text: "Start a new Claude Code session, type /mcp, choose commonswarm and sign in with the same account you use here ({email}). Tick {workspace} and choose Allow connection." },
       { text: "Then say:", say: joinSentence("Claude Code") },
     ],
     notes: [],
