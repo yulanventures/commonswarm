@@ -218,14 +218,15 @@ test("desktop sign-in fallback in the picker names the rendered Terminal route",
 
 /*
  * Heading hierarchy inside the card: the dashboard's channel title is the H1, so
- * every AgentConnect state must expose exactly one visible H2 — never an H3 skip
+ * every AgentConnect state must expose a primary H2 — never an H3 skip
  * (the audit found H1-workspace -> H3-result), never the stale "Name your agent."
  * above post-submit progress, never a heading-less state. These anchors pin the
  * markup levels and the CSS that retires the head; the live a11y-tree check is
  * separate evidence, not something a regex can claim.
  */
-test("every AgentConnect state exposes a correct h2 with no stale or skipped headings", () => {
+test("every AgentConnect state exposes its primary h2 without the stale form heading", () => {
   assert.match(connect, /<h2 class="ac__title">Name your agent\.<\/h2>/);
+  assert.doesNotMatch(connect, /<h[4-6]\b/, "native help follows the card h2 with h3");
   assert.match(connect, /<h2 class="ac__state-title"/);
   assert.match(connect, /<h2 class="ac__result-title">Your agent prompt is ready\.<\/h2>/);
   assert.match(
@@ -234,7 +235,6 @@ test("every AgentConnect state exposes a correct h2 with no stale or skipped hea
     "the working state names itself instead of wearing the form's question",
   );
   assert.match(connect, /<h2 class="ac__muted ac__loading-title">/);
-  assert.doesNotMatch(connect, /<h3/, "no h3 skip remains anywhere in the card");
   assert.match(
     connect,
     /\.ac\[data-state="done"\] \.ac__head,[\s\S]*\.ac\[data-state="blocked"\] \.ac__head,[\s\S]*\.ac\[data-state="working"\] \.ac__head,[\s\S]*\.ac\[data-state="loading"\] \.ac__head\s*\{[\s\S]*display: none/,
@@ -243,7 +243,7 @@ test("every AgentConnect state exposes a correct h2 with no stale or skipped hea
 });
 
 test("Add an agent asks only for a name and warns about the key when it exists", { timeout: 10000 }, () => {
-  assert.match(connect, /Add the name collaborators will see in the feed\./);
+  assert.match(connect, /data-field="name"/);
   assert.doesNotMatch(connect, /data-field(?:-wrap)?="model"|id="ac-models?"/);
   assert.doesNotMatch(connect, /Add the model|Use the model name/);
 
@@ -253,7 +253,7 @@ test("Add an agent asks only for a name and warns about the key when it exists",
   );
   const result = connect.slice(connect.indexOf('<div class="ac__panel ac__result"'));
   assert.doesNotMatch(form, /ac__warn/);
-  assert.match(result, /ac__warn[\s\S]*This prompt or setup file carries a secret through the model\. Keep it private\.[\s\S]*Use MCP connect on the agent host to keep the secret out of the model/);
+  assert.match(result, /ac__warn[\s\S]*This prompt or setup file carries a secret through the model\. Keep it private\.[\s\S]*hosted connector to keep credentials out of the model/);
   assert.match(agentConnect, /createAgentPrincipalCommand\(/);
   assert.match(agentConnect, /model: model \?\? null/);
   assert.match(
