@@ -1044,15 +1044,23 @@ assert env==dict(x.split('=',1) for x in live['Config']['Env'])
 assert env['SWARM_MCP_PUBLIC_ENABLED']=='1' and not any(k.startswith(('SWARM_CMD_TEST_','MCP_OAUTH_TEST_')) for k in env)
 PY
 }
-# Require an explicit phase: old baseline/recovery and new forward metadata differ.
-# No default or acceptance of both scope arrays after deployment.
+# Capture validated public metadata during read-only preflight, before deployment.
+# Recovery must match that recorded form; forward always requires mcp only.
 edge_route_probes() {
- local phase="${1:?baseline, forward or recovery required}"
+ local phase="${1:?capture, baseline, forward or recovery required}"
  test "$#" -eq 1 || fail 'route probe argument count refused'
- case "$phase" in baseline|forward|recovery) ;; *) fail 'route probe phase refused';; esac
- python3 - "$CADDY_CA_FILE" "$phase" <<'PY'
-import http.client,json,ssl,sys
-expected_scopes = ['mcp'] if sys.argv[2]=='forward' else ['mcp','offline_access']
+ case "$phase" in capture|baseline|forward|recovery) ;; *) fail 'route probe phase refused';; esac
+ python3 - "$CADDY_CA_FILE" "$phase" "$PROOF_DIR/mcp-prm.baseline.json" <<'PY'
+import http.client,json,pathlib,ssl,sys
+phase=sys.argv[2]; baseline=pathlib.Path(sys.argv[3])
+assert phase in ('capture','baseline','forward','recovery')
+def metadata(scopes):
+ return {'resource':'https://mcp.commonswarm.com/mcp','authorization_servers':['https://mcp.commonswarm.com'],'bearer_methods_supported':['header'],'scopes_supported':scopes,'resource_name':'CommonSwarm hosted MCP'}
+if phase in ('baseline','recovery'):
+ expected=json.loads(baseline.read_text())
+ assert expected in (metadata(['mcp','offline_access']),metadata(['mcp']))
+elif phase=='forward': expected=metadata(['mcp'])
+else: assert not baseline.exists() and not baseline.is_symlink()
 ctx=ssl.create_default_context(cafile=sys.argv[1])
 # Resolve transport to loopback without changing TLS SNI or HTTP Host.
 class LocalTLS(http.client.HTTPSConnection):
@@ -1082,7 +1090,10 @@ status,h,b=request('api.commonswarm.com','/.well-known/oauth-protected-resource/
 status,h,b=request('mcp.commonswarm.com','/.well-known/oauth-authorization-server',headers=discovery_headers); assert status==200
 assert json.loads(b)['issuer']=='https://mcp.commonswarm.com'
 status,h,b=request('mcp.commonswarm.com','/.well-known/oauth-protected-resource/mcp',headers=discovery_headers); assert status==200
-assert json.loads(b)=={'resource':'https://mcp.commonswarm.com/mcp','authorization_servers':['https://mcp.commonswarm.com'],'bearer_methods_supported':['header'],'scopes_supported':expected_scopes,'resource_name':'CommonSwarm hosted MCP'}
+observed=json.loads(b)
+if phase=='capture':
+ assert observed in (metadata(['mcp','offline_access']),metadata(['mcp']))
+else: assert observed==expected
 for meta in (False,True):
  params={'name':'cswarm_check','arguments':{}}
  if meta: params['_meta']={'progressToken':'edge-release-public-probe'}
@@ -1092,6 +1103,9 @@ for meta in (False,True):
  except ValueError: value={}
  error=value.get('error') if isinstance(value,dict) else None
  assert not isinstance(error,dict) or error.get('code')!=-32602
+# Persist only after every public probe succeeds; never overwrite the baseline.
+if phase=='capture':
+ with baseline.open('x') as f: json.dump(observed,f,sort_keys=True); f.write('\n')
 print('PASS local Caddy closed gate/CORS, canonical admin, discovery, MCP unauthenticated 401 pair; authenticated parser check pending')
 PY
 }
@@ -1123,7 +1137,7 @@ edge_timer_active
 test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive
 edge_identity "$OLD_EDGE"
 edge_invariants
-edge_route_probes baseline
+edge_route_probes capture
 printf 'PASS\n' >"$PROOF_DIR/probes-baseline.txt"
 printf 'PASS\n' >"$PROOF_DIR/open.txt"
 printf 'PASS open: PROOF_DIR=%s; baseline gate CLOSED; no service mutation\n' "$PROOF_DIR"

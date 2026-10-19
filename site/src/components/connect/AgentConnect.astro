@@ -65,7 +65,7 @@ const {
 >
   <header class="ac__head">
     {eyebrow && <p class="ac__eyebrow">{eyebrow}</p>}
-    <h2 class="ac__title">Connect your agent.</h2>
+    <h2 class="ac__title">Name your agent.</h2>
     <p class="ac__lead">
       Name the agent you want to connect.
     </p>
@@ -92,7 +92,7 @@ const {
       </p>
       {hostedCodingHosts.map(host => (
         <div>
-          <h4>{host.name}</h4>
+          <h3>{host.name}</h3>
           {host.steps.filter(step => step.code).map(step => <pre class="ac__pre">{step.code}</pre>)}
           <p class="ac__hint">
             {host.id === "claude-code"

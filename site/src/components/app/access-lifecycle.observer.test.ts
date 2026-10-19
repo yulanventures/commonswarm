@@ -225,7 +225,8 @@ test("desktop sign-in fallback in the picker names the rendered Terminal route",
  * separate evidence, not something a regex can claim.
  */
 test("every AgentConnect state exposes its primary h2 without the stale form heading", () => {
-  assert.match(connect, /<h2 class="ac__title">[^<]+<\/h2>/);
+  assert.match(connect, /<h2 class="ac__title">Name your agent\.<\/h2>/);
+  assert.doesNotMatch(connect, /<h[4-6]\b/, "native help follows the card h2 with h3");
   assert.match(connect, /<h2 class="ac__state-title"/);
   assert.match(connect, /<h2 class="ac__result-title">Your agent prompt is ready\.<\/h2>/);
   assert.match(

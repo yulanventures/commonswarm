@@ -1008,13 +1008,13 @@ class Connection:
  def close(self): pass
 http.client.HTTPSConnection=Connection
 class Extract(ast.NodeTransformer):
- def visit_Assert(self,node): return None
+ def visit_Assert(self,node): return ast.copy_location(ast.Pass(),node)
 tree=ast.fix_missing_locations(Extract().visit(ast.parse(sys.stdin.read())))
 plan_globals={'__name__':'__main__'}
 exec(compile(tree,'<probe-request-inventory>','exec'),plan_globals)
 print(json.dumps(calls))
 `);
-  const r = spawnSync('python3', ['-c', extractor, 'unused-ca'], { input: source, encoding: 'utf8' }); passed(r);
+  const r = spawnSync('python3', ['-c', extractor, 'unused-ca', 'forward', 'unused-baseline'], { input: source, encoding: 'utf8' }); passed(r);
   return JSON.parse(r.stdout.trim().split('\n').pop()!);
 }
 test('every extracted probe request has a route in parsed deployed Caddy; bare metadata fails', () => {
@@ -1061,15 +1061,17 @@ class Connection:
    # Replay responses from the real TS handler for the exact captured request.
    row=next(r for r in rows if r['request']==[self.host,path,self.method,self.body,self.headers])
    doc=json.loads(row['body'])
-   if sys.argv[2]=='bad-metadata': doc['resource']='https://mcp.commonswarm.com/wrong'
-   if path=='/mcp' and '_meta' in json.loads(self.body)['params'] and sys.argv[2]=='bad': doc={'error':{'code':-32602}}
+   if path=='/.well-known/oauth-protected-resource/mcp' and sys.argv[4]=='legacy': doc['scopes_supported']=['mcp','offline_access']
+   if path=='/.well-known/oauth-protected-resource/mcp' and sys.argv[4]=='unknown': doc['scopes_supported']=['mcp','unknown']
+   if sys.argv[4]=='bad-metadata': doc['resource']='https://mcp.commonswarm.com/wrong'
+   if path=='/mcp' and '_meta' in json.loads(self.body)['params'] and sys.argv[4]=='bad': doc={'error':{'code':-32602}}
    return Response(row['status'],json.dumps(doc).encode(),row['headers'])
   raise AssertionError('unexpected probe route')
 http.client.HTTPSConnection=Connection
 plan_globals={'__name__':'__main__'}
 exec(compile(payload['source'],'<extracted-local-caddy-probes>','exec'),plan_globals)
 `);
-  const run = async (probeSource: string, allowedOrigins: string[], kind = 'good') => {
+  const run = async (probeSource: string, allowedOrigins: string[], kind = 'good', phase = 'forward', baseline = join(scratch, `prm-${serial++}.json`)) => {
     const handle = createMcpProtocolHandler({
       issuer: 'https://mcp.commonswarm.com', resource: 'https://mcp.commonswarm.com/mcp', publicEnabled: true,
       allowedOrigins: new Set(allowedOrigins),
@@ -1084,7 +1086,7 @@ exec(compile(payload['source'],'<extracted-local-caddy-probes>','exec'),plan_glo
       const response = await handle(new Request(`https://${host}${path}`, { method, body, headers }));
       rows.push({ request, status: response.status, body: await response.text(), headers: Object.fromEntries(response.headers) });
     }
-    return { rows, result: spawnSync('python3', ['-c', harness, 'unused-public-ca', kind], { input: JSON.stringify({ rows, source: probeSource }), encoding: 'utf8' }) };
+    return { rows, result: spawnSync('python3', ['-c', harness, 'unused-public-ca', phase, baseline, kind], { input: JSON.stringify({ rows, source: probeSource }), encoding: 'utf8' }) };
   };
   const call = "request('mcp.commonswarm.com','/mcp','POST',body,headers=mcp_headers)";
   const injectedOrigin = source.replace(call, call.replace('headers=mcp_headers', "headers={**mcp_headers,'Origin':'https://commonswarm.com'}"));
@@ -1097,9 +1099,45 @@ exec(compile(payload['source'],'<extracted-local-caddy-probes>','exec'),plan_glo
     assert.notEqual(bad.result.status, 0); assert.match(bad.result.stderr, /AssertionError/);
     passed((await run(source, origins)).result);
   }
-  for (const kind of ['bad', 'bad-metadata']) {
+  for (const kind of ['bad', 'bad-metadata', 'legacy']) {
     const { result: bad } = await run(source, [], kind);
     assert.notEqual(bad.status, 0); assert.match(bad.stderr, /AssertionError/);
+  }
+  // Old metadata is a response fixture for the historical scope-only difference;
+  // current metadata and every MCP auth response come from the real handler.
+  for (const baselineKind of ['legacy', 'good']) {
+    const baseline = join(scratch, `captured-prm-${serial++}.json`);
+    passed((await run(source, [], baselineKind, 'capture', baseline)).result);
+    const recorded = readFileSync(baseline);
+    assert.deepEqual(JSON.parse(recorded.toString()).scopes_supported,
+      baselineKind === 'legacy' ? ['mcp', 'offline_access'] : ['mcp']);
+    for (const phase of ['baseline', 'recovery']) {
+      passed((await run(source, [], baselineKind, phase, baseline)).result);
+      const opposite = baselineKind === 'legacy' ? 'good' : 'legacy';
+      const bad = (await run(source, [], opposite, phase, baseline)).result;
+      assert.notEqual(bad.status, 0); assert.match(bad.stderr, /AssertionError/);
+    }
+    passed((await run(source, [], 'good', 'forward', baseline)).result);
+    const legacyForward = (await run(source, [], 'legacy', 'forward', baseline)).result;
+    assert.notEqual(legacyForward.status, 0); assert.match(legacyForward.stderr, /AssertionError/);
+    const recapture = (await run(source, [], baselineKind, 'capture', baseline)).result;
+    assert.notEqual(recapture.status, 0); assert.match(recapture.stderr, /AssertionError/);
+    assert.deepEqual(readFileSync(baseline), recorded);
+    const drift = (await run(source, [], 'bad-metadata', 'recovery', baseline)).result;
+    assert.notEqual(drift.status, 0); assert.match(drift.stderr, /AssertionError/);
+  }
+  for (const kind of ['bad', 'bad-metadata', 'unknown']) {
+    const baseline = join(scratch, `refused-prm-${serial++}.json`);
+    const bad = (await run(source, [], kind, 'capture', baseline)).result;
+    assert.notEqual(bad.status, 0); assert.match(bad.stderr, /AssertionError/);
+    assert.equal(existsSync(baseline), false, 'failed capture leaves no baseline');
+  }
+  const invalidPhase = (await run(source, [], 'good', 'unknown')).result;
+  assert.notEqual(invalidPhase.status, 0); assert.match(invalidPhase.stderr, /AssertionError/);
+  const missing = join(scratch, `missing-prm-${serial++}.json`);
+  for (const phase of ['baseline', 'recovery']) {
+    const bad = (await run(source, [], 'good', phase, missing)).result;
+    assert.notEqual(bad.status, 0); assert.match(bad.stderr, /FileNotFoundError/);
   }
 });
 
