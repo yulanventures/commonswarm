@@ -1,17 +1,17 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { fetchRestReadRetrying } from "./rest-read-retry.js";
 import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { spawn } from "node:child_process";
 import type { Readable, Writable } from "node:stream";
 import { createClient, type Session, type SupabaseClient } from "@supabase/supabase-js";
-import { isAuthRetryableFetchError } from "@supabase/auth-js";
 import {
   authStorageKey,
   CLIENT_PROTOCOL_VERSION,
   commandEndpoint,
   type CloudTarget,
 } from "./config.js";
-import type { CredentialRecord, CredentialStore } from "./storage.js";
+import { FileLockTimeoutError, type HumanSessionState, type CredentialRecord, type CredentialStore } from "./storage.js";
 import { withClientBuild } from "./client-build.js";
 
 const CALLBACK_PATH = "/callback";
@@ -82,12 +82,14 @@ export interface RefreshedCredential {
 
 export type HumanSessionErrorCode =
   | "human_session_missing"
-  | "human_session_refresh_failed";
+  | "human_session_refresh_failed"
+  | "human_session_transient";
 
 export class HumanSessionError extends Error {
   readonly name = "HumanSessionError";
 
-  constructor(readonly code: HumanSessionErrorCode, message: string) {
+  constructor(readonly code: HumanSessionErrorCode, message: string,
+    readonly operationId?: string, readonly generation?: number, readonly phase?: string) {
     super(message);
   }
 }
@@ -362,7 +364,10 @@ async function waitForCode(
 }
 
 function requireSession(session: Session | null): Session {
-  if (!session?.refresh_token || !session.access_token || !session.user?.id) {
+  if (typeof session?.refresh_token !== "string" || session.refresh_token.length < 8 ||
+      session.refresh_token.length > 2048 || /[|\u0000-\u001f\u007f]/.test(session.refresh_token) ||
+      typeof session.access_token !== "string" || !session.access_token || session.access_token.length > 16384 ||
+      typeof session.user?.id !== "string" || !/^[0-9a-f-]{36}$/i.test(session.user.id)) {
     throw new Error("GoTrue returned an incomplete session");
   }
   return session;
@@ -534,7 +539,10 @@ export async function login(options: LoginOptions): Promise<LoginResult> {
         deviceId,
         userId: session.user.id,
       };
+      delete existingProfile.humanSession;
+      await options.store.writeProfile(existingProfile);
       await options.store.write(record);
+      if (!sameCredential(await options.store.read(), record)) throw transientSession(randomUUID(), record.generation, "login-save");
       const workspaceId = discoveredWorkspace ??
         (sameUser ? existingProfile.workspaceId : null);
       await options.store.writeProfile({
@@ -549,6 +557,7 @@ export async function login(options: LoginOptions): Promise<LoginResult> {
           ? existingProfile.principalName ?? null
           : null,
         pendingCommands: sameUser ? existingProfile.pendingCommands : {},
+        humanSession: cachedState(record, session),
       });
       return {
         userId: record.userId,
@@ -564,63 +573,263 @@ export async function login(options: LoginOptions): Promise<LoginResult> {
   }
 }
 
+function credentialDigest(record: CredentialRecord): string {
+  return createHash("sha256").update(JSON.stringify([
+    record.generation, record.userId, record.deviceId, record.refreshToken,
+  ])).digest("hex");
+}
+
+function sameCredential(a: CredentialRecord | null, b: CredentialRecord): boolean {
+  return a !== null && credentialDigest(a) === credentialDigest(b);
+}
+
+function boundState(state: HumanSessionState | undefined, record: CredentialRecord): state is HumanSessionState {
+  return state !== undefined && state.generation === record.generation &&
+    state.userId === record.userId && state.deviceId === record.deviceId &&
+    state.parentDigest === credentialDigest(record);
+}
+
+function cachedState(record: CredentialRecord, session: Session): HumanSessionState {
+  const expiresAt = session.expires_at ?? Math.floor(Date.now() / 1000) + session.expires_in;
+  return { generation: record.generation, userId: record.userId, deviceId: record.deviceId,
+    parentDigest: credentialDigest(record), accessToken: session.access_token, expiresAt };
+}
+
+function cachedCredential(record: CredentialRecord, state: HumanSessionState | undefined,
+  rejectedAccessToken?: string): RefreshedCredential | null {
+  if (!boundState(state, record) || !state.accessToken ||
+      !Number.isSafeInteger(state.expiresAt) || state.expiresAt! <= Date.now() / 1000 + 30 ||
+      state.accessToken === rejectedAccessToken) return null;
+  return { accessToken: state.accessToken, userId: record.userId, deviceId: record.deviceId };
+}
+
+function transientSession(operationId: string, generation?: number, phase = "refresh"): HumanSessionError {
+  return new HumanSessionError("human_session_transient",
+    `Could not confirm your session right now. Your credential was kept; retry the command (reference ${operationId}).`,
+    operationId, generation, phase);
+}
+
+/** Caller holds the profile lock. A durable successor can recover either side of
+ * the credential write, but cannot recover an unseen server response. */
+async function reconcileSuccessor(store: CredentialStore, record: CredentialRecord): Promise<CredentialRecord> {
+  const profile = await store.readProfile();
+  const state = profile.humanSession;
+  const next = state?.successor;
+  if (!state || !next) return record;
+  const successor: CredentialRecord = { version: 1, refreshToken: next.refreshToken,
+    userId: next.userId, deviceId: next.deviceId, generation: next.generation };
+  const isParent = boundState(state, record);
+  const isSuccessor = sameCredential(record, successor) && state.generation + 1 === record.generation &&
+    state.userId === record.userId && state.deviceId === record.deviceId;
+  if (!isParent && !isSuccessor) return record;
+  if (isParent) {
+    // Confirm journal durability again when adopting, including recovery after
+    // a rename succeeded but the publishing process did not observe fsync.
+    await store.writeProfile(profile);
+    if (!sameCredential(await store.read(), record)) throw transientSession(state.operationId ?? randomUUID(), record.generation, "adopt");
+    await store.write(successor);
+  }
+  if (!sameCredential(await store.read(), successor)) throw transientSession(state.operationId ?? randomUUID(), record.generation, "read-back");
+  profile.humanSession = { generation: successor.generation, userId: successor.userId,
+    deviceId: successor.deviceId, parentDigest: credentialDigest(successor),
+    accessToken: next.accessToken, expiresAt: next.expiresAt, operationId: state.operationId };
+  await store.writeProfile(profile);
+  return successor;
+}
+
+async function saveSuccessor(store: CredentialStore, before: CredentialRecord,
+  session: Session, operationId: string): Promise<CredentialRecord> {
+  if (session.user.id !== before.userId) throw transientSession(operationId, before.generation, "identity");
+  if (!sameCredential(await store.read(), before)) throw transientSession(operationId, before.generation, "save");
+  const next = { ...before, refreshToken: session.refresh_token, generation: before.generation + 1 };
+  const cache = cachedState(next, session);
+  if (!Number.isSafeInteger(cache.expiresAt) || cache.expiresAt! <= 0) {
+    throw transientSession(operationId, before.generation, "expiry");
+  }
+  const profile = await store.readProfile();
+  profile.humanSession = { generation: before.generation, userId: before.userId,
+    deviceId: before.deviceId, parentDigest: credentialDigest(before), operationId, successor: {
+      refreshToken: next.refreshToken, accessToken: session.access_token, expiresAt: cache.expiresAt!,
+      userId: next.userId, deviceId: next.deviceId, generation: next.generation,
+    } };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (!sameCredential(await store.read(), before)) throw transientSession(operationId, before.generation, "journal-winner");
+    try {
+      await store.writeProfile(profile);
+      break;
+    } catch (error) {
+      // The successor is still known in memory. Retry its publication instead
+      // of asking the server to rotate the parent again.
+      if (attempt === 2) throw error;
+      await delay(100 * (attempt + 1));
+    }
+  }
+  return await reconcileSuccessor(store, before);
+}
+
+/** The SDK retries refresh internally. Use the same GoTrue endpoint directly here
+ * so attempts and their deadlines have one bounded owner. Never expose raw errors. */
+async function refreshHumanSession(target: CloudTarget, store: CredentialStore, record: CredentialRecord, operationId: string, signal?: AbortSignal | null): Promise<
+  { session: Session; code?: never } | { session?: never; code?: string }
+> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    signal?.throwIfAborted();
+    if (!sameCredential(await store.read(), record)) throw transientSession(operationId, record.generation, "winner");
+    try {
+      const response = await fetch(new URL("/auth/v1/token?grant_type=refresh_token", target.url), {
+        method: "POST", redirect: "error", signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
+        headers: { apikey: target.anonKey, "content-type": "application/json",
+          "x-request-id": operationId, "x-supabase-api-version": "2024-01-01" },
+        body: JSON.stringify({ refresh_token: record.refreshToken }),
+      });
+      const body = await response.json().catch(() => null) as Record<string, unknown> | null;
+      if (response.ok) {
+        const session = requireSession(body as unknown as Session | null);
+        if (!Number.isFinite(session.expires_at) && Number.isFinite(session.expires_in)) {
+          session.expires_at = Math.floor(Date.now() / 1000) + session.expires_in;
+        }
+        return { session };
+      }
+      if (response.status !== 429 && response.status < 500) {
+        // A policy/permission refusal is not proof that the refresh handle died.
+        return { code: response.status === 400 || response.status === 401
+          ? typeof body?.code === "string" ? body.code
+          : typeof body?.error_code === "string" ? body.error_code : undefined : undefined };
+      }
+    } catch { /* Network, malformed or incomplete response: retain the parent. */ }
+    signal?.throwIfAborted();
+    if (attempt < 2) await delay(150 * (attempt + 1), undefined, { signal: signal ?? undefined });
+  }
+  return {};
+}
+
 export async function refreshedCredential(
   target: CloudTarget,
   store: CredentialStore,
+  options: { rejectedAccessToken?: string; requestId?: string; signal?: AbortSignal | null;
+    userId?: string; deviceId?: string } = {},
 ): Promise<RefreshedCredential> {
-  return await store.withLock(async () => {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const before = await store.read();
-      if (!before) {
-        throw new HumanSessionError(
-          "human_session_missing",
-          "not logged in; run cswarm login",
-        );
+  const operationId = options.requestId && /^[A-Za-z0-9._:-]{1,128}$/.test(options.requestId) ? options.requestId : randomUUID();
+  try {
+    return await store.withLock(async () => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        let before = await store.read();
+        if (!before) throw new HumanSessionError("human_session_missing", "not logged in; run cswarm login");
+        if (options.userId !== undefined && (before.userId !== options.userId || before.deviceId !== options.deviceId)) {
+          throw transientSession(operationId, before.generation, "identity");
+        }
+        options.signal?.throwIfAborted();
+        try {
+          before = await reconcileSuccessor(store, before);
+          const profile = await store.readProfile();
+          const cached = cachedCredential(before, profile.humanSession, options.rejectedAccessToken);
+          if (cached) return cached;
+          if (!Number.isSafeInteger(before.generation + 1)) throw transientSession(operationId, before.generation, "generation");
+          const refreshed = await refreshHumanSession(target, store, before, operationId, options.signal);
+          const current = await store.read();
+          if (!sameCredential(current, before)) continue;
+          if (!refreshed.session) {
+            // Already-used is ambiguous: a locally published successor may still
+            // be recoverable. It must never force a browser login or delete state.
+            const reconciled = await reconcileSuccessor(store, before);
+            if (!sameCredential(reconciled, before)) continue;
+            if (refreshed.code && TERMINAL_REFRESH_CODES.has(refreshed.code) &&
+                refreshed.code !== "refresh_token_already_used" &&
+                sameCredential(await store.read(), before)) {
+              throw new HumanSessionError("human_session_refresh_failed",
+                `The server no longer accepts this session; run cswarm login to sign in again (reference ${operationId}).`,
+                operationId, before.generation, "refresh");
+            }
+            throw transientSession(operationId, before.generation);
+          }
+          const next = await saveSuccessor(store, before, refreshed.session, operationId);
+          const saved = cachedCredential(next, (await store.readProfile()).humanSession);
+          if (saved) return saved;
+          throw transientSession(operationId, next.generation, "read-back");
+        } catch (error) {
+          // Storage errors can occur after publication. Re-read the winner before
+          // returning failure, never rotate again merely because saving threw.
+          let current = await store.read();
+          if (!current) throw new HumanSessionError("human_session_missing", "not logged in; run cswarm login");
+          try { current = await reconcileSuccessor(store, current); } catch { /* Preserve original error. */ }
+          options.signal?.throwIfAborted();
+          if (!sameCredential(current, before)) {
+            if (options.userId !== undefined && (current.userId !== options.userId || current.deviceId !== options.deviceId)) {
+              throw transientSession(operationId, current.generation, "identity");
+            }
+            const cached = cachedCredential(current, (await store.readProfile()).humanSession, options.rejectedAccessToken);
+            if (cached) return cached;
+            continue;
+          }
+          if (error instanceof HumanSessionError) throw error;
+          throw transientSession(operationId, current.generation, "storage");
+        }
       }
-      const memory = new MemoryStorage();
-      const client = authClient(target, memory);
-      const refreshed = await client.auth.refreshSession({
-        refresh_token: before.refreshToken,
-      });
-      if (refreshed.error) {
-        const afterFailure = await store.read();
-        if (afterFailure && afterFailure.generation !== before.generation) continue;
-        // Expired, revoked, or rotated on another device all land here and all have the
-        // same remedy. The stable code classifies only our human-session boundary; it does
-        // not infer a provider cause from presentation text (§ error.message is presentation).
-        throw new HumanSessionError(
-          "human_session_refresh_failed",
-          "could not refresh your session; run cswarm login to sign in again",
-        );
-      }
-      const session = requireSession(refreshed.data.session);
+      throw transientSession(operationId, undefined, "winner");
+    }, { signal: options.signal });
+  } catch (error) {
+    if (error instanceof FileLockTimeoutError) {
+      // A winner may have saved just as our lock wait expired. This read never
+      // mutates or adopts a journal outside the shared lock.
       const current = await store.read();
-      if (!current || current.generation !== before.generation) continue;
-      await store.write({
-        ...before,
-        refreshToken: session.refresh_token,
-        generation: before.generation + 1,
-        userId: session.user.id,
-      });
-      return {
-        accessToken: session.access_token,
-        userId: session.user.id,
-        deviceId: before.deviceId,
-      };
+      if (current && (options.userId === undefined || current.userId === options.userId && current.deviceId === options.deviceId)) {
+        const cached = cachedCredential(current, (await store.readProfile()).humanSession, options.rejectedAccessToken);
+        if (cached) return cached;
+      }
+      throw transientSession(operationId, current?.generation, "lock");
     }
-    throw new Error("session refresh lost a credential-generation race; retry");
-  });
+    throw error;
+  }
 }
 
-/** What logout actually achieved.
- *
- * ~~"`revoked` is deliberately NOT claimed for the account-wide case, because the library
- * hides whether the server agreed."~~ DEAD, and it now says the OPPOSITE of the code: the
- * high-level wrapper hides it, but `admin.signOut` does not, so `revoked` is claimed exactly
- * when the server answered and accepted. What a 200 establishes is bounded, though -- the
- * endpoint revokes refresh tokens and cannot revoke already-issued access JWTs before they
- * expire, which is why the copy says "confirmed the sign-out" rather than "every session is
- * ended". */
+/** Bound human transport. Only explicit replayable API routes receive the token;
+ * unknown routes/stream bodies and policy refusals never trigger a refresh. */
+export function humanSessionFetch(target: CloudTarget, store: CredentialStore,
+  initial: RefreshedCredential, fetcher: typeof fetch = fetch): typeof fetch {
+  let current = initial;
+  const ownedTokens = new Set([initial.accessToken]);
+  return (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    const authorization = headers.get("authorization");
+    const ownsBearer = authorization !== null && ownedTokens.has(authorization.replace(/^Bearer /, ""));
+    const sameOrigin = url.origin === new URL(target.url).origin && !url.username && !url.password;
+    if (ownsBearer && !sameOrigin) throw transientSession(randomUUID(), undefined, "origin");
+    if (!ownsBearer) return await fetcher(input, init);
+    const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+    const body = init?.body;
+    const command = url.pathname === new URL(commandEndpoint(target)).pathname && method === "POST" && typeof body === "string";
+    let hasCommandId = false;
+    if (command) {
+      try { hasCommandId = typeof JSON.parse(body).command_id === "string"; } catch { /* No replay. */ }
+    }
+    const safeRead = method === "GET" && body === undefined &&
+      (url.pathname.startsWith("/rest/v1/") || url.pathname === "/functions/v1/read");
+    const readPost = method === "POST" && url.pathname === "/functions/v1/read" && typeof body === "string";
+    const replayable = !(input instanceof Request) && (safeRead || readPost || command && hasCommandId);
+    const sentAccessToken = current.accessToken;
+    headers.set("authorization", `Bearer ${sentAccessToken}`);
+    const requestId = headers.get("x-request-id") ?? randomUUID();
+    headers.set("x-request-id", requestId);
+    const requestInit = { ...init, headers, redirect: "error" as const };
+    const response = await fetcher(input, requestInit);
+    if (response.status !== 401 || !replayable || init?.signal?.aborted) return response;
+    const refusal = await response.clone().json().catch(() => null) as { error?: unknown; code?: unknown } | null;
+    const code = typeof refusal?.error === "string" ? refusal.error : refusal?.code;
+    if (typeof code !== "string" || !new Set(["unauthenticated", "invalid_jwt", "jwt_expired", "PGRST301", "PGRST303"]).has(code)) return response;
+    const rejectedAccessToken = sentAccessToken;
+    const next = await refreshedCredential(target, store, { rejectedAccessToken, requestId, signal: init?.signal,
+      userId: initial.userId, deviceId: initial.deviceId });
+    if (next.userId !== initial.userId || next.deviceId !== initial.deviceId) throw transientSession(requestId, undefined, "identity");
+    current = next;
+    ownedTokens.add(next.accessToken);
+    headers.set("authorization", `Bearer ${next.accessToken}`);
+    return await fetcher(input, requestInit);
+  }) as typeof fetch;
+}
+
+/** Server confirmation revokes refresh handles. Previously issued access JWTs
+ * retain their server-defined lifetime; copy must not claim otherwise. */
 export type LogoutOutcome =
   | "already-logged-out"
   | "revoked"
@@ -669,13 +878,6 @@ const TERMINAL_REFRESH_CODES: ReadonlySet<string> = new Set([
   "session_expired",
 ]);
 
-function isTerminalRefreshFailure(error: unknown): boolean {
-  if (error === null || typeof error !== "object") return false;
-  const named = error as { name?: unknown; code?: unknown };
-  if (named.name === "AuthSessionMissingError") return true;
-  return typeof named.code === "string" && TERMINAL_REFRESH_CODES.has(named.code);
-}
-
 export async function logout(
   target: CloudTarget,
   store: CredentialStore,
@@ -683,30 +885,23 @@ export async function logout(
   options: { localOnly?: boolean } = {},
 ): Promise<LogoutOutcome> {
   return await store.withLock(async () => {
-    const record = await store.read();
-    if (!record) return "already-logged-out";
-    // The escape hatch. Asked for explicitly, so it needs no guess about the token's state:
-    // a user whose failure we cannot classify gets an explicit server-free deletion path.
-    // NOT "always has a way to a clean local state" -- the delete below can itself throw
-    // (storage.ts raises on a non-zero, non-44 Keychain code), so that holds only where
-    // local storage can be changed.
+    let record = await store.read();
+    if (!record) {
+      const profile = await store.readProfile();
+      delete profile.humanSession;
+      await store.writeProfile(profile);
+      return "already-logged-out";
+    }
     if (options.localOnly) {
       await store.delete();
       return "cleared-unverified";
     }
-    const memory = new MemoryStorage();
-    const client = authClient(target, memory);
-    const refreshed = await client.auth.refreshSession({
-      refresh_token: record.refreshToken,
-    });
-    if (refreshed.error) {
-      // RETAIN BY DEFAULT. Delete only for a positively recognised terminal condition.
-      // Everything else keeps the credential, because a failed refresh does NOT imply a
-      // dead token. Measured: a closed port yields AuthRetryableFetchError (status 0), and
-      // a 429 rate limit yields AuthApiError -- transient, server-answered, and previously
-      // deleted by this function. A rotated-but-lost response is also recoverable from the
-      // retained parent token, and deleting would destroy that handle.
-      if (!isTerminalRefreshFailure(refreshed.error)) {
+    record = await reconcileSuccessor(store, record);
+    const operationId = randomUUID();
+    const refreshed = await refreshHumanSession(target, store, record, operationId);
+    if (!sameCredential(await store.read(), record)) throw transientSession(operationId, record.generation, "logout-winner");
+    if (!refreshed.session) {
+      if (!refreshed.code || !TERMINAL_REFRESH_CODES.has(refreshed.code)) {
         throw new Error(
           "could not confirm the session with the server, so your credential was kept; " +
             "check your connection and run cswarm logout again, " +
@@ -716,63 +911,22 @@ export async function logout(
       await store.delete();
       return "local-only";
     }
-    // USE THE LOW-LEVEL CALL ON PURPOSE. The high-level `client.auth.signOut()` deliberately
-    // SWALLOWS 401/403/404 from /logout and returns error:null, so it can still clear local
-    // browser state -- measured: refresh 200 then logout 403 arrives here with no error at
-    // all. `admin.signOut` is the same request the wrapper makes, minus the swallowing, so
-    // this is using a lower layer of the SDK rather than reaching around it. Without this we
-    // cannot tell "the server revoked it" from "the server refused and we were not told",
-    // and the CLI would assert containment it never observed.
-    // PERSIST THE ROTATED TOKEN BEFORE ATTEMPTING THE REVOKE. The refresh above CONSUMED the
-    // stored token, so every failure path below tells the user to "run cswarm logout again"
-    // with a spent credential -- the retry would then depend on GoTrue's parent-token grace
-    // rather than on a token we hold.
-    //
-    // THE `generation` BUMP IS NOT BOOKKEEPING AND MUST NOT BE DROPPED (Verity).
-    // `generation` is a CONCURRENCY TOKEN: `refreshedCredential` above guards its retry loop
-    // on it (`current.generation !== before.generation` -> continue) and throws on a lost
-    // race. Writing the rotated refreshToken WITHOUT bumping it would let a concurrent
-    // refresher see an unchanged generation, conclude nothing had happened, and proceed
-    // against a token that had silently rotated underneath it -- a lost update, which is the
-    // exact class of defect this lane has produced three times. The bump is what makes this
-    // write participate in the protocol that already exists rather than race it.
-    const session = requireSession(refreshed.data.session);
-    await store.write({
-      ...record,
-      refreshToken: session.refresh_token,
-      generation: record.generation + 1,
-      userId: session.user.id,
-    });
-    const signedOut = await client.auth.admin.signOut(session.access_token, scope);
-    if (signedOut.error) {
-      // ONE MESSAGE FOR EVERY FAILURE, ON PURPOSE. The previous version split on
-      // isAuthApiError and named a cause -- "refused" vs "could not reach" -- and Plumb's
-      // non-author control showed that split is WRONG: a 500, where the server plainly
-      // ANSWERED, arrives as AuthRetryableFetchError and would have been reported as
-      // unreachable. That is this lane's own defect, committed inside the fix for it:
-      // asserting a cause the code did not establish. What we actually know is the same in
-      // every branch -- the sign-out was not confirmed -- so that is all this says.
-      //
-      // AND THE CREDENTIAL IS KEPT, whatever the reason. Retaining is the safe side: it
-      // preserves the retry handle, and a success or a later TERMINAL refresh resolves it
-      // automatically. NOT "self-clears" -- this suite itself proves that wrong, since a
-      // repeatable 429 or a code-less legacy invalid_grant is non-terminal and can recur
-      // indefinitely, so the refresh may never reach the local-only delete. `--local` is the
-      // explicit escape where storage can be changed. Classifying this response is the trap -- a 404 from /logout says
-      // nothing about the REFRESH token; it says this sign-out found no session to end, so
-      // deleting on it would infer one credential's state from a response about a different
-      // object.
+    // Journal and verify the rotated handle before requesting server revocation.
+    const session = refreshed.session;
+    const successor = await saveSuccessor(store, record, session, operationId);
+    const signedOut = await fetch(new URL(`/auth/v1/logout?scope=${scope}`, target.url), {
+      method: "POST", redirect: "error", signal: AbortSignal.timeout(10_000),
+      headers: { authorization: `Bearer ${session.access_token}`, apikey: target.anonKey, "x-request-id": operationId },
+    }).then(response => response.ok).catch(() => false);
+    if (!signedOut) {
       throw new Error(
         "signed in, but the server did not confirm the session ended; your credential was " +
           "kept — run cswarm logout again, or run cswarm logout --local to clear this device " +
           "without contacting the server",
       );
     }
+    if (!sameCredential(await store.read(), successor)) throw transientSession(operationId, successor.generation, "logout-winner");
     await store.delete();
-    // Earned: admin.signOut bypasses the wrapper's 401/403/404 swallowing, so no error means
-    // the server answered and accepted. Note the SCOPE of what that establishes -- the
-    // endpoint revokes refresh tokens; already-issued access JWTs stay valid until they
-    // expire. The copy says "confirmed the sign-out", not "every session is ended".
     return "revoked";
   });
 }

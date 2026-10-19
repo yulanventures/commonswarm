@@ -1,3 +1,4 @@
+import { HumanSessionError } from "./auth.js";
 import { randomBytes } from "node:crypto";
 import {
   reduceTask,
@@ -839,6 +840,7 @@ export async function declareAgentModel(
       signal: controller.signal,
     });
   } catch (error) {
+    if (error instanceof HumanSessionError) throw error;
     if ((error as Error).name === "AbortError") {
       throw new CommandTransportError("model declaration timed out");
     }
@@ -886,6 +888,7 @@ export class ThinCommandClient {
         signal: controller.signal,
       });
     } catch (error) {
+    if (error instanceof HumanSessionError) throw error;
       if ((error as Error).name === "AbortError") {
         throw new CommandTransportError("command request timed out");
       }
@@ -992,6 +995,7 @@ export class ThinCommandClient {
         signal: controller.signal,
       });
     } catch (error) {
+    if (error instanceof HumanSessionError) throw error;
       if ((error as Error).name === "AbortError") {
         throw new CommandTransportError("command request timed out");
       }
@@ -1096,6 +1100,7 @@ export class ThinCommandClient {
         signal: controller.signal,
       });
     } catch (error) {
+    if (error instanceof HumanSessionError) throw error;
       if ((error as Error).name === "AbortError") {
         throw new CommandTransportError("capability link request timed out");
       }
@@ -1170,6 +1175,7 @@ export class ThinCommandClient {
         signal: controller.signal,
       });
     } catch (error) {
+    if (error instanceof HumanSessionError) throw error;
       if ((error as Error).name === "AbortError") {
         throw new CommandTransportError("channel request timed out");
       }
@@ -1328,6 +1334,7 @@ export class ThinCommandClient {
               }),
             );
           } catch (error) {
+            if (error instanceof HumanSessionError) throw error;
             fetchWork = Promise.reject(error);
           }
           const fetchOutcome = await raceSignalDeadline(
@@ -1402,6 +1409,7 @@ export class ThinCommandClient {
             retried: attempt > 1,
           };
         } catch (error) {
+          if (error instanceof HumanSessionError) throw error;
           const transient = error instanceof CommandTransportError ||
             error instanceof CommandHttpError && error.status >= 500;
           if (!transient || attempt === SIGNAL_WRITE_MAX_ATTEMPTS) throw error;

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { spawn, execFileSync } from "node:child_process";
 import { arrivalHostId } from "../../src/cloud/arrival-watch.js";
-import { FileLockTimeoutError, HOST_ID_LOCK_INCOMPLETE_GRACE_MS, fileLockTimeoutSentence, generalLockOwnerStale, pidStartMs, readSecureJsonFile, withFileLock } from "../../src/cloud/storage.js";
+import { FileLockTimeoutError, HOST_ID_LOCK_INCOMPLETE_GRACE_MS, fileLockTimeoutSentence, pidStartMs, readSecureJsonFile, withFileLock } from "../../src/cloud/storage.js";
 import { listenerPaths, runListenerSupervisor } from "../../src/listener/index.js";
 
 const AGED_LOCK_MS = 61_000;
@@ -543,7 +543,7 @@ test("host, credential, and takeover locks serialize two dead-owner contenders a
   } finally { Date.now = clock; await rm(root, { recursive: true, force: true }); }
 });
 
-test("general locks reclaim aged foreign hosts and reused pids, but keep a matching live owner", { timeout: 4_000 }, async () => {
+test("general locks retain aged foreign hosts and reclaim verified reused pids", { timeout: 4_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-general-recovery-"));
   const path = join(root, "check.lock");
   const clock = Date.now;
@@ -556,7 +556,8 @@ test("general locks reclaim aged foreign hosts and reused pids, but keep a match
     await assert.rejects(withFileLock(root, "check", async () => "too-early", { timeoutMs: 40 }), FileLockTimeoutError);
     assert.equal(await readFile(path, "utf8"), foreign);
     Date.now = () => clock() + AGED_LOCK_MS;
-    assert.equal(await withFileLock(root, "check", async () => "reclaimed", { timeoutMs: 500 }), "reclaimed");
+    await assert.rejects(withFileLock(root, "check", async () => "wrong", { timeoutMs: 60 }), FileLockTimeoutError);
+    assert.equal(await readFile(path, "utf8"), foreign);
     Date.now = clock;
 
     await writeFile(path, JSON.stringify({ pid: process.pid, host: hostname(),
@@ -628,16 +629,7 @@ test("an EPERM general-lock PID is reclaimed only when its start follows publica
   } finally { process.kill = originalKill; Date.now = clock; await rm(root, { recursive: true, force: true }); }
 });
 
-test("unreadable general-lock starts and missing creation times use the 60-second publication bound", { timeout: 1_000 }, () => {
-  for (const createdAt of [Date.now(), undefined]) {
-    assert.equal(generalLockOwnerStale(createdAt, null, 59_999), false);
-    assert.equal(generalLockOwnerStale(createdAt, null, 60_000), true);
-  }
-  assert.equal(generalLockOwnerStale(undefined, Date.now(), 59_999), false);
-  assert.equal(generalLockOwnerStale(undefined, Date.now(), 60_000), true);
-});
-
-test("a parsed but incomplete general-lock record uses publication age", { timeout: 3_000 }, async () => {
+test("an incomplete general-lock record stays protected regardless of publication age", { timeout: 3_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-incomplete-lock-age-"));
   const path = join(root, "check.lock");
   const clock = Date.now;
@@ -645,16 +637,17 @@ test("a parsed but incomplete general-lock record uses publication age", { timeo
     await writeFile(path, "null");
     await assert.rejects(withFileLock(root, "check", async () => "wrong", { timeoutMs: 40 }), FileLockTimeoutError);
     Date.now = () => clock() + AGED_LOCK_MS;
-    assert.equal(await withFileLock(root, "check", async () => "reclaimed", { timeoutMs: 500 }), "reclaimed");
+    await assert.rejects(withFileLock(root, "check", async () => "wrong", { timeoutMs: 60 }), FileLockTimeoutError);
+    assert.equal(await readFile(path, "utf8"), "null");
   } finally { Date.now = clock; await rm(root, { recursive: true, force: true }); }
 });
 
-test("unreadable general-lock entries wait until publication age, then yield", { timeout: 4_000 }, async () => {
+test("unreadable general-lock entries remain protected beyond the old publication bound", { timeout: 4_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-unreadable-lock-"));
   const path = join(root, "check.lock");
   const clock = Date.now;
   try {
-    for (const kind of ["directory", "symlink-directory", "mode-000"] as const) {
+    for (const kind of ["directory", "symlink-directory", "dangling-symlink", "mode-000"] as const) {
       if (kind === "directory") {
         await mkdir(path);
         await writeFile(join(path, "interrupted.tmp"), "orphaned");
@@ -662,6 +655,8 @@ test("unreadable general-lock entries wait until publication age, then yield", {
         const target = join(root, "orphaned-target");
         await mkdir(target);
         await symlink(target, path);
+      } else if (kind === "dangling-symlink") {
+        await symlink(join(root, "unpublished-owner"), path);
       } else {
         await writeFile(path, "unreadable", { mode: 0o000 });
         // A privileged test runner can still read mode-000 files; the directory covers that runner.
@@ -675,55 +670,14 @@ test("unreadable general-lock entries wait until publication age, then yield", {
       const beforeBoundOffset = Math.floor(publishedAt + 59_000 - clock());
       Date.now = () => clock() + beforeBoundOffset;
       await assert.rejects(withFileLock(root, "check", async () => "too-early", { timeoutMs: 80 }), FileLockTimeoutError);
-      assert.equal((await lstat(path)).isSymbolicLink(), kind === "symlink-directory", kind);
-      assert.equal((await stat(path)).isDirectory(), kind !== "mode-000", kind);
+      assert.equal((await lstat(path)).isSymbolicLink(), kind.endsWith("symlink") || kind === "symlink-directory", kind);
+      if (kind !== "dangling-symlink") assert.equal((await stat(path)).isDirectory(), kind !== "mode-000", kind);
       const atBoundOffset = Math.ceil(publishedAt + 60_000 - clock());
       Date.now = () => clock() + atBoundOffset;
-      assert.equal(await withFileLock(root, "check", async () => "reclaimed", { timeoutMs: 500 }), "reclaimed", kind);
+      await assert.rejects(withFileLock(root, "check", async () => "wrong", { timeoutMs: 60 }), FileLockTimeoutError);
+      assert.equal((await lstat(path)).isSymbolicLink(), kind.endsWith("symlink") || kind === "symlink-directory");
       Date.now = clock;
-    }
-  } finally {
-    Date.now = clock;
-    if ((await lstat(path).catch(() => null))?.isFile()) await chmod(path, 0o600);
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("an unreadable lock that becomes a readable live record before rename survives", { timeout: 4_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-unreadable-live-lock-"));
-  const path = join(root, "check.lock");
-  const clock = Date.now;
-  try {
-    for (const kind of ["directory", "mode-000"] as const) {
-      if (kind === "directory") await mkdir(path);
-      else {
-        await writeFile(path, "unreadable", { mode: 0o000 });
-        if (await readFile(path).then(() => true).catch(() => false)) {
-          assert.equal(process.getuid?.(), 0, "mode-000 must be unreadable to a non-root runner");
-          await rm(path);
-          continue;
-        }
-      }
-      const publishedAt = (await stat(path)).ctimeMs;
-      const atBoundOffset = Math.ceil(publishedAt + 60_000 - clock());
-      Date.now = () => clock() + atBoundOffset;
-      const live = JSON.stringify({ pid: process.pid, host: hostname(), createdAt: Date.now() });
-      let moved = false;
-      await assert.rejects(withFileLock(root, "check", async () => "wrong", {
-        timeoutMs: 120,
-        onBeforeStaleMove: async () => {
-          if (moved) return;
-          moved = true;
-          if (kind === "directory") await rm(path, { recursive: true });
-          else await chmod(path, 0o600);
-          await writeFile(path, live);
-        },
-      }), error => error instanceof FileLockTimeoutError ||
-        error instanceof Error && /lock owner changed during stale takeover/.test(error.message));
-      assert.equal(moved, true);
-      assert.equal(await readFile(path, "utf8"), live);
-      Date.now = clock;
-      await rm(path);
+      await rm(path, { recursive: true, force: true });
     }
   } finally {
     Date.now = clock;
@@ -974,4 +928,40 @@ test("supervisor records this process start as reported by real ps", { timeout: 
     assert.ok(status.processStartedAt !== undefined && Math.abs(status.processStartedAt - psStart) < 2_000,
       "the supervisor status must record the real process start, not supervisor launch");
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a real Linux process holding the credential lock past sixty seconds is never displaced", { timeout: 75_000, skip: process.platform !== "linux" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-live-human-owner-"));
+  const storagePath = new URL("../../src/cloud/storage.ts", import.meta.url).href;
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module"], { stdio: ["pipe", "pipe", "pipe"] });
+  const exited = new Promise<void>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => code === 0 ? resolve() : reject(new Error(`lock holder failed (${code}/${signal})`)));
+  });
+  exited.catch(() => {});
+  try {
+    const ready = new Promise<void>((resolve, reject) => {
+      child.stdout.once("data", () => resolve()); child.once("error", reject);
+      child.once("close", () => reject(new Error("lock holder exited before publication")));
+    });
+    child.stdin.end(`
+      import {withFileLock} from ${JSON.stringify(storagePath)};
+      await withFileLock(${JSON.stringify(root)},'human',async()=>{
+        process.stdout.write('locked');
+        await new Promise(resolve=>setTimeout(resolve,70000));
+      });
+    `);
+    // Real elapsed age and an actual live PID, followed by verified dead-owner recovery.
+    await ready;
+    const raw = await readFile(join(root, "human.lock"), "utf8");
+    await new Promise(resolve => setTimeout(resolve, 61_000));
+    await assert.rejects(withFileLock(root, "human", async () => "stolen", { timeoutMs: 100 }), FileLockTimeoutError);
+    assert.equal(await readFile(join(root, "human.lock"), "utf8"), raw);
+    child.kill("SIGKILL");
+    await exited.catch(() => {});
+    assert.equal(await withFileLock(root, "human", async () => "dead owner recovered", { timeoutMs: 1000 }), "dead owner recovered");
+  } finally {
+    child.kill("SIGKILL"); await exited.catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  }
 });
