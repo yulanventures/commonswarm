@@ -258,12 +258,31 @@ export async function createMcpProvider({
       AuthorizationCode: authorizationCodeTtlSeconds,
       Grant: refreshTokenTtlSeconds,
       Interaction: 10 * 60,
-      RefreshToken: (ctx) => Math.min(
-        adminTransactionContext(false)?.token ? Math.max(0, Math.floor(
-          (new Date(adminTransactionContext().token.binding.refresh_deadline).getTime() - Date.now()) / 1000)) : refreshTokenTtlSeconds,
-        refreshTokenTtlSeconds,
-        ctx?.oidc?.entities.RotatedRefreshToken?.remainingTTL ?? refreshTokenTtlSeconds,
-      ),
+      RefreshToken: (ctx) => {
+        const now = Date.now();
+        const rotated = ctx?.oidc?.entities.RotatedRefreshToken;
+        let ttl = refreshTokenTtlSeconds;
+        // An exp-less hosted token's remainingTTL calls expiration, which
+        // invokes this callback again. Only the validated epoch is a deadline;
+        // the adapter applies fresh canonical hosted policy after its locks.
+        if (rotated && Object.hasOwn(rotated, "exp")) {
+          if (!Number.isSafeInteger(rotated.exp) || rotated.exp <= 0) {
+            throw new errors.InvalidGrant("refresh token deadline is invalid");
+          }
+          ttl = Math.min(ttl, rotated.exp - Math.floor(now / 1000));
+        }
+        const adminToken = adminTransactionContext(false)?.token;
+        if (adminToken) {
+          ttl = Math.min(ttl, Math.floor(
+            (new Date(adminToken.binding.refresh_deadline).getTime() - now) / 1000));
+        }
+        // A deadline may elapse after validation. Never pass zero to the
+        // provider's positive-integer TTL validator or lose a finite bound.
+        if (!Number.isSafeInteger(ttl) || ttl <= 0) {
+          throw new errors.InvalidGrant("refresh token has expired");
+        }
+        return ttl;
+      },
       Session: refreshTokenTtlSeconds,
     },
     extraTokenClaims: async (_ctx, token) => {

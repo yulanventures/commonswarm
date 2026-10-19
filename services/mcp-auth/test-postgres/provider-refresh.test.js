@@ -355,7 +355,7 @@ test("ordinary MCP + admin-http: code exchange, refresh and replay before and af
   }
 });
 
-test('HTTP hosted refresh follows only the owner date across technical expiry, early extension/clear and elapsed policy', { timeout: 45000 }, async () => {
+test('HTTP hosted refresh rotates unbounded families twice and preserves owner dates across technical expiry, early extension/clear and elapsed policy', { timeout: 45000 }, async () => {
   const clientId = `https://s2-deadline-${randomUUID()}.example/oauth.json`;
   const server = await startProvider(clientId,undefined,pool,{ permanent: true,refreshTokenTtlSeconds: 2 });
   try {
@@ -373,6 +373,26 @@ test('HTTP hosted refresh follows only the owner date across technical expiry, e
       if (response.status === 200) { assert.notEqual(response.body.refresh_token,token); token=response.body.refresh_token; }
       return response;
     };
+    const assertStoredDeadline = async deadline => {
+      const rows = (await pool.query(`SELECT model,payload,expires_at
+        FROM commonswarm_oauth.provider_artifacts
+        WHERE (model='Grant' AND payload->>'jti'=$1)
+           OR (model='RefreshToken' AND artifact_id_hash=$2)`,
+      [family,createHash('sha256').update(token).digest('base64url')])).rows;
+      assert.deepEqual(rows.map(row => row.model).sort(),['Grant','RefreshToken']);
+      for (const row of rows) {
+        assert.equal(row.expires_at?.getTime() ?? null,deadline?.getTime() ?? null,row.model);
+        assert.equal(Object.hasOwn(row.payload,'exp'),deadline !== null,row.model);
+        if (deadline !== null) assert.equal(row.payload.exp,Math.ceil(deadline.getTime()/1000),row.model);
+      }
+    };
+    await assertStoredDeadline(null);
+    for (let rotation=0; rotation<2; rotation+=1) {
+      const result = await rotate();
+      assert.equal(result.status,200,JSON.stringify(result.body));
+      assert.equal(Object.hasOwn(result.body,'refresh_expires_in'),false);
+      await assertStoredDeadline(null);
+    }
     const future = (await pool.query("SELECT clock_timestamp()+interval '180 days' AS deadline")).rows[0].deadline;
     await pool.query('UPDATE swarm.hosted_mcp_grants SET connection_expires_at=$2 WHERE grant_id=$1',[server.hosted,future]);
     await pool.query('SELECT pg_sleep(2.1)');
@@ -381,6 +401,9 @@ test('HTTP hosted refresh follows only the owner date across technical expiry, e
       [createHash('sha256').update(token).digest('base64url')])).rows[0];
     assert.equal(row.expires_at.getTime(),future.getTime());
     assert.equal(row.payload.exp,Math.ceil(future.getTime()/1000));
+    await assertStoredDeadline(future);
+    assert.equal((await rotate()).status,200,'finite rotation must preserve the chosen future bound');
+    await assertStoredDeadline(future);
     for (const nextPolicy of [new Date(future.getTime()+86400000),null]) {
       await pool.query("UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()+interval '3 seconds' WHERE grant_id=$1",[server.hosted]);
       assert.equal((await rotate()).status,200,'persist a short owner deadline before the owner edits it');
@@ -393,9 +416,13 @@ test('HTTP hosted refresh follows only the owner date across technical expiry, e
       assert.equal(row.expires_at?.getTime() ?? null,nextPolicy?.getTime() ?? null);
       assert.equal(Object.hasOwn(row.payload,'exp'),nextPolicy !== null);
     }
-    // Same token succeeded immediately before this canonical policy elapsed.
-    await pool.query("UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()+interval '200 milliseconds' WHERE grant_id=$1",[server.hosted]);
-    await pool.query('SELECT pg_sleep(0.3)');
+    // Persist a chosen future bound, then model its elapsed canonical state
+    // without a wall-clock race or an additional sleep.
+    await pool.query('UPDATE swarm.hosted_mcp_grants SET connection_expires_at=$2 WHERE grant_id=$1',[server.hosted,future]);
+    assert.equal((await rotate()).status,200);
+    await assertStoredDeadline(future);
+    await pool.query("UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()-interval '1 second' WHERE grant_id=$1",[server.hosted]);
     const refused = await rotate(); assert.equal(refused.status,400); assert.equal(refused.body.error,'invalid_grant');
+    const stillRefused = await rotate(); assert.equal(stillRefused.status,400); assert.equal(stillRefused.body.error,'invalid_grant');
   } finally { await server.close(); await server.cleanup(); }
 });
