@@ -284,7 +284,7 @@ try {
     assert.equal((await human(envelope(allow(['read','create','update'])))).body.status,'committed');
     assert.equal((await call('todo_list')).body.status,'ok','human Allow recovers the same live grant');
     assert.equal((await call('todo_queue')).body.queue.content_access,'read','live sibling C read-only ceiling survives retired-target replacement');
-    assert.equal((await human(envelope(allow(['read'])))).body.status,'committed');
+    // Keep B broad so only live C can supply the read ceiling.
     await tx.unsafe(input.ownerRollback);
     assert.equal((await call('todo_queue')).body.queue.content_access,'read','gate honors exact replacement without hiding live C ceiling');
     for (const kind of ['expired','revoked']) {

@@ -38,6 +38,14 @@ test('owner restriction has exact command authority, canonical scope and truthfu
   const insert=(id=principal,origin='human_withdraw',ops="ARRAY[]::text[]")=>`INSERT INTO swarm.household_hosted_content_restrictions
     (grant_id,workspace_id,owner_user_id,principal_id,operations,origin)
     VALUES('${grant}','${workspace}','${owner}','${id}',${ops},'${origin}')`;
+  const closed = deadControls.find(c => c.kind === 'revoked')!;
+  // This is the exact valid CLOSED legacy row, not a malformed marker. Each
+  // negative below changes one independent authorization/closure condition.
+  const exactMarkers = `(SELECT jsonb_build_array(jsonb_build_object('kind','legacy','row',to_jsonb(c)))
+    FROM swarm.household_content_connections c WHERE c.connection_id='${closed.seat}')`;
+  const markerWrite = (markers=exactMarkers, origin='human_allow', ops="ARRAY['read','create','update']") =>
+    `UPDATE swarm.household_hosted_content_restrictions SET closed_target_replacements=${markers},
+      origin='${origin}',operations=${ops} WHERE ${scope} AND principal_id='${sibling}'`;
   runSql(`
     ${recordChecksumEvidenceForTest}
     ${dbAssert(`SELECT count(*)>0 FROM commonswarm_ops.migration_checksums`,'ledger preservation uses nonempty canonical release evidence')}
@@ -157,6 +165,59 @@ test('owner restriction has exact command authority, canonical scope and truthfu
       WHERE ${scope} AND principal_id='${sibling}';
     ${refuses(`UPDATE swarm.household_hosted_content_restrictions SET closed_target_replacements='[{}]'::jsonb WHERE ${scope} AND principal_id='${sibling}'`,'42501')}
     ${dbAssert(`SELECT operations=ARRAY['read'] AND principal_id='${principal}' FROM swarm.household_hosted_content_restrictions WHERE ${scope} AND principal_id='${principal}'`,'Allow B leaves explicit read-only A unchanged')}
+    ${markerWrite()};
+    ${dbAssert(`SELECT jsonb_array_length(closed_target_replacements)=1 FROM swarm.household_hosted_content_restrictions WHERE ${scope} AND principal_id='${sibling}'`,'exact closed legacy snapshot positive control reaches trigger validation')}
+    UPDATE swarm.household_hosted_content_restrictions SET closed_target_replacements='[]'::jsonb WHERE ${scope} AND principal_id='${sibling}';
+    RESET ROLE;
+    RESET SESSION AUTHORIZATION;
+    UPDATE swarm.memberships SET role='admin' WHERE workspace_id='${workspace}' AND user_id='${owner}';
+    SET LOCAL SESSION AUTHORIZATION commonswarm_edge;
+    SET LOCAL ROLE swarm_command;
+    ${refuses(markerWrite(),'42501')}
+    RESET ROLE;
+    RESET SESSION AUTHORIZATION;
+    UPDATE swarm.memberships SET role='member' WHERE workspace_id='${workspace}' AND user_id='${owner}';
+    SET LOCAL SESSION AUTHORIZATION commonswarm_edge;
+    SET LOCAL ROLE swarm_command;
+    ${refuses(markerWrite(),'42501')}
+    RESET ROLE;
+    RESET SESSION AUTHORIZATION;
+    UPDATE swarm.memberships SET role='owner' WHERE workspace_id='${workspace}' AND user_id='${owner}';
+    -- Only the target's liveness changes; its exact legacy snapshot is unchanged.
+    UPDATE swarm.hosted_mcp_seats SET revoked_at=NULL WHERE seat_id='${closed.seat}';
+    SET LOCAL SESSION AUTHORIZATION commonswarm_edge;
+    SET LOCAL ROLE swarm_command;
+    ${refuses(markerWrite(),'42501')}
+    RESET ROLE;
+    RESET SESSION AUTHORIZATION;
+    UPDATE swarm.hosted_mcp_seats SET revoked_at=clock_timestamp() WHERE seat_id='${closed.seat}';
+    SET LOCAL SESSION AUTHORIZATION commonswarm_edge;
+    SET LOCAL ROLE swarm_command;
+    ${context('household_withdraw_connection')}
+    ${refuses(markerWrite(exactMarkers,'human_withdraw','ARRAY[]::text[]'),'42501')}
+    ${context('household_connection_invalidation')}
+    ${refuses(markerWrite(exactMarkers,'system_invalidation','ARRAY[]::text[]'),'42501')}
+    ${context('household_approve_connection')}
+    ${markerWrite()};
+    ${dbAssert(`SELECT jsonb_array_length(closed_target_replacements)=1 FROM swarm.household_hosted_content_restrictions WHERE ${scope} AND principal_id='${sibling}'`,'restored owner and closed target admit the same exact snapshot after all negatives')}
+    RESET ROLE;
+    RESET SESSION AUTHORIZATION;
+    -- 256 additional distinct CLOSED canonical legacy targets plus the existing
+    -- closed target produce 257 otherwise-valid snapshots; no duplicate padding.
+    CREATE TEMP TABLE overflow_targets AS SELECT gen_random_uuid() AS principal_id,gen_random_uuid() AS seat_id FROM generate_series(1,256);
+    INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only)
+      SELECT principal_id,'${workspace}','${owner}','Closed overflow '||principal_id,'hosted_mcp',true FROM overflow_targets;
+    INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,created_at,revoked_at)
+      SELECT seat_id,'${grant}','${workspace}','${owner}',principal_id,'Closed overflow '||principal_id,clock_timestamp(),clock_timestamp() FROM overflow_targets;
+    INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at,hosted_grant_id)
+      SELECT t.seat_id,'${grant}','${workspace}',t.principal_id,'${owner}','shared',ARRAY['read'],r.content_consent_id,NULL,'${grant}'
+      FROM overflow_targets t CROSS JOIN swarm.household_member_content_roles r WHERE r.workspace_id='${workspace}' AND r.user_id='${owner}';
+    SET LOCAL SESSION AUTHORIZATION commonswarm_edge;
+    SET LOCAL ROLE swarm_command;
+    ${dbAssert(`SELECT count(*)=257 FROM swarm.household_content_connections WHERE hosted_grant_id='${grant}' AND workspace_id='${workspace}' AND principal_id NOT IN ('${principal}','${sibling}','${deadControls.find(c => c.kind === 'expired')!.principal}')`,'overflow control contains 257 distinct exact closed legacy targets')}
+    ${refuses(markerWrite(`(SELECT jsonb_agg(jsonb_build_object('kind','legacy','row',to_jsonb(c)) ORDER BY jsonb_build_object('kind','legacy','row',to_jsonb(c))::text)
+      FROM swarm.household_content_connections c WHERE c.hosted_grant_id='${grant}' AND c.workspace_id='${workspace}'
+        AND c.principal_id NOT IN ('${principal}','${sibling}','${deadControls.find(c => c.kind === 'expired')!.principal}'))`),'42501')}
     RESET ROLE;
     RESET SESSION AUTHORIZATION;
 
