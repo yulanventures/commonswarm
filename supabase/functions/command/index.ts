@@ -4718,6 +4718,52 @@ async function updateWorkspaceProjection(
           "AgentPrincipalRevoked projection did not revoke exactly one principal",
         );
       }
+      // The workspace stream is already locked, as in claim/consent. Lock every
+      // linked grant in a stable order before changing consent, so claims in
+      // another workspace and simultaneous removals see a single decision.
+      const hostedGrants = await tx<HostedGrantRow[]>`
+        SELECT g.* FROM swarm.hosted_mcp_grants AS g
+        WHERE EXISTS (
+          SELECT 1 FROM swarm.hosted_mcp_seats AS hs
+          WHERE hs.grant_id = g.grant_id
+            AND hs.workspace_id = ${route.workspaceId}::uuid
+            AND hs.principal_id = ${principalId}::uuid
+        )
+        ORDER BY g.grant_id FOR UPDATE OF g
+      `;
+      for (const grant of hostedGrants) {
+        const seats = await tx<{ seat_id: string }[]>`
+          SELECT seat_id FROM swarm.hosted_mcp_seats
+          WHERE grant_id = ${grant.grant_id}::uuid
+            AND workspace_id = ${route.workspaceId}::uuid
+            AND principal_id = ${principalId}::uuid
+          ORDER BY seat_id FOR UPDATE
+        `;
+        for (const seat of seats) {
+          await projectHostedSeatRevocation(tx, seat.seat_id, revokedAt, createdBy);
+        }
+        await tx`
+          UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at = ${revokedAt}
+          WHERE grant_id = ${grant.grant_id}::uuid
+            AND workspace_id = ${route.workspaceId}::uuid AND revoked_at IS NULL
+        `;
+        // Use the actual claim authorization predicate: a residual consent in
+        // an archived workspace, or with a removed owner, is not live access.
+        const [remaining] = await tx<{ live: boolean }[]>`
+          SELECT EXISTS (
+            SELECT 1 FROM swarm.hosted_mcp_grant_workspaces AS c
+            CROSS JOIN LATERAL swarm.resolve_hosted_grant_authorization(
+              c.grant_id, ${grant.owner_user_id}::uuid, c.workspace_id,
+              'claim_hosted_seat'
+            ) AS authorized
+            WHERE c.grant_id = ${grant.grant_id}::uuid
+              AND c.workspace_id <> ${route.workspaceId}::uuid
+          ) AS live
+        `;
+        if (!remaining?.live) {
+          await projectHostedGrantRevocation(tx, grant, revokedAt, createdBy);
+        }
+      }
       await rotateWakeId(tx, principalId);
       await tx`
         INSERT INTO swarm.revocation_tombstones (kind, target_id, created_by)
@@ -9694,6 +9740,40 @@ interface HostedGrantRow {
   revoked_at: Date | null;
 }
 
+// Shared by explicit hosted revocation and accepted principal removal.
+async function projectHostedSeatRevocation(
+  tx: Sql, seatId: string, revokedAt: Date, createdBy: string | null,
+): Promise<void> {
+  await tx`UPDATE swarm.hosted_mcp_seats SET revoked_at = ${revokedAt}
+    WHERE seat_id = ${seatId}::uuid AND revoked_at IS NULL`;
+  await tx`UPDATE swarm.hosted_mcp_seat_handles SET revoked_at = ${revokedAt}
+    WHERE seat_id = ${seatId}::uuid AND revoked_at IS NULL`;
+  await tx`INSERT INTO swarm.revocation_tombstones (kind, target_id, created_by)
+    VALUES ('hosted_seat', ${seatId}::uuid, ${createdBy}::uuid)
+    ON CONFLICT (kind, target_id) DO NOTHING`;
+}
+
+async function projectHostedGrantRevocation(
+  tx: Sql, grant: HostedGrantRow, revokedAt: Date, createdBy: string | null,
+): Promise<void> {
+  await tx`UPDATE swarm.hosted_mcp_grants SET state = 'revoked', revoked_at = ${revokedAt}
+    WHERE grant_id = ${grant.grant_id}::uuid AND state <> 'revoked'`;
+  await tx`INSERT INTO swarm.revocation_tombstones (kind, target_id, created_by)
+    VALUES ('hosted_grant', ${grant.grant_id}::uuid, ${createdBy}::uuid)
+    ON CONFLICT (kind, target_id) DO NOTHING`;
+  // Same family lock and durable retirement as the provider adapter's
+  // revokeByGrantId/upsert. Never touch browser sessions or other families.
+  await adminDbRole(tx, 'commonswarm_oauth_runtime');
+  await tx`SELECT pg_advisory_xact_lock(hashtextextended(${grant.provider_grant_id}, 484650))`;
+  await tx`INSERT INTO commonswarm_oauth.refresh_family_tombstones (grant_id, revoked_at)
+    VALUES (${grant.provider_grant_id}, ${revokedAt}) ON CONFLICT (grant_id) DO NOTHING`;
+  await tx`DELETE FROM commonswarm_oauth.provider_artifacts
+    WHERE grant_id = ${grant.provider_grant_id}`;
+  // A SQL failure aborts the entire authority transaction; do not mask its
+  // original code by trying to reset the role in an already-aborted tx.
+  await setTransaction(tx);
+}
+
 function parseHostedManagementCommand(value: unknown): HostedManagementCommand | null {
   const command = record(value);
   if (!command || typeof command.kind !== "string") return null;
@@ -10077,11 +10157,7 @@ async function handleHostedManagement(
       const folded = reduceHostedAuthority(hostedProjectionBefore(grant), event)
         .grants[grant.grant_id];
       if (!folded || folded.revoked_at === null) throw new Error("revocation event did not fold");
-      await tx`
-        UPDATE swarm.hosted_mcp_grants
-        SET state = ${folded.state}, revoked_at = ${new Date(folded.revoked_at)}
-        WHERE grant_id = ${command.grant_id}::uuid AND state <> 'revoked'
-      `;
+      await projectHostedGrantRevocation(tx, grant, new Date(folded.revoked_at), auth.actor.user);
     } else if (event.type === "HostedMcpSeatRevoked") {
       if (command.kind !== "revoke_hosted_mcp_seat" || seat === null) {
         throw new Error("seat revoke event did not match its command facts");
@@ -10102,16 +10178,7 @@ async function handleHostedManagement(
           foldedPrincipal.revoked_at) {
         throw new Error("hosted and workspace revocation folds disagree");
       }
-      await tx`
-        UPDATE swarm.hosted_mcp_seats
-        SET revoked_at = ${new Date(foldedSeat.revoked_at)}
-        WHERE seat_id = ${command.seat_id}::uuid AND revoked_at IS NULL
-      `;
-      await tx`
-        UPDATE swarm.hosted_mcp_seat_handles
-        SET revoked_at = ${new Date(foldedSeat.handle_revoked_at)}
-        WHERE seat_id = ${command.seat_id}::uuid AND revoked_at IS NULL
-      `;
+      await projectHostedSeatRevocation(tx, command.seat_id, new Date(foldedSeat.revoked_at), auth.actor.user);
       await tx`
         UPDATE swarm.agent_principals
         SET revoked_at = ${new Date(foldedPrincipal.revoked_at)}
