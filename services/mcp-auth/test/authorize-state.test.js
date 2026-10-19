@@ -791,17 +791,49 @@ test("production startServer gates ordinary DCR and applies configured IP/host l
   // Only SQL persistence and listen are replaced; no database or socket opens.
   const registrations = new Map();
   t.mock.method(globalThis, "fetch", async () => Response.json({ external: { github: true } }));
-  t.mock.method(pg.Pool.prototype, "query", async (sql, values) => {
-    if (sql.includes("DELETE FROM commonswarm_oauth.registered_clients")) return { rowCount: 0, rows: [] };
+  const query = async (sql, values) => {
+    if (sql.includes("SELECT client_id FROM commonswarm_oauth.registered_clients")) {
+      return { rows: [...registrations.keys()].map(client_id => ({ client_id })) };
+    }
     if (sql.includes("INSERT INTO commonswarm_oauth.registered_clients")) {
-      registrations.set(values[0], JSON.parse(values[1]));
+      registrations.set(values[0], { client_id: values[0], metadata: JSON.parse(values[1]) });
       return { rowCount: 1, rows: [] };
     }
-    if (sql.includes("SELECT metadata FROM commonswarm_oauth.registered_clients")) {
-      const metadata = registrations.get(values[0]);
-      return { rowCount: metadata ? 1 : 0, rows: metadata ? [{ metadata }] : [] };
-    }
-    throw new Error("unexpected DCR fixture SQL");
+    throw new Error("unexpected DCR fixture pool SQL");
+  };
+  t.mock.method(pg.Pool.prototype, "query", query);
+  t.mock.method(pg.Pool.prototype, "connect", async () => {
+    let active = false;
+    return {
+      async query(sql, values) {
+        if (sql === "BEGIN") {
+          assert.equal(active, false);
+          active = true;
+          return { rows: [] };
+        }
+        assert.equal(active, true, "registration queries require an open transaction");
+        if (sql === "COMMIT" || sql === "ROLLBACK") {
+          active = false;
+          return { rows: [] };
+        }
+        if (sql.includes("SELECT * FROM commonswarm_oauth.registered_clients")) {
+          const row = registrations.get(values[0]);
+          return { rows: row ? [row] : [] };
+        }
+        if (sql.includes("commonswarm_oauth.lock_hosted_client_streams")) {
+          assert.ok(registrations.has(values[0]));
+          // This transport fixture has no hosted families. Real PG tests own
+          // canonical retention, lock ordering and post-wait policy checks.
+          return { rows: [] };
+        }
+        if (sql.includes("UPDATE commonswarm_oauth.registered_clients")) {
+          assert.deepEqual(values.slice(1), [false, false, []]);
+          return { rows: [{ ...registrations.get(values[0]), live: true }] };
+        }
+        throw new Error("unexpected DCR fixture transaction SQL");
+      },
+      release() { assert.equal(active, false, "registration transaction must settle before release"); },
+    };
   });
   t.mock.method(Server.prototype, "listen", function (_port, _host, callback) {
     queueMicrotask(callback);

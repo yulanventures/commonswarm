@@ -22,6 +22,12 @@ const allowlist = JSON.parse(readFileSync(new URL('../support/admin-issuer-privi
 // the issuer must still be unable to select it or read auth tables directly.
 // P4 adds finish SELECT and column-only INSERT/UPDATE. Inventory those exact
 // grants; mutation controls must still reject writes to binding and deadline columns.
+// S1b/S2 private helpers: independently pin signatures and the sole non-owner
+// EXECUTE grant; do not enroll the future context helper before its migration.
+const hostedHelpers = [
+  'commonswarm_oauth.lock_hosted_family(text,uuid,text,text)',
+  'commonswarm_oauth.lock_hosted_client_streams(text)',
+];
 const literal = JSON.stringify(allowlist.map((entry: unknown[]) => entry.slice(0, 5))).replaceAll("'", "''");
 // Enumerate explicit ACLs across the whole database, not a selected set of known
 // tables. The saved schemas belong to runSql's rollback-only isolation fixture.
@@ -96,6 +102,14 @@ BEGIN
  IF unexpected IS NOT NULL THEN
    RAISE EXCEPTION 'issuer privilege widening (grantee/kind/object/privilege/grantable):%',E'\n'||unexpected USING ERRCODE='ZX002';
  END IF;
+ IF (SELECT count(*) FROM pg_proc p
+   WHERE p.oid IN (${hostedHelpers.map(signature => `'${signature}'::regprocedure`).join(',')})
+     AND p.proowner='swarm_admin'::regrole
+     AND (SELECT count(*)=1 AND bool_and(a.grantee='commonswarm_oauth_runtime'::regrole
+       AND a.privilege_type='EXECUTE' AND NOT a.is_grantable)
+       FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee<>p.proowner))<>2 THEN
+   RAISE EXCEPTION 'hosted helper owner or private EXECUTE grant changed' USING ERRCODE='ZX002';
+ END IF;
  IF (SELECT array_agg(r.rolname::text ORDER BY r.rolname) FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.roleid
    WHERE m.member='commonswarm_admin_issuer'::regrole AND NOT m.admin_option AND NOT m.inherit_option AND m.set_option)
    IS DISTINCT FROM ARRAY['commonswarm_oauth_runtime','swarm_command']::text[]
@@ -167,6 +181,19 @@ ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
 REVOKE EXECUTE ON FUNCTION pg_temp.assert_issuer() FROM PUBLIC;
 SELECT pg_temp.assert_issuer();
 ${dbAssert('SELECT count(*)>200 FROM issuer_acl_inventory', 'enumeration positive control includes existing command and runtime grants')}
+-- Each mutation is paired with an intact inventory before and after rollback.
+${hostedHelpers.map(signature => `
+${dbAssert(`SELECT has_function_privilege('commonswarm_oauth_runtime','${signature}','EXECUTE') AND NOT has_function_privilege('commonswarm_oauth_runtime','${signature}','EXECUTE WITH GRANT OPTION')`, 'runtime helper EXECUTE is usable and nongrantable')}
+${[
+  'GRANT EXECUTE ON FUNCTION ' + signature + ' TO commonswarm_oauth_runtime WITH GRANT OPTION;',
+  ...['commonswarm_admin_issuer','swarm_command','anon','authenticated','swarm_read','PUBLIC'].map(role =>
+    'GRANT EXECUTE ON FUNCTION ' + signature + ' TO ' + role + ';'),
+].map(mutation => `SAVEPOINT hosted_helper_mutation;
+${mutation}
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+ROLLBACK TO SAVEPOINT hosted_helper_mutation;
+SELECT pg_temp.assert_issuer();`).join('\n')}`).join('\n')}
+
 ${[
   ['household_workspace_boundaries','workspace_id','purpose','workspace_id'],
   ['household_member_content_roles','workspace_id','user_id','workspace_id,content_role,content_consent_id,confirmed_at,revoked_at'],
