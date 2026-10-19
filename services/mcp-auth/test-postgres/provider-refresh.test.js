@@ -34,7 +34,7 @@ function metadata(clientId) {
   };
 }
 
-async function startProvider(clientId, beforeConsume, database = pool) {
+async function startProvider(clientId, beforeConsume, database = pool, { permanent = false, refreshTokenTtlSeconds } = {}) {
   const owner = randomUUID(), workspace = randomUUID(), hosted = randomUUID(), stream = randomUUID();
   await database.query("INSERT INTO auth.users(id,aud,role,email) VALUES($1,'authenticated','authenticated',$2)",
     [owner, `${owner}@example.test`]);
@@ -45,8 +45,10 @@ async function startProvider(clientId, beforeConsume, database = pool) {
     [workspace, owner]);
   await database.query("INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES($1,$2,'workspace')",
     [stream, workspace]);
+  const adapter = createPostgresAdapter(database, { beforeConsume });
   const provider = await createMcpProvider({
-    adapter: createPostgresAdapter(database, { beforeConsume }),
+    adapter,
+    ...(refreshTokenTtlSeconds ? { refreshTokenTtlSeconds } : {}),
     // These are the ordinary production hooks, available before M1.
     providerGrantResource: async id => (await database.query(
       "SELECT resource FROM commonswarm_oauth.resolve_hosted_grant_status($1)", [id])).rows[0]?.resource,
@@ -88,6 +90,11 @@ async function startProvider(clientId, beforeConsume, database = pool) {
             VALUES($1,$2,$3,decode(repeat('ab',32),'hex'),$4,statement_timestamp())
             ON CONFLICT(grant_id,workspace_id) DO NOTHING`,
           [hosted, workspace, owner, randomUUID()]);
+          if (permanent) {
+            await adapter('Grant').promoteHostedGrant?.(grantId,{ hostedGrantId: hosted,accountId: owner,clientId });
+            grant = await provider.Grant.find(grantId);
+            assert.ok(grant,'active provider Grant reload before continuation');
+          }
           await provider.interactionFinished(request, response, { consent: { grantId } });
         })()
       : callback(request, response);
@@ -103,7 +110,7 @@ async function startProvider(clientId, beforeConsume, database = pool) {
   const origin = `http://127.0.0.1:${server.address().port}`;
   const cookies = new Map();
   return {
-    logs,
+    logs, hosted, provider,
     async request(target, options = {}) {
       const external = new URL(target, ISSUER);
       const headers = new Headers(options.headers);
@@ -122,6 +129,9 @@ async function startProvider(clientId, beforeConsume, database = pool) {
       return response;
     },
     async cleanup() {
+      // Permanent test bindings are append-only and retain their canonical
+      // rows until the migrated disposable database is destroyed.
+      if (permanent) return;
       await database.query("DELETE FROM swarm.hosted_mcp_grant_workspaces WHERE grant_id=$1", [hosted]);
       await database.query("DELETE FROM swarm.hosted_mcp_grants WHERE grant_id=$1", [hosted]);
       await database.query("DELETE FROM swarm.streams WHERE stream_id=$1", [stream]);
@@ -179,7 +189,7 @@ test("HTTP refresh race uses two PostgreSQL connections, preserves winner, and r
     waiting.push(processId);
     if (waiting.length === 2) release();
     await barrier;
-  });
+  },pool,{ permanent: true });
   let grantId;
   try {
     const code = await authorizeCode(server, clientId);
@@ -343,4 +353,49 @@ test("ordinary MCP + admin-http: code exchange, refresh and replay before and af
     physical.release();
     await admin.end();
   }
+});
+
+test('HTTP hosted refresh follows only the owner date across technical expiry, early extension/clear and elapsed policy', { timeout: 45000 }, async () => {
+  const clientId = `https://s2-deadline-${randomUUID()}.example/oauth.json`;
+  const server = await startProvider(clientId,undefined,pool,{ permanent: true,refreshTokenTtlSeconds: 2 });
+  try {
+    const code = await authorizeCode(server,clientId);
+    const initial = await tokenRequest(server,{ client_id: clientId,code,code_verifier: verifier,
+      grant_type: 'authorization_code',redirect_uri: redirectUri,resource: RESOURCE });
+    assert.equal(initial.status,200);
+    const family = decodeJwt(initial.body.access_token).grant_id;
+    let token = initial.body.refresh_token; assert.equal(typeof token,'string');
+    const savedGrant = (await pool.query("SELECT payload,expires_at FROM commonswarm_oauth.provider_artifacts WHERE model='Grant' AND payload->>'jti'=$1",[family])).rows[0];
+    assert.equal(savedGrant.expires_at,null,'initial active Grant was promoted before successful issuance');
+    assert.equal(Object.hasOwn(savedGrant.payload,'exp'),false);
+    const rotate = async () => {
+      const response = await tokenRequest(server,{ client_id: clientId,grant_type: 'refresh_token',refresh_token: token,resource: RESOURCE });
+      if (response.status === 200) { assert.notEqual(response.body.refresh_token,token); token=response.body.refresh_token; }
+      return response;
+    };
+    const future = (await pool.query("SELECT clock_timestamp()+interval '180 days' AS deadline")).rows[0].deadline;
+    await pool.query('UPDATE swarm.hosted_mcp_grants SET connection_expires_at=$2 WHERE grant_id=$1',[server.hosted,future]);
+    await pool.query('SELECT pg_sleep(2.1)');
+    assert.equal((await rotate()).status,200,'future owner policy survives a shorter configured Grant/RT TTL');
+    let row = (await pool.query("SELECT payload,expires_at FROM commonswarm_oauth.provider_artifacts WHERE model='RefreshToken' AND artifact_id_hash=$1",
+      [createHash('sha256').update(token).digest('base64url')])).rows[0];
+    assert.equal(row.expires_at.getTime(),future.getTime());
+    assert.equal(row.payload.exp,Math.ceil(future.getTime()/1000));
+    for (const nextPolicy of [new Date(future.getTime()+86400000),null]) {
+      await pool.query("UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()+interval '3 seconds' WHERE grant_id=$1",[server.hosted]);
+      assert.equal((await rotate()).status,200,'persist a short owner deadline before the owner edits it');
+      await pool.query('UPDATE swarm.hosted_mcp_grants SET connection_expires_at=$2 WHERE grant_id=$1',[server.hosted,nextPolicy]);
+      await pool.query('SELECT pg_sleep(3.1)');
+      const result = await rotate(); assert.equal(result.status,200,'pre-expiry owner edit is honored after the old stored deadline');
+      assert.equal(result.body.expires_in,300); assert.equal(Object.hasOwn(result.body,'refresh_expires_in'),false);
+      row = (await pool.query("SELECT payload,expires_at FROM commonswarm_oauth.provider_artifacts WHERE model='RefreshToken' AND artifact_id_hash=$1",
+        [createHash('sha256').update(token).digest('base64url')])).rows[0];
+      assert.equal(row.expires_at?.getTime() ?? null,nextPolicy?.getTime() ?? null);
+      assert.equal(Object.hasOwn(row.payload,'exp'),nextPolicy !== null);
+    }
+    // Same token succeeded immediately before this canonical policy elapsed.
+    await pool.query("UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()+interval '200 milliseconds' WHERE grant_id=$1",[server.hosted]);
+    await pool.query('SELECT pg_sleep(0.3)');
+    const refused = await rotate(); assert.equal(refused.status,400); assert.equal(refused.body.error,'invalid_grant');
+  } finally { await server.close(); await server.cleanup(); }
 });
