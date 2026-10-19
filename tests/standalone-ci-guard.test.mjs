@@ -21,6 +21,9 @@ function good(command, args, options) {
   assert.equal(r.status, 0, r.stderr || r.stdout);
   return r.stdout.trim();
 }
+test('existing installer inventories and absence rollback use real disposable files', () => {
+  good('python3', [join(repo, 'tests/standalone-ci-install.test.py')], {timeout:30000});
+});
 function fixture(control = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-ci-test.')));
   const source = join(root, 'source');
