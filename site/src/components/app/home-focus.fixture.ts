@@ -21,6 +21,8 @@ export async function focusFixture() {
     let workspaces = [{id:'W',name:'Home'},{id:'X',name:'Trip'}];
     let homeRoute = {view:'chat',workspaceId:'W'}, activeWorkspaceId = 'W', requestVersion = 1;
     let members = [{userId:'tom',name:'Tom',role:'owner'}];
+    // The fixture starts with a loaded roster, so renderRoster can reconcile its overview snapshot.
+    const homePeopleReadState = 'ready';
     let agents = [{principalId:'A',name:'Claude',ownerUserId:'tom',transport:'hosted_mcp',
       work:{work:'idle',facts:{transport:'hosted_mcp',turn_only:true,connection:'live',last_activity_at:'2026-10-05T11:47:00Z'}}}];
     let people = new Map(), accessStatuses = [], homeWorkClaims = [], pendingInvites = [], pendingAgents = [];

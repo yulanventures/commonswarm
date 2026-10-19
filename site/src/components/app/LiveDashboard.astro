@@ -4577,9 +4577,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (sampleMode || homeRoute.view === "catchup" || catchUpData.some(entry => entry.detail)) return;
       const generation = ++railOverviewGeneration;
       const viewer = homeViewerId();
+      const version = requestVersion, workspaceId = activeWorkspaceId;
       let overview;
       try { overview = await homeOverview(); } catch { return; }
-      if (!overview || generation !== railOverviewGeneration || homeViewerId() !== viewer || homeRoute.view === "catchup" ||
+      if (!overview || generation !== railOverviewGeneration || homeViewerId() !== viewer || version !== requestVersion ||
+        workspaceId !== activeWorkspaceId || homeRoute.view === "catchup" ||
         catchUpData.some(entry => entry.detail)) return;
       catchUpData = overviewCatchUpData(initialCatchUpData(workspaces), overview, sampleMode);
       // The workspace in view shows its live needs-you items in the stream; a one-time snapshot count on its rail row would go
@@ -4726,6 +4728,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       .map(agent => agent.principalId).join("|");
     let renderedWakeMarkKey = "";
     const renderRoster = (): void => {
+      // A settled current roster replaces that workspace's snapshot identities; absence means removal.
+      if (homePeopleReadState === "ready") catchUpData = catchUpData.map(entry =>
+        entry.workspace.id === activeWorkspaceId && entry.detail
+          ? { ...entry, detail: { ...entry.detail, people: currentHomePeople() } } : entry);
       renderHomeRail();
       renderHomeShell();
       renderHeaderRoster();
@@ -4990,6 +4996,19 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (action === "resume" && grant && agent) { await resumeRenewalGrant(session, uuid(), workspaceId, grant.grantId); receipt = agentResumeReceipt(agent.name); }
       if (action === "turn-off-key" && grant && agent) { await revokeAgentToken(session, uuid(), workspaceId, grant.tokenId); receipt = `Key turned off. ${agent.name} stops when its current access ends.`; }
       if (action === "remove-agent" && agent) { await revokeAgentPrincipal(session, uuid(), workspaceId, id); receipt = `${agent.name} removed. Its history stays as “${agent.name} (removed)”.`;
+        if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
+        // Acceptance is the removal receipt. Older reads must not restore the pre-removal roster.
+        ++requestVersion; ++catchUpGeneration; ++railOverviewGeneration; ++homeWorkspaceRead;
+        removedAgents.set(id, agent.name); removedAgentOwners.set(id, agent.ownerUserId);
+        agents = agents.filter(entry => entry.principalId !== id);
+        accessStatuses = accessStatuses.filter(entry => entry.principalId !== id);
+        catchUpData = catchUpData.map(entry => entry.workspace.id === workspaceId && entry.detail ? {
+          ...entry, detail: { ...entry.detail, people: { ...entry.detail.people,
+            groups: entry.detail.people.groups.map(group => ({ ...group, agents: group.agents.filter(agent => agent.id !== id) })),
+            other: entry.detail.people.other.filter(agent => agent.id !== id) } },
+        } : entry);
+        renderRoster(); renderHomeSide(); renderHomeObjectPane();
+        if (one<HTMLElement>("[data-mention-picker]")?.hidden === false) renderMentionPicker();
         if (livePromptPrincipalId === id) { one<SecretHoldingAgentConnect>("agent-connect")?.clearPrompt(false); livePromptPrincipalId = ""; } }
       if (action === "remove-person") {
         const reauth = one<HTMLElement>("[data-member-reauth]"); if (reauth) reauth.hidden = true;

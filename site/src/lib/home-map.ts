@@ -244,19 +244,22 @@ function countedNeedIds(row: WorkspaceCatchUp, now: number): Set<string> {
   ]);
 }
 export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: string, now: number, sample: boolean, signals: Signal[] = []): CatchUpDetail {
-  const people = mapHomePeople({ viewerId, now, sample, access: [], signals: [],
+  const roster: HomePeopleInput = { viewerId, now, sample, access: [], signals: [],
     members: row.people.map(person => ({ userId: person.user_id, name: person.display_name, role: person.role })),
     agents: row.people.flatMap(person => person.agents.map(agent => ({ principalId: agent.principal_id, name: agent.name,
-      ownerUserId: person.user_id, work: agent.status }))) });
+      ownerUserId: person.user_id, work: agent.status }))) };
+  // Overview retains revoked principals for old asks and waiting-on context, not the current roster.
+  const historicalPeople = mapHomePeople(roster);
+  const people = mapHomePeople({ ...roster, agents: roster.agents.filter(agent => agent.work?.facts.connection !== "removed") });
   const workspace = { id: row.workspace_id, name: row.name, href: routeHref({ view: "chat", workspaceId: row.workspace_id }) };
   const needsYou: NeedsYouVM[] = [];
   for (const ask of row.needs_you.asks) {
-    const card = askNeedsYouCard(ask, people, workspace, signals, now);
+    const card = askNeedsYouCard(ask, historicalPeople, workspace, signals, now);
     if (card) pushNeed(needsYou, card);
   }
   for (const todo of row.needs_you.assigned) pushNeed(needsYou, assignedNeedsYouCard(todo, workspace));
   for (const todo of row.needs_you.waiting) {
-    const card = waitingNeedsYouCard(todo, people, workspace);
+    const card = waitingNeedsYouCard(todo, historicalPeople, workspace);
     pushNeed(needsYou, card, card.kind === "request");
   }
   const counted = countedNeedIds(row, now);

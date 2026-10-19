@@ -14,6 +14,19 @@ import { canStartThread, THREAD_REPLY_CONTROL_LABEL, threadReplyPlace, threadRep
 import { channelLabel } from '../../lib/channels';
 import { parentRoute, routeHref } from '../../lib/home-route';
 import { todoView } from '../../lib/home-todo';
+import { homeRailPeople, mapHomeRail, initialCatchUpData, overviewCatchUpData, homeNeedsYouCount, catchUpDetailFromOverview } from '../../lib/home-map';
+import { buildHomeRail } from '../../lib/home-rail';
+import { homeStructureKey } from '../../lib/home-focus';
+import { assignOptions, tagOptions } from '../../lib/home-pickers';
+import { peopleDialogCanAct } from '../../lib/people-dialog-view';
+import * as agentStatusFunctions from '../../lib/agent-status';
+import { classifyAgentPresence } from '../../../../src/cloud/agent-presence';
+import { agentPresenceLine } from '../../lib/agent-presence';
+import { wakePathMark } from '../../lib/wake-path';
+import { identityDisplayLabel } from '../../lib/identity-label';
+import { isTaggable } from '../../lib/mention-address';
+import { removedAgentLabel } from '../../lib/household-access';
+import type { HomeOverview } from '../../lib/home/contract';
 
 /** Execute the dashboard's read/write lifecycle, replacing only the DOM paint boundaries.
  * No browser, model, network or customer data. Expected surface states come from UI-SPEC 3.3. */
@@ -954,4 +967,127 @@ test('Add agent receives the viewer first name and Home and Done leave that scre
   runInContext("const before = navigated.length; finishJoinedAgent(''); globalThis.stayed = navigated.length === before;", context);
   assert.equal(runInContext('stayed', context), true);
   assert.equal(runInContext('stopped.length', context), stopsAfterOpen + 4, 'Home, the fallback Home, Done and an empty Done each stop the join watch');
+});
+
+// One lifecycle owner: accepted removal must beat cached and in-flight pre-removal reads.
+// The real action, roster settlement, projection, rail DOM and candidate builders run here;
+// only transport, timers and unrelated paint/navigation boundaries are replaced.
+test('accepted agent removals leave every current surface immediately and after reload, while history stays', async () => {
+  const targets = [
+    { principalId: 'removed-one', name: 'MrWhatever', ownerUserId: 'viewer', transport: 'hosted_mcp' },
+    { principalId: 'removed-two', name: 'Codex Alloy', ownerUserId: 'viewer', transport: 'local' },
+  ];
+  const control = { principalId: 'live-control', name: 'Live helper', ownerUserId: 'viewer', transport: 'local' };
+  const makeOverview = (removed: boolean): HomeOverview => ({ viewer_user_id: 'viewer', generated_at: '2026-10-19T14:00:00Z', workspaces: [{
+    workspace_id: 'W', name: 'Home', role: 'owner', last_seen_at: null, new_messages: 0, content: null,
+    people: [{ user_id: 'viewer', display_name: 'Viewer', role: 'owner', is_viewer: true,
+      agents: [...targets, control].map(agent => ({ principal_id: agent.principalId, name: agent.name, queue: null,
+        status: { work: 'idle', facts: { transport: agent.transport as 'local' | 'hosted_mcp', turn_only: false,
+          connection: removed && agent !== control ? 'removed' : 'live', last_activity_at: null,
+          messages_waiting_since: null, doing: null, working_on: null } } })) }],
+    needs_you: { asks: [], assigned: [], waiting: [{ todo_id: 'waiting', title: 'Keep the old context', state: 'open', due_on: null,
+      reason: 'agent_removed', agent_id: targets[0].principalId }] },
+  }] });
+  class RailNode extends RowNode { get childElementCount() { return this.children.length; } }
+  const code = await dashboardFunctions(['homeViewerId', 'currentHomePeople', 'renderHomeRail', 'renderRoster', 'peopleDialogModel',
+    'identityRoster', 'combinedIdentityRoster', 'historicalAgentName', 'entityName', 'mentionCandidates', 'loadRailOverview', 'syncPendingPoll', 'peopleDialogAction']);
+  const fixture = (reloaded: boolean) => {
+    const slot = new RailNode('aside');
+    let tick!: () => void, finishRoster!: (rows: unknown) => void, finishOverview!: (overview: HomeOverview) => void;
+    let finishReload!: () => void;
+    const commands: string[] = [];
+    const context = createContext({ ...agentStatusFunctions, classifyAgentPresence, agentPresenceLine, wakePathMark,
+      identityDisplayLabel, isTaggable, removedAgentLabel, peopleDialogCanAct, mapHomePeople, homeRailPeople, mapHomeRail,
+      initialCatchUpData, overviewCatchUpData, homeNeedsYouCount, homeStructureKey, buildHomeRail, routeHref, assignOptions, tagOptions,
+      one: (selector: string) => selector === '[data-home-rail-slot]' ? slot : null,
+      document: { visibilityState: 'visible', createElement: (tag: string) => new RailNode(tag) },
+      window: { setInterval: (fn: () => void) => { tick = fn; return 1; } },
+      replaceHomeRegion: (region: RailNode, _key: string, children: RailNode[]) => region.replaceChildren(...children),
+      refreshHomeRailTimes: () => {},
+      roster: () => new Promise(resolve => { finishRoster = resolve; }),
+      homeOverview: () => new Promise(resolve => { finishOverview = resolve; }),
+      // The accepted command's transport receipt; it neither edits nor filters UI state.
+      revokeAgentPrincipal: async (_session: unknown, _request: string, _workspace: string, id: string) => { commands.push(id); },
+      // Hold the follow-up navigation so assertions measure accepted removal before its read.
+      reloadPeopleDialog: () => new Promise<void>(resolve => { finishReload = resolve; }),
+    });
+    runInContext(`
+      let session={user:{id:'viewer'}}, activeWorkspaceId='W', requestVersion=1, sampleMode=false;
+      let homeRoute={view:'people',workspaceId:'W'}, workspaces=[{id:'W',name:'Home'}], agents=${JSON.stringify(reloaded ? [control] : [...targets, control])};
+      let members=[{userId:'viewer',name:'Viewer',role:'owner'},{userId:'live-person',name:'Live person',role:'member'}];
+      let people=new Map(members.map(member=>[member.userId,member.name])), accessStatuses=[], homeWorkClaims=[];
+      let catchUpData=[], catchUpGeneration=0, railOverviewGeneration=0, homeRailKey='', railExpanded=false;
+      let homePeopleReadState='ready', homeWorkspaceRead=0, homeOverviewCounts=new Map();
+      let removedAgents=new Map(${JSON.stringify(reloaded ? targets.map(agent => [agent.principalId, agent.name]) : [])}), removedAgentOwners=new Map();
+      let pendingAgentsLoadFailed=false, householdConnectionsReadState='pending', householdConnections=[], peopleDialogReceipts=new Map(), householdReceipts=new Map();
+      let livePromptPrincipalId='', renderedWakeMarkKey='', pendingPollTimer, wakeRosterLastFetchedAt=0, wakeRosterRefreshInFlight=false;
+      const app={dataset:{channelView:'feed'}}, uuid=()=> 'request', WAKE_ROSTER_REFRESH_TIMEOUT_MS=1, PENDING_POLL_TICK_MS=4000;
+      const currentPendingAccessRows=()=>[], peopleDialogState={selected:null}, householdAccess={status:'ok',workspaceId:'W'};
+      const shouldPollPendingAccess=()=>true, pendingAccessKey=()=>'', renderedPendingAccessKey='', refreshPendingAccess=()=>{};
+      const renderHomeShell=()=>{}, renderHeaderRoster=()=>{}, renderDialogRoster=()=>{}, renderHomeSide=()=>{}, renderHomeObjectPane=()=>{};
+      const restoreComposerOnEntry=()=>{}, syncComposerAddress=()=>{}, renderSetupChecklist=()=>{}, composerHasRecipient=()=>false;
+      const wakeMarkKey=()=>'', renderPendingAccess=()=>{}, navigateHomeHref=()=>{}, selectHomePerson=()=>{};
+    `, context);
+    runInContext(code, context);
+    return { context, slot, commands, tick: () => tick(), finishRoster: (rows: unknown) => finishRoster(rows),
+      finishOverview: (overview: HomeOverview) => finishOverview(overview), finishReload: () => finishReload() };
+  };
+  const seed = (f: ReturnType<typeof fixture>, snapshot: HomeOverview) => {
+    f.context.snapshot = snapshot;
+    runInContext('catchUpData=overviewCatchUpData(initialCatchUpData(workspaces),snapshot,false); renderHomeRail();', f.context);
+  };
+  const assertSurfaces = (f: ReturnType<typeof fixture>, absent: string[], stage: string) => {
+    runInContext('renderHomeRail()', f.context);
+    const surfaces: Record<string, string[]> = {
+      sidebar: f.slot.descendants().flatMap(node => node.dataset.railAgent ? [node.dataset.railAgent] : []),
+      People: JSON.parse(runInContext('JSON.stringify(peopleDialogModel().agents.map(agent=>agent.id))', f.context)),
+      roster: JSON.parse(runInContext('JSON.stringify(identityRoster().agents.map(agent=>agent.id))', f.context)),
+      assignment: JSON.parse(runInContext('JSON.stringify(assignOptions(currentHomePeople()).map(option=>option.value))', f.context)),
+      tags: JSON.parse(runInContext('JSON.stringify(tagOptions(currentHomePeople()).map(option=>option.value))', f.context)),
+      mentions: JSON.parse(runInContext("JSON.stringify(mentionCandidates('').map(entity=>entity.id))", f.context)),
+    };
+    for (const [surface, ids] of Object.entries(surfaces)) {
+      assert.ok(ids.includes(control.principalId), `${stage}: ${surface} keeps the live agent`);
+      for (const id of absent) assert.ok(!ids.includes(id), `${stage}: ${surface} excludes ${id}`);
+    }
+    assert.ok(f.slot.descendants().some(node => node.dataset.railPerson === 'viewer'), `${stage}: sidebar keeps the live owner`);
+    assert.ok(runInContext("mentionCandidates('').some(entity=>entity.id==='live-person')", f.context), `${stage}: live person stays addressable`);
+  };
+  const f = fixture(false);
+  seed(f, makeOverview(false));
+  assertSurfaces(f, [], 'before removal');
+  for (const agent of targets) assert.ok(f.slot.descendants().some(node => node.dataset.railAgent === agent.principalId));
+  runInContext('syncPendingPoll()', f.context); f.tick(); // Capture an old roster before the accepted command.
+  const removeOne = runInContext("peopleDialogAction('remove-agent','removed-one',{}, {})", f.context) as Promise<void>;
+  await new Promise(resolve => setImmediate(resolve));
+  assertSurfaces(f, [targets[0].principalId], 'accepted before refresh');
+  f.finishRoster([...targets, control]); await new Promise(resolve => setImmediate(resolve));
+  assertSurfaces(f, [targets[0].principalId], 'late old roster');
+  f.finishReload(); await removeOne;
+  // A second old overview is already in flight when the next removal is accepted.
+  runInContext('catchUpData=[]', f.context);
+  const lateOverview = runInContext('loadRailOverview()', f.context) as Promise<void>;
+  const removeTwo = runInContext("peopleDialogAction('remove-agent','removed-two',{}, {})", f.context) as Promise<void>;
+  await new Promise(resolve => setImmediate(resolve));
+  assertSurfaces(f, targets.map(agent => agent.principalId), 'both accepted before refresh');
+  f.finishOverview(makeOverview(false)); await lateOverview;
+  assertSurfaces(f, targets.map(agent => agent.principalId), 'late old overview');
+  f.finishReload(); await removeTwo;
+  assert.deepEqual(f.commands, targets.map(agent => agent.principalId));
+  for (const agent of targets) {
+    assert.equal(runInContext(`entityName({kind:'agent',id:'${agent.principalId}'})`, f.context), `${agent.name} (removed)`);
+  }
+  const reloaded = fixture(true); seed(reloaded, makeOverview(true));
+  assertSurfaces(reloaded, targets.map(agent => agent.principalId), 'reload with historical removed overview');
+  const detail = catchUpDetailFromOverview(makeOverview(true).workspaces[0], 'viewer', Date.now(), false);
+  assert.equal(detail.needsYou?.find(card => card.id === 'waiting')?.from.id, targets[0].principalId, 'waiting-on context keeps its historical agent');
+  for (const agent of targets) assert.equal(runInContext(`entityName({kind:'agent',id:'${agent.principalId}'})`, reloaded.context), `${agent.name} (removed)`);
+  // A rail read belongs to the workspace/viewer generation that started it, even on W -> X -> W.
+  for (const switchScope of ["activeWorkspaceId='X'; ++requestVersion; activeWorkspaceId='W'", "session={user:{id:'other-viewer'}}"]) {
+    runInContext('catchUpData=[]', reloaded.context);
+    const pending = runInContext('loadRailOverview()', reloaded.context) as Promise<void>;
+    runInContext(switchScope, reloaded.context);
+    reloaded.finishOverview(makeOverview(false)); await pending;
+    assert.equal(runInContext('catchUpData.length', reloaded.context), 0, 'a late overview cannot cross a workspace/viewer switch');
+  }
 });
