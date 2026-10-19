@@ -223,10 +223,11 @@ export function createProductionFindAccount(pool) {
       );
       // Pending consent is omitted by the resolver: never tombstone a family
       // before consent can activate it. Admin transactions returned above.
-      if (result.rowCount === 1 && result.rows[0]?.active === false) {
-        await createPostgresAdapter(pool)("RefreshToken").revokeByGrantId(refreshGrantId);
-      }
-      return result.rowCount === 1 && result.rows[0]?.active === true ? {
+      const active = result.rowCount === 1 && result.rows[0]?.active === false
+        ? await createPostgresAdapter(pool)("RefreshToken")
+          .retireInactiveHostedFamily(refreshGrantId, accountId)
+        : result.rowCount === 1 && result.rows[0]?.active === true;
+      return active ? {
         accountId,
         claims: async () => ({ sub: accountId }),
       } : undefined;

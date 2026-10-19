@@ -629,8 +629,59 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         const sharedRefresh = await refresh(latest.refresh_token);
         assert.equal(sharedRefresh.status, 200, 'another usable workspace keeps the shared family live');
         latest = await sharedRefresh.json();
-        await pool.query(`UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at = statement_timestamp()
-          WHERE grant_id = (SELECT grant_id FROM swarm.hosted_mcp_grants WHERE provider_grant_id = $1)`, [family]);
+        // Retain B's consent but temporarily remove its membership. The refresh
+        // observes inactive, then waits behind the real adapter family fence.
+        await pool.query(`UPDATE swarm.memberships SET revoked_at = statement_timestamp()
+          WHERE workspace_id = $1 AND user_id = $2`, [workspaces[1], owner]);
+        const inactive = await running.pool.query(
+          'SELECT active FROM commonswarm_oauth.resolve_hosted_grant_status($1)', [family]);
+        assert.equal(inactive.rows[0]?.active, false, 'race starts with no usable workspace');
+        const blocker = await pool.connect();
+        let racingRefresh;
+        try {
+          await blocker.query('BEGIN');
+          await blocker.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 484650))', [family]);
+          racingRefresh = refresh(latest.refresh_token);
+          // Observe a real lock waiter rather than timing the membership write.
+          let waiting = false;
+          const deadline = Date.now() + 5_000;
+          while (Date.now() < deadline) {
+            const blocked = await pool.query(`SELECT 1 FROM pg_stat_activity
+              WHERE $1::int = ANY(pg_blocking_pids(pid)) AND wait_event = 'advisory'`, [blocker.processID]);
+            if (blocked.rowCount > 0) { waiting = true; break; }
+            await new Promise(resolve => setTimeout(resolve, 10));
+          }
+          assert.ok(waiting, 'inactive refresh reached the provider-family advisory fence');
+          await pool.query(`UPDATE swarm.memberships SET revoked_at = NULL
+            WHERE workspace_id = $1 AND user_id = $2`, [workspaces[1], owner]);
+          const consent = await pool.query(`SELECT revoked_at FROM swarm.hosted_mcp_grant_workspaces
+            WHERE grant_id = (SELECT grant_id FROM swarm.hosted_mcp_grants WHERE provider_grant_id = $1)
+              AND workspace_id = $2`, [family, workspaces[1]]);
+          assert.equal(consent.rows[0]?.revoked_at, null, 'B retains its original unrevoked consent');
+          await blocker.query('COMMIT');
+          const restored = await racingRefresh;
+          assert.equal(restored.status, 200, 'fresh active state allows real HTTP refresh without reconnect');
+          latest = await restored.json();
+        } finally {
+          await blocker.query('ROLLBACK');
+          blocker.release();
+          await racingRefresh?.catch(() => {});
+        }
+        const survived = await pool.query(`SELECT count(*)::int AS n
+          FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = $1`, [family]);
+        assert.equal(survived.rows[0].n, 0, 'restored membership prevents the permanent family fence');
+        const claim = await rpc({ jsonrpc: '2.0', id: 80, method: 'tools/call', params: {
+          name: 'claim_seat', arguments: { workspace_id: workspaces[1], name: `restored-${randomUUID()}`,
+            request_id: randomUUID() },
+        } }, latest.access_token, '2025-06-18');
+        assert.equal(claim.status, 200);
+        const claimed = await claim.json();
+        assert.ok(!claimed.error && !claimed.result?.isError, 'restored workspace remains usable through MCP');
+        const seat = JSON.parse(claimed.result.content[0].text);
+        assert.equal(seat.workspace_id, workspaces[1]);
+        assert.match(seat.handle, /^seat_/u);
+        await pool.query(`UPDATE swarm.memberships SET revoked_at = statement_timestamp()
+          WHERE workspace_id = $1 AND user_id = $2`, [workspaces[1], owner]);
         const beforeRetirement = await pool.query(`SELECT count(*)::int AS n
           FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = $1`, [family]);
         assert.equal(beforeRetirement.rows[0].n, 0, 'authority consent removal has not retired provider artifacts');
@@ -639,6 +690,12 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
           (SELECT count(*)::int FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = $1) AS tombstones,
           (SELECT count(*)::int FROM commonswarm_oauth.provider_artifacts WHERE grant_id = $1) AS artifacts`, [family]);
         assert.deepEqual(retired.rows[0], { tombstones: 1, artifacts: 0 }, 'real HTTP refresh retires the zero-consent family');
+        await pool.query(`UPDATE swarm.memberships SET revoked_at = NULL
+          WHERE workspace_id = $1 AND user_id = $2`, [workspaces[1], owner]);
+        await refusedRefresh(latest.refresh_token, {}, 'invalid_grant');
+        const terminal = await running.pool.query(
+          'SELECT active FROM commonswarm_oauth.resolve_hosted_grant_status($1)', [family]);
+        assert.equal(terminal.rows[0]?.active, false, 'membership re-add after retirement cannot revive the old family');
         const independent = await refresh(subset.refresh_token);
         assert.equal(independent.status, 200, 'independent provider family remains refreshable');
         const independentStatus = await pool.query(`SELECT count(*)::int AS n
