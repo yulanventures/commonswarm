@@ -9,7 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createConnection } from "node:net";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { GrokListenerModel } from "../src/listener/grok-model.js";
 import {
   ListenerAlreadyRunningError,
@@ -88,6 +88,16 @@ import {
   renderListenerStatus,
 } from "../src/cli.js";
 
+// Every temp root is registered for removal at allocation, so a failed
+// assertion or setup throw cannot leak it. t.after runs after the test
+// body's own child/server teardown, and each root is its own registration,
+// so concurrent tests never remove one another's roots.
+async function tempRoot(t: TestContext, prefix: string): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), prefix));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  return root;
+}
+
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -137,8 +147,8 @@ function statusFor(paths: ListenerPaths, state: ListenerStatus["state"]): Listen
   };
 }
 
-test("listener status and event log are secure and reject secret-shaped fields", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("listener status and event log are secure and reject secret-shaped fields", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   const status = statusFor(target, "ready");
   await writeListenerStatus(target, status);
@@ -169,9 +179,9 @@ test("listener status and event log are secure and reject secret-shaped fields",
   );
 });
 
-test("Grok canary attempts reach the local event log and terminal detail", async () => {
+test("Grok canary attempts reach the local event log and terminal detail", async (t) => {
   const runCanary = async (passed: boolean) => {
-    const root = await mkdtemp(join(tmpdir(), "cswarm-control-canary-test-"));
+    const root = await tempRoot(t, "cswarm-control-canary-test-");
     const target = paths(root);
     const workspaceId = randomUUID();
     const principalId = randomUUID();
@@ -295,24 +305,24 @@ test("Grok canary attempts reach the local event log and terminal detail", async
   );
 });
 
-test("Claude is a durable listener status provider", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("Claude is a durable listener status provider", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   const status = { ...statusFor(target, "ready"), provider: "claude" as const };
   await writeListenerStatus(target, status);
   assert.deepEqual(await readListenerStatus(target), status);
 });
 
-test("Codex is a durable listener status provider", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("Codex is a durable listener status provider", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   const status = { ...statusFor(target, "ready"), provider: "codex" as const };
   await writeListenerStatus(target, status);
   assert.deepEqual(await readListenerStatus(target), status);
 });
 
-test("failed Claude startup keeps measured runtime and demanded API floor", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-claude-version-"));
+test("failed Claude startup keeps measured runtime and demanded API floor", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-claude-version-");
   const target = paths(root);
   const error = new AcpPermissionCanaryError(
     "Internal error: API Error: 400 Claude Code 2.1.232 does not support this model; version 2.1.251 or newer is required.",
@@ -346,8 +356,8 @@ test("failed Claude startup keeps measured runtime and demanded API floor", asyn
   assert.deepEqual(await readListenerStatus(target), final);
 });
 
-test("lifetime control socket enforces one listener and supports status/stop", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("lifetime control socket enforces one listener and supports status/stop", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   let current = statusFor(target, "ready");
   let stopped = 0;
@@ -377,9 +387,9 @@ test("lifetime control socket enforces one listener and supports status/stop", a
   await first.close();
 });
 
-test("custom state directories isolate control sockets for one principal", async () => {
-  const leftRoot = await mkdtemp(join(tmpdir(), "cswarm-control-left-"));
-  const rightRoot = await mkdtemp(join(tmpdir(), "cswarm-control-right-"));
+test("custom state directories isolate control sockets for one principal", async (t) => {
+  const leftRoot = await tempRoot(t, "cswarm-control-left-");
+  const rightRoot = await tempRoot(t, "cswarm-control-right-");
   const identity = {
     profileId: "profile-isolated-state",
     workspaceId: randomUUID(),
@@ -477,8 +487,8 @@ test("win32 keeps the legacy default pipe and namespaces custom state roots", ()
   }
 });
 
-test("control socket answers one bounded response to oversized input", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("control socket answers one bounded response to oversized input", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   const current = statusFor(target, "ready");
   const control = await startListenerControlServer({
@@ -511,8 +521,8 @@ test("control socket answers one bounded response to oversized input", async () 
   }
 });
 
-test("supervisor becomes ready, stops through the socket, and logs metadata only", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("supervisor becomes ready, stops through the socket, and logs metadata only", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   const workspaceId = randomUUID();
   const principalId = randomUUID();
@@ -570,8 +580,8 @@ test("supervisor becomes ready, stops through the socket, and logs metadata only
   }
 });
 
-test("activity publish failures persist as a local counter and stable last code", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-activity-status-test-"));
+test("activity publish failures persist as a local counter and stable last code", async (t) => {
+  const root = await tempRoot(t, "cswarm-activity-status-test-");
   const target = paths(root);
   const workspaceId = randomUUID();
   const principalId = randomUUID();
@@ -617,8 +627,8 @@ test("activity publish failures persist as a local counter and stable last code"
   );
 });
 
-test("missing socket converts a live-looking status to unclean_exit", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("missing socket converts a live-looking status to unclean_exit", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   await writeListenerStatus(target, statusFor(target, "ready"));
   const effective = await effectiveListenerStatus(target);
@@ -626,8 +636,8 @@ test("missing socket converts a live-looking status to unclean_exit", async () =
   assert.equal(effective?.lastErrorCode, "unclean_exit");
 });
 
-test("control socket handles peer RST and connection reset without crashing", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("control socket handles peer RST and connection reset without crashing", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   const current = statusFor(target, "ready");
   const control = await startListenerControlServer({
@@ -654,7 +664,7 @@ test("control socket handles peer RST and connection reset without crashing", as
 test("two starters race the startup lock: the winner selects the journal UUID and the loser's initialize never runs", { timeout: 15_000 }, async (t) => {
   const phase = (label: string) =>
     t.diagnostic(`[two-starter race] ${label}`);
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+  const root = await tempRoot(t, "cswarm-control-test-");
   const identity = {
     profileId: "profile-race",
     workspaceId: randomUUID(),
@@ -806,8 +816,8 @@ test("two starters race the startup lock: the winner selects the journal UUID an
   }
 });
 
-test("control initialize runs after live-socket rejection and before listen", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("control initialize runs after live-socket rejection and before listen", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const occupied = paths(root);
   const first = await startListenerControlServer({
     paths: occupied,
@@ -863,8 +873,8 @@ test("control initialize runs after live-socket rejection and before listen", as
   }
 });
 
-test("control initialize never runs on win32 when a live listener control socket exists", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("control initialize never runs on win32 when a live listener control socket exists", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const occupied = paths(root);
   const winner = await startListenerControlServer({
     paths: occupied,
@@ -901,8 +911,8 @@ test("control initialize never runs on win32 when a live listener control socket
   }
 });
 
-test("supervisor carries one prepare-selected instance UUID through status, events, and run", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("supervisor carries one prepare-selected instance UUID through status, events, and run", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   const workspaceId = randomUUID();
   const principalId = randomUUID();
@@ -993,8 +1003,8 @@ test("supervisor carries one prepare-selected instance UUID through status, even
   }
 });
 
-test("supervisor rejects a prepare-selected id that is not a UUID and releases the lock", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("supervisor rejects a prepare-selected id that is not a UUID and releases the lock", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   let runCalls = 0;
   await assert.rejects(
@@ -1057,8 +1067,8 @@ test("supervisor rejects a prepare-selected id that is not a UUID and releases t
   }
 });
 
-test("prepare failure rejects cleanly, releases the startup lock, and allows one subsequent starter", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("prepare failure rejects cleanly, releases the startup lock, and allows one subsequent starter", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   let runCalls = 0;
   await assert.rejects(
@@ -1124,8 +1134,8 @@ test("prepare failure rejects cleanly, releases the startup lock, and allows one
   }
 });
 
-test("old status without delivery fields reads as nulls and is never rewritten", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("old status without delivery fields reads as nulls and is never rewritten", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   const ts = "2026-07-30T00:00:00.000Z";
   // A version-1 status file exactly as the pre-delivery writer produced it.
@@ -1168,8 +1178,8 @@ test("old status without delivery fields reads as nulls and is never rewritten",
   assert.equal(afterBytes, beforeBytes);
 });
 
-test("new status with delivery metadata round-trips exactly and writes require every field", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("new status with delivery metadata round-trips exactly and writes require every field", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   const ts = "2026-07-31T12:00:00.000Z";
   const status: ListenerStatus = {
@@ -1204,8 +1214,8 @@ test("new status with delivery metadata round-trips exactly and writes require e
   }
 });
 
-test("status ignores unknown keys, renders old counters as unmeasured, and rejects malformed known keys", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("status ignores unknown keys, renders old counters as unmeasured, and rejects malformed known keys", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   const writeRaw = async (mutate: (row: Record<string, unknown>) => void) => {
     const row = { ...statusFor(target, "ready") } as Record<string, unknown>;
@@ -1349,8 +1359,8 @@ test("status ignores unknown keys, renders old counters as unmeasured, and rejec
   assert.equal(valid?.pendingDeliveryCount, 0);
 });
 
-test("listener events accept the four new bounded delivery keys and reject sensitive fields", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("listener events accept the four new bounded delivery keys and reject sensitive fields", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   const ts = "2026-07-31T12:00:00.000Z";
 
@@ -1447,8 +1457,8 @@ async function readEvents(
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
-test("restart backoff ends by the live credential's renewal deadline", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-deadline-"));
+test("restart backoff ends by the live credential's renewal deadline", async (t) => {
+  const root = await tempRoot(t, "cswarm-restart-deadline-");
   const start = Date.parse("2026-07-30T00:00:00.000Z");
   let current = start;
   let runs = 0;
@@ -1470,8 +1480,8 @@ test("restart backoff ends by the live credential's renewal deadline", async () 
   assert.equal(current, start + LISTENER_REQUEST_WAIT_FLOOR_MS);
 });
 
-test("supervisor restarts keep the request floor after the renewal deadline", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-floor-"));
+test("supervisor restarts keep the request floor after the renewal deadline", async (t) => {
+  const root = await tempRoot(t, "cswarm-restart-floor-");
   const start = Date.parse("2026-07-30T00:00:00.000Z");
   let current = start;
   const runs: number[] = [];
@@ -1499,8 +1509,8 @@ test("supervisor restarts keep the request floor after the renewal deadline", as
   }
 });
 
-test("a sustained supervisor restart that begins before renewal is due ends at the six-minute lead", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-renewal-due-"));
+test("a sustained supervisor restart that begins before renewal is due ends at the six-minute lead", async (t) => {
+  const root = await tempRoot(t, "cswarm-restart-renewal-due-");
   try {
     const start = Date.parse("2026-07-30T00:00:00.000Z");
     const expiry = start + 7 * 60_000;
@@ -1551,8 +1561,8 @@ test("a sustained supervisor restart that begins before renewal is due ends at t
   }
 });
 
-test("D-051: a transient stop restarts a bounded number of times, then stays down and says why", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-test-"));
+test("D-051: a transient stop restarts a bounded number of times, then stays down and says why", async (t) => {
+  const root = await tempRoot(t, "cswarm-restart-test-");
   const target = paths(root);
   let runs = 0;
   const delays: number[] = [];
@@ -1593,8 +1603,8 @@ test("D-051: a transient stop restarts a bounded number of times, then stays dow
   assert.equal(failed.restartable, true);
 });
 
-test("D-051: a cause that cannot clear stops permanently and is never restarted", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-test-"));
+test("D-051: a cause that cannot clear stops permanently and is never restarted", async (t) => {
+  const root = await tempRoot(t, "cswarm-restart-test-");
 
   // A revoked credential must not loop: the supervisor must not retry it once.
   const credentialTarget = paths(root);
@@ -1644,8 +1654,8 @@ test("D-051: a cause that cannot clear stops permanently and is never restarted"
   assert.equal(failed.restart_attempts, 3);
 });
 
-test("D-051: a listener that recovers on a restart is not reported as failed", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-test-"));
+test("D-051: a listener that recovers on a restart is not reported as failed", async (t) => {
+  const root = await tempRoot(t, "cswarm-restart-test-");
   const target = paths(root);
   let runs = 0;
   const status = await runListenerSupervisor({
@@ -1665,8 +1675,8 @@ test("D-051: a listener that recovers on a restart is not reported as failed", a
   assert.equal(status.lastErrorCode, null);
 });
 
-test("nextAttemptAt clears as the next attempt begins", { timeout: 15_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-attempt-"));
+test("nextAttemptAt clears as the next attempt begins", { timeout: 15_000 }, async (t) => {
+  const root = await tempRoot(t, "cswarm-restart-attempt-");
   const target = paths(root);
   let runs = 0;
   const observed = await runListenerSupervisor({
@@ -1688,8 +1698,8 @@ test("nextAttemptAt clears as the next attempt begins", { timeout: 15_000 }, asy
   assert.equal(observed.state, "stopped");
 });
 
-test("busy push claims keep a five-minute reconcile cadence without a lapse", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-push-cadence-"));
+test("busy push claims keep a five-minute reconcile cadence without a lapse", async (t) => {
+  const root = await tempRoot(t, "cswarm-push-cadence-");
   const workspaceId = randomUUID();
   const principalId = randomUUID();
   const start = Date.parse("2026-09-01T09:59:00.000Z");
@@ -1875,8 +1885,8 @@ test("credential and claim status use the answering edge and current retry state
   assert.match(h0, /listener has stopped; no further listener action is needed/);
 });
 
-test("restart and terminal transitions clear claim and credential check fields", { timeout: 15_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-retry-fields-"));
+test("restart and terminal transitions clear claim and credential check fields", { timeout: 15_000 }, async (t) => {
+  const root = await tempRoot(t, "cswarm-retry-fields-");
   try {
     const target = paths(root);
     const ts = new Date().toISOString();
@@ -1945,8 +1955,8 @@ test("D-051: the restart delay is bounded by its own cap, not the read backoff c
   assert.ok(LISTENER_RESTART_SUSTAINED_MAX_MS > LISTENER_RESTART_MAX_MS);
 });
 
-test("a 500 past the fast attempts keeps retrying and recovers", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-sustain-"));
+test("a 500 past the fast attempts keeps retrying and recovers", async (t) => {
+  const root = await tempRoot(t, "cswarm-sustain-");
   const target = paths(root);
   let runs = 0;
   const delays: number[] = [];
@@ -1995,8 +2005,8 @@ test("a 500 past the fast attempts keeps retrying and recovers", async () => {
   assert.equal(events.some((event) => event.event === "listener_failed"), false);
 });
 
-test("cswarm listen stop ends a backoff sleep at once", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-stop-backoff-"));
+test("cswarm listen stop ends a backoff sleep at once", async (t) => {
+  const root = await tempRoot(t, "cswarm-stop-backoff-");
   const target = paths(root);
   let runs = 0;
   const started = Date.now();
@@ -2041,8 +2051,8 @@ test("cswarm listen stop ends a backoff sleep at once", async () => {
   assert.ok(Date.now() - started < 5_000, "stop must not wait out the backoff");
 });
 
-test("the restart attempt count resets after a clean run", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-clean-run-"));
+test("the restart attempt count resets after a clean run", async (t) => {
+  const root = await tempRoot(t, "cswarm-clean-run-");
   const target = paths(root);
   const workspaceId = randomUUID();
   const principalId = randomUUID();
@@ -2086,8 +2096,8 @@ test("the restart attempt count resets after a clean run", async () => {
   assert.equal(delays[LISTENER_RESTART_MAX_ATTEMPTS + 1], LISTENER_REQUEST_WAIT_FLOOR_MS);
 });
 
-test("D-051: one rejected write does not poison the rest of the supervisor's writes", { timeout: 15_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-test-"));
+test("D-051: one rejected write does not poison the rest of the supervisor's writes", { timeout: 15_000 }, async (t) => {
+  const root = await tempRoot(t, "cswarm-restart-test-");
   const target = paths(root);
   const workspaceId = randomUUID();
   const principalId = randomUUID();
@@ -2372,8 +2382,8 @@ test("D-057: classification is closed — an unrecognised failure never restarts
   );
 });
 
-test("D-057: a non-restartable delivery failure is not restarted by the supervisor", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-test-"));
+test("D-057: a non-restartable delivery failure is not restarted by the supervisor", async (t) => {
+  const root = await tempRoot(t, "cswarm-restart-test-");
   const target = paths(root);
   let runs = 0;
   const status = await runListenerSupervisor({
@@ -2403,8 +2413,8 @@ test("D-057: a non-restartable delivery failure is not restarted by the supervis
  * hosts drained stderr. The tail is LOCAL-ONLY — these tests pin the two
  * schema gates and the supervisor's consumption of it. */
 
-test("appendListenerEvent: worker_stderr_tail is exempt from the 128-char cap but keeps its own bound and the secret scan", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("appendListenerEvent: worker_stderr_tail is exempt from the 128-char cap but keeps its own bound and the secret scan", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   const ts = "2026-08-19T00:00:00.000Z";
   const longTail = "x".repeat(300);
@@ -2449,8 +2459,8 @@ test("appendListenerEvent: worker_stderr_tail is exempt from the 128-char cap bu
   );
 });
 
-test("appendListenerEvent: turn_budget_ms must be a positive safe integer", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("appendListenerEvent: turn_budget_ms must be a positive safe integer", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   const ts = "2026-08-19T00:00:00.000Z";
   await appendListenerEvent(target, {
@@ -2468,8 +2478,8 @@ test("appendListenerEvent: turn_budget_ms must be a positive safe integer", asyn
   }
 });
 
-test("status lastWorkerStderrTail: round-trips, absent key normalizes to null, secrets are rejected", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("status lastWorkerStderrTail: round-trips, absent key normalizes to null, secrets are rejected", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   const base = statusFor(target, "failed");
   await writeListenerStatus(target, {
@@ -2493,8 +2503,8 @@ test("status lastWorkerStderrTail: round-trips, absent key normalizes to null, s
   await assert.rejects(readListenerStatus(target), /malformed/);
 });
 
-test("status lastErrorDetail: round-trips and old files without it normalize to null", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("status lastErrorDetail: round-trips and old files without it normalize to null", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   const base = statusFor(target, "failed");
   await writeListenerStatus(target, {
@@ -2519,7 +2529,7 @@ test("status lastErrorDetail: round-trips and old files without it normalize to 
   await assert.rejects(readListenerStatus(target), /malformed/);
 });
 
-test("SECRET_SHAPE_RE: one case per control site per shape", async () => {
+test("SECRET_SHAPE_RE: one case per control site per shape", async (t) => {
   const shapes = [
     { name: "agent-token", value: `swm_agt_${"A".repeat(43)}`, leak: /swm_agt_/i },
     { name: "wake-topic", value: `cswarm-wake:${"B".repeat(43)}`, leak: /cswarm-wake:/i },
@@ -2527,7 +2537,7 @@ test("SECRET_SHAPE_RE: one case per control site per shape", async () => {
   const failures: string[] = [];
 
   for (const shape of shapes) {
-    const root = await mkdtemp(join(tmpdir(), "cswarm-secret-shape-"));
+    const root = await tempRoot(t, "cswarm-secret-shape-");
     const target = paths(root);
     const ts = "2026-08-19T00:00:00.000Z";
 
@@ -2574,9 +2584,7 @@ test("SECRET_SHAPE_RE: one case per control site per shape", async () => {
       }
     }
 
-    const supervisorRoot = await mkdtemp(
-      join(tmpdir(), "cswarm-secret-shape-sup-"),
-    );
+    const supervisorRoot = await tempRoot(t, "cswarm-secret-shape-sup-");
     const supervisorTarget = paths(supervisorRoot);
     const final = await runListenerSupervisor({
       paths: supervisorTarget,
@@ -2620,8 +2628,8 @@ test("SECRET_SHAPE_RE: one case per control site per shape", async () => {
   assert.deepEqual(failures, []);
 });
 
-test("a failing worker's stderr tail reaches the terminal failure event and status", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("a failing worker's stderr tail reaches the terminal failure event and status", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   const workspaceId = randomUUID();
   const principalId = randomUUID();
@@ -2660,8 +2668,8 @@ test("a failing worker's stderr tail reaches the terminal failure event and stat
   );
 });
 
-test("a restart carries the dead worker's tail; reaching ready clears it; a healthy stop writes NO tail field", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("a restart carries the dead worker's tail; reaching ready clears it; a healthy stop writes NO tail field", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   const workspaceId = randomUUID();
   const principalId = randomUUID();
@@ -2757,8 +2765,8 @@ test("a restart carries the dead worker's tail; reaching ready clears it; a heal
   }
 });
 
-test("an oversized tail is fitted from the front so the event line stays under its byte cap", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("an oversized tail is fitted from the front so the event line stays under its byte cap", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   const workspaceId = randomUUID();
   const principalId = randomUUID();
@@ -2786,7 +2794,7 @@ test("an oversized tail is fitted from the front so the event line stays under i
   assert.match(await readFile(target.logPath, "utf8"), /listener_failed/);
 });
 
-test("a tail that expands under JSON escaping is fitted by SERIALIZED size, and the failure line survives", async () => {
+test("a tail that expands under JSON escaping is fitted by SERIALIZED size, and the failure line survives", async (t) => {
   /* A raw-byte budget passes 2000 backslashes, but each serializes to two
    * bytes — the line blows the 4096 cap, appendListenerEvent throws, the
    * write chain swallows it, and the failure line is silently dropped: the
@@ -2795,7 +2803,7 @@ test("a tail that expands under JSON escaping is fitted by SERIALIZED size, and 
     ["backslashes", "\\".repeat(2_000)],
     ["quotes", '"'.repeat(2_000)],
   ] as const) {
-    const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+    const root = await tempRoot(t, "cswarm-control-test-");
     const target = paths(root);
     const final = await runListenerSupervisor({
       paths: target,
@@ -2827,8 +2835,8 @@ test("a tail that expands under JSON escaping is fitted by SERIALIZED size, and 
   }
 });
 
-test("a second worker's failure never inherits the first worker's tail", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-control-test-"));
+test("a second worker's failure never inherits the first worker's tail", async (t) => {
+  const root = await tempRoot(t, "cswarm-control-test-");
   const target = paths(root);
   let tailSlot: string | null = "worker-one: died with this stderr";
   const final = await runListenerSupervisor({
@@ -2869,8 +2877,8 @@ test("a second worker's failure never inherits the first worker's tail", async (
   );
 });
 
-test("read retry episodes persist, recover once, and log typed totals", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-read-health-"));
+test("read retry episodes persist, recover once, and log typed totals", async (t) => {
+  const root = await tempRoot(t, "cswarm-read-health-");
   const target = paths(root);
   const workspaceId = randomUUID();
   const principalId = randomUUID();
@@ -2958,8 +2966,8 @@ test("read retry episodes persist, recover once, and log typed totals", async ()
   assert.equal(recovered[0]!.duration_ms, 65_000);
 });
 
-test("a ready listener names a read retry, target URL, and next attempt", { timeout: 15_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-ready-read-retry-"));
+test("a ready listener names a read retry, target URL, and next attempt", { timeout: 15_000 }, async (t) => {
+  const root = await tempRoot(t, "cswarm-ready-read-retry-");
   try {
     const target = paths(root);
     const workspaceId = randomUUID();
@@ -2995,8 +3003,8 @@ test("a ready listener names a read retry, target URL, and next attempt", { time
   }
 });
 
-test("clearing a credential check preserves a failing claim and start names its edge", { timeout: 15_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-claim-check-status-"));
+test("clearing a credential check preserves a failing claim and start names its edge", { timeout: 15_000 }, async (t) => {
+  const root = await tempRoot(t, "cswarm-claim-check-status-");
   try {
     const target = paths(root);
     const workspaceId = randomUUID();
