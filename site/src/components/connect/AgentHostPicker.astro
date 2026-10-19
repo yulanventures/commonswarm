@@ -226,6 +226,15 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
         </div>
       )}
 
+      {/* A generated-prompt host (Grok Bot): the prompt is minted per person, so there is
+          no sentence to copy here. This button carries the same hook as the Terminal
+          agent chip, and the dashboard opens the same prompt flow for both. */}
+      {host.status === null && (
+        <div class="hm-ahp__prompt">
+          <button class="hm-ahp__button" type="button" data-agent-owner-self>Generate the setup prompt</button>
+        </div>
+      )}
+
       {host.status && host.status !== "waiting" && audience === "setter" && (
         <p class="hm-ahp__waiting" data-ahp-waiting role="status" aria-live="polite" hidden>
           <span class="hm-ahp__pulse" aria-hidden="true"></span>

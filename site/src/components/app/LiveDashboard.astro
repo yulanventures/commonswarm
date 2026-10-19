@@ -10724,7 +10724,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       event.preventDefault(); const selection = peopleDialogState.selected; peopleDialogState.selected = null;
       renderDialogRoster(); (document.getElementById(`pd-${selection.type}-${selection.id}`) ?? one<HTMLElement>("#pd-page-title"))?.focus({ preventScroll: true });
     });
-    one<HTMLButtonElement>("[data-agent-owner-self]")?.addEventListener("click", openConnect);
+    for (const button of all<HTMLButtonElement>("[data-agent-owner-self]")) {
+      button.addEventListener("click", openConnect);
+    }
     one<HTMLButtonElement>("[data-agent-owner-teammate]")?.addEventListener(
       "click",
       () => openInvite("agent-choice"),

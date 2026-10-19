@@ -30,6 +30,7 @@ export type AgentHostId =
   | "chatgpt"
   | "muse"
   | "grok"
+  | "grok-bot"
   | "gemini"
   | "claude-code"
   | "codex"
@@ -75,7 +76,7 @@ export interface AgentHost {
   /** Who makes it, in the tile's second line. */
   maker: string;
   group: AgentHostGroup;
-  /** Null only for routes that are not a hosted connector (the terminal key flow). */
+  /** Null only for routes that are not a hosted connector (the generated-prompt key flow). */
   status: AgentHostStatus | null;
   /** Repository evidence for the status, as path:line. Tests require it. */
   evidence: string;
@@ -243,6 +244,31 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
     notes: ["Business accounts need an admin to add the connector first."],
   },
   {
+    /* Not the grok.com connector above: a Grok Bot works on its own computer with the
+       generated setup prompt (site/src/pages/guides/grok-bot.astro). Status stays null,
+       like the terminal route it shares, so no screen may describe it as a connector. */
+    id: "grok-bot",
+    name: "Grok Bot",
+    maker: "xAI",
+    group: "chat",
+    status: null,
+    evidence: "site/src/pages/guides/grok-bot.astro:43",
+    logo: { src: "/brand/works-with/grok-bot.svg" },
+    joiner: "primary",
+    desktopSignIn: false,
+    steps: [
+      { text: "Choose Generate the setup prompt below, give the Bot a name, and copy the prompt it gives you." },
+      { text: "Paste that prompt into the Bot's chat. The Bot uses the cswarm tool on its own computer, connects itself, and confirms the result." },
+      {
+        text: "The full guide covers the optional wake preview and its limits:",
+        link: { href: "/guides/grok-bot", label: "Read the Grok Bot guide" },
+      },
+    ],
+    notes: [
+      "Without wake, the Bot reads its messages whenever it checks, including at each turn. Wake is a preview, and waking an idle Bot has not been proved yet.",
+    ],
+  },
+  {
     id: "gemini",
     name: "Gemini",
     maker: "Google",
@@ -355,7 +381,9 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
  * own first step.
  */
 export function hostConnectLine(host: AgentHost): string {
-  if (host.status === "waiting") return host.steps[0]?.text ?? "";
+  /* A generated-prompt host has no connector to add and no sign-in to repeat; its own
+     first step is the summary, as it is for a host that cannot connect yet. */
+  if (host.status === "waiting" || host.status === null) return host.steps[0]?.text ?? "";
   const app = host.id === "other-app" ? "the app" : host.name;
   const start = host.steps.some((step) => step.link)
     ? `Open the link to add CommonSwarm to ${app}`
@@ -406,7 +434,11 @@ export const INVITE_CONNECT_LEAD =
 export const INVITE_CONNECT_FOOTNOTE =
   "What it posts to the shared channel is visible to everyone in Home. Owners and admins can remove any agent from Home.";
 
-/** Assistants a joiner may preset for step 2 (chat apps first, then more). */
+/**
+ * Assistants a joiner may preset for step 2 (chat apps first, then more). The invite
+ * surface carries no keys, so generated-prompt routes (a null status) stay off it;
+ * a joiner adds those later from the workspace's own Add an agent page.
+ */
 export function inviteAssistantHosts(): AgentHost[] {
-  return agentHostsFor("joiner").filter((host) => host.id !== "terminal");
+  return agentHostsFor("joiner").filter((host) => host.id !== "terminal" && host.status !== null);
 }

@@ -183,12 +183,15 @@ test("Add an agent asks which app the agent lives in; the key flow and the perso
   assert.equal(terminal.length, 1, "the setter renders one Terminal agent chip");
   assert.equal(terminal[0]!.props["data-agent-owner-self"], "",
     "the actual Terminal chip must expose the key-flow hook, including in More apps");
-  assert.deepEqual(buttons.filter((button) => button.props["data-agent-owner-self"] !== undefined)
+  /* The key-flow hook also sits on a generated-prompt panel's Generate button (Grok Bot),
+     which is not a host chip; among chips only Terminal agent carries it. */
+  assert.deepEqual(buttons.filter((button) => button.props["data-agent-owner-self"] !== undefined
+    && button.props["data-ahp-host"] !== undefined)
     .map((button) => button.props["data-ahp-host"]), ["terminal"]);
   assert.ok(buttons.some((button) => button.props["data-ahp-host"] === "claude"));
   assert.equal(pickerElements("joiner").some((button) => button.props["data-ahp-host"] === "terminal"), false);
   assert.match(picker, /data-agent-owner-teammate>Invite someone</);
-  assert.match(dashboard, /\[data-agent-owner-self\]"\)\?\.addEventListener\("click", openConnect\)/);
+  assert.match(dashboard, /all<HTMLButtonElement>\("\[data-agent-owner-self\]"\)[\s\S]*?addEventListener\("click", openConnect\)/);
   assert.match(dashboard, /\[data-agent-owner-teammate\]"\)\?\.addEventListener\(/);
   assert.match(dashboard, /data-add-agent\]"\)\?\.addEventListener\("click", openAgentChoice\)/);
   assert.match(dashboard, /inviteWorkspaceMember/);
