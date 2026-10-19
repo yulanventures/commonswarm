@@ -1624,3 +1624,195 @@ test("same-owner revoked local principal is reclaimable through the hosted comma
   assert.deepEqual([...audits], [{ outcome: "accepted",
     detail: `reclaimed=1; closed_seats=0; principal_ids=${localPrincipal!.principal_id}; closed_seat_ids=` }]);
 });
+
+// The normal server harness applies the complete historical chain. These probes
+// inspect that migrated database without replaying DDL over the shared schemas.
+test("connection policy storage preserves nullable shape and exact existing ACLs", async () => {
+  const columns = await sql<{ table_name: string; column_name: string; type: string; nullable: boolean; has_default: boolean; column_acl: string | null }[]>`
+    SELECT a.attrelid::regclass::text AS table_name, a.attname::text AS column_name,
+      format_type(a.atttypid, a.atttypmod) AS type, NOT a.attnotnull AS nullable,
+      a.atthasdef AS has_default, a.attacl::text AS column_acl
+    FROM pg_attribute a
+    WHERE (a.attrelid IN ('swarm.hosted_mcp_grants'::regclass, 'swarm.renewal_grants'::regclass)
+        AND a.attname IN ('connection_expires_at', 'connection_expired_at'))
+      OR (a.attrelid = 'swarm.household_content_connections'::regclass AND a.attname = 'renewal_grant_id')
+    ORDER BY table_name, column_name`;
+  assert.deepEqual([...columns], [
+    ...["connection_expired_at", "connection_expires_at"].map(column_name => ({
+      table_name: "swarm.hosted_mcp_grants", column_name, type: "timestamp with time zone",
+      nullable: true, has_default: false, column_acl: null,
+    })),
+    { table_name: "swarm.household_content_connections", column_name: "renewal_grant_id",
+      type: "uuid", nullable: true, has_default: false, column_acl: null },
+    ...["connection_expired_at", "connection_expires_at"].map(column_name => ({
+      table_name: "swarm.renewal_grants", column_name, type: "timestamp with time zone",
+      nullable: true, has_default: false, column_acl: null,
+    })),
+  ]);
+  const relations = await sql<{ name: string; owner: string; rls: boolean; grants: string[] }[]>`
+    SELECT c.oid::regclass::text AS name, pg_get_userbyid(c.relowner) AS owner,
+      c.relrowsecurity AS rls, ARRAY(
+        SELECT pg_get_userbyid(p.grantee) || ':' || p.privilege_type || ':' || p.is_grantable::text
+        FROM aclexplode(c.relacl) p WHERE p.grantee <> c.relowner
+        ORDER BY 1
+      ) AS grants
+    FROM pg_class c WHERE c.oid IN ('swarm.hosted_mcp_grants'::regclass,
+      'swarm.renewal_grants'::regclass, 'swarm.household_content_connections'::regclass,
+      'commonswarm_oauth.registered_clients'::regclass) ORDER BY name`;
+  assert.deepEqual([...relations], [
+    { name: "commonswarm_oauth.registered_clients", owner: "swarm_admin", rls: true,
+      grants: ["DELETE", "INSERT", "SELECT", "UPDATE"].map(p => `commonswarm_oauth_runtime:${p}:false`) },
+    { name: "swarm.hosted_mcp_grants", owner: "swarm_admin", rls: true,
+      grants: ["INSERT", "SELECT", "UPDATE"].map(p => `swarm_command:${p}:false`) },
+    { name: "swarm.household_content_connections", owner: "swarm_admin", rls: true,
+      grants: ["INSERT", "SELECT"].map(p => `swarm_command:${p}:false`) },
+    { name: "swarm.renewal_grants", owner: "swarm_admin", rls: true,
+      grants: ["INSERT", "SELECT", "UPDATE"].map(p => `swarm_command:${p}:false`) },
+  ]);
+  const contentColumnGrants = await sql<{ column_name: string; role: string; privilege: string; grantable: boolean }[]>`
+    SELECT a.attname::text AS column_name, pg_get_userbyid(p.grantee) AS role,
+      p.privilege_type AS privilege, p.is_grantable AS grantable
+    FROM pg_attribute a CROSS JOIN LATERAL aclexplode(a.attacl) p
+    WHERE a.attrelid = 'swarm.household_content_connections'::regclass ORDER BY column_name, role, privilege`;
+  assert.deepEqual([...contentColumnGrants], ["connection_id", "consent_receipt_id", "expires_at", "operations", "revoked_at"]
+    .map(column_name => ({ column_name, role: "swarm_command", privilege: "UPDATE", grantable: false })));
+  const functions = await sql<{ signature: string; owner: string; grants: string[] }[]>`
+    SELECT p.oid::regprocedure::text AS signature, pg_get_userbyid(p.proowner) AS owner,
+      ARRAY(SELECT pg_get_userbyid(a.grantee) || ':' || a.privilege_type || ':' || a.is_grantable::text
+        FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner ORDER BY 1) AS grants
+    FROM pg_proc p WHERE p.oid IN (
+      'commonswarm_oauth.resolve_hosted_grant_status(text)'::regprocedure,
+      'swarm.prepare_renewal_grant(uuid,uuid)'::regprocedure,
+      'swarm.record_renewal_grant_use(uuid,uuid,text)'::regprocedure,
+      'swarm.resolve_hosted_grant_authorization(uuid,uuid,uuid,text)'::regprocedure,
+      'swarm.resolve_hosted_seat_command_authorization(uuid,text,text)'::regprocedure,
+      'swarm.resolve_hosted_seat_read_authorization(uuid,text,text)'::regprocedure
+    ) ORDER BY signature`;
+  assert.deepEqual([...functions], [
+    ["commonswarm_oauth.resolve_hosted_grant_status(text)", "commonswarm_oauth_runtime"],
+    ["swarm.prepare_renewal_grant(uuid,uuid)", "swarm_command"],
+    ["swarm.record_renewal_grant_use(uuid,uuid,text)", "swarm_command", "swarm_read"],
+    ["swarm.resolve_hosted_grant_authorization(uuid,uuid,uuid,text)", "swarm_command"],
+    ["swarm.resolve_hosted_seat_command_authorization(uuid,text,text)", "swarm_command"],
+    ["swarm.resolve_hosted_seat_read_authorization(uuid,text,text)", "swarm_read"],
+  ].map(([signature, ...roles]) => ({ signature, owner: "swarm_admin", grants: roles.map(role => `${role}:EXECUTE:false`) })));
+  const [shape] = await sql<{ fk: boolean; dcr: boolean; bearer: boolean }[]>`
+    SELECT EXISTS (SELECT 1 FROM pg_constraint c
+      WHERE c.conrelid = 'swarm.household_content_connections'::regclass AND c.contype = 'f'
+        AND c.confrelid = 'swarm.renewal_grants'::regclass AND c.convalidated
+        AND NOT c.condeferrable AND c.confupdtype = 'a' AND c.confdeltype = 'a'
+        AND c.conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = c.conrelid AND attname = 'renewal_grant_id')]
+        AND c.confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = c.confrelid AND attname = 'renewal_grant_id')]) AS fk,
+      (SELECT NOT attnotnull AND atthasdef FROM pg_attribute
+        WHERE attrelid = 'commonswarm_oauth.registered_clients'::regclass AND attname = 'expires_at') AS dcr,
+      (SELECT attnotnull FROM pg_attribute WHERE attrelid = 'swarm.agent_tokens'::regclass AND attname = 'expires_at') AS bearer`;
+  assert.deepEqual(shape, { fk: true, dcr: true, bearer: true });
+  const indexes = await sql<{ table_name: string; key: string; predicate: string; valid: boolean }[]>`
+    SELECT i.indrelid::regclass::text AS table_name, a.attname::text AS key,
+      pg_get_expr(i.indpred, i.indrelid) AS predicate,
+      i.indisvalid AND i.indisready AND NOT i.indisunique AND i.indnkeyatts = 1 AND i.indnatts = 1 AS valid
+    FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+    WHERE i.indrelid IN ('swarm.hosted_mcp_grants'::regclass, 'swarm.renewal_grants'::regclass)
+      AND a.attname = 'connection_expires_at' ORDER BY table_name`;
+  assert.deepEqual([...indexes], ["swarm.hosted_mcp_grants", "swarm.renewal_grants"].map(table_name => ({
+    table_name, key: "connection_expires_at",
+    predicate: "((connection_expires_at IS NOT NULL) AND (connection_expired_at IS NULL))", valid: true,
+  })));
+});
+
+test("legacy hosted and local inserts keep NULL policy and nullable approval linkage enforces its FK", async () => {
+  const fixture = await seedHostedFixture();
+  const rollback = new Error("rollback connection compatibility fixtures");
+  await sql.begin(async tx => {
+    const principal = randomUUID(), run = randomUUID(), renewal = randomUUID(), receipt = randomUUID(), device = randomUUID();
+    await tx`INSERT INTO swarm.devices (device_id, user_id, label)
+      VALUES (${device}::uuid, ${fixture.owner}::uuid, 'policy-compat-device')`;
+    await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
+      VALUES (${principal}::uuid, ${fixture.workspaceA}::uuid, ${fixture.owner}::uuid, 'policy-local')`;
+    await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id)
+      VALUES (${run}::uuid, ${principal}::uuid, ${device}::uuid)`;
+    await tx.unsafe("SET LOCAL ROLE swarm_command");
+    await tx`INSERT INTO swarm.renewal_grants (renewal_grant_id, workspace_id, principal_id, run_id,
+      created_by, horizon_expires_at, max_successors)
+      VALUES (${renewal}::uuid, ${fixture.workspaceA}::uuid, ${principal}::uuid, ${run}::uuid,
+        ${fixture.owner}::uuid, statement_timestamp() + interval '30 days', 800)`;
+    const [localGrant] = await tx`SELECT kind, max_successors, connection_expires_at, connection_expired_at,
+      horizon_expires_at > statement_timestamp() AS finite FROM swarm.renewal_grants WHERE renewal_grant_id = ${renewal}::uuid`;
+    assert.deepEqual(localGrant, { kind: "timeboxed", max_successors: 800,
+      connection_expires_at: null, connection_expired_at: null, finite: true });
+    const [hosted] = await tx`SELECT connection_expires_at, connection_expired_at
+      FROM swarm.hosted_mcp_grants WHERE grant_id = ${fixture.grantA}::uuid`;
+    assert.deepEqual(hosted, { connection_expires_at: null, connection_expired_at: null });
+    await tx.unsafe("RESET ROLE");
+    await tx`INSERT INTO swarm.household_workspace_boundaries (workspace_id, purpose, owner_user_id)
+      VALUES (${fixture.workspaceA}::uuid, 'personal', ${fixture.owner}::uuid)`;
+    await tx`INSERT INTO swarm.household_member_content_roles (workspace_id, user_id, content_role, content_consent_id, confirmed_at)
+      VALUES (${fixture.workspaceA}::uuid, ${fixture.owner}::uuid, 'editor', ${receipt}::uuid, statement_timestamp())`;
+    const connection = randomUUID();
+    await tx`INSERT INTO swarm.household_content_connections (connection_id, grant_id, workspace_id, principal_id,
+      owner_user_id, purpose, operations, consent_receipt_id, expires_at)
+      VALUES (${connection}::uuid, ${randomUUID()}::uuid, ${fixture.workspaceA}::uuid, ${principal}::uuid,
+        ${fixture.owner}::uuid, 'personal', ARRAY['read'], ${receipt}::uuid, statement_timestamp() + interval '1 hour')`;
+    const [approval] = await tx`SELECT renewal_grant_id FROM swarm.household_content_connections WHERE connection_id = ${connection}::uuid`;
+    assert.equal(approval?.renewal_grant_id, null, "old approval INSERT omits the new FK");
+    await tx`UPDATE swarm.household_content_connections SET renewal_grant_id = ${renewal}::uuid WHERE connection_id = ${connection}::uuid`;
+    await assert.rejects(tx.savepoint(async sp => {
+      await sp`UPDATE swarm.household_content_connections SET renewal_grant_id = ${randomUUID()}::uuid WHERE connection_id = ${connection}::uuid`;
+    }), { code: "23503" }, "missing family fails the real FK after a valid family succeeds");
+    const [linked] = await tx`SELECT renewal_grant_id FROM swarm.household_content_connections WHERE connection_id = ${connection}::uuid`;
+    assert.equal(linked?.renewal_grant_id, renewal);
+    // Store both independent terminal evidence and an optional deadline; this
+    // slice adds no new pair/order policy or default to either grant family.
+    const [hostedFence] = await tx`UPDATE swarm.hosted_mcp_grants SET connection_expires_at = statement_timestamp() + interval '1 day',
+      connection_expired_at = statement_timestamp() WHERE grant_id = ${fixture.grantA}::uuid
+      RETURNING connection_expires_at IS NOT NULL AND connection_expired_at IS NOT NULL AS stored`;
+    assert.equal(hostedFence?.stored, true);
+    const [localFence] = await tx`UPDATE swarm.renewal_grants SET connection_expired_at = statement_timestamp()
+      WHERE renewal_grant_id = ${renewal}::uuid
+      RETURNING connection_expires_at IS NULL AND connection_expired_at IS NOT NULL AS stored`;
+    assert.equal(localFence?.stored, true);
+    throw rollback;
+  }).catch(error => { if (error !== rollback) throw error; });
+  assert.equal(await providerActive(fixture.grantA), true, "NULL policy preserves old hosted authorization");
+  await providerRefresh(fixture);
+});
+
+test("finite DCR registration lifecycle still uses the production store and runtime role", async () => {
+  const requireService = createRequire(new URL("../../services/mcp-auth/package.json", import.meta.url));
+  const { Pool } = requireService("pg");
+  const pool = new Pool({ connectionString: oauthDatabaseUrl, max: 1 });
+  const { createPostgresRegistrationStore } = await import(new URL(
+    "../../services/mcp-auth/src/registration.js", import.meta.url).href);
+  const store = createPostgresRegistrationStore(pool);
+  const live = `compat-live-${randomUUID()}`, expired = `compat-expired-${randomUUID()}`, nullable = `compat-null-${randomUUID()}`;
+  const metadata = { redirect_uris: ["https://example.test/callback"] };
+  try {
+    await store.upsert(live, metadata);
+    assert.deepEqual(await store.find(live), metadata);
+    await store.markUsed(live);
+    const result = await pool.query(`SELECT last_used_at IS NOT NULL AS used,
+      expires_at > statement_timestamp() + interval '29 days' AS finite
+      FROM commonswarm_oauth.registered_clients WHERE client_id = $1`, [live]);
+    assert.deepEqual(result.rows, [{ used: true, finite: true }]);
+    await pool.query(`INSERT INTO commonswarm_oauth.registered_clients (client_id, metadata, registered_at, expires_at)
+      VALUES ($1, '{}'::jsonb, statement_timestamp() - interval '2 days', statement_timestamp() - interval '1 day')`, [expired]);
+    await assert.rejects(pool.query(`INSERT INTO commonswarm_oauth.registered_clients (client_id, metadata, expires_at)
+      VALUES ($1, '{}'::jsonb, statement_timestamp() - interval '1 day')`, [`invalid-${randomUUID()}`]),
+      { code: "23514" }, "finite expiry must still follow registration");
+    await pool.query(`INSERT INTO commonswarm_oauth.registered_clients (client_id, metadata, expires_at)
+      VALUES ($1, '{}'::jsonb, NULL)`, [nullable]);
+    const [nullRow] = await oauthSql`SELECT expires_at FROM commonswarm_oauth.registered_clients WHERE client_id = ${nullable}`;
+    assert.equal(nullRow?.expires_at, null, "new storage permits NULL without making any runtime retention claim");
+    assert.equal(await store.find(expired), undefined);
+    const listed = await store.list(1000);
+    assert.ok(listed.some((row: { client_id: string }) => row.client_id === live));
+    assert.ok(!listed.some((row: { client_id: string }) => row.client_id === expired));
+    assert.ok((await store.cleanup()) >= 1);
+    const removed = await pool.query("SELECT client_id FROM commonswarm_oauth.registered_clients WHERE client_id = $1", [expired]);
+    assert.equal(removed.rows.length, 0);
+    assert.deepEqual(await store.find(live), metadata, "same-invocation finite positive survives cleanup");
+  } finally {
+    for (const id of [live, expired, nullable]) await store.destroy(id);
+    await pool.end();
+  }
+});
