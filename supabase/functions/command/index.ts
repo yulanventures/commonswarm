@@ -9182,6 +9182,7 @@ type AskChainRefusal =
 type PostSignalOutcome =
   | { status: "inserted"; signal: SignalRecord }
   | { status: "thread_horizon" }
+  | { status: "hosted_refused" }
   | { status: "chain_refused"; error: AskChainRefusal };
 
 /** Fixed-content notices share signal targeting, rate and delivery truth.
@@ -9217,6 +9218,7 @@ async function postSignal(
   target: SignalWriteTarget,
   attachments: readonly SignalAttachment[],
   placement: SignalPlacement,
+  hostedCapability: HostedSeatCapability | null = null,
 ): Promise<PostSignalOutcome> {
   const signalCredentialKind: SignalCredentialKind =
     auth.credentialKind === "user" ? "user" : "agent";
@@ -9247,6 +9249,11 @@ async function postSignal(
         hashtextextended(${`${route.workspaceId}:${parentSignalId}`}, 0)
       )
     `;
+  }
+  // The optional parent advisory can wait too. Resolve policy with a fresh
+  // statement after it, before any signal effect.
+  if (hostedCapability !== null && await revalidateHostedSeatCommand(tx, hostedCapability) === null) {
+    return { status: "hosted_refused" };
   }
   const rows = await tx<{
     inserted: boolean;
@@ -9888,8 +9895,16 @@ async function handleHostedManagement(
           AND grant_id = ${command.grant_id}::uuid
         LIMIT 1
       `)[0]?.workspace_id ?? null
+    : command.kind === "set_connection_expiry" && preliminaryGrant
+    ? (await tx<{ workspace_id: string }[]>`
+        SELECT a.workspace_id FROM unnest(${preliminaryGrant.selected_workspace_ids}::uuid[]) selected(workspace_id)
+        CROSS JOIN LATERAL swarm.resolve_hosted_grant_authorization(
+          ${command.grant_id}::uuid,${auth.actor.user}::uuid,selected.workspace_id,'claim_hosted_seat') a
+        ORDER BY (a.workspace_id=${preliminaryGrant.home_workspace_id}::uuid) DESC,a.workspace_id LIMIT 1
+      `)[0]?.workspace_id ?? null
     : preliminaryGrant?.home_workspace_id ?? null;
-  if (routeWorkspaceId === null || body.workspace_id !== routeWorkspaceId) {
+  if (routeWorkspaceId === null || body.workspace_id !==
+      (command.kind === "set_connection_expiry" ? preliminaryGrant?.home_workspace_id : routeWorkspaceId)) {
     return { status: 403, body: { error: "forbidden" } };
   }
   const routeRows = await tx<{
@@ -9959,12 +9974,14 @@ async function handleHostedManagement(
     return { status: 403, body: { error: "connection_expired" } };
   }
   if (command.kind === "set_connection_expiry") {
-    const refusal = freshInteractiveAuthRefusal(command.kind, auth.credentialKind,
-      auth.interactiveAuthAtSeconds, frame.now);
-    if (refusal !== null) return { status: 403, body: refusal };
-    const [eligible] = await tx`SELECT grant_id FROM swarm.resolve_hosted_grant_authorization(
-      ${command.grant_id}::uuid,${auth.actor.user}::uuid,${route.workspaceId}::uuid,'claim_hosted_seat')`;
-    if (!auth.identityVerified || !eligible || !routeRow.live_member || routeRow.archived_at !== null) {
+    const [eligible] = await tx<{ workspace_id: string }[]>`
+      SELECT a.workspace_id FROM unnest(${grant!.selected_workspace_ids}::uuid[]) selected(workspace_id)
+      CROSS JOIN LATERAL swarm.resolve_hosted_grant_authorization(
+        ${command.grant_id}::uuid,${auth.actor.user}::uuid,selected.workspace_id,'claim_hosted_seat') a
+      ORDER BY (a.workspace_id=${grant!.home_workspace_id}::uuid) DESC,a.workspace_id LIMIT 1`;
+    if (!auth.identityVerified || eligible?.workspace_id !== route.workspaceId ||
+        grant!.home_workspace_id !== body.workspace_id ||
+        !routeRow.live_member || routeRow.archived_at !== null) {
       return { status: 403, body: { error: "forbidden" } };
     }
     if (command.connection_expires_at !== null && Date.parse(command.connection_expires_at) <= frame.now) {
@@ -10849,6 +10866,21 @@ async function handleTransaction(
       return { status: 403, body: { error: isDeliveryCommand ? "delivery_unavailable" : "forbidden" } };
     }
     await afterStep(5);
+
+    if (hostedSeat !== null && hostedSeatCapability !== null && kind !== "household_tool") {
+      // Hosted commands serialize with workspace removal and owner policy edits.
+      // Keep command order one stream -> exact grant; never enter the runtime all-stream helper.
+      await lockRegistrationStream(tx, route);
+      await tx`SELECT grant_id FROM swarm.hosted_mcp_grants
+        WHERE grant_id=${hostedSeat.grant_id}::uuid FOR UPDATE`;
+      const freshSeat = await revalidateHostedSeatCommand(tx, hostedSeatCapability);
+      if (freshSeat === null || freshSeat.seat_id !== hostedSeat.seat_id ||
+          freshSeat.principal_id !== hostedSeat.principal_id || freshSeat.handle !== hostedSeat.handle ||
+          freshSeat.grant_id !== hostedSeat.grant_id || freshSeat.provider_grant_id !== hostedSeat.provider_grant_id ||
+          freshSeat.owner_user_id !== hostedSeat.owner_user_id || freshSeat.workspace_id !== route.workspaceId || freshSeat.stream_id !== route.streamId) {
+        return { status: 403, body: { error: "forbidden" } };
+      }
+    }
 
     await beforeStep(6);
     if (await revoked(tx, auth, route)) {
@@ -11829,7 +11861,11 @@ async function handleTransaction(
           untilCeiling: rootUntil === null ? null : rootUntil.toISOString(),
           untilExplicit: command.until_ms !== undefined,
         },
+        hostedSeatCapability,
       );
+      if (postOutcome.status === "hosted_refused") {
+        return { status: 403, body: { error: "forbidden" } };
+      }
       if (postOutcome.status === "chain_refused") {
         const messages: Record<AskChainRefusal, string> = {
           chain_parent_invalid:
@@ -13643,6 +13679,17 @@ async function handleHostedCheck(
       return { status: 403, body: { error: "forbidden" } };
     }
 
+    await lockRegistrationStream(tx, { workspaceId: seat.workspace_id, streamId: seat.stream_id,
+      membershipRole: null, membershipRevokedAt: null });
+    await tx`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=${seat.grant_id}::uuid FOR UPDATE`;
+    const freshSeat = await revalidateHostedSeatCommand(tx, capability);
+    if (freshSeat === null || freshSeat.seat_id !== seat.seat_id ||
+        freshSeat.principal_id !== seat.principal_id || freshSeat.handle !== seat.handle ||
+        freshSeat.grant_id !== seat.grant_id || freshSeat.provider_grant_id !== seat.provider_grant_id ||
+        freshSeat.owner_user_id !== seat.owner_user_id || freshSeat.workspace_id !== seat.workspace_id || freshSeat.stream_id !== seat.stream_id) {
+      return { status: 403, body: { error: "forbidden" } };
+    }
+
     // Serialize every open and ACK for this seat before reading either batch
     // or cursor state. Two initial opens must not depend on concurrent creation
     // of the lazily initialized cursor row to establish their first boundary.
@@ -13806,6 +13853,10 @@ async function handleHostedCheck(
         })),
       });
       if (!decision.ok) throw new Error("hosted check decision changed after selection");
+    }
+
+    if (await revalidateHostedSeatCommand(tx, capability) === null) {
+      throw new HostedCheckRefusal("hosted_check_batch_forbidden");
     }
 
     // Test-only rollback hook shared with the command transaction harness.

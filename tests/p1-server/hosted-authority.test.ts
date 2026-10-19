@@ -181,7 +181,7 @@ async function managementCommand(
     email: null,
     displayName: "HM owner",
     identityVerified: true,
-    interactiveAuthAtSeconds: null,
+    interactiveAuthAtSeconds: input.interactiveAuthAtSeconds ?? null,
   }));
 }
 
@@ -418,7 +418,7 @@ async function mcpPolicy() {
     { name: "ECDSA", hash: "SHA-256" }, signing.privateKey, new TextEncoder().encode(unsigned))));
   const probe = async () => {
     const results = [];
-    for (const name of ["whoami","note","check"]) {
+    for (const name of (input.waitKind ? [input.tool] : ["whoami","note","check"])) {
       const args = { seat: input.handle, ...(name === "note" ? { body: "policy probe", request_id: crypto.randomUUID() } : {}) };
       const response = await serve(new Request("https://mcp.commonswarm.com/mcp", {
         method: "POST", headers: { authorization: "Bearer "+bearer, "content-type": "application/json" },
@@ -430,6 +430,35 @@ async function mcpPolicy() {
     return results;
   };
   const before = await probe();
+  if (input.waitKind) {
+    let waiting, removing;
+    if (input.waitKind === "expiry") await db\`UPDATE swarm.hosted_mcp_grants
+      SET connection_expires_at=clock_timestamp()+interval '2 seconds' WHERE grant_id=\${input.grantId}::uuid\`;
+    await db.begin(async gate => {
+      await gate\`SELECT stream_id FROM swarm.streams WHERE workspace_id=\${input.workspaceId}::uuid AND kind='workspace' FOR UPDATE\`;
+      for (const phase of (input.waitKind === "removal" ? ["remove", "seat"] : ["seat"])) {
+        if (phase === "remove") removing = publicCommand(input.otherJwt,input.workspaceId,
+          { kind: "remove_member", user_id: input.ownerUserId });
+        else waiting = probe();
+        const expected = phase === "seat" && removing ? 2 : 1;
+        const deadline = Date.now()+10000;
+        let reached = false;
+        while (Date.now()<deadline) {
+          const [row] = await gate\`SELECT count(*)::int n FROM pg_stat_activity
+            WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock'
+              AND query LIKE '%swarm.streams%'\`;
+          if (row.n >= expected) { reached = true; break; }
+          await new Promise(resolve => setTimeout(resolve,20));
+        }
+        if (!reached) throw new Error("old-JWT command did not reach the workspace stream wait");
+      }
+      if (input.waitKind === "expiry") await gate\`SELECT pg_sleep(2.1)\`;
+    });
+    const removed = removing ? await removing : null;
+    return { before, waited: await waiting, removedStatus: removed?.status ?? null,
+      jwtStillLive: Math.floor(Date.now()/1000) < now+300 };
+  }
+
   await db\`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()+interval '6 months'
     WHERE grant_id=\${input.grantId}::uuid\`;
   const future = await probe();
@@ -582,7 +611,7 @@ async function createAuthUser(label: string): Promise<{ id: string; jwt: string 
   return { id: created.data.user.id, jwt: signedIn.data.session.access_token };
 }
 
-async function seedHostedFixture(grantBOwnerIsOther = false): Promise<HostedFixture> {
+async function seedHostedFixture(grantBOwnerIsOther = false, providerBinding = false): Promise<HostedFixture> {
   const owner = await createAuthUser("hm-owner");
   const other = await createAuthUser("hm-other");
   const fixture: HostedFixture = {
@@ -637,6 +666,10 @@ async function seedHostedFixture(grantBOwnerIsOther = false): Promise<HostedFixt
           'active', statement_timestamp(), statement_timestamp()
         )
       `;
+      if (providerBinding) await tx`INSERT INTO commonswarm_oauth.provider_grant_resources
+        (provider_grant_id,resource,grant_class,owner_user_id,client_id,connection_id,hosted_grant_id)
+        VALUES (${`provider-${grant}`},'https://mcp.commonswarm.com/mcp','hosted_mcp',
+          ${grantOwner}::uuid,'test-client',${grant}::uuid,${grant}::uuid)`;
       for (const workspace of [fixture.workspaceA, fixture.workspaceB]) {
         await tx`
           INSERT INTO swarm.hosted_mcp_grant_workspaces (
@@ -2005,6 +2038,11 @@ test("owner policy HTTP records before/after once, extends and clears only a liv
     WHERE workspace_id=${f.workspaceA}::uuid AND command_kind='set_connection_expiry' AND outcome='accepted'`;
   assert.equal(audit!.n, 1, "replay does not record a second policy change");
   assert.equal(set(later).status, 200);
+  const staleOwner = runHostedHarness<HarnessResult>({ operation: "management", ownerUserId: f.owner,
+    workspaceId: f.workspaceA, interactiveAuthAtSeconds: Math.floor(Date.now()/1000)-3600,
+    command: { kind: "set_connection_expiry", connection_kind: "hosted", grant_id: f.grantA,
+      connection_expires_at: null } });
+  assert.equal(staleOwner.status, 200, "verified owner management identity needs no new AMR age");
   assert.equal(set(null).status, 200);
   assert.equal(set(future, { jwt: f.otherJwt }).status, 403, "foreign owner");
   assert.equal(set(future, { grant: f.grantB }).status, 403, "foreign target");
@@ -2039,7 +2077,17 @@ test("runtime hosted-family helper binds its tuple and exposes no edge authority
   const resource = "https://mcp.commonswarm.com/mcp";
   const lock = (owner = f.owner, client = "test-client", target = resource) => oauthSql.begin(tx => tx`
     SELECT * FROM commonswarm_oauth.lock_hosted_family(${`provider-${f.grantA}`},${owner}::uuid,${client},${target})`);
-  assert.equal((await lock())[0]!.active, true);
+  assert.equal((await lock()).length, 0, "missing immutable provider binding fails closed");
+  await assert.rejects(sql`INSERT INTO commonswarm_oauth.provider_grant_resources
+    (provider_grant_id,resource,grant_class,owner_user_id,client_id,connection_id,hosted_grant_id)
+    VALUES (${`provider-${f.grantA}`},${resource},'hosted_mcp',${f.owner}::uuid,'wrong-client',${f.grantA}::uuid,${f.grantA}::uuid)`,
+    (error: unknown) => error instanceof postgres.PostgresError && error.code === "23514",
+    "real immutable binding guard refuses a mismatched stored tuple");
+  assert.equal((await lock()).length, 0, "failed mismatched binding cannot admit the family");
+  await sql`INSERT INTO commonswarm_oauth.provider_grant_resources
+    (provider_grant_id,resource,grant_class,owner_user_id,client_id,connection_id,hosted_grant_id)
+    VALUES (${`provider-${f.grantA}`},${resource},'hosted_mcp',${f.owner}::uuid,'test-client',${f.grantA}::uuid,${f.grantA}::uuid)`;
+  assert.equal((await lock())[0]!.active, true, "same-call exact stored binding positive");
   assert.equal((await lock(f.other)).length, 0);
   assert.equal((await lock(f.owner, "wrong-client")).length, 0);
   assert.equal((await lock(f.owner, "test-client", "https://api.commonswarm.com/admin")).length, 0);
@@ -2076,7 +2124,7 @@ async function waitForRuntimeLock(tx: postgres.TransactionSql<Record<string, unk
 }
 
 test("runtime helper uses current policy after waiting on a selected workspace stream", { timeout: 30_000 }, async () => {
-  const f = await seedHostedFixture();
+  const f = await seedHostedFixture(false, true);
   const lock = () => oauthSql.begin(tx => tx`SELECT * FROM commonswarm_oauth.lock_hosted_family(
     ${`provider-${f.grantA}`},${f.owner}::uuid,'test-client','https://mcp.commonswarm.com/mcp')`);
   assert.equal((await lock())[0]!.active, true, "positive runtime control");
@@ -2109,10 +2157,17 @@ test("member removal fences exact hosted consent and restoration cannot revive o
   const removed = runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: f.otherJwt,
     workspaceId: f.workspaceA, command: { kind: "remove_member", user_id: f.owner } });
   assert.equal(removed.status, 200);
+  const editCommandId = randomUUID();
   const removedEdit = runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: f.ownerJwt,
-    workspaceId: f.workspaceA, command: { kind: "set_connection_expiry", connection_kind: "hosted",
+    commandId: editCommandId, workspaceId: f.workspaceA, command: { kind: "set_connection_expiry", connection_kind: "hosted",
       grant_id: f.grantA, connection_expires_at: null } });
-  assert.equal(removedEdit.status, 403, "removed owner cannot edit connection policy");
+  assert.equal(removedEdit.status, 200, "live other selected workspace permits owner policy edit");
+  const [routeReceipt] = await sql`SELECT workspace_id FROM swarm.idempotency_keys
+    WHERE principal_kind='user' AND principal_id=${f.owner} AND command_id=${editCommandId}`;
+  assert.equal(routeReceipt!.workspace_id, f.workspaceB, "ledger uses the derived live workspace");
+  assert.equal(runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: f.otherJwt,
+    workspaceId: f.workspaceA, command: { kind: "set_connection_expiry", connection_kind: "hosted",
+      grant_id: f.grantA, connection_expires_at: null } }).status, 403, "foreign owner remains refused");
   await sql`UPDATE swarm.memberships SET revoked_at=NULL WHERE workspace_id=${f.workspaceA}::uuid AND user_id=${f.owner}::uuid`;
   await assertSeatAccess(f, old, f.workspaceA, 403);
   assert.equal(claimSeat(f, f.grantA, `restored-${randomUUID()}`).status, 403);
@@ -2125,12 +2180,20 @@ test("member removal fences exact hosted consent and restoration cannot revive o
     JOIN swarm.hosted_mcp_seat_handles h USING(seat_id)
     WHERE hs.seat_id=${String(old.body.seat_id)}::uuid`;
   assert.deepEqual(fences, { consent: true, seat: true, handle: true, tombstone: true });
+  assert.equal(runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: f.otherJwt,
+    workspaceId: f.workspaceB, command: { kind: "remove_member", user_id: f.owner } }).status, 200);
+  assert.equal(runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: f.ownerJwt,
+    workspaceId: f.workspaceA, command: { kind: "set_connection_expiry", connection_kind: "hosted",
+      grant_id: f.grantA, connection_expires_at: null } }).status, 403, "all selected consents removed");
 });
 
 
 test("authorized admin routine removal closes hosted consent, handle and seat without retiring other workspace", { timeout: 180_000 }, async () => {
   const f = await seedHostedFixture();
   const old = claimSeat(f, f.grantA, `admin-remove-${randomUUID()}`);
+  const sibling = claimSeat(f, f.grantA, `admin-sibling-${randomUUID()}`);
+  const unrelatedGrant = claimSeat(f, f.grantB, `admin-independent-${randomUUID()}`);
+  await assertSeatAccess(f, sibling, f.workspaceA, 200);
   const other = runHostedHarness<HarnessResult>({ operation: "claim",
     claim: claimSpec(f, f.grantA, f.workspaceB, `admin-other-${randomUUID()}`) });
   await assertSeatAccess(f, old, f.workspaceA, 200);
@@ -2139,6 +2202,13 @@ test("authorized admin routine removal closes hosted consent, handle and seat wi
   assert.deepEqual(removed, { stage: "remove", status: 200 });
   await assertSeatAccess(f, old, f.workspaceA, 403);
   assert.equal(claimSeat(f, f.grantA, `admin-new-${randomUUID()}`).status, 403);
+  await assertSeatAccess(f, sibling, f.workspaceA, 403);
+  await assertSeatAccess(f, unrelatedGrant, f.workspaceA, 200);
+  const [siblingFence] = await sql`SELECT hs.revoked_at IS NOT NULL AS seat,h.revoked_at IS NOT NULL AS handle,
+    EXISTS(SELECT 1 FROM swarm.revocation_tombstones t WHERE t.kind='hosted_seat' AND t.target_id=hs.seat_id) AS tombstone
+    FROM swarm.hosted_mcp_seats hs JOIN swarm.hosted_mcp_seat_handles h USING(seat_id)
+    WHERE hs.seat_id=${String(sibling.body.seat_id)}::uuid`;
+  assert.deepEqual(siblingFence, { seat: true, handle: true, tombstone: true });
   await assertSeatAccess(f, other, f.workspaceB, 200);
   assert.equal(await providerActive(f.grantA), true);
   const [fence] = await sql`SELECT c.revoked_at IS NOT NULL AS consent,h.revoked_at IS NOT NULL AS handle,
@@ -2201,7 +2271,7 @@ test("already-issued MCP JWT cannot read, write or check after canonical owner d
 
 
 test("runtime helper takes selected streams before family/grant and rejects a binding changed during its wait", { timeout: 30_000 }, async () => {
-  const f = await seedHostedFixture();
+  const f = await seedHostedFixture(false, true);
   const family = `provider-${f.grantA}`;
   const lock = () => oauthSql.begin(tx => tx`SELECT * FROM commonswarm_oauth.lock_hosted_family(
     ${family},${f.owner}::uuid,'test-client','https://mcp.commonswarm.com/mcp')`);
@@ -2223,3 +2293,27 @@ test("runtime helper takes selected streams before family/grant and rejects a bi
   assert.deepEqual(state!.selected_workspace_ids, [f.workspaceA]);
   assert.equal(state!.state, "active", "read/lock helper never changes authority");
 });
+
+
+for (const tool of ["note", "check"] as const) {
+  for (const waitKind of ["expiry", "removal"] as const) {
+    test(`old MCP JWT ${tool} freshly refuses after stream wait: ${waitKind}`, { timeout: 120_000 }, async () => {
+      const f = await seedHostedFixture(true);
+      await sql`UPDATE swarm.memberships SET role='owner' WHERE user_id=${f.other}::uuid`;
+      const seat = claimSeat(f, f.grantA, `wait-${randomUUID()}`);
+      const result = runHostedHarness<{ before: { status: number; allowed: boolean }[];
+        waited: { status: number; allowed: boolean }[]; removedStatus: number | null; jwtStillLive: boolean }>({
+        operation: "mcp-policy", waitKind, tool, ownerUserId: f.owner, otherJwt: f.otherJwt,
+        workspaceId: f.workspaceA, grantId: f.grantA, handle: seat.body.handle,
+      });
+      assert.deepEqual(result.before, [{ status: 200, allowed: true }], "same-invocation live JWT positive");
+      assert.deepEqual(result.waited, [{ status: 200, allowed: false }]);
+      assert.equal(result.jwtStillLive, true, "JWT expiration is not the refusal");
+      assert.equal(result.removedStatus, waitKind === "removal" ? 200 : null);
+      const [signals] = await sql`SELECT count(*)::int n FROM swarm.signals
+        WHERE from_principal=${String(seat.body.principal_id)}::uuid`;
+      assert.equal(signals!.n, tool === "note" ? 1 : 0, "waited command has no signal effect");
+      assert.equal(await providerActive(f.grantB), true, "independent family survives");
+    });
+  }
+}

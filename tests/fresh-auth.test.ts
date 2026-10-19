@@ -129,7 +129,7 @@ test("change_role refuses a stale session on the same gate as remove_member", ()
 
   assert.deepEqual(
     [...FRESH_INTERACTIVE_COMMAND_KINDS],
-    ["remove_member", "change_role", "set_connection_expiry"],
+    ["remove_member", "change_role"],
   );
   assert.equal(commandNeedsFreshInteractiveAuth("change_role"), true);
   assert.equal(commandNeedsFreshInteractiveAuth("remove_member"), true);
@@ -192,17 +192,4 @@ test("fresh auth rejects malformed and nonfinite inputs", () => {
     hasFreshInteractiveAuth(NOW_SECONDS, Number.POSITIVE_INFINITY),
     false,
   );
-});
-
-
-test("connection date edits use the existing interactive AMR age and credential gate", () => {
-  assert.equal(freshInteractiveAuthRefusal("set_connection_expiry", "user",
-    NOW_SECONDS - FRESH_INTERACTIVE_AUTH_SECONDS, NOW_MS), null);
-  for (const [credential, timestamp] of [
-    ["user", NOW_SECONDS - FRESH_INTERACTIVE_AUTH_SECONDS - 1],
-    ["user", null], ["agent", NOW_SECONDS], ["hosted_seat", NOW_SECONDS],
-  ] as const) {
-    assert.equal(freshInteractiveAuthRefusal("set_connection_expiry", credential,
-      timestamp, NOW_MS)?.error, "fresh_auth_required");
-  }
 });

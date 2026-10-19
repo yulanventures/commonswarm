@@ -260,11 +260,11 @@ BEGIN
       OR NOT (current_grant.home_workspace_id = ANY(current_grant.selected_workspace_ids))
       OR array_position(current_grant.selected_workspace_ids,NULL) IS NOT NULL
       OR octet_length(current_grant.manifest_digest) <> 32
-      OR EXISTS (
+      OR NOT EXISTS (
         SELECT 1 FROM commonswarm_oauth.provider_grant_resources r
         WHERE r.provider_grant_id = p_provider_grant_id AND
           ROW(r.grant_class,r.hosted_grant_id,r.owner_user_id,r.client_id,r.resource)
-          IS DISTINCT FROM ROW('hosted_mcp'::text,current_grant.grant_id,p_owner_user_id,p_client_id,p_resource)
+          IS NOT DISTINCT FROM ROW('hosted_mcp'::text,current_grant.grant_id,p_owner_user_id,p_client_id,p_resource)
       ) OR EXISTS (
         SELECT 1 FROM swarm.hosted_mcp_grant_workspaces c
         WHERE c.grant_id = current_grant.grant_id AND
