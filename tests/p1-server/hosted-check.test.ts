@@ -445,11 +445,15 @@ test("ACK vs open and repeated ACK never close a newer batch", async () => {
   await postSignal(fixture);
   const first = runHarness<HarnessResult>(fixture, { operation: "single" });
   assert.equal(first.status, 200, "positive control: first batch opened");
+  const context = first.body.context as { account: { user_id: string }; workspace: { workspace_id: string } };
+  assert.equal(context.account.user_id, fixture.owner);
+  assert.equal(context.workspace.workspace_id, fixture.workspace);
   await postSignal(fixture);
   const raced = runHarness<HarnessResult[]>(fixture, {
     operation: "ack-open-race", ack: first.body.batch_id,
   });
   assert.ok(raced.every((entry) => entry.status === 200));
+  for (const entry of raced) assert.deepEqual(entry.body.context, context, "ACK/open both retain context");
   const [active] = await sql<{ batch_id: string }[]>`SELECT batch_id
     FROM swarm.hosted_mcp_check_batches
     WHERE seat_id = ${fixture.seatA}::uuid AND acknowledged_at IS NULL`;
@@ -458,6 +462,7 @@ test("ACK vs open and repeated ACK never close a newer batch", async () => {
     operation: "single", ack: first.body.batch_id,
   });
   assert.equal(repeated.status, 200);
+  assert.deepEqual(repeated.body.context, context, "repeated ACK retains context without changing batch semantics");
   assert.equal(repeated.body.batch_id, active.batch_id);
   const [stillActive] = await sql<{ acknowledged_at: Date | null }[]>`
     SELECT acknowledged_at FROM swarm.hosted_mcp_check_batches

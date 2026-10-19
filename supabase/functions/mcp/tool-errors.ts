@@ -83,6 +83,7 @@ export function commandOutput(result: CommandResult): Record<string, unknown> {
   }
   if (typeof result.body.handle === "string") {
     return {
+      ...(result.body.context === undefined ? {} : { context: result.body.context }),
       grant_id: result.body.grant_id,
       workspace_id: result.body.workspace_id,
       seat_id: result.body.seat_id,

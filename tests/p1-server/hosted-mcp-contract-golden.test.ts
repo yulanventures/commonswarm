@@ -89,7 +89,21 @@ test("golden backend: claim_seat and whoami over the real claim and read paths",
     const run = await harness.runScenario(target, "golden");
     assert.equal(run.stage, "complete", `golden run stopped at ${run.stage} (${run.error ?? "no code"})`);
     assert.equal(run.http_refused, 0, "the golden run made an HTTP call");
-    assert.deepEqual(run.golden, golden.backend);
+    // Context is an additive response contract owned by the actual HTTP tests
+    // in hosted-authority.test.ts. Preserve every pre-existing golden byte after
+    // removing only that one new top-level output field. Refusals are unchanged.
+    const previousFields = (entry: Rendered): Rendered => {
+      const envelope = JSON.parse(entry.text);
+      for (const item of envelope.result?.content ?? []) {
+        if (item.type === "text") {
+          const output = JSON.parse(item.text);
+          delete output.context;
+          item.text = JSON.stringify(output);
+        }
+      }
+      return { ...entry, text: JSON.stringify(envelope) };
+    };
+    assert.deepEqual(run.golden?.map(previousFields), golden.backend);
   } finally {
     await target.close();
   }
