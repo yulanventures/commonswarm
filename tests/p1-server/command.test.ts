@@ -7024,13 +7024,10 @@ test("durable-delivery: wrong principal/lease, revoked token, delivery_unavailab
     const rateAgent = await createFixtureAgent(f, f.ua, "dd-rate-agent-1");
     const otherAgent = await createFixtureAgent(f, f.ua, "dd-rate-agent-2");
 
-    // 1. Seed rate bucket count = 119 using exact DB schema columns and DB time
+    // 1. Seed rate bucket count = 119 in a DB minute with >=15s remaining,
+    // keyed by that explicitly returned window so claim120/121 count in it.
     const rateBucketKey = `delivery:claim:principal:${f.workspaceA}:${rateAgent.principalId}`;
-    await sql`
-      INSERT INTO swarm.rate_buckets (bucket_key, window_start, count)
-      VALUES (${rateBucketKey}, date_trunc('minute', statement_timestamp()), 119)
-      ON CONFLICT (bucket_key, window_start) DO UPDATE SET count = 119
-    `;
+    const rateWindowStart = await seedDeliveryRateBucket(rateBucketKey, 119);
 
     // Seed deliverable signal with secret sentinels
     const secretBody = "secret-body-content-xyz123";
@@ -7060,6 +7057,37 @@ test("durable-delivery: wrong principal/lease, revoked token, delivery_unavailab
       randomUUID(),
     );
     assert.equal(claim120.status, 200, claim120.text);
+
+    // Setup witness: claim120 must have brought the seeded window to the 120
+    // cap and that DB minute must still be current. If either fails, the seed
+    // went stale (a rollover would make claim121 count in a fresh bucket) and
+    // the failure belongs here, not to the limiter assertion below.
+    const [seededBucket] = await sql<
+      { window_start: Date; count: string | number; current_window: Date }[]
+    >`
+      SELECT
+        window_start,
+        count,
+        date_trunc('minute', statement_timestamp()) AS current_window
+      FROM swarm.rate_buckets
+      WHERE bucket_key = ${rateBucketKey}
+        AND window_start = ${rateWindowStart}::timestamptz
+    `;
+    assert.equal(
+      seededBucket?.window_start.toISOString(),
+      rateWindowStart,
+      "claim120 counted in the seeded DB minute window",
+    );
+    assert.equal(
+      Number(seededBucket?.count),
+      120,
+      "claim120 brings the seeded bucket to the 120 cap",
+    );
+    assert.equal(
+      seededBucket?.current_window.toISOString(),
+      rateWindowStart,
+      "seeded DB minute is still current before claim121",
+    );
 
     // 3. Request 121 exceeds rate limit (HTTP 429 rate_limited)
     const cmdId121 = randomUUID();
@@ -8636,11 +8664,7 @@ test("durable-delivery: concurrent identical ack calls serialize and both resolv
 
     // ACK rate limit, replay order, and claim/ACK bucket independence
     const ackBucketKey = `delivery:ack:principal:${f.workspaceA}:${receiver.principalId}`;
-    await sql`
-      INSERT INTO swarm.rate_buckets (bucket_key, window_start, count)
-      VALUES (${ackBucketKey}, date_trunc('minute', statement_timestamp()), 239)
-      ON CONFLICT (bucket_key, window_start) DO UPDATE SET count = 239
-    `;
+    await seedDeliveryRateBucket(ackBucketKey, 239);
 
     // ACK 240 succeeds
     const ackCid240 = randomUUID();
@@ -8694,11 +8718,7 @@ test("durable-delivery: concurrent identical ack calls serialize and both resolv
 
     // Saturated claim bucket cannot block ACK
     const claimBucketKey = `delivery:claim:principal:${f.workspaceA}:${receiver.principalId}`;
-    await sql`
-      INSERT INTO swarm.rate_buckets (bucket_key, window_start, count)
-      VALUES (${claimBucketKey}, date_trunc('minute', statement_timestamp()), 150)
-      ON CONFLICT (bucket_key, window_start) DO UPDATE SET count = 150
-    `;
+    await seedDeliveryRateBucket(claimBucketKey, 150);
     const unblockedAck = await issueDelivery(f, receiver.token, {
       kind: "ack_agent_delivery",
       listener_instance_id: instId,
@@ -11455,6 +11475,21 @@ async function awaitPhaseCMinuteWindow(): Promise<string> {
     await delay(Math.min(100, remainingMs));
   }
   throw new Error(`Phase C DB-clock barrier did not find >=15 seconds remaining; last=${lastRemaining}`);
+}
+
+/**
+ * Seed a delivery rate bucket in the safe DB minute returned by
+ * awaitPhaseCMinuteWindow, so the requests that follow count in that same
+ * window instead of a fresh bucket after a minute rollover.
+ */
+async function seedDeliveryRateBucket(bucketKey: string, count: number): Promise<string> {
+  const windowStart = await awaitPhaseCMinuteWindow();
+  await sql`
+    INSERT INTO swarm.rate_buckets (bucket_key, window_start, count)
+    VALUES (${bucketKey}, ${windowStart}::timestamptz, ${count})
+    ON CONFLICT (bucket_key, window_start) DO UPDATE SET count = ${count}
+  `;
+  return windowStart;
 }
 
 /** Record only the bounded status/error summary used to race resolver observation. */
