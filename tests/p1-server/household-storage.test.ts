@@ -177,7 +177,7 @@ test('agent operation ceilings and parent hosted-grant withdrawal fence reads, h
   await sql`INSERT INTO swarm.hosted_mcp_grant_workspaces(grant_id,workspace_id,owner_user_id,manifest_digest,consent_receipt_id,consented_at)
     VALUES (${grant}::uuid,${workspace}::uuid,${owner}::uuid,${manifest},${randomUUID()}::uuid,clock_timestamp())`;
   await sql`INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,created_at)
-    VALUES (${randomUUID()}::uuid,${grant}::uuid,${workspace}::uuid,${owner}::uuid,${principal}::uuid,'H2 synthetic seat',clock_timestamp())`;
+    VALUES (${connection}::uuid,${grant}::uuid,${workspace}::uuid,${owner}::uuid,${principal}::uuid,'H2 synthetic seat',clock_timestamp())`;
   await sql`INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at,hosted_grant_id)
     VALUES (${connection}::uuid,${grant}::uuid,${workspace}::uuid,${principal}::uuid,${owner}::uuid,'shared',ARRAY['read'],${randomUUID()}::uuid,clock_timestamp()+interval '1 hour',${grant}::uuid)`;
   const identity: HouseholdIdentity = { user_id: owner, principal_id: principal, run_id: null, connection: { connection_id: connection, grant_id: grant } };

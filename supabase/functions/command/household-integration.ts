@@ -49,6 +49,20 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
   const humanOnly = ['household_todo_answer', 'household_todo_steer', 'household_agent_work_policy', 'household_activity'].includes(String(value.kind));
   if (humanOnly && identity.principal_id !== null) return refused('human_confirmation_required');
   const store = householdStore(recheckCredential);
+  const missingAccess = async () => {
+    // A verified owner connection cannot bootstrap a boundary or human content
+    // consent. Give the existing precise condition without manufacturing either.
+    if (identity.principal_id !== null && identity.connection && await recheckCredential(tx, identity)) {
+      const [owner] = await tx`SELECT NOT EXISTS(SELECT 1 FROM swarm.household_workspace_boundaries b
+        WHERE b.workspace_id=m.workspace_id) AS missing_boundary FROM swarm.memberships m
+        JOIN swarm.hosted_mcp_seats s ON s.workspace_id=m.workspace_id AND s.owner_user_id=m.user_id
+        WHERE m.workspace_id=${workspaceId}::uuid AND m.user_id=${identity.user_id}::uuid
+          AND m.role='owner' AND m.revoked_at IS NULL AND s.seat_id=${identity.connection.connection_id}::uuid
+          AND s.grant_id=${identity.connection.grant_id}::uuid AND s.principal_id=${identity.principal_id}::uuid`;
+      if (owner?.missing_boundary) return refused('owner_confirmation_required');
+    }
+    return refused('workspace_access_refused');
+  };
   const todos = createHouseholdTodoStore({ core: core as unknown as Parameters<typeof createHouseholdTodoStore>[0]['core'], access: store.access,
     notice: notice ?? (async () => { throw new Error('Household notice port is required for writes.'); }) });
   if (humanOnly) {
@@ -85,7 +99,9 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
   }
   if (value.kind === 'household_access') {
     const access = await store.access(tx, workspaceId, identity);
-    if (!access || core.householdAccessRefusal(access.facts, workspaceId, 'read', access.now)) return refused('workspace_access_refused');
+    if (!access) return missingAccess();
+    const denied = core.householdAccessRefusal(access.facts, workspaceId, 'read', access.now);
+    if (denied) return refused(denied);
     return { status: 'ok', content_role: access.facts.member!.content_role,
       operations: core.HOUSEHOLD_CONTENT_OPERATIONS.filter(op => !core.householdAccessRefusal(access.facts, workspaceId, op, access.now)) };
   }
@@ -113,7 +129,7 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
   if (identity.connection === null && args.seat !== localSeat) return refused('seat_binding_mismatch');
   const access = await store.access(tx, workspaceId, identity);
   const operation = core.householdToolOperation(value.tool, args);
-  if (!access) return refused('workspace_access_refused');
+  if (!access) return missingAccess();
   const denied = core.householdAccessRefusal(access.facts, workspaceId, operation, access.now);
   if (denied) return refused(denied);
   if (core.HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === value.tool)!.objectTypes.includes('todo')) {
