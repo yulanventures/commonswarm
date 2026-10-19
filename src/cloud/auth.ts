@@ -669,15 +669,14 @@ async function saveSuccessor(store: CredentialStore, before: CredentialRecord,
 
 /** The SDK retries refresh internally. Use the same GoTrue endpoint directly here
  * so attempts and their deadlines have one bounded owner. Never expose raw errors. */
-async function refreshHumanSession(target: CloudTarget, store: CredentialStore, record: CredentialRecord, operationId: string, signal?: AbortSignal | null): Promise<
+async function refreshHumanSession(target: CloudTarget, store: CredentialStore, record: CredentialRecord, operationId: string): Promise<
   { session: Session; code?: never } | { session?: never; code?: string }
 > {
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    signal?.throwIfAborted();
     if (!sameCredential(await store.read(), record)) throw transientSession(operationId, record.generation, "winner");
     try {
       const response = await fetch(new URL("/auth/v1/token?grant_type=refresh_token", target.url), {
-        method: "POST", redirect: "error", signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
+        method: "POST", redirect: "error", signal: AbortSignal.timeout(10_000),
         headers: { apikey: target.anonKey, "content-type": "application/json",
           "x-request-id": operationId, "x-supabase-api-version": "2024-01-01" },
         body: JSON.stringify({ refresh_token: record.refreshToken }),
@@ -692,13 +691,11 @@ async function refreshHumanSession(target: CloudTarget, store: CredentialStore, 
       }
       if (response.status !== 429 && response.status < 500) {
         // A policy/permission refusal is not proof that the refresh handle died.
-        return { code: response.status === 400 || response.status === 401
-          ? typeof body?.code === "string" ? body.code
-          : typeof body?.error_code === "string" ? body.error_code : undefined : undefined };
+        return { code: typeof body?.code === "string" ? body.code
+          : typeof body?.error_code === "string" ? body.error_code : undefined };
       }
     } catch { /* Network, malformed or incomplete response: retain the parent. */ }
-    signal?.throwIfAborted();
-    if (attempt < 2) await delay(150 * (attempt + 1), undefined, { signal: signal ?? undefined });
+    if (attempt < 2) await delay(150 * (attempt + 1));
   }
   return {};
 }
@@ -725,16 +722,21 @@ export async function refreshedCredential(
           const cached = cachedCredential(before, profile.humanSession, options.rejectedAccessToken);
           if (cached) return cached;
           if (!Number.isSafeInteger(before.generation + 1)) throw transientSession(operationId, before.generation, "generation");
-          const refreshed = await refreshHumanSession(target, store, before, operationId, options.signal);
+          // Once rotation starts, its own bounded transport deadline owns it.
+          // Await reconciliation and durable publication under this same lock,
+          // even if the unrelated API caller cancels in the meantime.
+          options.signal?.throwIfAborted();
+          const refreshed = await refreshHumanSession(target, store, before, operationId);
           const current = await store.read();
           if (!sameCredential(current, before)) continue;
           if (!refreshed.session) {
-            // Already-used is ambiguous: a locally published successor may still
-            // be recoverable. It must never force a browser login or delete state.
+            // Reconcile a published successor before classifying any terminal
+            // code, including already-used. Only this exact unchanged parent
+            // with no recoverable winner can receive terminal advice.
             const reconciled = await reconcileSuccessor(store, before);
             if (!sameCredential(reconciled, before)) continue;
+            options.signal?.throwIfAborted();
             if (refreshed.code && TERMINAL_REFRESH_CODES.has(refreshed.code) &&
-                refreshed.code !== "refresh_token_already_used" &&
                 sameCredential(await store.read(), before)) {
               throw new HumanSessionError("human_session_refresh_failed",
                 `The server no longer accepts this session; run cswarm login to sign in again (reference ${operationId}).`,
@@ -744,6 +746,7 @@ export async function refreshedCredential(
           }
           const next = await saveSuccessor(store, before, refreshed.session, operationId);
           const saved = cachedCredential(next, (await store.readProfile()).humanSession);
+          options.signal?.throwIfAborted();
           if (saved) return saved;
           throw transientSession(operationId, next.generation, "read-back");
         } catch (error) {
@@ -776,7 +779,9 @@ export async function refreshedCredential(
         const cached = cachedCredential(current, (await store.readProfile()).humanSession, options.rejectedAccessToken);
         if (cached) return cached;
       }
-      throw transientSession(operationId, current?.generation, "lock");
+      throw new HumanSessionError("human_session_transient",
+        `Could not confirm your session because ${error.message} Your credential was kept (reference ${operationId}).`,
+        operationId, current?.generation, "lock");
     }
     throw error;
   }
@@ -896,37 +901,45 @@ export async function logout(
       await store.delete();
       return "cleared-unverified";
     }
-    record = await reconcileSuccessor(store, record);
     const operationId = randomUUID();
-    const refreshed = await refreshHumanSession(target, store, record, operationId);
-    if (!sameCredential(await store.read(), record)) throw transientSession(operationId, record.generation, "logout-winner");
-    if (!refreshed.session) {
-      if (!refreshed.code || !TERMINAL_REFRESH_CODES.has(refreshed.code)) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      record = await store.read();
+      if (!record) return "already-logged-out";
+      record = await reconcileSuccessor(store, record);
+      const refreshed = await refreshHumanSession(target, store, record, operationId);
+      if (!sameCredential(await store.read(), record)) continue;
+      if (!refreshed.session) {
+        const reconciled = await reconcileSuccessor(store, record);
+        if (!sameCredential(reconciled, record)) continue;
+        if (!sameCredential(await store.read(), record)) continue;
+        if (!refreshed.code || !TERMINAL_REFRESH_CODES.has(refreshed.code)) {
+          throw new Error(
+            "could not confirm the session with the server, so your credential was kept; " +
+              "check your connection and run cswarm logout again, " +
+              "or run cswarm logout --local to clear this device without contacting the server",
+          );
+        }
+        await store.delete();
+        return "local-only";
+      }
+      // Journal and verify the rotated handle before requesting server revocation.
+      const session = refreshed.session;
+      const successor = await saveSuccessor(store, record, session, operationId);
+      const signedOut = await fetch(new URL(`/auth/v1/logout?scope=${scope}`, target.url), {
+        method: "POST", redirect: "error", signal: AbortSignal.timeout(10_000),
+        headers: { authorization: `Bearer ${session.access_token}`, apikey: target.anonKey, "x-request-id": operationId },
+      }).then(response => response.ok).catch(() => false);
+      if (!signedOut) {
         throw new Error(
-          "could not confirm the session with the server, so your credential was kept; " +
-            "check your connection and run cswarm logout again, " +
-            "or run cswarm logout --local to clear this device without contacting the server",
+          "signed in, but the server did not confirm the session ended; your credential was " +
+            "kept — run cswarm logout again, or run cswarm logout --local to clear this device " +
+            "without contacting the server",
         );
       }
+      if (!sameCredential(await store.read(), successor)) throw transientSession(operationId, successor.generation, "logout-winner");
       await store.delete();
-      return "local-only";
+      return "revoked";
     }
-    // Journal and verify the rotated handle before requesting server revocation.
-    const session = refreshed.session;
-    const successor = await saveSuccessor(store, record, session, operationId);
-    const signedOut = await fetch(new URL(`/auth/v1/logout?scope=${scope}`, target.url), {
-      method: "POST", redirect: "error", signal: AbortSignal.timeout(10_000),
-      headers: { authorization: `Bearer ${session.access_token}`, apikey: target.anonKey, "x-request-id": operationId },
-    }).then(response => response.ok).catch(() => false);
-    if (!signedOut) {
-      throw new Error(
-        "signed in, but the server did not confirm the session ended; your credential was " +
-          "kept — run cswarm logout again, or run cswarm logout --local to clear this device " +
-          "without contacting the server",
-      );
-    }
-    if (!sameCredential(await store.read(), successor)) throw transientSession(operationId, successor.generation, "logout-winner");
-    await store.delete();
-    return "revoked";
+    throw transientSession(operationId, record?.generation, "logout-winner");
   });
 }

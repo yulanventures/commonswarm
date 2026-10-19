@@ -2466,7 +2466,8 @@ async function runLinkAccept(
             : null,
         };
       } catch (error) {
-        if (error instanceof HumanSessionError && error.code === "human_session_missing") return null;
+        if (error instanceof HumanSessionError &&
+            (error.code === "human_session_missing" || error.code === "human_session_refresh_failed")) return null;
         throw error;
       }
     },

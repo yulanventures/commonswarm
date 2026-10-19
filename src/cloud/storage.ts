@@ -385,9 +385,14 @@ export function fileLockTimeoutSentence(lockName: string, path: string, ownerPid
     try { process.kill(ownerPid, 0); liveOwner = true; }
     catch (error) { liveOwner = (error as NodeJS.ErrnoException).code === "EPERM"; }
   }
-  const next = liveOwner ? "Wait for its owner to exit, then retry. If its owner is gone, remove"
-    : "No live owner was identified; remove";
-  return `timed out waiting for the ${label} at ${path} (owner pid ${ownerPid ?? "unknown"}, host ${ownerHost ?? "unknown"}). ${next} ${gate ? "that directory" : "that lock file"} with ${hostIdRemovalStep(path, gate)} and retry.`;
+  // Owner fields come from disk; never echo an arbitrary host string or control
+  // characters into terminal diagnostics. An unverified owner is not a dead one.
+  const safeHost = typeof ownerHost === "string" && /^[A-Za-z0-9._-]{1,253}$/.test(ownerHost) ? ownerHost : "unknown";
+  const safePid = Number.isSafeInteger(ownerPid) && ownerPid! > 0 ? ownerPid : "unknown";
+  const safePath = path.replace(/[\x00-\x1f\x7f]/g, "?");
+  const next = liveOwner ? "Wait for its owner to finish, then retry."
+    : "The recorded owner's liveness could not be verified; the lock was retained.";
+  return `timed out waiting for the ${label} at ${safePath} (owner pid ${safePid}, host ${safeHost}). ${next} If it persists, have an operator verify the recorded host and process and stop all users of this state directory before recovering this exact lock. Do not remove an unverified lock or its publication target; retry after verified recovery.`;
 }
 
 /** Publish complete bytes at an absent path. A symlink is the atomic fallback when hard links are unavailable. */

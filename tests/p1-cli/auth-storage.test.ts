@@ -16,6 +16,7 @@ import {
   humanSessionFetch,
   validateCallbackUrl,
 } from "../../src/cloud/auth.js";
+import { encodeInviteLink } from "../../src/cloud/invite-link.js";
 import { ThinCommandClient } from "../../src/cloud/command-client.js";
 import { cloudTarget } from "../../src/cloud/config.js";
 import {
@@ -28,6 +29,7 @@ import {
   type CredentialRecord,
   type CredentialStore,
   defaultCredentialStateDirectory,
+  withFileLock,
 } from "../../src/cloud/storage.js";
 
 // The config directory moved from ~/.coswarm to ~/.cswarm with the CommonSwarm rename,
@@ -197,6 +199,7 @@ async function authServer(): Promise<{
 
 async function refreshServer(options: {
   delayMs?: number;
+  afterRotation?: (generation: number) => Promise<void>;
   failures?: Array<{ status: number; code: string }>;
   apiStatus?: number;
   apiCode?: string;
@@ -257,6 +260,7 @@ async function refreshServer(options: {
       }
       if (options.delayMs) await new Promise(resolve => setTimeout(resolve, options.delayMs));
       refreshCount += 1;
+      await options.afterRotation?.(refreshCount);
       if (options.dropAfterRotation) { request.socket.destroy(); return; }
       const now = new Date().toISOString();
       response.writeHead(200, { "content-type": "application/json" });
@@ -979,7 +983,7 @@ async function fileHuman(t: TestContext, target: ReturnType<typeof cloudTarget>,
   return { root, store, parent };
 }
 
-function humanChild(root: string, url: string, mode: "normal" | "before-save" | "after-save" | "cli" = "normal") {
+function humanChild(root: string, url: string, mode: "normal" | "before-save" | "after-save" | "cli" | "accept" = "normal", link?: string) {
   const authPath = new URL("../../src/cloud/auth.ts", import.meta.url).href;
   const storagePath = new URL("../../src/cloud/storage.ts", import.meta.url).href;
   const configPath = new URL("../../src/cloud/config.ts", import.meta.url).href;
@@ -995,12 +999,13 @@ function humanChild(root: string, url: string, mode: "normal" | "before-save" | 
     const target=cloudTarget(${JSON.stringify(url)},'test-anon-key');
     const store=await credentialStore({target,stateDirectory:${JSON.stringify(root)},forceFile:true,warn:()=>{}});
     const mode=${JSON.stringify(mode)};
-    if(mode==='cli') {
+    if(mode==='cli'||mode==='accept') {
       // Redirect filesystem discovery only. HOME and auth behavior are unchanged.
       os.homedir=()=>${JSON.stringify(root)};
       syncBuiltinESMExports();
-      process.argv=[process.execPath,fileURLToPath(${JSON.stringify(cliPath)}),'workspaces',
-        '--url',${JSON.stringify(url)},'--anon-key','test-anon-key','--force-file-store','--json'];
+      process.argv=[process.execPath,fileURLToPath(${JSON.stringify(cliPath)}),...(mode==='accept'
+        ? ['accept',${JSON.stringify(link)},'--no-browser','--force-file-store','--json']
+        : ['workspaces','--url',${JSON.stringify(url)},'--anon-key','test-anon-key','--force-file-store','--json'])];
       await import(${JSON.stringify(cliPath)});
     } else {
     if(mode!=='normal') {
@@ -1018,15 +1023,23 @@ function humanChild(root: string, url: string, mode: "normal" | "before-save" | 
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", chunk => { stdout += chunk; });
-  child.stderr.on("data", chunk => { stderr += chunk; });
+  let sawLogin = false;
+  child.stderr.on("data", chunk => {
+    stderr += chunk;
+    if (mode === "accept" && stderr.includes("Open this URL in a browser to sign in")) {
+      sawLogin = true;
+      // Boundary reached: never launch a browser or contact an identity provider.
+      child.kill("SIGTERM");
+    }
+  });
   child.stdin.end(code);
-  return new Promise<{ code: number | null; signal: NodeJS.Signals | null; stdout: string }>((resolve, reject) => {
+  return new Promise<{ code: number | null; signal: NodeJS.Signals | null; stdout: string; sawLogin: boolean }>((resolve, reject) => {
     const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("human CLI subprocess exceeded its deadline")); }, 45_000);
     child.once("error", error => { clearTimeout(timer); reject(error); });
     child.once("close", (code, signal) => {
       clearTimeout(timer);
-      if (code !== 0 && signal !== "SIGKILL") reject(new Error(`human CLI subprocess failed (${code}): ${stderr}`));
-      else resolve({ code, signal, stdout });
+      if (mode !== "accept" && code !== 0 && signal !== "SIGKILL") reject(new Error(`human CLI subprocess failed (${code}): ${stderr}`));
+      else resolve({ code, signal, stdout, sawLogin });
     });
   });
 }
@@ -1100,9 +1113,12 @@ test("bounded transient refresh failures retain the exact credential; terminal a
     { status: 0, code: "network", terminal: false },
     { status: 429, code: "over_request_rate_limit", terminal: false },
     { status: 503, code: "unexpected_failure", terminal: false },
-    { status: 400, code: "refresh_token_already_used", terminal: false },
+    { status: 400, code: "refresh_token_already_used", terminal: true },
     { status: 400, code: "invalid_grant", terminal: false },
-    { status: 403, code: "session_not_found", terminal: false },
+    { status: 403, code: "session_not_found", terminal: true },
+    { status: 404, code: "session_expired", terminal: true },
+    { status: 403, code: "permission_denied", terminal: false },
+    { status: 503, code: "session_not_found", terminal: false },
     { status: 400, code: "refresh_token_not_found", terminal: true },
   ]) await t.test(`${status}/${code}`, async t => {
     const retryable = status === 0 || status === 429 || status >= 500;
@@ -1230,17 +1246,19 @@ test("a dropped rotation response before journal publication retains the parent 
   const target = cloudTarget(server.url, "test-anon-key");
   const { store, parent } = await fileHuman(t, target);
   await assert.rejects(refreshedCredential(target, store), (error: unknown) =>
-    error instanceof HumanSessionError && error.code === "human_session_transient");
+    error instanceof HumanSessionError && error.code === "human_session_refresh_failed");
   assert.equal(server.refreshes(), 1, "fixture rotated before dropping its response");
   assert.deepEqual(await store.read(), parent, "an unseen successor cannot be reconstructed locally");
   assert.equal((await store.readProfile()).humanSession?.successor, undefined);
   await assert.rejects(refreshedCredential(target, store), (error: unknown) =>
-    error instanceof HumanSessionError && error.code === "human_session_transient");
+    error instanceof HumanSessionError && error.code === "human_session_refresh_failed");
   assert.deepEqual(await store.read(), parent);
   // This deliberately refusing HTTP fixture is not GoTrue parent-reuse proof.
 });
 
 test("a terminal response cannot condemn a same-generation winner with a different exact credential", async t => {
+  for (const refusal of [{ status: 400, code: "refresh_token_already_used" },
+    { status: 403, code: "session_not_found" }, { status: 404, code: "session_expired" }]) await t.test(`${refusal.status}/${refusal.code}`, async t => {
   const failures: Array<{ status: number; code: string }> = [];
   let publishWinner: (() => Promise<void>) | undefined;
   const server = await refreshServer({ failures, beforeRefusal: async () => { await publishWinner?.(); } });
@@ -1256,10 +1274,11 @@ test("a terminal response cannot condemn a same-generation winner with a differe
     await primary.store.write((await winner.store.read())!);
     await primary.store.writeProfile(await winner.store.readProfile());
   };
-  failures.push({ status: 400, code: "refresh_token_not_found" });
+  failures.push(refusal);
   assert.equal((await refreshedCredential(target, primary.store)).accessToken, expected.accessToken);
   assert.equal(server.refreshes(), 1);
   assert.deepEqual(await primary.store.read(), await winner.store.read());
+  });
 });
 
 test("a delayed old-token 401 adopts the winner instead of rejecting its new access token", async t => {
@@ -1316,4 +1335,121 @@ test("the actual CLI caller recovers an eligible 401 and a later command reuses 
   assert.equal(JSON.parse(second.stdout).identity.user_id, parent.userId);
   assert.equal(server.refreshes(), 2, "a separate command process reuses the valid cache");
   assert.equal((await store.read())!.generation, 2);
+});
+
+
+// F1: an API deadline must not lose an already-issued refresh successor or
+// release its lock before durable completion. Existing lock-wait cancellation
+// covers a different lifecycle boundary and cannot reach this in-flight case.
+test("caller cancellation during rotation awaits durable completion under the same lock without API replay", { timeout: 10_000 }, async t => {
+  const controller = new AbortController();
+  let rotated!: () => void, release!: () => void;
+  const rotation = new Promise<void>(resolve => { rotated = resolve; });
+  const response = new Promise<void>(resolve => { release = resolve; });
+  const server = await refreshServer({ apiStatus: 401, afterRotation: async generation => {
+    if (generation === 2) { controller.abort(); rotated(); await response; }
+  } });
+  t.after(async () => { release(); await server.close(); });
+  const target = cloudTarget(server.url, "test-anon-key");
+  const { store } = await fileHuman(t, target);
+  const human = await refreshedCredential(target, store);
+  let completed = false;
+  const pending = humanSessionFetch(target, store, human)(`${server.url}/rest/v1/memberships`, {
+    headers: { authorization: `Bearer ${human.accessToken}` }, signal: controller.signal,
+  });
+  const canceled = assert.rejects(pending, { name: "AbortError" }).finally(() => { completed = true; });
+  await rotation;
+  let contenderCompleted = false;
+  const contender = refreshedCredential(target, store).then(value => { contenderCompleted = true; return value; });
+  contender.catch(() => {});
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(completed, false, "cancellation cannot finish before successor publication");
+  assert.equal(contenderCompleted, false, "the same lock must cover the entire critical section");
+  release();
+  await canceled;
+  const adopted = await contender;
+  assert.equal(adopted.accessToken, "access-2");
+  assert.equal((await store.read())!.generation, 2);
+  assert.equal((await store.readProfile()).humanSession?.successor, undefined);
+  assert.equal(server.refreshes(), 2);
+  assert.equal(server.apiCalls.length, 1, "canceled API request must not be resent");
+});
+
+// F3 is owned at the real CLI boundary: a helper-only accept test would bypass
+// runLinkAccept.currentSession, where the regression occurred.
+test("accept with an invitation link resumes its existing login flow only for a terminal saved session", { timeout: 25_000 }, async t => {
+  for (const terminal of [true, false]) await t.test(terminal ? "terminal" : "transient", async t => {
+    const server = await refreshServer({ failures: Array.from({ length: terminal ? 1 : 3 }, () => ({
+      status: terminal ? 400 : 503, code: terminal ? "refresh_token_not_found" : "unexpected_failure",
+    })) });
+    t.after(server.close);
+    const target = cloudTarget(server.url, "test-anon-key");
+    const { root, store, parent } = await fileHuman(t, target, true);
+    const link = encodeInviteLink({ v: 1, url: server.url, anon_key: "test-anon-key",
+      workspace_id: randomUUID(), invitation_token: `swm_inv_${"B".repeat(43)}`,
+      workspace_name: "Test workspace", inviter_display_name: "Test inviter", inviter_user_id: randomUUID() });
+    const result = await humanChild(root, server.url, "accept", link);
+    assert.equal(result.sawLogin, terminal, "terminal sessions resume in-flow login; transient sessions retain retry advice");
+    assert.equal(server.attempts(), terminal ? 1 : 3, "the real refresh boundary must be reached");
+    if (!terminal) {
+      assert.notEqual(result.code, 0);
+      assert.match(result.stdout, /human_session_transient/);
+      assert.doesNotMatch(result.stdout, /cswarm login/);
+    }
+    assert.deepEqual(await store.read(), parent);
+  });
+});
+
+test("a retained unknown credential lock reports its exact cause and safe recovery without exposing owner payloads", async t => {
+  const server = await refreshServer(); t.after(server.close);
+  const target = cloudTarget(server.url, "test-anon-key");
+  const { root, store, parent } = await fileHuman(t, target);
+  const lockPath = join(root, `${target.profileId}.lock`);
+  await writeFile(lockPath, JSON.stringify({ pid: 12345, host: "foreign-host", createdAt: Date.now() - 120_000 }), { mode: 0o600 });
+  store.withLock = (work, options) => withFileLock(root, target.profileId, work, { ...options, timeoutMs: 50 });
+  await assert.rejects(refreshedCredential(target, store), (error: unknown) => {
+    assert.ok(error instanceof HumanSessionError);
+    assert.equal(error.code, "human_session_transient");
+    assert.equal(error.phase, "lock");
+    assert.ok(error.message.includes(lockPath));
+    assert.match(error.message, /owner pid 12345, host foreign-host/);
+    assert.match(error.message, /credential was kept/);
+    assert.match(error.message, /verify the recorded host and process/);
+    assert.doesNotMatch(error.message, /rm --|cswarm doctor|cswarm login/);
+    return true;
+  });
+  assert.deepEqual(await store.read(), parent);
+  assert.equal(server.attempts(), 0);
+});
+
+
+// A late journal is different from a changed credential: its parent bytes are
+// still identical when the refusal arrives. Both callers must reconcile it.
+test("terminal refresh and logout reconcile a journal published during the refusal before acting", async t => {
+  for (const ending of ["refresh", "logout"] as const) await t.test(ending, async t => {
+    const failures: Array<{ status: number; code: string }> = [];
+    let publish: (() => Promise<void>) | undefined;
+    const server = await refreshServer({ failures, beforeRefusal: async () => { await publish?.(); } });
+    t.after(server.close);
+    const target = cloudTarget(server.url, "test-anon-key");
+    const primary = await fileHuman(t, target), publisher = await fileHuman(t, target);
+    await publisher.store.withLock(async () => { await publisher.store.write(primary.parent); });
+    const originalWrite = publisher.store.write.bind(publisher.store);
+    publisher.store.write = async () => { throw new Error("fixture stops after durable publication"); };
+    await assert.rejects(refreshedCredential(target, publisher.store), HumanSessionError);
+    publisher.store.write = originalWrite;
+    const journal = await publisher.store.readProfile();
+    assert.ok(journal.humanSession?.successor);
+    publish = async () => { await primary.store.writeProfile(journal); };
+    failures.push({ status: 404, code: "session_not_found" });
+    if (ending === "refresh") {
+      assert.equal((await refreshedCredential(target, primary.store)).accessToken, "access-1");
+      assert.equal((await primary.store.read())!.generation, 1);
+      assert.equal(server.refreshes(), 1);
+    } else {
+      assert.equal(await logout(target, primary.store), "revoked");
+      assert.equal(server.logouts(), 1);
+      assert.equal(await primary.store.read(), null);
+    }
+  });
 });

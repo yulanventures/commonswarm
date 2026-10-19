@@ -82,7 +82,7 @@ test("a live host-id lock times out with its own name", { timeout: 2_000 }, asyn
       assert.match(error.message, /host-id rotation lock/);
       assert.match(error.message, new RegExp(`owner pid ${process.pid}`));
       assert.match(error.message, new RegExp(root));
-      assert.match(error.message, /If its owner is gone, remove that lock file with rm -- '.*' and retry/);
+      assert.match(error.message, /verify the recorded host and process/);
       assert.doesNotMatch(error.message, /credential refresh lock/);
       return true;
     });
@@ -186,7 +186,7 @@ test("an uninspectable live pid stays protected past 60 seconds; a dead pid is r
   } finally { Date.now = clock; process.kill = originalKill; await rm(root, { recursive: true, force: true }); }
 });
 
-test("reclaim gate timeout names its directory and the directory removal step", { timeout: 2_000 }, async () => {
+test("reclaim gate timeout names its retained directory and verified recovery", { timeout: 2_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-gate-copy-"));
   const lock = join(root, "host-id-rotation.lock");
   const gate = `${lock}.reclaim`;
@@ -201,13 +201,13 @@ test("reclaim gate timeout names its directory and the directory removal step", 
       assert.ok(error instanceof FileLockTimeoutError);
       assert.match(error.message, /host-id reclaim gate directory/);
       assert.ok(error.message.includes(gate));
-      assert.match(error.message, /remove that directory with rm -r -- '.*\.reclaim' and retry/);
+      assert.match(error.message, /verify the recorded host and process/);
       return true;
     });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("one timeout builder names each lock or gate, its path, and an ownerless removal step", { timeout: 1_000 }, () => {
+test("one timeout builder names each retained lock or gate and requires verified recovery", { timeout: 1_000 }, () => {
   const cases = [
     ["host-id-rotation", false, /host-id rotation lock/],
     ["a".repeat(24), false, /credential refresh lock/],
@@ -221,10 +221,14 @@ test("one timeout builder names each lock or gate, its path, and an ownerless re
     const sentence = fileLockTimeoutSentence(name, path, undefined, gate);
     assert.match(sentence, label);
     assert.ok(sentence.includes(path));
-    assert.match(sentence, /No live owner was identified/);
-    assert.ok(sentence.includes(`rm ${gate ? "-r " : ""}-- '${path}'`));
+    assert.match(sentence, /liveness could not be verified/);
+    assert.match(sentence, /verify the recorded host and process/);
+    assert.doesNotMatch(sentence, /rm --|rm -r|No live owner was identified/);
     if (!/^[0-9a-f]{24}$/.test(name)) assert.doesNotMatch(sentence, /credential refresh lock/);
   }
+  const unsafe = fileLockTimeoutSentence("seat", "/tmp/seat.lock", 12345, false, "token-shaped\n\x1b[31m");
+  assert.match(unsafe, /host unknown/);
+  assert.doesNotMatch(unsafe, /token-shaped|\x1b/);
 });
 
 test("two stale-lock contenders rotate once", { timeout: 8_000 }, async () => {
@@ -771,7 +775,7 @@ test("reclaim checks the moved owner and preserves a replacement gate", { timeou
     }), error => {
       assert.ok(error instanceof FileLockTimeoutError);
       assert.ok(error.message.includes(gate));
-      assert.match(error.message, /remove that directory/);
+      assert.match(error.message, /verify the recorded host and process/);
       return true;
     });
     assert.equal(await readFile(join(gate, "owner.json"), "utf8"), fresh);
@@ -930,7 +934,7 @@ test("supervisor records this process start as reported by real ps", { timeout: 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("a real Linux process holding the credential lock past sixty seconds is never displaced", { timeout: 75_000, skip: process.platform !== "linux" }, async () => {
+test("compatibility control: a real Linux process holding the credential lock past sixty seconds is never displaced", { timeout: 75_000, skip: process.platform !== "linux" }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-live-human-owner-"));
   const storagePath = new URL("../../src/cloud/storage.ts", import.meta.url).href;
   const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module"], { stdio: ["pipe", "pipe", "pipe"] });
