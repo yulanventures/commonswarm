@@ -197,7 +197,9 @@ os.utime(dump_file,(c.now().timestamp()-5,)*2)
 s.STATUS=str(backup/'status.json'); s.RESTORE=str(backup/'restore-status.json')
 machine=root/'machine-id'; machine.write_bytes(b'test-machine-id-with-newline\n'); c.MACHINE_ID=str(machine)
 real_digest,real_stat,real_fstat=c.digest,os.lstat,os.fstat
-temp_paths={tempfile.gettempdir(),str(pathlib.Path(tempfile.gettempdir()).resolve())}
+# Model protected staging ancestors above the fixture, including a nested TMPDIR.
+# Keep the fixture root and every path inside it subject to real mode checks.
+temp_paths={str(parent) for parent in root.parents}
 def real_rm(p):
  assert p.parent.resolve().is_relative_to(root)
  os.rmdir(p) if p.is_dir() and not p.is_symlink() else os.unlink(p)
@@ -224,6 +226,9 @@ def refuses(call,types=(ValueError,OSError,KeyError,TypeError)):
 
 test('status uses the exact local contract, computed dump hash and exclusive protected files', () => {
   const r = run(localHarness + String.raw`
+root.chmod(0o777)
+refuses(lambda:invoke('before','unsafe-parent.json')); assert not (proof/'unsafe-parent.json').exists()
+root.chmod(0o700)
 before=invoke('before','before.json'); assert before['restore_status']=={'exists':False,'sha256':None}
 # Missing and unsuccessful drills refuse at their actual boundary.
 refuses(lambda:invoke('write','writer.json','before.json'))
