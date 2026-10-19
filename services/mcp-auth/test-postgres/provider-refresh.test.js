@@ -426,3 +426,111 @@ test('HTTP hosted refresh rotates unbounded families twice and preserves owner d
     const stillRefused = await rotate(); assert.equal(stillRefused.status,400); assert.equal(stillRefused.body.error,'invalid_grant');
   } finally { await server.close(); await server.cleanup(); }
 });
+
+for (const edit of ['extend', 'clear']) {
+  test(`HTTP owner ${edit} before deadline survives crossing inside refresh consume/save`, { timeout: 20000 }, async () => {
+    const clientId = `https://s2-crossing-${randomUUID()}.example/oauth.json`;
+    let armed = false, barrierEntered = false, oldExp, nextPolicy;
+    const server = await startProvider(clientId, async ({ model }) => {
+      if (model !== 'RefreshToken' || !armed) return;
+      armed = false;
+      barrierEntered = true;
+      const edited = await pool.query(`UPDATE swarm.hosted_mcp_grants
+        SET connection_expires_at=$2 WHERE grant_id=$1 AND connection_expires_at>clock_timestamp()
+        RETURNING clock_timestamp() AS edited_at`, [server.hosted,nextPolicy]);
+      assert.equal(edited.rowCount,1,'owner edit commits while old chosen date is still future');
+      assert.ok(edited.rows[0].edited_at.getTime()<oldExp*1000);
+      // Release only after BOTH clocks cross the predecessor's actual payload
+      // exp. Poll a bounded predicate rather than guessing a sleep duration.
+      const stop = performance.now()+8000;
+      while (true) {
+        const crossed = (await pool.query('SELECT extract(epoch FROM clock_timestamp()) >= $1 AS crossed',[oldExp])).rows[0].crossed;
+        if (crossed && Math.floor(Date.now()/1000)>=oldExp) break;
+        assert.ok(performance.now()<stop,'DB and Node must cross stored exp within the clock barrier');
+        await new Promise(resolve => setTimeout(resolve,20));
+      }
+    },pool,{ permanent: true });
+    try {
+      const code = await authorizeCode(server,clientId);
+      const initial = await tokenRequest(server,{ client_id: clientId,code,code_verifier: verifier,
+        grant_type: 'authorization_code',redirect_uri: redirectUri,resource: RESOURCE });
+      assert.equal(initial.status,200);
+      const family = decodeJwt(initial.body.access_token).grant_id;
+      const rotate = token => tokenRequest(server,{ client_id: clientId,grant_type: 'refresh_token',refresh_token: token,resource: RESOURCE });
+      const chosen = (await pool.query("SELECT date_trunc('second',clock_timestamp())+interval '4 seconds' AS deadline")).rows[0].deadline;
+      nextPolicy = edit === 'clear' ? null : new Date(chosen.getTime()+86400000);
+      await pool.query('UPDATE swarm.hosted_mcp_grants SET connection_expires_at=$2 WHERE grant_id=$1',[server.hosted,chosen]);
+      const finite = await rotate(initial.body.refresh_token);
+      assert.equal(finite.status,200);
+      const predecessor = finite.body.refresh_token;
+      const hash = token => createHash('sha256').update(token).digest('base64url');
+      const stored = (await pool.query("SELECT payload,expires_at FROM commonswarm_oauth.provider_artifacts WHERE model='RefreshToken' AND artifact_id_hash=$1",[hash(predecessor)])).rows[0];
+      oldExp = stored.payload.exp;
+      assert.equal(oldExp,chosen.getTime()/1000);
+      assert.equal(stored.expires_at.getTime(),chosen.getTime());
+      armed = true;
+      const rotated = await rotate(predecessor);
+      assert.equal(barrierEntered,true,'refresh reached the beforeConsume race boundary');
+      assert.equal(rotated.status,200,JSON.stringify(rotated.body));
+      assert.notEqual(rotated.body.refresh_token,predecessor);
+      const assertPersisted = async token => {
+        const rows = (await pool.query(`SELECT model,payload,expires_at,consumed_at FROM commonswarm_oauth.provider_artifacts
+          WHERE (model='Grant' AND payload->>'jti'=$1) OR (model='RefreshToken' AND artifact_id_hash=$2)`,[family,hash(token)])).rows;
+        assert.deepEqual(rows.map(row => row.model).sort(),['Grant','RefreshToken']);
+        for (const row of rows) {
+          assert.equal(row.expires_at?.getTime() ?? null,nextPolicy?.getTime() ?? null,row.model);
+          assert.equal(Object.hasOwn(row.payload,'exp'),nextPolicy !== null,row.model);
+          if (nextPolicy) assert.equal(row.payload.exp,nextPolicy.getTime()/1000,row.model);
+          assert.equal(row.consumed_at,null,row.model);
+        }
+      };
+      await assertPersisted(rotated.body.refresh_token);
+      const again = await rotate(rotated.body.refresh_token);
+      assert.equal(again.status,200,JSON.stringify(again.body));
+      assert.notEqual(again.body.refresh_token,rotated.body.refresh_token);
+      await assertPersisted(again.body.refresh_token);
+      const replay = await rotate(predecessor);
+      assert.equal(replay.status,400); assert.equal(replay.body.error,'invalid_grant');
+      assert.equal((await pool.query('SELECT 1 FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id=$1',[family])).rowCount,1);
+      const revoked = await rotate(again.body.refresh_token);
+      assert.equal(revoked.status,400); assert.equal(revoked.body.error,'invalid_grant');
+    } finally { await server.close(); await server.cleanup(); }
+  });
+}
+
+test('HTTP finite nonhosted refresh crossing its deadline at consumed event saves no successor', async t => {
+  const clientId = `https://s2-finite-crossing-${randomUUID()}.example/oauth.json`;
+  const server = await startProvider(clientId,undefined,pool,{ refreshTokenTtlSeconds: 60 });
+  let clockMocked = false, consumed = false;
+  const crossDeadline = predecessor => {
+    consumed = true;
+    assert.ok(Number.isSafeInteger(predecessor.exp));
+    t.mock.timers.enable({ apis: ['Date'],now: (predecessor.exp+1)*1000 });
+    clockMocked = true;
+  };
+  try {
+    const code = await authorizeCode(server,clientId);
+    const initial = await tokenRequest(server,{ client_id: clientId,code,code_verifier: verifier,
+      grant_type: 'authorization_code',redirect_uri: redirectUri,resource: RESOURCE });
+    assert.equal(initial.status,200);
+    const family = decodeJwt(initial.body.access_token).grant_id;
+    assert.equal((await pool.query('SELECT 1 FROM commonswarm_oauth.provider_grant_resources WHERE provider_grant_id=$1',[family])).rowCount,0);
+    server.provider.once('refresh_token.consumed',crossDeadline);
+    let result;
+    try {
+      result = await tokenRequest(server,{ client_id: clientId,grant_type: 'refresh_token',refresh_token: initial.body.refresh_token,resource: RESOURCE });
+    } finally {
+      if (clockMocked) { t.mock.timers.reset(); clockMocked = false; }
+    }
+    assert.equal(consumed,true,'provider validated and consumed before crossing the finite deadline');
+    assert.equal(result.status,400); assert.equal(result.body.error,'invalid_grant');
+    const rows = (await pool.query("SELECT artifact_id_hash,consumed_at FROM commonswarm_oauth.provider_artifacts WHERE model='RefreshToken' AND grant_id=$1",[family])).rows;
+    assert.equal(rows.length,1,'no successor was saved');
+    assert.equal(rows[0].artifact_id_hash,createHash('sha256').update(initial.body.refresh_token).digest('base64url'));
+    assert.ok(rows[0].consumed_at,'original consumption evidence remains');
+  } finally {
+    if (clockMocked) t.mock.timers.reset();
+    server.provider.removeListener('refresh_token.consumed',crossDeadline);
+    await server.close(); await server.cleanup();
+  }
+});

@@ -198,6 +198,38 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
   }
 
   return (model) => ({
+    async proveHostedRefreshToken(predecessor, clientId) {
+      if (model !== "RefreshToken" || adminTransactionContext(false)) return undefined;
+      const id = predecessor.jti;
+      return transaction(pool, async client => {
+        const initial = (await client.query(`SELECT payload FROM ${artifacts}
+          WHERE model=$1 AND artifact_id_hash=$2`, [model,lookupHash(id)])).rows[0];
+        if (!initial) return undefined;
+        await requireBoundContext(model,id,initial.payload,client);
+        const envelope = await lockFamily(client,model,id,initial.payload);
+        if (!envelope.binding) return undefined;
+        const row = (await client.query(`SELECT * FROM ${artifacts}
+          WHERE model=$1 AND artifact_id_hash=$2 FOR UPDATE`, [model,lookupHash(id)])).rows[0];
+        if (!row || row.consumed_at !== null) return undefined;
+        assertHostedPayload(model,id,row.payload,envelope.binding);
+        assertHostedPayload(model,id,predecessor,envelope.binding);
+        const target = value => Array.isArray(value) && value.length === 1 ? value[0] : value;
+        if (row.grant_id !== envelope.family || row.payload.grantId !== envelope.family ||
+            predecessor.grantId !== envelope.family || clientId !== envelope.binding.client_id ||
+            target(row.payload.resource) !== resource || target(predecessor.resource) !== resource) {
+          throw new errors.InvalidGrant("refresh predecessor binding mismatch");
+        }
+        // This fresh authority read follows the artifact wait; the existing
+        // helper validates live consent, manifest, owner and family tombstones.
+        if (!(await currentPolicy(client,envelope.family,envelope.binding))?.active) {
+          throw new errors.InvalidGrant("hosted family inactive");
+        }
+        // Never serialize this proof or attach it to a token/client payload.
+        return Object.freeze({ predecessor, artifactId: id, family: envelope.family,
+          owner: envelope.binding.owner_user_id, clientId, resource });
+      });
+    },
+
     async consume(id) {
       await requireBoundContext(model,id);
       if (adminTransactionContext(false)) {

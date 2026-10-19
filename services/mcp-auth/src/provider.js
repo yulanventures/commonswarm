@@ -69,6 +69,7 @@ export async function createMcpProvider({
       cimdCacheDuration.min <= 0 || cimdCacheDuration.max < cimdCacheDuration.min) {
     throw new TypeError("CIMD cache duration must have bounded min and max seconds");
   }
+  const hostedRefreshProofs = new WeakMap();
   const adminLifecycle = new AdminTokenLifecycle({ activeKid: activeSigningKid ?? jwks?.keys?.[0]?.kid });
   const policy = interactionPolicy.base();
   // A provider session can outlive the authenticated browser session. The
@@ -238,7 +239,15 @@ export async function createMcpProvider({
       authorization: "/authorize",
       jwks: "/jwks",
     },
-    rotateRefreshToken: true,
+    rotateRefreshToken: async (ctx) => {
+      const predecessor = ctx.oidc.entities.RefreshToken;
+      if (!adminTransactionContext(false)) {
+        const proof = await predecessor.adapter.proveHostedRefreshToken?.(
+          predecessor, ctx.oidc.client.clientId);
+        if (proof) hostedRefreshProofs.set(ctx, proof);
+      }
+      return true;
+    },
     scopes: CLIENT_SCOPES,
     extraClientMetadata: {
       properties: ["scope", "dpop_signing_alg"],
@@ -262,10 +271,17 @@ export async function createMcpProvider({
         const now = Date.now();
         const rotated = ctx?.oidc?.entities.RotatedRefreshToken;
         let ttl = refreshTokenTtlSeconds;
-        // An exp-less hosted token's remainingTTL calls expiration, which
-        // invokes this callback again. Only the validated epoch is a deadline;
-        // the adapter applies fresh canonical hosted policy after its locks.
-        if (rotated && Object.hasOwn(rotated, "exp")) {
+        const proof = ctx && hostedRefreshProofs.get(ctx);
+        const provenHosted = !adminTransactionContext(false) && proof &&
+          proof.predecessor === rotated && proof.artifactId === rotated.jti &&
+          proof.family === rotated.grantId && proof.owner === rotated.accountId &&
+          proof.clientId === rotated.clientId && proof.clientId === ctx.oidc.client.clientId &&
+          proof.resource === (Array.isArray(rotated.resource) && rotated.resource.length === 1
+            ? rotated.resource[0] : rotated.resource);
+        // Only adapter proof for this exact predecessor can outlive its stale
+        // exp. Consume and upsert still enforce fresh canonical policy/CAS.
+        // Exp-less tokens must not call remainingTTL here (it recurses).
+        if (rotated && !provenHosted && Object.hasOwn(rotated, "exp")) {
           if (!Number.isSafeInteger(rotated.exp) || rotated.exp <= 0) {
             throw new errors.InvalidGrant("refresh token deadline is invalid");
           }
