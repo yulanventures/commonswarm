@@ -472,12 +472,16 @@ test("4. RFC 8707 binds authorization and token requests to the one MCP resource
   missingResourceUrl.searchParams.delete("resource");
   const missingAtAuthorize = await followAuthorization(sharedServer, missingResourceUrl);
   assert.equal(missingAtAuthorize.searchParams.get("error"), "invalid_target");
+  assert.equal(missingAtAuthorize.origin + missingAtAuthorize.pathname, DEFAULT_REDIRECT_URI);
+  assert.equal(missingAtAuthorize.searchParams.get("iss"), ISSUER);
 
   const rejectedAtAuthorize = await followAuthorization(sharedServer, authorizationUrl({
     clientId,
     resource: "https://other.example/mcp",
   }));
   assert.equal(rejectedAtAuthorize.searchParams.get("error"), "invalid_target");
+  assert.equal(rejectedAtAuthorize.origin + rejectedAtAuthorize.pathname, DEFAULT_REDIRECT_URI);
+  assert.equal(rejectedAtAuthorize.searchParams.get("iss"), ISSUER);
 
   const callback = await followAuthorization(sharedServer, authorizationUrl({ clientId }));
   const rejectedAtToken = await tokenRequest(sharedServer, {
@@ -556,7 +560,30 @@ test("5. RFC 9207 adds the configured issuer to the authorization response", asy
   const clientId = "https://response-issuer.example/oauth-client.json";
   sharedDocuments.set(clientId, clientMetadata(clientId));
   const callback = await followAuthorization(sharedServer, authorizationUrl({ clientId }));
+  assert.equal(callback.origin + callback.pathname, DEFAULT_REDIRECT_URI);
+  assert.ok(callback.searchParams.get("code"));
+  assert.equal(callback.searchParams.get("error"), null);
   assert.equal(callback.searchParams.get("iss"), ISSUER);
+
+  // A fresh HTTP server has no login cookies; prompt=none must return an error
+  // to the registered client, with the public issuer despite loopback transport.
+  const server = await startProvider(metadataFetchFromMap(new Map([
+    [clientId, clientMetadata(clientId)],
+  ])));
+  try {
+    const url = authorizationUrl({ clientId });
+    url.searchParams.set("prompt", "none");
+    const response = await server.request(url);
+    assert.equal(response.status, 303);
+    const denied = new URL(response.headers.get("location"), ISSUER);
+    assert.equal(denied.origin + denied.pathname, DEFAULT_REDIRECT_URI);
+    assert.equal(denied.searchParams.get("error"), "login_required");
+    assert.equal(denied.searchParams.has("code"), false);
+    assert.equal(denied.searchParams.get("state"), "spike-state");
+    assert.equal(denied.searchParams.get("iss"), ISSUER);
+  } finally {
+    await server.close();
+  }
 });
 
 test("6. access token is an independently verifiable five-minute ES256 JWT", async () => {

@@ -36,7 +36,6 @@ test("MCP handoff contains only operator terminal steps; legacy prompt discloses
     for (const phrase of ["Connect to CommonSwarm. Keep the file private", "Confirm cswarm setup --check-version", "Run setup --json. Reuse its --profile", "the local Grok Bot gateway; Codex supports turn checks", "Read brain topics; post intent and reply"]) assert.ok(prompt.includes(phrase), `fallback wording missing: ${phrase}`);
   }
   const component = readFileSync(new URL("./AgentConnect.astro", import.meta.url), "utf8");
-  assert.match(component, /<summary>Connect with MCP<\/summary>/);
   assert.match(component, /\{dashboardMcpPrompt\(\)\}/);
 });
 

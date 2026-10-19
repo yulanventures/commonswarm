@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { INSTALL_CMD_PINNED } from "../src/lib/release.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 
 const PAGES = [
   {
     route: "/guides/claude-code-subagents",
+    modified: "2026-10-19",
     title: "Claude Code subagents: A practical guide",
     description:
       "Learn how Claude Code subagents work and how to share updates with people and agents in a CommonSwarm workspace.",
@@ -87,7 +87,7 @@ test("SEO pages emit exact metadata, canonicals, OpenGraph, and structured data"
       assert.equal(json.itemListElement.length, 6);
     } else {
       assert.equal(json.datePublished, page.date ?? "2026-09-02");
-      assert.equal(json.dateModified, page.date ?? "2026-09-02");
+      assert.equal(json.dateModified, page.modified ?? page.date ?? "2026-09-02");
     }
 
     assert.doesNotMatch(html, /<!--/, `${page.route} ships an HTML comment`);
@@ -142,20 +142,17 @@ test("comparison claims reflect the supported Microsoft framework", () => {
   }
 });
 
-test("the Claude guide derives its release pin and shows the credential-file path", () => {
-  const route = "/guides/claude-code-subagents";
-  const html = builtHtml(route);
+test("the Claude guide defaults to the public hosted connector with browser sign-in", () => {
+  const html = builtHtml("/guides/claude-code-subagents");
   const article = attribute(html, /(<article class="seo-page">[\s\S]+<\/article>)/);
-  const source = fs.readFileSync(
-    path.join(ROOT, "src", "pages", "guides", "claude-code-subagents.astro"),
-    "utf8",
-  );
-
-  assert.ok(article.includes(INSTALL_CMD_PINNED), "install host drifted");
-  assert.match(article, /--agent-token-file/);
-  assert.doesNotMatch(article, /--agent-token-stdin/);
-  assert.match(source, /import \{ INSTALL_CMD_PINNED \} from "\.\.\/\.\.\/lib\/release\.ts"/);
-  assert.doesNotMatch(source, /\b0\.\d+\.\d+\b/);
+  const fallback = article.indexOf("<details");
+  assert.ok(fallback > 0, "the local/headless fallback stays optional");
+  const primary = article.slice(0, fallback);
+  assert.match(primary, /claude mcp add --transport http --scope user commonswarm https:\/\/mcp\.commonswarm\.com\/mcp/);
+  assert.match(primary, /Sign in through your browser/);
+  assert.doesNotMatch(primary, /--agent-token|swm_agt_|CSWARMA\./);
+  assert.match(article, /has not been tested with Claude Code yet/);
+  assert.match(article, /up to 30 days/);
 });
 
 test("the Grok Bot guide names wake's preview and delivery limits", () => {

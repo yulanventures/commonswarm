@@ -1044,9 +1044,23 @@ assert env==dict(x.split('=',1) for x in live['Config']['Env'])
 assert env['SWARM_MCP_PUBLIC_ENABLED']=='1' and not any(k.startswith(('SWARM_CMD_TEST_','MCP_OAUTH_TEST_')) for k in env)
 PY
 }
+# Capture validated public metadata during read-only preflight, before deployment.
+# Recovery must match that recorded form; forward always requires mcp only.
 edge_route_probes() {
- python3 - "$CADDY_CA_FILE" <<'PY'
-import http.client,json,ssl,sys
+ local phase="${1:?capture, baseline, forward or recovery required}"
+ test "$#" -eq 1 || fail 'route probe argument count refused'
+ case "$phase" in capture|baseline|forward|recovery) ;; *) fail 'route probe phase refused';; esac
+ python3 - "$CADDY_CA_FILE" "$phase" "$PROOF_DIR/mcp-prm.baseline.json" <<'PY'
+import http.client,json,pathlib,ssl,sys
+phase=sys.argv[2]; baseline=pathlib.Path(sys.argv[3])
+assert phase in ('capture','baseline','forward','recovery')
+def metadata(scopes):
+ return {'resource':'https://mcp.commonswarm.com/mcp','authorization_servers':['https://mcp.commonswarm.com'],'bearer_methods_supported':['header'],'scopes_supported':scopes,'resource_name':'CommonSwarm hosted MCP'}
+if phase in ('baseline','recovery'):
+ expected=json.loads(baseline.read_text())
+ assert expected in (metadata(['mcp','offline_access']),metadata(['mcp']))
+elif phase=='forward': expected=metadata(['mcp'])
+else: assert not baseline.exists() and not baseline.is_symlink()
 ctx=ssl.create_default_context(cafile=sys.argv[1])
 # Resolve transport to loopback without changing TLS SNI or HTTP Host.
 class LocalTLS(http.client.HTTPSConnection):
@@ -1076,7 +1090,10 @@ status,h,b=request('api.commonswarm.com','/.well-known/oauth-protected-resource/
 status,h,b=request('mcp.commonswarm.com','/.well-known/oauth-authorization-server',headers=discovery_headers); assert status==200
 assert json.loads(b)['issuer']=='https://mcp.commonswarm.com'
 status,h,b=request('mcp.commonswarm.com','/.well-known/oauth-protected-resource/mcp',headers=discovery_headers); assert status==200
-assert json.loads(b)=={'resource':'https://mcp.commonswarm.com/mcp','authorization_servers':['https://mcp.commonswarm.com'],'bearer_methods_supported':['header'],'scopes_supported':['mcp','offline_access'],'resource_name':'CommonSwarm hosted MCP'}
+observed=json.loads(b)
+if phase=='capture':
+ assert observed in (metadata(['mcp','offline_access']),metadata(['mcp']))
+else: assert observed==expected
 for meta in (False,True):
  params={'name':'cswarm_check','arguments':{}}
  if meta: params['_meta']={'progressToken':'edge-release-public-probe'}
@@ -1086,6 +1103,9 @@ for meta in (False,True):
  except ValueError: value={}
  error=value.get('error') if isinstance(value,dict) else None
  assert not isinstance(error,dict) or error.get('code')!=-32602
+# Persist only after every public probe succeeds; never overwrite the baseline.
+if phase=='capture':
+ with baseline.open('x') as f: json.dump(observed,f,sort_keys=True); f.write('\n')
 print('PASS local Caddy closed gate/CORS, canonical admin, discovery, MCP unauthenticated 401 pair; authenticated parser check pending')
 PY
 }
@@ -1117,7 +1137,7 @@ edge_timer_active
 test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive
 edge_identity "$OLD_EDGE"
 edge_invariants
-edge_route_probes
+edge_route_probes capture
 printf 'PASS\n' >"$PROOF_DIR/probes-baseline.txt"
 printf 'PASS\n' >"$PROOF_DIR/open.txt"
 printf 'PASS open: PROOF_DIR=%s; baseline gate CLOSED; no service mutation\n' "$PROOF_DIR"
@@ -1373,7 +1393,7 @@ case "${PROBE_PHASE:?forward or recovery}" in
  *) fail 'probe phase refused';;
 esac
 edge_timer_active; edge_identity "$target"; edge_readback "$sha"; edge_invariants
-edge_route_probes
+edge_route_probes "$PROBE_PHASE"
 printf 'PASS\n' >"$PROOF_DIR/probes-$PROBE_PHASE.txt"
 
 )
@@ -1420,7 +1440,7 @@ edge_timer_active; edge_identity "$OLD_EDGE"; edge_invariants
 cmp -s "$RECYCLE_JSON" "$PROOF_DIR/recycle.baseline.json"
 edge_db_state "$PROOF_DIR/abort"
 cmp -s "$PROOF_DIR/abort.cutover.json" "$PROOF_DIR/baseline.cutover.json"
-edge_route_probes
+edge_route_probes baseline
 printf 'PASS\n' >"$PROOF_DIR/probes-aborted-before-attempt.txt"
 printf 'PASS\n' >"$PROOF_DIR/aborted-before-attempt.txt"
 
@@ -1615,7 +1635,12 @@ if test "$CLOSE_RESULT" != success; then
  test ! -e "$NEW_HELPER"
  test ! -L "$NEW_HELPER"
 fi
-edge_invariants; edge_route_probes; edge_timer_active
+case "$CLOSE_RESULT" in
+ success) route_phase=forward;;
+ rolled-back) route_phase=recovery;;
+ aborted) route_phase=baseline;;
+esac
+edge_invariants; edge_route_probes "$route_phase"; edge_timer_active
 # Refuse unsafe cleanup; control proves rejected names. Use the installed rm guard.
 python3 - "$SECRET_STAGE" "$PROOF_DIR/secret-stage.path" <<'PY'
 import pathlib,re,sys
