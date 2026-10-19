@@ -177,7 +177,9 @@ cleanup, scratch retention and any quiet-wait deadline decision. It posts only t
 with context `hetzner/<suite>`. Both exact-SHA proof runs and `--ref main`
 nightlies use the resolved tested snapshot, even if main advances later.
 Deferred attempts publish nothing. Exit 0 publishes success; other exits publish
-failure, except timeout, cancellation and cleanup errors publish error.
+failure, except controller/setup errors, timeout, cancellation and cleanup errors
+publish error. A failed setup command before the suite starts is an error;
+a nonzero suite test exit remains failure.
 Descriptions contain only the run ID and exit code. No raw logs or response bodies
 are published or printed. This uses the commit-status permission only; it does
 not call workflow, check-run, PR or comment APIs.
@@ -199,6 +201,13 @@ Publication failure leaves the suite exit/result intact. The controller prints
 outside all container mounts and is retained for operator reconciliation; the
 14-day run retention does not delete it. An unset token path also produces this
 explicit failure. Publication has a 30-second host process bound per final suite.
+If publication-directory creation or either publication-record write fails, the
+controller still preserves the CI exit, runs subsequent suites and invokes final
+retention. Its stdout (captured by the service journal) includes the sanitized
+publication outcome and `persistence_errors` codes, without exception text. An
+unwritten host status record has `publication_record: null`; the other record is
+still attempted. This fallback does not change baseline receipt/filesystem errors
+outside publication persistence.
 
 For an existing installation, Root must install the reviewed four controller
 files (`run.sh`, `suite.sh`, `retain.py`, `publish-status.py`) together and update

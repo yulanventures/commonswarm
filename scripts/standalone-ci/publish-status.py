@@ -37,8 +37,10 @@ def status_payload(result):
     need(type(result.get('timed_out')) is bool, 'invalid_timeout')
     cleanup_failed = result.get('cleanup_failed', bool(result.get('cleanup_errors')))
     need(type(cleanup_failed) is bool, 'invalid_cleanup')
-    need(code != 0 or not (result['timed_out'] or cleanup_failed), 'inconsistent_result')
-    state = ('error' if result['timed_out'] or cleanup_failed or code == 130
+    controller_failed = result.get('controller_failed', bool(result.get('controller_error')))
+    need(type(controller_failed) is bool, 'invalid_controller_error')
+    need(code != 0 or not (result['timed_out'] or cleanup_failed or controller_failed), 'inconsistent_result')
+    state = ('error' if result['timed_out'] or cleanup_failed or controller_failed or code == 130
              else 'success' if code == 0 else 'failure')
     # Include only validated controller metadata; never logs, gate text or URLs.
     return sha, dict(state=state, context='hetzner/' + suite,

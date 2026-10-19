@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, mkdirSync, readFileSync, writeFileSync, chmodSync, readdirSync, symlinkSync, existsSync, statSync } from 'node:fs';
+import { mkdtempSync, realpathSync, mkdirSync, readFileSync, writeFileSync, chmodSync, readdirSync, renameSync, rmdirSync, symlinkSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import test from 'node:test';
@@ -467,11 +467,17 @@ test('namespace policy failure prevents worker startup and cleans owned runtime'
 // regressions: requested/merge SHA attribution, premature deferred success,
 // token exposure and lost CI failures when GitHub is unavailable. Only transport
 // is redirected in the disposable installed copy; production gains no test flag.
-async function statusAPI(t, response = 201) {
+// F1 owner: exercise real pre-suite controller stops and a real gate exit at the
+// API, so dropping error provenance or treating every nonzero as error fails.
+// F2 owner: cause actual mkdir/write errors at publication paths after baseline
+// receipt writes; assert CI exit, subsequent suites, retention and journal JSON.
+// These extend the existing owners; no mock returns a persistence failure.
+async function statusAPI(t, response = 201, onRequest = () => {}) {
   const requests = [];
   const server = createServer(async (req,res) => {
     let body=''; for await (const chunk of req) body += chunk;
     requests.push({method:req.method,path:req.url,authorization:req.headers.authorization,body:JSON.parse(body)});
+    onRequest(requests.at(-1));
     res.writeHead(response, response === 302 ? {Location:'http://127.0.0.1:1/never-forward-credentials'} : {}); res.end('synthetic-status-only-token must never be logged from an error response');
   });
   await new Promise(resolve => server.listen(0,'127.0.0.1',resolve));
@@ -488,47 +494,109 @@ function assertNoToken(f,result) {
     for (const name of readdirSync(runDir)) {
       if (statSync(join(runDir,name)).isFile()) assert.ok(!readFileSync(join(runDir,name),'utf8').includes('synthetic-status-only-token'),name);
     }
-    assert.ok(!JSON.stringify(publication(f,receipt)).includes('synthetic-status-only-token'));
+    const record=join(f.state,'statuses',receipt.run_id+'.json');
+    if (existsSync(record) && statSync(record).isFile()) assert.ok(!readFileSync(record,'utf8').includes('synthetic-status-only-token'));
   }
 }
 
-test('final statuses use the tested snapshot for every suite, keep p1 failure and keep credentials host-only', async t => {
+test('final statuses use the tested snapshot and distinguish gate failures from pre-suite controller errors', async t => {
   const api=await statusAPI(t);
-  const f=fixture({statusPort:api.port,exit:{'p1-cli':9}});
-  writeFileSync(join(f.source,'identity'),'later main is not the requested proof');
-  good('git',['-C',f.source,'commit','-qam','later main']);
-  const result=await start(f,f.args('all'));
-  assert.equal(result.status,9,result.stderr);
-  assert.equal(api.requests.length,5);
-  for (const req of api.requests) {
-    assert.equal(req.method,'POST');
-    assert.equal(req.path,'/repos/yulanventures/commonswarm/statuses/'+f.sha);
-    assert.equal(req.authorization,'Bearer synthetic-status-only-token');
-    assert.equal(req.body.state,req.body.context==='hetzner/p1-cli' ? 'failure' : 'success');
-    assert.deepEqual(Object.keys(req.body).sort(),['context','description','state']);
-  }
-  assert.deepEqual(api.requests.map(r=>r.body.context).sort(),['hetzner/box-dry-run','hetzner/p1-cli','hetzner/server','hetzner/site','hetzner/unit']);
-  for (const r of f.receipts()) {
-    assert.deepEqual(r.github_status,publication(f,r));
-    assert.equal(r.github_status.state,'published');
-  }
-  assertNoToken(f,result);
-});
-
-test('GitHub HTTP failures are durable, sanitized, and preserve both successful and failed CI exits', async t => {
-  const api=await statusAPI(t,403);
-  for (const exit of [0,7]) {
-    const f=fixture({statusPort:api.port,exit:{unit:exit}});
-    const result=await start(f);
-    assert.equal(result.status,exit,result.stderr);
-    const [receipt]=f.receipts();
-    assert.equal(receipt.exit_code,exit);
-    assert.equal(publication(f,receipt).state,'failed');
-    assert.equal(publication(f,receipt).error,'github_http_403');
-    assert.match(result.stdout,/"github_status": "failed"/);
+  for (const {control, probeError, code, infrastructure} of [
+    {control:{exit:{'p1-cli':9}},code:9,infrastructure:false},
+    {control:{policyFail:true},code:42,infrastructure:true},
+    {control:{},probeError:true,code:1,infrastructure:true},
+  ]) {
+    const before=api.requests.length;
+    const f=fixture({statusPort:api.port,...control});
+    if (probeError) writeFileSync(join(f.root,'bin','pgrep'),'#!/bin/sh\n[ "$4" = systemd ] && exit 0\nexit 2\n');
+    writeFileSync(join(f.source,'identity'),'later main is not the requested proof');
+    good('git',['-C',f.source,'commit','-qam','later main']);
+    const result=await start(f,f.args('all'));
+    assert.equal(result.status,code,result.stderr);
+    const requests=api.requests.slice(before);
+    assert.equal(requests.length,5);
+    for (const req of requests) {
+      assert.equal(req.method,'POST');
+      assert.equal(req.path,'/repos/yulanventures/commonswarm/statuses/'+f.sha);
+      assert.equal(req.authorization,'Bearer synthetic-status-only-token');
+      assert.equal(req.body.state,infrastructure ? 'error' : req.body.context==='hetzner/p1-cli' ? 'failure' : 'success');
+      assert.deepEqual(Object.keys(req.body).sort(),['context','description','state']);
+    }
+    assert.deepEqual(requests.map(r=>r.body.context).sort(),['hetzner/box-dry-run','hetzner/p1-cli','hetzner/server','hetzner/site','hetzner/unit']);
+    for (const r of f.receipts()) {
+      assert.deepEqual(r.github_status,publication(f,r));
+      assert.equal(r.github_status.state,'published');
+      assert.equal(Boolean(r.controller_error),infrastructure);
+    }
+    if (infrastructure) {
+      const events=readFileSync(join(f.root,'events.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
+      assert.ok(!events.some(e=>e.action==='start' && e.name.endsWith('-worker')),'infrastructure stopped before the suite worker');
+    }
     assertNoToken(f,result);
   }
-  assert.equal(api.requests.length,2);
+});
+
+test('publication failures preserve CI exits, subsequent suites, retention and sanitized journal fallback', async t => {
+  for (const {fault,response,exit} of [
+    {response:201,exit:0},
+    ...[0,7].flatMap(exit=>[
+      {response:403,exit},
+      {response:201,exit,fault:'status-directory'},
+      {response:201,exit,fault:'status-write'},
+      {response:403,exit,fault:'receipt-write'},
+    ]),
+  ]) {
+    let f, restoreReceipt;
+    const api=await statusAPI(t,response,req=>{
+      if (api.requests.length!==1) return;
+      const id=req.body.description.split(' ')[0];
+      if (fault==='status-write') {
+        mkdirSync(join(f.state,'statuses'),{recursive:true,mode:0o700});
+        mkdirSync(join(f.state,'statuses',id+'.json'));
+      }
+      if (fault==='receipt-write') {
+        const file=join(f.state,'runs',id,'receipt.json');
+        const backup=join(f.root,'baseline-receipt.json');
+        renameSync(file,backup); mkdirSync(file);
+        restoreReceipt=()=>{rmdirSync(file); renameSync(backup,file);};
+      }
+    });
+    f=fixture({statusPort:api.port,exit:{'box-dry-run':exit}});
+    if (fault==='status-directory') {
+      mkdirSync(f.state,{mode:0o700});
+      writeFileSync(join(f.state,'statuses'),'a file blocks publication mkdir');
+    }
+    // The final retention owner must still remove a genuinely expired clean run.
+    const oldID='csci-'+'f'.repeat(32), old=join(f.state,'runs',oldID);
+    mkdirSync(old,{recursive:true,mode:0o700});
+    writeFileSync(join(old,'receipt.json'),JSON.stringify({run_id:oldID,ended_at:'2000-01-01T00:00:00+00:00',cleanup_errors:[]}));
+    const result=await start(f,f.args('all'));
+    restoreReceipt?.();
+    assert.equal(result.status,exit,result.stderr);
+    assert.equal(existsSync(old),false,'final retention still ran');
+    const receipts=f.receipts(); assert.equal(receipts.length,5);
+    assert.equal(api.requests.length,5,'later suites still published');
+    assert.equal(api.requests[0].body.state,exit ? 'failure' : 'success');
+    assert.ok(api.requests.slice(1).every(r=>r.body.state==='success'));
+    for (const r of receipts) assert.equal(r.exit_code,r.suite==='box-dry-run' ? exit : 0);
+    const summaries=result.stdout.trim().split('\n').map(line=>JSON.parse(line)).filter(r=>r.github_status);
+    assert.equal(summaries.length,5);
+    for (const [index,summary] of summaries.entries()) {
+      assert.equal(summary.github_status,response===201 ? 'published' : 'failed');
+      const expected=fault==='status-directory' || (fault==='status-write' && index===0)
+        ? ['status_record_unavailable'] : fault==='receipt-write' && index===0
+        ? ['receipt_record_unavailable'] : [];
+      assert.deepEqual(summary.persistence_errors ?? [],expected);
+      assert.equal(summary.publication_record===null,expected.includes('status_record_unavailable'));
+      const receipt=receipts.find(r=>r.suite===summary.suite);
+      const outcome=summary.publication ?? publication(f,receipt);
+      if (response===403) assert.equal(outcome.error,'github_http_403');
+      if (!expected.includes('status_record_unavailable')) assert.deepEqual(publication(f,receipt),outcome);
+      if (!expected.includes('receipt_record_unavailable')) assert.deepEqual(receipt.github_status,outcome);
+    }
+    assert.ok(!result.stderr.includes('Traceback'));
+    assertNoToken(f,result);
+  }
 });
 
 test('nightly main statuses retain the initial resolved SHA when main advances during the invocation', async t => {
@@ -598,17 +666,28 @@ test('audited receipt backfills use resolved SHA, refuse unfinished results, and
     writeFileSync(file,JSON.stringify(value));
     return start(f,['-I',join(f.cfg.controller,'publish-status.py'),'--config',f.config,'--receipt',file],'python3');
   };
-  assert.equal((await backfill(receipt)).status,0);
-  assert.equal(okAPI.requests[0].path,'/repos/yulanventures/commonswarm/statuses/1f5d731a986b56642fb527860af69866959d4465');
+  for (const [value,state] of [
+    [receipt,'success'],
+    [{...receipt,state:'failed',exit_code:9},'failure'],
+    [{...receipt,state:'failed',exit_code:1,controller_error:'synthetic-status-only-token'},'error'],
+  ]) {
+    const result=await backfill(value); assert.equal(result.status,0);
+    const request=okAPI.requests.at(-1);
+    assert.equal(request.path,'/repos/yulanventures/commonswarm/statuses/1f5d731a986b56642fb527860af69866959d4465');
+    assert.equal(request.body.state,state);
+    assert.ok(!(result.stdout+result.stderr+JSON.stringify(request.body)).includes('synthetic-status-only-token'));
+  }
   for (const value of [
     {...receipt,state:'deferred',pending:true,exit_code:75},
     {...receipt,state:'failed',pending:false},
     {...receipt,resolved_sha:'main'},
+    {...receipt,controller_error:'RuntimeError'},
+    {...receipt,controller_failed:'yes'},
   ]) {
     const result=await backfill(value); assert.equal(result.status,1);
     assert.equal(JSON.parse(result.stdout).state,'failed');
   }
-  assert.equal(okAPI.requests.length,1);
+  assert.equal(okAPI.requests.length,3);
   // Use a separate disposable installed copy to direct the real HTTP client at
   // a redirecting server. No follow-up request (or token forwarding) is allowed.
   const redirect=fixture({statusPort:redirectAPI.port});

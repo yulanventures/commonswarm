@@ -168,7 +168,6 @@ with (state / 'queue.lock').open('a') as lock:
     suites = SUITES if selection == 'all' else (selection,)
     overall = 0
     status_dir = state / 'statuses'
-    status_dir.mkdir(mode=0o700, exist_ok=True)
     for suite in suites:
         if stopping:
             overall = 130
@@ -206,6 +205,7 @@ with (state / 'queue.lock').open('a') as lock:
                                                  for p in sorted(controller.iterdir()) if p.is_file()}
             active = None
             code = 1
+            suite_command = None
             with (run / 'suite.log').open('wb') as log:
                 class Deferred(Exception):
                     pass
@@ -271,7 +271,7 @@ with (state / 'queue.lock').open('a') as lock:
                                 -m conntrack ! --ctstate ESTABLISHED,RELATED -j DROP
                         done
                     '''])
-                    bounded(['docker', 'run', '--name', worker, '--label', label,
+                    suite_command = ['docker', 'run', '--name', worker, '--label', label,
                              '--memory=4g', '--network', 'container:' + daemon, '--user', '0' if suite == 'box-dry-run' else 'ciworker',
                              *(['--tmpfs', '/run:rw,mode=755'] if suite == 'box-dry-run' else []),
                              '--mount', f'type=bind,src={work},dst=/work',
@@ -287,7 +287,8 @@ with (state / 'queue.lock').open('a') as lock:
                              '--env', 'RUNNER_TEMP=/tmp', '--env', 'PLAYWRIGHT_BROWSERS_PATH=/ms-playwright',
                              '--env', 'C1_CADDY_BINARY=/usr/local/bin/caddy',
                              '--env', 'CSCI_PROJECT=' + run_id, '--env', 'CSCI_REQUESTED=' + requested, cfg['worker_image'],
-                             '/bin/bash', '/controller/suite.sh', suite])
+                             '/bin/bash', '/controller/suite.sh', suite]
+                    bounded(suite_command)
                     code = 0
                 except Deferred:
                     receipt.update(state='deferred', deferred_at=stamp(), reason='PromptEden worker active')
@@ -297,6 +298,8 @@ with (state / 'queue.lock').open('a') as lock:
                     code = 124
                 except sp.CalledProcessError as e:
                     code = e.returncode if e.returncode > 0 else 128 - e.returncode
+                    if e.cmd != suite_command:
+                        receipt['controller_error'] = 'setup_command_failed'
                 except StopRequested:
                     code = 130
                 except Exception as e:
@@ -419,6 +422,7 @@ with (state / 'queue.lock').open('a') as lock:
             result = dict(resolved_sha=resolved, suite=suite, run_id=run_id,
                           state=receipt['state'], pending=receipt['pending'],
                           exit_code=code, timed_out=receipt['timed_out'],
+                          controller_failed=bool(receipt.get('controller_error')),
                           cleanup_failed=bool(receipt['cleanup_errors']))
             try:
                 published = sp.run([sys.executable, '-I', str(controller / 'publish-status.py'),
@@ -433,12 +437,24 @@ with (state / 'queue.lock').open('a') as lock:
             publication.update(resolved_sha=resolved, suite=suite, run_id=run_id, attempted_at=stamp())
             # This host-only directory is never mounted into test containers. Keep
             # failures for operator retry without changing the underlying CI exit.
-            (status_dir / (run_id + '.json')).write_text(json.dumps(publication, indent=2) + '\n')
+            publication_record = status_dir / (run_id + '.json')
+            persistence_errors = []
+            try:
+                status_dir.mkdir(mode=0o700, exist_ok=True)
+                publication_record.write_text(json.dumps(publication, indent=2) + '\n')
+            except OSError:
+                persistence_errors.append('status_record_unavailable')
             receipt['github_status'] = publication
-            (run / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+            try:
+                (run / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+            except OSError:
+                persistence_errors.append('receipt_record_unavailable')
             print(json.dumps({'suite': suite, 'resolved_sha': resolved,
                               'github_status': publication['state'],
-                              'publication_record': str(status_dir / (run_id + '.json'))}), flush=True)
+                              'publication': publication,
+                              'persistence_errors': persistence_errors,
+                              'publication_record': None if 'status_record_unavailable' in persistence_errors
+                              else str(publication_record)}), flush=True)
             overall = overall or code
             break
         if stopping or code == 130:
