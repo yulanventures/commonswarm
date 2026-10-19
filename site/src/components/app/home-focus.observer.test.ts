@@ -102,10 +102,10 @@ async function evaluate(send: CdpSend, sessionId: string, expression: string): P
   return (result.result as { value?: unknown } | undefined)?.value;
 }
 
-async function removeOwnedProfile(profile: string): Promise<void> {
+async function removeOwnedTempDir(path: string, marker: string): Promise<void> {
   const root = resolve(tmpdir());
-  const target = resolve(profile);
-  if (target.startsWith(`${root}${sep}`) && target.includes(`${sep}commonswarm-home-focus-profile-`)) {
+  const target = resolve(path);
+  if (target.startsWith(`${root}${sep}`) && target.includes(`${sep}${marker}`)) {
     await rm(target, { recursive: true, force: true });
   }
 }
@@ -197,30 +197,34 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
   const js = bundle.outputFiles.find(file => file.path.endsWith(".js"))!.text;
   const css = bundle.outputFiles.find(file => file.path.endsWith(".css"))!.text;
   const directory = await mkdtemp(join(tmpdir(), "commonswarm-home-focus-"));
-  const fixturePath = join(directory, "index.html");
-  await writeFile(fixturePath, `<!doctype html><html><head><style>${css}
+  let profile: string | undefined;
+  let socket: WebSocket | undefined;
+  let stopPortRead = false;
+  let portWaitOver = false;
+  let chromeSettled: Promise<void> | undefined;
+  try {
+    const fixturePath = join(directory, "index.html");
+    await writeFile(fixturePath, `<!doctype html><html><head><style>${css}
     [hidden] {display:none!important} .hm-phone-bar,.hm-ws-nav {display:none}
     </style></head><body><div data-home-rail-slot></div><div data-home-workspace-shell></div>
     <div data-home-phone-nav></div><section data-home-catchup></section>
     <script>${js.replace(/<\/script/giu, "<\\/script")}</script></body></html>`);
-  const profile = await mkdtemp(join(tmpdir(), "commonswarm-home-focus-profile-"));
-  let socket: WebSocket | undefined;
-  let stopPortRead = false;
-  let portWaitOver = false;
-  const launched = launchChrome(await findChrome(), [
-    `--user-data-dir=${profile}`,
-    "--remote-debugging-port=0",
-    "--remote-allow-origins=*",
-    "--window-size=1440,900",
-    pathToFileURL(fixturePath).href,
-  ], { maxBuffer: 10 * 1024 * 1024, timeout: 45_000, killSignal: "SIGKILL" });
-  const chromeSettled = launched.then(() => undefined, () => undefined);
-  const chromeEndedFirst = chromeSettled.then(() => {
-    if (!portWaitOver) throw new Error("Chrome exited before DevToolsActivePort was written");
-  });
-  try {
+    const profileDir = await mkdtemp(join(tmpdir(), "commonswarm-home-focus-profile-"));
+    profile = profileDir;
+    const launched = launchChrome(await findChrome(), [
+      `--user-data-dir=${profileDir}`,
+      "--remote-debugging-port=0",
+      "--remote-allow-origins=*",
+      "--window-size=1440,900",
+      pathToFileURL(fixturePath).href,
+    ], { maxBuffer: 10 * 1024 * 1024, timeout: 45_000, killSignal: "SIGKILL" });
+    const settled = launched.then(() => undefined, () => undefined);
+    chromeSettled = settled;
+    const chromeEndedFirst = settled.then(() => {
+      if (!portWaitOver) throw new Error("Chrome exited before DevToolsActivePort was written");
+    });
     const endpoint = await Promise.race([
-      readDevtoolsPort(profile, () => stopPortRead).then((value) => { portWaitOver = true; return value; }),
+      readDevtoolsPort(profileDir, () => stopPortRead).then((value) => { portWaitOver = true; return value; }),
       chromeEndedFirst,
     ]);
     portWaitOver = true;
@@ -269,12 +273,19 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
     // Browser.close ends the browser before DevTools can answer, so waiting on that command
     // never settles. The process exit is the completion signal, and it has its own deadline.
     void connected.send("Browser.close").catch(() => undefined);
-    await waitForChromeExit(chromeSettled);
+    await waitForChromeExit(settled);
   } finally {
     portWaitOver = true;
     stopPortRead = true;
     socket?.close();
-    await chromeSettled;
-    await removeOwnedProfile(profile);
+    // The owned browser must settle before either directory is removed, and
+    // a cleanup failure for one directory must not skip the other.
+    if (chromeSettled) await chromeSettled;
+    const removals = await Promise.allSettled([
+      removeOwnedTempDir(directory, "commonswarm-home-focus-"),
+      ...(profile ? [removeOwnedTempDir(profile, "commonswarm-home-focus-profile-")] : []),
+    ]);
+    const failed = removals.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failed) throw failed.reason;
   }
 });

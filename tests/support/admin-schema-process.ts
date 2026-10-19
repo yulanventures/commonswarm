@@ -27,7 +27,7 @@ export function assertSqlProcessResult(result: SpawnSyncReturns<string>): void {
 }
 
 export function runSqlProcess(command: string, args: string[], sql: string): void {
-  const directory = mkdtempSync(join(process.platform === 'darwin' ? '/private/tmp' : tmpdir(), 'admin-schema-sql-'));
+  const directory = mkdtempSync(join(tmpdir(), 'admin-schema-sql-'));
   let fd: number | undefined;
   try {
     const path = join(directory, 'input.sql');
@@ -39,8 +39,11 @@ export function runSqlProcess(command: string, args: string[], sql: string): voi
       encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024 });
     assertSqlProcessResult(result);
   } finally {
-    if (fd !== undefined) closeSync(fd);
-    // Use the PATH-resolved rm guard; a refused cleanup must fail visibly.
-    execFileSync('rm', ['-rf', directory]);
+    try {
+      if (fd !== undefined) closeSync(fd);
+    } finally {
+      // Use the PATH-resolved rm guard; a refused cleanup must fail visibly.
+      execFileSync('rm', ['-rf', directory]);
+    }
   }
 }
