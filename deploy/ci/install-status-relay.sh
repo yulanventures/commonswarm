@@ -145,7 +145,7 @@ need(call(['git', '-C', str(source), 'rev-parse', 'HEAD']).strip() == args.sha a
 account = pwd.getpwnam(args.runner_user)
 need(account.pw_uid > 0 and account.pw_uid not in (service.pw_uid, pe_runner_uid) and account.pw_dir == '/var/lib/commonswarm-status-runner', 'unexpected runner identity')
 need(call(['id', '-G', args.runner_user]).strip() == str(account.pw_gid), 'runner has supplementary groups')
-sudo = sp.run(['sudo', '-n', '-l', '-U', args.runner_user], capture_output=True, text=True)
+sudo = sp.run(['runuser', '-u', args.runner_user, '--', 'sudo', '-n', '-l'], stdout=sp.DEVNULL, stderr=sp.DEVNULL)
 need(sudo.returncode != 0, 'runner may have sudo privileges; Root must resolve')
 uid = account.pw_uid
 need(cfg.get('status_reader_uid') in (None, uid), 'different installed reader')
