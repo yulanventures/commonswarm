@@ -168,3 +168,82 @@ dispatch block if already cut over. Preserve source, artifacts, receipts and
 caches for review. Never delete existing receipts to reinstall; future upgrades need a
 separate reviewed migration step. Do not prune host Docker objects or touch
 any PE service/runner.
+
+## Host-side GitHub commit statuses
+
+The installed controller calls `publish-status.py` after the final attempt's
+cleanup, scratch retention and any quiet-wait deadline decision. It posts only to
+`POST /repos/yulanventures/commonswarm/statuses/<resolved_sha>` on api.github.com,
+with context `hetzner/<suite>`. Both exact-SHA proof runs and `--ref main`
+nightlies use the resolved tested snapshot, even if main advances later.
+Deferred attempts publish nothing. Exit 0 publishes success; other exits publish
+failure, except controller/setup errors, timeout, cancellation and cleanup errors
+publish error. A failed setup command before the suite starts is an error;
+a nonzero suite test exit remains failure.
+Descriptions contain only the run ID and exit code. No raw logs or response bodies
+are published or printed. This uses the commit-status permission only; it does
+not call workflow, check-run, PR or comment APIs.
+
+Root must configure `github_status_token_file` in the root-owned
+`/opt/commonswarm-ci/config.json`, pointing to the **existing** CI-host GitHub
+credential. This change does not establish that credential's path or scope;
+Root must verify existing access to CommonSwarm commit statuses without minting
+a token or expanding its permissions. The publisher requires a canonical absolute
+regular file, mode 0600, owned by root or the service account and readable by the
+calling host account. Its path must be outside both configured `state` and
+`controller` trees, including all checkout, receipt and scratch mounts. The token
+is read only by the host publisher and never passed through argv, environment,
+logs or container mounts. The HTTP host is fixed; redirects are refused.
+
+Publication failure leaves the suite exit/result intact. The controller prints
+`"github_status": "failed"` in its JSON summary and stores a sanitized outcome in both
+`receipt.json` and `/var/lib/commonswarm-ci/statuses/<run_id>.json`. The latter is
+outside all container mounts and is retained for operator reconciliation; the
+14-day run retention does not delete it. An unset token path also produces this
+explicit failure. Publication has a 30-second host process bound per final suite.
+If publication-directory creation or either publication-record write fails, the
+controller still preserves the CI exit, runs subsequent suites and invokes final
+retention. Its stdout (captured by the service journal) includes the sanitized
+publication outcome and `persistence_errors` codes, without exception text. An
+unwritten host status record has `publication_record: null`; the other record is
+still attempted. This fallback does not change baseline receipt/filesystem errors
+outside publication persistence.
+
+For an existing installation, Root must install the reviewed four controller
+files (`run.sh`, `suite.sh`, `retain.py`, `publish-status.py`) together and update
+`controller_sha` plus all four `controller_checksums` in config. Do not rerun
+fresh-install-only provisioning over existing state. Verify the exact installed
+hashes and token file metadata, then inspect a completed proof/nightly status and
+its publication record. This Maker change has not installed or backfilled them.
+
+An operator can backfill an audited **final** receipt with:
+
+```sh
+python3 -I /opt/commonswarm-ci/scripts/publish-status.py --config /opt/commonswarm-ci/config.json --receipt /var/lib/commonswarm-ci/runs/<run_id>/receipt.json
+```
+
+It accepts no SHA override and refuses deferred/inconsistent receipts. Capture its
+sanitized JSON result and read back the GitHub status; manual invocation does not
+rewrite historical receipts or controller publication records. Publish oldest
+receipts before newer results for the same SHA/context. Never substitute a merge
+SHA for the resolved SHA in a receipt.
+
+Read-only metadata inventory on 2026-10-19 enumerated 37 receipts and selected the
+following six for Root's backfill. The first five share resolved SHA
+`e154f5143c3bf97b705ca0614e1877c19f960179`; their requested ref was `main`.
+
+| Run ID | Suite | Exit | Status |
+| --- | --- | --- | --- |
+| csci-2bcf14681e054e21b6706774db5a609a | box-dry-run | 0 | success |
+| csci-0973a9b8bf7f4559bcbde822aaf23f95 | server | 0 | success |
+| csci-6707cacfa0064ebbae06842f6800f37b | p1-cli | 1 | failure |
+| csci-163e0902286d4e40a6fff68a83d91824 | site | 0 | success |
+| csci-94eed54bd36b4f6fbaf796d9c337caf2 | unit | 0 | success |
+| csci-e6717ca3385d4f27a47cc52771525922 | p1-cli | 0 | success |
+
+The final row requested and resolved
+`1f5d731a986b56642fb527860af69866959d4465`, **not** the later merge SHA. All six
+receipts were terminal with `pending=false`, without timeout or cleanup errors.
+Gate counts in table order were 4, 12, 3, 4, 4 and 3; only the nightly
+`p1-cli` gate had a nonzero exit. Their public GitHub
+statuses have not been measured or changed by this Maker.

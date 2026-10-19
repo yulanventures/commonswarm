@@ -4,8 +4,9 @@
 // broad deletion. No existing test owns the new standalone entry point.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, mkdirSync, readFileSync, writeFileSync, chmodSync, readdirSync, symlinkSync, existsSync, statSync } from 'node:fs';
+import { mkdtempSync, realpathSync, mkdirSync, readFileSync, writeFileSync, chmodSync, readdirSync, renameSync, rmdirSync, symlinkSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import test from 'node:test';
@@ -27,7 +28,13 @@ function fixture(control = {}) {
   const bin = join(root, 'bin');
   const state = join(root, 'state');
   const installed = join(root, 'controller'); mkdirSync(installed);
-  for (const name of ['run.sh', 'suite.sh', 'retain.py']) writeFileSync(join(installed,name),readFileSync(join(controller,name)));
+  for (const name of ['run.sh', 'suite.sh', 'retain.py', 'publish-status.py']) writeFileSync(join(installed,name),readFileSync(join(controller,name)));
+  if (control.statusPort) {
+    const publisher = join(installed, 'publish-status.py');
+    // Redirect only the HTTPS transport to a real loopback HTTP API. No
+    // production endpoint flag; assertions exercise the actual wire request.
+    writeFileSync(publisher, `import http.client\nhttp.client.HTTPSConnection=lambda host,timeout: http.client.HTTPConnection('127.0.0.1',${control.statusPort},timeout=timeout)\n` + readFileSync(publisher,'utf8'));
+  }
   mkdirSync(source); mkdirSync(bin);
   good('git', ['init', '--quiet', '--initial-branch=main', source]);
   good('git', ['-C', source, 'config', 'user.email', 'fixture@example.invalid']);
@@ -46,6 +53,12 @@ import json,pathlib,sys,time,subprocess,os,signal
 root=pathlib.Path(${JSON.stringify(root)})
 p=root/'containers.json'
 args=sys.argv[1:]
+assert 'synthetic-status-only-token' not in json.dumps(args)+json.dumps(dict(os.environ))
+for i,a in enumerate(args):
+    if a=='--mount':
+        mount=pathlib.Path(args[i+1].split(',')[1][4:]).resolve()
+        token=root/'auth'/'token'
+        assert mount != token and mount not in token.parents, 'credential mounted in test container'
 assert os.environ['DOCKER_CONTEXT']=='default'
 assert os.environ['DOCKER_HOST']=='unix:///var/run/docker.sock'
 def event(action,name):
@@ -53,6 +66,7 @@ def event(action,name):
 if args[0]=='run':
     name=args[args.index('--name')+1]
     label=args[args.index('--label')+1].split('=',1)[1]
+    if name.endswith('-worker') and ${control.workerLaunch ?? 0}: sys.exit(${control.workerLaunch ?? 0})
     store=json.loads(p.read_text()); store[name]=dict(label=label); p.write_text(json.dumps(store))
     event('start',name)
     if name.endswith('-worker'):
@@ -131,9 +145,14 @@ os.execv(${JSON.stringify(realGit)},[${JSON.stringify(realGit)},*args])
     chmodSync(join(bin,'python3'),0o755);
   }
   const cfg = {state, controller: installed, service_uid:process.getuid(), service_gid:process.getgid(),
-    controller_checksums:Object.fromEntries(['run.sh','suite.sh','retain.py'].map(name=>[name,createHash('sha256').update(readFileSync(join(installed,name))).digest('hex')])), source_url: 'https://github.com/yulanventures/commonswarm.git', allowed_hostname: good('hostname',['-s']),
+    controller_checksums:Object.fromEntries(['run.sh','suite.sh','retain.py','publish-status.py'].map(name=>[name,createHash('sha256').update(readFileSync(join(installed,name))).digest('hex')])), source_url: 'https://github.com/yulanventures/commonswarm.git', allowed_hostname: good('hostname',['-s']),
     controller_sha: 'a'.repeat(40), worker_image: 'sha256:' + '1'.repeat(64),
     dind_image: 'fixture@sha256:' + '2'.repeat(64), timeout_seconds: 10};
+  if (control.statusPort) {
+    const auth = join(root,'auth'); mkdirSync(auth,{mode:0o700});
+    cfg.github_status_token_file = join(auth,'token');
+    writeFileSync(cfg.github_status_token_file,'synthetic-status-only-token\n',{mode:0o600});
+  }
   const config = join(root, 'config.json');
   writeFileSync(config, JSON.stringify(cfg));
   const env = {...process.env, PATH: `${bin}:${process.env.PATH}`, COMMONSWARM_CI_CONFIG: config};
@@ -141,8 +160,8 @@ os.execv(${JSON.stringify(realGit)},[${JSON.stringify(realGit)},*args])
   const receipts = () => readdirSync(join(state, 'runs')).sort().map(n => JSON.parse(readFileSync(join(state, 'runs', n, 'receipt.json'))));
   return {root, source, state, sha, cfg, config, env, args, receipts};
 }
-function start(f, args = f.args()) {
-  const child = spawn('bash', args, {env: f.env});
+function start(f, args = f.args(), command = 'bash') {
+  const child = spawn(command, args, {env: f.env});
   let stdout = '', stderr = '';
   child.stdout.on('data', x => stdout += x);
   child.stderr.on('data', x => stderr += x);
@@ -442,4 +461,254 @@ test('namespace policy failure prevents worker startup and cleans owned runtime'
   assert.equal(events.includes('-worker'),false);
   assert.deepEqual(JSON.parse(readFileSync(join(negative.root,'containers.json'))),{unowned:{label:'some-other-run'}});
   assert.equal(existsSync(join(negative.state,'runs',receipt.run_id,'scratch')),false);
+});
+
+// Authoring gate: these cases own the GitHub wire contract and the host final-
+// attempt lifecycle. Existing controls never contacted a status API. Credible
+// regressions: requested/merge SHA attribution, premature deferred success,
+// token exposure and lost CI failures when GitHub is unavailable. Only transport
+// is redirected in the disposable installed copy; production gains no test flag.
+// F1 owner: exercise pre-suite stops, Docker launch refusals and a real gate exit at the
+// API, so dropping error provenance or treating every nonzero as error fails.
+// F2 owner: cause actual mkdir/write errors at publication paths after baseline
+// receipt writes; assert CI exit, subsequent suites, retention and journal JSON.
+// These extend the existing owners; no mock returns a persistence failure.
+async function statusAPI(t, response = 201, onRequest = () => {}) {
+  const requests = [];
+  const server = createServer(async (req,res) => {
+    let body=''; for await (const chunk of req) body += chunk;
+    requests.push({method:req.method,path:req.url,authorization:req.headers.authorization,body:JSON.parse(body)});
+    onRequest(requests.at(-1));
+    res.writeHead(response, response === 302 ? {Location:'http://127.0.0.1:1/never-forward-credentials'} : {}); res.end('synthetic-status-only-token must never be logged from an error response');
+  });
+  await new Promise(resolve => server.listen(0,'127.0.0.1',resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  return {requests,port:server.address().port};
+}
+function publication(f,r) {
+  return JSON.parse(readFileSync(join(f.state,'statuses',r.run_id+'.json')));
+}
+function assertNoToken(f,result) {
+  assert.ok(!(result.stdout+result.stderr).includes('synthetic-status-only-token'));
+  for (const receipt of f.receipts()) {
+    const runDir=join(f.state,'runs',receipt.run_id);
+    for (const name of readdirSync(runDir)) {
+      if (statSync(join(runDir,name)).isFile()) assert.ok(!readFileSync(join(runDir,name),'utf8').includes('synthetic-status-only-token'),name);
+    }
+    const record=join(f.state,'statuses',receipt.run_id+'.json');
+    if (existsSync(record) && statSync(record).isFile()) assert.ok(!readFileSync(record,'utf8').includes('synthetic-status-only-token'));
+  }
+}
+
+test('final statuses use the tested snapshot and distinguish gate failures from pre-suite controller errors', async t => {
+  const api=await statusAPI(t);
+  for (const {control, probeError, code, infrastructure} of [
+    {control:{exit:{'p1-cli':9}},code:9,infrastructure:false},
+    {control:{policyFail:true},code:42,infrastructure:true},
+    {control:{},probeError:true,code:1,infrastructure:true},
+    ...[125,126,127].map(code=>({control:{workerLaunch:code},code,infrastructure:true})),
+  ]) {
+    const before=api.requests.length;
+    const f=fixture({statusPort:api.port,...control});
+    if (probeError) writeFileSync(join(f.root,'bin','pgrep'),'#!/bin/sh\n[ "$4" = systemd ] && exit 0\nexit 2\n');
+    writeFileSync(join(f.source,'identity'),'later main is not the requested proof');
+    good('git',['-C',f.source,'commit','-qam','later main']);
+    const result=await start(f,f.args('all'));
+    assert.equal(result.status,code,result.stderr);
+    const requests=api.requests.slice(before);
+    assert.equal(requests.length,5);
+    for (const req of requests) {
+      assert.equal(req.method,'POST');
+      assert.equal(req.path,'/repos/yulanventures/commonswarm/statuses/'+f.sha);
+      assert.equal(req.authorization,'Bearer synthetic-status-only-token');
+      assert.equal(req.body.state,infrastructure ? 'error' : req.body.context==='hetzner/p1-cli' ? 'failure' : 'success');
+      assert.deepEqual(Object.keys(req.body).sort(),['context','description','state']);
+    }
+    assert.deepEqual(requests.map(r=>r.body.context).sort(),['hetzner/box-dry-run','hetzner/p1-cli','hetzner/server','hetzner/site','hetzner/unit']);
+    for (const r of f.receipts()) {
+      assert.deepEqual(r.github_status,publication(f,r));
+      assert.equal(r.github_status.state,'published');
+      assert.equal(Boolean(r.controller_error),infrastructure);
+    }
+    if (infrastructure) {
+      const events=readFileSync(join(f.root,'events.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
+      assert.ok(!events.some(e=>e.action==='start' && e.name.endsWith('-worker')),'infrastructure stopped before the suite worker');
+      if (control.workerLaunch) assert.ok(events.some(e=>e.action==='policy'),'launch refusal followed namespace admission');
+    }
+    assertNoToken(f,result);
+  }
+});
+
+test('publication failures preserve CI exits, subsequent suites, retention and sanitized journal fallback', async t => {
+  for (const {fault,response,exit} of [
+    {response:201,exit:0},
+    ...[0,7].flatMap(exit=>[
+      {response:403,exit},
+      {response:201,exit,fault:'status-directory'},
+      {response:201,exit,fault:'status-write'},
+      {response:403,exit,fault:'receipt-write'},
+    ]),
+  ]) {
+    let f, restoreReceipt;
+    const api=await statusAPI(t,response,req=>{
+      if (api.requests.length!==1) return;
+      const id=req.body.description.split(' ')[0];
+      if (fault==='status-write') {
+        mkdirSync(join(f.state,'statuses'),{recursive:true,mode:0o700});
+        mkdirSync(join(f.state,'statuses',id+'.json'));
+      }
+      if (fault==='receipt-write') {
+        const file=join(f.state,'runs',id,'receipt.json');
+        const backup=join(f.root,'baseline-receipt.json');
+        renameSync(file,backup); mkdirSync(file);
+        restoreReceipt=()=>{rmdirSync(file); renameSync(backup,file);};
+      }
+    });
+    f=fixture({statusPort:api.port,exit:{'box-dry-run':exit}});
+    if (fault==='status-directory') {
+      mkdirSync(f.state,{mode:0o700});
+      writeFileSync(join(f.state,'statuses'),'a file blocks publication mkdir');
+    }
+    // The final retention owner must still remove a genuinely expired clean run.
+    const oldID='csci-'+'f'.repeat(32), old=join(f.state,'runs',oldID);
+    mkdirSync(old,{recursive:true,mode:0o700});
+    writeFileSync(join(old,'receipt.json'),JSON.stringify({run_id:oldID,ended_at:'2000-01-01T00:00:00+00:00',cleanup_errors:[]}));
+    const result=await start(f,f.args('all'));
+    restoreReceipt?.();
+    assert.equal(result.status,exit,result.stderr);
+    assert.equal(existsSync(old),false,'final retention still ran');
+    const receipts=f.receipts(); assert.equal(receipts.length,5);
+    assert.equal(api.requests.length,5,'later suites still published');
+    assert.equal(api.requests[0].body.state,exit ? 'failure' : 'success');
+    assert.ok(api.requests.slice(1).every(r=>r.body.state==='success'));
+    for (const r of receipts) assert.equal(r.exit_code,r.suite==='box-dry-run' ? exit : 0);
+    const summaries=result.stdout.trim().split('\n').map(line=>JSON.parse(line)).filter(r=>r.github_status);
+    assert.equal(summaries.length,5);
+    for (const [index,summary] of summaries.entries()) {
+      assert.equal(summary.github_status,response===201 ? 'published' : 'failed');
+      const expected=fault==='status-directory' || (fault==='status-write' && index===0)
+        ? ['status_record_unavailable'] : fault==='receipt-write' && index===0
+        ? ['receipt_record_unavailable'] : [];
+      assert.deepEqual(summary.persistence_errors ?? [],expected);
+      assert.equal(summary.publication_record===null,expected.includes('status_record_unavailable'));
+      const receipt=receipts.find(r=>r.suite===summary.suite);
+      const outcome=summary.publication ?? publication(f,receipt);
+      if (response===403) assert.equal(outcome.error,'github_http_403');
+      if (!expected.includes('status_record_unavailable')) assert.deepEqual(publication(f,receipt),outcome);
+      if (!expected.includes('receipt_record_unavailable')) assert.deepEqual(receipt.github_status,outcome);
+    }
+    assert.ok(!result.stderr.includes('Traceback'));
+    assertNoToken(f,result);
+  }
+});
+
+test('nightly main statuses retain the initial resolved SHA when main advances during the invocation', async t => {
+  const api=await statusAPI(t); const f=fixture({statusPort:api.port,sleep:0.15});
+  const running=start(f,f.args('all',['--ref','main']));
+  for (let n=0;n<400;n++) {
+    const path=join(f.root,'events.jsonl');
+    if (existsSync(path) && readFileSync(path,'utf8').includes('-worker')) break;
+    await delay(10);
+  }
+  writeFileSync(join(f.source,'identity'),'next main snapshot');
+  good('git',['-C',f.source,'commit','-qam','advance main']);
+  const result=await running; assert.equal(result.status,0,result.stderr);
+  assert.equal(api.requests.length,5);
+  for (const req of api.requests) assert.equal(req.path,'/repos/yulanventures/commonswarm/statuses/'+f.sha);
+});
+
+test('deferred attempts publish no status; quiet retry publishes exactly one final result', async t => {
+  const api=await statusAPI(t); const f=fixture({statusPort:api.port,sleep:0.05});
+  // A busy first probe followed by a quiet retry drives the real deferral path.
+  const marker=join(f.root,'busy-once');
+  writeFileSync(join(f.root,'bin','pgrep'),`#!/bin/sh\n[ "$4" = systemd ] && exit 0\nif test ! -e '${marker}'; then touch '${marker}'; exit 0; fi\nexit 1\n`);
+  const result=await start(f); assert.equal(result.status,0,result.stderr);
+  const receipts=f.receipts().sort((a,b)=>a.attempt-b.attempt);
+  assert.deepEqual(receipts.map(r=>r.state),['deferred','completed']);
+  assert.equal(api.requests.length,1);
+  assert.equal(api.requests[0].body.description,receipts[1].run_id+' exit 0');
+  assert.equal(existsSync(join(f.state,'statuses',receipts[0].run_id+'.json')),false);
+});
+
+test('quiet-wait timeout publishes a final error, not an unfinished or passing status', async t => {
+  const api=await statusAPI(t); const f=fixture({statusPort:api.port});
+  f.cfg.timeout_seconds=1; writeFileSync(f.config,JSON.stringify(f.cfg));
+  writeFileSync(join(f.root,'bin','pgrep'),'#!/bin/sh\nexit 0\n');
+  const result=await start(f); assert.equal(result.status,124,result.stderr);
+  assert.equal(api.requests.length,1); assert.equal(api.requests[0].body.state,'error');
+  const [r]=f.receipts(); assert.equal(r.state,'failed'); assert.equal(publication(f,r).state,'published');
+});
+
+test('publisher refuses unsafe credential placement and permissions before HTTP with a successful control', async t => {
+  const api=await statusAPI(t); const positive=fixture({statusPort:api.port});
+  assert.equal((await start(positive)).status,0);
+  assert.equal(api.requests.length,1);
+  for (const kind of ['permissions','mounted']) {
+    const f=fixture({statusPort:api.port});
+    if (kind==='permissions') chmodSync(f.cfg.github_status_token_file,0o644);
+    else {
+      f.cfg.github_status_token_file=join(f.cfg.controller,'token');
+      writeFileSync(f.cfg.github_status_token_file,'synthetic-status-only-token',{mode:0o600});
+      writeFileSync(f.config,JSON.stringify(f.cfg));
+    }
+    const result=await start(f); assert.equal(result.status,0,result.stderr);
+    const [r]=f.receipts(); assert.equal(publication(f,r).error,kind==='permissions' ? 'unsafe_token_permissions' : 'token_in_container_tree');
+  }
+  assert.equal(api.requests.length,1);
+});
+
+
+test('audited receipt backfills use resolved SHA, refuse unfinished results, and never follow redirects', async t => {
+  const okAPI=await statusAPI(t); const redirectAPI=await statusAPI(t,302);
+  const f=fixture({statusPort:okAPI.port});
+  const receipt={resolved_sha:'1f5d731a986b56642fb527860af69866959d4465',requested_sha:'main',
+    suite:'p1-cli',run_id:'csci-e6717ca3385d4f27a47cc52771525922',
+    state:'completed',pending:false,exit_code:0,timed_out:false,cleanup_errors:[]};
+  const file=join(f.root,'audited-receipt.json');
+  const backfill=async value => {
+    writeFileSync(file,JSON.stringify(value));
+    return start(f,['-I',join(f.cfg.controller,'publish-status.py'),'--config',f.config,'--receipt',file],'python3');
+  };
+  for (const [value,state] of [
+    [receipt,'success'],
+    [{...receipt,state:'failed',exit_code:9},'failure'],
+    [{...receipt,state:'failed',exit_code:1,controller_error:'synthetic-status-only-token'},'error'],
+  ]) {
+    const result=await backfill(value); assert.equal(result.status,0);
+    const request=okAPI.requests.at(-1);
+    assert.equal(request.path,'/repos/yulanventures/commonswarm/statuses/1f5d731a986b56642fb527860af69866959d4465');
+    assert.equal(request.body.state,state);
+    assert.ok(!(result.stdout+result.stderr+JSON.stringify(request.body)).includes('synthetic-status-only-token'));
+  }
+  for (const value of [
+    {...receipt,state:'deferred',pending:true,exit_code:75},
+    {...receipt,state:'failed',pending:false},
+    {...receipt,resolved_sha:'main'},
+    {...receipt,controller_error:'RuntimeError'},
+    {...receipt,controller_failed:'yes'},
+  ]) {
+    const result=await backfill(value); assert.equal(result.status,1);
+    assert.equal(JSON.parse(result.stdout).state,'failed');
+  }
+  assert.equal(okAPI.requests.length,3);
+  // Use a separate disposable installed copy to direct the real HTTP client at
+  // a redirecting server. No follow-up request (or token forwarding) is allowed.
+  const redirect=fixture({statusPort:redirectAPI.port});
+  writeFileSync(file,JSON.stringify(receipt));
+  const result=await start(redirect,['-I',join(redirect.cfg.controller,'publish-status.py'),'--config',redirect.config,'--receipt',file],'python3');
+  assert.equal(result.status,1);
+  assert.equal(JSON.parse(result.stdout).error,'github_http_302');
+  assert.equal(redirectAPI.requests.length,1);
+});
+
+
+test('owned cleanup failure publishes error and retains the failing suite result and scratch', async t => {
+  const api=await statusAPI(t); const f=fixture({statusPort:api.port,tamper:true});
+  const result=await start(f); assert.equal(result.status,1,result.stderr);
+  const [receipt]=f.receipts();
+  assert.equal(receipt.state,'failed'); assert.ok(receipt.cleanup_errors.length > 0);
+  assert.equal(existsSync(join(f.state,'runs',receipt.run_id,'scratch')),true);
+  assert.equal(api.requests.length,1); assert.equal(api.requests[0].body.state,'error');
+  assert.equal(publication(f,receipt).state,'published');
+  assertNoToken(f,result);
 });
