@@ -1,6 +1,6 @@
 /** HM lane-2 server coverage. Runs only in the manual `server` suite. */
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawnSync, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -373,12 +373,42 @@ async function contextHttp() {
   });
   const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, new TextEncoder().encode(unsigned));
   const token = unsigned + "." + b64(new Uint8Array(signature));
+  let storageWithdrawal = null;
+  let storageBlocked = false;
+  let storageArmed = false;
+  let observer = null;
+  if (input.storageRace) {
+    const { default: postgres } = await import("postgres");
+    observer = postgres(input.raceDatabaseUrl, { prepare: false, max: 1 });
+    const fetchForStorage = globalThis.fetch;
+    globalThis.fetch = async (request, init) => {
+      const response = await fetchForStorage(request, init);
+      const url = typeof request === "string" || request instanceof URL ? String(request) : request.url;
+      if (storageArmed && !storageWithdrawal && url.includes('/storage/v1/object/')) {
+        storageWithdrawal = managementCommand(input.ownerUserId, input.workspaceId,
+          { kind:'household_withdraw_connection', principal_id:input.principalId });
+        // The content operation holds its workspace lock during Storage I/O.
+        // Observe the withdrawal on a DIFFERENT backend waiting for that lock;
+        // returning the Storage response lets the content operation linearize.
+        for (let attempt=0;attempt<400;attempt++) {
+          const [wait] = await observer\x60SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+            WHERE usename='commonswarm_edge' AND wait_event_type='Lock'
+              AND cardinality(pg_blocking_pids(pid))>0) AS blocked\x60;
+          if(wait.blocked) { storageBlocked=true; break; }
+          await new Promise(resolve=>setTimeout(resolve,25));
+        }
+        if(!storageBlocked) throw new Error('withdrawal did not reach a real Storage lock wait');
+      }
+      return response;
+    };
+  }
   let handle = input.handle;
   const results = [];
   for (const call of input.calls) {
+    if (call.storage_race) storageArmed = true;
     const args = call.name === "claim_seat"
       ? { name: input.name ?? "context-fixture-seat", request_id: call.request_id ?? crypto.randomUUID(), ...(call.workspace_id ? { workspace_id: call.workspace_id } : {}) }
-      : { seat: call.seat ?? handle, ...(call.ack ? { ack: call.ack } : {}) };
+      : { seat: call.seat ?? handle, ...(call.ack ? { ack: call.ack } : {}), ...(call.arguments ?? {}) };
     const response = await mcp.handleRequest(new Request(MCP_RESOURCE, {
       method: "POST", headers: { authorization: "Bearer " + token, "content-type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "tools/call", params: { name: call.name, arguments: args } }),
@@ -388,7 +418,13 @@ async function contextHttp() {
     const body = typeof output === "string" ? JSON.parse(output) : envelope;
     if (call.name === "claim_seat" && typeof body.handle === "string") handle = body.handle;
     results.push({ name: call.name, status: response.status, isError: envelope.result?.isError === true || envelope.error !== undefined || response.status !== 200, body });
+    if (call.storage_race) {
+      if (!storageBlocked || !storageWithdrawal) throw new Error('Storage was not reached');
+      const withdrawn = await storageWithdrawal;
+      if(withdrawn.body.status!=='committed') throw new Error('concurrent withdrawal failed');
+    }
   }
+  await observer?.end({timeout:2});
   globalThis.fetch = fetchBeforeMcp;
   authPhase = "neutral";
   return results;
@@ -564,10 +600,8 @@ async function seedHostedFixture(grantBOwnerIsOther = false): Promise<HostedFixt
   return fixture;
 }
 
-function runHostedHarness<T>(input: Record<string, unknown>, options: {
-  databaseUrl?: string; rollbackBeforeStep?: number;
-} = {}): T {
-  const result = spawnSync("deno", [
+function hostedHarnessLaunch(options: {databaseUrl?: string; rollbackBeforeStep?: number}) {
+  return { args: [
     "run",
     "--no-lock",
     "--config",
@@ -576,10 +610,9 @@ function runHostedHarness<T>(input: Record<string, unknown>, options: {
     "--allow-net",
     "--allow-read",
     harnessPath,
-  ], {
+  ], options: {
     cwd: process.cwd(),
-    encoding: "utf8",
-    input: JSON.stringify(input),
+    encoding: "utf8" as const,
     env: {
       PATH: process.env.PATH ?? "",
       ...(process.env.DENO_DIR ? { DENO_DIR: process.env.DENO_DIR } : {}),
@@ -590,9 +623,17 @@ function runHostedHarness<T>(input: Record<string, unknown>, options: {
       ...(options.rollbackBeforeStep ? { SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP: String(options.rollbackBeforeStep) } : {}),
       SUPABASE_URL: local.API_URL,
       SUPABASE_ANON_KEY: local.ANON_KEY,
+      SUPABASE_SERVICE_ROLE_KEY: local.SERVICE_ROLE_KEY,
     },
     timeout: 90_000,
-  });
+  } };
+}
+
+function runHostedHarness<T>(input: Record<string, unknown>, options: {
+  databaseUrl?: string; rollbackBeforeStep?: number;
+} = {}): T {
+  const config = hostedHarnessLaunch(options);
+  const result = spawnSync("deno", config.args, {...config.options, input:JSON.stringify(input)});
   if (result.error) {
     assert.fail(`hosted harness failed to start deno: ${result.error.message}`);
   }
@@ -615,6 +656,28 @@ function runHostedHarness<T>(input: Record<string, unknown>, options: {
     );
   }
   return parsed;
+}
+
+
+function runHostedHarnessAsync<T>(input: Record<string, unknown>, databaseUrl: string): Promise<T> {
+  const options = { databaseUrl };
+  const config = hostedHarnessLaunch(options);
+  return new Promise((resolve, reject) => {
+    const child = spawn("deno", config.args, { ...config.options, stdio: ['pipe','pipe','pipe'] });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', code => {
+      try {
+        assert.equal(code, 0, stderr);
+        const line = stdout.trim().split('\n').reverse().find(row => row.startsWith('HM_RESULT:'));
+        assert.ok(line, 'real HTTP harness returned its result');
+        resolve(JSON.parse(line.slice('HM_RESULT:'.length)) as T);
+      } catch (error) { reject(error); }
+    });
+    child.stdin.end(JSON.stringify(input));
+  });
 }
 
 function claimSpec(
@@ -1977,3 +2040,140 @@ test("context resolver runs under migrated read/command roles and denies forged 
     }), ProbeRollback);
   }
 });
+
+// Authoring gate: the existing direct-handler fixture cannot catch HTTP tool
+// projection loss or READ COMMITTED behavior after a different session commits.
+// Use the existing MCP/JWKS fixture and the migrated schema, with no db.begin shim.
+async function ownerContentHttpFixture() {
+  const fixture = await seedHostedFixture(true);
+  await sql`INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose)
+    VALUES (${fixture.workspaceA}::uuid,'shared')`;
+  await sql`INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at)
+    VALUES (${fixture.workspaceA}::uuid,${fixture.owner}::uuid,'editor',${randomUUID()}::uuid,clock_timestamp()),
+      (${fixture.workspaceA}::uuid,${fixture.other}::uuid,'editor',${randomUUID()}::uuid,clock_timestamp())`;
+  const seat = claimSeat(fixture, fixture.grantA, `owner-content-${randomUUID()}`);
+  assert.equal(seat.status,200);
+  const edgeUrl = new URL(local.DB_URL);
+  edgeUrl.username = 'commonswarm_edge'; edgeUrl.password = randomBytes(32).toString('hex');
+  await releaseSql.unsafe(`DO $edge$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='commonswarm_edge') THEN
+    CREATE ROLE commonswarm_edge LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+    END IF; END $edge$; GRANT swarm_command,swarm_read,swarm_capability TO commonswarm_edge;`);
+  await releaseSql.unsafe(`ALTER ROLE commonswarm_edge PASSWORD '${edgeUrl.password}'`);
+  const edge = postgres(edgeUrl.href,{prepare:false,max:1});
+  try {
+    const [identity] = await edge`SELECT session_user='commonswarm_edge' AND NOT rolsuper AND NOT rolbypassrls AS safe
+      FROM pg_roles WHERE rolname=current_user`;
+    assert.equal(identity!.safe,true);
+    await assert.rejects(edge.begin(async tx => { await tx.unsafe('SET LOCAL ROLE commonswarm_oauth_runtime'); }), {code:'42501'});
+  } finally { await edge.end(); }
+  const handle = String(seat.body.handle);
+  const call = (calls: Array<Record<string,unknown>>, extra: Record<string,unknown> = {}) => ({
+    operation:'context-http',grantId:fixture.grantA,ownerUserId:fixture.owner,handle,calls,...extra });
+  return { fixture, seat, edgeUrl:edgeUrl.href, call };
+}
+function assertContentDenied(result: ContextHttpResult) {
+  assert.ok(result.isError || result.body.status==='refused',JSON.stringify(result.body));
+  assert.equal(result.body.content,undefined);
+  assert.equal(result.body.queue,undefined,'denied queue releases no stale content access');
+}
+
+test('owner content traverses MCP HTTP read/command routes with no approval, and nonowner/foreign/revoked controls', {timeout:180_000}, async()=>{
+  const f=await ownerContentHttpFixture();
+  try {
+    await sql`UPDATE swarm.household_member_content_roles SET content_role='reader'
+      WHERE workspace_id=${f.fixture.workspaceA}::uuid AND user_id=${f.fixture.owner}::uuid`;
+    const reader=runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list'},{name:'todo_queue'},
+      {name:'todo_create',arguments:{request_id:randomUUID(),title:'Reader refuses write'}}]),{databaseUrl:f.edgeUrl});
+    assert.equal(reader[0]!.body.status,'ok'); assert.equal((reader[1]!.body.queue as {content_access:string}).content_access,'read');
+    assertContentDenied(reader[2]!);
+    await sql`UPDATE swarm.household_member_content_roles SET content_role='editor'
+      WHERE workspace_id=${f.fixture.workspaceA}::uuid AND user_id=${f.fixture.owner}::uuid`;
+    const editor=runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_create',arguments:{request_id:randomUUID(),title:'HTTP inherited editor'}},
+      {name:'todo_queue'}]),{databaseUrl:f.edgeUrl});
+    assert.equal(editor[0]!.body.status,'committed'); assert.equal((editor[1]!.body.queue as {content_access:string}).content_access,'read_write');
+    const [approvals]=await sql`SELECT count(*)::int AS n FROM swarm.household_content_connections WHERE workspace_id=${f.fixture.workspaceA}::uuid`;
+    assert.equal(approvals!.n,0,'HTTP access never manufactures human approval');
+    for (const role of ['admin','member']) {
+      await sql`UPDATE swarm.memberships SET role=${role} WHERE workspace_id=${f.fixture.workspaceA}::uuid AND user_id=${f.fixture.owner}::uuid`;
+      const denied=runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list'},{name:'todo_queue'}]),{databaseUrl:f.edgeUrl});
+      denied.forEach(assertContentDenied);
+    }
+    await sql`UPDATE swarm.memberships SET role='owner' WHERE workspace_id=${f.fixture.workspaceA}::uuid AND user_id=${f.fixture.owner}::uuid`;
+    const control=runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list'}]),{databaseUrl:f.edgeUrl});
+    assert.equal(control[0]!.body.status,'ok');
+    runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list'}],{grantId:f.fixture.grantB,ownerUserId:f.fixture.other}),{databaseUrl:f.edgeUrl}).forEach(assertContentDenied);
+    await sql`UPDATE swarm.hosted_mcp_seats SET revoked_at=clock_timestamp() WHERE seat_id=${f.seat.body.seat_id as string}::uuid`;
+    runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list'},{name:'todo_queue'}]),{databaseUrl:f.edgeUrl}).forEach(assertContentDenied);
+  } finally { await releaseSql.unsafe('ALTER ROLE commonswarm_edge PASSWORD NULL'); }
+});
+
+for (const change of ['role','removal','withdrawal'] as const) {
+  test(`owner HTTP queue waits on another PostgreSQL session and rechecks committed ${change}`, {timeout:180_000}, async()=>{
+    const f=await ownerContentHttpFixture();
+    let pending: Promise<ContextHttpResult[]> | undefined;
+    try {
+      assert.equal(runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list'}]),{databaseUrl:f.edgeUrl})[0]!.body.status,'ok');
+      await sql.begin(async locker=>{
+        const [session]=await locker`SELECT pg_backend_pid() AS pid`;
+        await locker`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id=${f.fixture.workspaceA}::uuid FOR NO KEY UPDATE`;
+        pending=runHostedHarnessAsync<ContextHttpResult[]>(f.call([{name:'todo_queue'}]),f.edgeUrl);
+        void pending.catch(()=>{}); // the original promise is asserted after releasing the lock
+        let blocked=false;
+        for(let attempt=0;attempt<400;attempt++) {
+          const [wait]=await sql`SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+            WHERE usename='commonswarm_edge' AND ${session!.pid}::int=ANY(pg_blocking_pids(pid))) AS blocked`;
+          if(wait!.blocked) { blocked=true; break; }
+          await new Promise(resolve=>setTimeout(resolve,25));
+        }
+        assert.equal(blocked,true,'observed a real second-session lock wait before changing authority');
+        if(change==='role') await locker`UPDATE swarm.memberships SET role='member' WHERE workspace_id=${f.fixture.workspaceA}::uuid AND user_id=${f.fixture.owner}::uuid`;
+        else if(change==='removal') {
+          // The normal MemberRemoved content hook runs before the membership
+          // stamp, while a second real owner is still live for its audit checks.
+          await locker`UPDATE swarm.memberships SET role='owner' WHERE workspace_id=${f.fixture.workspaceA}::uuid AND user_id=${f.fixture.other}::uuid`;
+          await locker.unsafe('SET LOCAL ROLE swarm_command');
+          const {revokeRemovedMemberHousehold}=await import('../../supabase/functions/command/household-member-removal.ts');
+          await revokeRemovedMemberHousehold(locker,f.fixture.workspaceA,f.fixture.owner,new Date(),f.fixture.other,randomUUID(),'ab'.repeat(32));
+          await locker.unsafe('RESET ROLE');
+          await locker`UPDATE swarm.memberships SET revoked_at=clock_timestamp() WHERE workspace_id=${f.fixture.workspaceA}::uuid AND user_id=${f.fixture.owner}::uuid`;
+        }
+        else {
+          await locker.unsafe('SET LOCAL ROLE swarm_command');
+          const {withdrawHouseholdConnection}=await import('../../supabase/functions/command/household-permissions.ts');
+          const result=await withdrawHouseholdConnection(locker,f.fixture.workspaceA,
+            {user_id:f.fixture.owner,principal_id:null,run_id:null,connection:null},randomUUID(),
+            {kind:'household_withdraw_connection',principal_id:f.seat.body.principal_id},async()=>true);
+          assert.equal(result.status,'committed');
+        }
+      });
+      (await pending!).forEach(assertContentDenied);
+      runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list'},{name:'todo_queue'},
+        {name:'todo_create',arguments:{request_id:randomUUID(),title:'After committed barrier'}}]),{databaseUrl:f.edgeUrl}).forEach(assertContentDenied);
+    } finally {
+      if(pending) await pending.catch(()=>{});
+      await releaseSql.unsafe('ALTER ROLE commonswarm_edge PASSWORD NULL');
+    }
+  });
+}
+
+for(const operation of ['read','write'] as const) {
+  test(`Storage ${operation} linearizes before waiting withdrawal, and subsequent HTTP content is denied`, {timeout:180_000}, async()=>{
+    const f=await ownerContentHttpFixture();
+    try {
+      const object=randomUUID();
+      const setup=runHostedHarness<ContextHttpResult[]>(f.call([{name:'object_create',arguments:{request_id:randomUUID(),object_id:object,
+        title:'Synthetic Storage race',content:{kind:'doc',markdown:'Synthetic bytes'}}},
+        {name:'object_read',arguments:{object_id:object}}]),{databaseUrl:f.edgeUrl});
+      assert.equal(setup[0]!.body.status,'committed'); assert.equal(setup[1]!.body.status,'ok');
+      const raceCall=operation==='read'
+        ? {name:'object_read',arguments:{object_id:object},storage_race:true}
+        : {name:'object_create',arguments:{request_id:randomUUID(),object_id:randomUUID(),title:'Concurrent upload',
+          content:{kind:'doc',markdown:'Synthetic upload'}},storage_race:true};
+      const results=runHostedHarness<ContextHttpResult[]>(f.call([raceCall,{name:'todo_list'},{name:'todo_queue'},
+        {name:'object_read',arguments:{object_id:object}}],{storageRace:true,raceDatabaseUrl:local.DB_URL,
+        workspaceId:f.fixture.workspaceA,principalId:f.seat.body.principal_id}),{databaseUrl:f.edgeUrl});
+      assert.equal(results[0]!.body.status,operation==='read'?'ok':'committed','operation admitted before withdrawal commit may complete');
+      results.slice(1).forEach(assertContentDenied);
+    } finally { await releaseSql.unsafe('ALTER ROLE commonswarm_edge PASSWORD NULL'); }
+  });
+}

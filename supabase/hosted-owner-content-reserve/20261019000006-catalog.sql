@@ -13,14 +13,14 @@ WITH target AS (
 )
 SELECT coalesce((SELECT relrowsecurity AND relowner='swarm_admin'::regrole FROM target),false)
  AND (SELECT privileges=ARRAY['INSERT','SELECT']::text[] FROM allowed)
- AND (SELECT columns=ARRAY['operations','origin','principal_id','replaces_legacy']::text[] FROM column_updates)
+ AND (SELECT columns=ARRAY['operations','origin']::text[] FROM column_updates)
  AND NOT EXISTS(SELECT 1 FROM target c CROSS JOIN LATERAL aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) x
    WHERE x.grantee NOT IN ('swarm_admin'::regrole,'swarm_command'::regrole))
  AND NOT EXISTS(SELECT 1 FROM pg_attribute a CROSS JOIN LATERAL aclexplode(a.attacl) x
    WHERE a.attrelid=to_regclass('swarm.household_hosted_content_restrictions') AND a.attnum>0 AND NOT a.attisdropped
    AND x.grantee NOT IN ('swarm_admin'::regrole,'swarm_command'::regrole))
  AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('swarm.household_hosted_content_restrictions')
-   AND contype='p' AND pg_get_constraintdef(oid)='PRIMARY KEY (grant_id, workspace_id)')
+   AND contype='p' AND pg_get_constraintdef(oid)='PRIMARY KEY (grant_id, workspace_id, principal_id)')
  AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('swarm.household_hosted_content_restrictions')
    AND tgname='household_hosted_restriction_audit' AND tgenabled='O'
    AND tgfoid=to_regprocedure('swarm.audit_household_hosted_restriction()'))

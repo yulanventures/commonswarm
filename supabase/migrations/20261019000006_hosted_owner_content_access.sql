@@ -1,8 +1,9 @@
--- Reapply removes only the temporary old-source compatibility gate. Explicit
--- restrictions remain durable; no old approval, consent or audit is rewritten.
-DROP POLICY IF EXISTS hosted_owner_content_rollback_gate ON swarm.household_content_connections;
+-- A rollback compatibility gate is removed ONLY by the reviewed operator
+-- roll-forward packet, after the new source is active. Never rewind a ledger.
 -- No backfill: old approvals do not establish why a person or system restricted
 -- access. Runtime conservatively retains their ceilings until explicit reallow.
+-- Rows retain exact canonical human/system targets. Runtime intersects every
+-- target in the grant/workspace partition, so changing seat/name cannot escape.
 CREATE TABLE IF NOT EXISTS swarm.household_hosted_content_restrictions (
  grant_id uuid NOT NULL,
  workspace_id uuid NOT NULL,
@@ -11,16 +12,15 @@ CREATE TABLE IF NOT EXISTS swarm.household_hosted_content_restrictions (
  operations text[] NOT NULL CHECK (cardinality(operations) BETWEEN 0 AND 3
    AND operations <@ ARRAY['read','create','update']::text[]),
  origin text NOT NULL CHECK (origin IN ('human_allow','human_withdraw','system_invalidation')),
- replaces_legacy boolean NOT NULL DEFAULT false,
  changed_by uuid NOT NULL DEFAULT nullif(current_setting('cswarm.household_actor',true),'')::uuid,
  changed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
- PRIMARY KEY(grant_id,workspace_id),
+ PRIMARY KEY(grant_id,workspace_id,principal_id),
  FOREIGN KEY(grant_id,workspace_id,owner_user_id)
    REFERENCES swarm.hosted_mcp_grant_workspaces(grant_id,workspace_id,owner_user_id),
  FOREIGN KEY(principal_id,workspace_id,owner_user_id)
    REFERENCES swarm.agent_principals(principal_id,workspace_id,owner_user_id),
- CHECK ((origin='human_allow' AND replaces_legacy AND 'read'=ANY(operations))
-   OR (origin<>'human_allow' AND NOT replaces_legacy AND cardinality(operations)=0))
+ CHECK ((origin='human_allow' AND 'read'=ANY(operations))
+   OR (origin<>'human_allow' AND cardinality(operations)=0))
 );
 ALTER TABLE swarm.household_hosted_content_restrictions OWNER TO swarm_admin;
 ALTER TABLE swarm.household_hosted_content_restrictions ENABLE ROW LEVEL SECURITY;
@@ -29,7 +29,7 @@ CREATE POLICY swarm_command_all ON swarm.household_hosted_content_restrictions
  FOR ALL TO swarm_command USING(true) WITH CHECK(true);
 REVOKE ALL ON swarm.household_hosted_content_restrictions FROM PUBLIC,anon,authenticated,swarm_read,swarm_command;
 GRANT SELECT,INSERT ON swarm.household_hosted_content_restrictions TO swarm_command;
-GRANT UPDATE(principal_id,operations,origin,replaces_legacy) ON swarm.household_hosted_content_restrictions TO swarm_command;
+GRANT UPDATE(operations,origin) ON swarm.household_hosted_content_restrictions TO swarm_command;
 
 CREATE OR REPLACE FUNCTION swarm.audit_household_hosted_restriction() RETURNS trigger
 LANGUAGE plpgsql SET search_path=pg_catalog AS $$
@@ -47,9 +47,16 @@ BEGIN
      AND s.grant_id=NEW.grant_id AND s.principal_id=NEW.principal_id AND s.owner_user_id=actor) THEN
   RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='owned hosted restriction context required';
  END IF;
- IF TG_OP='UPDATE' AND (NEW.grant_id,NEW.workspace_id,NEW.owner_user_id)
-   IS DISTINCT FROM (OLD.grant_id,OLD.workspace_id,OLD.owner_user_id) THEN
+ IF TG_OP='UPDATE' AND (NEW.grant_id,NEW.workspace_id,NEW.owner_user_id,NEW.principal_id)
+   IS DISTINCT FROM (OLD.grant_id,OLD.workspace_id,OLD.owner_user_id,OLD.principal_id) THEN
   RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='hosted restriction scope is immutable';
+ END IF;
+ -- New grant-wide restrictions originate only while this human is a current
+ -- workspace owner. An existing owner-origin target can still be changed after
+ -- downgrade; ordinary never-owner admin/member per-seat approvals are unchanged.
+ IF TG_OP='INSERT' AND NOT EXISTS(SELECT 1 FROM swarm.memberships m
+   WHERE m.workspace_id=NEW.workspace_id AND m.user_id=actor AND m.role='owner' AND m.revoked_at IS NULL) THEN
+  RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='current owner required for new hosted restriction';
  END IF;
  IF NEW.origin='human_allow' THEN
   IF command_kind NOT IN ('household_permissions','household_approve_connection') OR NOT EXISTS(

@@ -3,6 +3,7 @@
 import type postgres from 'postgres';
 import * as core from '../_shared/protocol.js';
 import { createHouseholdObjectStore, type HouseholdIdentity, type HouseholdCredentialRecheck } from './household-objects.ts';
+import { loadHouseholdContentAccess } from './household-content-access.ts';
 import { approveHouseholdConnection, withdrawHouseholdConnection } from './household-permissions.ts';
 import { createHouseholdTodoStore, type HouseholdTodoNoticePort } from './household-todos.ts';
 import { readHouseholdActivity } from './household-activity.ts';
@@ -75,7 +76,9 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
     if (identity.principal_id !== null || !await recheckCredential(tx, identity)) return refused('human_confirmation_required');
     const access = await store.access(tx, workspaceId, identity);
     if (!access || core.householdAccessRefusal(access.facts, workspaceId, 'read', access.now)) return refused('workspace_access_refused');
-    const hosted = await tx`SELECT 'hosted' AS kind,s.seat_id AS connection_id,s.grant_id,s.principal_id,p.name
+    const hosted = await tx`SELECT 'hosted' AS kind,s.seat_id AS connection_id,s.grant_id,s.principal_id,p.name,g.provider_grant_id,
+        (SELECT h.handle FROM swarm.hosted_mcp_seat_handles h WHERE h.seat_id=s.seat_id
+          AND h.revoked_at IS NULL ORDER BY h.created_at DESC LIMIT 1) AS handle
       FROM swarm.hosted_mcp_seats s JOIN swarm.agent_principals p USING(principal_id)
       JOIN swarm.hosted_mcp_grants g USING(grant_id)
       JOIN swarm.hosted_mcp_grant_workspaces b ON b.grant_id=s.grant_id AND b.workspace_id=s.workspace_id
@@ -94,8 +97,38 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
     const key = (row: Record<string, unknown>) => JSON.stringify([row.connection_id, row.grant_id, row.principal_id]);
     const byConnection = new Map(approvals.map(row => [key(row), { operations: row.operations,
       expires_at: row.expires_at == null ? null : new Date(row.expires_at as string).toISOString() }]));
-    return { status: 'ok', connections: [...hosted,...local].map(row => ({ kind: row.kind, connection_id: row.connection_id,
-      grant_id: row.grant_id, principal_id: row.principal_id, name: row.name, approval: byConnection.get(key(row)) ?? null })) };
+    const connections = [];
+    for (const row of [...hosted,...local]) {
+      // These tuples came from the human's canonical live-seat/token query.
+      // Derive content facts without manufacturing a capability or approval.
+      let credentialLive = true;
+      if (row.kind === 'hosted') {
+        const [role] = await tx`SELECT current_setting('role') AS value`;
+        await tx`SELECT set_config('role','swarm_read',true)`;
+        try {
+          const [live] = await tx`SELECT EXISTS(SELECT 1 FROM swarm.resolve_hosted_seat_read_authorization(
+            ${String(row.grant_id)}::uuid,${row.handle as string | null}::text,'whoami') a
+            WHERE a.workspace_id=${workspaceId}::uuid AND a.principal_id=${String(row.principal_id)}::uuid
+              AND a.owner_user_id=${identity.user_id}::uuid)
+            AND commonswarm_oauth.provider_family_active(${String(row.provider_grant_id)}::text) AS live`;
+          credentialLive = live?.live === true;
+        } finally { await tx`SELECT set_config('role',${String(role!.value)},true)`; }
+      }
+      const effective = credentialLive ? await loadHouseholdContentAccess(tx, workspaceId, {
+        user_id: identity.user_id, principal_id: String(row.principal_id),
+        run_id: row.kind === 'local' ? String(row.grant_id) : null,
+        connection: { connection_id: String(row.connection_id), grant_id: String(row.grant_id) },
+      }) : null;
+      const operations = effective ? core.HOUSEHOLD_CONTENT_OPERATIONS.filter(op =>
+        !core.householdAccessRefusal(effective.facts, workspaceId, op, effective.now)) : [];
+      connections.push({ kind: row.kind, connection_id: row.connection_id, grant_id: row.grant_id,
+        principal_id: row.principal_id, name: row.name, approval: byConnection.get(key(row)) ?? null,
+        effective_access: { source: effective?.source ?? 'none', operations,
+          restricted: operations.length === 0 || (effective?.facts.member?.content_role === 'editor'
+            && operations.length < core.HOUSEHOLD_CONTENT_OPERATIONS.length),
+          restrictions: effective?.restriction ?? [] } });
+    }
+    return { status: 'ok', connections };
   }
   if (value.kind === 'household_access') {
     const access = await store.access(tx, workspaceId, identity);

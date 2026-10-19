@@ -3,7 +3,9 @@
 -- seat with a legacy approval. The old source still requires a manual approval.
 -- Deny a whole legacy connection if its operations exceed the explicit ceiling;
 -- conservative refusal during rollback is safer than widening that ceiling.
--- Reapply migration 00006 before restoring the new source / human reallow path.
+-- Roll forward: activate the reviewed new source FIRST, verify its identity,
+-- then explicitly DROP this gate in the operator transaction. Retain both
+-- migration ledgers and all restriction, consent, approval and audit rows.
 DROP POLICY IF EXISTS hosted_owner_content_rollback_gate ON swarm.household_content_connections;
 CREATE POLICY hosted_owner_content_rollback_gate ON swarm.household_content_connections
  AS RESTRICTIVE FOR SELECT TO swarm_command USING (

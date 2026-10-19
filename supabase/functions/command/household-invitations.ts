@@ -128,10 +128,8 @@ export async function humanInvitationTransaction(tx: Sql, commandId: string, val
   const hosted = await tx`SELECT grant_id,principal_id FROM swarm.hosted_mcp_seats
     WHERE workspace_id=${workspaceId}::uuid AND owner_user_id=${human.user_id}::uuid ORDER BY grant_id,seat_id FOR SHARE`;
   await tx`SELECT set_config('cswarm.household_command','household_connection_invalidation',true)`;
-  const invalidated = new Set<string>();
+  // Retain every canonical target; a later Allow of A cannot clear B.
   for (const seat of hosted) {
-    if (invalidated.has(String(seat.grant_id))) continue;
-    invalidated.add(String(seat.grant_id));
     await writeHostedContentRestriction(tx, workspaceId, human.user_id, String(seat.grant_id), String(seat.principal_id), [], 'system_invalidation');
   }
   await tx`SELECT set_config('cswarm.household_command','household_withdraw_connection',true)`;
