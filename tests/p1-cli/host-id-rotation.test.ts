@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import fsPromises from "node:fs/promises";
 import { chmod, link, lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -845,32 +847,52 @@ test("gate release leaves a replacement owner untouched", { timeout: 3_000 }, as
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("gate release retries a transient owner change once", { timeout: 3_000 }, async () => {
+test("gate release retries a transient owner change once", { timeout: 3_000 }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-gate-release-retry-"));
   const lock = join(root, "host-id-rotation.lock");
   const gate = `${lock}.reclaim`;
-  let restoration: Promise<void> = Promise.resolve();
+  const ownerPath = join(gate, "owner.json");
+  const realReadFile = fsPromises.readFile;
+  const temporaryOwner = JSON.stringify({ pid: process.pid, host: hostname(),
+    startTime: pidStartMs(process.pid), ownerId: "temporary" });
+  let originalOwner = "";
+  let releasing = false;
+  const releaseReads: Array<string | Buffer> = [];
   try {
+    t.mock.method(fsPromises, "readFile", async (...args: Parameters<typeof readFile>) => {
+      const raw = await realReadFile(...args);
+      if (args[0] === ownerPath && releasing) {
+        releaseReads.push(raw);
+        if (releaseReads.length === 1) {
+          // Return the real temporary-owner snapshot only after restoring the gate.
+          // The helper must reject that snapshot and read its own owner on retry.
+          await rm(gate, { recursive: true, force: true });
+          await rename(`${gate}.prior`, gate);
+        }
+      }
+      return raw;
+    });
+    syncBuiltinESMExports();
     await writeFile(lock, JSON.stringify({ pid: 999_999_999, host: hostname(),
       createdAt: Date.now(), startTime: Date.now() }), { mode: 0o600 });
     const result = await withFileLock(root, "host-id-rotation", async () => "acquired", {
       stalePolicy: "host-id", timeoutMs: 500, onBeforeStaleMove: async () => {
+        originalOwner = await realReadFile(ownerPath, "utf8");
         await rename(gate, `${gate}.prior`);
         await mkdir(gate, { mode: 0o700 });
-        await writeFile(join(gate, "owner.json"), JSON.stringify({ pid: process.pid,
-          host: hostname(), startTime: pidStartMs(process.pid), ownerId: "temporary" }));
-        restoration = new Promise<void>((resolve, reject) => setTimeout(() => {
-          void (async () => {
-            await rm(gate, { recursive: true, force: true });
-            await rename(`${gate}.prior`, gate);
-          })().then(resolve, reject);
-        }, 10));
+        await writeFile(ownerPath, temporaryOwner);
+        releasing = true;
       },
     });
-    await restoration;
+    assert.deepEqual(releaseReads, [temporaryOwner, originalOwner]);
     assert.equal(result, "acquired");
     await assert.rejects(stat(gate), { code: "ENOENT" });
-  } finally { await restoration.catch(() => undefined); await rm(root, { recursive: true, force: true }); }
+    assert.deepEqual((await readdir(root)).filter(name => name.startsWith("host-id-rotation.lock.reclaim")), []);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("host-id publication falls back on unsupported links and accepts retransmitted LINK", { timeout: 8_000 }, async () => {
