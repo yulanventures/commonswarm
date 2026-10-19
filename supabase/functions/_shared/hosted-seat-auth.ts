@@ -1,4 +1,5 @@
 import type postgres from "npm:postgres@3.4.9";
+import type { TransactionSql } from "postgres";
 
 import { HOUSEHOLD_TOOL_REGISTRY } from "./protocol.js";
 
@@ -270,7 +271,7 @@ export async function resolveHostedConnectionContext(
       ...(seat === null ? {} : { agent_principal_id: seat.principal_id }),
     })}, true)`;
     // A resolver SQL error must leave the transaction usable for restoration.
-    return await tx.savepoint(async scope => {
+    return await tx.savepoint(async (scope: TransactionSql<Record<string, unknown>>) => {
       const rows = await scope<{ context: HostedConnectionContext | null }[]>`
         SELECT swarm.resolve_hosted_mcp_connection_context(
           ${binding.grantId}::uuid, ${binding.providerGrantId}, ${binding.tool},
