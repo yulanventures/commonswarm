@@ -1,5 +1,10 @@
 /** HM lane-7 endpoint pipeline coverage. Runs only in the manual `server` suite. */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 // @ts-expect-error TS5097: the server suite imports the Deno source directly.
 import { MCP_ISSUER, MCP_RESOURCE, McpJwtVerifier } from "../../supabase/functions/mcp/auth.ts";
@@ -98,4 +103,53 @@ test("HTTP MCP tool call verifies a real JWT before dispatch; bad audience canno
   assert.equal(denied.status, 401);
   assert.equal(denied.headers.get("www-authenticate"), WWW_AUTHENTICATE);
   assert.equal(calls.length, 1, "invalid tokens never reach tool dispatch");
+});
+
+
+// Independent wire-contract proof: run each revision's actual protocol/catalog,
+// rather than copying the tool table or reconstructing its descriptions/schema.
+// A temporary source archive has no Git index or branch and is cleaned locally
+// by this Linux test.
+test("hosted tools/list bytes match the approved baseline through both actual catalog runners", { timeout: 150_000 }, () => {
+  const root = fileURLToPath(new URL("../../", import.meta.url));
+  const temp = mkdtempSync(join(tmpdir(), "hosted-context-catalog-"));
+  try {
+    const baseline = join(temp, "baseline");
+    mkdirSync(baseline);
+    const archive = execFileSync("git", ["archive", "f57cd98ab54256f90533f69c558a49a2c3f1167d",
+      "supabase/functions/mcp", "supabase/functions/_shared"], { cwd: root, maxBuffer: 8 * 1024 * 1024 });
+    execFileSync("tar", ["-x", "-C", baseline], { input: archive });
+    const runner = join(temp, "catalog.ts");
+    writeFileSync(runner, `
+const { createMcpProtocolHandler } = await import(Deno.args[0]);
+const serve = createMcpProtocolHandler({
+  issuer: "https://mcp.commonswarm.com", resource: "https://mcp.commonswarm.com/mcp",
+  publicEnabled: true, allowedOrigins: new Set(),
+  limits: { maxBodyBytes: 4096, maxResponseBytes: 128 * 1024, requestTimeoutMs: 2000, maxConcurrentRequests: 1 },
+  verifyToken: async () => ({ providerGrantId: "catalog-fixture", subject: "11111111-1111-4111-8111-111111111111", expiresAt: 1900000000 }),
+  executeTool: async () => { throw new Error("tools/list must not execute"); },
+});
+const response = await serve(new Request("https://mcp.commonswarm.com/mcp", {
+  method: "POST", headers: { authorization: "Bearer catalog.fixture.value", "content-type": "application/json" },
+  body: JSON.stringify({ jsonrpc: "2.0", id: "catalog", method: "tools/list", params: {} }),
+}));
+console.log(JSON.stringify({ status: response.status, text: await response.text() }));
+`);
+    const catalog = (source: string, enabled: string): { status: number; text: string } => JSON.parse(execFileSync("deno", [
+      "run", "--no-lock", "--config", "supabase/functions/command/deno.json", "--allow-env", "--allow-read",
+      runner, pathToFileURL(join(source, "supabase/functions/mcp/protocol.ts")).href,
+    ], { cwd: root, encoding: "utf8", timeout: 30_000,
+      env: { PATH: process.env.PATH ?? "", ...(process.env.DENO_DIR ? { DENO_DIR: process.env.DENO_DIR } : {}),
+        SWARM_MCP_TODOS_LISTS_ENABLED: enabled },
+    }));
+    for (const enabled of ["0", "1"]) {
+      const before = catalog(baseline, enabled);
+      const after = catalog(root, enabled);
+      assert.equal(before.status, 200);
+      assert.deepEqual(after, before, "serialized names/descriptions/input schemas/scopes/annotations remain byte-identical");
+      if (enabled === "0") assert.equal(JSON.parse(after.text).result.tools.length, 8);
+    }
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
 });

@@ -44,6 +44,10 @@ import { STANDING_GRANT_COPY } from "../../lib/standing-grants";
 import { h0LinkJoinEnabled } from "../../lib/h0-link-join-flag";
 import { joinInviteLimitSentence } from "../../../../src/protocol/agent-join-limits";
 import { dashboardMcpPrompt } from "./agent-prompt";
+import { AGENT_HOSTS } from "../../lib/agent-hosts";
+
+// Reuse the catalog's verified public commands; never include a credential here.
+const hostedCodingHosts = AGENT_HOSTS.filter(host => host.id === "claude-code" || host.id === "codex");
 
 const {
   workspaceId,
@@ -63,7 +67,7 @@ const {
     {eyebrow && <p class="ac__eyebrow">{eyebrow}</p>}
     <h2 class="ac__title">Name your agent.</h2>
     <p class="ac__lead">
-      Add the name collaborators will see in the feed.
+      Name the agent you want to connect.
     </p>
   </header>
 
@@ -80,6 +84,32 @@ const {
   </div>
 
   <form class="ac__panel ac__form" data-panel="form" data-has-agents="no">
+    <details class="ac__advanced">
+      <summary>Claude Code or Codex: hosted connector</summary>
+      <p class="ac__hint">
+        These public commands keep credentials out of the conversation. Create or select
+        your workspace first. These CommonSwarm routes are not tested with these hosts yet.
+      </p>
+      {hostedCodingHosts.map(host => (
+        <div>
+          <h3>{host.name}</h3>
+          {host.steps.filter(step => step.code).map(step => <pre class="ac__pre">{step.code}</pre>)}
+          <p class="ac__hint">
+            {host.id === "claude-code"
+              ? "Start a new Claude Code session, type /mcp, select commonswarm, and follow the browser sign-in steps."
+              : "Complete the browser sign-in opened by codex mcp login commonswarm. If the tools are not available, start a new Codex session."}
+            {" "}Use the same CommonSwarm account as here, choose your workspace, and select Allow connection.
+            Then ask your agent to join under its name and post a short note.
+          </p>
+        </div>
+      ))}
+      <p class="ac__hint">
+        The host saves the connector configuration. You do not need a new generated prompt
+        for each session. The connector reports whether a named workspace identity still
+        needs to join. The hosted connector currently supports messages.
+      </p>
+    </details>
+
     <div class="ac__field" data-field-wrap="identity">
       <label class="ac__label" for="ac-identity">AI assistant</label>
       <select class="ac__control" id="ac-identity" data-field="identity">
@@ -154,7 +184,7 @@ const {
       Generate prompt
     </button>
     <details class="ac__advanced">
-      <summary>Connect with MCP</summary>
+      <summary>Optional local stdio connector</summary>
       <p class="ac__hint">This terminal flow keeps the connect code and seat token out of the agent's model turn.</p>
       <pre class="ac__pre">{dashboardMcpPrompt()}</pre>
     </details>
@@ -208,7 +238,7 @@ const {
           stroke-linejoin="round"></path>
       </svg>
       <span>
-        This prompt or setup file carries a secret through the model. Keep it private. Use MCP connect on the agent host to keep the secret out of the model. Copy this prompt before you leave this screen.
+        This prompt or setup file carries a secret through the model. Keep it private. For hosts that support it, use the hosted connector to keep credentials out of the model. Copy this prompt before you leave this screen.
         If you lose it, create another.
       </span>
     </p>

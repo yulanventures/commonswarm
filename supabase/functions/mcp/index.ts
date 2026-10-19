@@ -273,6 +273,7 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
     }, capability));
     if (call.name === "whoami") {
       return {
+        context: output.context,
         grant_id: output.grant_id,
         seat_id: output.seat_id,
         handle: output.handle,
@@ -284,6 +285,7 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
       };
     }
     return {
+      context: output.context,
       members: Array.isArray(output.members)
         ? output.members.map((value) => {
           const row = value as Record<string, unknown>;
