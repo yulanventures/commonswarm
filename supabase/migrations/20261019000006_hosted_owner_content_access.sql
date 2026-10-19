@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS swarm.household_hosted_content_restrictions (
  operations text[] NOT NULL CHECK (cardinality(operations) BETWEEN 0 AND 3
    AND operations <@ ARRAY['read','create','update']::text[]),
  origin text NOT NULL CHECK (origin IN ('human_allow','human_withdraw','system_invalidation')),
+ closed_target_replacements jsonb NOT NULL DEFAULT '[]'::jsonb
+   CHECK (jsonb_typeof(closed_target_replacements)='array' AND jsonb_array_length(closed_target_replacements)<=256),
  changed_by uuid NOT NULL DEFAULT nullif(current_setting('cswarm.household_actor',true),'')::uuid,
  changed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  PRIMARY KEY(grant_id,workspace_id,principal_id),
@@ -29,11 +31,11 @@ CREATE POLICY swarm_command_all ON swarm.household_hosted_content_restrictions
  FOR ALL TO swarm_command USING(true) WITH CHECK(true);
 REVOKE ALL ON swarm.household_hosted_content_restrictions FROM PUBLIC,anon,authenticated,swarm_read,swarm_command;
 GRANT SELECT,INSERT ON swarm.household_hosted_content_restrictions TO swarm_command;
-GRANT UPDATE(operations,origin) ON swarm.household_hosted_content_restrictions TO swarm_command;
+GRANT UPDATE(operations,origin,closed_target_replacements) ON swarm.household_hosted_content_restrictions TO swarm_command;
 
 CREATE OR REPLACE FUNCTION swarm.audit_household_hosted_restriction() RETURNS trigger
 LANGUAGE plpgsql SET search_path=pg_catalog AS $$
-DECLARE actor uuid; command_kind text; request_id text; digest text;
+DECLARE actor uuid; command_kind text; request_id text; digest text; expected jsonb; prior_markers jsonb;
 BEGIN
  actor := nullif(current_setting('cswarm.household_actor',true),'')::uuid;
  command_kind := current_setting('cswarm.household_command',true);
@@ -82,6 +84,51 @@ BEGIN
   IF command_kind IS DISTINCT FROM 'household_connection_invalidation' THEN
    RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='connection invalidation context required';
   END IF;
+ END IF;
+ -- Replacement authorization is separate from ordinary per-seat Allow.
+ -- Exact JSON equality includes every relevant legacy field and restriction
+ -- version; containment would wrongly accept subsets of operation arrays.
+ IF jsonb_typeof(NEW.closed_target_replacements) IS DISTINCT FROM 'array' THEN
+  RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='closed target snapshots must be an array';
+ END IF;
+ IF jsonb_array_length(NEW.closed_target_replacements)>256 THEN
+  RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='closed target snapshot bound exceeded';
+ END IF;
+ IF NEW.closed_target_replacements<>'[]'::jsonb THEN
+  IF NEW.origin<>'human_allow' OR command_kind NOT IN ('household_permissions','household_approve_connection')
+    OR NOT EXISTS(SELECT 1 FROM swarm.memberships m WHERE m.workspace_id=NEW.workspace_id
+      AND m.user_id=actor AND m.role='owner' AND m.revoked_at IS NULL) THEN
+   RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='current owner human Allow required for closed target replacement';
+  END IF;
+  SELECT coalesce(jsonb_agg(snapshot ORDER BY snapshot::text),'[]'::jsonb) INTO expected FROM (
+      SELECT jsonb_build_object('kind','restriction','principal_id',r.principal_id,'operations',r.operations,'origin',r.origin,'changed_at',r.changed_at,'changed_by',r.changed_by) AS snapshot FROM swarm.household_hosted_content_restrictions r
+        WHERE r.grant_id=NEW.grant_id AND r.workspace_id=NEW.workspace_id AND EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats cs WHERE cs.grant_id=r.grant_id
+          AND cs.workspace_id=r.workspace_id AND cs.principal_id=r.principal_id AND cs.owner_user_id=r.owner_user_id)
+        AND NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats ls JOIN swarm.agent_principals lp USING(principal_id)
+          WHERE ls.grant_id=r.grant_id AND ls.workspace_id=r.workspace_id
+            AND ls.principal_id=r.principal_id AND ls.owner_user_id=r.owner_user_id
+            AND ls.revoked_at IS NULL AND lp.revoked_at IS NULL)
+      UNION ALL
+      SELECT jsonb_build_object('kind','legacy','row',to_jsonb(c)) AS snapshot FROM swarm.household_content_connections c
+        WHERE c.hosted_grant_id=NEW.grant_id AND c.workspace_id=NEW.workspace_id AND EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats cs WHERE cs.grant_id=c.grant_id
+          AND cs.workspace_id=c.workspace_id AND cs.principal_id=c.principal_id AND cs.owner_user_id=c.owner_user_id)
+        AND NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats ls JOIN swarm.agent_principals lp USING(principal_id)
+          WHERE ls.grant_id=c.grant_id AND ls.workspace_id=c.workspace_id
+            AND ls.principal_id=c.principal_id AND ls.owner_user_id=c.owner_user_id
+            AND ls.revoked_at IS NULL AND lp.revoked_at IS NULL)
+      LIMIT 257
+  ) targets;
+  IF NEW.closed_target_replacements IS DISTINCT FROM expected THEN
+   RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='exact closed target snapshots required';
+  END IF;
+ END IF;
+ prior_markers := CASE WHEN TG_OP='UPDATE' THEN OLD.closed_target_replacements ELSE '[]'::jsonb END;
+ IF prior_markers IS DISTINCT FROM NEW.closed_target_replacements THEN
+  -- Keep both marker versions in the existing append-only audit. No approval,
+  -- restriction, consent or historical audit row is deleted or rewritten.
+  INSERT INTO swarm.household_object_audit(audit_id,workspace_id,command_id,actor_user,actor_principal,occurred_at,command_kind,request_digest,outcome,reason_code)
+  VALUES(gen_random_uuid(),NEW.workspace_id,request_id,actor,NULL,clock_timestamp(),command_kind,digest,'committed',
+    'closed_target_replacements:' || jsonb_build_object('principal_id',NEW.principal_id,'old',prior_markers,'new',NEW.closed_target_replacements)::text);
  END IF;
  NEW.changed_by := actor;
  NEW.changed_at := clock_timestamp();

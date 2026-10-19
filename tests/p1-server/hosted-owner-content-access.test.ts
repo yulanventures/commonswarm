@@ -17,6 +17,20 @@ const catalog = (suffix: 'catalog' | 'rollback-catalog') => {
 };
 test('owner restriction has exact command authority, canonical scope and truthful audit; rollback preserves prior state', () => {
   const owner=randomUUID(), workspace=randomUUID(), grant=randomUUID(), seat=randomUUID(), principal=randomUUID(), decoy=randomUUID(), sibling=randomUUID(), siblingSeat=randomUUID();
+  const deadControls = ['revoked','expired'].map(kind => ({ kind, principal: randomUUID(), seat: randomUUID() }));
+  const deadSetup = deadControls.map(c => `
+    INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only)
+      VALUES('${c.principal}','${workspace}','${owner}','${c.kind} legacy target','hosted_mcp',true);
+    INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,created_at,revoked_at)
+      VALUES('${c.seat}','${grant}','${workspace}','${owner}','${c.principal}','${c.kind} legacy target',clock_timestamp(),${c.kind==='revoked'?'clock_timestamp()':'NULL'});
+    INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at,revoked_at,hosted_grant_id)
+      SELECT '${c.seat}','${grant}','${workspace}','${c.principal}','${owner}','shared',ARRAY['read','create','update'],content_consent_id,
+        ${c.kind==='expired'?"clock_timestamp()-interval '1 hour'":'NULL'},${c.kind==='revoked'?'clock_timestamp()':'NULL'},'${grant}'
+      FROM swarm.household_member_content_roles WHERE workspace_id='${workspace}' AND user_id='${owner}';
+  `).join('\n');
+  const deadVisible = deadControls.map(c => dbAssert(`SELECT count(*)=1 FROM swarm.household_content_connections
+    WHERE connection_id='${c.seat}' AND (revoked_at IS NOT NULL OR expires_at<=clock_timestamp())`,
+    `${c.kind} legacy denial stays visible during new-source roll-forward window`)).join('\n');
   const scope=`grant_id='${grant}' AND workspace_id='${workspace}'`;
   const context=(kind: string)=>`SELECT set_config('cswarm.household_actor','${owner}',true),
     set_config('cswarm.household_command','${kind}',true),set_config('cswarm.household_request','restriction-proof',true),
@@ -52,6 +66,7 @@ test('owner restriction has exact command authority, canonical scope and truthfu
     INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at,hosted_grant_id)
       SELECT '${siblingSeat}','${grant}','${workspace}','${sibling}','${owner}','shared',ARRAY['read'],content_consent_id,NULL,'${grant}'
       FROM swarm.household_member_content_roles WHERE workspace_id='${workspace}' AND user_id='${owner}';
+    ${deadSetup}
     DO $edge$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='commonswarm_edge') THEN
       CREATE ROLE commonswarm_edge LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS;
     END IF; END $edge$;
@@ -85,7 +100,10 @@ test('owner restriction has exact command authority, canonical scope and truthfu
     ${repoSql(`${proof}-rollback.sql`)}
     SET LOCAL SESSION AUTHORIZATION commonswarm_edge;
     SET LOCAL ROLE swarm_command;
-    ${dbAssert(`SELECT NOT EXISTS(SELECT 1 FROM swarm.household_content_connections WHERE connection_id='${siblingSeat}')`,'rollback gate prevents sibling approval bypass of grant withdrawal')}
+    ${dbAssert(`SELECT NOT EXISTS(SELECT 1 FROM swarm.household_content_connections WHERE connection_id='${siblingSeat}')`,'rollback gate prevents live sibling approval bypass of grant withdrawal')}
+    ${deadVisible}
+    ${dbAssert(`SELECT NOT EXISTS(SELECT 1 FROM swarm.household_content_connections WHERE workspace_id='${workspace}'
+      AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>clock_timestamp()))`,'old-source live-approval filter still denies every gated connection')}
     RESET ROLE;
     RESET SESSION AUTHORIZATION;
     ${catalog('rollback-catalog')}
@@ -104,6 +122,7 @@ test('owner restriction has exact command authority, canonical scope and truthfu
     SET LOCAL SESSION AUTHORIZATION commonswarm_edge;
     SET LOCAL ROLE swarm_command;
     ${dbAssert(`SELECT count(*)=1 FROM swarm.household_content_connections WHERE connection_id='${siblingSeat}'`,'forward source can again address the exact legacy approval')}
+    ${deadVisible}
     ${dbAssert(`SELECT origin='human_withdraw' AND cardinality(operations)=0 FROM swarm.household_hosted_content_restrictions WHERE ${scope}`,'forward gate drop retains the denial consumed by the new source')}
     RESET ROLE;
     RESET SESSION AUTHORIZATION;
@@ -136,6 +155,7 @@ test('owner restriction has exact command authority, canonical scope and truthfu
     UPDATE swarm.household_content_connections SET operations=ARRAY['read','create','update'] WHERE connection_id='${siblingSeat}';
     UPDATE swarm.household_hosted_content_restrictions SET operations=ARRAY['read','create','update'],origin='human_allow'
       WHERE ${scope} AND principal_id='${sibling}';
+    ${refuses(`UPDATE swarm.household_hosted_content_restrictions SET closed_target_replacements='[{}]'::jsonb WHERE ${scope} AND principal_id='${sibling}'`,'42501')}
     ${dbAssert(`SELECT operations=ARRAY['read'] AND principal_id='${principal}' FROM swarm.household_hosted_content_restrictions WHERE ${scope} AND principal_id='${principal}'`,'Allow B leaves explicit read-only A unchanged')}
     RESET ROLE;
     RESET SESSION AUTHORIZATION;

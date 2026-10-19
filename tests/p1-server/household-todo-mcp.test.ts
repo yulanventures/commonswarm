@@ -258,6 +258,75 @@ try {
     Object.assign(f,original);
     assert.equal((await call('todo_queue')).body.queue.content_access,'read_write','each target was truthfully reallowed');
 
+    // Closed targets cannot force a new browser grant: only a current owner's
+    // explicit Allow may replace exact retired versions, retaining live C.
+    await tx.unsafe('SAVEPOINT closed_target_reallow');
+    const liveSibling=crypto.randomUUID(),liveSiblingSeat=crypto.randomUUID();
+    await tx\x60INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only)
+      VALUES(\x24{liveSibling}::uuid,\x24{f.workspace}::uuid,\x24{f.owner}::uuid,'Live read-only C','hosted_mcp',true)\x60;
+    await tx\x60INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,created_at)
+      VALUES(\x24{liveSiblingSeat}::uuid,\x24{f.grant}::uuid,\x24{f.workspace}::uuid,\x24{f.owner}::uuid,\x24{liveSibling}::uuid,'Live read-only C',clock_timestamp())\x60;
+    await tx\x60INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at,hosted_grant_id)
+      SELECT \x24{liveSiblingSeat}::uuid,\x24{f.grant}::uuid,\x24{f.workspace}::uuid,\x24{liveSibling}::uuid,\x24{f.owner}::uuid,'shared',ARRAY['read'],content_consent_id,NULL,\x24{f.grant}::uuid
+      FROM swarm.household_member_content_roles WHERE workspace_id=\x24{f.workspace}::uuid AND user_id=\x24{f.owner}::uuid\x60;
+    assert.equal((await human(envelope(withdraw))).body.status,'committed');
+    const [closedBefore]=await tx\x60SELECT to_jsonb(r) AS row FROM swarm.household_hosted_content_restrictions r
+      WHERE grant_id=\x24{f.grant}::uuid AND workspace_id=\x24{f.workspace}::uuid AND principal_id=\x24{f.principal}::uuid\x60;
+    await tx\x60UPDATE swarm.hosted_mcp_seats SET revoked_at=clock_timestamp() WHERE seat_id=\x24{f.connection}::uuid\x60;
+    await tx\x60UPDATE swarm.agent_principals SET revoked_at=clock_timestamp() WHERE principal_id=\x24{f.principal}::uuid\x60;
+    Object.assign(f,{principal:f.sibling,connection:siblingSeat,handle:siblingHandle});
+    assert.equal((await call('todo_list')).body.status,'refused','automatic same-grant inheritance never replaces a closed withdrawal');
+    await tx\x60UPDATE swarm.memberships SET role='admin' WHERE workspace_id=\x24{f.workspace}::uuid AND user_id=\x24{f.owner}::uuid\x60;
+    assert.equal((await human(envelope(allow(['read','create','update'])))).body.status,'committed');
+    assert.equal((await call('todo_list')).body.status,'refused','role lowering or non-owner Allow never replaces closed targets');
+    await tx\x60UPDATE swarm.memberships SET role='owner' WHERE workspace_id=\x24{f.workspace}::uuid AND user_id=\x24{f.owner}::uuid\x60;
+    assert.equal((await call('todo_list')).body.status,'refused','role restoration alone never clears withdrawal');
+    assert.equal((await human(envelope(allow(['read','create','update'])))).body.status,'committed');
+    assert.equal((await call('todo_list')).body.status,'ok','human Allow recovers the same live grant');
+    assert.equal((await call('todo_queue')).body.queue.content_access,'read','live sibling C read-only ceiling survives retired-target replacement');
+    assert.equal((await human(envelope(allow(['read'])))).body.status,'committed');
+    await tx.unsafe(input.ownerRollback);
+    assert.equal((await call('todo_queue')).body.queue.content_access,'read','gate honors exact replacement without hiding live C ceiling');
+    for (const kind of ['expired','revoked']) {
+      await tx\x60UPDATE swarm.household_content_connections SET operations=ARRAY['read','create','update'],
+        expires_at=CASE WHEN \x24{kind}='expired' THEN clock_timestamp()-interval '1 hour' ELSE NULL END,
+        revoked_at=CASE WHEN \x24{kind}='revoked' THEN clock_timestamp() ELSE NULL END
+        WHERE connection_id=\x24{liveSiblingSeat}::uuid\x60;
+      const [visible]=await asCommand(sql=>sql\x60SELECT count(*)::int AS n FROM swarm.household_content_connections
+        WHERE connection_id=\x24{liveSiblingSeat}::uuid\x60);
+      assert.equal(visible.n,1,kind+' denial stays visible under actual rollback policy');
+      assert.equal((await call('todo_list')).body.status,'refused',kind+' denial fences new source before gate drop');
+    }
+    await tx.unsafe('DROP POLICY hosted_owner_content_rollback_gate ON swarm.household_content_connections');
+    assert.equal((await call('todo_list')).body.status,'refused','same denial remains after explicit forward gate drop');
+    await tx\x60UPDATE swarm.household_content_connections SET operations=ARRAY['read'],expires_at=NULL,revoked_at=NULL
+      WHERE connection_id=\x24{liveSiblingSeat}::uuid\x60;
+    assert.equal((await human(envelope(allow(['read','create','update'])))).body.status,'committed');
+    assert.equal((await call('todo_queue')).body.queue.content_access,'read','forward live control retains C ceiling');
+    const [closedAfter]=await tx\x60SELECT to_jsonb(r) AS row FROM swarm.household_hosted_content_restrictions r
+      WHERE grant_id=\x24{f.grant}::uuid AND workspace_id=\x24{f.workspace}::uuid AND principal_id=\x24{original.principal}::uuid\x60;
+    assert.deepEqual(closedAfter,closedBefore,'replacement retains the original closed restriction and its provenance');
+    const [marker]=await tx\x60SELECT closed_target_replacements FROM swarm.household_hosted_content_restrictions
+      WHERE grant_id=\x24{f.grant}::uuid AND workspace_id=\x24{f.workspace}::uuid AND principal_id=\x24{f.principal}::uuid\x60;
+    assert.equal(marker.closed_target_replacements.length,2,'only closed A restriction and legacy approval versions are replaced');
+    assert.equal((await human(envelope({kind:'household_withdraw_connection',principal_id:liveSibling}))).body.status,'committed');
+    assert.equal((await human(envelope(allow(['read','create','update'])))).body.status,'committed');
+    assert.equal((await call('todo_list')).body.status,'refused','Allow B never replaces live C withdrawal');
+    assert.equal((await human(envelope({kind:'household_approve_connection',connection:{kind:'hosted',connection_id:liveSiblingSeat,
+      grant_id:f.grant,principal_id:liveSibling,operations:['read']}}))).body.status,'committed');
+    assert.equal((await call('todo_list')).body.status,'ok');
+    await tx\x60UPDATE swarm.household_content_connections SET revoked_at=clock_timestamp()
+      WHERE connection_id=\x24{original.connection}::uuid\x60;
+    assert.equal((await call('todo_list')).body.status,'refused','changed closed legacy version invalidates all stale replacement snapshots');
+    assert.equal((await human(envelope(allow(['read','create','update'])))).body.status,'committed');
+    assert.equal((await call('todo_queue')).body.queue.content_access,'read');
+    const [replacementHistory]=await tx\x60SELECT count(*)::int AS n FROM swarm.household_object_audit
+      WHERE workspace_id=\x24{f.workspace}::uuid AND reason_code LIKE 'closed_target_replacements:%'\x60;
+    assert.ok(replacementHistory.n>=2,'append-only audit records old and new replacement marker versions');
+    Object.assign(f,original);
+    await tx.unsafe('ROLLBACK TO SAVEPOINT closed_target_reallow');
+    await tx.unsafe('RELEASE SAVEPOINT closed_target_reallow');
+
     // A and B withdrawals must coexist. Allow B cannot erase A, even after
     // ownership is lowered and B keeps its own live manual approval.
     assert.equal((await human(envelope(withdraw))).body.status,'committed');
@@ -366,6 +435,24 @@ try {
     const localControl=await asCommand(sql => surface.executeHouseholdSurface(sql,f.workspace,localIdentity,localWriteId,
       {kind:'household_tool',tool:'todo_create',arguments:{seat:'seat_0000000000000000000000',request_id:localWriteId,title:'Local positive control'}},yes));
     assert.equal(localControl.status,'committed');
+    const localListing=async()=>{
+      const result=await human(envelope({kind:'household_connections'}));
+      assert.equal(result.body.status,'ok');
+      return result.body.connections.find((row: Record<string,unknown>)=>row.connection_id===f.credential);
+    };
+    const listedLocal=await localListing();
+    assert.deepEqual(listedLocal.approval.operations,['read','create','update'],'real local approval remains visible');
+    assert.equal(listedLocal.effective_access,null,'listing does not infer canonical local liveness');
+    assert.equal(listedLocal.effective_access_reason,'local_credential_liveness_not_computed');
+    await tx.unsafe('SAVEPOINT local_listing_tombstone');
+    await isolate(async sql=>{
+      await sql\x60INSERT INTO swarm.revocation_tombstones(kind,target_id) VALUES('run',\x24{f.run}::uuid)\x60;
+      const tombstoned=await localListing();
+      assert.deepEqual(tombstoned.approval,listedLocal.approval,'tombstone never fabricates or removes human approval');
+      assert.equal(tombstoned.effective_access,null,'uncomputed stays truthful when canonical local path would refuse');
+    });
+    await tx.unsafe('ROLLBACK TO SAVEPOINT local_listing_tombstone');
+    await tx.unsafe('RELEASE SAVEPOINT local_listing_tombstone');
     const humanCommands=[
       {kind:'household_todo_answer',todo_id:done.todo_id,offer_id:crypto.randomUUID(),answer:'accept'},
       {kind:'household_todo_steer',todo_id:done.todo_id,base_version:done.version,action:{kind:'start_now'}},
@@ -450,6 +537,7 @@ test('hosted to-do round trip preserves notices, replay, tenant isolation and hu
     + repoSql('supabase/migrations/20261006000001_household_todos.sql');
   const result = spawnSync('deno', ['eval', '--no-lock', '--config', 'supabase/functions/command/deno.json', harness], {
     cwd: process.cwd(), encoding: 'utf8', input: JSON.stringify({ f, schema, setup: f.setup,
+      ownerRollback: repoSql('deploy/release-proofs/hosted-owner-content/20261019000006-rollback.sql'),
       catalog: releaseCatalogQuery(repoSql('deploy/release-proofs/household-todo/20261006000001-catalog.sql'), 'catalog_ok') }),
     env: { PATH: process.env.PATH ?? '', ...(process.env.DENO_DIR ? { DENO_DIR: process.env.DENO_DIR } : {}),
       SWARM_ENV: 'test', SWARM_DATABASE_URL: localClusterAdminUrl(local.DB_URL),

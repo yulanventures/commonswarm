@@ -32,26 +32,45 @@ export async function loadHouseholdContentAccess(tx: Sql, workspaceId: string, i
     if (inherited && !connection) source = 'inherited';
     if (!connection && !inherited) return null;
     if (canonicalSeat && (inherited || connection)) {
-      const legacy = await tx`SELECT c.* FROM swarm.household_content_connections c
+      const legacy = await tx`SELECT c.*, (EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats cs WHERE cs.grant_id=c.grant_id
+          AND cs.workspace_id=c.workspace_id AND cs.principal_id=c.principal_id AND cs.owner_user_id=c.owner_user_id)
+        AND NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats ls JOIN swarm.agent_principals lp USING(principal_id)
+          WHERE ls.grant_id=c.grant_id AND ls.workspace_id=c.workspace_id
+            AND ls.principal_id=c.principal_id AND ls.owner_user_id=c.owner_user_id
+            AND ls.revoked_at IS NULL AND lp.revoked_at IS NULL)) AND EXISTS(SELECT 1 FROM swarm.household_hosted_content_restrictions marker
+          CROSS JOIN LATERAL jsonb_array_elements(marker.closed_target_replacements) entry
+          WHERE marker.grant_id=c.grant_id AND marker.workspace_id=c.workspace_id
+            AND marker.origin='human_allow' AND entry=jsonb_build_object('kind','legacy','row',to_jsonb(c))) AS closed_replaced FROM swarm.household_content_connections c
         WHERE c.workspace_id=${workspaceId}::uuid AND c.hosted_grant_id=${canonicalSeat.grant_id}::uuid
         ORDER BY c.connection_id,c.principal_id FOR SHARE OF c`;
       const [grant] = await tx`SELECT state,revoked_at FROM swarm.hosted_mcp_grants WHERE grant_id=${canonicalSeat.grant_id}::uuid AND owner_user_id=${identity.user_id}::uuid FOR SHARE`;
       const [binding] = await tx`SELECT revoked_at FROM swarm.hosted_mcp_grant_workspaces WHERE grant_id=${canonicalSeat.grant_id}::uuid AND workspace_id=${workspaceId}::uuid AND owner_user_id=${identity.user_id}::uuid FOR SHARE`;
       const [seat] = await tx`SELECT revoked_at FROM swarm.hosted_mcp_seats WHERE seat_id=${canonicalSeat.seat_id}::uuid FOR SHARE`;
       if (!grant || grant.state !== 'active' || grant.revoked_at !== null || !binding || binding.revoked_at !== null || !seat || seat.revoked_at !== null) return null;
-      const policies = await tx`SELECT * FROM swarm.household_hosted_content_restrictions
-        WHERE grant_id=${canonicalSeat.grant_id}::uuid AND workspace_id=${workspaceId}::uuid
-        ORDER BY principal_id FOR SHARE`;
+      const policies = await tx`SELECT r.*, (EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats cs WHERE cs.grant_id=r.grant_id
+          AND cs.workspace_id=r.workspace_id AND cs.principal_id=r.principal_id AND cs.owner_user_id=r.owner_user_id)
+        AND NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats ls JOIN swarm.agent_principals lp USING(principal_id)
+          WHERE ls.grant_id=r.grant_id AND ls.workspace_id=r.workspace_id
+            AND ls.principal_id=r.principal_id AND ls.owner_user_id=r.owner_user_id
+            AND ls.revoked_at IS NULL AND lp.revoked_at IS NULL)) AND EXISTS(SELECT 1 FROM swarm.household_hosted_content_restrictions marker
+          CROSS JOIN LATERAL jsonb_array_elements(marker.closed_target_replacements) entry
+          WHERE marker.grant_id=r.grant_id AND marker.workspace_id=r.workspace_id
+            AND marker.origin='human_allow' AND entry=jsonb_build_object('kind','restriction','principal_id',r.principal_id,'operations',r.operations,'origin',r.origin,'changed_at',r.changed_at,'changed_by',r.changed_by)) AS closed_replaced
+        FROM swarm.household_hosted_content_restrictions r
+        WHERE r.grant_id=${canonicalSeat.grant_id}::uuid AND r.workspace_id=${workspaceId}::uuid
+        ORDER BY r.principal_id FOR SHARE OF r`;
       let operations: HouseholdContentOperation[] = rights?.content_role === 'editor' ? ['read','create','update'] : ['read'];
       // Every row records one truthful human/system target. Their intersection
       // is grant/workspace-wide, including after the owner's role is lowered.
-      restriction = policies.map(policy => ({ operations: policy.operations as string[],
+      const activePolicies = policies.filter(policy => !policy.closed_replaced);
+      restriction = activePolicies.map(policy => ({ operations: policy.operations as string[],
         origin: String(policy.origin), principal_id: String(policy.principal_id) }));
-      for (const policy of policies) operations = operations.filter(op => (policy.operations as string[]).includes(op));
-      // Human Allow updates only its actual legacy seat row. No blanket marker
-      // may discard another seat's operation ceiling, expiry or withdrawal.
+      for (const policy of activePolicies) operations = operations.filter(op => (policy.operations as string[]).includes(op));
+      // A marker replaces only an exact CLOSED row version. Live sibling
+      // operation ceilings, expiries and withdrawals always remain in force.
       const [clock] = await tx`SELECT clock_timestamp() AS now`;
       for (const row of inherited || policies.length > 0 ? legacy : connection ? [connection] : []) {
+        if (row.closed_replaced) continue;
         const denied = row.revoked_at !== null || (row.expires_at !== null && stamp(row.expires_at)! <= stamp(clock!.now)!) || row.purpose !== boundary.purpose;
         const ceiling = denied ? [] : row.operations as string[];
         if (denied || operations.some(op => !ceiling.includes(op))) restriction.push({
@@ -97,9 +116,31 @@ export async function writeHostedContentRestriction(tx: Sql, workspaceId: string
   const [existing] = await tx`SELECT grant_id FROM swarm.household_hosted_content_restrictions
     WHERE grant_id=${grant}::uuid AND workspace_id=${workspaceId}::uuid AND principal_id=${principal}::uuid FOR UPDATE`;
   if (!existing && member?.role !== 'owner') return;
+  // Only explicit current-owner Allow captures exact retired target versions.
+  // The trigger recomputes and validates this complete, bounded snapshot set.
+  const [replacement] = origin === 'human_allow' && member?.role === 'owner'
+    ? await tx`SELECT coalesce(jsonb_agg(snapshot ORDER BY snapshot::text),'[]'::jsonb) AS snapshots FROM (
+      SELECT jsonb_build_object('kind','restriction','principal_id',r.principal_id,'operations',r.operations,'origin',r.origin,'changed_at',r.changed_at,'changed_by',r.changed_by) AS snapshot FROM swarm.household_hosted_content_restrictions r
+        WHERE r.grant_id=${grant}::uuid AND r.workspace_id=${workspaceId}::uuid AND EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats cs WHERE cs.grant_id=r.grant_id
+          AND cs.workspace_id=r.workspace_id AND cs.principal_id=r.principal_id AND cs.owner_user_id=r.owner_user_id)
+        AND NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats ls JOIN swarm.agent_principals lp USING(principal_id)
+          WHERE ls.grant_id=r.grant_id AND ls.workspace_id=r.workspace_id
+            AND ls.principal_id=r.principal_id AND ls.owner_user_id=r.owner_user_id
+            AND ls.revoked_at IS NULL AND lp.revoked_at IS NULL)
+      UNION ALL
+      SELECT jsonb_build_object('kind','legacy','row',to_jsonb(c)) AS snapshot FROM swarm.household_content_connections c
+        WHERE c.hosted_grant_id=${grant}::uuid AND c.workspace_id=${workspaceId}::uuid AND EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats cs WHERE cs.grant_id=c.grant_id
+          AND cs.workspace_id=c.workspace_id AND cs.principal_id=c.principal_id AND cs.owner_user_id=c.owner_user_id)
+        AND NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats ls JOIN swarm.agent_principals lp USING(principal_id)
+          WHERE ls.grant_id=c.grant_id AND ls.workspace_id=c.workspace_id
+            AND ls.principal_id=c.principal_id AND ls.owner_user_id=c.owner_user_id
+            AND ls.revoked_at IS NULL AND lp.revoked_at IS NULL)
+      LIMIT 257
+    ) targets` : [];
+  const replacements = (replacement?.snapshots ?? []) as postgres.JSONValue;
   if (existing) await tx`UPDATE swarm.household_hosted_content_restrictions
-    SET operations=${[...operations]}::text[],origin=${origin}
+    SET operations=${[...operations]}::text[],origin=${origin},closed_target_replacements=${tx.json(replacements)}
     WHERE grant_id=${grant}::uuid AND workspace_id=${workspaceId}::uuid AND principal_id=${principal}::uuid`;
-  else await tx`INSERT INTO swarm.household_hosted_content_restrictions(grant_id,workspace_id,owner_user_id,principal_id,operations,origin)
-    VALUES (${grant}::uuid,${workspaceId}::uuid,${owner}::uuid,${principal}::uuid,${[...operations]}::text[],${origin})`;
+  else await tx`INSERT INTO swarm.household_hosted_content_restrictions(grant_id,workspace_id,owner_user_id,principal_id,operations,origin,closed_target_replacements)
+    VALUES (${grant}::uuid,${workspaceId}::uuid,${owner}::uuid,${principal}::uuid,${[...operations]}::text[],${origin},${tx.json(replacements)})`;
 }

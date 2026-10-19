@@ -99,8 +99,15 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
       expires_at: row.expires_at == null ? null : new Date(row.expires_at as string).toISOString() }]));
     const connections = [];
     for (const row of [...hosted,...local]) {
-      // These tuples came from the human's canonical live-seat/token query.
-      // Derive content facts without manufacturing a capability or approval.
+      // The local query does not prove the canonical token/lineage/tombstone
+      // fences. Preserve its manual approval without claiming effective rights.
+      if (row.kind === 'local') {
+        connections.push({ kind: row.kind, connection_id: row.connection_id, grant_id: row.grant_id,
+          principal_id: row.principal_id, name: row.name, approval: byConnection.get(key(row)) ?? null,
+          effective_access: null, effective_access_reason: 'local_credential_liveness_not_computed' });
+        continue;
+      }
+      // Hosted tuples are checked by the existing canonical resolver below.
       let credentialLive = true;
       if (row.kind === 'hosted') {
         const [role] = await tx`SELECT current_setting('role') AS value`;
