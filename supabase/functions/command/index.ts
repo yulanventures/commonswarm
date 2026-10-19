@@ -4718,6 +4718,36 @@ async function updateWorkspaceProjection(
           "AgentPrincipalRevoked projection did not revoke exactly one principal",
         );
       }
+      // The workspace stream is already locked, as in claim/consent. Lock every
+      // linked grant in a stable order before changing consent, so claims in
+      // another workspace and simultaneous removals see a single decision.
+      const hostedGrants = await tx<HostedGrantRow[]>`
+        SELECT g.* FROM swarm.hosted_mcp_grants AS g
+        WHERE EXISTS (
+          SELECT 1 FROM swarm.hosted_mcp_seats AS hs
+          WHERE hs.grant_id = g.grant_id
+            AND hs.workspace_id = ${route.workspaceId}::uuid
+            AND hs.principal_id = ${principalId}::uuid
+        )
+        ORDER BY g.grant_id FOR UPDATE OF g
+      `;
+      for (const grant of hostedGrants) {
+        const seats = await tx<{ seat_id: string }[]>`
+          SELECT seat_id FROM swarm.hosted_mcp_seats
+          WHERE grant_id = ${grant.grant_id}::uuid
+            AND workspace_id = ${route.workspaceId}::uuid
+            AND principal_id = ${principalId}::uuid
+          ORDER BY seat_id FOR UPDATE
+        `;
+        for (const seat of seats) {
+          await projectHostedSeatRevocation(tx, seat.seat_id, revokedAt, createdBy);
+        }
+        await tx`
+          UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at = ${revokedAt}
+          WHERE grant_id = ${grant.grant_id}::uuid
+            AND workspace_id = ${route.workspaceId}::uuid AND revoked_at IS NULL
+        `;
+      }
       await rotateWakeId(tx, principalId);
       await tx`
         INSERT INTO swarm.revocation_tombstones (kind, target_id, created_by)
@@ -9694,6 +9724,19 @@ interface HostedGrantRow {
   revoked_at: Date | null;
 }
 
+// Close seat identity under the command role; OAuth owns provider retirement.
+async function projectHostedSeatRevocation(
+  tx: Sql, seatId: string, revokedAt: Date, createdBy: string | null,
+): Promise<void> {
+  await tx`UPDATE swarm.hosted_mcp_seats SET revoked_at = ${revokedAt}
+    WHERE seat_id = ${seatId}::uuid AND revoked_at IS NULL`;
+  await tx`UPDATE swarm.hosted_mcp_seat_handles SET revoked_at = ${revokedAt}
+    WHERE seat_id = ${seatId}::uuid AND revoked_at IS NULL`;
+  await tx`INSERT INTO swarm.revocation_tombstones (kind, target_id, created_by)
+    VALUES ('hosted_seat', ${seatId}::uuid, ${createdBy}::uuid)
+    ON CONFLICT (kind, target_id) DO NOTHING`;
+}
+
 function parseHostedManagementCommand(value: unknown): HostedManagementCommand | null {
   const command = record(value);
   if (!command || typeof command.kind !== "string") return null;
@@ -10102,16 +10145,7 @@ async function handleHostedManagement(
           foldedPrincipal.revoked_at) {
         throw new Error("hosted and workspace revocation folds disagree");
       }
-      await tx`
-        UPDATE swarm.hosted_mcp_seats
-        SET revoked_at = ${new Date(foldedSeat.revoked_at)}
-        WHERE seat_id = ${command.seat_id}::uuid AND revoked_at IS NULL
-      `;
-      await tx`
-        UPDATE swarm.hosted_mcp_seat_handles
-        SET revoked_at = ${new Date(foldedSeat.handle_revoked_at)}
-        WHERE seat_id = ${command.seat_id}::uuid AND revoked_at IS NULL
-      `;
+      await projectHostedSeatRevocation(tx, command.seat_id, new Date(foldedSeat.revoked_at), auth.actor.user);
       await tx`
         UPDATE swarm.agent_principals
         SET revoked_at = ${new Date(foldedPrincipal.revoked_at)}

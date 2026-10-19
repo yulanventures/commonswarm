@@ -5,6 +5,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
@@ -53,6 +54,8 @@ const rollbackCatalogUrl = new URL(
 
 let sql: postgres.Sql;
 let releaseSql: postgres.Sql;
+let oauthSql: postgres.Sql;
+let oauthDatabaseUrl: string;
 let local: LocalEnvironment;
 let admin: SupabaseClient;
 let harnessDir: string;
@@ -116,7 +119,6 @@ async function capability(grantId, ownerUserId, workspaceId) {
       tool: "claim_hosted_seat",
       providerStatus: async () => ({ active: true }),
     });
-    if (value === null) throw new Error("hosted grant capability was refused");
     return value;
   });
 }
@@ -134,6 +136,7 @@ async function claim(spec, existingCapability) {
     spec.ownerUserId,
     spec.workspaceId,
   );
+  if (cap === null) return { status: 403, body: { error: "hosted_grant_forbidden" } };
   return reportNon2xx("hosted", await handleHostedCommand(
     commandInput(spec.workspaceId, spec.name, spec.commandId),
     cap,
@@ -297,17 +300,44 @@ async function seatCommand(spec) {
     grantId: spec.grantId,
     providerGrantId: "provider-" + spec.grantId,
     handle: spec.handle,
-    tool: "note",
+    tool: spec.tool ?? "note",
     providerStatus: async () => ({ active: true }),
   }, "command"));
   if (cap === null) return { status: 403, body: { error: "hosted_seat_forbidden" } };
   return await handleHostedCommand({
     command_id: crypto.randomUUID(), client_version: "0.1.80",
     workspace_id: spec.workspaceId, stream: { kind: "workspace" },
-    command: { kind: "post_signal", signal_kind: "note",
+    command: spec.tool === "check" ? { kind: "open_hosted_mcp_check_batch", seat: spec.handle } : {
+      kind: "post_signal", signal_kind: "note",
       body: "D3 historical identity", to_user_id: null, to_agent_principal_id: null,
       in_reply_to: null, about: null },
   }, cap);
+}
+
+async function seatRead(spec) {
+  const cap = await db.begin(async tx => {
+    await tx.unsafe("SET LOCAL ROLE swarm_read");
+    return await authenticateHostedSeatCapability(tx, {
+      grantId: spec.grantId, providerGrantId: "provider-" + spec.grantId,
+      handle: spec.handle, tool: "whoami", providerStatus: async () => ({ active: true }),
+    }, "read");
+  });
+  if (cap === null) return { status: 403, body: { error: "hosted_seat_forbidden" } };
+  const readModule = await import(${JSON.stringify(readUrl.href)});
+  return await readModule.handleHostedRead({ resource: "whoami", workspace_id: spec.workspaceId }, cap);
+}
+
+async function removalClaim() {
+  const cap = await capability(input.claim.grantId, input.claim.ownerUserId, input.claim.workspaceId);
+  const remove = () => publicCommand(input.ownerJwt, input.claim.workspaceId, {
+    kind: "revoke_agent_principal", principal_id: input.principalId,
+  });
+  if (input.concurrent) {
+    const [removed, claimed] = await Promise.all([remove(), claim(input.claim, cap)]);
+    return { removed, claimed, refused: await claim({ ...input.claim, commandId: crypto.randomUUID() }, cap) };
+  }
+  const removed = await remove();
+  return { removed, refused: await claim(input.claim, cap) };
 }
 
 async function revokedGrantClaim() {
@@ -319,7 +349,9 @@ async function revokedGrantClaim() {
 }
 
 let result;
-if (input.operation === "seat-command") result = await seatCommand(input.seat);
+if (input.operation === "seat-read") result = await seatRead(input.seat);
+else if (input.operation === "removal-claim") result = await removalClaim();
+else if (input.operation === "seat-command") result = await seatCommand(input.seat);
 else if (input.operation === "revoked-grant-claim") result = await revokedGrantClaim();
 else if (input.operation === "claim") result = await claim(input.claim);
 else if (input.operation === "race") result = await race();
@@ -356,6 +388,19 @@ before(async () => {
   assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(target.hostname));
   sql = postgres(local.DB_URL, { prepare: false, max: 4 });
   releaseSql = postgres(localClusterAdminUrl(local.DB_URL), { prepare: false, max: 1 });
+  // Use the existing OAuth service login, as in oauth-mcp-contract.test.js.
+  // The edge/admin login intentionally has no runtime SET ROLE authority.
+  const runtimeTarget = new URL(local.DB_URL);
+  runtimeTarget.username = "commonswarm_oauth_runtime";
+  runtimeTarget.password = randomBytes(32).toString("hex");
+  await releaseSql.unsafe(`ALTER ROLE commonswarm_oauth_runtime PASSWORD '${runtimeTarget.password}'`);
+  oauthDatabaseUrl = runtimeTarget.href;
+  oauthSql = postgres(oauthDatabaseUrl, { prepare: false, max: 1 });
+  const [runtimeIdentity] = await oauthSql<{ role: string; safe: boolean }[]>`
+    SELECT current_user AS role, NOT rolsuper AND NOT rolbypassrls AS safe
+    FROM pg_roles WHERE rolname = current_user`;
+  assert.equal(runtimeIdentity?.role, "commonswarm_oauth_runtime");
+  assert.equal(runtimeIdentity?.safe, true);
   admin = createClient(local.API_URL, local.SERVICE_ROLE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
@@ -366,6 +411,8 @@ before(async () => {
 
 after(async () => {
   await sql.end();
+  await oauthSql?.end();
+  await releaseSql.unsafe("ALTER ROLE commonswarm_oauth_runtime PASSWORD NULL");
   await releaseSql.end();
   rmSync(harnessDir, { recursive: true, force: true });
 });
@@ -470,7 +517,9 @@ async function seedHostedFixture(grantBOwnerIsOther = false): Promise<HostedFixt
   return fixture;
 }
 
-function runHostedHarness<T>(input: Record<string, unknown>): T {
+function runHostedHarness<T>(input: Record<string, unknown>, options: {
+  databaseUrl?: string; rollbackBeforeStep?: number;
+} = {}): T {
   const result = spawnSync("deno", [
     "run",
     "--no-lock",
@@ -488,8 +537,9 @@ function runHostedHarness<T>(input: Record<string, unknown>): T {
       PATH: process.env.PATH ?? "",
       ...(process.env.DENO_DIR ? { DENO_DIR: process.env.DENO_DIR } : {}),
       SWARM_ENV: "test",
-      SWARM_DATABASE_URL: local.DB_URL,
-      SUPABASE_DB_URL: local.DB_URL,
+      SWARM_DATABASE_URL: options.databaseUrl ?? local.DB_URL,
+      SUPABASE_DB_URL: options.databaseUrl ?? local.DB_URL,
+      ...(options.rollbackBeforeStep ? { SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP: String(options.rollbackBeforeStep) } : {}),
       SUPABASE_URL: local.API_URL,
       SUPABASE_ANON_KEY: local.ANON_KEY,
     },
@@ -1120,7 +1170,7 @@ test("same-owner hosted reclaim makes fresh identities and preserves removed row
   assert.deepEqual(await hostedRows(old.body.seat_id), oldRevoked);
 });
 
-test("app-removed orphan is reclaimable at the hosted seat limit while new names are refused", { timeout: 180_000 }, async () => {
+test("historical orphan is reclaimable at the hosted seat limit while new names are refused", { timeout: 180_000 }, async () => {
   const fixture = await seedHostedFixture();
   const name = `app-reclaim-${randomUUID()}`;
   const old = claimSeat(fixture, fixture.grantA, name);
@@ -1138,16 +1188,15 @@ test("app-removed orphan is reclaimable at the hosted seat limit while new names
     `;
     return rows.map(row => row.seat_id);
   };
-  const removed = runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: fixture.ownerJwt,
-    workspaceId: fixture.workspaceA,
-    command: { kind: "revoke_agent_principal", principal_id: old.body.principal_id } });
-  assert.equal(removed.status, 200, JSON.stringify(removed.body));
-  assert.equal(removed.body.status, "accepted");
+  // Historical pre-fix state remains recoverable after fresh owner consent.
+  // New accepted removals are covered below and must never leave this orphan.
+  await sql`UPDATE swarm.agent_principals SET revoked_at = statement_timestamp()
+    WHERE principal_id = ${String(old.body.principal_id)}::uuid`;
   const orphan = await hostedRows(old.body.seat_id);
   assert.equal(orphan.length, 1);
-  assert.ok(orphan[0]!.principal.revoked_at, "public removal revoked the principal");
-  assert.equal(orphan[0]!.seat.revoked_at, null, "positive control: app removal left a live hosted seat");
-  assert.equal(orphan[0]!.handle.revoked_at, null, "positive control: app removal left a live handle");
+  assert.ok(orphan[0]!.principal.revoked_at, "historical fixture has a removed principal");
+  assert.equal(orphan[0]!.seat.revoked_at, null, "historical fixture retains a live hosted seat");
+  assert.equal(orphan[0]!.handle.revoked_at, null, "historical fixture retains a live handle");
   const beforeSeatIds = await liveSeatIds();
   assert.equal(beforeSeatIds.length, HOSTED_MCP_SEAT_LIMIT, "the orphan still counts toward the grant's cap");
   assert.deepEqual(beforeSeatIds, seats.map(seat => String(seat.body.seat_id)).sort());
@@ -1182,6 +1231,264 @@ test("app-removed orphan is reclaimable at the hosted seat limit while new names
     detail: `reclaimed=1; closed_seats=1; principal_ids=${old.body.principal_id}; closed_seat_ids=${old.body.seat_id}` }]);
   const [catalog] = await sql.unsafe<{ catalog_ok: boolean }[]>(reclaimCatalog());
   assert.equal(catalog?.catalog_ok, true, "010 catalog still proves the live-name schema after app reclaim");
+});
+
+// The production provider's refresh findAccount uses this status function;
+// the service login proves the same persistent fence without issuing a bearer.
+async function providerActive(grantId: string): Promise<boolean> {
+  return await oauthSql.begin(async tx => {
+    const [row] = await tx<{ active: boolean }[]>`
+      SELECT active FROM commonswarm_oauth.resolve_hosted_grant_status(${`provider-${grantId}`})`;
+    return row?.active === true;
+  });
+}
+
+// Drive the production refresh admission and persisted provider adapter,
+// using the service dependencies installed by the server suite.
+async function providerRefresh(fixture: HostedFixture, options: {
+  afterAdmission?: () => Promise<void>; pending?: boolean;
+} = {}): Promise<boolean> {
+  const requireService = createRequire(new URL("../../services/mcp-auth/package.json", import.meta.url));
+  const { Pool } = requireService("pg");
+  const pool = new Pool({ connectionString: oauthDatabaseUrl, max: 1 });
+  try {
+    const { createProductionFindAccount } = await import(new URL(
+      "../../services/mcp-auth/src/server.js", import.meta.url).href);
+    const { createPostgresAdapter } = await import(new URL(
+      "../../services/mcp-auth/src/postgres-adapter.js", import.meta.url).href);
+    const grantId = `provider-${fixture.grantA}`;
+    const account = await createProductionFindAccount(pool)(
+      { oidc: { params: { grant_type: "refresh_token" } } }, fixture.owner, { grantId });
+    const refresh = createPostgresAdapter(pool)("RefreshToken");
+    const tokenId = randomUUID();
+    const write = () => refresh.upsert(tokenId, {
+      grantId, accountId: fixture.owner, clientId: "test-client",
+      resource: ["https://mcp.commonswarm.com/mcp"],
+    }, 3600);
+    if (!account) {
+      if (options.pending) await write();
+      else await assert.rejects(write, { error: "invalid_grant" }, "retired family cannot mint a successor");
+      return false;
+    }
+    await options.afterAdmission?.();
+    await write();
+    assert.ok(await refresh.find(tokenId), "live provider family persists a refresh successor");
+    return true;
+  } finally { await pool.end(); }
+}
+
+function seatSpec(fixture: HostedFixture, seat: HarnessResult, workspaceId = fixture.workspaceA, grantId = fixture.grantA) {
+  return { grantId, workspaceId, handle: seat.body.handle };
+}
+
+async function assertSeatAccess(fixture: HostedFixture, seat: HarnessResult, workspaceId: string, status: number, grantId = fixture.grantA) {
+  for (const tool of ["whoami", "note", "check"]) {
+    const operation = tool === "whoami" ? "seat-read" : "seat-command";
+    const result = runHostedHarness<HarnessResult>({ operation,
+      seat: { ...seatSpec(fixture, seat, workspaceId, grantId), tool } });
+    assert.equal(result.status, status, `${tool}: ${JSON.stringify(result.body)}`);
+  }
+}
+
+for (const otherConsent of ["live", "revoked", "archived", "membership-removed"] as const) {
+  test(`accepted hosted principal removal closes workspace access with ${otherConsent} other consent`, { timeout: 180_000 }, async () => {
+    const fixture = await seedHostedFixture();
+    const name = `removed-${randomUUID()}`;
+    const old = claimSeat(fixture, fixture.grantA, name);
+    const unrelated = runHostedHarness<HarnessResult>({ operation: "claim",
+      claim: claimSpec(fixture, fixture.grantA, fixture.workspaceB, `other-${randomUUID()}`) });
+    assert.equal(unrelated.status, 200);
+    await assertSeatAccess(fixture, old, fixture.workspaceA, 200);
+    await assertSeatAccess(fixture, unrelated, fixture.workspaceB, 200);
+    assert.equal(await providerActive(fixture.grantA), true, "positive status control");
+    assert.equal(await providerRefresh(fixture), true, "positive production refresh control");
+    if (otherConsent === "revoked") {
+      await sql`UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at = statement_timestamp()
+        WHERE grant_id = ${fixture.grantA}::uuid AND workspace_id = ${fixture.workspaceB}::uuid`;
+    } else if (otherConsent === "archived") {
+      await sql`UPDATE swarm.workspaces SET archived_at = statement_timestamp()
+        WHERE workspace_id = ${fixture.workspaceB}::uuid`;
+    } else if (otherConsent === "membership-removed") {
+      await sql`UPDATE swarm.memberships SET revoked_at = statement_timestamp()
+        WHERE user_id = ${fixture.owner}::uuid AND workspace_id = ${fixture.workspaceB}::uuid`;
+    }
+    const otherRows = await hostedRows(unrelated.body.seat_id);
+    const outcome = runHostedHarness<{ removed: HarnessResult; refused: HarnessResult }>({
+      operation: "removal-claim", ownerJwt: fixture.ownerJwt, principalId: old.body.principal_id,
+      claim: claimSpec(fixture, fixture.grantA, fixture.workspaceA, name),
+    });
+    assert.equal(outcome.removed.status, 200, JSON.stringify(outcome.removed.body));
+    assert.equal(outcome.removed.body.status, "accepted");
+    assert.equal(outcome.refused.status, 403, "pre-removal capability cannot reclaim");
+    const rows = await hostedRows(old.body.seat_id);
+    for (const field of ["seat", "principal", "handle"]) assert.ok(rows[0]![field].revoked_at);
+    await assertSeatAccess(fixture, old, fixture.workspaceA, 403);
+    for (const claimName of [name, `new-${randomUUID()}`]) {
+      const result = runHostedHarness<HarnessResult>({ operation: "claim",
+        claim: claimSpec(fixture, fixture.grantA, fixture.workspaceA, claimName) });
+      assert.equal(result.status, 403, "fresh provider authorization cannot restore this workspace");
+    }
+    const [consent] = await sql<{ revoked: boolean }[]>`
+      SELECT revoked_at IS NOT NULL AS revoked FROM swarm.hosted_mcp_grant_workspaces
+      WHERE grant_id = ${fixture.grantA}::uuid AND workspace_id = ${fixture.workspaceA}::uuid`;
+    assert.equal(consent?.revoked, true);
+    const tombstones = await sql<{ kind: string }[]>`SELECT kind FROM swarm.revocation_tombstones
+      WHERE (kind = 'hosted_seat' AND target_id = ${String(old.body.seat_id)}::uuid)
+        OR (kind = 'principal' AND target_id = ${String(old.body.principal_id)}::uuid) ORDER BY kind`;
+    assert.deepEqual(tombstones.map(row => row.kind), ["hosted_seat", "principal"]);
+    assert.deepEqual(await hostedRows(unrelated.body.seat_id), otherRows, "other identity history is unchanged");
+    // Edge has committed; OAuth retirement has deliberately not run yet.
+    const beforeRetirement = await sql`SELECT 1 FROM commonswarm_oauth.refresh_family_tombstones
+      WHERE grant_id = ${`provider-${fixture.grantA}`}`;
+    assert.equal(beforeRetirement.length, 0, "edge never retires provider families");
+    const artifactsBeforeRefresh = await sql`SELECT 1 FROM commonswarm_oauth.provider_artifacts
+      WHERE grant_id = ${`provider-${fixture.grantA}`}`;
+    assert.ok(artifactsBeforeRefresh.length > 0, "pre-removal refresh artifacts remain until OAuth retirement");
+    assert.equal(await providerActive(fixture.grantB), true, "independent family survives intermediate state");
+    const control = claimSeat(fixture, fixture.grantB, `control-${randomUUID()}`);
+    await assertSeatAccess(fixture, control, fixture.workspaceA, 200, fixture.grantB);
+    assert.equal(await providerActive(fixture.grantA), otherConsent === "live");
+    assert.equal(await providerRefresh(fixture), otherConsent === "live");
+    // Even successful refresh in a surviving workspace cannot regain A.
+    const afterRefresh = runHostedHarness<HarnessResult>({ operation: "claim",
+      claim: claimSpec(fixture, fixture.grantA, fixture.workspaceA, `refresh-${randomUUID()}`) });
+    assert.equal(afterRefresh.status, 403);
+    const [grant] = await sql<{ state: string }[]>`SELECT state FROM swarm.hosted_mcp_grants
+      WHERE grant_id = ${fixture.grantA}::uuid`;
+    assert.equal(grant?.state, "active", "OAuth retirement does not rewrite authority grants");
+    const families = await sql`SELECT 1 FROM commonswarm_oauth.refresh_family_tombstones
+      WHERE grant_id = ${`provider-${fixture.grantA}`}`;
+    assert.equal(families.length, otherConsent === "live" ? 0 : 1);
+    if (otherConsent !== "live") {
+      const artifacts = await sql`SELECT 1 FROM commonswarm_oauth.provider_artifacts
+        WHERE grant_id = ${`provider-${fixture.grantA}`}`;
+      assert.equal(artifacts.length, 0, "OAuth refresh physically retires this family");
+    }
+    assert.equal(await providerActive(fixture.grantB), true, "independent grant/family survives");
+    if (otherConsent === "live") {
+      await assertSeatAccess(fixture, unrelated, fixture.workspaceB, 200);
+      const claimed = runHostedHarness<HarnessResult>({ operation: "claim",
+        claim: claimSpec(fixture, fixture.grantA, fixture.workspaceB, `still-live-${randomUUID()}`) });
+      assert.equal(claimed.status, 200);
+    }
+    // A fresh owner-approved grant can reuse the name; removal history stays.
+    const replacement = claimSeat(fixture, fixture.grantB, name);
+    assert.notEqual(replacement.body.principal_id, old.body.principal_id);
+    assert.deepEqual(await hostedRows(old.body.seat_id), rows);
+  });
+}
+
+test("accepted removal fences concurrent same-name and new-name claims", { timeout: 180_000 }, async () => {
+  for (const sameName of [true, false]) {
+    const fixture = await seedHostedFixture();
+    const name = `remove-race-${randomUUID()}`;
+    const old = claimSeat(fixture, fixture.grantA, name);
+    const result = runHostedHarness<{ removed: HarnessResult; claimed: HarnessResult; refused: HarnessResult }>({
+      operation: "removal-claim", concurrent: true, ownerJwt: fixture.ownerJwt,
+      principalId: old.body.principal_id,
+      claim: claimSpec(fixture, fixture.grantA, fixture.workspaceA, sameName ? name : `race-new-${randomUUID()}`),
+    });
+    assert.equal(result.removed.status, 200, JSON.stringify(result.removed.body));
+    assert.ok([200, 403].includes(result.claimed.status), JSON.stringify(result.claimed));
+    assert.equal(result.refused.status, 403, "no cached capability survives committed removal");
+    if (result.claimed.status === 200) await assertSeatAccess(fixture, result.claimed, fixture.workspaceA, 403);
+  }
+});
+
+test("refresh admitted before removal cannot restore access when its successor is written afterward", { timeout: 120_000 }, async () => {
+  const fixture = await seedHostedFixture();
+  const name = `refresh-race-${randomUUID()}`;
+  const old = claimSeat(fixture, fixture.grantA, name);
+  await sql`UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at = statement_timestamp()
+    WHERE grant_id = ${fixture.grantA}::uuid AND workspace_id = ${fixture.workspaceB}::uuid`;
+  assert.equal(await providerRefresh(fixture, { afterAdmission: async () => {
+    const removed = runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: fixture.ownerJwt,
+      workspaceId: fixture.workspaceA,
+      command: { kind: "revoke_agent_principal", principal_id: old.body.principal_id } });
+    assert.equal(removed.body.status, "accepted");
+  } }), true, "in-flight adapter write can complete before OAuth retirement");
+  await assertSeatAccess(fixture, old, fixture.workspaceA, 403);
+  const refused = runHostedHarness<HarnessResult>({ operation: "claim",
+    claim: claimSpec(fixture, fixture.grantA, fixture.workspaceA, name) });
+  assert.equal(refused.status, 403, "current consent gate denies the raced successor");
+  assert.equal(await providerRefresh(fixture), false, "next refresh retires the family");
+  assert.equal(await providerActive(fixture.grantB), true);
+});
+
+test("pending partial consent cannot retire a provider family before activation", { timeout: 120_000 }, async () => {
+  const fixture = await seedHostedFixture();
+  await sql`UPDATE swarm.hosted_mcp_grants SET state = 'pending', activated_at = NULL
+    WHERE grant_id = ${fixture.grantA}::uuid`;
+  assert.equal(await providerRefresh(fixture, { pending: true }), false);
+  const families = await sql`SELECT 1 FROM commonswarm_oauth.refresh_family_tombstones
+    WHERE grant_id = ${`provider-${fixture.grantA}`}`;
+  assert.equal(families.length, 0, "partial consent never installs a permanent family fence");
+  await sql`UPDATE swarm.hosted_mcp_grants SET state = 'active', activated_at = statement_timestamp()
+    WHERE grant_id = ${fixture.grantA}::uuid`;
+  assert.equal(await providerRefresh(fixture), true, "activation retains a usable provider family");
+});
+
+test("failed authority projection rolls back principal, hosted identity and consent", { timeout: 120_000 }, async () => {
+  const fixture = await seedHostedFixture();
+  const old = claimSeat(fixture, fixture.grantA, `rollback-${randomUUID()}`);
+  const before = await hostedRows(old.body.seat_id);
+  const beforeEvents = await sql`SELECT event_id FROM swarm.events
+    WHERE workspace_id = ${fixture.workspaceA}::uuid ORDER BY seq`;
+  const input = { operation: "public", ownerJwt: fixture.ownerJwt, workspaceId: fixture.workspaceA,
+    command: { kind: "revoke_agent_principal", principal_id: old.body.principal_id } };
+  // Existing hook fires after the real authority projection, before commit.
+  const result = runHostedHarness<HarnessResult>(input, { rollbackBeforeStep: 13 });
+  assert.equal(result.status, 500, JSON.stringify(result.body));
+  assert.deepEqual(await hostedRows(old.body.seat_id), before);
+  const [consent] = await sql<{ revoked_at: Date | null }[]>`SELECT revoked_at
+    FROM swarm.hosted_mcp_grant_workspaces WHERE grant_id = ${fixture.grantA}::uuid
+      AND workspace_id = ${fixture.workspaceA}::uuid`;
+  assert.equal(consent?.revoked_at, null);
+  assert.deepEqual(await sql`SELECT event_id FROM swarm.events
+    WHERE workspace_id = ${fixture.workspaceA}::uuid ORDER BY seq`, beforeEvents);
+  const tombstones = await sql`SELECT kind FROM swarm.revocation_tombstones
+    WHERE target_id IN (${String(old.body.principal_id)}::uuid, ${String(old.body.seat_id)}::uuid)`;
+  assert.equal(tombstones.length, 0);
+  await assertSeatAccess(fixture, old, fixture.workspaceA, 200);
+  const retry = runHostedHarness<HarnessResult>(input);
+  assert.equal(retry.status, 200);
+  assert.equal(retry.body.status, "accepted");
+  await assertSeatAccess(fixture, old, fixture.workspaceA, 403);
+});
+
+test("production edge login removes hosted principal with command role only", { timeout: 120_000 }, async () => {
+  const fixture = await seedHostedFixture();
+  const old = claimSeat(fixture, fixture.grantA, `edge-role-${randomUUID()}`);
+  await sql`UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at = statement_timestamp()
+    WHERE grant_id = ${fixture.grantA}::uuid AND workspace_id = ${fixture.workspaceB}::uuid`;
+  const role = `hm_edge_${randomBytes(8).toString("hex")}`;
+  const password = randomBytes(32).toString("hex");
+  const edgeUrl = new URL(local.DB_URL);
+  edgeUrl.username = role;
+  edgeUrl.password = password;
+  await releaseSql.unsafe(`CREATE ROLE ${role} LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD '${password}'`);
+  try {
+    await releaseSql.unsafe(`GRANT swarm_command TO ${role}`);
+    const edge = postgres(edgeUrl.href, { prepare: false, max: 1 });
+    try {
+      const [identity] = await edge<{ safe: boolean }[]>`SELECT NOT rolsuper AND NOT rolbypassrls AS safe
+        FROM pg_roles WHERE rolname = current_user`;
+      assert.equal(identity?.safe, true);
+      await edge.begin(async tx => { await tx.unsafe("SET LOCAL ROLE swarm_command"); });
+      await assert.rejects(edge.begin(async tx => { await tx.unsafe("SET LOCAL ROLE commonswarm_oauth_runtime"); }),
+        { code: "42501" }, "edge has no OAuth SET authority");
+    } finally { await edge.end(); }
+    const removed = runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: fixture.ownerJwt,
+      workspaceId: fixture.workspaceA,
+      command: { kind: "revoke_agent_principal", principal_id: old.body.principal_id } },
+      { databaseUrl: edgeUrl.href });
+    assert.equal(removed.status, 200, JSON.stringify(removed.body));
+    assert.equal(removed.body.status, "accepted");
+    await assertSeatAccess(fixture, old, fixture.workspaceA, 403);
+    const families = await sql`SELECT 1 FROM commonswarm_oauth.refresh_family_tombstones
+      WHERE grant_id = ${`provider-${fixture.grantA}`}`;
+    assert.equal(families.length, 0);
+  } finally { await releaseSql.unsafe(`DROP ROLE ${role}`); }
 });
 
 test("foreign-owner revoked name is refused with a same-owner positive control", { timeout: 120_000 }, async () => {

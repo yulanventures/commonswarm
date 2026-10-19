@@ -187,6 +187,34 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
       return result.rows[0] ? storedPayload(result.rows[0]) : undefined;
     },
 
+    async retireInactiveHostedFamily(grantId, accountId) {
+      await requireBoundContext("Grant", grantId, { grantId });
+      return transaction(pool, async (client) => {
+        await client.query(
+          "SELECT pg_advisory_xact_lock(hashtextextended($1, 484650))", [grantId],
+        );
+        // Take a fresh statement snapshot AFTER acquiring the family fence.
+        // Membership restoration does not take this lock: this predicate is
+        // the terminal decision point, and later restoration cannot revive it.
+        const result = await client.query(
+          `WITH status AS MATERIALIZED (
+             SELECT active FROM commonswarm_oauth.resolve_hosted_grant_status($1)
+             WHERE owner_user_id = $2::uuid
+           ), retired AS (
+             INSERT INTO ${tombstones} (grant_id, revoked_at)
+             SELECT $1, statement_timestamp() FROM status WHERE active = false
+             ON CONFLICT (grant_id) DO NOTHING
+           ), removed AS (
+             DELETE FROM ${artifacts} WHERE grant_id = $1
+               AND EXISTS (SELECT 1 FROM status WHERE active = false)
+           ) SELECT active FROM status`,
+          [grantId, accountId],
+        );
+        // Pending/missing grants have no status row and never install a fence.
+        return result.rows[0]?.active === true;
+      });
+    },
+
     async revokeByGrantId(grantId) {
       await requireBoundContext("Grant", grantId, { grantId });
       await transaction(pool, async (client) => {

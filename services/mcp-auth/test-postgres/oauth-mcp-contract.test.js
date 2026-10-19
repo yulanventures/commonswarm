@@ -483,7 +483,7 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
           assert.ok(!body.access_token && !body.refresh_token);
         };
         const storedRefresh = async token => {
-          const result = await pool.query(`SELECT payload, expires_at FROM commonswarm_oauth.provider_artifacts
+          const result = await pool.query(`SELECT payload, expires_at, consumed_at FROM commonswarm_oauth.provider_artifacts
             WHERE model = 'RefreshToken' AND artifact_id_hash = $1`,
           [createHash('sha256').update(token).digest('base64url')]);
           assert.equal(result.rowCount, 1);
@@ -620,8 +620,100 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         const mcpOnly = await reconnect({ scope: 'openid mcp' });
         assert.ok(!(await storedRefresh(mcpOnly.refresh_token)).payload.scope.split(' ').includes('offline_access'));
         await refusedRefresh(mcpOnly.refresh_token, {}, 'invalid_scope');
-        await savedGrant.destroy();
+        const humanSessionsBefore = await pool.query(`SELECT count(*)::int AS n
+          FROM commonswarm_oauth.browser_sessions WHERE user_id = $1 AND invalidated_at IS NULL`, [owner]);
+        const independentFamily = (await storedRefresh(subset.refresh_token)).payload.grantId;
+        assert.notEqual(independentFamily, family, 'positive control has a distinct provider family');
+        await pool.query(`UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at = statement_timestamp()
+          WHERE grant_id = (SELECT grant_id FROM swarm.hosted_mcp_grants WHERE provider_grant_id = $1)
+            AND workspace_id = $2`, [family, workspaces[0]]);
+        const sharedRefresh = await refresh(latest.refresh_token);
+        assert.equal(sharedRefresh.status, 200, 'another usable workspace keeps the shared family live');
+        latest = await sharedRefresh.json();
+        // Retain B's consent but temporarily remove its membership. The refresh
+        // observes inactive, then waits behind the real adapter family fence.
+        await pool.query(`UPDATE swarm.memberships SET revoked_at = statement_timestamp()
+          WHERE workspace_id = $1 AND user_id = $2`, [workspaces[1], owner]);
+        const inactive = await running.pool.query(
+          'SELECT active FROM commonswarm_oauth.resolve_hosted_grant_status($1)', [family]);
+        assert.equal(inactive.rows[0]?.active, false, 'race starts with no usable workspace');
+        const blocker = await pool.connect();
+        let racingRefresh;
+        try {
+          await blocker.query('BEGIN');
+          await blocker.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 484650))', [family]);
+          racingRefresh = refresh(latest.refresh_token);
+          // Observe a real lock waiter rather than timing the membership write.
+          let waiting = false;
+          const deadline = Date.now() + 5_000;
+          while (Date.now() < deadline) {
+            const blocked = await pool.query(`SELECT 1 FROM pg_stat_activity
+              WHERE $1::int = ANY(pg_blocking_pids(pid)) AND wait_event = 'advisory'`, [blocker.processID]);
+            if (blocked.rowCount > 0) { waiting = true; break; }
+            await new Promise(resolve => setTimeout(resolve, 10));
+          }
+          assert.ok(waiting, 'inactive refresh reached the provider-family advisory fence');
+          await pool.query(`UPDATE swarm.memberships SET revoked_at = NULL
+            WHERE workspace_id = $1 AND user_id = $2`, [workspaces[1], owner]);
+          const consent = await pool.query(`SELECT revoked_at FROM swarm.hosted_mcp_grant_workspaces
+            WHERE grant_id = (SELECT grant_id FROM swarm.hosted_mcp_grants WHERE provider_grant_id = $1)
+              AND workspace_id = $2`, [family, workspaces[1]]);
+          assert.equal(consent.rows[0]?.revoked_at, null, 'B retains its original unrevoked consent');
+          await blocker.query('COMMIT');
+          const restored = await racingRefresh;
+          assert.equal(restored.status, 200, 'fresh active state allows real HTTP refresh without reconnect');
+          latest = await restored.json();
+        } finally {
+          await blocker.query('ROLLBACK');
+          blocker.release();
+          await racingRefresh?.catch(() => {});
+        }
+        const survived = await pool.query(`SELECT count(*)::int AS n
+          FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = $1`, [family]);
+        assert.equal(survived.rows[0].n, 0, 'restored membership prevents the permanent family fence');
+        const claim = await rpc({ jsonrpc: '2.0', id: 80, method: 'tools/call', params: {
+          name: 'claim_seat', arguments: { workspace_id: workspaces[1], name: `restored-${randomUUID()}`,
+            request_id: randomUUID() },
+        } }, latest.access_token, '2025-06-18');
+        assert.equal(claim.status, 200);
+        const claimed = await claim.json();
+        assert.ok(!claimed.error && !claimed.result?.isError, 'restored workspace remains usable through MCP');
+        const seat = JSON.parse(claimed.result.content[0].text);
+        assert.equal(seat.workspace_id, workspaces[1]);
+        assert.match(seat.handle, /^seat_/u);
+        await pool.query(`UPDATE swarm.memberships SET revoked_at = statement_timestamp()
+          WHERE workspace_id = $1 AND user_id = $2`, [workspaces[1], owner]);
+        const beforeRetirement = await pool.query(`SELECT count(*)::int AS n
+          FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = $1`, [family]);
+        assert.equal(beforeRetirement.rows[0].n, 0, 'authority consent removal has not retired provider artifacts');
         await refusedRefresh(latest.refresh_token, {}, 'invalid_grant');
+        const retired = await pool.query(`SELECT
+          (SELECT count(*)::int FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = $1) AS tombstones,
+          (SELECT count(*)::int FROM commonswarm_oauth.provider_artifacts WHERE grant_id = $1) AS artifacts`, [family]);
+        assert.deepEqual(retired.rows[0], { tombstones: 1, artifacts: 0 }, 'real HTTP refresh retires the zero-consent family');
+        await pool.query(`UPDATE swarm.memberships SET revoked_at = NULL
+          WHERE workspace_id = $1 AND user_id = $2`, [workspaces[1], owner]);
+        await refusedRefresh(latest.refresh_token, {}, 'invalid_grant');
+        const terminal = await running.pool.query(
+          'SELECT active FROM commonswarm_oauth.resolve_hosted_grant_status($1)', [family]);
+        assert.equal(terminal.rows[0]?.active, false, 'membership re-add after retirement cannot revive the old family');
+        const independentToken = await storedRefresh(subset.refresh_token);
+        assert.equal(independentToken.consumed_at, null, 'positive control retains its current unspent refresh token');
+        assert.equal(independentToken.payload.clientId, clientId);
+        const independentConsent = await running.pool.query(
+          'SELECT active FROM commonswarm_oauth.resolve_hosted_grant_status($1)', [independentFamily]);
+        assert.equal(independentConsent.rows[0]?.active, true, 'independent family retains usable workspace consent');
+        // The legacy family lacks offline_access: retry its current scope,
+        // rather than requesting the full scope that was already refused above.
+        const independent = await refresh(subset.refresh_token, { scope: undefined });
+        assert.equal(independent.status, 200, 'independent provider family remains refreshable');
+        const independentStatus = await pool.query(`SELECT count(*)::int AS n
+          FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = $1`, [independentFamily]);
+        assert.equal(independentStatus.rows[0].n, 0);
+        const humanSessionsAfter = await pool.query(`SELECT count(*)::int AS n
+          FROM commonswarm_oauth.browser_sessions WHERE user_id = $1 AND invalidated_at IS NULL`, [owner]);
+        assert.equal(humanSessionsAfter.rows[0].n, humanSessionsBefore.rows[0].n, 'refresh retirement preserves human sessions');
+        await savedGrant.destroy();
         const replay = await tokenRequest({});
         assert.equal(replay.status, 400); assert.equal((await replay.json()).error, 'invalid_grant');
 

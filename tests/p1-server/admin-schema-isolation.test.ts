@@ -46,6 +46,8 @@ SAVEPOINT hosted_prerequisite;
 INSERT INTO auth.users(id,aud,role,email) VALUES('${owner}','authenticated','authenticated','${owner}@example.test');
 INSERT INTO swarm.users(user_id,display_name) VALUES('${owner}','Hosted prerequisite owner');
 INSERT INTO swarm.workspaces(workspace_id,name,created_by) VALUES('${workspace}','Hosted prerequisite','${owner}');
+INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES('${workspace}','${owner}','owner');
+INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES('${randomUUID()}','${workspace}','workspace');
 INSERT INTO swarm.hosted_mcp_grants(grant_id,provider_grant_id,owner_user_id,home_workspace_id,client_id,resource,
   selected_workspace_ids,manifest_digest,interaction_ref,state,created_at,activated_at)
 VALUES('${hosted}','${provider}','${owner}','${workspace}','ordinary-client','https://mcp.commonswarm.com/mcp',ARRAY['${workspace}']::uuid[],
@@ -76,6 +78,13 @@ ${upgradeVersions.map(v => sqlPhase(`hosted-catalog-${v}`, catalog(v))).join('\n
 ${dbAssert('SELECT NOT admin_issuance_enabled AND NOT legacy_closed AND measured_at IS NULL FROM commonswarm_oauth.admin_cutover_state', 'upgrade must remain dormant')}
 ${dbAssert(`SELECT grant_class='hosted_mcp' AND resource='https://mcp.commonswarm.com/mcp' AND hosted_grant_id='${hosted}'::uuid AND connection_id='${hosted}'::uuid
   FROM commonswarm_oauth.provider_grant_resources WHERE provider_grant_id='${provider}'`, 'verified hosted binding backfilled')}
+SET LOCAL ROLE commonswarm_oauth_runtime;
+${dbAssert(`SELECT NOT active AND grant_class='hosted_mcp' FROM commonswarm_oauth.resolve_provider_grant_status('${provider}','${owner}','test-kid')`, 'hosted status inactive without workspace consent')}
+RESET ROLE;
+-- The active family needs usable consent, including live membership and a
+-- workspace stream; an active grant row alone is insufficient.
+INSERT INTO swarm.hosted_mcp_grant_workspaces(grant_id,workspace_id,owner_user_id,manifest_digest,consent_receipt_id,consented_at)
+VALUES('${hosted}','${workspace}','${owner}',decode(repeat('ab',32),'hex'),'${randomUUID()}',statement_timestamp());
 SET LOCAL ROLE commonswarm_oauth_runtime;
 ${dbAssert(`SELECT active AND grant_class='hosted_mcp' FROM commonswarm_oauth.resolve_provider_grant_status('${provider}','${owner}','test-kid')`, 'ordinary hosted status retained')}
 RESET ROLE;
