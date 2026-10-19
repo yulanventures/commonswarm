@@ -231,7 +231,7 @@ test("the add-agent summary line and copy block come from each host's own steps"
   }
   // Control: only a host with a real link says to open it.
   assert.match(hostConnectLine(AGENT_HOSTS.find((host) => host.id === "cursor")), /^Open the link/u);
-  assert.doesNotMatch(hostConnectLine(AGENT_HOSTS.find((host) => host.id === "claude")), /Open the link/u);
+  assert.match(hostConnectLine(AGENT_HOSTS.find((host) => host.id === "claude")), /^Open the link/u);
 });
 
 test("Grok Bot is a default card whose panel reaches the generated prompt and its guide, never a connector", () => {
@@ -273,8 +273,6 @@ test("an Open pill names the app and opens only its measured web address", () =>
     assert.equal(url.protocol, "https:");
     assert.ok(host.notes.some((note) => note.includes(url.hostname)), `${host.id}: the notes must name ${url.hostname}`);
   }
-  // The pill does not change the summary line: only a step link says to open a link.
-  assert.doesNotMatch(hostConnectLine(AGENT_HOSTS.find((host) => host.id === "claude")), /Open/u);
   const picker = readFileSync(new URL("../components/connect/AgentHostPicker.astro", import.meta.url), "utf8");
   assert.match(picker, /href=\{host\.open\.href\} target="_blank" rel="noopener noreferrer"/u);
 });

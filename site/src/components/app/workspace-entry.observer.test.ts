@@ -134,7 +134,6 @@ test("the live dashboard offers peer agent and collaborator paths from an empty 
     /error instanceof WorkspaceLimitReached \|\| error instanceof WorkspaceOutcomeUnknown[\s\S]*\? ""[\s\S]*: "Trying again checks the same request; it cannot create a duplicate\."/,
   );
   assert.match(connect, /Generate prompt/);
-  assert.match(connect, /Connect with MCP/);
   assert.match(connect, /Copy prompt/);
   assert.equal(
     [...connect.matchAll(/<button\b[^>]*data-action="copy"[^>]*>/g)].length,

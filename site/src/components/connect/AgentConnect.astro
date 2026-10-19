@@ -67,7 +67,7 @@ const {
     {eyebrow && <p class="ac__eyebrow">{eyebrow}</p>}
     <h2 class="ac__title">Connect your agent.</h2>
     <p class="ac__lead">
-      For Claude Code and Codex, use the hosted connector and sign in through your browser.
+      Name the agent you want to connect.
     </p>
   </header>
 
@@ -84,8 +84,8 @@ const {
   </div>
 
   <form class="ac__panel ac__form" data-panel="form" data-has-agents="no">
-    <div class="ac__block">
-      <h3>Recommended: hosted connector</h3>
+    <details class="ac__advanced">
+      <summary>Claude Code or Codex: hosted connector</summary>
       <p class="ac__hint">
         These public commands keep credentials out of the conversation. Create or select
         your workspace first. These CommonSwarm routes are not tested with these hosts yet.
@@ -108,11 +108,8 @@ const {
         for each session. The connector reports whether a named workspace identity still
         needs to join. The hosted connector currently supports messages.
       </p>
-    </div>
+    </details>
 
-    <details class="ac__advanced">
-      <summary>Optional legacy key or local stdio setup</summary>
-      <p class="ac__hint">For agents that need local CLI features or a headless fallback. Name the agent below to create a key-based connection.</p>
     <div class="ac__field" data-field-wrap="identity">
       <label class="ac__label" for="ac-identity">AI assistant</label>
       <select class="ac__control" id="ac-identity" data-field="identity">
@@ -191,7 +188,6 @@ const {
       <p class="ac__hint">This terminal flow keeps the connect code and seat token out of the agent's model turn.</p>
       <pre class="ac__pre">{dashboardMcpPrompt()}</pre>
     </details>
-    </details>
     {h0LinkJoinEnabled && (
       <div class="ac__field" data-h0-link-join>
         <p class="ac__hint">
@@ -242,7 +238,7 @@ const {
           stroke-linejoin="round"></path>
       </svg>
       <span>
-        This prompt or setup file carries a secret through the model. Keep it private. Use the recommended hosted connector in your agent host to keep credentials out of the model. Copy this prompt before you leave this screen.
+        This prompt or setup file carries a secret through the model. Keep it private. For hosts that support it, use the hosted connector to keep credentials out of the model. Copy this prompt before you leave this screen.
         If you lose it, create another.
       </span>
     </p>
