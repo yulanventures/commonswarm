@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
 
-test("Fold 18 whole MCP lane leaves an empty isolated HOME and builds default paths only from fixtures", { timeout: 240000 }, async () => {
+test("Fold 18 whole MCP lane leaves an empty isolated HOME and builds default paths only from fixtures", { timeout: 240000 }, async (t) => {
   const help = spawnSync(process.execPath, ["--help"], { encoding: "utf8", timeout: 5000 });
   assert.equal(help.status, 0, `could not probe test-isolation flags from ${process.execPath}: ${help.error ?? help.stderr}`);
   const accepts = (flag: string) => new RegExp(`(?:^|[\\s,])--${flag}(?:[=\\s,]|$)`, "m").test(help.stdout);
@@ -13,8 +14,10 @@ test("Fold 18 whole MCP lane leaves an empty isolated HOME and builds default pa
     : accepts("experimental-test-isolation") ? "--experimental-test-isolation=none" : null;
   assert.ok(isolationFlag, `${process.execPath} supports neither --test-isolation=none nor --experimental-test-isolation=none`);
   console.log(`MCP lane isolation flag: ${isolationFlag}`);
-  const home = await mkdtemp("/tmp/lane-home.");
-  const logs = await mkdtemp("/tmp/lane-home-spy.");
+  const home = await mkdtemp(join(tmpdir(), "lane-home."));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const logs = await mkdtemp(join(tmpdir(), "lane-home-spy."));
+  t.after(() => rm(logs, { recursive: true, force: true }));
   const log = join(logs, "homedir.log");
   try {
     const run = spawnSync(process.execPath, ["--require", resolve("tests/p1-cli/mcp-connect-home-spy.cjs"), "--import", "tsx",
@@ -30,8 +33,14 @@ test("Fold 18 whole MCP lane leaves an empty isolated HOME and builds default pa
     const builtHomes = calls.filter(call => call.stack.includes("mcp-connect")).map(call => call.path);
     assert.ok(builtHomes.length > 0, "the homedir spy observed default-path construction");
     assert.ok(builtHomes.every(path => path !== home), `default paths used the lane HOME: ${JSON.stringify(builtHomes)}`);
-    assert.ok(builtHomes.every(path => path.startsWith(join(tmpdir(), "cswarm-mcp-")) ||
-      path.startsWith("/private/tmp/lane-home-mcp-") || path.startsWith("/tmp/lane-home-mcp-")),
+    const fixtureParents = [...new Set([tmpdir(), realpathSync(tmpdir())])];
+    assert.ok(builtHomes.every(path => fixtureParents.some(parent =>
+      path.startsWith(join(parent, "cswarm-mcp-")) || path.startsWith(join(parent, "lane-home-mcp-")))),
       `a homedir-derived path escaped temporary fixtures: ${JSON.stringify(builtHomes)}`);
-  } finally { await rm(home, { recursive: true, force: true }); await rm(logs, { recursive: true, force: true }); }
+  } finally {
+    const settled = await Promise.allSettled([
+      rm(home, { recursive: true, force: true }), rm(logs, { recursive: true, force: true })]);
+    const failed = settled.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failed) throw failed.reason;
+  }
 });

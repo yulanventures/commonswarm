@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
@@ -101,9 +102,11 @@ test("every profile-writing test call has a fixture HOME", { timeout: 10_000 }, 
   assert.deepEqual(failures, [], `calls without fixture HOME: ${failures.join(", ")}`);
 });
 
-test("item K registry and credential checks use fixture homes and leave their enclosing HOME empty", { timeout: 60_000 }, async () => {
-  const home = await mkdtemp("/tmp/lane-home.");
-  const logs = await mkdtemp("/tmp/lane-home-spy.");
+test("item K registry and credential checks use fixture homes and leave their enclosing HOME empty", { timeout: 60_000 }, async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "lane-home."));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const logs = await mkdtemp(join(tmpdir(), "lane-home-spy."));
+  t.after(() => rm(logs, { recursive: true, force: true }));
   const log = join(logs, "homedir.log");
   const { NODE_TEST_CONTEXT: _nodeTestContext, ...childEnv } = process.env;
   try {
@@ -129,7 +132,14 @@ test("item K registry and credential checks use fixture homes and leave their en
     // The check fixture sets SWARM_AGENT_STATE_DIR, while the attachment CLI receives its own fixture HOME.
     assert.ok(builders.every(call => call.path !== home && call.path !== userInfo().homedir),
       "a builder reached the enclosing or real home");
-    assert.ok(builders.every(call => call.path.startsWith(join(tmpdir(), "cswarm-") ) || call.path.startsWith(join(tmpdir(), "lane-home-"))),
+    const fixtureParents = [...new Set([tmpdir(), realpathSync(tmpdir())])];
+    assert.ok(builders.every(call => fixtureParents.some(parent =>
+      call.path.startsWith(join(parent, "cswarm-")) || call.path.startsWith(join(parent, "lane-home-")))),
       "a builder escaped fixture homes");
-  } finally { await rm(home, { recursive: true, force: true }); await rm(logs, { recursive: true, force: true }); }
+  } finally {
+    const settled = await Promise.allSettled([
+      rm(home, { recursive: true, force: true }), rm(logs, { recursive: true, force: true })]);
+    const failed = settled.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failed) throw failed.reason;
+  }
 });

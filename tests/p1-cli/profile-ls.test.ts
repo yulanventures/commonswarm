@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { userInfo } from "node:os";
 import test from "node:test";
 import { agentProfilePath, agentProfileRoot, listAgentProfiles, privatePath, saveAgentProfile } from "../../src/cloud/agent-profile.js";
@@ -84,7 +85,7 @@ test("profile ls finds walked and registered paths without opening credentials",
   }
 });
 
-test("temporary home cleanup refuses outside paths", { timeout: 10_000 }, () => {
+test("temporary home cleanup refuses outside paths", { timeout: 30_000 }, () => {
   const helper = readFileSync(resolve("tests/support/lane-temp-home.ts"), "utf8");
   assert.match(helper, /actual === "\/" \|\| actual === realHome/);
   assert.match(helper, /inside\.startsWith/);
@@ -101,6 +102,39 @@ test("temporary home cleanup refuses outside paths", { timeout: 10_000 }, () => 
     assert.throws(() => removeLaneTempHome("/etc"));
     assert.throws(() => removeLaneTempHome(unowned), /refusing to remove/);
     assert.throws(() => removeLaneTempHome(""), /absolute path/);
+    assert.ok(existsSync(unowned), "the unowned canary survives a refused removal");
+    const removed = createLaneTempHome("cleanup-positive-");
+    removeLaneTempHome(removed);
+    assert.ok(!existsSync(removed), "an owned temporary home is removed");
+    // A replaced owned path must not delete whatever now sits behind it.
+    const victim = createLaneTempHome("cleanup-victim-");
+    const replaced = createLaneTempHome("cleanup-replaced-");
+    try {
+      rmSync(replaced, { recursive: true, force: true });
+      symlinkSync(victim, replaced);
+      assert.throws(() => removeLaneTempHome(replaced), /refusing to remove/);
+      assert.ok(existsSync(victim), "the directory behind a replaced path survives");
+      rmSync(replaced, { force: true });
+    } finally { removeLaneTempHome(victim); }
+    // A hostile TMPDIR is refused in a fresh process before any allocation;
+    // the same fixture succeeds under the test process's own TMPDIR.
+    const hostileCheck = join(home, "hostile-tmpdir-check.mts");
+    writeFileSync(hostileCheck, `
+      import { createLaneTempHome, removeLaneTempHome } from ${JSON.stringify(pathToFileURL(resolve("tests/support/lane-temp-home.ts")).href)};
+      try { const dir = createLaneTempHome("hostile-"); removeLaneTempHome(dir); console.log("CREATED"); }
+      catch (error) { console.log(/unsafe temporary root/.test(String(error)) ? "REFUSED" : "OTHER"); process.exitCode = 3; }
+    `);
+    const hostileRun = (tmp?: string) => spawnSync(process.execPath, ["--experimental-strip-types", hostileCheck], {
+      cwd: resolve("."), env: { ...process.env, ...(tmp === undefined ? {} : { TMPDIR: tmp }) },
+      encoding: "utf8", timeout: 15_000 });
+    for (const hostile of ["/", userInfo().homedir]) {
+      const run = hostileRun(hostile);
+      assert.equal(run.status, 3, `${hostile}: ${run.stdout}${run.stderr}`);
+      assert.match(run.stdout, /^REFUSED$/m);
+    }
+    const normal = hostileRun();
+    assert.equal(normal.status, 0, `${normal.stdout}${normal.stderr}`);
+    assert.match(normal.stdout, /^CREATED$/m);
   } finally {
     removeLaneUnownedTempHome(unowned);
     removeLaneTempHome(home);

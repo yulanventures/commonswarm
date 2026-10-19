@@ -337,11 +337,14 @@ test('c1 W6 retry: migrated schema supersedes a withdrawn owner version; same-ve
   const exec = (tool: string, args: string[]) => spawnSync(join(pg, tool), args, { encoding: 'utf8', timeout: 60_000 });
   const ok = (r: ReturnType<typeof exec>) => assert.equal(r.status, 0, r.stdout + r.stderr);
   const psql = (sql: string) => spawnSync(join(pg, 'psql'), ['-X', '-h', cluster, '-U', 'supabase_admin', '-d', 'postgres', '-Atq', '-v', 'ON_ERROR_STOP=1', '-f', '-'], { input: sql, encoding: 'utf8' });
-  let started = false;
+  let startAttempted = false;
+  let identityRecorded = false;
+  let bodyCompleted = false;
   try {
     ok(exec('initdb', ['-U', 'supabase_admin', '--auth=trust', '-E', 'UTF8', '--locale=C', '-D', join(cluster, 'data')]));
-    ok(exec('pg_ctl', ['-D', join(cluster, 'data'), '-o', `-c listen_addresses='' -c unix_socket_directories='${cluster}'`, '-l', join(cluster, 'pg.log'), '-w', 'start'])); started = true;
-    ok(run(['--record-identity', cluster]));
+    startAttempted = true;
+    ok(exec('pg_ctl', ['-D', join(cluster, 'data'), '-o', `-c listen_addresses='' -c unix_socket_directories='${cluster}'`, '-l', join(cluster, 'pg.log'), '-w', 'start']));
+    ok(run(['--record-identity', cluster])); identityRecorded = true;
     // Restore the repository's migrated dump, with only the bootstrap CREATE ROLE omitted.
     ok(psql(readFileSync(join(dump, 'roles.sql'), 'utf8').split('\n').filter(line => line.trim() !== 'CREATE ROLE supabase_admin;').join('\n')));
     for (const file of ['schema.sql', 'ledger.sql', 'ledger-extra.sql']) ok(psql(readFileSync(join(dump, file), 'utf8')));
@@ -656,9 +659,23 @@ test('c1 W6 retry: migrated schema supersedes a withdrawn owner version; same-ve
     assert.equal(rows.stdout.trim(), '1|f|t|c1-retry-superseded\n2|t|f|');
     const approvals = psql(`SELECT count(*),bool_and(withdrawn_at IS NOT NULL) FROM commonswarm_oauth.admin_client_owner_approvals WHERE client_id='${client}';`); ok(approvals);
     assert.equal(approvals.stdout.trim(), '2|t', 'superseding leaves immutable approval history intact');
+    bodyCompleted = true;
   } finally {
-    if (started) ok(run(['--cleanup-run', cluster], { PG_BIN: pg }));
-    // If startup never completed, retain the directory: do not infer that its postmaster is gone.
+    // Phase-aware teardown through the script's one cleanup rule: record any
+    // identity a failed start left observable, then let --cleanup-run stop and
+    // prove quiescence before it deletes. Initialized data with no valid
+    // identity is retained by that rule; never substitute a filesystem removal.
+    if (startAttempted && !identityRecorded && existsSync(join(cluster, 'data', 'postmaster.pid'))
+      && !existsSync(join(cluster, 'postmaster.identity'))) {
+      run(['--record-identity', cluster], { PG_BIN: pg });
+    }
+    const cleanup = run(['--cleanup-run', cluster], { PG_BIN: pg });
+    if (bodyCompleted) {
+      ok(cleanup);
+      assert.ok(!existsSync(cluster), `cleanup reported success but the cluster directory remains: ${cluster}`);
+    } else if (cleanup.status !== 0 || existsSync(cluster)) {
+      console.error(`c1 W6 retry teardown: cluster directory retained without positive postmaster identity/quiescence proof: ${cluster}\n${cleanup.stdout.trim()}`);
+    }
   }
 });
 
