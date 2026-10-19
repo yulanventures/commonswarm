@@ -66,7 +66,7 @@ export interface AgentHostStep {
   code?: string;
   /** A sentence to say to the agent, with a Copy button. */
   say?: string;
-  /** A link the person opens (the Cursor install link). */
+  /** A link the person opens to review setup in the host app. */
   link?: { href: string; label: string };
 }
 
@@ -134,6 +134,11 @@ const SIGN_IN_STEP: AgentHostStep = Object.freeze({
     "Sign in to CommonSwarm with the same account you use here ({email}). Tick {workspace} and choose Allow connection.",
 });
 
+/** Opens Claude's custom-connector form with public values prefilled; the person still reviews it. */
+export function claudeInstallLink(address: string = AGENT_CONNECTOR_ADDRESS): string {
+  return `https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=CommonSwarm&connectorUrl=${encodeURIComponent(address)}`;
+}
+
 /**
  * Cursor's documented install-link format: the server object, JSON-serialized, base64 of its
  * UTF-8 bytes, query-escaped. Built from the constant so the link cannot drift from the address.
@@ -169,8 +174,11 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
     joiner: "primary",
     desktopSignIn: false,
     steps: [
-      { text: "In Claude, open Customize, then Connectors, then Add, then Add custom connector." },
-      { text: "Name it CommonSwarm and paste this address:", address: true },
+      {
+        text: "Open Claude's Add custom connector form with CommonSwarm's name and address filled in:",
+        link: { href: claudeInstallLink(), label: "Add to Claude" },
+      },
+      { text: "Review the name and address in Claude, then confirm to add the connector." },
       SIGN_IN_STEP,
       { text: "In a chat, open +, then Connectors, and turn on CommonSwarm. Then say:", say: joinSentence("Claude") },
       { text: JOIN_NOTE_RESULT },

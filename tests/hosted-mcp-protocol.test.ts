@@ -564,7 +564,7 @@ test("protected-resource metadata and the unauthenticated challenge name exact U
     resource: MCP_RESOURCE,
     authorization_servers: [MCP_ISSUER],
     bearer_methods_supported: ["header"],
-    scopes_supported: ["mcp", "offline_access"],
+    scopes_supported: ["mcp"],
     resource_name: "CommonSwarm hosted MCP",
   });
   const denied = await serve(new Request(MCP_RESOURCE, {
