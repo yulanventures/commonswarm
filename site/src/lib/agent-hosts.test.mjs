@@ -14,6 +14,7 @@ import {
   cursorInstallLink,
   hostConnectLine,
   hostJoinPrompt,
+  inviteAssistantHosts,
   HOSTED_LISTS_NOTE,
   joinedListsOffer,
   joinSentence,
@@ -188,6 +189,14 @@ test("the add-agent summary line and copy block come from each host's own steps"
       assert.equal(hostJoinPrompt(host), null, `${host.id}: nothing to say before it can connect`);
       continue;
     }
+    if (host.status === null) {
+      /* A generated-prompt host: its prompt is minted per person, so the panel offers the
+         generator, never a static sentence or a sign-in it does not use. */
+      assert.equal(line, host.steps[0].text, `${host.id}: a generated-prompt host keeps its own first step`);
+      assert.doesNotMatch(line, /sign in/u, host.id);
+      assert.equal(hostJoinPrompt(host), null, `${host.id}: the prompt is generated, not a sentence to copy`);
+      continue;
+    }
     assert.match(line, /sign in with the account you use here/u, host.id);
     assert.equal(hostJoinPrompt(host), [...host.steps].reverse().find((step) => step.say)?.say, host.id);
     assert.match(hostJoinPrompt(host) ?? "", /^Use CommonSwarm to join my workspace as /u, host.id);
@@ -195,6 +204,38 @@ test("the add-agent summary line and copy block come from each host's own steps"
   // Control: only a host with a real link says to open it.
   assert.match(hostConnectLine(AGENT_HOSTS.find((host) => host.id === "cursor")), /^Open the link/u);
   assert.doesNotMatch(hostConnectLine(AGENT_HOSTS.find((host) => host.id === "claude")), /Open the link/u);
+});
+
+test("Grok Bot is a default card whose panel reaches the generated prompt and its guide, never a connector", () => {
+  const bot = AGENT_HOSTS.find((host) => host.id === "grok-bot");
+  assert.ok(bot, "the catalog carries Grok Bot");
+  assert.equal(bot.name, "Grok Bot");
+  /* Among the defaults on the setter's Add an agent page, beside its chat-app peers. */
+  assert.ok(agentHostsFor("setter").some((host) => host.id === "grok-bot" && host.joiner === "primary"));
+  /* No invented connector route: no address to paste, no command, no static sentence,
+     and no status a screen could render as a connector state. */
+  assert.equal(bot.status, null);
+  for (const step of bot.steps) {
+    assert.equal(step.address, undefined, "Grok Bot takes no connector address");
+    assert.equal(step.code, undefined, "Grok Bot asks the person for no command");
+    assert.equal(step.say, undefined, "the Grok Bot prompt is generated, never a typed sentence");
+  }
+  /* The flow the guide describes: paste the generated prompt into the Bot's chat, where
+     the Bot connects itself with cswarm on its own computer. */
+  assert.ok(bot.steps.some((step) => /Paste that prompt into the Bot's chat/u.test(step.text) && step.text.includes("cswarm")));
+  assert.deepEqual(
+    bot.steps.flatMap((step) => (step.link ? [step.link.href] : [])),
+    ["/guides/grok-bot"],
+    "the panel links the one Grok Bot guide",
+  );
+  /* The invite surface carries no keys, so a joiner cannot preset this route there. */
+  assert.ok(!inviteAssistantHosts().some((host) => host.id === "grok-bot"));
+  /* Card to flow: the picker's generated-prompt panel offers the generator under the
+     same hook the Terminal chip uses, and the dashboard binds every such button. */
+  const picker = readFileSync(new URL("../components/connect/AgentHostPicker.astro", import.meta.url), "utf8");
+  assert.match(picker, /host\.status === null && \([\s\S]*?data-agent-owner-self>Generate the setup prompt</u);
+  const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  assert.match(dashboard, /all<HTMLButtonElement>\("\[data-agent-owner-self\]"\)[\s\S]*?addEventListener\("click", openConnect\)/u);
 });
 
 test("an Open pill names the app and opens only its measured web address", () => {
