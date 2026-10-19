@@ -33,15 +33,19 @@ async function renderReal(component: string, props: Record<string, unknown>, scr
     resultScopedSlot: true, resolvePath: specifier => specifier,
   });
   assert.deepEqual(compiled.diagnostics.filter(d => d.severity === "error"), []);
+  // Plain frontmatter CSS imports (the picker's onboarding.css) are not
+  // `?astro&type=style`: give esbuild an output path, as home-focus does, so it
+  // emits them as a sibling CSS file instead of failing to import CSS into JS.
   const renderedBundle = await build({
     stdin: {
       contents: compiled.code.replace(/import "[^"\n]+\?astro&type=style[^"\n]+";\n/gu, ""),
       loader: "ts", resolveDir: dirname(component),
     },
-    bundle: true, write: false, format: "esm", platform: "node",
+    bundle: true, write: false, format: "esm", platform: "node", outfile: "rendered.js",
     external: ["astro/compiler-runtime"], define: { "import.meta.env": JSON.stringify(env) },
   });
-  const renderedCode = renderedBundle.outputFiles[0]!.text.replaceAll('"astro/compiler-runtime"',
+  const importedCss = renderedBundle.outputFiles.find(file => file.path.endsWith(".css"))?.text ?? "";
+  const renderedCode = renderedBundle.outputFiles.find(file => file.path.endsWith(".js"))!.text.replaceAll('"astro/compiler-runtime"',
     JSON.stringify(new URL("../../../node_modules/astro/dist/runtime/compiler/index.js", import.meta.url).href));
   const renderedComponent = await import(`data:text/javascript;base64,${Buffer.from(renderedCode).toString("base64")}`);
   const container = await AstroContainer.create({ resolve: () => scriptPath });
@@ -54,7 +58,7 @@ async function renderReal(component: string, props: Record<string, unknown>, scr
     bundle: true, write: false, format: "iife", platform: "browser",
     define: { "import.meta.env": JSON.stringify(env) },
   })).outputFiles[0]!.text;
-  return { markup, css: compiled.css.join("\n"), browserBundle };
+  return { markup, css: [importedCss, compiled.css.join("\n")].filter(Boolean).join("\n"), browserBundle };
 }
 
 /** The dashboard's own Generate wiring, verbatim. Extraction fails if the
