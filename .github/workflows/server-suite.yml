@@ -12,8 +12,6 @@ name: server suite
 on:
   pull_request:
     branches: [release]
-  schedule:
-    - cron: '23 3 * * *'
   workflow_dispatch:
     inputs:
       ref:

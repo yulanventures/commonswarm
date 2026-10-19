@@ -255,7 +255,7 @@ is `release`; no workflow uses `pull_request_target`.
 | Workflow | When and what |
 |---|---|
 | `.github/workflows/build.yml` | Push to `main` only: `npm ci`, root build, site install, site build. The site builds without secrets or `.env`. |
-| `.github/workflows/server-suite.yml` | Release PRs and nightly at **03:00 UTC**: server (including MCP auth), p1-cli, site, box-dry-run, and `npm test`. Manual `workflow_dispatch` still selects one suite; server-repeat is manual only. |
+| `deploy/ci/commonswarm-nightly.timer` | Five-suite Hetzner nightly at **06:00 UTC**: server (including MCP auth), p1-cli, site, box-dry-run, and `npm test`. GitHub `server-suite.yml` retains release PRs and manual dispatch; server-repeat is manual only. |
 | `.github/workflows/agent-trailers.yml` | Release PRs and nightly at 03:00 UTC: trailer checker self-test, required authorship fields, and informational summary. |
 | `.github/workflows/commit-identity.yml` | Release PRs and nightly at 03:00 UTC: author and committer allowlist. |
 
