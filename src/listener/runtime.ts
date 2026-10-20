@@ -1270,11 +1270,6 @@ export async function runListenerRuntime(
     error: unknown,
   ): Promise<ListenerRuntimeStop | "continue"> => {
     const atMs = now();
-    const currentExpiry = options.credentialSession.expiry;
-    if (currentExpiry !== null && currentExpiry !== undefined && atMs >= currentExpiry) {
-      return { reason: "credential", error: new RenewalRevoked("predecessor_expired_local",
-        "The current credential expired before it could be renewed. Ask whoever set this agent up for a new credential.") };
-    }
     if (kind === "confirmed") {
       if (credentialWindow === null) {
         credentialWindow = {

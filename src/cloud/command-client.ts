@@ -66,6 +66,8 @@ export interface CommandHttpResponse extends StoredResponse {
   expires_at?: string;
   grant_kind?: "timeboxed" | "standing";
   horizon_expires_at?: string | null;
+  connection_expires_at?: string | null;
+  connection_expired_at?: string | null;
   successors_remaining?: number | null;
   revoked_at?: string;
   renewal_grant_id?: string;

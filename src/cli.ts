@@ -2686,16 +2686,14 @@ async function runToken(args: Arguments): Promise<void> {
   if (action !== "mint") {
     throw new Error(`unknown token command: ${action ?? "(missing)"}`);
   }
-  const standing = args.has("standing");
-  if (standing && !args.has("confirm-standing")) {
-    throw new UsageError(
-      "--standing requires --confirm-standing because the grant has no expiry and must be revoked to stop renewal",
-    );
-  }
-  if (!standing && args.has("confirm-standing")) {
+  // The default requests the existing unbounded standing contract. Legacy horizon
+  // flags still request a technical timebox; they never set an owner policy date.
+  const horizonDays = args.optional("renewal-horizon-days");
+  const standing = args.has("standing") || horizonDays === undefined;
+  if (args.has("confirm-standing") && !args.has("standing")) {
     throw new UsageError("--confirm-standing is valid only with --standing");
   }
-  if (standing && args.optional("renewal-horizon-days") !== undefined) {
+  if (args.has("standing") && horizonDays !== undefined) {
     throw new UsageError(
       "--standing and --renewal-horizon-days conflict: a standing grant has no renewal horizon",
     );
@@ -2706,16 +2704,10 @@ async function runToken(args: Arguments): Promise<void> {
   const ttl = args.optional("ttl-ms");
   const principalId = args.required("principal-id");
   const runId = args.required("run-id");
-  // Days, not milliseconds: this is the one renewal number a person chooses, and the
-  // honest unit for "how long before I am asked again" is days.
-  const horizonMs = standing
-    ? null
-    : args.optional("renewal-horizon-days") === undefined
-    ? RENEWAL_HORIZON_DEFAULT_MS
-    : integer(args, "renewal-horizon-days", {
-      minimum: 1,
-      maximum: Math.floor(RENEWAL_HORIZON_MAX_MS / 86_400_000),
-    }) * 86_400_000;
+  const horizonMs = standing ? null : integer(args, "renewal-horizon-days", {
+    minimum: 1,
+    maximum: Math.floor(RENEWAL_HORIZON_MAX_MS / 86_400_000),
+  }) * 86_400_000;
   /* No separate grant call. The server creates the renewal grant in the same transaction
      as the token, so a successful mint IS a grant. The selected horizon is part of that
      same request and is enforced by the server; standing carries no horizon. */
@@ -2762,6 +2754,7 @@ async function runToken(args: Arguments): Promise<void> {
       expiresAt !== null,
       Math.round((horizonMs ?? RENEWAL_HORIZON_DEFAULT_MS) / 86_400_000),
       standing ? "standing" : "timeboxed",
+      response,
     ),
   );
   printJson(agentCredentialArtifact({
@@ -6202,14 +6195,14 @@ function credentialCheckSentence(status: ListenerStatus): string | null {
     : CONFIRMED_CREDENTIAL_LOSS_CODES).join(" or ");
   if (status.renewalExpiresAt &&
       Date.parse(status.renewalExpiresAt) < Date.parse(status.credentialStopAt)) {
-    return `The server refused this credential (${codes}). The listener is still running and retrying the credential check${status.nextAttemptAt ? ` at ${status.nextAttemptAt}` : ""}. The current token expires at ${status.renewalExpiresAt}; unless renewal succeeds first, the listener stops on the next renewal answer after expiry. Run cswarm whoami with this credential to see the grant state.`;
+    return `The server refused this credential (${codes}). The listener is still running and retrying the credential check${status.nextAttemptAt ? ` at ${status.nextAttemptAt}` : ""}. The current token expires at ${status.renewalExpiresAt}; ordinary work pauses after technical expiry while renewal retries. Confirmed server refusals determine whether the listener stops. Run cswarm whoami with this credential to see the grant state.`;
   }
   return `The server refused this credential (${codes}). The listener is still running. It will stop at ${status.credentialStopAt} if every check until then confirms the loss; a transient answer extends the check window. Run cswarm whoami with this credential to see the grant state.`;
 }
 
 function listenerRetrySentence(status: ListenerStatus): string | null {
   if (status.lastErrorCode === "renewal_retry" && status.nextAttemptAt) {
-    return `Credential renewal is retrying. The current token expires at ${status.renewalExpiresAt ?? "an unknown time"}. The listener will retry at ${status.nextAttemptAt} with backoff of at least one second. Reads and claims pause while renewal is unresolved because the successor may already have been issued. If renewal does not succeed before expiry, the listener stops and needs a new credential.`;
+    return `Credential renewal is retrying. The current token expires at ${status.renewalExpiresAt ?? "an unknown time"}. The listener will retry at ${status.nextAttemptAt} with backoff of at least one second. Reads and claims pause while renewal is unresolved because the successor may already have been issued. Technical expiry does not stop renewal retries. Confirmed removal, revocation or security policy ends access.`;
   }
   if (!LISTENER_RUNNING_STATES.includes(status.state) ||
       typeof status.nextAttemptAt !== "string" ||
