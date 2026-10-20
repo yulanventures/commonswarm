@@ -35,6 +35,7 @@ interface RaceResult {
   admin_issuance?: string;
   second_admin_blocked_by?: string;
   http_refused?: number;
+  checks?: {name:string;ok:boolean}[];
 }
 interface ControlResult {
   stage: string;
@@ -47,7 +48,7 @@ interface ControlResult {
 interface Harness {
   openLockOrderTarget(options: { connector: unknown }): Promise<Target>;
   lockOrderConnector(issuance: { record: string; measure: string; enable: string }): unknown;
-  runScenario(target: Target, scenario: string): Promise<RaceResult>;
+  runScenario(target: Target, scenario: string, timeoutMs?: number): Promise<RaceResult>;
   rawSqlPositiveControl(target: Target): Promise<ControlResult>;
   migrationTreeLine(): string;
 }
@@ -109,7 +110,7 @@ for (const name of RACE_TESTS) {
     assert.ok(result.deadlock_timeout_ms! < result.lock_timeout_ms!, `${name}: deadlock_timeout must be below lock_timeout`);
     assert.deepEqual(result.parking, {
       creation_waits_on_ceiling_after_stream: true,
-      holder_waits_on_stream_held_by_creation: true,
+      holder_waits_on_creation_workspace_or_stream: true,
     }, `${name}: parking points`);
     // The base lock order fails here.
     const sqlstates = result.sqlstates ?? [];
@@ -137,7 +138,7 @@ test(ADMIN_PAIR, { timeout: 240_000 }, async () => {
   assert.ok(result.deadlock_timeout_ms! < result.lock_timeout_ms!, `${ADMIN_PAIR}: deadlock_timeout must be below lock_timeout`);
   assert.deepEqual(result.parking, {
     first_admin_waits_on_shared_workspace: true,
-    second_admin_waits_on_shared_workspace: true,
+    second_admin_waits_on_complete_plan: true,
   }, `${ADMIN_PAIR}: parking points`);
   // The base lock order fails here.
   const sqlstates = result.sqlstates ?? [];
@@ -176,7 +177,7 @@ for (const [name, expected] of Object.entries(ADMIN_CROSS_RACES)) {
     assert.ok(result.deadlock_timeout_ms! < result.lock_timeout_ms!, `${name}: deadlock_timeout must be below lock_timeout`);
     assert.deepEqual(result.parking, {
       first_admin_waits_on_workspace: true,
-      second_admin_waits_on_workspace: true,
+      second_admin_waits_on_complete_plan: true,
     }, `${name}: parking points`);
     const sqlstates = result.sqlstates ?? [];
     const deadlocks = sqlstates.filter((code) => code === "40P01").length;
@@ -221,3 +222,22 @@ test(ADMIN_WITHDRAW, { timeout: 240_000 }, async () => {
   assert.deepEqual(result.writes, { first_withdrawal_recorded: true, second_withdrawal_recorded: true }, `${ADMIN_WITHDRAW}: writes`);
   assert.equal(result.http_refused, 0, `${ADMIN_WITHDRAW}: no HTTP call`);
 });
+
+// These reach actual delegated HTTP admission and protected worker delivery.
+// Existing X2 tests create principals, but never issue/renew a bounded worker
+// credential. These cases protect parent ordering, budget, and rollback at that
+// distinct production boundary, with a live control in every invocation.
+for (const name of ["delegated-local-permanent-suspension","delegated-local-revocation-closure","delegated-local-selector-compatibility","delegated-local-parent-reversal","delegated-local-renewal-budget",
+  "delegated-local-parent-deadline","delegated-local-parent-narrowing",
+  "delegated-local-wait-removal-rollback","ordinary-local-compat-policy",
+  "local-resume-parent-order","local-resume-recovery-controls",
+  "hosted-owner-removal-prefix","floor-first-use-vs-head-revocation"]) {
+  test(name,{timeout:300_000},async()=>{
+    const result=await harness.runScenario(bound(),name,270_000);
+    assert.equal(result.stage,"complete",`${name}: ${result.stage} (${result.error ?? "no code"})`);
+    assert.ok(result.checks && result.checks.length>0,"named observable contracts");
+    assert.deepEqual(result.checks.filter(c=>!c.ok),[],`${name}: failed contracts`);
+    assert.ok(result.checks.some(c=>c.name==="same-invocation-positive" && c.ok),"live admission positive");
+    assert.equal(result.http_refused,0,"no unbound HTTP target");
+  });
+}

@@ -20,7 +20,7 @@ interface TargetHarness {
 const harness = await import(new URL("../support/admin-principal-lock-order-harness.mjs", import.meta.url).href) as TargetHarness;
 const repo = fileURLToPath(new URL("../../", import.meta.url));
 
-test("renewal fence: rollback, diagnostic, same-command_id retry, revocation refusal and no token loss", { timeout: 300_000 }, async () => {
+for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: rollback, retry and credential continuity`, { timeout: 300_000 }, async () => {
   const target = await harness.openLockOrderTarget({ connector: harness.lockOrderConnector({
     record: recordChecksumEvidenceForTest, measure: measureIssuanceForTest, enable: enableIssuanceForTest,
   }) });
@@ -36,7 +36,7 @@ test("renewal fence: rollback, diagnostic, same-command_id retry, revocation ref
     for (const key of ["HOME", "DENO_DIR", "XDG_CACHE_HOME"]) if (process.env[key]) env[key] = process.env[key];
     const child = spawn("deno", ["run", "--no-lock", "--config", join(repo, "supabase/functions/command/deno.json"),
       "--allow-read", "--allow-env", "--allow-net", join(repo, "tests/support/renewal-savepoint-rollback-harness.mjs"),
-      repo, "real_read", "", config], { cwd: repo, env, stdio: ["ignore", "pipe", "ignore"] });
+      repo, mode, "", config], { cwd: repo, env, stdio: ["ignore", "pipe", "ignore"] });
     let stdout = "";
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => { stdout += chunk; });
@@ -54,6 +54,11 @@ test("renewal fence: rollback, diagnostic, same-command_id retry, revocation ref
     assert.equal(result.stage, "complete", `probe stopped at ${result.stage}: ${result.error ?? "unknown"}`);
     assert.ok(result.tables_counted > 0, "enumerated full database table set");
     assert.deepEqual(result.checks?.filter((check) => !check.ok), [], "owner-boundary contracts failed");
+    if(mode==='permanence') {
+      for(const variant of ['live-bootstrap','expired-unused','expired-used','pending','retired-history','predecessor-tombstone','elapsed','revoked','mismatched-device'])
+        assert.ok(result.checks?.some(check=>check.name===`current-proof-${variant}-home-and-queue` && check.ok),
+          `${variant}: both public read boundaries must return the expected connection truth`);
+    }
     assert.equal(result.verdict, "PASS");
     assert.equal(exit.code, 0);
   } finally {
