@@ -1,3 +1,4 @@
+import { connectionPolicyFields, connectionPolicyState, type ConnectionPolicy } from "./standing-grants";
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 
 import { client, postCommand, uuid } from "./commonswarm";
@@ -12,14 +13,14 @@ export interface ConnectedAppSeat {
   effectiveRevoked: boolean;
 }
 
-export interface ConnectedApp {
+export interface ConnectedApp extends ConnectionPolicy {
   grantId: string;
   clientId: string;
   clientHost: string;
   homeWorkspaceId: string;
   workspaceIds: string[];
   workspaces: Array<{ id: string; name: string }>;
-  status: "pending" | "active" | "revoked";
+  status: "pending" | "active" | "revoked" | "ended";
   seats: ConnectedAppSeat[];
 }
 
@@ -30,6 +31,8 @@ interface ConnectionRow {
   selected_workspace_ids?: unknown;
   state?: unknown;
   revoked_at?: unknown;
+  connection_expires_at?: unknown;
+  connection_expired_at?: unknown;
 }
 
 interface SeatRow {
@@ -61,14 +64,16 @@ export function groupConnectedApps(
       : [];
     const revoked = row.revoked_at != null || row.state === "revoked";
     const state = row.state === "active" ? "active" : "pending";
+    const policy = connectionPolicyFields(row as Record<string, unknown>);
     return {
+      ...policy,
       grantId,
       clientId: String(row.client_id ?? ""),
       clientHost: clientHost(String(row.client_id ?? "")),
       homeWorkspaceId: String(row.home_workspace_id ?? ""),
       workspaceIds,
       workspaces: workspaceIds.map((id) => ({ id, name: workspaceNames.get(id) ?? id })),
-      status: revoked ? "revoked" : state,
+      status: revoked ? "revoked" : connectionPolicyState(policy, state === "active") === "ended" ? "ended" : state,
       seats: seatRows
         .filter((seat) => String(seat.grant_id ?? "") === grantId)
         .map((seat) => ({
@@ -93,7 +98,7 @@ export async function loadConnectedApps(
   if (!api) throw new Error("This build is not connected to CommonSwarm.");
   const [connections, seats] = await Promise.all([
     api.schema("swarm_read").from("hosted_mcp_connections")
-      .select("grant_id,client_id,home_workspace_id,selected_workspace_ids,state,revoked_at")
+      .select("grant_id,client_id,home_workspace_id,selected_workspace_ids,state,revoked_at,connection_expires_at,connection_expired_at")
       .order("created_at", { ascending: false }),
     api.schema("swarm_read").from("hosted_mcp_seats")
       .select("seat_id,grant_id,workspace_id,principal_id,name,revoked_at")

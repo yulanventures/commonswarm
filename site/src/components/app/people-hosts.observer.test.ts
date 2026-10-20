@@ -72,6 +72,7 @@ const fakeDom = `
      column in the side column, and takes focus only for its own controls. */
   let renders = 0; let pageTitle = null;
   const renderPeopleDialog = (list, detail) => { renders += 1; const head = el('div', [], 'pd-page-head'); pageTitle = el('h1'); head.append(pageTitle); const side = el('aside'); side.append(detail); list.replaceChildren(head, side); };
+  const connectionDateFocus = () => null, restoreConnectionDateFocus = () => {};
   const syncPeopleDialogLayout = () => {}, peopleDialogModel = () => ({ agents: [], people: [] }), routeHref = () => '/app', confirmPeopleDialogAction = () => {};
   const peopleDialogState = { query: '', selected: null, rolePending: new Map() };
   let rosterFilter = '', peopleDialogFocus, activeWorkspaceId = 'W', workspaces = [{ id: 'W', name: 'Home' }], homeRoute = { view: 'people', workspaceId: 'W' };

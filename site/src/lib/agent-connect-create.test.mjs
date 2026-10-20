@@ -107,3 +107,21 @@ test("an idempotent retry reuses the command id and does not mint a second princ
   assert.equal(second.principalId, PRINCIPAL);
   assert.equal(first.principalId, second.principalId);
 });
+
+// Authoring gate: checks the actual JSON envelope, not DB ownership or durability.
+const { setConnectionExpiry } = await import("./commonswarm.ts");
+test("end-date commands route the exact hosted or renewal grant, including explicit clear", async () => {
+  respond = () => ({ status: "accepted", ok: true });
+  for (const kind of ["hosted", "renewal"]) for (const date of [null, "2027-01-02T03:04:00.000Z"]) {
+    await setConnectionExpiry(SESSION, WORKSPACE, kind, `${kind}-exact-id`, date, `${kind}-${date}`);
+    const request = sent.at(-1).envelope;
+    assert.equal(request.workspace_id, WORKSPACE);
+    assert.deepEqual(request.stream, { kind: "workspace" });
+    assert.deepEqual(request.command, { kind: "set_connection_expiry", connection_kind: kind,
+      grant_id: `${kind}-exact-id`, connection_expires_at: date });
+  }
+  assert.equal(sent.length, 4);
+  respond = () => ({ status: "rejected", error: "forbidden" });
+  await assert.rejects(setConnectionExpiry(SESSION, WORKSPACE, "renewal", PRINCIPAL, null), /not confirmed/);
+  assert.equal(sent.length, 5);
+});

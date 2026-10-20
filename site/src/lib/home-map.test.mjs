@@ -224,7 +224,7 @@ test("a failed ask preview, an assigned to-do and a disconnected agent share one
 });
 test("overview credentials retain each measured fault and last activity without an access or presence row", () => {
   const facts = { transport: "hosted_mcp", turn_only: true, last_activity_at: "2026-10-05T10:00:00Z", messages_waiting_since: null, doing: null, working_on: null };
-  for (const [connection, detail, action] of [["removed", "Removed", null], ["key_off", "Key turned off", "new-key"], ["key_ended", "Key ended", "new-key"], ["paused", "Paused: unused for 14 days", "resume"], ["live", "Active 2 hours ago", null]]) {
+  for (const [connection, detail, action] of [["removed", "Removed", null], ["key_off", "Key turned off", "new-key"], ["key_ended", "Key ended", "new-key"], ["paused", "Access suspended", "resume"], ["live", "Active 2 hours ago", null]]) {
     const people = mapHomePeople({ ...input, agents: [{ ...input.agents[0], work: { work: "idle", facts: { ...facts, connection } } }] });
     const state = people.groups[0].agents[0].state;
     assert.equal(state.word, connection === "live" ? "Idle" : "Disconnected");
@@ -802,4 +802,102 @@ test("on an agent's page the agent is the current rail row and its workspace is 
   const chat = mapHomeRail(workspaces, { view: "chat", workspaceId: "W" }, null, false);
   assert.equal(chat.currentAgentId, undefined);
   assert.deepEqual(chat.workspaces.map(row => row.current), [true, false]);
+});
+
+// Caller regression: access policy must survive Home's projection into the shared status owner.
+test("Home preserves canonical connection endings without turning proof horizons into policy", () => {
+  const grantId = "66666666-6666-4666-8666-666666666666", tokenId = "88888888-8888-4888-8888-888888888888";
+  const base = { workspaceId: "W", ownerUserId: "zoe", grantId, tokenId, principalId: "A", grantKind: "timeboxed", horizonExpiresAt: "2000-01-01T00:00:00Z",
+    boundDeviceId: "device", issuedAt: "2026-01-01T00:00:00Z", lastUsedAt: null,
+    newHostAt: null, suspendedAt: null, grantRevokedAt: null, revokedAt: null };
+  const state = (fields, connection = "live", identity = {}) => mapHomePeople({ ...input, workspaceId: "W",
+    agents: [{ ...input.agents[0], transport: "local", work: { work: "idle", facts: { transport: "local", connection,
+      renewal_grant_id: grantId, token_id: tokenId, connection_expires_at: false, connection_expired_at: "invalid" } } }],
+    access: [{ ...base, ...fields, ...identity }] }).groups[0].agents[0].state;
+  for (const fields of [{}, { connectionExpiresAt: null },
+    { connectionExpiresAt: undefined, connectionExpiredAt: null },
+    { connectionExpiresAt: "bad-date", connectionExpiredAt: null },
+    { connectionExpiresAt: null, connectionExpiredAt: null },
+    { connectionExpiresAt: "2099-01-01T00:00:00Z", connectionExpiredAt: null }]) {
+    assert.equal(state(fields).kind, "idle", "a proof horizon is never an owner end date");
+    assert.equal(state(fields).fix.action, null);
+    assert.doesNotMatch(state(fields).detail, /Stays connected|new key|14 days/i);
+  }
+  for (const fields of [
+    { connectionExpiresAt: "2026-10-01T00:00:00Z", connectionExpiredAt: null },
+    { connectionExpiresAt: null, connectionExpiredAt: "2026-10-01T00:00:00Z" },
+    { connectionExpiresAt: undefined, connectionExpiredAt: "2026-10-01T00:00:00Z" },
+  ]) {
+    const ended = state(fields);
+    assert.equal(ended.kind, "disconnected");
+    assert.equal(ended.detail, "Connection ended");
+    assert.equal(ended.fix.action, null, "an elapsed family cannot be resumed");
+    assert.equal(state(fields, "removed").detail, "Removed", "removal remains stronger than an end date");
+    assert.equal(state({ ...fields, suspendedAt: "2026-10-02T00:00:00Z" }).detail, "Access suspended");
+  }
+  // A stale or foreign roster family cannot override the selected live Home connection.
+  for (const identity of [{ grantId: "77777777-7777-4777-8777-777777777777" },
+    { ownerUserId: "amy" },
+    { workspaceId: "X" }, { principalId: "B" }]) {
+    const live = state({ connectionExpiresAt: "2026-10-01T00:00:00Z", suspendedAt: "2026-10-02T00:00:00Z", grantRevokedAt: "2026-10-02T00:00:00Z" }, "live", identity);
+    assert.equal(live.kind, "idle"); assert.equal(live.fix.action, null);
+  }
+  const rotated = { tokenId: "99999999-9999-4999-8999-999999999999" };
+  const endedRotation = state({ connectionExpiresAt: "2026-10-01T00:00:00Z", connectionExpiredAt: null }, "live", rotated);
+  assert.equal(endedRotation.detail, "Connection ended");
+  assert.equal(endedRotation.fix.action, null);
+  const oldRevoked = state({ revokedAt: "2026-10-02T00:00:00Z", connectionExpiresAt: null, connectionExpiredAt: null }, "live", rotated);
+  assert.equal(oldRevoked.kind, "idle", "old token revocation cannot revoke its successor");
+  assert.equal(oldRevoked.fix.action, null);
+  const selected = mapHomePeople({ ...input, workspaceId: "W",
+    agents: [{ ...input.agents[0], transport: "local", work: { work: "idle", facts: { connection: "live", renewal_grant_id: grantId, token_id: tokenId } } }],
+    access: [{ ...base, ...rotated }, { ...base, revokedAt: "2026-10-02T00:00:00Z" }] }).groups[0].agents[0].state;
+  assert.equal(selected.detail, "Key turned off", "matching token row wins among same-family rows");
+  const fallback = mapHomePeople({ ...input, workspaceId: "W", agents: [{ ...input.agents[0], transport: "local" }],
+    access: [{ ...base, suspendedAt: "2026-10-02T00:00:00Z", connectionExpiresAt: "2026-10-01T00:00:00Z", connectionExpiredAt: null }] }).groups[0].agents[0].state;
+  assert.equal(fallback.detail, "Access suspended", "absent Home keeps scoped roster status");
+  assert.equal(fallback.fix.action, null, "elapsed fallback cannot resume");
+  const suspended = state({ connectionExpiresAt: null, connectionExpiredAt: null, suspendedAt: "2026-10-02T00:00:00Z" });
+  assert.equal(suspended.kind, "disconnected");
+  assert.equal(suspended.detail, "Access suspended");
+  assert.doesNotMatch(suspended.fix.sentence, /idle|14 days/i);
+});
+
+// Authoring gate: raw Q10 facts reach the normal overview mapper with access: [].
+// Dropping either policy key would turn a terminal owner date into a new-key fix.
+// The roster caller above cannot detect that wire loss; no production seam is added.
+test("successful Home overview preserves canonical policy without a renewal roster", () => {
+  const before = "2026-10-01T00:00:00+00:00", future = "2099-01-01T00:00:00+00:00";
+  for (const [name, fields, connection, expected, action] of [
+    ["permanent", { connection_expires_at: null, connection_expired_at: null }, "live", "Active 2 hours ago", null],
+    ["future", { connection_expires_at: future, connection_expired_at: null }, "live", "Active 2 hours ago", null],
+    ["elapsed", { connection_expires_at: before, connection_expired_at: before }, "key_ended", "Connection ended", null],
+    ["elapsed without materialized fence", { connection_expires_at: before, connection_expired_at: null }, "key_ended", "Connection ended", null],
+    ["irreversible fence", { connection_expires_at: null, connection_expired_at: before }, "key_ended", "Connection ended", null],
+    ["legacy", {}, "live", "Active 2 hours ago", null],
+    ["partial", { connection_expires_at: null }, "live", "Active 2 hours ago", null],
+    ["malformed", { connection_expires_at: false, connection_expired_at: null }, "live", "Active 2 hours ago", null],
+    ["malformed fence", { connection_expires_at: null, connection_expired_at: "invalid" }, "live", "Active 2 hours ago", null],
+    ["paused", { connection_expires_at: null, connection_expired_at: null }, "paused", "Access suspended", "resume"],
+    ["paused and ended", { connection_expires_at: before, connection_expired_at: before }, "paused", "Access suspended", null],
+    ["key off", { connection_expires_at: null, connection_expired_at: null }, "key_off", "Key turned off", "new-key"],
+    ["connection off", { connection_expires_at: null, connection_expired_at: null }, "connection_off", "Connection turned off", null],
+    ["removed", { connection_expires_at: before, connection_expired_at: before }, "removed", "Removed", null],
+  ]) {
+    // Shape and key placement match 9ecb778 Q10's jsonb_build_object projection.
+    const row = { ...overviewRow, people: [{ user_id: "zoe", display_name: "Zoe", role: "owner", is_viewer: true,
+      agents: [{ principal_id: "A", name: "Claude", queue: null, status: { work: connection === "live" ? "idle" : "disconnected",
+        facts: { transport: "local", turn_only: false, connection, last_activity_at: "2026-10-05T10:00:00Z",
+          messages_waiting_since: null, doing: null, working_on: null, renewal_grant_id: "66666666-6666-4666-8666-666666666666",
+          token_id: "88888888-8888-4888-8888-888888888888", ...fields } } }] }],
+      needs_you: { asks: [], assigned: [], waiting: [] } };
+    const data = overviewCatchUpData(initialCatchUpData(workspaces), {
+      viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: [row] }, false);
+    const detail = data[0].detail;
+    if (connection === "removed") { assert.equal(detail.people.groups[0].agents.length, 0, name); continue; }
+    const state = detail.people.groups[0].agents[0].state;
+    assert.equal(state.detail, expected, name);
+    assert.equal(state.fix.action, action, name);
+    if (expected === "Connection ended") assert.match(state.fix.sentence, /cannot be resumed/, name);
+  }
 });

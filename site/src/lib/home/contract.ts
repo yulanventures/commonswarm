@@ -62,6 +62,10 @@ export type WriteResult<T> =
 export type AgentWork = 'working' | 'idle' | 'disconnected';
 export interface AgentWorkFacts {
   transport: 'local' | 'hosted_mcp'; turn_only: boolean;
+  renewal_grant_id?: Uuid | null; // absent unknown; NULL is a known legacy bearer
+  token_id?: Uuid;
+  connection_expires_at?: IsoTime | null;
+  connection_expired_at?: IsoTime | null;
   connection: 'live' | 'removed' | 'connection_off' | 'key_off' | 'key_ended' | 'paused';
   last_activity_at: IsoTime | null;            // latest server-recorded action by this agent
   messages_waiting_since: IsoTime | null;

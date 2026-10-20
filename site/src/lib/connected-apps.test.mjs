@@ -41,3 +41,27 @@ test("Connected apps DOM uses textContent, durable rereads, and no browser owner
   assert.match(client, /revoke_hosted_mcp_grant/u);
   assert.match(client, /revoke_hosted_mcp_seat/u);
 });
+
+// Authoring gate: hosted projection owns policy presence and status precedence;
+// this catches lost terminal metadata without replaying the browser click contract.
+test("hosted mapping distinguishes unknown, NULL, malformed, chosen and terminal policy", () => {
+  const future = "2099-01-01T00:00:00Z", past = "2020-01-01T00:00:00Z";
+  for (const [fields, expected] of [
+    [{}, "active"],
+    [{ connection_expires_at: null }, "active"],
+    [{ connection_expires_at: null, connection_expired_at: null }, "active"],
+    [{ connection_expires_at: "bad", connection_expired_at: null }, "active"],
+    [{ connection_expires_at: future, connection_expired_at: null }, "active"],
+    [{ connection_expires_at: future, connection_expired_at: past }, "ended"],
+    [{ connection_expires_at: past, connection_expired_at: null }, "ended"],
+  ]) {
+    const [connection] = groupConnectedApps([{ grant_id: "exact-hosted", state: "active", ...fields }], []);
+    assert.equal(connection.grantId, "exact-hosted");
+    assert.equal(Object.hasOwn(connection, "connectionExpiresAt"), Object.hasOwn(fields, "connection_expires_at"));
+    assert.equal(Object.hasOwn(connection, "connectionExpiredAt"), Object.hasOwn(fields, "connection_expired_at"));
+    assert.equal(connection.connectionExpiresAt, fields.connection_expires_at === "bad" ? undefined : fields.connection_expires_at);
+    assert.equal(connection.connectionExpiredAt, fields.connection_expired_at);
+    assert.equal(connection.status, expected);
+  }
+  assert.equal(groupConnectedApps([{ state: "revoked", connection_expires_at: past, connection_expired_at: past }], [])[0].status, "revoked");
+});

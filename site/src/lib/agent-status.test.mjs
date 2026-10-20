@@ -60,15 +60,15 @@ import { peopleAgentStatus, peopleAgentActivityTime, agentResumeReceipt } from "
 const key = (overrides = {}) => ({ kind: "standing", horizonExpiresAt: null, boundDeviceId: "computer", lastUsedAt: at(60_000), issuedAt: at(30 * 86400000), newHostAt: null, suspendedAt: null, revokedAt: null, ...overrides });
 const input = (overrides = {}) => ({ transport: "local", ownerName: "Mei Langridge", own: true, mayManage: true, sample: false, presence: row({ last_command_at: at(1000) }), ...overrides });
 
-test("dialog status precedence: revoked, ended, paused, messages, expiry, new computer, activity", () => {
+test("dialog status precedence preserves terminal, security, delivery and activity facts", () => {
   const collision = key({ suspendedAt: at(1000), newHostAt: at(1000), revokedAt: at(1000) });
   const oldestUnobservedAt = at(5 * 60000);
   const cases = [
     ["key-off", "Key turned off", { grant: collision, oldestUnobservedAt }],
-    ["key-ended", "Key ended", { grant: key({ kind: "timeboxed", horizonExpiresAt: at(1), newHostAt: at(1000) }), oldestUnobservedAt }],
-    ["paused", "Paused: unused for 14 days", { grant: key({ suspendedAt: at(1000), newHostAt: at(1000) }), oldestUnobservedAt }],
+    ["key-ended", "Connection ended", { grant: key({ connectionExpiresAt: at(1), connectionExpiredAt: null, newHostAt: at(1000) }), oldestUnobservedAt }],
+    ["paused", "Access suspended", { grant: key({ suspendedAt: at(1000), newHostAt: at(1000) }), oldestUnobservedAt }],
     ["stale-messages", "Hasn’t picked up messages for 3+ min", { grant: key({ kind: "timeboxed", horizonExpiresAt: at(-86400000), newHostAt: at(1000) }), oldestUnobservedAt }],
-    ["key-ends-soon", "Key ends in 1 day", { grant: key({ kind: "timeboxed", horizonExpiresAt: at(-86400000), newHostAt: at(1000) }) }],
+    ["new-computer", "Used from a new computer", { grant: key({ kind: "timeboxed", horizonExpiresAt: at(-86400000), newHostAt: at(1000) }) }],
     ["new-computer", "Used from a new computer", { grant: key({ newHostAt: at(1000) }) }],
     ["inactive", "Not active for 15 days", { presence: row({ last_command_at: at(15 * 86400000) }) }],
     ["idle", "Not active yet", { presence: null }],
@@ -82,17 +82,57 @@ test("dialog status precedence: revoked, ended, paused, messages, expiry, new co
   assert.equal(peopleAgentStatus(input({ grant: key({ kind: "timeboxed", horizonExpiresAt: at(-4 * 86400000) }) }), NOW).kind, "active");
 });
 
-test("resume is available to managers, new keys to the agent owner, and sample mode has no fixes", () => {
-  for (const [own, mayManage, expected] of [[true,true,true],[false,true,true],[false,false,false]]) {
-    const paused = peopleAgentStatus(input({ own, mayManage, grant: key({ suspendedAt: at(1000) }) }), NOW);
-    assert.equal(paused.fix.action, "resume"); assert.equal(paused.fix.allowed, expected);
-    assert.equal(paused.fix.askWho, expected ? null : "Mei");
-    const off = peopleAgentStatus(input({ own, mayManage, grant: key({ revokedAt: at(1000) }) }), NOW);
-    assert.equal(off.fix.action, "new-key"); assert.equal(off.fix.allowed, own);
+test("manual resume retains owner, manager, member and orphan permissions without attributing a cause", () => {
+  for (const [own, mayManage, ownerName, sample] of [
+    [true, true, "Mei Langridge", false], [false, true, "Mei Langridge", false],
+    [false, false, "Mei Langridge", false], [false, false, null, false],
+    [true, true, "Mei Langridge", true],
+  ]) {
+    const facts = input({ own, mayManage, ownerName, sample, grant: key({ suspendedAt: at(1000) }) });
+    const paused = peopleAgentStatus(facts, NOW);
+    assert.equal(paused.label, "Access suspended");
+    assert.equal(paused.fix.action, "resume");
+    assert.equal(paused.fix.allowed, mayManage && !sample);
+    assert.doesNotMatch(paused.sentence, /idle|unused|14 days/i);
+    if (mayManage) assert.doesNotMatch(paused.sentence, /Ask/i);
+    else assert.equal(paused.fix.askWho, ownerName ? "Mei" : "a workspace owner or admin");
+    const off = peopleAgentStatus({ ...facts, grant: key({ revokedAt: at(1) }) }, NOW);
+    assert.equal(off.fix.action, "new-key");
+    assert.equal(off.fix.allowed, own && !sample);
+    for (const terminal of [{ revokedAt: at(1) }, { connectionExpiresAt: at(1), connectionExpiredAt: null }]) {
+      assert.notEqual(peopleAgentStatus({ ...facts, grant: { ...facts.grant, ...terminal } }, NOW).fix.action, "resume");
+    }
   }
-  assert.equal(peopleAgentStatus(input({ sample: true, grant: key({ suspendedAt: at(1) }) }), NOW).fix.allowed, false);
-  const orphan = peopleAgentStatus(input({ ownerName: null, own: false, mayManage: false, grant: key({ suspendedAt: at(1) }) }), NOW);
-  assert.equal(orphan.sentence, "Ask a workspace owner, an admin, or the member who added the agent to resume it.");
+  assert.equal(peopleAgentStatus(input({ suspended: true }), NOW).fix.action, null);
+});
+
+test("server terminal authority survives canonical policy; live families can outlast the technical lease", () => {
+  for (const facts of [{ connection: "key_ended" }]) {
+    const ended = peopleAgentStatus(input(facts), NOW);
+    assert.equal(ended.label, "Key ended");
+    assert.equal(ended.fix.action, "new-key");
+    assert.equal(ended.fix.allowed, true);
+  }
+  for (const kind of ["standing", "timeboxed"]) for (const connectionExpiresAt of [null, at(-86400000)]) {
+    const grant = key({ kind, horizonExpiresAt: at(1), connectionExpiresAt, connectionExpiredAt: null });
+    const live = peopleAgentStatus(input({ connection: "live", grant }), NOW);
+    assert.equal(live.kind, "active");
+    assert.equal(live.fix.action, null);
+    const ended = peopleAgentStatus(input({ connection: "key_ended", grant }), NOW);
+    assert.equal(ended.label, "Key ended");
+    assert.equal(ended.fix.action, "new-key");
+    assert.equal(ended.fix.allowed, true);
+    const suspended = peopleAgentStatus(input({ connection: "key_ended", grant: { ...grant, suspendedAt: at(1) } }), NOW);
+    assert.equal(suspended.label, "Access suspended");
+    assert.equal(suspended.fix.action, null);
+    const revoked = peopleAgentStatus(input({ connection: "key_ended", grant: { ...grant, revokedAt: at(1) } }), NOW);
+    assert.equal(revoked.label, "Key turned off");
+    const off = peopleAgentStatus(input({ connection: "connection_off", grant }), NOW);
+    assert.equal(off.label, "Connection turned off");
+    assert.equal(off.fix.action, null);
+  }
+  assert.equal(peopleAgentStatus(input({ grant: key({ horizonExpiresAt: at(1) }) }), NOW).kind, "active");
+  assert.equal(peopleAgentStatus(input({ connection: "key_ended", revoked: true }), NOW).kind, "removed");
 });
 
 test("chat-app agents without a key have message guidance and never key states", () => {
@@ -110,7 +150,7 @@ test("resume preserves last activity: idle 15 days becomes inactive, never Activ
   const resumed = peopleAgentStatus({ ...facts, grant: { ...facts.grant, suspendedAt: null } }, NOW);
   assert.equal(resumed.label, "Not active for 15 days"); assert.equal(resumed.attention, false);
   assert.equal(peopleAgentActivityTime(facts.presence.last_command_at, NOW), "15 days ago");
-  assert.equal(agentResumeReceipt("Codex"), "Resumed. Nothing has reached Codex yet. It renews the next time it starts. Another 14 days without use will pause it again.");
+  assert.equal(agentResumeReceipt("Codex"), "Resumed. Nothing has reached Codex yet. It renews the next time it starts.");
 });
 
 import { homeAgentState, WORK_RECENT_MS } from "./agent-status.ts";
@@ -140,14 +180,14 @@ test("home disconnect and local message guidance reuse the dialog fixes", () => 
   for (const [facts, detail] of [
     [{ revoked: true }, "Removed"], [{ suspended: true }, "Needs reconnecting"],
     [{ grant: key({ revokedAt: at(1) }) }, "Key turned off"],
-    [{ grant: key({ kind: "timeboxed", horizonExpiresAt: at(1) }) }, "Key ended"],
-    [{ grant: key({ suspendedAt: at(1) }) }, "Paused: unused for 14 days"],
+    [{ grant: key({ connectionExpiresAt: at(1), connectionExpiredAt: null }) }, "Connection ended"],
+    [{ grant: key({ suspendedAt: at(1) }) }, "Access suspended"],
   ]) {
     const s = homeAgentState(input({ ...facts, workingOn, hasWakePath: true, oldestUnobservedAt: at(180000) }), NOW);
     assert.equal(s.kind, "disconnected"); assert.equal(s.word, "Disconnected"); assert.equal(s.detail, detail);
   }
   const paused = homeAgentState(input({ own: false, mayManage: false, grant: key({ suspendedAt: at(1) }) }), NOW);
-  assert.equal(paused.fix.action, "resume"); assert.equal(paused.fix.allowed, false); assert.equal(paused.fix.sentence, "Ask Mei to resume it.");
+  assert.equal(paused.fix.action, null); assert.equal(paused.fix.allowed, false); assert.equal(paused.fix.sentence, "Ask the connection owner to check its access.");
   const sample = homeAgentState(input({ sample: true, grant: key({ revokedAt: at(1) }) }), NOW);
   assert.equal(sample.fix.allowed, false);
   const clock = new Date(2026, 9, 5, 10, 10).getTime();
@@ -181,8 +221,8 @@ test("server work wins over work derivation while credential faults still discon
 test("server work classification preserves credential details and repair guidance", () => {
   const cases = [
     [{ grant: key({ revokedAt: at(1) }) }, "Key turned off", "new-key", "It needs a new key to connect again."],
-    [{ grant: key({ kind: "timeboxed", horizonExpiresAt: at(1) }) }, "Key ended", "new-key", "It needs a new key to connect again."],
-    [{ grant: key({ suspendedAt: at(1) }) }, "Paused: unused for 14 days", "resume", "Resume it so it can connect again."],
+    [{ grant: key({ connectionExpiresAt: at(1), connectionExpiredAt: null }) }, "Connection ended", null, "Its end date has passed. This connection cannot be resumed."],
+    [{ grant: key({ suspendedAt: at(1) }) }, "Access suspended", "resume", "Review its access before resuming it."],
     [{ suspended: true }, "Needs reconnecting", null, "Connect it again from its app."],
     [{ revoked: true }, "Removed", null, "It can no longer read or post."],
   ];
@@ -227,4 +267,37 @@ test("AM12 fresh working-on and Doing timestamps are recent server actions", () 
   assert.equal(homeAgentState({ ...quiet, workingOn: { title: "Budget", createdAt: at(60000), until: at(-60000) } }, NOW).word, "Working");
   assert.equal(homeAgentState({ ...quiet, doingTodo: { title: "Budget", since: at(60000) } }, NOW).word, "Working");
   assert.equal(homeAgentState({ ...quiet, doingTodo: { title: "Budget", since: at(-1000) } }, NOW).word, "Idle");
+});
+
+test("live canonical families outlast technical horizons; end dates and security still win", () => {
+  for (const horizonExpiresAt of [at(1), at(-1), null]) {
+    const status = peopleAgentStatus(input({ connection: "live",
+      grant: key({ kind: "timeboxed", horizonExpiresAt, connectionExpiresAt: null, connectionExpiredAt: null }) }), NOW);
+    assert.equal(status.kind, "active"); assert.equal(status.fix.action, null);
+  }
+  for (const policy of [{ connectionExpiresAt: at(1) }, { connectionExpiredAt: at(1) }]) {
+    const ended = peopleAgentStatus(input({ connection: "live", connectionPolicy: { connectionExpiresAt: undefined, connectionExpiredAt: undefined }, grant: key(policy) }), NOW);
+    assert.equal(ended.label, "Connection ended"); assert.equal(ended.fix.action, null);
+    const security = peopleAgentStatus(input({ grant: key({ ...policy, suspendedAt: at(1) }) }), NOW);
+    assert.equal(security.label, "Access suspended"); assert.equal(security.fix.action, null);
+  }
+  for (const connectionExpiresAt of [at(-86400000), null]) {
+    const extended = peopleAgentStatus(input({ connection: "live", connectionPolicy: { connectionExpiresAt, connectionExpiredAt: null },
+      grant: key({ connectionExpiresAt: at(1), connectionExpiredAt: null }) }), NOW);
+    assert.equal(extended.kind, "active", "Home extension or cleared date beats old roster end");
+    assert.equal(extended.fix.action, null);
+  }
+  for (const connection of ["removed", "connection_off"]) {
+    const combined = peopleAgentStatus(input({ connection, grant: key({ revokedAt: at(1), suspendedAt: at(1) }) }), NOW);
+    assert.equal(combined.fix.action, null, "principal restriction cannot offer key recovery or resume");
+    assert.equal(combined.fix.allowed, false);
+  }
+
+});
+
+// Technical token/horizon expiry cannot prove an owner deadline or force re-inviting.
+test("unknown policy with an old technical horizon does not invent a new-key remedy", () => {
+  const result = peopleAgentStatus(input({ grant: key({ kind: "timeboxed", horizonExpiresAt: at(1) }) }), NOW);
+  assert.equal(result.fix.action, null);
+  assert.notEqual(result.label, "Key ended");
 });
