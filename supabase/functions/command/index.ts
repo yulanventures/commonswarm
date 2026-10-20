@@ -20,7 +20,7 @@ import {
   enforceAgentSessionProof,
   hashSessionKey,
   loadAgentCredential,
-  planLocalOperation, lockLocalAuthPlan, type LocalAuthLockPlan, LocalCredentialDenied, recheckLocalCredential, LocalAuthDiscoveryChanged,
+  planLocalOperation, planLocalConnection, lockLocalAuthPlan, type LocalAuthLockPlan, LocalCredentialDenied, recheckLocalCredential, LocalAuthDiscoveryChanged,
   retryLocalAuthTransaction,
   planHostedClaimPrefix,
   type AgentAuthRow,
@@ -11001,6 +11001,17 @@ async function handleTransaction(
     const todoId=typeof args?.todo_id==='string' && UUID_RE.test(args.todo_id) ? args.todo_id:null;
     if(expiryBinding?.workspace_id===localWorkspace) principalTargets.add(expiryBinding.principal_id);
     const tokenTargets=typeof rawLocal?.token_id==='string' && UUID_RE.test(rawLocal.token_id) ? [rawLocal.token_id]:[];
+    // The Allow writer selects the exact connection, including retired tokens
+    // absent from principal discovery. Reuse its nonlocking selector/refusal
+    // boundary before adding that token's server-derived parent to the prefix.
+    // Invalid/foreign bindings retain the existing command/writer refusal path.
+    if (verifiedHuman && localWorkspace && consent?.kind==='local'
+      && ['household_permissions','household_approve_connection'].includes(kind)
+      && typeof consent.principal_id==='string' && UUID_RE.test(consent.principal_id)
+      && typeof consent.connection_id==='string' && UUID_RE.test(consent.connection_id)
+      && await planLocalConnection(tx,localWorkspace,verifiedHuman.userId,consent.principal_id,consent.connection_id)) {
+      tokenTargets.push(consent.connection_id);
+    }
     const removeUser=kind==='remove_member' && typeof rawLocal?.user_id==='string' && UUID_RE.test(rawLocal.user_id) ? rawLocal.user_id:null;
     const revocation=removeUser ? {user:removeUser}
       : kind==='revoke_agent_principal' && principalTargets.size===1 ? {principal:[...principalTargets][0]!}
