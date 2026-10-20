@@ -1755,7 +1755,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:323",
+          "citation": "src/cli.ts:324",
           "detail": "One 30-second deadline for waiting on listener stop.",
           "operation": {
             "name": "listener-stop-wait",
@@ -1769,7 +1769,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7788",
+          "citation": "src/cli.ts:7800",
           "detail": "Poll the listener stop while the one command deadline remains active.",
           "operation": {
             "name": "listener-stop-poll",
@@ -1783,7 +1783,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:8578",
+          "citation": "src/cli.ts:8591",
           "detail": "Wait for Claude hook JSON on stdin.",
           "operation": {
             "name": "hook-stdin",
@@ -1797,7 +1797,7 @@
           "class": "network-api",
           "scope": "per-request",
           "endpoints": ["/functions/v1/command"],
-          "citation": "src/cli.ts:5293-5298; src/cloud/wake-lease.ts:69,72",
+          "citation": "src/cli.ts:5305-5310; src/cloud/wake-lease.ts:69,72",
           "detail": "Best-effort release of a cleanly stopped watcher; the command aborts after two seconds.",
           "operation": {
             "name": "wake-lease-release",
@@ -1811,7 +1811,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:3415",
+          "citation": "src/cli.ts:3427",
           "detail": "Margin reserved for credential work around an external model turn.",
           "operation": {
             "name": "listener-turn-margin",
@@ -1897,7 +1897,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:8629; src/onboarding-cli.ts:97",
+          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:8642; src/onboarding-cli.ts:97",
           "detail": "Hard process ceiling for hook check.",
           "operation": {
             "name": "hook-hard-exit",
@@ -2082,11 +2082,47 @@
             "reason": "Use of AGENT_SEEN_TIMEOUT_MS. Receipts are durable."
           }
         },
+        "src/cloud/auth.ts:AbortSignal.timeout": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/auth/v1/token"
+          ],
+          "citation": "src/cloud/auth.ts:672-702",
+          "detail": "Each refresh attempt has its own 10-second transport deadline, independent of caller cancellation. At most three attempts with 150/300 ms backoff; the shared profile lock covers successor publication and read-back. Used by command authentication and logout.",
+          "operation": {
+            "name": "human-session-refresh",
+            "class": "not-run",
+            "writes": [
+              "GoTrue refresh-token rotation"
+            ],
+            "removes": [],
+            "reason": "Changes server session state; excluded from timeout measurements against a real workspace."
+          }
+        },
+        "src/cloud/auth.ts:AbortSignal.timeout#2": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/auth/v1/logout"
+          ],
+          "citation": "src/cloud/auth.ts:925-932",
+          "detail": "One 10-second server logout request after the rotated refresh credential is durably saved. Unconfirmed revocation retains the credential.",
+          "operation": {
+            "name": "human-session-logout",
+            "class": "not-run",
+            "writes": [
+              "GoTrue session revocation"
+            ],
+            "removes": [],
+            "reason": "Changes server session state; excluded from timeout measurements against a real workspace."
+          }
+        },
         "src/cloud/auth.ts:CALLBACK_TIMEOUT_MS": {
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/auth.ts:16,300-338",
+          "citation": "src/cloud/auth.ts:18,324-361,493",
           "detail": "Wait for the local OAuth callback or pasted callback URL.",
           "operation": {
             "name": "oauth-callback",
@@ -2576,7 +2612,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/storage.ts:35,631-632",
+          "citation": "src/cloud/storage.ts:34,678-679",
           "detail": "Local credential and state file-lock acquisition.",
           "operation": {
             "name": "storage-lock",
@@ -2590,7 +2626,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/storage.ts:528",
+          "citation": "src/cloud/storage.ts:574",
           "detail": "Bounded local ps process-start probe for host-id lock ownership.",
           "operation": {
             "name": "host-id-pid-probe",
@@ -2604,7 +2640,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/storage.ts:631",
+          "citation": "src/cloud/storage.ts:678",
           "detail": "File lock default options.timeoutMs ?? LOCK_TIMEOUT_MS.",
           "operation": {
             "name": "storage-lock-site",
@@ -3282,7 +3318,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7140",
+          "citation": "src/cli.ts:7152",
           "detail": "Listener turn budget default options.turnBudgetMs ?? LISTENER_PROMPT_TIMEOUT_MS.",
           "operation": {
             "name": "listener-prompt-site",
@@ -3296,7 +3332,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7341",
+          "citation": "src/cli.ts:7353",
           "detail": "Delivery hold budget property deliveryHoldBudgetMs: turnBudgetMs.",
           "operation": {
             "name": "listener-prompt-site",

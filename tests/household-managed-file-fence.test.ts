@@ -1,7 +1,6 @@
 /** Legacy file and signal paths refuse Lists & docs rows and still serve ordinary files. */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { build } from 'esbuild';
 import {
   FILE_DOWNLOAD_URL_KIND,
   FILE_RESTORE_KIND,
@@ -202,6 +201,7 @@ test('ordinary files still download, tombstone, restore, miss a pending version,
 });
 
 async function signalEntry() {
+  const { build } = await import('esbuild');
   const bundled = await build({
     stdin: { contents: `export { resolveSignalAttachments } from './supabase/functions/command/index.ts';`, resolveDir: process.cwd() },
     bundle: true, write: false, platform: 'node', format: 'esm', target: 'es2022', logLevel: 'silent',
@@ -272,4 +272,59 @@ test('signal attachment refuses a household-managed file and still posts an ordi
     assert.equal(posted.attachments[0]?.size_bytes, 4);
   }
   assert.equal(live.queries.length, 2);
+});
+
+// Exercise the production handler: capacity changes must not bypass the other guards.
+test('workspace filename capacity admits 500 through 4999 and refuses 5000', async () => {
+  const command = {
+    kind: FILE_VERSION_CREATE_KIND, file_id: fileId, version_id: versionId,
+    name: 'next.txt', declared_size_bytes: 4, content_type: 'text/plain', if_version: null,
+  };
+  for (const count of [500, 4999, 5000]) {
+    const db = scripted([
+      [{ workspace_id: workspace }], [{ total: '0' }], [], [{ total: String(count) }],
+      [{ n: '0' }], [{ n: '0' }], [{ n: '0' }], [], [],
+    ]);
+    let uploads = 0;
+    const api = { ...storage().api, async signUpload() {
+      uploads += 1;
+      return { path: '/upload', token: 'upload-token' };
+    } };
+    const result = await fileVersionCreate(db.tx, workspace, actor, command, api, ledger().fn);
+    if (count < 5000) {
+      assert.equal(result.ok, true, `new name at ${count} names`);
+      if (result.ok === true) {
+        assert.equal(result.body.name, 'next.txt');
+        assert.equal(result.body.version_n, 1);
+        assert.equal(result.body.upload_path, '/upload');
+      }
+      assert.equal(uploads, 1);
+      assert.equal(db.queries.length, 9);
+    } else {
+      assert.equal(refusal(result).error, 'workspace_file_count');
+      assert.equal(uploads, 0);
+      assert.equal(db.queries.length, 4, 'refused before any insert');
+    }
+  }
+  const existing = {
+    file_id: fileId, household_managed: false, tombstoned_at: null,
+    current_version: 1, live_version_count: '1', in_flight_version_count: '0',
+  };
+  // No name-count query for an existing name, even when no new names fit.
+  const version = scripted([
+    [{ workspace_id: workspace }], [{ total: '0' }], [existing],
+    [{ n: '0' }], [{ n: '1' }], [],
+  ]);
+  const appended = await fileVersionCreate(version.tx, workspace, actor, command, storage().api, ledger().fn);
+  assert.equal(appended.ok, true);
+  if (appended.ok === true) assert.equal(appended.body.version_n, 2);
+  assert.equal(version.queries.length, 6);
+  const capped = scripted([
+    [{ workspace_id: workspace }], [{ total: '0' }], [{ ...existing, live_version_count: '20' }],
+  ]);
+  assert.equal(refusal(await fileVersionCreate(capped.tx, workspace, actor, command, storage().api, ledger().fn)).error, 'file_version_cap');
+  assert.equal(capped.queries.length, 3);
+  const bytes = scripted([[{ workspace_id: workspace }], [{ total: String(1024 ** 3) }]]);
+  assert.equal(refusal(await fileVersionCreate(bytes.tx, workspace, actor, command, storage().api, ledger().fn)).error, 'workspace_quota_exceeded');
+  assert.equal(bytes.queries.length, 2);
 });

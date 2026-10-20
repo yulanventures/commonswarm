@@ -27,15 +27,26 @@ const wsOf = (values: unknown[]) => values.find((value): value is string => valu
 const measured = (value: unknown) => Buffer.byteLength(JSON.stringify(JSON.stringify(value)), 'utf8');
 function answer(sql: string, values: unknown[]): Row[] {
   const flags = box.flags, ws = wsOf(values);
+  if (sql.startsWith('LOCK TABLE swarm.household_content_connections IN ACCESS SHARE MODE')) return [];
+  if (sql.includes('FROM pg_catalog.pg_policy')) return [{ present: false }];
+  if (sql.includes('SELECT s.owner_user_id,s.seat_id AS connection_id')) return ws ? [{ owner_user_id: owner,
+    connection_id: conn, grant_id: grant, handle: ws === wa ? seatA : seatB, provider_grant_id: 'synthetic-grant' }] : [];
+  if (sql.includes("current_setting('role')")) return [{ value: 'swarm_read' }];
+  if (sql.includes('SELECT EXISTS(SELECT 1 FROM swarm.resolve_hosted_seat_read_authorization')) return [{ live: flags.provider && !flags.grant && !flags.member && !!ws && flags.bind.has(ws) }];
+  // Match catalog/restriction/legacy queries before their nested seat references.
+  if (sql.includes('FROM swarm.household_hosted_content_restrictions r')) return [];
+  if (sql.includes('SELECT seat_id,grant_id,owner_user_id FROM swarm.hosted_mcp_seats')) return [{ seat_id: conn, grant_id: grant, owner_user_id: owner }];
+  if (sql.includes('SELECT c.*,') && sql.includes('FROM swarm.household_content_connections c')) return [{
+    workspace_id: ws, owner_user_id: owner, principal_id: self, connection_id: conn, grant_id: grant, hosted_grant_id: grant,
+    operations: ['read', 'create', 'update'], purpose: 'shared', revoked_at: flags.connection ? at : null, expires_at: null, closed_replaced: false }];
   if (sql.includes('SELECT p.*')) return [self, other, id(9)].includes(String(values.at(-1))) ? [{ owner_user_id: owner, revoked_at: null, member_live: true, transport: 'hosted_mcp', hosted_live: true, turn_only: true }] : [];
   if (sql.includes('SELECT greatest(')) return [{ last_activity_at: at, messages_waiting_since: null }];
   if (sql.includes('id,created_at,until')) return [];
-  if (sql.includes('bool_or(')) return [{ can_read: true, can_write: true }];
   if (sql.includes('owner_user_id,revoked_at FROM swarm.agent_principals')) return [self, other, id(9)].map(principal_id => ({ principal_id, workspace_id: ws, owner_user_id: owner, revoked_at: null }));
   if (sql.includes('role FROM swarm.memberships')) return [{ user_id: owner, workspace_id: ws, revoked_at: flags.member ? at : null, role: 'owner' }];
   if (sql.includes('archived_at FROM swarm.workspaces')) { box.surface += 1; return [{ archived_at: null }]; }
   if (sql.includes('purpose, owner_user_id')) return [{ purpose: 'shared', owner_user_id: owner }];
-  if (sql.includes('revoked_at FROM swarm.memberships')) return [{ revoked_at: flags.member ? at : null }];
+  if (sql.includes('revoked_at FROM swarm.memberships')) return [{ role: 'owner', revoked_at: flags.member ? at : null }];
   if (sql.includes('household_member_content_roles')) return [{ revoked_at: null, content_role: 'editor', content_consent_id: flags.consent }];
   if (sql.includes('revoked_at FROM swarm.agent_principals')) return [{ revoked_at: null }];
   if (sql.includes('household_content_connections')) return [{ connection_id: conn, grant_id: grant, hosted_grant_id: grant, operations: ['read', 'create', 'update'], purpose: 'shared', revoked_at: flags.connection ? at : null, expires_at: null }];
@@ -76,6 +87,9 @@ function answer(sql: string, values: unknown[]): Row[] {
 }
 
 function query(sql: string, values: unknown[]): Row[] {
+  if (sql.startsWith('LOCK TABLE swarm.household_content_connections IN ACCESS SHARE MODE')
+    || sql.includes('SELECT s.owner_user_id,s.seat_id AS connection_id')
+    || sql.includes('SELECT EXISTS(SELECT 1 FROM swarm.resolve_hosted_seat_read_authorization')) return answer(sql, values);
   if (!/^\s*(select|insert|update|delete|with)\b/i.test(sql)) return [{ fragment: true }];
   const flags = box.flags, handle = String(sql.includes('hosted_mcp_seat_handles') ? values.at(-1) : values[1]), seat = seats[handle];
   if (sql.includes('provider_family_active')) return [{ active: flags.provider }];

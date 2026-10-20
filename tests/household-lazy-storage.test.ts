@@ -26,6 +26,16 @@ const projection = { ...emptyHouseholdObjectState(workspace, id(6)),
 function fixture() {
   const tx = (async (parts: TemplateStringsArray) => {
     const query = parts.join('?');
+    if (query.startsWith('LOCK TABLE swarm.household_content_connections IN ACCESS SHARE MODE')) return [];
+    if (query.includes('FROM pg_catalog.pg_policy')) return [{ present: false }];
+    if (query.includes('SELECT role, revoked_at FROM swarm.memberships')) return [{ role: 'owner', revoked_at: null }];
+    if (query.includes('SELECT seat_id,grant_id,owner_user_id FROM swarm.hosted_mcp_seats')) return [{
+      seat_id: connection.connection_id, grant_id: connection.grant_id, owner_user_id: user }];
+    if (query.includes('FROM swarm.household_hosted_content_restrictions r')) return [];
+    // The existing manual approval is a read-only ceiling on this hosted seat.
+    if (query.includes('SELECT c.*,') && query.includes('FROM swarm.household_content_connections c')) return [{
+      ...connection, workspace_id: workspace, principal_id: principal, owner_user_id: user, hosted_grant_id: connection.grant_id,
+      operations: ['read'], purpose: 'shared', revoked_at: null, expires_at: null, closed_replaced: false }];
     if (query.includes('SELECT archived_at FROM swarm.workspaces')) return [{ archived_at: null }];
     if (query.includes('SELECT purpose, owner_user_id')) return [{ purpose: 'shared', owner_user_id: user }];
     if (query.includes('SELECT revoked_at FROM swarm.memberships')) return [{ revoked_at: null }];
@@ -33,7 +43,7 @@ function fixture() {
     if (query.includes('SELECT revoked_at FROM swarm.agent_principals')) return [{ revoked_at: null }];
     if (query.includes('SELECT * FROM swarm.household_content_connections')) return [{ ...connection,
       hosted_grant_id: connection.grant_id, operations: ['read'], purpose: 'shared', revoked_at: null, expires_at: null }];
-    if (query.includes('SELECT state, revoked_at FROM swarm.hosted_mcp_grants')) return [{ state: 'active', revoked_at: null }];
+    if (query.includes('SELECT state,revoked_at FROM swarm.hosted_mcp_grants')) return [{ state: 'active', revoked_at: null }];
     if (query.includes('SELECT revoked_at FROM swarm.hosted_mcp_grant_workspaces')
       || query.includes('SELECT revoked_at FROM swarm.hosted_mcp_seats')) return [{ revoked_at: null }];
     if (query.includes('SELECT clock_timestamp() AS now')) return [{ now: at }];
