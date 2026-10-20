@@ -283,6 +283,23 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       const { readAgentProfile, openProfileCredential } = await import("../../src/cloud/agent-profile.js");
       const admin = createClient(local.API_URL, local.SERVICE_ROLE_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
       const f = await fixture();
+      const foreign = await fixture(); // W2 has a real owner and agent to protect.
+      assert.notEqual(foreign.workspace, f.workspace);
+      async function confirmOwner(bearer: string, principal: string) {
+        const response = await fetch(readEndpoint(target), {
+          method: "POST", headers: { authorization: `Bearer ${bearer}`, apikey: target.anonKey, "content-type": "application/json" },
+          body: JSON.stringify({ resource: "members", workspace_id: f.workspace }), signal: AbortSignal.timeout(15_000),
+        });
+        assert.equal(response.status, 200, "same valid token must read its own W1");
+        const payload = await response.json();
+        assert.equal(payload.identity?.credential_valid, true);
+        assert.equal(payload.identity?.workspace_id, f.workspace);
+        assert.equal(payload.identity?.principal_id, principal);
+        assert.equal(payload.identity?.owner_user_id, f.user);
+        assert.ok(payload.agents.some((agent: { principal_id: string; owner_user_id: string }) =>
+          agent.principal_id === principal && agent.owner_user_id === f.user));
+        assert.ok(!payload.agents.some((agent: { principal_id: string }) => agent.principal_id === foreign.principal));
+      }
       const password = `T-${randomBytes(24).toString("base64url")}!`;
       const changed = await admin.auth.admin.updateUserById(f.user, { password, email_confirm: true });
       assert.ifError(changed.error);
@@ -292,7 +309,7 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       const minted: Array<{ tokenId: string; unused: boolean }> = [];
       const proofBearers: string[] = [];
       const mintReads: Array<{ status: number; error: unknown }> = [];
-      let mintPolicy: "live" | "revoked" | "elapsed" | "membership" = "live";
+      let mintPolicy: "live" | "revoked" | "elapsed" | "membership" | "foreign" = "live";
       // Only fixture state changes between real issuance and real completion read.
       // Each refusal is paired below with a fresh live issuance/read, in this run.
       async function fence(tokenId: string, policy: typeof mintPolicy) {
@@ -311,10 +328,13 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
           for await (const chunk of request) chunks.push(Buffer.from(chunk));
           const raw = Buffer.concat(chunks).toString("utf8");
           const body = JSON.parse(raw);
+          // Change only the requested workspace after issuance; preserve the real bearer.
+          const forwarded = body.resource === "members" && mintPolicy === "foreign"
+            ? JSON.stringify({ ...body, workspace_id: foreign.workspace }) : raw;
           const upstream = await fetch(`${target.url}${request.url}`, { method: "POST",
             headers: { "content-type": "application/json", apikey: target.anonKey,
               ...(request.headers.authorization ? { authorization: request.headers.authorization } : {}) },
-            body: raw, signal: AbortSignal.timeout(15_000) });
+            body: forwarded, signal: AbortSignal.timeout(15_000) });
           const payload = await upstream.json() as Record<string, unknown>;
           if (body.command?.kind === "mint_agent_token" && typeof payload.token_id === "string") {
             const [row] = await sql<{ first_used_at: Date | null }[]>`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id = ${payload.token_id}::uuid`;
@@ -322,6 +342,11 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
             await fence(payload.token_id, mintPolicy);
           }
           if (body.resource === "members") {
+            if (mintPolicy === "foreign") {
+              assert.equal(JSON.parse(forwarded).workspace_id, foreign.workspace);
+              assert.equal(upstream.status, 200);
+              assert.deepEqual(payload, { members: [], agents: [] }, "no W2 rows, content or valid foreign identity");
+            }
             proofBearers.push(request.headers.authorization ?? "");
             mintReads.push({ status: upstream.status, error: payload.error });
           }
@@ -378,7 +403,7 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
         assert.notEqual(successor, artifact.agent_token);
         assert.equal((await store.read())?.generation, 1);
         assert.equal(await use(f.workspace, successor), 200);
-        for (const policy of ["revoked", "elapsed", "membership"] as const) {
+        for (const policy of ["revoked", "elapsed", "membership", "foreign"] as const) {
           mintPolicy = policy;
           const beforeMint = minted.length, beforeRead = mintReads.length;
           try {
@@ -386,8 +411,14 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
             assert.equal(denied.code, 1, `${policy}: completion must fail`);
             assert.equal(denied.output, "", "no credential export on refused real read");
             assert.equal(minted.length, beforeMint + 1, "failed verification never remints");
-            assert.deepEqual(mintReads.slice(beforeRead), [{ status: policy === "membership" ? 403 : 401,
-              error: policy === "membership" ? "forbidden" : "unauthenticated" }]);
+            assert.deepEqual(mintReads.slice(beforeRead), [{ status: policy === "foreign" ? 200 : policy === "membership" ? 403 : 401,
+              error: policy === "foreign" ? undefined : policy === "membership" ? "forbidden" : "unauthenticated" }]);
+            if (policy === "foreign") {
+              assert.match(denied.error, /did not confirm the issued agent and workspace/);
+              const authorization = proofBearers.at(-1)!;
+              assert.ok(authorization.startsWith("Bearer swm_agt_"));
+              await confirmOwner(authorization.slice("Bearer ".length), f.principal);
+            }
             assert.match(denied.error, /setup is incomplete/);
             assert.match(denied.error, /fresh-response-only; replay cannot recover it/);
             assert.doesNotMatch(denied.error, /swm_agt_|issued and authenticated/);
@@ -475,7 +506,7 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       assert.equal(await use(f.workspace, await reopened.bearer()), 200);
       const { CONNECT_PROFILE_FILES } = await import("../../src/cloud/connect-profile-files.js");
       // Completion fences run after real registration, before its first real read.
-      for (const policy of ["revoked", "elapsed", "membership"] as const) {
+      for (const policy of ["revoked", "elapsed", "membership", "foreign"] as const) {
         for (const live of [false, true]) {
           const issued = await new ThinCommandClient(target).sendConnect({ workspaceId: f.workspace,
             command: { kind: "mint_agent_join_credential", seat_cap: 1, ttl_hours: 1 }, credential: login.data.session.access_token });
@@ -486,8 +517,19 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
           let registrations = 0, completions = 0;
           const replies: Array<{ status: number; error: unknown }> = [];
           const fetcher: typeof fetch = async (input, init) => {
-            const response = await fetch(input, init);
             const endpoint = new URL(String(input)).pathname;
+            const foreignRead = endpoint === "/functions/v1/read" && policy === "foreign" && !live;
+            let forwarded = init;
+            if (foreignRead) {
+              const body = JSON.parse(String(init?.body));
+              assert.equal(body.resource, "members");
+              assert.equal(body.workspace_id, f.workspace, "valid saved W1 profile reaches HTTP");
+              const profile = await readAgentProfile(path);
+              const credential = JSON.parse(await readFile(profile.credential_file, "utf8"));
+              assert.equal(new Headers(init?.headers).get("authorization"), `Bearer ${credential.agent_token}`);
+              forwarded = { ...init, body: JSON.stringify({ ...body, workspace_id: foreign.workspace }) };
+            }
+            const response = await fetch(input, forwarded);
             if (endpoint === "/functions/v1/h0/register") {
               registrations++;
               const payload = await response.clone().json();
@@ -497,6 +539,10 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
             }
             if (endpoint === "/functions/v1/read") {
               const payload = await response.clone().json();
+              if (foreignRead) {
+                assert.equal(response.status, 200);
+                assert.deepEqual(payload, { members: [], agents: [] }, "no W2 rows, content or valid foreign identity");
+              }
               replies.push({ status: response.status, error: payload.error });
             }
             return response;
@@ -511,18 +557,24 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
               const connected = await openProfileCredential(await readAgentProfile(path));
               assert.equal(await use(f.workspace, await connected.bearer()), 200);
             } else {
-              await assert.rejects(connectMcp(options), { code: "connect_authentication_refused" });
-              assert.deepEqual(replies, [{ status: policy === "membership" ? 403 : 401,
-                error: policy === "membership" ? "forbidden" : "unauthenticated" }]);
+              await assert.rejects(connectMcp(options), { code: policy === "foreign" ? "connect_identity_mismatch" : "connect_authentication_refused" });
+              assert.deepEqual(replies, [{ status: policy === "foreign" ? 200 : policy === "membership" ? 403 : 401,
+                error: policy === "foreign" ? undefined : policy === "membership" ? "forbidden" : "unauthenticated" }]);
               assert.equal(completions, 0);
               const saved = await readAgentProfile(path);
               const credentialBefore = await readFile(saved.credential_file);
               const pendingPath = join(directory, `completion-${policy}-${live}`, CONNECT_PROFILE_FILES.pending);
               const pendingBefore = await readFile(pendingPath);
               await assert.rejects(readFile(join(directory, `completion-${policy}-${live}`, CONNECT_PROFILE_FILES.complete)), { code: "ENOENT" });
-              await assert.rejects(connectMcp(options), { code: "connect_authentication_refused" });
+              await assert.rejects(connectMcp(options), { code: policy === "foreign" ? "connect_identity_mismatch" : "connect_authentication_refused" });
               assert.deepEqual(await readFile(saved.credential_file), credentialBefore);
               assert.deepEqual(await readFile(pendingPath), pendingBefore);
+              assert.equal((await readAgentProfile(path)).workspace_id, f.workspace, "no foreign profile is saved");
+              await assert.rejects(readFile(join(directory, `completion-${policy}-${live}`, CONNECT_PROFILE_FILES.complete)), { code: "ENOENT" });
+              if (policy === "foreign") {
+                const credential = JSON.parse(credentialBefore.toString("utf8"));
+                await confirmOwner(credential.agent_token, saved.principal_id);
+              }
               assert.equal(completions, 0);
               assert.equal(replies.length, 2);
               assert.deepEqual(replies[1], replies[0]);
