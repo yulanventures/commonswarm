@@ -36,6 +36,8 @@ interface RaceResult {
   second_admin_blocked_by?: string;
   http_refused?: number;
   checks?: {name:string;ok:boolean}[];
+  floor_compatibility?: string;
+  required_compatibility?: string;
 }
 interface ControlResult {
   stage: string;
@@ -239,5 +241,9 @@ for (const name of ["delegated-local-permanent-suspension","delegated-local-revo
     assert.deepEqual(result.checks.filter(c=>!c.ok),[],`${name}: failed contracts`);
     assert.ok(result.checks.some(c=>c.name==="same-invocation-positive" && c.ok),"live admission positive");
     assert.equal(result.http_refused,0,"no unbound HTTP target");
+    if (name === "floor-first-use-vs-head-revocation") {
+      assert.equal(result.floor_compatibility,"SUPPORTED",
+        `required rollback-support gate ${result.required_compatibility ?? "BLOCKED"}; legacy diagnostic ${result.floor_compatibility}`);
+    }
   });
 }

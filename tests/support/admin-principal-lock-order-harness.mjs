@@ -46,6 +46,7 @@ export const ADMIN_CROSS = Object.freeze({
 /** Round 6 (inventory): two owners each withdraw a workspace from the other's grant (adminWithdrawScenario). */
 export const ADMIN_WITHDRAW = 'admin-human-withdraw-crossed-grants';
 const RACES = Object.freeze({
+  'hosted-owner-removal-prefix': { parked: 'hosted', waiting: 'admin' },
   'admin-oauth-vs-hosted-claim-seat': { parked: 'hosted', waiting: 'admin' },
   'admin-oauth-vs-local-join-registration': { parked: 'join', waiting: 'admin' },
   'admin-oauth-vs-local-command-creation': { parked: 'local', waiting: 'admin' },
@@ -607,7 +608,8 @@ export async function runScenario(target, scenario, timeoutMs = 170_000) {
       child.on('close', (code, signal) => { clearTimeout(timer); resolve({ code, signal }); });
     });
     const line = stdout.split('\n').reverse().find((entry) => entry.startsWith('LOCK_ORDER_RESULT '));
-    if (line === undefined) return { scenario, stage: 'no_result', exit_code: exit.code, signal: exit.signal };
+    if (line === undefined) return { scenario, stage: 'no_result', exit_code: exit.code, signal: exit.signal,
+      ...(scenario==='floor-first-use-vs-head-revocation' ? {required_compatibility:'BLOCKED',floor_compatibility:'INCONCLUSIVE'} : {}) };
     const result = JSON.parse(line.slice('LOCK_ORDER_RESULT '.length));
     return adminIssuance === null ? result : { ...result, admin_issuance: adminIssuance };
   } finally {
@@ -726,7 +728,8 @@ async function verifyTlsAgainstDialedAddress(host) {
 
 async function denoMain() {
   const [configPath, scenario] = Deno.args;
-  const out = { scenario, stage: 'config' };
+  const out = { scenario, stage: 'config', ...(scenario==='floor-first-use-vs-head-revocation'
+    ? {required_compatibility:'BLOCKED',floor_compatibility:'INCONCLUSIVE'} : {}) };
   const http = { refused: 0 };
   const jwks = { body: null };
   let exitCode = 0;
@@ -774,11 +777,13 @@ async function denoMain() {
     const { db } = command;
     // Every command-module transaction (admin, hosted, join and ordinary) runs through db.begin.
     // Record the SQLSTATE of each rejected one while a race is open; no message is read.
-    const failures = { recording: false, codes: [] };
+    const failures = { recording: false, codes: [], deadlocks: [] };
     const begin = db.begin;
     db.begin = function (...args) {
       return begin.apply(this, args).catch((error) => {
-        if (failures.recording) failures.codes.push(sqlstate(error));
+        if (failures.recording) { failures.codes.push(sqlstate(error));
+          if(sqlstate(error)==='40P01') failures.deadlocks.push(deadlockEdges(error));
+        }
         throw error;
       });
     };
@@ -1683,7 +1688,7 @@ async function delegatedLocalScenario(ctx,scenario) {
       const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
       await tx`SELECT token_id FROM swarm.agent_tokens WHERE token_id=${child}::uuid FOR UPDATE`;
       pending=admin.invoke(revoke);
-      check('used-direct-child-observed-wait',await waitForBlocked(observer,Number(pid),async()=>true,3500)!==null);
+      check('used-direct-child-observed-wait',await waitForBlocked(observer,Number(pid),p=>ownedWait(observer,p,{grants:[revoked.grantId]},Number(pid)),3500)!==null);
       let blocked=false;
       try { await observer.begin(async probe=>{
         await probe`SELECT principal_id FROM swarm.agent_principals WHERE principal_id=${seat.principal}::uuid FOR SHARE NOWAIT`;
@@ -2210,31 +2215,55 @@ async function localResumeScenario(ctx,scenario) {
 if (typeof Deno !== 'undefined' && import.meta.main) await denoMain();
 
 
+function deadlockEdges(error) {
+  if(sqlstate(error)!=='40P01' || typeof error.detail!=='string') return [];
+  return [...error.detail.matchAll(/Process (\d+) waits for [^;]+; blocked by process (\d+)\./g)]
+    .map(match=>[Number(match[1]),Number(match[2])]);
+}
+// Match a tuple wait to run-owned UUIDs; a transaction wait is sufficient only
+// for a gate whose sole row lock is the named row (never for a multi-row actor).
+async function ownedWait(sql, pid, targets, singleRowGate = null) {
+  const rows=await sql`SELECT tableoid::oid AS rel,ctid::text AS tid FROM swarm.users WHERE user_id=ANY(${targets.users ?? []}::uuid[])
+    UNION ALL SELECT tableoid::oid,ctid::text FROM swarm.workspaces WHERE workspace_id=ANY(${targets.workspaces ?? []}::uuid[])
+    UNION ALL SELECT tableoid::oid,ctid::text FROM swarm.streams WHERE stream_id=ANY(${targets.streams ?? []}::uuid[])
+    UNION ALL SELECT tableoid::oid,ctid::text FROM swarm.hosted_mcp_grants WHERE grant_id=ANY(${targets.grants ?? []}::uuid[])
+    UNION ALL SELECT tableoid::oid,ctid::text FROM swarm.agent_tokens WHERE token_id=ANY(${targets.tokens ?? []}::uuid[])`;
+  const locks=await sql`SELECT relation::oid AS rel,page,tuple FROM pg_locks WHERE pid=${pid}::int AND locktype='tuple'`;
+  if(rows.some(row=>locks.some(lock=>Number(lock.rel)===Number(row.rel) && row.tid===`(${lock.page},${lock.tuple})`))) return true;
+  if(singleRowGate===null || rows.length!==1) return false;
+  return (await sql`SELECT EXISTS(SELECT 1 FROM pg_locks waiting JOIN pg_locks holder
+    ON holder.locktype='transactionid' AND holder.transactionid=waiting.transactionid
+    WHERE waiting.pid=${pid}::int AND waiting.locktype='transactionid' AND NOT waiting.granted
+      AND holder.pid=${singleRowGate}::int AND holder.granted) AS ok`)[0]?.ok===true;
+}
+
 // These scenarios own the two V15 defects at real command/loader boundaries.
 // Setup, queue timeouts and parser failures are inconclusive, never a red witness.
 async function hostedOwnerRemovalScenario(ctx) {
   const {observer,failures}=ctx,checks=[];
   const check=(name,ok)=>checks.push({name,ok:ok===true});
   const {authenticateHostedGrantCapability}=await import('../../supabase/functions/_shared/hosted-seat-auth.ts');
-  const fixture=async label=>{
-    const admin=await human(ctx,`prefix-admin-${label}`),owner=await human(ctx,`prefix-owner-${label}`);
-    const w=await workspace(ctx,admin,false);await member(ctx,w.workspaceId,owner,'member');
+  const fixture=async (label,options={})=>{
+    const admin=await human(ctx,`prefix-admin-${label}`),owner=options.owner ?? await human(ctx,`prefix-owner-${label}`);
+    const w=options.workspace ?? await workspace(ctx,options.ownedWorkspace?owner:admin,false);
+    if(!options.workspace && !options.ownedWorkspace) await member(ctx,w.workspaceId,owner,'member');
+    const selected=options.selected ?? [w.workspaceId];
     const grantId=id(),providerGrantId=`provider-${grantId}`,digest='07'.repeat(32);
     for(const command of [
       {kind:'begin_hosted_mcp_grant',grant_id:grantId,provider_grant_id:providerGrantId,owner_user_id:owner.userId,
         home_workspace_id:w.workspaceId,client_id:`prefix-${ctx.tag}`,resource:'https://mcp.commonswarm.com/mcp',
-        selected_workspace_ids:[w.workspaceId],manifest_digest:digest,interaction_ref:`interaction-${grantId}`},
-      {kind:'consent_hosted_mcp_workspace',grant_id:grantId,workspace_id:w.workspaceId,owner_user_id:owner.userId,
-        manifest_digest:digest,consent_receipt_id:id()},
-      {kind:'activate_hosted_mcp_grant',grant_id:grantId},
-    ]) {const result=await manage(ctx,owner,w.workspaceId,command);if(result.status!==200) fail('prefix_genuine_grant_setup');}
+        selected_workspace_ids:selected,manifest_digest:digest,interaction_ref:`interaction-${grantId}`},
+      ...selected.filter(workspace_id=>!options.pending || workspace_id!==w.workspaceId).map(workspace_id=>({kind:'consent_hosted_mcp_workspace',grant_id:grantId,workspace_id,owner_user_id:owner.userId,
+        manifest_digest:digest,consent_receipt_id:id()})),
+      ...options.pending ? [] : [{kind:'activate_hosted_mcp_grant',grant_id:grantId}],
+    ]) {const result=await manage(ctx,owner,command.kind==='consent_hosted_mcp_workspace'?command.workspace_id:w.workspaceId,command);if(result.status!==200) fail('prefix_genuine_grant_setup');}
     const provider={active:true};
     const capability=await ctx.db.begin(async tx=>{
       await tx`SET LOCAL ROLE swarm_command`;
       return await authenticateHostedGrantCapability(tx,{grantId,ownerUserId:owner.userId,providerGrantId,
         workspaceId:w.workspaceId,tool:'claim_hosted_seat',providerStatus:async()=>provider});
     });
-    if(!capability) fail('prefix_capability_setup');
+    if(!capability && !options.pending) fail('prefix_capability_setup');
     const body={command_id:id(),client_version:ctx.clientVersion,workspace_id:w.workspaceId,
       stream:{kind:'workspace'},command:{kind:'claim_hosted_seat',name:`prefix-${label}-${ctx.tag}`}};
     const claim=()=>ctx.command.handleHostedCommand(body,capability);
@@ -2243,7 +2272,7 @@ async function hostedOwnerRemovalScenario(ctx) {
       return await manage(ctx,{...admin,identity:{...admin.identity,interactiveAuthAtSeconds:Number(clock.seconds)}},
         w.workspaceId,{kind:'remove_member',user_id:owner.userId});
     };
-    return {...w,owner,admin,grantId,providerGrantId,provider,capability,body,claim,remove};
+    return {...w,owner,admin,grantId,providerGrantId,provider,capability,body,claim,remove,digest};
   };
   const sequential=await fixture('sequential');
   const admitted=await sequential.claim();check('same-invocation-positive',admitted.status===200);
@@ -2280,32 +2309,118 @@ async function hostedOwnerRemovalScenario(ctx) {
     NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats WHERE grant_id=${revoked.grantId}::uuid)
     AND NOT EXISTS(SELECT 1 FROM swarm.idempotency_keys WHERE principal_kind='hosted_grant'
       AND principal_id=${revoked.grantId} AND command_id=${revoked.body.command_id}) AS ok`)[0]?.ok===true);
-  for(const order of ['claim-first','remove-first','management-first']) {
-    const f=await fixture(order);let first,second;
-    const prior=order==='management-first' ? await f.claim() : null;
+  for(const kind of ['management','admin']) {
+    const f=await fixture(`alone-${kind}`,{ownedWorkspace:kind==='admin'}),claimed=await f.claim();
+    if(claimed.status!==200) fail('alone_claim_setup');
+    const [seat]=await observer`SELECT principal_id FROM swarm.hosted_mcp_seats WHERE seat_id=${claimed.body.seat_id}::uuid`;
+    let result;
+    if(kind==='admin') {
+      const side=await adminSide(ctx,{owner:f.owner,workspaceId:f.workspaceId},'alone-admin');
+      result=(await side.invoke({kind:'admin_revoke_seat',grant_id:side.grant,workspace_id:f.workspaceId,
+        principal_id:seat.principal_id,reason_code:'owner_requested'})).result;
+    } else result=await manage(ctx,f.owner,f.workspaceId,{kind:'revoke_hosted_mcp_seat',grant_id:f.grantId,seat_id:claimed.body.seat_id});
+    check(`${kind}-alone-commits`,result.status===200);
+    check(`${kind}-alone-terminal-denial`,(await f.claim()).status===403);
+  }
+  // Both real authority entrypoints, both orders. Each fixture owns all UUIDs.
+  for(const order of ['claim-first','remove-first','management-first','management-remove-first','management-admin-first','admin-first']) {
+    const isAdmin=order==='management-admin-first' || order==='admin-first';
+    const isManagement=order.startsWith('management') || order==='admin-first';
+    const reverse=order==='remove-first' || order==='management-remove-first' || order==='admin-first';
+    const f=await fixture(order,{ownedWorkspace:isAdmin});let first,second;
+    const prior=isManagement ? await f.claim() : null;
     if(prior && prior.status!==200) fail('prefix_management_positive');
+    const seat=prior ? (await observer`SELECT principal_id FROM swarm.hosted_mcp_seats WHERE seat_id=${prior.body.seat_id}::uuid`)[0] : null;
+    const side=isAdmin ? await adminSide(ctx,{owner:f.owner,workspaceId:f.workspaceId},`prefix-${order}`) : null;
+    const adminCommand=side ? {kind:'admin_revoke_seat',grant_id:side.grant,workspace_id:f.workspaceId,
+      principal_id:seat.principal_id,reason_code:'owner_requested'} : null;
+    const managementId=id();
+    const management=()=>ctx.command.handleHostedManagementCommand({command_id:managementId,client_version:ctx.clientVersion,
+      workspace_id:f.workspaceId,stream:{kind:'workspace'},
+      command:{kind:'revoke_hosted_mcp_seat',grant_id:f.grantId,seat_id:prior.body.seat_id}},f.owner.identity);
+    const other=side ? async()=>{const r=await side.invoke(adminCommand);return {...r.result,commandId:r.commandId};} : f.remove;
+    // Rollback at the existing transaction boundary, then prove actual authority remains.
+    if(isManagement) {
+      const state=async()=>JSON.stringify({
+        seats:await observer`SELECT hs.revoked_at,p.revoked_at AS principal_revoked_at,h.revoked_at AS handle_revoked_at
+          FROM swarm.hosted_mcp_seats hs JOIN swarm.agent_principals p USING(principal_id)
+          JOIN swarm.hosted_mcp_seat_handles h USING(seat_id) WHERE hs.seat_id=${prior.body.seat_id}::uuid ORDER BY h.handle`,
+        consent:await observer`SELECT revoked_at FROM swarm.hosted_mcp_grant_workspaces
+          WHERE grant_id=${f.grantId}::uuid AND workspace_id=${f.workspaceId}::uuid`,
+        receipts:await observer`SELECT command_id FROM swarm.idempotency_keys WHERE workspace_id=${f.workspaceId}::uuid ORDER BY command_id`,
+        audit:await observer`SELECT command_kind,outcome FROM swarm.audit_log WHERE workspace_id=${f.workspaceId}::uuid ORDER BY command_kind,outcome`,
+        adminAudit:side ? await observer`SELECT request_id,outcome FROM commonswarm_oauth.admin_oauth_audit
+          WHERE admin_grant_id=${side.grant}::uuid ORDER BY request_id,outcome` : [],
+        tombstone:await observer`SELECT kind,target_id FROM swarm.revocation_tombstones
+          WHERE target_id=ANY(${[prior.body.seat_id,seat.principal_id]}::uuid[]) ORDER BY kind,target_id`,
+      });
+      const before=await state();
+      const begin=ctx.db.begin,marker={};let reached=false;
+      ctx.db.begin=function(...args){const op=args.pop();return begin.apply(this,[...args,async tx=>{const r=await op(tx);reached ||= r?.status===200 || r?.result?.status===200;throw marker;}]);};
+      try {await (isAdmin?other:management)().catch(()=>{});} finally {ctx.db.begin=begin;}
+      check(`${order}-rollback-reached`,reached);
+      check(`${order}-rollback-restores-seat-consent-ledgers`,before===await state());
+      if(side) check(`${order}-rollback-admin-authority`,(await side.invoke({kind:'admin_read_metadata',grant_id:side.grant})).result.status===200);
+      check(`${order}-rollback-usable-authority`,(await f.claim()).status===200);
+    }
     failures.codes.length=0;failures.recording=true;
     await observer.begin(async gate=>{
       const [{pid}]=await gate`SELECT pg_backend_pid() AS pid`;
       await gate`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=${f.grantId}::uuid FOR SHARE`;
-      const management=()=>manage(ctx,f.owner,f.workspaceId,{kind:'revoke_hosted_mcp_seat',grant_id:f.grantId,seat_id:prior.body.seat_id});
-      first=order==='remove-first' ? f.remove() : order==='management-first' ? management() : f.claim();
-      first=first.catch(error=>({thrown:sqlstate(error)}));
-      const firstPid=await waitForBlocked(observer,Number(pid),async()=>true,3500);
-      if(firstPid===null) fail('prefix_first_queue_inconclusive');
-      second=(order==='remove-first'?f.claim():f.remove()).catch(error=>({thrown:sqlstate(error)}));
-      const secondPid=await waitForBlocked(observer,firstPid,async()=>true,3500);
-      if(secondPid===null) fail('prefix_second_queue_inconclusive');
-      check(`${order}-identified-wait-graph`,firstPid!==secondPid);
-      const independent=await human(ctx,`independent-${order}`);
-      const unrelated=await workspace(ctx,independent,false);
-      check(`${order}-unrelated-workspace-progress`,(await manage(ctx,independent,unrelated.workspaceId,
-        {kind:'create_agent_principal',name:`unrelated-${order}-${ctx.tag}`})).status===200);
+      first=(reverse?other():isManagement?management():f.claim()).catch(error=>({thrown:sqlstate(error)}));
+      const firstPid=await waitForBlocked(observer,Number(pid),p=>ownedWait(observer,p,{grants:[f.grantId]},Number(pid)),3500);
+      if(firstPid===null) fail('prefix_first_owned_G_queue_inconclusive');
+      second=(reverse?isManagement?management():f.claim():other()).catch(error=>({thrown:sqlstate(error)}));
+      const secondPid=await waitForBlocked(observer,firstPid,p=>ownedWait(observer,p,
+        {users:[f.owner.userId],workspaces:[f.workspaceId],streams:[f.streamId]}),3500);
+      if(secondPid===null) fail('prefix_second_owned_U_W_S_queue_inconclusive');
+      check(`${order}-owned-row-blocker-graph`,true);
     });
     const results=await Promise.all([first,second]);failures.recording=false;
     check(`${order}-no-sqlstate`,failures.codes.length===0 && results.every(r=>!r.thrown));
-    check(`${order}-removal-committed`,results[order==='remove-first'?0:1].status===200);
+    check(`${order}-authority-entrypoint-committed`,results[reverse?0:1].status===200);
+    if(isManagement) check(`${order}-management-committed`,results[reverse?1:0].status===200);
+    if(isAdmin) {
+      const adminResult=results[reverse?0:1];
+      check(`${order}-admin-audit`,(await observer`SELECT outcome FROM commonswarm_oauth.admin_oauth_audit
+        WHERE admin_grant_id=${side.grant}::uuid AND request_id=${adminResult.commandId}`).some(r=>r.outcome==='committed'));
+    }
+    if(isManagement) {
+      check(`${order}-management-receipt-and-audit`,(await observer`SELECT EXISTS(
+        SELECT 1 FROM swarm.idempotency_keys WHERE principal_id=${f.owner.userId} AND command_id=${managementId})
+        AND EXISTS(SELECT 1 FROM swarm.audit_log WHERE workspace_id=${f.workspaceId}::uuid
+          AND actor_user=${f.owner.userId}::uuid AND command_kind='revoke_hosted_mcp_seat' AND outcome IN ('accepted','replayed')) AS ok`)[0]?.ok===true);
+      check(`${order}-consent-revoked-by-authority-entrypoint`,(await observer`SELECT revoked_at IS NOT NULL AS ok FROM swarm.hosted_mcp_grant_workspaces
+        WHERE grant_id=${f.grantId}::uuid AND workspace_id=${f.workspaceId}::uuid`)[0]?.ok===true);
+    }
+    if(prior) check(`${order}-seat-handle-principal-closed`,(await observer`SELECT hs.revoked_at IS NOT NULL
+      AND p.revoked_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_seat_handles h WHERE h.seat_id=hs.seat_id AND h.revoked_at IS NULL) AS ok
+      FROM swarm.hosted_mcp_seats hs JOIN swarm.agent_principals p USING(principal_id) WHERE hs.seat_id=${prior.body.seat_id}::uuid`)[0]?.ok===true);
     check(`${order}-terminal-claim-denial`,(await f.claim()).status===403);
+  }
+  // Same owner, two selected workspaces; G2 uses W2 while G1's one-W action waits.
+  for(const pendingGrant of [false,true]) {
+    const owner=await human(ctx,`same-owner-${pendingGrant}`),admin=await human(ctx,`same-admin-${pendingGrant}`);
+    const w1=await workspace(ctx,admin,false),w2=await workspace(ctx,admin,false);
+    await member(ctx,w1.workspaceId,owner,'member');await member(ctx,w2.workspaceId,owner,'member');
+    const g1=await fixture(`W1-${pendingGrant}`,{owner,workspace:w1,selected:[w1.workspaceId,w2.workspaceId],pending:pendingGrant});
+    const g2=await fixture(`W2-${pendingGrant}`,{owner,workspace:w2});
+    const seat=pendingGrant?null:await g1.claim();let action,progress;
+    await observer.begin(async gate=>{
+      const [{pid}]=await gate`SELECT pg_backend_pid() AS pid`;
+      await gate`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=${g1.grantId}::uuid FOR SHARE`;
+      action=manage(ctx,owner,w1.workspaceId,pendingGrant
+        ? {kind:'consent_hosted_mcp_workspace',grant_id:g1.grantId,workspace_id:w1.workspaceId,owner_user_id:owner.userId,manifest_digest:g1.digest,consent_receipt_id:id()}
+        : {kind:'revoke_hosted_mcp_seat',grant_id:g1.grantId,seat_id:seat.body.seat_id});
+      if(await waitForBlocked(observer,Number(pid),p=>ownedWait(observer,p,{grants:[g1.grantId]},Number(pid)),3500)===null) fail('same_owner_G1_queue_inconclusive');
+      progress=g2.claim();const result=await Promise.race([progress,new Promise(resolve=>setTimeout(()=>resolve(null),1500))]);
+      check(`same-owner-W2-${pendingGrant}-commits-before-release`,result?.status===200);
+      check(`same-owner-W2-${pendingGrant}-seat-principal-receipt`,(await observer`SELECT EXISTS(
+        SELECT 1 FROM swarm.hosted_mcp_seats hs JOIN swarm.agent_principals p USING(principal_id)
+        WHERE hs.grant_id=${g2.grantId}::uuid AND p.revoked_at IS NULL) AND EXISTS(
+        SELECT 1 FROM swarm.idempotency_keys WHERE principal_id=${g2.grantId} AND command_id=${g2.body.command_id}) AS ok`)[0]?.ok===true);
+    });
+    check(`same-owner-W1-${pendingGrant}-commits`,(await action).status===200);await progress;
   }
   return {checks};
 }
@@ -2371,22 +2486,41 @@ async function floorFirstUseScenario(ctx) {
   ctx.failures.recording=false;
   check('head-head-no-sqlstate',ctx.failures.codes.length===0 && [200,401,403].includes(headResults[0]) && headResults[1].status===200);
   check('head-head-terminal-denial',await use(head.raw)!==200);
-  const raced=await chain('race');let old,newer;const states=[];
-  ctx.failures.codes.length=0;ctx.failures.recording=true;
+  const raced=await chain('race');let old,newer,oldPid,newPid;const states=[],graphs=[];
+  ctx.failures.codes.length=0;ctx.failures.deadlocks.length=0;ctx.failures.recording=true;
+  let heldC=false;
   await observer.begin(async gate=>{
     const [{pid}]=await gate`SELECT pg_backend_pid() AS pid`;
     await gate`SELECT token_id FROM swarm.agent_tokens WHERE token_id=${raced.X.token_id}::uuid FOR UPDATE`;
-    old=invoke(raced).catch(error=>{states.push(sqlstate(error));return false;});
-    const oldPid=await waitForBlocked(observer,Number(pid),async()=>true,3500);
-    if(oldPid===null) fail('floor_X_queue_inconclusive');
+    old=invoke(raced).catch(error=>{states.push(sqlstate(error));graphs.push(deadlockEdges(error));return false;});
+    oldPid=await waitForBlocked(observer,Number(pid),p=>ownedWait(observer,p,{tokens:[raced.X.token_id]},Number(pid)),3500);
+    if(oldPid===null) fail('floor_owned_X_queue_inconclusive');
     newer=revoke(raced).catch(()=>null);
-    const newPid=await waitForBlocked(observer,oldPid,async()=>true,3500);
-    if(newPid===null) fail('head_X_queue_inconclusive');
-    check('identified-floor-head-X-queue',oldPid!==newPid);
+    // Head may queue directly on the gate or behind old's tuple lock. Both
+    // require the exact owned X tuple, with the corresponding blocker edge.
+    const deadline=Date.now()+3500;
+    while(Date.now()<deadline && newPid==null) {
+      const rows=await observer`SELECT pid,pg_blocking_pids(pid) AS blockers FROM pg_stat_activity
+        WHERE pid<>${oldPid} AND (${oldPid}=ANY(pg_blocking_pids(pid)) OR ${Number(pid)}=ANY(pg_blocking_pids(pid)))`;
+      if(rows.length===1 && await ownedWait(observer,Number(rows[0].pid),{tokens:[raced.X.token_id]})) newPid=Number(rows[0].pid);
+      if(newPid==null) await new Promise(resolve=>setTimeout(resolve,20));
+    }
+    if(newPid==null) fail('head_owned_X_queue_inconclusive');
+    // C belongs only to this new chain. Old is parked before reaching C;
+    // head is the only other transaction using it. NOWAIT rolls back its savepoint.
+    await observer.begin(async probe=>{
+      try {await probe.savepoint(async sp=>{await sp`SELECT token_id FROM swarm.agent_tokens
+        WHERE token_id=${raced.C.token_id}::uuid FOR UPDATE NOWAIT`;});}
+      catch(error) {if(sqlstate(error)!=='55P03') throw error;heldC=true;}
+    });
+    if(!heldC) fail('head_owned_C_not_held_inconclusive');
   });
-  await Promise.all([old,newer]);
-  ctx.failures.recording=false;
-  states.push(...ctx.failures.codes);
-  check('observed-floor-incompatibility-40P01',states.length===1 && states[0]==='40P01');
-  return {checks,floor_compatibility:states.length===1 && states[0]==='40P01' ? 'INCOMPATIBLE':'UNPROVEN',sqlstates:states};
+  await Promise.all([old,newer]);ctx.failures.recording=false;
+  states.push(...ctx.failures.codes);graphs.push(...ctx.failures.deadlocks);
+  const cycle=graphs.some(edges=>edges.some(([a,b])=>a===oldPid && b===newPid) &&
+    edges.some(([a,b])=>a===newPid && b===oldPid));
+  const incompatible=heldC && cycle && states.length===1 && states[0]==='40P01';
+  // Diagnostic only: no historical deadlock can satisfy the required support gate.
+  return {checks,floor_compatibility:incompatible?'INCOMPATIBLE':states.length?'INCONCLUSIVE':'UNPROVEN',
+    required_compatibility:'BLOCKED',sqlstates:states,legacy_diagnostic:{held_C:heldC,identified_cycle:cycle}};
 }

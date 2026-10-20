@@ -10020,8 +10020,16 @@ async function handleHostedManagement(
       SELECT workspace_id,principal_id FROM swarm.hosted_mcp_seats
       WHERE seat_id=${command.seat_id}::uuid AND grant_id=${command.grant_id}::uuid` : [];
     if (seats.some(seat=>seat.workspace_id!==routeWorkspaceId)) throw new LocalAuthDiscoveryChanged();
-    return {owner:auth.actor.user!,workspaces:[routeWorkspaceId,...(current?.selected_workspace_ids ?? [])],
-      binding:JSON.stringify({current:current ?? null,seats})};
+    const eligible = command.kind==='set_connection_expiry' && current ? (await tx<{workspace_id:string}[]>`
+      SELECT a.workspace_id FROM unnest(${current.selected_workspace_ids}::uuid[]) selected(workspace_id)
+      CROSS JOIN LATERAL swarm.resolve_hosted_grant_authorization(
+        ${command.grant_id}::uuid,${auth.actor.user}::uuid,selected.workspace_id,'claim_hosted_seat') a
+      ORDER BY (a.workspace_id=${current.home_workspace_id}::uuid) DESC,a.workspace_id LIMIT 1`)[0]?.workspace_id : null;
+    if (command.kind==='set_connection_expiry' && eligible!==routeWorkspaceId) throw new LocalAuthDiscoveryChanged();
+    const workspaces=command.kind==='activate_hosted_mcp_grant'
+      ? [routeWorkspaceId,...(current?.selected_workspace_ids ?? [])] : [routeWorkspaceId];
+    return {owner:auth.actor.user!,workspaces,
+      binding:JSON.stringify({current:current ?? null,seats,eligible})};
   });
   if (prefix===null) return {status:403,body:{error:'forbidden'}};
   await lockLocalAuthPlan(tx,prefix);
@@ -10071,8 +10079,13 @@ async function handleHostedManagement(
     return { status: 403, body: { error: "forbidden" } };
   }
 
-  if (grant !== null) await tx`SELECT workspace_id FROM swarm.hosted_mcp_grant_workspaces
-    WHERE grant_id=${grant.grant_id}::uuid ORDER BY workspace_id FOR UPDATE`;
+  const consentWorkspaceIds = command.kind==='activate_hosted_mcp_grant'
+    ? grant?.selected_workspace_ids ?? []
+    : ['consent_hosted_mcp_workspace','revoke_hosted_mcp_seat','set_connection_expiry'].includes(command.kind)
+    ? [routeWorkspaceId] : [];
+  if (grant !== null && consentWorkspaceIds.length) await tx`SELECT workspace_id FROM swarm.hosted_mcp_grant_workspaces
+    WHERE grant_id=${grant.grant_id}::uuid AND workspace_id=ANY(${consentWorkspaceIds}::uuid[])
+    ORDER BY workspace_id FOR UPDATE`;
   const seatRows = command.kind === "revoke_hosted_mcp_seat"
     ? await tx<{
       seat_id: string; grant_id: string; workspace_id: string; owner_user_id: string;
@@ -10142,13 +10155,38 @@ async function handleHostedManagement(
     }
   }
 
+  const finalAuthorization = async () => {
+    if ((await prefix.rediscover()).hostedPrefix !== prefix.snapshot.hostedPrefix &&
+        command.kind !== 'begin_hosted_mcp_grant') throw new LocalAuthDiscoveryChanged();
+    if (command.kind==='revoke_hosted_mcp_grant' || command.kind==='revoke_hosted_mcp_seat') return;
+    const required=command.kind==='activate_hosted_mcp_grant' ? grant!.selected_workspace_ids : [route.workspaceId];
+    const [fresh]=await tx<{ok:boolean}[]>`SELECT
+      NOT EXISTS (SELECT 1 FROM unnest(${required}::uuid[]) r(workspace_id)
+        LEFT JOIN swarm.workspaces w USING(workspace_id)
+        LEFT JOIN swarm.memberships m ON m.workspace_id=r.workspace_id AND m.user_id=${auth.actor.user}::uuid
+        WHERE w.workspace_id IS NULL OR w.archived_at IS NOT NULL OR m.user_id IS NULL OR m.revoked_at IS NOT NULL)
+      AND EXISTS(SELECT 1 FROM swarm.hosted_mcp_grants g WHERE g.grant_id=${command.grant_id}::uuid
+        AND g.owner_user_id=${auth.actor.user}::uuid AND g.state<>'revoked' AND g.revoked_at IS NULL
+        AND g.connection_expired_at IS NULL
+        AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp()))
+      AND (NOT ${command.kind==='consent_hosted_mcp_workspace' || command.kind==='activate_hosted_mcp_grant' || command.kind==='set_connection_expiry'}::boolean OR
+        NOT EXISTS(SELECT 1 FROM unnest(${required}::uuid[]) r(workspace_id)
+          WHERE NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_grant_workspaces c
+            WHERE c.grant_id=${command.grant_id}::uuid AND c.workspace_id=r.workspace_id AND c.revoked_at IS NULL)))
+      AND (${grant?.connection_expires_at ?? null}::timestamptz IS NULL OR
+        ${grant?.connection_expires_at ?? null}::timestamptz>clock_timestamp())
+      AND (${command.kind==='set_connection_expiry' ? command.connection_expires_at : null}::timestamptz IS NULL OR
+        ${command.kind==='set_connection_expiry' ? command.connection_expires_at : null}::timestamptz>clock_timestamp()) AS ok`;
+    if (!fresh?.ok) throw new LocalCommandRefused({status:403,body:{error:'forbidden'}});
+  };
   const hash = await hostedRequestHash("user", auth.actor.user, body);
-  const consentRows = grant === null ? [] : await tx<{ workspace_id: string }[]>`
+  const consentRows = grant === null || !['consent_hosted_mcp_workspace','activate_hosted_mcp_grant'].includes(command.kind) ? [] : await tx<{ workspace_id: string }[]>`
     SELECT workspace_id
     FROM swarm.hosted_mcp_grant_workspaces
     WHERE grant_id = ${grant.grant_id}::uuid AND revoked_at IS NULL
+      AND workspace_id=ANY(${consentWorkspaceIds}::uuid[])
   `;
-  const allRequired = grant === null ? [{ consents: false, memberships: false }] :
+  const allRequired = grant === null || command.kind!=='activate_hosted_mcp_grant' ? [{ consents: false, memberships: false }] :
     await tx<{ consents: boolean; memberships: boolean }[]>`
       SELECT
         NOT EXISTS (
@@ -10208,6 +10246,7 @@ async function handleHostedManagement(
         replay.stream_id !== route.streamId) {
       return { status: 409, body: { error: "command_id_conflict" } };
     }
+    await finalAuthorization();
     return replayResult(storedResponse(replay.response), command.kind);
   }
   let nextSeq = frame.headSeq;
@@ -10375,6 +10414,7 @@ async function handleHostedManagement(
     outcome: event || command.kind === "set_connection_expiry" ? "accepted" : "replayed",
     hash,
   });
+  await finalAuthorization();
   return { status: 200, body: { status: "accepted", ...response, events: decision.events } };
 }
 

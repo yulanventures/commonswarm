@@ -492,6 +492,9 @@ export async function planHostedClaimPrefix(tx: Sql, discover: () => Promise<{
 } | null>): Promise<LocalAuthLockPlan | null> {
   const initial = await discover();
   if (!initial) return null;
+  if (sortedIds(initial.workspaces).length > 100) {
+    throw Object.assign(new Error('Hosted workspace closure exceeds work bound'), {code:'54000'});
+  }
   const snapshotOf = (row: NonNullable<typeof initial>): LocalPlanSnapshot => ({
     hostedPrefix: row.binding, bindings: [], users: [row.owner], parents: [],
     memberships: sortedIds(row.workspaces).map(workspace => ({workspace,user:row.owner,mode:'share'})),
