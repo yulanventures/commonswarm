@@ -728,7 +728,7 @@ export async function planLocalOperation(tx: Sql, options: {
     const boundaryIds=(await tx<{workspace_id:string}[]>`SELECT workspace_id FROM swarm.household_workspace_boundaries WHERE workspace_id=${workspace}::uuid`).map(r=>r.workspace_id);
     const principals = sortedIds(bindings.map(r=>r.principal_id));
     const sessions = principals.length ? await tx<{principal:string;workspace:string}[]>`SELECT principal_id AS principal,workspace_id AS workspace FROM swarm.agent_execution_sessions WHERE principal_id=ANY(${principals}::uuid[]) ORDER BY principal_id,workspace_id` : [];
-    let approvals = await tx<LocalApprovalLock[]>`SELECT connection_id AS connection,grant_id AS grant,workspace_id AS workspace,principal_id AS principal,'update'::text AS mode FROM swarm.household_content_connections WHERE workspace_id=${workspace}::uuid AND (
+    let approvals: LocalApprovalLock[] = await tx<LocalApprovalLock[]>`SELECT connection_id AS connection,grant_id AS grant,workspace_id AS workspace,principal_id AS principal,'update'::text AS mode FROM swarm.household_content_connections WHERE workspace_id=${workspace}::uuid AND (
       ${options.household===true || options.revocation!==undefined || options.allWorkspace===true}
         AND principal_id=ANY(${principals}::uuid[])) ORDER BY connection_id,grant_id,workspace_id,principal_id`;
     let hosted = options.household || options.revocation || options.allWorkspace ? await tx<{grant:string;workspace:string;seat:string|null;principal:string}[]>`SELECT grant_id AS grant,workspace_id AS workspace,seat_id AS seat,principal_id AS principal FROM swarm.hosted_mcp_seats WHERE workspace_id=${workspace}::uuid
