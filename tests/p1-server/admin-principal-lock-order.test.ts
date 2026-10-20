@@ -38,6 +38,7 @@ interface RaceResult {
   checks?: {name:string;ok:boolean}[];
   floor_compatibility?: string;
   required_compatibility?: string;
+  race_witness?: {allow_pid:number;issuer_pid:number;workspace_id:string;parent_id:string;sqlstates:string[];deadlock_edges:number[][][]};
 }
 interface ControlResult {
   stage: string;
@@ -233,6 +234,7 @@ for (const name of ["delegated-local-permanent-suspension","delegated-local-revo
   "delegated-local-parent-deadline","delegated-local-parent-narrowing",
   "delegated-local-wait-removal-rollback","ordinary-local-compat-policy",
   "local-resume-parent-order","local-resume-recovery-controls",
+  "local-allow-retired-parent-allow-first","local-allow-retired-parent-issuer-first",
   "hosted-owner-removal-prefix","floor-first-use-vs-head-revocation"]) {
   test(name,{timeout:300_000},async()=>{
     const result=await harness.runScenario(bound(),name,270_000);
@@ -241,6 +243,19 @@ for (const name of ["delegated-local-permanent-suspension","delegated-local-revo
     assert.deepEqual(result.checks.filter(c=>!c.ok),[],`${name}: failed contracts`);
     assert.ok(result.checks.some(c=>c.name==="same-invocation-positive" && c.ok),"live admission positive");
     assert.equal(result.http_refused,0,"no unbound HTTP target");
+    if (name.startsWith("local-allow-retired-parent-")) {
+      assert.ok(result.race_witness, "actual issuer/Allow PID and owned-row witness");
+      assert.ok(result.race_witness.allow_pid > 0 && result.race_witness.issuer_pid > 0);
+      assert.notEqual(result.race_witness.allow_pid, result.race_witness.issuer_pid);
+      assert.deepEqual(result.race_witness.sqlstates, []);
+      assert.deepEqual(result.race_witness.deadlock_edges, []);
+      for (const contract of ["legal-parentless-principal-token-parent", "real-retired-token-active-parent",
+        "issuer-real-session-and-set-only-roles", "real-issuer-lifecycle-committed", "real-dpop-replay-refused",
+        "same-owner-unrelated-workspace-progress", "rollback-restores-issuer-account-events-audit-ledger",
+        "foreign-token-no-foreign-owner-lock", "wrong-workspace-normal-refusal", "all-denials-no-revival"]) {
+        assert.ok(result.checks.some(c=>c.name===contract && c.ok), contract);
+      }
+    }
     if (name === "floor-first-use-vs-head-revocation") {
       assert.equal(result.floor_compatibility,"SUPPORTED",
         `required rollback-support gate ${result.required_compatibility ?? "BLOCKED"}; legacy diagnostic ${result.floor_compatibility}`);
