@@ -844,10 +844,10 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
           assert.ok((error instanceof RenewalCredentialCheckError && error.status === 401 && error.code === "unauthenticated") ||
             error instanceof RenewalSuperseded, "only a recognized server refusal satisfies this negative");
         }
-        const [after]: UsedWinnerState[] = await sql<UsedWinnerState[]>`
+        const after: UsedWinnerState | undefined = (await sql<UsedWinnerState[]>`
           SELECT t.first_used_at, t.revoked_at, (SELECT count(*)::integer FROM swarm.agent_tokens
             WHERE predecessor_token_id = ${f.tokenId}::uuid) AS tokens
-          FROM swarm.agent_tokens t WHERE token_id = ${winner.tokenId}::uuid`;
+          FROM swarm.agent_tokens t WHERE token_id = ${winner.tokenId}::uuid`)[0];
         assert.equal(after?.tokens, before.tokens, "neither id may replace the used winner");
         assert.equal(after?.first_used_at?.getTime(), before.first_used_at.getTime());
         assert.equal(after?.revoked_at, null);
