@@ -50,7 +50,7 @@ after(async () => { await sql?.end(); });
 
 const human = (id = owner): HouseholdIdentity => ({ user_id: id, principal_id: null, run_id: null, connection: null });
 const proposal = (markdown: string): HouseholdProposal => ({ content: { kind: 'doc', markdown } });
-const newDoc = (objectId: string, title = 'Synthetic doc'): HouseholdObjectCommand => ({ kind: 'create_household_object', object_id: objectId, title, content: proposal('base').content });
+const newDoc = (objectId: string, title = 'Synthetic doc'): Extract<HouseholdObjectCommand, { kind: 'create_household_object' }> => ({ kind: 'create_household_object', object_id: objectId, title, content: proposal('base').content });
 const patch = (objectId: string, base: HouseholdRevisionRef, after: string): HouseholdObjectCommand => ({ kind: 'update_household_object', object_id: objectId, base, patch: { kind: 'doc', splices: [{ start: 0, before: 'base', after }] } });
 function store(override: Partial<Parameters<typeof createHouseholdObjectStore>[0]> = {}) {
   return createHouseholdObjectStore({ core, transfers, storage, fileContentAllowed: allowed,

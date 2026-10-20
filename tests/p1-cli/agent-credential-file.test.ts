@@ -264,7 +264,7 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
     if (policy === "security") await sql`UPDATE swarm.renewal_grants SET suspended_at = clock_timestamp() WHERE renewal_grant_id = ${grant}::uuid`;
     const presented = { token, tokenId, principalId: principal, runId: run, expiresAt };
     const store = await agentCredentialStore({ target, lineageKey: credentialLineageKey(token), stateDirectory: directory });
-    return { user, workspace, principal, run, grant, tokenId, token, presented, store };
+    return { user, device, workspace, principal, run, grant, tokenId, token, presented, store };
   }
   async function use(workspace: string, bearer: string): Promise<number> {
     const response = await fetch(readEndpoint(target), {
@@ -342,13 +342,14 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
             await fence(payload.token_id, mintPolicy);
           }
           if (body.resource === "members") {
+            const readError = payload.error;
             if (mintPolicy === "foreign") {
               assert.equal(JSON.parse(forwarded).workspace_id, foreign.workspace);
               assert.equal(upstream.status, 200);
               assert.deepEqual(payload, { members: [], agents: [] }, "no W2 rows, content or valid foreign identity");
             }
             proofBearers.push(request.headers.authorization ?? "");
-            mintReads.push({ status: upstream.status, error: payload.error });
+            mintReads.push({ status: upstream.status, error: readError });
           }
           response.writeHead(upstream.status, { "content-type": "application/json" });
           response.end(JSON.stringify(payload));
@@ -405,7 +406,8 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
         assert.equal(await use(f.workspace, successor), 200);
         for (const policy of ["revoked", "elapsed", "membership", "foreign"] as const) {
           mintPolicy = policy;
-          const beforeMint = minted.length, beforeRead = mintReads.length;
+          const beforeMint: number = minted.length;
+          const beforeRead: number = mintReads.length;
           try {
             const denied = await mint();
             assert.equal(denied.code, 1, `${policy}: completion must fail`);
@@ -587,7 +589,7 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
           assert.deepEqual(requests, [{ path: "/functions/v1/command", status: 200 }, { path: "/functions/v1/read", status: 200 }]);
           assert.equal(completions, 1);
           const winner = await savedStore.read();
-          assert.ok(winner && winner.tokenId && winner.generation === 1);
+          assert.ok(winner && winner.tokenId && winner.token && winner.generation === 1);
           const [after] = await sql<{ successors: number; first_used_at: Date | null }[]>`SELECT first_used_at,
             (SELECT count(*)::integer FROM swarm.agent_tokens WHERE predecessor_token_id = ${original.token_id}::uuid) AS successors
             FROM swarm.agent_tokens WHERE token_id = ${winner.tokenId}::uuid`;
@@ -705,7 +707,7 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       assert.equal(await use(unused.workspace, recovered), 200);
       assert.equal(await use(f.workspace, await reopened.bearer()), 200);
     });
-    await t.test("known and unknown expiry unused permanent CLI inputs silently renew and save", async () => {
+    await t.test("unknown-expiry bare and artifact CLI inputs recover only after real authentication refusal", async () => {
       for (const form of ["known", "bare", "artifact"] as const) {
         const bare = form === "bare";
         const f = await fixture();
@@ -856,6 +858,7 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
           WHERE predecessor_token_id = ${f.tokenId}::uuid) AS tokens
         FROM swarm.agent_tokens t WHERE token_id = ${winner.tokenId}::uuid`;
       assert.ok(before?.first_used_at, "the current winner really authenticated");
+      type UsedWinnerState = { first_used_at: Date | null; revoked_at: Date | null; tokens: number };
       for (const commandId of [ids[5]!, newRenewalCommandId()]) {
         try {
           const recovered = await requestSuccessor({ target, workspaceId: f.workspace, predecessor: f.token, commandId });
@@ -865,10 +868,10 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
           assert.ok((error instanceof RenewalCredentialCheckError && error.status === 401 && error.code === "unauthenticated") ||
             error instanceof RenewalSuperseded, "only a recognized server refusal satisfies this negative");
         }
-        const [after] = await sql<{ first_used_at: Date | null; revoked_at: Date | null; tokens: number }[]>`
+        const after: UsedWinnerState | undefined = (await sql<UsedWinnerState[]>`
           SELECT t.first_used_at, t.revoked_at, (SELECT count(*)::integer FROM swarm.agent_tokens
             WHERE predecessor_token_id = ${f.tokenId}::uuid) AS tokens
-          FROM swarm.agent_tokens t WHERE token_id = ${winner.tokenId}::uuid`;
+          FROM swarm.agent_tokens t WHERE token_id = ${winner.tokenId}::uuid`)[0];
         assert.equal(after?.tokens, before.tokens, "neither id may replace the used winner");
         assert.equal(after?.first_used_at?.getTime(), before.first_used_at.getTime());
         assert.equal(after?.revoked_at, null);

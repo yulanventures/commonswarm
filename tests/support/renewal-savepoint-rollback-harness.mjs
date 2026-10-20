@@ -566,7 +566,7 @@ try {
       body:JSON.stringify({version:1,workspace_id:W,stream_id:streamId,sequence:1,phase:'idle',
         signal_id:null,tool_title:null,elapsed_ms:0}),
     }));
-    const activitySeat=await seat('activity-deadline'),issued=await renew(activitySeat.raw,id()),activityRaw=credential(issued);
+    const activitySeat=await seat('activity-deadline'),activityIssued=await renew(activitySeat.raw,id()),activityRaw=credential(activityIssued);
     check('activity fixture has a genuine unused successor',activityRaw!==null);
     await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '3 seconds'
       WHERE renewal_grant_id=${activitySeat.grant}::uuid`;
