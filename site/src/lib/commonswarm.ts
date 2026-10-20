@@ -1206,12 +1206,12 @@ export async function agentAccessStatuses(
         ownerUserId: String(row.owner_user_id),
         agentName: String(row.agent_name),
         model: row.model === null ? null : String(row.model),
-        tokenId: String(row.token_id),
+        tokenId: typeof row.token_id === "string" ? row.token_id : "",
         issuedAt: String(row.issued_at),
         expiresAt: String(row.token_expires_at),
         firstUsedAt: row.first_used_at === null ? null : String(row.first_used_at),
         revokedAt: row.token_revoked_at === null ? null : String(row.token_revoked_at),
-        grantId: String(row.renewal_grant_id),
+        grantId: typeof row.renewal_grant_id === "string" ? row.renewal_grant_id : "",
         grantKind: row.kind === "standing" ? "standing" : "timeboxed",
         horizonExpiresAt: row.horizon_expires_at === null
           ? null

@@ -117,7 +117,7 @@ export interface PeopleAgentStatusInput extends AgentStatusInput {
   /** Optional server overview facts; absent for the existing People dialog. */
   connection?: "live" | "removed" | "connection_off" | "key_off" | "key_ended" | "paused";
   grant?: GrantRiskInput | null;
-  /** Overview policy carries no grant identity or permission to edit. */
+  /** Callers pass policy and roster only for the same canonical connection. */
   connectionPolicy?: ConnectionPolicy;
   oldestUnobservedAt?: string | null;
   app?: string | null;
@@ -147,21 +147,21 @@ export function peopleAgentStatus(input: PeopleAgentStatusInput, now = Date.now(
       : `Ask ${owner} to get a new key.`, "new-key", input.own, input.own ? null : owner);
   const grant = input.grant;
   if (input.revoked || input.connection === "removed") return result("removed", "Removed", "It can no longer read or post.");
-  if (grant?.revokedAt || input.connection === "key_off") return keyFix("key-off", "Key turned off");
+  if (input.suspended) return result(base.kind, base.chip, base.receive ?? "Check this connection's access.");
   if (input.connection === "connection_off") return result("suspended", "Connection turned off",
     input.own ? "Connect it again from its app." : "Ask its owner to check this connection.");
+  if (grant?.revokedAt || input.connection === "key_off") return keyFix("key-off", "Key turned off");
   const policy = connectionPolicyState(input.connectionPolicy ?? grant ?? {}, input.connection === "live", now);
   // Overview key_ended means no current token or renewable family remains. An owner
   // policy cannot restore that authority; only a legacy technical horizon is superseded.
   const ended = policy === "ended" || Boolean(grant && renewalGrantEnded(grant, now)) || input.connection === "key_ended";
-  if (input.suspended) return result(base.kind, base.chip, base.receive ?? "Check this connection's access.");
   if (grant?.suspendedAt || input.connection === "paused") {
     if (ended) return result("paused", "Access suspended", "This connection has also ended and cannot be resumed.");
     return result("paused", "Access suspended", input.mayManage ? "Review its access before resuming it."
       : input.ownerName ? `Ask ${owner} to review and resume it.` : "Ask a workspace owner or admin to review and resume it.",
       "resume", input.mayManage, input.mayManage ? null : input.ownerName ? owner : "a workspace owner or admin");
   }
-  if (policy === "ended")
+  if (policy === "ended" || Boolean(grant && renewalGrantEnded(grant, now)))
     return result("key-ended", "Connection ended", "Its end date has passed. This connection cannot be resumed.");
   if (ended) return keyFix("key-ended", "Key ended");
   if (wakePathMark(input.oldestUnobservedAt, now)) {

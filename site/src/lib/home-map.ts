@@ -18,7 +18,30 @@ export interface HomeMapAgent extends RailAgent {
   oldestUnobservedAt?: string | null;
   work?: AgentWorkStatus;
 }
+const connectionUuid = (value: unknown): value is string => typeof value === "string" &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+
+/** Home and the existing roster may describe different local connections. */
+export function homeConnectionAccess(row: Pick<HomeMapAgent, "principalId" | "ownerUserId" | "work" | "transport">,
+  workspaceId: string | undefined, access: readonly AgentAccessStatus[]): AgentAccessStatus | undefined {
+  const facts = row.work?.facts;
+  const hosted = (facts?.transport ?? row.transport) === "hosted_mcp";
+  if (!hosted && !connectionUuid(facts?.renewal_grant_id)) return undefined;
+  return access.find(item => item.workspaceId === workspaceId && item.principalId === row.principalId &&
+    item.ownerUserId === row.ownerUserId && (hosted || (item.grantId === facts?.renewal_grant_id &&
+      connectionUuid(item.grantId) && connectionUuid(item.tokenId) &&
+      (!Object.hasOwn(facts!, "token_id") || item.tokenId === facts?.token_id))));
+}
+
+/** Legacy and unknown families have no owner policy; dates never establish identity. */
+export function homeConnectionPolicy(row: Pick<HomeMapAgent, "work" | "transport">) {
+  const facts = row.work?.facts;
+  return (facts?.transport ?? row.transport) === "hosted_mcp" || connectionUuid(facts?.renewal_grant_id)
+    ? connectionPolicyFields((facts ?? {}) as unknown as Record<string, unknown>) : {};
+}
+
 export interface HomePeopleInput {
+  workspaceId?: string;
   viewerId: string | null;
   members: RailMember[];
   agents: HomeMapAgent[];
@@ -58,11 +81,11 @@ export function mapHomePeople(input: HomePeopleInput): HomePeople {
     firstName: names.get(member.userId) ?? "", initials: initials(member.name), you: member.userId === input.viewerId, role: member.role });
   const agent = (row: HomeMapAgent): AgentVM => {
     const owner = input.members.find(member => member.userId === row.ownerUserId);
-    const access = input.access.find(item => item.principalId === row.principalId);
+    const access = homeConnectionAccess(row, input.workspaceId, input.access);
     const raw = row.name.trim() || row.principalId;
     const yours = row.ownerUserId === input.viewerId;
     const work = row.work;
-    const policy = connectionPolicyFields((work?.facts ?? {}) as unknown as Record<string, unknown>);
+    const policy = homeConnectionPolicy(row);
     const workingOn = input.signals.filter(item => item.fromKind === "agent" && item.from === row.principalId && item.kind === "working-on" && Date.parse(item.until ?? "") > input.now)
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0];
     const facts: HomeAgentStatusInput = { own: yours, ownerName: owner?.name ?? null, ownerFirstName: names.get(row.ownerUserId) ?? null,
@@ -250,7 +273,7 @@ function countedNeedIds(row: WorkspaceCatchUp, now: number): Set<string> {
   ]);
 }
 export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: string, now: number, sample: boolean, signals: Signal[] = []): CatchUpDetail {
-  const roster: HomePeopleInput = { viewerId, now, sample, access: [], signals: [],
+  const roster: HomePeopleInput = { workspaceId: row.workspace_id, viewerId, now, sample, access: [], signals: [],
     members: row.people.map(person => ({ userId: person.user_id, name: person.display_name, role: person.role })),
     agents: row.people.flatMap(person => person.agents.map(agent => ({ principalId: agent.principal_id, name: agent.name,
       ownerUserId: person.user_id, work: agent.status }))) };

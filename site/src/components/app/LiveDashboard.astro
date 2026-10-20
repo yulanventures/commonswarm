@@ -1000,7 +1000,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice } from "../../lib/home/contract";
   import type { TodoVM, AgentVM, ObjectCardVM } from "../../lib/home-types";
-  import { mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
+  import { homeConnectionAccess, homeConnectionPolicy, mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
   import { agentPage } from "../../lib/home-agent";
   import { listsAndDocsFact } from "../../lib/home-agent-copy";
   import { todosPane, type TodoFilter } from "../../lib/home-todo-list";
@@ -1202,7 +1202,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import {
     grantRiskBadge,
     renewalGrantEnded,
-    connectionPolicyFields,
     connectionPolicyCopy,
     connectionPolicyState,
     type ConnectionPolicy,
@@ -2750,9 +2749,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           closeEntityPanel(false);
           return;
         }
-        const status = accessStatuses.find(
-          (candidate) => candidate.principalId === agent.principalId,
-        );
+        const status = homeConnectionAccess(agent, activeWorkspaceId, accessStatuses);
         const details = agentEntityView(
           agent,
           status,
@@ -4067,7 +4064,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
 
     const homeViewerId = (): string | null => session?.user.id ?? (sampleMode ? "sample-owner" : null);
-    const currentHomePeople = (): HomePeople => mapHomePeople({ viewerId: homeViewerId(), members,
+    const currentHomePeople = (): HomePeople => mapHomePeople({ workspaceId: activeWorkspaceId, viewerId: homeViewerId(), members,
       access: accessStatuses, signals: homeWorkClaims, agents, now: Date.now(), sample: sampleMode });
     const navigateHomeHref = (href: string): void => {
       void navigateHome(parseRoute(new URL(href, window.location.origin).search), "push");
@@ -4123,7 +4120,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const overviewRead = server.overview().then(overview => {
         if (!live()) return;
         for (const person of overview.workspaces.find(row => row.workspace_id === workspaceId)?.people ?? [])
-          for (const agent of person.agents) { const row = agents.find(row => row.principalId === agent.principal_id); if (row) row.work = agent.status; }
+          for (const agent of person.agents) { const row = agents.find(row => row.principalId === agent.principal_id && row.ownerUserId === person.user_id); if (row) row.work = agent.status; }
         renderHomeRail(); renderHomeShell(); renderHomeSide(); renderHomeObjectPane();
         if (homeRoute.view === "people") renderDialogRoster();
       }, () => { /* Status falls back to measured roster facts when overview is unavailable. */ });
@@ -4284,7 +4281,22 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             while (offset !== null) { const page = await server.agentQueue(route.workspaceId, route.agentId, { section, offset, limit: 50 }); if (!live()) return;
               queue[section].push(...page[section]); const next = page.next_offset[section]; if (next !== null && next <= offset) throw new Error("home_cursor_invalid"); offset = next; }
           }
-          homeQueue = queue; homeQueueRead = "ready"; const row = agents.find(row => row.principalId === route.agentId); if (row) row.work = { ...queue.status, facts: { ...row.work?.facts, ...queue.status.facts } }; homePolicies.set(route.agentId, queue.accepts_from);
+          if (queue.workspace_id !== route.workspaceId || queue.principal_id !== route.agentId ||
+            !agents.some(row => row.principalId === queue.principal_id && row.ownerUserId === queue.owner_user_id)) return;
+          homeQueue = queue; homeQueueRead = "ready";
+          const row = agents.find(row => row.principalId === queue.principal_id && row.ownerUserId === queue.owner_user_id);
+          if (row) {
+            const canonical = row.work?.facts;
+            const facts = { ...queue.status.facts };
+            // Queue is principal-wide. Keep Home's selected family and connection truth together.
+            if (canonical) for (const key of ["connection", "renewal_grant_id", "token_id", "connection_expires_at", "connection_expired_at"] as const) {
+              delete (facts as unknown as Record<string, unknown>)[key];
+              if (Object.hasOwn(canonical, key)) Object.assign(facts, { [key]: canonical[key] });
+            }
+            if (["removed", "connection_off"].includes(queue.status.facts.connection)) facts.connection = queue.status.facts.connection;
+            row.work = { ...queue.status, facts };
+          }
+          homePolicies.set(route.agentId, queue.accepts_from);
           renderHomeRail(); renderHomeObjectPane();
           const detailIds = [...new Set([...queue.not_yet.filter(row => row.gate.kind === "hold"), ...queue.working,
             ...homeTodoRows.filter(row => row.state === "done" && row.assignee?.kind === "agent" && row.assignee.id === route.agentId).sort((a, b) => Date.parse(b.state_at) - Date.parse(a.state_at)).slice(0, 5)].map(row => row.todo_id))];
@@ -4569,7 +4581,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           homeWorkingOn(workspace.id), workspaceFiles(workspace.id).then(value => homeFileCount(value), () => null),
         ]);
         // Page length is not an answer check: the read hides the viewer's own directed replies.
-        return { people: mapHomePeople({ viewerId: viewer, members: nextMembers.members, agents: nextAgents,
+        return { people: mapHomePeople({ workspaceId: workspace.id, viewerId: viewer, members: nextMembers.members, agents: nextAgents,
           access: nextAccess, signals: claims, now: Date.now(), sample: false }), signals: nextSignals,
           openTodos: null, lists: null, files: nextFiles, newMessages: null };
       }, entry => {
@@ -4788,7 +4800,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     // The roster's latest token cannot prove run/device eligibility. Require the
     // server's current family classification before promising continuity or editing.
     const renewalConnectionLive = (grant: AgentAccessStatus): boolean =>
-      agents.find(row => row.principalId === grant.principalId)?.work?.facts.connection === "live" &&
+      agents.some(row => row.work?.facts.connection === "live" && homeConnectionAccess(row, activeWorkspaceId, [grant]) === grant &&
+        ["permanent", "dated"].includes(connectionPolicyState(homeConnectionPolicy(row), true))) &&
       ["permanent", "dated"].includes(connectionPolicyState(grant, true)) &&
       [grant.grantId, grant.tokenId, grant.boundDeviceId].every(id => typeof id === "string" &&
         /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) &&
@@ -4920,8 +4933,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
     const mountRenewalEndDate = (host: HTMLElement, principalId: string): void => {
       const workspaceId = activeWorkspaceId, ownerId = session?.user.id, generation = connectionSettingsGeneration;
-      const grant = accessStatuses.find(row => row.principalId === principalId);
       const agent = agents.find(row => row.principalId === principalId);
+      const grant = agent ? homeConnectionAccess(agent, workspaceId, accessStatuses) : undefined;
       if (!ownerId || sampleMode || !agent) return;
       if (!grant) {
         // Home already read policy, but no family identity: show its truth without an editor.
@@ -4929,7 +4942,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         section.dataset.connectionEndDate = `${ownerId}:${workspaceId}:overview:${principalId}`;
         const heading = document.createElement("h3"); heading.textContent = "End date";
         const summary = document.createElement("p");
-        summary.textContent = connectionPolicyCopy(connectionPolicyFields((agent.work?.facts ?? {}) as unknown as Record<string, unknown>),
+        summary.textContent = connectionPolicyCopy(homeConnectionPolicy(agent),
           agent.work?.facts.connection === "live");
         section.append(heading, summary); host.append(section); return;
       }
@@ -4938,7 +4951,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const isCurrent = () => session?.user.id === ownerId && activeWorkspaceId === workspaceId && connectionSettingsGeneration === generation && !sampleMode;
       host.append(connectionEndDateEditor({ key: `${ownerId}:${workspaceId}:renewal:${grantId}`, workspaceId, kind: "renewal", grantId,
         isCurrent, current: () => {
-          const current = accessStatuses.find(row => row.grantId === grantId);
+          const canonical = agents.find(row => row.principalId === principalId && row.ownerUserId === ownerId);
+          const current = canonical ? homeConnectionAccess(canonical, workspaceId, accessStatuses.filter(row => row.grantId === grantId)) : undefined;
           return current ? { policy: current, live: renewalConnectionLive(current), owner: current.ownerUserId === ownerId &&
             agents.some(row => row.principalId === principalId && row.ownerUserId === ownerId) } : null;
         }, reread: async () => {
@@ -4946,9 +4960,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           if (!isCurrent()) return;
           accessStatuses = rows;
           const status = overview?.workspaces.find(row => row.workspace_id === workspaceId)?.people
-            .flatMap(person => person.agents).find(row => row.principal_id === principalId)?.status;
-          const agent = agents.find(row => row.principalId === principalId);
-          if (agent) agent.work = status;
+            .filter(person => person.user_id === agent.ownerUserId).flatMap(person => person.agents).find(row => row.principal_id === principalId)?.status;
+          const currentAgent = agents.find(row => row.principalId === principalId && row.ownerUserId === agent.ownerUserId);
+          if (currentAgent) currentAgent.work = status;
         } }));
     };
 
@@ -4967,8 +4981,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           mayRemove: !sampleMode && member.userId !== session?.user.id &&
             (me?.role === "owner" || (me?.role === "admin" && member.role !== "owner")) })),
         agents: agents.map((agent) => {
-          const grant = accessStatuses.find((candidate) => candidate.principalId === agent.principalId);
-          const policy = connectionPolicyFields((agent.work?.facts ?? {}) as unknown as Record<string, unknown>);
+          const grant = homeConnectionAccess(agent, activeWorkspaceId, accessStatuses);
+          const policy = homeConnectionPolicy(agent);
           const own = Boolean(me && agent.ownerUserId === me.userId && !sampleMode);
           const mayManage = Boolean(me && (elevated || agent.ownerUserId === me.userId) && !sampleMode);
           const ownerName = people.get(agent.ownerUserId) ?? null;
@@ -5171,7 +5185,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (!session || !activeWorkspaceId || !peopleDialogCanAct(peopleDialogModel(), action, id)) throw new Error("This action is no longer available. Go back and check the details.");
       const workspaceId = activeWorkspaceId, userId = session.user.id;
       const agent = agents.find((entry) => entry.principalId === id);
-      const grant = accessStatuses.find((entry) => entry.principalId === id);
+      const grant = agent ? homeConnectionAccess(agent, workspaceId, accessStatuses) : undefined;
       // These three continue in the workspace: the key prompt and the consent card are channel views.
       if (action === "new-key") { await navigateHome({ view: "chat", workspaceId }, "push"); openConnect(); window.requestAnimationFrame(() => one<SecretHoldingAgentConnect>("agent-connect")?.requestPromptFor(id)); return; }
       if (action === "connected-apps") { one<HTMLButtonElement>("[data-connected-apps-open]")?.click(); return; }

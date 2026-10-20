@@ -276,7 +276,7 @@ test("live canonical families outlast technical horizons; end dates and security
     assert.equal(status.kind, "active"); assert.equal(status.fix.action, null);
   }
   for (const policy of [{ connectionExpiresAt: at(1) }, { connectionExpiredAt: at(1) }]) {
-    const ended = peopleAgentStatus(input({ grant: key(policy) }), NOW);
+    const ended = peopleAgentStatus(input({ connection: "live", connectionPolicy: { connectionExpiresAt: undefined, connectionExpiredAt: undefined }, grant: key(policy) }), NOW);
     assert.equal(ended.label, "Connection ended"); assert.equal(ended.fix.action, null);
     const security = peopleAgentStatus(input({ grant: key({ ...policy, suspendedAt: at(1) }) }), NOW);
     assert.equal(security.label, "Access suspended"); assert.equal(security.fix.action, null);

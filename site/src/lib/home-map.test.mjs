@@ -806,12 +806,14 @@ test("on an agent's page the agent is the current rail row and its workspace is 
 
 // Caller regression: access policy must survive Home's projection into the shared status owner.
 test("Home preserves canonical connection endings without turning proof horizons into policy", () => {
-  const base = { principalId: "A", grantKind: "timeboxed", horizonExpiresAt: "2000-01-01T00:00:00Z",
+  const grantId = "66666666-6666-4666-8666-666666666666", tokenId = "88888888-8888-4888-8888-888888888888";
+  const base = { workspaceId: "W", ownerUserId: "zoe", grantId, tokenId, principalId: "A", grantKind: "timeboxed", horizonExpiresAt: "2000-01-01T00:00:00Z",
     boundDeviceId: "device", issuedAt: "2026-01-01T00:00:00Z", lastUsedAt: null,
     newHostAt: null, suspendedAt: null, grantRevokedAt: null, revokedAt: null };
-  const state = (fields, connection = "live") => mapHomePeople({ ...input,
-    agents: [{ ...input.agents[0], work: { work: "idle", facts: { connection } } }],
-    access: [{ ...base, ...fields }] }).groups[0].agents[0].state;
+  const state = (fields, connection = "live", identity = {}) => mapHomePeople({ ...input, workspaceId: "W",
+    agents: [{ ...input.agents[0], transport: "local", work: { work: "idle", facts: { transport: "local", connection,
+      renewal_grant_id: grantId, token_id: tokenId, connection_expires_at: false, connection_expired_at: "invalid" } } }],
+    access: [{ ...base, ...fields, ...identity }] }).groups[0].agents[0].state;
   for (const fields of [{}, { connectionExpiresAt: null },
     { connectionExpiresAt: undefined, connectionExpiredAt: null },
     { connectionExpiresAt: "bad-date", connectionExpiredAt: null },
@@ -832,6 +834,13 @@ test("Home preserves canonical connection endings without turning proof horizons
     assert.equal(ended.fix.action, null, "an elapsed family cannot be resumed");
     assert.equal(state(fields, "removed").detail, "Removed", "removal remains stronger than an end date");
     assert.equal(state({ ...fields, suspendedAt: "2026-10-02T00:00:00Z" }).detail, "Access suspended");
+  }
+  // A stale or foreign roster family cannot override the selected live Home connection.
+  for (const identity of [{ grantId: "77777777-7777-4777-8777-777777777777" },
+    { tokenId: "99999999-9999-4999-8999-999999999999" }, { ownerUserId: "amy" },
+    { workspaceId: "X" }, { principalId: "B" }]) {
+    const live = state({ connectionExpiresAt: "2026-10-01T00:00:00Z", suspendedAt: "2026-10-02T00:00:00Z", grantRevokedAt: "2026-10-02T00:00:00Z" }, "live", identity);
+    assert.equal(live.kind, "idle"); assert.equal(live.fix.action, null);
   }
   const suspended = state({ connectionExpiresAt: null, connectionExpiredAt: null, suspendedAt: "2026-10-02T00:00:00Z" });
   assert.equal(suspended.kind, "disconnected");
@@ -864,7 +873,8 @@ test("successful Home overview preserves canonical policy without a renewal rost
     const row = { ...overviewRow, people: [{ user_id: "zoe", display_name: "Zoe", role: "owner", is_viewer: true,
       agents: [{ principal_id: "A", name: "Claude", queue: null, status: { work: connection === "live" ? "idle" : "disconnected",
         facts: { transport: "local", turn_only: false, connection, last_activity_at: "2026-10-05T10:00:00Z",
-          messages_waiting_since: null, doing: null, working_on: null, ...fields } } }] }],
+          messages_waiting_since: null, doing: null, working_on: null, renewal_grant_id: "66666666-6666-4666-8666-666666666666",
+          token_id: "88888888-8888-4888-8888-888888888888", ...fields } } }] }],
       needs_you: { asks: [], assigned: [], waiting: [] } };
     const data = overviewCatchUpData(initialCatchUpData(workspaces), {
       viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: [row] }, false);

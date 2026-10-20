@@ -50,6 +50,8 @@ function installConnectionFixture() {
   if (scenario === "malformed") grant.connection_expired_at = "invalid";
   if (scenario === "dated") grant.connection_expires_at = "2034-01-01T00:00:00Z";
   if (scenario === "elapsed-fence") grant.connection_expired_at = before;
+  if (scenario === "home-mismatch") { grant.renewal_grant_id = hostedId; grant.suspended_at = recent; grant.revoked_at = recent; grant.connection_expires_at = before; }
+  if (scenario === "home-matched-ended") grant.connection_expires_at = before;
   const connection = { grant_id: hostedId, client_id: "https://connector.example.test",
     home_workspace_id: workspace, selected_workspace_ids: [workspace],
     state: scenario === "hosted-pending" ? "pending" : "active", revoked_at: scenario === "hosted-revoked" ? recent : null,
@@ -57,7 +59,7 @@ function installConnectionFixture() {
   if (scenario === "hosted-unknown") { delete (connection as any).connection_expires_at; delete (connection as any).connection_expired_at; }
   if (scenario === "hosted-malformed") (connection as any).connection_expired_at = false;
   const f = w.connectionFixture = { scenario, hosted, principal, owner, foreign, workspace, otherWorkspace, renewal, hostedId,
-    home, grant, connection, requests: [] as any[], unexpected: [] as string[], holdRead: false,
+    home, grant, connection, canonicalGrant: renewal, rotateFamily: false, requests: [] as any[], unexpected: [] as string[], holdRead: false,
     releaseRead: null as null | (() => void), failRead: false, mode: "accept", reads: 0, overviewReads: 0, readTargets: [] as string[] };
   const network = window.fetch.bind(window);
   const policyRead = async (target: string) => {
@@ -74,7 +76,7 @@ function installConnectionFixture() {
       if (url.pathname === "/auth/v1/user") return Response.json(user);
       if (url.pathname === "/auth/v1/logout") return new Response(null, { status: 204 });
       if (url.pathname === "/functions/v1/read") {
-        if (body.resource === "renewal_grants") { await policyRead("renewal"); return Response.json({ grants: home ? [] : [f.grant] }); }
+        if (body.resource === "renewal_grants") { await policyRead("renewal"); return Response.json({ grants: home && !["home-mismatch", "home-matched-ended"].includes(scenario) ? [] : [f.grant] }); }
         if (body.resource === "pending_access") return Response.json({ pending: [], agents: [] });
       }
       if (url.pathname === "/functions/v1/command") {
@@ -90,6 +92,11 @@ function installConnectionFixture() {
           if (f.mode === "http-unavailable") return new Response(null, { status: 501 });
           if (f.mode === "deny") return Response.json({ error: "forbidden" }, { status: 403 });
           (c.connection_kind === "hosted" ? f.connection : f.grant).connection_expires_at = c.connection_expires_at;
+          if (f.rotateFamily) {
+            f.rotateFamily = false;
+            f.grant = { ...f.grant, renewal_grant_id: hostedId, token_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", connection_expires_at: null };
+            f.canonicalGrant = hostedId;
+          }
           return Response.json({ status: "accepted", ok: true });
         }
         if (c.kind === "revoke_agent_token") { f.grant.token_revoked_at = recent; return Response.json({ status: "accepted" }); }
@@ -110,16 +117,19 @@ function installConnectionFixture() {
       }
       if (url.pathname === "/rest/v1/rpc/home_overview") {
         f.overviewReads++;
-        const status = { work: "idle", facts: { transport: hosted ? "hosted_mcp" : "local", turn_only: hosted,
+        const status = { work: "idle", facts: { renewal_grant_id: scenario === "home-legacy" ? null : f.canonicalGrant, token_id: f.grant.token_id, transport: hosted ? "hosted_mcp" : "local", turn_only: hosted,
           connection: scenario === "key-ended" ? "key_ended" : scenario === "connection-off" ? "connection_off" : scenario === "removed" ? "removed" : scenario === "suspended" ? "paused" : "live",
-          last_activity_at: recent, messages_waiting_since: null, doing: null, working_on: null } };
+          last_activity_at: recent, messages_waiting_since: null, doing: null, working_on: null,
+          ...(Object.hasOwn(f.grant, "connection_expires_at") ? { connection_expires_at: f.grant.connection_expires_at } : {}),
+          ...(Object.hasOwn(f.grant, "connection_expired_at") ? { connection_expired_at: f.grant.connection_expired_at } : {}) } };
         if (home) {
           const facts = status.facts as any;
           facts.connection = scenario === "home-ended" ? "key_ended" : scenario === "home-paused" ? "paused"
             : scenario === "home-removed" ? "removed" : scenario === "home-key-off" ? "key_off" : "live";
+          if (scenario === "home-unknown") { delete facts.connection_expires_at; delete facts.connection_expired_at; }
           if (scenario !== "home-unknown") {
             facts.connection_expires_at = scenario === "home-ended" ? before : scenario === "home-dated" ? "2034-01-01T00:00:00+00:00" : null;
-            facts.connection_expired_at = scenario === "home-ended" ? before : scenario === "home-malformed" ? "invalid" : null;
+            facts.connection_expired_at = scenario === "home-ended" ? before : ["home-malformed", "home-matched-ended"].includes(scenario) ? "invalid" : null;
           }
           status.work = facts.connection === "live" ? "idle" : "disconnected";
         }
@@ -180,13 +190,13 @@ async function observeConnectionApp() {
         one('[data-rail-agent="' + f.principal + '"]').click();
         await wait(() => one("[data-home-route-pane] [data-connection-end-date]"), "normal Home agent summary");
         const pane = one("[data-home-route-pane]"), summary = () => pane.querySelector("[data-connection-end-date]");
-        const expected = f.scenario === "home-permanent" ? "Stays connected until you remove it"
+        const expected = ["home-permanent", "home-mismatch"].includes(f.scenario) ? "Stays connected until you remove it"
           : f.scenario === "home-dated" ? "Connection ends"
-          : f.scenario === "home-ended" ? "Connection ended" : "Connection settings are managed by the server.";
+          : ["home-ended", "home-matched-ended"].includes(f.scenario) ? "Connection ended" : "Connection settings are managed by the server.";
         await wait(() => summary()?.textContent.includes(expected) && f.requests.some((r: any) => r.body?.command?.tool === "todo_queue") &&
           !pane.textContent.includes("Checking the line"), "canonical Home policy after queue read");
-        assert(!summary().querySelector("form"), "overview invented an editable family identity");
-        if (f.scenario === "home-ended") {
+        assert(!visible(summary().querySelector("form")), "overview invented an editable family identity");
+        if (["home-ended", "home-matched-ended"].includes(f.scenario)) {
           assert(pane.textContent.includes("This connection cannot be resumed."), "elapsed owner date lost its terminal reason");
           assert(!Array.from(pane.querySelectorAll("button")).some((b: any) => /new key|resume/i.test(b.textContent)), "ended Home offered recovery");
         }
@@ -210,7 +220,14 @@ async function observeConnectionApp() {
     const field = (selector: string): any => editor().querySelector(selector);
     const notice = () => editor().querySelector('[role="status"]').textContent;
     assert(writes().length === 0, "mount wrote a command");
-    const editable = ["renewal", "hosted", "dated", "legacy-permanent", "confirmation", "session-reset"].includes(f.scenario);
+    if (!form()) {
+      assert(["foreign", "grant-foreign", "principal-foreign"].includes(f.scenario), "missing admitted editor");
+      assert(!editor().querySelector("[data-end-date-save]"), "foreign family exposed a save control");
+      assert(writes().length === 0 && f.unexpected.length === 0, "foreign family sent a write");
+      document.documentElement.dataset.connectionObservation = JSON.stringify({ scenario: f.scenario, writes: writes(), reads: f.reads });
+      return;
+    }
+    const editable = ["renewal", "hosted", "dated", "legacy-permanent", "confirmation", "session-reset", "stale-family"].includes(f.scenario);
     await wait(() => f.overviewReads > 0 && visible(form()) === editable, "owner/live/policy mount admission");
     if (["unknown", "malformed", "hosted-unknown", "hosted-malformed", "key-ended", "connection-off", "removed", "unbound"].includes(f.scenario))
       assert(!editor().textContent.includes("Stays connected until you remove it"), "unknown or terminal promised permanence");
@@ -265,6 +282,22 @@ async function observeConnectionApp() {
       if (f.hosted) { one("[data-connected-apps-close]").click(); one("[data-connected-apps-open]").click(); }
       else one("#pd-agent-" + f.principal).click();
       await wait(() => field("[data-end-date-value]")?.value === "2035-02-03T04:05", "draft across reread/rerender");
+      if (f.scenario === "stale-family") {
+        const oldForm = form(), oldEditor = editor();
+        const original = f.grant.renewal_grant_id;
+        f.rotateFamily = true;
+        // Save still names the original grant. Its normal follow-up reads select another family.
+        oldForm.requestSubmit();
+        await wait(() => f.reads > 1 && !visible(oldForm), "canonical family changed after save");
+        assert(writes().length === 1 && writes()[0].command.grant_id === original, "draft retargeted its write");
+        assert(!oldEditor.textContent.includes("End date saved."), "different family confirmed original save");
+        oldForm.dispatchEvent(new Event("submit", { cancelable: true }));
+        one("#pd-agent-" + f.principal).click();
+        assert(writes().length === 1, "stale draft saved to replacement family");
+        assert(!visible(form()) || field("[data-end-date-value]").value !== "2035-02-03T04:05", "replacement inherited old draft");
+        document.documentElement.dataset.connectionObservation = JSON.stringify({ scenario: f.scenario, writes: writes(), reads: f.reads });
+        return;
+      }
       f.holdRead = true; form().requestSubmit();
       await wait(() => f.releaseRead, "save follow-up read");
       assert(!/saved\./.test(notice()), "success preceded the follow-up HTTP response");
@@ -382,7 +415,7 @@ browserTest("real app mounts enforce end-date identity, lifecycle and owner admi
     bundled.push((await build({ stdin: { contents: content, loader: "ts", resolveDir: dirname(path) }, bundle: true, write: false,
       format: "iife", platform: "browser", define: { "import.meta.env": JSON.stringify({ PUBLIC_H0_LINK_JOIN: "0" }) } })).outputFiles[0]!.text);
   }
-  const scenarios = ["home-permanent", "home-dated", "home-ended", "home-unknown", "home-malformed", "home-paused", "home-removed", "home-key-off", "renewal", "hosted", "confirmation", "session-reset", "legacy-permanent", "foreign", "grant-foreign", "principal-foreign", "unbound", "unknown", "malformed", "dated", "elapsed-fence", "key-ended", "connection-off", "removed", "ended", "ended-suspended", "bounded", "revoked", "suspended", "hosted-pending", "hosted-ended", "hosted-revoked", "hosted-unknown", "hosted-malformed"];
+  const scenarios = ["home-legacy", "home-mismatch", "home-matched-ended", "stale-family", "home-permanent", "home-dated", "home-ended", "home-unknown", "home-malformed", "home-paused", "home-removed", "home-key-off", "renewal", "hosted", "confirmation", "session-reset", "legacy-permanent", "foreign", "grant-foreign", "principal-foreign", "unbound", "unknown", "malformed", "dated", "elapsed-fence", "key-ended", "connection-off", "removed", "ended", "ended-suspended", "bounded", "revoked", "suspended", "hosted-pending", "hosted-ended", "hosted-revoked", "hosted-unknown", "hosted-malformed"];
   // Compile our own fixture functions from their authored source, avoiding
   // transpiler-generated closure helpers in Function.toString().
   const testSource = await readFile(new URL(import.meta.url), "utf8");
