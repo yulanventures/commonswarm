@@ -89,7 +89,8 @@ export async function recheckLocalCredential(tx:Sql,hash:Uint8Array,plan:LocalAu
 async function lockedCredentialFacts(tx:Sql,tokenHash:Uint8Array,exact:LocalCredentialIds,
   allowExpiredRenewal:boolean,stampUse:boolean):Promise<(AgentAuthRow & {first_use:boolean})|null> {
   // All waits precede this statement. Family policy, unlike a bearer deadline,
-  // is terminal. An expired used bearer is proof only for silent renewal.
+  // is terminal. Expired proof is admitted only for silent renewal; an unused
+  // predecessorless root additionally needs the exact permanent family below.
   const rows = await tx<(AgentAuthRow & { first_use:boolean; eligible_renewal:boolean })[]>`
     SELECT t.token_id,t.principal_id,t.run_id,r.device_id,p.owner_user_id,
       p.workspace_id AS principal_workspace_id,t.lineage_id,t.scopes,t.surrender_only,
@@ -99,7 +100,10 @@ async function lockedCredentialFacts(tx:Sql,tokenHash:Uint8Array,exact:LocalCred
       t.first_used_at IS NULL AS first_use,
       (g.kind='standing' AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
         AND g.connection_expired_at IS NULL AND g.revoked_at IS NULL
-        AND (t.first_used_at IS NOT NULL OR EXISTS(SELECT 1 FROM swarm.agent_tokens predecessor
+        AND (t.first_used_at IS NOT NULL
+          OR (t.first_used_at IS NULL AND t.predecessor_token_id IS NULL
+            AND g.horizon_expires_at IS NULL AND g.max_successors IS NULL)
+          OR EXISTS(SELECT 1 FROM swarm.agent_tokens predecessor
           WHERE predecessor.token_id=t.predecessor_token_id AND predecessor.first_used_at IS NOT NULL
             AND predecessor.revoked_at IS NULL AND NOT predecessor.surrender_only
             AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z
@@ -145,8 +149,9 @@ async function lockedCredentialFacts(tx:Sql,tokenHash:Uint8Array,exact:LocalCred
     await tx`UPDATE swarm.agent_tokens SET expires_at=${clock!.now}
       WHERE token_id=${exact.predecessor_token_id}::uuid AND revoked_at IS NULL AND expires_at>${clock!.now}`;
   }
-  // A saved pending successor proves possession here; the same transaction
-  // stamps real renewal use; command commits this before retrying issuance.
+  // A saved pending successor or eligible unused permanent root proves actual
+  // possession here. Command commits this use only after validation and final
+  // authorization, then retries issuance in a fresh transaction.
   return agent;
 }
 

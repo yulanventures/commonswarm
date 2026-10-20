@@ -81,10 +81,10 @@ try {
     return { status: r.status, body: clean(body), headers: r.headers };
   };
   const credential = (r) => { try { return JSON.parse(r.text).agent_token ?? null; } catch { return null; } };
-  const renew = async (token, commandId) => capture(await command.handleRequest(new Request('http://127.0.0.1/functions/v1/command', {
+  const renew = async (token, commandId, fields = {}, workspace = W) => capture(await command.handleRequest(new Request('http://127.0.0.1/functions/v1/command', {
     method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ command_id: commandId, client_version: CLIENT_PROTOCOL_VERSION, workspace_id: W,
-      stream: { kind: 'workspace' }, command: { kind: 'renew_agent_token' } }) })));
+    body: JSON.stringify({ command_id: commandId, client_version: CLIENT_PROTOCOL_VERSION, workspace_id: workspace,
+      stream: { kind: 'workspace' }, command: { kind: 'renew_agent_token', ...fields } }) })));
   const readAs = async (token) => capture(await read.handleRequest(new Request('http://127.0.0.1/functions/v1/read', {
     method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ resource: 'members', workspace_id: W }) })));
@@ -92,8 +92,8 @@ try {
   // A renewable seat: a local, unmanaged principal (no session proof needed, agent-auth.ts:246-248), its device and run,
   // a standing renewal grant bound to that device, and a root token T0 with a task/epoch binding and that grant (rows as
   // tests/p1-server/renewal-last-use.test.ts:70-80). T0 gets its first use from the real read route (a token is never
-  // born used, SWARM_TOKEN_FIRST_USE_PRESET), because a pending token may not renew (predecessor_pending_first_use).
-  const seat = async (name, use=true, boundDevice=null) => {
+  // born used, SWARM_TOKEN_FIRST_USE_PRESET). Unused expired permanent roots instead authenticate a renewal before issuance.
+  const seat = async (name, use=true, boundDevice=undefined, kind='standing') => {
     const principal = id(), device = id(), run = id(), task = id(), lineage = id(), grant = id(), t0 = id();
     const raw = mintRaw(), hash = await hashOf(raw);
     await observer.begin(async (tx) => {
@@ -102,11 +102,13 @@ try {
       await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id) VALUES (${run}::uuid, ${principal}::uuid, ${device}::uuid)`;
       await tx`INSERT INTO swarm.renewal_grants (renewal_grant_id, workspace_id, principal_id, run_id, kind, max_successors, successors_used,
         horizon_expires_at, bound_device_id, created_by)
-        VALUES (${grant}::uuid, ${W}::uuid, ${principal}::uuid, ${run}::uuid, 'standing', NULL, 0, NULL, ${boundDevice ?? device}::uuid, ${owner}::uuid)`;
+        VALUES (${grant}::uuid, ${W}::uuid, ${principal}::uuid, ${run}::uuid, ${kind==='timeboxed'?'timeboxed':'standing'}, ${kind==='timeboxed'?100:null}, 0,
+          ${kind==='timeboxed'?new Date(Date.now()+86400000):null}::timestamptz,
+          ${boundDevice===undefined ? device:boundDevice}::uuid, ${owner}::uuid)`;
       await tx`INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, task_id, epoch, scopes, token_hash, expires_at, lineage_id,
         renewal_grant_id)
         VALUES (${t0}::uuid, ${principal}::uuid, ${run}::uuid, ${task}::uuid, 1, ${tx.json(['post_signal'])}::jsonb, ${hash},
-        statement_timestamp() + interval '1 hour', ${lineage}::uuid, ${grant}::uuid)`;
+        statement_timestamp() + interval '1 hour', ${lineage}::uuid, ${kind==='no-family'?null:grant}::uuid)`;
     });
     if(use) {
       const firstUse = await readAs(raw);
@@ -302,11 +304,115 @@ try {
       check(`saved pending proof crash recovery ${attempt+1} commits use before next issuance`,used.used && credential(saved)!==null);
     }
     check('recovered successor reaches actual read',(await readAs(credential(saved))).status===200);
+    // Primary regression owner: real command/DB, no synthesized auth context.
     const bootstrap=await seat('unused-bootstrap',false);
     await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${bootstrap.t0}::uuid`;
-    const bootstrapBefore=await seatState(bootstrap),bootstrapDenied=await renew(bootstrap.raw,id());
-    check('expired unused root cannot borrow recovery authority',bootstrapDenied.status===401 || bootstrapDenied.status===403);
-    check('unused-root denial leaves no adoption or ledger',JSON.stringify(bootstrapBefore)===JSON.stringify(await seatState(bootstrap)));
+    const bootstrapBefore=await seatState(bootstrap);
+    check('unused-root ordinary expired read denies without use',[401,403].includes((await readAs(bootstrap.raw)).status)
+      && JSON.stringify(bootstrapBefore)===JSON.stringify(await seatState(bootstrap)));
+    const ordinaryFields={kind:'create',task_id:id(),slug:'unused-expired'};
+    check('unused-root ordinary expired command denies without use',[401,403].includes((await renew(bootstrap.raw,id(),ordinaryFields)).status)
+      && JSON.stringify(bootstrapBefore)===JSON.stringify(await seatState(bootstrap)));
+    for(const fields of [{token_id:bootstrap.t0},{principal_id:bootstrap.principal},{expires_at:'2099-01-01T00:00:00Z'},
+      {extra:true},{kind:'renew_agent_token ',principal_id:bootstrap.principal}]) {
+      const malformed=await renew(bootstrap.raw,id(),fields);
+      check('unused-root malformed renewal cannot commit use',malformed.status>=400
+        && JSON.stringify(bootstrapBefore)===JSON.stringify(await seatState(bootstrap)));
+    }
+    const recovered=await renew(bootstrap.raw,id()),recoveredRaw=credential(recovered);
+    const recoveredState=await seatState(bootstrap);
+    check('unused-root real renewal commits genuine use and one child',recovered.status===200 && recoveredRaw!==null
+      && recoveredState.tokens.length===2 && recoveredState.tokens.find(t=>t.token==='T0').used);
+    check('unused-root ordinary expired read still denies after recovery',[401,403].includes((await readAs(bootstrap.raw)).status)
+      && JSON.stringify(recoveredState)===JSON.stringify(await seatState(bootstrap)));
+    check('unused-root ordinary expired command still denies after recovery',[401,403].includes((await renew(bootstrap.raw,id(),ordinaryFields)).status)
+      && JSON.stringify(recoveredState)===JSON.stringify(await seatState(bootstrap)));
+    check('unused-root successor authenticates',recoveredRaw!==null && (await readAs(recoveredRaw)).status===200);
+    // A family with no device binding and a future owner date is still live.
+    const unbound=await seat('unused-unbound-future',false,null);
+    await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '1 day'
+      WHERE renewal_grant_id=${unbound.grant}::uuid`;
+    await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${unbound.t0}::uuid`;
+    check('unused-root NULL binding and future date renew',credential(await renew(unbound.raw,id()))!==null);
+    // Each refusal differs from the positive by one authority gate.
+    const foreignDevice=id();
+    await observer`INSERT INTO swarm.devices(device_id,user_id,label) VALUES(${foreignDevice}::uuid,${owner}::uuid,'Root foreign binding')`;
+    for(const variant of ['timeboxed','no-family','wrong-binding','surrendered','revoked','principal-revoked','family-tombstone','token-tombstone','terminal-date','elapsed-date','ended-run','revoked-device','removed-member','archived']) {
+      const bad=await seat(`unused-${variant}`,false,variant==='wrong-binding'?foreignDevice:undefined,
+        variant==='timeboxed'?'timeboxed':variant==='no-family'?'no-family':'standing');
+      await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${bad.t0}::uuid`;
+      if(variant==='surrendered') await observer`UPDATE swarm.agent_tokens SET surrender_only=true WHERE token_id=${bad.t0}::uuid`;
+      if(variant==='revoked') await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp() WHERE renewal_grant_id=${bad.grant}::uuid`;
+      if(variant==='principal-revoked') await observer`UPDATE swarm.agent_principals SET revoked_at=clock_timestamp() WHERE principal_id=${bad.principal}::uuid`;
+      if(variant==='family-tombstone') await observer`INSERT INTO swarm.revocation_tombstones(kind,target_id,created_by)
+        SELECT 'family',lineage_id,${owner}::uuid FROM swarm.agent_tokens WHERE token_id=${bad.t0}::uuid`;
+      if(variant==='token-tombstone') await observer`INSERT INTO swarm.revocation_tombstones(kind,target_id,created_by) VALUES('token',${bad.t0}::uuid,${owner}::uuid)`;
+      if(variant==='terminal-date') await observer`UPDATE swarm.renewal_grants SET connection_expired_at=clock_timestamp() WHERE renewal_grant_id=${bad.grant}::uuid`;
+      if(variant==='elapsed-date') await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second' WHERE renewal_grant_id=${bad.grant}::uuid`;
+      if(variant==='ended-run') await observer`UPDATE swarm.agent_runs SET ended_at=clock_timestamp() WHERE run_id=${bad.run}::uuid`;
+      if(variant==='revoked-device') await observer`UPDATE swarm.devices SET revoked_at=clock_timestamp() WHERE device_id=${bad.device}::uuid`;
+      if(variant==='removed-member') await observer`UPDATE swarm.memberships SET revoked_at=clock_timestamp() WHERE workspace_id=${W}::uuid AND user_id=${owner}::uuid`;
+      if(variant==='archived') await observer`UPDATE swarm.workspaces SET archived_at=clock_timestamp() WHERE workspace_id=${W}::uuid`;
+      try {
+        const before=await seatState(bad),refused=await renew(bad.raw,id());
+        check(`unused-root-${variant}-denied-without-effects`,[401,403].includes(refused.status)
+          && JSON.stringify(before)===JSON.stringify(await seatState(bad)));
+      } finally {
+        if(variant==='removed-member') await observer`UPDATE swarm.memberships SET revoked_at=NULL WHERE workspace_id=${W}::uuid AND user_id=${owner}::uuid`;
+        if(variant==='archived') await observer`UPDATE swarm.workspaces SET archived_at=NULL WHERE workspace_id=${W}::uuid`;
+      }
+    }
+    // Two independent command IDs cannot fork an unused permanent root.
+    const concurrent=await seat('unused-concurrent',false);
+    await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${concurrent.t0}::uuid`;
+    const replies=await Promise.all([renew(concurrent.raw,id()),renew(concurrent.raw,id())]);
+    const [children]=await observer`SELECT count(*)::int AS n FROM swarm.agent_tokens WHERE predecessor_token_id=${concurrent.t0}::uuid AND revoked_at IS NULL`;
+    check('unused-root concurrent recovery never forks',children.n===1 && replies.filter(r=>credential(r)!==null).length===1);
+    // Hold the real adoption UPDATE after it writes but before the final clock.
+    // The chosen date crossing this wait must roll back even the use stamp.
+    const crossing=await seat('unused-final-clock',false),clockFn=`root_clock_${tag}`;
+    const clockKey=Math.floor(Math.random()*1000000000);
+    await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${crossing.t0}::uuid`;
+    const crossingBefore=await seatState(crossing);
+    await observer.unsafe(`CREATE FUNCTION public.${clockFn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(130014, ${clockKey}); RETURN NEW; END $$`);
+    await observer.unsafe(`CREATE TRIGGER ${clockFn} AFTER UPDATE OF first_used_at ON swarm.agent_tokens FOR EACH ROW WHEN (OLD.token_id='${crossing.t0}'::uuid AND OLD.first_used_at IS NULL AND NEW.first_used_at IS NOT NULL) EXECUTE FUNCTION public.${clockFn}()`);
+    let crossingPending;
+    try {
+      await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '3 seconds' WHERE renewal_grant_id=${crossing.grant}::uuid`;
+      await observer.begin(async tx=>{
+        const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
+        await tx`SELECT pg_advisory_xact_lock(130014,${clockKey}::int)`;
+        crossingPending=renew(crossing.raw,id());
+        check('unused-root final-clock fixture reaches actual adoption wait',await waitBlockedBy(pid,100)>0);
+        await sleep(3200);
+      });
+      const denied=await crossingPending;
+      check('unused-root date crossing adoption wait rolls back stamp',denied.status===403
+        && JSON.stringify(crossingBefore)===JSON.stringify(await seatState(crossing)));
+    } finally {
+      if(crossingPending) await crossingPending;
+      await observer.unsafe(`DROP TRIGGER ${clockFn} ON swarm.agent_tokens`);
+      await observer.unsafe(`DROP FUNCTION public.${clockFn}()`);
+    }
+    // Fail only issuance after the real recovery-use transaction has committed.
+    // A restart/same-ID retry must use that truthful proof, never fake a stamp.
+    const interrupted=await seat('unused-issuance-interrupted',false),interruptedId=id(),failFn=`root_issue_${tag}`;
+    await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${interrupted.t0}::uuid`;
+    await observer.unsafe(`CREATE FUNCTION public.${failFn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture issuance interrupted' USING ERRCODE='40001'; END $$`);
+    await observer.unsafe(`CREATE TRIGGER ${failFn} BEFORE INSERT ON swarm.agent_tokens FOR EACH ROW WHEN (NEW.predecessor_token_id='${interrupted.t0}'::uuid) EXECUTE FUNCTION public.${failFn}()`);
+    try {
+      const failed=await renew(interrupted.raw,interruptedId),state=await seatState(interrupted);
+      check('unused-root issuance failure retains truthful use without child',failed.status>=500
+        && state.tokens.length===1 && state.tokens[0].used && state.idempotency.length===0 && state.events.length===0);
+    } finally {
+      await observer.unsafe(`DROP TRIGGER ${failFn} ON swarm.agent_tokens`);
+      await observer.unsafe(`DROP FUNCTION public.${failFn}()`);
+    }
+    const resumed=await renew(interrupted.raw,interruptedId);
+    check('unused-root same ID resumes after committed use',credential(resumed)!==null);
+    const replay=await renew(interrupted.raw,interruptedId);
+    check('unused-root lost-reply replay exposes no second secret',replay.status===200 && credential(replay)===null
+      && (await seatState(interrupted)).tokens.length===2);
     // A final effect wait must still defeat the new domain-commit path.
     const late=await seat('refusal-final-wait');
     await renew(late.raw,id()); // establish presence so the final write can wait
@@ -450,7 +556,16 @@ try {
     const convertedRead=()=>read.handleRequest(new Request('http://127.0.0.1/functions/v1/read',{
       method:'POST',headers:{authorization:`Bearer ${convertedRaw}`,'content-type':'application/json'},
       body:JSON.stringify({resource:'members',workspace_id:convertedWorkspace})}));
-    check('converted NULL-bound family has genuine runtime first use',(await convertedRead()).status===200);
+    await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second'
+      WHERE token_id=${convertedToken}::uuid`;
+    const [virginConverted]=await observer`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id=${convertedToken}::uuid`;
+    check('converted unused root starts without fabricated use',virginConverted.first_used_at===null);
+    check('converted unused root ordinary expired read denies',[401,403].includes((await convertedRead()).status));
+    const convertedRecovery=await renew(convertedRaw,id(),{},convertedWorkspace);
+    check('converted unused permanent NULL-bound root renews',credential(convertedRecovery)!==null);
+    check('converted successor authenticates at real read boundary',credential(convertedRecovery)!==null && (await capture(await read.handleRequest(new Request('http://127.0.0.1/functions/v1/read',{
+      method:'POST',headers:{authorization:`Bearer ${credential(convertedRecovery)}`,'content-type':'application/json'},
+      body:JSON.stringify({resource:'members',workspace_id:convertedWorkspace})})))).status===200);
     const [convertedUse]=await observer`SELECT t.first_used_at,g.kind,g.bound_device_id
       FROM swarm.agent_tokens t JOIN swarm.renewal_grants g USING(renewal_grant_id)
       WHERE t.token_id=${convertedToken}::uuid`;

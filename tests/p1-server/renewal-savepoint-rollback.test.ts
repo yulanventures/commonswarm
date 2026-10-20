@@ -55,6 +55,14 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
     assert.ok(result.tables_counted > 0, "enumerated full database table set");
     assert.deepEqual(result.checks?.filter((check) => !check.ok), [], "owner-boundary contracts failed");
     if(mode==='permanence') {
+      for(const name of ['unused-root real renewal commits genuine use and one child',
+        'unused-root ordinary expired read denies without use','unused-root ordinary expired read still denies after recovery',
+        'unused-root NULL binding and future date renew','converted unused permanent NULL-bound root renews',
+        'unused-root concurrent recovery never forks','unused-root date crossing adoption wait rolls back stamp',
+        'unused-root issuance failure retains truthful use without child','unused-root same ID resumes after committed use',
+        'unused-root lost-reply replay exposes no second secret'])
+        assert.ok(result.checks?.some(check=>check.name===name && check.ok), `${name}: actual DB proof required`);
+
       for(const variant of ['live-bootstrap','expired-unused','expired-used','pending','retired-history','predecessor-tombstone','elapsed','revoked','mismatched-device'])
         assert.ok(result.checks?.some(check=>check.name===`current-proof-${variant}-home-and-queue` && check.ok),
           `${variant}: both public read boundaries must return the expected connection truth`);

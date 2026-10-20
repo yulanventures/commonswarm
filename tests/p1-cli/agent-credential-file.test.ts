@@ -683,23 +683,38 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
           }
         }
       }
-      // An unused expired root gets no renewal authority; a live control still works.
+      // The exact unused permanent root silently renews; ordinary expired use
+      // cannot create the proof, either before or after renewal commits it.
       const unused = await fixture();
+      assert.ok([401, 403].includes(await use(unused.workspace, unused.token)));
+      const [beforeRecovery] = await sql<{ first_used_at: Date | null }[]>`
+        SELECT first_used_at FROM swarm.agent_tokens WHERE token_id = ${unused.tokenId}::uuid`;
+      assert.equal(beforeRecovery.first_used_at, null);
       const session = await AgentCredentialSession.open({ target, workspaceId: unused.workspace, presented: unused.presented, store: unused.store });
-      await assert.rejects(session.bearer(), RenewalCredentialCheckError);
-      const [refused] = await sql<{ first_used_at: Date | null; successors: number }[]>`
+      const recovered = await session.bearer();
+      assert.notEqual(recovered, unused.token);
+      const saved = await unused.store.read();
+      assert.equal(saved?.token, recovered);
+      assert.equal(saved?.generation, 1);
+      const [used] = await sql<{ first_used_at: Date | null; successors: number }[]>`
         SELECT first_used_at, (SELECT count(*)::integer FROM swarm.agent_tokens WHERE predecessor_token_id = ${unused.tokenId}::uuid) AS successors
         FROM swarm.agent_tokens WHERE token_id = ${unused.tokenId}::uuid`;
-      assert.equal(refused.first_used_at, null);
-      assert.equal(refused.successors, 0);
+      assert.ok(used.first_used_at);
+      assert.equal(used.successors, 1);
+      assert.ok([401, 403].includes(await use(unused.workspace, unused.token)));
+      assert.equal(await use(unused.workspace, recovered), 200);
       assert.equal(await use(f.workspace, await reopened.bearer()), 200);
     });
-    await t.test("unknown-expiry bare and artifact CLI inputs recover only after real authentication refusal", async () => {
-      for (const bare of [false, true]) {
+    await t.test("known and unknown expiry unused permanent CLI inputs silently renew and save", async () => {
+      for (const form of ["known", "bare", "artifact"] as const) {
+        const bare = form === "bare";
         const f = await fixture();
+        const [virgin] = await sql<{ first_used_at: Date | null }[]>`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id = ${f.tokenId}::uuid`;
+        assert.equal(virgin.first_used_at, null, `${form}: real CLI must start with an unused expired root`);
         const path = join(directory, `${f.tokenId}.json`);
         await writeFile(path, bare ? f.token : JSON.stringify({ message: "Agent credential minted.", status: "accepted",
-          principal_id: f.principal, token_id: f.tokenId, run_id: f.run, agent_token: f.token }), { mode: 0o600 });
+          principal_id: f.principal, token_id: f.tokenId, run_id: f.run, agent_token: f.token,
+          ...(form === "known" ? { expires_at: new Date(f.presented.expiresAt).toISOString() } : {}) }), { mode: 0o600 });
         const child = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", "command", "create",
           "--task-id", randomUUID(), "--slug", "unknown-cli", "--agent-token-file", path,
           "--url", target.url, "--anon-key", target.anonKey, "--workspace-id", f.workspace], {
@@ -710,7 +725,7 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
         let output = "";
         child.stderr.resume();
         for await (const part of child.stdout) output += part;
-        assert.equal(await exited, 0, "real CLI unknown-expiry command must complete");
+        assert.equal(await exited, 0, `${form}: real CLI unused-root command must complete`);
         assert.match(output, /"status": "accepted"/);
         const saved = await f.store.read();
         assert.equal(saved?.generation, 1);
