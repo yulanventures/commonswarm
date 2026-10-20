@@ -16,11 +16,16 @@ interface Target { url: string; mode: string; close(): Promise<void> }
 interface TargetHarness {
   openLockOrderTarget(options: { connector: unknown }): Promise<Target>;
   lockOrderConnector(issuance: { record: string; measure: string; enable: string }): unknown;
+  materializeActiveFloorSource(directory: string, generation: "current" | "H" | "F"): {path: string; commit: string; tree: string};
 }
 const harness = await import(new URL("../support/admin-principal-lock-order-harness.mjs", import.meta.url).href) as TargetHarness;
 const repo = fileURLToPath(new URL("../../", import.meta.url));
 
-for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: rollback, retry and credential continuity`, { timeout: 300_000 }, async () => {
+// Existing seeded storage/fault contracts retain their narrower claim: these
+// cases do not prove human admission, consent or AS issuance.
+const completedRenewalCases=new Set<string>();
+for(const [generation,readGeneration] of [['current','current'],['H','H'],['F','H'],['H','F'],['F','current'],['current','F'],['F','F']] as const)
+for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: rollback, retry and credential continuity${generation==='current' && readGeneration==='current' ? '' : ` exact ${generation}/${readGeneration}`}`, { timeout: 300_000 }, async () => {
   const target = await harness.openLockOrderTarget({ connector: harness.lockOrderConnector({
     record: recordChecksumEvidenceForTest, measure: measureIssuanceForTest, enable: enableIssuanceForTest,
   }) });
@@ -30,13 +35,17 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
     assert.equal(target.mode, "ci", "renewal regression requires the isolated CI database");
     directory = mkdtempSync(join(root, "anvil-secret."));
     chmodSync(directory, 0o700);
+    const source = harness.materializeActiveFloorSource(directory, generation);
+    const readSource = readGeneration === generation ? source : harness.materializeActiveFloorSource(directory, readGeneration);
     const config = join(directory, "target.json");
-    writeFileSync(config, JSON.stringify({ db_url: target.url }), { mode: 0o600 });
-    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, NO_COLOR: "1", SWARM_CMD_TEST_SLEEP_AFTER_STEP: "9:2500" };
+    writeFileSync(config, JSON.stringify({ db_url: target.url, source, read_source: readSource, active_floor: generation==='F' || readGeneration==='F' }), { mode: 0o600 });
+    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, NO_COLOR: "1" };
+    // Deterministic fault control belongs only to its existing rollback contract.
+    if (mode === "real_read") env.SWARM_CMD_TEST_SLEEP_AFTER_STEP = "9:2500";
     for (const key of ["HOME", "DENO_DIR", "XDG_CACHE_HOME"]) if (process.env[key]) env[key] = process.env[key];
     const child = spawn("deno", ["run", "--no-lock", "--config", join(repo, "supabase/functions/command/deno.json"),
       "--allow-read", "--allow-env", "--allow-net", join(repo, "tests/support/renewal-savepoint-rollback-harness.mjs"),
-      repo, mode, "", config], { cwd: repo, env, stdio: ["ignore", "pipe", "ignore"] });
+      source.path, mode, "", config], { cwd: repo, env, stdio: ["ignore", "pipe", "ignore"] });
     let stdout = "";
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => { stdout += chunk; });
@@ -49,12 +58,19 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
     assert.ok(line, `probe did not report: exit=${exit.code}, signal=${exit.signal}`);
     const result = JSON.parse(line.slice("R13_PROBE ".length)) as {
       stage: string; error?: string; verdict?: string; tables_counted: number;
+      hook_sleep?: string | null;
+      active_catalog?: {functions:number;migrations:number;view_columns:number;measured_view_sha256:string};
       checks?: { name: string; ok: boolean }[];
     };
+    if (mode === "permanence") assert.equal(result.hook_sleep, null, "permanence runs without fault hooks");
+    assert.equal(exit.signal, null, "a signalled child cannot supply proof");
     assert.equal(result.stage, "complete", `probe stopped at ${result.stage}: ${result.error ?? "unknown"}`);
     assert.ok(result.tables_counted > 0, "enumerated full database table set");
     assert.deepEqual(result.checks?.filter((check) => !check.ok), [], "owner-boundary contracts failed");
     if(mode==='permanence') {
+      for(const contract of ['command denial rolls back both adoptions and every table','activity denial rolls back both adoptions and every table',
+        'ordinary-timeboxed-live-positive','ordinary-expired-unused-refused','ordinary-expired-unused-full-denial-rollback'])
+        assert.ok(result.checks?.some(check=>check.name===contract && check.ok),contract);
       for(const name of ['unused-root real renewal commits genuine use and one child',
         'unused-root ordinary expired read denies without use','unused-root ordinary expired read still denies after recovery',
         'unused-root NULL binding and future date renew','converted unused permanent NULL-bound root renews',
@@ -88,6 +104,7 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
     }
     assert.equal(result.verdict, "PASS");
     assert.equal(exit.code, 0);
+    completedRenewalCases.add(`${generation}/${readGeneration}/${mode}`);
   } finally {
     if (directory) {
       const resolved = realpathSync(directory);
@@ -98,4 +115,12 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
     }
     await target.close();
   }
+});
+
+// A filtered or inconclusive child never counts as required F evidence.
+test('active-floor-required-F-renewal-complete',()=>{
+  for(const [command,read] of [['current','current'],['H','H'],['F','H'],['H','F'],['F','current'],['current','F'],['F','F']])
+    for(const mode of ['real_read','permanence'])
+      assert.ok(completedRenewalCases.has(`${command}/${read}/${mode}`),`required renewal ${command}/${read}/${mode} did not complete`);
+  assert.equal(completedRenewalCases.size,14);
 });
