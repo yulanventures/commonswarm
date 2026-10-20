@@ -8178,13 +8178,21 @@ async function resumeRenewalGrant(
   /* The whole gate, in one call, under its own row lock. The returned value is a
      code we assign — never a message, and never classified by parsing one
      (D-053). NULL means the resume happened. */
-  const outcomeRows = await tx<{ resume_outcome: string | null }[]>`
-    SELECT swarm.resume_renewal_grant(
-      ${workspaceId}::uuid,
-      ${renewalGrantId}::uuid,
-      ${userId}::uuid
-    ) AS resume_outcome
-  `;
+  let outcomeRows: { resume_outcome: string | null }[];
+  try {
+    outcomeRows = await tx.savepoint(sp => sp<{ resume_outcome: string | null }[]>`
+      SELECT swarm.resume_renewal_grant(
+        ${workspaceId}::uuid, ${renewalGrantId}::uuid, ${userId}::uuid
+      ) AS resume_outcome
+    `);
+  } catch (error) {
+    // Only our private binding marker is a domain refusal. The savepoint has
+    // unwound before auditing; all other SQL errors (including 40001) escape.
+    const failure = record(error);
+    if (failure?.code !== '22023' || failure.detail !== 'LOCAL_DISCOVERY_BINDING') throw error;
+    return await refuse('authz', 'renewal_resume_renewal_resume_forbidden', forbidden,
+      `renewal_grant_id=${renewalGrantId}`);
+  }
   /* ★ NULL IS THE SUCCESS VALUE, SO IT MUST SURVIVE THE READ.
    *
    * This was `outcomeRows[0]?.resume_outcome ?? "renewal_resume_forbidden"`, and `??` cannot
@@ -10838,16 +10846,19 @@ async function handleTransaction(
       return {status:400,body:{error:'invalid_request'}};
     const resumeFamily=kind===RESUME_RENEWAL_GRANT_KIND && typeof rawLocal?.renewal_grant_id==='string'
       && UUID_RE.test(rawLocal.renewal_grant_id) ? rawLocal.renewal_grant_id : undefined;
-    if (resumeFamily) {
-      if (!verifiedHuman || !localWorkspace) return {status:403,body:{error:'forbidden'}};
-      const [admitted]=await tx`SELECT g.renewal_grant_id FROM swarm.renewal_grants g
+    let resumeAdmissionRefusal: 'renewal_grant_not_found' | 'renewal_resume_forbidden' | null = null;
+    if (resumeFamily && verifiedHuman && localWorkspace) {
+      // Nonlocking route-scoped discovery chooses a plan, never authority.
+      // Known refusals retain only the actor's plan until real authentication.
+      const [admitted]=await tx<{owner_user_id:string;role:string}[]>`SELECT p.owner_user_id,m.role FROM swarm.renewal_grants g
         JOIN swarm.agent_principals p USING(principal_id)
         JOIN swarm.memberships m ON m.workspace_id=g.workspace_id AND m.user_id=${verifiedHuman.userId}::uuid
         JOIN swarm.workspaces w ON w.workspace_id=g.workspace_id
         WHERE g.renewal_grant_id=${resumeFamily}::uuid AND g.workspace_id=${localWorkspace}::uuid
-          AND p.workspace_id=g.workspace_id AND m.revoked_at IS NULL AND w.archived_at IS NULL
-          AND (p.owner_user_id=${verifiedHuman.userId}::uuid OR m.role IN ('owner','admin'))`;
-      if (!admitted) return {status:403,body:{error:'forbidden'}};
+          AND p.workspace_id=g.workspace_id AND m.revoked_at IS NULL AND w.archived_at IS NULL`;
+      if (!admitted) resumeAdmissionRefusal='renewal_grant_not_found';
+      else if (admitted.owner_user_id!==verifiedHuman.userId && !['owner','admin'].includes(admitted.role))
+        resumeAdmissionRefusal='renewal_resume_forbidden';
     }
     const joinAttempt = kind===REGISTER_AGENT_SEAT_KIND && typeof rawLocal?.attempt_id==='string' && UUID_RE.test(rawLocal.attempt_id)
       ? rawLocal.attempt_id : null;
@@ -10892,31 +10903,56 @@ async function handleTransaction(
       : kind==='revoke_agent_principal' && principalTargets.size===1 ? {principal:[...principalTargets][0]!}
       : kind==='revoke_agent_token' && tokenTargets[0] ? {token:tokenTargets[0]} : undefined;
     const target=principalTargets.size || tokenTargets.length ? {principals:[...principalTargets],tokens:tokenTargets}:undefined;
-    localPlan = hostedSeat===null && (!HOSTED_MANAGEMENT_KINDS.has(kind) || localExpiry) ? await planLocalOperation(tx, {
-      ...(agentTokenHash ? {hash:agentTokenHash}:{}), workspace:localWorkspace,actor:verifiedHuman?.userId,
-      ...(resumeFamily ? {resumeFamily}:{}),
-      household,householdQueue:rawLocal?.tool==='todo_queue',...(todoId ? {todo:todoId}:{}),
-      streamIds:[CLAIM_AGENT_INBOX_KIND,ACK_AGENT_DELIVERY_KIND,TOUCH_PRESENCE_KIND].includes(kind) ? [] : localStreams.map(r=>r.stream_id),
-      workspaceMode: household || revocation || localExpiry || verifiedHuman
-        || (WORKSPACE_COMMAND_KINDS as readonly string[]).includes(kind) && kind!==RENEW_AGENT_TOKEN_KIND ? 'update':'share',
-      ...(target && !revocation ? {target}:tokenTargets.length ? {target:{principals:[],tokens:tokenTargets}}:{}),
-      ...(revocation ? {revocation}:{}),
-      memberTargets:removeUser ? [removeUser] : kind==='change_role' && typeof rawLocal?.user_id==='string' && UUID_RE.test(rawLocal.user_id) ? [rawLocal.user_id]:[],
-      principalMode: kind===CLAIM_AGENT_INBOX_KIND?'noKeyUpdate'
-        : kind==='acquire_agent_session' || revocation || ['enable_agent_management','disable_agent_management','recover_agent_session','declare_agent_model','set_agent_model'].includes(kind) ? 'update':'share',
-      sessionMode:['acquire_agent_session','renew_agent_session','release_agent_session','enable_agent_management','disable_agent_management','recover_agent_session'].includes(kind)?'update':'share',
-      hostedMode:revocation ? 'update':'share',
-      ...(joinCredentialHash && joinAttempt ? {join:{hash:joinCredentialHash,attempt:joinAttempt}}:{}),
-    }) : null;
-    if(localPlan && verifiedHuman && (kind==='revoke_agent_token' || consent?.kind==='local')) {
-      const selected=localPlan.snapshot.bindings.find(b=>b.token_id===(kind==='revoke_agent_token'?rawLocal?.token_id:consent?.connection_id));
-      const [member]=await tx<{role:string}[]>`SELECT role FROM swarm.memberships
-        WHERE workspace_id=${localWorkspace ?? null}::uuid AND user_id=${verifiedHuman.userId}::uuid AND revoked_at IS NULL`;
-      if(selected && selected.owner_user_id!==verifiedHuman.userId
-        && (consent?.kind==='local' || !member || !['owner','admin'].includes(member.role)))
-        return {status:403,body:{error:'forbidden'}};
+    if (resumeFamily && hostedSeat===null) {
+      if (verifiedHuman && !resumeAdmissionRefusal) {
+        try {
+          localPlan=await tx.savepoint(async sp=>{
+            const plan=await planLocalOperation(sp,{workspace:localWorkspace,actor:verifiedHuman.userId,
+              resumeFamily,streamIds:localStreams.map(r=>r.stream_id),workspaceMode:'update'});
+            if (plan) await lockLocalAuthPlan(sp,plan);
+            return plan;
+          });
+        } catch (error) {
+          const failure=record(error);
+          if (failure?.code!=='22023' || failure.detail!=='LOCAL_DISCOVERY_BINDING') throw error;
+          // No locks or closure from the failed family plan may survive. Rebuild
+          // actor-only from scratch, in the same canonical order, after rollback.
+          localPlan=null;
+          resumeAdmissionRefusal='renewal_resume_forbidden';
+        }
+      }
+      if (!localPlan) {
+        localPlan=await planLocalOperation(tx,{
+          ...(agentTokenHash ? {hash:agentTokenHash}:{}),workspace:localWorkspace,actor:verifiedHuman?.userId,
+          streamIds:localStreams.map(r=>r.stream_id),workspaceMode:verifiedHuman?'update':'share'});
+        if (localPlan) await lockLocalAuthPlan(tx,localPlan);
+      }
+    } else {
+      localPlan = hostedSeat===null && (!HOSTED_MANAGEMENT_KINDS.has(kind) || localExpiry) ? await planLocalOperation(tx, {
+        ...(agentTokenHash ? {hash:agentTokenHash}:{}), workspace:localWorkspace,actor:verifiedHuman?.userId,
+        household,householdQueue:rawLocal?.tool==='todo_queue',...(todoId ? {todo:todoId}:{}),
+        streamIds:[CLAIM_AGENT_INBOX_KIND,ACK_AGENT_DELIVERY_KIND,TOUCH_PRESENCE_KIND].includes(kind) ? [] : localStreams.map(r=>r.stream_id),
+        workspaceMode: household || revocation || localExpiry || verifiedHuman
+          || (WORKSPACE_COMMAND_KINDS as readonly string[]).includes(kind) && kind!==RENEW_AGENT_TOKEN_KIND ? 'update':'share',
+        ...(target && !revocation ? {target}:tokenTargets.length ? {target:{principals:[],tokens:tokenTargets}}:{}),
+        ...(revocation ? {revocation}:{}),
+        memberTargets:removeUser ? [removeUser] : kind==='change_role' && typeof rawLocal?.user_id==='string' && UUID_RE.test(rawLocal.user_id) ? [rawLocal.user_id]:[],
+        principalMode: kind===CLAIM_AGENT_INBOX_KIND?'noKeyUpdate'
+          : kind==='acquire_agent_session' || revocation || ['enable_agent_management','disable_agent_management','recover_agent_session','declare_agent_model','set_agent_model'].includes(kind) ? 'update':'share',
+        sessionMode:['acquire_agent_session','renew_agent_session','release_agent_session','enable_agent_management','disable_agent_management','recover_agent_session'].includes(kind)?'update':'share',
+        hostedMode:revocation ? 'update':'share',
+        ...(joinCredentialHash && joinAttempt ? {join:{hash:joinCredentialHash,attempt:joinAttempt}}:{}),
+      }) : null;
+      if(localPlan && verifiedHuman && (kind==='revoke_agent_token' || consent?.kind==='local')) {
+        const selected=localPlan.snapshot.bindings.find(b=>b.token_id===(kind==='revoke_agent_token'?rawLocal?.token_id:consent?.connection_id));
+        const [member]=await tx<{role:string}[]>`SELECT role FROM swarm.memberships
+          WHERE workspace_id=${localWorkspace ?? null}::uuid AND user_id=${verifiedHuman.userId}::uuid AND revoked_at IS NULL`;
+        if(selected && selected.owner_user_id!==verifiedHuman.userId
+          && (consent?.kind==='local' || !member || !['owner','admin'].includes(member.role)))
+          return {status:403,body:{error:'forbidden'}};
+      }
+      if (localPlan) await lockLocalAuthPlan(tx,localPlan);
     }
-    if (localPlan) await lockLocalAuthPlan(tx,localPlan);
     if(invitationHintHash) {
       const [hint]=await tx<{workspace_id:string}[]>`SELECT workspace_id FROM swarm.invitations WHERE token_hash=${invitationHintHash}`;
       if(hint?.workspace_id!==localWorkspace) throw new LocalAuthDiscoveryChanged();
@@ -11153,7 +11189,16 @@ async function handleTransaction(
        not a reducer command and has no arm there; falling through would earn
        "unknown command kind". */
     if (kind === RESUME_RENEWAL_GRANT_KIND) {
-      return await resumeRenewalGrant(tx, body, auth, route, ignoredIdentity);
+      if (resumeAdmissionRefusal && auth.credentialKind==='user' && auth.identityVerified) {
+        return decided(await auditRefusal(tx,auth,kind,{
+          outcome:'authz',reason:`renewal_resume_${resumeAdmissionRefusal}`,
+          detail:[ignoredIdentity,`renewal_grant_id=${resumeFamily}`].filter(Boolean).join('; '),
+          workspaceId:route.workspaceId,streamId:route.streamId,
+        },{status:403,body:{error:'forbidden'}}));
+      }
+      // Agent domain refusals commit their audit/use only after the final
+      // credential and session fences below; failed authentication rolls back.
+      return decided(await resumeRenewalGrant(tx, body, auth, route, ignoredIdentity));
     }
     if (kind === "claim_wake_lease" || kind === "renew_wake_lease" || kind === "release_wake_lease") {
       const command = record(body.command);

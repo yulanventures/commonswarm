@@ -178,7 +178,7 @@ BEGIN
   INTO bindings FROM rows;
   IF EXISTS (SELECT 1 FROM jsonb_to_recordset(bindings) b(token_id uuid, predecessor_token_id uuid, renewal_grant_id uuid, principal_id uuid, run_id uuid, device_id uuid, owner_user_id uuid, workspace_id uuid, lineage_id uuid, token_parent_admin_grant_id uuid, principal_parent_admin_grant_id uuid)
       WHERE b.workspace_id<>p_workspace_id) THEN
-    RAISE EXCEPTION 'LOCAL_DISCOVERY_BINDING' USING ERRCODE='22023';
+    RAISE EXCEPTION 'LOCAL_DISCOVERY_BINDING' USING ERRCODE='22023',DETAIL='LOCAL_DISCOVERY_BINDING';
   END IF;
   IF EXISTS (
     SELECT 1 FROM jsonb_to_recordset(bindings) b(token_id uuid,renewal_grant_id uuid,principal_id uuid,
@@ -192,7 +192,7 @@ BEGIN
       OR (p_resume_family_id IS NOT NULL AND (g.renewal_grant_id IS DISTINCT FROM p_resume_family_id
         OR (g.bound_device_id IS NOT NULL AND g.bound_device_id IS DISTINCT FROM b.device_id)))
   ) THEN
-    RAISE EXCEPTION 'LOCAL_DISCOVERY_BINDING' USING ERRCODE='22023';
+    RAISE EXCEPTION 'LOCAL_DISCOVERY_BINDING' USING ERRCODE='22023',DETAIL='LOCAL_DISCOVERY_BINDING';
   END IF;
   IF EXISTS(SELECT 1 FROM swarm.agent_tokens child LEFT JOIN swarm.agent_tokens pred
       ON pred.token_id=child.predecessor_token_id
@@ -204,7 +204,7 @@ BEGIN
       b(lineage_id uuid,principal_id uuid,run_id uuid,renewal_grant_id uuid,owner_user_id uuid,workspace_id uuid)
       WHERE b.lineage_id IS NOT NULL GROUP BY b.lineage_id
       HAVING count(DISTINCT ROW(b.principal_id,b.run_id,b.renewal_grant_id,b.owner_user_id,b.workspace_id))>1) THEN
-    RAISE EXCEPTION 'LOCAL_DISCOVERY_BINDING' USING ERRCODE='22023';
+    RAISE EXCEPTION 'LOCAL_DISCOVERY_BINDING' USING ERRCODE='22023',DETAIL='LOCAL_DISCOVERY_BINDING';
   END IF;
   IF (p_all_workspace OR cardinality(p_token_ids)>0 OR p_resume_family_id IS NOT NULL) AND (jsonb_array_length(bindings)>4096 OR
     (SELECT count(DISTINCT b.owner_user_id)>256 OR count(DISTINCT b.principal_id)>256
@@ -1276,6 +1276,15 @@ BEGIN
      UNION SELECT b.principal_parent_admin_grant_id FROM jsonb_to_recordset(local_before) b(principal_parent_admin_grant_id uuid))
     AND (a.state<>'active' OR a.revoked_at IS NOT NULL OR a.expires_at<=local_now OR a.refresh_deadline<=local_now))
     THEN RETURN 'renewal_resume_forbidden'; END IF;
+  IF grant_row.revoked_at IS NOT NULL OR grant_row.connection_expired_at IS NOT NULL
+    OR grant_row.connection_expires_at<=local_now OR EXISTS(SELECT 1 FROM swarm.revocation_tombstones z
+      WHERE z.kind='renewal_grant' AND z.target_id=grant_row.renewal_grant_id) THEN
+    RETURN 'renewal_grant_revoked';
+  END IF;
+  IF NOT grant_row.suspension_active THEN
+    RETURN 'renewal_grant_not_suspended';
+  END IF;
+  -- Recoverability cannot hide an already terminal or unpaused grant.
   IF NOT EXISTS(SELECT 1 FROM swarm.agent_tokens t
     WHERE t.renewal_grant_id=grant_row.renewal_grant_id AND t.revoked_at IS NULL AND NOT t.surrender_only
       AND NOT EXISTS(SELECT 1 FROM swarm.agent_tokens child WHERE child.predecessor_token_id=t.token_id
@@ -1293,14 +1302,6 @@ BEGIN
         (('token',t.token_id),('principal',t.principal_id),('run',t.run_id),('device',(SELECT r.device_id FROM swarm.agent_runs r WHERE r.run_id=grant_row.run_id)),
          ('lineage',t.lineage_id),('family',t.lineage_id),('membership',grant_row.created_by))))
     THEN RETURN 'renewal_resume_forbidden'; END IF;
-  IF grant_row.revoked_at IS NOT NULL OR grant_row.connection_expired_at IS NOT NULL
-    OR grant_row.connection_expires_at<=local_now OR EXISTS(SELECT 1 FROM swarm.revocation_tombstones z
-      WHERE z.kind='renewal_grant' AND z.target_id=grant_row.renewal_grant_id) THEN
-    RETURN 'renewal_grant_revoked';
-  END IF;
-  IF NOT grant_row.suspension_active THEN
-    RETURN 'renewal_grant_not_suspended';
-  END IF;
 
   UPDATE swarm.renewal_grants
   SET resumed_at = local_now,
