@@ -340,6 +340,10 @@ test('a removed content role is not written again, and a first confirmation stil
     const tx = (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join(' ');
       const reply = (rows: unknown[]) => Promise.resolve(rows);
+      if (query.startsWith('LOCK TABLE swarm.household_content_connections IN ACCESS SHARE MODE')) return reply([]);
+      if (query.includes('FROM pg_catalog.pg_policy')) return reply([{ present: false }]);
+      // This invitation fixture has no hosted seats to invalidate.
+      if (query.includes('SELECT grant_id,principal_id FROM swarm.hosted_mcp_seats')) return reply([]);
       if (query.includes('created_by AS inviter')) return reply([invite(createdAt)]);
       if (query.includes('FROM swarm.workspaces')) return reply([{ name: 'Shared home', archived_at: null }]);
       if (query.includes('SELECT stream_id,head_seq')) return reply([{ stream_id: joinStream, head_seq: 0 }]);
@@ -407,6 +411,8 @@ test('a removed content role is not written again, and a first confirmation stil
   const staleWrites: string[] = [];
   const staleTx = (strings: TemplateStringsArray) => {
     const query = strings.join(' ');
+    if (query.startsWith('LOCK TABLE swarm.household_content_connections IN ACCESS SHARE MODE')) return Promise.resolve([]);
+    if (query.includes('FROM pg_catalog.pg_policy')) return Promise.resolve([{ present: false }]);
     if (query.includes('INSERT INTO swarm.household_member_content_roles') || query.includes('UPDATE swarm.household_member_content_roles') || query.includes('INSERT INTO swarm.memberships')) staleWrites.push(query);
     if (query.includes('created_by AS inviter') || query.includes('consumed_at AS accepted_at')) {
       return Promise.resolve([invite(joinNow - 180_000)]);
