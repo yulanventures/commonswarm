@@ -641,6 +641,7 @@ function hostedHarnessLaunch(options: {databaseUrl?: string; rollbackBeforeStep?
       ...(process.env.DENO_DIR ? { DENO_DIR: process.env.DENO_DIR } : {}),
       SWARM_ENV: "test",
       SWARM_MCP_PUBLIC_ENABLED: "1",
+      SWARM_MCP_TODOS_LISTS_ENABLED: "1",
       SWARM_DATABASE_URL: options.databaseUrl ?? local.DB_URL,
       SUPABASE_DB_URL: options.databaseUrl ?? local.DB_URL,
       ...(options.rollbackBeforeStep ? { SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP: String(options.rollbackBeforeStep) } : {}),
@@ -793,6 +794,24 @@ test("catalog rollback preserves every receipt kind and reapply is search-path i
     // M1 adds a real FK to hosted grants. Reverse newer, data-free schema first
     // in an empty DDL snapshot; retain every original grant/artifact/receipt.
     await tx.unsafe(emptySchema);
+    const [emptyRestrictions] = await tx`SELECT count(*)::int AS n FROM swarm.household_hosted_content_restrictions`;
+    assert.equal(emptyRestrictions!.n, 0, "historical inverse runs only on an empty restriction fixture");
+    // 00006 retains this table on rollback. Its one grant-workspace FK must
+    // leave only this empty, transaction-rolled-back historical HM drill.
+    const newerFks = await tx<{ name: string; columns: string[]; targets: string[] }[]>`
+      SELECT c.conname AS name,
+        ARRAY(SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY k(num,ord)
+          JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.num ORDER BY k.ord) AS columns,
+        ARRAY(SELECT a.attname::text FROM unnest(c.confkey) WITH ORDINALITY k(num,ord)
+          JOIN pg_attribute a ON a.attrelid=c.confrelid AND a.attnum=k.num ORDER BY k.ord) AS targets
+      FROM pg_constraint c WHERE c.contype='f'
+        AND c.conrelid='swarm.household_hosted_content_restrictions'::regclass
+        AND c.confrelid='swarm.hosted_mcp_grant_workspaces'::regclass`;
+    assert.equal(newerFks.length, 1);
+    const newerFk = newerFks[0]!;
+    assert.deepEqual(newerFk.columns, ['grant_id','workspace_id','owner_user_id']);
+    assert.deepEqual(newerFk.targets, newerFk.columns);
+    await tx`ALTER TABLE swarm.household_hosted_content_restrictions DROP CONSTRAINT ${tx(newerFk.name)}`;
     for (const version of [...adminVersions].reverse()) {
       await tx.unsafe(repoSql(`supabase/admin-delegation-reserve/${version}-rollback.sql`));
     }
@@ -875,6 +894,9 @@ test("catalog rollback preserves every receipt kind and reapply is search-path i
     await tx.unsafe(reclaimMigration());
     const [reclaimAfter] = await tx.unsafe<{ catalog_ok: boolean }[]>(reclaimCatalog());
     assert.equal(reclaimAfter?.catalog_ok, true, "010 reapply after HM restores live-name schema");
+    await tx`ALTER TABLE swarm.household_hosted_content_restrictions ADD CONSTRAINT ${tx(newerFk.name)}
+      FOREIGN KEY(grant_id,workspace_id,owner_user_id)
+      REFERENCES swarm.hosted_mcp_grant_workspaces(grant_id,workspace_id,owner_user_id)`;
     throw rollbackDrill;
   }).catch((error) => {
     if (error !== rollbackDrill) throw error;
@@ -2274,16 +2296,17 @@ for(const operation of ['read','write'] as const) {
     const f=await ownerContentHttpFixture();
     try {
       const object=randomUUID();
-      const setup=runHostedHarness<ContextHttpResult[]>(f.call([{name:'object_create',arguments:{request_id:randomUUID(),object_id:object,
-        title:'Synthetic Storage race',content:{kind:'doc',markdown:'Synthetic bytes'}}},
-        {name:'object_read',arguments:{object_id:object}}]),{databaseUrl:f.edgeUrl});
+      const setup=runHostedHarness<ContextHttpResult[]>(f.call([{name:'list_create',arguments:{request_id:randomUUID(),object_id:object,
+        title:'Synthetic Storage race',content:{kind:'list',items:[{item_id:'race',text:'Synthetic bytes',order:0,checked:false}]}}},
+        {name:'list_read',arguments:{object_id:object}}]),{databaseUrl:f.edgeUrl});
       assert.equal(setup[0]!.body.status,'committed'); assert.equal(setup[1]!.body.status,'ok');
+      assert.deepEqual(setup[1]!.body.content,{kind:'list',items:[{item_id:'race',text:'Synthetic bytes',order:0,checked:false}]},'admitted list read returns actual Storage bytes');
       const raceCall=operation==='read'
-        ? {name:'object_read',arguments:{object_id:object},storage_race:true}
-        : {name:'object_create',arguments:{request_id:randomUUID(),object_id:randomUUID(),title:'Concurrent upload',
-          content:{kind:'doc',markdown:'Synthetic upload'}},storage_race:true};
+        ? {name:'list_read',arguments:{object_id:object},storage_race:true}
+        : {name:'list_create',arguments:{request_id:randomUUID(),object_id:randomUUID(),title:'Concurrent upload',
+          content:{kind:'list',items:[{item_id:'upload',text:'Synthetic upload',order:0,checked:false}]}},storage_race:true};
       const results=runHostedHarness<ContextHttpResult[]>(f.call([raceCall,{name:'todo_list'},{name:'todo_queue'},
-        {name:'object_read',arguments:{object_id:object}}],{storageRace:true,raceDatabaseUrl:local.DB_URL,
+        {name:'list_read',arguments:{object_id:object}}],{storageRace:true,raceDatabaseUrl:local.DB_URL,
         workspaceId:f.fixture.workspaceA,principalId:f.seat.body.principal_id}),{databaseUrl:f.edgeUrl});
       assert.equal(results[0]!.body.status,operation==='read'?'ok':'committed','operation admitted before withdrawal commit may complete');
       results.slice(1).forEach(assertContentDenied);

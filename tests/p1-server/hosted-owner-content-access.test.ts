@@ -91,7 +91,12 @@ test('owner restriction has exact command authority, canonical scope and truthfu
     ${insert()};
     ${dbAssert(`SELECT origin='human_withdraw' AND changed_by='${owner}' AND cardinality(operations)=0 FROM swarm.household_hosted_content_restrictions WHERE ${scope}`,'missing approval withdrawal persists with truthful human provenance')}
     ${dbAssert(`SELECT NOT EXISTS(SELECT 1 FROM swarm.household_content_connections WHERE workspace_id='${workspace}' AND connection_id='${seat}')`,'restriction never invents approval')}
+    ${refuses('SELECT * FROM swarm.household_object_audit','42501')}
+    RESET ROLE;
+    RESET SESSION AUTHORIZATION;
     ${dbAssert(`SELECT count(*)=1 FROM swarm.household_object_audit WHERE workspace_id='${workspace}' AND reason_code='human_withdraw'`,'exactly one restriction audit')}
+    SET LOCAL SESSION AUTHORIZATION commonswarm_edge;
+    SET LOCAL ROLE swarm_command;
     ${refuses(`DELETE FROM swarm.household_hosted_content_restrictions WHERE ${scope}`,'42501')}
     ${refuses(`UPDATE swarm.household_hosted_content_restrictions SET changed_by='${decoy}' WHERE ${scope}`,'42501')}
     ${refuses(`UPDATE swarm.household_hosted_content_restrictions SET principal_id='${sibling}' WHERE ${scope}`,'42501')}

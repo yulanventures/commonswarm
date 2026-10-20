@@ -361,7 +361,7 @@ test('legacy FILE HTTP redirect rolls back gated requests and resumes in the sam
   const run = randomUUID(), tokenId = randomUUID(), predecessor = randomUUID(), lineage = randomUUID();
   const token = `swm_agt_${randomBytes(32).toString('base64url')}`;
   await sql`INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES (${randomUUID()}::uuid,${workspace}::uuid,'workspace')`;
-  committed(await write(workspace, newDoc(object), proposal('Legacy HTTP control')));
+  committed(await write(workspace, { ...newDoc(object), content: proposal('Legacy HTTP control').content }, proposal('Legacy HTTP control')));
   const [binding] = await sql`SELECT file_id FROM swarm.household_object_bindings WHERE workspace_id=${workspace}::uuid AND object_id=${object}`;
   assert.ok(binding);
   await sql.begin(async tx => {

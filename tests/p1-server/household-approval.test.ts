@@ -16,6 +16,7 @@ function hostedFixture(workspace: string, owner: string) {
   // Migration 20261004000010 allows one live hosted seat per name in a workspace, so each
   // fixture seat (one per member in the personal-boundary case) gets its own name.
   const name = `Synthetic agent ${principal.slice(0, 8)}`;
+  const handle = `seat_${principal.replaceAll("-", "").slice(0, 22)}`;
   const setup = `
     INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only)
       VALUES ('${principal}','${workspace}','${owner}','${name}','hosted_mcp',true);
@@ -27,6 +28,8 @@ function hostedFixture(workspace: string, owner: string) {
       VALUES ('${grant}','${workspace}','${owner}',decode(repeat('a',64),'hex'),'${randomUUID()}',clock_timestamp());
     INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,created_at)
       VALUES ('${connection}','${grant}','${workspace}','${owner}','${principal}','${name}',clock_timestamp());
+    INSERT INTO swarm.hosted_mcp_seat_handles(handle,seat_id,grant_id,workspace_id,principal_id,created_at)
+      VALUES ('${handle}','${connection}','${grant}','${workspace}','${principal}',clock_timestamp());
   `;
   return { principal, connection, grant, name, setup };
 }
@@ -241,7 +244,9 @@ test('real command adapters approve without role rewrite, list exact active appr
         { ...input, connection: { ...connection, operations: ['read'] } }, yes), { status: 'refused', reason: 'request_id_reused' });
       const listed = await api.executeHouseholdSurface(tx, f.workspace, actor, randomUUID(), { kind: 'household_connections' }, yes);
       assert.deepEqual(listed, { status: 'ok', connections: [{ kind: 'hosted', connection_id: f.connection, grant_id: f.grant, principal_id: f.principal,
-        name: f.name, approval: { operations: ['read', 'update'], expires_at: null } }] });
+        name: f.name, approval: { operations: ['read', 'update'], expires_at: null },
+        effective_access: { source: 'explicit', operations: ['read', 'update'], restricted: true,
+          restrictions: [{ operations: ['read', 'update'], origin: 'human_allow', principal_id: f.principal }] } }] });
       const withdrawInput = { kind: 'household_withdraw_connection', principal_id: f.principal };
       await tx`RESET ROLE`;
       await t.test('withdraw another member\'s agent refuses connection_access_refused without writes and preserves their active approval', async () => {

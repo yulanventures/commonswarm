@@ -145,7 +145,26 @@ try {
     await tx\x60DELETE FROM swarm.household_content_connections WHERE hosted_grant_id=\x24{f.grant}::uuid\x60;
     const approvalCount=async()=>Number((await tx\x60SELECT count(*)::int AS n FROM swarm.household_content_connections WHERE hosted_grant_id=\x24{f.grant}::uuid\x60)[0]!.n);
     await tx\x60UPDATE swarm.household_member_content_roles SET content_role='reader' WHERE workspace_id=\x24{f.workspace}::uuid AND user_id=\x24{f.owner}::uuid\x60;
-    assert.equal((await call('todo_list')).body.status,'ok','owner reader inherits without Allow');
+    const ownerReader = await call('todo_list');
+    if (ownerReader.body.status !== 'ok') {
+      // Never emit arbitrary response strings, IDs, tokens, or the raw body.
+      const knownFields = ['status','error','reason','code','retryable','next_action','todos','queue','ok','event_ids','events'];
+      const classify = (value: unknown) => {
+        const known = ['ok','refused','accepted','committed','forbidden','invalid_request','upgrade_required',
+          'workspace_access_refused','content_consent_required','connection_access_refused','household_service_updating'];
+        return typeof value === 'string' && known.includes(value) ? value : value == null ? 'absent' : 'other';
+      };
+      const keys = Object.keys(ownerReader.body);
+      console.error('OWNER_READER_DIAG:'+JSON.stringify({
+        http_status:Number.isInteger(ownerReader.status) && ownerReader.status>=100 && ownerReader.status<=599 ? ownerReader.status : null,
+        status:classify(ownerReader.body.status),error:classify(ownerReader.body.error),
+        reason:classify(ownerReader.body.reason),code:classify(ownerReader.body.code),
+        fields:knownFields.filter(key=>keys.includes(key)),unknown_field_count:keys.filter(key=>!knownFields.includes(key)).length,
+        classification:ownerReader.status===403?'authorization_refusal':ownerReader.status===426?'client_version_refusal':
+          ownerReader.status===503?'service_gate':ownerReader.body.status==='refused'?'content_refusal':'unclassified',
+      }));
+    }
+    assert.equal(ownerReader.body.status,'ok','owner reader inherits without Allow');
     assert.equal((await call('todo_create',{title:'Reader cannot write'})).body.status,'refused');
     assert.equal((await call('todo_queue')).body.queue.content_access,'read');
     assert.equal(await approvalCount(),0,'reader access invents no approval');
