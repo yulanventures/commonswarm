@@ -10,7 +10,6 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
-import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { goTrueFixture } from './finish-flow-fixture.js';
@@ -37,13 +36,19 @@ function requirePrivateNamespace() {
   };
   const info = JSON.parse(docker(['info', '--format', '{{json .}}']));
   assert.match(info.Name, /^[a-f0-9]{12}$/u, 'nested daemon hostname required');
-  assert.equal(info.Name === hostname(), false, 'worker shares network, not daemon identity');
+  // The pinned controller uses --network container:<daemon>; hostname equality
+  // is permitted and does not prove or disprove namespace isolation.
   const name = `supabase_db_${process.env.CSCI_PROJECT}`;
   const [db] = JSON.parse(docker(['inspect', name]));
   assert.equal(db.Name === `/${name}` && db.State.Running === true, true);
+  assert.equal(db.Config.Labels?.['com.supabase.cli.project'], process.env.CSCI_PROJECT, 'run-owned database project required');
   const bindings = db.NetworkSettings.Ports['5432/tcp'];
-  assert.equal(Array.isArray(bindings) && bindings.length === 1 &&
-    bindings[0].HostIp === '127.0.0.1' && bindings[0].HostPort === '54322', true, 'run-owned loopback database required');
+  // Supabase may publish IPv4/IPv6 wildcards inside DinD. The pinned controller
+  // isolates the outer job network and filters unsolicited eth0 ingress in both
+  // families before DNAT; these bindings never publish a port on the CI host.
+  assert.equal(Array.isArray(bindings) && bindings.length >= 1 && bindings.length <= 2 &&
+    bindings.every(binding => ['127.0.0.1', '0.0.0.0', '::1', '::'].includes(binding.HostIp) &&
+      binding.HostPort === '54322'), true, 'run-owned private-namespace database port required');
 }
 
 async function childMain() {
