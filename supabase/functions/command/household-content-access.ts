@@ -47,6 +47,7 @@ export async function loadHouseholdContentAccess(tx: Sql, workspaceId: string, i
   if (!boundary) return null;
   let source: 'human' | 'inherited' | 'explicit' = identity.principal_id === null ? 'human' : 'explicit';
   let restriction: { operations: string[]; origin: string; principal_id: string }[] = [];
+  let connectionPolicy: { connection_expires_at: unknown; connection_expired_at: unknown } | null = null;
   let credential: HouseholdAccessFacts['credential'] = { kind: 'human' };
   if (identity.principal_id !== null) {
     if (!identity.connection) return null;
@@ -70,13 +71,19 @@ export async function loadHouseholdContentAccess(tx: Sql, workspaceId: string, i
             AND ls.revoked_at IS NULL AND lp.revoked_at IS NULL)) AND EXISTS(SELECT 1 FROM swarm.household_hosted_content_restrictions marker
           CROSS JOIN LATERAL jsonb_array_elements(marker.closed_target_replacements) entry
           WHERE marker.grant_id=c.grant_id AND marker.workspace_id=c.workspace_id
-            AND marker.origin='human_allow' AND entry=jsonb_build_object('kind','legacy','row',to_jsonb(c))) AS closed_replaced FROM swarm.household_content_connections c
+            AND marker.origin='human_allow' AND (
+              entry=jsonb_build_object('kind','legacy','row',to_jsonb(c))
+              OR (jsonb_typeof(entry->'row')='object' AND NOT (entry->'row' ? 'renewal_grant_id')
+                AND to_jsonb(c)->'renewal_grant_id'='null'::jsonb
+                AND entry=jsonb_build_object('kind','legacy','row',to_jsonb(c)-'renewal_grant_id'))
+            )) AS closed_replaced FROM swarm.household_content_connections c
         WHERE c.workspace_id=${workspaceId}::uuid AND c.hosted_grant_id=${canonicalSeat.grant_id}::uuid
         ORDER BY c.connection_id,c.principal_id FOR SHARE OF c`;
-      const [grant] = await tx`SELECT state,revoked_at FROM swarm.hosted_mcp_grants WHERE grant_id=${canonicalSeat.grant_id}::uuid AND owner_user_id=${identity.user_id}::uuid FOR SHARE`;
+      const [grant] = await tx`SELECT state,revoked_at,connection_expires_at,connection_expired_at FROM swarm.hosted_mcp_grants WHERE grant_id=${canonicalSeat.grant_id}::uuid AND owner_user_id=${identity.user_id}::uuid FOR SHARE`;
       const [binding] = await tx`SELECT revoked_at FROM swarm.hosted_mcp_grant_workspaces WHERE grant_id=${canonicalSeat.grant_id}::uuid AND workspace_id=${workspaceId}::uuid AND owner_user_id=${identity.user_id}::uuid FOR SHARE`;
       const [seat] = await tx`SELECT revoked_at FROM swarm.hosted_mcp_seats WHERE seat_id=${canonicalSeat.seat_id}::uuid FOR SHARE`;
       if (!grant || grant.state !== 'active' || grant.revoked_at !== null || !binding || binding.revoked_at !== null || !seat || seat.revoked_at !== null) return null;
+      connectionPolicy = grant;
       const policies = await tx`SELECT r.*, (EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats cs WHERE cs.grant_id=r.grant_id
           AND cs.workspace_id=r.workspace_id AND cs.principal_id=r.principal_id AND cs.owner_user_id=r.owner_user_id)
         AND NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats ls JOIN swarm.agent_principals lp USING(principal_id)
@@ -118,6 +125,17 @@ export async function loadHouseholdContentAccess(tx: Sql, workspaceId: string, i
         purpose: boundary.purpose as 'personal' | 'shared', revoked_at: null, expires_at: null } };
     } else {
       if (!connection || connection.hosted_grant_id !== null) return null;
+      // Only the canonical nullable linkage opts a local approval into family
+      // policy. Legacy technical horizons never become owner-selected expiry.
+      // Read existing role-visible fields without adding a late family lock.
+      if (connection.renewal_grant_id !== null) {
+        const [family] = await tx`SELECT revoked_at,connection_expires_at,connection_expired_at
+          FROM swarm.renewal_grants WHERE renewal_grant_id=${connection.renewal_grant_id}::uuid
+            AND workspace_id=${workspaceId}::uuid AND principal_id=${identity.principal_id}::uuid
+            AND run_id=${connection.grant_id}::uuid AND created_by=${identity.user_id}::uuid`;
+        if (!family || family.revoked_at !== null) return null;
+        connectionPolicy = family;
+      }
       credential = { kind: 'agent', connection: {
         connection_id: String(connection.connection_id), grant_id: String(connection.grant_id), workspace_id: workspaceId,
         principal_id: identity.principal_id, owner_user_id: identity.user_id,
@@ -127,7 +145,13 @@ export async function loadHouseholdContentAccess(tx: Sql, workspaceId: string, i
     }
   } else if (identity.connection !== null || identity.run_id !== null) return null;
   const [clock] = await tx`SELECT clock_timestamp() AS now`;
-  return { now: stamp(clock!.now)!, source, restriction, facts: {
+  const now = stamp(clock!.now)!;
+  // Every caller, including queue and management summaries, receives policy
+  // evaluated after the existing row waits. NULL is permanent; terminal stays
+  // terminal even when no date is selected.
+  if (connectionPolicy && (connectionPolicy.connection_expired_at !== null
+    || (connectionPolicy.connection_expires_at !== null && stamp(connectionPolicy.connection_expires_at)! <= now))) return null;
+  return { now, source, restriction, facts: {
     workspace_id: workspaceId, archived_at: stamp(workspace.archived_at), actor: actor(identity), credential,
     boundary: boundary.purpose === 'personal' ? { kind: 'personal', owner_user_id: String(boundary.owner_user_id) } : { kind: 'shared' },
     member: member ? { user_id: identity.user_id, workspace_id: workspaceId,

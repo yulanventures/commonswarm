@@ -314,7 +314,8 @@ test('catalogs detect privilege drift and reverse rollbacks restore the pre-lane
   const inviteProof = (suffix: string) => readFileSync(new URL(`../../deploy/release-proofs/household-invites/20261004000006-${suffix}.sql`, import.meta.url), 'utf8');
   // Migration 05 intentionally widens the lane-2 confirmation tables. Undo its
   // overlay first to test the original exact catalogs; this entire drill rolls back.
-  let script = 'BEGIN;\n' + removalProof('catalog') + requireProof('catalog_ok',true)
+  // Project away the later permanent-connection overlay only inside this rolled-back historical drill.
+  let script = 'BEGIN;\nALTER TABLE swarm.household_content_connections DROP COLUMN IF EXISTS renewal_grant_id;\n' + removalProof('catalog') + requireProof('catalog_ok',true)
     + removalProof('rollback') + removalProof('rollback-catalog') + requireProof('rollback_ok',true)
     + approvalProof('catalog') + requireProof('catalog_ok',true)
     + approvalProof('rollback') + approvalProof('rollback-catalog') + requireProof('rollback_ok',true)
@@ -356,7 +357,7 @@ test('catalogs detect privilege drift and reverse rollbacks restore the pre-lane
 
 // The FILE caller's adapter catch and local-token handover are not reached by
 // the existing todo HTTP/MCP coverage. No auth, transaction or storage shim.
-test('legacy FILE HTTP redirect rolls back gated requests and resumes in the same process after DROP', { timeout: 180_000 }, async () => {
+async function legacyFileHttp(policyCases = false) {
   const workspace = await fixture(), object = randomUUID(), principal = randomUUID(), device = randomUUID();
   const run = randomUUID(), tokenId = randomUUID(), predecessor = randomUUID(), lineage = randomUUID(), renewalGrant = randomUUID();
   const token = `swm_agt_${randomBytes(32).toString('base64url')}`;
@@ -384,6 +385,16 @@ test('legacy FILE HTTP redirect rolls back gated requests and resumes in the sam
       SELECT ${tokenId}::uuid,${run}::uuid,${workspace}::uuid,${principal}::uuid,${owner}::uuid,'shared',ARRAY['read'],content_consent_id,
         clock_timestamp()+interval '1 hour' FROM swarm.household_member_content_roles WHERE workspace_id=${workspace}::uuid AND user_id=${owner}::uuid`;
   });
+  const families = Object.fromEntries(['null','future','elapsed','terminal','revoked','mismatch'].map(name => [name,randomUUID()]));
+  const alternateRun = randomUUID();
+  if (policyCases) {
+    await sql`INSERT INTO swarm.agent_runs(run_id,principal_id,device_id) VALUES (${alternateRun}::uuid,${principal}::uuid,${device}::uuid)`;
+    for (const [name,id] of Object.entries(families)) {
+      const familyRun = name === 'mismatch' ? alternateRun : run;
+      await sql`INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,created_by,horizon_expires_at,max_successors)
+        VALUES (${id}::uuid,${workspace}::uuid,${principal}::uuid,${familyRun}::uuid,${owner}::uuid,clock_timestamp()+interval '30 days',800)`;
+    }
+  }
   const release = postgres(localClusterAdminUrl(local.DB_URL), { prepare: false, max: 1 });
   const edgeUrl = new URL(local.DB_URL);
   edgeUrl.username = 'commonswarm_edge'; edgeUrl.password = randomBytes(32).toString('hex');
@@ -398,7 +409,7 @@ const fixture = postgres(input.adminUrl, { prepare: false, max: 1 });
 const server = Deno.serve({ hostname: "127.0.0.1", port: 0, onListen() {} }, handleRequest);
 const request = () => fetch("http://127.0.0.1:" + server.addr.port + "/functions/v1/command", {
   method: "POST", headers: { authorization: "Bearer " + input.token, "content-type": "application/json" },
-  body: JSON.stringify(input.body),
+  body: JSON.stringify(input.policyCases ? {...input.body,command_id:crypto.randomUUID()} : input.body),
 }).then(async response => ({ status: response.status, body: await response.json(),
   retryAfter: response.headers.get("retry-after"), challenge: response.headers.get("www-authenticate") }));
 async function snapshot() {
@@ -421,12 +432,22 @@ try {
   let oauthDenied = false;
   try { await db.begin(async tx => { await tx.unsafe("SET LOCAL ROLE commonswarm_oauth_runtime"); }); }
   catch (error) { if (error.code !== "42501") throw error; oauthDenied = true; }
+  if (input.policyCases) {
+    const cases = [];
+    for (const policy of ['unlinked','null','future','elapsed','terminal','revoked','mismatch']) {
+      await fixture.unsafe("UPDATE swarm.renewal_grants SET connection_expires_at=CASE WHEN $2='future' THEN clock_timestamp()+interval '1 hour' WHEN $2='elapsed' THEN clock_timestamp()-interval '1 second' ELSE NULL END, connection_expired_at=CASE WHEN $2='terminal' THEN clock_timestamp() ELSE NULL END, revoked_at=CASE WHEN $2='revoked' THEN clock_timestamp() ELSE NULL END WHERE renewal_grant_id=$1::uuid", [input.families[policy]??input.families.null,policy]);
+      await fixture.unsafe("UPDATE swarm.household_content_connections SET renewal_grant_id=$2::uuid WHERE connection_id=$1::uuid", [input.tokenId,policy==='unlinked'?null:input.families[policy]]);
+      cases.push({ policy, result: await request() });
+    }
+    console.log("LEGACY_HTTP_RESULT:" + JSON.stringify({ identity, role, oauthDenied, cases }));
+  } else {
   const before = await snapshot();
   const gated = [await request(), await request()];
   const after = await snapshot();
   await fixture.unsafe("DROP POLICY hosted_owner_content_rollback_gate ON swarm.household_content_connections");
   const recovered = await request();
   console.log("LEGACY_HTTP_RESULT:" + JSON.stringify({ identity, role, oauthDenied, before, after, gated, recovered }));
+  }
 } finally {
   await server.shutdown();
   await db.end();
@@ -438,7 +459,7 @@ try {
       CREATE ROLE commonswarm_edge LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
       END IF; END $edge$; GRANT swarm_command,swarm_read,swarm_capability TO commonswarm_edge;`);
     await release.unsafe(`ALTER ROLE commonswarm_edge PASSWORD '${edgeUrl.password}'`);
-    await release.unsafe(readFileSync(new URL('../../deploy/release-proofs/hosted-owner-content/20261019000006-rollback.sql', import.meta.url), 'utf8'));
+    if (!policyCases) await release.unsafe(readFileSync(new URL('../../deploy/release-proofs/hosted-owner-content/20261019000006-rollback.sql', import.meta.url), 'utf8'));
     const [pending] = await sql`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id=${tokenId}::uuid`;
     assert.equal(pending!.first_used_at, null);
     const [absent] = await sql`SELECT count(*)::int AS n FROM swarm.agent_presence WHERE workspace_id=${workspace}::uuid`;
@@ -452,7 +473,7 @@ try {
         SWARM_DATABASE_URL: edgeUrl.href, SUPABASE_DB_URL: edgeUrl.href, SUPABASE_URL: local.API_URL,
         SUPABASE_ANON_KEY: local.ANON_KEY,
         SUPABASE_SERVICE_ROLE_KEY: local.SERVICE_ROLE_KEY },
-      input: JSON.stringify({ adminUrl: localClusterAdminUrl(local.DB_URL), workspace, principal, token,
+      input: JSON.stringify({ adminUrl: localClusterAdminUrl(local.DB_URL), workspace, principal, token, policyCases, families, tokenId,
         body: { command_id: randomUUID(), client_version: '0.1.0', client_build: '0.1.0', workspace_id: workspace,
           stream: { kind: 'workspace' }, command: { kind: 'file_download_url', file_id: String(binding!.file_id), version_n: null } } }),
     });
@@ -464,6 +485,20 @@ try {
     assert.deepEqual(result.identity, { login: 'commonswarm_edge', safe: true });
     assert.equal(result.role, 'swarm_command');
     assert.equal(result.oauthDenied, true);
+    if (policyCases) {
+      assert.equal(result.cases.length,7);
+      for (const {policy: name,result: response} of result.cases) {
+        if (['unlinked','null','future'].includes(name)) {
+          assert.equal(response.status,200,name);
+          assert.equal(response.body.status,'ok',name);
+          assert.deepEqual(response.body.content,proposal('Legacy HTTP control').content,name);
+        } else {
+          assert.ok(response.status!==200 || response.body.status==='refused',name);
+          assert.equal(response.body.content,undefined,name+' releases no Storage bytes');
+        }
+      }
+      return;
+    }
     const retry = { error: 'household_content_service_updating',
       message: 'Household content service is updating. Retry after one second with the same request_id.',
       retryable: true, retry_after_seconds: 1 };
@@ -488,4 +523,9 @@ try {
     await release.end();
     rmSync(directory, { recursive: true, force: true });
   }
-});
+}
+
+test('legacy FILE HTTP redirect rolls back gated requests and resumes in the same process after DROP', { timeout: 180_000 }, () => legacyFileHttp());
+// Real token auth remains live: only linked family policy changes, with legacy
+// and finite technical-window NULL-policy positives in the same invocation.
+test('local FILE HTTP applies linked renewal policy before returning genuine Storage content', { timeout: 180_000 }, () => legacyFileHttp(true));

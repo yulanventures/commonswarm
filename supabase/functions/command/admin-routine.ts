@@ -281,6 +281,42 @@ export async function prepareAdminRoutine(
   };
 }
 
+// Called only inside an already-authorized workspace-stream transaction.
+// Linked grants, then seats, use the same deterministic order for every removal.
+export async function revokeHostedWorkspaceApproval(
+  tx: Sql, workspaceId: string, revokedAt: Date, createdBy: string | null,
+  target: { ownerUserId: string } | { principalId: string },
+): Promise<void> {
+  const owner = "ownerUserId" in target ? target.ownerUserId : null;
+  const principal = "principalId" in target ? target.principalId : null;
+  const grants = await tx<{ grant_id: string }[]>`
+    SELECT g.grant_id FROM swarm.hosted_mcp_grants g
+    WHERE (${owner}::uuid IS NOT NULL AND g.owner_user_id = ${owner}::uuid
+      AND ${workspaceId}::uuid = ANY(g.selected_workspace_ids))
+      OR EXISTS (SELECT 1 FROM swarm.hosted_mcp_seats hs
+        WHERE hs.grant_id = g.grant_id AND hs.workspace_id = ${workspaceId}::uuid
+          AND hs.principal_id = ${principal}::uuid)
+    ORDER BY g.grant_id FOR UPDATE OF g
+  `;
+  for (const grant of grants) {
+    const seats = await tx<{ seat_id: string }[]>`
+      SELECT seat_id FROM swarm.hosted_mcp_seats
+      WHERE grant_id = ${grant.grant_id}::uuid AND workspace_id = ${workspaceId}::uuid
+      ORDER BY seat_id FOR UPDATE
+    `;
+    for (const seat of seats) {
+      await tx`UPDATE swarm.hosted_mcp_seats SET revoked_at = coalesce(revoked_at,${revokedAt})
+        WHERE seat_id = ${seat.seat_id}::uuid`;
+      await tx`UPDATE swarm.hosted_mcp_seat_handles SET revoked_at = coalesce(revoked_at,${revokedAt})
+        WHERE seat_id = ${seat.seat_id}::uuid`;
+      await tx`INSERT INTO swarm.revocation_tombstones(kind,target_id,created_by)
+        VALUES('hosted_seat',${seat.seat_id}::uuid,${createdBy}::uuid) ON CONFLICT DO NOTHING`;
+    }
+    await tx`UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at = coalesce(revoked_at,${revokedAt})
+      WHERE grant_id = ${grant.grant_id}::uuid AND workspace_id = ${workspaceId}::uuid`;
+  }
+}
+
 export async function applyAdminRoutine(
   tx: Sql,
   command: AdminRoutineCommand,
@@ -358,9 +394,8 @@ export async function applyAdminRoutine(
       await tx`UPDATE swarm.agent_principals SET revoked_at=${
         date(ctx.now)
       } WHERE principal_id=${String(p.principal_id)}::uuid`;
-      await tx`UPDATE swarm.hosted_mcp_seats SET revoked_at=coalesce(revoked_at,${
-        date(ctx.now)
-      }) WHERE principal_id=${String(p.principal_id)}::uuid`;
+      await revokeHostedWorkspaceApproval(tx, e.workspace_id, new Date(ctx.now), ctx.owner_user_id,
+        { principalId: String(p.principal_id) });
       await tx`UPDATE swarm.agent_tokens SET revoked_at=coalesce(revoked_at,${
         date(ctx.now)
       }) WHERE principal_id=${String(p.principal_id)}::uuid`;

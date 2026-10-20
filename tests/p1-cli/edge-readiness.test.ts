@@ -163,12 +163,12 @@ test("D-024: a refusal survives being thrown through the transport handler", asy
 test("D-020: the gate fails loudly rather than returning on a runtime that never boots", async () => {
   const { fetcher } = scriptedFetcher([{ status: 502, body: "unknown_error" }]);
   await assert.rejects(
-    () => gate(fetcher, 1_000, () => "captured function logs"),
+    () => gate(fetcher, 1_000, () => "Serving functions on http://secret/?token=hidden\nTypeError: private content at supabase/functions/command/index.ts:12:3"),
     (error: unknown) => {
       assert.ok(!(error instanceof ReadinessRefused), "a boot artefact is not a refusal");
       assert.match((error as Error).message, /never reported running/);
       assert.match((error as Error).message, /HTTP 502/);
-      assert.match((error as Error).message, /captured function logs/);
+      assert.match((error as Error).message, /supabase\/functions\/command\/index.ts:12:3/);
       return true;
     },
   );
@@ -180,4 +180,30 @@ test("D-020: once the gate returns it performs no further requests", async () =>
   const afterReturn = calls();
   assert.equal(afterReturn, 1);
   assert.equal(calls(), afterReturn, "the gate must not remain active after returning");
+});
+
+
+test("readiness refusal invokes bounded diagnostics without exposing logs or replacing the refusal", async () => {
+  for (const broken of [false, true]) {
+    const { fetcher, calls } = scriptedFetcher([
+      { status: 500, body: "original refusal" }, { status: 401, body: FUNCTION_401 },
+    ]);
+    let captured = 0;
+    await assert.rejects(() => gate(fetcher, 1000, () => {
+      captured++;
+      if (broken) throw new Error("private callback failure");
+      return "Serving functions on http://private/?token=secret\nTypeError: private payload\n" +
+        "at file:///srv/supabase/functions/command/index.ts:99:4\n".repeat(1000);
+    }), (error: unknown) => {
+      assert.ok(error instanceof ReadinessRefused);
+      assert.equal(error.status, 500);
+      assert.equal(error.body, "original refusal");
+      assert.doesNotMatch(error.message, /private|token=|secret|callback failure/);
+      assert.ok(error.diagnostics.length < 2000);
+      if (!broken) assert.match(error.diagnostics, /supabase\/functions\/command\/index.ts:99:4/);
+      return true;
+    });
+    assert.equal(captured, 1);
+    assert.equal(calls(), 1);
+  }
 });
