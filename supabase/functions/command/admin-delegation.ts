@@ -370,6 +370,9 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
       if (grant.withdrawn_workspace_ids.includes(routineCommand.workspace_id)) routineRefusal = 'workspace_forbidden';
     }
   }
+  // Refresh decision time after the existing account/parent/workspace waits.
+  const [routineClock]=await tx<{now:number}[]>`SELECT floor(extract(epoch FROM clock_timestamp())*1000)::float8 AS now`;
+  context.now=routineClock!.now;
   const routineContext = routineCommand && routineRefusal === null ? await prepareAdminRoutine(tx, routineCommand, state, context, oauth && authentication.kind === 'oauth' ? adminWorkerChannelConnection(authentication.worker_channel, oauth) : null) : null;
   let refusal: string | null = !wireValid ? 'invalid_request' : command === null ? actor.kind === 'delegated_admin' ? 'human_confirmation_required' : 'invalid_request' : routineRefusal;
   let allowance: Awaited<ReturnType<typeof charge>> | null = null;

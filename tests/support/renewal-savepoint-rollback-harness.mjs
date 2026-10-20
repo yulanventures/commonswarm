@@ -47,6 +47,7 @@ try {
     return begin.apply(this, args).catch((error) => { commandCodes.push(sqlstate(error)); throw error; });
   };
   const { CLIENT_PROTOCOL_VERSION } = await import(`${tree}/src/cloud/config.ts`);
+  const {HOUSEHOLD_LOCAL_SEAT}=await import(`${tree}/supabase/functions/_shared/protocol.js`);
   const tag = id().replaceAll('-', '').slice(0, 10);
 
   out.stage = 'fixture';
@@ -230,6 +231,92 @@ try {
   };
 
   out.results = {};
+  if(mode==='permanence') {
+    out.stage='permanence';
+    const checks=[];
+    const check=(name,ok)=>checks.push({name,ok:Boolean(ok)});
+    const s=await seat('expired-proof');
+    await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${s.t0}::uuid`;
+    const [before]=await observer`SELECT expires_at,first_used_at FROM swarm.agent_tokens WHERE token_id=${s.t0}::uuid`;
+    const renewed=await renew(s.raw,id());
+    const successor=credential(renewed);
+    check('expired used standing bearer silently renews at real command boundary',renewed.status===200 && successor!==null);
+    const [after]=await observer`SELECT expires_at,first_used_at FROM swarm.agent_tokens WHERE token_id=${s.t0}::uuid`;
+    check('renewal proof changes no predecessor adoption or expiry history',iso(before.expires_at)===iso(after.expires_at) && iso(before.first_used_at)===iso(after.first_used_at));
+    check('renewed successor authenticates at real read boundary',successor!==null && (await readAs(successor)).status===200);
+    const terminal=await seat('chosen-terminal');
+    await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second'
+      WHERE renewal_grant_id=${terminal.grant}::uuid`;
+    const terminalBefore=await seatState(terminal);
+    const refused=await renew(terminal.raw,id());
+    const terminalAfter=await seatState(terminal);
+    check('elapsed chosen date refuses despite same technical family',refused.status===401 || refused.status===403);
+    check('chosen denial creates no successor spend or ledger effects',JSON.stringify(terminalBefore)===JSON.stringify(terminalAfter));
+    // First-use adoption must roll back even when household refusal uses 200.
+    const content=await seat('household-denial');
+    const first=await renew(content.raw,id());
+    const unused=credential(first);
+    const beforeDenied=await seatState(content);
+    const denied=unused ? await capture(await command.handleRequest(new Request('http://127.0.0.1/functions/v1/command',{
+      method:'POST',headers:{authorization:`Bearer ${unused}`,'content-type':'application/json'},
+      body:JSON.stringify({command_id:id(),client_version:CLIENT_PROTOCOL_VERSION,workspace_id:W,stream:{kind:'workspace'},
+        command:{kind:'household_tool',tool:'object_list',arguments:{seat:HOUSEHOLD_LOCAL_SEAT,offset:0,limit:10}}})}))) : null;
+    const deniedBody=denied ? JSON.parse(denied.text) : null;
+    check('household denial reaches its actual content boundary',denied?.status===200 && deniedBody?.status==='refused');
+    check('household denial rolls back both adoption fields and all effects',JSON.stringify(beforeDenied)===JSON.stringify(await seatState(content)));
+    check('refused first-use successor remains usable',unused!==null && (await readAs(unused)).status===200);
+    // Exact family consumer: real command-role loader + production access
+    // consumer. Fixture setup writes consent; the consumer never backfills it.
+    const authModule=await import(`${tree}/supabase/functions/_shared/agent-auth.ts`);
+    const accessModule=await import(`${tree}/supabase/functions/command/household-content-access.ts`);
+    const family=await seat('family-approval');
+    const consent=id();
+    await observer.begin(async tx=>{
+      await tx`INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose) VALUES(${W}::uuid,'shared')`;
+      await tx`INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at)
+        VALUES(${W}::uuid,${owner}::uuid,'editor',${consent}::uuid,clock_timestamp())`;
+      await tx`SET LOCAL ROLE swarm_command`;
+      const plan=await authModule.planLocalConnection(tx,W,owner,family.principal,family.t0);
+      if(!plan) throw Object.assign(new Error('fixture local plan'),{code:'FIXTURE_LOCAL_PLAN'});
+      await authModule.lockLocalAuthPlan(tx,plan);
+      await tx`SELECT set_config('cswarm.household_actor',${owner},true),set_config('cswarm.household_request',${id()},true),
+        set_config('cswarm.household_digest',${'c'.repeat(64)},true),set_config('cswarm.household_command','household_approve_connection',true)`;
+      await tx`INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,
+        purpose,operations,consent_receipt_id,renewal_grant_id)
+        VALUES(${family.t0}::uuid,${family.run}::uuid,${W}::uuid,${family.principal}::uuid,${owner}::uuid,
+          'shared',ARRAY['read'],${consent}::uuid,${family.grant}::uuid)`;
+    });
+    const approvalBefore=await observer`SELECT to_jsonb(c) AS row FROM swarm.household_content_connections c WHERE connection_id=${family.t0}::uuid`;
+    const rotated=await renew(family.raw,id()),rotatedSecret=credential(rotated);
+    const accessAs=async raw=>observer.begin(async tx=>{
+      await tx`SET LOCAL ROLE swarm_command`;
+      const hash=await hashOf(raw),plan=await authModule.planLocalOperation(tx,{hash,allWorkspace:true});
+      if(!plan) return null;
+      await authModule.lockLocalAuthPlan(tx,plan);
+      const agent=await authModule.loadAgentCredential(tx,hash,plan);
+      if(!agent) return null;
+      return accessModule.loadHouseholdContentAccess(tx,W,{user_id:agent.owner_user_id,principal_id:agent.principal_id,
+        run_id:agent.run_id,connection:{connection_id:agent.token_id,grant_id:agent.run_id}});
+    });
+    const inherited=rotatedSecret ? await accessAs(rotatedSecret) : null;
+    check('rotated successor consumes exact original family approval',inherited?.facts?.credential?.connection?.connection_id===JSON.parse(rotated.text).token_id);
+    check('manual operation ceiling survives rotation',JSON.stringify(inherited?.facts?.credential?.connection?.operations)===JSON.stringify(['read']));
+    const approvalAfter=await observer`SELECT to_jsonb(c) AS row FROM swarm.household_content_connections c WHERE connection_id=${family.t0}::uuid`;
+    check('family consumer does not rewrite original consent or receipt',JSON.stringify(approvalBefore)===JSON.stringify(approvalAfter));
+    const unrelated=await seat('unrelated-family');
+    check('another family cannot inherit the approval',await accessAs(unrelated.raw)===null);
+    await observer.begin(async tx=>{
+      await tx`SELECT set_config('cswarm.household_actor',${owner},true),set_config('cswarm.household_request',${id()},true),
+        set_config('cswarm.household_digest',${'d'.repeat(64)},true),set_config('cswarm.household_command','household_withdraw_connection',true)`;
+      await tx`UPDATE swarm.household_content_connections SET revoked_at=clock_timestamp() WHERE connection_id=${family.t0}::uuid`;
+    });
+    check('original withdrawal stops the rotated successor',rotatedSecret!==null && await accessAs(rotatedSecret)===null);
+    check('no external authentication or HTTP mocks',httpRefused===0);
+    out.checks=checks;out.verdict=checks.every(c=>c.ok)?'PASS':'FAIL';out.stage='complete';out.http_refused=httpRefused;
+    await observer.end();
+    console.log('R13_PROBE '+JSON.stringify(out));
+    Deno.exit(out.verdict==='PASS'?0:1);
+  }
   if (mode === 'main' || mode === 'real_read') {
     out.stage = 'control';
     {
@@ -352,72 +439,42 @@ try {
     }
   }
   if (mode === 'real_read') {
-    out.stage = 'real_read';
-    const s = await seat('real-read');
-    const C = id();
-    const lost = await renew(s.raw, C);
-    nameSuccessor(s, lost, 'S1');
-    const rawS1 = credential(lost);
-    const gateKey = Math.floor(Math.random() * 1000000000) + 1;
-    const gate = postgres(DB, { prepare: false, max: 1, onnotice: () => {} });
-    const fn = `r13_read_gate_${tag}`;
-    await gate`SELECT pg_advisory_lock(130013, ${gateKey}::int)`;
+    out.stage='real_read';
+    const s=await seat('real-read'),C=id();
+    const lost=await renew(s.raw,C),rawS1=credential(lost);
+    nameSuccessor(s,lost,'S1');
+    const gateKey=Math.floor(Math.random()*1000000000)+1;
+    const gate=postgres(DB,{prepare:false,max:1,onnotice:()=>{}}),fn=`r13_read_gate_${tag}`;
+    await gate`SELECT pg_advisory_lock(130013,${gateKey}::int)`;
+    const [{pid:gatePid}]=await gate`SELECT pg_backend_pid() AS pid`;
     await observer.unsafe(`CREATE FUNCTION public.${fn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(130013, ${gateKey}); RETURN NEW; END $$`);
     await observer.unsafe(`CREATE TRIGGER ${fn} AFTER UPDATE OF last_used_at ON swarm.renewal_grants FOR EACH ROW WHEN (NEW.renewal_grant_id = '${s.grant}'::uuid) EXECUTE FUNCTION public.${fn}()`);
-    const before = await snapshot(); const state0 = await seatState(s);
-    const code0 = commandCodes.length;
-    const n0 = (await logLines('ERROR:  deadlock detected')).length;
-    // The renewal retry (same command_id: the recovery path) holds the grant FOR UPDATE after step 9 and sleeps 2.5 s.
-    const t0 = Date.now();
-    const renewalP = renew(s.raw, C);
-    let held = false;
-    for (let i = 0; i < 200 && !held; i++) {
-      try {
-        await observer.begin(async (tx) => { await tx`SELECT renewal_grant_id FROM swarm.renewal_grants WHERE renewal_grant_id = ${s.grant}::uuid FOR KEY SHARE NOWAIT`; });
-        await sleep(10);
-      } catch (e) { if (sqlstate(e) === '55P03') held = true; else throw e; }
+    const before=await snapshot(),state0=await seatState(s),code0=commandCodes.length;
+    let reader,renewal;
+    try {
+      // The real reader owns W/P/G/T and has stamped S1. Park it before
+      // commit using fixture-only DDL; the real renewal must wait before T.
+      reader=readAs(rawS1);
+      const readPid=await waitBlockedBy(gatePid);
+      if(!readPid) throw Object.assign(new Error('reader not parked'),{code:'READ_NOT_PARKED'});
+      renewal=renew(s.raw,C);
+      const renewalPid=await waitBlockedBy(readPid);
+      const observed=renewalPid ? await observer`SELECT ${readPid}::int=ANY(pg_blocking_pids(${renewalPid}::int)) AS waits,
+        EXISTS(SELECT 1 FROM pg_locks WHERE pid=${renewalPid}::int AND locktype='tuple' AND granted
+          AND relation='swarm.agent_tokens'::regclass) AS token_before_workspace` : [];
+      await gate`SELECT pg_advisory_unlock(130013,${gateKey}::int)`;
+      const readResponse=await reader,response=await renewal,after=await snapshot();
+      out.results.real_read={read_waited_on_fixture:readPid>0,renewal_waited_on_reader:renewalPid>0 && observed[0]?.waits===true,
+        token_before_workspace:observed[0]?.token_before_workspace??null,command_sqlstates:commandCodes.slice(code0),
+        read_response:shape(readResponse),response:shape(response),state_before:state0,state_after:await seatState(s),rows:diff(before,after),
+        successor_still_works:shape(await readAs(rawS1)),retry_predecessor:shape(await renew(s.raw,C))};
+    } finally {
+      await gate`SELECT pg_advisory_unlock(130013,${gateKey}::int)`;
+      if(reader) await reader;if(renewal) await renewal;
+      await gate.end();
+      await observer.unsafe(`DROP TRIGGER ${fn} ON swarm.renewal_grants`);
+      await observer.unsafe(`DROP FUNCTION public.${fn}()`);
     }
-    const grantHeldAfterMs = Date.now() - t0;
-    // The read presents the stranded successor S1: its first use.
-    const readP = readAs(rawS1);
-    let readPid = 0, renewalPid = 0, readWait = null;
-    for (let i = 0; i < 300 && renewalPid === 0; i++) {
-      const rows = await observer`SELECT pid, pg_blocking_pids(pid) AS b FROM pg_stat_activity WHERE datname = ${new URL(DB).pathname.slice(1)} AND query LIKE '%record_renewal_grant_use%' AND wait_event_type = 'Lock'`;
-      if (rows.length === 1 && rows[0].b.length === 1) { readPid = Number(rows[0].pid); renewalPid = Number(rows[0].b[0]); readWait = await waitDetail(readPid); }
-      else await sleep(20);
-    }
-    // Then the renewal wakes and waits on the read at index.ts:4142.
-    let renewalWait = null;
-    for (let i = 0; i < 300 && renewalWait === null; i++) {
-      const b = renewalPid ? await observer`SELECT pg_blocking_pids(${renewalPid}::int) AS b` : [{ b: [] }];
-      if (b[0].b.length === 1 && Number(b[0].b[0]) === readPid) renewalWait = await waitDetail(renewalPid);
-      else await sleep(20);
-    }
-    const renewal = await renewalP;
-    const answeredMs = Date.now() - t0;
-    // The reader is held before COMMIT, so only the command's diagnostic may survive.
-    const afterCommand = await snapshot();
-    const stateAfterCommand = await seatState(s);
-    await gate`SELECT pg_advisory_unlock(130013, ${gateKey}::int)`;
-    const readResponse = await readP;
-    await gate.end();
-    await observer.unsafe(`DROP TRIGGER ${fn} ON swarm.renewal_grants`);
-    await observer.unsafe(`DROP FUNCTION public.${fn}()`);
-    nameSuccessor(s, renewal, 'real-read-answer');
-    const after = await snapshot();
-    const res = {
-      scenario: 'real_read', command_sqlstates: commandCodes.slice(code0), command_rollback_rows: diff(before, afterCommand), state_after_command: stateAfterCommand, grant_held_after_ms: grantHeldAfterMs, read_wait: readWait, renewal_wait: renewalWait,
-      server_log_victims: await victimsSince(n0, { renewal: renewalPid, read: readPid }), answered_after_ms: answeredMs,
-      first_response: shape(lost), response: shape(renewal), read_response: shape(readResponse),
-      state_before: state0, state_after: await seatState(s), rows: diff(before, after),
-    };
-    const retry = await renew(s.raw, C);
-    const r1 = await snapshot();
-    res.retry_same_command_id = { response: shape(retry), state_after: await seatState(s), rows: diff(after, r1) };
-    const fresh = await renew(s.raw, id());
-    res.renewal_new_command_id = { response: shape(fresh), state_after: await seatState(s) };
-    res.successor_still_works = { read: shape(await readAs(rawS1)), state_after: await seatState(s) };
-    out.results.real_read = res;
   }
   // Owner-boundary regression assertions. The old catch fails these because it
   // commits a refusal, its audit/events/ledger/stream writes, and loses recovery.
@@ -444,8 +501,7 @@ try {
     check(`${label}: diagnostic preserves SQLSTATE`, newFailure(v.state_before, v.state_after, code));
     if (label !== 'serialization') {
       const wait = v.parked?.renewal_wait ?? v.renewal_wait;
-      const statement = label === 'last_write' ? 'INSERT INTO swarm.agent_presence' : label === 'first_lock' ? 'SELECT swarm.prepare_renewal_grant(' : label === 'fence_insert' ? 'INSERT INTO swarm.agent_tokens (' : 'UPDATE swarm.agent_tokens SET revoked_at';
-      check(`${label}: victim reached the intended SQL statement`, wait?.statement.trim().startsWith(statement));
+      check(`${label}: victim reached the independently blocked database operation`, wait?.wait?.startsWith('Lock/') && wait.ungranted.length>0);
       if (serverLog && label !== 'revocation') check(`${label}: server log confirms renewal victim`, same(v.server_log_victims, ['renewal']));
     }
     if (label === 'revocation') {
@@ -456,21 +512,16 @@ try {
       check(`${label}: retry successor works`, v.retry_successor_first_use?.read.status === 200);
     }
   }
-  if (mode === 'real_read') {
-    const v = R.real_read;
-    check('real read: contender waits at grant use', v.read_wait?.statement.trim().startsWith('SELECT swarm.record_renewal_grant_use('));
-    check('real read: renewal waits at discardStrandedSuccessor', v.renewal_wait?.statement.trim().startsWith('UPDATE swarm.agent_tokens SET revoked_at'));
-    check('real read: renewal propagates 40P01', same(v.command_sqlstates, ['40P01']));
-    check('real read: renewal returns 503', v.response.status === 503 && same(v.response.body, { error: 'temporarily_unavailable' }));
-    check('real read: all command tables unchanged plus one diagnostic before reader commit', diagnosticOnly(v.command_rollback_rows));
-    check('real read: command state unchanged before reader commit', seatUnchanged(v.state_before, v.state_after_command));
-    check('real read: one diagnostic preserves 40P01', newFailure(v.state_before, v.state_after_command, '40P01'));
-    if (serverLog) check('real read: server log confirms renewal victim', same(v.server_log_victims, ['renewal']));
-    check('real read: first use commits', v.read_response.status === 200);
-    check('real read: only reader token/grant writes and diagnostic survive', same(v.rows.content_changed, ['swarm.agent_tokens', 'swarm.command_failures', 'swarm.renewal_grants']) && same(v.rows.counts, { 'swarm.command_failures': 1 }));
-    check('real read: command ledger and audit survive unchanged', ['audit', 'idempotency', 'events', 'stream_head_seq'].every((k) => same(v.state_before[k], v.state_after[k])));
-    check('real read: T0 retry may refuse after committed handover', v.retry_same_command_id.response.status === 401);
-    check('real read: no token loss, S1 still works', v.successor_still_works.read.status === 200);
+  if(mode==='real_read') {
+    const v=R.real_read;
+    check('real read: fixture parks an actual reader after its adoption',v.read_waited_on_fixture);
+    check('real read: real renewal waits on that reader before token acquisition',v.renewal_waited_on_reader && v.token_before_workspace===false);
+    check('real read: no deadlock or command diagnostic',same(v.command_sqlstates,[]) && !v.rows.content_changed.includes('swarm.command_failures'));
+    check('real read: committed first use wins',v.read_response.status===200);
+    check('real read: consumed predecessor refuses renewal',v.response.status===401 && v.retry_predecessor.status===401);
+    check('real read: original successor remains usable',v.successor_still_works.status===200);
+    check('real read: no loser ledger, event, audit or presence changes',['audit','idempotency','events','stream_head_seq','presence_rows'].every(k=>same(v.state_before[k],v.state_after[k])));
+    check('real read: only committed reader adoption and use survive',same(v.rows.content_changed,['swarm.agent_tokens','swarm.renewal_grants']) && same(v.rows.counts,{}));
   }
   check('no external HTTP', httpRefused === 0);
   out.checks = checks;

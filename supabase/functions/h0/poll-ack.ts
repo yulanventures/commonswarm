@@ -23,6 +23,7 @@ import {
   agentCredentialRevoked,
   enforceAgentSessionProof,
   loadAgentCredential,
+  planLocalOperation, lockLocalAuthPlan, retryLocalAuthTransaction, type LocalAuthLockPlan, LocalCredentialDenied,
 } from "../_shared/agent-auth.ts";
 import {
   agentSessionErrorStatus,
@@ -238,8 +239,40 @@ function prelude(request: Request): Response | null {
   return null;
 }
 
-async function authenticate(tx: Tx, tokenHash: Uint8Array): Promise<Authed> {
-  const agent = await loadAgentCredential(tx, tokenHash);
+
+class LocalH0Refused extends Error {
+  constructor(readonly result: unknown) { super('H0 credential operation refused'); }
+}
+async function localH0Transaction<T>(hash:Uint8Array,request:Request,poll:boolean,
+  operation:(tx:Tx,plan:LocalAuthLockPlan|null)=>Promise<T>):Promise<T> {
+  try { return await retryLocalAuthTransaction(()=>h0Database().begin(async tx=>{
+    await setRole(tx);
+    const plan=await planLocalOperation(tx,{hash,principalMode:poll?'noKeyUpdate':'share'});
+    if(plan) await lockLocalAuthPlan(tx,plan);
+    const result=await operation(tx,plan);
+    const r=result as {response?:Response;acquired?:boolean;collected?:{kind?:string}};
+    if (result instanceof Response && result.status>=400 || r?.acquired===false || r?.collected?.kind==='error') throw new LocalH0Refused(result);
+    let agent;
+    try {agent=plan ? await loadAgentCredential(tx,hash,plan) : null;}
+    catch(error) {if(error instanceof LocalCredentialDenied) agent=null;else throw error;}
+    const proof=agent ? await enforceAgentSessionProof(tx,{principalId:agent.principal_id,
+      workspaceId:agent.principal_workspace_id,proofParse:parseAgentSessionProofHeaders(request.headers)}) : null;
+    if (!agent || !proof?.ok) {
+      const response=json(403,{error:'forbidden'});
+      throw new LocalH0Refused(result instanceof Response ? response : r.acquired===true
+        ? {acquired:false,response} : {...r,collected:{kind:'error',status:403,error:'forbidden',message:'This seat cannot poll or ack.'},remainingMs:0});
+    }
+    return result;
+  })) as unknown as T; }
+  catch(error) { if(error instanceof LocalH0Refused) return error.result as T; throw error; }
+}
+async function authenticate(tx: Tx, tokenHash: Uint8Array, plan:LocalAuthLockPlan|null): Promise<Authed> {
+  let agent;
+  try {agent=plan ? await loadAgentCredential(tx,tokenHash,plan):null;}
+  catch(error) {
+    if(error instanceof LocalCredentialDenied) return {ok:false,status:403,error:'forbidden',message:'This seat cannot poll or ack.'};
+    throw error;
+  }
   if (agent === null) {
     return {
       ok: false,
@@ -864,9 +897,9 @@ export async function handleH0PollRequest(request: Request): Promise<Response> {
   const tokenHash = await sha256(token);
   let held: { seat: Seat; holder: string } | null = null;
   try {
-    const opened = await h0Database().begin(async (tx) => {
+    const opened = await localH0Transaction(tokenHash,request,true,async (tx,plan) => {
       await setRole(tx);
-      const auth = await authenticate(tx, tokenHash);
+      const auth = await authenticate(tx, tokenHash, plan);
       if (!auth.ok) return { acquired: false as const, response: json(auth.status, { error: auth.error, message: auth.message }) };
       await lockPollPrincipal(tx, auth.seat);
       const session = await sessionOrRefusal(tx, auth.seat, request);
@@ -932,9 +965,9 @@ export async function handleH0PollRequest(request: Request): Promise<Response> {
       } else {
         while (current.kind === "empty") {
           throwIfAborted(request.signal);
-          const slice = await h0Database().begin(async (tx) => {
+          const slice = await localH0Transaction(tokenHash,request,true,async (tx,plan) => {
             await setRole(tx);
-            const auth = await authenticate(tx, tokenHash);
+            const auth = await authenticate(tx, tokenHash, plan);
             if (!auth.ok) {
               return {
                 collected: {
@@ -1042,9 +1075,9 @@ export async function handleH0AckRequest(request: Request): Promise<Response> {
   });
   if (!parsed.ok) return json(400, { error: parsed.error, message: parsed.message });
   const tokenHash = await sha256(token);
-  return await h0Database().begin(async (tx) => {
+  return await localH0Transaction(tokenHash,request,false,async (tx,plan) => {
     await setRole(tx);
-    const auth = await authenticate(tx, tokenHash);
+    const auth = await authenticate(tx, tokenHash, plan);
     if (!auth.ok) {
       return json(auth.status, { error: auth.error, message: auth.message });
     }

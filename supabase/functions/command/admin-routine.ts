@@ -3,7 +3,6 @@ import { restoreAdminRoutineWorkspace } from "./admin-routine-workspace.ts";
 import type postgres from "npm:postgres@3.4.9";
 import {
   reduceWorkspace,
-  RENEWAL_IDLE_PAUSE_DAYS,
 } from "../_shared/protocol.js";
 import type {
   AdminAccountState,
@@ -164,6 +163,10 @@ export async function prepareAdminRoutine(
     const tokenId = "credential_id" in command
       ? command.credential_id
       : command.predecessor_credential_id;
+    const [binding] = await tx<{renewal_grant_id:string|null}[]>`SELECT renewal_grant_id FROM swarm.agent_tokens
+      WHERE token_id=${tokenId}::uuid`;
+    if (binding?.renewal_grant_id) await tx`SELECT renewal_grant_id FROM swarm.renewal_grants
+      WHERE renewal_grant_id=${binding.renewal_grant_id}::uuid FOR UPDATE`;
     const rows = await tx<
       (Record<string, unknown> & {
         token_id: string;
@@ -174,7 +177,7 @@ export async function prepareAdminRoutine(
         horizon_expires_at: Date | null;
       })[]
     >`
-      SELECT t.*,g.kind,g.last_used_at,g.horizon_expires_at,g.max_successors,g.successors_used,g.suspension_active,g.bound_device_id,
+      SELECT t.*,g.connection_expires_at,g.connection_expired_at,g.kind,g.last_used_at,g.horizon_expires_at,g.max_successors,g.successors_used,g.suspension_active,g.bound_device_id,
         r.device_id,r.ended_at,d.revoked_at AS device_revoked_at,
         EXISTS(SELECT 1 FROM swarm.agent_tokens s WHERE s.predecessor_token_id=t.token_id AND s.revoked_at IS NULL) AS superseded,
         EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='lineage' AND z.target_id=t.lineage_id) AS lineage_revoked,
@@ -232,11 +235,8 @@ export async function prepareAdminRoutine(
           (row.lineage_revoked || row.grant_revoked_at ? ctx.now : null),
         first_used_at: row.first_used_at?.getTime() ?? null,
         superseded: row.superseded === true,
-        suspended: row.suspension_active === true ||
-          row.kind === "standing" &&
-            (!row.last_used_at ||
-              new Date(row.last_used_at as string).getTime() <=
-                ctx.now - RENEWAL_IDLE_PAUSE_DAYS * 86400000),
+        suspended: row.suspension_active === true && !(row.kind==='standing'
+          && row.connection_expires_at===null && row.connection_expired_at===null),
         device_valid: row.ended_at === null && row.device_revoked_at === null &&
           (row.bound_device_id === null ||
             row.bound_device_id === row.device_id),

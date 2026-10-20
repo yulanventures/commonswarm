@@ -118,7 +118,7 @@ function stopProcessGroup(pid: number | undefined, signal: NodeJS.Signals): void
 
 const options = { prepare: false, max: 1, connect_timeout: 5 };
 
-test("older SQL use with another device and source leaves the newer use intact", { timeout: 25_000 }, async () => {
+test("a wrong run device cannot overwrite an authorized use after its grant wait", { timeout: 25_000 }, async () => {
   const local = localEnvironment();
   const sql = postgres(local.DB_URL, options);
   const aSql = postgres(local.DB_URL, options);
@@ -163,7 +163,7 @@ test("older SQL use with another device and source leaves the newer use intact",
   }
 });
 
-test("older successor use preserves newer fields while still spending capacity", { timeout: 25_000 }, async () => {
+test("successor use takes a fresh post-wait clock while still spending capacity", { timeout: 25_000 }, async () => {
   const local = localEnvironment();
   const sql = postgres(local.DB_URL, options);
   const aSql = postgres(local.DB_URL, options);
@@ -192,7 +192,7 @@ test("older successor use preserves newer fields while still spending capacity",
         );
       await waitForGrantLock(monitor, bPid, 5_000, aPid, "RowShareLock", "%INSERT INTO swarm.agent_tokens%");
       await b`SELECT swarm.record_renewal_grant_use(
-        ${f.tokenId}::uuid, ${f.otherDevice}::uuid, 'newer')`;
+        ${f.tokenId}::uuid, ${f.device}::uuid, 'newer')`;
       const rows = await b<{ last_used_at: Date }[]>`
         SELECT last_used_at FROM swarm.renewal_grants WHERE renewal_grant_id = ${f.grant}::uuid`;
       assert.ok(rows[0]?.last_used_at, "positive control: B records a later use");
@@ -207,10 +207,10 @@ test("older successor use preserves newer fields while still spending capacity",
       last_used_from, new_host_at FROM swarm.renewal_grants
       WHERE renewal_grant_id = ${f.grant}::uuid`;
     assert.equal(rows[0]?.successors_used, 1);
-    assert.equal(rows[0]?.last_used_at?.getTime(), bStamp!.getTime());
-    assert.equal(rows[0]?.last_used_device_id, f.otherDevice);
+    assert.ok(rows[0]!.last_used_at.getTime() >= bStamp!.getTime(), "successor uses the post-wait clock");
+    assert.equal(rows[0]?.last_used_device_id, f.device);
     assert.equal(rows[0]?.last_used_from, "newer");
-    assert.equal(rows[0]?.new_host_at?.getTime(), bStamp!.getTime());
+    assert.equal(rows[0]?.new_host_at, null);
   } finally {
     if (aResult) await aResult;
     await Promise.all([sql, aSql, bSql, monitor].map((db) => db.end({ timeout: 5 })));
@@ -227,7 +227,7 @@ test("served member read survives an older blocked use", { timeout: 90_000 }, as
   writeFileSync(envFile, "SWARM_ENV=test\n");
   let logs = "";
   const child = spawn("supabase", ["functions", "serve", "--no-verify-jwt", "--env-file", envFile], {
-    cwd: process.cwd(), env: { ...process.env, HOME: temp,
+    cwd: process.cwd(), env: { ...process.env,
       XDG_STATE_HOME: join(temp, "state"), SWARM_ENV: "test" },
     detached: true, stdio: ["ignore", "pipe", "pipe"],
   });
@@ -260,7 +260,7 @@ test("served member read survives an older blocked use", { timeout: 90_000 }, as
         body: JSON.stringify({ resource: "members", workspace_id: f.workspace }),
         signal: AbortSignal.timeout(10_000),
       }).then((response) => ({ response }), (error: unknown) => ({ error }));
-      await waitForGrantLock(monitor, bPid, 5_000);
+      await waitForGrantLock(monitor, bPid, 5_000, null, "RowShareLock", "%agent_delivery_read_context%");
       await b`SELECT swarm.record_renewal_grant_use(${f.tokenId}::uuid, ${f.device}::uuid, NULL)`;
       const rows = await b<{ last_used_at: Date }[]>`
         SELECT last_used_at FROM swarm.renewal_grants WHERE renewal_grant_id = ${f.grant}::uuid`;
@@ -273,7 +273,7 @@ test("served member read survives an older blocked use", { timeout: 90_000 }, as
     assert.equal(response.status, 200, await response.text());
     const rows = await sql<{ last_used_at: Date }[]>`
       SELECT last_used_at FROM swarm.renewal_grants WHERE renewal_grant_id = ${f.grant}::uuid`;
-    assert.equal(rows[0]?.last_used_at?.getTime(), bStamp!.getTime());
+    assert.ok(rows[0]!.last_used_at.getTime() >= bStamp!.getTime(), "read records fresh authorized use after waiting");
   } finally {
     if (responsePromise) await responsePromise;
     const exited = child.exitCode === null
@@ -460,5 +460,96 @@ test("residual revocation refuses live families and revokes only the authorized 
       [["lineage",lineage,f.user],["token",token,f.user]]);
     await revoke(token);
     assert.deepEqual(await state(),after,"idempotent residual revoke preserves timestamps");
+  } finally {await sql.end({timeout:5});}
+});
+
+// prepare is the owning SQL boundary for lazy idle suspension. A stale last
+// use must not force human action; an owner-selected expiry still refuses.
+test("perpetual standing renewal has no idle gate and chosen expiry stays terminal", {timeout:30_000},async()=>{
+  const sql=postgres(localEnvironment().DB_URL,options);
+  try {
+    const f=await seed(sql);
+    await sql`UPDATE swarm.renewal_grants SET last_used_at=clock_timestamp()-interval '90 days'
+      WHERE renewal_grant_id=${f.grant}::uuid`;
+    const prepare=()=>sql.begin(async tx=>{
+      await tx`SET LOCAL ROLE swarm_command`;
+      await tx`SELECT user_id FROM swarm.users WHERE user_id=${f.user}::uuid FOR NO KEY UPDATE`;
+      await tx`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id=${f.workspace}::uuid FOR SHARE`;
+      await tx`SELECT user_id FROM swarm.memberships WHERE workspace_id=${f.workspace}::uuid AND user_id=${f.user}::uuid FOR SHARE`;
+      await tx`SELECT principal_id FROM swarm.agent_principals WHERE principal_id=${f.principal}::uuid FOR SHARE`;
+      await tx`SELECT run_id FROM swarm.agent_runs WHERE run_id=${f.run}::uuid FOR SHARE`;
+      await tx`SELECT device_id FROM swarm.devices WHERE device_id=${f.device}::uuid FOR SHARE`;
+      await tx`SELECT renewal_grant_id FROM swarm.renewal_grants WHERE renewal_grant_id=${f.grant}::uuid FOR UPDATE`;
+      await tx`SELECT token_id FROM swarm.agent_tokens WHERE token_id=${f.tokenId}::uuid FOR UPDATE`;
+      const [result]=await tx`SELECT swarm.prepare_renewal_grant(${f.grant}::uuid,${f.device}::uuid) AS code`;
+      return result!.code;
+    });
+    assert.equal(await prepare(),null,"ninety idle days require no resume");
+    const [live]=await sql`SELECT suspension_active,suspended_at,connection_expired_at FROM swarm.renewal_grants WHERE renewal_grant_id=${f.grant}::uuid`;
+    assert.deepEqual(live,{suspension_active:false,suspended_at:null,connection_expired_at:null});
+    await sql`UPDATE swarm.renewal_grants SET suspended_at=clock_timestamp() WHERE renewal_grant_id=${f.grant}::uuid`;
+    assert.equal(await prepare(),null,"historical automatic idle suspension adds no resume ceremony");
+    const [history]=await sql`SELECT suspended_at,resumed_at,resumed_by FROM swarm.renewal_grants WHERE renewal_grant_id=${f.grant}::uuid`;
+    assert.ok(history!.suspended_at instanceof Date,"historical idle record is retained");
+    assert.equal(history!.resumed_at,null);assert.equal(history!.resumed_by,null,"no fictional human resume");
+    await sql`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second' WHERE renewal_grant_id=${f.grant}::uuid`;
+    assert.equal(await prepare(),'renewal_grant_revoked');
+    await sql`UPDATE swarm.renewal_grants SET connection_expires_at=NULL WHERE renewal_grant_id=${f.grant}::uuid`;
+    assert.equal(await prepare(),'renewal_grant_revoked',"clearing the date cannot revive terminal authority");
+  } finally {await sql.end({timeout:5});}
+});
+
+test("read owner routine checks chosen deadline after a blocked family wait and rolls back adoption", {timeout:30_000},async()=>{
+  const sql=postgres(localEnvironment().DB_URL,options),blocker=postgres(localEnvironment().DB_URL,options),
+    reader=postgres(localEnvironment().DB_URL,options),monitor=postgres(localEnvironment().DB_URL,options);
+  let pending:Promise<unknown>|undefined;
+  try {
+    const f=await seed(sql);
+    const [before]=await sql`SELECT first_used_at,expires_at FROM swarm.agent_tokens WHERE token_id=${f.tokenId}::uuid`;
+    await blocker.begin(async tx=>{
+      const [{pid}]=await tx<{pid:number}[]>`SELECT pg_backend_pid() AS pid`;
+      await tx`SELECT renewal_grant_id FROM swarm.renewal_grants WHERE renewal_grant_id=${f.grant}::uuid FOR UPDATE`;
+      pending=reader.begin(async r=>{
+        await r`SET LOCAL ROLE swarm_read`;
+        return r`SELECT * FROM swarm.agent_delivery_read_context(${createHash('sha256').update(f.secret).digest()},${f.workspace}::uuid)`;
+      });
+      await waitForGrantLock(monitor,pid,5000,null,'RowShareLock','%agent_delivery_read_context%');
+      await tx`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second' WHERE renewal_grant_id=${f.grant}::uuid`;
+    });
+    assert.deepEqual(await pending,[],"deadline committed during the wait refuses this invocation");
+    const [after]=await sql`SELECT first_used_at,expires_at FROM swarm.agent_tokens WHERE token_id=${f.tokenId}::uuid`;
+    assert.deepEqual(after,before,"a denied read adopts nothing");
+    const control=await seed(sql);
+    const result=await reader.begin(async tx=>{
+      await tx`SET LOCAL ROLE swarm_read`;
+      return tx`SELECT * FROM swarm.agent_delivery_read_context(${createHash('sha256').update(control.secret).digest()},${control.workspace}::uuid)`;
+    });
+    assert.equal(result.length,1,"same-role positive reaches the same owner routine");
+    assert.equal(result[0]!.is_revoked,false);
+    const [used]=await sql`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id=${control.tokenId}::uuid`;
+    assert.ok(used!.first_used_at instanceof Date);
+  } finally {if(pending) await pending;await Promise.all([sql,blocker,reader,monitor].map(db=>db.end({timeout:5})));}
+});
+
+test("local discovery accepts the full 2048-token closure and refuses 2049 without truncation",{timeout:45_000},async()=>{
+  const sql=postgres(localEnvironment().DB_URL,options);
+  try {
+    const f=await seed(sql);
+    await sql`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,task_id,epoch,scopes,token_hash,expires_at,lineage_id,renewal_grant_id)
+      SELECT gen_random_uuid(),${f.principal}::uuid,${f.run}::uuid,${f.task}::uuid,1,'["post_signal"]'::jsonb,
+        decode(lpad(to_hex(i),64,'0'),'hex'),clock_timestamp()+interval '1 hour',${f.lineage}::uuid,${f.grant}::uuid
+      FROM generate_series(1,2047) i`;
+    const discover=()=>sql.begin(async tx=>{
+      await tx`SET LOCAL ROLE swarm_command`;
+      return tx`SELECT token_id FROM swarm.discover_local_target_ids(${f.workspace}::uuid,NULL,ARRAY[${f.principal}::uuid],ARRAY[]::uuid[],false)`;
+    });
+    assert.equal((await discover()).length,2048,"exact token cap returns the complete set");
+    await sql`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,task_id,epoch,scopes,token_hash,expires_at,lineage_id,renewal_grant_id)
+      VALUES(gen_random_uuid(),${f.principal}::uuid,${f.run}::uuid,${f.task}::uuid,1,'["post_signal"]'::jsonb,
+        ${createHash('sha256').update(randomBytes(32)).digest()},clock_timestamp()+interval '1 hour',${f.lineage}::uuid,${f.grant}::uuid)`;
+    await assert.rejects(discover(),{code:'54000'},"cap+1 refuses rather than returning a partial closure");
+    const [intact]=await sql`SELECT count(*)::int AS n,count(first_used_at)::int AS used,count(revoked_at)::int AS revoked
+      FROM swarm.agent_tokens WHERE principal_id=${f.principal}::uuid`;
+    assert.deepEqual(intact,{n:2049,used:0,revoked:0},"discovery has no adoption or revocation effects");
   } finally {await sql.end({timeout:5});}
 });
