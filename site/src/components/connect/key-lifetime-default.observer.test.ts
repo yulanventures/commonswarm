@@ -44,7 +44,7 @@ test("ordinary AgentConnect has no lifetime choice and preserves its 30-day boot
   const workspaceId = "11111111-1111-4111-8111-111111111111";
   const inviteId = "22222222-2222-4222-8222-222222222222";
   const userId = "33333333-3333-4333-8333-333333333333";
-  const container = await AstroContainer.create({ resolve: () => "/agent-connect.js" });
+  const container = await AstroContainer.create({ resolve: async () => "/agent-connect.js" });
   const markup = await container.renderToString(renderedComponent.default, {
     props: { workspaceId, workspaceName: "Synthetic household" },
   });

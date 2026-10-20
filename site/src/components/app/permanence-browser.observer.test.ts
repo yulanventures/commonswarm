@@ -440,7 +440,7 @@ browserTest("real app mounts enforce end-date identity, lifecycle and owner admi
   const code = rendered.outputFiles[0]!.text.replaceAll('"astro/compiler-runtime"',
     JSON.stringify(new URL("../../../node_modules/astro/dist/runtime/compiler/index.js", import.meta.url).href));
   const module = await import("data:text/javascript;base64," + Buffer.from(code).toString("base64"));
-  const container = await AstroContainer.create({ resolve: () => "/app.js" });
+  const container = await AstroContainer.create({ resolve: async () => "/app.js" });
   const markup = await container.renderToString(module.default);
   const bundled: string[] = [];
   for (const [path, contents] of scripts) for (const content of contents) {
