@@ -281,6 +281,18 @@ test("live canonical families outlast technical horizons; end dates and security
     const security = peopleAgentStatus(input({ grant: key({ ...policy, suspendedAt: at(1) }) }), NOW);
     assert.equal(security.label, "Access suspended"); assert.equal(security.fix.action, null);
   }
+  for (const connectionExpiresAt of [at(-86400000), null]) {
+    const extended = peopleAgentStatus(input({ connection: "live", connectionPolicy: { connectionExpiresAt, connectionExpiredAt: null },
+      grant: key({ connectionExpiresAt: at(1), connectionExpiredAt: null }) }), NOW);
+    assert.equal(extended.kind, "active", "Home extension or cleared date beats old roster end");
+    assert.equal(extended.fix.action, null);
+  }
+  for (const connection of ["removed", "connection_off"]) {
+    const combined = peopleAgentStatus(input({ connection, grant: key({ revokedAt: at(1), suspendedAt: at(1) }) }), NOW);
+    assert.equal(combined.fix.action, null, "principal restriction cannot offer key recovery or resume");
+    assert.equal(combined.fix.allowed, false);
+  }
+
 });
 
 // Technical token/horizon expiry cannot prove an owner deadline or force re-inviting.

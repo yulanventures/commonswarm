@@ -26,11 +26,19 @@ export function homeConnectionAccess(row: Pick<HomeMapAgent, "principalId" | "ow
   workspaceId: string | undefined, access: readonly AgentAccessStatus[]): AgentAccessStatus | undefined {
   const facts = row.work?.facts;
   const hosted = (facts?.transport ?? row.transport) === "hosted_mcp";
-  if (!hosted && !connectionUuid(facts?.renewal_grant_id)) return undefined;
-  return access.find(item => item.workspaceId === workspaceId && item.principalId === row.principalId &&
-    item.ownerUserId === row.ownerUserId && (hosted || (item.grantId === facts?.renewal_grant_id &&
-      connectionUuid(item.grantId) && connectionUuid(item.tokenId) &&
-      (!Object.hasOwn(facts!, "token_id") || item.tokenId === facts?.token_id))));
+  const scoped = access.filter(item => item.workspaceId === workspaceId && item.principalId === row.principalId &&
+    item.ownerUserId === row.ownerUserId);
+  // Without Home, the selected roster supplies read-only status, never canonical policy.
+  if (!row.work || hosted) return scoped[0];
+  if (!connectionUuid(facts?.renewal_grant_id)) return undefined;
+  const family = scoped.filter(item => item.grantId === facts.renewal_grant_id);
+  return family.find(item => homeConnectionTokenMatches(row, item)) ?? family[0];
+}
+
+/** Token revocation, use and key mutations belong only to the actual selected token. */
+export function homeConnectionTokenMatches(row: Pick<HomeMapAgent, "work" | "transport">, access: AgentAccessStatus): boolean {
+  return (row.work?.facts.transport ?? row.transport) === "hosted_mcp" ||
+    (!row.work ? connectionUuid(access.tokenId) : connectionUuid(row.work.facts.token_id) && row.work.facts.token_id === access.tokenId);
 }
 
 /** Legacy and unknown families have no owner policy; dates never establish identity. */
@@ -100,8 +108,8 @@ export function mapHomePeople(input: HomePeopleInput): HomePeople {
         ...(Object.hasOwn(access, "connectionExpiresAt") ? { connectionExpiresAt: access.connectionExpiresAt } : {}),
         ...(Object.hasOwn(access, "connectionExpiredAt") ? { connectionExpiredAt: access.connectionExpiredAt } : {}),
         kind: access.grantKind, horizonExpiresAt: access.horizonExpiresAt, boundDeviceId: access.boundDeviceId,
-        lastUsedAt: access.lastUsedAt, issuedAt: access.issuedAt, newHostAt: access.newHostAt,
-        suspendedAt: access.suspendedAt, revokedAt: access.grantRevokedAt ?? access.revokedAt } : null,
+        lastUsedAt: homeConnectionTokenMatches(row, access) ? access.lastUsedAt : null, issuedAt: access.issuedAt, newHostAt: access.newHostAt,
+        suspendedAt: access.suspendedAt, revokedAt: access.grantRevokedAt ?? (homeConnectionTokenMatches(row, access) ? access.revokedAt : null) } : null,
       serverWork: work?.work, lastActionAt: work?.facts.last_activity_at,
       doingTodo: work?.facts.doing ? { title: work.facts.doing.title ?? "a to-do", since: work.facts.doing.since } : null,
       workingOn: workingOn ? { body: workingOn.body, createdAt: workingOn.createdAt, until: workingOn.until! }

@@ -837,11 +837,26 @@ test("Home preserves canonical connection endings without turning proof horizons
   }
   // A stale or foreign roster family cannot override the selected live Home connection.
   for (const identity of [{ grantId: "77777777-7777-4777-8777-777777777777" },
-    { tokenId: "99999999-9999-4999-8999-999999999999" }, { ownerUserId: "amy" },
+    { ownerUserId: "amy" },
     { workspaceId: "X" }, { principalId: "B" }]) {
     const live = state({ connectionExpiresAt: "2026-10-01T00:00:00Z", suspendedAt: "2026-10-02T00:00:00Z", grantRevokedAt: "2026-10-02T00:00:00Z" }, "live", identity);
     assert.equal(live.kind, "idle"); assert.equal(live.fix.action, null);
   }
+  const rotated = { tokenId: "99999999-9999-4999-8999-999999999999" };
+  const endedRotation = state({ connectionExpiresAt: "2026-10-01T00:00:00Z", connectionExpiredAt: null }, "live", rotated);
+  assert.equal(endedRotation.detail, "Connection ended");
+  assert.equal(endedRotation.fix.action, null);
+  const oldRevoked = state({ revokedAt: "2026-10-02T00:00:00Z", connectionExpiresAt: null, connectionExpiredAt: null }, "live", rotated);
+  assert.equal(oldRevoked.kind, "idle", "old token revocation cannot revoke its successor");
+  assert.equal(oldRevoked.fix.action, null);
+  const selected = mapHomePeople({ ...input, workspaceId: "W",
+    agents: [{ ...input.agents[0], transport: "local", work: { work: "idle", facts: { connection: "live", renewal_grant_id: grantId, token_id: tokenId } } }],
+    access: [{ ...base, ...rotated }, { ...base, revokedAt: "2026-10-02T00:00:00Z" }] }).groups[0].agents[0].state;
+  assert.equal(selected.detail, "Key turned off", "matching token row wins among same-family rows");
+  const fallback = mapHomePeople({ ...input, workspaceId: "W", agents: [{ ...input.agents[0], transport: "local" }],
+    access: [{ ...base, suspendedAt: "2026-10-02T00:00:00Z", connectionExpiresAt: "2026-10-01T00:00:00Z", connectionExpiredAt: null }] }).groups[0].agents[0].state;
+  assert.equal(fallback.detail, "Access suspended", "absent Home keeps scoped roster status");
+  assert.equal(fallback.fix.action, null, "elapsed fallback cannot resume");
   const suspended = state({ connectionExpiresAt: null, connectionExpiredAt: null, suspendedAt: "2026-10-02T00:00:00Z" });
   assert.equal(suspended.kind, "disconnected");
   assert.equal(suspended.detail, "Access suspended");

@@ -17,6 +17,8 @@ import { browserTest, findChrome, launchChrome } from "../../../tests/chrome.js"
 // Error rows protect response-specific copy and correction without a read; the
 // credible regression is treating all 400s as unsupported or all refusals as
 // unknown writes. This existing DOM/HTTP owner lacked those codes. No new seam.
+// Rotation rows keep family editing/resume while rejecting an old token key target.
+// Foreign queue rows must terminate loading; cross-family queue policy cannot replace Home.
 // Home rows additionally own the real RPC -> rail -> agent-page policy summary.
 // The roster-only settings rows cannot catch a successful overview dropping policy.
 function installConnectionFixture() {
@@ -46,12 +48,13 @@ function installConnectionFixture() {
     issued_at: before, token_expires_at: before, first_used_at: scenario === "unbound" ? null : recent,
     token_revoked_at: null, connection_expires_at: scenario.startsWith("ended") ? before : null, connection_expired_at: null };
   if (["unknown", "bounded"].includes(scenario)) { delete grant.connection_expires_at; delete grant.connection_expired_at; }
-  if (scenario === "revoked") grant.revoked_at = recent;
+  if (scenario === "revoked" || scenario === "absent-home") grant.revoked_at = recent;
   if (scenario === "malformed") grant.connection_expired_at = "invalid";
   if (scenario === "dated") grant.connection_expires_at = "2034-01-01T00:00:00Z";
   if (scenario === "elapsed-fence") grant.connection_expired_at = before;
   if (scenario === "home-mismatch") { grant.renewal_grant_id = hostedId; grant.suspended_at = recent; grant.revoked_at = recent; grant.connection_expires_at = before; }
   if (scenario === "home-matched-ended") grant.connection_expires_at = before;
+  if (scenario === "rotation" || scenario === "rotation-suspended") { grant.token_revoked_at = recent; if (scenario === "rotation-suspended") grant.suspended_at = recent; }
   const connection = { grant_id: hostedId, client_id: "https://connector.example.test",
     home_workspace_id: workspace, selected_workspace_ids: [workspace],
     state: scenario === "hosted-pending" ? "pending" : "active", revoked_at: scenario === "hosted-revoked" ? recent : null,
@@ -59,7 +62,7 @@ function installConnectionFixture() {
   if (scenario === "hosted-unknown") { delete (connection as any).connection_expires_at; delete (connection as any).connection_expired_at; }
   if (scenario === "hosted-malformed") (connection as any).connection_expired_at = false;
   const f = w.connectionFixture = { scenario, hosted, principal, owner, foreign, workspace, otherWorkspace, renewal, hostedId,
-    home, grant, connection, canonicalGrant: renewal, rotateFamily: false, requests: [] as any[], unexpected: [] as string[], holdRead: false,
+    home, grant, connection, canonicalGrant: renewal, canonicalToken: ["rotation", "rotation-suspended"].includes(scenario) ? "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" : grant.token_id, rotateFamily: false, requests: [] as any[], unexpected: [] as string[], holdRead: false,
     releaseRead: null as null | (() => void), failRead: false, mode: "accept", reads: 0, overviewReads: 0, readTargets: [] as string[] };
   const network = window.fetch.bind(window);
   const policyRead = async (target: string) => {
@@ -95,7 +98,7 @@ function installConnectionFixture() {
           if (f.rotateFamily) {
             f.rotateFamily = false;
             f.grant = { ...f.grant, renewal_grant_id: hostedId, token_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", connection_expires_at: null };
-            f.canonicalGrant = hostedId;
+            f.canonicalGrant = hostedId; f.canonicalToken = f.grant.token_id;
           }
           return Response.json({ status: "accepted", ok: true });
         }
@@ -103,12 +106,15 @@ function installConnectionFixture() {
         if (c.kind === "resume_renewal_grant") { f.grant.suspended_at = null; return Response.json({ status: "accepted" }); }
         if (c.kind === "household_access") return Response.json({ status: "ok", content_role: null });
         if (home && c.kind === "household_tool" && c.tool === "todo_queue") return Response.json({ status: "ok", queue: {
-          workspace_id: workspace, principal_id: principal, owner_user_id: owner, read_at: new Date().toISOString(),
+          workspace_id: scenario === "home-queue-workspace" ? otherWorkspace : workspace,
+          principal_id: scenario === "home-queue-principal" ? foreign : principal,
+          owner_user_id: scenario === "home-queue-owner" ? foreign : owner, read_at: new Date().toISOString(),
           accepts_from: "owner", content_access: "none", working: [], up_next: [], not_yet: [], requests: [],
           next_offset: { working: null, up_next: null, not_yet: null, requests: null },
-          // Queue facts have no policy in the current backend. They must not erase Home policy.
+          // Different queue family/policy/key state must not replace canonical Home truth.
           status: { work: scenario === "home-ended" ? "disconnected" : "idle", facts: { transport: "local", turn_only: false,
-            connection: scenario === "home-ended" ? "key_ended" : scenario === "home-paused" ? "paused" : scenario === "home-key-off" ? "key_off" : "live",
+            connection: scenario === "home-queue-removed" ? "removed" : scenario === "home-queue-off" ? "connection_off" : scenario === "home-permanent" ? "key_ended" : scenario === "home-ended" ? "key_ended" : scenario === "home-paused" ? "paused" : scenario === "home-key-off" ? "key_off" : "live",
+            renewal_grant_id: hostedId, token_id: foreign, connection_expires_at: before, connection_expired_at: before,
             last_activity_at: recent, messages_waiting_since: null, doing: null, working_on: null } }
         } });
         if (c.kind === "household_tool") return Response.json({ status: "refused", reason: "content_consent_required" });
@@ -116,8 +122,9 @@ function installConnectionFixture() {
         // Read-only activity/queue requests have no write effects in this UI fixture.
       }
       if (url.pathname === "/rest/v1/rpc/home_overview") {
+        if (scenario === "absent-home") return Response.json({ error: "unavailable" }, { status: 503 });
         f.overviewReads++;
-        const status = { work: "idle", facts: { renewal_grant_id: scenario === "home-legacy" ? null : f.canonicalGrant, token_id: f.grant.token_id, transport: hosted ? "hosted_mcp" : "local", turn_only: hosted,
+        const status = { work: "idle", facts: { renewal_grant_id: scenario === "home-legacy" ? null : f.canonicalGrant, token_id: f.canonicalToken, transport: hosted ? "hosted_mcp" : "local", turn_only: hosted,
           connection: scenario === "key-ended" ? "key_ended" : scenario === "connection-off" ? "connection_off" : scenario === "removed" ? "removed" : scenario === "suspended" ? "paused" : "live",
           last_activity_at: recent, messages_waiting_since: null, doing: null, working_on: null,
           ...(Object.hasOwn(f.grant, "connection_expires_at") ? { connection_expires_at: f.grant.connection_expires_at } : {}),
@@ -181,7 +188,12 @@ async function observeConnectionApp() {
   try {
     if (f.home) {
       await wait(() => f.overviewReads > 0 && one("[data-home-catchup]")?.textContent.includes("Home"), "successful Home RPC");
-      if (f.scenario === "home-removed") {
+      if (["home-queue-workspace", "home-queue-principal", "home-queue-owner"].includes(f.scenario)) {
+        await wait(() => one('[data-rail-agent="' + f.principal + '"]'), "queue mismatch agent");
+        one('[data-rail-agent="' + f.principal + '"]').click();
+        await wait(() => one("[data-home-route-pane]")?.textContent.includes("Could not load"), "queue failure recovery");
+        assert(!one("[data-home-route-pane]").textContent.includes("Checking the line"), "foreign queue stayed pending");
+      } else if (f.scenario === "home-removed") {
         await wait(() => one('[data-home-catchup] [data-workspace-id="' + f.workspace + '"] .hm-catchup-card-body'), "removed overview rendered");
         assert(!one('[data-rail-agent="' + f.principal + '"]'), "removed principal stayed in Home roster");
       } else {
@@ -200,6 +212,9 @@ async function observeConnectionApp() {
           assert(pane.textContent.includes("This connection cannot be resumed."), "elapsed owner date lost its terminal reason");
           assert(!Array.from(pane.querySelectorAll("button")).some((b: any) => /new key|resume/i.test(b.textContent)), "ended Home offered recovery");
         }
+        if (f.scenario === "home-permanent") assert(!pane.textContent.includes("Key ended") && !pane.textContent.includes("Connection ended"), "queue overrode canonical family");
+        if (f.scenario === "home-queue-removed") assert(pane.textContent.includes("Removed"), "queue removal lost precedence");
+        if (f.scenario === "home-queue-off") assert(pane.textContent.includes("Connection turned off"), "queue connection-off lost precedence");
         if (f.scenario === "home-paused") assert(pane.textContent.includes("Access suspended"), "suspension lost precedence");
         if (f.scenario === "home-key-off") assert(pane.textContent.includes("Key turned off"), "revocation lost precedence");
       }
@@ -221,18 +236,23 @@ async function observeConnectionApp() {
     const notice = () => editor().querySelector('[role="status"]').textContent;
     assert(writes().length === 0, "mount wrote a command");
     if (!form()) {
-      assert(["foreign", "grant-foreign", "principal-foreign"].includes(f.scenario), "missing admitted editor");
+      assert(["foreign", "grant-foreign", "principal-foreign", "absent-home"].includes(f.scenario), "missing admitted editor");
+      if (f.scenario === "absent-home") {
+        assert(one("[data-people-detail]").textContent.includes("Key turned off"), "roster revocation vanished without Home");
+        assert(!editor().textContent.includes("Stays connected until you remove it"), "absent Home invented permanence");
+      }
       assert(!editor().querySelector("[data-end-date-save]"), "foreign family exposed a save control");
       assert(writes().length === 0 && f.unexpected.length === 0, "foreign family sent a write");
       document.documentElement.dataset.connectionObservation = JSON.stringify({ scenario: f.scenario, writes: writes(), reads: f.reads });
       return;
     }
-    const editable = ["renewal", "hosted", "dated", "legacy-permanent", "confirmation", "session-reset", "stale-family"].includes(f.scenario);
+    const editable = ["renewal", "hosted", "dated", "legacy-permanent", "confirmation", "session-reset", "stale-family", "rotation"].includes(f.scenario);
     await wait(() => f.overviewReads > 0 && visible(form()) === editable, "owner/live/policy mount admission");
     if (["unknown", "malformed", "hosted-unknown", "hosted-malformed", "key-ended", "connection-off", "removed", "unbound"].includes(f.scenario))
       assert(!editor().textContent.includes("Stays connected until you remove it"), "unknown or terminal promised permanence");
     if (["ended", "elapsed-fence", "hosted-ended"].includes(f.scenario))
       assert(editor().textContent.includes("Connection ended"), "terminal policy not shown");
+    if (["rotation", "rotation-suspended"].includes(f.scenario)) assert(!one("[data-people-detail] [data-revoke-grant]"), "old token supplied a key mutation target");
     if (f.scenario === "confirmation") {
       const turnOff = one("[data-people-detail] [data-revoke-grant]");
       assert(turnOff, "live key has no turn-off action");
@@ -256,7 +276,7 @@ async function observeConnectionApp() {
       field("[data-end-date-value]").dispatchEvent(new Event("input"));
       form().dispatchEvent(new Event("submit", { cancelable: true }));
       assert(writes().length === 0, "hidden or terminal control sent a write");
-      if (f.scenario === "suspended") {
+      if (f.scenario === "suspended" || f.scenario === "rotation-suspended") {
         clickText("Resume", one("[data-people-detail]"));
         await wait(() => writes().some((r: any) => r.command.kind === "resume_renewal_grant"), "manual resume");
         assert(writes()[0].command.renewal_grant_id === f.renewal, "resume used wrong family");
@@ -415,7 +435,7 @@ browserTest("real app mounts enforce end-date identity, lifecycle and owner admi
     bundled.push((await build({ stdin: { contents: content, loader: "ts", resolveDir: dirname(path) }, bundle: true, write: false,
       format: "iife", platform: "browser", define: { "import.meta.env": JSON.stringify({ PUBLIC_H0_LINK_JOIN: "0" }) } })).outputFiles[0]!.text);
   }
-  const scenarios = ["home-legacy", "home-mismatch", "home-matched-ended", "stale-family", "home-permanent", "home-dated", "home-ended", "home-unknown", "home-malformed", "home-paused", "home-removed", "home-key-off", "renewal", "hosted", "confirmation", "session-reset", "legacy-permanent", "foreign", "grant-foreign", "principal-foreign", "unbound", "unknown", "malformed", "dated", "elapsed-fence", "key-ended", "connection-off", "removed", "ended", "ended-suspended", "bounded", "revoked", "suspended", "hosted-pending", "hosted-ended", "hosted-revoked", "hosted-unknown", "hosted-malformed"];
+  const scenarios = ["absent-home", "rotation", "rotation-suspended", "home-queue-workspace", "home-queue-principal", "home-queue-owner", "home-queue-removed", "home-queue-off", "home-legacy", "home-mismatch", "home-matched-ended", "stale-family", "home-permanent", "home-dated", "home-ended", "home-unknown", "home-malformed", "home-paused", "home-removed", "home-key-off", "renewal", "hosted", "confirmation", "session-reset", "legacy-permanent", "foreign", "grant-foreign", "principal-foreign", "unbound", "unknown", "malformed", "dated", "elapsed-fence", "key-ended", "connection-off", "removed", "ended", "ended-suspended", "bounded", "revoked", "suspended", "hosted-pending", "hosted-ended", "hosted-revoked", "hosted-unknown", "hosted-malformed"];
   // Compile our own fixture functions from their authored source, avoiding
   // transpiler-generated closure helpers in Function.toString().
   const testSource = await readFile(new URL(import.meta.url), "utf8");

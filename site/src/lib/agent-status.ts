@@ -151,17 +151,18 @@ export function peopleAgentStatus(input: PeopleAgentStatusInput, now = Date.now(
   if (input.connection === "connection_off") return result("suspended", "Connection turned off",
     input.own ? "Connect it again from its app." : "Ask its owner to check this connection.");
   if (grant?.revokedAt || input.connection === "key_off") return keyFix("key-off", "Key turned off");
-  const policy = connectionPolicyState(input.connectionPolicy ?? grant ?? {}, input.connection === "live", now);
+  const policy = connectionPolicyState(input.connectionPolicy ?? grant ?? {}, true, now);
   // Overview key_ended means no current token or renewable family remains. An owner
   // policy cannot restore that authority; only a legacy technical horizon is superseded.
-  const ended = policy === "ended" || Boolean(grant && renewalGrantEnded(grant, now)) || input.connection === "key_ended";
+  const familyEnded = policy === "ended" || (policy === "unknown" && Boolean(grant && renewalGrantEnded(grant, now)));
+  const ended = familyEnded || input.connection === "key_ended";
   if (grant?.suspendedAt || input.connection === "paused") {
     if (ended) return result("paused", "Access suspended", "This connection has also ended and cannot be resumed.");
     return result("paused", "Access suspended", input.mayManage ? "Review its access before resuming it."
       : input.ownerName ? `Ask ${owner} to review and resume it.` : "Ask a workspace owner or admin to review and resume it.",
       "resume", input.mayManage, input.mayManage ? null : input.ownerName ? owner : "a workspace owner or admin");
   }
-  if (policy === "ended" || Boolean(grant && renewalGrantEnded(grant, now)))
+  if (familyEnded)
     return result("key-ended", "Connection ended", "Its end date has passed. This connection cannot be resumed.");
   if (ended) return keyFix("key-ended", "Key ended");
   if (wakePathMark(input.oldestUnobservedAt, now)) {

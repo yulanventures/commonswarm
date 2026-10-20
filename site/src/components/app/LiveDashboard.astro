@@ -1000,7 +1000,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice } from "../../lib/home/contract";
   import type { TodoVM, AgentVM, ObjectCardVM } from "../../lib/home-types";
-  import { homeConnectionAccess, homeConnectionPolicy, mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
+  import { homeConnectionAccess, homeConnectionTokenMatches, homeConnectionPolicy, mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
   import { agentPage } from "../../lib/home-agent";
   import { listsAndDocsFact } from "../../lib/home-agent-copy";
   import { todosPane, type TodoFilter } from "../../lib/home-todo-list";
@@ -1201,7 +1201,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   } from "../../lib/participant-rail";
   import {
     grantRiskBadge,
-    renewalGrantEnded,
     connectionPolicyCopy,
     connectionPolicyState,
     type ConnectionPolicy,
@@ -2752,7 +2751,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const status = homeConnectionAccess(agent, activeWorkspaceId, accessStatuses);
         const details = agentEntityView(
           agent,
-          status,
+          status && homeConnectionTokenMatches(agent, status) ? status : undefined,
           people.get(agent.ownerUserId) ?? "Workspace member",
           entityDate,
         );
@@ -4282,7 +4281,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               queue[section].push(...page[section]); const next = page.next_offset[section]; if (next !== null && next <= offset) throw new Error("home_cursor_invalid"); offset = next; }
           }
           if (queue.workspace_id !== route.workspaceId || queue.principal_id !== route.agentId ||
-            !agents.some(row => row.principalId === queue.principal_id && row.ownerUserId === queue.owner_user_id)) return;
+            !agents.some(row => row.principalId === queue.principal_id && row.ownerUserId === queue.owner_user_id)) throw new Error("home_queue_identity_mismatch");
           homeQueue = queue; homeQueueRead = "ready";
           const row = agents.find(row => row.principalId === queue.principal_id && row.ownerUserId === queue.owner_user_id);
           if (row) {
@@ -4293,7 +4292,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               delete (facts as unknown as Record<string, unknown>)[key];
               if (Object.hasOwn(canonical, key)) Object.assign(facts, { [key]: canonical[key] });
             }
-            if (["removed", "connection_off"].includes(queue.status.facts.connection)) facts.connection = queue.status.facts.connection;
+            if (canonical?.connection === "removed" || queue.status.facts.connection === "removed") facts.connection = "removed";
+            else if (canonical?.connection === "connection_off" || queue.status.facts.connection === "connection_off") facts.connection = "connection_off";
             row.work = { ...queue.status, facts };
           }
           homePolicies.set(route.agentId, queue.accepts_from);
@@ -4802,10 +4802,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const renewalConnectionLive = (grant: AgentAccessStatus): boolean =>
       agents.some(row => row.work?.facts.connection === "live" && homeConnectionAccess(row, activeWorkspaceId, [grant]) === grant &&
         ["permanent", "dated"].includes(connectionPolicyState(homeConnectionPolicy(row), true))) &&
-      ["permanent", "dated"].includes(connectionPolicyState(grant, true)) &&
       [grant.grantId, grant.tokenId, grant.boundDeviceId].every(id => typeof id === "string" &&
         /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) &&
-      grant.revokedAt === null && grant.grantRevokedAt === null && grant.suspendedAt === null;
+      grant.grantRevokedAt === null && grant.suspendedAt === null &&
+      agents.some(row => homeConnectionAccess(row, activeWorkspaceId, [grant]) === grant &&
+        (!homeConnectionTokenMatches(row, grant) || grant.revokedAt === null));
 
     const connectionDateFocus = (host: HTMLElement) => {
       const active = document.activeElement;
@@ -4936,7 +4937,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const agent = agents.find(row => row.principalId === principalId);
       const grant = agent ? homeConnectionAccess(agent, workspaceId, accessStatuses) : undefined;
       if (!ownerId || sampleMode || !agent) return;
-      if (!grant) {
+      if (!grant || !agent.work) {
         // Home already read policy, but no family identity: show its truth without an editor.
         const section = document.createElement("section"); section.className = "dashboard__connection-end-date";
         section.dataset.connectionEndDate = `${ownerId}:${workspaceId}:overview:${principalId}`;
@@ -4953,7 +4954,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         isCurrent, current: () => {
           const canonical = agents.find(row => row.principalId === principalId && row.ownerUserId === ownerId);
           const current = canonical ? homeConnectionAccess(canonical, workspaceId, accessStatuses.filter(row => row.grantId === grantId)) : undefined;
-          return current ? { policy: current, live: renewalConnectionLive(current), owner: current.ownerUserId === ownerId &&
+          return current && canonical ? { policy: homeConnectionPolicy(canonical), live: renewalConnectionLive(current), owner: current.ownerUserId === ownerId &&
             agents.some(row => row.principalId === principalId && row.ownerUserId === ownerId) } : null;
         }, reread: async () => {
           const [rows, overview] = await Promise.all([agentAccessStatuses(workspaceId), homeOverview()]);
@@ -4983,6 +4984,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         agents: agents.map((agent) => {
           const grant = homeConnectionAccess(agent, activeWorkspaceId, accessStatuses);
           const policy = homeConnectionPolicy(agent);
+          const tokenMatches = !!grant && homeConnectionTokenMatches(agent, grant);
+          const familyPolicy = connectionPolicyState(policy, true, now) === "unknown" ? grant ?? {} : policy;
           const own = Boolean(me && agent.ownerUserId === me.userId && !sampleMode);
           const mayManage = Boolean(me && (elevated || agent.ownerUserId === me.userId) && !sampleMode);
           const ownerName = people.get(agent.ownerUserId) ?? null;
@@ -4994,8 +4997,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             connection: agent.work?.facts.connection,
             ...(Object.keys(policy).length ? { connectionPolicy: policy } : {}),
             grant: grant ? { ...grant, kind: grant.grantKind, horizonExpiresAt: grant.horizonExpiresAt, boundDeviceId: grant.boundDeviceId,
-              lastUsedAt: grant.lastUsedAt, issuedAt: grant.issuedAt, newHostAt: grant.newHostAt,
-              suspendedAt: grant.suspendedAt, revokedAt: grant.grantRevokedAt ?? grant.revokedAt } : null }, now);
+              lastUsedAt: tokenMatches ? grant.lastUsedAt : null, issuedAt: grant.issuedAt, newHostAt: grant.newHostAt,
+              suspendedAt: grant.suspendedAt, revokedAt: grant.grantRevokedAt ?? (tokenMatches ? grant.revokedAt : null) } : null }, now);
           const presence = classifyAgentPresence(agent.presence ?? null);
           const receive = agentStatus({ transport: agent.transport, turnOnly: agent.turnOnly, presence: agent.presence, own, ownerFirstName: ownerName?.trim().split(/\s+/)[0] ?? null }).receive;
           const technical = [`Agent ID: ${agent.principalId}`, `Connection: ${agent.transport === "hosted_mcp" ? "Hosted MCP · OAuth connector" : agent.transport === "local" ? "Local" : "Not reported"}`];
@@ -5003,11 +5006,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           const wakeMark = wakePathMark(agent.oldestUnobservedAt); if (wakeMark) technical.push(wakeMark);
           let grantRisk: string | null = null;
           if (grant) {
-            technical.push(`Key ID: ${grant.grantId}`, `Last used: ${grant.lastUsedAt === null ? "never" : formatTime(grant.lastUsedAt).relative}`);
-            technical.push(connectionPolicyCopy(grant, renewalConnectionLive(grant)));
-            const risk = grantRiskBadge({ ...grant, kind: grant.grantKind, horizonExpiresAt: grant.horizonExpiresAt,
+            if (tokenMatches) technical.push(`Key ID: ${grant.tokenId}`, `Last used: ${grant.lastUsedAt === null ? "never" : formatTime(grant.lastUsedAt).relative}`);
+            technical.push(connectionPolicyCopy(agent.work ? policy : {}, renewalConnectionLive(grant)));
+            const risk = grantRiskBadge({ ...grant, ...familyPolicy, kind: grant.grantKind, horizonExpiresAt: grant.horizonExpiresAt,
               boundDeviceId: grant.boundDeviceId, lastUsedAt: grant.lastUsedAt, issuedAt: grant.issuedAt,
-              newHostAt: grant.newHostAt, suspendedAt: grant.suspendedAt, revokedAt: grant.grantRevokedAt ?? grant.revokedAt });
+              newHostAt: grant.newHostAt, suspendedAt: grant.suspendedAt, revokedAt: grant.grantRevokedAt ?? (tokenMatches ? grant.revokedAt : null) });
             if (risk) { grantRisk = risk; technical.push(risk); }
           }
           return { id: agent.principalId, name: identityDisplayLabel({ id: agent.principalId, name: agent.name }, rosterNames),
@@ -5016,8 +5019,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             technical, grantRisk, updateAvailable: presence.client.kind === "update available", access: approval ? { until: approval.expires_at === null ? null : new Date(approval.expires_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) } : null,
             key: grant ? ["key-off", "key-ended", "paused", "key-ends-soon"].includes(status.kind) ? status.kind === "key-off" ? "Turned off. A new key can bring it back." : status.label + "." : "Uses a key to connect." : null,
             accessReadState: householdConnectionsReadState,
-            liveKey: Boolean(grant && grant.revokedAt === null && grant.grantRevokedAt === null && status.kind !== "key-ended" &&
-              !renewalGrantEnded({ ...grant, kind: grant.grantKind }, now)), own, mayManage,
+            liveKey: Boolean(grant && tokenMatches && grant.revokedAt === null && grant.grantRevokedAt === null && status.kind !== "key-ended" &&
+              !["removed", "suspended"].includes(status.kind) && connectionPolicyState(familyPolicy, true, now) !== "ended"), own, mayManage,
             receipt: peopleDialogReceipts.get(`${activeWorkspaceId}:${agent.principalId}`) ?? householdReceipts.get(agent.principalId) ?? "" };
         }),
         invites: currentPendingAccessRows().map((row) => {
@@ -5193,7 +5196,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       let receipt = "";
       if (action === "withdraw" && agent) { await withdrawAgent(id, agent.name, agent.transport === "hosted_mcp", button, notice, true); return; }
       if (action === "resume" && grant && agent) { await resumeRenewalGrant(session, uuid(), workspaceId, grant.grantId); receipt = agentResumeReceipt(agent.name); }
-      if (action === "turn-off-key" && grant && agent) { await revokeAgentToken(session, uuid(), workspaceId, grant.tokenId); receipt = `Key turned off. ${agent.name} stops when its current access ends.`; }
+      if (action === "turn-off-key" && grant && agent && homeConnectionTokenMatches(agent, grant)) { await revokeAgentToken(session, uuid(), workspaceId, grant.tokenId); receipt = `Key turned off. ${agent.name} stops when its current access ends.`; }
       if (action === "remove-agent" && agent) { await revokeAgentPrincipal(session, uuid(), workspaceId, id); receipt = `${agent.name} removed. Its history stays as “${agent.name} (removed)”.`;
         if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
         // Acceptance is the removal receipt. Older reads must not restore the pre-removal roster.
