@@ -10495,12 +10495,13 @@ async function claimHostedSeat(
     await tx`SELECT grant_id FROM swarm.hosted_mcp_grant_workspaces
       WHERE grant_id=${resolved.grant_id}::uuid AND workspace_id=${route.workspaceId}::uuid FOR UPDATE`;
     // Include later name-reclaim writes in the owned suffix before deciding.
+    const closureGrant = resolved;
     const discoverClosure = () => tx<{seat_id:string;principal_id:string}[]>`
       SELECT hs.seat_id,hs.principal_id FROM swarm.hosted_mcp_seats hs
       JOIN swarm.agent_principals p ON p.principal_id=hs.principal_id
       WHERE hs.workspace_id=${route.workspaceId}::uuid
-        AND (hs.grant_id=${resolved.grant_id}::uuid OR
-          (p.name=${input.command.name} AND p.owner_user_id=${resolved.owner_user_id}::uuid))
+        AND (hs.grant_id=${closureGrant.grant_id}::uuid OR
+          (p.name=${input.command.name} AND p.owner_user_id=${closureGrant.owner_user_id}::uuid))
       ORDER BY hs.seat_id`;
     const closure=await discoverClosure();
     for (const seat of closure) await tx`SELECT seat_id FROM swarm.hosted_mcp_seats WHERE seat_id=${seat.seat_id}::uuid FOR UPDATE`;
@@ -10518,7 +10519,7 @@ async function claimHostedSeat(
       return { status: 403, body: { error: "forbidden" } };
     }
 
-    const [freshClock] = await tx<{ now_ms: string | number }[]>`
+    const [freshClock] = await tx<[{ now_ms: string | number }]>`
       SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now_ms`;
     frame.now = Number(freshClock.now_ms);
 
@@ -10577,7 +10578,7 @@ async function claimHostedSeat(
       const current = await revalidateHostedGrantCommand(tx, capability);
       if (current === null) return {status:403,body:{error:'forbidden'}};
       if (JSON.stringify(current) !== prefix.snapshot.hostedPrefix) throw new LocalAuthDiscoveryChanged();
-      const [clock] = await tx<{now_ms:string|number}[]>`SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now_ms`;
+      const [clock] = await tx<[{now_ms:string|number}]>`SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now_ms`;
       frame.now=Number(clock.now_ms);
       const context = await resolveHostedConnectionContext(tx, capability, resolved, {
         handle: response.handle, principal_id: response.principal_id,
@@ -10656,7 +10657,7 @@ async function claimHostedSeat(
     const current = await revalidateHostedGrantCommand(tx, capability);
     if (current === null) return {status:403,body:{error:'forbidden'}};
     if (JSON.stringify(current) !== prefix.snapshot.hostedPrefix) throw new LocalAuthDiscoveryChanged();
-    const [clock] = await tx<{now_ms:string|number}[]>`SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now_ms`;
+    const [clock] = await tx<[{now_ms:string|number}]>`SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now_ms`;
     frame.now=Number(clock.now_ms);
     // Current resolver authority replaces the pre-wait EXISTS snapshot.
     grant.owner_is_live_member=true;
@@ -10899,8 +10900,9 @@ async function handleTransaction(
     const decided = (result:HttpResult):HttpResult => {
       outcome.value={kind:'decided',result}; return result;
     };
-    let authenticatedAgent: AgentAuthRow | null = null;
-    let localPlan: LocalAuthLockPlan | null = null;
+    const localState: { authenticatedAgent: AgentAuthRow | null; localPlan: LocalAuthLockPlan | null } = {
+      authenticatedAgent: null, localPlan: null,
+    };
     let acceptedPresenceRoute: PresenceRoute | null = null;
     const result = await (async (): Promise<HttpResult> => {
     await beforeStep(2);
@@ -10999,7 +11001,7 @@ async function handleTransaction(
     }
     // Existing to-do assignment is DB-owned metadata, reselected after each wait.
     const todoId=typeof args?.todo_id==='string' && UUID_RE.test(args.todo_id) ? args.todo_id:null;
-    if(expiryBinding?.workspace_id===localWorkspace) principalTargets.add(expiryBinding.principal_id);
+    if(expiryBinding && expiryBinding.workspace_id===localWorkspace) principalTargets.add(expiryBinding.principal_id);
     const tokenTargets=typeof rawLocal?.token_id==='string' && UUID_RE.test(rawLocal.token_id) ? [rawLocal.token_id]:[];
     // The Allow writer selects the exact connection, including retired tokens
     // absent from principal discovery. Reuse its nonlocking selector/refusal
@@ -11020,7 +11022,7 @@ async function handleTransaction(
     if (resumeFamily && hostedSeat===null) {
       if (verifiedHuman && !resumeAdmissionRefusal) {
         try {
-          localPlan=await tx.savepoint(async sp=>{
+          localState.localPlan=await tx.savepoint(async sp=>{
             const plan=await planLocalOperation(sp,{workspace:localWorkspace,actor:verifiedHuman.userId,
               resumeFamily,streamIds:localStreams.map(r=>r.stream_id),workspaceMode:'update'});
             if (plan) await lockLocalAuthPlan(sp,plan);
@@ -11031,18 +11033,18 @@ async function handleTransaction(
           if (failure?.code!=='22023' || failure.detail!=='LOCAL_DISCOVERY_BINDING') throw error;
           // No locks or closure from the failed family plan may survive. Rebuild
           // actor-only from scratch, in the same canonical order, after rollback.
-          localPlan=null;
+          localState.localPlan=null;
           resumeAdmissionRefusal='renewal_resume_forbidden';
         }
       }
-      if (!localPlan) {
-        localPlan=await planLocalOperation(tx,{
+      if (!localState.localPlan) {
+        localState.localPlan=await planLocalOperation(tx,{
           ...(agentTokenHash ? {hash:agentTokenHash}:{}),workspace:localWorkspace,actor:verifiedHuman?.userId,
           streamIds:localStreams.map(r=>r.stream_id),workspaceMode:verifiedHuman?'update':'share'});
-        if (localPlan) await lockLocalAuthPlan(tx,localPlan);
+        if (localState.localPlan) await lockLocalAuthPlan(tx,localState.localPlan);
       }
     } else {
-      localPlan = hostedSeat===null && (!HOSTED_MANAGEMENT_KINDS.has(kind) || localExpiry) ? await planLocalOperation(tx, {
+      localState.localPlan = hostedSeat===null && (!HOSTED_MANAGEMENT_KINDS.has(kind) || localExpiry) ? await planLocalOperation(tx, {
         ...(agentTokenHash ? {hash:agentTokenHash}:{}), workspace:localWorkspace,actor:verifiedHuman?.userId,
         household,householdQueue:rawLocal?.tool==='todo_queue',...(todoId ? {todo:todoId}:{}),
         streamIds:[CLAIM_AGENT_INBOX_KIND,ACK_AGENT_DELIVERY_KIND,TOUCH_PRESENCE_KIND].includes(kind) ? [] : localStreams.map(r=>r.stream_id),
@@ -11057,15 +11059,15 @@ async function handleTransaction(
         hostedMode:revocation ? 'update':'share',
         ...(joinCredentialHash && joinAttempt ? {join:{hash:joinCredentialHash,attempt:joinAttempt}}:{}),
       }) : null;
-      if(localPlan && verifiedHuman && (kind==='revoke_agent_token' || consent?.kind==='local')) {
-        const selected=localPlan.snapshot.bindings.find(b=>b.token_id===(kind==='revoke_agent_token'?rawLocal?.token_id:consent?.connection_id));
+      if(localState.localPlan && verifiedHuman && (kind==='revoke_agent_token' || consent?.kind==='local')) {
+        const selected=localState.localPlan.snapshot.bindings.find(b=>b.token_id===(kind==='revoke_agent_token'?rawLocal?.token_id:consent?.connection_id));
         const [member]=await tx<{role:string}[]>`SELECT role FROM swarm.memberships
           WHERE workspace_id=${localWorkspace ?? null}::uuid AND user_id=${verifiedHuman.userId}::uuid AND revoked_at IS NULL`;
         if(selected && selected.owner_user_id!==verifiedHuman.userId
           && (consent?.kind==='local' || !member || !['owner','admin'].includes(member.role)))
           return {status:403,body:{error:'forbidden'}};
       }
-      if (localPlan) await lockLocalAuthPlan(tx,localPlan);
+      if (localState.localPlan) await lockLocalAuthPlan(tx,localState.localPlan);
     }
     if(invitationHintHash) {
       const [hint]=await tx<{workspace_id:string}[]>`SELECT workspace_id FROM swarm.invitations WHERE token_hash=${invitationHintHash}`;
@@ -11073,7 +11075,7 @@ async function handleTransaction(
     }
 
     if (kind === REGISTER_AGENT_SEAT_KIND) {
-      if (joinCredentialHash === null || localPlan===null) {
+      if (joinCredentialHash === null || localState.localPlan===null) {
         return { status: 403, body: { error: "forbidden" } };
       }
       return await registerAgentSeat(tx, body, joinCredentialHash);
@@ -11083,7 +11085,7 @@ async function handleTransaction(
     const auth = hostedSeat !== null
       ? hostedSeatAuth(hostedSeat)
       : agentTokenHash !== null
-      ? localPlan ? await authenticateAgent(tx, agentTokenHash, localPlan, kind===RENEW_AGENT_TOKEN_KIND) : null
+      ? localState.localPlan ? await authenticateAgent(tx, agentTokenHash, localState.localPlan, kind===RENEW_AGENT_TOKEN_KIND) : null
       : verifiedHuman !== null
       ? await authenticateHuman(tx, verifiedHuman)
       : null;
@@ -11114,7 +11116,7 @@ async function handleTransaction(
     }
     // Hosted turns do not advertise listener presence or touch local delivery
     // state. Their durable authorization was reloaded above for this call.
-    authenticatedAgent = hostedSeat === null ? auth.agent : null;
+    localState.authenticatedAgent = hostedSeat === null ? auth.agent : null;
 
     if (
       auth.agent?.transport === "hosted_mcp" &&
@@ -11399,7 +11401,7 @@ async function handleTransaction(
           const seat = await revalidateHouseholdSeat(checkTx, hostedSeatCapability, setTransaction);
           return seat !== null && seat.workspace_id === route.workspaceId && seat.principal_id === identity.principal_id;
         }
-        return localPlan && agentTokenHash ? await recheckLocalCredential(checkTx,agentTokenHash,localPlan)!==null
+        return localState.localPlan && agentTokenHash ? await recheckLocalCredential(checkTx,agentTokenHash,localState.localPlan)!==null
           : !await revoked(checkTx, auth, route);
       };
       try {
@@ -11838,7 +11840,7 @@ async function handleTransaction(
         }
         return matches
           ? decided(replayResult(kind==="mint_agent_token" || kind===RENEW_AGENT_TOKEN_KIND
-            ? await currentLocalPolicyResponse(tx,storedResponse(existing.response),localPlan)
+            ? await currentLocalPolicyResponse(tx,storedResponse(existing.response),localState.localPlan)
             : storedResponse(existing.response), kind))
           : { status: 409, body: { error: "command_id_conflict" } };
       }
@@ -13524,20 +13526,20 @@ async function handleTransaction(
       || localBody?.status==='refused' || record(localBody?.result)?.status==='refused')
       && (outcome.value.kind!=='decided' || outcome.value.result!==result)) throw new LocalCommandRefused(result);
     if (
-      !recoverSavedPending && result.status >= 200 && result.status < 300 && authenticatedAgent !== null
+      !recoverSavedPending && result.status >= 200 && result.status < 300 && localState.authenticatedAgent !== null
     ) {
       await recordAgentPresence(
         tx,
-        authenticatedAgent,
+        localState.authenticatedAgent,
         body.client_build,
         acceptedPresenceRoute,
       );
     }
-    if (agentTokenHash!==null && localPlan && authenticatedAgent && !['renew_agent_token','revoke_agent_token','revoke_agent_principal','acquire_agent_session','release_agent_session'].includes(kind)) {
-      const finalAgent=await recheckLocalCredential(tx,agentTokenHash,localPlan);
+    if (agentTokenHash!==null && localState.localPlan && localState.authenticatedAgent && !['renew_agent_token','revoke_agent_token','revoke_agent_principal','acquire_agent_session','release_agent_session'].includes(kind)) {
+      const finalAgent=await recheckLocalCredential(tx,agentTokenHash,localState.localPlan);
       if (!finalAgent) throw new LocalCommandRefused({status:403,body:{error:'forbidden'}});
     }
-    if (agentTokenHash!==null && authenticatedAgent && kind===RENEW_AGENT_TOKEN_KIND) {
+    if (agentTokenHash!==null && localState.authenticatedAgent && kind===RENEW_AGENT_TOKEN_KIND) {
       // Issuance intentionally adds one owned token to discovery. Recheck the
       // original proof and family after INSERT/ledger/presence waits without
       // adopting a newly discovered external row or stamping the successor.
@@ -13547,7 +13549,7 @@ async function handleTransaction(
         JOIN swarm.devices d USING(device_id) JOIN swarm.renewal_grants g USING(renewal_grant_id)
         JOIN swarm.workspaces w ON w.workspace_id=p.workspace_id
         JOIN swarm.memberships m ON m.workspace_id=p.workspace_id AND m.user_id=p.owner_user_id
-        WHERE t.token_hash=${agentTokenHash} AND t.token_id=${authenticatedAgent.token_id}::uuid
+        WHERE t.token_hash=${agentTokenHash} AND t.token_id=${localState.authenticatedAgent.token_id}::uuid
           AND p.revoked_at IS NULL AND r.ended_at IS NULL AND d.revoked_at IS NULL
           AND t.revoked_at IS NULL AND NOT t.surrender_only AND m.revoked_at IS NULL AND w.archived_at IS NULL
           AND g.revoked_at IS NULL AND (NOT g.suspension_active OR g.kind='standing') AND g.connection_expired_at IS NULL
@@ -13563,18 +13565,18 @@ async function handleTransaction(
              ('renewal_grant',g.renewal_grant_id),('membership',p.owner_user_id),('lineage',t.lineage_id),('family',t.lineage_id)))`;
       if(!current.length) throw new LocalCommandRefused({status:403,body:{error:'forbidden'}});
     }
-    if(authenticatedAgent && agentTokenHash && !isAgentSessionProofExempt(kind)
+    if(localState.authenticatedAgent && agentTokenHash && !isAgentSessionProofExempt(kind)
       && !['release_agent_session','revoke_agent_token','revoke_agent_principal'].includes(kind)) {
       const currentSession=await enforceAgentSessionProof(tx,{
-        principalId:authenticatedAgent.principal_id,workspaceId:authenticatedAgent.principal_workspace_id,
-        proofParse:sessionProofParse,managedAt:authenticatedAgent.managed_at,
+        principalId:localState.authenticatedAgent.principal_id,workspaceId:localState.authenticatedAgent.principal_workspace_id,
+        proofParse:sessionProofParse,managedAt:localState.authenticatedAgent.managed_at,
       });
       if(!currentSession.ok) throw new LocalCommandRefused({
         status:currentSession.status,body:{error:currentSession.error},
       });
     }
-    if (kind===REGISTER_AGENT_SEAT_KIND && joinCredentialHash && localPlan && localBody?.status==='accepted') {
-      const original=localPlan.snapshot.joins?.[0];
+    if (kind===REGISTER_AGENT_SEAT_KIND && joinCredentialHash && localState.localPlan && localBody?.status==='accepted') {
+      const original=localState.localPlan.snapshot.joins?.[0];
       const current=await tx`SELECT c.id FROM swarm.agent_join_credentials c
         JOIN swarm.agent_principals p ON p.principal_id=c.registrar_principal_id
         JOIN swarm.agent_runs r ON r.run_id=c.registrar_run_id AND r.principal_id=p.principal_id
@@ -13593,9 +13595,9 @@ async function handleTransaction(
               AND g.connection_expired_at IS NULL AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp()))`;
       if(!current.length) throw new LocalCommandRefused({status:403,body:{error:'forbidden'}});
     }
-    if (authenticatedAgent && !isAgentSessionProofExempt(kind) && !['acquire_agent_session','release_agent_session'].includes(kind)) {
-      const finalSession=await enforceAgentSessionProof(tx,{principalId:authenticatedAgent.principal_id,
-        workspaceId:authenticatedAgent.principal_workspace_id,proofParse:sessionProofParse});
+    if (localState.authenticatedAgent && !isAgentSessionProofExempt(kind) && !['acquire_agent_session','release_agent_session'].includes(kind)) {
+      const finalSession=await enforceAgentSessionProof(tx,{principalId:localState.authenticatedAgent.principal_id,
+        workspaceId:localState.authenticatedAgent.principal_workspace_id,proofParse:sessionProofParse});
       if(!finalSession.ok) throw new LocalCommandRefused({status:finalSession.status,body:{error:finalSession.error}});
     }
     return result;
