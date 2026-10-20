@@ -1,3 +1,4 @@
+import { assertActiveFloorCatalog } from './admin-principal-lock-order-harness.mjs';
 // HezLead ruling 38, item 4: real renewal transactions must abort on 40P01/40001.
 // Adapted from the saved r12b 104-table probe. Run only on an isolated local database.
 // deno run --allow-read --allow-env --allow-net <harness> <tree> <main|real_read> <server.log|empty> [0600 config.json]
@@ -41,6 +42,8 @@ const iso = (d) => (d instanceof Date ? d.toISOString() : d ?? null);
 try {
   const { default: postgres } = await import('npm:postgres@3.4.9');
   const observer = postgres(DB, { prepare: false, max: 8, onnotice: () => {} });
+  if(config?.active_floor) {out.stage='active_catalog';out.active_catalog=await assertActiveFloorCatalog(observer);}
+  out.stage='import';
   const command = await import(`${tree}/supabase/functions/command/index.ts`);
   const read = await import(`${readTree}/supabase/functions/read/index.ts`);
   // Capture the error AFTER postgres.js rolls the entire transaction back.
@@ -297,7 +300,7 @@ try {
       suspended_at=clock_timestamp() WHERE renewal_grant_id=${crash.grant}::uuid`;
     await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${crash.t0}::uuid`;
     let saved=await renew(crash.raw,id());
-    check('future chosen date and old idle history permit expired used proof renewal',credential(saved)!==null);
+    check('future chosen date permits expired used proof renewal',credential(saved)!==null);
     for(let attempt=0;attempt<2;attempt++) {
       const savedId=JSON.parse(saved.text).token_id,savedRaw=credential(saved);
       await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${savedId}::uuid`;

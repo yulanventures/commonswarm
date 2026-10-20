@@ -36,6 +36,10 @@ interface RaceResult {
   second_admin_blocked_by?: string;
   http_refused?: number;
   checks?: {name:string;ok:boolean}[];
+  source?: {commit:string;tree:string};
+  read_source?: {commit:string;tree:string};
+  active_catalog?: {functions:number;migrations:number};
+  canonical_witness?: {first_pid:number;second_pid:number;gate_pid:number;token_ids:string[];order:string};
   floor_compatibility?: string;
   required_compatibility?: string;
   race_witness?: {allow_pid:number;issuer_pid:number;workspace_id:string;parent_id:string;sqlstates:string[];deadlock_edges:number[][][]};
@@ -49,9 +53,10 @@ interface ControlResult {
   sqlstates?: string[];
 }
 interface Harness {
+  ACTIVE_FLOOR_SOURCES: {F:{commit:string;tree:string}};
   openLockOrderTarget(options: { connector: unknown }): Promise<Target>;
   lockOrderConnector(issuance: { record: string; measure: string; enable: string }): unknown;
-  runScenario(target: Target, scenario: string, timeoutMs?: number): Promise<RaceResult>;
+  runScenario(target: Target, scenario: string, timeoutMs?: number, generations?: {command:string;read:string}): Promise<RaceResult>;
   rawSqlPositiveControl(target: Target): Promise<ControlResult>;
   migrationTreeLine(): string;
 }
@@ -226,6 +231,11 @@ test(ADMIN_WITHDRAW, { timeout: 240_000 }, async () => {
   assert.equal(result.http_refused, 0, `${ADMIN_WITHDRAW}: no HTTP call`);
 });
 
+const ALLOW_ISSUER_CONTRACTS = ["legal-parentless-principal-token-parent", "real-retired-token-active-parent",
+        "issuer-real-session-and-set-only-roles", "real-issuer-lifecycle-committed", "real-dpop-replay-refused",
+        "same-owner-unrelated-workspace-progress", "rollback-restores-issuer-account-events-audit-ledger",
+        "foreign-token-no-foreign-owner-lock", "wrong-workspace-normal-refusal", "all-denials-no-revival"] as const;
+
 // These reach actual delegated HTTP admission and protected worker delivery.
 // Existing X2 tests create principals, but never issue/renew a bounded worker
 // credential. These cases protect parent ordering, budget, and rollback at that
@@ -249,12 +259,7 @@ for (const name of ["delegated-local-permanent-suspension","delegated-local-revo
       assert.notEqual(result.race_witness.allow_pid, result.race_witness.issuer_pid);
       assert.deepEqual(result.race_witness.sqlstates, []);
       assert.deepEqual(result.race_witness.deadlock_edges, []);
-      for (const contract of ["legal-parentless-principal-token-parent", "real-retired-token-active-parent",
-        "issuer-real-session-and-set-only-roles", "real-issuer-lifecycle-committed", "real-dpop-replay-refused",
-        "same-owner-unrelated-workspace-progress", "rollback-restores-issuer-account-events-audit-ledger",
-        "foreign-token-no-foreign-owner-lock", "wrong-workspace-normal-refusal", "all-denials-no-revival"]) {
-        assert.ok(result.checks.some(c=>c.name===contract && c.ok), contract);
-      }
+      for(const contract of ALLOW_ISSUER_CONTRACTS) assert.ok(result.checks.some(check=>check.name===contract && check.ok),contract);
     }
     if (name === "floor-first-use-vs-head-revocation") {
       // This name remains the exact legacy-O diagnostic. It cannot certify F.
@@ -263,3 +268,58 @@ for (const name of ["delegated-local-permanent-suspension","delegated-local-revo
     }
   });
 }
+
+
+// Generation rows extend existing owners; none supplies auth, a receipt, or
+// an outcome. F is loaded from its retained Git objects, current is this checkout.
+for(const [command,read] of [['F','current'],['current','F'],['F','F']]) {
+  for(const order of ['use-first','revoke-first']) {
+    const name=`active-floor-canonical-${order}`;
+    test(`${name} exact ${command}/${read}`,{timeout:300_000},async()=>{
+      const result=await harness.runScenario(bound(),name,270_000,{command,read});
+      assert.equal(result.stage,'complete',`${result.stage}: ${result.error ?? 'inconclusive'}`);
+      assert.equal(result.active_catalog?.migrations,4);
+      if(command==='F') assert.deepEqual(result.source,harness.ACTIVE_FLOOR_SOURCES.F);
+      if(read==='F') assert.deepEqual(result.read_source,harness.ACTIVE_FLOOR_SOURCES.F);
+      assert.ok(result.checks?.some(check=>check.name==='same-invocation-positive' && check.ok));
+      assert.ok(result.checks && result.checks.length>=8);
+      assert.deepEqual(result.checks.filter(check=>!check.ok),[]);
+      assert.deepEqual(result.sqlstates,[]);
+      assert.equal(result.http_refused,0);
+      assert.ok(result.canonical_witness);
+      assert.notEqual(result.canonical_witness.first_pid,result.canonical_witness.second_pid);
+      assert.equal(result.canonical_witness.token_ids.length,3);
+      assert.equal(result.canonical_witness.order,order);
+    });
+  }
+  for(const name of ['local-allow-retired-parent-allow-first','local-allow-retired-parent-issuer-first',
+    'delegated-local-revocation-closure','delegated-local-renewal-budget','delegated-local-selector-compatibility','delegated-local-parent-deadline','delegated-local-parent-narrowing',
+    'delegated-local-wait-removal-rollback','local-resume-parent-order','local-resume-recovery-controls','ordinary-local-compat-policy']) {
+    test(`active-floor-${name} exact ${command}/${read}`,{timeout:300_000},async()=>{
+      const result=await harness.runScenario(bound(),name,270_000,{command,read});
+      assert.equal(result.stage,'complete',`${result.stage}: ${result.error ?? 'inconclusive'}`);
+      assert.equal(result.active_catalog?.migrations,4);
+      if(command==='F') assert.deepEqual(result.source,harness.ACTIVE_FLOOR_SOURCES.F);
+      if(read==='F') assert.deepEqual(result.read_source,harness.ACTIVE_FLOOR_SOURCES.F);
+      assert.ok(result.checks && result.checks.length>0);
+      assert.deepEqual(result.checks.filter(check=>!check.ok),[]);
+      assert.ok(result.checks.some(check=>check.name==='same-invocation-positive' && check.ok));
+      assert.equal(result.http_refused,0);
+      if(name.startsWith('local-allow-retired-parent-')) {
+        assert.ok(result.race_witness);
+        assert.ok(result.race_witness.allow_pid>0 && result.race_witness.issuer_pid>0);
+        assert.notEqual(result.race_witness.allow_pid,result.race_witness.issuer_pid);
+        assert.deepEqual(result.race_witness.sqlstates,[]);
+        assert.deepEqual(result.race_witness.deadlock_edges,[]);
+        for(const contract of ALLOW_ISSUER_CONTRACTS) assert.ok(result.checks.some(check=>check.name===contract && check.ok),contract);
+      }
+    });
+  }
+}
+
+// Required source-intermediate gate. The O diagnostic remains diagnostic. Keep
+// this red until the missing independently owned F contracts are executable;
+// a passing consumer subset cannot certify support or initial AS issuance.
+test('active-floor-required-F-support-complete',()=>{
+  assert.fail('F support incomplete: full denial state/rollback for both adoptions; genuine over-thirty-day idle history without rewinding immutable last-use; old/current renewal wire and operation ceiling/history matrix; exact SQL10 view body and remaining catalog ACL binding. Runtime and full AS suite UNRUN.');
+});

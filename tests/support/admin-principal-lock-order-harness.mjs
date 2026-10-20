@@ -579,6 +579,9 @@ export const ACTIVE_FLOOR_SOURCES = Object.freeze({
   F: Object.freeze({commit:'27d7b2102f8c17579f6813cad50eaa35c5c1326a',tree:'5fcd7c1dce08fcec6301accea9d2123fc5f04792'}),
 });
 export function materializeActiveFloorSource(directory, generation) {
+  if(generation==='current') return {path:REPO_ROOT,
+    commit:execFileSync('git',['-C',REPO_ROOT,'rev-parse','HEAD'],{encoding:'utf8'}).trim(),
+    tree:execFileSync('git',['-C',REPO_ROOT,'rev-parse','HEAD^{tree}'],{encoding:'utf8'}).trim()};
   if (!Object.hasOwn(ACTIVE_FLOOR_SOURCES,generation)) throw new Error('unknown_source_generation');
   const source=ACTIVE_FLOOR_SOURCES[generation];
   const git=args=>execFileSync('git',['-C',REPO_ROOT,...args],{stdio:['ignore','pipe','ignore'],maxBuffer:64*1024*1024});
@@ -604,8 +607,92 @@ export function materializeActiveFloorSource(directory, generation) {
   return {...source,path:destination};
 }
 
+/** Read-only ACTIVE prerequisite. Source bodies come from the reviewed migrations;
+ * this never activates PREP, installs SQL, or grants a role. */
+export async function assertActiveFloorCatalog(sql) {
+  const migrations = [
+    '20261019000007_local_auth_lock_order.sql',
+    '20261019000008_local_auth_inactive_parent_closure.sql',
+    '20261019000009_hosted_snapshot_null_compat.sql',
+    '20261019000010_local_permanence_read_models.sql',
+  ];
+  const expected = new Map();
+  for (const file of migrations) {
+    const text = readFileSync(join(REPO_ROOT,'supabase/migrations',file),'utf8');
+    const pattern = /CREATE(?: OR REPLACE)? FUNCTION\s+([a-z_]+\.[a-z_]+)\s*\(([^)]*)\)([\s\S]*?)\bAS\s+(\$[a-z_]*\$)([\s\S]*?)\4\s*;/giu;
+    let count=0;
+    for (const match of text.matchAll(pattern)) {
+      const args=match[2].trim() ? match[2].split(',').map(arg=>arg.trim().split(/\s+/u)[1]) : [];
+      if(args.some(type=>typeof type!=='string' || !/^[a-z_]+(?:\[\])?$/u.test(type))) throw new Error('active_catalog_signature');
+      const types=args.join(',');
+      expected.set(`${match[1]}(${types})`,{body:match[5],definer:/SECURITY DEFINER/iu.test(match[3]),language:/LANGUAGE\s+(sql|plpgsql)\b/iu.exec(match[3])?.[1].toLowerCase(),volatility:/IMMUTABLE/iu.test(match[3])?'i':/STABLE/iu.test(match[3])?'s':'v'});count++;
+    }
+    if(count===0 || count!==[...text.matchAll(/^CREATE(?: OR REPLACE)? FUNCTION\b/gimu)].length) throw new Error('active_catalog_source_unreadable');
+  }
+  return await sql.begin('read only',async tx=>{
+    for(const [signature,want] of expected) {
+      const rows=await tx`SELECT p.prosrc,p.prosecdef,p.proconfig,p.provolatile,l.lanname,r.rolname AS owner
+        FROM pg_proc p JOIN pg_roles r ON r.oid=p.proowner JOIN pg_language l ON l.oid=p.prolang WHERE p.oid=to_regprocedure(${signature})`;
+      const actual=rows[0];
+      if(rows.length!==1 || actual.prosrc!==want.body || actual.prosecdef!==want.definer || actual.owner!=='swarm_admin' || actual.lanname!==want.language || actual.provolatile!==want.volatility)
+        throw new Error('active_catalog_body_owner_or_mode');
+      if(!actual.proconfig?.includes('search_path=pg_catalog')) throw new Error('active_catalog_search_path');
+    }
+    const privateFunctions=[
+      ['swarm.discover_local_credential_ids(bytea)',['swarm_command']],
+      ['swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean)',['swarm_command']],
+      ['swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean,uuid)',['swarm_command']],
+      ['swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean,uuid,boolean)',['swarm_command']],
+      ['swarm.discover_local_join_ids(bytea,uuid)',['swarm_command']],
+      ['swarm.household_local_family_binding_guard()',[]],
+      ['swarm.local_content_approval_pointer_guard()',[]],
+      ['swarm.revoke_local_residual_tokens(uuid,uuid,text,uuid)',['swarm_command']],
+      ['swarm_read.home_overview()',['authenticated']],
+      ['swarm.agent_delivery_read_context(bytea,uuid)',['swarm_read']],
+      ['swarm.agent_tokens_successor_fence()',[]],
+      ['swarm.record_renewal_grant_use(uuid,uuid,text)',['swarm_read','swarm_command']],
+      ['swarm.prepare_renewal_grant(uuid,uuid)',['swarm_command']],
+      ['swarm.resume_renewal_grant(uuid,uuid,uuid)',['swarm_command']],
+      ['swarm_read.renewal_grant_roster(uuid)',['authenticated','swarm_read']],
+      ['swarm_read.renewal_grant_for_token(uuid,uuid)',['swarm_read']],
+      ['swarm.renewal_grants_revoke_cascade()',[]],
+      ['swarm.audit_household_hosted_restriction()',[]],
+      ['swarm.renewal_grants_spend_or_revoke_only()',[]],
+    ];
+    for(const [signature,allowed] of privateFunctions) {
+      const publicAcl=await tx`SELECT EXISTS(SELECT 1 FROM pg_proc p,
+        LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+        WHERE p.oid=to_regprocedure(${signature}) AND a.grantee=0 AND a.privilege_type='EXECUTE') AS ok`;
+      if(publicAcl[0].ok) throw new Error('active_catalog_public_execute');
+      for(const role of ['anon','authenticated','swarm_read','swarm_command']) {
+        const [row]=await tx`SELECT has_function_privilege(${role},${signature},'EXECUTE') AS ok`;
+        if(row.ok!==allowed.includes(role)) throw new Error('active_catalog_effective_acl');
+      }
+    }
+    for(const [table,trigger,fn,kind,predicate=null] of [
+      ['swarm.household_content_connections','aa_household_local_family_binding','swarm.household_local_family_binding_guard()',23],
+      ['swarm.renewal_grants','aa_local_content_approval_pointer','swarm.local_content_approval_pointer_guard()',23],
+      ['swarm.agent_tokens','agent_tokens_successor_fence','swarm.agent_tokens_successor_fence()',7,'new.predecessor_token_idisnotnull'],
+      ['swarm.renewal_grants','renewal_grants_spend_or_revoke_only','swarm.renewal_grants_spend_or_revoke_only()',27],
+      ['swarm.renewal_grants','renewal_grants_revoke_cascade','swarm.renewal_grants_revoke_cascade()',17,'old.revoked_atisnullandnew.revoked_atisnotnull'],
+      ['swarm.household_hosted_content_restrictions','household_hosted_restriction_audit','swarm.audit_household_hosted_restriction()',23],
+    ]) {
+      const rows=await tx`SELECT tgtype::int AS kind,pg_get_triggerdef(oid,true) AS definition FROM pg_trigger WHERE tgrelid=to_regclass(${table})
+        AND tgname=${trigger} AND tgfoid=to_regprocedure(${fn}) AND tgenabled='O' AND NOT tgisinternal`;
+      if(rows.length!==1 || rows[0].kind!==kind) throw new Error('active_catalog_trigger');
+      const when=/ WHEN (.+) EXECUTE FUNCTION /u.exec(rows[0].definition)?.[1] ?? null;
+      if((when===null ? null : when.toLowerCase().replace(/[()\s]/gu,''))!==predicate) throw new Error('active_catalog_trigger_predicate');
+    }
+    const [column]=await tx`SELECT count(*)::int AS n FROM pg_attribute
+      WHERE attrelid='swarm.renewal_grants'::regclass AND attname='local_content_approval_token_id'
+        AND atttypid='uuid'::regtype AND NOT attisdropped`;
+    if(column.n!==1) throw new Error('active_catalog_column');
+    return {functions:expected.size,migrations:migrations.length};
+  });
+}
+
 /** Runs one Deno scenario against the target. Only LOCK_ORDER_ lines are read back. */
-export async function runScenario(target, scenario, timeoutMs = 170_000) {
+export async function runScenario(target, scenario, timeoutMs = 170_000, generations = null) {
   let adminIssuance = null;
   if (RACES[scenario]?.waiting === 'admin') {
     adminIssuance = await target.ensureAdminIssuance();
@@ -614,6 +701,8 @@ export async function runScenario(target, scenario, timeoutMs = 170_000) {
   const secret = secretDirectory();
   try {
     const configPath = join(secret.dir, 'target.json');
+    const source=generations ? materializeActiveFloorSource(secret.dir,generations.command) : null;
+    const readSource=generations && generations.read!==generations.command ? materializeActiveFloorSource(secret.dir,generations.read) : source;
     let floor_url;
     if (scenario === 'floor-first-use-vs-head-revocation') {
       const floor='6d29f8060e05be93a1669cae30bdfa3e56c426d8';
@@ -630,7 +719,7 @@ export async function runScenario(target, scenario, timeoutMs = 170_000) {
       }
       floor_url=pathToFileURL(join(secret.dir,modules[0][0])).href;
     }
-    writeFileSync(configPath, JSON.stringify({ db_url: target.url, tls_ca_pem: target.tlsCaPem, floor_url }), { mode: 0o600 });
+    writeFileSync(configPath, JSON.stringify({ db_url: target.url, tls_ca_pem: target.tlsCaPem, floor_url, source, read_source:readSource, active_floor:generations!==null }), { mode: 0o600 });
     const env = { PATH: process.env.PATH ?? '', NO_COLOR: '1' };
     for (const key of ['HOME', 'DENO_DIR', 'XDG_CACHE_HOME']) if (process.env[key]) env[key] = process.env[key];
     const child = spawn('deno', ['run', '--no-lock', ...(scenario==='floor-first-use-vs-head-revocation' ? ['--cached-only'] : []), '--config', join(REPO_ROOT, 'supabase/functions/command/deno.json'),
@@ -810,7 +899,13 @@ async function denoMain() {
     out.stage = 'import';
     const { default: postgres } = await import('npm:postgres@3.4.9');
     const observer = postgres(config.db_url, { prepare: false, max: 4, idle_timeout: 5, connect_timeout: 10, onnotice: () => {}, ...ssl });
-    const command = await import('../../supabase/functions/command/index.ts');
+    if(config.active_floor) {out.stage='active_catalog';out.active_catalog=await assertActiveFloorCatalog(observer);}
+    out.stage='import';
+    const load=(path,kind='command')=>import(pathToFileURL(join((kind==='read' ? config.read_source : config.source)?.path ?? REPO_ROOT,path)).href);
+    const command = await load('supabase/functions/command/index.ts');
+    const policyCommand=config.active_floor ? await import('../../supabase/functions/command/index.ts') : command;
+    out.source=config.source ? {commit:config.source.commit,tree:config.source.tree} : null;
+    out.read_source=config.read_source ? {commit:config.read_source.commit,tree:config.read_source.tree} : null;
     const { db } = command;
     // Every command-module transaction (admin, hosted, join and ordinary) runs through db.begin.
     // Record the SQLSTATE of each rejected one while a race is open; no message is read.
@@ -845,8 +940,9 @@ async function denoMain() {
     if (!minimum.ok) fail(minClientVersionDiagnostic(minimum));
     out.client_version = minimum.version;
     // D4: names and ids unique to this run (fresh workspace, users and grants per scenario).
-    const ctx = { issuerTarget:{url:config.db_url,ssl:ssl.ssl}, floorUrl:config.floor_url, command, db, observer, failures, jwks, out, tag: randomUUID().replaceAll('-', '').slice(0, 10), clientVersion: minimum.version };
-    const result = scenario.startsWith('local-allow-retired-parent-') ? await localAllowRetiredParentScenario(ctx,scenario)
+    const ctx = { load, policyCommand, issuerTarget:{url:config.db_url,ssl:ssl.ssl}, floorUrl:config.floor_url, command, db, observer, failures, jwks, out, tag: randomUUID().replaceAll('-', '').slice(0, 10), clientVersion: minimum.version };
+    const result = scenario.startsWith('active-floor-canonical-') ? await activeFloorCanonicalScenario(ctx,scenario)
+      : scenario.startsWith('local-allow-retired-parent-') ? await localAllowRetiredParentScenario(ctx,scenario)
       : scenario==='hosted-owner-removal-prefix' ? await hostedOwnerRemovalScenario(ctx)
       : scenario==='floor-first-use-vs-head-revocation' ? await floorFirstUseScenario(ctx)
       : scenario.startsWith('local-resume-') ? await localResumeScenario(ctx,scenario)
@@ -885,7 +981,8 @@ async function workspace(ctx, owner, household, workspaceId = id()) {
 const member = (ctx, workspaceId, user, role) =>
   ctx.observer`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${workspaceId}::uuid, ${user.userId}::uuid, ${role})`;
 const summary = (result) => ({ status: result.status, body_status: result.body?.status ?? null, error: result.body?.error ?? null });
-const manage = (ctx, user, workspaceId, body) => ctx.command.handleHostedManagementCommand({
+// F is an ACTIVE rollback reader/consumer; the chosen-date writer remains current.
+const manage = (ctx, user, workspaceId, body) => (body.kind==='set_connection_expiry' ? ctx.policyCommand : ctx.command).handleHostedManagementCommand({
   command_id: id(), client_version: ctx.clientVersion,
   ...(workspaceId === null ? {} : { workspace_id: workspaceId, stream: { kind: 'workspace' } }), command: body,
 }, user.identity);
@@ -911,7 +1008,7 @@ async function hostedGrant(ctx, owner, workspaceId, otherWorkspaceIds = []) {
 async function creationSide(ctx, kind, fixture) {
   const { owner, workspaceId } = fixture;
   if (kind === 'hosted') {
-    const { authenticateHostedGrantCapability } = await import('../../supabase/functions/_shared/hosted-seat-auth.ts');
+    const { authenticateHostedGrantCapability } = await ctx.load('supabase/functions/_shared/hosted-seat-auth.ts');
     const grant = await hostedGrant(ctx, owner, workspaceId);
     const capability = await ctx.db.begin((tx) => authenticateHostedGrantCapability(tx, {
       grantId: grant.grantId, ownerUserId: owner.userId, providerGrantId: grant.providerGrantId,
@@ -1017,8 +1114,8 @@ async function holderSide(ctx, kind, fixture) {
  * that is prepared and never granted; `race`, the race command and the result it must give. */
 async function adminSide(ctx, fixture, label = 'admin', options = {}) {
   const { owner, workspaceId } = fixture;
-  const policy = await import('../../supabase/functions/_shared/protocol.js');
-  const { adminTransaction } = await import('../../supabase/functions/command/admin-delegation.ts');
+  const policy = await ctx.load('supabase/functions/_shared/protocol.js');
+  const { adminTransaction } = await ctx.load('supabase/functions/command/admin-delegation.ts');
   const { oauthFixture } = await import('./admin-edge-oauth-fixture.mjs');
   const signing = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   // One issuer kid and one client per admin side; the in-process JWKS serves every side's key.
@@ -1458,8 +1555,8 @@ async function adminWithdrawScenario(ctx) {
   // Each owner's grant selects the other owner's workspace.
   const firstGrant = (await adminSide(ctx, { owner: first, workspaceId: secondWorkspace }, 'first')).grant;
   const secondGrant = (await adminSide(ctx, { owner: second, workspaceId: firstWorkspace }, 'second')).grant;
-  const policy = await import('../../supabase/functions/_shared/protocol.js');
-  const { adminTransaction } = await import('../../supabase/functions/command/admin-delegation.ts');
+  const policy = await ctx.load('supabase/functions/_shared/protocol.js');
+  const { adminTransaction } = await ctx.load('supabase/functions/command/admin-delegation.ts');
   const withdraw = (grant, workspaceId) => ({ command_id: id(), stream: { kind: 'account' }, resource: policy.ADMIN_RESOURCE,
     command: { kind: 'withdraw_admin_workspace_access', grant_id: grant, workspace_id: workspaceId, reason_code: 'withdrawn' } });
   const sides = [
@@ -1512,12 +1609,12 @@ async function adminWithdrawScenario(ctx) {
 async function golden(ctx) {
   const { out, observer, command } = ctx;
   out.stage = 'golden-fixture';
-  const { createMcpProtocolHandler } = await import('../../supabase/functions/mcp/protocol.ts');
-  const { MCP_ISSUER, MCP_RESOURCE } = await import('../../supabase/functions/mcp/auth.ts');
-  const { executeClaimSeat } = await import('../../supabase/functions/mcp/claim-seat.ts');
-  const { commandOutput, readOutput, HostedToolFailure } = await import('../../supabase/functions/mcp/tool-errors.ts');
-  const { authenticateHostedSeatCapability } = await import('../../supabase/functions/_shared/hosted-seat-auth.ts');
-  const read = await import('../../supabase/functions/read/index.ts');
+  const { createMcpProtocolHandler } = await ctx.load('supabase/functions/mcp/protocol.ts');
+  const { MCP_ISSUER, MCP_RESOURCE } = await ctx.load('supabase/functions/mcp/auth.ts');
+  const { executeClaimSeat } = await ctx.load('supabase/functions/mcp/claim-seat.ts');
+  const { commandOutput, readOutput, HostedToolFailure } = await ctx.load('supabase/functions/mcp/tool-errors.ts');
+  const { authenticateHostedSeatCapability } = await ctx.load('supabase/functions/_shared/hosted-seat-auth.ts');
+  const read = await ctx.load('supabase/functions/read/index.ts','read');
   const owner = await human(ctx, 'golden-owner');
   const { workspaceId } = await workspace(ctx, owner, false);
   const other = await workspace(ctx, owner, false);
@@ -1611,7 +1708,7 @@ async function delegatedLocalScenario(ctx,scenario) {
   const owner=await human(ctx,'m3-owner');
   const {workspaceId}=await workspace(ctx,owner,false);
   const admin=await adminSide(ctx,{owner,workspaceId},'m3-first');
-  const read=await import('../../supabase/functions/read/index.ts');
+  const read=await ctx.load('supabase/functions/read/index.ts','read');
   const use=async raw=>{
     const response=await read.handleRequest(new Request('http://127.0.0.1/functions/v1/read',{
       method:'POST',headers:{authorization:`Bearer ${raw}`,'content-type':'application/json'},
@@ -1727,7 +1824,7 @@ async function delegatedLocalScenario(ctx,scenario) {
       const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
       await tx`SELECT token_id FROM swarm.agent_tokens WHERE token_id=${child}::uuid FOR UPDATE`;
       pending=admin.invoke(revoke);
-      check('used-direct-child-observed-wait',await waitForBlocked(observer,Number(pid),p=>ownedWait(observer,p,{grants:[revoked.grantId]},Number(pid)),3500)!==null);
+      check('used-direct-child-observed-wait',await waitForBlocked(observer,Number(pid),p=>ownedWait(observer,p,{tokens:[child]},Number(pid)),3500)!==null);
       let blocked=false;
       try { await observer.begin(async probe=>{
         await probe`SELECT principal_id FROM swarm.agent_principals WHERE principal_id=${seat.principal}::uuid FOR SHARE NOWAIT`;
@@ -2003,7 +2100,7 @@ async function ordinaryLocalPolicyScenario(ctx) {
   check('actual-mint-truthful-null-policy',Object.hasOwn(minted.body,'connection_expires_at') && minted.body.connection_expires_at===null && Object.hasOwn(minted.body,'connection_expired_at') && minted.body.connection_expired_at===null);
   const [g]=await observer`SELECT g.* FROM swarm.renewal_grants g JOIN swarm.agent_tokens t USING(renewal_grant_id) WHERE t.token_id=${minted.body.token_id}::uuid`;
   check('old-default-does-not-persist-technical-horizon',g.kind==='standing' && g.horizon_expires_at===null && g.max_successors===null);
-  const read=await import('../../supabase/functions/read/index.ts');
+  const read=await ctx.load('supabase/functions/read/index.ts','read');
   let credential=minted.body.agent_token;
   const readPolicy=async()=>{
     const response=await read.handleRequest(new Request('http://127.0.0.1/functions/v1/read',{
@@ -2290,7 +2387,7 @@ async function localResumeScenario(ctx,scenario) {
   const owner=await human(ctx,'resume-owner'),manager=await human(ctx,'resume-manager');
   const {workspaceId}=await workspace(ctx,owner,false);
   await member(ctx,workspaceId,manager,'admin');
-  const read=await import('../../supabase/functions/read/index.ts');
+  const read=await ctx.load('supabase/functions/read/index.ts','read');
   const use=async raw=>{
     const response=await read.handleRequest(new Request('http://127.0.0.1/functions/v1/read',{
       method:'POST',headers:{authorization:`Bearer ${raw}`,'content-type':'application/json'},
@@ -2508,7 +2605,7 @@ async function ownedWait(sql, pid, targets, singleRowGate = null) {
 async function hostedOwnerRemovalScenario(ctx) {
   const {observer,failures}=ctx,checks=[];
   const check=(name,ok)=>checks.push({name,ok:ok===true});
-  const {authenticateHostedGrantCapability}=await import('../../supabase/functions/_shared/hosted-seat-auth.ts');
+  const {authenticateHostedGrantCapability}=await ctx.load('supabase/functions/_shared/hosted-seat-auth.ts');
   const fixture=async (label,options={})=>{
     const admin=await human(ctx,`prefix-admin-${label}`),owner=options.owner ?? await human(ctx,`prefix-owner-${label}`);
     const w=options.workspace ?? await workspace(ctx,options.ownedWorkspace?owner:admin,false);
@@ -2696,7 +2793,7 @@ async function floorFirstUseScenario(ctx) {
   const check=(name,ok)=>checks.push({name,ok:ok===true});
   if(typeof ctx.floorUrl!=='string') fail('floor_module_missing');
   const floor=await import(ctx.floorUrl);
-  const read=await import('../../supabase/functions/read/index.ts');
+  const read=await ctx.load('supabase/functions/read/index.ts','read');
   const owner=await human(ctx,'floor-owner');const {workspaceId}=await workspace(ctx,owner,false);
   const request=async(raw,command)=>{
     const response=await ctx.command.handleRequest(new Request('http://127.0.0.1/functions/v1/command',{
@@ -2789,4 +2886,92 @@ async function floorFirstUseScenario(ctx) {
   // Diagnostic only: no historical deadlock can satisfy the required support gate.
   return {checks,floor_compatibility:incompatible?'INCOMPATIBLE':states.length?'INCONCLUSIVE':'UNPROVEN',
     required_compatibility:'BLOCKED',sqlstates:states,legacy_diagnostic:{held_C:heldC,identified_cycle:cycle}};
+}
+
+
+/** Canonical first use uses the selected public read handler. The existing
+ * management fixture supplies the human context for revocation; this case
+ * claims consumer locking/rollback, never JWT or initial consent admission. */
+async function activeFloorCanonicalScenario(ctx,scenario) {
+  const {observer}=ctx,checks=[];
+  const check=(name,ok)=>checks.push({name,ok:ok===true});
+  const read=await ctx.load('supabase/functions/read/index.ts','read');
+  const owner=await human(ctx,'active-floor');
+  const {workspaceId}=await workspace(ctx,owner,false);
+  const use=async raw=>{
+    const response=await read.handleRequest(new Request('http://127.0.0.1/functions/v1/read',{
+      method:'POST',headers:{authorization:`Bearer ${raw}`,'content-type':'application/json'},
+      body:JSON.stringify({resource:'renewal_grants',workspace_id:workspaceId})}));
+    return response.status;
+  };
+  const renew=async raw=>{
+    const response=await ctx.command.handleRequest(new Request('http://127.0.0.1/functions/v1/command',{
+      method:'POST',headers:{authorization:`Bearer ${raw}`,'content-type':'application/json'},
+      body:JSON.stringify({command_id:id(),client_version:ctx.clientVersion,workspace_id:workspaceId,
+        stream:{kind:'workspace'},command:{kind:'renew_agent_token'}})}));
+    const body=await response.json();
+    if(response.status!==200 || typeof body.agent_token!=='string') fail('active_floor_renew_control');
+    return body;
+  };
+  const chain=async label=>{
+    const made=await manage(ctx,owner,workspaceId,{kind:'create_agent_principal',name:`af-${label}-${ctx.tag}`});
+    if(made.status!==200) fail('active_floor_principal_control');
+    const device=id();
+    await observer`INSERT INTO swarm.devices(device_id,user_id,label) VALUES(${device}::uuid,${owner.userId}::uuid,'active floor')`;
+    const t=await manage(ctx,owner,workspaceId,{kind:'mint_agent_token',principal_id:made.body.principal_id,
+      run_id:id(),task_id:id(),epoch:1,device_id:device,scopes:['post_signal']});
+    if(t.status!==200 || await use(t.body.agent_token)!==200) fail('active_floor_root_use');
+    const c=await renew(t.body.agent_token);
+    if(await use(c.agent_token)!==200) fail('active_floor_successor_use');
+    const x=await renew(c.agent_token);
+    const rows=await observer`SELECT token_id,predecessor_token_id,first_used_at,renewal_grant_id,lineage_id
+      FROM swarm.agent_tokens WHERE token_id=ANY(${[t.body.token_id,c.token_id,x.token_id]}::uuid[])`;
+    const T=rows.find(row=>row.token_id===t.body.token_id),C=rows.find(row=>row.token_id===c.token_id),X=rows.find(row=>row.token_id===x.token_id);
+    if(rows.length!==3 || !T.first_used_at || !C.first_used_at || X.first_used_at!==null ||
+      C.predecessor_token_id!==T.token_id || X.predecessor_token_id!==C.token_id ||
+      rows.some(row=>row.renewal_grant_id!==T.renewal_grant_id || row.lineage_id!==T.lineage_id)) fail('active_floor_chain_binding');
+    return {T,C,X,raw:x.agent_token};
+  };
+  const revoke=async fixture=>{
+    const [clock]=await observer`SELECT extract(epoch FROM clock_timestamp())::float8 AS seconds`;
+    return await manage(ctx,{...owner,identity:{...owner.identity,interactiveAuthAtSeconds:Number(clock.seconds)}},
+      workspaceId,{kind:'revoke_agent_token',token_id:fixture.T.token_id});
+  };
+  const positive=await chain('positive');
+  check('same-invocation-positive',await use(positive.raw)===200);
+  const sequential=await chain('sequential');
+  check('sequential-revoke', (await revoke(sequential)).status===200);
+  check('sequential-terminal-denial',[401,403].includes(await use(sequential.raw)));
+  check('sequential-no-denied-adoption',(await observer`SELECT first_used_at IS NULL AS ok FROM swarm.agent_tokens WHERE token_id=${sequential.X.token_id}::uuid`)[0].ok);
+  const raced=await chain('raced');
+  const firstUseFirst=scenario.endsWith('use-first');
+  const states=[];
+  const settle=promise=>promise.catch(error=>{states.push(sqlstate(error));return null;});
+  let first,second,firstPid,secondPid,gatePid;
+  await observer.begin(async gate=>{
+    gatePid=Number((await gate`SELECT pg_backend_pid() AS pid`)[0].pid);
+    await gate`SELECT token_id FROM swarm.agent_tokens WHERE token_id=${raced.X.token_id}::uuid FOR UPDATE`;
+    first=settle(firstUseFirst ? use(raced.raw) : revoke(raced));
+    firstPid=await waitForBlocked(observer,gatePid,pid=>ownedWait(observer,pid,{tokens:[raced.X.token_id]},gatePid));
+    if(firstPid===null) fail('active_floor_first_owned_queue_inconclusive');
+    second=settle(firstUseFirst ? revoke(raced) : use(raced.raw));
+    const deadline=Date.now()+3500;
+    while(Date.now()<deadline && secondPid==null) {
+      const rows=await observer`SELECT pid FROM pg_stat_activity WHERE pid<>${firstPid}::int
+        AND (${gatePid}::int=ANY(pg_blocking_pids(pid)) OR ${firstPid}::int=ANY(pg_blocking_pids(pid)))`;
+      for(const row of rows) if(await ownedWait(observer,Number(row.pid),{tokens:[raced.T.token_id,raced.C.token_id,raced.X.token_id],users:[owner.userId],workspaces:[workspaceId]})) secondPid=Number(row.pid);
+      if(secondPid==null) await new Promise(resolve=>setTimeout(resolve,20));
+    }
+    if(secondPid==null) fail('active_floor_second_owned_queue_inconclusive');
+  });
+  const results=await Promise.all([first,second]);
+  const used=firstUseFirst ? results[0] : results[1],revoked=firstUseFirst ? results[1] : results[0];
+  check('both-owned-distinct-pids',firstPid>0 && secondPid>0 && firstPid!==secondPid && gatePid!==firstPid && gatePid!==secondPid);
+  check('no-race-sqlstate',states.length===0);
+  check('revoke-committed',revoked?.status===200);
+  check('ordered-first-use-result',firstUseFirst ? used===200 : [401,403].includes(used));
+  if(!firstUseFirst) check('denied-first-use-rolls-back-adoption',(await observer`SELECT first_used_at IS NULL AS ok FROM swarm.agent_tokens WHERE token_id=${raced.X.token_id}::uuid`)[0].ok);
+  check('terminal-denial',[401,403].includes(await use(raced.raw)));
+  return {checks,sqlstates:states,canonical_witness:{first_pid:firstPid,second_pid:secondPid,gate_pid:gatePid,
+    workspace_id:workspaceId,token_ids:[raced.T.token_id,raced.C.token_id,raced.X.token_id],order:firstUseFirst?'use-first':'revoke-first'}};
 }

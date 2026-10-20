@@ -11,6 +11,8 @@ import { createClient } from '@supabase/supabase-js';
 import { fixture, emptyApplicationSchema } from '../support/admin-schema-db.js';
 import { ADMIN_RESOURCE, canonicalAdminJson } from '../../src/protocol/index.js';
 
+const floorHarness = await import(new URL('../support/admin-principal-lock-order-harness.mjs',import.meta.url).href);
+
 const scenarios = {
   cached_v1: 'legacy-admin-unreachable: cached v1 admin command replay denied with current OAuth positive',
   runtime: 'legacy-admin-unreachable: opaque access, refresh, private mint and callbacks refuse with actual OAuth positive',
@@ -26,7 +28,8 @@ const scenarios = {
 } as const;
 
 for (const [scenario, label] of Object.entries(scenarios)) {
-  test(label, { timeout: 180000 }, async () => {
+  for(const generation of (['consent','boundary','issuance'].includes(scenario) ? ['current','F'] : ['current']))
+  test(label+(generation==='F' ? ' exact F' : ''), { timeout: 180000 }, async () => {
     // Never print status: it contains local test credentials. No production targets.
     const local = JSON.parse(execFileSync('supabase', ['status', '-o', 'json'], {
       encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
@@ -69,8 +72,9 @@ VALUES('${legacy.owner}','delegated_admin:${legacy.identity}','${cached.command_
       await sql`INSERT INTO swarm.users(user_id, display_name) VALUES (${owner}::uuid, 'Lane B owner')`;
       await sql`INSERT INTO swarm.workspaces(workspace_id, name, created_by) VALUES (${workspace}::uuid, 'Lane B', ${owner}::uuid)`;
       await sql`INSERT INTO swarm.memberships(workspace_id, user_id, role) VALUES (${workspace}::uuid, ${owner}::uuid, 'owner')`;
+      const source=generation==='F' ? floorHarness.materializeActiveFloorSource(secretDir,'F') : null;
       const configPath = join(secretDir, 'local.json');
-      writeFileSync(configPath, JSON.stringify({ local, owner, workspace, jwt: signed.data.session.access_token,
+      writeFileSync(configPath, JSON.stringify({ local, owner, workspace, source, active_floor:generation==='F', jwt: signed.data.session.access_token,
         ...(scenario === 'storage' ? { rollbackSchema: emptyApplicationSchema() } : {}),
         ...(legacy ? { legacy: { owner: legacy.owner, grant: legacy.grant, identity: legacy.identity, connection: legacy.connection, client: legacy.client } } : {}) }), { mode: 0o600 });
       const run = spawnSync('deno', ['run', '--no-lock', '--config', 'supabase/functions/command/deno.json',
@@ -78,6 +82,8 @@ VALUES('${legacy.owner}','delegated_admin:${legacy.identity}','${cached.command_
         encoding: 'utf8', timeout: 150000, env: process.env,
       });
       // The harness emits only fixed assertion labels, never raw errors or secrets.
+      assert.equal(run.signal,null,'signalled admission child cannot supply proof');
+      assert.equal(run.error,undefined,'admission child must start and finish');
       assert.equal(run.status, 0, run.stdout);
       assert.match(run.stdout, /ADMIN_SERVER_OK/u);
     } finally {
