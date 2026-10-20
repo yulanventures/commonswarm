@@ -2868,8 +2868,6 @@ async function runGrant(args: Arguments): Promise<void> {
       "Renewal is allowed again. Nothing has reached the agent yet: it starts " +
       "renewing when its own cswarm process next tries, so start that process " +
       "if it is not running.\n" +
-      `The idle clock restarts now — another ${STANDING_IDLE_PAUSE_DAYS} days ` +
-      "with no use pauses it again.\n" +
       `Confirm with: cswarm whoami --agent-token-file <path>\n`,
   );
 }
