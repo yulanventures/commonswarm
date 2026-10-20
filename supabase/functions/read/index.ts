@@ -528,6 +528,11 @@ async function handle(
     humanUserId = data.user.id.toLowerCase();
   }
   const tokenHash = agentCredential ? await sha256(token) : null;
+  let localProof: {hash:Uint8Array;workspace:string} | undefined;
+  if (tokenHash !== null) {
+    if (body.workspace_id === null) return json(400, { error: "invalid_request" });
+    localProof = {hash:tokenHash,workspace:body.workspace_id};
+  }
 
   return await withReadTransaction(async (tx) => {
     setPhase("session_setup");
@@ -1072,7 +1077,7 @@ async function handle(
        * returns before grant-use and must not carry the topic. */
       ...(body.inbox ? optionalWake(agent.wake_id) : {}),
     });
-  }, tokenHash ? {hash:tokenHash,workspace:body.workspace_id} : undefined);
+  }, localProof);
 }
 
 export type HostedReadInput =
