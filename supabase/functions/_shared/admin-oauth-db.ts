@@ -1,3 +1,4 @@
+import { lockLocalAuthPlan, type LocalAuthLockPlan } from './agent-auth.ts';
 import type postgres from 'npm:postgres@3.4.9';
 import { ADMIN_RESOURCE, canonicalAdminJson } from './protocol.js';
 import { AdminJwtVerifier, AdminRequestVerifier, isAdminAdmission, adminAdmissionDigest, type AdminAdmission, type ProofOutcome } from './admin-oauth-auth.ts';
@@ -33,7 +34,7 @@ export interface AdminAccessState {
 /** Run under the same authority transaction before snapshot, replay or execution.
  * Prior live generations are valid. The exact ledger row supplies generation;
  * it is never guessed from the family's newest generation. */
-export async function adminAccessState(tx: Sql, admission: AdminAdmission): Promise<AdminAccessState> {
+export async function adminAccessState(tx: Sql, admission: AdminAdmission, plan?: LocalAuthLockPlan): Promise<AdminAccessState> {
   if (!isAdminAdmission(admission)) return { known: false, active: false, capabilities: [] };
   const t = admission.token;
   await adminDbRole(tx, 'commonswarm_oauth_runtime');
@@ -58,8 +59,15 @@ export async function adminAccessState(tx: Sql, admission: AdminAdmission): Prom
     }
     await adminDbRole(tx, 'swarm_command');
     await tx`SELECT active FROM commonswarm_oauth.lock_admin_client_verification(${t.client_id}, ${locator.verification_version})`;
-    await tx`SELECT user_id FROM swarm.users WHERE user_id=${t.owner_user_id}::uuid FOR NO KEY UPDATE`; // Lock order: lockPrincipalName in command/index.ts.
-    await tx`SELECT owner_user_id FROM swarm.admin_accounts WHERE owner_user_id=${t.owner_user_id}::uuid FOR UPDATE`;
+    if (plan) {
+      if (plan.actor !== t.owner_user_id || !plan.snapshot.adminAccounts?.includes(t.owner_user_id) ||
+          !plan.snapshot.parents.includes(t.admin_grant_id)) return {known:false,active:false,capabilities:[]};
+      await lockLocalAuthPlan(tx,plan,"parents");
+    } else {
+      // Status/failure-only callers have no cross-owner child work.
+      await tx`SELECT user_id FROM swarm.users WHERE user_id=${t.owner_user_id}::uuid FOR NO KEY UPDATE`;
+      await tx`SELECT owner_user_id FROM swarm.admin_accounts WHERE owner_user_id=${t.owner_user_id}::uuid FOR UPDATE`;
+    }
     await adminDbRole(tx, 'commonswarm_oauth_runtime');
     const [row] = await tx<{ active: boolean; capabilities: string[]; scope_names: string[]; registry_version: number;
       manifest_digest: string; jkt: string; admin_grant_id: string; admin_identity_id: string;

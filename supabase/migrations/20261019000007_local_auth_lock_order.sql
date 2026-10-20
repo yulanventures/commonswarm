@@ -1142,3 +1142,182 @@ REVOKE ALL ON FUNCTION swarm.agent_delivery_read_context(bytea,uuid),swarm.agent
 GRANT EXECUTE ON FUNCTION swarm.agent_delivery_read_context(bytea,uuid) TO swarm_read;
 GRANT EXECUTE ON FUNCTION swarm.record_renewal_grant_use(uuid,uuid,text) TO swarm_read,swarm_command;
 GRANT EXECUTE ON FUNCTION swarm.prepare_renewal_grant(uuid,uuid),swarm.resume_renewal_grant(uuid,uuid,uuid) TO swarm_command;
+
+-- Canonical connection policy on the two existing renewal read wires.
+DROP FUNCTION swarm_read.renewal_grant_roster(uuid);
+CREATE FUNCTION swarm_read.renewal_grant_roster(p_workspace_id uuid)
+RETURNS TABLE (
+  renewal_grant_id uuid,
+  principal_id uuid,
+  owner_user_id uuid,
+  agent_name text,
+  model text,
+  kind text,
+  horizon_expires_at timestamptz,
+  bound_device_id uuid,
+  last_used_at timestamptz,
+  last_used_device_id uuid,
+  last_used_from text,
+  new_host_at timestamptz,
+  suspended_at timestamptz,
+  revoked_at timestamptz,
+  token_id uuid,
+  issued_at timestamptz,
+  token_expires_at timestamptz,
+  first_used_at timestamptz,
+  token_revoked_at timestamptz,
+  connection_expires_at timestamptz,
+  connection_expired_at timestamptz
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  v_user_id uuid := NULLIF(
+    NULLIF(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub',
+    ''
+  )::uuid;
+BEGIN
+  IF v_user_id IS NULL OR NOT swarm.is_member(p_workspace_id, v_user_id) THEN
+    RETURN;
+  END IF;
+
+  RETURN QUERY
+  SELECT
+    grant_row.renewal_grant_id,
+    principal.principal_id,
+    principal.owner_user_id,
+    principal.name,
+    principal.model,
+    grant_row.kind,
+    grant_row.horizon_expires_at,
+    grant_row.bound_device_id,
+    grant_row.last_used_at,
+    grant_row.last_used_device_id,
+    grant_row.last_used_from,
+    grant_row.new_host_at,
+    CASE WHEN grant_row.suspension_active AND NOT (grant_row.kind='standing' AND grant_row.connection_expires_at IS NULL AND grant_row.connection_expired_at IS NULL) THEN grant_row.suspended_at END,
+    grant_row.revoked_at,
+    token.token_id,
+    token.issued_at,
+    token.expires_at,
+    token.first_used_at,
+    token.revoked_at,
+    grant_row.connection_expires_at,grant_row.connection_expired_at
+  FROM swarm.agent_principals AS principal
+  JOIN LATERAL (
+    SELECT candidate.*
+    FROM swarm.renewal_grants AS candidate
+    WHERE candidate.workspace_id = p_workspace_id
+      AND candidate.principal_id = principal.principal_id
+    ORDER BY
+      (candidate.revoked_at IS NULL) DESC,
+      candidate.created_at DESC,
+      candidate.renewal_grant_id DESC
+    LIMIT 1
+  ) AS grant_row ON true
+  LEFT JOIN LATERAL (
+    SELECT candidate.token_id, candidate.issued_at,
+           candidate.expires_at, candidate.first_used_at, candidate.revoked_at
+    FROM swarm.agent_tokens AS candidate
+    WHERE candidate.renewal_grant_id = grant_row.renewal_grant_id
+    ORDER BY candidate.issued_at DESC, candidate.token_id DESC
+    LIMIT 1
+  ) AS token ON true
+  WHERE principal.workspace_id = p_workspace_id
+    AND principal.revoked_at IS NULL
+  ORDER BY principal.principal_id;
+END;
+$$;
+
+ALTER FUNCTION swarm_read.renewal_grant_roster(uuid) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm_read.renewal_grant_roster(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION swarm_read.renewal_grant_roster(uuid)
+  TO authenticated, swarm_read;
+
+COMMENT ON FUNCTION swarm_read.renewal_grant_roster(uuid) IS
+  'One current grant row per live principal for a verified live workspace member. suspended_at reports CURRENT suspension: a resumed grant reads NULL. Includes token ids and timestamps, never token hashes or bearer secrets.';
+
+DROP FUNCTION swarm_read.renewal_grant_for_token(uuid,uuid);
+CREATE FUNCTION swarm_read.renewal_grant_for_token(
+  p_workspace_id uuid,
+  p_token_id uuid
+)
+RETURNS TABLE (
+  renewal_grant_id uuid,
+  principal_id uuid,
+  owner_user_id uuid,
+  agent_name text,
+  model text,
+  kind text,
+  horizon_expires_at timestamptz,
+  bound_device_id uuid,
+  last_used_at timestamptz,
+  last_used_device_id uuid,
+  last_used_from text,
+  new_host_at timestamptz,
+  suspended_at timestamptz,
+  revoked_at timestamptz,
+  token_id uuid,
+  issued_at timestamptz,
+  token_expires_at timestamptz,
+  first_used_at timestamptz,
+  token_revoked_at timestamptz,
+  connection_expires_at timestamptz,
+  connection_expired_at timestamptz
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT
+    grant_row.renewal_grant_id,
+    principal.principal_id,
+    principal.owner_user_id,
+    principal.name,
+    principal.model,
+    grant_row.kind,
+    grant_row.horizon_expires_at,
+    grant_row.bound_device_id,
+    grant_row.last_used_at,
+    grant_row.last_used_device_id,
+    grant_row.last_used_from,
+    grant_row.new_host_at,
+    CASE WHEN grant_row.suspension_active AND NOT (grant_row.kind='standing' AND grant_row.connection_expires_at IS NULL AND grant_row.connection_expired_at IS NULL) THEN grant_row.suspended_at END,
+    grant_row.revoked_at,
+    latest.token_id,
+    latest.issued_at,
+    latest.expires_at,
+    latest.first_used_at,
+    latest.revoked_at,
+    grant_row.connection_expires_at,grant_row.connection_expired_at
+  FROM swarm.agent_tokens AS presenting
+  JOIN swarm.renewal_grants AS grant_row
+    ON grant_row.renewal_grant_id = presenting.renewal_grant_id
+  JOIN swarm.agent_principals AS principal
+    ON principal.principal_id = grant_row.principal_id
+  LEFT JOIN LATERAL (
+    SELECT candidate.token_id, candidate.issued_at,
+           candidate.expires_at, candidate.first_used_at, candidate.revoked_at
+    FROM swarm.agent_tokens AS candidate
+    WHERE candidate.renewal_grant_id = grant_row.renewal_grant_id
+    ORDER BY candidate.issued_at DESC, candidate.token_id DESC
+    LIMIT 1
+  ) AS latest ON true
+  WHERE presenting.token_id = p_token_id
+    AND grant_row.workspace_id = p_workspace_id
+    AND principal.workspace_id = p_workspace_id
+    AND principal.revoked_at IS NULL;
+$$;
+
+ALTER FUNCTION swarm_read.renewal_grant_for_token(uuid, uuid) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm_read.renewal_grant_for_token(uuid, uuid)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION swarm_read.renewal_grant_for_token(uuid, uuid)
+  TO swarm_read;
+
+COMMENT ON FUNCTION swarm_read.renewal_grant_for_token(uuid, uuid) IS
+  'The current renewal grant for one already-authenticated agent token. suspended_at reports CURRENT suspension: a resumed grant reads NULL. Never returns another principal or workspace.';

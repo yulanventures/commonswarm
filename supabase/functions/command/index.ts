@@ -511,6 +511,8 @@ interface RenewalGrantFacts {
   /** Issued but never delivered; subtracted from `successors_used` for the ceiling. */
   successors_stranded: number;
   horizon_expires_at: number | null;
+  connection_expires_at: number | null;
+  connection_expired_at: number | null;
   revoked_at: number | null;
   /** Effective suspension: historical idle pauses do not expire permanent standing families. */
   suspension_active: boolean;
@@ -616,6 +618,7 @@ interface StoredResponse {
   grant_id?: string;
   seat_id?: string;
   handle?: string;
+  connection_expired_at?: string | null;
   connection_expires_at?: string | null;
   previous_connection_expires_at?: string | null;
 }
@@ -2976,6 +2979,8 @@ function storedResponse(value: unknown): StoredResponse {
         response.successors_remaining === null
       ? { successors_remaining: response.successors_remaining as number | null }
       : {}),
+    ...(typeof response.connection_expired_at === "string" || response.connection_expired_at === null
+      ? { connection_expired_at: response.connection_expired_at as string | null } : {}),
     ...(typeof response.connection_expires_at === "string" || response.connection_expires_at === null
       ? { connection_expires_at: response.connection_expires_at as string | null } : {}),
     ...(typeof response.previous_connection_expires_at === "string" || response.previous_connection_expires_at === null
@@ -3743,10 +3748,11 @@ async function prepareWorkspaceCommand(
       epoch: wire.epoch,
       scopes: [...(wire.scopes ?? P0_AGENT_SCOPES)],
       ...(wire.ttl_ms === undefined ? {} : { ttl_ms: wire.ttl_ms }),
-      renewal_kind: wire.renewal_kind ?? "standing",
-      renewal_horizon_ms: (wire.renewal_kind ?? "standing") === "standing"
-        ? null
-        : wire.renewal_horizon_ms ?? RENEWAL_HORIZON_DEFAULT_MS,
+      // The ordinary connection endpoint never represented owner-chosen expiry.
+      // Older clients sent timeboxed/30 days even for their default connection.
+      // Delegated/security/job issuance uses its separate bounded authority path.
+      renewal_kind: "standing",
+      renewal_horizon_ms: null,
     };
   } else {
     // Exhaustiveness: every ConnectCommand kind is armed above. Falling into a
@@ -3867,6 +3873,8 @@ async function loadRenewalFacts(
     successors_used: number | null;
     successors_stranded: number | null;
     horizon_expires_at: Date | null;
+    connection_expires_at: Date | null;
+    connection_expired_at: Date | null;
     grant_revoked_at: Date | null;
     grant_suspension_active: boolean | null;
     grant_bound_to_token: boolean | null;
@@ -3881,6 +3889,7 @@ async function loadRenewalFacts(
       g.successors_used,
       g.successors_stranded,
       g.horizon_expires_at,
+      g.connection_expires_at,g.connection_expired_at,
       g.revoked_at AS grant_revoked_at,
       -- Explicit finite policy retains its current suspension. A historical
       -- technical idle pause never imposes a human resume on a permanent family.
@@ -3978,6 +3987,8 @@ async function loadRenewalFacts(
       successors_used: Number(row.successors_used),
       successors_stranded: Number(row.successors_stranded),
       horizon_expires_at: millis(row.horizon_expires_at),
+      connection_expires_at: millis(row.connection_expires_at),
+      connection_expired_at: millis(row.connection_expired_at),
       revoked_at: millis(row.grant_revoked_at),
       suspension_active: row.grant_suspension_active === true,
     };
@@ -4001,6 +4012,16 @@ async function loadRenewalFacts(
  * readable by swarm_command, so a replay identifies the successor and its
  * expiry but never re-issues the secret.
  */
+async function currentLocalPolicyResponse(tx:Sql,response:StoredResponse,plan:LocalAuthLockPlan|null):Promise<StoredResponse> {
+  const {connection_expires_at:_deadline,connection_expired_at:_terminal,...receipt}=response;
+  const family=plan?.snapshot.bindings.find(r=>r.token_id===response.token_id)?.renewal_grant_id;
+  if (!family || !plan?.locked) return receipt;
+  const [current]=await tx<{connection_expires_at:Date|null;connection_expired_at:Date|null}[]>`
+    SELECT connection_expires_at,connection_expired_at FROM swarm.renewal_grants WHERE renewal_grant_id=${family}::uuid`;
+  return current ? {...receipt,connection_expires_at:current.connection_expires_at?.toISOString() ?? null,
+    connection_expired_at:current.connection_expired_at?.toISOString() ?? null} : receipt;
+}
+
 function renewalReplayFields(
   prepared: PreparedWorkspace,
   events: readonly EventEnvelope[],
@@ -4026,6 +4047,8 @@ function renewalReplayFields(
     ...(grant === null
       ? {}
       : {
+        connection_expires_at: grant.connection_expires_at===null ? null : new Date(grant.connection_expires_at).toISOString(),
+        connection_expired_at: grant.connection_expired_at===null ? null : new Date(grant.connection_expired_at).toISOString(),
         grant_kind: grant.kind,
         horizon_expires_at: grant.horizon_expires_at === null
           ? null
@@ -9713,7 +9736,7 @@ type HostedManagementCommand =
   | { kind: "activate_hosted_mcp_grant"; grant_id: string }
   | { kind: "revoke_hosted_mcp_grant"; grant_id: string }
   | { kind: "revoke_hosted_mcp_seat"; grant_id: string; seat_id: string }
-  | { kind: "set_connection_expiry"; connection_kind: "hosted"; grant_id: string;
+  | { kind: "set_connection_expiry"; connection_kind: "hosted" | "renewal"; grant_id: string;
       connection_expires_at: string | null };
 
 interface HostedGrantRow {
@@ -9790,7 +9813,7 @@ function parseHostedManagementCommand(value: unknown): HostedManagementCommand |
   if (command.kind === "set_connection_expiry") {
     const expiry = command.connection_expires_at;
     return exactKeys(command, ["kind", "connection_kind", "grant_id", "connection_expires_at"]) &&
-        command.connection_kind === "hosted" &&
+        (command.connection_kind === "hosted" || command.connection_kind === "renewal") &&
         typeof command.grant_id === "string" && UUID_RE.test(command.grant_id) &&
         (expiry === null || (typeof expiry === "string" &&
           /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u.test(expiry) &&
@@ -9876,6 +9899,76 @@ function hostedProjectionBefore(grant: HostedGrantRow, seat: ReturnType<typeof r
   };
 }
 
+/** Exact renewal-family policy edit through the existing verified human command.
+ * The coordinator has preheld U/A/W/E/P/D/G/T before human authentication.
+ * No client owner or token deadline is a policy input. */
+async function handleLocalConnectionExpiry(
+  tx:Sql,body:RequestBody,auth:AuthContext,
+  command:Extract<HostedManagementCommand,{kind:"set_connection_expiry"}>,
+):Promise<HttpResult> {
+  const forbidden:HttpResult={status:403,body:{error:"connection_expiry_unavailable"}};
+  if (!auth.identityVerified || auth.credentialKind!=="user" || auth.actor.user===null) return forbidden;
+  const [binding]=await tx<{workspace_id:string;principal_id:string;run_id:string;created_by:string}[]>`
+    SELECT workspace_id,principal_id,run_id,created_by FROM swarm.renewal_grants
+    WHERE renewal_grant_id=${command.grant_id}::uuid`;
+  if (!binding || binding.workspace_id!==body.workspace_id) return forbidden;
+  const [stream]=await tx<{stream_id:string}[]>`SELECT stream_id FROM swarm.streams
+    WHERE workspace_id=${binding.workspace_id}::uuid AND kind='workspace'`;
+  if (!stream) return forbidden;
+  const route:Route={workspaceId:binding.workspace_id,streamId:stream.stream_id,membershipRole:null,membershipRevokedAt:null};
+  await lockRegistrationStream(tx,route);
+  const [grant]=await tx<{connection_expires_at:Date|null;connection_expired_at:Date|null}[]>`
+    SELECT connection_expires_at,connection_expired_at FROM swarm.renewal_grants
+    WHERE renewal_grant_id=${command.grant_id}::uuid FOR UPDATE`;
+  // Fresh SQL proof after stream/family waits; exact human owner, all current
+  // parents, membership, run/device and terminal fences remain mandatory.
+  const [current]=await tx<{now:number}[]>`SELECT floor(extract(epoch FROM clock_timestamp())*1000)::float8 AS now
+    FROM swarm.renewal_grants g JOIN swarm.agent_principals p USING(principal_id)
+    JOIN swarm.agent_runs r ON r.run_id=g.run_id AND r.principal_id=p.principal_id
+    JOIN swarm.devices d ON d.device_id=r.device_id
+    JOIN swarm.workspaces w ON w.workspace_id=g.workspace_id
+    JOIN swarm.memberships m ON m.workspace_id=g.workspace_id AND m.user_id=${auth.actor.user}::uuid
+    WHERE g.renewal_grant_id=${command.grant_id}::uuid AND g.workspace_id=${body.workspace_id}::uuid
+      AND g.created_by=${auth.actor.user}::uuid AND p.owner_user_id=${auth.actor.user}::uuid
+      AND p.workspace_id=g.workspace_id AND p.transport='local' AND NOT p.turn_only
+      AND p.revoked_at IS NULL AND r.ended_at IS NULL AND d.revoked_at IS NULL
+      AND m.revoked_at IS NULL AND w.archived_at IS NULL AND g.revoked_at IS NULL
+      AND (g.bound_device_id IS NULL OR g.bound_device_id=d.device_id)
+      AND (g.kind='standing' OR g.horizon_expires_at>clock_timestamp() AND g.successors_used<g.max_successors)
+      AND (NOT g.suspension_active OR g.kind='standing' AND g.connection_expires_at IS NULL AND g.connection_expired_at IS NULL)
+      AND g.connection_expired_at IS NULL AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
+      AND swarm.admin_child_live(p.parent_admin_grant_id,g.workspace_id)
+      AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z
+        WHERE z.kind='renewal_grant' AND z.target_id=g.renewal_grant_id
+          OR z.kind='principal' AND z.target_id=p.principal_id
+          OR z.kind IN ('lineage','family') AND z.target_id IN
+            (SELECT t.lineage_id FROM swarm.agent_tokens t WHERE t.renewal_grant_id=g.renewal_grant_id))
+      AND EXISTS(SELECT 1 FROM swarm.agent_tokens t WHERE t.renewal_grant_id=g.renewal_grant_id
+        AND t.revoked_at IS NULL AND swarm.admin_child_live(t.parent_admin_grant_id,g.workspace_id))`;
+  if (!grant || !current) return forbidden;
+  if (command.connection_expires_at!==null && Date.parse(command.connection_expires_at)<=current.now)
+    return {status:400,body:{error:"invalid_connection_expiry"}};
+  const hash=await hostedRequestHash("user",auth.actor.user,body);
+  const [prior]=await tx<{workspace_id:string;stream_id:string;request_hash:string;response:unknown}[]>`
+    SELECT workspace_id,stream_id,request_hash,response FROM swarm.idempotency_keys
+    WHERE principal_kind='user' AND principal_id=${auth.actor.user} AND command_id=${body.command_id}`;
+  if (prior) return prior.workspace_id===route.workspaceId && prior.stream_id===route.streamId && prior.request_hash===hash
+    ? replayResult(storedResponse(prior.response),command.kind) : {status:409,body:{error:"command_id_conflict"}};
+  const [changed]=await tx`UPDATE swarm.renewal_grants SET connection_expires_at=${command.connection_expires_at}::timestamptz
+    WHERE renewal_grant_id=${command.grant_id}::uuid AND revoked_at IS NULL AND connection_expired_at IS NULL
+      AND (connection_expires_at IS NULL OR connection_expires_at>clock_timestamp())
+      AND (${command.connection_expires_at}::timestamptz IS NULL OR ${command.connection_expires_at}::timestamptz>clock_timestamp())
+    RETURNING renewal_grant_id`;
+  if (!changed) return forbidden;
+  const response:StoredResponse={ok:true,event_ids:[],grant_id:command.grant_id,renewal_grant_id:command.grant_id,
+    workspace_id:route.workspaceId,previous_connection_expires_at:grant.connection_expires_at?.toISOString() ?? null,
+    connection_expires_at:command.connection_expires_at,connection_expired_at:null};
+  await tx`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response)
+    VALUES('user',${auth.actor.user},${body.command_id},${route.workspaceId}::uuid,${route.streamId}::uuid,${hash},${tx.json(response as unknown as postgres.JSONValue)})`;
+  await insertAudit(tx,{auth,commandKind:command.kind,workspaceId:route.workspaceId,streamId:route.streamId,outcome:"accepted",hash});
+  return {status:200,body:{status:"accepted",...response,events:[]}};
+}
+
 async function handleHostedManagement(
   tx: Sql,
   body: RequestBody,
@@ -9892,6 +9985,9 @@ async function handleHostedManagement(
       record(body.stream)?.kind !== "workspace") {
     return { status: 400, body: { error: "invalid_request" } };
   }
+
+  if (command.kind==="set_connection_expiry" && command.connection_kind==="renewal")
+    return await handleLocalConnectionExpiry(tx,body,auth,command);
 
   const preliminary = command.kind === "begin_hosted_mcp_grant"
     ? []
@@ -10735,11 +10831,17 @@ async function handleTransaction(
       ? await tx<{stream_id:string}[]>`SELECT stream_id FROM swarm.streams WHERE workspace_id=${localWorkspace}::uuid AND kind='workspace'`
       : localWorkspace && record(body.stream)?.kind==='repo' && typeof record(body.stream)?.repo_mapping_id==='string' && UUID_RE.test(String(record(body.stream)?.repo_mapping_id))
       ? await tx<{stream_id:string}[]>`SELECT stream_id FROM swarm.streams WHERE workspace_id=${localWorkspace}::uuid AND repo_mapping_id=${String(record(body.stream)?.repo_mapping_id)}::uuid AND kind='repo'` : [];
-    localPlan = hostedSeat===null && !HOSTED_MANAGEMENT_KINDS.has(kind) ? await planLocalOperation(tx, {
+    const localExpiry=kind==='set_connection_expiry' && rawLocal?.connection_kind==='renewal';
+    const expiryBinding=localExpiry && typeof rawLocal.grant_id==='string' && UUID_RE.test(rawLocal.grant_id)
+      ? (await tx<{principal_id:string;workspace_id:string}[]>`SELECT principal_id,workspace_id FROM swarm.renewal_grants
+          WHERE renewal_grant_id=${rawLocal.grant_id}::uuid`)[0] : null;
+    localPlan = hostedSeat===null && (!HOSTED_MANAGEMENT_KINDS.has(kind) || localExpiry) ? await planLocalOperation(tx, {
       ...(agentTokenHash ? {hash:agentTokenHash}:{}), workspace:localWorkspace,actor:verifiedHuman?.userId,
       allWorkspace: joinAttempt!==null || (WORKSPACE_COMMAND_KINDS as readonly string[]).includes(kind)
         || (HOUSEHOLD_SURFACE_KINDS as readonly string[]).includes(kind),
       streamIds:[CLAIM_AGENT_INBOX_KIND,ACK_AGENT_DELIVERY_KIND,TOUCH_PRESENCE_KIND].includes(kind) ? [] : localStreams.map(r=>r.stream_id),
+      ...(localExpiry ? {workspaceMode:'update' as const} : {}),
+      ...(expiryBinding && expiryBinding.workspace_id===localWorkspace ? {target:{principals:[expiryBinding.principal_id],tokens:[]}} : {}),
       ...(localWorkspace && typeof rawLocal?.principal_id==='string' && UUID_RE.test(rawLocal.principal_id)
         ? {target:{principals:[rawLocal.principal_id],tokens:[]}} : {}),
       principalMode: kind===CLAIM_AGENT_INBOX_KIND?'noKeyUpdate':kind===ACK_AGENT_DELIVERY_KIND?'share':'update',
@@ -11502,7 +11604,9 @@ async function handleTransaction(
           };
         }
         return matches
-          ? replayResult(storedResponse(existing.response), kind)
+          ? replayResult(kind==="mint_agent_token" || kind===RENEW_AGENT_TOKEN_KIND
+            ? await currentLocalPolicyResponse(tx,storedResponse(existing.response),localPlan)
+            : storedResponse(existing.response), kind)
           : { status: 409, body: { error: "command_id_conflict" } };
       }
       renewalRecovery = true;
@@ -12935,6 +13039,8 @@ async function handleTransaction(
                   ).toISOString(),
                 }
                 : {}),
+              connection_expires_at: null,
+              connection_expired_at: null,
               grant_kind: prepared.command.renewal_kind,
               horizon_expires_at: prepared.command.renewal_horizon_ms === null
                 ? null
@@ -13268,7 +13374,7 @@ async function insertCommandFailure(
 
 import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
 import { createAdminHttpHandler } from '../_shared/admin-http.ts';
-import { adminDbRole, adminSecurityFailure, type AdminAuditKind } from '../_shared/admin-oauth-db.ts';
+import { adminAccessState, adminDbRole, adminSecurityFailure, type AdminAuditKind } from '../_shared/admin-oauth-db.ts';
 import { admitAdminRequest } from './admin-admission.ts';
 import { createAdminWorkerChannel } from './admin-worker-delivery.ts';
 import type { AdminAdmission } from '../_shared/admin-oauth-auth.ts';
@@ -13290,7 +13396,7 @@ export async function handleAdminMcpRequest(request: Request): Promise<Response>
 async function runAdminOAuthCommand(input: AdminInput, admission: AdminAdmission, kind: AdminAuditKind, signal: AbortSignal): Promise<HttpResult> {
   const authentication: AdminAuthentication = { kind: 'oauth', admission };
   try {
-    const outcome = await db.begin('isolation level read committed', async tx => {
+    const outcome = await retryLocalAuthTransaction(() => db.begin('isolation level read committed', async tx => {
       await adminDbRole(tx, 'swarm_command');
       const remaining = Math.min(10_000, admission.token.expires_at - Date.now());
       if (remaining <= 0 || signal.aborted) throw new Error('admin_request_expired');
@@ -13298,7 +13404,7 @@ async function runAdminOAuthCommand(input: AdminInput, admission: AdminAdmission
       const result = await adminTransaction(tx, input, authentication, kind);
       if (signal.aborted || Date.now() >= admission.token.expires_at) throw new Error('admin_request_expired');
       return result;
-    });
+    }));
     return outcome.result;
   } catch (error) {
     console.error('admin_command_failed', 'transaction_failed');
@@ -13561,11 +13667,11 @@ async function runAdminAccountCommand(
   human: VerifiedHuman | null = null,
 ): Promise<HttpResult> {
   try {
-    const outcome = await db.begin("isolation level read committed", async tx => {
+    const outcome = await retryLocalAuthTransaction(() => db.begin("isolation level read committed", async tx => {
       await setTransaction(tx);
       if (human !== null) await authenticateHuman(tx, human);
       return await adminTransaction(tx, input, authentication);
-    });
+    }));
     return outcome.result;
   } catch (error) {
     console.error("admin_command_failed", safeAdminError(error));
@@ -14628,7 +14734,7 @@ export async function handleAdminWorkerCommand(
   if (request.signal.aborted) abort();
   const timer = setTimeout(abort, Math.max(0, Math.min(25_000, admission.token.expires_at - Date.now())));
   try {
-    const outcome = await db.begin(async tx => {
+    const outcome = await retryLocalAuthTransaction(() => db.begin(async tx => {
       await setTransaction(tx);
       const remaining = Math.min(10_000, admission.token.expires_at - Date.now());
       if (remaining <= 0 || deadline.signal.aborted) throw new Error('request_expired');
@@ -14662,8 +14768,30 @@ export async function handleAdminWorkerCommand(
         }
       }
       if (deadline.signal.aborted || Date.now() >= admission.token.expires_at) throw new Error('request_expired');
+      if (result.worker_delivery) {
+        // The delivery callback may wait. Recheck the admitted parent and the
+        // exact newly written child after it returns, before COMMIT. All rows
+        // and parent modes are preheld; no second connection is opened here.
+        const status=await adminAccessState(tx,admission);
+        const [live]=await tx`SELECT t.token_id FROM swarm.agent_tokens t
+          JOIN swarm.renewal_grants g USING(renewal_grant_id)
+          JOIN swarm.agent_principals p ON p.principal_id=t.principal_id AND g.principal_id=t.principal_id AND g.run_id=t.run_id AND g.workspace_id=p.workspace_id
+          JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=p.principal_id
+          JOIN swarm.devices d ON d.device_id=r.device_id
+          JOIN swarm.workspaces w ON w.workspace_id=p.workspace_id
+          JOIN swarm.memberships m ON m.workspace_id=p.workspace_id AND m.user_id=p.owner_user_id
+          WHERE t.token_id=${result.worker_delivery.credential_id}::uuid AND t.revoked_at IS NULL AND t.expires_at>clock_timestamp()
+            AND p.owner_user_id=${admission.token.owner_user_id}::uuid AND p.revoked_at IS NULL
+            AND r.ended_at IS NULL AND d.revoked_at IS NULL AND m.revoked_at IS NULL AND w.archived_at IS NULL
+            AND g.revoked_at IS NULL AND g.connection_expired_at IS NULL
+            AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
+            AND (g.kind='standing' OR g.horizon_expires_at>clock_timestamp())
+            AND swarm.admin_child_live(p.parent_admin_grant_id,p.workspace_id)
+            AND swarm.admin_child_live(t.parent_admin_grant_id,p.workspace_id)`;
+        if (!status.known || !status.active || !live) throw new Error('admin_authority_changed');
+      }
       return result;
-    });
+    }));
     return Date.now() < admission.token.expires_at && !deadline.signal.aborted ? outcome.result : { status: 401, body: { error: 'credential_expired' } };
   } catch (error) {
     try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication, undefined, adminFailureRetryable(error)); }); }

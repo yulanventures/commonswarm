@@ -1,3 +1,4 @@
+import { planLocalOperation, lockLocalAuthPlan } from '../_shared/agent-auth.ts';
 import { isVerifiedAdminAdmission } from './admin-admission.ts';
 import { prepareAdminRoutine, applyAdminRoutine, type AdminWorkerDelivery } from './admin-routine.ts';
 import { adminWorkerChannelConnection, type AdminWorkerChannel } from './admin-worker-delivery.ts';
@@ -136,8 +137,17 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
   const auditKind: AdminAuditKind = operation ?? (adminRecord(input.command)?.kind === 'admin_read_metadata' ? 'read' : 'action');
   let boundCapabilities: string[] = [];
   const requestId = typeof input.command_id === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(input.command_id) ? input.command_id : crypto.randomUUID();
+  const plannedRoutine=token ? parseAdminRoutineCommand(adminRecord(input.command)) : null;
+  const recipients=plannedRoutine?.kind==='admin_invite_member' ? [plannedRoutine.recipient_user_id]
+    : plannedRoutine?.kind==='admin_issue_agent_invitation' ? [plannedRoutine.intended_owner_user_id] : [];
+  const localPlan=token ? await planLocalOperation(tx,{
+    workspace:plannedRoutine?.workspace_id,actor:token.owner_user_id,allWorkspace:plannedRoutine!==null,
+    principalMode:plannedRoutine?.kind==='admin_revoke_seat' ? 'update':'share',sessionMode:'share',
+    hostedMode:plannedRoutine?.kind==='admin_revoke_seat' ? 'update':'share',
+    admin:{owner:token.owner_user_id,grant:token.admin_grant_id,recipients},
+  }) : null;
   if (oauth) {
-    const status = await adminAccessState(tx, oauth);
+    const status = await adminAccessState(tx, oauth, localPlan ?? undefined);
     if (!status.known) {
       await adminSecurityFailure(tx, 'unknown_admin_credential');
       return { result: errorResult(401, 'unauthenticated') };
@@ -204,7 +214,7 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
   const account = accounts[0];
   if (!account) return await finish(errorResult(403, 'forbidden'));
   const clock = await tx<{ now: number }[]>`SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::float8 AS now`;
-  const now = clock[0]!.now;
+  let now = clock[0]!.now;
   let state = account.projection ?? emptyAdminAccount();
   const receipts = await tx<(Omit<AdminConsent, 'expires_at' | 'consumed_at'> & { expires_at: Date; consumed_at: Date | null })[]>`SELECT * FROM swarm.admin_consents WHERE owner_user_id = ${owner}::uuid`;
   for (const c of receipts) state.consents[c.consent_receipt_id] = { ...c, expires_at: new Date(c.expires_at).getTime(), consumed_at: c.consumed_at === null ? null : new Date(c.consumed_at).getTime() };
@@ -224,9 +234,10 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
   // both hold SHARE and wait to raise it, nor lock two workspaces in opposite orders. As in
   // currentRights, only workspaces where the owner has a membership row are locked, except an
   // admin_create_workspace target: admin-routine.ts:48 locks an existing one (workspace_exists).
-  const routineTarget = token ? parseAdminRoutineCommand(raw) : null;
+  const routineTarget = plannedRoutine;
   const routineGrant = routineTarget ? state.grants[token!.admin_grant_id] : undefined;
   const createTarget = routineTarget?.kind === 'admin_create_workspace' ? routineTarget.workspace_id : null;
+  if (localPlan) await lockLocalAuthPlan(tx,localPlan);
   if (routineTarget && routineGrant) await tx`
     SELECT w.workspace_id FROM swarm.workspaces w
     WHERE w.workspace_id = ANY(${[routineTarget.workspace_id,
@@ -234,6 +245,12 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
       AND (w.workspace_id = ${createTarget}::uuid OR EXISTS (SELECT 1 FROM swarm.memberships m
         WHERE m.workspace_id = w.workspace_id AND m.user_id = ${owner}::uuid))
     ORDER BY w.workspace_id FOR NO KEY UPDATE OF w`;
+  if (localPlan) {
+    const status=await adminAccessState(tx,oauth!,localPlan);
+    if (!status.known || !status.active) return await finish(errorResult(403,'grant_inactive'));
+    const [fresh]=await tx<{now:number}[]>`SELECT floor(extract(epoch FROM clock_timestamp())*1000)::float8 AS now`;
+    now=fresh!.now;
+  }
   if (token) {
     const bound = state.grants[token.admin_grant_id];
     if (!bound || bound.owner_user_id !== token.owner_user_id || bound.admin_identity_id !== token.admin_identity_id ||
@@ -373,6 +390,7 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
   // Refresh decision time after the existing account/parent/workspace waits.
   const [routineClock]=await tx<{now:number}[]>`SELECT floor(extract(epoch FROM clock_timestamp())*1000)::float8 AS now`;
   context.now=routineClock!.now;
+  now=context.now;
   const routineContext = routineCommand && routineRefusal === null ? await prepareAdminRoutine(tx, routineCommand, state, context, oauth && authentication.kind === 'oauth' ? adminWorkerChannelConnection(authentication.worker_channel, oauth) : null) : null;
   let refusal: string | null = !wireValid ? 'invalid_request' : command === null ? actor.kind === 'delegated_admin' ? 'human_confirmation_required' : 'invalid_request' : routineRefusal;
   let allowance: Awaited<ReturnType<typeof charge>> | null = null;
@@ -388,6 +406,17 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
     // counters; SQL atomically aggregates connection/account/workspace buckets.
     for (const bucket of allowance.buckets) state.rate_buckets[bucket.key] = { hour_start: bucket.hour_start, attempts: bucket.attempts - 1 };
     if (!allowance.allowed) refusal = 'rate_limited';
+  }
+  if (oauth && localPlan) {
+    // Rate buckets and routine target reads can wait. Revalidate after the last
+    // wait, retaining the same verifier and current SQL rights boundary.
+    const status=await adminAccessState(tx,oauth,localPlan);
+    const [fresh]=await tx<{now:number}[]>`SELECT floor(extract(epoch FROM clock_timestamp())*1000)::float8 AS now`;
+    now=fresh!.now; context.now=now;
+    if (routineContext) routineContext.now=now;
+    if (!status.known || !status.active || !grant || grant.state!=='active' || grant.expires_at<=now || grant.refresh_deadline<=now || token!.expires_at<=now)
+      refusal='grant_inactive';
+    else if (!await currentRights(tx,owner,grant.workspace_ids.filter(w=>!grant.withdrawn_workspace_ids.includes(w)),token!.scope_names)) refusal='current_rights_required';
   }
   // Verified malformed/refused requests still produce an account action record,
   // without resolving targets outside the authenticated account.
@@ -463,6 +492,24 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
   }
   await tx`INSERT INTO swarm.admin_command_results(owner_user_id, actor_key, command_id, request_digest, response) VALUES (${owner}::uuid, ${actorKey}, ${commandId}, ${requestDigest}, ${tx.json(result as unknown as postgres.JSONValue)})`;
   const outcome = await finish(result, decision.events.map(event => event.event_id));
+  if (oauth && routineCommand && decision.ok) {
+    // INSERT/FK/ledger/audit waits can outlive an earlier proof. These are
+    // reacquisitions of the already held caller U/account/parent, so the
+    // intended new child is not mistaken for external discovery drift.
+    const status=await adminAccessState(tx,oauth);
+    if (!status.known || !status.active || !await currentRights(tx,owner,grant!.workspace_ids.filter(w=>!grant!.withdrawn_workspace_ids.includes(w)),token!.scope_names))
+      throw new Error('admin_authority_changed');
+    if (routineContext?.target_credential) {
+      const [live]=await tx`SELECT renewal_grant_id FROM swarm.renewal_grants
+        WHERE renewal_grant_id=${routineContext.target_credential.renewal_grant_id}::uuid
+          AND revoked_at IS NULL AND connection_expired_at IS NULL
+          AND (connection_expires_at IS NULL OR connection_expires_at>clock_timestamp())
+          AND (kind='standing' OR horizon_expires_at>clock_timestamp())`;
+      // Successful revocations deliberately terminate their target family.
+      if (!live && !['admin_revoke_seat','admin_revoke_seat_credential'].includes(routineCommand.kind))
+        throw new Error('admin_authority_changed');
+    }
+  }
   return { ...outcome, ...(workerDelivery ? { worker_delivery: workerDelivery } : {}) };
 }
 

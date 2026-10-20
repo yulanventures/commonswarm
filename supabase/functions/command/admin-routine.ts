@@ -198,6 +198,8 @@ export async function prepareAdminRoutine(
       for (
         const key of [
           "kind",
+          "connection_expires_at",
+          "connection_expired_at",
           "last_used_at",
           "horizon_expires_at",
           "max_successors",
@@ -223,7 +225,7 @@ export async function prepareAdminRoutine(
               : ""),
         ),
         worker_scope_names: row.scopes as string[],
-        expires_at: row.expires_at.getTime(),
+        expires_at: Math.min(row.expires_at.getTime(),row.connection_expires_at instanceof Date ? row.connection_expires_at.getTime():Infinity),
         horizon_expires_at: row.horizon_expires_at?.getTime() ?? null,
         bearer_seconds:
           state.routine?.credentials[row.token_id]?.bearer_seconds ??
@@ -232,7 +234,7 @@ export async function prepareAdminRoutine(
         successors_used: Number(row.successors_used),
         kind: row.kind as "standing" | "timeboxed",
         revoked_at: row.revoked_at?.getTime() ??
-          (row.lineage_revoked || row.grant_revoked_at ? ctx.now : null),
+          (row.lineage_revoked || row.grant_revoked_at || row.connection_expired_at ? ctx.now : null),
         first_used_at: row.first_used_at?.getTime() ?? null,
         superseded: row.superseded === true,
         suspended: row.suspension_active === true && !(row.kind==='standing'
