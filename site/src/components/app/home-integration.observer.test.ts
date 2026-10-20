@@ -855,7 +855,7 @@ test('a stale self-role save ends on sign-in, and the email names Save; removal 
   assert.deepEqual(stored, ['commonswarm.pending-member-selection']);
   assert.equal(closed.includes('people'), true);
   await runInContext('emailReauth({currentTarget:{disabled:false}})', context);
-  assert.equal(shown.errorText, REMOVE_SIGN_IN_EMAIL);
+  assert.equal<string>(shown.errorText, REMOVE_SIGN_IN_EMAIL);
   assert.equal(shown.errorText.includes('Save'), false);
   focusLog.length = 0; closed.length = 0;
   roleError = Object.assign(new Error('ignored'), { code: 'last_owner' });

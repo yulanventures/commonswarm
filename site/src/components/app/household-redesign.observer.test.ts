@@ -380,7 +380,7 @@ test("server-confirmed key loss offers removal and a new key but no turn-off alt
 function creationFixture(outcome: "committed" | "refused" | "unknown", existing = false, storage = new Map<string, string>()) {
   const events: string[] = [], commands: any[] = [];
   const radios = [{ value: "shared", checked: false, disabled: false }, { value: "personal", checked: false, disabled: false }];
-  const warning = { textContent: "" }, receipt = { hidden: true, textContent: "", dataset: {} };
+  const warning = { textContent: "" }, receipt: { hidden: boolean; textContent: string; dataset: { setupWorkspaceId?: string } } = { hidden: true, textContent: "", dataset: {} };
   const session = { user: { id: "person" } };
   const ctx: any = {
     homeRoute: {view:"new"}, routeHref: () => "?w=workspace", focusHomeView: () => {},
