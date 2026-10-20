@@ -35,7 +35,7 @@ export function homeConnectionAccess(row: Pick<HomeMapAgent, "principalId" | "ow
   return family.find(item => homeConnectionTokenMatches(row, item)) ?? family[0];
 }
 
-/** Token revocation, use and key mutations belong only to the actual selected token. */
+/** Token revocation and key mutations belong only to the actual selected token. */
 export function homeConnectionTokenMatches(row: Pick<HomeMapAgent, "work" | "transport">, access: AgentAccessStatus): boolean {
   return (row.work?.facts.transport ?? row.transport) === "hosted_mcp" ||
     (!row.work ? connectionUuid(access.tokenId) : connectionUuid(row.work.facts.token_id) && row.work.facts.token_id === access.tokenId);
@@ -108,7 +108,7 @@ export function mapHomePeople(input: HomePeopleInput): HomePeople {
         ...(Object.hasOwn(access, "connectionExpiresAt") ? { connectionExpiresAt: access.connectionExpiresAt } : {}),
         ...(Object.hasOwn(access, "connectionExpiredAt") ? { connectionExpiredAt: access.connectionExpiredAt } : {}),
         kind: access.grantKind, horizonExpiresAt: access.horizonExpiresAt, boundDeviceId: access.boundDeviceId,
-        lastUsedAt: homeConnectionTokenMatches(row, access) ? access.lastUsedAt : null, issuedAt: access.issuedAt, newHostAt: access.newHostAt,
+        lastUsedAt: access.lastUsedAt, issuedAt: access.issuedAt, newHostAt: access.newHostAt,
         suspendedAt: access.suspendedAt, revokedAt: access.grantRevokedAt ?? (homeConnectionTokenMatches(row, access) ? access.revokedAt : null) } : null,
       serverWork: work?.work, lastActionAt: work?.facts.last_activity_at,
       doingTodo: work?.facts.doing ? { title: work.facts.doing.title ?? "a to-do", since: work.facts.doing.since } : null,

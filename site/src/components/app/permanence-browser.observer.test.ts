@@ -53,7 +53,7 @@ function installConnectionFixture() {
   if (scenario === "dated") grant.connection_expires_at = "2034-01-01T00:00:00Z";
   if (scenario === "elapsed-fence") grant.connection_expired_at = before;
   if (scenario === "home-mismatch") { grant.renewal_grant_id = hostedId; grant.suspended_at = recent; grant.revoked_at = recent; grant.connection_expires_at = before; }
-  if (scenario === "home-matched-ended") grant.connection_expires_at = before;
+  if (scenario === "home-matched-ended" || ["renewal", "rotation"].includes(scenario)) grant.connection_expires_at = before;
   if (scenario === "rotation" || scenario === "rotation-suspended") { grant.token_revoked_at = recent; if (scenario === "rotation-suspended") grant.suspended_at = recent; }
   const connection = { grant_id: hostedId, client_id: "https://connector.example.test",
     home_workspace_id: workspace, selected_workspace_ids: [workspace],
@@ -129,6 +129,8 @@ function installConnectionFixture() {
           last_activity_at: recent, messages_waiting_since: null, doing: null, working_on: null,
           ...(Object.hasOwn(f.grant, "connection_expires_at") ? { connection_expires_at: f.grant.connection_expires_at } : {}),
           ...(Object.hasOwn(f.grant, "connection_expired_at") ? { connection_expired_at: f.grant.connection_expired_at } : {}) } };
+        // Existing People rows separate stale roster dates from canonical permanent Home.
+        if (["renewal", "rotation"].includes(scenario) && f.grant.connection_expires_at === before) status.facts.connection_expires_at = null;
         if (home) {
           const facts = status.facts as any;
           facts.connection = scenario === "home-ended" ? "key_ended" : scenario === "home-paused" ? "paused"
@@ -253,6 +255,16 @@ async function observeConnectionApp() {
     if (["ended", "elapsed-fence", "hosted-ended"].includes(f.scenario))
       assert(editor().textContent.includes("Connection ended"), "terminal policy not shown");
     if (["rotation", "rotation-suspended"].includes(f.scenario)) assert(!one("[data-people-detail] [data-revoke-grant]"), "old token supplied a key mutation target");
+    if (["renewal", "rotation"].includes(f.scenario)) {
+      const detail = one("[data-people-detail]");
+      assert(editor().textContent.includes("Stays connected until you remove it") && !field("[data-end-date-toggle]").checked, "stale roster replaced permanent Home policy");
+      assert(!detail.textContent.includes("ENDED") && detail.textContent.includes("Uses a key to connect."), "stale roster ended an active connection");
+      assert(detail.textContent.includes("Last used:") && !detail.textContent.includes("Last used: never"), "family Last used vanished after rotation");
+      if (f.scenario === "renewal") {
+        assert(one("[data-people-detail] [data-revoke-grant]"), "stale roster removed a live key action");
+        assert(detail.textContent.includes("Key ID: " + f.grant.token_id), "matching key ID is not the actual token");
+      } else assert(!detail.textContent.includes("Key ID:"), "rotated family mislabeled an old token as the key");
+    }
     if (f.scenario === "confirmation") {
       const turnOff = one("[data-people-detail] [data-revoke-grant]");
       assert(turnOff, "live key has no turn-off action");

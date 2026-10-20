@@ -4997,7 +4997,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             connection: agent.work?.facts.connection,
             ...(Object.keys(policy).length ? { connectionPolicy: policy } : {}),
             grant: grant ? { ...grant, kind: grant.grantKind, horizonExpiresAt: grant.horizonExpiresAt, boundDeviceId: grant.boundDeviceId,
-              lastUsedAt: tokenMatches ? grant.lastUsedAt : null, issuedAt: grant.issuedAt, newHostAt: grant.newHostAt,
+              lastUsedAt: grant.lastUsedAt, issuedAt: grant.issuedAt, newHostAt: grant.newHostAt,
               suspendedAt: grant.suspendedAt, revokedAt: grant.grantRevokedAt ?? (tokenMatches ? grant.revokedAt : null) } : null }, now);
           const presence = classifyAgentPresence(agent.presence ?? null);
           const receive = agentStatus({ transport: agent.transport, turnOnly: agent.turnOnly, presence: agent.presence, own, ownerFirstName: ownerName?.trim().split(/\s+/)[0] ?? null }).receive;
@@ -5006,7 +5006,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           const wakeMark = wakePathMark(agent.oldestUnobservedAt); if (wakeMark) technical.push(wakeMark);
           let grantRisk: string | null = null;
           if (grant) {
-            if (tokenMatches) technical.push(`Key ID: ${grant.tokenId}`, `Last used: ${grant.lastUsedAt === null ? "never" : formatTime(grant.lastUsedAt).relative}`);
+            if (tokenMatches) technical.push(`Key ID: ${grant.tokenId}`);
+            technical.push(`Last used: ${grant.lastUsedAt === null ? "never" : formatTime(grant.lastUsedAt).relative}`);
             technical.push(connectionPolicyCopy(agent.work ? policy : {}, renewalConnectionLive(grant)));
             const risk = grantRiskBadge({ ...grant, ...familyPolicy, kind: grant.grantKind, horizonExpiresAt: grant.horizonExpiresAt,
               boundDeviceId: grant.boundDeviceId, lastUsedAt: grant.lastUsedAt, issuedAt: grant.issuedAt,
