@@ -96,17 +96,17 @@ try {
   // tests/p1-server/renewal-last-use.test.ts:70-80). T0 gets its first use from the real read route (a token is never
   // born used, SWARM_TOKEN_FIRST_USE_PRESET). Unused expired permanent roots instead authenticate a renewal before issuance.
   const seat = async (name, use=true, boundDevice=undefined, kind='standing', options={}) => {
-    const principal = id(), device = id(), run = id(), task = id(), lineage = id(), grant = id(), t0 = id();
+    const principal = options.principal ?? id(), device = id(), run = id(), task = id(), lineage = id(), grant = id(), t0 = id();
     const raw = mintRaw(), hash = await hashOf(raw), workspace = options.workspace ?? W;
     await observer.begin(async (tx) => {
       await tx`INSERT INTO swarm.devices (device_id, user_id, label) VALUES (${device}::uuid, ${options.deviceOwner ?? owner}::uuid, ${`r12b-${name}`})`;
-      await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name, parent_admin_grant_id) VALUES (${principal}::uuid, ${workspace}::uuid, ${owner}::uuid, ${`r12b-${name}-${tag}`}, ${options.principalParent ?? null}::uuid)`;
+      if(!options.principal) await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name, parent_admin_grant_id) VALUES (${principal}::uuid, ${workspace}::uuid, ${owner}::uuid, ${`r12b-${name}-${tag}`}, ${options.principalParent ?? null}::uuid)`;
       await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id) VALUES (${run}::uuid, ${principal}::uuid, ${device}::uuid)`;
       await tx`INSERT INTO swarm.renewal_grants (renewal_grant_id, workspace_id, principal_id, run_id, kind, max_successors, successors_used,
-        horizon_expires_at, bound_device_id, created_by)
+        horizon_expires_at, bound_device_id, created_by, created_at)
         VALUES (${grant}::uuid, ${workspace}::uuid, ${options.familyPrincipal ?? principal}::uuid, ${options.familyRun ?? run}::uuid, ${kind==='timeboxed'?'timeboxed':'standing'}, ${kind==='timeboxed'?100:null}, 0,
           ${kind==='timeboxed'?new Date(Date.now()+86400000):null}::timestamptz,
-          ${boundDevice===undefined ? device:boundDevice}::uuid, ${options.creator ?? owner}::uuid)`;
+          ${boundDevice===undefined ? device:boundDevice}::uuid, ${options.creator ?? owner}::uuid, ${options.createdAt ?? new Date()}::timestamptz)`;
       await tx`INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, task_id, epoch, scopes, token_hash, expires_at, lineage_id,
         renewal_grant_id, parent_admin_grant_id, recipient_connection_id)
         VALUES (${t0}::uuid, ${principal}::uuid, ${run}::uuid, ${task}::uuid, 1, ${tx.json(['post_signal'])}::jsonb, ${hash},
@@ -613,6 +613,68 @@ try {
       const [row]=await tx`SELECT swarm_read.home_overview() AS value`;return row.value;
     });
     check('current local overview positive is live',connectionFrom(await overviewAs(owner))==='live');
+    // Reuse the real-schema seat and normal-role readers. No selection/auth mock.
+    const rosterAs=async user=>observer.begin(async tx=>{
+      await tx`SET TRANSACTION READ ONLY`;
+      await tx`SET LOCAL ROLE authenticated`;
+      await tx`SELECT set_config('request.jwt.claims',${JSON.stringify({sub:user,role:'authenticated'})},true)`;
+      return await tx`SELECT * FROM swarm_read.renewal_grant_roster(${readWorkspace}::uuid)`;
+    });
+    const scoped=async token=>observer.begin(async tx=>{
+      await tx`SET TRANSACTION READ ONLY`;
+      await tx`SET LOCAL ROLE swarm_read`;
+      return await tx`SELECT * FROM swarm_read.renewal_grant_for_token(${readWorkspace}::uuid,${token}::uuid)`;
+    });
+    for(const variant of ['elapsed','dead-run','dead-device','legacy','silent-renewal','both-revoked','none-eligible','newer-eligible','dead-token']) {
+      const old=await readSeat(`mixed-${variant}`,true,undefined,variant==='legacy'?'no-family':'standing',{createdAt:new Date(Date.now()-86400000)});
+      const newer=await readSeat(`mixed-new-${variant}`,true,undefined,'standing',{principal:old.principal});
+      if(variant==='elapsed' || variant==='legacy') await observer`UPDATE swarm.renewal_grants
+        SET connection_expires_at=clock_timestamp()-interval '1 second' WHERE renewal_grant_id=${newer.grant}::uuid`;
+      if(['dead-run','silent-renewal','none-eligible','dead-token'].includes(variant)) await observer`UPDATE swarm.agent_runs SET ended_at=clock_timestamp() WHERE run_id=${newer.run}::uuid`;
+      if(variant==='dead-device') await observer`UPDATE swarm.devices SET revoked_at=clock_timestamp() WHERE device_id=${newer.device}::uuid`;
+      if(variant==='legacy' || variant==='none-eligible') await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp() WHERE renewal_grant_id=${old.grant}::uuid`;
+      if(variant==='silent-renewal') await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${old.t0}::uuid`;
+      if(variant==='both-revoked') await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp() WHERE renewal_grant_id IN (${old.grant}::uuid,${newer.grant}::uuid)`;
+      if(variant==='dead-token') await observer`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,task_id,epoch,scopes,token_hash,
+        issued_at,expires_at,lineage_id,renewal_grant_id,revoked_at)
+        SELECT ${id()}::uuid,principal_id,run_id,task_id,epoch,scopes,${await hashOf(mintRaw())},clock_timestamp()+interval '1 second',
+          expires_at,lineage_id,renewal_grant_id,clock_timestamp() FROM swarm.agent_tokens WHERE token_id=${old.t0}::uuid`;
+      const chosen=['both-revoked','none-eligible','newer-eligible'].includes(variant)?newer:old;
+      const before=await snapshot();
+      const home=await overviewAs(owner),roster=await rosterAs(owner);
+      const facts=home.workspaces.find(w=>w.workspace_id===readWorkspace)?.people.flatMap(p=>p.agents)
+        .find(a=>a.principal_id===old.principal)?.status.facts;
+      const row=roster.find(r=>r.principal_id===old.principal);
+      check(`mixed-${variant}-selected`,facts?.connection===(variant==='both-revoked'?'key_off':variant==='none-eligible'?'key_ended':'live')
+        && facts?.token_id===chosen.t0 && facts?.renewal_grant_id===(variant==='legacy'?null:chosen.grant)
+        && (variant==='legacy' ? !row && !Object.hasOwn(facts,'connection_expires_at') && !Object.hasOwn(facts,'connection_expired_at')
+          : row?.renewal_grant_id===chosen.grant && row?.token_id===chosen.t0));
+      const tokenRows=await scoped(newer.t0);
+      check(`mixed-${variant}-scoped`,tokenRows[0]?.renewal_grant_id===newer.grant
+        && (variant!=='elapsed' && variant!=='legacy' || tokenRows[0]?.connection_expired_at!==null));
+      check(`mixed-${variant}-no-write`,JSON.stringify(before)===JSON.stringify(await snapshot()));
+      const control=await readAs(old.raw,readWorkspace);
+      check(`mixed-${variant}-bearer`,['silent-renewal','both-revoked','none-eligible'].includes(variant)
+        ? control.status===401 || control.status===403 : control.status===200);
+      if(variant==='silent-renewal') check('mixed-silent-renewal-real-renew',credential(await readRenew(old.raw,id()))!==null);
+      if(['elapsed','dead-run','dead-device','legacy','silent-renewal','both-revoked','none-eligible','dead-token'].includes(variant))
+        check(`mixed-${variant}-dead-bearer`,[401,403].includes((await readAs(newer.raw,readWorkspace)).status));
+    }
+    check('mixed-outsider-roster-empty',(await rosterAs(outsider)).length===0);
+    const member=id();
+    await observer`INSERT INTO auth.users(id,aud,role,email) VALUES(${member}::uuid,'authenticated','authenticated',${member+'@example.test'})`;
+    await observer`INSERT INTO swarm.users(user_id,display_name) VALUES(${member}::uuid,'Mixed member')`;
+    await observer`INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES(${readWorkspace}::uuid,${member}::uuid,'member')`;
+    const memberRows=await rosterAs(member);
+    check('mixed-member-roster-visible',memberRows.some(r=>r.renewal_grant_id===readModels.grant));
+    await observer`UPDATE swarm.memberships SET revoked_at=clock_timestamp() WHERE workspace_id=${readWorkspace}::uuid AND user_id=${member}::uuid`;
+    check('mixed-revoked-member-roster-empty',(await rosterAs(member)).length===0);
+    const [privateAcl]=await observer`SELECT pg_get_userbyid(proowner)='swarm_admin' AND NOT prosecdef
+      AND NOT has_function_privilege('authenticated',oid,'EXECUTE') AND NOT has_function_privilege('anon',oid,'EXECUTE')
+      AND NOT has_function_privilege('swarm_read',oid,'EXECUTE') AND NOT has_function_privilege('swarm_command',oid,'EXECUTE') AS ok
+      FROM pg_proc WHERE oid='swarm_read.local_connection_selection(uuid,uuid,uuid)'::regprocedure`;
+    check('mixed-selector-private-invoker',privateAcl.ok);
+
     // The same observable connection contract at both public read boundaries.
     // The regression is an expired virgin permanent root falsely shown dead.
     // Pair the live rows with one-gate denials at both installed read owners;

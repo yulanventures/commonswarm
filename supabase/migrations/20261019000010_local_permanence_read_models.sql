@@ -1,3 +1,79 @@
+-- Pure read selection shared by the two human projections. No auth/use calls.
+-- Only the existing SECURITY DEFINER readers (owned by swarm_admin) call it.
+CREATE OR REPLACE FUNCTION swarm_read.local_connection_selection(
+ p_workspace_id uuid,p_principal_id uuid,p_owner_user_id uuid)
+RETURNS TABLE(selected_renewal_grant_id uuid,selected_token_id uuid,is_live boolean)
+LANGUAGE sql VOLATILE SECURITY INVOKER SET search_path=pg_catalog AS $$
+ WITH eligible_tokens AS MATERIALIZED (
+       SELECT t.token_id,t.renewal_grant_id,t.issued_at FROM swarm.agent_tokens t
+        JOIN swarm.agent_principals p ON p.principal_id=t.principal_id
+        JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=t.principal_id
+        JOIN swarm.devices d ON d.device_id=r.device_id
+        LEFT JOIN swarm.renewal_grants g ON g.renewal_grant_id=t.renewal_grant_id
+        JOIN swarm.memberships m ON m.workspace_id=p.workspace_id AND m.user_id=p.owner_user_id
+        JOIN swarm.workspaces w ON w.workspace_id=p.workspace_id
+        WHERE p.workspace_id=p_workspace_id AND p.principal_id=p_principal_id
+          AND p.owner_user_id=p_owner_user_id AND p.transport='local' AND p.revoked_at IS NULL AND NOT p.turn_only
+          AND t.revoked_at IS NULL AND NOT t.surrender_only AND r.ended_at IS NULL AND d.revoked_at IS NULL
+          AND d.user_id=p.owner_user_id AND m.revoked_at IS NULL AND w.archived_at IS NULL
+          AND (t.renewal_grant_id IS NULL OR g.renewal_grant_id IS NOT NULL AND g.revoked_at IS NULL
+            AND NOT (g.suspension_active AND g.kind<>'standing')
+            AND g.connection_expired_at IS NULL AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
+            AND ROW(g.principal_id,g.run_id,g.workspace_id,g.created_by)=ROW(t.principal_id,t.run_id,p.workspace_id,p.owner_user_id)
+            AND (g.bound_device_id IS NULL OR g.bound_device_id=d.device_id))
+          AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY[t.parent_admin_grant_id,p.parent_admin_grant_id]) parent(id)
+          WHERE parent.id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM swarm.admin_grants a
+            JOIN swarm.memberships am ON am.workspace_id=p.workspace_id AND am.user_id=a.owner_user_id
+            JOIN swarm.workspaces aw ON aw.workspace_id=am.workspace_id
+            LEFT JOIN swarm.admin_created_workspaces ac ON ac.workspace_id=p.workspace_id
+            WHERE a.grant_id=parent.id AND a.state='active' AND a.revoked_at IS NULL
+              AND a.expires_at>clock_timestamp() AND a.refresh_deadline>clock_timestamp()
+              AND am.revoked_at IS NULL AND am.role IN ('owner','admin') AND aw.archived_at IS NULL
+              AND NOT p.workspace_id=ANY(a.withdrawn_workspace_ids)
+              AND (p.workspace_id=ANY(a.workspace_ids) OR ac.grant_id=a.grant_id
+                OR a.workspace_selector='owned_and_selected' AND am.role='owner')
+              AND (ac.grant_id IS DISTINCT FROM a.grant_id OR
+                'seats:create'=ANY(ac.scope_names) AND a.created_workspace_policy->'scope_names' ? 'seats:create')
+              AND jsonb_typeof(t.scopes)='array' AND NOT EXISTS (
+                SELECT 1 FROM jsonb_array_elements_text(t.scopes) s(scope) WHERE NOT s.scope=ANY(a.worker_scope_ceiling))))
+          AND NOT EXISTS (SELECT 1 FROM swarm.revocation_tombstones z WHERE (z.kind,z.target_id) IN
+            (('token',t.token_id),('principal',p.principal_id),('run',r.run_id),('device',d.device_id),
+             ('membership',p.owner_user_id),('lineage',t.lineage_id),('family',t.lineage_id),('renewal_grant',t.renewal_grant_id)))
+          AND (t.expires_at>clock_timestamp() OR (g.kind='standing' AND (t.first_used_at IS NOT NULL
+          OR (t.first_used_at IS NULL AND t.predecessor_token_id IS NULL
+            AND g.horizon_expires_at IS NULL AND g.max_successors IS NULL)
+          OR EXISTS (
+          SELECT 1 FROM swarm.agent_tokens predecessor WHERE predecessor.token_id=t.predecessor_token_id
+            AND predecessor.first_used_at IS NOT NULL AND predecessor.revoked_at IS NULL AND NOT predecessor.surrender_only
+            AND ROW(predecessor.principal_id,predecessor.run_id,predecessor.renewal_grant_id,predecessor.lineage_id,predecessor.parent_admin_grant_id)
+              IS NOT DISTINCT FROM ROW(t.principal_id,t.run_id,t.renewal_grant_id,t.lineage_id,t.parent_admin_grant_id)
+            AND NOT EXISTS (SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='token' AND z.target_id=predecessor.token_id)))
+          AND NOT EXISTS (SELECT 1 FROM swarm.agent_tokens child WHERE child.predecessor_token_id=t.token_id
+            AND child.revoked_at IS NULL AND child.first_used_at IS NOT NULL)))
+ ), choices AS (
+  SELECT g.renewal_grant_id,t.token_id,(e.token_id IS NOT NULL) AS eligible,
+    (g.revoked_at IS NULL) AS unrevoked,g.created_at
+  FROM swarm.renewal_grants g
+  LEFT JOIN LATERAL (
+   SELECT candidate.token_id FROM swarm.agent_tokens candidate
+   LEFT JOIN eligible_tokens usable ON usable.token_id=candidate.token_id
+   WHERE candidate.renewal_grant_id=g.renewal_grant_id
+   ORDER BY (usable.token_id IS NOT NULL) DESC,candidate.issued_at DESC,candidate.token_id DESC LIMIT 1
+  ) t ON true
+  LEFT JOIN eligible_tokens e ON e.token_id=t.token_id
+  WHERE g.workspace_id=p_workspace_id AND g.principal_id=p_principal_id AND g.created_by=p_owner_user_id
+  UNION ALL
+  SELECT NULL,e.token_id,true,true,e.issued_at FROM eligible_tokens e WHERE e.renewal_grant_id IS NULL
+ )
+ SELECT c.renewal_grant_id,c.token_id,c.eligible FROM choices c
+ ORDER BY c.eligible DESC,(c.renewal_grant_id IS NOT NULL) DESC,c.unrevoked DESC,
+   c.created_at DESC,c.renewal_grant_id DESC,c.token_id DESC LIMIT 1
+$$;
+ALTER FUNCTION swarm_read.local_connection_selection(uuid,uuid,uuid) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm_read.local_connection_selection(uuid,uuid,uuid)
+ FROM PUBLIC,anon,authenticated,swarm_read,swarm_command;
+
 -- v10 forward read truth. 00009 is reserved for hosted snapshot compatibility.
 -- Keep this additive schema and a chosen-date-enforcing runtime on rollback.
 -- e565 runtime alone is not a safe rollback floor.
@@ -116,6 +192,19 @@ BEGIN
    FROM swarm.household_todos t WHERE t.workspace_id = workspace.workspace_id
   ), agent_facts AS (
    SELECT p.*, connection.kind AS connection,
+    CASE WHEN p.transport='hosted_mcp' AND hosted_policy.grant_id IS NOT NULL THEN
+      jsonb_build_object('connection_expires_at',hosted_policy.connection_expires_at,
+        'connection_expired_at',coalesce(hosted_policy.connection_expired_at,
+          CASE WHEN hosted_policy.connection_expires_at<=clock_timestamp() THEN hosted_policy.connection_expires_at END))
+    WHEN p.transport='local' AND local_policy.renewal_grant_id IS NOT NULL THEN
+      jsonb_build_object('renewal_grant_id',local_policy.renewal_grant_id,
+        'connection_expires_at',local_policy.connection_expires_at,
+        'connection_expired_at',coalesce(local_policy.connection_expired_at,
+          CASE WHEN local_policy.connection_expires_at<=clock_timestamp() THEN local_policy.connection_expires_at END))
+        || CASE WHEN selected.selected_token_id IS NOT NULL THEN jsonb_build_object('token_id',selected.selected_token_id) ELSE '{}'::jsonb END
+    WHEN p.transport='local' AND selected.selected_token_id IS NOT NULL THEN
+      jsonb_build_object('renewal_grant_id',NULL,'token_id',selected.selected_token_id)
+    ELSE '{}'::jsonb END AS connection_policy,
     -- Raw signals are safe here: last_activity_at exposes only a time, no content or signal id.
     greatest(presence.last_command_at,
      (SELECT max(s.created_at) FROM swarm.signals s WHERE s.workspace_id = p.workspace_id AND s.from_kind = 'agent' AND s.from_principal = p.principal_id),
@@ -143,65 +232,35 @@ BEGIN
     FROM swarm_read.signals s WHERE s.workspace_id = p.workspace_id AND s.from_kind = 'agent' AND s."from" = p.principal_id
      AND s.kind = 'working-on' AND s.until > read_at ORDER BY s.created_at DESC, s.id LIMIT 1
    ) working ON true
+   LEFT JOIN LATERAL swarm_read.local_connection_selection(p.workspace_id,p.principal_id,p.owner_user_id)
+    selected ON p.transport='local'
+   LEFT JOIN swarm.renewal_grants local_policy
+    ON local_policy.renewal_grant_id=selected.selected_renewal_grant_id
+   -- principal_id is UNIQUE on seats: policy and status share this same grant.
+   LEFT JOIN LATERAL (
+    SELECT g.*,seat.revoked_at AS seat_revoked_at,binding.revoked_at AS binding_revoked_at
+    FROM swarm.hosted_mcp_seats seat
+    JOIN swarm.hosted_mcp_grant_workspaces binding ON binding.grant_id=seat.grant_id
+      AND binding.workspace_id=seat.workspace_id AND binding.owner_user_id=seat.owner_user_id
+    JOIN swarm.hosted_mcp_grants g ON g.grant_id=binding.grant_id AND g.owner_user_id=binding.owner_user_id
+    WHERE p.transport='hosted_mcp' AND seat.workspace_id=p.workspace_id
+      AND seat.principal_id=p.principal_id AND seat.owner_user_id=p.owner_user_id
+   ) hosted_policy ON true
    CROSS JOIN LATERAL (
     SELECT CASE
      WHEN p.revoked_at IS NOT NULL THEN 'removed'
-     WHEN p.transport = 'hosted_mcp' THEN CASE WHEN EXISTS (
-      SELECT 1 FROM swarm.hosted_mcp_seats seat
-      JOIN swarm.hosted_mcp_grant_workspaces binding ON binding.grant_id = seat.grant_id AND binding.workspace_id = seat.workspace_id AND binding.owner_user_id = seat.owner_user_id
-      JOIN swarm.hosted_mcp_grants g ON g.grant_id = binding.grant_id AND g.owner_user_id = binding.owner_user_id
-      WHERE seat.workspace_id = p.workspace_id AND seat.principal_id = p.principal_id AND seat.owner_user_id = p.owner_user_id
-       AND seat.revoked_at IS NULL AND binding.revoked_at IS NULL AND g.revoked_at IS NULL AND g.state = 'active' AND g.connection_expired_at IS NULL
-       AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())) THEN 'live' ELSE 'connection_off' END
-     WHEN (SELECT g.connection_expired_at IS NOT NULL OR g.connection_expires_at<=clock_timestamp()
-      FROM swarm.renewal_grants g WHERE g.workspace_id=p.workspace_id AND g.principal_id=p.principal_id
-      ORDER BY (g.revoked_at IS NULL) DESC,g.created_at DESC,g.renewal_grant_id DESC LIMIT 1) THEN 'key_ended'
-     WHEN EXISTS (
-       SELECT 1 FROM swarm.agent_tokens t
-        JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=t.principal_id
-        JOIN swarm.devices d ON d.device_id=r.device_id
-        LEFT JOIN swarm.renewal_grants g ON g.renewal_grant_id=t.renewal_grant_id
-        JOIN swarm.memberships m ON m.workspace_id=p.workspace_id AND m.user_id=p.owner_user_id
-        JOIN swarm.workspaces w ON w.workspace_id=p.workspace_id
-        WHERE t.principal_id=p.principal_id AND p.revoked_at IS NULL AND NOT p.turn_only
-          AND t.revoked_at IS NULL AND NOT t.surrender_only AND r.ended_at IS NULL AND d.revoked_at IS NULL
-          AND d.user_id=p.owner_user_id AND m.revoked_at IS NULL AND w.archived_at IS NULL
-          AND (t.renewal_grant_id IS NULL OR g.renewal_grant_id IS NOT NULL AND g.revoked_at IS NULL
-            AND g.connection_expired_at IS NULL AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
-            AND ROW(g.principal_id,g.run_id,g.workspace_id,g.created_by)=ROW(t.principal_id,t.run_id,p.workspace_id,p.owner_user_id)
-            AND (g.bound_device_id IS NULL OR g.bound_device_id=d.device_id))
-          AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY[t.parent_admin_grant_id,p.parent_admin_grant_id]) parent(id)
-          WHERE parent.id IS NOT NULL AND NOT EXISTS (
-            SELECT 1 FROM swarm.admin_grants a
-            JOIN swarm.memberships am ON am.workspace_id=p.workspace_id AND am.user_id=a.owner_user_id
-            JOIN swarm.workspaces aw ON aw.workspace_id=am.workspace_id
-            LEFT JOIN swarm.admin_created_workspaces ac ON ac.workspace_id=p.workspace_id
-            WHERE a.grant_id=parent.id AND a.state='active' AND a.revoked_at IS NULL
-              AND a.expires_at>clock_timestamp() AND a.refresh_deadline>clock_timestamp()
-              AND am.revoked_at IS NULL AND am.role IN ('owner','admin') AND aw.archived_at IS NULL
-              AND NOT p.workspace_id=ANY(a.withdrawn_workspace_ids)
-              AND (p.workspace_id=ANY(a.workspace_ids) OR ac.grant_id=a.grant_id
-                OR a.workspace_selector='owned_and_selected' AND am.role='owner')
-              AND (ac.grant_id IS DISTINCT FROM a.grant_id OR
-                'seats:create'=ANY(ac.scope_names) AND a.created_workspace_policy->'scope_names' ? 'seats:create')
-              AND jsonb_typeof(t.scopes)='array' AND NOT EXISTS (
-                SELECT 1 FROM jsonb_array_elements_text(t.scopes) s(scope) WHERE NOT s.scope=ANY(a.worker_scope_ceiling))))
-          AND NOT EXISTS (SELECT 1 FROM swarm.revocation_tombstones z WHERE (z.kind,z.target_id) IN
-            (('token',t.token_id),('principal',p.principal_id),('run',r.run_id),('device',d.device_id),
-             ('membership',p.owner_user_id),('lineage',t.lineage_id),('family',t.lineage_id),('renewal_grant',t.renewal_grant_id)))
-          AND (t.expires_at>clock_timestamp() OR (g.kind='standing' AND (t.first_used_at IS NOT NULL
-          OR (t.first_used_at IS NULL AND t.predecessor_token_id IS NULL
-            AND g.horizon_expires_at IS NULL AND g.max_successors IS NULL)
-          OR EXISTS (
-          SELECT 1 FROM swarm.agent_tokens predecessor WHERE predecessor.token_id=t.predecessor_token_id
-            AND predecessor.first_used_at IS NOT NULL AND predecessor.revoked_at IS NULL AND NOT predecessor.surrender_only
-            AND ROW(predecessor.principal_id,predecessor.run_id,predecessor.renewal_grant_id,predecessor.lineage_id,predecessor.parent_admin_grant_id)
-              IS NOT DISTINCT FROM ROW(t.principal_id,t.run_id,t.renewal_grant_id,t.lineage_id,t.parent_admin_grant_id)
-            AND NOT EXISTS (SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='token' AND z.target_id=predecessor.token_id)))
-          AND NOT EXISTS (SELECT 1 FROM swarm.agent_tokens child WHERE child.predecessor_token_id=t.token_id
-            AND child.revoked_at IS NULL AND child.first_used_at IS NOT NULL)))) THEN 'live'
-     WHEN EXISTS (SELECT 1 FROM swarm.renewal_grants g WHERE g.workspace_id = p.workspace_id AND g.principal_id = p.principal_id AND g.revoked_at IS NULL AND g.suspension_active AND g.kind<>'standing'
-      AND g.connection_expired_at IS NULL AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())) THEN 'paused'
+     WHEN p.transport = 'hosted_mcp' THEN CASE
+      WHEN hosted_policy.seat_revoked_at IS NULL AND hosted_policy.binding_revoked_at IS NULL
+       AND hosted_policy.revoked_at IS NULL AND hosted_policy.state='active'
+       AND hosted_policy.connection_expired_at IS NULL
+       AND (hosted_policy.connection_expires_at IS NULL OR hosted_policy.connection_expires_at>clock_timestamp())
+      THEN 'live' ELSE 'connection_off' END
+     WHEN selected.is_live THEN 'live'
+     WHEN local_policy.connection_expired_at IS NOT NULL OR local_policy.connection_expires_at<=clock_timestamp() THEN 'key_ended'
+     WHEN local_policy.revoked_at IS NULL AND local_policy.suspension_active AND local_policy.kind<>'standing'
+      AND local_policy.connection_expired_at IS NULL
+      AND (local_policy.connection_expires_at IS NULL OR local_policy.connection_expires_at>clock_timestamp()) THEN 'paused'
+     WHEN local_policy.revoked_at IS NOT NULL THEN 'key_off'
      WHEN EXISTS (SELECT 1 FROM swarm.agent_tokens token WHERE token.principal_id = p.principal_id AND token.revoked_at IS NULL)
       THEN 'key_ended' ELSE 'key_off' END AS kind
    ) connection
@@ -210,7 +269,7 @@ BEGIN
     'status',jsonb_build_object('work',CASE WHEN a.connection <> 'live' THEN 'disconnected'
      WHEN (a.doing IS NOT NULL OR a.working_on IS NOT NULL) AND a.last_activity_at >= read_at - interval '30 minutes' THEN 'working' ELSE 'idle' END,
      'facts',jsonb_build_object('transport',a.transport,'turn_only',a.turn_only,'connection',a.connection,
-      'last_activity_at',a.last_activity_at,'messages_waiting_since',a.messages_waiting_since,'doing',a.doing,'working_on',a.working_on)),
+      'last_activity_at',a.last_activity_at,'messages_waiting_since',a.messages_waiting_since,'doing',a.doing,'working_on',a.working_on) || a.connection_policy),
     'queue',a.queue) ORDER BY a.principal_id) FROM agent_facts a WHERE a.owner_user_id = m.user_id),'[]'::jsonb) AS agents
    FROM members m
   )
@@ -239,3 +298,82 @@ AS
   FROM swarm.hosted_mcp_grants AS g
   WHERE g.owner_user_id = auth.uid();
 ALTER VIEW swarm_read.hosted_mcp_connections OWNER TO swarm_admin;
+
+-- Replace the existing human roster only; the token-scoped reader is unchanged.
+CREATE OR REPLACE FUNCTION swarm_read.renewal_grant_roster(p_workspace_id uuid)
+RETURNS TABLE (
+  renewal_grant_id uuid,
+  principal_id uuid,
+  owner_user_id uuid,
+  agent_name text,
+  model text,
+  kind text,
+  horizon_expires_at timestamptz,
+  bound_device_id uuid,
+  last_used_at timestamptz,
+  last_used_device_id uuid,
+  last_used_from text,
+  new_host_at timestamptz,
+  suspended_at timestamptz,
+  revoked_at timestamptz,
+  token_id uuid,
+  issued_at timestamptz,
+  token_expires_at timestamptz,
+  first_used_at timestamptz,
+  token_revoked_at timestamptz,
+  connection_expires_at timestamptz,
+  connection_expired_at timestamptz
+)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  v_user_id uuid := NULLIF(
+    NULLIF(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub',
+    ''
+  )::uuid;
+BEGIN
+  IF v_user_id IS NULL OR NOT swarm.is_member(p_workspace_id, v_user_id) THEN
+    RETURN;
+  END IF;
+
+  RETURN QUERY
+  SELECT
+    grant_row.renewal_grant_id,
+    principal.principal_id,
+    principal.owner_user_id,
+    principal.name,
+    principal.model,
+    grant_row.kind,
+    grant_row.horizon_expires_at,
+    grant_row.bound_device_id,
+    grant_row.last_used_at,
+    grant_row.last_used_device_id,
+    grant_row.last_used_from,
+    grant_row.new_host_at,
+    CASE WHEN grant_row.suspension_active AND grant_row.kind<>'standing' THEN grant_row.suspended_at END,
+    grant_row.revoked_at,
+    token.token_id,
+    token.issued_at,
+    token.expires_at,
+    token.first_used_at,
+    token.revoked_at,
+    grant_row.connection_expires_at,COALESCE(grant_row.connection_expired_at,
+      CASE WHEN grant_row.connection_expires_at<=clock_timestamp() THEN grant_row.connection_expires_at END)
+  FROM swarm.agent_principals AS principal
+  JOIN LATERAL swarm_read.local_connection_selection(
+    p_workspace_id,principal.principal_id,principal.owner_user_id) selected ON true
+  JOIN swarm.renewal_grants grant_row ON grant_row.renewal_grant_id=selected.selected_renewal_grant_id
+  LEFT JOIN swarm.agent_tokens token ON token.token_id=selected.selected_token_id
+  WHERE principal.workspace_id = p_workspace_id
+    AND principal.revoked_at IS NULL
+  ORDER BY principal.principal_id;
+END;
+$$;
+
+ALTER FUNCTION swarm_read.renewal_grant_roster(uuid) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm_read.renewal_grant_roster(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION swarm_read.renewal_grant_roster(uuid)
+  TO authenticated, swarm_read;
