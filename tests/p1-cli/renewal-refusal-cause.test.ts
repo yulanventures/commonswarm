@@ -47,25 +47,38 @@ test("recognized domain revocation and security suspension stay authoritative", 
   }
 });
 
-test("a malformed success never authorizes fresh-id recovery and an outage retains durable intent", async () => {
+test("unknown or malformed issuance retains durable intent across repeated attempts", async () => {
   const directory = await mkdtemp(join(tmpdir(), "cswarm-renewal-wire-"));
   try {
-    const store = await agentCredentialStore({ target, lineageKey: credentialLineageKey(token), stateDirectory: directory });
-    let calls = 0;
-    const ids: string[] = [];
-    const session = await AgentCredentialSession.open({ target, workspaceId: options.workspaceId,
-      presented: { token, tokenId: randomUUID(), principalId: randomUUID(), runId: randomUUID(), expiresAt: NOW - 1 },
-      store, now: () => NOW, warn: () => {}, fetcher: (async (_input, init) => {
-        calls++; ids.push((JSON.parse(String(init?.body)) as { command_id: string }).command_id);
-        return Response.json({ status: "accepted" });
-      }) as typeof fetch,
-    });
-    await assert.rejects(() => session.bearer(), RenewalRetryError);
-    await assert.rejects(() => session.bearer(), RenewalRetryError);
-    assert.equal(calls, 2, "malformed acceptance must not spend a fresh-id request");
-    assert.equal(ids[0], ids[1], "ambiguous responses retain the original id");
-    assert.equal((await store.read())?.pendingRenewal?.commandId, ids[0]);
-    assert.equal((await store.read())?.token, null);
+    for (const [index, answer] of [
+      { status: "accepted" },
+      { status: "accepted", ok: true, agent_token: "bad" },
+      { status: "rejected" },
+      null, // A request whose reply was lost, rather than a decided rejection.
+    ].entries()) {
+      const store = await agentCredentialStore({ target, lineageKey: credentialLineageKey(token), stateDirectory: join(directory, String(index)) });
+      let current = NOW;
+      const ids: string[] = [];
+      const settings = { target, workspaceId: options.workspaceId,
+        presented: { token, tokenId: randomUUID(), principalId: randomUUID(), runId: randomUUID(), expiresAt: NOW + 60_000 },
+        store, now: () => current, warn: () => {}, fetcher: (async (_input, init) => {
+          ids.push((JSON.parse(String(init?.body)) as { command_id: string }).command_id);
+          if (answer === null) throw new TypeError("injected reply loss");
+          return Response.json(answer);
+        }) as typeof fetch,
+      };
+      let session = await AgentCredentialSession.open(settings);
+      assert.equal(await session.bearer(), token, "live predecessor may continue after an unknown outcome");
+      current = NOW + 60_000;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        session = await AgentCredentialSession.open(settings);
+        await assert.rejects(() => session.bearer(), RenewalRetryError);
+      }
+      assert.equal(ids.length, 3, "one bounded exchange per ambiguous attempt");
+      assert.ok(ids.every((id) => id === ids[0]), "unknown outcomes retain the same id across reopen and expiry");
+      assert.equal((await store.read())?.pendingRenewal?.commandId, ids[0]);
+      assert.equal((await store.read())?.token, null, "unknown issuance never publishes a credential");
+    }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -135,5 +148,95 @@ test("unknown-expiry sessions leave live proof untouched and keep recovery outag
       await assert.rejects(() => refused.recoverUnauthenticated(token), row.type,
         "confirmed refusals must retain their cause rather than becoming a retry");
     }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+// Fixed wire envelopes exercise request intent and durable publication. Real M3
+// eligibility, supersession and policy authority stay in agent-credential-file.
+test("decided renewal refusals preserve the saved successor and allow a fresh attempt", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cswarm-decided-renewal-"));
+  try {
+    for (const listenerMode of [false, true]) {
+      for (const row of [
+        { status: 200, body: { status: "rejected", reason: "predecessor_pending_first_use" }, code: "predecessor_pending_first_use", type: RenewalRefused, remedy: /Run the command again/ },
+        { status: 200, body: { status: "rejected", reason: "new_server_reason" }, code: "new_server_reason", type: RenewalRefused, remedy: /workspace owner/ },
+        { status: 200, body: { status: "rejected", reason: "renewal_device_mismatch" }, code: "renewal_device_mismatch", type: RenewalRefused, remedy: /intended device/ },
+        { status: 200, body: { status: "rejected", reason: "renewal_unsupported" }, code: null, type: RenewalUnsupported, remedy: /Ask whoever issued it/ },
+        { status: 426, body: { error: "upgrade_required", min_client_version: "999.0.0" }, code: "upgrade_required", type: RenewalRefused, remedy: /Update cswarm/ },
+      ]) {
+        const root = `swm_agt_${randomBytes(32).toString("base64url")}`;
+        const savedToken = `swm_agt_${randomBytes(32).toString("base64url")}`;
+        const successor = `swm_agt_${randomBytes(32).toString("base64url")}`;
+        const principalId = randomUUID(), runId = randomUUID(), rootTokenId = randomUUID();
+        const store = await agentCredentialStore({ target, lineageKey: credentialLineageKey(root), stateDirectory: directory });
+        await store.write({ version: 1, rootTokenId, generation: 1, token: savedToken,
+          tokenId: randomUUID(), principalId, runId, issuedAt: NOW - 3_600_001, expiresAt: NOW - 1,
+          horizonExpiresAt: null, successorsRemaining: null, pendingRenewal: null });
+        const ids: string[] = [], bodies: Record<string, unknown>[] = [];
+        const settings = { target, workspaceId: randomUUID(), listenerMode, store,
+          presented: { token: root, tokenId: rootTokenId, principalId, runId, expiresAt: NOW - 1 },
+          now: () => NOW, warn: () => {}, fetcher: (async (_input, init) => {
+            const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+            ids.push(String(body.command_id)); bodies.push(body);
+            assert.equal(new Headers(init?.headers).get("authorization"), `Bearer ${savedToken}`);
+            assert.equal((await store.read())?.pendingRenewal?.commandId, body.command_id, "intent is durable before HTTP");
+            return ids.length === 1 ? Response.json(row.body, { status: row.status }) : Response.json({
+              status: "accepted", ok: true, agent_token: successor, token_id: randomUUID(),
+              principal_id: principalId, run_id: runId, issued_at: NOW, expires_at: NOW + 3_600_000,
+            });
+          }) as typeof fetch };
+        const session = await AgentCredentialSession.open(settings);
+        await assert.rejects(() => session.bearer(), (error: unknown) => {
+          if (listenerMode && row.status !== 426) return error instanceof RenewalRetryError;
+          assert.ok(error instanceof row.type, "expired one-shot retains the actual refusal type");
+          assert.match(error.message, row.remedy);
+          if (error instanceof RenewalRefused) {
+            assert.equal(error.status, row.status);
+            assert.equal(error.code, row.code);
+          }
+          return true;
+        });
+        const retained = await store.read();
+        assert.equal(retained?.pendingRenewal, null, "decided rejection is no longer replayed");
+        assert.equal(retained?.token, savedToken, "last durable successor is retained");
+        assert.equal(retained?.generation, 1);
+        const reopened = await AgentCredentialSession.open(settings);
+        assert.equal(await reopened.bearer(), successor);
+        assert.equal(ids.length, 2);
+        assert.notEqual(ids[0], ids[1], "a decided refusal permits a fresh id next invocation");
+        assert.deepEqual({ ...bodies[0], command_id: null }, { ...bodies[1], command_id: null });
+        assert.equal((await store.read())?.generation, 2);
+        assert.equal((await store.read())?.token, successor);
+      }
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("a first fresh null result retains intent; only a saved-id null replay permits one recovery id", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cswarm-null-replay-"));
+  try {
+    const store = await agentCredentialStore({ target, lineageKey: credentialLineageKey(token), stateDirectory: directory });
+    const principalId = randomUUID(), runId = randomUUID();
+    const ids: string[] = [], bodies: Record<string, unknown>[] = [];
+    const settings = { target, workspaceId: options.workspaceId, store, now: () => NOW, warn: () => {},
+      presented: { token, tokenId: randomUUID(), principalId, runId, expiresAt: NOW - 1 },
+      fetcher: (async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        ids.push(String(body.command_id)); bodies.push(body);
+        assert.equal((await store.read())?.pendingRenewal?.commandId, body.command_id);
+        return Response.json({ status: "accepted", ok: true, token_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          principal_id: principalId, run_id: runId, issued_at: NOW, expires_at: NOW + 3_600_000 });
+      }) as typeof fetch };
+    await assert.rejects(() => AgentCredentialSession.open(settings).then((session) => session.bearer()), RenewalRetryError);
+    assert.equal(ids.length, 1, "the first new request is not a replay");
+    assert.equal((await store.read())?.pendingRenewal?.commandId, ids[0]);
+    const reopened = await AgentCredentialSession.open(settings);
+    await assert.rejects(() => reopened.bearer(), RenewalRetryError);
+    assert.equal(ids.length, 3, "one saved-id replay and at most one fresh-id request");
+    assert.equal(ids[1], ids[0]);
+    assert.notEqual(ids[2], ids[1]);
+    assert.equal((await store.read())?.pendingRenewal?.commandId, ids[2], "latest uncertain request remains durable");
+    assert.equal((await store.read())?.token, null, "null envelopes never authorize ordinary work");
+    for (const body of bodies) assert.deepEqual({ ...body, command_id: null }, { ...bodies[0], command_id: null });
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

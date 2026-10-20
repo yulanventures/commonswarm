@@ -218,7 +218,10 @@ export function describeRenewalGrant(grant: RenewalGrantStatus): string[] {
     describeConnectionPolicy(grant),
   ];
   if (grant.suspended_at !== null) {
-    lines.push(`PAUSED since ${grant.suspended_at}. Renewal is blocked by the server; ask a workspace owner to check its security status.`);
+    lines.push(`PAUSED since ${grant.suspended_at}. Renewal is blocked by the server; ask a workspace owner to check the cause.`);
+    if (grant.revoked_at === null && grant.connection_expired_at == null) {
+      lines.push(`For an idle pause, ${STANDING_RESUME_ACTORS_SENTENCE} runs cswarm grant resume. Security restrictions must be resolved by a workspace owner before renewal can continue.`);
+    }
   }
   if (grant.revoked_at !== null) {
     lines.push(`REVOKED since ${grant.revoked_at}. This is permanent and cannot be resumed. Next step: mint a new grant if this agent should continue.`);

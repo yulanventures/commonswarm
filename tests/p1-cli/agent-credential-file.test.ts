@@ -203,13 +203,17 @@ test("full synthetic minted shape passes the credential parser", () => {
 
 // Opt-in real M3 boundary gate. Root runs this only in its assigned local-stack
 // slot after integrating the backend. No server authority is replaced by mocks.
+// Requires M3 to remove technical-expiry/idle preflights for eligible permanent
+// families and recover an exact expired unused child under a fresh request id.
+// The registered Linux/server gate must execute this; its default skip is no proof.
 test("M3 agent continuity at the real command, secure-store and listener boundaries", {
   skip: process.env.CSWARM_AGENT_CLIENT_M3 !== "1",
   timeout: 180_000,
 }, async (t) => {
   const { default: postgres } = await import("postgres");
   const { cloudTarget, readEndpoint } = await import("../../src/cloud/config.js");
-  const { AgentCredentialSession, RenewalRetryError, newRenewalCommandId, requestSuccessor } = await import("../../src/cloud/renewal.js");
+  const { AgentCredentialSession, RenewalCredentialCheckError, RenewalReauthorisationRequired,
+    RenewalRevoked, RenewalSuspended, RenewalSuperseded, RenewalRetryError, newRenewalCommandId, requestSuccessor } = await import("../../src/cloud/renewal.js");
   const { agentCredentialStore, credentialLineageKey } = await import("../../src/cloud/agent-credential.js");
   const { ThinCommandClient } = await import("../../src/cloud/command-client.js");
   const { runListenerRuntime, NullListenerModel } = await import("../../src/listener/runtime.js");
@@ -325,7 +329,9 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
         presented: { token: f.token, tokenId: null, principalId: null, runId: null, expiresAt: null } });
       await assert.rejects(() => client.send({ workspaceId: f.workspace, stream: { kind: "workspace" },
         command: { kind: "create", task_id: randomUUID(), slug: "obsolete" }, credential: f.token },
-        (rejected) => obsolete.recoverUnauthenticated(rejected)));
+        (rejected) => obsolete.recoverUnauthenticated(rejected)), (error: unknown) =>
+        (error instanceof RenewalCredentialCheckError && error.status === 401 && error.code === "unauthenticated") ||
+        error instanceof RenewalSuperseded, "obsolete proof must meet the server's used-winner fence");
       assert.equal((await lost.read())?.token ?? null, null);
       assert.equal(await use(f.workspace, await session.bearer()), 200);
     });
@@ -377,13 +383,32 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       assert.notEqual(otherOrigin.profileId, target.profileId, "fixture requires distinct origins");
       const isolated = await agentCredentialStore({ target: otherOrigin, lineageKey: credentialLineageKey(f.token), stateDirectory: directory });
       assert.equal(await isolated.read(), null, "another origin cannot find the winner");
-      // The server has now observed the successor in real work: an obsolete root
-      // must no longer recover that used child under either id form.
-      for (const commandId of [ids[3]!, newRenewalCommandId()]) {
-        let recovered = false;
-        try { recovered = (await requestSuccessor({ target, workspaceId: f.workspace, predecessor: f.token, commandId })) !== null; }
-        catch { /* A confirmed denial is also a correct negative. */ }
-        assert.equal(recovered, false, "used winner cannot be replaced from obsolete proof");
+      // ids[4] issued the CURRENT winner. ids[3] names the expired, replaced
+      // child and cannot exercise the used-winner self-heal fence.
+      const winner = await f.store.read();
+      assert.ok(winner?.tokenId);
+      const [before] = await sql<{ first_used_at: Date | null; tokens: number }[]>`
+        SELECT t.first_used_at, (SELECT count(*)::integer FROM swarm.agent_tokens
+          WHERE predecessor_token_id = ${f.tokenId}::uuid) AS tokens
+        FROM swarm.agent_tokens t WHERE token_id = ${winner.tokenId}::uuid`;
+      assert.ok(before?.first_used_at, "the current winner really authenticated");
+      for (const commandId of [ids[4]!, newRenewalCommandId()]) {
+        try {
+          const recovered = await requestSuccessor({ target, workspaceId: f.workspace, predecessor: f.token, commandId });
+          assert.equal(commandId, ids[4], "a new id must be refused for a used winner");
+          assert.equal(recovered, null, "the actual issuance replay cannot return another secret");
+        } catch (error) {
+          assert.ok((error instanceof RenewalCredentialCheckError && error.status === 401 && error.code === "unauthenticated") ||
+            error instanceof RenewalSuperseded, "only a recognized server refusal satisfies this negative");
+        }
+        const [after] = await sql<{ first_used_at: Date | null; revoked_at: Date | null; tokens: number }[]>`
+          SELECT t.first_used_at, t.revoked_at, (SELECT count(*)::integer FROM swarm.agent_tokens
+            WHERE predecessor_token_id = ${f.tokenId}::uuid) AS tokens
+          FROM swarm.agent_tokens t WHERE token_id = ${winner.tokenId}::uuid`;
+        assert.equal(after?.tokens, before.tokens, "neither id may replace the used winner");
+        assert.equal(after?.first_used_at?.getTime(), before.first_used_at.getTime());
+        assert.equal(after?.revoked_at, null);
+        assert.equal(await use(f.workspace, bearer), 200, "the used winner remains usable");
       }
     });
     await t.test("interrupted save never exposes an unpersisted successor; reopen recovers", async () => {
@@ -473,7 +498,18 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
           credential: await session.bearer() }, (rejected) => session.recoverUnauthenticated(rejected));
         if (policy === "permanent") assert.equal((await work()).response.status, "accepted");
         else {
-          await assert.rejects(work);
+          await assert.rejects(work, (error: unknown) => {
+            // M3 can refuse at admission (the exact 401 sample) or at the
+            // renewal command's named policy fence. Transport/parse/storage
+            // failures and unrelated domain reasons must fail this negative.
+            if (error instanceof RenewalCredentialCheckError) {
+              return error.status === 401 && error.code === "unauthenticated";
+            }
+            if (policy === "elapsed") return error instanceof RenewalReauthorisationRequired && error.reason === "horizon_reached";
+            if (policy === "revoked") return error instanceof RenewalRevoked &&
+              ["renewal_grant_revoked", "renewal_lineage_revoked", "predecessor_revoked"].includes(error.code);
+            return error instanceof RenewalSuspended && error.code === "renewal_grant_suspended";
+          }, `${policy} must reach its server authentication/policy fence`);
           assert.equal((await f.store.read())?.token ?? null, null, "no replacement is stored after denial");
         }
       }

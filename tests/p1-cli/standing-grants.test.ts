@@ -233,7 +233,8 @@ test("grant read preserves absent policy and validates canonical deadlines befor
     { fields: { connection_expires_at: null, connection_expired_at: null }, expected: /no chosen expiry or idle cutoff/, forbidden: /14 days/ },
     { fields: { connection_expires_at: "2030-01-01T00:00:00Z", connection_expired_at: null }, expected: /owner-selected expiry: 2030-01-01/, forbidden: /no chosen expiry/ },
     { fields: { connection_expires_at: null, connection_expired_at: "2026-10-01T00:00:00Z" }, expected: /cannot be resumed/, forbidden: /no chosen expiry/ },
-    { fields: { suspended_at: "2026-10-01T00:00:00Z" }, expected: /security status/, forbidden: /after 14 days|grant resume/ },
+    { fields: { suspended_at: "2026-10-01T00:00:00Z" }, expected: /PAUSED.*check the cause/, forbidden: /blocked.*security|no chosen expiry/ },
+    { fields: { suspended_at: "2026-10-01T00:00:00Z", revoked_at: "2026-10-02T00:00:00Z" }, expected: /permanent and cannot be resumed/, forbidden: /grant resume/ },
     { fields: { revoked_at: "2026-10-01T00:00:00Z" }, expected: /permanent and cannot be resumed/, forbidden: /grant resume/ },
   ]) {
     const grants = await readRenewalGrants(cloudTarget("http://127.0.0.1:9", "anon"), "test", WORKSPACE,
@@ -241,6 +242,11 @@ test("grant read preserves absent policy and validates canonical deadlines befor
     const output = describeRenewalGrant(grants[0]!).join("\n");
     assert.match(output, row.expected);
     assert.doesNotMatch(output, row.forbidden);
+    if (grants[0]!.suspended_at !== null && grants[0]!.revoked_at === null) {
+      assert.match(output, /For an idle pause, .* runs cswarm grant resume/);
+      assert.match(output, /Security restrictions must be resolved by a workspace owner/);
+      assert.match(output, /server-managed/);
+    }
     if (Object.keys(row.fields).length === 0) assert.equal(Object.hasOwn(grants[0]!, "connection_expires_at"), false);
   }
   for (const value of ["not-a-date", 1, {}]) {

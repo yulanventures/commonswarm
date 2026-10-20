@@ -465,7 +465,7 @@ export async function requestSuccessor(options: {
    * the missing token with a shrug. The reason strings are the reducer's
    * RenewalRejectionReason union. */
   if (body.status === "rejected") {
-    if (options.listenerMode && typeof body.reason !== "string") {
+    if (typeof body.reason !== "string") {
       throw new RenewalMalformedResponseError("renewal rejection did not name a reason");
     }
     const reason = typeof body.reason === "string" ? body.reason : "unknown";
@@ -523,11 +523,8 @@ export async function requestSuccessor(options: {
           : "The standing grant is bound to another device, so CommonSwarm refused renewal. Ask a workspace owner to revoke this grant and mint a new credential on the intended device.",
       );
     }
-    if (!options.listenerMode) {
-      throw new RenewalRefused(200, reason,
-        `The deployment refused to renew this credential (${reason}).`);
-    }
-    throw new RenewalMalformedResponseError("renewal rejection named an unknown reason");
+    throw new RenewalRefused(200, reason,
+      `The deployment refused to renew this credential (${reason}). Run the command again; if the refusal continues, ask a workspace owner to check this grant.`);
   }
 
   if (body.agent_token !== undefined && typeof body.agent_token !== "string") {
@@ -538,8 +535,6 @@ export async function requestSuccessor(options: {
     throw new RenewalMalformedResponseError("renewal response did not confirm an accepted replay");
   }
   if (token && !AGENT_TOKEN_RE.test(token)) {
-    if (!options.listenerMode) throw new RenewalRefused(response.status, "malformed_successor",
-      "The deployment returned a credential that is not shaped like one. It was not stored.");
     throw new RenewalMalformedResponseError(
       "The deployment returned a credential that is not shaped like one. It was not stored.",
     );
@@ -547,8 +542,6 @@ export async function requestSuccessor(options: {
   const tokenId = typeof body.token_id === "string" ? body.token_id : "";
   const runId = typeof body.run_id === "string" ? body.run_id : "";
   if (!UUID_RE.test(tokenId) || !UUID_RE.test(runId) || principalId === null) {
-    if (!options.listenerMode) throw new RenewalRefused(response.status, "incomplete_successor",
-      "A successor credential was issued but the deployment did not name its principal, run, or token. It was not stored; ask an owner to revoke it.");
     throw new RenewalMalformedResponseError(
       "A successor credential was issued but the deployment did not name its principal, run, or token. It was not stored; ask an owner to revoke it.",
     );
@@ -560,15 +553,11 @@ export async function requestSuccessor(options: {
   const issuedAt = parsedIssuedAt ?? now();
   const expiresAt = timestamp(body.expires_at);
   if (expiresAt === null) {
-    if (!options.listenerMode) throw new RenewalRefused(response.status, "successor_expiry_missing",
-      "A successor credential was issued without an expiry. It was not stored, because a credential whose lifetime is unknown cannot be renewed on time.");
     throw new RenewalMalformedResponseError(
       "A successor credential was issued without an expiry. It was not stored, because a credential whose lifetime is unknown cannot be renewed on time.",
     );
   }
   if (expiresAt - issuedAt > AGENT_TOKEN_MAX_TTL_MS) {
-    if (!options.listenerMode) throw new RenewalRefused(response.status, "successor_ttl_too_long",
-      "The deployment issued a successor credential that lasts longer than eight hours. cswarm refused to store it. Agent credentials stay short on purpose; renewal is what makes that survivable.");
     // The whole point of renewal is that the token stays short. A deployment offering a
     // long one is the failure this design exists to prevent, so refuse it here too.
     throw new RenewalMalformedResponseError(
@@ -587,8 +576,6 @@ export async function requestSuccessor(options: {
   try {
     wake = parseOptionalWakeHint(body.wake);
   } catch {
-    if (!options.listenerMode) throw new RenewalRefused(response.status, "malformed_wake",
-      "The deployment returned a successor credential with a malformed wake hint. It was not stored.");
     throw new RenewalMalformedResponseError(
       "The deployment returned a successor credential with a malformed wake hint. It was not stored.",
     );
@@ -859,7 +846,7 @@ export class AgentCredentialSession {
       }
       if (this.options.listenerMode) throw error;
       if (this.expired()) {
-        if (retryableRenewalOutcome) throw new RenewalRetryError(this.expiresAt);
+        if (error instanceof RenewalOutcomeUnknown) throw new RenewalRetryError(this.expiresAt);
         throw error;
       }
       if (error instanceof RenewalUnsupported) {
@@ -923,9 +910,10 @@ export class AgentCredentialSession {
       }
       // Replaying first lets M3 resolve the exact pending child. A null replay is
       // the only evidence permitting one fresh-id recovery in this locked attempt.
-      const commandId = this.pending?.commandId ?? newRenewalCommandId();
+      const pendingCommandId = this.pending?.commandId;
+      const commandId = pendingCommandId ?? newRenewalCommandId();
       if (await this.exchange(commandId)) return;
-      if (await this.exchange(newRenewalCommandId())) return;
+      if (pendingCommandId !== undefined && await this.exchange(newRenewalCommandId())) return;
       throw new RenewalOutcomeUnknown("The renewal reply contained no successor secret; recovery will retry from the saved command.");
     });
   }
@@ -956,10 +944,12 @@ export class AgentCredentialSession {
         now: this.clock,
       });
     } catch (error) {
-      // Unknown outcomes retain the same id. A recognized refusal may end the
-      // attempt, but never deletes the last durable successor or a server fence.
+      // A decided refusal must not pin an idempotently stored rejection forever.
+      // Unknown/malformed issuance retains its id; clearing only intent preserves
+      // the durable successor and every server-side fence.
       if (error instanceof RenewalRevoked || error instanceof RenewalSuspended ||
-          error instanceof RenewalReauthorisationRequired || error instanceof RenewalSuperseded) {
+          error instanceof RenewalReauthorisationRequired || error instanceof RenewalSuperseded ||
+          error instanceof RenewalRefused || error instanceof RenewalUnsupported) {
         this.pending = null;
         await this.persist(store).catch(() => undefined);
       }
