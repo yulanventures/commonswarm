@@ -19,6 +19,14 @@ let denied = '', provider = true;
 /** Facts and persisted rows only: production code authorizes, decides and reduces. */
 function query(sql: string, values: any[]): Row[] {
   const ws = values.find(value => value === wa || value === wb);
+  if (sql.startsWith('LOCK TABLE swarm.household_content_connections IN ACCESS SHARE MODE')) return [];
+  if (sql.includes('FROM pg_catalog.pg_policy')) return [{ present: false }];
+  // Match catalog/restriction/legacy queries before their nested seat references.
+  if (sql.includes('FROM swarm.household_hosted_content_restrictions r')) return [];
+  if (sql.includes('SELECT seat_id,grant_id,owner_user_id FROM swarm.hosted_mcp_seats')) return [{ seat_id: connection, grant_id: grant, owner_user_id: owner }];
+  if (sql.includes('SELECT c.*,') && sql.includes('FROM swarm.household_content_connections c')) return [{
+    workspace_id: ws, owner_user_id: owner, principal_id: principal, connection_id: connection, grant_id: grant, hosted_grant_id: grant,
+    operations: ['read', 'create', 'update'], purpose: 'shared', revoked_at: denied === 'connection_access_refused' ? at : null, expires_at: null, closed_replaced: false }];
   if (sql.includes('provider_family_active')) return [{ active: provider }];
   if (sql.includes('hosted_mcp_seat_handles')) {
     const handle = values.at(-1); return seats[handle] ? [{ grant_id: grant, owner_user_id: owner, workspace_id: seats[handle], handle }] : [];
@@ -31,7 +39,8 @@ function query(sql: string, values: any[]): Row[] {
   if (sql.includes('revocation_tombstones')) return [];
   if (sql.includes('archived_at FROM swarm.workspaces')) return [{ archived_at: null }];
   if (sql.includes('purpose, owner_user_id')) return [{ purpose: 'shared', owner_user_id: owner }];
-  if (sql.includes('revoked_at FROM swarm.memberships') || sql.includes('revoked_at FROM swarm.agent_principals')) return [{ revoked_at: null }];
+  if (sql.includes('revoked_at FROM swarm.memberships')) return [{ role: 'owner', revoked_at: null }];
+  if (sql.includes('revoked_at FROM swarm.agent_principals')) return [{ revoked_at: null }];
   if (sql.includes('household_member_content_roles')) return [{ revoked_at: denied === 'workspace_access_refused' ? at : null,
     content_role: 'editor', content_consent_id: denied === 'content_consent_required' ? null : id(8) }];
   if (sql.includes('household_content_connections')) return [{ connection_id: connection, grant_id: grant, hosted_grant_id: grant,

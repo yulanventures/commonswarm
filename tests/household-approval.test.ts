@@ -14,8 +14,24 @@ const identity = { user_id: owner, principal_id: null, run_id: null, connection:
 const connection = { kind: 'hosted', connection_id: randomUUID(), grant_id: randomUUID(), principal_id: principal, operations: ['read'] };
 const yes = async () => true;
 function facts(role = 'editor', localExpiry?: string) {
-  const tx = Object.assign(async (sql: TemplateStringsArray) => {
+  const restrictions = new Map<string, Record<string, unknown>>();
+  const tx = Object.assign(async (sql: TemplateStringsArray, ...values: unknown[]) => {
     const query = sql.join('?');
+    if (query.startsWith('LOCK TABLE swarm.household_content_connections IN ACCESS SHARE MODE')) return [];
+    if (query.includes('FROM pg_catalog.pg_policy')) return [{ present: false }];
+    // No retired seats exist in this fixture, so the exact replacement set is empty.
+    if (query.startsWith('SELECT coalesce(jsonb_agg(snapshot')) return [{ snapshots: [] }];
+    if (query.startsWith('SELECT grant_id FROM swarm.household_hosted_content_restrictions')) {
+      const row = restrictions.get(String(values[2])); return row ? [row] : [];
+    }
+    if (query.startsWith('INSERT INTO swarm.household_hosted_content_restrictions')) {
+      restrictions.set(String(values[3]), { grant_id: values[0], workspace_id: values[1], owner_user_id: values[2],
+        principal_id: values[3], operations: values[4], origin: values[5], closed_target_replacements: values[6] }); return [];
+    }
+    if (query.startsWith('UPDATE swarm.household_hosted_content_restrictions')) {
+      const row = restrictions.get(String(values[5]));
+      if (row) Object.assign(row, { operations: values[0], origin: values[1], closed_target_replacements: values[2] }); return [];
+    }
     if (query.startsWith('SELECT archived_at')) return [{ archived_at: null }];
     if (query.includes('FROM swarm.memberships')) return [{ role: 'owner', revoked_at: null }];
     if (query.includes('FROM swarm.household_workspace_boundaries')) return [{ purpose: 'shared', owner_user_id: null }];
@@ -25,7 +41,7 @@ function facts(role = 'editor', localExpiry?: string) {
     if (query.includes('FROM swarm.idempotency_keys')) return [];
     if (query.includes('FROM swarm.agent_principals')) return [{ principal_id: principal, revoked_at: null }];
     if (query.includes('FROM swarm.agent_tokens')) return localExpiry ? [{ expires_at: localExpiry }] : [];
-    if (query.includes('FROM swarm.hosted_mcp_seats')) return [{ seat_id: connection.connection_id }];
+    if (query.includes('FROM swarm.hosted_mcp_seats')) return [{ seat_id: connection.connection_id, grant_id: connection.grant_id }];
     if (query.startsWith('SELECT set_config') || query.startsWith('INSERT INTO swarm.household_content_connections')
       || query.startsWith('INSERT INTO swarm.idempotency_keys') || query.startsWith('UPDATE swarm.household_content_connections')) return [];
     throw new Error('unexpected database boundary');

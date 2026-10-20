@@ -23,9 +23,38 @@ const measuredBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(JSON.
 
 // Static database records only: this port implements neither paging nor the
 // response budget. The real adapter owns both. SQL/ACLs stay in the CI suite.
-function readFixture(rows: Row[], comments: Row[] = [], agent: Row = {}, approval: Row = {}) {
+function readFixture(rows: Row[], comments: Row[] = [], agent: Row = {}, operations: readonly string[] = ['read', 'create', 'update']) {
+  const connection = { connection_id: id(6), grant_id: id(7), workspace_id: workspace, principal_id: principal, owner_user_id: user,
+    hosted_grant_id: agent.transport === 'local' ? null : id(7), operations: ['read', 'create', 'update'],
+    consent_receipt_id: id(5), purpose: 'shared', revoked_at: null,
+    expires_at: agent.transport === 'local' ? '2026-10-05T13:00:00.000Z' : null };
   const tx = (async (parts: TemplateStringsArray, ...values: unknown[]) => {
     const sql = parts.join('?');
+    if (sql.startsWith('LOCK TABLE swarm.household_content_connections IN ACCESS SHARE MODE')) return [];
+    if (sql.includes('FROM pg_catalog.pg_policy')) return [{ present: false }];
+    if (sql.includes('SELECT role, revoked_at FROM swarm.memberships')) return [{ role: 'owner', revoked_at: null }];
+    if (sql.includes('SELECT s.owner_user_id,s.seat_id AS connection_id')) {
+      const local = agent.transport === 'local';
+      // A renewed local fixture has a current token; paused/ended keys do not.
+      const live = agent.revoked_at == null && (local ? agent.token_live || agent.renewal_live : agent.hosted_live !== false);
+      return live ? [{ owner_user_id: user, connection_id: id(6), grant_id: id(7),
+        handle: local ? null : 'seat_0000000000000000000000', provider_grant_id: local ? null : 'synthetic-grant' }] : [];
+    }
+    if (sql.includes("current_setting('role')")) return [{ value: 'swarm_read' }];
+    if (sql.includes("set_config('role'")) return [];
+    if (sql.includes('SELECT EXISTS(SELECT 1 FROM swarm.resolve_hosted_seat_read_authorization')) return [{ live: agent.revoked_at == null && agent.hosted_live !== false }];
+    if (sql.includes('SELECT revoked_at FROM swarm.agent_principals')) return [{ revoked_at: agent.revoked_at ?? null }];
+    if (sql.includes('SELECT * FROM swarm.household_content_connections')) return [connection];
+    if (sql.includes('SELECT seat_id,grant_id,owner_user_id FROM swarm.hosted_mcp_seats')) return agent.transport === 'local' ? []
+      : [{ seat_id: id(6), grant_id: id(7), owner_user_id: user }];
+    if (sql.includes('SELECT c.*,') && sql.includes('FROM swarm.household_content_connections c')) return [{ ...connection, closed_replaced: false }];
+    if (sql.includes('FROM swarm.household_hosted_content_restrictions r')) return [{
+      grant_id: id(7), workspace_id: workspace, owner_user_id: user, principal_id: principal,
+      operations: [...operations], origin: operations.length ? 'human_allow' : 'human_withdraw',
+      closed_target_replacements: [], changed_at: at, changed_by: user, closed_replaced: false }];
+    if (sql.includes('SELECT state,revoked_at FROM swarm.hosted_mcp_grants')) return [{ state: 'active', revoked_at: null }];
+    if (sql.includes('SELECT revoked_at FROM swarm.hosted_mcp_grant_workspaces')
+      || sql.includes('SELECT revoked_at FROM swarm.hosted_mcp_seats')) return [{ revoked_at: null }];
     if (sql.includes('SELECT archived_at FROM swarm.workspaces')) return [{ archived_at: null }];
     if (sql.includes('SELECT purpose, owner_user_id')) return [{ purpose: 'shared', owner_user_id: user }];
     if (sql.includes('SELECT revoked_at FROM swarm.memberships')) return [{ revoked_at: null }];
@@ -41,7 +70,6 @@ function readFixture(rows: Row[], comments: Row[] = [], agent: Row = {}, approva
     if (sql.includes('SELECT p.*')) return [{ owner_user_id: user, revoked_at: null, member_live: true, transport: 'hosted_mcp', hosted_live: true, turn_only: true, ...agent }];
     if (sql.includes('SELECT greatest(')) return [{ last_activity_at: at, messages_waiting_since: null }];
     if (sql.includes('SELECT id,created_at,until')) return [];
-    if (sql.includes('SELECT bool_or(')) return [{ can_read: true, can_write: true, ...approval }];
     throw new Error(`Unexpected read query: ${sql}`);
   }) as unknown as Parameters<ReturnType<typeof createHouseholdTodoStore>['read']>[0];
   const store = createHouseholdTodoStore({ core: { ...todos, ...policy, ...accessPolicy },
@@ -127,19 +155,19 @@ test('a human queue needs an explicit principal; valid queue summaries omit note
 });
 
 test('Doing titles follow viewer access; hosted disconnection keeps its own vocabulary', async () => {
-  for (const [agent, approval, connection, contentAccess, work] of [
-    [{}, {}, 'live', 'read_write', 'working'],
-    [{}, { can_read: false, can_write: false }, 'live', 'none', 'working'],
-    [{ hosted_live: false }, {}, 'connection_off', 'none', 'disconnected'],
-    [{ revoked_at: at }, {}, 'removed', 'none', 'disconnected'],
-    [{ transport: 'local', token_live: true }, {}, 'live', 'read_write', 'working'],
-    [{ transport: 'local', key_off: true }, {}, 'key_off', 'none', 'disconnected'],
-    [{ transport: 'local', key_off: true, token_live: true }, {}, 'live', 'read_write', 'working'],
-    [{ transport: 'local', renewal_live: true }, {}, 'live', 'read_write', 'working'],
-    [{ transport: 'local', paused: true }, {}, 'paused', 'none', 'disconnected'],
-    [{ transport: 'local' }, {}, 'key_ended', 'none', 'disconnected'],
+  for (const [agent, operations, connection, contentAccess, work] of [
+    [{}, ['read', 'create', 'update'], 'live', 'read_write', 'working'],
+    [{}, [], 'live', 'none', 'working'],
+    [{ hosted_live: false }, ['read', 'create', 'update'], 'connection_off', 'none', 'disconnected'],
+    [{ revoked_at: at }, ['read', 'create', 'update'], 'removed', 'none', 'disconnected'],
+    [{ transport: 'local', token_live: true }, ['read', 'create', 'update'], 'live', 'read_write', 'working'],
+    [{ transport: 'local', key_off: true }, ['read', 'create', 'update'], 'key_off', 'none', 'disconnected'],
+    [{ transport: 'local', key_off: true, token_live: true }, ['read', 'create', 'update'], 'live', 'read_write', 'working'],
+    [{ transport: 'local', renewal_live: true }, ['read', 'create', 'update'], 'live', 'read_write', 'working'],
+    [{ transport: 'local', paused: true }, ['read', 'create', 'update'], 'paused', 'none', 'disconnected'],
+    [{ transport: 'local' }, ['read', 'create', 'update'], 'key_ended', 'none', 'disconnected'],
   ] as const) {
-    const queue = await readFixture([row(0, 'Viewer can read this')], [], agent, approval)({ kind: 'todo_queue', principal_id: principal }) as Row & { status: { work: string; facts: Row } };
+    const queue = await readFixture([row(0, 'Viewer can read this')], [], agent, operations)({ kind: 'todo_queue', principal_id: principal }) as Row & { status: { work: string; facts: Row } };
     assert.equal(queue.status.facts.connection, connection);
     assert.equal(queue.status.work, work);
     assert.equal(queue.content_access, contentAccess);
