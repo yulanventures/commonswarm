@@ -93,7 +93,7 @@ try {
   // a standing renewal grant bound to that device, and a root token T0 with a task/epoch binding and that grant (rows as
   // tests/p1-server/renewal-last-use.test.ts:70-80). T0 gets its first use from the real read route (a token is never
   // born used, SWARM_TOKEN_FIRST_USE_PRESET), because a pending token may not renew (predecessor_pending_first_use).
-  const seat = async (name, use=true) => {
+  const seat = async (name, use=true, boundDevice=null) => {
     const principal = id(), device = id(), run = id(), task = id(), lineage = id(), grant = id(), t0 = id();
     const raw = mintRaw(), hash = await hashOf(raw);
     await observer.begin(async (tx) => {
@@ -102,7 +102,7 @@ try {
       await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id) VALUES (${run}::uuid, ${principal}::uuid, ${device}::uuid)`;
       await tx`INSERT INTO swarm.renewal_grants (renewal_grant_id, workspace_id, principal_id, run_id, kind, max_successors, successors_used,
         horizon_expires_at, bound_device_id, created_by)
-        VALUES (${grant}::uuid, ${W}::uuid, ${principal}::uuid, ${run}::uuid, 'standing', NULL, 0, NULL, ${device}::uuid, ${owner}::uuid)`;
+        VALUES (${grant}::uuid, ${W}::uuid, ${principal}::uuid, ${run}::uuid, 'standing', NULL, 0, NULL, ${boundDevice ?? device}::uuid, ${owner}::uuid)`;
       await tx`INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, task_id, epoch, scopes, token_hash, expires_at, lineage_id,
         renewal_grant_id)
         VALUES (${t0}::uuid, ${principal}::uuid, ${run}::uuid, ${task}::uuid, 1, ${tx.json(['post_signal'])}::jsonb, ${hash},
@@ -364,11 +364,54 @@ try {
     const connectionFrom=overview=>overview.workspaces.find(w=>w.workspace_id===W)?.people
       .flatMap(person=>person.agents).find(a=>a.principal_id===readModels.principal)?.status.facts.connection;
     const overviewAs=async user=>observer.begin(async tx=>{
+      await tx`SET TRANSACTION READ ONLY`;
       await tx`SET LOCAL ROLE authenticated`;
       await tx`SELECT set_config('request.jwt.claims',${JSON.stringify({sub:user,role:'authenticated'})},true)`;
       const [row]=await tx`SELECT swarm_read.home_overview() AS value`;return row.value;
     });
     check('current local overview positive is live',connectionFrom(await overviewAs(owner))==='live');
+    // The same observable connection contract at both public read boundaries.
+    // Existing coverage only exercised live grants, not a dead bootstrap or
+    // historical first use that cannot authenticate the current frontier.
+    await observer`INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose)
+      VALUES(${W}::uuid,'shared') ON CONFLICT DO NOTHING`;
+    const queueFor=async principal=>{
+      const result=await command.handleHostedManagementCommand({command_id:id(),client_version:CLIENT_PROTOCOL_VERSION,
+        workspace_id:W,stream:{kind:'workspace'},command:{kind:'household_tool',tool:'todo_queue',
+          arguments:{seat:HOUSEHOLD_LOCAL_SEAT,principal_id:principal}}},
+        {userId:owner,email,displayName:'Read truth owner',identityVerified:true,interactiveAuthAtSeconds:null});
+      if(result.status!==200 || !result.body.queue?.status?.facts) throw Object.assign(new Error('queue boundary'),{code:'QUEUE_READ_CONTROL'});
+      return result.body.queue.status.facts.connection;
+    };
+    const wrongDevice=id();
+    await observer`INSERT INTO swarm.devices(device_id,user_id,label) VALUES(${wrongDevice}::uuid,${owner}::uuid,'Mismatched read fixture')`;
+    for(const variant of ['live-bootstrap','expired-unused','expired-used','pending','retired-history','predecessor-tombstone','elapsed','revoked','mismatched-device']) {
+      const fixture=await seat(`truth-${variant}`,!['live-bootstrap','expired-unused','mismatched-device'].includes(variant),
+        variant==='mismatched-device' ? wrongDevice:null);
+      let child;
+      if(['pending','retired-history','predecessor-tombstone'].includes(variant)) {
+        const issued=await renew(fixture.raw,id());child=JSON.parse(issued.text);
+        if(issued.status!==200 || !child.agent_token) throw Object.assign(new Error('truth successor'),{code:'TRUTH_SUCCESSOR'});
+        if(variant==='retired-history') {
+          if((await readAs(child.agent_token)).status!==200) throw Object.assign(new Error('truth use'),{code:'TRUTH_USE'});
+          await observer`UPDATE swarm.agent_tokens SET surrender_only=true WHERE token_id=${child.token_id}::uuid`;
+        }
+        if(variant==='predecessor-tombstone') await observer`INSERT INTO swarm.revocation_tombstones(kind,target_id,created_by)
+          VALUES('token',${fixture.t0}::uuid,${owner}::uuid)`;
+      }
+      if(!['live-bootstrap','mismatched-device'].includes(variant)) await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second'
+        WHERE renewal_grant_id=${fixture.grant}::uuid`;
+      if(variant==='elapsed') await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second'
+        WHERE renewal_grant_id=${fixture.grant}::uuid`;
+      if(variant==='revoked') await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp() WHERE renewal_grant_id=${fixture.grant}::uuid`;
+      const expected=['live-bootstrap','expired-used','pending'].includes(variant);
+      const overview=await overviewAs(owner);
+      const home=overview.workspaces.find(w=>w.workspace_id===W)?.people.flatMap(person=>person.agents)
+        .find(agent=>agent.principal_id===fixture.principal)?.status.facts.connection;
+      const queue=await queueFor(fixture.principal);
+      check(`current-proof-${variant}-home-and-queue`,home!==undefined && (home==='live')===expected && (queue==='live')===expected);
+    }
+
     // SQL fixture provenance permits the real owner-only conversion trigger.
     // Minting is outside this read-model contract; conversion, first-use and
     // overview results are produced by the actual database/runtime boundaries.

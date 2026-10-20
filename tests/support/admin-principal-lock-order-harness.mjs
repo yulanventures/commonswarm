@@ -58,7 +58,7 @@ const RACES = Object.freeze({
   [ADMIN_PAIR]: { parked: 'admin', waiting: 'admin' },
   ...Object.fromEntries(Object.values(ADMIN_CROSS).map((name) => [name, { parked: 'admin', waiting: 'admin' }])),
   [ADMIN_WITHDRAW]: { parked: 'admin', waiting: 'admin' },
-  ...Object.fromEntries(['delegated-local-parent-reversal','delegated-local-renewal-budget','delegated-local-parent-deadline','delegated-local-parent-narrowing','delegated-local-wait-removal-rollback','ordinary-local-compat-policy','local-resume-parent-order','local-resume-recovery-controls'].map(name=>[name,{parked:'admin',waiting:'admin'}])),
+  ...Object.fromEntries(['delegated-local-permanent-suspension','delegated-local-revocation-closure','delegated-local-parent-reversal','delegated-local-renewal-budget','delegated-local-parent-deadline','delegated-local-parent-narrowing','delegated-local-wait-removal-rollback','ordinary-local-compat-policy','local-resume-parent-order','local-resume-recovery-controls'].map(name=>[name,{parked:'admin',waiting:'admin'}])),
 });
 
 /** A refused target. Callers branch on `code`, never on the message. */
@@ -982,7 +982,7 @@ async function adminSide(ctx, fixture, label = 'admin', options = {}) {
     target_rules: { seat_ids: [], own_seats: true, grant_created_seats: true, recipient_user_ids: [owner.userId],
       recipient_connection_ids: [connection], transports: ['local', 'hosted_mcp'] },
     worker_scope_ceiling: ['post_signal'], role_ceiling: 'member',
-    renewal_limits: { ...policy.ADMIN_RENEWAL_CEILINGS, grant_kinds: ['timeboxed', 'standing'], principal_ids: [],
+    renewal_limits: { ...policy.ADMIN_RENEWAL_CEILINGS, grant_kinds: ['timeboxed', 'standing'], principal_ids: options.renewalPrincipalIds ?? [],
       successors_per_worker: 2, successors_per_grant: 2 },
     issuance_limits: { ...policy.ADMIN_ISSUANCE_CEILINGS, workspaces: 1 },
     expires_at: now + 86400000, refresh_deadline: now + 86400000,
@@ -1591,7 +1591,146 @@ async function delegatedLocalScenario(ctx,scenario) {
       ORDER BY kind,target_id`;
     return JSON.stringify({g,tokens,tombstones,spend:a.spend});
   };
-  if (scenario==='delegated-local-parent-reversal') {
+  if (scenario==='delegated-local-permanent-suspension') {
+    // Ordinary standing issuance and explicitly consented delegated renewal.
+    // No delegated-family conversion, preset first use, or ancestry mutation.
+    for (const mode of ['null-renew','future-renew','null-replace','future-replace','elapsed','revoked','parent-dead','deadline-wait']) {
+      const name=`permanent-${mode}-${ctx.tag}`;
+      const created=await manage(ctx,owner,workspaceId,{kind:'create_agent_principal',name});
+      if(created.status!==200 || !created.body.principal_id) fail('permanent_create_control');
+      const principal={principal_id:created.body.principal_id};
+      const side=await adminSide(ctx,{owner,workspaceId},`permanent-${mode}`,{renewalPrincipalIds:[principal.principal_id]});
+      const device=id();await observer`INSERT INTO swarm.devices(device_id,user_id,label) VALUES(${device}::uuid,${owner.userId}::uuid,'Permanent fixture')`;
+      const minted=await manage(ctx,owner,workspaceId,{kind:'mint_agent_token',principal_id:principal.principal_id,
+        run_id:id(),task_id:id(),epoch:1,device_id:device,ttl_ms:120000,scopes:['post_signal']});
+      if(minted.status!==200 || !minted.body.agent_token) fail('permanent_ordinary_mint');
+      const root={principal:principal.principal_id,token:minted.body.token_id,raw:minted.body.agent_token};
+      const [binding]=await observer`SELECT renewal_grant_id FROM swarm.agent_tokens WHERE token_id=${root.token}::uuid`;
+      root.grant=binding.renewal_grant_id;
+      if(!mode.includes('replace') && (await use(root.raw)).status!==200) fail('permanent_actual_first_use');
+      await observer`UPDATE swarm.renewal_grants SET suspended_at=clock_timestamp(),
+        connection_expires_at=CASE WHEN ${mode.startsWith('future')} THEN clock_timestamp()+interval '1 hour'
+          WHEN ${mode==='elapsed'} THEN clock_timestamp()-interval '1 second'
+          WHEN ${mode==='deadline-wait'} THEN clock_timestamp()+interval '3 seconds' ELSE NULL END
+        WHERE renewal_grant_id=${root.grant}::uuid`;
+      if(mode==='revoked') await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp() WHERE renewal_grant_id=${root.grant}::uuid`;
+      if(mode==='parent-dead') await observer`UPDATE swarm.admin_grants SET state='revoked',revoked_at=clock_timestamp() WHERE grant_id=${side.grant}::uuid`;
+      const before=await family(root);
+      const command=mode.includes('replace') ? {kind:'admin_replace_undelivered_seat_credential',grant_id:side.grant,
+        workspace_id:workspaceId,principal_id:root.principal,credential_id:root.token,recipient_connection_id:side.connection}
+        : renewCommand(side,root);
+      let pending;
+      if(mode==='deadline-wait') {
+        await observer.begin(async tx=>{
+          const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
+          await tx`SELECT renewal_grant_id FROM swarm.renewal_grants WHERE renewal_grant_id=${root.grant}::uuid FOR UPDATE`;
+          pending=side.invoke(command,{worker:true});
+          check('permanent-deadline-observed-family-wait',await waitForBlocked(observer,Number(pid),async()=>true,2000)!==null);
+          await new Promise(resolve=>setTimeout(resolve,3200));
+        });
+      } else pending=side.invoke(command,{worker:true});
+      const result=await pending;
+      const positive=mode.startsWith('null') || mode.startsWith('future');
+      check(`permanent-${mode}-delivery`,positive ? result.result.status===200 && result.calls===1 && result.delivery!==null
+        : result.result.status===403 && result.calls===0);
+      if(!positive) check(`permanent-${mode}-no-effects`,await family(root)===before);
+    }
+  } else if (scenario==='delegated-local-revocation-closure') {
+    const issued=await admin.invoke(renewCommand(admin,seat),{worker:true});
+    if(issued.result.status!==200 || !issued.delivery || (await use(issued.delivery.credential)).status!==200) fail('legal_used_child_control');
+    const child=issued.delivery.credential_id;
+    await observer.begin(async tx=>{
+      await tx`SET LOCAL ROLE swarm_command`;
+      const old5=await tx`SELECT token_id FROM swarm.discover_local_target_ids(${workspaceId}::uuid,NULL::uuid,ARRAY[]::uuid[],ARRAY[${seat.token}::uuid],false)`;
+      const old6=await tx`SELECT token_id FROM swarm.discover_local_target_ids(${workspaceId}::uuid,NULL::uuid,ARRAY[]::uuid[],ARRAY[${seat.token}::uuid],false,NULL::uuid)`;
+      const revoking=await tx`SELECT token_id FROM swarm.discover_local_target_ids(${workspaceId}::uuid,NULL::uuid,ARRAY[]::uuid[],ARRAY[${seat.token}::uuid],false,NULL::uuid,true)`;
+      check('old-five-six-callers-retain-proof-closure',JSON.stringify(old5)===JSON.stringify(old6) && !old5.some(t=>t.token_id===child));
+      check('revocation-selector-includes-legal-used-child',revoking.some(t=>t.token_id===child) && revoking.some(t=>t.token_id===seat.token));
+    });
+    const revoke={kind:'admin_revoke_seat_credential',grant_id:admin.grant,workspace_id:workspaceId,
+      principal_id:seat.principal,credential_id:seat.token,reason_code:'owner_requested'};
+    let pending;
+    await observer.begin(async tx=>{
+      const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
+      await tx`SELECT token_id FROM swarm.agent_tokens WHERE token_id=${child}::uuid FOR UPDATE`;
+      pending=admin.invoke(revoke);
+      check('used-direct-child-observed-wait',await waitForBlocked(observer,Number(pid),async()=>true,3500)!==null);
+      let blocked=false;
+      try { await observer.begin(async probe=>{
+        await probe`SELECT principal_id FROM swarm.agent_principals WHERE principal_id=${seat.principal}::uuid FOR SHARE NOWAIT`;
+      }); } catch(error) { blocked=sqlstate(error)==='55P03'; }
+      check('principal-update-preheld-before-used-child',blocked);
+    });
+    const revoked=await pending;
+    const rows=await observer`SELECT token_id,revoked_at FROM swarm.agent_tokens WHERE token_id=ANY(${[seat.token,child]}::uuid[])`;
+    check('credential-revoke-ends-both-legal-tokens',revoked.result.status===200 && rows.length===2 && rows.every(t=>t.revoked_at!==null));
+    check('credential-lineage-tombstone',(await observer`SELECT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z
+      JOIN swarm.agent_tokens t ON t.lineage_id=z.target_id WHERE z.kind='lineage' AND t.token_id=${seat.token}::uuid) AS ok`)[0].ok);
+    // Seat revocation must also end a genuinely ungranted legacy credential.
+    const residual=await provision(admin,'residual'),run=id(),device=id(),token=id(),lineage=id();
+    const raw=`swm_agt_${base64url(randomBytes(32))}`,hash=new Uint8Array(createHash('sha256').update(raw).digest());
+    await observer`INSERT INTO swarm.devices(device_id,user_id,label) VALUES(${device}::uuid,${owner.userId}::uuid,'Residual fixture')`;
+    await observer`INSERT INTO swarm.agent_runs(run_id,principal_id,device_id) VALUES(${run}::uuid,${residual.principal}::uuid,${device}::uuid)`;
+    await observer`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,task_id,epoch,scopes,token_hash,expires_at,lineage_id,recipient_connection_id)
+      VALUES(${token}::uuid,${residual.principal}::uuid,${run}::uuid,${id()}::uuid,1,${observer.json(['post_signal'])},${hash},clock_timestamp()+interval '1 hour',${lineage}::uuid,${admin.connection}::uuid)`;
+    if((await use(raw)).status!==200) fail('ungranted_residual_runtime_control');
+    const extra=[];
+    for(const mode of ['active-family','prior-grant']) {
+      // Canonical legacy rows, including a historically revoked family with
+      // an uncleared current root. No trigger is disabled or ancestry edited.
+      const familyId=id(),runId=id(),tokenId=id(),lineageId=id();
+      const secret=`swm_agt_${base64url(randomBytes(32))}`,digest=new Uint8Array(createHash('sha256').update(secret).digest());
+      await observer`INSERT INTO swarm.agent_runs(run_id,principal_id,device_id)
+        VALUES(${runId}::uuid,${residual.principal}::uuid,${device}::uuid)`;
+      await observer`INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,kind,max_successors,
+        horizon_expires_at,bound_device_id,created_by,revoked_at)
+        VALUES(${familyId}::uuid,${workspaceId}::uuid,${residual.principal}::uuid,${runId}::uuid,'standing',NULL,NULL,
+          ${device}::uuid,${owner.userId}::uuid,CASE WHEN ${mode==='prior-grant'} THEN clock_timestamp() ELSE NULL END)`;
+      await observer`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,task_id,epoch,scopes,token_hash,
+        expires_at,lineage_id,renewal_grant_id,recipient_connection_id)
+        VALUES(${tokenId}::uuid,${residual.principal}::uuid,${runId}::uuid,${id()}::uuid,1,${observer.json(['post_signal'])},
+          ${digest},clock_timestamp()+interval '1 hour',${lineageId}::uuid,${familyId}::uuid,${admin.connection}::uuid)`;
+      if(mode==='active-family' && (await use(secret)).status!==200) fail('second_active_family_control');
+      extra.push(tokenId);
+    }
+
+    const ended=await admin.invoke({kind:'admin_revoke_seat',grant_id:admin.grant,workspace_id:workspaceId,
+      principal_id:residual.principal,reason_code:'owner_requested'});
+    const [facts]=await observer`SELECT t.revoked_at IS NOT NULL AS ended,
+      EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='token' AND z.target_id=t.token_id) AS token_tomb,
+      EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='lineage' AND z.target_id=t.lineage_id) AS lineage_tomb,
+      NOT EXISTS(SELECT 1 FROM swarm.renewal_grants g WHERE g.principal_id=t.principal_id AND g.revoked_at IS NULL) AS grants_ended
+      FROM swarm.agent_tokens t WHERE t.token_id=${token}::uuid`;
+    check('seat-revoke-ends-ungranted-residual-and-all-grants',ended.result.status===200 && facts.ended && facts.token_tomb && facts.lineage_tomb && facts.grants_ended);
+    check('residual-no-longer-authenticates',(await use(raw)).status===403);
+    const [extraEffects]=await observer`SELECT count(*)=2 AND bool_and(t.revoked_at IS NOT NULL) AS ended,
+      bool_and(EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='lineage' AND z.target_id=t.lineage_id)) AS tombs
+      FROM swarm.agent_tokens t WHERE token_id=ANY(${extra}::uuid[])`;
+    check('all-active-and-prior-grant-residuals-ended',extraEffects.ended && extraEffects.tombs);
+
+    const lateAdmin=await adminSide(ctx,{owner,workspaceId},'revoke-final-fence');
+    const late=await provision(lateAdmin,'late-revoke');
+    await observer`UPDATE swarm.admin_grants SET expires_at=clock_timestamp()+interval '3 seconds'
+      WHERE grant_id=${lateAdmin.grant}::uuid`;
+    const before=await family(late);let latePending;
+    await observer.begin(async tx=>{
+      const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
+      await tx`LOCK TABLE swarm.admin_command_results IN SHARE MODE`;
+      latePending=lateAdmin.invoke({kind:'admin_revoke_seat',grant_id:lateAdmin.grant,workspace_id:workspaceId,
+        principal_id:late.principal,reason_code:'owner_requested'});
+      check('revocation-final-ledger-wait-observed',await waitForBlocked(observer,Number(pid),async()=>true,2000)!==null);
+      await new Promise(resolve=>setTimeout(resolve,3200));
+    });
+    const lateResult=await latePending;
+    check('final-admin-expiry-rolls-back-revocation',lateResult.result.status!==200 && await family(late)===before
+      && (await observer`SELECT revoked_at IS NULL AS live FROM swarm.agent_principals WHERE principal_id=${late.principal}::uuid`)[0].live);
+
+    const [roles]=await observer`SELECT has_function_privilege('swarm_command','swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean,uuid,boolean)','EXECUTE') AS command,
+      NOT has_function_privilege('authenticated','swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean,uuid,boolean)','EXECUTE') AS human_denied,
+      NOT EXISTS(SELECT 1 FROM pg_roles r WHERE r.rolname LIKE '%oauth%' AND
+        has_function_privilege(r.oid,'swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean,uuid,boolean)','EXECUTE')) AS oauth_denied`;
+    check('internal-selector-command-only-roles',roles.command && roles.human_denied && roles.oauth_denied);
+  } else if (scenario==='delegated-local-parent-reversal') {
     const other=await human(ctx,'m3-other');await member(ctx,workspaceId,other,'admin');
     const second=await adminSide(ctx,{owner:other,workspaceId},'m3-second');
     await provision(second,'second');

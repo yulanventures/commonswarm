@@ -227,7 +227,7 @@ test(ADMIN_WITHDRAW, { timeout: 240_000 }, async () => {
 // Existing X2 tests create principals, but never issue/renew a bounded worker
 // credential. These cases protect parent ordering, budget, and rollback at that
 // distinct production boundary, with a live control in every invocation.
-for (const name of ["delegated-local-parent-reversal","delegated-local-renewal-budget",
+for (const name of ["delegated-local-permanent-suspension","delegated-local-revocation-closure","delegated-local-parent-reversal","delegated-local-renewal-budget",
   "delegated-local-parent-deadline","delegated-local-parent-narrowing",
   "delegated-local-wait-removal-rollback","ordinary-local-compat-policy",
   "local-resume-parent-order","local-resume-recovery-controls"]) {

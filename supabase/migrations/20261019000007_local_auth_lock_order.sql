@@ -76,7 +76,7 @@ $fn$;
 
 CREATE FUNCTION swarm.discover_local_target_ids(
   p_workspace_id uuid, p_target_user_id uuid, p_principal_ids uuid[],
-  p_token_ids uuid[], p_all_workspace boolean, p_resume_family_id uuid
+  p_token_ids uuid[], p_all_workspace boolean, p_resume_family_id uuid, p_revoke_token boolean
 )
 RETURNS TABLE (
   token_id uuid,
@@ -97,7 +97,9 @@ DECLARE
   cycle_found boolean;
 BEGIN
   IF p_workspace_id IS NULL OR p_principal_ids IS NULL OR p_token_ids IS NULL
-    OR p_all_workspace IS NULL
+    OR p_all_workspace IS NULL OR p_revoke_token IS NULL
+    OR (p_revoke_token AND (p_resume_family_id IS NOT NULL OR p_target_user_id IS NOT NULL
+      OR p_all_workspace OR cardinality(p_principal_ids)<>0 OR cardinality(p_token_ids)<>1))
     OR array_position(p_principal_ids,NULL) IS NOT NULL
     OR array_position(p_token_ids,NULL) IS NOT NULL
     OR cardinality(p_principal_ids)>64 OR cardinality(p_token_ids)>64
@@ -143,7 +145,8 @@ BEGIN
       JOIN swarm.agent_tokens t ON t.token_id=c.token_id WHERE t.predecessor_token_id IS NOT NULL
     UNION SELECT child.token_id FROM current_tokens c JOIN swarm.agent_tokens child
       ON child.predecessor_token_id=c.token_id
-      WHERE child.revoked_at IS NULL AND child.first_used_at IS NULL
+      WHERE child.revoked_at IS NULL AND (child.first_used_at IS NULL OR p_revoke_token)
+        AND (NOT p_revoke_token OR child.lineage_id=(SELECT t.lineage_id FROM swarm.agent_tokens t WHERE t.token_id=c.token_id))
   ), rows AS (
     SELECT t.token_id,t.predecessor_token_id,t.renewal_grant_id,t.principal_id,
       t.run_id,r.device_id,p.owner_user_id,p.workspace_id,t.lineage_id,
@@ -244,6 +247,28 @@ $fn$;
 
 CREATE FUNCTION swarm.discover_local_target_ids(
   p_workspace_id uuid, p_target_user_id uuid, p_principal_ids uuid[],
+  p_token_ids uuid[], p_all_workspace boolean, p_resume_family_id uuid
+)
+RETURNS TABLE (
+  token_id uuid,
+  predecessor_token_id uuid,
+  renewal_grant_id uuid,
+  principal_id uuid,
+  run_id uuid,
+  device_id uuid,
+  owner_user_id uuid,
+  workspace_id uuid,
+  lineage_id uuid,
+  token_parent_admin_grant_id uuid,
+  principal_parent_admin_grant_id uuid
+)
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path=pg_catalog AS $fn$
+  SELECT * FROM swarm.discover_local_target_ids(p_workspace_id,p_target_user_id,
+    p_principal_ids,p_token_ids,p_all_workspace,p_resume_family_id,false)
+$fn$;
+
+CREATE FUNCTION swarm.discover_local_target_ids(
+  p_workspace_id uuid, p_target_user_id uuid, p_principal_ids uuid[],
   p_token_ids uuid[], p_all_workspace boolean
 )
 RETURNS TABLE (
@@ -315,14 +340,17 @@ $fn$;
 ALTER FUNCTION swarm.discover_local_credential_ids(bytea) OWNER TO swarm_admin;
 ALTER FUNCTION swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean) OWNER TO swarm_admin;
 ALTER FUNCTION swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean,uuid) OWNER TO swarm_admin;
+ALTER FUNCTION swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean,uuid,boolean) OWNER TO swarm_admin;
 ALTER FUNCTION swarm.discover_local_join_ids(bytea,uuid) OWNER TO swarm_admin;
 REVOKE ALL ON FUNCTION swarm.discover_local_credential_ids(bytea),
   swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean),
   swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean,uuid),
+  swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean,uuid,boolean),
   swarm.discover_local_join_ids(bytea,uuid) FROM PUBLIC,anon,authenticated,swarm_read,swarm_command;
 GRANT EXECUTE ON FUNCTION swarm.discover_local_credential_ids(bytea),
   swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean),
   swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean,uuid),
+  swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean,uuid,boolean),
   swarm.discover_local_join_ids(bytea,uuid) TO swarm_command;
 
 -- Narrow v5 amendment: exact family binding, immutable after first assignment.

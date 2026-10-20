@@ -203,9 +203,10 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
     allowMissingWorkspace:plannedRoutine?.kind==='admin_create_workspace',
     ...(plannedRoutine?.kind==='admin_revoke_seat' && routinePrincipal
       ? {revocation:{principal:routinePrincipal}}
+      : plannedRoutine?.kind==='admin_revoke_seat_credential' && routineToken ? {revocation:{token:routineToken}}
       : routineToken ? {target:{principals:[],tokens:[routineToken]}}
       : routinePrincipal ? {target:{principals:[routinePrincipal],tokens:[]}}:{}),
-    principalMode:plannedRoutine?.kind==='admin_revoke_seat' ? 'update':'share',sessionMode:'share',
+    principalMode:plannedRoutine?.kind==='admin_revoke_seat' || plannedRoutine?.kind==='admin_revoke_seat_credential' ? 'update':'share',sessionMode:'share',
     hostedMode:plannedRoutine?.kind==='admin_revoke_seat' ? 'update':'share',
     admin:{owner:token.owner_user_id,grant:token.admin_grant_id,recipients},
   }) : null;
@@ -518,7 +519,7 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
     await adminRequestAudit(tx, oauth, auditKind, requestId, decision.ok ? 'committed' : 'refused', decision.ok ? null : 'forbidden');
     audited = true;
   }
-  const workerDelivery = routineCommand && routineContext ? await applyAdminRoutine(tx, routineCommand, routineContext, decision as AdminRoutineDecision) : undefined;
+  const workerDelivery = routineCommand && routineContext ? await applyAdminRoutine(tx, routineCommand, routineContext, decision as AdminRoutineDecision, localPlan ?? undefined) : undefined;
   // Grant and approval triggers fence linked OAuth families in this same transaction.
   const next = await persistEvents(tx, owner, state, decision.events);
   for (const event of decision.events) {

@@ -634,6 +634,11 @@ export async function planLocalOperation(tx: Sql, options: {
       const union=new Map([...bindings,...extra].map(r=>[JSON.stringify([r.token_id,r.principal_id,r.renewal_grant_id]),r]));
       bindings=[...union.values()];
     }
+    if (workspace && options.revocation && 'token' in options.revocation) {
+      const revoked=await tx<LocalCredentialIds[]>`SELECT * FROM swarm.discover_local_target_ids(
+        ${workspace}::uuid,NULL::uuid,ARRAY[]::uuid[],ARRAY[${options.revocation.token}::uuid],false,NULL::uuid,true)`;
+      bindings=[...new Map([...bindings,...revoked].map(r=>[JSON.stringify(r),r])).values()];
+    }
     if (workspace && options.resumeFamily) {
       const family=await tx<LocalCredentialIds[]>`SELECT * FROM swarm.discover_local_target_ids(
         ${workspace}::uuid,NULL::uuid,ARRAY[]::uuid[],ARRAY[]::uuid[],false,${options.resumeFamily}::uuid)`;

@@ -54,6 +54,11 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
     assert.equal(result.stage, "complete", `probe stopped at ${result.stage}: ${result.error ?? "unknown"}`);
     assert.ok(result.tables_counted > 0, "enumerated full database table set");
     assert.deepEqual(result.checks?.filter((check) => !check.ok), [], "owner-boundary contracts failed");
+    if(mode==='permanence') {
+      for(const variant of ['live-bootstrap','expired-unused','expired-used','pending','retired-history','predecessor-tombstone','elapsed','revoked','mismatched-device'])
+        assert.ok(result.checks?.some(check=>check.name===`current-proof-${variant}-home-and-queue` && check.ok),
+          `${variant}: both public read boundaries must return the expected connection truth`);
+    }
     assert.equal(result.verdict, "PASS");
     assert.equal(exit.code, 0);
   } finally {
