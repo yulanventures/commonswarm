@@ -51,7 +51,7 @@ export const FILE_COMMAND_KINDS = [
 // §4 caps. Refusals carry the number: a bare status teaches nothing.
 export const FILE_MAX_VERSION_BYTES = 25 * 1024 * 1024;
 export const FILE_WORKSPACE_MAX_BYTES = 1024 * 1024 * 1024;
-export const FILE_WORKSPACE_MAX_NAMES = 500;
+export const FILE_WORKSPACE_MAX_NAMES = 5000;
 export const FILE_MAX_VERSIONS_PER_NAME = BRAIN_LIVE_VERSION_LIMIT;
 // Per identity (agent principal or user), on file_version_create. Brain topics are files, so
 // `brain put` and signal attachments draw on the same bucket. 30 tripped on 2026-09-10 while

@@ -24,10 +24,12 @@ class RollbackProof extends Error {}
 function fixture() {
   const owner = randomUUID(), other = randomUUID(), workspace = randomUUID(), foreign = randomUUID(), consent = randomUUID();
   const grant = randomUUID(), principal = randomUUID(), sibling = randomUUID(), connection = randomUUID();
+  const handle = `seat_${principal.replaceAll('-', '').slice(0, 22)}`;
   const setup = `
     INSERT INTO auth.users(id,aud,role,email) VALUES ('${owner}','authenticated','authenticated','${owner}@example.test'),('${other}','authenticated','authenticated','${other}@example.test');
     INSERT INTO swarm.users(user_id,display_name) VALUES ('${owner}','To-do owner'),('${other}','To-do reader');
     INSERT INTO swarm.workspaces(workspace_id,name,created_by) VALUES ('${workspace}','Synthetic to-dos','${owner}'),('${foreign}','Synthetic foreign','${other}');
+    INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES ('${randomUUID()}','${workspace}','workspace');
     INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES ('${workspace}','${owner}','owner'),('${workspace}','${other}','member'),('${foreign}','${other}','owner');
     INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose) VALUES ('${workspace}','shared'),('${foreign}','shared');
     INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at) VALUES ('${workspace}','${owner}','editor','${consent}',clock_timestamp()),('${workspace}','${other}','reader','${randomUUID()}',clock_timestamp());
@@ -36,6 +38,8 @@ function fixture() {
       VALUES ('${grant}','synthetic-${grant}','${owner}','${workspace}','synthetic-client','https://mcp.commonswarm.com/mcp',ARRAY['${workspace}']::uuid[],decode(repeat('a',64),'hex'),'synthetic-consent','active',clock_timestamp(),clock_timestamp());
     INSERT INTO swarm.hosted_mcp_grant_workspaces(grant_id,workspace_id,owner_user_id,manifest_digest,consent_receipt_id,consented_at) VALUES ('${grant}','${workspace}','${owner}',decode(repeat('a',64),'hex'),'${randomUUID()}',clock_timestamp());
     INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,created_at) VALUES ('${connection}','${grant}','${workspace}','${owner}','${principal}','Synthetic first',clock_timestamp());
+    INSERT INTO swarm.hosted_mcp_seat_handles(handle,seat_id,grant_id,workspace_id,principal_id,created_at)
+      VALUES ('${handle}','${connection}','${grant}','${workspace}','${principal}',clock_timestamp());
     INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at,hosted_grant_id)
       VALUES ('${connection}','${grant}','${workspace}','${principal}','${owner}','shared',ARRAY['read','create','update'],'${consent}',NULL,'${grant}');`;
   const human: HouseholdIdentity = { user_id: owner, principal_id: null, run_id: null, connection: null };

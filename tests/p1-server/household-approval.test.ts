@@ -16,6 +16,7 @@ function hostedFixture(workspace: string, owner: string) {
   // Migration 20261004000010 allows one live hosted seat per name in a workspace, so each
   // fixture seat (one per member in the personal-boundary case) gets its own name.
   const name = `Synthetic agent ${principal.slice(0, 8)}`;
+  const handle = `seat_${principal.replaceAll("-", "").slice(0, 22)}`;
   const setup = `
     INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only)
       VALUES ('${principal}','${workspace}','${owner}','${name}','hosted_mcp',true);
@@ -27,6 +28,8 @@ function hostedFixture(workspace: string, owner: string) {
       VALUES ('${grant}','${workspace}','${owner}',decode(repeat('a',64),'hex'),'${randomUUID()}',clock_timestamp());
     INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,created_at)
       VALUES ('${connection}','${grant}','${workspace}','${owner}','${principal}','${name}',clock_timestamp());
+    INSERT INTO swarm.hosted_mcp_seat_handles(handle,seat_id,grant_id,workspace_id,principal_id,created_at)
+      VALUES ('${handle}','${connection}','${grant}','${workspace}','${principal}',clock_timestamp());
   `;
   return { principal, connection, grant, name, setup };
 }
@@ -149,6 +152,8 @@ test('real command adapters approve without role rewrite, list exact active appr
       // Compare complete persisted rows so a refusal cannot silently insert,
       // update, delete, audit or consume an idempotency key.
       const writes = async (sql: typeof tx) => ({
+        restrictions: await sql`SELECT to_jsonb(r)::text AS row FROM swarm.household_hosted_content_restrictions r
+          WHERE workspace_id=${f.workspace}::uuid ORDER BY grant_id`,
         connections: await sql`SELECT to_jsonb(c)::text AS row FROM swarm.household_content_connections c
           WHERE workspace_id=${f.workspace}::uuid ORDER BY connection_id,grant_id,principal_id`,
         audits: await sql`SELECT to_jsonb(a)::text AS row FROM swarm.household_object_audit a
@@ -229,7 +234,7 @@ test('real command adapters approve without role rewrite, list exact active appr
       assert.deepEqual(approved, { status: 'committed', operations: ['read', 'update'], expires_at: null });
       await tx`RESET ROLE`;
       assert.deepEqual(await snapshot(), before);
-      const [audit] = await tx`SELECT count(*)::int AS count, min(command_kind) AS kind FROM swarm.household_object_audit WHERE workspace_id=${f.workspace}::uuid`;
+      const [audit] = await tx`SELECT count(*)::int AS count, min(command_kind) AS kind FROM swarm.household_object_audit WHERE workspace_id=${f.workspace}::uuid AND reason_code='household_content_connections'`;
       assert.deepEqual(audit, { count: 1, kind: 'household_approve_connection' });
       const [row] = await tx`SELECT expires_at, consent_receipt_id FROM swarm.household_content_connections WHERE connection_id=${f.connection}::uuid`;
       assert.deepEqual(row, { expires_at: null, consent_receipt_id: f.consent });
@@ -239,7 +244,9 @@ test('real command adapters approve without role rewrite, list exact active appr
         { ...input, connection: { ...connection, operations: ['read'] } }, yes), { status: 'refused', reason: 'request_id_reused' });
       const listed = await api.executeHouseholdSurface(tx, f.workspace, actor, randomUUID(), { kind: 'household_connections' }, yes);
       assert.deepEqual(listed, { status: 'ok', connections: [{ kind: 'hosted', connection_id: f.connection, grant_id: f.grant, principal_id: f.principal,
-        name: f.name, approval: { operations: ['read', 'update'], expires_at: null } }] });
+        name: f.name, approval: { operations: ['read', 'update'], expires_at: null },
+        effective_access: { source: 'explicit', operations: ['read', 'update'], restricted: true,
+          restrictions: [{ operations: ['read', 'update'], origin: 'human_allow', principal_id: f.principal }] } }] });
       const withdrawInput = { kind: 'household_withdraw_connection', principal_id: f.principal };
       await tx`RESET ROLE`;
       await t.test('withdraw another member\'s agent refuses connection_access_refused without writes and preserves their active approval', async () => {
@@ -283,7 +290,7 @@ test('real command adapters approve without role rewrite, list exact active appr
       assert.deepEqual(await api.approveHouseholdConnection(tx, f.workspace, actor, randomUUID(), readInput, yes),
         { status: 'committed', operations: ['read'], expires_at: null });
       await tx`RESET ROLE`;
-      const [reapprovedAudit] = await tx`SELECT count(*)::int AS count FROM swarm.household_object_audit WHERE workspace_id=${f.workspace}::uuid AND command_kind='household_approve_connection'`;
+      const [reapprovedAudit] = await tx`SELECT count(*)::int AS count FROM swarm.household_object_audit WHERE workspace_id=${f.workspace}::uuid AND command_kind='household_approve_connection' AND reason_code='household_content_connections'`;
       assert.equal(reapprovedAudit!.count, 2, 'each approval and reapproval appends exactly one audit');
       await tx`SET LOCAL ROLE swarm_command`;
       // Each write path must reach the final credential check, then roll back
@@ -332,7 +339,7 @@ test('real command adapters approve without role rewrite, list exact active appr
         credential: { kind: 'agent', connection: { connection_id: f.connection, grant_id: f.grant, principal_id: f.principal, workspace_id: f.workspace, owner_user_id: f.owner, purpose: 'shared',
           operations: ['read'], expires_at: null, revoked_at: new Date(withdrawn!.revoked_at as string).getTime() } } };
       assert.equal(householdAccessRefusal(access, f.workspace, 'read', Date.now()), 'connection_access_refused');
-      const [withdrawAudit] = await tx`SELECT count(*)::int AS count FROM swarm.household_object_audit WHERE workspace_id=${f.workspace}::uuid AND command_kind='household_withdraw_connection'`;
+      const [withdrawAudit] = await tx`SELECT count(*)::int AS count FROM swarm.household_object_audit WHERE workspace_id=${f.workspace}::uuid AND command_kind='household_withdraw_connection' AND reason_code='household_content_connections'`;
       assert.equal(withdrawAudit!.count, 2, 'one withdraw audit per active connection');
       const [expiredRemains] = await tx`SELECT revoked_at FROM swarm.household_content_connections
         WHERE connection_id=${f.connection}::uuid AND grant_id=${decoys[0]!.grant_id}::uuid`;

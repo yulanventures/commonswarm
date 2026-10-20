@@ -155,9 +155,19 @@ test("edge router admits hosted to-do and list tools only with the storage brief
   const title = async (handle: string) => ((await call(on, live, "todo_read", { seat: handle, todo_id: todoId })).todo as { title?: string }).title;
   assert.equal(await title(approved), "H6 shared todo");
   assert.equal((await call(on, live, "whoami", { seat: unapproved })).handle, unapproved);
+  assert.equal(await title(unapproved), "H6 shared todo", "current owner inherits without manual approval");
+  const [missingApproval] = await sql`SELECT count(*)::int AS n FROM swarm.household_content_connections
+    WHERE workspace_id=${workspace}::uuid AND principal_id=${other}::uuid`;
+  assert.equal(missingApproval!.n, 0, "inheritance invents no approval");
+  // The distinct unapproved seat now belongs to a nonowner. Its valid hosted
+  // identity remains usable, but content still requires explicit approval.
+  await sql`UPDATE swarm.memberships SET role='member' WHERE workspace_id=${workspace}::uuid AND user_id=${owner}::uuid`;
+  assert.equal((await call(on, live, "whoami", { seat: unapproved })).handle, unapproved);
   const refusal = await call(on, live, "todo_read", { seat: unapproved, todo_id: todoId });
   assert.deepEqual([refusal.status, refusal.reason, refusal.next_action], ["refused", "workspace_access_refused", householdRefusalNextStep("workspace_access_refused")]);
   assert.equal(await title(approved), "H6 shared todo");
+  await sql`UPDATE swarm.memberships SET role='owner' WHERE workspace_id=${workspace}::uuid AND user_id=${owner}::uuid`;
+  assert.equal(await title(unapproved), "H6 shared todo", "restored owner inherits again");
   assert.equal(((await call(on, live, "list_read", { seat: approved, object_id: "h6list" })).content as { items: { text: string }[] }).items[0]?.text, MARKER);
   // The storage-absent fail-closed path is proven at worker level by tests/household-lazy-storage.test.ts ("authorized dispatch leaves storage untouched until a blob read and retains revocation checks") because production main boot requires the key.
 });
