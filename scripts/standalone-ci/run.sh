@@ -332,7 +332,7 @@ with (state / 'queue.lock').open('a') as lock:
                     bounded(['git', '-C', str(work), 'remote', 'set-url', 'origin', 'https://github.com/yulanventures/commonswarm.git'])
                     bounded(['docker', 'network', 'create', '--label', label, run_id])
                     # Port conflicts are private to this fresh daemon/network namespace.
-                    bounded(['docker', 'run', '-d', '--name', daemon, '--label', label, '--network', run_id, '--privileged', '--memory=2g',
+                    bounded(['docker', 'run', '-d', '--name', daemon, '--label', label, '--label', 'owner=cswarm-lead', '--label', 'project=commonswarm', '--label', f'job={run_id}', '--network', run_id, '--privileged', '--memory=2g',
                              '--mount', f'type=bind,src={work},dst=/work',
                              '--mount', f'type=bind,src={tmp},dst=/tmp',
                              '--mount', f'type=bind,src={tmp},dst=/private/tmp',
@@ -348,7 +348,7 @@ with (state / 'queue.lock').open('a') as lock:
                                 -m conntrack ! --ctstate ESTABLISHED,RELATED -j DROP
                         done
                     '''])
-                    suite_command = ['docker', 'run', '--name', worker, '--label', label,
+                    suite_command = ['docker', 'run', '--name', worker, '--label', label, '--label', 'owner=cswarm-lead', '--label', 'project=commonswarm', '--label', f'job={run_id}',
                              '--memory=4g', '--network', 'container:' + daemon, '--user', '0' if suite == 'box-dry-run' else 'ciworker',
                              *(['--tmpfs', '/run:rw,mode=755'] if suite == 'box-dry-run' else []),
                              '--mount', f'type=bind,src={work},dst=/work',
@@ -402,7 +402,7 @@ with (state / 'queue.lock').open('a') as lock:
                     # Root fixtures and nested services can leave root-owned files,
                     # including receipt artifacts. Reclaim only this run's mount.
                     try:
-                        cmd(['docker', 'run', '--name', cleaner, '--label', label, '--network', 'none', '--user', '0',
+                        cmd(['docker', 'run', '--name', cleaner, '--label', label, '--label', 'owner=cswarm-lead', '--label', 'project=commonswarm', '--label', f'job={run_id}', '--network', 'none', '--user', '0',
                              '--mount', f'type=bind,src={artifacts},dst=/receipt',
                              '--mount', f'type=bind,src={scratch},dst=/scratch', cfg['worker_image'],
                              'chown', '-R', f'{os.getuid()}:{os.getgid()}', '/receipt', '/scratch'], stdout=log, stderr=log, timeout=60)
