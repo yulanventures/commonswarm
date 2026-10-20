@@ -97,8 +97,15 @@ async function lockedCredentialFacts(tx:Sql,tokenHash:Uint8Array,exact:LocalCred
       r.ended_at AS run_ended_at,d.revoked_at AS device_revoked_at,
       t.expires_at>clock_timestamp() AS unexpired,p.managed_at,p.transport,
       t.first_used_at IS NULL AS first_use,
-      (g.kind='standing' AND g.connection_expires_at IS NULL AND g.connection_expired_at IS NULL
-        AND g.revoked_at IS NULL AND t.first_used_at IS NOT NULL
+      (g.kind='standing' AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
+        AND g.connection_expired_at IS NULL AND g.revoked_at IS NULL
+        AND (t.first_used_at IS NOT NULL OR EXISTS(SELECT 1 FROM swarm.agent_tokens predecessor
+          WHERE predecessor.token_id=t.predecessor_token_id AND predecessor.first_used_at IS NOT NULL
+            AND predecessor.revoked_at IS NULL AND NOT predecessor.surrender_only
+            AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z
+              WHERE z.kind='token' AND z.target_id=predecessor.token_id)
+            AND ROW(predecessor.principal_id,predecessor.run_id,predecessor.renewal_grant_id,predecessor.lineage_id,predecessor.parent_admin_grant_id)
+              IS NOT DISTINCT FROM ROW(t.principal_id,t.run_id,t.renewal_grant_id,t.lineage_id,t.parent_admin_grant_id)))
         AND NOT EXISTS(SELECT 1 FROM swarm.agent_tokens child WHERE child.predecessor_token_id=t.token_id
           AND child.revoked_at IS NULL AND child.first_used_at IS NOT NULL)) AS eligible_renewal
     FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING(principal_id)
@@ -128,15 +135,18 @@ async function lockedCredentialFacts(tx:Sql,tokenHash:Uint8Array,exact:LocalCred
     return null;
   }
   if (!agent.unexpired && !(allowExpiredRenewal && agent.eligible_renewal)) return null;
-  if (stampUse && agent.unexpired && agent.first_use) {
+  const recoverPending = allowExpiredRenewal && !agent.unexpired && agent.eligible_renewal && agent.first_use;
+  if (stampUse && (agent.unexpired || recoverPending) && agent.first_use) {
     const [clock]=await tx<{now:Date}[]>`SELECT clock_timestamp() AS now`;
     const stamped=await tx`UPDATE swarm.agent_tokens SET first_used_at=${clock!.now}
       WHERE token_id=${agent.token_id}::uuid AND first_used_at IS NULL
-        AND revoked_at IS NULL AND expires_at>${clock!.now} RETURNING token_id`;
+        AND revoked_at IS NULL AND (expires_at>${clock!.now} OR ${recoverPending}) RETURNING token_id`;
     if (!stamped.length) return null;
     await tx`UPDATE swarm.agent_tokens SET expires_at=${clock!.now}
       WHERE token_id=${exact.predecessor_token_id}::uuid AND revoked_at IS NULL AND expires_at>${clock!.now}`;
   }
+  // A saved pending successor proves possession here; the same transaction
+  // stamps real renewal use; command commits this before retrying issuance.
   return agent;
 }
 

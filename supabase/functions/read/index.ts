@@ -80,6 +80,8 @@ async function setReadTransaction(tx: Sql): Promise<void> {
   `;
 }
 
+const decidedReadRefusals = new WeakSet<Response>();
+function decidedReadRefusal(response:Response):Response { decidedReadRefusals.add(response); return response; }
 class LocalReadRefused extends Error {
   constructor(readonly response:Response) { super('Local read credential refused'); }
 }
@@ -89,7 +91,7 @@ async function withReadTransaction<T>(
   try { return await retryLocalAuthTransaction(()=>db.begin("isolation level read committed", async (tx) => {
     const result=await operation(tx);
     if(proof && result instanceof Response) {
-      if(result.status>=400) throw new LocalReadRefused(result);
+      if(result.status>=400 && !decidedReadRefusals.has(result)) throw new LocalReadRefused(result);
       const current=await tx<{is_revoked:boolean}[]>`SELECT is_revoked FROM swarm.agent_delivery_read_context(${proof.hash},${proof.workspace}::uuid)`;
       if(!current[0] || current[0].is_revoked) throw new LocalReadRefused(json(403,{error:'forbidden'}));
     }
@@ -933,13 +935,13 @@ async function handle(
           ORDER BY slug
           LIMIT 200
         `;
-        return json(404, {
+        return decidedReadRefusal(json(404, {
           error: "channel_not_found",
           message: unknownChannelMessage(
             channelSlug,
             liveRows.map((row) => row.slug),
           ),
-        });
+        }));
       }
       channelId = channelRows[0].channel_id;
     }

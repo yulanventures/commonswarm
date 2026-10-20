@@ -507,6 +507,10 @@ test("perpetual standing renewal has no idle gate and chosen expiry stays termin
     const [history]=await sql`SELECT suspended_at,resumed_at,resumed_by FROM swarm.renewal_grants WHERE renewal_grant_id=${f.grant}::uuid`;
     assert.ok(history!.suspended_at instanceof Date,"historical idle record is retained");
     assert.equal(history!.resumed_at,null);assert.equal(history!.resumed_by,null,"no fictional human resume");
+    await sql`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '1 day' WHERE renewal_grant_id=${f.grant}::uuid`;
+    assert.equal(await prepare(),null,"a future chosen date also ignores technical idle history");
+    await sql`UPDATE swarm.renewal_grants SET connection_expires_at=NULL WHERE renewal_grant_id=${f.grant}::uuid`;
+    assert.equal(await prepare(),null,"clearing a live future policy requires no resume");
     await sql`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second' WHERE renewal_grant_id=${f.grant}::uuid`;
     assert.equal(await prepare(),'renewal_grant_revoked');
     await sql`UPDATE swarm.renewal_grants SET connection_expires_at=NULL WHERE renewal_grant_id=${f.grant}::uuid`;

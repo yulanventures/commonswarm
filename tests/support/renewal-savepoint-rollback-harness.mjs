@@ -93,7 +93,7 @@ try {
   // a standing renewal grant bound to that device, and a root token T0 with a task/epoch binding and that grant (rows as
   // tests/p1-server/renewal-last-use.test.ts:70-80). T0 gets its first use from the real read route (a token is never
   // born used, SWARM_TOKEN_FIRST_USE_PRESET), because a pending token may not renew (predecessor_pending_first_use).
-  const seat = async (name) => {
+  const seat = async (name, use=true) => {
     const principal = id(), device = id(), run = id(), task = id(), lineage = id(), grant = id(), t0 = id();
     const raw = mintRaw(), hash = await hashOf(raw);
     await observer.begin(async (tx) => {
@@ -108,9 +108,11 @@ try {
         VALUES (${t0}::uuid, ${principal}::uuid, ${run}::uuid, ${task}::uuid, 1, ${tx.json(['post_signal'])}::jsonb, ${hash},
         statement_timestamp() + interval '1 hour', ${lineage}::uuid, ${grant}::uuid)`;
     });
-    const firstUse = await readAs(raw);
-    const [used] = await observer`SELECT first_used_at IS NOT NULL AS used FROM swarm.agent_tokens WHERE token_id = ${t0}::uuid`;
-    if (firstUse.status !== 200 || !used.used) throw Object.assign(new Error('seat'), { code: `FIXTURE_SEAT_${firstUse.status}` });
+    if(use) {
+      const firstUse = await readAs(raw);
+      const [used] = await observer`SELECT first_used_at IS NOT NULL AS used FROM swarm.agent_tokens WHERE token_id = ${t0}::uuid`;
+      if (firstUse.status !== 200 || !used.used) throw Object.assign(new Error('seat'), { code: `FIXTURE_SEAT_${firstUse.status}` });
+    }
     return { name, principal, device, run, grant, t0, raw };
   };
 
@@ -252,7 +254,7 @@ try {
     const terminalAfter=await seatState(terminal);
     check('elapsed chosen date refuses despite same technical family',refused.status===401 || refused.status===403);
     check('chosen denial creates no successor spend or ledger effects',JSON.stringify(terminalBefore)===JSON.stringify(terminalAfter));
-    // First-use adoption must roll back even when household refusal uses 200.
+    // A decided content refusal is a valid use, while business effects stay absent.
     const content=await seat('household-denial');
     const first=await renew(content.raw,id());
     const unused=credential(first);
@@ -263,8 +265,64 @@ try {
         command:{kind:'household_tool',tool:'object_list',arguments:{seat:HOUSEHOLD_LOCAL_SEAT,offset:0,limit:10}}})}))) : null;
     const deniedBody=denied ? JSON.parse(denied.text) : null;
     check('household denial reaches its actual content boundary',denied?.status===200 && deniedBody?.status==='refused');
-    check('household denial rolls back both adoption fields and all effects',JSON.stringify(beforeDenied)===JSON.stringify(await seatState(content)));
+    const afterDenied=await seatState(content);
+    const adopted=afterDenied.tokens.find(t=>t.token===JSON.parse(first.text).token_id);
+    check('decided household refusal commits genuine successor use and predecessor cut',adopted?.used && !afterDenied.tokens.find(t=>t.token==='T0').unexpired);
+    check('decided household refusal retains its intentional audit',afterDenied.audit.length===beforeDenied.audit.length+1);
+    check('content refusal commits no business events or reducer ledger',JSON.stringify(afterDenied.events)===JSON.stringify(beforeDenied.events)
+      && JSON.stringify(afterDenied.idempotency)===JSON.stringify(beforeDenied.idempotency) && afterDenied.stream_head_seq===beforeDenied.stream_head_seq);
     check('refused first-use successor remains usable',unused!==null && (await readAs(unused)).status===200);
+    // Rejection is a decided, replayable result; it also completes the first
+    // actual use needed by the next renewal, without issuing a child early.
+    const pending=await seat('pending-decision'),pendingIssue=await renew(pending.raw,id());
+    const pendingRaw=credential(pendingIssue),decisionId=id();
+    const pendingBefore=await seatState(pending),decision=await renew(pendingRaw,decisionId);
+    check('unused live successor reaches owning reducer refusal',JSON.parse(decision.text).reason==='predecessor_pending_first_use');
+    const decidedState=await seatState(pending);
+    check('rejected renewal commits use and exactly one rejected ledger entry',decidedState.tokens.length===pendingBefore.tokens.length
+      && decidedState.tokens.find(t=>t.token===JSON.parse(pendingIssue.text).token_id)?.used
+      && decidedState.idempotency.some(r=>r.command_id===decisionId && r.ok==='false'));
+    const replayed=await renew(pendingRaw,decisionId);
+    check('same ID and hash replay the stored domain reason',JSON.parse(replayed.text).reason==='predecessor_pending_first_use'
+      && (await seatState(pending)).tokens.length===decidedState.tokens.length);
+    check('a fresh renewal after committed use issues normally',credential(await renew(pendingRaw,id()))!==null);
+    // Saved pending credentials are exercised as real proofs, including two
+    // consecutive crashes after durable save and before first use.
+    const crash=await seat('future-crash');
+    await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '1 day',
+      suspended_at=clock_timestamp() WHERE renewal_grant_id=${crash.grant}::uuid`;
+    await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${crash.t0}::uuid`;
+    let saved=await renew(crash.raw,id());
+    check('future chosen date and old idle history permit expired used proof renewal',credential(saved)!==null);
+    for(let attempt=0;attempt<2;attempt++) {
+      const savedId=JSON.parse(saved.text).token_id,savedRaw=credential(saved);
+      await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${savedId}::uuid`;
+      saved=await renew(savedRaw,id());
+      const [used]=await observer`SELECT first_used_at IS NOT NULL AS used FROM swarm.agent_tokens WHERE token_id=${savedId}::uuid`;
+      check(`saved pending proof crash recovery ${attempt+1} commits use before next issuance`,used.used && credential(saved)!==null);
+    }
+    check('recovered successor reaches actual read',(await readAs(credential(saved))).status===200);
+    const bootstrap=await seat('unused-bootstrap',false);
+    await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${bootstrap.t0}::uuid`;
+    const bootstrapBefore=await seatState(bootstrap),bootstrapDenied=await renew(bootstrap.raw,id());
+    check('expired unused root cannot borrow recovery authority',bootstrapDenied.status===401 || bootstrapDenied.status===403);
+    check('unused-root denial leaves no adoption or ledger',JSON.stringify(bootstrapBefore)===JSON.stringify(await seatState(bootstrap)));
+    // A final effect wait must still defeat the new domain-commit path.
+    const late=await seat('refusal-final-wait');
+    await renew(late.raw,id()); // establish presence so the final write can wait
+    const lateIssue=await renew(late.raw,id()),lateRaw=credential(lateIssue);
+    await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '3 seconds'
+      WHERE renewal_grant_id=${late.grant}::uuid`;
+    const lateBefore=await seatState(late);let latePending;
+    await observer.begin(async tx=>{
+      const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
+      await tx`SELECT principal_id FROM swarm.agent_presence WHERE principal_id=${late.principal}::uuid FOR UPDATE`;
+      latePending=renew(lateRaw,id());
+      check('decided rejection waits at its real final presence write',await waitBlockedBy(pid,100)>0);
+      await sleep(3200);
+    });
+    check('date crossing during refusal wait overrides decided commit',(await latePending).status===403);
+    check('failed final fence rolls back refused-use adoption and ledger',JSON.stringify(lateBefore)===JSON.stringify(await seatState(late)));
     // Activity owns a distinct final wait: the transactional realtime send.
     // The old Source returns 202 and commits adoption/broadcast after this wait.
     await import(`${tree}/supabase/functions/activity/index.ts`);
@@ -300,6 +358,85 @@ try {
       WHERE token_id=${JSON.parse(controlIssued.text).token_id}::uuid`;
     const [positiveBroadcast]=await observer`SELECT count(*)::int AS n FROM realtime.messages`;
     check('activity positive commits adoption and a realtime row',positiveUse.used && positiveBroadcast.n===broadcastAfter.n+1);
+    // Read truth is owned here at real database roles. No stored marker is
+    // fabricated to make an elapsed canonical date look persisted.
+    const readModels=await seat('read-models');
+    const connectionFrom=overview=>overview.workspaces.find(w=>w.workspace_id===W)?.people
+      .flatMap(person=>person.agents).find(a=>a.principal_id===readModels.principal)?.status.facts.connection;
+    const overviewAs=async user=>observer.begin(async tx=>{
+      await tx`SET LOCAL ROLE authenticated`;
+      await tx`SELECT set_config('request.jwt.claims',${JSON.stringify({sub:user,role:'authenticated'})},true)`;
+      const [row]=await tx`SELECT swarm_read.home_overview() AS value`;return row.value;
+    });
+    check('current local overview positive is live',connectionFrom(await overviewAs(owner))==='live');
+    await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '1 day',suspended_at=clock_timestamp()
+      WHERE renewal_grant_id=${readModels.grant}::uuid`;
+    await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${readModels.t0}::uuid`;
+    check('future dated family with idle history stays live through renewal liveness',connectionFrom(await overviewAs(owner))==='live');
+    check('live bearer control exists before terminal precedence',credential(await renew(readModels.raw,id()))!==null);
+    const [deadline]=await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second'
+      WHERE renewal_grant_id=${readModels.grant}::uuid RETURNING connection_expires_at`;
+    check('elapsed canonical policy wins over renewal liveness in overview',connectionFrom(await overviewAs(owner))==='key_ended');
+    const renewalRows=await observer.begin(async tx=>{
+      await tx`SET LOCAL ROLE authenticated`;
+      await tx`SELECT set_config('request.jwt.claims',${JSON.stringify({sub:owner,role:'authenticated'})},true)`;
+      return await tx`SELECT * FROM swarm_read.renewal_grant_roster(${W}::uuid)`;
+    });
+    const tokenRows=await observer.begin(async tx=>{
+      await tx`SET LOCAL ROLE swarm_read`;
+      return await tx`SELECT * FROM swarm_read.renewal_grant_for_token(${W}::uuid,${readModels.t0}::uuid)`;
+    });
+    const rosterRow=renewalRows.find(r=>r.renewal_grant_id===readModels.grant);
+    check('both renewal readers derive the elapsed terminal timestamp',iso(rosterRow?.connection_expired_at)===iso(deadline.connection_expires_at)
+      && iso(tokenRows[0]?.connection_expired_at)===iso(deadline.connection_expires_at));
+    const [stored]=await observer`SELECT connection_expired_at FROM swarm.renewal_grants WHERE renewal_grant_id=${readModels.grant}::uuid`;
+    check('read truth does not invent a persisted terminal write',stored.connection_expired_at===null);
+    await observer`UPDATE swarm.renewal_grants SET connection_expired_at=${deadline.connection_expires_at},connection_expires_at=NULL
+      WHERE renewal_grant_id=${readModels.grant}::uuid`;
+    check('stored terminal marker wins even with null chosen date',connectionFrom(await overviewAs(owner))==='key_ended');
+    const hosted=id(),hostedDeadline=new Date(Date.now()-1000);
+    await observer`INSERT INTO swarm.hosted_mcp_grants(grant_id,provider_grant_id,owner_user_id,home_workspace_id,client_id,resource,
+      selected_workspace_ids,manifest_digest,interaction_ref,state,created_at,activated_at,connection_expires_at)
+      VALUES(${hosted}::uuid,${'probe-'+hosted},${owner}::uuid,${W}::uuid,'probe-client','https://mcp.commonswarm.com/mcp',
+        ${[W]}::uuid[],${new Uint8Array(32).fill(7)},'probe-consent','active',clock_timestamp(),clock_timestamp(),${hostedDeadline})`;
+    const hostedPrincipal=id(),hostedSeat=id(),hostedDigest=new Uint8Array(32).fill(7);
+    await observer`INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only)
+      VALUES(${hostedPrincipal}::uuid,${W}::uuid,${owner}::uuid,'probe-hosted','hosted_mcp',true)`;
+    await observer`INSERT INTO swarm.hosted_mcp_grant_workspaces(grant_id,workspace_id,owner_user_id,manifest_digest,consent_receipt_id,consented_at)
+      VALUES(${hosted}::uuid,${W}::uuid,${owner}::uuid,${hostedDigest},${id()}::uuid,clock_timestamp())`;
+    await observer`INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,created_at)
+      VALUES(${hostedSeat}::uuid,${hosted}::uuid,${W}::uuid,${owner}::uuid,${hostedPrincipal}::uuid,'probe-hosted',clock_timestamp())`;
+    const hostedOverview=await overviewAs(owner);
+    const hostedConnection=hostedOverview.workspaces.find(w=>w.workspace_id===W).people.flatMap(p=>p.agents)
+      .find(a=>a.principal_id===hostedPrincipal)?.status.facts.connection;
+    check('hosted elapsed policy precedes otherwise active seat liveness',hostedConnection==='connection_off');
+    const hostedAs=async user=>observer.begin(async tx=>{
+      await tx`SET LOCAL ROLE authenticated`;
+      await tx`SELECT set_config('request.jwt.claims',${JSON.stringify({sub:user,role:'authenticated'})},true)`;
+      return await tx`SELECT grant_id,client_id,resource,home_workspace_id,selected_workspace_ids,state,created_at,activated_at,revoked_at,
+        connection_expires_at,connection_expired_at FROM swarm_read.hosted_mcp_connections WHERE grant_id=${hosted}::uuid`;
+    });
+    const hostedRows=await hostedAs(owner);
+    check('hosted owner view exposes canonical policy and derived terminal',hostedRows.length===1
+      && iso(hostedRows[0].connection_expires_at)===hostedDeadline.toISOString() && iso(hostedRows[0].connection_expired_at)===hostedDeadline.toISOString());
+    check('hosted view still filters another owner',(await hostedAs(id())).length===0);
+    const oldReader=await observer.begin(async tx=>{
+      await tx`SET LOCAL ROLE authenticated`;
+      await tx`SELECT set_config('request.jwt.claims',${JSON.stringify({sub:owner,role:'authenticated'})},true)`;
+      return await tx`SELECT grant_id,client_id,resource,home_workspace_id,selected_workspace_ids,state,created_at,activated_at,revoked_at
+        FROM swarm_read.hosted_mcp_connections WHERE grant_id=${hosted}::uuid`;
+    });
+    check('old hosted reader still selects its original nine columns',oldReader.length===1 && Object.keys(oldReader[0]).length===9);
+    const [acl]=await observer`SELECT pg_get_userbyid(c.relowner)='swarm_admin' AS owner_ok,
+      'security_barrier=true'=ANY(c.reloptions) AS barrier_ok,
+      has_table_privilege('authenticated',c.oid,'SELECT') AND has_table_privilege('swarm_read',c.oid,'SELECT')
+        AND NOT has_table_privilege('anon',c.oid,'SELECT') AS select_ok,
+      has_function_privilege('authenticated','swarm_read.home_overview()','EXECUTE')
+        AND NOT has_function_privilege('swarm_read','swarm_read.home_overview()','EXECUTE')
+        AND NOT has_function_privilege('swarm_command','swarm_read.home_overview()','EXECUTE')
+        AND NOT has_function_privilege('anon','swarm_read.home_overview()','EXECUTE') AS execute_ok
+      FROM pg_class c WHERE c.oid='swarm_read.hosted_mcp_connections'::regclass`;
+    check('read-model owners, barrier and role ACL boundary survive',acl.owner_ok && acl.barrier_ok && acl.select_ok && acl.execute_ok);
     // Exact family consumer: real command-role loader + production access
     // consumer. Fixture setup writes consent; the consumer never backfills it.
     const authModule=await import(`${tree}/supabase/functions/_shared/agent-auth.ts`);

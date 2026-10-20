@@ -3893,12 +3893,11 @@ async function loadRenewalFacts(
       g.successors_used,
       g.successors_stranded,
       g.horizon_expires_at,
-      g.connection_expires_at,g.connection_expired_at,
+      g.connection_expires_at,COALESCE(g.connection_expired_at,CASE WHEN g.connection_expires_at<=clock_timestamp() THEN g.connection_expires_at END) AS connection_expired_at,
       g.revoked_at AS grant_revoked_at,
-      -- Explicit finite policy retains its current suspension. A historical
-      -- technical idle pause never imposes a human resume on a permanent family.
-      CASE WHEN g.kind='standing' AND g.connection_expires_at IS NULL AND g.connection_expired_at IS NULL
-        THEN false ELSE g.suspension_active END AS grant_suspension_active,
+      -- suspension_active records technical idle history. A standing family
+      -- never needs resume; its separate canonical terminal/date fence remains.
+      CASE WHEN g.kind='standing' THEN false ELSE g.suspension_active END AS grant_suspension_active,
       (
         g.principal_id = t.principal_id
         AND g.run_id = t.run_id
@@ -4016,14 +4015,20 @@ async function loadRenewalFacts(
  * readable by swarm_command, so a replay identifies the successor and its
  * expiry but never re-issues the secret.
  */
+async function localPolicyFields(tx:Sql,family:string):Promise<{connection_expires_at:string|null;connection_expired_at:string|null}|null> {
+  const [current]=await tx<{connection_expires_at:Date|null;connection_expired_at:Date|null}[]>`
+    SELECT connection_expires_at,COALESCE(connection_expired_at,
+      CASE WHEN connection_expires_at<=clock_timestamp() THEN connection_expires_at END) AS connection_expired_at
+    FROM swarm.renewal_grants WHERE renewal_grant_id=${family}::uuid`;
+  return current ? {connection_expires_at:current.connection_expires_at?.toISOString() ?? null,
+    connection_expired_at:current.connection_expired_at?.toISOString() ?? null} : null;
+}
 async function currentLocalPolicyResponse(tx:Sql,response:StoredResponse,plan:LocalAuthLockPlan|null):Promise<StoredResponse> {
   const {connection_expires_at:_deadline,connection_expired_at:_terminal,...receipt}=response;
   const family=plan?.snapshot.bindings.find(r=>r.token_id===response.token_id)?.renewal_grant_id;
   if (!family || !plan?.locked) return receipt;
-  const [current]=await tx<{connection_expires_at:Date|null;connection_expired_at:Date|null}[]>`
-    SELECT connection_expires_at,connection_expired_at FROM swarm.renewal_grants WHERE renewal_grant_id=${family}::uuid`;
-  return current ? {...receipt,connection_expires_at:current.connection_expires_at?.toISOString() ?? null,
-    connection_expired_at:current.connection_expired_at?.toISOString() ?? null} : receipt;
+  const current=await localPolicyFields(tx,family);
+  return current ? {...receipt,...current} : receipt;
 }
 
 function renewalReplayFields(
@@ -6281,7 +6286,7 @@ async function replaceUnusedRegistrationToken(
           AND g.run_id = ${existing.run_id}::uuid
           AND g.revoked_at IS NULL
           AND (g.kind='standing' OR g.horizon_expires_at > clock_timestamp())
-          AND (NOT g.suspension_active OR g.kind='standing' AND g.connection_expires_at IS NULL) AND g.connection_expired_at IS NULL
+          AND (NOT g.suspension_active OR g.kind='standing') AND g.connection_expired_at IS NULL
           AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
       )
     RETURNING token_id
@@ -9905,7 +9910,7 @@ async function handleLocalConnectionExpiry(
       AND m.revoked_at IS NULL AND w.archived_at IS NULL AND g.revoked_at IS NULL
       AND (g.bound_device_id IS NULL OR g.bound_device_id=d.device_id)
       AND (g.kind='standing' OR g.horizon_expires_at>clock_timestamp() AND g.successors_used<g.max_successors)
-      AND (NOT g.suspension_active OR g.kind='standing' AND g.connection_expires_at IS NULL AND g.connection_expired_at IS NULL)
+      AND (NOT g.suspension_active OR g.kind='standing')
       AND g.connection_expired_at IS NULL AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
       AND swarm.admin_child_live(p.parent_admin_grant_id,g.workspace_id)
       AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z
@@ -9923,7 +9928,8 @@ async function handleLocalConnectionExpiry(
     SELECT workspace_id,stream_id,request_hash,response FROM swarm.idempotency_keys
     WHERE principal_kind='user' AND principal_id=${auth.actor.user} AND command_id=${body.command_id}`;
   if (prior) return prior.workspace_id===route.workspaceId && prior.stream_id===route.streamId && prior.request_hash===hash
-    ? replayResult(storedResponse(prior.response),command.kind) : {status:409,body:{error:"command_id_conflict"}};
+    ? replayResult({...storedResponse(prior.response),...await localPolicyFields(tx,command.grant_id)},command.kind)
+    : {status:409,body:{error:"command_id_conflict"}};
   const [changed]=await tx`UPDATE swarm.renewal_grants SET connection_expires_at=${command.connection_expires_at}::timestamptz
     WHERE renewal_grant_id=${command.grant_id}::uuid AND revoked_at IS NULL AND connection_expired_at IS NULL
       AND (connection_expires_at IS NULL OR connection_expires_at>clock_timestamp())
@@ -9936,7 +9942,7 @@ async function handleLocalConnectionExpiry(
   await tx`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response)
     VALUES('user',${auth.actor.user},${body.command_id},${route.workspaceId}::uuid,${route.streamId}::uuid,${hash},${tx.json(response as unknown as postgres.JSONValue)})`;
   await insertAudit(tx,{auth,commandKind:command.kind,workspaceId:route.workspaceId,streamId:route.streamId,outcome:"accepted",hash});
-  return {status:200,body:{status:"accepted",...response,events:[]}};
+  return {status:200,body:{status:"accepted",...response,...await localPolicyFields(tx,command.grant_id),events:[]}};
 }
 
 async function handleHostedManagement(
@@ -10752,6 +10758,11 @@ async function claimHostedSeat(
   });
 }
 
+/** Failed business work rolls back its savepoint before a deliberate refusal
+ * is audited; authenticated use/attempt counters belong to the outer unit. */
+class LocalBusinessRefused<T> extends Error {
+  constructor(readonly outcome:T) { super('Local business operation refused'); }
+}
 class LocalCommandRefused extends Error {
   constructor(readonly result: HttpResult) { super('Local credential operation refused'); }
 }
@@ -10767,7 +10778,16 @@ async function handleTransaction(
 ): Promise<HttpResult> {
   const kind = commandKind(body);
   const commandId = String(body.command_id);
-  return await retryLocalAuthTransaction(() => db.begin("isolation level read committed", async (tx) => {
+  let recoverSavedPending = false;
+  const response = await retryLocalAuthTransaction(() => db.begin("isolation level read committed", async (tx) => {
+    recoverSavedPending = false;
+    // Only explicit, completed domain decisions may commit a refusal. Unknown
+    // failures and credential/session denials still unwind the whole transaction.
+    type LocalOutcome = {kind:'rollback'} | {kind:'decided';result:HttpResult};
+    const outcome: {value:LocalOutcome} = {value:{kind:'rollback'}};
+    const decided = (result:HttpResult):HttpResult => {
+      outcome.value={kind:'decided',result}; return result;
+    };
     let authenticatedAgent: AgentAuthRow | null = null;
     let localPlan: LocalAuthLockPlan | null = null;
     let acceptedPresenceRoute: PresenceRoute | null = null;
@@ -10966,6 +10986,13 @@ async function handleTransaction(
     }
 
     await afterStep(3);
+    if (kind===RENEW_AGENT_TOKEN_KIND && auth.agentFirstUse && auth.agent && !auth.agent.unexpired) {
+      // Exact saved pending successor recovery. This transaction commits real
+      // possession/use under the final credential/session fences below. Only
+      // then does a fresh transaction retry issuance with the same command ID.
+      recoverSavedPending=true;
+      return {status:204,body:{}};
+    }
 
     await beforeStep(4);
     const ignoredIdentity = forgedActorDetail(body);
@@ -11122,7 +11149,7 @@ async function handleTransaction(
               AND expires_at > clock_timestamp()) AS held
         `;
         if (poll[0]?.held) {
-          return { status: 409, body: { error: "notify_held_elsewhere", surface: "h0_poll" } };
+          return decided({ status: 409, body: { error: "notify_held_elsewhere", surface: "h0_poll" } });
         }
       }
       if (agent === null ||
@@ -11208,18 +11235,18 @@ async function handleTransaction(
           const legacy = record(surface.command);
           if (!legacy || ![...FILE_COMMAND_KINDS,"brain_put","brain_get","brain_history"].includes(String(legacy.kind))) return { status: 400, body: { error: "invalid_request" } };
         }
-        const output = kind === "household_legacy"
-          ? await executeHouseholdLegacy(tx, { workspace_id: route.workspaceId, request_id: commandId, command: surface.command as never,
+        const output = await tx.savepoint(async sp => kind === "household_legacy"
+          ? await executeHouseholdLegacy(sp, { workspace_id: route.workspaceId, request_id: commandId, command: surface.command as never,
             ...(surface.base_revision ? { base_revision: surface.base_revision as never } : {}) }, identity, recheck, body.household_attachment instanceof Uint8Array ? body.household_attachment : undefined)
           : kind === "household_permissions"
-          ? await provisionHouseholdPermissions(tx, route.workspaceId, identity, commandId, surface, recheck)
-          : await executeHouseholdSurface(tx, route.workspaceId, identity, commandId, surface, recheck, body.household_attachment instanceof Uint8Array ? body.household_attachment : undefined, householdNotice(route, auth));
+          ? await provisionHouseholdPermissions(sp, route.workspaceId, identity, commandId, surface, recheck)
+          : await executeHouseholdSurface(sp, route.workspaceId, identity, commandId, surface, recheck, body.household_attachment instanceof Uint8Array ? body.household_attachment : undefined, householdNotice(route, auth)));
         await insertAudit(tx, { auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
           outcome: output.status === "refused" ? "authz" : "accepted",
           reason: output.status === "refused" ? String(output.reason) : null });
-        return { status: 200, body: output };
+        return decided({ status: 200, body: output });
       } catch (error) {
-        if (error instanceof HouseholdToolInputError) return { status: 400, body: { status: "refused", reason: error.code } };
+        if (error instanceof HouseholdToolInputError) return decided({ status: 400, body: { status: "refused", reason: error.code } });
         throw error;
       }
     }
@@ -11516,7 +11543,7 @@ async function handleTransaction(
           operation,
         );
         if (!rateCheck.allowed) {
-          return rateCheck.result;
+          return decided(rateCheck.result);
         }
       }
     }
@@ -11634,9 +11661,9 @@ async function handleTransaction(
           };
         }
         return matches
-          ? replayResult(kind==="mint_agent_token" || kind===RENEW_AGENT_TOKEN_KIND
+          ? decided(replayResult(kind==="mint_agent_token" || kind===RENEW_AGENT_TOKEN_KIND
             ? await currentLocalPolicyResponse(tx,storedResponse(existing.response),localPlan)
-            : storedResponse(existing.response), kind)
+            : storedResponse(existing.response), kind))
           : { status: 409, body: { error: "command_id_conflict" } };
       }
       renewalRecovery = true;
@@ -11813,10 +11840,11 @@ async function handleTransaction(
           reason: outcome.reason,
           hash,
         });
-        return {
+        const refusal:HttpResult = {
           status: outcome.status,
           body: { error: outcome.error, message: outcome.message },
         };
+        return outcome.status===404 ? refusal : decided(refusal);
       }
       const channelResponse: StoredResponse = {
         ok: true,
@@ -11903,7 +11931,7 @@ async function handleTransaction(
           reason: attachmentResolution.reason,
           hash,
         });
-        return {
+        const refusal:HttpResult = {
           status: attachmentResolution.status,
           body: {
             error: attachmentResolution.error,
@@ -11913,6 +11941,7 @@ async function handleTransaction(
               : {}),
           },
         };
+        return attachmentResolution.status===404 ? refusal : decided(refusal);
       }
       const rateLimit = await enforceSignalRate(
         tx,
@@ -11948,7 +11977,7 @@ async function handleTransaction(
             })}::jsonb
           )
         `;
-        return {
+        return decided({
           status: 429,
           body: {
             error: "rate_limited",
@@ -11956,7 +11985,7 @@ async function handleTransaction(
             limit: rateLimit.limit,
             resets_at: rateLimit.resetsAt,
           },
-        };
+        });
       }
 
       const channelResolution = await resolveSignalChannel(tx, route, command);
@@ -11970,13 +11999,14 @@ async function handleTransaction(
           reason: channelResolution.reason!,
           hash,
         });
-        return {
+        const refusal:HttpResult = {
           status: channelResolution.status!,
           body: {
             error: channelResolution.error!,
             message: channelResolution.message!,
           },
         };
+        return channelResolution.status===404 ? refusal : decided(refusal);
       }
       const threadResolution = await resolveThreadRoot(tx, route, command);
       if (!threadResolution.ok) {
@@ -11989,13 +12019,14 @@ async function handleTransaction(
           reason: threadResolution.reason!,
           hash,
         });
-        return {
+        const refusal:HttpResult = {
           status: threadResolution.status!,
           body: {
             error: threadResolution.error!,
             message: threadResolution.message!,
           },
         };
+        return threadResolution.status===404 ? refusal : decided(refusal);
       }
       /* Reply expiry: the server CLAMPS a defaulted horizon and REFUSES an
        * explicit one it cannot honour. Silently shortening a horizon the caller
@@ -12027,7 +12058,7 @@ async function handleTransaction(
             reason: "thread_reply_until_exceeds_root",
             hash,
           });
-          return {
+          return decided({
             status: 409,
             body: {
               error: "thread_reply_until_exceeds_root",
@@ -12035,7 +12066,7 @@ async function handleTransaction(
                 `A reply cannot outlive the message its thread starts from. That thread ends at ${rootUntil.toISOString()}. Ask for a shorter horizon, or leave it out and it is set for you.`,
               root_until: rootUntil.toISOString(),
             },
-          };
+          });
         }
       }
       /* A threaded reply inherits its root's channel. The client does not get
@@ -12307,7 +12338,7 @@ async function handleTransaction(
             detail,
             hash,
           });
-          return {
+          return decided({
             status: 429,
             body: {
               error: "rate_limited",
@@ -12316,7 +12347,7 @@ async function handleTransaction(
               resets_at: bucket.resetsAt,
               scope: "identity",
             },
-          };
+          });
         }
         const wsBucket = await incrementRateBucket(
           tx,
@@ -12341,7 +12372,7 @@ async function handleTransaction(
             detail,
             hash,
           });
-          return {
+          return decided({
             status: 429,
             body: {
               error: "rate_limited",
@@ -12350,13 +12381,13 @@ async function handleTransaction(
               resets_at: wsBucket.resetsAt,
               scope: "workspace",
             },
-          };
+          });
         }
       }
       const storage = fileStorage();
-      const outcome = fileCommand.kind === FILE_VERSION_CREATE_KIND
+      const applyFile = async (sp:Sql) => fileCommand.kind === FILE_VERSION_CREATE_KIND
         ? await fileVersionCreate(
-          tx,
+          sp,
           route.workspaceId,
           fileActor,
           fileCommand,
@@ -12365,7 +12396,7 @@ async function handleTransaction(
         )
         : fileCommand.kind === FILE_VERSION_COMMIT_KIND
         ? await fileVersionCommit(
-          tx,
+          sp,
           route.workspaceId,
           fileActor,
           fileCommand,
@@ -12373,22 +12404,33 @@ async function handleTransaction(
           ledgerRecheck,
         )
         : fileCommand.kind === FILE_DOWNLOAD_URL_KIND
-        ? await fileDownloadUrl(tx, route.workspaceId, fileCommand, storage)
+        ? await fileDownloadUrl(sp, route.workspaceId, fileCommand, storage)
         : fileCommand.kind === FILE_TOMBSTONE_KIND
         ? await fileTombstone(
-          tx,
+          sp,
           route.workspaceId,
           fileActor,
           fileCommand,
           ledgerRecheck,
         )
         : await fileRestore(
-          tx,
+          sp,
           route.workspaceId,
           fileActor,
           fileCommand,
           ledgerRecheck,
         );
+      let outcome:Awaited<ReturnType<typeof applyFile>>;
+      try {
+        outcome=await tx.savepoint(async sp=>{
+          const applied=await applyFile(sp);
+          if (!applied.ok) throw new LocalBusinessRefused(applied);
+          return applied;
+        });
+      } catch(error) {
+        if (!(error instanceof LocalBusinessRefused)) throw error;
+        outcome=error.outcome as Awaited<ReturnType<typeof applyFile>>;
+      }
       if (outcome.ok === "replay") {
         // The ledger holds accepted results only (see the refusal comment
         // below), so a recheck hit is always the winner's 200.
@@ -12417,13 +12459,14 @@ async function handleTransaction(
          * the post-lock recheck above prevents double-execution of those.
          * Same-id-different-content is command_id_conflict via the hash
          * comparison, never a replay. */
-        return {
+        const refusal:HttpResult = {
           status: outcome.refusal.status,
           body: {
             error: outcome.refusal.error,
             message: outcome.refusal.message,
           },
         };
+        return outcome.refusal.status===403 ? refusal : decided(refusal);
       }
       const fileResponse = {
         ok: true,
@@ -12631,7 +12674,7 @@ async function handleTransaction(
           detail: ignoredIdentity,
           hash,
         });
-        return ackRefused.http;
+        return ackRefused.auditOutcome==='domain' ? decided(ackRefused.http) : ackRefused.http;
       }
       const ackResponse = "response" in result ? result.response : undefined;
       if (ackResponse === undefined) {
@@ -12814,7 +12857,7 @@ async function handleTransaction(
           reason: "rate_limited",
           detail,
         });
-        return {
+        return decided({
           status: 429,
           body: {
             error: "rate_limited",
@@ -12822,7 +12865,7 @@ async function handleTransaction(
             limit: MODEL_DECLARE_RATE_LIMIT_PER_HOUR,
             resets_at: setBucket.resetsAt,
           },
-        };
+        });
       }
     }
     if (prepared !== null && prepared.command.kind === "submit_feedback") {
@@ -12884,7 +12927,7 @@ async function handleTransaction(
             reason: "rate_limited",
             detail,
           });
-          return {
+          return decided({
             status: 429,
             body: {
               error: "rate_limited",
@@ -12892,7 +12935,7 @@ async function handleTransaction(
               limit: FEEDBACK_RATE_LIMIT_PER_HOUR,
               resets_at: feedbackBucket.resetsAt,
             },
-          };
+          });
         }
       }
     }
@@ -12950,7 +12993,7 @@ async function handleTransaction(
             reason: "rate_limited",
             detail,
           });
-          return {
+          return decided({
             status: 429,
             body: {
               error: "rate_limited",
@@ -12958,7 +13001,7 @@ async function handleTransaction(
               limit: MODEL_DECLARE_RATE_LIMIT_PER_HOUR,
               resets_at: declareBucket.resetsAt,
             },
-          };
+          });
         }
       }
     }
@@ -13133,7 +13176,7 @@ async function handleTransaction(
     // the window rolls over is the same fresh command.
     if (outcome.decision.ok) {
       const budget = await enforceFreeTierBudget(tx, auth, route, command, hash);
-      if (budget !== null) return budget;
+      if (budget !== null) return decided(budget);
     }
 
     await beforeStep(11);
@@ -13298,13 +13341,14 @@ async function handleTransaction(
         },
       };
     await afterStep(15);
-    return result;
+    return !outcome.decision.ok ? decided(result) : result;
     })();
     const localBody=record(result.body);
     if (agentTokenHash!==null && (result.status>=400 || localBody?.ok===false || localBody?.status==='rejected'
-      || localBody?.status==='refused' || record(localBody?.result)?.status==='refused')) throw new LocalCommandRefused(result);
+      || localBody?.status==='refused' || record(localBody?.result)?.status==='refused')
+      && (outcome.value.kind!=='decided' || outcome.value.result!==result)) throw new LocalCommandRefused(result);
     if (
-      result.status >= 200 && result.status < 300 && authenticatedAgent !== null
+      !recoverSavedPending && result.status >= 200 && result.status < 300 && authenticatedAgent !== null
     ) {
       await recordAgentPresence(
         tx,
@@ -13317,7 +13361,7 @@ async function handleTransaction(
       const finalAgent=await recheckLocalCredential(tx,agentTokenHash,localPlan);
       if (!finalAgent) throw new LocalCommandRefused({status:403,body:{error:'forbidden'}});
     }
-    if (agentTokenHash!==null && authenticatedAgent && kind===RENEW_AGENT_TOKEN_KIND && localBody?.status==='accepted') {
+    if (agentTokenHash!==null && authenticatedAgent && kind===RENEW_AGENT_TOKEN_KIND) {
       // Issuance intentionally adds one owned token to discovery. Recheck the
       // original proof and family after INSERT/ledger/presence waits without
       // adopting a newly discovered external row or stamping the successor.
@@ -13330,10 +13374,10 @@ async function handleTransaction(
         WHERE t.token_hash=${agentTokenHash} AND t.token_id=${authenticatedAgent.token_id}::uuid
           AND p.revoked_at IS NULL AND r.ended_at IS NULL AND d.revoked_at IS NULL
           AND t.revoked_at IS NULL AND NOT t.surrender_only AND m.revoked_at IS NULL AND w.archived_at IS NULL
-          AND g.revoked_at IS NULL AND (NOT g.suspension_active OR g.kind='standing' AND g.connection_expires_at IS NULL) AND g.connection_expired_at IS NULL
+          AND g.revoked_at IS NULL AND (NOT g.suspension_active OR g.kind='standing') AND g.connection_expired_at IS NULL
           AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
           AND (g.kind='standing' OR g.horizon_expires_at>clock_timestamp())
-          AND (t.expires_at>clock_timestamp() OR (g.kind='standing' AND g.connection_expires_at IS NULL AND t.first_used_at IS NOT NULL))
+          AND (t.expires_at>clock_timestamp() OR (g.kind='standing' AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp()) AND t.first_used_at IS NOT NULL))
           AND swarm.admin_child_live(t.parent_admin_grant_id,p.workspace_id)
           AND swarm.admin_child_live(p.parent_admin_grant_id,p.workspace_id)
           AND swarm.admin_child_scopes_live(t.parent_admin_grant_id,t.scopes)
@@ -13389,6 +13433,9 @@ async function handleTransaction(
     }
     throw error;
   }));
+  return recoverSavedPending && response.status===204
+    ? await handleTransaction(body,verifiedHuman,agentTokenHash,joinCredentialHash,sessionProofParse,acquireProofParse,hostedSeatCapability)
+    : response;
 }
 
 /** Persist one allowlisted failure row after the command transaction is gone. */

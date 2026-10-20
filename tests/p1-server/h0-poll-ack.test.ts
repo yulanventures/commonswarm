@@ -387,6 +387,9 @@ test("H0 poll refuses a seat with a fresh watcher lease and succeeds after it go
     assert.equal(refused.body.error, "notify_held_elsewhere");
     assert.equal(refused.body.surface, "watcher");
     assert.equal(refused.body.host_label, "other-host");
+    const [used]=await sql`SELECT first_used_at FROM swarm.agent_tokens
+      WHERE token_hash=${createHash('sha256').update(seat.token).digest()}`;
+    assert.ok(used!.first_used_at instanceof Date,"a decided watcher conflict commits valid credential first use");
     await sql`UPDATE swarm.agent_wake_leases SET renewed_at = clock_timestamp() - interval '4 minutes'
       WHERE workspace_id = ${owner.workspace}::uuid AND principal_id = ${seat.principalId}::uuid`;
     const allowed = await h0("poll", seat.token, { wait: 0 });

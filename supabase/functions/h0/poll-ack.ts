@@ -240,6 +240,8 @@ function prelude(request: Request): Response | null {
 }
 
 
+const decidedH0Refusals = new WeakSet<Response>();
+function decidedH0Refusal(response:Response):Response { decidedH0Refusals.add(response); return response; }
 class LocalH0Refused extends Error {
   constructor(readonly result: unknown) { super('H0 credential operation refused'); }
 }
@@ -253,7 +255,9 @@ async function localH0Transaction<T>(hash:Uint8Array,request:Request,poll:boolea
     if(plan) await lockLocalAuthPlan(tx,plan);
     const result=await operation(tx,plan);
     const r=result as {response?:Response;acquired?:boolean;collected?:{kind?:string}};
-    if (result instanceof Response && result.status>=400 || r?.acquired===false || r?.collected?.kind==='error') throw new LocalH0Refused(result);
+    const refusal=result instanceof Response ? result : r?.response;
+    if ((result instanceof Response && result.status>=400 || r?.acquired===false || r?.collected?.kind==='error')
+      && !(refusal && decidedH0Refusals.has(refusal))) throw new LocalH0Refused(result);
     let agent;
     try {agent=plan ? await loadAgentCredential(tx,hash,plan) : null;}
     catch(error) {if(error instanceof LocalCredentialDenied) agent=null;else throw error;}
@@ -871,17 +875,18 @@ function ackHttp(result: AckResult): Response | null {
     });
   }
   if (result.status === "conflict") {
-    return json(409, {
+    return decidedH0Refusal(json(409, {
       error: "delivery_ack_conflict",
       message: "That message was already acknowledged with a different outcome.",
-    });
+    }));
   }
   const code: AgentSessionErrorCode = result.status === "not_surfaced"
     ? "delivery_not_surfaced"
     : result.status === "session_conflict"
     ? "session_conflict"
     : "session_expired";
-  return json(agentSessionErrorStatus(code), { error: code });
+  const response=json(agentSessionErrorStatus(code), { error: code });
+  return result.status==='not_surfaced' ? decidedH0Refusal(response) : response;
 }
 
 export async function handleH0PollRequest(request: Request): Promise<Response> {
@@ -922,19 +927,19 @@ export async function handleH0PollRequest(request: Request): Promise<Response> {
           AND renewed_at > clock_timestamp() - (${WAKE_LEASE_STALE_MS} * interval '1 millisecond')
       `;
       if (watcher.length > 0) {
-        return { acquired: false as const, response: json(409, {
+        return { acquired: false as const, response: decidedH0Refusal(json(409, {
           error: "notify_held_elsewhere", surface: "watcher",
           host_label: watcher[0]!.host_label,
-        }) };
+        })) };
       }
       const lock = await acquireLock(tx, auth.seat, parsed.body.wait);
       if (lock === null) {
         return {
           acquired: false as const,
-          response: json(H0_POLL_IN_PROGRESS_STATUS, {
+          response: decidedH0Refusal(json(H0_POLL_IN_PROGRESS_STATUS, {
             error: H0_POLL_IN_PROGRESS,
             message: H0_POLL_IN_PROGRESS_MESSAGE,
-          }),
+          })),
         };
       }
       const collected = await collect(

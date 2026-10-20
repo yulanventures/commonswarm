@@ -1337,3 +1337,66 @@ test("managed current-family proof is repeated after the final effect wait", {ti
   const [committed]=await sql`SELECT count(*)::int AS n FROM swarm.signals WHERE from_principal=${control.principalId}::uuid`;
   assert.equal(committed!.n,1,'same-invocation current session commits the actual signal');
 });
+
+// The served owner command owns set/clear admission; SQL-only preparation cannot
+// prove that a real human can change a live future date with retained idle history.
+test("owner can set and clear a future local date without resume; elapsed date stays terminal", {timeout:30_000},async()=>{
+  const agent=await seedAgent('chosen-date-owner');
+  const minted=await runCmd(shared.ownerJwt,{kind:'mint_agent_token',principal_id:agent.principalId,
+    run_id:randomUUID(),task_id:randomUUID(),epoch:1,device_id:shared.device,scopes:['post_signal']});
+  assert.equal(minted.body.status,'accepted');
+  const raw=String(minted.body.agent_token),tokenId=String(minted.body.token_id);
+  const [family]=await sql<{renewal_grant_id:string}[]>`SELECT renewal_grant_id FROM swarm.agent_tokens WHERE token_id=${tokenId}::uuid`;
+  assert.ok(family?.renewal_grant_id);
+  const grant=family!.renewal_grant_id;
+  assert.equal((await readMembers(raw,shared.workspace)).status,200);
+  await sql`UPDATE swarm.renewal_grants SET suspended_at=clock_timestamp() WHERE renewal_grant_id=${grant}::uuid`;
+  const setDate=(date:string|null,commandId?:string)=>runCmd(shared.ownerJwt,{kind:'set_connection_expiry',connection_kind:'renewal',grant_id:grant,connection_expires_at:date},{commandId});
+  const future=new Date(Date.now()+86_400_000).toISOString();
+  const datedCommand=randomUUID();
+  assert.equal((await setDate(future,datedCommand)).body.status,'accepted');
+  const renewed=await runCmd(raw,{kind:'renew_agent_token'});
+  assert.equal(renewed.body.status,'accepted');assert.equal(renewed.body.connection_expires_at,future);
+  assert.equal((await setDate(null)).body.status,'accepted');
+  const replayed=await setDate(future,datedCommand);
+  assert.equal(replayed.status,200);assert.equal(replayed.body.connection_expires_at,null,'old receipt exposes current cleared policy');
+  assert.equal(replayed.body.connection_expired_at,null);
+  const [history]=await sql`SELECT suspended_at,resumed_at,connection_expires_at,connection_expired_at
+    FROM swarm.renewal_grants WHERE renewal_grant_id=${grant}::uuid`;
+  assert.ok(history!.suspended_at instanceof Date);assert.equal(history!.resumed_at,null);
+  assert.equal(history!.connection_expires_at,null);assert.equal(history!.connection_expired_at,null);
+  await sql`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second' WHERE renewal_grant_id=${grant}::uuid`;
+  assert.equal((await setDate(null)).status,403,"the served setter cannot clear elapsed terminal authority");
+  assert.equal((await runCmd(String(renewed.body.agent_token),{kind:'renew_agent_token'})).status,403);
+});
+
+// Attempt metering is a distinct refusal contract from reducer ledger replay.
+// A real served limit decision must retain its bucket/audit and valid first use.
+test("model attempt refusal commits use and metering without a model mutation", {timeout:30_000},async()=>{
+  const agent=await seedAgent('attempt-refusal');
+  const minted=await runCmd(shared.ownerJwt,{kind:'mint_agent_token',principal_id:agent.principalId,
+    run_id:randomUUID(),task_id:randomUUID(),epoch:1,device_id:shared.device,scopes:['post_signal']});
+  assert.equal(minted.body.status,'accepted');
+  const root=String(minted.body.agent_token);
+  assert.equal((await readMembers(root,shared.workspace)).status,200);
+  const issued=await runCmd(root,{kind:'renew_agent_token'});assert.equal(issued.body.status,'accepted');
+  const bucket=`model:declare:agent:${agent.principalId}`;
+  await sql`INSERT INTO swarm.rate_buckets(bucket_key,window_start,count)
+    VALUES(${bucket},date_trunc('hour',clock_timestamp()),10)`;
+  const [before]=await sql`SELECT model FROM swarm.agent_principals WHERE principal_id=${agent.principalId}::uuid`;
+  const denied=await runCmd(String(issued.body.agent_token),{kind:'declare_agent_model',model:'synthetic-limited'});
+  assert.equal(denied.status,429);assert.equal(denied.body.error,'rate_limited');
+  const [meter]=await sql`SELECT count FROM swarm.rate_buckets WHERE bucket_key=${bucket} AND window_start=date_trunc('hour',clock_timestamp())`;
+  assert.equal(meter!.count,11,'the refused attempt commits its charge');
+  const [used]=await sql`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id=${String(issued.body.token_id)}::uuid`;
+  const [predecessor]=await sql`SELECT expires_at<=clock_timestamp() AS cut FROM swarm.agent_tokens WHERE token_id=${String(minted.body.token_id)}::uuid`;
+  assert.ok(used!.first_used_at instanceof Date);assert.equal(predecessor!.cut,true);
+  const [after]=await sql`SELECT model FROM swarm.agent_principals WHERE principal_id=${agent.principalId}::uuid`;
+  assert.deepEqual(after,before,'refusal commits no requested model mutation');
+  const [audit]=await sql`SELECT count(*)::int AS n FROM swarm.audit_log
+    WHERE actor_agent_principal=${agent.principalId}::uuid AND command_kind='declare_agent_model' AND outcome='rate_limit'`;
+  assert.equal(audit!.n,1);
+  const control=await seedAgent('attempt-positive');
+  const accepted=await runCmd(control.token,{kind:'declare_agent_model',model:'synthetic-accepted'});
+  assert.equal(accepted.body.status,'accepted','same-invocation ordinary model mutation works');
+});

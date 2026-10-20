@@ -753,7 +753,7 @@ BEGIN
   IF pred.revoked_at IS NOT NULL THEN
     RAISE EXCEPTION 'SWARM_RENEWAL_PREDECESSOR_REVOKED' USING ERRCODE = '55000';
   END IF;
-  IF pred.expires_at <= v_now AND NOT (grant_row.kind='standing' AND grant_row.connection_expires_at IS NULL
+  IF pred.expires_at <= v_now AND NOT (grant_row.kind='standing' AND (grant_row.connection_expires_at IS NULL OR grant_row.connection_expires_at>clock_timestamp())
     AND grant_row.connection_expired_at IS NULL AND pred.first_used_at IS NOT NULL
     AND NOT EXISTS(SELECT 1 FROM swarm.agent_tokens child WHERE child.predecessor_token_id=pred.token_id
       AND child.revoked_at IS NULL AND child.first_used_at IS NOT NULL)) THEN
@@ -824,8 +824,7 @@ BEGIN
   END IF;
   -- Historical idle suspension is technical, not an owner-selected expiry.
   -- Keep its history; live permanent standing families renew without resume.
-  IF grant_row.suspension_active AND NOT (grant_row.kind='standing'
-    AND grant_row.connection_expires_at IS NULL AND grant_row.connection_expired_at IS NULL) THEN
+  IF grant_row.suspension_active AND grant_row.kind<>'standing' THEN
     RAISE EXCEPTION 'SWARM_RENEWAL_GRANT_SUSPENDED' USING ERRCODE = '55000';
   END IF;
   IF grant_row.kind = 'timeboxed'
@@ -901,8 +900,7 @@ BEGIN
   END IF;
   v_now:=clock_timestamp();
   IF token.revoked_at IS NOT NULL OR token.surrender_only OR token.expires_at<=v_now
-    OR grant_row.revoked_at IS NOT NULL OR (grant_row.suspension_active AND NOT
-      (grant_row.kind='standing' AND grant_row.connection_expires_at IS NULL AND grant_row.connection_expired_at IS NULL))
+    OR grant_row.revoked_at IS NOT NULL OR (grant_row.suspension_active AND grant_row.kind<>'standing')
     OR grant_row.connection_expired_at IS NOT NULL OR grant_row.connection_expires_at<=v_now
     OR NOT EXISTS(SELECT 1 FROM swarm.agent_principals p JOIN swarm.agent_runs r USING(principal_id)
       JOIN swarm.devices d USING(device_id) JOIN swarm.workspaces w ON w.workspace_id=p.workspace_id
@@ -956,8 +954,7 @@ BEGIN
   END IF;
   -- Historical idle suspension is technical, not an owner-selected expiry.
   -- Keep its history; live permanent standing families renew without resume.
-  IF grant_row.suspension_active AND NOT (grant_row.kind='standing'
-    AND grant_row.connection_expires_at IS NULL AND grant_row.connection_expired_at IS NULL) THEN
+  IF grant_row.suspension_active AND grant_row.kind<>'standing' THEN
     RETURN 'renewal_grant_suspended';
   END IF;
 
@@ -1264,7 +1261,7 @@ RETURNS TABLE (
   connection_expired_at timestamptz
 )
 LANGUAGE plpgsql
-STABLE
+VOLATILE
 SECURITY DEFINER
 SET search_path = pg_catalog
 AS $$
@@ -1292,14 +1289,15 @@ BEGIN
     grant_row.last_used_device_id,
     grant_row.last_used_from,
     grant_row.new_host_at,
-    CASE WHEN grant_row.suspension_active AND NOT (grant_row.kind='standing' AND grant_row.connection_expires_at IS NULL AND grant_row.connection_expired_at IS NULL) THEN grant_row.suspended_at END,
+    CASE WHEN grant_row.suspension_active AND grant_row.kind<>'standing' THEN grant_row.suspended_at END,
     grant_row.revoked_at,
     token.token_id,
     token.issued_at,
     token.expires_at,
     token.first_used_at,
     token.revoked_at,
-    grant_row.connection_expires_at,grant_row.connection_expired_at
+    grant_row.connection_expires_at,COALESCE(grant_row.connection_expired_at,
+      CASE WHEN grant_row.connection_expires_at<=clock_timestamp() THEN grant_row.connection_expires_at END)
   FROM swarm.agent_principals AS principal
   JOIN LATERAL (
     SELECT candidate.*
@@ -1363,7 +1361,7 @@ RETURNS TABLE (
   connection_expired_at timestamptz
 )
 LANGUAGE sql
-STABLE
+VOLATILE
 SECURITY DEFINER
 SET search_path = pg_catalog
 AS $$
@@ -1380,14 +1378,15 @@ AS $$
     grant_row.last_used_device_id,
     grant_row.last_used_from,
     grant_row.new_host_at,
-    CASE WHEN grant_row.suspension_active AND NOT (grant_row.kind='standing' AND grant_row.connection_expires_at IS NULL AND grant_row.connection_expired_at IS NULL) THEN grant_row.suspended_at END,
+    CASE WHEN grant_row.suspension_active AND grant_row.kind<>'standing' THEN grant_row.suspended_at END,
     grant_row.revoked_at,
     latest.token_id,
     latest.issued_at,
     latest.expires_at,
     latest.first_used_at,
     latest.revoked_at,
-    grant_row.connection_expires_at,grant_row.connection_expired_at
+    grant_row.connection_expires_at,COALESCE(grant_row.connection_expired_at,
+      CASE WHEN grant_row.connection_expires_at<=clock_timestamp() THEN grant_row.connection_expires_at END)
   FROM swarm.agent_tokens AS presenting
   JOIN swarm.renewal_grants AS grant_row
     ON grant_row.renewal_grant_id = presenting.renewal_grant_id

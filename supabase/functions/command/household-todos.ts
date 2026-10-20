@@ -267,11 +267,11 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
               AND (g.connection_expires_at IS NULL OR g.connection_expires_at>${new Date(now)})))) AS token_live,
       EXISTS (SELECT 1 FROM swarm.renewal_grants g JOIN swarm.agent_runs r USING(run_id) JOIN swarm.devices d USING(device_id)
         WHERE g.renewal_grant_id=ANY(${familyIds}::uuid[]) AND g.principal_id=p.principal_id AND g.revoked_at IS NULL AND (g.horizon_expires_at IS NULL OR g.horizon_expires_at>${new Date(now)})
-          AND g.connection_expired_at IS NULL AND (g.connection_expires_at IS NULL OR g.connection_expires_at>${new Date(now)}) AND (NOT g.suspension_active OR g.kind='standing' AND g.connection_expires_at IS NULL) AND r.ended_at IS NULL AND d.revoked_at IS NULL) AS renewal_live,
+          AND g.connection_expired_at IS NULL AND (g.connection_expires_at IS NULL OR g.connection_expires_at>${new Date(now)}) AND (NOT g.suspension_active OR g.kind='standing') AND r.ended_at IS NULL AND d.revoked_at IS NULL) AS renewal_live,
       coalesce((SELECT g.revoked_at IS NOT NULL FROM swarm.renewal_grants g WHERE g.renewal_grant_id=ANY(${familyIds}::uuid[]) AND g.principal_id=p.principal_id ORDER BY g.created_at DESC,g.renewal_grant_id LIMIT 1),
         (SELECT t.revoked_at IS NOT NULL FROM swarm.agent_tokens t WHERE t.token_id=ANY(${tokenIds}::uuid[]) AND t.principal_id=p.principal_id ORDER BY t.issued_at DESC,t.token_id LIMIT 1),false) AS key_off,
       EXISTS (SELECT 1 FROM swarm.renewal_grants g WHERE g.renewal_grant_id=ANY(${familyIds}::uuid[]) AND g.principal_id=p.principal_id AND g.revoked_at IS NULL AND g.suspension_active
-        AND NOT (g.kind='standing' AND g.connection_expires_at IS NULL)) AS paused
+        AND g.kind<>'standing') AS paused
       FROM swarm.agent_principals p WHERE p.workspace_id=${workspaceId}::uuid AND p.principal_id=${principalId}::uuid`;
     if (!agent) return null;
     const [activity] = await tx`SELECT greatest(
