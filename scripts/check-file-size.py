@@ -163,7 +163,7 @@ def inventory(head):
 
 
 def main():
-    os.chdir(os.fsdecode(git('rev-parse', '--show-toplevel').rstrip(b'\n')))
+    os.chdir(os.fsdecode(git('rev-parse', '--show-toplevel')[:-1]))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base')
     parser.add_argument('--head', default='HEAD')

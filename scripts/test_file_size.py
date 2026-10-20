@@ -178,6 +178,15 @@ class FileSizeTest(unittest.TestCase):
         config = subprocess.run(['git', 'config', '--get', 'core.hooksPath'],
                                 cwd=self.root, env=self.env, capture_output=True)
         self.assertEqual(1, config.returncode)
+        # --git-path must also respect a pre-existing custom hooks directory.
+        self.git('config', 'core.hooksPath', 'custom-hooks')
+        self.write('custom-hooks/post-commit', '#!/bin/sh\nexit 0\n')
+        (self.root / 'custom-hooks/post-commit').chmod(0o755)
+        result = subprocess.run(['sh', str(installer)], cwd=self.root,
+                                env=self.env, capture_output=True, text=True)
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertIn('custom-hooks/post-commit', result.stderr)
+        self.assertEqual('custom-hooks', self.git('config', '--get', 'core.hooksPath').strip())
 
     def test_partial_staging(self):
         self.write('partial.txt', 'x' * 25000)
