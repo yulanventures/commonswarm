@@ -739,60 +739,72 @@ test("logout non-author control: 404 and 500 retain the rotated credential witho
   );
 });
 
-test("logout with an unusable refresh token clears the credential instead of wedging", async () => {
-  // Regression: logout used to throw when refreshSession failed, which meant it never
-  // reached store.delete(). A user whose session had expired was told by `status` to log
-  // in, but `logout` -- the obvious way to reset -- failed and left the credential on
-  // disk. There was no way out of that state from the CLI.
-  const server = await createServer((request, response) => {
-    const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    if (request.method === "POST" && url.pathname === "/auth/v1/token") {
-      // A NAMED terminal condition. The legacy `invalid_grant` shape carries no code, so it
-      // is deliberately NOT terminal any more -- it retains and routes the user to
-      // `--local` instead. That case is covered in the retain test above.
-      response.writeHead(400, { "content-type": "application/json" });
-      response.end(
-        JSON.stringify({
-          code: "refresh_token_not_found",
-          error_code: "refresh_token_not_found",
-          msg: "Invalid Refresh Token: Refresh Token Not Found",
-        }),
+test("logout with a terminal refresh refusal and no journal clears locally instead of wedging", async t => {
+  for (const { status, code } of [
+    { status: 400, code: "refresh_token_not_found" },
+    { status: 403, code: "session_not_found" },
+    { status: 404, code: "session_expired" },
+  ]) await t.test(`${status}/${code}`, async () => {
+    // Regression: logout used to throw when refreshSession failed, which meant it never
+    // reached store.delete(). A user whose session had expired was told by `status` to log
+    // in, but `logout` -- the obvious way to reset -- failed and left the credential on
+    // disk. There was no way out of that state from the CLI.
+    let refreshAttempts = 0, logoutAttempts = 0;
+    const server = await createServer((request, response) => {
+      const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      if (request.method === "POST" && url.pathname === "/auth/v1/token") {
+        // A NAMED terminal condition. The legacy `invalid_grant` shape carries no code, so it
+        // is deliberately NOT terminal any more -- it retains and routes the user to
+        // `--local` instead. That case is covered in the retain test above.
+        refreshAttempts += 1;
+        response.writeHead(status, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            code,
+            error_code: code,
+            msg: "Fixture terminal session refusal",
+          }),
+        );
+        return;
+      }
+      if (url.pathname === "/auth/v1/logout") logoutAttempts += 1;
+      response.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address === "string" || address === null) throw new Error("no port");
+    const target = cloudTarget(`http://127.0.0.1:${address.port}`, "test-anon-key");
+    const credentials = new MemoryCredentialStore();
+    credentials.record = {
+      version: 1,
+      refreshToken: "expired-token",
+      generation: 1,
+      deviceId: randomUUID(),
+      userId: "33333333-3333-4333-8333-333333333333",
+    };
+    try {
+      assert.equal((await credentials.readProfile()).humanSession?.successor, undefined, "no journal can recover this parent");
+      assert.equal(
+        await logout(target, credentials),
+        "local-only",
+        "an unrevokable session reports local-only, so the caller never claims a revocation",
       );
-      return;
+      assert.equal(
+        credentials.record,
+        null,
+        "the credential is removed, so the user is not stuck between a failing status and a failing logout",
+      );
+      assert.equal(refreshAttempts, 1, "the named terminal refusal is not retried");
+      assert.equal(logoutAttempts, 0, "no server revocation was possible");
+      assert.equal(
+        await logout(target, credentials),
+        "already-logged-out",
+        "and logout stays idempotent afterwards",
+      );
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
-    response.writeHead(404).end();
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  if (typeof address === "string" || address === null) throw new Error("no port");
-  const target = cloudTarget(`http://127.0.0.1:${address.port}`, "test-anon-key");
-  const credentials = new MemoryCredentialStore();
-  credentials.record = {
-    version: 1,
-    refreshToken: "expired-token",
-    generation: 1,
-    deviceId: randomUUID(),
-    userId: "33333333-3333-4333-8333-333333333333",
-  };
-  try {
-    assert.equal(
-      await logout(target, credentials),
-      "local-only",
-      "an unrevokable session reports local-only, so the caller never claims a revocation",
-    );
-    assert.equal(
-      credentials.record,
-      null,
-      "the credential is removed, so the user is not stuck between a failing status and a failing logout",
-    );
-    assert.equal(
-      await logout(target, credentials),
-      "already-logged-out",
-      "and logout stays idempotent afterwards",
-    );
-  } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  }
 });
 test("headless file fallback warns and enforces 0700/0600", async () => {
   const parent = await mkdtemp(join(tmpdir(), "swarm-cloud-store-"));

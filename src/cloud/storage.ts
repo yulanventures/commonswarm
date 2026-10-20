@@ -361,8 +361,8 @@ function parseProfile(raw: string): CredentialProfile {
   return value as CredentialProfile;
 }
 
-function hostIdRemovalStep(path: string, directory: boolean): string {
-  return `rm ${directory ? "-r " : ""}-- '${path.replaceAll("'", "'\"'\"'")}'`;
+function verifiedLockRecovery(): string {
+  return "If it persists, have an operator verify the recorded host and process and stop all users of this state directory before recovering this exact lock. Do not remove an unverified lock or its publication target; retry after verified recovery.";
 }
 
 export class FileLockTimeoutError extends Error {
@@ -380,19 +380,19 @@ export function fileLockTimeoutSentence(lockName: string, path: string, ownerPid
   const label = gate ? `${lockName === "host-id-rotation" ? "host-id" : lockName} reclaim gate directory`
     : lockName === "host-id-rotation" ? "host-id rotation lock"
     : /^[0-9a-f]{24}$/.test(lockName) ? "credential refresh lock" : `${lockName} lock`;
-  let liveOwner = false;
-  if (ownerPid !== undefined && (ownerHost === undefined || ownerHost === hostname())) {
-    try { process.kill(ownerPid, 0); liveOwner = true; }
-    catch (error) { liveOwner = (error as NodeJS.ErrnoException).code === "EPERM"; }
-  }
-  // Owner fields come from disk; never echo an arbitrary host string or control
-  // characters into terminal diagnostics. An unverified owner is not a dead one.
+  // Owner fields come from disk; an unverified owner is not a dead one.
   const safeHost = typeof ownerHost === "string" && /^[A-Za-z0-9._-]{1,253}$/.test(ownerHost) ? ownerHost : "unknown";
   const safePid = Number.isSafeInteger(ownerPid) && ownerPid! > 0 ? ownerPid : "unknown";
+  let currentHost = "unknown"; try { const host = hostname(); if (/^[A-Za-z0-9._-]{1,253}$/.test(host)) currentHost = host; } catch { /* Unavailable host identity stays unknown. */ }
+  let liveOwner = false;
+  if (safePid !== "unknown" && safeHost !== "unknown" && safeHost === currentHost) {
+    try { process.kill(safePid, 0); liveOwner = true; }
+    catch (error) { liveOwner = (error as NodeJS.ErrnoException).code === "EPERM"; }
+  }
   const safePath = path.replace(/[\x00-\x1f\x7f]/g, "?");
-  const next = liveOwner ? "Wait for its owner to finish, then retry."
-    : "The recorded owner's liveness could not be verified; the lock was retained.";
-  return `timed out waiting for the ${label} at ${safePath} (owner pid ${safePid}, host ${safeHost}). ${next} If it persists, have an operator verify the recorded host and process and stop all users of this state directory before recovering this exact lock. Do not remove an unverified lock or its publication target; retry after verified recovery.`;
+  const cause = safePid === "unknown" ? "The owner pid is unavailable or invalid." : safeHost === "unknown" ? "The owner host is unavailable or invalid." : currentHost === "unknown" ? "This host could not be identified."
+    : safeHost !== currentHost ? "The recorded owner host differs from this host." : liveOwner ? "A process with the recorded pid is running; its ownership of this lock is unverified. Wait for confirmed lock activity to finish, then retry." : "The recorded local process could not be verified.";
+  return `timed out waiting for the ${label} at ${safePath} (owner pid ${safePid}, host ${safeHost}${currentHost === "unknown" ? "" : `, current host ${currentHost}`}). ${cause} The lock was retained. ${verifiedLockRecovery()}`;
 }
 
 /** Publish complete bytes at an absent path. A symlink is the atomic fallback when hard links are unavailable. */
@@ -623,8 +623,8 @@ export async function cleanupDeadOwnerTemps(stateDirectory: string, lockFileName
 }
 
 function gateOwnerChanged(reclaimPath: string, phase: string): Error {
-  const lockName = basename(reclaimPath).replace(/\.lock\.reclaim$/, "");
-  return new Error(`${lockName === "host-id-rotation" ? "host-id" : lockName} reclaim gate owner changed at ${reclaimPath} ${phase}. Retry the command; if its owner is gone, remove that directory with ${hostIdRemovalStep(reclaimPath, true)} and retry.`);
+  const safePath = reclaimPath.replace(/[\x00-\x1f\x7f]/g, "?"), lockName = basename(safePath).replace(/\.lock\.reclaim$/, "");
+  return new Error(`${lockName === "host-id-rotation" ? "host-id" : lockName} reclaim gate owner changed at ${safePath} ${phase}. The gate was retained because ownership changed. ${verifiedLockRecovery()} Retry the command after verified recovery.`);
 }
 
 async function releaseReclaimGate(reclaimPath: string, ownerId: string): Promise<void> {

@@ -221,7 +221,7 @@ test("one timeout builder names each retained lock or gate and requires verified
     const sentence = fileLockTimeoutSentence(name, path, undefined, gate);
     assert.match(sentence, label);
     assert.ok(sentence.includes(path));
-    assert.match(sentence, /liveness could not be verified/);
+    assert.match(sentence, /owner pid is unavailable or invalid/);
     assert.match(sentence, /verify the recorded host and process/);
     assert.doesNotMatch(sentence, /rm --|rm -r|No live owner was identified/);
     if (!/^[0-9a-f]{24}$/.test(name)) assert.doesNotMatch(sentence, /credential refresh lock/);
@@ -557,12 +557,33 @@ test("general locks retain aged foreign hosts and reclaim verified reused pids",
     const foreign = JSON.stringify({ pid: process.pid, host: "previous-hostname",
       createdAt: clock(), startTime, ownerId: "foreign" });
     await writeFile(path, foreign);
-    await assert.rejects(withFileLock(root, "check", async () => "too-early", { timeoutMs: 40 }), FileLockTimeoutError);
+    await assert.rejects(withFileLock(root, "check", async () => "too-early", { timeoutMs: 40 }), error => {
+      assert.ok(error instanceof FileLockTimeoutError);
+      assert.match(error.message, /recorded owner host differs from this host/);
+      assert.ok(error.message.includes(`current host ${hostname()}`));
+      return true;
+    });
     assert.equal(await readFile(path, "utf8"), foreign);
     Date.now = () => clock() + AGED_LOCK_MS;
     await assert.rejects(withFileLock(root, "check", async () => "wrong", { timeoutMs: 60 }), FileLockTimeoutError);
     assert.equal(await readFile(path, "utf8"), foreign);
     Date.now = clock;
+
+    for (const [record, cause] of [
+      [JSON.stringify({ host: hostname(), pid: "invalid" }), /owner pid is unavailable or invalid/],
+      [JSON.stringify({ pid: process.pid }), /owner host is unavailable or invalid/],
+      [JSON.stringify({ pid: process.pid, host: "token-shaped\n\x1b[31m" }), /owner host is unavailable or invalid/],
+    ] as const) {
+      await writeFile(path, record);
+      await assert.rejects(withFileLock(root, "check", async () => "wrong", { timeoutMs: 40 }), error => {
+        assert.ok(error instanceof FileLockTimeoutError);
+        assert.match(error.message, cause);
+        assert.ok(error.message.includes(`current host ${hostname()}`));
+        assert.doesNotMatch(error.message, /token-shaped|\x1b|rm --|rm -r/);
+        return true;
+      });
+      assert.equal(await readFile(path, "utf8"), record, "diagnostics must not alter the retained owner");
+    }
 
     await writeFile(path, JSON.stringify({ pid: process.pid, host: hostname(),
       createdAt: startTime - 10_000, startTime, ownerId: "reused" }));
@@ -798,7 +819,11 @@ test("gate release leaves a replacement owner untouched", { timeout: 3_000 }, as
     }), error => {
       assert.match(String(error), /gate owner changed at .* before release/);
       assert.ok(String(error).includes(gate));
-      assert.match(String(error), /Retry the command/);
+      assert.match(String(error), /gate was retained because ownership changed/);
+      assert.match(String(error), /verify the recorded host and process/);
+      assert.match(String(error), /stop all users of this state directory before recovering this exact lock/);
+      assert.match(String(error), /Do not remove an unverified lock or its publication target/);
+      assert.doesNotMatch(String(error), /rm --|rm -r|cswarm doctor/);
       return true;
     });
     assert.equal(await readFile(join(gate, "owner.json"), "utf8"), fresh);
