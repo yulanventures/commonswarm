@@ -11112,6 +11112,7 @@ async function handleTransaction(
     if (isFileCommand && HOUSEHOLD_FEATURE_GATES.legacyFileRedirect) {
       const [boundary] = await tx`SELECT purpose FROM swarm.household_workspace_boundaries WHERE workspace_id=${route.workspaceId}::uuid`;
       if (boundary) {
+        await assertHouseholdContentServiceReady(tx);
         const identity = { user_id: auth.actor.user!, principal_id: auth.actor.agent_principal, run_id: auth.actor.run,
           connection: auth.agent ? { connection_id: auth.agent.token_id, grant_id: auth.agent.run_id } : null };
         const result = await executeHouseholdLegacy(tx, { workspace_id: route.workspaceId, request_id: commandId,

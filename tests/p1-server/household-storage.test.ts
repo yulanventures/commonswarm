@@ -1,12 +1,15 @@
 /** H2 adapter/Storage/PostgreSQL cases; test:p1-server's existing glob owns
- * these. They deliberately bypass HTTP dispatch, which belongs to lane 4.
+ * these. Most bypass HTTP dispatch; the legacy FILE regression owns its HTTP redirect.
  * No fixtures carry customer data, production targets, or fixed host paths.
  */
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { randomBytes, randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { localClusterAdminUrl } from '../support/admin-schema-db.js';
 import { after, before, test } from 'node:test';
 import { createClient } from '@supabase/supabase-js';
 import postgres from 'postgres';
@@ -22,7 +25,7 @@ let storage: transfers.HouseholdStorage;
 let allowed: (name: string, type: string) => boolean;
 let owner: string, other: string;
 const core = { ...objects, ...policy };
-let local: { API_URL: string; DB_URL: string; SERVICE_ROLE_KEY: string };
+let local: { API_URL: string; ANON_KEY: string; DB_URL: string; SERVICE_ROLE_KEY: string };
 
 before(async () => {
   local = JSON.parse(execFileSync('supabase', ['status', '-o', 'json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
@@ -349,4 +352,134 @@ test('catalogs detect privilege drift and reverse rollbacks restore the pre-lane
   for (const id of [...ids].reverse()) script += proof(id,'rollback') + proof(id,'rollback-catalog') + requireProof('rollback_ok',true) + proof(id,'catalog') + requireProof('catalog_ok',false);
   script += 'ROLLBACK;\n';
   execFileSync('docker', ['exec','-i',containers[0]!, 'psql','-X','-q','-U','postgres','-d','postgres','-v','ON_ERROR_STOP=1'], { input: script, stdio: ['pipe','pipe','pipe'] });
+});
+
+// The FILE caller's adapter catch and local-token handover are not reached by
+// the existing todo HTTP/MCP coverage. No auth, transaction or storage shim.
+test('legacy FILE HTTP redirect rolls back gated requests and resumes in the same process after DROP', { timeout: 180_000 }, async () => {
+  const workspace = await fixture(), object = randomUUID(), principal = randomUUID(), device = randomUUID();
+  const run = randomUUID(), tokenId = randomUUID(), predecessor = randomUUID(), lineage = randomUUID();
+  const token = `swm_agt_${randomBytes(32).toString('base64url')}`;
+  await sql`INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES (${randomUUID()}::uuid,${workspace}::uuid,'workspace')`;
+  committed(await write(workspace, newDoc(object), proposal('Legacy HTTP control')));
+  const [binding] = await sql`SELECT file_id FROM swarm.household_object_bindings WHERE workspace_id=${workspace}::uuid AND object_id=${object}`;
+  assert.ok(binding);
+  await sql.begin(async tx => {
+    await tx`INSERT INTO swarm.devices(device_id,user_id,label) VALUES (${device}::uuid,${owner}::uuid,'Legacy HTTP test')`;
+    await tx`INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name)
+      VALUES (${principal}::uuid,${workspace}::uuid,${owner}::uuid,'Legacy HTTP agent')`;
+    await tx`INSERT INTO swarm.agent_runs(run_id,principal_id,device_id) VALUES (${run}::uuid,${principal}::uuid,${device}::uuid)`;
+    await tx`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,scopes,token_hash,expires_at,lineage_id,first_used_at)
+      VALUES (${predecessor}::uuid,${principal}::uuid,${run}::uuid,'["post_signal"]',${randomBytes(32)},clock_timestamp()+interval '1 hour',${lineage}::uuid,clock_timestamp())`;
+    await tx`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,scopes,token_hash,expires_at,lineage_id,predecessor_token_id)
+      VALUES (${tokenId}::uuid,${principal}::uuid,${run}::uuid,'["post_signal"]',${createHash('sha256').update(token).digest()},
+        clock_timestamp()+interval '1 hour',${lineage}::uuid,${predecessor}::uuid)`;
+    await tx`INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at)
+      SELECT ${tokenId}::uuid,${run}::uuid,${workspace}::uuid,${principal}::uuid,${owner}::uuid,'shared',ARRAY['read'],content_consent_id,
+        clock_timestamp()+interval '1 hour' FROM swarm.household_member_content_roles WHERE workspace_id=${workspace}::uuid AND user_id=${owner}::uuid`;
+  });
+  const release = postgres(localClusterAdminUrl(local.DB_URL), { prepare: false, max: 1 });
+  const edgeUrl = new URL(local.DB_URL);
+  edgeUrl.username = 'commonswarm_edge'; edgeUrl.password = randomBytes(32).toString('hex');
+  const directory = mkdtempSync(join(tmpdir(), 'cswarm-legacy-file-http-'));
+  const harnessPath = join(directory, 'harness.ts');
+  const commandUrl = new URL('../../supabase/functions/command/index.ts', import.meta.url);
+  const harness = `
+const input = JSON.parse(await new Response(Deno.stdin.readable).text());
+const { db, handleRequest } = await import(${JSON.stringify(commandUrl.href)});
+const { default: postgres } = await import("postgres");
+const fixture = postgres(input.adminUrl, { prepare: false, max: 1 });
+const server = Deno.serve({ hostname: "127.0.0.1", port: 0, onListen() {} }, handleRequest);
+const request = () => fetch("http://127.0.0.1:" + server.addr.port + "/functions/v1/command", {
+  method: "POST", headers: { authorization: "Bearer " + input.token, "content-type": "application/json" },
+  body: JSON.stringify(input.body),
+}).then(async response => ({ status: response.status, body: await response.json(),
+  retryAfter: response.headers.get("retry-after"), challenge: response.headers.get("www-authenticate") }));
+async function snapshot() {
+  const result = [];
+  for (const table of ["workspaces","memberships","household_workspace_boundaries","household_member_content_roles",
+    "agent_principals","household_content_connections","household_hosted_content_restrictions",
+    "household_object_streams","household_object_events","household_object_artifacts","household_object_audit",
+    "household_object_bindings","household_todo_streams","household_todo_events","household_todos",
+    "idempotency_keys","streams","events","files","file_versions","signals","signal_deliveries","agent_presence","audit_log"]) {
+    result.push([table, ...await fixture.unsafe("SELECT count(*)::int AS n, md5(coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text)::text,'[]')) AS digest FROM swarm." + table + " r WHERE workspace_id=$1::uuid", [input.workspace])]);
+  }
+  for (const table of ["agent_tokens","agent_runs"]) {
+    result.push([table, ...await fixture.unsafe("SELECT count(*)::int AS n, md5(coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text)::text,'[]')) AS digest FROM swarm." + table + " r WHERE principal_id=$1::uuid", [input.principal])]);
+  }
+  return result;
+}
+try {
+  const [identity] = await db.unsafe("SELECT session_user AS login, NOT rolsuper AND NOT rolbypassrls AS safe FROM pg_roles WHERE rolname=current_user");
+  const role = await db.begin(async tx => { await tx.unsafe("SET LOCAL ROLE swarm_command"); return (await tx.unsafe("SELECT current_user AS role"))[0].role; });
+  let oauthDenied = false;
+  try { await db.begin(async tx => { await tx.unsafe("SET LOCAL ROLE commonswarm_oauth_runtime"); }); }
+  catch (error) { if (error.code !== "42501") throw error; oauthDenied = true; }
+  const before = await snapshot();
+  const gated = [await request(), await request()];
+  const after = await snapshot();
+  await fixture.unsafe("DROP POLICY hosted_owner_content_rollback_gate ON swarm.household_content_connections");
+  const recovered = await request();
+  console.log("LEGACY_HTTP_RESULT:" + JSON.stringify({ identity, role, oauthDenied, before, after, gated, recovered }));
+} finally {
+  await server.shutdown();
+  await db.end();
+  await fixture.end();
+}
+`;
+  try {
+    await release.unsafe(`DO $edge$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='commonswarm_edge') THEN
+      CREATE ROLE commonswarm_edge LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+      END IF; END $edge$; GRANT swarm_command,swarm_read,swarm_capability TO commonswarm_edge;`);
+    await release.unsafe(`ALTER ROLE commonswarm_edge PASSWORD '${edgeUrl.password}'`);
+    await release.unsafe(readFileSync(new URL('../../deploy/release-proofs/hosted-owner-content/20261019000006-rollback.sql', import.meta.url), 'utf8'));
+    const [pending] = await sql`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id=${tokenId}::uuid`;
+    assert.equal(pending!.first_used_at, null);
+    const [absent] = await sql`SELECT count(*)::int AS n FROM swarm.agent_presence WHERE workspace_id=${workspace}::uuid`;
+    assert.equal(absent!.n, 0);
+    writeFileSync(harnessPath, harness, { mode: 0o600 });
+    const child = spawnSync('deno', ['run','--no-lock','--config','supabase/functions/command/deno.json',
+      '--allow-env','--allow-net','--allow-read',harnessPath], {
+      cwd: process.cwd(), encoding: 'utf8', timeout: 90_000,
+      env: { PATH: process.env.PATH ?? '', ...(process.env.DENO_DIR ? { DENO_DIR: process.env.DENO_DIR } : {}),
+        SWARM_ENV: 'test', SWARM_HOUSEHOLD_LEGACY_FILE_REDIRECT: '1',
+        SWARM_DATABASE_URL: edgeUrl.href, SUPABASE_DB_URL: edgeUrl.href, SUPABASE_URL: local.API_URL,
+        SUPABASE_ANON_KEY: local.ANON_KEY,
+        SUPABASE_SERVICE_ROLE_KEY: local.SERVICE_ROLE_KEY },
+      input: JSON.stringify({ adminUrl: localClusterAdminUrl(local.DB_URL), workspace, principal, token,
+        body: { command_id: randomUUID(), client_version: '0.1.0', client_build: '0.1.0', workspace_id: workspace,
+          stream: { kind: 'workspace' }, command: { kind: 'file_download_url', file_id: String(binding!.file_id), version_n: null } } }),
+    });
+    assert.ifError(child.error);
+    assert.equal(child.status, 0, child.stderr);
+    const line = child.stdout.split('\n').find(value => value.startsWith('LEGACY_HTTP_RESULT:'));
+    assert.ok(line, 'real HTTP harness returned its evidence');
+    const result = JSON.parse(line.slice('LEGACY_HTTP_RESULT:'.length));
+    assert.deepEqual(result.identity, { login: 'commonswarm_edge', safe: true });
+    assert.equal(result.role, 'swarm_command');
+    assert.equal(result.oauthDenied, true);
+    const retry = { error: 'household_content_service_updating',
+      message: 'Household content service is updating. Retry after one second with the same request_id.',
+      retryable: true, retry_after_seconds: 1 };
+    assert.equal(result.gated.length, 2);
+    for (const refusal of result.gated) assert.deepEqual(refusal, { status: 503, body: retry, retryAfter: '1', challenge: null });
+    assert.deepEqual(result.after, result.before, '503 rolls back content, authority, receipts, audit, presence and first-use handover');
+    assert.equal(result.recovered.status, 200);
+    assert.equal(result.recovered.retryAfter, null);
+    assert.equal(result.recovered.challenge, null);
+    assert.equal(result.recovered.body.status, 'ok');
+    assert.equal(result.recovered.body.kind, 'read');
+    assert.deepEqual(result.recovered.body.content, proposal('Legacy HTTP control').content);
+    const [adopted] = await sql`SELECT first_used_at IS NOT NULL AS used FROM swarm.agent_tokens WHERE token_id=${tokenId}::uuid`;
+    const [ended] = await sql`SELECT expires_at<=clock_timestamp() AS ended FROM swarm.agent_tokens WHERE token_id=${predecessor}::uuid`;
+    const [present] = await sql`SELECT count(*)::int AS n FROM swarm.agent_presence WHERE workspace_id=${workspace}::uuid AND principal_id=${principal}::uuid`;
+    assert.equal(adopted!.used, true, 'successful retry alone adopts successor');
+    assert.equal(ended!.ended, true, 'successful retry alone ends predecessor');
+    assert.equal(present!.n, 1, 'successful retry alone records presence');
+  } finally {
+    await release.unsafe('DROP POLICY IF EXISTS hosted_owner_content_rollback_gate ON swarm.household_content_connections');
+    await release.unsafe('ALTER ROLE commonswarm_edge PASSWORD NULL');
+    await release.end();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
