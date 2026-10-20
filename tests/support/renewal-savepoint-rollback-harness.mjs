@@ -100,7 +100,7 @@ try {
   // a standing renewal grant bound to that device, and a root token T0 with a task/epoch binding and that grant (rows as
   // tests/p1-server/renewal-last-use.test.ts:70-80). T0 gets its first use from the real read route (a token is never
   // born used, SWARM_TOKEN_FIRST_USE_PRESET), because a pending token may not renew (predecessor_pending_first_use).
-  const seat = async (name, use=true, boundDevice=null) => {
+  const seat = async (name, use=true, boundDevice=null, kind='standing') => {
     const principal = id(), device = id(), run = id(), task = id(), lineage = id(), grant = id(), t0 = id();
     const raw = mintRaw(), hash = await hashOf(raw);
     await observer.begin(async (tx) => {
@@ -109,7 +109,8 @@ try {
       await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id) VALUES (${run}::uuid, ${principal}::uuid, ${device}::uuid)`;
       await tx`INSERT INTO swarm.renewal_grants (renewal_grant_id, workspace_id, principal_id, run_id, kind, max_successors, successors_used,
         horizon_expires_at, bound_device_id, created_by)
-        VALUES (${grant}::uuid, ${W}::uuid, ${principal}::uuid, ${run}::uuid, 'standing', NULL, 0, NULL, ${boundDevice ?? device}::uuid, ${owner}::uuid)`;
+        VALUES (${grant}::uuid, ${W}::uuid, ${principal}::uuid, ${run}::uuid, ${kind}, ${kind==='timeboxed' ? 2:null}, 0,
+          CASE WHEN ${kind==='timeboxed'} THEN clock_timestamp()+interval '1 day' ELSE NULL END, ${boundDevice ?? device}::uuid, ${owner}::uuid)`;
       await tx`INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, task_id, epoch, scopes, token_hash, expires_at, lineage_id,
         renewal_grant_id)
         VALUES (${t0}::uuid, ${principal}::uuid, ${run}::uuid, ${task}::uuid, 1, ${tx.json(['post_signal'])}::jsonb, ${hash},
@@ -244,6 +245,16 @@ try {
     out.stage='permanence';
     const checks=[];
     const check=(name,ok)=>checks.push({name,ok:Boolean(ok)});
+    // Ordinary unused expiry must remain a refusal even after the separate
+    // permanent-root change. Pair with a real live read under the same policy.
+    const ordinaryControl=await seat('ordinary-live',true,null,'timeboxed');
+    check('ordinary-timeboxed-live-positive',(await readAs(ordinaryControl.raw)).status===200);
+    const ordinaryUnused=await seat('ordinary-expired-unused',false,null,'timeboxed');
+    await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second'
+      WHERE token_id=${ordinaryUnused.t0}::uuid`;
+    const ordinaryBefore=await snapshot(),ordinaryDenied=await renew(ordinaryUnused.raw,id());
+    check('ordinary-expired-unused-refused',[401,403].includes(ordinaryDenied.status) && credential(ordinaryDenied)===null);
+    check('ordinary-expired-unused-full-denial-rollback',JSON.stringify(ordinaryBefore)===JSON.stringify(await snapshot()));
     const s=await seat('expired-proof');
     await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${s.t0}::uuid`;
     const [before]=await observer`SELECT expires_at,first_used_at FROM swarm.agent_tokens WHERE token_id=${s.t0}::uuid`;
@@ -320,7 +331,7 @@ try {
     const lateIssue=await renew(late.raw,id()),lateRaw=credential(lateIssue);
     await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '3 seconds'
       WHERE renewal_grant_id=${late.grant}::uuid`;
-    const lateBefore=await seatState(late);let latePending;
+    const lateBefore=await seatState(late),lateDatabaseBefore=await snapshot();let latePending;
     await observer.begin(async tx=>{
       const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
       await tx`SELECT principal_id FROM swarm.agent_presence WHERE principal_id=${late.principal}::uuid FOR UPDATE`;
@@ -330,6 +341,7 @@ try {
     });
     check('date crossing during refusal wait overrides decided commit',(await latePending).status===403);
     check('failed final fence rolls back refused-use adoption and ledger',JSON.stringify(lateBefore)===JSON.stringify(await seatState(late)));
+    check('command denial rolls back both adoptions and every table',JSON.stringify(lateDatabaseBefore)===JSON.stringify(await snapshot()));
     // Activity owns a distinct final wait: the transactional realtime send.
     // The old Source returns 202 and commits adoption/broadcast after this wait.
     await import(`${readTree}/supabase/functions/activity/index.ts`);
@@ -343,7 +355,7 @@ try {
     check('activity fixture has a genuine unused successor',activityRaw!==null);
     await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '3 seconds'
       WHERE renewal_grant_id=${activitySeat.grant}::uuid`;
-    const activityBefore=await seatState(activitySeat);
+    const activityBefore=await seatState(activitySeat),activityDatabaseBefore=await snapshot();
     const [broadcastBefore]=await observer`SELECT count(*)::int AS n FROM realtime.messages`;
     let activityPending;
     await observer.begin(async tx=>{
@@ -358,6 +370,7 @@ try {
     check('activity denial rolls back token adoption and family use',JSON.stringify(activityBefore)===JSON.stringify(await seatState(activitySeat)));
     const [broadcastAfter]=await observer`SELECT count(*)::int AS n FROM realtime.messages`;
     check('activity denial commits no realtime broadcast',broadcastAfter.n===broadcastBefore.n);
+    check('activity denial rolls back both adoptions and every table',JSON.stringify(activityDatabaseBefore)===JSON.stringify(await snapshot()));
     const activityControl=await seat('activity-positive'),controlIssued=await renew(activityControl.raw,id()),controlRaw=credential(controlIssued);
     const positiveActivity=await activity(controlRaw);
     check('same-invocation activity really publishes',positiveActivity.status===202);
@@ -570,7 +583,7 @@ try {
     const family=await seat('family-approval');
     const consent=id();
     await observer.begin(async tx=>{
-      await tx`INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose) VALUES(${W}::uuid,'shared')`;
+      await tx`INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose) VALUES(${W}::uuid,'shared') ON CONFLICT DO NOTHING`;
       await tx`INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at)
         VALUES(${W}::uuid,${owner}::uuid,'editor',${consent}::uuid,clock_timestamp())`;
       await tx`SET LOCAL ROLE swarm_command`;

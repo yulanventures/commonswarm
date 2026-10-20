@@ -38,7 +38,7 @@ interface RaceResult {
   checks?: {name:string;ok:boolean}[];
   source?: {commit:string;tree:string};
   read_source?: {commit:string;tree:string};
-  active_catalog?: {functions:number;migrations:number};
+  active_catalog?: {functions:number;migrations:number;view_columns:number;measured_view_sha256:string};
   canonical_witness?: {first_pid:number;second_pid:number;gate_pid:number;token_ids:string[];order:string};
   floor_compatibility?: string;
   required_compatibility?: string;
@@ -272,13 +272,17 @@ for (const name of ["delegated-local-permanent-suspension","delegated-local-revo
 
 // Generation rows extend existing owners; none supplies auth, a receipt, or
 // an outcome. F is loaded from its retained Git objects, current is this checkout.
-for(const [command,read] of [['F','current'],['current','F'],['F','F']]) {
+const completedFloorCases=new Set<string>();
+for(const [command,read] of [['current','current'],['F','current'],['current','F'],['F','F']]) {
   for(const order of ['use-first','revoke-first']) {
     const name=`active-floor-canonical-${order}`;
     test(`${name} exact ${command}/${read}`,{timeout:300_000},async()=>{
       const result=await harness.runScenario(bound(),name,270_000,{command,read});
       assert.equal(result.stage,'complete',`${result.stage}: ${result.error ?? 'inconclusive'}`);
       assert.equal(result.active_catalog?.migrations,4);
+      assert.equal(result.active_catalog?.view_columns,11);
+      assert.match(result.active_catalog?.measured_view_sha256 ?? '',/^[a-f0-9]{64}$/);
+      process.stdout.write(`ACTIVE_FLOOR_CATALOG ${JSON.stringify({command,read,...result.active_catalog})}\n`);
       if(command==='F') assert.deepEqual(result.source,harness.ACTIVE_FLOOR_SOURCES.F);
       if(read==='F') assert.deepEqual(result.read_source,harness.ACTIVE_FLOOR_SOURCES.F);
       assert.ok(result.checks?.some(check=>check.name==='same-invocation-positive' && check.ok));
@@ -290,8 +294,13 @@ for(const [command,read] of [['F','current'],['current','F'],['F','F']]) {
       assert.notEqual(result.canonical_witness.first_pid,result.canonical_witness.second_pid);
       assert.equal(result.canonical_witness.token_ids.length,3);
       assert.equal(result.canonical_witness.order,order);
+      for(const contract of ['sequential-denial-every-table-unchanged','terminal-denial-every-table-unchanged',
+        ...(order==='revoke-first' ? ['revoke-first-both-adoptions-and-history-unchanged']:[])])
+        assert.ok(result.checks.some(check=>check.name===contract && check.ok),contract);
+      completedFloorCases.add(`${name}/${command}/${read}`);
     });
   }
+  if(command==='current' && read==='current') continue; // current permission owners already run above
   for(const name of ['local-allow-retired-parent-allow-first','local-allow-retired-parent-issuer-first',
     'delegated-local-revocation-closure','delegated-local-renewal-budget','delegated-local-selector-compatibility','delegated-local-parent-deadline','delegated-local-parent-narrowing',
     'delegated-local-wait-removal-rollback','local-resume-parent-order','local-resume-recovery-controls','ordinary-local-compat-policy']) {
@@ -299,6 +308,9 @@ for(const [command,read] of [['F','current'],['current','F'],['F','F']]) {
       const result=await harness.runScenario(bound(),name,270_000,{command,read});
       assert.equal(result.stage,'complete',`${result.stage}: ${result.error ?? 'inconclusive'}`);
       assert.equal(result.active_catalog?.migrations,4);
+      assert.equal(result.active_catalog?.view_columns,11);
+      assert.match(result.active_catalog?.measured_view_sha256 ?? '',/^[a-f0-9]{64}$/);
+      process.stdout.write(`ACTIVE_FLOOR_CATALOG ${JSON.stringify({command,read,...result.active_catalog})}\n`);
       if(command==='F') assert.deepEqual(result.source,harness.ACTIVE_FLOOR_SOURCES.F);
       if(read==='F') assert.deepEqual(result.read_source,harness.ACTIVE_FLOOR_SOURCES.F);
       assert.ok(result.checks && result.checks.length>0);
@@ -313,13 +325,20 @@ for(const [command,read] of [['F','current'],['current','F'],['F','F']]) {
         assert.deepEqual(result.race_witness.deadlock_edges,[]);
         for(const contract of ALLOW_ISSUER_CONTRACTS) assert.ok(result.checks.some(check=>check.name===contract && check.ok),contract);
       }
+      if(name==='ordinary-local-compat-policy') for(const prefix of ['', 'current-wire-'])
+        assert.ok(result.checks.some(check=>check.name===`${prefix}renewal-wire-retains-scope-counter-history` && check.ok));
+      completedFloorCases.add(`${name}/${command}/${read}`);
     });
   }
 }
 
-// Required source-intermediate gate. The O diagnostic remains diagnostic. Keep
-// this red until the missing independently owned F contracts are executable;
-// a passing consumer subset cannot certify support or initial AS issuance.
+// Count real completed cases, then retain the explicit missing-history failure.
+// Renewal's independent required gate lives with its own real transaction tests;
+// the genuine GoTrue/issuer owners and full AS suite remain separate gates.
 test('active-floor-required-F-support-complete',()=>{
-  assert.fail('F support incomplete: full denial state/rollback for both adoptions; genuine over-thirty-day idle history without rewinding immutable last-use; old/current renewal wire and operation ceiling/history matrix; exact SQL10 view body and remaining catalog ACL binding. Runtime and full AS suite UNRUN.');
+  for(const [command,read] of [['current','current'],['F','current'],['current','F'],['F','F']])
+    for(const order of ['use-first','revoke-first'])
+      assert.ok(completedFloorCases.has(`active-floor-canonical-${order}/${command}/${read}`),'required canonical case did not complete');
+  assert.equal(completedFloorCases.size,41,'all 8 canonical and 33 existing permission/issuer cases must execute successfully');
+  assert.fail('F support incomplete: genuine >30-day coherent stored idle fixture remains unimplemented; retained baseline pins renewal grant created_at and forbids rewinding it. Current declared consumer assertions do not certify this missing case. New unused-permanent-root F backport, Linux and full AS gates remain pending.');
 });

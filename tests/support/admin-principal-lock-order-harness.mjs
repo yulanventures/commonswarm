@@ -629,6 +629,9 @@ export async function assertActiveFloorCatalog(sql) {
     }
     if(count===0 || count!==[...text.matchAll(/^CREATE(?: OR REPLACE)? FUNCTION\b/gimu)].length) throw new Error('active_catalog_source_unreadable');
   }
+  const catalogRoles=['anon','authenticated','swarm_read','swarm_command','swarm_capability',
+    'commonswarm_oauth_runtime','commonswarm_admin_issuer','commonswarm_admin_release',
+    'commonswarm_dpop_verifier','commonswarm_oauth_maintenance','commonswarm_oauth_session_guard'];
   return await sql.begin('read only',async tx=>{
     for(const [signature,want] of expected) {
       const rows=await tx`SELECT p.prosrc,p.prosecdef,p.proconfig,p.provolatile,l.lanname,r.rolname AS owner
@@ -664,7 +667,13 @@ export async function assertActiveFloorCatalog(sql) {
         LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
         WHERE p.oid=to_regprocedure(${signature}) AND a.grantee=0 AND a.privilege_type='EXECUTE') AS ok`;
       if(publicAcl[0].ok) throw new Error('active_catalog_public_execute');
-      for(const role of ['anon','authenticated','swarm_read','swarm_command']) {
+      const acl=await tx`SELECT r.rolname,a.privilege_type,a.is_grantable FROM pg_proc p,
+        LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+        LEFT JOIN pg_roles r ON r.oid=a.grantee
+        WHERE p.oid=to_regprocedure(${signature}) AND a.grantee<>p.proowner ORDER BY r.rolname`;
+      if(acl.length!==allowed.length || acl.some(a=>!allowed.includes(a.rolname) || a.privilege_type!=='EXECUTE' || a.is_grantable))
+        throw new Error('active_catalog_exact_function_acl');
+      for(const role of catalogRoles) {
         const [row]=await tx`SELECT has_function_privilege(${role},${signature},'EXECUTE') AS ok`;
         if(row.ok!==allowed.includes(role)) throw new Error('active_catalog_effective_acl');
       }
@@ -687,7 +696,34 @@ export async function assertActiveFloorCatalog(sql) {
       WHERE attrelid='swarm.renewal_grants'::regclass AND attname='local_content_approval_token_id'
         AND atttypid='uuid'::regtype AND NOT attisdropped`;
     if(column.n!==1) throw new Error('active_catalog_column');
-    return {functions:expected.size,migrations:migrations.length};
+    // Bind the additive SQL10 shape and authority before importing F. Body hashes
+    // are measured on the actual PG target, never guessed from SQL formatting.
+    const [view]=await tx`SELECT c.relkind,pg_get_userbyid(c.relowner) AS owner,c.reloptions,
+      pg_get_viewdef(c.oid,false) AS body FROM pg_class c WHERE c.oid=to_regclass('swarm_read.hosted_mcp_connections')`;
+    if(!view || view.relkind!=='v' || view.owner!=='swarm_admin' ||
+      JSON.stringify(view.reloptions)!==JSON.stringify(['security_barrier=true'])) throw new Error('active_catalog_view_owner_barrier');
+    const names=['grant_id','client_id','resource','home_workspace_id','selected_workspace_ids','state','created_at',
+      'activated_at','revoked_at','connection_expires_at','connection_expired_at'];
+    const columns=await tx`SELECT v.attname,v.atttypid=b.atttypid AND v.atttypmod=b.atttypmod AS type_ok
+      FROM pg_attribute v LEFT JOIN pg_attribute b ON b.attrelid='swarm.hosted_mcp_grants'::regclass
+        AND b.attname=v.attname AND NOT b.attisdropped
+      WHERE v.attrelid='swarm_read.hosted_mcp_connections'::regclass AND v.attnum>0 AND NOT v.attisdropped ORDER BY v.attnum`;
+    if(JSON.stringify(columns.map(c=>c.attname))!==JSON.stringify(names) || columns.some(c=>!c.type_ok))
+      throw new Error('active_catalog_view_shape');
+    const viewAcl=await tx`SELECT r.rolname,a.privilege_type,a.is_grantable FROM pg_class c,
+      LATERAL aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a LEFT JOIN pg_roles r ON r.oid=a.grantee
+      WHERE c.oid='swarm_read.hosted_mcp_connections'::regclass AND a.grantee<>c.relowner ORDER BY r.rolname`;
+    if(viewAcl.length!==2 || viewAcl.some((a,i)=>a.rolname!==['authenticated','swarm_read'][i] ||
+      a.privilege_type!=='SELECT' || a.is_grantable)) throw new Error('active_catalog_view_acl');
+    for(const role of catalogRoles) {
+      const [acl]=await tx`SELECT has_table_privilege(${role},'swarm_read.hosted_mcp_connections','SELECT') AS can_read,
+        has_any_column_privilege(${role},'swarm_read.hosted_mcp_connections','INSERT,UPDATE,REFERENCES') AS can_write,
+        has_table_privilege(${role},'swarm_read.hosted_mcp_connections','DELETE,TRUNCATE,TRIGGER') AS can_mutate`;
+      if(acl.can_read!==['authenticated','swarm_read'].includes(role) || acl.can_write || acl.can_mutate)
+        throw new Error('active_catalog_view_effective_acl');
+    }
+    return {functions:expected.size,migrations:migrations.length,view_columns:columns.length,
+      measured_view_sha256:createHash('sha256').update(view.body).digest('hex')};
   });
 }
 
@@ -2081,8 +2117,13 @@ async function delegatedLocalScenario(ctx,scenario) {
 }
 
 /** Compatibility owns the old ordinary mint wire and the existing policy
- * setter/read/ledger boundary. It does not simulate a newer client default. */
-async function ordinaryLocalPolicyScenario(ctx) {
+ * setter/read/ledger boundary, with old explicit horizon fields and current
+ * omitted fields. Both use the unchanged target-free renewal wire. */
+async function ordinaryLocalPolicyScenario(ctx,wire=null) {
+  if(wire===null) {
+    const old=await ordinaryLocalPolicyScenario(ctx,'old'),current=await ordinaryLocalPolicyScenario(ctx,'current');
+    return {checks:[...old.checks,...current.checks.map(c=>({...c,name:`current-wire-${c.name}`}))]};
+  }
   const {observer}=ctx,checks=[];
   const check=(name,ok)=>checks.push({name,ok:ok===true});
   const owner=await human(ctx,'compat-owner'),other=await human(ctx,'compat-admin');
@@ -2092,7 +2133,7 @@ async function ordinaryLocalPolicyScenario(ctx) {
   const device=id();await observer`INSERT INTO swarm.devices(device_id,user_id,label) VALUES(${device}::uuid,${owner.userId}::uuid,'compat fixture')`;
   const minted=await manage(ctx,owner,workspaceId,{kind:'mint_agent_token',principal_id:created.body.principal_id,
     run_id:id(),task_id:id(),epoch:1,device_id:device,scopes:['post_signal'],
-    renewal_kind:'timeboxed',renewal_horizon_ms:30*86400000});
+    ...(wire==='old' ? {renewal_kind:'timeboxed',renewal_horizon_ms:30*86400000} : {})});
   if (minted.status!==200 || typeof minted.body.agent_token!=='string') fail('compat_old_wire_mint');
   check('same-invocation-positive',minted.status===200 && minted.body.status==='accepted'
     && (await observer`SELECT EXISTS(SELECT 1 FROM swarm.agent_tokens WHERE token_id=${minted.body.token_id}::uuid) AS ok`)[0]?.ok===true);
@@ -2112,6 +2153,9 @@ async function ordinaryLocalPolicyScenario(ctx) {
   check('existing-agent-read-truthful-null-policy',first.status===200 && first.body.grants.length===1 && first.body.grants[0].connection_expires_at===null && first.body.grants[0].connection_expired_at===null);
   await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second'
     WHERE token_id=${minted.body.token_id}::uuid`;
+  const history=await observer`SELECT t.scopes,t.first_used_at,t.issued_at,g.successors_used,g.successors_stranded,
+    g.created_at,g.suspended_at,g.new_host_at FROM swarm.agent_tokens t JOIN swarm.renewal_grants g USING(renewal_grant_id)
+    WHERE t.token_id=${minted.body.token_id}::uuid`;
   const renewalResponse=await ctx.command.handleRequest(new Request('http://127.0.0.1/functions/v1/command',{
     method:'POST',headers:{authorization:`Bearer ${credential}`,'content-type':'application/json'},
     body:JSON.stringify({command_id:id(),client_version:ctx.clientVersion,workspace_id:workspaceId,
@@ -2120,6 +2164,13 @@ async function ordinaryLocalPolicyScenario(ctx) {
   check('old-wire-family-silent-expired-proof-renewal',renewalResponse.status===200 && renewed.status==='accepted' && typeof renewed.agent_token==='string'
     && renewed.grant_kind==='standing' && renewed.connection_expires_at===null && renewed.connection_expired_at===null);
   if (typeof renewed.agent_token!=='string') fail('compat_silent_renewal_control');
+  const successorRows=await observer`SELECT t.scopes,g.successors_used,g.successors_stranded,g.created_at,g.suspended_at,g.new_host_at,
+    parent.first_used_at,parent.issued_at FROM swarm.agent_tokens t JOIN swarm.renewal_grants g USING(renewal_grant_id)
+    JOIN swarm.agent_tokens parent ON parent.token_id=t.predecessor_token_id WHERE t.token_id=${renewed.token_id}::uuid`;
+  const prior=history[0],next=successorRows[0];
+  check('renewal-wire-retains-scope-counter-history',next && JSON.stringify(next.scopes)===JSON.stringify(prior.scopes) &&
+    next.successors_used===prior.successors_used+1 && next.successors_stranded===prior.successors_stranded &&
+    ['created_at','suspended_at','new_host_at','first_used_at','issued_at'].every(key=>String(next[key])===String(prior[key])));
   credential=renewed.agent_token;
   check('silently-renewed-credential-usable',(await readPolicy()).status===200);
   const policy=expiry=>({kind:'set_connection_expiry',connection_kind:'renewal',grant_id:g.renewal_grant_id,connection_expires_at:expiry});
@@ -2896,6 +2947,16 @@ async function activeFloorCanonicalScenario(ctx,scenario) {
   const {observer}=ctx,checks=[];
   const check=(name,ok)=>checks.push({name,ok:ok===true});
   const read=await ctx.load('supabase/functions/read/index.ts','read');
+  const tables=(await observer`SELECT schemaname,relname FROM pg_stat_user_tables ORDER BY schemaname,relname`);
+  const databaseState=async()=>{
+    const state=[];
+    for(const {schemaname,relname} of tables) {
+      const rows=await observer`SELECT count(*)::text AS n,md5(coalesce(string_agg(to_jsonb(r)::text,E'\n' ORDER BY to_jsonb(r)::text),'')) AS hash
+        FROM ${observer(`${schemaname}.${relname}`)} r`;
+      state.push([schemaname,relname,rows[0].n,rows[0].hash]);
+    }
+    return JSON.stringify(state);
+  };
   const owner=await human(ctx,'active-floor');
   const {workspaceId}=await workspace(ctx,owner,false);
   const use=async raw=>{
@@ -2941,9 +3002,16 @@ async function activeFloorCanonicalScenario(ctx,scenario) {
   check('same-invocation-positive',await use(positive.raw)===200);
   const sequential=await chain('sequential');
   check('sequential-revoke', (await revoke(sequential)).status===200);
+  const sequentialBefore=await databaseState();
   check('sequential-terminal-denial',[401,403].includes(await use(sequential.raw)));
+  check('sequential-denial-every-table-unchanged',sequentialBefore===await databaseState());
   check('sequential-no-denied-adoption',(await observer`SELECT first_used_at IS NULL AS ok FROM swarm.agent_tokens WHERE token_id=${sequential.X.token_id}::uuid`)[0].ok);
   const raced=await chain('raced');
+  const adoptionState=async()=>JSON.stringify(await observer`SELECT t.token_id,t.first_used_at,t.expires_at,
+    g.last_used_at,g.last_used_device_id,g.last_used_from,g.successors_used,g.successors_stranded
+    FROM swarm.agent_tokens t JOIN swarm.renewal_grants g USING(renewal_grant_id)
+    WHERE t.token_id=ANY(${[raced.T.token_id,raced.C.token_id,raced.X.token_id]}::uuid[]) ORDER BY t.token_id`);
+  const adoptionBefore=await adoptionState();
   const firstUseFirst=scenario.endsWith('use-first');
   const states=[];
   const settle=promise=>promise.catch(error=>{states.push(sqlstate(error));return null;});
@@ -2971,7 +3039,10 @@ async function activeFloorCanonicalScenario(ctx,scenario) {
   check('revoke-committed',revoked?.status===200);
   check('ordered-first-use-result',firstUseFirst ? used===200 : [401,403].includes(used));
   if(!firstUseFirst) check('denied-first-use-rolls-back-adoption',(await observer`SELECT first_used_at IS NULL AS ok FROM swarm.agent_tokens WHERE token_id=${raced.X.token_id}::uuid`)[0].ok);
+  if(!firstUseFirst) check('revoke-first-both-adoptions-and-history-unchanged',adoptionBefore===await adoptionState());
+  const terminalBefore=await databaseState();
   check('terminal-denial',[401,403].includes(await use(raced.raw)));
+  check('terminal-denial-every-table-unchanged',terminalBefore===await databaseState());
   return {checks,sqlstates:states,canonical_witness:{first_pid:firstPid,second_pid:secondPid,gate_pid:gatePid,
     workspace_id:workspaceId,token_ids:[raced.T.token_id,raced.C.token_id,raced.X.token_id],order:firstUseFirst?'use-first':'revoke-first'}};
 }
