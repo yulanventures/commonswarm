@@ -8,6 +8,9 @@
 // Output contains only fixture ids, redacted bodies, counts, hashes, and SQLSTATEs.
 const [tree, mode, serverLog, configPath] = Deno.args;
 const config = configPath ? JSON.parse(await Deno.readTextFile(configPath)) : null;
+if (config?.source && tree !== config.source.path) throw new Error('source_path_mismatch');
+if (mode === 'permanence' && ['SWARM_CMD_TEST_SLEEP_AFTER_STEP','SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP'].some(key=>Deno.env.get(key)!==undefined)) throw new Error('permanence_fault_hook_set');
+const readTree = config?.read_source?.path ?? tree;
 const DB = config?.db_url ?? 'postgres://postgres@127.0.0.1:54931/lock_order_probe';
 if (!['127.0.0.1', 'localhost', '[::1]'].includes(new URL(DB).hostname)) throw new Error('local probe database required');
 Deno.env.set('SWARM_ENV', 'test');
@@ -27,7 +30,8 @@ Deno.serve = (handler) => {
   served.push(typeof handler === 'function' ? handler : handler.handler);
   return { finished: Promise.resolve(), shutdown: async () => {}, ref() {}, unref() {}, addr: { hostname: '127.0.0.1', port: 0 } };
 };
-const out = { tree, mode, hook_sleep: Deno.env.get('SWARM_CMD_TEST_SLEEP_AFTER_STEP') ?? null, stage: 'import' };
+const out = { tree, mode, source:config?.source ? {commit:config.source.commit,tree:config.source.tree} : null,
+  read_source:config?.read_source ? {commit:config.read_source.commit,tree:config.read_source.tree} : null, hook_sleep: Deno.env.get('SWARM_CMD_TEST_SLEEP_AFTER_STEP') ?? null, stage: 'import' };
 const sqlstate = (e) => (e && typeof e === 'object' && typeof e.code === 'string' && /^[0-9A-Z]{5}$/u.test(e.code) ? e.code : 'non_sql');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const id = () => crypto.randomUUID();
@@ -38,7 +42,7 @@ try {
   const { default: postgres } = await import('npm:postgres@3.4.9');
   const observer = postgres(DB, { prepare: false, max: 8, onnotice: () => {} });
   const command = await import(`${tree}/supabase/functions/command/index.ts`);
-  const read = await import(`${tree}/supabase/functions/read/index.ts`);
+  const read = await import(`${readTree}/supabase/functions/read/index.ts`);
   // Capture the error AFTER postgres.js rolls the entire transaction back.
   // No production seam: this is the exported real command pool at its existing boundary.
   const commandCodes = [];
@@ -325,7 +329,7 @@ try {
     check('failed final fence rolls back refused-use adoption and ledger',JSON.stringify(lateBefore)===JSON.stringify(await seatState(late)));
     // Activity owns a distinct final wait: the transactional realtime send.
     // The old Source returns 202 and commits adoption/broadcast after this wait.
-    await import(`${tree}/supabase/functions/activity/index.ts`);
+    await import(`${readTree}/supabase/functions/activity/index.ts`);
     const activityHandler=served.at(-1);
     const activity=raw=>activityHandler(new Request('http://127.0.0.1/functions/v1/activity',{
       method:'POST',headers:{authorization:`Bearer ${raw}`,'content-type':'application/json'},

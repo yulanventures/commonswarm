@@ -16,11 +16,15 @@ interface Target { url: string; mode: string; close(): Promise<void> }
 interface TargetHarness {
   openLockOrderTarget(options: { connector: unknown }): Promise<Target>;
   lockOrderConnector(issuance: { record: string; measure: string; enable: string }): unknown;
+  materializeActiveFloorSource(directory: string, generation: "H" | "F"): {path: string; commit: string; tree: string};
 }
 const harness = await import(new URL("../support/admin-principal-lock-order-harness.mjs", import.meta.url).href) as TargetHarness;
 const repo = fileURLToPath(new URL("../../", import.meta.url));
 
-for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: rollback, retry and credential continuity`, { timeout: 300_000 }, async () => {
+// Existing seeded storage/fault contracts retain their narrower claim: these
+// cases do not prove human admission, consent or AS issuance.
+for(const [generation,readGeneration] of [['H','H'],['F','H'],['H','F'],['F','F']] as const)
+for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: rollback, retry and credential continuity${generation==='H' && readGeneration==='H' ? '' : ` exact ${generation}/${readGeneration}`}`, { timeout: 300_000 }, async () => {
   const target = await harness.openLockOrderTarget({ connector: harness.lockOrderConnector({
     record: recordChecksumEvidenceForTest, measure: measureIssuanceForTest, enable: enableIssuanceForTest,
   }) });
@@ -30,13 +34,17 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
     assert.equal(target.mode, "ci", "renewal regression requires the isolated CI database");
     directory = mkdtempSync(join(root, "anvil-secret."));
     chmodSync(directory, 0o700);
+    const source = harness.materializeActiveFloorSource(directory, generation);
+    const readSource = readGeneration === generation ? source : harness.materializeActiveFloorSource(directory, readGeneration);
     const config = join(directory, "target.json");
-    writeFileSync(config, JSON.stringify({ db_url: target.url }), { mode: 0o600 });
-    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, NO_COLOR: "1", SWARM_CMD_TEST_SLEEP_AFTER_STEP: "9:2500" };
+    writeFileSync(config, JSON.stringify({ db_url: target.url, source, read_source: readSource }), { mode: 0o600 });
+    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, NO_COLOR: "1" };
+    // Deterministic fault control belongs only to its existing rollback contract.
+    if (mode === "real_read") env.SWARM_CMD_TEST_SLEEP_AFTER_STEP = "9:2500";
     for (const key of ["HOME", "DENO_DIR", "XDG_CACHE_HOME"]) if (process.env[key]) env[key] = process.env[key];
     const child = spawn("deno", ["run", "--no-lock", "--config", join(repo, "supabase/functions/command/deno.json"),
       "--allow-read", "--allow-env", "--allow-net", join(repo, "tests/support/renewal-savepoint-rollback-harness.mjs"),
-      repo, mode, "", config], { cwd: repo, env, stdio: ["ignore", "pipe", "ignore"] });
+      source.path, mode, "", config], { cwd: repo, env, stdio: ["ignore", "pipe", "ignore"] });
     let stdout = "";
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => { stdout += chunk; });
@@ -49,8 +57,11 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
     assert.ok(line, `probe did not report: exit=${exit.code}, signal=${exit.signal}`);
     const result = JSON.parse(line.slice("R13_PROBE ".length)) as {
       stage: string; error?: string; verdict?: string; tables_counted: number;
+      hook_sleep?: string | null;
       checks?: { name: string; ok: boolean }[];
     };
+    if (mode === "permanence") assert.equal(result.hook_sleep, null, "permanence runs without fault hooks");
+    assert.equal(exit.signal, null, "a signalled child cannot supply proof");
     assert.equal(result.stage, "complete", `probe stopped at ${result.stage}: ${result.error ?? "unknown"}`);
     assert.ok(result.tables_counted > 0, "enumerated full database table set");
     assert.deepEqual(result.checks?.filter((check) => !check.ok), [], "owner-boundary contracts failed");

@@ -257,8 +257,9 @@ for (const name of ["delegated-local-permanent-suspension","delegated-local-revo
       }
     }
     if (name === "floor-first-use-vs-head-revocation") {
-      assert.equal(result.floor_compatibility,"SUPPORTED",
-        `required rollback-support gate ${result.required_compatibility ?? "BLOCKED"}; legacy diagnostic ${result.floor_compatibility}`);
+      // This name remains the exact legacy-O diagnostic. It cannot certify F.
+      assert.equal(result.floor_compatibility,"INCOMPATIBLE", "legacy O must exhibit the identified owned-row cycle");
+      assert.equal(result.required_compatibility,"BLOCKED", "an O diagnosis cannot satisfy the separate F admission gate");
     }
   });
 }

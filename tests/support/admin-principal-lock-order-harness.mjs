@@ -12,7 +12,7 @@
  * statuses and booleans: never SQL text, driver messages, bodies or credentials. */
 import { execFileSync, spawn } from 'node:child_process';
 import { X509Certificate, createHash, randomBytes, randomUUID } from 'node:crypto';
-import { chmodSync, mkdirSync, lstatSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, lstatSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -570,6 +570,40 @@ function removeSecretDirectory({ root, dir }) {
   execFileSync('rm', ['-r', resolved], { stdio: 'ignore' });
 }
 
+/** Artifact selection for the existing renewal owner, not authorization evidence.
+ * Both generations are read from immutable Git objects, never a labelled copy of
+ * this checkout. Materialize the complete source trees so activity, config and
+ * every relative/type import use the same generation as command/read. */
+export const ACTIVE_FLOOR_SOURCES = Object.freeze({
+  H: Object.freeze({commit:'b9ee52592df924d945f800619ee31e6c483200df',tree:'6c97679c7ffe042e88addcfaf573c78d6a1379dc'}),
+  F: Object.freeze({commit:'27d7b2102f8c17579f6813cad50eaa35c5c1326a',tree:'5fcd7c1dce08fcec6301accea9d2123fc5f04792'}),
+});
+export function materializeActiveFloorSource(directory, generation) {
+  if (!Object.hasOwn(ACTIVE_FLOOR_SOURCES,generation)) throw new Error('unknown_source_generation');
+  const source=ACTIVE_FLOOR_SOURCES[generation];
+  const git=args=>execFileSync('git',['-C',REPO_ROOT,...args],{stdio:['ignore','pipe','ignore'],maxBuffer:64*1024*1024});
+  if(git(['rev-parse',`${source.commit}^{tree}`]).toString().trim()!==source.tree) throw new Error('source_tree_identity');
+  const destination=join(directory,`source-${generation}`);
+  if(existsSync(destination)) throw new Error('source_destination_exists');
+  mkdirSync(destination,{mode:0o700});
+  // Read blobs directly: archive attributes must not substitute source bytes.
+  // No dependency, checkout hook or application code is executed here.
+  const entries=git(['ls-tree','-rz',source.commit,'src','supabase/functions']).toString().split('\0').filter(Boolean);
+  if(entries.length===0) throw new Error('source_tree_empty');
+  for(const entry of entries) {
+    const match=/^(100644|100755) blob ([0-9a-f]{40})\t(.+)$/u.exec(entry);
+    if(!match) throw new Error('source_not_regular_blob');
+    const [, ,blob,path]=match;
+    if(isAbsolute(path) || path.split('/').some(part=>part==='..' || part==='')) throw new Error('source_path_unsafe');
+    const bytes=git(['cat-file','blob',blob]);
+    if(createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex')!==blob) throw new Error('source_blob_identity');
+    const file=join(destination,path);
+    mkdirSync(dirname(file),{recursive:true,mode:0o700});
+    writeFileSync(file,bytes,{mode:0o600,flag:'wx'});
+  }
+  return {...source,path:destination};
+}
+
 /** Runs one Deno scenario against the target. Only LOCK_ORDER_ lines are read back. */
 export async function runScenario(target, scenario, timeoutMs = 170_000) {
   let adminIssuance = null;
@@ -607,10 +641,11 @@ export async function runScenario(target, scenario, timeoutMs = 170_000) {
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     const exit = await new Promise((resolve) => {
       const timer = setTimeout(() => { child.kill('SIGKILL'); }, timeoutMs);
+      child.on('error', () => { clearTimeout(timer); resolve({code:null,signal:'spawn_error'}); });
       child.on('close', (code, signal) => { clearTimeout(timer); resolve({ code, signal }); });
     });
     const line = stdout.split('\n').reverse().find((entry) => entry.startsWith('LOCK_ORDER_RESULT '));
-    if (line === undefined) return { scenario, stage: 'no_result', exit_code: exit.code, signal: exit.signal,
+    if (exit.code !== 0 || exit.signal !== null || line === undefined) return { scenario, stage: 'process_failed', exit_code: exit.code, signal: exit.signal,
       ...(scenario==='floor-first-use-vs-head-revocation' ? {required_compatibility:'BLOCKED',floor_compatibility:'INCONCLUSIVE'} : {}) };
     const result = JSON.parse(line.slice('LOCK_ORDER_RESULT '.length));
     return adminIssuance === null ? result : { ...result, admin_issuance: adminIssuance };
