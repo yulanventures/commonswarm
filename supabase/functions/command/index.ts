@@ -8199,7 +8199,7 @@ async function resumeRenewalGrant(
    * was told 403; a retry then answered `renewal_grant_not_suspended`, because the resume it
    * had denied had in fact happened.
    *
-   * Same shape as the renewal preflight read at index.ts:3987 (`preflight[0]?.code ?? null`):
+   * Same shape as the renewal preflight read at index.ts:3988 (`preflight[0]?.code ?? null`):
    * preserve NULL, refuse only on a code we assign.
    *
    * WHY A REFUSAL BELOW STILL COMMITS, DELIBERATELY. `refuse` must commit — its whole job is

@@ -331,7 +331,11 @@ test("lock contention from another process becomes check_timeout without moving 
       assert.match(error.message, /check\.lock/);
       assert.match(error.message, new RegExp(`owner pid ${holder.pid}`));
       assert.ok(error.message.includes(`host ${hostname()}`));
-      assert.ok(error.message.includes(`rm -- '${lockPath}'`));
+      assert.match(error.message, /Wait for its owner to finish, then retry/);
+      assert.match(error.message, /verify the recorded host and process/);
+      assert.match(error.message, /stop all users of this state directory before recovering this exact lock/);
+      assert.match(error.message, /Do not remove an unverified lock or its publication target/);
+      assert.doesNotMatch(error.message, /rm --/);
       assert.doesNotMatch(error.message, /Try cswarm check again/);
       return true;
     });
