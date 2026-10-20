@@ -66,7 +66,9 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
         'unused-root concurrent live successor authenticates','unused-root concurrent used successor wins',
         'unused-root-session-missing','unused-root-session-wrong-key','unused-root-session-valid',
         'unused-root discovery change owned workspace wait','unused-root discovery change retries whole transaction',
-        'unused-root removal owned membership wait','unused-root removal wins without effects'])
+        'unused-root removal owned membership wait','unused-root removal wins without effects',
+        'converted unused permanent home-and-queue live','converted unused future-date home-and-queue live',
+        'converted read projections do not authorize or stamp bearer'])
         assert.ok(result.checks?.some(check=>check.name===name && check.ok), `${name}: actual DB proof required`);
 
       for(const variant of ['wrong-device-owner','wrong-creator','wrong-family'])
@@ -75,7 +77,10 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
       for(const slot of ['token','principal']) for(const policy of ['live','expired','withdrawn','scope'])
         assert.ok(result.checks?.some(check=>check.name===`unused-root-parent-${slot}-${policy}` && check.ok),
           `${slot}/${policy}: real parent gate required`);
-      for(const variant of ['live-bootstrap','expired-unused','expired-used','pending','retired-history','predecessor-tombstone','elapsed','revoked','mismatched-device']) {
+      for(const variant of ['live-bootstrap','expired-unused','expired-used','pending','retired-history','predecessor-tombstone','elapsed','revoked','mismatched-device','unused-unbound','unused-future-bound','unused-future-unbound','unused-terminal','unused-elapsed','unused-timeboxed','unused-no-family','unused-wrong-creator','unused-foreign-device','unused-wrong-family','unused-token-tombstone','unused-family-tombstone']) {
+        if(variant.startsWith('unused-') || ['expired-unused','mismatched-device'].includes(variant))
+          assert.ok(result.checks?.some(check=>check.name===`current-proof-${variant}-virgin` && check.ok),
+            `${variant}: expired virgin root must remain unused after read projection`);
         assert.ok(result.checks?.some(check=>check.name===`current-proof-${variant}-binding` && check.ok), `${variant}: retained device binding required`);
         assert.ok(result.checks?.some(check=>check.name===`current-proof-${variant}-home-and-queue` && check.ok),
           `${variant}: both public read boundaries must return the expected connection truth`);

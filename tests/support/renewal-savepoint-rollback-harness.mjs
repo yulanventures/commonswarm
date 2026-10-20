@@ -87,9 +87,9 @@ try {
     method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...proof },
     body: JSON.stringify({ command_id: commandId, client_version: CLIENT_PROTOCOL_VERSION, workspace_id: workspace,
       stream: { kind: 'workspace' }, command: { kind: 'renew_agent_token', ...fields } }) })));
-  const readAs = async (token) => capture(await read.handleRequest(new Request('http://127.0.0.1/functions/v1/read', {
+  const readAs = async (token, workspace = W) => capture(await read.handleRequest(new Request('http://127.0.0.1/functions/v1/read', {
     method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ resource: 'members', workspace_id: W }) })));
+    body: JSON.stringify({ resource: 'members', workspace_id: workspace }) })));
 
   // A renewable seat: a local, unmanaged principal (no session proof needed, agent-auth.ts:246-248), its device and run,
   // a standing renewal grant bound to that device, and a root token T0 with a task/epoch binding and that grant (rows as
@@ -97,14 +97,14 @@ try {
   // born used, SWARM_TOKEN_FIRST_USE_PRESET). Unused expired permanent roots instead authenticate a renewal before issuance.
   const seat = async (name, use=true, boundDevice=undefined, kind='standing', options={}) => {
     const principal = id(), device = id(), run = id(), task = id(), lineage = id(), grant = id(), t0 = id();
-    const raw = mintRaw(), hash = await hashOf(raw);
+    const raw = mintRaw(), hash = await hashOf(raw), workspace = options.workspace ?? W;
     await observer.begin(async (tx) => {
       await tx`INSERT INTO swarm.devices (device_id, user_id, label) VALUES (${device}::uuid, ${options.deviceOwner ?? owner}::uuid, ${`r12b-${name}`})`;
-      await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name, parent_admin_grant_id) VALUES (${principal}::uuid, ${W}::uuid, ${owner}::uuid, ${`r12b-${name}-${tag}`}, ${options.principalParent ?? null}::uuid)`;
+      await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name, parent_admin_grant_id) VALUES (${principal}::uuid, ${workspace}::uuid, ${owner}::uuid, ${`r12b-${name}-${tag}`}, ${options.principalParent ?? null}::uuid)`;
       await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id) VALUES (${run}::uuid, ${principal}::uuid, ${device}::uuid)`;
       await tx`INSERT INTO swarm.renewal_grants (renewal_grant_id, workspace_id, principal_id, run_id, kind, max_successors, successors_used,
         horizon_expires_at, bound_device_id, created_by)
-        VALUES (${grant}::uuid, ${W}::uuid, ${options.familyPrincipal ?? principal}::uuid, ${options.familyRun ?? run}::uuid, ${kind==='timeboxed'?'timeboxed':'standing'}, ${kind==='timeboxed'?100:null}, 0,
+        VALUES (${grant}::uuid, ${workspace}::uuid, ${options.familyPrincipal ?? principal}::uuid, ${options.familyRun ?? run}::uuid, ${kind==='timeboxed'?'timeboxed':'standing'}, ${kind==='timeboxed'?100:null}, 0,
           ${kind==='timeboxed'?new Date(Date.now()+86400000):null}::timestamptz,
           ${boundDevice===undefined ? device:boundDevice}::uuid, ${options.creator ?? owner}::uuid)`;
       await tx`INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, task_id, epoch, scopes, token_hash, expires_at, lineage_id,
@@ -113,7 +113,7 @@ try {
         statement_timestamp() + interval '1 hour', ${lineage}::uuid, ${kind==='no-family'?null:grant}::uuid, ${options.tokenParent ?? null}::uuid, ${options.recipient ?? null}::uuid)`;
     });
     if(use) {
-      const firstUse = await readAs(raw);
+      const firstUse = await readAs(raw,workspace);
       const [used] = await observer`SELECT first_used_at IS NOT NULL AS used FROM swarm.agent_tokens WHERE token_id = ${t0}::uuid`;
       if (firstUse.status !== 200 || !used.used) throw Object.assign(new Error('seat'), { code: `FIXTURE_SEAT_${firstUse.status}` });
     }
@@ -594,8 +594,17 @@ try {
     check('activity positive commits adoption and a realtime row',positiveUse.used && positiveBroadcast.n===broadcastAfter.n+1);
     // Read truth is owned here at real database roles. No stored marker is
     // fabricated to make an elapsed canonical date look persisted.
-    const readModels=await seat('read-models');
-    const connectionFrom=overview=>overview.workspaces.find(w=>w.workspace_id===W)?.people
+    // Keep all read-truth fixtures visible below Home's 50-agent bound.
+    const readWorkspace=id(),readStream=id();
+    await observer.begin(async tx=>{
+      await tx`INSERT INTO swarm.workspaces(workspace_id,name,created_by) VALUES(${readWorkspace}::uuid,'Read truth',${owner}::uuid)`;
+      await tx`INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES(${readWorkspace}::uuid,${owner}::uuid,'owner')`;
+      await tx`INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES(${readStream}::uuid,${readWorkspace}::uuid,'workspace')`;
+    });
+    const readSeat=(name,use=true,bound=undefined,kind='standing',options={})=>seat(name,use,bound,kind,{...options,workspace:readWorkspace});
+    const readRenew=(raw,commandId,fields={},workspace=readWorkspace)=>renew(raw,commandId,fields,workspace);
+    const readModels=await readSeat('read-models');
+    const connectionFrom=overview=>overview.workspaces.find(w=>w.workspace_id===readWorkspace)?.people
       .flatMap(person=>person.agents).find(a=>a.principal_id===readModels.principal)?.status.facts.connection;
     const overviewAs=async user=>observer.begin(async tx=>{
       await tx`SET TRANSACTION READ ONLY`;
@@ -605,13 +614,14 @@ try {
     });
     check('current local overview positive is live',connectionFrom(await overviewAs(owner))==='live');
     // The same observable connection contract at both public read boundaries.
-    // Existing coverage only exercised live grants, not a dead bootstrap or
-    // historical first use that cannot authenticate the current frontier.
+    // The regression is an expired virgin permanent root falsely shown dead.
+    // Pair the live rows with one-gate denials at both installed read owners;
+    // standing grants' NULL horizon/max are also enforced by the real schema.
     await observer`INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose)
-      VALUES(${W}::uuid,'shared') ON CONFLICT DO NOTHING`;
-    const queueFor=async principal=>{
+      VALUES(${readWorkspace}::uuid,'shared') ON CONFLICT DO NOTHING`;
+    const queueFor=async (principal,workspace=readWorkspace)=>{
       const result=await command.handleHostedManagementCommand({command_id:id(),client_version:CLIENT_PROTOCOL_VERSION,
-        workspace_id:W,stream:{kind:'workspace'},command:{kind:'household_tool',tool:'todo_queue',
+        workspace_id:workspace,stream:{kind:'workspace'},command:{kind:'household_tool',tool:'todo_queue',
           arguments:{seat:HOUSEHOLD_LOCAL_SEAT,principal_id:principal}}},
         {userId:owner,email,displayName:'Read truth owner',identityVerified:true,interactiveAuthAtSeconds:null});
       if(result.status!==200 || !result.body.queue?.status?.facts) throw Object.assign(new Error('queue boundary'),{code:'QUEUE_READ_CONTROL'});
@@ -619,33 +629,55 @@ try {
     };
     const wrongDevice=id();
     await observer`INSERT INTO swarm.devices(device_id,user_id,label) VALUES(${wrongDevice}::uuid,${owner}::uuid,'Mismatched read fixture')`;
-    for(const variant of ['live-bootstrap','expired-unused','expired-used','pending','retired-history','predecessor-tombstone','elapsed','revoked','mismatched-device']) {
-      const fixture=await seat(`truth-${variant}`,!['live-bootstrap','expired-unused','mismatched-device'].includes(variant),
-        variant==='mismatched-device' ? wrongDevice:undefined);
+    for(const variant of ['live-bootstrap','expired-unused','expired-used','pending','retired-history','predecessor-tombstone','elapsed','revoked','mismatched-device','unused-unbound','unused-future-bound','unused-future-unbound','unused-terminal','unused-elapsed','unused-timeboxed','unused-no-family','unused-wrong-creator','unused-foreign-device','unused-wrong-family','unused-token-tombstone','unused-family-tombstone']) {
+      const unused=variant.startsWith('unused-') || ['live-bootstrap','expired-unused','mismatched-device'].includes(variant);
+      const unbound=['unused-unbound','unused-future-unbound'].includes(variant);
+      const fixture=await readSeat(`truth-${variant}`,!unused,
+        variant==='mismatched-device' ? wrongDevice:unbound ? null:undefined,
+        variant==='unused-timeboxed' ? 'timeboxed':variant==='unused-no-family' ? 'no-family':'standing',
+        variant==='unused-wrong-creator' ? {creator:outsider}:variant==='unused-foreign-device' ? {deviceOwner:outsider}:
+          variant==='unused-wrong-family' ? {familyPrincipal:otherFamily.principal,familyRun:otherFamily.run}:{});
       const [binding]=await observer`SELECT bound_device_id FROM swarm.renewal_grants WHERE renewal_grant_id=${fixture.grant}::uuid`;
-      check(`current-proof-${variant}-binding`,binding.bound_device_id===(variant==='mismatched-device'?wrongDevice:fixture.device));
+      check(`current-proof-${variant}-binding`,binding.bound_device_id===(variant==='mismatched-device'?wrongDevice:unbound ? null:fixture.device));
       let child;
       if(['pending','retired-history','predecessor-tombstone'].includes(variant)) {
-        const issued=await renew(fixture.raw,id());child=JSON.parse(issued.text);
+        const issued=await readRenew(fixture.raw,id());child=JSON.parse(issued.text);
         if(issued.status!==200 || !child.agent_token) throw Object.assign(new Error('truth successor'),{code:'TRUTH_SUCCESSOR'});
         if(variant==='retired-history') {
-          if((await readAs(child.agent_token)).status!==200) throw Object.assign(new Error('truth use'),{code:'TRUTH_USE'});
+          if((await readAs(child.agent_token,readWorkspace)).status!==200) throw Object.assign(new Error('truth use'),{code:'TRUTH_USE'});
           await observer`UPDATE swarm.agent_tokens SET surrender_only=true WHERE token_id=${child.token_id}::uuid`;
         }
         if(variant==='predecessor-tombstone') await observer`INSERT INTO swarm.revocation_tombstones(kind,target_id,created_by)
           VALUES('token',${fixture.t0}::uuid,${owner}::uuid)`;
       }
-      if(!['live-bootstrap','mismatched-device'].includes(variant)) await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second'
-        WHERE renewal_grant_id=${fixture.grant}::uuid`;
+      if(variant!=='live-bootstrap') await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second'
+        WHERE renewal_grant_id=${fixture.grant}::uuid OR token_id=${fixture.t0}::uuid`;
       if(variant==='elapsed') await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second'
         WHERE renewal_grant_id=${fixture.grant}::uuid`;
       if(variant==='revoked') await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp() WHERE renewal_grant_id=${fixture.grant}::uuid`;
-      const expected=['live-bootstrap','expired-used','pending'].includes(variant);
+      if(['unused-future-bound','unused-future-unbound'].includes(variant)) await observer`UPDATE swarm.renewal_grants
+        SET connection_expires_at=clock_timestamp()+interval '1 day' WHERE renewal_grant_id=${fixture.grant}::uuid`;
+      if(variant==='unused-terminal') await observer`UPDATE swarm.renewal_grants SET connection_expired_at=clock_timestamp()
+        WHERE renewal_grant_id=${fixture.grant}::uuid`;
+      if(variant==='unused-elapsed') await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second'
+        WHERE renewal_grant_id=${fixture.grant}::uuid`;
+      if(['unused-token-tombstone','unused-family-tombstone'].includes(variant)) await observer`INSERT INTO swarm.revocation_tombstones(kind,target_id,created_by)
+        SELECT ${variant==='unused-token-tombstone'?'token':'family'},
+          CASE WHEN ${variant==='unused-token-tombstone'} THEN token_id ELSE lineage_id END,${owner}::uuid
+        FROM swarm.agent_tokens WHERE token_id=${fixture.t0}::uuid`;
+      const [beforeRead]=await observer`SELECT first_used_at,predecessor_token_id,expires_at>clock_timestamp() AS unexpired
+        FROM swarm.agent_tokens WHERE token_id=${fixture.t0}::uuid`;
+      const expected=['live-bootstrap','expired-unused','expired-used','pending','unused-unbound','unused-future-bound','unused-future-unbound'].includes(variant);
       const overview=await overviewAs(owner);
-      const home=overview.workspaces.find(w=>w.workspace_id===W)?.people.flatMap(person=>person.agents)
+      const home=overview.workspaces.find(w=>w.workspace_id===readWorkspace)?.people.flatMap(person=>person.agents)
         .find(agent=>agent.principal_id===fixture.principal)?.status.facts.connection;
       const queue=await queueFor(fixture.principal);
-      check(`current-proof-${variant}-home-and-queue`,home!==undefined && (home==='live')===expected && (queue==='live')===expected);
+      if(unused && variant!=='live-bootstrap') {
+        const [afterRead]=await observer`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id=${fixture.t0}::uuid`;
+        check(`current-proof-${variant}-virgin`,beforeRead.first_used_at===null && beforeRead.predecessor_token_id===null
+          && !beforeRead.unexpired && afterRead.first_used_at===null);
+      }
+      check(`current-proof-${variant}-home-and-queue`,home!==undefined && queue!==undefined && (home==='live')===expected && (queue==='live')===expected);
     }
 
     // SQL fixture provenance permits the real owner-only conversion trigger.
@@ -691,7 +723,24 @@ try {
     const [virginConverted]=await observer`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id=${convertedToken}::uuid`;
     check('converted unused root starts without fabricated use',virginConverted.first_used_at===null);
     check('converted unused root ordinary expired read denies',[401,403].includes((await convertedRead()).status));
-    const convertedRecovery=await renew(convertedRaw,id(),{},convertedWorkspace);
+    await observer`INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose)
+      VALUES(${convertedWorkspace}::uuid,'shared')`;
+    const convertedVirginStatus=async()=>{
+      const overview=await overviewAs(owner);
+      return overview.workspaces.find(w=>w.workspace_id===convertedWorkspace)?.people.flatMap(person=>person.agents)
+        .find(agent=>agent.principal_id===convertedPrincipal)?.status;
+    };
+    for(const future of [false,true]) {
+      if(future) await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '1 day'
+        WHERE renewal_grant_id=${convertedGrant}::uuid`;
+      const home=await convertedVirginStatus(),queue=await queueFor(convertedPrincipal,convertedWorkspace);
+      check(`converted unused ${future?'future-date':'permanent'} home-and-queue live`,home?.facts.connection==='live'
+        && home.work==='idle' && queue==='live');
+    }
+    const [stillVirgin]=await observer`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id=${convertedToken}::uuid`;
+    check('converted read projections do not authorize or stamp bearer',stillVirgin.first_used_at===null
+      && [401,403].includes((await convertedRead()).status));
+    const convertedRecovery=await readRenew(convertedRaw,id(),{},convertedWorkspace);
     check('converted unused permanent NULL-bound root renews',credential(convertedRecovery)!==null);
     check('converted successor authenticates at real read boundary',credential(convertedRecovery)!==null && (await capture(await read.handleRequest(new Request('http://127.0.0.1/functions/v1/read',{
       method:'POST',headers:{authorization:`Bearer ${credential(convertedRecovery)}`,'content-type':'application/json'},
@@ -719,17 +768,17 @@ try {
     check('converted revoked family never appears live',(await convertedStatus())?.facts.connection!=='live');
     check('converted revoked family is denied by runtime',(await convertedRead()).status===403);
     // Independent non-NULL binding control: the expired bearer cannot mask it.
-    const mismatch=await seat('read-model-binding',false);
+    const mismatch=await readSeat('read-model-binding',false);
     const otherDevice=id();
     await observer`INSERT INTO swarm.devices(device_id,user_id,label) VALUES(${otherDevice}::uuid,${owner}::uuid,'Other binding')`;
     await observer`INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,
       kind,max_successors,successors_used,horizon_expires_at,bound_device_id,created_by)
-      VALUES(${id()}::uuid,${W}::uuid,${mismatch.principal}::uuid,${mismatch.run}::uuid,'standing',NULL,0,NULL,
+      VALUES(${id()}::uuid,${readWorkspace}::uuid,${mismatch.principal}::uuid,${mismatch.run}::uuid,'standing',NULL,0,NULL,
         ${otherDevice}::uuid,${owner}::uuid)`;
     await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp() WHERE renewal_grant_id=${mismatch.grant}::uuid`;
     await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${mismatch.t0}::uuid`;
     const mismatchOverview=await overviewAs(owner);
-    const mismatchConnection=mismatchOverview.workspaces.find(w=>w.workspace_id===W)?.people.flatMap(person=>person.agents)
+    const mismatchConnection=mismatchOverview.workspaces.find(w=>w.workspace_id===readWorkspace)?.people.flatMap(person=>person.agents)
       .find(agent=>agent.principal_id===mismatch.principal)?.status.facts.connection;
     check('non-NULL mismatched device cannot claim renewal liveness',mismatchConnection!=='live');
 
@@ -737,18 +786,18 @@ try {
       WHERE renewal_grant_id=${readModels.grant}::uuid`;
     await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${readModels.t0}::uuid`;
     check('future dated family with idle history stays live through renewal liveness',connectionFrom(await overviewAs(owner))==='live');
-    check('live bearer control exists before terminal precedence',credential(await renew(readModels.raw,id()))!==null);
+    check('live bearer control exists before terminal precedence',credential(await readRenew(readModels.raw,id()))!==null);
     const [deadline]=await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second'
       WHERE renewal_grant_id=${readModels.grant}::uuid RETURNING connection_expires_at`;
     check('elapsed canonical policy wins over renewal liveness in overview',connectionFrom(await overviewAs(owner))==='key_ended');
     const renewalRows=await observer.begin(async tx=>{
       await tx`SET LOCAL ROLE authenticated`;
       await tx`SELECT set_config('request.jwt.claims',${JSON.stringify({sub:owner,role:'authenticated'})},true)`;
-      return await tx`SELECT * FROM swarm_read.renewal_grant_roster(${W}::uuid)`;
+      return await tx`SELECT * FROM swarm_read.renewal_grant_roster(${readWorkspace}::uuid)`;
     });
     const tokenRows=await observer.begin(async tx=>{
       await tx`SET LOCAL ROLE swarm_read`;
-      return await tx`SELECT * FROM swarm_read.renewal_grant_for_token(${W}::uuid,${readModels.t0}::uuid)`;
+      return await tx`SELECT * FROM swarm_read.renewal_grant_for_token(${readWorkspace}::uuid,${readModels.t0}::uuid)`;
     });
     const rosterRow=renewalRows.find(r=>r.renewal_grant_id===readModels.grant);
     check('both renewal readers derive the elapsed terminal timestamp',iso(rosterRow?.connection_expired_at)===iso(deadline.connection_expires_at)
@@ -761,17 +810,17 @@ try {
     const hosted=id(),hostedDeadline=new Date(Date.now()-1000);
     await observer`INSERT INTO swarm.hosted_mcp_grants(grant_id,provider_grant_id,owner_user_id,home_workspace_id,client_id,resource,
       selected_workspace_ids,manifest_digest,interaction_ref,state,created_at,activated_at,connection_expires_at)
-      VALUES(${hosted}::uuid,${'probe-'+hosted},${owner}::uuid,${W}::uuid,'probe-client','https://mcp.commonswarm.com/mcp',
-        ${[W]}::uuid[],${new Uint8Array(32).fill(7)},'probe-consent','active',clock_timestamp(),clock_timestamp(),${hostedDeadline})`;
+      VALUES(${hosted}::uuid,${'probe-'+hosted},${owner}::uuid,${readWorkspace}::uuid,'probe-client','https://mcp.commonswarm.com/mcp',
+        ${[readWorkspace]}::uuid[],${new Uint8Array(32).fill(7)},'probe-consent','active',clock_timestamp(),clock_timestamp(),${hostedDeadline})`;
     const hostedPrincipal=id(),hostedSeat=id(),hostedDigest=new Uint8Array(32).fill(7);
     await observer`INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only)
-      VALUES(${hostedPrincipal}::uuid,${W}::uuid,${owner}::uuid,'probe-hosted','hosted_mcp',true)`;
+      VALUES(${hostedPrincipal}::uuid,${readWorkspace}::uuid,${owner}::uuid,'probe-hosted','hosted_mcp',true)`;
     await observer`INSERT INTO swarm.hosted_mcp_grant_workspaces(grant_id,workspace_id,owner_user_id,manifest_digest,consent_receipt_id,consented_at)
-      VALUES(${hosted}::uuid,${W}::uuid,${owner}::uuid,${hostedDigest},${id()}::uuid,clock_timestamp())`;
+      VALUES(${hosted}::uuid,${readWorkspace}::uuid,${owner}::uuid,${hostedDigest},${id()}::uuid,clock_timestamp())`;
     await observer`INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,created_at)
-      VALUES(${hostedSeat}::uuid,${hosted}::uuid,${W}::uuid,${owner}::uuid,${hostedPrincipal}::uuid,'probe-hosted',clock_timestamp())`;
+      VALUES(${hostedSeat}::uuid,${hosted}::uuid,${readWorkspace}::uuid,${owner}::uuid,${hostedPrincipal}::uuid,'probe-hosted',clock_timestamp())`;
     const hostedOverview=await overviewAs(owner);
-    const hostedConnection=hostedOverview.workspaces.find(w=>w.workspace_id===W).people.flatMap(p=>p.agents)
+    const hostedConnection=hostedOverview.workspaces.find(w=>w.workspace_id===readWorkspace).people.flatMap(p=>p.agents)
       .find(a=>a.principal_id===hostedPrincipal)?.status.facts.connection;
     check('hosted elapsed policy precedes otherwise active seat liveness',hostedConnection==='connection_off');
     const hostedAs=async user=>observer.begin(async tx=>{

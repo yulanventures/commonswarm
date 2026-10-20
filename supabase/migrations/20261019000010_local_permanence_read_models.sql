@@ -189,7 +189,10 @@ BEGIN
           AND NOT EXISTS (SELECT 1 FROM swarm.revocation_tombstones z WHERE (z.kind,z.target_id) IN
             (('token',t.token_id),('principal',p.principal_id),('run',r.run_id),('device',d.device_id),
              ('membership',p.owner_user_id),('lineage',t.lineage_id),('family',t.lineage_id),('renewal_grant',t.renewal_grant_id)))
-          AND (t.expires_at>clock_timestamp() OR (g.kind='standing' AND (t.first_used_at IS NOT NULL OR EXISTS (
+          AND (t.expires_at>clock_timestamp() OR (g.kind='standing' AND (t.first_used_at IS NOT NULL
+          OR (t.first_used_at IS NULL AND t.predecessor_token_id IS NULL
+            AND g.horizon_expires_at IS NULL AND g.max_successors IS NULL)
+          OR EXISTS (
           SELECT 1 FROM swarm.agent_tokens predecessor WHERE predecessor.token_id=t.predecessor_token_id
             AND predecessor.first_used_at IS NOT NULL AND predecessor.revoked_at IS NULL AND NOT predecessor.surrender_only
             AND ROW(predecessor.principal_id,predecessor.run_id,predecessor.renewal_grant_id,predecessor.lineage_id,predecessor.parent_admin_grant_id)
