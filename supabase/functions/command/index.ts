@@ -20,6 +20,7 @@ import {
   enforceAgentSessionProof,
   hashSessionKey,
   loadAgentCredential,
+  retryLocalAuthTransaction,
   type AgentAuthRow,
 } from "../_shared/agent-auth.ts";
 import {
@@ -10682,7 +10683,7 @@ async function handleTransaction(
 ): Promise<HttpResult> {
   const kind = commandKind(body);
   const commandId = String(body.command_id);
-  return await db.begin("isolation level read committed", async (tx) => {
+  return await retryLocalAuthTransaction(() => db.begin("isolation level read committed", async (tx) => {
     let authenticatedAgent: AgentAuthRow | null = null;
     let acceptedPresenceRoute: PresenceRoute | null = null;
     const result = await (async (): Promise<HttpResult> => {
@@ -13129,7 +13130,7 @@ async function handleTransaction(
       return { status: 503, headers: { "retry-after": "1" }, body: HouseholdContentServiceUpdating.body };
     }
     throw error;
-  });
+  }));
 }
 
 async function resolveLedgerRace(

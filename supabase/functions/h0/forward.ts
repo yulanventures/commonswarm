@@ -69,13 +69,13 @@ async function workspaceForToken(token: string | null, database: postgres.Sql): 
   const hash = new Uint8Array(
     await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token)),
   );
-  const rows = await database<[{ workspace_id: string }]>`
-    SELECT p.workspace_id::text
-    FROM swarm.agent_tokens AS t
-    JOIN swarm.agent_principals AS p ON p.principal_id = t.principal_id
-    WHERE t.token_hash = ${hash}
-    LIMIT 1
-  `;
+  const rows = await database.begin(async (tx) => {
+    // Use the command service's existing role boundary. Discovery itself has
+    // command-only EXECUTE and never acquires an auth/adoption row lock.
+    await tx`SELECT set_config('role','swarm_command',true)`;
+    return await tx<{ workspace_id: string }[]>`
+      SELECT workspace_id::text FROM swarm.discover_local_credential_ids(${hash})`;
+  });
   return rows[0]?.workspace_id ?? crypto.randomUUID();
 }
 

@@ -310,3 +310,193 @@ export async function authenticateAgentSession(
   if (result.ok) return { ok: true };
   return { ok: false, error: result.error };
 }
+
+/** IDs only. Discovery is not authorization and must never reach public output. */
+export interface LocalCredentialIds {
+  token_id: string | null;
+  predecessor_token_id: string | null;
+  renewal_grant_id: string | null;
+  principal_id: string;
+  run_id: string | null;
+  device_id: string | null;
+  owner_user_id: string;
+  workspace_id: string;
+  lineage_id: string | null;
+  token_parent_admin_grant_id: string | null;
+  principal_parent_admin_grant_id: string | null;
+}
+export class LocalAuthDiscoveryChanged extends Error {
+  readonly code = "40001";
+  readonly detail = "LOCAL_AUTH_DISCOVERY_CHANGED";
+  constructor() { super("Local authentication binding changed"); }
+}
+export async function retryLocalAuthTransaction<T>(operation: () => Promise<T>): Promise<T> {
+  for (let attempt = 0;; attempt++) {
+    try { return await operation(); }
+    catch (error) {
+      const owned = error instanceof LocalAuthDiscoveryChanged ||
+        (error !== null && typeof error === "object" &&
+          "code" in error && error.code === "40001" &&
+          "detail" in error && error.detail === "LOCAL_AUTH_DISCOVERY_CHANGED");
+      if (!owned || attempt >= 2) throw error;
+    }
+  }
+}
+export async function discoverLocalCredential(tx: Sql, hash: Uint8Array): Promise<LocalCredentialIds | null> {
+  const rows = await tx<LocalCredentialIds[]>`
+    SELECT * FROM swarm.discover_local_credential_ids(${hash})`;
+  return rows[0] ?? null;
+}
+export async function discoverLocalTargets(tx: Sql, workspace: string, selector:
+  { user: string } | { principals: string[]; tokens: string[] } | { allWorkspace: true },
+): Promise<LocalCredentialIds[]> {
+  return await tx<LocalCredentialIds[]>`
+    SELECT * FROM swarm.discover_local_target_ids(${workspace}::uuid,
+      ${"user" in selector ? selector.user : null}::uuid,
+      ${"principals" in selector ? selector.principals : []}::uuid[],
+      ${"tokens" in selector ? selector.tokens : []}::uuid[],
+      ${"allWorkspace" in selector})`;
+}
+type LocalLockMode = "share" | "update";
+interface LocalRowLock { id: string; mode: LocalLockMode }
+interface LocalMemberLock { workspace: string; user: string; mode: LocalLockMode }
+type LocalApprovalLock = {
+  connection: string; grant: string; workspace: string; principal: string; mode: LocalLockMode;
+};
+interface LocalPlanSnapshot {
+  bindings: LocalCredentialIds[];
+  users: string[];
+  parents: string[];
+  memberships: LocalMemberLock[];
+  sessions: { principal: string; workspace: string }[];
+  approvals: LocalApprovalLock[];
+}
+/** No arbitrary table or SQL string. More caller phases must be added explicitly. */
+export interface LocalAuthLockPlan {
+  readonly snapshot: LocalPlanSnapshot;
+  readonly rediscover: () => Promise<LocalPlanSnapshot>;
+  readonly workspaces: LocalRowLock[];
+  readonly principalMode: LocalLockMode;
+  readonly sessionMode: LocalLockMode;
+  readonly streamIds: string[];
+  locked: boolean;
+}
+const sortedIds = (ids: Array<string | null>) => [...new Set(ids.filter((id): id is string => id !== null))].sort();
+function canonicalBindings(rows: LocalCredentialIds[]): string {
+  return JSON.stringify(rows.map(r => [
+    r.token_id,r.predecessor_token_id,r.renewal_grant_id,r.principal_id,r.run_id,r.device_id,
+    r.owner_user_id,r.workspace_id,r.lineage_id,r.token_parent_admin_grant_id,r.principal_parent_admin_grant_id,
+  ]).sort((a,b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
+}
+function snapshotKey(s: LocalPlanSnapshot): string {
+  return JSON.stringify([canonicalBindings(s.bindings),s.users,s.parents,s.memberships,s.sessions,s.approvals]);
+}
+/** This plan owns one exact local Allow target, including every family sibling.
+ * Call before workspace/approval/principal/token reads in the permission writer.
+ * The authenticated human's earlier user upsert is the same owner's U lock.
+ */
+export async function planLocalConnection(
+  tx: Sql, workspace: string, owner: string, principal: string, token: string,
+): Promise<LocalAuthLockPlan | null> {
+  let initial: LocalCredentialIds[];
+  try {
+    // Read-only selector validation, before any plan row lock. This savepoint
+    // maps a foreign/malformed target to ordinary refusal; it never restarts a
+    // changed closure while retaining locks.
+    initial = await tx.savepoint(sp => discoverLocalTargets(sp, workspace, { principals: [], tokens: [token] }));
+  } catch (error) {
+    if (error !== null && typeof error === "object" && "code" in error && error.code === "22023") return null;
+    throw error;
+  }
+  const discover = async (known?: LocalCredentialIds[]): Promise<LocalPlanSnapshot> => {
+    const bindings = known ?? await discoverLocalTargets(tx, workspace, { principals: [], tokens: [token] });
+    const parents = sortedIds(bindings.flatMap(r => [r.token_parent_admin_grant_id,r.principal_parent_admin_grant_id]));
+    const parentOwners = parents.length ? await tx<{ owner_user_id: string }[]>`
+      SELECT owner_user_id FROM swarm.admin_grants WHERE grant_id=ANY(${parents}::uuid[]) ORDER BY grant_id` : [];
+    const principals = sortedIds(bindings.map(r => r.principal_id));
+    const users = sortedIds([owner,...bindings.map(r => r.owner_user_id),...parentOwners.map(r => r.owner_user_id)]);
+    const sessions = principals.length ? await tx<{ principal: string; workspace: string }[]>`
+      SELECT principal_id AS principal, workspace_id AS workspace FROM swarm.agent_execution_sessions
+      WHERE principal_id=ANY(${principals}::uuid[]) ORDER BY principal_id,workspace_id` : [];
+    const approvals = principals.length ? await tx<LocalApprovalLock[]>`
+      SELECT connection_id AS connection,grant_id AS grant,workspace_id AS workspace,principal_id AS principal,'update'::text AS mode
+      FROM swarm.household_content_connections WHERE workspace_id=${workspace}::uuid
+        AND principal_id=ANY(${principals}::uuid[])
+      ORDER BY connection_id,grant_id,workspace_id,principal_id` : [];
+    return { bindings,parents,users,sessions,approvals,
+      memberships: users.map(user => ({workspace,user,mode:"share" as const})) };
+  };
+  const snapshot = await discover(initial);
+  const target = snapshot.bindings.find(r => r.token_id === token);
+  // A human Allow cannot enlist foreign-owner U locks after its own user upsert.
+  // Parent ancestry enforces the same owner; fail closed on malformed bindings.
+  if (!target || target.principal_id !== principal || target.owner_user_id !== owner ||
+      snapshot.users.some(user => user !== owner) ||
+      snapshot.bindings.some(r => r.workspace_id !== workspace || r.owner_user_id !== owner)) return null;
+  if (snapshot.sessions.length > 256 || snapshot.approvals.length > 4096) {
+    throw Object.assign(new Error("Local authentication closure exceeds work bound"), {code:"54000"});
+  }
+  return { snapshot,rediscover:() => discover(),workspaces:[{id:workspace,mode:"update"}],
+    principalMode:"share",sessionMode:"share",streamIds:[],locked:false };
+}
+/** Acquire complete predeclared phases. Every post-wait discovery is a new SQL
+ * statement. Changed membership in any set rolls back the ENTIRE transaction.
+ * This is backend protocol, not a trigger claim about absent caller prelocks.
+ */
+export async function lockLocalAuthPlan(tx: Sql, plan: LocalAuthLockPlan): Promise<void> {
+  const same = async () => {
+    if (snapshotKey(await plan.rediscover()) !== snapshotKey(plan.snapshot)) throw new LocalAuthDiscoveryChanged();
+    await tx`SELECT clock_timestamp()`;
+  };
+  const s = plan.snapshot;
+  if (new Set(plan.streamIds).size > 64) {
+    throw Object.assign(new Error("Local authentication stream closure exceeds work bound"), {code:"54000"});
+  }
+  for (const id of s.users) await tx`SELECT user_id FROM swarm.users WHERE user_id=${id}::uuid FOR NO KEY UPDATE`;
+  await same();
+  for (const id of s.parents) await tx`SELECT grant_id FROM swarm.admin_grants WHERE grant_id=${id}::uuid FOR SHARE`;
+  await same();
+  for (const w of [...plan.workspaces].sort((a,b)=>a.id.localeCompare(b.id))) {
+    if (w.mode === "update") await tx`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id=${w.id}::uuid FOR UPDATE`;
+    else await tx`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id=${w.id}::uuid FOR SHARE`;
+  }
+  for (const w of plan.workspaces) await tx`SELECT workspace_id FROM swarm.household_workspace_boundaries WHERE workspace_id=${w.id}::uuid FOR SHARE`;
+  for (const m of s.memberships) await tx`SELECT user_id FROM swarm.memberships WHERE workspace_id=${m.workspace}::uuid AND user_id=${m.user}::uuid FOR SHARE`;
+  for (const m of s.memberships) await tx`SELECT user_id FROM swarm.household_member_content_roles WHERE workspace_id=${m.workspace}::uuid AND user_id=${m.user}::uuid FOR SHARE`;
+  await same();
+  for (const a of s.approvals) await tx`
+    SELECT connection_id FROM swarm.household_content_connections
+    WHERE connection_id=${a.connection}::uuid AND grant_id=${a.grant}::uuid
+      AND workspace_id=${a.workspace}::uuid AND principal_id=${a.principal}::uuid FOR UPDATE`;
+  await same();
+  for (const id of [...plan.streamIds].sort()) await tx`SELECT stream_id FROM swarm.streams WHERE stream_id=${id}::uuid FOR UPDATE`;
+  await same();
+  for (const id of sortedIds(s.bindings.map(r=>r.principal_id))) {
+    if (plan.principalMode === "update") await tx`SELECT principal_id FROM swarm.agent_principals WHERE principal_id=${id}::uuid FOR UPDATE`;
+    else await tx`SELECT principal_id FROM swarm.agent_principals WHERE principal_id=${id}::uuid FOR SHARE`;
+  }
+  await same();
+  for (const session of s.sessions) {
+    if (plan.sessionMode === "update") await tx`SELECT principal_id FROM swarm.agent_execution_sessions WHERE principal_id=${session.principal}::uuid AND workspace_id=${session.workspace}::uuid FOR UPDATE`;
+    else await tx`SELECT principal_id FROM swarm.agent_execution_sessions WHERE principal_id=${session.principal}::uuid AND workspace_id=${session.workspace}::uuid FOR SHARE`;
+  }
+  await same();
+  for (const id of sortedIds(s.bindings.map(r=>r.run_id))) await tx`SELECT run_id FROM swarm.agent_runs WHERE run_id=${id}::uuid FOR SHARE`;
+  for (const id of sortedIds(s.bindings.map(r=>r.device_id))) await tx`SELECT device_id FROM swarm.devices WHERE device_id=${id}::uuid FOR SHARE`;
+  await same();
+  for (const id of sortedIds(s.bindings.map(r=>r.renewal_grant_id))) await tx`SELECT renewal_grant_id FROM swarm.renewal_grants WHERE renewal_grant_id=${id}::uuid FOR UPDATE`;
+  await same();
+  const remaining = new Map(s.bindings.filter(r=>r.token_id!==null).map(r=>[r.token_id!,r]));
+  const done = new Set<string>();
+  while (remaining.size) {
+    const roots = [...remaining.values()].filter(r => r.predecessor_token_id === null ||
+      done.has(r.predecessor_token_id)).sort((a,b)=>a.token_id!.localeCompare(b.token_id!));
+    if (!roots.length) throw Object.assign(new Error("Malformed local credential closure"), {code:"22023"});
+    for (const r of roots) {
+      await tx`SELECT token_id FROM swarm.agent_tokens WHERE token_id=${r.token_id}::uuid FOR UPDATE`;
+      remaining.delete(r.token_id!); done.add(r.token_id!);
+    }
+  }
+  await same();
+  plan.locked=true;
+}
