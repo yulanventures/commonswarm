@@ -2129,7 +2129,7 @@ test('owner content traverses MCP HTTP read/command routes with no approval, and
   try {
     await sql`UPDATE swarm.household_member_content_roles SET content_role='reader'
       WHERE workspace_id=${f.fixture.workspaceA}::uuid AND user_id=${f.fixture.owner}::uuid`;
-    const reader=runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list'},{name:'todo_queue'},
+    const reader=runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list',arguments:{scope:'open'}},{name:'todo_queue'},
       {name:'todo_create',arguments:{request_id:randomUUID(),title:'Reader refuses write'}}]),{databaseUrl:f.edgeUrl});
     assert.equal(reader[0]!.body.status,'ok'); assert.equal((reader[1]!.body.queue as {content_access:string}).content_access,'read');
     assertContentDenied(reader[2]!);
@@ -2142,15 +2142,15 @@ test('owner content traverses MCP HTTP read/command routes with no approval, and
     assert.equal(approvals!.n,0,'HTTP access never manufactures human approval');
     for (const role of ['admin','member']) {
       await sql`UPDATE swarm.memberships SET role=${role} WHERE workspace_id=${f.fixture.workspaceA}::uuid AND user_id=${f.fixture.owner}::uuid`;
-      const denied=runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list'},{name:'todo_queue'}]),{databaseUrl:f.edgeUrl});
+      const denied=runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list',arguments:{scope:'open'}},{name:'todo_queue'}]),{databaseUrl:f.edgeUrl});
       denied.forEach(assertContentDenied);
     }
     await sql`UPDATE swarm.memberships SET role='owner' WHERE workspace_id=${f.fixture.workspaceA}::uuid AND user_id=${f.fixture.owner}::uuid`;
-    const control=runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list'}]),{databaseUrl:f.edgeUrl});
+    const control=runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list',arguments:{scope:'open'}}]),{databaseUrl:f.edgeUrl});
     assert.equal(control[0]!.body.status,'ok');
-    runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list'}],{grantId:f.fixture.grantB,ownerUserId:f.fixture.other}),{databaseUrl:f.edgeUrl}).forEach(assertContentDenied);
+    runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list',arguments:{scope:'open'}}],{grantId:f.fixture.grantB,ownerUserId:f.fixture.other}),{databaseUrl:f.edgeUrl}).forEach(assertContentDenied);
     await sql`UPDATE swarm.hosted_mcp_seats SET revoked_at=clock_timestamp() WHERE seat_id=${f.seat.body.seat_id as string}::uuid`;
-    runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list'},{name:'todo_queue'}]),{databaseUrl:f.edgeUrl}).forEach(assertContentDenied);
+    runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list',arguments:{scope:'open'}},{name:'todo_queue'}]),{databaseUrl:f.edgeUrl}).forEach(assertContentDenied);
   } finally { await releaseSql.unsafe('ALTER ROLE commonswarm_edge PASSWORD NULL'); }
 });
 
@@ -2167,7 +2167,7 @@ test('compatibility gate returns retryable content errors without effects, then 
   const retryBody={error:'household_content_service_updating',
     message:'Household content service is updating. Retry after one second with the same request_id.',retryable:true,retry_after_seconds:1};
   const writeId=randomUUID();
-  const calls=[{name:'todo_list'},{name:'todo_queue'},
+  const calls=[{name:'todo_list',arguments:{scope:'open'}},{name:'todo_queue'},
     {name:'todo_create',arguments:{request_id:writeId,title:'Gate must never create this'}}];
   const httpCalls=calls.map(call=>({...call,transport:'http',...(call.name==='todo_queue'?{arguments:{principal_id:principal}}:{})}));
   const authorityCalls=[{name:'allow',transport:'http',command:allow},
@@ -2247,7 +2247,7 @@ for (const change of ['role','removal','withdrawal'] as const) {
     const f=await ownerContentHttpFixture();
     let pending: Promise<ContextHttpResult[]> | undefined;
     try {
-      assert.equal(runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list'}]),{databaseUrl:f.edgeUrl})[0]!.body.status,'ok');
+      assert.equal(runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list',arguments:{scope:'open'}}]),{databaseUrl:f.edgeUrl})[0]!.body.status,'ok');
       await sql.begin(async locker=>{
         const [session]=await locker`SELECT pg_backend_pid() AS pid`;
         await locker`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id=${f.fixture.workspaceA}::uuid FOR NO KEY UPDATE`;
@@ -2282,7 +2282,7 @@ for (const change of ['role','removal','withdrawal'] as const) {
         }
       });
       (await pending!).forEach(assertContentDenied);
-      runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list'},{name:'todo_queue'},
+      runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list',arguments:{scope:'open'}},{name:'todo_queue'},
         {name:'todo_create',arguments:{request_id:randomUUID(),title:'After committed barrier'}}]),{databaseUrl:f.edgeUrl}).forEach(assertContentDenied);
     } finally {
       if(pending) await pending.catch(()=>{});
@@ -2305,7 +2305,7 @@ for(const operation of ['read','write'] as const) {
         ? {name:'list_read',arguments:{object_id:object},storage_race:true}
         : {name:'list_create',arguments:{request_id:randomUUID(),object_id:randomUUID(),title:'Concurrent upload',
           content:{kind:'list',items:[{item_id:'upload',text:'Synthetic upload',order:0,checked:false}]}},storage_race:true};
-      const results=runHostedHarness<ContextHttpResult[]>(f.call([raceCall,{name:'todo_list'},{name:'todo_queue'},
+      const results=runHostedHarness<ContextHttpResult[]>(f.call([raceCall,{name:'todo_list',arguments:{scope:'open'}},{name:'todo_queue'},
         {name:'list_read',arguments:{object_id:object}}],{storageRace:true,raceDatabaseUrl:local.DB_URL,
         workspaceId:f.fixture.workspaceA,principalId:f.seat.body.principal_id}),{databaseUrl:f.edgeUrl});
       assert.equal(results[0]!.body.status,operation==='read'?'ok':'committed','operation admitted before withdrawal commit may complete');

@@ -29,6 +29,7 @@ function fixture() {
     INSERT INTO auth.users(id,aud,role,email) VALUES ('${owner}','authenticated','authenticated','${owner}@example.test'),('${other}','authenticated','authenticated','${other}@example.test');
     INSERT INTO swarm.users(user_id,display_name) VALUES ('${owner}','To-do owner'),('${other}','To-do reader');
     INSERT INTO swarm.workspaces(workspace_id,name,created_by) VALUES ('${workspace}','Synthetic to-dos','${owner}'),('${foreign}','Synthetic foreign','${other}');
+    INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES ('${randomUUID()}','${workspace}','workspace');
     INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES ('${workspace}','${owner}','owner'),('${workspace}','${other}','member'),('${foreign}','${other}','owner');
     INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose) VALUES ('${workspace}','shared'),('${foreign}','shared');
     INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at) VALUES ('${workspace}','${owner}','editor','${consent}',clock_timestamp()),('${workspace}','${other}','reader','${randomUUID()}',clock_timestamp());
