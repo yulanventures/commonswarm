@@ -80,3 +80,5 @@ vendored/
 dist-npm/
 /supabase/functions/_shared/protocol.js
 /deploy/site/vercel-reference.json
+/supabase/functions/_shared/*.d.ts
+/supabase/functions/read/admin-recovery-contract.ts
