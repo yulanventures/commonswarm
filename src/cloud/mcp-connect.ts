@@ -18,7 +18,9 @@ import { REGISTER_NO_SEAT_THIS_ATTEMPT, REGISTER_EXISTING_SEAT_REFUSALS } from "
 import { CONNECT_PROFILE_FILES, connectProfileReservedPaths, reservedConnectProfileName, reservedConnectProfileNames } from "./connect-profile-files.js";
 
 import { assertProfileIdentity, withAgentDeadline } from "./agent-check.js";
-import { readAgentSignalDirectory, SignalTransportError, SignalReadTimeoutError } from "./signals.js";
+import { readAgentSignalDirectory, SignalTransportError, SignalReadTimeoutError, followHttpDetails, followErrorEnvelope } from "./signals.js";
+import { RenewalCredentialCheckError, RenewalOutcomeUnknown, RenewalRetryError, RenewalRevoked,
+  RenewalSuspended, RenewalReauthorisationRequired, RenewalRefused, RenewalSuperseded } from "./renewal.js";
 
 const JOIN_CODE = /^swm_join_[A-Za-z0-9_-]{43}$/;
 const SEAT_TOKEN = /^swm_agt_[A-Za-z0-9_-]{43}$/;
@@ -628,7 +630,7 @@ async function connectedResult(path: string, profile: AgentProfile, fetcher: typ
       const saved = await readAgentProfile(path, profile.host_session_id);
       if (saved.url !== profile.url || saved.anon_key !== profile.anon_key ||
           saved.workspace_id !== profile.workspace_id || saved.principal_id !== profile.principal_id) {
-        throw new Error("saved profile changed");
+        throw new AgentSetupError("authenticated_identity_mismatch", "The saved profile changed.");
       }
       const credential = await readProfileCredential(saved);
       const session = await openProfileCredential(saved, bounded);
@@ -638,7 +640,7 @@ async function connectedResult(path: string, profile: AgentProfile, fetcher: typ
           const directory = await readAgentSignalDirectory(profileTarget(saved), token, saved.workspace_id, { fetcher: bounded, signal });
           assertProfileIdentity(saved, directory);
           if (directory.identity?.run_id !== undefined && credential.runId !== null && directory.identity.run_id !== credential.runId) {
-            throw new Error("saved run was not confirmed");
+            throw new AgentSetupError("authenticated_identity_mismatch", "The saved run was not confirmed.");
           }
           break;
         } catch (error) {
@@ -648,8 +650,61 @@ async function connectedResult(path: string, profile: AgentProfile, fetcher: typ
         }
       }
     }, fetcher);
-  } catch {
-    throw new McpConnectError("connect_authentication_incomplete", "The saved connection could not be authenticated. Setup is incomplete; its files were kept. Rerun the same mcp connect command with the same code.");
+  } catch (error) {
+    const http = followHttpDetails(error);
+    const envelope = followErrorEnvelope(error);
+    const replacement = `If a replacement is intended, the owner can run cswarm token mint --workspace-id ${profile.workspace_id} --principal-id ${profile.principal_id} --run-id <fresh-uuid> --task-id <fresh-uuid> --epoch 0.`;
+    let code = "connect_authentication_incomplete";
+    let reason = "The authentication outcome is unconfirmed. Ask the owner to inspect this saved connection before another attempt.";
+    if (error instanceof AgentSetupError &&
+        ["authenticated_identity_mismatch", "profile_identity_mismatch"].includes(error.code)) {
+      code = "connect_identity_mismatch";
+      reason = "The saved connection does not confirm the expected agent, workspace or run. Ask for the correct connection file; keep this profile for inspection.";
+    } else if (error instanceof AgentSetupError && error.code === "profile_credential_missing") {
+      code = "connect_credential_missing";
+      reason = "The saved credential is missing. Ask for the correct connection file.";
+    } else if (http?.status === 401 || http?.status === 403 || error instanceof RenewalCredentialCheckError) {
+      code = "connect_authentication_refused";
+      reason = `${(http?.status ?? (error instanceof RenewalCredentialCheckError ? error.status : null)) === 403 ? "Permission" : "The credential"} was refused; the cause is unconfirmed. Ask the owner to check access. ${replacement}`;
+    } else if (error instanceof RenewalRevoked) {
+      code = "connect_renewal_refused";
+      const reasons: Record<string, string> = {
+        renewal_lineage_revoked: "The renewal lineage was revoked.",
+        renewal_grant_revoked: "The renewal grant was revoked.",
+        predecessor_revoked: "The saved credential was revoked.",
+        predecessor_not_found: "The saved predecessor was removed.",
+        predecessor_not_owned: "The saved predecessor belongs to another identity.",
+        predecessor_expired: "The saved predecessor expired before renewal.",
+      };
+      if (error.code === "predecessor_not_owned") {
+        code = "connect_identity_mismatch";
+        reason = "The saved predecessor belongs to another identity. Ask for the correct connection file; keep this profile for inspection.";
+      } else reason = `${reasons[error.code] ?? "The deployment refused renewal; its cause is unconfirmed."} ${replacement}`;
+    } else if (error instanceof RenewalSuspended) {
+      code = "connect_renewal_refused";
+      reason = `Renewal is paused. The owner can inspect the grant and, if resuming is intended, run cswarm grant resume --workspace-id ${profile.workspace_id} --renewal-grant-id <grant-id>, then rerun the same connect command with the same code.`;
+    } else if (error instanceof RenewalReauthorisationRequired) {
+      code = "connect_renewal_refused";
+      reason = `${error.reason === "horizon_reached" ? "The technical renewal horizon was reached." : "The renewal successor budget was exhausted."} ${replacement}`;
+    } else if (error instanceof RenewalSuperseded) {
+      code = "connect_renewal_refused";
+      reason = "A successor was already issued, but its saved proof is unavailable. Ask the owner to recover the existing connection file before another attempt.";
+    } else if (error instanceof RenewalRefused && error.status === 426 && error.code === "upgrade_required") {
+      code = "connect_renewal_refused";
+      reason = "The deployment requires a newer cswarm. Update cswarm, then rerun the same connect command with the same code.";
+    } else if (error instanceof RenewalRefused && error.commandDecided) {
+      code = "connect_renewal_refused";
+      reason = ["renewal_device_unavailable", "renewal_device_mismatch"].includes(error.code)
+        ? `Renewal was refused for this device. Ask the owner to inspect the intended device. ${replacement}`
+        : "The deployment refused renewal; its cause is unconfirmed. Ask the owner to inspect this grant before another attempt.";
+    } else if (error instanceof SignalTransportError || error instanceof SignalReadTimeoutError ||
+        error instanceof RenewalRetryError || error instanceof RenewalOutcomeUnknown ||
+        (error instanceof AgentSetupError && error.code === "check_timeout") ||
+        (http !== null && (http.status === 429 || http.status >= 500) && envelope.retryable !== false) ||
+        (error instanceof RenewalRefused && (error.status === 429 || error.status >= 500))) {
+      reason = "Authentication is unconfirmed after the bounded attempt. Rerun the same mcp connect command later with the same code.";
+    }
+    throw new McpConnectError(code, `Setup is incomplete; its files were kept. ${reason}`);
   }
   const arguments_ = ["mcp", "--profile", path, ...(profile.host_session_id ? ["--host-session-id", profile.host_session_id] : [])];
   const claude = `claude mcp add --scope user --transport stdio cswarm -- cswarm ${arguments_.map(quoteAgentArgument).join(" ")}`;

@@ -291,6 +291,18 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       assert.ok(login.data.session);
       const minted: Array<{ tokenId: string; unused: boolean }> = [];
       const proofBearers: string[] = [];
+      const mintReads: Array<{ status: number; error: unknown }> = [];
+      let mintPolicy: "live" | "revoked" | "elapsed" | "membership" = "live";
+      // Only fixture state changes between real issuance and real completion read.
+      // Each refusal is paired below with a fresh live issuance/read, in this run.
+      async function fence(tokenId: string, policy: typeof mintPolicy) {
+        if (policy === "revoked") await sql`UPDATE swarm.renewal_grants SET revoked_at = clock_timestamp(), revoked_by = ${f.user}::uuid
+          WHERE renewal_grant_id = (SELECT renewal_grant_id FROM swarm.agent_tokens WHERE token_id = ${tokenId}::uuid)`;
+        if (policy === "elapsed") await sql`UPDATE swarm.renewal_grants SET connection_expires_at = clock_timestamp() - interval '1 second'
+          WHERE renewal_grant_id = (SELECT renewal_grant_id FROM swarm.agent_tokens WHERE token_id = ${tokenId}::uuid)`;
+        if (policy === "membership") await sql`UPDATE swarm.memberships SET revoked_at = clock_timestamp()
+          WHERE workspace_id = ${f.workspace}::uuid AND user_id = ${f.user}::uuid`;
+      }
       // Forward to real M3 unchanged. Inspect its database before forwarding the
       // mint reply; no mock decides identity, first-use or renewal eligibility.
       const proxy = createServer(async (request, response) => {
@@ -307,8 +319,12 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
           if (body.command?.kind === "mint_agent_token" && typeof payload.token_id === "string") {
             const [row] = await sql<{ first_used_at: Date | null }[]>`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id = ${payload.token_id}::uuid`;
             minted.push({ tokenId: payload.token_id, unused: row?.first_used_at === null });
+            await fence(payload.token_id, mintPolicy);
           }
-          if (body.resource === "members") proofBearers.push(request.headers.authorization ?? "");
+          if (body.resource === "members") {
+            proofBearers.push(request.headers.authorization ?? "");
+            mintReads.push({ status: upstream.status, error: payload.error });
+          }
           response.writeHead(upstream.status, { "content-type": "application/json" });
           response.end(JSON.stringify(payload));
         } catch { response.writeHead(502).end(); }
@@ -324,23 +340,68 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       await humanStore.write({ version: 1, refreshToken: login.data.session.refresh_token,
         generation: 0, userId: f.user, deviceId: f.device });
       try {
-        const child = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", "token", "mint",
-          "--url", mintTarget.url, "--anon-key", mintTarget.anonKey, "--force-file-store",
-          "--workspace-id", f.workspace, "--principal-id", f.principal, "--run-id", randomUUID(),
-          "--task-id", randomUUID(), "--epoch", "1"], {
-          env: { ...process.env, SWARM_CLOUD_URL: "", SWARM_CLOUD_ANON_KEY: "", SWARM_CLOUD_WORKSPACE_ID: "" },
-          stdio: ["ignore", "pipe", "pipe"], timeout: 30_000,
-        });
-        const exited = new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
-        let output = "";
-        child.stderr.resume();
-        for await (const chunk of child.stdout) output += chunk;
-        assert.equal(await exited, 0, "real mint must authenticate before exporting");
-        const artifact = JSON.parse(output) as { token_id: string; agent_token: string };
+        async function mint() {
+          const child = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", "token", "mint",
+            "--url", mintTarget.url, "--anon-key", mintTarget.anonKey, "--force-file-store",
+            "--workspace-id", f.workspace, "--principal-id", f.principal, "--run-id", randomUUID(),
+            "--task-id", randomUUID(), "--epoch", "1", "--ttl-ms", "3600000"], {
+            env: { ...process.env, SWARM_CLOUD_URL: "", SWARM_CLOUD_ANON_KEY: "", SWARM_CLOUD_WORKSPACE_ID: "" },
+            stdio: ["ignore", "pipe", "pipe"], timeout: 30_000,
+          });
+          const exited = new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
+          let output = "", error = "";
+          child.stderr.on("data", chunk => { error += chunk; });
+          for await (const chunk of child.stdout) output += chunk;
+          return { code: await exited, output, error };
+        }
+        const initial = await mint();
+        assert.equal(initial.code, 0, "real mint must authenticate before exporting");
+        const artifact = JSON.parse(initial.output) as { token_id: string; agent_token: string; expires_at: string };
         assert.deepEqual(minted, [{ tokenId: artifact.token_id, unused: true }]);
         assert.deepEqual(proofBearers, [`Bearer ${artifact.agent_token}`]);
+        assert.deepEqual(mintReads, [{ status: 200, error: undefined }]);
         const [used] = await sql<{ first_used_at: Date | null }[]>`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id = ${artifact.token_id}::uuid`;
         assert.ok(used.first_used_at, "CLI export follows committed first use");
+        // Real exported mint artifact, idle >1h: age technical dates only.
+        // first_used_at remains the actual committed read, never a synthetic stamp.
+        await sql`UPDATE swarm.agent_tokens SET issued_at = issued_at - interval '2 hours', expires_at = expires_at - interval '2 hours'
+          WHERE token_id = ${artifact.token_id}::uuid`;
+        await sql`UPDATE swarm.renewal_grants SET last_used_at = clock_timestamp() - interval '2 hours'
+          WHERE renewal_grant_id = (SELECT renewal_grant_id FROM swarm.agent_tokens WHERE token_id = ${artifact.token_id}::uuid)`;
+        const aged = { ...artifact, expires_at: new Date(Date.parse(artifact.expires_at) - 7_200_000).toISOString() };
+        const artifactPath = join(directory, "idle-minted.json");
+        await writeFile(artifactPath, JSON.stringify(aged), { mode: 0o600 });
+        const presented = parseAgentCredentialInput(await readFile(artifactPath, "utf8"), { kind: "file", path: artifactPath });
+        const store = await agentCredentialStore({ target: mintTarget, lineageKey: credentialLineageKey(presented.token), stateDirectory: directory });
+        const session = await AgentCredentialSession.open({ target: mintTarget, workspaceId: f.workspace, presented, store });
+        const successor = await session.bearer();
+        assert.notEqual(successor, artifact.agent_token);
+        assert.equal((await store.read())?.generation, 1);
+        assert.equal(await use(f.workspace, successor), 200);
+        for (const policy of ["revoked", "elapsed", "membership"] as const) {
+          mintPolicy = policy;
+          const beforeMint = minted.length, beforeRead = mintReads.length;
+          try {
+            const denied = await mint();
+            assert.equal(denied.code, 1, `${policy}: completion must fail`);
+            assert.equal(denied.output, "", "no credential export on refused real read");
+            assert.equal(minted.length, beforeMint + 1, "failed verification never remints");
+            assert.deepEqual(mintReads.slice(beforeRead), [{ status: policy === "membership" ? 403 : 401,
+              error: policy === "membership" ? "forbidden" : "unauthenticated" }]);
+            assert.match(denied.error, /setup is incomplete/);
+            assert.match(denied.error, /fresh-response-only; replay cannot recover it/);
+            assert.doesNotMatch(denied.error, /swm_agt_|issued and authenticated/);
+          } finally {
+            if (policy === "membership") await sql`UPDATE swarm.memberships SET revoked_at = NULL
+              WHERE workspace_id = ${f.workspace}::uuid AND user_id = ${f.user}::uuid`;
+            mintPolicy = "live";
+          }
+          const control = await mint();
+          assert.equal(control.code, 0, `${policy}: paired real mint control`);
+          const live = JSON.parse(control.output) as { agent_token: string };
+          assert.equal(mintReads.at(-1)?.status, 200);
+          assert.equal(await use(f.workspace, live.agent_token), 200);
+        }
       } finally { await humanStore.delete(); proxy.closeAllConnections(); await new Promise<void>(resolve => proxy.close(() => resolve())); }
 
       const joinResult = await new ThinCommandClient(target).sendConnect({ workspaceId: f.workspace,
@@ -380,12 +441,99 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
         expires_at: new Date(Date.parse(root.expires_at) - 32 * 86_400_000).toISOString() }));
       await sql`UPDATE swarm.renewal_grants SET last_used_at = clock_timestamp() - interval '31 days'
         WHERE renewal_grant_id = (SELECT renewal_grant_id FROM swarm.agent_tokens WHERE token_id = ${root.token_id}::uuid)`;
-      // Resume the same pending profile after >30d; M3 must authorize renewal.
-      const resumed = await connectMcp({ target, profilePath, readCode: async () => code });
+      // Another process/session saves the actual M3 winner before pending rerun.
+      const rootBytes = await readFile(savedProfile.credential_file);
+      const firstReopen = await openProfileCredential(savedProfile);
+      const winnerBearer = await firstReopen.bearer();
+      const winnerStore = await agentCredentialStore({ target, lineageKey: credentialLineageKey(root.agent_token) });
+      const winner = await winnerStore.read();
+      assert.ok(winner && winner.tokenId && winner.generation === 1);
+      assert.equal(winner.token, winnerBearer);
+      assert.notEqual(winnerBearer, root.agent_token);
+      const [beforeResume] = await sql<{ successors: number }[]>`SELECT count(*)::integer AS successors FROM swarm.agent_tokens WHERE predecessor_token_id = ${root.token_id}::uuid`;
+      assert.equal(beforeResume.successors, 1);
+      const resumeRequests: Array<{ path: string; bearer: string | null; status: number }> = [];
+      // Resume the same pending profile after >30d using that saved real winner.
+      const resumed = await connectMcp({ target, profilePath, readCode: async () => code,
+        fetcher: async (input, init) => {
+          const response = await fetch(input, init);
+          resumeRequests.push({ path: new URL(String(input)).pathname,
+            bearer: new Headers(init?.headers).get("authorization"), status: response.status });
+          return response;
+        } });
+      assert.deepEqual(resumeRequests, [{ path: "/functions/v1/read", bearer: `Bearer ${winnerBearer}`, status: 200 }]);
+      assert.deepEqual(await readFile(savedProfile.credential_file), rootBytes);
+      assert.deepEqual(await winnerStore.read(), winner);
+      const [afterResume] = await sql<{ successors: number; first_used_at: Date | null }[]>`SELECT first_used_at,
+        (SELECT count(*)::integer FROM swarm.agent_tokens WHERE predecessor_token_id = ${root.token_id}::uuid) AS successors
+        FROM swarm.agent_tokens WHERE token_id = ${winner.tokenId}::uuid`;
+      assert.equal(afterResume.successors, beforeResume.successors);
+      assert.ok(afterResume.first_used_at, "pending completion really authenticated the saved M3 winner");
       assert.equal(resumed.profile, profilePath);
       assert.equal(JSON.parse(await readFile(savedProfile.credential_file, "utf8")).agent_token, root.agent_token);
       const reopened = await openProfileCredential(await readAgentProfile(profilePath));
       assert.equal(await use(f.workspace, await reopened.bearer()), 200);
+      const { CONNECT_PROFILE_FILES } = await import("../../src/cloud/connect-profile-files.js");
+      // Completion fences run after real registration, before its first real read.
+      for (const policy of ["revoked", "elapsed", "membership"] as const) {
+        for (const live of [false, true]) {
+          const issued = await new ThinCommandClient(target).sendConnect({ workspaceId: f.workspace,
+            command: { kind: "mint_agent_join_credential", seat_cap: 1, ttl_hours: 1 }, credential: login.data.session.access_token });
+          assert.equal(issued.response.status, "accepted");
+          const joinCode = issued.response.join_credential!;
+          const path = join(directory, `completion-${policy}-${live}`, "profile.json");
+          const name = `C6 ${policy} ${live}`;
+          let registrations = 0, completions = 0;
+          const replies: Array<{ status: number; error: unknown }> = [];
+          const fetcher: typeof fetch = async (input, init) => {
+            const response = await fetch(input, init);
+            const endpoint = new URL(String(input)).pathname;
+            if (endpoint === "/functions/v1/h0/register") {
+              registrations++;
+              const payload = await response.clone().json();
+              assert.equal(response.status, 200, "must reach real successful registration");
+              assert.equal(typeof payload.token_id, "string");
+              await fence(payload.token_id, live ? "live" : policy);
+            }
+            if (endpoint === "/functions/v1/read") {
+              const payload = await response.clone().json();
+              replies.push({ status: response.status, error: payload.error });
+            }
+            return response;
+          };
+          const options = { target, profilePath: path, name, readCode: async () => joinCode, fetcher,
+            writeCompletion: async (file: string, value: string) => { completions++; await writeSecureJsonFile(file, value); } };
+          try {
+            if (live) {
+              assert.equal((await connectMcp(options)).profile, path, `${policy}: paired real connect control`);
+              assert.deepEqual(replies, [{ status: 200, error: undefined }]);
+              assert.equal(completions, 1);
+              const connected = await openProfileCredential(await readAgentProfile(path));
+              assert.equal(await use(f.workspace, await connected.bearer()), 200);
+            } else {
+              await assert.rejects(connectMcp(options), { code: "connect_authentication_refused" });
+              assert.deepEqual(replies, [{ status: policy === "membership" ? 403 : 401,
+                error: policy === "membership" ? "forbidden" : "unauthenticated" }]);
+              assert.equal(completions, 0);
+              const saved = await readAgentProfile(path);
+              const credentialBefore = await readFile(saved.credential_file);
+              const pendingPath = join(directory, `completion-${policy}-${live}`, CONNECT_PROFILE_FILES.pending);
+              const pendingBefore = await readFile(pendingPath);
+              await assert.rejects(readFile(join(directory, `completion-${policy}-${live}`, CONNECT_PROFILE_FILES.complete)), { code: "ENOENT" });
+              await assert.rejects(connectMcp(options), { code: "connect_authentication_refused" });
+              assert.deepEqual(await readFile(saved.credential_file), credentialBefore);
+              assert.deepEqual(await readFile(pendingPath), pendingBefore);
+              assert.equal(completions, 0);
+              assert.equal(replies.length, 2);
+              assert.deepEqual(replies[1], replies[0]);
+            }
+            assert.equal(registrations, 1, "pending failures never consume another seat");
+          } finally {
+            if (policy === "membership" && !live) await sql`UPDATE swarm.memberships SET revoked_at = NULL
+              WHERE workspace_id = ${f.workspace}::uuid AND user_id = ${f.user}::uuid`;
+          }
+        }
+      }
       // An unused expired root gets no renewal authority; a live control still works.
       const unused = await fixture();
       const session = await AgentCredentialSession.open({ target, workspaceId: unused.workspace, presented: unused.presented, store: unused.store });

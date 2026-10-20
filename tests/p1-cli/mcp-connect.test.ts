@@ -1291,7 +1291,7 @@ async function fixture(guardedRoot?: string) {
 test("connect verifies durable proof before completion, preserves failures and resumes without register", { timeout: 20_000 }, async () => {
   const f = await fixture();
   try {
-    for (const failure of ["missing", "workspace", "principal", "owner", "run", "malformed", "denied", "transport"]) {
+    for (const failure of ["missing", "workspace", "principal", "owner", "run", "malformed", "denied", "unauthenticated", "overload", "no-retry", "transport"]) {
       f.reset();
       const path = join(f.root, `proof-${failure}`, "profile.json");
       const pending = join(dirname(path), CONNECT_PROFILE_FILES.pending);
@@ -1305,7 +1305,8 @@ test("connect verifies durable proof before completion, preserves failures and r
           pending: existsSync(pending), complete: existsSync(complete), body: JSON.parse(String(init?.body)) });
         if (!deny) return Response.json(DIRECTORY);
         if (failure === "transport") throw new Error(`lost response ${TOKEN}`);
-        if (failure === "denied") return Response.json({ error: "forbidden" }, { status: 403 });
+        if (failure === "denied" || failure === "unauthenticated") return Response.json({ error: failure === "denied" ? "forbidden" : "unauthenticated", message: `private ${TOKEN}` }, { status: failure === "denied" ? 403 : 401 });
+        if (failure === "overload" || failure === "no-retry") return Response.json({ error: "unavailable", retryable: failure !== "no-retry" }, { status: 503 });
         if (failure === "malformed") return Response.json({ members: "invalid" });
         if (failure === "missing") return Response.json({ members: [], agents: [] });
         return Response.json({ ...DIRECTORY, identity: { ...DIRECTORY.identity,
@@ -1317,7 +1318,13 @@ test("connect verifies durable proof before completion, preserves failures and r
       };
       const before = f.calls();
       await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: transport }), error => {
-        assert.equal((error as { code: string }).code, "connect_authentication_incomplete");
+        const mismatch = ["missing", "workspace", "principal", "owner", "run"].includes(failure);
+        const refused = ["denied", "unauthenticated"].includes(failure);
+        assert.equal((error as { code: string }).code, mismatch ? "connect_identity_mismatch" : refused ? "connect_authentication_refused" : "connect_authentication_incomplete");
+        if (failure === "transport" || failure === "overload") assert.match(String(error), /Rerun the same.*later with the same code/);
+        else assert.doesNotMatch(String(error), /Rerun the same/);
+        if (refused) { assert.match(String(error), /refused; the cause is unconfirmed/); assert.doesNotMatch(String(error), /revoked|expired/); }
+        if (mismatch) assert.match(String(error), /correct connection file/);
         assert.doesNotMatch(String(error), /swm_join_|swm_agt_|mcp add|mcp_servers/);
         return true;
       });
@@ -1404,7 +1411,7 @@ test("restored profile failure remains pending and verifies again before install
     const seen: string[] = [];
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
       fetcher: async (input) => { seen.push(new URL(String(input)).pathname); return Response.json({ members: [], agents: [] }); } }),
-      { code: "connect_authentication_incomplete" });
+      { code: "connect_identity_mismatch" });
     assert.deepEqual(seen, ["/functions/v1/read"]);
     assert.equal(existsSync(join(dirname(path), CONNECT_PROFILE_FILES.pending)), true);
     assert.deepEqual(await readFile(join(dirname(path), CONNECT_PROFILE_FILES.credential)), credential);

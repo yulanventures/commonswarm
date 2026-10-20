@@ -245,6 +245,13 @@ test("default mint requests standing and narrates only returned canonical policy
         assert.equal(minted.code, 1);
         assert.equal(minted.stdout, "", "unverified credentials are never exported");
         assert.match(minted.stderr, /setup is incomplete/);
+        assert.match(minted.stderr, /fresh-response-only; replay cannot recover it/);
+        assert.match(minted.stderr, /cswarm token revoke --workspace-id .* --token-id/);
+        assert.match(minted.stderr, /cswarm token mint --workspace-id/);
+        if (proofMode === "denied") {
+          assert.match(minted.stderr, /refused permission \(HTTP 403\); the cause is unconfirmed/);
+          assert.doesNotMatch(minted.stderr, /was revoked|connection expired|Rerun the same/);
+        } else assert.match(minted.stderr, /did not confirm the issued agent and workspace/);
         assert.doesNotMatch(minted.stderr, /swm_agt_|issued and authenticated/);
       }
     }

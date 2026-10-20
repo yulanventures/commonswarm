@@ -159,7 +159,7 @@ import {
 } from "./cloud/current-target.js";
 import { seedDogfood } from "./cloud/seed.js";
 import { withAgentDeadline } from "./cloud/agent-check.js";
-import { SignalTransportError, SignalReadTimeoutError } from "./cloud/signals.js";
+import { SignalTransportError } from "./cloud/signals.js";
 import {
   agentCredentialStore,
   credentialLineageKey,
@@ -2760,7 +2760,7 @@ async function runToken(args: Arguments): Promise<void> {
               identity.workspace_id !== workspace ||
               (identity.run_id !== undefined && identity.run_id !== mintedRunId) ||
               !directory.agents.some(agent => agent.principal_id === principalId && agent.owner_user_id === identity.owner_user_id)) {
-            throw new Error("mint identity was not confirmed");
+            throw new AgentSetupError("authenticated_identity_mismatch", "The issued identity was not confirmed.");
           }
           return;
         } catch (error) {
@@ -2770,8 +2770,25 @@ async function runToken(args: Arguments): Promise<void> {
         }
       }
     });
-  } catch {
-    throw new Error("The credential was issued, but authentication could not be confirmed. No credential was exported; setup is incomplete.");
+  } catch (error) {
+    const http = followHttpDetails(error);
+    const envelope = followErrorEnvelope(error);
+    let reason = "The authentication outcome is unconfirmed.";
+    if (error instanceof AgentSetupError && error.code === "authenticated_identity_mismatch") {
+      reason = "The service did not confirm the issued agent and workspace.";
+    } else if (http?.status === 401) {
+      reason = "The service refused the issued credential (HTTP 401); the cause is unconfirmed.";
+    } else if (http?.status === 403) {
+      reason = "The service refused permission (HTTP 403); the cause is unconfirmed.";
+    } else if (error instanceof SignalTransportError || error instanceof SignalReadTimeoutError ||
+        (error instanceof AgentSetupError && error.code === "check_timeout") ||
+        (http !== null && (http.status === 429 || http.status >= 500) && envelope.retryable !== false)) {
+      reason = "The authentication response could not be confirmed after the bounded attempt.";
+    }
+    throw new Error(`The credential was issued. No credential was exported; setup is incomplete. ${reason} ` +
+      `Its secret is fresh-response-only; replay cannot recover it. Existing connections were kept. ` +
+      `The owner can explicitly revoke this issuance with cswarm token revoke --workspace-id ${workspace} --token-id ${mintedTokenId}. ` +
+      `After checking access, the owner can explicitly issue a new credential with cswarm token mint --workspace-id ${workspace} --principal-id ${principalId} --run-id <fresh-uuid> --task-id <fresh-uuid> --epoch 0.`);
   }
   process.stderr.write("Credential issued and authenticated. Installation on the recipient is unconfirmed.\n");
   process.stderr.write(
