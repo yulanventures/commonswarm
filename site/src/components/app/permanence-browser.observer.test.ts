@@ -14,6 +14,9 @@ import { browserTest, findChrome, launchChrome } from "../../../tests/chrome.js"
 // mounts, refresh and reset through rendered DOM/events. Only HTTP responses are
 // synthetic. They prove browser behavior and envelopes, never backend ownership,
 // PostgreSQL persistence, audit, or role enforcement.
+// Error rows protect response-specific copy and correction without a read; the
+// credible regression is treating all 400s as unsupported or all refusals as
+// unknown writes. This existing DOM/HTTP owner lacked those codes. No new seam.
 function installConnectionFixture() {
   const w = window as any;
   const scenario = new URL(location.href).searchParams.get("case") || "renewal";
@@ -75,7 +78,13 @@ function installConnectionFixture() {
         const c = body.command;
         if (c.kind === "set_connection_expiry") {
           if (f.mode === "lost") throw new Error("synthetic command loss");
+          if (f.mode === "invalid-date") return Response.json({ error: "invalid_connection_expiry" }, { status: 400 });
+          if (f.mode === "invalid-request") return Response.json({ error: "invalid_request" }, { status: 400 });
           if (f.mode === "unavailable") return Response.json({ error: "invalid_command" }, { status: 400 });
+          if (f.mode === "unknown-400") return Response.json({ error: "unrecognized" }, { status: 400 });
+          if (f.mode === "empty-400") return new Response(null, { status: 400 });
+          if (f.mode === "empty-200") return new Response(null, { status: 200 });
+          if (f.mode === "http-unavailable") return new Response(null, { status: 501 });
           if (f.mode === "deny") return Response.json({ error: "forbidden" }, { status: 403 });
           (c.connection_kind === "hosted" ? f.connection : f.grant).connection_expires_at = c.connection_expires_at;
           return Response.json({ status: "accepted", ok: true });
@@ -226,9 +235,38 @@ async function observeConnectionApp() {
       f.mode = "deny"; edit(); form().requestSubmit();
       await wait(() => /not confirmed/.test(notice()), "refusal reread");
       assert(f.grant.connection_expires_at === null && f.connection.connection_expires_at === null, "refusal changed fixture state");
-      f.mode = "unavailable"; form().requestSubmit();
-      await wait(() => /unavailable on this server/.test(notice()), "F writer unavailable");
-      assert(f.grant.connection_expires_at === null && f.connection.connection_expires_at === null, "unavailable writer changed state");
+      for (const row of [
+        { mode: "invalid-date", copy: "Choose a future end date after the server's current time. Nothing was changed." },
+        { mode: "invalid-request", copy: "The server rejected this end date request. Nothing was changed." },
+        { mode: "unavailable", copy: "End date settings are unavailable on this server. Nothing was changed." },
+      ]) {
+        // This date passes the actual client's clock check; the server can be ahead.
+        const reads = f.reads, count = writes().length;
+        f.mode = row.mode; f.failRead = true; form().requestSubmit();
+        await wait(() => notice() === row.copy, row.mode + " validation refusal");
+        assert(writes().length === count + 1, row.mode + " did not reach command HTTP");
+        assert(f.reads === reads, row.mode + " required an unnecessary policy read");
+        assert(f.grant.connection_expires_at === null && f.connection.connection_expires_at === null, row.mode + " changed saved state");
+        assert(editor().textContent.includes("Stays connected until you remove it"), row.mode + " changed canonical summary");
+        assert(!field("[data-end-date-save]").disabled && !field("[data-end-date-value]").disabled &&
+          !visible(field("[data-end-date-check]")), row.mode + " blocked correction on a read-only Check");
+        assert(field("[data-end-date-value]").value === "2035-02-03T04:05", row.mode + " discarded the draft");
+      }
+      f.failRead = false;
+      // Empty bodies and unrecognized HTTP errors do not prove a no-write validation refusal.
+      for (const mode of ["unknown-400", "empty-400", "empty-200", "http-unavailable"]) {
+        const reads = f.reads, count = writes().length;
+        f.mode = mode; f.failRead = true; form().requestSubmit();
+        await wait(() => /result is unknown/.test(notice()), mode + " unknown outcome");
+        assert(f.reads > reads && writes().length === count + 1, mode + " skipped canonical reconciliation");
+        assert(field("[data-end-date-save]").disabled && field("[data-end-date-value]").disabled &&
+          visible(field("[data-end-date-check]")), mode + " permits editing before a check");
+        form().dispatchEvent(new Event("submit", { cancelable: true }));
+        assert(writes().length === count + 1, mode + " retried an unknown write");
+        f.failRead = false; field("[data-end-date-check]").click();
+        await wait(() => /settings checked/.test(notice()), mode + " read-only reconciliation");
+        assert(writes().length === count + 1, mode + " check wrote a command");
+      }
       f.mode = "lost"; f.failRead = true; form().requestSubmit();
       await wait(() => /result is unknown/.test(notice()), "unknown outcome");
       const count = writes().length;

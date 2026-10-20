@@ -1042,6 +1042,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import {
     ClientTooOld,
     CommandOutcomeUnknown,
+    ConnectionExpiryRefused,
     EmailAddressRejected,
     EmailDomainNotAccepted,
     EmailNotVerified,
@@ -4894,6 +4895,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           state.busy = false; state.needsCheck = true;
           state.notice = "Check the saved end date before saving again.";
           if (session?.user.id === ownerSession.user.id) refreshConnectionDateViews();
+          return;
+        }
+        if (writeError instanceof ConnectionExpiryRefused) {
+          state.busy = false; state.needsCheck = false; state.notice = readableError(writeError);
+          if (section.isConnected) { update(); (state.enabled ? date : toggle).focus({ preventScroll: true }); }
+          else refreshConnectionDateViews();
           return;
         }
         try {

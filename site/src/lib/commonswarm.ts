@@ -1129,6 +1129,11 @@ export async function pendingAgentAccess(workspaceId: string): Promise<PendingAg
   }
 }
 
+/** A recognized validation refusal proves the end-date command did not write. */
+export class ConnectionExpiryRefused extends Error {
+  override name = "ConnectionExpiryRefused";
+}
+
 /** Existing command envelope; ownership, liveness and persistence remain server decisions. */
 export async function setConnectionExpiry(
   session: Session,
@@ -1143,7 +1148,18 @@ export async function setConnectionExpiry(
     grant_id: grantId, connection_expires_at: connectionExpiresAt,
   }, { workspace_id: workspaceId, stream: { kind: "workspace" } },
   "The end date result is unknown. Check the connection before saving again.");
-  if ([400, 404, 405, 501].includes(result.status)) {
+  if (result.status === 400) {
+    if (result.body.error === "invalid_connection_expiry") {
+      throw new ConnectionExpiryRefused("Choose a future end date after the server's current time. Nothing was changed.");
+    }
+    if (result.body.error === "invalid_request") {
+      throw new ConnectionExpiryRefused("The server rejected this end date request. Nothing was changed.");
+    }
+    if (result.body.error === "invalid_command") {
+      throw new ConnectionExpiryRefused("End date settings are unavailable on this server. Nothing was changed.");
+    }
+  }
+  if ([404, 405, 501].includes(result.status)) {
     throw new Error("End date settings are unavailable on this server. Nothing was changed.");
   }
   if (result.status !== 200 || result.body.status !== "accepted" || result.body.ok !== true) {
