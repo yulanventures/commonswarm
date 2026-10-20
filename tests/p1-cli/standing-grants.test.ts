@@ -16,7 +16,6 @@ import {
   describeRenewalGrant,
   readRenewalGrants,
   STANDING_IDLE_PAUSE_DAYS,
-  STANDING_RESUME_ACTORS,
   type RenewalGrantStatus,
   STANDING_RESUME_ACTORS_SENTENCE,
   standingPausedRenewalMessage,
@@ -297,19 +296,9 @@ test("grant read preserves absent policy and validates canonical deadlines befor
   }
 });
 
-/**
- * ★ ONE NUMBER, THREE FILES, NO IMPORT BETWEEN THEM.
- *
- * The idle window is enforced by `interval '14 days'` inside
- * swarm.prepare_renewal_grant. The CLI prints it, the connect page prints it,
- * and neither can import PL/pgSQL. AGENTS.md is explicit that a user-facing
- * sentence listing what the code enforces must come from the same constant the
- * enforcement reads, and it records four shipped defects from hand-typed lists
- * that two review arms each passed. Where an import is impossible, this test IS
- * the shared constant: change the interval in SQL without changing both mirrors
- * and it fails here.
- */
-test("the idle window and the resume gate agree across SQL, the CLI, and the site", async () => {
+/** Historical idle suspension remains readable and its privileged resume gate is retained.
+ * The permanent-default Site does not mirror this legacy technical idle window. */
+test("legacy idle suspension and its resume gate retain their SQL and CLI contract", async () => {
   const migration = await readFile(
     new URL(
       "../../supabase/migrations/20260904000001_standing_grant_resume.sql",
@@ -317,11 +306,6 @@ test("the idle window and the resume gate agree across SQL, the CLI, and the sit
     ),
     "utf8",
   );
-  const site = await readFile(
-    new URL("../../site/src/lib/standing-grants.ts", import.meta.url),
-    "utf8",
-  );
-
   /* POSITIVE CONTROL FIRST: this regex has to find the interval the migration
      actually installs. Without it a renamed variable would make the assertion
      below vacuous instead of failing. */
@@ -333,24 +317,9 @@ test("the idle window and the resume gate agree across SQL, the CLI, and the sit
   );
   assert.equal(Number(interval[1]), STANDING_IDLE_PAUSE_DAYS);
 
-  const siteDays = /STANDING_IDLE_PAUSE_DAYS = (\d+)/.exec(site);
-  assert.ok(siteDays, "the site no longer exports STANDING_IDLE_PAUSE_DAYS");
-  assert.equal(Number(siteDays[1]), STANDING_IDLE_PAUSE_DAYS);
-
-  /* The reducer is the THIRD copy: it builds the renewal_idle_suspended detail
-     an agent is handed, and it is imported here rather than read as text
-     because it can be. All three, and the SQL, are one number. */
+  /* The protocol builds the legacy renewal_idle_suspended detail an agent is
+     handed; the CLI and protocol retain the historical SQL number. */
   assert.equal(RENEWAL_IDLE_PAUSE_DAYS, STANDING_IDLE_PAUSE_DAYS);
-
-  /* The rules paragraph is the same on both sides, so an agent reading the
-     pasted prompt and an operator reading `cswarm whoami` are told one thing. */
-  assert.match(site, /export const STANDING_GRANT_RULES/);
-  for (const actor of STANDING_RESUME_ACTORS) {
-    assert.ok(
-      site.includes(actor),
-      `the site copy drops "${actor}" from the resume gate`,
-    );
-  }
 
   /* And the gate the sentence describes is the gate the function applies. */
   assert.match(migration, /actor_role NOT IN \('owner', 'admin'\)/);
@@ -363,9 +332,8 @@ test("the idle window and the resume gate agree across SQL, the CLI, and the sit
 
 /**
  * ★ THE WEB DEFAULT. An agent added through /app must get a grant that does not
- * expire, and the ONLY thing that makes that true is the field below: the
- * command function defaults an absent renewal_kind to "timeboxed", so omitting
- * it chooses a 30-day expiry by accident.
+ * acquire a technical renewal horizon by accident. Keep its standing request
+ * explicit while canonical owner policy comes only from the server.
  */
 test("the web add-agent flow asks for a standing grant", async () => {
   const connect = await readFile(
@@ -522,10 +490,8 @@ test("cswarm grant resume reaches the wire and says what is still to be done", a
     /* HONESTY IS NOT SUFFICIENT. Exit 0 here does not mean the agent is working
        — nothing has contacted it — so the output has to say what is left. */
     assert.match(resumed.stdout, /Nothing has reached the agent yet/);
-    assert.match(
-      resumed.stdout,
-      new RegExp(`another ${STANDING_IDLE_PAUSE_DAYS} days`),
-    );
+    assert.doesNotMatch(resumed.stdout, /idle clock restarts|another \d+ days/i,
+      "a resume receipt must not invent a new technical idle deadline");
     assert.match(resumed.stdout, /Confirm with: cswarm whoami/);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));

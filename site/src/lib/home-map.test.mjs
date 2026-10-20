@@ -803,3 +803,38 @@ test("on an agent's page the agent is the current rail row and its workspace is 
   assert.equal(chat.currentAgentId, undefined);
   assert.deepEqual(chat.workspaces.map(row => row.current), [true, false]);
 });
+
+// Caller regression: access policy must survive Home's projection into the shared status owner.
+test("Home preserves canonical connection endings without turning proof horizons into policy", () => {
+  const base = { principalId: "A", grantKind: "timeboxed", horizonExpiresAt: "2000-01-01T00:00:00Z",
+    boundDeviceId: "device", issuedAt: "2026-01-01T00:00:00Z", lastUsedAt: null,
+    newHostAt: null, suspendedAt: null, grantRevokedAt: null, revokedAt: null };
+  const state = (fields, connection = "live") => mapHomePeople({ ...input,
+    agents: [{ ...input.agents[0], work: { work: "idle", facts: { connection } } }],
+    access: [{ ...base, ...fields }] }).groups[0].agents[0].state;
+  for (const fields of [{}, { connectionExpiresAt: null },
+    { connectionExpiresAt: undefined, connectionExpiredAt: null },
+    { connectionExpiresAt: "bad-date", connectionExpiredAt: null },
+    { connectionExpiresAt: null, connectionExpiredAt: null },
+    { connectionExpiresAt: "2099-01-01T00:00:00Z", connectionExpiredAt: null }]) {
+    assert.equal(state(fields).kind, "idle", "a proof horizon is never an owner end date");
+    assert.equal(state(fields).fix.action, null);
+    assert.doesNotMatch(state(fields).detail, /Stays connected|new key|14 days/i);
+  }
+  for (const fields of [
+    { connectionExpiresAt: "2026-10-01T00:00:00Z", connectionExpiredAt: null },
+    { connectionExpiresAt: null, connectionExpiredAt: "2026-10-01T00:00:00Z" },
+    { connectionExpiresAt: undefined, connectionExpiredAt: "2026-10-01T00:00:00Z" },
+  ]) {
+    const ended = state(fields);
+    assert.equal(ended.kind, "disconnected");
+    assert.equal(ended.detail, "Connection ended");
+    assert.equal(ended.fix.action, null, "an elapsed family cannot be resumed");
+    assert.equal(state(fields, "removed").detail, "Removed", "removal remains stronger than an end date");
+    assert.equal(state({ ...fields, suspendedAt: "2026-10-02T00:00:00Z" }).detail, "Access suspended");
+  }
+  const suspended = state({ connectionExpiresAt: null, connectionExpiredAt: null, suspendedAt: "2026-10-02T00:00:00Z" });
+  assert.equal(suspended.kind, "disconnected");
+  assert.equal(suspended.detail, "Access suspended");
+  assert.doesNotMatch(suspended.fix.sentence, /idle|14 days/i);
+});

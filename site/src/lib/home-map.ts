@@ -70,7 +70,10 @@ export function mapHomePeople(input: HomePeopleInput): HomePeople {
       revoked: work?.facts.connection === "removed",
       connection: work?.facts.connection,
 
-      grant: access ? { kind: access.grantKind, horizonExpiresAt: access.horizonExpiresAt, boundDeviceId: access.boundDeviceId,
+      grant: access ? {
+        ...(Object.hasOwn(access, "connectionExpiresAt") ? { connectionExpiresAt: access.connectionExpiresAt } : {}),
+        ...(Object.hasOwn(access, "connectionExpiredAt") ? { connectionExpiredAt: access.connectionExpiredAt } : {}),
+        kind: access.grantKind, horizonExpiresAt: access.horizonExpiresAt, boundDeviceId: access.boundDeviceId,
         lastUsedAt: access.lastUsedAt, issuedAt: access.issuedAt, newHostAt: access.newHostAt,
         suspendedAt: access.suspendedAt, revokedAt: access.grantRevokedAt ?? access.revokedAt } : null,
       serverWork: work?.work, lastActionAt: work?.facts.last_activity_at,

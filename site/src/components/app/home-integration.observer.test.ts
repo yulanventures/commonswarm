@@ -138,7 +138,8 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
       const homeRoute={view:${JSON.stringify(view)},workspaceId:'W'};
       let workspaces=[{id:'W',name:'Home'}], activeWorkspaceId='W';
       let renderedAuthUserId='tom', requestVersion=1, authReloadQueued=false, bootInFlight=null, bootAgain=false;
-      let catchUpGeneration=0, railOverviewGeneration=0, connectedAppsGeneration=0;
+      let catchUpGeneration=0, railOverviewGeneration=0, connectedAppsGeneration=0, connectionSettingsGeneration=0;
+      const connectionDateDrafts=new Map();
       let homeWorkspaceGeneration=0, homeWorkspaceRead=0, homeDetailGeneration=0;
       let connectFocusObserver=null, humanSeenObserver=null, signalExpiryTimer;
       let catchUpData, homeWorkClaims, homePeopleReadState, homeShellKey, homeRailKey, homeCatchUpKey;
