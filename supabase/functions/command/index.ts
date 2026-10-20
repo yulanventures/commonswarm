@@ -155,7 +155,7 @@ import {
 // frozen TypeScript core. This checked-in bundle is regenerated directly from
 // src/protocol/index.ts by build:command-core; it is not a second implementation.
 import {
-  HOUSEHOLD_LOCAL_SEAT, HOUSEHOLD_JOIN_RATE_PER_HOUR,
+  HOUSEHOLD_LOCAL_SEAT, HOUSEHOLD_JOIN_RATE_PER_HOUR, HUMAN_ONLY_COMMANDS,
   HouseholdToolInputError,
   applyCommand,
   canonicalPrincipal,
@@ -3430,6 +3430,7 @@ function byteaHex(value: unknown): string {
 async function loadWorkspaceState(
   tx: Sql,
   route: Route,
+  tokenIds: string[] = [],
 ): Promise<WorkspaceState> {
   const [workspaceRows, memberRows, invitationRows, principalRows, tokenRows] =
     await Promise.all([
@@ -3465,6 +3466,7 @@ async function loadWorkspaceState(
         JOIN swarm.agent_principals AS p
           ON p.principal_id = t.principal_id
         WHERE p.workspace_id = ${route.workspaceId}::uuid
+          AND t.token_id=ANY(${tokenIds}::uuid[])
       `,
     ]);
   const workspace = workspaceRows[0];
@@ -3618,7 +3620,9 @@ async function prepareWorkspaceCommand(
    */
   selfHealStranded = false,
 ): Promise<PreparedWorkspace> {
-  const state = await loadWorkspaceState(tx, route);
+  const state = await loadWorkspaceState(tx, route,
+    wire.kind==='renew_agent_token' && auth.agent ? [auth.agent.token_id]
+      : wire.kind==='revoke_agent_token' ? [wire.token_id] : []);
   let invitationToken: string | null = null;
   let invitationHash: Uint8Array | null = null;
   let agentToken: string | null = null;
@@ -4768,41 +4772,6 @@ async function updateWorkspaceProjection(
         )
         ON CONFLICT (kind, target_id) DO NOTHING
       `;
-      const liveTokens = await tx<{ token_id: string; lineage_id: string }[]>`
-        SELECT token_id, lineage_id
-        FROM swarm.agent_tokens
-        WHERE principal_id = ${principalId}::uuid
-          AND revoked_at IS NULL
-      `;
-      await tx`
-        UPDATE swarm.agent_tokens
-        SET revoked_at = ${revokedAt}
-        WHERE principal_id = ${principalId}::uuid
-          AND revoked_at IS NULL
-      `;
-      for (const token of liveTokens) {
-        await tx`
-          INSERT INTO swarm.revocation_tombstones (kind, target_id, created_by)
-          VALUES (
-            'token',
-            ${token.token_id}::uuid,
-            ${createdBy}::uuid
-          )
-          ON CONFLICT (kind, target_id) DO NOTHING
-        `;
-      }
-      const lineageIds = [...new Set(liveTokens.map((row) => row.lineage_id))];
-      for (const lineageId of lineageIds) {
-        await tx`
-          INSERT INTO swarm.revocation_tombstones (kind, target_id, created_by)
-          VALUES (
-            'lineage',
-            ${lineageId}::uuid,
-            ${createdBy}::uuid
-          )
-          ON CONFLICT (kind, target_id) DO NOTHING
-        `;
-      }
       // Grant revoke is paired (revoked_at, revoked_by); the cascade trigger
       // tombstones the grant and stamps any residual tokens.
       if (createdBy !== null) {
@@ -4846,8 +4815,7 @@ async function updateWorkspaceProjection(
         renewal_grant_id: string | null;
         principal_id: string;
       }[]>`
-        UPDATE swarm.agent_tokens
-        SET revoked_at = ${revokedAt}
+        SELECT token_id, lineage_id, renewal_grant_id, principal_id FROM swarm.agent_tokens
         WHERE token_id = ${tokenId}::uuid
           AND revoked_at IS NULL
           AND principal_id IN (
@@ -4855,7 +4823,7 @@ async function updateWorkspaceProjection(
             FROM swarm.agent_principals
             WHERE workspace_id = ${route.workspaceId}::uuid
           )
-        RETURNING token_id, lineage_id, renewal_grant_id, principal_id
+
       `;
       if (revoked.length !== 1) {
         throw new Error(
@@ -4883,6 +4851,8 @@ async function updateWorkspaceProjection(
             AND revoked_at IS NULL
         `;
       }
+      await tx`UPDATE swarm.agent_tokens SET revoked_at=coalesce(revoked_at,${revokedAt})
+        WHERE token_id=${tokenId}::uuid`;
       if (prepared.ctx.actor.agent_principal===null && createdBy!==null) await tx`
         SELECT swarm.revoke_local_residual_tokens(${route.workspaceId}::uuid,${createdBy}::uuid,'revoke_agent_token',${tokenId}::uuid)`;
       // Distinct lineage tombstone so successors and renewals fail closed even
@@ -10825,8 +10795,40 @@ async function handleTransaction(
       localWorkspace=hint?.workspace_id;
     }
     const rawLocal = record(body.command);
+    if (agentTokenHash && HUMAN_ONLY_COMMANDS.has(kind as never))
+      return {status:403,body:{error:'human_sign_in_required'}};
+    if (verifiedHuman && localWorkspace && kind!=='accept_invitation') {
+      const [admission]=await tx<{role:string}[]>`SELECT m.role FROM swarm.memberships m
+        JOIN swarm.workspaces w USING(workspace_id)
+        WHERE m.workspace_id=${localWorkspace}::uuid AND m.user_id=${verifiedHuman.userId}::uuid
+          AND m.revoked_at IS NULL AND w.archived_at IS NULL`;
+      if (!admission) return {status:403,body:{error:'forbidden'}};
+      if (['remove_member','change_role','archive_workspace'].includes(kind)
+        && !['owner','admin'].includes(admission.role)) return {status:403,body:{error:'forbidden'}};
+      const targetPrincipal=typeof rawLocal?.principal_id==='string' && UUID_RE.test(rawLocal.principal_id) ? rawLocal.principal_id:null;
+      if (targetPrincipal && ['mint_agent_token','revoke_agent_principal','set_agent_model','disable_agent_session','recover_agent_session'].includes(kind)) {
+        const [target]=await tx<{owner_user_id:string}[]>`SELECT owner_user_id FROM swarm.agent_principals
+          WHERE principal_id=${targetPrincipal}::uuid AND workspace_id=${localWorkspace}::uuid`;
+        if (!target || target.owner_user_id!==verifiedHuman.userId && !['owner','admin'].includes(admission.role))
+          return {status:403,body:{error:'forbidden'}};
+      }
+    }
     const joinAttempt = kind===REGISTER_AGENT_SEAT_KIND && typeof rawLocal?.attempt_id==='string' && UUID_RE.test(rawLocal.attempt_id)
       ? rawLocal.attempt_id : null;
+    if(joinCredentialHash && joinAttempt) {
+      const [admitted]=await tx`SELECT c.id FROM swarm.agent_join_credentials c
+        JOIN swarm.agent_principals p ON p.principal_id=c.registrar_principal_id
+        JOIN swarm.agent_runs r ON r.run_id=c.registrar_run_id AND r.principal_id=p.principal_id
+        JOIN swarm.devices d USING(device_id) JOIN swarm.workspaces w ON w.workspace_id=c.workspace_id
+        JOIN swarm.memberships m ON m.workspace_id=c.workspace_id AND m.user_id=c.owner_user_id
+        WHERE c.credential_hash=${joinCredentialHash} AND c.revoked_at IS NULL AND c.expires_at>clock_timestamp()
+          AND p.revoked_at IS NULL AND p.owner_user_id=c.owner_user_id AND p.workspace_id=c.workspace_id
+          AND r.ended_at IS NULL AND d.revoked_at IS NULL AND w.archived_at IS NULL AND m.revoked_at IS NULL
+          AND NOT EXISTS(SELECT 1 FROM swarm.admin_grants a WHERE a.grant_id=p.parent_admin_grant_id
+            AND (a.state<>'active' OR a.revoked_at IS NOT NULL OR a.expires_at<=clock_timestamp()
+              OR a.refresh_deadline<=clock_timestamp() OR c.workspace_id=ANY(a.withdrawn_workspace_ids)))`;
+      if(!admitted) return {status:403,body:{error:'forbidden'}};
+    }
     const localStreams = localWorkspace && (record(body.stream)?.kind==='workspace' || invitationHintHash!==null)
       ? await tx<{stream_id:string}[]>`SELECT stream_id FROM swarm.streams WHERE workspace_id=${localWorkspace}::uuid AND kind='workspace'`
       : localWorkspace && record(body.stream)?.kind==='repo' && typeof record(body.stream)?.repo_mapping_id==='string' && UUID_RE.test(String(record(body.stream)?.repo_mapping_id))
@@ -10835,20 +10837,48 @@ async function handleTransaction(
     const expiryBinding=localExpiry && typeof rawLocal.grant_id==='string' && UUID_RE.test(rawLocal.grant_id)
       ? (await tx<{principal_id:string;workspace_id:string}[]>`SELECT principal_id,workspace_id FROM swarm.renewal_grants
           WHERE renewal_grant_id=${rawLocal.grant_id}::uuid`)[0] : null;
+    const household=(HOUSEHOLD_SURFACE_KINDS as readonly string[]).includes(kind) || kind==='household_legacy';
+    const args=record(rawLocal?.arguments) ?? rawLocal;
+    const consent=record(rawLocal?.connection);
+    const principalTargets=new Set<string>();
+    for (const value of [rawLocal?.principal_id,args?.principal_id,consent?.principal_id,
+      record(args?.assignee)?.kind==='agent' ? record(args?.assignee)?.id:null,
+      record(args?.to)?.kind==='agent' ? record(args?.to)?.id:null,
+      record(record(args?.assign)?.to)?.kind==='agent' ? record(record(args?.assign)?.to)?.id:null]) {
+      if(typeof value==='string' && UUID_RE.test(value)) principalTargets.add(value);
+    }
+    // Existing to-do assignment is DB-owned metadata, reselected after each wait.
+    const todoId=typeof args?.todo_id==='string' && UUID_RE.test(args.todo_id) ? args.todo_id:null;
+    if(expiryBinding?.workspace_id===localWorkspace) principalTargets.add(expiryBinding.principal_id);
+    const tokenTargets=typeof rawLocal?.token_id==='string' && UUID_RE.test(rawLocal.token_id) ? [rawLocal.token_id]:[];
+    const removeUser=kind==='remove_member' && typeof rawLocal?.user_id==='string' && UUID_RE.test(rawLocal.user_id) ? rawLocal.user_id:null;
+    const revocation=removeUser ? {user:removeUser}
+      : kind==='revoke_agent_principal' && principalTargets.size===1 ? {principal:[...principalTargets][0]!}
+      : kind==='revoke_agent_token' && tokenTargets[0] ? {token:tokenTargets[0]} : undefined;
+    const target=principalTargets.size || tokenTargets.length ? {principals:[...principalTargets],tokens:tokenTargets}:undefined;
     localPlan = hostedSeat===null && (!HOSTED_MANAGEMENT_KINDS.has(kind) || localExpiry) ? await planLocalOperation(tx, {
       ...(agentTokenHash ? {hash:agentTokenHash}:{}), workspace:localWorkspace,actor:verifiedHuman?.userId,
-      allWorkspace: joinAttempt!==null || (WORKSPACE_COMMAND_KINDS as readonly string[]).includes(kind)
-        || (HOUSEHOLD_SURFACE_KINDS as readonly string[]).includes(kind),
+      household,householdQueue:rawLocal?.tool==='todo_queue',...(todoId ? {todo:todoId}:{}),
       streamIds:[CLAIM_AGENT_INBOX_KIND,ACK_AGENT_DELIVERY_KIND,TOUCH_PRESENCE_KIND].includes(kind) ? [] : localStreams.map(r=>r.stream_id),
-      ...(localExpiry ? {workspaceMode:'update' as const} : {}),
-      ...(expiryBinding && expiryBinding.workspace_id===localWorkspace ? {target:{principals:[expiryBinding.principal_id],tokens:[]}} : {}),
-      ...(localWorkspace && typeof rawLocal?.principal_id==='string' && UUID_RE.test(rawLocal.principal_id)
-        ? {target:{principals:[rawLocal.principal_id],tokens:[]}} : {}),
-      principalMode: kind===CLAIM_AGENT_INBOX_KIND?'noKeyUpdate':kind===ACK_AGENT_DELIVERY_KIND?'share':'update',
-      sessionMode:kind===ACK_AGENT_DELIVERY_KIND?'share':'update',
-      hostedMode:['remove_member','revoke_agent_principal','revoke_agent_token','archive_workspace'].includes(kind)?'update':'share',
+      workspaceMode: household || revocation || localExpiry || verifiedHuman
+        || (WORKSPACE_COMMAND_KINDS as readonly string[]).includes(kind) && kind!==RENEW_AGENT_TOKEN_KIND ? 'update':'share',
+      ...(target && !revocation ? {target}:tokenTargets.length ? {target:{principals:[],tokens:tokenTargets}}:{}),
+      ...(revocation ? {revocation}:{}),
+      memberTargets:removeUser ? [removeUser] : kind==='change_role' && typeof rawLocal?.user_id==='string' && UUID_RE.test(rawLocal.user_id) ? [rawLocal.user_id]:[],
+      principalMode: kind===CLAIM_AGENT_INBOX_KIND?'noKeyUpdate'
+        : kind==='acquire_agent_session' || revocation || ['enable_agent_management','disable_agent_management','recover_agent_session','declare_agent_model','set_agent_model'].includes(kind) ? 'update':'share',
+      sessionMode:['acquire_agent_session','renew_agent_session','release_agent_session','enable_agent_management','disable_agent_management','recover_agent_session'].includes(kind)?'update':'share',
+      hostedMode:revocation ? 'update':'share',
       ...(joinCredentialHash && joinAttempt ? {join:{hash:joinCredentialHash,attempt:joinAttempt}}:{}),
     }) : null;
+    if(localPlan && verifiedHuman && (kind==='revoke_agent_token' || consent?.kind==='local')) {
+      const selected=localPlan.snapshot.bindings.find(b=>b.token_id===(kind==='revoke_agent_token'?rawLocal?.token_id:consent?.connection_id));
+      const [member]=await tx<{role:string}[]>`SELECT role FROM swarm.memberships
+        WHERE workspace_id=${localWorkspace ?? null}::uuid AND user_id=${verifiedHuman.userId}::uuid AND revoked_at IS NULL`;
+      if(selected && selected.owner_user_id!==verifiedHuman.userId
+        && (consent?.kind==='local' || !member || !['owner','admin'].includes(member.role)))
+        return {status:403,body:{error:'forbidden'}};
+    }
     if (localPlan) await lockLocalAuthPlan(tx,localPlan);
     if(invitationHintHash) {
       const [hint]=await tx<{workspace_id:string}[]>`SELECT workspace_id FROM swarm.invitations WHERE token_hash=${invitationHintHash}`;
@@ -13312,6 +13342,16 @@ async function handleTransaction(
             (('token',t.token_id),('principal',p.principal_id),('run',r.run_id),('device',d.device_id),
              ('renewal_grant',g.renewal_grant_id),('membership',p.owner_user_id),('lineage',t.lineage_id),('family',t.lineage_id)))`;
       if(!current.length) throw new LocalCommandRefused({status:403,body:{error:'forbidden'}});
+    }
+    if(authenticatedAgent && agentTokenHash && !isAgentSessionProofExempt(kind)
+      && !['release_agent_session','revoke_agent_token','revoke_agent_principal'].includes(kind)) {
+      const currentSession=await enforceAgentSessionProof(tx,{
+        principalId:authenticatedAgent.principal_id,workspaceId:authenticatedAgent.principal_workspace_id,
+        proofParse:sessionProofParse,managedAt:authenticatedAgent.managed_at,
+      });
+      if(!currentSession.ok) throw new LocalCommandRefused({
+        status:currentSession.status,body:{error:currentSession.error},
+      });
     }
     if (kind===REGISTER_AGENT_SEAT_KIND && joinCredentialHash && localPlan && localBody?.status==='accepted') {
       const original=localPlan.snapshot.joins?.[0];

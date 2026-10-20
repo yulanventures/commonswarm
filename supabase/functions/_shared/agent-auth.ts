@@ -79,7 +79,9 @@ export async function recheckLocalCredential(tx:Sql,hash:Uint8Array,plan:LocalAu
       || newRows.some(row=>!oldRows.some(r=>r.workspace===row.workspace && r.stream===row.stream)
         && !plan.workspaces.some(w=>w.id===row.workspace && w.mode==='update'))) throw new LocalAuthDiscoveryChanged();
   }
-  if(snapshotKey({...current,objectStreams:initial.objectStreams,todoStreams:initial.todoStreams})!==snapshotKey(initial)) throw new LocalAuthDiscoveryChanged();
+  if((current.todoBindings ?? []).some(t=>[t.assignee_principal,t.offer_principal].some(id=>
+      id!==null && !initial.bindings.some(b=>b.principal_id===id)))) throw new LocalAuthDiscoveryChanged();
+  if(snapshotKey({...current,objectStreams:initial.objectStreams,todoStreams:initial.todoStreams,todoBindings:initial.todoBindings})!==snapshotKey(initial)) throw new LocalAuthDiscoveryChanged();
   const exact=await discoverLocalCredential(tx,hash);
   if(!exact || !initial.bindings.some(r=>r.token_id===exact.token_id)) throw new LocalAuthDiscoveryChanged();
   return await lockedCredentialFacts(tx,hash,exact,false,false);
@@ -347,9 +349,14 @@ export async function retryLocalAuthTransaction<T>(operation: () => Promise<T>):
   }
 }
 export async function discoverLocalCredential(tx: Sql, hash: Uint8Array): Promise<LocalCredentialIds | null> {
-  const rows = await tx<LocalCredentialIds[]>`
-    SELECT * FROM swarm.discover_local_credential_ids(${hash})`;
-  return rows[0] ?? null;
+  try {
+    const rows = await tx<LocalCredentialIds[]>`SELECT * FROM swarm.discover_local_credential_ids(${hash})`;
+    return rows[0] ?? null;
+  } catch(error) {
+    if(error!==null && typeof error==='object' && 'code' in error && error.code==='42501'
+      && 'detail' in error && error.detail==='LOCAL_CREDENTIAL_DENIED') throw new LocalCredentialDenied();
+    throw error;
+  }
 }
 export async function discoverLocalTargets(tx: Sql, workspace: string, selector:
   { user: string } | { principals: string[]; tokens: string[] } | { allWorkspace: true },
@@ -377,6 +384,7 @@ interface LocalPlanSnapshot {
   members?: { workspace: string; user: string }[];
   contentRoles?: {workspace:string;user:string}[];
   boundaryIds?: string[];
+  todoBindings?: {assignee_principal:string|null;offer_principal:string|null}[];
   hosted?: { grant: string; workspace: string; seat: string | null; principal: string }[];
   objectStreams?: { workspace: string; stream: string }[];
   todoStreams?: { workspace: string; stream: string }[];
@@ -411,9 +419,9 @@ function canonicalBindings(rows: LocalCredentialIds[]): string {
   ]).sort((a,b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
 }
 function snapshotKey(s: LocalPlanSnapshot): string {
-  return JSON.stringify([canonicalBindings(s.bindings),s.users,s.parents,s.memberships,s.sessions,s.approvals,s.members,s.hosted,s.objectStreams,s.todoStreams,s.joins,s.parentUpdates,s.routeStreams,s.restrictions,s.hostedGrants,s.hostedBindings,s.contentRoles,s.boundaryIds,s.adminAccounts,s.adminWorkspaces,s.workspaceRows]);
+  return JSON.stringify([canonicalBindings(s.bindings),s.users,s.parents,s.memberships,s.sessions,s.approvals,s.members,s.hosted,s.objectStreams,s.todoStreams,s.joins,s.parentUpdates,s.routeStreams,s.restrictions,s.hostedGrants,s.hostedBindings,s.contentRoles,s.boundaryIds,s.adminAccounts,s.adminWorkspaces,s.workspaceRows,s.todoBindings]);
 }
-/** This plan owns one exact local Allow target, including every family sibling.
+/** This plan owns one exact local Allow target, including the exact current family proof.
  * Call before workspace/approval/principal/token reads in the permission writer.
  * The authenticated human's earlier user upsert is the same owner's U lock.
  */
@@ -444,6 +452,8 @@ export async function planLocalConnection(
       SELECT connection_id AS connection,grant_id AS grant,workspace_id AS workspace,principal_id AS principal,'update'::text AS mode
       FROM swarm.household_content_connections WHERE workspace_id=${workspace}::uuid
         AND principal_id=ANY(${principals}::uuid[])
+        AND (renewal_grant_id=ANY(${sortedIds(bindings.map(r=>r.renewal_grant_id))}::uuid[])
+          OR connection_id=${token}::uuid)
       ORDER BY connection_id,grant_id,workspace_id,principal_id` : [];
     return { bindings,parents,users,sessions,approvals,
       memberships: users.map(user => ({workspace,user,mode:"share" as const})) };
@@ -523,10 +533,16 @@ export async function lockLocalAuthPlan(tx: Sql, plan: LocalAuthLockPlan, throug
     if (j.attempt) await tx`SELECT attempt_id FROM swarm.agent_join_attempts WHERE join_credential_id=${j.credential}::uuid AND attempt_id=${j.attempt}::uuid FOR UPDATE`;
   }
   await same();
-  for (const id of sortedIds(s.bindings.map(r=>r.principal_id))) {
-    if (plan.principalMode === "update") await tx`SELECT principal_id FROM swarm.agent_principals WHERE principal_id=${id}::uuid FOR UPDATE`;
-    else if (plan.principalMode === "noKeyUpdate") await tx`SELECT principal_id FROM swarm.agent_principals WHERE principal_id=${id}::uuid FOR NO KEY UPDATE`;
-    else await tx`SELECT principal_id FROM swarm.agent_principals WHERE principal_id=${id}::uuid FOR SHARE`;
+  const principalIds=sortedIds(s.bindings.map(r=>r.principal_id));
+  if (plan.principalMode==='update') {
+    for await (const _rows of tx`SELECT principal_id FROM swarm.agent_principals
+      WHERE principal_id=ANY(${principalIds}::uuid[]) ORDER BY principal_id FOR UPDATE`.cursor(64)) { /* retain locks */ }
+  } else if (plan.principalMode==='noKeyUpdate') {
+    for await (const _rows of tx`SELECT principal_id FROM swarm.agent_principals
+      WHERE principal_id=ANY(${principalIds}::uuid[]) ORDER BY principal_id FOR NO KEY UPDATE`.cursor(64)) { /* retain locks */ }
+  } else {
+    for await (const _rows of tx`SELECT principal_id FROM swarm.agent_principals
+      WHERE principal_id=ANY(${principalIds}::uuid[]) ORDER BY principal_id FOR SHARE`.cursor(64)) { /* retain locks */ }
   }
   await same();
   for (const session of s.sessions) {
@@ -537,13 +553,15 @@ export async function lockLocalAuthPlan(tx: Sql, plan: LocalAuthLockPlan, throug
   for (const id of sortedIds(s.bindings.map(r=>r.run_id))) await tx`SELECT run_id FROM swarm.agent_runs WHERE run_id=${id}::uuid FOR SHARE`;
   for (const id of sortedIds(s.bindings.map(r=>r.device_id))) await tx`SELECT device_id FROM swarm.devices WHERE device_id=${id}::uuid FOR SHARE`;
   await same();
-  for (const id of sortedIds(s.bindings.map(r=>r.renewal_grant_id))) await tx`SELECT renewal_grant_id FROM swarm.renewal_grants WHERE renewal_grant_id=${id}::uuid FOR UPDATE`;
+  for await (const _rows of tx`SELECT renewal_grant_id FROM swarm.renewal_grants
+    WHERE renewal_grant_id=ANY(${sortedIds(s.bindings.map(r=>r.renewal_grant_id))}::uuid[])
+    ORDER BY renewal_grant_id FOR UPDATE`.cursor(64)) { /* complete parent fence */ }
   await same();
   const remaining = new Map(s.bindings.filter(r=>r.token_id!==null).map(r=>[r.token_id!,r]));
   const done = new Set<string>();
   while (remaining.size) {
     const roots = [...remaining.values()].filter(r => r.predecessor_token_id === null ||
-      done.has(r.predecessor_token_id)).sort((a,b)=>a.token_id!.localeCompare(b.token_id!));
+      !remaining.has(r.predecessor_token_id) || done.has(r.predecessor_token_id)).sort((a,b)=>a.token_id!.localeCompare(b.token_id!));
     if (!roots.length) throw Object.assign(new Error("Malformed local credential closure"), {code:"22023"});
     for (const r of roots) {
       await tx`SELECT token_id FROM swarm.agent_tokens WHERE token_id=${r.token_id}::uuid FOR UPDATE`;
@@ -565,6 +583,8 @@ export async function planLocalOperation(tx: Sql, options: {
   workspaceMode?: LocalLockMode; parentUpdates?: string[]; join?: { hash: Uint8Array; attempt: string }; hostedMode?:LocalLockMode;
   target?: {user:string}|{principals:string[];tokens:string[]};
   admin?: {owner:string;grant:string;recipients:string[]};
+  household?: boolean; memberTargets?: string[]; allowMissingWorkspace?: boolean; todo?: string; householdQueue?: boolean;
+  revocation?: {user:string}|{principal:string}|{token:string};
 }): Promise<LocalAuthLockPlan | null> {
   const credential = options.hash ? await discoverLocalCredential(tx, options.hash) : null;
   if (options.hash && !credential) return null;
@@ -573,11 +593,28 @@ export async function planLocalOperation(tx: Sql, options: {
   if (options.join && !joinRows.length) return null;
   const workspace = credential?.workspace_id ?? joinRows[0]?.workspace_id ?? options.workspace ?? null;
   if (!workspace && !options.admin) return null;
+  // Nonlocking admission; authority is repeated after the final wait.
+  if (credential && options.workspace && credential.workspace_id!==options.workspace) throw new LocalCredentialDenied();
+  const owner=options.actor ?? credential?.owner_user_id ?? joinRows[0]?.owner_user_id;
+  if (workspace && owner && !options.join) {
+    const [admitted]=await tx<{ok:boolean}[]>`SELECT EXISTS(
+      SELECT 1 FROM swarm.memberships m JOIN swarm.workspaces w USING(workspace_id)
+      WHERE m.workspace_id=${workspace}::uuid AND m.user_id=${owner}::uuid
+        AND m.revoked_at IS NULL AND w.archived_at IS NULL) AS ok`;
+    if (!admitted?.ok && !(options.allowMissingWorkspace && !(await tx`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id=${workspace}::uuid`).length)) {
+      if(options.hash) throw new LocalCredentialDenied();
+      return null;
+    }
+  }
   const discover = async (): Promise<LocalPlanSnapshot> => {
     const exact = options.hash ? await discoverLocalCredential(tx, options.hash) : null;
     const joins: typeof joinRows = options.join
       ? await tx`SELECT * FROM swarm.discover_local_join_ids(${options.join.hash},${options.join.attempt}::uuid)` : [];
-    let bindings = workspace && options.allWorkspace
+    // Parent-only selectors return P/G and current parent bindings, no T.
+    let bindings = workspace && options.revocation && !('token' in options.revocation)
+      ? await discoverLocalTargets(tx,workspace,'user' in options.revocation
+        ? {user:options.revocation.user}:{principals:[options.revocation.principal],tokens:[]})
+      : workspace && options.allWorkspace
       ? await discoverLocalTargets(tx, workspace, {allWorkspace:true})
       : joins.length ? joins.map(({join_credential_id: _j,attempt_id: _a,stream_id: _s,...row})=>row)
       : exact?.token_id ? await discoverLocalTargets(tx, workspace!, {principals:[],tokens:[exact.token_id]}) : [];
@@ -585,6 +622,26 @@ export async function planLocalOperation(tx: Sql, options: {
       const extra=await discoverLocalTargets(tx,workspace,options.target);
       const union=new Map([...bindings,...extra].map(r=>[JSON.stringify([r.token_id,r.principal_id,r.renewal_grant_id]),r]));
       bindings=[...union.values()];
+    }
+    const todoBindings=workspace && options.todo ? await tx<{assignee_principal:string|null;offer_principal:string|null}[]>`
+      SELECT assignee_principal,offer_principal FROM swarm.household_todos
+      WHERE workspace_id=${workspace}::uuid AND todo_id=${options.todo}::uuid` : [];
+    const todoPrincipals=sortedIds(todoBindings.flatMap(t=>[t.assignee_principal,t.offer_principal]));
+    if (workspace && todoPrincipals.length) {
+      const extra=await discoverLocalTargets(tx,workspace,{principals:todoPrincipals,tokens:[]});
+      bindings=[...new Map([...bindings,...extra].map(r=>[JSON.stringify([r.token_id,r.principal_id,r.renewal_grant_id,r.token_parent_admin_grant_id]),r])).values()];
+    }
+    if(workspace && options.householdQueue && exact) {
+      const extra=await discoverLocalTargets(tx,workspace,{principals:[exact.principal_id],tokens:[]});
+      bindings=[...new Map([...bindings,...extra].map(r=>[JSON.stringify([r.token_id,r.principal_id,r.renewal_grant_id,r.token_parent_admin_grant_id]),r])).values()];
+    }
+    if(options.revocation && !('token' in options.revocation)) {
+      // The independent parent plan carries no child T work and cannot fail
+      // because of the number of current or historical children.
+      bindings=[...new Map(bindings.map(r=>{
+        const parent={...r,token_id:null,predecessor_token_id:null,lineage_id:null};
+        return [JSON.stringify(parent),parent] as const;
+      })).values()];
     }
     if (options.hash && (!exact || exact.workspace_id!==workspace || !bindings.some(r=>r.token_id===exact.token_id))) throw new LocalAuthDiscoveryChanged();
     // All existing account grants are written by delegated projection persistence.
@@ -610,7 +667,7 @@ export async function planLocalOperation(tx: Sql, options: {
     const parentOwners = parents.length ? await tx<{owner_user_id:string}[]>`SELECT owner_user_id FROM swarm.admin_grants WHERE grant_id=ANY(${parents}::uuid[]) ORDER BY grant_id` : [];
     const workspaceMembers = options.allWorkspace
       ? await tx<{workspace:string;user:string}[]>`SELECT workspace_id AS workspace,user_id AS user FROM swarm.memberships WHERE workspace_id=${workspace}::uuid ORDER BY workspace_id,user_id` : [];
-    const users = sortedIds([options.actor ?? null,options.admin?.owner ?? null,...recipients,...bindings.map(r=>r.owner_user_id),...parentOwners.map(r=>r.owner_user_id),...workspaceMembers.map(r=>r.user)]);
+    const users = sortedIds([options.actor ?? null,options.admin?.owner ?? null,...recipients,...bindings.map(r=>r.owner_user_id),...parentOwners.map(r=>r.owner_user_id),...workspaceMembers.map(r=>r.user),...(options.memberTargets ?? [])]);
     const members=await tx<{workspace:string;user:string}[]>`SELECT workspace_id AS workspace,user_id AS user FROM swarm.memberships
       WHERE workspace_id=ANY(${sortedIds([workspace ?? null,...adminWorkspaces])}::uuid[]) AND user_id=ANY(${users}::uuid[]) ORDER BY workspace_id,user_id`;
     const contentRoles=await tx<{workspace:string;user:string}[]>`SELECT workspace_id AS workspace,user_id AS user FROM swarm.household_member_content_roles
@@ -618,21 +675,42 @@ export async function planLocalOperation(tx: Sql, options: {
     const boundaryIds=(await tx<{workspace_id:string}[]>`SELECT workspace_id FROM swarm.household_workspace_boundaries WHERE workspace_id=${workspace}::uuid`).map(r=>r.workspace_id);
     const principals = sortedIds(bindings.map(r=>r.principal_id));
     const sessions = principals.length ? await tx<{principal:string;workspace:string}[]>`SELECT principal_id AS principal,workspace_id AS workspace FROM swarm.agent_execution_sessions WHERE principal_id=ANY(${principals}::uuid[]) ORDER BY principal_id,workspace_id` : [];
-    const approvals = await tx<LocalApprovalLock[]>`SELECT connection_id AS connection,grant_id AS grant,workspace_id AS workspace,principal_id AS principal,'update'::text AS mode FROM swarm.household_content_connections WHERE workspace_id=${workspace}::uuid AND (principal_id=ANY(${principals}::uuid[]) OR ${options.allWorkspace===true}) ORDER BY connection_id,grant_id,workspace_id,principal_id`;
-    const hosted = options.allWorkspace ? await tx<{grant:string;workspace:string;seat:string|null;principal:string}[]>`SELECT grant_id AS grant,workspace_id AS workspace,seat_id AS seat,principal_id AS principal FROM swarm.hosted_mcp_seats WHERE workspace_id=${workspace}::uuid ORDER BY grant_id,workspace_id,seat_id,principal_id` : [];
-    const hostedGrants=options.allWorkspace ? (await tx<{grant_id:string}[]>`SELECT g.grant_id FROM swarm.hosted_mcp_grants g
-      WHERE ${workspace}::uuid=ANY(g.selected_workspace_ids)
-        OR EXISTS(SELECT 1 FROM swarm.hosted_mcp_grant_workspaces b WHERE b.grant_id=g.grant_id AND b.workspace_id=${workspace}::uuid)
-        OR EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats hs WHERE hs.grant_id=g.grant_id AND hs.workspace_id=${workspace}::uuid)
+    let approvals = await tx<LocalApprovalLock[]>`SELECT connection_id AS connection,grant_id AS grant,workspace_id AS workspace,principal_id AS principal,'update'::text AS mode FROM swarm.household_content_connections WHERE workspace_id=${workspace}::uuid AND (
+      ${options.household===true || options.revocation!==undefined || options.allWorkspace===true}
+        AND principal_id=ANY(${principals}::uuid[])) ORDER BY connection_id,grant_id,workspace_id,principal_id`;
+    let hosted = options.household || options.revocation || options.allWorkspace ? await tx<{grant:string;workspace:string;seat:string|null;principal:string}[]>`SELECT grant_id AS grant,workspace_id AS workspace,seat_id AS seat,principal_id AS principal FROM swarm.hosted_mcp_seats WHERE workspace_id=${workspace}::uuid
+      AND (principal_id=ANY(${principals}::uuid[]) OR owner_user_id=ANY(${options.memberTargets ?? []}::uuid[])) ORDER BY grant_id,workspace_id,seat_id,principal_id` : [];
+    const hostedGrants=options.household || options.revocation || options.allWorkspace ? (await tx<{grant_id:string}[]>`SELECT g.grant_id FROM swarm.hosted_mcp_grants g
+      WHERE (g.owner_user_id=ANY(${options.memberTargets ?? []}::uuid[])
+          AND ${workspace}::uuid=ANY(g.selected_workspace_ids))
+        OR g.grant_id=ANY(${sortedIds(hosted.map(h=>h.grant))}::uuid[])
       ORDER BY g.grant_id`).map(r=>r.grant_id) : [];
-    const hostedBindings=options.allWorkspace ? await tx<{grant:string;workspace:string}[]>`SELECT grant_id AS grant,workspace_id AS workspace
-      FROM swarm.hosted_mcp_grant_workspaces WHERE workspace_id=${workspace}::uuid ORDER BY grant_id,workspace_id` : [];
-    const routeStreams = await tx<{id:string;workspace:string;kind:string;repo:string|null}[]>`SELECT stream_id AS id,workspace_id AS workspace,kind,repo_mapping_id AS repo FROM swarm.streams WHERE workspace_id=${workspace}::uuid AND (stream_id=ANY(${options.streamIds ?? []}::uuid[]) OR ${options.admin!==undefined && options.allWorkspace===true} AND kind='workspace') ORDER BY stream_id`;
-    const restrictions = options.allWorkspace ? await tx<{grant:string;workspace:string;principal:string}[]>`SELECT grant_id AS grant,workspace_id AS workspace,principal_id AS principal FROM swarm.household_hosted_content_restrictions WHERE workspace_id=${workspace}::uuid ORDER BY grant_id,workspace_id,principal_id` : [];
-    const objectStreams = options.allWorkspace ? await tx<{workspace:string;stream:string}[]>`SELECT workspace_id AS workspace,stream_id AS stream FROM swarm.household_object_streams WHERE workspace_id=${workspace}::uuid ORDER BY stream_id` : [];
-    const todoStreams = options.allWorkspace ? await tx<{workspace:string;stream:string}[]>`SELECT workspace_id AS workspace,stream_id AS stream FROM swarm.household_todo_streams WHERE workspace_id=${workspace}::uuid ORDER BY stream_id` : [];
-    if (members.length>4096 || contentRoles.length>4096 || adminWorkspaces.length+(workspace?1:0)>256 || users.length>256 || parents.length>256 || sessions.length>256 || hostedGrants.length>256 || bindings.length+approvals.length+hosted.length+hostedBindings.length+restrictions.length>4096 || objectStreams.length+todoStreams.length+(options.streamIds?.length ?? 0)>64) throw Object.assign(new Error('Local authentication closure exceeds work bound'),{code:'54000'});
-    return {bindings,parents,users,sessions,approvals,members,contentRoles,boundaryIds,hosted,hostedGrants,hostedBindings,objectStreams,todoStreams,routeStreams,restrictions,adminAccounts,adminWorkspaces,workspaceRows,
+    if(hostedGrants.length) {
+      hosted=await tx<{grant:string;workspace:string;seat:string|null;principal:string}[]>`
+        SELECT grant_id AS grant,workspace_id AS workspace,seat_id AS seat,principal_id AS principal
+        FROM swarm.hosted_mcp_seats WHERE workspace_id=${workspace}::uuid
+          AND grant_id=ANY(${hostedGrants}::uuid[]) ORDER BY grant_id,workspace_id,seat_id,principal_id`;
+      const legacy=await tx<LocalApprovalLock[]>`SELECT connection_id AS connection,grant_id AS grant,workspace_id AS workspace,
+        principal_id AS principal,'update'::text AS mode FROM swarm.household_content_connections
+        WHERE workspace_id=${workspace}::uuid AND hosted_grant_id=ANY(${hostedGrants}::uuid[])
+        ORDER BY connection_id,grant_id,workspace_id,principal_id`;
+      approvals=[...new Map([...approvals,...legacy].map(a=>[JSON.stringify([a.connection,a.grant,a.workspace,a.principal]),a])).values()]
+        .sort((a,b)=>a.connection.localeCompare(b.connection)||a.grant.localeCompare(b.grant)||a.workspace.localeCompare(b.workspace)||a.principal.localeCompare(b.principal));
+    }
+    const hostedBindings=hostedGrants.length ? await tx<{grant:string;workspace:string}[]>`SELECT grant_id AS grant,workspace_id AS workspace
+      FROM swarm.hosted_mcp_grant_workspaces WHERE workspace_id=${workspace}::uuid
+      AND grant_id=ANY(${hostedGrants}::uuid[]) ORDER BY grant_id,workspace_id` : [];
+    const routeStreams = await tx<{id:string;workspace:string;kind:string;repo:string|null}[]>`SELECT stream_id AS id,workspace_id AS workspace,kind,repo_mapping_id AS repo FROM swarm.streams WHERE workspace_id=${workspace}::uuid AND (stream_id=ANY(${options.streamIds ?? []}::uuid[]) OR ${options.admin!==undefined} AND kind='workspace') ORDER BY stream_id`;
+    const restrictions = hostedGrants.length ? await tx<{grant:string;workspace:string;principal:string}[]>`SELECT grant_id AS grant,workspace_id AS workspace,principal_id AS principal FROM swarm.household_hosted_content_restrictions WHERE workspace_id=${workspace}::uuid
+      AND grant_id=ANY(${hostedGrants}::uuid[]) ORDER BY grant_id,workspace_id,principal_id` : [];
+    const objectStreams = options.household ? await tx<{workspace:string;stream:string}[]>`SELECT workspace_id AS workspace,stream_id AS stream FROM swarm.household_object_streams WHERE workspace_id=${workspace}::uuid ORDER BY stream_id` : [];
+    const todoStreams = options.household ? await tx<{workspace:string;stream:string}[]>`SELECT workspace_id AS workspace,stream_id AS stream FROM swarm.household_todo_streams WHERE workspace_id=${workspace}::uuid ORDER BY stream_id` : [];
+    if (!options.revocation && (sortedIds(bindings.map(r=>r.token_id)).length>2048
+      || sortedIds(bindings.map(r=>r.principal_id)).length>256
+      || sortedIds(bindings.map(r=>r.renewal_grant_id)).length>256
+      || sortedIds(bindings.map(r=>r.run_id)).length>256 || sortedIds(bindings.map(r=>r.device_id)).length>256
+      || members.length>4096 || contentRoles.length>4096 || adminWorkspaces.length+(workspace?1:0)>256 || users.length>256 || parents.length>256 || sessions.length>256 || hostedGrants.length>256 || bindings.length+approvals.length+hosted.length+hostedBindings.length+restrictions.length>4096 || objectStreams.length+todoStreams.length+(options.streamIds?.length ?? 0)>64)) throw Object.assign(new Error('Local authentication closure exceeds work bound'),{code:'54000'});
+    return {bindings,parents,users,sessions,approvals,todoBindings,members,contentRoles,boundaryIds,hosted,hostedGrants,hostedBindings,objectStreams,todoStreams,routeStreams,restrictions,adminAccounts,adminWorkspaces,workspaceRows,
       memberships:[...new Map([...members,...contentRoles].map(m=>[JSON.stringify([m.workspace,m.user]),m])).values()]
         .sort((a,b)=>a.workspace.localeCompare(b.workspace)||a.user.localeCompare(b.user)).map(m=>({...m,mode:"share" as const})),
       joins: joins.length ? [{credential:joins[0]!.join_credential_id,attempt:joins[0]!.attempt_id}] : [],
@@ -640,7 +718,7 @@ export async function planLocalOperation(tx: Sql, options: {
   };
   const snapshot = await discover();
   return {snapshot,rediscover:discover,actor:options.actor ?? credential?.owner_user_id ?? joinRows[0]?.owner_user_id,
-    workspaces:sortedIds([workspace ?? null,...(snapshot.adminWorkspaces ?? [])]).map(id=>({id,mode: options.workspaceMode ?? (options.allWorkspace || options.join || options.admin ? 'update' as const:'share' as const)})),
+    workspaces:sortedIds([workspace ?? null,...(snapshot.adminWorkspaces ?? [])]).map(id=>({id,mode: options.workspaceMode ?? (options.allWorkspace || options.household || options.revocation || options.join || options.admin ? 'update' as const:'share' as const)})),
     principalMode:options.principalMode ?? 'share',sessionMode:options.sessionMode ?? 'share',hostedMode:options.hostedMode,
     streamIds:sortedIds([...(snapshot.routeStreams ?? []).map(r=>r.id),...joinRows.map(r=>r.stream_id)]),locked:false};
 }

@@ -34,7 +34,7 @@ export interface AdminAccessState {
 /** Run under the same authority transaction before snapshot, replay or execution.
  * Prior live generations are valid. The exact ledger row supplies generation;
  * it is never guessed from the family's newest generation. */
-export async function adminAccessState(tx: Sql, admission: AdminAdmission, plan?: LocalAuthLockPlan): Promise<AdminAccessState> {
+export async function adminAccessState(tx: Sql, admission: AdminAdmission, plan?: LocalAuthLockPlan, admissionOnly=false): Promise<AdminAccessState> {
   if (!isAdminAdmission(admission)) return { known: false, active: false, capabilities: [] };
   const t = admission.token;
   await adminDbRole(tx, 'commonswarm_oauth_runtime');
@@ -42,9 +42,9 @@ export async function adminAccessState(tx: Sql, admission: AdminAdmission, plan?
     // Match the resolver/denial order, and acquire the account write lock before
     // its shared status read. Two different kids must not both hold SHARE and
     // then wait to upgrade the same account during command execution.
-    await tx`SELECT commonswarm_oauth.issuer_key_allowed(${'https://mcp.commonswarm.com'}, ${t.kid})`;
-    const [locator] = await tx<{ verification_version: number; ledger_scopes: string[] }[]>`
-      SELECT b.verification_version, i.scope_names AS ledger_scopes
+    if (!admissionOnly) await tx`SELECT commonswarm_oauth.issuer_key_allowed(${'https://mcp.commonswarm.com'}, ${t.kid})`;
+    const [locator] = await tx<{ verification_version: number; ledger_scopes: string[]; capabilities:string[] }[]>`
+      SELECT b.verification_version, i.scope_names AS ledger_scopes,b.capabilities
       FROM commonswarm_oauth.admin_access_issuances i JOIN commonswarm_oauth.admin_grant_bindings b USING(provider_grant_id)
       WHERE i.access_jti=${t.jti} AND i.access_token_digest=${adminAdmissionDigest(admission)}
         AND i.provider_grant_id=${t.grant_id} AND i.admin_grant_id=${t.admin_grant_id}::uuid
@@ -57,6 +57,7 @@ export async function adminAccessState(tx: Sql, admission: AdminAdmission, plan?
     if (!locator || canonicalAdminJson([...locator.ledger_scopes].sort()) !== canonicalAdminJson([...t.scope_names].sort())) {
       return { known: false, active: false, capabilities: [] };
     }
+    if (admissionOnly) return {known:true,active:t.expires_at>Date.now(),capabilities:locator.capabilities};
     await adminDbRole(tx, 'swarm_command');
     await tx`SELECT active FROM commonswarm_oauth.lock_admin_client_verification(${t.client_id}, ${locator.verification_version})`;
     if (plan) {

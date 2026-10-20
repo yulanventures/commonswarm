@@ -265,6 +265,41 @@ try {
     check('household denial reaches its actual content boundary',denied?.status===200 && deniedBody?.status==='refused');
     check('household denial rolls back both adoption fields and all effects',JSON.stringify(beforeDenied)===JSON.stringify(await seatState(content)));
     check('refused first-use successor remains usable',unused!==null && (await readAs(unused)).status===200);
+    // Activity owns a distinct final wait: the transactional realtime send.
+    // The old Source returns 202 and commits adoption/broadcast after this wait.
+    await import(`${tree}/supabase/functions/activity/index.ts`);
+    const activityHandler=served.at(-1);
+    const activity=raw=>activityHandler(new Request('http://127.0.0.1/functions/v1/activity',{
+      method:'POST',headers:{authorization:`Bearer ${raw}`,'content-type':'application/json'},
+      body:JSON.stringify({version:1,workspace_id:W,stream_id:streamId,sequence:1,phase:'idle',
+        signal_id:null,tool_title:null,elapsed_ms:0}),
+    }));
+    const activitySeat=await seat('activity-deadline'),issued=await renew(activitySeat.raw,id()),activityRaw=credential(issued);
+    check('activity fixture has a genuine unused successor',activityRaw!==null);
+    await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '3 seconds'
+      WHERE renewal_grant_id=${activitySeat.grant}::uuid`;
+    const activityBefore=await seatState(activitySeat);
+    const [broadcastBefore]=await observer`SELECT count(*)::int AS n FROM realtime.messages`;
+    let activityPending;
+    await observer.begin(async tx=>{
+      const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
+      await tx`LOCK TABLE realtime.messages IN SHARE MODE`;
+      activityPending=activity(activityRaw);
+      check('actual activity send waited at realtime after adoption',await waitBlockedBy(pid,100)>0);
+      await sleep(3200);
+    });
+    const activityDenied=await activityPending;
+    check('activity rejects a chosen deadline elapsed during its final send wait',activityDenied.status===403);
+    check('activity denial rolls back token adoption and family use',JSON.stringify(activityBefore)===JSON.stringify(await seatState(activitySeat)));
+    const [broadcastAfter]=await observer`SELECT count(*)::int AS n FROM realtime.messages`;
+    check('activity denial commits no realtime broadcast',broadcastAfter.n===broadcastBefore.n);
+    const activityControl=await seat('activity-positive'),controlIssued=await renew(activityControl.raw,id()),controlRaw=credential(controlIssued);
+    const positiveActivity=await activity(controlRaw);
+    check('same-invocation activity really publishes',positiveActivity.status===202);
+    const [positiveUse]=await observer`SELECT first_used_at IS NOT NULL AS used FROM swarm.agent_tokens
+      WHERE token_id=${JSON.parse(controlIssued.text).token_id}::uuid`;
+    const [positiveBroadcast]=await observer`SELECT count(*)::int AS n FROM realtime.messages`;
+    check('activity positive commits adoption and a realtime row',positiveUse.used && positiveBroadcast.n===broadcastAfter.n+1);
     // Exact family consumer: real command-role loader + production access
     // consumer. Fixture setup writes consent; the consumer never backfills it.
     const authModule=await import(`${tree}/supabase/functions/_shared/agent-auth.ts`);
@@ -290,7 +325,7 @@ try {
     const rotated=await renew(family.raw,id()),rotatedSecret=credential(rotated);
     const accessAs=async raw=>observer.begin(async tx=>{
       await tx`SET LOCAL ROLE swarm_command`;
-      const hash=await hashOf(raw),plan=await authModule.planLocalOperation(tx,{hash,allWorkspace:true});
+      const hash=await hashOf(raw),plan=await authModule.planLocalOperation(tx,{hash,household:true});
       if(!plan) return null;
       await authModule.lockLocalAuthPlan(tx,plan);
       const agent=await authModule.loadAgentCredential(tx,hash,plan);

@@ -1251,3 +1251,89 @@ test("members projects the authenticated run and current model without widening 
   await sql`UPDATE swarm.agent_tokens SET expires_at = statement_timestamp() - interval '1 second' WHERE principal_id = ${self.principalId}::uuid`;
   assert.equal((await readMembers(self.token, shared.workspace)).status, 401);
 });
+
+
+// F2: both real sign-in and credential HTTP callers must be rejected before a
+// victim's workspace/principal locks. A 403 after waiting would fail this test.
+test("foreign workspace admission completes while the victim is locked; both same callers still work",
+  {timeout:30_000},async()=>{
+  const caller=await seedOwnedWorkspace('admission-caller'),victim=await seedOwnedWorkspace('admission-victim');
+  for(const scope of [caller,victim]) await sql`INSERT INTO swarm.streams(stream_id,workspace_id,kind)
+    VALUES(${randomUUID()}::uuid,${scope.workspace}::uuid,'workspace')`;
+  const callerAgent=await seedAgent('admission-agent',caller),victimAgent=await seedAgent('admission-victim',victim);
+  let pending:Promise<Array<{status:number;body:Record<string,unknown>}>>|undefined;
+  let whileLocked:Array<{status:number;body:Record<string,unknown>}>|null=null;
+  await sql.begin(async tx=>{
+    const [{pid}]=await tx<{pid:number}[]>`SELECT pg_backend_pid() AS pid`;
+    await tx`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id=${victim.workspace}::uuid FOR UPDATE`;
+    await tx`SELECT principal_id FROM swarm.agent_principals WHERE principal_id=${victimAgent.principalId}::uuid FOR UPDATE`;
+    pending=Promise.all([
+      runCmd(caller.ownerJwt,{kind:'create_agent_principal',name:`foreign-${randomUUID()}`},{workspace:victim.workspace}),
+      runCmd(callerAgent.token,noteBody(),{workspace:victim.workspace}),
+    ]);
+    whileLocked=await Promise.race([pending,delay(2500).then(()=>null)]);
+    const blocked=await sql`SELECT count(*)::int AS n FROM pg_stat_activity a
+      WHERE ${pid}=ANY(pg_blocking_pids(a.pid)) AND a.wait_event_type='Lock'`;
+    assert.equal(blocked[0]!.n,0,'neither HTTP caller blocked on any victim row');
+  });
+  const refused=await pending!;
+  assert.ok(whileLocked,'refusals completed before releasing the victim');
+  assert.ok(refused.every(r=>r.status===403),'known foreign workspace scope is refused');
+  const human=await runCmd(caller.ownerJwt,{kind:'create_agent_principal',name:`legitimate-${randomUUID()}`},{workspace:caller.workspace});
+  assert.equal(human.status,200);assert.equal(human.body.status,'accepted');
+  const agent=await runCmd(callerAgent.token,noteBody(),{workspace:caller.workspace});
+  assert.equal(agent.status,200);assert.equal(agent.body.status,'accepted');
+  const [unchanged]=await sql`SELECT revoked_at,managed_at FROM swarm.agent_principals WHERE principal_id=${victimAgent.principalId}::uuid`;
+  assert.deepEqual(unchanged,{revoked_at:null,managed_at:null});
+});
+
+
+// A session deadline can elapse during the final presence write even though
+// no competing writer can change its locked generation. That wait still needs
+// a current proof before committing the unused successor's adoption and signal.
+test("managed current-family proof is repeated after the final effect wait", {timeout:30_000},async()=>{
+  const agent=await seedAgent('final-session-proof');
+  const minted=await runCmd(shared.ownerJwt,{kind:'mint_agent_token',principal_id:agent.principalId,
+    run_id:randomUUID(),task_id:randomUUID(),epoch:1,device_id:shared.device,scopes:['post_signal']});
+  assert.equal(minted.body.status,'accepted');const root=String(minted.body.agent_token);
+  await enable(agent.principalId);
+  const sessionId=randomUUID(),key=synthKey(),held=await acquire(root,sessionId,key);
+  assert.equal(held.status,200);
+  const headers=proofHeaders(sessionId,Number(held.body.generation),key);
+  const issued=await runCmd(root,{kind:'renew_agent_token'},{headers});
+  assert.equal(issued.body.status,'accepted');
+  const unused=String(issued.body.agent_token);
+  const [binding]=await sql<{renewal_grant_id:string}[]>`SELECT renewal_grant_id FROM swarm.agent_tokens WHERE token_id=${String(issued.body.token_id)}::uuid`;
+  assert.ok(binding?.renewal_grant_id);
+  const state=async()=>({
+    tokens:await sql`SELECT token_id,first_used_at,expires_at,revoked_at FROM swarm.agent_tokens
+      WHERE renewal_grant_id=${binding!.renewal_grant_id}::uuid ORDER BY token_id`,
+    grant:await sql`SELECT last_used_at,last_used_device_id,new_host_at,successors_used,successors_stranded
+      FROM swarm.renewal_grants WHERE renewal_grant_id=${binding!.renewal_grant_id}::uuid`,
+    signals:await sql`SELECT id FROM swarm.signals WHERE from_principal=${agent.principalId}::uuid ORDER BY id`,
+    events:await sql`SELECT event_id FROM swarm.events WHERE actor_agent_principal=${agent.principalId}::uuid ORDER BY event_id`,
+    ledger:await sql`SELECT command_id FROM swarm.idempotency_keys WHERE principal_kind='agent'
+      AND principal_id LIKE '%'||${agent.principalId}::text||'%' ORDER BY command_id`,
+    audit:await sql`SELECT audit_id FROM swarm.audit_log WHERE actor_agent_principal=${agent.principalId}::uuid ORDER BY audit_id`,
+  });
+  let pending:ReturnType<typeof runCmd>|undefined,before:Awaited<ReturnType<typeof state>>|undefined;
+  await sql.begin(async tx=>{
+    const [{pid}]=await tx<{pid:number}[]>`SELECT pg_backend_pid() AS pid`;
+    await tx`SELECT principal_id FROM swarm.agent_presence WHERE principal_id=${agent.principalId}::uuid FOR UPDATE`;
+    await sql`UPDATE swarm.agent_execution_sessions SET expired_at=clock_timestamp()+interval '3 seconds'
+      WHERE principal_id=${agent.principalId}::uuid`;
+    before=await state();pending=runCmd(unused,noteBody(),{headers});
+    assert.equal(await waitForLockBlockedBy(sql,pid,2000),true,'actual final effect is blocked');
+    await delay(3200);
+  });
+  const denied=await pending!;
+  assert.equal(denied.status,401);assert.equal(denied.body.error,'session_expired');
+  assert.deepEqual(await state(),before,'first use, predecessor adoption, family use, signal, events, ledger and audit all rolled back');
+  const control=await seedAgent('final-session-positive');await enable(control.principalId);
+  const controlSession=randomUUID(),controlKey=synthKey(),controlHeld=await acquire(control.token,controlSession,controlKey);
+  assert.equal(controlHeld.status,200);
+  const positive=await runCmd(control.token,noteBody(),{headers:proofHeaders(controlSession,Number(controlHeld.body.generation),controlKey)});
+  assert.equal(positive.status,200);assert.equal(positive.body.status,'accepted');
+  const [committed]=await sql`SELECT count(*)::int AS n FROM swarm.signals WHERE from_principal=${control.principalId}::uuid`;
+  assert.equal(committed!.n,1,'same-invocation current session commits the actual signal');
+});

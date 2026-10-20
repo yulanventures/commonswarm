@@ -125,7 +125,7 @@ async function writeConnection(tx: Sql, workspaceId: string, actor: HouseholdIde
   // The workspace lock serializes this primary-key upsert. Lock the existing
   // row explicitly so a reapproval fires one audit trigger, rather than both
   // BEFORE INSERT and BEFORE UPDATE through INSERT ... ON CONFLICT.
-  const [existing] = await tx`SELECT connection_id FROM swarm.household_content_connections
+  const [existing] = await tx`SELECT * FROM swarm.household_content_connections
     WHERE connection_id=${connection.connection_id}::uuid AND grant_id=${connection.grant_id}::uuid
       AND workspace_id=${workspaceId}::uuid AND principal_id=${connection.principal_id}::uuid FOR UPDATE`;
   if (existing) {
@@ -138,6 +138,23 @@ async function writeConnection(tx: Sql, workspaceId: string, actor: HouseholdIde
       VALUES (${connection.connection_id}::uuid,${connection.grant_id}::uuid,${workspaceId}::uuid,${connection.principal_id}::uuid,
         ${actor.user_id}::uuid,${purpose},${connection.operations}::text[],${consent}::uuid,${approvalExpiry},${connection.kind === 'hosted' ? connection.grant_id : null}::uuid,${family}::uuid)`;
   }
+  if (connection.kind === 'local') await tx`UPDATE swarm.renewal_grants
+    SET local_content_approval_token_id=${connection.connection_id}::uuid
+    WHERE renewal_grant_id=${family}::uuid AND workspace_id=${workspaceId}::uuid
+      AND principal_id=${connection.principal_id}::uuid AND run_id=${connection.grant_id}::uuid
+      AND created_by=${actor.user_id}::uuid`;
+  // A second Allow on the same technical bearer updates the same primary key.
+  // Preserve the previous decision's exact permission/receipt in append-only
+  // audit before returning success; no old decision vanishes on re-Allow/widen.
+  if (connection.kind === 'local') await tx`INSERT INTO swarm.audit_log(
+      actor_user,credential_kind,credential_id,command_kind,workspace_id,outcome,reason,detail,request_hash)
+    SELECT ${actor.user_id}::uuid,'user',${actor.user_id}::uuid,
+      current_setting('cswarm.household_command',true),${workspaceId}::uuid,'accepted','local_allow_decision',
+      jsonb_build_object('before',${tx.json((existing ?? null) as postgres.JSONValue)},'after',to_jsonb(c))::text,
+      current_setting('cswarm.household_digest',true)
+    FROM swarm.household_content_connections c WHERE c.connection_id=${connection.connection_id}::uuid
+      AND c.grant_id=${connection.grant_id}::uuid AND c.workspace_id=${workspaceId}::uuid
+      AND c.principal_id=${connection.principal_id}::uuid`;
   if (connection.kind === 'hosted') await writeHostedContentRestriction(tx, workspaceId, actor.user_id,
     connection.grant_id, connection.principal_id, connection.operations, 'human_allow');
 }

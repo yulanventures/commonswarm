@@ -1573,7 +1573,9 @@ async function delegatedLocalScenario(ctx,scenario) {
     return {principal:p.principal_id,grant:g.renewal_grant_id,token:g.token_id,raw:issued.delivery.credential};
   };
   const seat=await provision(admin,'first');
-  check('same-invocation-positive',true);
+  check('same-invocation-positive',(await observer`SELECT t.first_used_at IS NOT NULL AND g.kind='timeboxed' AS ok
+    FROM swarm.agent_tokens t JOIN swarm.renewal_grants g USING(renewal_grant_id)
+    WHERE t.token_id=${seat.token}::uuid`)[0]?.ok===true);
   const renewCommand=(side,s)=>({kind:'admin_renew_seat',grant_id:side.grant,workspace_id:workspaceId,
     principal_id:s.principal,predecessor_credential_id:s.token,recipient_connection_id:side.connection,
     worker_scope_names:['post_signal'],bearer_seconds:120});
@@ -1629,6 +1631,21 @@ async function delegatedLocalScenario(ctx,scenario) {
     check('both-exact-writes',await principalLive(ctx,workspaceId,high.name) && await principalLive(ctx,workspaceId,low.name));
     check('both-oauth-audits-committed',JSON.stringify([...await high.audit(),...await low.audit()])===JSON.stringify(['committed','committed']));
   } else if (scenario==='delegated-local-renewal-budget') {
+    const foreignOwner=await human(ctx,'foreign-workspace'),foreignWorkspace=await workspace(ctx,foreignOwner,false);
+    let foreignCall,completed;
+    await observer.begin(async tx=>{
+      const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
+      await tx`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id=${foreignWorkspace.workspaceId}::uuid FOR UPDATE`;
+      foreignCall=admin.invoke({kind:'admin_create_seat',grant_id:admin.grant,workspace_id:foreignWorkspace.workspaceId,
+        name:`foreign-${ctx.tag}`,model:null,transport:'local'});
+      completed=await Promise.race([foreignCall,new Promise(resolve=>setTimeout(()=>resolve(null),2500))]);
+      const [{n}]=await observer`SELECT count(*)::int AS n FROM pg_stat_activity a
+        WHERE ${pid}=ANY(pg_blocking_pids(a.pid)) AND a.wait_event_type='Lock'`;
+      check('delegated-foreign-request-holds-no-victim-lock',n===0);
+    });
+    const foreignResponse=await foreignCall;
+    check('delegated-foreign-refusal-completes-before-victim-unlocks',completed!==null && foreignResponse.result.status===403 && foreignResponse.calls===0);
+
     const ownerEdit=await manage(ctx,owner,workspaceId,{kind:'set_connection_expiry',connection_kind:'renewal',grant_id:seat.grant,connection_expires_at:null});
     check('same-target-human-owner-policy-positive',ownerEdit.status===200);
     const before=await family(seat);
@@ -1743,10 +1760,14 @@ async function delegatedLocalScenario(ctx,scenario) {
     // Same-invocation native human removal reaches the actual workspace command
     // and revokes the other member's family before membership is removed.
     const keeper=await human(ctx,'m3-keeper');await member(ctx,workspaceId,keeper,'owner');
+    keeper.identity.interactiveAuthAtSeconds=Number((await observer`SELECT extract(epoch FROM clock_timestamp()) AS seconds`)[0].seconds);
     const removed=await manage(ctx,keeper,workspaceId,{kind:'remove_member',user_id:owner.userId,landing_authority_successor_user_id:keeper.userId});
     check('human-removal-through-real-command',removed.status===200 && removed.body.status==='accepted');
     const [terminal]=await observer`SELECT m.revoked_at IS NOT NULL AS removed,g.revoked_at IS NOT NULL AS revoked,
-      NOT EXISTS(SELECT 1 FROM swarm.agent_tokens t WHERE t.renewal_grant_id=g.renewal_grant_id AND t.revoked_at IS NULL) AS all_tokens_revoked
+      EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='renewal_grant' AND z.target_id=g.renewal_grant_id)
+        AND NOT EXISTS(SELECT 1 FROM swarm.agent_tokens t WHERE t.renewal_grant_id=g.renewal_grant_id AND t.revoked_at IS NULL
+          AND NOT EXISTS(SELECT 1 FROM swarm.agent_tokens child WHERE child.predecessor_token_id=t.token_id
+            AND child.first_used_at IS NOT NULL AND child.revoked_at IS NULL)) AS all_tokens_revoked
       FROM swarm.memberships m JOIN swarm.renewal_grants g ON g.workspace_id=m.workspace_id
       WHERE m.workspace_id=${workspaceId}::uuid AND m.user_id=${owner.userId}::uuid AND g.renewal_grant_id=${seat.grant}::uuid`;
     check('membership-and-hidden-parent-family-atomic',terminal.removed && terminal.revoked && terminal.all_tokens_revoked);
@@ -1768,7 +1789,8 @@ async function ordinaryLocalPolicyScenario(ctx) {
     run_id:id(),task_id:id(),epoch:1,device_id:device,scopes:['post_signal'],
     renewal_kind:'timeboxed',renewal_horizon_ms:30*86400000});
   if (minted.status!==200 || typeof minted.body.agent_token!=='string') fail('compat_old_wire_mint');
-  check('same-invocation-positive',true);
+  check('same-invocation-positive',minted.status===200 && minted.body.status==='accepted'
+    && (await observer`SELECT EXISTS(SELECT 1 FROM swarm.agent_tokens WHERE token_id=${minted.body.token_id}::uuid) AS ok`)[0]?.ok===true);
   check('actual-old-wire-is-permanent-default',minted.body.grant_kind==='standing' && minted.body.horizon_expires_at===null && minted.body.successors_remaining===null);
   check('actual-mint-truthful-null-policy',Object.hasOwn(minted.body,'connection_expires_at') && minted.body.connection_expires_at===null && Object.hasOwn(minted.body,'connection_expired_at') && minted.body.connection_expired_at===null);
   const [g]=await observer`SELECT g.* FROM swarm.renewal_grants g JOIN swarm.agent_tokens t USING(renewal_grant_id) WHERE t.token_id=${minted.body.token_id}::uuid`;

@@ -48,7 +48,7 @@ interface ControlResult {
 interface Harness {
   openLockOrderTarget(options: { connector: unknown }): Promise<Target>;
   lockOrderConnector(issuance: { record: string; measure: string; enable: string }): unknown;
-  runScenario(target: Target, scenario: string): Promise<RaceResult>;
+  runScenario(target: Target, scenario: string, timeoutMs?: number): Promise<RaceResult>;
   rawSqlPositiveControl(target: Target): Promise<ControlResult>;
   migrationTreeLine(): string;
 }

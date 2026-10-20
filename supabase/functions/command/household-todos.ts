@@ -4,6 +4,7 @@
  * Lock order: workspace/access rows, stream, projection rows.
  */
 import type postgres from 'postgres';
+import { discoverLocalTargets } from '../_shared/agent-auth.ts';
 import { loadHouseholdContentAccess } from './household-content-access.ts';
 import type { HouseholdIdentity } from './household-objects.ts';
 import type { HouseholdAccessFacts } from '../_shared/household-object-policy.d.ts';
@@ -120,8 +121,8 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       await audit(tx, workspaceId, identity, requestId, command, digest, outcome, replayed);
       return { outcome, events: [], notices: replayed ? stored.notices : [], replayed };
     }
-    const members = await tx`SELECT user_id,workspace_id,revoked_at,role FROM swarm.memberships WHERE workspace_id=${workspaceId}::uuid FOR SHARE`;
-    const agents = await tx`SELECT principal_id,workspace_id,owner_user_id,revoked_at FROM swarm.agent_principals WHERE workspace_id=${workspaceId}::uuid FOR SHARE`;
+    const members = await tx`SELECT user_id,workspace_id,revoked_at,role FROM swarm.memberships WHERE workspace_id=${workspaceId}::uuid`;
+    const agents = await tx`SELECT principal_id,workspace_id,owner_user_id,revoked_at FROM swarm.agent_principals WHERE workspace_id=${workspaceId}::uuid`;
     const [objects] = await tx`SELECT projection FROM swarm.household_object_streams WHERE workspace_id=${workspaceId}::uuid`;
     const projection = objects?.projection as { objects?: Record<string, { object_id: string; kind: 'list' | 'doc' | 'file' }> } | undefined;
     const identityAttempts = await rate(tx, `todo:${identity.principal_id ? 'agent' : 'user'}:${principal.toLowerCase()}`, core.TODO_IDENTITY_WRITE_HOURLY_LIMIT);
@@ -186,15 +187,32 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
   async function queueContentAccess(tx: Sql, workspaceId: string, principalId: string): Promise<'none' | 'read' | 'read_write'> {
     // These are durable candidate identities, never accepted as credentials.
     // The same locked facts/policy used for actual content decide each candidate.
+    const planned=await discoverLocalTargets(tx,workspaceId,{principals:[principalId],tokens:[]});
+    const tokenIds=[...new Set(planned.flatMap(r=>r.token_id ? [r.token_id]:[]))];
     const candidates = await tx`SELECT s.owner_user_id,s.seat_id AS connection_id,s.grant_id,h.handle,g.provider_grant_id FROM swarm.hosted_mcp_seats s
       JOIN swarm.hosted_mcp_seat_handles h ON h.seat_id=s.seat_id AND h.revoked_at IS NULL
       JOIN swarm.hosted_mcp_grants g ON g.grant_id=s.grant_id
       WHERE s.workspace_id=${workspaceId}::uuid AND s.principal_id=${principalId}::uuid
-      UNION ALL SELECT c.owner_user_id,c.connection_id,c.grant_id,NULL,NULL FROM swarm.household_content_connections c
-      JOIN swarm.agent_tokens t ON t.token_id=c.connection_id AND t.run_id=c.grant_id AND t.principal_id=c.principal_id
+      UNION ALL SELECT DISTINCT c.owner_user_id,t.token_id AS connection_id,c.grant_id,NULL,NULL
+      FROM swarm.household_content_connections c
+      JOIN swarm.agent_tokens original ON original.token_id=c.connection_id AND original.run_id=c.grant_id
+        AND original.principal_id=c.principal_id
+      LEFT JOIN swarm.renewal_grants g ON g.renewal_grant_id=c.renewal_grant_id
+        AND g.workspace_id=c.workspace_id AND g.principal_id=c.principal_id AND g.run_id=c.grant_id AND g.created_by=c.owner_user_id
+      JOIN swarm.agent_tokens t ON t.run_id=c.grant_id AND t.principal_id=c.principal_id
+        AND (c.renewal_grant_id IS NULL AND t.token_id=c.connection_id
+          OR t.renewal_grant_id=c.renewal_grant_id AND t.lineage_id=original.lineage_id)
       JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=t.principal_id
       JOIN swarm.devices d ON d.device_id=r.device_id
-      WHERE t.revoked_at IS NULL AND t.expires_at>clock_timestamp() AND NOT t.surrender_only
+      WHERE t.token_id=ANY(${tokenIds}::uuid[]) AND t.revoked_at IS NULL AND t.expires_at>clock_timestamp() AND NOT t.surrender_only
+        AND (c.renewal_grant_id IS NULL OR g.renewal_grant_id IS NOT NULL
+          AND g.revoked_at IS NULL AND g.connection_expired_at IS NULL
+          AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
+          AND (g.local_content_approval_token_id IS NULL OR g.local_content_approval_token_id=c.connection_id))
+        AND swarm.admin_child_live(t.parent_admin_grant_id,${workspaceId}::uuid)
+        AND swarm.admin_child_scopes_live(t.parent_admin_grant_id,t.scopes)
+        AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z
+          WHERE z.kind='renewal_grant' AND z.target_id=t.renewal_grant_id)
         AND r.ended_at IS NULL AND d.revoked_at IS NULL
         AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones rt WHERE
           (rt.kind='token' AND rt.target_id=t.token_id) OR (rt.kind='principal' AND rt.target_id=t.principal_id)
@@ -230,6 +248,9 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
   }
   async function queueFacts(tx: Sql, workspaceId: string, principalId: string, current: HouseholdTodoState, now: number) {
     const contentAccess = await queueContentAccess(tx, workspaceId, principalId);
+    const planned=await discoverLocalTargets(tx,workspaceId,{principals:[principalId],tokens:[]});
+    const tokenIds=[...new Set(planned.flatMap(r=>r.token_id ? [r.token_id]:[]))];
+    const familyIds=[...new Set(planned.flatMap(r=>r.renewal_grant_id ? [r.renewal_grant_id]:[]))];
     const [clock] = await tx`SELECT clock_timestamp() AS now`;
     now = new Date(clock!.now as string).getTime();
     const [agent] = await tx`SELECT p.*,
@@ -239,17 +260,18 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
         WHERE s.workspace_id=p.workspace_id AND s.principal_id=p.principal_id AND s.revoked_at IS NULL AND g.state='active' AND g.revoked_at IS NULL AND g.connection_expired_at IS NULL
           AND (g.connection_expires_at IS NULL OR g.connection_expires_at>${new Date(now)}) AND b.revoked_at IS NULL) AS hosted_live,
       EXISTS (SELECT 1 FROM swarm.agent_tokens t JOIN swarm.agent_runs r USING(run_id) JOIN swarm.devices d USING(device_id)
-        WHERE t.principal_id=p.principal_id AND t.revoked_at IS NULL AND t.expires_at>${new Date(now)} AND NOT t.surrender_only AND r.ended_at IS NULL AND d.revoked_at IS NULL
+        WHERE t.token_id=ANY(${tokenIds}::uuid[]) AND t.principal_id=p.principal_id AND t.revoked_at IS NULL AND t.expires_at>${new Date(now)} AND NOT t.surrender_only AND r.ended_at IS NULL AND d.revoked_at IS NULL
           AND (t.renewal_grant_id IS NULL OR EXISTS (SELECT 1 FROM swarm.renewal_grants g
             WHERE g.renewal_grant_id=t.renewal_grant_id AND g.workspace_id=p.workspace_id AND g.principal_id=p.principal_id
               AND g.run_id=t.run_id AND g.revoked_at IS NULL AND g.connection_expired_at IS NULL
               AND (g.connection_expires_at IS NULL OR g.connection_expires_at>${new Date(now)})))) AS token_live,
       EXISTS (SELECT 1 FROM swarm.renewal_grants g JOIN swarm.agent_runs r USING(run_id) JOIN swarm.devices d USING(device_id)
-        WHERE g.principal_id=p.principal_id AND g.revoked_at IS NULL AND (g.horizon_expires_at IS NULL OR g.horizon_expires_at>${new Date(now)})
-          AND g.connection_expired_at IS NULL AND (g.connection_expires_at IS NULL OR g.connection_expires_at>${new Date(now)}) AND NOT g.suspension_active AND r.ended_at IS NULL AND d.revoked_at IS NULL) AS renewal_live,
-      coalesce((SELECT g.revoked_at IS NOT NULL FROM swarm.renewal_grants g WHERE g.principal_id=p.principal_id ORDER BY g.created_at DESC,g.renewal_grant_id LIMIT 1),
-        (SELECT t.revoked_at IS NOT NULL FROM swarm.agent_tokens t WHERE t.principal_id=p.principal_id ORDER BY t.issued_at DESC,t.token_id LIMIT 1),false) AS key_off,
-      EXISTS (SELECT 1 FROM swarm.renewal_grants g WHERE g.principal_id=p.principal_id AND g.revoked_at IS NULL AND g.suspension_active) AS paused
+        WHERE g.renewal_grant_id=ANY(${familyIds}::uuid[]) AND g.principal_id=p.principal_id AND g.revoked_at IS NULL AND (g.horizon_expires_at IS NULL OR g.horizon_expires_at>${new Date(now)})
+          AND g.connection_expired_at IS NULL AND (g.connection_expires_at IS NULL OR g.connection_expires_at>${new Date(now)}) AND (NOT g.suspension_active OR g.kind='standing' AND g.connection_expires_at IS NULL) AND r.ended_at IS NULL AND d.revoked_at IS NULL) AS renewal_live,
+      coalesce((SELECT g.revoked_at IS NOT NULL FROM swarm.renewal_grants g WHERE g.renewal_grant_id=ANY(${familyIds}::uuid[]) AND g.principal_id=p.principal_id ORDER BY g.created_at DESC,g.renewal_grant_id LIMIT 1),
+        (SELECT t.revoked_at IS NOT NULL FROM swarm.agent_tokens t WHERE t.token_id=ANY(${tokenIds}::uuid[]) AND t.principal_id=p.principal_id ORDER BY t.issued_at DESC,t.token_id LIMIT 1),false) AS key_off,
+      EXISTS (SELECT 1 FROM swarm.renewal_grants g WHERE g.renewal_grant_id=ANY(${familyIds}::uuid[]) AND g.principal_id=p.principal_id AND g.revoked_at IS NULL AND g.suspension_active
+        AND NOT (g.kind='standing' AND g.connection_expires_at IS NULL)) AS paused
       FROM swarm.agent_principals p WHERE p.workspace_id=${workspaceId}::uuid AND p.principal_id=${principalId}::uuid`;
     if (!agent) return null;
     const [activity] = await tx`SELECT greatest(

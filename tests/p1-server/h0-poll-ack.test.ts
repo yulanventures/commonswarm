@@ -1375,4 +1375,119 @@ test("a poll cannot take the waiting slot while the admission lock is held", { t
     await gate.end({ timeout: 5 });
   }
 });
+
+// Each phase owns a separate transaction. An earlier successful opening must
+// never authorize a later slice or ack after the family ends while waiting.
+for (const phase of ['opening','slice','ack'] as const) test(`local family deadline after a ${phase} wait rolls back first use and delivery effects`,
+  {timeout:30_000},async()=>{
+  const seat=await makeSeat(),hash=createHash('sha256').update(seat.token).digest();
+  const [binding]=await sql<{renewal_grant_id:string}[]>`SELECT renewal_grant_id FROM swarm.agent_tokens WHERE token_hash=${hash}`;
+  assert.ok(binding?.renewal_grant_id);
+  let pending:Promise<HttpResult>|undefined;
+  let ackBody:Record<string,unknown>={};
+  if(phase==='ack') {
+    const signalId=await postAsk(seat.principalId),poll=await h0('poll',seat.token,{wait:0});
+    assert.equal(poll.status,200);
+    const row=deliveriesOf(poll.body).find(row=>row.signal.id===signalId)!;assert.ok(row);
+    ackBody={signal_id:signalId,lease_id:row.lease_id,listener_instance_id:poll.body.listener_instance_id,
+      outcome:'replied',last_error_code:null};
+  } else if(phase==='slice') {
+    pending=h0('poll',seat.token,{wait:8});
+    let waiting=false;
+    for(let i=0;i<80;i++) {
+      waiting=(await sql`SELECT waiting FROM swarm.h0_poll_locks WHERE principal_id=${seat.principalId}::uuid`)[0]?.waiting===true;
+      if(waiting) break;await delay(25);
+    }
+    assert.equal(waiting,true,'opening committed and entered the slice loop');
+  }
+  const state=async()=>{
+    const token=await sql`SELECT first_used_at,expires_at FROM swarm.agent_tokens WHERE token_hash=${hash}`;
+    const grant=await sql`SELECT last_used_at,last_used_device_id,last_used_from,successors_used,successors_stranded
+      FROM swarm.renewal_grants WHERE renewal_grant_id=${binding!.renewal_grant_id}::uuid`;
+    const deliveries=await sql`SELECT signal_id,lease_id,acked_at,ack_outcome,attempt_count
+      FROM swarm.signal_deliveries WHERE recipient_agent_principal_id=${seat.principalId}::uuid ORDER BY signal_id`;
+    return {token,grant,deliveries};
+  };
+  let before:Awaited<ReturnType<typeof state>>|undefined;
+  await sql.begin(async tx=>{
+    const [{pid}]=await tx<{pid:number}[]>`SELECT pg_backend_pid() AS pid`;
+    await tx`SELECT renewal_grant_id FROM swarm.renewal_grants WHERE renewal_grant_id=${binding!.renewal_grant_id}::uuid FOR UPDATE`;
+    before=await state();
+    if(phase!=='slice') pending=h0(phase==='ack'?'ack':'poll',seat.token,phase==='ack'?ackBody:{wait:0});
+    let blocked=false;
+    for(let i=0;i<100;i++) {
+      blocked=(await sql`SELECT EXISTS(SELECT 1 FROM pg_stat_activity a
+        WHERE ${pid}=ANY(pg_blocking_pids(a.pid)) AND a.wait_event_type='Lock') AS yes`)[0]?.yes===true;
+      if(blocked) break;await delay(25);
+    }
+    assert.equal(blocked,true,`the actual ${phase} transaction waited for G`);
+    await tx`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second'
+      WHERE renewal_grant_id=${binding!.renewal_grant_id}::uuid`;
+  });
+  const denied=await pending!;assert.ok(denied.status>=400,JSON.stringify(denied.body));
+  assert.deepEqual(await state(),before,'denied phase committed no adoption, use, spend or delivery effect');
+  const control=await makeSeat(),signal=await postAsk(control.principalId);
+  const poll=await h0('poll',control.token,{wait:0});assert.equal(poll.status,200);
+  const row=deliveriesOf(poll.body).find(row=>row.signal.id===signal)!;assert.ok(row);
+  const ack=await h0('ack',control.token,{signal_id:signal,lease_id:row.lease_id,
+    listener_instance_id:poll.body.listener_instance_id,outcome:'replied',last_error_code:null});
+  assert.equal(ack.status,200,'same-invocation current-family poll/ack control');
+  assert.equal((await delivery(signal,control.principalId)).ack_outcome,'replied');
+});
+
+
+test("registration replacement rolls back its revoked predecessor and family effects on a late insert failure",
+  {timeout:30_000},async()=>{
+  const minted=await command(owner.ownerJwt,{kind:'mint_agent_join_credential',seat_cap:1,ttl_hours:4});
+  assert.equal(minted.status,200);
+  const attempt=randomUUID(),credential=String(minted.body.join_credential),joinId=String(minted.body.join_credential_id);
+  const register=async()=>{
+    const response=await fetch(`${local.API_URL}/functions/v1/command`,{method:'POST',
+      headers:{authorization:`Bearer ${credential}`,'content-type':'application/json'},
+      body:JSON.stringify({command_id:randomUUID(),client_version:'0.1.0',
+        command:{kind:'register_agent_seat',attempt_id:attempt,name:`replacement-${attempt.slice(0,8)}`}})});
+    return {status:response.status,body:await response.json() as Record<string,unknown>};
+  };
+  const first=await register();assert.equal(first.status,200);
+  const hash=createHash('sha256').update(String(first.body.agent_token)).digest();
+  const [binding]=await sql<{token_id:string;renewal_grant_id:string;principal_id:string}[]>`
+    SELECT token_id,renewal_grant_id,principal_id FROM swarm.agent_tokens WHERE token_hash=${hash}`;
+  assert.ok(binding);
+  const state=async()=>{
+    const tokens=await sql`SELECT token_id,first_used_at,revoked_at,expires_at,predecessor_token_id
+      FROM swarm.agent_tokens WHERE renewal_grant_id=${binding!.renewal_grant_id}::uuid ORDER BY token_id`;
+    const grant=await sql`SELECT successors_used,successors_stranded,last_used_at,revoked_at
+      FROM swarm.renewal_grants WHERE renewal_grant_id=${binding!.renewal_grant_id}::uuid`;
+    const attemptRow=await sql`SELECT token_id,principal_id,run_id FROM swarm.agent_join_attempts
+      WHERE join_credential_id=${joinId}::uuid AND attempt_id=${attempt}::uuid`;
+    const counter=await sql`SELECT seats_used FROM swarm.agent_join_credentials WHERE id=${joinId}::uuid`;
+    const tombstones=await sql`SELECT kind,target_id FROM swarm.revocation_tombstones WHERE target_id=${binding!.token_id}::uuid ORDER BY kind`;
+    return {tokens,grant,attemptRow,counter,tombstones};
+  };
+  const before=await state(),fixture=`registration_${randomUUID().replaceAll('-','')}`;
+  assert.match(binding!.renewal_grant_id,/^[0-9a-f-]{36}$/);
+  await sql.unsafe(`CREATE FUNCTION public.${fixture}() RETURNS trigger LANGUAGE plpgsql AS $fixture$
+    BEGIN RAISE EXCEPTION 'registration fixture conflict' USING ERRCODE='40001'; END $fixture$`);
+  try {
+    await sql.unsafe(`CREATE TRIGGER ${fixture} AFTER INSERT ON swarm.agent_tokens FOR EACH ROW
+      WHEN (NEW.renewal_grant_id='${binding!.renewal_grant_id}'::uuid) EXECUTE FUNCTION public.${fixture}()`);
+    const failed=await register();
+    assert.ok(failed.status>=400,'late INSERT failure escaped the entire registration transaction');
+    assert.deepEqual(await state(),before,'predecessor stamp, family use, attempt link, seat count and tombstones rolled back');
+    assert.equal(before.tokens[0]!.first_used_at,null,'failed replacement did not adopt its old proof');
+  } finally {
+    await sql.unsafe(`DROP TRIGGER IF EXISTS ${fixture} ON swarm.agent_tokens`);
+    await sql.unsafe(`DROP FUNCTION public.${fixture}()`);
+  }
+  const replacement=await register();
+  assert.equal(replacement.status,200,'same-invocation ordinary registration replacement control');
+  assert.equal(typeof replacement.body.agent_token,'string');
+  const after=await state();
+  assert.equal(after.attemptRow[0]!.token_id,String(replacement.body.token_id));
+  assert.ok(after.tokens.find(t=>t.token_id===binding!.token_id)!.revoked_at instanceof Date);
+  assert.equal(after.counter[0]!.seats_used,before.counter[0]!.seats_used);
+  assert.equal((await h0('poll',String(replacement.body.agent_token),{wait:0})).status,200);
+  assert.ok((await h0('poll',String(first.body.agent_token),{wait:0})).status>=400,'replaced root cannot return');
+});
+
 });

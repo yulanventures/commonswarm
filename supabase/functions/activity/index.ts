@@ -6,7 +6,7 @@ import {
   agentCredentialRevoked,
   enforceAgentSessionProof,
   loadAgentCredential,
-  planLocalOperation, lockLocalAuthPlan, retryLocalAuthTransaction, LocalCredentialDenied,
+  planLocalOperation, lockLocalAuthPlan, retryLocalAuthTransaction, LocalCredentialDenied, recheckLocalCredential,
 } from "../_shared/agent-auth.ts";
 import { parseAgentSessionProofHeaders } from "../../../src/cloud/session-wire.ts";
 import { activityFailureResult } from "../command/failures.ts";
@@ -187,6 +187,15 @@ async function handle(request: Request): Promise<Response> {
         true
       )
     `;
+    // realtime.send may wait. Its row/notification is transactional: validate
+    // after that final wait, and roll the entire send back if authority elapsed.
+    await tx`SELECT set_config('role','swarm_command',true)`;
+    const finalAgent=await recheckLocalCredential(tx,tokenHash,plan);
+    const finalSession=finalAgent ? await enforceAgentSessionProof(tx,{
+      principalId:finalAgent.principal_id,workspaceId:finalAgent.principal_workspace_id,
+      proofParse:parseAgentSessionProofHeaders(request.headers),
+    }) : null;
+    if(!finalAgent || !finalSession?.ok) return json(403,{error:'forbidden'});
     return json(202, { status: "accepted" });
     })();
     if(result.status>=400) throw new LocalActivityRefused(result);

@@ -56,15 +56,19 @@ function parseCommand(input: unknown): AdminCommand | AdminRoutineCommand | null
   return null;
 }
 
-async function currentRights(tx: Sql, owner: string, workspaceIds: readonly string[], scopes: readonly string[] = ['admin:read']): Promise<boolean> {
+async function currentRights(tx: Sql, owner: string, workspaceIds: readonly string[], scopes: readonly string[] = ['admin:read'], locking=true): Promise<boolean> {
   // Transaction-time membership locks order rights loss against grant/refresh.
   if (workspaceIds.length === 0) return true;
-  const rows = await tx<{ workspace_id: string; role: string; revoked_at: Date | null; archived_at: Date | null }[]>`
+  const rows = locking ? await tx<{ workspace_id: string; role: string; revoked_at: Date | null; archived_at: Date | null }[]>`
     SELECT m.workspace_id, m.role, m.revoked_at, w.archived_at
     FROM swarm.memberships m JOIN swarm.workspaces w USING (workspace_id)
     WHERE m.user_id = ${owner}::uuid AND m.workspace_id = ANY(${[...workspaceIds]}::uuid[])
     ORDER BY m.workspace_id FOR SHARE OF m, w
-  `;
+  ` : await tx<{ workspace_id: string; role: string; revoked_at: Date | null; archived_at: Date | null }[]>`
+    SELECT m.workspace_id,m.role,m.revoked_at,w.archived_at
+    FROM swarm.memberships m JOIN swarm.workspaces w USING(workspace_id)
+    WHERE m.user_id=${owner}::uuid AND m.workspace_id=ANY(${[...workspaceIds]}::uuid[])
+    ORDER BY m.workspace_id`;
   const needsManagement = scopes.some(scope => scope !== 'admin:read' && scope !== 'workspaces:create');
   return rows.length === workspaceIds.length && rows.every(row => row.revoked_at === null && row.archived_at === null && (!needsManagement || row.role === 'owner' || row.role === 'admin'));
 }
@@ -140,8 +144,67 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
   const plannedRoutine=token ? parseAdminRoutineCommand(adminRecord(input.command)) : null;
   const recipients=plannedRoutine?.kind==='admin_invite_member' ? [plannedRoutine.recipient_user_id]
     : plannedRoutine?.kind==='admin_issue_agent_invitation' ? [plannedRoutine.intended_owner_user_id] : [];
+  // Verify the exact issuance without touching any target/account/parent lock.
+  // This is a rejection filter only; the full status gate runs after the plan.
+  if (oauth && token) {
+    const admission=await adminAccessState(tx,oauth,undefined,true);
+    if (!admission.known || !admission.active) return {result:errorResult(403,'grant_inactive')};
+    const [grant]=await tx<AdminAccountState['grants'][string][]>`SELECT * FROM swarm.admin_grants
+      WHERE grant_id=${token.admin_grant_id}::uuid AND owner_user_id=${token.owner_user_id}::uuid`;
+    if (!grant || grant.state!=='active' || grant.revoked_at!==null || grant.suspended_at!==null
+      || new Date(grant.expires_at).getTime()<=Date.now() || new Date(grant.refresh_deadline).getTime()<=Date.now()
+      || grant.admin_identity_id!==token.admin_identity_id || grant.connection_id!==token.connection_id
+      || grant.client_id!==token.client_id || grant.manifest_digest!==token.manifest_digest
+      || !await currentRights(tx,token.owner_user_id,grant.workspace_ids.filter(w=>!grant.withdrawn_workspace_ids.includes(w)),token.scope_names,false))
+      return {result:errorResult(403,'grant_inactive')};
+    const requestedKind=String(adminRecord(input.command)?.kind);
+    const requestedScope=Object.entries(ADMIN_SCOPE_REGISTRY).find(([,commands])=>
+      (commands as readonly string[]).includes(requestedKind))?.[0];
+    if (!admission.capabilities.includes(requestedKind) || !requestedScope
+      || !token.scope_names.includes(requestedScope) || !grant.scope_names.includes(requestedScope as AdminScope))
+      return {result:errorResult(403,'capability_forbidden')};
+    if (plannedRoutine && 'principal_id' in plannedRoutine) {
+      const [principal]=await tx<{principal_id:string;owner_user_id:string;transport:string}[]>`SELECT principal_id,owner_user_id,transport
+        FROM swarm.agent_principals WHERE principal_id=${plannedRoutine.principal_id}::uuid
+          AND workspace_id=${plannedRoutine.workspace_id}::uuid`;
+      const [account]=await tx<{projection:AdminAccountState}[]>`SELECT projection FROM swarm.admin_accounts WHERE owner_user_id=${token.owner_user_id}::uuid`;
+      if (!principal || principal.owner_user_id!==token.owner_user_id
+        || !grant.target_rules.transports.includes(principal.transport as 'local')
+        || !(grant.target_rules.own_seats || grant.target_rules.seat_ids.includes(principal.principal_id)
+          || grant.target_rules.grant_created_seats && account?.projection.routine?.seats[principal.principal_id]?.grant_id===token.admin_grant_id))
+        return {result:errorResult(403,'target_forbidden')};
+    }
+    if (plannedRoutine && 'recipient_connection_id' in plannedRoutine
+      && !grant.target_rules.recipient_connection_ids.includes(plannedRoutine.recipient_connection_id))
+      return {result:errorResult(403,'recipient_forbidden')};
+    if (recipients.some(id=>!grant.target_rules.recipient_user_ids.includes(id)))
+      return {result:errorResult(403,'recipient_forbidden')};
+    if (plannedRoutine) {
+      if (plannedRoutine.grant_id!==token.admin_grant_id) return {result:errorResult(403,'forbidden')};
+      const [target]=await tx<{ok:boolean}[]>`SELECT EXISTS(
+        SELECT 1 FROM swarm.memberships m JOIN swarm.workspaces w USING(workspace_id)
+        WHERE m.workspace_id=${plannedRoutine.workspace_id}::uuid AND m.user_id=${token.owner_user_id}::uuid
+          AND m.revoked_at IS NULL AND w.archived_at IS NULL AND m.role IN ('owner','admin')
+          AND NOT ${plannedRoutine.workspace_id}::uuid=ANY(${grant.withdrawn_workspace_ids ?? []}::uuid[])
+          AND (${plannedRoutine.workspace_id}::uuid=ANY(${grant.workspace_ids}::uuid[])
+            OR ${grant.workspace_selector==='owned_and_selected'} AND m.role='owner'
+            OR EXISTS(SELECT 1 FROM swarm.admin_created_workspaces c
+              WHERE c.workspace_id=w.workspace_id AND c.grant_id=${token.admin_grant_id}::uuid))
+        ) OR (${plannedRoutine.kind==='admin_create_workspace'} AND NOT EXISTS(
+          SELECT 1 FROM swarm.workspaces WHERE workspace_id=${plannedRoutine.workspace_id}::uuid)) AS ok`;
+      if (!target?.ok) return {result:errorResult(403,'current_rights_required')};
+    }
+  }
+  const routineToken=plannedRoutine && 'predecessor_credential_id' in plannedRoutine ? plannedRoutine.predecessor_credential_id
+    : plannedRoutine && 'credential_id' in plannedRoutine ? plannedRoutine.credential_id:null;
+  const routinePrincipal=plannedRoutine && 'principal_id' in plannedRoutine ? plannedRoutine.principal_id:null;
   const localPlan=token ? await planLocalOperation(tx,{
-    workspace:plannedRoutine?.workspace_id,actor:token.owner_user_id,allWorkspace:plannedRoutine!==null,
+    workspace:plannedRoutine?.workspace_id,actor:token.owner_user_id,
+    allowMissingWorkspace:plannedRoutine?.kind==='admin_create_workspace',
+    ...(plannedRoutine?.kind==='admin_revoke_seat' && routinePrincipal
+      ? {revocation:{principal:routinePrincipal}}
+      : routineToken ? {target:{principals:[],tokens:[routineToken]}}
+      : routinePrincipal ? {target:{principals:[routinePrincipal],tokens:[]}}:{}),
     principalMode:plannedRoutine?.kind==='admin_revoke_seat' ? 'update':'share',sessionMode:'share',
     hostedMode:plannedRoutine?.kind==='admin_revoke_seat' ? 'update':'share',
     admin:{owner:token.owner_user_id,grant:token.admin_grant_id,recipients},

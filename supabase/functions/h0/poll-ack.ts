@@ -23,7 +23,7 @@ import {
   agentCredentialRevoked,
   enforceAgentSessionProof,
   loadAgentCredential,
-  planLocalOperation, lockLocalAuthPlan, retryLocalAuthTransaction, type LocalAuthLockPlan, LocalCredentialDenied,
+  planLocalOperation, lockLocalAuthPlan, retryLocalAuthTransaction, discoverLocalCredential, type LocalAuthLockPlan, LocalCredentialDenied,
 } from "../_shared/agent-auth.ts";
 import {
   agentSessionErrorStatus,
@@ -247,7 +247,9 @@ async function localH0Transaction<T>(hash:Uint8Array,request:Request,poll:boolea
   operation:(tx:Tx,plan:LocalAuthLockPlan|null)=>Promise<T>):Promise<T> {
   try { return await retryLocalAuthTransaction(()=>h0Database().begin(async tx=>{
     await setRole(tx);
-    const plan=await planLocalOperation(tx,{hash,principalMode:poll?'noKeyUpdate':'share'});
+    let plan:LocalAuthLockPlan|null;
+    try {plan=await planLocalOperation(tx,{hash,principalMode:poll?'noKeyUpdate':'share'});}
+    catch(error) {if(error instanceof LocalCredentialDenied) plan=null;else throw error;}
     if(plan) await lockLocalAuthPlan(tx,plan);
     const result=await operation(tx,plan);
     const r=result as {response?:Response;acquired?:boolean;collected?:{kind?:string}};
@@ -268,7 +270,10 @@ async function localH0Transaction<T>(hash:Uint8Array,request:Request,poll:boolea
 }
 async function authenticate(tx: Tx, tokenHash: Uint8Array, plan:LocalAuthLockPlan|null): Promise<Authed> {
   let agent;
-  try {agent=plan ? await loadAgentCredential(tx,tokenHash,plan):null;}
+  try {
+    if(!plan) await discoverLocalCredential(tx,tokenHash); // owned known-denial keeps its existing 403
+    agent=plan ? await loadAgentCredential(tx,tokenHash,plan):null;
+  }
   catch(error) {
     if(error instanceof LocalCredentialDenied) return {ok:false,status:403,error:'forbidden',message:'This seat cannot poll or ack.'};
     throw error;

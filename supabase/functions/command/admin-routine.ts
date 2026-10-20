@@ -60,13 +60,15 @@ export async function prepareAdminRoutine(
     >`SELECT * FROM swarm.workspaces WHERE workspace_id=${command.workspace_id}::uuid`;
     const members = await tx<
       Record<string, unknown>[]
-    >`SELECT * FROM swarm.memberships WHERE workspace_id=${command.workspace_id}::uuid ORDER BY user_id FOR SHARE`;
+    >`SELECT * FROM swarm.memberships WHERE workspace_id=${command.workspace_id}::uuid ORDER BY user_id`;
     const principals = await tx<
       Record<string, unknown>[]
-    >`SELECT * FROM swarm.agent_principals WHERE workspace_id=${command.workspace_id}::uuid ORDER BY principal_id FOR SHARE`;
+    >`SELECT * FROM swarm.agent_principals WHERE workspace_id=${command.workspace_id}::uuid ORDER BY principal_id`;
     const tokens = await tx<
       Record<string, unknown>[]
-    >`SELECT t.* FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING(principal_id) WHERE p.workspace_id=${command.workspace_id}::uuid`;
+    >`SELECT t.* FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING(principal_id) WHERE p.workspace_id=${command.workspace_id}::uuid
+      AND t.token_id=${'predecessor_credential_id' in command ? command.predecessor_credential_id
+        : 'credential_id' in command ? command.credential_id:null}::uuid`;
     const stamp = (v: unknown): number | null =>
       v === null ? null : new Date(v as string).getTime();
     workspace = {
@@ -398,9 +400,6 @@ export async function applyAdminRoutine(
       } WHERE principal_id=${String(p.principal_id)}::uuid`;
       await revokeHostedWorkspaceApproval(tx, e.workspace_id, new Date(ctx.now), ctx.owner_user_id,
         { principalId: String(p.principal_id) });
-      await tx`UPDATE swarm.agent_tokens SET revoked_at=coalesce(revoked_at,${
-        date(ctx.now)
-      }) WHERE principal_id=${String(p.principal_id)}::uuid`;
       await tx`UPDATE swarm.renewal_grants SET revoked_at=coalesce(revoked_at,${
         date(ctx.now)
       }),revoked_by=coalesce(revoked_by,${ctx.owner_user_id}::uuid) WHERE principal_id=${
@@ -419,7 +418,8 @@ export async function applyAdminRoutine(
       } else {
         await tx`UPDATE swarm.agent_tokens SET revoked_at=coalesce(revoked_at,${
           date(ctx.now)
-        }) WHERE lineage_id=(SELECT lineage_id FROM swarm.agent_tokens WHERE token_id=${
+        }) WHERE revoked_at IS NULL AND (token_id=${String(p.token_id)}::uuid OR
+        predecessor_token_id=${String(p.token_id)}::uuid) AND lineage_id=(SELECT lineage_id FROM swarm.agent_tokens WHERE token_id=${
           String(p.token_id)
         }::uuid)`;
         await tx`INSERT INTO swarm.revocation_tombstones(kind,target_id,created_by) SELECT 'lineage',lineage_id,${ctx.owner_user_id}::uuid FROM swarm.agent_tokens WHERE token_id=${
