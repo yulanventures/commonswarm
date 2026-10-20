@@ -211,6 +211,7 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
   const { cloudTarget, readEndpoint } = await import("../../src/cloud/config.js");
   const { AgentCredentialSession, RenewalRetryError, newRenewalCommandId, requestSuccessor } = await import("../../src/cloud/renewal.js");
   const { agentCredentialStore, credentialLineageKey } = await import("../../src/cloud/agent-credential.js");
+  const { ThinCommandClient } = await import("../../src/cloud/command-client.js");
   const { runListenerRuntime, NullListenerModel } = await import("../../src/listener/runtime.js");
   const { FileListenerEffectStore } = await import("../../src/listener/file-store.js");
   const { FilePendingMainQueue } = await import("../../src/listener/main-routing.js");
@@ -235,6 +236,8 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
     await sql`INSERT INTO swarm.users (user_id, display_name) VALUES (${user}::uuid, 'Client continuity')`;
     await sql`INSERT INTO swarm.devices (device_id, user_id, label) VALUES (${device}::uuid, ${user}::uuid, 'client-test')`;
     await sql`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${workspace}::uuid, 'Client continuity', ${user}::uuid)`;
+    await sql`INSERT INTO swarm.streams (stream_id, workspace_id, kind, repo_mapping_id)
+      VALUES (${randomUUID()}::uuid, ${workspace}::uuid, 'workspace', NULL)`;
     await sql`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${workspace}::uuid, ${user}::uuid, 'owner')`;
     await sql`INSERT INTO swarm.agent_principals (principal_id, workspace_id, name, owner_user_id)
       VALUES (${principal}::uuid, ${workspace}::uuid, 'client-test', ${user}::uuid)`;
@@ -250,7 +253,7 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
     const expiresAt = Date.now() - 31 * 86_400_000;
     await sql`INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, task_id, epoch, scopes,
       token_hash, issued_at, expires_at, lineage_id, renewal_grant_id)
-      VALUES (${tokenId}::uuid, ${principal}::uuid, ${run}::uuid, ${randomUUID()}::uuid, 1, '["post_signal"]'::jsonb,
+      VALUES (${tokenId}::uuid, ${principal}::uuid, ${run}::uuid, ${randomUUID()}::uuid, 1, '["post_signal","create"]'::jsonb,
         ${createHash("sha256").update(token).digest()}, ${new Date(expiresAt - 3_600_000)}, ${new Date(expiresAt)},
         ${randomUUID()}::uuid, ${grant}::uuid)`;
     if (policy === "revoked") await sql`UPDATE swarm.renewal_grants SET revoked_at = clock_timestamp(), revoked_by = ${user}::uuid WHERE renewal_grant_id = ${grant}::uuid`;
@@ -268,6 +271,64 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
     return response.status;
   }
   try {
+    await t.test("unknown-expiry bare and artifact CLI inputs recover only after real authentication refusal", async () => {
+      for (const bare of [false, true]) {
+        const f = await fixture();
+        const path = join(directory, `${f.tokenId}.json`);
+        await writeFile(path, bare ? f.token : JSON.stringify({ message: "Agent credential minted.", status: "accepted",
+          principal_id: f.principal, token_id: f.tokenId, run_id: f.run, agent_token: f.token }), { mode: 0o600 });
+        const child = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", "command", "create",
+          "--task-id", randomUUID(), "--slug", "unknown-cli", "--agent-token-file", path,
+          "--url", target.url, "--anon-key", target.anonKey, "--workspace-id", f.workspace], {
+          env: { ...process.env, SWARM_AGENT_STATE_DIR: directory, SWARM_CLOUD_URL: "", SWARM_CLOUD_ANON_KEY: "", SWARM_CLOUD_WORKSPACE_ID: "" },
+          stdio: ["ignore", "pipe", "pipe"], timeout: 30_000,
+        });
+        const exited = new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
+        let output = "";
+        child.stderr.resume();
+        for await (const part of child.stdout) output += part;
+        assert.equal(await exited, 0, "real CLI unknown-expiry command must complete");
+        assert.match(output, /"status": "accepted"/);
+        const saved = await f.store.read();
+        assert.equal(saved?.generation, 1);
+        assert.equal(saved?.rootTokenId, bare ? null : f.tokenId, "only actual artifact metadata supplies the root id");
+        assert.equal(await use(f.workspace, saved!.token!), 200);
+      }
+    });
+    await t.test("live unknown proof does not renew; expired eligible proof replays exactly once with its original body", async () => {
+      const f = await fixture();
+      await sql`UPDATE swarm.agent_tokens SET expires_at = clock_timestamp() + interval '1 hour'
+        WHERE token_id = ${f.tokenId}::uuid`;
+      const session = await AgentCredentialSession.open({ target, workspaceId: f.workspace, store: f.store,
+        presented: { token: f.token, tokenId: null, principalId: null, runId: null, expiresAt: null } });
+      const bodies: string[] = [];
+      const transport: typeof fetch = async (input, init) => {
+        const body = JSON.parse(String(init?.body)) as { command: { kind: string }; command_id: string };
+        if (body.command.kind !== "renew_agent_token") bodies.push(String(init?.body));
+        return await fetch(input, init);
+      };
+      const client = new ThinCommandClient(target, transport);
+      const work = async () => await client.send({ workspaceId: f.workspace, stream: { kind: "workspace" },
+        command: { kind: "create", task_id: randomUUID(), slug: `unknown-${randomUUID()}` },
+        credential: await session.bearer() }, (rejected) => session.recoverUnauthenticated(rejected));
+      assert.equal((await work()).response.status, "accepted");
+      assert.equal(await f.store.read(), null, "live unknown proof never creates renewal state");
+      await sql`UPDATE swarm.agent_tokens SET expires_at = clock_timestamp() - interval '1 hour' WHERE token_id = ${f.tokenId}::uuid`;
+      assert.equal((await work()).response.status, "accepted");
+      assert.equal(bodies.length, 3);
+      assert.equal(bodies[1], bodies[2], "real server replay keeps original command id/body");
+      assert.equal((await f.store.read())?.generation, 1);
+      // A fresh machine lost its successor. An already-used child cannot be
+      // resurrected from the obsolete root. Current stored proof is the control.
+      const lost = await agentCredentialStore({ target, lineageKey: credentialLineageKey(f.token), stateDirectory: join(directory, "lost") });
+      const obsolete = await AgentCredentialSession.open({ target, workspaceId: f.workspace, store: lost,
+        presented: { token: f.token, tokenId: null, principalId: null, runId: null, expiresAt: null } });
+      await assert.rejects(() => client.send({ workspaceId: f.workspace, stream: { kind: "workspace" },
+        command: { kind: "create", task_id: randomUUID(), slug: "obsolete" }, credential: f.token },
+        (rejected) => obsolete.recoverUnauthenticated(rejected)));
+      assert.equal((await lost.read())?.token ?? null, null);
+      assert.equal(await use(f.workspace, await session.bearer()), 200);
+    });
     await t.test("idle >30d, outage across expiry, repeated dropped replies and expired unused child", async () => {
       const f = await fixture();
       let drop = 2, unavailable = true;
@@ -351,16 +412,24 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       const program = `
         import { AgentCredentialSession } from './src/cloud/renewal.ts';
         import { agentCredentialStore, credentialLineageKey } from './src/cloud/agent-credential.ts';
+        import { ThinCommandClient } from './src/cloud/command-client.ts';
+        import { randomUUID } from 'node:crypto';
         let raw = ''; for await (const chunk of process.stdin) raw += chunk;
         const input = JSON.parse(raw);
         const store = await agentCredentialStore({ target: input.target, lineageKey: credentialLineageKey(input.presented.token), stateDirectory: input.directory });
         const session = await AgentCredentialSession.open({ target: input.target, workspaceId: input.workspace, presented: input.presented, store });
-        await session.bearer(); process.stdout.write('ready');
+        const client = new ThinCommandClient(input.target);
+        const result = await client.send({ workspaceId: input.workspace, stream: { kind: 'workspace' },
+          command: { kind: 'create', task_id: randomUUID(), slug: 'race-' + randomUUID() },
+          credential: await session.bearer() }, (rejected) => session.recoverUnauthenticated(rejected));
+        if (result.response.status !== 'accepted') throw new Error('ordinary work refused');
+        process.stdout.write('ready');
       `;
       const run = async () => {
         const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", program], { stdio: ["pipe", "pipe", "ignore"], timeout: 30_000 });
         const exited = new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
-        child.stdin.end(JSON.stringify({ target, directory, workspace: f.workspace, presented: f.presented }));
+        child.stdin.end(JSON.stringify({ target, directory, workspace: f.workspace,
+          presented: { token: f.token, tokenId: null, principalId: null, runId: null, expiresAt: null } }));
         let output = ""; for await (const part of child.stdout) output += part;
         const code = await exited;
         assert.equal(code, 0); assert.equal(output, "ready");
@@ -397,10 +466,14 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
     await t.test("selected elapsed expiry, revocation and security suspension deny while permanent control succeeds", async () => {
       for (const policy of ["elapsed", "revoked", "security", "permanent"] as const) {
         const f = await fixture(policy);
-        const session = await AgentCredentialSession.open({ target, workspaceId: f.workspace, presented: f.presented, store: f.store, warn: () => {} });
-        if (policy === "permanent") assert.equal(await use(f.workspace, await session.bearer()), 200);
+        const session = await AgentCredentialSession.open({ target, workspaceId: f.workspace,
+          presented: { ...f.presented, expiresAt: null }, store: f.store, warn: () => {} });
+        const work = async () => await new ThinCommandClient(target).send({ workspaceId: f.workspace,
+          stream: { kind: "workspace" }, command: { kind: "create", task_id: randomUUID(), slug: "policy" },
+          credential: await session.bearer() }, (rejected) => session.recoverUnauthenticated(rejected));
+        if (policy === "permanent") assert.equal((await work()).response.status, "accepted");
         else {
-          await assert.rejects(() => session.bearer());
+          await assert.rejects(work);
           assert.equal((await f.store.read())?.token ?? null, null, "no replacement is stored after denial");
         }
       }

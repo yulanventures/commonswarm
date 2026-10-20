@@ -617,8 +617,8 @@ export interface PresentedCredential {
   runId: string | null;
   /**
    * Epoch ms, when the artifact stated one. Null for a bare token or an artifact minted
-   * before renewal existed — and a null here means this credential is never renewed. See
-   * due() for why that is the safe answer rather than the lazy one.
+   * before renewal existed. Unknown expiry never triggers proactive rotation; an exact
+   * command-edge authentication refusal may request one server-authorized recovery.
    */
   expiresAt: number | null;
 }
@@ -806,8 +806,8 @@ export class AgentCredentialSession {
      * that would end a credential that may have had fifty-nine good minutes left, spend one
      * of the grant's successors on every fresh lineage, and — if the same artifact is in
      * use on two machines — brick the second one. A bare token or a pre-renewal artifact
-     * therefore behaves exactly as it did before this file existed, and the fix is to
-     * re-issue it: `cswarm token mint` and the connect page both state the expiry now. */
+     * therefore stays untouched until the real command endpoint refuses it. Only that
+     * exact authentication failure may ask the server to authorize recovery. */
     const at = this.renewalAt;
     return at !== null && this.clock() >= at;
   }
@@ -874,16 +874,33 @@ export class AgentCredentialSession {
     return this.token;
   }
 
-  private async renew(): Promise<void> {
+  /** Called only after the command endpoint's typed 401 unauthenticated. */
+  async recoverUnauthenticated(rejectedBearer: string): Promise<string | null> {
+    if (this.options.presented.expiresAt !== null || this.expiresAt !== null ||
+        this.token !== rejectedBearer || this.options.store === null) return null;
+    try {
+      await this.renew(rejectedBearer);
+    } catch (error) {
+      // A generic HTTP refusal does not establish revocation. Confirmed domain
+      // fences retain their own types; ambiguous transport/storage stays retryable.
+      if (error instanceof RenewalOutcomeUnknown) throw new RenewalRetryError(this.expiresAt);
+      throw error;
+    }
+    if (this.token === rejectedBearer) return null;
+    if (this.expired()) throw new RenewalRetryError(this.expiresAt);
+    return this.token;
+  }
+
+  private async renew(rejectedBearer?: string): Promise<void> {
     if (this.inFlight) return await this.inFlight;
-    const work = this.renewOnce().finally(() => {
+    const work = this.renewOnce(rejectedBearer).finally(() => {
       this.inFlight = null;
     });
     this.inFlight = work;
     return await work;
   }
 
-  private async renewOnce(): Promise<void> {
+  private async renewOnce(rejectedBearer?: string): Promise<void> {
     const store = this.options.store;
     if (!store) return;
     // The lock spans read-decide-write. Two invocations racing here is the read-rotate-
@@ -900,7 +917,9 @@ export class AgentCredentialSession {
       if (record && record.generation >= this.generation) {
         if (record.token !== null && record.token !== this.token) this.adopt(record);
         this.pending = record.pendingRenewal;
-        if (!this.due()) return;
+        // A winner is adopted before considering any exchange. Only the still-
+        // rejected unknown proof bypasses the proactive scheduling check.
+        if (!this.due() && (rejectedBearer === undefined || this.token !== rejectedBearer)) return;
       }
       // Replaying first lets M3 resolve the exact pending child. A null replay is
       // the only evidence permitting one fresh-id recovery in this locked attempt.

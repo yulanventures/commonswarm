@@ -867,7 +867,24 @@ export class ThinCommandClient {
     return this.projections.get(taskId) ?? null;
   }
 
-  async send(request: CommandRequest): Promise<CommandResult> {
+  async send(
+    request: CommandRequest,
+    recoverAgentCredential?: (rejectedBearer: string) => Promise<string | null>,
+  ): Promise<CommandResult> {
+    // Only the real agent-session caller supplies recovery. The inner sends have
+    // no callback: a second refusal cannot renew or replay ordinary work again.
+    if (recoverAgentCredential && AGENT_TOKEN_RE.test(request.credential)) {
+      const original = { ...request, commandId: request.commandId ?? newCommandId() };
+      try {
+        return await this.send(original);
+      } catch (error) {
+        if (!(error instanceof CommandHttpError) || error.status !== 401 ||
+            error.code !== "unauthenticated") throw error;
+        const credential = await recoverAgentCredential(original.credential);
+        if (credential === null) throw error;
+        return await this.send({ ...original, credential });
+      }
+    }
     const commandId = request.commandId ?? newCommandId();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 30_000);

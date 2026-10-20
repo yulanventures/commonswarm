@@ -9477,7 +9477,7 @@ async function runTaskCommand(args: Arguments): Promise<void> {
   const kind = args.positionals[1];
   if (!kind) throw new Error("command kind is required");
   const cloud = await target(args);
-  const { selectedWorkspace, bearer, fetcher } =
+  const { selectedWorkspace, bearer, fetcher, kind: credentialKind, session } =
     await commandWorkspaceAndCredential(args, cloud);
   const client = new ThinCommandClient(cloud, fetcher);
   const result = await client.send({
@@ -9485,7 +9485,9 @@ async function runTaskCommand(args: Arguments): Promise<void> {
     stream: stream(args),
     command: command(args, kind),
     credential: bearer,
-  });
+  }, credentialKind === "agent" && session
+    ? (rejectedBearer) => session.recoverUnauthenticated(rejectedBearer)
+    : undefined);
   printResult(kind, result);
 }
 
