@@ -12,7 +12,7 @@
  * statuses and booleans: never SQL text, driver messages, bodies or credentials. */
 import { execFileSync, spawn } from 'node:child_process';
 import { X509Certificate, createHash, randomBytes, randomUUID } from 'node:crypto';
-import { chmodSync, mkdirSync, lstatSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, lstatSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -438,10 +438,18 @@ export function classifyMinClientVersion(row) {
 export const minClientVersionDiagnostic = (check) => (check.observed === undefined ? check.code : `${check.code}:observed=${check.observed}`);
 
 const DUMP_SCHEMAS = ['auth', 'swarm', 'swarm_read', 'commonswarm_oauth', 'commonswarm_ops', 'supabase_migrations'];
+/** Pinned pre-fix source for an unsupported diagnostic comparison on ACTIVE.
+ * Live read/renewal controls must succeed before its expiry refusal counts.
+ * This is not a supported rollback or a historical-schema equivalence claim. */
+export const HISTORICAL_BASELINE_SOURCE = Object.freeze({
+  commit:'6d29f8060e05be93a1669cae30bdfa3e56c426d8',
+  tree:'c68bac76b3e705565440c2786cf2b34b22abc58a',
+});
+
 /** CI only: a throwaway database on the CLI cluster, as adminEdgeDatabase builds one, but from
  * the verified container. Only its DDL comes from the shared database; its seed rows are the
  * migrations' own, so earlier server files cannot change them. Admin issuance opens only inside it. */
-async function isolatedDatabaseTarget(binding, docker, issuance) {
+async function isolatedDatabaseTarget(binding, docker, issuance, historical = false, initial = null, snapshot = null) {
   if (binding.mode !== 'ci') throw new Error('isolated_database_ci_only');
   const { default: postgres } = await import('postgres');
   const source = new URL(binding.db_url);
@@ -452,6 +460,7 @@ async function isolatedDatabaseTarget(binding, docker, issuance) {
   const master = postgres(binding.db_url, quiet);
   const db = postgres(target.toString(), quiet);
   let created = false;
+  let history = null, retainedCatalog = null;
   const close = async () => {
     try { await db.end({ timeout: 5 }); } finally {
       try {
@@ -472,17 +481,53 @@ async function isolatedDatabaseTarget(binding, docker, issuance) {
       FROM unnest(${DUMP_SCHEMAS}::text[]) AS s`;
     if (present?.ok !== true || present.cutover !== true) throw new Error('source_schema_missing');
     phase = 'dump';
-    const dump = docker.execWithSecret(binding.db_container_id,
-      `IFS= read -r PGPASSWORD || true; export PGPASSWORD; exec pg_dump -U "$1" -d "$2" --schema-only --strict-names ${DUMP_SCHEMAS.map((s) => `--schema=${s}`).join(' ')}`,
-      [decodeURIComponent(source.username), decodeURIComponent(source.pathname.slice(1))], decodeURIComponent(source.password));
+    // Both sections and the catalog witness see one exported, retained schema snapshot.
+    // No application data is copied from the shared database.
+    const schemas = historical ? [...DUMP_SCHEMAS, 'extensions'] : DUMP_SCHEMAS;
+    let pre, post, dump;
+    let extensionOptions = [];
+    const section = (snapshot, part) => docker.execWithSecret(binding.db_container_id,
+      `IFS= read -r PGPASSWORD || true; export PGPASSWORD; exec pg_dump -U "$1" -d "$2" --snapshot="$3" --schema-only --strict-names ${schemas.map(s=>`--schema=${s}`).join(' ')} ${part ? `--section=${part}` : ''} ${extensionOptions.join(' ')}`,
+      [decodeURIComponent(source.username), decodeURIComponent(source.pathname.slice(1)), snapshot], decodeURIComponent(source.password));
+    if (historical && snapshot) {
+      ({pre, post, retainedCatalog} = snapshot);
+    } else await master.begin('isolation level repeatable read read only', async tx => {
+      const [{snapshot}] = await tx`SELECT pg_export_snapshot() AS snapshot`;
+      if (historical) {
+        const extensions = await tx`SELECT e.extname,pg_get_userbyid(e.extowner)=current_user AS owned
+          FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE n.nspname=ANY(${schemas}::text[]) ORDER BY e.extname`;
+        // pg_dump with --schema omits extensions unless explicitly selected.
+        // Extension ownership cannot be ALTERed; never silently restore under another owner.
+        if (!extensions.some(e=>e.extname==='pgcrypto') || !extensions.some(e=>e.extname==='uuid-ossp') ||
+          extensions.some(e=>!e.owned || !/^[a-zA-Z0-9_-]+$/u.test(e.extname))) throw new Error('historical_extension_owner_or_dependency');
+        extensionOptions=extensions.map(e=>`--extension=${e.extname}`);
+        retainedCatalog = await historicalCatalog(tx);
+        pre = section(snapshot, 'pre-data');
+        post = section(snapshot, 'post-data');
+      } else dump = section(snapshot, null);
+    });
     phase = 'create';
     await master.unsafe(`CREATE DATABASE ${name} TEMPLATE template0`);
     created = true;
     phase = 'restore';
-    await db.unsafe(`CREATE SCHEMA extensions; CREATE EXTENSION pgcrypto WITH SCHEMA extensions;
-      CREATE EXTENSION "uuid-ossp" WITH SCHEMA extensions; GRANT USAGE ON SCHEMA extensions TO PUBLIC;`);
-    await db.unsafe(dump.replace(/^\\(?:un)?restrict \S+\r?$/gmu, ''));
+    const restore = text => db.unsafe(text.replace(/^\\(?:un)?restrict \S+\r?$/gmu, ''));
+    if (historical) {
+      await restore(pre);
+      phase = 'historical-initial-data';
+      history = await seedHistoricalInitial(db, initial);
+      phase = 'historical-post-data';
+      await restore(post);
+    } else {
+      await db.unsafe(`CREATE SCHEMA extensions; CREATE EXTENSION pgcrypto WITH SCHEMA extensions;
+        CREATE EXTENSION "uuid-ossp" WITH SCHEMA extensions; GRANT USAGE ON SCHEMA extensions TO PUBLIC;`);
+      await restore(dump);
+    }
     await db.unsafe('RESET ALL');
+    if (historical) {
+      phase = 'historical-catalog';
+      if (await historicalCatalog(db) !== retainedCatalog) throw new Error('historical_catalog_changed');
+      await historicalGuards(db, history);
+    }
     phase = 'seed';
     // A schema-only copy has no seed rows. The command module reads only min_client_version
     // from swarm.config. Its value is a text parameter: postgres.js describes a `${json}::jsonb`
@@ -499,10 +544,146 @@ async function isolatedDatabaseTarget(binding, docker, issuance) {
     const check = classifyMinClientVersion(seeded);
     if (!check.ok) setupFailure(minClientVersionDiagnostic(check));
     if (check.version !== minimum) setupFailure('min_client_version_readback_mismatch');
-    return { url: target.toString(), mode: binding.mode, tlsCaPem: null, ensureAdminIssuance: () => ensureAdminIssuance(db, issuance), close };
+    return { url: target.toString(), mode: binding.mode, tlsCaPem: null, history, retainedCatalog,
+      historicalSnapshot: historical ? {pre, post, retainedCatalog} : null,
+      historicalChild: (generation = 'current', initial = null, snapshot = null) => {
+        if(generation!=='current') refuse('historical_initial_active_only');
+        return isolatedDatabaseTarget(binding,docker,issuance,true,initial,snapshot);
+      }, ensureAdminIssuance: () => ensureAdminIssuance(db, issuance), close };
   } catch (error) {
     try { await close(); } catch { /* the setup failure below is the result */ }
-    throw new Error(`isolated_database_setup_failed:${phase}:${error instanceof LockOrderSetupFailure ? error.code : sqlstate(error)}`);
+    throw new Error(`isolated_database_setup_failed:${phase}:${(error instanceof LockOrderSetupFailure || error instanceof LockOrderBindingRefusal) ? error.code : sqlstate(error)}`);
+  }
+}
+
+/** Catalog equality covers the actual source definitions, not an invented schema.
+ * OIDs are deliberately resolved to names because a fresh database allocates new OIDs. */
+async function historicalCatalog(sql) {
+  const schemas = [...DUMP_SCHEMAS, 'extensions'];
+  const rows = await sql`
+    SELECT kind, identity, body FROM (
+      SELECT 'schema' AS kind,n.nspname AS identity,
+        jsonb_build_array(pg_get_userbyid(n.nspowner),n.nspacl) AS body
+        FROM pg_namespace n WHERE n.nspname=ANY(${schemas}::text[])
+      UNION ALL SELECT 'extension',e.extname,jsonb_build_array(n.nspname,e.extversion,pg_get_userbyid(e.extowner))
+        FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE n.nspname=ANY(${schemas}::text[])
+      UNION ALL SELECT 'default-acl',n.nspname||'.'||pg_get_userbyid(a.defaclrole)||'.'||a.defaclobjtype,
+        to_jsonb(a.defaclacl) FROM pg_default_acl a JOIN pg_namespace n ON n.oid=a.defaclnamespace WHERE n.nspname=ANY(${schemas}::text[])
+      UNION ALL SELECT 'index',n.nspname||'.'||c.relname,to_jsonb(pg_get_indexdef(c.oid))
+        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind='i' AND n.nspname=ANY(${schemas}::text[])
+      UNION ALL SELECT 'relation',n.nspname||'.'||c.relname,
+        jsonb_build_array(c.relkind,pg_get_userbyid(c.relowner),c.relacl,c.relrowsecurity,c.relforcerowsecurity,c.reloptions,
+          CASE WHEN c.relkind IN ('v','m') THEN pg_get_viewdef(c.oid) ELSE NULL END)
+        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=ANY(${schemas}::text[])
+      UNION ALL SELECT 'column',n.nspname||'.'||c.relname||'.'||a.attname,
+        jsonb_build_array(a.attnum,format_type(a.atttypid,a.atttypmod),a.attnotnull,a.attidentity,a.attgenerated,a.attacl,
+          pg_get_expr(d.adbin,d.adrelid))
+        FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+        LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+        WHERE n.nspname=ANY(${schemas}::text[]) AND a.attnum>0 AND NOT a.attisdropped
+      UNION ALL SELECT 'function',n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')',
+        jsonb_build_array(pg_get_userbyid(p.proowner),p.proacl,p.prokind,CASE WHEN p.prokind='a' THEN NULL ELSE pg_get_functiondef(p.oid) END)
+        FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+        WHERE n.nspname=ANY(${schemas}::text[])
+      UNION ALL SELECT 'type',n.nspname||'.'||t.typname,jsonb_build_array(pg_get_userbyid(t.typowner),t.typacl,t.typtype)
+        FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname=ANY(${schemas}::text[])
+      UNION ALL SELECT 'constraint',n.nspname||'.'||c.relname||'.'||k.conname,
+        jsonb_build_array(k.convalidated,pg_get_constraintdef(k.oid))
+        FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname=ANY(${schemas}::text[])
+      UNION ALL SELECT 'trigger',n.nspname||'.'||c.relname||'.'||t.tgname,
+        jsonb_build_array(t.tgenabled,pg_get_triggerdef(t.oid))
+        FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname=ANY(${schemas}::text[]) AND NOT t.tgisinternal
+      UNION ALL SELECT 'policy',n.nspname||'.'||c.relname||'.'||p.polname,
+        jsonb_build_array(p.polpermissive,p.polcmd,
+          (SELECT array_agg(CASE WHEN r=0 THEN 'PUBLIC' ELSE pg_get_userbyid(r) END ORDER BY r) FROM unnest(p.polroles) r),
+          pg_get_expr(p.polqual,p.polrelid),pg_get_expr(p.polwithcheck,p.polrelid))
+        FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname=ANY(${schemas}::text[])
+    ) inventory ORDER BY kind,identity`;
+  return JSON.stringify(rows);
+}
+
+/** Synthetic imported INITIAL history; no claim of observed historical issuance.
+ * First use is within the original one-hour TTL and more than 35 days ago. */
+async function seedHistoricalInitial(sql, initial = null) {
+  const [{now}] = await sql`SELECT clock_timestamp() AS now`;
+  const T = initial?.clock ?? new Date(now).getTime(), day=86_400_000;
+  const history=initial ?? {label:'synthetic-initial-history',clock:T,cases:
+    ['standing','suspended','horizon-expired','expired-unused','live'].map(kind=>({kind,
+      ...Object.fromEntries(['owner','workspace','stream','principal','device','run','grant','token','lineage','task'].map(k=>[k,randomUUID()])),
+      raw:`swm_agt_${randomBytes(32).toString('base64url')}`}))};
+  for (const f of history.cases) {
+    const {kind,raw}=f;
+    const created=new Date(T-37*day), issued=new Date(kind==='live' ? T-60_000 : T-36*day);
+    const used=kind==='expired-unused' ? null : new Date(issued.getTime()+30_000);
+    const expires=new Date(issued.getTime()+3_600_000);
+    const standing=['standing','suspended','live'].includes(kind);
+    await sql`INSERT INTO auth.users(id,aud,role,email,created_at)
+      VALUES(${f.owner}::uuid,'authenticated','authenticated',${`${f.owner}@example.test`},${created})`;
+    await sql`INSERT INTO swarm.users(user_id,display_name,created_at)
+      VALUES(${f.owner}::uuid,'Synthetic historical owner',${created})`;
+    await sql`INSERT INTO swarm.devices(device_id,user_id,label,created_at)
+      VALUES(${f.device}::uuid,${f.owner}::uuid,'Synthetic historical device',${created})`;
+    await sql`INSERT INTO swarm.workspaces(workspace_id,name,created_by,created_at)
+      VALUES(${f.workspace}::uuid,'Synthetic historical workspace',${f.owner}::uuid,${created})`;
+    await sql`INSERT INTO swarm.memberships(workspace_id,user_id,role,joined_at)
+      VALUES(${f.workspace}::uuid,${f.owner}::uuid,'owner',${created})`;
+    await sql`INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES(${f.stream}::uuid,${f.workspace}::uuid,'workspace')`;
+    await sql`INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,created_at)
+      VALUES(${f.principal}::uuid,${f.workspace}::uuid,${f.owner}::uuid,${kind},${created})`;
+    await sql`INSERT INTO swarm.agent_runs(run_id,principal_id,device_id,started_at)
+      VALUES(${f.run}::uuid,${f.principal}::uuid,${f.device}::uuid,${created})`;
+    await sql`INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,created_by,created_at,
+      kind,max_successors,horizon_expires_at,bound_device_id,last_used_at,last_used_device_id,last_used_from,new_host_at,suspended_at)
+      VALUES(${f.grant}::uuid,${f.workspace}::uuid,${f.principal}::uuid,${f.run}::uuid,${f.owner}::uuid,${created},
+        ${standing?'standing':'timeboxed'},${standing?null:800},${standing?null:new Date(T-7*day)},
+        ${f.device}::uuid,${used},${used?f.device:null}::uuid,${used?'synthetic-initial':null},
+        ${kind==='suspended'?used:null},${kind==='suspended'?new Date(T-2*day):null})`;
+    await sql`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,task_id,epoch,scopes,token_hash,issued_at,expires_at,
+      lineage_id,renewal_grant_id,first_used_at)
+      VALUES(${f.token}::uuid,${f.principal}::uuid,${f.run}::uuid,${f.task}::uuid,1,'["post_signal"]'::jsonb,
+        ${createHash('sha256').update(raw).digest()},${issued},${expires},${f.lineage}::uuid,${f.grant}::uuid,${used})`;
+  }
+  return history;
+}
+
+async function historicalGuards(sql, history) {
+  const [{ok}] = await sql`SELECT current_setting('row_security')='on'
+    AND current_setting('check_function_bodies')='on' AND current_setting('session_replication_role')='origin'
+    AND (SELECT setting=reset_val FROM pg_settings WHERE name='search_path')
+    AND NOT EXISTS(SELECT 1 FROM pg_constraint k JOIN pg_namespace n ON n.oid=k.connamespace
+      WHERE n.nspname=ANY(${DUMP_SCHEMAS}::text[]) AND NOT k.convalidated)
+    AND NOT EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+      JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=ANY(${DUMP_SCHEMAS}::text[]) AND t.tgenabled NOT IN ('O','A')) AS ok`;
+  if (!ok) throw new Error('historical_guard_settings');
+  // The source catalog equality includes the full immutable/server-clock bodies and ACLs.
+  const f=history.cases[0], rolledBack={};
+  const rollback=async operation=>{
+    try { await sql.begin(async tx=>{await operation(tx);throw rolledBack;}); }
+    catch(error) {if(error!==rolledBack) throw error;}
+  };
+  await rollback(async tx=>{
+    const [row]=await tx`INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,created_by,
+      created_at,kind,bound_device_id) VALUES(${randomUUID()}::uuid,${f.workspace}::uuid,${f.principal}::uuid,
+      ${f.run}::uuid,${f.owner}::uuid,'2000-01-01','standing',${f.device}::uuid)
+      RETURNING created_at=statement_timestamp() AS pinned`;
+    if(!row.pinned) throw new Error('historical_server_clock_not_pinned');
+  });
+  for(const column of ['created_at','last_used_at']) {
+    let code=null;
+    try {await rollback(tx=>tx`UPDATE swarm.renewal_grants SET ${tx(column)}=${tx(column)}-interval '1 day'
+      WHERE renewal_grant_id=${f.grant}::uuid`);} catch(error) {code=sqlstate(error);}
+    if(code!=='55000') throw new Error('historical_monotonic_guard_missing');
+  }
+  for(const role of ['anon','authenticated','swarm_read']) {
+    let code=null;
+    try {await rollback(async tx=>{
+      await tx.unsafe(`SET LOCAL ROLE ${role}`);
+      await tx`UPDATE swarm.renewal_grants SET successors_used=successors_used+1 WHERE renewal_grant_id=${f.grant}::uuid`;
+    });} catch(error) {code=sqlstate(error);}
+    if(code!=='42501') throw new Error('historical_unauthorized_write_not_denied');
   }
 }
 
@@ -570,8 +751,186 @@ function removeSecretDirectory({ root, dir }) {
   execFileSync('rm', ['-r', resolved], { stdio: 'ignore' });
 }
 
+/** Artifact selection for the existing renewal owner, not authorization evidence.
+ * Both generations are read from immutable Git objects, never a labelled copy of
+ * this checkout. Materialize the complete source trees so activity, config and
+ * every relative/type import use the same generation as command/read. */
+export const ACTIVE_FLOOR_SOURCES = Object.freeze({
+  H: Object.freeze({commit:'131b1111fbd84cbcffb0178b00222872867bc3cf',tree:'89ab43e169d5d7604c6bbf02b1c538d76dacc79d'}),
+  // Pre-fix virgin-root witness only; b9 already supports expired USED renewal.
+  B: Object.freeze({commit:'b9ee52592df924d945f800619ee31e6c483200df',tree:'6c97679c7ffe042e88addcfaf573c78d6a1379dc'}),
+  F: Object.freeze({commit:'6f2020b4830e9839fd35e40b436ea4677b8326d0',tree:'57186c773b9c25ee13bcfe42f0d190a51dcde90b'}),
+});
+export function materializeActiveFloorSource(directory, generation) {
+  if(generation==='current') return {path:REPO_ROOT,
+    commit:execFileSync('git',['-C',REPO_ROOT,'rev-parse','HEAD'],{encoding:'utf8'}).trim(),
+    tree:execFileSync('git',['-C',REPO_ROOT,'rev-parse','HEAD^{tree}'],{encoding:'utf8'}).trim()};
+  if (generation!=='O' && !Object.hasOwn(ACTIVE_FLOOR_SOURCES,generation)) throw new Error('unknown_source_generation');
+  const source=generation==='O' ? {commit:HISTORICAL_BASELINE_SOURCE.commit,tree:HISTORICAL_BASELINE_SOURCE.tree} : ACTIVE_FLOOR_SOURCES[generation];
+  const git=args=>execFileSync('git',['-C',REPO_ROOT,...args],{stdio:['ignore','pipe','ignore'],maxBuffer:64*1024*1024});
+  if(git(['rev-parse',`${source.commit}^{tree}`]).toString().trim()!==source.tree) throw new Error('source_tree_identity');
+  const destination=join(directory,`source-${generation}`);
+  if(existsSync(destination)) throw new Error('source_destination_exists');
+  mkdirSync(destination,{mode:0o700});
+  // Read blobs directly: archive attributes must not substitute source bytes.
+  // No dependency, checkout hook or application code is executed here.
+  const entries=git(['ls-tree','-rz',source.commit,'src','supabase/functions']).toString().split('\0').filter(Boolean);
+  if(entries.length===0) throw new Error('source_tree_empty');
+  for(const entry of entries) {
+    const match=/^(100644|100755) blob ([0-9a-f]{40})\t(.+)$/u.exec(entry);
+    if(!match) throw new Error('source_not_regular_blob');
+    const [, ,blob,path]=match;
+    if(isAbsolute(path) || path.split('/').some(part=>part==='..' || part==='')) throw new Error('source_path_unsafe');
+    const bytes=git(['cat-file','blob',blob]);
+    if(createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex')!==blob) throw new Error('source_blob_identity');
+    const file=join(destination,path);
+    mkdirSync(dirname(file),{recursive:true,mode:0o700});
+    writeFileSync(file,bytes,{mode:0o600,flag:'wx'});
+  }
+  return {...source,path:destination};
+}
+
+/** Read-only ACTIVE prerequisite. Source bodies come from the reviewed migrations;
+ * this never activates PREP, installs SQL, or grants a role. */
+export async function assertActiveFloorCatalog(sql) {
+  const migrations = [
+    '20261019000007_local_auth_lock_order.sql',
+    '20261019000008_local_auth_inactive_parent_closure.sql',
+    '20261019000009_hosted_snapshot_null_compat.sql',
+    '20261019000010_local_permanence_read_models.sql',
+  ];
+  const expected = new Map();
+  for (const file of migrations) {
+    const text = readFileSync(join(REPO_ROOT,'supabase/migrations',file),'utf8');
+    const pattern = /CREATE(?: OR REPLACE)? FUNCTION\s+([a-z_]+\.[a-z_]+)\s*\(([^)]*)\)([\s\S]*?)\bAS\s+(\$[a-z_]*\$)([\s\S]*?)\4\s*;/giu;
+    let count=0;
+    for (const match of text.matchAll(pattern)) {
+      const args=match[2].trim() ? match[2].split(',').map(arg=>arg.trim().split(/\s+/u)[1]) : [];
+      if(args.some(type=>typeof type!=='string' || !/^[a-z_]+(?:\[\])?$/u.test(type))) throw new Error('active_catalog_signature');
+      const types=args.join(',');
+      expected.set(`${match[1]}(${types})`,{body:match[5],definer:/SECURITY DEFINER/iu.test(match[3]),language:/LANGUAGE\s+(sql|plpgsql)\b/iu.exec(match[3])?.[1].toLowerCase(),volatility:/IMMUTABLE/iu.test(match[3])?'i':/STABLE/iu.test(match[3])?'s':'v'});count++;
+    }
+    if(count===0 || count!==[...text.matchAll(/^CREATE(?: OR REPLACE)? FUNCTION\b/gimu)].length) throw new Error('active_catalog_source_unreadable');
+  }
+  const catalogRoles=['anon','authenticated','swarm_read','swarm_command','swarm_capability',
+    'commonswarm_oauth_runtime','commonswarm_admin_issuer','commonswarm_admin_release',
+    'commonswarm_dpop_verifier','commonswarm_oauth_maintenance','commonswarm_oauth_session_guard'];
+  return await sql.begin('read only',async tx=>{
+    for(const [signature,want] of expected) {
+      const rows=await tx`SELECT p.prosrc,p.prosecdef,p.proconfig,p.provolatile,l.lanname,r.rolname AS owner
+        FROM pg_proc p JOIN pg_roles r ON r.oid=p.proowner JOIN pg_language l ON l.oid=p.prolang WHERE p.oid=to_regprocedure(${signature})`;
+      const actual=rows[0];
+      if(rows.length!==1 || actual.prosrc!==want.body || actual.prosecdef!==want.definer || actual.owner!=='swarm_admin' || actual.lanname!==want.language || actual.provolatile!==want.volatility)
+        throw new Error('active_catalog_body_owner_or_mode');
+      if(!actual.proconfig?.includes('search_path=pg_catalog')) throw new Error('active_catalog_search_path');
+    }
+    const privateFunctions=[
+      ['swarm.discover_local_credential_ids(bytea)',['swarm_command']],
+      ['swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean)',['swarm_command']],
+      ['swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean,uuid)',['swarm_command']],
+      ['swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean,uuid,boolean)',['swarm_command']],
+      ['swarm.discover_local_join_ids(bytea,uuid)',['swarm_command']],
+      ['swarm.household_local_family_binding_guard()',[]],
+      ['swarm.local_content_approval_pointer_guard()',[]],
+      ['swarm.revoke_local_residual_tokens(uuid,uuid,text,uuid)',['swarm_command']],
+      ['swarm_read.home_overview()',['authenticated']],
+      ['swarm.agent_delivery_read_context(bytea,uuid)',['swarm_read']],
+      ['swarm.agent_tokens_successor_fence()',[]],
+      ['swarm.record_renewal_grant_use(uuid,uuid,text)',['swarm_read','swarm_command']],
+      ['swarm.prepare_renewal_grant(uuid,uuid)',['swarm_command']],
+      ['swarm.resume_renewal_grant(uuid,uuid,uuid)',['swarm_command']],
+      ['swarm_read.renewal_grant_roster(uuid)',['authenticated','swarm_read']],
+      ['swarm_read.renewal_grant_for_token(uuid,uuid)',['swarm_read']],
+      ['swarm.renewal_grants_revoke_cascade()',[]],
+      ['swarm.audit_household_hosted_restriction()',[]],
+      ['swarm.renewal_grants_spend_or_revoke_only()',[]],
+    ];
+    for(const [signature,allowed] of privateFunctions) {
+      const publicAcl=await tx`SELECT EXISTS(SELECT 1 FROM pg_proc p,
+        LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+        WHERE p.oid=to_regprocedure(${signature}) AND a.grantee=0 AND a.privilege_type='EXECUTE') AS ok`;
+      if(publicAcl[0].ok) throw new Error('active_catalog_public_execute');
+      const acl=await tx`SELECT r.rolname,a.privilege_type,a.is_grantable FROM pg_proc p,
+        LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+        LEFT JOIN pg_roles r ON r.oid=a.grantee
+        WHERE p.oid=to_regprocedure(${signature}) AND a.grantee<>p.proowner ORDER BY r.rolname`;
+      if(acl.length!==allowed.length || acl.some(a=>!allowed.includes(a.rolname) || a.privilege_type!=='EXECUTE' || a.is_grantable))
+        throw new Error('active_catalog_exact_function_acl');
+      for(const role of catalogRoles) {
+        const [row]=await tx`SELECT has_function_privilege(${role},${signature},'EXECUTE') AS ok`;
+        if(row.ok!==allowed.includes(role)) throw new Error('active_catalog_effective_acl');
+      }
+    }
+    for(const [table,trigger,fn,kind,predicate=null] of [
+      ['swarm.household_content_connections','aa_household_local_family_binding','swarm.household_local_family_binding_guard()',23],
+      ['swarm.renewal_grants','aa_local_content_approval_pointer','swarm.local_content_approval_pointer_guard()',23],
+      ['swarm.agent_tokens','agent_tokens_successor_fence','swarm.agent_tokens_successor_fence()',7,'new.predecessor_token_idisnotnull'],
+      ['swarm.renewal_grants','renewal_grants_spend_or_revoke_only','swarm.renewal_grants_spend_or_revoke_only()',27],
+      ['swarm.renewal_grants','renewal_grants_revoke_cascade','swarm.renewal_grants_revoke_cascade()',17,'old.revoked_atisnullandnew.revoked_atisnotnull'],
+      ['swarm.household_hosted_content_restrictions','household_hosted_restriction_audit','swarm.audit_household_hosted_restriction()',23],
+    ]) {
+      const rows=await tx`SELECT tgtype::int AS kind,pg_get_triggerdef(oid,true) AS definition FROM pg_trigger WHERE tgrelid=to_regclass(${table})
+        AND tgname=${trigger} AND tgfoid=to_regprocedure(${fn}) AND tgenabled='O' AND NOT tgisinternal`;
+      if(rows.length!==1 || rows[0].kind!==kind) throw new Error('active_catalog_trigger');
+      const when=/ WHEN (.+) EXECUTE FUNCTION /u.exec(rows[0].definition)?.[1] ?? null;
+      if((when===null ? null : when.toLowerCase().replace(/[()\s]/gu,''))!==predicate) throw new Error('active_catalog_trigger_predicate');
+    }
+    const [column]=await tx`SELECT count(*)::int AS n FROM pg_attribute
+      WHERE attrelid='swarm.renewal_grants'::regclass AND attname='local_content_approval_token_id'
+        AND atttypid='uuid'::regtype AND NOT attisdropped`;
+    if(column.n!==1) throw new Error('active_catalog_column');
+    // Bind the additive SQL10 shape and authority before importing F. Body hashes
+    // are measured on the actual PG target, never guessed from SQL formatting.
+    const [view]=await tx`SELECT c.relkind,pg_get_userbyid(c.relowner) AS owner,c.reloptions,
+      pg_get_viewdef(c.oid,false) AS body FROM pg_class c WHERE c.oid=to_regclass('swarm_read.hosted_mcp_connections')`;
+    if(!view || view.relkind!=='v' || view.owner!=='swarm_admin' ||
+      JSON.stringify(view.reloptions)!==JSON.stringify(['security_barrier=true'])) throw new Error('active_catalog_view_owner_barrier');
+    const names=['grant_id','client_id','resource','home_workspace_id','selected_workspace_ids','state','created_at',
+      'activated_at','revoked_at','connection_expires_at','connection_expired_at'];
+    const columns=await tx`SELECT v.attname,v.atttypid=b.atttypid AND v.atttypmod=b.atttypmod AS type_ok
+      FROM pg_attribute v LEFT JOIN pg_attribute b ON b.attrelid='swarm.hosted_mcp_grants'::regclass
+        AND b.attname=v.attname AND NOT b.attisdropped
+      WHERE v.attrelid='swarm_read.hosted_mcp_connections'::regclass AND v.attnum>0 AND NOT v.attisdropped ORDER BY v.attnum`;
+    if(JSON.stringify(columns.map(c=>c.attname))!==JSON.stringify(names) || columns.some(c=>!c.type_ok))
+      throw new Error('active_catalog_view_shape');
+    const viewAcl=await tx`SELECT r.rolname,a.privilege_type,a.is_grantable FROM pg_class c,
+      LATERAL aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a LEFT JOIN pg_roles r ON r.oid=a.grantee
+      WHERE c.oid='swarm_read.hosted_mcp_connections'::regclass AND a.grantee<>c.relowner ORDER BY r.rolname`;
+    if(viewAcl.length!==2 || viewAcl.some((a,i)=>a.rolname!==['authenticated','swarm_read'][i] ||
+      a.privilege_type!=='SELECT' || a.is_grantable)) throw new Error('active_catalog_view_acl');
+    for(const role of catalogRoles) {
+      const [acl]=await tx`SELECT has_table_privilege(${role},'swarm_read.hosted_mcp_connections','SELECT') AS can_read,
+        has_any_column_privilege(${role},'swarm_read.hosted_mcp_connections','INSERT,UPDATE,REFERENCES') AS can_write,
+        has_table_privilege(${role},'swarm_read.hosted_mcp_connections','DELETE,TRUNCATE,TRIGGER') AS can_mutate`;
+      if(acl.can_read!==['authenticated','swarm_read'].includes(role) || acl.can_write || acl.can_mutate)
+        throw new Error('active_catalog_view_effective_acl');
+    }
+    return {functions:expected.size,migrations:migrations.length,view_columns:columns.length,
+      measured_view_sha256:createHash('sha256').update(view.body).digest('hex')};
+  });
+}
+
 /** Runs one Deno scenario against the target. Only LOCK_ORDER_ lines are read back. */
-export async function runScenario(target, scenario, timeoutMs = 170_000) {
+export async function runScenario(target, scenario, timeoutMs = 170_000, generations = null) {
+  if(scenario==='historical-baseline-discriminator') {
+    if(target.mode!=='ci' || typeof target.historicalChild!=='function') refuse('historical_initial_ci_child_required');
+    const prior=await target.historicalChild('current');
+    let baseline, initial;
+    try {initial=prior.history;baseline=await runScenario(prior,'historical-baseline-expiry',timeoutMs,{command:'O',read:'O'});}
+    finally {await prior.close();}
+    // Two owned children restore the same actual ACTIVE dump and identical
+    // synthetic INITIAL history. Only the handler generation differs.
+    const head=await target.historicalChild('current',initial,prior.historicalSnapshot);
+    let current;
+    try {current=await runScenario(head,'active-floor-historical-idle',timeoutMs,{command:'current',read:'current'});}
+    finally {await head.close();}
+    return {scenario,stage:baseline.stage==='complete' && current.stage==='complete'?'complete':'discriminator_failed',baseline,current};
+  }
+  if (scenario === 'active-floor-historical-idle' && !target.history) {
+    if (target.mode !== 'ci' || typeof target.historicalChild !== 'function') refuse('historical_initial_ci_child_required');
+    const child = await target.historicalChild();
+    try { return await runScenario(child, scenario, timeoutMs, generations); } finally { await child.close(); }
+  }
   let adminIssuance = null;
   if (RACES[scenario]?.waiting === 'admin') {
     adminIssuance = await target.ensureAdminIssuance();
@@ -580,6 +939,10 @@ export async function runScenario(target, scenario, timeoutMs = 170_000) {
   const secret = secretDirectory();
   try {
     const configPath = join(secret.dir, 'target.json');
+    const source=generations ? materializeActiveFloorSource(secret.dir,generations.command) : null;
+    const readSource=generations && generations.read!==generations.command ? materializeActiveFloorSource(secret.dir,generations.read) : source;
+    const expectBaselineExpiry=source?.commit===HISTORICAL_BASELINE_SOURCE.commit && readSource?.commit===HISTORICAL_BASELINE_SOURCE.commit;
+    if(scenario==='historical-baseline-expiry' && !expectBaselineExpiry) refuse('historical_expiry_requires_pinned_O');
     let floor_url;
     if (scenario === 'floor-first-use-vs-head-revocation') {
       const floor='6d29f8060e05be93a1669cae30bdfa3e56c426d8';
@@ -596,7 +959,7 @@ export async function runScenario(target, scenario, timeoutMs = 170_000) {
       }
       floor_url=pathToFileURL(join(secret.dir,modules[0][0])).href;
     }
-    writeFileSync(configPath, JSON.stringify({ db_url: target.url, tls_ca_pem: target.tlsCaPem, floor_url }), { mode: 0o600 });
+    writeFileSync(configPath, JSON.stringify({ db_url: target.url, tls_ca_pem: target.tlsCaPem, floor_url, source, read_source:readSource, active_floor:generations!==null, expect_baseline_expiry:expectBaselineExpiry, history:target.history, retained_catalog:target.retainedCatalog }), { mode: 0o600 });
     const env = { PATH: process.env.PATH ?? '', NO_COLOR: '1' };
     for (const key of ['HOME', 'DENO_DIR', 'XDG_CACHE_HOME']) if (process.env[key]) env[key] = process.env[key];
     const child = spawn('deno', ['run', '--no-lock', ...(scenario==='floor-first-use-vs-head-revocation' ? ['--cached-only'] : []), '--config', join(REPO_ROOT, 'supabase/functions/command/deno.json'),
@@ -607,10 +970,11 @@ export async function runScenario(target, scenario, timeoutMs = 170_000) {
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     const exit = await new Promise((resolve) => {
       const timer = setTimeout(() => { child.kill('SIGKILL'); }, timeoutMs);
+      child.on('error', () => { clearTimeout(timer); resolve({code:null,signal:'spawn_error'}); });
       child.on('close', (code, signal) => { clearTimeout(timer); resolve({ code, signal }); });
     });
     const line = stdout.split('\n').reverse().find((entry) => entry.startsWith('LOCK_ORDER_RESULT '));
-    if (line === undefined) return { scenario, stage: 'no_result', exit_code: exit.code, signal: exit.signal,
+    if (exit.code !== 0 || exit.signal !== null || line === undefined) return { scenario, stage: 'process_failed', exit_code: exit.code, signal: exit.signal,
       ...(scenario==='floor-first-use-vs-head-revocation' ? {required_compatibility:'BLOCKED',floor_compatibility:'INCONCLUSIVE'} : {}) };
     const result = JSON.parse(line.slice('LOCK_ORDER_RESULT '.length));
     return adminIssuance === null ? result : { ...result, admin_issuance: adminIssuance };
@@ -775,7 +1139,18 @@ async function denoMain() {
     out.stage = 'import';
     const { default: postgres } = await import('npm:postgres@3.4.9');
     const observer = postgres(config.db_url, { prepare: false, max: 4, idle_timeout: 5, connect_timeout: 10, onnotice: () => {}, ...ssl });
-    const command = await import('../../supabase/functions/command/index.ts');
+    if(config.active_floor) {out.stage='active_catalog';out.active_catalog=await assertActiveFloorCatalog(observer);}
+    if (config.history) {
+      out.stage='historical-guards';
+      if (await historicalCatalog(observer) !== config.retained_catalog) fail('historical_catalog_changed');
+      await historicalGuards(observer, config.history);
+    }
+    out.stage='import';
+    const load=(path,kind='command')=>import(pathToFileURL(join((kind==='read' ? config.read_source : config.source)?.path ?? REPO_ROOT,path)).href);
+    const command = await load('supabase/functions/command/index.ts');
+    const policyCommand=config.active_floor ? await import('../../supabase/functions/command/index.ts') : command;
+    out.source=config.source ? {commit:config.source.commit,tree:config.source.tree} : null;
+    out.read_source=config.read_source ? {commit:config.read_source.commit,tree:config.read_source.tree} : null;
     const { db } = command;
     // Every command-module transaction (admin, hosted, join and ordinary) runs through db.begin.
     // Record the SQLSTATE of each rejected one while a race is open; no message is read.
@@ -810,8 +1185,10 @@ async function denoMain() {
     if (!minimum.ok) fail(minClientVersionDiagnostic(minimum));
     out.client_version = minimum.version;
     // D4: names and ids unique to this run (fresh workspace, users and grants per scenario).
-    const ctx = { issuerTarget:{url:config.db_url,ssl:ssl.ssl}, floorUrl:config.floor_url, command, db, observer, failures, jwks, out, tag: randomUUID().replaceAll('-', '').slice(0, 10), clientVersion: minimum.version };
-    const result = scenario.startsWith('local-allow-retired-parent-') ? await localAllowRetiredParentScenario(ctx,scenario)
+    const ctx = { expectBaselineExpiry:config.expect_baseline_expiry, history:config.history, retainedCatalog:config.retained_catalog, load, policyCommand, issuerTarget:{url:config.db_url,ssl:ssl.ssl}, floorUrl:config.floor_url, command, db, observer, failures, jwks, out, tag: randomUUID().replaceAll('-', '').slice(0, 10), clientVersion: minimum.version };
+    const result = ['active-floor-historical-idle','historical-baseline-expiry'].includes(scenario) ? await historicalIdleScenario(ctx)
+      : scenario.startsWith('active-floor-canonical-') ? await activeFloorCanonicalScenario(ctx,scenario)
+      : scenario.startsWith('local-allow-retired-parent-') ? await localAllowRetiredParentScenario(ctx,scenario)
       : scenario==='hosted-owner-removal-prefix' ? await hostedOwnerRemovalScenario(ctx)
       : scenario==='floor-first-use-vs-head-revocation' ? await floorFirstUseScenario(ctx)
       : scenario.startsWith('local-resume-') ? await localResumeScenario(ctx,scenario)
@@ -850,7 +1227,8 @@ async function workspace(ctx, owner, household, workspaceId = id()) {
 const member = (ctx, workspaceId, user, role) =>
   ctx.observer`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${workspaceId}::uuid, ${user.userId}::uuid, ${role})`;
 const summary = (result) => ({ status: result.status, body_status: result.body?.status ?? null, error: result.body?.error ?? null });
-const manage = (ctx, user, workspaceId, body) => ctx.command.handleHostedManagementCommand({
+// F is an ACTIVE rollback reader/consumer; the chosen-date writer remains current.
+const manage = (ctx, user, workspaceId, body) => (body.kind==='set_connection_expiry' ? ctx.policyCommand : ctx.command).handleHostedManagementCommand({
   command_id: id(), client_version: ctx.clientVersion,
   ...(workspaceId === null ? {} : { workspace_id: workspaceId, stream: { kind: 'workspace' } }), command: body,
 }, user.identity);
@@ -876,7 +1254,7 @@ async function hostedGrant(ctx, owner, workspaceId, otherWorkspaceIds = []) {
 async function creationSide(ctx, kind, fixture) {
   const { owner, workspaceId } = fixture;
   if (kind === 'hosted') {
-    const { authenticateHostedGrantCapability } = await import('../../supabase/functions/_shared/hosted-seat-auth.ts');
+    const { authenticateHostedGrantCapability } = await ctx.load('supabase/functions/_shared/hosted-seat-auth.ts');
     const grant = await hostedGrant(ctx, owner, workspaceId);
     const capability = await ctx.db.begin((tx) => authenticateHostedGrantCapability(tx, {
       grantId: grant.grantId, ownerUserId: owner.userId, providerGrantId: grant.providerGrantId,
@@ -982,8 +1360,8 @@ async function holderSide(ctx, kind, fixture) {
  * that is prepared and never granted; `race`, the race command and the result it must give. */
 async function adminSide(ctx, fixture, label = 'admin', options = {}) {
   const { owner, workspaceId } = fixture;
-  const policy = await import('../../supabase/functions/_shared/protocol.js');
-  const { adminTransaction } = await import('../../supabase/functions/command/admin-delegation.ts');
+  const policy = await ctx.load('supabase/functions/_shared/protocol.js');
+  const { adminTransaction } = await ctx.load('supabase/functions/command/admin-delegation.ts');
   const { oauthFixture } = await import('./admin-edge-oauth-fixture.mjs');
   const signing = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   // One issuer kid and one client per admin side; the in-process JWKS serves every side's key.
@@ -1423,8 +1801,8 @@ async function adminWithdrawScenario(ctx) {
   // Each owner's grant selects the other owner's workspace.
   const firstGrant = (await adminSide(ctx, { owner: first, workspaceId: secondWorkspace }, 'first')).grant;
   const secondGrant = (await adminSide(ctx, { owner: second, workspaceId: firstWorkspace }, 'second')).grant;
-  const policy = await import('../../supabase/functions/_shared/protocol.js');
-  const { adminTransaction } = await import('../../supabase/functions/command/admin-delegation.ts');
+  const policy = await ctx.load('supabase/functions/_shared/protocol.js');
+  const { adminTransaction } = await ctx.load('supabase/functions/command/admin-delegation.ts');
   const withdraw = (grant, workspaceId) => ({ command_id: id(), stream: { kind: 'account' }, resource: policy.ADMIN_RESOURCE,
     command: { kind: 'withdraw_admin_workspace_access', grant_id: grant, workspace_id: workspaceId, reason_code: 'withdrawn' } });
   const sides = [
@@ -1477,12 +1855,12 @@ async function adminWithdrawScenario(ctx) {
 async function golden(ctx) {
   const { out, observer, command } = ctx;
   out.stage = 'golden-fixture';
-  const { createMcpProtocolHandler } = await import('../../supabase/functions/mcp/protocol.ts');
-  const { MCP_ISSUER, MCP_RESOURCE } = await import('../../supabase/functions/mcp/auth.ts');
-  const { executeClaimSeat } = await import('../../supabase/functions/mcp/claim-seat.ts');
-  const { commandOutput, readOutput, HostedToolFailure } = await import('../../supabase/functions/mcp/tool-errors.ts');
-  const { authenticateHostedSeatCapability } = await import('../../supabase/functions/_shared/hosted-seat-auth.ts');
-  const read = await import('../../supabase/functions/read/index.ts');
+  const { createMcpProtocolHandler } = await ctx.load('supabase/functions/mcp/protocol.ts');
+  const { MCP_ISSUER, MCP_RESOURCE } = await ctx.load('supabase/functions/mcp/auth.ts');
+  const { executeClaimSeat } = await ctx.load('supabase/functions/mcp/claim-seat.ts');
+  const { commandOutput, readOutput, HostedToolFailure } = await ctx.load('supabase/functions/mcp/tool-errors.ts');
+  const { authenticateHostedSeatCapability } = await ctx.load('supabase/functions/_shared/hosted-seat-auth.ts');
+  const read = await ctx.load('supabase/functions/read/index.ts','read');
   const owner = await human(ctx, 'golden-owner');
   const { workspaceId } = await workspace(ctx, owner, false);
   const other = await workspace(ctx, owner, false);
@@ -1576,7 +1954,7 @@ async function delegatedLocalScenario(ctx,scenario) {
   const owner=await human(ctx,'m3-owner');
   const {workspaceId}=await workspace(ctx,owner,false);
   const admin=await adminSide(ctx,{owner,workspaceId},'m3-first');
-  const read=await import('../../supabase/functions/read/index.ts');
+  const read=await ctx.load('supabase/functions/read/index.ts','read');
   const use=async raw=>{
     const response=await read.handleRequest(new Request('http://127.0.0.1/functions/v1/read',{
       method:'POST',headers:{authorization:`Bearer ${raw}`,'content-type':'application/json'},
@@ -1692,7 +2070,7 @@ async function delegatedLocalScenario(ctx,scenario) {
       const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
       await tx`SELECT token_id FROM swarm.agent_tokens WHERE token_id=${child}::uuid FOR UPDATE`;
       pending=admin.invoke(revoke);
-      check('used-direct-child-observed-wait',await waitForBlocked(observer,Number(pid),p=>ownedWait(observer,p,{grants:[revoked.grantId]},Number(pid)),3500)!==null);
+      check('used-direct-child-observed-wait',await waitForBlocked(observer,Number(pid),p=>ownedWait(observer,p,{tokens:[child]},Number(pid)),3500)!==null);
       let blocked=false;
       try { await observer.begin(async probe=>{
         await probe`SELECT principal_id FROM swarm.agent_principals WHERE principal_id=${seat.principal}::uuid FOR SHARE NOWAIT`;
@@ -1949,8 +2327,13 @@ async function delegatedLocalScenario(ctx,scenario) {
 }
 
 /** Compatibility owns the old ordinary mint wire and the existing policy
- * setter/read/ledger boundary. It does not simulate a newer client default. */
-async function ordinaryLocalPolicyScenario(ctx) {
+ * setter/read/ledger boundary, with old explicit horizon fields and current
+ * omitted fields. Both use the unchanged target-free renewal wire. */
+async function ordinaryLocalPolicyScenario(ctx,wire=null) {
+  if(wire===null) {
+    const old=await ordinaryLocalPolicyScenario(ctx,'old'),current=await ordinaryLocalPolicyScenario(ctx,'current');
+    return {checks:[...old.checks,...current.checks.map(c=>({...c,name:`current-wire-${c.name}`}))]};
+  }
   const {observer}=ctx,checks=[];
   const check=(name,ok)=>checks.push({name,ok:ok===true});
   const owner=await human(ctx,'compat-owner'),other=await human(ctx,'compat-admin');
@@ -1960,7 +2343,7 @@ async function ordinaryLocalPolicyScenario(ctx) {
   const device=id();await observer`INSERT INTO swarm.devices(device_id,user_id,label) VALUES(${device}::uuid,${owner.userId}::uuid,'compat fixture')`;
   const minted=await manage(ctx,owner,workspaceId,{kind:'mint_agent_token',principal_id:created.body.principal_id,
     run_id:id(),task_id:id(),epoch:1,device_id:device,scopes:['post_signal'],
-    renewal_kind:'timeboxed',renewal_horizon_ms:30*86400000});
+    ...(wire==='old' ? {renewal_kind:'timeboxed',renewal_horizon_ms:30*86400000} : {})});
   if (minted.status!==200 || typeof minted.body.agent_token!=='string') fail('compat_old_wire_mint');
   check('same-invocation-positive',minted.status===200 && minted.body.status==='accepted'
     && (await observer`SELECT EXISTS(SELECT 1 FROM swarm.agent_tokens WHERE token_id=${minted.body.token_id}::uuid) AS ok`)[0]?.ok===true);
@@ -1968,7 +2351,7 @@ async function ordinaryLocalPolicyScenario(ctx) {
   check('actual-mint-truthful-null-policy',Object.hasOwn(minted.body,'connection_expires_at') && minted.body.connection_expires_at===null && Object.hasOwn(minted.body,'connection_expired_at') && minted.body.connection_expired_at===null);
   const [g]=await observer`SELECT g.* FROM swarm.renewal_grants g JOIN swarm.agent_tokens t USING(renewal_grant_id) WHERE t.token_id=${minted.body.token_id}::uuid`;
   check('old-default-does-not-persist-technical-horizon',g.kind==='standing' && g.horizon_expires_at===null && g.max_successors===null);
-  const read=await import('../../supabase/functions/read/index.ts');
+  const read=await ctx.load('supabase/functions/read/index.ts','read');
   let credential=minted.body.agent_token;
   const readPolicy=async()=>{
     const response=await read.handleRequest(new Request('http://127.0.0.1/functions/v1/read',{
@@ -1980,6 +2363,9 @@ async function ordinaryLocalPolicyScenario(ctx) {
   check('existing-agent-read-truthful-null-policy',first.status===200 && first.body.grants.length===1 && first.body.grants[0].connection_expires_at===null && first.body.grants[0].connection_expired_at===null);
   await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second'
     WHERE token_id=${minted.body.token_id}::uuid`;
+  const history=await observer`SELECT t.scopes,t.first_used_at,t.issued_at,g.successors_used,g.successors_stranded,
+    g.created_at,g.suspended_at,g.new_host_at FROM swarm.agent_tokens t JOIN swarm.renewal_grants g USING(renewal_grant_id)
+    WHERE t.token_id=${minted.body.token_id}::uuid`;
   const renewalResponse=await ctx.command.handleRequest(new Request('http://127.0.0.1/functions/v1/command',{
     method:'POST',headers:{authorization:`Bearer ${credential}`,'content-type':'application/json'},
     body:JSON.stringify({command_id:id(),client_version:ctx.clientVersion,workspace_id:workspaceId,
@@ -1988,6 +2374,13 @@ async function ordinaryLocalPolicyScenario(ctx) {
   check('old-wire-family-silent-expired-proof-renewal',renewalResponse.status===200 && renewed.status==='accepted' && typeof renewed.agent_token==='string'
     && renewed.grant_kind==='standing' && renewed.connection_expires_at===null && renewed.connection_expired_at===null);
   if (typeof renewed.agent_token!=='string') fail('compat_silent_renewal_control');
+  const successorRows=await observer`SELECT t.scopes,g.successors_used,g.successors_stranded,g.created_at,g.suspended_at,g.new_host_at,
+    parent.first_used_at,parent.issued_at FROM swarm.agent_tokens t JOIN swarm.renewal_grants g USING(renewal_grant_id)
+    JOIN swarm.agent_tokens parent ON parent.token_id=t.predecessor_token_id WHERE t.token_id=${renewed.token_id}::uuid`;
+  const prior=history[0],next=successorRows[0];
+  check('renewal-wire-retains-scope-counter-history',next && JSON.stringify(next.scopes)===JSON.stringify(prior.scopes) &&
+    next.successors_used===prior.successors_used+1 && next.successors_stranded===prior.successors_stranded &&
+    ['created_at','suspended_at','new_host_at','first_used_at','issued_at'].every(key=>String(next[key])===String(prior[key])));
   credential=renewed.agent_token;
   check('silently-renewed-credential-usable',(await readPolicy()).status===200);
   const policy=expiry=>({kind:'set_connection_expiry',connection_kind:'renewal',grant_id:g.renewal_grant_id,connection_expires_at:expiry});
@@ -2255,7 +2648,7 @@ async function localResumeScenario(ctx,scenario) {
   const owner=await human(ctx,'resume-owner'),manager=await human(ctx,'resume-manager');
   const {workspaceId}=await workspace(ctx,owner,false);
   await member(ctx,workspaceId,manager,'admin');
-  const read=await import('../../supabase/functions/read/index.ts');
+  const read=await ctx.load('supabase/functions/read/index.ts','read');
   const use=async raw=>{
     const response=await read.handleRequest(new Request('http://127.0.0.1/functions/v1/read',{
       method:'POST',headers:{authorization:`Bearer ${raw}`,'content-type':'application/json'},
@@ -2473,7 +2866,7 @@ async function ownedWait(sql, pid, targets, singleRowGate = null) {
 async function hostedOwnerRemovalScenario(ctx) {
   const {observer,failures}=ctx,checks=[];
   const check=(name,ok)=>checks.push({name,ok:ok===true});
-  const {authenticateHostedGrantCapability}=await import('../../supabase/functions/_shared/hosted-seat-auth.ts');
+  const {authenticateHostedGrantCapability}=await ctx.load('supabase/functions/_shared/hosted-seat-auth.ts');
   const fixture=async (label,options={})=>{
     const admin=await human(ctx,`prefix-admin-${label}`),owner=options.owner ?? await human(ctx,`prefix-owner-${label}`);
     const w=options.workspace ?? await workspace(ctx,options.ownedWorkspace?owner:admin,false);
@@ -2661,7 +3054,7 @@ async function floorFirstUseScenario(ctx) {
   const check=(name,ok)=>checks.push({name,ok:ok===true});
   if(typeof ctx.floorUrl!=='string') fail('floor_module_missing');
   const floor=await import(ctx.floorUrl);
-  const read=await import('../../supabase/functions/read/index.ts');
+  const read=await ctx.load('supabase/functions/read/index.ts','read');
   const owner=await human(ctx,'floor-owner');const {workspaceId}=await workspace(ctx,owner,false);
   const request=async(raw,command)=>{
     const response=await ctx.command.handleRequest(new Request('http://127.0.0.1/functions/v1/command',{
@@ -2754,4 +3147,267 @@ async function floorFirstUseScenario(ctx) {
   // Diagnostic only: no historical deadlock can satisfy the required support gate.
   return {checks,floor_compatibility:incompatible?'INCOMPATIBLE':states.length?'INCONCLUSIVE':'UNPROVEN',
     required_compatibility:'BLOCKED',sqlstates:states,legacy_diagnostic:{held_C:heldC,identified_cycle:cycle}};
+}
+
+
+/** Canonical first use uses the selected public read handler. The existing
+ * management fixture supplies the human context for revocation; this case
+ * claims consumer locking/rollback, never JWT or initial consent admission. */
+async function activeFloorCanonicalScenario(ctx,scenario) {
+  const {observer}=ctx,checks=[];
+  const check=(name,ok)=>checks.push({name,ok:ok===true});
+  const read=await ctx.load('supabase/functions/read/index.ts','read');
+  const tables=(await observer`SELECT schemaname,relname FROM pg_stat_user_tables ORDER BY schemaname,relname`);
+  const databaseState=async()=>{
+    const state=[];
+    for(const {schemaname,relname} of tables) {
+      const rows=await observer`SELECT count(*)::text AS n,md5(coalesce(string_agg(to_jsonb(r)::text,E'\n' ORDER BY to_jsonb(r)::text),'')) AS hash
+        FROM ${observer(`${schemaname}.${relname}`)} r`;
+      state.push([schemaname,relname,rows[0].n,rows[0].hash]);
+    }
+    return JSON.stringify(state);
+  };
+  const owner=await human(ctx,'active-floor');
+  const {workspaceId}=await workspace(ctx,owner,false);
+  const use=async raw=>{
+    const response=await read.handleRequest(new Request('http://127.0.0.1/functions/v1/read',{
+      method:'POST',headers:{authorization:`Bearer ${raw}`,'content-type':'application/json'},
+      body:JSON.stringify({resource:'renewal_grants',workspace_id:workspaceId})}));
+    return response.status;
+  };
+  const renew=async raw=>{
+    const response=await ctx.command.handleRequest(new Request('http://127.0.0.1/functions/v1/command',{
+      method:'POST',headers:{authorization:`Bearer ${raw}`,'content-type':'application/json'},
+      body:JSON.stringify({command_id:id(),client_version:ctx.clientVersion,workspace_id:workspaceId,
+        stream:{kind:'workspace'},command:{kind:'renew_agent_token'}})}));
+    const body=await response.json();
+    if(response.status!==200 || typeof body.agent_token!=='string') fail('active_floor_renew_control');
+    return body;
+  };
+  const chain=async label=>{
+    const made=await manage(ctx,owner,workspaceId,{kind:'create_agent_principal',name:`af-${label}-${ctx.tag}`});
+    if(made.status!==200) fail('active_floor_principal_control');
+    const device=id();
+    await observer`INSERT INTO swarm.devices(device_id,user_id,label) VALUES(${device}::uuid,${owner.userId}::uuid,'active floor')`;
+    const t=await manage(ctx,owner,workspaceId,{kind:'mint_agent_token',principal_id:made.body.principal_id,
+      run_id:id(),task_id:id(),epoch:1,device_id:device,scopes:['post_signal']});
+    if(t.status!==200 || await use(t.body.agent_token)!==200) fail('active_floor_root_use');
+    const c=await renew(t.body.agent_token);
+    if(await use(c.agent_token)!==200) fail('active_floor_successor_use');
+    const x=await renew(c.agent_token);
+    const rows=await observer`SELECT token_id,predecessor_token_id,first_used_at,renewal_grant_id,lineage_id
+      FROM swarm.agent_tokens WHERE token_id=ANY(${[t.body.token_id,c.token_id,x.token_id]}::uuid[])`;
+    const T=rows.find(row=>row.token_id===t.body.token_id),C=rows.find(row=>row.token_id===c.token_id),X=rows.find(row=>row.token_id===x.token_id);
+    if(rows.length!==3 || !T.first_used_at || !C.first_used_at || X.first_used_at!==null ||
+      C.predecessor_token_id!==T.token_id || X.predecessor_token_id!==C.token_id ||
+      rows.some(row=>row.renewal_grant_id!==T.renewal_grant_id || row.lineage_id!==T.lineage_id)) fail('active_floor_chain_binding');
+    return {T,C,X,raw:x.agent_token};
+  };
+  const revoke=async fixture=>{
+    const [clock]=await observer`SELECT extract(epoch FROM clock_timestamp())::float8 AS seconds`;
+    return await manage(ctx,{...owner,identity:{...owner.identity,interactiveAuthAtSeconds:Number(clock.seconds)}},
+      workspaceId,{kind:'revoke_agent_token',token_id:fixture.T.token_id});
+  };
+  const positive=await chain('positive');
+  check('same-invocation-positive',await use(positive.raw)===200);
+  const sequential=await chain('sequential');
+  check('sequential-revoke', (await revoke(sequential)).status===200);
+  const sequentialBefore=await databaseState();
+  check('sequential-terminal-denial',[401,403].includes(await use(sequential.raw)));
+  check('sequential-denial-every-table-unchanged',sequentialBefore===await databaseState());
+  check('sequential-no-denied-adoption',(await observer`SELECT first_used_at IS NULL AS ok FROM swarm.agent_tokens WHERE token_id=${sequential.X.token_id}::uuid`)[0].ok);
+  const raced=await chain('raced');
+  const adoptionState=async()=>JSON.stringify(await observer`SELECT t.token_id,t.first_used_at,t.expires_at,
+    g.last_used_at,g.last_used_device_id,g.last_used_from,g.successors_used,g.successors_stranded
+    FROM swarm.agent_tokens t JOIN swarm.renewal_grants g USING(renewal_grant_id)
+    WHERE t.token_id=ANY(${[raced.T.token_id,raced.C.token_id,raced.X.token_id]}::uuid[]) ORDER BY t.token_id`);
+  const adoptionBefore=await adoptionState();
+  const firstUseFirst=scenario.endsWith('use-first');
+  const states=[];
+  const settle=promise=>promise.catch(error=>{states.push(sqlstate(error));return null;});
+  let first,second,firstPid,secondPid,gatePid;
+  await observer.begin(async gate=>{
+    gatePid=Number((await gate`SELECT pg_backend_pid() AS pid`)[0].pid);
+    await gate`SELECT token_id FROM swarm.agent_tokens WHERE token_id=${raced.X.token_id}::uuid FOR UPDATE`;
+    first=settle(firstUseFirst ? use(raced.raw) : revoke(raced));
+    firstPid=await waitForBlocked(observer,gatePid,pid=>ownedWait(observer,pid,{tokens:[raced.X.token_id]},gatePid));
+    if(firstPid===null) fail('active_floor_first_owned_queue_inconclusive');
+    second=settle(firstUseFirst ? revoke(raced) : use(raced.raw));
+    const deadline=Date.now()+3500;
+    while(Date.now()<deadline && secondPid==null) {
+      const rows=await observer`SELECT pid FROM pg_stat_activity WHERE pid<>${firstPid}::int
+        AND (${gatePid}::int=ANY(pg_blocking_pids(pid)) OR ${firstPid}::int=ANY(pg_blocking_pids(pid)))`;
+      for(const row of rows) if(await ownedWait(observer,Number(row.pid),{tokens:[raced.T.token_id,raced.C.token_id,raced.X.token_id],users:[owner.userId],workspaces:[workspaceId]})) secondPid=Number(row.pid);
+      if(secondPid==null) await new Promise(resolve=>setTimeout(resolve,20));
+    }
+    if(secondPid==null) fail('active_floor_second_owned_queue_inconclusive');
+  });
+  const results=await Promise.all([first,second]);
+  const used=firstUseFirst ? results[0] : results[1],revoked=firstUseFirst ? results[1] : results[0];
+  check('both-owned-distinct-pids',firstPid>0 && secondPid>0 && firstPid!==secondPid && gatePid!==firstPid && gatePid!==secondPid);
+  check('no-race-sqlstate',states.length===0);
+  check('revoke-committed',revoked?.status===200);
+  check('ordered-first-use-result',firstUseFirst ? used===200 : [401,403].includes(used));
+  if(!firstUseFirst) check('denied-first-use-rolls-back-adoption',(await observer`SELECT first_used_at IS NULL AS ok FROM swarm.agent_tokens WHERE token_id=${raced.X.token_id}::uuid`)[0].ok);
+  if(!firstUseFirst) check('revoke-first-both-adoptions-and-history-unchanged',adoptionBefore===await adoptionState());
+  const terminalBefore=await databaseState();
+  check('terminal-denial',[401,403].includes(await use(raced.raw)));
+  check('terminal-denial-every-table-unchanged',terminalBefore===await databaseState());
+  return {checks,sqlstates:states,canonical_witness:{first_pid:firstPid,second_pid:secondPid,gate_pid:gatePid,
+    workspace_id:workspaceId,token_ids:[raced.T.token_id,raced.C.token_id,raced.X.token_id],order:firstUseFirst?'use-first':'revoke-first'}};
+}
+
+
+/** Historical behavior belongs to the real read/command owners. The complete state
+ * comparisons intentionally fail on any unexplained write, including other schemas. */
+async function historicalIdleScenario(ctx) {
+  const {observer:sql,history}=ctx,checks=[];
+  const check=(name,ok)=>{if(!ok) fail(`historical_${name}`);checks.push({name,ok:true});};
+  const read=await ctx.load('supabase/functions/read/index.ts','read');
+  const stable=value=>JSON.stringify(value,(_key,v)=>v && typeof v==='object' && !Array.isArray(v)
+    ? Object.fromEntries(Object.entries(v).sort(([a],[b])=>a.localeCompare(b))) : v);
+  const same=(a,b)=>stable(a)===stable(b);
+  const state=async()=>{
+    const result={};
+    for(const t of await sql`SELECT schemaname,relname FROM pg_stat_user_tables ORDER BY schemaname,relname`) {
+      const name=`${t.schemaname}.${t.relname}`;
+      result[name]=(await sql`SELECT to_jsonb(r) AS row FROM ${sql(name)} r ORDER BY to_jsonb(r)::text`).map(r=>r.row);
+    }
+    return result;
+  };
+  const use=(f,raw=f.raw)=>read.handleRequest(new Request('http://127.0.0.1/functions/v1/read',{
+    method:'POST',headers:{authorization:`Bearer ${raw}`,'content-type':'application/json'},
+    body:JSON.stringify({resource:'renewal_grants',workspace_id:f.workspace})}));
+  const renew=async f=>{
+    const commandId=id();
+    const response=await ctx.command.handleRequest(new Request('http://127.0.0.1/functions/v1/command',{
+      method:'POST',headers:{authorization:`Bearer ${f.raw}`,'content-type':'application/json'},
+      body:JSON.stringify({command_id:commandId,client_version:ctx.clientVersion,workspace_id:f.workspace,
+        stream:{kind:'workspace'},command:{kind:'renew_agent_token'}})}));
+    return {status:response.status,body:await response.json(),commandId};
+  };
+  const minus=(row,keys)=>Object.fromEntries(Object.entries(row).filter(([key])=>!keys.includes(key)));
+  const row=(s,table,key,value)=>s[`swarm.${table}`].find(r=>r[key]===value);
+  const unchangedExcept=(before,after,tables)=>{
+    check('table-inventory-unchanged',same(Object.keys(before),Object.keys(after)));
+    for(const table of Object.keys(before)) if(!tables.includes(table))
+      check(`unchanged-${table}`,same(before[table],after[table]));
+  };
+  const window=(value,start,end)=>Number.isFinite(Date.parse(value)) && Date.parse(value)>=start && Date.parse(value)<=end;
+  const clock=async()=>new Date((await sql`SELECT clock_timestamp() AS now`)[0].now).getTime();
+  const grantDelta=(before,after,f,start,end,spend)=>{
+    const a=row(before,'renewal_grants','renewal_grant_id',f.grant),b=row(after,'renewal_grants','renewal_grant_id',f.grant);
+    check('grant-history-preserved',same(minus(a,['last_used_at','last_used_device_id','last_used_from','successors_used']),
+      minus(b,['last_used_at','last_used_device_id','last_used_from','successors_used'])));
+    check('exact-grant-counter-and-use',b.successors_used===a.successors_used+spend &&
+      b.last_used_device_id===f.device && window(b.last_used_at,start,end) &&
+      b.last_used_from===a.last_used_from);
+    check('other-grants-unchanged',same(before['swarm.renewal_grants'].filter(r=>r.renewal_grant_id!==f.grant),
+      after['swarm.renewal_grants'].filter(r=>r.renewal_grant_id!==f.grant)));
+  };
+  const live=history.cases.find(f=>f.kind==='live');
+  check('same-invocation-positive',(await use(live)).status===200);
+  if(ctx.expectBaselineExpiry) {
+    const liveRenewal=await renew(live);
+    check('baseline-live-renewal-positive',liveRenewal.status===200 && liveRenewal.body.status==='accepted' &&
+      /^swm_agt_[A-Za-z0-9_-]{43}$/u.test(liveRenewal.body.agent_token) &&
+      (await use(live,liveRenewal.body.agent_token)).status===200);
+  }
+  const completed=[];
+  for(const f of history.cases.filter(f=>f.kind!=='live')) {
+    const initial=await state(),g=row(initial,'renewal_grants','renewal_grant_id',f.grant),t=row(initial,'agent_tokens','token_id',f.token);
+    const now=await clock();
+    check('coherent-old-credential',Date.parse(g.created_at)<=Date.parse(t.issued_at) &&
+      Date.parse(t.issued_at)<now-35*86_400_000 && Date.parse(t.expires_at)>Date.parse(t.issued_at) &&
+      Date.parse(t.expires_at)-Date.parse(t.issued_at)<=8*3_600_000 &&
+      (f.kind==='expired-unused' ? t.first_used_at===null && g.last_used_at===null :
+        Date.parse(t.first_used_at)>=Date.parse(t.issued_at) && Date.parse(t.first_used_at)<Date.parse(t.expires_at) &&
+        t.first_used_at===g.last_used_at && Date.parse(g.last_used_at)<now-35*86_400_000));
+    // Independent storage witnesses exclude missing hash, membership, principal,
+    // run, device, revocation or foreign ancestry as a reason for O's 401.
+    const [authority]=await sql`SELECT t.token_hash=${createHash('sha256').update(f.raw).digest()} AS hash_ok,
+      t.revoked_at IS NULL AND NOT t.surrender_only AND t.predecessor_token_id IS NULL
+      AND t.lineage_id=${f.lineage}::uuid AND t.renewal_grant_id=g.renewal_grant_id
+      AND p.transport='local' AND NOT p.turn_only AND p.managed_at IS NULL AND p.revoked_at IS NULL
+      AND r.ended_at IS NULL AND d.revoked_at IS NULL AND m.revoked_at IS NULL
+      AND g.revoked_at IS NULL AND g.connection_expires_at IS NULL AND g.connection_expired_at IS NULL
+      AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones) AS live
+      FROM swarm.agent_tokens t JOIN swarm.agent_principals p ON p.principal_id=t.principal_id
+      JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=p.principal_id
+      JOIN swarm.devices d ON d.device_id=r.device_id AND d.user_id=p.owner_user_id
+      JOIN swarm.memberships m ON m.workspace_id=p.workspace_id AND m.user_id=p.owner_user_id
+      JOIN swarm.renewal_grants g ON g.renewal_grant_id=t.renewal_grant_id AND g.principal_id=p.principal_id AND g.run_id=r.run_id
+      WHERE t.token_id=${f.token}::uuid`;
+    check('hash-and-live-authority',authority?.hash_ok===true && authority.live===true);
+    check('expired-read-denied',[401,403].includes((await use(f)).status));
+    check('expired-read-every-table-unchanged',same(initial,await state()));
+    const before=await state(),start=await clock(),result=await renew(f),end=await clock(),after=await state();
+    if(ctx.expectBaselineExpiry) {
+      check('baseline-expiry-refusal',result.status===401 && result.body.error==='unauthenticated');
+      check('baseline-denial-every-table-unchanged',same(before,after));
+      completed.push(f.kind);
+      continue;
+    }
+    if(['horizon-expired','expired-unused'].includes(f.kind)) {
+      check('ordinary-renewal-denied',[401,403].includes(result.status));
+      check('ordinary-denial-every-table-unchanged',same(before,after));
+      completed.push(f.kind);
+      continue;
+    }
+    check('standing-null-technical-windows',g.kind==='standing' && g.max_successors===null && g.horizon_expires_at===null &&
+      g.connection_expires_at===null && g.connection_expired_at===null && g.suspension_active===(f.kind==='suspended'));
+    const body=result.body;
+    check('silent-short-successor',result.status===200 && body.status==='accepted' && /^swm_agt_[A-Za-z0-9_-]{43}$/u.test(body.agent_token));
+    unchangedExcept(before,after,['swarm.agent_tokens','swarm.renewal_grants','swarm.events','swarm.streams',
+      'swarm.idempotency_keys','swarm.audit_log','swarm.agent_presence']);
+    const successor=row(after,'agent_tokens','token_id',body.token_id);
+    check('one-pending-hash-matched-successor',!!successor && after['swarm.agent_tokens'].length===before['swarm.agent_tokens'].length+1 &&
+      same(before['swarm.agent_tokens'],after['swarm.agent_tokens'].filter(r=>r.token_id!==body.token_id)) &&
+      successor.token_hash===`\\x${createHash('sha256').update(body.agent_token).digest('hex')}` && successor.first_used_at===null &&
+      successor.predecessor_token_id===f.token && successor.lineage_id===f.lineage && successor.renewal_grant_id===f.grant &&
+      successor.principal_id===f.principal && successor.run_id===f.run && successor.task_id===f.task && successor.epoch===t.epoch &&
+      same(successor.scopes,t.scopes) && successor.revoked_at===null && successor.surrender_only===false &&
+      successor.parent_admin_grant_id===t.parent_admin_grant_id && window(successor.issued_at,start,end) &&
+      Date.parse(successor.expires_at)>end && Date.parse(successor.expires_at)-Date.parse(successor.issued_at)<=8*3_600_000);
+    check('complete-successor-inheritance',same(
+      minus(t,['token_id','token_hash','issued_at','expires_at','first_used_at','predecessor_token_id']),
+      minus(successor,['token_id','token_hash','issued_at','expires_at','first_used_at','predecessor_token_id'])));
+    grantDelta(before,after,f,start,end,1);
+    const appended=(table,predicate)=>{
+      const old=before[`swarm.${table}`],next=after[`swarm.${table}`];
+      const added=next.filter(r=>!old.some(o=>same(o,r)));
+      check(`exact-${table}-append`,next.length===old.length+1 && old.every(o=>next.some(r=>same(o,r))) && added.length===1 && predicate(added[0]));
+      return added[0];
+    };
+    const event=appended('events',r=>r.command_id===result.commandId && r.type==='AgentTokenMinted' &&
+      r.workspace_id===f.workspace && r.stream_id===f.stream && r.actor_agent_principal===f.principal && r.actor_run===f.run &&
+      r.payload.token_id===body.token_id && r.payload.predecessor_token_id===f.token && r.payload.renewal_grant_id===f.grant &&
+      r.payload.principal_id===f.principal && r.payload.run_id===f.run && same(r.payload.scopes,t.scopes));
+    appended('idempotency_keys',r=>r.command_id===result.commandId && r.principal_kind==='agent' && r.principal_id===f.principal &&
+      r.workspace_id===f.workspace && r.stream_id===f.stream && r.response.ok===true && r.response.token_id===body.token_id &&
+      same(r.response.event_ids,[event.event_id]) && !Object.hasOwn(r.response,'agent_token'));
+    appended('audit_log',r=>r.workspace_id===f.workspace && r.stream_id===f.stream && r.command_kind==='renew_agent_token' &&
+      r.outcome==='accepted' && r.actor_agent_principal===f.principal && r.actor_run===f.run && r.credential_id===f.token && r.reason===null);
+    appended('agent_presence',r=>r.workspace_id===f.workspace && r.principal_id===f.principal && window(r.last_command_at,start,end) &&
+      r.client_build===null && r.watcher_at===null && r.channel_at===null && r.listener_at===null && r.turn_at===null);
+    check('exact-stream-sequence',same(before['swarm.streams'].map(r=>r.stream_id===f.stream?{...r,head_seq:r.head_seq+1}:r).sort((a,b)=>a.stream_id.localeCompare(b.stream_id)),[...after['swarm.streams']].sort((a,b)=>a.stream_id.localeCompare(b.stream_id))));
+    const useStart=await clock();
+    check('successor-read-usable',(await use(f,body.agent_token)).status===200);
+    const useEnd=await clock(),adopted=await state();
+    unchangedExcept(after,adopted,['swarm.agent_tokens','swarm.renewal_grants']);
+    const used=row(adopted,'agent_tokens','token_id',body.token_id);
+    check('exact-successor-adoption',window(used.first_used_at,useStart,useEnd) &&
+      same(minus(successor,['first_used_at']),minus(used,['first_used_at'])) &&
+      same(after['swarm.agent_tokens'].filter(r=>r.token_id!==body.token_id),adopted['swarm.agent_tokens'].filter(r=>r.token_id!==body.token_id)));
+    grantDelta(after,adopted,f,useStart,useEnd,0);
+    completed.push(f.kind);
+  }
+  const guardBefore=await state();
+  await historicalGuards(sql,history);
+  check('guard-probes-rollback-every-table',same(guardBefore,await state()));
+  check('retained-catalog-after-cases',await historicalCatalog(sql)===ctx.retainedCatalog);
+  await assertActiveFloorCatalog(sql);
+  // Digest only: bearer and hash stay private. The pair must use identical input.
+  const fixture_digest=createHash('sha256').update(JSON.stringify(history)).digest('hex');
+  return {checks,historical_completed:completed,fixture_label:history.label,fixture_digest};
 }

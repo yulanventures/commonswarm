@@ -36,6 +36,15 @@ interface RaceResult {
   second_admin_blocked_by?: string;
   http_refused?: number;
   checks?: {name:string;ok:boolean}[];
+  source?: {commit:string;tree:string};
+  read_source?: {commit:string;tree:string};
+  historical_completed?: string[];
+  fixture_label?: string;
+  fixture_digest?: string;
+  baseline?: RaceResult;
+  current?: RaceResult;
+  active_catalog?: {functions:number;migrations:number;view_columns:number;measured_view_sha256:string};
+  canonical_witness?: {first_pid:number;second_pid:number;gate_pid:number;token_ids:string[];order:string};
   floor_compatibility?: string;
   required_compatibility?: string;
   race_witness?: {allow_pid:number;issuer_pid:number;workspace_id:string;parent_id:string;sqlstates:string[];deadlock_edges:number[][][]};
@@ -49,9 +58,11 @@ interface ControlResult {
   sqlstates?: string[];
 }
 interface Harness {
+  HISTORICAL_BASELINE_SOURCE: {commit:string;tree:string};
+  ACTIVE_FLOOR_SOURCES: {F:{commit:string;tree:string}};
   openLockOrderTarget(options: { connector: unknown }): Promise<Target>;
   lockOrderConnector(issuance: { record: string; measure: string; enable: string }): unknown;
-  runScenario(target: Target, scenario: string, timeoutMs?: number): Promise<RaceResult>;
+  runScenario(target: Target, scenario: string, timeoutMs?: number, generations?: {command:string;read:string}): Promise<RaceResult>;
   rawSqlPositiveControl(target: Target): Promise<ControlResult>;
   migrationTreeLine(): string;
 }
@@ -226,6 +237,11 @@ test(ADMIN_WITHDRAW, { timeout: 240_000 }, async () => {
   assert.equal(result.http_refused, 0, `${ADMIN_WITHDRAW}: no HTTP call`);
 });
 
+const ALLOW_ISSUER_CONTRACTS = ["legal-parentless-principal-token-parent", "real-retired-token-active-parent",
+        "issuer-real-session-and-set-only-roles", "real-issuer-lifecycle-committed", "real-dpop-replay-refused",
+        "same-owner-unrelated-workspace-progress", "rollback-restores-issuer-account-events-audit-ledger",
+        "foreign-token-no-foreign-owner-lock", "wrong-workspace-normal-refusal", "all-denials-no-revival"] as const;
+
 // These reach actual delegated HTTP admission and protected worker delivery.
 // Existing X2 tests create principals, but never issue/renew a bounded worker
 // credential. These cases protect parent ordering, budget, and rollback at that
@@ -249,16 +265,141 @@ for (const name of ["delegated-local-permanent-suspension","delegated-local-revo
       assert.notEqual(result.race_witness.allow_pid, result.race_witness.issuer_pid);
       assert.deepEqual(result.race_witness.sqlstates, []);
       assert.deepEqual(result.race_witness.deadlock_edges, []);
-      for (const contract of ["legal-parentless-principal-token-parent", "real-retired-token-active-parent",
-        "issuer-real-session-and-set-only-roles", "real-issuer-lifecycle-committed", "real-dpop-replay-refused",
-        "same-owner-unrelated-workspace-progress", "rollback-restores-issuer-account-events-audit-ledger",
-        "foreign-token-no-foreign-owner-lock", "wrong-workspace-normal-refusal", "all-denials-no-revival"]) {
-        assert.ok(result.checks.some(c=>c.name===contract && c.ok), contract);
-      }
+      for(const contract of ALLOW_ISSUER_CONTRACTS) assert.ok(result.checks.some(check=>check.name===contract && check.ok),contract);
     }
     if (name === "floor-first-use-vs-head-revocation") {
-      assert.equal(result.floor_compatibility,"SUPPORTED",
-        `required rollback-support gate ${result.required_compatibility ?? "BLOCKED"}; legacy diagnostic ${result.floor_compatibility}`);
+      // This name remains the exact legacy-O diagnostic. It cannot certify F.
+      assert.equal(result.floor_compatibility,"INCOMPATIBLE", "legacy O must exhibit the identified owned-row cycle");
+      assert.equal(result.required_compatibility,"BLOCKED", "an O diagnosis cannot satisfy the separate F admission gate");
     }
   });
 }
+
+
+// Generation rows extend existing owners; none supplies auth, a receipt, or
+// an outcome. F is loaded from its retained Git objects, current is this checkout.
+const completedFloorCases=new Set<string>();
+for(const [command,read] of [['current','current'],['F','current'],['current','F'],['F','F']]) {
+  for(const order of ['use-first','revoke-first']) {
+    const name=`active-floor-canonical-${order}`;
+    test(`${name} exact ${command}/${read}`,{timeout:300_000},async()=>{
+      const result=await harness.runScenario(bound(),name,270_000,{command,read});
+      assert.equal(result.stage,'complete',`${result.stage}: ${result.error ?? 'inconclusive'}`);
+      assert.equal(result.active_catalog?.migrations,4);
+      assert.equal(result.active_catalog?.view_columns,11);
+      assert.match(result.active_catalog?.measured_view_sha256 ?? '',/^[a-f0-9]{64}$/);
+      process.stdout.write(`ACTIVE_FLOOR_CATALOG ${JSON.stringify({command,read,...result.active_catalog})}\n`);
+      if(command==='F') assert.deepEqual(result.source,harness.ACTIVE_FLOOR_SOURCES.F);
+      if(read==='F') assert.deepEqual(result.read_source,harness.ACTIVE_FLOOR_SOURCES.F);
+      assert.ok(result.checks?.some(check=>check.name==='same-invocation-positive' && check.ok));
+      assert.ok(result.checks && result.checks.length>=8);
+      assert.deepEqual(result.checks.filter(check=>!check.ok),[]);
+      assert.deepEqual(result.sqlstates,[]);
+      assert.equal(result.http_refused,0);
+      assert.ok(result.canonical_witness);
+      assert.notEqual(result.canonical_witness.first_pid,result.canonical_witness.second_pid);
+      assert.equal(result.canonical_witness.token_ids.length,3);
+      assert.equal(result.canonical_witness.order,order);
+      for(const contract of ['sequential-denial-every-table-unchanged','terminal-denial-every-table-unchanged',
+        ...(order==='revoke-first' ? ['revoke-first-both-adoptions-and-history-unchanged']:[])])
+        assert.ok(result.checks.some(check=>check.name===contract && check.ok),contract);
+      completedFloorCases.add(`${name}/${command}/${read}`);
+    });
+  }
+  if(command==='current' && read==='current') continue; // current permission owners already run above
+  for(const name of ['local-allow-retired-parent-allow-first','local-allow-retired-parent-issuer-first',
+    'delegated-local-revocation-closure','delegated-local-renewal-budget','delegated-local-selector-compatibility','delegated-local-parent-deadline','delegated-local-parent-narrowing',
+    'delegated-local-wait-removal-rollback','local-resume-parent-order','local-resume-recovery-controls','ordinary-local-compat-policy']) {
+    test(`active-floor-${name} exact ${command}/${read}`,{timeout:300_000},async()=>{
+      const result=await harness.runScenario(bound(),name,270_000,{command,read});
+      assert.equal(result.stage,'complete',`${result.stage}: ${result.error ?? 'inconclusive'}`);
+      assert.equal(result.active_catalog?.migrations,4);
+      assert.equal(result.active_catalog?.view_columns,11);
+      assert.match(result.active_catalog?.measured_view_sha256 ?? '',/^[a-f0-9]{64}$/);
+      process.stdout.write(`ACTIVE_FLOOR_CATALOG ${JSON.stringify({command,read,...result.active_catalog})}\n`);
+      if(command==='F') assert.deepEqual(result.source,harness.ACTIVE_FLOOR_SOURCES.F);
+      if(read==='F') assert.deepEqual(result.read_source,harness.ACTIVE_FLOOR_SOURCES.F);
+      assert.ok(result.checks && result.checks.length>0);
+      assert.deepEqual(result.checks.filter(check=>!check.ok),[]);
+      assert.ok(result.checks.some(check=>check.name==='same-invocation-positive' && check.ok));
+      assert.equal(result.http_refused,0);
+      if(name.startsWith('local-allow-retired-parent-')) {
+        assert.ok(result.race_witness);
+        assert.ok(result.race_witness.allow_pid>0 && result.race_witness.issuer_pid>0);
+        assert.notEqual(result.race_witness.allow_pid,result.race_witness.issuer_pid);
+        assert.deepEqual(result.race_witness.sqlstates,[]);
+        assert.deepEqual(result.race_witness.deadlock_edges,[]);
+        for(const contract of ALLOW_ISSUER_CONTRACTS) assert.ok(result.checks.some(check=>check.name===contract && check.ok),contract);
+      }
+      if(name==='ordinary-local-compat-policy') for(const prefix of ['', 'current-wire-'])
+        assert.ok(result.checks.some(check=>check.name===`${prefix}renewal-wire-retains-scope-counter-history` && check.ok));
+      completedFloorCases.add(`${name}/${command}/${read}`);
+    });
+  }
+}
+
+// Each row receives a fresh INITIAL-history child database; none rewinds shared state.
+const completedHistoricalCases=new Set<string>();
+for(const [command,read] of [['current','current'],['F','current'],['current','F'],['F','F']]) {
+  test(`active-floor-historical-idle exact ${command}/${read}`,{timeout:300_000},async()=>{
+    const result=await harness.runScenario(bound(),'active-floor-historical-idle',270_000,{command,read});
+    assert.equal(result.stage,'complete',`${result.stage}: ${result.error ?? 'inconclusive'}`);
+    assert.equal(result.fixture_label,'synthetic-initial-history');
+    assert.equal(result.active_catalog?.migrations,4);
+    if(command==='F') assert.deepEqual(result.source,harness.ACTIVE_FLOOR_SOURCES.F);
+    if(read==='F') assert.deepEqual(result.read_source,harness.ACTIVE_FLOOR_SOURCES.F);
+    assert.equal(result.http_refused,0);
+    assert.deepEqual(result.historical_completed,['standing','suspended','horizon-expired','expired-unused']);
+    for(const contract of ['same-invocation-positive','coherent-old-credential','expired-read-every-table-unchanged',
+      'ordinary-denial-every-table-unchanged','silent-short-successor','successor-read-usable',
+      'exact-successor-adoption','grant-history-preserved','guard-probes-rollback-every-table','retained-catalog-after-cases'])
+      assert.ok(result.checks?.some(check=>check.name===contract && check.ok),contract);
+    assert.deepEqual(result.checks?.filter(check=>!check.ok),[]);
+    completedHistoricalCases.add(`${command}/${read}`);
+  });
+}
+
+let completedHistoricalBaseline=false;
+test('historical-baseline-discriminator unsupported O/ACTIVE diagnostic and current/ACTIVE',{timeout:600_000},async()=>{
+  const result=await harness.runScenario(bound(),'historical-baseline-discriminator',270_000);
+  assert.equal(result.stage,'complete');
+  const {baseline,current}=result;
+  assert.ok(baseline && current,'both real handler invocations on ACTIVE must return');
+  const {commit,tree}=harness.HISTORICAL_BASELINE_SOURCE;
+  assert.deepEqual(baseline.source,{commit,tree});
+  assert.deepEqual(baseline.read_source,{commit,tree});
+  assert.equal(baseline.active_catalog?.migrations,4,'O diagnostic must use real ACTIVE');
+  assert.match(baseline.fixture_digest ?? '',/^[a-f0-9]{64}$/);
+  assert.equal(current.fixture_digest,baseline.fixture_digest,'identical original credential and history');
+  assert.equal(current.active_catalog?.migrations,4);
+  for(const row of [baseline,current]) {
+    assert.equal(row.stage,'complete');
+    assert.equal(row.fixture_label,'synthetic-initial-history');
+    assert.equal(row.http_refused,0);
+    assert.deepEqual(row.historical_completed,['standing','suspended','horizon-expired','expired-unused']);
+    assert.ok(row.checks && row.checks.length>0);
+    assert.deepEqual(row.checks.filter(c=>!c.ok),[]);
+    for(const name of ['same-invocation-positive','hash-and-live-authority','coherent-old-credential',
+      'expired-read-every-table-unchanged','guard-probes-rollback-every-table','retained-catalog-after-cases'])
+      assert.ok(row.checks.some(c=>c.name===name && c.ok),name);
+  }
+  for(const name of ['baseline-live-renewal-positive','baseline-expiry-refusal','baseline-denial-every-table-unchanged'])
+    assert.ok(baseline.checks?.some(c=>c.name===name && c.ok),name);
+  for(const name of ['silent-short-successor','successor-read-usable','exact-successor-adoption','grant-history-preserved',
+    'ordinary-denial-every-table-unchanged']) assert.ok(current.checks?.some(c=>c.name===name && c.ok),name);
+  completedHistoricalBaseline=true;
+});
+
+// Count only successfully executed cases; source registration cannot make this green.
+// Renewal's independent required gate lives with its own real transaction tests;
+// the genuine GoTrue/issuer owners and full AS suite remain separate gates.
+test('active-floor-required-F-support-complete',()=>{
+  for(const [command,read] of [['current','current'],['F','current'],['current','F'],['F','F']])
+    for(const order of ['use-first','revoke-first'])
+      assert.ok(completedFloorCases.has(`active-floor-canonical-${order}/${command}/${read}`),'required canonical case did not complete');
+  assert.equal(completedFloorCases.size,41,'all 8 canonical and 33 existing permission/issuer cases must execute successfully');
+  assert.equal(completedHistoricalCases.size,4,'all historical generation rows must execute successfully');
+  assert.equal(completedHistoricalBaseline,true,'unsupported O/ACTIVE expiry diagnostic and same-history current renewal must both complete');
+  // Exact F includes virgin-root recovery. Source rebinding does not replace
+  // different-family review, real Linux execution or full AS.
+});

@@ -1,3 +1,4 @@
+import { ACTIVE_FLOOR_SOURCES, assertActiveFloorCatalog } from './admin-principal-lock-order-harness.mjs';
 // HezLead ruling 38, item 4: real renewal transactions must abort on 40P01/40001.
 // Adapted from the saved r12b 104-table probe. Run only on an isolated local database.
 // deno run --allow-read --allow-env --allow-net <harness> <tree> <main|real_read> <server.log|empty> [0600 config.json]
@@ -8,6 +9,9 @@
 // Output contains only fixture ids, redacted bodies, counts, hashes, and SQLSTATEs.
 const [tree, mode, serverLog, configPath] = Deno.args;
 const config = configPath ? JSON.parse(await Deno.readTextFile(configPath)) : null;
+if (config?.source && tree !== config.source.path) throw new Error('source_path_mismatch');
+if (mode === 'permanence' && ['SWARM_CMD_TEST_SLEEP_AFTER_STEP','SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP'].some(key=>Deno.env.get(key)!==undefined)) throw new Error('permanence_fault_hook_set');
+const readTree = config?.read_source?.path ?? tree;
 const DB = config?.db_url ?? 'postgres://postgres@127.0.0.1:54931/lock_order_probe';
 if (!['127.0.0.1', 'localhost', '[::1]'].includes(new URL(DB).hostname)) throw new Error('local probe database required');
 Deno.env.set('SWARM_ENV', 'test');
@@ -27,7 +31,8 @@ Deno.serve = (handler) => {
   served.push(typeof handler === 'function' ? handler : handler.handler);
   return { finished: Promise.resolve(), shutdown: async () => {}, ref() {}, unref() {}, addr: { hostname: '127.0.0.1', port: 0 } };
 };
-const out = { tree, mode, hook_sleep: Deno.env.get('SWARM_CMD_TEST_SLEEP_AFTER_STEP') ?? null, stage: 'import' };
+const out = { tree, mode, source:config?.source ? {commit:config.source.commit,tree:config.source.tree} : null,
+  read_source:config?.read_source ? {commit:config.read_source.commit,tree:config.read_source.tree} : null, hook_sleep: Deno.env.get('SWARM_CMD_TEST_SLEEP_AFTER_STEP') ?? null, stage: 'import' };
 const sqlstate = (e) => (e && typeof e === 'object' && typeof e.code === 'string' && /^[0-9A-Z]{5}$/u.test(e.code) ? e.code : 'non_sql');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const id = () => crypto.randomUUID();
@@ -37,8 +42,17 @@ const iso = (d) => (d instanceof Date ? d.toISOString() : d ?? null);
 try {
   const { default: postgres } = await import('npm:postgres@3.4.9');
   const observer = postgres(DB, { prepare: false, max: 8, onnotice: () => {} });
+  if(config?.active_floor) {out.stage='active_catalog';out.active_catalog=await assertActiveFloorCatalog(observer);}
+  out.stage='import';
   const command = await import(`${tree}/supabase/functions/command/index.ts`);
-  const read = await import(`${tree}/supabase/functions/read/index.ts`);
+  const read = await import(`${readTree}/supabase/functions/read/index.ts`);
+  const baseline = config?.unused_root_baseline;
+  if (baseline && (mode !== 'permanence' || baseline.commit !== ACTIVE_FLOOR_SOURCES.B.commit
+      || baseline.tree !== ACTIVE_FLOOR_SOURCES.B.tree || !config.active_floor)) throw new Error('unused_root_baseline_identity');
+  // Complete pinned b9 trees supply their own auth and renewal handlers.
+  const baselineCommand = baseline ? await import(`${baseline.path}/supabase/functions/command/index.ts`) : null;
+  const baselineRead = baseline ? await import(`${baseline.path}/supabase/functions/read/index.ts`) : null;
+  out.unused_root_baseline = baseline ? {commit:baseline.commit,tree:baseline.tree} : null;
   // Capture the error AFTER postgres.js rolls the entire transaction back.
   // No production seam: this is the exported real command pool at its existing boundary.
   const authTypes = await import(`${tree}/supabase/functions/_shared/agent-auth.ts`);
@@ -83,11 +97,11 @@ try {
     return { status: r.status, body: clean(body), headers: r.headers };
   };
   const credential = (r) => { try { return JSON.parse(r.text).agent_token ?? null; } catch { return null; } };
-  const renew = async (token, commandId, fields = {}, workspace = W, proof = {}) => capture(await command.handleRequest(new Request('http://127.0.0.1/functions/v1/command', {
+  const renew = async (token, commandId, fields = {}, workspace = W, proof = {}, handler = command) => capture(await handler.handleRequest(new Request('http://127.0.0.1/functions/v1/command', {
     method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...proof },
     body: JSON.stringify({ command_id: commandId, client_version: CLIENT_PROTOCOL_VERSION, workspace_id: workspace,
       stream: { kind: 'workspace' }, command: { kind: 'renew_agent_token', ...fields } }) })));
-  const readAs = async (token, workspace = W) => capture(await read.handleRequest(new Request('http://127.0.0.1/functions/v1/read', {
+  const readAs = async (token, workspace = W, handler = read) => capture(await handler.handleRequest(new Request('http://127.0.0.1/functions/v1/read', {
     method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ resource: 'members', workspace_id: workspace }) })));
 
@@ -241,6 +255,16 @@ try {
     out.stage='permanence';
     const checks=[];
     const check=(name,ok)=>checks.push({name,ok:Boolean(ok)});
+    // Ordinary unused expiry must remain a refusal even after the separate
+    // permanent-root change. Pair with a real live read under the same policy.
+    const ordinaryControl=await seat('ordinary-live',true,null,'timeboxed');
+    check('ordinary-timeboxed-live-positive',(await readAs(ordinaryControl.raw)).status===200);
+    const ordinaryUnused=await seat('ordinary-expired-unused',false,null,'timeboxed');
+    await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second'
+      WHERE token_id=${ordinaryUnused.t0}::uuid`;
+    const ordinaryBefore=await snapshot(),ordinaryDenied=await renew(ordinaryUnused.raw,id());
+    check('ordinary-expired-unused-refused',[401,403].includes(ordinaryDenied.status) && credential(ordinaryDenied)===null);
+    check('ordinary-expired-unused-full-denial-rollback',JSON.stringify(ordinaryBefore)===JSON.stringify(await snapshot()));
     const s=await seat('expired-proof');
     await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${s.t0}::uuid`;
     const [before]=await observer`SELECT expires_at,first_used_at FROM swarm.agent_tokens WHERE token_id=${s.t0}::uuid`;
@@ -297,7 +321,7 @@ try {
       suspended_at=clock_timestamp() WHERE renewal_grant_id=${crash.grant}::uuid`;
     await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${crash.t0}::uuid`;
     let saved=await renew(crash.raw,id());
-    check('future chosen date and old idle history permit expired used proof renewal',credential(saved)!==null);
+    check('future chosen date permits expired used proof renewal',credential(saved)!==null);
     for(let attempt=0;attempt<2;attempt++) {
       const savedId=JSON.parse(saved.text).token_id,savedRaw=credential(saved);
       await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${savedId}::uuid`;
@@ -307,12 +331,36 @@ try {
     }
     check('recovered successor reaches actual read',(await readAs(credential(saved))).status===200);
     // Primary regression owner: real command/DB, no synthesized auth context.
+    if (baseline) {
+      // Same schema/invocation and real role-setting handlers: b9 is pre-fix
+      // only for virgin roots, not expired USED standing proof.
+      const usedControl = await seat('b9-used-control',false);
+      const liveUse = await readAs(usedControl.raw,W,baselineRead);
+      const [usedBefore] = await observer`SELECT first_used_at IS NOT NULL AS used FROM swarm.agent_tokens
+        WHERE token_id=${usedControl.t0}::uuid`;
+      if (liveUse.status!==200 || !usedBefore.used) throw new Error('b9_live_use_control');
+      await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second'
+        WHERE token_id=${usedControl.t0}::uuid`;
+      const usedRenewal = await renew(usedControl.raw,id(),{},W,{},baselineCommand);
+      const usedSuccessor = credential(usedRenewal);
+      check('b9 used standing proof renews to readable successor',usedRenewal.status===200
+        && JSON.parse(usedRenewal.text).status==='accepted' && usedSuccessor!==null
+        && (await readAs(usedSuccessor,W,baselineRead)).status===200);
+    }
     const bootstrap=await seat('unused-bootstrap',false);
     await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${bootstrap.t0}::uuid`;
     const bootstrapBefore=await seatState(bootstrap);
     check('unused-root admission starts unused expired and bound',bootstrapBefore.tokens.length===1
       && !bootstrapBefore.tokens[0].used && !bootstrapBefore.tokens[0].unexpired);
 
+    if (baseline) {
+      const virginBefore = await snapshot();
+      const virginDenied = await renew(bootstrap.raw,id(),{},W,{},baselineCommand);
+      check('b9 virgin standing root denies for authentication',virginDenied.status===401
+        && JSON.parse(virginDenied.text).error==='unauthenticated' && credential(virginDenied)===null);
+      check('b9 virgin denial leaves every table unchanged',JSON.stringify(virginBefore)===JSON.stringify(await snapshot())
+        && JSON.stringify(bootstrapBefore)===JSON.stringify(await seatState(bootstrap)));
+    }
     check('unused-root ordinary expired read denies without use',[401,403].includes((await readAs(bootstrap.raw)).status)
       && JSON.stringify(bootstrapBefore)===JSON.stringify(await seatState(bootstrap)));
     const ordinaryFields={kind:'create',task_id:id(),slug:'unused-expired'};
@@ -547,7 +595,7 @@ try {
     const lateIssue=await renew(late.raw,id()),lateRaw=credential(lateIssue);
     await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '3 seconds'
       WHERE renewal_grant_id=${late.grant}::uuid`;
-    const lateBefore=await seatState(late);let latePending;
+    const lateBefore=await seatState(late),lateDatabaseBefore=await snapshot();let latePending;
     await observer.begin(async tx=>{
       const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
       await tx`SELECT principal_id FROM swarm.agent_presence WHERE principal_id=${late.principal}::uuid FOR UPDATE`;
@@ -557,9 +605,10 @@ try {
     });
     check('date crossing during refusal wait overrides decided commit',(await latePending).status===403);
     check('failed final fence rolls back refused-use adoption and ledger',JSON.stringify(lateBefore)===JSON.stringify(await seatState(late)));
+    check('command denial rolls back both adoptions and every table',JSON.stringify(lateDatabaseBefore)===JSON.stringify(await snapshot()));
     // Activity owns a distinct final wait: the transactional realtime send.
     // The old Source returns 202 and commits adoption/broadcast after this wait.
-    await import(`${tree}/supabase/functions/activity/index.ts`);
+    await import(`${readTree}/supabase/functions/activity/index.ts`);
     const activityHandler=served.at(-1);
     const activity=raw=>activityHandler(new Request('http://127.0.0.1/functions/v1/activity',{
       method:'POST',headers:{authorization:`Bearer ${raw}`,'content-type':'application/json'},
@@ -570,7 +619,7 @@ try {
     check('activity fixture has a genuine unused successor',activityRaw!==null);
     await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '3 seconds'
       WHERE renewal_grant_id=${activitySeat.grant}::uuid`;
-    const activityBefore=await seatState(activitySeat);
+    const activityBefore=await seatState(activitySeat),activityDatabaseBefore=await snapshot();
     const [broadcastBefore]=await observer`SELECT count(*)::int AS n FROM realtime.messages`;
     let activityPending;
     await observer.begin(async tx=>{
@@ -585,6 +634,7 @@ try {
     check('activity denial rolls back token adoption and family use',JSON.stringify(activityBefore)===JSON.stringify(await seatState(activitySeat)));
     const [broadcastAfter]=await observer`SELECT count(*)::int AS n FROM realtime.messages`;
     check('activity denial commits no realtime broadcast',broadcastAfter.n===broadcastBefore.n);
+    check('activity denial rolls back both adoptions and every table',JSON.stringify(activityDatabaseBefore)===JSON.stringify(await snapshot()));
     const activityControl=await seat('activity-positive'),controlIssued=await renew(activityControl.raw,id()),controlRaw=credential(controlIssued);
     const positiveActivity=await activity(controlRaw);
     check('same-invocation activity really publishes',positiveActivity.status===202);
@@ -919,7 +969,7 @@ try {
     const family=await seat('family-approval');
     const consent=id();
     await observer.begin(async tx=>{
-      await tx`INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose) VALUES(${W}::uuid,'shared')`;
+      await tx`INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose) VALUES(${W}::uuid,'shared') ON CONFLICT DO NOTHING`;
       await tx`INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at)
         VALUES(${W}::uuid,${owner}::uuid,'editor',${consent}::uuid,clock_timestamp())`;
       await tx`SET LOCAL ROLE swarm_command`;

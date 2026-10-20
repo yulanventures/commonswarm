@@ -1,3 +1,5 @@
+import { assertActiveFloorCatalog } from './admin-principal-lock-order-harness.mjs';
+import { pathToFileURL } from 'node:url';
 import { oauthFixture } from './admin-edge-oauth-fixture.mjs';
 // Real Deno edge adapters. Local credentials stay in memory or the protected
 // task file; no credentials, SQL errors, or response bodies go to stdout.
@@ -26,10 +28,17 @@ globalThis.fetch = async (...args) => {
 };
 const base64url = bytes => btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
 const encoded = value => base64url(new TextEncoder().encode(JSON.stringify(value)));
-const { db, handleRequest, handleAdminMcpRequest } = await import('../../supabase/functions/command/index.ts');
-const { adminTransaction, adminDigest, recordAdminFailure } = await import('../../supabase/functions/command/admin-delegation.ts');
-const policy = await import('../../supabase/functions/_shared/protocol.js');
-const { handleRequest: readRequest } = await import('../../supabase/functions/read/index.ts');
+const sourceRoot=config.source?.path ?? new URL('../../',import.meta.url).pathname;
+const load=path=>import(pathToFileURL(`${sourceRoot}/${path}`).href);
+if(config.active_floor) {
+  const {default:postgres}=await import('npm:postgres@3.4.9');
+  const catalog=postgres(config.local.DB_URL,{prepare:false,max:1,onnotice:()=>{}});
+  try {await assertActiveFloorCatalog(catalog);} finally {await catalog.end();}
+}
+const { db, handleRequest, handleAdminMcpRequest } = await load('supabase/functions/command/index.ts');
+const { adminTransaction, adminDigest, recordAdminFailure } = await load('supabase/functions/command/admin-delegation.ts');
+const policy = await load('supabase/functions/_shared/protocol.js');
+const { handleRequest: readRequest } = await load('supabase/functions/read/index.ts');
 const id = () => crypto.randomUUID();
 let stage = 'initialization';
 function check(condition, label) { stage = label; if (!condition) throw new Error('assertion'); }
@@ -98,10 +107,10 @@ try {
     const fake = await transact(readWire(grant), {kind:'oauth',admission:{token:{owner_user_id:config.owner,admin_grant_id:grant.grantId},digest:new Uint8Array(32)}});
     check(fake.result.status === 401 && await count() === before,'forged identity cannot bind victim audit');
     for (const old of ['swm_adm_'+ 'a'.repeat(43),'swm_adr_'+ 'b'.repeat(43)]) check((await http(readWire(grant),old)).status === 401,'legacy public credentials refused');
-    const commandModule = await import('../../supabase/functions/command/index.ts');
+    const commandModule = await load('supabase/functions/command/index.ts');
     check(!('handleAdminRuntimeCommand' in commandModule) && !('handleAdminWorkerRuntimeCommand' in commandModule),'retired callbacks absent');
     const oauth = await issue(grant);
-    const untrusted=(await import('../../supabase/functions/_shared/admin-oauth-db.ts')).createAdminRequestVerifier(db);
+    const untrusted=(await load('supabase/functions/_shared/admin-oauth-db.ts')).createAdminRequestVerifier(db);
     const forgedFromImport=await untrusted.verify(await oauth.request(readWire(grant)),'admin_command');
     check((await transact(readWire(grant),{kind:'oauth',admission:forgedFromImport})).result.status===401,'caller-instantiated verifier cannot confer authority through imports');
     check((await http(issueInput,oauth.access)).status === 403,'OAuth token cannot mint opaque admin access');
@@ -354,7 +363,7 @@ try {
       check((await http(wire({kind:'revoke_admin_delegation',grant_id:grant.grantId,reason_code:'human_revoked'}))).status===200,'human recovery after expiry');
     } else if (scenario === 'failure') {
       const input=readWire(grant), admission=await oauth.admission(), authentication={kind:'oauth',admission}, before=await count();
-      const proofRequest=await oauth.request(input), admitted=await (await import('../../supabase/functions/command/admin-admission.ts')).admitAdminRequest(proofRequest,'admin_command');
+      const proofRequest=await oauth.request(input), admitted=await (await load('supabase/functions/command/admin-admission.ts')).admitAdminRequest(proofRequest,'admin_command');
       let reached=false; const rollback=new Error('intentional rollback');
       await db.begin(async tx=>{ await tx`SELECT set_config('role','swarm_command',true)`; const result=await adminTransaction(tx,input,{kind:'oauth',admission:admitted}); check(result.result.status===200,'rollback reaches positive authority'); reached=true; throw rollback; }).catch(error=>{if(error!==rollback)throw error;});
       check(reached && await count()===before,'rollback retains no domain success');
@@ -368,7 +377,7 @@ try {
       const postgres = (await import('npm:postgres@3.4.9')).default;
       const firstDb=postgres(config.local.DB_URL,{prepare:false,max:1});
       const otherDb=postgres(config.local.DB_URL,{prepare:false,max:1});
-      const {createAdminRequestVerifier}=await import('../../supabase/functions/_shared/admin-oauth-db.ts');
+      const {createAdminRequestVerifier}=await load('supabase/functions/_shared/admin-oauth-db.ts');
       try {
         const [firstPid]=await firstDb`SELECT pg_backend_pid() AS pid`;
         const [secondPid]=await otherDb`SELECT pg_backend_pid() AS pid`;
@@ -377,7 +386,7 @@ try {
         const request=await oauth.request(readWire(grant),'admin_command',{jti});
         const outcomes=await Promise.allSettled([first.verify(request,'admin_command'),second.verify(request.clone(),'admin_command')]);
         check(outcomes.filter(r=>r.status==='fulfilled').length===1 && outcomes.filter(r=>r.status==='rejected' && r.reason.code==='replay').length===1,'two edge verifier instances admit one signed proof');
-        const {admitAdminRequest}=await import('../../supabase/functions/command/admin-admission.ts');
+        const {admitAdminRequest}=await load('supabase/functions/command/admin-admission.ts');
         const rollbackRequest=await oauth.request(readWire(grant));
         const accepted=await admitAdminRequest(rollbackRequest,'admin_command');
         const rollback=new Error('domain rollback'); let reached=false;

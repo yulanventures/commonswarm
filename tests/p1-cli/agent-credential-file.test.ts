@@ -698,16 +698,16 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       const saved = await unused.store.read();
       assert.equal(saved?.token, recovered);
       assert.equal(saved?.generation, 1);
-      const [used] = await sql<{ first_used_at: Date | null; successors: number }[]>`
+      const [recoveredRootState] = await sql<{ first_used_at: Date | null; successors: number }[]>`
         SELECT first_used_at, (SELECT count(*)::integer FROM swarm.agent_tokens WHERE predecessor_token_id = ${unused.tokenId}::uuid) AS successors
         FROM swarm.agent_tokens WHERE token_id = ${unused.tokenId}::uuid`;
-      assert.ok(used.first_used_at);
-      assert.equal(used.successors, 1);
+      assert.ok(recoveredRootState.first_used_at);
+      assert.equal(recoveredRootState.successors, 1);
       assert.ok([401, 403].includes(await use(unused.workspace, unused.token)));
       assert.equal(await use(unused.workspace, recovered), 200);
       assert.equal(await use(f.workspace, await reopened.bearer()), 200);
     });
-    await t.test("unknown-expiry bare and artifact CLI inputs recover only after real authentication refusal", async () => {
+    await t.test("known-expiry, bare and artifact CLI inputs recover eligible unused permanent roots", async () => {
       for (const form of ["known", "bare", "artifact"] as const) {
         const bare = form === "bare";
         const f = await fixture();
