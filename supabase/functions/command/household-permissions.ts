@@ -1,7 +1,7 @@
 /** Explicit human confirmation. Administration alone never grants content rights.
  * No default rights are provisioned when a workspace, member or seat is created. */
 import type postgres from 'postgres';
-import { writeHostedContentRestriction } from './household-content-access.ts';
+import { assertHouseholdContentServiceReady, writeHostedContentRestriction } from './household-content-access.ts';
 import type { HouseholdIdentity, HouseholdCredentialRecheck } from './household-objects.ts';
 import { HOUSEHOLD_CONTENT_OPERATIONS } from '../_shared/protocol.js';
 import { householdCanonical, householdSha256 } from './household-transfers.ts';
@@ -26,6 +26,7 @@ async function human(tx: Sql, actor: HouseholdIdentity, recheck: HouseholdCreden
   return actor.principal_id === null && actor.connection === null && await recheck(tx, actor);
 }
 async function permissionContext(tx: Sql, workspaceId: string, actor: HouseholdIdentity) {
+  await assertHouseholdContentServiceReady(tx);
   const [workspace] = await tx`SELECT archived_at FROM swarm.workspaces WHERE workspace_id=${workspaceId}::uuid FOR UPDATE`;
   const [member] = await tx`SELECT role, revoked_at FROM swarm.memberships WHERE workspace_id=${workspaceId}::uuid AND user_id=${actor.user_id}::uuid FOR SHARE`;
   if (!workspace || workspace.archived_at !== null || !member || member.revoked_at !== null) return null;

@@ -402,9 +402,31 @@ async function contextHttp() {
       return response;
     };
   }
+  if (input.dropCompatibilityGate) {
+    const { default: postgres } = await import("postgres");
+    observer = postgres(input.raceDatabaseUrl, { prepare: false, max: 1 });
+  }
   let handle = input.handle;
   const results = [];
   for (const call of input.calls) {
+    if (call.drop_compatibility_gate) await observer.unsafe('DROP POLICY hosted_owner_content_rollback_gate ON swarm.household_content_connections');
+    if (call.transport === 'http') {
+      authPhase = 'human';
+      const read = call.name === 'todo_list' || call.name === 'todo_queue';
+      const args = { seat: 'seat_0000000000000000000000', ...(call.arguments ?? {}) };
+      const command = call.command ?? { kind: 'household_tool', tool: call.name, arguments: args };
+      const module = read ? await import(${JSON.stringify(readUrl.href)}) : commandModule;
+      const response = await module.handleRequest(new Request('http://local/functions/v1/' + (read ? 'read' : 'command'), {
+        method: 'POST', headers: { authorization: 'Bearer ' + input.ownerJwt, 'content-type': 'application/json' },
+        body: JSON.stringify(read ? { resource: 'household', workspace_id: input.workspaceId, tool: call.name, arguments: args }
+          : { command_id: call.request_id ?? args.request_id ?? crypto.randomUUID(), client_version: '0.1.80', workspace_id: input.workspaceId,
+            stream: { kind: 'workspace' }, command }),
+      }));
+      results.push({ name: call.name, status: response.status, body: await response.json(),
+        isError: response.status !== 200, authChallenge: response.headers.has('www-authenticate'), retryAfter: response.headers.get('retry-after') });
+      authPhase = 'hosted';
+      continue;
+    }
     if (call.storage_race) storageArmed = true;
     const args = call.name === "claim_seat"
       ? { name: input.name ?? "context-fixture-seat", request_id: call.request_id ?? crypto.randomUUID(), ...(call.workspace_id ? { workspace_id: call.workspace_id } : {}) }
@@ -417,7 +439,8 @@ async function contextHttp() {
     const output = envelope.result?.content?.[0]?.text;
     const body = typeof output === "string" ? JSON.parse(output) : envelope;
     if (call.name === "claim_seat" && typeof body.handle === "string") handle = body.handle;
-    results.push({ name: call.name, status: response.status, isError: envelope.result?.isError === true || envelope.error !== undefined || response.status !== 200, body });
+    results.push({ name: call.name, status: response.status, isError: envelope.result?.isError === true || envelope.error !== undefined || response.status !== 200, body,
+      authChallenge: response.headers.has("www-authenticate") || envelope.result?._meta?.["mcp/www_authenticate"] !== undefined });
     if (call.storage_race) {
       if (!storageBlocked || !storageWithdrawal) throw new Error('Storage was not reached');
       const withdrawn = await storageWithdrawal;
@@ -1740,6 +1763,8 @@ test("same-owner revoked local principal is reclaimable through the hosted comma
 interface ContextHttpResult extends HarnessResult {
   name: string;
   isError: boolean;
+  authChallenge?: boolean;
+  retryAfter?: string | null;
 }
 interface ConnectionContext {
   account: { user_id: string; display_name: string; email: string | null };
@@ -2105,6 +2130,94 @@ test('owner content traverses MCP HTTP read/command routes with no approval, and
     await sql`UPDATE swarm.hosted_mcp_seats SET revoked_at=clock_timestamp() WHERE seat_id=${f.seat.body.seat_id as string}::uuid`;
     runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list'},{name:'todo_queue'}]),{databaseUrl:f.edgeUrl}).forEach(assertContentDenied);
   } finally { await releaseSql.unsafe('ALTER ROLE commonswarm_edge PASSWORD NULL'); }
+});
+
+// A non-nested legacy/restriction pair used to hide the legacy create ceiling
+// under the actual rollback policy. Only real committed transactions can prove
+// the 503 rollback and same-process catalog transition at both HTTP boundaries.
+test('compatibility gate returns retryable content errors without effects, then exact intersection after DROP', {timeout:180_000}, async()=>{
+  const f=await ownerContentHttpFixture();
+  const workspace=f.fixture.workspaceA, principal=String(f.seat.body.principal_id), seat=String(f.seat.body.seat_id);
+  const allow={kind:'household_approve_connection',connection:{kind:'hosted',connection_id:seat,
+    grant_id:f.fixture.grantA,principal_id:principal,operations:['read','update']}};
+  const management=(command:Record<string,unknown>)=>runHostedHarness<HarnessResult>({operation:'management',
+    ownerUserId:f.fixture.owner,workspaceId:workspace,command},{databaseUrl:f.edgeUrl});
+  const retryBody={error:'household_content_service_updating',
+    message:'Household content service is updating. Retry after one second with the same request_id.',retryable:true,retry_after_seconds:1};
+  const writeId=randomUUID();
+  const calls=[{name:'todo_list'},{name:'todo_queue'},
+    {name:'todo_create',arguments:{request_id:writeId,title:'Gate must never create this'}}];
+  const httpCalls=calls.map(call=>({...call,transport:'http',...(call.name==='todo_queue'?{arguments:{principal_id:principal}}:{})}));
+  const authorityCalls=[{name:'allow',transport:'http',command:allow},
+    {name:'withdraw',transport:'http',command:{kind:'household_withdraw_connection',principal_id:principal}}];
+  const httpInput={ownerJwt:f.fixture.ownerJwt,workspaceId:workspace};
+  // Digests cover complete synthetic row versions, including retained receipts,
+  // authority/audits, content projections/events, notifications and presence.
+  const snapshot=async()=>{
+    const state=[];
+    for(const table of ['workspaces','memberships','household_workspace_boundaries','household_member_content_roles',
+      'agent_principals','hosted_mcp_grant_workspaces','hosted_mcp_seats','hosted_mcp_seat_handles',
+      'household_content_connections','household_hosted_content_restrictions','household_object_streams',
+      'household_object_events','household_object_artifacts','household_object_audit','household_todo_streams',
+      'household_todo_events','household_todos','household_comments','household_todo_receipts',
+      'household_agent_work_policies','idempotency_keys','streams','events','signals','signal_deliveries','agent_presence','audit_log']) {
+      state.push([table,...await sql.unsafe(`SELECT count(*)::int AS n, md5(coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text)::text,'[]')) AS digest
+        FROM swarm.${table} r WHERE workspace_id=$1::uuid`,[workspace])]);
+    }
+    return state;
+  };
+  try {
+    assert.equal(management(allow).body.status,'committed');
+    // Privileged fixture edit models historical independently chosen ceilings;
+    // the human restriction remains read/update, legacy approval read/create.
+    await sql`UPDATE swarm.household_content_connections SET operations=ARRAY['read','create']
+      WHERE connection_id=${seat}::uuid AND workspace_id=${workspace}::uuid`;
+    const beforeControl=runHostedHarness<ContextHttpResult[]>(f.call(calls),{databaseUrl:f.edgeUrl});
+    assert.equal(beforeControl[0]!.body.status,'ok');
+    assert.equal((beforeControl[1]!.body.queue as {content_access:string}).content_access,'read');
+    assertContentDenied(beforeControl[2]!);
+    await releaseSql.unsafe(repoSql('deploy/release-proofs/hosted-owner-content/20261019000006-rollback.sql'));
+    const [hidden]=await sql.begin(async tx=>{
+      await tx.unsafe('SET LOCAL ROLE swarm_command');
+      return await tx`SELECT count(*)::int AS n FROM swarm.household_content_connections WHERE connection_id=${seat}::uuid`;
+    });
+    assert.equal(hidden!.n,0,'actual restrictive policy hides the non-nested legacy ceiling');
+    const before=await snapshot();
+    const gated=runHostedHarness<ContextHttpResult[]>(f.call([...calls,...httpCalls,...authorityCalls],httpInput),{databaseUrl:f.edgeUrl});
+    assert.equal(gated.length,8);
+    gated.forEach((result,index)=>{
+      assert.equal(result.status,index<3?200:503);
+      assert.equal(result.isError,true);
+      assert.equal(result.authChallenge,false,'transient content refusal never asks to reconnect');
+      assert.deepEqual(result.body,retryBody,'MCP preserves the exact ordinary HTTP body');
+      if(index>=3) assert.equal(result.retryAfter,'1');
+    });
+    assert.deepEqual(await snapshot(),before,'gate leaves zero content or authority effects');
+    assert.deepEqual(management(allow),{status:503,body:retryBody,headers:{'retry-after':'1'}});
+    assert.deepEqual(await snapshot(),before,'shared human-management boundary also rolls back');
+    // A single live MCP process observes the gate and its DROP: no restart,
+    // cached authority refresh, Allow, login, or token invalidation is involved.
+    const forward=runHostedHarness<ContextHttpResult[]>(f.call([calls[0]!,{...calls[0],drop_compatibility_gate:true},
+      calls[1]!,calls[2]!],{dropCompatibilityGate:true,raceDatabaseUrl:localClusterAdminUrl(local.DB_URL)}),{databaseUrl:f.edgeUrl});
+    assert.deepEqual(forward[0]!.body,retryBody); assert.equal(forward[0]!.isError,true);
+    assert.equal(forward[1]!.body.status,'ok'); assert.equal(forward[1]!.isError,false);
+    assert.equal((forward[2]!.body.queue as {content_access:string}).content_access,'read');
+    assertContentDenied(forward[3]!);
+    const listing=management({kind:'household_connections'});
+    const connections=listing.body.connections as Array<{connection_id:string;effective_access:{operations:string[]}}>;
+    assert.deepEqual(connections.find(row=>row.connection_id===seat)!.effective_access.operations,['read']);
+    assert.equal(management({...allow,connection:{...allow.connection,operations:['read','create','update']}}).body.status,'committed');
+    const restored=runHostedHarness<ContextHttpResult[]>(f.call([calls[2]!,calls[1]!,...httpCalls],httpInput),{databaseUrl:f.edgeUrl});
+    assert.equal(restored[0]!.body.status,'committed','same refused request_id can succeed after truthful human Allow');
+    assert.equal((restored[1]!.body.queue as {content_access:string}).content_access,'read_write');
+    assert.equal(restored[2]!.status,200); assert.equal(restored[2]!.body.status,'ok');
+    assert.equal(restored[3]!.status,200); assert.equal(restored[3]!.body.status,'ok');
+    assert.equal((restored[3]!.body.queue as {content_access:string}).content_access,'read_write');
+    assert.equal(restored[4]!.status,200); assert.equal(restored[4]!.body.status,'committed','ordinary HTTP writes resume after DROP');
+  } finally {
+    await releaseSql.unsafe('DROP POLICY IF EXISTS hosted_owner_content_rollback_gate ON swarm.household_content_connections');
+    await releaseSql.unsafe('ALTER ROLE commonswarm_edge PASSWORD NULL');
+  }
 });
 
 for (const change of ['role','removal','withdrawal'] as const) {

@@ -6,9 +6,39 @@ import type postgres from 'postgres';
 import type { HouseholdIdentity } from './household-objects.ts';
 import type { HouseholdAccessFacts, HouseholdContentOperation } from '../_shared/household-object-policy.d.ts';
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
+/** Owned transient failure: callers retry without changing authentication. */
+export class HouseholdContentServiceUpdating extends Error {
+  static readonly body = Object.freeze({
+    error: 'household_content_service_updating',
+    message: 'Household content service is updating. Retry after one second with the same request_id.',
+    retryable: true,
+    retry_after_seconds: 1,
+  });
+  constructor() {
+    super('Household content service is updating');
+    this.name = 'HouseholdContentServiceUpdating';
+  }
+}
+
+export async function assertHouseholdContentServiceReady(tx: Sql): Promise<void> {
+  // Policy DDL requires AccessExclusiveLock. Hold this SELECT-authorized lock
+  // through rollback/commit so catalog inspection cannot race gate installation.
+  // Read the actual catalog on every call, including post-wait access rechecks.
+  await tx`LOCK TABLE swarm.household_content_connections IN ACCESS SHARE MODE`;
+  const [gate] = await tx`SELECT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_policy p
+    JOIN pg_catalog.pg_class c ON c.oid=p.polrelid
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname='swarm' AND c.relname='household_content_connections'
+      AND p.polname='hosted_owner_content_rollback_gate'
+  ) AS present`;
+  if (gate?.present) throw new HouseholdContentServiceUpdating();
+}
+
 const stamp = (v: unknown): number | null => v == null ? null : new Date(v as string).getTime();
 const actor = (i: HouseholdIdentity) => ({ user_id: i.user_id, principal_id: i.principal_id, run_id: i.run_id });
 export async function loadHouseholdContentAccess(tx: Sql, workspaceId: string, identity: HouseholdIdentity): Promise<{ facts: HouseholdAccessFacts; now: number; source: 'human' | 'inherited' | 'explicit'; restriction: { operations: string[]; origin: string; principal_id: string }[] } | null> {
+  await assertHouseholdContentServiceReady(tx);
   const [workspace] = await tx`SELECT archived_at FROM swarm.workspaces WHERE workspace_id=${workspaceId}::uuid FOR UPDATE`;
   if (!workspace) return null;
   const [boundary] = await tx`SELECT purpose, owner_user_id FROM swarm.household_workspace_boundaries WHERE workspace_id=${workspaceId}::uuid FOR SHARE`;
@@ -111,6 +141,7 @@ export async function loadHouseholdContentAccess(tx: Sql, workspaceId: string, i
  * lock. Explicit update avoids double BEFORE-trigger audits on an upsert. */
 export async function writeHostedContentRestriction(tx: Sql, workspaceId: string, owner: string,
   grant: string, principal: string, operations: readonly string[], origin: 'human_allow' | 'human_withdraw' | 'system_invalidation') {
+  await assertHouseholdContentServiceReady(tx);
   const [member] = await tx`SELECT role FROM swarm.memberships WHERE workspace_id=${workspaceId}::uuid
     AND user_id=${owner}::uuid AND revoked_at IS NULL FOR SHARE`;
   const [existing] = await tx`SELECT grant_id FROM swarm.household_hosted_content_restrictions

@@ -130,6 +130,7 @@ import {
 } from "./file-artifacts.ts";
 import { executeHouseholdLegacy } from "./household-legacy-integration.ts";
 import { HOUSEHOLD_FEATURE_GATES } from "../_shared/household-feature-gates.ts";
+import { assertHouseholdContentServiceReady, HouseholdContentServiceUpdating } from "./household-content-access.ts";
 import { HOUSEHOLD_SURFACE_KINDS, executeHouseholdSurface } from "./household-integration.ts";
 import type { HouseholdTodoNoticePort } from './household-todos.ts';
 import { provisionHouseholdPermissions, pendingLinkInvitationIds, revokeRemovedMemberHousehold } from "./household-permissions.ts";
@@ -10608,6 +10609,9 @@ async function handleTransaction(
     const result = await (async (): Promise<HttpResult> => {
     await beforeStep(2);
     await setTransaction(tx);
+    if ((HOUSEHOLD_SURFACE_KINDS as readonly string[]).includes(kind) || kind === "household_legacy") {
+      await assertHouseholdContentServiceReady(tx);
+    }
     await afterStep(2);
 
     const hostedSeat = hostedSeatCapability === null
@@ -13019,6 +13023,13 @@ async function handleTransaction(
       );
     }
     return result;
+  }).catch((error: unknown): HttpResult => {
+    // postgres.js rejects begin only after rollback: no authority/content,
+    // idempotency, presence, audit or notice effects survive this refusal.
+    if (error instanceof HouseholdContentServiceUpdating) {
+      return { status: 503, headers: { "retry-after": "1" }, body: HouseholdContentServiceUpdating.body };
+    }
+    throw error;
   });
 }
 

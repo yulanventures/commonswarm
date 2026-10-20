@@ -286,7 +286,7 @@ try {
     assert.equal((await call('todo_queue')).body.queue.content_access,'read','live sibling C read-only ceiling survives retired-target replacement');
     // Keep B broad so only live C can supply the read ceiling.
     await tx.unsafe(input.ownerRollback);
-    assert.equal((await call('todo_queue')).body.queue.content_access,'read','gate honors exact replacement without hiding live C ceiling');
+    assert.equal((await call('todo_queue')).status,503,'new source retries while the compatibility gate exists');
     for (const kind of ['expired','revoked']) {
       await tx\x60UPDATE swarm.household_content_connections SET operations=ARRAY['read','create','update'],
         expires_at=CASE WHEN \x24{kind}='expired' THEN clock_timestamp()-interval '1 hour' ELSE NULL END,
@@ -295,7 +295,7 @@ try {
       const [visible]=await asCommand(sql=>sql\x60SELECT count(*)::int AS n FROM swarm.household_content_connections
         WHERE connection_id=\x24{liveSiblingSeat}::uuid\x60);
       assert.equal(visible.n,1,kind+' denial stays visible under actual rollback policy');
-      assert.equal((await call('todo_list')).body.status,'refused',kind+' denial fences new source before gate drop');
+      assert.equal((await call('todo_list')).status,503,kind+' remains a transient refusal until gate drop');
     }
     await tx.unsafe('DROP POLICY hosted_owner_content_rollback_gate ON swarm.household_content_connections');
     assert.equal((await call('todo_list')).body.status,'refused','same denial remains after explicit forward gate drop');

@@ -5,7 +5,7 @@
  * Lock order is workspace, membership/content rights, stream, artifact rows.
  */
 import type postgres from 'postgres';
-import { loadHouseholdContentAccess } from './household-content-access.ts';
+import { assertHouseholdContentServiceReady, loadHouseholdContentAccess } from './household-content-access.ts';
 import type {
   HouseholdAttribution, HouseholdBlob, HouseholdContent, HouseholdObjectState,
   HouseholdRevision, HouseholdRevisionRef,
@@ -67,7 +67,9 @@ export function createHouseholdObjectStore(dependencies: {
     const result = await loadHouseholdContentAccess(tx, workspaceId, identity);
     // Workspace/storage waits may outlast a credential. Revalidate the verified
     // capability after acquiring durable locks as well as at every existing call.
-    return await recheckCredential(tx, identity) ? result : null;
+    const live = await recheckCredential(tx, identity);
+    await assertHouseholdContentServiceReady(tx);
+    return live ? result : null;
   }
 
   async function state(tx: Sql, workspaceId: string, create: boolean): Promise<HouseholdObjectState> {

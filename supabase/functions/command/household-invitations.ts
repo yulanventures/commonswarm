@@ -1,7 +1,7 @@
 /** Recipient-only join; called before workspace routing, within the authenticated
  * command transaction. No delegated credential can enter this boundary. */
 import type postgres from 'npm:postgres@3.4.9';
-import { writeHostedContentRestriction } from './household-content-access.ts';
+import { assertHouseholdContentServiceReady, writeHostedContentRestriction } from './household-content-access.ts';
 import { parseHumanInviteCommand, decideHumanInvite, HOUSEHOLD_JOIN_DISCLOSURE, HOUSEHOLD_JOIN_CONSENT_VERSION,
   reduceAdminAuthority, canonicalAdminJson, adminEffectiveCapabilities, adminGrantManifest, adminManifestValid } from '../_shared/protocol.js';
 import type { AdminAccountState, AdminAccountEvent, AdminGrant } from '../_shared/admin-authority.d.ts';
@@ -16,6 +16,7 @@ export async function humanInvitationTransaction(tx: Sql, commandId: string, val
   const command = parseHumanInviteCommand(value) as HumanInviteCommand | null;
   if (!human?.verified) return { status: 403, body: { error: 'human_sign_in_required' } };
   if (!command || !/^[A-Za-z0-9_-]{1,128}$/.test(commandId)) return { status: 400, body: { error: 'invalid_request' } };
+  await assertHouseholdContentServiceReady(tx);
   const delegated = command.invitation.source === 'delegated';
   // First resolve without locks. Then follow the routine writer's lock order:
   // grantor user, account, grants, workspace, stream, invitation. Re-read under locks.

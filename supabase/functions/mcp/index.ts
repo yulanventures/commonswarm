@@ -259,6 +259,7 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
       : await handleHostedCommand({ command_id: args.request_id ?? `read_${crypto.randomUUID()}`,
       client_version: "0.1.80", workspace_id: binding.workspaceId, stream: { kind: "workspace" },
       command: { kind: "household_tool", tool: call.name, arguments: args } }, capability);
+    if (result.status === 503 && serviceUpdating(result.body)) return result.body;
     if (result.status !== 200) throw new HostedToolFailure("hosted_seat_forbidden");
     const output = call.name.startsWith("list_")
       ? boundHouseholdListResult(result.body, Number(args.offset ?? 0)) : result.body;
@@ -333,6 +334,10 @@ const handleProtocolRequest = createMcpProtocolHandler({
   executeTool,
 });
 
+function serviceUpdating(body: Record<string, unknown>): boolean {
+  return body.error === "household_content_service_updating" && body.retryable === true && body.retry_after_seconds === 1;
+}
+
 export async function handleRequest(request: Request): Promise<Response> {
   // Refuse foreign credentials before routing, parsing, authentication or tools.
   // Keep the protocol module independent of the account authority bundle.
@@ -349,7 +354,20 @@ export async function handleRequest(request: Request): Promise<Response> {
       },
     });
   }
-  return await handleProtocolRequest(request);
+  const response = await handleProtocolRequest(request);
+  if (response.status !== 200 || !response.headers.get("content-type")?.includes("application/json")) return response;
+  // Keep the protocol and frozen tool contracts unchanged. This owned backend
+  // refusal is tool content (HTTP 200), with no credential challenge or recopy.
+  const envelope = await response.clone().json();
+  const content = envelope.result?.content;
+  if (Array.isArray(content) && content.length === 1 && content[0]?.type === "text") {
+    const body = JSON.parse(content[0].text);
+    if (body !== null && typeof body === "object" && serviceUpdating(body)) {
+      envelope.result.isError = true;
+      return new Response(JSON.stringify(envelope), { status: 200, headers: response.headers });
+    }
+  }
+  return response;
 }
 
 if (import.meta.main) Deno.serve(handleRequest);
