@@ -14,6 +14,7 @@ import { emptyHouseholdObjectState } from "../../src/protocol/household-objects.
 import { HOSTED_MCP_SEAT_LIMIT } from "../../src/protocol/hosted-authority.js";
 import { emptyApplicationSchema, localClusterAdminUrl, migrationNames as adminMigrationNames, repoSql, versions as adminVersions } from "../support/admin-schema-db.js";
 import { releaseCatalogQuery } from "../support/release-catalog-query.js";
+import { adminEdgeDatabase } from "../support/admin-edge-database.js";
 
 const commandUrl = new URL("../../supabase/functions/command/index.ts", import.meta.url);
 const readUrl = new URL("../../supabase/functions/read/index.ts", import.meta.url);
@@ -811,7 +812,7 @@ async function createAuthUser(label: string): Promise<{ id: string; jwt: string 
   return { id: created.data.user.id, jwt: signedIn.data.session.access_token };
 }
 
-async function seedHostedFixture(grantBOwnerIsOther = false, providerBinding = false): Promise<HostedFixture> {
+async function seedHostedFixture(grantBOwnerIsOther = false, providerBinding = false, isolatedAuthUsers = false): Promise<HostedFixture> {
   const owner = await createAuthUser("hm-owner");
   const other = await createAuthUser("hm-other");
   const fixture: HostedFixture = {
@@ -823,6 +824,10 @@ async function seedHostedFixture(grantBOwnerIsOther = false, providerBinding = f
     otherJwt: other.jwt,
   };
   await sql.begin(async (tx) => {
+    // Schema-only isolated fixtures need the real auth FK rows as well.
+    if (isolatedAuthUsers) await tx`INSERT INTO auth.users(id, aud, role)
+      VALUES (${fixture.owner}::uuid, 'authenticated', 'authenticated'),
+             (${fixture.other}::uuid, 'authenticated', 'authenticated')`;
     await tx`
       INSERT INTO swarm.users (user_id, display_name)
       VALUES (${fixture.owner}::uuid, 'HM owner'), (${fixture.other}::uuid, 'HM other')
@@ -2416,36 +2421,67 @@ test("member removal fences exact hosted consent and restoration cannot revive o
 
 
 test("authorized admin routine removal closes hosted consent, handle and seat without retiring other workspace", { timeout: 180_000 }, async () => {
-  const f = await seedHostedFixture();
-  const old = claimSeat(f, f.grantA, `admin-remove-${randomUUID()}`);
-  const sibling = claimSeat(f, f.grantA, `admin-sibling-${randomUUID()}`);
-  const unrelatedGrant = claimSeat(f, f.grantB, `admin-independent-${randomUUID()}`);
-  await assertSeatAccess(f, sibling, f.workspaceA, 200);
-  const other = runHostedHarness<HarnessResult>({ operation: "claim",
-    claim: claimSpec(f, f.grantA, f.workspaceB, `admin-other-${randomUUID()}`) });
-  await assertSeatAccess(f, old, f.workspaceA, 200);
-  const removed = runHostedHarness<{ status: number; stage: string }>({ operation: "admin-removal",
-    ownerUserId: f.owner, workspaceId: f.workspaceA, principalId: old.body.principal_id });
-  assert.deepEqual(removed, { stage: "remove", status: 200 });
-  await assertSeatAccess(f, old, f.workspaceA, 403);
-  const refusedClaim = runHostedHarness<HarnessResult>({ operation: "claim",
-    claim: claimSpec(f,f.grantA,f.workspaceA,`admin-new-${randomUUID()}`) });
-  assert.equal(refusedClaim.status,403);
-  assert.equal(refusedClaim.body.error,"hosted_grant_forbidden");
-  await assertSeatAccess(f, sibling, f.workspaceA, 403);
-  await assertSeatAccess(f, unrelatedGrant, f.workspaceA, 200);
-  const [siblingFence] = await sql`SELECT hs.revoked_at IS NOT NULL AS seat,h.revoked_at IS NOT NULL AS handle,
-    EXISTS(SELECT 1 FROM swarm.revocation_tombstones t WHERE t.kind='hosted_seat' AND t.target_id=hs.seat_id) AS tombstone
-    FROM swarm.hosted_mcp_seats hs JOIN swarm.hosted_mcp_seat_handles h USING(seat_id)
-    WHERE hs.seat_id=${String(sibling.body.seat_id)}::uuid`;
-  assert.deepEqual(siblingFence, { seat: true, handle: true, tombstone: true });
-  await assertSeatAccess(f, other, f.workspaceB, 200);
-  assert.equal(await providerActive(f.grantA), true);
-  const [fence] = await sql`SELECT c.revoked_at IS NOT NULL AS consent,h.revoked_at IS NOT NULL AS handle,
-    EXISTS(SELECT 1 FROM swarm.revocation_tombstones t WHERE t.kind='hosted_seat' AND t.target_id=h.seat_id) AS tombstone
-    FROM swarm.hosted_mcp_grant_workspaces c JOIN swarm.hosted_mcp_seat_handles h USING(grant_id,workspace_id)
-    WHERE h.seat_id=${String(old.body.seat_id)}::uuid`;
-  assert.deepEqual(fence, { consent: true, handle: true, tombstone: true });
+  // Top-level tests in this file run serially. Redirect only this lifecycle to
+  // the existing isolated fixture, whose real cutover cannot open the shared DB.
+  const shared = { sql, oauthSql, databaseUrl: local.DB_URL, oauthDatabaseUrl, adminIssuerDatabaseUrl };
+  const cutoverBefore = await shared.sql`SELECT * FROM commonswarm_oauth.admin_cutover_state WHERE singleton`;
+  const isolated = await adminEdgeDatabase(local.DB_URL);
+  const inIsolatedDatabase = (value: string) => {
+    const target = new URL(value);
+    target.pathname = new URL(isolated.url).pathname;
+    return target.href;
+  };
+  let isolatedRuntime: postgres.Sql | undefined;
+  try {
+    sql = isolated.db;
+    local.DB_URL = inIsolatedDatabase(shared.databaseUrl);
+    oauthDatabaseUrl = inIsolatedDatabase(shared.oauthDatabaseUrl);
+    adminIssuerDatabaseUrl = inIsolatedDatabase(shared.adminIssuerDatabaseUrl);
+    isolatedRuntime = postgres(oauthDatabaseUrl, { prepare: false, max: 1 });
+    oauthSql = isolatedRuntime;
+    const [configuration] = await shared.sql`SELECT value FROM swarm.config WHERE key='min_client_version'`;
+    assert.ok(configuration, "shared fixture has the minimum client version");
+    await sql`INSERT INTO swarm.config(key,value) VALUES('min_client_version',${sql.json(configuration.value)})`;
+    const f = await seedHostedFixture(false, false, true);
+    const old = claimSeat(f, f.grantA, `admin-remove-${randomUUID()}`);
+    const sibling = claimSeat(f, f.grantA, `admin-sibling-${randomUUID()}`);
+    const unrelatedGrant = claimSeat(f, f.grantB, `admin-independent-${randomUUID()}`);
+    await assertSeatAccess(f, sibling, f.workspaceA, 200);
+    const other = runHostedHarness<HarnessResult>({ operation: "claim",
+      claim: claimSpec(f, f.grantA, f.workspaceB, `admin-other-${randomUUID()}`) });
+    await assertSeatAccess(f, old, f.workspaceA, 200);
+    const removed = runHostedHarness<{ status: number; stage: string }>({ operation: "admin-removal",
+      ownerUserId: f.owner, workspaceId: f.workspaceA, principalId: old.body.principal_id });
+    assert.deepEqual(removed, { stage: "remove", status: 200 });
+    await assertSeatAccess(f, old, f.workspaceA, 403);
+    const refusedClaim = runHostedHarness<HarnessResult>({ operation: "claim",
+      claim: claimSpec(f,f.grantA,f.workspaceA,`admin-new-${randomUUID()}`) });
+    assert.equal(refusedClaim.status,403);
+    assert.equal(refusedClaim.body.error,"hosted_grant_forbidden");
+    await assertSeatAccess(f, sibling, f.workspaceA, 403);
+    await assertSeatAccess(f, unrelatedGrant, f.workspaceA, 200);
+    const [siblingFence] = await sql`SELECT hs.revoked_at IS NOT NULL AS seat,h.revoked_at IS NOT NULL AS handle,
+      EXISTS(SELECT 1 FROM swarm.revocation_tombstones t WHERE t.kind='hosted_seat' AND t.target_id=hs.seat_id) AS tombstone
+      FROM swarm.hosted_mcp_seats hs JOIN swarm.hosted_mcp_seat_handles h USING(seat_id)
+      WHERE hs.seat_id=${String(sibling.body.seat_id)}::uuid`;
+    assert.deepEqual(siblingFence, { seat: true, handle: true, tombstone: true });
+    await assertSeatAccess(f, other, f.workspaceB, 200);
+    assert.equal(await providerActive(f.grantA), true);
+    const [fence] = await sql`SELECT c.revoked_at IS NOT NULL AS consent,h.revoked_at IS NOT NULL AS handle,
+      EXISTS(SELECT 1 FROM swarm.revocation_tombstones t WHERE t.kind='hosted_seat' AND t.target_id=h.seat_id) AS tombstone
+      FROM swarm.hosted_mcp_grant_workspaces c JOIN swarm.hosted_mcp_seat_handles h USING(grant_id,workspace_id)
+      WHERE h.seat_id=${String(old.body.seat_id)}::uuid`;
+    assert.deepEqual(fence, { consent: true, handle: true, tombstone: true });
+  } finally {
+    sql = shared.sql;
+    oauthSql = shared.oauthSql;
+    local.DB_URL = shared.databaseUrl;
+    oauthDatabaseUrl = shared.oauthDatabaseUrl;
+    adminIssuerDatabaseUrl = shared.adminIssuerDatabaseUrl;
+    try { await isolatedRuntime?.end(); } finally { await isolated.close(); }
+    const cutoverAfter = await shared.sql`SELECT * FROM commonswarm_oauth.admin_cutover_state WHERE singleton`;
+    assert.deepEqual(cutoverAfter, cutoverBefore, "isolated issuance never changes the shared cutover gate");
+  }
 });
 
 
