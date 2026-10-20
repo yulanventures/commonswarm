@@ -52,12 +52,22 @@ class FileSizeTest(unittest.TestCase):
         # One table owns the size contract, including exact and rounded boundaries.
         cases = [
             ('new over', None, 25000, 1),
+            ('new one token over', None, 20001, 1),
             ('new under', None, 19999, 0),
             ('exact limit', None, 20000, 0),
-            ('grow past', 20000, 20001, 1),
+            ('grow past', 20000, 20001, 0),
+            ('under crosses plus 500', 16000, 22000, 0),
+            ('under crosses plus 501', 16000, 22001, 1),
+            ('at limit plus 500', 20000, 22000, 0),
+            ('at limit plus 501', 20000, 22001, 1),
             ('over shrinks', 25000, 24000, 0),
             ('over unchanged', 25000, 25000, 0),
-            ('over grows', 25000, 26000, 1),
+            ('over grows', 25000, 26000, 0),
+            ('over plus 500', 25000, 27000, 0),
+            ('over plus 501', 25000, 27001, 1),
+            ('rounded over plus 500', 25001, 27004, 0),
+            ('rounded over plus 501', 25001, 27005, 1),
+            ('crossed file next change', 22000, 24000, 0),
             ('same rounded token size', 25001, 25002, 0),
         ]
         for name, before, after, expected in cases:
@@ -73,8 +83,8 @@ class FileSizeTest(unittest.TestCase):
                 if expected:
                     self.assertIn('limit 5000', output)
                     self.assertIn('new {} tokens'.format((after + 3) // 4), output)
-                    self.assertIn('split this file' if before is None or before <= 20000
-                                  else 'reduce it back to', output)
+                    self.assertIn('split this file' if before is None else
+                                  'grow it by at most 500 tokens per change, or split it', output)
                 # Also exercise CI's committed-snapshot mode.
                 self.commit()
                 self.check(expected, '--base', base)
@@ -84,7 +94,10 @@ class FileSizeTest(unittest.TestCase):
         base = self.commit()
         self.git('mv', 'source.txt', 'moved.txt')
         self.check(0, '--staged')
-        self.write('moved.txt', ('abcdefghij\n' * 2400) + 'extra')
+        self.write('moved.txt', ('abcdefghij\n' * 2400) + 'x' * 2000)
+        self.git('add', '--all')
+        self.check(0, '--staged')
+        self.write('moved.txt', ('abcdefghij\n' * 2400) + 'x' * 2001)
         self.git('add', '--all')
         output = self.check(1, '--staged')
         self.assertIn('"moved.txt": base 6600', output)

@@ -14,6 +14,7 @@ import tempfile
 
 # The complete size policy: estimated tokens = ceil(Unicode characters / 4).
 LIMIT = 5000
+GROWTH_ALLOWANCE = 500
 CHARACTERS_PER_TOKEN = 4
 LOCKFILES = {
     'pnpm-lock.yaml', 'package-lock.json', 'yarn.lock', 'Cargo.lock',
@@ -128,12 +129,13 @@ def check(base, head):
         # All comparisons use the policy measure, including its token rounding.
         if after is None or after <= LIMIT * CHARACTERS_PER_TOKEN:
             continue
-        if before is not None and tokens(after) <= tokens(before):
+        if (before is not None and
+                tokens(after) <= max(LIMIT, tokens(before)) + GROWTH_ALLOWANCE):
             continue
         baseline = str(tokens(before)) if before is not None else 'new'
-        fix = ('split this file into smaller modules' if before is None or
-               before <= LIMIT * CHARACTERS_PER_TOKEN else
-               'reduce it back to {} tokens or less'.format(tokens(before)))
+        fix = ('split this file into smaller modules' if before is None else
+               'grow it by at most {} tokens per change, or split it'.format(
+                   GROWTH_ALLOWANCE))
         # JSON quoting keeps even newline-containing paths on one output line.
         print('{}: base {}, new {} tokens, limit {}; {}'.format(
             json.dumps(os.fsdecode(path), ensure_ascii=False), baseline,
