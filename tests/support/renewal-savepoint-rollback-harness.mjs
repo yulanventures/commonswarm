@@ -41,10 +41,12 @@ try {
   const read = await import(`${tree}/supabase/functions/read/index.ts`);
   // Capture the error AFTER postgres.js rolls the entire transaction back.
   // No production seam: this is the exported real command pool at its existing boundary.
+  const authTypes = await import(`${tree}/supabase/functions/_shared/agent-auth.ts`);
+  let discoveryRetries = 0;
   const commandCodes = [];
   const begin = command.db.begin;
   command.db.begin = function (...args) {
-    return begin.apply(this, args).catch((error) => { commandCodes.push(sqlstate(error)); throw error; });
+    return begin.apply(this, args).catch((error) => { commandCodes.push(sqlstate(error)); if(error instanceof authTypes.LocalAuthDiscoveryChanged) discoveryRetries++; throw error; });
   };
   const { CLIENT_PROTOCOL_VERSION } = await import(`${tree}/src/cloud/config.ts`);
   const {HOUSEHOLD_LOCAL_SEAT}=await import(`${tree}/supabase/functions/_shared/protocol.js`);
@@ -81,8 +83,8 @@ try {
     return { status: r.status, body: clean(body), headers: r.headers };
   };
   const credential = (r) => { try { return JSON.parse(r.text).agent_token ?? null; } catch { return null; } };
-  const renew = async (token, commandId, fields = {}, workspace = W) => capture(await command.handleRequest(new Request('http://127.0.0.1/functions/v1/command', {
-    method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+  const renew = async (token, commandId, fields = {}, workspace = W, proof = {}) => capture(await command.handleRequest(new Request('http://127.0.0.1/functions/v1/command', {
+    method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...proof },
     body: JSON.stringify({ command_id: commandId, client_version: CLIENT_PROTOCOL_VERSION, workspace_id: workspace,
       stream: { kind: 'workspace' }, command: { kind: 'renew_agent_token', ...fields } }) })));
   const readAs = async (token) => capture(await read.handleRequest(new Request('http://127.0.0.1/functions/v1/read', {
@@ -93,22 +95,22 @@ try {
   // a standing renewal grant bound to that device, and a root token T0 with a task/epoch binding and that grant (rows as
   // tests/p1-server/renewal-last-use.test.ts:70-80). T0 gets its first use from the real read route (a token is never
   // born used, SWARM_TOKEN_FIRST_USE_PRESET). Unused expired permanent roots instead authenticate a renewal before issuance.
-  const seat = async (name, use=true, boundDevice=undefined, kind='standing') => {
+  const seat = async (name, use=true, boundDevice=undefined, kind='standing', options={}) => {
     const principal = id(), device = id(), run = id(), task = id(), lineage = id(), grant = id(), t0 = id();
     const raw = mintRaw(), hash = await hashOf(raw);
     await observer.begin(async (tx) => {
-      await tx`INSERT INTO swarm.devices (device_id, user_id, label) VALUES (${device}::uuid, ${owner}::uuid, ${`r12b-${name}`})`;
-      await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name) VALUES (${principal}::uuid, ${W}::uuid, ${owner}::uuid, ${`r12b-${name}-${tag}`})`;
+      await tx`INSERT INTO swarm.devices (device_id, user_id, label) VALUES (${device}::uuid, ${options.deviceOwner ?? owner}::uuid, ${`r12b-${name}`})`;
+      await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name, parent_admin_grant_id) VALUES (${principal}::uuid, ${W}::uuid, ${owner}::uuid, ${`r12b-${name}-${tag}`}, ${options.principalParent ?? null}::uuid)`;
       await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id) VALUES (${run}::uuid, ${principal}::uuid, ${device}::uuid)`;
       await tx`INSERT INTO swarm.renewal_grants (renewal_grant_id, workspace_id, principal_id, run_id, kind, max_successors, successors_used,
         horizon_expires_at, bound_device_id, created_by)
-        VALUES (${grant}::uuid, ${W}::uuid, ${principal}::uuid, ${run}::uuid, ${kind==='timeboxed'?'timeboxed':'standing'}, ${kind==='timeboxed'?100:null}, 0,
+        VALUES (${grant}::uuid, ${W}::uuid, ${options.familyPrincipal ?? principal}::uuid, ${options.familyRun ?? run}::uuid, ${kind==='timeboxed'?'timeboxed':'standing'}, ${kind==='timeboxed'?100:null}, 0,
           ${kind==='timeboxed'?new Date(Date.now()+86400000):null}::timestamptz,
-          ${boundDevice===undefined ? device:boundDevice}::uuid, ${owner}::uuid)`;
+          ${boundDevice===undefined ? device:boundDevice}::uuid, ${options.creator ?? owner}::uuid)`;
       await tx`INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, task_id, epoch, scopes, token_hash, expires_at, lineage_id,
-        renewal_grant_id)
+        renewal_grant_id, parent_admin_grant_id, recipient_connection_id)
         VALUES (${t0}::uuid, ${principal}::uuid, ${run}::uuid, ${task}::uuid, 1, ${tx.json(['post_signal'])}::jsonb, ${hash},
-        statement_timestamp() + interval '1 hour', ${lineage}::uuid, ${kind==='no-family'?null:grant}::uuid)`;
+        statement_timestamp() + interval '1 hour', ${lineage}::uuid, ${kind==='no-family'?null:grant}::uuid, ${options.tokenParent ?? null}::uuid, ${options.recipient ?? null}::uuid)`;
     });
     if(use) {
       const firstUse = await readAs(raw);
@@ -308,6 +310,9 @@ try {
     const bootstrap=await seat('unused-bootstrap',false);
     await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${bootstrap.t0}::uuid`;
     const bootstrapBefore=await seatState(bootstrap);
+    check('unused-root admission starts unused expired and bound',bootstrapBefore.tokens.length===1
+      && !bootstrapBefore.tokens[0].used && !bootstrapBefore.tokens[0].unexpired);
+
     check('unused-root ordinary expired read denies without use',[401,403].includes((await readAs(bootstrap.raw)).status)
       && JSON.stringify(bootstrapBefore)===JSON.stringify(await seatState(bootstrap)));
     const ordinaryFields={kind:'create',task_id:id(),slug:'unused-expired'};
@@ -362,12 +367,124 @@ try {
         if(variant==='archived') await observer`UPDATE swarm.workspaces SET archived_at=NULL WHERE workspace_id=${W}::uuid`;
       }
     }
+
+    // C2 primary owner: real renewal + persisted no-effects. Each malformed
+    // identity differs from the admitted unused root; used-root controls do
+    // not exercise this branch. No auth/outcome is synthesized.
+    const outsider=id();
+    await observer`INSERT INTO auth.users(id,aud,role,email) VALUES(${outsider}::uuid,'authenticated','authenticated',${outsider+'@example.test'})`;
+    await observer`INSERT INTO swarm.users(user_id,display_name) VALUES(${outsider}::uuid,'Root other owner')`;
+    const otherFamily=await seat('unused-other-family',false);
+    for(const [variant,options] of [
+      ['wrong-device-owner',{deviceOwner:outsider}],['wrong-creator',{creator:outsider}],
+      ['wrong-family',{familyPrincipal:otherFamily.principal,familyRun:otherFamily.run}],
+    ]) {
+      const bad=await seat(`unused-${variant}`,false,undefined,'standing',options);
+      await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${bad.t0}::uuid`;
+      const before=await seatState(bad),denied=await renew(bad.raw,id());
+      check(`unused-root-${variant}-denied-without-effects`,denied.status===403
+        && JSON.stringify(before)===JSON.stringify(await seatState(bad)));
+    }
+    // Reuse admin-schema-db's installed-table fixture shape, with real parent
+    // liveness/scope routines and command auth. Cover both ancestry owners.
+    await observer`INSERT INTO swarm.admin_accounts(owner_user_id,stream_id) VALUES(${owner}::uuid,${id()}::uuid) ON CONFLICT DO NOTHING`;
+    for(const slot of ['token','principal']) for(const policy of ['live','expired','withdrawn','scope']) {
+      const parent=id(),recipient=id();
+      await observer`INSERT INTO swarm.admin_grants(grant_id,owner_user_id,admin_identity_id,connection_id,client_id,resource,registry_version,
+        workspace_ids,created_workspace_policy,target_rules,worker_scope_ceiling,role_ceiling,renewal_limits,issuance_limits,
+        expires_at,refresh_deadline,state,consent_receipt_id,manifest_digest,created_at)
+        VALUES(${parent}::uuid,${owner}::uuid,${id()}::uuid,${id()}::uuid,'https://root.example.test','https://api.commonswarm.com/admin',2,
+          ARRAY[${W}::uuid],'{"scope_names":[]}'::jsonb,${observer.json({recipient_connection_ids:[recipient]})}::jsonb,
+          ARRAY['post_signal'],'member','{}'::jsonb,'{}'::jsonb,clock_timestamp()+interval '1 day',
+          clock_timestamp()+interval '2 days','active',${id()}::uuid,${'a'.repeat(64)},clock_timestamp()-interval '1 day')`;
+      const fixture=await seat(`unused-parent-${slot}-${policy}`,false,undefined,'standing',
+        {...(slot==='token'?{tokenParent:parent}:{principalParent:parent}),recipient});
+      await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${fixture.t0}::uuid`;
+      if(policy==='expired') await observer`UPDATE swarm.admin_grants SET expires_at=clock_timestamp()-interval '1 second' WHERE grant_id=${parent}::uuid`;
+      if(policy==='withdrawn') await observer`UPDATE swarm.admin_grants SET withdrawn_workspace_ids=ARRAY[${W}::uuid] WHERE grant_id=${parent}::uuid`;
+      if(policy==='scope') await observer`UPDATE swarm.admin_grants SET worker_scope_ceiling=ARRAY[]::text[] WHERE grant_id=${parent}::uuid`;
+      const before=await seatState(fixture),response=await renew(fixture.raw,id());
+      check(`unused-root-parent-${slot}-${policy}`,policy==='live'
+        ? response.status===200 && credential(response)!==null
+        : response.status===403 && JSON.stringify(before)===JSON.stringify(await seatState(fixture)));
+    }
+    // Session validation owns stamp rollback before issuance, a different
+    // contract from the unmanaged and used-token baseline session controls.
+    const managed=await seat('unused-managed',false),session=id(),key=mintRaw().slice(8);
+    await observer`UPDATE swarm.agent_principals SET managed_at=clock_timestamp() WHERE principal_id=${managed.principal}::uuid`;
+    await observer`INSERT INTO swarm.agent_execution_sessions(principal_id,workspace_id,session_id,generation,lifecycle_state,key_hash,started_at,renewed_at,expired_at)
+      VALUES(${managed.principal}::uuid,${W}::uuid,${session}::uuid,1,'enabled',${await hashOf(key)},clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '2 minutes')`;
+    await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${managed.t0}::uuid`;
+    const managedBefore=await seatState(managed);
+    for(const [variant,proof] of [['missing',{}],['wrong-key',{'x-cswarm-session-id':session,'x-cswarm-session-generation':'1','x-cswarm-session-key':mintRaw().slice(8)}]]) {
+      const response=await renew(managed.raw,id(),{},W,proof);
+      check(`unused-root-session-${variant}`,JSON.parse(response.text).error===(variant==='missing'?'session_proof_missing':'session_proof_invalid')
+        && JSON.stringify(managedBefore)===JSON.stringify(await seatState(managed)));
+    }
+    check('unused-root-session-valid',credential(await renew(managed.raw,id(),{},W,{
+      'x-cswarm-session-id':session,'x-cswarm-session-generation':'1','x-cswarm-session-key':key}))!==null);
+    // Actual closure change while blocked on our sole workspace row.
+    const changed=await seat('unused-discovery-changed',false);
+    await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${changed.t0}::uuid`;
+    const retriesBefore=discoveryRetries;let changedPending;
+    await observer.begin(async tx=>{
+      const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
+      await tx`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id=${W}::uuid FOR UPDATE`;
+      changedPending=renew(changed.raw,id());
+      const waiter=await waitBlockedBy(pid,100);
+      check('unused-root discovery change owned workspace wait',waiter>0
+        && (await waitDetail(waiter)).statement?.includes('swarm.workspaces'));
+      await tx`INSERT INTO swarm.agent_execution_sessions(principal_id,workspace_id,session_id,lifecycle_state)
+        VALUES(${changed.principal}::uuid,${W}::uuid,${id()}::uuid,'disabled')`;
+    });
+    check('unused-root discovery change retries whole transaction',credential(await changedPending)!==null && discoveryRetries>retriesBefore);
+    // Real post-discovery membership removal wins before authentication.
+    const removed=await seat('unused-removal-wins',false);
+    await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${removed.t0}::uuid`;
+    const removedBefore=await seatState(removed);let removedPending;
+    try {
+      await observer.begin(async tx=>{
+        const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
+        await tx`SELECT user_id FROM swarm.memberships WHERE workspace_id=${W}::uuid AND user_id=${owner}::uuid FOR UPDATE`;
+        removedPending=renew(removed.raw,id());
+        const waiter=await waitBlockedBy(pid,100);
+        check('unused-root removal owned membership wait',waiter>0
+          && (await waitDetail(waiter)).statement?.includes('swarm.memberships'));
+        await tx`UPDATE swarm.memberships SET revoked_at=clock_timestamp() WHERE workspace_id=${W}::uuid AND user_id=${owner}::uuid`;
+      });
+      const response=await removedPending;
+      check('unused-root removal wins without effects',response.status===403
+        && JSON.stringify(removedBefore)===JSON.stringify(await seatState(removed)));
+    } finally {
+      if(removedPending) await removedPending;
+      await observer`UPDATE swarm.memberships SET revoked_at=NULL WHERE workspace_id=${W}::uuid AND user_id=${owner}::uuid`;
+    }
     // Two independent command IDs cannot fork an unused permanent root.
     const concurrent=await seat('unused-concurrent',false);
     await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${concurrent.t0}::uuid`;
-    const replies=await Promise.all([renew(concurrent.raw,id()),renew(concurrent.raw,id())]);
-    const [children]=await observer`SELECT count(*)::int AS n FROM swarm.agent_tokens WHERE predecessor_token_id=${concurrent.t0}::uuid AND revoked_at IS NULL`;
-    check('unused-root concurrent recovery never forks',children.n===1 && replies.filter(r=>credential(r)!==null).length===1);
+
+    let firstPending,secondPending;
+    await observer.begin(async tx=>{
+      const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
+      // Sole owned row gate; the second recovery queues on the first's U lock.
+      await tx`SELECT renewal_grant_id FROM swarm.renewal_grants WHERE renewal_grant_id=${concurrent.grant}::uuid FOR UPDATE`;
+      firstPending=renew(concurrent.raw,id());
+      const firstPid=await waitBlockedBy(pid,100);
+      check('unused-root concurrency owned grant wait',firstPid>0
+        && (await waitDetail(firstPid)).statement?.includes('swarm.renewal_grants'));
+      secondPending=renew(concurrent.raw,id());
+      const secondPid=firstPid ? await waitBlockedBy(firstPid,100):0;
+      check('unused-root concurrency distinct PID waits on first recovery',secondPid>0 && secondPid!==firstPid
+        && (await waitDetail(secondPid)).statement?.includes('swarm.users'));
+    });
+    const replies=await Promise.all([firstPending,secondPending]);
+    const children=await observer`SELECT token_id FROM swarm.agent_tokens WHERE predecessor_token_id=${concurrent.t0}::uuid AND revoked_at IS NULL`;
+    const issued=replies.filter(r=>credential(r)!==null);
+    check('unused-root concurrent recovery never forks',children.length===1 && issued.length>=1
+      && new Set(issued.map(r=>JSON.parse(r.text).token_id)).size===issued.length);
+    const liveReply=issued.find(r=>JSON.parse(r.text).token_id===children[0]?.token_id);
+    check('unused-root concurrent live successor authenticates',liveReply!==undefined && (await readAs(credential(liveReply))).status===200);
+    check('unused-root concurrent used successor wins',credential(await renew(concurrent.raw,id()))===null);
     // Hold the real adoption UPDATE after it writes but before the final clock.
     // The chosen date crossing this wait must roll back even the use stamp.
     const crossing=await seat('unused-final-clock',false),clockFn=`root_clock_${tag}`;
@@ -410,9 +527,20 @@ try {
     }
     const resumed=await renew(interrupted.raw,interruptedId);
     check('unused-root same ID resumes after committed use',credential(resumed)!==null);
+    // Drop the issuance response before any use. Matching-ID recovery replaces
+    // the pending child; it must never re-emit the old credential from storage.
+    const replaced=await renew(interrupted.raw,interruptedId),replacementRaw=credential(replaced);
+    const replacedState=await seatState(interrupted);
+    const [ledger]=await observer`SELECT response::text NOT LIKE '%swm_agt_%' AS secret_free
+      FROM swarm.idempotency_keys WHERE command_id=${interruptedId} AND principal_kind='agent'`;
+    check('unused-root lost reply replaces pending child without secret replay',replacementRaw!==null
+      && replacementRaw!==credential(resumed) && replacedState.tokens.length===3
+      && replacedState.tokens.filter(t=>!t.revoked).length===2 && ledger?.secret_free===true
+      && [401,403].includes((await readAs(credential(resumed))).status));
+    check('unused-root resumed successor authenticates',replacementRaw!==null && (await readAs(replacementRaw)).status===200);
     const replay=await renew(interrupted.raw,interruptedId);
-    check('unused-root lost-reply replay exposes no second secret',replay.status===200 && credential(replay)===null
-      && (await seatState(interrupted)).tokens.length===2);
+    check('unused-root used successor prevents root secret replay',[401,403].includes(replay.status) && credential(replay)===null
+      && (await seatState(interrupted)).tokens.length===3);
     // A final effect wait must still defeat the new domain-commit path.
     const late=await seat('refusal-final-wait');
     await renew(late.raw,id()); // establish presence so the final write can wait
@@ -493,7 +621,9 @@ try {
     await observer`INSERT INTO swarm.devices(device_id,user_id,label) VALUES(${wrongDevice}::uuid,${owner}::uuid,'Mismatched read fixture')`;
     for(const variant of ['live-bootstrap','expired-unused','expired-used','pending','retired-history','predecessor-tombstone','elapsed','revoked','mismatched-device']) {
       const fixture=await seat(`truth-${variant}`,!['live-bootstrap','expired-unused','mismatched-device'].includes(variant),
-        variant==='mismatched-device' ? wrongDevice:null);
+        variant==='mismatched-device' ? wrongDevice:undefined);
+      const [binding]=await observer`SELECT bound_device_id FROM swarm.renewal_grants WHERE renewal_grant_id=${fixture.grant}::uuid`;
+      check(`current-proof-${variant}-binding`,binding.bound_device_id===(variant==='mismatched-device'?wrongDevice:fixture.device));
       let child;
       if(['pending','retired-history','predecessor-tombstone'].includes(variant)) {
         const issued=await renew(fixture.raw,id());child=JSON.parse(issued.text);

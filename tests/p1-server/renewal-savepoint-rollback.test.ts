@@ -60,12 +60,26 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
         'unused-root NULL binding and future date renew','converted unused permanent NULL-bound root renews',
         'unused-root concurrent recovery never forks','unused-root date crossing adoption wait rolls back stamp',
         'unused-root issuance failure retains truthful use without child','unused-root same ID resumes after committed use',
-        'unused-root lost-reply replay exposes no second secret'])
+        'unused-root lost reply replaces pending child without secret replay','unused-root resumed successor authenticates','unused-root used successor prevents root secret replay',
+        'unused-root admission starts unused expired and bound',
+        'unused-root concurrency owned grant wait','unused-root concurrency distinct PID waits on first recovery',
+        'unused-root concurrent live successor authenticates','unused-root concurrent used successor wins',
+        'unused-root-session-missing','unused-root-session-wrong-key','unused-root-session-valid',
+        'unused-root discovery change owned workspace wait','unused-root discovery change retries whole transaction',
+        'unused-root removal owned membership wait','unused-root removal wins without effects'])
         assert.ok(result.checks?.some(check=>check.name===name && check.ok), `${name}: actual DB proof required`);
 
-      for(const variant of ['live-bootstrap','expired-unused','expired-used','pending','retired-history','predecessor-tombstone','elapsed','revoked','mismatched-device'])
+      for(const variant of ['wrong-device-owner','wrong-creator','wrong-family'])
+        assert.ok(result.checks?.some(check=>check.name===`unused-root-${variant}-denied-without-effects` && check.ok),
+          `${variant}: unused-root authority denial required`);
+      for(const slot of ['token','principal']) for(const policy of ['live','expired','withdrawn','scope'])
+        assert.ok(result.checks?.some(check=>check.name===`unused-root-parent-${slot}-${policy}` && check.ok),
+          `${slot}/${policy}: real parent gate required`);
+      for(const variant of ['live-bootstrap','expired-unused','expired-used','pending','retired-history','predecessor-tombstone','elapsed','revoked','mismatched-device']) {
+        assert.ok(result.checks?.some(check=>check.name===`current-proof-${variant}-binding` && check.ok), `${variant}: retained device binding required`);
         assert.ok(result.checks?.some(check=>check.name===`current-proof-${variant}-home-and-queue` && check.ok),
           `${variant}: both public read boundaries must return the expected connection truth`);
+      }
     }
     assert.equal(result.verdict, "PASS");
     assert.equal(exit.code, 0);

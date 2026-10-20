@@ -709,8 +709,17 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       for (const form of ["known", "bare", "artifact"] as const) {
         const bare = form === "bare";
         const f = await fixture();
-        const [virgin] = await sql<{ first_used_at: Date | null }[]>`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id = ${f.tokenId}::uuid`;
+        // CLI owns process transport + durable save, while the server harness
+        // owns auth variants. Assert actual root eligibility before spawning so
+        // a fixture that becomes used/unexpired cannot silently bypass recovery.
+        const [virgin] = await sql<{ first_used_at: Date | null; eligible: boolean }[]>`
+          SELECT t.first_used_at, (t.expires_at<=clock_timestamp() AND t.predecessor_token_id IS NULL
+            AND g.kind='standing' AND g.horizon_expires_at IS NULL AND g.max_successors IS NULL
+            AND g.bound_device_id=r.device_id) AS eligible
+          FROM swarm.agent_tokens t JOIN swarm.renewal_grants g USING(renewal_grant_id)
+          JOIN swarm.agent_runs r ON r.run_id=t.run_id WHERE t.token_id=${f.tokenId}::uuid`;
         assert.equal(virgin.first_used_at, null, `${form}: real CLI must start with an unused expired root`);
+        assert.equal(virgin.eligible, true, `${form}: exact bound permanent root recovery precondition`);
         const path = join(directory, `${f.tokenId}.json`);
         await writeFile(path, bare ? f.token : JSON.stringify({ message: "Agent credential minted.", status: "accepted",
           principal_id: f.principal, token_id: f.tokenId, run_id: f.run, agent_token: f.token,
