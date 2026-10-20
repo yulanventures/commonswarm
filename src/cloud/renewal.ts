@@ -197,8 +197,8 @@ export class RenewalSuperseded extends Error {
 
 /**
  * The request left and no outcome came back, or a 5xx arrived. Named separately because
- * the honest sentence differs: a refusal means nothing was issued, this means nobody
- * knows, and it is the case whose command id must be kept.
+ * the honest sentence differs: an undecided HTTP refusal cannot disprove an earlier
+ * issuance either. Keep the command id until a parsed command decision settles it.
  */
 export class RenewalOutcomeUnknown extends Error {
   override name = "RenewalOutcomeUnknown";
@@ -229,7 +229,13 @@ export class RenewalRetryError extends Error {
 
 export class RenewalRefused extends Error {
   override name = "RenewalRefused";
-  constructor(readonly status: number, readonly code: string, message: string) {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+    /** True only for a parsed command rejection, never an HTTP-layer refusal. */
+    readonly commandDecided = false,
+  ) {
     super(message);
   }
 }
@@ -521,10 +527,11 @@ export async function requestSuccessor(options: {
         reason === "renewal_device_unavailable"
           ? "The standing grant is device-bound, but this renewal carried no device identity. Ask a workspace owner to revoke this grant and mint a new credential on the intended device."
           : "The standing grant is bound to another device, so CommonSwarm refused renewal. Ask a workspace owner to revoke this grant and mint a new credential on the intended device.",
+        true,
       );
     }
     throw new RenewalRefused(200, reason,
-      `The deployment refused to renew this credential (${reason}). Run the command again; if the refusal continues, ask a workspace owner to check this grant.`);
+      `The deployment refused to renew this credential (${reason}). If renewal keeps being refused, ask a workspace owner to check this grant.`, true);
   }
 
   if (body.agent_token !== undefined && typeof body.agent_token !== "string") {
@@ -944,12 +951,12 @@ export class AgentCredentialSession {
         now: this.clock,
       });
     } catch (error) {
-      // A decided refusal must not pin an idempotently stored rejection forever.
-      // Unknown/malformed issuance retains its id; clearing only intent preserves
-      // the durable successor and every server-side fence.
+      // Only a parsed command rejection releases intent. HTTP refusals may precede
+      // the ledger lookup and cannot disprove an earlier committed, lost reply.
+      // Clearing decided intent preserves the durable successor and server fences.
       if (error instanceof RenewalRevoked || error instanceof RenewalSuspended ||
           error instanceof RenewalReauthorisationRequired || error instanceof RenewalSuperseded ||
-          error instanceof RenewalRefused || error instanceof RenewalUnsupported) {
+          (error instanceof RenewalRefused && error.commandDecided) || error instanceof RenewalUnsupported) {
         this.pending = null;
         await this.persist(store).catch(() => undefined);
       }

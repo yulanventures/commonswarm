@@ -213,7 +213,7 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
   const { default: postgres } = await import("postgres");
   const { cloudTarget, readEndpoint } = await import("../../src/cloud/config.js");
   const { AgentCredentialSession, RenewalCredentialCheckError, RenewalReauthorisationRequired,
-    RenewalRevoked, RenewalSuspended, RenewalSuperseded, RenewalRetryError, newRenewalCommandId, requestSuccessor } = await import("../../src/cloud/renewal.js");
+    RenewalRevoked, RenewalSuspended, RenewalSuperseded, RenewalRefused, RenewalRetryError, newRenewalCommandId, requestSuccessor } = await import("../../src/cloud/renewal.js");
   const { agentCredentialStore, credentialLineageKey } = await import("../../src/cloud/agent-credential.js");
   const { ThinCommandClient } = await import("../../src/cloud/command-client.js");
   const { runListenerRuntime, NullListenerModel } = await import("../../src/listener/runtime.js");
@@ -335,13 +335,15 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       assert.equal((await lost.read())?.token ?? null, null);
       assert.equal(await use(f.workspace, await session.bearer()), 200);
     });
-    await t.test("idle >30d, outage across expiry, repeated dropped replies and expired unused child", async () => {
+    await t.test("idle >30d, lost replies across pre-ledger upgrade refusal and expired unused child", async () => {
       const f = await fixture();
-      let drop = 2, unavailable = true;
+      let drop = 2, unavailable = true, upgradeRequired = false;
       const ids: string[] = [];
       const transport: typeof fetch = async (input, init) => {
         ids.push((JSON.parse(String(init?.body)) as { command_id: string }).command_id);
         if (unavailable) throw new TypeError("injected outage");
+        // Inject only the pre-ledger HTTP gate. Renewal decisions still use M3.
+        if (upgradeRequired) return Response.json({ error: "upgrade_required", min_client_version: "999.0.0" }, { status: 426 });
         const response = await fetch(input, init);
         if (drop-- > 0) { await response.arrayBuffer(); throw new TypeError("injected reply loss"); }
         return response;
@@ -351,6 +353,20 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       await assert.rejects(() => session.bearer(), RenewalRetryError);
       unavailable = false;
       await assert.rejects(() => session.bearer(), RenewalRetryError);
+      const committed = await f.store.read();
+      assert.ok(committed?.pendingRenewal);
+      const [child] = await sql<{ token_id: string; first_used_at: Date | null; revoked_at: Date | null }[]>`
+        SELECT token_id, first_used_at, revoked_at FROM swarm.agent_tokens
+        WHERE predecessor_token_id = ${f.tokenId}::uuid`;
+      assert.ok(child?.token_id, "real M3 committed a child before the reply was dropped");
+      assert.equal(child.first_used_at, null);
+      assert.equal(child.revoked_at, null);
+      upgradeRequired = true;
+      session = await AgentCredentialSession.open(options);
+      await assert.rejects(() => session.bearer(), (error: unknown) =>
+        error instanceof RenewalRefused && error.status === 426 && error.code === "upgrade_required");
+      assert.deepEqual(await f.store.read(), committed, "pre-ledger 426 retains committed lost-reply evidence");
+      upgradeRequired = false;
       // A process can be offline longer than the old one-hour pending deadline.
       await f.store.withLock(async () => {
         const saved = await f.store.read();
@@ -367,10 +383,15 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       assert.ok(bearer !== f.token, "a stored live successor is required");
       assert.equal(await use(f.workspace, bearer), 200);
       assert.equal(ids[1], ids[0], "outage retains id");
-      assert.equal(ids[2], ids[0], "old pending evidence is retained");
-      assert.equal(ids[3], ids[0], "same-id replay precedes recovery");
-      assert.notEqual(ids[4], ids[3], "only null replay permits one fresh id");
-      assert.equal(ids.length, 5, "recovery is bounded");
+      assert.equal(ids[2], ids[0], "pre-ledger upgrade refusal retains the lost-reply id");
+      assert.equal(ids[3], ids[0], "old pending evidence is retained after reopen/upgrade");
+      assert.equal(ids[4], ids[0], "same-id replay precedes recovery");
+      assert.notEqual(ids[5], ids[4], "only null replay permits one fresh id");
+      assert.equal(ids.length, 6, "recovery is bounded");
+      const recovered = await f.store.read();
+      assert.ok(recovered?.token === bearer, "recovery is durable before the bearer is used again");
+      assert.equal(recovered.pendingRenewal, null);
+      assert.equal(recovered.generation, 1);
       const reopened = await AgentCredentialSession.open({ ...options, fetcher: fetch });
       assert.ok(await reopened.bearer() === bearer, "reopen adopts durable successor");
       // Bare and artifact forms use the identical root-derived secure store.
@@ -383,7 +404,7 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       assert.notEqual(otherOrigin.profileId, target.profileId, "fixture requires distinct origins");
       const isolated = await agentCredentialStore({ target: otherOrigin, lineageKey: credentialLineageKey(f.token), stateDirectory: directory });
       assert.equal(await isolated.read(), null, "another origin cannot find the winner");
-      // ids[4] issued the CURRENT winner. ids[3] names the expired, replaced
+      // ids[5] issued the CURRENT winner. ids[4] names the expired, replaced
       // child and cannot exercise the used-winner self-heal fence.
       const winner = await f.store.read();
       assert.ok(winner?.tokenId);
@@ -392,10 +413,10 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
           WHERE predecessor_token_id = ${f.tokenId}::uuid) AS tokens
         FROM swarm.agent_tokens t WHERE token_id = ${winner.tokenId}::uuid`;
       assert.ok(before?.first_used_at, "the current winner really authenticated");
-      for (const commandId of [ids[4]!, newRenewalCommandId()]) {
+      for (const commandId of [ids[5]!, newRenewalCommandId()]) {
         try {
           const recovered = await requestSuccessor({ target, workspaceId: f.workspace, predecessor: f.token, commandId });
-          assert.equal(commandId, ids[4], "a new id must be refused for a used winner");
+          assert.equal(commandId, ids[5], "a new id must be refused for a used winner");
           assert.equal(recovered, null, "the actual issuance replay cannot return another secret");
         } catch (error) {
           assert.ok((error instanceof RenewalCredentialCheckError && error.status === 401 && error.code === "unauthenticated") ||
