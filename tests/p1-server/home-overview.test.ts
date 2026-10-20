@@ -435,7 +435,7 @@ test('Home RPC carries the selected connection policy and respects nonstanding s
     { name:'removed beats elapsed and suspension', deadline:elapsed, removed:true, suspended:true, connection:'removed' },
     { name:'revoked family cannot be live', revoked:true, connection:'key_off' },
     { name:'member policy', memberOwned:true, deadline:future, connection:'live' },
-    { name:'newest family chosen', secondFamily:true, deadline:elapsed, connection:'key_ended' },
+    { name:'older live beats newer elapsed', secondFamily:true, deadline:elapsed, connection:'live' },
   ];
   const facts = (id: string) => `(SELECT a->'status'->'facts' FROM overview_result,
     jsonb_array_elements(value->'workspaces') ws,
@@ -444,7 +444,7 @@ test('Home RPC carries the selected connection policy and respects nonstanding s
   let sql = repoSql('supabase/migrations/20261019000010_local_permanence_read_models.sql')
     + userSql(owner) + userSql(member) + userSql(outsider) + workspaceSql(w,owner) + boundarySql(w)
     + `INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES ('${w}','${member}','member');`;
-  const expected: { principal: string; grant: string; connection: string; name: string }[] = [];
+  const expected: { principal: string; grant: string; token?: string; connection: string; name: string }[] = [];
   for (const c of localCases) {
     const [grant, nextGrant] = [randomUUID(),randomUUID()].sort() as [string,string];
     const principal = randomUUID(), device = randomUUID(), run = randomUUID(), token = randomUUID();
@@ -466,14 +466,14 @@ test('Home RPC carries the selected connection policy and respects nonstanding s
         '${randomUUID()}','${grant}');`;
     if (c.used) sql += `UPDATE swarm.agent_tokens SET first_used_at=clock_timestamp() WHERE token_id='${token}';`;
     if (c.secondFamily) {
-      // A newer unrevoked family is canonical even when an older bearer is live.
+      // A newer elapsed family cannot hide an older eligible bearer.
       const chosen = nextGrant, nextRun = randomUUID();
       sql += `INSERT INTO swarm.agent_runs(run_id,principal_id,device_id) VALUES ('${nextRun}','${principal}','${device}');
         INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,kind,
           max_successors,horizon_expires_at,bound_device_id,created_by,connection_expires_at)
         VALUES ('${chosen}','${w}','${principal}','${nextRun}','standing',NULL,NULL,'${device}','${who}',${elapsed});`;
-      expected.push({principal,grant:chosen,connection:c.connection,name:c.name});
-    } else expected.push({principal,grant,connection:c.connection,name:c.name});
+      expected.push({principal,grant,token,connection:c.connection,name:c.name});
+    } else expected.push({principal,grant,token,connection:c.connection,name:c.name});
     if (c.removed) sql += `UPDATE swarm.agent_principals SET revoked_at=statement_timestamp() WHERE principal_id='${principal}';`;
     if (c.revoked) sql += `UPDATE swarm.renewal_grants SET revoked_at=statement_timestamp(),revoked_by='${who}' WHERE renewal_grant_id='${grant}';`;
   }
@@ -514,6 +514,8 @@ test('Home RPC carries the selected connection policy and respects nonstanding s
     ${claims(owner)} SET LOCAL ROLE authenticated; ${snapshot()}`;
   for (const c of expected) {
     sql += check(`${facts(c.principal)}->>'connection'='${c.connection}'`, c.name);
+    if(c.token) sql += check(`${facts(c.principal)}->>'renewal_grant_id'='${c.grant}' AND ${facts(c.principal)}->>'token_id'='${c.token}'`, `selected identity: ${c.name}`);
+    if(c.token && c.connection!=='removed') sql += check(`EXISTS (SELECT 1 FROM swarm_read.renewal_grant_roster('${w}') r WHERE r.principal_id='${c.principal}' AND r.renewal_grant_id='${c.grant}' AND r.token_id='${c.token}')`, `roster agrees: ${c.name}`);
     sql += check(`${facts(c.principal)} ?& ARRAY['connection_expires_at','connection_expired_at']
       AND ${facts(c.principal)}->'connection_expires_at' IS NOT DISTINCT FROM
         (SELECT coalesce(to_jsonb(connection_expires_at),'null'::jsonb) FROM expected_home_policy WHERE grant_id='${c.grant}')
@@ -523,6 +525,7 @@ test('Home RPC carries the selected connection policy and respects nonstanding s
   }
   sql += check(`${facts(bare)}->>'connection'='live' AND NOT (${facts(bare)} ?| ARRAY['connection_expires_at','connection_expired_at'])`,
     'ungranted authority does not imply permanent policy');
+  sql += check(`${facts(bare)}->'renewal_grant_id'='null'::jsonb AND ${facts(bare)}->>'token_id' IS NOT NULL AND NOT EXISTS (SELECT 1 FROM swarm_read.renewal_grant_roster('${w}') r WHERE r.principal_id='${bare}')`, 'legacy identity has no grant roster row');
   sql += `RESET ROLE; ${claims(member)} SET LOCAL ROLE authenticated; ${refresh()}`;
   sql += check(`${facts(expected[0]!.principal)}->'connection_expires_at'='null'::jsonb`, 'member sees canonical roster facts');
   sql += `RESET ROLE; ${claims(outsider)} SET LOCAL ROLE authenticated; ${refresh()}`;
