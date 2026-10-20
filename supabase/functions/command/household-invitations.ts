@@ -1,6 +1,7 @@
 /** Recipient-only join; called before workspace routing, within the authenticated
  * command transaction. No delegated credential can enter this boundary. */
 import type postgres from 'npm:postgres@3.4.9';
+import { assertHouseholdContentServiceReady, writeHostedContentRestriction } from './household-content-access.ts';
 import { parseHumanInviteCommand, decideHumanInvite, HOUSEHOLD_JOIN_DISCLOSURE, HOUSEHOLD_JOIN_CONSENT_VERSION,
   reduceAdminAuthority, canonicalAdminJson, adminEffectiveCapabilities, adminGrantManifest, adminManifestValid } from '../_shared/protocol.js';
 import type { AdminAccountState, AdminAccountEvent, AdminGrant } from '../_shared/admin-authority.d.ts';
@@ -15,6 +16,7 @@ export async function humanInvitationTransaction(tx: Sql, commandId: string, val
   const command = parseHumanInviteCommand(value) as HumanInviteCommand | null;
   if (!human?.verified) return { status: 403, body: { error: 'human_sign_in_required' } };
   if (!command || !/^[A-Za-z0-9_-]{1,128}$/.test(commandId)) return { status: 400, body: { error: 'invalid_request' } };
+  await assertHouseholdContentServiceReady(tx);
   const delegated = command.invitation.source === 'delegated';
   // First resolve without locks. Then follow the routine writer's lock order:
   // grantor user, account, grants, workspace, stream, invitation. Re-read under locks.
@@ -120,6 +122,16 @@ export async function humanInvitationTransaction(tx: Sql, commandId: string, val
       WHERE workspace_id=${workspaceId}::uuid AND user_id=${human.user_id}::uuid AND revoked_at IS NULL
       RETURNING content_role`;
     writtenRole = updated[0]?.content_role ?? null;
+  }
+  // Reconfirmation invalidates the connection's prior consent, including an
+  // inherited connection that never had a manual approval. This is system
+  // invalidation, not a claim about the person's withdrawal intent.
+  const hosted = await tx`SELECT grant_id,principal_id FROM swarm.hosted_mcp_seats
+    WHERE workspace_id=${workspaceId}::uuid AND owner_user_id=${human.user_id}::uuid ORDER BY grant_id,seat_id FOR SHARE`;
+  await tx`SELECT set_config('cswarm.household_command','household_connection_invalidation',true)`;
+  // Retain every canonical target; a later Allow of A cannot clear B.
+  for (const seat of hosted) {
+    await writeHostedContentRestriction(tx, workspaceId, human.user_id, String(seat.grant_id), String(seat.principal_id), [], 'system_invalidation');
   }
   await tx`SELECT set_config('cswarm.household_command','household_withdraw_connection',true)`;
   await tx`UPDATE swarm.household_content_connections SET revoked_at=${date(now)}

@@ -5,11 +5,12 @@
  * Lock order is workspace, membership/content rights, stream, artifact rows.
  */
 import type postgres from 'postgres';
+import { loadHouseholdContentAccess } from './household-content-access.ts';
 import type {
   HouseholdAttribution, HouseholdBlob, HouseholdContent, HouseholdObjectState,
   HouseholdRevision, HouseholdRevisionRef,
 } from '../_shared/household-object-events.d.ts';
-import type { HouseholdAccessFacts, HouseholdContentOperation } from '../_shared/household-object-policy.d.ts';
+import type { HouseholdAccessFacts } from '../_shared/household-object-policy.d.ts';
 import type { HouseholdObjectCommand, HouseholdVerifiedContent, HouseholdReadQuery } from '../_shared/household-objects.d.ts';
 import type { HouseholdStorage } from './household-transfers.ts';
 
@@ -63,51 +64,12 @@ export function createHouseholdObjectStore(dependencies: {
 
   async function access(tx: Sql, workspaceId: string, identity: HouseholdIdentity): Promise<{ facts: HouseholdAccessFacts; now: number } | null> {
     if (!await recheckCredential(tx, identity)) return null;
-    const [workspace] = await tx`SELECT archived_at FROM swarm.workspaces WHERE workspace_id=${workspaceId}::uuid FOR UPDATE`;
-    if (!workspace) return null;
-    const [boundary] = await tx`SELECT purpose, owner_user_id FROM swarm.household_workspace_boundaries WHERE workspace_id=${workspaceId}::uuid FOR SHARE`;
-    const [member] = await tx`SELECT revoked_at FROM swarm.memberships WHERE workspace_id=${workspaceId}::uuid AND user_id=${identity.user_id}::uuid FOR SHARE`;
-    const [rights] = await tx`SELECT * FROM swarm.household_member_content_roles WHERE workspace_id=${workspaceId}::uuid AND user_id=${identity.user_id}::uuid FOR SHARE`;
-    if (!boundary) return null;
-    let hostedPolicy: { connection_expires_at: unknown; connection_expired_at: unknown } | null = null;
-    let credential: HouseholdAccessFacts['credential'] = { kind: 'human' };
-    if (identity.principal_id !== null) {
-      if (!identity.connection) return null;
-      const [principal] = await tx`SELECT revoked_at FROM swarm.agent_principals WHERE workspace_id=${workspaceId}::uuid AND principal_id=${identity.principal_id}::uuid AND owner_user_id=${identity.user_id}::uuid FOR SHARE`;
-      if (!principal || principal.revoked_at !== null) return null;
-      const [connection] = await tx`SELECT * FROM swarm.household_content_connections WHERE workspace_id=${workspaceId}::uuid
-        AND connection_id=${identity.connection.connection_id}::uuid AND grant_id=${identity.connection.grant_id}::uuid
-        AND principal_id=${identity.principal_id}::uuid AND owner_user_id=${identity.user_id}::uuid FOR SHARE`;
-      if (!connection) return null;
-      if (connection.hosted_grant_id !== null) {
-        const [grant] = await tx`SELECT state, revoked_at, connection_expires_at, connection_expired_at FROM swarm.hosted_mcp_grants WHERE grant_id=${connection.hosted_grant_id}::uuid AND owner_user_id=${identity.user_id}::uuid FOR SHARE`;
-        const [binding] = await tx`SELECT revoked_at FROM swarm.hosted_mcp_grant_workspaces WHERE grant_id=${connection.hosted_grant_id}::uuid AND workspace_id=${workspaceId}::uuid AND owner_user_id=${identity.user_id}::uuid FOR SHARE`;
-        const [seat] = await tx`SELECT revoked_at FROM swarm.hosted_mcp_seats WHERE grant_id=${connection.hosted_grant_id}::uuid AND workspace_id=${workspaceId}::uuid AND principal_id=${identity.principal_id}::uuid FOR SHARE`;
-        if (!grant || grant.state !== 'active' || grant.revoked_at !== null || !binding || binding.revoked_at !== null || !seat || seat.revoked_at !== null) return null;
-        hostedPolicy = { connection_expires_at: grant.connection_expires_at, connection_expired_at: grant.connection_expired_at };
-      }
-      credential = { kind: 'agent', connection: {
-        connection_id: String(connection.connection_id), grant_id: String(connection.grant_id), workspace_id: workspaceId,
-        principal_id: identity.principal_id, owner_user_id: identity.user_id,
-        operations: connection.operations as HouseholdContentOperation[], purpose: connection.purpose as 'personal' | 'shared',
-        revoked_at: stamp(connection.revoked_at), expires_at: stamp(connection.expires_at),
-      } };
-    } else if (identity.connection !== null || identity.run_id !== null) return null;
-    // Hosted revalidation only reads the same capability. Resolve it after all
-    // access-row waits; do not introduce stream/family locks or local adoption.
-    if (hostedPolicy && !await recheckCredential(tx, identity)) return null;
-    const [clock] = await tx`SELECT clock_timestamp() AS now`;
-    const now = stamp(clock!.now)!;
-    if (hostedPolicy && (hostedPolicy.connection_expired_at !== null
-      || (hostedPolicy.connection_expires_at !== null && stamp(hostedPolicy.connection_expires_at)! <= now))) return null;
-    return { now, facts: {
-      workspace_id: workspaceId, archived_at: stamp(workspace.archived_at), actor: actor(identity), credential,
-      boundary: boundary.purpose === 'personal' ? { kind: 'personal', owner_user_id: String(boundary.owner_user_id) } : { kind: 'shared' },
-      member: member ? { user_id: identity.user_id, workspace_id: workspaceId,
-        revoked_at: stamp(member.revoked_at) ?? stamp(rights?.revoked_at),
-        content_role: rights?.content_role as 'reader' | 'editor' | null ?? null,
-        content_consent_id: rights?.content_consent_id as string | null ?? null } : null,
-    } };
+    const result = await loadHouseholdContentAccess(tx, workspaceId, identity);
+    // Resolve the verified capability after all durable access-row waits.
+    // Reload the same facts afterwards so a credential wait cannot leave an
+    // earlier policy clock in the authority returned to Storage or the caller.
+    if (!result || !await recheckCredential(tx, identity)) return null;
+    return await loadHouseholdContentAccess(tx, workspaceId, identity);
   }
 
   async function state(tx: Sql, workspaceId: string, create: boolean): Promise<HouseholdObjectState> {

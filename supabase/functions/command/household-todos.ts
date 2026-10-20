@@ -4,6 +4,7 @@
  * Lock order: workspace/access rows, stream, projection rows.
  */
 import type postgres from 'postgres';
+import { loadHouseholdContentAccess } from './household-content-access.ts';
 import type { HouseholdIdentity } from './household-objects.ts';
 import type { HouseholdAccessFacts } from '../_shared/household-object-policy.d.ts';
 import type { HouseholdTodoState, Todo, TodoCommand, TodoComment, TodoGate, Party, TodoNotice, TodoOutcome } from '../_shared/household-todos.d.ts';
@@ -182,6 +183,51 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       ORDER BY seq,comment_id OFFSET ${offset} LIMIT ${limit + 1}`;
     return rows.map(commentFromRow);
   }
+  async function queueContentAccess(tx: Sql, workspaceId: string, principalId: string): Promise<'none' | 'read' | 'read_write'> {
+    // These are durable candidate identities, never accepted as credentials.
+    // The same locked facts/policy used for actual content decide each candidate.
+    const candidates = await tx`SELECT s.owner_user_id,s.seat_id AS connection_id,s.grant_id,h.handle,g.provider_grant_id FROM swarm.hosted_mcp_seats s
+      JOIN swarm.hosted_mcp_seat_handles h ON h.seat_id=s.seat_id AND h.revoked_at IS NULL
+      JOIN swarm.hosted_mcp_grants g ON g.grant_id=s.grant_id
+      WHERE s.workspace_id=${workspaceId}::uuid AND s.principal_id=${principalId}::uuid
+      UNION ALL SELECT c.owner_user_id,c.connection_id,c.grant_id,NULL,NULL FROM swarm.household_content_connections c
+      JOIN swarm.agent_tokens t ON t.token_id=c.connection_id AND t.run_id=c.grant_id AND t.principal_id=c.principal_id
+      JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=t.principal_id
+      JOIN swarm.devices d ON d.device_id=r.device_id
+      WHERE t.revoked_at IS NULL AND t.expires_at>clock_timestamp() AND NOT t.surrender_only
+        AND r.ended_at IS NULL AND d.revoked_at IS NULL
+        AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones rt WHERE
+          (rt.kind='token' AND rt.target_id=t.token_id) OR (rt.kind='principal' AND rt.target_id=t.principal_id)
+          OR (rt.kind='run' AND rt.target_id=t.run_id) OR (rt.kind='device' AND rt.target_id=d.device_id)
+          OR (rt.kind='membership' AND rt.target_id=c.owner_user_id)
+          OR (rt.kind IN ('lineage','family') AND rt.target_id=t.lineage_id))
+        AND c.workspace_id=${workspaceId}::uuid AND c.principal_id=${principalId}::uuid AND c.hosted_grant_id IS NULL`;
+    let result: 'none' | 'read' | 'read_write' = 'none';
+    for (const candidate of candidates) {
+      if (candidate.handle) {
+        // Existing hosted-read authority, never OAuth-runtime membership.
+        const [role] = await tx`SELECT current_setting('role') AS value`;
+        let live = false;
+        await tx`SELECT set_config('role','swarm_read',true)`;
+        try {
+          const [row] = await tx`SELECT EXISTS(SELECT 1 FROM swarm.resolve_hosted_seat_read_authorization(
+            ${candidate.grant_id}::uuid,${candidate.handle}::text,'whoami') a
+            WHERE a.workspace_id=${workspaceId}::uuid AND a.principal_id=${principalId}::uuid
+              AND a.owner_user_id=${candidate.owner_user_id}::uuid)
+            AND commonswarm_oauth.provider_family_active(${candidate.provider_grant_id}::text) AS live`;
+          live = row?.live === true;
+        } finally { await tx`SELECT set_config('role',${String(role!.value)},true)`; }
+        if (!live) continue;
+      }
+      const checked = await loadHouseholdContentAccess(tx, workspaceId, { user_id: String(candidate.owner_user_id), principal_id: principalId,
+        run_id: null, connection: { connection_id: String(candidate.connection_id), grant_id: String(candidate.grant_id) } });
+      if (!checked || core.householdAccessRefusal(checked.facts, workspaceId, 'read', checked.now)) continue;
+      if (!core.householdAccessRefusal(checked.facts, workspaceId, 'create', checked.now)
+        || !core.householdAccessRefusal(checked.facts, workspaceId, 'update', checked.now)) return 'read_write';
+      result = 'read';
+    }
+    return result;
+  }
   async function queueFacts(tx: Sql, workspaceId: string, principalId: string, current: HouseholdTodoState, now: number) {
     const [agent] = await tx`SELECT p.*,
       EXISTS (SELECT 1 FROM swarm.memberships m WHERE m.workspace_id=p.workspace_id AND m.user_id=p.owner_user_id AND m.revoked_at IS NULL) AS member_live,
@@ -206,14 +252,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       ) AS last_activity_at,
       (SELECT min(enqueued_at) FROM swarm.signal_deliveries WHERE workspace_id=${workspaceId}::uuid AND recipient_agent_principal_id=${principalId}::uuid AND acked_at IS NULL) AS messages_waiting_since`;
     const [claim] = await tx`SELECT id,created_at,until FROM swarm.signals WHERE workspace_id=${workspaceId}::uuid AND from_principal=${principalId}::uuid AND from_kind='agent' AND kind='working-on' AND until>${new Date(now)} ORDER BY created_at DESC,id LIMIT 1`;
-    const [approval] = await tx`SELECT bool_or('read'=ANY(c.operations)) AS can_read, bool_or(r.content_role='editor' AND 'read'=ANY(c.operations) AND ('create'=ANY(c.operations) OR 'update'=ANY(c.operations))) AS can_write
-      FROM swarm.household_content_connections c JOIN swarm.household_member_content_roles r ON r.workspace_id=c.workspace_id AND r.user_id=c.owner_user_id
-      WHERE c.workspace_id=${workspaceId}::uuid AND c.principal_id=${principalId}::uuid AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at>${new Date(now)})
-      AND r.revoked_at IS NULL AND r.content_consent_id IS NOT NULL AND r.content_role IN ('reader','editor')
-      AND (c.hosted_grant_id IS NULL OR EXISTS (SELECT 1 FROM swarm.hosted_mcp_grants g JOIN swarm.hosted_mcp_grant_workspaces b USING(grant_id)
-        JOIN swarm.hosted_mcp_seats s ON s.grant_id=g.grant_id AND s.workspace_id=b.workspace_id
-        WHERE g.grant_id=c.hosted_grant_id AND g.state='active' AND g.revoked_at IS NULL AND b.workspace_id=c.workspace_id AND b.revoked_at IS NULL
-        AND s.principal_id=c.principal_id AND s.revoked_at IS NULL))`;
+    const contentAccess = await queueContentAccess(tx, workspaceId, principalId);
     const doing = Object.values(current.todos).filter(t => t.state === 'doing' && t.assignee?.kind === 'agent' && t.assignee.id === principalId).sort((a,b) => a.state_at.localeCompare(b.state_at))[0];
     const live = agent.revoked_at === null && agent.member_live && (agent.transport === 'hosted_mcp' ? agent.hosted_live : agent.token_live || agent.renewal_live);
     const facts: AgentWorkFacts = { transport: agent.transport as 'local' | 'hosted_mcp', turn_only: Boolean(agent.turn_only),
@@ -223,11 +262,15 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       working_on: claim ? { signal_id: String(claim.id), at: iso(claim.created_at), until: iso(claim.until) } : null };
     const work = facts.connection === 'connection_off' ? 'disconnected' : core.agentWorkState({ ...facts, connection: facts.connection }, now);
     return { owner_user_id: String(agent.owner_user_id), status: { work, facts },
-      content_access: !live || !approval?.can_read ? 'none' : approval.can_write ? 'read_write' : 'read' };
+      content_access: !live ? 'none' : contentAccess };
   }
   async function read(tx: Sql, workspaceId: string, identity: HouseholdIdentity, query: HouseholdTodoQuery) {
     const initial = await authorize(tx, workspaceId, identity, 'read');
     if (initial.denied) return { status: 'refused' as const, reason: initial.denied };
+    // Acquire target content locks before stream/projection locks; later queue
+    // rechecks revisit those same rows after any waits.
+    if (query.kind === 'todo_queue' && (query.principal_id ?? identity.principal_id))
+      await queueContentAccess(tx, workspaceId, (query.principal_id ?? identity.principal_id)!);
     const current = await state(tx, workspaceId, false);
     const latest = await authorize(tx, workspaceId, identity, 'read');
     if (latest.denied) return { status: 'refused' as const, reason: latest.denied };
@@ -281,6 +324,10 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       result = { ...metadata, ...loaded, next_offset };
     }
     if ((await authorize(tx, workspaceId, identity, 'read')).denied) return { status: 'refused' as const, reason: 'workspace_access_refused' as const };
+    if (query.kind === 'todo_queue') {
+      const target = query.principal_id ?? identity.principal_id;
+      if (target) (result as { content_access: string }).content_access = await queueContentAccess(tx, workspaceId, target);
+    }
     return result;
   }
   return { write, read, state };

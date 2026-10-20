@@ -3,6 +3,7 @@
 import type postgres from 'postgres';
 import * as core from '../_shared/protocol.js';
 import { createHouseholdObjectStore, type HouseholdIdentity, type HouseholdCredentialRecheck } from './household-objects.ts';
+import { loadHouseholdContentAccess } from './household-content-access.ts';
 import { approveHouseholdConnection, withdrawHouseholdConnection } from './household-permissions.ts';
 import { createHouseholdTodoStore, type HouseholdTodoNoticePort } from './household-todos.ts';
 import { readHouseholdActivity } from './household-activity.ts';
@@ -49,6 +50,20 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
   const humanOnly = ['household_todo_answer', 'household_todo_steer', 'household_agent_work_policy', 'household_activity'].includes(String(value.kind));
   if (humanOnly && identity.principal_id !== null) return refused('human_confirmation_required');
   const store = householdStore(recheckCredential);
+  const missingAccess = async () => {
+    // A verified owner connection cannot bootstrap a boundary or human content
+    // consent. Give the existing precise condition without manufacturing either.
+    if (identity.principal_id !== null && identity.connection && await recheckCredential(tx, identity)) {
+      const [owner] = await tx`SELECT NOT EXISTS(SELECT 1 FROM swarm.household_workspace_boundaries b
+        WHERE b.workspace_id=m.workspace_id) AS missing_boundary FROM swarm.memberships m
+        JOIN swarm.hosted_mcp_seats s ON s.workspace_id=m.workspace_id AND s.owner_user_id=m.user_id
+        WHERE m.workspace_id=${workspaceId}::uuid AND m.user_id=${identity.user_id}::uuid
+          AND m.role='owner' AND m.revoked_at IS NULL AND s.seat_id=${identity.connection.connection_id}::uuid
+          AND s.grant_id=${identity.connection.grant_id}::uuid AND s.principal_id=${identity.principal_id}::uuid`;
+      if (owner?.missing_boundary) return refused('owner_confirmation_required');
+    }
+    return refused('workspace_access_refused');
+  };
   const todos = createHouseholdTodoStore({ core: core as unknown as Parameters<typeof createHouseholdTodoStore>[0]['core'], access: store.access,
     notice: notice ?? (async () => { throw new Error('Household notice port is required for writes.'); }) });
   if (humanOnly) {
@@ -61,7 +76,9 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
     if (identity.principal_id !== null || !await recheckCredential(tx, identity)) return refused('human_confirmation_required');
     const access = await store.access(tx, workspaceId, identity);
     if (!access || core.householdAccessRefusal(access.facts, workspaceId, 'read', access.now)) return refused('workspace_access_refused');
-    const hosted = await tx`SELECT 'hosted' AS kind,s.seat_id AS connection_id,s.grant_id,s.principal_id,p.name
+    const hosted = await tx`SELECT 'hosted' AS kind,s.seat_id AS connection_id,s.grant_id,s.principal_id,p.name,g.provider_grant_id,
+        (SELECT h.handle FROM swarm.hosted_mcp_seat_handles h WHERE h.seat_id=s.seat_id
+          AND h.revoked_at IS NULL ORDER BY h.created_at DESC LIMIT 1) AS handle
       FROM swarm.hosted_mcp_seats s JOIN swarm.agent_principals p USING(principal_id)
       JOIN swarm.hosted_mcp_grants g USING(grant_id)
       JOIN swarm.hosted_mcp_grant_workspaces b ON b.grant_id=s.grant_id AND b.workspace_id=s.workspace_id
@@ -80,12 +97,51 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
     const key = (row: Record<string, unknown>) => JSON.stringify([row.connection_id, row.grant_id, row.principal_id]);
     const byConnection = new Map(approvals.map(row => [key(row), { operations: row.operations,
       expires_at: row.expires_at == null ? null : new Date(row.expires_at as string).toISOString() }]));
-    return { status: 'ok', connections: [...hosted,...local].map(row => ({ kind: row.kind, connection_id: row.connection_id,
-      grant_id: row.grant_id, principal_id: row.principal_id, name: row.name, approval: byConnection.get(key(row)) ?? null })) };
+    const connections = [];
+    for (const row of [...hosted,...local]) {
+      // The local query does not prove the canonical token/lineage/tombstone
+      // fences. Preserve its manual approval without claiming effective rights.
+      if (row.kind === 'local') {
+        connections.push({ kind: row.kind, connection_id: row.connection_id, grant_id: row.grant_id,
+          principal_id: row.principal_id, name: row.name, approval: byConnection.get(key(row)) ?? null,
+          effective_access: null, effective_access_reason: 'local_credential_liveness_not_computed' });
+        continue;
+      }
+      // Hosted tuples are checked by the existing canonical resolver below.
+      let credentialLive = true;
+      if (row.kind === 'hosted') {
+        const [role] = await tx`SELECT current_setting('role') AS value`;
+        await tx`SELECT set_config('role','swarm_read',true)`;
+        try {
+          const [live] = await tx`SELECT EXISTS(SELECT 1 FROM swarm.resolve_hosted_seat_read_authorization(
+            ${String(row.grant_id)}::uuid,${row.handle as string | null}::text,'whoami') a
+            WHERE a.workspace_id=${workspaceId}::uuid AND a.principal_id=${String(row.principal_id)}::uuid
+              AND a.owner_user_id=${identity.user_id}::uuid)
+            AND commonswarm_oauth.provider_family_active(${String(row.provider_grant_id)}::text) AS live`;
+          credentialLive = live?.live === true;
+        } finally { await tx`SELECT set_config('role',${String(role!.value)},true)`; }
+      }
+      const effective = credentialLive ? await loadHouseholdContentAccess(tx, workspaceId, {
+        user_id: identity.user_id, principal_id: String(row.principal_id),
+        run_id: row.kind === 'local' ? String(row.grant_id) : null,
+        connection: { connection_id: String(row.connection_id), grant_id: String(row.grant_id) },
+      }) : null;
+      const operations = effective ? core.HOUSEHOLD_CONTENT_OPERATIONS.filter(op =>
+        !core.householdAccessRefusal(effective.facts, workspaceId, op, effective.now)) : [];
+      connections.push({ kind: row.kind, connection_id: row.connection_id, grant_id: row.grant_id,
+        principal_id: row.principal_id, name: row.name, approval: byConnection.get(key(row)) ?? null,
+        effective_access: { source: effective?.source ?? 'none', operations,
+          restricted: operations.length === 0 || (effective?.facts.member?.content_role === 'editor'
+            && operations.length < core.HOUSEHOLD_CONTENT_OPERATIONS.length),
+          restrictions: effective?.restriction ?? [] } });
+    }
+    return { status: 'ok', connections };
   }
   if (value.kind === 'household_access') {
     const access = await store.access(tx, workspaceId, identity);
-    if (!access || core.householdAccessRefusal(access.facts, workspaceId, 'read', access.now)) return refused('workspace_access_refused');
+    if (!access) return missingAccess();
+    const denied = core.householdAccessRefusal(access.facts, workspaceId, 'read', access.now);
+    if (denied) return refused(denied);
     return { status: 'ok', content_role: access.facts.member!.content_role,
       operations: core.HOUSEHOLD_CONTENT_OPERATIONS.filter(op => !core.householdAccessRefusal(access.facts, workspaceId, op, access.now)) };
   }
@@ -113,7 +169,7 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
   if (identity.connection === null && args.seat !== localSeat) return refused('seat_binding_mismatch');
   const access = await store.access(tx, workspaceId, identity);
   const operation = core.householdToolOperation(value.tool, args);
-  if (!access) return refused('workspace_access_refused');
+  if (!access) return missingAccess();
   const denied = core.householdAccessRefusal(access.facts, workspaceId, operation, access.now);
   if (denied) return refused(denied);
   if (core.HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === value.tool)!.objectTypes.includes('todo')) {
