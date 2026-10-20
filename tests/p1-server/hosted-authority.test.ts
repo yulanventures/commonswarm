@@ -2118,7 +2118,7 @@ async function ownerContentHttpFixture(privateAuth = false) {
   } finally { await edge.end(); }
   const handle = String(seat.body.handle);
   const call = (calls: Array<Record<string,unknown>>, extra: Record<string,unknown> = {}) => ({
-    operation:'context-http',household:true,grantId:fixture.grantA,ownerUserId:fixture.owner,handle,calls,...extra });
+    operation:'context-http',grantId:fixture.grantA,ownerUserId:fixture.owner,handle,calls,...extra });
   return { fixture, seat, edgeUrl:edgeUrl.href, call };
 }
 function assertContentDenied(result: ContextHttpResult) {
@@ -2334,8 +2334,16 @@ test('B closed snapshots survive committed M00002 NULL only, without another All
     const functionIdentity=()=>sql`SELECT p.proowner,p.prosecdef,p.proacl,p.proargtypes::text,p.proconfig
       FROM pg_proc p WHERE p.oid='swarm.audit_household_hosted_restriction()'::regprocedure`;
     const fnBefore=await functionIdentity();
-    await sql.unsafe(repoSql('supabase/migrations/20261019000009_hosted_snapshot_null_compat.sql'));
-    assert.deepEqual(await functionIdentity(),fnBefore,'owner/signature/invoker/config/ACL unchanged');
+    const functionFingerprint=()=>sql`SELECT md5(pg_get_functiondef(
+      'swarm.audit_household_hosted_restriction()'::regprocedure)) AS fingerprint`;
+    // CI clones the fully migrated stack. Restore only the exact B00006
+    // function in this disposable database so the before phase exercises B.
+    const bFunction=repoSql('supabase/migrations/20261019000006_hosted_owner_content_access.sql')
+      .match(/^CREATE OR REPLACE FUNCTION swarm\.audit_household_hosted_restriction\(\) RETURNS trigger\n[\s\S]*?^END \$\$;/m);
+    assert.ok(bFunction,'extract the existing B00006 trigger function, without its table/ACL DDL');
+    await sql.unsafe(bFunction[0]);
+    const bFingerprint=await functionFingerprint();
+    assert.deepEqual(await functionIdentity(),fnBefore,'restoring B preserves original owner/signature/invoker/config/ACL');
     const f=await ownerContentHttpFixture(true);
     edge=postgres(f.edgeUrl,{prepare:false,max:1});
     const [login]=await edge`SELECT session_user,current_user,rolsuper,rolbypassrls
@@ -2346,7 +2354,7 @@ test('B closed snapshots survive committed M00002 NULL only, without another All
     const workspace=f.fixture.workspaceA, owner=f.fixture.owner, grant=f.fixture.grantA;
     const oldSeat=String(f.seat.body.seat_id), oldPrincipal=String(f.seat.body.principal_id);
     const allow=(seat:string,principal:string,operations:string[])=>runHostedHarness<HarnessResult>({
-      operation:'public',household:true,ownerJwt:f.fixture.ownerJwt,workspaceId:workspace,
+      operation:'public',ownerJwt:f.fixture.ownerJwt,workspaceId:workspace,
       command:{kind:'household_approve_connection',connection:{kind:'hosted',connection_id:seat,
         grant_id:grant,principal_id:principal,operations}}},{databaseUrl:f.edgeUrl});
     assert.equal(allow(oldSeat,oldPrincipal,['read']).body.status,'committed');
@@ -2374,7 +2382,7 @@ test('B closed snapshots survive committed M00002 NULL only, without another All
     const unchanged=await durable();
     const content=()=>runHostedHarness<ContextHttpResult[]>(f.call([
       {name:'todo_list'},{name:'todo_create',arguments:{request_id:randomUUID(),title:'Snapshot compatibility synthetic'}}],
-      {handle:fresh.body.handle,household:true}),{databaseUrl:f.edgeUrl});
+      {handle:fresh.body.handle}),{databaseUrl:f.edgeUrl});
     const positive=()=>{const result=content();assert.equal(result[0]!.body.status,'ok');assert.equal(result[1]!.body.status,'committed');};
     // Direct real command-role trigger check uses existing authenticated context,
     // not an owner bypass. It retains the marker bytes and makes no new approval.
@@ -2390,7 +2398,11 @@ test('B closed snapshots survive committed M00002 NULL only, without another All
         closed_target_replacements=${value === undefined ? null : tx.json(value as postgres.JSONValue)}
         WHERE grant_id=${grant}::uuid AND workspace_id=${workspace}::uuid AND principal_id=${principal}::uuid`;
     });
-    positive(); await capture(markers); assert.deepEqual(await durable(),unchanged);
+    positive(); await capture(markers); assert.deepEqual(await durable(),unchanged,'B00006 before M0 and M00002');
+    await sql.unsafe(repoSql('supabase/migrations/20261019000009_hosted_snapshot_null_compat.sql'));
+    assert.notDeepEqual(await functionFingerprint(),bFingerprint,'M0 changes the actual installed B00006 definition');
+    assert.deepEqual(await functionIdentity(),fnBefore,'M0 preserves original owner/signature/invoker/config/ACL');
+    positive(); await capture(markers); assert.deepEqual(await durable(),unchanged,'M0 before M00002');
     // COMMIT before HTTP starts: a second connection must see M00002; no DDL
     // lock is held while the synchronous harness waits for its response.
     await sql.begin(async tx=>{await tx.unsafe(repoSql('tests/fixtures/permanence-m00002.sql'));});
@@ -2404,9 +2416,15 @@ test('B closed snapshots survive committed M00002 NULL only, without another All
     await capture(markers); assert.deepEqual(await durable(),unchanged);
     const bad: Array<[string,unknown]>=[
       ['SQL NULL',undefined],['JSON null',null],['malformed entry',[null]],['scalar entry',[1]],
-      ['duplicate',[...markers,markers[0]]],['missing entry',markers.slice(1)],
+      ['duplicate',[...markers,markers[0]]],['missing legacy entry',markers.filter((_,index)=>index!==legacy)],
       ['order',[...markers].reverse()],['bound',Array.from({length:257},()=>markers[0])],
     ];
+    const missingOtherNullKey=structuredClone(markers);
+    const missingNullRow=missingOtherNullKey[legacy]!.row as Record<string,unknown>;
+    assert.equal(Object.hasOwn(missingNullRow,'expires_at'),true,'negative removes an existing key');
+    assert.equal(missingNullRow.expires_at,null,'negative removes a genuinely JSON-null key');
+    delete missingNullRow.expires_at;
+    bad.push(['missing other null key',missingOtherNullKey]);
     for(const [label,mutate] of [
       ['kind',(row:Record<string,unknown>)=>{row.kind='restriction';}],
       ['root field',(row:Record<string,unknown>)=>{row.unrelated=null;}],
@@ -2421,9 +2439,11 @@ test('B closed snapshots survive committed M00002 NULL only, without another All
       await assert.rejects(capture(value),{code:'42501'},label+' trigger denies');
       assert.deepEqual(await durable(),unchanged,label+' rejection leaves marker unchanged');
     }
-    await assert.rejects(capture(markers,f.fixture.other),{code:'42501'});
-    await assert.rejects(capture(markers,owner,'household_connection_invalidation'),{code:'42501'});
-    await assert.rejects(capture(markers,owner,'household_permissions',oldPrincipal),{code:'42501'});
+    await assert.rejects(capture(markers,f.fixture.other),{code:'42501'},'trigger rejects a different actor');
+    await assert.rejects(capture(markers,owner,'household_connection_invalidation'),{code:'42501'},'trigger rejects invalid command context');
+    // principal_id is outside swarm_command's column UPDATE grant, so this
+    // negative proves the ACL boundary before the trigger can check immutability.
+    await assert.rejects(capture(markers,owner,'household_permissions',oldPrincipal),{code:'42501'},'column ACL denies scope UPDATE');
     // Persist synthetic bad snapshots only with the private setup role, then
     // require normal HTTP runtime denial. Constraints still reject SQL NULL,
     // non-arrays and over-bound arrays; do not weaken them for the fixture.
