@@ -1401,6 +1401,145 @@ test("pending connect authenticates the stored successor and keeps its root cred
   } finally { await store.delete(); await f.close(); }
 });
 
+test("pending renewal preserves refusal evidence without vetoing a valid fallback proof", { timeout: 60_000 }, async () => {
+  const { agentCredentialStore, credentialLineageKey } = await import("../../src/cloud/agent-credential.js");
+  const f = await fixture();
+  try {
+    for (const expiry of ["expired", "live"] as const) for (const status of [0, 401, 403, 429, 503] as const) {
+      for (const body of ["", "not-json", JSON.stringify({ error: "unknown" })]) {
+        if (![401, 403].includes(status) && body !== "") continue;
+        for (const proof of ["refused", "valid"] as const) {
+          if (expiry === "expired" && proof === "valid") continue;
+          f.reset();
+          const before = f.calls();
+          const path = join(f.root, randomUUID(), "profile.json");
+          const root = `swm_agt_${randomUUID().replaceAll("-", "").padEnd(43, "R")}`;
+          const store = await agentCredentialStore({ target: TARGET, lineageKey: credentialLineageKey(root) });
+          try {
+            await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+              fetcher: async (input, init) => {
+                if (new URL(String(input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY);
+                return Response.json({ ...await (await f.fetcher(input, init)).json(), agent_token: root });
+              }, writeCompletion: async () => { throw new Error("interrupted completion"); } }), { code: "connect_complete_write_failed" });
+            const credential = join(dirname(path), CONNECT_PROFILE_FILES.credential);
+            const artifact = JSON.parse(await readFile(credential, "utf8"));
+            await writeSecureJsonFile(credential, JSON.stringify({ ...artifact,
+              expires_at: new Date(Date.now() + (expiry === "live" ? 60_000 : -5_000)).toISOString() }));
+            const rootBytes = await readFile(credential);
+            const pending = join(dirname(path), CONNECT_PROFILE_FILES.pending);
+            const pendingBytes = await readFile(pending);
+            const requests: Array<{ path: string; body: string; bearer: string | null }> = [];
+            const fetcher: typeof fetch = async (input, init) => {
+              const endpoint = new URL(String(input)).pathname;
+              requests.push({ path: endpoint, body: String(init?.body), bearer: new Headers(init?.headers).get("authorization") });
+              assert.ok(init?.signal, "renewal and proof share the connect deadline");
+              if (endpoint === "/functions/v1/command") {
+                if (status === 0) throw new TypeError("connection lost");
+                return new Response(body, { status });
+              }
+              assert.equal(endpoint, "/functions/v1/read");
+              return proof === "valid" ? Response.json(DIRECTORY) : Response.json({ error: "unavailable" }, { status: 503 });
+            };
+            if (proof === "valid") {
+              assert.equal((await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher })).profile, path);
+              assert.equal(existsSync(pending), false, "authenticated fallback completes despite earlier refusal");
+            } else {
+              const refused = status === 401 || status === 403;
+              await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher }), error => {
+                assert.equal((error as { code: string }).code, refused ? "connect_authentication_refused" : "connect_authentication_incomplete");
+                if (refused) {
+                  assert.match(String(error), /refused; the cause is unconfirmed/);
+                  assert.match(String(error), /inspect the intended connection first/);
+                  assert.match(String(error), /cswarm mcp code --workspace-id/);
+                  assert.match(String(error), /--profile <absolute-new-directory>\/profile.json/);
+                  assert.doesNotMatch(String(error), /token mint|revoked|expired|Rerun the same/);
+                } else assert.match(String(error), /Rerun the same.*later with the same code/);
+                assert.doesNotMatch(String(error), /swm_agt_|mcp add|mcp_servers/);
+                return true;
+              });
+              assert.deepEqual(await readFile(pending), pendingBytes);
+              assert.equal(existsSync(join(dirname(path), CONNECT_PROFILE_FILES.complete)), false);
+              const commandId = JSON.parse(requests[0].body).command_id;
+              assert.equal((await store.read())?.pendingRenewal?.commandId, commandId);
+              await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher }));
+              assert.ok(requests.filter(row => row.path === "/functions/v1/command").every(row => JSON.parse(row.body).command_id === commandId));
+            }
+            assert.equal(requests[0].path, "/functions/v1/command");
+            assert.ok(requests.every(row => row.bearer === `Bearer ${root}`));
+            assert.equal(requests.some(row => row.path === "/functions/v1/read"), expiry === "live");
+            assert.deepEqual(await readFile(credential), rootBytes);
+            assert.equal(f.calls(), before + 1, "pending verification never registers again");
+          } finally { await store.delete(); }
+        }
+      }
+    }
+  } finally { await f.close(); }
+});
+
+test("pending renewal keeps named terminal meanings and bounds stalled renewal", { timeout: 35_000 }, async () => {
+  const { agentCredentialStore, credentialLineageKey } = await import("../../src/cloud/agent-credential.js");
+  const cases = [
+    { reason: "renewal_grant_revoked", expected: /renewal grant was revoked/ },
+    { reason: "predecessor_expired", expected: /predecessor expired before renewal/ },
+    { reason: "renewal_grant_suspended", expected: /Renewal is paused/ },
+    { reason: "renewal_horizon_reached", expected: /technical renewal horizon/ },
+    { reason: "renewal_successors_exhausted", expected: /successor budget was exhausted/ },
+    { reason: "predecessor_superseded", expected: /Another process renewed.*no usable saved successor/ },
+    { reason: "predecessor_not_owned", expected: /belongs to another identity/ },
+    { reason: "upgrade", expected: /requires a newer cswarm/ },
+    { reason: "unknown", expected: /cause is unconfirmed.*inspect this grant/ },
+    { reason: "stalled-command", expected: /Rerun the same.*later with the same code/ },
+    { reason: "stalled-body", expected: /Rerun the same.*later with the same code/ },
+  ];
+  const f = await fixture();
+  try {
+    for (const row of cases) {
+      f.reset();
+      const before = f.calls();
+      const path = join(f.root, row.reason, "profile.json");
+      const root = `swm_agt_${randomUUID().replaceAll("-", "").padEnd(43, "R")}`;
+      const store = await agentCredentialStore({ target: TARGET, lineageKey: credentialLineageKey(root) });
+      try {
+        await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+          fetcher: async (input, init) => new URL(String(input)).pathname === "/functions/v1/read"
+            ? Response.json(DIRECTORY) : Response.json({ ...await (await f.fetcher(input, init)).json(), agent_token: root }),
+          writeCompletion: async () => { throw new Error("interrupted completion"); } }), { code: "connect_complete_write_failed" });
+        const credential = join(dirname(path), CONNECT_PROFILE_FILES.credential);
+        await writeSecureJsonFile(credential, JSON.stringify({ ...JSON.parse(await readFile(credential, "utf8")),
+          expires_at: new Date(Date.now() - 5_000).toISOString() }));
+        const bytes = await readFile(credential);
+        const pending = join(dirname(path), CONNECT_PROFILE_FILES.pending);
+        const pendingBytes = await readFile(pending);
+        let commands = 0, proofs = 0;
+        const started = Date.now();
+        await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+          fetcher: async (input, init) => {
+            if (new URL(String(input)).pathname !== "/functions/v1/command") { proofs++; return Response.json(DIRECTORY); }
+            commands++;
+            assert.ok(init?.signal);
+            if (row.reason === "stalled-command") return new Promise<Response>(() => undefined);
+            if (row.reason === "stalled-body") return new Response(new ReadableStream({ start() {} }));
+            if (row.reason === "upgrade") return Response.json({ error: "upgrade_required", min_client_version: "99.0.0" }, { status: 426 });
+            return Response.json({ status: "rejected", reason: row.reason });
+          } }), error => {
+          assert.equal((error as { code: string }).code, row.reason.startsWith("stalled") ? "connect_authentication_incomplete"
+            : row.reason === "predecessor_not_owned" ? "connect_identity_mismatch" : "connect_renewal_refused");
+          assert.match(String(error), row.expected);
+          assert.doesNotMatch(String(error), /token mint|swm_agt_|mcp add|mcp_servers/);
+          return true;
+        });
+        assert.ok(Date.now() - started < 12_000, "renewal headers/body share the ten-second connect budget");
+        assert.equal(commands, 1);
+        assert.equal(proofs, 0);
+        assert.equal(f.calls(), before + 1);
+        assert.deepEqual(await readFile(credential), bytes);
+        assert.deepEqual(await readFile(pending), pendingBytes);
+        assert.equal(existsSync(join(dirname(path), CONNECT_PROFILE_FILES.complete)), false);
+      } finally { await store.delete(); }
+    }
+  } finally { await f.close(); }
+});
+
 test("restored profile failure remains pending and verifies again before installation", { timeout: 10_000 }, async () => {
   const f = await fixture();
   const path = join(f.root, "restore-proof", "profile.json");

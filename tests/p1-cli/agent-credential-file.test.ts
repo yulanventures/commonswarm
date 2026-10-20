@@ -505,6 +505,103 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       const reopened = await openProfileCredential(await readAgentProfile(profilePath));
       assert.equal(await use(f.workspace, await reopened.bearer()), 200);
       const { CONNECT_PROFILE_FILES } = await import("../../src/cloud/connect-profile-files.js");
+      // Distinct from saved-winner adoption above: no session renews this root
+      // before connect. Every case starts with real committed first use.
+      for (const scenario of ["direct", "membership", "superseded"] as const) {
+        const issued = await new ThinCommandClient(target).sendConnect({ workspaceId: f.workspace,
+          command: { kind: "mint_agent_join_credential", seat_cap: 1, ttl_hours: 1 }, credential: login.data.session.access_token });
+        assert.equal(issued.response.status, "accepted");
+        const joinCode = issued.response.join_credential!;
+        const path = join(directory, `in-connect-${scenario}`, "profile.json");
+        let registrations = 0;
+        const registerFetch: typeof fetch = async (input, init) => {
+          if (new URL(String(input)).pathname === "/functions/v1/h0/register") registrations++;
+          return fetch(input, init);
+        };
+        await assert.rejects(connectMcp({ target, profilePath: path, readCode: async () => joinCode, fetcher: registerFetch,
+          writeCompletion: async () => { throw new Error("interrupted after actual first use"); } }), { code: "connect_complete_write_failed" });
+        const profile = await readAgentProfile(path);
+        const original = JSON.parse(await readFile(profile.credential_file, "utf8"));
+        const [usedRoot] = await sql<{ first_used_at: Date | null }[]>`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id = ${original.token_id}::uuid`;
+        assert.ok(usedRoot.first_used_at, "actual read, never fabricated first use");
+        await sql`UPDATE swarm.agent_tokens SET issued_at = issued_at - interval '32 days', expires_at = expires_at - interval '32 days'
+          WHERE token_id = ${original.token_id}::uuid`;
+        await sql`UPDATE swarm.renewal_grants SET last_used_at = clock_timestamp() - interval '31 days'
+          WHERE renewal_grant_id = (SELECT renewal_grant_id FROM swarm.agent_tokens WHERE token_id = ${original.token_id}::uuid)`;
+        await writeSecureJsonFile(profile.credential_file, JSON.stringify({ ...original,
+          expires_at: new Date(Date.parse(original.expires_at) - 32 * 86_400_000).toISOString() }));
+        const rootBytes = await readFile(profile.credential_file);
+        const pending = join(path, "..", CONNECT_PROFILE_FILES.pending);
+        const pendingBytes = await readFile(pending);
+        const savedStore = await agentCredentialStore({ target, lineageKey: credentialLineageKey(original.agent_token) });
+        assert.equal(await savedStore.read(), null, "no saved successor before direct connect");
+        const [zero] = await sql<{ successors: number }[]>`SELECT count(*)::integer AS successors FROM swarm.agent_tokens WHERE predecessor_token_id = ${original.token_id}::uuid`;
+        assert.equal(zero.successors, 0);
+        let otherBearer: string | null = null;
+        if (scenario === "superseded") {
+          const parsed = parseAgentCredentialInput(rootBytes.toString(), { kind: "file", path: profile.credential_file });
+          const isolated = await agentCredentialStore({ target, lineageKey: credentialLineageKey(original.agent_token), stateDirectory: directory });
+          const other = await AgentCredentialSession.open({ target, workspaceId: f.workspace, presented: parsed, store: isolated });
+          otherBearer = await other.bearer();
+          assert.equal(await use(f.workspace, otherBearer), 200, "paired real winner authenticates");
+          assert.equal(await savedStore.read(), null, "losing connection cannot see other store's winner");
+        }
+        if (scenario === "membership") await fence(original.token_id, "membership");
+        const requests: Array<{ path: string; status: number }> = [];
+        let completions = 0;
+        const options = { target, profilePath: path, readCode: async () => joinCode,
+          writeCompletion: async (file: string, value: string) => { completions++; await writeSecureJsonFile(file, value); },
+          fetcher: (async (input, init) => {
+            assert.ok(init?.signal, "in-connect renewal and read are deadline-bound");
+            if (new URL(String(input)).pathname === "/functions/v1/read") {
+              const saved = await savedStore.read();
+              assert.ok(saved && saved.generation === 1, "winner persisted inside connect before authenticated read");
+              assert.equal(new Headers(init?.headers).get("authorization"), `Bearer ${saved.token}`);
+            }
+            const response = await fetch(input, init);
+            requests.push({ path: new URL(String(input)).pathname, status: response.status });
+            return response;
+          }) as typeof fetch };
+        try {
+          if (scenario === "direct") assert.equal((await connectMcp(options)).profile, path);
+          else {
+            await assert.rejects(connectMcp(options), error => {
+              assert.equal((error as { code: string }).code, scenario === "membership" ? "connect_authentication_refused" : "connect_renewal_refused");
+              assert.match(String(error), scenario === "membership" ? /refused; the cause is unconfirmed/ : /Another process renewed.*no usable saved successor/);
+              assert.doesNotMatch(String(error), /Rerun the same|token mint|mcp add|mcp_servers/);
+              return true;
+            });
+            assert.equal(completions, 0);
+            assert.deepEqual(await readFile(pending), pendingBytes);
+            assert.deepEqual(requests, [{ path: "/functions/v1/command", status: scenario === "membership" ? 403 : 200 }]);
+          }
+        } finally {
+          if (scenario === "membership") await sql`UPDATE swarm.memberships SET revoked_at = NULL
+            WHERE workspace_id = ${f.workspace}::uuid AND user_id = ${f.user}::uuid`;
+        }
+        if (scenario === "membership") {
+          requests.length = 0;
+          assert.equal((await connectMcp(options)).profile, path, "paired real renewal/read after restoring membership");
+        }
+        if (scenario !== "superseded") {
+          assert.deepEqual(requests, [{ path: "/functions/v1/command", status: 200 }, { path: "/functions/v1/read", status: 200 }]);
+          assert.equal(completions, 1);
+          const winner = await savedStore.read();
+          assert.ok(winner && winner.tokenId && winner.generation === 1);
+          const [after] = await sql<{ successors: number; first_used_at: Date | null }[]>`SELECT first_used_at,
+            (SELECT count(*)::integer FROM swarm.agent_tokens WHERE predecessor_token_id = ${original.token_id}::uuid) AS successors
+            FROM swarm.agent_tokens WHERE token_id = ${winner.tokenId}::uuid`;
+          assert.equal(after.successors, 1);
+          assert.ok(after.first_used_at, "renewed successor really authenticated before completion");
+          assert.equal(await use(f.workspace, winner.token), 200);
+        } else {
+          const [after] = await sql<{ successors: number }[]>`SELECT count(*)::integer AS successors FROM swarm.agent_tokens WHERE predecessor_token_id = ${original.token_id}::uuid`;
+          assert.equal(after.successors, 1, "losing copy never issues an extra successor");
+          assert.equal(await use(f.workspace, otherBearer!), 200);
+        }
+        assert.deepEqual(await readFile(profile.credential_file), rootBytes);
+        assert.equal(registrations, 1);
+      }
       // Completion fences run after real registration, before its first real read.
       for (const policy of ["revoked", "elapsed", "membership", "foreign"] as const) {
         for (const live of [false, true]) {
