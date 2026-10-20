@@ -12,10 +12,10 @@
  * statuses and booleans: never SQL text, driver messages, bodies or credentials. */
 import { execFileSync, spawn } from 'node:child_process';
 import { X509Certificate, createHash, randomBytes, randomUUID } from 'node:crypto';
-import { chmodSync, lstatSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, lstatSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 export const BINDING_ENV = 'C1B_LOCK_ORDER_BINDING';
@@ -577,10 +577,26 @@ export async function runScenario(target, scenario, timeoutMs = 170_000) {
   const secret = secretDirectory();
   try {
     const configPath = join(secret.dir, 'target.json');
-    writeFileSync(configPath, JSON.stringify({ db_url: target.url, tls_ca_pem: target.tlsCaPem }), { mode: 0o600 });
+    let floor_url;
+    if (scenario === 'floor-first-use-vs-head-revocation') {
+      const floor='6d29f8060e05be93a1669cae30bdfa3e56c426d8';
+      const modules=[
+        ['supabase/functions/_shared/agent-auth.ts','7dcdd9e8fdc96e4951dd87005d8ab12cdc54d1b1'],
+        ['src/cloud/session-wire.ts','d68dfeffa1210c2daff368c789e6e94d1986ea42'],
+      ];
+      for (const [path,blob] of modules) {
+        const bytes=execFileSync('git',['-C',REPO_ROOT,'show',`${floor}:${path}`],{stdio:['ignore','pipe','ignore']});
+        const actual=createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+        if(actual!==blob) throw new LockOrderBindingRefusal('floor_blob_identity');
+        const targetPath=join(secret.dir,path);mkdirSync(dirname(targetPath),{recursive:true,mode:0o700});
+        writeFileSync(targetPath,bytes,{mode:0o600});
+      }
+      floor_url=pathToFileURL(join(secret.dir,modules[0][0])).href;
+    }
+    writeFileSync(configPath, JSON.stringify({ db_url: target.url, tls_ca_pem: target.tlsCaPem, floor_url }), { mode: 0o600 });
     const env = { PATH: process.env.PATH ?? '', NO_COLOR: '1' };
     for (const key of ['HOME', 'DENO_DIR', 'XDG_CACHE_HOME']) if (process.env[key]) env[key] = process.env[key];
-    const child = spawn('deno', ['run', '--no-lock', '--config', join(REPO_ROOT, 'supabase/functions/command/deno.json'),
+    const child = spawn('deno', ['run', '--no-lock', ...(scenario==='floor-first-use-vs-head-revocation' ? ['--cached-only'] : []), '--config', join(REPO_ROOT, 'supabase/functions/command/deno.json'),
       '--allow-read', '--allow-env', '--allow-net', fileURLToPath(import.meta.url), configPath, scenario],
     { cwd: REPO_ROOT, env, stdio: ['ignore', 'pipe', 'ignore'] });
     let stdout = '';
@@ -787,8 +803,10 @@ async function denoMain() {
     if (!minimum.ok) fail(minClientVersionDiagnostic(minimum));
     out.client_version = minimum.version;
     // D4: names and ids unique to this run (fresh workspace, users and grants per scenario).
-    const ctx = { command, db, observer, failures, jwks, out, tag: randomUUID().replaceAll('-', '').slice(0, 10), clientVersion: minimum.version };
-    const result = scenario.startsWith('local-resume-') ? await localResumeScenario(ctx,scenario)
+    const ctx = { floorUrl:config.floor_url, command, db, observer, failures, jwks, out, tag: randomUUID().replaceAll('-', '').slice(0, 10), clientVersion: minimum.version };
+    const result = scenario==='hosted-owner-removal-prefix' ? await hostedOwnerRemovalScenario(ctx)
+      : scenario==='floor-first-use-vs-head-revocation' ? await floorFirstUseScenario(ctx)
+      : scenario.startsWith('local-resume-') ? await localResumeScenario(ctx,scenario)
       : scenario.startsWith('delegated-local-') ? await delegatedLocalScenario(ctx,scenario)
       : scenario==='ordinary-local-compat-policy' ? await ordinaryLocalPolicyScenario(ctx)
       : scenario === 'golden' ? await golden(ctx)
@@ -1107,8 +1125,10 @@ async function raceScenario(ctx, scenario) {
     out.stage = 'park-holder';
     let holderReturned = null;
     waiting = settleSide(holder.start()).then((outcome) => { holderReturned = outcome; return outcome; });
-    const waitingPid = await waitForBlocked(observer, parkedPid, tupleOnStreams(observer));
-    parking.holder_waits_on_stream_held_by_creation = waitingPid !== null;
+    const waitingPid = await waitForBlocked(observer, parkedPid, async pid => (await observer`SELECT EXISTS (
+      SELECT 1 FROM pg_locks WHERE pid=${pid}::int AND locktype='tuple'
+        AND relation IN ('swarm.workspaces'::regclass,'swarm.streams'::regclass)) AS ok`)[0].ok === true);
+    parking.holder_waits_on_creation_workspace_or_stream = waitingPid !== null;
     // A holder that returned without waiting names its HTTP status and error code.
     if (waitingPid === null) {
       fail(holderReturned === null ? 'holder_did_not_wait_for_stream' : `holder_returned_before_stream:${returnedCode(holderReturned)}`);
@@ -2188,3 +2208,185 @@ async function localResumeScenario(ctx,scenario) {
 }
 
 if (typeof Deno !== 'undefined' && import.meta.main) await denoMain();
+
+
+// These scenarios own the two V15 defects at real command/loader boundaries.
+// Setup, queue timeouts and parser failures are inconclusive, never a red witness.
+async function hostedOwnerRemovalScenario(ctx) {
+  const {observer,failures}=ctx,checks=[];
+  const check=(name,ok)=>checks.push({name,ok:ok===true});
+  const {authenticateHostedGrantCapability}=await import('../../supabase/functions/_shared/hosted-seat-auth.ts');
+  const fixture=async label=>{
+    const admin=await human(ctx,`prefix-admin-${label}`),owner=await human(ctx,`prefix-owner-${label}`);
+    const w=await workspace(ctx,admin,false);await member(ctx,w.workspaceId,owner,'member');
+    const grantId=id(),providerGrantId=`provider-${grantId}`,digest='07'.repeat(32);
+    for(const command of [
+      {kind:'begin_hosted_mcp_grant',grant_id:grantId,provider_grant_id:providerGrantId,owner_user_id:owner.userId,
+        home_workspace_id:w.workspaceId,client_id:`prefix-${ctx.tag}`,resource:'https://mcp.commonswarm.com/mcp',
+        selected_workspace_ids:[w.workspaceId],manifest_digest:digest,interaction_ref:`interaction-${grantId}`},
+      {kind:'consent_hosted_mcp_workspace',grant_id:grantId,workspace_id:w.workspaceId,owner_user_id:owner.userId,
+        manifest_digest:digest,consent_receipt_id:id()},
+      {kind:'activate_hosted_mcp_grant',grant_id:grantId},
+    ]) {const result=await manage(ctx,owner,w.workspaceId,command);if(result.status!==200) fail('prefix_genuine_grant_setup');}
+    const provider={active:true};
+    const capability=await ctx.db.begin(async tx=>{
+      await tx`SET LOCAL ROLE swarm_command`;
+      return await authenticateHostedGrantCapability(tx,{grantId,ownerUserId:owner.userId,providerGrantId,
+        workspaceId:w.workspaceId,tool:'claim_hosted_seat',providerStatus:async()=>provider});
+    });
+    if(!capability) fail('prefix_capability_setup');
+    const body={command_id:id(),client_version:ctx.clientVersion,workspace_id:w.workspaceId,
+      stream:{kind:'workspace'},command:{kind:'claim_hosted_seat',name:`prefix-${label}-${ctx.tag}`}};
+    const claim=()=>ctx.command.handleHostedCommand(body,capability);
+    const remove=async()=>{
+      const [clock]=await observer`SELECT extract(epoch FROM clock_timestamp())::float8 AS seconds`;
+      return await manage(ctx,{...admin,identity:{...admin.identity,interactiveAuthAtSeconds:Number(clock.seconds)}},
+        w.workspaceId,{kind:'remove_member',user_id:owner.userId});
+    };
+    return {...w,owner,admin,grantId,providerGrantId,provider,capability,body,claim,remove};
+  };
+  const sequential=await fixture('sequential');
+  const admitted=await sequential.claim();check('same-invocation-positive',admitted.status===200);
+  check('sequential-remove',(await sequential.remove()).status===200);
+  check('removed-owner-replay-denied',(await sequential.claim()).status===403);
+  check('removed-owner-fresh-name-denied',(await ctx.command.handleHostedCommand({...sequential.body,command_id:id(),
+    command:{kind:'claim_hosted_seat',name:`denied-${ctx.tag}`}},sequential.capability)).status===403);
+  const freshCapability=await ctx.db.begin(async tx=>{
+    await tx`SET LOCAL ROLE swarm_command`;
+    return await authenticateHostedGrantCapability(tx,{grantId:sequential.grantId,ownerUserId:sequential.owner.userId,
+      providerGrantId:sequential.providerGrantId,workspaceId:sequential.workspaceId,tool:'claim_hosted_seat',providerStatus:async()=>({active:true})});
+  });
+  check('removed-owner-new-capability-denied',freshCapability===null);
+  const rollback=await fixture('rollback');
+  const originalBegin=ctx.db.begin,marker={};
+  ctx.db.begin=function(...args) {
+    const operation=args.pop();
+    return originalBegin.apply(this,[...args,async tx=>{await operation(tx);throw marker;}]);
+  };
+  try {await rollback.remove().catch(()=>{});} finally {ctx.db.begin=originalBegin;}
+  check('removal-rollback-retains-member',(await observer`SELECT revoked_at IS NULL AS ok FROM swarm.memberships
+    WHERE workspace_id=${rollback.workspaceId}::uuid AND user_id=${rollback.owner.userId}::uuid`)[0]?.ok===true);
+  check('removal-rollback-retains-claim-authority',(await rollback.claim()).status===200);
+  const revoked=await fixture('provider-revoked');let pending;
+  await observer.begin(async gate=>{
+    const [{pid}]=await gate`SELECT pg_backend_pid() AS pid`;
+    await gate`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=${revoked.grantId}::uuid FOR SHARE`;
+    pending=revoked.claim();
+    if(await waitForBlocked(observer,Number(pid),async()=>true,3500)===null) fail('provider_revoke_queue_inconclusive');
+    revoked.provider.active=false;
+  });
+  check('provider-revoked-after-wait-denied',(await pending).status===403);
+  check('provider-revoked-no-seat-or-receipt',(await observer`SELECT
+    NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats WHERE grant_id=${revoked.grantId}::uuid)
+    AND NOT EXISTS(SELECT 1 FROM swarm.idempotency_keys WHERE principal_kind='hosted_grant'
+      AND principal_id=${revoked.grantId} AND command_id=${revoked.body.command_id}) AS ok`)[0]?.ok===true);
+  for(const order of ['claim-first','remove-first','management-first']) {
+    const f=await fixture(order);let first,second;
+    const prior=order==='management-first' ? await f.claim() : null;
+    if(prior && prior.status!==200) fail('prefix_management_positive');
+    failures.codes.length=0;failures.recording=true;
+    await observer.begin(async gate=>{
+      const [{pid}]=await gate`SELECT pg_backend_pid() AS pid`;
+      await gate`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=${f.grantId}::uuid FOR SHARE`;
+      const management=()=>manage(ctx,f.owner,f.workspaceId,{kind:'revoke_hosted_mcp_seat',grant_id:f.grantId,seat_id:prior.body.seat_id});
+      first=order==='remove-first' ? f.remove() : order==='management-first' ? management() : f.claim();
+      first=first.catch(error=>({thrown:sqlstate(error)}));
+      const firstPid=await waitForBlocked(observer,Number(pid),async()=>true,3500);
+      if(firstPid===null) fail('prefix_first_queue_inconclusive');
+      second=(order==='remove-first'?f.claim():f.remove()).catch(error=>({thrown:sqlstate(error)}));
+      const secondPid=await waitForBlocked(observer,firstPid,async()=>true,3500);
+      if(secondPid===null) fail('prefix_second_queue_inconclusive');
+      check(`${order}-identified-wait-graph`,firstPid!==secondPid);
+      const independent=await human(ctx,`independent-${order}`);
+      const unrelated=await workspace(ctx,independent,false);
+      check(`${order}-unrelated-workspace-progress`,(await manage(ctx,independent,unrelated.workspaceId,
+        {kind:'create_agent_principal',name:`unrelated-${order}-${ctx.tag}`})).status===200);
+    });
+    const results=await Promise.all([first,second]);failures.recording=false;
+    check(`${order}-no-sqlstate`,failures.codes.length===0 && results.every(r=>!r.thrown));
+    check(`${order}-removal-committed`,results[order==='remove-first'?0:1].status===200);
+    check(`${order}-terminal-claim-denial`,(await f.claim()).status===403);
+  }
+  return {checks};
+}
+
+async function floorFirstUseScenario(ctx) {
+  const {observer}=ctx,checks=[];
+  const check=(name,ok)=>checks.push({name,ok:ok===true});
+  if(typeof ctx.floorUrl!=='string') fail('floor_module_missing');
+  const floor=await import(ctx.floorUrl);
+  const read=await import('../../supabase/functions/read/index.ts');
+  const owner=await human(ctx,'floor-owner');const {workspaceId}=await workspace(ctx,owner,false);
+  const request=async(raw,command)=>{
+    const response=await ctx.command.handleRequest(new Request('http://127.0.0.1/functions/v1/command',{
+      method:'POST',headers:{authorization:`Bearer ${raw}`,'content-type':'application/json'},
+      body:JSON.stringify({command_id:id(),client_version:ctx.clientVersion,workspace_id:workspaceId,stream:{kind:'workspace'},command})}));
+    return {status:response.status,body:await response.json()};
+  };
+  const use=async raw=>(await read.handleRequest(new Request('http://127.0.0.1/functions/v1/read',{
+    method:'POST',headers:{authorization:`Bearer ${raw}`,'content-type':'application/json'},
+    body:JSON.stringify({resource:'renewal_grants',workspace_id:workspaceId})}))).status;
+  const chain=async label=>{
+    const created=await manage(ctx,owner,workspaceId,{kind:'create_agent_principal',name:`floor-${label}-${ctx.tag}`});
+    if(created.status!==200) fail('floor_principal_setup');
+    const device=id();await observer`INSERT INTO swarm.devices(device_id,user_id,label) VALUES(${device}::uuid,${owner.userId}::uuid,'floor fixture')`;
+    const t=await manage(ctx,owner,workspaceId,{kind:'mint_agent_token',principal_id:created.body.principal_id,
+      run_id:id(),task_id:id(),epoch:1,device_id:device,scopes:['post_signal']});
+    if(t.status!==200 || await use(t.body.agent_token)!==200) fail('floor_T_use');
+    const c=await request(t.body.agent_token,{kind:'renew_agent_token'});
+    if(c.status!==200 || await use(c.body.agent_token)!==200) fail('floor_C_use');
+    const x=await request(c.body.agent_token,{kind:'renew_agent_token'});
+    if(x.status!==200) fail('floor_X_issue');
+    const rows=await observer`SELECT token_id,predecessor_token_id,renewal_grant_id,lineage_id,first_used_at,token_hash
+      FROM swarm.agent_tokens WHERE token_id=ANY(${[t.body.token_id,c.body.token_id,x.body.token_id]}::uuid[])`;
+    const T=rows.find(r=>r.token_id===t.body.token_id),C=rows.find(r=>r.token_id===c.body.token_id),X=rows.find(r=>r.token_id===x.body.token_id);
+    if(!T?.first_used_at || !C?.first_used_at || X?.first_used_at!==null || C.predecessor_token_id!==T.token_id ||
+      X.predecessor_token_id!==C.token_id || rows.some(r=>r.renewal_grant_id!==T.renewal_grant_id || r.lineage_id!==T.lineage_id)) fail('floor_real_chain_binding');
+    return {T,C,X,raw:x.body.agent_token};
+  };
+  const invoke=async(s,rollback=false)=>{
+    const marker={};
+    try {return await observer.begin('isolation level read committed',async tx=>{
+      await tx`SET LOCAL ROLE swarm_command`;
+      await tx`SELECT set_config('search_path','swarm, pg_catalog',true),set_config('lock_timeout','5s',true),set_config('statement_timeout','10s',true)`;
+      const row=await floor.loadAgentCredential(tx,s.X.token_hash);
+      const valid=row!==null && !await floor.agentCredentialRevoked(tx,row,null);
+      if(rollback) throw marker;
+      return valid;
+    });} catch(error) {if(error===marker) return true;throw error;}
+  };
+  const sequential=await chain('sequential');check('same-invocation-positive',await invoke(sequential));
+  const rollback=await chain('rollback');await invoke(rollback,true);
+  check('floor-first-use-rollback',(await observer`SELECT first_used_at IS NULL AS ok FROM swarm.agent_tokens WHERE token_id=${rollback.X.token_id}::uuid`)[0]?.ok===true);
+  const revoke=async s=>{
+    const [clock]=await observer`SELECT extract(epoch FROM clock_timestamp())::float8 AS seconds`;
+    return await manage(ctx,{...owner,identity:{...owner.identity,interactiveAuthAtSeconds:Number(clock.seconds)}},workspaceId,
+      {kind:'revoke_agent_token',token_id:s.T.token_id});
+  };
+  check('sequential-head-revoke',(await revoke(sequential)).status===200);
+  check('committed-head-denies-floor',!await invoke(sequential));
+  const head=await chain('head-head');
+  ctx.failures.codes.length=0;ctx.failures.recording=true;
+  const headResults=await Promise.all([use(head.raw),revoke(head)]);
+  ctx.failures.recording=false;
+  check('head-head-no-sqlstate',ctx.failures.codes.length===0 && [200,401,403].includes(headResults[0]) && headResults[1].status===200);
+  check('head-head-terminal-denial',await use(head.raw)!==200);
+  const raced=await chain('race');let old,newer;const states=[];
+  ctx.failures.codes.length=0;ctx.failures.recording=true;
+  await observer.begin(async gate=>{
+    const [{pid}]=await gate`SELECT pg_backend_pid() AS pid`;
+    await gate`SELECT token_id FROM swarm.agent_tokens WHERE token_id=${raced.X.token_id}::uuid FOR UPDATE`;
+    old=invoke(raced).catch(error=>{states.push(sqlstate(error));return false;});
+    const oldPid=await waitForBlocked(observer,Number(pid),async()=>true,3500);
+    if(oldPid===null) fail('floor_X_queue_inconclusive');
+    newer=revoke(raced).catch(()=>null);
+    const newPid=await waitForBlocked(observer,oldPid,async()=>true,3500);
+    if(newPid===null) fail('head_X_queue_inconclusive');
+    check('identified-floor-head-X-queue',oldPid!==newPid);
+  });
+  await Promise.all([old,newer]);
+  ctx.failures.recording=false;
+  states.push(...ctx.failures.codes);
+  check('observed-floor-incompatibility-40P01',states.length===1 && states[0]==='40P01');
+  return {checks,floor_compatibility:states.length===1 && states[0]==='40P01' ? 'INCOMPATIBLE':'UNPROVEN',sqlstates:states};
+}

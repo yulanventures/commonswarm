@@ -385,6 +385,7 @@ type LocalApprovalLock = {
   connection: string; grant: string; workspace: string; principal: string; mode: LocalLockMode;
 };
 interface LocalPlanSnapshot {
+  hostedPrefix?: string;
   bindings: LocalCredentialIds[];
   users: string[];
   parents: string[];
@@ -419,6 +420,7 @@ export interface LocalAuthLockPlan {
   locked: boolean;
   parentsLocked?: boolean;
   readonly actor?: string;
+  readonly userKeyShareIds?: readonly string[];
   readonly hostedMode?: LocalLockMode;
 }
 const sortedIds = (ids: Array<string | null>) => [...new Set(ids.filter((id): id is string => id !== null))].sort();
@@ -429,7 +431,7 @@ function canonicalBindings(rows: LocalCredentialIds[]): string {
   ]).sort((a,b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
 }
 function snapshotKey(s: LocalPlanSnapshot): string {
-  return JSON.stringify([canonicalBindings(s.bindings),s.users,s.parents,s.memberships,s.sessions,s.approvals,s.members,s.hosted,s.objectStreams,s.todoStreams,s.joins,s.parentUpdates,s.routeStreams,s.restrictions,s.hostedGrants,s.hostedBindings,s.contentRoles,s.boundaryIds,s.adminAccounts,s.adminWorkspaces,s.workspaceRows,s.todoBindings]);
+  return JSON.stringify([s.hostedPrefix,canonicalBindings(s.bindings),s.users,s.parents,s.memberships,s.sessions,s.approvals,s.members,s.hosted,s.objectStreams,s.todoStreams,s.joins,s.parentUpdates,s.routeStreams,s.restrictions,s.hostedGrants,s.hostedBindings,s.contentRoles,s.boundaryIds,s.adminAccounts,s.adminWorkspaces,s.workspaceRows,s.todoBindings]);
 }
 /** This plan owns one exact local Allow target, including the exact current family proof.
  * Call before workspace/approval/principal/token reads in the permission writer.
@@ -481,6 +483,32 @@ export async function planLocalConnection(
   return { snapshot,rediscover:() => discover(),workspaces:[{id:workspace,mode:"update"}],
     principalMode:"share",sessionMode:"share",streamIds:[],locked:false };
 }
+/** Locking only: callers supply a current server-resolved binding, never an
+ * AuthContext. Rediscovery fences retain the existing whole-transaction retry.
+ * Empty suffix sets deliberately leave grant/stream ordering to the caller.
+ */
+export async function planHostedClaimPrefix(tx: Sql, discover: () => Promise<{
+  owner: string; workspaces: string[]; binding: string;
+} | null>): Promise<LocalAuthLockPlan | null> {
+  const initial = await discover();
+  if (!initial) return null;
+  const snapshotOf = (row: NonNullable<typeof initial>): LocalPlanSnapshot => ({
+    hostedPrefix: row.binding, bindings: [], users: [row.owner], parents: [],
+    memberships: sortedIds(row.workspaces).map(workspace => ({workspace,user:row.owner,mode:'share'})),
+    sessions: [], approvals: [], workspaceRows: sortedIds(row.workspaces),
+  });
+  return {
+    snapshot: snapshotOf(initial),
+    rediscover: async () => {
+      const current = await discover();
+      if (!current) throw new LocalAuthDiscoveryChanged();
+      return snapshotOf(current);
+    },
+    workspaces: sortedIds(initial.workspaces).map(id => ({id,mode:'update'})),
+    userKeyShareIds: [initial.owner], principalMode:'share',sessionMode:'share',
+    streamIds:[],locked:false,
+  };
+}
 /** Acquire complete predeclared phases. Every post-wait discovery is a new SQL
  * statement. Changed membership in any set rolls back the ENTIRE transaction.
  * This is backend protocol, not a trigger claim about absent caller prelocks.
@@ -496,7 +524,7 @@ export async function lockLocalAuthPlan(tx: Sql, plan: LocalAuthLockPlan, throug
   }
   if (!plan.parentsLocked) {
   for (const id of s.users) {
-    if (plan.actor && id !== plan.actor) await tx`SELECT user_id FROM swarm.users WHERE user_id=${id}::uuid FOR KEY SHARE`;
+    if (plan.userKeyShareIds?.includes(id) || (plan.actor && id !== plan.actor)) await tx`SELECT user_id FROM swarm.users WHERE user_id=${id}::uuid FOR KEY SHARE`;
     else await tx`SELECT user_id FROM swarm.users WHERE user_id=${id}::uuid FOR NO KEY UPDATE`;
   }
   for (const id of s.adminAccounts ?? []) await tx`SELECT owner_user_id FROM swarm.admin_accounts WHERE owner_user_id=${id}::uuid FOR UPDATE`;

@@ -110,7 +110,7 @@ for (const name of RACE_TESTS) {
     assert.ok(result.deadlock_timeout_ms! < result.lock_timeout_ms!, `${name}: deadlock_timeout must be below lock_timeout`);
     assert.deepEqual(result.parking, {
       creation_waits_on_ceiling_after_stream: true,
-      holder_waits_on_stream_held_by_creation: true,
+      holder_waits_on_creation_workspace_or_stream: true,
     }, `${name}: parking points`);
     // The base lock order fails here.
     const sqlstates = result.sqlstates ?? [];
@@ -230,7 +230,8 @@ test(ADMIN_WITHDRAW, { timeout: 240_000 }, async () => {
 for (const name of ["delegated-local-permanent-suspension","delegated-local-revocation-closure","delegated-local-selector-compatibility","delegated-local-parent-reversal","delegated-local-renewal-budget",
   "delegated-local-parent-deadline","delegated-local-parent-narrowing",
   "delegated-local-wait-removal-rollback","ordinary-local-compat-policy",
-  "local-resume-parent-order","local-resume-recovery-controls"]) {
+  "local-resume-parent-order","local-resume-recovery-controls",
+  "hosted-owner-removal-prefix","floor-first-use-vs-head-revocation"]) {
   test(name,{timeout:300_000},async()=>{
     const result=await harness.runScenario(bound(),name,270_000);
     assert.equal(result.stage,"complete",`${name}: ${result.stage} (${result.error ?? "no code"})`);

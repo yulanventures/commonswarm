@@ -22,6 +22,7 @@ import {
   loadAgentCredential,
   planLocalOperation, lockLocalAuthPlan, type LocalAuthLockPlan, LocalCredentialDenied, recheckLocalCredential, LocalAuthDiscoveryChanged,
   retryLocalAuthTransaction,
+  planHostedClaimPrefix,
   type AgentAuthRow,
 } from "../_shared/agent-auth.ts";
 import {
@@ -10004,6 +10005,26 @@ async function handleHostedManagement(
       (command.kind === "set_connection_expiry" ? preliminaryGrant?.home_workspace_id : routeWorkspaceId)) {
     return { status: 403, body: { error: "forbidden" } };
   }
+  // The authenticated actor already owns its human U lock. This prefix
+  // adds no human authority and fences every server-bound workspace before S/G.
+  const prefix = await planHostedClaimPrefix(tx, async () => {
+    const rows = await tx<{grant_id:string;owner_user_id:string;home_workspace_id:string;
+      selected_workspace_ids:string[];provider_grant_id:string}[]>`
+      SELECT grant_id,owner_user_id,home_workspace_id,selected_workspace_ids,provider_grant_id
+      FROM swarm.hosted_mcp_grants WHERE grant_id=${command.grant_id}::uuid`;
+    const current=rows[0];
+    if (current && current.owner_user_id!==auth.actor.user) return null;
+    if (!current && command.kind!=='begin_hosted_mcp_grant') return null;
+    if (current && preliminaryGrant && current.home_workspace_id!==preliminaryGrant.home_workspace_id) throw new LocalAuthDiscoveryChanged();
+    const seats=command.kind==='revoke_hosted_mcp_seat' ? await tx<{workspace_id:string;principal_id:string}[]>`
+      SELECT workspace_id,principal_id FROM swarm.hosted_mcp_seats
+      WHERE seat_id=${command.seat_id}::uuid AND grant_id=${command.grant_id}::uuid` : [];
+    if (seats.some(seat=>seat.workspace_id!==routeWorkspaceId)) throw new LocalAuthDiscoveryChanged();
+    return {owner:auth.actor.user!,workspaces:[routeWorkspaceId,...(current?.selected_workspace_ids ?? [])],
+      binding:JSON.stringify({current:current ?? null,seats})};
+  });
+  if (prefix===null) return {status:403,body:{error:'forbidden'}};
+  await lockLocalAuthPlan(tx,prefix);
   const routeRows = await tx<{
     stream_id: string;
     archived_at: Date | null;
@@ -10050,7 +10071,42 @@ async function handleHostedManagement(
     return { status: 403, body: { error: "forbidden" } };
   }
 
-  // Fresh statement after stream/grant waits: pre-lock route facts and time
+  if (grant !== null) await tx`SELECT workspace_id FROM swarm.hosted_mcp_grant_workspaces
+    WHERE grant_id=${grant.grant_id}::uuid ORDER BY workspace_id FOR UPDATE`;
+  const seatRows = command.kind === "revoke_hosted_mcp_seat"
+    ? await tx<{
+      seat_id: string; grant_id: string; workspace_id: string; owner_user_id: string;
+      principal_id: string; name: string; handle: string; created_at: Date;
+      revoked_at: Date | null; handle_revoked_at: Date | null;
+      principal_revoked_at: Date | null; transport: "local" | "hosted_mcp";
+      turn_only: boolean;
+    }[]>`
+      SELECT hs.seat_id, hs.grant_id, hs.workspace_id, hs.owner_user_id,
+             hs.principal_id, hs.name, hs.created_at, hs.revoked_at,
+             h.handle, h.revoked_at AS handle_revoked_at,
+             p.revoked_at AS principal_revoked_at, p.transport, p.turn_only
+      FROM swarm.hosted_mcp_seats AS hs
+      JOIN swarm.hosted_mcp_seat_handles AS h ON h.seat_id = hs.seat_id
+      JOIN swarm.agent_principals AS p ON p.principal_id = hs.principal_id
+      WHERE hs.seat_id = ${command.seat_id}::uuid
+        AND hs.grant_id = ${command.grant_id}::uuid
+      FOR UPDATE OF hs, h, p
+    `
+    : [];
+  const seatRow = seatRows[0];
+  const seat = seatRow ? {
+    ...seatRow,
+    created_at: seatRow.created_at.getTime(),
+    revoked_at: seatRow.revoked_at?.getTime() ?? null,
+    handle_revoked_at: seatRow.handle_revoked_at?.getTime() ?? null,
+    principal_revoked_at: seatRow.principal_revoked_at?.getTime() ?? null,
+    transport: seatRow.transport as "hosted_mcp",
+    turn_only: seatRow.turn_only as true,
+  } : null;
+  if (seatRow) await tx`SELECT handle FROM swarm.hosted_mcp_seat_handles
+    WHERE seat_id=${seatRow.seat_id}::uuid ORDER BY handle FOR UPDATE`;
+  if ((await prefix.rediscover()).hostedPrefix !== prefix.snapshot.hostedPrefix) throw new LocalAuthDiscoveryChanged();
+  // Fresh statement after the last seat/handle wait: route facts and time
   // cannot authorize a policy edit or activation.
   const [freshRoute] = await tx<{ stream_id: string; archived_at: Date | null;
     live_member: boolean; now_ms: string | number }[]>`
@@ -10117,36 +10173,6 @@ async function handleHostedManagement(
   const existingConsent = grant === null ? false : consentRows.some(
     (row) => row.workspace_id === route.workspaceId,
   );
-  const seatRows = command.kind === "revoke_hosted_mcp_seat"
-    ? await tx<{
-      seat_id: string; grant_id: string; workspace_id: string; owner_user_id: string;
-      principal_id: string; name: string; handle: string; created_at: Date;
-      revoked_at: Date | null; handle_revoked_at: Date | null;
-      principal_revoked_at: Date | null; transport: "local" | "hosted_mcp";
-      turn_only: boolean;
-    }[]>`
-      SELECT hs.seat_id, hs.grant_id, hs.workspace_id, hs.owner_user_id,
-             hs.principal_id, hs.name, hs.created_at, hs.revoked_at,
-             h.handle, h.revoked_at AS handle_revoked_at,
-             p.revoked_at AS principal_revoked_at, p.transport, p.turn_only
-      FROM swarm.hosted_mcp_seats AS hs
-      JOIN swarm.hosted_mcp_seat_handles AS h ON h.seat_id = hs.seat_id
-      JOIN swarm.agent_principals AS p ON p.principal_id = hs.principal_id
-      WHERE hs.seat_id = ${command.seat_id}::uuid
-        AND hs.grant_id = ${command.grant_id}::uuid
-      FOR UPDATE OF hs, h, p
-    `
-    : [];
-  const seatRow = seatRows[0];
-  const seat = seatRow ? {
-    ...seatRow,
-    created_at: seatRow.created_at.getTime(),
-    revoked_at: seatRow.revoked_at?.getTime() ?? null,
-    handle_revoked_at: seatRow.handle_revoked_at?.getTime() ?? null,
-    principal_revoked_at: seatRow.principal_revoked_at?.getTime() ?? null,
-    transport: seatRow.transport as "hosted_mcp",
-    turn_only: seatRow.turn_only as true,
-  } : null;
   const replayRows = await tx<{
     request_hash: string;
     workspace_id: string;
@@ -10360,12 +10386,22 @@ async function claimHostedSeat(
   if (input === null || hostedCapabilityTool(capability) !== "claim_hosted_seat") {
     return { status: 400, body: { error: "invalid_request" } };
   }
-  return await db.begin(HOSTED_TRANSACTION_ISOLATION, async (tx) => {
+  return await retryLocalAuthTransaction(() => db.begin(HOSTED_TRANSACTION_ISOLATION, async (tx) => {
     await setTransaction(tx);
     let resolved = await revalidateHostedGrantCommand(tx, capability);
     if (resolved === null || resolved.workspace_id !== input.workspace_id) {
       return { status: 403, body: { error: "forbidden" } };
     }
+    const prefix = await planHostedClaimPrefix(tx, async () => {
+      const current = await revalidateHostedGrantCommand(tx, capability);
+      return current === null ? null : {owner:current.owner_user_id,
+        workspaces:[current.workspace_id],binding:JSON.stringify(current)};
+    });
+    if (prefix === null) return {status:403,body:{error:'forbidden'}};
+    await lockLocalAuthPlan(tx, prefix);
+    resolved = await revalidateHostedGrantCommand(tx, capability);
+    if (resolved === null || resolved.workspace_id !== input.workspace_id) return {status:403,body:{error:'forbidden'}};
+    if (JSON.stringify(resolved) !== prefix.snapshot.hostedPrefix) throw new LocalAuthDiscoveryChanged();
     const route: Route = {
       workspaceId: resolved.workspace_id,
       streamId: resolved.stream_id,
@@ -10416,6 +10452,25 @@ async function claimHostedSeat(
       FOR UPDATE
     `;
     const grant = lockedGrantRows[0];
+    await tx`SELECT grant_id FROM swarm.hosted_mcp_grant_workspaces
+      WHERE grant_id=${resolved.grant_id}::uuid AND workspace_id=${route.workspaceId}::uuid FOR UPDATE`;
+    // Include later name-reclaim writes in the owned suffix before deciding.
+    const discoverClosure = () => tx<{seat_id:string;principal_id:string}[]>`
+      SELECT hs.seat_id,hs.principal_id FROM swarm.hosted_mcp_seats hs
+      JOIN swarm.agent_principals p ON p.principal_id=hs.principal_id
+      WHERE hs.workspace_id=${route.workspaceId}::uuid
+        AND (hs.grant_id=${resolved.grant_id}::uuid OR
+          (p.name=${input.command.name} AND p.owner_user_id=${resolved.owner_user_id}::uuid))
+      ORDER BY hs.seat_id`;
+    const closure=await discoverClosure();
+    for (const seat of closure) await tx`SELECT seat_id FROM swarm.hosted_mcp_seats WHERE seat_id=${seat.seat_id}::uuid FOR UPDATE`;
+    await tx`SELECT handle FROM swarm.hosted_mcp_seat_handles
+      WHERE seat_id=ANY(${closure.map(row=>row.seat_id)}::uuid[]) ORDER BY handle FOR UPDATE`;
+    await tx`SELECT principal_id FROM swarm.agent_principals
+      WHERE workspace_id=${route.workspaceId}::uuid AND
+        (principal_id=ANY(${closure.map(row=>row.principal_id)}::uuid[]) OR name=${input.command.name})
+      ORDER BY principal_id FOR UPDATE`;
+    if (JSON.stringify(await discoverClosure())!==JSON.stringify(closure)) throw new LocalAuthDiscoveryChanged();
     resolved = await revalidateHostedGrantCommand(tx, capability);
     if (grant === undefined || resolved === null ||
         resolved.workspace_id !== route.workspaceId ||
@@ -10479,9 +10534,11 @@ async function claimHostedSeat(
       if (replayRows.length !== 1) {
         return { status: 403, body: { error: "hosted_seat_revoked" } };
       }
-      if (await revalidateHostedGrantCommand(tx, capability) === null) {
-        return { status: 403, body: { error: "forbidden" } };
-      }
+      const current = await revalidateHostedGrantCommand(tx, capability);
+      if (current === null) return {status:403,body:{error:'forbidden'}};
+      if (JSON.stringify(current) !== prefix.snapshot.hostedPrefix) throw new LocalAuthDiscoveryChanged();
+      const [clock] = await tx<{now_ms:string|number}[]>`SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now_ms`;
+      frame.now=Number(clock.now_ms);
       const context = await resolveHostedConnectionContext(tx, capability, resolved, {
         handle: response.handle, principal_id: response.principal_id,
       });
@@ -10556,9 +10613,15 @@ async function claimHostedSeat(
         AND p.name = ${input.command.name}
         AND p.owner_user_id = ${grant.owner_user_id}::uuid
     `;
-    if (await revalidateHostedGrantCommand(tx, capability) === null) {
-      return { status: 403, body: { error: "forbidden" } };
-    }
+    const current = await revalidateHostedGrantCommand(tx, capability);
+    if (current === null) return {status:403,body:{error:'forbidden'}};
+    if (JSON.stringify(current) !== prefix.snapshot.hostedPrefix) throw new LocalAuthDiscoveryChanged();
+    const [clock] = await tx<{now_ms:string|number}[]>`SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now_ms`;
+    frame.now=Number(clock.now_ms);
+    // Current resolver authority replaces the pre-wait EXISTS snapshot.
+    grant.owner_is_live_member=true;
+    grant.workspace_archived=false;
+    grant.workspace_consented=true;
     const liveSeatCount = Number(seatCountRows[0]?.live ?? "0") - reclaimableSeats.length;
     const seatId = crypto.randomUUID();
     const principalId = crypto.randomUUID();
@@ -10763,7 +10826,7 @@ async function claimHostedSeat(
       hash,
     });
     return { status: 200, body: { status: "accepted", ...response, context } };
-  });
+  }));
 }
 
 /** Failed business work rolls back its savepoint before a deliberate refusal
