@@ -371,7 +371,10 @@ async function legacyFileHttp(policyCases = false) {
       VALUES (${principal}::uuid,${workspace}::uuid,${owner}::uuid,'Legacy HTTP agent')`;
     await tx`INSERT INTO swarm.agent_runs(run_id,principal_id,device_id) VALUES (${run}::uuid,${principal}::uuid,${device}::uuid)`;
     await tx`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,scopes,token_hash,expires_at,lineage_id,first_used_at)
-      VALUES (${predecessor}::uuid,${principal}::uuid,${run}::uuid,'["post_signal"]',${randomBytes(32)},clock_timestamp()+interval '1 hour',${lineage}::uuid,clock_timestamp())`;
+      VALUES (${predecessor}::uuid,${principal}::uuid,${run}::uuid,'["post_signal"]',${randomBytes(32)},clock_timestamp()+interval '1 hour',${lineage}::uuid,NULL)`;
+    // A predecessor starts pending, then takes the supported write-once first-use transition.
+    await tx`UPDATE swarm.agent_tokens SET first_used_at=statement_timestamp()
+      WHERE token_id=${predecessor}::uuid AND first_used_at IS NULL`;
     await tx`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,scopes,token_hash,expires_at,lineage_id,predecessor_token_id)
       VALUES (${tokenId}::uuid,${principal}::uuid,${run}::uuid,'["post_signal"]',${createHash('sha256').update(token).digest()},
         clock_timestamp()+interval '1 hour',${lineage}::uuid,${predecessor}::uuid)`;

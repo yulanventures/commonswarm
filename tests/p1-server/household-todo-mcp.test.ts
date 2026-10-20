@@ -145,7 +145,7 @@ try {
     await tx\x60DELETE FROM swarm.household_content_connections WHERE hosted_grant_id=\x24{f.grant}::uuid\x60;
     const approvalCount=async()=>Number((await tx\x60SELECT count(*)::int AS n FROM swarm.household_content_connections WHERE hosted_grant_id=\x24{f.grant}::uuid\x60)[0]!.n);
     await tx\x60UPDATE swarm.household_member_content_roles SET content_role='reader' WHERE workspace_id=\x24{f.workspace}::uuid AND user_id=\x24{f.owner}::uuid\x60;
-    const ownerReader = await call('todo_list');
+    const ownerReader = await call('todo_list',{scope:'open'});
     if (ownerReader.body.status !== 'ok') {
       // Never emit arbitrary response strings, IDs, tokens, or the raw body.
       const knownFields = ['status','error','reason','code','retryable','next_action','todos','queue','ok','event_ids','events'];
@@ -189,15 +189,15 @@ try {
       ["provider family",\x60INSERT INTO commonswarm_oauth.refresh_family_tombstones(grant_id,revoked_at) VALUES('synthetic-\x24{f.grant}',clock_timestamp())\x60],
     ];
     for (const [label,mutation] of fences) {
-      assert.equal((await call('todo_list')).body.status,'ok',label+' positive control');
+      assert.equal((await call('todo_list',{scope:'open'})).body.status,'ok',label+' positive control');
       const cap=await capability('todo_list');
       await tx.unsafe('SAVEPOINT owner_fence');
       await tx.unsafe(mutation!);
-      const denied=await asEdge(()=>api.handleHostedCommand(envelope({kind:'household_tool',tool:'todo_list',arguments:{seat:f.handle}}),cap));
+      const denied=await asEdge(()=>api.handleHostedCommand(envelope({kind:'household_tool',tool:'todo_list',arguments:{seat:f.handle,scope:'open'}}),cap));
       assert.ok(denied.status===403||denied.body.status==='refused',label+' fences an already issued capability');
       if(label==='handle'||label==='provider family') assert.deepEqual((await listing()).effective_access.operations,[],label+' also fences human connection listing');
       await tx.unsafe('ROLLBACK TO SAVEPOINT owner_fence'); await tx.unsafe('RELEASE SAVEPOINT owner_fence');
-      assert.equal((await call('todo_list')).body.status,'ok',label+' rollback positive control');
+      assert.equal((await call('todo_list',{scope:'open'})).body.status,'ok',label+' rollback positive control');
     }
 
     // Real two-session Storage linearization lives at the MCP HTTP boundary
@@ -207,15 +207,15 @@ try {
       await tx\x60DELETE FROM swarm.household_content_connections WHERE workspace_id=\x24{f.workspace}::uuid\x60;
       if (condition==='consent') await tx\x60DELETE FROM swarm.household_member_content_roles WHERE workspace_id=\x24{f.workspace}::uuid\x60;
       else await tx\x60DELETE FROM swarm.household_workspace_boundaries WHERE workspace_id=\x24{f.workspace}::uuid\x60;
-      const missing=await call('todo_list');
+      const missing=await call('todo_list',{scope:'open'});
       assert.equal(missing.body.reason,condition==='consent'?'content_consent_required':'owner_confirmation_required');
       assert.equal(await approvalCount(),0,'bootstrap refusal manufactures no approval');
       await tx.unsafe('ROLLBACK TO SAVEPOINT missing_bootstrap'); await tx.unsafe('RELEASE SAVEPOINT missing_bootstrap');
-      assert.equal((await call('todo_list')).body.status,'ok');
+      assert.equal((await call('todo_list',{scope:'open'})).body.status,'ok');
     }
     for (const role of ['admin','member']) {
       await tx\x60UPDATE swarm.memberships SET role=\x24{role} WHERE workspace_id=\x24{f.workspace}::uuid AND user_id=\x24{f.owner}::uuid\x60;
-      assert.equal((await call('todo_list')).body.status,'refused','non-owner still needs exact approval');
+      assert.equal((await call('todo_list',{scope:'open'})).body.status,'refused','non-owner still needs exact approval');
     }
     await tx\x60UPDATE swarm.memberships SET role='owner' WHERE workspace_id=\x24{f.workspace}::uuid AND user_id=\x24{f.owner}::uuid\x60;
     const original={principal:f.principal,connection:f.connection,handle:f.handle};
@@ -229,14 +229,14 @@ try {
     const [restriction]=await tx\x60SELECT origin,changed_by,operations FROM swarm.household_hosted_content_restrictions
       WHERE grant_id=\x24{f.grant}::uuid AND workspace_id=\x24{f.workspace}::uuid AND principal_id=\x24{f.principal}::uuid\x60;
     assert.deepEqual(restriction,{origin:'human_withdraw',changed_by:f.owner,operations:[]});
-    assert.equal((await call('todo_list')).body.reason,'connection_access_refused');
+    assert.equal((await call('todo_list',{scope:'open'})).body.reason,'connection_access_refused');
     const deniedListing=await listing();
     assert.equal(deniedListing.approval,null);
     assert.deepEqual(deniedListing.effective_access.operations,[]);
     assert.equal(deniedListing.effective_access.restricted,true);
     assert.equal(deniedListing.effective_access.restrictions[0].origin,'human_withdraw');
     Object.assign(f,{principal:f.sibling,connection:siblingSeat,handle:siblingHandle});
-    assert.equal((await call('todo_list')).body.reason,'connection_access_refused','same grant cannot escape withdrawal via another seat/name');
+    assert.equal((await call('todo_list',{scope:'open'})).body.reason,'connection_access_refused','same grant cannot escape withdrawal via another seat/name');
     Object.assign(f,original);
     // An expired sibling stays an ambiguous deny until that exact target is reallowed.
     await tx\x60INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at,hosted_grant_id)
@@ -244,11 +244,11 @@ try {
       FROM swarm.household_member_content_roles WHERE workspace_id=\x24{f.workspace}::uuid AND user_id=\x24{f.owner}::uuid\x60;
     const allow=(operations: string[])=>({kind:'household_approve_connection',connection:{kind:'hosted',connection_id:f.connection,grant_id:f.grant,principal_id:f.principal,operations}});
     assert.equal((await human(envelope(allow(['read'])))).body.status,'committed');
-    assert.equal((await call('todo_list')).body.status,'refused','Allow A cannot discard expired legacy B');
+    assert.equal((await call('todo_list',{scope:'open'})).body.status,'refused','Allow A cannot discard expired legacy B');
     Object.assign(f,{principal:f.sibling,connection:siblingSeat,handle:siblingHandle});
     assert.equal((await human(envelope(allow(['read'])))).body.status,'committed');
     Object.assign(f,original);
-    assert.equal((await call('todo_list')).body.status,'ok','only targeted reallow replaces each expired constraint');
+    assert.equal((await call('todo_list',{scope:'open'})).body.status,'ok','only targeted reallow replaces each expired constraint');
     assert.equal((await call('todo_create',{title:'Human chose read only'})).body.status,'refused');
     assert.equal((await call('todo_queue')).body.queue.content_access,'read');
     const explicitListing=await listing();
@@ -269,7 +269,7 @@ try {
     // Expired approval withdrawal still persists and never guesses its origin.
     await tx\x60UPDATE swarm.household_content_connections SET expires_at=clock_timestamp()-interval '1 hour' WHERE connection_id=\x24{f.connection}::uuid\x60;
     assert.equal((await human(envelope(withdraw))).body.withdrawn,0);
-    assert.equal((await call('todo_list')).body.reason,'connection_access_refused');
+    assert.equal((await call('todo_list',{scope:'open'})).body.reason,'connection_access_refused');
     assert.equal((await human(envelope(allow(['read','create','update'])))).body.status,'committed');
     assert.equal((await call('todo_queue')).body.queue.content_access,'read','Allow A cannot broaden explicit read-only B');
     Object.assign(f,{principal:f.sibling,connection:siblingSeat,handle:siblingHandle});
@@ -294,14 +294,14 @@ try {
     await tx\x60UPDATE swarm.hosted_mcp_seats SET revoked_at=clock_timestamp() WHERE seat_id=\x24{f.connection}::uuid\x60;
     await tx\x60UPDATE swarm.agent_principals SET revoked_at=clock_timestamp() WHERE principal_id=\x24{f.principal}::uuid\x60;
     Object.assign(f,{principal:f.sibling,connection:siblingSeat,handle:siblingHandle});
-    assert.equal((await call('todo_list')).body.status,'refused','automatic same-grant inheritance never replaces a closed withdrawal');
+    assert.equal((await call('todo_list',{scope:'open'})).body.status,'refused','automatic same-grant inheritance never replaces a closed withdrawal');
     await tx\x60UPDATE swarm.memberships SET role='admin' WHERE workspace_id=\x24{f.workspace}::uuid AND user_id=\x24{f.owner}::uuid\x60;
     assert.equal((await human(envelope(allow(['read','create','update'])))).body.status,'committed');
-    assert.equal((await call('todo_list')).body.status,'refused','role lowering or non-owner Allow never replaces closed targets');
+    assert.equal((await call('todo_list',{scope:'open'})).body.status,'refused','role lowering or non-owner Allow never replaces closed targets');
     await tx\x60UPDATE swarm.memberships SET role='owner' WHERE workspace_id=\x24{f.workspace}::uuid AND user_id=\x24{f.owner}::uuid\x60;
-    assert.equal((await call('todo_list')).body.status,'refused','role restoration alone never clears withdrawal');
+    assert.equal((await call('todo_list',{scope:'open'})).body.status,'refused','role restoration alone never clears withdrawal');
     assert.equal((await human(envelope(allow(['read','create','update'])))).body.status,'committed');
-    assert.equal((await call('todo_list')).body.status,'ok','human Allow recovers the same live grant');
+    assert.equal((await call('todo_list',{scope:'open'})).body.status,'ok','human Allow recovers the same live grant');
     assert.equal((await call('todo_queue')).body.queue.content_access,'read','live sibling C read-only ceiling survives retired-target replacement');
     // Keep B broad so only live C can supply the read ceiling.
     await tx.unsafe(input.ownerRollback);
@@ -314,10 +314,10 @@ try {
       const [visible]=await asCommand(sql=>sql\x60SELECT count(*)::int AS n FROM swarm.household_content_connections
         WHERE connection_id=\x24{liveSiblingSeat}::uuid\x60);
       assert.equal(visible.n,1,kind+' denial stays visible under actual rollback policy');
-      assert.equal((await call('todo_list')).status,503,kind+' remains a transient refusal until gate drop');
+      assert.equal((await call('todo_list',{scope:'open'})).status,503,kind+' remains a transient refusal until gate drop');
     }
     await tx.unsafe('DROP POLICY hosted_owner_content_rollback_gate ON swarm.household_content_connections');
-    assert.equal((await call('todo_list')).body.status,'refused','same denial remains after explicit forward gate drop');
+    assert.equal((await call('todo_list',{scope:'open'})).body.status,'refused','same denial remains after explicit forward gate drop');
     await tx\x60UPDATE swarm.household_content_connections SET operations=ARRAY['read'],expires_at=NULL,revoked_at=NULL
       WHERE connection_id=\x24{liveSiblingSeat}::uuid\x60;
     assert.equal((await human(envelope(allow(['read','create','update'])))).body.status,'committed');
@@ -330,13 +330,13 @@ try {
     assert.equal(marker.closed_target_replacements.length,2,'only closed A restriction and legacy approval versions are replaced');
     assert.equal((await human(envelope({kind:'household_withdraw_connection',principal_id:liveSibling}))).body.status,'committed');
     assert.equal((await human(envelope(allow(['read','create','update'])))).body.status,'committed');
-    assert.equal((await call('todo_list')).body.status,'refused','Allow B never replaces live C withdrawal');
+    assert.equal((await call('todo_list',{scope:'open'})).body.status,'refused','Allow B never replaces live C withdrawal');
     assert.equal((await human(envelope({kind:'household_approve_connection',connection:{kind:'hosted',connection_id:liveSiblingSeat,
       grant_id:f.grant,principal_id:liveSibling,operations:['read']}}))).body.status,'committed');
-    assert.equal((await call('todo_list')).body.status,'ok');
+    assert.equal((await call('todo_list',{scope:'open'})).body.status,'ok');
     await tx\x60UPDATE swarm.household_content_connections SET revoked_at=clock_timestamp()
       WHERE connection_id=\x24{original.connection}::uuid\x60;
-    assert.equal((await call('todo_list')).body.status,'refused','changed closed legacy version invalidates all stale replacement snapshots');
+    assert.equal((await call('todo_list',{scope:'open'})).body.status,'refused','changed closed legacy version invalidates all stale replacement snapshots');
     assert.equal((await human(envelope(allow(['read','create','update'])))).body.status,'committed');
     assert.equal((await call('todo_queue')).body.queue.content_access,'read');
     const [replacementHistory]=await tx\x60SELECT count(*)::int AS n FROM swarm.household_object_audit
@@ -352,14 +352,14 @@ try {
     Object.assign(f,{principal:f.sibling,connection:siblingSeat,handle:siblingHandle});
     assert.equal((await human(envelope({kind:'household_withdraw_connection',principal_id:f.principal}))).body.status,'committed');
     assert.equal((await human(envelope(allow(['read','create','update'])))).body.status,'committed');
-    assert.equal((await call('todo_list')).body.status,'refused','Allow B retains explicit withdrawal A');
+    assert.equal((await call('todo_list',{scope:'open'})).body.status,'refused','Allow B retains explicit withdrawal A');
     await tx\x60UPDATE swarm.memberships SET role='member' WHERE workspace_id=\x24{f.workspace}::uuid AND user_id=\x24{f.owner}::uuid\x60;
-    assert.equal((await call('todo_list')).body.status,'refused','owner-origin grant restriction survives role lowering');
+    assert.equal((await call('todo_list',{scope:'open'})).body.status,'refused','owner-origin grant restriction survives role lowering');
     assert.equal((await human(envelope(allow(['read','create','update'])))).body.status,'committed');
-    assert.equal((await call('todo_list')).body.status,'refused','lowered-role Allow B still cannot clear A');
+    assert.equal((await call('todo_list',{scope:'open'})).body.status,'refused','lowered-role Allow B still cannot clear A');
     Object.assign(f,original);
     assert.equal((await human(envelope(allow(['read','create','update'])))).body.status,'committed');
-    assert.equal((await call('todo_list')).body.status,'ok','human may reallow the same owner-origin target after downgrade');
+    assert.equal((await call('todo_list',{scope:'open'})).body.status,'ok','human may reallow the same owner-origin target after downgrade');
     await tx\x60UPDATE swarm.memberships SET role='owner' WHERE workspace_id=\x24{f.workspace}::uuid AND user_id=\x24{f.owner}::uuid\x60;
 
     // Ordinary nonowners with no owner-origin restriction retain independent
@@ -378,10 +378,10 @@ try {
       assert.equal(Number((await tx\x60SELECT count(*)::int AS n FROM swarm.household_hosted_content_restrictions WHERE workspace_id=\x24{f.workspace}::uuid\x60)[0].n),0);
       await tx.unsafe('ROLLBACK TO SAVEPOINT ordinary_nonowner'); await tx.unsafe('RELEASE SAVEPOINT ordinary_nonowner');
     }
-    assert.equal((await call('todo_list')).body.status,'ok');
+    assert.equal((await call('todo_list',{scope:'open'})).body.status,'ok');
     const agentWithdraw=await asEdge(async()=>api.handleHostedCommand(envelope(withdraw),await capability('todo_create')));
     assert.equal(agentWithdraw.status,403,'agent cannot clear or change restriction');
-    const forged=await asEdge(()=>api.handleHostedCommand(envelope({kind:'household_tool',tool:'todo_list',arguments:{seat:f.handle}}),{} as never));
+    const forged=await asEdge(()=>api.handleHostedCommand(envelope({kind:'household_tool',tool:'todo_list',arguments:{seat:f.handle,scope:'open'}}),{} as never));
     assert.equal(forged.status,403,'JSON cannot fabricate a capability');
     assert.deepEqual(await tx.unsafe("SELECT to_jsonb(m)::text AS row FROM pg_auth_members m WHERE roleid='commonswarm_oauth_runtime'::regrole AND member='commonswarm_edge'::regrole ORDER BY grantor"),runtimeMembership,'content adds no OAuth-runtime SET or rights');
     const committed = (result: Result) => { assert.equal(result.status,200); assert.equal(result.body.status,'committed'); return result.body.value; };
