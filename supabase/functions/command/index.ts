@@ -11074,13 +11074,6 @@ async function handleTransaction(
     }
 
     await afterStep(3);
-    if (kind===RENEW_AGENT_TOKEN_KIND && auth.agentFirstUse && auth.agent && !auth.agent.unexpired) {
-      // Exact saved pending successor recovery. This transaction commits real
-      // possession/use under the final credential/session fences below. Only
-      // then does a fresh transaction retry issuance with the same command ID.
-      recoverSavedPending=true;
-      return {status:204,body:{}};
-    }
 
     await beforeStep(4);
     const ignoredIdentity = forgedActorDetail(body);
@@ -11427,6 +11420,13 @@ async function handleTransaction(
         status: 426,
         body: { error: "upgrade_required", min_client_version: minClientVersion },
       };
+    }
+    if (kind===RENEW_AGENT_TOKEN_KIND && auth.agentFirstUse && auth.agent && !auth.agent.unexpired) {
+      // Exact pending-child or unused permanent-root recovery. Route, revocation,
+      // kind-only wire and client-version checks must precede committing use.
+      // Final credential/session fences below still roll back failed adoption.
+      recoverSavedPending=true;
+      return {status:204,body:{}};
     }
     // §2.3 renewal is the one command an agent presents that is NOT authorised
     // by a scope — a "renew token" scope is intrinsically denylisted, so no
@@ -13459,6 +13459,8 @@ async function handleTransaction(
       if (!finalAgent) throw new LocalCommandRefused({status:403,body:{error:'forbidden'}});
     }
     if (agentTokenHash!==null && authenticatedAgent && kind===RENEW_AGENT_TOKEN_KIND) {
+      if (recoverSavedPending && localPlan && !await loadAgentCredential(tx,agentTokenHash,localPlan,true))
+        throw new LocalCommandRefused({status:403,body:{error:'forbidden'}});
       // Issuance intentionally adds one owned token to discovery. Recheck the
       // original proof and family after INSERT/ledger/presence waits without
       // adopting a newly discovered external row or stamping the successor.
@@ -13471,6 +13473,9 @@ async function handleTransaction(
         WHERE t.token_hash=${agentTokenHash} AND t.token_id=${authenticatedAgent.token_id}::uuid
           AND p.revoked_at IS NULL AND r.ended_at IS NULL AND d.revoked_at IS NULL
           AND t.revoked_at IS NULL AND NOT t.surrender_only AND m.revoked_at IS NULL AND w.archived_at IS NULL
+          AND p.transport='local' AND NOT p.turn_only AND d.user_id=p.owner_user_id
+          AND ROW(g.principal_id,g.run_id,g.workspace_id,g.created_by)=ROW(t.principal_id,t.run_id,p.workspace_id,p.owner_user_id)
+          AND (g.bound_device_id IS NULL OR g.bound_device_id=d.device_id)
           AND g.revoked_at IS NULL AND (NOT g.suspension_active OR g.kind='standing') AND g.connection_expired_at IS NULL
           AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
           AND (g.kind='standing' OR g.horizon_expires_at>clock_timestamp())
