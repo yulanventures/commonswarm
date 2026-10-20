@@ -158,6 +158,8 @@ import {
   writeCurrentTarget,
 } from "./cloud/current-target.js";
 import { seedDogfood } from "./cloud/seed.js";
+import { withAgentDeadline } from "./cloud/agent-check.js";
+import { SignalTransportError } from "./cloud/signals.js";
 import {
   agentCredentialStore,
   credentialLineageKey,
@@ -2686,16 +2688,14 @@ async function runToken(args: Arguments): Promise<void> {
   if (action !== "mint") {
     throw new Error(`unknown token command: ${action ?? "(missing)"}`);
   }
-  const standing = args.has("standing");
-  if (standing && !args.has("confirm-standing")) {
-    throw new UsageError(
-      "--standing requires --confirm-standing because the grant has no expiry and must be revoked to stop renewal",
-    );
-  }
-  if (!standing && args.has("confirm-standing")) {
+  // The default requests the existing unbounded standing contract. Legacy horizon
+  // flags still request a technical timebox; they never set an owner policy date.
+  const horizonDays = args.optional("renewal-horizon-days");
+  const standing = args.has("standing") || horizonDays === undefined;
+  if (args.has("confirm-standing") && !args.has("standing")) {
     throw new UsageError("--confirm-standing is valid only with --standing");
   }
-  if (standing && args.optional("renewal-horizon-days") !== undefined) {
+  if (args.has("standing") && horizonDays !== undefined) {
     throw new UsageError(
       "--standing and --renewal-horizon-days conflict: a standing grant has no renewal horizon",
     );
@@ -2706,16 +2706,10 @@ async function runToken(args: Arguments): Promise<void> {
   const ttl = args.optional("ttl-ms");
   const principalId = args.required("principal-id");
   const runId = args.required("run-id");
-  // Days, not milliseconds: this is the one renewal number a person chooses, and the
-  // honest unit for "how long before I am asked again" is days.
-  const horizonMs = standing
-    ? null
-    : args.optional("renewal-horizon-days") === undefined
-    ? RENEWAL_HORIZON_DEFAULT_MS
-    : integer(args, "renewal-horizon-days", {
-      minimum: 1,
-      maximum: Math.floor(RENEWAL_HORIZON_MAX_MS / 86_400_000),
-    }) * 86_400_000;
+  const horizonMs = standing ? null : integer(args, "renewal-horizon-days", {
+    minimum: 1,
+    maximum: Math.floor(RENEWAL_HORIZON_MAX_MS / 86_400_000),
+  }) * 86_400_000;
   /* No separate grant call. The server creates the renewal grant in the same transaction
      as the token, so a successful mint IS a grant. The selected horizon is part of that
      same request and is enforced by the server; standing carries no horizon. */
@@ -2752,22 +2746,63 @@ async function runToken(args: Arguments): Promise<void> {
   }
   assertAgentToken(response.agent_token);
   const expiresAt = mintedExpiry(response);
-  /* The stated expiry is now the ONLY condition, and it is the honest one: the CLI schedules
-     renewal off that deadline and refuses to renew a credential whose deadline it does not
-     know (src/cloud/renewal.ts `due()`), so an artifact without an expiry renews nothing no
-     matter what the server can do. The grant is no longer part of this test because it is no
-     longer a separate thing that can fail — a mint that returned a token created one. */
+  const mintedRunId = uuid(response.run_id, "run_id");
+  const mintedTokenId = uuid(response.token_id, "token_id");
+  try {
+    await withAgentDeadline(10_000, async (fetcher, signal) => {
+      // A lost read reply may already have committed first use. Retry that same
+      // proof once; never mint another credential to resolve an unknown read.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const directory = await readAgentSignalDirectory(cloud, response.agent_token!, workspace, { fetcher, signal });
+          const identity = directory.identity;
+          if (identity?.credential_valid !== true || identity.principal_id !== principalId ||
+              identity.workspace_id !== workspace ||
+              (identity.run_id !== undefined && identity.run_id !== mintedRunId) ||
+              !directory.agents.some(agent => agent.principal_id === principalId && agent.owner_user_id === identity.owner_user_id)) {
+            throw new AgentSetupError("authenticated_identity_mismatch", "The issued identity was not confirmed.");
+          }
+          return;
+        } catch (error) {
+          if (attempt !== 0 || signal.aborted ||
+              !(error instanceof SignalTransportError || error instanceof SignalReadTimeoutError)) throw error;
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+      }
+    });
+  } catch (error) {
+    const http = followHttpDetails(error);
+    const envelope = followErrorEnvelope(error);
+    let reason = "The authentication outcome is unconfirmed.";
+    if (error instanceof AgentSetupError && error.code === "authenticated_identity_mismatch") {
+      reason = "The service did not confirm the issued agent and workspace.";
+    } else if (http?.status === 401) {
+      reason = "The service refused the issued credential (HTTP 401); the cause is unconfirmed.";
+    } else if (http?.status === 403) {
+      reason = "The service refused permission (HTTP 403); the cause is unconfirmed.";
+    } else if (error instanceof SignalTransportError || error instanceof SignalReadTimeoutError ||
+        (error instanceof AgentSetupError && error.code === "check_timeout") ||
+        (http !== null && (http.status === 429 || http.status >= 500) && envelope.retryable !== false)) {
+      reason = "The authentication response could not be confirmed after the bounded attempt.";
+    }
+    throw new Error(`The credential was issued. No credential was exported; setup is incomplete. ${reason} ` +
+      `Its secret is fresh-response-only; replay cannot recover it. Existing connections were kept. ` +
+      `The owner can explicitly revoke this issuance with cswarm token revoke --workspace-id ${workspace} --token-id ${mintedTokenId}. ` +
+      `After checking access, the owner can explicitly issue a new credential with cswarm token mint --workspace-id ${workspace} --principal-id ${principalId} --run-id <fresh-uuid> --task-id <fresh-uuid> --epoch 0.`);
+  }
+  process.stderr.write("Credential issued and authenticated. Installation on the recipient is unconfirmed.\n");
   process.stderr.write(
     describeMintRenewal(
       expiresAt !== null,
       Math.round((horizonMs ?? RENEWAL_HORIZON_DEFAULT_MS) / 86_400_000),
       standing ? "standing" : "timeboxed",
+      response,
     ),
   );
   printJson(agentCredentialArtifact({
     principalId,
-    tokenId: uuid(response.token_id, "token_id"),
-    runId: uuid(response.run_id, "run_id"),
+    tokenId: mintedTokenId,
+    runId: mintedRunId,
     token: response.agent_token,
     expiresAt,
   }));
@@ -6202,14 +6237,14 @@ function credentialCheckSentence(status: ListenerStatus): string | null {
     : CONFIRMED_CREDENTIAL_LOSS_CODES).join(" or ");
   if (status.renewalExpiresAt &&
       Date.parse(status.renewalExpiresAt) < Date.parse(status.credentialStopAt)) {
-    return `The server refused this credential (${codes}). The listener is still running and retrying the credential check${status.nextAttemptAt ? ` at ${status.nextAttemptAt}` : ""}. The current token expires at ${status.renewalExpiresAt}; unless renewal succeeds first, the listener stops on the next renewal answer after expiry. Run cswarm whoami with this credential to see the grant state.`;
+    return `The server refused this credential (${codes}). The listener is still running and retrying the credential check${status.nextAttemptAt ? ` at ${status.nextAttemptAt}` : ""}. The current token expires at ${status.renewalExpiresAt}; ordinary work pauses after technical expiry while renewal retries. Confirmed server refusals determine whether the listener stops. Run cswarm whoami with this credential to see the grant state.`;
   }
   return `The server refused this credential (${codes}). The listener is still running. It will stop at ${status.credentialStopAt} if every check until then confirms the loss; a transient answer extends the check window. Run cswarm whoami with this credential to see the grant state.`;
 }
 
 function listenerRetrySentence(status: ListenerStatus): string | null {
   if (status.lastErrorCode === "renewal_retry" && status.nextAttemptAt) {
-    return `Credential renewal is retrying. The current token expires at ${status.renewalExpiresAt ?? "an unknown time"}. The listener will retry at ${status.nextAttemptAt} with backoff of at least one second. Reads and claims pause while renewal is unresolved because the successor may already have been issued. If renewal does not succeed before expiry, the listener stops and needs a new credential.`;
+    return `Credential renewal is retrying. The current token expires at ${status.renewalExpiresAt ?? "an unknown time"}. The listener will retry at ${status.nextAttemptAt} with backoff of at least one second. Reads and claims pause while renewal is unresolved because the successor may already have been issued. Technical expiry does not stop renewal retries. Confirmed removal, revocation or security policy ends access.`;
   }
   if (!LISTENER_RUNNING_STATES.includes(status.state) ||
       typeof status.nextAttemptAt !== "string" ||
@@ -9484,7 +9519,7 @@ async function runTaskCommand(args: Arguments): Promise<void> {
   const kind = args.positionals[1];
   if (!kind) throw new Error("command kind is required");
   const cloud = await target(args);
-  const { selectedWorkspace, bearer, fetcher } =
+  const { selectedWorkspace, bearer, fetcher, kind: credentialKind, session } =
     await commandWorkspaceAndCredential(args, cloud);
   const client = new ThinCommandClient(cloud, fetcher);
   const result = await client.send({
@@ -9492,7 +9527,9 @@ async function runTaskCommand(args: Arguments): Promise<void> {
     stream: stream(args),
     command: command(args, kind),
     credential: bearer,
-  });
+  }, credentialKind === "agent" && session
+    ? (rejectedBearer) => session.recoverUnauthenticated(rejectedBearer)
+    : undefined);
   printResult(kind, result);
 }
 

@@ -1847,7 +1847,7 @@ test("credential and claim status use the answering edge and current retry state
   });
   assert.match(readBeforeRenewal, /retrying the credential check at 2026-09-22T00:02:01.000Z/);
   assert.doesNotMatch(readBeforeRenewal, /retrying renewal/);
-  assert.match(expiring, /current token expires at 2026-09-22T00:03:00.000Z; unless renewal succeeds first, the listener stops on the next renewal answer after expiry/);
+  assert.match(expiring, /current token expires at 2026-09-22T00:03:00.000Z; ordinary work pauses after technical expiry while renewal retries/);
   assert.doesNotMatch(expiring, /transient answer extends/);
   const stopped = renderListenerStatus({
     ...statusFor(target, "failed"),

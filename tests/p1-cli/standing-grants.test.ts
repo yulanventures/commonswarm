@@ -14,7 +14,7 @@ import { test } from "node:test";
 import { cloudTarget } from "../../src/cloud/config.js";
 import {
   describeRenewalGrant,
-  STANDING_GRANT_RULES,
+  readRenewalGrants,
   STANDING_IDLE_PAUSE_DAYS,
   STANDING_RESUME_ACTORS,
   type RenewalGrantStatus,
@@ -82,27 +82,23 @@ function mintArgs(extra: string[] = []): string[] {
   ];
 }
 
-test("standing mint refuses missing confirmation and a horizon contradiction before I/O", async () => {
-  const missing = await cli(mintArgs(["--standing"]));
-  assert.equal(missing.code, 1);
-  assert.match(missing.stderr, /--standing requires --confirm-standing/);
-  assert.match(missing.stderr, /must be revoked to stop renewal/);
-
-  const contradiction = await cli(mintArgs([
-    "--standing",
-    "--confirm-standing",
-    "--renewal-horizon-days",
-    "7",
-  ]));
+test("legacy standing flags reject contradictions before I/O", async () => {
+  const confirmationOnly = await cli(mintArgs(["--confirm-standing"]));
+  assert.equal(confirmationOnly.code, 1);
+  assert.match(confirmationOnly.stderr, /valid only with --standing/);
+  const contradiction = await cli(mintArgs(["--standing", "--renewal-horizon-days", "7"]));
   assert.equal(contradiction.code, 1);
   assert.match(contradiction.stderr, /conflict/);
-  assert.match(contradiction.stderr, /standing grant has no renewal horizon/);
 });
 
-test("confirmed standing mint and timeboxed horizon reach the command wire", async () => {
+test("default mint requests standing and narrates only returned canonical policy", async () => {
   const home = await mkdtemp(join(tmpdir(), "cswarm-standing-cli-"));
   const captured: Array<Record<string, unknown>> = [];
   let refresh = 0;
+  let issuedToken = "";
+  const proofRequests: Array<{ bearer: string | undefined; body: unknown }> = [];
+  let proofMode = "valid";
+  let mintPolicy: Record<string, unknown> = { grant_kind: "standing", horizon_expires_at: null };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     const chunks: Buffer[] = [];
@@ -139,7 +135,8 @@ test("confirmed standing mint and timeboxed horizon reach the command wire", asy
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
       captured.push(body);
       const command = body.command as Record<string, unknown>;
-      const standing = command.renewal_kind === "standing";
+
+      issuedToken = `swm_agt_${randomBytes(32).toString("base64url")}`;
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({
         status: "accepted",
@@ -149,12 +146,21 @@ test("confirmed standing mint and timeboxed horizon reach the command wire", asy
         token_id: randomUUID(),
         principal_id: PRINCIPAL,
         run_id: RUN,
-        agent_token: `swm_agt_${randomBytes(32).toString("base64url")}`,
+        agent_token: issuedToken,
         expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
-        grant_kind: standing ? "standing" : "timeboxed",
-        horizon_expires_at: standing
-          ? null
-          : new Date(Date.now() + Number(command.renewal_horizon_ms)).toISOString(),
+        ...mintPolicy,
+      }));
+      return;
+    }
+    if (url.pathname === "/functions/v1/read") {
+      proofRequests.push({ bearer: request.headers.authorization, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
+      if (proofMode === "lost-reply" && proofRequests.at(-2)?.bearer !== request.headers.authorization) { response.destroy(); return; }
+      response.writeHead(proofMode === "denied" ? 403 : 200, { "content-type": "application/json" });
+      response.end(JSON.stringify(proofMode === "missing" ? { members: [], agents: [] } : {
+        members: [], agents: [{ principal_id: PRINCIPAL, name: "agent", owner_user_id: USER }],
+        identity: { credential_valid: true, principal_id: proofMode === "principal" ? USER : PRINCIPAL,
+          workspace_id: proofMode === "workspace" ? USER : WORKSPACE, owner_user_id: USER,
+          run_id: proofMode === "run" ? USER : RUN },
       }));
       return;
     }
@@ -190,120 +196,105 @@ test("confirmed standing mint and timeboxed horizon reach the command wire", asy
       "anon",
       "--force-file-store",
     ];
-    const standing = await cli(
-      mintArgs(["--standing", "--confirm-standing", ...targetArgs]),
-      { HOME: home },
-    );
-    assert.equal(standing.code, 0, standing.stderr);
-    assert.match(standing.stderr, /Standing grant created/);
-    /* The narration carries the SAME rules list the connect page and the grant
-       status line carry. The retired assertion pinned the literal "This does not
-       expire. Revoke is the only kill switch." — a sentence that omitted the
-       14-day pause and named a kill switch that was not the only one. */
-    assert.ok(
-      standing.stderr.includes(STANDING_GRANT_RULES.join(" ")),
-      `mint narration does not carry the standing rules; got: ${standing.stderr}`,
-    );
-    assert.doesNotMatch(standing.stderr, /Revoke is the only kill switch/);
-    const standingCommand = captured[0]!.command as Record<string, unknown>;
-    assert.equal(standingCommand.renewal_kind, "standing");
-    assert.equal(Object.hasOwn(standingCommand, "renewal_horizon_ms"), false);
-
-    const timeboxed = await cli(
-      mintArgs(["--renewal-horizon-days", "7", ...targetArgs]),
-      { HOME: home },
-    );
+    for (const extra of [[], ["--standing"], ["--standing", "--confirm-standing"]]) {
+      const minted = await cli(mintArgs([...extra, ...targetArgs]), { HOME: home });
+      assert.equal(minted.code, 0, minted.stderr);
+      assert.match(minted.stderr, /server-managed/);
+      assert.doesNotMatch(minted.stderr, /no chosen expiry|no idle cutoff|14 days|authorise it again/);
+      const command = captured.at(-1)!.command as Record<string, unknown>;
+      assert.equal(command.renewal_kind, "standing");
+      assert.equal(Object.hasOwn(command, "renewal_horizon_ms"), false);
+    }
+    mintPolicy = { grant_kind: "timeboxed", horizon_expires_at: "2030-01-08T00:00:00Z" };
+    const timeboxed = await cli(mintArgs(["--renewal-horizon-days", "7", ...targetArgs]), { HOME: home });
     assert.equal(timeboxed.code, 0, timeboxed.stderr);
-    assert.match(timeboxed.stderr, /authorise it again in 7 days/);
-    const timeboxedCommand = captured[1]!.command as Record<string, unknown>;
+    assert.match(timeboxed.stderr, /server-managed/);
+    assert.match(timeboxed.stderr, /Technical renewal horizon: 2030-01-08/);
+    assert.doesNotMatch(timeboxed.stderr, /owner-selected|no chosen expiry/);
+    const timeboxedCommand = captured.at(-1)!.command as Record<string, unknown>;
     assert.equal(timeboxedCommand.renewal_kind, "timeboxed");
     assert.equal(timeboxedCommand.renewal_horizon_ms, 7 * 24 * 60 * 60_000);
+
+    for (const row of [
+      { expiry: null, terminal: null, expected: /no chosen expiry or idle cutoff/ },
+      { expiry: "2030-02-01T00:00:00Z", terminal: null, expected: /owner-selected expiry: 2030-02-01/ },
+      { expiry: null, terminal: "2026-10-01T00:00:00Z", expected: /expired at 2026-10-01.*cannot be resumed/ },
+    ]) {
+      mintPolicy = { grant_kind: "standing", horizon_expires_at: null,
+        connection_expires_at: row.expiry, connection_expired_at: row.terminal };
+      const minted = await cli(mintArgs(targetArgs), { HOME: home });
+      assert.equal(minted.code, 0, minted.stderr);
+      assert.match(minted.stderr, row.expected);
+      if (row.expiry !== null || row.terminal !== null) assert.doesNotMatch(minted.stderr, /no chosen expiry/);
+      assert.match(minted.stderr, /issued and authenticated.*Installation .*unconfirmed/);
+      assert.equal(proofRequests.at(-1)?.bearer, `Bearer ${issuedToken}`);
+      assert.deepEqual(proofRequests.at(-1)?.body, { resource: "members", workspace_id: WORKSPACE });
+      const artifact = JSON.parse(minted.stdout) as Record<string, unknown>;
+      assert.equal(Object.hasOwn(artifact, "connection_expires_at"), false, "artifact format stays unchanged");
+    }
+    for (proofMode of ["missing", "principal", "workspace", "run", "denied", "lost-reply"]) {
+      const beforeMint = captured.length, beforeRead = proofRequests.length;
+      const minted = await cli(mintArgs(targetArgs), { HOME: home });
+      assert.equal(captured.length, beforeMint + 1, "verification never remints");
+      assert.equal(proofRequests.at(-1)?.bearer, `Bearer ${issuedToken}`);
+      if (proofMode === "lost-reply") {
+        assert.equal(minted.code, 0, minted.stderr);
+        assert.equal(proofRequests.length, beforeRead + 2);
+        assert.equal(proofRequests.at(-2)?.bearer, proofRequests.at(-1)?.bearer);
+      } else {
+        assert.equal(minted.code, 1);
+        assert.equal(minted.stdout, "", "unverified credentials are never exported");
+        assert.match(minted.stderr, /setup is incomplete/);
+        assert.match(minted.stderr, /fresh-response-only; replay cannot recover it/);
+        assert.match(minted.stderr, /cswarm token revoke --workspace-id .* --token-id/);
+        assert.match(minted.stderr, /cswarm token mint --workspace-id/);
+        if (proofMode === "denied") {
+          assert.match(minted.stderr, /refused permission \(HTTP 403\); the cause is unconfirmed/);
+          assert.doesNotMatch(minted.stderr, /was revoked|connection expired|Rerun the same/);
+        } else assert.match(minted.stderr, /did not confirm the issued agent and workspace/);
+        assert.doesNotMatch(minted.stderr, /swm_agt_|issued and authenticated/);
+      }
+    }
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(home, { recursive: true, force: true });
   }
 });
 
-test("status wording follows the server grant shape and gives suspended next step", () => {
+test("grant read preserves absent policy and validates canonical deadlines before status", async () => {
   const grant: RenewalGrantStatus = {
     renewal_grant_id: "00000000-0000-4000-8000-000000000010",
-    principal_id: PRINCIPAL,
-    kind: "standing",
-    horizon_expires_at: null,
-    bound_device_id: DEVICE,
-    last_used_at: "2026-08-31T12:00:00Z",
-    last_used_device_id: DEVICE,
-    last_used_from: null,
-    new_host_at: null,
-    suspended_at: "2026-08-31T13:00:00Z",
-    revoked_at: null,
-    token_id: "00000000-0000-4000-8000-000000000011",
-    issued_at: "2026-08-31T11:00:00Z",
-    token_expires_at: "2026-08-31T14:00:00Z",
-    token_revoked_at: null,
+    principal_id: PRINCIPAL, kind: "standing", horizon_expires_at: null,
+    bound_device_id: DEVICE, last_used_at: null, last_used_device_id: null,
+    last_used_from: null, new_host_at: null, suspended_at: null, revoked_at: null,
+    token_id: null, issued_at: null, token_expires_at: null, token_revoked_at: null,
   };
-  const lines = describeRenewalGrant(grant);
-  assert.equal(lines.length, 2);
-  assert.equal(lines[0], `Grant: standing — ${STANDING_GRANT_RULES.join(" ")}`);
-  /* ★ THE REMEDY IS THE POINT. The retired line said "Next step: ask a workspace
-     owner to revoke this grant and mint a new credential" — it offered the
-     PERMANENT kill as the cure for the RECOVERABLE pause. That was the only
-     honest advice while suspension was one-way, and it is wrong now that it is
-     not: a reader who followed it destroyed the lineage to fix a fortnight of
-     silence. */
-  assert.match(lines[1], /^PAUSED since 2026-08-31T13:00:00Z after 14 days with no use\./);
-  assert.match(lines[1], /This is not revoked and the agent is not gone\./);
-  assert.match(
-    lines[1],
-    /cswarm grant resume --renewal-grant-id 00000000-0000-4000-8000-000000000010/,
-  );
-  assert.doesNotMatch(
-    lines[1],
-    /revoke this grant and mint a new credential/,
-    "the paused remedy must not tell the reader to perform the permanent kill",
-  );
-
-  /* ★ THE SECOND SURFACE, SWEPT 2026-09-04. `cswarm whoami` was corrected above while
-     src/cloud/renewal.ts still told the reader to "revoke this grant and mint a new
-     credential" — and that is the message an operator actually meets, because it is what the
-     listener prints when renewal is refused. One claim, two surfaces; a sweep that stops at
-     the first one leaves the retired remedy on the louder of the two. Both now read the same
-     generated sentence, so neither can drift from swarm.resume_renewal_grant's gate. */
-  for (const idle of [true, false]) {
-    const message = standingPausedRenewalMessage(idle);
-    assert.match(message, /cswarm grant resume/);
-    assert.match(message, /It is not revoked and this agent is not gone\./);
-    assert.doesNotMatch(
-      message,
-      /revoke this grant and mint a new credential/,
-      "the listener's paused message must not name the permanent kill either",
-    );
-    assert.ok(
-      message.includes(STANDING_RESUME_ACTORS_SENTENCE),
-      "the actors come from the shared constant, never retyped",
-    );
+  for (const row of [
+    { fields: {}, expected: /server-managed/, forbidden: /no chosen expiry|idle cutoff/ },
+    { fields: { connection_expires_at: null }, expected: /server-managed/, forbidden: /no chosen expiry/ },
+    { fields: { connection_expires_at: null, connection_expired_at: null }, expected: /no chosen expiry or idle cutoff/, forbidden: /14 days/ },
+    { fields: { connection_expires_at: "2030-01-01T00:00:00Z", connection_expired_at: null }, expected: /owner-selected expiry: 2030-01-01/, forbidden: /no chosen expiry/ },
+    { fields: { connection_expires_at: null, connection_expired_at: "2026-10-01T00:00:00Z" }, expected: /cannot be resumed/, forbidden: /no chosen expiry/ },
+    { fields: { suspended_at: "2026-10-01T00:00:00Z" }, expected: /PAUSED.*check the cause/, forbidden: /blocked.*security|no chosen expiry/ },
+    { fields: { suspended_at: "2026-10-01T00:00:00Z", revoked_at: "2026-10-02T00:00:00Z" }, expected: /permanent and cannot be resumed/, forbidden: /grant resume/ },
+    { fields: { revoked_at: "2026-10-01T00:00:00Z" }, expected: /permanent and cannot be resumed/, forbidden: /grant resume/ },
+  ]) {
+    const grants = await readRenewalGrants(cloudTarget("http://127.0.0.1:9", "anon"), "test", WORKSPACE,
+      (async () => Response.json({ grants: [{ ...grant, ...row.fields }] })) as typeof fetch);
+    const output = describeRenewalGrant(grants[0]!).join("\n");
+    assert.match(output, row.expected);
+    assert.doesNotMatch(output, row.forbidden);
+    if (grants[0]!.suspended_at !== null && grants[0]!.revoked_at === null) {
+      assert.match(output, /For an idle pause, .* runs cswarm grant resume/);
+      assert.match(output, /Security restrictions must be resolved by a workspace owner/);
+      assert.match(output, /server-managed/);
+    }
+    if (Object.keys(row.fields).length === 0) assert.equal(Object.hasOwn(grants[0]!, "connection_expires_at"), false);
   }
-  assert.match(
-    standingPausedRenewalMessage(true),
-    new RegExp(`went ${STANDING_IDLE_PAUSE_DAYS} days with no use`),
-    "the idle count is generated from the constant the migration is pinned against",
-  );
-  assert.doesNotMatch(
-    standingPausedRenewalMessage(false),
-    /days with no use/,
-    "a grant paused for another reason must not claim an idle count",
-  );
-
-  /* Revoked keeps the opposite advice and says the word that separates the two
-     states. Paused and revoked must never read as interchangeable. */
-  const revoked = describeRenewalGrant({
-    ...grant,
-    suspended_at: null,
-    revoked_at: "2026-09-01T13:00:00Z",
-  });
-  assert.match(revoked[1], /REVOKED since 2026-09-01T13:00:00Z\./);
-  assert.match(revoked[1], /permanent and cannot be resumed/);
-  assert.doesNotMatch(revoked[1], /grant resume/);
+  for (const value of ["not-a-date", 1, {}]) {
+    await assert.rejects(() => readRenewalGrants(cloudTarget("http://127.0.0.1:9", "anon"), "test", WORKSPACE,
+      (async () => Response.json({ grants: [{ ...grant, connection_expires_at: value }] })) as typeof fetch), /malformed connection_expires_at/);
+  }
 });
 
 /**
@@ -401,15 +392,7 @@ test("the web add-agent flow asks for a standing grant", async () => {
     "the connect page may not own a renewal horizon again; the server names it",
   );
 
-  /* The CLI's own default is UNCHANGED and must stay that way: standing there
-     still costs two flags, so a scripted `cswarm token mint` is not silently
-     promoted by this lane. */
-  const cli = await readFile(
-    new URL("../../src/cli.ts", import.meta.url),
-    "utf8",
-  );
-  assert.match(cli, /renewal_kind: standing \? "standing" : "timeboxed"/);
-  assert.match(cli, /--standing requires --confirm-standing/);
+
 });
 
 /**
