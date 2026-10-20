@@ -111,7 +111,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
       throw new errors.InvalidGrant("hosted family binding mismatch");
     }
   }
-  async function lockFamily(client, model, id, payload) {
+  async function lockFamily(client, model, id, payload, allowInactive = false) {
     const family = familyId(model,id,payload);
     if (!family) return {};
     // Admin issuance already owns its independent transaction envelope. Keep
@@ -127,7 +127,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
       if (!candidates.some(row => row.provider_grant_id === family && row.owner_user_id === binding.owner_user_id &&
           row.client_id === binding.client_id && row.resource === binding.resource)) throw new errors.InvalidGrant("hosted binding unavailable");
       const policy = await currentPolicy(client,family,binding);
-      if (!policy || (!policy.active && !(model === "Grant" && policy.state === "pending"))) {
+      if (!policy || (!allowInactive && !policy.active && !(model === "Grant" && policy.state === "pending"))) {
         throw new errors.InvalidGrant("hosted family inactive");
       }
       return { family, binding, policy };
@@ -153,7 +153,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
     }
     return { payload: value, expiresAt };
   }
-  async function lockProviderGrant(client, envelope) {
+  async function lockProviderGrant(client, envelope, allowConsumed = false) {
     if (!envelope.binding) return undefined;
     // A rotation loads Grant before consume and never saves it. Lock that
     // exact persisted Grant BEFORE the refresh artifact so both snapshots can
@@ -163,7 +163,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
     // Never create a missing Grant: adapter callers may persist a refresh
     // artifact independently; the provider validates Grant before redemption.
     if (!row) return undefined;
-    if (row.consumed_at !== null) {
+    if (!allowConsumed && row.consumed_at !== null) {
       throw new errors.InvalidGrant("hosted Grant unavailable");
     }
     assertHostedPayload("Grant",envelope.family,row.payload,envelope.binding);
@@ -175,6 +175,40 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
     await client.query(`UPDATE ${artifacts} SET payload=$2::jsonb,expires_at=$3,updated_at=clock_timestamp()
       WHERE model='Grant' AND artifact_id_hash=$1 AND consumed_at IS NULL`,
       [row.artifact_id_hash,JSON.stringify(normalized.payload),normalized.expiresAt]);
+  }
+  async function retireLockedHostedFamily(client, envelope, policy, providerGrant) {
+    const { family, binding } = envelope;
+    // Only the existing definer's freshly validated, non-pending authority can
+    // make a terminal decision. Missing rows and query errors are not evidence.
+    // The post-wait policy read is the decision point: a later membership
+    // re-add cannot undo this fence, while restoration before it stays active.
+    if (!binding || policy?.active !== false || !["active","revoked"].includes(policy.state) ||
+        policy.grant_id !== binding.hosted_grant_id) return false;
+    if (providerGrant) {
+      assertHostedPayload("Grant",family,providerGrant.payload,binding);
+      if ((providerGrant.grant_id !== null && providerGrant.grant_id !== family) ||
+          (providerGrant.payload.grantId !== undefined && providerGrant.payload.grantId !== family)) {
+        throw new errors.InvalidGrant("stored Grant family mismatch");
+      }
+    }
+    // hosted_mcp_grants.provider_grant_id is UNIQUE; provider_grant_resources
+    // has that same PRIMARY KEY plus an immutable, checked hosted tuple.
+    // currentPolicy validated that tuple under the family/authority locks.
+    // Thus this exact model+id Grant cannot serve an independent family.
+    await client.query(`INSERT INTO ${tombstones} (grant_id,revoked_at)
+      VALUES ($1,statement_timestamp()) ON CONFLICT (grant_id) DO NOTHING`, [family]);
+    await client.query(`DELETE FROM ${artifacts}
+      WHERE grant_id=$1 AND model=ANY($5::text[])
+        AND payload->>'grantId'=$1 AND payload->>'accountId'=$2 AND payload->>'clientId'=$3
+        AND (payload->'resource' IS NULL OR payload->'resource'=to_jsonb($4::text)
+          OR payload->'resource'=jsonb_build_array($4::text))
+        AND (payload->'aud' IS NULL OR payload->'aud'=to_jsonb($4::text))`,
+      [family,binding.owner_user_id,binding.client_id,binding.resource,[...GRANTABLE_MODELS]]);
+    if (providerGrant) {
+      await client.query(`DELETE FROM ${artifacts}
+        WHERE model='Grant' AND artifact_id_hash=$1`, [providerGrant.artifact_id_hash]);
+    }
+    return true;
   }
   async function readArtifact(model, column, value, recoveredJti, requireActive = false) {
     if (adminTransactionContext(false)) {
@@ -193,7 +227,10 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
       if (!initial) return undefined;
       const id = recoveredJti ?? initial.payload.jti;
       await requireBoundContext(model,id ?? "",initial.payload,client);
-      const envelope = await lockFamily(client,model,id,initial.payload);
+      // Reads must reach the durable retirement decision even when authority
+      // is already inactive. Keep this inside the SAME ordered transaction.
+      const envelope = await lockFamily(client,model,id,initial.payload,true);
+      const providerGrant = await lockProviderGrant(client,envelope,true);
       const row = (await client.query(`SELECT * FROM ${artifacts} WHERE model=$1 AND artifact_id_hash=$2 FOR UPDATE`, [model,initial.artifact_id_hash])).rows[0];
       if (!row) return undefined;
       if (familyId(model,id,row.payload) !== familyId(model,id,initial.payload)) throw new errors.InvalidGrant("artifact family changed");
@@ -204,7 +241,12 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
         // Artifact waits are last. Re-read canonical authority and DB time in
         // a NEW statement while all previously acquired locks remain held.
         policy = await currentPolicy(client,envelope.family,envelope.binding);
-        if (!policy || (!policy.active && !(model === "Grant" && policy.state === "pending"))) return undefined;
+        if (!policy || (!policy.active && !(model === "Grant" && policy.state === "pending"))) {
+          await retireLockedHostedFamily(client,envelope,policy,providerGrant);
+          // Return normally so the tombstone/deletions commit before find
+          // reports unavailable; throwing here would roll retirement back.
+          return undefined;
+        }
       }
       if (requireActive && !policy?.active) throw new errors.InvalidGrant("active hosted approval required");
       if (row.consumed_at === null && policy?.active && (model === "Grant" || model === "RefreshToken")) {
@@ -346,29 +388,16 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
 
     async retireInactiveHostedFamily(grantId, accountId) {
       await requireBoundContext("Grant", grantId, { grantId });
-      return transaction(pool, async (client) => {
-        await client.query(
-          "SELECT pg_advisory_xact_lock(hashtextextended($1, 484650))", [grantId],
-        );
-        // Take a fresh statement snapshot AFTER acquiring the family fence.
-        // Membership restoration does not take this lock: this predicate is
-        // the terminal decision point, and later restoration cannot revive it.
-        const result = await client.query(
-          `WITH status AS MATERIALIZED (
-             SELECT active FROM commonswarm_oauth.resolve_hosted_grant_status($1)
-             WHERE owner_user_id = $2::uuid
-           ), retired AS (
-             INSERT INTO ${tombstones} (grant_id, revoked_at)
-             SELECT $1, statement_timestamp() FROM status WHERE active = false
-             ON CONFLICT (grant_id) DO NOTHING
-           ), removed AS (
-             DELETE FROM ${artifacts} WHERE grant_id = $1
-               AND EXISTS (SELECT 1 FROM status WHERE active = false)
-           ) SELECT active FROM status`,
-          [grantId, accountId],
-        );
-        // Pending/missing grants have no status row and never install a fence.
-        return result.rows[0]?.active === true;
+      if (adminTransactionContext(false)) return false;
+      return transaction(pool, async client => {
+        const binding = await bindingFor(client,grantId);
+        if (binding?.grant_class !== "hosted_mcp" || binding.owner_user_id !== accountId) return false;
+        const payload = { accountId, clientId: binding.client_id, resources: { [resource]: "" } };
+        const envelope = await lockFamily(client,"Grant",grantId,payload,true);
+        const providerGrant = await lockProviderGrant(client,envelope,true);
+        const policy = await currentPolicy(client,grantId,binding);
+        await retireLockedHostedFamily(client,envelope,policy,providerGrant);
+        return policy?.active === true;
       });
     },
 
