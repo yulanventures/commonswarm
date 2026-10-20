@@ -7,7 +7,7 @@ import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { AGENT_CREDENTIAL_MESSAGE_D088, AgentCredentialInputError } from "./agent-credential-input.js";
 import { parseAgentCredentialInput } from "./agent-credential-input.js";
-import { AgentSetupError, ONBOARDING_MAX_FILE_BYTES, agentProfileRoot, assertPrivateLocation, privatePath, readAgentProfile, readProfileCredential, saveAgentProfile, type AgentProfile } from "./agent-profile.js";
+import { AgentSetupError, ONBOARDING_MAX_FILE_BYTES, agentProfileRoot, assertPrivateLocation, privatePath, readAgentProfile, readProfileCredential, openProfileCredential, profileTarget, saveAgentProfile, type AgentProfile } from "./agent-profile.js";
 import { deleteSecureJsonFile, ensureSecureStateDirectory, isPublishedOwnerFileTarget, readSecureJsonFileIfPresent, withFileLock, writeSecureJsonFile, writeSecureJsonFileExclusive } from "./storage.js";
 import { ONBOARDING_UUID, type AgentConnectionEnvelope } from "./agent-onboarding-contract.js";
 import { type CloudTarget } from "./config.js";
@@ -16,6 +16,9 @@ import { CommandHttpError, ThinCommandClient } from "./command-client.js";
 import { H0_REGISTRATION_NAME_MAX } from "../h0/verbs.js";
 import { REGISTER_NO_SEAT_THIS_ATTEMPT, REGISTER_EXISTING_SEAT_REFUSALS } from "./mcp-register-refusals.js";
 import { CONNECT_PROFILE_FILES, connectProfileReservedPaths, reservedConnectProfileName, reservedConnectProfileNames } from "./connect-profile-files.js";
+
+import { assertProfileIdentity, withAgentDeadline } from "./agent-check.js";
+import { readAgentSignalDirectory, SignalTransportError, SignalReadTimeoutError } from "./signals.js";
 
 const JOIN_CODE = /^swm_join_[A-Za-z0-9_-]{43}$/;
 const SEAT_TOKEN = /^swm_agt_[A-Za-z0-9_-]{43}$/;
@@ -617,7 +620,37 @@ async function defaultPendingProfile(target: CloudTarget, code: string, probe: R
 
 export interface McpConnectResult { profile: string; principal_id: string; install: string }
 
-function connectedResult(path: string, profile: AgentProfile): McpConnectResult {
+async function connectedResult(path: string, profile: AgentProfile, fetcher: typeof fetch = fetch): Promise<McpConnectResult> {
+  try {
+    await withAgentDeadline(MCP_REGISTER_TIMEOUT_MS, async (bounded, signal) => {
+      // Reopen the durable profile, then adopt/renew its saved lineage winner
+      // through the existing session locks. Never probe a register-response copy.
+      const saved = await readAgentProfile(path, profile.host_session_id);
+      if (saved.url !== profile.url || saved.anon_key !== profile.anon_key ||
+          saved.workspace_id !== profile.workspace_id || saved.principal_id !== profile.principal_id) {
+        throw new Error("saved profile changed");
+      }
+      const credential = await readProfileCredential(saved);
+      const session = await openProfileCredential(saved, bounded);
+      const token = await session.bearer();
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const directory = await readAgentSignalDirectory(profileTarget(saved), token, saved.workspace_id, { fetcher: bounded, signal });
+          assertProfileIdentity(saved, directory);
+          if (directory.identity?.run_id !== undefined && credential.runId !== null && directory.identity.run_id !== credential.runId) {
+            throw new Error("saved run was not confirmed");
+          }
+          break;
+        } catch (error) {
+          if (attempt !== 0 || signal.aborted ||
+              !(error instanceof SignalTransportError || error instanceof SignalReadTimeoutError)) throw error;
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+      }
+    }, fetcher);
+  } catch {
+    throw new McpConnectError("connect_authentication_incomplete", "The saved connection could not be authenticated. Setup is incomplete; its files were kept. Rerun the same mcp connect command with the same code.");
+  }
   const arguments_ = ["mcp", "--profile", path, ...(profile.host_session_id ? ["--host-session-id", profile.host_session_id] : [])];
   const claude = `claude mcp add --scope user --transport stdio cswarm -- cswarm ${arguments_.map(quoteAgentArgument).join(" ")}`;
   const codex = `[mcp_servers.cswarm]\ncommand = "cswarm"\nargs = ${JSON.stringify(arguments_)}`;
@@ -747,7 +780,7 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
       await cleanConnectTemps(path);
       const current = await readPending(path);
       const complete = await readComplete(path, current !== null);
-      if (!current && complete?.url === options.target.url && complete.codeHash === codeHash(code, complete.attemptId) &&
+      if ((!current || current.attemptId === complete?.attemptId) && complete?.url === options.target.url && complete.codeHash === codeHash(code, complete.attemptId) &&
           (!await pathExists(path) || (await repairableProfileAt(path) && !await completedProfileAt(path)))) {
         return await withFileLock(profileDir, CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {
           if (await completedProfileAt(path) || (await pathExists(path) && !await repairableProfileAt(path))) {
@@ -775,12 +808,20 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
           const restored: AgentProfile = { version: 1, url: complete.url, anon_key: complete.anon_key,
             workspace_id: complete.workspace_id, principal_id: orphan.principalId,
             credential_file: join(profileDir, CONNECT_PROFILE_FILES.credential) };
+          // A failed rebuild/probe must remain resumable with the existing
+          // saved proof, including when the old completion marker predates this client.
+          if (!current) await writeSecureJsonFile(pendingPath(path), JSON.stringify({
+            attemptId: complete.attemptId, url: complete.url, name, codeHash: complete.codeHash,
+            createdAt: new Date().toISOString(),
+          } satisfies PendingConnect));
           const markerPath = join(profileDir, CONNECT_PROFILE_FILES.attemptMarker);
           await requireConnectReservedPath(markerPath, reservedProbe);
           await writeSecureJsonFile(markerPath, JSON.stringify({ attemptId: complete.attemptId }));
           if (await pathExists(path)) await writeSecureJsonFile(path, JSON.stringify(restored));
           else await writeSecureJsonFileExclusive(path, JSON.stringify(restored));
-          return connectedResult(path, restored);
+          const result = await connectedResult(path, restored, options.fetcher);
+          await deleteSecureJsonFile(pendingPath(path));
+          return result;
         }, { publishLink: options.publishLink });
       }
       if (!current && await pathExists(path)) throw new McpConnectError("profile_exists", `The connect was refused because ${path} already exists. No blocking file was deleted. Pass --profile with a profile file in a different directory.`);
@@ -804,12 +845,13 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
           }
           if (profile.url !== options.target.url) throw new Error("wrong profile target");
           const credential = await readProfileCredential(profile);
+          const result = await connectedResult(path, profile, options.fetcher);
           try { await (options.writeCompletion ?? writeSecureJsonFile)(completePath(path), JSON.stringify({ attemptId: current.attemptId, url: current.url, codeHash: current.codeHash,
             workspace_id: profile.workspace_id, anon_key: profile.anon_key, principal_id: profile.principal_id,
             ...(credential.runId ? { run_id: credential.runId } : {}) } satisfies CompleteConnect)); }
-          catch { throw new McpConnectError("connect_complete_write_failed", `The working profile at ${path} was kept, but the completion record at ${completePath(path)} could not be written. Inspect the completion record and rerun the same command.`); }
+          catch { throw new McpConnectError("connect_complete_write_failed", `The authenticated profile at ${path} was kept, but setup is incomplete because the completion record at ${completePath(path)} could not be written. Inspect the completion record and rerun the same command.`); }
           await deleteSecureJsonFile(pendingPath(path));
-          return connectedResult(path, profile);
+          return result;
         } catch (error) {
           if (error instanceof McpConnectError) throw error;
           throw new McpConnectError("connect_profile_damaged", damagedProfileMessage(path));
@@ -893,11 +935,12 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
         }
         // saveAgentProfile owns the 0700 directory and 0600 file writes. The profile is intentionally unbound.
         const profile = await (options.saveProfile ?? saveAgentProfile)(path, connection, undefined, undefined, true, current !== null, orphanPrincipalId, undefined, attemptId);
+        const result = await connectedResult(path, profile, options.fetcher);
         try { await (options.writeCompletion ?? writeSecureJsonFile)(completePath(path), JSON.stringify({ attemptId, url: options.target.url, codeHash: codeHash(code, attemptId),
           workspace_id: connection.workspace_id, anon_key: connection.anon_key, principal_id: connection.principal_id, run_id: body.run_id } satisfies CompleteConnect)); }
-        catch { throw new McpConnectError("connect_complete_write_failed", `The profile at ${path} is saved and usable, but the completion record at ${completePath(path)} was not written. Inspect that record and run the same command again to finish the connect.`); }
+        catch { throw new McpConnectError("connect_complete_write_failed", `The profile at ${path} is saved and authenticated, but setup is incomplete because the completion record at ${completePath(path)} was not written. Inspect that record and run the same command again to finish the connect.`); }
         await deleteSecureJsonFile(pendingPath(path));
-        return connectedResult(path, profile);
+        return result;
       } catch (error) {
         clearTimeout(timer);
         if (error instanceof McpConnectError && error.code !== "register_outcome_unknown") throw error;

@@ -95,6 +95,9 @@ test("default mint requests standing and narrates only returned canonical policy
   const home = await mkdtemp(join(tmpdir(), "cswarm-standing-cli-"));
   const captured: Array<Record<string, unknown>> = [];
   let refresh = 0;
+  let issuedToken = "";
+  const proofRequests: Array<{ bearer: string | undefined; body: unknown }> = [];
+  let proofMode = "valid";
   let mintPolicy: Record<string, unknown> = { grant_kind: "standing", horizon_expires_at: null };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -133,6 +136,7 @@ test("default mint requests standing and narrates only returned canonical policy
       captured.push(body);
       const command = body.command as Record<string, unknown>;
 
+      issuedToken = `swm_agt_${randomBytes(32).toString("base64url")}`;
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({
         status: "accepted",
@@ -142,9 +146,21 @@ test("default mint requests standing and narrates only returned canonical policy
         token_id: randomUUID(),
         principal_id: PRINCIPAL,
         run_id: RUN,
-        agent_token: `swm_agt_${randomBytes(32).toString("base64url")}`,
+        agent_token: issuedToken,
         expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
         ...mintPolicy,
+      }));
+      return;
+    }
+    if (url.pathname === "/functions/v1/read") {
+      proofRequests.push({ bearer: request.headers.authorization, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
+      if (proofMode === "lost-reply" && proofRequests.at(-2)?.bearer !== request.headers.authorization) { response.destroy(); return; }
+      response.writeHead(proofMode === "denied" ? 403 : 200, { "content-type": "application/json" });
+      response.end(JSON.stringify(proofMode === "missing" ? { members: [], agents: [] } : {
+        members: [], agents: [{ principal_id: PRINCIPAL, name: "agent", owner_user_id: USER }],
+        identity: { credential_valid: true, principal_id: proofMode === "principal" ? USER : PRINCIPAL,
+          workspace_id: proofMode === "workspace" ? USER : WORKSPACE, owner_user_id: USER,
+          run_id: proofMode === "run" ? USER : RUN },
       }));
       return;
     }
@@ -210,8 +226,27 @@ test("default mint requests standing and narrates only returned canonical policy
       assert.equal(minted.code, 0, minted.stderr);
       assert.match(minted.stderr, row.expected);
       if (row.expiry !== null || row.terminal !== null) assert.doesNotMatch(minted.stderr, /no chosen expiry/);
+      assert.match(minted.stderr, /issued and authenticated.*Installation .*unconfirmed/);
+      assert.equal(proofRequests.at(-1)?.bearer, `Bearer ${issuedToken}`);
+      assert.deepEqual(proofRequests.at(-1)?.body, { resource: "members", workspace_id: WORKSPACE });
       const artifact = JSON.parse(minted.stdout) as Record<string, unknown>;
       assert.equal(Object.hasOwn(artifact, "connection_expires_at"), false, "artifact format stays unchanged");
+    }
+    for (proofMode of ["missing", "principal", "workspace", "run", "denied", "lost-reply"]) {
+      const beforeMint = captured.length, beforeRead = proofRequests.length;
+      const minted = await cli(mintArgs(targetArgs), { HOME: home });
+      assert.equal(captured.length, beforeMint + 1, "verification never remints");
+      assert.equal(proofRequests.at(-1)?.bearer, `Bearer ${issuedToken}`);
+      if (proofMode === "lost-reply") {
+        assert.equal(minted.code, 0, minted.stderr);
+        assert.equal(proofRequests.length, beforeRead + 2);
+        assert.equal(proofRequests.at(-2)?.bearer, proofRequests.at(-1)?.bearer);
+      } else {
+        assert.equal(minted.code, 1);
+        assert.equal(minted.stdout, "", "unverified credentials are never exported");
+        assert.match(minted.stderr, /setup is incomplete/);
+        assert.doesNotMatch(minted.stderr, /swm_agt_|issued and authenticated/);
+      }
     }
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));

@@ -31,6 +31,9 @@ const TOKEN_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const JOIN = `swm_join_${"J".repeat(43)}`;
 const TOKEN = `swm_agt_${"T".repeat(43)}`;
 const TARGET = cloudTarget("http://127.0.0.1:39876", "public-test-key");
+// Wire fixtures only; actual first-use authority is owned by the real-M3 gate.
+const DIRECTORY = { members: [], agents: [{ principal_id: PRINCIPAL, name: "MCP agent", owner_user_id: WS }],
+  identity: { credential_valid: true, principal_id: PRINCIPAL, workspace_id: WS, owner_user_id: WS, run_id: RUN } };
 let fileHome: string;
 let previousFileHome: string | undefined;
 before(() => {
@@ -361,6 +364,7 @@ test("Fold 9 unsupported hard links use exclusive final creation and recover a w
     const attempts = new Set<string>();
     let posts = 0;
     const fetcher: typeof fetch = async (_input, init) => {
+      if (new URL(String(_input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY);
       posts++;
       attempts.add(JSON.parse(String(init?.body)).attemptId);
       return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL,
@@ -404,7 +408,8 @@ test("Fold 10 killed wx claims and fallback temps recover the same pending conne
   const f = await fixture();
   let writer: ReturnType<typeof spawnPausedWriter> | null = null;
   let posts = 0;
-  const fetcher: typeof fetch = async () => {
+  const fetcher: typeof fetch = async (input) => {
+    if (new URL(String(input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY);
     posts++;
     return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL,
       run_id: RUN, token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" });
@@ -964,14 +969,14 @@ test("Fold 10 profile access probe classifies both permission codes before POST"
   } finally { await f.close(); }
 });
 
-test("Fold 9 completion write failure reports a saved usable profile and resumes without POST", { timeout: 10000 }, async () => {
+test("Fold 9 completion write failure reports authenticated but incomplete setup and resumes without POST", { timeout: 10000 }, async () => {
   const f = await fixture();
   try {
     const path = join(f.root, "completion-write", "profile.json");
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher,
       writeCompletion: async () => { throw Object.assign(new Error("write failed"), { code: "EIO" }); } }), error => {
       assert.equal((error as { code: string }).code, "connect_complete_write_failed");
-      assert.match(String(error), /profile .*saved and usable/);
+      assert.match(String(error), /profile .*saved and authenticated.*setup is incomplete/);
       assert.match(String(error), /completion record .*was not written/);
       assert.match(String(error), /run the same command again/);
       assert.doesNotMatch(String(error), /outcome is unknown/);
@@ -1265,6 +1270,7 @@ async function fixture(guardedRoot?: string) {
   let consumed = false;
   let refusal: string | null = null;
   const fetcher: typeof fetch = async (input, init) => {
+    if (new URL(String(input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY);
     calls++;
     assert.equal(String(input), `${TARGET.url}/functions/v1/h0/register`);
     assert.equal(init?.method, "POST");
@@ -1281,6 +1287,133 @@ async function fixture(guardedRoot?: string) {
   return { root, fetcher, calls: () => calls, refuse: (value: string) => { refusal = value; },
     reset: () => { consumed = false; }, close: () => guardedRoot ? removeLaneTempHome(root) : rm(root, { recursive: true, force: true }) };
 }
+
+test("connect verifies durable proof before completion, preserves failures and resumes without register", { timeout: 20_000 }, async () => {
+  const f = await fixture();
+  try {
+    for (const failure of ["missing", "workspace", "principal", "owner", "run", "malformed", "denied", "transport"]) {
+      f.reset();
+      const path = join(f.root, `proof-${failure}`, "profile.json");
+      const pending = join(dirname(path), CONNECT_PROFILE_FILES.pending);
+      const complete = join(dirname(path), CONNECT_PROFILE_FILES.complete);
+      const seen: Array<{ bearer: string; saved: string; pending: boolean; complete: boolean; body: unknown }> = [];
+      let deny = true;
+      const transport: typeof fetch = async (input, init) => {
+        if (new URL(String(input)).pathname !== "/functions/v1/read") return f.fetcher(input, init);
+        const saved = JSON.parse(await readFile(join(dirname(path), CONNECT_PROFILE_FILES.credential), "utf8"));
+        seen.push({ bearer: new Headers(init?.headers).get("authorization")!, saved: saved.agent_token,
+          pending: existsSync(pending), complete: existsSync(complete), body: JSON.parse(String(init?.body)) });
+        if (!deny) return Response.json(DIRECTORY);
+        if (failure === "transport") throw new Error(`lost response ${TOKEN}`);
+        if (failure === "denied") return Response.json({ error: "forbidden" }, { status: 403 });
+        if (failure === "malformed") return Response.json({ members: "invalid" });
+        if (failure === "missing") return Response.json({ members: [], agents: [] });
+        return Response.json({ ...DIRECTORY, identity: { ...DIRECTORY.identity,
+          ...(failure === "workspace" ? { workspace_id: RUN } : {}),
+          ...(failure === "principal" ? { principal_id: RUN } : {}),
+          ...(failure === "owner" ? { owner_user_id: RUN } : {}),
+          ...(failure === "run" ? { run_id: WS } : {}),
+        } });
+      };
+      const before = f.calls();
+      await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: transport }), error => {
+        assert.equal((error as { code: string }).code, "connect_authentication_incomplete");
+        assert.doesNotMatch(String(error), /swm_join_|swm_agt_|mcp add|mcp_servers/);
+        return true;
+      });
+      assert.equal(f.calls(), before + 1);
+      assert.ok(seen.length >= 1 && seen.length <= 2);
+      for (const proof of seen) {
+        assert.equal(proof.bearer, `Bearer ${proof.saved}`);
+        assert.equal(proof.pending, true);
+        assert.equal(proof.complete, false);
+        assert.deepEqual(proof.body, { resource: "members", workspace_id: WS });
+      }
+      const rootBefore = await readFile(join(dirname(path), CONNECT_PROFILE_FILES.credential));
+      const pendingBefore = await readFile(pending);
+      deny = false;
+      const result = await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: transport });
+      assert.equal(result.profile, path);
+      assert.equal(f.calls(), before + 1, "saved pending profile never registers again");
+      assert.ok(pendingBefore.length > 0);
+      assert.deepEqual(await readFile(join(dirname(path), CONNECT_PROFILE_FILES.credential)), rootBefore);
+      assert.equal(existsSync(pending), false);
+      assert.equal(existsSync(complete), true);
+    }
+  } finally { await f.close(); }
+});
+
+test("connect lost first-use reply retries the same saved bearer without re-registering", { timeout: 10_000 }, async () => {
+  const f = await fixture();
+  const path = join(f.root, "lost-proof", "profile.json");
+  const proofs: string[] = [];
+  try {
+    const transport: typeof fetch = async (input, init) => {
+      if (new URL(String(input)).pathname !== "/functions/v1/read") return f.fetcher(input, init);
+      proofs.push(new Headers(init?.headers).get("authorization")!);
+      if (proofs.length === 1) throw new Error("lost reply after read commit");
+      return Response.json(DIRECTORY);
+    };
+    const result = await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: transport });
+    assert.equal(result.profile, path);
+    assert.deepEqual(proofs, [`Bearer ${TOKEN}`, `Bearer ${TOKEN}`]);
+    assert.equal(f.calls(), 1);
+  } finally { await f.close(); }
+});
+
+test("pending connect authenticates the stored successor and keeps its root credential", { timeout: 10_000 }, async () => {
+  const { agentCredentialStore, credentialLineageKey } = await import("../../src/cloud/agent-credential.js");
+  const f = await fixture();
+  const path = join(f.root, "saved-winner", "profile.json");
+  const root = `swm_agt_${randomUUID().replaceAll("-", "").padEnd(43, "R")}`;
+  const winner = `swm_agt_${randomUUID().replaceAll("-", "").padEnd(43, "W")}`;
+  const store = await agentCredentialStore({ target: TARGET, lineageKey: credentialLineageKey(root) });
+  try {
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+      fetcher: async (input, init) => {
+        if (new URL(String(input)).pathname === "/functions/v1/read") return Response.json({ error: "unavailable" }, { status: 503 });
+        const response = await f.fetcher(input, init);
+        return Response.json({ ...await response.json(), agent_token: root });
+      } }), { code: "connect_authentication_incomplete" });
+    const credentialBefore = await readFile(join(dirname(path), CONNECT_PROFILE_FILES.credential));
+    await store.write({ version: 1, token: winner, tokenId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      principalId: PRINCIPAL, runId: RUN, rootTokenId: TOKEN_ID, generation: 1,
+      issuedAt: Date.now(), expiresAt: Date.now() + 3_600_000, horizonExpiresAt: null,
+      successorsRemaining: null, pendingRenewal: null });
+    const seen: Array<{ path: string; bearer: string | null }> = [];
+    const result = await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+      fetcher: async (input, init) => {
+        seen.push({ path: new URL(String(input)).pathname, bearer: new Headers(init?.headers).get("authorization") });
+        return Response.json(DIRECTORY);
+      } });
+    assert.equal(result.profile, path);
+    assert.deepEqual(seen, [{ path: "/functions/v1/read", bearer: `Bearer ${winner}` }]);
+    assert.deepEqual(await readFile(join(dirname(path), CONNECT_PROFILE_FILES.credential)), credentialBefore);
+    assert.equal((await store.read())?.token, winner);
+    assert.equal(f.calls(), 1);
+  } finally { await store.delete(); await f.close(); }
+});
+
+test("restored profile failure remains pending and verifies again before installation", { timeout: 10_000 }, async () => {
+  const f = await fixture();
+  const path = join(f.root, "restore-proof", "profile.json");
+  try {
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    const credential = await readFile(join(dirname(path), CONNECT_PROFILE_FILES.credential));
+    await unlink(path);
+    const seen: string[] = [];
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+      fetcher: async (input) => { seen.push(new URL(String(input)).pathname); return Response.json({ members: [], agents: [] }); } }),
+      { code: "connect_authentication_incomplete" });
+    assert.deepEqual(seen, ["/functions/v1/read"]);
+    assert.equal(existsSync(join(dirname(path), CONNECT_PROFILE_FILES.pending)), true);
+    assert.deepEqual(await readFile(join(dirname(path), CONNECT_PROFILE_FILES.credential)), credential);
+    const result = await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    assert.equal(result.profile, path);
+    assert.equal(f.calls(), 1);
+    assert.equal(existsSync(join(dirname(path), CONNECT_PROFILE_FILES.pending)), false);
+  } finally { await f.close(); }
+});
 
 test("connect saves an unbound private profile and never returns either secret", { timeout: 10000 }, async () => {
   const f = await fixture();
@@ -1356,6 +1489,7 @@ test("a committed save failure resumes one seat with the same attempt and a priv
     const attempts: string[] = [];
     let seats = 0;
     const fetcher: typeof fetch = async (_input, init) => {
+      if (new URL(String(_input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY);
       const body = JSON.parse(String(init?.body));
       const pendingAtRequest = JSON.parse(await readFile(join(dirname(path), "connect-pending.json"), "utf8"));
       assert.equal(pendingAtRequest.attemptId, body.attemptId, "pending attempt is durable before POST");
@@ -1392,6 +1526,7 @@ test("rotating retry repairs a credential-only crash on explicit and default pat
       const liveTokens = new Set<string>();
       let path = join(f.root, mode, "profile.json");
       const fetcher: typeof fetch = async (_input, init) => {
+        if (new URL(String(_input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY);
         calls++;
         const body = JSON.parse(String(init?.body));
         if (attempt) assert.equal(body.attemptId, attempt);
@@ -1426,7 +1561,8 @@ test("rotating retry repairs a credential-only crash on explicit and default pat
       assert.equal(calls, 2, "a completed retry never registers again");
     }
     let calls = 0;
-    const fetcher: typeof fetch = async () => {
+    const fetcher: typeof fetch = async (input) => {
+      if (new URL(String(input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY);
       calls++;
       return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL, run_id: RUN,
         token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" });
@@ -1447,7 +1583,8 @@ test("a successful retry for another principal keeps the orphan bytes and pendin
   try {
     const path = join(f.root, "mismatch", "profile.json");
     let calls = 0;
-    const fetcher: typeof fetch = async () => {
+    const fetcher: typeof fetch = async (input) => {
+      if (new URL(String(input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY);
       calls++;
       return Response.json({ status: "accepted", workspace_id: WS,
         principal_id: calls === 1 ? PRINCIPAL : "ffffffff-ffff-4fff-8fff-ffffffffffff", run_id: RUN,
@@ -1474,7 +1611,8 @@ test("a damaged profile beside this code gives a profile-only move step", { time
   try {
     const path = join(f.root, "damaged", "profile.json");
     let calls = 0;
-    const fetcher: typeof fetch = async () => { calls++; throw new Error("lost response"); };
+    const fetcher: typeof fetch = async (input) => {
+      if (new URL(String(input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY); calls++; throw new Error("lost response"); };
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher }), { code: "register_outcome_unknown" });
     const pending = join(dirname(path), "connect-pending.json");
     const pendingBytes = await readFile(pending);
@@ -1500,7 +1638,8 @@ test("umask 0277 still creates mode 0600 pending, credential, profile and comple
   const old = process.umask(0o277);
   try {
     await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
-      fetcher: async () => {
+      fetcher: async (input) => {
+        if (new URL(String(input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY);
         assert.equal((await stat(join(dirname(path), "connect-pending.json"))).mode & 0o777, 0o600);
         return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL, run_id: RUN,
           token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" });
@@ -1519,6 +1658,7 @@ test("Fold 7 first credential write leaves no partial final file on EIO and one 
     let posts = 0;
     const attempts: string[] = [];
     const fetcher: typeof fetch = async (_input, init) => {
+      if (new URL(String(_input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY);
       posts++;
       attempts.push(JSON.parse(String(init?.body)).attemptId);
       return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL, run_id: RUN,
@@ -1547,7 +1687,8 @@ test("Fold 7 damaged partial credential gives its exact move step before POST", 
   try {
     const path = join(f.root, "partial-old", "profile.json");
     let posts = 0;
-    const fetcher: typeof fetch = async () => { posts++; throw new Error("response lost"); };
+    const fetcher: typeof fetch = async (input) => {
+      if (new URL(String(input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY); posts++; throw new Error("response lost"); };
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher }), { code: "register_outcome_unknown" });
     const credential = join(dirname(path), "credential.json");
     await writeFile(credential, "{", { mode: 0o600 });
@@ -1590,7 +1731,8 @@ test("Fold 7 retry checks every orphan form before register", { timeout: 10000 }
   try {
     const path = join(f.root, "orphan-check", "profile.json");
     let posts = 0;
-    const fetcher: typeof fetch = async () => { posts++; throw new Error("response lost"); };
+    const fetcher: typeof fetch = async (input) => {
+      if (new URL(String(input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY); posts++; throw new Error("response lost"); };
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher }), { code: "register_outcome_unknown" });
     const credential = join(dirname(path), "credential.json");
     const other = join(dirname(path), "other.json");
@@ -1646,7 +1788,7 @@ test("Fold 7 completion rebuilds a missing profile locally or gives a new path f
     await unlink(profile);
     const rebuilt = await connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: f.fetcher });
     assert.equal(rebuilt.profile, profile);
-    assert.equal(f.calls(), 1, "rebuild uses no network");
+    assert.equal(f.calls(), 1, "rebuild never registers again");
     assert.deepEqual(await readFile(credential), before);
     assert.equal((await readAgentProfile(profile)).principal_id, PRINCIPAL);
     await unlink(profile);
@@ -1878,7 +2020,8 @@ test("Fold 7 damaged completion warns; unreadable completion refuses before regi
       if (kind === "damaged") await writeFile(complete, "{", { mode: 0o600 });
       else await symlink(join(dirname(complete), "missing-record"), complete);
       captured.length = 0;
-      const attempt = () => connectMcp({ target: TARGET, readCode: async () => `swm_join_${(kind === "damaged" ? "K" : "L").repeat(43)}`, fetcher: async () => {
+      const attempt = () => connectMcp({ target: TARGET, readCode: async () => `swm_join_${(kind === "damaged" ? "K" : "L").repeat(43)}`, fetcher: async (input) => {
+        if (new URL(String(input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY);
         return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL, run_id: RUN,
           token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" });
       } });
@@ -1905,7 +2048,8 @@ test("Fold 7 kill before first credential write leaves no final file and one-req
   try {
     const path = join(f.root, "first-kill", "profile.json");
     let posts = 0;
-    const fetcher: typeof fetch = async () => {
+    const fetcher: typeof fetch = async (input) => {
+      if (new URL(String(input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY);
       posts++;
       if (posts === 1) throw new Error("response lost");
       return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL, run_id: RUN,
@@ -1992,7 +2136,7 @@ test("used and server-expired retries keep the attempt and identify the clear st
     for (const kind of ["used", "expired"] as const) {
       const path = join(f.root, kind, "profile.json");
       let calls = 0;
-      const fetcher: typeof fetch = async () => {
+      const fetcher: typeof fetch = async (input) => {
         calls++;
         if (calls === 1) throw new Error("lost response");
         return Response.json({ error: kind === "used" ? "registration_token_already_used" : "forbidden" }, { status: kind === "used" ? 409 : 403 });
@@ -2053,6 +2197,7 @@ test("fresh no-seat refusals clear pending; resumed refusals retain it", { timeo
       if (code === "upgrade_required" || code === "principal_limit_reached") {
         let resumedAttempt = "";
         await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: async (_input, init) => {
+          if (new URL(String(_input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY);
           resumedAttempt = JSON.parse(String(init?.body)).attemptId;
           return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL, run_id: RUN,
             token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" });
@@ -2068,7 +2213,8 @@ test("completed profile clears old pending without POST", { timeout: 10000 }, as
   try {
     const completed = join(f.root, "completed-old", "profile.json");
     let calls = 0;
-    const fetcher: typeof fetch = async () => {
+    const fetcher: typeof fetch = async (input) => {
+      if (new URL(String(input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY);
       calls++;
       return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL, run_id: RUN,
         token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" });
@@ -2097,7 +2243,8 @@ test("a long-lived code reaches the server on retry", { timeout: 10000 }, async 
     old.createdAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
     await writeFile(pending, JSON.stringify(old), { mode: 0o600 });
     let calls = 0;
-    const fetcher: typeof fetch = async () => {
+    const fetcher: typeof fetch = async (input) => {
+      if (new URL(String(input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY);
       calls++;
       return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL, run_id: RUN,
         token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" });
@@ -2288,7 +2435,7 @@ test("default scan filters URL, refuses ambiguity, and reports damaged pending",
     };
     const other = await pendingAt("11111111-1111-4111-8111-111111111111", otherTarget);
     let posts = 0;
-    const accepted: typeof fetch = async () => { posts++; return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL,
+    const accepted: typeof fetch = async (input) => { if (new URL(String(input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY); posts++; return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL,
       run_id: RUN, token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" }); };
     const fresh = await connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: accepted });
     assert.notEqual(fresh.profile, other);
@@ -2382,7 +2529,8 @@ test("unparseable pending blocks a fresh connect until cleared", { timeout: 1000
     assert.equal((await stat(pending)).isFile(), true);
     await clearMcpConnect(path);
     let recoveredPosts = 0;
-    const result = await connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: async () => {
+    const result = await connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: async (input) => {
+      if (new URL(String(input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY);
       recoveredPosts++;
       return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL, run_id: RUN,
         token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" });
@@ -2482,6 +2630,7 @@ test("owned pending with a wrong file or directory mode matches by HMAC and resu
       assert.equal(posts, 0);
       await chmod(damaged, kind === "file" ? 0o600 : 0o700);
       const connected = await connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: async (_input, init) => {
+        if (new URL(String(_input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY);
         posts++;
         assert.equal(JSON.parse(String(init?.body)).attemptId, attempt);
         return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL, run_id: RUN,
@@ -2634,6 +2783,11 @@ test("a truncated committed response recovers the same seat", { timeout: 10000 }
     let raw = "";
     for await (const chunk of request) raw += chunk;
     const body = JSON.parse(raw);
+    if (request.url === "/functions/v1/read") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(DIRECTORY));
+      return;
+    }
     attempts.push(body.attemptId);
     if (attempts.length === 1) { response.writeHead(200, { "content-type": "application/json" }); response.end('{"status":'); return; }
     response.writeHead(200, { "content-type": "application/json" });
@@ -2665,6 +2819,11 @@ test("a killed child after register reaches the server resumes without a second 
     let raw = "";
     for await (const chunk of request) raw += chunk;
     const body = JSON.parse(raw);
+    if (request.url === "/functions/v1/read") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(DIRECTORY));
+      return;
+    }
     attempts.push(body.attemptId);
     if (attempts.length === 1) { firstReceived(); return; }
     response.writeHead(200, { "content-type": "application/json" });
@@ -2714,6 +2873,11 @@ test("the printed no-profile command recovers a killed child's one seat by code"
     let raw = "";
     for await (const chunk of request) raw += chunk;
     const body = JSON.parse(raw);
+    if (request.url === "/functions/v1/read") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(DIRECTORY));
+      return;
+    }
     attempts.push(body.attemptId);
     if (attempts.length === 1) { firstReceived(); return; }
     response.writeHead(200, { "content-type": "application/json" });
@@ -2994,7 +3158,7 @@ test("two concurrent connects for one profile serialize before a second POST", {
   const f = await fixture();
   try {
     const path = join(f.root, "race", "profile.json");
-    const fetcher: typeof fetch = async () => Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL,
+    const fetcher: typeof fetch = async (input) => new URL(String(input)).pathname === "/functions/v1/read" ? Response.json(DIRECTORY) : Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL,
       run_id: RUN, token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" });
     let arrivals = 0;
     let release!: () => void;

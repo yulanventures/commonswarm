@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -222,7 +222,7 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
   const { openListenerDeliveryJournal } = await import("../../src/listener/delivery-journal.js");
   const local = JSON.parse(execFileSync("supabase", ["status", "-o", "json"], {
     encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000,
-  })) as { API_URL: string; ANON_KEY: string; DB_URL: string };
+  })) as { API_URL: string; ANON_KEY: string; DB_URL: string; SERVICE_ROLE_KEY: string };
   for (const url of [local.API_URL, local.DB_URL]) {
     assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(new URL(url).hostname), "local stack required");
   }
@@ -275,6 +275,128 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
     return response.status;
   }
   try {
+    await t.test("real mint and MCP connect commit first use before export/completion and survive idle", async () => {
+      const { createClient } = await import("@supabase/supabase-js");
+      const { createServer } = await import("node:http");
+      const { credentialStore } = await import("../../src/cloud/storage.js");
+      const { connectMcp } = await import("../../src/cloud/mcp-connect.js");
+      const { readAgentProfile, openProfileCredential } = await import("../../src/cloud/agent-profile.js");
+      const admin = createClient(local.API_URL, local.SERVICE_ROLE_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
+      const f = await fixture();
+      const password = `T-${randomBytes(24).toString("base64url")}!`;
+      const changed = await admin.auth.admin.updateUserById(f.user, { password, email_confirm: true });
+      assert.ifError(changed.error);
+      const login = await admin.auth.signInWithPassword({ email: `client-${f.user}@example.test`, password });
+      assert.ifError(login.error);
+      assert.ok(login.data.session);
+      const minted: Array<{ tokenId: string; unused: boolean }> = [];
+      const proofBearers: string[] = [];
+      // Forward to real M3 unchanged. Inspect its database before forwarding the
+      // mint reply; no mock decides identity, first-use or renewal eligibility.
+      const proxy = createServer(async (request, response) => {
+        try {
+          const chunks: Buffer[] = [];
+          for await (const chunk of request) chunks.push(Buffer.from(chunk));
+          const raw = Buffer.concat(chunks).toString("utf8");
+          const body = JSON.parse(raw);
+          const upstream = await fetch(`${target.url}${request.url}`, { method: "POST",
+            headers: { "content-type": "application/json", apikey: target.anonKey,
+              ...(request.headers.authorization ? { authorization: request.headers.authorization } : {}) },
+            body: raw, signal: AbortSignal.timeout(15_000) });
+          const payload = await upstream.json() as Record<string, unknown>;
+          if (body.command?.kind === "mint_agent_token" && typeof payload.token_id === "string") {
+            const [row] = await sql<{ first_used_at: Date | null }[]>`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id = ${payload.token_id}::uuid`;
+            minted.push({ tokenId: payload.token_id, unused: row?.first_used_at === null });
+          }
+          if (body.resource === "members") proofBearers.push(request.headers.authorization ?? "");
+          response.writeHead(upstream.status, { "content-type": "application/json" });
+          response.end(JSON.stringify(payload));
+        } catch { response.writeHead(502).end(); }
+      });
+      await new Promise<void>(resolve => proxy.listen(0, "127.0.0.1", resolve));
+      const address = proxy.address();
+      assert.ok(address && typeof address === "object");
+      const mintTarget = cloudTarget(`http://127.0.0.1:${address.port}`, local.ANON_KEY);
+      // Root runs this only in its isolated Linux lane. Never replace an
+      // existing human record, and never alter HOME to isolate the test.
+      const humanStore = await credentialStore({ target: mintTarget, forceFile: true, platform: "linux", warn: () => undefined });
+      assert.equal(await humanStore.read(), null, "fresh local proxy must have no existing human state");
+      await humanStore.write({ version: 1, refreshToken: login.data.session.refresh_token,
+        generation: 0, userId: f.user, deviceId: f.device });
+      try {
+        const child = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", "token", "mint",
+          "--url", mintTarget.url, "--anon-key", mintTarget.anonKey, "--force-file-store",
+          "--workspace-id", f.workspace, "--principal-id", f.principal, "--run-id", randomUUID(),
+          "--task-id", randomUUID(), "--epoch", "1"], {
+          env: { ...process.env, SWARM_CLOUD_URL: "", SWARM_CLOUD_ANON_KEY: "", SWARM_CLOUD_WORKSPACE_ID: "" },
+          stdio: ["ignore", "pipe", "pipe"], timeout: 30_000,
+        });
+        const exited = new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
+        let output = "";
+        child.stderr.resume();
+        for await (const chunk of child.stdout) output += chunk;
+        assert.equal(await exited, 0, "real mint must authenticate before exporting");
+        const artifact = JSON.parse(output) as { token_id: string; agent_token: string };
+        assert.deepEqual(minted, [{ tokenId: artifact.token_id, unused: true }]);
+        assert.deepEqual(proofBearers, [`Bearer ${artifact.agent_token}`]);
+        const [used] = await sql<{ first_used_at: Date | null }[]>`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id = ${artifact.token_id}::uuid`;
+        assert.ok(used.first_used_at, "CLI export follows committed first use");
+      } finally { await humanStore.delete(); proxy.closeAllConnections(); await new Promise<void>(resolve => proxy.close(() => resolve())); }
+
+      const joinResult = await new ThinCommandClient(target).sendConnect({ workspaceId: f.workspace,
+        command: { kind: "mint_agent_join_credential", seat_cap: 1, ttl_hours: 1 }, credential: login.data.session.access_token });
+      assert.equal(joinResult.response.status, "accepted");
+      assert.equal(typeof joinResult.response.join_credential, "string");
+      const code = joinResult.response.join_credential!;
+      const profilePath = join(directory, "first-use-connect", "profile.json");
+      const reads: Array<{ bearer: string; unused: boolean; saved: boolean }> = [];
+      let registerCalls = 0;
+      const transport: typeof fetch = async (input, init) => {
+        const endpoint = new URL(String(input)).pathname;
+        if (endpoint === "/functions/v1/h0/register") registerCalls++;
+        if (endpoint !== "/functions/v1/read") return fetch(input, init);
+        const profile = await readAgentProfile(profilePath);
+        const saved = JSON.parse(await readFile(profile.credential_file, "utf8"));
+        const [before] = await sql<{ first_used_at: Date | null }[]>`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id = ${saved.token_id}::uuid`;
+        reads.push({ bearer: new Headers(init?.headers).get("authorization")!, unused: before.first_used_at === null,
+          saved: new Headers(init?.headers).get("authorization") === `Bearer ${saved.agent_token}` });
+        const response = await fetch(input, init);
+        if (reads.length === 1) { await response.arrayBuffer(); throw new Error("lost reply after real read commit"); }
+        return response;
+      };
+      await assert.rejects(connectMcp({ target, profilePath, readCode: async () => code, fetcher: transport,
+        writeCompletion: async () => { throw new Error("crash before completion"); } }), { code: "connect_complete_write_failed" });
+      assert.equal(registerCalls, 1);
+      assert.deepEqual(reads.map(row => row.unused), [true, false]);
+      assert.ok(reads.every(row => row.saved));
+      assert.equal(reads[0].bearer, reads[1].bearer);
+      const savedProfile = await readAgentProfile(profilePath);
+      const root = JSON.parse(await readFile(savedProfile.credential_file, "utf8"));
+      const [used] = await sql<{ first_used_at: Date | null }[]>`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id = ${root.token_id}::uuid`;
+      assert.ok(used.first_used_at);
+      await sql`UPDATE swarm.agent_tokens SET issued_at = issued_at - interval '32 days', expires_at = expires_at - interval '32 days' WHERE token_id = ${root.token_id}::uuid`;
+      const { writeSecureJsonFile } = await import("../../src/cloud/storage.js");
+      await writeSecureJsonFile(savedProfile.credential_file, JSON.stringify({ ...root,
+        expires_at: new Date(Date.parse(root.expires_at) - 32 * 86_400_000).toISOString() }));
+      await sql`UPDATE swarm.renewal_grants SET last_used_at = clock_timestamp() - interval '31 days'
+        WHERE renewal_grant_id = (SELECT renewal_grant_id FROM swarm.agent_tokens WHERE token_id = ${root.token_id}::uuid)`;
+      // Resume the same pending profile after >30d; M3 must authorize renewal.
+      const resumed = await connectMcp({ target, profilePath, readCode: async () => code });
+      assert.equal(resumed.profile, profilePath);
+      assert.equal(JSON.parse(await readFile(savedProfile.credential_file, "utf8")).agent_token, root.agent_token);
+      const reopened = await openProfileCredential(await readAgentProfile(profilePath));
+      assert.equal(await use(f.workspace, await reopened.bearer()), 200);
+      // An unused expired root gets no renewal authority; a live control still works.
+      const unused = await fixture();
+      const session = await AgentCredentialSession.open({ target, workspaceId: unused.workspace, presented: unused.presented, store: unused.store });
+      await assert.rejects(session.bearer(), RenewalCredentialCheckError);
+      const [refused] = await sql<{ first_used_at: Date | null; successors: number }[]>`
+        SELECT first_used_at, (SELECT count(*)::integer FROM swarm.agent_tokens WHERE predecessor_token_id = ${unused.tokenId}::uuid) AS successors
+        FROM swarm.agent_tokens WHERE token_id = ${unused.tokenId}::uuid`;
+      assert.equal(refused.first_used_at, null);
+      assert.equal(refused.successors, 0);
+      assert.equal(await use(f.workspace, await reopened.bearer()), 200);
+    });
     await t.test("unknown-expiry bare and artifact CLI inputs recover only after real authentication refusal", async () => {
       for (const bare of [false, true]) {
         const f = await fixture();

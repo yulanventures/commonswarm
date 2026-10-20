@@ -158,6 +158,8 @@ import {
   writeCurrentTarget,
 } from "./cloud/current-target.js";
 import { seedDogfood } from "./cloud/seed.js";
+import { withAgentDeadline } from "./cloud/agent-check.js";
+import { SignalTransportError, SignalReadTimeoutError } from "./cloud/signals.js";
 import {
   agentCredentialStore,
   credentialLineageKey,
@@ -2744,11 +2746,34 @@ async function runToken(args: Arguments): Promise<void> {
   }
   assertAgentToken(response.agent_token);
   const expiresAt = mintedExpiry(response);
-  /* The stated expiry is now the ONLY condition, and it is the honest one: the CLI schedules
-     renewal off that deadline and refuses to renew a credential whose deadline it does not
-     know (src/cloud/renewal.ts `due()`), so an artifact without an expiry renews nothing no
-     matter what the server can do. The grant is no longer part of this test because it is no
-     longer a separate thing that can fail — a mint that returned a token created one. */
+  const mintedRunId = uuid(response.run_id, "run_id");
+  const mintedTokenId = uuid(response.token_id, "token_id");
+  try {
+    await withAgentDeadline(10_000, async (fetcher, signal) => {
+      // A lost read reply may already have committed first use. Retry that same
+      // proof once; never mint another credential to resolve an unknown read.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const directory = await readAgentSignalDirectory(cloud, response.agent_token!, workspace, { fetcher, signal });
+          const identity = directory.identity;
+          if (identity?.credential_valid !== true || identity.principal_id !== principalId ||
+              identity.workspace_id !== workspace ||
+              (identity.run_id !== undefined && identity.run_id !== mintedRunId) ||
+              !directory.agents.some(agent => agent.principal_id === principalId && agent.owner_user_id === identity.owner_user_id)) {
+            throw new Error("mint identity was not confirmed");
+          }
+          return;
+        } catch (error) {
+          if (attempt !== 0 || signal.aborted ||
+              !(error instanceof SignalTransportError || error instanceof SignalReadTimeoutError)) throw error;
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+      }
+    });
+  } catch {
+    throw new Error("The credential was issued, but authentication could not be confirmed. No credential was exported; setup is incomplete.");
+  }
+  process.stderr.write("Credential issued and authenticated. Installation on the recipient is unconfirmed.\n");
   process.stderr.write(
     describeMintRenewal(
       expiresAt !== null,
@@ -2759,8 +2784,8 @@ async function runToken(args: Arguments): Promise<void> {
   );
   printJson(agentCredentialArtifact({
     principalId,
-    tokenId: uuid(response.token_id, "token_id"),
-    runId: uuid(response.run_id, "run_id"),
+    tokenId: mintedTokenId,
+    runId: mintedRunId,
     token: response.agent_token,
     expiresAt,
   }));
