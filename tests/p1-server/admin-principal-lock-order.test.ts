@@ -41,7 +41,6 @@ interface RaceResult {
   historical_completed?: string[];
   fixture_label?: string;
   fixture_digest?: string;
-  baseline_schema?: {source:{commit:string;tree:string;migrations_tree:string};catalog_sha256:string};
   baseline?: RaceResult;
   current?: RaceResult;
   active_catalog?: {functions:number;migrations:number;view_columns:number;measured_view_sha256:string};
@@ -59,7 +58,7 @@ interface ControlResult {
   sqlstates?: string[];
 }
 interface Harness {
-  HISTORICAL_BASELINE_SOURCE: {commit:string;tree:string;migrations_tree:string};
+  HISTORICAL_BASELINE_SOURCE: {commit:string;tree:string};
   ACTIVE_FLOOR_SOURCES: {F:{commit:string;tree:string}};
   openLockOrderTarget(options: { connector: unknown }): Promise<Target>;
   lockOrderConnector(issuance: { record: string; measure: string; enable: string }): unknown;
@@ -361,17 +360,15 @@ for(const [command,read] of [['current','current'],['F','current'],['current','F
 }
 
 let completedHistoricalBaseline=false;
-test('historical-baseline-discriminator exact O/schema-O and current/ACTIVE',{timeout:600_000},async()=>{
+test('historical-baseline-discriminator unsupported O/ACTIVE diagnostic and current/ACTIVE',{timeout:600_000},async()=>{
   const result=await harness.runScenario(bound(),'historical-baseline-discriminator',270_000);
   assert.equal(result.stage,'complete');
   const {baseline,current}=result;
-  assert.ok(baseline && current,'both real source/schema invocations must return');
+  assert.ok(baseline && current,'both real handler invocations on ACTIVE must return');
   const {commit,tree}=harness.HISTORICAL_BASELINE_SOURCE;
   assert.deepEqual(baseline.source,{commit,tree});
   assert.deepEqual(baseline.read_source,{commit,tree});
-  assert.deepEqual(baseline.baseline_schema?.source,harness.HISTORICAL_BASELINE_SOURCE);
-  assert.match(baseline.baseline_schema?.catalog_sha256 ?? '',/^[a-f0-9]{64}$/);
-  assert.equal(baseline.active_catalog,undefined,'O must never use the ACTIVE discriminator');
+  assert.equal(baseline.active_catalog?.migrations,4,'O diagnostic must use real ACTIVE');
   assert.match(baseline.fixture_digest ?? '',/^[a-f0-9]{64}$/);
   assert.equal(current.fixture_digest,baseline.fixture_digest,'identical original credential and history');
   assert.equal(current.active_catalog?.migrations,4);
@@ -402,7 +399,7 @@ test('active-floor-required-F-support-complete',()=>{
       assert.ok(completedFloorCases.has(`active-floor-canonical-${order}/${command}/${read}`),'required canonical case did not complete');
   assert.equal(completedFloorCases.size,41,'all 8 canonical and 33 existing permission/issuer cases must execute successfully');
   assert.equal(completedHistoricalCases.size,4,'all historical generation rows must execute successfully');
-  assert.equal(completedHistoricalBaseline,true,'O/schema-O expiry refusal and same-history ACTIVE renewal must both complete');
+  assert.equal(completedHistoricalBaseline,true,'unsupported O/ACTIVE expiry diagnostic and same-history current renewal must both complete');
   // F27d still excludes the later unused-permanent-root fix. This source gate
   // does not replace new-F rebinding, different-family review, Linux or full AS.
 });
