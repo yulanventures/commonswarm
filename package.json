@@ -1,6 +1,6 @@
 {
   "name": "cloud-swarm",
-  "version": "0.1.81",
+  "version": "0.1.82",
   "private": true,
   "description": "A shared workspace for people and their agents, at home and at work. Share messages and files.",
   "type": "module",
