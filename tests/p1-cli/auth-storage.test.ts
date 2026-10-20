@@ -1045,13 +1045,13 @@ function humanChild(root: string, url: string, mode: "normal" | "before-save" | 
     }
   });
   child.stdin.end(code);
-  return new Promise<{ code: number | null; signal: NodeJS.Signals | null; stdout: string; sawLogin: boolean }>((resolve, reject) => {
+  return new Promise<{ code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string; sawLogin: boolean }>((resolve, reject) => {
     const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("human CLI subprocess exceeded its deadline")); }, 45_000);
     child.once("error", error => { clearTimeout(timer); reject(error); });
     child.once("close", (code, signal) => {
       clearTimeout(timer);
       if (mode !== "accept" && code !== 0 && signal !== "SIGKILL") reject(new Error(`human CLI subprocess failed (${code}): ${stderr}`));
-      else resolve({ code, signal, stdout, sawLogin });
+      else resolve({ code, signal, stdout, stderr, sawLogin });
     });
   });
 }
@@ -1404,9 +1404,10 @@ test("accept with an invitation link resumes its existing login flow only for a 
     assert.equal(result.sawLogin, terminal, "terminal sessions resume in-flow login; transient sessions retain retry advice");
     assert.equal(server.attempts(), terminal ? 1 : 3, "the real refresh boundary must be reached");
     if (!terminal) {
-      assert.notEqual(result.code, 0);
-      assert.match(result.stdout, /human_session_transient/);
-      assert.doesNotMatch(result.stdout, /cswarm login/);
+      assert.equal(result.code, 1);
+      assert.equal(result.signal, null);
+      assert.match(result.stderr, /Your credential was kept; retry the command/);
+      assert.doesNotMatch(result.stdout + result.stderr, /cswarm login/);
     }
     assert.deepEqual(await store.read(), parent);
   });
