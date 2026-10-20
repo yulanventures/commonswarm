@@ -438,10 +438,89 @@ export function classifyMinClientVersion(row) {
 export const minClientVersionDiagnostic = (check) => (check.observed === undefined ? check.code : `${check.code}:observed=${check.observed}`);
 
 const DUMP_SCHEMAS = ['auth', 'swarm', 'swarm_read', 'commonswarm_oauth', 'commonswarm_ops', 'supabase_migrations'];
+/** O is a source/schema pair, never an alias for ACTIVE. The applying worker
+ * supplies a private receipt from the separately migrated disposable CI database.
+ * Its independently recorded checksum ledger and measured catalog are verified
+ * inside the same read-only snapshot used for both dump sections. */
+export const HISTORICAL_BASELINE_SOURCE = Object.freeze({
+  commit:'6d29f8060e05be93a1669cae30bdfa3e56c426d8',
+  tree:'c68bac76b3e705565440c2786cf2b34b22abc58a',
+  migrations_tree:'2923026a3601382047ad48cbfb3e7470d5b8db69',
+});
+export function historicalBaselineReceipt(binding, env = process.env, fs = {lstatSync,readFileSync}) {
+  if(binding.mode!=='ci') refuse('historical_baseline_ci_only');
+  const path=env.C1B_HISTORICAL_BASELINE_RECEIPT, digest=env.C1B_HISTORICAL_BASELINE_RECEIPT_SHA256;
+  if(typeof path!=='string' || !isAbsolute(path) || !/^[a-f0-9]{64}$/u.test(digest ?? '')) refuse('historical_baseline_receipt_required');
+  let stat,bytes,value;
+  try {stat=fs.lstatSync(path);} catch {refuse('historical_baseline_receipt_unreadable');}
+  if(!stat.isFile() || stat.isSymbolicLink() || (stat.mode&0o777)!==0o600) refuse('historical_baseline_receipt_mode');
+  try {bytes=fs.readFileSync(path);} catch {refuse('historical_baseline_receipt_unreadable');}
+  if(createHash('sha256').update(bytes).digest('hex')!==digest) refuse('historical_baseline_receipt_hash');
+  try {value=JSON.parse(bytes.toString());} catch {refuse('historical_baseline_receipt_invalid');}
+  const keys=['version','source','database','db_container_id','compose_project','compose_network','compose_volume','catalog_sha256'];
+  if(!value || Array.isArray(value) || JSON.stringify(Object.keys(value).sort())!==JSON.stringify(keys.sort()) || value.version!==1)
+    refuse('historical_baseline_receipt_keys');
+  if(!value.source || JSON.stringify(Object.keys(value.source).sort())!==JSON.stringify(Object.keys(HISTORICAL_BASELINE_SOURCE).sort()) ||
+    Object.entries(HISTORICAL_BASELINE_SOURCE).some(([k,v])=>value.source[k]!==v)) refuse('historical_baseline_source');
+  for(const k of ['db_container_id','compose_project','compose_network','compose_volume'])
+    if(value[k]!==binding[k]) refuse('historical_baseline_target');
+  if(!/^lock_order_[a-f0-9]{32}$/u.test(value.database ?? '') ||
+    new URL(binding.db_url).pathname===`/${value.database}`) refuse('historical_baseline_database');
+  if(!/^[a-f0-9]{64}$/u.test(value.catalog_sha256 ?? '')) refuse('historical_baseline_catalog');
+  return Object.freeze(value);
+}
+function historicalBaselineMigrations() {
+  const git=args=>execFileSync('git',['-C',REPO_ROOT,...args],{stdio:['ignore','pipe','ignore']});
+  const source=HISTORICAL_BASELINE_SOURCE;
+  if(git(['rev-parse',`${source.commit}:supabase/migrations`]).toString().trim()!==source.migrations_tree)
+    refuse('historical_baseline_migrations_tree');
+  return git(['ls-tree','-r','--name-only',source.commit,'supabase/migrations']).toString().trim().split('\n')
+    .filter(path=>path.endsWith('.sql')).map(path=>{
+      const bytes=git(['show',`${source.commit}:${path}`]);
+      return {name:basename(path),text:bytes.toString(),version:basename(path).split('_')[0],sha256:createHash('sha256').update(bytes).digest('hex')};
+    });
+}
+async function assertHistoricalBaselineSchema(tx, receipt) {
+  const expected=historicalBaselineMigrations();
+  const versions=await tx`SELECT version FROM supabase_migrations.schema_migrations ORDER BY version`;
+  const hashes=await tx`SELECT version,sha256,released_sha FROM commonswarm_ops.migration_checksums ORDER BY version`;
+  if(JSON.stringify(versions.map(r=>r.version))!==JSON.stringify(expected.map(r=>r.version)) || hashes.length!==expected.length ||
+    hashes.some((r,i)=>r.version!==expected[i].version || r.sha256!==expected[i].sha256 || r.released_sha!==receipt.source.commit))
+    refuse('historical_baseline_migration_evidence');
+  // Independent schema discriminator: even a receipt/catalog from ACTIVE must
+  // not stand in for O. Take the last actual retained definitions in migration
+  // order; compare bodies and execution modes, not a hand-written approximation.
+  const names=new Set(['swarm.prepare_renewal_grant','swarm.record_renewal_grant_use',
+    'swarm.agent_tokens_successor_fence','swarm.renewal_grants_server_clock','swarm.renewal_grants_spend_or_revoke_only']);
+  const definitions=new Map();
+  for(const migration of expected) {
+    const pattern=/^CREATE(?: OR REPLACE)? FUNCTION\s+([a-z_]+\.[a-z_]+)\s*\(([^)]*)\)([\s\S]*?)\bAS\s+(\$[a-z_]*\$)([\s\S]*?)\4\s*;/gimu;
+    for(const match of migration.text.matchAll(pattern)) if(names.has(match[1].toLowerCase())) {
+      const args=match[2].trim()?match[2].split(',').map(arg=>arg.trim().split(/\s+/u)[1]):[];
+      if(args.some(type=>!type || !/^[a-z_]+$/u.test(type))) refuse('historical_baseline_signature');
+      definitions.set(`${match[1]}(${args.join(',')})`,{body:match[5],definer:/SECURITY DEFINER/iu.test(match[3])});
+    }
+  }
+  if(definitions.size!==names.size) refuse('historical_baseline_definitions');
+  for(const [signature,want] of definitions) {
+    const rows=await tx`SELECT p.prosrc,p.prosecdef,pg_get_userbyid(p.proowner) AS owner
+      FROM pg_proc p WHERE p.oid=to_regprocedure(${signature})`;
+    if(rows.length!==1 || rows[0].prosrc!==want.body || rows[0].prosecdef!==want.definer || rows[0].owner!=='swarm_admin')
+      refuse('historical_baseline_body');
+  }
+  const [shape]=await tx`SELECT NOT EXISTS(SELECT 1 FROM pg_attribute
+    WHERE attrelid='swarm.renewal_grants'::regclass AND attname='local_content_approval_token_id' AND NOT attisdropped)
+    AND to_regprocedure('swarm.discover_local_credential_ids(bytea)') IS NULL AS prior`;
+  if(!shape.prior) refuse('historical_baseline_active_schema');
+  const catalog=await historicalCatalog(tx);
+  if(createHash('sha256').update(catalog).digest('hex')!==receipt.catalog_sha256) refuse('historical_baseline_catalog_evidence');
+  return catalog;
+}
+
 /** CI only: a throwaway database on the CLI cluster, as adminEdgeDatabase builds one, but from
  * the verified container. Only its DDL comes from the shared database; its seed rows are the
  * migrations' own, so earlier server files cannot change them. Admin issuance opens only inside it. */
-async function isolatedDatabaseTarget(binding, docker, issuance, historical = false) {
+async function isolatedDatabaseTarget(binding, docker, issuance, historical = false, baseline = null, initial = null) {
   if (binding.mode !== 'ci') throw new Error('isolated_database_ci_only');
   const { default: postgres } = await import('postgres');
   const source = new URL(binding.db_url);
@@ -466,7 +545,7 @@ async function isolatedDatabaseTarget(binding, docker, issuance, historical = fa
   };
   let phase = 'seed-source';
   try {
-    const minimum = migrationMinClientVersion(readMigrations());
+    const minimum = migrationMinClientVersion(baseline ? historicalBaselineMigrations() : readMigrations());
     phase = 'source';
     const [present] = await master`SELECT bool_and(to_regnamespace(s) IS NOT NULL) AS ok,
       to_regclass('commonswarm_oauth.admin_cutover_state') IS NOT NULL AS cutover
@@ -491,7 +570,7 @@ async function isolatedDatabaseTarget(binding, docker, issuance, historical = fa
         if (!extensions.some(e=>e.extname==='pgcrypto') || !extensions.some(e=>e.extname==='uuid-ossp') ||
           extensions.some(e=>!e.owned || !/^[a-zA-Z0-9_-]+$/u.test(e.extname))) throw new Error('historical_extension_owner_or_dependency');
         extensionOptions=extensions.map(e=>`--extension=${e.extname}`);
-        retainedCatalog = await historicalCatalog(tx);
+        retainedCatalog = baseline ? await assertHistoricalBaselineSchema(tx, baseline) : await historicalCatalog(tx);
         pre = section(snapshot, 'pre-data');
         post = section(snapshot, 'post-data');
       } else dump = section(snapshot, null);
@@ -504,7 +583,7 @@ async function isolatedDatabaseTarget(binding, docker, issuance, historical = fa
     if (historical) {
       await restore(pre);
       phase = 'historical-initial-data';
-      history = await seedHistoricalInitial(db);
+      history = await seedHistoricalInitial(db, initial);
       phase = 'historical-post-data';
       await restore(post);
     } else {
@@ -534,11 +613,20 @@ async function isolatedDatabaseTarget(binding, docker, issuance, historical = fa
     const check = classifyMinClientVersion(seeded);
     if (!check.ok) setupFailure(minClientVersionDiagnostic(check));
     if (check.version !== minimum) setupFailure('min_client_version_readback_mismatch');
-    return { url: target.toString(), mode: binding.mode, tlsCaPem: null, history, retainedCatalog,
-      historicalChild: () => isolatedDatabaseTarget(binding, docker, issuance, true), ensureAdminIssuance: () => ensureAdminIssuance(db, issuance), close };
+    return { url: target.toString(), mode: binding.mode, tlsCaPem: null, history, retainedCatalog, baseline,
+      historicalChild: (generation = 'current', initial = null) => {
+        if(generation==='current') return isolatedDatabaseTarget(binding,docker,issuance,true,null,initial);
+        if(generation!=='O') refuse('historical_baseline_generation');
+        const receipt=historicalBaselineReceipt(binding);
+        // Recheck the original exact container/labels/mount/port before deriving
+        // a second database name on that already verified CI cluster.
+        verifyDockerTarget(binding,readLiveStackFacts(),docker,CLI_LABEL);
+        const url=new URL(binding.db_url);url.pathname=`/${receipt.database}`;
+        return isolatedDatabaseTarget({...binding,db_url:url.toString()},docker,issuance,true,receipt,initial);
+      }, ensureAdminIssuance: () => ensureAdminIssuance(db, issuance), close };
   } catch (error) {
     try { await close(); } catch { /* the setup failure below is the result */ }
-    throw new Error(`isolated_database_setup_failed:${phase}:${error instanceof LockOrderSetupFailure ? error.code : sqlstate(error)}`);
+    throw new Error(`isolated_database_setup_failed:${phase}:${(error instanceof LockOrderSetupFailure || error instanceof LockOrderBindingRefusal) ? error.code : sqlstate(error)}`);
   }
 }
 
@@ -593,16 +681,18 @@ async function historicalCatalog(sql) {
 
 /** Synthetic imported INITIAL history; no claim of observed historical issuance.
  * First use is within the original one-hour TTL and more than 35 days ago. */
-async function seedHistoricalInitial(sql) {
+async function seedHistoricalInitial(sql, initial = null) {
   const [{now}] = await sql`SELECT clock_timestamp() AS now`;
-  const T = new Date(now).getTime(), day=86_400_000;
-  const history={label:'synthetic-initial-history',cases:[]};
-  for (const kind of ['standing','suspended','horizon-expired','expired-unused','live']) {
-    const f=Object.fromEntries(['owner','workspace','stream','principal','device','run','grant','token','lineage','task'].map(k=>[k,randomUUID()]));
+  const T = initial?.clock ?? new Date(now).getTime(), day=86_400_000;
+  const history=initial ?? {label:'synthetic-initial-history',clock:T,cases:
+    ['standing','suspended','horizon-expired','expired-unused','live'].map(kind=>({kind,
+      ...Object.fromEntries(['owner','workspace','stream','principal','device','run','grant','token','lineage','task'].map(k=>[k,randomUUID()])),
+      raw:`swm_agt_${randomBytes(32).toString('base64url')}`}))};
+  for (const f of history.cases) {
+    const {kind,raw}=f;
     const created=new Date(T-37*day), issued=new Date(kind==='live' ? T-60_000 : T-36*day);
     const used=kind==='expired-unused' ? null : new Date(issued.getTime()+30_000);
     const expires=new Date(issued.getTime()+3_600_000);
-    const raw=`swm_agt_${randomBytes(32).toString('base64url')}`;
     const standing=['standing','suspended','live'].includes(kind);
     await sql`INSERT INTO auth.users(id,aud,role,email,created_at)
       VALUES(${f.owner}::uuid,'authenticated','authenticated',${`${f.owner}@example.test`},${created})`;
@@ -629,7 +719,6 @@ async function seedHistoricalInitial(sql) {
       lineage_id,renewal_grant_id,first_used_at)
       VALUES(${f.token}::uuid,${f.principal}::uuid,${f.run}::uuid,${f.task}::uuid,1,'["post_signal"]'::jsonb,
         ${createHash('sha256').update(raw).digest()},${issued},${expires},${f.lineage}::uuid,${f.grant}::uuid,${used})`;
-    history.cases.push({...f,kind,raw});
   }
   return history;
 }
@@ -748,8 +837,8 @@ export function materializeActiveFloorSource(directory, generation) {
   if(generation==='current') return {path:REPO_ROOT,
     commit:execFileSync('git',['-C',REPO_ROOT,'rev-parse','HEAD'],{encoding:'utf8'}).trim(),
     tree:execFileSync('git',['-C',REPO_ROOT,'rev-parse','HEAD^{tree}'],{encoding:'utf8'}).trim()};
-  if (!Object.hasOwn(ACTIVE_FLOOR_SOURCES,generation)) throw new Error('unknown_source_generation');
-  const source=ACTIVE_FLOOR_SOURCES[generation];
+  if (generation!=='O' && !Object.hasOwn(ACTIVE_FLOOR_SOURCES,generation)) throw new Error('unknown_source_generation');
+  const source=generation==='O' ? {commit:HISTORICAL_BASELINE_SOURCE.commit,tree:HISTORICAL_BASELINE_SOURCE.tree} : ACTIVE_FLOOR_SOURCES[generation];
   const git=args=>execFileSync('git',['-C',REPO_ROOT,...args],{stdio:['ignore','pipe','ignore'],maxBuffer:64*1024*1024});
   if(git(['rev-parse',`${source.commit}^{tree}`]).toString().trim()!==source.tree) throw new Error('source_tree_identity');
   const destination=join(directory,`source-${generation}`);
@@ -895,6 +984,21 @@ export async function assertActiveFloorCatalog(sql) {
 
 /** Runs one Deno scenario against the target. Only LOCK_ORDER_ lines are read back. */
 export async function runScenario(target, scenario, timeoutMs = 170_000, generations = null) {
+  if(scenario==='historical-baseline-discriminator') {
+    if(target.mode!=='ci' || typeof target.historicalChild!=='function') refuse('historical_initial_ci_child_required');
+    const prior=await target.historicalChild('O');
+    let baseline, initial;
+    try {initial=prior.history;baseline=await runScenario(prior,'historical-baseline-expiry',timeoutMs,{command:'O',read:'O'});}
+    finally {await prior.close();}
+    // Exactly the same credential, IDs and stored history in the approved
+    // current schema. Both standing schemas already require NULL technical
+    // windows; only ACTIVE-only columns take their real migrated defaults.
+    const head=await target.historicalChild('current',initial);
+    let current;
+    try {current=await runScenario(head,'active-floor-historical-idle',timeoutMs,{command:'current',read:'current'});}
+    finally {await head.close();}
+    return {scenario,stage:baseline.stage==='complete' && current.stage==='complete'?'complete':'discriminator_failed',baseline,current};
+  }
   if (scenario === 'active-floor-historical-idle' && !target.history) {
     if (target.mode !== 'ci' || typeof target.historicalChild !== 'function') refuse('historical_initial_ci_child_required');
     const child = await target.historicalChild();
@@ -926,7 +1030,7 @@ export async function runScenario(target, scenario, timeoutMs = 170_000, generat
       }
       floor_url=pathToFileURL(join(secret.dir,modules[0][0])).href;
     }
-    writeFileSync(configPath, JSON.stringify({ db_url: target.url, tls_ca_pem: target.tlsCaPem, floor_url, source, read_source:readSource, active_floor:generations!==null, history:target.history, retained_catalog:target.retainedCatalog }), { mode: 0o600 });
+    writeFileSync(configPath, JSON.stringify({ db_url: target.url, tls_ca_pem: target.tlsCaPem, floor_url, source, read_source:readSource, active_floor:generations!==null && !target.baseline, baseline:target.baseline, history:target.history, retained_catalog:target.retainedCatalog }), { mode: 0o600 });
     const env = { PATH: process.env.PATH ?? '', NO_COLOR: '1' };
     for (const key of ['HOME', 'DENO_DIR', 'XDG_CACHE_HOME']) if (process.env[key]) env[key] = process.env[key];
     const child = spawn('deno', ['run', '--no-lock', ...(scenario==='floor-first-use-vs-head-revocation' ? ['--cached-only'] : []), '--config', join(REPO_ROOT, 'supabase/functions/command/deno.json'),
@@ -1152,8 +1256,8 @@ async function denoMain() {
     if (!minimum.ok) fail(minClientVersionDiagnostic(minimum));
     out.client_version = minimum.version;
     // D4: names and ids unique to this run (fresh workspace, users and grants per scenario).
-    const ctx = { history:config.history, retainedCatalog:config.retained_catalog, load, policyCommand, issuerTarget:{url:config.db_url,ssl:ssl.ssl}, floorUrl:config.floor_url, command, db, observer, failures, jwks, out, tag: randomUUID().replaceAll('-', '').slice(0, 10), clientVersion: minimum.version };
-    const result = scenario === 'active-floor-historical-idle' ? await historicalIdleScenario(ctx)
+    const ctx = { baseline:config.baseline, history:config.history, retainedCatalog:config.retained_catalog, load, policyCommand, issuerTarget:{url:config.db_url,ssl:ssl.ssl}, floorUrl:config.floor_url, command, db, observer, failures, jwks, out, tag: randomUUID().replaceAll('-', '').slice(0, 10), clientVersion: minimum.version };
+    const result = ['active-floor-historical-idle','historical-baseline-expiry'].includes(scenario) ? await historicalIdleScenario(ctx)
       : scenario.startsWith('active-floor-canonical-') ? await activeFloorCanonicalScenario(ctx,scenario)
       : scenario.startsWith('local-allow-retired-parent-') ? await localAllowRetiredParentScenario(ctx,scenario)
       : scenario==='hosted-owner-removal-prefix' ? await hostedOwnerRemovalScenario(ctx)
@@ -3274,6 +3378,11 @@ async function historicalIdleScenario(ctx) {
   };
   const live=history.cases.find(f=>f.kind==='live');
   check('same-invocation-positive',(await use(live)).status===200);
+  if(ctx.baseline) {
+    const liveRenewal=await renew(live);
+    check('baseline-live-renewal-positive',liveRenewal.status===200 && liveRenewal.body.status==='accepted' &&
+      (await use(live,liveRenewal.body.agent_token)).status===200);
+  }
   const completed=[];
   for(const f of history.cases.filter(f=>f.kind!=='live')) {
     const initial=await state(),g=row(initial,'renewal_grants','renewal_grant_id',f.grant),t=row(initial,'agent_tokens','token_id',f.token);
@@ -3284,9 +3393,31 @@ async function historicalIdleScenario(ctx) {
       (f.kind==='expired-unused' ? t.first_used_at===null && g.last_used_at===null :
         Date.parse(t.first_used_at)>=Date.parse(t.issued_at) && Date.parse(t.first_used_at)<Date.parse(t.expires_at) &&
         t.first_used_at===g.last_used_at && Date.parse(g.last_used_at)<now-35*86_400_000));
+    // Independent storage witnesses exclude missing hash, membership, principal,
+    // run, device, revocation or foreign ancestry as a reason for O's 401.
+    const [authority]=await sql`SELECT t.token_hash=${createHash('sha256').update(f.raw).digest()} AS hash_ok,
+      t.revoked_at IS NULL AND NOT t.surrender_only AND t.predecessor_token_id IS NULL
+      AND t.lineage_id=${f.lineage}::uuid AND t.renewal_grant_id=g.renewal_grant_id
+      AND p.transport='local' AND NOT p.turn_only AND p.managed_at IS NULL AND p.revoked_at IS NULL
+      AND r.ended_at IS NULL AND d.revoked_at IS NULL AND m.revoked_at IS NULL
+      AND g.revoked_at IS NULL AND g.connection_expires_at IS NULL AND g.connection_expired_at IS NULL
+      AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones) AS live
+      FROM swarm.agent_tokens t JOIN swarm.agent_principals p ON p.principal_id=t.principal_id
+      JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=p.principal_id
+      JOIN swarm.devices d ON d.device_id=r.device_id AND d.user_id=p.owner_user_id
+      JOIN swarm.memberships m ON m.workspace_id=p.workspace_id AND m.user_id=p.owner_user_id
+      JOIN swarm.renewal_grants g ON g.renewal_grant_id=t.renewal_grant_id AND g.principal_id=p.principal_id AND g.run_id=r.run_id
+      WHERE t.token_id=${f.token}::uuid`;
+    check('hash-and-live-authority',authority?.hash_ok===true && authority.live===true);
     check('expired-read-denied',[401,403].includes((await use(f)).status));
     check('expired-read-every-table-unchanged',same(initial,await state()));
     const before=await state(),start=await clock(),result=await renew(f),end=await clock(),after=await state();
+    if(ctx.baseline) {
+      check('baseline-expiry-refusal',result.status===401 && result.body.error==='unauthenticated');
+      check('baseline-denial-every-table-unchanged',same(before,after));
+      completed.push(f.kind);
+      continue;
+    }
     if(['horizon-expired','expired-unused'].includes(f.kind)) {
       check('ordinary-renewal-denied',[401,403].includes(result.status));
       check('ordinary-denial-every-table-unchanged',same(before,after));
@@ -3345,6 +3476,9 @@ async function historicalIdleScenario(ctx) {
   await historicalGuards(sql,history);
   check('guard-probes-rollback-every-table',same(guardBefore,await state()));
   check('retained-catalog-after-cases',await historicalCatalog(sql)===ctx.retainedCatalog);
-  await assertActiveFloorCatalog(sql);
-  return {checks,historical_completed:completed,fixture_label:history.label};
+  if(!ctx.baseline) await assertActiveFloorCatalog(sql);
+  // Digest only: bearer and hash stay private. The pair must use identical input.
+  const fixture_digest=createHash('sha256').update(JSON.stringify(history)).digest('hex');
+  return {checks,historical_completed:completed,fixture_label:history.label,fixture_digest,
+    baseline_schema:ctx.baseline ? {source:ctx.baseline.source,catalog_sha256:ctx.baseline.catalog_sha256} : null};
 }

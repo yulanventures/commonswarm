@@ -40,6 +40,10 @@ interface RaceResult {
   read_source?: {commit:string;tree:string};
   historical_completed?: string[];
   fixture_label?: string;
+  fixture_digest?: string;
+  baseline_schema?: {source:{commit:string;tree:string;migrations_tree:string};catalog_sha256:string};
+  baseline?: RaceResult;
+  current?: RaceResult;
   active_catalog?: {functions:number;migrations:number;view_columns:number;measured_view_sha256:string};
   canonical_witness?: {first_pid:number;second_pid:number;gate_pid:number;token_ids:string[];order:string};
   floor_compatibility?: string;
@@ -55,6 +59,7 @@ interface ControlResult {
   sqlstates?: string[];
 }
 interface Harness {
+  HISTORICAL_BASELINE_SOURCE: {commit:string;tree:string;migrations_tree:string};
   ACTIVE_FLOOR_SOURCES: {F:{commit:string;tree:string}};
   openLockOrderTarget(options: { connector: unknown }): Promise<Target>;
   lockOrderConnector(issuance: { record: string; measure: string; enable: string }): unknown;
@@ -355,7 +360,40 @@ for(const [command,read] of [['current','current'],['F','current'],['current','F
   });
 }
 
-// Count real completed cases, then retain the explicit missing-baseline failure.
+let completedHistoricalBaseline=false;
+test('historical-baseline-discriminator exact O/schema-O and current/ACTIVE',{timeout:600_000},async()=>{
+  const result=await harness.runScenario(bound(),'historical-baseline-discriminator',270_000);
+  assert.equal(result.stage,'complete');
+  const {baseline,current}=result;
+  assert.ok(baseline && current,'both real source/schema invocations must return');
+  const {commit,tree}=harness.HISTORICAL_BASELINE_SOURCE;
+  assert.deepEqual(baseline.source,{commit,tree});
+  assert.deepEqual(baseline.read_source,{commit,tree});
+  assert.deepEqual(baseline.baseline_schema?.source,harness.HISTORICAL_BASELINE_SOURCE);
+  assert.match(baseline.baseline_schema?.catalog_sha256 ?? '',/^[a-f0-9]{64}$/);
+  assert.equal(baseline.active_catalog,undefined,'O must never use the ACTIVE discriminator');
+  assert.match(baseline.fixture_digest ?? '',/^[a-f0-9]{64}$/);
+  assert.equal(current.fixture_digest,baseline.fixture_digest,'identical original credential and history');
+  assert.equal(current.active_catalog?.migrations,4);
+  for(const row of [baseline,current]) {
+    assert.equal(row.stage,'complete');
+    assert.equal(row.fixture_label,'synthetic-initial-history');
+    assert.equal(row.http_refused,0);
+    assert.deepEqual(row.historical_completed,['standing','suspended','horizon-expired','expired-unused']);
+    assert.ok(row.checks && row.checks.length>0);
+    assert.deepEqual(row.checks.filter(c=>!c.ok),[]);
+    for(const name of ['same-invocation-positive','hash-and-live-authority','coherent-old-credential',
+      'expired-read-every-table-unchanged','guard-probes-rollback-every-table','retained-catalog-after-cases'])
+      assert.ok(row.checks.some(c=>c.name===name && c.ok),name);
+  }
+  for(const name of ['baseline-live-renewal-positive','baseline-expiry-refusal','baseline-denial-every-table-unchanged'])
+    assert.ok(baseline.checks?.some(c=>c.name===name && c.ok),name);
+  for(const name of ['silent-short-successor','successor-read-usable','exact-successor-adoption','grant-history-preserved',
+    'ordinary-denial-every-table-unchanged']) assert.ok(current.checks?.some(c=>c.name===name && c.ok),name);
+  completedHistoricalBaseline=true;
+});
+
+// Count only successfully executed cases; source registration cannot make this green.
 // Renewal's independent required gate lives with its own real transaction tests;
 // the genuine GoTrue/issuer owners and full AS suite remain separate gates.
 test('active-floor-required-F-support-complete',()=>{
@@ -364,5 +402,7 @@ test('active-floor-required-F-support-complete',()=>{
       assert.ok(completedFloorCases.has(`active-floor-canonical-${order}/${command}/${read}`),'required canonical case did not complete');
   assert.equal(completedFloorCases.size,41,'all 8 canonical and 33 existing permission/issuer cases must execute successfully');
   assert.equal(completedHistoricalCases.size,4,'all historical generation rows must execute successfully');
-  assert.fail('F support incomplete: retained pre-permanence source plus its actual schema discriminator remains unimplemented (SCR historical baseline target). Historical current/ACTIVE rows do not prove baseline-red. New unused-permanent-root F backport, Linux and full AS gates remain pending.');
+  assert.equal(completedHistoricalBaseline,true,'O/schema-O expiry refusal and same-history ACTIVE renewal must both complete');
+  // F27d still excludes the later unused-permanent-root fix. This source gate
+  // does not replace new-F rebinding, different-family review, Linux or full AS.
 });

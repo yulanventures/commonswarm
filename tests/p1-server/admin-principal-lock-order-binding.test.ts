@@ -6,6 +6,7 @@
  * curve, IP:127.0.0.1); its key was discarded. X509Certificate parsing does not check validity
  * dates, so its long lifetime does not affect the test. */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -21,6 +22,8 @@ interface Docker {
   execWithSecret(id: string, script: string, args: string[], secret: string): string;
 }
 interface Harness {
+  HISTORICAL_BASELINE_SOURCE: {commit:string;tree:string;migrations_tree:string};
+  historicalBaselineReceipt(binding: Binding,env: Record<string,string|undefined>): Record<string,unknown>;
   BINDING_ENV: string;
   FIXTURE_BINDING_KEYS: readonly string[];
   CI_BINDING_KEYS: readonly string[];
@@ -615,4 +618,45 @@ test("the CI seed takes min_client_version from the migrations' own default", ()
   const sample = "SELECT E'a\\'-- b', $x$ -- c $x$; -- d";
   const contexts = harness.sqlLexicalContexts(sample);
   assert.deepEqual(["SELECT", "-- b", "-- c", "-- d"].map((part) => contexts[sample.indexOf(part)]), [0, 2, 2, 1]);
+});
+
+// Distinct transport contract: the old-schema source can only be selected by a
+// hash-bound receipt on the already verified CI cluster, before any SQL/import.
+test('historical baseline receipt binds exact O source and a disposable CI database',()=>{
+  const binding:Binding={mode:'ci',db_container_id:CI_ID,compose_project:'cloud-swarm',
+    compose_network:'supabase_network_cloud-swarm',compose_volume:'supabase_db_cloud-swarm',
+    db_url:'postgresql://supabase_admin:fixture-secret@127.0.0.1:54322/postgres'};
+  const receipt={version:1,source:harness.HISTORICAL_BASELINE_SOURCE,
+    database:`lock_order_${'1'.repeat(32)}`,db_container_id:binding.db_container_id,
+    compose_project:binding.compose_project,compose_network:binding.compose_network,
+    compose_volume:binding.compose_volume,catalog_sha256:'a'.repeat(64)};
+  const store=(value:unknown)=>{
+    const path=join(directory,`baseline-${++fileCounter}.json`),bytes=JSON.stringify(value);
+    writeFileSync(path,bytes,{mode:0o600});
+    return {C1B_HISTORICAL_BASELINE_RECEIPT:path,
+      C1B_HISTORICAL_BASELINE_RECEIPT_SHA256:createHash('sha256').update(bytes).digest('hex')};
+  };
+  const refused=(code:string)=>(error:unknown)=>error instanceof harness.LockOrderBindingRefusal && error.code===code;
+  const valid=store(receipt);
+  assert.deepEqual(harness.historicalBaselineReceipt(binding,valid),receipt);
+  assert.throws(()=>harness.historicalBaselineReceipt({...binding,mode:'fixture'},valid),refused('historical_baseline_ci_only'));
+  assert.throws(()=>harness.historicalBaselineReceipt(binding,{}),refused('historical_baseline_receipt_required'));
+  assert.throws(()=>harness.historicalBaselineReceipt(binding,{...valid,C1B_HISTORICAL_BASELINE_RECEIPT_SHA256:'0'.repeat(64)}),refused('historical_baseline_receipt_hash'));
+  for(const source of [{...receipt.source,commit:'0'.repeat(40)},{...receipt.source,tree:'0'.repeat(40)},
+    {...receipt.source,migrations_tree:'0'.repeat(40)},{...receipt.source,active:true}])
+    assert.throws(()=>harness.historicalBaselineReceipt(binding,store({...receipt,source})),refused('historical_baseline_source'));
+  for(const key of ['db_container_id','compose_project','compose_network','compose_volume'])
+    assert.throws(()=>harness.historicalBaselineReceipt(binding,store({...receipt,[key]:'foreign'})),refused('historical_baseline_target'));
+  for(const database of ['postgres','template0','lock_order_bad','live_database'])
+    assert.throws(()=>harness.historicalBaselineReceipt(binding,store({...receipt,database})),refused('historical_baseline_database'));
+  assert.throws(()=>harness.historicalBaselineReceipt({...binding,db_url:binding.db_url.replace('/postgres',`/${receipt.database}`)},valid),refused('historical_baseline_database'));
+  assert.throws(()=>harness.historicalBaselineReceipt(binding,store({...receipt,catalog_sha256:'bad'})),refused('historical_baseline_catalog'));
+  assert.throws(()=>harness.historicalBaselineReceipt(binding,store({...receipt,db_url:binding.db_url})),refused('historical_baseline_receipt_keys'));
+  chmodSync(valid.C1B_HISTORICAL_BASELINE_RECEIPT,0o644);
+  assert.throws(()=>harness.historicalBaselineReceipt(binding,valid),refused('historical_baseline_receipt_mode'));
+  chmodSync(valid.C1B_HISTORICAL_BASELINE_RECEIPT,0o600);
+  const link=join(directory,`baseline-link-${++fileCounter}.json`);
+  symlinkSync(valid.C1B_HISTORICAL_BASELINE_RECEIPT,link);
+  assert.throws(()=>harness.historicalBaselineReceipt(binding,{...valid,C1B_HISTORICAL_BASELINE_RECEIPT:link}),refused('historical_baseline_receipt_mode'));
+  assert.deepEqual(harness.historicalBaselineReceipt(binding,valid),receipt,'live positive after refusals');
 });
