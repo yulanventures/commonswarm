@@ -5,6 +5,7 @@ import { after, before, test } from "node:test";
 import { Pool } from "pg";
 
 import { createPostgresAdapter } from "../src/postgres-adapter.js";
+import { fixture as adminFixture } from "../../../tests/support/admin-schema-db.ts";
 
 const databaseUrl = process.env.MCP_OAUTH_TEST_DATABASE_URL ??
   "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
@@ -276,6 +277,15 @@ const refreshPayload = g => ({ accountId: g.owner,clientId: g.clientId,grantId: 
 async function artifact(model,id) {
   return (await admin.query('SELECT * FROM commonswarm_oauth.provider_artifacts WHERE model=$1 AND artifact_id_hash=$2',[model,hash(id)])).rows[0];
 }
+// Read durable storage independently of the adapter, including Grant's exact
+// model/id identity (its grant_id is NULL).
+async function familyStorage(g) {
+  return (await admin.query(`SELECT
+    (SELECT count(*)::int FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id=$1) AS tombstones,
+    (SELECT count(*)::int FROM commonswarm_oauth.provider_artifacts WHERE grant_id=$1) AS artifacts,
+    (SELECT count(*)::int FROM commonswarm_oauth.provider_artifacts WHERE model='Grant' AND artifact_id_hash=$2) AS exact_grant`,
+  [g.family,hash(g.family)])).rows[0];
+}
 async function waitOnBackend(pid) {
   const until = Date.now()+5000;
   while (Date.now()<until) {
@@ -449,7 +459,10 @@ test('post-wait owner extension, clear, removal and elapsed policy control retai
 
 test('the final artifact wait uses a fresh database clock and cannot promote an elapsed family', { timeout: 15000 }, async () => {
   const f = await hostedClients(), g = f.grants[0], token = randomUUID();
-  const rt = createPostgresAdapter(runtime)('RefreshToken'); await rt.upsert(token,refreshPayload(g),60);
+  const adapters = createPostgresAdapter(runtime), rt = adapters('RefreshToken');
+  await adapters('Grant').upsert(g.family,grantPayload(g),60);
+  await rt.upsert(token,refreshPayload(g),60);
+  assert.deepEqual(await familyStorage(g),{ tombstones: 0,artifacts: 1,exact_grant: 1 });
   const blocker = await admin.connect(), c = await runtime.connect();
   let pending;
   try {
@@ -460,7 +473,11 @@ test('the final artifact wait uses a fresh database clock and cannot promote an 
     pending = createPostgresAdapter(single)('RefreshToken').find(token); await waitOnBackend(c.processID);
     await blocker.query('SELECT pg_sleep(2.1)'); await blocker.query('COMMIT');
     assert.equal(await pending,undefined);
-    assert.equal((await artifact('RefreshToken',token)).expires_at,null,'refused promotion does not rewrite stored state');
+    assert.equal((await admin.query('SELECT connection_expires_at <= clock_timestamp() AS elapsed FROM swarm.hosted_mcp_grants WHERE grant_id=$1',[g.id])).rows[0].elapsed,true);
+    assert.deepEqual(await familyStorage(g),{ tombstones: 1,artifacts: 0,exact_grant: 0 },
+      'an elapsed owner date commits terminal retirement before lookup returns');
+    assert.equal(await artifact('RefreshToken',token),undefined);
+    assert.equal(await artifact('Grant',g.family),undefined);
   } finally {
     await blocker.query('ROLLBACK').catch(() => {}); blocker.release();
     if (pending) await Promise.allSettled([pending]); c.release();
@@ -492,13 +509,16 @@ test('activation and promotion retry independently, and a pending/removed Grant 
   }
   const promote = row => grant.promoteHostedGrant(row.family,{ hostedGrantId: row.id,accountId: row.owner,clientId: row.clientId });
   await assert.rejects(promote(g),e => e.error === 'invalid_grant');
-  assert.ok((await artifact('Grant',g.family)).expires_at,'pending failure remains finite');
+  assert.ok((await artifact('Grant',g.family)).expires_at > new Date(),'pending failure remains finite');
+  assert.deepEqual(await familyStorage(g),{ tombstones: 0,artifacts: 0,exact_grant: 1 });
   await admin.query("UPDATE swarm.hosted_mcp_grants SET state='active',activated_at=clock_timestamp() WHERE grant_id=$1",[g.id]);
   await promote(g); await promote(g);
   assert.equal((await artifact('Grant',g.family)).expires_at,null,'idempotent retry promotes the existing exact Grant');
   await admin.query("UPDATE swarm.hosted_mcp_grants SET state='revoked',revoked_at=clock_timestamp() WHERE grant_id=$1",[removed.id]);
   await assert.rejects(promote(removed),e => e.error === 'invalid_grant');
-  assert.ok((await artifact('Grant',removed.family)).expires_at,'revoked failure never makes a pending artifact permanent');
+  assert.deepEqual(await familyStorage(removed),{ tombstones: 1,artifacts: 0,exact_grant: 0 },
+    'revoked promotion commits retirement despite returning invalid_grant');
+  assert.equal(await artifact('Grant',removed.family),undefined);
 });
 
 test('concurrent new binding serializes behind DCR retention before joining its candidate set', { timeout: 20000 }, async () => {
@@ -610,14 +630,180 @@ test('stored owner, client and resource mismatches never acquire permanent famil
   const f = await hostedClients(), g = f.grants[0];
   const rt = createPostgresAdapter(runtime)('RefreshToken');
   const control = randomUUID(); await rt.upsert(control,refreshPayload(g),60);
+  await createPostgresAdapter(runtime)('Grant').upsert(g.family,grantPayload(g),60);
+  let artifacts = 1;
   for (const [key,value] of [['accountId',randomUUID()],['clientId',`foreign-${randomUUID()}`],['resource','https://foreign.example/mcp']]) {
+    artifacts += 1;
     const id = randomUUID(); await rt.upsert(id,refreshPayload(g),60);
     // The actual historical hosted-artifact guard permits native payload
     // bookkeeping. The runtime must independently bind each retained payload.
     await admin.query("UPDATE commonswarm_oauth.provider_artifacts SET payload=jsonb_set(payload,ARRAY[$2]::text[],$3::jsonb) WHERE model='RefreshToken' AND artifact_id_hash=$1",
       [hash(id),key,JSON.stringify(value)]);
+    const before = await artifact('RefreshToken',id), beforeGrant = await artifact('Grant',g.family);
     assert.equal(await rt.find(id),undefined,key);
+    assert.deepEqual(await familyStorage(g),{ tombstones: 0,artifacts,exact_grant: 1 },key);
+    assert.deepEqual(await artifact('RefreshToken',id),before,key);
+    assert.deepEqual(await artifact('Grant',g.family),beforeGrant,key);
     await assert.rejects(rt.upsert(id,refreshPayload(g),60),e => e.error === 'invalid_grant','save cannot turn an invalid retained tuple into a permanent artifact');
     assert.ok(await rt.find(control),'same-family exact stored tuple remains usable');
   }
+});
+
+// The account-validation caller reaches this public method only if policy
+// changes after the provider's earlier successful artifact lookup.
+test('public retirement commits refresh-race removal and preserves authority restored during a real wait', { timeout: 30000 }, async () => {
+  for (const restore of [false,true]) {
+    const f = await hostedClients(), [g,other] = f.grants;
+    const adapters = createPostgresAdapter(runtime), rt = adapters('RefreshToken');
+    const token = randomUUID(), otherToken = randomUUID();
+    for (const [row,id] of [[g,token],[other,otherToken]]) {
+      await adapters('Grant').upsert(row.family,grantPayload(row),60);
+      await rt.upsert(id,refreshPayload(row),60);
+    }
+    const predecessor = await rt.find(token);
+    assert.equal(predecessor.grantId,g.family,'provider already loaded the refresh predecessor');
+    const otherBefore = await artifact('RefreshToken',otherToken);
+    assert.equal(await rt.retireInactiveHostedFamily(g.family,g.owner),true);
+    assert.deepEqual(await familyStorage(g),{ tombstones: 0,artifacts: 1,exact_grant: 1 });
+    if (restore) await admin.query('DELETE FROM swarm.memberships WHERE workspace_id=$1 AND user_id=$2',[g.workspace,g.owner]);
+    const status = async () => (await admin.query('SELECT active FROM commonswarm_oauth.resolve_hosted_grant_status($1)',[g.family])).rows[0].active;
+    assert.equal(await status(),!restore,'pre-wait authority is the opposite of the final decision');
+    const blocker = await admin.connect(), c = await runtime.connect();
+    const single = { query: (...a) => c.query(...a),connect: async () => ({ query: (...a) => c.query(...a),release() {} }) };
+    let waiting;
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query("SELECT stream_id FROM swarm.streams WHERE workspace_id=$1 AND kind='workspace' FOR UPDATE",[g.workspace]);
+      waiting = createPostgresAdapter(single)('RefreshToken').retireInactiveHostedFamily(predecessor.grantId,g.owner);
+      await waitOnBackend(c.processID);
+      if (restore) await blocker.query("INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES($1,$2,'owner')",[g.workspace,g.owner]);
+      else await blocker.query('DELETE FROM swarm.memberships WHERE workspace_id=$1 AND user_id=$2',[g.workspace,g.owner]);
+      await blocker.query('COMMIT');
+      assert.equal(await waiting,restore,'the public method uses post-wait canonical authority');
+      assert.deepEqual(await familyStorage(g),restore
+        ? { tombstones: 0,artifacts: 1,exact_grant: 1 }
+        : { tombstones: 1,artifacts: 0,exact_grant: 0 });
+      assert.deepEqual(await artifact('RefreshToken',otherToken),otherBefore,'independent family storage is unchanged');
+      assert.deepEqual(await familyStorage(other),{ tombstones: 0,artifacts: 1,exact_grant: 1 });
+      assert.equal((await rt.find(otherToken)).grantId,other.family);
+      if (restore) assert.equal((await rt.find(token)).grantId,g.family);
+      else {
+        // Re-adding membership cannot revive a committed fence.
+        await admin.query("INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES($1,$2,'owner')",[g.workspace,g.owner]);
+        assert.equal(await rt.find(token),undefined);
+        await assert.rejects(rt.upsert(randomUUID(),refreshPayload(g),60),e => e.error === 'invalid_grant');
+        assert.deepEqual(await familyStorage(g),{ tombstones: 1,artifacts: 0,exact_grant: 0 });
+      }
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => {}); blocker.release();
+      if (waiting) await Promise.allSettled([waiting]); c.release();
+      await admin.query("INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES($1,$2,'owner') ON CONFLICT(workspace_id,user_id) DO NOTHING",[g.workspace,g.owner]);
+    }
+  }
+});
+
+test('pending and missing canonical policy never retire on read', async () => {
+  for (const mode of ['pending','missing-policy']) {
+    const f = await hostedClients(), [g,other] = f.grants;
+    const adapters = createPostgresAdapter(runtime), rt = adapters('RefreshToken'), token = randomUUID(), control = randomUUID();
+    await adapters('Grant').upsert(g.family,grantPayload(g),60);
+    await rt.upsert(token,refreshPayload(g),60);
+    await rt.upsert(control,refreshPayload(other),60);
+    try {
+      if (mode === 'pending') await admin.query("UPDATE swarm.hosted_mcp_grants SET state='pending',activated_at=NULL WHERE grant_id=$1",[g.id]);
+      else if (mode === 'missing-policy') {
+        // Real authority tuple validation returns no policy, rather than an
+        // injected empty row or a denial from an unrelated privilege guard.
+        await admin.query(`INSERT INTO swarm.hosted_mcp_grant_workspaces
+          (grant_id,workspace_id,owner_user_id,manifest_digest,consent_receipt_id,consented_at)
+          SELECT grant_id,$2,owner_user_id,manifest_digest,$3,clock_timestamp()
+          FROM swarm.hosted_mcp_grants WHERE grant_id=$1`,[g.id,other.workspace,randomUUID()]);
+        assert.equal((await runtime.query('SELECT * FROM commonswarm_oauth.lock_hosted_family($1,$2,$3,$4)',[g.family,g.owner,g.clientId,mcp])).rowCount,0);
+      }
+      const beforeToken = await artifact('RefreshToken',token), beforeGrant = await artifact('Grant',g.family);
+      assert.equal(await rt.find(token),undefined,mode);
+      assert.deepEqual(await familyStorage(g),{ tombstones: 0,artifacts: 1,exact_grant: 1 },mode);
+      assert.deepEqual(await artifact('RefreshToken',token),beforeToken,mode);
+      assert.deepEqual(await artifact('Grant',g.family),beforeGrant,mode);
+      assert.equal((await rt.find(control)).grantId,other.family,'same-invocation valid runtime lookup');
+    } finally {
+      if (mode === 'missing-policy') await admin.query('DELETE FROM swarm.hosted_mcp_grant_workspaces WHERE grant_id=$1 AND workspace_id=$2',[g.id,other.workspace]);
+    }
+  }
+});
+
+test('missing resource binding retains finite legacy artifacts without authorizing retirement', async () => {
+  const f = await hostedClients({ families: 1,unboundLast: true }), g = f.grants[0];
+  const adapters = createPostgresAdapter(runtime), rt = adapters('RefreshToken'), token = randomUUID();
+  await adapters('Grant').upsert(g.family,grantPayload(g),60);
+  await rt.upsert(token,refreshPayload(g),60);
+  const before = await artifact('RefreshToken',token);
+  assert.ok(before.expires_at > new Date());
+  assert.equal((await runtime.query('SELECT * FROM commonswarm_oauth.provider_grant_resources WHERE provider_grant_id=$1',[g.family])).rowCount,0);
+  assert.equal((await rt.find(token)).grantId,g.family);
+  assert.equal(await rt.retireInactiveHostedFamily(g.family,g.owner),false);
+  assert.deepEqual(await artifact('RefreshToken',token),before);
+  assert.deepEqual(await familyStorage(g),{ tombstones: 0,artifacts: 1,exact_grant: 1 });
+});
+
+test('unknown and permission resolve failures roll back without tombstones or artifact loss', async () => {
+  for (const code of ['XX000','42501']) {
+    const f = await hostedClients(), [g,other] = f.grants;
+    const adapters = createPostgresAdapter(runtime), rt = adapters('RefreshToken'), token = randomUUID(), control = randomUUID();
+    await adapters('Grant').upsert(g.family,grantPayload(g),60);
+    await rt.upsert(token,refreshPayload(g),60); await rt.upsert(control,refreshPayload(other),60);
+    await admin.query("UPDATE swarm.hosted_mcp_grants SET state='revoked',revoked_at=clock_timestamp() WHERE grant_id=$1",[g.id]);
+    const beforeToken = await artifact('RefreshToken',token), beforeGrant = await artifact('Grant',g.family);
+    for (const entry of ['find','retireInactiveHostedFamily']) {
+      let resolves = 0;
+      const failure = Object.assign(new Error('injected canonical resolve failure'),{ code });
+      const faultPool = { query: (...a) => runtime.query(...a),connect: async () => {
+        const c = await runtime.connect();
+        return { release: () => c.release(),query: async (sql,...args) => {
+          if (sql.includes('commonswarm_oauth.lock_hosted_family(')) {
+            resolves += 1;
+            if (resolves === 2) throw failure;
+            const result = await c.query(sql,...args);
+            assert.equal(result.rows[0].active,false,'first real policy confirms inactive authority');
+            return result;
+          }
+          return c.query(sql,...args);
+        } };
+      } };
+      const faulty = createPostgresAdapter(faultPool)('RefreshToken');
+      await assert.rejects(entry === 'find' ? faulty.find(token) : faulty.retireInactiveHostedFamily(g.family,g.owner),e => e === failure);
+      assert.equal(resolves,2,'failure occurs at the final policy read, after the real lock path');
+      assert.deepEqual(await familyStorage(g),{ tombstones: 0,artifacts: 1,exact_grant: 1 });
+      assert.deepEqual(await artifact('RefreshToken',token),beforeToken);
+      assert.deepEqual(await artifact('Grant',g.family),beforeGrant);
+    }
+    assert.equal((await rt.find(control)).grantId,other.family,'the runtime connection remains usable after rollback');
+  }
+});
+
+test('real delegated-admin artifacts refuse hosted reads and retirement outside their transaction', async () => {
+  const f = adminFixture(), c = await admin.connect();
+  try {
+    await c.query('BEGIN');
+    // Reuse the established schema fixture and its actual resource/binding
+    // guards; no authority or admin transaction context is mocked.
+    for (const part of f.preparation.filter(p => ['fixture-prepare:account','fixture-prepare:grant','fixture-prepare:resource','fixture-prepare:binding'].includes(p.step))) await c.query(part.sql);
+    await c.query('COMMIT');
+  } finally { await c.query('ROLLBACK').catch(() => {}); c.release(); }
+  const resource = 'https://api.commonswarm.com/admin', token = randomUUID();
+  for (const [model,id,payload] of [
+    ['Grant',f.provider,{ accountId: f.owner,clientId: f.client,jti: f.provider,resources: { [resource]: 'admin:read' } }],
+    ['RefreshToken',token,{ accountId: f.owner,clientId: f.client,grantId: f.provider,resource }],
+  ]) await runtime.query(`INSERT INTO commonswarm_oauth.provider_artifacts(model,artifact_id_hash,payload,grant_id,expires_at,created_at,updated_at)
+    VALUES($1,$2,$3::jsonb,$4,clock_timestamp()+interval '1 hour',clock_timestamp(),clock_timestamp())`,[model,hash(id),JSON.stringify(payload),model === 'Grant' ? null : f.provider]);
+  const g = { family: f.provider }, beforeToken = await artifact('RefreshToken',token), beforeGrant = await artifact('Grant',f.provider);
+  const rt = createPostgresAdapter(runtime)('RefreshToken');
+  await assert.rejects(rt.find(token),e => e.code === 'admin_transaction_required');
+  await assert.rejects(rt.retireInactiveHostedFamily(f.provider,f.owner),e => e.code === 'admin_transaction_required');
+  assert.deepEqual(await familyStorage(g),{ tombstones: 0,artifacts: 1,exact_grant: 1 });
+  assert.deepEqual(await artifact('RefreshToken',token),beforeToken);
+  assert.deepEqual(await artifact('Grant',f.provider),beforeGrant);
+  const hosted = (await hostedClients({ families: 1 })).grants[0], control = randomUUID();
+  await rt.upsert(control,refreshPayload(hosted),60);
+  assert.equal((await rt.find(control)).grantId,hosted.family,'the same runtime role can still read a hosted family');
 });
