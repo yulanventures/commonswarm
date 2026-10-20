@@ -3271,14 +3271,14 @@ for (const change of ['role','removal','withdrawal'] as const) {
           // stamp, while a second real owner is still live for its audit checks.
           await locker`UPDATE swarm.memberships SET role='owner' WHERE workspace_id=${f.fixture.workspaceA}::uuid AND user_id=${f.fixture.other}::uuid`;
           await locker.unsafe('SET LOCAL ROLE swarm_command');
-          const {revokeRemovedMemberHousehold}=await import('../../supabase/functions/command/household-member-removal.js');
+          const {revokeRemovedMemberHousehold}=await import('../../supabase/functions/command/household-member-removal.ts');
           await revokeRemovedMemberHousehold(locker,f.fixture.workspaceA,f.fixture.owner,new Date(),f.fixture.other,randomUUID(),'ab'.repeat(32));
           await locker.unsafe('RESET ROLE');
           await locker`UPDATE swarm.memberships SET revoked_at=clock_timestamp() WHERE workspace_id=${f.fixture.workspaceA}::uuid AND user_id=${f.fixture.owner}::uuid`;
         }
         else {
           await locker.unsafe('SET LOCAL ROLE swarm_command');
-          const {withdrawHouseholdConnection}=await import('../../supabase/functions/command/household-permissions.js');
+          const {withdrawHouseholdConnection}=await import('../../supabase/functions/command/household-permissions.ts');
           const result=await withdrawHouseholdConnection(locker,f.fixture.workspaceA,
             {user_id:f.fixture.owner,principal_id:null,run_id:null,connection:null},randomUUID(),
             {kind:'household_withdraw_connection',principal_id:f.seat.body.principal_id},async()=>true);

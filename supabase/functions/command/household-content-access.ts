@@ -109,7 +109,7 @@ export async function loadHouseholdContentAccess(tx: Sql, workspaceId: string, i
       const [binding] = await tx`SELECT revoked_at FROM swarm.hosted_mcp_grant_workspaces WHERE grant_id=${canonicalSeat.grant_id}::uuid AND workspace_id=${workspaceId}::uuid AND owner_user_id=${identity.user_id}::uuid FOR SHARE`;
       const [seat] = await tx`SELECT revoked_at FROM swarm.hosted_mcp_seats WHERE seat_id=${canonicalSeat.seat_id}::uuid FOR SHARE`;
       if (!grant || grant.state !== 'active' || grant.revoked_at !== null || !binding || binding.revoked_at !== null || !seat || seat.revoked_at !== null) return null;
-      connectionPolicy = grant;
+      connectionPolicy = { connection_expires_at: grant.connection_expires_at, connection_expired_at: grant.connection_expired_at };
       const policies = await tx`SELECT r.*, (EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats cs WHERE cs.grant_id=r.grant_id
           AND cs.workspace_id=r.workspace_id AND cs.principal_id=r.principal_id AND cs.owner_user_id=r.owner_user_id)
         AND NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats ls JOIN swarm.agent_principals lp USING(principal_id)
@@ -162,7 +162,7 @@ export async function loadHouseholdContentAccess(tx: Sql, workspaceId: string, i
             AND workspace_id=${workspaceId}::uuid AND principal_id=${identity.principal_id}::uuid
             AND run_id=${connection.grant_id}::uuid AND created_by=${identity.user_id}::uuid`;
         if (!family || family.revoked_at !== null) return null;
-        connectionPolicy = family;
+        connectionPolicy = { connection_expires_at: family.connection_expires_at, connection_expired_at: family.connection_expired_at };
       }
       // NULL legacy keeps every earlier ceiling. Only a deliberate validated
       // Allow selects a new decision; bearer rotation never advances the pointer.
