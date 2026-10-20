@@ -265,7 +265,8 @@ async function localH0Transaction<T>(hash:Uint8Array,request:Request,poll:boolea
       workspaceId:agent.principal_workspace_id,proofParse:parseAgentSessionProofHeaders(request.headers)}) : null;
     if (!agent || !proof?.ok) {
       const response=json(403,{error:'forbidden'});
-      throw new LocalH0Refused(result instanceof Response ? response : r.acquired===true
+      // Both opening outcomes must replace any stale decided response.
+      throw new LocalH0Refused(result instanceof Response ? response : r.acquired!==undefined
         ? {acquired:false,response} : {...r,collected:{kind:'error',status:403,error:'forbidden',message:'This seat cannot poll or ack.'},remainingMs:0});
     }
     return result;

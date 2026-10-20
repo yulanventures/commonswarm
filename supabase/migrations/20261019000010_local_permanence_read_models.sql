@@ -174,7 +174,7 @@ BEGIN
        AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
        AND (NOT g.suspension_active OR g.kind='standing')
        AND run.ended_at IS NULL AND device.revoked_at IS NULL
-       AND ((g.kind = 'standing' AND g.bound_device_id = run.device_id)
+       AND ((g.kind = 'standing' AND (g.bound_device_id IS NULL OR g.bound_device_id = run.device_id))
         OR (g.kind = 'timeboxed' AND g.horizon_expires_at > read_at AND g.successors_used - g.successors_stranded < g.max_successors))
        AND NOT EXISTS (SELECT 1 FROM swarm.revocation_tombstones tomb WHERE (tomb.kind,tomb.target_id) IN (
         ('renewal_grant',g.renewal_grant_id),('principal',p.principal_id),('run',run.run_id),('device',device.device_id),('membership',p.owner_user_id)))) THEN 'live'

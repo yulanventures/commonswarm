@@ -369,6 +369,82 @@ try {
       const [row]=await tx`SELECT swarm_read.home_overview() AS value`;return row.value;
     });
     check('current local overview positive is live',connectionFrom(await overviewAs(owner))==='live');
+    // SQL fixture provenance permits the real owner-only conversion trigger.
+    // Minting is outside this read-model contract; conversion, first-use and
+    // overview results are produced by the actual database/runtime boundaries.
+    const convertedWorkspace=id(),convertedStream=id(),convertedPrincipal=id(),convertedDevice=id(),
+      convertedRun=id(),convertedGrant=id(),convertedToken=id(),convertedTask=id(),convertedLineage=id();
+    const convertedRaw=mintRaw(),convertedHash=await hashOf(convertedRaw);
+    await observer.begin(async tx=>{
+      await tx`INSERT INTO swarm.workspaces(workspace_id,name,created_by)
+        VALUES(${convertedWorkspace}::uuid,'Converted read model',${owner}::uuid)`;
+      await tx`INSERT INTO swarm.memberships(workspace_id,user_id,role)
+        VALUES(${convertedWorkspace}::uuid,${owner}::uuid,'owner')`;
+      await tx`INSERT INTO swarm.streams(stream_id,workspace_id,kind)
+        VALUES(${convertedStream}::uuid,${convertedWorkspace}::uuid,'workspace')`;
+      await tx`INSERT INTO swarm.devices(device_id,user_id,label)
+        VALUES(${convertedDevice}::uuid,${owner}::uuid,'Converted device')`;
+      await tx`INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name)
+        VALUES(${convertedPrincipal}::uuid,${convertedWorkspace}::uuid,${owner}::uuid,'Converted CLI')`;
+      await tx`INSERT INTO swarm.agent_runs(run_id,principal_id,device_id)
+        VALUES(${convertedRun}::uuid,${convertedPrincipal}::uuid,${convertedDevice}::uuid)`;
+      await tx`INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,
+        kind,max_successors,successors_used,horizon_expires_at,bound_device_id,created_by)
+        VALUES(${convertedGrant}::uuid,${convertedWorkspace}::uuid,${convertedPrincipal}::uuid,${convertedRun}::uuid,
+          'timeboxed',100,0,clock_timestamp()+interval '1 day',NULL,${owner}::uuid)`;
+      await tx`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,task_id,epoch,scopes,token_hash,
+        expires_at,lineage_id,renewal_grant_id)
+        VALUES(${convertedToken}::uuid,${convertedPrincipal}::uuid,${convertedRun}::uuid,${convertedTask}::uuid,1,
+          ${tx.json(['post_signal'])}::jsonb,${convertedHash},clock_timestamp()+interval '1 hour',
+          ${convertedLineage}::uuid,${convertedGrant}::uuid)`;
+      await tx`INSERT INTO swarm.events(workspace_id,stream_id,seq,event_id,command_id,type,schema_version,actor_user,payload)
+        VALUES(${convertedWorkspace}::uuid,${convertedStream}::uuid,1,${id()}::uuid,${id()},'AgentTokenMinted',1,
+          ${owner}::uuid,${tx.json({token_id:convertedToken})}::jsonb)`;
+      await tx`SET LOCAL ROLE swarm_admin`;
+      await tx`UPDATE swarm.renewal_grants SET kind='standing',max_successors=NULL,horizon_expires_at=NULL
+        WHERE renewal_grant_id=${convertedGrant}::uuid`;
+    });
+    const convertedRead=()=>read.handleRequest(new Request('http://127.0.0.1/functions/v1/read',{
+      method:'POST',headers:{authorization:`Bearer ${convertedRaw}`,'content-type':'application/json'},
+      body:JSON.stringify({resource:'members',workspace_id:convertedWorkspace})}));
+    check('converted NULL-bound family has genuine runtime first use',(await convertedRead()).status===200);
+    const [convertedUse]=await observer`SELECT t.first_used_at,g.kind,g.bound_device_id
+      FROM swarm.agent_tokens t JOIN swarm.renewal_grants g USING(renewal_grant_id)
+      WHERE t.token_id=${convertedToken}::uuid`;
+    check('real conversion retained NULL binding and runtime committed use',convertedUse.kind==='standing'
+      && convertedUse.bound_device_id===null && convertedUse.first_used_at!==null);
+    await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second'
+      WHERE token_id=${convertedToken}::uuid`;
+    const convertedStatus=async()=>{
+      const overview=await overviewAs(owner);
+      return overview.workspaces.find(w=>w.workspace_id===convertedWorkspace)?.people.flatMap(person=>person.agents)
+        .find(agent=>agent.principal_id===convertedPrincipal)?.status;
+    };
+    check('idle converted USED family remains live with NULL binding',(await convertedStatus())?.facts.connection==='live'
+      && (await convertedStatus())?.work==='idle');
+    await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second'
+      WHERE renewal_grant_id=${convertedGrant}::uuid`;
+    check('converted elapsed date is terminal despite NULL binding',(await convertedStatus())?.facts.connection==='key_ended');
+    check('converted elapsed family is denied by runtime',(await convertedRead()).status===403);
+    await observer`UPDATE swarm.renewal_grants SET connection_expires_at=NULL,revoked_at=clock_timestamp()
+      WHERE renewal_grant_id=${convertedGrant}::uuid`;
+    check('converted revoked family never appears live',(await convertedStatus())?.facts.connection!=='live');
+    check('converted revoked family is denied by runtime',(await convertedRead()).status===403);
+    // Independent non-NULL binding control: the expired bearer cannot mask it.
+    const mismatch=await seat('read-model-binding',false);
+    const otherDevice=id();
+    await observer`INSERT INTO swarm.devices(device_id,user_id,label) VALUES(${otherDevice}::uuid,${owner}::uuid,'Other binding')`;
+    await observer`INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,
+      kind,max_successors,successors_used,horizon_expires_at,bound_device_id,created_by)
+      VALUES(${id()}::uuid,${W}::uuid,${mismatch.principal}::uuid,${mismatch.run}::uuid,'standing',NULL,0,NULL,
+        ${otherDevice}::uuid,${owner}::uuid)`;
+    await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp() WHERE renewal_grant_id=${mismatch.grant}::uuid`;
+    await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${mismatch.t0}::uuid`;
+    const mismatchOverview=await overviewAs(owner);
+    const mismatchConnection=mismatchOverview.workspaces.find(w=>w.workspace_id===W)?.people.flatMap(person=>person.agents)
+      .find(agent=>agent.principal_id===mismatch.principal)?.status.facts.connection;
+    check('non-NULL mismatched device cannot claim renewal liveness',mismatchConnection!=='live');
+
     await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '1 day',suspended_at=clock_timestamp()
       WHERE renewal_grant_id=${readModels.grant}::uuid`;
     await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${readModels.t0}::uuid`;

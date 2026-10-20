@@ -400,6 +400,102 @@ test("H0 poll refuses a seat with a fresh watcher lease and succeeds after it go
   }
 });
 
+// This wait is after authenticate/first-use, at the real opening wake lock.
+// Earlier G-lock waits cannot reach the stale decided-409 branch.
+for (const conflict of ["watcher", "poll"] as const) {
+  for (const deadline of ["token", "date"] as const) {
+    test(`${conflict} refusal becomes 403 when ${deadline} ends during the final wake-lock wait`,
+      { timeout: 20_000 }, async () => {
+      const seat = await makeSeat();
+      const hash = createHash("sha256").update(seat.token).digest();
+      const [binding] = await sql<{ renewal_grant_id: string }[]>`
+        SELECT renewal_grant_id FROM swarm.agent_tokens WHERE token_hash = ${hash}`;
+      assert.ok(binding?.renewal_grant_id);
+      if (conflict === "watcher") {
+        await sql`INSERT INTO swarm.agent_wake_leases
+          (workspace_id, principal_id, watcher_id, host_label, host_id, host_session_ref,
+           generation, claimed_at, renewed_at)
+          VALUES (${owner.workspace}::uuid, ${seat.principalId}::uuid,
+            ${randomUUID()}::uuid, 'private-watcher-label', ${randomUUID()}::uuid, NULL, 1,
+            clock_timestamp(), clock_timestamp())`;
+      } else {
+        await sql`INSERT INTO swarm.h0_poll_locks
+          (workspace_id, principal_id, holder, listener_instance_id, acquired_at, expires_at)
+          VALUES (${owner.workspace}::uuid, ${seat.principalId}::uuid,
+            ${randomUUID()}::uuid, ${randomUUID()}::uuid, clock_timestamp(), clock_timestamp() + interval '1 minute')`;
+      }
+      // Same fixture must produce a genuine decided conflict while current.
+      const control = await h0("poll", seat.token, { wait: 0 });
+      assert.equal(control.status, 409);
+      assert.equal(control.body.error, conflict === "watcher" ? "notify_held_elsewhere" : H0_POLL_IN_PROGRESS);
+      // Use a fresh unused successor so rollback has observable adoption effects.
+      const renewed = await command(seat.token, { kind: "renew_agent_token" });
+      assert.equal(renewed.status, 200, JSON.stringify(renewed.body));
+      const raw = String(renewed.body.agent_token);
+      const pendingHash = createHash("sha256").update(raw).digest();
+      assert.equal(typeof renewed.body.agent_token, "string");
+      const state = async () => ({
+        tokens: await sql`SELECT token_id, first_used_at, revoked_at, expires_at FROM swarm.agent_tokens
+          WHERE renewal_grant_id = ${binding.renewal_grant_id}::uuid ORDER BY token_id`,
+        grants: await sql`SELECT last_used_at, successors_used, successors_stranded FROM swarm.renewal_grants
+          WHERE renewal_grant_id = ${binding.renewal_grant_id}::uuid`,
+        deliveries: await sql`SELECT signal_id, lease_id, acked_at, attempt_count FROM swarm.signal_deliveries
+          WHERE recipient_agent_principal_id = ${seat.principalId}::uuid ORDER BY signal_id`,
+      });
+      const gate = postgres(local.DB_URL, { prepare: false, max: 1 });
+      let pending: Promise<HttpResult> | undefined;
+      let before: Awaited<ReturnType<typeof state>> | undefined;
+      try {
+        await gate.begin(async (tx) => {
+          const [{ pid }] = await tx<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+          await tx`SELECT swarm.wake_seat_lock(${owner.workspace}::uuid, ${seat.principalId}::uuid)`;
+          if (deadline === "token") {
+            await sql`UPDATE swarm.agent_tokens SET expires_at = clock_timestamp() + interval '3 seconds'
+              WHERE token_hash = ${pendingHash}`;
+          } else {
+            await sql`UPDATE swarm.renewal_grants SET connection_expires_at = clock_timestamp() + interval '3 seconds'
+              WHERE renewal_grant_id = ${binding.renewal_grant_id}::uuid`;
+          }
+          before = await state();
+          assert.equal(before.tokens.find(row => row.token_id === renewed.body.token_id)?.first_used_at, null);
+          let settled = false;
+          pending = h0("poll", raw, { wait: 0 }).then(result => { settled = true; return result; });
+          let blocked = false;
+          for (let i = 0; i < 80; i++) {
+            blocked = (await sql`SELECT EXISTS(SELECT 1 FROM pg_stat_activity a
+              WHERE ${pid} = ANY(pg_blocking_pids(a.pid)) AND a.wait_event_type = 'Lock') AS yes`)[0]?.yes === true;
+            if (blocked) break;
+            await delay(20);
+          }
+          assert.equal(blocked, true, "actual opening transaction reached the wake lock after authentication");
+          assert.equal(settled, false);
+          let elapsed = false;
+          for (let i = 0; i < 180; i++) {
+            const [clock] = deadline === "token"
+              ? await sql`SELECT expires_at <= clock_timestamp() AS elapsed FROM swarm.agent_tokens WHERE token_hash = ${pendingHash}`
+              : await sql`SELECT connection_expires_at <= clock_timestamp() AS elapsed FROM swarm.renewal_grants
+                  WHERE renewal_grant_id = ${binding.renewal_grant_id}::uuid`;
+            elapsed = clock?.elapsed === true;
+            if (elapsed) break;
+            await delay(20);
+          }
+          assert.equal(elapsed, true, "deadline crossed while the real transaction was blocked");
+          assert.equal(settled, false);
+        });
+        const denied = await pending!;
+        assert.equal(denied.status, 403, JSON.stringify(denied.body));
+        assert.deepEqual(denied.body, { error: "forbidden" }, "stale watcher labels and decided conflicts do not escape");
+        assert.deepEqual(await state(), before, "failed final fence rolled back first use, predecessor cut, family and delivery effects");
+      } finally {
+        await pending?.catch(() => undefined);
+        await gate.end({ timeout: 5 });
+        await sql`DELETE FROM swarm.agent_wake_leases WHERE principal_id = ${seat.principalId}::uuid`;
+        await sql`DELETE FROM swarm.h0_poll_locks WHERE principal_id = ${seat.principalId}::uuid`;
+      }
+    });
+  }
+}
+
 test("a watcher claim for a real H0 seat names its fresh poll lock", { timeout: 20_000 }, async () => {
   const seat = await makeSeat();
   await sql`INSERT INTO swarm.h0_poll_locks
