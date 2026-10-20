@@ -1,9 +1,9 @@
+import { LocalAuthDiscoveryChanged, type LocalAuthLockPlan } from "../_shared/agent-auth.ts";
 import { P0_AGENT_SCOPES } from "./worker-scopes.ts";
 import { restoreAdminRoutineWorkspace } from "./admin-routine-workspace.ts";
 import type postgres from "npm:postgres@3.4.9";
 import {
   reduceWorkspace,
-  RENEWAL_IDLE_PAUSE_DAYS,
 } from "../_shared/protocol.js";
 import type {
   AdminAccountState,
@@ -61,13 +61,15 @@ export async function prepareAdminRoutine(
     >`SELECT * FROM swarm.workspaces WHERE workspace_id=${command.workspace_id}::uuid`;
     const members = await tx<
       Record<string, unknown>[]
-    >`SELECT * FROM swarm.memberships WHERE workspace_id=${command.workspace_id}::uuid ORDER BY user_id FOR SHARE`;
+    >`SELECT * FROM swarm.memberships WHERE workspace_id=${command.workspace_id}::uuid ORDER BY user_id`;
     const principals = await tx<
       Record<string, unknown>[]
-    >`SELECT * FROM swarm.agent_principals WHERE workspace_id=${command.workspace_id}::uuid ORDER BY principal_id FOR SHARE`;
+    >`SELECT * FROM swarm.agent_principals WHERE workspace_id=${command.workspace_id}::uuid ORDER BY principal_id`;
     const tokens = await tx<
       Record<string, unknown>[]
-    >`SELECT t.* FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING(principal_id) WHERE p.workspace_id=${command.workspace_id}::uuid`;
+    >`SELECT t.* FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING(principal_id) WHERE p.workspace_id=${command.workspace_id}::uuid
+      AND t.token_id=${'predecessor_credential_id' in command ? command.predecessor_credential_id
+        : 'credential_id' in command ? command.credential_id:null}::uuid`;
     const stamp = (v: unknown): number | null =>
       v === null ? null : new Date(v as string).getTime();
     workspace = {
@@ -164,6 +166,10 @@ export async function prepareAdminRoutine(
     const tokenId = "credential_id" in command
       ? command.credential_id
       : command.predecessor_credential_id;
+    const [binding] = await tx<{renewal_grant_id:string|null}[]>`SELECT renewal_grant_id FROM swarm.agent_tokens
+      WHERE token_id=${tokenId}::uuid`;
+    if (binding?.renewal_grant_id) await tx`SELECT renewal_grant_id FROM swarm.renewal_grants
+      WHERE renewal_grant_id=${binding.renewal_grant_id}::uuid FOR UPDATE`;
     const rows = await tx<
       (Record<string, unknown> & {
         token_id: string;
@@ -174,7 +180,7 @@ export async function prepareAdminRoutine(
         horizon_expires_at: Date | null;
       })[]
     >`
-      SELECT t.*,g.kind,g.last_used_at,g.horizon_expires_at,g.max_successors,g.successors_used,g.suspension_active,g.bound_device_id,
+      SELECT t.*,g.connection_expires_at,g.connection_expired_at,g.kind,g.last_used_at,g.horizon_expires_at,g.max_successors,g.successors_used,g.suspension_active,g.bound_device_id,
         r.device_id,r.ended_at,d.revoked_at AS device_revoked_at,
         EXISTS(SELECT 1 FROM swarm.agent_tokens s WHERE s.predecessor_token_id=t.token_id AND s.revoked_at IS NULL) AS superseded,
         EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='lineage' AND z.target_id=t.lineage_id) AS lineage_revoked,
@@ -195,6 +201,8 @@ export async function prepareAdminRoutine(
       for (
         const key of [
           "kind",
+          "connection_expires_at",
+          "connection_expired_at",
           "last_used_at",
           "horizon_expires_at",
           "max_successors",
@@ -205,6 +213,8 @@ export async function prepareAdminRoutine(
       ) row[key] = current[key];
       row.grant_revoked_at = current.revoked_at;
     }
+    const [fresh] = await tx<{now:number}[]>`SELECT floor(extract(epoch FROM clock_timestamp())*1000)::float8 AS now`;
+    ctx = {...ctx, now:fresh!.now};
     if (row) {
       target_credential = {
         credential_id: row.token_id,
@@ -220,7 +230,7 @@ export async function prepareAdminRoutine(
               : ""),
         ),
         worker_scope_names: row.scopes as string[],
-        expires_at: row.expires_at.getTime(),
+        expires_at: Math.min(row.expires_at.getTime(),row.connection_expires_at instanceof Date ? row.connection_expires_at.getTime():Infinity),
         horizon_expires_at: row.horizon_expires_at?.getTime() ?? null,
         bearer_seconds:
           state.routine?.credentials[row.token_id]?.bearer_seconds ??
@@ -229,14 +239,12 @@ export async function prepareAdminRoutine(
         successors_used: Number(row.successors_used),
         kind: row.kind as "standing" | "timeboxed",
         revoked_at: row.revoked_at?.getTime() ??
-          (row.lineage_revoked || row.grant_revoked_at ? ctx.now : null),
+          (row.lineage_revoked || row.grant_revoked_at || row.connection_expired_at ? ctx.now : null),
         first_used_at: row.first_used_at?.getTime() ?? null,
         superseded: row.superseded === true,
-        suspended: row.suspension_active === true ||
-          row.kind === "standing" &&
-            (!row.last_used_at ||
-              new Date(row.last_used_at as string).getTime() <=
-                ctx.now - RENEWAL_IDLE_PAUSE_DAYS * 86400000),
+        suspended: row.suspension_active === true && !(row.kind==='standing'
+          && row.grant_revoked_at===null && row.connection_expired_at===null
+          && (row.connection_expires_at===null || row.connection_expires_at instanceof Date && row.connection_expires_at.getTime()>ctx.now)),
         device_valid: row.ended_at === null && row.device_revoked_at === null &&
           (row.bound_device_id === null ||
             row.bound_device_id === row.device_id),
@@ -322,6 +330,7 @@ export async function applyAdminRoutine(
   command: AdminRoutineCommand,
   ctx: AdminRoutineContext,
   decision: AdminRoutineDecision,
+  plan?: LocalAuthLockPlan,
 ): Promise<AdminWorkerDelivery | undefined> {
   if (!decision.ok) return;
   let delivery: AdminWorkerDelivery | undefined;
@@ -396,14 +405,18 @@ export async function applyAdminRoutine(
       } WHERE principal_id=${String(p.principal_id)}::uuid`;
       await revokeHostedWorkspaceApproval(tx, e.workspace_id, new Date(ctx.now), ctx.owner_user_id,
         { principalId: String(p.principal_id) });
-      await tx`UPDATE swarm.agent_tokens SET revoked_at=coalesce(revoked_at,${
-        date(ctx.now)
-      }) WHERE principal_id=${String(p.principal_id)}::uuid`;
-      await tx`UPDATE swarm.renewal_grants SET revoked_at=coalesce(revoked_at,${
-        date(ctx.now)
-      }),revoked_by=coalesce(revoked_by,${ctx.owner_user_id}::uuid) WHERE principal_id=${
-        String(p.principal_id)
-      }::uuid`;
+      if (!plan?.locked || plan.principalMode!=='update' || !plan.snapshot.bindings.some(b=>
+        b.principal_id===String(p.principal_id) && b.owner_user_id===ctx.owner_user_id && b.workspace_id===e.workspace_id))
+        throw new LocalAuthDiscoveryChanged();
+      const families=[...new Set(plan.snapshot.bindings.filter(b=>b.principal_id===String(p.principal_id))
+        .flatMap(b=>b.renewal_grant_id ? [b.renewal_grant_id]:[]))].sort();
+      for (const family of families) {
+        await tx`UPDATE swarm.renewal_grants SET revoked_at=coalesce(revoked_at,${date(ctx.now)}),
+          revoked_by=coalesce(revoked_by,${ctx.owner_user_id}::uuid)
+          WHERE renewal_grant_id=${family}::uuid AND principal_id=${String(p.principal_id)}::uuid AND revoked_at IS NULL`;
+      }
+      await tx`SELECT swarm.revoke_local_residual_tokens(${e.workspace_id}::uuid,${ctx.owner_user_id}::uuid,
+        'revoke_agent_principal',${String(p.principal_id)}::uuid)`;
       await tx`INSERT INTO swarm.revocation_tombstones(kind,target_id,created_by) VALUES('principal',${
         String(p.principal_id)
       }::uuid,${ctx.owner_user_id}::uuid) ON CONFLICT DO NOTHING`;
@@ -415,11 +428,26 @@ export async function applyAdminRoutine(
           date(ctx.now)
         } WHERE token_id=${String(p.token_id)}::uuid AND first_used_at IS NULL`;
       } else {
-        await tx`UPDATE swarm.agent_tokens SET revoked_at=coalesce(revoked_at,${
-          date(ctx.now)
-        }) WHERE lineage_id=(SELECT lineage_id FROM swarm.agent_tokens WHERE token_id=${
-          String(p.token_id)
-        }::uuid)`;
+        if (!plan?.locked || plan.principalMode!=='update') throw new LocalAuthDiscoveryChanged();
+        const target=plan.snapshot.bindings.find(b=>b.token_id===String(p.token_id));
+        if (!target || target.owner_user_id!==ctx.owner_user_id || target.workspace_id!==e.workspace_id)
+          throw new LocalAuthDiscoveryChanged();
+        // Consume only the verified preheld write set; dependency predecessors
+        // remain in the plan but are not effects of this revocation.
+        const affected=plan.snapshot.bindings.filter(b=>b.lineage_id===target.lineage_id &&
+          (b.token_id===target.token_id || b.predecessor_token_id===target.token_id))
+          .sort((a,b)=>Number(a.token_id!==target.token_id)-Number(b.token_id!==target.token_id)
+            || a.token_id!.localeCompare(b.token_id!));
+        for (const row of affected) {
+          const [binding]=await tx<{ok:boolean}[]>`SELECT ROW(t.principal_id,t.run_id,t.renewal_grant_id,t.lineage_id,
+              t.parent_admin_grant_id,t.predecessor_token_id) IS NOT DISTINCT FROM
+            ROW(${row.principal_id}::uuid,${row.run_id}::uuid,${row.renewal_grant_id}::uuid,${row.lineage_id}::uuid,
+              ${row.token_parent_admin_grant_id}::uuid,${row.predecessor_token_id}::uuid) AS ok
+            FROM swarm.agent_tokens t WHERE t.token_id=${row.token_id}::uuid`;
+          if (!binding?.ok) throw new LocalAuthDiscoveryChanged();
+          await tx`UPDATE swarm.agent_tokens SET revoked_at=coalesce(revoked_at,${date(ctx.now)})
+            WHERE token_id=${row.token_id}::uuid`;
+        }
         await tx`INSERT INTO swarm.revocation_tombstones(kind,target_id,created_by) SELECT 'lineage',lineage_id,${ctx.owner_user_id}::uuid FROM swarm.agent_tokens WHERE token_id=${
           String(p.token_id)
         }::uuid ON CONFLICT DO NOTHING`;

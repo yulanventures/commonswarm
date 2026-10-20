@@ -53,9 +53,35 @@ export async function loadHouseholdContentAccess(tx: Sql, workspaceId: string, i
     if (!identity.connection) return null;
     const [principal] = await tx`SELECT revoked_at FROM swarm.agent_principals WHERE workspace_id=${workspaceId}::uuid AND principal_id=${identity.principal_id}::uuid AND owner_user_id=${identity.user_id}::uuid FOR SHARE`;
     if (!principal || principal.revoked_at !== null) return null;
-    const [connection] = await tx`SELECT * FROM swarm.household_content_connections WHERE workspace_id=${workspaceId}::uuid
-      AND connection_id=${identity.connection.connection_id}::uuid AND grant_id=${identity.connection.grant_id}::uuid
-      AND principal_id=${identity.principal_id}::uuid AND owner_user_id=${identity.user_id}::uuid FOR SHARE`;
+    const [presented] = await tx`SELECT t.renewal_grant_id,t.lineage_id,t.run_id
+      FROM swarm.agent_tokens t JOIN swarm.agent_runs run ON run.run_id=t.run_id AND run.principal_id=t.principal_id
+      JOIN swarm.devices device USING(device_id)
+      WHERE t.revoked_at IS NULL AND NOT t.surrender_only AND t.expires_at>clock_timestamp()
+        AND run.ended_at IS NULL AND device.revoked_at IS NULL AND device.user_id=${identity.user_id}::uuid
+        AND swarm.admin_child_live(t.parent_admin_grant_id,${workspaceId}::uuid)
+        AND swarm.admin_child_scopes_live(t.parent_admin_grant_id,t.scopes)
+        AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE (z.kind,z.target_id) IN
+          (('token',t.token_id),('principal',t.principal_id),('run',t.run_id),('device',device.device_id),
+           ('renewal_grant',t.renewal_grant_id),('lineage',t.lineage_id),('family',t.lineage_id),('membership',${identity.user_id}::uuid)))
+        AND t.token_id=${identity.connection.connection_id}::uuid
+        AND t.principal_id=${identity.principal_id}::uuid AND t.run_id=${identity.connection.grant_id}::uuid`;
+    const [localFamily] = presented?.renewal_grant_id ? await tx`SELECT g.* FROM swarm.renewal_grants g
+      WHERE g.renewal_grant_id=${presented.renewal_grant_id}::uuid AND g.workspace_id=${workspaceId}::uuid
+        AND g.principal_id=${identity.principal_id}::uuid AND g.run_id=${identity.connection.grant_id}::uuid
+        AND g.created_by=${identity.user_id}::uuid` : [];
+    const latestAllow=localFamily?.local_content_approval_token_id ?? null;
+    const connections = await tx`SELECT c.* FROM swarm.household_content_connections c
+      WHERE c.workspace_id=${workspaceId}::uuid AND c.grant_id=${identity.connection.grant_id}::uuid
+        AND c.principal_id=${identity.principal_id}::uuid AND c.owner_user_id=${identity.user_id}::uuid
+        AND (c.connection_id=${identity.connection.connection_id}::uuid OR
+          (c.hosted_grant_id IS NULL AND (to_jsonb(c)->>'renewal_grant_id')::uuid=${presented?.renewal_grant_id ?? null}::uuid
+            AND EXISTS(SELECT 1 FROM swarm.agent_tokens original WHERE original.token_id=c.connection_id
+              AND original.principal_id=c.principal_id AND original.run_id=c.grant_id
+              AND original.renewal_grant_id=(to_jsonb(c)->>'renewal_grant_id')::uuid AND original.lineage_id=${presented?.lineage_id ?? null}::uuid)))
+      ORDER BY c.connection_id,c.grant_id,c.workspace_id,c.principal_id FOR SHARE OF c`;
+    const connection = latestAllow===null
+      ? connections.find(c=>c.connection_id===identity.connection!.connection_id) ?? connections[0]
+      : connections.find(c=>c.connection_id===latestAllow);
     const [canonicalSeat] = await tx`SELECT seat_id,grant_id,owner_user_id FROM swarm.hosted_mcp_seats
       WHERE seat_id=${identity.connection.connection_id}::uuid AND grant_id=${identity.connection.grant_id}::uuid
         AND workspace_id=${workspaceId}::uuid AND principal_id=${identity.principal_id}::uuid AND owner_user_id=${identity.user_id}::uuid`;
@@ -124,11 +150,13 @@ export async function loadHouseholdContentAccess(tx: Sql, workspaceId: string, i
         principal_id: identity.principal_id, owner_user_id: identity.user_id, operations,
         purpose: boundary.purpose as 'personal' | 'shared', revoked_at: null, expires_at: null } };
     } else {
-      if (!connection || connection.hosted_grant_id !== null) return null;
+      if (!presented || !connection || connection.hosted_grant_id !== null) return null;
+      if (latestAllow!==null && (!localFamily || connection.renewal_grant_id!==presented.renewal_grant_id
+        || connection.consent_receipt_id!==rights?.content_consent_id)) return null;
       // Only the canonical nullable linkage opts a local approval into family
       // policy. Legacy technical horizons never become owner-selected expiry.
       // Read existing role-visible fields without adding a late family lock.
-      if (connection.renewal_grant_id !== null) {
+      if (connection.renewal_grant_id != null) {
         const [family] = await tx`SELECT revoked_at,connection_expires_at,connection_expired_at
           FROM swarm.renewal_grants WHERE renewal_grant_id=${connection.renewal_grant_id}::uuid
             AND workspace_id=${workspaceId}::uuid AND principal_id=${identity.principal_id}::uuid
@@ -136,10 +164,20 @@ export async function loadHouseholdContentAccess(tx: Sql, workspaceId: string, i
         if (!family || family.revoked_at !== null) return null;
         connectionPolicy = family;
       }
+      // NULL legacy keeps every earlier ceiling. Only a deliberate validated
+      // Allow selects a new decision; bearer rotation never advances the pointer.
+      const [localClock] = await tx`SELECT clock_timestamp() AS now`;
+      const localNow=stamp(localClock!.now)!;
+      let operations=connection.operations as HouseholdContentOperation[];
+      for (const row of latestAllow===null ? connections : [connection]) {
+        if (row.hosted_grant_id !== null || row.purpose!==boundary.purpose || row.revoked_at!==null
+          || row.expires_at!==null && stamp(row.expires_at)!<=localNow) return null;
+        operations=operations.filter(op=>(row.operations as string[]).includes(op));
+      }
       credential = { kind: 'agent', connection: {
-        connection_id: String(connection.connection_id), grant_id: String(connection.grant_id), workspace_id: workspaceId,
+        connection_id: identity.connection.connection_id, grant_id: String(connection.grant_id), workspace_id: workspaceId,
         principal_id: identity.principal_id, owner_user_id: identity.user_id,
-        operations: connection.operations as HouseholdContentOperation[], purpose: connection.purpose as 'personal' | 'shared',
+        operations, purpose: connection.purpose as 'personal' | 'shared',
         revoked_at: stamp(connection.revoked_at), expires_at: stamp(connection.expires_at),
       } };
     }
