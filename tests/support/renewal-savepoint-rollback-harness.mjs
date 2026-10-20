@@ -1,4 +1,4 @@
-import { assertActiveFloorCatalog } from './admin-principal-lock-order-harness.mjs';
+import { ACTIVE_FLOOR_SOURCES, assertActiveFloorCatalog } from './admin-principal-lock-order-harness.mjs';
 // HezLead ruling 38, item 4: real renewal transactions must abort on 40P01/40001.
 // Adapted from the saved r12b 104-table probe. Run only on an isolated local database.
 // deno run --allow-read --allow-env --allow-net <harness> <tree> <main|real_read> <server.log|empty> [0600 config.json]
@@ -46,6 +46,13 @@ try {
   out.stage='import';
   const command = await import(`${tree}/supabase/functions/command/index.ts`);
   const read = await import(`${readTree}/supabase/functions/read/index.ts`);
+  const baseline = config?.unused_root_baseline;
+  if (baseline && (mode !== 'permanence' || baseline.commit !== ACTIVE_FLOOR_SOURCES.B.commit
+      || baseline.tree !== ACTIVE_FLOOR_SOURCES.B.tree || !config.active_floor)) throw new Error('unused_root_baseline_identity');
+  // Complete pinned b9 trees supply their own auth and renewal handlers.
+  const baselineCommand = baseline ? await import(`${baseline.path}/supabase/functions/command/index.ts`) : null;
+  const baselineRead = baseline ? await import(`${baseline.path}/supabase/functions/read/index.ts`) : null;
+  out.unused_root_baseline = baseline ? {commit:baseline.commit,tree:baseline.tree} : null;
   // Capture the error AFTER postgres.js rolls the entire transaction back.
   // No production seam: this is the exported real command pool at its existing boundary.
   const authTypes = await import(`${tree}/supabase/functions/_shared/agent-auth.ts`);
@@ -90,11 +97,11 @@ try {
     return { status: r.status, body: clean(body), headers: r.headers };
   };
   const credential = (r) => { try { return JSON.parse(r.text).agent_token ?? null; } catch { return null; } };
-  const renew = async (token, commandId, fields = {}, workspace = W, proof = {}) => capture(await command.handleRequest(new Request('http://127.0.0.1/functions/v1/command', {
+  const renew = async (token, commandId, fields = {}, workspace = W, proof = {}, handler = command) => capture(await handler.handleRequest(new Request('http://127.0.0.1/functions/v1/command', {
     method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...proof },
     body: JSON.stringify({ command_id: commandId, client_version: CLIENT_PROTOCOL_VERSION, workspace_id: workspace,
       stream: { kind: 'workspace' }, command: { kind: 'renew_agent_token', ...fields } }) })));
-  const readAs = async (token, workspace = W) => capture(await read.handleRequest(new Request('http://127.0.0.1/functions/v1/read', {
+  const readAs = async (token, workspace = W, handler = read) => capture(await handler.handleRequest(new Request('http://127.0.0.1/functions/v1/read', {
     method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ resource: 'members', workspace_id: workspace }) })));
 
@@ -324,12 +331,36 @@ try {
     }
     check('recovered successor reaches actual read',(await readAs(credential(saved))).status===200);
     // Primary regression owner: real command/DB, no synthesized auth context.
+    if (baseline) {
+      // Same schema/invocation and real role-setting handlers: b9 is pre-fix
+      // only for virgin roots, not expired USED standing proof.
+      const usedControl = await seat('b9-used-control',false);
+      const liveUse = await readAs(usedControl.raw,W,baselineRead);
+      const [usedBefore] = await observer`SELECT first_used_at IS NOT NULL AS used FROM swarm.agent_tokens
+        WHERE token_id=${usedControl.t0}::uuid`;
+      if (liveUse.status!==200 || !usedBefore.used) throw new Error('b9_live_use_control');
+      await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second'
+        WHERE token_id=${usedControl.t0}::uuid`;
+      const usedRenewal = await renew(usedControl.raw,id(),{},W,{},baselineCommand);
+      const usedSuccessor = credential(usedRenewal);
+      check('b9 used standing proof renews to readable successor',usedRenewal.status===200
+        && JSON.parse(usedRenewal.text).status==='accepted' && usedSuccessor!==null
+        && (await readAs(usedSuccessor,W,baselineRead)).status===200);
+    }
     const bootstrap=await seat('unused-bootstrap',false);
     await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${bootstrap.t0}::uuid`;
     const bootstrapBefore=await seatState(bootstrap);
     check('unused-root admission starts unused expired and bound',bootstrapBefore.tokens.length===1
       && !bootstrapBefore.tokens[0].used && !bootstrapBefore.tokens[0].unexpired);
 
+    if (baseline) {
+      const virginBefore = await snapshot();
+      const virginDenied = await renew(bootstrap.raw,id(),{},W,{},baselineCommand);
+      check('b9 virgin standing root denies for authentication',virginDenied.status===401
+        && JSON.parse(virginDenied.text).error==='unauthenticated' && credential(virginDenied)===null);
+      check('b9 virgin denial leaves every table unchanged',JSON.stringify(virginBefore)===JSON.stringify(await snapshot())
+        && JSON.stringify(bootstrapBefore)===JSON.stringify(await seatState(bootstrap)));
+    }
     check('unused-root ordinary expired read denies without use',[401,403].includes((await readAs(bootstrap.raw)).status)
       && JSON.stringify(bootstrapBefore)===JSON.stringify(await seatState(bootstrap)));
     const ordinaryFields={kind:'create',task_id:id(),slug:'unused-expired'};

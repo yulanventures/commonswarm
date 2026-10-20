@@ -400,6 +400,6 @@ test('active-floor-required-F-support-complete',()=>{
   assert.equal(completedFloorCases.size,41,'all 8 canonical and 33 existing permission/issuer cases must execute successfully');
   assert.equal(completedHistoricalCases.size,4,'all historical generation rows must execute successfully');
   assert.equal(completedHistoricalBaseline,true,'unsupported O/ACTIVE expiry diagnostic and same-history current renewal must both complete');
-  // F27d still excludes the later unused-permanent-root fix. This source gate
-  // does not replace new-F rebinding, different-family review, Linux or full AS.
+  // Exact F includes virgin-root recovery. Source rebinding does not replace
+  // different-family review, real Linux execution or full AS.
 });

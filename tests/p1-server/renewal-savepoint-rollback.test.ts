@@ -14,9 +14,10 @@ import { enableIssuanceForTest, measureIssuanceForTest, recordChecksumEvidenceFo
 
 interface Target { url: string; mode: string; close(): Promise<void> }
 interface TargetHarness {
+  ACTIVE_FLOOR_SOURCES: Record<"H" | "F" | "B", {commit: string; tree: string}>;
   openLockOrderTarget(options: { connector: unknown }): Promise<Target>;
   lockOrderConnector(issuance: { record: string; measure: string; enable: string }): unknown;
-  materializeActiveFloorSource(directory: string, generation: "current" | "H" | "F"): {path: string; commit: string; tree: string};
+  materializeActiveFloorSource(directory: string, generation: "current" | "H" | "F" | "B"): {path: string; commit: string; tree: string};
 }
 const harness = await import(new URL("../support/admin-principal-lock-order-harness.mjs", import.meta.url).href) as TargetHarness;
 const repo = fileURLToPath(new URL("../../", import.meta.url));
@@ -37,8 +38,10 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
     chmodSync(directory, 0o700);
     const source = harness.materializeActiveFloorSource(directory, generation);
     const readSource = readGeneration === generation ? source : harness.materializeActiveFloorSource(directory, readGeneration);
+    const baseline = mode === "permanence" && generation === "current" && readGeneration === "current"
+      ? harness.materializeActiveFloorSource(directory, "B") : null;
     const config = join(directory, "target.json");
-    writeFileSync(config, JSON.stringify({ db_url: target.url, source, read_source: readSource, active_floor: generation==='F' || readGeneration==='F' }), { mode: 0o600 });
+    writeFileSync(config, JSON.stringify({ db_url: target.url, source, read_source: readSource, unused_root_baseline: baseline, active_floor: baseline!==null || generation==='F' || readGeneration==='F' }), { mode: 0o600 });
     const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, NO_COLOR: "1" };
     // Deterministic fault control belongs only to its existing rollback contract.
     if (mode === "real_read") env.SWARM_CMD_TEST_SLEEP_AFTER_STEP = "9:2500";
@@ -59,6 +62,7 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
     const result = JSON.parse(line.slice("R13_PROBE ".length)) as {
       stage: string; error?: string; verdict?: string; tables_counted: number;
       hook_sleep?: string | null;
+      unused_root_baseline?: {commit: string; tree: string} | null;
       active_catalog?: {functions:number;migrations:number;view_columns:number;measured_view_sha256:string};
       checks?: { name: string; ok: boolean }[];
     };
@@ -67,6 +71,13 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
     assert.equal(result.stage, "complete", `probe stopped at ${result.stage}: ${result.error ?? "unknown"}`);
     assert.ok(result.tables_counted > 0, "enumerated full database table set");
     assert.deepEqual(result.checks?.filter((check) => !check.ok), [], "owner-boundary contracts failed");
+    if (baseline) {
+      assert.deepEqual(result.unused_root_baseline, harness.ACTIVE_FLOOR_SOURCES.B);
+      assert.equal(result.active_catalog?.migrations, 4, 'b9 witness uses the same valid ACTIVE schema');
+      for (const name of ['b9 used standing proof renews to readable successor',
+        'b9 virgin standing root denies for authentication', 'b9 virgin denial leaves every table unchanged'])
+        assert.ok(result.checks?.some(check => check.name === name && check.ok), name);
+    }
     if(mode==='permanence') {
       for(const contract of ['command denial rolls back both adoptions and every table','activity denial rolls back both adoptions and every table',
         'ordinary-timeboxed-live-positive','ordinary-expired-unused-refused','ordinary-expired-unused-full-denial-rollback'])
