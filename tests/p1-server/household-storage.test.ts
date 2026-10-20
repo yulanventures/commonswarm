@@ -358,7 +358,7 @@ test('catalogs detect privilege drift and reverse rollbacks restore the pre-lane
 // the existing todo HTTP/MCP coverage. No auth, transaction or storage shim.
 test('legacy FILE HTTP redirect rolls back gated requests and resumes in the same process after DROP', { timeout: 180_000 }, async () => {
   const workspace = await fixture(), object = randomUUID(), principal = randomUUID(), device = randomUUID();
-  const run = randomUUID(), tokenId = randomUUID(), predecessor = randomUUID(), lineage = randomUUID();
+  const run = randomUUID(), tokenId = randomUUID(), predecessor = randomUUID(), lineage = randomUUID(), renewalGrant = randomUUID();
   const token = `swm_agt_${randomBytes(32).toString('base64url')}`;
   await sql`INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES (${randomUUID()}::uuid,${workspace}::uuid,'workspace')`;
   committed(await write(workspace, { ...newDoc(object), content: proposal('Legacy HTTP control').content }, proposal('Legacy HTTP control')));
@@ -369,14 +369,17 @@ test('legacy FILE HTTP redirect rolls back gated requests and resumes in the sam
     await tx`INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name)
       VALUES (${principal}::uuid,${workspace}::uuid,${owner}::uuid,'Legacy HTTP agent')`;
     await tx`INSERT INTO swarm.agent_runs(run_id,principal_id,device_id) VALUES (${run}::uuid,${principal}::uuid,${device}::uuid)`;
-    await tx`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,scopes,token_hash,expires_at,lineage_id,first_used_at)
-      VALUES (${predecessor}::uuid,${principal}::uuid,${run}::uuid,'["post_signal"]',${randomBytes(32)},clock_timestamp()+interval '1 hour',${lineage}::uuid,NULL)`;
+    // Both bearers belong to the same live, device-bound canonical renewal grant.
+    await tx`INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,kind,max_successors,successors_used,horizon_expires_at,bound_device_id,created_by)
+      VALUES (${renewalGrant}::uuid,${workspace}::uuid,${principal}::uuid,${run}::uuid,'standing',NULL,0,NULL,${device}::uuid,${owner}::uuid)`;
+    await tx`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,scopes,token_hash,expires_at,lineage_id,first_used_at,renewal_grant_id)
+      VALUES (${predecessor}::uuid,${principal}::uuid,${run}::uuid,'["post_signal"]',${randomBytes(32)},clock_timestamp()+interval '1 hour',${lineage}::uuid,NULL,${renewalGrant}::uuid)`;
     // A predecessor starts pending, then takes the supported write-once first-use transition.
     await tx`UPDATE swarm.agent_tokens SET first_used_at=statement_timestamp()
       WHERE token_id=${predecessor}::uuid AND first_used_at IS NULL`;
-    await tx`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,scopes,token_hash,expires_at,lineage_id,predecessor_token_id)
+    await tx`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,scopes,token_hash,expires_at,lineage_id,predecessor_token_id,renewal_grant_id)
       VALUES (${tokenId}::uuid,${principal}::uuid,${run}::uuid,'["post_signal"]',${createHash('sha256').update(token).digest()},
-        clock_timestamp()+interval '1 hour',${lineage}::uuid,${predecessor}::uuid)`;
+        clock_timestamp()+interval '1 hour',${lineage}::uuid,${predecessor}::uuid,${renewalGrant}::uuid)`;
     await tx`INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at)
       SELECT ${tokenId}::uuid,${run}::uuid,${workspace}::uuid,${principal}::uuid,${owner}::uuid,'shared',ARRAY['read'],content_consent_id,
         clock_timestamp()+interval '1 hour' FROM swarm.household_member_content_roles WHERE workspace_id=${workspace}::uuid AND user_id=${owner}::uuid`;
