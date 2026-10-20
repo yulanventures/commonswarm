@@ -382,7 +382,7 @@ export function fileLockTimeoutSentence(lockName: string, path: string, ownerPid
     : /^[0-9a-f]{24}$/.test(lockName) ? "credential refresh lock" : `${lockName} lock`;
   // Owner fields come from disk; an unverified owner is not a dead one.
   const safeHost = typeof ownerHost === "string" && /^[A-Za-z0-9._-]{1,253}$/.test(ownerHost) ? ownerHost : "unknown";
-  const safePid = Number.isSafeInteger(ownerPid) && ownerPid! > 0 ? ownerPid : "unknown";
+  const safePid = typeof ownerPid === "number" && Number.isSafeInteger(ownerPid) && ownerPid > 0 ? ownerPid : "unknown";
   let currentHost = "unknown"; try { const host = hostname(); if (/^[A-Za-z0-9._-]{1,253}$/.test(host)) currentHost = host; } catch { /* Unavailable host identity stays unknown. */ }
   let liveOwner = false;
   if (safePid !== "unknown" && safeHost !== "unknown" && safeHost === currentHost) {
