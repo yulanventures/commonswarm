@@ -181,6 +181,8 @@ test("QA-010 invite form routes empty and malformed input through the validator"
 // baseline CI tree; it imports no candidate-only exports in the browser harness.
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { findChrome, launchChrome } from "../../../tests/chrome.js";
 
@@ -195,6 +197,7 @@ test("saved web sessions survive transient verification/refresh and reload; term
   const helper = bundle.outputFiles[0]!.text;
   const rotatedAccessToken = accessToken.slice(0, accessToken.lastIndexOf(".") + 1) + encode({ rotated: true });
   const recovered = new Set<string>();
+  const releases = new Map<string, number>();
   const commandRequests = new Map<string, { bodies: string[]; fetchCalls: string[]; committed: Map<string, string>; writes: number }>();
   const releaseOldUser = new Map<string, () => void>();
   const observed = new Map<string, { users: number; refreshes: number }>();
@@ -211,6 +214,10 @@ test("saved web sessions survive transient verification/refresh and reload; term
       res.end(JSON.stringify(payload));
     };
     if (url.pathname === "/probe") { json(200, counts); return; }
+    if (url.pathname === "/deploy") {
+      releases.set(mode, (releases.get(mode) ?? 1) + 1);
+      json(200, { revision: releases.get(mode) }); return;
+    }
     if (url.pathname === "/release") { recovered.add(mode); releaseOldUser.get(mode)?.(); json(200, {}); return; }
     if (url.pathname === "/functions/v1/command") {
       const record = commandRequests.get(mode) ?? { bodies: [], fetchCalls: [], committed: new Map<string, string>(), writes: 0 };
@@ -264,7 +271,8 @@ test("saved web sessions survive transient verification/refresh and reload; term
     }
     if (url.pathname.startsWith("/rest/v1/")) { json(200, []); return; }
     if (url.pathname === "/helper.js") {
-      res.writeHead(200, { "content-type": "text/javascript" }).end(helper); return;
+      res.writeHead(200, { "content-type": "text/javascript", "cache-control": "no-store" })
+        .end(helper + `\n/* fixture release ${releases.get(mode) ?? 1} */`); return;
     }
     const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     const bootstrap = `<meta name="commonswarm:url" content="${origin}"><meta name="commonswarm:anon-key" content="fixture-anon"><script>
@@ -283,6 +291,25 @@ test("saved web sessions survive transient verification/refresh and reload; term
         return nativeFetch(routed?u:input,init);
       };
     </script>`;
+    if (url.pathname === "/lifecycle") {
+      // Exercise the production SDK/storage and the built dashboard in a normal
+      // temporary profile. HTTP fixture outcomes do not prove GoTrue rotation.
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" }).end(`<!doctype html><head>${bootstrap}<script src="/helper.js?mode=${mode}"></script></head><body data-revision="${releases.get(mode) ?? 1}"><script>
+        (async()=>{
+          const session=await cs.currentSession();
+          if(session?.user.id!==${JSON.stringify(userId)}||session.refresh_token!=='browser-refresh')throw Error('saved owner must survive lifecycle without reseeding');
+          const frame=document.createElement('iframe');frame.src='/app/?mode=${mode}';document.body.append(frame);
+          for(let i=0;i<500;i++){
+            if(frame.contentDocument?.querySelector('live-dashboard')?.dataset.state==='create'){
+              if(!frame.contentDocument.querySelector('[data-panel="signed-out"]').hidden)throw Error('signed-in dashboard exposed login');
+              document.body.dataset.result='passed';return;
+            }
+            await new Promise(r=>setTimeout(r,20));
+          }
+          throw Error('persisted dashboard did not recover');
+        })().catch(e=>document.body.dataset.failure=e.message);
+      </script></body>`); return;
+    }
     if (url.pathname === "/peer") {
       res.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><head>${bootstrap}<script src="/helper.js"></script></head><body></body>`); return;
     }
@@ -306,6 +333,9 @@ test("saved web sessions survive transient verification/refresh and reload; term
             peer.contentWindow.location.reload();await reloaded;
             check(await peer.contentWindow.cs.currentSession()===null,'reload must not resurrect superseded credentials');
           };
+          if(mode.startsWith('lifecycle-')){
+            location.replace('/lifecycle?mode='+mode);return;
+          }
           if(mode==='storage-unwritable'||mode==='storage-late-failure'){
             if(mode==='storage-late-failure')await cs.currentSession();
             Storage.prototype.setItem=function(){throw new DOMException('Fixture quota','QuotaExceededError');};
@@ -452,17 +482,24 @@ test("saved web sessions survive transient verification/refresh and reload; term
       "command-recover", "command-repeat", "command-unknown", "race", "race-unlocked",
       "storage-unwritable", "storage-late-failure", "storage-explicit-logout", "storage-removal-retry",
       "corrupt-storage", "race-refresh429", "refresh-already-used",
-      "terminal-user-modern", "terminal-refresh-modern",
+      "terminal-user-modern", "terminal-refresh-modern", "lifecycle-multitab", "lifecycle-restart-deploy",
     ];
     // Independent profiles and per-mode server state let two real-time retry
     // cases progress together within the existing 180s file gate.
     await Promise.all(modes.map(mode => t.test(mode, async () => {
-      // CDP observes real elapsed time. No virtual time or Date.now jumps.
+      const lifecycle = mode.startsWith("lifecycle-");
+      const profile = lifecycle ? await mkdtemp(join(tmpdir(), "cswarm-web-continuity-")) : undefined;
+      if (profile) t.after(async () => { await rm(profile, { recursive: true, force: true }); });
+      const phases = mode === "lifecycle-restart-deploy" ? ["seed", "restart", "deploy"] : ["seed"];
+      for (const phase of phases) {
+      if (phase === "deploy") await nativeFetch(`${origin}/deploy?mode=${mode}`, { method: "POST" });
+      // Each phase launches a fresh browser process; the two lifecycle modes
+      // alone retain their own freshly created temporary profile across phases.
       const reservation = createServer();
       await new Promise<void>(resolve => reservation.listen(0, "127.0.0.1", resolve));
       const port = (reservation.address() as { port: number }).port;
       await new Promise<void>(resolve => reservation.close(() => resolve()));
-      const run = launchChrome(chrome, [`--remote-debugging-port=${port}`, "about:blank"], { timeout: 60000 });
+      const run = launchChrome(chrome, [`--remote-debugging-port=${port}`, ...(profile ? [`--user-data-dir=${profile}`] : []), "about:blank"], { timeout: 60000 });
       let launchError: unknown;
       let exited = false;
       const settled = run.then(() => { exited = true; }, error => { exited = true; launchError = error; });
@@ -496,7 +533,7 @@ test("saved web sessions survive transient verification/refresh and reload; term
           if (message.error) waiter?.reject(new Error(message.error.message));
           else waiter?.resolve(message);
         };
-        const send = (method: string, params = {}): Promise<any> => new Promise((resolve, reject) => {
+        const send = (method: string, params = {}, sessionId?: string): Promise<any> => new Promise((resolve, reject) => {
           if (socket?.readyState !== WebSocket.OPEN) { reject(new Error("DevTools socket is not open")); return; }
           const id = ++sequence;
           const timer = setTimeout(() => { pending.delete(id); reject(new Error(`DevTools ${method} did not answer`)); }, 5000);
@@ -504,9 +541,9 @@ test("saved web sessions survive transient verification/refresh and reload; term
             resolve: value => { clearTimeout(timer); resolve(value); },
             reject: error => { clearTimeout(timer); reject(error); },
           });
-          socket.send(JSON.stringify({ id, method, params }));
+          socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
         });
-        await send("Page.navigate", { url: `${origin}/measure?mode=${mode}` });
+        await send("Page.navigate", { url: `${origin}/${phase === "seed" ? "measure" : "lifecycle"}?mode=${mode}` });
         let result: { result?: string; failure?: string } = {};
         for (let attempt = 0; attempt < 550; attempt++) {
           const message = await send("Runtime.evaluate", { expression: "JSON.stringify({result:document.body?.dataset.result,failure:document.body?.dataset.failure})", returnByValue: true });
@@ -514,7 +551,32 @@ test("saved web sessions survive transient verification/refresh and reload; term
           if (result.result || result.failure) break;
           await new Promise(resolve => setTimeout(resolve, 100));
         }
-        assert.equal(result.result, "passed", `${mode}: ${result.failure ?? "real-time observer timeout"}`);
+        assert.equal(result.result, "passed", `${mode}/${phase}: ${result.failure ?? "real-time observer timeout"}`);
+        if (phase === "deploy") {
+          const revision = await send("Runtime.evaluate", { expression: "document.body.dataset.revision", returnByValue: true });
+          assert.equal(revision.result.result.value, "2", "new static fixture revision must actually be served");
+        }
+        if (mode === "lifecycle-multitab") {
+          const peer = await send("Target.createTarget", { url: `${origin}/lifecycle?mode=${mode}` });
+          const attached = await send("Target.attachToTarget", { targetId: peer.result.targetId, flatten: true });
+          let ready = false;
+          for (let attempt = 0; attempt < 100 && !ready; attempt++) {
+            const observed = await send("Runtime.evaluate", { expression: "document.body?.dataset.result", returnByValue: true }, attached.result.sessionId);
+            ready = observed.result.result.value === "passed";
+            if (!ready) await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          assert.equal(ready, true, "a separate real tab must recover the same saved owner");
+          await send("Target.closeTarget", { targetId: peer.result.targetId });
+          await send("Runtime.evaluate", { expression: "document.body.dataset.result='reloading'" });
+          await send("Page.reload");
+          let reloaded = false;
+          for (let attempt = 0; attempt < 100 && !reloaded; attempt++) {
+            const observed = await send("Runtime.evaluate", { expression: "document.body?.dataset.result", returnByValue: true });
+            reloaded = observed.result.result.value === "passed";
+            if (!reloaded) await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          assert.equal(reloaded, true, "original tab remains signed in after peer open/close and reload");
+        }
       } catch (error) {
         failure = error;
       } finally {
@@ -526,8 +588,10 @@ test("saved web sessions survive transient verification/refresh and reload; term
       }
       if (failure) throw failure;
       if (launchError) throw launchError;
+      } // Browser lifecycle phase.
       const counts = observed.get(mode)!;
       assert.ok(counts.users > 0 || counts.refreshes > 0, `${mode} must reach real SDK HTTP`);
+      if (lifecycle) assert.equal(counts.refreshes, 0, "valid saved web access survives tabs/processes/static replacement without rotation");
       if (mode.startsWith("command")) {
         const record = commandRequests.get(mode)!;
         if (mode === "command-unknown") {

@@ -11,7 +11,7 @@
  *      web-added agent used to die after.
  *   2. `renewal_horizon_ms` must be ABSENT from the JSON. The validator accepts standing only
  *      when the key is `undefined` (index.ts:2657); a present `null` fails validation and
- *      returns 400 (index.ts:2710), even though the wire TYPE declares `number | null`.
+ *      returns 400 (index.ts:2711), even though the wire TYPE declares `number | null`.
  *      `JSON.stringify` drops undefined but SERIALISES null, so this is a real distinction and
  *      the test asserts on the serialised string, not on the object. An object assertion alone
  *      would pass for a body that gets rejected by the deployment.

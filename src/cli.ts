@@ -66,6 +66,7 @@ import {
   logoutMessage,
   HumanSessionError,
   refreshedCredential,
+  humanSessionFetch,
   type LoginProvider,
   type RefreshedCredential,
 } from "./cloud/auth.js";
@@ -1695,6 +1696,7 @@ async function confirmationLine(prompt: string): Promise<string> {
 }
 
 interface HumanSession extends RefreshedCredential {
+  fetcher: typeof fetch;
   store: CredentialStore;
 }
 
@@ -1703,9 +1705,11 @@ async function humanCredential(
   cloud: CloudTarget,
 ): Promise<HumanSession> {
   const credentials = await store(args, cloud);
+  const human = await refreshedCredential(cloud, credentials);
   return {
-    ...await refreshedCredential(cloud, credentials),
+    ...human,
     store: credentials,
+    fetcher: humanSessionFetch(cloud, credentials, human),
   };
 }
 
@@ -1717,13 +1721,14 @@ async function dualAuthHumanCredential(
   try {
     return await humanCredential(args, cloud);
   } catch (error) {
-    if (!(error instanceof HumanSessionError)) throw error;
+    if (!(error instanceof HumanSessionError) || error.code === "human_session_transient") throw error;
     const personPath = error.code === "human_session_missing"
       ? "not signed in. If you are a person, run cswarm login."
       : "could not refresh your session. If you are a person, run cswarm login to sign in again.";
     throw new HumanSessionError(
       error.code,
       `${personPath} If you are an agent, pass --agent-token-file <path to the credential CommonSwarm minted for you> (or --agent-token-stdin).`,
+      error.operationId, error.generation, error.phase,
     );
   }
 }
@@ -1749,7 +1754,7 @@ async function workspaceId(
     environmental: process.env.SWARM_CLOUD_WORKSPACE_ID,
     session: human,
     store: human.store,
-    directory: options.directory ?? cloudWorkspaceDirectory(cloud),
+    directory: options.directory ?? cloudWorkspaceDirectory(cloud, human.fetcher),
     ...(options.workspaces === undefined
       ? {}
       : { workspaces: options.workspaces }),
@@ -1807,7 +1812,7 @@ async function runWorkspaces(args: Arguments): Promise<void> {
   args.assertShape(RUN_WORKSPACES_1_ACCEPTED_FLAGS, 1);
   const cloud = await target(args);
   const human = await humanCredential(args, cloud);
-  const directory = cloudWorkspaceDirectory(cloud);
+  const directory = cloudWorkspaceDirectory(cloud, human.fetcher);
   const projects = await directory.list(human);
   const profile = await profileIdentity(human);
   const selectedWorkspaceId = projects.some(
@@ -1838,7 +1843,7 @@ async function runUse(args: Arguments): Promise<void> {
   args.assertShape(RUN_USE_1_ACCEPTED_FLAGS, 2);
   const cloud = await target(args);
   const human = await humanCredential(args, cloud);
-  const directory = cloudWorkspaceDirectory(cloud);
+  const directory = cloudWorkspaceDirectory(cloud, human.fetcher);
   const selected = await selectWorkspace(
     args.positionals[1]!,
     await directory.list(human),
@@ -1878,7 +1883,7 @@ async function runNew(args: Arguments): Promise<void> {
   const proposedId = randomUUID();
   let result: ConnectCommandResult;
   try {
-    result = await new ThinCommandClient(cloud).sendConnect({
+    result = await new ThinCommandClient(cloud, human.fetcher).sendConnect({
       command: { kind: "create_workspace", workspace_id: proposedId, name },
       credential: human.accessToken,
     });
@@ -2008,7 +2013,7 @@ async function runStatus(args: Arguments): Promise<void> {
   args.assertShape(RUN_STATUS_1_ACCEPTED_FLAGS, 1);
   const cloud = await target(args);
   const human = await humanCredential(args, cloud);
-  const directory = cloudWorkspaceDirectory(cloud);
+  const directory = cloudWorkspaceDirectory(cloud, human.fetcher);
   const projects = await directory.list(human);
   const profile = await profileIdentity(human);
   const identityLabel = sanitizeDisplayLabel(
@@ -2076,7 +2081,7 @@ async function runStatus(args: Arguments): Promise<void> {
         workspaceId: selectedWorkspaceId,
         inbox: false,
         limit: 5,
-      }),
+      }, human.fetcher),
       readSignals(cloud, {
         kind: "human",
         accessToken: human.accessToken,
@@ -2086,12 +2091,13 @@ async function runStatus(args: Arguments): Promise<void> {
         inbox: true,
         kind: "ask",
         limit: 100,
-      }),
+      }, human.fetcher),
     ),
     readRenewalGrants(
       cloud,
       human.accessToken,
       selectedWorkspaceId,
+      human.fetcher,
     ),
   ]);
   const grantsByPrincipal = new Map(
@@ -2184,7 +2190,7 @@ async function runInvite(args: Arguments): Promise<void> {
     const invitationId = args.required("invitation-id");
     const revoked = (
       await sendConnectWithPending(
-        new ThinCommandClient(cloud),
+        new ThinCommandClient(cloud, human.fetcher),
         human,
         workspace,
         { kind: "revoke_invitation", invitation_id: invitationId },
@@ -2221,7 +2227,7 @@ async function runInvite(args: Arguments): Promise<void> {
   const response = acceptedConnect(
     "invite",
     await sendConnectWithPending(
-      new ThinCommandClient(cloud),
+      new ThinCommandClient(cloud, human.fetcher),
       human,
       workspace,
       { kind: "invite_member", email: args.required("email") },
@@ -2284,13 +2290,13 @@ async function runMember(args: Arguments): Promise<void> {
   }
   const cloud = await target(args);
   const human = await humanCredential(args, cloud);
-  const directory = cloudWorkspaceDirectory(cloud);
+  const directory = cloudWorkspaceDirectory(cloud, human.fetcher);
   const workspace = await workspaceId(args, cloud, human, { directory });
   const status = await directory.status(human, workspace);
   const selected = resolveWorkspaceMember(selector, status.members);
   const response = (
     await sendConnectWithPending(
-      new ThinCommandClient(cloud),
+      new ThinCommandClient(cloud, human.fetcher),
       human,
       workspace,
       { kind: "remove_member", user_id: selected.user_id },
@@ -2340,12 +2346,12 @@ async function runWorkspace(args: Arguments): Promise<void> {
   }
   const cloud = await target(args);
   const human = await humanCredential(args, cloud);
-  const directory = cloudWorkspaceDirectory(cloud);
+  const directory = cloudWorkspaceDirectory(cloud, human.fetcher);
   const projects = await directory.list(human);
   const selected = resolveWorkspaceSelector(selector, projects);
   const response = (
     await sendConnectWithPending(
-      new ThinCommandClient(cloud),
+      new ThinCommandClient(cloud, human.fetcher),
       human,
       selected.workspace_id,
       { kind: "archive_workspace" },
@@ -2389,7 +2395,7 @@ async function runLegacyAccept(args: Arguments): Promise<void> {
   const response = acceptedConnect(
     "accept",
     await sendConnectWithPending(
-      new ThinCommandClient(cloud),
+      new ThinCommandClient(cloud, human.fetcher),
       human,
       undefined,
       { kind: "accept_invitation", token: invitationToken },
@@ -2438,7 +2444,9 @@ async function runLinkAccept(
   });
   await pinOriginOnce(cloud);
   const credentials = await store(args, cloud);
-  const operations = cloudAcceptOperations(cloud, credentials);
+  let acceptFetch: typeof fetch | undefined;
+  const operations = cloudAcceptOperations(cloud, credentials,
+    (input, init) => (acceptFetch ?? fetch)(input, init));
   const emit = progressWriter(json);
   const runtime = {
     ...operations,
@@ -2449,6 +2457,7 @@ async function runLinkAccept(
     ): Promise<AcceptSession | null> {
       try {
         const refreshed = await refreshedCredential(selected, selectedStore);
+        acceptFetch = humanSessionFetch(selected, selectedStore, refreshed);
         const profile = await selectedStore.readProfile();
         return {
           ...refreshed,
@@ -2456,8 +2465,10 @@ async function runLinkAccept(
             ? profile.email ?? null
             : null,
         };
-      } catch {
-        return null;
+      } catch (error) {
+        if (error instanceof HumanSessionError &&
+            (error.code === "human_session_missing" || error.code === "human_session_refresh_failed")) return null;
+        throw error;
       }
     },
     async loginSession(
@@ -2472,6 +2483,7 @@ async function runLinkAccept(
         output: process.stderr,
       });
       const refreshed = await refreshedCredential(selected, selectedStore);
+      acceptFetch = humanSessionFetch(selected, selectedStore, refreshed);
       return { ...refreshed, email: result.email };
     },
     emit,
@@ -2559,7 +2571,7 @@ async function runPrincipal(args: Arguments): Promise<void> {
     const response = acceptedConnect(
       "principal create",
       await sendConnectWithPending(
-        new ThinCommandClient(cloud),
+        new ThinCommandClient(cloud, human.fetcher),
         human,
         workspace,
         createAgentPrincipalCommand(
@@ -2590,7 +2602,7 @@ async function runPrincipal(args: Arguments): Promise<void> {
     const principalId = args.required("principal-id");
     const response = (
       await sendConnectWithPending(
-        new ThinCommandClient(cloud),
+        new ThinCommandClient(cloud, human.fetcher),
         human,
         workspace,
         { kind: "revoke_agent_principal", principal_id: principalId },
@@ -2710,7 +2722,7 @@ async function runToken(args: Arguments): Promise<void> {
   const response = acceptedConnect(
     "token mint",
     await sendConnectWithPending(
-      new ThinCommandClient(cloud),
+      new ThinCommandClient(cloud, human.fetcher),
       human,
       workspace,
       {
@@ -2805,7 +2817,7 @@ async function runGrant(args: Arguments): Promise<void> {
   const response = acceptedConnect(
     "grant resume",
     await sendConnectWithPending(
-      new ThinCommandClient(cloud),
+      new ThinCommandClient(cloud, human.fetcher),
       human,
       workspace,
       { kind: "resume_renewal_grant", renewal_grant_id: renewalGrantId },
@@ -2904,7 +2916,7 @@ async function runTokenRevoke(args: Arguments): Promise<void> {
   const tokenId = args.required("token-id");
   const response = (
     await sendConnectWithPending(
-      new ThinCommandClient(cloud),
+      new ThinCommandClient(cloud, human.fetcher),
       human,
       workspace,
       { kind: "revoke_agent_token", token_id: tokenId },
@@ -3003,7 +3015,7 @@ async function runLinkNew(args: Arguments): Promise<void> {
   const response = acceptedConnect(
     "link new",
     await sendCapabilityWithPending(
-      new ThinCommandClient(cloud),
+      new ThinCommandClient(cloud, human.fetcher),
       human,
       workspace,
       {
@@ -3071,7 +3083,7 @@ async function runLinkRevoke(args: Arguments): Promise<void> {
   const response = acceptedConnect(
     "link revoke",
     await sendCapabilityWithPending(
-      new ThinCommandClient(cloud),
+      new ThinCommandClient(cloud, human.fetcher),
       human,
       workspace,
       { kind: "revoke_capability_url", capability_id: capabilityId },
@@ -3316,7 +3328,7 @@ async function commandWorkspaceAndCredential(
     credentials: human.store,
     kind: "human",
     human,
-    fetcher: fetch,
+    fetcher: human.fetcher,
   };
 }
 
@@ -3512,7 +3524,7 @@ async function signalDirectory(
     );
   }
   const human = credential.human!;
-  const status = await cloudWorkspaceDirectory(cloud).status(
+  const status = await cloudWorkspaceDirectory(cloud, human.fetcher).status(
     human,
     selectedWorkspace,
   );
@@ -3575,7 +3587,7 @@ async function signalAuthorLabels(
     };
   }
   const human = credential.human!;
-  const status = await cloudWorkspaceDirectory(cloud).status(
+  const status = await cloudWorkspaceDirectory(cloud, human.fetcher).status(
     human,
     selectedWorkspace,
   );
@@ -8054,6 +8066,7 @@ async function runSession(args: Arguments): Promise<void> {
       credential: human.accessToken,
       workspaceId: workspace,
       principalId,
+      fetcher: human.fetcher,
     });
     const messages = {
       enable:
@@ -9501,9 +9514,9 @@ async function runDogfood(args: Arguments): Promise<void> {
     1,
   );
   const cloud = await target(args);
-  const { selectedWorkspace, bearer } =
+  const { selectedWorkspace, bearer, fetcher } =
     await commandWorkspaceAndCredential(args, cloud);
-  const client = new ThinCommandClient(cloud);
+  const client = new ThinCommandClient(cloud, fetcher);
   const route = stream(args);
   const taskId = args.optional("task-id") ?? randomUUID();
   const ttl = Number(args.optional("ttl-ms") ?? "3600000");
@@ -10053,7 +10066,7 @@ async function runMcpCode(args: Arguments): Promise<void> {
   const human = await humanCredential(args, cloud);
   const workspace = await workspaceId(args, cloud, human);
   const { mintMcpCode, renderMcpCode } = await import("./cloud/mcp-connect.js");
-  const result = await mintMcpCode(cloud, human.accessToken, workspace);
+  const result = await mintMcpCode(cloud, human.accessToken, workspace, human.fetcher);
   process.stdout.write(renderMcpCode(result, cloud));
 }
 
@@ -10819,12 +10832,12 @@ async function runAdminRecovery(args: Arguments): Promise<void> {
   if (action !== "revoke" && request === null) throw new UsageError("Choose a valid workspace ID, page size, and cursor.");
   const cloud = await target(args), human = await humanCredential(args, cloud);
   if (grantId !== null) {
-    const receipt = await revokeAdminDelegation(cloud, human.accessToken, grantId, requestId);
+    const receipt = await revokeAdminDelegation(cloud, human.accessToken, grantId, requestId, human.fetcher);
     if (args.has("json")) printJson(receipt);
     else process.stdout.write(`Admin grant ${grantId} is revoked. Review prior actions with cswarm admin history.\n`);
     return;
   }
-  const page = await readAdminDelegations(cloud, human.accessToken, request!);
+  const page = await readAdminDelegations(cloud, human.accessToken, request!, human.fetcher);
   if (args.has("json")) { printJson({ ...page }); return; }
   if (action === "grants") {
     process.stdout.write(`${page.active.grant_count} active admin grants; ${page.active.full_account_count} cover the full account.\n`);

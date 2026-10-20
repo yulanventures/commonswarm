@@ -29,7 +29,6 @@ import { CONNECT_PROFILE_FILES } from "./connect-profile-files.js";
 // the rename keeps its old keychain record; nothing reads it, so that install reports
 // "not logged in" until `cswarm login` runs once. No migration is attempted on purpose.
 const KEYCHAIN_SERVICE = "com.commonswarm.cli";
-const LOCK_STALE_MS = 60_000;
 /** Longer than a local owner-record write, including a paused process. */
 export const HOST_ID_LOCK_INCOMPLETE_GRACE_MS = 2_000;
 const LOCK_TIMEOUT_MS = 30_000;
@@ -57,6 +56,25 @@ export interface PendingCommandRecord {
   createdAt: number;
 }
 
+/** Optional protected human state; compact Keychain credentials stay unchanged. */
+export interface HumanSessionState {
+  operationId?: string;
+  generation: number;
+  userId: string;
+  deviceId: string;
+  parentDigest: string;
+  accessToken?: string;
+  expiresAt?: number;
+  successor?: {
+    refreshToken: string;
+    accessToken: string;
+    expiresAt: number;
+    userId: string;
+    deviceId: string;
+    generation: number;
+  };
+}
+
 export interface CredentialProfile {
   version: 1;
   userId: string | null;
@@ -65,12 +83,13 @@ export interface CredentialProfile {
   principalId?: string | null;
   principalName?: string | null;
   pendingCommands: Record<string, PendingCommandRecord>;
+  humanSession?: HumanSessionState;
 }
 
 export interface PendingProfileStore {
   readProfile(): Promise<CredentialProfile>;
   writeProfile(profile: CredentialProfile): Promise<void>;
-  withLock<T>(work: () => Promise<T>): Promise<T>;
+  withLock<T>(work: () => Promise<T>, options?: { signal?: AbortSignal | null }): Promise<T>;
 }
 
 export interface CredentialStore extends PendingProfileStore {
@@ -317,11 +336,33 @@ function parseProfile(raw: string): CredentialProfile {
       throw new Error("stored credential profile is malformed");
     }
   }
+  // Optional cache corruption must never make legacy credentials unreadable. A
+  // malformed journal is not eligible for adoption either.
+  const human = value.humanSession;
+  if (human !== undefined) {
+    const token = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 16384;
+    const generation = (v: unknown): v is number => Number.isSafeInteger(v) && Number(v) >= 0;
+    const expiry = (v: unknown): v is number => Number.isSafeInteger(v) && Number(v) > 0;
+    const next = human?.successor;
+    if (!human || typeof human !== "object" || !generation(human.generation) ||
+        typeof human.userId !== "string" || !UUID_RE.test(human.userId) ||
+        typeof human.deviceId !== "string" || !UUID_RE.test(human.deviceId) ||
+        typeof human.parentDigest !== "string" || !SHA256_RE.test(human.parentDigest) ||
+        (human.operationId !== undefined && (typeof human.operationId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(human.operationId))) ||
+        (human.accessToken !== undefined && !token(human.accessToken)) ||
+        (human.expiresAt !== undefined && !expiry(human.expiresAt)) ||
+        (next !== undefined && (!next || typeof next !== "object" ||
+          !token(next.refreshToken) || !token(next.accessToken) || !expiry(next.expiresAt) ||
+          next.userId !== human.userId || next.deviceId !== human.deviceId ||
+          next.generation !== human.generation + 1))) {
+      delete value.humanSession;
+    }
+  }
   return value as CredentialProfile;
 }
 
-function hostIdRemovalStep(path: string, directory: boolean): string {
-  return `rm ${directory ? "-r " : ""}-- '${path.replaceAll("'", "'\"'\"'")}'`;
+function verifiedLockRecovery(): string {
+  return "If it persists, have an operator verify the recorded host and process and stop all users of this state directory before recovering this exact lock. Do not remove an unverified lock or its publication target; retry after verified recovery.";
 }
 
 export class FileLockTimeoutError extends Error {
@@ -339,14 +380,19 @@ export function fileLockTimeoutSentence(lockName: string, path: string, ownerPid
   const label = gate ? `${lockName === "host-id-rotation" ? "host-id" : lockName} reclaim gate directory`
     : lockName === "host-id-rotation" ? "host-id rotation lock"
     : /^[0-9a-f]{24}$/.test(lockName) ? "credential refresh lock" : `${lockName} lock`;
+  // Owner fields come from disk; an unverified owner is not a dead one.
+  const safeHost = typeof ownerHost === "string" && /^[A-Za-z0-9._-]{1,253}$/.test(ownerHost) ? ownerHost : "unknown";
+  const safePid = typeof ownerPid === "number" && Number.isSafeInteger(ownerPid) && ownerPid > 0 ? ownerPid : "unknown";
+  let currentHost = "unknown"; try { const host = hostname(); if (/^[A-Za-z0-9._-]{1,253}$/.test(host)) currentHost = host; } catch { /* Unavailable host identity stays unknown. */ }
   let liveOwner = false;
-  if (ownerPid !== undefined && (ownerHost === undefined || ownerHost === hostname())) {
-    try { process.kill(ownerPid, 0); liveOwner = true; }
+  if (safePid !== "unknown" && safeHost !== "unknown" && safeHost === currentHost) {
+    try { process.kill(safePid, 0); liveOwner = true; }
     catch (error) { liveOwner = (error as NodeJS.ErrnoException).code === "EPERM"; }
   }
-  const next = liveOwner ? "Wait for its owner to exit, then retry. If its owner is gone, remove"
-    : "No live owner was identified; remove";
-  return `timed out waiting for the ${label} at ${path} (owner pid ${ownerPid ?? "unknown"}, host ${ownerHost ?? "unknown"}). ${next} ${gate ? "that directory" : "that lock file"} with ${hostIdRemovalStep(path, gate)} and retry.`;
+  const safePath = path.replace(/[\x00-\x1f\x7f]/g, "?");
+  const cause = safePid === "unknown" ? "The owner pid is unavailable or invalid." : safeHost === "unknown" ? "The owner host is unavailable or invalid." : currentHost === "unknown" ? "This host could not be identified."
+    : safeHost !== currentHost ? "The recorded owner host differs from this host." : liveOwner ? "A process with the recorded pid is running; its ownership of this lock is unverified. Wait for confirmed lock activity to finish, then retry." : "The recorded local process could not be verified.";
+  return `timed out waiting for the ${label} at ${safePath} (owner pid ${safePid}, host ${safeHost}${currentHost === "unknown" ? "" : `, current host ${currentHost}`}). ${cause} The lock was retained. ${verifiedLockRecovery()}`;
 }
 
 /** Publish complete bytes at an absent path. A symlink is the atomic fallback when hard links are unavailable. */
@@ -446,7 +492,7 @@ const heldFileLocks = new Map<string, { createdAt: number; ownerId: string }>();
 let heldFileLockExitHookInstalled = false;
 
 /**
- * process.exit() skips every pending finally, so a hook's hard exit would leave its lock for LOCK_STALE_MS and the
+ * process.exit() skips every pending finally, so a hook's hard exit would leave its lock and the
  * next turns would spend their budget waiting. On exit, remove each lock this process still owns, checking the
  * recorded pid and createdAt so a lock another process took after ours is never removed.
  */
@@ -487,7 +533,7 @@ function readlinkSyncSafe(path: string): string | null {
 
 /**
  * A local PID that started before publication stays live. Foreign-host, incomplete,
- * and uninspectable records use publication age; dead or reused PIDs are stale at once.
+ * and uninspectable records are retained; only verified dead or reused PIDs are stale.
  */
 const UNREADABLE_OWNER_RECORD = Symbol("unreadable owner record");
 
@@ -500,12 +546,12 @@ async function deadLockOwnerRecord(
     raw = await readFile(lockPath, "utf8");
     owner = JSON.parse(raw) as typeof owner;
   } catch {
-    return publishedAgeMs >= LOCK_STALE_MS ? raw ?? UNREADABLE_OWNER_RECORD : null;
+    return null;
   }
-  if (!owner || typeof owner !== "object") return publishedAgeMs >= LOCK_STALE_MS ? raw : null;
-  if (owner.host !== hostname()) return publishedAgeMs >= LOCK_STALE_MS ? raw : null;
+  if (!owner || typeof owner !== "object") return null;
+  if (owner.host !== hostname()) return null;
   if (typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) {
-    return publishedAgeMs >= LOCK_STALE_MS ? raw : null;
+    return null;
   }
   try { process.kill(owner.pid, 0); }
   catch (error) {
@@ -517,7 +563,7 @@ async function deadLockOwnerRecord(
 
 export function generalLockOwnerStale(createdAt: unknown, pidStart: number | null, publishedAgeMs: number): boolean {
   if (pidStart === null || typeof createdAt !== "number" || !Number.isFinite(createdAt)) {
-    return publishedAgeMs >= LOCK_STALE_MS;
+    return false;
   }
   return pidStart > createdAt + 2_000;
 }
@@ -577,8 +623,8 @@ export async function cleanupDeadOwnerTemps(stateDirectory: string, lockFileName
 }
 
 function gateOwnerChanged(reclaimPath: string, phase: string): Error {
-  const lockName = basename(reclaimPath).replace(/\.lock\.reclaim$/, "");
-  return new Error(`${lockName === "host-id-rotation" ? "host-id" : lockName} reclaim gate owner changed at ${reclaimPath} ${phase}. Retry the command; if its owner is gone, remove that directory with ${hostIdRemovalStep(reclaimPath, true)} and retry.`);
+  const safePath = reclaimPath.replace(/[\x00-\x1f\x7f]/g, "?"), lockName = basename(safePath).replace(/\.lock\.reclaim$/, "");
+  return new Error(`${lockName === "host-id-rotation" ? "host-id" : lockName} reclaim gate owner changed at ${safePath} ${phase}. The gate was retained because ownership changed. ${verifiedLockRecovery()} Retry the command after verified recovery.`);
 }
 
 async function releaseReclaimGate(reclaimPath: string, ownerId: string): Promise<void> {
@@ -618,7 +664,7 @@ export async function withFileLock<T>(
   stateDirectory: string,
   lockName: string,
   work: () => Promise<T>,
-  options: { timeoutMs?: number; stalePolicy?: "host-id"; publishLink?: typeof link;
+  options: { timeoutMs?: number; signal?: AbortSignal | null; stalePolicy?: "host-id"; publishLink?: typeof link;
     pidStartLookup?: typeof pidStartMs;
     onBeforePublish?: () => Promise<void>;
     onBeforeStaleMove?: () => Promise<void>;
@@ -626,6 +672,7 @@ export async function withFileLock<T>(
     onAfterGateStat?: () => Promise<void>;
     onBeforeGateStaleMove?: () => Promise<void> } = {},
 ): Promise<T> {
+  options.signal?.throwIfAborted();
   await secureDirectory(stateDirectory);
   const lockPath = join(stateDirectory, `${lockName}.lock`);
   const timeoutMs = options.timeoutMs ?? LOCK_TIMEOUT_MS;
@@ -639,6 +686,7 @@ export async function withFileLock<T>(
   const ownerId = randomBytes(8).toString("hex");
   let gateOwnerChangeRetries = 0;
   while (handle === null) {
+    options.signal?.throwIfAborted();
     try {
       createdAt = Date.now();
       if (options.stalePolicy === "host-id") {
@@ -659,7 +707,7 @@ export async function withFileLock<T>(
       const pathInfo = await lstat(lockPath).catch(() => null);
       const lockInfo = await stat(lockPath).catch(() => null);
       const dangling = lockInfo === null && pathInfo !== null;
-      const deadCandidate = dangling ? "" : lockInfo ? options.stalePolicy === "host-id"
+      const deadCandidate = dangling ? options.stalePolicy === "host-id" ? "" : null : lockInfo ? options.stalePolicy === "host-id"
         ? await staleHostIdOwnerRecord(lockPath, Date.now() - (pathInfo?.mtimeMs ?? lockInfo.mtimeMs))
         : await deadLockOwnerRecord(lockPath, Date.now() - (pathInfo?.ctimeMs ?? lockInfo.ctimeMs), options.pidStartLookup) : null;
       const deadRecord = deadCandidate === UNREADABLE_OWNER_RECORD
@@ -718,8 +766,8 @@ export async function withFileLock<T>(
               }
             } catch { /* Incomplete records become reclaimable after the stated grace. */ }
           }
-          if (gateInfo && Date.now() - gateInfo.ctimeMs >= HOST_ID_LOCK_INCOMPLETE_GRACE_MS &&
-              !completeLocalOwner) abandoned = true;
+          if (options.stalePolicy === "host-id" && gateInfo &&
+              Date.now() - gateInfo.ctimeMs >= HOST_ID_LOCK_INCOMPLETE_GRACE_MS && !completeLocalOwner) abandoned = true;
           // Apply one identity check to both complete and incomplete records before using age.
           const currentInfo = await stat(reclaimPath).catch(() => null);
           const currentOwner = await readFile(gateOwnerPath, "utf8").catch(() => null);
@@ -752,14 +800,14 @@ export async function withFileLock<T>(
             }
           }
           if (Date.now() >= deadline) throw new FileLockTimeoutError(lockName, reclaimPath, recordedPid, true);
-          await delay(25);
+          await delay(25, undefined, { signal: options.signal ?? undefined });
           continue;
         }
         try {
           const freshPathInfo = await lstat(lockPath).catch(() => null);
           const freshInfo = await stat(lockPath).catch(() => null);
           const freshDangling = freshInfo === null && freshPathInfo !== null;
-          const freshCandidate = freshDangling ? "" : freshInfo && (options.stalePolicy === "host-id"
+          const freshCandidate = freshDangling ? options.stalePolicy === "host-id" ? "" : null : freshInfo && (options.stalePolicy === "host-id"
             ? await staleHostIdOwnerRecord(lockPath, Date.now() - (freshPathInfo?.mtimeMs ?? freshInfo.mtimeMs))
             : await deadLockOwnerRecord(lockPath, Date.now() - (freshPathInfo?.ctimeMs ?? freshInfo.ctimeMs), options.pidStartLookup));
           const stillStale = freshCandidate === UNREADABLE_OWNER_RECORD
@@ -780,7 +828,7 @@ export async function withFileLock<T>(
         const owner = await readFile(lockPath, "utf8").then(raw => JSON.parse(raw) as { pid?: number; host?: string }).catch(() => null);
         throw new FileLockTimeoutError(lockName, lockPath, owner?.pid, false, owner?.host);
       }
-      await delay(25 + randomBytes(1)[0]! % 75);
+      await delay(25 + randomBytes(1)[0]! % 75, undefined, { signal: options.signal ?? undefined });
     }
   }
 
@@ -790,6 +838,7 @@ export async function withFileLock<T>(
     process.on("exit", releaseHeldFileLocksSync);
   }
   try {
+    options.signal?.throwIfAborted();
     await cleanupDeadOwnerTemps(stateDirectory, `${lockName}.lock`);
     return await work();
   } finally {
@@ -833,6 +882,8 @@ export async function writeSecureJsonFile(
     await handle.close();
     await secureCredentialFile(temporary);
     await rename(temporary, path);
+    const directory = await open(dirname(path), "r");
+    try { await directory.sync(); } finally { await directory.close(); }
   } catch (error) {
     await handle.close().catch(() => undefined);
     await unlink(temporary).catch(() => undefined);
@@ -940,6 +991,8 @@ export async function deleteSecureJsonFile(path: string): Promise<void> {
   try {
     await secureCredentialFile(path);
     await unlink(path);
+    const directory = await open(dirname(path), "r");
+    try { await directory.sync(); } finally { await directory.close(); }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
@@ -1019,8 +1072,8 @@ abstract class LockedCredentialStore implements CredentialStore {
     await writeSecureJsonFile(this.profilePath, serialized);
   }
 
-  async withLock<T>(work: () => Promise<T>): Promise<T> {
-    return await withFileLock(this.stateDirectory, this.lockName, work);
+  async withLock<T>(work: () => Promise<T>, options: { signal?: AbortSignal | null } = {}): Promise<T> {
+    return await withFileLock(this.stateDirectory, this.lockName, work, options);
   }
 }
 
@@ -1079,6 +1132,9 @@ class MacKeychainStore extends LockedCredentialStore {
   }
 
   async delete(): Promise<void> {
+    const profile = await this.readProfile();
+    delete profile.humanSession;
+    await this.writeProfile(profile);
     const result = await run(this.securityPath, [
       "delete-generic-password",
       "-a",
@@ -1121,6 +1177,9 @@ class SecureFileStore extends LockedCredentialStore {
   }
 
   async delete(): Promise<void> {
+    const profile = await this.readProfile();
+    delete profile.humanSession;
+    await this.writeProfile(profile);
     this.warning();
     await deleteSecureJsonFile(this.location);
   }
