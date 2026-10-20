@@ -183,6 +183,23 @@ ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
 ROLLBACK TO SAVEPOINT context_acl_mutation;
 SELECT pg_temp.assert_issuer();`).join('\n')}
 
+-- Hosted restrictions allow only the five non-grantable migration ACLs.
+${[
+  'GRANT DELETE ON swarm.household_hosted_content_restrictions TO swarm_command;',
+  'GRANT UPDATE ON swarm.household_hosted_content_restrictions TO swarm_command;',
+  'GRANT UPDATE (owner_user_id) ON swarm.household_hosted_content_restrictions TO swarm_command;',
+  'GRANT SELECT ON swarm.household_hosted_content_restrictions TO swarm_command WITH GRANT OPTION;',
+  'GRANT INSERT ON swarm.household_hosted_content_restrictions TO swarm_command WITH GRANT OPTION;',
+  'GRANT UPDATE (operations) ON swarm.household_hosted_content_restrictions TO swarm_command WITH GRANT OPTION;',
+  'GRANT UPDATE (origin) ON swarm.household_hosted_content_restrictions TO swarm_command WITH GRANT OPTION;',
+  'GRANT UPDATE (closed_target_replacements) ON swarm.household_hosted_content_restrictions TO swarm_command WITH GRANT OPTION;',
+].map(mutation => `SAVEPOINT hosted_restriction_acl_mutation;
+${mutation}
+${dbAssert("SELECT count(*)=1 FROM issuer_widening", 'hosted restriction mutation adds exactly one offending ACL')}
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+ROLLBACK TO SAVEPOINT hosted_restriction_acl_mutation;
+SELECT pg_temp.assert_issuer();`).join('\n')}
+
 ${[
   ['household_workspace_boundaries','workspace_id','purpose','workspace_id'],
   ['household_member_content_roles','workspace_id','user_id','workspace_id,content_role,content_consent_id,confirmed_at,revoked_at'],

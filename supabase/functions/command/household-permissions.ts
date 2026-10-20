@@ -1,6 +1,7 @@
 /** Explicit human confirmation. Administration alone never grants content rights.
  * No default rights are provisioned when a workspace, member or seat is created. */
 import type postgres from 'postgres';
+import { assertHouseholdContentServiceReady, writeHostedContentRestriction } from './household-content-access.ts';
 import type { HouseholdIdentity, HouseholdCredentialRecheck } from './household-objects.ts';
 import { HOUSEHOLD_CONTENT_OPERATIONS } from '../_shared/protocol.js';
 import { householdCanonical, householdSha256 } from './household-transfers.ts';
@@ -25,6 +26,7 @@ async function human(tx: Sql, actor: HouseholdIdentity, recheck: HouseholdCreden
   return actor.principal_id === null && actor.connection === null && await recheck(tx, actor);
 }
 async function permissionContext(tx: Sql, workspaceId: string, actor: HouseholdIdentity) {
+  await assertHouseholdContentServiceReady(tx);
   const [workspace] = await tx`SELECT archived_at FROM swarm.workspaces WHERE workspace_id=${workspaceId}::uuid FOR UPDATE`;
   const [member] = await tx`SELECT role, revoked_at FROM swarm.memberships WHERE workspace_id=${workspaceId}::uuid AND user_id=${actor.user_id}::uuid FOR SHARE`;
   if (!workspace || workspace.archived_at !== null || !member || member.revoked_at !== null) return null;
@@ -96,6 +98,8 @@ async function writeConnection(tx: Sql, workspaceId: string, actor: HouseholdIde
       VALUES (${connection.connection_id}::uuid,${connection.grant_id}::uuid,${workspaceId}::uuid,${connection.principal_id}::uuid,
         ${actor.user_id}::uuid,${purpose},${connection.operations}::text[],${consent}::uuid,${expiry},${connection.kind === 'hosted' ? connection.grant_id : null}::uuid)`;
   }
+  if (connection.kind === 'hosted') await writeHostedContentRestriction(tx, workspaceId, actor.user_id,
+    connection.grant_id, connection.principal_id, connection.operations, 'human_allow');
 }
 async function finish(tx: Sql, workspaceId: string, actor: HouseholdIdentity, requestId: string,
   request: Awaited<ReturnType<typeof requestContext>>, response: Record<string, postgres.JSONValue>, recheck: HouseholdCredentialRecheck) {
@@ -171,7 +175,14 @@ export async function withdrawHouseholdConnection(tx: Sql, workspaceId: string, 
   const [principal] = await tx`SELECT principal_id FROM swarm.agent_principals WHERE workspace_id=${workspaceId}::uuid
     AND principal_id=${input.principal_id}::uuid AND owner_user_id=${actor.user_id}::uuid FOR SHARE`;
   if (!principal) return refused('connection_access_refused');
+  await tx`SELECT connection_id FROM swarm.household_content_connections WHERE workspace_id=${workspaceId}::uuid
+    AND principal_id=${input.principal_id}::uuid AND owner_user_id=${actor.user_id}::uuid
+    ORDER BY connection_id,grant_id FOR UPDATE`;
+  const [seat] = await tx`SELECT seat_id,grant_id FROM swarm.hosted_mcp_seats WHERE workspace_id=${workspaceId}::uuid
+    AND principal_id=${input.principal_id}::uuid AND owner_user_id=${actor.user_id}::uuid FOR SHARE`;
   await auditContext(tx, actor, requestId, request.digest, 'household_withdraw_connection');
+  if (seat) await writeHostedContentRestriction(tx, workspaceId, actor.user_id,
+    String(seat.grant_id), input.principal_id, [], 'human_withdraw');
   const withdrawn = await tx`UPDATE swarm.household_content_connections SET revoked_at=clock_timestamp()
     WHERE workspace_id=${workspaceId}::uuid AND principal_id=${input.principal_id}::uuid AND owner_user_id=${actor.user_id}::uuid
       AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>clock_timestamp()) RETURNING connection_id`;
