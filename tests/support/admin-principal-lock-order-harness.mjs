@@ -441,7 +441,7 @@ const DUMP_SCHEMAS = ['auth', 'swarm', 'swarm_read', 'commonswarm_oauth', 'commo
 /** CI only: a throwaway database on the CLI cluster, as adminEdgeDatabase builds one, but from
  * the verified container. Only its DDL comes from the shared database; its seed rows are the
  * migrations' own, so earlier server files cannot change them. Admin issuance opens only inside it. */
-async function isolatedDatabaseTarget(binding, docker, issuance) {
+async function isolatedDatabaseTarget(binding, docker, issuance, historical = false) {
   if (binding.mode !== 'ci') throw new Error('isolated_database_ci_only');
   const { default: postgres } = await import('postgres');
   const source = new URL(binding.db_url);
@@ -452,6 +452,7 @@ async function isolatedDatabaseTarget(binding, docker, issuance) {
   const master = postgres(binding.db_url, quiet);
   const db = postgres(target.toString(), quiet);
   let created = false;
+  let history = null, retainedCatalog = null;
   const close = async () => {
     try { await db.end({ timeout: 5 }); } finally {
       try {
@@ -472,17 +473,51 @@ async function isolatedDatabaseTarget(binding, docker, issuance) {
       FROM unnest(${DUMP_SCHEMAS}::text[]) AS s`;
     if (present?.ok !== true || present.cutover !== true) throw new Error('source_schema_missing');
     phase = 'dump';
-    const dump = docker.execWithSecret(binding.db_container_id,
-      `IFS= read -r PGPASSWORD || true; export PGPASSWORD; exec pg_dump -U "$1" -d "$2" --schema-only --strict-names ${DUMP_SCHEMAS.map((s) => `--schema=${s}`).join(' ')}`,
-      [decodeURIComponent(source.username), decodeURIComponent(source.pathname.slice(1))], decodeURIComponent(source.password));
+    // Both sections and the catalog witness see one exported, retained schema snapshot.
+    // No application data is copied from the shared database.
+    const schemas = historical ? [...DUMP_SCHEMAS, 'extensions'] : DUMP_SCHEMAS;
+    let pre, post, dump;
+    let extensionOptions = [];
+    const section = (snapshot, part) => docker.execWithSecret(binding.db_container_id,
+      `IFS= read -r PGPASSWORD || true; export PGPASSWORD; exec pg_dump -U "$1" -d "$2" --snapshot="$3" --schema-only --strict-names ${schemas.map(s=>`--schema=${s}`).join(' ')} ${part ? `--section=${part}` : ''} ${extensionOptions.join(' ')}`,
+      [decodeURIComponent(source.username), decodeURIComponent(source.pathname.slice(1)), snapshot], decodeURIComponent(source.password));
+    await master.begin('isolation level repeatable read read only', async tx => {
+      const [{snapshot}] = await tx`SELECT pg_export_snapshot() AS snapshot`;
+      if (historical) {
+        const extensions = await tx`SELECT e.extname,pg_get_userbyid(e.extowner)=current_user AS owned
+          FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE n.nspname=ANY(${schemas}::text[]) ORDER BY e.extname`;
+        // pg_dump with --schema omits extensions unless explicitly selected.
+        // Extension ownership cannot be ALTERed; never silently restore under another owner.
+        if (!extensions.some(e=>e.extname==='pgcrypto') || !extensions.some(e=>e.extname==='uuid-ossp') ||
+          extensions.some(e=>!e.owned || !/^[a-zA-Z0-9_-]+$/u.test(e.extname))) throw new Error('historical_extension_owner_or_dependency');
+        extensionOptions=extensions.map(e=>`--extension=${e.extname}`);
+        retainedCatalog = await historicalCatalog(tx);
+        pre = section(snapshot, 'pre-data');
+        post = section(snapshot, 'post-data');
+      } else dump = section(snapshot, null);
+    });
     phase = 'create';
     await master.unsafe(`CREATE DATABASE ${name} TEMPLATE template0`);
     created = true;
     phase = 'restore';
-    await db.unsafe(`CREATE SCHEMA extensions; CREATE EXTENSION pgcrypto WITH SCHEMA extensions;
-      CREATE EXTENSION "uuid-ossp" WITH SCHEMA extensions; GRANT USAGE ON SCHEMA extensions TO PUBLIC;`);
-    await db.unsafe(dump.replace(/^\\(?:un)?restrict \S+\r?$/gmu, ''));
+    const restore = text => db.unsafe(text.replace(/^\\(?:un)?restrict \S+\r?$/gmu, ''));
+    if (historical) {
+      await restore(pre);
+      phase = 'historical-initial-data';
+      history = await seedHistoricalInitial(db);
+      phase = 'historical-post-data';
+      await restore(post);
+    } else {
+      await db.unsafe(`CREATE SCHEMA extensions; CREATE EXTENSION pgcrypto WITH SCHEMA extensions;
+        CREATE EXTENSION "uuid-ossp" WITH SCHEMA extensions; GRANT USAGE ON SCHEMA extensions TO PUBLIC;`);
+      await restore(dump);
+    }
     await db.unsafe('RESET ALL');
+    if (historical) {
+      phase = 'historical-catalog';
+      if (await historicalCatalog(db) !== retainedCatalog) throw new Error('historical_catalog_changed');
+      await historicalGuards(db, history);
+    }
     phase = 'seed';
     // A schema-only copy has no seed rows. The command module reads only min_client_version
     // from swarm.config. Its value is a text parameter: postgres.js describes a `${json}::jsonb`
@@ -499,10 +534,141 @@ async function isolatedDatabaseTarget(binding, docker, issuance) {
     const check = classifyMinClientVersion(seeded);
     if (!check.ok) setupFailure(minClientVersionDiagnostic(check));
     if (check.version !== minimum) setupFailure('min_client_version_readback_mismatch');
-    return { url: target.toString(), mode: binding.mode, tlsCaPem: null, ensureAdminIssuance: () => ensureAdminIssuance(db, issuance), close };
+    return { url: target.toString(), mode: binding.mode, tlsCaPem: null, history, retainedCatalog,
+      historicalChild: () => isolatedDatabaseTarget(binding, docker, issuance, true), ensureAdminIssuance: () => ensureAdminIssuance(db, issuance), close };
   } catch (error) {
     try { await close(); } catch { /* the setup failure below is the result */ }
     throw new Error(`isolated_database_setup_failed:${phase}:${error instanceof LockOrderSetupFailure ? error.code : sqlstate(error)}`);
+  }
+}
+
+/** Catalog equality covers the actual source definitions, not an invented schema.
+ * OIDs are deliberately resolved to names because a fresh database allocates new OIDs. */
+async function historicalCatalog(sql) {
+  const schemas = [...DUMP_SCHEMAS, 'extensions'];
+  const rows = await sql`
+    SELECT kind, identity, body FROM (
+      SELECT 'schema' AS kind,n.nspname AS identity,
+        jsonb_build_array(pg_get_userbyid(n.nspowner),n.nspacl) AS body
+        FROM pg_namespace n WHERE n.nspname=ANY(${schemas}::text[])
+      UNION ALL SELECT 'extension',e.extname,jsonb_build_array(n.nspname,e.extversion,pg_get_userbyid(e.extowner))
+        FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE n.nspname=ANY(${schemas}::text[])
+      UNION ALL SELECT 'default-acl',n.nspname||'.'||pg_get_userbyid(a.defaclrole)||'.'||a.defaclobjtype,
+        to_jsonb(a.defaclacl) FROM pg_default_acl a JOIN pg_namespace n ON n.oid=a.defaclnamespace WHERE n.nspname=ANY(${schemas}::text[])
+      UNION ALL SELECT 'index',n.nspname||'.'||c.relname,to_jsonb(pg_get_indexdef(c.oid))
+        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind='i' AND n.nspname=ANY(${schemas}::text[])
+      UNION ALL SELECT 'relation',n.nspname||'.'||c.relname,
+        jsonb_build_array(c.relkind,pg_get_userbyid(c.relowner),c.relacl,c.relrowsecurity,c.relforcerowsecurity,c.reloptions,
+          CASE WHEN c.relkind IN ('v','m') THEN pg_get_viewdef(c.oid) ELSE NULL END)
+        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=ANY(${schemas}::text[])
+      UNION ALL SELECT 'column',n.nspname||'.'||c.relname||'.'||a.attname,
+        jsonb_build_array(a.attnum,format_type(a.atttypid,a.atttypmod),a.attnotnull,a.attidentity,a.attgenerated,a.attacl,
+          pg_get_expr(d.adbin,d.adrelid))
+        FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+        LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+        WHERE n.nspname=ANY(${schemas}::text[]) AND a.attnum>0 AND NOT a.attisdropped
+      UNION ALL SELECT 'function',n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')',
+        jsonb_build_array(pg_get_userbyid(p.proowner),p.proacl,p.prokind,CASE WHEN p.prokind='a' THEN NULL ELSE pg_get_functiondef(p.oid) END)
+        FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+        WHERE n.nspname=ANY(${schemas}::text[])
+      UNION ALL SELECT 'type',n.nspname||'.'||t.typname,jsonb_build_array(pg_get_userbyid(t.typowner),t.typacl,t.typtype)
+        FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname=ANY(${schemas}::text[])
+      UNION ALL SELECT 'constraint',n.nspname||'.'||c.relname||'.'||k.conname,
+        jsonb_build_array(k.convalidated,pg_get_constraintdef(k.oid))
+        FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname=ANY(${schemas}::text[])
+      UNION ALL SELECT 'trigger',n.nspname||'.'||c.relname||'.'||t.tgname,
+        jsonb_build_array(t.tgenabled,pg_get_triggerdef(t.oid))
+        FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname=ANY(${schemas}::text[]) AND NOT t.tgisinternal
+      UNION ALL SELECT 'policy',n.nspname||'.'||c.relname||'.'||p.polname,
+        jsonb_build_array(p.polpermissive,p.polcmd,
+          (SELECT array_agg(CASE WHEN r=0 THEN 'PUBLIC' ELSE pg_get_userbyid(r) END ORDER BY r) FROM unnest(p.polroles) r),
+          pg_get_expr(p.polqual,p.polrelid),pg_get_expr(p.polwithcheck,p.polrelid))
+        FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname=ANY(${schemas}::text[])
+    ) inventory ORDER BY kind,identity`;
+  return JSON.stringify(rows);
+}
+
+/** Synthetic imported INITIAL history; no claim of observed historical issuance.
+ * First use is within the original one-hour TTL and more than 35 days ago. */
+async function seedHistoricalInitial(sql) {
+  const [{now}] = await sql`SELECT clock_timestamp() AS now`;
+  const T = new Date(now).getTime(), day=86_400_000;
+  const history={label:'synthetic-initial-history',cases:[]};
+  for (const kind of ['standing','suspended','horizon-expired','expired-unused','live']) {
+    const f=Object.fromEntries(['owner','workspace','stream','principal','device','run','grant','token','lineage','task'].map(k=>[k,randomUUID()]));
+    const created=new Date(T-37*day), issued=new Date(kind==='live' ? T-60_000 : T-36*day);
+    const used=kind==='expired-unused' ? null : new Date(issued.getTime()+30_000);
+    const expires=new Date(issued.getTime()+3_600_000);
+    const raw=`swm_agt_${randomBytes(32).toString('base64url')}`;
+    const standing=['standing','suspended','live'].includes(kind);
+    await sql`INSERT INTO auth.users(id,aud,role,email,created_at)
+      VALUES(${f.owner}::uuid,'authenticated','authenticated',${`${f.owner}@example.test`},${created})`;
+    await sql`INSERT INTO swarm.users(user_id,display_name,created_at)
+      VALUES(${f.owner}::uuid,'Synthetic historical owner',${created})`;
+    await sql`INSERT INTO swarm.devices(device_id,user_id,label,created_at)
+      VALUES(${f.device}::uuid,${f.owner}::uuid,'Synthetic historical device',${created})`;
+    await sql`INSERT INTO swarm.workspaces(workspace_id,name,created_by,created_at)
+      VALUES(${f.workspace}::uuid,'Synthetic historical workspace',${f.owner}::uuid,${created})`;
+    await sql`INSERT INTO swarm.memberships(workspace_id,user_id,role,joined_at)
+      VALUES(${f.workspace}::uuid,${f.owner}::uuid,'owner',${created})`;
+    await sql`INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES(${f.stream}::uuid,${f.workspace}::uuid,'workspace')`;
+    await sql`INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,created_at)
+      VALUES(${f.principal}::uuid,${f.workspace}::uuid,${f.owner}::uuid,${kind},${created})`;
+    await sql`INSERT INTO swarm.agent_runs(run_id,principal_id,device_id,started_at)
+      VALUES(${f.run}::uuid,${f.principal}::uuid,${f.device}::uuid,${created})`;
+    await sql`INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,created_by,created_at,
+      kind,max_successors,horizon_expires_at,bound_device_id,last_used_at,last_used_device_id,last_used_from,new_host_at,suspended_at)
+      VALUES(${f.grant}::uuid,${f.workspace}::uuid,${f.principal}::uuid,${f.run}::uuid,${f.owner}::uuid,${created},
+        ${standing?'standing':'timeboxed'},${standing?null:800},${standing?null:new Date(T-7*day)},
+        ${f.device}::uuid,${used},${used?f.device:null}::uuid,${used?'synthetic-initial':null},
+        ${kind==='suspended'?used:null},${kind==='suspended'?new Date(T-2*day):null})`;
+    await sql`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,task_id,epoch,scopes,token_hash,issued_at,expires_at,
+      lineage_id,renewal_grant_id,first_used_at)
+      VALUES(${f.token}::uuid,${f.principal}::uuid,${f.run}::uuid,${f.task}::uuid,1,'["post_signal"]'::jsonb,
+        ${createHash('sha256').update(raw).digest()},${issued},${expires},${f.lineage}::uuid,${f.grant}::uuid,${used})`;
+    history.cases.push({...f,kind,raw});
+  }
+  return history;
+}
+
+async function historicalGuards(sql, history) {
+  const [{ok}] = await sql`SELECT current_setting('row_security')='on'
+    AND current_setting('check_function_bodies')='on' AND current_setting('session_replication_role')='origin'
+    AND (SELECT setting=reset_val FROM pg_settings WHERE name='search_path')
+    AND NOT EXISTS(SELECT 1 FROM pg_constraint k JOIN pg_namespace n ON n.oid=k.connamespace
+      WHERE n.nspname=ANY(${DUMP_SCHEMAS}::text[]) AND NOT k.convalidated)
+    AND NOT EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+      JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=ANY(${DUMP_SCHEMAS}::text[]) AND t.tgenabled NOT IN ('O','A')) AS ok`;
+  if (!ok) throw new Error('historical_guard_settings');
+  // The source catalog equality includes the full immutable/server-clock bodies and ACLs.
+  const f=history.cases[0], rolledBack={};
+  const rollback=async operation=>{
+    try { await sql.begin(async tx=>{await operation(tx);throw rolledBack;}); }
+    catch(error) {if(error!==rolledBack) throw error;}
+  };
+  await rollback(async tx=>{
+    const [row]=await tx`INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,created_by,
+      created_at,kind,bound_device_id) VALUES(${randomUUID()}::uuid,${f.workspace}::uuid,${f.principal}::uuid,
+      ${f.run}::uuid,${f.owner}::uuid,'2000-01-01','standing',${f.device}::uuid)
+      RETURNING created_at=statement_timestamp() AS pinned`;
+    if(!row.pinned) throw new Error('historical_server_clock_not_pinned');
+  });
+  for(const column of ['created_at','last_used_at']) {
+    let code=null;
+    try {await rollback(tx=>tx`UPDATE swarm.renewal_grants SET ${tx(column)}=${tx(column)}-interval '1 day'
+      WHERE renewal_grant_id=${f.grant}::uuid`);} catch(error) {code=sqlstate(error);}
+    if(code!=='55000') throw new Error('historical_monotonic_guard_missing');
+  }
+  for(const role of ['anon','authenticated','swarm_read']) {
+    let code=null;
+    try {await rollback(async tx=>{
+      await tx.unsafe(`SET LOCAL ROLE ${role}`);
+      await tx`UPDATE swarm.renewal_grants SET successors_used=successors_used+1 WHERE renewal_grant_id=${f.grant}::uuid`;
+    });} catch(error) {code=sqlstate(error);}
+    if(code!=='42501') throw new Error('historical_unauthorized_write_not_denied');
   }
 }
 
@@ -729,6 +895,11 @@ export async function assertActiveFloorCatalog(sql) {
 
 /** Runs one Deno scenario against the target. Only LOCK_ORDER_ lines are read back. */
 export async function runScenario(target, scenario, timeoutMs = 170_000, generations = null) {
+  if (scenario === 'active-floor-historical-idle' && !target.history) {
+    if (target.mode !== 'ci' || typeof target.historicalChild !== 'function') refuse('historical_initial_ci_child_required');
+    const child = await target.historicalChild();
+    try { return await runScenario(child, scenario, timeoutMs, generations); } finally { await child.close(); }
+  }
   let adminIssuance = null;
   if (RACES[scenario]?.waiting === 'admin') {
     adminIssuance = await target.ensureAdminIssuance();
@@ -755,7 +926,7 @@ export async function runScenario(target, scenario, timeoutMs = 170_000, generat
       }
       floor_url=pathToFileURL(join(secret.dir,modules[0][0])).href;
     }
-    writeFileSync(configPath, JSON.stringify({ db_url: target.url, tls_ca_pem: target.tlsCaPem, floor_url, source, read_source:readSource, active_floor:generations!==null }), { mode: 0o600 });
+    writeFileSync(configPath, JSON.stringify({ db_url: target.url, tls_ca_pem: target.tlsCaPem, floor_url, source, read_source:readSource, active_floor:generations!==null, history:target.history, retained_catalog:target.retainedCatalog }), { mode: 0o600 });
     const env = { PATH: process.env.PATH ?? '', NO_COLOR: '1' };
     for (const key of ['HOME', 'DENO_DIR', 'XDG_CACHE_HOME']) if (process.env[key]) env[key] = process.env[key];
     const child = spawn('deno', ['run', '--no-lock', ...(scenario==='floor-first-use-vs-head-revocation' ? ['--cached-only'] : []), '--config', join(REPO_ROOT, 'supabase/functions/command/deno.json'),
@@ -936,6 +1107,11 @@ async function denoMain() {
     const { default: postgres } = await import('npm:postgres@3.4.9');
     const observer = postgres(config.db_url, { prepare: false, max: 4, idle_timeout: 5, connect_timeout: 10, onnotice: () => {}, ...ssl });
     if(config.active_floor) {out.stage='active_catalog';out.active_catalog=await assertActiveFloorCatalog(observer);}
+    if (config.history) {
+      out.stage='historical-guards';
+      if (await historicalCatalog(observer) !== config.retained_catalog) fail('historical_catalog_changed');
+      await historicalGuards(observer, config.history);
+    }
     out.stage='import';
     const load=(path,kind='command')=>import(pathToFileURL(join((kind==='read' ? config.read_source : config.source)?.path ?? REPO_ROOT,path)).href);
     const command = await load('supabase/functions/command/index.ts');
@@ -976,8 +1152,9 @@ async function denoMain() {
     if (!minimum.ok) fail(minClientVersionDiagnostic(minimum));
     out.client_version = minimum.version;
     // D4: names and ids unique to this run (fresh workspace, users and grants per scenario).
-    const ctx = { load, policyCommand, issuerTarget:{url:config.db_url,ssl:ssl.ssl}, floorUrl:config.floor_url, command, db, observer, failures, jwks, out, tag: randomUUID().replaceAll('-', '').slice(0, 10), clientVersion: minimum.version };
-    const result = scenario.startsWith('active-floor-canonical-') ? await activeFloorCanonicalScenario(ctx,scenario)
+    const ctx = { history:config.history, retainedCatalog:config.retained_catalog, load, policyCommand, issuerTarget:{url:config.db_url,ssl:ssl.ssl}, floorUrl:config.floor_url, command, db, observer, failures, jwks, out, tag: randomUUID().replaceAll('-', '').slice(0, 10), clientVersion: minimum.version };
+    const result = scenario === 'active-floor-historical-idle' ? await historicalIdleScenario(ctx)
+      : scenario.startsWith('active-floor-canonical-') ? await activeFloorCanonicalScenario(ctx,scenario)
       : scenario.startsWith('local-allow-retired-parent-') ? await localAllowRetiredParentScenario(ctx,scenario)
       : scenario==='hosted-owner-removal-prefix' ? await hostedOwnerRemovalScenario(ctx)
       : scenario==='floor-first-use-vs-head-revocation' ? await floorFirstUseScenario(ctx)
@@ -3045,4 +3222,129 @@ async function activeFloorCanonicalScenario(ctx,scenario) {
   check('terminal-denial-every-table-unchanged',terminalBefore===await databaseState());
   return {checks,sqlstates:states,canonical_witness:{first_pid:firstPid,second_pid:secondPid,gate_pid:gatePid,
     workspace_id:workspaceId,token_ids:[raced.T.token_id,raced.C.token_id,raced.X.token_id],order:firstUseFirst?'use-first':'revoke-first'}};
+}
+
+
+/** Historical behavior belongs to the real read/command owners. The complete state
+ * comparisons intentionally fail on any unexplained write, including other schemas. */
+async function historicalIdleScenario(ctx) {
+  const {observer:sql,history}=ctx,checks=[];
+  const check=(name,ok)=>{if(!ok) fail(`historical_${name}`);checks.push({name,ok:true});};
+  const read=await ctx.load('supabase/functions/read/index.ts','read');
+  const stable=value=>JSON.stringify(value,(_key,v)=>v && typeof v==='object' && !Array.isArray(v)
+    ? Object.fromEntries(Object.entries(v).sort(([a],[b])=>a.localeCompare(b))) : v);
+  const same=(a,b)=>stable(a)===stable(b);
+  const state=async()=>{
+    const result={};
+    for(const t of await sql`SELECT schemaname,relname FROM pg_stat_user_tables ORDER BY schemaname,relname`) {
+      const name=`${t.schemaname}.${t.relname}`;
+      result[name]=(await sql`SELECT to_jsonb(r) AS row FROM ${sql(name)} r ORDER BY to_jsonb(r)::text`).map(r=>r.row);
+    }
+    return result;
+  };
+  const use=(f,raw=f.raw)=>read.handleRequest(new Request('http://127.0.0.1/functions/v1/read',{
+    method:'POST',headers:{authorization:`Bearer ${raw}`,'content-type':'application/json'},
+    body:JSON.stringify({resource:'renewal_grants',workspace_id:f.workspace})}));
+  const renew=async f=>{
+    const commandId=id();
+    const response=await ctx.command.handleRequest(new Request('http://127.0.0.1/functions/v1/command',{
+      method:'POST',headers:{authorization:`Bearer ${f.raw}`,'content-type':'application/json'},
+      body:JSON.stringify({command_id:commandId,client_version:ctx.clientVersion,workspace_id:f.workspace,
+        stream:{kind:'workspace'},command:{kind:'renew_agent_token'}})}));
+    return {status:response.status,body:await response.json(),commandId};
+  };
+  const minus=(row,keys)=>Object.fromEntries(Object.entries(row).filter(([key])=>!keys.includes(key)));
+  const row=(s,table,key,value)=>s[`swarm.${table}`].find(r=>r[key]===value);
+  const unchangedExcept=(before,after,tables)=>{
+    check('table-inventory-unchanged',same(Object.keys(before),Object.keys(after)));
+    for(const table of Object.keys(before)) if(!tables.includes(table))
+      check(`unchanged-${table}`,same(before[table],after[table]));
+  };
+  const window=(value,start,end)=>Number.isFinite(Date.parse(value)) && Date.parse(value)>=start && Date.parse(value)<=end;
+  const clock=async()=>new Date((await sql`SELECT clock_timestamp() AS now`)[0].now).getTime();
+  const grantDelta=(before,after,f,start,end,spend)=>{
+    const a=row(before,'renewal_grants','renewal_grant_id',f.grant),b=row(after,'renewal_grants','renewal_grant_id',f.grant);
+    check('grant-history-preserved',same(minus(a,['last_used_at','last_used_device_id','last_used_from','successors_used']),
+      minus(b,['last_used_at','last_used_device_id','last_used_from','successors_used'])));
+    check('exact-grant-counter-and-use',b.successors_used===a.successors_used+spend &&
+      b.last_used_device_id===f.device && window(b.last_used_at,start,end) &&
+      b.last_used_from===a.last_used_from);
+    check('other-grants-unchanged',same(before['swarm.renewal_grants'].filter(r=>r.renewal_grant_id!==f.grant),
+      after['swarm.renewal_grants'].filter(r=>r.renewal_grant_id!==f.grant)));
+  };
+  const live=history.cases.find(f=>f.kind==='live');
+  check('same-invocation-positive',(await use(live)).status===200);
+  const completed=[];
+  for(const f of history.cases.filter(f=>f.kind!=='live')) {
+    const initial=await state(),g=row(initial,'renewal_grants','renewal_grant_id',f.grant),t=row(initial,'agent_tokens','token_id',f.token);
+    const now=await clock();
+    check('coherent-old-credential',Date.parse(g.created_at)<=Date.parse(t.issued_at) &&
+      Date.parse(t.issued_at)<now-35*86_400_000 && Date.parse(t.expires_at)>Date.parse(t.issued_at) &&
+      Date.parse(t.expires_at)-Date.parse(t.issued_at)<=8*3_600_000 &&
+      (f.kind==='expired-unused' ? t.first_used_at===null && g.last_used_at===null :
+        Date.parse(t.first_used_at)>=Date.parse(t.issued_at) && Date.parse(t.first_used_at)<Date.parse(t.expires_at) &&
+        t.first_used_at===g.last_used_at && Date.parse(g.last_used_at)<now-35*86_400_000));
+    check('expired-read-denied',[401,403].includes((await use(f)).status));
+    check('expired-read-every-table-unchanged',same(initial,await state()));
+    const before=await state(),start=await clock(),result=await renew(f),end=await clock(),after=await state();
+    if(['horizon-expired','expired-unused'].includes(f.kind)) {
+      check('ordinary-renewal-denied',[401,403].includes(result.status));
+      check('ordinary-denial-every-table-unchanged',same(before,after));
+      completed.push(f.kind);
+      continue;
+    }
+    check('standing-null-technical-windows',g.kind==='standing' && g.max_successors===null && g.horizon_expires_at===null &&
+      g.connection_expires_at===null && g.connection_expired_at===null && g.suspension_active===(f.kind==='suspended'));
+    const body=result.body;
+    check('silent-short-successor',result.status===200 && body.status==='accepted' && /^swm_agt_[A-Za-z0-9_-]{43}$/u.test(body.agent_token));
+    unchangedExcept(before,after,['swarm.agent_tokens','swarm.renewal_grants','swarm.events','swarm.streams',
+      'swarm.idempotency_keys','swarm.audit_log','swarm.agent_presence']);
+    const successor=row(after,'agent_tokens','token_id',body.token_id);
+    check('one-pending-hash-matched-successor',!!successor && after['swarm.agent_tokens'].length===before['swarm.agent_tokens'].length+1 &&
+      same(before['swarm.agent_tokens'],after['swarm.agent_tokens'].filter(r=>r.token_id!==body.token_id)) &&
+      successor.token_hash===`\\x${createHash('sha256').update(body.agent_token).digest('hex')}` && successor.first_used_at===null &&
+      successor.predecessor_token_id===f.token && successor.lineage_id===f.lineage && successor.renewal_grant_id===f.grant &&
+      successor.principal_id===f.principal && successor.run_id===f.run && successor.task_id===f.task && successor.epoch===t.epoch &&
+      same(successor.scopes,t.scopes) && successor.revoked_at===null && successor.surrender_only===false &&
+      successor.parent_admin_grant_id===t.parent_admin_grant_id && window(successor.issued_at,start,end) &&
+      Date.parse(successor.expires_at)>end && Date.parse(successor.expires_at)-Date.parse(successor.issued_at)<=8*3_600_000);
+    check('complete-successor-inheritance',same(
+      minus(t,['token_id','token_hash','issued_at','expires_at','first_used_at','predecessor_token_id']),
+      minus(successor,['token_id','token_hash','issued_at','expires_at','first_used_at','predecessor_token_id'])));
+    grantDelta(before,after,f,start,end,1);
+    const appended=(table,predicate)=>{
+      const old=before[`swarm.${table}`],next=after[`swarm.${table}`];
+      const added=next.filter(r=>!old.some(o=>same(o,r)));
+      check(`exact-${table}-append`,next.length===old.length+1 && old.every(o=>next.some(r=>same(o,r))) && added.length===1 && predicate(added[0]));
+      return added[0];
+    };
+    const event=appended('events',r=>r.command_id===result.commandId && r.type==='AgentTokenMinted' &&
+      r.workspace_id===f.workspace && r.stream_id===f.stream && r.actor_agent_principal===f.principal && r.actor_run===f.run &&
+      r.payload.token_id===body.token_id && r.payload.predecessor_token_id===f.token && r.payload.renewal_grant_id===f.grant &&
+      r.payload.principal_id===f.principal && r.payload.run_id===f.run && same(r.payload.scopes,t.scopes));
+    appended('idempotency_keys',r=>r.command_id===result.commandId && r.principal_kind==='agent' && r.principal_id===f.principal &&
+      r.workspace_id===f.workspace && r.stream_id===f.stream && r.response.ok===true && r.response.token_id===body.token_id &&
+      same(r.response.event_ids,[event.event_id]) && !Object.hasOwn(r.response,'agent_token'));
+    appended('audit_log',r=>r.workspace_id===f.workspace && r.stream_id===f.stream && r.command_kind==='renew_agent_token' &&
+      r.outcome==='accepted' && r.actor_agent_principal===f.principal && r.actor_run===f.run && r.credential_id===f.token && r.reason===null);
+    appended('agent_presence',r=>r.workspace_id===f.workspace && r.principal_id===f.principal && window(r.last_command_at,start,end) &&
+      r.client_build===null && r.watcher_at===null && r.channel_at===null && r.listener_at===null && r.turn_at===null);
+    check('exact-stream-sequence',same(before['swarm.streams'].map(r=>r.stream_id===f.stream?{...r,head_seq:r.head_seq+1}:r).sort((a,b)=>a.stream_id.localeCompare(b.stream_id)),[...after['swarm.streams']].sort((a,b)=>a.stream_id.localeCompare(b.stream_id))));
+    const useStart=await clock();
+    check('successor-read-usable',(await use(f,body.agent_token)).status===200);
+    const useEnd=await clock(),adopted=await state();
+    unchangedExcept(after,adopted,['swarm.agent_tokens','swarm.renewal_grants']);
+    const used=row(adopted,'agent_tokens','token_id',body.token_id);
+    check('exact-successor-adoption',window(used.first_used_at,useStart,useEnd) &&
+      same(minus(successor,['first_used_at']),minus(used,['first_used_at'])) &&
+      same(after['swarm.agent_tokens'].filter(r=>r.token_id!==body.token_id),adopted['swarm.agent_tokens'].filter(r=>r.token_id!==body.token_id)));
+    grantDelta(after,adopted,f,useStart,useEnd,0);
+    completed.push(f.kind);
+  }
+  const guardBefore=await state();
+  await historicalGuards(sql,history);
+  check('guard-probes-rollback-every-table',same(guardBefore,await state()));
+  check('retained-catalog-after-cases',await historicalCatalog(sql)===ctx.retainedCatalog);
+  await assertActiveFloorCatalog(sql);
+  return {checks,historical_completed:completed,fixture_label:history.label};
 }

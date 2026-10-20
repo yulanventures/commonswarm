@@ -38,6 +38,8 @@ interface RaceResult {
   checks?: {name:string;ok:boolean}[];
   source?: {commit:string;tree:string};
   read_source?: {commit:string;tree:string};
+  historical_completed?: string[];
+  fixture_label?: string;
   active_catalog?: {functions:number;migrations:number;view_columns:number;measured_view_sha256:string};
   canonical_witness?: {first_pid:number;second_pid:number;gate_pid:number;token_ids:string[];order:string};
   floor_compatibility?: string;
@@ -332,7 +334,28 @@ for(const [command,read] of [['current','current'],['F','current'],['current','F
   }
 }
 
-// Count real completed cases, then retain the explicit missing-history failure.
+// Each row receives a fresh INITIAL-history child database; none rewinds shared state.
+const completedHistoricalCases=new Set<string>();
+for(const [command,read] of [['current','current'],['F','current'],['current','F'],['F','F']]) {
+  test(`active-floor-historical-idle exact ${command}/${read}`,{timeout:300_000},async()=>{
+    const result=await harness.runScenario(bound(),'active-floor-historical-idle',270_000,{command,read});
+    assert.equal(result.stage,'complete',`${result.stage}: ${result.error ?? 'inconclusive'}`);
+    assert.equal(result.fixture_label,'synthetic-initial-history');
+    assert.equal(result.active_catalog?.migrations,4);
+    if(command==='F') assert.deepEqual(result.source,harness.ACTIVE_FLOOR_SOURCES.F);
+    if(read==='F') assert.deepEqual(result.read_source,harness.ACTIVE_FLOOR_SOURCES.F);
+    assert.equal(result.http_refused,0);
+    assert.deepEqual(result.historical_completed,['standing','suspended','horizon-expired','expired-unused']);
+    for(const contract of ['same-invocation-positive','coherent-old-credential','expired-read-every-table-unchanged',
+      'ordinary-denial-every-table-unchanged','silent-short-successor','successor-read-usable',
+      'exact-successor-adoption','grant-history-preserved','guard-probes-rollback-every-table','retained-catalog-after-cases'])
+      assert.ok(result.checks?.some(check=>check.name===contract && check.ok),contract);
+    assert.deepEqual(result.checks?.filter(check=>!check.ok),[]);
+    completedHistoricalCases.add(`${command}/${read}`);
+  });
+}
+
+// Count real completed cases, then retain the explicit missing-baseline failure.
 // Renewal's independent required gate lives with its own real transaction tests;
 // the genuine GoTrue/issuer owners and full AS suite remain separate gates.
 test('active-floor-required-F-support-complete',()=>{
@@ -340,5 +363,6 @@ test('active-floor-required-F-support-complete',()=>{
     for(const order of ['use-first','revoke-first'])
       assert.ok(completedFloorCases.has(`active-floor-canonical-${order}/${command}/${read}`),'required canonical case did not complete');
   assert.equal(completedFloorCases.size,41,'all 8 canonical and 33 existing permission/issuer cases must execute successfully');
-  assert.fail('F support incomplete: genuine >30-day coherent stored idle fixture remains unimplemented; retained baseline pins renewal grant created_at and forbids rewinding it. Current declared consumer assertions do not certify this missing case. New unused-permanent-root F backport, Linux and full AS gates remain pending.');
+  assert.equal(completedHistoricalCases.size,4,'all historical generation rows must execute successfully');
+  assert.fail('F support incomplete: retained pre-permanence source plus its actual schema discriminator remains unimplemented (SCR historical baseline target). Historical current/ACTIVE rows do not prove baseline-red. New unused-permanent-root F backport, Linux and full AS gates remain pending.');
 });
