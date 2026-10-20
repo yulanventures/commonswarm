@@ -17,7 +17,7 @@ LIMIT = 5000
 CHARACTERS_PER_TOKEN = 4
 LOCKFILES = {
     'pnpm-lock.yaml', 'package-lock.json', 'yarn.lock', 'Cargo.lock',
-    'bun.lockb', 'poetry.lock', 'uv.lock',
+    'bun.lockb', 'poetry.lock', 'uv.lock', 'deno.lock',
 }
 
 
@@ -121,8 +121,10 @@ def check(base, head):
     content = blobs(oid for _, old, new in records for oid in (old, new))
     failures = 0
     for path, old, new in records:
-        after = characters(content[new])
         before = characters(content[old]) if old else None
+        # Text at base stays subject to the ratchet despite NUL/invalid bytes.
+        after = (len(content[new].decode('utf-8', 'replace')) if before is not None
+                 else characters(content[new]))
         # All comparisons use the policy measure, including its token rounding.
         if after is None or after <= LIMIT * CHARACTERS_PER_TOKEN:
             continue
@@ -161,6 +163,7 @@ def inventory(head):
 
 
 def main():
+    os.chdir(os.fsdecode(git('rev-parse', '--show-toplevel').rstrip(b'\n')))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base')
     parser.add_argument('--head', default='HEAD')

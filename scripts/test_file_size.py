@@ -42,8 +42,8 @@ class FileSizeTest(unittest.TestCase):
         self.git('commit', '-qm', 'fixture change')
         return self.git('rev-parse', 'HEAD').strip()
 
-    def check(self, expected, *args):
-        result = subprocess.run([sys.executable, str(SCRIPT), *args], cwd=self.root,
+    def check(self, expected, *args, cwd=None):
+        result = subprocess.run([sys.executable, str(SCRIPT), *args], cwd=cwd or self.root,
                                 env=self.env, capture_output=True, text=True)
         self.assertEqual(expected, result.returncode, result.stdout + result.stderr)
         return result.stdout
@@ -96,7 +96,7 @@ class FileSizeTest(unittest.TestCase):
                            ('invalid.bin', b'x' * 25000 + b'\xff')]:
             self.write(path, blob)
         for name in ('pnpm-lock.yaml', 'package-lock.json', 'yarn.lock', 'Cargo.lock',
-                     'bun.lockb', 'poetry.lock', 'uv.lock'):
+                     'bun.lockb', 'poetry.lock', 'uv.lock', 'deno.lock'):
             self.write('nested/' + name, 'x' * 25000)
         self.git('add', '--all')
         self.check(0, '--staged')
@@ -114,6 +114,70 @@ class FileSizeTest(unittest.TestCase):
             self.git('add', path)
         output = self.check(1, '--staged')
         self.assertEqual(2, len(output.splitlines()))
+
+    def test_subdirectory_uses_root_policy_and_inventory(self):
+        self.write('.file-size-ignore', '# Generated output\nsub/ignored.txt\n')
+        self.write('sub/ignored.txt', 'x' * 25000)
+        self.write('sub/frozen.txt', 'x' * 24000)
+        base = self.commit()
+        self.write('sub/ignored.txt', 'x' * 28000)
+        self.git('add', '--all')
+        self.check(0, '--staged', cwd=self.root / 'sub')
+        head = self.commit()
+        self.check(0, '--base', base, '--head', head, cwd=self.root / 'sub')
+        import json
+        rows = json.loads(self.check(0, '--inventory', cwd=self.root / 'sub'))
+        self.assertEqual(['sub/frozen.txt'], [row['path'] for row in rows])
+        self.write('sub/handwritten.txt', 'x' * 25000)
+        self.git('add', '--all')
+        self.assertIn('"sub/handwritten.txt"',
+                      self.check(1, '--staged', cwd=self.root / 'sub'))
+
+    def test_text_cannot_escape_ratchet_with_binary_bytes(self):
+        cases = [('invalid', b'\xff'), ('nul', b'\0')]
+        for name, suffix in cases:
+            with self.subTest(name=name):
+                path = name + '.txt'
+                self.write(path, 'x' * 25000)
+                base = self.commit()
+                self.write(path, b'x' * 65000 + suffix)
+                self.git('add', '--all')
+                output = self.check(1, '--staged')
+                self.assertIn('base 6250, new 16251 tokens', output)
+                self.commit()
+                self.check(1, '--base', base)
+                # The same decode policy still permits shrinking a text file.
+                self.write(path, b'x' * 20000 + suffix)
+                self.commit()
+                self.check(0, '--base', base)
+
+    @unittest.skipUnless(SCRIPT.with_name('install-hooks.sh').exists(),
+                         'repo already has a hook installer')
+    def test_installer_preserves_existing_executable_hooks(self):
+        installer = SCRIPT.with_name('install-hooks.sh')
+        self.git('config', '--unset', 'core.hooksPath')
+        hooks = self.root / self.git('rev-parse', '--git-path', 'hooks').strip()
+        self.write(str(hooks.relative_to(self.root) / 'example.sample'), '#!/bin/sh\n')
+        (hooks / 'example.sample').chmod(0o755)
+        self.write(str(hooks.relative_to(self.root) / 'README'), 'non-executable')
+        result = subprocess.run(['sh', str(installer)], cwd=self.root,
+                                env=self.env, capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual('scripts/hooks', self.git('config', '--get', 'core.hooksPath').strip())
+        self.git('config', '--unset', 'core.hooksPath')
+        for name in ('pre-push', 'commit-msg'):
+            self.write(str(hooks.relative_to(self.root) / name), '#!/bin/sh\nexit 0\n')
+            (hooks / name).chmod(0o755)
+        result = subprocess.run(['sh', str(installer)], cwd=self.root,
+                                env=self.env, capture_output=True, text=True)
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        for name in ('pre-push', 'commit-msg'):
+            self.assertIn(str(hooks.relative_to(self.root) / name), result.stderr)
+        self.assertNotIn('example.sample', result.stderr)
+        self.assertNotIn('README', result.stderr)
+        config = subprocess.run(['git', 'config', '--get', 'core.hooksPath'],
+                                cwd=self.root, env=self.env, capture_output=True)
+        self.assertEqual(1, config.returncode)
 
     def test_partial_staging(self):
         self.write('partial.txt', 'x' * 25000)
