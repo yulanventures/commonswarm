@@ -436,6 +436,7 @@
   ["swarm_command","COLUMN","swarm.household_content_connections.renewal_grant_id","UPDATE",false],
   ["swarm_command","FUNCTION","swarm.discover_local_credential_ids(bytea)","EXECUTE",false],
   ["swarm_command","FUNCTION","swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean)","EXECUTE",false],
+  ["swarm_command","FUNCTION","swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean,uuid)","EXECUTE",false],
   ["swarm_command","FUNCTION","swarm.discover_local_join_ids(bytea,uuid)","EXECUTE",false],
   ["swarm_command","FUNCTION","swarm.revoke_local_residual_tokens(uuid,uuid,text,uuid)","EXECUTE",false]
 ]

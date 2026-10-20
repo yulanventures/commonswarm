@@ -76,7 +76,7 @@ $fn$;
 
 CREATE FUNCTION swarm.discover_local_target_ids(
   p_workspace_id uuid, p_target_user_id uuid, p_principal_ids uuid[],
-  p_token_ids uuid[], p_all_workspace boolean
+  p_token_ids uuid[], p_all_workspace boolean, p_resume_family_id uuid
 )
 RETURNS TABLE (
   token_id uuid,
@@ -103,10 +103,13 @@ BEGIN
     OR cardinality(p_principal_ids)>64 OR cardinality(p_token_ids)>64
     OR cardinality(p_principal_ids)+cardinality(p_token_ids)>128
     OR NOT (
+      (p_resume_family_id IS NOT NULL AND p_target_user_id IS NULL AND NOT p_all_workspace
+        AND cardinality(p_principal_ids)+cardinality(p_token_ids)=0)
+      OR (p_resume_family_id IS NULL AND (
       (p_target_user_id IS NOT NULL AND NOT p_all_workspace AND cardinality(p_principal_ids)+cardinality(p_token_ids)=0)
       OR (p_target_user_id IS NULL AND NOT p_all_workspace AND cardinality(p_principal_ids)+cardinality(p_token_ids)>0)
       OR (p_target_user_id IS NULL AND p_all_workspace AND cardinality(p_principal_ids)+cardinality(p_token_ids)=0)
-    ) THEN
+    ))) THEN
     RAISE EXCEPTION 'LOCAL_DISCOVERY_SELECTOR' USING ERRCODE='22023';
   END IF;
   IF EXISTS (SELECT 1 FROM swarm.agent_principals p
@@ -121,12 +124,16 @@ BEGIN
   WITH seed_principals AS (
     SELECT p.principal_id FROM swarm.agent_principals p
     WHERE p.workspace_id=p_workspace_id AND
-      (p_all_workspace OR p.owner_user_id=p_target_user_id OR p.principal_id=ANY(p_principal_ids))
+      (p_all_workspace OR p.owner_user_id=p_target_user_id OR p.principal_id=ANY(p_principal_ids)
+       OR EXISTS(SELECT 1 FROM swarm.renewal_grants g WHERE g.renewal_grant_id=p_resume_family_id
+         AND g.principal_id=p.principal_id AND g.workspace_id=p_workspace_id))
   ), current_tokens AS (
     SELECT t.token_id FROM swarm.agent_tokens t WHERE t.token_id=ANY(p_token_ids)
     UNION
     SELECT t.token_id FROM seed_principals sp JOIN swarm.agent_tokens t USING(principal_id)
-    WHERE (p_all_workspace OR cardinality(p_principal_ids)>0) AND t.revoked_at IS NULL
+    WHERE (p_all_workspace OR cardinality(p_principal_ids)>0 OR p_resume_family_id IS NOT NULL)
+      AND (p_resume_family_id IS NULL OR t.renewal_grant_id=p_resume_family_id)
+      AND t.revoked_at IS NULL AND (p_resume_family_id IS NULL OR NOT t.surrender_only)
       AND NOT EXISTS(SELECT 1 FROM swarm.agent_tokens child
         WHERE child.predecessor_token_id=t.token_id AND child.revoked_at IS NULL
           AND child.first_used_at IS NOT NULL)
@@ -149,7 +156,9 @@ BEGIN
     SELECT NULL::uuid,NULL::uuid,g.renewal_grant_id,p.principal_id,g.run_id,r.device_id,
       p.owner_user_id,p.workspace_id,NULL::uuid,parents.parent_admin_grant_id,p.parent_admin_grant_id
     FROM seed_principals sp JOIN swarm.agent_principals p ON p.principal_id=sp.principal_id
-    LEFT JOIN swarm.renewal_grants g ON g.principal_id=p.principal_id AND g.revoked_at IS NULL
+    LEFT JOIN swarm.renewal_grants g ON g.principal_id=p.principal_id
+      AND (g.revoked_at IS NULL OR p_resume_family_id IS NOT NULL)
+      AND (p_resume_family_id IS NULL OR g.renewal_grant_id=p_resume_family_id)
     LEFT JOIN swarm.agent_runs r ON r.run_id=g.run_id AND r.principal_id=p.principal_id
     LEFT JOIN LATERAL (
       SELECT DISTINCT t.parent_admin_grant_id FROM swarm.agent_tokens t
@@ -157,9 +166,10 @@ BEGIN
         AND t.revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM swarm.agent_tokens child
           WHERE child.predecessor_token_id=t.token_id AND child.revoked_at IS NULL AND child.first_used_at IS NOT NULL)
     ) parents ON true
-    WHERE g.renewal_grant_id IS NULL OR NOT EXISTS
+    WHERE (p_resume_family_id IS NULL OR g.renewal_grant_id=p_resume_family_id)
+      AND (g.renewal_grant_id IS NULL OR NOT EXISTS
       (SELECT 1 FROM family_tokens f JOIN swarm.agent_tokens t ON t.token_id=f.id
-       WHERE t.renewal_grant_id=g.renewal_grant_id)
+       WHERE t.renewal_grant_id=g.renewal_grant_id))
   )
   SELECT coalesce(jsonb_agg(to_jsonb(rows) ORDER BY rows.token_id,rows.principal_id,rows.renewal_grant_id),'[]'::jsonb)
   INTO bindings FROM rows;
@@ -176,6 +186,8 @@ BEGIN
       (g.renewal_grant_id IS NULL OR ROW(g.principal_id,g.run_id,g.workspace_id,g.created_by)
         IS DISTINCT FROM ROW(b.principal_id,b.run_id,b.workspace_id,b.owner_user_id)))
       OR (b.device_id IS NOT NULL AND (d.device_id IS NULL OR d.user_id<>b.owner_user_id))
+      OR (p_resume_family_id IS NOT NULL AND (g.renewal_grant_id IS DISTINCT FROM p_resume_family_id
+        OR (g.bound_device_id IS NOT NULL AND g.bound_device_id IS DISTINCT FROM b.device_id)))
   ) THEN
     RAISE EXCEPTION 'LOCAL_DISCOVERY_BINDING' USING ERRCODE='22023';
   END IF;
@@ -191,7 +203,7 @@ BEGIN
       HAVING count(DISTINCT ROW(b.principal_id,b.run_id,b.renewal_grant_id,b.owner_user_id,b.workspace_id))>1) THEN
     RAISE EXCEPTION 'LOCAL_DISCOVERY_BINDING' USING ERRCODE='22023';
   END IF;
-  IF (p_all_workspace OR cardinality(p_token_ids)>0) AND (jsonb_array_length(bindings)>4096 OR
+  IF (p_all_workspace OR cardinality(p_token_ids)>0 OR p_resume_family_id IS NOT NULL) AND (jsonb_array_length(bindings)>4096 OR
     (SELECT count(DISTINCT b.owner_user_id)>256 OR count(DISTINCT b.principal_id)>256
       OR count(DISTINCT b.run_id)>256 OR count(DISTINCT b.device_id)>256
       OR count(DISTINCT b.renewal_grant_id)>256 OR count(DISTINCT b.token_id)>2048
@@ -228,6 +240,28 @@ BEGIN
   RETURN QUERY SELECT b.token_id, b.predecessor_token_id, b.renewal_grant_id, b.principal_id, b.run_id, b.device_id, b.owner_user_id, b.workspace_id, b.lineage_id, b.token_parent_admin_grant_id, b.principal_parent_admin_grant_id FROM jsonb_to_recordset(bindings) b(token_id uuid, predecessor_token_id uuid, renewal_grant_id uuid, principal_id uuid, run_id uuid, device_id uuid, owner_user_id uuid, workspace_id uuid, lineage_id uuid, token_parent_admin_grant_id uuid, principal_parent_admin_grant_id uuid)
     ORDER BY b.token_id,b.principal_id,b.renewal_grant_id;
 END
+$fn$;
+
+CREATE FUNCTION swarm.discover_local_target_ids(
+  p_workspace_id uuid, p_target_user_id uuid, p_principal_ids uuid[],
+  p_token_ids uuid[], p_all_workspace boolean
+)
+RETURNS TABLE (
+  token_id uuid,
+  predecessor_token_id uuid,
+  renewal_grant_id uuid,
+  principal_id uuid,
+  run_id uuid,
+  device_id uuid,
+  owner_user_id uuid,
+  workspace_id uuid,
+  lineage_id uuid,
+  token_parent_admin_grant_id uuid,
+  principal_parent_admin_grant_id uuid
+)
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path=pg_catalog AS $fn$
+  SELECT * FROM swarm.discover_local_target_ids(p_workspace_id,p_target_user_id,
+    p_principal_ids,p_token_ids,p_all_workspace,NULL::uuid)
 $fn$;
 
 CREATE FUNCTION swarm.discover_local_join_ids(p_hash bytea,p_attempt_id uuid)
@@ -280,12 +314,15 @@ $fn$;
 
 ALTER FUNCTION swarm.discover_local_credential_ids(bytea) OWNER TO swarm_admin;
 ALTER FUNCTION swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean) OWNER TO swarm_admin;
+ALTER FUNCTION swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean,uuid) OWNER TO swarm_admin;
 ALTER FUNCTION swarm.discover_local_join_ids(bytea,uuid) OWNER TO swarm_admin;
 REVOKE ALL ON FUNCTION swarm.discover_local_credential_ids(bytea),
   swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean),
+  swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean,uuid),
   swarm.discover_local_join_ids(bytea,uuid) FROM PUBLIC,anon,authenticated,swarm_read,swarm_command;
 GRANT EXECUTE ON FUNCTION swarm.discover_local_credential_ids(bytea),
   swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean),
+  swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean,uuid),
   swarm.discover_local_join_ids(bytea,uuid) TO swarm_command;
 
 -- Narrow v5 amendment: exact family binding, immutable after first assignment.
@@ -1039,16 +1076,13 @@ BEGIN
 
   SELECT g.principal_id,g.workspace_id,p.owner_user_id INTO local_seed FROM swarm.renewal_grants g JOIN swarm.agent_principals p USING(principal_id) WHERE g.renewal_grant_id=p_renewal_grant_id AND g.workspace_id=p_workspace_id;
   IF NOT FOUND THEN RETURN 'renewal_grant_not_found'; END IF;
+  -- Admission is nonlocking; repeat it under the complete plan below.
+  IF NOT EXISTS(SELECT 1 FROM swarm.memberships m JOIN swarm.workspaces w USING(workspace_id)
+    WHERE m.workspace_id=p_workspace_id AND m.user_id=p_user_id AND m.revoked_at IS NULL
+      AND w.archived_at IS NULL AND (m.role IN ('owner','admin') OR local_seed.owner_user_id=p_user_id))
+    THEN RETURN 'renewal_resume_forbidden'; END IF;
   SELECT coalesce(jsonb_agg(to_jsonb(b) ORDER BY b.token_id,b.principal_id,b.renewal_grant_id),'[]'::jsonb)
-    INTO local_before FROM (
-      SELECT NULL::uuid AS token_id,NULL::uuid AS predecessor_token_id,
-        g.renewal_grant_id,p.principal_id,g.run_id,r.device_id,p.owner_user_id,p.workspace_id,
-        NULL::uuid AS lineage_id,NULL::uuid AS token_parent_admin_grant_id,
-        p.parent_admin_grant_id AS principal_parent_admin_grant_id
-      FROM swarm.renewal_grants g JOIN swarm.agent_principals p USING(principal_id)
-      JOIN swarm.agent_runs r ON r.run_id=g.run_id AND r.principal_id=p.principal_id
-      WHERE g.renewal_grant_id=p_renewal_grant_id AND g.workspace_id=p_workspace_id
-    ) b;
+    INTO local_before FROM swarm.discover_local_target_ids(p_workspace_id,NULL,ARRAY[]::uuid[],ARRAY[]::uuid[],false,p_renewal_grant_id) b;
   -- Revalidate complete key sets after EACH potentially blocking phase.
   SELECT jsonb_build_object(
     'users',(SELECT coalesce(jsonb_agg(u.user_id ORDER BY u.user_id),'[]'::jsonb) FROM swarm.users u
@@ -1115,15 +1149,7 @@ BEGIN
   END LOOP;
     END IF;
   SELECT coalesce(jsonb_agg(to_jsonb(b) ORDER BY b.token_id,b.principal_id,b.renewal_grant_id),'[]'::jsonb)
-    INTO local_after FROM (
-      SELECT NULL::uuid AS token_id,NULL::uuid AS predecessor_token_id,
-        g.renewal_grant_id,p.principal_id,g.run_id,r.device_id,p.owner_user_id,p.workspace_id,
-        NULL::uuid AS lineage_id,NULL::uuid AS token_parent_admin_grant_id,
-        p.parent_admin_grant_id AS principal_parent_admin_grant_id
-      FROM swarm.renewal_grants g JOIN swarm.agent_principals p USING(principal_id)
-      JOIN swarm.agent_runs r ON r.run_id=g.run_id AND r.principal_id=p.principal_id
-      WHERE g.renewal_grant_id=p_renewal_grant_id AND g.workspace_id=p_workspace_id
-    ) b;
+    INTO local_after FROM swarm.discover_local_target_ids(p_workspace_id,NULL,ARRAY[]::uuid[],ARRAY[]::uuid[],false,p_renewal_grant_id) b;
   IF local_after IS DISTINCT FROM local_before THEN
     RAISE EXCEPTION 'LOCAL_AUTH_DISCOVERY_CHANGED' USING ERRCODE='40001',DETAIL='LOCAL_AUTH_DISCOVERY_CHANGED';
   END IF;
@@ -1197,12 +1223,48 @@ BEGIN
       AND p.workspace_id=p_workspace_id AND p.owner_user_id=grant_row.created_by AND p.transport='local' AND NOT p.turn_only
       AND p.revoked_at IS NULL AND r.ended_at IS NULL AND d.revoked_at IS NULL AND d.user_id=p.owner_user_id
       AND (grant_row.bound_device_id IS NULL OR grant_row.bound_device_id=d.device_id)
+      AND EXISTS(SELECT 1 FROM swarm.memberships m WHERE m.workspace_id=p.workspace_id
+        AND m.user_id=p.owner_user_id AND m.revoked_at IS NULL)
       AND swarm.admin_child_live(p.parent_admin_grant_id,p.workspace_id))
-    OR EXISTS(SELECT 1 FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING(principal_id)
-      WHERE t.renewal_grant_id=grant_row.renewal_grant_id AND
-        (NOT swarm.admin_child_live(t.parent_admin_grant_id,p.workspace_id)
-         OR NOT swarm.admin_child_scopes_live(t.parent_admin_grant_id,t.scopes)
-         OR NOT swarm.admin_child_scopes_live(p.parent_admin_grant_id,t.scopes))) THEN RETURN 'renewal_resume_forbidden'; END IF;
+    THEN RETURN 'renewal_resume_forbidden'; END IF;
+  -- Check current authority only. Retired predecessor scopes cannot veto a
+  -- deliberate later narrowing; technical expiry must not hide a parent.
+  FOR local_row IN SELECT t.*,p.parent_admin_grant_id AS principal_parent
+    FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING(principal_id)
+    WHERE t.renewal_grant_id=grant_row.renewal_grant_id AND t.revoked_at IS NULL AND NOT t.surrender_only
+      AND NOT EXISTS(SELECT 1 FROM swarm.agent_tokens child WHERE child.predecessor_token_id=t.token_id
+        AND child.revoked_at IS NULL AND child.first_used_at IS NOT NULL)
+  LOOP
+    IF NOT swarm.admin_child_live(local_row.parent_admin_grant_id,p_workspace_id)
+      OR NOT swarm.admin_child_scopes_live(local_row.parent_admin_grant_id,local_row.scopes)
+      OR NOT swarm.admin_child_scopes_live(local_row.principal_parent,local_row.scopes)
+      THEN RETURN 'renewal_resume_forbidden'; END IF;
+  END LOOP;
+  -- Every potentially waiting parent check is now complete. Never reuse the
+  -- pre-wait clock for deadline, recovery eligibility, or the resume record.
+  local_now:=clock_timestamp();
+  IF EXISTS(SELECT 1 FROM swarm.admin_grants a WHERE a.grant_id IN
+    (SELECT b.token_parent_admin_grant_id FROM jsonb_to_recordset(local_before) b(token_parent_admin_grant_id uuid)
+     UNION SELECT b.principal_parent_admin_grant_id FROM jsonb_to_recordset(local_before) b(principal_parent_admin_grant_id uuid))
+    AND (a.state<>'active' OR a.revoked_at IS NOT NULL OR a.expires_at<=local_now OR a.refresh_deadline<=local_now))
+    THEN RETURN 'renewal_resume_forbidden'; END IF;
+  IF NOT EXISTS(SELECT 1 FROM swarm.agent_tokens t
+    WHERE t.renewal_grant_id=grant_row.renewal_grant_id AND t.revoked_at IS NULL AND NOT t.surrender_only
+      AND NOT EXISTS(SELECT 1 FROM swarm.agent_tokens child WHERE child.predecessor_token_id=t.token_id
+        AND child.revoked_at IS NULL AND child.first_used_at IS NOT NULL)
+      AND (t.expires_at>local_now OR (grant_row.kind='standing' AND (t.first_used_at IS NOT NULL
+        OR EXISTS(SELECT 1 FROM swarm.agent_tokens pred WHERE pred.token_id=t.predecessor_token_id
+          AND pred.renewal_grant_id=t.renewal_grant_id AND pred.first_used_at IS NOT NULL
+          AND pred.revoked_at IS NULL AND NOT pred.surrender_only
+          AND NOT EXISTS(SELECT 1 FROM swarm.agent_tokens used_child
+            WHERE used_child.predecessor_token_id=pred.token_id AND used_child.revoked_at IS NULL
+              AND used_child.first_used_at IS NOT NULL)
+          AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z
+            WHERE z.kind='token' AND z.target_id=pred.token_id)))))
+      AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE (z.kind,z.target_id) IN
+        (('token',t.token_id),('principal',t.principal_id),('run',t.run_id),('device',(SELECT r.device_id FROM swarm.agent_runs r WHERE r.run_id=grant_row.run_id)),
+         ('lineage',t.lineage_id),('family',t.lineage_id),('membership',grant_row.created_by))))
+    THEN RETURN 'renewal_resume_forbidden'; END IF;
   IF grant_row.revoked_at IS NOT NULL OR grant_row.connection_expired_at IS NOT NULL
     OR grant_row.connection_expires_at<=local_now OR EXISTS(SELECT 1 FROM swarm.revocation_tombstones z
       WHERE z.kind='renewal_grant' AND z.target_id=grant_row.renewal_grant_id) THEN

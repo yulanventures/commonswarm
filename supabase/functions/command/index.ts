@@ -10833,6 +10833,22 @@ async function handleTransaction(
           return {status:403,body:{error:'forbidden'}};
       }
     }
+    if (kind===RESUME_RENEWAL_GRANT_KIND && (!rawLocal || !exactKeys(rawLocal,['kind','renewal_grant_id'])
+      || typeof rawLocal.renewal_grant_id!=='string' || !UUID_RE.test(rawLocal.renewal_grant_id)))
+      return {status:400,body:{error:'invalid_request'}};
+    const resumeFamily=kind===RESUME_RENEWAL_GRANT_KIND && typeof rawLocal?.renewal_grant_id==='string'
+      && UUID_RE.test(rawLocal.renewal_grant_id) ? rawLocal.renewal_grant_id : undefined;
+    if (resumeFamily) {
+      if (!verifiedHuman || !localWorkspace) return {status:403,body:{error:'forbidden'}};
+      const [admitted]=await tx`SELECT g.renewal_grant_id FROM swarm.renewal_grants g
+        JOIN swarm.agent_principals p USING(principal_id)
+        JOIN swarm.memberships m ON m.workspace_id=g.workspace_id AND m.user_id=${verifiedHuman.userId}::uuid
+        JOIN swarm.workspaces w ON w.workspace_id=g.workspace_id
+        WHERE g.renewal_grant_id=${resumeFamily}::uuid AND g.workspace_id=${localWorkspace}::uuid
+          AND p.workspace_id=g.workspace_id AND m.revoked_at IS NULL AND w.archived_at IS NULL
+          AND (p.owner_user_id=${verifiedHuman.userId}::uuid OR m.role IN ('owner','admin'))`;
+      if (!admitted) return {status:403,body:{error:'forbidden'}};
+    }
     const joinAttempt = kind===REGISTER_AGENT_SEAT_KIND && typeof rawLocal?.attempt_id==='string' && UUID_RE.test(rawLocal.attempt_id)
       ? rawLocal.attempt_id : null;
     if(joinCredentialHash && joinAttempt) {
@@ -10878,6 +10894,7 @@ async function handleTransaction(
     const target=principalTargets.size || tokenTargets.length ? {principals:[...principalTargets],tokens:tokenTargets}:undefined;
     localPlan = hostedSeat===null && (!HOSTED_MANAGEMENT_KINDS.has(kind) || localExpiry) ? await planLocalOperation(tx, {
       ...(agentTokenHash ? {hash:agentTokenHash}:{}), workspace:localWorkspace,actor:verifiedHuman?.userId,
+      ...(resumeFamily ? {resumeFamily}:{}),
       household,householdQueue:rawLocal?.tool==='todo_queue',...(todoId ? {todo:todoId}:{}),
       streamIds:[CLAIM_AGENT_INBOX_KIND,ACK_AGENT_DELIVERY_KIND,TOUCH_PRESENCE_KIND].includes(kind) ? [] : localStreams.map(r=>r.stream_id),
       workspaceMode: household || revocation || localExpiry || verifiedHuman

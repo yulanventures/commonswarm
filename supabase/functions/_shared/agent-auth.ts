@@ -592,6 +592,7 @@ export async function planLocalOperation(tx: Sql, options: {
   streamIds?: string[]; principalMode?: LocalLockMode; sessionMode?: LocalLockMode;
   workspaceMode?: LocalLockMode; parentUpdates?: string[]; join?: { hash: Uint8Array; attempt: string }; hostedMode?:LocalLockMode;
   target?: {user:string}|{principals:string[];tokens:string[]};
+  resumeFamily?: string;
   admin?: {owner:string;grant:string;recipients:string[]};
   household?: boolean; memberTargets?: string[]; allowMissingWorkspace?: boolean; todo?: string; householdQueue?: boolean;
   revocation?: {user:string}|{principal:string}|{token:string};
@@ -632,6 +633,12 @@ export async function planLocalOperation(tx: Sql, options: {
       const extra=await discoverLocalTargets(tx,workspace,options.target);
       const union=new Map([...bindings,...extra].map(r=>[JSON.stringify([r.token_id,r.principal_id,r.renewal_grant_id]),r]));
       bindings=[...union.values()];
+    }
+    if (workspace && options.resumeFamily) {
+      const family=await tx<LocalCredentialIds[]>`SELECT * FROM swarm.discover_local_target_ids(
+        ${workspace}::uuid,NULL::uuid,ARRAY[]::uuid[],ARRAY[]::uuid[],false,${options.resumeFamily}::uuid)`;
+      if (!family.length) throw new LocalAuthDiscoveryChanged();
+      bindings=[...new Map([...bindings,...family].map(r=>[JSON.stringify(r),r])).values()];
     }
     const todoBindings=workspace && options.todo ? await tx<{assignee_principal:string|null;offer_principal:string|null}[]>`
       SELECT assignee_principal,offer_principal FROM swarm.household_todos

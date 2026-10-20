@@ -229,7 +229,8 @@ test(ADMIN_WITHDRAW, { timeout: 240_000 }, async () => {
 // distinct production boundary, with a live control in every invocation.
 for (const name of ["delegated-local-parent-reversal","delegated-local-renewal-budget",
   "delegated-local-parent-deadline","delegated-local-parent-narrowing",
-  "delegated-local-wait-removal-rollback","ordinary-local-compat-policy"]) {
+  "delegated-local-wait-removal-rollback","ordinary-local-compat-policy",
+  "local-resume-parent-order","local-resume-recovery-controls"]) {
   test(name,{timeout:300_000},async()=>{
     const result=await harness.runScenario(bound(),name,270_000);
     assert.equal(result.stage,"complete",`${name}: ${result.stage} (${result.error ?? "no code"})`);

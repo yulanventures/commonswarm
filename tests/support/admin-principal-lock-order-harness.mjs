@@ -58,7 +58,7 @@ const RACES = Object.freeze({
   [ADMIN_PAIR]: { parked: 'admin', waiting: 'admin' },
   ...Object.fromEntries(Object.values(ADMIN_CROSS).map((name) => [name, { parked: 'admin', waiting: 'admin' }])),
   [ADMIN_WITHDRAW]: { parked: 'admin', waiting: 'admin' },
-  ...Object.fromEntries(['delegated-local-parent-reversal','delegated-local-renewal-budget','delegated-local-parent-deadline','delegated-local-parent-narrowing','delegated-local-wait-removal-rollback','ordinary-local-compat-policy'].map(name=>[name,{parked:'admin',waiting:'admin'}])),
+  ...Object.fromEntries(['delegated-local-parent-reversal','delegated-local-renewal-budget','delegated-local-parent-deadline','delegated-local-parent-narrowing','delegated-local-wait-removal-rollback','ordinary-local-compat-policy','local-resume-parent-order','local-resume-recovery-controls'].map(name=>[name,{parked:'admin',waiting:'admin'}])),
 });
 
 /** A refused target. Callers branch on `code`, never on the message. */
@@ -788,7 +788,8 @@ async function denoMain() {
     out.client_version = minimum.version;
     // D4: names and ids unique to this run (fresh workspace, users and grants per scenario).
     const ctx = { command, db, observer, failures, jwks, out, tag: randomUUID().replaceAll('-', '').slice(0, 10), clientVersion: minimum.version };
-    const result = scenario.startsWith('delegated-local-') ? await delegatedLocalScenario(ctx,scenario)
+    const result = scenario.startsWith('local-resume-') ? await localResumeScenario(ctx,scenario)
+      : scenario.startsWith('delegated-local-') ? await delegatedLocalScenario(ctx,scenario)
       : scenario==='ordinary-local-compat-policy' ? await ordinaryLocalPolicyScenario(ctx)
       : scenario === 'golden' ? await golden(ctx)
       : scenario === ADMIN_PAIR ? await adminPairScenario(ctx)
@@ -1842,6 +1843,181 @@ async function ordinaryLocalPolicyScenario(ctx) {
   check('elapsed-date-cannot-clear-or-revive',elapsed.status===403 && (await readPolicy()).status!==200);
   const [persisted]=await observer`SELECT connection_expires_at<clock_timestamp() AS elapsed FROM swarm.renewal_grants WHERE renewal_grant_id=${g.renewal_grant_id}::uuid`;
   check('terminal-policy-preserved',persisted.elapsed===true);
+  return {checks};
+}
+
+
+/** Resume owns the cross-owner human W/admin A cycle. Fixtures mint through
+ * real command/worker paths; only persisted clock/pause state is aged directly.
+ * The existing X2 boundary observes every rejected transaction, so retries
+ * cannot turn a deadlock into an apparently successful assertion. */
+async function localResumeScenario(ctx,scenario) {
+  const {observer,failures}=ctx,checks=[];
+  const check=(name,ok)=>checks.push({name,ok:ok===true});
+  const owner=await human(ctx,'resume-owner'),manager=await human(ctx,'resume-manager');
+  const {workspaceId}=await workspace(ctx,owner,false);
+  await member(ctx,workspaceId,manager,'admin');
+  const read=await import('../../supabase/functions/read/index.ts');
+  const use=async raw=>{
+    const response=await read.handleRequest(new Request('http://127.0.0.1/functions/v1/read',{
+      method:'POST',headers:{authorization:`Bearer ${raw}`,'content-type':'application/json'},
+      body:JSON.stringify({resource:'renewal_grants',workspace_id:workspaceId})}));
+    return response.status;
+  };
+  const resume=s=>manage(ctx,manager,workspaceId,{kind:'resume_renewal_grant',renewal_grant_id:s.grant});
+  const state=async s=>JSON.stringify((await observer`SELECT resumed_at,resumed_by,resume_count
+    FROM swarm.renewal_grants WHERE renewal_grant_id=${s.grant}::uuid`)[0]);
+  const pause=async s=>observer`UPDATE swarm.renewal_grants SET suspended_at=clock_timestamp()
+    WHERE renewal_grant_id=${s.grant}::uuid`;
+  const mint=async(label,admin=null,principal=null)=>{
+    if (!principal) {
+      const created=await manage(ctx,owner,workspaceId,{kind:'create_agent_principal',name:`resume-${label}-${ctx.tag}`});
+      if(created.status!==200 || !created.body.principal_id) fail('resume_human_principal_control');
+      principal=created.body.principal_id;
+    }
+    let token,raw;
+    if(admin) {
+      const issued=await admin.invoke({kind:'admin_provision_seat',grant_id:admin.grant,workspace_id:workspaceId,
+        principal_id:principal,recipient_connection_id:admin.connection,worker_scope_names:['post_signal'],
+        bearer_seconds:120,horizon_seconds:600,max_successors:2},{worker:true});
+      if(issued.result.status!==200 || issued.calls!==1 || !issued.delivery) fail('resume_legal_delegated_mint');
+      token=issued.delivery.credential_id;raw=issued.delivery.credential;
+    } else {
+      const device=id();await observer`INSERT INTO swarm.devices(device_id,user_id,label)
+        VALUES(${device}::uuid,${owner.userId}::uuid,'resume fixture')`;
+      const issued=await manage(ctx,owner,workspaceId,{kind:'mint_agent_token',principal_id:principal,
+        run_id:id(),task_id:id(),epoch:1,device_id:device,scopes:['post_signal']});
+      if(issued.status!==200 || !issued.body.agent_token) fail('resume_ordinary_mint');
+      token=issued.body.token_id;raw=issued.body.agent_token;
+    }
+    const [binding]=await observer`SELECT t.renewal_grant_id AS grant,p.parent_admin_grant_id AS principal_parent,
+      t.parent_admin_grant_id AS token_parent FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING(principal_id)
+      WHERE t.token_id=${token}::uuid`;
+    check(`legal-null-principal-parent-${label}`,binding.principal_parent===null && binding.token_parent===(admin?.grant ?? null));
+    return {principal,token,raw,grant:binding.grant};
+  };
+  const renewed=async s=>{
+    const response=await ctx.command.handleRequest(new Request('http://127.0.0.1/functions/v1/command',{
+      method:'POST',headers:{authorization:`Bearer ${s.raw}`,'content-type':'application/json'},
+      body:JSON.stringify({command_id:id(),client_version:ctx.clientVersion,workspace_id:workspaceId,
+        stream:{kind:'workspace'},command:{kind:'renew_agent_token'}})}));
+    const body=await response.json();
+    if(response.status!==200 || !body.agent_token) fail('resume_successor_control');
+    return {...s,token:body.token_id,raw:body.agent_token};
+  };
+  if(scenario==='local-resume-parent-order') {
+    const admin=await adminSide(ctx,{owner,workspaceId},'resume-admin');
+    const seat=await mint('delegated',admin);
+    check('same-invocation-positive',await use(seat.raw)===200);
+    await pause(seat);
+    await admin.arm();
+    let pending,creating,humanPid;
+    failures.codes.length=0;failures.recording=true;
+    await observer.begin(async tx=>{
+      const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
+      // SHARE parks human W UPDATE but does not take A. Start the human first:
+      // baseline gets W ahead of admin then requests its A; fixed preholds A.
+      await tx`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id=${workspaceId}::uuid FOR SHARE`;
+      pending=resume(seat);
+      humanPid=await waitForBlocked(observer,Number(pid),async()=>true,3500);
+      check('human-resume-witnessed-wait-on-workspace',humanPid!==null);
+      if(humanPid===null) fail('resume_workspace_not_parked');
+      creating=settleSide(admin.start());
+      const adminPid=await waitForBlocked(observer,humanPid,async()=>true,3500);
+      check('delegated-create-waits-on-human-preheld-parent',adminPid!==null);
+      if(adminPid!==null) {
+        const [witness]=await observer`SELECT query ILIKE '%swarm.admin_grants%' AS parent_wait
+          FROM pg_stat_activity WHERE pid=${adminPid}::int`;
+        check('actual-admin-A-wait-witness',witness?.parent_wait===true);
+      }
+    });
+    const resumed=await pending,created=await creating;
+    failures.recording=false;
+    check('both-real-cross-owner-commands-complete',resumed.status===200 && created.ok);
+    check('no-deadlock-or-retry-masking',failures.codes.length===0);
+    check('exact-resume-and-admin-write',(await observer`SELECT resume_count=1 AND resumed_by=${manager.userId}::uuid
+      AND NOT suspension_active AS ok FROM swarm.renewal_grants WHERE renewal_grant_id=${seat.grant}::uuid`)[0]?.ok===true
+      && await principalLive(ctx,workspaceId,admin.name));
+    check('delegated-create-audit-committed',JSON.stringify(await admin.audit())===JSON.stringify(['committed']));
+    // Cross a precommitted deadline while SQL itself waits on A. A command-only
+    // regression would miss the SQL clock bug after command planning is fixed.
+    await pause(seat);
+    await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '4 seconds'
+      WHERE renewal_grant_id=${seat.grant}::uuid`;
+    const before=await state(seat);let sqlResume;
+    await observer.begin(async tx=>{
+      const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
+      await tx`SELECT grant_id FROM swarm.admin_grants WHERE grant_id=${admin.grant}::uuid FOR UPDATE`;
+      sqlResume=observer.begin(async call=>{
+        await call`SET LOCAL ROLE swarm_command`;
+        return (await call`SELECT swarm.resume_renewal_grant(${workspaceId}::uuid,${seat.grant}::uuid,${manager.userId}::uuid) AS refusal`)[0];
+      });
+      check('SQL-resume-witnessed-parent-wait',await waitForBlocked(observer,Number(pid),async()=>true,3500)!==null);
+      check('deadline-still-future-at-observed-wait',(await observer`SELECT connection_expires_at>clock_timestamp() AS ok
+        FROM swarm.renewal_grants WHERE renewal_grant_id=${seat.grant}::uuid`)[0]?.ok===true);
+      await tx`SELECT pg_sleep(greatest(0,extract(epoch FROM (connection_expires_at-clock_timestamp())))+0.05)
+        FROM swarm.renewal_grants WHERE renewal_grant_id=${seat.grant}::uuid`;
+    });
+    const denied=await sqlResume;
+    check('deadline-crossing-denied-with-no-resume',denied.refusal==='renewal_grant_revoked' && await state(seat)===before);
+    // Independent parent controls each retain a fresh same-invocation positive.
+    for(const policy of ['revoked','narrowed']) {
+      const side=await adminSide(ctx,{owner,workspaceId},`resume-${policy}`);
+      const s=await mint(policy,side);check(`live-before-${policy}`,await use(s.raw)===200);await pause(s);
+      const before=await state(s);
+      if(policy==='revoked') await observer`UPDATE swarm.admin_grants SET state='revoked',revoked_at=clock_timestamp()
+        WHERE grant_id=${side.grant}::uuid`;
+      else await observer`UPDATE swarm.admin_grants SET worker_scope_ceiling=ARRAY[]::text[] WHERE grant_id=${side.grant}::uuid`;
+      const result=await resume(s);
+      check(`current-${policy}-parent-denies-without-resume`,result.status===403 && await state(s)===before);
+    }
+  } else {
+    const positive=await mint('positive');await use(positive.raw);await pause(positive);
+    check('same-invocation-positive',(await resume(positive)).status===200);
+    for(const mode of ['expired-unused','expired-used','pending','retired-history']) {
+      const root=await mint(mode);let current=root;
+      if(mode!=='expired-unused') {
+        if(await use(current.raw)!==200) fail('resume_first_use_control');
+        if(mode==='pending' || mode==='retired-history') current=await renewed(current);
+        if(mode==='retired-history') {
+          if(await use(current.raw)!==200) fail('resume_middle_use_control');
+          current=await renewed(current);
+          if(await use(current.raw)!==200) fail('resume_current_use_control');
+        }
+      }
+      await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second'
+        WHERE renewal_grant_id=${root.grant}::uuid`;
+      await pause(current);const before=await state(current);
+      let result;
+      if(mode==='retired-history') {
+        // An unrelated family on the SAME principal must not join the plan.
+        const sibling=await mint('sibling',null,root.principal);let pending,whileHeld;
+        await observer.begin(async tx=>{
+          const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
+          await tx`SELECT token_id FROM swarm.agent_tokens WHERE token_id=ANY(${[root.token,sibling.token]}::uuid[]) FOR UPDATE`;
+          pending=resume(current);
+          whileHeld=await Promise.race([pending,new Promise(resolve=>setTimeout(()=>resolve(null),2500))]);
+          const [{n}]=await observer`SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${pid}=ANY(pg_blocking_pids(pid))`;
+          check('retired-history-and-sibling-tokens-not-locked',whileHeld?.status===200 && n===0);
+        });
+        result=await pending;
+      } else result=await resume(current);
+      check(`${mode}-eligibility-and-effect`,mode==='expired-unused'
+        ? result.status===403 && await state(current)===before
+        : result.status===200 && (await observer`SELECT resume_count=1 AND NOT suspension_active AS ok
+            FROM swarm.renewal_grants WHERE renewal_grant_id=${current.grant}::uuid`)[0]?.ok===true);
+    }
+    // Unauthorized family selectors must finish while a victim is locked.
+    const foreign=await human(ctx,'resume-outsider');await member(ctx,workspaceId,foreign,'member');
+    const victim=await mint('victim');await pause(victim);let pending,whileHeld;
+    await observer.begin(async tx=>{
+      await tx`SELECT renewal_grant_id FROM swarm.renewal_grants WHERE renewal_grant_id=${victim.grant}::uuid FOR UPDATE`;
+      pending=manage(ctx,foreign,workspaceId,{kind:'resume_renewal_grant',renewal_grant_id:victim.grant});
+      whileHeld=await Promise.race([pending,new Promise(resolve=>setTimeout(()=>resolve(null),2500))]);
+      check('foreign-owner-refused-before-family-lock',whileHeld?.status===403);
+    });
+    await pending;
+  }
   return {checks};
 }
 
