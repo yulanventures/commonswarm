@@ -3363,10 +3363,12 @@ for (const policy of ['null','future','elapsed','terminal','revoked'] as const) 
       assert.equal(allow.body.status,live?'committed':'refused');
       if(!live) assert.equal(allow.body.reason,'connection_access_refused');
       else {
-        const [stored]=await sql`SELECT expires_at IS NOT DISTINCT FROM g.connection_expires_at AS aligned
+        const [stored]=await sql`SELECT c.expires_at,g.connection_expires_at
           FROM swarm.household_content_connections c JOIN swarm.hosted_mcp_grants g ON g.grant_id=c.hosted_grant_id
           WHERE c.connection_id=${f.seat.body.seat_id as string}::uuid`;
-        assert.equal(stored!.aligned,true,'Allow metadata follows chosen policy');
+        assert.equal(stored!.expires_at,null,'hosted approval does not copy chosen policy');
+        assert.equal(allow.body.expires_at,stored!.connection_expires_at == null ? null
+          : new Date(stored!.connection_expires_at as string).toISOString(),'Allow response exposes canonical chosen policy');
       }
     } finally {await releaseSql.unsafe('ALTER ROLE commonswarm_edge PASSWORD NULL');}
   });
@@ -3410,6 +3412,182 @@ test('inherited queue rechecks unchanged chosen deadline after another PostgreSQ
     assert.equal(approvals!.n,0);
   } finally {if(pending)await pending.catch(()=>{});await releaseSql.unsafe('ALTER ROLE commonswarm_edge PASSWORD NULL');}
 });
+
+// Real HTTP is the owning boundary: copied approval deadlines and a stale
+// queue clock can disagree with canonical policy even when authentication works.
+async function observeHouseholdRowWait(blocker: number, query: string) {
+  for(let attempt=0;attempt<400;attempt++) {
+    const [wait]=await sql`SELECT EXISTS(SELECT 1 FROM pg_stat_activity a
+      WHERE a.usename='commonswarm_edge' AND ${blocker}::int=ANY(pg_blocking_pids(a.pid))
+        AND a.query LIKE ${'%' + query + '%'}) AS blocked`;
+    if(wait!.blocked) return;
+    await new Promise(resolve=>setTimeout(resolve,25));
+  }
+  assert.fail('HTTP request did not reach the intended PostgreSQL row wait');
+}
+async function awaitHouseholdDeadline(deadline: string) {
+  for(let attempt=0;attempt<800;attempt++) {
+    const [clock]=await sql`SELECT clock_timestamp()>=${deadline}::timestamptz AS elapsed`;
+    if(clock!.elapsed) return;
+    await new Promise(resolve=>setTimeout(resolve,25));
+  }
+  assert.fail('chosen deadline did not elapse on the database clock');
+}
+
+for(const role of ['owner','member'] as const) {
+  test(`explicit hosted ${role} approval survives extending and clearing chosen expiry without another Allow`, {timeout:180_000}, async()=>{
+    const f=await ownerContentHttpFixture();
+    const workspace=f.fixture.workspaceA,principal=String(f.seat.body.principal_id);
+    const http={ownerJwt:f.fixture.ownerJwt,workspaceId:workspace};
+    const allow={kind:'household_approve_connection',connection:{kind:'hosted',connection_id:f.seat.body.seat_id,
+      grant_id:f.fixture.grantA,principal_id:principal,operations:['read','create','update']}};
+    const setExpiry=(expiry:string|null)=>({name:'expiry',transport:'http',command:{kind:'set_connection_expiry',
+      connection_kind:'hosted',grant_id:f.fixture.grantA,connection_expires_at:expiry}});
+    const access=()=>runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_list'},{name:'todo_queue'},
+      {name:'todo_queue',transport:'http',arguments:{principal_id:principal}}],http),{databaseUrl:f.edgeUrl});
+    const assertLive=()=>{
+      const results=access();
+      assert.equal(results[0]!.body.status,'ok');
+      for(const result of results.slice(1)) {
+        assert.equal(result.body.status,'ok');
+        const queue=result.body.queue as {content_access:string;status:{facts:{connection:string}}};
+        assert.equal(queue.status.facts.connection,'live');assert.equal(queue.content_access,'read_write');
+      }
+    };
+    try {
+      await sql`UPDATE swarm.memberships SET role=${role} WHERE workspace_id=${workspace}::uuid AND user_id=${f.fixture.owner}::uuid`;
+      const [dates]=await sql`SELECT clock_timestamp()+interval '10 seconds' AS old,clock_timestamp()+interval '1 hour' AS extended`;
+      const original=new Date(dates!.old as string).toISOString(),extended=new Date(dates!.extended as string).toISOString();
+      const initial=runHostedHarness<ContextHttpResult[]>(f.call([setExpiry(original),{name:'allow',transport:'http',command:allow},setExpiry(extended)],http),{databaseUrl:f.edgeUrl});
+      assert.equal(initial[0]!.body.ok,true);assert.equal(initial[1]!.body.status,'committed');assert.equal(initial[1]!.body.expires_at,original);
+      assert.equal(initial[2]!.body.ok,true);
+      const approval=async()=>{
+        const [row]=await sql`SELECT to_jsonb(c) AS value FROM swarm.household_content_connections c WHERE connection_id=${f.seat.body.seat_id as string}::uuid`;
+        return row!.value as Record<string,unknown>;
+      };
+      const saved=await approval();assert.equal(saved.expires_at,null);
+      await awaitHouseholdDeadline(original);assertLive();
+      // Select another real future date, then clear it through the human API.
+      const [next]=await sql`SELECT clock_timestamp()+interval '10 seconds' AS deadline`;
+      const second=new Date(next!.deadline as string).toISOString();
+      const cleared=runHostedHarness<ContextHttpResult[]>(f.call([setExpiry(second),setExpiry(null)],http),{databaseUrl:f.edgeUrl});
+      cleared.forEach(result=>assert.equal(result.body.ok,true));
+      await awaitHouseholdDeadline(second);assertLive();
+      assert.deepEqual(await approval(),saved,'policy changes neither reapprove nor rewrite historical consent');
+      const [canonical]=await sql`SELECT connection_expires_at,connection_expired_at FROM swarm.hosted_mcp_grants WHERE grant_id=${f.fixture.grantA}::uuid`;
+      assert.equal(canonical!.connection_expires_at,null);assert.equal(canonical!.connection_expired_at,null);
+      // Clearing a date does not revive a removed seat.
+      const removed=runHostedHarness<ContextHttpResult[]>(f.call([{name:'remove',transport:'http',command:{kind:'revoke_hosted_mcp_seat',
+        grant_id:f.fixture.grantA,seat_id:f.seat.body.seat_id}}],http),{databaseUrl:f.edgeUrl})[0]!;
+      assert.equal(removed.body.ok,true);
+      const denied=access();denied.slice(0,2).forEach(assertContentDenied);
+      const queue=denied[2]!.body.queue as {content_access:string;status:{facts:{connection:string}}};
+      assert.equal(denied[2]!.body.status,'ok');assert.equal(queue.status.facts.connection,'removed');assert.equal(queue.content_access,'none');
+      const refused=runHostedHarness<ContextHttpResult[]>(f.call([{name:'allow',transport:'http',command:allow}],http),{databaseUrl:f.edgeUrl})[0]!;
+      assert.equal(refused.body.status,'refused');assert.equal(refused.body.reason,'connection_access_refused');
+    } finally {await releaseSql.unsafe('ALTER ROLE commonswarm_edge PASSWORD NULL');}
+  });
+}
+
+test('human owner queue refreshes liveness after the actual queueFacts content row wait', {timeout:180_000}, async()=>{
+  const f=await ownerContentHttpFixture(),workspace=f.fixture.workspaceA;
+  const principal=randomUUID(),seat=randomUUID(),handle='seat_'+randomBytes(18).toString('base64url');
+  const http={ownerJwt:f.fixture.ownerJwt,workspaceId:workspace};
+  const grantLocker=await sql.reserve();let locked=false,pending:Promise<ContextHttpResult[]>|undefined;
+  let chosen='',blocker=0;
+  try {
+    const control=runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_create',arguments:{request_id:randomUUID(),title:'Queue clock control'}},
+      {name:'todo_queue',transport:'http',arguments:{principal_id:f.seat.body.principal_id}}],http),{databaseUrl:f.edgeUrl});
+    assert.equal(control[0]!.body.status,'committed');
+    const live=control[1]!.body.queue as {content_access:string;status:{facts:{connection:string}}};
+    assert.equal(live.status.facts.connection,'live');assert.equal(live.content_access,'read_write');
+    await sql`INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only)
+      VALUES (${principal}::uuid,${workspace}::uuid,${f.fixture.owner}::uuid,${'queue-clock-'+principal},'hosted_mcp',true)`;
+    await sql.begin(async streamLocker=>{
+      const [session]=await streamLocker`SELECT pg_backend_pid() AS pid`;
+      await streamLocker`SELECT stream_id FROM swarm.household_todo_streams WHERE workspace_id=${workspace}::uuid FOR UPDATE`;
+      pending=runHostedHarnessAsync<ContextHttpResult[]>(f.call([{name:'todo_queue',transport:'http',arguments:{principal_id:principal}}],http),f.edgeUrl);
+      void pending.catch(()=>{});
+      await observeHouseholdRowWait(Number(session!.pid),'SELECT stream_id,last_seq FROM swarm.household_todo_streams');
+      // The first candidate scan was empty. Publish a new synthetic seat while
+      // state() waits, so queueFacts itself must acquire its existing grant lock.
+      // No previously revoked handle/seat or historical marker is reopened.
+      const [date]=await sql`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()+interval '3 seconds'
+        WHERE grant_id=${f.fixture.grantA}::uuid RETURNING connection_expires_at`;
+      chosen=new Date(date!.connection_expires_at as string).toISOString();
+      await grantLocker.unsafe('BEGIN');locked=true;
+      const [grantSession]=await grantLocker`SELECT pg_backend_pid() AS pid`;blocker=Number(grantSession!.pid);
+      await grantLocker`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=${f.fixture.grantA}::uuid FOR NO KEY UPDATE`;
+      await sql.begin(async fixture=>{
+        await fixture`INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,created_at)
+          VALUES (${seat}::uuid,${f.fixture.grantA}::uuid,${workspace}::uuid,${f.fixture.owner}::uuid,${principal}::uuid,${'queue-clock-'+principal},clock_timestamp())`;
+        await fixture`INSERT INTO swarm.hosted_mcp_seat_handles(handle,seat_id,grant_id,workspace_id,principal_id,created_at)
+          VALUES (${handle},${seat}::uuid,${f.fixture.grantA}::uuid,${workspace}::uuid,${principal}::uuid,clock_timestamp())`;
+      });
+    });
+    await observeHouseholdRowWait(blocker,'SELECT state,revoked_at,connection_expires_at,connection_expired_at FROM swarm.hosted_mcp_grants');
+    const [before]=await sql`SELECT clock_timestamp()<${chosen}::timestamptz AS future`;
+    assert.equal(before!.future,true,'queueFacts reached the existing content wait before the chosen date');
+    await awaitHouseholdDeadline(chosen);
+    await grantLocker.unsafe('ROLLBACK');locked=false;
+    const result=(await pending!)[0]!;
+    const [after]=await sql`SELECT clock_timestamp()>=connection_expires_at AS elapsed,connection_expires_at
+      FROM swarm.hosted_mcp_grants WHERE grant_id=${f.fixture.grantA}::uuid`;
+    assert.equal(after!.elapsed,true);assert.equal(new Date(after!.connection_expires_at as string).toISOString(),chosen);
+    assert.equal(result.status,200);assert.equal(result.body.status,'ok');
+    const queue=result.body.queue as {content_access:string;status:{facts:{connection:string}}};
+    assert.equal(queue.status.facts.connection,'connection_off','pre-wait queue clock would incorrectly report live');
+    assert.equal(queue.content_access,'none');
+  } finally {
+    if(locked)await grantLocker.unsafe('ROLLBACK');grantLocker.release();
+    if(pending)await pending.catch(()=>{});await releaseSql.unsafe('ALTER ROLE commonswarm_edge PASSWORD NULL');
+  }
+});
+
+for(const policy of ['null','future','elapsed'] as const) {
+  test(`human Allow checks ${policy} canonical policy after its existing grant row wait`, {timeout:180_000}, async()=>{
+    const f=await ownerContentHttpFixture(),workspace=f.fixture.workspaceA;
+    const request=randomUUID();let pending:Promise<ContextHttpResult[]>|undefined;
+    let chosen:string|null=null;
+    try {
+      await sql`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()+interval '1 hour'
+        WHERE grant_id=${f.fixture.grantA}::uuid`;
+      await sql.begin(async locker=>{
+        const [session]=await locker`SELECT pg_backend_pid() AS pid`;
+        await locker`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=${f.fixture.grantA}::uuid FOR NO KEY UPDATE`;
+        pending=runHostedHarnessAsync<ContextHttpResult[]>(f.call([{name:'allow',transport:'http',request_id:request,
+          command:{kind:'household_approve_connection',connection:{kind:'hosted',connection_id:f.seat.body.seat_id,
+            grant_id:f.fixture.grantA,principal_id:f.seat.body.principal_id,operations:['read','create','update']}}}],
+          {ownerJwt:f.fixture.ownerJwt,workspaceId:workspace}),f.edgeUrl);void pending.catch(()=>{});
+        await observeHouseholdRowWait(Number(session!.pid),'SELECT s.seat_id,g.connection_expires_at,g.connection_expired_at');
+        // Change policy under the existing blocker, after HTTP reached the
+        // actual checkedConnection query. The response must use the new row.
+        const [date]=await locker`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=CASE WHEN ${policy}='null' THEN NULL
+          WHEN ${policy}='future' THEN clock_timestamp()+interval '2 hours' ELSE clock_timestamp()+interval '3 seconds' END
+          WHERE grant_id=${f.fixture.grantA}::uuid RETURNING connection_expires_at`;
+        chosen=date!.connection_expires_at == null ? null : new Date(date!.connection_expires_at as string).toISOString();
+        if(policy==='elapsed') {
+          const [before]=await sql`SELECT clock_timestamp()<${chosen}::timestamptz AS future`;
+          assert.equal(before!.future,true,'Allow reached its checkedConnection wait before the chosen date');
+          await awaitHouseholdDeadline(chosen!);
+        }
+      });
+      const result=(await pending!)[0]!;
+      const [clock]=await sql`SELECT clock_timestamp() AS now,connection_expires_at FROM swarm.hosted_mcp_grants WHERE grant_id=${f.fixture.grantA}::uuid`;
+      assert.equal(clock!.connection_expires_at == null ? null : new Date(clock!.connection_expires_at as string).toISOString(),chosen);
+      const rows=await sql`SELECT expires_at FROM swarm.household_content_connections WHERE connection_id=${f.seat.body.seat_id as string}::uuid`;
+      if(policy==='elapsed') {
+        assert.ok(new Date(clock!.now as string).getTime()>=Date.parse(chosen!));
+        assert.equal(result.body.status,'refused');assert.equal(result.body.reason,'connection_access_refused');assert.equal(rows.length,0);
+        const [effects]=await sql`SELECT count(*)::int AS n FROM swarm.idempotency_keys WHERE command_id=${request}`;
+        assert.equal(effects!.n,0,'refusal writes no successful Allow receipt');
+      } else {
+        assert.equal(result.body.status,'committed');assert.equal(result.body.expires_at,chosen);
+        assert.equal(rows.length,1);assert.equal(rows[0]!.expires_at,null);
+      }
+    } finally {if(pending)await pending.catch(()=>{});await releaseSql.unsafe('ALTER ROLE commonswarm_edge PASSWORD NULL');}
+  });
+}
 
 for(const operation of ['read','write'] as const) {
   test(`inherited Storage ${operation} refuses bytes or committed effects when DB deadline crosses actual I/O`, {timeout:180_000}, async()=>{

@@ -87,6 +87,10 @@ async function auditContext(tx: Sql, actor: HouseholdIdentity, requestId: string
 }
 async function writeConnection(tx: Sql, workspaceId: string, actor: HouseholdIdentity, connection: ConnectionConsent,
   purpose: string, consent: string, expiry: Date | null) {
+  // Hosted chosen expiry belongs to the canonical grant. Persisting a copy
+  // would turn an extended/cleared date into a stale manual restriction.
+  // Local approvals retain their existing technical expiry.
+  const approvalExpiry = connection.kind === 'hosted' ? null : expiry;
   // The workspace lock serializes this primary-key upsert. Lock the existing
   // row explicitly so a reapproval fires one audit trigger, rather than both
   // BEFORE INSERT and BEFORE UPDATE through INSERT ... ON CONFLICT.
@@ -95,13 +99,13 @@ async function writeConnection(tx: Sql, workspaceId: string, actor: HouseholdIde
       AND workspace_id=${workspaceId}::uuid AND principal_id=${connection.principal_id}::uuid FOR UPDATE`;
   if (existing) {
     await tx`UPDATE swarm.household_content_connections SET operations=${connection.operations}::text[],
-      consent_receipt_id=${consent}::uuid,expires_at=${expiry},revoked_at=NULL
+      consent_receipt_id=${consent}::uuid,expires_at=${approvalExpiry},revoked_at=NULL
       WHERE connection_id=${connection.connection_id}::uuid AND grant_id=${connection.grant_id}::uuid
         AND workspace_id=${workspaceId}::uuid AND principal_id=${connection.principal_id}::uuid`;
   } else {
     await tx`INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at,hosted_grant_id)
       VALUES (${connection.connection_id}::uuid,${connection.grant_id}::uuid,${workspaceId}::uuid,${connection.principal_id}::uuid,
-        ${actor.user_id}::uuid,${purpose},${connection.operations}::text[],${consent}::uuid,${expiry},${connection.kind === 'hosted' ? connection.grant_id : null}::uuid)`;
+        ${actor.user_id}::uuid,${purpose},${connection.operations}::text[],${consent}::uuid,${approvalExpiry},${connection.kind === 'hosted' ? connection.grant_id : null}::uuid)`;
   }
   if (connection.kind === 'hosted') await writeHostedContentRestriction(tx, workspaceId, actor.user_id,
     connection.grant_id, connection.principal_id, connection.operations, 'human_allow');
