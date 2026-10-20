@@ -1,3 +1,4 @@
+import { connectionPolicyFields, type ConnectionPolicy } from "./standing-grants";
 import { homeOverviewUnavailable } from "./home-map";
 import type { HomeOverview } from "./home/contract";
 /*
@@ -1036,7 +1037,7 @@ export async function pendingMemberInvites(workspaceId: string): Promise<Pending
   }));
 }
 
-export interface AgentAccessStatus {
+export interface AgentAccessStatus extends ConnectionPolicy {
   workspaceId: string;
   principalId: string;
   ownerUserId: string;
@@ -1128,6 +1129,28 @@ export async function pendingAgentAccess(workspaceId: string): Promise<PendingAg
   }
 }
 
+/** Existing command envelope; ownership, liveness and persistence remain server decisions. */
+export async function setConnectionExpiry(
+  session: Session,
+  workspaceId: string,
+  connectionKind: "hosted" | "renewal",
+  grantId: string,
+  connectionExpiresAt: string | null,
+  commandId = uuid(),
+): Promise<void> {
+  const result = await postCommand(session, commandId, {
+    kind: "set_connection_expiry", connection_kind: connectionKind,
+    grant_id: grantId, connection_expires_at: connectionExpiresAt,
+  }, { workspace_id: workspaceId, stream: { kind: "workspace" } },
+  "The end date result is unknown. Check the connection before saving again.");
+  if ([400, 404, 405, 501].includes(result.status)) {
+    throw new Error("End date settings are unavailable on this server. Nothing was changed.");
+  }
+  if (result.status !== 200 || result.body.status !== "accepted" || result.body.ok !== true) {
+    throw new Error("The end date was not confirmed. Check the connection before saving again.");
+  }
+}
+
 /** Member-scoped grant status through the read edge; no direct table query. */
 export async function agentAccessStatuses(
   workspaceId: string,
@@ -1161,6 +1184,7 @@ export async function agentAccessStatuses(
     }
     return body.grants
       .map((row): AgentAccessStatus => ({
+        ...connectionPolicyFields(row),
         workspaceId,
         principalId: String(row.principal_id),
         ownerUserId: String(row.owner_user_id),

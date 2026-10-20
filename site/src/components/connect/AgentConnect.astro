@@ -35,11 +35,6 @@ interface Props {
   class?: string;
 }
 
-/* The standing-grant sentences are IMPORTED, never retyped here. What an added
-   agent's access does is enforced by swarm.prepare_renewal_grant and
-   swarm.resume_renewal_grant; STANDING_GRANT_COPY is assembled from the same
-   constants that mirror them, so this screen cannot drift from the rule the way
-   the retired "renews access automatically for up to 30 days" sentence did. */
 import { STANDING_GRANT_COPY } from "../../lib/standing-grants";
 import { h0LinkJoinEnabled } from "../../lib/h0-link-join-flag";
 import { joinInviteLimitSentence } from "../../../../src/protocol/agent-join-limits";
@@ -138,38 +133,6 @@ const {
       </p>
     </div>
 
-    <details class="ac__advanced">
-      <summary>Key settings</summary>
-    <div class="ac__field" data-field-wrap="ttl">
-      <label class="ac__label" for="ac-ttl">Key lifetime</label>
-      {/* Three values, not a free field (operator direction 2026-08-19, API-key mental
-          model). "Never" is deliberately absent: the 30-day renewal horizon is the
-          ceiling on any bearer credential, and a pasted prompt is a standing transcript —
-          a non-expiring secret in one is a backdoor. 30d IS the horizon, so it is the
-          honest "as long as possible".
-
-          DEFAULT IS 30d (operator ruling 2026-08-27). It was 24h, which meant an agent
-          connected through this page stopped working the next day — the single most
-          common way a working setup died, and it read as a product fault rather than a
-          deliberate expiry. 30d is the ceiling already enforced elsewhere, so defaulting
-          to it grants nothing the operator could not already pick; it only stops the
-          shortest option being chosen by people who never saw the question. Shorter
-          remains one click away for anyone who wants it. */}
-      <select class="ac__control" id="ac-ttl" data-field="ttl">
-        <option value="86400000">24 hours</option>
-        <option value="604800000">7 days</option>
-        <option value="2592000000" selected>30 days</option>
-      </select>
-      <p class="ac__hint">
-        How long the pasted key works before the agent must be running to renew it.
-        This is the key, not the access: once the agent connects, its access continues
-        under the rules above. 30 days is the maximum; pick shorter if you want the key
-        to lapse sooner.
-      </p>
-    </div>
-
-    </details>
-
     <p class="ac__form-error" data-slot="form-error" role="alert" hidden></p>
     <button
       class="ac__btn ac__btn--quiet"
@@ -258,6 +221,8 @@ const {
 
     <p class="ac__status" role="status" aria-live="polite" data-slot="copy-status"></p>
 
+    <p class="ac__hint" data-slot="connection-policy"></p>
+
     <div class="ac__result-actions">
       {h0LinkJoinEnabled && (
         <button class="ac__btn ac__btn--quiet" type="button" data-action="revoke-join" hidden>
@@ -273,7 +238,6 @@ const {
 
 <script>
   import {
-    AGENT_TOKEN_DEFAULT_TTL_MS,
     AGENT_TOKEN_MAX_TTL_MS,
     AgentConnectRefused,
     AgentNameTaken,
@@ -286,6 +250,7 @@ const {
     myAgents,
     type AgentIdentity,
   } from "../../lib/agent-connect";
+  import { connectionPolicyCopy } from "../../lib/standing-grants";
   import { identityDisplayLabel } from "../../lib/identity-label";
   import {
     NoDeployment,
@@ -585,6 +550,7 @@ const {
       window.clearInterval(this.#pollTimer);
       this.#pollTimer = undefined;
       this.#text("prompt", "");
+      this.#text("connection-policy", "");
       this.#text("copy-status", "");
       this.#resetCopyLabel();
     }
@@ -840,21 +806,8 @@ const {
         }
 
         this.#step("mint-credential", "doing");
-        const ttlField = this.querySelector('[data-field="ttl"]');
-        const chosenTtl = ttlField instanceof HTMLSelectElement
-          ? Number(ttlField.value)
-          : Number.NaN;
         const credential = await mintAgentCredential(
-          session,
-          mintCommandId,
-          this.#workspaceId,
-          identity,
-          deviceId,
-          /* A tampered or missing option falls back to the safe default, never
-             to a wider lifetime. */
-          Number.isFinite(chosenTtl) && chosenTtl > 0 && chosenTtl <= AGENT_TOKEN_MAX_TTL_MS
-            ? chosenTtl
-            : AGENT_TOKEN_DEFAULT_TTL_MS,
+          session, mintCommandId, this.#workspaceId, identity, deviceId, AGENT_TOKEN_MAX_TTL_MS,
         );
         this.#step("mint-credential", "done");
 
@@ -875,6 +828,7 @@ const {
         this.#connection = dashboardAgentConnection(promptInput);
         this.#filePrompt = dashboardAgentFilePrompt(promptInput);
         this.#connectionName = `cswarm-connection-${credential.principalId}.json`;
+        this.#text("connection-policy", connectionPolicyCopy(credential, false));
         this.#text("prompt", this.#prompt);
         this.#tokenId = credential.tokenId;
         this.#text("copy-status", "");
@@ -955,6 +909,7 @@ const {
       lead: string;
       withheld: boolean;
     }) {
+      this.#text("connection-policy", "");
       this.#joinActive = true;
       this.#inviteId = reveal.inviteId;
       this.#connection = null;

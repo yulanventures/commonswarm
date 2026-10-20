@@ -1,3 +1,4 @@
+import { connectionPolicyFields, type ConnectionPolicy } from "./standing-grants";
 /*
  * Turning a signed-in human into an agent's credential issuer.
  *
@@ -36,19 +37,7 @@ import { createAgentPrincipalCommand } from "./identity-label";
 
 export { ALLOW_DUPLICATE_NAME_FIELD, createAgentPrincipalCommand } from "./identity-label";
 
-/**
- * Mirrors AGENT_TOKEN_DEFAULT_TTL_MS / AGENT_TOKEN_MAX_TTL_MS in
- * src/protocol/workspace-commands.ts. The reducer refuses anything above the maximum,
- * so a lifetime picker that offers more than it is offering a refusal.
- *
- * The DEFAULT stays 24h while the protocol max is 30d (operator ruling 2026-08-19: an
- * API-key-style lifetime picker — 24h / 7d / 30d; "never" refused because the 30-day
- * renewal horizon is the deliberate ceiling on any bearer credential). Context from
- * 2026-08-18: the connect-page credential crosses a human — pasted into another
- * machine's chat, often after environment fixes on that side — and the measured cost of
- * a short bootstrap was a sandboxed agent watching its window close while its listener
- * was stuck in "starting" and could not rotate. Rotation successors stay short.
- */
+/** Existing bounded helper default; the connect screen retains its 30-day bootstrap request. */
 export const AGENT_TOKEN_DEFAULT_TTL_MS = 24 * 60 * 60 * 1_000;
 export const AGENT_TOKEN_MAX_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 
@@ -56,8 +45,8 @@ export const AGENT_TOKEN_MAX_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
  * of src/cloud/renewal.ts, and add it to the mint's issue time to produce a horizon date.
  *
  * The rationale it carried is still true and now lives where it is enforced: a work session
- * runs for days while a bearer lives at most a day, so the token stays short and rotates
- * rather than becoming a month-long secret on a developer's machine (SWARM-CLOUD.md §2.3).
+ * runs for days while bearer leases remain finite and rotate. The bootstrap lease
+ * preserves the existing connect flow; renewal timing remains server policy.
  * What was false was the DATE. This page never asked the server for that horizon and the
  * server never returned it here; the number was right only while the server's default
  * happened to agree, and the agent's prompt printed it as "rotate it until <date>".
@@ -427,7 +416,7 @@ export async function createAgentIdentity(
 }
 
 /** A live credential. It is shown once, by definition, and is never persisted anywhere. */
-export interface AgentCredential {
+export interface AgentCredential extends ConnectionPolicy {
   principalId: string;
   principalName: string;
   tokenId: string;
@@ -493,25 +482,6 @@ export async function mintAgentCredential(
       epoch: 0,
       device_id: deviceId,
       ttl_ms: ttlMs,
-      /* ★ THE WEB FLOW ASKS FOR A STANDING GRANT, AND SAYING SO IS THE WHOLE FIX.
-       *
-       * The command function defaults an ABSENT renewal_kind to "timeboxed"
-       * (supabase/functions/command/index.ts, prepareWorkspaceCommand), which is
-       * why every agent added through this page used to stop working after 30
-       * days: nobody chose that, it was the shape of the omission. The default a
-       * person gets when they add an agent is now that it does not expire
-       * (operator ruling 2026-09-04).
-       *
-       * IT IS SENT EXPLICITLY RATHER THAN BY FLIPPING THE SERVER DEFAULT. The
-       * server default is also what `cswarm token mint` gets when it passes no
-       * flag, and the CLI deliberately keeps standing behind --standing
-       * --confirm-standing. Changing the default in one place would have moved
-       * both, silently promoting every scripted mint in the field.
-       *
-       * DEVICE BINDING COMES WITH IT AND IS NOT OPTIONAL: for a standing mint the
-       * command function stores bound_device_id = this request's device_id, so the
-       * grant binds to the browser device registered above, and swarm.agent_runs
-       * pins that same device on the run the agent inherits. */
       renewal_kind: "standing",
     },
     { workspace_id: workspaceId, stream: { kind: "workspace" } },
@@ -542,6 +512,7 @@ export async function mintAgentCredential(
     ? body.grant_kind
     : null;
   return {
+    ...connectionPolicyFields(body),
     principalId: identity.principalId,
     principalName: identity.name,
     tokenId,

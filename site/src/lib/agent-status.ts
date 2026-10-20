@@ -17,7 +17,7 @@
 import { classifyAgentPresence, type AgentPresenceRow } from "../../../src/cloud/agent-presence";
 import { WAKE_STALE_MS } from "../../../src/cloud/idle-poll";
 import { wakePathMark } from "./wake-path";
-import { STANDING_IDLE_PAUSE_DAYS, STANDING_RESUME_ACTORS, type GrantRiskInput } from "./standing-grants";
+import { connectionPolicyState, renewalGrantEnded, type GrantRiskInput } from "./standing-grants";
 import type { AgentStateVM } from "./home-types";
 import { formatWhen } from "./home-names";
 
@@ -136,32 +136,37 @@ export interface PeopleAgentStatus {
 export function peopleAgentStatus(input: PeopleAgentStatusInput, now = Date.now()): PeopleAgentStatus {
   const base = agentStatus(input, now);
   const owner = input.ownerName?.split(/\s+/)[0] ?? "its owner";
-  const actors = STANDING_RESUME_ACTORS.map((actor, index) =>
-    index === STANDING_RESUME_ACTORS.length - 1 ? `or ${actor}` : actor).join(", ");
   const result = (kind: PeopleAgentStatusKind, label: string, sentence: string,
     action: PeopleAgentStatus["fix"]["action"] = null, permitted = false, askWho: string | null = null,
     attention = true): PeopleAgentStatus => ({ kind, label, sentence, attention,
       fix: { action, allowed: permitted && !input.sample, askWho } });
-  const keyFix = (kind: "key-off" | "key-ended" | "key-ends-soon", label: string) => result(kind, label,
-    input.own ? kind === "key-ends-soon" ? "Get a new key before this one ends." : "It needs a new key to connect again."
+  const keyFix = (kind: "key-off" | "key-ended", label: string) => result(kind, label,
+    input.own ? "It needs a new key to connect again."
       : `Ask ${owner} to get a new key.`, "new-key", input.own, input.own ? null : owner);
   const grant = input.grant;
   if (grant?.revokedAt || input.connection === "key_off") return keyFix("key-off", "Key turned off");
-  const horizon = grant?.kind === "timeboxed" && grant.horizonExpiresAt ? Date.parse(grant.horizonExpiresAt) : NaN;
-  if (horizon <= now || input.connection === "key_ended") return keyFix("key-ended", "Key ended");
-  if ((grant?.kind === "standing" && grant.suspendedAt) || input.connection === "paused") return result("paused",
-    `Paused: unused for ${STANDING_IDLE_PAUSE_DAYS} days`, input.mayManage ? "Resume it so it can connect again."
-      : input.ownerName ? `Ask ${owner} to resume it.` : `Ask ${actors} to resume it.`,
-    "resume", input.mayManage, input.mayManage ? null : input.ownerName ? owner : actors);
+  if (input.revoked || input.connection === "removed") return result("removed", "Removed", "It can no longer read or post.");
+  if (input.connection === "connection_off") return result("suspended", "Connection turned off",
+    input.own ? "Connect it again from its app." : "Ask its owner to check this connection.");
+  const policy = grant ? connectionPolicyState(grant, true, now) : "unknown";
+  // Overview key_ended means no current token or renewable family remains. An owner
+  // policy cannot restore that authority; only a legacy technical horizon is superseded.
+  const ended = Boolean(grant && renewalGrantEnded(grant, now)) || input.connection === "key_ended";
+  if (input.suspended) return result(base.kind, base.chip, base.receive ?? "Check this connection's access.");
+  if (grant?.suspendedAt || input.connection === "paused") {
+    if (ended) return result("paused", "Access suspended", "This connection has also ended and cannot be resumed.");
+    return result("paused", "Access suspended", input.mayManage ? "Review its access before resuming it."
+      : input.ownerName ? `Ask ${owner} to review and resume it.` : "Ask a workspace owner or admin to review and resume it.",
+      "resume", input.mayManage, input.mayManage ? null : input.ownerName ? owner : "a workspace owner or admin");
+  }
+  if (policy === "ended")
+    return result("key-ended", "Connection ended", "Its end date has passed. This connection cannot be resumed.");
+  if (ended) return keyFix("key-ended", "Key ended");
   if (wakePathMark(input.oldestUnobservedAt, now)) {
     const hosted = input.transport === "hosted_mcp";
     return result("stale-messages", `Hasn’t picked up messages for ${WAKE_STALE_MS / 60_000}+ min`,
       hosted ? "Open the chat app you use it in and say: check CommonSwarm." : "Start its cswarm process.",
       hosted ? "guide-chat" : "guide-local", input.own, input.own ? null : owner);
-  }
-  if (horizon - now <= 3 * 86_400_000) {
-    const days = Math.max(1, Math.ceil((horizon - now) / 86_400_000));
-    return keyFix("key-ends-soon", `Key ends in ${days} ${days === 1 ? "day" : "days"}`);
   }
   if (grant?.newHostAt) return result("new-computer", "Used from a new computer", "Keep using it if you recognize this computer.");
   const label = base.kind === "active" && base.chip !== "Active now" && input.presence?.last_command_at
@@ -170,7 +175,7 @@ export function peopleAgentStatus(input: PeopleAgentStatusInput, now = Date.now(
 }
 
 export function agentResumeReceipt(name: string): string {
-  return `Resumed. Nothing has reached ${name} yet. It renews the next time it starts. Another ${STANDING_IDLE_PAUSE_DAYS} days without use will pause it again.`;
+  return `Resumed. Nothing has reached ${name} yet. It renews the next time it starts.`;
 }
 
 /** Server-recorded activity keeps an old work claim from reading as current work. */

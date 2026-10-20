@@ -1072,6 +1072,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
        it, so Shared objects threw ReferenceError in the built page (found by the before-state
        screenshot harness, 2026-10-04). */
     postCommand,
+    setConnectionExpiry,
     BROWSER_RECEIPT_REQUESTS_PER_TICK,
     browserAcceptedDeliveryIndicator,
     browserBroadcastRosterView,
@@ -1199,7 +1200,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   } from "../../lib/participant-rail";
   import {
     grantRiskBadge,
-    STANDING_GRANT_COPY,
+    renewalGrantEnded,
+    connectionPolicyCopy,
+    connectionPolicyState,
+    type ConnectionPolicy,
   } from "../../lib/standing-grants";
   import { renderFileList, type DisplayFile } from "../../lib/file-list";
   import {
@@ -4119,6 +4123,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         for (const person of overview.workspaces.find(row => row.workspace_id === workspaceId)?.people ?? [])
           for (const agent of person.agents) { const row = agents.find(row => row.principalId === agent.principal_id); if (row) row.work = agent.status; }
         renderHomeRail(); renderHomeShell(); renderHomeSide(); renderHomeObjectPane();
+        if (homeRoute.view === "people") renderDialogRoster();
       }, () => { /* Status falls back to measured roster facts when overview is unavailable. */ });
       try {
         if (sampleMode) householdAccess = { workspaceId, status: "ok", contentRole: "editor" };
@@ -4315,6 +4320,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const note = document.createElement("p"); note.className = "hm-todo-quiet"; note.setAttribute("role", "status"); note.textContent = homeTodoReceipt; slot.append(note); };
       if (homeRoute.view === "agent") {
         const id = homeRoute.agentId;
+        const endDateFocus = connectionDateFocus(slot);
         const candidates = [...ctx.people.groups.flatMap(group => group.agents), ...ctx.people.other];
         const agent = candidates.find(agent => agent.id === id);
         if (!agent) { const state = homeObjectState(id, candidates.map(agent => agent.id), homePeopleReadState);
@@ -4360,7 +4366,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             else if (action === "start-now") steerHomeTodo(row.todoId, { kind: "start_now" });
             else if (action === "release") steerHomeTodo(row.todoId, { kind: "gate", gate: { kind: "none" } });
             else { homeGateEditorId = row.todoId; void navigateHome({ view: "todo", workspaceId: workspace.id, todoId: row.todoId }, "push"); }
-          } })]); return;
+          } })]);
+        mountRenewalEndDate(slot, id); restoreConnectionDateFocus(slot, endDateFocus); return;
       }
       if (homeTodosState === "absent") {
         if (homeRoute.view === "todo") homePaneMessage("Could not load this to-do.", "");
@@ -4773,6 +4780,158 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
      * dialog (a replaced node cannot keep focus, and losing it would strand a keyboard
      * user on <body> behind the modal).
      */
+    // Drafts follow the signed-in owner, workspace and exact connection, across refreshes.
+    let connectionSettingsGeneration = 0;
+    const connectionDateDrafts = new Map<string, { enabled: boolean; value: string; dirty: boolean; busy: boolean; needsCheck: boolean; notice: string }>();
+    // The roster's latest token cannot prove run/device eligibility. Require the
+    // server's current family classification before promising continuity or editing.
+    const renewalConnectionLive = (grant: AgentAccessStatus): boolean =>
+      agents.find(row => row.principalId === grant.principalId)?.work?.facts.connection === "live" &&
+      ["permanent", "dated"].includes(connectionPolicyState(grant, true)) &&
+      [grant.grantId, grant.tokenId, grant.boundDeviceId].every(id => typeof id === "string" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) &&
+      grant.revokedAt === null && grant.grantRevokedAt === null && grant.suspendedAt === null;
+
+    const connectionDateFocus = (host: HTMLElement) => {
+      const active = document.activeElement;
+      if (!(active instanceof HTMLElement) || !host.contains(active)) return null;
+      const key = active.closest<HTMLElement>("[data-connection-end-date]")?.dataset.connectionEndDate;
+      return key ? { key, field: active.dataset.endDateField ?? "save" } : null;
+    };
+    const restoreConnectionDateFocus = (host: HTMLElement, focus: ReturnType<typeof connectionDateFocus>): void => {
+      if (!focus) return;
+      Array.from(host.querySelectorAll<HTMLElement>("[data-connection-end-date]"))
+        .find(element => element.dataset.connectionEndDate === focus.key)?.querySelector<HTMLElement>(`[data-end-date-field="${focus.field}"]`)?.focus({ preventScroll: true });
+    };
+    const refreshConnectionDateViews = (): void => {
+      if (homeRoute.view === "people") renderDialogRoster();
+      else if (homeRoute.view === "agent") renderHomeObjectPane();
+      if (one<HTMLDialogElement>("[data-connected-apps-dialog]")?.open) renderConnectedApps();
+    };
+
+    const connectionEndDateEditor = (options: {
+      key: string; workspaceId: string; kind: "hosted" | "renewal"; grantId: string;
+      current: () => { policy: ConnectionPolicy; live: boolean; owner: boolean } | null;
+      isCurrent: () => boolean;
+      reread: () => Promise<void>;
+    }): HTMLElement => {
+      const section = document.createElement("section"); section.className = "dashboard__connection-end-date";
+      section.dataset.connectionEndDate = options.key;
+      const heading = document.createElement("h3"); heading.textContent = "End date";
+      const summary = document.createElement("p");
+      const notice = document.createElement("p"); notice.setAttribute("role", "status"); notice.setAttribute("aria-live", "polite");
+      section.append(heading, summary, notice);
+      const localDate = (value: string | null | undefined): string => {
+        if (!value) return "";
+        const date = new Date(value);
+        return Number.isFinite(date.getTime()) ? new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16) : "";
+      };
+      let draft = connectionDateDrafts.get(options.key);
+      if (!draft) {
+        const policy = options.current()?.policy;
+        draft = { enabled: typeof policy?.connectionExpiresAt === "string", value: localDate(policy?.connectionExpiresAt), dirty: false, busy: false, needsCheck: false, notice: "" };
+        connectionDateDrafts.set(options.key, draft);
+      }
+      const state = draft;
+      const form = document.createElement("form");
+      const toggleLabel = document.createElement("label");
+      const toggle = document.createElement("input"); toggle.type = "checkbox"; toggle.dataset.endDateToggle = "";
+      toggleLabel.append(toggle, document.createTextNode("Use an end date"));
+      const dateLabel = document.createElement("label"); dateLabel.textContent = "Connection ends (" + Intl.DateTimeFormat().resolvedOptions().timeZone + ")";
+      const date = document.createElement("input"); date.type = "datetime-local"; date.step = "60"; date.required = true; date.dataset.endDateValue = "";
+      dateLabel.append(date);
+      const save = document.createElement("button"); save.type = "submit"; save.textContent = "Save";
+      save.className = "dashboard__button dashboard__button--secondary"; save.dataset.endDateSave = "";
+      const check = document.createElement("button"); check.type = "button"; check.textContent = "Check saved end date";
+      check.className = "dashboard__text-button"; check.dataset.endDateCheck = "";
+      for (const [field, control] of [["toggle", toggle], ["value", date], ["save", save], ["check", check]] as const) {
+        control.dataset.endDateField = field; control.dataset.pdFocus = `${options.key}:${field}`;
+      }
+      form.append(toggleLabel, dateLabel, save, check); section.append(form);
+      const update = (): void => {
+        const latest = options.current();
+        const policy = latest?.policy ?? {};
+        const policyState = connectionPolicyState(policy, latest?.live === true);
+        const editable = options.isCurrent() && latest?.owner === true && (policyState === "permanent" || policyState === "dated");
+        summary.textContent = connectionPolicyCopy(policy, latest?.live === true);
+        if (!state.dirty && !state.busy && !state.needsCheck) {
+          state.enabled = typeof policy.connectionExpiresAt === "string"; state.value = localDate(policy.connectionExpiresAt);
+        }
+        form.hidden = !editable && !state.needsCheck;
+        toggle.checked = state.enabled; date.value = state.value; dateLabel.hidden = !state.enabled;
+        toggle.disabled = date.disabled = !editable || state.busy || state.needsCheck;
+        date.disabled ||= !state.enabled;
+        save.disabled = !editable || state.busy || state.needsCheck || !state.dirty;
+        check.hidden = !state.needsCheck; check.disabled = state.busy || !options.isCurrent();
+        notice.textContent = state.notice;
+      };
+      const edited = (): void => { state.enabled = toggle.checked; state.value = date.value; state.dirty = true; state.notice = ""; update(); };
+      toggle.addEventListener("change", edited); date.addEventListener("input", edited);
+      check.addEventListener("click", async () => {
+        if (state.busy || !options.isCurrent()) return;
+        state.busy = true; state.notice = "Checking saved end date…"; update();
+        try { await options.reread(); if (!options.isCurrent()) return;
+          state.needsCheck = false; state.notice = "Saved connection settings checked. Review before saving.";
+        } catch { if (options.isCurrent()) state.notice = "Could not check the saved end date. Check again before saving."; }
+        finally { state.busy = false; if (options.isCurrent()) { if (section.isConnected) update(); else refreshConnectionDateViews(); } }
+      });
+      form.addEventListener("submit", async event => {
+        event.preventDefault();
+        const latest = options.current(); const ownerSession = session;
+        if (state.busy || state.needsCheck || !state.dirty || !options.isCurrent() || !ownerSession || latest?.owner !== true ||
+          !["permanent", "dated"].includes(connectionPolicyState(latest.policy, latest.live))) return;
+        const parsed = state.enabled ? new Date(state.value).getTime() : null;
+        if (state.enabled && (!state.value || !Number.isFinite(parsed) || parsed! <= Date.now() || localDate(new Date(parsed!).toISOString()) !== state.value)) {
+          state.notice = "Choose a future end date."; update(); date.focus(); return;
+        }
+        const desired = parsed === null ? null : new Date(parsed).toISOString();
+        state.busy = true; state.notice = "Saving end date…"; update();
+        // Even an unknown command outcome is reconciled by reading; never remint or send again here.
+        let writeError: unknown = null;
+        try { await setConnectionExpiry(ownerSession, options.workspaceId, options.kind, options.grantId, desired); }
+        catch (error) { writeError = error; }
+        if (!options.isCurrent()) {
+          state.busy = false; state.needsCheck = true;
+          state.notice = "Check the saved end date before saving again.";
+          if (session?.user.id === ownerSession.user.id) refreshConnectionDateViews();
+          return;
+        }
+        try {
+          await options.reread(); if (!options.isCurrent()) return;
+          const fresh = options.current();
+          const confirmed = writeError === null && fresh?.owner === true && ["permanent", "dated"].includes(connectionPolicyState(fresh.policy, fresh.live)) &&
+            (desired === null ? fresh.policy.connectionExpiresAt === null : Date.parse(fresh.policy.connectionExpiresAt ?? "") === Date.parse(desired));
+          state.needsCheck = false;
+          if (confirmed) { state.dirty = false; state.notice = desired === null ? "End date is off." : "End date saved."; }
+          else state.notice = writeError === null ? "The end date was not confirmed. Review the saved connection settings before saving again." : readableError(writeError);
+        } catch { state.needsCheck = true; state.notice = "The result is unknown. Check the saved end date before saving again."; }
+        finally { state.busy = false; if (options.isCurrent()) { if (section.isConnected) { update(); (state.needsCheck ? check : toggle).focus({ preventScroll: true }); } else refreshConnectionDateViews(); } }
+      });
+      update(); return section;
+    };
+
+    const mountRenewalEndDate = (host: HTMLElement, principalId: string): void => {
+      const workspaceId = activeWorkspaceId, ownerId = session?.user.id, generation = connectionSettingsGeneration;
+      const grant = accessStatuses.find(row => row.principalId === principalId);
+      if (!grant || !ownerId || sampleMode || agents.find(row => row.principalId === principalId)?.transport === "hosted_mcp") return;
+      const grantId = grant.grantId;
+      const isCurrent = () => session?.user.id === ownerId && activeWorkspaceId === workspaceId && connectionSettingsGeneration === generation && !sampleMode;
+      host.append(connectionEndDateEditor({ key: `${ownerId}:${workspaceId}:renewal:${grantId}`, workspaceId, kind: "renewal", grantId,
+        isCurrent, current: () => {
+          const current = accessStatuses.find(row => row.grantId === grantId);
+          return current ? { policy: current, live: renewalConnectionLive(current), owner: current.ownerUserId === ownerId &&
+            agents.some(row => row.principalId === principalId && row.ownerUserId === ownerId) } : null;
+        }, reread: async () => {
+          const [rows, overview] = await Promise.all([agentAccessStatuses(workspaceId), homeOverview()]);
+          if (!isCurrent()) return;
+          accessStatuses = rows;
+          const status = overview?.workspaces.find(row => row.workspace_id === workspaceId)?.people
+            .flatMap(person => person.agents).find(row => row.principal_id === principalId)?.status;
+          const agent = agents.find(row => row.principalId === principalId);
+          if (agent) agent.work = status;
+        } }));
+    };
+
     const peopleDialogState: PeopleDialogState = { selected: null, collapsed: new Set(), showAllAttention: false, query: "" };
     const peopleDialogReceipts = new Map<string, string>();
     const peopleDialogModel = (): PeopleDialogModel => {
@@ -4797,7 +4956,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               .map(connectionApproval).find((value) => value !== null) ?? null : null;
           const status = peopleAgentStatus({ transport: agent.transport, turnOnly: agent.turnOnly,
             presence: agent.presence, oldestUnobservedAt: agent.oldestUnobservedAt, ownerName, own, mayManage, sample: sampleMode,
-            grant: grant ? { kind: grant.grantKind, horizonExpiresAt: grant.horizonExpiresAt, boundDeviceId: grant.boundDeviceId,
+            connection: agent.work?.facts.connection,
+            grant: grant ? { ...grant, kind: grant.grantKind, horizonExpiresAt: grant.horizonExpiresAt, boundDeviceId: grant.boundDeviceId,
               lastUsedAt: grant.lastUsedAt, issuedAt: grant.issuedAt, newHostAt: grant.newHostAt,
               suspendedAt: grant.suspendedAt, revokedAt: grant.grantRevokedAt ?? grant.revokedAt } : null }, now);
           const presence = classifyAgentPresence(agent.presence ?? null);
@@ -4808,8 +4968,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           let grantRisk: string | null = null;
           if (grant) {
             technical.push(`Key ID: ${grant.grantId}`, `Last used: ${grant.lastUsedAt === null ? "never" : formatTime(grant.lastUsedAt).relative}`);
-            if (grant.grantKind === "standing") technical.push(STANDING_GRANT_COPY);
-            const risk = grantRiskBadge({ kind: grant.grantKind, horizonExpiresAt: grant.horizonExpiresAt,
+            technical.push(connectionPolicyCopy(grant, renewalConnectionLive(grant)));
+            const risk = grantRiskBadge({ ...grant, kind: grant.grantKind, horizonExpiresAt: grant.horizonExpiresAt,
               boundDeviceId: grant.boundDeviceId, lastUsedAt: grant.lastUsedAt, issuedAt: grant.issuedAt,
               newHostAt: grant.newHostAt, suspendedAt: grant.suspendedAt, revokedAt: grant.grantRevokedAt ?? grant.revokedAt });
             if (risk) { grantRisk = risk; technical.push(risk); }
@@ -4820,8 +4980,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             technical, grantRisk, updateAvailable: presence.client.kind === "update available", access: approval ? { until: approval.expires_at === null ? null : new Date(approval.expires_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) } : null,
             key: grant ? ["key-off", "key-ended", "paused", "key-ends-soon"].includes(status.kind) ? status.kind === "key-off" ? "Turned off. A new key can bring it back." : status.label + "." : "Uses a key to connect." : null,
             accessReadState: householdConnectionsReadState,
-            liveKey: Boolean(grant && grant.revokedAt === null && grant.grantRevokedAt === null &&
-              (grant.grantKind !== "timeboxed" || (grant.horizonExpiresAt !== null && Date.parse(grant.horizonExpiresAt) > Date.now()))), own, mayManage,
+            liveKey: Boolean(grant && grant.revokedAt === null && grant.grantRevokedAt === null && status.kind !== "key-ended" &&
+              !renewalGrantEnded({ ...grant, kind: grant.grantKind }, now)), own, mayManage,
             receipt: peopleDialogReceipts.get(`${activeWorkspaceId}:${agent.principalId}`) ?? householdReceipts.get(agent.principalId) ?? "" };
         }),
         invites: currentPendingAccessRows().map((row) => {
@@ -4879,6 +5039,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const workspace = workspaces.find((row) => row.id === activeWorkspaceId);
       if (!list || !workspace || homeRoute.view !== "people") return;
       const detail = peopleDetailHost();
+      const endDateFocus = connectionDateFocus(detail);
       const model = peopleDialogModel(); peopleDialogState.query = rosterFilter;
       /* The render replaces the page, and the sign-in block sits in its header: moving it drops the focus of a
          control inside it (the sign-in button after a refusal). Note that control, and put focus back after the
@@ -4952,6 +5113,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           invite: () => { void navigateHome({ view: "chat", workspaceId: workspace.id }, "push").then(() => openInvite("channel")); },
           onQuery: (value) => { rosterFilter = value; peopleDialogState.collapsed.clear(); renderDialogRoster(); },
         } });
+      if (peopleDialogState.selected?.type === "agent") mountRenewalEndDate(detail, peopleDialogState.selected.id);
+      restoreConnectionDateFocus(detail, endDateFocus);
       // A removal or role change that needs a fresh sign-in shows its block under the page header.
       mountMemberDetails(list);
       if (held?.isConnected && document.activeElement !== held) {
@@ -6641,6 +6804,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (connectedDialog?.open) connectedDialog.close();
       connectedAppsGeneration += 1;
       connectedApps = [];
+      connectionSettingsGeneration += 1;
+      connectionDateDrafts.clear();
       one<HTMLElement>("[data-connected-apps-list]")?.replaceChildren();
       connectedAppsStatus("");
       /* The channel dialog is the third modal this app opens with showModal, and it lives
@@ -6881,6 +7046,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const renderConnectedApps = (receipt = ""): void => {
       const root = one<HTMLElement>("[data-connected-apps-list]");
       if (!root) return;
+      const focused = connectionDateFocus(root);
       root.replaceChildren();
       connectedAppsStatus(receipt);
       if (connectedApps.length === 0) {
@@ -6900,6 +7066,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         badge.className = `dashboard__connected-app-state dashboard__connected-app-state--${connection.status}`;
         badge.textContent = connection.status;
         head.append(title, badge);
+        const ownerId = session?.user.id, generation = connectedAppsGeneration;
+        if (ownerId && !sampleMode) card.append(connectionEndDateEditor({
+          key: `${ownerId}:${connection.homeWorkspaceId}:hosted:${connection.grantId}`,
+          workspaceId: connection.homeWorkspaceId, kind: "hosted", grantId: connection.grantId,
+          isCurrent: () => session?.user.id === ownerId && connectedAppsGeneration === generation && !sampleMode,
+          current: () => { const fresh = connectedApps.find(row => row.grantId === connection.grantId);
+            return fresh ? { policy: fresh, live: fresh.status === "active", owner: session?.user.id === ownerId } : null; },
+          reread: async () => { const loaded = await loadConnectedApps(new Map(workspaces.map(row => [row.id, row.name])));
+            if (session?.user.id === ownerId && connectedAppsGeneration === generation) connectedApps = loaded; },
+        }));
         const workspacesTitle = document.createElement("p");
         workspacesTitle.className = "dashboard__connected-app-label";
         workspacesTitle.textContent = "Consented workspaces";
@@ -6922,7 +7098,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         for (const seat of connection.seats) {
           const row = document.createElement("li");
           const label = document.createElement("span");
-          label.textContent = `${seat.name} · ${seat.workspaceName}${seat.effectiveRevoked ? " · revoked" : ""}`;
+          label.textContent = `${seat.name} · ${seat.workspaceName}${seat.effectiveRevoked ? " · revoked" : connection.status === "ended" ? " · connection ended" : ""}`;
           row.append(label);
           if (!seat.effectiveRevoked && connection.status !== "revoked") {
             const revoke = document.createElement("button");
@@ -6961,7 +7137,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           }
           seatList.append(row);
         }
-        card.append(head, workspacesTitle, workspaceList, seatsTitle, seatList);
+        card.prepend(head);
+        card.append(workspacesTitle, workspaceList, seatsTitle, seatList);
         if (connection.status !== "revoked") {
           const revoke = document.createElement("button");
           revoke.type = "button";
@@ -6994,6 +7171,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         }
         root.append(card);
       }
+      restoreConnectionDateFocus(root, focused);
     };
 
     const loadConnectedAppsDialog = async (): Promise<void> => {
@@ -15972,8 +16150,44 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     text-transform: capitalize;
   }
 
+  .dashboard__connection-end-date {
+    display: grid;
+    gap: var(--s-2);
+    margin-block: var(--s-4);
+    font-size: var(--t-sm);
+  }
+  .dashboard__connection-end-date h3,
+  .dashboard__connection-end-date p { margin: 0; }
+  .dashboard__connection-end-date form {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: var(--s-3);
+  }
+  .dashboard__connection-end-date label {
+    display: grid;
+    gap: var(--s-2);
+    min-block-size: 2.75rem;
+  }
+  .dashboard__connection-end-date label:has([type="checkbox"]) {
+    display: inline-flex;
+    align-items: center;
+  }
+  .dashboard__connection-end-date [type="datetime-local"] {
+    box-sizing: border-box;
+    max-inline-size: 100%;
+    min-block-size: 2.75rem;
+    padding: var(--s-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+    color: var(--text);
+    font: inherit;
+  }
+
   .dashboard__connected-app-state--active { color: var(--success-text); }
-  .dashboard__connected-app-state--revoked { color: var(--text-muted); }
+  .dashboard__connected-app-state--revoked,
+  .dashboard__connected-app-state--ended { color: var(--text-muted); }
 
   /* ===================================================================================
      REDESIGN 2026-10-04: household onboarding surfaces. Daylight Orbs tokens only.
