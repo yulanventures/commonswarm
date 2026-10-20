@@ -17,7 +17,7 @@
 import { classifyAgentPresence, type AgentPresenceRow } from "../../../src/cloud/agent-presence";
 import { WAKE_STALE_MS } from "../../../src/cloud/idle-poll";
 import { wakePathMark } from "./wake-path";
-import { connectionPolicyState, renewalGrantEnded, type GrantRiskInput } from "./standing-grants";
+import { connectionPolicyState, renewalGrantEnded, type GrantRiskInput, type ConnectionPolicy } from "./standing-grants";
 import type { AgentStateVM } from "./home-types";
 import { formatWhen } from "./home-names";
 
@@ -117,6 +117,8 @@ export interface PeopleAgentStatusInput extends AgentStatusInput {
   /** Optional server overview facts; absent for the existing People dialog. */
   connection?: "live" | "removed" | "connection_off" | "key_off" | "key_ended" | "paused";
   grant?: GrantRiskInput | null;
+  /** Overview policy carries no grant identity or permission to edit. */
+  connectionPolicy?: ConnectionPolicy;
   oldestUnobservedAt?: string | null;
   app?: string | null;
   ownerName: string | null;
@@ -144,14 +146,14 @@ export function peopleAgentStatus(input: PeopleAgentStatusInput, now = Date.now(
     input.own ? "It needs a new key to connect again."
       : `Ask ${owner} to get a new key.`, "new-key", input.own, input.own ? null : owner);
   const grant = input.grant;
-  if (grant?.revokedAt || input.connection === "key_off") return keyFix("key-off", "Key turned off");
   if (input.revoked || input.connection === "removed") return result("removed", "Removed", "It can no longer read or post.");
+  if (grant?.revokedAt || input.connection === "key_off") return keyFix("key-off", "Key turned off");
   if (input.connection === "connection_off") return result("suspended", "Connection turned off",
     input.own ? "Connect it again from its app." : "Ask its owner to check this connection.");
-  const policy = grant ? connectionPolicyState(grant, true, now) : "unknown";
+  const policy = connectionPolicyState(input.connectionPolicy ?? grant ?? {}, input.connection === "live", now);
   // Overview key_ended means no current token or renewable family remains. An owner
   // policy cannot restore that authority; only a legacy technical horizon is superseded.
-  const ended = Boolean(grant && renewalGrantEnded(grant, now)) || input.connection === "key_ended";
+  const ended = policy === "ended" || Boolean(grant && renewalGrantEnded(grant, now)) || input.connection === "key_ended";
   if (input.suspended) return result(base.kind, base.chip, base.receive ?? "Check this connection's access.");
   if (grant?.suspendedAt || input.connection === "paused") {
     if (ended) return result("paused", "Access suspended", "This connection has also ended and cannot be resumed.");

@@ -1,5 +1,6 @@
 /** Map Home wire facts to UI models using shared copy formatting.
  * Input: membership/overview facts; output: view models. DOM builders never interpret wire facts. */
+import { connectionPolicyFields } from "./standing-grants";
 import { homeAgentState, type HomeAgentStatusInput } from "./agent-status";
 import { agentLabel, firstNames, initials, formatWhen, personTint } from "./home-names";
 import { foldIdentityName } from "./identity-label";
@@ -61,6 +62,7 @@ export function mapHomePeople(input: HomePeopleInput): HomePeople {
     const raw = row.name.trim() || row.principalId;
     const yours = row.ownerUserId === input.viewerId;
     const work = row.work;
+    const policy = connectionPolicyFields((work?.facts ?? {}) as unknown as Record<string, unknown>);
     const workingOn = input.signals.filter(item => item.fromKind === "agent" && item.from === row.principalId && item.kind === "working-on" && Date.parse(item.until ?? "") > input.now)
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0];
     const facts: HomeAgentStatusInput = { own: yours, ownerName: owner?.name ?? null, ownerFirstName: names.get(row.ownerUserId) ?? null,
@@ -69,6 +71,7 @@ export function mapHomePeople(input: HomePeopleInput): HomePeople {
       oldestUnobservedAt: work?.facts.messages_waiting_since ?? row.oldestUnobservedAt,
       revoked: work?.facts.connection === "removed",
       connection: work?.facts.connection,
+      ...(Object.keys(policy).length ? { connectionPolicy: policy } : {}),
 
       grant: access ? {
         ...(Object.hasOwn(access, "connectionExpiresAt") ? { connectionExpiresAt: access.connectionExpiresAt } : {}),

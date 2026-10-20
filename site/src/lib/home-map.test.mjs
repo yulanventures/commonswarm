@@ -224,7 +224,7 @@ test("a failed ask preview, an assigned to-do and a disconnected agent share one
 });
 test("overview credentials retain each measured fault and last activity without an access or presence row", () => {
   const facts = { transport: "hosted_mcp", turn_only: true, last_activity_at: "2026-10-05T10:00:00Z", messages_waiting_since: null, doing: null, working_on: null };
-  for (const [connection, detail, action] of [["removed", "Removed", null], ["key_off", "Key turned off", "new-key"], ["key_ended", "Key ended", "new-key"], ["paused", "Paused: unused for 14 days", "resume"], ["live", "Active 2 hours ago", null]]) {
+  for (const [connection, detail, action] of [["removed", "Removed", null], ["key_off", "Key turned off", "new-key"], ["key_ended", "Key ended", "new-key"], ["paused", "Access suspended", "resume"], ["live", "Active 2 hours ago", null]]) {
     const people = mapHomePeople({ ...input, agents: [{ ...input.agents[0], work: { work: "idle", facts: { ...facts, connection } } }] });
     const state = people.groups[0].agents[0].state;
     assert.equal(state.word, connection === "live" ? "Idle" : "Disconnected");
@@ -837,4 +837,42 @@ test("Home preserves canonical connection endings without turning proof horizons
   assert.equal(suspended.kind, "disconnected");
   assert.equal(suspended.detail, "Access suspended");
   assert.doesNotMatch(suspended.fix.sentence, /idle|14 days/i);
+});
+
+// Authoring gate: raw Q10 facts reach the normal overview mapper with access: [].
+// Dropping either policy key would turn a terminal owner date into a new-key fix.
+// The roster caller above cannot detect that wire loss; no production seam is added.
+test("successful Home overview preserves canonical policy without a renewal roster", () => {
+  const before = "2026-10-01T00:00:00+00:00", future = "2099-01-01T00:00:00+00:00";
+  for (const [name, fields, connection, expected, action] of [
+    ["permanent", { connection_expires_at: null, connection_expired_at: null }, "live", "Active 2 hours ago", null],
+    ["future", { connection_expires_at: future, connection_expired_at: null }, "live", "Active 2 hours ago", null],
+    ["elapsed", { connection_expires_at: before, connection_expired_at: before }, "key_ended", "Connection ended", null],
+    ["elapsed without materialized fence", { connection_expires_at: before, connection_expired_at: null }, "key_ended", "Connection ended", null],
+    ["irreversible fence", { connection_expires_at: null, connection_expired_at: before }, "key_ended", "Connection ended", null],
+    ["legacy", {}, "live", "Active 2 hours ago", null],
+    ["partial", { connection_expires_at: null }, "live", "Active 2 hours ago", null],
+    ["malformed", { connection_expires_at: false, connection_expired_at: null }, "live", "Active 2 hours ago", null],
+    ["malformed fence", { connection_expires_at: null, connection_expired_at: "invalid" }, "live", "Active 2 hours ago", null],
+    ["paused", { connection_expires_at: null, connection_expired_at: null }, "paused", "Access suspended", "resume"],
+    ["paused and ended", { connection_expires_at: before, connection_expired_at: before }, "paused", "Access suspended", null],
+    ["key off", { connection_expires_at: null, connection_expired_at: null }, "key_off", "Key turned off", "new-key"],
+    ["connection off", { connection_expires_at: null, connection_expired_at: null }, "connection_off", "Connection turned off", null],
+    ["removed", { connection_expires_at: before, connection_expired_at: before }, "removed", "Removed", null],
+  ]) {
+    // Shape and key placement match 9ecb778 Q10's jsonb_build_object projection.
+    const row = { ...overviewRow, people: [{ user_id: "zoe", display_name: "Zoe", role: "owner", is_viewer: true,
+      agents: [{ principal_id: "A", name: "Claude", queue: null, status: { work: connection === "live" ? "idle" : "disconnected",
+        facts: { transport: "local", turn_only: false, connection, last_activity_at: "2026-10-05T10:00:00Z",
+          messages_waiting_since: null, doing: null, working_on: null, ...fields } } }] }],
+      needs_you: { asks: [], assigned: [], waiting: [] } };
+    const data = overviewCatchUpData(initialCatchUpData(workspaces), {
+      viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: [row] }, false);
+    const detail = data[0].detail;
+    if (connection === "removed") { assert.equal(detail.people.groups[0].agents.length, 0, name); continue; }
+    const state = detail.people.groups[0].agents[0].state;
+    assert.equal(state.detail, expected, name);
+    assert.equal(state.fix.action, action, name);
+    if (expected === "Connection ended") assert.match(state.fix.sentence, /cannot be resumed/, name);
+  }
 });

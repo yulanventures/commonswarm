@@ -17,10 +17,13 @@ import { browserTest, findChrome, launchChrome } from "../../../tests/chrome.js"
 // Error rows protect response-specific copy and correction without a read; the
 // credible regression is treating all 400s as unsupported or all refusals as
 // unknown writes. This existing DOM/HTTP owner lacked those codes. No new seam.
+// Home rows additionally own the real RPC -> rail -> agent-page policy summary.
+// The roster-only settings rows cannot catch a successful overview dropping policy.
 function installConnectionFixture() {
   const w = window as any;
   const scenario = new URL(location.href).searchParams.get("case") || "renewal";
   const hosted = scenario.startsWith("hosted");
+  const home = scenario.startsWith("home-");
   const principal = "22222222-2222-4222-8222-222222222222";
   const owner = "33333333-3333-4333-8333-333333333333";
   const foreign = "44444444-4444-4444-8444-444444444444";
@@ -54,7 +57,7 @@ function installConnectionFixture() {
   if (scenario === "hosted-unknown") { delete (connection as any).connection_expires_at; delete (connection as any).connection_expired_at; }
   if (scenario === "hosted-malformed") (connection as any).connection_expired_at = false;
   const f = w.connectionFixture = { scenario, hosted, principal, owner, foreign, workspace, otherWorkspace, renewal, hostedId,
-    grant, connection, requests: [] as any[], unexpected: [] as string[], holdRead: false,
+    home, grant, connection, requests: [] as any[], unexpected: [] as string[], holdRead: false,
     releaseRead: null as null | (() => void), failRead: false, mode: "accept", reads: 0, overviewReads: 0, readTargets: [] as string[] };
   const network = window.fetch.bind(window);
   const policyRead = async (target: string) => {
@@ -71,7 +74,7 @@ function installConnectionFixture() {
       if (url.pathname === "/auth/v1/user") return Response.json(user);
       if (url.pathname === "/auth/v1/logout") return new Response(null, { status: 204 });
       if (url.pathname === "/functions/v1/read") {
-        if (body.resource === "renewal_grants") { await policyRead("renewal"); return Response.json({ grants: [f.grant] }); }
+        if (body.resource === "renewal_grants") { await policyRead("renewal"); return Response.json({ grants: home ? [] : [f.grant] }); }
         if (body.resource === "pending_access") return Response.json({ pending: [], agents: [] });
       }
       if (url.pathname === "/functions/v1/command") {
@@ -92,6 +95,15 @@ function installConnectionFixture() {
         if (c.kind === "revoke_agent_token") { f.grant.token_revoked_at = recent; return Response.json({ status: "accepted" }); }
         if (c.kind === "resume_renewal_grant") { f.grant.suspended_at = null; return Response.json({ status: "accepted" }); }
         if (c.kind === "household_access") return Response.json({ status: "ok", content_role: null });
+        if (home && c.kind === "household_tool" && c.tool === "todo_queue") return Response.json({ status: "ok", queue: {
+          workspace_id: workspace, principal_id: principal, owner_user_id: owner, read_at: new Date().toISOString(),
+          accepts_from: "owner", content_access: "none", working: [], up_next: [], not_yet: [], requests: [],
+          next_offset: { working: null, up_next: null, not_yet: null, requests: null },
+          // Queue facts have no policy in the current backend. They must not erase Home policy.
+          status: { work: scenario === "home-ended" ? "disconnected" : "idle", facts: { transport: "local", turn_only: false,
+            connection: scenario === "home-ended" ? "key_ended" : scenario === "home-paused" ? "paused" : scenario === "home-key-off" ? "key_off" : "live",
+            last_activity_at: recent, messages_waiting_since: null, doing: null, working_on: null } }
+        } });
         if (c.kind === "household_tool") return Response.json({ status: "refused", reason: "content_consent_required" });
         if (c.kind === "todo_list") return Response.json({ status: "ok", todos: [], next_offset: null });
         // Read-only activity/queue requests have no write effects in this UI fixture.
@@ -101,7 +113,17 @@ function installConnectionFixture() {
         const status = { work: "idle", facts: { transport: hosted ? "hosted_mcp" : "local", turn_only: hosted,
           connection: scenario === "key-ended" ? "key_ended" : scenario === "connection-off" ? "connection_off" : scenario === "removed" ? "removed" : scenario === "suspended" ? "paused" : "live",
           last_activity_at: recent, messages_waiting_since: null, doing: null, working_on: null } };
-        return Response.json({ viewer_user_id: owner, generated_at: recent, workspaces: [{
+        if (home) {
+          const facts = status.facts as any;
+          facts.connection = scenario === "home-ended" ? "key_ended" : scenario === "home-paused" ? "paused"
+            : scenario === "home-removed" ? "removed" : scenario === "home-key-off" ? "key_off" : "live";
+          if (scenario !== "home-unknown") {
+            facts.connection_expires_at = scenario === "home-ended" ? before : scenario === "home-dated" ? "2034-01-01T00:00:00+00:00" : null;
+            facts.connection_expired_at = scenario === "home-ended" ? before : scenario === "home-malformed" ? "invalid" : null;
+          }
+          status.work = facts.connection === "live" ? "idle" : "disconnected";
+        }
+        return Response.json({ viewer_user_id: owner, generated_at: home ? new Date().toISOString() : recent, workspaces: [{
           workspace_id: workspace, name: "Home", role: "owner", last_seen_at: recent, new_messages: 0,
           content: null, people: [{ user_id: owner, display_name: "Synthetic owner", role: "owner", is_viewer: true,
             agents: [{ principal_id: principal, name: "Synthetic assistant", status, queue: null }] }],
@@ -147,6 +169,34 @@ async function observeConnectionApp() {
     assert(button, "missing button " + text); button!.click();
   };
   try {
+    if (f.home) {
+      await wait(() => f.overviewReads > 0 && one("[data-home-catchup]")?.textContent.includes("Home"), "successful Home RPC");
+      if (f.scenario === "home-removed") {
+        await wait(() => one('[data-home-catchup] [data-workspace-id="' + f.workspace + '"] .hm-catchup-card-body'), "removed overview rendered");
+        assert(!one('[data-rail-agent="' + f.principal + '"]'), "removed principal stayed in Home roster");
+      } else {
+        await wait(() => one('[data-rail-agent="' + f.principal + '"]'), "Home overview agent row");
+        assert(f.reads === 0, "successful Catch up unnecessarily fetched renewal metadata");
+        one('[data-rail-agent="' + f.principal + '"]').click();
+        await wait(() => one("[data-home-route-pane] [data-connection-end-date]"), "normal Home agent summary");
+        const pane = one("[data-home-route-pane]"), summary = () => pane.querySelector("[data-connection-end-date]");
+        const expected = f.scenario === "home-permanent" ? "Stays connected until you remove it"
+          : f.scenario === "home-dated" ? "Connection ends"
+          : f.scenario === "home-ended" ? "Connection ended" : "Connection settings are managed by the server.";
+        await wait(() => summary()?.textContent.includes(expected) && f.requests.some((r: any) => r.body?.command?.tool === "todo_queue") &&
+          !pane.textContent.includes("Checking the line"), "canonical Home policy after queue read");
+        assert(!summary().querySelector("form"), "overview invented an editable family identity");
+        if (f.scenario === "home-ended") {
+          assert(pane.textContent.includes("This connection cannot be resumed."), "elapsed owner date lost its terminal reason");
+          assert(!Array.from(pane.querySelectorAll("button")).some((b: any) => /new key|resume/i.test(b.textContent)), "ended Home offered recovery");
+        }
+        if (f.scenario === "home-paused") assert(pane.textContent.includes("Access suspended"), "suspension lost precedence");
+        if (f.scenario === "home-key-off") assert(pane.textContent.includes("Key turned off"), "revocation lost precedence");
+      }
+      assert(writes().length === 0 && f.unexpected.length === 0, "Home mount wrote or used unexpected HTTP");
+      document.documentElement.dataset.connectionObservation = JSON.stringify({ scenario: f.scenario, writes: writes(), reads: f.reads });
+      return;
+    }
     await wait(() => one("live-dashboard")?.dataset.state === "channel" && one("#pd-agent-" + f.principal), "real People route");
     one("#pd-agent-" + f.principal).click();
     await wait(() => one("[data-people-detail] h2"), "real agent selection");
@@ -332,7 +382,7 @@ browserTest("real app mounts enforce end-date identity, lifecycle and owner admi
     bundled.push((await build({ stdin: { contents: content, loader: "ts", resolveDir: dirname(path) }, bundle: true, write: false,
       format: "iife", platform: "browser", define: { "import.meta.env": JSON.stringify({ PUBLIC_H0_LINK_JOIN: "0" }) } })).outputFiles[0]!.text);
   }
-  const scenarios = ["renewal", "hosted", "confirmation", "session-reset", "legacy-permanent", "foreign", "grant-foreign", "principal-foreign", "unbound", "unknown", "malformed", "dated", "elapsed-fence", "key-ended", "connection-off", "removed", "ended", "ended-suspended", "bounded", "revoked", "suspended", "hosted-pending", "hosted-ended", "hosted-revoked", "hosted-unknown", "hosted-malformed"];
+  const scenarios = ["home-permanent", "home-dated", "home-ended", "home-unknown", "home-malformed", "home-paused", "home-removed", "home-key-off", "renewal", "hosted", "confirmation", "session-reset", "legacy-permanent", "foreign", "grant-foreign", "principal-foreign", "unbound", "unknown", "malformed", "dated", "elapsed-fence", "key-ended", "connection-off", "removed", "ended", "ended-suspended", "bounded", "revoked", "suspended", "hosted-pending", "hosted-ended", "hosted-revoked", "hosted-unknown", "hosted-malformed"];
   // Compile our own fixture functions from their authored source, avoiding
   // transpiler-generated closure helpers in Function.toString().
   const testSource = await readFile(new URL(import.meta.url), "utf8");
@@ -350,7 +400,7 @@ browserTest("real app mounts enforce end-date identity, lifecycle and owner admi
   const app = "<!doctype html><html><head><meta name='commonswarm:url' content='https://api.test.invalid'><meta name='commonswarm:anon-key' content='synthetic-public'><style>" +
     styles.join("\n") + "</style>" + setup + "</head><body>" + markup + observation + "</body></html>";
   const parent = "<!doctype html><html><body><script>(async()=>{ const results=[]; for(const scenario of " + JSON.stringify(scenarios) +
-    "){ const frame=document.createElement('iframe'); frame.style.width=results.length%2?'390px':'1280px'; frame.style.height='900px'; frame.src='/app?v=people&w=11111111-1111-4111-8111-111111111111&case='+scenario; document.body.append(frame);" +
+    "){ const frame=document.createElement('iframe'); frame.style.width=results.length%2?'390px':'1280px'; frame.style.height='900px'; frame.src='/app?v='+(scenario.startsWith('home-')?'catchup':'people&w=11111111-1111-4111-8111-111111111111')+'&case='+scenario; document.body.append(frame);" +
     "for(let i=0;i<1000;i++){const value=frame.contentDocument?.documentElement.dataset.connectionObservation;if(value){results.push(JSON.parse(value));break;}await fetch('/__observer-tick');}" +
     "frame.remove();if(results.at(-1)?.scenario!==scenario||results.at(-1)?.error)break;}document.documentElement.dataset.endDateObservation=btoa(JSON.stringify(results));})();</script></body></html>";
   const server = createServer((request, response) => {
