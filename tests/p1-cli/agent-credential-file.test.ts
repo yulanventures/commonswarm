@@ -707,7 +707,7 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       assert.equal(await use(unused.workspace, recovered), 200);
       assert.equal(await use(f.workspace, await reopened.bearer()), 200);
     });
-    await t.test("unknown-expiry bare and artifact CLI inputs recover only after real authentication refusal", async () => {
+    await t.test("known-expiry, bare and artifact CLI inputs recover eligible unused permanent roots", async () => {
       for (const form of ["known", "bare", "artifact"] as const) {
         const bare = form === "bare";
         const f = await fixture();
