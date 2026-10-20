@@ -5,8 +5,8 @@
 !*.mdx/
 *.txt
 !*.txt/
-docs/
-reports/
+/docs/
+/reports/
 *.dc.html
 !*.dc.html/
 CHANGELOG
@@ -19,8 +19,8 @@ NOTICE
 !NOTICE/
 
 # Data and fixtures; keep known runtime/build/tool configuration checked below.
-**/fixtures/
-**/__fixtures__/
+**/fixtures/**
+**/__fixtures__/**
 **/testdata/
 **/__snapshots__/
 **/golden/
@@ -70,6 +70,14 @@ NOTICE
 !/scripts/schemas/*.json
 !/scripts/timeout-table/mapping.json
 !/site/public/oauth/*/client.json
+
+# Traverse fixture directories so named test/spec files stay checked.
+!**/fixtures/**/
+!**/__fixtures__/**/
+!**/fixtures/**/*.test.*
+!**/fixtures/**/*.spec.*
+!**/__fixtures__/**/*.test.*
+!**/__fixtures__/**/*.spec.*
 
 # Generated or vendored output, lock-like manifests, captured logs and text assets.
 **/dist/
