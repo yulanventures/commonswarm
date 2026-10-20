@@ -41,7 +41,7 @@ async function checkedConnection(tx: Sql, workspaceId: string, actor: HouseholdI
     AND principal_id=${connection.principal_id}::uuid AND owner_user_id=${actor.user_id}::uuid FOR SHARE`;
   if (!principal || principal.revoked_at !== null) return { allowed: false as const, expires_at: null };
   if (connection.kind === 'hosted') {
-    const [seat] = await tx`SELECT s.seat_id FROM swarm.hosted_mcp_seats s
+    const [seat] = await tx`SELECT s.seat_id,g.connection_expires_at,g.connection_expired_at FROM swarm.hosted_mcp_seats s
       JOIN swarm.hosted_mcp_grants g USING(grant_id)
       JOIN swarm.hosted_mcp_grant_workspaces b ON b.grant_id=s.grant_id AND b.workspace_id=s.workspace_id
       WHERE s.seat_id=${connection.connection_id}::uuid AND s.grant_id=${connection.grant_id}::uuid
@@ -50,7 +50,12 @@ async function checkedConnection(tx: Sql, workspaceId: string, actor: HouseholdI
       AND g.state='active' AND g.revoked_at IS NULL AND s.revoked_at IS NULL AND b.revoked_at IS NULL
       FOR SHARE OF s,g,b`;
     if (!seat) return { allowed: false as const, expires_at: null };
-    expiry = null;
+    // Evaluate chosen policy with a fresh database clock after the existing
+    // principal/seat/grant/binding waits. A terminal family stays terminal.
+    const [clock] = await tx`SELECT clock_timestamp() AS now`;
+    expiry = seat.connection_expires_at == null ? null : new Date(seat.connection_expires_at as string);
+    if (seat.connection_expired_at !== null || expiry !== null && expiry.getTime() <= new Date(clock!.now as string).getTime())
+      return { allowed: false as const, expires_at: null };
   } else if (connection.kind === 'local') {
     const [token] = await tx`SELECT t.expires_at FROM swarm.agent_tokens t JOIN swarm.agent_runs r USING(run_id)
       JOIN swarm.devices d USING(device_id)

@@ -229,15 +229,24 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
     return result;
   }
   async function queueFacts(tx: Sql, workspaceId: string, principalId: string, current: HouseholdTodoState, now: number) {
+    const contentAccess = await queueContentAccess(tx, workspaceId, principalId);
+    const [clock] = await tx`SELECT clock_timestamp() AS now`;
+    now = new Date(clock!.now as string).getTime();
     const [agent] = await tx`SELECT p.*,
       EXISTS (SELECT 1 FROM swarm.memberships m WHERE m.workspace_id=p.workspace_id AND m.user_id=p.owner_user_id AND m.revoked_at IS NULL) AS member_live,
       EXISTS (SELECT 1 FROM swarm.hosted_mcp_seats s JOIN swarm.hosted_mcp_grants g USING(grant_id)
         JOIN swarm.hosted_mcp_grant_workspaces b ON b.grant_id=g.grant_id AND b.workspace_id=s.workspace_id
-        WHERE s.workspace_id=p.workspace_id AND s.principal_id=p.principal_id AND s.revoked_at IS NULL AND g.state='active' AND g.revoked_at IS NULL AND b.revoked_at IS NULL) AS hosted_live,
+        WHERE s.workspace_id=p.workspace_id AND s.principal_id=p.principal_id AND s.revoked_at IS NULL AND g.state='active' AND g.revoked_at IS NULL AND g.connection_expired_at IS NULL
+          AND (g.connection_expires_at IS NULL OR g.connection_expires_at>${new Date(now)}) AND b.revoked_at IS NULL) AS hosted_live,
       EXISTS (SELECT 1 FROM swarm.agent_tokens t JOIN swarm.agent_runs r USING(run_id) JOIN swarm.devices d USING(device_id)
-        WHERE t.principal_id=p.principal_id AND t.revoked_at IS NULL AND t.expires_at>${new Date(now)} AND NOT t.surrender_only AND r.ended_at IS NULL AND d.revoked_at IS NULL) AS token_live,
+        WHERE t.principal_id=p.principal_id AND t.revoked_at IS NULL AND t.expires_at>${new Date(now)} AND NOT t.surrender_only AND r.ended_at IS NULL AND d.revoked_at IS NULL
+          AND (t.renewal_grant_id IS NULL OR EXISTS (SELECT 1 FROM swarm.renewal_grants g
+            WHERE g.renewal_grant_id=t.renewal_grant_id AND g.workspace_id=p.workspace_id AND g.principal_id=p.principal_id
+              AND g.run_id=t.run_id AND g.revoked_at IS NULL AND g.connection_expired_at IS NULL
+              AND (g.connection_expires_at IS NULL OR g.connection_expires_at>${new Date(now)})))) AS token_live,
       EXISTS (SELECT 1 FROM swarm.renewal_grants g JOIN swarm.agent_runs r USING(run_id) JOIN swarm.devices d USING(device_id)
-        WHERE g.principal_id=p.principal_id AND g.revoked_at IS NULL AND (g.horizon_expires_at IS NULL OR g.horizon_expires_at>${new Date(now)}) AND NOT g.suspension_active AND r.ended_at IS NULL AND d.revoked_at IS NULL) AS renewal_live,
+        WHERE g.principal_id=p.principal_id AND g.revoked_at IS NULL AND (g.horizon_expires_at IS NULL OR g.horizon_expires_at>${new Date(now)})
+          AND g.connection_expired_at IS NULL AND (g.connection_expires_at IS NULL OR g.connection_expires_at>${new Date(now)}) AND NOT g.suspension_active AND r.ended_at IS NULL AND d.revoked_at IS NULL) AS renewal_live,
       coalesce((SELECT g.revoked_at IS NOT NULL FROM swarm.renewal_grants g WHERE g.principal_id=p.principal_id ORDER BY g.created_at DESC,g.renewal_grant_id LIMIT 1),
         (SELECT t.revoked_at IS NOT NULL FROM swarm.agent_tokens t WHERE t.principal_id=p.principal_id ORDER BY t.issued_at DESC,t.token_id LIMIT 1),false) AS key_off,
       EXISTS (SELECT 1 FROM swarm.renewal_grants g WHERE g.principal_id=p.principal_id AND g.revoked_at IS NULL AND g.suspension_active) AS paused
@@ -252,7 +261,6 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       ) AS last_activity_at,
       (SELECT min(enqueued_at) FROM swarm.signal_deliveries WHERE workspace_id=${workspaceId}::uuid AND recipient_agent_principal_id=${principalId}::uuid AND acked_at IS NULL) AS messages_waiting_since`;
     const [claim] = await tx`SELECT id,created_at,until FROM swarm.signals WHERE workspace_id=${workspaceId}::uuid AND from_principal=${principalId}::uuid AND from_kind='agent' AND kind='working-on' AND until>${new Date(now)} ORDER BY created_at DESC,id LIMIT 1`;
-    const contentAccess = await queueContentAccess(tx, workspaceId, principalId);
     const doing = Object.values(current.todos).filter(t => t.state === 'doing' && t.assignee?.kind === 'agent' && t.assignee.id === principalId).sort((a,b) => a.state_at.localeCompare(b.state_at))[0];
     const live = agent.revoked_at === null && agent.member_live && (agent.transport === 'hosted_mcp' ? agent.hosted_live : agent.token_live || agent.renewal_live);
     const facts: AgentWorkFacts = { transport: agent.transport as 'local' | 'hosted_mcp', turn_only: Boolean(agent.turn_only),

@@ -714,9 +714,59 @@ async function contextHttp() {
     const { default: postgres } = await import("postgres");
     observer = postgres(input.raceDatabaseUrl, { prepare: false, max: 1 });
   }
+  let policyIdentity = null;
+  if (input.policyProbe || input.storageExpiry) {
+    const { default: postgres } = await import("postgres");
+    observer = postgres(input.raceDatabaseUrl, { prepare: false, max: 1 });
+  }
+  if (input.policyProbe) {
+    const resolved = await db.begin(async tx => {
+      await tx.unsafe('SET LOCAL ROLE swarm_read');
+      const cap = await authenticateHostedSeatCapability(tx, { grantId:input.grantId,
+        providerGrantId:'provider-'+input.grantId,handle:input.handle,tool:'todo_list',providerStatus:async()=>({active:true}) },'read');
+      if (!cap) throw new Error('policy probe requires a live authenticated seat');
+      return await authModule.revalidateHouseholdSeat(tx,cap,async tx=>{await tx.unsafe('SET LOCAL ROLE swarm_command');});
+    });
+    if (!resolved) throw new Error('policy probe identity missing');
+    policyIdentity = {user_id:resolved.owner_user_id,principal_id:resolved.principal_id,run_id:null,
+      connection:{connection_id:resolved.seat_id,grant_id:resolved.grant_id}};
+  }
+  if (input.storageExpiry) {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (request,init) => {
+      const response = await realFetch(request,init);
+      const url = typeof request==='string'||request instanceof URL ? String(request):request.url;
+      if (storageArmed && url.includes('/storage/v1/object/')) {
+        // The genuine Storage request has completed. Withhold its response
+        // until the unchanged database deadline elapses, before bytes/effects.
+        let elapsed=false;
+        for(let attempt=0;attempt<800;attempt++) {
+          const [clock]=await observer.unsafe('SELECT connection_expires_at<=clock_timestamp() AS elapsed FROM swarm.hosted_mcp_grants WHERE grant_id=$1::uuid',[input.grantId]);
+          if(clock.elapsed) {elapsed=true;break;}
+          await new Promise(resolve=>setTimeout(resolve,25));
+        }
+        if(!elapsed) throw new Error('Storage deadline did not elapse');
+        storageBlocked=true;
+      }
+      return response;
+    };
+  }
   let handle = input.handle;
   const results = [];
   for (const call of input.calls) {
+    if (call.policy_loader) {
+      await observer.unsafe("UPDATE swarm.hosted_mcp_grants SET connection_expires_at=CASE WHEN $2='future' THEN clock_timestamp()+interval '1 hour' WHEN $2='elapsed' THEN clock_timestamp()-interval '1 second' ELSE NULL END,connection_expired_at=CASE WHEN $2='terminal' THEN clock_timestamp() ELSE NULL END,revoked_at=CASE WHEN $2='revoked' THEN clock_timestamp() ELSE NULL END WHERE grant_id=$1::uuid",[input.grantId,call.policy_loader]);
+      const { loadHouseholdContentAccess } = await import(${JSON.stringify(new URL('../../supabase/functions/command/household-content-access.ts', import.meta.url).href)});
+      const checked = await db.begin(async tx=>{
+        await tx.unsafe('SET LOCAL ROLE swarm_command');
+        const [role]=await tx.unsafe('SELECT current_user AS role');
+        if(role.role!=='swarm_command') throw new Error('loader role mismatch');
+        return await loadHouseholdContentAccess(tx,input.workspaceId,policyIdentity);
+      });
+      results.push({name:'policy_loader',status:200,isError:!checked,body:{status:checked?'ok':'refused',source:checked?.source}});
+      continue;
+    }
+    if (call.choose_storage_deadline) await observer.unsafe("UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()+interval '2 seconds' WHERE grant_id=$1::uuid",[input.grantId]);
     if (call.drop_compatibility_gate) await observer.unsafe('DROP POLICY hosted_owner_content_rollback_gate ON swarm.household_content_connections');
     if (call.transport === 'http') {
       authPhase = 'human';
@@ -750,6 +800,7 @@ async function contextHttp() {
     results.push({ name: call.name, status: response.status, isError: envelope.result?.isError === true || envelope.error !== undefined || response.status !== 200, body,
       authChallenge: response.headers.has("www-authenticate") || envelope.result?._meta?.["mcp/www_authenticate"] !== undefined });
     if (call.storage_race) {
+      if (input.storageExpiry) { if(!storageBlocked) throw new Error('real Storage expiry wait was not reached'); continue; }
       if (!storageBlocked || !storageWithdrawal) throw new Error('Storage was not reached');
       const withdrawn = await storageWithdrawal;
       if(withdrawn.body.status!=='committed') throw new Error('concurrent withdrawal failed');
@@ -3264,5 +3315,124 @@ for(const operation of ['read','write'] as const) {
       assert.equal(results[0]!.body.status,operation==='read'?'ok':'committed','operation admitted before withdrawal commit may complete');
       results.slice(1).forEach(assertContentDenied);
     } finally { await releaseSql.unsafe('ALTER ROLE commonswarm_edge PASSWORD NULL'); }
+  });
+}
+
+// The loader owns family policy independently of HTTP authentication. A real
+// authenticated identity is retained before the fixture changes the family;
+// HTTP read/write/queue and genuine Storage then prove the consumer boundaries.
+for (const policy of ['null','future','elapsed','terminal','revoked'] as const) {
+  test(`inherited owner ${policy} policy protects loader, HTTP content, queue and truthful Allow`, {timeout:180_000}, async()=>{
+    const f=await ownerContentHttpFixture();
+    const workspace=f.fixture.workspaceA,principal=String(f.seat.body.principal_id);
+    const content={kind:'list',items:[{item_id:'policy',text:'Exact inherited policy bytes',order:0,checked:false}]};
+    const existing=randomUUID(),attempted=randomUUID();
+    try {
+      const setup=runHostedHarness<ContextHttpResult[]>(f.call([{name:'list_create',arguments:{request_id:randomUUID(),object_id:existing,title:'Policy control',content}},
+        {name:'list_read',arguments:{object_id:existing}}]),{databaseUrl:f.edgeUrl});
+      assert.equal(setup[0]!.body.status,'committed');
+      assert.deepEqual(setup[1]!.body.content,content);
+      const results=runHostedHarness<ContextHttpResult[]>(f.call([
+        {name:'policy_loader',policy_loader:policy},{name:'todo_list'},{name:'todo_queue'},
+        {name:'todo_create',arguments:{request_id:randomUUID(),title:'Policy todo'}},
+        {name:'list_read',arguments:{object_id:existing}},
+        {name:'list_create',arguments:{request_id:randomUUID(),object_id:attempted,title:'Policy upload',content}},
+        {name:'todo_queue',transport:'http',arguments:{principal_id:principal}},
+      ],{policyProbe:true,raceDatabaseUrl:local.DB_URL,workspaceId:workspace,ownerJwt:f.fixture.ownerJwt}),{databaseUrl:f.edgeUrl});
+      const live=policy==='null'||policy==='future';
+      assert.equal(results[0]!.body.status,live?'ok':'refused','shared loader cannot be masked by HTTP auth');
+      if(live) {
+        assert.equal(results[0]!.body.source,'inherited');
+        assert.equal(results[1]!.body.status,'ok');
+        assert.equal((results[2]!.body.queue as {content_access:string}).content_access,'read_write');
+        assert.equal(results[3]!.body.status,'committed');
+        assert.deepEqual(results[4]!.body.content,content);
+        assert.equal(results[5]!.body.status,'committed');
+      } else results.slice(1,6).forEach(assertContentDenied);
+      const queue=results[6]!.body.queue as {content_access:string;status:{facts:{connection:string}}};
+      assert.equal(results[6]!.body.status,'ok','human can inspect an inactive agent');
+      assert.equal(queue.status.facts.connection,live?'live':'connection_off');
+      assert.equal(queue.content_access,live?'read_write':'none');
+      const [approvals]=await sql`SELECT count(*)::int AS n FROM swarm.household_content_connections WHERE workspace_id=${workspace}::uuid`;
+      assert.equal(approvals!.n,0,'all inherited probes precede any Allow');
+      const [effects]=await sql`SELECT count(*)::int AS n FROM swarm.household_object_bindings WHERE workspace_id=${workspace}::uuid AND object_id=${attempted}`;
+      assert.equal(effects!.n,live?1:0);
+      const allow=runHostedHarness<ContextHttpResult[]>(f.call([{name:'allow',transport:'http',command:{kind:'household_approve_connection',
+        connection:{kind:'hosted',connection_id:f.seat.body.seat_id,grant_id:f.fixture.grantA,principal_id:principal,operations:['read','create','update']}}}],
+        {ownerJwt:f.fixture.ownerJwt,workspaceId:workspace}),{databaseUrl:f.edgeUrl})[0]!;
+      assert.equal(allow.body.status,live?'committed':'refused');
+      if(!live) assert.equal(allow.body.reason,'connection_access_refused');
+      else {
+        const [stored]=await sql`SELECT expires_at IS NOT DISTINCT FROM g.connection_expires_at AS aligned
+          FROM swarm.household_content_connections c JOIN swarm.hosted_mcp_grants g ON g.grant_id=c.hosted_grant_id
+          WHERE c.connection_id=${f.seat.body.seat_id as string}::uuid`;
+        assert.equal(stored!.aligned,true,'Allow metadata follows chosen policy');
+      }
+    } finally {await releaseSql.unsafe('ALTER ROLE commonswarm_edge PASSWORD NULL');}
+  });
+}
+
+test('inherited queue rechecks unchanged chosen deadline after another PostgreSQL session blocks it', {timeout:180_000}, async()=>{
+  const f=await ownerContentHttpFixture();
+  let pending:Promise<ContextHttpResult[]>|undefined;
+  try {
+    await sql`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()+interval '1 hour' WHERE grant_id=${f.fixture.grantA}::uuid`;
+    const positive=await runHostedHarnessAsync<ContextHttpResult[]>(f.call([{name:'todo_queue'}]),f.edgeUrl);
+    assert.equal((positive[0]!.body.queue as {content_access:string}).content_access,'read_write');
+    let chosen:unknown;
+    await sql.begin(async locker=>{
+      const [session]=await locker`SELECT pg_backend_pid() AS pid`;
+      await locker`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id=${f.fixture.workspaceA}::uuid FOR NO KEY UPDATE`;
+      const [deadline]=await sql`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()+interval '3 seconds'
+        WHERE grant_id=${f.fixture.grantA}::uuid RETURNING connection_expires_at`;
+      chosen=deadline!.connection_expires_at;
+      pending=runHostedHarnessAsync<ContextHttpResult[]>(f.call([{name:'todo_queue'}]),f.edgeUrl);void pending.catch(()=>{});
+      let blocked=false;
+      for(let i=0;i<400;i++) {
+        const [wait]=await sql`SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE usename='commonswarm_edge'
+          AND ${session!.pid}::int=ANY(pg_blocking_pids(pid))) AS blocked`;
+        if(wait!.blocked){blocked=true;break;}
+        await new Promise(resolve=>setTimeout(resolve,25));
+      }
+      assert.equal(blocked,true,'exact independent blocker observed');
+      let elapsed=false;
+      for(let i=0;i<400;i++) {
+        const [clock]=await sql`SELECT connection_expires_at<=clock_timestamp() AS elapsed,
+          connection_expires_at FROM swarm.hosted_mcp_grants WHERE grant_id=${f.fixture.grantA}::uuid`;
+        assert.deepEqual(clock!.connection_expires_at,chosen,'deadline never shortened during wait');
+        if(clock!.elapsed){elapsed=true;break;}
+        await new Promise(resolve=>setTimeout(resolve,25));
+      }
+      assert.equal(elapsed,true);
+    });
+    (await pending!).forEach(assertContentDenied);
+    const [approvals]=await sql`SELECT count(*)::int AS n FROM swarm.household_content_connections WHERE workspace_id=${f.fixture.workspaceA}::uuid`;
+    assert.equal(approvals!.n,0);
+  } finally {if(pending)await pending.catch(()=>{});await releaseSql.unsafe('ALTER ROLE commonswarm_edge PASSWORD NULL');}
+});
+
+for(const operation of ['read','write'] as const) {
+  test(`inherited Storage ${operation} refuses bytes or committed effects when DB deadline crosses actual I/O`, {timeout:180_000}, async()=>{
+    const f=await ownerContentHttpFixture(),object=randomUUID(),attempted=randomUUID(),request=randomUUID();
+    const content={kind:'list',items:[{item_id:'io',text:'Exact Storage deadline bytes',order:0,checked:false}]};
+    try {
+      const setup=runHostedHarness<ContextHttpResult[]>(f.call([{name:'list_create',arguments:{request_id:randomUUID(),object_id:object,title:'I/O positive',content}},
+        {name:'list_read',arguments:{object_id:object}}]),{databaseUrl:f.edgeUrl});
+      assert.equal(setup[0]!.body.status,'committed');assert.deepEqual(setup[1]!.body.content,content);
+      const [before]=await sql`SELECT count(*)::int AS n FROM swarm.household_object_events WHERE workspace_id=${f.fixture.workspaceA}::uuid`;
+      const call=operation==='read'?{name:'list_read',arguments:{object_id:object}}:
+        {name:'list_create',arguments:{request_id:request,object_id:attempted,title:'Must roll back',content}};
+      const result=runHostedHarness<ContextHttpResult[]>(f.call([{...call,storage_race:true,choose_storage_deadline:true}],
+        {storageExpiry:true,raceDatabaseUrl:local.DB_URL}),{databaseUrl:f.edgeUrl})[0]!;
+      assertContentDenied(result);
+      const [after]=await sql`SELECT count(*)::int AS n FROM swarm.household_object_events WHERE workspace_id=${f.fixture.workspaceA}::uuid`;
+      assert.equal(after!.n,before!.n,'post-I/O refusal commits no event');
+      const [effects]=await sql`SELECT count(*)::int AS n FROM swarm.household_object_bindings WHERE workspace_id=${f.fixture.workspaceA}::uuid AND object_id=${attempted}`;
+      assert.equal(effects!.n,0);
+      const [receipts]=await sql`SELECT count(*)::int AS n FROM swarm.idempotency_keys WHERE command_id=${request}`;
+      assert.equal(receipts!.n,0,'failed upload commits no success receipt');
+      const [approvals]=await sql`SELECT count(*)::int AS n FROM swarm.household_content_connections WHERE workspace_id=${f.fixture.workspaceA}::uuid`;
+      assert.equal(approvals!.n,0);
+    } finally {await releaseSql.unsafe('ALTER ROLE commonswarm_edge PASSWORD NULL');}
   });
 }
