@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  AGENT_CREDENTIAL_MESSAGE,
   AGENT_CREDENTIAL_OPTIONAL_FIELDS,
   AGENT_CREDENTIAL_REQUIRED_FIELDS,
   parseAgentCredentialInput,
@@ -233,10 +234,14 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
     const user = randomUUID(), device = randomUUID(), workspace = randomUUID();
     const principal = randomUUID(), run = randomUUID(), grant = randomUUID(), tokenId = randomUUID();
     const token = `swm_agt_${randomBytes(32).toString("base64url")}`;
-    await sql`INSERT INTO auth.users (id, aud, role, email, encrypted_password,
-      email_confirmed_at, raw_app_meta_data, raw_user_meta_data, created_at, updated_at)
-      VALUES (${user}::uuid, 'authenticated', 'authenticated', ${`client-${user}@example.test`}, '',
-        clock_timestamp(), '{}'::jsonb, '{}'::jsonb, clock_timestamp(), clock_timestamp())`;
+    const { createClient } = await import("@supabase/supabase-js");
+    const admin = createClient(local.API_URL, local.SERVICE_ROLE_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
+    const created = await admin.auth.admin.createUser({
+      id: user, email: `client-${user}@example.test`, email_confirm: true,
+      app_metadata: { provider: "email", providers: ["email"] }, user_metadata: {},
+    });
+    assert.ifError(created.error);
+    assert.equal(created.data.user?.id, user, "auth fixture must retain its pre-journaled user id");
     await sql`INSERT INTO swarm.users (user_id, display_name) VALUES (${user}::uuid, 'Client continuity')`;
     await sql`INSERT INTO swarm.devices (device_id, user_id, label) VALUES (${device}::uuid, ${user}::uuid, 'client-test')`;
     await sql`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${workspace}::uuid, 'Client continuity', ${user}::uuid)`;
@@ -723,7 +728,7 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
         assert.equal(virgin.first_used_at, null, `${form}: real CLI must start with an unused expired root`);
         assert.equal(virgin.eligible, true, `${form}: exact bound permanent root recovery precondition`);
         const path = join(directory, `${f.tokenId}.json`);
-        await writeFile(path, bare ? f.token : JSON.stringify({ message: "Agent credential minted.", status: "accepted",
+        await writeFile(path, bare ? f.token : JSON.stringify({ message: AGENT_CREDENTIAL_MESSAGE, status: "accepted",
           principal_id: f.principal, token_id: f.tokenId, run_id: f.run, agent_token: f.token,
           ...(form === "known" ? { expires_at: new Date(f.presented.expiresAt).toISOString() } : {}) }), { mode: 0o600 });
         const child = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", "command", "create",
