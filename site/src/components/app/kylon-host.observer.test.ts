@@ -74,6 +74,14 @@ const fixtureScript = `
     check('siblings inert', [...dialog.parentElement.children].filter(node => node !== dialog).every(node => node.inert));
   },
   tabState() { check('native Tab contained', app.querySelector('dialog').contains(document.activeElement)); },
+  async reopened() {
+    app.querySelector('.cs-org-drawer .cs-icon-button').click();
+    this.openDrawer();
+    await settle();
+    const dialog = app.querySelector('dialog');
+    check('queued close event preserves reopened modal/inert', dialog.matches(':modal') &&
+      [...dialog.parentElement.children].filter(node => node !== dialog).every(node => node.inert));
+  },
   productRing() {
     const active = document.activeElement, scroller = app.querySelector('.cs-org-context-scroll'), dialog = app.querySelector('dialog');
     const b = active.getBoundingClientRect(), style = getComputedStyle(active), out = Math.max(0, parseFloat(style.outlineWidth) + parseFloat(style.outlineOffset));
@@ -169,6 +177,7 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
     await evaluate("window.hostObserver.openDrawer();window.hostObserver.drawerState()"); await key("Tab"); await evaluate("window.hostObserver.tabState()");
     // Primary390px ring regression.
     if (width === 390) await evaluate("window.hostObserver.productRing()");
+    await evaluate("window.hostObserver.reopened()");
     await key("Escape"); await evaluate("window.hostObserver.escaped()");
     await evaluate("window.hostObserver.openDrawer()");
     await send("Emulation.setDeviceMetricsOverride", { width: 1024, height: 900, deviceScaleFactor: 1, mobile: false });

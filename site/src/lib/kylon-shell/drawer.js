@@ -40,7 +40,10 @@ export function connectDrawer(parts, callbacks = {}) {
   }
   function change() { if (!media.matches && opened) close('resize'); position('resize'); }
   function cancel(event) { event.preventDefault(); close('escape'); }
-  function closed() { finish('native-close'); }
+  function closed() {
+    // A previous close event may arrive after the same dialog has reopened.
+    if (!dialog.open) finish('native-close');
+  }
   function backdrop(event) {
     if (event.target !== dialog) return;
     const b = dialog.getBoundingClientRect();
