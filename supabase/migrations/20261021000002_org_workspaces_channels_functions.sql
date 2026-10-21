@@ -26,6 +26,10 @@ BEGIN
         RAISE EXCEPTION 'CHANNEL_HAS_PUBLIC_HISTORY';
       END IF;
     END IF;
+  ELSIF TG_TABLE_NAME IN ('signals', 'file_channel_bindings') THEN
+    IF NEW.channel_id IS NOT NULL AND EXISTS (SELECT 1 FROM channels WHERE channel_id = NEW.channel_id AND visibility = 'private') AND NOT private_channels_enabled() THEN
+      RAISE EXCEPTION 'PRIVATE_CHANNELS_DISABLED';
+    END IF;
   ELSIF EXISTS (SELECT 1 FROM channels WHERE channel_id = NEW.channel_id AND visibility = 'private') THEN
     IF NOT private_channels_enabled() THEN RAISE EXCEPTION 'PRIVATE_CHANNELS_DISABLED'; END IF;
     IF TG_OP = 'UPDATE' AND (NEW.channel_id, NEW.principal_kind, NEW.principal_id) IS DISTINCT FROM (OLD.channel_id, OLD.principal_kind, OLD.principal_id) THEN
@@ -52,6 +56,8 @@ END
 $$;
 CREATE TRIGGER channels_visibility_transition_guard BEFORE INSERT OR UPDATE ON swarm.channels FOR EACH ROW EXECUTE FUNCTION swarm.guard_channel_visibility_transition();
 CREATE TRIGGER channel_memberships_write_guard BEFORE INSERT OR UPDATE ON swarm.channel_memberships FOR EACH ROW EXECUTE FUNCTION swarm.guard_channel_visibility_transition();
+CREATE TRIGGER signals_private_channel_guard BEFORE INSERT OR UPDATE ON swarm.signals FOR EACH ROW EXECUTE FUNCTION swarm.guard_channel_visibility_transition();
+CREATE TRIGGER file_channel_bindings_private_guard BEFORE INSERT OR UPDATE ON swarm.file_channel_bindings FOR EACH ROW EXECUTE FUNCTION swarm.guard_channel_visibility_transition();
 
 CREATE FUNCTION swarm.can_read_org(p_org uuid, p_kind text, p_id uuid, p_owner uuid DEFAULT NULL, p_conn uuid DEFAULT NULL)
 RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
@@ -61,12 +67,7 @@ RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = swarm, pg
       SELECT 1 FROM agent_identities ai WHERE ai.id = p_id AND ai.revoked_at IS NULL
       AND (ai.standing_grant_id IS NULL OR EXISTS (SELECT 1 FROM hosted_mcp_grants g WHERE g.grant_id = ai.standing_grant_id AND g.state = 'active' AND g.revoked_at IS NULL))
       AND (ai.standing_renewal_grant_id IS NULL OR EXISTS (SELECT 1 FROM renewal_grants rg WHERE rg.renewal_grant_id = ai.standing_renewal_grant_id AND rg.revoked_at IS NULL AND (rg.horizon_expires_at IS NULL OR rg.horizon_expires_at > now())))
-      AND NOT EXISTS (
-        SELECT 1 FROM org_memberships om
-        LEFT JOIN agent_identities sib ON sib.id = om.principal_id
-        WHERE om.org_id = p_org AND om.principal_kind = 'agent' AND om.revoked_at IS NOT NULL
-          AND (om.principal_id = p_id OR (live_org_role(p_org, 'agent', p_id) IS NULL AND sib.owner_user_id = ai.owner_user_id AND lower(sib.display_name) = lower(ai.display_name)))
-      )
+      AND NOT EXISTS (SELECT 1 FROM org_memberships om WHERE (om.org_id, om.principal_kind, om.principal_id) = (p_org, 'agent', p_id) AND om.revoked_at IS NOT NULL)
       AND NOT EXISTS (SELECT 1 FROM connection_org_policies WHERE connection_id = p_conn AND (revoked_at IS NOT NULL OR NOT (p_org = ANY(coalesce(allowed_org_ids, ARRAY[p_org])))))
       AND live_org_role(p_org, 'user', coalesce(p_owner, ai.owner_user_id)) IS NOT NULL
       AND coalesce(live_org_role(p_org, 'agent', p_id), nullif(live_org_role(p_org, 'user', coalesce(p_owner, ai.owner_user_id)), 'guest')) IS NOT NULL
@@ -85,18 +86,7 @@ RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = swarm, pg
       OR (p_kind = 'agent' AND EXISTS (
         SELECT 1 FROM agent_identities ai WHERE ai.id = p_id
         AND can_read_workspace(p_ws, 'user', coalesce(p_owner, ai.owner_user_id))
-        AND NOT EXISTS (
-          SELECT 1 FROM agent_principals ap
-          LEFT JOIN agent_identities sib ON sib.id = ap.agent_identity_id
-          WHERE ap.workspace_id = p_ws AND ap.revoked_at IS NOT NULL
-            AND (ap.agent_identity_id = p_id OR (NOT has_live_ws_grant(p_ws, 'agent', p_id) AND sib.owner_user_id = ai.owner_user_id AND lower(sib.display_name) = lower(ai.display_name)))
-        )
-        AND NOT EXISTS (
-          SELECT 1 FROM workspace_principal_grants wg
-          JOIN agent_identities sib ON sib.id = wg.principal_id
-          WHERE wg.workspace_id = p_ws AND wg.principal_kind = 'agent' AND wg.revoked_at IS NOT NULL
-            AND NOT has_live_ws_grant(p_ws, 'agent', p_id) AND sib.owner_user_id = ai.owner_user_id AND lower(sib.display_name) = lower(ai.display_name)
-        )
+        AND NOT EXISTS (SELECT 1 FROM agent_principals ap WHERE (ap.workspace_id, ap.agent_identity_id) = (p_ws, p_id) AND ap.revoked_at IS NOT NULL)
         AND (has_live_ws_grant(p_ws, 'agent', p_id) OR (live_org_role(w.org_id, 'user', coalesce(p_owner, ai.owner_user_id)) IS DISTINCT FROM 'guest' AND coalesce(live_org_role(w.org_id, 'agent', p_id), live_org_role(w.org_id, 'user', coalesce(p_owner, ai.owner_user_id))) <> 'guest'))
       )))
   );
@@ -199,8 +189,11 @@ BEGIN
     ON CONFLICT (workspace_id, principal_kind, principal_id) DO UPDATE SET org_id = EXCLUDED.org_id, revoked_at = coalesce(workspace_principal_grants.revoked_at, EXCLUDED.revoked_at);
   END IF;
   UPDATE memberships SET revoked_at = v_now WHERE workspace_id = p_ws AND revoked_at IS NULL AND NOT has_live_ws_grant(p_ws, 'user', user_id);
-  UPDATE channel_memberships SET revoked_at = v_now WHERE workspace_id = p_ws AND revoked_at IS NULL AND NOT has_live_ws_grant(p_ws, principal_kind, principal_id);
-  UPDATE agent_principals SET revoked_at = v_now WHERE workspace_id = p_ws AND revoked_at IS NULL AND NOT has_live_ws_grant(p_ws, 'agent', agent_identity_id);
+  UPDATE workspace_principal_grants wg SET revoked_at = v_now FROM agent_identities ai
+  WHERE wg.workspace_id = p_ws AND wg.principal_kind = 'agent' AND wg.principal_id = ai.id AND wg.revoked_at IS NULL
+    AND (NOT has_live_ws_grant(p_ws, 'user', ai.owner_user_id) OR NOT can_read_workspace(p_ws, 'agent', ai.id));
+  UPDATE channel_memberships SET revoked_at = v_now WHERE workspace_id = p_ws AND revoked_at IS NULL AND NOT can_read_workspace(p_ws, principal_kind, principal_id);
+  UPDATE agent_principals SET revoked_at = v_now WHERE workspace_id = p_ws AND revoked_at IS NULL AND NOT can_read_workspace(p_ws, 'agent', agent_identity_id);
   UPDATE hosted_mcp_seats s SET revoked_at = v_now FROM agent_principals a WHERE (s.workspace_id, s.principal_id) = (p_ws, a.principal_id) AND s.revoked_at IS NULL AND a.revoked_at IS NOT NULL;
   UPDATE hosted_mcp_seat_handles h SET revoked_at = v_now FROM hosted_mcp_seats s WHERE (h.seat_id, s.workspace_id) = (s.seat_id, p_ws) AND h.revoked_at IS NULL AND s.revoked_at IS NOT NULL;
   RETURN jsonb_build_object('workspace_id', p_ws, 'source_org_id', v_src, 'target_org_id', p_dst, 'transfer_members', p_mode);

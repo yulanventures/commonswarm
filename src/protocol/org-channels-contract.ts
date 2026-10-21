@@ -256,9 +256,9 @@ export function reconcileWorkspaceMove(
   const sourceOrgId = ws.org_id;
   ws.org_id = target_org_id;
   for (const g of s.workspaceGrants) if (g.workspace_id === ws.workspace_id) g.org_id = target_org_id;
-  const closedSeats: string[] = [];
+  const closedSeats = new Set<string>();
   const candidates = new Map<string, { principal_kind: PrincipalKind; principal_id: string; role: OrgRole }>();
-  for (const g of s.workspaceGrants.filter((x) => x.workspace_id === ws.workspace_id && isLive(x))) {
+  for (const g of s.workspaceGrants.filter((x) => x.workspace_id === ws.workspace_id)) {
     candidates.set(`${g.principal_kind}:${g.principal_id}`, { principal_kind: g.principal_kind, principal_id: g.principal_id, role: g.role });
   }
   for (const ap of (s.agentPrincipals ?? []).filter((x) => x.workspace_id === ws.workspace_id && isLive(x))) {
@@ -297,15 +297,15 @@ export function reconcileWorkspaceMove(
           m.org_id === target_org_id &&
           isPrin(m, p.principal_kind, p.principal_id),
       );
-      if (existingOrgMem && existingOrgMem.revoked_at != null) {
-        closedSeats.push(
-          ...cascadeWorkspaceMemberRemoval(s, {
-            workspace_id: ws.workspace_id,
-            principal_kind: p.principal_kind,
-            principal_id: p.principal_id,
-            now,
-          }).closed_seat_ids,
-        );
+      if ((existingOrgMem && existingOrgMem.revoked_at != null) || wg.revoked_at != null) {
+        for (const sid of cascadeWorkspaceMemberRemoval(s, {
+          workspace_id: ws.workspace_id,
+          principal_kind: p.principal_kind,
+          principal_id: p.principal_id,
+          now,
+        }).closed_seat_ids) {
+          closedSeats.add(sid);
+        }
       } else if (!existingOrgMem) {
         s.orgMemberships.push({
           org_id: target_org_id,
@@ -316,6 +316,18 @@ export function reconcileWorkspaceMove(
           created_at: now,
           revoked_at: null,
         });
+      }
+    }
+    for (const p of candidates.values()) {
+      if (!canReadWorkspace(s, { principal_kind: p.principal_kind, principal_id: p.principal_id }, ws.workspace_id)) {
+        for (const sid of cascadeWorkspaceMemberRemoval(s, {
+          workspace_id: ws.workspace_id,
+          principal_kind: p.principal_kind,
+          principal_id: p.principal_id,
+          now,
+        }).closed_seat_ids) {
+          closedSeats.add(sid);
+        }
       }
     }
   } else {
@@ -329,18 +341,18 @@ export function reconcileWorkspaceMove(
     }
     for (const p of candidates.values()) {
       if (orgRole(s, target_org_id, p.principal_kind, p.principal_id) !== 'owner') {
-        closedSeats.push(
-          ...cascadeWorkspaceMemberRemoval(s, {
-            workspace_id: ws.workspace_id,
-            principal_kind: p.principal_kind,
-            principal_id: p.principal_id,
-            now,
-          }).closed_seat_ids,
-        );
+        for (const sid of cascadeWorkspaceMemberRemoval(s, {
+          workspace_id: ws.workspace_id,
+          principal_kind: p.principal_kind,
+          principal_id: p.principal_id,
+          now,
+        }).closed_seat_ids) {
+          closedSeats.add(sid);
+        }
       }
     }
   }
-  return { ok: true as const, source_org_id: sourceOrgId, target_org_id, closed_seat_ids: closedSeats };
+  return { ok: true as const, source_org_id: sourceOrgId, target_org_id, closed_seat_ids: [...closedSeats] };
 }
 
 export function buildMultiOrgWhoamiResponse(

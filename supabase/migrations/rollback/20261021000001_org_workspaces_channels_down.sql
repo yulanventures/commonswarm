@@ -4,8 +4,13 @@
 
 BEGIN;
 
+LOCK TABLE swarm.channels IN ACCESS EXCLUSIVE MODE;
+
 DO $org_workspaces_channels_rollback_guard$
 BEGIN
+  IF to_regclass('swarm.file_channel_bindings') IS NOT NULL THEN
+    EXECUTE 'LOCK TABLE swarm.file_channel_bindings IN ACCESS EXCLUSIVE MODE';
+  END IF;
   IF EXISTS (
     SELECT 1 FROM pg_catalog.pg_attribute AS a
     JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid
@@ -34,6 +39,8 @@ BEGIN
 END
 $org_workspaces_channels_rollback_guard$;
 
+DROP TRIGGER IF EXISTS file_channel_bindings_private_guard ON swarm.file_channel_bindings;
+DROP TRIGGER IF EXISTS signals_private_channel_guard ON swarm.signals;
 DROP TRIGGER IF EXISTS channel_memberships_write_guard ON swarm.channel_memberships;
 DROP TRIGGER IF EXISTS channels_visibility_transition_guard ON swarm.channels;
 DROP TRIGGER IF EXISTS renewal_grants_sync_identity ON swarm.renewal_grants;

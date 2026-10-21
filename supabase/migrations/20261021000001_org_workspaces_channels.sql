@@ -1,119 +1,78 @@
 -- CommonSwarm Organizations > Workspaces > Channels (Phase 0 Schema, Backfill, Triggers & RLS)
 SET search_path = swarm, pg_catalog, public;
 CREATE TABLE swarm.agent_identities (
-  id uuid PRIMARY KEY,
-  owner_user_id uuid NOT NULL REFERENCES users(user_id),
+  id uuid PRIMARY KEY, owner_user_id uuid NOT NULL REFERENCES users(user_id),
   standing_grant_id uuid REFERENCES hosted_mcp_grants(grant_id),
   standing_renewal_grant_id uuid UNIQUE REFERENCES renewal_grants(renewal_grant_id),
   display_name text NOT NULL CHECK (btrim(display_name) <> ''),
-  created_at timestamptz NOT NULL DEFAULT now(),
-  revoked_at timestamptz,
-  UNIQUE (standing_grant_id, display_name)
+  created_at timestamptz NOT NULL DEFAULT now(), revoked_at timestamptz, UNIQUE (standing_grant_id, display_name)
 );
-
 CREATE TABLE swarm.organizations (
   id uuid PRIMARY KEY,
   slug text NOT NULL CHECK (slug ~ '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$' AND char_length(slug) BETWEEN 1 AND 48),
   display_name text NOT NULL CHECK (btrim(display_name) <> ''),
-  logo_object_key text,
-  logo_updated_at timestamptz,
+  logo_object_key text, logo_updated_at timestamptz,
   created_by uuid NOT NULL REFERENCES users(user_id),
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  archived_at timestamptz
+  created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), archived_at timestamptz
 );
 CREATE UNIQUE INDEX organizations_slug_lower_key ON swarm.organizations(lower(slug));
 CREATE TABLE swarm.org_memberships (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  org_id uuid NOT NULL REFERENCES organizations(id),
-  principal_kind text NOT NULL CHECK (principal_kind IN ('user','agent')),
-  principal_id uuid NOT NULL,
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), org_id uuid NOT NULL REFERENCES organizations(id),
+  principal_kind text NOT NULL CHECK (principal_kind IN ('user','agent')), principal_id uuid NOT NULL,
   role text NOT NULL CHECK (role IN ('owner','admin','member','guest')),
-  invited_by uuid REFERENCES users(user_id),
-  created_at timestamptz NOT NULL DEFAULT now(),
-  revoked_at timestamptz,
-  UNIQUE (org_id, principal_kind, principal_id)
+  invited_by uuid REFERENCES users(user_id), created_at timestamptz NOT NULL DEFAULT now(),
+  revoked_at timestamptz, UNIQUE (org_id, principal_kind, principal_id)
 );
 CREATE INDEX org_memberships_live_idx ON swarm.org_memberships(principal_kind, principal_id, org_id) WHERE revoked_at IS NULL;
-
 CREATE TABLE swarm.org_invites (
-  invite_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  org_id uuid NOT NULL REFERENCES organizations(id),
-  email text,
-  role text NOT NULL CHECK (role IN ('owner','admin','member','guest')),
-  workspace_ids uuid[] NOT NULL DEFAULT '{}',
-  token_hash bytea NOT NULL UNIQUE CHECK (octet_length(token_hash) = 32),
-  invited_by uuid NOT NULL REFERENCES users(user_id),
-  expires_at timestamptz NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  consumed_at timestamptz,
-  consumed_by uuid REFERENCES users(user_id),
-  revoked_at timestamptz
+  invite_id uuid PRIMARY KEY DEFAULT gen_random_uuid(), org_id uuid NOT NULL REFERENCES organizations(id),
+  email text, role text NOT NULL CHECK (role IN ('owner','admin','member','guest')),
+  workspace_ids uuid[] NOT NULL DEFAULT '{}', token_hash bytea NOT NULL UNIQUE CHECK (octet_length(token_hash) = 32),
+  invited_by uuid NOT NULL REFERENCES users(user_id), expires_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(), consumed_at timestamptz,
+  consumed_by uuid REFERENCES users(user_id), revoked_at timestamptz
 );
 CREATE TABLE swarm.workspace_principal_grants (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  workspace_id uuid NOT NULL REFERENCES workspaces(workspace_id),
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), workspace_id uuid NOT NULL REFERENCES workspaces(workspace_id),
   org_id uuid NOT NULL REFERENCES organizations(id),
-  principal_kind text NOT NULL CHECK (principal_kind IN ('user','agent')),
-  principal_id uuid NOT NULL,
+  principal_kind text NOT NULL CHECK (principal_kind IN ('user','agent')), principal_id uuid NOT NULL,
   role text NOT NULL CHECK (role IN ('owner','admin','member','guest')),
-  granted_by uuid REFERENCES users(user_id),
-  created_at timestamptz NOT NULL DEFAULT now(),
-  revoked_at timestamptz,
-  UNIQUE (workspace_id, principal_kind, principal_id)
+  granted_by uuid REFERENCES users(user_id), created_at timestamptz NOT NULL DEFAULT now(),
+  revoked_at timestamptz, UNIQUE (workspace_id, principal_kind, principal_id)
 );
 CREATE INDEX workspace_grants_live_idx ON swarm.workspace_principal_grants(principal_kind, principal_id, workspace_id) WHERE revoked_at IS NULL;
 CREATE TABLE swarm.connection_org_policies (
-  connection_id uuid PRIMARY KEY,
-  owner_user_id uuid REFERENCES users(user_id),
-  agent_identity_id uuid REFERENCES agent_identities(id),
-  default_org_id uuid REFERENCES organizations(id),
-  default_workspace_id uuid REFERENCES workspaces(workspace_id),
-  allowed_org_ids uuid[],
-  created_at timestamptz NOT NULL DEFAULT now(),
-  revoked_at timestamptz
+  connection_id uuid PRIMARY KEY, owner_user_id uuid REFERENCES users(user_id),
+  agent_identity_id uuid REFERENCES agent_identities(id), default_org_id uuid REFERENCES organizations(id),
+  default_workspace_id uuid REFERENCES workspaces(workspace_id), allowed_org_ids uuid[],
+  created_at timestamptz NOT NULL DEFAULT now(), revoked_at timestamptz
 );
 CREATE TABLE swarm.channel_memberships (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  channel_id uuid NOT NULL,
-  workspace_id uuid NOT NULL,
-  principal_kind text NOT NULL CHECK (principal_kind IN ('user','agent')),
-  principal_id uuid NOT NULL,
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), channel_id uuid NOT NULL, workspace_id uuid NOT NULL,
+  principal_kind text NOT NULL CHECK (principal_kind IN ('user','agent')), principal_id uuid NOT NULL,
   role text NOT NULL CHECK (role IN ('owner','member')),
   notify_pref text NOT NULL DEFAULT 'all' CHECK (notify_pref IN ('all','mentions','mute')),
-  added_by_kind text NOT NULL DEFAULT 'user' CHECK (added_by_kind IN ('user','agent')),
-  added_by uuid,
-  joined_at timestamptz NOT NULL DEFAULT now(),
-  revoked_at timestamptz,
+  added_by_kind text NOT NULL DEFAULT 'user' CHECK (added_by_kind IN ('user','agent')), added_by uuid,
+  joined_at timestamptz NOT NULL DEFAULT now(), revoked_at timestamptz,
   UNIQUE (channel_id, principal_kind, principal_id),
   FOREIGN KEY (channel_id, workspace_id) REFERENCES channels(channel_id, workspace_id)
 );
 CREATE INDEX channel_memberships_live_idx ON swarm.channel_memberships(channel_id, principal_kind, principal_id) WHERE revoked_at IS NULL;
 CREATE TABLE swarm.file_channel_bindings (
-  file_id uuid NOT NULL,
-  workspace_id uuid NOT NULL,
-  channel_id uuid NOT NULL,
-  bound_by_kind text NOT NULL DEFAULT 'user' CHECK (bound_by_kind IN ('user','agent')),
-  bound_by uuid,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (file_id, channel_id),
+  file_id uuid NOT NULL, workspace_id uuid NOT NULL, channel_id uuid NOT NULL,
+  bound_by_kind text NOT NULL DEFAULT 'user' CHECK (bound_by_kind IN ('user','agent')), bound_by uuid,
+  created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (file_id, channel_id),
   FOREIGN KEY (file_id, workspace_id) REFERENCES files(file_id, workspace_id),
   FOREIGN KEY (channel_id, workspace_id) REFERENCES channels(channel_id, workspace_id)
 );
 CREATE TABLE swarm.org_approval_requests (
-  approval_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  org_id uuid NOT NULL REFERENCES organizations(id),
-  workspace_id uuid REFERENCES workspaces(workspace_id),
-  channel_id uuid REFERENCES channels(channel_id),
+  approval_id uuid PRIMARY KEY DEFAULT gen_random_uuid(), org_id uuid NOT NULL REFERENCES organizations(id),
+  workspace_id uuid REFERENCES workspaces(workspace_id), channel_id uuid REFERENCES channels(channel_id),
   requested_by_agent_identity_id uuid NOT NULL REFERENCES agent_identities(id),
-  owner_user_id uuid NOT NULL REFERENCES users(user_id),
-  action_kind text NOT NULL CHECK (btrim(action_kind) <> ''),
-  target_scope jsonb NOT NULL DEFAULT '{}',
-  payload jsonb NOT NULL DEFAULT '{}',
+  owner_user_id uuid NOT NULL REFERENCES users(user_id), action_kind text NOT NULL CHECK (btrim(action_kind) <> ''),
+  target_scope jsonb NOT NULL DEFAULT '{}', payload jsonb NOT NULL DEFAULT '{}',
   state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','approved','rejected','expired')),
-  decided_by uuid REFERENCES users(user_id),
-  decided_at timestamptz,
-  expires_at timestamptz,
+  decided_by uuid REFERENCES users(user_id), decided_at timestamptz, expires_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE swarm.workspaces ADD COLUMN org_id uuid REFERENCES organizations(id), ADD COLUMN slug text;
@@ -215,19 +174,11 @@ $$;
 CREATE TRIGGER memberships_sync_org_grants AFTER INSERT OR UPDATE ON swarm.memberships FOR EACH ROW EXECUTE FUNCTION swarm.sync_legacy_membership_to_org_grants();
 
 CREATE FUNCTION swarm.ensure_agent_principal_identity() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
-DECLARE v_ai uuid;
 BEGIN
   IF NEW.agent_identity_id IS NULL THEN
-    SELECT ai.id INTO v_ai FROM swarm.agent_identities ai
-    WHERE ai.owner_user_id = NEW.owner_user_id AND lower(ai.display_name) = lower(NEW.name)
-      AND NOT EXISTS (SELECT 1 FROM swarm.agent_principals ap WHERE ap.workspace_id = NEW.workspace_id AND ap.agent_identity_id = ai.id AND ap.principal_id <> NEW.principal_id)
-    ORDER BY ai.standing_grant_id IS NOT NULL DESC, ai.revoked_at NULLS FIRST, ai.created_at ASC LIMIT 1;
-    IF v_ai IS NOT NULL THEN NEW.agent_identity_id := v_ai;
-    ELSE
-      INSERT INTO swarm.agent_identities (id, owner_user_id, display_name, created_at, revoked_at)
-      VALUES (NEW.principal_id, NEW.owner_user_id, NEW.name, coalesce(NEW.created_at, now()), NEW.revoked_at) ON CONFLICT (id) DO NOTHING;
-      NEW.agent_identity_id := NEW.principal_id;
-    END IF;
+    INSERT INTO swarm.agent_identities (id, owner_user_id, display_name, created_at, revoked_at)
+    VALUES (NEW.principal_id, NEW.owner_user_id, NEW.name, coalesce(NEW.created_at, now()), NEW.revoked_at) ON CONFLICT (id) DO NOTHING;
+    NEW.agent_identity_id := NEW.principal_id;
   END IF;
   RETURN NEW;
 END
@@ -237,10 +188,10 @@ CREATE TRIGGER agent_principals_ensure_identity BEFORE INSERT ON swarm.agent_pri
 CREATE FUNCTION swarm.sync_standing_grant_to_agent_identity() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
 DECLARE v_ap RECORD; v_ai uuid; v_j jsonb := to_jsonb(NEW); v_gid uuid := (v_j->>'grant_id')::uuid; v_rgid uuid := (v_j->>'renewal_grant_id')::uuid;
 BEGIN
-  IF TG_TABLE_NAME = 'hosted_mcp_seats' AND v_gid IS NOT NULL THEN
-    SELECT principal_id, workspace_id, agent_identity_id, owner_user_id, name INTO v_ap FROM swarm.agent_principals WHERE principal_id = NEW.principal_id;
+  IF v_gid IS NOT NULL OR v_rgid IS NOT NULL THEN
+    SELECT principal_id, workspace_id, agent_identity_id, owner_user_id, name, created_at, revoked_at INTO v_ap FROM swarm.agent_principals WHERE principal_id = NEW.principal_id;
     IF v_ap.principal_id IS NOT NULL THEN
-      SELECT id INTO v_ai FROM swarm.agent_identities WHERE standing_grant_id = v_gid AND lower(display_name) = lower(v_ap.name) LIMIT 1;
+      SELECT id INTO v_ai FROM swarm.agent_identities WHERE (v_gid IS NOT NULL AND standing_grant_id = v_gid) OR (v_rgid IS NOT NULL AND standing_renewal_grant_id = v_rgid) LIMIT 1;
       IF v_ai IS NOT NULL AND v_ai <> v_ap.agent_identity_id THEN
         IF NOT EXISTS (SELECT 1 FROM swarm.agent_principals WHERE workspace_id = v_ap.workspace_id AND agent_identity_id = v_ai AND principal_id <> v_ap.principal_id) THEN
           UPDATE swarm.agent_principals SET agent_identity_id = v_ai WHERE principal_id = v_ap.principal_id;
@@ -250,13 +201,16 @@ BEGIN
           UPDATE swarm.agent_identities ai SET revoked_at = coalesce(ai.revoked_at, o.revoked_at) FROM swarm.agent_identities o WHERE ai.id = v_ap.agent_identity_id AND o.id = v_ai AND o.revoked_at IS NOT NULL;
         END IF;
       ELSIF v_ai IS NULL THEN
-        UPDATE swarm.agent_identities SET standing_grant_id = v_gid WHERE id = v_ap.agent_identity_id AND standing_grant_id IS NULL;
+        UPDATE swarm.agent_identities SET standing_grant_id = coalesce(standing_grant_id, v_gid), standing_renewal_grant_id = coalesce(standing_renewal_grant_id, v_rgid)
+        WHERE id = v_ap.agent_identity_id AND ((v_gid IS NOT NULL AND standing_grant_id IS NULL) OR (v_rgid IS NOT NULL AND standing_renewal_grant_id IS NULL));
+        IF NOT FOUND THEN
+          INSERT INTO swarm.agent_identities (id, owner_user_id, standing_grant_id, standing_renewal_grant_id, display_name, created_at, revoked_at)
+          VALUES (v_ap.principal_id, v_ap.owner_user_id, v_gid, v_rgid, v_ap.name, coalesce(v_ap.created_at, now()), v_ap.revoked_at)
+          ON CONFLICT (id) DO UPDATE SET standing_grant_id = coalesce(EXCLUDED.standing_grant_id, swarm.agent_identities.standing_grant_id), standing_renewal_grant_id = coalesce(EXCLUDED.standing_renewal_grant_id, swarm.agent_identities.standing_renewal_grant_id);
+          UPDATE swarm.agent_principals SET agent_identity_id = v_ap.principal_id WHERE principal_id = v_ap.principal_id;
+        END IF;
       END IF;
     END IF;
-  ELSIF TG_TABLE_NAME = 'renewal_grants' AND v_rgid IS NOT NULL THEN
-    UPDATE swarm.agent_identities ai SET standing_renewal_grant_id = v_rgid FROM swarm.agent_principals ap
-    WHERE ap.principal_id = NEW.principal_id AND ai.id = ap.agent_identity_id AND (ai.standing_renewal_grant_id IS NULL OR ai.standing_renewal_grant_id = v_rgid)
-      AND NOT EXISTS (SELECT 1 FROM swarm.agent_identities o WHERE o.standing_renewal_grant_id = v_rgid AND o.id <> ai.id);
   END IF;
   RETURN NEW;
 END
