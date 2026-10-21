@@ -280,7 +280,7 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
     return response.status;
   }
   try {
-    await t.test("real mint and MCP connect commit first use before export/completion and survive idle", async () => {
+    await t.test("real mint and MCP connect commit first use before export/completion and recover technical expiry", async () => {
       const { createClient } = await import("@supabase/supabase-js");
       const { createServer } = await import("node:http");
       const { credentialStore } = await import("../../src/cloud/storage.js");
@@ -393,14 +393,12 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
         assert.deepEqual(mintReads, [{ status: 200, error: undefined }]);
         const [used] = await sql<{ first_used_at: Date | null }[]>`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id = ${artifact.token_id}::uuid`;
         assert.ok(used.first_used_at, "CLI export follows committed first use");
-        // Real exported mint artifact, idle >1h: age technical dates only.
+        // Real exported mint artifact: age technical dates past expiry only.
         // first_used_at remains the actual committed read, never a synthetic stamp.
         await sql`UPDATE swarm.agent_tokens SET issued_at = issued_at - interval '2 hours', expires_at = expires_at - interval '2 hours'
           WHERE token_id = ${artifact.token_id}::uuid`;
-        await sql`UPDATE swarm.renewal_grants SET last_used_at = clock_timestamp() - interval '2 hours'
-          WHERE renewal_grant_id = (SELECT renewal_grant_id FROM swarm.agent_tokens WHERE token_id = ${artifact.token_id}::uuid)`;
         const aged = { ...artifact, expires_at: new Date(Date.parse(artifact.expires_at) - 7_200_000).toISOString() };
-        const artifactPath = join(directory, "idle-minted.json");
+        const artifactPath = join(directory, "expired-minted.json");
         await writeFile(artifactPath, JSON.stringify(aged), { mode: 0o600 });
         const presented = parseAgentCredentialInput(await readFile(artifactPath, "utf8"), { kind: "file", path: artifactPath });
         const store = await agentCredentialStore({ target: mintTarget, lineageKey: credentialLineageKey(presented.token), stateDirectory: directory });
@@ -477,8 +475,6 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       const { writeSecureJsonFile } = await import("../../src/cloud/storage.js");
       await writeSecureJsonFile(savedProfile.credential_file, JSON.stringify({ ...root,
         expires_at: new Date(Date.parse(root.expires_at) - 32 * 86_400_000).toISOString() }));
-      await sql`UPDATE swarm.renewal_grants SET last_used_at = clock_timestamp() - interval '31 days'
-        WHERE renewal_grant_id = (SELECT renewal_grant_id FROM swarm.agent_tokens WHERE token_id = ${root.token_id}::uuid)`;
       // Another process/session saves the actual M3 winner before pending rerun.
       const rootBytes = await readFile(savedProfile.credential_file);
       const firstReopen = await openProfileCredential(savedProfile);
@@ -491,7 +487,7 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       const [beforeResume] = await sql<{ successors: number }[]>`SELECT count(*)::integer AS successors FROM swarm.agent_tokens WHERE predecessor_token_id = ${root.token_id}::uuid`;
       assert.equal(beforeResume.successors, 1);
       const resumeRequests: Array<{ path: string; bearer: string | null; status: number }> = [];
-      // Resume the same pending profile after >30d using that saved real winner.
+      // Resume the pending profile after technical expiry using the saved real winner.
       const resumed = await connectMcp({ target, profilePath, readCode: async () => code,
         fetcher: async (input, init) => {
           const response = await fetch(input, init);
@@ -533,8 +529,6 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
         assert.ok(usedRoot.first_used_at, "actual read, never fabricated first use");
         await sql`UPDATE swarm.agent_tokens SET issued_at = issued_at - interval '32 days', expires_at = expires_at - interval '32 days'
           WHERE token_id = ${original.token_id}::uuid`;
-        await sql`UPDATE swarm.renewal_grants SET last_used_at = clock_timestamp() - interval '31 days'
-          WHERE renewal_grant_id = (SELECT renewal_grant_id FROM swarm.agent_tokens WHERE token_id = ${original.token_id}::uuid)`;
         await writeSecureJsonFile(profile.credential_file, JSON.stringify({ ...original,
           expires_at: new Date(Date.parse(original.expires_at) - 32 * 86_400_000).toISOString() }));
         const rootBytes = await readFile(profile.credential_file);
