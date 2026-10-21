@@ -5,7 +5,6 @@ export declare const HOUSEHOLD_VERSION_BYTE_LIMIT: number;
 export declare const HOUSEHOLD_LIVE_REVISION_LIMIT = 20;
 export declare const HOUSEHOLD_IDENTITY_WRITE_HOURLY_LIMIT = 600;
 export declare const HOUSEHOLD_WORKSPACE_WRITE_HOURLY_LIMIT = 2000;
-/** Also used by consent and tool generation during lane 4 integration. */
 export declare const HOUSEHOLD_CONTENT_OPERATIONS: readonly ["read", "create", "update"];
 export type HouseholdContentOperation = typeof HOUSEHOLD_CONTENT_OPERATIONS[number];
 export declare const HOUSEHOLD_CONTENT_ROLES: readonly ["reader", "editor"];
