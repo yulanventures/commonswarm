@@ -1,0 +1,140 @@
+/* CommonSwarm Files presentation. Own code; existing runtime remains owner. */
+live-dashboard.dashboard[data-kylon-shell] .dashboard__files-view {
+  min-inline-size: 0;
+  /* Native Tab must expose the complete 2px outline plus 2px offset. */
+  scroll-padding-block: 4px;
+  padding: 24px;
+  color: var(--k-shell-ink);
+  background: var(--k-shell-surface);
+  font: 14px/1.55 var(--k-shell-font);
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__files-view .hm-pane-title {
+  margin: 0 0 8px;
+  color: var(--k-shell-ink);
+  font: 600 20px/1.35 var(--k-shell-font);
+  letter-spacing: -.5px;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__file-description {
+  margin: 0 0 20px;
+  color: var(--k-shell-secondary);
+  font: 400 13px/1.55 var(--k-shell-font);
+  overflow-wrap: anywhere;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__file-list {
+  gap: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__file-row {
+  grid-template-columns: minmax(0, 2fr) 64px 40px minmax(80px, 1fr) 80px 112px;
+  gap: 12px;
+  min-inline-size: 0;
+  min-block-size: 76px;
+  padding: 12px 0;
+  border: 0;
+  border-block-end: 1px solid var(--k-shell-line);
+  border-radius: 0;
+  background: var(--k-shell-surface);
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__file-identity {
+  gap: 4px;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__file-identity strong {
+  color: var(--k-shell-ink);
+  font: 500 14px/1.5 var(--k-shell-font);
+}
+live-dashboard.dashboard[data-kylon-shell] :is(.dashboard__file-state, .dashboard__file-row > span, .dashboard__file-row > time) {
+  min-inline-size: 0;
+  color: var(--k-shell-secondary);
+  font: 400 12px/1.5 var(--k-shell-font);
+  overflow-wrap: anywhere;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__file-row [data-field-label]::before {
+  margin-block-end: 2px;
+  color: var(--k-shell-secondary);
+  font: 400 11px/1.5 var(--k-shell-font);
+  letter-spacing: 0;
+  text-transform: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__file-action {
+  min-inline-size: 0;
+  gap: 4px;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__file-download {
+  min-inline-size: 88px;
+  min-block-size: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--k-shell-control);
+  border-radius: var(--k-shell-radius);
+  color: var(--k-shell-ink);
+  background: var(--k-shell-surface);
+  font: 500 13px/1.5 var(--k-shell-font);
+  box-shadow: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__file-download:hover:not(:disabled) {
+  background: var(--k-shell-hover);
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__file-download:focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__file-download:disabled {
+  color: var(--k-shell-secondary);
+  background: var(--k-shell-subtle);
+  cursor: default;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__file-download-status {
+  max-inline-size: 100%;
+  font: 400 12px/1.5 var(--k-shell-font);
+  overflow-wrap: anywhere;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__file-row--removed [data-file-name] {
+  color: var(--k-shell-secondary);
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__file-empty {
+  padding-block: 12px;
+  color: var(--k-shell-secondary);
+  font: 400 14px/1.55 var(--k-shell-font);
+}
+/* Existing warning and error semantics/colors remain supplied by their owner. */
+live-dashboard.dashboard[data-kylon-shell] :is(.dashboard__file-warning, .dashboard__file-error) {
+  font-family: var(--k-shell-font);
+  font-size: 13px;
+  line-height: 1.55;
+}
+@media (max-width: 70rem) {
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__file-row {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  live-dashboard.dashboard[data-kylon-shell] :is(.dashboard__file-identity, .dashboard__file-action) {
+    grid-column: 1 / -1;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__file-action {
+    justify-items: start;
+  }
+}
+@media (max-width: 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__files-view {
+    padding: 20px 16px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__file-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 16px;
+    padding-block: 16px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__file-download-status {
+    text-align: start;
+  }
+}
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__file-download {
+    border-color: ButtonText;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__file-download:disabled {
+    color: GrayText;
+  }
+}
