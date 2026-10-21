@@ -20,7 +20,7 @@ import {
   enforceAgentSessionProof,
   hashSessionKey,
   loadAgentCredential,
-  planLocalOperation, planLocalConnection, lockLocalAuthPlan, type LocalAuthLockPlan, LocalCredentialDenied, recheckLocalCredential, LocalAuthDiscoveryChanged,
+  planLocalOperation, planLocalConnection, lockLocalAuthPlan, type LocalAuthLockPlan, LocalCredentialDenied, LocalCredentialWorkspaceMismatch, recheckLocalCredential, LocalAuthDiscoveryChanged,
   retryLocalAuthTransaction,
   planHostedClaimPrefix,
   type AgentAuthRow,
@@ -10859,22 +10859,30 @@ async function handleTransaction(
     const rawLocal = record(body.command);
     if (agentTokenHash && HUMAN_ONLY_COMMANDS.has(kind as never))
       return {status:403,body:{error:'human_sign_in_required'}};
-    if (verifiedHuman && localWorkspace && kind!=='accept_invitation') {
+    // Admission selects a lock suffix, never a domain reason. The reducer
+    // remains the sole owner of authenticated business refusals.
+    const humanLocalAdmission = async (): Promise<'allowed' | 'business-refusal' | 'forbidden'> => {
+      if (!verifiedHuman || !localWorkspace || kind==='accept_invitation') return 'allowed';
       const [admission]=await tx<{role:string}[]>`SELECT m.role FROM swarm.memberships m
         JOIN swarm.workspaces w USING(workspace_id)
         WHERE m.workspace_id=${localWorkspace}::uuid AND m.user_id=${verifiedHuman.userId}::uuid
           AND m.revoked_at IS NULL AND w.archived_at IS NULL`;
-      if (!admission) return {status:403,body:{error:'forbidden'}};
+      if (!admission) return 'forbidden';
       if (['remove_member','change_role','archive_workspace'].includes(kind)
-        && !['owner','admin'].includes(admission.role)) return {status:403,body:{error:'forbidden'}};
+        && !['owner','admin'].includes(admission.role))
+        return kind==='change_role' ? 'forbidden' : 'business-refusal';
       const targetPrincipal=typeof rawLocal?.principal_id==='string' && UUID_RE.test(rawLocal.principal_id) ? rawLocal.principal_id:null;
       if (targetPrincipal && ['mint_agent_token','revoke_agent_principal','set_agent_model','disable_agent_session','recover_agent_session'].includes(kind)) {
         const [target]=await tx<{owner_user_id:string}[]>`SELECT owner_user_id FROM swarm.agent_principals
           WHERE principal_id=${targetPrincipal}::uuid AND workspace_id=${localWorkspace}::uuid`;
         if (!target || target.owner_user_id!==verifiedHuman.userId && !['owner','admin'].includes(admission.role))
-          return {status:403,body:{error:'forbidden'}};
+          return ['revoke_agent_principal','set_agent_model'].includes(kind) ? 'business-refusal' : 'forbidden';
       }
-    }
+      return 'allowed';
+    };
+    const humanAdmission = await humanLocalAdmission();
+    if (humanAdmission==='forbidden') return {status:403,body:{error:'forbidden'}};
+    const humanBusinessRefusal = humanAdmission==='business-refusal';
     if (kind===RESUME_RENEWAL_GRANT_KIND && (!rawLocal || !exactKeys(rawLocal,['kind','renewal_grant_id'])
       || typeof rawLocal.renewal_grant_id!=='string' || !UUID_RE.test(rawLocal.renewal_grant_id)))
       return {status:400,body:{error:'invalid_request'}};
@@ -10922,11 +10930,11 @@ async function handleTransaction(
       record(args?.assignee)?.kind==='agent' ? record(args?.assignee)?.id:null,
       record(args?.to)?.kind==='agent' ? record(args?.to)?.id:null,
       record(record(args?.assign)?.to)?.kind==='agent' ? record(record(args?.assign)?.to)?.id:null]) {
-      if(typeof value==='string' && UUID_RE.test(value)) principalTargets.add(value);
+      if(!humanBusinessRefusal && typeof value==='string' && UUID_RE.test(value)) principalTargets.add(value);
     }
     // Existing to-do assignment is DB-owned metadata, reselected after each wait.
-    const todoId=typeof args?.todo_id==='string' && UUID_RE.test(args.todo_id) ? args.todo_id:null;
-    const tokenTargets=typeof rawLocal?.token_id==='string' && UUID_RE.test(rawLocal.token_id) ? [rawLocal.token_id]:[];
+    const todoId=!humanBusinessRefusal && typeof args?.todo_id==='string' && UUID_RE.test(args.todo_id) ? args.todo_id:null;
+    const tokenTargets=!humanBusinessRefusal && typeof rawLocal?.token_id==='string' && UUID_RE.test(rawLocal.token_id) ? [rawLocal.token_id]:[];
     // The Allow writer selects the exact connection, including retired tokens
     // absent from principal discovery. Reuse its nonlocking selector/refusal
     // boundary before adding that token's server-derived parent to the prefix.
@@ -10938,7 +10946,7 @@ async function handleTransaction(
       && await planLocalConnection(tx,localWorkspace,verifiedHuman.userId,consent.principal_id,consent.connection_id)) {
       tokenTargets.push(consent.connection_id);
     }
-    const removeUser=kind==='remove_member' && typeof rawLocal?.user_id==='string' && UUID_RE.test(rawLocal.user_id) ? rawLocal.user_id:null;
+    const removeUser=!humanBusinessRefusal && kind==='remove_member' && typeof rawLocal?.user_id==='string' && UUID_RE.test(rawLocal.user_id) ? rawLocal.user_id:null;
     const revocation=removeUser ? {user:removeUser}
       : kind==='revoke_agent_principal' && principalTargets.size===1 ? {principal:[...principalTargets][0]!}
       : kind==='revoke_agent_token' && tokenTargets[0] ? {token:tokenTargets[0]} : undefined;
@@ -10993,6 +11001,9 @@ async function handleTransaction(
       }
       if (localState.localPlan) await lockLocalAuthPlan(tx,localState.localPlan);
     }
+    // A changed role/target binding needs a new complete plan, not a suffix
+    // appended after the actor-only refusal plan has already been locked.
+    if (await humanLocalAdmission()!==humanAdmission) throw new LocalAuthDiscoveryChanged();
     if(invitationHintHash) {
       const [hint]=await tx<{workspace_id:string}[]>`SELECT workspace_id FROM swarm.invitations WHERE token_hash=${invitationHintHash}`;
       if(hint?.workspace_id!==localWorkspace) throw new LocalAuthDiscoveryChanged();
@@ -13569,6 +13580,9 @@ async function handleTransaction(
   }).catch((error: unknown): HttpResult => {
     // postgres.js rejects begin only after rollback: no authority/content,
     // idempotency, presence, audit or notice effects survive this refusal.
+    if (error instanceof LocalCredentialWorkspaceMismatch
+      && (kind===CLAIM_AGENT_INBOX_KIND || kind===ACK_AGENT_DELIVERY_KIND))
+      return {status:403,body:{error:'delivery_unavailable'}};
     if (error instanceof LocalCredentialDenied) return error.credentialInvalid
       ? {status:401,body:{error:'unauthenticated'}}
       : {status:403,body:{error:'forbidden'}};
