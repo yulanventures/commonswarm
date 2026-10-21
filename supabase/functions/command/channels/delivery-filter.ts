@@ -40,20 +40,6 @@ export interface ChannelSignalRecord {
   created_at: string;
 }
 
-export interface PlannedSignalDelivery {
-  delivery_id: string;
-  signal_id: string;
-  workspace_id: string;
-  channel_id: string | null;
-  recipient_kind: PrincipalKind;
-  recipient_id: string;
-  notify_pref: NotifyPref;
-  mentioned: boolean;
-  deliver_inbox: boolean;
-  deliver_wake: boolean;
-  deliver_push: boolean;
-}
-
 export interface WakeEvent {
   wake_id: string;
   signal_id: string;
@@ -61,6 +47,15 @@ export interface WakeEvent {
   channel_id: string | null;
   recipient_kind: PrincipalKind;
   recipient_id: string;
+}
+
+export interface PlannedSignalDelivery extends Omit<WakeEvent, 'wake_id'> {
+  delivery_id: string;
+  notify_pref: NotifyPref;
+  mentioned: boolean;
+  deliver_inbox: boolean;
+  deliver_wake: boolean;
+  deliver_push: boolean;
 }
 
 function checkSeatMatchesWorkspace(
@@ -71,18 +66,11 @@ function checkSeatMatchesWorkspace(
   if (!seatId) return null;
   const seat = (s.seats ?? []).find((x) => x.seat_id === seatId && isLive(x));
   if (!seat) {
-    return fail('WORKSPACE_ACCESS_DENIED', 'active_seat', {
-      workspace: workspaceId,
-      seat_id: seatId,
-    }).refusal;
+    return fail('WORKSPACE_ACCESS_DENIED', 'active_seat', { workspace: workspaceId, seat_id: seatId }).refusal;
   }
   if (seat.workspace_id !== workspaceId) {
     const scope = wsScope(s, workspaceId, null, seatId);
-    return fail(
-      'WORKSPACE_SEAT_MISMATCH',
-      `seat_in_${scope.org ?? workspaceId}/${scope.workspace ?? workspaceId}`,
-      scope,
-    ).refusal;
+    return fail('WORKSPACE_SEAT_MISMATCH', `seat_in_${scope.org ?? workspaceId}/${scope.workspace ?? workspaceId}`, scope).refusal;
   }
   return null;
 }
@@ -94,11 +82,7 @@ function getEffectiveNotifyPref(
   id: string,
 ): NotifyPref {
   if (!channelId) return 'all';
-  return (
-    s.channelMemberships.find(
-      (m) => m.channel_id === channelId && isPrin(m, kind, id) && isLive(m),
-    )?.notify_pref ?? 'all'
-  );
+  return s.channelMemberships.find((m) => m.channel_id === channelId && isPrin(m, kind, id) && isLive(m))?.notify_pref ?? 'all';
 }
 
 export function postChannelSignal(
@@ -120,11 +104,7 @@ export function postChannelSignal(
     candidate_recipients?: readonly CallerContext[];
     now?: string;
   },
-): ChannelResult<{
-  signal: ChannelSignalRecord;
-  deliveries: PlannedSignalDelivery[];
-  wakes: WakeEvent[];
-}> {
+): ChannelResult<{ signal: ChannelSignalRecord; deliveries: PlannedSignalDelivery[]; wakes: WakeEvent[] }> {
   const seatErr = checkSeatMatchesWorkspace(s, input.workspace_id, input.seat_id);
   if (seatErr) return { ok: false, refusal: seatErr };
 
@@ -134,30 +114,52 @@ export function postChannelSignal(
   }
 
   const threadRootId = input.thread_id ?? input.thread_root_id ?? null;
-  const parentId = threadRootId ?? input.in_reply_to ?? null;
+  const replyToId = input.in_reply_to ?? null;
   const signalKind: SignalKind = input.signal_kind ?? 'note';
   let resolvedChannelId: string | null = input.channel_id ?? null;
+  const knownSignals = input.existing_signals ?? (s.signals as readonly ChannelSignalRecord[] | undefined) ?? [];
 
-  if (parentId !== null) {
+  if (threadRootId !== null || replyToId !== null) {
     if (threadRootId !== null && signalKind === 'working-on') {
       return fail('INVALID_THREAD_REPLY_KIND', 'note_or_ask_signal_kind', baseScope);
     }
-    const rootSig = (
-      input.existing_signals ??
-      (s.signals as readonly ChannelSignalRecord[] | undefined) ??
-      []
-    ).find((x) => x.signal_id === parentId);
-    if (!rootSig || rootSig.workspace_id !== input.workspace_id) {
-      return fail('CHANNEL_ACCESS_DENIED', 'thread_channel_access', baseScope);
+    const checkSigAccess = (sig: ChannelSignalRecord | undefined) => {
+      if (!sig || sig.workspace_id !== input.workspace_id) {
+        return fail('CHANNEL_ACCESS_DENIED', 'thread_channel_access', baseScope);
+      }
+      if (sig.channel_id !== null) {
+        const sigCh = s.channels.find((c) => c.workspace_id === input.workspace_id && c.channel_id === sig.channel_id);
+        if (!sigCh) return fail('CHANNEL_ACCESS_DENIED', 'thread_channel_access', baseScope);
+        if (sigCh.visibility === 'private' && !isPrivateChannelsEnabled(s)) {
+          return fail('PRIVATE_CHANNELS_DISABLED', 'private_channels_enabled', baseScope);
+        }
+        if (!canReadChannel(s, caller, sigCh.channel_id)) {
+          return fail('CHANNEL_ACCESS_DENIED', 'thread_channel_access', baseScope);
+        }
+      }
+      return null;
+    };
+    const rootSig = threadRootId !== null ? knownSignals.find((x) => x.signal_id === threadRootId) : undefined;
+    if (threadRootId !== null) {
+      const err = checkSigAccess(rootSig);
+      if (err) return err;
     }
-    if (
-      input.channel_id !== undefined &&
-      input.channel_id !== null &&
-      input.channel_id !== rootSig.channel_id
-    ) {
+    const replySig = replyToId !== null ? knownSignals.find((x) => x.signal_id === replyToId) : undefined;
+    if (replyToId !== null) {
+      const err = checkSigAccess(replySig);
+      if (err) return err;
+    }
+    if (rootSig && replySig) {
+      const sameThread = replySig.signal_id === rootSig.signal_id || replySig.thread_root_id === rootSig.signal_id;
+      if (replySig.channel_id !== rootSig.channel_id || !sameThread) {
+        return fail('THREAD_CHANNEL_MISMATCH', 'matching_thread_channel', baseScope);
+      }
+    }
+    const refSig = (rootSig ?? replySig)!;
+    if (input.channel_id != null && input.channel_id !== refSig.channel_id) {
       return fail('THREAD_CHANNEL_MISMATCH', 'matching_thread_channel', baseScope);
     }
-    resolvedChannelId = rootSig.channel_id;
+    resolvedChannelId = refSig.channel_id;
   }
 
   if (resolvedChannelId !== null) {
@@ -165,23 +167,22 @@ export function postChannelSignal(
       (c) => c.workspace_id === input.workspace_id && c.channel_id === resolvedChannelId,
     );
     if (!ch) return fail('CHANNEL_ACCESS_DENIED', 'channel_membership', baseScope);
-    const chScope = wsScope(s, input.workspace_id, ch.slug, input.seat_id);
     if (ch.visibility === 'private' && !isPrivateChannelsEnabled(s)) {
-      return fail('PRIVATE_CHANNELS_DISABLED', 'private_channels_enabled', chScope);
+      return fail('PRIVATE_CHANNELS_DISABLED', 'private_channels_enabled', baseScope);
     }
     if (!canReadChannel(s, caller, ch.channel_id)) {
-      return fail('CHANNEL_ACCESS_DENIED', 'channel_membership', {
-        ...baseScope,
-        channel: threadRootId ? null : ch.slug,
-      });
+      return fail('CHANNEL_ACCESS_DENIED', 'channel_membership', baseScope);
     }
+    const chScope = wsScope(s, input.workspace_id, ch.slug, input.seat_id);
     if (!isLive(ch)) return fail('CHANNEL_ARCHIVED', 'active_channel', chScope);
   }
 
   const now = input.now ?? new Date().toISOString();
   const attachmentFileIds = input.attachment_file_ids ?? [];
+  const prevBindings = [...(s.fileChannelBindings ?? [])];
   for (const fileId of attachmentFileIds) {
     if (!canAccessBoundFile(s, caller, fileId, input.workspace_id)) {
+      s.fileChannelBindings = prevBindings;
       return fail('CHANNEL_ACCESS_DENIED', 'file_channel_membership', baseScope);
     }
     if (resolvedChannelId !== null) {
@@ -191,7 +192,10 @@ export function postChannelSignal(
         channel_id: resolvedChannelId,
         now,
       });
-      if (!bound.ok) return bound;
+      if (!bound.ok) {
+        s.fileChannelBindings = prevBindings;
+        return bound;
+      }
     }
   }
 
@@ -311,27 +315,22 @@ export function planSignalDeliveries(
         : canReadChannel(s, cand, signal.channel_id);
     if (!canReceive) continue;
 
-    const notifyPref = getEffectiveNotifyPref(
-      s,
-      signal.channel_id,
-      cand.principal_kind,
-      cand.principal_id,
-    );
-    const mentioned = signal.mentions.some((m) =>
-      isPrin(m, cand.principal_kind, cand.principal_id),
-    );
+    const notifyPref = getEffectiveNotifyPref(s, signal.channel_id, cand.principal_kind, cand.principal_id);
+    const mentioned = signal.mentions.some((m) => isPrin(m, cand.principal_kind, cand.principal_id));
     const deliverInbox = notifyPref !== 'mute';
-    const deliverWake =
-      notifyPref === 'all' || (notifyPref === 'mentions' && mentioned);
+    const deliverWake = notifyPref === 'all' || (notifyPref === 'mentions' && mentioned);
+    const baseItem = {
+      signal_id: signal.signal_id,
+      workspace_id: signal.workspace_id,
+      channel_id: signal.channel_id,
+      recipient_kind: cand.principal_kind,
+      recipient_id: cand.principal_id,
+    };
 
     if (deliverInbox) {
       deliveries.push({
+        ...baseItem,
         delivery_id: `del-${signal.signal_id}-${cand.principal_kind}-${cand.principal_id}`,
-        signal_id: signal.signal_id,
-        workspace_id: signal.workspace_id,
-        channel_id: signal.channel_id,
-        recipient_kind: cand.principal_kind,
-        recipient_id: cand.principal_id,
         notify_pref: notifyPref,
         mentioned,
         deliver_inbox: true,
@@ -341,12 +340,8 @@ export function planSignalDeliveries(
     }
     if (deliverWake) {
       wakes.push({
+        ...baseItem,
         wake_id: `wake-${signal.signal_id}-${cand.principal_kind}-${cand.principal_id}`,
-        signal_id: signal.signal_id,
-        workspace_id: signal.workspace_id,
-        channel_id: signal.channel_id,
-        recipient_kind: cand.principal_kind,
-        recipient_id: cand.principal_id,
       });
     }
   }
@@ -364,9 +359,7 @@ export function filterInboxItems(
       item.recipient_kind === caller.principal_kind &&
       item.recipient_id === caller.principal_id &&
       (!workspaceId || item.workspace_id === workspaceId) &&
-      (item.channel_id === null
-        ? canReadWorkspace(s, caller, item.workspace_id)
-        : canReadChannel(s, caller, item.channel_id)),
+      (item.channel_id === null ? canReadWorkspace(s, caller, item.workspace_id) : canReadChannel(s, caller, item.channel_id)),
   );
 }
 
@@ -379,9 +372,7 @@ export function filterWakeEvents(
     (w) =>
       w.recipient_kind === caller.principal_kind &&
       w.recipient_id === caller.principal_id &&
-      (w.channel_id === null
-        ? canReadWorkspace(s, caller, w.workspace_id)
-        : canReadChannel(s, caller, w.channel_id)),
+      (w.channel_id === null ? canReadWorkspace(s, caller, w.workspace_id) : canReadChannel(s, caller, w.channel_id)),
   );
 }
 
@@ -394,18 +385,20 @@ export function canAckInboxItem(
   const seatErr = checkSeatMatchesWorkspace(s, item.workspace_id, seatId);
   if (seatErr) return { ok: false, refusal: seatErr };
   const scope = wsScope(s, item.workspace_id, null, seatId);
-  if (
-    item.recipient_kind !== caller.principal_kind ||
-    item.recipient_id !== caller.principal_id
-  ) {
+  if (item.recipient_kind !== caller.principal_kind || item.recipient_id !== caller.principal_id) {
     return fail('CHANNEL_ACCESS_DENIED', 'delivery_recipient_match', scope);
   }
-  const readable =
-    item.channel_id === null
-      ? canReadWorkspace(s, caller, item.workspace_id)
-      : canReadChannel(s, caller, item.channel_id);
+  const readable = item.channel_id === null ? canReadWorkspace(s, caller, item.workspace_id) : canReadChannel(s, caller, item.channel_id);
   if (!readable) return fail('CHANNEL_ACCESS_DENIED', 'channel_membership', scope);
   return { ok: true, acked_delivery_id: item.delivery_id };
+}
+
+export interface ChannelUnreadBucket {
+  channel_id: string;
+  slug: string;
+  unread_count: number;
+  mention_count: number;
+  muted: boolean;
 }
 
 export function computeUnreadCounts(
@@ -420,45 +413,18 @@ export function computeUnreadCounts(
   total_unread: number;
   total_mentions: number;
   unfiled_unread: number;
-  by_channel: Record<
-    string,
-    {
-      channel_id: string;
-      slug: string;
-      unread_count: number;
-      mention_count: number;
-      muted: boolean;
-    }
-  >;
+  by_channel: Record<string, ChannelUnreadBucket>;
 }> {
   const scope = wsScope(s, input.workspace_id, null);
   if (!canReadWorkspace(s, caller, input.workspace_id)) {
     return fail('WORKSPACE_ACCESS_DENIED', 'workspace_grant', scope);
   }
   const seen = new Set(input.seen_signal_ids ?? []);
-  const byChannel: Record<
-    string,
-    {
-      channel_id: string;
-      slug: string;
-      unread_count: number;
-      mention_count: number;
-      muted: boolean;
-    }
-  > = {};
+  const byChannel: Record<string, ChannelUnreadBucket> = {};
 
   for (const ch of s.channels) {
-    if (
-      ch.workspace_id === input.workspace_id &&
-      isLive(ch) &&
-      canReadChannel(s, caller, ch.channel_id)
-    ) {
-      const pref = getEffectiveNotifyPref(
-        s,
-        ch.channel_id,
-        caller.principal_kind,
-        caller.principal_id,
-      );
+    if (ch.workspace_id === input.workspace_id && isLive(ch) && canReadChannel(s, caller, ch.channel_id)) {
+      const pref = getEffectiveNotifyPref(s, ch.channel_id, caller.principal_kind, caller.principal_id);
       byChannel[ch.channel_id] = {
         channel_id: ch.channel_id,
         slug: ch.slug,

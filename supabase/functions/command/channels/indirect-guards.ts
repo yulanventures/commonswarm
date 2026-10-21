@@ -113,13 +113,13 @@ export function bindFileToChannel(
     (c) => c.workspace_id === input.workspace_id && c.channel_id === input.channel_id,
   );
   if (!ch) return fail('CHANNEL_ACCESS_DENIED', 'channel_membership', baseScope);
-  const scope = wsScope(s, input.workspace_id, ch.slug);
   if (ch.visibility === 'private' && !isPrivateChannelsEnabled(s)) {
-    return fail('PRIVATE_CHANNELS_DISABLED', 'private_channels_enabled', scope);
+    return fail('PRIVATE_CHANNELS_DISABLED', 'private_channels_enabled', baseScope);
   }
   if (!canReadChannel(s, caller, ch.channel_id)) {
-    return fail('CHANNEL_ACCESS_DENIED', 'channel_membership', scope);
+    return fail('CHANNEL_ACCESS_DENIED', 'channel_membership', baseScope);
   }
+  const scope = wsScope(s, input.workspace_id, ch.slug);
   if (!isLive(ch)) return fail('CHANNEL_ARCHIVED', 'active_channel', scope);
 
   s.fileChannelBindings = s.fileChannelBindings ?? [];
@@ -398,52 +398,65 @@ export function scrubLinkPreviews(
     let authorized = canReadWorkspace(s, viewer, cand.workspace_id);
     let isPrivate = false;
     let resolvedChannelId: string | null = cand.channel_id ?? null;
+    let checkedTarget = false;
 
-    if (cand.target_kind === 'signal' || cand.target_kind === 'channel' || Boolean(cand.signal_id)) {
-      if (cand.target_kind === 'signal' || Boolean(cand.signal_id)) {
-        const sig = cand.signal_id
-          ? (s.signals ?? []).find(
-              (x) =>
-                x.signal_id === cand.signal_id &&
-                (x.workspace_id === undefined || x.workspace_id === cand.workspace_id),
-            )
-          : undefined;
-        if (sig && (!cand.channel_id || sig.channel_id === cand.channel_id)) {
-          resolvedChannelId = sig.channel_id ?? null;
-        } else {
-          resolvedChannelId = null;
-        }
+    if (cand.target_kind === 'signal' || cand.signal_id != null) {
+      checkedTarget = true;
+      const sig = cand.signal_id
+        ? (s.signals ?? []).find(
+            (x) =>
+              x.signal_id === cand.signal_id &&
+              (x.workspace_id === undefined || x.workspace_id === cand.workspace_id),
+          )
+        : undefined;
+      if (sig && sig.channel_id && (!cand.channel_id || sig.channel_id === cand.channel_id)) {
+        resolvedChannelId = sig.channel_id;
+      } else {
+        resolvedChannelId = null;
+        authorized = false;
       }
+    }
+
+    if (
+      cand.target_kind === 'channel' ||
+      cand.target_kind === 'signal' ||
+      cand.signal_id != null ||
+      resolvedChannelId != null
+    ) {
+      if (cand.target_kind === 'channel') checkedTarget = true;
       const ch = resolvedChannelId
         ? s.channels.find(
             (c) => c.channel_id === resolvedChannelId && c.workspace_id === cand.workspace_id,
           )
         : undefined;
-      isPrivate = ch?.visibility === 'private';
+      if (ch?.visibility === 'private') isPrivate = true;
       authorized =
         authorized &&
         Boolean(resolvedChannelId && ch) &&
-        (!isPrivate || isPrivateChannelsEnabled(s)) &&
+        (ch?.visibility !== 'private' || isPrivateChannelsEnabled(s)) &&
         Boolean(resolvedChannelId && canReadChannel(s, viewer, resolvedChannelId));
-    } else if (cand.target_kind === 'file') {
+    }
+
+    if (cand.target_kind === 'file' || cand.file_id != null) {
+      checkedTarget = true;
       if (!cand.file_id) {
         authorized = false;
       } else {
         const bindings = (s.fileChannelBindings ?? []).filter(
           (b) => b.file_id === cand.file_id && b.workspace_id === cand.workspace_id,
         );
-        isPrivate = bindings.some(
+        const fileHasPrivate = bindings.some(
           (b) => s.channels.find((c) => c.channel_id === b.channel_id)?.visibility === 'private',
         );
-        if (resolvedChannelId) {
-          authorized = authorized && canReadChannel(s, viewer, resolvedChannelId);
-        }
+        if (fileHasPrivate) isPrivate = true;
         authorized =
           authorized &&
-          (!isPrivate || isPrivateChannelsEnabled(s)) &&
+          (!fileHasPrivate || isPrivateChannelsEnabled(s)) &&
           canAccessBoundFile(s, viewer, cand.file_id, cand.workspace_id);
       }
-    } else {
+    }
+
+    if (!checkedTarget) {
       authorized = false;
     }
 

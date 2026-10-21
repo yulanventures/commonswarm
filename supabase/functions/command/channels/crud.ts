@@ -353,7 +353,7 @@ export function channelSetVisibility(
           code: 'CHANNEL_HAS_PUBLIC_HISTORY',
           missing: 'archive_and_fork_private_channel',
           scope,
-          mcp_tool: 'cswarm_channel_create',
+          mcp_tool: 'channel_create',
           cli_command: `cswarm channel archive ${ch.slug} --workspace ${sel} && cswarm channel create ${ch.slug}-private --private --workspace ${sel}`,
         }),
       };

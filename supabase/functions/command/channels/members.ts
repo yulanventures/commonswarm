@@ -86,17 +86,19 @@ function isLastPrivateChannelOwner(
   kind: PrincipalKind,
   id: string,
 ): boolean {
+  const cascadedAgents =
+    kind === 'user'
+      ? new Set(s.agentIdentities.filter((ai) => ai.owner_user_id === id).map((ai) => ai.id))
+      : null;
   const otherOwners = s.channelMemberships.filter(
     (m) =>
       m.channel_id === channelId &&
       isLive(m) &&
       m.role === 'owner' &&
-      !isPrin(m, kind, id),
+      !isPrin(m, kind, id) &&
+      !(cascadedAgents && m.principal_kind === 'agent' && cascadedAgents.has(m.principal_id)),
   );
-  const otherMembers = s.channelMemberships.filter(
-    (m) => m.channel_id === channelId && isLive(m) && !isPrin(m, kind, id),
-  );
-  return otherOwners.length === 0 && otherMembers.length > 0;
+  return otherOwners.length === 0;
 }
 
 export function channelJoin(
@@ -117,12 +119,10 @@ export function channelJoin(
     (c) => c.workspace_id === input.workspace_id && c.channel_id === input.channel_id,
   );
   if (!ch) return fail('CHANNEL_ACCESS_DENIED', 'channel_membership', baseScope);
-  const scope = wsScope(s, input.workspace_id, ch.slug);
   if (ch.visibility === 'private' && !isPrivateChannelsEnabled(s)) {
-    return fail('PRIVATE_CHANNELS_DISABLED', 'private_channels_enabled', scope);
+    return fail('PRIVATE_CHANNELS_DISABLED', 'private_channels_enabled', baseScope);
   }
-  if (!isLive(ch)) return fail('CHANNEL_ARCHIVED', 'active_channel', scope);
-
+  const scope = wsScope(s, input.workspace_id, ch.slug);
   if (ch.visibility === 'private' || ch.join_policy === 'invite_only') {
     const existingLive = s.channelMemberships.find(
       (m) =>
@@ -131,10 +131,12 @@ export function channelJoin(
         isLive(m),
     );
     if (existingLive && canReadChannel(s, caller, ch.channel_id)) {
+      if (!isLive(ch)) return fail('CHANNEL_ARCHIVED', 'active_channel', scope);
       return { ok: true, membership: existingLive };
     }
-    return fail('CHANNEL_ACCESS_DENIED', 'channel_owner_invite', scope);
+    return fail('CHANNEL_ACCESS_DENIED', 'channel_owner_invite', baseScope);
   }
+  if (!isLive(ch)) return fail('CHANNEL_ARCHIVED', 'active_channel', scope);
 
   const ownerId = caller.principal_kind === 'agent' ? agentOwner(s, caller) : null;
   const callerIsGuest = isGuestInWorkspace(
@@ -262,6 +264,14 @@ export function channelAddMember(
       isPrin(m, input.principal_kind, input.principal_id),
   );
   if (existing) {
+    if (
+      isLive(existing) &&
+      existing.role === 'owner' &&
+      role !== 'owner' &&
+      isLastPrivateChannelOwner(s, ch.channel_id, input.principal_kind, input.principal_id)
+    ) {
+      return fail('CANNOT_REMOVE_LAST_CHANNEL_OWNER', 'another_channel_owner', scope);
+    }
     existing.role = role;
     existing.notify_pref = notifyPref;
     existing.added_by = addedByUser;
