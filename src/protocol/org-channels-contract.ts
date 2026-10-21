@@ -263,6 +263,8 @@ export function reconcileWorkspaceMove(
   const ws = s.workspaces.find((w) => w.workspace_id === workspace_id && isLive(w));
   if (!ws) return fail('WORKSPACE_NOT_FOUND', 'workspace', { workspace: workspace_id });
   if (
+    !s.organizations.some((o) => o.id === ws.org_id && isLive(o)) ||
+    !s.organizations.some((o) => o.id === target_org_id && isLive(o)) ||
     orgRole(s, ws.org_id, 'user', actor_user_id) !== 'owner' ||
     orgRole(s, target_org_id, 'user', actor_user_id) !== 'owner'
   ) {

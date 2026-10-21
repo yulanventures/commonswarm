@@ -384,5 +384,7 @@ export const agentOwner = (s: OrgChannelAuthorityState, c: CallerContext) => {
     )
   )
     return null;
-  return c.owner_user_id ?? ai.owner_user_id;
+  if (c.owner_user_id != null && c.owner_user_id !== ai.owner_user_id)
+    return null;
+  return ai.owner_user_id;
 };
