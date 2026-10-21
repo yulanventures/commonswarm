@@ -32,7 +32,7 @@ export function parseCookies(header) {
 }
 
 export function sessionCookie(value, { clear = false } = {}) {
-  return `${SESSION_COOKIE}=${clear ? "" : value}; ${SESSION_COOKIE_ATTRIBUTES}${clear ? "; Max-Age=0" : ""}`;
+  return `${SESSION_COOKIE}=${clear ? "" : value}; ${SESSION_COOKIE_ATTRIBUTES}${clear ? "; Max-Age=0" : "; Max-Age=34560000"}`;
 }
 
 export function assertAllowedOrigin(origin, allowedOrigins) {
