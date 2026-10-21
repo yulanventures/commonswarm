@@ -5758,6 +5758,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const renderFeed = (change: "history" | "latest" = "history"): void => {
       window.clearTimeout(signalExpiryTimer);
       signalExpiryTimer = undefined;
+      if (homeRoute.view !== "chat" || activeWorkspaceView !== "signals") return;
       if (addAgentViewOpen()) return;
       if (unknownChannelId !== null) {
         renderUnknownChannel();
