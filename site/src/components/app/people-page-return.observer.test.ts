@@ -37,6 +37,15 @@ type ScenarioResult = {
   sameDocument: boolean;
   returnedBy: string;
 };
+type DetailFocusResult = {
+  viewport: { width: number; height: number };
+  cases: Array<{ kind: string; via: string; id: string; before: FocusGeometry; opened: FocusGeometry;
+    after: FocusGeometry; collapsed: boolean; escapeHandled: boolean; sameDocument: boolean }>;
+};
+type FocusGeometry = {
+  active: boolean; focusVisible: boolean; indicator: boolean; outside: boolean; insideViewport: boolean;
+  rect: { width: number; height: number }; clipped: unknown[];
+};
 
 const contentTypes: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
@@ -63,6 +72,84 @@ const peopleReturnScript = `
     await until(() => app && app.dataset.state === "channel", "the sample workspace");
     view.__peopleReturnDocument = true;
     const go = (search) => { view.history.pushState({ home: true }, "", "/app" + search); view.dispatchEvent(new view.PopStateEvent("popstate", { state: { home: true } })); };
+    if (scenario === "detail-focus") {
+      /* Real built app, Sample data and actual close/keydown handlers. No layout override or
+         scroll/focus repair: the only actions after opening are Close or Escape. Escape uses a
+         DOM KeyboardEvent, not a claim about trusted physical keyboard delivery. */
+      const number = (value) => Number.parseFloat(value) || 0;
+      const box = (rect) => ({ left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height });
+      const measure = (element) => {
+        const rect = box(element.getBoundingClientRect()), style = view.getComputedStyle(element);
+        const opaque = (color) => color !== "transparent" && !/^rgba\\([^)]*,\\s*0(?:\\.0+)?\\)$/.test(color) && !/\\/\\s*0(?:\\.0+)?\\)$/.test(color);
+        const outline = style.outlineStyle !== "none" && style.outlineStyle !== "hidden" && number(style.outlineWidth) > 0 && opaque(style.outlineColor);
+        const edge = outline ? Math.max(0, number(style.outlineWidth) + number(style.outlineOffset)) : 0;
+        const outset = { left: edge, right: edge, top: edge, bottom: edge }; let shadow = false;
+        for (const part of style.boxShadow.split(/,(?![^()]*\\))/)) {
+          if (part === "none" || part.includes("inset")) continue;
+          const color = part.match(/rgba?\\([^)]*\\)/)?.[0];
+          const values = part.replace(/(?:rgba?|color|oklch|hsl)a?\\([^)]*\\)/g, "").match(/-?\\d+(?:\\.\\d+)?px/g)?.map(number);
+          if (!values || values.length < 2 || (color && !opaque(color))) continue;
+          const [x, y, blur = 0, spread = 0] = values, extent = Math.max(0, blur + spread);
+          shadow ||= extent > 0 || x !== 0 || y !== 0;
+          outset.left = Math.max(outset.left, extent - x); outset.right = Math.max(outset.right, extent + x);
+          outset.top = Math.max(outset.top, extent - y); outset.bottom = Math.max(outset.bottom, extent + y);
+        }
+        const ring = { left: rect.left - outset.left, right: rect.right + outset.right, top: rect.top - outset.top, bottom: rect.bottom + outset.bottom };
+        const viewport = { left: 0, top: 0, right: view.innerWidth, bottom: view.innerHeight };
+        const intersection = { ...viewport }, ancestors = [], ignoredNonbox = []; let opacity = number(style.opacity);
+        for (let ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
+          const css = view.getComputedStyle(ancestor);
+          opacity *= number(css.opacity);
+          if (css.display === "contents") { ignoredNonbox.push({ tag: ancestor.tagName, classes: ancestor.className }); continue; }
+          const clipX = /auto|scroll|hidden|clip/.test(css.overflowX), clipY = /auto|scroll|hidden|clip/.test(css.overflowY);
+          if (!clipX && !clipY) continue;
+          const r = ancestor.getBoundingClientRect();
+          const bounds = { left: r.left + ancestor.clientLeft, right: r.left + ancestor.clientLeft + ancestor.clientWidth,
+            top: r.top + ancestor.clientTop, bottom: r.top + ancestor.clientTop + ancestor.clientHeight };
+          if (clipX) { intersection.left = Math.max(intersection.left, bounds.left); intersection.right = Math.min(intersection.right, bounds.right); }
+          if (clipY) { intersection.top = Math.max(intersection.top, bounds.top); intersection.bottom = Math.min(intersection.bottom, bounds.bottom); }
+          ancestors.push({ tag: ancestor.tagName, classes: ancestor.className, bounds, clipX, clipY, scrollTop: ancestor.scrollTop, scrollLeft: ancestor.scrollLeft,
+            cutsX: clipX && (ring.left < bounds.left - .5 || ring.right > bounds.right + .5), cutsY: clipY && (ring.top < bounds.top - .5 || ring.bottom > bounds.bottom + .5) });
+        }
+        return { active: doc.activeElement === element, focusVisible: element.matches(":focus-visible"), indicator: opacity > 0 && style.visibility === "visible" && (outline || shadow),
+          rect, ring, outset, opacity, outline: style.outline, outlineOffset: style.outlineOffset, boxShadow: style.boxShadow, viewport, intersection, ancestors, ignoredNonbox,
+          clipped: ancestors.filter((ancestor) => ancestor.cutsX || ancestor.cutsY),
+          outside: rect.bottom <= intersection.top || rect.top >= intersection.bottom || rect.right <= intersection.left || rect.left >= intersection.right,
+          insideViewport: ring.left >= -.5 && ring.right <= view.innerWidth + .5 && ring.top >= -.5 && ring.bottom <= view.innerHeight + .5 };
+      };
+      const waitFor = async (check, label) => {
+        const deadline = view.performance.now() + 2000;
+        while (!check()) {
+          if (view.performance.now() >= deadline) throw new Error(label + ": " + JSON.stringify({ search: view.location.search, fonts: doc.fonts.status,
+            active: doc.activeElement?.outerHTML, detailHidden: doc.querySelector("[data-people-detail]")?.hidden,
+            pane: doc.querySelector("[data-home-route-pane]")?.getBoundingClientRect().toJSON() }));
+          await new Promise((resolve) => view.setTimeout(resolve, 20));
+        }
+      };
+      go("?w=" + workspace + "&v=people");
+      await waitFor(() => visible(doc.querySelector("[data-people-page]")) && doc.querySelectorAll("[data-people-page] .pd-agent-disclosure").length === 9 && doc.fonts.status === "loaded", "Field lab roster and fonts");
+      const cases = [];
+      for (const kind of ["person", "agent"]) for (const via of ["Close", "Escape"]) {
+        const opener = doc.querySelector("[data-people-page] .pd-" + kind + "-disclosure");
+        if (!opener) throw new Error("missing " + kind + " disclosure");
+        const id = opener.id, before = measure(opener);
+        if (before.outside) throw new Error("the starting " + kind + " disclosure is outside the visible pane: " + JSON.stringify(before));
+        opener.click();
+        await waitFor(() => visible(doc.querySelector("[data-people-detail]")) && doc.activeElement === doc.querySelector("#pd-detail-title"), "focused " + kind + " detail");
+        const opened = measure(doc.getElementById(id));
+        if (!opened.outside) throw new Error("negative control: opening " + kind + " details did not put its row outside the visible pane: " + JSON.stringify(opened));
+        let escapeHandled = false;
+        if (via === "Close") doc.querySelector("[data-people-detail] .pd-close-detail").click();
+        else { const event = new view.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }); doc.dispatchEvent(event); escapeHandled = event.defaultPrevented; }
+        await waitFor(() => !visible(doc.querySelector("[data-people-detail]")) && doc.activeElement === doc.getElementById(id), "closed " + kind + " detail and returned focus via " + via);
+        const returned = doc.getElementById(id), after = measure(returned);
+        cases.push({ kind, via, id, before, opened, after, escapeHandled, collapsed: returned.getAttribute("aria-expanded") === "false", sameDocument: view.__peopleReturnDocument === true });
+        // Stop at the first product failure, preserving the exact uncorrected geometry in the report.
+        if (!after.active || !after.focusVisible || !after.indicator || !after.insideViewport || after.clipped.length)
+          throw new Error("returned " + kind + " focus via " + via + " is not fully visible: " + JSON.stringify(cases));
+      }
+      return { viewport: { width: view.innerWidth, height: view.innerHeight }, cases };
+    }
     const state = () => {
       const page = doc.querySelector("[data-people-page]"); const detail = doc.querySelector("[data-people-detail]");
       return { search: view.location.search, page: visible(page), detailInPage: !!page && !!detail && page.contains(detail),
@@ -124,7 +211,8 @@ const startDistServer = async (): Promise<{ close(): Promise<void>; origin: stri
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     if (url.pathname === "/__people-return") {
       response.writeHead(200, { "content-type": contentTypes[".html"] });
-      response.end(`<!doctype html><html><body style="margin:0"><iframe title="People return" src="/app" style="border:0;width:1360px;height:1100px"></iframe><script>${peopleReturnScript}</script></body></html>`);
+      const phone = url.searchParams.get("size") === "320" ? [320, 568] : url.searchParams.get("size") === "390" ? [390, 844] : [1360, 1100];
+      response.end(`<!doctype html><html><body style="margin:0"><iframe title="People return" src="/app" style="border:0;width:${phone[0]}px;height:${phone[1]}px"></iframe><script>${peopleReturnScript}</script></body></html>`);
       return;
     }
     const relative = url.pathname === "/app" || url.pathname === "/app/" ? "app/index.html" : url.pathname.replace(/^\/+/, "");
@@ -148,17 +236,17 @@ const startDistServer = async (): Promise<{ close(): Promise<void>; origin: stri
   };
 };
 
-const runScenario = async (chrome: string, origin: string, scenario: string): Promise<ScenarioResult> => {
+const runScenario = async <T = ScenarioResult>(chrome: string, origin: string, scenario: string, size?: number): Promise<T> => {
   const { stdout, stderr } = await launchChrome(chrome, [
     "--single-process", "--no-zygote", "--run-all-compositor-stages-before-draw", "--window-size=1600,1200",
     "--virtual-time-budget=20000", "--dump-dom",
-    `${origin}/__people-return?scenario=${scenario}&workspace=${WORKSPACE}`,
+    `${origin}/__people-return?scenario=${scenario}&workspace=${size ? "sample-field-lab" : WORKSPACE}${size ? `&size=${size}` : ""}`,
   ], { maxBuffer: 10 * 1024 * 1024, timeout: 40_000, killSignal: "SIGKILL" });
   const encoded = stdout.match(/data-people-return="([^"]+)"/)?.[1];
   const failure = stdout.match(/data-people-return-error="([^"]+)"/)?.[1];
   assert.ok(encoded, `${scenario}: the app did not report\npage error: ${failure ? decodeURIComponent(failure) : "none"}\n` +
     `stderr: ${stderr.slice(-1_000)}\nDOM: ${stdout.slice(-1_500)}`);
-  return JSON.parse(decodeURIComponent(encoded)) as ScenarioResult;
+  return JSON.parse(decodeURIComponent(encoded)) as T;
 };
 
 const SCENARIOS: Array<[string, string]> = [
@@ -192,6 +280,30 @@ test("People & agents comes back with its detail column after another route took
       assert.ok(result.signInBefore > 0, `${label}: the refused sign-in block never showed, so its hiding measures nothing: ${facts}`);
       assert.equal(result.away.visibleSignIn, 0, `${label}: the refusal's error or sign-in controls showed under another route: ${facts}`);
       assert.ok(result.signInAfter.mounted && result.signInAfter.visible > 0, `${label}: the sign-in block did not come back under the page header: ${facts}`);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("closing a person's or agent's details returns visible focus to its row on a phone", async () => {
+  const chrome = await findChrome();
+  const server = await startDistServer();
+  try {
+    for (const [width, height] of [[390, 844], [320, 568]]) {
+      const result = await runScenario<DetailFocusResult>(chrome, server.origin, "detail-focus", width);
+      assert.deepEqual(result.viewport, { width, height });
+      assert.deepEqual(result.cases.map(({ kind, via }) => [kind, via]), [["person", "Close"], ["person", "Escape"], ["agent", "Close"], ["agent", "Escape"]]);
+      for (const row of result.cases) {
+        const facts = `${width}×${height} ${row.kind}/${row.via}: ${JSON.stringify(row)}`;
+        assert.equal(row.opened.outside, true, `the opener must really leave the visible pane: ${facts}`);
+        assert.ok(row.after.active && row.collapsed && row.sameDocument, `Close must restore the actual matching row in the same app: ${facts}`);
+        assert.ok(row.after.focusVisible && row.after.indicator, `the returned row must paint its focus indicator: ${facts}`);
+        assert.ok(row.after.insideViewport, `the whole painted ring must fit the iframe viewport: ${facts}`);
+        assert.deepEqual(row.after.clipped, [], `every generated clipping ancestor must contain the whole ring: ${facts}`);
+        assert.ok(row.after.rect.width >= 44 && row.after.rect.height >= 44, `the actual row target remains at least 44px: ${facts}`);
+        if (row.via === "Escape") assert.equal(row.escapeHandled, true, `the production Escape handler must consume the event: ${facts}`);
+      }
     }
   } finally {
     await server.close();

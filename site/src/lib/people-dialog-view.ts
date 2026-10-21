@@ -298,10 +298,10 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     state.selected = state.selected?.id === id && state.selected.type === type ? null : { type, id };
     callbacks.render(); detail.scrollTop = 0;
     if (page && state.selected) detail.scrollIntoView?.({ block: "nearest" });
-    (state.selected ? detail.querySelector<HTMLElement>("h2") : doc.getElementById(`pd-${type}-${id}`))?.focus({ preventScroll: true });
+    (state.selected ? detail.querySelector<HTMLElement>("h2") : doc.getElementById(`pd-${type}-${id}`))?.focus({ preventScroll: !page });
   };
   const back = () => { const selected = state.selected; state.selected = null; callbacks.render();
-    if (selected) (doc.getElementById(`pd-${selected.type}-${selected.id}`) ?? outer?.querySelector<HTMLElement>("#dashboard-roster-title") ?? pageRoot?.querySelector<HTMLElement>("#pd-page-title"))?.focus({ preventScroll: true }); };
+    if (selected) (doc.getElementById(`pd-${selected.type}-${selected.id}`) ?? outer?.querySelector<HTMLElement>("#dashboard-roster-title") ?? pageRoot?.querySelector<HTMLElement>("#pd-page-title"))?.focus({ preventScroll: !page }); };
   const actionButton = (action: PeopleDialogAction, agent: PeopleDialogAgent, text: string, notice: HTMLElement, hook?: string) => {
     const element = button(doc, text, (opener) => {
       if (!peopleDialogCanAct(model, action, agent.id)) return;
@@ -465,16 +465,16 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     disclosure.dataset.pdFocus = `agent-${agent.id}`;
     disclosure.setAttribute("aria-expanded", String(state.selected?.type === "agent" && state.selected.id === agent.id)); disclosure.setAttribute("aria-controls", detail.id);
     const secondary = agent.model ?? (agent.hosted ? "In a chat app" : "On a computer");
-    disclosure.setAttribute("aria-label", `${agent.name}, ${agent.ownerName ? `${agent.ownerName}’s agent` : "Other agent"}, ${agent.app ? `${agent.app}, ` : ""}${secondary}, ${agent.status.label}${approved ? peopleDialogAccessLabel(agent) : ""}`);
     const copy = node(doc, "span", "pd-agent-copy"); const nameLine = node(doc, "span", "pd-agent-name-line");
     const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.name; nameLine.append(name);
-    nameLine.append(chip(doc, agent.status));
+    nameLine.append(doc.createTextNode(" "), chip(doc, agent.status));
     const sentence = agent.status.attention && !model.sample ? agent.status.sentence : "";
     const details = node(doc, "span", "pd-agent-app", sentence || [agent.app, secondary].filter(Boolean).join(" · "));
-    // The canvas row draws no Lists & docs glyph: the disclosure's accessible name above carries "Can use Lists & docs" (the hosted note for a hosted agent),
-    // and the agent's details (the side card) show the Lists & docs fact.
-    copy.append(nameLine, details);
-    disclosure.append(orb(doc, agent, tintOf(agent)), copy); row.append(disclosure);
+    // Name follows visible content; retain owner, replaced model/app and access facts for assistive technology.
+    const supplement = [agent.ownerName ? `${agent.ownerName}’s agent` : "Other agent",
+      ...(sentence ? [agent.app, secondary].filter(Boolean) : [])].join(", ") + (approved ? peopleDialogAccessLabel(agent) : "");
+    copy.append(nameLine, doc.createTextNode(" "), details);
+    disclosure.append(orb(doc, agent, tintOf(agent)), copy, node(doc, "span", "pd-sr-only", ` ${supplement}`)); row.append(disclosure);
     const notice = noticeFor(agent);
     const actions = node(doc, "span", "pd-agent-actions");
     const next = agent.status.attention ? fix(agent, notice) : null;

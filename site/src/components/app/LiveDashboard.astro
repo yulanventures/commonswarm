@@ -38,6 +38,7 @@ import "../../styles/kylon-shell.css";
 import "../../styles/kylon-layout/index.css";
 import "../../styles/kylon-workspace-settings-integration.css";
 import "../../styles/kylon-files.css";
+import "../../styles/kylon-people.css";
 import "../../styles/dashboard-welcome.css";
 
 const signInMethods = signInDoors(await enabledProvidersForBuild({
@@ -4482,7 +4483,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       const pane = homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" ? homeRoute.view : "chat";
       const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
-        people: currentHomePeople().groups, pane, todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
+        people: currentHomePeople().groups, pane, contextTitle: homeRoute.view === "people", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
         hrefs: { chat: routeHref({ view: "chat", workspaceId: workspace.id }), todos: routeHref({ view: "todos", workspaceId: workspace.id }),
           lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }),
           wiki: routeHref({ view: "wiki", workspaceId: workspace.id }), workspaces: routeHref({ view: "catchup" }) },
@@ -10743,7 +10744,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (event.key !== "Escape" || homeRoute.view !== "people" || !peopleDialogState.selected) return;
       if (one<HTMLDialogElement>("[data-people-confirm]")?.open || document.querySelector("dialog[open]")) return;
       event.preventDefault(); const selection = peopleDialogState.selected; peopleDialogState.selected = null;
-      renderDialogRoster(); (document.getElementById(`pd-${selection.type}-${selection.id}`) ?? one<HTMLElement>("#pd-page-title"))?.focus({ preventScroll: true });
+      renderDialogRoster(); (document.getElementById(`pd-${selection.type}-${selection.id}`) ?? one<HTMLElement>("#pd-page-title"))?.focus({ preventScroll: false });
     });
     for (const button of all<HTMLButtonElement>("[data-agent-owner-self]")) {
       button.addEventListener("click", openConnect);
