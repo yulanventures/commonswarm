@@ -40,7 +40,7 @@ function fixture(port) {
   return {root,runs,script,put,invoke};
 }
 async function api(t,options={}) {
-  const requests=[], rows=[]; let next=1000;
+  const requests=[], rows=[]; let next=1000, readbacks=0;
   const server=createServer(async(req,res)=>{
     let raw=''; for await(const part of req) raw+=part;
     const url=new URL(req.url,'http://localhost');
@@ -51,12 +51,19 @@ async function api(t,options={}) {
     if(req.method==='GET') {
       const page=Number(url.searchParams.get('page'));
       let data=rows.filter(r=>r.sha===url.pathname.split('/').at(-2)).sort((a,b)=>b.id-a.id).map(({sha,...r})=>r);
-      if(options.readbackMissing && requests.some(r=>r.method==='POST')) data=[];
+      if(requests.some(r=>r.method==='POST')) {
+        readbacks++;
+        if(options.readbackMissing || readbacks <= (options.readbackDelay ?? 0)) data=[];
+        if(options.readbackField) data=data.map(r=>({...r,[options.readbackField]:options.readbackField==='state'?'failure':'wrong'}));
+        if(options.readbackFault==='malformed') data=[{id:'invalid'}];
+        if(options.readbackFault==='unknown') data=[{id:999,context:'hetzner/p1-cli',state:'success',description:'unknown writer'}];
+      }
       if(options.malformedPage===page) data={secret:token};
       else data=data.slice((page-1)*100,page*100);
       res.end(JSON.stringify(data)); return;
     }
     assert.equal(req.method,'POST'); assert.match(url.pathname,/\/statuses\/[0-9a-f]{40}$/);
+    next=Math.max(next,...rows.map(r=>r.id+1)); // seeded history also precedes new API IDs
     const row={...request.body,id:next++,sha:url.pathname.split('/').at(-1)};
     rows.push(row);
     if(options.losePost) {options.losePost=false;res.destroy();return;}
@@ -97,24 +104,89 @@ test('full pagination finds older duplicate and refuses page failures before POS
   }
 });
 
-test('sorts completion times and blocks stale, equal or unknown history without using API insertion order',async t=>{
+test('sorts completion times, skips superseded receipts and refuses ambiguous or unknown history',async t=>{
   const a=await api(t), f=fixture(a.port);
   f.put(receipt(runID(2),{ended_at:'2026-10-18T02:00:00Z'})); f.put(receipt());
   assert.equal((await f.invoke(runID(2)+','+runID(1))).status,0);
   assert.deepEqual(a.posts().map(r=>r.body.description.split(' ')[0]),[runID(1),runID(2)]);
   f.put(receipt(runID(3),{ended_at:'2026-10-18T01:30:00Z'}));
-  assert.equal((await f.invoke(runID(3))).result.error,'newer_or_ambiguous_result');
+  const stale=await f.invoke(runID(3));
+  assert.equal(stale.status,0); assert.equal(stale.result.skipped,1); assert.equal(a.posts().length,2);
+  const scheduled=await f.invoke();
+  assert.equal(scheduled.status,0); assert.deepEqual(scheduled.result,{state:'reconciled',published:0,skipped:3,eligible:3});
+  assert.equal(a.posts().length,2);
   f.put(receipt(runID(4),{ended_at:'2026-10-18T02:00:00Z'}));
   assert.equal((await f.invoke(runID(4))).result.error,'newer_or_ambiguous_result');
   // A duplicate older run remains idempotent even after a newer run is current.
   assert.equal((await f.invoke(runID(1))).result.skipped,1);
-  a.rows.push({id:9999,sha,context:'hetzner/p1-cli',state:'failure',description:'unattributed external writer'});
+  // API insertion order puts this older completion first. A genuinely newer
+  // selected run must still publish exactly once and complete its readback.
+  a.rows.push({id:9998,sha,context:'hetzner/p1-cli',state:'success',description:runID(7)+' exit 0 ended 2026-10-18T00:30:00Z'});
+  assert.equal((await f.invoke(runID(3))).result.skipped,1); assert.equal(a.posts().length,2);
   f.put(receipt(runID(5),{ended_at:'2026-10-18T03:00:00Z'}));
-  assert.equal((await f.invoke(runID(5))).result.error,'unknown_status_provenance');
-  assert.equal(a.posts().length,2);
+  const latest=await f.invoke(runID(5));
+  assert.equal(latest.status,0); assert.equal(latest.result.published,1); assert.equal(a.posts().length,3);
+  assert.equal(a.posts().at(-1).body.description,runID(5)+' exit 0 ended 2026-10-18T03:00:00+00:00');
+  assert.equal(a.requests.at(-1).method,'GET','readback follows POST');
+  assert.equal((await f.invoke(runID(5))).result.skipped,1); assert.equal(a.posts().length,3);
+  a.rows.push({id:10000,sha,context:'hetzner/p1-cli',state:'failure',description:'unattributed external writer'});
+  f.put(receipt(runID(8),{ended_at:'2026-10-18T04:00:00Z'}));
+  assert.equal((await f.invoke(runID(8))).result.error,'unknown_status_provenance');
+  assert.equal(a.posts().length,3);
   // Different SHAs are independent of the conflicting context.
   f.put(receipt(runID(6),{resolved_sha:'a'.repeat(40)}));
-  assert.equal((await f.invoke(runID(6))).status,0); assert.equal(a.posts().length,3);
+  assert.equal((await f.invoke(runID(6))).status,0); assert.equal(a.posts().length,4);
+});
+
+// Test-audit: full context validation must precede both skip decisions. These
+// wire-history cases catch early returns that hide unknown or contradictory rows;
+// the existing ordering owner above covers valid chronology. No new seam.
+test('superseded and identical receipts still refuse invalid full-context history',async t=>{
+  for(const evidence of ['newer','identical']) for(const fault of ['unknown','same-run','prior-run','equal','invalid-time']) {
+    const a=await api(t), f=fixture(a.port); f.put(receipt());
+    const row=(id,run,ended,state='success',code=0)=>({id,sha,context:'hetzner/p1-cli',state,
+      description:run+' exit '+code+' ended '+ended});
+    a.rows.push(evidence==='newer'
+      ? row(100,runID(2),'2026-10-18T02:00:00Z')
+      : row(100,runID(1),'2026-10-18T01:00:00+00:00'));
+    let expected;
+    if(fault==='unknown') {
+      a.rows.push({id:99,sha,context:'hetzner/p1-cli',state:'success',description:'unknown writer'});
+      expected='unknown_status_provenance';
+    } else if(fault==='same-run') {
+      a.rows.push(row(99,runID(1),'2026-10-18T01:00:00Z','failure',1));
+      expected='conflicting_run_status';
+    } else if(fault==='prior-run') {
+      a.rows.push(row(98,runID(3),'2026-10-18T00:30:00Z'),row(99,runID(3),'2026-10-18T00:30:00Z','failure',1));
+      expected='conflicting_run_status';
+    } else if(fault==='equal') {
+      a.rows.push(row(99,runID(3),'2026-10-18T01:00:00Z'));
+      expected='newer_or_ambiguous_result';
+    } else {
+      a.rows.push(row(99,runID(3),'invalid'));
+      expected='invalid_completion_time';
+    }
+    const result=await f.invoke();
+    assert.equal(result.status,1,evidence+'/'+fault); assert.equal(result.result.error,expected);
+    assert.equal(a.posts().length,0);
+  }
+});
+
+// Test-audit: collection admission is distinct from API history: a newer known
+// status cannot conceal equal ready completions or malformed old receipts.
+test('scheduled collection validates every receipt and equal completion before POST',async t=>{
+  for(const fault of ['equal','malformed']) {
+    const a=await api(t), f=fixture(a.port); f.put(receipt());
+    a.rows.push({id:100,sha,context:'hetzner/p1-cli',state:'success',
+      description:runID(9)+' exit 0 ended 2026-10-18T03:00:00Z'});
+    f.put(receipt(runID(2),fault==='equal'?{}:{exit_code:-1}));
+    // Positive control reaches the real API before collection-only rejection.
+    assert.equal((await f.invoke(runID(1))).result.skipped,1);
+    const before=a.requests.length, result=await f.invoke();
+    assert.equal(result.status,1);
+    assert.equal(result.result.error,fault==='equal'?'newer_or_ambiguous_result':'invalid_exit_code');
+    assert.equal(a.requests.length,before); assert.equal(a.posts().length,0);
+  }
 });
 
 test('legacy chronology resolves readable original receipt and fails on missing provenance',async t=>{
@@ -127,11 +199,31 @@ test('legacy chronology resolves readable original receipt and fails on missing 
   }
 });
 
+// Test-audit: first readback can lag the actual stored POST. The existing owner
+// lacked that recovery case; old one-shot code must report status_readback_failed.
+// Exercise HTTP and stored rows, with no production retry/test injection seam.
 test('lost POST response reconciles next invocation and missing readback never reports published',async t=>{
-  for(const options of [{losePost:true},{readbackMissing:true}]) {
+  const cases=[
+    {options:{readbackDelay:1},published:true,gets:2},
+    {options:{readbackDelay:2},published:true,gets:3},
+    {options:{losePost:true},error:'publisher_unavailable',gets:0},
+    {options:{readbackMissing:true},error:'status_readback_failed',gets:3},
+    ...['state','context','description'].map(readbackField=>({options:{readbackField},error:'status_readback_failed',gets:1})),
+    {options:{readbackFault:'malformed'},error:'invalid_status',gets:1},
+    {options:{readbackFault:'unknown'},error:'unknown_status_provenance',gets:1},
+    {options:{reject:(r,requests)=>r.method==='GET' && requests.some(p=>p.method==='POST')},error:'github_http_403',gets:1},
+  ];
+  for(const {options,published,error,gets} of cases) {
     const a=await api(t,options), f=fixture(a.port); f.put(receipt());
-    const first=await f.invoke(); assert.equal(first.status,1); assert.equal(first.result.state,'failed'); assert.equal(a.posts().length,1);
-    options.readbackMissing=false;
+    const first=await f.invoke();
+    assert.equal(first.status,published?0:1,JSON.stringify(first.result));
+    if(published) assert.equal(first.result.published,1);
+    else assert.equal(first.result.error,error);
+    assert.equal(a.posts().length,1);
+    const postIndex=a.requests.findIndex(r=>r.method==='POST');
+    assert.equal(a.requests.slice(postIndex+1).filter(r=>r.method==='GET').length,gets);
+    // Clear only the HTTP fault: the original row actually persisted on POST.
+    options.readbackMissing=false; options.readbackField=null; options.readbackFault=null; options.reject=null;
     const again=await f.invoke(); assert.equal(again.status,0); assert.equal(again.result.skipped,1); assert.equal(a.posts().length,1);
   }
 });
