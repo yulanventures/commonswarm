@@ -19,57 +19,13 @@ export interface CliCallerContext extends CallerContext {
 }
 
 export interface CliOrgChannelState extends OrgChannelAuthorityState {
-  orgInvites?: Array<{
-    invite_id: string;
-    org_id: string;
-    email?: string | null;
-    principal_kind?: PrincipalKind;
-    principal_id?: string | null;
-    role: OrgRole;
-    workspace_ids: string[];
-    invited_by: string;
-    expires_at: string;
-    created_at: string;
-    revoked_at?: string | null;
-  }>;
+  orgInvites?: Array<{ invite_id: string; org_id: string; email?: string | null; principal_kind?: PrincipalKind; principal_id?: string | null; role: OrgRole; workspace_ids: string[]; invited_by: string; expires_at: string; created_at: string; revoked_at?: string | null }>;
   approvalRequests?: OrgApprovalRequest[];
-  orgLogos?: Record<
-    string,
-    {
-      org_id: string;
-      object_key: string;
-      content_type: string;
-      byte_length: number;
-      renditions: { '64': string; '128': string; '256': string };
-      rendition_blobs?: Record<
-        '64' | '128' | '256',
-        {
-          object_key: string;
-          width: number;
-          height: number;
-          content_type: string;
-          byte_length: number;
-          sha256: string;
-          data_base64: string;
-        }
-      >;
-      sanitized_svg?: string;
-      updated_at: string;
-    }
-  >;
-  signals?: Array<{
-    signal_id: string;
-    workspace_id: string;
-    channel_id?: string | null;
-    thread_id?: string | null;
-  }>;
+  orgLogos?: Record<string, { org_id: string; object_key: string; content_type: string; byte_length: number; renditions: { '64': string; '128': string; '256': string }; rendition_blobs?: Record<'64' | '128' | '256', { object_key: string; width: number; height: number; content_type: string; byte_length: number; sha256: string; data_base64: string }>; sanitized_svg?: string; updated_at: string }>;
+  signals?: Array<{ signal_id: string; workspace_id: string; channel_id?: string | null; thread_id?: string | null }>;
 }
 
-export interface ParsedOrgChannelCliCommand {
-  tool: string;
-  arguments: Record<string, unknown>;
-  json: boolean;
-}
+export interface ParsedOrgChannelCliCommand { tool: string; arguments: Record<string, unknown>; json: boolean; }
 
 const BOOL_FLAGS = new Set(['json', 'approve', 'reject', 'request-approval']);
 
@@ -82,11 +38,7 @@ function makeEmptyCliState(): CliOrgChannelState {
 }
 
 let defaultCliState: CliOrgChannelState = makeEmptyCliState();
-
-export function getDefaultOrgChannelCliState(): CliOrgChannelState {
-  return defaultCliState;
-}
-
+export const getDefaultOrgChannelCliState = (): CliOrgChannelState => defaultCliState;
 export function resetDefaultOrgChannelCliState(next?: CliOrgChannelState): CliOrgChannelState {
   defaultCliState = next ?? makeEmptyCliState();
   return defaultCliState;
@@ -279,6 +231,7 @@ export interface ExecuteOrgChannelsCliOptions {
   state?: CliOrgChannelState;
   caller?: CliCallerContext;
   executeTool?: OrgChannelToolDispatcher;
+  transport?: (tool: string, args: Record<string, unknown>, caller: CliCallerContext) => Record<string, unknown>;
 }
 
 let defaultCliCaller: CliCallerContext = { principal_kind: 'user', principal_id: 'u-cli-default' };
@@ -296,7 +249,7 @@ export function executeOrgChannelsCli(argv: readonly string[], options: ExecuteO
     ...parsed.arguments,
   };
   const run = options.executeTool ?? resolveDefaultDispatcher();
-  const payload = run(state, caller, parsed.tool, argsWithSeat);
+  const payload = options.transport ? options.transport(parsed.tool, argsWithSeat, caller) : run(state, caller, parsed.tool, argsWithSeat);
   const ok = payload.ok === true;
   if (!ok && payload.refusal) {
     const text = parsed.json ? JSON.stringify(payload) : formatOrgChannelRefusal(payload.refusal as OrgChannelRefusal);

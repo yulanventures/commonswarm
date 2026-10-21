@@ -60,8 +60,7 @@ export function enrichOrgChannelRefusal(r: OrgChannelRefusal): EnrichedOrgChanne
     mcp = 'org_assign_workspace_member'; cli = `cswarm org members grant <principal_id> --workspace ${sel}`;
   }
   const finalMcp = isRegisteredTool(r.mcp_tool) ? r.mcp_tool : mcp;
-  const finalCli = isRegisteredTool(r.mcp_tool) && r.cli_command ? r.cli_command : cli;
-  return { ...r, mcp_tool: finalMcp, cli_command: finalCli, grant_command_hint: finalCli };
+  return { ...r, mcp_tool: finalMcp, cli_command: cli, grant_command_hint: cli };
 }
 
 export const ref = (code: string, missing: string, scope?: OrgChannelRefusal['scope'], choices?: WorkspaceSelectorChoice[]) => ({
@@ -126,11 +125,15 @@ export function executeChannelMcpSubtool(
     if (ex) { ex.role = role; ex.notify_pref = pref; ex.revoked_at = null; }
     else s.channelMemberships.push({ channel_id: chId, workspace_id: ws.workspace_id, principal_kind: k, principal_id: id, role, notify_pref: pref, joined_at: now, revoked_at: null });
   };
+  const wsGrantRole = s.workspaceGrants.find((g) => g.workspace_id === ws.workspace_id && isPrin(g, caller.principal_kind, caller.principal_id) && isLive(g))?.role ?? null;
+  const RANK: Record<OrgRole, number> = { guest: 1, member: 2, admin: 3, owner: 4 };
+  const effWsRole: OrgRole | null = !callerOrgRole || callerOrgRole === 'guest' ? (callerOrgRole === 'guest' && wsGrantRole ? 'guest' : null)
+    : wsGrantRole ? (caller.principal_kind === 'agent' && RANK[wsGrantRole] > RANK[callerOrgRole] ? callerOrgRole : wsGrantRole) : callerOrgRole;
   if (name === 'channel_list') {
     return { ok: true, workspace_id: ws.workspace_id, org_id: org.id, channels: s.channels.filter((ch) => ch.workspace_id === ws.workspace_id && isLive(ch) && canReadChannel(s, ctx, ch.channel_id)) };
   }
   if (name === 'channel_create') {
-    if (callerOrgRole === 'guest') return ref('CHANNEL_CREATE_FORBIDDEN', 'member_role', { org: org.slug, workspace: ws.slug });
+    if (!effWsRole || effWsRole === 'guest') return ref('CHANNEL_CREATE_FORBIDDEN', 'member_role', { org: org.slug, workspace: ws.slug });
     const slug = norm(String(args.slug));
     if (!SLUG_RE.test(slug)) return ref('INVALID_CHANNEL_SLUG', 'valid_channel_slug', { org: org.slug, workspace: ws.slug, channel: slug });
     const vis = ((args.visibility as ChannelVisibility | undefined) ?? 'workspace') as ChannelVisibility;
@@ -166,28 +169,32 @@ export function executeChannelMcpSubtool(
     if (mem) mem.revoked_at = now;
     return { ok: true, channel_id: ch.channel_id, left: true };
   }
+  const chRole = s.channelMemberships.find((m) => m.channel_id === ch.channel_id && isPrin(m, caller.principal_kind, caller.principal_id) && isLive(m))?.role ?? null;
+  const isChAdmin = effWsRole !== 'guest' && (ch.visibility === 'private'
+    ? (chRole === 'owner' || callerOrgRole === 'owner' || callerOrgRole === 'admin')
+    : (chRole === 'owner' || effWsRole === 'owner' || effWsRole === 'admin'));
   if (name === 'channel_add_member' || name === 'channel_remove_member') {
     const pId = String(args.principal_id);
     const pKind = ((args.principal_kind as PrincipalKind | undefined) ?? (s.agentIdentities.some((a) => a.id === pId) ? 'agent' : 'user')) as PrincipalKind;
     const chk = canModifyChannelMembership(s, ctx, ch.channel_id, { principal_kind: pKind, principal_id: pId });
     if (!chk.ok) return { ok: false, status: 'refused', refusal: enrichOrgChannelRefusal(chk.refusal) };
+    const ex = s.channelMemberships.find((m) => m.channel_id === ch.channel_id && isPrin(m, pKind, pId) && isLive(m));
     if (name === 'channel_add_member') {
       if (!canReadWorkspace(s, { principal_kind: pKind, principal_id: pId }, ws.workspace_id)) return ref('WORKSPACE_ACCESS_DENIED', 'target_workspace_grant', cScope);
       const cRole = ((args.role as ChannelRole | undefined) ?? 'member') as ChannelRole;
+      if ((cRole === 'owner' || ex?.role === 'owner') && !isChAdmin) {
+        return ref(ch.visibility === 'private' ? 'PRIVATE_CHANNEL_OWNER_REQUIRED' : 'CHANNEL_ADMIN_REQUIRED', 'channel_owner_or_admin_role', cScope);
+      }
       upsertChMem(ch.channel_id, pKind, pId, cRole);
       return { ok: true, channel_id: ch.channel_id, principal_id: pId, principal_kind: pKind, role: cRole };
     }
-    const ex = s.channelMemberships.find((m) => m.channel_id === ch.channel_id && isPrin(m, pKind, pId) && isLive(m));
+    if (!isPrin({ principal_kind: pKind, principal_id: pId }, caller.principal_kind, caller.principal_id) && !isChAdmin) {
+      return ref(ch.visibility === 'private' ? 'PRIVATE_CHANNEL_OWNER_REQUIRED' : 'CHANNEL_ADMIN_REQUIRED', 'channel_owner_or_admin_role', cScope);
+    }
     if (ex) ex.revoked_at = now;
     return { ok: true, channel_id: ch.channel_id, principal_id: pId, principal_kind: pKind, removed: true };
   }
   if (name === 'channel_list_members') return { ok: true, channel_id: ch.channel_id, members: s.channelMemberships.filter((m) => m.channel_id === ch.channel_id && isLive(m)) };
-  const wsGrantRole = s.workspaceGrants.find((g) => g.workspace_id === ws.workspace_id && isPrin(g, caller.principal_kind, caller.principal_id) && isLive(g))?.role ?? null;
-  const effWsRole: OrgRole | null = callerOrgRole === 'guest' ? 'guest' : (wsGrantRole ?? callerOrgRole);
-  const chRole = s.channelMemberships.find((m) => m.channel_id === ch.channel_id && isPrin(m, caller.principal_kind, caller.principal_id) && isLive(m))?.role ?? null;
-  const isChAdmin = effWsRole !== 'guest' && (ch.visibility === 'private'
-    ? (chRole === 'owner' || callerOrgRole === 'owner' || callerOrgRole === 'admin')
-    : (chRole === 'owner' || callerOrgRole === 'owner' || callerOrgRole === 'admin' || effWsRole === 'owner' || effWsRole === 'admin'));
   if (name === 'channel_archive' || name === 'channel_delete') {
     if (!isChAdmin) return ref(ch.visibility === 'private' ? 'PRIVATE_CHANNEL_OWNER_REQUIRED' : 'CHANNEL_ADMIN_REQUIRED', ch.visibility === 'private' ? 'channel_owner_role' : 'channel_owner_or_admin_role', cScope);
     if (isDef(ch)) return ref('CANNOT_ARCHIVE_GENERAL_CHANNEL', 'non_general_channel', cScope);

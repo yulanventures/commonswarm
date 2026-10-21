@@ -1,182 +1,83 @@
 import {
-  type OrganizationSummary,
-  type OrgRole,
-  type PrincipalKind,
-  agentOwner,
-  canReadOrg,
-  canReadWorkspace,
-  cascadeOrgMemberRemoval,
-  isLive,
-  isPrin,
-  norm,
-  orgRole,
+  type OrganizationSummary, type OrgRole, type PrincipalKind, agentOwner, canReadOrg, canReadWorkspace, cascadeOrgMemberRemoval, isLive, isPrin, norm, orgRole,
 } from '../../../src/protocol/org-channels-contract.js';
+import { effCallerOrgRole, registerDefaultOrgChannelCliExecutor } from '../../../src/cloud/org-channels-cli.js';
 import {
-  effCallerOrgRole,
-  registerDefaultOrgChannelCliExecutor,
-} from '../../../src/cloud/org-channels-cli.js';
-import {
-  type McpCallerAuth,
-  type OrgChannelSlice3State,
-  OrgChannelToolInputError,
-  type OrgChannelToolName,
-  executeMultiOrgWhoami,
-  resolveMcpOrgWorkspaceChannel,
-  resolveSeatIdFromAuthOrArgs,
-  validateOrgChannelToolArguments,
+  type McpCallerAuth, type OrgChannelSlice3State, OrgChannelToolInputError, type OrgChannelToolName,
+  executeMultiOrgWhoami, resolveMcpOrgWorkspaceChannel, resolveSeatIdFromAuthOrArgs, validateOrgChannelToolArguments,
 } from './org-channels-tools.js';
 import {
-  SLUG_RE,
-  enqueueApproval,
-  executeOrgLogoOrWorkspaceCreate,
-  executeWorkspaceJoinTool,
-  executeWorkspaceScopeTool,
-  ref,
-  resolveOrg,
-  toCtx,
+  SLUG_RE, enqueueApproval, executeOrgLogoOrWorkspaceCreate, executeWorkspaceJoinTool, executeWorkspaceScopeTool, ref, resolveOrg, toCtx,
 } from './org-channels-subtools.js';
 import { executeChannelMcpSubtool } from './org-channels-channels.js';
 
 export function executeOrgChannelMcpTool(
-  s: OrgChannelSlice3State,
-  caller: McpCallerAuth,
-  name: OrgChannelToolName | string,
-  rawArgs: Record<string, unknown> = {},
+  s: OrgChannelSlice3State, caller: McpCallerAuth, name: OrgChannelToolName | string, rawArgs: Record<string, unknown> = {},
 ): Record<string, unknown> {
   let args: Record<string, unknown>;
-  try {
-    args = validateOrgChannelToolArguments(name, rawArgs);
-  } catch (err) {
-    if (err instanceof OrgChannelToolInputError) {
-      return { ...ref('INVALID_ARGUMENTS', err.message), error: err.code };
-    }
+  try { args = validateOrgChannelToolArguments(name, rawArgs); } catch (err) {
+    if (err instanceof OrgChannelToolInputError) return { ...ref('INVALID_ARGUMENTS', err.message), error: err.code };
     throw err;
   }
-  const now = new Date().toISOString();
-  const ctx = toCtx(caller);
-  const inferKind = (id: string) =>
-    ((args.principal_kind as PrincipalKind | undefined) ??
-      (s.agentIdentities.some((a) => a.id === id) ? 'agent' : 'user')) as PrincipalKind;
+  const now = new Date().toISOString(), ctx = toCtx(caller), str = (v: unknown) => (typeof v === 'string' && v.trim()) || null;
+  const inferKind = (id: string) => ((args.principal_kind as PrincipalKind | undefined) ?? (s.agentIdentities.some((a) => a.id === id) ? 'agent' : 'user')) as PrincipalKind;
 
   if (name === 'whoami' || name === 'discover') {
     const res = executeMultiOrgWhoami(s, caller, args);
     if (!res.ok || name === 'whoami') return { ...res };
     return {
-      ...res,
-      total_organizations: res.organizations.length,
+      ...res, total_organizations: res.organizations.length,
       total_workspaces: res.organizations.reduce((a, o) => a + o.workspaces.length, 0),
-      total_channels: res.organizations.reduce(
-        (a, o) => a + o.workspaces.reduce((w, x) => w + x.channels.length, 0),
-        0,
-      ),
+      total_channels: res.organizations.reduce((a, o) => a + o.workspaces.reduce((w, x) => w + x.channels.length, 0), 0),
     };
   }
 
-  if (name === 'org_list') {
+  if (name === 'org_list' || name === 'org_create') {
     const sr = resolveSeatIdFromAuthOrArgs(s, caller, args);
     if (!sr.ok) return { ok: false, status: 'refused', refusal: sr.refusal };
-    if (typeof args.workspace === 'string' || typeof args.channel === 'string') {
-      const chk = resolveMcpOrgWorkspaceChannel(s, caller, args as Record<string, string | null | undefined>);
-      if (!chk.ok) return { ok: false, status: 'refused', refusal: chk.refusal };
-    } else if (typeof args.org === 'string' && args.org.trim()) {
+    if (str(args.org) || str(args.workspace) || str(args.channel)) {
       const or = resolveOrg(s, caller, args);
       if (!or.ok) return or;
     }
-    const organizations = s.organizations
-      .filter((o) => isLive(o) && canReadOrg(s, ctx, o.id))
-      .map((o) => ({
-        ...o,
-        role: effCallerOrgRole(s, ctx, o.id)!,
-        workspace_count: s.workspaces.filter(
-          (w) => w.org_id === o.id && isLive(w) && canReadWorkspace(s, ctx, w.workspace_id),
-        ).length,
+    if (name === 'org_list') {
+      const organizations = s.organizations.filter((o) => isLive(o) && canReadOrg(s, ctx, o.id)).map((o) => ({
+        ...o, role: effCallerOrgRole(s, ctx, o.id)!, workspace_count: s.workspaces.filter((w) => w.org_id === o.id && isLive(w) && canReadWorkspace(s, ctx, w.workspace_id)).length,
       }));
-    return { ok: true, organizations };
-  }
-
-  if (name === 'org_create') {
-    const slug = norm(String(args.slug));
-    const displayName = String(args.display_name).trim();
-    if (!SLUG_RE.test(slug) || slug.length > 48 || !displayName) {
-      return ref('INVALID_ORG_SLUG', 'valid_org_slug', { org: slug });
+      return { ok: true, organizations };
     }
-    if (s.organizations.some((o) => norm(o.slug) === slug && isLive(o))) {
-      return ref('ORG_SLUG_TAKEN', 'unique_org_slug', { org: slug });
-    }
-    const uid =
-      caller.principal_kind === 'user'
-        ? caller.principal_id
-        : (agentOwner(s, ctx) ?? caller.principal_id);
-    const org: OrganizationSummary = {
-      id: `org-${s.organizations.length + 1}`,
-      slug,
-      display_name: displayName,
-      logo_object_key: null,
-      logo_updated_at: null,
-      created_by: uid,
-      created_at: now,
-      updated_at: now,
-      archived_at: null,
-    };
+    const slug = norm(String(args.slug)), displayName = String(args.display_name).trim();
+    if (!SLUG_RE.test(slug) || slug.length > 48 || !displayName) return ref('INVALID_ORG_SLUG', 'valid_org_slug', { org: slug });
+    if (s.organizations.some((o) => norm(o.slug) === slug && isLive(o))) return ref('ORG_SLUG_TAKEN', 'unique_org_slug', { org: slug });
+    const uid = caller.principal_kind === 'user' ? caller.principal_id : (agentOwner(s, ctx) ?? caller.principal_id);
+    const org: OrganizationSummary = { id: `org-${s.organizations.length + 1}`, slug, display_name: displayName, logo_object_key: null, logo_updated_at: null, created_by: uid, created_at: now, updated_at: now, archived_at: null };
     s.organizations.push(org);
-    s.orgMemberships.push({
-      org_id: org.id,
-      principal_kind: 'user',
-      principal_id: uid,
-      role: 'owner',
-      created_at: now,
-      revoked_at: null,
-    });
-    if (caller.principal_kind === 'agent') {
-      s.orgMemberships.push({
-        org_id: org.id,
-        principal_kind: 'agent',
-        principal_id: caller.principal_id,
-        role: 'admin',
-        created_at: now,
-        revoked_at: null,
-      });
-    }
+    s.orgMemberships.push({ org_id: org.id, principal_kind: 'user', principal_id: uid, role: 'owner', created_at: now, revoked_at: null });
+    if (caller.principal_kind === 'agent') s.orgMemberships.push({ org_id: org.id, principal_kind: 'agent', principal_id: caller.principal_id, role: 'admin', created_at: now, revoked_at: null });
     return { ok: true, organization: org };
   }
 
   if (name === 'org_confirm_action') {
+    const sr = resolveSeatIdFromAuthOrArgs(s, caller, args);
+    if (!sr.ok) return { ok: false, status: 'refused', refusal: sr.refusal };
+    const selOrg = sr.seat_id || str(args.org) || str(args.workspace) || str(args.channel) ? resolveOrg(s, caller, args) : null;
+    if (selOrg && !selOrg.ok) return selOrg;
     const decision = String(args.decision);
-    if (decision !== 'approve' && decision !== 'reject') {
-      return { ...ref('INVALID_ARGUMENTS', 'decision_approve_or_reject'), error: 'INVALID_ARGUMENTS' };
-    }
+    if (decision !== 'approve' && decision !== 'reject') return { ...ref('INVALID_ARGUMENTS', 'decision_approve_or_reject'), error: 'INVALID_ARGUMENTS' };
     const card = (s.approvalRequests ?? []).find((a) => a.approval_id === String(args.approval_id));
     if (!card) return ref('APPROVAL_NOT_FOUND', 'approval_id');
+    if (selOrg && selOrg.ok && selOrg.org.id !== card.org_id) return ref('WORKSPACE_SEAT_MISMATCH', 'approval_org_scope', { org: selOrg.org.slug, seat_id: sr.seat_id });
     if (card.state !== 'pending') return ref('APPROVAL_ALREADY_DECIDED', 'pending_approval', { org: card.org_id });
-    if (caller.principal_kind !== 'user' || orgRole(s, card.org_id, 'user', caller.principal_id) !== 'owner') {
-      return ref('ORG_OWNER_REQUIRED', 'human_org_owner', { org: card.org_id });
-    }
+    if (caller.principal_kind !== 'user' || orgRole(s, card.org_id, 'user', caller.principal_id) !== 'owner') return ref('ORG_OWNER_REQUIRED', 'human_org_owner', { org: card.org_id });
     if (decision === 'reject') {
-      card.decided_by = caller.principal_id;
-      card.decided_at = now;
-      card.state = 'rejected';
+      Object.assign(card, { decided_by: caller.principal_id, decided_at: now, state: 'rejected' });
       return { ok: true, status: 'rejected', approval: card };
     }
-    const executed = executeOrgChannelMcpTool(
-      s,
-      { principal_kind: 'user', principal_id: caller.principal_id },
-      card.action_kind,
-      card.payload,
-    );
+    const executed = executeOrgChannelMcpTool(s, { principal_kind: 'user', principal_id: caller.principal_id }, card.action_kind, card.payload);
     if (executed.ok !== true) {
       const errCode = (executed.refusal as { code?: string } | undefined)?.code ?? String(executed.error ?? 'EXECUTION_FAILED');
-      return {
-        ...executed,
-        ok: false,
-        status: 'refused',
-        error: errCode,
-        approval: card,
-        executed,
-      };
+      return { ...executed, ok: false, status: 'refused', error: errCode, approval: card, executed };
     }
-    card.decided_by = caller.principal_id;
-    card.decided_at = now;
-    card.state = 'approved';
+    Object.assign(card, { decided_by: caller.principal_id, decided_at: now, state: 'approved' });
     return { ok: true, status: 'approved', approval: card, executed };
   }
 
@@ -184,21 +85,15 @@ export function executeOrgChannelMcpTool(
     const sr = resolveSeatIdFromAuthOrArgs(s, caller, args);
     if (!sr.ok) return { ok: false, status: 'refused', refusal: sr.refusal };
     let filterOrgId: string | null = null;
-    if (typeof args.workspace === 'string' || typeof args.channel === 'string') {
-      const chk = resolveMcpOrgWorkspaceChannel(s, caller, args as Record<string, string | null | undefined>);
-      if (!chk.ok) return { ok: false, status: 'refused', refusal: chk.refusal };
-      filterOrgId = chk.org.id;
-    } else if (typeof args.org === 'string' && args.org.trim()) {
+    if (str(args.org) || str(args.workspace) || str(args.channel)) {
       const or = resolveOrg(s, caller, args);
       if (!or.ok) return or;
       filterOrgId = or.org.id;
     }
-    const workspaces = s.workspaces
-      .filter((w) => isLive(w) && (!filterOrgId || w.org_id === filterOrgId) && canReadWorkspace(s, ctx, w.workspace_id))
-      .map((w) => {
-        const o = s.organizations.find((x) => x.id === w.org_id)!;
-        return { ...w, org_slug: o.slug, selector: `${o.slug}/${w.slug}` };
-      });
+    const workspaces = s.workspaces.filter((w) => isLive(w) && (!filterOrgId || w.org_id === filterOrgId) && canReadWorkspace(s, ctx, w.workspace_id)).map((w) => {
+      const o = s.organizations.find((x) => x.id === w.org_id)!;
+      return { ...w, org_slug: o.slug, selector: `${o.slug}/${w.slug}` };
+    });
     return { ok: true, workspaces };
   }
 
@@ -210,31 +105,21 @@ export function executeOrgChannelMcpTool(
   if (ORG_OPS.has(name)) {
     const or = resolveOrg(s, caller, args);
     if (!or.ok) return or;
-    const { org } = or;
-    const role = effCallerOrgRole(s, ctx, org.id);
+    const { org } = or, role = effCallerOrgRole(s, ctx, org.id);
 
     if (name === 'org_get') {
-      return {
-        ok: true,
-        organization: org,
-        role,
-        workspaces: s.workspaces.filter((w) => w.org_id === org.id && isLive(w) && canReadWorkspace(s, ctx, w.workspace_id)),
-        logo: s.orgLogos?.[org.id] ?? null,
-      };
+      return { ok: true, organization: org, role, workspaces: s.workspaces.filter((w) => w.org_id === org.id && isLive(w) && canReadWorkspace(s, ctx, w.workspace_id)), logo: s.orgLogos?.[org.id] ?? null };
     }
     if (name === 'org_switch_default') {
       let defWsId: string | null = null;
       if (typeof args.workspace === 'string' && args.workspace.trim()) {
         const wsTok = norm(args.workspace.includes('/') ? args.workspace.split('/', 2)[1]! : args.workspace);
         const ws = s.workspaces.find((w) => w.org_id === org.id && isLive(w) && (w.workspace_id === args.workspace || norm(w.slug) === wsTok));
-        if (!ws || !canReadWorkspace(s, ctx, ws.workspace_id)) {
-          return ref('WORKSPACE_ACCESS_DENIED', 'workspace_grant', { org: org.slug, workspace: String(args.workspace) });
-        }
+        if (!ws || !canReadWorkspace(s, ctx, ws.workspace_id)) return ref('WORKSPACE_ACCESS_DENIED', 'workspace_grant', { org: org.slug, workspace: String(args.workspace) });
         defWsId = ws.workspace_id;
       }
       s.connectionPolicies = s.connectionPolicies ?? [];
-      const cid = caller.connection_id ?? `conn_${caller.principal_id}`;
-      const pol = s.connectionPolicies.find((p) => p.connection_id === cid);
+      const cid = caller.connection_id ?? `conn_${caller.principal_id}`, pol = s.connectionPolicies.find((p) => p.connection_id === cid);
       if (pol) { pol.default_org_id = org.id; pol.default_workspace_id = defWsId; }
       else s.connectionPolicies.push({ connection_id: cid, default_org_id: org.id, default_workspace_id: defWsId, revoked_at: null });
       return { ok: true, default_org_id: org.id, default_workspace_id: defWsId, org_slug: org.slug };
@@ -243,10 +128,7 @@ export function executeOrgChannelMcpTool(
       const kind = typeof args.kind === 'string' ? args.kind : 'all';
       const members = s.orgMemberships
         .filter((m) => m.org_id === org.id && isLive(m) && (kind === 'all' || (kind === 'guest' ? m.role === 'guest' : m.principal_kind === kind)))
-        .map((m) => ({
-          ...m,
-          workspaces: s.workspaceGrants.filter((g) => g.org_id === org.id && isPrin(g, m.principal_kind, m.principal_id) && isLive(g)).map((g) => g.workspace_id),
-        }));
+        .map((m) => ({ ...m, workspaces: s.workspaceGrants.filter((g) => g.org_id === org.id && isPrin(g, m.principal_kind, m.principal_id) && isLive(g)).map((g) => g.workspace_id) }));
       return { ok: true, org_id: org.id, members, invites: (s.orgInvites ?? []).filter((i) => i.org_id === org.id && isLive(i)) };
     }
     if (name === 'org_delete') {

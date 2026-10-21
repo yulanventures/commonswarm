@@ -92,12 +92,12 @@ function propSchema(t: OrgChannelToolName, k: string): Record<string, unknown> {
 }
 
 export const ORG_CHANNEL_TOOL_SPECS = SPECS.map(([name, effect, required, extra]) => ({
-  name, effect, title: name, description: name, required, allowed: Array.from(new Set([...SEL, ...extra])),
+  name, effect, required, allowed: Array.from(new Set([...SEL, ...extra])),
 }));
 
 export const ORG_CHANNEL_MCP_TOOLS = ORG_CHANNEL_TOOL_SPECS.map((s) => ({
-  name: s.name, title: s.title, description: s.description, securitySchemes: [{ type: 'oauth2', scopes: ['mcp'] }],
-  annotations: { title: s.title, readOnlyHint: s.effect === 'read', destructiveHint: s.effect === 'write', idempotentHint: s.effect === 'read', openWorldHint: false },
+  name: s.name, title: s.name, description: s.name, securitySchemes: [{ type: 'oauth2', scopes: ['mcp'] }],
+  annotations: { title: s.name, readOnlyHint: s.effect === 'read', destructiveHint: s.effect === 'write', idempotentHint: s.effect === 'read', openWorldHint: false },
   inputSchema: { type: 'object', properties: Object.fromEntries(s.allowed.map((k) => [k, propSchema(s.name, k)])), required: [...s.required], additionalProperties: false },
 }));
 
@@ -129,10 +129,7 @@ export function validateOrgChannelToolArguments(name: string, value: unknown): R
 export const failEnriched = (code: string, missing: string, scope?: OrgChannelRefusal['scope'], choices?: WorkspaceSelectorChoice[]) => ({
   ok: false as const, refusal: enrichOrgChannelRefusal(buildOrgChannelRefusal({ code, missing, scope, choices })),
 });
-
-const callerCtx = (c: McpCallerAuth): CallerContext => ({
-  principal_kind: c.principal_kind, principal_id: c.principal_id, owner_user_id: c.owner_user_id ?? null, connection_id: c.connection_id ?? null,
-});
+const callerCtx = (c: McpCallerAuth): CallerContext => ({ principal_kind: c.principal_kind, principal_id: c.principal_id, owner_user_id: c.owner_user_id ?? null, connection_id: c.connection_id ?? null });
 
 export function resolveSeatIdFromAuthOrArgs(
   s: OrgChannelSlice3State, caller: McpCallerAuth, args: Record<string, unknown>,
@@ -145,8 +142,7 @@ export function resolveSeatIdFromAuthOrArgs(
   let seatId = argS || authS;
   const rawH = argH || authH;
   if (rawH) {
-    const byS = (s.seats ?? []).find((x) => x.seat_id === rawH && isLive(x));
-    const h = byS ? null : (s.seatHandles ?? []).find((x) => x.handle_id === rawH);
+    const byS = (s.seats ?? []).find((x) => x.seat_id === rawH && isLive(x)), h = byS ? null : (s.seatHandles ?? []).find((x) => x.handle_id === rawH);
     if (!byS && (!h || !isLive(h))) return failEnriched('WORKSPACE_ACCESS_DENIED', 'active_seat_handle', { seat_id: rawH });
     const hSeatId = byS ? byS.seat_id : h!.seat_id;
     if (seatId && seatId !== hSeatId) return failEnriched('WORKSPACE_SEAT_MISMATCH', 'matching_seat_and_seat_id', { seat_id: seatId });
@@ -195,9 +191,10 @@ export function executeMultiOrgWhoami(
 ): ({ ok: true } & MultiOrgWhoamiResponse) | { ok: false; status: 'refused'; refusal: EnrichedOrgChannelRefusal } {
   const seatRes = resolveSeatIdFromAuthOrArgs(s, caller, args);
   if (!seatRes.ok) return { ok: false, status: 'refused', refusal: seatRes.refusal };
-  const seatId = seatRes.seat_id, c = callerCtx(caller), oTok = typeof args.org === 'string' && args.org.trim() ? args.org.trim() : null;
-  if ((typeof args.workspace === 'string' && args.workspace.trim()) || (typeof args.channel === 'string' && args.channel.trim())) {
-    const chk = resolveMcpOrgWorkspaceChannel(s, caller, { org: oTok, workspace: (args.workspace as string | undefined) ?? null, channel: (args.channel as string | undefined) ?? null, seat_id: seatId });
+  const str = (v: unknown) => (typeof v === 'string' && v.trim()) || null;
+  const seatId = seatRes.seat_id, c = callerCtx(caller), oTok = str(args.org);
+  if (str(args.workspace) || str(args.channel)) {
+    const chk = resolveMcpOrgWorkspaceChannel(s, caller, { org: oTok, workspace: str(args.workspace), channel: str(args.channel), seat_id: seatId });
     if (!chk.ok) return { ok: false, status: 'refused', refusal: chk.refusal };
   } else if (oTok) {
     const found = s.organizations.find((o) => isLive(o) && canReadOrg(s, c, o.id) && (o.id === oTok || norm(o.slug) === norm(oTok)));
@@ -217,8 +214,10 @@ export function executeMultiOrgWhoami(
         return { ...w, role: rank[rawW] <= rank[eff] ? rawW : eff };
       }) };
     });
-    const liveO = new Set(capped.map((o) => o.org_id)), liveW = new Set(capped.flatMap((o) => o.workspaces.map((w) => w.workspace_id)));
-    return { ...base, ok: true, default_org_id: base.default_org_id && liveO.has(base.default_org_id) ? base.default_org_id : null, default_workspace_id: base.default_workspace_id && liveW.has(base.default_workspace_id) ? base.default_workspace_id : null, organizations: orgFilter ? capped.filter((o) => o.org_id === oTok || norm(o.slug) === orgFilter) : capped };
+    const dOrg = (base.default_org_id ? capped.find((o) => o.org_id === base.default_org_id) : undefined) ?? (capped.length === 1 ? capped[0] : undefined);
+    const dWs = (base.default_workspace_id && dOrg?.workspaces.some((w) => w.workspace_id === base.default_workspace_id) ? base.default_workspace_id : null)
+      ?? (dOrg?.workspaces.length === 1 ? dOrg.workspaces[0]!.workspace_id : null);
+    return { ...base, ok: true, default_org_id: dOrg?.org_id ?? null, default_workspace_id: dWs, organizations: orgFilter ? capped.filter((o) => o.org_id === oTok || norm(o.slug) === orgFilter) : capped };
   }
   const organizations = s.organizations.filter((o) => isLive(o) && canReadOrg(s, c, o.id) && (!orgFilter || o.id === oTok || norm(o.slug) === orgFilter)).map((o) => {
     const id = caller.principal_id, r = orgRole(s, o.id, 'user', id)!;
