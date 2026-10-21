@@ -1,0 +1,39 @@
+  /* --- Lists & docs objects: bring the household renderer into the app's visual system --- */
+  .dashboard__objects-view .household-objects {
+    padding: var(--s-6);
+    border-color: var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--ring-top);
+  }
+
+  .dashboard__objects-view .household-objects > header h2 {
+    font-size: var(--t-xl);
+    line-height: var(--lh-xl);
+  }
+
+  .dashboard__objects-view .household-objects > header p {
+    margin: 0 0 var(--s-1);
+    color: var(--text-muted);
+    font-size: var(--t-sm);
+  }
+
+  .dashboard__objects-view .household-objects .hh-eyebrow {
+    color: var(--accent-bright);
+    font-weight: var(--weight-semibold);
+    letter-spacing: var(--track-eyebrow);
+  }
+
+  .dashboard__objects-view .household-objects nav button {
+    font-weight: var(--weight-semibold);
+    background: var(--surface-2);
+    border-color: var(--border);
+    border-radius: var(--radius);
+  }
+
+  .dashboard__objects-view .household-objects nav button:hover:enabled {
+    border-color: var(--border-strong);
+  }
+
+  .dashboard__objects-view .household-objects article button {
+    border-radius: var(--radius-pill);
+  }

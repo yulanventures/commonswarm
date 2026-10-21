@@ -182,6 +182,16 @@ test('conflicts require private recovery and review; the reviewed retry uses cur
   assert.equal(await fixture.controller.save(), false, 'ordinary retry cannot bypass review');
   assert.equal(await fixture.controller.checkSave(), false, 'refusal is not an uncertain request to check');
   assert.equal(calls.length, 2);
+  assert.equal(await fixture.controller.openRevision(fixture.doc.history[0]!.revision.token), true);
+  const earlierHtml = renderHouseholdObjects(fixture.controller.getState());
+  assert.match(earlierHtml, /Reading an earlier revision/);
+  assert.doesNotMatch(earlierHtml, /data-hh-review|data-hh-action="reviewed-save"/,
+    'an earlier revision must not offer a save which its controller refuses');
+  assert.equal(await fixture.controller.save(true), false);
+  assert.equal(calls.length, 2, 'reading history makes no save request');
+  assert.equal(fixture.controller.backToCurrent(), true);
+  assert.match(renderHouseholdObjects(fixture.controller.getState()), /data-hh-review/,
+    'returning to current restores explicit retained-draft review');
   assert.equal(await fixture.controller.save(true), true);
   assert.equal(calls[2]!.request_id, 'request-3');
   assert.deepEqual(calls[2]!.base, fixture.conflict.current.revision);

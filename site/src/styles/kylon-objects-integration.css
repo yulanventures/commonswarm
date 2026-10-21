@@ -1,0 +1,4 @@
+/* Load the unchanged app decoration before the scoped Lists presentation. */
+@import "./dashboard-objects.css";
+@import "./kylon-objects-base.css";
+@import "./kylon-objects-skin.css";

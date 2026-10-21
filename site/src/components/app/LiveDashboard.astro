@@ -36,6 +36,7 @@ import "../../styles/home/index.css";
 import "../../styles/dashboard-decoration.css";
 import "../../styles/kylon-shell.css";
 import "../../styles/kylon-layout/index.css";
+import "../../styles/kylon-objects-integration.css";
 
 const signInMethods = signInDoors(await enabledProvidersForBuild({
   url: import.meta.env.PUBLIC_SUPABASE_URL,
@@ -555,7 +556,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 accepts, and operations from the policy constant. Nothing here grants access by
                 itself; the command decides. */}
             <section class="dashboard__objects-view" data-channel-view="objects" hidden>
-              <h1 class="hm-pane-title" tabindex="-1">Lists</h1>
+              <h1 id="dashboard-lists-title" class="hm-pane-title" tabindex="-1">Lists</h1>
               <form class="dashboard__access-card" data-household-consent hidden>
                 <h2 class="dashboard__access-title">Turn on Lists &amp; docs</h2>
                 <p class="dashboard__access-lead">
@@ -4625,6 +4626,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (routePane) routePane.hidden = true;
       if (homeRoute.view !== "people") parkPeopleHosts();
       if (channel) channel.hidden = home || homeRoute.view === "todo" || homeRoute.view === "agent" || homeRoute.view === "todos" || homeRoute.view === "people";
+      const channelHead = channel?.querySelector<HTMLElement>(".dashboard__channel-head");
+      if (channelHead) channelHead.hidden = homeRoute.view === "lists";
+      channel?.setAttribute("aria-labelledby", homeRoute.view === "lists" ? "dashboard-lists-title" : "dashboard-channel-title");
       const channelMenu = one<HTMLElement>("[data-home-channel-menu]");
       if (channelMenu) channelMenu.hidden = homeRoute.view !== "chat";
       const frame = one<HTMLElement>(".hm-frame");
@@ -8153,7 +8157,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (refresh) refresh.hidden = sampleMode || agents.length === 0;
         returnToChannel();
       }
-      window.requestAnimationFrame(() => name?.focus({ preventScroll: true }));
+      window.requestAnimationFrame(() => (view === "objects" ? one<HTMLElement>("#dashboard-lists-title") : name)?.focus({ preventScroll: true }));
     };
 
 
@@ -16232,46 +16236,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     margin: 0;
     color: var(--text-muted);
     font-size: var(--t-sm);
-  }
-
-  /* --- Lists & docs objects: bring the household renderer into the app's visual system --- */
-  .dashboard__objects-view .household-objects {
-    padding: var(--s-6);
-    border-color: var(--border);
-    border-radius: var(--radius-lg);
-    box-shadow: var(--ring-top);
-  }
-
-  .dashboard__objects-view .household-objects > header h2 {
-    font-size: var(--t-xl);
-    line-height: var(--lh-xl);
-  }
-
-  .dashboard__objects-view .household-objects > header p {
-    margin: 0 0 var(--s-1);
-    color: var(--text-muted);
-    font-size: var(--t-sm);
-  }
-
-  .dashboard__objects-view .household-objects .hh-eyebrow {
-    color: var(--accent-bright);
-    font-weight: var(--weight-semibold);
-    letter-spacing: var(--track-eyebrow);
-  }
-
-  .dashboard__objects-view .household-objects nav button {
-    font-weight: var(--weight-semibold);
-    background: var(--surface-2);
-    border-color: var(--border);
-    border-radius: var(--radius);
-  }
-
-  .dashboard__objects-view .household-objects nav button:hover:enabled {
-    border-color: var(--border-strong);
-  }
-
-  .dashboard__objects-view .household-objects article button {
-    border-radius: var(--radius-pill);
   }
 
   /* --- People & agents dialog: A2 member cards and facts --- */
