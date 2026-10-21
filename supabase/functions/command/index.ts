@@ -13487,7 +13487,14 @@ async function handleTransaction(
           AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE (z.kind,z.target_id) IN
             (('token',t.token_id),('principal',p.principal_id),('run',r.run_id),('device',d.device_id),
              ('renewal_grant',g.renewal_grant_id),('membership',p.owner_user_id),('lineage',t.lineage_id),('family',t.lineage_id)))`;
-      if(!current.length) throw new LocalCredentialDenied();
+      if(!current.length) {
+        const known=await tx<{credential_invalid:boolean}[]>`SELECT
+          (t.revoked_at IS NOT NULL OR t.surrender_only OR g.revoked_at IS NOT NULL OR g.suspension_active
+            OR g.connection_expired_at IS NOT NULL OR g.connection_expires_at<=clock_timestamp()) IS TRUE AS credential_invalid
+          FROM swarm.agent_tokens t LEFT JOIN swarm.renewal_grants g ON g.renewal_grant_id=t.renewal_grant_id
+          WHERE t.token_hash=${agentTokenHash}`;
+        throw new LocalCredentialDenied(known[0]?.credential_invalid===true);
+      }
     }
     if(localState.authenticatedAgent && agentTokenHash && !isAgentSessionProofExempt(kind)
       && !['release_agent_session','revoke_agent_token','revoke_agent_principal'].includes(kind)) {
