@@ -48,6 +48,10 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] 
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] [data-home-route-pane]:has(> .hm-todos) {
     padding-inline: 24px;
   }
+  /* Keep the index at the same content column as detail instead of centering its maximum width. */
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] [data-home-route-pane] > .hm-todos {
+    margin-inline: 0;
+  }
   /* Match the index's24+4px content inset; keep completion/title layout in its Todo owner. */
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] [data-home-route-pane] > .hm-todo {
     inline-size: 100%; box-sizing: border-box; max-inline-size: 776px;
