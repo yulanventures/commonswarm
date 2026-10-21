@@ -70,21 +70,27 @@ const ctrl = mountOrgDialogsController(membersRoot, {
 });
 
 const wsScreen = document.getElementById('screen-workspace-move-logo');
-wsScreen.innerHTML = [
- renderWorkspaceMoveModal({ workspace_id: 'ws-1a', workspace_slug: 'ops', workspace_name: 'Operations', source_org_id: 'org-1', source_org_slug: 'yulan', source_org_name: 'Yulan Ventures', target_orgs: [{ org_id: 'org-2', slug: 'household', display_name: 'Household', actor_is_owner: true }, { org_id: 'org-3', slug: 'partner', display_name: 'Partner Org', actor_is_owner: false }], selected_target_org_id: 'org-2', transfer_members: 'owners_only', affected_non_owner_count: 2, affected_agent_seat_count: 1 }),
- renderOrgLogoUploadModal({ org_id: 'org-1', org_slug: 'yulan', org_name: 'Yulan Ventures', actor_role: 'owner' }),
- renderWorkspaceMembersPanel({ org_slug: 'yulan', workspace_slug: 'ops', workspace_name: 'Operations', workspace_id: 'ws-1a', actor_role: 'owner', workspace_members: [ROSTER[0], ROSTER[1]], org_candidates: [ROSTER[2]] }),
- renderCreateWorkspaceModal({ org_slug: 'yulan', org_name: 'Yulan Ventures', workspace_slug: 'research', workspace_name: 'Research Lab', actor_role: 'owner' }),
- renderOrganizationCrudModal({ mode: 'rename', org_id: 'org-1', org_slug: 'yulan', org_name: 'Yulan Ventures', actor_role: 'owner' }),
-].join('\n');
+for (const cfg of [
+ { activeDialog: 'move-workspace', moveWorkspace: { workspace_id: 'ws-1a', workspace_slug: 'ops', workspace_name: 'Operations', source_org_id: 'org-1', source_org_slug: 'yulan', source_org_name: 'Yulan Ventures', target_orgs: [{ org_id: 'org-2', slug: 'household', display_name: 'Household', actor_is_owner: true }, { org_id: 'org-3', slug: 'partner', display_name: 'Partner Org', actor_is_owner: false }], selected_target_org_id: 'org-2', transfer_members: 'owners_only', affected_non_owner_count: 2, affected_agent_seat_count: 1 } },
+ { activeDialog: 'org-logo-upload', logoUpload: { org_id: 'org-1', org_slug: 'yulan', org_name: 'Yulan Ventures', actor_role: 'owner' } },
+ { workspaceMembers: { org_slug: 'yulan', workspace_slug: 'ops', workspace_name: 'Operations', workspace_id: 'ws-1a', actor_role: 'owner', workspace_members: [ROSTER[0], ROSTER[1]], org_candidates: [ROSTER[2]] } },
+ { activeDialog: 'create-workspace', createWorkspace: { org_slug: 'yulan', org_name: 'Yulan Ventures', workspace_slug: 'research', workspace_name: 'Research Lab', actor_role: 'owner' } },
+ { activeDialog: 'org-crud', orgCrud: { mode: 'rename', org_id: 'org-1', org_slug: 'yulan', org_name: 'Yulan Ventures', actor_role: 'owner' } },
+]) {
+ const slot = document.createElement('div');
+ wsScreen.appendChild(slot);
+ mountOrgDialogsController(slot, { ...cfg, onAction: () => ({ ok: true }) });
+}
 
 const chScreen = document.getElementById('screen-private-channel');
-mountOrgDialogsController(chScreen, {
- activeDialog: 'create-channel',
- createChannel: { org_slug: 'yulan', workspace_slug: 'ops', workspace_name: 'Operations', step: 1, private_channels_enabled: true, visibility: 'private', channel_icon: 'lock', channel_slug: 'sec-incident', topic: 'Security response', guidelines: 'Contain findings.', available_principals: [ROSTER[0]], selected_principal_ids: ['ag-1'] },
- onAction: () => ({ ok: true }),
-});
-chScreen.insertAdjacentHTML('beforeend', renderChannelMembersModal({ org_slug: 'yulan', workspace_slug: 'ops', channel_id: 'ch-1', channel_slug: 'sec-incident', visibility: 'private', actor_channel_role: 'owner', actor_org_role: 'owner', notify_pref: 'all', members: [{ principal_id: 'u-owner', principal_kind: 'user', display_name: 'Tom Langridge', channel_role: 'owner', notify_pref: 'all' }, { principal_id: 'ag-1', principal_kind: 'agent', display_name: 'Argon Lead', channel_role: 'member', notify_pref: 'mentions' }] }));
+for (const cfg of [
+ { activeDialog: 'create-channel', createChannel: { org_slug: 'yulan', workspace_slug: 'ops', workspace_name: 'Operations', step: 1, private_channels_enabled: true, visibility: 'private', channel_icon: 'lock', channel_slug: 'sec-incident', topic: 'Security response', guidelines: 'Contain findings.', available_principals: [ROSTER[0]], selected_principal_ids: ['ag-1'] } },
+ { activeDialog: 'channel-members-prefs', channelMembers: { org_slug: 'yulan', workspace_slug: 'ops', channel_id: 'ch-1', channel_slug: 'sec-incident', visibility: 'private', actor_channel_role: 'owner', actor_org_role: 'owner', notify_pref: 'all', members: [{ principal_id: 'u-owner', principal_kind: 'user', display_name: 'Tom Langridge', channel_role: 'owner', notify_pref: 'all' }, { principal_id: 'ag-1', principal_kind: 'agent', display_name: 'Argon Lead', channel_role: 'member', notify_pref: 'mentions' }] } },
+]) {
+ const slot = document.createElement('div');
+ chScreen.appendChild(slot);
+ mountOrgDialogsController(slot, { ...cfg, onAction: () => ({ ok: true }) });
+}
 
 const apScreen = document.getElementById('screen-approval-refusal');
 mountOrgDialogsController(apScreen, {

@@ -79,6 +79,15 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 .app-shell > .org-members-mode {
   display: contents;
 }
+.app-shell > .specimen-main {
+  grid-column: 2 / -1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+.specimen-main > .dialog-grid {
+  padding: 24px 32px;
+}
 
 .rail {
   display: flex;
@@ -447,6 +456,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
   gap: 10px;
   margin-bottom: 10px;
 }
+.dialog-heading > .sample-row { flex-wrap: nowrap; flex-shrink: 0; }
 .field { display: grid; gap: 5px; font-size: 12.5px; margin: 12px 0; }
 .transfer-fieldset {
   border: 1px solid var(--cs-line);
@@ -496,6 +506,9 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .logo-rendition-frame {
   display: grid;
   place-items: center;
+  width: 48px;
+  height: 48px;
+  overflow: hidden;
   border-radius: 8px;
   background: var(--cs-accent);
   color: #ffffff;
