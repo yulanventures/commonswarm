@@ -1,0 +1,64 @@
+/* Todo mode only. Original workspace/header/resource slots and native controls are relocated, not copied. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context {
+  display: flex; flex-direction: column; gap: 16px; min-inline-size: 0;
+  color: var(--k-shell-ink); font-family: var(--k-shell-font); font-size: 14px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-mode {
+  margin: 0; color: var(--k-shell-secondary); font-size: 12px; font-weight: 600; line-height: 1.5;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-disclosure {
+  min-inline-size: 0; border-block-start: 1px solid var(--k-shell-line); padding-block: 4px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-disclosure > summary {
+  box-sizing: border-box; min-block-size: 44px; padding: 10px 4px; margin: 0 4px;
+  color: var(--k-shell-ink); font: inherit; font-weight: 500; line-height: 24px;
+  cursor: pointer; overflow-wrap: anywhere; border-radius: 4px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-disclosure > summary:focus-visible {
+  outline: 2px solid var(--k-shell-focus); outline-offset: 2px; box-shadow: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context [data-home-rail-slot] {
+  block-size: auto; min-block-size: 0; padding: 4px; overflow: visible;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context [data-home-rail-slot] .hm-rail__nav {
+  max-block-size: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context [data-home-rail-slot] :is(.hm-rail__person, .hm-rail__agent) {
+  min-block-size: 44px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context [data-home-side-slot]:not([hidden]) {
+  display: block; grid-area: auto; min-inline-size: 0; border: 0; padding: 4px; overflow: visible;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context .hm-side {
+  padding: 0; min-inline-size: 0;
+}
+@media (width > 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .hm-frame.hm-frame.hm-frame {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context > [data-home-workspace-shell] .hm-ws-header {
+    display: flex; flex-wrap: wrap; gap: 12px; padding: 0; border: 0; min-inline-size: 0;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context .hm-ws-header__copy {
+    min-inline-size: 0; flex-basis: 100%;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context .hm-ws-header__actions {
+    min-inline-size: 0; flex-wrap: wrap; gap: 8px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] [data-home-route-pane]:has(> .hm-todos) {
+    padding-inline: 24px;
+  }
+  /* Match the index's24+4px content inset; keep completion/title layout in its Todo owner. */
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] [data-home-route-pane] > .hm-todo {
+    inline-size: 100%; box-sizing: border-box; max-inline-size: 776px;
+    margin-inline: 0; padding-inline: 28px;
+  }
+}
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context { padding: 4px; }
+}
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-disclosure > summary:focus-visible {
+    outline: 3px solid Highlight; outline-offset: 2px;
+  }
+}
