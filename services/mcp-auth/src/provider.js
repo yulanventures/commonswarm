@@ -16,7 +16,7 @@ import {
 } from "./metadata-fetch.js";
 import { createAtomicMemoryAdapter } from "./memory-adapter.js";
 import { CLIENT_SCOPES, createMemoryRegistrationStore, createRegistrationLimiter,
-  validateClientPolicy } from "./registration.js";
+  registrationErrorResponse, validateClientPolicy } from "./registration.js";
 
 export const ISSUER = "https://mcp.commonswarm.com";
 export const RESOURCE = "https://mcp.commonswarm.com/mcp";
@@ -278,6 +278,26 @@ export async function createMcpProvider({
   // Production terminates TLS before this app. Tests exercise the same trusted
   // proxy shape over an ephemeral loopback HTTP server.
   provider.proxy = true;
+  // RFC 7591 errors are JSON regardless of Accept. Capture the typed error at
+  // the provider boundary; never serialize an exception or reflected URI value.
+  for (const event of ["registration_create.error", "server_error"]) {
+    provider.on(event, (ctx, error) => {
+      if (ctx.path === "/reg") ctx.state.registrationFailure = registrationErrorResponse(error);
+    });
+  }
+  provider.use(async (ctx, next) => {
+    if (ctx.path !== "/reg") return next();
+    ctx.req.headers.accept = "application/json";
+    try { await next(); }
+    catch (error) { ctx.state.registrationFailure = registrationErrorResponse(error); }
+    const failure = ctx.state.registrationFailure;
+    if (failure || ctx.status >= 400) {
+      ctx.status = failure?.status ?? ctx.status;
+      ctx.body = failure?.body ?? { error: "invalid_request",
+        error_description: "registration requires POST on an enabled registration endpoint" };
+      ctx.type = "application/json";
+    }
+  });
   provider.use(async (ctx, next) => {
     try { await next(); }
     finally { ctx.state.registrationSettle?.(ctx.status === 201); }

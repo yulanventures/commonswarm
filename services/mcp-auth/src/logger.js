@@ -1,7 +1,8 @@
 import { basename } from "node:path";
+import { registrationErrorResponse } from "./registration.js";
 
 const ALLOWED_FIELDS = new Set(["event", "method", "path", "request_id", "status", "duration_ms",
-  "error_code", "error_name", "stack_frames"]);
+  "error_code", "error_name", "stack_frames", "registration_error_description"]);
 
 function identifier(value) {
   return typeof value === "string" && /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,79}$/u.test(value)
@@ -21,14 +22,18 @@ export function logProviderError(logger, event, requestId, error) {
     if (frames.length === 5) break;
   }
   logger.info({ event, request_id: requestId, error_name: identifier(error?.name) ?? "Error",
-    error_code: identifier(error?.code) ?? identifier(error?.error) ?? null, stack_frames: frames });
+    error_code: identifier(error?.code) ?? identifier(error?.error) ?? null, stack_frames: frames,
+    ...(event === "registration_create.error" ? {
+      registration_error_description: registrationErrorResponse(error).body.error_description,
+    } : {}),
+  });
 }
 
 export function subscribeProviderErrors(provider, logger) {
   // oidc-provider 9.12.2 emits these error events. Its interaction.started and
   // interaction.ended events are successes, not errors; custom interaction
   // failures are captured by the application's outer handler instead.
-  for (const event of ["server_error", "authorization.error", "grant.error"]) {
+  for (const event of ["server_error", "authorization.error", "grant.error", "registration_create.error"]) {
     provider.on?.(event, (ctx, error) => {
       logProviderError(logger, event, ctx?.res?.getHeader("x-request-id"), error);
     });
