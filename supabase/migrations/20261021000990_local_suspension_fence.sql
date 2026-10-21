@@ -225,7 +225,6 @@ BEGIN
     SELECT b.* INTO local_seed FROM swarm.discover_local_credential_ids(p_token_hash) b;
   EXCEPTION WHEN insufficient_privilege THEN
     GET STACKED DIAGNOSTICS local_denial=PG_EXCEPTION_DETAIL;
-    IF local_denial='LOCAL_CREDENTIAL_DENIED' THEN RETURN; END IF;
     RAISE;
   END;
   IF NOT FOUND THEN RETURN; END IF;
