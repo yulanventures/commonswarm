@@ -1,0 +1,54 @@
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] {
+  display: block; min-inline-size: 0; color: var(--k-shell-ink); font: 400 14px/1.6 var(--k-shell-font);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-page-side { display: block; min-inline-size: 0; max-inline-size: 52rem; margin-inline: auto; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-profile-empty { display: grid; align-content: center; gap: 8px; min-block-size: 55dvh; padding: 24px; text-align: center; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-profile-empty h2 { margin: 0; font: 600 20px/1.4 var(--k-shell-font); letter-spacing: -.3px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-profile-empty p { margin: 0; color: var(--k-shell-secondary); }
+/* Keep the proven normal-flow detail: the route owns scrolling, never the outer frame. */
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail {
+  position: static; flex: none; inline-size: auto; min-inline-size: 0; padding: 8px 8px 32px;
+  overflow: visible; border: 0; border-radius: 0; background: var(--k-shell-surface);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail-top { display: flex; justify-content: flex-end; margin: 0 0 16px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-close-detail { border-radius: 6px; color: var(--k-shell-secondary); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail-identity { display: flex; flex-wrap: nowrap; align-items: center; gap: 14px; margin-block-end: 28px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail-identity h2 { margin: 0; font: 600 20px/1.4 var(--k-shell-font); letter-spacing: -.3px; overflow-wrap: anywhere; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail-identity p { margin: 3px 0; color: var(--k-shell-secondary); font-size: 13px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail-identity :is(.pd-initials,.pd-orb) { flex: 0 0 44px; inline-size: 44px; block-size: 44px; font: 600 16px/1 var(--k-shell-font); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail-identity .pd-orb { border-radius: 10px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-fact-sheet { margin: 0 0 20px; overflow: visible; border: 0; border-radius: 0; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-fact-row { display: grid; grid-template-columns: 7rem minmax(0,1fr) auto; align-items: start; gap: 8px 20px; min-block-size: 52px; padding: 12px 0; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-fact-row + .pd-fact-row { border-block-start: 1px solid var(--k-shell-line); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-fact-row dt { margin: 0; color: var(--k-shell-secondary); font: 400 13px/1.6 var(--k-shell-font); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-fact-row dd { margin: 0; min-inline-size: 0; font: 400 14px/1.6 var(--k-shell-font); overflow-wrap: anywhere; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-fact-row dd:not(.pd-fact-action) { grid-column: 2 / -1; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-fact-row:has(.pd-fact-action) dd:not(.pd-fact-action) { grid-column: 2; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-fact-row .pd-fact-action { grid-column: 3; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail :is(button,a,input,select,summary) {
+  min-inline-size: 44px; min-block-size: 44px; max-inline-size: 100%; box-sizing: border-box; border-radius: 6px;
+  font-family: var(--k-shell-font); white-space: normal; overflow-wrap: anywhere; scroll-margin: 6px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail [tabindex] { scroll-margin: 6px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail :is(.pd-text-button,.pd-danger-button) { padding: 8px; font: 500 13px/1.5 var(--k-shell-font); box-shadow: none; background: transparent; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail .pd-text-button { color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-guidance { padding: 12px 14px; border: 1px solid var(--k-shell-line); border-radius: 6px; background: var(--k-shell-subtle); color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-guidance h3 { font: 600 13px/1.5 var(--k-shell-font); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] :is(.pd-permission-note,.pd-model-form,.pd-technical) { padding: 12px; border-radius: 6px; background: var(--k-shell-subtle); color: var(--k-shell-secondary); font-size: 13px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-model-form input { border: 1px solid var(--k-shell-control); background: var(--k-shell-surface); color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .hm-role-select { padding: 8px 28px 8px 10px; border: 1px solid var(--k-shell-control); background-color: var(--k-shell-surface); color: var(--k-shell-ink); font-size: 14px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-danger-zone { padding-block-start: 16px; margin-block-start: 24px; border-block-start: 1px solid var(--k-shell-line); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] :is(.pd-danger-zone h3,.pd-section-title) { font: 600 13px/1.5 var(--k-shell-font); color: var(--k-shell-secondary); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-person-agents button { border: 1px solid var(--k-shell-line); border-radius: 6px; background: transparent; color: var(--k-shell-ink); padding: 8px 12px; font-size: 13px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] dialog .pd-confirm-actions { flex-wrap: wrap; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] dialog .pd-confirm-actions button { flex: 1 1 10rem; white-space: normal; overflow-wrap: anywhere; }
+@media (max-width: 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail { padding: 8px 6px 32px; }
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail .hm-role-select { font-size: 16px; }
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-model-form input { font-size: 16px; }
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-fact-row { grid-template-columns: minmax(0,1fr) auto; gap: 4px 12px; }
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-fact-row dt { grid-column: 1 / -1; }
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-fact-row dd:not(.pd-fact-action) { grid-column: 1 / -1; }
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-fact-row:has(.pd-fact-action) dd:not(.pd-fact-action) { grid-column: 1; }
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-fact-row .pd-fact-action { grid-column: 2; }
+}

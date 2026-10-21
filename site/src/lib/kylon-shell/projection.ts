@@ -17,5 +17,5 @@ export function projectHomeLayout(state: string | undefined, route: HomeRoute,
     for (const view of views) navigation.push({ ...view,
       href: routeHref({ view: view.id, workspaceId: workspace.id } as HomeRoute), current: route.view === view.id });
   }
-  return { enabled: state === "channel", title: route.view === "catchup" ? "Catch up" : "Workspaces", workspaceName: workspace?.name, navigation };
+  return { enabled: state === "channel", title: route.view === "catchup" ? "Catch up" : "Workspaces", workspaceName: workspace?.name, navigation, people: route.view === "people" };
 }

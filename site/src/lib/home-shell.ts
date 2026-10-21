@@ -8,7 +8,7 @@ import { capsule } from "./home-primitives";
 import { orderCapsules } from "./home-rail";
 import type { CapsuleVM, Id } from "./home-types";
 
-export type WorkspacePane = "chat" | "todos" | "lists" | "files";
+export type WorkspacePane = "chat" | "todos" | "lists" | "files" | "people";
 export type WorkspaceMenuItem = "wiki" | "settings" | "admin-access";
 
 /** Local to this lane; home-types.ts has no shell view model. */
@@ -73,8 +73,8 @@ export interface FeedMenuState {
 }
 export type FeedMenuAction = { kind: "channel"; id: string } | { kind: "new-channel" } | { kind: "filter"; value: FeedFilterValue } | { kind: "refresh" };
 
-export const PANE_LABELS: Record<WorkspacePane, string> = { chat: "Chat", todos: "To-dos", lists: "Lists", files: "Files" };
-const PANES: WorkspacePane[] = ["chat", "todos", "lists", "files"];
+export const PANE_LABELS: Record<WorkspacePane, string> = { chat: "Chat", todos: "To-dos", lists: "Lists", files: "Files", people: "People & agents" };
+const PANES: Exclude<WorkspacePane, "people">[] = ["chat", "todos", "lists", "files"];
 
 /** "Claude", "Claude and dot", "Claude, dot and Grok". */
 export function joinNames(names: readonly string[]): string {

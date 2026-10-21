@@ -4481,7 +4481,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         homeShellKey = "";
         slot?.replaceChildren(); bottom?.replaceChildren(); return;
       }
-      const pane = homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" ? homeRoute.view : "chat";
+      const pane = homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" || homeRoute.view === "people" ? homeRoute.view : "chat";
       const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
         people: currentHomePeople().groups, pane, contextTitle: homeRoute.view === "people", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
         hrefs: { chat: routeHref({ view: "chat", workspaceId: workspace.id }), todos: routeHref({ view: "todos", workspaceId: workspace.id }),
@@ -4663,7 +4663,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       document.title = homeRoute.view === "people" ? ["People & agents", workspace?.name, "CommonSwarm"].filter(Boolean).join(" · ") : homeViewTitle(homeRoute, workspace?.name);
       window.requestAnimationFrame(() => {
         const scope = homeRoute.view === "catchup" ? "[data-home-catchup]"
-          : homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos" || homeRoute.view === "people" ? "[data-home-route-pane]"
+          : homeRoute.view === "people" ? "[data-people-context]"
+          : homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos" ? "[data-home-route-pane]"
           : homeRoute.view === "new" ? "[data-panel=create]"
           : homeRoute.view === "add-agent" ? "[data-channel-view=agent-choice]"
           : homeRoute.view === "lists" ? "[data-channel-view=objects]"
@@ -4672,7 +4673,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           : "[data-home-workspace-shell]";
         // People & agents with a focus target lands on that person's or agent's details instead.
         const target = homeRoute.view === "people" && peopleDialogFocus ? one<HTMLElement>("#pd-detail-title") : null;
-        (target ?? all<HTMLElement>(`${scope} h1, .cs-org-phone-title h1`).find(heading => heading.getClientRects().length > 0))?.focus({ preventScroll: true });
+        const visible = (element: HTMLElement | null): element is HTMLElement => !!element?.getClientRects().length && !element.closest("[hidden], [inert]");
+        (visible(target) ? target : all<HTMLElement>(`${scope} h1, .cs-org-phone-title h1`).find(visible))?.focus({ preventScroll: homeRoute.view !== "people" });
       });
     };
     const navigateHome = async (requested: HomeRoute, historyMode: "push" | "replace" | "pop"): Promise<void> => {
@@ -4884,6 +4886,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       head.append(members); members.hidden = false;
     };
     const parkPeopleHosts = (): void => {
+      layout.peopleContext(null);
       parkMemberDetails();
       const detail = one<HTMLElement>("[data-people-detail]");
       // Hidden while parked: a selection's open details must not show at the foot of another route.
@@ -4908,15 +4911,18 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const signIn = one<HTMLElement>("[data-member-details]"); const active = document.activeElement;
       const held = signIn && active instanceof HTMLElement && signIn.contains(active) ? active : null;
       const range = held instanceof HTMLInputElement || held instanceof HTMLTextAreaElement ? [held.selectionStart, held.selectionEnd] as const : null;
+      layout.peopleContext(null);
       parkMemberDetails();
       list.hidden = false;
       renderPeopleDialog(list, detail, model, peopleDialogState, { render: renderDialogRoster, action: async (action, id, button, notice) => {
         if (button.disabled) return; button.disabled = true;
         const workspaceId = activeWorkspaceId, userId = session?.user.id;
         try { await peopleDialogAction(action, id, button, notice); }
-        catch (error) { if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
-          const errorTarget = Array.from(list.querySelectorAll<HTMLElement>("[data-agent-row-error]")).find((element) => element.dataset.agentRowError === id)
-            ?? one<HTMLElement>("[data-agent-error]");
+        catch (error) { if (workspaceId !== activeWorkspaceId || userId !== session?.user.id || homeRoute.view !== "people") return;
+          const selected = peopleDialogState.selected;
+          const errorTarget = selected?.type === "agent" && selected.id === id
+            ? list.querySelector<HTMLElement>("[data-people-detail] [data-agent-error]")
+            : Array.from(app.querySelectorAll<HTMLElement>("[data-people-context] [data-agent-row-error]")).find((element) => element.dataset.agentRowError === id);
           if (errorTarget) { errorTarget.textContent = readableError(error); errorTarget.hidden = false; }
         } finally { button.disabled = false; }
       },
@@ -4967,6 +4973,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           return personTint(owner, owner !== null && owner === session?.user.id);
         }, page: {
           homeLabel: workspace.name, homeHref: routeHref({ view: "chat", workspaceId: workspace.id }), back: () => homeBack(),
+          workspacesHref: routeHref({ view: "catchup" }),
           addAgentHref: routeHref({ view: "add-agent", workspaceId: workspace.id }),
           agentHref: (agentId) => routeHref({ view: "agent", workspaceId: workspace.id, agentId }),
           navigate: (href) => navigateHomeHref(href),
@@ -4976,6 +4983,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         } });
       // A removal or role change that needs a fresh sign-in shows its block under the page header.
       mountMemberDetails(list);
+      layout.peopleContext(list.querySelector<HTMLElement>("[data-people-context]"));
       if (held?.isConnected && document.activeElement !== held) {
         held.focus({ preventScroll: true });
         if (range && range[0] !== null && range[1] !== null) try { (held as HTMLInputElement).setSelectionRange(range[0], range[1]); } catch { /* not a text field */ }
@@ -5077,13 +5085,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         renderDialogRoster(); focusPeoplePage(); return Promise.resolve();
       }
       rosterFilter = "";
-      peopleDialogState.selected = null; peopleDialogState.showAllAttention = false;
+      peopleDialogState.selected = null; peopleDialogState.showAllAttention = false; peopleDialogState.filter = "all";
       if (!workspaceId) return Promise.resolve();
       return navigateHome({ view: "people", workspaceId }, "push");
     };
     const focusPeoplePage = (): void => {
-      window.requestAnimationFrame(() => ((peopleDialogFocus ? one<HTMLElement>("#pd-detail-title") : null)
-        ?? one<HTMLElement>("#pd-page-title"))?.focus({ preventScroll: true }));
+      window.requestAnimationFrame(() => [peopleDialogFocus ? one<HTMLElement>("#pd-detail-title") : null, one<HTMLElement>("#pd-page-title")]
+        .find(element => !!element?.getClientRects().length && !element.closest("[hidden], [inert]"))?.focus({ preventScroll: false }));
     };
 
     /** Leaving the page: the confirmation closes and every draft that belonged to it is dropped. */
@@ -10744,6 +10752,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (event.key !== "Escape" || homeRoute.view !== "people" || !peopleDialogState.selected) return;
       if (one<HTMLDialogElement>("[data-people-confirm]")?.open || document.querySelector("dialog[open]")) return;
       event.preventDefault(); const selection = peopleDialogState.selected; peopleDialogState.selected = null;
+      if (!document.getElementById(`pd-${selection.type}-${selection.id}`)) { rosterFilter = ""; peopleDialogState.filter = "all"; }
       renderDialogRoster(); (document.getElementById(`pd-${selection.type}-${selection.id}`) ?? one<HTMLElement>("#pd-page-title"))?.focus({ preventScroll: false });
     });
     for (const button of all<HTMLButtonElement>("[data-agent-owner-self]")) {
