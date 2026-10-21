@@ -139,9 +139,8 @@ class API:
         raise Refused('history_page_limit')
 
 
-def reconcile(api, root, item):
+def history_decision(root, item, history):
     payload = item['payload']
-    history = api.history(item['sha'])
     context = [r for r in history if r['context'] == payload['context']]
     legacy_description = f"{item['run_id']} exit {item['code']}"
     identical, superseded = False, False
@@ -173,14 +172,29 @@ def reconcile(api, root, item):
         need(completed not in completions or completions[completed] == prior_id, 'newer_or_ambiguous_result')
         completions[completed] = prior_id
         superseded = superseded or completed > item['ended']
-    if identical or superseded:
+    return identical or superseded
+
+
+def reconcile(api, root, item):
+    payload = item['payload']
+    if history_decision(root, item, api.history(item['sha'])):
         return 'skipped'
     created = api.request('POST', '/statuses/' + item['sha'], payload)
     need(isinstance(created, dict) and type(created.get('id')) is int and created['id'] > 0, 'invalid_create_response')
-    readback = api.history(item['sha'])
-    need(any(r['id'] == created['id'] and all(r.get(k) == v for k, v in payload.items()) for r in readback),
-         'status_readback_failed')
-    return 'published'
+    # Retry only valid history that has not exposed this exact created ID yet.
+    # POST is outside the loop: a lost acknowledgement is never retried here.
+    for attempt in range(3):
+        readback = api.history(item['sha'])
+        matching = next((r for r in readback if r['id'] == created['id']), None)
+        if matching is not None:
+            need(all(matching.get(k) == v for k, v in payload.items()), 'status_readback_failed')
+        history_decision(root, item, readback)
+        if matching is not None:
+            return 'published'
+        if attempt < 2:
+            need(time.monotonic() + 0.5 < api.deadline, 'github_deadline')
+            time.sleep(0.5)
+    raise Refused('status_readback_failed')
 
 
 def main():
