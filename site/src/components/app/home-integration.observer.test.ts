@@ -4,10 +4,10 @@ import { readFile } from 'node:fs/promises';
 import { createContext, runInContext } from 'node:vm';
 import ts from 'typescript';
 import { HomeToolsUnavailable, HomeCommandRefused } from '../../lib/home/client';
-import { CommandOutcomeUnknown, FreshLoginRequired, WorkspaceRoleRefused, BROWSER_SIGNAL_COLUMNS, browserSignalFromRow } from '../../lib/commonswarm';
+import { CommandOutcomeUnknown, FreshLoginRequired, WorkspaceRoleRefused, BROWSER_SIGNAL_COLUMNS, browserSignalFromRow, browserDeliveryReceiptCandidates, BROWSER_RECEIPT_REQUESTS_PER_TICK } from '../../lib/commonswarm';
 import { createLatestRead } from '../../lib/latest-read';
 import { buildAuthorLine, buildStreamExtras, deriveStreamExtras } from '../../lib/home-stream';
-import { homeParty, mapHomePeople, homeAskAnswered, homeViewTitle } from '../../lib/home-map';
+import { homeParty, mapHomePeople, homeAskAnswered, homeViewTitle, homeAgentFixCards } from '../../lib/home-map';
 import { peopleRoleBeginSave, peopleRoleErrorCode, peopleRoleFinishSave, peopleRoleReceipt, peopleRoleRefusal } from '../../lib/people-dialog-view';
 import { addAgentOwnershipLine, agentLabelInSentence, personFirstName } from '../../lib/home-names';
 import { canStartThread, THREAD_REPLY_CONTROL_LABEL, threadReplyPlace, threadReplyTargetText } from '../../lib/thread-reply';
@@ -430,6 +430,64 @@ class RowNode {
   querySelectorAll(selector: string) { return this.descendants().filter(node => selector.startsWith('.')
     ? node.className.split(' ').includes(selector.slice(1)) : node.tag === selector); }
 }
+test('a signal page settling after a same-workspace view change retains data without taking the pane', async () => {
+  const code = await dashboardFunctions(['addAgentViewOpen', 'showChannelView', 'renderFeed', 'loadSignals',
+    'forgetFetchedPostedIds', 'prunePostedRows', 'rowShowsOnScreen', 'visibleReceiptSignalIds', 'refreshDeliveryReceipts']);
+  for (const [route, workspaceView, channelView] of [
+    ['files', 'files', 'files'], ['wiki', 'brain', 'brain'], ['lists', 'objects', 'objects'],
+    ['chat', 'signals', 'connect'], ['add-agent', 'signals', 'agent-choice'],
+  ]) {
+    class ViewNode extends RowNode { hidden = false; }
+    const sections = ['feed', 'feed-empty', 'feed-pending', 'files', 'brain', 'objects', 'connect', 'agent-choice'].map(name => {
+      const node = new ViewNode('section'); node.dataset.channelView = name; return node;
+    });
+    const composer = new ViewNode('form'), list = new ViewNode('ol'), emptyTitle = new ViewNode('h2');
+    const nodes = new Map([['[data-composer]', composer], ['[data-feed-list]', list], ['[data-feed-empty-title]', emptyTitle]]);
+    let resolvePage!: (page: { rows: unknown[]; hasMore: boolean }) => void, reads = 0;
+    const context = createContext({ routeHref, homeAgentFixCards, browserDeliveryReceiptCandidates, BROWSER_RECEIPT_REQUESTS_PER_TICK,
+      signalPage: () => { reads++; return new Promise(resolve => { resolvePage = resolve; }); },
+      one: (selector: string) => nodes.get(selector) ?? null,
+      all: (selector: string) => selector === '[data-channel-view]' ? sections : [],
+      queueMicrotask: () => {}, window: { clearTimeout() {} },
+    });
+    runInContext(`
+      const app={dataset:{channelView:'feed'}}, activeWorkspaceId='W', requestVersion=1, sampleMode=false, session={user:{id:'viewer'}};
+      let homeRoute={view:'chat',workspaceId:'W'}, activeWorkspaceView='signals', signalExpiryTimer;
+      let activeChannelId=null, unknownChannelId=null, signalCursor={createdAt:'old',id:'old'}, signalCutoff='', signalHasMore=true;
+      let signals=[{id:'previous-page'}], feedWasEmpty=false; const agents=[], workspaces=[{id:'W',name:'Home'}];
+      const postedSinceReset=new Map(), POSTED_ROW_GRACE_MS=30000, previousSignalIds=new Set();
+      const deliveryReceiptCache=new Map([['retained-receipt',{result:null,checkedAt:123}]]); let deliveryReceiptRefreshOwner='';
+      const humanSeenReporter={resetVisible(){}}, humanSeenObserver=null, activeChannel=()=>null;
+      const currentHomePeople=()=>({groups:[],other:[]}), atBottom=()=>true, feedScroller=()=>null;
+      // Unrelated chrome/focus/decoration boundaries; no substitute for the guarded renderer or view switch.
+      const syncComposerPlacement=()=>{}, disarmLiveFeed=()=>{}, armLiveFeed=()=>{}, closeMentionPicker=()=>{};
+      const syncStandalonePage=()=>{}, syncFeedChrome=()=>{}, renderSignalCounts=()=>{}, focusComposerOnEntry=()=>{};
+    `, context);
+    runInContext(code, context);
+    const pending = runInContext("loadSignals('W',true,1)", context) as Promise<void>;
+    assert.equal(reads, 1, 'the real loader reached its deferred transport before the view changed');
+    // Explicit fixture route transition, not the full history/router: production showChannelView owns hidden flags.
+    runInContext(`homeRoute={view:${JSON.stringify(route)},workspaceId:'W'}; activeWorkspaceView=${JSON.stringify(workspaceView)}; showChannelView(${JSON.stringify(channelView)});`, context);
+    const selected = sections.find(node => node.dataset.channelView === channelView)!;
+    assert.equal(selected.hidden, false, `${route}/${channelView}: selected pane starts visible`);
+    assert.equal(composer.hidden, true);
+    resolvePage({ rows: [], hasMore: false }); // A valid authoritative empty page, not a failed or stale read.
+    await pending;
+    assert.equal(selected.hidden, false, `${route}/${channelView}: late feed paint must not hide the actual selected section`);
+    assert.equal(runInContext('app.dataset.channelView', context), channelView);
+    assert.equal(composer.hidden, true, 'a late read cannot expose the feed composer');
+    assert.equal(runInContext('signals.length', context), 0, 'the valid new page replaced old data despite holding its paint');
+    assert.equal(runInContext('signalCursor', context), null);
+    assert.equal(runInContext('signalHasMore', context), false);
+    assert.equal(runInContext("deliveryReceiptCache.get('retained-receipt').checkedAt", context), 123, 'holding paint does not discard cached receipts');
+    // Chat re-entry positive: the same actual renderer must reach the actual empty-feed view switch.
+    runInContext("homeRoute={view:'chat',workspaceId:'W'}; activeWorkspaceView='signals'; showChannelView('feed'); renderFeed();", context);
+    assert.equal(runInContext('app.dataset.channelView', context), 'feed-empty');
+    assert.equal(sections.find(node => node.dataset.channelView === 'feed-empty')!.hidden, false);
+    assert.equal(composer.hidden, false);
+    assert.equal(emptyTitle.textContent, 'No messages yet.');
+  }
+});
 test('replying from a stream row preserves the agent ownership label and the root channel', async () => {
   const document = { createElement: (tag: string) => new RowNode(tag) };
   const input = { placeholder: '', setAttribute() {}, focus() {} };

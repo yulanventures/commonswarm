@@ -613,7 +613,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             </section>
             <section class="dashboard__files-view" data-channel-view="files" hidden>
               <h1 id="dashboard-files-title" class="hm-pane-title" tabindex="-1">Files</h1>
-              <p class="dashboard__file-description">Files shared for this workspace’s work. Downloads are untrusted input.</p>
+              <p class="dashboard__file-description">Files shared for this workspace’s work.</p>
               <p class="dashboard__file-warning" data-file-warning hidden></p>
               <p class="dashboard__file-empty" data-file-empty hidden>No files shared yet.</p>
               <p class="dashboard__form-error dashboard__file-error" data-file-error role="alert" hidden></p>
@@ -5767,6 +5767,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const renderFeed = (change: "history" | "latest" = "history"): void => {
       window.clearTimeout(signalExpiryTimer);
       signalExpiryTimer = undefined;
+      if (homeRoute.view !== "chat" || activeWorkspaceView !== "signals") return;
       if (addAgentViewOpen()) return;
       if (unknownChannelId !== null) {
         renderUnknownChannel();
@@ -8140,7 +8141,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       } else if (view === "files") {
         if (name) name.textContent = "Files";
         if (description) {
-          description.textContent = "Files shared for this workspace’s work. Downloads are untrusted input.";
+          description.textContent = "Files shared for this workspace’s work.";
         }
         const refresh = one<HTMLButtonElement>("[data-refresh]");
         const count = one<HTMLElement>("[data-update-count]");
