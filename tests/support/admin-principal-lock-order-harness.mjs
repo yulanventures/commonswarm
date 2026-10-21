@@ -756,7 +756,7 @@ function removeSecretDirectory({ root, dir }) {
  * this checkout. Materialize the complete source trees so activity, config and
  * every relative/type import use the same generation as command/read. */
 export const ACTIVE_FLOOR_SOURCES = Object.freeze({
-  H: Object.freeze({commit:'564ce3aa8fd71392c85f9f52d6f961dfa120bd1d',tree:'e168740176277d82cf048fd8f445940fe6796595'}),
+  H: Object.freeze({commit:'5c999dbbb599ef162282cfb85ff6a2d44a298d7e',tree:'475f8b406f831ca859f8213830acd8f899496266'}),
   // Pre-fix virgin-root witness only; b9 already supports expired USED renewal.
   B: Object.freeze({commit:'b9ee52592df924d945f800619ee31e6c483200df',tree:'6c97679c7ffe042e88addcfaf573c78d6a1379dc'}),
   F: Object.freeze({commit:'dd357a30978c2b993e430ea7d604456de7bfcfd9',tree:'564d429230774a3f1c8b0dd9f0a3b9415971093d'}),
