@@ -265,19 +265,41 @@ try {
     const ordinaryBefore=await snapshot(),ordinaryDenied=await renew(ordinaryUnused.raw,id());
     check('ordinary-expired-unused-refused',[401,403].includes(ordinaryDenied.status) && credential(ordinaryDenied)===null);
     check('ordinary-expired-unused-full-denial-rollback',JSON.stringify(ordinaryBefore)===JSON.stringify(await snapshot()));
-    for(const policy of ['permanent','future-date','resumed-metadata']) {
+    const resumeOwner=async secured=>{
+      // Existing verified-human management boundary: real authorization, locks,
+      // resume routine, idempotency and audit under the command role.
+      const result=await command.handleHostedManagementCommand({command_id:id(),client_version:CLIENT_PROTOCOL_VERSION,
+        workspace_id:W,stream:{kind:'workspace'},command:{kind:'resume_renewal_grant',renewal_grant_id:secured.grant}},
+        {userId:owner,email,displayName:`R12b owner ${tag}`,identityVerified:true,interactiveAuthAtSeconds:null});
+      if(result.status!==200 || result.body?.ok!==true) throw new Error('security_owner_resume_failed');
+      const [state]=await observer`SELECT NOT suspension_active AND resumed_by=${owner}::uuid AND resume_count>0
+        AND suspended_at IS NOT NULL AND resumed_at>suspended_at AS ok FROM swarm.renewal_grants
+        WHERE renewal_grant_id=${secured.grant}::uuid`;
+      const [audit]=await observer`SELECT EXISTS(SELECT 1 FROM swarm.audit_log WHERE workspace_id=${W}::uuid
+        AND actor_user=${owner}::uuid AND command_kind='resume_renewal_grant' AND outcome='accepted') AS ok`;
+      return state?.ok===true && audit?.ok===true;
+    };
+    for(const policy of ['permanent','future-date','older-resume']) {
       const secured=await seat(`security-${policy}`,false);
       if(policy==='future-date') await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '1 day'
         WHERE renewal_grant_id=${secured.grant}::uuid`;
       check(`security-${policy}-live-positive`,(await readAs(secured.raw)).status===200);
       await observer`UPDATE swarm.renewal_grants SET suspended_at=clock_timestamp() WHERE renewal_grant_id=${secured.grant}::uuid`;
-      if(policy==='resumed-metadata') await observer`UPDATE swarm.renewal_grants SET resumed_at=clock_timestamp(),resumed_by=${owner}::uuid,resume_count=resume_count+1
-        WHERE renewal_grant_id=${secured.grant}::uuid`;
+      if(policy==='older-resume') {
+        // A genuine owner resume is superseded by a later suspension.
+        await resumeOwner(secured);
+        await observer`UPDATE swarm.renewal_grants SET suspended_at=clock_timestamp() WHERE renewal_grant_id=${secured.grant}::uuid`;
+      }
       const securityBefore=await snapshot();
       const securityRead=await readAs(secured.raw),securityRenew=await renew(secured.raw,id());
       check(`security-${policy}-read-denied`,[401,403].includes(securityRead.status));
       check(`security-${policy}-renewal-denied`,[401,403].includes(securityRenew.status) && credential(securityRenew)===null);
       check(`security-${policy}-no-write`,JSON.stringify(securityBefore)===JSON.stringify(await snapshot()));
+      check(`security-${policy}-owner-resume-audited`,await resumeOwner(secured));
+      check(`security-${policy}-owner-resume-read-positive`,(await readAs(secured.raw)).status===200);
+      const resumedRenewal=await renew(secured.raw,id()),resumedToken=credential(resumedRenewal);
+      check(`security-${policy}-owner-resume-renewal-positive`,resumedRenewal.status===200 && resumedToken!==null
+        && (await readAs(resumedToken)).status===200);
     }
     const s=await seat('expired-proof');
     await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${s.t0}::uuid`;

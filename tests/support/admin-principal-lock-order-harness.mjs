@@ -756,14 +756,14 @@ function removeSecretDirectory({ root, dir }) {
  * this checkout. Materialize the complete source trees so activity, config and
  * every relative/type import use the same generation as command/read. */
 export const ACTIVE_FLOOR_SOURCES = Object.freeze({
-  H: Object.freeze({commit:'e7cc111bab342ab1b7b9afb575537bb86085f715',tree:'20f46a1b9d6f86d2754ccb5a3c371e459e3f3d07'}),
+  H: Object.freeze({commit:'55e505cab77d4086365da6ea158c5a3332cc170f',tree:'7b729821d322b4b75f433eab278fbbf3e641c00e'}),
   // Pre-fix virgin-root witness only; b9 already supports expired USED renewal.
   B: Object.freeze({commit:'b9ee52592df924d945f800619ee31e6c483200df',tree:'6c97679c7ffe042e88addcfaf573c78d6a1379dc'}),
-  F: Object.freeze({commit:'053a94f60bc00d0c6356866b76ac73d1a4b17243',tree:'0d21c6f5910cae5c721d2b358a68fca99d9a59e9'}),
+  F: Object.freeze({commit:'d34ff70c9b71b79579524aa3491305e02a54d66e',tree:'09ff8f81af76ff55ea6c3ee3cb4f37598025ae83'}),
 });
 export function materializeActiveFloorSource(directory, generation) {
   // Qualification HEAD changes test bindings only. Every current row loads the
-  // immutable integrated H3 product source, including the existing permission owners.
+  // immutable repaired H product source, including the existing permission owners.
   if(generation==='current') generation='H';
   if (generation!=='O' && !Object.hasOwn(ACTIVE_FLOOR_SOURCES,generation)) throw new Error('unknown_source_generation');
   const source=generation==='O' ? {commit:HISTORICAL_BASELINE_SOURCE.commit,tree:HISTORICAL_BASELINE_SOURCE.tree} : ACTIVE_FLOOR_SOURCES[generation];
@@ -798,6 +798,7 @@ export async function assertActiveFloorCatalog(sql) {
     '20261019000008_local_auth_inactive_parent_closure.sql',
     '20261019000009_hosted_snapshot_null_compat.sql',
     '20261019000010_local_permanence_read_models.sql',
+    '20261021000990_local_suspension_fence.sql',
   ];
   const expected = new Map();
   for (const file of migrations) {

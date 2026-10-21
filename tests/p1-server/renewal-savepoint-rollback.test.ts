@@ -76,14 +76,14 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
     assert.deepEqual(result.checks?.filter((check) => !check.ok), [], "owner-boundary contracts failed");
     if (baseline) {
       assert.deepEqual(result.unused_root_baseline, harness.ACTIVE_FLOOR_SOURCES.B);
-      assert.equal(result.active_catalog?.migrations, 4, 'b9 witness uses the same valid ACTIVE schema');
+      assert.equal(result.active_catalog?.migrations, 5, 'b9 witness uses the same valid ACTIVE schema');
       for (const name of ['b9 used standing proof renews to readable successor',
         'b9 virgin standing root denies for authentication', 'b9 virgin denial leaves every table unchanged'])
         assert.ok(result.checks?.some(check => check.name === name && check.ok), name);
     }
     if(mode==='permanence') {
-      for(const policy of ['permanent','future-date','resumed-metadata'])
-        for(const proof of ['live-positive','read-denied','renewal-denied','no-write']) {
+      for(const policy of ['permanent','future-date','older-resume'])
+        for(const proof of ['live-positive','read-denied','renewal-denied','no-write','owner-resume-audited','owner-resume-read-positive','owner-resume-renewal-positive']) {
           const name=`security-${policy}-${proof}`;
           assert.ok(result.checks?.some(check=>check.name===name && check.ok),name);
         }
