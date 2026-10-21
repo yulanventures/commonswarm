@@ -4,6 +4,7 @@ import type {
 } from '../../../src/protocol/household-object-events.js';
 import { HOUSEHOLD_CONTENT_OPERATIONS, type HouseholdContentOperation, type HouseholdContentRole } from '../../../src/protocol/household-object-policy.js';
 import { escapeMessageHtml, renderMessageMarkdown } from './message-markdown.js';
+import { bindHouseholdObjectFocus } from './household-object-focus.js';
 
 /** Authorized presentation data only: no storage paths, credentials or signed URLs.
  * The integration caller loads each page through the authenticated content routes.
@@ -381,6 +382,7 @@ export type HouseholdObjectsController = ReturnType<typeof createHouseholdObject
  * The shared escaped renderer is also used by all three Astro components.
  */
 export function mountHouseholdObjects(root: HTMLElement, controller: HouseholdObjectsController): () => void {
+  const clearFocus = bindHouseholdObjectFocus(root);
   const unsubscribe = controller.subscribe((state) => {
     const active = root.ownerDocument.activeElement;
     const focused = active instanceof HTMLElement && root.contains(active) ? active : null;
@@ -420,7 +422,7 @@ export function mountHouseholdObjects(root: HTMLElement, controller: HouseholdOb
       controller.stage({ kind: 'doc', markdown: event.target.value });
   };
   root.addEventListener('click', click); root.addEventListener('input', input);
-  return () => { unsubscribe(); root.removeEventListener('click', click); root.removeEventListener('input', input); root.replaceChildren(); };
+  return () => { clearFocus(); unsubscribe(); root.removeEventListener('click', click); root.removeEventListener('input', input); root.replaceChildren(); };
 }
 
 /** Synthetic fixture factory; never enabled by default in a product component. */
