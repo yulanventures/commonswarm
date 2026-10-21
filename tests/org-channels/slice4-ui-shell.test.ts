@@ -90,22 +90,16 @@ interface FakeEl extends OrgDomElement {
 function createFakeDomDoc(): { doc: OrgDomDocument; getFocused: () => FakeEl | null } {
   let focused: FakeEl | null = null;
   const makeEl = (tag: string): FakeEl => {
-    const attrs = new Map<string, string>();
-    const children: Array<FakeEl | string> = [];
-    const dataset: Record<string, string | undefined> = {};
+    const attrs = new Map<string, string>(), children: Array<FakeEl | string> = [], dataset: Record<string, string | undefined> = {};
     const listeners = new Map<string, Array<(event: { key?: string; preventDefault?(): void }) => void>>();
     const el: FakeEl = {
       tagName: tag.toUpperCase(), className: '', id: '', textContent: null, hidden: false, dataset, children, attrs,
-      setAttribute(name: string, value: string) { attrs.set(name, value); },
-      getAttribute(name: string) { return attrs.get(name) ?? null; },
-      append(...nodes: Array<OrgDomElement | string>) { children.push(...(nodes as Array<FakeEl | string>)); },
-      focus() { focused = el; },
-      addEventListener(type: string, fn: (event: { key?: string; preventDefault?(): void }) => void) {
-        listeners.set(type, [...(listeners.get(type) ?? []), fn]);
-      },
-      trigger(type: string, event: { key?: string; preventDefault?(): void } = { preventDefault() {} }) {
-        for (const fn of listeners.get(type) ?? []) fn(event);
-      },
+      setAttribute: (k, v) => { attrs.set(k, v); },
+      getAttribute: (k) => attrs.get(k) ?? null,
+      append: (...n) => { children.push(...(n as Array<FakeEl | string>)); },
+      focus: () => { focused = el; },
+      addEventListener: (t, fn) => { listeners.set(t, [...(listeners.get(t) ?? []), fn]); },
+      trigger: (t, ev = { preventDefault() {} }) => { for (const fn of listeners.get(t) ?? []) fn(ev); },
     };
     return el;
   };
@@ -154,6 +148,8 @@ test('multi-org switcher renders 4 role tiers, org unread totals, menu ARIA role
   const popButtons = pop.children.filter((c): c is FakeEl => typeof c !== 'string');
 
   assert.equal(pop.attrs.get('role'), 'menu');
+  assert.equal(pop.dataset.anchorTop, '58px');
+  assert.equal(pop.dataset.anchorLeft, '64px');
   assert.equal(popButtons[0]?.attrs.get('role'), 'menuitemradio');
   assert.equal(popButtons[0]?.attrs.get('aria-checked'), 'true');
   assert.equal(popButtons[0]?.dataset.orgUnreadCount, '5');
@@ -194,7 +190,10 @@ test('workspace selector enforces canReadWorkspace and blocks revoked user or ow
   const guestCaller = { principal_kind: 'user' as const, principal_id: 'u-guest' };
   const agentCaller = { principal_kind: 'agent' as const, principal_id: 'ag-argon' };
 
-  const memberNav = deriveWorkspaceChannelNavVM(state, memberCaller, { activeOrgId: 'org-yulan', workspaceMenuOpen: true });
+  const memberNav = deriveWorkspaceChannelNavVM(state, memberCaller, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-open', workspaceMenuOpen: true });
+  assert.equal(memberNav.activeWorkspace?.workspaceId, 'ws-build');
+  assert.equal(memberNav.activeWorkspace?.granted, true);
+  assert.equal(memberNav.header.activeWorkspace?.workspaceId, 'ws-build');
   assert.deepEqual(
     memberNav.workspaces.map((w) => [w.slug, w.granted, w.joinable]),
     [['commonswarm-build', true, false], ['operations', false, true], ['customer-advisory', false, true]],
@@ -203,23 +202,17 @@ test('workspace selector enforces canReadWorkspace and blocks revoked user or ow
   const revokedUserState: OrgChannelAuthorityState = {
     ...state,
     workspaceGrants: [
-      ...state.workspaceGrants.map((g) => g.workspace_id === 'ws-build' && g.principal_id === 'u-member' ? { ...g, revoked_at: '2026-10-21T01:00:00Z' } : g),
+      ...state.workspaceGrants.map((g) => (g.workspace_id === 'ws-build' && g.principal_id === 'u-member' ? { ...g, revoked_at: '2026-10-21T01:00:00Z' } : g)),
       { workspace_id: 'ws-ops', org_id: 'org-yulan', principal_kind: 'user', principal_id: 'u-member', role: 'member', created_at: '2026-10-21T00:00:00Z', revoked_at: '2026-10-21T01:00:00Z' },
     ],
   };
-  const revokedMemberNav = deriveWorkspaceChannelNavVM(revokedUserState, memberCaller, { activeOrgId: 'org-yulan' });
-  assert.deepEqual(revokedMemberNav.workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['customer-advisory', false, true]]);
-
-  const agentBefore = deriveWorkspaceChannelNavVM(state, agentCaller, { activeOrgId: 'org-yulan' });
-  assert.deepEqual(agentBefore.workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['commonswarm-build', true, false], ['operations', true, false]]);
-
+  assert.deepEqual(deriveWorkspaceChannelNavVM(revokedUserState, memberCaller, { activeOrgId: 'org-yulan' }).workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['customer-advisory', false, true]]);
+  assert.deepEqual(deriveWorkspaceChannelNavVM(state, agentCaller, { activeOrgId: 'org-yulan' }).workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['commonswarm-build', true, false], ['operations', true, false]]);
   const ownerRevokedState: OrgChannelAuthorityState = {
     ...state,
-    workspaceGrants: state.workspaceGrants.map((g) => g.workspace_id === 'ws-ops' && g.principal_id === 'u-tom' ? { ...g, revoked_at: '2026-10-21T01:00:00Z' } : g),
+    workspaceGrants: state.workspaceGrants.map((g) => (g.workspace_id === 'ws-ops' && g.principal_id === 'u-tom' ? { ...g, revoked_at: '2026-10-21T01:00:00Z' } : g)),
   };
-  const agentAfterOwnerRevoke = deriveWorkspaceChannelNavVM(ownerRevokedState, agentCaller, { activeOrgId: 'org-yulan' });
-  assert.deepEqual(agentAfterOwnerRevoke.workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['commonswarm-build', true, false]]);
-
+  assert.deepEqual(deriveWorkspaceChannelNavVM(ownerRevokedState, agentCaller, { activeOrgId: 'org-yulan' }).workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['commonswarm-build', true, false]]);
   const guestNav = deriveWorkspaceChannelNavVM(state, guestCaller, { activeOrgId: 'org-yulan', workspaceMenuOpen: true });
   assert.deepEqual(guestNav.workspaces.map((w) => w.slug), ['commonswarm-build']);
   assert.doesNotMatch(renderWorkspaceSwitcherMenuHtml(guestNav), /\+ New Workspace/);
@@ -280,6 +273,9 @@ test('all 38 preserved hooks across chat/members/wiki modes, scoped Kylon v0.3 C
     const shellHtml = renderKylonOrgShellHtml(vm);
     assert.doesNotMatch(shellHtml, /class="app[^"]*"[^>]*data-home-workspace-shell/);
     assert.doesNotMatch(shellHtml, /class="workspace"[^>]*data-home-route-pane/);
+    assert.doesNotMatch(shellHtml, /class="rail-bottom"[^>]*data-rail-account/);
+    assert.doesNotMatch(shellHtml, /class="topbar-copy"[^>]*data-home-channel-menu/);
+    if (mode === 'chat') assert.match(shellHtml, /data-channel-id="ch-gen" data-channel-place="ch-gen"/);
     for (const hook of PRESERVED_SHELL_HOOKS) {
       const needle = hook.startsWith('#') ? `id="${hook.slice(1)}"` : hook.slice(1, -1);
       assert.ok(shellHtml.includes(needle), `shellHtml (${mode}) missing preserved hook ${hook}`);

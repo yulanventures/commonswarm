@@ -12,10 +12,10 @@
 <nav class="rail" aria-label="Product" data-home-rail-slot>
 <div class="mark" aria-label="CommonSwarm">cs</div>
 <div id="rail-nav" style="display:contents"></div>
-<div class="rail-bottom" id="dashboard-user-menu" data-user-menu-root data-rail-account>
+<div class="rail-bottom" id="dashboard-user-menu" data-user-menu-root>
 <button class="icon-button" aria-label="Settings" data-ic="settings" data-theme-toggle><span class="sr-only" data-theme-toggle-label>Light</span></button>
 <button class="avatar small" aria-label="Account" data-user-menu-trigger>TL</button>
-<div class="popover" data-user-menu hidden data-connected-apps-open data-signout></div>
+<div class="popover" data-user-menu hidden data-connected-apps-open data-signout><span class="sr-only" data-rail-account>Your account</span></div>
 </div>
 </nav>
 <aside class="sidebar" id="sidebar" aria-label="Navigation">
@@ -37,11 +37,13 @@
 <header class="topbar" data-home-workspace-header="ws-build" data-home-phone-bar="ws-build" data-home-account-menu>
 <button class="icon-button mobile-menu" aria-label="Open navigation" data-ic="menu" data-action="open-nav" data-home-back aria-controls="sidebar" aria-expanded="false"></button>
 <span class="room-icon" id="room-symbol">#</span>
-<div class="topbar-copy" data-home-channel-menu>
+<div class="topbar-copy">
 <h1 id="dashboard-channel-title" data-channel-name><span id="hm-ws-title" class="sr-only"></span><span id="hm-phone-title" class="sr-only"></span><span id="screen-title">general</span><span class="badge private-badge" id="priv-badge" hidden>Private</span></h1>
 <p class="topic" id="screen-topic" data-channel-description></p>
+<div data-home-channel-menu hidden>
 <button id="hm-channel-menu-trigger" class="sr-only" aria-controls="hm-channel-menu-panel" aria-expanded="false"><span data-channel-menu-label>general</span></button>
-<div id="hm-channel-menu-panel" hidden data-workspace-view="signals" data-channel-place="general" data-channel-filter="all" data-channel-new data-channel-list data-home-workspace-shell="ws-build" data-home-route-pane data-home-catchup data-update-notice data-update-dismiss data-update-reload data-roster-open></div>
+<div id="hm-channel-menu-panel" hidden data-workspace-view="signals" data-channel-place="ch-general" data-channel-filter="all" data-channel-new data-channel-list data-home-workspace-shell="ws-build" data-home-route-pane data-home-catchup data-update-notice data-update-dismiss data-update-reload data-roster-open></div>
+</div>
 </div>
 <div class="topbar-actions" id="topbar-actions">
 <span class="badge good" data-live-chip>Live</span>
