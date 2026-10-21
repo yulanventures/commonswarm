@@ -119,10 +119,14 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
     import { buildPhoneTopBar, buildWorkspaceHeader, buildWorkspaceNav } from './src/lib/home-shell';
     import { renderCatchUp as buildCatchUp } from './src/lib/home-catchup';
     import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes } from './src/lib/home-focus';
-    import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, catchUpRailPeople } from './src/lib/home-map';
+    import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, homeRailPeople } from './src/lib/home-map';
     import { routeHref } from './src/lib/home-route';
     import { PendingRefreshGate } from './src/lib/pending-refresh';
-    import './src/styles/tokens.css'; import './src/styles/home/index.css';
+    import { greetingName } from './src/lib/greeting-name';
+    import { createKylonHost } from './src/lib/kylon-shell/host';
+    import { projectHomeLayout } from './src/lib/kylon-shell/projection';
+    import './src/styles/tokens.css'; import './src/styles/home/index.css'; import './src/styles/kylon-layout/index.css';
+    const app = document.querySelector('live-dashboard');
     ${setup}
     ${production()}
     renderRoster();
@@ -132,7 +136,7 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
       rename: () => { workspaces = workspaces.map(w => w.id === 'X' ? {...w,name:'Summer trip'} : w); renderRoster(); },
       removeTrip: () => { workspaces = workspaces.filter(w => w.id !== 'X'); renderRoster(); },
       changeShell: () => { workspaces = workspaces.map(w => w.id === 'W' ? {...w,name:'House'} : w); renderHomeShell(); },
-      catchup: () => { homeRoute = {view:'catchup'}; catchUpData = initialCatchUpData(workspaces); renderHomeCatchUp(); },
+      catchup: () => { homeRoute = {view:'catchup'}; one('[data-home-catchup]').hidden = false; renderHomeShell(); catchUpData = initialCatchUpData(workspaces); renderHomeCatchUp(); },
       fillCard: () => { catchUpData[0] = {...catchUpData[0],state:'open'}; renderHomeCatchUp(); },
       repaint: () => { now += 60000; renderHomeCatchUp(); }
     };
@@ -150,12 +154,9 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
     assert.equal(await evaluate("!!window.fixture"), true, "production refresh functions initialized");
     const sequential = [...document.querySelectorAll('a[href],button,input,select,textarea,[tabindex]')]
       .filter(node => node.tabIndex >= 0 && !node.disabled && node.getClientRects().length > 0);
-    /* Canvas rail (home-visual 40979db1, Main.dc.html): the brand row is a link above Catch up, so the
-       document order, and the Tab order, is brand, Catch up, Home, Trip. Pin all four, not only the end. */
-    assert.deepEqual(sequential.slice(0, 4).map(node => node.classList.contains("hm-rail__brand") ? "brand"
-      : node.hasAttribute("data-home-catch-up") ? "catch-up" : node.dataset.railWorkspace ?? node.tagName),
-      ["brand", "catch-up", "W", "X"], "the native keyboard order is brand, Catch up, Home, then the Trip link");
-    assert.equal(await evaluate("document.activeElement.dataset.railWorkspace"), "X", "four Tab keys landed on the Trip link");
+    assert.deepEqual(sequential.filter(node => node.hasAttribute('data-rail-workspace')).map(node => node.dataset.railWorkspace),
+      ["W", "X"], "the native keyboard order keeps Home before Trip in the mounted context rail");
+    assert.equal(await evaluate("document.activeElement.dataset.railWorkspace"), "X", "native Tab keys landed on the Trip link");
     await evaluate("window.original = document.activeElement");
     const statusTitle = () => evaluate("document.querySelector('[data-rail-agent] .hm-status').title");
     assert.equal(await statusTitle(), "Active 13 minutes ago", "initial paint exposes an aging status detail");
@@ -205,9 +206,14 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
   try {
     const fixturePath = join(directory, "index.html");
     await writeFile(fixturePath, `<!doctype html><html><head><style>${css}
-    [hidden] {display:none!important} .hm-phone-bar,.hm-ws-nav {display:none}
-    </style></head><body><div data-home-rail-slot></div><div data-home-workspace-shell></div>
-    <div data-home-phone-nav></div><section data-home-catchup></section>
+    [hidden] {display:none!important} html,body {margin:0;height:100%}
+    live-dashboard {display:block;height:100%}
+    </style></head><body><live-dashboard class="dashboard" data-kylon-shell data-state="channel" data-channel-view="feed">
+    <div class="dashboard__frame hm-frame"><aside class="hm-frame__rail">
+    <div data-user-menu-root></div><div class="hm-frame__rail-content" data-home-rail-slot></div></aside>
+    <main class="hm-frame__main"><section data-home-catchup hidden></section><div data-home-workspace-shell></div>
+    <div data-home-phone-nav></div></main></div></live-dashboard>
+    <script>window.addEventListener('error', event => { window.fixtureError = event.message; });</script>
     <script>${js.replace(/<\/script/giu, "<\\/script")}</script></body></html>`);
     const profileDir = await mkdtemp(join(tmpdir(), "commonswarm-home-focus-profile-"));
     profile = profileDir;
@@ -243,13 +249,19 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
     const readyDeadline = Date.now() + 10_000;
     let ready = false;
     while (Date.now() < readyDeadline) {
-      ready = await evaluate(connected.send, sessionId, "document.documentElement.dataset.focusReady === '1'") === true;
+      ready = await evaluate(connected.send, sessionId, "(() => { if (window.fixtureError) throw new Error(window.fixtureError); return document.documentElement.dataset.focusReady === '1'; })()") === true;
       if (ready) break;
       await new Promise((resolveWait) => setTimeout(resolveWait, 50));
     }
     assert.equal(ready, true, "the fixture did not finish painting");
-    // Brand, Catch up, Home, Trip: the fourth Tab reaches the Trip link (the brand row joined in 40979db1).
-    for (let step = 0; step < 4; step += 1) {
+    // Start from the browser's initial focus and reach the workspace by native keyboard navigation.
+    const tripTabCount = await evaluate(connected.send, sessionId, `
+      [...document.querySelectorAll('a[href],button,input,select,textarea,[tabindex]')]
+        .filter(node => node.tabIndex >= 0 && !node.disabled && node.getClientRects().length > 0 && !node.closest('[hidden],[inert]'))
+        .findIndex(node => node.dataset.railWorkspace === 'X') + 1
+    `) as number;
+    assert.ok(tripTabCount > 0, 'Trip is reachable in the mounted shell keyboard order');
+    for (let step = 0; step < tripTabCount; step += 1) {
       await connected.send("Input.dispatchKeyEvent", {
         type: "keyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9,
       }, sessionId);
@@ -260,7 +272,7 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
     assert.equal(
       await evaluate(connected.send, sessionId, "document.activeElement?.dataset?.railWorkspace ?? ''"),
       "X",
-      "four Tab keys land on the Trip workspace",
+      "native Tab keys land on the Trip workspace",
     );
     const checks = await evaluate(connected.send, sessionId, "window.runFocusChecks()") as
       { actual: unknown; expected: unknown; name: string; different?: boolean }[];

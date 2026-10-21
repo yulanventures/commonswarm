@@ -67,7 +67,8 @@ test('standalone details hide the account door and restore the same DOM to works
   const frame = { toggleAttribute(_name: string, enabled: boolean) { standalone = enabled; } };
   const nodes = new Map<string, unknown>([['.hm-frame', frame], ['[data-user-menu-root]', account],
     ['.hm-frame__main', main], ['.hm-frame__rail', rail]]);
-  const context = createContext({ one: (selector: string) => nodes.get(selector) });
+  // Exercise the legacy/parked frame; the mounted adapter owns its account placement.
+  const context = createContext({ layout: { mounted: false }, one: (selector: string) => nodes.get(selector) });
   runInContext("let homeRoute={view:'todo'}; const app={dataset:{state:'channel',channelView:'feed'}};", context);
   runInContext(await dashboardFunctions(['syncStandalonePage']), context);
   const sync = (statement = '') => runInContext(`${statement}; syncStandalonePage();`, context);
@@ -125,6 +126,7 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
     let finishBoot!: () => void, boots = 0;
     const pendingBoot = new Promise<void>(resolve => { finishBoot = resolve; });
     const context = createContext({
+      layout: { mounted: false },
       one: (selector: string) => nodes.get(selector) ?? null,
       all: (selector: string) => selector.split(',').some(part => part.trim() === '[data-home-route-pane]') ? [pane] : [],
       queueMicrotask: (callback: () => void) => microtasks.push(callback),
@@ -210,10 +212,10 @@ test('applyHomePane keeps standalone to-do states readable, with a back link and
   frame.append(rail, main); rail.append(account); main.append(slot, channel);
   const nodes = new Map<string, PaneNode>([['.hm-frame', frame], ['.hm-frame__main', main], ['.hm-frame__rail', rail],
     ['[data-home-route-pane]', slot], ['.dashboard__channel', channel], ['[data-user-menu-root]', account]]);
-  const context = createContext({ document, routeHref, homeViewTitle, todoView,
+  const context = createContext({ document, routeHref, homeViewTitle, todoView, layout: { mounted: false },
     window: { requestAnimationFrame: (callback: () => void) => frames.push(callback) },
     one: (selector: string) => nodes.get(selector) ?? null,
-    all: (selector: string) => selector === '[data-home-route-pane] h1' ? slot.querySelectorAll('h1') : [],
+    all: (selector: string) => selector.split(',').some(part => part.trim() === '[data-home-route-pane] h1') ? slot.querySelectorAll('h1') : [],
     // Paint replacement has its own focus tests; keep the production to-do DOM builder here.
     replaceHomeRegion: (region: PaneNode, _key: string, children: PaneNode[]) => region.replaceChildren(...children),
   });
@@ -646,17 +648,32 @@ test('browser reads retain a top-level directed reply reference', () => {
 
 
 test('each navigation focuses the visible H1 for that view', async () => {
-  const frames: (()=>void)[] = [], selectors: string[] = [], focused: string[] = [];
+  const frames: (()=>void)[] = [], focused: unknown[] = [];
+  const heading = (name: string) => ({ name, visible: false, getClientRects() { return this.visible ? [{}] : []; }, focus() { focused.push(this); } });
+  const scopes = {catchup:'[data-home-catchup]',chat:'[data-home-workspace-shell]',todos:'[data-home-route-pane]',todo:'[data-home-route-pane]',agent:'[data-home-route-pane]',new:'[data-panel=create]', 'add-agent':'[data-channel-view=agent-choice]',lists:'[data-channel-view=objects]',files:'[data-channel-view=files]',wiki:'[data-channel-view=brain]'};
+  const headings = new Map([...new Set(Object.values(scopes))].map(scope => [`${scope} h1`, heading(scope)]));
+  const phoneTitle = heading('phone workspace');
+  headings.set('.cs-org-phone-title h1', phoneTitle);
   const context = createContext({homeViewTitle:()=> 'View · CommonSwarm', window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
-    document:{title:''}, all:(selector:string)=>{selectors.push(selector);return [{getClientRects:()=>[],focus:()=>focused.push('hidden')},{getClientRects:()=>[{}],focus:()=>focused.push(selector)}];}});
+    document:{title:''}, all:(selector:string)=>selector.split(',').flatMap(part => headings.get(part.trim()) ?? [])});
   runInContext("let homeRoute, workspaces=[{id:'W',name:'Home'}];",context);
   runInContext(await dashboardFunctions(['focusHomeView']),context);
-  const scopes = {catchup:'[data-home-catchup]',chat:'[data-home-workspace-shell]',todos:'[data-home-route-pane]',todo:'[data-home-route-pane]',agent:'[data-home-route-pane]',new:'[data-panel=create]', 'add-agent':'[data-channel-view=agent-choice]',lists:'[data-channel-view=objects]',files:'[data-channel-view=files]',wiki:'[data-channel-view=brain]'};
   for (const [view,scope] of Object.entries(scopes)) {
+    focused.length = 0;
+    for (const node of headings.values()) node.visible = false;
+    const target = headings.get(`${scope} h1`)!;
+    target.visible = true;
     runInContext(`homeRoute={view:${JSON.stringify(view)},workspaceId:'W'};focusHomeView();`,context);
     assert.equal(frames.length,1); frames.shift()!();
-    assert.equal(selectors.at(-1), `${scope} h1`); assert.equal(focused.at(-1),`${scope} h1`);
+    assert.equal(focused.at(-1), target, `${view} focuses its visible page heading`);
   }
+  // The adapter moves the phone H1 outside the workspace-header slot.
+  focused.length = 0;
+  for (const node of headings.values()) node.visible = false;
+  phoneTitle.visible = true;
+  runInContext("homeRoute={view:'chat',workspaceId:'W'};focusHomeView();",context);
+  assert.equal(frames.length,1); frames.shift()!();
+  assert.equal(focused.at(-1), phoneTitle, 'the relocated visible phone heading receives focus');
 });
 
 
@@ -1004,6 +1021,8 @@ test('accepted agent removals leave every current surface immediately and after 
       window: { setInterval: (fn: () => void) => { tick = fn; return 1; } },
       replaceHomeRegion: (region: RailNode, _key: string, children: RailNode[]) => region.replaceChildren(...children),
       refreshHomeRailTimes: () => {},
+      // Shell placement is unrelated to accepted removal; retain the real rail builder below.
+      syncVisibleShell: () => {},
       roster: () => new Promise(resolve => { finishRoster = resolve; }),
       homeOverview: () => new Promise(resolve => { finishOverview = resolve; }),
       // The accepted command's transport receipt; it neither edits nor filters UI state.
