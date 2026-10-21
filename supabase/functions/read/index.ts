@@ -429,6 +429,13 @@ function readFailureResponse(
   phase: ReadHandlerPhase,
   requestId: string,
 ): Response {
+  // Only owned PostgreSQL denials are public authentication outcomes. Unknown
+  // SQLSTATE/detail pairs retain the correlated failure response below.
+  if (error !== null && typeof error === "object" && "code" in error && error.code === "42501"
+    && "detail" in error) {
+    if (error.detail === "LOCAL_CREDENTIAL_INVALID") return json(401, { error: "unauthenticated" });
+    if (error.detail === "LOCAL_CREDENTIAL_DENIED") return json(403, { error: "forbidden" });
+  }
   const diagnostics = extractSafeDiagnostics(error, phase, requestId);
   console.error(formatReadFailureLog(diagnostics));
   return json(500, { ...publicReadErrorBody(diagnostics) });

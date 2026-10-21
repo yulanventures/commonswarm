@@ -69,7 +69,7 @@ export async function loadAgentCredential(
  * them in this transaction; no existing stream may disappear or rebind, and
  * no new external binding/parent/session/family/token is adopted here.
  */
-export async function recheckLocalCredential(tx:Sql,hash:Uint8Array,plan:LocalAuthLockPlan):Promise<AgentAuthRow|null> {
+export async function recheckLocalCredential(tx:Sql,hash:Uint8Array,plan:LocalAuthLockPlan,allowExpiredRenewal=false):Promise<AgentAuthRow|null> {
   if(!plan.locked) throw new LocalAuthDiscoveryChanged();
   const current=await plan.rediscover();
   const initial=plan.snapshot;
@@ -84,7 +84,7 @@ export async function recheckLocalCredential(tx:Sql,hash:Uint8Array,plan:LocalAu
   if(snapshotKey({...current,objectStreams:initial.objectStreams,todoStreams:initial.todoStreams,todoBindings:initial.todoBindings})!==snapshotKey(initial)) throw new LocalAuthDiscoveryChanged();
   const exact=await discoverLocalCredential(tx,hash);
   if(!exact || !initial.bindings.some(r=>r.token_id===exact.token_id)) throw new LocalAuthDiscoveryChanged();
-  return await lockedCredentialFacts(tx,hash,exact,false,false);
+  return await lockedCredentialFacts(tx,hash,exact,allowExpiredRenewal,false);
 }
 async function lockedCredentialFacts(tx:Sql,tokenHash:Uint8Array,exact:LocalCredentialIds,
   allowExpiredRenewal:boolean,stampUse:boolean):Promise<(AgentAuthRow & {first_use:boolean})|null> {
