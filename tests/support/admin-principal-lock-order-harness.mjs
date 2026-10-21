@@ -12,10 +12,34 @@
  * statuses and booleans: never SQL text, driver messages, bodies or credentials. */
 import { execFileSync, spawn } from 'node:child_process';
 import { X509Certificate, createHash, randomBytes, randomUUID } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, lstatSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+
+/** Existing standalone worker mount survives scratch cleanup; never trust a symlink or public directory.
+ * Flat <=1MiB chunks match the controller's artifact validator, retaining up to 16MiB exactly. */
+export function privateHarnessEvidence(label, bytes) {
+  let root;
+  if (process.env.STANDALONE_CI === '1') {
+    root = '/receipt';
+    const info = lstatSync(root);
+    if (!isAbsolute(root) || !info.isDirectory() || info.isSymbolicLink()
+      || info.uid !== process.getuid() || (info.mode & 0o077) !== 0 || realpathSync(root) !== root)
+      throw new Error('unsafe_private_artifact_root');
+  } else {
+    root = mkdtempSync(join(tmpdir(), 'server-harness-evidence-'));
+    chmodSync(root, 0o700);
+  }
+  if (!/^[a-z-]{1,32}$/u.test(label)) throw new Error('unsafe_evidence_label');
+  const prefix = `${label}-${randomUUID()}`, paths = [];
+  const retain = (name, data) => { const path = join(root, name); writeFileSync(path, data, {mode:0o600,flag:'wx'}); paths.push(path); };
+  const input = Buffer.from(bytes), cap = 16 * 1024 * 1024, chunk = 1024 * 1024;
+  for (let offset = 0; offset < Math.min(input.length, cap); offset += chunk)
+    retain(`${prefix}-${offset / chunk}.private`, input.subarray(offset, Math.min(offset + chunk, cap)));
+  retain(`${prefix}.json`, JSON.stringify({bytes:input.length,retained_bytes:Math.min(input.length,cap),truncated:input.length>cap}));
+  return paths;
+}
 
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 export const BINDING_ENV = 'C1B_LOCK_ORDER_BINDING';
@@ -216,7 +240,7 @@ export async function openLockOrderTarget(options) {
   const env = options.env ?? process.env;
   const live = options.live ?? readLiveStackFacts();
   const docker = options.docker ?? realDocker();
-  const fs = options.fs ?? { lstatSync, readFileSync };
+  const fs = options.fs ?? { lstatSync, mkdtempSync, readFileSync };
   let binding;
   let label;
   let tlsCaPem = null;
@@ -714,7 +738,7 @@ async function ensureAdminIssuance(sql, issuance) {
 
 export function sqlstate(error) {
   const code = error !== null && typeof error === 'object' ? error.code : undefined;
-  return typeof code === 'string' && /^[0-9A-Z]{5}$/u.test(code) ? code : 'non_sql';
+  return typeof code === 'string' && /^(?:00|01|02|03|08|09|0A|0B|0F|0L|0P|0Z|20|21|22|23|24|25|26|27|28|2B|2D|2F|34|38|39|3B|3D|3F|40|42|44|53|54|55|57|58|F0|HV|P0|XX)[0-9A-Z]{3}$/u.test(code) ? code : 'non_sql';
 }
 /** Setup diagnostics only: a SQLSTATE, or a driver, TLS or socket error code. Never a message. */
 export function failureCode(error) {
@@ -756,10 +780,10 @@ function removeSecretDirectory({ root, dir }) {
  * this checkout. Materialize the complete source trees so activity, config and
  * every relative/type import use the same generation as command/read. */
 export const ACTIVE_FLOOR_SOURCES = Object.freeze({
-  H: Object.freeze({commit:'5c999dbbb599ef162282cfb85ff6a2d44a298d7e',tree:'475f8b406f831ca859f8213830acd8f899496266'}),
+  H: Object.freeze({commit:'0e3552a4e7dab640cee39f789c22ef1d18ca2b82',tree:'a901908d7e15041ae8246d49b18bd56b361e8b90'}),
   // Pre-fix virgin-root witness only; b9 already supports expired USED renewal.
   B: Object.freeze({commit:'b9ee52592df924d945f800619ee31e6c483200df',tree:'6c97679c7ffe042e88addcfaf573c78d6a1379dc'}),
-  F: Object.freeze({commit:'dd357a30978c2b993e430ea7d604456de7bfcfd9',tree:'564d429230774a3f1c8b0dd9f0a3b9415971093d'}),
+  F: Object.freeze({commit:'af9a82923377e7662e2b61aac3eeb8cdff6301fc',tree:'b4d2656379f81448a1ce88050450fb9c3da116a7'}),
 });
 export function materializeActiveFloorSource(directory, generation) {
   // Qualification HEAD changes test bindings only. Every current row loads the
@@ -906,7 +930,7 @@ export async function assertActiveFloorCatalog(sql) {
       if(acl.can_read!==['authenticated','swarm_read'].includes(role) || acl.can_write || acl.can_mutate)
         throw new Error('active_catalog_view_effective_acl');
     }
-    return {functions:expected.size,migrations:migrations.length,view_columns:columns.length,
+    return {functions:expected.size,migrations:migrations.length,migration_names:[...migrations],view_columns:columns.length,
       measured_view_sha256:createHash('sha256').update(view.body).digest('hex')};
   });
 }
@@ -967,17 +991,41 @@ export async function runScenario(target, scenario, timeoutMs = 170_000, generat
       '--allow-read', '--allow-env', '--allow-net', fileURLToPath(import.meta.url), configPath, scenario],
     { cwd: REPO_ROOT, env, stdio: ['ignore', 'pipe', 'ignore'] });
     let stdout = '';
+    let oversized = false;
+    const outputLimit = 1024 * 1024;
     child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stdout.on('data', (chunk) => {
+      if (Buffer.byteLength(stdout) + Buffer.byteLength(chunk) > outputLimit) { oversized = true; child.kill('SIGKILL'); }
+      else if (!oversized) stdout += chunk;
+    });
     const exit = await new Promise((resolve) => {
       const timer = setTimeout(() => { child.kill('SIGKILL'); }, timeoutMs);
       child.on('error', () => { clearTimeout(timer); resolve({code:null,signal:'spawn_error'}); });
       child.on('close', (code, signal) => { clearTimeout(timer); resolve({ code, signal }); });
     });
-    const line = stdout.split('\n').reverse().find((entry) => entry.startsWith('LOCK_ORDER_RESULT '));
-    if (exit.code !== 0 || exit.signal !== null || line === undefined) return { scenario, stage: 'process_failed', exit_code: exit.code, signal: exit.signal,
-      ...(scenario==='floor-first-use-vs-head-revocation' ? {required_compatibility:'BLOCKED',floor_compatibility:'INCONCLUSIVE'} : {}) };
-    const result = JSON.parse(line.slice('LOCK_ORDER_RESULT '.length));
+    const lines = stdout.split('\n').filter(entry => entry.startsWith('LOCK_ORDER_RESULT '));
+    let result, invalid = oversized ? 'oversize_result' : lines.length !== 1 ? 'missing_or_duplicate_result' : null;
+    if (!invalid) {
+      try {
+        result = JSON.parse(lines[0].slice('LOCK_ORDER_RESULT '.length));
+        if (!result || typeof result !== 'object' || Array.isArray(result) || result.scenario !== scenario
+          || typeof result.stage !== 'string' || !new Set(['active_catalog', 'historical-guards', 'forced-rollback', 'allow-issuer-race', 'blocker', 'complete', 'config', 'control-timeout', 'creator-inserts', 'creator-stream', 'deadlock-timeout', 'fixture', 'golden-calls', 'golden-fixture', 'holder-rows', 'holder-waits-for-stream', 'import', 'min-client-version', 'park-creation', 'park-first-admin', 'park-holder', 'park-second-admin', 'race', 'release', 'sqlstate-capture-control', 'warm-up', 'writes']).has(result.stage)
+          || !Number.isSafeInteger(result.http_refused) || result.http_refused < 0
+          || (result.error !== undefined && (typeof result.error !== 'string'
+            || !(new Set(['CERT_HAS_EXPIRED','DEPTH_ZERO_SELF_SIGNED_CERT','ECONNABORTED','EHOSTUNREACH','ENETUNREACH','ERR_SSL_WRONG_VERSION_NUMBER','ERR_TLS_CERT_ALTNAME_INVALID','SELF_SIGNED_CERT_IN_CHAIN','UNABLE_TO_VERIFY_LEAF_SIGNATURE','active_catalog_body_owner_or_mode','active_catalog_column','active_catalog_effective_acl','active_catalog_exact_function_acl','active_catalog_public_execute','active_catalog_search_path','active_catalog_signature','active_catalog_source_unreadable','active_catalog_trigger','active_catalog_trigger_predicate','active_catalog_view_acl','active_catalog_view_effective_acl','active_catalog_view_owner_barrier','active_catalog_view_shape','active_floor_chain_binding','active_floor_first_owned_queue_inconclusive','active_floor_principal_control','active_floor_renew_control','active_floor_root_use','active_floor_second_owned_queue_inconclusive','active_floor_successor_use','admin_consent_refused','admin_extra_consent_refused','admin_grant_refused','allow_foreign_fixture','allow_other_workspace_fixture','allow_principal_control','allow_provision_control','allow_retirement_control','allow_workspace_not_reached','alone_claim_setup','budget_successor_control','compat_old_wire_mint','compat_principal_control','compat_silent_renewal_control','creation_did_not_park','deadlock_timeout_not_below_lock_timeout','delegated_child_read_control','delegated_create_control','delegated_provision_control','first_admin_did_not_park','fixture rollback','fixture_endpoint_not_127_0_0_1','fixture_tls_ca_missing','floor_C_use','floor_T_use','floor_X_issue','floor_module_missing','floor_owned_X_queue_inconclusive','floor_principal_setup','floor_real_chain_binding','golden_claim_failed','golden_local_principal_refused','head_owned_C_not_held_inconclusive','head_owned_X_queue_inconclusive','higher_parent_not_parked','historical_baseline-denial-every-table-unchanged','historical_baseline-expiry-refusal','historical_baseline-live-renewal-positive','historical_catalog_changed','historical_coherent-old-credential','historical_complete-successor-inheritance','historical_exact-agent_presence-append','historical_exact-audit_log-append','historical_exact-events-append','historical_exact-grant-counter-and-use','historical_exact-idempotency_keys-append','historical_exact-stream-sequence','historical_exact-successor-adoption','historical_expired-read-denied','historical_expired-read-every-table-unchanged','historical_extension_owner_or_dependency','historical_grant-history-preserved','historical_guard-probes-rollback-every-table','historical_guard_settings','historical_hash-and-live-authority','historical_monotonic_guard_missing','historical_one-pending-hash-matched-successor','historical_ordinary-denial-every-table-unchanged','historical_ordinary-renewal-denied','historical_other-grants-unchanged','historical_retained-catalog-after-cases','historical_same-invocation-positive','historical_server_clock_not_pinned','historical_silent-short-successor','historical_standing-null-technical-windows','historical_successor-read-usable','historical_table-inventory-unchanged','historical_unauthorized_write_not_denied','historical_unchanged-commonswarm_oauth.admin_access_issuances','historical_unchanged-commonswarm_oauth.admin_client_owner_approvals','historical_unchanged-commonswarm_oauth.admin_consent_orchestration','historical_unchanged-commonswarm_oauth.admin_cutover_state','historical_unchanged-commonswarm_oauth.admin_grant_bindings','historical_unchanged-commonswarm_oauth.admin_interactions','historical_unchanged-commonswarm_oauth.admin_oauth_audit','historical_unchanged-commonswarm_oauth.admin_oauth_audit_daily','historical_unchanged-commonswarm_oauth.admin_verified_clients','historical_unchanged-commonswarm_oauth.browser_sessions','historical_unchanged-commonswarm_oauth.cimd_cache','historical_unchanged-commonswarm_oauth.consent_orchestration','historical_unchanged-commonswarm_oauth.dpop_nonces','historical_unchanged-commonswarm_oauth.dpop_proof_replays','historical_unchanged-commonswarm_oauth.finish_records','historical_unchanged-commonswarm_oauth.interactions','historical_unchanged-commonswarm_oauth.issuer_key_denials','historical_unchanged-commonswarm_oauth.provider_artifacts','historical_unchanged-commonswarm_oauth.provider_grant_resources','historical_unchanged-commonswarm_oauth.refresh_family_tombstones','historical_unchanged-commonswarm_oauth.registered_clients','historical_unchanged-commonswarm_ops.migration_checksums','historical_unchanged-swarm.admin_accounts','historical_unchanged-swarm.admin_command_results','historical_unchanged-swarm.admin_consents','historical_unchanged-swarm.admin_created_workspaces','historical_unchanged-swarm.admin_credentials','historical_unchanged-swarm.admin_events','historical_unchanged-swarm.admin_grants','historical_unchanged-swarm.admin_rate_buckets','historical_unchanged-swarm.admin_routine_invitations','historical_unchanged-swarm.admin_security_audit','historical_unchanged-swarm.agent_execution_sessions','historical_unchanged-swarm.agent_join_attempts','historical_unchanged-swarm.agent_join_credentials','historical_unchanged-swarm.agent_presence','historical_unchanged-swarm.agent_principals','historical_unchanged-swarm.agent_runs','historical_unchanged-swarm.agent_tokens','historical_unchanged-swarm.agent_wake_leases','historical_unchanged-swarm.audit_log','historical_unchanged-swarm.capability_urls','historical_unchanged-swarm.channels','historical_unchanged-swarm.command_failures','historical_unchanged-swarm.config','historical_unchanged-swarm.devices','historical_unchanged-swarm.events','historical_unchanged-swarm.feedback','historical_unchanged-swarm.file_purge_queue','historical_unchanged-swarm.file_versions','historical_unchanged-swarm.files','historical_unchanged-swarm.github_installations','historical_unchanged-swarm.grant_consumptions','historical_unchanged-swarm.grants','historical_unchanged-swarm.h','historical_unchanged-swarm.hosted_mcp_check_batches','historical_unchanged-swarm.hosted_mcp_check_cursors','historical_unchanged-swarm.hosted_mcp_grant_workspaces','historical_unchanged-swarm.hosted_mcp_grants','historical_unchanged-swarm.hosted_mcp_seat_handles','historical_unchanged-swarm.hosted_mcp_seats','historical_unchanged-swarm.household_agent_work_policies','historical_unchanged-swarm.household_comments','historical_unchanged-swarm.household_content_connections','historical_unchanged-swarm.household_hosted_content_restrictions','historical_unchanged-swarm.household_member_content_roles','historical_unchanged-swarm.household_object_artifacts','historical_unchanged-swarm.household_object_audit','historical_unchanged-swarm.household_object_bindings','historical_unchanged-swarm.household_object_events','historical_unchanged-swarm.household_object_streams','historical_unchanged-swarm.household_todo_events','historical_unchanged-swarm.household_todo_receipts','historical_unchanged-swarm.household_todo_streams','historical_unchanged-swarm.household_todos','historical_unchanged-swarm.household_workspace_boundaries','historical_unchanged-swarm.idempotency_keys','historical_unchanged-swarm.inbox_deliveries','historical_unchanged-swarm.invitations','historical_unchanged-swarm.leases','historical_unchanged-swarm.memberships','historical_unchanged-swarm.rate_buckets','historical_unchanged-swarm.renewal_grants','historical_unchanged-swarm.repositories','historical_unchanged-swarm.retired_agent_sessions','historical_unchanged-swarm.revocation_tombstones','historical_unchanged-swarm.security_alerts','historical_unchanged-swarm.signal_agent_receipts','historical_unchanged-swarm.signal_attachments','historical_unchanged-swarm.signal_deliveries','historical_unchanged-swarm.signal_human_receipts','historical_unchanged-swarm.signal_recipients','historical_unchanged-swarm.signals','historical_unchanged-swarm.spend_breaker','historical_unchanged-swarm.streams','historical_unchanged-swarm.tasks','historical_unchanged-swarm.users','historical_unchanged-swarm.wake_path_release','historical_unchanged-swarm.workspaces','holder_did_not_wait_for_stream','hosted_capability_refused','invitation_refused','isolated_database_ci_only','issuer_artifact_setup','issuer_membership_contract','issuer_parent_not_reached','issuer_rollback_parent_not_reached','issuer_session_identity','issuer_set_role','issuer_unrelated_role_admitted','join_credential_mint_refused','last_budget_control','legal_used_child_control','min_client_version_missing','min_client_version_non_semver','min_client_version_non_string','native_parent_share_control','permanent_actual_first_use','permanent_create_control','permanent_ordinary_mint','post_rollback_control','prefix_capability_setup','prefix_first_owned_G_queue_inconclusive','prefix_genuine_grant_setup','prefix_management_positive','prefix_second_owned_U_W_S_queue_inconclusive','provider_revoke_queue_inconclusive','race_timeout','restored_database_schema_missing','resume_current_use_control','resume_first_use_control','resume_human_principal_control','resume_legal_delegated_mint','resume_middle_use_control','resume_ordinary_mint','resume_successor_control','resume_workspace_not_parked','same_owner_G1_queue_inconclusive','second_active_family_control','second_admin_did_not_park','sides_did_not_reach_barrier','source_blob_identity','source_destination_exists','source_not_regular_blob','source_path_unsafe','source_schema_missing','source_tree_empty','source_tree_identity','sqlstate_capture_control_failed','target_not_loopback','terminal_actual_first_use','test_hook_set','ungranted_residual_runtime_control','unknown_scenario','unknown_source_generation','unsafe_cleanup_path','unsafe_database_cleanup','unsafe_evidence_label','unsafe_private_artifact_root','EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EPIPE', 'ETIMEDOUT', 'active_floor_chain_binding', 'active_floor_first_owned_queue_inconclusive', 'active_floor_principal_control', 'active_floor_renew_control', 'active_floor_root_use', 'active_floor_second_owned_queue_inconclusive', 'active_floor_successor_use', 'admin_consent_refused', 'admin_extra_consent_refused', 'admin_grant_refused', 'allow_foreign_fixture', 'allow_other_workspace_fixture', 'allow_principal_control', 'allow_provision_control', 'allow_retirement_control', 'allow_workspace_not_reached', 'alone_claim_setup', 'budget_successor_control', 'compat_old_wire_mint', 'compat_principal_control', 'compat_silent_renewal_control', 'creation_did_not_park', 'deadlock_timeout_not_below_lock_timeout', 'delegated_child_read_control', 'delegated_create_control', 'delegated_provision_control', 'first_admin_did_not_park', 'fixture_endpoint_not_127_0_0_1', 'floor_C_use', 'floor_T_use', 'floor_X_issue', 'floor_module_missing', 'floor_owned_X_queue_inconclusive', 'floor_principal_setup', 'floor_real_chain_binding', 'golden_claim_failed', 'golden_local_principal_refused', 'head_owned_C_not_held_inconclusive', 'head_owned_X_queue_inconclusive', 'higher_parent_not_parked', 'historical_catalog_changed', 'hosted_capability_refused', 'invitation_refused', 'issuer_artifact_setup', 'issuer_membership_contract', 'issuer_parent_not_reached', 'issuer_rollback_parent_not_reached', 'issuer_session_identity', 'issuer_set_role', 'issuer_unrelated_role_admitted', 'join_credential_mint_refused', 'last_budget_control', 'legal_used_child_control', 'native_parent_share_control', 'non_sql', 'permanent_actual_first_use', 'permanent_create_control', 'permanent_ordinary_mint', 'post_rollback_control', 'prefix_capability_setup', 'prefix_first_owned_G_queue_inconclusive', 'prefix_genuine_grant_setup', 'prefix_management_positive', 'prefix_second_owned_U_W_S_queue_inconclusive', 'provider_revoke_queue_inconclusive', 'race_timeout', 'resume_current_use_control', 'resume_first_use_control', 'resume_human_principal_control', 'resume_legal_delegated_mint', 'resume_middle_use_control', 'resume_ordinary_mint', 'resume_successor_control', 'resume_workspace_not_parked', 'same_owner_G1_queue_inconclusive', 'second_active_family_control', 'second_admin_did_not_park', 'sides_did_not_reach_barrier', 'sqlstate_capture_control_failed', 'target_not_loopback', 'terminal_actual_first_use', 'test_hook_set', 'ungranted_residual_runtime_control', 'unknown_scenario']).has(result.error) || /^(?:creation_positive_control_failed|holder_positive_control_failed|holder_returned_before_stream):(?:none|[1-5][0-9]{2}):(?:admin_command_failed|admin_failure_audit_unavailable|admin_transaction_failed|already_revoked|capability_limit_reached|channel_archived|channel_exists|channel_not_found|client_outdated|command_id_conflict|connection_attempt_expired|connection_attempt_forbidden|credential_expired|credential_kind_forbidden|delivery_ack_conflict|delivery_unavailable|email_domain_not_accepted|email_not_verified|feature_disabled|forbidden|fresh_auth_required|h0_command_not_configured|h0_command_unreadable|h0_transaction_retryable|hosted_check_batch_forbidden|hosted_seat_limit_reached|hosted_seat_revoked|household_attachment_refused|household_content_service_updating|household_legacy_disabled|human_sign_in_required|insufficient_scope|internal_error|invalid_dpop|invalid_request|join_credential_limit_reached|member_limit_reached|method_not_allowed|non_sql|none|not_found|notify_held_elsewhere|notify_unavailable|origin_not_allowed|payload_too_large|principal_limit_reached|rate_limited|registration_seat_revoked|registration_token_already_used|reply_status_not_reply|reply_status_thread|request_timeout|request_too_large|route_not_allowed|session_proof_missing|signal_attachment_duplicate|signal_attachment_limit|signal_attachment_not_live|signal_attachment_unavailable|signal_attachment_version_unavailable|signup_paused|storage_unavailable|temporarily_unavailable|thread_reply_until_exceeds_root|thread_root_is_a_reply|thread_root_not_found|too_many_requests|tool_failed|transport_unavailable|unauthenticated|unauthorized|unknown_tool|unsupported_media_type|upgrade_required|use_dpop_nonce|worker_delivery_failed|workspace_limit_reached|(?:00|01|02|03|08|09|0A|0B|0F|0L|0P|0Z|20|21|22|23|24|25|26|27|28|2B|2D|2F|34|38|39|3B|3D|3F|40|42|44|53|54|55|57|58|F0|HV|P0|XX)[0-9A-Z]{3})$/u.test(result.error) || /^min_client_version_non_semver:observed=[0-9A-Za-z.+-]{1,32}$/u.test(result.error) || /^(?:00|01|02|03|08|09|0A|0B|0F|0L|0P|0Z|20|21|22|23|24|25|26|27|28|2B|2D|2F|34|38|39|3B|3D|3F|40|42|44|53|54|55|57|58|F0|HV|P0|XX)[0-9A-Z]{3}$/u.test(result.error))))) invalid = 'malformed_result';
+      } catch { invalid = 'malformed_result'; }
+    }
+    if (exit.code !== 0 || exit.signal !== null || invalid || result.stage !== 'complete' || result.error !== undefined) {
+      // Retain only fixed protocol codes. Never retain stdout, stderr or target config.
+      const diagnostic = { scenario, stage: invalid ? 'process_failed' : result.stage,
+        error: invalid ?? result.error ?? 'process_failed',
+        sqlstate: !invalid && /^(?:00|01|02|03|08|09|0A|0B|0F|0L|0P|0Z|20|21|22|23|24|25|26|27|28|2B|2D|2F|34|38|39|3B|3D|3F|40|42|44|53|54|55|57|58|F0|HV|P0|XX)[0-9A-Z]{3}$/u.test(result.error ?? '') ? result.error : null,
+        exit_code: exit.code, signal: exit.signal };
+      privateHarnessEvidence('lock-result', JSON.stringify(diagnostic));
+      // A child that failed after setting complete must never pass the parent stage assertion.
+      return { ...diagnostic, stage: diagnostic.stage === 'complete' ? 'process_failed' : diagnostic.stage,
+        ...(scenario==='floor-first-use-vs-head-revocation' ? {required_compatibility:'BLOCKED',floor_compatibility:'INCONCLUSIVE'} : {}) };
+    }
     process.stdout.write(`ACTIVE_FLOOR_SOURCE ${JSON.stringify({scenario,source:result.source,read_source:result.read_source})}\n`);
     return adminIssuance === null ? result : { ...result, admin_issuance: adminIssuance };
   } finally {

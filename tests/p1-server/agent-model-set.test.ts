@@ -304,6 +304,11 @@ test("S2b the UNCHANGED-value probe is refused for someone else's agent (both ar
 });
 
 test("S3 an agent token is refused on this kind", async () => {
+  const setup = await setModel(f.memberJwt, f.principalMember, "s3-before-refusal");
+  assert.equal(setup.status, 200, JSON.stringify(setup.body));
+  assert.equal(setup.body.status, "accepted");
+  const eventsBefore = await sql`SELECT event_id FROM swarm.events
+    WHERE workspace_id = ${f.workspace}::uuid ORDER BY event_id`;
   const response = await fetch(`${local.API_URL}/functions/v1/command`, {
     method: "POST",
     headers: {
@@ -325,16 +330,23 @@ test("S3 an agent token is refused on this kind", async () => {
   assert.equal(response.status, 403);
   await response.json();
   const byId = await models();
-  assert.equal(byId[f.principalMember], "claude");
+  assert.equal(byId[f.principalMember], "s3-before-refusal");
+  const eventsAfter = await sql`SELECT event_id FROM swarm.events
+    WHERE workspace_id = ${f.workspace}::uuid ORDER BY event_id`;
+  assert.deepEqual(eventsAfter, eventsBefore, "agent refusal appends no events");
 });
 
 test("S4 an unchanged set is an accepted no-op appending nothing", async () => {
+  const setup = await setModel(f.ownerJwt, f.principalMember, "s4-noop");
+  assert.equal(setup.status, 200, JSON.stringify(setup.body));
+  assert.equal(setup.body.status, "accepted");
   const eventsBefore = await sql<{ n: string }[]>`
     SELECT count(*)::text AS n FROM swarm.events
     WHERE workspace_id = ${f.workspace}::uuid
   `;
-  const result = await setModel(f.ownerJwt, f.principalMember, "claude");
+  const result = await setModel(f.ownerJwt, f.principalMember, "s4-noop");
   assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.status, "accepted");
   assert.equal(result.body.unchanged, true);
   assert.deepEqual(result.body.event_ids, []);
   const eventsAfter = await sql<{ n: string }[]>`

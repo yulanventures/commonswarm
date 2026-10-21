@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { closeSync, mkdtempSync, openSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { privateHarnessEvidence } from './admin-principal-lock-order-harness.mjs';
 import { join } from 'node:path';
 
 export function sqlPhase(label: string, sql: string): string {
@@ -11,7 +12,7 @@ export function sqlPhase(label: string, sql: string): string {
 }
 
 export function assertSqlProcessResult(result: SpawnSyncReturns<string>): void {
-  if (!result.error && result.status === 0) return;
+  if (!result.error && result.status === 0 && result.signal === null) return;
   const stderr = result.stderr ?? '';
   const phase = [...stderr.matchAll(/^admin-schema-phase: ([a-z0-9_.-]{1,100})$/gm)].at(-1)?.[1] ?? 'unknown';
   const errors = [...stderr.matchAll(/^(?:psql:[^\r\n]*?:(\d+):\s*)?ERROR:\s+([A-Z0-9]{5}):\s*([^\r\n]*)/gm)].map(([, line, state, message]) => {
@@ -35,9 +36,15 @@ export function runSqlProcess(command: string, args: string[], sql: string): voi
     fd = openSync(path, 'r');
     // A file descriptor keeps the same stdin/psql transaction semantics, but
     // Node has no large pipe write to fail with EPIPE when psql exits early.
+    // Retain exact input before the child starts, including parent interruption.
+    const retainedInput = privateHarnessEvidence('issuer-input', sql);
     const result = spawnSync(command, args, { stdio: [fd, 'pipe', 'pipe'],
       encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024 });
+    if (result.error || result.status !== 0 || result.signal !== null) {
+      privateHarnessEvidence('issuer-stderr', result.stderr ?? '');
+    }
     assertSqlProcessResult(result);
+    execFileSync('rm', ['-f', ...retainedInput]);
   } finally {
     try {
       if (fd !== undefined) closeSync(fd);

@@ -285,7 +285,8 @@ for(const [command,read] of [['current','current'],['F','current'],['current','F
     test(`${name} exact ${command}/${read}`,{timeout:300_000},async()=>{
       const result=await harness.runScenario(bound(),name,270_000,{command,read});
       assert.equal(result.stage,'complete',`${result.stage}: ${result.error ?? 'inconclusive'}`);
-      assert.equal(result.active_catalog?.migrations,4);
+      assert.equal(result.active_catalog?.migrations,5);
+      assert.deepEqual(result.active_catalog?.migration_names,['20261019000007_local_auth_lock_order.sql','20261019000008_local_auth_inactive_parent_closure.sql','20261019000009_hosted_snapshot_null_compat.sql','20261019000010_local_permanence_read_models.sql','20261021000990_local_suspension_fence.sql']);
       assert.equal(result.active_catalog?.view_columns,11);
       assert.match(result.active_catalog?.measured_view_sha256 ?? '',/^[a-f0-9]{64}$/);
       process.stdout.write(`ACTIVE_FLOOR_CATALOG ${JSON.stringify({command,read,...result.active_catalog})}\n`);
@@ -313,7 +314,8 @@ for(const [command,read] of [['current','current'],['F','current'],['current','F
     test(`active-floor-${name} exact ${command}/${read}`,{timeout:300_000},async()=>{
       const result=await harness.runScenario(bound(),name,270_000,{command,read});
       assert.equal(result.stage,'complete',`${result.stage}: ${result.error ?? 'inconclusive'}`);
-      assert.equal(result.active_catalog?.migrations,4);
+      assert.equal(result.active_catalog?.migrations,5);
+      assert.deepEqual(result.active_catalog?.migration_names,['20261019000007_local_auth_lock_order.sql','20261019000008_local_auth_inactive_parent_closure.sql','20261019000009_hosted_snapshot_null_compat.sql','20261019000010_local_permanence_read_models.sql','20261021000990_local_suspension_fence.sql']);
       assert.equal(result.active_catalog?.view_columns,11);
       assert.match(result.active_catalog?.measured_view_sha256 ?? '',/^[a-f0-9]{64}$/);
       process.stdout.write(`ACTIVE_FLOOR_CATALOG ${JSON.stringify({command,read,...result.active_catalog})}\n`);
@@ -345,7 +347,8 @@ for(const [command,read] of [['current','current'],['F','current'],['current','F
     const result=await harness.runScenario(bound(),'active-floor-historical-idle',270_000,{command,read});
     assert.equal(result.stage,'complete',`${result.stage}: ${result.error ?? 'inconclusive'}`);
     assert.equal(result.fixture_label,'synthetic-initial-history');
-    assert.equal(result.active_catalog?.migrations,4);
+    assert.equal(result.active_catalog?.migrations,5);
+    assert.deepEqual(result.active_catalog?.migration_names,['20261019000007_local_auth_lock_order.sql','20261019000008_local_auth_inactive_parent_closure.sql','20261019000009_hosted_snapshot_null_compat.sql','20261019000010_local_permanence_read_models.sql','20261021000990_local_suspension_fence.sql']);
     if(command==='F') assert.deepEqual(result.source,harness.ACTIVE_FLOOR_SOURCES.F);
     if(read==='F') assert.deepEqual(result.read_source,harness.ACTIVE_FLOOR_SOURCES.F);
     assert.equal(result.http_refused,0);
@@ -368,10 +371,12 @@ test('historical-baseline-discriminator unsupported O/ACTIVE diagnostic and curr
   const {commit,tree}=harness.HISTORICAL_BASELINE_SOURCE;
   assert.deepEqual(baseline.source,{commit,tree});
   assert.deepEqual(baseline.read_source,{commit,tree});
-  assert.equal(baseline.active_catalog?.migrations,4,'O diagnostic must use real ACTIVE');
+  assert.equal(baseline.active_catalog?.migrations,5,'O diagnostic must use real ACTIVE');
+  assert.deepEqual(baseline.active_catalog?.migration_names,['20261019000007_local_auth_lock_order.sql','20261019000008_local_auth_inactive_parent_closure.sql','20261019000009_hosted_snapshot_null_compat.sql','20261019000010_local_permanence_read_models.sql','20261021000990_local_suspension_fence.sql']);
   assert.match(baseline.fixture_digest ?? '',/^[a-f0-9]{64}$/);
   assert.equal(current.fixture_digest,baseline.fixture_digest,'identical original credential and history');
-  assert.equal(current.active_catalog?.migrations,4);
+  assert.equal(current.active_catalog?.migrations,5);
+  assert.deepEqual(current.active_catalog?.migration_names,['20261019000007_local_auth_lock_order.sql','20261019000008_local_auth_inactive_parent_closure.sql','20261019000009_hosted_snapshot_null_compat.sql','20261019000010_local_permanence_read_models.sql','20261021000990_local_suspension_fence.sql']);
   for(const row of [baseline,current]) {
     assert.equal(row.stage,'complete');
     assert.equal(row.fixture_label,'synthetic-initial-history');
