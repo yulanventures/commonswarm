@@ -131,7 +131,7 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
       all: (selector: string) => selector.split(',').some(part => part.trim() === '[data-home-route-pane]') ? [pane] : [],
       queueMicrotask: (callback: () => void) => microtasks.push(callback),
       boot: () => { boots++; return boots === 1 ? pendingBoot : Promise.resolve(); },
-      window: { clearTimeout() {}, dispatchEvent() {} },
+      window: { setTimeout: (callback: () => void) => microtasks.push(callback), clearTimeout() {}, dispatchEvent() {} },
       CustomEvent: class { constructor(readonly type: string, readonly options: unknown) {} },
     });
     // Paint and transport boundaries are inert; the production reset owns pane removal.
@@ -139,7 +139,7 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
       const app={dataset:{state:'channel',channelView:${JSON.stringify(view === 'todo' ? 'feed' : 'agent-choice')}}};
       const homeRoute={view:${JSON.stringify(view)},workspaceId:'W'};
       let workspaces=[{id:'W',name:'Home'}], activeWorkspaceId='W';
-      let renderedAuthUserId='tom', requestVersion=1, authReloadQueued=false, bootInFlight=null, bootAgain=false;
+      let renderedAuthUserId='tom', requestVersion=1, authReloadQueued=false, authRecoveryActive=false, bootInFlight=null, bootAgain=false;
       let catchUpGeneration=0, railOverviewGeneration=0, connectedAppsGeneration=0;
       let homeWorkspaceGeneration=0, homeWorkspaceRead=0, homeDetailGeneration=0;
       let connectFocusObserver=null, humanSeenObserver=null, signalExpiryTimer;
