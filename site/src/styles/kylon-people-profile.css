@@ -41,8 +41,6 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-page] .hm-role-select { 
 live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-danger-zone { padding-block-start: 16px; margin-block-start: 24px; border-block-start: 1px solid var(--k-shell-line); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-page] :is(.pd-danger-zone h3,.pd-section-title) { font: 600 13px/1.5 var(--k-shell-font); color: var(--k-shell-secondary); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-person-agents button { border: 1px solid var(--k-shell-line); border-radius: 6px; background: transparent; color: var(--k-shell-ink); padding: 8px 12px; font-size: 13px; }
-live-dashboard.dashboard[data-kylon-shell] [data-people-page] dialog .pd-confirm-actions { flex-wrap: wrap; }
-live-dashboard.dashboard[data-kylon-shell] [data-people-page] dialog .pd-confirm-actions button { flex: 1 1 10rem; white-space: normal; overflow-wrap: anywhere; }
 @media (max-width: 52rem) {
   live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail { padding: 8px 6px 32px; }
   live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail .hm-role-select { font-size: 16px; }

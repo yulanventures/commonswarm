@@ -4,10 +4,37 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-people-composition
 live-dashboard.dashboard[data-kylon-shell] :is([data-people-page],[data-people-context]) :is(button,a,input,select,summary):focus-visible:not(dialog *) {
   outline: 2px solid var(--k-shell-focus); outline-offset: 2px; box-shadow: none; scroll-margin: 6px;
 }
-/* The current page's confirmation keeps native dialog ownership and stop/stay facts. */
-live-dashboard.dashboard[data-kylon-shell] dialog[data-people-page-confirm] .pd-confirm-actions { flex-wrap: wrap; gap: 12px; }
-live-dashboard.dashboard[data-kylon-shell] dialog[data-people-page-confirm] .pd-confirm-actions button { flex: 1 1 10rem; min-inline-size: 44px; min-block-size: 44px; max-inline-size: 100%; white-space: normal; overflow-wrap: anywhere; font-family: var(--k-shell-font); }
+/* Page confirmations only, including the nested self-role question. The classic roster dialog keeps its skin. */
+live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) {
+  box-sizing: border-box; padding: 24px; border: 1px solid var(--k-shell-line); border-radius: var(--k-shell-menu-radius);
+  background: var(--k-shell-surface); color: var(--k-shell-ink); font: 400 14px/1.6 var(--k-shell-font);
+  box-shadow: var(--k-shell-shadow); overflow: auto; scroll-padding: 6px;
+}
+live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) :is(h2,.hm-role-question) {
+  margin: 0; font: 600 20px/1.4 var(--k-shell-font); letter-spacing: -.3px; overflow-wrap: anywhere;
+}
+live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-alternative {
+  border-color: var(--k-shell-line); border-radius: var(--k-shell-radius); background: var(--k-shell-subtle);
+}
+live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-alternative p { color: var(--k-shell-secondary); }
+live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-actions { flex-wrap: wrap; gap: 12px; }
+live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) :is(.pd-confirm-actions,.pd-alternative) button {
+  box-sizing: border-box; min-inline-size: 44px; min-block-size: 44px; max-inline-size: 100%; padding: 10px 12px;
+  border: 1px solid var(--k-shell-control); border-radius: var(--k-shell-radius); background: var(--k-shell-surface); color: var(--k-shell-ink);
+  font: 500 13px/1.5 var(--k-shell-font); white-space: normal; overflow-wrap: anywhere; box-shadow: none; scroll-margin: 6px;
+}
+live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-actions button { flex: 1 1 10rem; }
+/* The regular dialog is outside .cs-ui; use tokens owned by the live-dashboard ancestor. */
+live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-actions .dashboard__button--primary { border-color: var(--k-shell-focus); background: var(--k-shell-focus); color: var(--k-shell-surface); }
+live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-actions .dashboard__button--primary:hover:not(:disabled) { border-color: var(--k-shell-ink); background: var(--k-shell-ink); }
+/* Keep the existing destructive-action palette and meaning. */
+live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-actions .pd-danger-fill { border-color: var(--home-danger); background: var(--home-danger); color: var(--home-danger-ink); }
+live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-actions .pd-danger-fill:hover:not(:disabled) { border-color: var(--home-danger-hover); background: var(--home-danger-hover); }
+live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) :is(button,a):focus-visible { outline: 2px solid var(--k-shell-focus); outline-offset: 2px; box-shadow: none; }
 @media (max-width: 52rem) {
+  /* A width basis becomes height in the legacy column layout. Let content determine height, with a 44px floor. */
+  live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-actions { flex-wrap: nowrap; }
+  live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-actions button { flex: 0 0 auto; inline-size: 100%; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-people-composition] .hm-route-pane { padding: 8px 12px 24px; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-people-composition] .cs-org-context-body { padding: 0; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-people-composition] .hm-rail__people { display: none; }
@@ -20,6 +47,7 @@ live-dashboard.dashboard[data-kylon-shell] dialog[data-people-page-confirm] .pd-
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-people-composition] :is(.cs-org-phone-bar > .cs-org-product,.cs-kylon-workspace-menu .hm-menu__trigger,.dashboard__user-trigger) { border: 0; box-shadow: none; background: transparent; }
 }
 @media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) :is(button,a):focus-visible { outline: 3px solid Highlight; outline-offset: 2px; box-shadow: none; }
   live-dashboard.dashboard[data-kylon-shell] :is([data-people-page],[data-people-context]) :is(button,a,input,select,summary):focus-visible:not(dialog *) { outline: 3px solid Highlight; outline-offset: 2px; box-shadow: none; }
   live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters [aria-pressed="true"] { outline: 1px solid ButtonText; outline-offset: -1px; }
 }
