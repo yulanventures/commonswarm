@@ -130,8 +130,21 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
 }
 
 live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__text-button {
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-inline-size: 0;
   min-block-size: 44px;
   white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__email-sent {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__email-sent > * {
+  min-inline-size: 0;
+  max-inline-size: 100%;
   overflow-wrap: anywhere;
 }
 
