@@ -1,0 +1,7 @@
+@import "./kylon-catchup.css";
+
+/* Catch up's centered content and its surrounding pane share one surface.
+ * Keep the existing frame topology and data-home-catchup scroll owner. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame.hm-frame--catchup .hm-frame__main {
+  background: var(--k-shell-surface);
+}

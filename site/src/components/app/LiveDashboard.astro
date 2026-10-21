@@ -33,8 +33,10 @@ import { ALL_SIGNALS_SLUG, channelLabel } from "../../lib/channels";
 import { THREAD_REPLY_CANCEL_LABEL } from "../../lib/thread-reply";
 import "../../styles/tokens.css";
 import "../../styles/home/index.css";
+import "../../styles/dashboard-decoration.css";
 import "../../styles/kylon-shell.css";
 import "../../styles/kylon-conversation.css";
+import "../../styles/kylon-catchup-integration.css";
 
 const signInMethods = signInDoors(await enabledProvidersForBuild({
   url: import.meta.env.PUBLIC_SUPABASE_URL,
@@ -11183,32 +11185,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     }
   }
 
-  .dashboard__wordmark {
-    inline-size: fit-content;
-    color: var(--text);
-    font-size: var(--t-base);
-    line-height: 1;
-    font-weight: var(--weight-head);
-    letter-spacing: var(--track-head);
-    text-decoration: none;
-    white-space: nowrap;
-  }
-
-  .dashboard__wordmark::after {
-    content: "";
-    display: block;
-    inline-size: 1.45rem;
-    block-size: 3px;
-    margin-block-start: var(--s-2);
-    border-radius: var(--radius-pill);
-    background: var(--accent);
-    transition: inline-size var(--dur-2) var(--ease-standard);
-  }
-
-  .dashboard__wordmark:hover::after {
-    inline-size: 100%;
-  }
-
   .dashboard__gateway {
     min-block-size: 100svh;
     display: grid;
@@ -11916,14 +11892,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     opacity: 0.45;
   }
 
-  .dashboard__popover-label {
-    margin: 0;
-    color: var(--text-muted);
-    font-size: var(--t-2xs);
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-  }
-
   /* Account button + menu at the rail foot. */
   .dashboard__user-trigger {
     inline-size: 100%;
@@ -12012,17 +11980,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   .dashboard__workspace-summary strong {
     color: inherit;
     font-weight: var(--weight-semibold);
-  }
-
-  .dashboard__sample-chip {
-    padding: 0.2rem 0.45rem;
-    color: var(--warning);
-    background: var(--warning-dim);
-    border-radius: var(--radius-pill);
-    font-size: var(--t-2xs);
-    font-weight: var(--weight-semibold);
-    letter-spacing: var(--track-eyebrow);
-    text-transform: uppercase;
   }
 
   .dashboard__rail-section {
