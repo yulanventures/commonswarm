@@ -113,6 +113,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
 }
 
 live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note a {
+  position: relative;
   display: inline-flex;
   align-items: center;
   min-block-size: 44px;
@@ -193,6 +194,22 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
   box-shadow: none;
 }
 
+/* Keep the 44px link target; draw focus around its text, clear of wrapped prose. */
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note a:focus-visible {
+  outline: none;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note a:focus-visible::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  inset-block: calc(50% - .7em);
+  inset-inline: 2px;
+  border-radius: 2px;
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 0;
+}
+
 @media (width <= 34rem) {
   live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] {
     padding-block: 24px;
@@ -214,6 +231,13 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
 
 @media (forced-colors: active) {
   live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] :is(a, button, input):focus-visible {
+    outline-color: Highlight;
+  }
+  /* Replace the global forced full-target outline with the visible Highlight pseudo. */
+  live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note a:focus-visible {
+    outline: none !important;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note a:focus-visible::after {
     outline-color: Highlight;
   }
 }
