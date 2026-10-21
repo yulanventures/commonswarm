@@ -323,6 +323,10 @@ export function reconcileWorkspaceMove(
       const k = `${om.principal_kind}:${om.principal_id}`;
       if (!candidates.has(k)) candidates.set(k, { principal_kind: om.principal_kind, principal_id: om.principal_id, role: om.role });
     }
+    for (const ai of (s.agentIdentities ?? []).filter(isLive)) {
+      const k = `agent:${ai.id}`;
+      if (!candidates.has(k)) candidates.set(k, { principal_kind: 'agent', principal_id: ai.id, role: 'member' });
+    }
     for (const p of candidates.values()) {
       if (orgRole(s, target_org_id, p.principal_kind, p.principal_id) !== 'owner') {
         closedSeats.push(

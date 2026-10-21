@@ -190,8 +190,8 @@ BEGIN
   ELSE
     UPDATE workspace_principal_grants SET revoked_at = v_now WHERE workspace_id = p_ws AND revoked_at IS NULL AND live_org_role(p_dst, principal_kind, principal_id) IS DISTINCT FROM 'owner';
     INSERT INTO workspace_principal_grants (workspace_id, org_id, principal_kind, principal_id, role, granted_by, created_at, revoked_at)
-    SELECT p_ws, p_dst, 'agent', ap.agent_identity_id, 'member', p_actor, v_now, v_now
-    FROM agent_principals ap WHERE ap.workspace_id = p_ws AND live_org_role(p_dst, 'agent', ap.agent_identity_id) IS DISTINCT FROM 'owner'
+    SELECT p_ws, p_dst, 'agent', ai.id, 'member', p_actor, v_now, v_now
+    FROM agent_identities ai WHERE ai.revoked_at IS NULL AND live_org_role(p_dst, 'agent', ai.id) IS DISTINCT FROM 'owner'
     ON CONFLICT (workspace_id, principal_kind, principal_id) DO UPDATE SET org_id = EXCLUDED.org_id, revoked_at = coalesce(workspace_principal_grants.revoked_at, EXCLUDED.revoked_at);
     INSERT INTO workspace_principal_grants (workspace_id, org_id, principal_kind, principal_id, role, granted_by, created_at, revoked_at)
     SELECT p_ws, p_dst, om.principal_kind, om.principal_id, om.role, p_actor, v_now, v_now
