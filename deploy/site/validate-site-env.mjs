@@ -100,7 +100,7 @@ try {
     check(/^\/root\/cswarm-site-[A-Za-z0-9-]+$/.test(extra), 'reserve path');
     const release = `${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}-${receipt.revision.slice(0, 12)}-${randomBytes(8).toString('hex')}`;
     const values = { RESERVE: extra, RELEASE: release, BUILD_SHA: arg, ARTIFACT_SHA: receipt.artifact, ROOT_SHA: receipt.html['index.html'], APP_SHA: receipt.html['app/index.html'], REVISION: receipt.revision, H0: receipt.h0 };
-    const script = template.replace(/@@([A-Z_]+)@@/g, (_, k) => { check(k in values, 'template placeholder'); return values[k]; });
+    const script = template.replace(/@@([A-Z0-9_]+)@@/g, (_, k) => { check(k in values, 'template placeholder'); return values[k]; });
     const packet = resolve(dir, 'packet'); mkdirSync(packet);
     for (const name of ['site.tar', 'BUILD.json']) copyFileSync(join(dir, name), join(packet, name));
     write(join(packet, 'SITE-DIRECT.sh'), script); write(join(packet, 'RESERVE'), extra + '\n');
