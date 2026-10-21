@@ -10,37 +10,37 @@ export const LOGO_RENDITION_SIZES=[64,128,256] as const,LOGO_MAX_BYTES=1_048_576
 export const SVG_STATIC_GEOMETRY_ALLOWLIST='svg,g,path,rect,circle,ellipse,line,polyline,polygon,defs,lineargradient,radialgradient,stop,clippath,title,desc'.split(',');
 const TAGS=new Set<S>(SVG_STATIC_GEOMETRY_ALLOWLIST),isAdm=(r?:R)=>!r||r==='owner'||r==='admin',pk=(k:K)=>k==='agent'?'Agent':'Person',nt=(r:S,b:S,ex='')=>`<div class="notice" role="${r}"${ex}>${b}</div>`;
 const delBox=(t:S,v:S,can:B,ok:B,a:S,l:S)=>`<div class="typed-delete-box">${fld(`Type <code>${esc(t)}</code> to confirm delete`,inp('typed_delete_input',v,!can,` data-delete-confirm-target="${esc(t)}"`))}${act(btn('primary danger',a,esc(l),!can||!ok))}</div>`;
-export const CHANNEL_ICON_OPTIONS:ReadonlyArray<{id:ChannelIcon;label:S}>=(['#:# Hash','lock:Lock','bolt:Bolt','shield:Shield','book:Book'] as const).map((s)=>{const[id,label]=s.split(':') as[ChannelIcon,S];return{id,label};});
-export const NOTIFY_PREF_OPTIONS:ReadonlyArray<{id:NotifyPref;label:S;description:S}>=([['all','All activity','Every message'],['mentions','Mentions & replies','Direct @mentions'],['mute','Mute channel','No push wakes']] as const).map(([id,label,description])=>({id,label,description}));
-const UNSAFE_SVG_RE=/<\/?[a-z0-9_-]+:|(?:^|[\s"'/])[a-z0-9_-]+:[a-z0-9_-]+\s*=|\bxmlns\s*=\s*(?!["']http:\/\/www\.w3\.org\/2000\/svg["'])|<\s*\/?\s*(?:script|foreignobject|iframe|object|embed|image|use|animate|set|handler|listener)\b|(?:^|[\s"'/])(?:on[a-z]+|href)\s*=|xlink:href|javascript:|data:|@import|url\s*\(|=\s*(?:"[^"]*|'[^']*|\S*?)(?:&#|&[a-z0-9]+;)|<![a-z[]|<\?/i;
+export const CHANNEL_ICON_OPTIONS='#:# Hash,lock:Lock,bolt:Bolt,shield:Shield,book:Book'.split(',').map((s)=>{const[id,label]=s.split(':') as[ChannelIcon,S];return{id,label};});
+export const NOTIFY_PREF_OPTIONS='all:All activity:Every message|mentions:Mentions & replies:Direct @mentions|mute:Mute channel:No push wakes'.split('|').map((s)=>{const[id,label,description]=s.split(':') as[NotifyPref,S,S];return{id,label,description};});
+const UNSAFE_SVG_RE=/<\/?[a-z0-9_-]+:|(?:^|[\s"'/])[a-z0-9_-]+:[a-z0-9_-]+\s*=|\bxmlns\s*=|<\s*\/?\s*(?:script|foreignobject|style|iframe|object|embed|image|use|a|animate|set|handler|listener)\b|(?:^|[\s"'/])(?:on[a-z]+|href|src|style)\s*=|(?:javascript|vbscript|data|https?|file):|\/\/|@import|expression\s*\(|url\s*\(|\\|=\s*(?:"[^"]*|'[^']*|\S*?)(?:&#|&[a-z0-9]+;)|<![a-z[]|<\?/i;
 export const isTypedDeleteMatch=(e:S,t:S):B=>Boolean(e.trim()&&t.trim()===e.trim());
 export function validateOrgLogoUpload(i:{actorRole:R;mimeType:S;sizeBytes:N;svgText?:S;bytes?:Uint8Array|null;previewUrl?:S|null}):{ok:B;error?:S;sanitizedSvg?:S;previewUrl?:S}{
-  const E=(error:S)=>({ok:false,error});
-  if(!isAdm(i.actorRole))return E('ORG_LOGO_REQUIRES_ADMIN_OR_OWNER');
-  if(!LOGO_ALLOWED_MIMES.includes(i.mimeType as(typeof LOGO_ALLOWED_MIMES)[N]))return E('UNSUPPORTED_LOGO_MIME_TYPE');
-  if(i.sizeBytes<=0||i.sizeBytes>LOGO_MAX_BYTES)return E('LOGO_EXCEEDS_1MB_LIMIT');
-  if(i.mimeType!=='image/svg+xml'){
-    const b=i.bytes,n=b?.byteLength??0;if(!b||!n||n>LOGO_MAX_BYTES)return E('INVALID_RASTER_LOGO');
-    const dv=new DataView(b.buffer,b.byteOffset,n),u=(o:N,le=false)=>o+4<=n?dv.getUint32(o,le):0,ib=(w:N,h:N)=>w>0&&w<=2048&&h>0&&h<=2048;
-    let ok=false;
-    if(i.mimeType==='image/png'&&n>=57&&u(0)===0x89504e47&&u(4)===0x0d0a1a0a&&u(8)===13&&u(12)===0x49484452&&ib(u(16),u(20))){for(let p=8,d=0;p+12<=n;){const l=u(p),t=u(p+4);if(p+12+l>n)break;if(t===0x49444154&&l>0)d=1;p+=12+l;if(t===0x49454e44){ok=Boolean(d&&p===n);break;}}}
-    else if(i.mimeType==='image/jpeg'&&n>=20&&u(0)>>>8===0xffd8ff&&b[n-2]===0xff&&b[n-1]===0xd9){for(let p=2;p+9<n;){if(b[p]!==0xff){p++;continue;}const m=b[p+1]!,l=(b[p+2]!<<8)|b[p+3]!;if(m===0xd9||m===0xda||l<2||p+2+l>n)break;if(m>=0xc0&&m<=0xc2){ok=ib((b[p+7]!<<8)|b[p+8]!,(b[p+5]!<<8)|b[p+6]!);break;}p+=2+l;}}
-    else if(i.mimeType==='image/webp'&&n>=25&&u(0)===0x52494646&&u(4,true)+8<=n&&u(8)===0x57454250){const c=u(12),h=u(21,true);ok=c===0x5650384c?b[20]===0x2f&&ib((h&0x3fff)+1,((h>>14)&0x3fff)+1):c===0x56503858&&n>=30?ib((u(24,true)&0xffffff)+1,(u(26,true)>>>8)+1):c===0x56503820&&n>=30&&b[23]===0x9d&&b[24]===1&&b[25]===0x2a&&ib(dv.getUint16(26,true)&0x3fff,dv.getUint16(28,true)&0x3fff);}
-    if(!ok)return E('INVALID_RASTER_LOGO');
-    let s='';for(let k=0;k<n;k++)s+=String.fromCharCode(b[k]!);
-    return{ok:true,previewUrl:i.previewUrl||`data:${i.mimeType};base64,${btoa(s)}`};
-  }
-  const raw=(i.svgText??'').trim(),tags=[...raw.matchAll(/<\/?([a-zA-Z0-9_-]+)/g)].map((m)=>m[1]!.toLowerCase());
-  if(!raw||UNSAFE_SVG_RE.test(raw)||!tags.includes('svg'))return E('Unsafe SVG content refused');
-  return tags.every((t)=>TAGS.has(t))?{ok:true,sanitizedSvg:raw}:E('Disallowed SVG element');
+const E=(error:S)=>({ok:false,error});
+if(!isAdm(i.actorRole))return E('ORG_LOGO_REQUIRES_ADMIN_OR_OWNER');
+if(!LOGO_ALLOWED_MIMES.includes(i.mimeType as(typeof LOGO_ALLOWED_MIMES)[N]))return E('UNSUPPORTED_LOGO_MIME_TYPE');
+if(i.sizeBytes<=0||i.sizeBytes>LOGO_MAX_BYTES)return E('LOGO_EXCEEDS_1MB_LIMIT');
+if(i.mimeType!=='image/svg+xml'){
+const b=i.bytes,n=b?.byteLength??0;if(!b||!n||n>LOGO_MAX_BYTES)return E('INVALID_RASTER_LOGO');
+const dv=new DataView(b.buffer,b.byteOffset,n),u=(o:N,le=false)=>o+4<=n?dv.getUint32(o,le):0,ib=(w:N,h:N)=>w>0&&w<=2048&&h>0&&h<=2048;
+let ok=false;
+if(i.mimeType==='image/png'&&n>=57&&u(0)===0x89504e47&&u(4)===0x0d0a1a0a&&u(8)===13&&u(12)===0x49484452&&ib(u(16),u(20))){for(let p=8,d=0;p+12<=n;){const l=u(p),t=u(p+4);if(p+12+l>n)break;if(t===0x49444154&&l>0)d=1;p+=12+l;if(t===0x49454e44){ok=Boolean(d&&p===n);break;}}}
+else if(i.mimeType==='image/jpeg'&&n>=20&&u(0)>>>8===0xffd8ff&&b[n-2]===0xff&&b[n-1]===0xd9){for(let p=2;p+9<n;){if(b[p]!==0xff){p++;continue;}const m=b[p+1]!,l=(b[p+2]!<<8)|b[p+3]!;if(m===0xd9||m===0xda||l<2||p+2+l>n)break;if(m>=0xc0&&m<=0xc2){ok=ib((b[p+7]!<<8)|b[p+8]!,(b[p+5]!<<8)|b[p+6]!);break;}p+=2+l;}}
+else if(i.mimeType==='image/webp'&&n>=25&&u(0)===0x52494646&&u(4,true)+8<=n&&u(8)===0x57454250){const c=u(12),h=u(21,true);ok=c===0x5650384c?b[20]===0x2f&&ib((h&0x3fff)+1,((h>>14)&0x3fff)+1):c===0x56503858&&n>=30?ib((u(24,true)&0xffffff)+1,(u(26,true)>>>8)+1):c===0x56503820&&n>=30&&b[23]===0x9d&&b[24]===1&&b[25]===0x2a&&ib(dv.getUint16(26,true)&0x3fff,dv.getUint16(28,true)&0x3fff);}
+if(!ok)return E('INVALID_RASTER_LOGO');
+let s='';for(let k=0;k<n;k++)s+=String.fromCharCode(b[k]!);
+return{ok:true,previewUrl:i.previewUrl||`data:${i.mimeType};base64,${btoa(s)}`};
+}
+const raw=(i.svgText??'').trim(),noNs=raw.replace(/\bxmlns\s*=\s*["']http:\/\/www\.w3\.org\/2000\/svg["']/gi,''),tags=[...raw.matchAll(/<\/?([a-zA-Z0-9_-]+)/g)].map((m)=>m[1]!.toLowerCase());
+if(!raw||UNSAFE_SVG_RE.test(noNs)||!tags.includes('svg'))return E('Unsafe SVG content refused');
+return tags.every((t)=>TAGS.has(t))?{ok:true,sanitizedSvg:raw}:E('Disallowed SVG element');
 }
 interface WsCtx{org_slug:S;workspace_slug:S;workspace_name:S;}
 export interface WorkspaceMembersPanelProps extends WsCtx{workspace_id:S;actor_role:R;workspace_members:OrgRosterMemberItem[];org_candidates:OrgRosterMemberItem[];selected_candidate_id?:S;}
 export function renderWorkspaceMembersPanel(p:WorkspaceMembersPanelProps):S{
-  const can=isAdm(p.actor_role),sId=p.selected_candidate_id??p.org_candidates[0]?.principal_id;
-  const rows=p.workspace_members.map((m)=>{const ag=m.principal_kind==='agent';return `<div class="ws-member-row" data-member-id="${esc(m.principal_id)}"><span class="avatar ${ag?'agent':''} small">${esc(m.initials)}</span><div class="ws-member-copy"><strong>${esc(m.display_name)} ${bdg(pk(m.principal_kind))} ${bdg(esc(RL[m.role]))}</strong><small class="meta">${esc(m.handle)}${ag?` · ${m.active_seat_id?`Active seat ${esc(m.active_seat_id)} (closes immediately on removal)`:'No active seat'}`:''}</small></div>${btn('danger','ws-remove-member','Remove',!can,` data-member-id="${esc(m.principal_id)}"`)}</div>`;}).join('');
-  const opts=p.org_candidates.map((c)=>opt(c.principal_id,c.principal_id===sId,`${esc(c.display_name)} (${pk(c.principal_kind)})`)).join('');
-  return `<section class="spec-card ws-members-panel" data-workspace-slug="${esc(p.workspace_slug)}"><div class="dialog-heading"><h2>Workspace Members · ${esc(p.workspace_name)}</h2>${bdg(`${p.workspace_members.length} assigned`)}</div><div class="ws-add-bar sample-row"><select id="ws-candidate-select" name="ws_candidate_id" class="ws-select" ${dis(!can||!opts)}>${opts||'<option value="">None</option>'}</select>${btn('primary','ws-add-member','+ Add to workspace',!can||!opts)}</div><div class="ws-member-list">${rows}</div>${nt('note',`<p>${esc(RSD)}.</p>`)}</section>`;
+const can=isAdm(p.actor_role),sId=p.selected_candidate_id??p.org_candidates[0]?.principal_id;
+const rows=p.workspace_members.map((m)=>{const ag=m.principal_kind==='agent';return `<div class="ws-member-row" data-member-id="${esc(m.principal_id)}"><span class="avatar ${ag?'agent':''} small">${esc(m.initials)}</span><div class="ws-member-copy"><strong>${esc(m.display_name)} ${bdg(pk(m.principal_kind))} ${bdg(esc(RL[m.role]))}</strong><small class="meta">${esc(m.handle)}${ag?` · ${m.active_seat_id?`Active seat ${esc(m.active_seat_id)} (closes immediately on removal)`:'No active seat'}`:''}</small></div>${btn('danger','ws-remove-member','Remove',!can,` data-member-id="${esc(m.principal_id)}"`)}</div>`;}).join('');
+const opts=p.org_candidates.map((c)=>opt(c.principal_id,c.principal_id===sId,`${esc(c.display_name)} (${pk(c.principal_kind)})`)).join('');
+return `<section class="spec-card ws-members-panel" data-workspace-slug="${esc(p.workspace_slug)}"><div class="dialog-heading"><h2>Workspace Members · ${esc(p.workspace_name)}</h2>${bdg(`${p.workspace_members.length} assigned`)}</div><div class="ws-add-bar sample-row"><select id="ws-candidate-select" name="ws_candidate_id" class="ws-select" ${dis(!can||!opts)}>${opts||'<option value="">None</option>'}</select>${btn('primary','ws-add-member','+ Add to workspace',!can||!opts)}</div><div class="ws-member-list">${rows}</div>${nt('note',`<p>${esc(RSD)}.</p>`)}</section>`;
 }
 export interface CreateWorkspaceModalProps extends WsCtx{org_id?:S;org_name?:S;organizations?:Array<{org_id:S;slug:S;display_name:S}>;actor_role?:R;}
 export function renderCreateWorkspaceModal(p:CreateWorkspaceModalProps):S{

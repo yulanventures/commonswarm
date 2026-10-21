@@ -566,6 +566,17 @@ dd { margin: 0; overflow-wrap: anywhere; }
   min-width: 0;
 }
 dialog.spec-card.dialog-surface { position: static; width: 100%; margin: 0; color: var(--cs-ink); }
+dialog:modal {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+  overflow: auto;
+  z-index: 100;
+  box-shadow: var(--cs-shadow-popover);
+}
+dialog:modal::backdrop { background: rgba(40, 39, 32, 0.28); }
 .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .mobile-member-back { display: none; }
 
