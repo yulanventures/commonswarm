@@ -68,6 +68,9 @@ export function resolveOrgWorkspaceChannelSelector(
       seat_id: input.seat_id ?? null,
     });
   }
+  const pol = c.connection_id
+    ? (s.connectionPolicies ?? []).find((p) => p.connection_id === c.connection_id && isLive(p))
+    : undefined;
   let resOrg: OrganizationSummary | undefined, resWs: WorkspaceRecord | undefined;
   let source: 'explicit' | 'seat' | 'connection_default' | 'inferred' = 'inferred';
 
@@ -104,7 +107,15 @@ export function resolveOrgWorkspaceChannelSelector(
       resWs = cands[0];
       resOrg = resOrg ?? reachOrgs.find((o) => o.id === resWs!.org_id);
     } else if (resOrg) {
+      const defWs = pol?.default_workspace_id
+        ? reachWs.find(
+            (w) =>
+              w.workspace_id === pol.default_workspace_id &&
+              w.org_id === resOrg!.id,
+          )
+        : undefined;
       if (seatWs && seatWs.org_id === resOrg.id) resWs = seatWs;
+      else if (defWs) resWs = defWs;
       else {
         const orgWs = reachWs.filter((w) => w.org_id === resOrg!.id);
         if (orgWs.length !== 1)
@@ -130,9 +141,6 @@ export function resolveOrgWorkspaceChannelSelector(
     resWs = seatWs;
     source = 'seat';
   } else {
-    const pol = c.connection_id
-      ? (s.connectionPolicies ?? []).find((p) => p.connection_id === c.connection_id && isLive(p))
-      : undefined;
     if (pol?.default_workspace_id) {
       const defWs = reachWs.find((w) => w.workspace_id === pol.default_workspace_id);
       const defOrg = defWs ? reachOrgs.find((o) => o.id === defWs.org_id) : undefined;
@@ -141,7 +149,8 @@ export function resolveOrgWorkspaceChannelSelector(
         resOrg = defOrg;
         source = 'connection_default';
       }
-    } else if (pol?.default_org_id) {
+    }
+    if (!resWs && pol?.default_org_id) {
       const defOrg = reachOrgs.find((o) => o.id === pol.default_org_id);
       const orgWs = defOrg ? reachWs.filter((w) => w.org_id === defOrg.id) : [];
       if (defOrg && orgWs.length === 1) {
@@ -203,10 +212,25 @@ export function cascadeWorkspaceMemberRemoval(
   ) => {
     for (const r of rows ?? []) if (r.revoked_at == null && pred(r)) r.revoked_at = now;
   };
-  revoke(
-    s.workspaceGrants,
-    (g) => g.workspace_id === workspace_id && isPrin(g, principal_kind, principal_id),
-  );
+  let foundGrant = false;
+  for (const g of s.workspaceGrants) {
+    if (g.workspace_id === workspace_id && isPrin(g, principal_kind, principal_id)) {
+      foundGrant = true;
+      if (g.revoked_at == null) g.revoked_at = now;
+    }
+  }
+  if (!foundGrant) {
+    const ws = s.workspaces.find((w) => w.workspace_id === workspace_id);
+    s.workspaceGrants.push({
+      workspace_id,
+      org_id: ws?.org_id ?? '',
+      principal_kind,
+      principal_id,
+      role: 'member',
+      created_at: now,
+      revoked_at: now,
+    });
+  }
   if (principal_kind === 'user')
     revoke(s.legacyMemberships, (m) => m.workspace_id === workspace_id && m.user_id === principal_id);
   revoke(
@@ -260,9 +284,23 @@ export function cascadeOrgMemberRemoval(
     now?: string;
   },
 ) {
-  for (const m of s.orgMemberships)
-    if (m.org_id === org_id && isPrin(m, principal_kind, principal_id) && m.revoked_at == null)
-      m.revoked_at = now;
+  let foundMem = false;
+  for (const m of s.orgMemberships) {
+    if (m.org_id === org_id && isPrin(m, principal_kind, principal_id)) {
+      foundMem = true;
+      if (m.revoked_at == null) m.revoked_at = now;
+    }
+  }
+  if (!foundMem) {
+    s.orgMemberships.push({
+      org_id,
+      principal_kind,
+      principal_id,
+      role: 'member',
+      created_at: now,
+      revoked_at: now,
+    });
+  }
   const closedSeats: string[] = [],
     closedHandles: string[] = [];
   for (const ws of s.workspaces) {
@@ -312,12 +350,24 @@ export function reconcileWorkspaceMove(
   for (const g of s.workspaceGrants) if (g.workspace_id === ws.workspace_id) g.org_id = target_org_id;
   const closedSeats: string[] = [];
   if (transfer_members === 'all') {
-    for (const g of s.workspaceGrants) {
-      if (
-        g.workspace_id === ws.workspace_id &&
-        isLive(g) &&
-        !orgRole(s, target_org_id, g.principal_kind, g.principal_id)
-      ) {
+    for (const g of s.workspaceGrants.filter(
+      (x) => x.workspace_id === ws.workspace_id && isLive(x),
+    )) {
+      const existingOrgMem = s.orgMemberships.find(
+        (m) =>
+          m.org_id === target_org_id &&
+          isPrin(m, g.principal_kind, g.principal_id),
+      );
+      if (existingOrgMem && existingOrgMem.revoked_at != null) {
+        closedSeats.push(
+          ...cascadeWorkspaceMemberRemoval(s, {
+            workspace_id: ws.workspace_id,
+            principal_kind: g.principal_kind,
+            principal_id: g.principal_id,
+            now,
+          }).closed_seat_ids,
+        );
+      } else if (!existingOrgMem) {
         s.orgMemberships.push({
           org_id: target_org_id,
           principal_kind: g.principal_kind,

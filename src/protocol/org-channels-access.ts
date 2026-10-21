@@ -109,30 +109,37 @@ export function canReadChannel(
   c: CallerContext,
   chId: string,
 ): boolean {
-  const ch = s.channels.find((x) => x.channel_id === chId);
+  const ch = s.channels.find((x) => x.channel_id === chId && isLive(x));
   if (!ch || !canReadWorkspace(s, c, ch.workspace_id)) return false;
-  if (ch.visibility === 'workspace') return true;
-  if (!(s.privateChannelsEnabled ?? true)) return false;
-  if (
-    !s.channelMemberships.some(
-      (m) =>
-        m.channel_id === chId &&
-        isPrin(m, c.principal_kind, c.principal_id) &&
-        isLive(m),
-    )
-  )
-    return false;
+  const ws = s.workspaces.find((w) => w.workspace_id === ch.workspace_id);
+  const hasChMem = (k: PrincipalKind, id: string) =>
+    s.channelMemberships.some(
+      (m) => m.channel_id === chId && isPrin(m, k, id) && isLive(m),
+    );
+  const isGuest = (k: PrincipalKind, id: string) =>
+    (ws != null && orgRole(s, ws.org_id, k, id) === 'guest') ||
+    s.workspaceGrants.some(
+      (g) =>
+        g.workspace_id === ch.workspace_id &&
+        isPrin(g, k, id) &&
+        isLive(g) &&
+        g.role === 'guest',
+    );
+  if (ch.visibility === 'workspace') {
+    if (isGuest(c.principal_kind, c.principal_id) && !hasChMem(c.principal_kind, c.principal_id))
+      return false;
+    if (c.principal_kind === 'agent') {
+      const ownerId = agentOwner(s, c);
+      if (!ownerId || (isGuest('user', ownerId) && !hasChMem('user', ownerId)))
+        return false;
+    }
+    return true;
+  }
+  if (!Boolean(s.privateChannelsEnabled)) return false;
+  if (!hasChMem(c.principal_kind, c.principal_id)) return false;
   if (c.principal_kind === 'user') return true;
   const ownerId = agentOwner(s, c);
-  return Boolean(
-    ownerId &&
-      s.channelMemberships.some(
-        (m) =>
-          m.channel_id === chId &&
-          isPrin(m, 'user', ownerId) &&
-          isLive(m),
-      ),
-  );
+  return Boolean(ownerId && hasChMem('user', ownerId));
 }
 
 export function canModifyChannelMembership(
@@ -141,7 +148,7 @@ export function canModifyChannelMembership(
   chId: string,
   target: { principal_kind: PrincipalKind; principal_id: string },
 ) {
-  const ch = s.channels.find((c) => c.channel_id === chId);
+  const ch = s.channels.find((c) => c.channel_id === chId && isLive(c));
   if (!ch || !canReadWorkspace(s, actor, ch.workspace_id))
     return fail('WORKSPACE_ACCESS_DENIED', 'workspace_grant', {
       workspace: ch?.workspace_id ?? null,
@@ -149,7 +156,7 @@ export function canModifyChannelMembership(
     });
   if (ch.visibility === 'private') {
     const scope = { workspace: ch.workspace_id, channel: ch.slug };
-    if (!(s.privateChannelsEnabled ?? true))
+    if (!Boolean(s.privateChannelsEnabled))
       return fail('PRIVATE_CHANNELS_DISABLED', 'private_channels_enabled', scope);
     if (
       !s.channelMemberships.some(
@@ -182,11 +189,11 @@ export function canReadChannelBoundFile(
   const b = (s.fileChannelBindings ?? []).filter(
     (x) => x.file_id === fileId && x.workspace_id === wsId,
   );
-  return b.length === 0 ? true : b.some((x) => canReadChannel(s, c, x.channel_id));
+  return b.every((x) => canReadChannel(s, c, x.channel_id));
 }
 
 export function validateChannelVisibilityTransition({
-  privateChannelsEnabled = true,
+  privateChannelsEnabled = false,
   currentVisibility,
   nextVisibility,
   nextJoinPolicy,

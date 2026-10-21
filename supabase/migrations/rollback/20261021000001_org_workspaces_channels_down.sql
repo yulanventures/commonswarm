@@ -1,4 +1,4 @@
--- Fail-Closed Rollback for 20261021000001_org_workspaces_channels.sql
+-- Fail-Closed Rollback for 20261021000001_org_workspaces_channels.sql & 20261021000002_org_workspaces_channels_functions.sql
 -- Refuses to drop privacy columns or tables if any visibility='private' channel exists,
 -- preventing accidental widening of private room history or file attachments to workspace-wide visibility.
 
@@ -34,14 +34,22 @@ $org_workspaces_channels_rollback_guard$;
 
 DROP TRIGGER IF EXISTS channel_memberships_write_guard ON swarm.channel_memberships;
 DROP TRIGGER IF EXISTS channels_visibility_transition_guard ON swarm.channels;
+DROP TRIGGER IF EXISTS agent_principals_ensure_identity ON swarm.agent_principals;
+DROP TRIGGER IF EXISTS memberships_sync_org_grants ON swarm.memberships;
+DROP TRIGGER IF EXISTS workspaces_ensure_org_and_slug ON swarm.workspaces;
+
 DROP FUNCTION IF EXISTS swarm.guard_channel_visibility_transition();
 DROP FUNCTION IF EXISTS swarm.private_channels_enabled();
 DROP FUNCTION IF EXISTS swarm.org_move_workspace(uuid, uuid, uuid, text);
+DROP FUNCTION IF EXISTS swarm.can_read_channel_bound_file(uuid, uuid, text, uuid, uuid, uuid);
 DROP FUNCTION IF EXISTS swarm.can_read_channel(uuid, text, uuid, uuid, uuid);
 DROP FUNCTION IF EXISTS swarm.can_read_workspace(uuid, text, uuid, uuid, uuid);
 DROP FUNCTION IF EXISTS swarm.can_read_org(uuid, text, uuid, uuid, uuid);
 DROP FUNCTION IF EXISTS swarm.has_live_ws_grant(uuid, text, uuid);
 DROP FUNCTION IF EXISTS swarm.live_org_role(uuid, text, uuid);
+DROP FUNCTION IF EXISTS swarm.ensure_agent_principal_identity();
+DROP FUNCTION IF EXISTS swarm.sync_legacy_membership_to_org_grants();
+DROP FUNCTION IF EXISTS swarm.ensure_workspace_org_and_slug();
 
 DROP TABLE IF EXISTS swarm.org_approval_requests;
 DROP TABLE IF EXISTS swarm.file_channel_bindings;

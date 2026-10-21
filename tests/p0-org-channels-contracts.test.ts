@@ -35,7 +35,14 @@ function createFixture(): OrgChannelAuthorityState {
       { channel_id: 'ch-2a-gen', workspace_id: 'ws-2a', slug: 'general', visibility: 'workspace', join_policy: 'open' },
     ],
     agentIdentities: [
-      { id: 'ag-1', owner_user_id: 'u-owner', display_name: 'Argon Lead', created_at: now },
+      { id: 'ag-1', owner_user_id: 'u-owner', standing_grant_id: 'hg-1', standing_renewal_grant_id: 'rg-1', display_name: 'Argon Lead', created_at: now },
+      { id: 'ag-inherited', owner_user_id: 'u-owner', display_name: 'Inherited Helper', created_at: now },
+    ],
+    hostedGrants: [
+      { grant_id: 'hg-1', state: 'active', revoked_at: null },
+    ],
+    renewalGrants: [
+      { renewal_grant_id: 'rg-1', horizon_expires_at: '2099-01-01T00:00:00Z', revoked_at: null },
     ],
     orgMemberships: [
       { org_id: 'org-1', principal_kind: 'user', principal_id: 'u-owner', role: 'owner', created_at: now },
@@ -65,6 +72,8 @@ function createFixture(): OrgChannelAuthorityState {
     ],
     fileChannelBindings: [
       { file_id: 'file-priv-1', workspace_id: 'ws-1a', channel_id: 'ch-1a-priv', bound_by_kind: 'user', created_at: now },
+      { file_id: 'file-dual-1', workspace_id: 'ws-1a', channel_id: 'ch-1a-gen', bound_by_kind: 'user', created_at: now },
+      { file_id: 'file-dual-1', workspace_id: 'ws-1a', channel_id: 'ch-1a-priv', bound_by_kind: 'user', created_at: now },
     ],
     connectionPolicies: [
       { connection_id: 'conn-1', owner_user_id: 'u-owner', agent_identity_id: 'ag-1', default_org_id: 'org-1', default_workspace_id: 'ws-1a' },
@@ -80,8 +89,9 @@ function createFixture(): OrgChannelAuthorityState {
   };
 }
 
-test('multi-org agent identity whoami pre-seat and post-seat with per-org roles', () => {
+test('multi-org agent identity whoami pre-seat, post-seat, and standing credential revocation', () => {
   const s = createFixture();
+  const caller = { principal_kind: 'agent' as const, principal_id: 'ag-1', connection_id: 'conn-1' };
   const preSeat = buildMultiOrgWhoamiResponse(s, { agent_identity_id: 'ag-1', connection_id: 'conn-1' });
   assert.equal(preSeat.active_seat, null);
   assert.equal(preSeat.organizations.length, 2);
@@ -91,9 +101,21 @@ test('multi-org agent identity whoami pre-seat and post-seat with per-org roles'
   const postSeat = buildMultiOrgWhoamiResponse(s, { agent_identity_id: 'ag-1', connection_id: 'conn-1', seat_id: 'seat-2a' });
   assert.equal(postSeat.active_seat?.workspace_id, 'ws-2a');
   assert.equal(postSeat.active_seat?.org_slug, 'household');
+
+  // Revoking standing hosted grant revokes canReadOrg
+  s.hostedGrants![0]!.state = 'revoked';
+  s.hostedGrants![0]!.revoked_at = '2026-10-21T01:00:00Z';
+  assert.equal(canReadOrg(s, caller, 'org-1'), false);
+  s.hostedGrants![0]!.state = 'active';
+  s.hostedGrants![0]!.revoked_at = null;
+  assert.equal(canReadOrg(s, caller, 'org-1'), true);
+
+  // Revoking standing renewal grant revokes canReadOrg
+  s.renewalGrants![0]!.revoked_at = '2026-10-21T01:00:00Z';
+  assert.equal(canReadOrg(s, caller, 'org-1'), false);
 });
 
-test('universal selector precedence, ambiguous workspace choices, and seat mismatch refusal', () => {
+test('universal selector precedence, explicit org with connection default, and revoked default fallback', () => {
   const s = createFixture();
   const caller = { principal_kind: 'agent' as const, principal_id: 'ag-1', connection_id: 'conn-1' };
 
@@ -103,6 +125,13 @@ test('universal selector precedence, ambiguous workspace choices, and seat misma
   if (!ambig.ok) {
     assert.equal(ambig.refusal.code, 'AMBIGUOUS_WORKSPACE_SELECTOR');
     assert.equal(ambig.refusal.choices?.length, 2);
+  }
+
+  // Explicit org="yulan" without workspace uses connection default_workspace_id (ws-1a)
+  const explicitOrg = resolveOrgWorkspaceChannelSelector(s, caller, { org: 'yulan' });
+  assert.equal(explicitOrg.ok, true);
+  if (explicitOrg.ok) {
+    assert.equal(explicitOrg.workspace.workspace_id, 'ws-1a');
   }
 
   // Qualified yulan/ops succeeds
@@ -120,9 +149,7 @@ test('universal selector precedence, ambiguous workspace choices, and seat misma
     seat_id: 'seat-1a',
   });
   assert.equal(mismatch.ok, false);
-  if (!mismatch.ok) {
-    assert.equal(mismatch.refusal.code, 'WORKSPACE_SEAT_MISMATCH');
-  }
+  if (!mismatch.ok) assert.equal(mismatch.refusal.code, 'WORKSPACE_SEAT_MISMATCH');
 
   // Connection default fallback when no explicit or seat selector is given
   const fromDefault = resolveOrgWorkspaceChannelSelector(s, caller, {});
@@ -131,11 +158,37 @@ test('universal selector precedence, ambiguous workspace choices, and seat misma
     assert.equal(fromDefault.workspace.workspace_id, 'ws-1a');
     assert.equal(fromDefault.source, 'connection_default');
   }
+
+  // When default_workspace_id (ws-1a) is revoked, falls back to remaining workspace (ws-1b) in default_org_id
+  cascadeWorkspaceMemberRemoval(s, { workspace_id: 'ws-1a', principal_kind: 'agent', principal_id: 'ag-1' });
+  const fallbackToOrg = resolveOrgWorkspaceChannelSelector(s, caller, {});
+  assert.equal(fallbackToOrg.ok, true);
+  if (fallbackToOrg.ok) {
+    assert.equal(fallbackToOrg.workspace.workspace_id, 'ws-1b');
+    assert.equal(fallbackToOrg.source, 'connection_default');
+  }
 });
 
-test('explicit org/workspace revocation overrides owner inheritance and cascades seats', () => {
+test('explicit org/workspace revocation overrides owner inheritance (including tombstone creation) and cascades seats', () => {
   const s = createFixture();
   const caller = { principal_kind: 'agent' as const, principal_id: 'ag-1', connection_id: 'conn-1' };
+  const inheritedCaller = { principal_kind: 'agent' as const, principal_id: 'ag-inherited' };
+
+  // Inherited agent has no explicit orgMemberships or workspaceGrants rows, yet can read via u-owner
+  assert.equal(canReadWorkspace(s, inheritedCaller, 'ws-1a'), true);
+  cascadeWorkspaceMemberRemoval(s, {
+    workspace_id: 'ws-1a',
+    principal_kind: 'agent',
+    principal_id: 'ag-inherited',
+  });
+  assert.equal(canReadWorkspace(s, inheritedCaller, 'ws-1a'), false);
+  assert.equal(canReadOrg(s, inheritedCaller, 'org-1'), true);
+  cascadeOrgMemberRemoval(s, {
+    org_id: 'org-1',
+    principal_kind: 'agent',
+    principal_id: 'ag-inherited',
+  });
+  assert.equal(canReadOrg(s, inheritedCaller, 'org-1'), false);
 
   const resWs = cascadeWorkspaceMemberRemoval(s, {
     workspace_id: 'ws-1a',
@@ -144,11 +197,9 @@ test('explicit org/workspace revocation overrides owner inheritance and cascades
   });
   assert.deepEqual(resWs.closed_seat_ids, ['seat-1a']);
   assert.equal(canReadWorkspace(s, caller, 'ws-1a'), false);
-  // Seat in ws-2a remains untouched
   assert.equal(s.seats?.find((x) => x.seat_id === 'seat-2a')?.revoked_at ?? null, null);
   assert.equal(canReadWorkspace(s, caller, 'ws-2a'), true);
 
-  // Removing from org-2 closes ws-2a seat
   const resOrg = cascadeOrgMemberRemoval(s, {
     org_id: 'org-2',
     principal_kind: 'agent',
@@ -158,35 +209,50 @@ test('explicit org/workspace revocation overrides owner inheritance and cascades
   assert.equal(canReadOrg(s, caller, 'org-2'), false);
 });
 
-test('guest isolation and private channel non-member owner/admin exclusion + flag gate', () => {
+test('guest channel isolation, every-channel file bindings, and fail-closed privateChannelsEnabled default', () => {
   const s = createFixture();
+  const now = '2026-10-21T00:00:00Z';
   const guest = { principal_kind: 'user' as const, principal_id: 'u-guest' };
   const admin = { principal_kind: 'user' as const, principal_id: 'u-admin' };
   const owner = { principal_kind: 'user' as const, principal_id: 'u-owner' };
 
-  // Guest has org membership but no workspace grant -> denied
+  // Guest without workspace grant -> denied workspace
   assert.equal(canReadOrg(s, guest, 'org-1'), true);
   assert.equal(canReadWorkspace(s, guest, 'ws-1a'), false);
 
-  // Workspace admin who is not a member of ch-1a-priv cannot read or self-join or invite others
+  // Guest WITH workspace grant can read workspace, but is isolated from workspace-visible channel until added to channelMemberships
+  s.workspaceGrants.push({ workspace_id: 'ws-1a', org_id: 'org-1', principal_kind: 'user', principal_id: 'u-guest', role: 'guest', created_at: now });
+  assert.equal(canReadWorkspace(s, guest, 'ws-1a'), true);
+  assert.equal(canReadChannel(s, guest, 'ch-1a-gen'), false);
+  s.channelMemberships.push({ channel_id: 'ch-1a-gen', workspace_id: 'ws-1a', principal_kind: 'user', principal_id: 'u-guest', role: 'member', notify_pref: 'all', joined_at: now });
+  assert.equal(canReadChannel(s, guest, 'ch-1a-gen'), true);
+
+  // Workspace admin who is not a member of ch-1a-priv cannot read private channel or dual-bound file
   assert.equal(canReadChannel(s, admin, 'ch-1a-priv'), false);
   assert.equal(canReadChannelBoundFile(s, admin, 'file-priv-1', 'ws-1a'), false);
+  assert.equal(canReadChannelBoundFile(s, admin, 'file-dual-1', 'ws-1a'), false);
   const selfJoin = canModifyChannelMembership(s, admin, 'ch-1a-priv', admin);
   assert.equal(selfJoin.ok, false);
   if (!selfJoin.ok) assert.equal(selfJoin.refusal.code, 'PRIVATE_CHANNEL_INVITE_REQUIRED');
 
-  // Channel owner can read private channel and bound file
+  // Channel owner can read both channels and dual-bound file
   assert.equal(canReadChannel(s, owner, 'ch-1a-priv'), true);
-  assert.equal(canReadChannelBoundFile(s, owner, 'file-priv-1', 'ws-1a'), true);
+  assert.equal(canReadChannelBoundFile(s, owner, 'file-dual-1', 'ws-1a'), true);
 
-  // PRIVATE_CHANNELS_ENABLED=false fails closed on private channels
-  s.privateChannelsEnabled = false;
+  // Omitting privateChannelsEnabled (undefined) fails CLOSED on private channels
+  delete s.privateChannelsEnabled;
   assert.equal(canReadChannel(s, owner, 'ch-1a-priv'), false);
-  assert.equal(canReadChannelBoundFile(s, owner, 'file-priv-1', 'ws-1a'), false);
-  s.privateChannelsEnabled = true;
+  assert.equal(canModifyChannelMembership(s, owner, 'ch-1a-priv', admin).ok, false);
+  const defaultTrans = validateChannelVisibilityTransition({
+    nextVisibility: 'private',
+    nextJoinPolicy: 'invite_only',
+  });
+  assert.equal(defaultTrans.ok, false);
+  if (!defaultTrans.ok) assert.equal(defaultTrans.refusal.code, 'PRIVATE_CHANNELS_DISABLED');
 
-  // Visibility transitions: non-empty public -> private blocked; private -> public blocked
+  // Visibility transitions with privateChannelsEnabled=true: non-empty public -> private blocked; private -> public blocked
   const pubToPriv = validateChannelVisibilityTransition({
+    privateChannelsEnabled: true,
     currentVisibility: 'workspace',
     nextVisibility: 'private',
     nextJoinPolicy: 'invite_only',
@@ -196,6 +262,7 @@ test('guest isolation and private channel non-member owner/admin exclusion + fla
   if (!pubToPriv.ok) assert.equal(pubToPriv.refusal.code, 'CHANNEL_HAS_PUBLIC_HISTORY');
 
   const privToPub = validateChannelVisibilityTransition({
+    privateChannelsEnabled: true,
     currentVisibility: 'private',
     nextVisibility: 'workspace',
     nextJoinPolicy: 'open',
@@ -204,9 +271,19 @@ test('guest isolation and private channel non-member owner/admin exclusion + fla
   if (!privToPub.ok) assert.equal(privToPub.refusal.code, 'PRIVATE_CHANNEL_CANNOT_BECOME_PUBLIC');
 });
 
-test('workspace move between orgs enforces dual owner and owners_only revocation', () => {
-  const s = createFixture();
-  const moved = reconcileWorkspaceMove(s, {
+test('workspace move enforces dual owner, owners_only revocation, and transfer_members=all revoked-target reconciliation', () => {
+  const s1 = createFixture();
+  // Non-owner actor refused with ORG_MOVE_REQUIRES_DUAL_OWNER
+  const denied = reconcileWorkspaceMove(s1, {
+    workspace_id: 'ws-1a',
+    target_org_id: 'org-2',
+    actor_user_id: 'u-admin',
+    transfer_members: 'owners_only',
+  });
+  assert.equal(denied.ok, false);
+  if (!denied.ok) assert.equal(denied.refusal.code, 'ORG_MOVE_REQUIRES_DUAL_OWNER');
+
+  const moved = reconcileWorkspaceMove(s1, {
     workspace_id: 'ws-1a',
     target_org_id: 'org-2',
     actor_user_id: 'u-owner',
@@ -216,7 +293,29 @@ test('workspace move between orgs enforces dual owner and owners_only revocation
   if (moved.ok) {
     assert.equal(moved.source_org_id, 'org-1');
     assert.equal(moved.target_org_id, 'org-2');
-    // ag-1 is only a 'member' in org-2, so under owners_only its ws-1a grant and seat are revoked
     assert.deepEqual(moved.closed_seat_ids, ['seat-1a']);
+  }
+
+  // Under transfer_members='all', a principal explicitly revoked in target_org_id has their workspace grant & seat revoked
+  const s2 = createFixture();
+  const ag2 = s2.orgMemberships.find((m) => m.org_id === 'org-2' && m.principal_kind === 'agent' && m.principal_id === 'ag-1')!;
+  ag2.revoked_at = '2026-10-21T00:30:00Z';
+  const movedAll = reconcileWorkspaceMove(s2, {
+    workspace_id: 'ws-1a',
+    target_org_id: 'org-2',
+    actor_user_id: 'u-owner',
+    transfer_members: 'all',
+  });
+  assert.equal(movedAll.ok, true);
+  if (movedAll.ok) {
+    assert.deepEqual(movedAll.closed_seat_ids, ['seat-1a']);
+    // u-admin was not in org-2 at all -> transferred as active admin in org-2
+    assert.equal(canReadWorkspace(s2, { principal_kind: 'user', principal_id: 'u-admin' }, 'ws-1a'), true);
+    // ag-1 was explicitly revoked in org-2 -> remains denied in ws-1a with no duplicate orgMemberships row
+    assert.equal(canReadWorkspace(s2, { principal_kind: 'agent', principal_id: 'ag-1' }, 'ws-1a'), false);
+    assert.equal(
+      s2.orgMemberships.filter((m) => m.org_id === 'org-2' && m.principal_kind === 'agent' && m.principal_id === 'ag-1').length,
+      1,
+    );
   }
 });

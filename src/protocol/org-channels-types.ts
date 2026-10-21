@@ -87,6 +87,7 @@ export interface ChannelMembershipRecord {
   principal_id: string;
   role: ChannelRole;
   notify_pref: NotifyPref;
+  added_by_kind?: PrincipalKind;
   added_by?: string | null;
   joined_at: string;
   revoked_at?: string | null;
@@ -174,6 +175,16 @@ export interface OrgChannelAuthorityState {
   workspaces: WorkspaceRecord[];
   channels: ChannelSummary[];
   agentIdentities: AgentIdentity[];
+  hostedGrants?: Array<{
+    grant_id: string;
+    state: 'pending' | 'active' | 'revoked';
+    revoked_at?: string | null;
+  }>;
+  renewalGrants?: Array<{
+    renewal_grant_id: string;
+    horizon_expires_at: string;
+    revoked_at?: string | null;
+  }>;
   orgMemberships: OrgMembershipRecord[];
   workspaceGrants: WorkspacePrincipalGrant[];
   legacyMemberships?: Array<{
@@ -320,5 +331,26 @@ export const agentOwner = (s: OrgChannelAuthorityState, c: CallerContext) => {
   const ai = s.agentIdentities.find(
     (a) => a.id === c.principal_id && isLive(a),
   );
-  return ai ? (c.owner_user_id ?? ai.owner_user_id) : null;
+  if (!ai) return null;
+  if (
+    ai.standing_grant_id &&
+    !(s.hostedGrants ?? []).some(
+      (g) =>
+        g.grant_id === ai.standing_grant_id &&
+        g.state === 'active' &&
+        g.revoked_at == null,
+    )
+  )
+    return null;
+  if (
+    ai.standing_renewal_grant_id &&
+    !(s.renewalGrants ?? []).some(
+      (rg) =>
+        rg.renewal_grant_id === ai.standing_renewal_grant_id &&
+        rg.revoked_at == null &&
+        Date.parse(rg.horizon_expires_at) > Date.now(),
+    )
+  )
+    return null;
+  return c.owner_user_id ?? ai.owner_user_id;
 };
