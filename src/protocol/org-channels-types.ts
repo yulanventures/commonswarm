@@ -170,6 +170,7 @@ export interface MultiOrgWhoamiResponse {
   }>;
 }
 export interface OrgChannelAuthorityState {
+  now?: string | number | null;
   privateChannelsEnabled?: boolean;
   organizations: OrganizationSummary[];
   workspaces: WorkspaceRecord[];
@@ -231,6 +232,7 @@ export interface CallerContext {
   principal_id: string;
   owner_user_id?: string | null;
   connection_id?: string | null;
+  now?: string | number | null;
 }
 
 export const isLive = (r: {
@@ -357,7 +359,21 @@ export const hasWsGrant = (
   );
 };
 
-export const agentOwner = (s: OrgChannelAuthorityState, c: CallerContext) => {
+export const toEvalMs = (
+  now?: string | number | null,
+  fallback?: string | null,
+): number => {
+  if (typeof now === 'number') return now;
+  const raw = now ?? fallback ?? '1970-01-01T00:00:00Z';
+  const ms = Date.parse(raw);
+  return Number.isNaN(ms) ? 0 : ms;
+};
+
+export const agentOwner = (
+  s: OrgChannelAuthorityState,
+  c: CallerContext,
+  now?: string | number | null,
+) => {
   const aid = resolveAgentId(s, c.principal_id);
   const ai = s.agentIdentities.find(
     (a) => a.id === aid && isLive(a),
@@ -373,6 +389,10 @@ export const agentOwner = (s: OrgChannelAuthorityState, c: CallerContext) => {
     )
   )
     return null;
+  const refMs = toEvalMs(
+    now ?? c.now ?? s.now,
+    ai.created_at ?? s.organizations[0]?.updated_at ?? s.organizations[0]?.created_at,
+  );
   if (
     ai.standing_renewal_grant_id &&
     !(s.renewalGrants ?? []).some(
@@ -380,7 +400,7 @@ export const agentOwner = (s: OrgChannelAuthorityState, c: CallerContext) => {
         rg.renewal_grant_id === ai.standing_renewal_grant_id &&
         rg.revoked_at == null &&
         (rg.horizon_expires_at == null ||
-          Date.parse(rg.horizon_expires_at) > Date.now()),
+          Date.parse(rg.horizon_expires_at) > refMs),
     )
   )
     return null;

@@ -16,12 +16,17 @@ import {
 
 type State = OrgChannelAuthorityState;
 
-export function canReadOrg(s: State, c: CallerContext, orgId: string): boolean {
+export function canReadOrg(
+  s: State,
+  c: CallerContext,
+  orgId: string,
+  now?: string | number | null,
+): boolean {
   if (!s.organizations.some((o) => o.id === orgId && isLive(o))) return false;
   if (c.principal_kind === 'user')
     return orgRole(s, orgId, 'user', c.principal_id) !== null;
   const aid = resolveAgentId(s, c.principal_id);
-  const ownerId = agentOwner(s, c);
+  const ownerId = agentOwner(s, c, now);
   const aRole = orgRole(s, orgId, 'agent', aid);
   if (
     !ownerId ||
@@ -54,6 +59,7 @@ export function canReadWorkspace(
   s: State,
   c: CallerContext,
   wsId: string,
+  now?: string | number | null,
 ): boolean {
   const ws = s.workspaces.find((w) => w.workspace_id === wsId && isLive(w));
   const aid =
@@ -62,7 +68,7 @@ export function canReadWorkspace(
       : c.principal_id;
   if (
     !ws ||
-    !canReadOrg(s, c, ws.org_id) ||
+    !canReadOrg(s, c, ws.org_id, now) ||
     s.workspaceGrants.some(
       (g) =>
         g.workspace_id === wsId &&
@@ -85,13 +91,14 @@ export function canReadWorkspace(
         ),
     );
   }
-  const ownerId = agentOwner(s, c);
+  const ownerId = agentOwner(s, c, now);
   if (
     !ownerId ||
     !canReadWorkspace(
       s,
       { principal_kind: 'user', principal_id: ownerId },
       wsId,
+      now,
     )
   )
     return false;
@@ -119,9 +126,10 @@ export function canReadChannel(
   s: State,
   c: CallerContext,
   chId: string,
+  now?: string | number | null,
 ): boolean {
   const ch = s.channels.find((x) => x.channel_id === chId);
-  if (!ch || !canReadWorkspace(s, c, ch.workspace_id)) return false;
+  if (!ch || !canReadWorkspace(s, c, ch.workspace_id, now)) return false;
   const aid =
     c.principal_kind === 'agent'
       ? resolveAgentId(s, c.principal_id)
@@ -148,7 +156,7 @@ export function canReadChannel(
     if (isGuest(c.principal_kind, aid) && !hasChMem(c.principal_kind, aid))
       return false;
     if (c.principal_kind === 'agent') {
-      const ownerId = agentOwner(s, c);
+      const ownerId = agentOwner(s, c, now);
       if (!ownerId) return false;
       if (isGuest('user', ownerId) && (!hasChMem('user', ownerId) || !hasChMem('agent', aid)))
         return false;
@@ -158,7 +166,7 @@ export function canReadChannel(
   if (!Boolean(s.privateChannelsEnabled)) return false;
   if (!hasChMem(c.principal_kind, aid)) return false;
   if (c.principal_kind === 'user') return true;
-  const ownerId = agentOwner(s, c);
+  const ownerId = agentOwner(s, c, now);
   return Boolean(ownerId && hasChMem('user', ownerId));
 }
 
@@ -167,9 +175,10 @@ export function canModifyChannelMembership(
   actor: CallerContext,
   chId: string,
   target: { principal_kind: PrincipalKind; principal_id: string },
+  now?: string | number | null,
 ) {
   const ch = s.channels.find((c) => c.channel_id === chId && isLive(c));
-  if (!ch || !canReadWorkspace(s, actor, ch.workspace_id))
+  if (!ch || !canReadWorkspace(s, actor, ch.workspace_id, now))
     return fail('WORKSPACE_ACCESS_DENIED', 'workspace_grant', {
       workspace: ch?.workspace_id ?? null,
       channel: ch?.slug ?? chId,
@@ -186,17 +195,35 @@ export function canModifyChannelMembership(
       target.principal_kind === 'agent'
         ? resolveAgentId(s, target.principal_id)
         : target.principal_id;
-    if (
-      !canReadChannel(s, actor, chId) ||
-      !s.channelMemberships.some(
-        (m) =>
-          m.channel_id === chId &&
-          m.principal_kind === actor.principal_kind &&
-          (actor.principal_kind === 'agent' ? resolveAgentId(s, m.principal_id) : m.principal_id) === actorId &&
-          m.role === 'owner' &&
-          isLive(m),
-      )
-    ) {
+    const liveMems = s.channelMemberships.filter((m) => m.channel_id === chId && isLive(m));
+    const creatorId = ch.created_by_principal
+      ? ch.created_by_kind === 'agent'
+        ? resolveAgentId(s, ch.created_by_principal)
+        : ch.created_by_principal
+      : null;
+    const isCreator =
+      (ch.created_by_kind == null || ch.created_by_kind === actor.principal_kind) &&
+      (creatorId === null || creatorId === actorId);
+    const ownerUserId = actor.principal_kind === 'agent' ? agentOwner(s, actor, now) : null;
+    const hasActorOwner = liveMems.some(
+      (m) =>
+        m.principal_kind === actor.principal_kind &&
+        (actor.principal_kind === 'agent' ? resolveAgentId(s, m.principal_id) : m.principal_id) === actorId &&
+        m.role === 'owner',
+    );
+    const isBootstrap =
+      (liveMems.length === 0 &&
+        isCreator &&
+        ((target.principal_kind === actor.principal_kind && targetId === actorId) ||
+          (actor.principal_kind === 'agent' && target.principal_kind === 'user' && targetId === ownerUserId))) ||
+      (actor.principal_kind === 'agent' &&
+        ownerUserId != null &&
+        ((hasActorOwner && target.principal_kind === 'user' && targetId === ownerUserId) ||
+          (isCreator &&
+            target.principal_kind === 'agent' &&
+            targetId === actorId &&
+            liveMems.some((m) => m.principal_kind === 'user' && m.principal_id === ownerUserId && m.role === 'owner'))));
+    if (!isBootstrap && (!canReadChannel(s, actor, chId, now) || !hasActorOwner)) {
       return fail(
         target.principal_kind === actor.principal_kind && targetId === actorId
           ? 'PRIVATE_CHANNEL_INVITE_REQUIRED'
@@ -209,13 +236,130 @@ export function canModifyChannelMembership(
   return { ok: true as const };
 }
 
+export function bootstrapPrivateChannelMemberships(
+  s: State,
+  actor: CallerContext,
+  chId: string,
+  now = '2026-10-21T00:00:00Z',
+) {
+  const ch = s.channels.find((c) => c.channel_id === chId && isLive(c));
+  const actorId =
+    actor.principal_kind === 'agent'
+      ? resolveAgentId(s, actor.principal_id)
+      : actor.principal_id;
+  const targets: Array<{ principal_kind: PrincipalKind; principal_id: string }> = [
+    { principal_kind: actor.principal_kind, principal_id: actorId },
+  ];
+  if (actor.principal_kind === 'agent') {
+    const ownerUserId = agentOwner(s, actor, now);
+    if (!ownerUserId)
+      return fail('WORKSPACE_ACCESS_DENIED', 'agent_owner', {
+        workspace: ch?.workspace_id ?? null,
+        channel: ch?.slug ?? chId,
+      });
+    targets.push({ principal_kind: 'user', principal_id: ownerUserId });
+  }
+  const snap = s.channelMemberships.map((m) => ({ ...m }));
+  for (const t of targets) {
+    const auth = canModifyChannelMembership(s, actor, chId, t, now);
+    if (!auth.ok) {
+      s.channelMemberships = snap;
+      return auth;
+    }
+    const existing = s.channelMemberships.find(
+      (m) =>
+        m.channel_id === chId &&
+        m.principal_kind === t.principal_kind &&
+        (t.principal_kind === 'agent' ? resolveAgentId(s, m.principal_id) : m.principal_id) === t.principal_id,
+    );
+    if (existing) {
+      existing.role = 'owner';
+      existing.revoked_at = null;
+    } else if (ch) {
+      s.channelMemberships.push({
+        channel_id: chId,
+        workspace_id: ch.workspace_id,
+        principal_kind: t.principal_kind,
+        principal_id: t.principal_id,
+        role: 'owner',
+        notify_pref: 'all',
+        added_by_kind: actor.principal_kind,
+        added_by: actorId,
+        joined_at: now,
+      });
+    }
+  }
+  return { ok: true as const };
+}
+
+export function reconcileAgentIdentityMerge(
+  s: State,
+  {
+    principal_id,
+    target_agent_identity_id,
+  }: {
+    principal_id: string;
+    target_agent_identity_id: string;
+  },
+) {
+  const ap = (s.agentPrincipals ?? []).find((x) => x.principal_id === principal_id);
+  if (!ap) return { ok: false as const };
+  const oldId = ap.agent_identity_id;
+  if (oldId === target_agent_identity_id) return { ok: true as const };
+  ap.agent_identity_id = target_agent_identity_id;
+  const oldWg = s.workspaceGrants.find(
+    (g) => g.workspace_id === ap.workspace_id && isPrin(g, 'agent', oldId),
+  );
+  const newWg = s.workspaceGrants.find(
+    (g) => g.workspace_id === ap.workspace_id && isPrin(g, 'agent', target_agent_identity_id),
+  );
+  if (oldWg && newWg) {
+    newWg.revoked_at = newWg.revoked_at ?? oldWg.revoked_at ?? ap.revoked_at ?? null;
+    s.workspaceGrants = s.workspaceGrants.filter((g) => g !== oldWg);
+  } else if (oldWg) {
+    oldWg.principal_id = target_agent_identity_id;
+    oldWg.revoked_at = oldWg.revoked_at ?? ap.revoked_at ?? null;
+  }
+  for (const oldOm of [...s.orgMemberships.filter((m) => isPrin(m, 'agent', oldId))]) {
+    const newOm = s.orgMemberships.find(
+      (m) => m.org_id === oldOm.org_id && isPrin(m, 'agent', target_agent_identity_id),
+    );
+    if (newOm) {
+      newOm.revoked_at = newOm.revoked_at ?? oldOm.revoked_at ?? null;
+      s.orgMemberships = s.orgMemberships.filter((m) => m !== oldOm);
+    } else {
+      oldOm.principal_id = target_agent_identity_id;
+    }
+  }
+  for (const oldCm of [
+    ...s.channelMemberships.filter(
+      (m) => m.workspace_id === ap.workspace_id && isPrin(m, 'agent', oldId),
+    ),
+  ]) {
+    const newCm = s.channelMemberships.find(
+      (m) => m.channel_id === oldCm.channel_id && isPrin(m, 'agent', target_agent_identity_id),
+    );
+    if (newCm) {
+      if (oldCm.role === 'owner') newCm.role = 'owner';
+      newCm.revoked_at = newCm.revoked_at ?? oldCm.revoked_at ?? null;
+      s.channelMemberships = s.channelMemberships.filter((m) => m !== oldCm);
+    } else {
+      oldCm.principal_id = target_agent_identity_id;
+    }
+  }
+  if (!(s.agentPrincipals ?? []).some((x) => x.agent_identity_id === oldId)) {
+    s.agentIdentities = s.agentIdentities.filter((a) => a.id !== oldId);
+  }
+  return { ok: true as const };
+}
+
 export function cascadeWorkspaceMemberRemoval(
   s: State,
   {
     workspace_id,
     principal_kind,
     principal_id: raw_principal_id,
-    now = new Date().toISOString(),
+    now = String(s.now ?? s.organizations[0]?.updated_at ?? s.organizations[0]?.created_at ?? '2026-10-21T00:00:00Z'),
   }: {
     workspace_id: string;
     principal_kind: PrincipalKind;
@@ -297,7 +441,7 @@ export function cascadeOrgMemberRemoval(
     org_id,
     principal_kind,
     principal_id: raw_principal_id,
-    now = new Date().toISOString(),
+    now = String(s.now ?? s.organizations[0]?.updated_at ?? s.organizations[0]?.created_at ?? '2026-10-21T00:00:00Z'),
   }: {
     org_id: string;
     principal_kind: PrincipalKind;
@@ -348,12 +492,13 @@ export function canReadChannelBoundFile(
   c: CallerContext,
   fileId: string,
   wsId: string,
+  now?: string | number | null,
 ): boolean {
-  if (!canReadWorkspace(s, c, wsId)) return false;
+  if (!canReadWorkspace(s, c, wsId, now)) return false;
   const b = (s.fileChannelBindings ?? []).filter(
     (x) => x.file_id === fileId && x.workspace_id === wsId,
   );
-  return b.every((x) => canReadChannel(s, c, x.channel_id));
+  return b.every((x) => canReadChannel(s, c, x.channel_id, now));
 }
 
 export function validateChannelVisibilityTransition({
