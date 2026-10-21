@@ -2,95 +2,111 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CommonSwarm · Slice 5 Dialogs</title><link rel="stylesheet" href="./org-dialogs.css"></head>
 <body>
 <div class="app-shell" id="specimen-app" data-mobile-view="list">
-<nav class="rail" id="rail-nav" ></nav>
-<div class="org-members-mode" id="org-members-mount" data-org-slug="yulan" data-workspace-slug="ops" data-mobile-view="list">
-<aside class="sidebar roster-pane members-list-pane" id="roster-sidebar" ></aside>
-<section class="page-content detail-pane member-detail-pane" id="detail-pane" >
-<header class="topbar" id="specimen-topbar"></header>
-<div id="screen-members"></div><div id="screen-workspace-move-logo" hidden></div><div id="screen-private-channel" hidden></div><div id="screen-approval-refusal" hidden></div>
-</section>
+<nav class="rail" id="rail-nav" aria-label="Primary navigation">
+<div class="mark">cs</div>
+<button type="button" class="icon-button" aria-label="Chat">#</button>
+<button type="button" class="icon-button" aria-label="Members" aria-current="page">P</button>
+<button type="button" class="icon-button" aria-label="Wiki">W</button>
+<button type="button" class="icon-button" aria-label="Connections">C</button>
+<div class="rail-bottom"><span class="avatar small">TL</span></div>
+</nav>
+<div class="specimen-main" style="flex:1;min-width:0;display:flex;flex-direction:column">
+<header class="topbar" id="specimen-topbar">
+<div><h1>Members &amp; Workspace Grants</h1><p class="meta">Yulan Ventures (<code>yulan</code>) · Workspace <code>yulan/ops</code></p></div>
+<div class="specimen-tabs">
+<button type="button" class="button" data-scr="members" aria-pressed="true">1. Org Members</button>
+<button type="button" class="button" data-scr="workspace-move-logo" aria-pressed="false">2. Workspace &amp; Logo</button>
+<button type="button" class="button" data-scr="private-channel" aria-pressed="false">3. Private Channel</button>
+<button type="button" class="button" data-scr="approval-refusal" aria-pressed="false">4. Approvals &amp; Refusals</button>
+</div>
+</header>
+<div id="screen-members"></div>
+<div id="screen-workspace-move-logo" class="dialog-grid" hidden></div>
+<div id="screen-private-channel" class="dialog-grid" hidden></div>
+<div id="screen-approval-refusal" class="dialog-grid" hidden></div>
 </div>
 </div>
-<script>
-const $=id=>document.getElementById(id),Q=s=>document.querySelector(s),QA=s=>document.querySelectorAll(s);
-const E=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const Y='Yulan Ventures',T='Tom Langridge',A='Argon Lead',OP='Operations',SI='sec-incident',YO='yulan/ops',AP='appr_01jb8x9k2m',HH='Household (household)',S1='workspace-move-logo',S2='private-channel',S3='approval-refusal',TM='transfer_members',CA='ag-1 --org yulan',KR='--kind agent --role admin';
-const REV='Workspace removal closes the active seat here; org removal revokes all workspaces, channels, and seats.';
-const ROSTER=[
-['ag-1','agent',A,'@argon-lead','AL','Admin','Architecture & UI','seat-1a',[[OP,'Admin','seat-1a']],HH+': Member',0],
-['u-owner','user',T,'@tom','TL','Owner','Owner',0,[[OP,'Owner'],['Product','Owner']],HH+': Owner',0],
-['u-guest','user','Reviewer','@reviewer','ER','Guest','Audit guest',0,[[OP,'Guest']],'None',0],
-['inv-1','user','alex@yulan.io','invite:inv-1','AX','Member','Pending invite',0,[],'None',1]
+<script type="module">
+import {
+ mountOrgDialogsController, renderWorkspaceMembersPanel, renderWorkspaceMoveModal,
+ renderOrgLogoUploadModal, renderCreateWorkspaceModal, renderOrganizationCrudModal,
+ renderCreateChannelModal, renderChannelMembersModal, renderInlineApprovalCard, renderActionableRefusalBanner,
+} from './approval-remedy-cards.js';
+
+const ROSTER = [
+ { principal_kind: 'agent', principal_id: 'ag-1', display_name: 'Argon Lead', handle: '@argon-lead', initials: 'AL', role: 'admin', specialty: 'Architecture & UI', provider: 'Gemini', model: 'Gemini 4 Argon', skills: ['Kylon UI Critique', 'Edge Security Audit'], owner_user_id: 'u-owner', owner_display_name: 'Tom Langridge', inherits_owner_access: true, connection_state: 'working', active_seat_id: 'seat-1a', active_seat_workspace_slug: 'ops', workspace_grants: [{ workspace_id: 'ws-1a', workspace_slug: 'ops', workspace_name: 'Operations', role: 'admin', active_seat_id: 'seat-1a' }], other_org_roles: [{ org_id: 'org-2', org_slug: 'household', org_name: 'Household', role: 'member' }] },
+ { principal_kind: 'user', principal_id: 'u-owner', display_name: 'Tom Langridge', handle: '@tom', initials: 'TL', role: 'owner', specialty: 'Founder & Owner', workspace_grants: [{ workspace_id: 'ws-1a', workspace_slug: 'ops', workspace_name: 'Operations', role: 'owner' }, { workspace_id: 'ws-1b', workspace_slug: 'product', workspace_name: 'Product', role: 'owner' }], other_org_roles: [{ org_id: 'org-2', org_slug: 'household', org_name: 'Household', role: 'owner' }] },
+ { principal_kind: 'user', principal_id: 'u-guest', display_name: 'External Reviewer', handle: '@reviewer', initials: 'ER', role: 'guest', specialty: 'Audit guest', workspace_grants: [{ workspace_id: 'ws-1a', workspace_slug: 'ops', workspace_name: 'Operations', role: 'guest' }] },
+ { principal_kind: 'user', principal_id: 'inv-1', display_name: 'alex@yulan.io', handle: 'invite:inv-1', initials: 'AX', role: 'member', specialty: 'Pending invite', workspace_grants: [], invite_pending: true },
 ];
-let flt='all',sel='ag-1',dTab='profile',chStep=1,cM='rename',pR='',orgDel='',chDel='',aS='pending',chVis='private',chIcon='lock',chSlug=SI,chTopic='Security response',chGuide='Contain findings.';
-const D=(c,b,x='')=>`<div class="${c}"${x}>${b}</div>`,S=(c,b,x='')=>`<span class="${c}"${x}>${b}</span>`,ap=c=>`aria-pressed="${!!c}"`,SS=s=>`data-scr="${s}"`;
-const B=(t,c='')=>S(`badge${c?' '+c:''}`,t),C=t=>`<code>${t}</code>`,G=t=>`<strong>${t}</strong>`,M=t=>`<small class="meta">${t}</small>`,SR=(b,c='')=>D(`sample-row${c?' '+c:''}`,b);
-const F=(l,c)=>`<label class="field">${l}${c}</label>`,I=(n,v,x='')=>`<input type="text" name="${n}" value="${E(v)}"${x}>`,O=(v,t,s=0)=>`<option value="${E(v)}"${s?' selected':''}>${t}</option>`,L=(a,o)=>`<select ${a}>${o}</select>`;
-const K=(c,x,t)=>`<button type="button"${c?` class="${c}"`:''} ${x}>${t}</button>`,N=(c,a,t,d=0,x='')=>K(`button${c?' '+c:''}`,`data-action="${a}"${d?' disabled':''}${x}`,t);
-const R=(n,v,k,h)=>`<label class="check-field"><input type="radio" name="${n}" value="${v}" ${k?'checked':''}><span>${h}</span></label>`,FS=(l,b)=>`<fieldset class="transfer-fieldset"><legend>${l}</legend>${b}</fieldset>`,W=(dt,dd)=>`<dt>${dt}</dt><dd>${dd}</dd>`,DH=(h,b='')=>D('dialog-heading',h+b);
-const NT=(t,p,x='',r='note')=>`<div class="notice" role="${r}"${x}>${t?G(t):''}<p>${p}</p></div>`,PB=b=>D('parity-command-box',b),P=(m,c,l,cp=c)=>D('parity-row',`${S('meta',m)}${C(c)}${K('button',`data-copy-cmd="${cp}"`,l)}`);
-const DL=(id,h2,b,body,act='',x='')=>`<dialog open aria-modal="true" class="spec-card dialog-surface" data-dialog="${id}"${x}>${DH(`<h2>${h2}</h2>`,b)}${body}${act?D('actions',act):''}</dialog>`;
-const TD=(v,t,a,l)=>D('typed-delete-box',F(`Type ${C(E(t))} to confirm delete`,I('typed_delete_input',v,` data-del="${E(t)}"`))+D('actions',N('primary danger',a,l,v.trim()!==t)));
-$('rail-nav').innerHTML=D('mark','cs')+[['Chat','#',0],['Members','P',1],['Wiki','W',0],['Connections','C',0]].map(([l,t,c])=>K('icon-button',`aria-label="${l}"${c?' aria-current="page"':''}`,t)).join('')+D('rail-bottom',S('avatar small','TL'));
-$('roster-sidebar').innerHTML=D('identity',K('org-button',SS(S1),`${S('logo-placeholder','Y')}${G(Y)}${S('badge good','Owner',' style="margin-left:auto"')}`)+K('workspace-button',SS(S1),`<span>Workspace: ${G(`${OP} (${YO})`)}</span>`))+D('pane-heading','<h2>Members &amp; Agents</h2>'+D('creation-menu-wrap',N('icon-button','toggle-creation-menu','+',0,' id="cm-btn"')+D('popover creation-menu-popover',[['new-agent','New Agent'],['invite-person','Invite a Person'],['connect-agent','Connect Agent']].map(([id,l])=>K('',`data-creation-action="${id}"`,G(l))).join(''),' id="cm-pop" hidden')))+SR(N('primary','invite-person','+ Invite Person')+N('','connect-grant-agent','+ Connect / Grant Agent'),'top-roster-actions')+D('filters',[['all','All'],['people','People'],['agents','Agents'],['guests','Guests'],['invites','Pending Invites']].map(([id,l],i)=>K('',`data-flt="${id}" ${ap(!i)}`,l)).join(''))+D('roster-list','',' id="roster-list"')+D('sidebar-parity-footer',M('CLI parity')+C(`cswarm org invite ${CA} ${KR}`)+C(`cswarm org members grant ${CA} --workspace ${YO} ${KR}`));
-$('specimen-topbar').innerHTML=`<div><h1>Members &amp; Workspace Grants</h1><p class="meta">${Y} (${C('yulan')}) · Workspace ${C(YO)}</p></div>`+D('specimen-tabs',[['members','1. Org Members'],[S1,'2. Workspace & Logo'],[S2,'3. Private Channel'],[S3,'4. Approvals & Refusals']].map(([id,l],i)=>K('button',`${SS(id)} ${ap(!i)}`,l)).join(''));
-function setMobileView(v){$('specimen-app').dataset.mobileView=$('org-members-mount').dataset.mobileView=v;}
-function renderRoster(){
-  const items=ROSTER.filter(m=>flt==='people'?(!m[10]&&m[1]==='user'):flt==='agents'?(!m[10]&&m[1]==='agent'):flt==='guests'?(!m[10]&&m[5]==='Guest'):flt==='invites'?!!m[10]:!m[10]);
-  $('roster-list').innerHTML=items.map(([id,k,n,,i,r,s,seat,ws])=>K('member-row',`data-member-id="${id}" aria-current="${id===sel}"`,S(`avatar${k==='agent'?' agent':''}`,i)+S('member-row-copy',`${G(`${n} ${B(r,r==='Owner'?'good':'')}`)}<small>${k==='agent'?'Agent':'Person'} · ${s} · ${k==='agent'?(seat?`Active seat: ${seat}`:'No seat'):ws.length+' ws'}</small>`))).join('');
-  const [id,k,n,h,i,r,s,seat,ws,other]=ROSTER.find(x=>x[0]===sel)||ROSTER[0],ag=k==='agent';
-  const remDlg=pR?DL('confirm-remove-org-member','Confirm Removal · '+n,B('Destructive','danger-badge'),`<p>${REV}</p>`,N('','no-rem','Cancel')+N('primary danger','ok-rem','Confirm remove',0,` data-removal-scope="${pR}"`),` role="alertdialog" data-removal-scope="${pR}"`):'';
-  const sk=D('detail-tab-panel',`<h3>Capabilities</h3>${SR(B('Kylon UI')+B('Edge Security'))}<h3>CLI Parity</h3>${PB(P('Invite',`cswarm org invite ${id} --org yulan`,'Copy CLI'))}`,` data-tab-panel="skills"${dTab!=='skills'?' hidden':''}`);
-  $('screen-members').innerHTML=D('profile',N('text-button mobile-member-back','member-list-back','← Back to members')+D('profile-heading',S(`avatar${ag?' agent':''}`,i)+D('profile-identity',D('profile-title-row',`<h2>${n}</h2>${B(ag?'Agent':'Person')}${B(r,r==='Owner'?'good':'')}${ag&&seat?B('Active seat · '+seat,'good'):''}`)+`<p class="meta">${h} · ${s}</p>`)+D('profile-quick-actions',N('','message-member','Message')))+D('filters detail-tabs',K('',`data-detail-tab="profile" ${ap(dTab==='profile')}`,'Profile &amp; Access')+K('',`data-detail-tab="skills" ${ap(dTab==='skills')}`,'Skills &amp; Parity'))+D('detail-tab-panel',`<dl class="profile-dl">${W('Organization role',L('class="role-select" data-action="change-org-role"',['Owner','Admin','Member','Guest'].map(x=>O(x.toLowerCase(),x,r===x)).join(''))+M('4-tier role in '+Y))}${W('Workspace grants',D('ws-chip-list',ws.map(([wn,wr,wsId])=>S('ws-chip',`<span>${wn} <small>(${wr}${wsId?' · '+wsId:''})</small></span>`+N('ws-chip-remove','revoke-workspace-grant','×'))).join(''))+D('ws-grant-add-row',L('class="ws-select"',O('ws-1b','Product (product)'))+N('','add-workspace-grant','+ Add to workspace')))}${W('Status',ag?(seat?'Working · active seat':'Offline'):'Human · direct')}${ag?W('Owner',`${T} · Inherits access.`)+W('Model','Gemini 4 Argon'):''}${W('Multi-org',B(other))}</dl>${NT('',REV)}${SR(N('danger','open-remove-workspace','Remove from '+OP)+N('primary danger','open-remove-org','Remove from Organization'),'member-danger-actions')}${remDlg}`,` data-tab-panel="profile"${dTab==='skills'?' hidden':''}`)+sk,` data-selected-member="${id}"`);
-}
-function renderDialogs(){
-  const cb=cM==='delete'?TD(orgDel,Y,'confirm-delete-org','Delete organization'):`${F('Organization display name',I('org_display_name',Y))}${F(`Organization slug (${C('[a-z0-9-]')})`,I('org_slug','yulan'))}${cM==='create'?F('Initial workspace name',I('initial_workspace_name','General'))+D('actions',N('primary','submit-create-org','Create organization')):D('actions',N('primary','submit-rename-org','Save changes'))}`;
-  const cc=DL('org-crud',cM==='create'?'Create Organization':cM==='rename'?'Rename '+Y:'Delete '+Y,SR(['create','rename','delete'].map(m=>K('button',`data-crud-mode="${m}" ${ap(cM===m)}`,m)).join('')),cb,'',` data-org-crud-mode="${cM}"`);
-  const mc=DL('move-workspace','Move Workspace · '+OP,B('org_move_workspace'),`${F('Destination organization',L('id="move-ws-target-org"',O('org-2',HH,1)))}${FS(`Transfer policy (${C(TM)})`,R(TM,'all',0,G('Transfer all (<code>all</code>)'))+R(TM,'owners_only',1,G('Transfer owners only (<code>owners_only</code>)')))}${NT('Non-transferred lose grants &amp; seats',`2 principals &amp; 1 seat close. ${C(`cswarm workspace move ${YO} --to-org household --transfer-members owners_only`)}`,' data-move-warning="true"','alert')}`,N('primary','submit-move-workspace','Move workspace'));
-  const lc=DL('org-logo-upload','Organization Logo · '+Y,B('64 / 128 / 256px'),D('logo-dropzone',G('PNG, JPEG, WebP, SVG (&lt;= 1 MB)')+'<input type="file" accept="image/*">')+D('logo-rendition-grid',[64,128,256].map((px,i)=>D('logo-rendition-box',D('logo-rendition-frame','Y',` style="width:${32+i*12}px;height:${32+i*12}px"`)+M(`${px}×${px}px`)+C(`orgs/org-1/logo/${px}.webp`),` data-rendition-size="${px}"`)).join('')),N('primary','submit-logo-upload','Save organization logo'));
-  const wp=`<section class="spec-card ws-members-panel" data-workspace-slug="ops">${DH('<h2>Workspace Members · '+OP+'</h2>',B('2 assigned'))}${SR(L('id="ws-candidate-select" class="ws-select"',O('u-guest','Reviewer'))+N('primary','ws-add-member','+ Add to workspace'),'ws-add-bar')}${D('ws-member-list',D('ws-member-row',S('avatar agent small','AL')+D('ws-member-copy',G(`${A} ${B('Agent')} ${B('Admin')}`)+M('@argon-lead · seat-1a'))+N('danger','ws-remove-member','Remove'),' data-member-id="ag-1"'))}${NT('',REV)}</section>`;
-  const cw=DL('create-workspace','Create Workspace',B('org_create_workspace'),`${F('Organization',L('name="org_slug"',O('yulan',Y+' (yulan)',1)))}${F('Workspace name',I('workspace_name','Research Lab'))}${F(`Workspace slug (${C('[a-z0-9-]')})`,I('workspace_slug','research'))}${NT('',`Provisions ${C('#general')}. ${C('cswarm workspace create research --org yulan')}`)}`,N('primary','submit-create-workspace','Create workspace'));
-  $('screen-'+S1).innerHTML=D('dialog-grid',mc+lc+wp+cw+cc);
-  const steps=[[1,'1. Visibility'],[2,'2. Name'],[3,'3. Members']].map(([n,l])=>K(`step-pill${chStep===n?' active':''}`,`data-step="${n}"`,l)).join(''),pane=(n,b)=>`<fieldset class="channel-step-pane" data-step-pane="${n}" ${chStep!==n?'hidden':''}>${b}</fieldset>`,vop=(v,c,t)=>`<label class="visibility-option${c?' selected':''}"><input type="radio" name="channel_visibility" value="${v}"${c?' checked':''}><div>${G(t)}</div></label>`;
-  const ch=DL('create-channel','Create Channel in '+OP,B('PRIVATE_CHANNELS_ENABLED: true','good'),D('step-progress',steps)+pane(1,vop('workspace',chVis==='workspace','# Public (<code>visibility="workspace"</code>)')+vop('private',chVis==='private','Lock Private (<code>visibility="private"</code>)')+NT('','Owner invite required (<code>PRIVATE_CHANNEL_CANNOT_BECOME_PUBLIC</code> / <code>CHANNEL_HAS_PUBLIC_HISTORY</code>).'))+pane(2,`${F(`Channel icon (${C('channel_icon')})`,L('name="channel_icon"',['#','lock','bolt','shield','book'].map(v=>O(v,v,v===chIcon)).join('')))}${F('Channel name',I('channel_slug',chSlug))}${F('Topic',I('channel_topic',chTopic))}${F('Guidelines',`<textarea name="channel_guidelines" rows="2">${E(chGuide)}</textarea>`)}`)+pane(3,D('channel-initial-members',[[A,'ag-1'],['HezLead','ag-2']].map(([n,id])=>`<label class="check-field"><input type="checkbox" value="${id}" checked><span>${n}</span></label>`).join(''))+`<code data-channel-cli-preview="true">cswarm channel create ${E(chSlug||SI)} --workspace ${YO} --visibility ${chVis}</code>`),`${N('','prev-channel-step','Back',chStep===1)}${chStep<3?N('primary','next-channel-step','Next step'):''}${N(chStep===3?'primary':'','submit-create-channel','Create channel',chStep!==3)}`,` data-current-step="${chStep}"`);
-  const cp=DL('channel-members-prefs',`Lock ${SI} · Members &amp; Notifications`,'',FS(`Notifications (${C('all | mentions | mute')})`,[['all','All'],['mentions','Mentions'],['mute','Mute']].map(([id,l],i)=>R('channel_notify_pref',id,!i,G(`${l} (${C(id)})`))).join(''))+D('ws-member-list',[[T,'owner','all'],[A,'member','mentions']].map(([n,r,p])=>D('ws-member-row',`<span>${G(n)} ${B(r)}</span>`+M('Notify: '+p))).join(''))+SR(`<input type="text" id="channel-invite-input" placeholder="Handle">${N('primary','channel-invite-submit','Invite to channel')}`,'ws-add-bar')+TD(chDel,SI,'confirm-delete-channel','Delete #'+SI));
-  $('screen-'+S2).innerHTML=D('dialog-grid',ch+cp);
-  const mcpStr=`org_confirm_action {"approval_id":"${AP}","decision":"approve"}`,U='https://commonswarm.com/app/ops',kvs=[['org','yulan'],['workspace','ops'],['principal_id','ag-2'],['principal_name','HezLead'],['role','admin']].map(([k,v])=>C(k+'='+v)).join(' '),isP=aS==='pending';
-  $('screen-'+S3).innerHTML=D('dialog-grid',`<article class="spec-card approval-card" data-approval-id="${AP}" data-approval-state="${aS}">${DH(`<div><h2>Owner Approval · ${C('org_assign_workspace_member')}</h2><p class="meta">By ${G(A)} (${C('ag-1')}) for ${G(T)}</p></div>`,B(aS.toUpperCase(),aS==='approved'?'good':aS==='rejected'?'danger-badge':''))}<dl class="approval-dl">${W('Action','Grant workspace access in '+YO)}${W('Scope',C(`${YO} (org=yulan · workspace=ops)`))}${W('Subject',`Principal: ${G(`HezLead (${C('ag-2')})`)} · Role: ${B('admin')}${SR(kvs,' style="margin-top:4px"')}`)}${W('Approver',`Live Owner (${C(T)})`)}${W('Validity','Standing approval')}</dl>${PB(P('CLI','cswarm org confirm '+AP,'Copy CLI')+P('MCP',mcpStr,'Copy MCP',mcpStr.replace(/"/g,'&quot;')))}${SR(N('primary','approve-request','Approve',!isP)+N('danger','reject-request','Reject',!isP),'approval-actions')}</article><aside class="notice refusal-remedy-banner" role="alert" data-refusal-code="AMBIGUOUS_WORKSPACE_SELECTOR" style="margin:0">${DH(G(`Refused: ${C('AMBIGUOUS_WORKSPACE_SELECTOR')} (missing: ${C('org_qualifier')})`),B('workspace=ops'))}<p>Resolve: <a href="${U}" data-remedy-url="${U}">${U}</a></p>${PB(P('MCP','cswarm_list_workspaces','Copy MCP')+P('CLI','cswarm workspaces list','Copy CLI'))}${D('refusal-choices',M('Selectors:')+SR([YO,'household/ops'].map(s=>K('button',`data-ws-choice="${s}" data-copy-cmd="${s}"`,C(s))).join('')))}</aside>`);
-}
-function setScreen(s){
-  ['members',S1,S2,S3].forEach(k=>{const el=$('screen-'+k);if(el)el.hidden=(k!==s);});
-  QA('.specimen-tabs [data-scr]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.scr===s)));
-}
-document.addEventListener('click',e=>{
-  const b=e.target.closest('button');if(!b)return;const d=b.dataset,a=d.action;
-  if(d.copyCmd){navigator.clipboard?.writeText?.(d.copyCmd);return;}
-  if(b.id==='cm-btn'){$('cm-pop').hidden=!$('cm-pop').hidden;return;}
-  if(d.detailTab){dTab=d.detailTab;renderRoster();return;}
-  if(d.flt){flt=d.flt;QA('[data-flt]').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));renderRoster();return;}
-  if(d.memberId&&!a){sel=d.memberId;pR='';setScreen('members');renderRoster();setMobileView('detail');scrollTo(0,0);return;}
-  if(a==='open-remove-org'||a==='open-remove-workspace'){pR=a==='open-remove-org'?'organization':'workspace';renderRoster();return;}
-  if(a==='no-rem'){pR='';renderRoster();return;}
-  if(a==='ok-rem'){const m=ROSTER.find(x=>x[0]===sel);if(m&&pR==='workspace'){m[7]=0;m[8]=m[8].filter(w=>w[0]!==OP);}pR='';renderRoster();return;}
-  if(a==='approve-request'||a==='reject-request'){aS=a==='approve-request'?'approved':'rejected';renderDialogs();return;}
-  if(a==='member-list-back'){setMobileView('list');Q(`.member-row[data-member-id="${sel}"]`)?.focus();return;}
-  if(a==='next-channel-step'||a==='prev-channel-step'){chStep=Math.max(1,Math.min(3,chStep+(a==='next-channel-step'?1:-1)));renderDialogs();return;}
-  if(d.step){chStep=+d.step;renderDialogs();return;}
-  if(d.crudMode){cM=d.crudMode;orgDel='';renderDialogs();return;}
-  if(d.scr)setScreen(d.scr);
+
+const APPROVAL = {
+ approval_id: 'appr_01jb8x9k2m', org_id: 'org-1', org_slug: 'yulan', workspace_id: 'ws-1a', workspace_slug: 'ops',
+ requested_by_agent_identity_id: 'ag-1', agent_display_name: 'Argon Lead', owner_user_id: 'u-owner', owner_display_name: 'Tom Langridge',
+ action_kind: 'org_assign_workspace_member', action_summary: 'Grant workspace access in yulan/ops',
+ target_scope: { org: 'yulan', workspace: 'ops' }, payload: { principal_id: 'ag-2', principal_name: 'HezLead', role: 'admin' },
+ state: 'pending', created_at: '2026-10-20T12:00:00Z',
+};
+
+const REFUSAL = {
+ code: 'AMBIGUOUS_WORKSPACE_SELECTOR', missing: 'org_qualifier', scope: { workspace: 'ops' },
+ remedy_url: 'https://commonswarm.com/app/ops', mcp_tool: 'workspace_list', cli_command: 'cswarm workspaces list',
+ choices: [
+  { org_id: 'org-1', org_slug: 'yulan', workspace_id: 'ws-1a', workspace_slug: 'ops', selector: 'yulan/ops' },
+  { org_id: 'org-2', org_slug: 'household', workspace_id: 'ws-2a', workspace_slug: 'ops', selector: 'household/ops' },
+ ],
+};
+
+const membersRoot = document.getElementById('screen-members');
+const ctrl = mountOrgDialogsController(membersRoot, {
+ members: {
+  org_id: 'org-1', org_slug: 'yulan', org_name: 'Yulan Ventures',
+  current_workspace_id: 'ws-1a', current_workspace_slug: 'ops', current_workspace_name: 'Operations',
+  actor_role: 'owner', active_filter: 'all', selected_principal_id: 'ag-1', active_detail_tab: 'profile',
+  available_workspaces: [{ workspace_id: 'ws-1a', slug: 'ops', name: 'Operations' }, { workspace_id: 'ws-1b', slug: 'product', name: 'Product' }],
+  members: ROSTER,
+ },
+ onAction: (cmd) => ({ ok: true, decided_by: 'u-owner', decided_at: '2026-10-20T12:05:00Z', command: cmd }),
 });
-const imap={channel_slug:v=>{chSlug=v;const c=Q('[data-channel-cli-preview]');if(c)c.textContent=`cswarm channel create ${v||SI} --workspace ${YO} --visibility ${chVis}`;},channel_topic:v=>chTopic=v,channel_guidelines:v=>chGuide=v,channel_icon:v=>chIcon=v,channel_visibility:v=>chVis=v};
-document.addEventListener('input',e=>{
-  const t=e.target,n=t?.name;if(!n)return;
-  if(imap[n])imap[n](t.value);
-  else if(n==='typed_delete_input'){
-    const g=t.dataset.del,q=s=>Q(`[data-action="${s}"]`);
-    if(g===Y){orgDel=t.value;if(q('confirm-delete-org'))q('confirm-delete-org').disabled=orgDel.trim()!==Y;}
-    else if(g===SI){chDel=t.value;if(q('confirm-delete-channel'))q('confirm-delete-channel').disabled=chDel.trim()!==SI;}
-  }
+
+const wsScreen = document.getElementById('screen-workspace-move-logo');
+wsScreen.innerHTML = [
+ renderWorkspaceMoveModal({ workspace_id: 'ws-1a', workspace_slug: 'ops', workspace_name: 'Operations', source_org_id: 'org-1', source_org_slug: 'yulan', source_org_name: 'Yulan Ventures', target_orgs: [{ org_id: 'org-2', slug: 'household', display_name: 'Household', actor_is_owner: true }, { org_id: 'org-3', slug: 'partner', display_name: 'Partner Org', actor_is_owner: false }], selected_target_org_id: 'org-2', transfer_members: 'owners_only', affected_non_owner_count: 2, affected_agent_seat_count: 1 }),
+ renderOrgLogoUploadModal({ org_id: 'org-1', org_slug: 'yulan', org_name: 'Yulan Ventures', actor_role: 'owner' }),
+ renderWorkspaceMembersPanel({ org_slug: 'yulan', workspace_slug: 'ops', workspace_name: 'Operations', workspace_id: 'ws-1a', actor_role: 'owner', workspace_members: [ROSTER[0], ROSTER[1]], org_candidates: [ROSTER[2]] }),
+ renderCreateWorkspaceModal({ org_slug: 'yulan', org_name: 'Yulan Ventures', workspace_slug: 'research', workspace_name: 'Research Lab', actor_role: 'owner' }),
+ renderOrganizationCrudModal({ mode: 'rename', org_id: 'org-1', org_slug: 'yulan', org_name: 'Yulan Ventures', actor_role: 'owner' }),
+].join('\n');
+
+const chScreen = document.getElementById('screen-private-channel');
+mountOrgDialogsController(chScreen, {
+ activeDialog: 'create-channel',
+ createChannel: { org_slug: 'yulan', workspace_slug: 'ops', workspace_name: 'Operations', step: 1, private_channels_enabled: true, visibility: 'private', channel_icon: 'lock', channel_slug: 'sec-incident', topic: 'Security response', guidelines: 'Contain findings.', available_principals: [ROSTER[0]], selected_principal_ids: ['ag-1'] },
+ onAction: () => ({ ok: true }),
 });
-onhashchange=()=>{const h=location.hash.slice(1);if(h)setScreen(h);};
-renderRoster();renderDialogs();if(location.hash.slice(1))setScreen(location.hash.slice(1));
+chScreen.insertAdjacentHTML('beforeend', renderChannelMembersModal({ org_slug: 'yulan', workspace_slug: 'ops', channel_id: 'ch-1', channel_slug: 'sec-incident', visibility: 'private', actor_channel_role: 'owner', actor_org_role: 'owner', notify_pref: 'all', members: [{ principal_id: 'u-owner', principal_kind: 'user', display_name: 'Tom Langridge', channel_role: 'owner', notify_pref: 'all' }, { principal_id: 'ag-1', principal_kind: 'agent', display_name: 'Argon Lead', channel_role: 'member', notify_pref: 'mentions' }] }));
+
+const apScreen = document.getElementById('screen-approval-refusal');
+mountOrgDialogsController(apScreen, {
+ approvals: [APPROVAL],
+ refusals: [REFUSAL],
+ onAction: () => ({ ok: true, decided_by: 'u-owner', decided_at: '2026-10-20T12:05:00Z' }),
+});
+
+function setScreen(scr) {
+ for (const k of ['members', 'workspace-move-logo', 'private-channel', 'approval-refusal']) {
+  const el = document.getElementById('screen-' + k);
+  if (el) el.hidden = k !== scr;
+ }
+ document.querySelectorAll('.specimen-tabs [data-scr]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.scr === scr)));
+}
+document.querySelector('.specimen-tabs').addEventListener('click', (e) => {
+ const b = e.target.closest('[data-scr]');
+ if (b) setScreen(b.dataset.scr);
+});
+window.addEventListener('hashchange', () => { const h = location.hash.slice(1); if (h) setScreen(h); });
+if (location.hash.slice(1)) setScreen(location.hash.slice(1));
+window.__slice5Ctrl = ctrl;
 </script>
 </body>
 </html>
