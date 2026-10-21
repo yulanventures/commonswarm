@@ -45,7 +45,6 @@ test("DCR known Meta fields register; metadata and JSON refusals are safe JSON e
     ["{", "invalid_request", "failed to parse the request body"],
     ["null", "invalid_request", "client registration request must be a JSON object"],
     [{ ...META, response_types: ["token"] }, "invalid_client_metadata", "response_types metadata is invalid"],
-    [{ ...META, logo_uri: "https://meta.ai/logo.png" }, "invalid_client_metadata", "registered clients cannot declare logo_uri"],
     [{ ...META, client_uri: "private-value-not-a-url" }, "invalid_client_metadata", "client_uri must be a valid URL", { accept: "application/json" }],
     [{ ...META, post_logout_redirect_uris: "private-value-not-an-array" }, "invalid_client_metadata", "post_logout_redirect_uris must be an array of URLs", { accept: "application/json" }],
     [{ ...META, post_logout_redirect_uris: ["private-value-not-a-url"] }, "invalid_client_metadata", "post_logout_redirect_uris must contain valid URLs", { accept: "application/json" }],
@@ -60,8 +59,50 @@ test("DCR known Meta fields register; metadata and JSON refusals are safe JSON e
   }
   assert.equal((await h.request(META)).status, 201, "rejections leave registration usable");
   assert.ok(h.logs.some(row => row.event === "registration_create.error" && row.error_code === "invalid_client_metadata" &&
-    row.registration_error_description === "registered clients cannot declare logo_uri"));
+    row.registration_error_description === "response_types metadata is invalid"));
   assert.doesNotMatch(JSON.stringify(h.logs), /private-value|meta\.ai/u);
+});
+
+test("DCR discards optional Cursor logos before validation and persistence without relaxing policy", async t => {
+  const store = createMemoryRegistrationStore();
+  const h = await harness(t, { registrationStore: store });
+  const cursor = { ...META, client_name: "Cursor", client_uri: "https://cursor.com",
+    redirect_uris: ["cursor://anysphere.cursor-retrieval/oauth/user-server/callback"] };
+  const control = await h.request(cursor);
+  assert.equal(control.status, 201);
+  const trustedClientId = "https://claude.ai/oauth/mcp-oauth-client-metadata";
+  const cases = ["https://cursor.com/logo.png", null, { url: "https://cursor.com/logo.png" },
+    "private-value-not-a-url", "javascript:private-value", ["https://cursor.com/logo.png"], 42]
+    .map(logo_uri => ({ logo_uri }));
+  cases.push({ client_id: trustedClientId, logo_uri: "https://cursor.com/logo.png" });
+  for (const supplied of cases) {
+    const registered = await h.request({ ...cursor, ...supplied });
+    assert.equal(registered.status, 201);
+    assert.notEqual(registered.body.client_id, trustedClientId, "DCR owns the assigned client ID");
+    assert.equal(Object.hasOwn(registered.body, "logo_uri"), false);
+    assert.equal(registered.body.application_type, "native");
+    assert.deepEqual(registered.body.redirect_uris, cursor.redirect_uris);
+    const persisted = await store.find(registered.body.client_id);
+    assert.ok(persisted, "registration was persisted by the real provider adapter path");
+    assert.equal(Object.hasOwn(persisted, "logo_uri"), false);
+    assert.deepEqual(persisted.redirect_uris, cursor.redirect_uris);
+    const client = await h.provider.Client.find(registered.body.client_id);
+    assert.ok(client);
+    assert.equal(Object.hasOwn(client.metadata(), "logo_uri"), false);
+  }
+  const count = (await store.list()).length;
+  for (const overrides of [
+    { redirect_uris: ["http://evil.example/callback"] },
+    { client_name: "claude.ai" },
+    { client_id: trustedClientId, client_name: "claude.ai" },
+    { client_uri: "https://evil.example" },
+  ]) {
+    const rejected = await h.request({ ...cursor, logo_uri: "https://cursor.com/logo.png", ...overrides });
+    assert.equal(rejected.status, 400);
+    assert.equal(rejected.body.error, "invalid_client_metadata");
+  }
+  assert.equal((await store.list()).length, count, "invalid registrations were not persisted");
+  assert.doesNotMatch(JSON.stringify(h.logs), /private-value|cursor\.com\/logo/u);
 });
 
 test("DCR storage faults stay private beside a successful real-store control", async t => {
@@ -82,7 +123,7 @@ test("DCR storage faults stay private beside a successful real-store control", a
 test("DCR origin wrapper failures also use OAuth JSON errors", async t => {
   const h = await harness(t, { maxBodyBytes: 512 });
   assert.equal((await h.request(META)).status, 201);
-  const large = await h.request({ ...META, padding: "x".repeat(512) });
+  const large = await h.request({ ...META, logo_uri: "x".repeat(512) });
   assert.equal(large.status, 413);
   assert.deepEqual(large.body, { error: "invalid_request", error_description: "registration request body is too large" });
   const wrongMethod = await h.request(undefined, { method: "GET" });

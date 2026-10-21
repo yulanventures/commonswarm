@@ -151,6 +151,10 @@ export function createRegistrationLimiter({ perIp = DEFAULT_DCR_LIMITS.perIp, pe
   windowMs = 60 * 60 * 1000, maxKeys = 10_000 } = {}) {
   const buckets = new Map();
   return (ctx) => {
+    // oidc-provider 9.12.2 calls this DCR idFactory after parsing JSON and
+    // before copying the body into metadata for validation and persistence.
+    // Ignore optional, untrusted branding here; CIMD never takes this path.
+    delete ctx.oidc.body.logo_uri;
     // registrationResponse decides whether to generate a secret before applying
     // clientDefaults. Set the public default in the parsed request as well.
     ctx.oidc.body.token_endpoint_auth_method ??= "none";

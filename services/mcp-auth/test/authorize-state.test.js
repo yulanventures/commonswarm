@@ -1198,7 +1198,7 @@ test("DCR accepts Cursor and dotted native redirects while preserving web and br
     const h = await harness();
     for (const overrides of [
       { client_uri: "https://evil.example" }, { client_name: "claude.ai" },
-      { client_name: "anysphere.cursor-retrieval" }, { logo_uri: "https://cursor.com/logo.png" },
+      { client_name: "anysphere.cursor-retrieval" },
     ]) {
       const result = await register(h, { redirect_uris: ["cursor://anysphere.cursor-retrieval/callback"], ...overrides });
       assert.equal(result.response.statusCode, 400, result.response.body);
@@ -1363,7 +1363,7 @@ test("DCR per-host rate limit keys on the registrable domain, not subdomains", a
   });
 });
 
-test("DCR registration rejects impersonating client_name and logo_uri", async () => {
+test("DCR registration rejects impersonating client_name", async () => {
   const h = await harness();
   const phishing = await register(h, {
     client_name: "claude.ai",
@@ -1371,13 +1371,6 @@ test("DCR registration rejects impersonating client_name and logo_uri", async ()
   });
   assert.equal(phishing.response.statusCode, 400);
   assert.equal(phishing.metadata.error, "invalid_client_metadata");
-  const logo = await register(h, {
-    client_name: "Honest app",
-    logo_uri: "https://evil.example/logo.png",
-    redirect_uris: ["https://evil.example/callback"],
-  }, { ip: "203.0.113.40" });
-  assert.equal(logo.response.statusCode, 400);
-  assert.equal(logo.metadata.error, "invalid_client_metadata");
   assert.equal((await h.provider.Client.adapter.list()).length, 0);
 });
 
