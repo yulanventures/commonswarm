@@ -10873,6 +10873,11 @@ async function claimHostedSeat(
 class LocalBusinessRefused<T> extends Error {
   constructor(readonly outcome:T) { super('Local business operation refused'); }
 }
+/** Authenticated validation intent survives only after its business savepoint
+ * (including first-use and predecessor handover) has rolled back. */
+class LocalValidationRefused extends Error {
+  constructor(readonly result: HttpResult, readonly audit: Audit) { super('Local validation refused'); }
+}
 class LocalCommandRefused extends Error {
   constructor(readonly result: HttpResult) { super('Local credential operation refused'); }
 }
@@ -11079,6 +11084,10 @@ async function handleTransaction(
       return await registerAgentSeat(tx, body, joinCredentialHash);
     }
 
+    // The canonical discovery locks above survive validation rollback; use and
+    // all later business effects belong to this savepoint.
+    try {
+    const executeAuthenticated = async (tx: Sql): Promise<HttpResult> => {
     await beforeStep(3);
     const auth = hostedSeat !== null
       ? hostedSeatAuth(hostedSeat)
@@ -11176,13 +11185,16 @@ async function handleTransaction(
     const isSeenCommand = kind === SIGNALS_SEEN_KIND;
 
     if (Object.hasOwn(body, "from")) {
-      await insertAudit(tx, {
+      const audit: Audit = {
         auth,
         commandKind: kind,
         outcome: "validation",
         reason: "client-supplied from is forbidden",
-      });
-      return { status: 400, body: { error: "invalid_request" } };
+      };
+      const refusal: HttpResult = { status: 400, body: { error: "invalid_request" } };
+      if (agentTokenHash !== null) throw new LocalValidationRefused(refusal, audit);
+      await insertAudit(tx, audit);
+      return refusal;
     }
 
     if (kind === REGISTER_DEVICE_KIND) {
@@ -11428,7 +11440,7 @@ async function handleTransaction(
       throw new Error("min_client_version config is missing or malformed");
     }
     if (!validation.ok) {
-      await insertAudit(tx, {
+      const audit: Audit = {
         auth,
         commandKind: kind,
         workspaceId: route.workspaceId,
@@ -11436,7 +11448,7 @@ async function handleTransaction(
         outcome: "validation",
         reason: validation.reason,
         detail: ignoredIdentity,
-      });
+      };
       /* The reason reaches the CALLER, not only the audit table.
        *
        * It used to go to insertAudit alone, so a 400 was a bare
@@ -11450,7 +11462,7 @@ async function handleTransaction(
        * fields by contract (src/cloud/signals.ts:315-326), and the error code
        * they branch on is unchanged. Nothing secret is added -- the strings are
        * validator-authored and already stored in swarm.audit. */
-      return {
+      const refusal: HttpResult = {
         status: validation.status,
         body: {
           error: validation.error ?? (validation.status === 413
@@ -11459,6 +11471,9 @@ async function handleTransaction(
           message: validation.reason,
         },
       };
+      if (agentTokenHash !== null) throw new LocalValidationRefused(refusal, audit);
+      await insertAudit(tx, audit);
+      return refusal;
     }
     if (typeof body.client_version !== "string") {
       await insertAudit(tx, {
@@ -13518,13 +13533,27 @@ async function handleTransaction(
       };
     await afterStep(15);
     return !outcome.decision.ok ? decided(result) : result;
+    };
+    return agentTokenHash === null ? await executeAuthenticated(tx) : await tx.savepoint(executeAuthenticated);
+    } catch (error) {
+      if (!(error instanceof LocalValidationRefused)) throw error;
+      if (!agentTokenHash || !localState.localPlan || !localState.authenticatedAgent) throw error;
+      // No credential stamping on this recheck. The final session fence below
+      // also runs before this outer transaction can retain its one audit row.
+      if (!await recheckLocalCredential(tx, agentTokenHash, localState.localPlan)) throw new LocalCredentialDenied(true);
+      await insertAudit(tx, error.audit);
+      return decided(error.result);
+    }
     })();
     const localBody=record(result.body);
+    const successfulRenewal = recoverSavedPending || (result.status >= 200 && result.status < 300
+      && localBody?.status === 'accepted' && localBody?.ok === true);
     if (agentTokenHash!==null && (result.status>=400 || localBody?.ok===false || localBody?.status==='rejected'
       || localBody?.status==='refused' || record(localBody?.result)?.status==='refused')
       && (outcome.value.kind!=='decided' || outcome.value.result!==result)) throw new LocalCommandRefused(result);
     if (
       !recoverSavedPending && result.status >= 200 && result.status < 300 && localState.authenticatedAgent !== null
+      && (kind !== RENEW_AGENT_TOKEN_KIND || successfulRenewal)
     ) {
       await recordAgentPresence(
         tx,
@@ -13540,6 +13569,10 @@ async function handleTransaction(
     if (agentTokenHash!==null && localState.authenticatedAgent && kind===RENEW_AGENT_TOKEN_KIND) {
       if (recoverSavedPending && localState.localPlan && !await loadAgentCredential(tx,agentTokenHash,localState.localPlan,true))
         throw new LocalCredentialDenied(true);
+      if (!successfulRenewal && (!localState.localPlan
+        || !await recheckLocalCredential(tx, agentTokenHash, localState.localPlan, true)))
+        throw new LocalCredentialDenied(true);
+      if (successfulRenewal) {
       // Issuance intentionally adds one owned token to discovery. Recheck the
       // original proof and family after INSERT/ledger/presence waits without
       // adopting a newly discovered external row or stamping the successor.
@@ -13573,6 +13606,7 @@ async function handleTransaction(
           FROM swarm.agent_tokens t LEFT JOIN swarm.renewal_grants g ON g.renewal_grant_id=t.renewal_grant_id
           WHERE t.token_hash=${agentTokenHash}`;
         throw new LocalCredentialDenied(known[0]?.credential_invalid===true);
+      }
       }
     }
     if(localState.authenticatedAgent && agentTokenHash && !isAgentSessionProofExempt(kind)
