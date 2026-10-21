@@ -70,10 +70,15 @@ test("DCR discards optional Cursor logos before validation and persistence witho
     redirect_uris: ["cursor://anysphere.cursor-retrieval/oauth/user-server/callback"] };
   const control = await h.request(cursor);
   assert.equal(control.status, 201);
-  for (const logo_uri of ["https://cursor.com/logo.png", null, { url: "https://cursor.com/logo.png" },
-    "private-value-not-a-url", "javascript:private-value", ["https://cursor.com/logo.png"], 42]) {
-    const registered = await h.request({ ...cursor, logo_uri });
+  const trustedClientId = "https://claude.ai/oauth/mcp-oauth-client-metadata";
+  const cases = ["https://cursor.com/logo.png", null, { url: "https://cursor.com/logo.png" },
+    "private-value-not-a-url", "javascript:private-value", ["https://cursor.com/logo.png"], 42]
+    .map(logo_uri => ({ logo_uri }));
+  cases.push({ client_id: trustedClientId, logo_uri: "https://cursor.com/logo.png" });
+  for (const supplied of cases) {
+    const registered = await h.request({ ...cursor, ...supplied });
     assert.equal(registered.status, 201);
+    assert.notEqual(registered.body.client_id, trustedClientId, "DCR owns the assigned client ID");
     assert.equal(Object.hasOwn(registered.body, "logo_uri"), false);
     assert.equal(registered.body.application_type, "native");
     assert.deepEqual(registered.body.redirect_uris, cursor.redirect_uris);
@@ -89,6 +94,7 @@ test("DCR discards optional Cursor logos before validation and persistence witho
   for (const overrides of [
     { redirect_uris: ["http://evil.example/callback"] },
     { client_name: "claude.ai" },
+    { client_id: trustedClientId, client_name: "claude.ai" },
     { client_uri: "https://evil.example" },
   ]) {
     const rejected = await h.request({ ...cursor, logo_uri: "https://cursor.com/logo.png", ...overrides });
