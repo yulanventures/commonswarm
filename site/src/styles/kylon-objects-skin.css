@@ -1,0 +1,185 @@
+/* Adapted from the frozen Lists candidate; objects only. */
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view {
+  padding: 24px;
+  gap: 20px;
+  background: var(--k-shell-surface);
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view > :is(.hm-pane-title, .household-objects, .dashboard__access-card, .dashboard__agent-approvals) {
+  box-sizing: border-box;
+  inline-size: 100%;
+  max-inline-size: 1040px;
+  margin-inline: auto;
+  min-inline-size: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view > .hm-pane-title {
+  font-family: var(--k-shell-font);
+  font-size: 20px;
+  line-height: 1.35;
+  font-weight: 600;
+  letter-spacing: -.5px;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: var(--k-shell-surface);
+  color: var(--k-shell-ink);
+  font-family: var(--k-shell-font);
+  font-size: 14px;
+  line-height: 1.55;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects :is(h2, h3, h4) {
+  margin-block: 0 8px;
+  color: var(--k-shell-ink);
+  font-family: var(--k-shell-font);
+  font-size: 15px;
+  line-height: 1.5;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects > header :is(p, .hh-eyebrow) {
+  margin-block: 0 6px;
+  color: var(--k-shell-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-status {
+  padding-block: 8px 12px;
+  border-color: var(--k-shell-line);
+  color: var(--k-shell-secondary);
+  font-size: 13px;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-layout {
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 24px;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects :is(nav, article, .hh-comparison > section) {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects nav li {
+  margin-block-end: 4px;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects button {
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  max-inline-size: 100%;
+  margin: 0 8px 8px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--k-shell-control);
+  border-radius: var(--k-shell-radius);
+  background: var(--k-shell-surface);
+  color: var(--k-shell-ink);
+  font-family: var(--k-shell-font);
+  font-size: 13px;
+  line-height: 1.5;
+  font-weight: 500;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects nav button {
+  margin: 0;
+  text-align: start;
+  background: var(--k-shell-surface);
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects button:hover:enabled {
+  color: var(--k-shell-ink);
+  background: var(--k-shell-hover);
+  border-color: var(--k-shell-control);
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects button:is([data-hh-action='save'], [data-hh-action='reviewed-save']) {
+  color: #fff;
+  background: #697344;
+  border-color: #697344;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects button:is([data-hh-action='save'], [data-hh-action='reviewed-save']):hover:enabled {
+  color: #fff;
+  background: #535d33;
+  border-color: #535d33;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-editor {
+  margin-block: 20px 8px;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects textarea {
+  min-block-size: 120px;
+  min-inline-size: 0;
+  padding: 12px;
+  background: var(--k-shell-surface);
+  color: var(--k-shell-ink);
+  border-color: var(--k-shell-control);
+  border-radius: var(--k-shell-radius);
+  font: 400 14px/1.55 var(--k-shell-font);
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-history {
+  margin-block-start: 24px;
+  padding-block-start: 16px;
+  border-color: var(--k-shell-line);
+  font-size: 12px;
+  color: var(--k-shell-secondary);
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-history li { margin-block-end: 16px; }
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-conflict {
+  margin-block-start: 20px;
+  padding: 16px;
+  border-inline-start: 3px solid var(--k-shell-control);
+  border-radius: 8px;
+  color: var(--k-shell-ink);
+  background: var(--k-shell-subtle);
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-comparison { gap: 16px; }
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view :is(.dashboard__access-card, .dashboard__agent-approvals) {
+  padding: 16px;
+  background: var(--k-shell-subtle);
+  border: 1px solid var(--k-shell-line);
+  border-radius: 8px;
+  box-shadow: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .dashboard__access-title { font: 600 15px/1.5 var(--k-shell-font); }
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .dashboard__access-lead { color: var(--k-shell-secondary); font-size: 13px; }
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view { padding: 20px 16px 24px; }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects :is(.hh-layout, .hh-comparison) { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects textarea { font-size: 16px; }
+}
+
+/* Selection follows the renderer's actual selected object, including busy reads. */
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects nav button[aria-current="true"] {
+  background: var(--k-shell-hover);
+  border-color: var(--k-shell-control);
+  font-weight: 600;
+}
+/* The whole native checkbox label is the target and the focus boundary. Keep
+ * the full review instruction visible, wrapping inside the existing card. */
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-conflict label {
+  box-sizing: border-box;
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  padding: 8px;
+  align-items: center;
+  border-radius: var(--k-shell-radius);
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-conflict label input {
+  flex: 0 0 auto;
+  accent-color: #697344;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-conflict label:has(input:focus-visible) {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-conflict label input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-conflict label:has(input:focus-visible) {
+    outline-color: Highlight;
+  }
+}

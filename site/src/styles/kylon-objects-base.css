@@ -1,0 +1,26 @@
+/* Lists only. Task list and task detail keep their current presentation. */
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view {
+  --home-font-body: var(--k-shell-font);
+  --home-font-display: var(--k-shell-font);
+  --home-ink: var(--k-shell-ink);
+  --home-ink-muted: var(--k-shell-secondary);
+  --home-card: var(--k-shell-surface);
+  --home-canvas: var(--k-shell-subtle);
+  --home-card-border: var(--k-shell-line);
+  --home-hairline: var(--k-shell-line);
+  --home-field: var(--k-shell-surface);
+  --home-field-border: var(--k-shell-control);
+  --home-quiet: var(--k-shell-subtle);
+  --home-soft: var(--k-shell-hover);
+  font-family: var(--k-shell-font);
+  color: var(--k-shell-ink);
+  font-size: 14px;
+  line-height: 1.55;
+  /* This pane owns scrolling; leave room for the 2px outline + 2px offset. */
+  scroll-padding-block: 5px;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view :is(a, button, input, select, textarea):focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 2px;
+  box-shadow: none;
+}

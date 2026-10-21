@@ -62,6 +62,11 @@ test('reader and unapproved editor actions never reach save; approved editor car
       before: '## Saturday\nBring a picnic. **Check the weather.**', after: 'Changed' }] } }]);
   assert.match(editor.controller.getState().notice, /refused/);
   assert.deepEqual(editor.controller.getState().proposed, { kind: 'doc', markdown: 'Changed' });
+  // A refusal without a recovered conflict remains an ordinary editable draft.
+  assert.equal(editor.controller.stage({ kind: 'doc', markdown: 'Changed after refusal' }), true);
+  assert.equal(await editor.controller.save(), true);
+  assert.deepEqual(editor.saves[1]!.patch, { kind: 'doc', splices: [{ start: 0,
+    before: '## Saturday\nBring a picnic. **Check the weather.**', after: 'Changed after refusal' }] });
 });
 
 test('retired history is readable by a reader; foreign versions are withheld with a valid page control', async () => {
@@ -141,6 +146,9 @@ test('conflicts require private recovery and review; the reviewed retry uses cur
   const calls: HouseholdSaveRequest[] = [];
   const fixture = setup('editor', { save: async (request) => {
     calls.push(structuredClone(request));
+    if (calls.length === 2) return { status: 'refused', reason: 'fixture_refusal' };
+    if (calls.length === 3) return { status: 'unknown' };
+    if (calls.length === 4) return { status: 'pending', object_id: 'weekend', reservation_id: 'reservation-reviewed' };
     return { status: 'conflict', object_id: 'weekend', current: calls.length === 1 ? fixture.conflict.current.revision
       : { ...fixture.conflict.current.revision, token: 'another-new-current-revision' }, draft_id: 'draft-a' };
   } });
@@ -159,6 +167,43 @@ test('conflicts require private recovery and review; the reviewed retry uses cur
   assert.deepEqual(calls[1]!.base, fixture.conflict.current.revision);
   assert.deepEqual(calls[1]!.patch, { kind: 'doc', splices: [{ start: 0,
     before: 'Bring a picnic. Meet at noon.', after: 'Bring fruit for the picnic.' }] });
+  const refused = fixture.controller.getState();
+  assert.equal(refused.save_state, 'refused');
+  assert.match(refused.notice, /refused/);
+  assert.deepEqual(refused.conflict?.proposed, fixture.conflict.proposed);
+  const refusedHtml = renderHouseholdObjects(refused);
+  assert.doesNotMatch(refusedHtml, /<textarea|data-hh-action="save"/);
+  assert.match(refusedHtml, /data-hh-action="reviewed-save"/);
+  const reviewBox = refusedHtml.match(/<input[^>]*data-hh-review[^>]*>/)?.[0];
+  assert.ok(reviewBox, 'refused conflict offers a fresh explicit review');
+  assert.doesNotMatch(reviewBox, /\bchecked\b/);
+  assert.equal(fixture.controller.stage({ kind: 'doc', markdown: 'Must not be accepted by a review-only view' }), false);
+  assert.deepEqual(fixture.controller.getState().proposed, refused.proposed, 'already staged local content is retained');
+  assert.equal(await fixture.controller.save(), false, 'ordinary retry cannot bypass review');
+  assert.equal(await fixture.controller.checkSave(), false, 'refusal is not an uncertain request to check');
+  assert.equal(calls.length, 2);
+  assert.equal(await fixture.controller.openRevision(fixture.doc.history[0]!.revision.token), true);
+  const earlierHtml = renderHouseholdObjects(fixture.controller.getState());
+  assert.match(earlierHtml, /Reading an earlier revision/);
+  assert.doesNotMatch(earlierHtml, /data-hh-review|data-hh-action="reviewed-save"/,
+    'an earlier revision must not offer a save which its controller refuses');
+  assert.equal(await fixture.controller.save(true), false);
+  assert.equal(calls.length, 2, 'reading history makes no save request');
+  assert.equal(fixture.controller.backToCurrent(), true);
+  assert.match(renderHouseholdObjects(fixture.controller.getState()), /data-hh-review/,
+    'returning to current restores explicit retained-draft review');
+  assert.equal(await fixture.controller.save(true), true);
+  assert.equal(calls[2]!.request_id, 'request-3');
+  assert.deepEqual(calls[2]!.base, fixture.conflict.current.revision);
+  assert.deepEqual(calls[2]!.patch, calls[1]!.patch, 'reviewed retry submits the displayed retained proposal');
+  assert.equal(fixture.controller.getState().save_state, 'unknown');
+  assert.match(renderHouseholdObjects(fixture.controller.getState()), /data-hh-action="check-save"/);
+  assert.doesNotMatch(renderHouseholdObjects(fixture.controller.getState()), /data-hh-action="reviewed-save"/);
+  assert.equal(await fixture.controller.save(true), false, 'unknown request must be checked, not retried');
+  assert.equal(await fixture.controller.checkSave(), true);
+  assert.equal(fixture.controller.getState().save_state, 'pending');
+  assert.equal(await fixture.controller.checkSave(), true);
+  assert.deepEqual(calls[3], calls[2]); assert.deepEqual(calls[4], calls[2]);
   const readerState = { ...fixture.controller.getState(), conflict: fixture.conflict };
   readerState.workspace.content_role = 'reader';
   assert.doesNotMatch(renderHouseholdConflict(readerState), /data-hh-action="reviewed-save"/);

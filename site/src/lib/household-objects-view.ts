@@ -4,6 +4,7 @@ import type {
 } from '../../../src/protocol/household-object-events.js';
 import { HOUSEHOLD_CONTENT_OPERATIONS, type HouseholdContentOperation, type HouseholdContentRole } from '../../../src/protocol/household-object-policy.js';
 import { escapeMessageHtml, renderMessageMarkdown } from './message-markdown.js';
+import { bindHouseholdObjectFocus } from './household-object-focus.js';
 
 /** Authorized presentation data only: no storage paths, credentials or signed URLs.
  * The integration caller loads each page through the authenticated content routes.
@@ -156,7 +157,8 @@ export function renderHouseholdConflict(state: HouseholdObjectsState): string {
   if (conflict.owner_user_id !== state.workspace.viewer_user_id || conflict.workspace_id !== state.workspace.workspace_id
     || conflict.object_id !== state.selected_id || !bound(conflict.base.revision, conflict.workspace_id, conflict.object_id)
     || !bound(conflict.current.revision, conflict.workspace_id, conflict.object_id)) return '';
-  const canSave = householdCanUpdate(state.workspace) && state.save_state === 'conflict' && conflict.proposed.kind !== 'file';
+  const canSave = householdCanUpdate(state.workspace) && !state.opened_version
+    && ['conflict', 'refused'].includes(state.save_state) && conflict.proposed.kind !== 'file';
   return `<section class="hh-conflict" aria-label="Save conflict"><h3>Review the changes</h3>
     <p>Your retained draft is available to you. Compare all three versions before saving again.</p>
     <div class="hh-comparison">${[
@@ -165,14 +167,15 @@ export function renderHouseholdConflict(state: HouseholdObjectsState): string {
     <p>Base revision ${esc(conflict.base.revision.token)} · Current revision ${esc(conflict.current.revision.token)}</p>
     ${canSave ? `<label><input type="checkbox" data-hh-review /> I reviewed the current revision and my proposed changes.</label>
     ${button('reviewed-save', 'Save reviewed changes')}` : householdCanUpdate(state.workspace)
-      ? '<p>Your proposed draft remains here while the save is checked.</p>'
+      ? state.opened_version ? '<p>Return to the current revision before reviewing this draft.</p>'
+        : '<p>Your proposed draft remains here while the save is checked.</p>'
       : '<p>You can read this draft. Saving requires an editor content role and update permission.</p>'}</section>`;
 }
 export function renderHouseholdObjects(state: HouseholdObjectsState): string {
   const { workspace } = state;
   const object = selectedHouseholdObject(state);
   const busy = state.save_state === 'saving' || state.save_state === 'pending' || state.save_state === 'unknown';
-  const canEdit = householdCanUpdate(workspace) && !busy && state.save_state !== 'conflict';
+  const canEdit = householdCanUpdate(workspace) && !busy && !state.conflict && state.save_state !== 'conflict';
   const content = state.opened_version?.content ?? object?.current.content ?? null;
   const capabilities = HOUSEHOLD_CONTENT_OPERATIONS.filter((operation) => workspace.operations.includes(operation)
     && (operation === 'read' || workspace.content_role === 'editor'));
@@ -183,7 +186,7 @@ export function renderHouseholdObjects(state: HouseholdObjectsState): string {
     <p>Everyone here can read what is shared and its history. In /app you can check list items and edit docs; ask an agent to create a list or add items.</p></header>
     <p role="status" aria-live="polite" aria-atomic="true" class="hh-status">${esc(state.notice)}</p>
     <div class="hh-layout"><nav aria-label="Household objects">${workspace.objects.length ? `<ul>${workspace.objects.map((item) =>
-      `<li>${button('select', `${item.current.title} · ${item.kind}`, item.object_id, busy)}</li>`).join('')}</ul>` : '<p>No lists or docs yet. Ask an agent: “Create a CommonSwarm list called Groceries.”</p>'}</nav>
+      `<li><button type="button" data-hh-action="select" data-hh-value="${esc(item.object_id)}"${busy ? ' disabled' : ''}${item.object_id === state.selected_id ? ' aria-current="true"' : ''}>${esc(`${item.current.title} · ${item.kind}`)}</button></li>`).join('')}</ul>` : '<p>No lists or docs yet. Ask an agent: “Create a CommonSwarm list called Groceries.”</p>'}</nav>
     <article aria-label="Selected object">${object ? `<h3>${esc(object.current.title)}</h3>
       <p>${esc(householdAttribution((state.opened_version ?? object.current).author, workspace.names))}</p>
       ${state.opened_version ? '<p>Reading an earlier revision.</p>' : '<p>Current revision</p>'}
@@ -286,7 +289,7 @@ export function createHouseholdObjectsController(workspace: HouseholdWorkspaceVi
   }
   function stage(proposed: HouseholdContent): boolean {
     const object = selectedHouseholdObject(state);
-    if (!object || !householdCanUpdate(state.workspace) || locked() || state.opened_version || state.save_state === 'conflict'
+    if (!object || !householdCanUpdate(state.workspace) || locked() || state.opened_version || state.conflict || state.save_state === 'conflict'
       || proposed.kind !== object.kind || proposed.kind === 'file') return false;
     state.proposed = structuredClone(proposed); return true;
   }
@@ -315,7 +318,8 @@ export function createHouseholdObjectsController(workspace: HouseholdWorkspaceVi
       if (!householdCanUpdate(state.workspace) || locked() || state.opened_version) return false;
       const object = selectedHouseholdObject(state);
       if (!object) return false;
-      if (state.save_state === 'conflict' && (!reviewed || !state.conflict)) return false;
+      // A refused reviewed save retains its recovered draft and still needs explicit review.
+      if ((state.conflict || state.save_state === 'conflict') && (!reviewed || !state.conflict)) return false;
       const base = state.conflict?.current ?? object.current;
       const proposed = state.conflict?.proposed ?? state.proposed;
       if (!base.content || !proposed) return false;
@@ -378,6 +382,7 @@ export type HouseholdObjectsController = ReturnType<typeof createHouseholdObject
  * The shared escaped renderer is also used by all three Astro components.
  */
 export function mountHouseholdObjects(root: HTMLElement, controller: HouseholdObjectsController): () => void {
+  const clearFocus = bindHouseholdObjectFocus(root);
   const unsubscribe = controller.subscribe((state) => {
     const active = root.ownerDocument.activeElement;
     const focused = active instanceof HTMLElement && root.contains(active) ? active : null;
@@ -417,7 +422,7 @@ export function mountHouseholdObjects(root: HTMLElement, controller: HouseholdOb
       controller.stage({ kind: 'doc', markdown: event.target.value });
   };
   root.addEventListener('click', click); root.addEventListener('input', input);
-  return () => { unsubscribe(); root.removeEventListener('click', click); root.removeEventListener('input', input); root.replaceChildren(); };
+  return () => { clearFocus(); unsubscribe(); root.removeEventListener('click', click); root.removeEventListener('input', input); root.replaceChildren(); };
 }
 
 /** Synthetic fixture factory; never enabled by default in a product component. */
