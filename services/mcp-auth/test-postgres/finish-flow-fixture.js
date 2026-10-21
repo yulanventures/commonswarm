@@ -86,7 +86,9 @@ export async function goTrueFixture(t) {
       'GOTRUE_LOG_LEVEL=error', ''].join('\n'), { mode: 0o600 });
     await new Promise(resolve => reservation.close(resolve));
     phase = 'health'; attempted = true;
-    docker(['run', '--detach', '--name', name, '--label', `cs.fixture=${name}`, '--network', 'host', '--env-file', `${directory}/env`, resolved]);
+    docker(['run', '--detach', '--name', name, '--label', `cs.fixture=${name}`,
+      '--label', 'cs.owner=mcp-auth', '--label', `cs.project=${process.env.CSCI_PROJECT ?? name}`,
+      '--label', `cs.job=${name}`, '--network', 'host', '--env-file', `${directory}/env`, resolved]);
     const wire = (url, options) => { const u = new URL(url); u.pathname = u.pathname.replace(/^\/auth\/v1/u, ''); return fetch(u, options); };
     let health;
     for (let i = 0; i < 120; i++) {

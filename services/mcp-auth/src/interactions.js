@@ -1,5 +1,5 @@
 // Ordinary MCP interactions: verified GoTrue callbacks and bound consent inputs
-// produce fixed-deadline login reuse or an activated P9b finish handoff.
+// produce live-bound login reuse or an activated P9b finish handoff.
 // OAuth freshness, live sessions, Origin/CSRF and request bindings remain required;
 // admin dispatch stays separate and provider results never enter page inputs.
 import { AUTH_PROVIDER_CATALOG } from "./auth-provider-catalog.js";
@@ -157,7 +157,10 @@ export async function ensureSession(request, response, store) {
   const supplied = parseCookies(request.headers.cookie).get(SESSION_COOKIE);
   if (supplied) {
     const session = await store.requireSession(supplied);
-    if (session) return { id: supplied, session };
+    if (session) {
+      response.setHeader("set-cookie", sessionCookie(supplied));
+      return { id: supplied, session };
+    }
   }
   const id = await store.createSession();
   response.setHeader("set-cookie", sessionCookie(id));
