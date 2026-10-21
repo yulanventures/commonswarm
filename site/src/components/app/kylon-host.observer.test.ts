@@ -444,7 +444,7 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
   try {
   const fixture = join(directory, "index.html"), profile = join(directory, "profile");
   await writeFile(fixture, html);
-  const launched = launchChrome(await findChrome(), [`--user-data-dir=${profile}`, "--remote-debugging-port=0", "about:blank"], { timeout: 60_000, maxBuffer: 10 * 1024 * 1024, killSignal: "SIGKILL" });
+  const launched = launchChrome(await findChrome(), [`--user-data-dir=${profile}`, "--hide-scrollbars", "--remote-debugging-port=0", "about:blank"], { timeout: 60_000, maxBuffer: 10 * 1024 * 1024, killSignal: "SIGKILL" });
   settled = launched.then(() => undefined, error => { launchFailure = error; });
   let port: string | undefined;
   for (let attempt = 0; attempt < 150 && !port; attempt++) {
