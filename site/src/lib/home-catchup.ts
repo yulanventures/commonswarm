@@ -190,7 +190,6 @@ function workspaceCard(doc: Document, card: CatchUpWorkspaceCardVM, sample: bool
     const status = node(doc, "p", "hm-catchup-card-status", statusText);
     element.append(node(doc, "div", "hm-catchup-card-head", card.name), status);
     element.title = card.name;
-    element.setAttribute("aria-label", `${card.name}. ${statusText}`);
     return element;
   }
   if (card.state === "failed") {
@@ -198,13 +197,11 @@ function workspaceCard(doc: Document, card: CatchUpWorkspaceCardVM, sample: bool
     const status = node(doc, "p", "hm-catchup-card-status", statusText);
     element.append(node(doc, "div", "hm-catchup-card-head", card.name), status);
     element.title = card.name;
-    element.setAttribute("aria-label", `${card.name}. ${statusText}`);
     return element;
   }
   if (card.state === "open") {
     element.append(node(doc, "div", "hm-catchup-card-head", card.name), node(doc, "p", "hm-catchup-card-open", "Open"));
     element.title = card.name;
-    element.setAttribute("aria-label", `${card.name}. Open`);
     return element;
   }
   const head = node(doc, "div", "hm-catchup-card-body");
@@ -233,7 +230,13 @@ function workspaceCard(doc: Document, card: CatchUpWorkspaceCardVM, sample: bool
     element.append(foot);
   }
   element.title = card.name;
-  element.setAttribute("aria-label", [card.name, card.peopleSummary, sinceLastLooked, counts, attention].filter(Boolean).join(". "));
+  // Let the visible card content supply its name. Keep measured facts that the
+  // single-line footer did not show, without repeating the visible footer.
+  const supplemental = [sinceLastLooked, counts, attention]
+    .filter((line): line is string => line !== null && line !== footer?.text);
+  if (supplemental.length) {
+    element.append(node(doc, "span", "hm-sr-only", ` ${supplemental.join(". ")}.`));
+  }
   return element;
 }
 

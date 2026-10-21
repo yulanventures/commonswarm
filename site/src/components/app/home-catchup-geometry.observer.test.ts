@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
 import { join } from "node:path";
 import { browserTest as test } from "../../../tests/chrome.js";
 import { findChrome, launchChrome } from "../../../tests/chrome.js";
+import { homeFixture } from "./home-fixture.js";
 
 type Geometry = {
   width: number;
@@ -15,7 +14,8 @@ type Geometry = {
   hostileText: boolean;
   subline: string;
   loadingBusy: boolean;
-  loadingLabel: string;
+  loadingName: string;
+  workspaceFacts: string;
   failedCopy: boolean;
   latestHeading: string;
   needsYouCards: number;
@@ -28,73 +28,15 @@ type Geometry = {
   sampleLinks: number;
 };
 
-const primitiveStub = `
-export function capsule(doc, c) {
-  const el = doc.createElement("span");
-  el.className = "hm-stub-capsule";
-  el.setAttribute("role", "img");
-  el.setAttribute("aria-label", c.person.firstName);
-  return el;
-}
-export function personAvatar(doc, p) {
-  const el = doc.createElement("span");
-  el.className = "hm-person-avatar";
-  el.setAttribute("role", "img");
-  el.setAttribute("aria-label", p.firstName);
-  return el;
-}
-export function agentOrb(doc, a) {
-  const el = doc.createElement("span");
-  el.className = "hm-agent-orb";
-  el.setAttribute("role", "img");
-  el.setAttribute("aria-label", a.name);
-  return el;
-}
-export function needsYouCard(doc, n, onAction) {
-  const article = doc.createElement("article");
-  article.className = "hm-stub-needs";
-  const button = doc.createElement("button");
-  button.type = "button";
-  button.className = "hm-stub-needs-action";
-  button.textContent = n.primary.label;
-  button.addEventListener("click", () => onAction("primary", n));
-  const text = doc.createElement("p");
-  text.textContent = n.what;
-  article.append(text, button);
-  return article;
-}
-`;
-
 test("Catch up geometry keeps 44px targets and hostile text as plain text", { timeout: 60_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "commonswarm-catchup-geometry-"));
   const fixture = join(directory, "index.html");
-  const bundle = await build({
-    absWorkingDir: fileURLToPath(new URL("../../../", import.meta.url)),
-    bundle: true,
-    entryPoints: ["src/lib/home-catchup.ts"],
-    format: "iife",
-    globalName: "CatchUp",
-    platform: "browser",
-    write: false,
-    plugins: [{
-      name: "home-primitives-stub",
-      setup(build) {
-        build.onResolve({ filter: /home-primitives$/ }, () => ({ path: "home-primitives-stub", namespace: "stub" }));
-        build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({ contents: primitiveStub, loader: "ts" }));
-      },
-    }],
-  });
-  const script = bundle.outputFiles[0]?.text;
-  assert.ok(script);
-  const tokens = await readFile(new URL("../../styles/tokens.css", import.meta.url), "utf8");
-  const catchupCss = await readFile(new URL("../../styles/home/catchup.css", import.meta.url), "utf8");
   try {
-    await writeFile(fixture, `<!doctype html><html><head><style>
-      * { box-sizing: border-box; } body { margin: 0; font-family: sans-serif; }
-      .hm-stub-needs-action { min-height: 44px; min-width: 44px; }
-      ${tokens} ${catchupCss}
-    </style></head><body><main id="mount"></main><main id="sample"></main>
-      <script>${script}</script><script>
+    await writeFile(fixture, await homeFixture({
+      entryPoint: "src/lib/home-catchup.ts",
+      globalName: "CatchUp",
+      body: '<main id="mount"></main><main id="sample"></main>',
+      script: `
       (async () => {
         const hostile = '<img src=x onerror="document.title=1">';
         const person = (id, firstName, you = false) => ({ id, name: firstName + hostile, firstName, initials: firstName[0], you, role: "member" });
@@ -103,7 +45,7 @@ test("Catch up geometry keeps 44px targets and hostile text as plain text", { ti
           id, kind: "ask",
           workspace: { id: workspaceId, name: workspaceId, href: "?w=" + workspaceId },
           from: person("claude", "Claude"), what: hostile, when: "7:40 am",
-          primary: { label: "Reply" },
+          primary: { label: "Reply", action: "reply" },
         });
         const vm = {
           sample: false,
@@ -150,10 +92,13 @@ test("Catch up geometry keeps 44px targets and hostile text as plain text", { ti
           hostileText: root.textContent.includes(hostile),
           subline: root.querySelector(".hm-catchup-subline").textContent,
           loadingBusy: loadingCard.getAttribute("aria-busy") === "true",
-          loadingLabel: loadingCard.getAttribute("aria-label"),
+          // This card has only its visible title/status; its name must contain
+          // those words together, without a conflicting replacement label.
+          loadingName: loadingCard.getAttribute("aria-label") ?? loadingCard.innerText.replace(/\\s+/g, " ").trim(),
+          workspaceFacts: homeCard.textContent,
           failedCopy: root.querySelector('[data-workspace-id="broken"]').textContent.includes("Couldn't load Launch crew"),
           latestHeading: root.querySelector("#hm-catchup-latest-title").textContent,
-          needsYouCards: root.querySelectorAll(".hm-stub-needs").length,
+          needsYouCards: root.querySelectorAll(".hm-needs-you").length,
           showMoreLabel: showMore ? showMore.textContent : null,
           showMoreExpanded: showMore ? showMore.getAttribute("aria-expanded") : null,
           showMoreControls: showMore ? showMore.getAttribute("aria-controls") : null,
@@ -161,7 +106,7 @@ test("Catch up geometry keeps 44px targets and hostile text as plain text", { ti
         };
         const expandedRoot = CatchUp.renderCatchUp(document, { ...vm, needsYouExpanded: needsYouExpanded }, callbacks);
         document.getElementById("mount").replaceChildren(expandedRoot);
-        const expandedNeedsYouCards = expandedRoot.querySelectorAll(".hm-stub-needs").length;
+        const expandedNeedsYouCards = expandedRoot.querySelectorAll(".hm-needs-you").length;
         const sampleRoot = CatchUp.renderCatchUp(document, { ...vm, sample: true }, callbacks);
         document.getElementById("sample").append(sampleRoot);
         const metrics = {
@@ -172,7 +117,8 @@ test("Catch up geometry keeps 44px targets and hostile text as plain text", { ti
         };
         document.documentElement.dataset.metrics = btoa(unescape(encodeURIComponent(JSON.stringify(metrics))));
       })();
-      </script></body></html>`, "utf8");
+      `,
+    }), "utf8");
     const chrome = await findChrome();
     for (const width of [320, 390, 1440]) {
       const { stdout } = await launchChrome(chrome, [
@@ -191,7 +137,8 @@ test("Catch up geometry keeps 44px targets and hostile text as plain text", { ti
       assert.equal(geometry.hostileText, true);
       assert.equal(geometry.subline, "Checked 2 of 4 workspaces.");
       assert.equal(geometry.loadingBusy, true);
-      assert.equal(geometry.loadingLabel, "My paperwork. Checking My paperwork…");
+      assert.equal(geometry.loadingName, "My paperwork Checking My paperwork…");
+      assert.match(geometry.workspaceFacts, /4 open to-dos · 3 lists · 3 files/, "measured facts remain in card content when messages win the footer");
       assert.equal(geometry.failedCopy, true);
       assert.equal(geometry.latestHeading, "Latest");
       assert.equal(geometry.needsYouCards, 3, `${width}px shows three needs-you cards before expand`);
