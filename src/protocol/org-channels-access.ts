@@ -96,9 +96,12 @@ export function canReadWorkspace(
     )
   )
     return false;
+  const ownerRole = orgRole(s, ws.org_id, 'user', ownerId);
+  const agentRole = orgRole(s, ws.org_id, 'agent', c.principal_id);
   const eff =
-    orgRole(s, ws.org_id, 'agent', c.principal_id) ??
-    orgRole(s, ws.org_id, 'user', ownerId);
+    ownerRole === 'guest' || agentRole === 'guest'
+      ? 'guest'
+      : (agentRole ?? ownerRole);
   return eff === 'guest'
     ? hasWsGrant(s, wsId, 'agent', c.principal_id)
     : hasWsGrant(s, wsId, 'agent', c.principal_id) || eff !== null;

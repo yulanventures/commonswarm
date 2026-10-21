@@ -182,7 +182,7 @@ export interface OrgChannelAuthorityState {
   }>;
   renewalGrants?: Array<{
     renewal_grant_id: string;
-    horizon_expires_at: string;
+    horizon_expires_at?: string | null;
     revoked_at?: string | null;
   }>;
   orgMemberships: OrgMembershipRecord[];
@@ -348,7 +348,8 @@ export const agentOwner = (s: OrgChannelAuthorityState, c: CallerContext) => {
       (rg) =>
         rg.renewal_grant_id === ai.standing_renewal_grant_id &&
         rg.revoked_at == null &&
-        Date.parse(rg.horizon_expires_at) > Date.now(),
+        (rg.horizon_expires_at == null ||
+          Date.parse(rg.horizon_expires_at) > Date.now()),
     )
   )
     return null;

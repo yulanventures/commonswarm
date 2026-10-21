@@ -26,14 +26,25 @@ BEGIN
         RAISE EXCEPTION 'CHANNEL_HAS_PUBLIC_HISTORY';
       END IF;
     END IF;
-  ELSIF NEW.revoked_at IS NULL AND EXISTS (SELECT 1 FROM channels WHERE channel_id = NEW.channel_id AND visibility = 'private') THEN
+  ELSIF EXISTS (SELECT 1 FROM channels WHERE channel_id = NEW.channel_id AND visibility = 'private') THEN
     IF NOT private_channels_enabled() THEN RAISE EXCEPTION 'PRIVATE_CHANNELS_DISABLED'; END IF;
-    IF EXISTS (SELECT 1 FROM channel_memberships WHERE channel_id = NEW.channel_id AND role = 'owner' AND revoked_at IS NULL AND id IS DISTINCT FROM NEW.id) THEN
-      IF NOT EXISTS (SELECT 1 FROM channel_memberships WHERE (channel_id, principal_kind, principal_id, role) = (NEW.channel_id, NEW.added_by_kind, NEW.added_by, 'owner') AND revoked_at IS NULL) THEN
+    IF TG_OP = 'UPDATE' AND (NEW.channel_id, NEW.principal_kind, NEW.principal_id) IS DISTINCT FROM (OLD.channel_id, OLD.principal_kind, OLD.principal_id) THEN
+      RAISE EXCEPTION 'PRIVATE_CHANNEL_OWNER_REQUIRED';
+    END IF;
+    IF NEW.revoked_at IS NULL THEN
+      IF TG_OP = 'INSERT' AND NOT EXISTS (SELECT 1 FROM channel_memberships WHERE channel_id = NEW.channel_id AND id IS DISTINCT FROM NEW.id) THEN
+        IF NEW.role <> 'owner' OR (NEW.principal_kind, NEW.principal_id) IS DISTINCT FROM (NEW.added_by_kind, NEW.added_by)
+           OR NOT EXISTS (SELECT 1 FROM channels c WHERE c.channel_id = NEW.channel_id AND (c.created_by_principal IS NULL OR (c.created_by_kind, c.created_by_principal) = (NEW.principal_kind, NEW.principal_id))) THEN
+          RAISE EXCEPTION 'PRIVATE_CHANNEL_OWNER_REQUIRED';
+        END IF;
+      ELSIF NOT EXISTS (
+        SELECT 1 FROM channel_memberships cm
+        WHERE (cm.channel_id, cm.principal_kind, cm.principal_id, cm.role) = (NEW.channel_id, NEW.added_by_kind, NEW.added_by, 'owner')
+          AND cm.revoked_at IS NULL
+          AND (TG_OP = 'INSERT' OR cm.id <> OLD.id OR (OLD.role = 'owner' AND OLD.revoked_at IS NULL))
+      ) THEN
         RAISE EXCEPTION 'PRIVATE_CHANNEL_OWNER_REQUIRED';
       END IF;
-    ELSIF NEW.role <> 'owner' THEN
-      RAISE EXCEPTION 'PRIVATE_CHANNEL_OWNER_REQUIRED';
     END IF;
   END IF;
   RETURN NEW;
@@ -49,7 +60,7 @@ RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = swarm, pg
     OR (p_kind = 'agent' AND EXISTS (
       SELECT 1 FROM agent_identities ai WHERE ai.id = p_id AND ai.revoked_at IS NULL
       AND (ai.standing_grant_id IS NULL OR EXISTS (SELECT 1 FROM hosted_mcp_grants g WHERE g.grant_id = ai.standing_grant_id AND g.state = 'active' AND g.revoked_at IS NULL))
-      AND (ai.standing_renewal_grant_id IS NULL OR EXISTS (SELECT 1 FROM renewal_grants rg WHERE rg.renewal_grant_id = ai.standing_renewal_grant_id AND rg.revoked_at IS NULL AND rg.horizon_expires_at > now()))
+      AND (ai.standing_renewal_grant_id IS NULL OR EXISTS (SELECT 1 FROM renewal_grants rg WHERE rg.renewal_grant_id = ai.standing_renewal_grant_id AND rg.revoked_at IS NULL AND (rg.horizon_expires_at IS NULL OR rg.horizon_expires_at > now())))
       AND NOT EXISTS (SELECT 1 FROM org_memberships WHERE (org_id, principal_kind, principal_id) = (p_org, 'agent', p_id) AND revoked_at IS NOT NULL)
       AND NOT EXISTS (SELECT 1 FROM connection_org_policies WHERE connection_id = p_conn AND (revoked_at IS NOT NULL OR NOT (p_org = ANY(coalesce(allowed_org_ids, ARRAY[p_org])))))
       AND live_org_role(p_org, 'user', coalesce(p_owner, ai.owner_user_id)) IS NOT NULL
@@ -70,7 +81,7 @@ RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = swarm, pg
         SELECT 1 FROM agent_identities ai WHERE ai.id = p_id
         AND can_read_workspace(p_ws, 'user', coalesce(p_owner, ai.owner_user_id))
         AND NOT EXISTS (SELECT 1 FROM agent_principals WHERE (workspace_id, agent_identity_id) = (p_ws, p_id) AND revoked_at IS NOT NULL)
-        AND (has_live_ws_grant(p_ws, 'agent', p_id) OR coalesce(live_org_role(w.org_id, 'agent', p_id), live_org_role(w.org_id, 'user', coalesce(p_owner, ai.owner_user_id))) <> 'guest')
+        AND (has_live_ws_grant(p_ws, 'agent', p_id) OR (live_org_role(w.org_id, 'user', coalesce(p_owner, ai.owner_user_id)) IS DISTINCT FROM 'guest' AND coalesce(live_org_role(w.org_id, 'agent', p_id), live_org_role(w.org_id, 'user', coalesce(p_owner, ai.owner_user_id))) <> 'guest'))
       )))
   );
 $$;
@@ -150,6 +161,10 @@ BEGIN
     FROM workspace_principal_grants WHERE workspace_id = p_ws AND revoked_at IS NULL ON CONFLICT (org_id, principal_kind, principal_id) DO NOTHING;
   ELSE
     UPDATE workspace_principal_grants SET revoked_at = v_now WHERE workspace_id = p_ws AND revoked_at IS NULL AND live_org_role(p_dst, principal_kind, principal_id) IS DISTINCT FROM 'owner';
+    INSERT INTO workspace_principal_grants (workspace_id, org_id, principal_kind, principal_id, role, granted_by, created_at, revoked_at)
+    SELECT p_ws, p_dst, 'agent', ap.agent_identity_id, 'member', p_actor, v_now, v_now
+    FROM agent_principals ap WHERE ap.workspace_id = p_ws AND live_org_role(p_dst, 'agent', ap.agent_identity_id) IS DISTINCT FROM 'owner'
+    ON CONFLICT (workspace_id, principal_kind, principal_id) DO UPDATE SET org_id = EXCLUDED.org_id, revoked_at = coalesce(workspace_principal_grants.revoked_at, EXCLUDED.revoked_at);
   END IF;
   UPDATE memberships SET revoked_at = v_now WHERE workspace_id = p_ws AND revoked_at IS NULL AND NOT has_live_ws_grant(p_ws, 'user', user_id);
   UPDATE channel_memberships SET revoked_at = v_now WHERE workspace_id = p_ws AND revoked_at IS NULL AND NOT has_live_ws_grant(p_ws, principal_kind, principal_id);

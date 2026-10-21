@@ -318,4 +318,20 @@ test('workspace move enforces dual owner, owners_only revocation, and transfer_m
       1,
     );
   }
+
+  // Inherited agent without explicit workspaceGrants row loses access and seat on owners_only move
+  const s3 = createFixture();
+  s3.workspaceGrants = s3.workspaceGrants.filter((g) => !(g.workspace_id === 'ws-1a' && g.principal_kind === 'agent' && g.principal_id === 'ag-1'));
+  assert.equal(canReadWorkspace(s3, { principal_kind: 'agent', principal_id: 'ag-1' }, 'ws-1a'), true);
+  const movedInherited = reconcileWorkspaceMove(s3, {
+    workspace_id: 'ws-1a',
+    target_org_id: 'org-2',
+    actor_user_id: 'u-owner',
+    transfer_members: 'owners_only',
+  });
+  assert.equal(movedInherited.ok, true);
+  if (movedInherited.ok) {
+    assert.deepEqual(movedInherited.closed_seat_ids, ['seat-1a']);
+    assert.equal(canReadWorkspace(s3, { principal_kind: 'agent', principal_id: 'ag-1' }, 'ws-1a'), false);
+  }
 });

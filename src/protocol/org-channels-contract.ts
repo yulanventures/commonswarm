@@ -349,30 +349,49 @@ export function reconcileWorkspaceMove(
   ws.org_id = target_org_id;
   for (const g of s.workspaceGrants) if (g.workspace_id === ws.workspace_id) g.org_id = target_org_id;
   const closedSeats: string[] = [];
+  const candidates = new Map<string, { principal_kind: PrincipalKind; principal_id: string; role: OrgRole }>();
+  for (const g of s.workspaceGrants.filter((x) => x.workspace_id === ws.workspace_id && isLive(x))) {
+    candidates.set(`${g.principal_kind}:${g.principal_id}`, { principal_kind: g.principal_kind, principal_id: g.principal_id, role: g.role });
+  }
+  for (const ap of (s.agentPrincipals ?? []).filter((x) => x.workspace_id === ws.workspace_id && isLive(x))) {
+    const k = `agent:${ap.agent_identity_id}`;
+    if (!candidates.has(k)) candidates.set(k, { principal_kind: 'agent', principal_id: ap.agent_identity_id, role: 'member' });
+  }
+  for (const cm of s.channelMemberships.filter((x) => x.workspace_id === ws.workspace_id && isLive(x))) {
+    const k = `${cm.principal_kind}:${cm.principal_id}`;
+    if (!candidates.has(k)) candidates.set(k, { principal_kind: cm.principal_kind, principal_id: cm.principal_id, role: 'member' });
+  }
+  for (const seat of (s.seats ?? []).filter((x) => x.workspace_id === ws.workspace_id && isLive(x))) {
+    const aid = seat.agent_identity_id ?? (s.agentPrincipals ?? []).find((a) => a.principal_id === seat.principal_id)?.agent_identity_id ?? seat.principal_id;
+    const k = `agent:${aid}`;
+    if (!candidates.has(k)) candidates.set(k, { principal_kind: 'agent', principal_id: aid, role: 'member' });
+  }
+  for (const ai of s.agentIdentities.filter((x) => isLive(x))) {
+    const k = `agent:${ai.id}`;
+    if (!candidates.has(k)) candidates.set(k, { principal_kind: 'agent', principal_id: ai.id, role: 'member' });
+  }
   if (transfer_members === 'all') {
-    for (const g of s.workspaceGrants.filter(
-      (x) => x.workspace_id === ws.workspace_id && isLive(x),
-    )) {
+    for (const p of candidates.values()) {
       const existingOrgMem = s.orgMemberships.find(
         (m) =>
           m.org_id === target_org_id &&
-          isPrin(m, g.principal_kind, g.principal_id),
+          isPrin(m, p.principal_kind, p.principal_id),
       );
       if (existingOrgMem && existingOrgMem.revoked_at != null) {
         closedSeats.push(
           ...cascadeWorkspaceMemberRemoval(s, {
             workspace_id: ws.workspace_id,
-            principal_kind: g.principal_kind,
-            principal_id: g.principal_id,
+            principal_kind: p.principal_kind,
+            principal_id: p.principal_id,
             now,
           }).closed_seat_ids,
         );
-      } else if (!existingOrgMem) {
+      } else if (!existingOrgMem && s.workspaceGrants.some((x) => x.workspace_id === ws.workspace_id && isPrin(x, p.principal_kind, p.principal_id) && isLive(x))) {
         s.orgMemberships.push({
           org_id: target_org_id,
-          principal_kind: g.principal_kind,
-          principal_id: g.principal_id,
-          role: g.role === 'owner' ? 'admin' : g.role,
+          principal_kind: p.principal_kind,
+          principal_id: p.principal_id,
+          role: p.role === 'owner' ? 'admin' : p.role,
           invited_by: actor_user_id,
           created_at: now,
           revoked_at: null,
@@ -380,20 +399,17 @@ export function reconcileWorkspaceMove(
       }
     }
   } else {
-    for (const g of s.workspaceGrants.filter(
-      (x) =>
-        x.workspace_id === ws.workspace_id &&
-        isLive(x) &&
-        orgRole(s, target_org_id, x.principal_kind, x.principal_id) !== 'owner',
-    )) {
-      closedSeats.push(
-        ...cascadeWorkspaceMemberRemoval(s, {
-          workspace_id: ws.workspace_id,
-          principal_kind: g.principal_kind,
-          principal_id: g.principal_id,
-          now,
-        }).closed_seat_ids,
-      );
+    for (const p of candidates.values()) {
+      if (orgRole(s, target_org_id, p.principal_kind, p.principal_id) !== 'owner') {
+        closedSeats.push(
+          ...cascadeWorkspaceMemberRemoval(s, {
+            workspace_id: ws.workspace_id,
+            principal_kind: p.principal_kind,
+            principal_id: p.principal_id,
+            now,
+          }).closed_seat_ids,
+        );
+      }
     }
   }
   return { ok: true as const, source_org_id: sourceOrgId, target_org_id, closed_seat_ids: closedSeats };

@@ -221,19 +221,28 @@ $$;
 CREATE TRIGGER workspaces_ensure_org_and_slug BEFORE INSERT ON swarm.workspaces FOR EACH ROW EXECUTE FUNCTION swarm.ensure_workspace_org_and_slug();
 
 CREATE FUNCTION swarm.sync_legacy_membership_to_org_grants() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
-DECLARE v_org uuid;
+DECLARE v_org uuid; v_org_revoked boolean;
 BEGIN
   SELECT org_id INTO v_org FROM swarm.workspaces WHERE workspace_id = NEW.workspace_id;
   IF v_org IS NOT NULL THEN
-    INSERT INTO swarm.workspace_principal_grants (workspace_id, org_id, principal_kind, principal_id, role, granted_by, created_at, revoked_at)
-    VALUES (NEW.workspace_id, v_org, 'user', NEW.user_id, NEW.role, NEW.invited_by, coalesce(NEW.joined_at, now()), NEW.revoked_at)
-    ON CONFLICT (workspace_id, principal_kind, principal_id) DO UPDATE SET org_id = EXCLUDED.org_id, role = EXCLUDED.role, revoked_at = EXCLUDED.revoked_at;
+    SELECT EXISTS (
+      SELECT 1 FROM swarm.org_memberships
+      WHERE (org_id, principal_kind, principal_id) = (v_org, 'user', NEW.user_id)
+        AND revoked_at IS NOT NULL
+    ) INTO v_org_revoked;
 
-    INSERT INTO swarm.org_memberships (org_id, principal_kind, principal_id, role, invited_by, created_at, revoked_at)
-    VALUES (v_org, 'user', NEW.user_id, NEW.role, NEW.invited_by, coalesce(NEW.joined_at, now()), NEW.revoked_at)
-    ON CONFLICT (org_id, principal_kind, principal_id) DO UPDATE SET
+    INSERT INTO swarm.workspace_principal_grants (workspace_id, org_id, principal_kind, principal_id, role, granted_by, created_at, revoked_at)
+    VALUES (NEW.workspace_id, v_org, 'user', NEW.user_id, NEW.role, NEW.invited_by, coalesce(NEW.joined_at, now()), CASE WHEN v_org_revoked THEN coalesce(NEW.revoked_at, now()) ELSE NEW.revoked_at END)
+    ON CONFLICT (workspace_id, principal_kind, principal_id) DO UPDATE SET
+      org_id = EXCLUDED.org_id,
       role = EXCLUDED.role,
-      revoked_at = (CASE WHEN EXCLUDED.revoked_at IS NULL THEN NULL WHEN org_memberships.org_id = NEW.workspace_id THEN EXCLUDED.revoked_at ELSE org_memberships.revoked_at END);
+      revoked_at = CASE WHEN v_org_revoked THEN coalesce(EXCLUDED.revoked_at, workspace_principal_grants.revoked_at, now()) ELSE EXCLUDED.revoked_at END;
+
+    IF NEW.revoked_at IS NULL AND NOT v_org_revoked THEN
+      INSERT INTO swarm.org_memberships (org_id, principal_kind, principal_id, role, invited_by, created_at, revoked_at)
+      VALUES (v_org, 'user', NEW.user_id, NEW.role, NEW.invited_by, coalesce(NEW.joined_at, now()), NULL)
+      ON CONFLICT (org_id, principal_kind, principal_id) DO NOTHING;
+    END IF;
   END IF;
   RETURN NEW;
 END

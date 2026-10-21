@@ -2,6 +2,8 @@
 -- Refuses to drop privacy columns or tables if any visibility='private' channel exists,
 -- preventing accidental widening of private room history or file attachments to workspace-wide visibility.
 
+BEGIN;
+
 DO $org_workspaces_channels_rollback_guard$
 BEGIN
   IF EXISTS (
@@ -76,3 +78,5 @@ ALTER TABLE swarm.agent_principals
 
 DROP TABLE IF EXISTS swarm.organizations;
 DROP TABLE IF EXISTS swarm.agent_identities;
+
+COMMIT;
