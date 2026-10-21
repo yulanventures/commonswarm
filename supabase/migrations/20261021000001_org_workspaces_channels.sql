@@ -180,12 +180,12 @@ UPDATE agent_principals SET agent_identity_id = v_ai WHERE principal_id = v_ap.p
 WITH d AS (DELETE FROM workspace_principal_grants WHERE (workspace_id, principal_kind, principal_id) = (v_ws, 'agent', v_old) RETURNING *)
 INSERT INTO workspace_principal_grants SELECT gen_random_uuid(), workspace_id, org_id, 'agent', v_ai, role, granted_by, created_at, coalesce(revoked_at, v_ap.revoked_at) FROM d
 ON CONFLICT (workspace_id, principal_kind, principal_id) DO UPDATE SET revoked_at = coalesce(workspace_principal_grants.revoked_at, EXCLUDED.revoked_at);
-WITH d AS (DELETE FROM org_memberships WHERE (principal_kind, principal_id) = ('agent', v_old) RETURNING *)
-INSERT INTO org_memberships SELECT gen_random_uuid(), org_id, 'agent', v_ai, role, invited_by, created_at, revoked_at FROM d
+INSERT INTO org_memberships SELECT gen_random_uuid(), org_id, 'agent', v_ai, role, invited_by, created_at, revoked_at FROM org_memberships WHERE (principal_kind, principal_id) = ('agent', v_old)
 ON CONFLICT (org_id, principal_kind, principal_id) DO UPDATE SET revoked_at = coalesce(org_memberships.revoked_at, EXCLUDED.revoked_at);
-UPDATE channel_memberships g SET role = CASE WHEN 'owner' IN (g.role, o.role) THEN 'owner' ELSE g.role END, revoked_at = coalesce(g.revoked_at, o.revoked_at) FROM channel_memberships o WHERE (g.workspace_id, g.channel_id, g.principal_kind, g.principal_id, o.workspace_id, o.principal_kind, o.principal_id) = (v_ws, o.channel_id, 'agent', v_ai, v_ws, 'agent', v_old);
-UPDATE channel_memberships c SET principal_id = v_ai WHERE (workspace_id, principal_kind, principal_id) = (v_ws, 'agent', v_old) AND NOT EXISTS (SELECT 1 FROM channel_memberships x WHERE (x.channel_id, x.principal_kind, x.principal_id) = (c.channel_id, 'agent', v_ai));
-DELETE FROM channel_memberships WHERE (workspace_id, principal_kind, principal_id) = (v_ws, 'agent', v_old);
+DELETE FROM org_memberships WHERE (principal_kind, principal_id) = ('agent', v_old) AND NOT EXISTS (SELECT 1 FROM agent_principals WHERE agent_identity_id = v_old);
+WITH d AS (DELETE FROM channel_memberships WHERE (workspace_id, principal_kind, principal_id) = (v_ws, 'agent', v_old) RETURNING *)
+INSERT INTO channel_memberships SELECT gen_random_uuid(), channel_id, workspace_id, 'agent', v_ai, role, notify_pref, added_by_kind, added_by, joined_at, revoked_at FROM d
+ON CONFLICT (channel_id, principal_kind, principal_id) DO UPDATE SET role = CASE WHEN 'owner' IN (channel_memberships.role, EXCLUDED.role) THEN 'owner' ELSE channel_memberships.role END, revoked_at = coalesce(channel_memberships.revoked_at, EXCLUDED.revoked_at);
 DELETE FROM agent_identities WHERE id = v_old AND NOT EXISTS (SELECT 1 FROM agent_principals WHERE agent_identity_id = v_old);
 ELSIF v_ai IS NULL THEN
 UPDATE agent_identities SET standing_grant_id = v_gid WHERE id = v_old AND (standing_grant_id IS NULL OR standing_grant_id = v_gid);

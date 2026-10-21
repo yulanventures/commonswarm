@@ -195,7 +195,8 @@ export function canModifyChannelMembership(
       target.principal_kind === 'agent'
         ? resolveAgentId(s, target.principal_id)
         : target.principal_id;
-    const liveMems = s.channelMemberships.filter((m) => m.channel_id === chId && isLive(m));
+    const allMems = s.channelMemberships.filter((m) => m.channel_id === chId);
+    const liveMems = allMems.filter(isLive);
     const creatorId = ch.created_by_principal
       ? ch.created_by_kind === 'agent'
         ? resolveAgentId(s, ch.created_by_principal)
@@ -212,17 +213,17 @@ export function canModifyChannelMembership(
         m.role === 'owner',
     );
     const isBootstrap =
-      (liveMems.length === 0 &&
+      (allMems.length === 0 &&
         isCreator &&
-        ((target.principal_kind === actor.principal_kind && targetId === actorId) ||
-          (actor.principal_kind === 'agent' && target.principal_kind === 'user' && targetId === ownerUserId))) ||
-      (actor.principal_kind === 'agent' &&
+        target.principal_kind === actor.principal_kind &&
+        targetId === actorId) ||
+      (allMems.length === 1 &&
+        actor.principal_kind === 'agent' &&
+        isCreator &&
+        hasActorOwner &&
         ownerUserId != null &&
-        ((hasActorOwner && target.principal_kind === 'user' && targetId === ownerUserId) ||
-          (isCreator &&
-            target.principal_kind === 'agent' &&
-            targetId === actorId &&
-            liveMems.some((m) => m.principal_kind === 'user' && m.principal_id === ownerUserId && m.role === 'owner'))));
+        target.principal_kind === 'user' &&
+        targetId === ownerUserId);
     if (!isBootstrap && (!canReadChannel(s, actor, chId, now) || !hasActorOwner)) {
       return fail(
         target.principal_kind === actor.principal_kind && targetId === actorId
@@ -247,6 +248,13 @@ export function bootstrapPrivateChannelMemberships(
     actor.principal_kind === 'agent'
       ? resolveAgentId(s, actor.principal_id)
       : actor.principal_id;
+  if (s.channelMemberships.some((m) => m.channel_id === chId)) {
+    return fail(
+      'PRIVATE_CHANNEL_INVITE_REQUIRED',
+      'channel_owner_membership',
+      { workspace: ch?.workspace_id ?? null, channel: ch?.slug ?? chId },
+    );
+  }
   const targets: Array<{ principal_kind: PrincipalKind; principal_id: string }> = [
     { principal_kind: actor.principal_kind, principal_id: actorId },
   ];
@@ -266,16 +274,7 @@ export function bootstrapPrivateChannelMemberships(
       s.channelMemberships = snap;
       return auth;
     }
-    const existing = s.channelMemberships.find(
-      (m) =>
-        m.channel_id === chId &&
-        m.principal_kind === t.principal_kind &&
-        (t.principal_kind === 'agent' ? resolveAgentId(s, m.principal_id) : m.principal_id) === t.principal_id,
-    );
-    if (existing) {
-      existing.role = 'owner';
-      existing.revoked_at = null;
-    } else if (ch) {
+    if (ch) {
       s.channelMemberships.push({
         channel_id: chId,
         workspace_id: ch.workspace_id,
@@ -307,6 +306,7 @@ export function reconcileAgentIdentityMerge(
   const oldId = ap.agent_identity_id;
   if (oldId === target_agent_identity_id) return { ok: true as const };
   ap.agent_identity_id = target_agent_identity_id;
+  const oldRetained = (s.agentPrincipals ?? []).some((x) => x.agent_identity_id === oldId);
   const oldWg = s.workspaceGrants.find(
     (g) => g.workspace_id === ap.workspace_id && isPrin(g, 'agent', oldId),
   );
@@ -326,9 +326,11 @@ export function reconcileAgentIdentityMerge(
     );
     if (newOm) {
       newOm.revoked_at = newOm.revoked_at ?? oldOm.revoked_at ?? null;
-      s.orgMemberships = s.orgMemberships.filter((m) => m !== oldOm);
-    } else {
+      if (!oldRetained) s.orgMemberships = s.orgMemberships.filter((m) => m !== oldOm);
+    } else if (!oldRetained) {
       oldOm.principal_id = target_agent_identity_id;
+    } else {
+      s.orgMemberships.push({ ...oldOm, principal_id: target_agent_identity_id });
     }
   }
   for (const oldCm of [
@@ -347,7 +349,7 @@ export function reconcileAgentIdentityMerge(
       oldCm.principal_id = target_agent_identity_id;
     }
   }
-  if (!(s.agentPrincipals ?? []).some((x) => x.agent_identity_id === oldId)) {
+  if (!oldRetained) {
     s.agentIdentities = s.agentIdentities.filter((a) => a.id !== oldId);
   }
   return { ok: true as const };
