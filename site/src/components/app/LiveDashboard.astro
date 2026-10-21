@@ -34,6 +34,7 @@ import { THREAD_REPLY_CANCEL_LABEL } from "../../lib/thread-reply";
 import "../../styles/tokens.css";
 import "../../styles/home/index.css";
 import "../../styles/kylon-shell.css";
+import "../../styles/kylon-conversation.css";
 
 const signInMethods = signInDoors(await enabledProvidersForBuild({
   url: import.meta.env.PUBLIC_SUPABASE_URL,
@@ -14617,12 +14618,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     gap: 0.32rem var(--s-2);
   }
 
-  .dashboard__message-meta strong {
-    color: var(--text);
-    font-size: var(--t-sm);
-    font-weight: var(--weight-semibold);
-  }
-
   .dashboard__message-identity-badge {
     padding: 0.08rem 0.32rem;
     color: var(--text-muted);
@@ -14646,12 +14641,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     font-size: var(--t-xs);
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .dashboard__message-meta time {
-    margin-inline-start: auto;
-    color: var(--text-muted);
-    font-size: var(--t-xs);
   }
 
   .dashboard__message-kind {

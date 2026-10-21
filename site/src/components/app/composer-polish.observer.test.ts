@@ -1,504 +1,317 @@
-/** Reached by `npm --prefix site test` through the recursive component-observer glob. */
+/** Kylon composer focus, contained controls and short-reply usability.
+ * Uses the existing built-app server and bundled-browser CI guard. No new app seam.
+ * General autosize/failure/draft persistence belongs to composer-sprint-browser;
+ * transcript end-gap and its 12px contract belong to feed-composer-clearance.
+ */
 import assert from "node:assert/strict";
-import { browserTest as test } from "../../../tests/chrome.js";
-import { findChrome, launchChrome } from "../../../tests/chrome.js";
+import { browserTest as test, findChrome, launchChrome } from "../../../tests/chrome.js";
 import { startComposerPolishServer } from "./composer-polish.fixture.js";
 
-type Rect = {
-  bottom: number;
-  height: number;
-  left: number;
-  right: number;
-  top: number;
-  width: number;
-};
-
-type RestGeometry = {
-  composer: Rect;
-  bottomTextInset: number;
-  lineBottom: number;
-  lineHeight: number;
-  lineTop: number;
-  field: { bottom: number; left: number; right: number; top: number };
-  send: Rect;
-  sendFieldEdgeDelta: number;
-  sendInsetDelta: number;
-  sendRightInset: number;
-  shell: Rect;
-  textLeft: number;
-  textLeftInset: number;
-  topTextInset: number;
-  verticalAsymmetry: number;
-};
-
-type PolishMeasurement = {
-  focus: {
-    matchesFocusVisible: boolean;
-    shellBorderBlurred: string;
-    shellBorderFocused: string;
-    shellBoxShadow: string;
-    textareaBoxShadow: string;
-    textareaOutlineStyle: string;
-    textareaOutlineWidth: string;
-  };
-  rest: RestGeometry;
-  success: {
-    feedbackHidden: boolean;
-    statusText: string;
-    statusVisible: boolean;
-  };
-  twoLine: {
-    composer: Rect;
-    input: Rect;
-    send: Rect;
-    shell: Rect;
-  };
+type FocusProbe = { visible: boolean; quiet: boolean; active: boolean; contrast: number; blurred: string; focused: string };
+type SendProbe = { contained: boolean; target: boolean; uncovered: boolean; inViewport: boolean; focusClear: boolean | null; textClear: boolean; width: number; height: number };
+type ReplyProbe = { active: boolean; audience: boolean; cancel: boolean; history: boolean; draft: boolean; internalScroll: boolean; historyHeight: number; inputHeight: number };
+type DisclosureProbe = { authorAccessible: boolean; named: boolean; opened: boolean; detailReadable: boolean; replyStable: boolean; closed: boolean };
+type Sample = { focus: FocusProbe; send: SendProbe };
+type Negative<T> = { before: T; during: T; restored: T; resolvedTargets: number };
+type Measurement = {
   runs: number;
-  variant: "current" | "reverted";
-  viewport: { height: number; width: number };
+  viewport: { width: number; height: number; theme: string };
+  ordinary: Sample[];
+  focusMissing: Negative<FocusProbe>;
+  focusHalo: Negative<FocusProbe>;
+  sendOutside: Negative<SendProbe>;
+  sendSmall: Negative<SendProbe>;
+  textUnderControls: Negative<SendProbe>;
+  shortReply: { short: ReplyProbe; long: ReplyProbe; overlap: Negative<ReplyProbe>; cancelled: boolean; draftSurvivedCancel: boolean } | null;
+  disclosure: DisclosureProbe;
+  success: { statusText: string; statusVisible: boolean; feedbackHidden: boolean };
 };
 
 const measurementPage = (url: URL): string | null => {
   if (url.pathname !== "/__measure") return null;
-  const width = Number.parseInt(url.searchParams.get("width") ?? "", 10);
-  const height = Number.parseInt(url.searchParams.get("height") ?? "", 10);
-  const variant = url.searchParams.get("variant");
-  if (
-    !Number.isSafeInteger(width) || width <= 0 ||
-    !Number.isSafeInteger(height) || height <= 0 ||
-    (variant !== "current" && variant !== "reverted")
-  ) return "<!doctype html><title>Invalid measurement</title>";
-
+  const width = Number(url.searchParams.get("width"));
+  const height = Number(url.searchParams.get("height"));
+  const theme = url.searchParams.get("theme");
+  if (![width, height].every(n => Number.isSafeInteger(n) && n > 0) || !["light", "dark"].includes(theme ?? "")) {
+    return "<!doctype html><title>Invalid measurement</title>";
+  }
   return `<!doctype html><html><body style="margin:0"><iframe title="Composer measurement viewport" src="/app" style="border:0;width:${width}px;height:${height}px"></iframe><script>
+    const theme = ${JSON.stringify(theme)};
+    ${String.raw`
     const frame = document.querySelector("iframe");
-    const reportError = (value) => {
-      document.documentElement.dataset.composerPolishError = btoa(unescape(encodeURIComponent(String(value))));
-    };
     let measurementRuns = 0;
     const runMeasurement = async () => {
       measurementRuns += 1;
-      const doc = frame.contentDocument;
-      const view = frame.contentWindow;
+      const doc = frame.contentDocument, view = frame.contentWindow;
       const waitFor = async (predicate, label) => {
         for (let attempt = 0; attempt < 160; attempt += 1) {
           if (predicate()) return;
-          await new Promise((resolve) => view.setTimeout(resolve, 25));
+          await new Promise(resolve => view.setTimeout(resolve, 25));
         }
         throw new Error("Timed out waiting for " + label);
       };
-      const settle = async () => {
-        await new Promise((resolve) => view.setTimeout(resolve, 40));
-      };
-      await waitFor(
-        () => !doc.querySelector("[data-composer]")?.hidden &&
-          doc.querySelectorAll("[data-feed-list] > li").length > 0,
-        "sample composer",
-      );
+      const settle = () => new Promise(resolve => view.setTimeout(resolve, 40));
+      await waitFor(() => !doc.querySelector("[data-composer]")?.hidden && doc.querySelectorAll("[data-feed-list] > li").length > 0, "sample composer");
+      doc.documentElement.dataset.theme = theme;
       await doc.fonts.ready;
-      const form = doc.querySelector("[data-composer]");
-      const shell = doc.querySelector(".dashboard__composer-input");
-      const input = doc.querySelector("[data-composer-input]");
-      const send = doc.querySelector("[data-composer-send]");
-      const status = doc.querySelector("[data-composer-status]");
-      const feedback = doc.querySelector("[data-composer-feedback]");
-      const focusSink = doc.querySelector("[data-channel-name]");
-      if (!form || !shell || !input || !send || !status || !feedback || !focusSink) {
-        throw new Error("Composer fixture is incomplete");
-      }
-
-      /* The dashboard queues its initial desktop autofocus in requestAnimationFrame. A single
-       * blur plus timeout can lose to that callback and read the accent border as the blurred
-       * border. Reclaim focus until the requested state survives three separate turns. */
+      const form = doc.querySelector("[data-composer]"), shell = doc.querySelector(".dashboard__composer-input");
+      const input = doc.querySelector("[data-composer-input]"), send = doc.querySelector("[data-composer-send]");
+      const status = doc.querySelector("[data-composer-status]"), feedback = doc.querySelector("[data-composer-feedback]");
+      const channelHeading = doc.querySelector("[data-channel-name]");
+      // The channel heading may legitimately be hidden by phone chrome. A
+      // fixture-only body focus sink still exercises actual field blur.
+      const focusSink = channelHeading?.getClientRects().length && view.getComputedStyle(channelHeading).visibility === "visible" ? channelHeading : doc.body;
+      const scroller = doc.querySelector(".dashboard__feed-view");
+      if (!form || !shell || !input || !send || !status || !feedback || !focusSink || !scroller) throw new Error("Composer fixture incomplete");
+      // The initial desktop autofocus is queued. Require three stable turns,
+      // retaining the original race defense rather than measuring one blur.
       const settleFocus = async (target, predicate, label) => {
         let stableTurns = 0;
         for (let attempt = 0; attempt < 160; attempt += 1) {
-          target.focus();
-          await new Promise((resolve) => view.setTimeout(resolve, 25));
+          target.focus({ preventScroll: true });
+          await new Promise(resolve => view.setTimeout(resolve, 25));
           stableTurns = predicate() ? stableTurns + 1 : 0;
           if (stableTurns >= 3) return;
         }
         throw new Error("Timed out waiting for stable " + label);
       };
-
-      if (${JSON.stringify(variant)} === "reverted") {
-        const style = doc.createElement("style");
-        style.textContent = [
-          /* The pre-sprint bar: a taller, looser input shell. It is the control for both the
-             alignment claims and the 80px budget below. */
-          ".dashboard__composer { padding-block: var(--s-4) !important; }",
-          ".dashboard__composer-input {",
-          "display: flex !important;",
-          "align-items: flex-end !important;",
-          "flex-wrap: wrap !important;",
-          "gap: var(--s-2) !important;",
-          "padding: var(--s-2) !important;",
-          "}",
-          ".dashboard__composer textarea {",
-          "flex: 1 1 14rem !important;",
-          "min-block-size: 2rem !important;",
-          "padding: 0.34rem var(--s-2) !important;",
-          "line-height: var(--lh-base) !important;",
-          "}",
-          ".dashboard__composer-send { border-radius: 50% !important; }",
-        ].join("");
-        doc.head.append(style);
-      }
-
-      const setInput = (value) => {
+      const killTransitions = doc.createElement("style");
+      killTransitions.textContent = "* { transition:none !important; animation:none !important; }";
+      doc.head.append(killTransitions);
+      focusSink.setAttribute("tabindex", "-1");
+      const setInput = async value => {
         input.value = value;
         input.setSelectionRange(value.length, value.length);
-        input.dispatchEvent(new view.InputEvent("input", { bubbles: true, inputType: "insertText" }));
+        input.dispatchEvent(new view.InputEvent("input", { bubbles:true, inputType:"insertText" }));
+        await settle();
       };
-      const readRect = (element) => {
-        const box = element.getBoundingClientRect();
+      const rect = element => element.getBoundingClientRect();
+      const visible = element => {
+        if (!element || element.hidden || element.closest("[hidden]")) return false;
+        const b = rect(element), s = view.getComputedStyle(element);
+        return b.width > 0 && b.height > 0 && s.visibility === "visible" && s.display !== "none" && s.clipPath === "none";
+      };
+      const inViewport = element => {
+        const b = rect(element);
+        return visible(element) && b.top >= -.5 && b.left >= -.5 && b.right <= view.innerWidth + .5 && b.bottom <= view.innerHeight + .5;
+      };
+      const uncovered = element => {
+        if (!inViewport(element)) return false;
+        const b = rect(element), hit = doc.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+        return hit === element || element.contains(hit);
+      };
+      const shadows = value => value === "none" ? [] : value.split(/,(?![^(]*\))/).map(part => {
+        const color = part.match(/rgba?\([^)]*\)/)?.[0] ?? "transparent";
+        const lengths = (part.replace(/rgba?\([^)]*\)/g, "").match(/-?\d+(?:\.\d+)?px/g) ?? []).map(Number.parseFloat);
+        return { inset:part.includes("inset"), color, blur:lengths[2] ?? 0, spread:lengths[3] ?? 0 };
+      });
+      const luminance = color => {
+        const parts = (color.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+        if (parts.length !== 3) return null;
+        const linear = parts.map(n => { const s = n / 255; return s <= .04045 ? s / 12.92 : ((s + .055) / 1.055) ** 2.4; });
+        return linear[0] * .2126 + linear[1] * .7152 + linear[2] * .0722;
+      };
+      const contrast = (a, b) => {
+        const x = luminance(a), y = luminance(b);
+        return x === null || y === null ? 0 : (Math.max(x, y) + .05) / (Math.min(x, y) + .05);
+      };
+      const readFocus = async () => {
+        await settleFocus(focusSink, () => doc.activeElement === focusSink && !shell.matches(":focus-within"), "blurred composer");
+        const blurred = view.getComputedStyle(shell, "::before").boxShadow;
+        await settleFocus(input, () => doc.activeElement === input && shell.matches(":focus-within"), "focused composer");
+        const fieldStyle = view.getComputedStyle(shell, "::before"), fieldShadows = shadows(fieldStyle.boxShadow);
+        const own = [view.getComputedStyle(input), view.getComputedStyle(shell)];
+        const inset = fieldShadows.filter(s => s.inset && s.spread >= 1.5 && s.spread <= 3 && s.blur === 0);
+        const ratio = inset.length === 1 ? contrast(inset[0].color, fieldStyle.backgroundColor) : 0;
+        const noOutline = style => style.outlineStyle === "none" || Number.parseFloat(style.outlineWidth) === 0;
         return {
-          bottom: box.bottom,
-          height: box.height,
-          left: box.left,
-          right: box.right,
-          top: box.top,
-          width: box.width,
+          visible:fieldStyle.content !== "none" && inset.length === 1 && ratio >= 3 && fieldStyle.boxShadow !== blurred,
+          quiet:own.every(s => noOutline(s) && shadows(s.boxShadow).every(p => p.inset)) && fieldShadows.every(s => s.inset) && noOutline(fieldStyle),
+          active:doc.activeElement === input && input.matches(":focus-visible"), contrast:ratio, blurred, focused:fieldStyle.boxShadow,
         };
       };
-
-      setInput("");
-      if (${JSON.stringify(variant)} === "reverted") {
-        input.style.setProperty("min-block-size", "0", "important");
-        input.style.setProperty("block-size", "37px", "important");
-        input.style.transform = "translateY(4px)";
-      }
-      input.blur();
-      focusSink.setAttribute("tabindex", "-1");
-      await settleFocus(
-        focusSink,
-        () => doc.activeElement === focusSink && !shell.matches(":focus-within"),
-        "blurred composer",
-      );
-      const shellBox = shell.getBoundingClientRect();
-      const inputBox = input.getBoundingClientRect();
-      const sendBox = send.getBoundingClientRect();
-      const shellStyle = view.getComputedStyle(shell);
-      const inputStyle = view.getComputedStyle(input);
-      const shellBorderTop = Number.parseFloat(shellStyle.borderTopWidth);
-      const shellBorderRight = Number.parseFloat(shellStyle.borderRightWidth);
-      const shellBorderBottom = Number.parseFloat(shellStyle.borderBottomWidth);
-      const shellBorderLeft = Number.parseFloat(shellStyle.borderLeftWidth);
-      const inputBorderTop = Number.parseFloat(inputStyle.borderTopWidth);
-      const inputBorderLeft = Number.parseFloat(inputStyle.borderLeftWidth);
-      const inputPaddingTop = Number.parseFloat(inputStyle.paddingTop);
-      const inputPaddingLeft = Number.parseFloat(inputStyle.paddingLeft);
-      const lineHeight = Number.parseFloat(inputStyle.lineHeight);
-      const lineTop = inputBox.top + inputBorderTop + inputPaddingTop;
-      const lineBottom = lineTop + lineHeight;
-      const shellInnerTop = shellBox.top + shellBorderTop;
-      const shellInnerRight = shellBox.right - shellBorderRight;
-      const shellInnerBottom = shellBox.bottom - shellBorderBottom;
-      const shellInnerLeft = shellBox.left + shellBorderLeft;
-      const topTextInset = lineTop - shellInnerTop;
-      const bottomTextInset = shellInnerBottom - lineBottom;
-      const textLeft = inputBox.left + inputBorderLeft + inputPaddingLeft;
-      const textLeftInset = textLeft - shellInnerLeft;
-      const sendRightInset = shellInnerRight - sendBox.right;
-      /* THE FIELD IS WHAT THE READER SEES AS THE BOX. In the canvas form (Space.dc.html,
-         Phone-Space.dc.html) Send sits BESIDE the field, and the field is drawn by the shell's
-         ::before so both stay in one grid cell. Without that pseudo-element the field is the
-         shell itself, which is the Slack form this test was first written for. */
-      const fieldStyle = view.getComputedStyle(shell, "::before");
-      const field = fieldStyle.content !== "none" && fieldStyle.position === "absolute"
-        ? {
-          top: shellInnerTop + Number.parseFloat(fieldStyle.top),
-          right: shellInnerRight - Number.parseFloat(fieldStyle.right),
-          bottom: shellInnerBottom - Number.parseFloat(fieldStyle.bottom),
-          left: shellInnerLeft + Number.parseFloat(fieldStyle.left),
+      const fieldRect = () => {
+        const b = rect(shell), s = view.getComputedStyle(shell), p = view.getComputedStyle(shell, "::before");
+        const number = value => Number.parseFloat(value) || 0;
+        if (p.content === "none" || p.position !== "absolute") throw new Error("No painted composer field to measure");
+        return { left:b.left + number(s.borderLeftWidth) + number(p.left), right:b.right - number(s.borderRightWidth) - number(p.right), top:b.top + number(s.borderTopWidth) + number(p.top), bottom:b.bottom - number(s.borderBottomWidth) - number(p.bottom) };
+      };
+      const readSend = async () => {
+        let focusClear = null;
+        if (!send.disabled) {
+          await settleFocus(send, () => doc.activeElement === send && send.matches(":focus-visible"), "focused Send");
+          const b = rect(send), style = view.getComputedStyle(send);
+          const extent = Number.parseFloat(style.outlineWidth) + Math.max(0, Number.parseFloat(style.outlineOffset));
+          let clipped = false;
+          for (let parent = send.parentElement; parent; parent = parent.parentElement) {
+            const ps = view.getComputedStyle(parent), r = rect(parent);
+            if (/hidden|clip|auto|scroll/.test(ps.overflowX) && (b.left - extent < r.left - .5 || b.right + extent > r.right + .5)) clipped = true;
+            if (/hidden|clip|auto|scroll/.test(ps.overflowY) && (b.top - extent < r.top - .5 || b.bottom + extent > r.bottom + .5)) clipped = true;
+          }
+          focusClear = style.outlineStyle !== "none" && extent > 0 && !clipped;
         }
-        : { top: shellInnerTop, right: shellInnerRight, bottom: shellInnerBottom, left: shellInnerLeft };
-      const rest = {
-        composer: readRect(form),
-        bottomTextInset,
-        lineBottom,
-        lineHeight,
-        lineTop,
-        field,
-        send: readRect(send),
-        sendFieldEdgeDelta: Math.max(
-          Math.abs(field.top - sendBox.top),
-          Math.abs(field.bottom - sendBox.bottom),
-        ),
-        sendInsetDelta: Math.abs(textLeftInset - sendRightInset),
-        sendRightInset,
-        shell: readRect(shell),
-        textLeft,
-        textLeftInset,
-        topTextInset,
-        verticalAsymmetry: Math.abs(topTextInset - bottomTextInset),
+        const b = rect(send), f = fieldRect(), text = rect(input), textStyle = view.getComputedStyle(input);
+        const attach = doc.querySelector("[data-composer-attach]");
+        const controlsLeft = Math.min(b.left, visible(attach) ? rect(attach).left : b.left);
+        const textRight = text.right - Number.parseFloat(textStyle.paddingRight) - Number.parseFloat(textStyle.borderRightWidth);
+        return { contained:b.left >= f.left - .5 && b.right <= f.right + .5 && b.top >= f.top - .5 && b.bottom <= f.bottom + .5,
+          target:b.width >= 43.9 && b.height >= 43.9, uncovered:uncovered(send), inViewport:inViewport(send), focusClear, textClear:textRight <= controlsLeft + .5, width:b.width, height:b.height };
       };
-
-      /* Operator complaint, twice: clicking the box drew an aggressive ring.
-       * Chrome treats a focused TEXT FIELD as :focus-visible even on click, so
-       * this must be measured on the rendered page, not reasoned about. The
-       * indicator that MUST remain is the shell border colour change. */
-      /* The border-color change animates over --dur-1; reading mid-transition
-       * made the probe report "no change" while the real page changes fine
-       * (verified in an isolated reproduction). Transitions are suppressed for
-       * this read so the probe measures the destination, not an interpolation
-       * frame. */
-      const killTransitions = doc.createElement("style");
-      killTransitions.textContent = "* { transition: none !important; }";
-      doc.head.append(killTransitions);
-      const shellBorderBlurred = view.getComputedStyle(shell).borderTopColor;
-      await settleFocus(
-        input,
-        () => doc.activeElement === input && shell.matches(":focus-within"),
-        "focused composer",
-      );
-      const focusedInputStyle = view.getComputedStyle(input);
-      const focusedShellStyle = view.getComputedStyle(shell);
-      const focus = {
-        matchesFocusVisible: input.matches(":focus-visible"),
-        shellBorderBlurred,
-        shellBorderFocused: focusedShellStyle.borderTopColor,
-        shellBoxShadow: focusedShellStyle.boxShadow,
-        textareaBoxShadow: focusedInputStyle.boxShadow,
-        textareaOutlineStyle: focusedInputStyle.outlineStyle,
-        textareaOutlineWidth: focusedInputStyle.outlineWidth,
+      // Isolated same-DOM controls. A missing selector or boot failure is an
+      // error, never the negative result. Restore and remeasure each positive.
+      const mutate = async (selector, css, measure) => {
+        const resolvedTargets = doc.querySelectorAll(selector).length;
+        if (resolvedTargets !== 1) throw new Error("Mutation target not unique: " + selector);
+        const before = await measure(), style = doc.createElement("style");
+        style.textContent = css; doc.head.append(style);
+        let during;
+        try { await settle(); during = await measure(); } finally { style.remove(); }
+        await settle();
+        return { before, during, restored:await measure(), resolvedTargets };
       };
-      input.blur();
-      killTransitions.remove();
-      await settleFocus(
-        focusSink,
-        () => doc.activeElement === focusSink && !shell.matches(":focus-within"),
-        "composer blur after focus check",
-      );
-
-      /* A tagged, two-line message. The tag is a word in the text now, so this measures the
-         box growing with the content rather than a chip finding a home beside it. */
-      setInput("@River First line\\nSecond line");
-      input.blur();
-      await settle();
-      const twoLine = {
-        composer: readRect(form),
-        input: readRect(input),
-        send: readRect(send),
-        shell: readRect(shell),
-      };
-
-      setInput("Successful sample post");
-      form.requestSubmit();
-      await settle();
-      await waitFor(() => !send.hasAttribute("aria-busy"), "successful sample post");
-      if (${JSON.stringify(variant)} === "reverted") {
-        status.textContent = "Posted.";
-        feedback.hidden = false;
+      const ordinary = [];
+      for (const draft of ["", "First line\nSecond line"]) {
+        await setInput(draft);
+        ordinary.push({ focus:await readFocus(), send:await readSend() });
       }
-      await settle();
-      const success = {
-        feedbackHidden: feedback.hidden,
-        statusText: status.textContent ?? "",
-        statusVisible: !feedback.hidden && view.getComputedStyle(status).display !== "none",
-      };
-      document.documentElement.dataset.composerPolishMeasurement = btoa(unescape(encodeURIComponent(JSON.stringify({ focus, rest, runs: measurementRuns, success, twoLine,
-        variant: ${JSON.stringify(variant)},
-        viewport: { height: view.innerHeight, width: view.innerWidth },
-      }))));
+      const scope = "live-dashboard.dashboard[data-kylon-shell] .hm-frame ";
+      const focusMissing = await mutate(".dashboard__composer-input", scope + ".dashboard__composer-input:focus-within::before{box-shadow:none!important;border-color:transparent!important;outline:none!important}", readFocus);
+      const focusHalo = await mutate("[data-composer-input]", scope + "[data-composer-input]:focus{outline:8px solid magenta!important;box-shadow:0 0 0 12px magenta!important}", readFocus);
+      const sendOutside = await mutate("[data-composer-send]", scope + "[data-composer-send]{transform:translateX(80px)!important}", readSend);
+      const sendSmall = await mutate("[data-composer-send]", scope + "[data-composer-send]{inline-size:20px!important;block-size:20px!important;min-inline-size:0!important;min-block-size:0!important}", readSend);
+
+      const textUnderControls = await mutate("[data-composer-input]", scope + "[data-composer-input]{padding-inline-end:0!important}", readSend);
+
+      // The semantic owner already tests author labels and receipt truth. Here
+      // test only their distinct rendered access/native disclosure stability.
+      const row = Array.from(doc.querySelectorAll("[data-feed-list] > li")).find(el => el.querySelector(".dashboard__message-receipt > summary") && el.querySelector("[data-message-reply]"));
+      if (!row) throw new Error("Sample has no real receipt plus Reply row; cannot claim disclosure coverage");
+      const summary = row.querySelector(".dashboard__message-receipt > summary"), details = summary.parentElement;
+      const reply = row.querySelector("[data-message-reply]");
+      const author = row.querySelector(".hm-author__name button,.hm-author__name a,.dashboard__message-author");
+      if (!author) throw new Error("Real row has no author/profile control");
+      author.scrollIntoView({ block:"center" }); author.focus({ preventScroll:true }); await settle();
+      const authorAccessible = visible(author) && uncovered(author) && doc.activeElement === author && !!(author.getAttribute("aria-label") || author.textContent).trim();
+      summary.scrollIntoView({ block:"center" }); summary.focus({ preventScroll:true }); await settle();
+      const label = summary.getAttribute("aria-label") || "";
+      const named = label.trim().length > 0 && visible(summary) && uncovered(summary);
+      const before = { top:rect(reply).top - rect(summary).top, left:rect(reply).left - rect(summary).left };
+      summary.click(); await settle();
+      const opened = details.open;
+      const content = Array.from(details.children).filter(el => el !== summary);
+      const detailReadable = content.some(el => visible(el) && el.textContent.trim().length > 0);
+      const after = { top:rect(reply).top - rect(summary).top, left:rect(reply).left - rect(summary).left };
+      const replyStable = visible(reply) && Math.abs(after.top - before.top) <= 1 && Math.abs(after.left - before.left) <= 1;
+      summary.click(); await settle(); summary.focus({ preventScroll:true });
+      const disclosure = { authorAccessible, named, opened, detailReadable, replyStable, closed:!details.open && doc.activeElement === summary && summary.getAttribute("aria-label") === label };
+
+      let shortReply = null;
+      if (view.innerHeight <= 568) {
+        // Enter through the actual existing Reply action. No hidden-state DOM
+        // insertion, global dashboard function export, or backend mock.
+        reply.scrollIntoView({ block:"center" }); reply.click();
+        await waitFor(() => !doc.querySelector("[data-composer-reply]")?.hidden && !doc.querySelector("[data-composer-to]")?.hidden, "real reply and audience");
+        const cancel = doc.querySelector("[data-composer-reply-cancel]"), audience = doc.querySelector("[data-composer-to]");
+        const note = doc.querySelector("[data-composer-to-note]"), target = doc.querySelector("[data-composer-reply-target-text]");
+        if (!cancel || !audience || !note || !target) throw new Error("Real reply furniture incomplete");
+        const readReply = () => {
+          const style = view.getComputedStyle(input), historyHeight = Math.max(0, Math.min(rect(scroller).bottom, rect(form).top) - Math.max(0, rect(scroller).top));
+          return { active:!doc.querySelector("[data-composer-reply]").hidden && inViewport(target) && !!target.textContent.trim(),
+            audience:inViewport(audience) && inViewport(note) && !!note.textContent.trim(), cancel:uncovered(cancel) && rect(cancel).width >= 43.9 && rect(cancel).height >= 43.9,
+            history:historyHeight >= 2 * Number.parseFloat(style.lineHeight) && scroller.clientHeight > 0,
+            draft:inViewport(input) && input.value === expectedDraft, internalScroll:style.overflowY === "auto" && input.scrollHeight > input.clientHeight + 20 && input.scrollTop > 0,
+            historyHeight, inputHeight:rect(input).height };
+        };
+        let expectedDraft = "A short local reply"; await setInput(expectedDraft);
+        const short = readReply();
+        expectedDraft = Array.from({ length:40 }, (_, i) => "Local long reply line " + i).join("\n"); await setInput(expectedDraft);
+        input.scrollTop = input.scrollHeight; await settle(); const long = readReply();
+        const overlap = await mutate("[data-composer-input]", scope + "[data-composer-input]{max-block-size:none!important;block-size:80dvh!important}", readReply);
+        cancel.click(); await waitFor(() => doc.querySelector("[data-composer-reply]").hidden, "reply cancelled");
+        shortReply = { short, long, overlap, cancelled:doc.activeElement === input, draftSurvivedCancel:input.value === expectedDraft };
+      }
+      // Preserve the existing no-stale-success-feedback assertion. This is
+      // sample-mode posting, never proof of a server delivery receipt.
+      await setInput("Successful sample post"); form.requestSubmit(); await settle();
+      await waitFor(() => !send.hasAttribute("aria-busy"), "successful sample post"); await settle();
+      const success = { feedbackHidden:feedback.hidden, statusText:status.textContent || "", statusVisible:!feedback.hidden && view.getComputedStyle(status).display !== "none" };
+      killTransitions.remove();
+      document.documentElement.dataset.composerPolishMeasurement = btoa(unescape(encodeURIComponent(JSON.stringify({ ordinary, focusMissing, focusHalo, sendOutside, sendSmall, textUnderControls, shortReply, disclosure, success, runs:measurementRuns, viewport:{width:view.innerWidth,height:view.innerHeight,theme} }))));
     };
-    /* The iframe can already be complete when this script runs and still deliver its queued
-     * load event. Without this guard both paths mutate and measure the same composer at once,
-     * which produced the observed 52px inset and already-focused-border flakes. */
     let started = false;
-    const start = () => {
-      if (started) return;
-      started = true;
-      void runMeasurement().catch((error) => reportError(error?.stack ?? error));
-    };
-    /* Call the start gate twice on purpose. This is the positive control for the race: removing
-     * the gate now deterministically launches two writers against the same measurement DOM. */
-    const triggerStart = () => {
-      start();
-      start();
-    };
-    frame.addEventListener("load", triggerStart, { once: true });
+    const start = () => { if (started) return; started = true; void runMeasurement().catch(error => {
+      document.documentElement.dataset.composerPolishError = btoa(unescape(encodeURIComponent(String(error?.stack || error))));
+    }); };
+    // Retain the intentional duplicate trigger: the race guard must allow one writer.
+    const triggerStart = () => { start(); start(); };
+    frame.addEventListener("load", triggerStart, { once:true });
     if (frame.contentDocument?.readyState === "complete" && frame.contentWindow?.location.pathname === "/app") triggerStart();
+    `}
   </script></body></html>`;
 };
 
-const measure = async (
-  chrome: string,
-  origin: string,
-  width: number,
-  height: number,
-  variant: "current" | "reverted",
-): Promise<PolishMeasurement> => {
+const measure = async (chrome: string, origin: string, width: number, height: number, theme: string): Promise<Measurement> => {
   const { stdout, stderr } = await launchChrome(chrome, [
-    "--single-process",
-    "--no-zygote",
-    "--run-all-compositor-stages-before-draw",
-    "--window-size=1600,1200",
-    "--virtual-time-budget=12000",
-    "--dump-dom",
-    `${origin}/__measure?width=${width}&height=${height}&variant=${variant}`,
-  ], {
-    maxBuffer: 12 * 1024 * 1024,
-    timeout: 25_000,
-    killSignal: "SIGKILL",
-  });
+    "--single-process", "--no-zygote", "--run-all-compositor-stages-before-draw", "--window-size=1600,1200",
+    "--virtual-time-budget=20000", "--dump-dom", `${origin}/__measure?width=${width}&height=${height}&theme=${theme}`,
+  ], { maxBuffer:12 * 1024 * 1024, timeout:35_000, killSignal:"SIGKILL" });
   const encoded = stdout.match(/data-composer-polish-measurement="([^"]+)"/)?.[1];
-  const encodedError = stdout.match(/data-composer-polish-error="([^"]+)"/)?.[1];
-  assert.ok(
-    encoded,
-    `${width}px/${variant}: Chrome returned no polish measurement\n` +
-      `page error: ${encodedError
-        ? decodeURIComponent(escape(Buffer.from(encodedError, "base64").toString("utf8")))
-        : "none"}\n` +
-      `stderr: ${stderr.slice(-1_000)}\nDOM: ${stdout.slice(-2_000)}`,
-  );
-  return JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as PolishMeasurement;
+  const error = stdout.match(/data-composer-polish-error="([^"]+)"/)?.[1];
+  assert.ok(encoded, `${width}x${height}/${theme}: no measurement; error:${error ? Buffer.from(error, "base64").toString("utf8") : "none"}; stderr:${stderr.slice(-1000)}; DOM:${stdout.slice(-2000)}`);
+  return JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as Measurement;
+};
+const assertFocus = (p: FocusProbe): void => {
+  assert.equal(p.active, true, "focus-active: textarea was not actually focus-visible");
+  assert.equal(p.visible, true, `focus-missing: no changed meaningful field indicator: ${JSON.stringify(p)}`);
+  assert.equal(p.quiet, true, `focus-halo: stacked outer focus indicators: ${JSON.stringify(p)}`);
+};
+const assertSend = (p: SendProbe): void => {
+  assert.equal(p.target, true, `send-target: real Send is below44px: ${JSON.stringify(p)}`);
+  assert.equal(p.contained, true, `send-contained: real Send left painted field: ${JSON.stringify(p)}`);
+  assert.equal(p.textClear, true, `text-reservation: editable line extends under Attach/Send: ${JSON.stringify(p)}`);
+  if (p.focusClear !== null) assert.equal(p.focusClear, true, `send-focus: enabled Send focus was clipped or absent: ${JSON.stringify(p)}`);
+  assert.equal(p.inViewport && p.uncovered, true, `send-access: Send left viewport or is obstructed: ${JSON.stringify(p)}`);
+};
+const assertReply = (p: ReplyProbe, long = false): void => {
+  assert.equal(p.active && p.audience && p.cancel && p.history && p.draft, true, `short-reply: audience/Cancel/history/draft unusable: ${JSON.stringify(p)}`);
+  if (long) assert.equal(p.internalScroll, true, `reply-scroll: long draft not internally reachable: ${JSON.stringify(p)}`);
+};
+const assertNegative = <T>(p: Negative<T>, check: (value: T) => void, expected: RegExp): void => {
+  assert.equal(p.resolvedTargets, 1, "negative control did not reach one real target");
+  check(p.before);
+  assert.throws(() => check(p.during), expected, "negative control failed to expose the intended defect");
+  check(p.restored);
 };
 
-/**
- * THE CEILINGS COME FROM THE SOURCE NOW (2026-10-07, home visual lane, Tom's ruling 3 "Quiet
- * forms": the To: line shows only when the address is not "Everyone here").
- *
- * Rest, Space.dc.html composer: border-top 1 + padding-top 14 + the 13px label at the body's
- * 1.45 line-height (18.85) + 6 + the 50px field + padding-bottom 22 = 111.85px, so 112. The phone
- * (Phone-Space.dc.html: 1 + 10 + 46 + 10) is 67px, under it. Measured on this build in the lane
- * harness: 111.85px desktop, 67px mobile. The reverted control rests at about 123.85px desktop.
- *
- * Two lines: the same 111.85 + 20px (the 50px field holds one 23px line; a second grows it to
- * 70) = 131.85px, so 132. The To: row that ruling 3 shows for a tag is NOT in this number: the
- * measurement reads 40ms after the input, before the debounced address pass draws the row, so
- * the gate is the field's own growth. CI 37683104423 measured 131.84px desktop and 87px mobile;
- * the reverted control measured 136.84px desktop and 112px mobile, so the ceiling separates them.
- * ~~162 (with the To: row)~~ was derived from a harness run that waited for the row; CI does not.
- *
- * ~~108 / 130~~, retired the same day: they were the 2026-09-05 build's measurements with the
- * To: row always shown and the label absent, not anything the canvas implies.
- *
- * The older record, kept for its bound:
- * The composer's height ceilings, measured on this build rather than chosen. Both are just
- * above what the current bar actually is and well below the reverted control, so the pair
- * still discriminates: see the comments at each use.
- *
- * BOUND, stated because a review arm asked for it: this file opens 1440x900 and 390x844 and
- * no other viewport. The old comment said the budget held "on every screen" and never
- * measured the smallest one. At 320x568 the composer rests at 128.81px, ABOVE the number
- * below, which is recorded with its screenshot in
- * docs/evidence/2026-09-05-composer-to/mobile-measurements.json rather than gated here.
- */
-const COMPOSER_REST_BUDGET_PX = 112;
-const COMPOSER_TWO_LINE_BUDGET_PX = 132;
-
-const geometryFailures = (measurement: PolishMeasurement): string[] => {
-  const failures: string[] = [];
-  if (measurement.runs !== 1) {
-    failures.push(`measurement ran ${measurement.runs} times against one frame`);
-  }
-  const focus = measurement.focus;
-  if (focus.textareaOutlineStyle !== "none" && focus.textareaOutlineWidth !== "0px") {
-    failures.push(
-      `focused textarea draws the global outline (${focus.textareaOutlineStyle} ${focus.textareaOutlineWidth})`,
-    );
-  }
-  if (focus.textareaBoxShadow !== "none") {
-    failures.push(`focused textarea draws a box-shadow halo (${focus.textareaBoxShadow})`);
-  }
-  if (focus.shellBoxShadow !== "none") {
-    failures.push(`focused shell draws a focus ring (${focus.shellBoxShadow})`);
-  }
-  if (focus.shellBorderFocused === focus.shellBorderBlurred) {
-    failures.push(
-      "shell border does not change on focus - the quiet indicator is missing, which removes the focus indicator entirely",
-    );
-  }
-  if (measurement.rest.verticalAsymmetry > 1) {
-    failures.push(`text vertical asymmetry ${measurement.rest.verticalAsymmetry.toFixed(2)}px > 1px`);
-  }
-  /* THE RESTING BUDGET, renegotiated 2026-09-05 and MEASURED, not guessed.
-   *
-   * RETIRED: "the operator's budget (2026-09-04): this bar is 80px at rest, on every screen.
-   * The TO row and the note checkbox were removed to make that possible." The operator asked
-   * for the To: row back on 2026-09-05, so the 80px it bought is spent. Measured on this
-   * build: 104.44px desktop, 99.38px mobile. The ceiling is set just above the larger of the
-   * two rather than at a round number, so a row that grows again fails here.
-   *
-   * The reverted control still fails it at 128.44px / 131.38px, which is what keeps this
-   * number a gate rather than a record of whatever the composer happens to be. */
-  if (measurement.rest.composer.height > COMPOSER_REST_BUDGET_PX) {
-    failures.push(
-      `composer is ${measurement.rest.composer.height.toFixed(2)}px at rest, over the ` +
-        `${COMPOSER_REST_BUDGET_PX}px budget`,
-    );
-  }
-  /* SEND AND THE FIELD SHARE THEIR TOP AND BOTTOM EDGES (Space.dc.html: a 50px field and a 50px
-   * Send on one flex-end row; Phone-Space.dc.html: 46px and 46px). This is the alignment the
-   * canvas has, and the reverted control (a padded shell around a shorter Send) breaks it by 8px.
-   *
-   * ~~`send/text inset delta`: the text's left inset inside the shell equals Send's right inset~~,
-   * retired 2026-10-07. It described the Slack form, where Send sat INSIDE the bordered shell.
-   * In the canvas form Send sits beside the field, flush with the row's edge, so its right inset
-   * is 0 by construction while the text keeps the source's 16px padding; the only geometry that
-   * passed it was a fake 16px margin the mockup does not have. The value is still measured and
-   * logged as `sendInsetDelta`. */
-  if (measurement.rest.sendFieldEdgeDelta > 1) {
-    failures.push(`send/field edge delta ${measurement.rest.sendFieldEdgeDelta.toFixed(2)}px > 1px`);
-  }
-  /* Two lines of text may grow the box, but not past a third of a phone screen. Measured
-   * 2026-09-05 with the To: row: 124.44px desktop, 119.38px mobile; the reverted control is
-   * 147.44px / 150.38px, so the ceiling still separates them. (Superseded numbers: the current
-   * derivation is at COMPOSER_TWO_LINE_BUDGET_PX.) */
-  if (measurement.twoLine.composer.height > COMPOSER_TWO_LINE_BUDGET_PX) {
-    failures.push(
-      `two-line composer is ${measurement.twoLine.composer.height.toFixed(2)}px, over ` +
-        `${COMPOSER_TWO_LINE_BUDGET_PX}px`,
-    );
-  }
-  if (measurement.success.statusText.trim() !== "") {
-    failures.push(`successful send left visible status text: ${JSON.stringify(measurement.success.statusText)}`);
-  }
-  if (measurement.success.statusVisible) {
-    failures.push("successful send left the status area visible");
-  }
-  if (!measurement.success.feedbackHidden) {
-    failures.push("successful send left the feedback row open");
-  }
-  return failures;
-};
-
-test("Slack-shaped composer geometry stays aligned in real Chrome", async () => {
-  const chrome = await findChrome();
-  const server = await startComposerPolishServer(measurementPage);
+test("Kylon composer keeps quiet focus, contained Send and usable short replies in the built app", { timeout:180_000 }, async () => {
+  const chrome = await findChrome(), server = await startComposerPolishServer(measurementPage);
   try {
-    const current = {
-      desktop: await measure(chrome, server.origin, 1440, 900, "current"),
-      mobile: await measure(chrome, server.origin, 390, 844, "current"),
-    };
-    const reverted = {
-      desktop: await measure(chrome, server.origin, 1440, 900, "reverted"),
-      mobile: await measure(chrome, server.origin, 390, 844, "reverted"),
-    };
-    const currentFailures = Object.entries(current).flatMap(([viewport, measurement]) =>
-      geometryFailures(measurement).map((failure) => `${viewport}: ${failure}`)
-    );
-    const revertedFailures = Object.entries(reverted).flatMap(([viewport, measurement]) =>
-      geometryFailures(measurement).map((failure) => `${viewport}: ${failure}`)
-    );
-    console.log(`composer-polish-current ${JSON.stringify(current)}`);
-    console.log(`composer-polish-reverted ${JSON.stringify({ measurements: reverted, failures: revertedFailures })}`);
-    assert.deepEqual(currentFailures, [], `composer polish drifted:\n${currentFailures.join("\n")}`);
-    assert.ok(
-      revertedFailures.some((failure) => failure.includes("vertical asymmetry")) &&
-        revertedFailures.some((failure) =>
-          failure.includes(`over the ${COMPOSER_REST_BUDGET_PX}px budget`)
-        ) &&
-        /* The two-line ceiling needs its own reverted failure or the number is a record of
-           the current build rather than a gate. A review arm found it unasserted. */
-        revertedFailures.some((failure) =>
-          failure.includes(`over ${COMPOSER_TWO_LINE_BUDGET_PX}px`)
-        ) &&
-        revertedFailures.some((failure) => failure.includes("send/field edge")) &&
-        revertedFailures.some((failure) => failure.includes("visible status text")),
-      `geometry reversion control did not exercise every defect:\n${revertedFailures.join("\n")}`,
-    );
-  } finally {
-    await server.close();
-  }
+    // Four processes, at most140s launcher budget, within the180s CI test budget.
+    // Phone mechanics/keyboard variants are already owned by sprint-browser.
+    for (const [width, height, theme] of [[1440, 900, "light"], [390, 844, "dark"], [320, 568, "light"], [735, 424, "dark"]] as const) {
+      const m = await measure(chrome, server.origin, width, height, theme);
+      assert.equal(m.runs, 1, "measurement race: more than one writer used the frame");
+      assert.deepEqual(m.viewport, { width, height, theme });
+      assert.equal(m.ordinary.length, 2, "empty/two-line states were not reconciled");
+      for (const state of m.ordinary) { assertFocus(state.focus); assertSend(state.send); }
+      assert.equal(m.ordinary[1].send.focusClear, true, "enabled Send focus was not measured");
+      assertNegative(m.focusMissing, assertFocus, /focus-missing/);
+      assertNegative(m.focusHalo, assertFocus, /focus-halo/);
+      assertNegative(m.sendOutside, assertSend, /send-contained/);
+      assertNegative(m.sendSmall, assertSend, /send-target/);
+      assertNegative(m.textUnderControls, assertSend, /text-reservation/);
+      for (const [name, passed] of Object.entries(m.disclosure)) assert.equal(passed, true, `rendered-disclosure:${name}: ${JSON.stringify(m.disclosure)}`);
+      if (height <= 568) {
+        assert.ok(m.shortReply, "short reply case missing");
+        assertReply(m.shortReply.short); assertReply(m.shortReply.long, true);
+        assertNegative(m.shortReply.overlap, value => assertReply(value, true), /short-reply/);
+        assert.equal(m.shortReply.cancelled, true, "Cancel did not return focus to input");
+        assert.equal(m.shortReply.draftSurvivedCancel, true, "Cancel lost the unsent draft");
+      }
+      assert.equal(m.success.statusText.trim(), "", "successful send left stale status text");
+      assert.equal(m.success.statusVisible, false, "successful send left status visible");
+      assert.equal(m.success.feedbackHidden, true, "successful send left feedback open");
+      console.log(`composer-kylon-polish ${JSON.stringify(m)}`);
+    }
+  } finally { await server.close(); }
 });
