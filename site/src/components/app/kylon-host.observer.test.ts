@@ -19,13 +19,16 @@ const fixtureScript = `
   const check = (name, pass, detail) => checks.push({ name, pass: !!pass, detail });
   const renderHeader = () => { fixture.renderHeader(); ({ bar, menu, heading } = fixture); };
   const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-  let heldSearch = null, releasedPeople = null;
+  let heldSearch = null, releasedPeople = null, suspendedHidden = null, doorCounts = null;
   const listeners = () => fixture.mediaQueries.reduce((count, query) => count + query.listeners.size, 0);
   const peopleFacts = () => ({ width: innerWidth, phone: matchMedia('(max-width:52rem)').matches,
     rosterParent: fixture.people.roster?.parentElement?.className, navHidden: context.hidden,
     active: document.activeElement?.outerHTML, accountParent: account.parentElement?.className,
     dialog: { open: app.querySelector('dialog')?.open, modal: app.querySelector('dialog')?.matches(':modal') },
-    inert: [...app.querySelectorAll('[inert]')].map(node => node.className), listeners: listeners() });
+    inert: [...app.querySelectorAll('[inert]')].map(node => node.className), listeners: listeners(),
+    doors: [...app.querySelectorAll('[data-people-page-invite],[data-people-page-add-agent]')].map(node => ({
+      tag: node.tagName, text: node.textContent, href: node.getAttribute('href'), visible: !!node.getClientRects().length })),
+    intents: calls.filter(call => call.kind === 'people-invite' || call.kind === 'people-navigate') });
   const until = async (condition, label) => {
     const deadline = performance.now() + 2000;
     while (!condition()) {
@@ -199,6 +202,67 @@ const fixtureScript = `
     check('held native query cannot reproject released roster', releasedPeople.node.parentNode === releasedPeople.parent &&
       releasedPeople.node.nextSibling === releasedPeople.next && context.hidden === releasedPeople.hidden && listeners() === 1, peopleFacts());
   },
+  async peopleHeader(options, expected) {
+    fixture.people.mount(false, options); ({ bar, menu, heading } = fixture); heldSearch = null;
+    await this.peoplePlaced(1471, false);
+    const roster = fixture.people.roster, head = roster.querySelector('.pd-page-head');
+    const invites = roster.querySelectorAll('[data-people-page-invite]'), adds = roster.querySelectorAll('[data-people-page-add-agent]');
+    check('actual header gates ' + expected.label, invites.length === Number(expected.invite) && adds.length === Number(expected.add) &&
+      [...invites, ...adds].every(node => head.contains(node) && node.getClientRects().length > 0 && !node.closest('[hidden],[inert]')) &&
+      roster.querySelectorAll('.pd-page-actions').length === Number(expected.invite || expected.add), peopleFacts());
+    if (expected.invite) check('Invite remains the named button ' + expected.label, invites[0]?.tagName === 'BUTTON' &&
+      invites[0].type === 'button' && invites[0].textContent === 'Invite someone', peopleFacts());
+    if (expected.add) check('Add retains supplied workspace href ' + expected.label,
+      adds[0]?.tagName === 'A' && adds[0].textContent === 'Add an agent' &&
+      adds[0].href === new URL(fixture.people.addHref, document.baseURI).href, peopleFacts());
+    if (expected.invite && expected.add) this.peopleHeaderOrder();
+    // Explicit starting position for the subsequent native Tab/Enter journey, not a return-focus assertion.
+    roster.querySelector('.pd-page-back').focus();
+    doorCounts = { invite: calls.filter(call => call.kind === 'people-invite').length,
+      add: calls.filter(call => call.kind === 'people-navigate').length };
+  },
+  peopleHeaderOrder() {
+    const roster = fixture.people.roster, head = roster.querySelector('.pd-page-head');
+    const ordered = [head.querySelector('#pd-page-title'), head.querySelector('[data-people-page-invite]'),
+      head.querySelector('[data-people-page-add-agent]'), fixture.people.search, head.querySelector('[role=group][aria-label="Show roster"]'),
+      roster.querySelector('.pd-page-main')];
+    check('real title, Invite, Add, search, filters, roster DOM order at ' + innerWidth,
+      ordered.every(Boolean) && ordered.slice(1).every((node, i) => !!(ordered[i].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)), peopleFacts());
+  },
+  peopleDoorFocus(kind) {
+    const selector = kind === 'invite' ? '[data-people-page-invite]' : kind === 'add' ? '[data-people-page-add-agent]' : '.pd-page-search';
+    const node = fixture.people.roster.querySelector(selector);
+    check('native Tab reaches actual People ' + kind, !!node && document.activeElement === node &&
+      !!node.getClientRects().length && !node.closest('[hidden],[inert]'), peopleFacts());
+    if (kind === 'search') check('native doors emit only their supplied local intents',
+      calls.filter(call => call.kind === 'people-invite').length === doorCounts.invite &&
+      calls.filter(call => call.kind === 'people-navigate').length === doorCounts.add, peopleFacts());
+  },
+  async peopleDoorIntent(kind) {
+    const label = kind === 'invite' ? 'people-invite' : 'people-navigate';
+    await until(() => calls.filter(call => call.kind === label).length > doorCounts[kind], 'native People ' + kind + ' callback');
+    const actual = calls.filter(call => call.kind === label);
+    check('native People ' + kind + ' invokes original local callback once', actual.length === doorCounts[kind] + 1 &&
+      (kind !== 'add' || actual.at(-1).href === new URL(fixture.people.addHref, document.baseURI).href), peopleFacts());
+    doorCounts[kind]++;
+  },
+  peopleHeaderRefresh() {
+    const previous = fixture.people.roster; renderHeader(); fixture.people.render();
+    check('permitted header refresh preserves one real generation', !previous.isConnected && peopleUnique(), peopleFacts());
+    this.peopleHeaderOrder(); fixture.people.roster.querySelector('.pd-page-back').focus();
+  },
+  peopleUnowned(label) {
+    for (const hidden of [false, true]) {
+      context.hidden = hidden; // Another owner changes its own node while People owns no roster.
+      for (const [phase, act] of [['Chat sync', () => host.sync(project(chat))],
+        ['null clear', () => host.peopleContext(null)], ['repeated null clear', () => host.peopleContext(null)]]) {
+        act();
+        check(label + ' unowned hidden=' + hidden + ' survives ' + phase, context.hidden === hidden && sameNodes() && listeners() === 1 &&
+          !app.querySelector('.cs-org-shell').hasAttribute('data-people-composition') && (!releasedPeople ||
+          (releasedPeople.node.parentNode === releasedPeople.parent && releasedPeople.node.nextSibling === releasedPeople.next)), peopleFacts());
+      }
+    }
+  },
   async finish() {
     host.syncMenu(false); slot.replaceChildren(); frame.classList.add('hm-frame--catchup');
     host.sync(project({ view: 'catchup' })); await settle();
@@ -208,7 +272,8 @@ const fixtureScript = `
     frame.classList.remove('hm-frame--catchup'); host.sync(project(chat)); renderHeader();
     const previousMenu = menu, previousHeading = heading; renderHeader();
     check('header replaces menu/H1', docked() && !previousMenu.isConnected && !previousHeading.isConnected);
-    host.suspend();
+    suspendedHidden = context.hidden; host.suspend();
+    check('suspend preserves another owner hidden state after People release', context.hidden === suspendedHidden, peopleFacts());
     check('destroy restores parents', sameNodes() && frame.parentElement === frameParent && context.parentElement === contextParent && account.parentElement === accountParent);
     check('destroy restores exact next siblings and removes held query listeners', frame.nextSibling === fixture.frameNext &&
       context.nextSibling === fixture.contextNext && account.nextSibling === fixture.accountNext && listeners() === 0);
@@ -221,7 +286,7 @@ const fixtureScript = `
     await until(() => innerWidth === width && matchMedia('(max-width:52rem)').matches === (width <= 832), 'post-suspend native media query');
     check('post-suspend held query leaves restored DOM untouched', frame.parentElement === frameParent && context.parentElement === contextParent &&
       account.parentElement === accountParent && frame.nextSibling === fixture.frameNext && context.nextSibling === fixture.contextNext &&
-      account.nextSibling === fixture.accountNext && !app.querySelector('.cs-org-shell,dialog') && listeners() === 0, peopleFacts());
+      account.nextSibling === fixture.accountNext && context.hidden === suspendedHidden && !app.querySelector('.cs-org-shell,dialog') && listeners() === 0, peopleFacts());
     return checks;
   },
   };
@@ -250,8 +315,8 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
     const value = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
     assert.equal(value.exceptionDetails, undefined, JSON.stringify(value.exceptionDetails)); return value.result?.value;
   };
-  const key = async (name: "Tab" | "Escape" | "ArrowLeft", shift = false) => {
-    const code = name === "Tab" ? 9 : name === "Escape" ? 27 : 37;
+  const key = async (name: "Tab" | "Enter" | "Escape" | "ArrowLeft", shift = false) => {
+    const code = name === "Tab" ? 9 : name === "Enter" ? 13 : name === "Escape" ? 27 : 37;
     for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: name, code: name, modifiers: shift ? 8 : 0,
       windowsVirtualKeyCode: code, nativeVirtualKeyCode: code });
   };
@@ -277,6 +342,7 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
     await evaluate("window.hostObserver.settle()");
     }
     await evaluate("window.hostObserver.refreshFocus()");
+    if (width === 1471) await evaluate('window.hostObserver.peopleUnowned("before first People mount")');
     // One existing host owner, one actual People composition case. Read-only invented data;
     // native CDP search/caret and actual responsive/drawer events, no replacement adapter.
     if (width === 1471) for (const hidden of [false, true]) {
@@ -302,6 +368,40 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
         await send("Emulation.setDeviceMetricsOverride", { width: nextWidth, height: nextWidth === 320 ? 568 : 900, deviceScaleFactor: 1, mobile: false });
         await evaluate(`window.hostObserver.peopleReleased(${nextWidth})`);
       }
+    }
+    if (width === 1471) {
+      // Independent expected gate table. Local intent callbacks cannot invite or mint anything.
+      for (const row of [
+        { label: 'Sample suppresses supplied doors', sample: true, role: 'owner', invite: true, add: true, wantInvite: false, wantAdd: false },
+        { label: 'member retains Add only', sample: false, role: 'member', invite: true, add: true, wantInvite: false, wantAdd: true },
+        { label: 'admin has both doors', sample: false, role: 'admin', invite: true, add: true, wantInvite: true, wantAdd: true },
+        { label: 'missing Invite callback', sample: false, role: 'owner', invite: false, add: true, wantInvite: false, wantAdd: true },
+        { label: 'missing Add href', sample: false, role: 'owner', invite: true, add: false, wantInvite: true, wantAdd: false },
+        { label: 'owner has both doors', sample: false, role: 'owner', invite: true, add: true, wantInvite: true, wantAdd: true },
+      ]) {
+        await evaluate(`window.hostObserver.peopleHeader(${JSON.stringify(row)},${JSON.stringify({ label: row.label, invite: row.wantInvite, add: row.wantAdd })})`);
+        if (row.label === 'owner has both doors') {
+          const nativeDoors = async () => {
+            for (const kind of ['invite', 'add']) {
+              await key('Tab'); await evaluate(`window.hostObserver.peopleDoorFocus('${kind}')`);
+              await key('Enter'); await evaluate(`window.hostObserver.peopleDoorIntent('${kind}')`);
+            }
+            await key('Tab'); await evaluate("window.hostObserver.peopleDoorFocus('search')");
+          };
+          await nativeDoors();
+          await evaluate('window.hostObserver.peopleHeaderRefresh()');
+          await nativeDoors();
+          await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+          await evaluate('window.hostObserver.peoplePlaced(390,false)');
+          await evaluate('window.hostObserver.peopleHeaderOrder()');
+          await evaluate('window.hostObserver.peopleHeaderRefresh()');
+          await nativeDoors();
+          await send('Emulation.setDeviceMetricsOverride', { width: 1471, height: 900, deviceScaleFactor: 1, mobile: false });
+          await evaluate('window.hostObserver.peoplePlaced(1471,false)');
+        }
+        await evaluate('window.hostObserver.peopleClear()');
+      }
+      await evaluate('window.hostObserver.peopleUnowned("after active People release")');
     }
     await evaluate("window.hostObserver.finish()");
     const nextWidth = width <= 832 ? 1024 : 390;

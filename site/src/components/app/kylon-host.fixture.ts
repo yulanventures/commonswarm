@@ -6,7 +6,7 @@ import { build } from "esbuild";
 const siteRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const setupScript = `
 (() => {
-  const { createKylonHost, projectHomeLayout, buildPhoneTopBar, buildWorkspaceHeader, buildWorkspaceNav, replaceHomeRegion, renderPeopleDialog } = KylonHostFixture;
+  const { createKylonHost, projectHomeLayout, buildPhoneTopBar, buildWorkspaceHeader, buildWorkspaceNav, replaceHomeRegion, renderPeopleDialog, routeHref } = KylonHostFixture;
   const app = document.querySelector('live-dashboard'), frame = app.querySelector('.hm-frame');
   const context = app.querySelector('[data-home-rail-slot]'), account = app.querySelector('[data-user-menu-root]');
   const frameParent = frame.parentElement, contextParent = context.parentElement;
@@ -42,7 +42,7 @@ const setupScript = `
   menu = bar.querySelector('.hm-menu'); heading = bar.querySelector('.hm-phone-bar__title');
   host.replaceHeader(() => replaceHomeRegion(slot, "shell", [bar, buildWorkspaceHeader(document, vm, callbacks), buildWorkspaceNav(document, vm, callbacks, "tablet")]));
   }
-  // Actual page builder and actual projection; invented read-only data/local query callbacks.
+  // Actual page builder and actual projection; invented data/local intent callbacks only.
   // This is physical host ownership coverage, not a router, sign-in or backend fixture.
   const pane = app.querySelector('[data-home-route-pane]'); pane.className = 'hm-route-pane';
   const detail = document.createElement('section'); detail.className = 'pd-detail'; detail.id = 'pd-detail';
@@ -55,18 +55,26 @@ const setupScript = `
       receive: null, lastActive: 'Not reported', technical: [], updateAvailable: false, access: null, accessReadState: 'pending',
       key: null, liveKey: false, own: true, mayManage: false, receipt: '' }] };
   let roster = null, homeParent = null, homeNext = null, priorHidden = false;
+  let doors = { invite: false, add: false };
+  const addHref = routeHref({ view: 'add-agent', workspaceId: workspace.id });
   function renderPeople() {
     host.peopleContext(null);
     renderPeopleDialog(pane, detail, peopleModel, peopleState, {
       render: renderPeople, action: () => { throw new Error('read-only fixture action'); },
       saveModel: async () => { throw new Error('read-only fixture save'); }, confirm: () => { throw new Error('read-only fixture confirm'); },
     }, { layout: 'page', page: { homeLabel: workspace.name, homeHref: '?w=fixture-w', workspacesHref: '?v=catchup',
+      invite: doors.invite ? () => calls.push({ kind: 'people-invite' }) : undefined,
+      addAgentHref: doors.add ? addHref : undefined,
+      navigate: doors.add ? href => calls.push({ kind: 'people-navigate', href }) : undefined,
       onQuery(value) { peopleState.query = value; calls.push({ kind: 'people-query', value }); renderPeople(); } } });
     roster = pane.querySelector('[data-people-context]'); homeParent = roster.parentNode; homeNext = roster.nextSibling;
     host.peopleContext(roster);
   }
   const people = {
-    mount(hidden = false) {
+    mount(hidden = false, options = {}) {
+      // Preserve original Sample/no-door defaults. These are inputs, not a permission model.
+      peopleModel.sample = options.sample ?? true; peopleModel.people[0].role = options.role ?? 'owner';
+      doors = { invite: options.invite ?? false, add: options.add ?? false };
       peopleState.query = ''; peopleState.selected = null; peopleState.filter = 'all';
       priorHidden = hidden; context.hidden = hidden; vm.contextTitle = true; frame.classList.add('hm-frame--people');
       renderHeader(); host.sync(project({ view: 'people', workspaceId: workspace.id })); renderPeople();
@@ -75,7 +83,7 @@ const setupScript = `
     clear() { host.peopleContext(null); host.sync(project(chat)); frame.classList.remove('hm-frame--people'); vm.contextTitle = false; renderHeader(); },
     get roster() { return roster; }, get search() { return roster.querySelector('.pd-page-search'); },
     get homeParent() { return homeParent; }, get homeNext() { return homeNext; },
-    get priorHidden() { return priorHidden; }, detail, state: peopleState,
+    get priorHidden() { return priorHidden; }, detail, state: peopleState, addHref,
   };
   renderHeader(); host.sync(project(chat));
   window.hostFixtureData = { app, frame, context, account, frameParent, contextParent, accountParent, frameNext, contextNext, accountNext,
@@ -90,6 +98,7 @@ export async function kylonHostFixture(observe: string): Promise<string> {
     export { buildPhoneTopBar, buildWorkspaceHeader, buildWorkspaceNav } from './src/lib/home-shell.ts';
     export { replaceHomeRegion } from './src/lib/home-focus.ts';
     export { renderPeopleDialog } from './src/lib/people-dialog-view.ts';
+    export { routeHref } from './src/lib/home-route.ts';
     import './src/styles/tokens.css'; import './src/styles/home/index.css';
     import './src/styles/kylon-shell.css'; import './src/styles/kylon-layout/index.css';
     import './src/styles/kylon-people.css';` } });

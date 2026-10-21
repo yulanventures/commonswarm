@@ -91,18 +91,9 @@ test("agent avatars keep one shape and one tint mechanism", () => {
   assert.match(dashboard, /--avatar-hue/);
 });
 
-/* ~~"management lives in a dialog whose first primary action is Add an agent"~~, retired
-   2026-10-07: Members.dc.html puts the two doors beside the page title, Invite someone as the
-   dark primary and Add an agent as the outlined secondary, then the filter, then the roster. */
-test("management lives on the page: the two doors beside the title, then filter, then roster", () => {
-  const page = view.slice(view.indexOf("if (page) {"), view.indexOf("const select = "));
-  const invite = page.indexOf("Invite someone"), add = page.indexOf("Add an agent");
-  const search = page.indexOf("pd-page-search"), columns = page.indexOf("pd-page-columns");
-  assert.ok(invite > 0 && add > invite && search > add && columns > search,
-    "the doors come first, then the filter, then the roster columns");
-  assert.match(page, /button\(doc, "Invite someone", \(\) => nav.invite\?\.\(\), "pd-page-primary"\)/);
-  assert.match(page, /link\(doc, "Add an agent", nav.addAgentHref, "pd-page-secondary", nav.navigate\)/);
-  assert.match(page, /nav.addAgentHref && !model.sample/, "sample mode never shows an Add door that cannot mint");
+/* Rendered gates/order/native callbacks belong to the actual kylon-host owner. Keep this
+   distinct application binding: the selected workspace supplies the existing page route. */
+test("People page retains workspace route and existing management error bindings", () => {
   assert.match(dashboard, /layout: "page"/);
   assert.match(dashboard, /addAgentHref: routeHref\(\{ view: "add-agent", workspaceId: workspace.id \}\)/);
   assert.match(dashboard, /rosterFilter/);
