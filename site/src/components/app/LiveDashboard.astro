@@ -33,6 +33,7 @@ import { ALL_SIGNALS_SLUG, channelLabel } from "../../lib/channels";
 import { THREAD_REPLY_CANCEL_LABEL } from "../../lib/thread-reply";
 import "../../styles/tokens.css";
 import "../../styles/home/index.css";
+import "../../styles/kylon-shell.css";
 
 const signInMethods = signInDoors(await enabledProvidersForBuild({
   url: import.meta.env.PUBLIC_SUPABASE_URL,
@@ -40,7 +41,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 }));
 ---
 
-<live-dashboard class="dashboard" data-state="loading">
+<live-dashboard class="dashboard" data-state="loading" data-kylon-shell>
   <div class="dashboard__wash" aria-hidden="true"></div>
 
   <div class="dashboard__root">
@@ -301,7 +302,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               </button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-connected-apps-open>Connected apps</button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout>Sign out</button>
-              <a class="dashboard__wordmark dashboard__user-menu-brand" href="/" aria-label="CommonSwarm home">CommonSwarm</a>
+              <a class="dashboard__wordmark dashboard__user-menu-brand" href="/" role="menuitem" aria-label="CommonSwarm home">CommonSwarm</a>
             </div>
           </div>
 
@@ -11887,16 +11888,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     overflow-y: auto;
     border-inline-end: 1px solid var(--border);
     background: var(--bg-raised);
-  }
-
-  .dashboard__rail .dashboard__wordmark {
-    font-family: var(--font-mono);
-    font-size: var(--t-sm);
-    letter-spacing: -0.02em;
-  }
-
-  .dashboard__rail .dashboard__wordmark::after {
-    display: none;
   }
 
   .dashboard__workspace-control {

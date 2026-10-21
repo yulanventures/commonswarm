@@ -30,7 +30,8 @@ import { createPinnedMetadataFetch, createPostgresCimdFetch } from "./metadata-f
 import { createPostgresAdapter } from "./postgres-adapter.js";
 import { createMcpProvider, RESOURCE } from "./provider.js";
 import { createProductionManagementBindings } from "./management-bindings.js";
-import { CLIENT_SCOPES, createPostgresRegistrationStore, createRegistrationLimiter } from "./registration.js";
+import { CLIENT_SCOPES, createPostgresRegistrationStore, createRegistrationLimiter,
+  registrationErrorResponse } from "./registration.js";
 
 const ALWAYS_AVAILABLE = new Set([
   "/health",
@@ -54,7 +55,10 @@ function rejectOversizedRequest(request, response) {
   request.pause();
   response.shouldKeepAlive = false;
   if (typeof response.once === "function") response.once("finish", () => request.destroy());
-  json(response, 413, { error: "request_too_large" }, { connection: "close" });
+  const registration = new URL(request.url, "https://mcp.commonswarm.com").pathname === "/reg";
+  json(response, 413, registration
+    ? { error: "invalid_request", error_description: "registration request body is too large" }
+    : { error: "request_too_large" }, { connection: "close" });
   if (typeof response.once !== "function") request.destroy();
 }
 
@@ -134,7 +138,9 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
         return;
       }
       if (!publicAuthorizationEnabled && !ALWAYS_AVAILABLE.has(path)) {
-        json(response, 503, { error: "authorization_service_disabled" });
+        json(response, 503, path === "/reg"
+          ? { error: "temporarily_unavailable", error_description: "client registration is unavailable" }
+          : { error: "authorization_service_disabled" });
         return;
       }
       const consentLocation = initialConsentLocation(request);
@@ -180,7 +186,7 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
       if (path.startsWith("/interaction/") || path === "/oauth/callback/gotrue") {
         logProviderError(logger, "interaction.error", requestId, error);
       }
-      const clientResponse = clientErrorResponse(error);
+      const clientResponse = path === "/reg" ? registrationErrorResponse(error) : clientErrorResponse(error);
       const status = clientResponse?.status ?? 500;
       logger.info({ event: "request_failed", request_id: requestId, method: request.method,
         path, status, error_code: clientResponse?.body.error ?? error?.code ?? "internal_error" });

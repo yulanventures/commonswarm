@@ -117,7 +117,7 @@
 
 	@mcp_metadata {
 		method GET HEAD
-		path /.well-known/oauth-protected-resource/mcp
+		path /.well-known/oauth-protected-resource/mcp /.well-known/oauth-protected-resource
 	}
 	handle @mcp_metadata {
 		rewrite * /functions/v1/mcp/.well-known/oauth-protected-resource/mcp
@@ -130,7 +130,7 @@
 		}
 	}
 
-	@known_wrong_method path /mcp /.well-known/oauth-protected-resource/mcp
+	@known_wrong_method path /mcp /.well-known/oauth-protected-resource/mcp /.well-known/oauth-protected-resource
 	handle @known_wrong_method {
 		header Content-Type "application/json; charset=utf-8"
 		respond "{\"error\":\"method_not_allowed\"}" 405
@@ -190,7 +190,7 @@ mcp.commonswarm.com {
 		# served by services/mcp-auth. The resource snippet remains unimported.
 		import mcp_oauth_active
 
-		@mcp_unavailable path /mcp /.well-known/oauth-protected-resource/mcp
+		@mcp_unavailable path /mcp /.well-known/oauth-protected-resource/mcp /.well-known/oauth-protected-resource
 		handle @mcp_unavailable {
 			header Content-Type "application/json; charset=utf-8"
 			respond "{\"error\":\"feature_disabled\",\"feature\":\"hosted_mcp\",\"message\":\"Hosted MCP is not available yet.\"}" 503

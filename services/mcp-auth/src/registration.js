@@ -7,6 +7,30 @@ import { metadataUrlAllowed } from "./metadata-fetch.js";
 export const REGISTRATION_IDLE_SECONDS = 30 * 24 * 60 * 60;
 export const CLIENT_SCOPES = Object.freeze(["openid", "offline_access", "mcp"]);
 export const DEFAULT_DCR_LIMITS = Object.freeze({ perIp: 60, perHost: 300 });
+// Descriptions from these owned errors contain only service-authored text.
+class RegistrationMetadataError extends errors.InvalidClientMetadata {}
+class RegistrationRequestError extends errors.InvalidRequest {}
+
+export function registrationErrorResponse(error) {
+  if (error instanceof RegistrationMetadataError || error instanceof RegistrationRequestError) {
+    return { status: error.statusCode, body: { error: error.error, error_description: error.error_description } };
+  }
+  if (error instanceof errors.InvalidClientMetadata) {
+    // Provider metadata errors can interpolate client-supplied URI schemes.
+    // Retain the field name, never the supplied value or exception detail.
+    const field = /^(?:invalid )?([a-z][a-z0-9_]{0,63})(?:\[| |$)/u.exec(error.error_description)?.[1];
+    return { status: 400, body: { error: error.error,
+      error_description: field ? `${field} metadata is invalid` : "client metadata is invalid" } };
+  }
+  if (error instanceof errors.InvalidRequest) {
+    const description = error.error_description;
+    const safe = new Set(["failed to parse the request body", "client registration request must be a JSON object"]);
+    return { status: 400, body: { error: "invalid_request", error_description: safe.has(description)
+      ? description : "registration requests require application/json" } };
+  }
+  return { status: 500, body: { error: "server_error", error_description: "registration could not be saved; retry later" } };
+}
+
 const LOOPBACKS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 // The mapping is also the branding domain for an explicitly allowed client.
 const NATIVE_CLIENT_SCHEMES = new Map([["cursor:", "cursor.com"]]);
@@ -62,31 +86,50 @@ function hostnamesInText(value) {
 function validateDcrBranding(metadata) {
   if (metadata.client_id && metadataUrlAllowed(metadata.client_id)) return;
   if (metadata.logo_uri !== undefined) {
-    throw new errors.InvalidClientMetadata("registered clients cannot declare logo_uri");
+    throw new RegistrationMetadataError("registered clients cannot declare logo_uri");
   }
   const allowed = redirectRegistrableDomains(metadata);
   for (const host of hostnamesInText(metadata.client_name)) {
     if (!allowed.has(registrableDomain(host))) {
-      throw new errors.InvalidClientMetadata("client_name cannot claim a different host than redirect_uris");
+      throw new RegistrationMetadataError("client_name cannot claim a different host than redirect_uris");
     }
   }
   if (metadata.client_uri !== undefined) {
     const host = registrableDomain(new URL(metadata.client_uri).hostname);
     if (!allowed.has(host)) {
-      throw new errors.InvalidClientMetadata("client_uri must stay on the redirect host");
+      throw new RegistrationMetadataError("client_uri must stay on the redirect host");
     }
   }
 }
 
-// Applied to both CIMD and registered metadata, after the provider's schema
-// checks. The provider independently restricts grants, responses and algorithms.
+// Applied to both CIMD and registered metadata before the provider schema.
+// The provider independently restricts grants, responses and algorithms.
 export function validateClientPolicy(metadata, nativeLoopbackEnabled) {
   if (metadata.token_endpoint_auth_method !== "none") {
-    throw new errors.InvalidClientMetadata("only public clients are supported");
+    throw new RegistrationMetadataError("only public clients are supported");
+  }
+  // extraClientMetadata.validator runs before the provider schema, despite
+  // receiving the merged defaults. Validate shapes before URL operations.
+  for (const field of ["redirect_uris", "post_logout_redirect_uris"]) {
+    const uris = metadata[field];
+    if (uris === undefined && field === "post_logout_redirect_uris") continue;
+    if (!Array.isArray(uris)) throw new RegistrationMetadataError(`${field} must be an array of URLs`);
+    for (const uri of uris) {
+      try {
+        if (typeof uri !== "string") throw new TypeError();
+        new URL(uri);
+      } catch { throw new RegistrationMetadataError(`${field} must contain valid URLs`); }
+    }
+  }
+  if (metadata.client_uri !== undefined) {
+    try {
+      if (typeof metadata.client_uri !== "string") throw new TypeError();
+      new URL(metadata.client_uri);
+    } catch { throw new RegistrationMetadataError("client_uri must be a valid URL"); }
   }
   if (metadata.application_type === "native" && !nativeLoopbackEnabled &&
       !metadata.redirect_uris.some(uri => privateUseScheme(new URL(uri)))) {
-    throw new errors.InvalidClientMetadata("native clients are disabled");
+    throw new RegistrationMetadataError("native clients are disabled");
   }
   for (const uri of [...metadata.redirect_uris, ...metadata.post_logout_redirect_uris ?? []]) {
     const url = new URL(uri);
@@ -95,7 +138,7 @@ export function validateClientPolicy(metadata, nativeLoopbackEnabled) {
     const privateUse = metadata.application_type === "native" && privateUseScheme(url);
     if (url.username || url.password || url.href.includes("#") ||
         (!privateUse && !loopback && (url.protocol !== "https:" || LOOPBACKS.has(url.hostname)))) {
-      throw new errors.InvalidClientMetadata("redirect URIs require HTTPS, a native private-use scheme or enabled native loopback");
+      throw new RegistrationMetadataError("redirect URIs require HTTPS, a native private-use scheme or enabled native loopback");
     }
   }
   validateDcrBranding(metadata);
@@ -108,22 +151,26 @@ export function createRegistrationLimiter({ perIp = DEFAULT_DCR_LIMITS.perIp, pe
   windowMs = 60 * 60 * 1000, maxKeys = 10_000 } = {}) {
   const buckets = new Map();
   return (ctx) => {
+    // oidc-provider 9.12.2 calls this DCR idFactory after parsing JSON and
+    // before copying the body into metadata for validation and persistence.
+    // Ignore optional, untrusted branding here; CIMD never takes this path.
+    delete ctx.oidc.body.logo_uri;
     // registrationResponse decides whether to generate a secret before applying
     // clientDefaults. Set the public default in the parsed request as well.
     ctx.oidc.body.token_endpoint_auth_method ??= "none";
     if (ctx.oidc.body.token_endpoint_auth_method !== "none") {
-      throw new errors.InvalidClientMetadata("only public clients are supported");
+      throw new RegistrationMetadataError("only public clients are supported");
     }
     const now = Date.now();
     for (const [key, bucket] of buckets) if (bucket.until <= now) buckets.delete(key);
     const uris = ctx.oidc.body.redirect_uris;
     if (!Array.isArray(uris) || uris.length < 1 || uris.length > 10) {
-      throw new errors.InvalidClientMetadata("register between one and ten redirect URIs");
+      throw new RegistrationMetadataError("register between one and ten redirect URIs");
     }
     let urls;
     try {
       urls = uris.map((uri) => new URL(uri));
-    } catch { throw new errors.InvalidClientMetadata("invalid redirect URI"); }
+    } catch { throw new RegistrationMetadataError("invalid redirect URI"); }
     // Some MCP clients omit application_type or send web for native callbacks.
     // Infer native only when every callback is private-use or HTTP loopback.
     // validateClientPolicy still enforces the native loopback configuration.
@@ -145,7 +192,7 @@ export function createRegistrationLimiter({ perIp = DEFAULT_DCR_LIMITS.perIp, pe
         : Math.min(...[...buckets.values()].map(bucket => bucket.until), now + windowMs);
       const reason = exhausted.length ? [...new Set(exhausted.map(([, , kind]) => kind))].join(", ") : "capacity";
       ctx.set("Retry-After", String(Math.max(1, Math.ceil((until - now) / 1000))));
-      throw new errors.InvalidRequest(`registration rate limit exceeded: ${reason}`, 429);
+      throw new RegistrationRequestError(`registration rate limit exceeded: ${reason}`, 429);
     }
     const reservation = keys.map(([key]) => {
       const bucket = buckets.get(key) ?? { count: 0, until: now + windowMs };
@@ -173,7 +220,7 @@ export function createMemoryRegistrationStore() {
   const store = {
     async upsert(id, metadata) {
       await store.cleanup();
-      if (clients.size >= 10_000) throw new errors.InvalidRequest("registration capacity exceeded", 429);
+      if (clients.size >= 10_000) throw new RegistrationRequestError("registration capacity exceeded", 429);
       const now = Date.now();
       clients.set(id, { client_id: id, metadata: structuredClone(metadata), registered_at: now,
         last_used_at: null, expires_at: now + REGISTRATION_IDLE_SECONDS * 1000 });
