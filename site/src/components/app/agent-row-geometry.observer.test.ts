@@ -142,8 +142,8 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
             const opener=pageDetail.querySelector('[data-remove-agent]'); opener.focus(); opener.click();
             pageConfirm.getBoundingClientRect();
             const deadline=performance.now()+2000;
-            while (!pageConfirm.open || !pageConfirm.matches(':modal') || document.activeElement!==pageConfirm.querySelector('.pd-confirm-actions button') || document.fonts.status!=='loaded' || !document.fonts.check('500 13px "CommonSwarm Inter"')) {
-              if (performance.now()>=deadline) throw Error('Page confirmation readiness: '+JSON.stringify({open:pageConfirm.open,modal:pageConfirm.matches(':modal'),active:document.activeElement?.outerHTML,fonts:document.fonts.status}));
+            while (!pageConfirm.open || !pageConfirm.matches(':modal') || document.activeElement!==pageConfirm.querySelector('.pd-confirm-actions button') || document.fonts.status!=='loaded' || !document.fonts.check(getComputedStyle(pageConfirm.querySelector('.pd-confirm-actions button')).font)) {
+              if (performance.now()>=deadline) throw Error('Page confirmation readiness: '+JSON.stringify({width:innerWidth,height:innerHeight,phone:matchMedia('(max-width:52rem)').matches,open:pageConfirm.open,modal:pageConfirm.matches(':modal'),active:document.activeElement?.outerHTML,fonts:document.fonts.status,font:pageConfirm.querySelector('button')?getComputedStyle(pageConfirm.querySelector('button')).font:null}));
               await new Promise(resolve=>setTimeout(resolve,20));
             }
             const buttons=[...pageConfirm.querySelectorAll('.pd-confirm-actions button')], cancel=buttons[0];
