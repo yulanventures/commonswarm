@@ -1,0 +1,10 @@
+/* Rail-brand rules extracted unchanged from LiveDashboard; frame/scroll declarations stay with existing observers. */
+  .dashboard__rail .dashboard__wordmark {
+    font-family: var(--font-mono);
+    font-size: var(--t-sm);
+    letter-spacing: -0.02em;
+  }
+
+  .dashboard__rail .dashboard__wordmark::after {
+    display: none;
+  }

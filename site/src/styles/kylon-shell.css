@@ -1,0 +1,290 @@
+@import "./dashboard-rail-brand.css";
+@import "./kylon-tokens.css";
+
+/* Candidate: existing shell presentation only. No route/visibility/layout reset.
+ * Prefix beats the legacy inline global rules without !important. Home/status
+ * tokens are mapped only on the shell component that consumes them.
+ */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame.dashboard__frame {
+  background: var(--k-shell-surface);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* White rail, quiet rows. Keep current width, scroll boxes, and mobile ownership. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame__rail,
+live-dashboard.dashboard[data-kylon-shell] .hm-rail {
+  --home-rail-bg: var(--k-shell-surface);
+  --home-rail-panel: var(--k-shell-surface);
+  --home-rail-raised: var(--k-shell-hover);
+  --home-rail-current: var(--k-shell-selected);
+  --home-rail-current-ink: var(--k-shell-ink);
+  --home-rail-text: var(--k-shell-secondary);
+  --home-rail-strong: var(--k-shell-ink);
+  --home-rail-muted: var(--k-shell-muted);
+  --home-rail-divider: var(--k-shell-line);
+  --home-font-body: var(--k-shell-font);
+  --home-font-display: var(--k-shell-font);
+  --home-focus-ring: var(--k-shell-ring);
+  background: var(--k-shell-surface);
+  color: var(--k-shell-secondary);
+  font-family: var(--k-shell-font);
+}
+
+live-dashboard.dashboard[data-kylon-shell] .hm-rail {
+  gap: 16px;
+  padding-inline: 12px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__heading,
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__other-head {
+  padding-inline: 10px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+live-dashboard.dashboard[data-kylon-shell] :is(
+  .hm-rail__link, .hm-rail__person, .hm-rail__agent, .hm-rail__more
+) {
+  gap: 10px;
+  border-radius: var(--k-shell-row-radius);
+  font-family: var(--k-shell-font);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__agent::before {
+  border-radius: var(--k-shell-row-radius);
+}
+
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__link[aria-current="page"] {
+  background: var(--k-shell-selected);
+  color: var(--k-shell-ink);
+  font-weight: 600;
+  box-shadow: none;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__new {
+  border-radius: var(--k-shell-radius);
+  font-family: var(--k-shell-font);
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: inset 0 0 0 1px var(--k-shell-control);
+}
+
+live-dashboard.dashboard[data-kylon-shell] .hm-frame__rail .dashboard__user-trigger {
+  border-radius: var(--k-shell-radius);
+  font-family: var(--k-shell-font);
+}
+
+live-dashboard.dashboard[data-kylon-shell] .hm-frame__rail .dashboard__user-trigger-brand {
+  font-family: var(--k-shell-font);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+}
+
+/* Only shell headers get sans typography; message/document content is untouched.
+   Local Home aliases cover the existing capsule/menu chrome without recoloring
+   semantic status, agent identity, or message tokens. */
+live-dashboard.dashboard[data-kylon-shell] :is(.hm-ws-header, .hm-phone-bar) {
+  --home-font-body: var(--k-shell-font);
+  --home-font-display: var(--k-shell-font);
+  --home-card: var(--k-shell-surface);
+  --home-card-border: var(--k-shell-line);
+  --home-soft: var(--k-shell-hover);
+  --home-ink: var(--k-shell-ink);
+  --home-ink-muted: var(--k-shell-secondary);
+  --home-rail-bg: var(--k-shell-surface);
+  --home-rail-strong: var(--k-shell-ink);
+  --home-rail-raised: var(--k-shell-hover);
+  --home-focus-ring: var(--k-shell-ring);
+  background: var(--k-shell-surface);
+  color: var(--k-shell-ink);
+  font-family: var(--k-shell-font);
+  font-size: 13px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .hm-ws-header {
+  padding: 12px 24px;
+  gap: 8px 16px;
+  border-block-end-color: var(--k-shell-line);
+}
+
+live-dashboard.dashboard[data-kylon-shell] :is(.hm-ws-header__title, .hm-phone-bar__title) {
+  font-family: var(--k-shell-font);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.2px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .hm-ws-header__subline {
+  color: var(--k-shell-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .hm-ws-header__actions { gap: 8px 12px; }
+
+live-dashboard.dashboard[data-kylon-shell] .hm-ws-header__people,
+live-dashboard.dashboard[data-kylon-shell] .hm-menu__trigger {
+  border-radius: var(--k-shell-radius);
+  font-family: var(--k-shell-font);
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: inset 0 0 0 1px var(--k-shell-control);
+}
+
+/* Preserve an icon-sized ellipsis; the base trigger owns its accessible label. */
+live-dashboard.dashboard[data-kylon-shell] .hm-menu__trigger { font-size: 18px; }
+
+live-dashboard.dashboard[data-kylon-shell] .hm-phone-bar .hm-menu__trigger {
+  color: var(--k-shell-ink);
+  box-shadow: none;
+}
+
+/* Restyle existing popovers. Positions, z-index, clipping bounds, [hidden] and
+   keyboard/focus state continue to be owned by the existing shell/runtime. */
+live-dashboard.dashboard[data-kylon-shell] :is(
+  .dashboard__user-menu, .hm-menu__list, .hm-channel-menu__panel
+) {
+  --home-card: var(--k-shell-surface);
+  --home-soft: var(--k-shell-hover);
+  --home-ink: var(--k-shell-ink);
+  --home-ink-muted: var(--k-shell-secondary);
+  --home-card-border: var(--k-shell-line);
+  --home-focus-ring: var(--k-shell-ring);
+  color-scheme: var(--k-shell-scheme);
+  background: var(--k-shell-surface);
+  color: var(--k-shell-ink);
+  border: 1px solid var(--k-shell-line);
+  border-radius: var(--k-shell-menu-radius);
+  box-shadow: var(--k-shell-shadow);
+  font-family: var(--k-shell-font);
+}
+
+live-dashboard.dashboard[data-kylon-shell] :is(
+  .hm-menu__item, .hm-channel-menu__item, .hm-channel-menu__list > button,
+  .dashboard__user-menu-item, .dashboard__theme-toggle
+) {
+  border-radius: var(--k-shell-radius);
+  font-family: var(--k-shell-font);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu :is(
+  .dashboard__user-menu-item, .dashboard__theme-toggle
+) { color: var(--k-shell-ink); }
+
+live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu-account {
+  color: var(--k-shell-secondary);
+  font-family: var(--k-shell-font);
+  font-size: 12px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .hm-channel-menu__trigger {
+  border-radius: var(--k-shell-radius);
+  color: var(--k-shell-ink);
+  font-family: var(--k-shell-font);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+live-dashboard.dashboard[data-kylon-shell] :is(
+  .hm-rail a, .hm-rail button, .dashboard__user-trigger,
+  .hm-ws-header button, .hm-phone-bar button, .hm-phone-bar a,
+  .hm-menu__item, .hm-channel-menu__trigger, .hm-channel-menu__item,
+  .hm-channel-menu__list > button, .dashboard__user-menu button,
+  .dashboard__user-menu a
+):focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+
+@media (width > 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame__rail.dashboard__rail {
+    border-inline-end: 1px solid var(--k-shell-line);
+  }
+
+  live-dashboard.dashboard[data-kylon-shell] :is(
+    .hm-rail__link, .hm-rail__person, .hm-rail__agent, .hm-rail__more,
+    .hm-ws-header__people, .hm-menu__trigger
+  ) { min-block-size: 36px; }
+
+  /* Agent row surfaces already use a 2px inset pseudo-element. Keep their
+     target geometry/margins intact to avoid overlap after density changes. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-rail__agent {
+    min-block-size: 44px;
+  }
+}
+
+@media (width <= 52rem) {
+  /* Retain current top-bar grid, safe-area padding and 44px touch controls. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-phone-bar__title { line-height: 27px; }
+  live-dashboard.dashboard[data-kylon-shell] :is(
+    .hm-menu__item, .hm-channel-menu__item, .hm-channel-menu__list > button,
+    .dashboard__user-menu-item, .dashboard__theme-toggle
+  ) { min-block-size: 44px; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  live-dashboard.dashboard[data-kylon-shell] :is(
+    .hm-rail a, .hm-rail button, .hm-ws-header button, .hm-phone-bar button,
+    .hm-menu__item, .hm-channel-menu__item
+  ) {
+    transition: background-color var(--k-shell-motion) var(--k-shell-ease),
+      color var(--k-shell-motion) var(--k-shell-ease);
+  }
+}
+
+live-dashboard.dashboard[data-kylon-shell] .hm-phone-bar__title {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* One outline owns focus; inset strokes remain only on bordered controls. */
+live-dashboard.dashboard[data-kylon-shell] :is(
+  .hm-rail__new, .hm-ws-header__people, .hm-menu__trigger
+):focus-visible { box-shadow: inset 0 0 0 1px var(--k-shell-control); }
+
+/* The account popover uses the same row contract for native links and buttons. */
+live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu :is(
+  .dashboard__theme-toggle, .dashboard__user-menu-item, .dashboard__user-menu-brand
+) {
+  display: flex;
+  align-items: center;
+  inline-size: 100%;
+  min-block-size: 36px;
+  padding: 8px 10px;
+  border-radius: var(--k-shell-row-radius);
+  font-family: var(--k-shell-font);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.5;
+  text-decoration: none;
+  color: var(--k-shell-ink);
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu :is(
+  .dashboard__theme-toggle, .dashboard__user-menu-item, .dashboard__user-menu-brand
+):hover { background: var(--k-shell-hover); }
+@media (width <= 52rem) {
+  /* A sample has the separate account door, so it needs no empty menu track. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-phone-bar:not([data-home-account-menu]) {
+    grid-template-columns: 44px minmax(0, 1fr) auto;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu :is(
+    .dashboard__theme-toggle, .dashboard__user-menu-item, .dashboard__user-menu-brand
+  ) { min-block-size: 44px; }
+}
+@media (width > 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-ws-header .hm-menu__trigger { min-inline-size: 36px; }
+}

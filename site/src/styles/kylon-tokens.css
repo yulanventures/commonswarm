@@ -1,0 +1,71 @@
+/* Incremental live-shell tokens mapped in DESIGN-SYSTEM v0.3.
+ * Private reference captures informed proportions only; no reference assets/code.
+ * Opt-in app scope. These tokens do not alias global, Home, or status tokens.
+ */
+live-dashboard.dashboard[data-kylon-shell] {
+  --k-shell-surface: #ffffff;
+  --k-shell-subtle: #f5f5f2;
+  --k-shell-hover: #f5f5f2;
+  --k-shell-selected: #eeefea;
+  --k-shell-ink: #282720;
+  --k-shell-secondary: #655e53;
+  --k-shell-muted: #716b60;
+  --k-shell-line: #e9e7e2;
+  /* Slightly darker than draft --cs-control: also clears 3:1 on selected rows. */
+  --k-shell-control: #7e887c;
+  --k-shell-focus: #176548;
+  --k-shell-ring: 0 0 0 2px var(--k-shell-surface), 0 0 0 4px var(--k-shell-focus);
+  --k-shell-shadow: 0 12px 40px #1d2b1f24, 0 2px 6px #1d2b1f0d;
+  --k-shell-font: "InterVariable", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --k-shell-radius: 6px;
+  --k-shell-row-radius: 8px;
+  --k-shell-menu-radius: 10px;
+  --k-shell-motion: 140ms;
+  --k-shell-ease: ease-out;
+  --k-shell-scheme: light;
+
+  /* Parked values keep the OS/manual dark branches identical. Existing app
+     theme preference and bootstrap remain the sole preference owners. */
+  --k-shell-dark-surface: #181a18;
+  --k-shell-dark-subtle: #222521;
+  --k-shell-dark-selected: #30352e;
+  --k-shell-dark-ink: #eeeee7;
+  --k-shell-dark-secondary: #c3bfb4;
+  --k-shell-dark-muted: #b3afa4;
+  --k-shell-dark-line: #343831;
+  --k-shell-dark-control: #929a8c;
+  --k-shell-dark-focus: #9bc6ab;
+  --k-shell-dark-shadow: 0 12px 40px #0000004d, 0 2px 6px #00000026;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) live-dashboard.dashboard[data-kylon-shell] {
+    --k-shell-surface: var(--k-shell-dark-surface);
+    --k-shell-subtle: var(--k-shell-dark-subtle);
+    --k-shell-hover: var(--k-shell-dark-subtle);
+    --k-shell-selected: var(--k-shell-dark-selected);
+    --k-shell-ink: var(--k-shell-dark-ink);
+    --k-shell-secondary: var(--k-shell-dark-secondary);
+    --k-shell-muted: var(--k-shell-dark-muted);
+    --k-shell-line: var(--k-shell-dark-line);
+    --k-shell-control: var(--k-shell-dark-control);
+    --k-shell-focus: var(--k-shell-dark-focus);
+    --k-shell-shadow: var(--k-shell-dark-shadow);
+    --k-shell-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] live-dashboard.dashboard[data-kylon-shell] {
+  --k-shell-surface: var(--k-shell-dark-surface);
+  --k-shell-subtle: var(--k-shell-dark-subtle);
+  --k-shell-hover: var(--k-shell-dark-subtle);
+  --k-shell-selected: var(--k-shell-dark-selected);
+  --k-shell-ink: var(--k-shell-dark-ink);
+  --k-shell-secondary: var(--k-shell-dark-secondary);
+  --k-shell-muted: var(--k-shell-dark-muted);
+  --k-shell-line: var(--k-shell-dark-line);
+  --k-shell-control: var(--k-shell-dark-control);
+  --k-shell-focus: var(--k-shell-dark-focus);
+  --k-shell-shadow: var(--k-shell-dark-shadow);
+  --k-shell-scheme: dark;
+}
