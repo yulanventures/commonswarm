@@ -5,11 +5,12 @@ import {
   type OrgChannelAuthorityState,
   type PrincipalKind,
   agentOwner,
+  cascadeWsRenewalGrants,
   fail,
+  hasLiveWsRenewal,
   hasWsGrant,
   isLive,
   isPrin,
-  norm,
   orgRole,
   resolveAgentId,
 } from './org-channels-types.js';
@@ -85,7 +86,7 @@ export function canReadWorkspace(
   const wsAps = (s.agentPrincipals ?? []).filter(
     (ap) => ap.workspace_id === wsId && ap.agent_identity_id === aid,
   );
-  if (wsAps.some((ap) => ap.revoked_at != null) && !wsAps.some(isLive))
+  if ((wsAps.some((ap) => ap.revoked_at != null) && !wsAps.some(isLive)) || !hasLiveWsRenewal(s, wsId, wsAps, c, now))
     return false;
   const ownerRole = orgRole(s, ws.org_id, 'user', ownerId);
   const agentRole = orgRole(s, ws.org_id, 'agent', aid);
@@ -398,6 +399,7 @@ export function cascadeWorkspaceMemberRemoval(
       affected.add(ap.principal_id);
     }
   }
+  cascadeWsRenewalGrants(s, workspace_id, affected, now);
   const closedSeats: string[] = [],
     closedHandles: string[] = [];
   for (const x of s.seats ?? []) {
@@ -472,18 +474,8 @@ export function cascadeOrgMemberRemoval(
   return { closed_seat_ids: closedSeats, closed_handle_ids: closedHandles };
 }
 
-export function canReadChannelBoundFile(
-  s: State,
-  c: CallerContext,
-  fileId: string,
-  wsId: string,
-  now?: string | number | null,
-): boolean {
-  if (!canReadWorkspace(s, c, wsId, now)) return false;
-  const b = (s.fileChannelBindings ?? []).filter(
-    (x) => x.file_id === fileId && x.workspace_id === wsId,
-  );
-  return b.every((x) => canReadChannel(s, c, x.channel_id, now));
+export function canReadChannelBoundFile(s: State, c: CallerContext, fileId: string, wsId: string, now?: string | number | null): boolean {
+  return canReadWorkspace(s, c, wsId, now) && (s.fileChannelBindings ?? []).filter((x) => x.file_id === fileId && x.workspace_id === wsId).every((x) => canReadChannel(s, c, x.channel_id, now));
 }
 
 export function validateChannelVisibilityTransition({

@@ -75,67 +75,72 @@ const u = (principal_id: string) => ({ principal_kind: 'user' as const, principa
 const ag = (principal_id: string, connection_id?: string) => ({ principal_kind: 'agent' as const, principal_id, ...(connection_id ? { connection_id } : {}) });
 
 test('multi-org agent identity whoami pre-seat, post-seat, and standing credential revocation', () => {
-  const s = createFixture(), caller = ag('ag-1', 'conn-1');
-  const preSeat = buildMultiOrgWhoamiResponse(s, { agent_identity_id: 'ag-1', connection_id: 'conn-1' });
-  eq(preSeat.active_seat, null);
-  eq(preSeat.organizations.length, 2);
-  eq(preSeat.organizations[0]?.role, 'admin');
-  eq(preSeat.organizations[1]?.role, 'member');
+  const s = createFixture(), c = ag('ag-1', 'conn-1');
+  const pre = buildMultiOrgWhoamiResponse(s, { agent_identity_id: 'ag-1', connection_id: 'conn-1' });
+  eq(pre.active_seat, null);
+  eq(pre.organizations.length, 2);
+  eq(pre.organizations[0]?.role, 'admin');
+  eq(pre.organizations[1]?.role, 'member');
 
-  const postSeat = buildMultiOrgWhoamiResponse(s, { agent_identity_id: 'ag-1', connection_id: 'conn-1', seat_id: 'seat-2a' });
-  eq(postSeat.active_seat?.workspace_id, 'ws-2a');
-  eq(postSeat.active_seat?.org_slug, 'household');
+  const post = buildMultiOrgWhoamiResponse(s, { agent_identity_id: 'ag-1', connection_id: 'conn-1', seat_id: 'seat-2a' });
+  eq(post.active_seat?.workspace_id, 'ws-2a');
+  eq(post.active_seat?.org_slug, 'household');
   s.hostedGrants![0]!.state = 'revoked';
   s.hostedGrants![0]!.revoked_at = '2026-10-21T01:00:00Z';
-  eq(canReadOrg(s, caller, 'org-1'), false);
+  eq(canReadOrg(s, c, 'org-1'), false);
   s.hostedGrants![0]!.state = 'active';
   s.hostedGrants![0]!.revoked_at = null;
-  eq(canReadOrg(s, caller, 'org-1'), true);
-  eq(canReadOrg({ ...s, now: null }, caller, 'org-1'), false);
-  eq(canReadOrg(s, { ...caller, now: '2100-01-01T00:00:00Z' }, 'org-1'), false);
+  eq(canReadOrg(s, c, 'org-1'), true);
+  eq(canReadOrg({ ...s, now: null }, c, 'org-1'), false);
+  eq(canReadOrg(s, { ...c, now: '2100-01-01T00:00:00Z' }, 'org-1'), false);
   s.renewalGrants![0]!.revoked_at = '2026-10-21T01:00:00Z';
-  eq(canReadOrg(s, caller, 'org-1'), false);
+  eq(canReadOrg(s, c, 'org-1'), false);
+  s.renewalGrants![0]!.principal_id = 'ap-1a';
+  s.agentPrincipals![0]!.revoked_at = '2026-10-21T01:00:00Z';
+  eq(canReadOrg(s, c, 'org-1'), true);
+  eq(canReadWorkspace(s, c, 'ws-1a'), false);
+  eq(canReadWorkspace(s, c, 'ws-1b'), true);
 });
 
 test('universal selector precedence, explicit org with connection default, and revoked default fallback', () => {
-  const s = createFixture(), caller = ag('ag-1', 'conn-1');
-  const ambig = resolveOrgWorkspaceChannelSelector(s, caller, { workspace: 'ops' });
-  eq(ambig.ok, false);
-  if (!ambig.ok) { eq(ambig.refusal.code, 'AMBIGUOUS_WORKSPACE_SELECTOR'); eq(ambig.refusal.choices?.length, 2); }
-  const exOrg = resolveOrgWorkspaceChannelSelector(s, caller, { org: 'yulan' });
-  eq(exOrg.ok, true);
-  if (exOrg.ok) eq(exOrg.workspace.workspace_id, 'ws-1a');
-  const ex = resolveOrgWorkspaceChannelSelector(s, caller, { workspace: 'yulan/ops' });
+  const s = createFixture(), c = ag('ag-1', 'conn-1');
+  const amb = resolveOrgWorkspaceChannelSelector(s, c, { workspace: 'ops' });
+  eq(amb.ok, false);
+  if (!amb.ok) { eq(amb.refusal.code, 'AMBIGUOUS_WORKSPACE_SELECTOR'); eq(amb.refusal.choices?.length, 2); }
+  const eo = resolveOrgWorkspaceChannelSelector(s, c, { org: 'yulan' });
+  eq(eo.ok, true);
+  if (eo.ok) eq(eo.workspace.workspace_id, 'ws-1a');
+  const ex = resolveOrgWorkspaceChannelSelector(s, c, { workspace: 'yulan/ops' });
   eq(ex.ok, true);
   if (ex.ok) { eq(ex.workspace.workspace_id, 'ws-1a'); eq(ex.channel?.slug, 'general'); eq(ex.source, 'explicit'); }
-  const seatAp = resolveOrgWorkspaceChannelSelector(s, ag('ap-1a', 'conn-1'), { seat_id: 'seat-1a' });
-  eq(seatAp.ok, true);
-  if (seatAp.ok) { eq(seatAp.workspace.workspace_id, 'ws-1a'); eq(seatAp.source, 'seat'); }
-  const osMis = resolveOrgWorkspaceChannelSelector(s, caller, { org: 'yulan', seat_id: 'seat-2a' });
-  eq(osMis.ok, false);
-  if (!osMis.ok) eq(osMis.refusal.code, 'WORKSPACE_SEAT_MISMATCH');
-  const mis = resolveOrgWorkspaceChannelSelector(s, caller, { workspace: 'household/ops', seat_id: 'seat-1a' });
+  const sa = resolveOrgWorkspaceChannelSelector(s, ag('ap-1a', 'conn-1'), { seat_id: 'seat-1a' });
+  eq(sa.ok, true);
+  if (sa.ok) { eq(sa.workspace.workspace_id, 'ws-1a'); eq(sa.source, 'seat'); }
+  const om = resolveOrgWorkspaceChannelSelector(s, c, { org: 'yulan', seat_id: 'seat-2a' });
+  eq(om.ok, false);
+  if (!om.ok) eq(om.refusal.code, 'WORKSPACE_SEAT_MISMATCH');
+  const mis = resolveOrgWorkspaceChannelSelector(s, c, { workspace: 'household/ops', seat_id: 'seat-1a' });
   eq(mis.ok, false);
   if (!mis.ok) { eq(mis.refusal.code, 'WORKSPACE_SEAT_MISMATCH'); eq(mis.refusal.mcp_tool, 'claim_seat'); }
 
   s.connectionPolicies![0]!.default_workspace_id = null;
-  const mDef = resolveOrgWorkspaceChannelSelector(s, caller, {});
-  eq(mDef.ok, false);
-  if (!mDef.ok) {
-    eq(mDef.refusal.code, 'AMBIGUOUS_WORKSPACE_SELECTOR');
-    eq(mDef.refusal.scope.org, 'yulan');
-    deq(mDef.refusal.choices?.map((c) => c.workspace_id), ['ws-1a', 'ws-1b']);
+  const md = resolveOrgWorkspaceChannelSelector(s, c, {});
+  eq(md.ok, false);
+  if (!md.ok) {
+    eq(md.refusal.code, 'AMBIGUOUS_WORKSPACE_SELECTOR');
+    eq(md.refusal.scope.org, 'yulan');
+    deq(md.refusal.choices?.map((x) => x.workspace_id), ['ws-1a', 'ws-1b']);
   }
   s.connectionPolicies![0]!.default_workspace_id = 'ws-1a';
 
-  const fDef = resolveOrgWorkspaceChannelSelector(s, caller, {});
-  eq(fDef.ok, true);
-  if (fDef.ok) { eq(fDef.workspace.workspace_id, 'ws-1a'); eq(fDef.source, 'connection_default'); }
+  const fd = resolveOrgWorkspaceChannelSelector(s, c, {});
+  eq(fd.ok, true);
+  if (fd.ok) { eq(fd.workspace.workspace_id, 'ws-1a'); eq(fd.source, 'connection_default'); }
 
   cascadeWorkspaceMemberRemoval(s, { workspace_id: 'ws-1a', principal_kind: 'agent', principal_id: 'ag-1' });
-  const fbOrg = resolveOrgWorkspaceChannelSelector(s, caller, {});
-  eq(fbOrg.ok, true);
-  if (fbOrg.ok) { eq(fbOrg.workspace.workspace_id, 'ws-1b'); eq(fbOrg.source, 'connection_default'); }
+  const fb = resolveOrgWorkspaceChannelSelector(s, c, {});
+  eq(fb.ok, true);
+  if (fb.ok) { eq(fb.workspace.workspace_id, 'ws-1b'); eq(fb.source, 'connection_default'); }
 });
 
 test('explicit org/workspace revocation overrides owner inheritance (including tombstone creation) and cascades seats', () => {

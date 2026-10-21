@@ -183,6 +183,8 @@ export interface OrgChannelAuthorityState {
   }>;
   renewalGrants?: Array<{
     renewal_grant_id: string;
+    principal_id?: string | null;
+    workspace_id?: string | null;
     horizon_expires_at?: string | null;
     revoked_at?: string | null;
   }>;
@@ -386,18 +388,100 @@ export const agentOwner = (
   )
     return null;
   const refMs = toEvalMs(now ?? c.now ?? s.now);
-  if (
-    ai.standing_renewal_grant_id &&
-    !(s.renewalGrants ?? []).some(
+  if (ai.standing_renewal_grant_id) {
+    const aps = (s.agentPrincipals ?? []).filter((ap) => ap.agent_identity_id === aid);
+    const liveRg = (rg: NonNullable<OrgChannelAuthorityState['renewalGrants']>[number]) =>
+      rg.revoked_at == null &&
+      (rg.horizon_expires_at == null ||
+        (Number.isFinite(refMs) && Date.parse(rg.horizon_expires_at) > refMs));
+    const srg = (s.renewalGrants ?? []).find(
+      (rg) => rg.renewal_grant_id === ai.standing_renewal_grant_id,
+    );
+    const srgAp = srg?.principal_id
+      ? aps.find((ap) => ap.principal_id === srg.principal_id)
+      : undefined;
+    const hasOtherLiveAp =
+      srgAp != null &&
+      !isLive(srgAp) &&
+      aps.some(
+        (ap) =>
+          isLive(ap) &&
+          !(s.renewalGrants ?? []).some(
+            (rg) => rg.principal_id === ap.principal_id && !liveRg(rg),
+          ),
+      );
+    const hasLiveAltRg = (s.renewalGrants ?? []).some(
       (rg) =>
-        rg.renewal_grant_id === ai.standing_renewal_grant_id &&
+        rg.principal_id != null &&
+        aps.some((ap) => ap.principal_id === rg.principal_id && isLive(ap)) &&
+        liveRg(rg),
+    );
+    if (!((srg && liveRg(srg)) || hasOtherLiveAp || hasLiveAltRg)) return null;
+  }
+  if (c.owner_user_id != null && c.owner_user_id !== ai.owner_user_id)
+    return null;
+  return ai.owner_user_id;
+};
+
+export const hasLiveWsRenewal = (
+  s: OrgChannelAuthorityState,
+  wsId: string,
+  wsAps: NonNullable<OrgChannelAuthorityState['agentPrincipals']>,
+  c: CallerContext,
+  now?: string | number | null,
+) => {
+  const refMs = toEvalMs(now ?? c.now ?? s.now);
+  const wsRgs = (s.renewalGrants ?? []).filter(
+    (rg) =>
+      rg.workspace_id === wsId ||
+      (rg.principal_id != null && wsAps.some((ap) => ap.principal_id === rg.principal_id)),
+  );
+  return (
+    wsRgs.length === 0 ||
+    wsRgs.some(
+      (rg) =>
         rg.revoked_at == null &&
         (rg.horizon_expires_at == null ||
           (Number.isFinite(refMs) && Date.parse(rg.horizon_expires_at) > refMs)),
     )
-  )
-    return null;
-  if (c.owner_user_id != null && c.owner_user_id !== ai.owner_user_id)
-    return null;
-  return ai.owner_user_id;
+  );
+};
+
+export const cascadeWsRenewalGrants = (
+  s: OrgChannelAuthorityState,
+  workspace_id: string,
+  affected: Set<string>,
+  now: string,
+) => {
+  for (const rg of s.renewalGrants ?? []) {
+    if (
+      rg.revoked_at == null &&
+      (rg.workspace_id === workspace_id || (rg.principal_id && affected.has(rg.principal_id)))
+    )
+      rg.revoked_at = now;
+  }
+  for (const ai of s.agentIdentities) {
+    if (!ai.standing_renewal_grant_id) continue;
+    const cur = (s.renewalGrants ?? []).find(
+      (rg) => rg.renewal_grant_id === ai.standing_renewal_grant_id,
+    );
+    if (cur && cur.revoked_at != null && cur.principal_id != null) {
+      const next = (s.renewalGrants ?? []).find(
+        (rg) =>
+          rg.revoked_at == null &&
+          rg.principal_id != null &&
+          (s.agentPrincipals ?? []).some(
+            (ap) =>
+              ap.agent_identity_id === ai.id &&
+              ap.principal_id === rg.principal_id &&
+              isLive(ap),
+          ),
+      );
+      if (next) ai.standing_renewal_grant_id = next.renewal_grant_id;
+      else if (
+        (s.agentPrincipals ?? []).some((ap) => ap.agent_identity_id === ai.id && isLive(ap))
+      )
+        ai.standing_renewal_grant_id = null;
+    }
+  }
 };

@@ -45,6 +45,7 @@ DROP TRIGGER IF EXISTS channel_memberships_write_guard ON swarm.channel_membersh
 DROP TRIGGER IF EXISTS channels_visibility_transition_guard ON swarm.channels;
 DROP TRIGGER IF EXISTS renewal_grants_sync_identity ON swarm.renewal_grants;
 DROP TRIGGER IF EXISTS hosted_mcp_seats_sync_identity ON swarm.hosted_mcp_seats;
+DROP TRIGGER IF EXISTS agent_principals_sync_identity ON swarm.agent_principals;
 DROP TRIGGER IF EXISTS agent_principals_ensure_identity ON swarm.agent_principals;
 DROP TRIGGER IF EXISTS memberships_sync_org_grants ON swarm.memberships;
 DROP TRIGGER IF EXISTS workspaces_ensure_org_and_slug ON swarm.workspaces;
