@@ -75,23 +75,9 @@ const BOOL_FLAGS = new Set(['json', 'approve', 'reject', 'request-approval']);
 
 function makeEmptyCliState(): CliOrgChannelState {
   return {
-    privateChannelsEnabled: true,
-    organizations: [],
-    workspaces: [],
-    channels: [],
-    agentIdentities: [],
-    orgMemberships: [],
-    workspaceGrants: [],
-    channelMemberships: [],
-    agentPrincipals: [],
-    seats: [],
-    seatHandles: [],
-    connectionPolicies: [],
-    fileChannelBindings: [],
-    orgInvites: [],
-    approvalRequests: [],
-    orgLogos: {},
-    signals: [],
+    privateChannelsEnabled: true, organizations: [], workspaces: [], channels: [], agentIdentities: [],
+    orgMemberships: [], workspaceGrants: [], channelMemberships: [], agentPrincipals: [], seats: [],
+    seatHandles: [], connectionPolicies: [], fileChannelBindings: [], orgInvites: [], approvalRequests: [], orgLogos: {}, signals: [],
   };
 }
 
@@ -239,14 +225,54 @@ function resolveDefaultDispatcher(): OrgChannelToolDispatcher {
   return fallbackDispatch;
 }
 
+const ROLE_RANK: Record<OrgRole, number> = { guest: 1, member: 2, admin: 3, owner: 4 };
+
 export function effCallerOrgRole(s: CliOrgChannelState, c: CallerContext, orgId: string): OrgRole | null {
   if (!canReadOrg(s, c, orgId)) return null;
   if (c.principal_kind === 'user') return orgRole(s, orgId, 'user', c.principal_id);
-  const explicit = orgRole(s, orgId, 'agent', c.principal_id);
-  if (explicit) return explicit;
   const owner = agentOwner(s, c);
   const ownerRole = owner ? orgRole(s, orgId, 'user', owner) : null;
-  return ownerRole ? (ownerRole === 'guest' ? 'guest' : 'member') : null;
+  if (!ownerRole) return null;
+  const ownerCap: OrgRole = ownerRole === 'owner' ? 'admin' : ownerRole;
+  const explicit = orgRole(s, orgId, 'agent', c.principal_id);
+  if (!explicit) return ownerRole === 'guest' ? 'guest' : 'member';
+  const expCap: OrgRole = explicit === 'owner' ? 'admin' : explicit;
+  return ROLE_RANK[expCap] <= ROLE_RANK[ownerCap] ? expCap : ownerCap;
+}
+
+export function formatOrgChannelCliOutput(tool: string, statusLabel: string, p: Record<string, unknown>): string {
+  const lines = [`${tool}: ${statusLabel}`];
+  if (typeof p.agent_identity_id === 'string') {
+    lines.push(`Identity: ${p.agent_identity_id} (owner=${String(p.owner_user_id ?? '-')}, seat=${(p.active_seat as { seat_id?: string } | null)?.seat_id ?? 'none'}, default_org=${String(p.default_org_id ?? 'none')})`);
+  }
+  if (typeof p.total_organizations === 'number') {
+    lines.push(`Totals: orgs=${p.total_organizations} workspaces=${String(p.total_workspaces ?? 0)} channels=${String(p.total_channels ?? 0)}`);
+  }
+  if (Array.isArray(p.organizations)) {
+    for (const o of p.organizations as Array<Record<string, unknown>>) {
+      const wsList = Array.isArray(o.workspaces)
+        ? (o.workspaces as Array<Record<string, unknown>>).map((w) => {
+            const chs = Array.isArray(w.channels) ? (w.channels as Array<{ slug: string }>).map((c) => `#${c.slug}`).join(',') : '';
+            return `${String(w.slug)}(${String(w.role ?? '-')})${chs ? `[${chs}]` : ''}`;
+          }).join(', ')
+        : `workspaces=${String(o.workspace_count ?? 0)}`;
+      lines.push(`Org ${String(o.slug ?? o.org_id)} [${String(o.role ?? '-')}]: ${wsList}`);
+    }
+  }
+  const orgObj = p.organization as Record<string, unknown> | undefined;
+  if (orgObj) lines.push(`Organization: ${String(orgObj.slug)} (${String(orgObj.display_name ?? orgObj.id)}) role=${String(p.role ?? 'owner')}`);
+  if (Array.isArray(p.workspaces)) {
+    lines.push(`Workspaces: ${(p.workspaces as Array<Record<string, unknown>>).map((w) => `${String(w.selector ?? w.slug)} (${String(w.name ?? w.workspace_id)})`).join(', ') || 'none'}`);
+  }
+  if (Array.isArray(p.channels)) {
+    lines.push(`Channels: ${(p.channels as Array<Record<string, unknown>>).map((c) => `#${String(c.slug)} (${String(c.visibility ?? 'workspace')})`).join(', ') || 'none'}`);
+  }
+  if (Array.isArray(p.members)) {
+    lines.push(`Members: ${(p.members as Array<Record<string, unknown>>).map((m) => `${String(m.principal_kind ?? 'user')}:${String(m.principal_id)} (${String(m.role)})`).join(', ') || 'none'}`);
+  }
+  const apr = (p.approval ?? p.approval_request) as Record<string, unknown> | undefined;
+  if (apr) lines.push(`Approval ${String(apr.approval_id)}: action=${String(apr.action_kind)} state=${String(apr.state)}${p.cli_command ? ` | confirm: ${String(p.cli_command)}` : ''}`);
+  return lines.join('\n');
 }
 
 export interface ExecuteOrgChannelsCliOptions {
@@ -255,10 +281,15 @@ export interface ExecuteOrgChannelsCliOptions {
   executeTool?: OrgChannelToolDispatcher;
 }
 
+let defaultCliCaller: CliCallerContext = { principal_kind: 'user', principal_id: 'u-cli-default' };
+export function registerDefaultOrgChannelCliCaller(caller: CliCallerContext): void {
+  defaultCliCaller = caller;
+}
+
 export function executeOrgChannelsCli(argv: readonly string[], options: ExecuteOrgChannelsCliOptions = {}) {
   const parsed = parseOrgChannelsCliArgs(argv);
   const state = options.state ?? defaultCliState;
-  const caller: CliCallerContext = options.caller ?? { principal_kind: 'user', principal_id: 'u-cli-default' };
+  const caller: CliCallerContext = options.caller ?? defaultCliCaller;
   const argsWithSeat: Record<string, unknown> = {
     ...(caller.seat ? { seat: caller.seat } : {}),
     ...(caller.seat_id ? { seat_id: caller.seat_id } : {}),
@@ -279,7 +310,7 @@ export function executeOrgChannelsCli(argv: readonly string[], options: ExecuteO
       : ok
         ? 'ok'
         : String(payload.error ?? 'error');
-  const stdout = parsed.json ? JSON.stringify(payload) : `${parsed.tool}: ${statusLabel}`;
+  const stdout = parsed.json ? JSON.stringify(payload) : formatOrgChannelCliOutput(parsed.tool, statusLabel, payload);
   return { exitCode: ok ? 0 : 1, ok, tool: parsed.tool, payload, stdout, stderr: ok ? '' : stdout };
 }
 

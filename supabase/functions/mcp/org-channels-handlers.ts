@@ -60,7 +60,7 @@ export function executeOrgChannelMcpTool(
 
   if (name === 'whoami' || name === 'discover') {
     const res = executeMultiOrgWhoami(s, caller, args);
-    if (!res.ok || name === 'whoami') return res;
+    if (!res.ok || name === 'whoami') return { ...res };
     return {
       ...res,
       total_organizations: res.organizations.length,
@@ -296,16 +296,25 @@ export function executeOrgChannelMcpTool(
       }
       if (!pId && !email) return ref('INVALID_INVITE_TARGET', 'principal_id_or_email', { org: org.slug });
       const wsIds = Array.isArray(args.workspace_ids) ? (args.workspace_ids as string[]) : [];
+      const resolvedWsIds: string[] = [];
+      for (const wid of wsIds) {
+        const chk = resolveMcpOrgWorkspaceChannel(s, caller, { org: org.id, workspace: wid });
+        if (!chk.ok) return { ok: false, status: 'refused', refusal: chk.refusal };
+        resolvedWsIds.push(chk.workspace.workspace_id);
+      }
       if (pId) {
         if (pKind === 'agent' && !s.agentIdentities.some((a) => a.id === pId)) {
           s.agentIdentities.push({ id: pId, owner_user_id: caller.principal_kind === 'user' ? caller.principal_id : (agentOwner(s, ctx) ?? caller.principal_id), display_name: typeof args.display_name === 'string' ? args.display_name : pId, created_at: now });
         }
         if (ex) { ex.role = tRole; ex.revoked_at = null; } else s.orgMemberships.push({ org_id: org.id, principal_kind: pKind, principal_id: pId, role: tRole, created_at: now, revoked_at: null });
-        for (const wid of wsIds) executeOrgChannelMcpTool(s, caller, 'org_assign_workspace_member', { org: org.id, workspace: wid, principal_id: pId, principal_kind: pKind, role: tRole });
+        for (const wid of resolvedWsIds) {
+          const gr = executeOrgChannelMcpTool(s, caller, 'org_assign_workspace_member', { org: org.id, workspace: wid, principal_id: pId, principal_kind: pKind, role: tRole });
+          if (gr.ok !== true) return gr;
+        }
       }
       if (email) {
         s.orgInvites = s.orgInvites ?? [];
-        const inv = { invite_id: `inv_${s.orgInvites.length + 1}`, org_id: org.id, email, principal_kind: pKind, principal_id: pId, role: tRole, workspace_ids: wsIds, invited_by: caller.principal_id, expires_at: new Date(Date.now() + 7 * 86400_000).toISOString(), created_at: now, revoked_at: null };
+        const inv = { invite_id: `inv_${s.orgInvites.length + 1}`, org_id: org.id, email, principal_kind: pKind, principal_id: pId, role: tRole, workspace_ids: resolvedWsIds, invited_by: caller.principal_id, expires_at: new Date(Date.now() + 7 * 86400_000).toISOString(), created_at: now, revoked_at: null };
         s.orgInvites.push(inv);
         return { ok: true, invite: inv, principal_id: pId, role: tRole };
       }

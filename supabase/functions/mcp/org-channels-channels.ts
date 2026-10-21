@@ -182,12 +182,20 @@ export function executeChannelMcpSubtool(
     return { ok: true, channel_id: ch.channel_id, principal_id: pId, principal_kind: pKind, removed: true };
   }
   if (name === 'channel_list_members') return { ok: true, channel_id: ch.channel_id, members: s.channelMemberships.filter((m) => m.channel_id === ch.channel_id && isLive(m)) };
+  const wsGrantRole = s.workspaceGrants.find((g) => g.workspace_id === ws.workspace_id && isPrin(g, caller.principal_kind, caller.principal_id) && isLive(g))?.role ?? null;
+  const effWsRole: OrgRole | null = callerOrgRole === 'guest' ? 'guest' : (wsGrantRole ?? callerOrgRole);
+  const chRole = s.channelMemberships.find((m) => m.channel_id === ch.channel_id && isPrin(m, caller.principal_kind, caller.principal_id) && isLive(m))?.role ?? null;
+  const isChAdmin = effWsRole !== 'guest' && (ch.visibility === 'private'
+    ? (chRole === 'owner' || callerOrgRole === 'owner' || callerOrgRole === 'admin')
+    : (chRole === 'owner' || callerOrgRole === 'owner' || callerOrgRole === 'admin' || effWsRole === 'owner' || effWsRole === 'admin'));
   if (name === 'channel_archive' || name === 'channel_delete') {
+    if (!isChAdmin) return ref(ch.visibility === 'private' ? 'PRIVATE_CHANNEL_OWNER_REQUIRED' : 'CHANNEL_ADMIN_REQUIRED', ch.visibility === 'private' ? 'channel_owner_role' : 'channel_owner_or_admin_role', cScope);
     if (isDef(ch)) return ref('CANNOT_ARCHIVE_GENERAL_CHANNEL', 'non_general_channel', cScope);
     ch.archived_at = now;
     return { ok: true, channel_id: ch.channel_id, archived_at: now };
   }
   if (name === 'channel_rename' || name === 'channel_set_visibility' || name === 'channel_update') {
+    if (!isChAdmin) return ref(ch.visibility === 'private' ? 'PRIVATE_CHANNEL_OWNER_REQUIRED' : 'CHANNEL_ADMIN_REQUIRED', ch.visibility === 'private' ? 'channel_owner_role' : 'channel_owner_or_admin_role', cScope);
     if (args.visibility || args.join_policy) {
       const nextVis = ((args.visibility as ChannelVisibility | undefined) ?? ch.visibility) as ChannelVisibility;
       const nextJp = ((args.join_policy as ChannelJoinPolicy | undefined) ?? (nextVis === 'private' ? 'invite_only' : ch.join_policy)) as ChannelJoinPolicy;
@@ -217,6 +225,7 @@ export function executeChannelMcpSubtool(
     return { ok: true, channel: ch };
   }
   if (name === 'channel_set_topic') {
+    if (effWsRole === 'guest' || callerOrgRole === 'guest') return ref('CHANNEL_UPDATE_FORBIDDEN', 'member_role', cScope);
     const topic = String(args.topic);
     if (topic.length > 500) return ref('TOPIC_TOO_LONG', 'topic_max_500_chars', cScope);
     ch.topic = topic;

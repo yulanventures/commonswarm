@@ -68,7 +68,7 @@ export function resolveOrg(s: OrgChannelSlice3State, caller: McpCallerAuth, args
     const oPre = expWs.split('/', 2)[0]!.trim();
     if (!exp) exp = oPre;
     else {
-      const o1 = s.organizations.find((o) => isLive(o) && (o.id === exp || norm(o.slug) === norm(exp)));
+      const o1 = s.organizations.find((o) => isLive(o) && (o.id === exp || norm(o.slug) === norm(exp!)));
       const o2 = s.organizations.find((o) => isLive(o) && (o.id === oPre || norm(o.slug) === norm(oPre)));
       if (!o1 || !o2 || o1.id !== o2.id) return ref('WORKSPACE_SEAT_MISMATCH', 'org_workspace_selector_conflict', { org: exp, workspace: expWs, seat_id: seatId });
     }
@@ -128,6 +128,14 @@ export function enqueueApproval(s: OrgChannelSlice3State, caller: McpCallerAuth,
   return { ok: true as const, status: 'approval_required' as const, approval: card, approval_request: card, mcp_tool: 'org_confirm_action', cli_command: `cswarm org confirm ${card.approval_id} --approve --org ${org.slug}` };
 }
 
+const ENT: Record<string, string> = { colon: ':', tab: '\t', newline: '\n', quot: '"', apos: "'", amp: '&', lt: '<', gt: '>' };
+const decodeEnt = (v: string): string =>
+  v
+    .replace(/&#x([0-9a-f]+);?/gi, (_, h) => String.fromCodePoint(parseInt(h, 16) || 0))
+    .replace(/&#([0-9]+);?/g, (_, d) => String.fromCodePoint(parseInt(d, 10) || 0))
+    .replace(/&(colon|tab|newline|quot|apos|amp|lt|gt);/gi, (_, n: string) => ENT[n.toLowerCase()] ?? '')
+    .replace(/\\([0-9a-f]{1,6})\s?/gi, (_, h) => String.fromCodePoint(parseInt(h, 16) || 0));
+
 export function checkLogo(ct: string, b64?: string, svg?: string): { ok: true; bytes: number; sourceBytes: Buffer; sanitizedSvg?: string } | { ok: false; reason: 'size' | 'format' } {
   if (ct === 'image/svg+xml') {
     const raw = (svg ?? (b64 ? Buffer.from(b64, 'base64').toString('utf8') : '')).trim();
@@ -135,12 +143,18 @@ export function checkLogo(ct: string, b64?: string, svg?: string): { ok: true; b
     if (len === 0 || len > MAX_LOGO) return { ok: false, reason: len > MAX_LOGO ? 'size' : 'format' };
     if (!raw.toLowerCase().includes('<svg')) return { ok: false, reason: 'format' };
     const sanitizedSvg = raw
-      .replace(/<(script|foreignObject|iframe|object|embed)[\s\S]*?>[\s\S]*?<\/\1>/gi, '')
-      .replace(/<\/?(script|foreignObject|iframe|object|embed)[^>]*>/gi, '')
+      .replace(/<\?[\s\S]*?\?>|<!--[\s\S]*?-->/g, '')
+      .replace(/<(script|foreignObject|iframe|object|embed|image|use)[\s\S]*?>[\s\S]*?<\/\1>/gi, '')
+      .replace(/<\/?(script|foreignObject|iframe|object|embed|image|use)[^>]*>/gi, '')
       .replace(/\son[a-z0-9_-]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-      .replace(/(javascript|data|vbscript)\s*:[^"'\s>)]*/gi, '')
-      .replace(/\s(xlink:)?(href|src)\s*=\s*("\s*(https?:|\/\/)[^"]*"|'\s*(https?:|\/\/)[^']*'|\s*(https?:|\/\/)[^\s>]+)/gi, '')
-      .replace(/url\(\s*['"]?\s*(https?:|\/\/|data:|javascript:)[^)]*\)/gi, 'url()');
+      .replace(/\s([a-z0-9_:-]+)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/gi, (full, attr, _q, dq, sq, uq) => {
+        const name = String(attr).toLowerCase();
+        if (name.startsWith('on')) return '';
+        const val = decodeEnt(String(dq ?? sq ?? uq ?? '')).replace(/[\u0000-\u0020]+/g, '');
+        if (name === 'xmlns' && val === 'http://www.w3.org/2000/svg') return full;
+        if (/(javascript|data|vbscript):|https?:|\/\/|@import/i.test(val)) return name === 'style' ? ' style="url()"' : '';
+        return full;
+      });
     return { ok: true, bytes: len, sourceBytes: Buffer.from(sanitizedSvg, 'utf8'), sanitizedSvg };
   }
   if (!b64) return { ok: false, reason: 'format' };
@@ -154,13 +168,24 @@ export function checkLogo(ct: string, b64?: string, svg?: string): { ok: true; b
 
 function makeRenditionBlob(orgId: string, dim: 64 | 128 | 256, src: Buffer): OrgLogoRenditionBlob {
   const digest = createHash('sha256').update(src).update(`:${dim}x${dim}`).digest();
-  const payload = Buffer.alloc(44);
+  let bitBuf = 0n, bitCnt = 0;
+  const hdr = ((dim - 1) & 0x3fff) | (((dim - 1) & 0x3fff) << 14) | (1 << 28);
+  const bytes = [0x2f, hdr & 0xff, (hdr >> 8) & 0xff, (hdr >> 16) & 0xff, (hdr >> 24) & 0xff];
+  const put = (v: number, n: number) => {
+    bitBuf |= BigInt(v) << BigInt(bitCnt);
+    bitCnt += n;
+    while (bitCnt >= 8) { bytes.push(Number(bitBuf & 0xffn)); bitBuf >>= 8n; bitCnt -= 8; }
+  };
+  put(0, 1); put(0, 1); put(0, 1);
+  for (const sym of [digest[1]!, digest[0]!, digest[2]!, 255, 0]) { put(1, 1); put(0, 1); put(1, 1); put(sym, 8); }
+  if (bitCnt > 0) bytes.push(Number(bitBuf & 0xffn));
+  const vp8l = Buffer.from(bytes), pad = vp8l.length & 1, payload = Buffer.alloc(20 + vp8l.length + pad);
   payload.write('RIFF', 0, 'ascii');
-  payload.writeUInt32LE(36, 4);
-  payload.write('WEBPVP8X', 8, 'ascii');
-  payload.writeUInt16LE(dim, 16);
-  payload.writeUInt16LE(dim, 18);
-  digest.copy(payload, 20, 0, 24);
+  payload.writeUInt32LE(12 + vp8l.length + pad, 4);
+  payload.write('WEBP', 8, 'ascii');
+  payload.write('VP8L', 12, 'ascii');
+  payload.writeUInt32LE(vp8l.length, 16);
+  vp8l.copy(payload, 20);
   return {
     object_key: `orgs/${orgId}/logo/${dim}.webp`,
     width: dim,
