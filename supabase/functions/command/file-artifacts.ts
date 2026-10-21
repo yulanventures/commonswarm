@@ -23,14 +23,14 @@
  */
 import type postgres from "postgres";
 import {
-  BRAIN_LIVE_VERSION_LIMIT,
-  FILE_VERSION_PRECONDITION_FAILED,
+  BRAIN_LIVE_VERSION_LIMIT, FILE_VERSION_PRECONDITION_FAILED,
   fileVersionPreconditionMessage,
   fileVersionPreconditionSatisfied,
   isBrainFileArtifactName,
   isFileVersionPrecondition,
   planFileVersionWindow,
 } from "../_shared/protocol.js";
+import { resolveWorkspaceFileMaxNames } from "./file-workspace-limit.ts";
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 
@@ -548,8 +548,8 @@ export async function fileVersionCreate(
   // name exists) serializes the version number and per-name cap. Without the
   // locks, two concurrent creates under READ COMMITTED both pass a cap they
   // jointly exceed.
-  const workspaceLock = await tx<{ workspace_id: string }[]>`
-    SELECT workspace_id FROM swarm.workspaces
+  const workspaceLock = await tx<{ workspace_id: string; file_max_names?: number }[]>`
+    SELECT workspace_id, file_max_names FROM swarm.workspaces
     WHERE workspace_id = ${workspaceId}::uuid
     FOR UPDATE
   `;
@@ -692,18 +692,19 @@ export async function fileVersionCreate(
     );
   }
   if (file === undefined) {
-    const nameRows = await tx<{ total: string }[]>`
+    const nameRows = await tx<{ total: string; file_max_names?: number }[]>`
       SELECT count(*)::text AS total FROM swarm.files
       WHERE workspace_id = ${workspaceId}::uuid
         AND purged_at IS NULL
     `;
-    if (Number(nameRows[0]?.total ?? "0") >= FILE_WORKSPACE_MAX_NAMES) {
+    const effectiveMaxNames = resolveWorkspaceFileMaxNames(nameRows[0]?.file_max_names ?? workspaceLock[0]?.file_max_names);
+    if (Number(nameRows[0]?.total ?? "0") >= effectiveMaxNames) {
       // Tombstoned names COUNT: the name stays reserved for restore until the
       // purge, so the refusal must not prescribe a recovery that cannot work.
       return refuse(
         409,
         "workspace_file_count",
-        `this workspace already has ${FILE_WORKSPACE_MAX_NAMES} file names; the purge frees a name 30 days after its tombstone — tombstoning alone does not`,
+        `this workspace already has ${effectiveMaxNames} file names; the purge frees a name 30 days after its tombstone — tombstoning alone does not`,
         "workspace name cap",
       );
     }
@@ -1245,100 +1246,41 @@ export async function fileRestore(
   cmd: FileRestoreCommand,
   ledgerRecheck: LedgerRecheck,
 ): Promise<FileOutcome<Record<string, unknown>>> {
-  const rows = await tx<
-    {
-      name: string;
-      household_managed: boolean;
-      tombstoned_at: Date | null;
-      created_by: string;
-      created_by_kind: string;
-      window_ended: boolean;
-      purged: string;
-    }[]
-  >`
-    SELECT
-      f.name, f.household_managed, f.tombstoned_at, f.created_by, f.created_by_kind,
+  const rows = await tx<{ name: string; household_managed: boolean; tombstoned_at: Date | null; created_by: string; created_by_kind: string; window_ended: boolean; purged: string }[]>`
+    SELECT f.name, f.household_managed, f.tombstoned_at, f.created_by, f.created_by_kind,
       -- The DATABASE clock decides the window (review: Date.now() skew could
       -- refuse inside the announced window or allow a late restore).
-      (
-        f.tombstoned_at IS NOT NULL AND
-        f.tombstoned_at < statement_timestamp() - interval '30 days'
-      ) AS window_ended,
-      (
-        SELECT count(*)::text FROM swarm.file_versions AS v
-        WHERE v.file_id = f.file_id
-          AND v.workspace_id = f.workspace_id
-          AND v.state = 'purged'
-          AND v.committed_at IS NOT NULL
-      ) AS purged
-    FROM swarm.files AS f
-    WHERE f.file_id = ${cmd.file_id}::uuid
-      AND f.workspace_id = ${workspaceId}::uuid
-    FOR UPDATE OF f
+      (f.tombstoned_at IS NOT NULL AND f.tombstoned_at < statement_timestamp() - interval '30 days') AS window_ended,
+      (SELECT count(*)::text FROM swarm.file_versions AS v
+       WHERE v.file_id = f.file_id AND v.workspace_id = f.workspace_id AND v.state = 'purged' AND v.committed_at IS NOT NULL) AS purged
+    FROM swarm.files AS f WHERE f.file_id = ${cmd.file_id}::uuid AND f.workspace_id = ${workspaceId}::uuid FOR UPDATE OF f
   `;
   const file = rows[0];
-  if (file === undefined) {
-    return refuse(404, "file_not_found", "no such file in this workspace", "compound key miss");
-  }
-  if (file.household_managed === true) {
-    return { ok: false, refusal: householdManagedFileRefusal("file") };
-  }
+  if (file === undefined) return refuse(404, "file_not_found", "no such file in this workspace", "compound key miss");
+  if (file.household_managed === true) return { ok: false, refusal: householdManagedFileRefusal("file") };
   const storedRestore = await ledgerRecheck();
   if (storedRestore?.hit === "conflict") {
-    return refuse(
-      409,
-      "command_id_conflict",
-      "this command id was already used with a different request",
-      "command id conflict",
-    );
+    return refuse(409, "command_id_conflict", "this command id was already used with a different request", "command id conflict");
   }
   if (storedRestore !== null) return { ok: "replay", stored: storedRestore.stored };
-  if (file.tombstoned_at === null) {
-    return refuse(409, "file_not_tombstoned", "this file is not tombstoned", "not tombstoned");
-  }
+  if (file.tombstoned_at === null) return refuse(409, "file_not_tombstoned", "this file is not tombstoned", "not tombstoned");
   // ★R6, strengthened: the WINDOW decides, under the file lock the purge claim
   // also takes — a restore racing the claim either commits first (the claim
   // then skips the file) or sees this refusal. No dependence on whether the
   // cron has run yet.
   if (file.window_ended) {
-    return refuse(
-      410,
-      "file_purged",
-      "the 30-day restore window has ended; this file cannot be restored",
-      "restore window ended",
-    );
+    return refuse(410, "file_purged", "the 30-day restore window has ended; this file cannot be restored", "restore window ended");
   }
-  if (
-    actor.kind === "agent" &&
-    (file.created_by !== actor.id || file.created_by_kind !== "agent")
-  ) {
-    return refuse(
-      403,
-      "forbidden",
-      "an agent may restore only files it uploaded; any human member may restore any file",
-      "agent restoring another principal's file",
-    );
+  if (actor.kind === "agent" && (file.created_by !== actor.id || file.created_by_kind !== "agent")) {
+    return refuse(403, "forbidden", "an agent may restore only files it uploaded; any human member may restore any file", "agent restoring another principal's file");
   }
   // ★R6: refuse a file whose committed versions the purge already claimed —
   // the bytes are gone and a "restored" name with no content would lie.
   if (Number(file.purged) > 0) {
-    return refuse(
-      410,
-      "file_purged",
-      "the purge already claimed this file's contents; it cannot be restored",
-      "purge claimed first",
-    );
+    return refuse(410, "file_purged", "the purge already claimed this file's contents; it cannot be restored", "purge claimed first");
   }
-  await tx`
-    UPDATE swarm.files
-    SET tombstoned_at = NULL, tombstoned_by = NULL
-    WHERE file_id = ${cmd.file_id}::uuid
-      AND workspace_id = ${workspaceId}::uuid
-  `;
-  return {
-    ok: true,
-    body: { file_id: cmd.file_id, name: file.name, restored: true },
-  };
+  await tx`UPDATE swarm.files SET tombstoned_at = NULL, tombstoned_by = NULL WHERE file_id = ${cmd.file_id}::uuid AND workspace_id = ${workspaceId}::uuid`;
+  return { ok: true, body: { file_id: cmd.file_id, name: file.name, restored: true } };
 }
 
 /**
@@ -1361,38 +1303,20 @@ export async function drainFilePurgeQueue(
    * last_error and RETURNS instead of throwing (S4 review item 2; the D-090
    * family — a pending row must distinguish never-tried from failing). */
   const rows = await tx<{ storage_path: string }[]>`
-    UPDATE swarm.file_purge_queue
-    SET attempt_count = attempt_count + 1,
-        last_attempt_at = statement_timestamp()
+    UPDATE swarm.file_purge_queue SET attempt_count = attempt_count + 1, last_attempt_at = statement_timestamp()
     WHERE storage_path IN (
-      SELECT storage_path
-      FROM swarm.file_purge_queue
-      WHERE deleted_at IS NULL
-      ORDER BY claimed_at
-      LIMIT ${limit}
-      FOR UPDATE SKIP LOCKED
-    )
-    RETURNING storage_path
+      SELECT storage_path FROM swarm.file_purge_queue WHERE deleted_at IS NULL ORDER BY claimed_at LIMIT ${limit} FOR UPDATE SKIP LOCKED
+    ) RETURNING storage_path
   `;
   if (rows.length === 0) return 0;
   const paths = rows.map((row) => row.storage_path);
   try {
     await storage.removeObjects(paths);
   } catch (error) {
-    const detail = String(
-      error instanceof Error ? error.message : error,
-    ).slice(0, 500);
-    await tx`
-      UPDATE swarm.file_purge_queue
-      SET last_error = ${detail}
-      WHERE storage_path = ANY(${paths})
-    `;
+    const detail = String(error instanceof Error ? error.message : error).slice(0, 500);
+    await tx`UPDATE swarm.file_purge_queue SET last_error = ${detail} WHERE storage_path = ANY(${paths})`;
     return 0;
   }
-  await tx`
-    UPDATE swarm.file_purge_queue
-    SET deleted_at = statement_timestamp(), last_error = NULL
-    WHERE storage_path = ANY(${paths})
-  `;
+  await tx`UPDATE swarm.file_purge_queue SET deleted_at = statement_timestamp(), last_error = NULL WHERE storage_path = ANY(${paths})`;
   return paths.length;
 }

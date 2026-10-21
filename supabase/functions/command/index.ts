@@ -119,7 +119,7 @@ import {
   FILE_TOMBSTONE_KIND,
   FILE_VERSION_COMMIT_KIND,
   FILE_VERSION_CREATE_KIND,
-  fileDownloadUrl,
+  drainFilePurgeQueue, fileDownloadUrl,
   fileRestore,
   fileTombstone,
   fileVersionCommit,
@@ -134,7 +134,7 @@ import { assertHouseholdContentServiceReady, HouseholdContentServiceUpdating } f
 import { HOUSEHOLD_SURFACE_KINDS, executeHouseholdSurface } from "./household-integration.ts";
 import type { HouseholdTodoNoticePort } from './household-todos.ts';
 import { provisionHouseholdPermissions, pendingLinkInvitationIds, revokeRemovedMemberHousehold } from "./household-permissions.ts";
-import { drainFilePurgeQueue } from "./file-artifacts.ts";
+import { SET_WORKSPACE_FILE_LIMIT_KIND, type SetWorkspaceFileLimitCommand, legacyAcceptRefusalMessage, setWorkspaceFileLimit, stampMillis, validateSetWorkspaceFileLimitCommand } from "./file-workspace-limit.ts";
 import {
   parseSignalAttachmentRefs,
   signalAttachmentListRefusal,
@@ -376,7 +376,7 @@ type ValidatedCommand =
   | SignalsSeenCommand
   | DeliveryCommand
   | TouchPresenceCommand
-  | FileCommand;
+  | FileCommand | SetWorkspaceFileLimitCommand;
 
 type WorkspaceRole = "owner" | "admin" | "member";
 
@@ -1053,7 +1053,7 @@ const COMMAND_KINDS = [
   "remove_member",
   "archive_workspace",
   "create_agent_principal",
-  "change_role",
+  "change_role", "set_workspace_file_limit",
   "mint_agent_token",
   MINT_AGENT_JOIN_CREDENTIAL_KIND,
   REVOKE_AGENT_JOIN_CREDENTIAL_KIND,
@@ -1099,7 +1099,7 @@ const CONNECT_COMMAND_KINDS = [
   "remove_member",
   "archive_workspace",
   "create_agent_principal",
-  "change_role",
+  "change_role", "set_workspace_file_limit",
   "mint_agent_token",
   MINT_AGENT_JOIN_CREDENTIAL_KIND,
   REVOKE_AGENT_JOIN_CREDENTIAL_KIND,
@@ -2454,14 +2454,14 @@ function validateCommand(
   }
 
   if ((CONNECT_COMMAND_KINDS as readonly string[]).includes(cmd.kind)) {
+    if (cmd.kind === SET_WORKSPACE_FILE_LIMIT_KIND) {
+      return validateSetWorkspaceFileLimitCommand(cmd);
+    }
     if (cmd.kind === "archive_workspace") {
       return exactKeys(cmd, ["kind"])
         ? { ok: true, command: { kind: "archive_workspace" } }
-        : {
-          ok: false,
-          status: 400,
-          reason: "archive_workspace fields are malformed",
-        };
+        : { ok: false, status: 400,
+          reason: "archive_workspace fields are malformed" };
     }
     if (cmd.kind === "remove_member") {
       return exactKeys(cmd, ["kind", "user_id"]) &&
@@ -11898,11 +11898,11 @@ async function handleTransaction(
       };
     }
 
-    if ((FILE_COMMAND_KINDS as readonly string[]).includes(command.kind)) {
-      const fileCommand = command as FileCommand;
+    if (command.kind === SET_WORKSPACE_FILE_LIMIT_KIND || (FILE_COMMAND_KINDS as readonly string[]).includes(command.kind)) {
+      const fileCommand = command as FileCommand | SetWorkspaceFileLimitCommand;
       const fileActor = auth.credentialKind === "agent"
         ? { kind: "agent" as const, id: auth.agent!.principal_id }
-        : { kind: "user" as const, id: auth.actor.user! };
+        : { kind: "user" as const, id: auth.actor.user!, role: route.membershipRole };
       /* Called by handlers AFTER their row locks: a same-command-id request
        * that lost the lock race finds the winner's ledgered response here
        * instead of re-executing against changed state. The stored row must
@@ -12097,12 +12097,12 @@ async function handleTransaction(
           fileCommand,
           ledgerRecheck,
         )
+        : fileCommand.kind === SET_WORKSPACE_FILE_LIMIT_KIND
+        ? await setWorkspaceFileLimit(
+          tx, route.workspaceId, fileActor, fileCommand, ledgerRecheck,
+        )
         : await fileRestore(
-          tx,
-          route.workspaceId,
-          fileActor,
-          fileCommand,
-          ledgerRecheck,
+          tx, route.workspaceId, fileActor, fileCommand, ledgerRecheck,
         );
       if (outcome.ok === "replay") {
         // The ledger holds accepted results only (see the refusal comment
@@ -14499,32 +14499,19 @@ async function releaseAgentSession(
   ) {
     return { status: 400, body: { error: "invalid_request" } };
   }
-  const sessions = await tx<{ session_id: string }[]>`
-    SELECT session_id
-    FROM swarm.agent_execution_sessions
-    WHERE principal_id = ${principalId}::uuid
-      AND session_id = ${sessionProofParse.proof.session_id}::uuid
-      AND generation = ${sessionProofParse.proof.generation}
+  const [current] = await tx<{ session_id: string }[]>`
+    SELECT session_id FROM swarm.agent_execution_sessions
+    WHERE principal_id = ${principalId}::uuid AND session_id = ${sessionProofParse.proof.session_id}::uuid AND generation = ${sessionProofParse.proof.generation}
     FOR UPDATE
   `;
-  const current = sessions[0];
-  if (current === undefined) {
-    return sessionError("session_conflict");
-  }
+  if (current === undefined) return sessionError("session_conflict");
   await retireSessionUuid(tx, current.session_id, principalId);
   const updated = await tx`
     UPDATE swarm.agent_execution_sessions
-    SET
-      expired_at = statement_timestamp(),
-      key_hash = NULL,
-      updated_at = statement_timestamp()
-    WHERE principal_id = ${principalId}::uuid
-      AND session_id = ${sessionProofParse.proof.session_id}::uuid
-      AND generation = ${sessionProofParse.proof.generation}
+    SET expired_at = statement_timestamp(), key_hash = NULL, updated_at = statement_timestamp()
+    WHERE principal_id = ${principalId}::uuid AND session_id = ${sessionProofParse.proof.session_id}::uuid AND generation = ${sessionProofParse.proof.generation}
   `;
-  if (updated.count === 0) {
-    return sessionError("session_conflict");
-  }
+  if (updated.count === 0) return sessionError("session_conflict");
   await reclaimUnsurfacedLeases(tx, principalId);
   return { status: 200, body: { ok: true, status: "accepted" } };
 }
@@ -14597,92 +14584,42 @@ export async function handleAdminWorkerCommand(
   }
 }
 
-function legacyAcceptRefusalMessage(reason: string): string {
-  if (reason === "invitation_recipient_mismatch") {
-    return "This invitation is for a different verified email. Nothing was changed.";
-  }
-  if (reason === "invitation_predates_removal") {
-    return "This invitation was issued before the member was removed. Nothing was changed.";
-  }
-  return "Open the invitation in /invite and review it as yourself.";
-}
-
-function stampMillis(value: Date | string | null | undefined): number {
-  if (value instanceof Date) return value.getTime();
-  if (typeof value === "string") return new Date(value).getTime();
-  return Number.NaN;
-}
-
 /** Repeats the household boundary check after both rows are locked. */
 export async function legacyAcceptLockedFence(
-  tx: Sql,
-  route: Route,
-  auth: AuthContext,
-  invitationHash: Uint8Array | null,
+  tx: Sql, route: Route, auth: AuthContext, invitationHash: Uint8Array | null,
 ): Promise<{ error: string; message: string } | null> {
   const [boundary] = await tx<{ purpose: string }[]>`
-    SELECT purpose FROM swarm.household_workspace_boundaries
-    WHERE workspace_id = ${route.workspaceId}::uuid
-    FOR SHARE
+    SELECT purpose FROM swarm.household_workspace_boundaries WHERE workspace_id = ${route.workspaceId}::uuid FOR SHARE
   `;
-  const invited = invitationHash === null ? [] : await tx<{
-    email: string | null;
-    created_at: Date | string | null;
-  }[]>`
-    SELECT i.email, i.created_at
-    FROM swarm.invitations AS i
-    WHERE i.token_hash = ${invitationHash}
-      AND i.workspace_id = ${route.workspaceId}::uuid
-    FOR SHARE
+  const invited = invitationHash === null ? [] : await tx<{ email: string | null; created_at: Date | string | null }[]>`
+    SELECT i.email, i.created_at FROM swarm.invitations AS i
+    WHERE i.token_hash = ${invitationHash} AND i.workspace_id = ${route.workspaceId}::uuid FOR SHARE
   `;
   const members = auth.actor.user === null ? [] : await tx<{ revoked_at: Date | string | null }[]>`
-    SELECT m.revoked_at
-    FROM swarm.memberships AS m
-    WHERE m.workspace_id = ${route.workspaceId}::uuid
-      AND m.user_id = ${auth.actor.user}::uuid
-    FOR SHARE
+    SELECT m.revoked_at FROM swarm.memberships AS m
+    WHERE m.workspace_id = ${route.workspaceId}::uuid AND m.user_id = ${auth.actor.user}::uuid FOR SHARE
   `;
   const boundaryRefusal = legacyHouseholdAcceptRefusal(
-    boundary !== undefined,
-    normalizedEmail(auth.email),
-    normalizedEmail(invited[0]?.email ?? null),
+    boundary !== undefined, normalizedEmail(auth.email), normalizedEmail(invited[0]?.email ?? null),
   );
-  if (boundaryRefusal !== null) {
-    return { error: boundaryRefusal, message: legacyAcceptRefusalMessage(boundaryRefusal) };
-  }
+  if (boundaryRefusal !== null) return { error: boundaryRefusal, message: legacyAcceptRefusalMessage(boundaryRefusal) };
   const member = members[0];
-  const revokedAt = member === undefined || member.revoked_at === null
-    ? null
-    : stampMillis(member.revoked_at);
-  const removalRefusal = legacyRemovalRejoinRefusal(
-    revokedAt,
-    stampMillis(invited[0]?.created_at),
-  );
-  if (removalRefusal !== null) {
-    return { error: removalRefusal, message: legacyAcceptRefusalMessage(removalRefusal) };
-  }
+  const revokedAt = member === undefined || member.revoked_at === null ? null : stampMillis(member.revoked_at);
+  const removalRefusal = legacyRemovalRejoinRefusal(revokedAt, stampMillis(invited[0]?.created_at));
+  if (removalRefusal !== null) return { error: removalRefusal, message: legacyAcceptRefusalMessage(removalRefusal) };
   return null;
 }
 
 export async function legacyAcceptEarlyRefusal(
-  tx: Sql,
-  route: Route,
-  auth: AuthContext,
-  invitationHash: Uint8Array | null,
+  tx: Sql, route: Route, auth: AuthContext, invitationHash: Uint8Array | null,
 ): Promise<{ error: string; message: string } | null> {
   const [boundary] = await tx`SELECT purpose FROM swarm.household_workspace_boundaries WHERE workspace_id=${route.workspaceId}::uuid`;
   if (!boundary) return null;
   const invited = invitationHash === null ? [] : await tx<{ email: string | null }[]>`
-    SELECT i.email, i.created_at
-    FROM swarm.invitations AS i
-    WHERE i.token_hash = ${invitationHash}
-      AND i.workspace_id = ${route.workspaceId}::uuid
+    SELECT i.email, i.created_at FROM swarm.invitations AS i
+    WHERE i.token_hash = ${invitationHash} AND i.workspace_id = ${route.workspaceId}::uuid
   `;
-  const refusal = legacyHouseholdAcceptRefusal(
-    true,
-    normalizedEmail(auth.email),
-    normalizedEmail(invited[0]?.email ?? null),
-  );
+  const refusal = legacyHouseholdAcceptRefusal(true, normalizedEmail(auth.email), normalizedEmail(invited[0]?.email ?? null));
   return refusal === null ? null : { error: refusal, message: legacyAcceptRefusalMessage(refusal) };
 }
 
