@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>CommonSwarm · Organization &amp; Workspace Shell</title>
+<title>CommonSwarm · Org &amp; Workspace Shell</title>
 <link rel="stylesheet" href="./org-shell.css">
 </head>
 <body style="margin:0">
@@ -12,7 +12,7 @@
 <nav class="rail" aria-label="Product">
 <div class="mark" aria-label="CommonSwarm">cs</div>
 <div id="rail-nav" style="display:contents"></div>
-<div data-home-rail-slot hidden></div>
+<div data-home-rail-slot></div>
 <div class="rail-bottom" id="dashboard-user-menu" data-user-menu-root>
 <button class="icon-button" aria-label="Settings" data-ic="settings" data-theme-toggle><span class="sr-only" data-theme-toggle-label>Light</span></button>
 <button class="avatar small" aria-label="Account" data-user-menu-trigger>TL</button>
@@ -42,7 +42,7 @@
 <span id="hm-ws-title" class="sr-only"></span><span id="hm-phone-title" class="sr-only"></span>
 <h1 id="dashboard-channel-title"><span id="screen-title" data-channel-name>general</span><span class="badge private-badge" id="priv-badge" hidden>Private</span></h1>
 <p class="topic" id="screen-topic" data-channel-description></p>
-<div data-home-channel-menu hidden>
+<div data-home-channel-menu>
 <button id="hm-channel-menu-trigger" class="sr-only" aria-controls="hm-channel-menu-panel" aria-expanded="false"><span data-channel-menu-label>general</span></button>
 <div id="hm-channel-menu-panel" hidden data-workspace-view="signals" data-channel-place="ch-general" data-channel-filter="all" data-channel-new data-channel-list></div>
 </div>
@@ -53,7 +53,7 @@
 <button class="icon-button" aria-label="Refresh" data-ic="bell" data-refresh></button>
 </div>
 </header>
-<div data-home-workspace-shell="ws-build" hidden></div><section data-home-route-pane hidden></section><div data-home-catchup hidden></div><div data-update-notice hidden><button data-update-dismiss></button><button data-update-reload></button></div>
+<div data-home-workspace-shell="ws-build"></div><section data-home-route-pane hidden></section><div data-home-catchup hidden></div><div data-update-notice hidden><button data-update-dismiss></button><button data-update-reload></button></div>
 <section id="v-chat" class="conversation">
 <div class="messages" id="messages"></div>
 <form class="composer-wrap" id="composer-form">
@@ -103,7 +103,7 @@ const gO = () => ORGS.find((o) => o[0] === cO) || ORGS[0], gW = () => gO()[5].fi
 const lgH = (o, sz) => o[3] ? `<span class="cs-org-logo ${sz === 32 ? '' : 'cs-org-logo--24'}" role="img" aria-label="${o[1]} logo"><img class="cs-org-logo__img" src="${o[3]}" alt="${o[1]} logo" width="${sz}" height="${sz}"/></span>` : `<span class="cs-org-logo-placeholder logo-placeholder ${sz === 32 ? '' : 'cs-org-logo--24'}" role="img" aria-label="${o[1]} logo — click to upload">${o[4]}</span>`;
 const rId = () => { const o = gO(), w = gW(); $('#logo-slot').innerHTML = lgH(o, 32); $('#org-name').textContent = o[1]; $('#org-role').textContent = o[2]; $('#workspace-label').textContent = w[1]; $('#org-trigger').setAttribute('aria-expanded', popId === 'org-menu'); $('#workspace-trigger').setAttribute('aria-expanded', popId === 'workspace-menu'); };
 const rSb = () => {
-  const o = gO(), sc = $('#sidebar-content'), pane = (h, l, b) => `<div class="pane-heading"><h2>${h}</h2>${btn(`class="icon-button" aria-label="${l}"`, ic('plus'))}</div>${b}`;
+  const o = gO(), sc = $('#sidebar-content'), pane = (h, l, b) => `<div class="pane-heading"><h2>${h}</h2>${o[2] === 'Guest' ? '' : btn(`class="icon-button" aria-label="${l}"`, ic('plus'))}</div>${b}`;
   if (cM === 'members') {
     const vis = ROSTER.filter(([, , k, d]) => mF === 'people' ? k === 'Person' : mF === 'agents' ? k === 'Agent' : mF === 'guests' ? d === 'Guest' : true);
     sc.innerHTML = pane('Members', 'Add members', `<div class="filters">${pills('member-filter', ['all', 'people', 'agents', 'guests'], mF)}</div><div>${vis.map(([n, i, k, d]) => btn('class="member-row"', `<span class="avatar ${k === 'Agent' ? 'agent' : ''}">${i}</span><span><strong>${n}</strong><small>${k} · ${d}</small></span>`)).join('')}</div>`);

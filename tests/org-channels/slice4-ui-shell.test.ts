@@ -29,7 +29,7 @@ function createMultiOrgFixture(): OrgChannelAuthorityState {
   const org = (id: string, slug: string, display_name: string, logo_object_key: string | null = null, created_by = 'u-tom') => ({
     id, slug, display_name, logo_object_key, ...(logo_object_key ? { logo_updated_at: now } : {}), created_by, created_at: now, updated_at: now,
   });
-  const ws = (workspace_id: string, org_id: string, slug: string, name: string) => ({ workspace_id, org_id, slug, name });
+  const ws = (workspace_id: string, org_id: string, slug: string, name: string, join_policy?: 'open' | 'invite_only') => ({ workspace_id, org_id, slug, name, ...(join_policy ? { join_policy } : {}) });
   const ch = (channel_id: string, slug: string, topic: string, visibility: 'workspace' | 'private') => ({
     channel_id, workspace_id: 'ws-build', slug, topic, visibility, join_policy: (visibility === 'private' ? 'invite_only' : 'open') as 'open' | 'invite_only',
   });
@@ -47,7 +47,7 @@ function createMultiOrgFixture(): OrgChannelAuthorityState {
     ],
     workspaces: [
       ws('ws-build', 'org-yulan', 'commonswarm-build', 'CommonSwarm Build'), ws('ws-ops', 'org-yulan', 'operations', 'Operations'),
-      ws('ws-open', 'org-yulan', 'customer-advisory', 'Customer Advisory'), ws('ws-home', 'org-household', 'family-hub', 'Family Hub'),
+      ws('ws-open', 'org-yulan', 'customer-advisory', 'Customer Advisory', 'open'), ws('ws-home', 'org-household', 'family-hub', 'Family Hub'),
       ws('ws-studio', 'org-studio', 'design-systems', 'Design Systems'), ws('ws-audit-granted', 'org-audit', 'shared-review', 'Shared Review Room'),
       ws('ws-audit-internal', 'org-audit', 'internal-audit', 'Internal Audit Only'),
     ],
@@ -131,7 +131,7 @@ test('workspace selector enforces canReadWorkspace and blocks revoked user or ow
   assert.equal(memberNav.activeWorkspace?.workspaceId, 'ws-build');
   assert.equal(memberNav.activeWorkspace?.granted, true);
   assert.equal(memberNav.header.activeWorkspace?.workspaceId, 'ws-build');
-  assert.deepEqual(memberNav.workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['commonswarm-build', true, false], ['operations', false, true], ['customer-advisory', false, true]]);
+  assert.deepEqual(memberNav.workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['commonswarm-build', true, false], ['customer-advisory', false, true]]);
   const revokedUserState: OrgChannelAuthorityState = {
     ...state,
     workspaceGrants: [
@@ -146,6 +146,7 @@ test('workspace selector enforces canReadWorkspace and blocks revoked user or ow
   const guestNav = deriveWorkspaceChannelNavVM(state, guestCaller, { activeOrgId: 'org-yulan', workspaceMenuOpen: true });
   assert.deepEqual(guestNav.workspaces.map((w) => w.slug), ['commonswarm-build']);
   assert.doesNotMatch(renderWorkspaceSwitcherMenuHtml(guestNav), /\+ New Workspace/);
+  assert.doesNotMatch(renderModeContextualListPaneHtml(guestNav), /Create channel|\+ New Channel/);
 });
 
 test('privateChannelsEnabled defaults to false (fail-closed), member filters work, and topbar reflects mode', () => {
@@ -182,6 +183,7 @@ test('all 38 preserved hooks across chat/members/wiki modes, scoped Kylon v0.3 C
   for (const mode of ['chat', 'members', 'wiki'] as const) {
     const shellHtml = renderKylonOrgShellHtml(deriveWorkspaceChannelNavVM(state, caller, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build', mode }));
     const uShell = applyUpdates(shellHtml), uSpec = applyUpdates(specimenHtml);
+    assert.doesNotMatch(shellHtml, /data-home-rail-slot[^>]*hidden|data-home-workspace-shell[^>]*hidden/);
     for (const p of [/data-theme-toggle/, /data-user-menu-trigger/, /id="hm-ws-title"/, /id="hm-phone-title"/, /id="screen-visibility-badge"/]) assert.match(uShell, p);
     if (mode === 'chat') assert.match(shellHtml, /data-channel-id="ch-gen" data-channel-place="ch-gen"/);
     for (const hook of PRESERVED_SHELL_HOOKS) {
@@ -193,7 +195,7 @@ test('all 38 preserved hooks across chat/members/wiki modes, scoped Kylon v0.3 C
   const css = readFileSync(resolve(REPO_ROOT, 'site/src/components/app/live-dashboard/org-shell/org-shell.css'), 'utf8');
   assert.doesNotMatch(css, /\/Users\//); assert.doesNotMatch(css, /^body\s*\{/m);
   for (const [t, v] of [['--cs-canvas', '#f5f5f2'], ['--cs-surface', '#ffffff'], ['--cs-subtle', '#f5f5f2'], ['--cs-selected', '#eeefea'], ['--cs-ink', '#282720'], ['--cs-secondary', '#655e53'], ['--cs-muted', '#716b60'], ['--cs-line', '#e9e7e2'], ['--cs-control', '#7e887c'], ['--cs-accent', '#697344'], ['--cs-focus', '#586339'], ['--cs-rail', '52px'], ['--cs-sidebar', '390px'], ['--cs-radius-panel', '0px']] as const) assert.match(css, new RegExp(`${t}:\\s*${v}`));
-  for (const p of ['site/src/components/app/live-dashboard/org-shell/org-header-switcher.ts', 'site/src/components/app/live-dashboard/org-shell/workspace-channel-nav.ts', 'site/src/components/app/live-dashboard/org-shell/org-shell.css', 'site/src/components/app/live-dashboard/org-shell/specimen.html', 'tests/org-channels/slice4-ui-shell.test.ts']) {
+  for (const p of ['org-header-switcher.ts', 'workspace-channel-nav.ts', 'org-shell.css', 'specimen.html'].map((f) => `site/src/components/app/live-dashboard/org-shell/${f}`).concat('tests/org-channels/slice4-ui-shell.test.ts')) {
     const c = readFileSync(resolve(REPO_ROOT, p), 'utf8'), tok = Math.ceil(c.length / 4);
     assert.ok(tok <= 4500, `${p} exceeds 4,500 tokens: ${tok} (${c.length} chars)`);
   }
