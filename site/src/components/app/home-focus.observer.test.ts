@@ -194,6 +194,10 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
     document.documentElement.dataset.focusReady = "1";
   `;
   const bundle = await build({ absWorkingDir: siteRoot, bundle: true, write: false, format: "iife", platform: "browser",
+    loader: { ".woff2": "dataurl" },
+    plugins: [{ name: "fixture-font", setup(bundle) {
+      bundle.onResolve({ filter: /^\/fonts\/inter-latin\.woff2$/ }, () => ({ path: join(siteRoot, "public", "fonts", "inter-latin.woff2") }));
+    } }],
     outfile: "focus.js", stdin: { contents: fixtureScript, resolveDir: siteRoot, loader: "ts" } });
   const js = bundle.outputFiles.find(file => file.path.endsWith(".js"))!.text;
   const css = bundle.outputFiles.find(file => file.path.endsWith(".css"))!.text;
