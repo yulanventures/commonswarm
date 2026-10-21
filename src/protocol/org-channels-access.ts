@@ -9,22 +9,38 @@ import {
   hasWsGrant,
   isLive,
   isPrin,
+  norm,
   orgRole,
 } from './org-channels-types.js';
 
 type State = OrgChannelAuthorityState;
+
+function siblingAgentIds(s: State, agentId: string): string[] {
+  const ai = (s.agentIdentities ?? []).find((a) => a.id === agentId);
+  if (!ai) return [agentId];
+  return (s.agentIdentities ?? [])
+    .filter(
+      (a) =>
+        a.owner_user_id === ai.owner_user_id &&
+        norm(a.display_name) === norm(ai.display_name),
+    )
+    .map((a) => a.id);
+}
 
 export function canReadOrg(s: State, c: CallerContext, orgId: string): boolean {
   if (!s.organizations.some((o) => o.id === orgId && isLive(o))) return false;
   if (c.principal_kind === 'user')
     return orgRole(s, orgId, 'user', c.principal_id) !== null;
   const ownerId = agentOwner(s, c);
+  const sibs = siblingAgentIds(s, c.principal_id);
+  const aRole = orgRole(s, orgId, 'agent', c.principal_id);
   if (
     !ownerId ||
     s.orgMemberships.some(
       (m) =>
         m.org_id === orgId &&
-        isPrin(m, 'agent', c.principal_id) &&
+        m.principal_kind === 'agent' &&
+        (m.principal_id === c.principal_id || (!aRole && sibs.includes(m.principal_id))) &&
         m.revoked_at != null,
     )
   )
@@ -42,7 +58,6 @@ export function canReadOrg(s: State, c: CallerContext, orgId: string): boolean {
   }
   const uRole = orgRole(s, orgId, 'user', ownerId);
   if (!uRole) return false;
-  const aRole = orgRole(s, orgId, 'agent', c.principal_id);
   return uRole === 'guest' || aRole === 'guest' ? aRole !== null : true;
 }
 
@@ -87,24 +102,35 @@ export function canReadWorkspace(
     )
   )
     return false;
+  const sibs = siblingAgentIds(s, c.principal_id);
+  const explicitGrant = hasWsGrant(s, wsId, 'agent', c.principal_id);
   if (
     (s.agentPrincipals ?? []).some(
       (ap) =>
         ap.workspace_id === wsId &&
-        ap.agent_identity_id === c.principal_id &&
+        (ap.agent_identity_id === c.principal_id ||
+          (!explicitGrant && sibs.includes(ap.agent_identity_id))) &&
         ap.revoked_at != null,
-    )
+    ) ||
+    (!explicitGrant &&
+      s.workspaceGrants.some(
+        (g) =>
+          g.workspace_id === wsId &&
+          g.principal_kind === 'agent' &&
+          sibs.includes(g.principal_id) &&
+          g.revoked_at != null,
+      ))
   )
     return false;
   const ownerRole = orgRole(s, ws.org_id, 'user', ownerId);
   const agentRole = orgRole(s, ws.org_id, 'agent', c.principal_id);
+  const inheritedOwnerRole =
+    ownerRole === 'guest' ? 'guest' : ownerRole ? 'member' : null;
   const eff =
     ownerRole === 'guest' || agentRole === 'guest'
       ? 'guest'
-      : (agentRole ?? ownerRole);
-  return eff === 'guest'
-    ? hasWsGrant(s, wsId, 'agent', c.principal_id)
-    : hasWsGrant(s, wsId, 'agent', c.principal_id) || eff !== null;
+      : (agentRole ?? inheritedOwnerRole);
+  return eff === 'guest' ? explicitGrant : explicitGrant || eff !== null;
 }
 
 export function canReadChannel(
@@ -163,6 +189,7 @@ export function canModifyChannelMembership(
     if (!Boolean(s.privateChannelsEnabled))
       return fail('PRIVATE_CHANNELS_DISABLED', 'private_channels_enabled', scope);
     if (
+      !canReadChannel(s, actor, chId) ||
       !s.channelMemberships.some(
         (m) =>
           m.channel_id === chId &&
@@ -181,6 +208,132 @@ export function canModifyChannelMembership(
     }
   }
   return { ok: true as const };
+}
+
+export function cascadeWorkspaceMemberRemoval(
+  s: State,
+  {
+    workspace_id,
+    principal_kind,
+    principal_id,
+    now = new Date().toISOString(),
+  }: {
+    workspace_id: string;
+    principal_kind: PrincipalKind;
+    principal_id: string;
+    now?: string;
+  },
+) {
+  const revoke = <T extends { revoked_at?: string | null }>(
+    rows: T[] | undefined,
+    pred: (r: T) => boolean,
+  ) => {
+    for (const r of rows ?? []) if (r.revoked_at == null && pred(r)) r.revoked_at = now;
+  };
+  let foundGrant = false;
+  for (const g of s.workspaceGrants) {
+    if (g.workspace_id === workspace_id && isPrin(g, principal_kind, principal_id)) {
+      foundGrant = true;
+      if (g.revoked_at == null) g.revoked_at = now;
+    }
+  }
+  if (!foundGrant) {
+    const ws = s.workspaces.find((w) => w.workspace_id === workspace_id);
+    s.workspaceGrants.push({
+      workspace_id,
+      org_id: ws?.org_id ?? '',
+      principal_kind,
+      principal_id,
+      role: 'member',
+      created_at: now,
+      revoked_at: now,
+    });
+  }
+  if (principal_kind === 'user')
+    revoke(s.legacyMemberships, (m) => m.workspace_id === workspace_id && m.user_id === principal_id);
+  revoke(
+    s.channelMemberships,
+    (cm) => cm.workspace_id === workspace_id && isPrin(cm, principal_kind, principal_id),
+  );
+  const affected = new Set<string>();
+  for (const ap of s.agentPrincipals ?? []) {
+    if (
+      ap.workspace_id === workspace_id &&
+      ((principal_kind === 'agent' && ap.agent_identity_id === principal_id) ||
+        (principal_kind === 'user' && ap.owner_user_id === principal_id))
+    ) {
+      if (ap.revoked_at == null) ap.revoked_at = now;
+      affected.add(ap.principal_id);
+    }
+  }
+  const closedSeats: string[] = [],
+    closedHandles: string[] = [];
+  for (const x of s.seats ?? []) {
+    if (
+      x.workspace_id === workspace_id &&
+      (affected.has(x.principal_id) ||
+        (principal_kind === 'agent' && x.agent_identity_id === principal_id)) &&
+      x.revoked_at == null
+    ) {
+      x.revoked_at = now;
+      closedSeats.push(x.seat_id);
+    }
+  }
+  for (const h of s.seatHandles ?? []) {
+    if (h.workspace_id === workspace_id && closedSeats.includes(h.seat_id) && h.revoked_at == null) {
+      h.revoked_at = now;
+      closedHandles.push(h.handle_id);
+    }
+  }
+  return { closed_seat_ids: closedSeats, closed_handle_ids: closedHandles };
+}
+
+export function cascadeOrgMemberRemoval(
+  s: State,
+  {
+    org_id,
+    principal_kind,
+    principal_id,
+    now = new Date().toISOString(),
+  }: {
+    org_id: string;
+    principal_kind: PrincipalKind;
+    principal_id: string;
+    now?: string;
+  },
+) {
+  let foundMem = false;
+  for (const m of s.orgMemberships) {
+    if (m.org_id === org_id && isPrin(m, principal_kind, principal_id)) {
+      foundMem = true;
+      if (m.revoked_at == null) m.revoked_at = now;
+    }
+  }
+  if (!foundMem) {
+    s.orgMemberships.push({
+      org_id,
+      principal_kind,
+      principal_id,
+      role: 'member',
+      created_at: now,
+      revoked_at: now,
+    });
+  }
+  const closedSeats: string[] = [],
+    closedHandles: string[] = [];
+  for (const ws of s.workspaces) {
+    if (ws.org_id === org_id) {
+      const res = cascadeWorkspaceMemberRemoval(s, {
+        workspace_id: ws.workspace_id,
+        principal_kind,
+        principal_id,
+        now,
+      });
+      closedSeats.push(...res.closed_seat_ids);
+      closedHandles.push(...res.closed_handle_ids);
+    }
+  }
+  return { closed_seat_ids: closedSeats, closed_handle_ids: closedHandles };
 }
 
 export function canReadChannelBoundFile(

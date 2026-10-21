@@ -37,7 +37,7 @@ BEGIN
            OR NOT EXISTS (SELECT 1 FROM channels c WHERE c.channel_id = NEW.channel_id AND (c.created_by_principal IS NULL OR (c.created_by_kind, c.created_by_principal) = (NEW.principal_kind, NEW.principal_id))) THEN
           RAISE EXCEPTION 'PRIVATE_CHANNEL_OWNER_REQUIRED';
         END IF;
-      ELSIF NOT EXISTS (
+      ELSIF NOT can_read_channel(NEW.channel_id, NEW.added_by_kind, NEW.added_by) OR NOT EXISTS (
         SELECT 1 FROM channel_memberships cm
         WHERE (cm.channel_id, cm.principal_kind, cm.principal_id, cm.role) = (NEW.channel_id, NEW.added_by_kind, NEW.added_by, 'owner')
           AND cm.revoked_at IS NULL
@@ -61,7 +61,12 @@ RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = swarm, pg
       SELECT 1 FROM agent_identities ai WHERE ai.id = p_id AND ai.revoked_at IS NULL
       AND (ai.standing_grant_id IS NULL OR EXISTS (SELECT 1 FROM hosted_mcp_grants g WHERE g.grant_id = ai.standing_grant_id AND g.state = 'active' AND g.revoked_at IS NULL))
       AND (ai.standing_renewal_grant_id IS NULL OR EXISTS (SELECT 1 FROM renewal_grants rg WHERE rg.renewal_grant_id = ai.standing_renewal_grant_id AND rg.revoked_at IS NULL AND (rg.horizon_expires_at IS NULL OR rg.horizon_expires_at > now())))
-      AND NOT EXISTS (SELECT 1 FROM org_memberships WHERE (org_id, principal_kind, principal_id) = (p_org, 'agent', p_id) AND revoked_at IS NOT NULL)
+      AND NOT EXISTS (
+        SELECT 1 FROM org_memberships om
+        LEFT JOIN agent_identities sib ON sib.id = om.principal_id
+        WHERE om.org_id = p_org AND om.principal_kind = 'agent' AND om.revoked_at IS NOT NULL
+          AND (om.principal_id = p_id OR (live_org_role(p_org, 'agent', p_id) IS NULL AND sib.owner_user_id = ai.owner_user_id AND lower(sib.display_name) = lower(ai.display_name)))
+      )
       AND NOT EXISTS (SELECT 1 FROM connection_org_policies WHERE connection_id = p_conn AND (revoked_at IS NOT NULL OR NOT (p_org = ANY(coalesce(allowed_org_ids, ARRAY[p_org])))))
       AND live_org_role(p_org, 'user', coalesce(p_owner, ai.owner_user_id)) IS NOT NULL
       AND coalesce(live_org_role(p_org, 'agent', p_id), nullif(live_org_role(p_org, 'user', coalesce(p_owner, ai.owner_user_id)), 'guest')) IS NOT NULL
@@ -80,7 +85,18 @@ RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = swarm, pg
       OR (p_kind = 'agent' AND EXISTS (
         SELECT 1 FROM agent_identities ai WHERE ai.id = p_id
         AND can_read_workspace(p_ws, 'user', coalesce(p_owner, ai.owner_user_id))
-        AND NOT EXISTS (SELECT 1 FROM agent_principals WHERE (workspace_id, agent_identity_id) = (p_ws, p_id) AND revoked_at IS NOT NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM agent_principals ap
+          LEFT JOIN agent_identities sib ON sib.id = ap.agent_identity_id
+          WHERE ap.workspace_id = p_ws AND ap.revoked_at IS NOT NULL
+            AND (ap.agent_identity_id = p_id OR (NOT has_live_ws_grant(p_ws, 'agent', p_id) AND sib.owner_user_id = ai.owner_user_id AND lower(sib.display_name) = lower(ai.display_name)))
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM workspace_principal_grants wg
+          JOIN agent_identities sib ON sib.id = wg.principal_id
+          WHERE wg.workspace_id = p_ws AND wg.principal_kind = 'agent' AND wg.revoked_at IS NOT NULL
+            AND NOT has_live_ws_grant(p_ws, 'agent', p_id) AND sib.owner_user_id = ai.owner_user_id AND lower(sib.display_name) = lower(ai.display_name)
+        )
         AND (has_live_ws_grant(p_ws, 'agent', p_id) OR (live_org_role(w.org_id, 'user', coalesce(p_owner, ai.owner_user_id)) IS DISTINCT FROM 'guest' AND coalesce(live_org_role(w.org_id, 'agent', p_id), live_org_role(w.org_id, 'user', coalesce(p_owner, ai.owner_user_id))) <> 'guest'))
       )))
   );
@@ -140,10 +156,11 @@ RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = swarm, pg_cata
 DECLARE v_src uuid; v_now timestamptz := now();
 BEGIN
   IF p_mode NOT IN ('all','owners_only') THEN RAISE EXCEPTION 'INVALID_TRANSFER_MEMBERS_MODE'; END IF;
-  PERFORM 1 FROM organizations WHERE id = p_dst OR id = (SELECT org_id FROM workspaces WHERE workspace_id = p_ws) ORDER BY id FOR UPDATE;
-  SELECT org_id INTO v_src FROM workspaces WHERE workspace_id = p_ws FOR UPDATE;
+  SELECT org_id INTO v_src FROM workspaces WHERE workspace_id = p_ws;
   IF v_src IS NULL THEN RAISE EXCEPTION 'WORKSPACE_NOT_FOUND'; END IF;
-  PERFORM 1 FROM organizations WHERE id = v_src FOR UPDATE;
+  PERFORM 1 FROM organizations WHERE id IN (v_src, p_dst) ORDER BY id FOR UPDATE;
+  SELECT org_id INTO v_src FROM workspaces WHERE workspace_id = p_ws AND org_id = v_src FOR UPDATE;
+  IF v_src IS NULL THEN RAISE EXCEPTION 'CONCURRENT_WORKSPACE_MOVE'; END IF;
   PERFORM 1 FROM channels WHERE workspace_id = p_ws ORDER BY channel_id FOR UPDATE;
   PERFORM 1 FROM org_memberships WHERE org_id IN (v_src, p_dst) ORDER BY id FOR UPDATE;
   PERFORM 1 FROM workspace_principal_grants WHERE workspace_id = p_ws ORDER BY id FOR UPDATE;

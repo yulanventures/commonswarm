@@ -221,27 +221,18 @@ $$;
 CREATE TRIGGER workspaces_ensure_org_and_slug BEFORE INSERT ON swarm.workspaces FOR EACH ROW EXECUTE FUNCTION swarm.ensure_workspace_org_and_slug();
 
 CREATE FUNCTION swarm.sync_legacy_membership_to_org_grants() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
-DECLARE v_org uuid; v_org_revoked boolean;
+DECLARE v_org uuid; v_rev boolean;
 BEGIN
   SELECT org_id INTO v_org FROM swarm.workspaces WHERE workspace_id = NEW.workspace_id;
   IF v_org IS NOT NULL THEN
-    SELECT EXISTS (
-      SELECT 1 FROM swarm.org_memberships
-      WHERE (org_id, principal_kind, principal_id) = (v_org, 'user', NEW.user_id)
-        AND revoked_at IS NOT NULL
-    ) INTO v_org_revoked;
-
+    SELECT EXISTS (SELECT 1 FROM swarm.org_memberships WHERE (org_id, principal_kind, principal_id) = (v_org, 'user', NEW.user_id) AND revoked_at IS NOT NULL) INTO v_rev;
     INSERT INTO swarm.workspace_principal_grants (workspace_id, org_id, principal_kind, principal_id, role, granted_by, created_at, revoked_at)
-    VALUES (NEW.workspace_id, v_org, 'user', NEW.user_id, NEW.role, NEW.invited_by, coalesce(NEW.joined_at, now()), CASE WHEN v_org_revoked THEN coalesce(NEW.revoked_at, now()) ELSE NEW.revoked_at END)
-    ON CONFLICT (workspace_id, principal_kind, principal_id) DO UPDATE SET
-      org_id = EXCLUDED.org_id,
-      role = EXCLUDED.role,
-      revoked_at = CASE WHEN v_org_revoked THEN coalesce(EXCLUDED.revoked_at, workspace_principal_grants.revoked_at, now()) ELSE EXCLUDED.revoked_at END;
-
-    IF NEW.revoked_at IS NULL AND NOT v_org_revoked THEN
+    VALUES (NEW.workspace_id, v_org, 'user', NEW.user_id, NEW.role, NEW.invited_by, coalesce(NEW.joined_at, now()), CASE WHEN v_rev THEN coalesce(NEW.revoked_at, now()) ELSE NEW.revoked_at END)
+    ON CONFLICT (workspace_id, principal_kind, principal_id) DO UPDATE SET org_id = EXCLUDED.org_id, role = EXCLUDED.role,
+      revoked_at = CASE WHEN v_rev THEN coalesce(EXCLUDED.revoked_at, workspace_principal_grants.revoked_at, now()) ELSE EXCLUDED.revoked_at END;
+    IF NEW.revoked_at IS NULL AND NOT v_rev THEN
       INSERT INTO swarm.org_memberships (org_id, principal_kind, principal_id, role, invited_by, created_at, revoked_at)
-      VALUES (v_org, 'user', NEW.user_id, NEW.role, NEW.invited_by, coalesce(NEW.joined_at, now()), NULL)
-      ON CONFLICT (org_id, principal_kind, principal_id) DO NOTHING;
+      VALUES (v_org, 'user', NEW.user_id, NEW.role, NEW.invited_by, coalesce(NEW.joined_at, now()), NULL) ON CONFLICT (org_id, principal_kind, principal_id) DO NOTHING;
     END IF;
   END IF;
   RETURN NEW;
@@ -250,12 +241,19 @@ $$;
 CREATE TRIGGER memberships_sync_org_grants AFTER INSERT OR UPDATE ON swarm.memberships FOR EACH ROW EXECUTE FUNCTION swarm.sync_legacy_membership_to_org_grants();
 
 CREATE FUNCTION swarm.ensure_agent_principal_identity() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
+DECLARE v_ai uuid;
 BEGIN
   IF NEW.agent_identity_id IS NULL THEN
-    INSERT INTO swarm.agent_identities (id, owner_user_id, display_name, created_at, revoked_at)
-    VALUES (NEW.principal_id, NEW.owner_user_id, NEW.name, coalesce(NEW.created_at, now()), NEW.revoked_at)
-    ON CONFLICT (id) DO NOTHING;
-    NEW.agent_identity_id := NEW.principal_id;
+    SELECT ai.id INTO v_ai FROM swarm.agent_identities ai
+    WHERE ai.owner_user_id = NEW.owner_user_id AND lower(ai.display_name) = lower(NEW.name)
+      AND NOT EXISTS (SELECT 1 FROM swarm.agent_principals ap WHERE ap.workspace_id = NEW.workspace_id AND ap.agent_identity_id = ai.id AND ap.principal_id <> NEW.principal_id)
+    ORDER BY ai.standing_grant_id IS NOT NULL DESC, ai.revoked_at NULLS FIRST, ai.created_at ASC LIMIT 1;
+    IF v_ai IS NOT NULL THEN NEW.agent_identity_id := v_ai;
+    ELSE
+      INSERT INTO swarm.agent_identities (id, owner_user_id, display_name, created_at, revoked_at)
+      VALUES (NEW.principal_id, NEW.owner_user_id, NEW.name, coalesce(NEW.created_at, now()), NEW.revoked_at) ON CONFLICT (id) DO NOTHING;
+      NEW.agent_identity_id := NEW.principal_id;
+    END IF;
   END IF;
   RETURN NEW;
 END
@@ -263,27 +261,27 @@ $$;
 CREATE TRIGGER agent_principals_ensure_identity BEFORE INSERT ON swarm.agent_principals FOR EACH ROW EXECUTE FUNCTION swarm.ensure_agent_principal_identity();
 
 CREATE FUNCTION swarm.sync_standing_grant_to_agent_identity() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
-DECLARE v_ap RECORD; v_existing_ai uuid;
+DECLARE v_ap RECORD; v_ai uuid;
 BEGIN
   IF TG_TABLE_NAME = 'hosted_mcp_seats' AND NEW.grant_id IS NOT NULL THEN
     SELECT principal_id, workspace_id, agent_identity_id, owner_user_id, name INTO v_ap FROM swarm.agent_principals WHERE principal_id = NEW.principal_id;
     IF v_ap.principal_id IS NOT NULL THEN
-      SELECT id INTO v_existing_ai FROM swarm.agent_identities WHERE standing_grant_id = NEW.grant_id AND display_name = v_ap.name LIMIT 1;
-      IF v_existing_ai IS NOT NULL AND v_existing_ai <> v_ap.agent_identity_id THEN
-        IF NOT EXISTS (SELECT 1 FROM swarm.agent_principals WHERE workspace_id = v_ap.workspace_id AND agent_identity_id = v_existing_ai AND principal_id <> v_ap.principal_id) THEN
-          UPDATE swarm.agent_principals SET agent_identity_id = v_existing_ai WHERE principal_id = v_ap.principal_id;
-          UPDATE swarm.workspace_principal_grants SET principal_id = v_existing_ai WHERE workspace_id = v_ap.workspace_id AND principal_kind = 'agent' AND principal_id = v_ap.agent_identity_id
-            AND NOT EXISTS (SELECT 1 FROM swarm.workspace_principal_grants WHERE (workspace_id, principal_kind, principal_id) = (v_ap.workspace_id, 'agent', v_existing_ai));
+      SELECT id INTO v_ai FROM swarm.agent_identities WHERE standing_grant_id = NEW.grant_id AND lower(display_name) = lower(v_ap.name) LIMIT 1;
+      IF v_ai IS NOT NULL AND v_ai <> v_ap.agent_identity_id THEN
+        IF NOT EXISTS (SELECT 1 FROM swarm.agent_principals WHERE workspace_id = v_ap.workspace_id AND agent_identity_id = v_ai AND principal_id <> v_ap.principal_id) THEN
+          UPDATE swarm.agent_principals SET agent_identity_id = v_ai WHERE principal_id = v_ap.principal_id;
+          UPDATE swarm.workspace_principal_grants SET principal_id = v_ai WHERE (workspace_id, principal_kind, principal_id) = (v_ap.workspace_id, 'agent', v_ap.agent_identity_id)
+            AND NOT EXISTS (SELECT 1 FROM swarm.workspace_principal_grants WHERE (workspace_id, principal_kind, principal_id) = (v_ap.workspace_id, 'agent', v_ai));
+        ELSE
+          UPDATE swarm.agent_identities ai SET revoked_at = coalesce(ai.revoked_at, o.revoked_at) FROM swarm.agent_identities o WHERE ai.id = v_ap.agent_identity_id AND o.id = v_ai AND o.revoked_at IS NOT NULL;
         END IF;
-      ELSIF v_existing_ai IS NULL THEN
+      ELSIF v_ai IS NULL THEN
         UPDATE swarm.agent_identities SET standing_grant_id = NEW.grant_id WHERE id = v_ap.agent_identity_id AND standing_grant_id IS NULL;
       END IF;
     END IF;
   ELSIF TG_TABLE_NAME = 'renewal_grants' THEN
-    UPDATE swarm.agent_identities ai SET standing_renewal_grant_id = NEW.renewal_grant_id
-    FROM swarm.agent_principals ap
-    WHERE ap.principal_id = NEW.principal_id AND ai.id = ap.agent_identity_id
-      AND (ai.standing_renewal_grant_id IS NULL OR ai.standing_renewal_grant_id = NEW.renewal_grant_id)
+    UPDATE swarm.agent_identities ai SET standing_renewal_grant_id = NEW.renewal_grant_id FROM swarm.agent_principals ap
+    WHERE ap.principal_id = NEW.principal_id AND ai.id = ap.agent_identity_id AND (ai.standing_renewal_grant_id IS NULL OR ai.standing_renewal_grant_id = NEW.renewal_grant_id)
       AND NOT EXISTS (SELECT 1 FROM swarm.agent_identities o WHERE o.standing_renewal_grant_id = NEW.renewal_grant_id AND o.id <> ai.id);
   END IF;
   RETURN NEW;
