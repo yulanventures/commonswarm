@@ -41,7 +41,7 @@ live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],
   live-dashboard.dashboard[data-kylon-shell] [data-people-page] > .pd-page-side { display: none; }
   live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail > .pd-page-side { display: block; }
   live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail [data-people-context] > :is(.pd-page-main,.pd-context-footer) { display: none; }
-  live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-head > :is(.pd-page-search,.pd-page-filters) { display: none; }
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-head > :is(.pd-page-actions,.pd-page-search,.pd-page-filters) { display: none; }
   live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-back { display: none; }
   live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-head { padding: 8px 6px 0; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-people-composition] :is(.cs-org-phone-bar > .cs-org-product,.cs-kylon-workspace-menu .hm-menu__trigger,.dashboard__user-trigger) { border: 0; box-shadow: none; background: transparent; }

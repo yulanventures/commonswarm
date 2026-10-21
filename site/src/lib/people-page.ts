@@ -48,6 +48,7 @@ export function buildPeoplePage(doc: Document, model: PeopleDialogModel, state: 
       event.preventDefault(); nav.navigate?.(add.href, event);
     }); actions.append(add);
   }
+  if (actions.childElementCount) titleRow.after(actions);
   const help = make("details", "pd-roles"); help.append(make("summary", "", "About roles & removal"));
   const definitions = make("dl", "pd-roles-list");
   for (const [term, text] of [["Owner", "manages people and agents, and can change anyone’s role."],
@@ -56,7 +57,7 @@ export function buildPeoplePage(doc: Document, model: PeopleDialogModel, state: 
     const entry = make("div", ""); entry.append(make("dt", "", term), make("dd", "", text)); definitions.append(entry);
   }
   help.append(definitions, make("p", "pd-page-note", "Removing a person or an agent cannot be undone. Their history stays here."));
-  const footer = make("footer", "pd-context-footer"); footer.append(actions, help);
+  const footer = make("footer", "pd-context-footer"); footer.append(help);
   if (nav.workspacesHref) {
     const switcher = make("a", "pd-page-back", "Switch workspace"); switcher.href = nav.workspacesHref; switcher.dataset.pdFocus = "page-workspaces";
     if (nav.navigate) switcher.addEventListener("click", event => {
