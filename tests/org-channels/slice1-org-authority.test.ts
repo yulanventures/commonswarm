@@ -1,287 +1,272 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CANONICAL_ORG_CHANNEL_LOCK_ORDER,
-  ORG_LOGO_MAX_BYTES,
-  type OrgAuthorityState,
-  canReadOrg,
-  canReadWorkspace,
-  dispatchOrgCommand,
-  orgAssignWorkspaceMember,
-  orgConfirmAction,
-  orgCreate,
-  orgDelete,
-  orgInviteAccept,
-  orgInviteCreate,
-  orgInviteRevoke,
-  orgList,
-  orgListMembers,
-  orgLogoFinalize,
-  orgLogoRemove,
-  orgLogoUploadPrepare,
-  orgMoveWorkspace,
-  orgRemoveMember,
-  orgRemoveWorkspaceMember,
-  orgSetMemberRole,
-  orgUpdate,
-  workspaceJoin,
-  workspaceLeave,
-  workspaceListMembers,
+  CANONICAL_ORG_CHANNEL_LOCK_ORDER as LOCK_ORDER, ORG_LOGO_MAX_BYTES as MAX_BYTES,
+  type OrgAuthorityState, type OrgRole, type OrgSqlExecutor, type PrincipalKind,
+  canReadOrg as cro, canReadWorkspace as crw, dispatchOrgCommand as dispatch,
+  orgAssignWorkspaceMember as assignWs, orgConfirmAction as confirm, orgCreate, orgDelete,
+  orgInviteAccept as invAccept, orgInviteCreate as invCreate, orgInviteRevoke as invRevoke,
+  orgList, orgListMembers as listMem, orgLogoFinalize as finLogo, orgLogoRemove as remLogo,
+  orgLogoUploadPrepare as prepLogo, orgMoveWorkspace as moveWs, orgRemoveMember as remMem,
+  orgRemoveWorkspaceMember as remWs, orgSetMemberRole as setRole, orgUpdate,
+  readLogoDimensions as dims, workspaceJoin as wsJoin, workspaceLeave as wsLeave, workspaceListMembers as wsList,
 } from '../../supabase/functions/command/orgs/index.js';
 
+const NOW = '2026-10-21T00:00:00Z', eq = assert.equal, deq = assert.deepEqual, neq = assert.notEqual;
+const pu = (id: string) => ({ principal_kind: 'user' as const, principal_id: id });
+const pa = (id: string) => ({ principal_kind: 'agent' as const, principal_id: id });
+const usr = (id: string, email?: string) => ({ ...pu(id), ...(email ? { authenticated_email: email } : {}) });
+const org = (id: string, slug: string, display_name = slug) => ({ id, slug, display_name, created_by: 'u-owner', created_at: NOW, updated_at: NOW });
+const ws = (workspace_id: string, org_id: string, slug: string, name = slug) => ({ workspace_id, org_id, slug, name });
+const om = (o: string, k: PrincipalKind, p: string, r: OrgRole) => ({ org_id: o, principal_kind: k, principal_id: p, role: r, created_at: NOW });
+const wg = (w: string, o: string, k: PrincipalKind, p: string, r: OrgRole) => ({ workspace_id: w, org_id: o, principal_kind: k, principal_id: p, role: r, created_at: NOW });
+const cm = (c: string, w: string, k: PrincipalKind, p: string, r: 'owner' | 'member') => ({ channel_id: c, workspace_id: w, principal_kind: k, principal_id: p, role: r, notify_pref: 'all' as const, joined_at: NOW });
+const ch = (c: string, w: string, o: string) => ({ channel_id: c, workspace_id: w, org_id: o, slug: 'general', visibility: 'workspace' as const, join_policy: 'open' as const });
+const ap = (p: string, w: string, a: string, name = 'Argon') => ({ principal_id: p, workspace_id: w, agent_identity_id: a, owner_user_id: 'u-owner', name });
+const st = (s: string, w: string, p: string, a: string) => ({ seat_id: s, workspace_id: w, principal_id: p, agent_identity_id: a });
+const refused = (r: { ok: boolean; refusal?: { code: string } }, code: string) => eq(!r.ok && r.refusal?.code, code);
+function exec<T extends { ok: boolean; status?: string }>(r: T): Extract<T, { ok: true; status: 'executed' }> {
+  eq(r.ok && r.status === 'executed', true);
+  return r as Extract<T, { ok: true; status: 'executed' }>;
+}
+
+function appr<T extends { ok: boolean; status?: string }>(r: T): Extract<T, { ok: true; status: 'approval_required' }> {
+  eq(r.ok && r.status === 'approval_required', true);
+  return r as Extract<T, { ok: true; status: 'approval_required' }>;
+}
+
 function createFixture(): OrgAuthorityState {
-  const now = '2026-10-21T00:00:00Z';
   return {
     privateChannelsEnabled: true,
-    organizations: [
-      { id: 'org-1', slug: 'yulan', display_name: 'Yulan Ventures', created_by: 'u-owner', created_at: now, updated_at: now },
-      { id: 'org-2', slug: 'household', display_name: 'Langridge Household', created_by: 'u-owner', created_at: now, updated_at: now },
-    ],
-    workspaces: [
-      { workspace_id: 'ws-1a', org_id: 'org-1', slug: 'ops', name: 'Operations' },
-      { workspace_id: 'ws-1b', org_id: 'org-1', slug: 'product', name: 'Product' },
-      { workspace_id: 'ws-2a', org_id: 'org-2', slug: 'home', name: 'Household Ops' },
-    ],
-    channels: [
-      { channel_id: 'ch-1a-gen', workspace_id: 'ws-1a', org_id: 'org-1', slug: 'general', visibility: 'workspace', join_policy: 'open' },
-      { channel_id: 'ch-1b-gen', workspace_id: 'ws-1b', org_id: 'org-1', slug: 'general', visibility: 'workspace', join_policy: 'open' },
-      { channel_id: 'ch-2a-gen', workspace_id: 'ws-2a', org_id: 'org-2', slug: 'general', visibility: 'workspace', join_policy: 'open' },
-    ],
-    agentIdentities: [
-      { id: 'ag-1', owner_user_id: 'u-owner', display_name: 'Argon Lead', created_at: now },
-      { id: 'ag-2', owner_user_id: 'u-owner', display_name: 'Codex Maker', created_at: now },
-    ],
+    organizations: [org('org-1', 'yulan', 'Yulan'), org('org-2', 'household', 'Household')],
+    workspaces: [ws('ws-1a', 'org-1', 'ops'), ws('ws-1b', 'org-1', 'product'), ws('ws-2a', 'org-2', 'home')],
+    channels: [ch('ch-1a-gen', 'ws-1a', 'org-1'), ch('ch-1b-gen', 'ws-1b', 'org-1'), ch('ch-2a-gen', 'ws-2a', 'org-2')],
+    agentIdentities: [{ id: 'ag-1', owner_user_id: 'u-owner', display_name: 'Argon', created_at: NOW }, { id: 'ag-2', owner_user_id: 'u-owner', display_name: 'Codex', created_at: NOW }],
     orgMemberships: [
-      { org_id: 'org-1', principal_kind: 'user', principal_id: 'u-owner', role: 'owner', created_at: now },
-      { org_id: 'org-1', principal_kind: 'user', principal_id: 'u-admin', role: 'admin', created_at: now },
-      { org_id: 'org-1', principal_kind: 'user', principal_id: 'u-member', role: 'member', created_at: now },
-      { org_id: 'org-1', principal_kind: 'user', principal_id: 'u-guest', role: 'guest', created_at: now },
-      { org_id: 'org-1', principal_kind: 'agent', principal_id: 'ag-1', role: 'admin', created_at: now },
-      { org_id: 'org-2', principal_kind: 'user', principal_id: 'u-owner', role: 'owner', created_at: now },
-      { org_id: 'org-2', principal_kind: 'agent', principal_id: 'ag-1', role: 'member', created_at: now },
+      om('org-1', 'user', 'u-owner', 'owner'), om('org-1', 'user', 'u-admin', 'admin'), om('org-1', 'user', 'u-member', 'member'),
+      om('org-1', 'user', 'u-guest', 'guest'), om('org-1', 'agent', 'ag-1', 'admin'), om('org-2', 'user', 'u-owner', 'owner'), om('org-2', 'agent', 'ag-1', 'member'),
     ],
     workspaceGrants: [
-      { workspace_id: 'ws-1a', org_id: 'org-1', principal_kind: 'user', principal_id: 'u-owner', role: 'owner', created_at: now },
-      { workspace_id: 'ws-1b', org_id: 'org-1', principal_kind: 'user', principal_id: 'u-owner', role: 'owner', created_at: now },
-      { workspace_id: 'ws-2a', org_id: 'org-2', principal_kind: 'user', principal_id: 'u-owner', role: 'owner', created_at: now },
-      { workspace_id: 'ws-1a', org_id: 'org-1', principal_kind: 'user', principal_id: 'u-admin', role: 'admin', created_at: now },
-      { workspace_id: 'ws-1a', org_id: 'org-1', principal_kind: 'user', principal_id: 'u-member', role: 'member', created_at: now },
-      { workspace_id: 'ws-1a', org_id: 'org-1', principal_kind: 'agent', principal_id: 'ag-1', role: 'admin', created_at: now },
-      { workspace_id: 'ws-2a', org_id: 'org-2', principal_kind: 'agent', principal_id: 'ag-1', role: 'member', created_at: now },
+      wg('ws-1a', 'org-1', 'user', 'u-owner', 'owner'), wg('ws-1b', 'org-1', 'user', 'u-owner', 'owner'), wg('ws-2a', 'org-2', 'user', 'u-owner', 'owner'),
+      wg('ws-1a', 'org-1', 'user', 'u-admin', 'admin'), wg('ws-1a', 'org-1', 'user', 'u-member', 'member'), wg('ws-1a', 'org-1', 'agent', 'ag-1', 'admin'), wg('ws-2a', 'org-2', 'agent', 'ag-1', 'member'),
     ],
-    agentPrincipals: [
-      { principal_id: 'ap-1a', workspace_id: 'ws-1a', agent_identity_id: 'ag-1', owner_user_id: 'u-owner', name: 'Argon Lead' },
-      { principal_id: 'ap-2a', workspace_id: 'ws-2a', agent_identity_id: 'ag-1', owner_user_id: 'u-owner', name: 'Argon Lead' },
-    ],
-    channelMemberships: [
-      { channel_id: 'ch-1a-gen', workspace_id: 'ws-1a', principal_kind: 'user', principal_id: 'u-owner', role: 'owner', notify_pref: 'all', joined_at: now },
-      { channel_id: 'ch-1a-gen', workspace_id: 'ws-1a', principal_kind: 'user', principal_id: 'u-member', role: 'member', notify_pref: 'all', joined_at: now },
-      { channel_id: 'ch-1a-gen', workspace_id: 'ws-1a', principal_kind: 'agent', principal_id: 'ag-1', role: 'member', notify_pref: 'all', joined_at: now },
-    ],
-    seats: [
-      { seat_id: 'seat-1a', workspace_id: 'ws-1a', principal_id: 'ap-1a', agent_identity_id: 'ag-1' },
-      { seat_id: 'seat-2a', workspace_id: 'ws-2a', principal_id: 'ap-2a', agent_identity_id: 'ag-1' },
-    ],
-    seatHandles: [
-      { handle_id: 'h-1a', seat_id: 'seat-1a', workspace_id: 'ws-1a' },
-      { handle_id: 'h-2a', seat_id: 'seat-2a', workspace_id: 'ws-2a' },
-    ],
-    signals: [
-      { signal_id: 'sig-1a-1', workspace_id: 'ws-1a', channel_id: 'ch-1a-gen', from_principal_kind: 'user', from_principal_id: 'u-owner', kind: 'note', body: 'Initial ops', created_at: now },
-    ],
-    files: [{ file_id: 'file-1a-1', workspace_id: 'ws-1a', name: 'runbook.md', created_at: now }],
+    agentPrincipals: [ap('ap-1a', 'ws-1a', 'ag-1'), ap('ap-2a', 'ws-2a', 'ag-1')],
+    channelMemberships: [cm('ch-1a-gen', 'ws-1a', 'user', 'u-owner', 'owner'), cm('ch-1a-gen', 'ws-1a', 'user', 'u-member', 'member'), cm('ch-1a-gen', 'ws-1a', 'agent', 'ag-1', 'member')],
+    seats: [st('seat-1a', 'ws-1a', 'ap-1a', 'ag-1'), st('seat-2a', 'ws-2a', 'ap-2a', 'ag-1')],
+    seatHandles: [{ handle_id: 'h-1a', seat_id: 'seat-1a', workspace_id: 'ws-1a' }, { handle_id: 'h-2a', seat_id: 'seat-2a', workspace_id: 'ws-2a' }],
+    signals: [{ signal_id: 'sig-1a-1', workspace_id: 'ws-1a', channel_id: 'ch-1a-gen', from_principal_kind: 'user', from_principal_id: 'u-owner', kind: 'note', body: 'Init', created_at: NOW }],
+    files: [{ file_id: 'file-1a-1', workspace_id: 'ws-1a', name: 'runbook.md', created_at: NOW }],
   };
 }
 
-const owner = { principal_kind: 'user' as const, principal_id: 'u-owner' };
-const admin = { principal_kind: 'user' as const, principal_id: 'u-admin' };
-const member = { principal_kind: 'user' as const, principal_id: 'u-member' };
-const guest = { principal_kind: 'user' as const, principal_id: 'u-guest' };
-const ag1 = { principal_kind: 'agent' as const, principal_id: 'ag-1' };
-const ag2 = { principal_kind: 'agent' as const, principal_id: 'ag-2' };
+function recDb() {
+  const queries: Array<{ sql: string; params: readonly unknown[] }> = [], rpcCalls: Array<{ fn: string; params: unknown }> = [];
+  let tx = 0;
+  const db: OrgSqlExecutor = {
+    query(sql, params = []) { queries.push({ sql, params }); return { rows: [], rowCount: 1 }; },
+    rpc(fn, params) { rpcCalls.push({ fn, params }); return { ok: true }; },
+    withTransaction(fn) { tx += 1; return fn(db); },
+  };
+  return { db, queries, rpcCalls, getTx: () => tx };
+}
 
-test('org CRUD, multi-org listing for humans and agents, and owner-only org_delete safeguards', () => {
+const owner = usr('u-owner', 'owner@yulan.io'), admin = usr('u-admin', 'admin@yulan.io');
+const member = usr('u-member', 'member@yulan.io'), guest = usr('u-guest', 'guest@yulan.io');
+const ag1 = pa('ag-1'), ag2 = pa('ag-2'), clk = { testClockIso: '2026-10-22T00:00:00Z' };
+const o1 = { org_id: 'org-1' }, o2 = { org_id: 'org-2' }, oe = { org_id: 'org-empty' }, w1a = { workspace_id: 'ws-1a' };
+
+test('org CRUD, listing, last-org dual confirm, and delete cascade', () => {
   const s = createFixture();
-  assert.equal(orgList(s, owner).organizations.length, 2);
-  const agentOrgs = orgList(s, ag1);
-  assert.equal(agentOrgs.organizations.length, 2);
-  assert.equal(agentOrgs.organizations[0]?.role, 'admin');
-  assert.equal(agentOrgs.organizations[1]?.role, 'member');
+  s.workspaceGrants.push(wg('ws-2a', 'org-2', 'agent', 'ag-2', 'member'));
+  s.agentPrincipals!.push(ap('ap-2a-ag2', 'ws-2a', 'ag-2', 'Codex'));
+  s.channelMemberships.push(cm('ch-2a-gen', 'ws-2a', 'agent', 'ag-2', 'member'));
+  s.seats!.push(st('seat-2a-ag2', 'ws-2a', 'ap-2a-ag2', 'ag-2'));
 
-  const created = orgCreate(s, owner, { id: 'org-3', slug: 'ridge-labs', display_name: 'Ridge Labs' });
-  assert.equal(created.ok && created.workspace, null);
+  eq(orgList(s, owner).organizations.length, 2);
+  deq(orgList(s, ag1).organizations.map((o) => o.role), ['admin', 'member']);
 
-  const dup = orgCreate(s, owner, { slug: 'RIDGE-LABS', display_name: 'Dup' });
-  assert.equal(!dup.ok && dup.refusal.code, 'ORG_SLUG_TAKEN');
+  const cr = orgCreate(s, owner, { id: 'org-3', slug: 'ridge-labs', display_name: 'Ridge Labs' });
+  eq(cr.ok && cr.workspace === null, true);
+  refused(orgCreate(s, owner, { slug: 'RIDGE-LABS', display_name: 'Dup' }), 'ORG_SLUG_TAKEN');
+  refused(orgUpdate(s, member, { ...o1, display_name: 'Nope' }), 'ORG_ADMIN_REQUIRED');
+  eq(orgUpdate(s, admin, { ...o1, display_name: 'Yulan Inc.' }).ok, true);
+  refused(orgDelete(s, admin, o1), 'ORG_OWNER_REQUIRED');
+  eq(orgDelete(s, owner, { org_id: 'org-3' }).ok, true);
 
-  const deniedUpdate = orgUpdate(s, member, { org_id: 'org-1', display_name: 'Nope' });
-  assert.equal(!deniedUpdate.ok && deniedUpdate.refusal.code, 'ORG_ADMIN_REQUIRED');
-  assert.equal(orgUpdate(s, admin, { org_id: 'org-1', display_name: 'Yulan Ventures Inc.' }).ok, true);
+  const del2 = exec(orgDelete(s, owner, o2));
+  deq(del2.closed_seat_ids, ['seat-2a', 'seat-2a-ag2']);
+  neq(s.workspaceGrants.find((g) => g.workspace_id === 'ws-2a' && g.principal_id === 'ag-2')?.revoked_at ?? null, null);
+  neq(s.agentPrincipals?.find((p) => p.workspace_id === 'ws-2a' && p.agent_identity_id === 'ag-2')?.revoked_at ?? null, null);
+  neq(s.channelMemberships.find((x) => x.workspace_id === 'ws-2a' && x.principal_id === 'ag-2')?.revoked_at ?? null, null);
 
-  const deniedDelete = orgDelete(s, admin, { org_id: 'org-1' });
-  assert.equal(!deniedDelete.ok && deniedDelete.refusal.code, 'ORG_OWNER_REQUIRED');
-
-  assert.equal(orgDelete(s, owner, { org_id: 'org-3' }).ok, true);
-  const del2 = orgDelete(s, owner, { org_id: 'org-2' });
-  if (del2.ok && del2.status === 'executed') assert.deepEqual(del2.closed_seat_ids, ['seat-2a']);
-
-  const lastOrgBlocked = orgDelete(s, owner, { org_id: 'org-1' });
-  assert.equal(!lastOrgBlocked.ok && lastOrgBlocked.refusal.code, 'CANNOT_DELETE_LAST_ORG');
-  assert.equal(orgDelete(s, owner, { org_id: 'org-1', confirm_slug: 'yulan' }).ok, true);
+  for (const a of [o1, { ...o1, allow_last_org: true }, { ...o1, confirm_slug: 'yulan' }] as const) {
+    refused(orgDelete(s, owner, a), 'CANNOT_DELETE_LAST_ORG');
+  }
+  exec(orgDelete(s, owner, { ...o1, allow_last_org: true, confirm_slug: 'yulan' }));
 });
 
-test('unified human+agent org_memberships, roles, last-owner guard, and org removal cascade', () => {
+test('unified org_memberships, human-only last-owner guard, and removal cascade', () => {
   const s = createFixture();
-  const allRoster = orgListMembers(s, owner, { org_id: 'org-1', filter: 'all' });
-  assert.equal(allRoster.ok && allRoster.members.length, 5);
-  const agentRoster = orgListMembers(s, owner, { org_id: 'org-1', filter: 'agent' });
-  if (agentRoster.ok) assert.deepEqual(agentRoster.members[0]?.active_seat_ids, ['seat-1a']);
+  const all = listMem(s, owner, { ...o1, filter: 'all' });
+  eq(all.ok && all.members.length, 5);
+  const ags = listMem(s, owner, { ...o1, filter: 'agent' });
+  if (!ags.ok) assert.fail('Expected agent roster');
+  deq(ags.members[0]?.active_seat_ids, ['seat-1a']);
 
-  const demoteLast = orgSetMemberRole(s, owner, { org_id: 'org-1', principal_kind: 'user', principal_id: 'u-owner', role: 'admin' });
-  assert.equal(!demoteLast.ok && demoteLast.refusal.code, 'CANNOT_REMOVE_LAST_ORG_OWNER');
+  eq(setRole(s, owner, { ...o1, ...ag1, role: 'owner' }).ok, true);
+  refused(setRole(s, owner, { ...o1, ...pu('u-owner'), role: 'admin' }), 'CANNOT_REMOVE_LAST_ORG_OWNER');
+  refused(remMem(s, owner, { ...o1, ...pu('u-owner') }), 'CANNOT_REMOVE_LAST_ORG_OWNER');
+  refused(setRole(s, admin, { ...o1, ...pu('u-admin'), role: 'owner' }), 'ORG_OWNER_REQUIRED');
+  eq(setRole(s, admin, { ...o1, ...ag2, role: 'guest' }).ok, true);
 
-  const removeLast = orgRemoveMember(s, owner, { org_id: 'org-1', principal_kind: 'user', principal_id: 'u-owner' });
-  assert.equal(!removeLast.ok && removeLast.refusal.code, 'CANNOT_REMOVE_LAST_ORG_OWNER');
-
-  const adminPromoteOwner = orgSetMemberRole(s, admin, { org_id: 'org-1', principal_kind: 'user', principal_id: 'u-admin', role: 'owner' });
-  assert.equal(!adminPromoteOwner.ok && adminPromoteOwner.refusal.code, 'ORG_OWNER_REQUIRED');
-
-  assert.equal(orgSetMemberRole(s, admin, { org_id: 'org-1', principal_kind: 'agent', principal_id: 'ag-2', role: 'guest' }).ok, true);
-
-  const remAg1 = orgRemoveMember(s, admin, { org_id: 'org-1', principal_kind: 'agent', principal_id: 'ag-1' });
-  if (remAg1.ok && remAg1.status === 'executed') assert.deepEqual(remAg1.closed_seat_ids, ['seat-1a']);
-  assert.equal(canReadOrg(s, ag1, 'org-1'), false);
-  assert.equal(canReadOrg(s, ag1, 'org-2'), true);
-  assert.equal(s.seats?.find((x) => x.seat_id === 'seat-2a')?.revoked_at ?? null, null);
+  eq(setRole(s, owner, { ...o1, ...ag1, role: 'admin' }).ok, true);
+  const remAg1 = exec(remMem(s, admin, { ...o1, ...ag1 }));
+  deq(remAg1.closed_seat_ids, ['seat-1a']);
+  eq(cro(s, ag1, 'org-1'), false);
+  eq(cro(s, ag1, 'org-2'), true);
+  eq(s.seats?.find((x) => x.seat_id === 'seat-2a')?.revoked_at ?? null, null);
 });
 
-test('workspace grants: agent_principals transactional provisioning, seat-close cascade, guest restriction, and explicit revocation override', () => {
+test('workspace grants, ambiguity resolver, agent_principals, and revocation', () => {
   const s = createFixture();
-  const guestJoin = workspaceJoin(s, guest, { workspace_id: 'ws-1a' });
-  assert.equal(!guestJoin.ok && guestJoin.refusal.code, 'GUEST_CANNOT_SELF_JOIN_WORKSPACE');
+  s.workspaces.push(ws('ws-2b', 'org-2', 'ops'));
+  s.workspaceGrants.push(wg('ws-2b', 'org-2', 'user', 'u-owner', 'owner'));
 
-  const assign1b = orgAssignWorkspaceMember(s, admin, { workspace_id: 'ws-1b', principal_kind: 'agent', principal_id: 'ag-1', role: 'member' });
-  if (assign1b.ok && assign1b.status === 'executed') assert.equal(assign1b.agent_principal?.workspace_id, 'ws-1b');
+  const ambig = wsJoin(s, owner, { workspace_id: 'ops' });
+  refused(ambig, 'AMBIGUOUS_WORKSPACE_SELECTOR');
+  eq(!ambig.ok && ambig.refusal.choices?.length, 2);
+  eq(wsJoin(s, owner, { workspace_id: 'yulan/ops' }).ok, true);
+  refused(wsJoin(s, guest, w1a), 'GUEST_CANNOT_SELF_JOIN_WORKSPACE');
 
-  const remWs1a = orgRemoveWorkspaceMember(s, admin, { workspace_id: 'ws-1a', principal_kind: 'agent', principal_id: 'ag-1' });
-  if (remWs1a.ok && remWs1a.status === 'executed') assert.deepEqual(remWs1a.closed_seat_ids, ['seat-1a']);
-  assert.equal(canReadWorkspace(s, ag1, 'ws-1a'), false);
-  assert.equal(canReadWorkspace(s, ag1, 'ws-1b'), true);
-  assert.equal(canReadWorkspace(s, ag1, 'ws-2a'), true);
+  const assign1b = exec(assignWs(s, admin, { workspace_id: 'ws-1b', ...ag1, role: 'member' }));
+  eq(assign1b.agent_principal?.workspace_id, 'ws-1b');
 
-  const rejoinBlocked = workspaceJoin(s, ag1, { workspace_id: 'ws-1a' });
-  assert.equal(!rejoinBlocked.ok && rejoinBlocked.refusal.code, 'WORKSPACE_ACCESS_REVOKED');
+  const remWs1a = exec(remWs(s, admin, { ...w1a, ...ag1 }));
+  deq(remWs1a.closed_seat_ids, ['seat-1a']);
+  eq(crw(s, ag1, 'ws-1a'), false);
+  eq(crw(s, ag1, 'ws-1b'), true);
+  eq(crw(s, ag1, 'ws-2a'), true);
+  refused(wsJoin(s, ag1, w1a), 'WORKSPACE_ACCESS_REVOKED');
 
-  assert.equal(orgAssignWorkspaceMember(s, admin, { workspace_id: 'ws-1a', principal_kind: 'agent', principal_id: 'ag-1', role: 'admin' }).ok, true);
-  assert.equal(canReadWorkspace(s, ag1, 'ws-1a'), true);
+  eq(assignWs(s, admin, { ...w1a, ...ag1, role: 'admin' }).ok, true);
+  eq(crw(s, ag1, 'ws-1a'), true);
   const apRows = (s.agentPrincipals ?? []).filter((p) => p.workspace_id === 'ws-1a' && p.agent_identity_id === 'ag-1');
-  assert.equal(apRows.length, 1);
-  assert.equal(apRows[0]?.revoked_at, null);
+  eq(apRows.length === 1 && apRows[0]?.revoked_at === null, true);
 
-  assert.equal(canReadWorkspace(s, ag2, 'ws-1a'), true);
-  assert.equal(orgRemoveWorkspaceMember(s, admin, { workspace_id: 'ws-1a', principal_kind: 'agent', principal_id: 'ag-2' }).ok, true);
-  assert.equal(canReadWorkspace(s, ag2, 'ws-1a'), false);
-
-  assert.equal(workspaceListMembers(s, admin, { workspace_id: 'ws-1a' }).ok, true);
-  assert.equal(workspaceLeave(s, member, { workspace_id: 'ws-1a' }).ok, true);
+  eq(crw(s, ag2, 'ws-1a'), true);
+  eq(remWs(s, admin, { ...w1a, ...ag2 }).ok, true);
+  eq(crw(s, ag2, 'ws-1a'), false);
+  eq(wsList(s, admin, w1a).ok, true);
+  eq(wsLeave(s, member, w1a).ok, true);
 });
 
-test('org invites and inline chat Approval Cards (approve and reject flows)', () => {
+test('invites & approvals: token+email+clock, no downgrade, agent reactivation, expiry', () => {
   const s = createFixture();
-  const cardRes = orgInviteCreate(s, ag1, { org_id: 'org-2', email: 'newbie@yulan.io', role: 'admin', workspace_ids: ['ws-2a'] });
-  assert.equal(cardRes.ok && cardRes.status, 'approval_required');
-  if (cardRes.ok && cardRes.status === 'approval_required') {
-    const approvalId = cardRes.approval.approval_id;
-    assert.match(cardRes.card_signal?.body ?? '', /\[Approval Card\]/);
+  eq(orgDelete(s, ag1, { ...o1, require_approval: false }).status, 'approval_required');
+  eq(remMem(s, ag1, { ...o1, ...pu('u-member'), require_approval: false }).status, 'approval_required');
 
-    const selfConfirm = orgConfirmAction(s, ag1, { approval_id: approvalId, decision: 'approve' });
-    assert.equal(!selfConfirm.ok && selfConfirm.refusal.code, 'HUMAN_OWNER_CONFIRMATION_REQUIRED');
+  const cardRes = appr(invCreate(s, ag1, { ...o1, email: 'newbie@yulan.io', role: 'admin', workspace_ids: ['ws-1a'], require_approval: false }));
+  const aid = cardRes.approval.approval_id;
+  assert.match(cardRes.card_signal?.body ?? '', /\[Approval Card\]/);
+  refused(confirm(s, ag1, { approval_id: aid, decision: 'approve' }), 'HUMAN_OWNER_CONFIRMATION_REQUIRED');
 
-    const confirmed = orgConfirmAction(s, owner, { approval_id: approvalId, decision: 'approve' });
-    if (confirmed.ok) {
-      assert.equal(confirmed.executed, true);
-      const token = (confirmed.result as { token?: string }).token;
-      const accepted = orgInviteAccept(s, { principal_kind: 'user', principal_id: 'u-newbie' }, { token, email: 'newbie@yulan.io' });
-      assert.equal(accepted.ok, true);
-      assert.equal(canReadWorkspace(s, { principal_kind: 'user', principal_id: 'u-newbie' }, 'ws-2a'), true);
-    }
-  }
+  const conf = confirm(s, owner, { approval_id: aid, decision: 'approve' });
+  if (!conf.ok || !conf.executed) assert.fail('Expected confirmed');
+  const invRes = conf.result as { token: string; invite: { invite_id: string } };
 
-  const secondCard = dispatchOrgCommand(s, ag1, { kind: 'org_set_member_role', org_id: 'org-2', principal_kind: 'user', principal_id: 'u-newbie', role: 'owner' });
-  if (secondCard.ok && 'status' in secondCard && secondCard.status === 'approval_required') {
-    const rejected = orgConfirmAction(s, owner, { approval_id: secondCard.approval.approval_id, decision: 'reject' });
-    assert.equal(rejected.ok && rejected.approval.state, 'rejected');
-  }
+  const uNew = usr('u-newbie', 'newbie@yulan.io');
+  refused(invAccept(s, uNew, { invite_id: invRes.invite.invite_id }), 'ORG_INVITE_TOKEN_REQUIRED');
+  refused(invAccept(s, pu('u-newbie'), { token: invRes.token, email: 'newbie@yulan.io' }), 'INVITE_EMAIL_MISMATCH');
+  refused(invAccept(s, usr('u-newbie', 'other@yulan.io'), { token: invRes.token }), 'INVITE_EMAIL_MISMATCH');
+  refused(invAccept(s, uNew, { token: invRes.token, now: '2026-10-21T00:01:00Z' }, { testClockIso: '2026-12-01T00:00:00Z' }), 'ORG_INVITE_EXPIRED');
 
-  const inv2 = orgInviteCreate(s, owner, { org_id: 'org-1', role: 'guest', workspace_ids: ['ws-1a'] });
-  if (inv2.ok && inv2.status === 'executed') {
-    assert.equal(orgInviteRevoke(s, owner, { org_id: 'org-1', invite_id: inv2.invite.invite_id }).ok, true);
-    assert.equal(orgInviteAccept(s, { principal_kind: 'user', principal_id: 'u-late' }, { token: inv2.token }).ok, false);
-  }
+  eq(invAccept(s, usr('u-newbie', 'Newbie@Yulan.io'), { token: invRes.token }, clk).ok, true);
+  eq(crw(s, uNew, 'ws-1a'), true);
+
+  const mInv = exec(invCreate(s, owner, { ...o1, role: 'member', workspace_ids: ['ws-1a'], now: NOW }));
+  const ownerAcc = invAccept(s, owner, { token: mInv.token }, clk);
+  eq(ownerAcc.ok && ownerAcc.membership.role, 'owner');
+
+  eq(remWs(s, admin, { ...w1a, ...ag1 }).ok, true);
+  eq(crw(s, ag1, 'ws-1a'), false);
+  const agInv = exec(invCreate(s, owner, { ...o1, role: 'admin', workspace_ids: ['ws-1a'], now: NOW }));
+  eq(invAccept(s, ag1, { token: agInv.token }, clk).ok, true);
+  eq(crw(s, ag1, 'ws-1a'), true);
+
+  const expCard = appr(dispatch(s, ag1, { kind: 'org_set_member_role', ...o2, ...pu('u-newbie'), role: 'owner' }));
+  expCard.approval.expires_at = '2026-10-22T00:00:00Z';
+  refused(confirm(s, owner, { approval_id: expCard.approval.approval_id, decision: 'approve', now: NOW }, { testClockIso: '2026-10-23T00:00:00Z' }), 'APPROVAL_REQUEST_EXPIRED');
+  eq(expCard.approval.state, 'expired');
+
+  const inv2 = exec(invCreate(s, owner, { ...o1, role: 'guest', workspace_ids: ['ws-1a'] }));
+  eq(invRevoke(s, owner, { ...o1, invite_id: inv2.invite.invite_id }).ok, true);
+  eq(invAccept(s, pu('u-late'), { token: inv2.token }).ok, false);
 });
 
-test('Org Logo pipeline: works before any workspace exists, enforces <= 1 MB, PNG/JPEG/WebP magic bytes, SVG sanitization, and 64/128/256 renditions', () => {
-  const s = createFixture();
-  assert.equal(orgCreate(s, owner, { id: 'org-empty', slug: 'zero-ws-org', display_name: 'Zero WS' }).ok, true);
-  assert.equal(s.workspaces.filter((w) => w.org_id === 'org-empty').length, 0);
+test('Org Logo pipeline: allowlist SVG sanitization and 64/128/256 renditions', () => {
+  const s = createFixture(), lp = 'orgs/org-empty/logo';
+  eq(orgCreate(s, owner, { id: 'org-empty', slug: 'zero-ws-org', display_name: 'Zero WS' }).ok, true);
+  eq(s.workspaces.filter((w) => w.org_id === 'org-empty').length, 0);
 
-  const memberDenied = orgLogoUploadPrepare(s, member, { org_id: 'org-1', content_type: 'image/png', size_bytes: 512 });
-  assert.equal(!memberDenied.ok && memberDenied.refusal.code, 'ORG_ADMIN_REQUIRED');
+  refused(prepLogo(s, member, { ...o1, content_type: 'image/png', size_bytes: 512 }), 'ORG_ADMIN_REQUIRED');
+  refused(prepLogo(s, owner, { ...oe, content_type: 'image/png', size_bytes: MAX_BYTES + 1 }), 'ORG_LOGO_TOO_LARGE');
 
-  const tooLarge = orgLogoUploadPrepare(s, owner, { org_id: 'org-empty', content_type: 'image/png', size_bytes: ORG_LOGO_MAX_BYTES + 1 });
-  assert.equal(!tooLarge.ok && tooLarge.refusal.code, 'ORG_LOGO_TOO_LARGE');
+  const prep = exec(prepLogo(s, owner, { ...oe, content_type: 'image/png', size_bytes: 16 }));
+  refused(finLogo(s, owner, { ...oe, upload_id: prep.upload.upload_id, bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xe0]) }), 'ORG_LOGO_MAGIC_BYTE_MISMATCH');
 
-  const prep = orgLogoUploadPrepare(s, owner, { org_id: 'org-empty', content_type: 'image/png', size_bytes: 16 });
-  if (prep.ok && prep.status === 'executed') {
-    const spoofed = orgLogoFinalize(s, owner, { org_id: 'org-empty', upload_id: prep.upload.upload_id, bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xe0]) });
-    assert.equal(!spoofed.ok && spoofed.refusal.code, 'ORG_LOGO_MAGIC_BYTE_MISMATCH');
-
-    const validPng = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
-    const finPng = orgLogoFinalize(s, owner, { org_id: 'org-empty', upload_id: prep.upload.upload_id, bytes: validPng });
-    if (finPng.ok && finPng.status === 'executed') {
-      assert.deepEqual(finPng.renditions, {
-        64: 'orgs/org-empty/logo/64.png',
-        128: 'orgs/org-empty/logo/128.png',
-        256: 'orgs/org-empty/logo/256.png',
-      });
-    }
-  }
+  const validPng = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 10, 20, 30, 40]);
+  const finPng = exec(finLogo(s, owner, { ...oe, upload_id: prep.upload.upload_id, bytes: validPng }));
+  deq(finPng.renditions, { 64: `${lp}/64.png`, 128: `${lp}/128.png`, 256: `${lp}/256.png` });
+  const p64 = s.logoObjects![`${lp}/64.png`]!, p128 = s.logoObjects![`${lp}/128.png`]!, p256 = s.logoObjects![`${lp}/256.png`]!;
+  deq(dims(p64.data, 'image/png'), { width: 64, height: 64 });
+  deq(dims(p128.data, 'image/png'), { width: 128, height: 128 });
+  deq(dims(p256.data, 'image/png'), { width: 256, height: 256 });
+  neq(p64.sha256, p128.sha256);
+  neq(p128.sha256, p256.sha256);
 
   const validWebp = new Uint8Array([0x52, 0x49, 0x46, 0x46, 0x24, 0, 0, 0, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x20]);
-  assert.equal(orgLogoFinalize(s, owner, { org_id: 'org-empty', content_type: 'image/webp', bytes: validWebp }).ok, true);
+  eq(finLogo(s, owner, { ...oe, content_type: 'image/webp', bytes: validWebp }).ok, true);
+  deq(dims(s.logoObjects![`${lp}/64.webp`]!.data, 'image/webp'), { width: 64, height: 64 });
+  deq(dims(s.logoObjects![`${lp}/256.webp`]!.data, 'image/webp'), { width: 256, height: 256 });
 
-  const dirtySvg = `<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>evil()</script><style>@import url("https://evil.example/x.css");</style><image href="https://evil.example/track.png" /><rect width="100" height="100" onclick="steal()" fill="#145c46"/></svg>`;
-  const finSvg = orgLogoFinalize(s, owner, { org_id: 'org-empty', content_type: 'image/svg+xml', bytes: dirtySvg });
-  if (finSvg.ok && finSvg.status === 'executed') {
-    const r256 = String(s.logoObjects?.['orgs/org-empty/logo/256.svg']?.data ?? '');
-    assert.equal(/<script|onload|onclick|evil\.example/i.test(r256), false);
-    assert.match(r256, /width="256" height="256"/);
-  }
+  const dirtySvg = `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" onload="alert(1)"><script>evil()</script><style>@import url("https://evil.example/x.css");</style><image href="/outside.svg" /><use href="&#104;ttps://example.invalid/logo.svg" /><a xlink:href="&#x6a;avascript:alert(1)"><rect width="100" height="100" href="/rel.svg" onclick="steal()" fill="#145c46"/></a></svg>`;
+  eq(finLogo(s, owner, { ...oe, content_type: 'image/svg+xml', bytes: dirtySvg }).ok, true);
+  const r64 = String(s.logoObjects?.[`${lp}/64.svg`]?.data ?? ''), r256 = String(s.logoObjects?.[`${lp}/256.svg`]?.data ?? '');
+  eq(/<script|<image|<use|<a\b|onload|onclick|href|outside\.svg|example\.invalid|&#/i.test(r256), false);
+  assert.match(r64, /viewBox="0 0 512 512" width="64" height="64"/);
+  assert.match(r256, /viewBox="0 0 512 512" width="256" height="256"/);
+  const svgTag = r256.match(/<svg\b[^>]*>/i)?.[0] ?? '';
+  eq((svgTag.match(/\bwidth=/g) ?? []).length, 1);
+  eq((svgTag.match(/\bheight=/g) ?? []).length, 1);
 
-  assert.equal(orgLogoRemove(s, owner, { org_id: 'org-empty' }).ok, true);
-  assert.equal(s.organizations.find((o) => o.id === 'org-empty')?.logo_object_key, null);
+  eq(remLogo(s, owner, oe).ok, true);
+  eq(s.organizations.find((o) => o.id === 'org-empty')?.logo_object_key, null);
 });
 
-test('org_move_workspace: dual-owner check, canonical lock order, ID preservation, and transfer_members reconciliation', () => {
-  const s1 = createFixture();
-  const deniedMove = orgMoveWorkspace(s1, admin, { workspace_id: 'ws-1a', target_org_id: 'org-2', transfer_members: 'owners_only' });
-  assert.equal(!deniedMove.ok && deniedMove.refusal.code, 'ORG_MOVE_REQUIRES_DUAL_OWNER');
+test('org_move_workspace & SQL executor: lock order, SQL/RPC, transfer_members', () => {
+  const s1 = createFixture(), { db, queries, rpcCalls, getTx } = recDb();
+  refused(moveWs(s1, admin, { ...w1a, target_org_id: 'org-2', transfer_members: 'owners_only' }), 'ORG_MOVE_REQUIRES_DUAL_OWNER');
 
-  const movedOwnersOnly = orgMoveWorkspace(s1, owner, { workspace_id: 'ws-1a', target_org_id: 'org-2', transfer_members: 'owners_only' });
-  if (movedOwnersOnly.ok && movedOwnersOnly.status === 'executed') {
-    assert.deepEqual(movedOwnersOnly.lock_order, [...CANONICAL_ORG_CHANNEL_LOCK_ORDER]);
-    assert.deepEqual(movedOwnersOnly.closed_seat_ids, ['seat-1a']);
-    assert.equal(movedOwnersOnly.preserved.workspace_id, 'ws-1a');
-    assert.deepEqual(movedOwnersOnly.preserved.channel_ids, ['ch-1a-gen']);
-    assert.deepEqual(movedOwnersOnly.preserved.signal_ids, ['sig-1a-1']);
-    assert.deepEqual(movedOwnersOnly.preserved.file_ids, ['file-1a-1']);
-  }
-  assert.equal(canReadWorkspace(s1, admin, 'ws-1a'), false);
-  assert.equal(canReadWorkspace(s1, owner, 'ws-1a'), true);
+  const moved = exec(dispatch(s1, { kind: 'org_move_workspace', ...w1a, target_org_id: 'org-2', transfer_members: 'owners_only' }, owner, db));
+  if (!('lock_order' in moved)) assert.fail('Expected move');
+  deq(moved.lock_order, [...LOCK_ORDER]);
+  deq(moved.closed_seat_ids, ['seat-1a']);
+  eq(moved.preserved.workspace_id, 'ws-1a');
+  deq(moved.preserved.channel_ids, ['ch-1a-gen']);
+  deq(moved.preserved.signal_ids, ['sig-1a-1']);
+  deq(moved.preserved.file_ids, ['file-1a-1']);
+  eq(getTx(), 1);
+  eq(rpcCalls[0]?.fn, 'org_move_workspace');
+  eq(queries.some((q) => q.sql.includes('SELECT swarm.org_move_workspace($1, $2, $3, $4)')), true);
+
+  const lockTables = queries.filter((q) => q.sql.includes('FOR UPDATE')).map((q) => q.sql.match(/FROM swarm\.([a-z_]+)/)?.[1]);
+  deq(lockTables, ['organizations', 'workspaces', 'channels', 'org_memberships', 'workspace_principal_grants', 'channel_memberships', 'agent_principals', 'hosted_mcp_seats']);
+  eq(crw(s1, admin, 'ws-1a'), false);
+  eq(crw(s1, owner, 'ws-1a'), true);
 
   const s2 = createFixture();
-  const movedAll = orgMoveWorkspace(s2, owner, { workspace_id: 'ws-1a', target_org_id: 'org-2', transfer_members: 'all' });
-  if (movedAll.ok && movedAll.status === 'executed') assert.deepEqual(movedAll.closed_seat_ids, []);
-  assert.equal(canReadWorkspace(s2, admin, 'ws-1a'), true);
-  assert.equal(s2.seats?.find((x) => x.seat_id === 'seat-1a')?.revoked_at ?? null, null);
+  const movedAll = exec(moveWs(s2, owner, { ...w1a, target_org_id: 'org-2', transfer_members: 'all' }));
+  deq(movedAll.closed_seat_ids, []);
+  eq(crw(s2, admin, 'ws-1a'), true);
+  eq(s2.seats?.find((x) => x.seat_id === 'seat-1a')?.revoked_at ?? null, null);
 });
