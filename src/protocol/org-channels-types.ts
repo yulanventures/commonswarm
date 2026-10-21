@@ -213,6 +213,7 @@ export interface OrgChannelAuthorityState {
     allowed_org_ids?: string[] | null;
     revoked_at?: string | null;
   }>;
+  approvalRequests?: OrgApprovalRequest[];
   seats?: Array<{
     seat_id: string;
     workspace_id: string;

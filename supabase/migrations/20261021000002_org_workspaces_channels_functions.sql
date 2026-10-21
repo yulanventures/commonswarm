@@ -123,16 +123,18 @@ PERFORM 1 FROM agent_principals WHERE workspace_id = p_ws ORDER BY principal_id 
 PERFORM 1 FROM hosted_mcp_seats WHERE workspace_id = p_ws ORDER BY seat_id FOR UPDATE;
 IF live_org_role(v_src, 'user', p_actor) IS DISTINCT FROM 'owner' OR live_org_role(p_dst, 'user', p_actor) IS DISTINCT FROM 'owner' THEN RAISE EXCEPTION 'ORG_MOVE_REQUIRES_DUAL_OWNER'; END IF;
 IF v_src <> p_dst THEN
-UPDATE workspaces SET org_id = p_dst WHERE workspace_id = p_ws;
-UPDATE workspace_principal_grants SET org_id = p_dst WHERE workspace_id = p_ws;
 INSERT INTO workspace_principal_grants (workspace_id, org_id, principal_kind, principal_id, role, granted_by, created_at)
-SELECT p_ws, p_dst, 'agent', agent_identity_id, 'member', p_actor, v_now FROM agent_principals WHERE p_mode = 'all' AND workspace_id = p_ws AND revoked_at IS NULL
-UNION ALL SELECT p_ws, p_dst, principal_kind, principal_id, 'member', p_actor, v_now FROM channel_memberships WHERE p_mode = 'all' AND workspace_id = p_ws AND revoked_at IS NULL
-UNION ALL SELECT p_ws, p_dst, 'user', user_id, 'admin', p_actor, v_now FROM memberships WHERE p_mode = 'owners_only' AND workspace_id = p_ws AND revoked_at IS NULL AND 'owner' IN (live_org_role(v_src, 'user', user_id), live_org_role(p_dst, 'user', user_id))
+SELECT p_ws, p_dst, k, id, r, p_actor, v_now FROM (
+SELECT 'agent' k, agent_identity_id id, 'member' r FROM agent_principals WHERE p_mode = 'all' AND workspace_id = p_ws AND revoked_at IS NULL
+UNION ALL SELECT principal_kind, principal_id, 'member' FROM channel_memberships WHERE p_mode = 'all' AND workspace_id = p_ws AND revoked_at IS NULL
+UNION ALL SELECT 'user', user_id, 'admin' FROM memberships WHERE p_mode = 'owners_only' AND workspace_id = p_ws AND revoked_at IS NULL AND 'owner' IN (live_org_role(v_src, 'user', user_id), live_org_role(p_dst, 'user', user_id))
+) c WHERE can_read_workspace(p_ws, c.k, c.id)
 ON CONFLICT (workspace_id, principal_kind, principal_id) DO NOTHING;
 UPDATE workspace_principal_grants wg SET revoked_at = v_now WHERE workspace_id = p_ws AND revoked_at IS NULL
-AND (NOT can_read_org(v_src, wg.principal_kind, wg.principal_id) OR EXISTS (SELECT 1 FROM org_memberships WHERE (org_id, principal_kind, principal_id) = (p_dst, wg.principal_kind, wg.principal_id) AND revoked_at IS NOT NULL)
+AND (NOT can_read_workspace(p_ws, wg.principal_kind, wg.principal_id) OR EXISTS (SELECT 1 FROM org_memberships WHERE (org_id, principal_kind, principal_id) = (p_dst, wg.principal_kind, wg.principal_id) AND revoked_at IS NOT NULL)
 OR (p_mode = 'owners_only' AND role <> 'owner' AND 'owner' NOT IN (coalesce(live_org_role(v_src, principal_kind, principal_id), ''), coalesce(live_org_role(p_dst, principal_kind, principal_id), ''))));
+UPDATE workspaces SET org_id = p_dst WHERE workspace_id = p_ws;
+UPDATE workspace_principal_grants SET org_id = p_dst WHERE workspace_id = p_ws;
 INSERT INTO org_memberships (org_id, principal_kind, principal_id, role, invited_by, created_at)
 SELECT p_dst, principal_kind, principal_id, CASE WHEN role = 'owner' THEN 'admin' ELSE role END, p_actor, v_now
 FROM workspace_principal_grants WHERE workspace_id = p_ws AND revoked_at IS NULL ON CONFLICT (org_id, principal_kind, principal_id) DO NOTHING;

@@ -204,7 +204,7 @@ export function reconcileWorkspaceMove(
     target_org_id,
     actor_user_id,
     transfer_members,
-    now = String(s.now ?? s.organizations[0]?.updated_at ?? s.organizations[0]?.created_at ?? '2026-10-21T00:00:00Z'),
+    now,
   }: {
     workspace_id: string;
     target_org_id: string;
@@ -213,6 +213,7 @@ export function reconcileWorkspaceMove(
     now?: string;
   },
 ) {
+  const ts = String(now ?? s.now ?? s.organizations[0]?.updated_at ?? s.organizations[0]?.created_at ?? '2026-10-21T00:00:00Z');
   const ws = s.workspaces.find((w) => w.workspace_id === workspace_id && isLive(w));
   if (!ws) return fail('WORKSPACE_NOT_FOUND', 'workspace', { workspace: workspace_id });
   if (
@@ -257,28 +258,28 @@ export function reconcileWorkspaceMove(
   }
   const srcOk = new Set<string>();
   for (const [k, p] of cands.entries()) {
-    if (canReadWorkspace(s, { principal_kind: p.principal_kind, principal_id: p.principal_id, now }, ws.workspace_id)) srcOk.add(k);
+    if (canReadWorkspace(s, { principal_kind: p.principal_kind, principal_id: p.principal_id, now }, ws.workspace_id, now)) srcOk.add(k);
   }
   ws.org_id = target_org_id;
   for (const g of s.workspaceGrants) if (g.workspace_id === ws.workspace_id) g.org_id = target_org_id;
   const dropCand = (p: { principal_kind: PrincipalKind; principal_id: string }) => {
-    for (const sid of cascadeWorkspaceMemberRemoval(s, { workspace_id: ws.workspace_id, principal_kind: p.principal_kind, principal_id: p.principal_id, now }).closed_seat_ids) closed.add(sid);
+    for (const sid of cascadeWorkspaceMemberRemoval(s, { workspace_id: ws.workspace_id, principal_kind: p.principal_kind, principal_id: p.principal_id, now: ts }).closed_seat_ids) closed.add(sid);
   };
   const syncCand = (p: { principal_kind: PrincipalKind; principal_id: string; role: OrgRole }) => {
     const k = `${p.principal_kind}:${p.principal_id}`;
     if (!srcOk.has(k)) { dropCand(p); return; }
     let wg = s.workspaceGrants.find((x) => x.workspace_id === ws.workspace_id && isPrin(x, p.principal_kind, p.principal_id));
     if (!wg) {
-      wg = { workspace_id: ws.workspace_id, org_id: target_org_id, principal_kind: p.principal_kind, principal_id: p.principal_id, role: p.role === 'owner' ? 'admin' : p.role, granted_by: actor_user_id, created_at: now, revoked_at: null };
+      wg = { workspace_id: ws.workspace_id, org_id: target_org_id, principal_kind: p.principal_kind, principal_id: p.principal_id, role: p.role === 'owner' ? 'admin' : p.role, granted_by: actor_user_id, created_at: ts, revoked_at: null };
       s.workspaceGrants.push(wg);
     }
     const exOm = s.orgMemberships.find((m) => m.org_id === target_org_id && isPrin(m, p.principal_kind, p.principal_id));
     if ((exOm && exOm.revoked_at != null) || wg.revoked_at != null) dropCand(p);
-    else if (!exOm) s.orgMemberships.push({ org_id: target_org_id, principal_kind: p.principal_kind, principal_id: p.principal_id, role: p.role === 'owner' ? 'admin' : p.role, invited_by: actor_user_id, created_at: now, revoked_at: null });
+    else if (!exOm) s.orgMemberships.push({ org_id: target_org_id, principal_kind: p.principal_kind, principal_id: p.principal_id, role: p.role === 'owner' ? 'admin' : p.role, invited_by: actor_user_id, created_at: ts, revoked_at: null });
   };
   if (transfer_members === 'all') {
     for (const p of cands.values()) syncCand(p);
-    for (const p of cands.values()) if (!canReadWorkspace(s, { principal_kind: p.principal_kind, principal_id: p.principal_id }, ws.workspace_id)) dropCand(p);
+    for (const p of cands.values()) if (!canReadWorkspace(s, { principal_kind: p.principal_kind, principal_id: p.principal_id, now }, ws.workspace_id, now)) dropCand(p);
   } else {
     const owners = new Set<string>();
     for (const [k, p] of cands.entries()) {
@@ -296,7 +297,7 @@ export function reconcileWorkspaceMove(
       if (!cands.has(k)) cands.set(k, { principal_kind: 'agent', principal_id: ai.id, role: 'member' });
     }
     for (const [k, p] of cands.entries()) {
-      if ((!owners.has(k) && orgRole(s, target_org_id, p.principal_kind, p.principal_id) !== 'owner') || !canReadWorkspace(s, { principal_kind: p.principal_kind, principal_id: p.principal_id }, ws.workspace_id)) dropCand(p);
+      if ((!owners.has(k) && orgRole(s, target_org_id, p.principal_kind, p.principal_id) !== 'owner') || !canReadWorkspace(s, { principal_kind: p.principal_kind, principal_id: p.principal_id, now }, ws.workspace_id, now)) dropCand(p);
     }
   }
   return { ok: true as const, source_org_id: srcOrg, target_org_id, closed_seat_ids: [...closed] };

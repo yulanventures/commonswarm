@@ -204,6 +204,9 @@ test('guest channel isolation, every-channel file bindings, and fail-closed priv
   s.channelMemberships.find((m) => m.channel_id === 'ch-1a-priv' && m.principal_id === 'ag-1')!.role = 'owner';
   eq(canModifyChannelMembership(s, ag('ap-1a'), 'ch-1a-priv', admin).ok, true);
   s.channels.push({ channel_id: 'ch-ag-priv', workspace_id: 'ws-1a', slug: 'ag-priv', visibility: 'private', join_policy: 'invite_only', created_by_kind: 'agent', created_by_principal: 'ap-1a' });
+  s.renewalGrants![0]!.horizon_expires_at = '2026-10-21T01:00:00Z';
+  eq(bootstrapPrivateChannelMemberships(s, ag('ap-1a'), 'ch-ag-priv').ok, false);
+  s.renewalGrants![0]!.horizon_expires_at = '2026-10-28T00:00:00Z';
   eq(bootstrapPrivateChannelMemberships(s, ag('ap-1a'), 'ch-ag-priv', now).ok, true);
   eq(canReadChannel(s, ag('ap-1a'), 'ch-ag-priv'), true);
   s.channelMemberships.forEach((m) => { if (m.channel_id === 'ch-ag-priv') m.revoked_at = now; });

@@ -23,36 +23,15 @@ export function canReadOrg(
   now?: string | number | null,
 ): boolean {
   if (!s.organizations.some((o) => o.id === orgId && isLive(o))) return false;
-  if (c.principal_kind === 'user')
-    return orgRole(s, orgId, 'user', c.principal_id) !== null;
-  const aid = resolveAgentId(s, c.principal_id);
-  const ownerId = agentOwner(s, c, now);
-  const aRole = orgRole(s, orgId, 'agent', aid);
-  if (
-    !ownerId ||
-    s.orgMemberships.some(
-      (m) =>
-        m.org_id === orgId &&
-        m.principal_kind === 'agent' &&
-        m.principal_id === aid &&
-        m.revoked_at != null,
-    )
-  )
-    return false;
+  if (c.principal_kind === 'user') return orgRole(s, orgId, 'user', c.principal_id) !== null;
+  const aid = resolveAgentId(s, c.principal_id), ownerId = agentOwner(s, c, now), aRole = orgRole(s, orgId, 'agent', aid);
+  if (!ownerId || s.orgMemberships.some((m) => m.org_id === orgId && isPrin(m, 'agent', aid) && m.revoked_at != null)) return false;
   if (c.connection_id) {
-    const pol = (s.connectionPolicies ?? []).find(
-      (p) => p.connection_id === c.connection_id,
-    );
-    if (
-      pol &&
-      (pol.revoked_at != null ||
-        (pol.allowed_org_ids && !pol.allowed_org_ids.includes(orgId)))
-    )
-      return false;
+    const pol = (s.connectionPolicies ?? []).find((p) => p.connection_id === c.connection_id);
+    if (pol && (pol.revoked_at != null || (pol.allowed_org_ids && !pol.allowed_org_ids.includes(orgId)))) return false;
   }
   const uRole = orgRole(s, orgId, 'user', ownerId);
-  if (!uRole) return false;
-  return uRole === 'guest' || aRole === 'guest' ? aRole !== null : true;
+  return uRole ? (uRole === 'guest' || aRole === 'guest' ? aRole !== null : true) : false;
 }
 
 export function canReadWorkspace(
@@ -241,9 +220,10 @@ export function bootstrapPrivateChannelMemberships(
   s: State,
   actor: CallerContext,
   chId: string,
-  now = '2026-10-21T00:00:00Z',
+  now?: string,
 ) {
   const ch = s.channels.find((c) => c.channel_id === chId && isLive(c));
+  const joinedAt = String(now ?? actor.now ?? s.now ?? '2026-10-21T00:00:00Z');
   const actorId =
     actor.principal_kind === 'agent'
       ? resolveAgentId(s, actor.principal_id)
@@ -284,7 +264,7 @@ export function bootstrapPrivateChannelMemberships(
         notify_pref: 'all',
         added_by_kind: actor.principal_kind,
         added_by: actorId,
-        joined_at: now,
+        joined_at: joinedAt,
       });
     }
   }
