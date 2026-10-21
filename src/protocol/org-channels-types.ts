@@ -344,9 +344,17 @@ export const hasWsGrant = (
     (g) => g.workspace_id === wsId && isPrin(g, k, id) && isLive(g),
   );
 
+export const resolveAgentId = (s: OrgChannelAuthorityState, id: string) =>
+  s.agentIdentities.some((a) => a.id === id)
+    ? id
+    : ((s.agentPrincipals ?? []).find(
+        (ap) => ap.principal_id === id && isLive(ap),
+      )?.agent_identity_id ?? id);
+
 export const agentOwner = (s: OrgChannelAuthorityState, c: CallerContext) => {
+  const aid = resolveAgentId(s, c.principal_id);
   const ai = s.agentIdentities.find(
-    (a) => a.id === c.principal_id && isLive(a),
+    (a) => a.id === aid && isLive(a),
   );
   if (!ai) return null;
   if (

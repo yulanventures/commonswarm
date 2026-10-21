@@ -11,6 +11,7 @@ import {
   isPrin,
   norm,
   orgRole,
+  resolveAgentId,
 } from './org-channels-types.js';
 
 type State = OrgChannelAuthorityState;
@@ -19,15 +20,16 @@ export function canReadOrg(s: State, c: CallerContext, orgId: string): boolean {
   if (!s.organizations.some((o) => o.id === orgId && isLive(o))) return false;
   if (c.principal_kind === 'user')
     return orgRole(s, orgId, 'user', c.principal_id) !== null;
+  const aid = resolveAgentId(s, c.principal_id);
   const ownerId = agentOwner(s, c);
-  const aRole = orgRole(s, orgId, 'agent', c.principal_id);
+  const aRole = orgRole(s, orgId, 'agent', aid);
   if (
     !ownerId ||
     s.orgMemberships.some(
       (m) =>
         m.org_id === orgId &&
         m.principal_kind === 'agent' &&
-        m.principal_id === c.principal_id &&
+        m.principal_id === aid &&
         m.revoked_at != null,
     )
   )
@@ -54,13 +56,17 @@ export function canReadWorkspace(
   wsId: string,
 ): boolean {
   const ws = s.workspaces.find((w) => w.workspace_id === wsId && isLive(w));
+  const aid =
+    c.principal_kind === 'agent'
+      ? resolveAgentId(s, c.principal_id)
+      : c.principal_id;
   if (
     !ws ||
     !canReadOrg(s, c, ws.org_id) ||
     s.workspaceGrants.some(
       (g) =>
         g.workspace_id === wsId &&
-        isPrin(g, c.principal_kind, c.principal_id) &&
+        isPrin(g, c.principal_kind, aid) &&
         g.revoked_at != null,
     )
   )
@@ -89,18 +95,14 @@ export function canReadWorkspace(
     )
   )
     return false;
-  const explicitGrant = hasWsGrant(s, wsId, 'agent', c.principal_id);
-  if (
-    (s.agentPrincipals ?? []).some(
-      (ap) =>
-        ap.workspace_id === wsId &&
-        ap.agent_identity_id === c.principal_id &&
-        ap.revoked_at != null,
-    )
-  )
+  const explicitGrant = hasWsGrant(s, wsId, 'agent', aid);
+  const wsAps = (s.agentPrincipals ?? []).filter(
+    (ap) => ap.workspace_id === wsId && ap.agent_identity_id === aid,
+  );
+  if (wsAps.some((ap) => ap.revoked_at != null) && !wsAps.some(isLive))
     return false;
   const ownerRole = orgRole(s, ws.org_id, 'user', ownerId);
-  const agentRole = orgRole(s, ws.org_id, 'agent', c.principal_id);
+  const agentRole = orgRole(s, ws.org_id, 'agent', aid);
   const ownerWsGuest = s.workspaceGrants.some(
     (g) => g.workspace_id === wsId && isPrin(g, 'user', ownerId) && isLive(g) && g.role === 'guest',
   );
@@ -120,6 +122,10 @@ export function canReadChannel(
 ): boolean {
   const ch = s.channels.find((x) => x.channel_id === chId);
   if (!ch || !canReadWorkspace(s, c, ch.workspace_id)) return false;
+  const aid =
+    c.principal_kind === 'agent'
+      ? resolveAgentId(s, c.principal_id)
+      : c.principal_id;
   const ws = s.workspaces.find((w) => w.workspace_id === ch.workspace_id);
   const hasChMem = (k: PrincipalKind, id: string) =>
     s.channelMemberships.some(
@@ -135,18 +141,18 @@ export function canReadChannel(
         g.role === 'guest',
     );
   if (ch.visibility === 'workspace') {
-    if (isGuest(c.principal_kind, c.principal_id) && !hasChMem(c.principal_kind, c.principal_id))
+    if (isGuest(c.principal_kind, aid) && !hasChMem(c.principal_kind, aid))
       return false;
     if (c.principal_kind === 'agent') {
       const ownerId = agentOwner(s, c);
       if (!ownerId) return false;
-      if (isGuest('user', ownerId) && (!hasChMem('user', ownerId) || !hasChMem('agent', c.principal_id)))
+      if (isGuest('user', ownerId) && (!hasChMem('user', ownerId) || !hasChMem('agent', aid)))
         return false;
     }
     return true;
   }
   if (!Boolean(s.privateChannelsEnabled)) return false;
-  if (!hasChMem(c.principal_kind, c.principal_id)) return false;
+  if (!hasChMem(c.principal_kind, aid)) return false;
   if (c.principal_kind === 'user') return true;
   const ownerId = agentOwner(s, c);
   return Boolean(ownerId && hasChMem('user', ownerId));

@@ -82,6 +82,7 @@ ALTER TABLE swarm.workspaces
   DROP COLUMN IF EXISTS slug,
   DROP COLUMN IF EXISTS org_id;
 
+DROP INDEX IF EXISTS swarm.agent_principals_workspace_identity_key;
 ALTER TABLE swarm.agent_principals
   DROP CONSTRAINT IF EXISTS agent_principals_workspace_identity_key,
   DROP COLUMN IF EXISTS agent_identity_id;

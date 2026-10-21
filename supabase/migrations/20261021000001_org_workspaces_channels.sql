@@ -91,21 +91,18 @@ BEGIN
   FROM workspaces ON CONFLICT DO NOTHING;
   UPDATE workspaces w SET org_id = o.id, slug = o.slug FROM organizations o WHERE o.id = w.workspace_id;
   WITH rp AS (
-    SELECT ap.*, hs.grant_id, CASE WHEN hs.grant_id IS NULL THEN 1 ELSE row_number() OVER (PARTITION BY hs.grant_id, ap.name, ap.workspace_id ORDER BY ap.revoked_at NULLS FIRST, ap.created_at ASC, ap.principal_id ASC) END AS rn
+    SELECT ap.*, hs.grant_id, CASE WHEN hs.grant_id IS NULL OR ap.revoked_at IS NOT NULL THEN 1 ELSE row_number() OVER (PARTITION BY hs.grant_id, ap.name, ap.workspace_id ORDER BY ap.created_at, ap.principal_id) END AS rn
     FROM agent_principals ap LEFT JOIN hosted_mcp_seats hs USING (principal_id)
   )
   INSERT INTO agent_identities (id, owner_user_id, standing_grant_id, standing_renewal_grant_id, display_name, created_at, revoked_at)
   SELECT DISTINCT ON (CASE WHEN grant_id IS NOT NULL AND rn = 1 THEN grant_id::text || ':' || name ELSE principal_id::text END)
-    principal_id, owner_user_id, CASE WHEN rn = 1 THEN grant_id ELSE NULL END,
+    principal_id, owner_user_id, CASE WHEN rn = 1 THEN grant_id END,
     (SELECT rg.renewal_grant_id FROM renewal_grants rg WHERE rg.principal_id = rp.principal_id ORDER BY rg.revoked_at NULLS FIRST, rg.horizon_expires_at DESC LIMIT 1),
     name, created_at, revoked_at
-  FROM rp ORDER BY (CASE WHEN grant_id IS NOT NULL AND rn = 1 THEN grant_id::text || ':' || name ELSE principal_id::text END), revoked_at NULLS FIRST, created_at ASC ON CONFLICT DO NOTHING;
-  WITH rp AS (
-    SELECT ap.principal_id, ap.name, hs.grant_id, CASE WHEN hs.grant_id IS NULL THEN 1 ELSE row_number() OVER (PARTITION BY hs.grant_id, ap.name, ap.workspace_id ORDER BY ap.revoked_at NULLS FIRST, ap.created_at ASC, ap.principal_id ASC) END AS rn
-    FROM agent_principals ap LEFT JOIN hosted_mcp_seats hs USING (principal_id)
-  )
+  FROM rp ORDER BY (CASE WHEN grant_id IS NOT NULL AND rn = 1 THEN grant_id::text || ':' || name ELSE principal_id::text END), revoked_at NULLS FIRST, created_at ON CONFLICT DO NOTHING;
   UPDATE agent_principals ap SET agent_identity_id = coalesce(
-    (SELECT ai.id FROM rp JOIN agent_identities ai ON ai.standing_grant_id = rp.grant_id AND ai.display_name = rp.name WHERE rp.principal_id = ap.principal_id AND rp.grant_id IS NOT NULL AND rp.rn = 1 LIMIT 1),
+    (SELECT ai.id FROM hosted_mcp_seats hs JOIN agent_identities ai ON ai.standing_grant_id = hs.grant_id AND ai.display_name = ap.name
+     WHERE hs.principal_id = ap.principal_id AND (ap.revoked_at IS NOT NULL OR ap.principal_id = (SELECT a2.principal_id FROM agent_principals a2 JOIN hosted_mcp_seats s2 USING (principal_id) WHERE (a2.workspace_id, s2.grant_id, a2.name) = (ap.workspace_id, hs.grant_id, ap.name) AND a2.revoked_at IS NULL ORDER BY a2.created_at, a2.principal_id LIMIT 1)) LIMIT 1),
     ap.principal_id
   );
 
@@ -130,7 +127,8 @@ END
 $$;
 
 ALTER TABLE swarm.workspaces ALTER COLUMN org_id SET NOT NULL, ALTER COLUMN slug SET NOT NULL;
-ALTER TABLE swarm.agent_principals ALTER COLUMN agent_identity_id SET NOT NULL, ADD CONSTRAINT agent_principals_workspace_identity_key UNIQUE (workspace_id, agent_identity_id);
+ALTER TABLE swarm.agent_principals ALTER COLUMN agent_identity_id SET NOT NULL;
+CREATE UNIQUE INDEX agent_principals_workspace_identity_key ON swarm.agent_principals(workspace_id, agent_identity_id) WHERE revoked_at IS NULL;
 CREATE UNIQUE INDEX workspaces_org_slug_lower_key ON swarm.workspaces(org_id, lower(slug));
 
 CREATE FUNCTION swarm.ensure_workspace_org_and_slug() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
@@ -173,45 +171,45 @@ END
 $$;
 CREATE TRIGGER memberships_sync_org_grants AFTER INSERT OR UPDATE ON swarm.memberships FOR EACH ROW EXECUTE FUNCTION swarm.sync_legacy_membership_to_org_grants();
 
-CREATE FUNCTION swarm.ensure_agent_principal_identity() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
+CREATE FUNCTION ensure_agent_principal_identity() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
 BEGIN
   IF NEW.agent_identity_id IS NULL THEN
-    INSERT INTO swarm.agent_identities (id, owner_user_id, display_name, created_at, revoked_at)
+    INSERT INTO agent_identities (id, owner_user_id, display_name, created_at, revoked_at)
     VALUES (NEW.principal_id, NEW.owner_user_id, NEW.name, coalesce(NEW.created_at, now()), NEW.revoked_at) ON CONFLICT (id) DO NOTHING;
     NEW.agent_identity_id := NEW.principal_id;
   END IF;
   RETURN NEW;
 END
 $$;
-CREATE TRIGGER agent_principals_ensure_identity BEFORE INSERT ON swarm.agent_principals FOR EACH ROW EXECUTE FUNCTION swarm.ensure_agent_principal_identity();
+CREATE TRIGGER agent_principals_ensure_identity BEFORE INSERT ON agent_principals FOR EACH ROW EXECUTE FUNCTION ensure_agent_principal_identity();
 
-CREATE FUNCTION swarm.sync_standing_grant_to_agent_identity() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
+CREATE FUNCTION sync_standing_grant_to_agent_identity() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
 DECLARE v_ap RECORD; v_ai uuid; v_j jsonb := to_jsonb(NEW); v_gid uuid := (v_j->>'grant_id')::uuid; v_rgid uuid := (v_j->>'renewal_grant_id')::uuid; v_rg uuid;
 BEGIN
   IF v_gid IS NOT NULL OR v_rgid IS NOT NULL THEN
-    SELECT principal_id, workspace_id, agent_identity_id, owner_user_id, name, created_at, revoked_at INTO v_ap FROM swarm.agent_principals WHERE principal_id = NEW.principal_id;
+    SELECT principal_id, workspace_id, agent_identity_id, owner_user_id, name, created_at, revoked_at INTO v_ap FROM agent_principals WHERE principal_id = NEW.principal_id;
     IF v_ap.principal_id IS NOT NULL THEN
       IF v_rgid IS NOT NULL THEN
-        SELECT renewal_grant_id INTO v_rg FROM swarm.renewal_grants WHERE principal_id = v_ap.principal_id ORDER BY revoked_at NULLS FIRST, horizon_expires_at DESC LIMIT 1;
-        UPDATE swarm.agent_identities SET standing_renewal_grant_id = coalesce(v_rg, v_rgid) WHERE id = v_ap.agent_identity_id;
+        SELECT renewal_grant_id INTO v_rg FROM renewal_grants WHERE principal_id = v_ap.principal_id ORDER BY revoked_at NULLS FIRST, horizon_expires_at DESC LIMIT 1;
+        UPDATE agent_identities SET standing_renewal_grant_id = coalesce(v_rg, v_rgid) WHERE id = v_ap.agent_identity_id;
       END IF;
       IF v_gid IS NOT NULL THEN
-        SELECT id INTO v_ai FROM swarm.agent_identities WHERE standing_grant_id = v_gid AND display_name = v_ap.name ORDER BY revoked_at NULLS FIRST, created_at ASC LIMIT 1;
+        SELECT id INTO v_ai FROM agent_identities WHERE standing_grant_id = v_gid AND display_name = v_ap.name ORDER BY revoked_at NULLS FIRST, created_at LIMIT 1;
         IF v_ai IS NOT NULL AND v_ai <> v_ap.agent_identity_id THEN
-          IF NOT EXISTS (SELECT 1 FROM swarm.agent_principals WHERE workspace_id = v_ap.workspace_id AND agent_identity_id = v_ai AND principal_id <> v_ap.principal_id) THEN
-            UPDATE swarm.agent_principals SET agent_identity_id = v_ai WHERE principal_id = v_ap.principal_id;
-            UPDATE swarm.workspace_principal_grants SET principal_id = v_ai WHERE (workspace_id, principal_kind, principal_id) = (v_ap.workspace_id, 'agent', v_ap.agent_identity_id)
-              AND NOT EXISTS (SELECT 1 FROM swarm.workspace_principal_grants WHERE (workspace_id, principal_kind, principal_id) = (v_ap.workspace_id, 'agent', v_ai));
-          ELSE
-            UPDATE swarm.agent_identities ai SET standing_grant_id = coalesce(ai.standing_grant_id, v_gid), revoked_at = coalesce(ai.revoked_at, o.revoked_at) FROM swarm.agent_identities o WHERE ai.id = v_ap.agent_identity_id AND o.id = v_ai;
-          END IF;
+          UPDATE agent_principals SET revoked_at = coalesce(revoked_at, now()) WHERE (workspace_id, agent_identity_id) = (v_ap.workspace_id, v_ai) AND principal_id <> v_ap.principal_id AND revoked_at IS NULL;
+          UPDATE agent_principals SET agent_identity_id = v_ai WHERE principal_id = v_ap.principal_id;
+          UPDATE workspace_principal_grants SET principal_id = v_ai WHERE (workspace_id, principal_kind, principal_id) = (v_ap.workspace_id, 'agent', v_ap.agent_identity_id)
+            AND NOT EXISTS (SELECT 1 FROM workspace_principal_grants WHERE (workspace_id, principal_kind, principal_id) = (v_ap.workspace_id, 'agent', v_ai));
+          DELETE FROM workspace_principal_grants WHERE (workspace_id, principal_kind, principal_id) = (v_ap.workspace_id, 'agent', v_ap.agent_identity_id);
+          DELETE FROM agent_identities WHERE id = v_ap.agent_identity_id AND NOT EXISTS (SELECT 1 FROM agent_principals WHERE agent_identity_id = v_ap.agent_identity_id);
+          IF v_ap.revoked_at IS NULL THEN UPDATE agent_identities SET revoked_at = NULL WHERE id = v_ai AND revoked_at IS NOT NULL; END IF;
         ELSIF v_ai IS NULL THEN
-          UPDATE swarm.agent_identities SET standing_grant_id = v_gid WHERE id = v_ap.agent_identity_id AND (standing_grant_id IS NULL OR standing_grant_id = v_gid);
+          UPDATE agent_identities SET standing_grant_id = v_gid WHERE id = v_ap.agent_identity_id AND (standing_grant_id IS NULL OR standing_grant_id = v_gid);
           IF NOT FOUND THEN
-            INSERT INTO swarm.agent_identities (id, owner_user_id, standing_grant_id, standing_renewal_grant_id, display_name, created_at, revoked_at)
+            INSERT INTO agent_identities (id, owner_user_id, standing_grant_id, standing_renewal_grant_id, display_name, created_at, revoked_at)
             VALUES (v_ap.principal_id, v_ap.owner_user_id, v_gid, v_rg, v_ap.name, coalesce(v_ap.created_at, now()), v_ap.revoked_at)
             ON CONFLICT (id) DO UPDATE SET standing_grant_id = coalesce(EXCLUDED.standing_grant_id, agent_identities.standing_grant_id), standing_renewal_grant_id = coalesce(agent_identities.standing_renewal_grant_id, EXCLUDED.standing_renewal_grant_id);
-            UPDATE swarm.agent_principals SET agent_identity_id = v_ap.principal_id WHERE principal_id = v_ap.principal_id;
+            UPDATE agent_principals SET agent_identity_id = v_ap.principal_id WHERE principal_id = v_ap.principal_id;
           END IF;
         END IF;
       END IF;
@@ -220,13 +218,13 @@ BEGIN
   RETURN NEW;
 END
 $$;
-CREATE TRIGGER hosted_mcp_seats_sync_identity AFTER INSERT OR UPDATE ON swarm.hosted_mcp_seats FOR EACH ROW EXECUTE FUNCTION swarm.sync_standing_grant_to_agent_identity();
-CREATE TRIGGER renewal_grants_sync_identity AFTER INSERT OR UPDATE ON swarm.renewal_grants FOR EACH ROW EXECUTE FUNCTION swarm.sync_standing_grant_to_agent_identity();
+CREATE TRIGGER hosted_mcp_seats_sync_identity AFTER INSERT OR UPDATE ON hosted_mcp_seats FOR EACH ROW EXECUTE FUNCTION sync_standing_grant_to_agent_identity();
+CREATE TRIGGER renewal_grants_sync_identity AFTER INSERT OR UPDATE ON renewal_grants FOR EACH ROW EXECUTE FUNCTION sync_standing_grant_to_agent_identity();
 
-ALTER FUNCTION swarm.ensure_workspace_org_and_slug() OWNER TO swarm_admin;
-ALTER FUNCTION swarm.sync_legacy_membership_to_org_grants() OWNER TO swarm_admin;
-ALTER FUNCTION swarm.ensure_agent_principal_identity() OWNER TO swarm_admin;
-ALTER FUNCTION swarm.sync_standing_grant_to_agent_identity() OWNER TO swarm_admin;
-REVOKE ALL ON FUNCTION swarm.ensure_workspace_org_and_slug(), swarm.sync_legacy_membership_to_org_grants(), swarm.ensure_agent_principal_identity(), swarm.sync_standing_grant_to_agent_identity() FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
-GRANT EXECUTE ON FUNCTION swarm.ensure_workspace_org_and_slug(), swarm.sync_legacy_membership_to_org_grants(), swarm.ensure_agent_principal_identity(), swarm.sync_standing_grant_to_agent_identity() TO swarm_command;
+ALTER FUNCTION ensure_workspace_org_and_slug() OWNER TO swarm_admin;
+ALTER FUNCTION sync_legacy_membership_to_org_grants() OWNER TO swarm_admin;
+ALTER FUNCTION ensure_agent_principal_identity() OWNER TO swarm_admin;
+ALTER FUNCTION sync_standing_grant_to_agent_identity() OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION ensure_workspace_org_and_slug(), sync_legacy_membership_to_org_grants(), ensure_agent_principal_identity(), sync_standing_grant_to_agent_identity() FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+GRANT EXECUTE ON FUNCTION ensure_workspace_org_and_slug(), sync_legacy_membership_to_org_grants(), ensure_agent_principal_identity(), sync_standing_grant_to_agent_identity() TO swarm_command;
 RESET search_path;

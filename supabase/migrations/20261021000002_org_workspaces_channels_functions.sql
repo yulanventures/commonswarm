@@ -59,91 +59,76 @@ BEGIN
   RETURN NEW;
 END
 $$;
-CREATE TRIGGER channels_visibility_transition_guard BEFORE INSERT OR UPDATE ON swarm.channels FOR EACH ROW EXECUTE FUNCTION swarm.guard_channel_visibility_transition();
-CREATE TRIGGER channel_memberships_write_guard BEFORE INSERT OR UPDATE ON swarm.channel_memberships FOR EACH ROW EXECUTE FUNCTION swarm.guard_channel_visibility_transition();
-CREATE TRIGGER signals_private_channel_guard BEFORE INSERT OR UPDATE ON swarm.signals FOR EACH ROW EXECUTE FUNCTION swarm.guard_channel_visibility_transition();
-CREATE TRIGGER file_channel_bindings_private_guard BEFORE INSERT OR UPDATE ON swarm.file_channel_bindings FOR EACH ROW EXECUTE FUNCTION swarm.guard_channel_visibility_transition();
+CREATE TRIGGER channels_visibility_transition_guard BEFORE INSERT OR UPDATE ON channels FOR EACH ROW EXECUTE FUNCTION guard_channel_visibility_transition();
+CREATE TRIGGER channel_memberships_write_guard BEFORE INSERT OR UPDATE ON channel_memberships FOR EACH ROW EXECUTE FUNCTION guard_channel_visibility_transition();
+CREATE TRIGGER signals_private_channel_guard BEFORE INSERT OR UPDATE ON signals FOR EACH ROW EXECUTE FUNCTION guard_channel_visibility_transition();
+CREATE TRIGGER file_channel_bindings_private_guard BEFORE INSERT OR UPDATE ON file_channel_bindings FOR EACH ROW EXECUTE FUNCTION guard_channel_visibility_transition();
 
-CREATE FUNCTION swarm.can_read_org(p_org uuid, p_kind text, p_id uuid, p_owner uuid DEFAULT NULL, p_conn uuid DEFAULT NULL)
+CREATE FUNCTION can_read_org(p_org uuid, p_kind text, p_id uuid, p_owner uuid DEFAULT NULL, p_conn uuid DEFAULT NULL)
 RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
   SELECT EXISTS (SELECT 1 FROM organizations WHERE id = p_org AND archived_at IS NULL) AND (
     (p_kind = 'user' AND live_org_role(p_org, 'user', p_id) IS NOT NULL)
     OR (p_kind = 'agent' AND EXISTS (
-      SELECT 1 FROM agent_identities ai WHERE ai.id = p_id AND ai.revoked_at IS NULL
-      AND (ai.standing_grant_id IS NULL OR EXISTS (SELECT 1 FROM hosted_mcp_grants g WHERE g.grant_id = ai.standing_grant_id AND g.state = 'active' AND g.revoked_at IS NULL))
-      AND (ai.standing_renewal_grant_id IS NULL OR EXISTS (SELECT 1 FROM renewal_grants rg WHERE rg.renewal_grant_id = ai.standing_renewal_grant_id AND rg.revoked_at IS NULL AND (rg.horizon_expires_at IS NULL OR rg.horizon_expires_at > now())))
-      AND NOT EXISTS (SELECT 1 FROM org_memberships om WHERE (om.org_id, om.principal_kind, om.principal_id) = (p_org, 'agent', p_id) AND om.revoked_at IS NOT NULL)
+      SELECT 1 FROM agent_identities ai
+      WHERE (ai.id = p_id OR EXISTS (SELECT 1 FROM agent_principals ap WHERE (ap.principal_id, ap.agent_identity_id) = (p_id, ai.id) AND ap.revoked_at IS NULL))
+      AND ai.revoked_at IS NULL
+      AND (ai.standing_grant_id IS NULL OR EXISTS (SELECT 1 FROM hosted_mcp_grants g WHERE (g.grant_id, g.state) = (ai.standing_grant_id, 'active') AND g.revoked_at IS NULL))
+      AND (ai.standing_renewal_grant_id IS NULL OR EXISTS (SELECT 1 FROM renewal_grants rg WHERE rg.renewal_grant_id = ai.standing_renewal_grant_id AND rg.revoked_at IS NULL AND coalesce(rg.horizon_expires_at > now(), true)))
+      AND NOT EXISTS (SELECT 1 FROM org_memberships om WHERE (om.org_id, om.principal_kind, om.principal_id) = (p_org, 'agent', ai.id) AND om.revoked_at IS NOT NULL)
       AND NOT EXISTS (SELECT 1 FROM connection_org_policies WHERE connection_id = p_conn AND (revoked_at IS NOT NULL OR NOT (p_org = ANY(coalesce(allowed_org_ids, ARRAY[p_org])))))
       AND live_org_role(p_org, 'user', coalesce(p_owner, ai.owner_user_id)) IS NOT NULL
-      AND coalesce(live_org_role(p_org, 'agent', p_id), nullif(live_org_role(p_org, 'user', coalesce(p_owner, ai.owner_user_id)), 'guest')) IS NOT NULL
+      AND coalesce(live_org_role(p_org, 'agent', ai.id), nullif(live_org_role(p_org, 'user', coalesce(p_owner, ai.owner_user_id)), 'guest')) IS NOT NULL
     ))
   );
 $$;
 
-CREATE FUNCTION swarm.can_read_workspace(p_ws uuid, p_kind text, p_id uuid, p_owner uuid DEFAULT NULL, p_conn uuid DEFAULT NULL)
+CREATE FUNCTION can_read_workspace(p_ws uuid, p_kind text, p_id uuid, p_owner uuid DEFAULT NULL, p_conn uuid DEFAULT NULL)
 RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
   SELECT EXISTS (
     SELECT 1 FROM workspaces w WHERE w.workspace_id = p_ws AND w.archived_at IS NULL
     AND can_read_org(w.org_id, p_kind, p_id, p_owner, p_conn)
-    AND NOT EXISTS (SELECT 1 FROM workspace_principal_grants WHERE (workspace_id, principal_kind, principal_id) = (p_ws, p_kind, p_id) AND revoked_at IS NOT NULL)
-    AND ((p_kind = 'user' AND (has_live_ws_grant(p_ws, 'user', p_id)
+    AND ((p_kind = 'user' AND NOT EXISTS (SELECT 1 FROM workspace_principal_grants WHERE (workspace_id, principal_kind, principal_id) = (p_ws, 'user', p_id) AND revoked_at IS NOT NULL)
+      AND (has_live_ws_grant(p_ws, 'user', p_id)
       OR (live_org_role(w.org_id, 'user', p_id) IS DISTINCT FROM 'guest' AND EXISTS (SELECT 1 FROM memberships WHERE (workspace_id, user_id) = (p_ws, p_id) AND revoked_at IS NULL))))
       OR (p_kind = 'agent' AND EXISTS (
-        SELECT 1 FROM agent_identities ai WHERE ai.id = p_id
+        SELECT 1 FROM agent_identities ai
+        WHERE (ai.id = p_id OR EXISTS (SELECT 1 FROM agent_principals ap WHERE (ap.principal_id, ap.agent_identity_id) = (p_id, ai.id) AND ap.revoked_at IS NULL))
         AND can_read_workspace(p_ws, 'user', coalesce(p_owner, ai.owner_user_id))
-        AND NOT EXISTS (SELECT 1 FROM agent_principals ap WHERE (ap.workspace_id, ap.agent_identity_id) = (p_ws, p_id) AND ap.revoked_at IS NOT NULL)
-        AND (has_live_ws_grant(p_ws, 'agent', p_id) OR (live_org_role(w.org_id, 'user', coalesce(p_owner, ai.owner_user_id)) IS DISTINCT FROM 'guest' AND coalesce(live_org_role(w.org_id, 'agent', p_id), live_org_role(w.org_id, 'user', coalesce(p_owner, ai.owner_user_id))) <> 'guest' AND NOT EXISTS (SELECT 1 FROM workspace_principal_grants wg WHERE (wg.workspace_id, wg.principal_kind, wg.principal_id) = (p_ws, 'user', coalesce(p_owner, ai.owner_user_id)) AND wg.revoked_at IS NULL AND wg.role = 'guest')))
+        AND NOT EXISTS (SELECT 1 FROM workspace_principal_grants WHERE (workspace_id, principal_kind, principal_id) = (p_ws, 'agent', ai.id) AND revoked_at IS NOT NULL)
+        AND NOT (EXISTS (SELECT 1 FROM agent_principals ap WHERE (ap.workspace_id, ap.agent_identity_id) = (p_ws, ai.id) AND ap.revoked_at IS NOT NULL)
+          AND NOT EXISTS (SELECT 1 FROM agent_principals ap WHERE (ap.workspace_id, ap.agent_identity_id) = (p_ws, ai.id) AND ap.revoked_at IS NULL))
+        AND (has_live_ws_grant(p_ws, 'agent', ai.id) OR (live_org_role(w.org_id, 'user', coalesce(p_owner, ai.owner_user_id)) IS DISTINCT FROM 'guest' AND coalesce(live_org_role(w.org_id, 'agent', ai.id), live_org_role(w.org_id, 'user', coalesce(p_owner, ai.owner_user_id))) <> 'guest' AND NOT EXISTS (SELECT 1 FROM workspace_principal_grants wg WHERE (wg.workspace_id, wg.principal_kind, wg.principal_id, wg.role) = (p_ws, 'user', coalesce(p_owner, ai.owner_user_id), 'guest') AND wg.revoked_at IS NULL)))
       )))
   );
 $$;
 
-CREATE FUNCTION swarm.can_read_channel(p_ch uuid, p_kind text, p_id uuid, p_owner uuid DEFAULT NULL, p_conn uuid DEFAULT NULL)
+CREATE FUNCTION can_read_channel(p_ch uuid, p_kind text, p_id uuid, p_owner uuid DEFAULT NULL, p_conn uuid DEFAULT NULL)
 RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
   SELECT EXISTS (
     SELECT 1 FROM channels c JOIN workspaces w ON w.workspace_id = c.workspace_id
-    WHERE c.channel_id = p_ch
-    AND can_read_workspace(c.workspace_id, p_kind, p_id, p_owner, p_conn)
-    AND (
-      (c.visibility = 'workspace'
-        AND (
-          (live_org_role(w.org_id, p_kind, p_id) IS DISTINCT FROM 'guest'
-           AND NOT EXISTS (SELECT 1 FROM workspace_principal_grants wg WHERE (wg.workspace_id, wg.principal_kind, wg.principal_id) = (c.workspace_id, p_kind, p_id) AND wg.revoked_at IS NULL AND wg.role = 'guest'))
-          OR EXISTS (SELECT 1 FROM channel_memberships cm WHERE (cm.channel_id, cm.principal_kind, cm.principal_id) = (p_ch, p_kind, p_id) AND cm.revoked_at IS NULL)
-        )
-        AND (
-          p_kind = 'user' OR EXISTS (
-            SELECT 1 FROM agent_identities ai WHERE ai.id = p_id AND ai.revoked_at IS NULL
-            AND (
-              (live_org_role(w.org_id, 'user', coalesce(p_owner, ai.owner_user_id)) IS DISTINCT FROM 'guest'
-               AND NOT EXISTS (SELECT 1 FROM workspace_principal_grants wg WHERE (wg.workspace_id, wg.principal_kind, wg.principal_id) = (c.workspace_id, 'user', coalesce(p_owner, ai.owner_user_id)) AND wg.revoked_at IS NULL AND wg.role = 'guest'))
-              OR (
-                EXISTS (SELECT 1 FROM channel_memberships cm WHERE (cm.channel_id, cm.principal_kind, cm.principal_id) = (p_ch, 'user', coalesce(p_owner, ai.owner_user_id)) AND cm.revoked_at IS NULL)
-                AND EXISTS (SELECT 1 FROM channel_memberships cm WHERE (cm.channel_id, cm.principal_kind, cm.principal_id) = (p_ch, 'agent', p_id) AND cm.revoked_at IS NULL)
-              )
-            )
-          )
-        )
-      )
-      OR (
-        c.visibility = 'private' AND private_channels_enabled()
+    WHERE c.channel_id = p_ch AND can_read_workspace(c.workspace_id, p_kind, p_id, p_owner, p_conn)
+    AND ((c.visibility = 'workspace'
+      AND ((live_org_role(w.org_id, p_kind, p_id) IS DISTINCT FROM 'guest'
+        AND NOT EXISTS (SELECT 1 FROM workspace_principal_grants wg WHERE (wg.workspace_id, wg.principal_kind, wg.principal_id, wg.role) = (c.workspace_id, p_kind, p_id, 'guest') AND wg.revoked_at IS NULL))
+        OR EXISTS (SELECT 1 FROM channel_memberships cm WHERE (cm.channel_id, cm.principal_kind, cm.principal_id) = (p_ch, p_kind, p_id) AND cm.revoked_at IS NULL))
+      AND (p_kind = 'user' OR EXISTS (
+        SELECT 1 FROM agent_identities ai WHERE (ai.id = p_id OR EXISTS (SELECT 1 FROM agent_principals ap WHERE (ap.principal_id, ap.agent_identity_id) = (p_id, ai.id) AND ap.revoked_at IS NULL)) AND ai.revoked_at IS NULL
+        AND ((live_org_role(w.org_id, 'user', coalesce(p_owner, ai.owner_user_id)) IS DISTINCT FROM 'guest'
+          AND NOT EXISTS (SELECT 1 FROM workspace_principal_grants wg WHERE (wg.workspace_id, wg.principal_kind, wg.principal_id, wg.role) = (c.workspace_id, 'user', coalesce(p_owner, ai.owner_user_id), 'guest') AND wg.revoked_at IS NULL))
+          OR (EXISTS (SELECT 1 FROM channel_memberships cm WHERE (cm.channel_id, cm.principal_kind, cm.principal_id) = (p_ch, 'user', coalesce(p_owner, ai.owner_user_id)) AND cm.revoked_at IS NULL)
+            AND EXISTS (SELECT 1 FROM channel_memberships cm WHERE (cm.channel_id, cm.principal_kind, cm.principal_id) = (p_ch, 'agent', ai.id) AND cm.revoked_at IS NULL))))))
+      OR (c.visibility = 'private' AND private_channels_enabled()
         AND EXISTS (SELECT 1 FROM channel_memberships WHERE (channel_id, principal_kind, principal_id) = (p_ch, p_kind, p_id) AND revoked_at IS NULL)
         AND (p_kind = 'user' OR EXISTS (
           SELECT 1 FROM agent_identities ai JOIN channel_memberships cm ON (cm.channel_id, cm.principal_kind, cm.principal_id) = (p_ch, 'user', coalesce(p_owner, ai.owner_user_id))
-          WHERE ai.id = p_id AND ai.revoked_at IS NULL AND cm.revoked_at IS NULL
-        ))
-      )
-    )
+          WHERE (ai.id = p_id OR EXISTS (SELECT 1 FROM agent_principals ap WHERE (ap.principal_id, ap.agent_identity_id) = (p_id, ai.id) AND ap.revoked_at IS NULL)) AND ai.revoked_at IS NULL AND cm.revoked_at IS NULL))))
   );
 $$;
 
-CREATE FUNCTION swarm.can_read_channel_bound_file(p_file uuid, p_ws uuid, p_kind text, p_id uuid, p_owner uuid DEFAULT NULL, p_conn uuid DEFAULT NULL)
+CREATE FUNCTION can_read_channel_bound_file(p_file uuid, p_ws uuid, p_kind text, p_id uuid, p_owner uuid DEFAULT NULL, p_conn uuid DEFAULT NULL)
 RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
   SELECT can_read_workspace(p_ws, p_kind, p_id, p_owner, p_conn)
-  AND NOT EXISTS (
-    SELECT 1 FROM file_channel_bindings fb
-    WHERE fb.file_id = p_file AND fb.workspace_id = p_ws
-    AND NOT can_read_channel(fb.channel_id, p_kind, p_id, p_owner, p_conn)
-  );
+  AND NOT EXISTS (SELECT 1 FROM file_channel_bindings fb WHERE (fb.file_id, fb.workspace_id) = (p_file, p_ws) AND NOT can_read_channel(fb.channel_id, p_kind, p_id, p_owner, p_conn));
 $$;
 
 CREATE FUNCTION swarm.org_move_workspace(p_ws uuid, p_dst uuid, p_actor uuid, p_mode text DEFAULT 'owners_only')
@@ -200,41 +185,17 @@ BEGIN
 END
 $$;
 
-ALTER FUNCTION swarm.private_channels_enabled() OWNER TO swarm_admin;
-ALTER FUNCTION swarm.live_org_role(uuid, text, uuid) OWNER TO swarm_admin;
-ALTER FUNCTION swarm.has_live_ws_grant(uuid, text, uuid) OWNER TO swarm_admin;
-ALTER FUNCTION swarm.guard_channel_visibility_transition() OWNER TO swarm_admin;
-ALTER FUNCTION swarm.can_read_org(uuid, text, uuid, uuid, uuid) OWNER TO swarm_admin;
-ALTER FUNCTION swarm.can_read_workspace(uuid, text, uuid, uuid, uuid) OWNER TO swarm_admin;
-ALTER FUNCTION swarm.can_read_channel(uuid, text, uuid, uuid, uuid) OWNER TO swarm_admin;
-ALTER FUNCTION swarm.can_read_channel_bound_file(uuid, uuid, text, uuid, uuid, uuid) OWNER TO swarm_admin;
-ALTER FUNCTION swarm.org_move_workspace(uuid, uuid, uuid, text) OWNER TO swarm_admin;
+ALTER FUNCTION private_channels_enabled OWNER TO swarm_admin;
+ALTER FUNCTION live_org_role OWNER TO swarm_admin;
+ALTER FUNCTION has_live_ws_grant OWNER TO swarm_admin;
+ALTER FUNCTION guard_channel_visibility_transition OWNER TO swarm_admin;
+ALTER FUNCTION can_read_org OWNER TO swarm_admin;
+ALTER FUNCTION can_read_workspace OWNER TO swarm_admin;
+ALTER FUNCTION can_read_channel OWNER TO swarm_admin;
+ALTER FUNCTION can_read_channel_bound_file OWNER TO swarm_admin;
+ALTER FUNCTION org_move_workspace OWNER TO swarm_admin;
 
-REVOKE ALL ON FUNCTION
-  swarm.private_channels_enabled(),
-  swarm.live_org_role(uuid, text, uuid),
-  swarm.has_live_ws_grant(uuid, text, uuid),
-  swarm.guard_channel_visibility_transition(),
-  swarm.can_read_org(uuid, text, uuid, uuid, uuid),
-  swarm.can_read_workspace(uuid, text, uuid, uuid, uuid),
-  swarm.can_read_channel(uuid, text, uuid, uuid, uuid),
-  swarm.can_read_channel_bound_file(uuid, uuid, text, uuid, uuid, uuid),
-  swarm.org_move_workspace(uuid, uuid, uuid, text)
-FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
-
-GRANT EXECUTE ON FUNCTION
-  swarm.private_channels_enabled(),
-  swarm.live_org_role(uuid, text, uuid),
-  swarm.has_live_ws_grant(uuid, text, uuid),
-  swarm.can_read_org(uuid, text, uuid, uuid, uuid),
-  swarm.can_read_workspace(uuid, text, uuid, uuid, uuid),
-  swarm.can_read_channel(uuid, text, uuid, uuid, uuid),
-  swarm.can_read_channel_bound_file(uuid, uuid, text, uuid, uuid, uuid)
-TO swarm_command, swarm_read;
-
-GRANT EXECUTE ON FUNCTION
-  swarm.guard_channel_visibility_transition(),
-  swarm.org_move_workspace(uuid, uuid, uuid, text)
-TO swarm_command;
-
+REVOKE ALL ON FUNCTION private_channels_enabled, live_org_role, has_live_ws_grant, guard_channel_visibility_transition, can_read_org, can_read_workspace, can_read_channel, can_read_channel_bound_file, org_move_workspace FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+GRANT EXECUTE ON FUNCTION private_channels_enabled, live_org_role, has_live_ws_grant, can_read_org, can_read_workspace, can_read_channel, can_read_channel_bound_file TO swarm_command, swarm_read;
+GRANT EXECUTE ON FUNCTION guard_channel_visibility_transition, org_move_workspace TO swarm_command;
 RESET search_path;

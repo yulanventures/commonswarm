@@ -233,6 +233,10 @@ test('explicit org/workspace revocation overrides owner inheritance (including t
   });
   assert.deepEqual(resOrg.closed_seat_ids, ['seat-2a']);
   assert.equal(canReadOrg(s, caller, 'org-2'), false);
+
+  s.agentPrincipals!.push({ principal_id: 'ap-2a-reclaimed', workspace_id: 'ws-2a', agent_identity_id: 'ag-1', owner_user_id: 'u-owner', name: 'Argon Lead' });
+  assert.equal(canReadOrg(s, { principal_kind: 'agent', principal_id: 'ap-2a-reclaimed' }, 'org-2'), false);
+  assert.equal(canReadWorkspace(s, { principal_kind: 'agent', principal_id: 'ap-2a-reclaimed' }, 'ws-2a'), false);
 });
 
 test('guest channel isolation, every-channel file bindings, and fail-closed privateChannelsEnabled default', () => {
