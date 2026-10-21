@@ -268,6 +268,9 @@ try {
     const resumeOwner=async secured=>{
       // Existing verified-human management boundary: real authorization, locks,
       // resume routine, idempotency and audit under the command role.
+      const auditBefore=await observer`SELECT audit_id::text FROM swarm.audit_log WHERE workspace_id=${W}::uuid
+        AND actor_user=${owner}::uuid AND command_kind='resume_renewal_grant' AND outcome='accepted'`;
+      const priorAuditIds=new Set(auditBefore.map(row=>row.audit_id));
       const result=await command.handleHostedManagementCommand({command_id:id(),client_version:CLIENT_PROTOCOL_VERSION,
         workspace_id:W,stream:{kind:'workspace'},command:{kind:'resume_renewal_grant',renewal_grant_id:secured.grant}},
         {userId:owner,email,displayName:`R12b owner ${tag}`,identityVerified:true,interactiveAuthAtSeconds:null});
@@ -275,9 +278,11 @@ try {
       const [state]=await observer`SELECT NOT suspension_active AND resumed_by=${owner}::uuid AND resume_count>0
         AND suspended_at IS NOT NULL AND resumed_at>suspended_at AS ok FROM swarm.renewal_grants
         WHERE renewal_grant_id=${secured.grant}::uuid`;
-      const [audit]=await observer`SELECT EXISTS(SELECT 1 FROM swarm.audit_log WHERE workspace_id=${W}::uuid
-        AND actor_user=${owner}::uuid AND command_kind='resume_renewal_grant' AND outcome='accepted') AS ok`;
-      return state?.ok===true && audit?.ok===true;
+      const auditAfter=await observer`SELECT audit_id::text,detail FROM swarm.audit_log WHERE workspace_id=${W}::uuid
+        AND actor_user=${owner}::uuid AND command_kind='resume_renewal_grant' AND outcome='accepted'`;
+      const addedAudits=auditAfter.filter(row=>!priorAuditIds.has(row.audit_id));
+      return state?.ok===true && addedAudits.length===1
+        && addedAudits[0].detail?.split('; ').includes(`renewal_grant_id=${secured.grant}`)===true;
     };
     for(const policy of ['permanent','future-date','older-resume']) {
       const secured=await seat(`security-${policy}`,false);
@@ -287,7 +292,7 @@ try {
       await observer`UPDATE swarm.renewal_grants SET suspended_at=clock_timestamp() WHERE renewal_grant_id=${secured.grant}::uuid`;
       if(policy==='older-resume') {
         // A genuine owner resume is superseded by a later suspension.
-        await resumeOwner(secured);
+        check('security-older-resume-pre-resume-audited',await resumeOwner(secured));
         await observer`UPDATE swarm.renewal_grants SET suspended_at=clock_timestamp() WHERE renewal_grant_id=${secured.grant}::uuid`;
       }
       const securityBefore=await snapshot();
