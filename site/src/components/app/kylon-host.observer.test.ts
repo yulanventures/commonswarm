@@ -25,6 +25,31 @@ const fixtureScript = `
   return app.querySelector('.cs-kylon-workspace-menu > .hm-menu') === menu &&
     app.querySelector('.cs-org-phone-title > h1') === heading && document.querySelectorAll('#hm-phone-title').length === 1;
   }
+  // The popup is a real todoView/tagPicker in the real standalone scroller. No pane height override.
+  // This boundary was absent from primitive/index fixtures; old size containment must fail paint checks.
+  const until = async (predicate, label) => {
+    const deadline = performance.now() + 2000;
+    while (!predicate() && performance.now() < deadline) await new Promise(resolve => requestAnimationFrame(resolve));
+    if (!predicate()) throw Error(label + ': ' + JSON.stringify({ width: innerWidth, fonts: document.fonts.status,
+      standalone: frame.hasAttribute('data-home-standalone'), field: app.querySelector('[data-todo-comment]')?.outerHTML }));
+  };
+  let todoAccountParent, tagDelivers;
+  const tagState = () => {
+    const field = app.querySelector('[data-todo-comment]'), pop = app.querySelector('.hm-tag-picker .hm-picker-pop');
+    return { field, pop, list: pop?.querySelector('[role=listbox]'), active: document.getElementById(field?.getAttribute('aria-activedescendant')) };
+  };
+  const paint = (el, out = 0) => {
+    if (!el) return null;
+    const b = el.getBoundingClientRect(), ring = { left: b.left - out, right: b.right + out, top: b.top - out, bottom: b.bottom + out }, clips = [];
+    for (let a = el.parentElement; a; a = a.parentElement) {
+      const s = getComputedStyle(a); if (s.display === 'contents') continue;
+      const r = a.getBoundingClientRect(), q = { left: r.left + a.clientLeft, right: r.left + a.clientLeft + a.clientWidth,
+        top: r.top + a.clientTop, bottom: r.top + a.clientTop + a.clientHeight };
+      if (/hidden|clip|auto|scroll/.test(s.overflowX) && (ring.left < q.left - .5 || ring.right > q.right + .5)
+        || /hidden|clip|auto|scroll/.test(s.overflowY) && (ring.top < q.top - .5 || ring.bottom > q.bottom + .5)) clips.push({ className: a.className, bounds: q });
+    }
+    return { width: b.width, height: b.height, ring, clips, inside: ring.left >= -.5 && ring.top >= -.5 && ring.right <= innerWidth + .5 && ring.bottom <= innerHeight + .5 };
+  };
   window.hostObserver = {
   checks, settle,
   async initial() {
@@ -119,6 +144,49 @@ const fixtureScript = `
     check('header refresh preserves unrelated account popup and focus', !unrelated.hidden && document.activeElement === option);
     unrelated.hidden = true;
   },
+  todoEnter(delivers) {
+    tagDelivers = delivers; todoAccountParent = account.parentElement;
+    fixture.renderTodo('todo', delivers);
+    check('actual detail route sets standalone before mounted return', frame.hasAttribute('data-home-standalone') && host.mounted);
+    check('standalone retains mounted account ownership', account.parentElement === todoAccountParent && sameNodes());
+  },
+  todoFieldFocused() { return document.activeElement === tagState().field; },
+  async todoOpened() {
+    await until(() => { const s = tagState(); return s.field?.getAttribute('aria-expanded') === 'true'
+      && s.list?.querySelectorAll('[role=option]').length === 5 && document.fonts.status === 'loaded'; }, 'actual populated combobox did not open');
+    const s = tagState(), main = frame.querySelector(':scope > .hm-frame__main'), pane = app.querySelector('[data-home-route-pane]');
+    check('standalone popup has painted height in bounded actual scroller', s.pop.getBoundingClientRect().height > 4 && main.clientHeight > 0,
+      { popup: paint(s.pop), pane: { type: getComputedStyle(pane).containerType, height: pane.clientHeight },
+        main: { type: getComputedStyle(main).containerType, height: main.clientHeight }, cap: getComputedStyle(s.pop).maxBlockSize });
+    const heading = [...document.querySelectorAll('h1')].filter(e => e.getClientRects().length);
+    check('standalone has one real main heading and phone context', heading.length === 1 && heading[0].classList.contains('hm-todo-title')
+      && (innerWidth > 832 || app.querySelector('.cs-org-phone-title > .hm-phone-bar__title')?.tagName === 'P'));
+    return [...s.list.querySelectorAll('[role=option]')].map(e => e.id);
+  },
+  async todoPaint(previous = null) {
+    if (previous) await until(() => tagState().active?.id !== previous, 'native ArrowDown active descendant did not change');
+    const s = tagState(), parts = [s.pop, s.pop.querySelector('.hm-pick-heading'), s.active];
+    const footer = s.pop.querySelector('.hm-pick-footer');
+    check('real tag footer matches delivery contract', tagDelivers ? !footer : !!footer?.textContent.trim()); if (footer) parts.push(footer);
+    const geometry = parts.map(e => paint(e));
+    check('popup heading/footer/active option fit all real clips and viewport', geometry.every(g => g && g.width > 0 && g.height > 0 && g.inside && !g.clips.length), geometry);
+    const option = paint(s.active); check('active native option stays44px', option?.width >= 44 && option?.height >= 44, option);
+    const style = getComputedStyle(s.field), ring = paint(s.field, parseFloat(style.outlineWidth) + parseFloat(style.outlineOffset));
+    check('native textarea focus keeps full2+2 outline', document.activeElement === s.field && s.field.matches(':focus-visible')
+      && parseFloat(style.outlineWidth) === 2 && parseFloat(style.outlineOffset) === 2 && ring.width >= 44 && ring.height >= 44 && ring.inside && !ring.clips.length,
+      { outline: style.outline, shadow: style.boxShadow, ring });
+    return s.active?.id;
+  },
+  async todoEscaped() {
+    await until(() => tagState().field?.getAttribute('aria-expanded') === 'false', 'native Escape did not close picker');
+    check('tag Escape retains draft/focus without a write', document.activeElement === tagState().field && tagState().field.value === '@'
+      && !calls.some(call => call.kind === 'todo-write'));
+    fixture.renderTodo('todos');
+    check('index restores route flag/account and real heading', !frame.hasAttribute('data-home-standalone') && account.parentElement === todoAccountParent
+      && [...document.querySelectorAll('h1')].filter(e => e.getClientRects().length).length === 1 && !!app.querySelector('[data-home-todos] h1'));
+    fixture.restoreTodo(); ({ bar, menu, heading } = fixture);
+    check('Chat restores adopted original heading/menu after detail', docked() && !frame.hasAttribute('data-home-standalone') && sameNodes());
+  },
   async finish() {
     host.syncMenu(false); slot.replaceChildren(); frame.classList.add('hm-frame--catchup');
     host.sync(project({ view: 'catchup' })); await settle();
@@ -161,11 +229,12 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
     const value = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
     assert.equal(value.exceptionDetails, undefined, JSON.stringify(value.exceptionDetails)); return value.result?.value;
   };
-  const key = async (name: "Tab" | "Escape") => {
-    for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: name, code: name, windowsVirtualKeyCode: name === "Tab" ? 9 : 27, nativeVirtualKeyCode: name === "Tab" ? 9 : 27 });
+  const key = async (name: "Tab" | "Escape" | "ArrowDown") => {
+    const code = { Tab: 9, Escape: 27, ArrowDown: 40 }[name];
+    for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: name, code: name, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code });
   };
   await send("Emulation.setFocusEmulationEnabled", { enabled: true });
-  for (const [width, height] of [[1471, 900], [833, 900], [390, 844], [320, 568]]) {
+  for (const [width, height] of [[1471, 900], [833, 900], [390, 844], [320, 568], [735, 424]]) {
     await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
     await send("Page.navigate", { url: pathToFileURL(fixture).href + `?case=${width}` });
     let ready = false;
@@ -186,6 +255,23 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
     await evaluate("window.hostObserver.settle()");
     }
     await evaluate("window.hostObserver.refreshFocus()");
+    if ([1471, 320, 735].includes(width)) for (const delivers of [true, false]) {
+      await evaluate(`window.hostObserver.todoEnter(${delivers})`);
+      const deadline = Date.now() + 2000;
+      while (!await evaluate("window.hostObserver.todoFieldFocused()") && Date.now() < deadline) await key("Tab");
+      assert.equal(await evaluate("window.hostObserver.todoFieldFocused()"), true, `${width}px native Tab reaches actual comment field`);
+      await send("Input.insertText", { text: "@" });
+      const options = await evaluate("window.hostObserver.todoOpened()") as string[], visited = new Set<string>();
+      assert.equal(options.length, 5, 'actual populated picker is the negative/positive boundary');
+      let previous: string | null = null;
+      for (let index = 0; index < options.length; index++) {
+        if (index) await key("ArrowDown");
+        previous = await evaluate(`window.hostObserver.todoPaint(${JSON.stringify(previous)})`);
+        assert.ok(previous); visited.add(previous);
+      }
+      assert.deepEqual([...visited].sort(), [...options].sort(), 'native arrows reach every actual option');
+      await key("Escape"); await evaluate("window.hostObserver.todoEscaped()");
+    }
     const checks = await evaluate("window.hostObserver.finish()") as Check[];
     assert.ok(Array.isArray(checks) && checks.length > 0, `${width}px must reach lifecycle checks`);
     for (const check of checks) assert.equal(check.pass, true, `${width}px ${check.name}: ${JSON.stringify(check.detail)}`);

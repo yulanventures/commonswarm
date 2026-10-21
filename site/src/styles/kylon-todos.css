@@ -26,6 +26,13 @@ live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos,
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane]:has(> :is(.hm-todos, .hm-todo)) {
   scroll-padding: 4px; container-type: size;
 }
+/* Standalone detail uses the main scrollport; its route pane is content-sized. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame[data-home-standalone] [data-home-route-pane]:has(> .hm-todo) {
+  container-type: normal;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame[data-home-standalone] > .hm-frame__main:has(> [data-home-route-pane] > .hm-todo) {
+  container-type: size; scroll-padding: 4px;
+}
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos {
   inline-size: 100%; max-inline-size: 720px; gap: 16px; padding: 4px 4px 16px;
 }
