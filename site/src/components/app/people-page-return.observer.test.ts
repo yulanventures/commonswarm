@@ -24,7 +24,8 @@ const siteRoot = join(import.meta.dirname, "..", "..", "..");
 const distRoot = join(siteRoot, "dist");
 const WORKSPACE = "sample-design-studio";
 
-type PeopleState = { search: string; page: boolean; detailInPage: boolean; detailHosts: number; openers: number };
+type PeopleState = { search: string; page: boolean; detailInPage: boolean; detailHosts: number; openers: number;
+  contexts: number; contextInShell: boolean; contextInPage: boolean };
 type ScenarioResult = {
   scenario: string;
   before: PeopleState;
@@ -39,11 +40,12 @@ type ScenarioResult = {
 };
 type DetailFocusResult = {
   viewport: { width: number; height: number };
-  cases: Array<{ kind: string; via: string; id: string; before: FocusGeometry; opened: FocusGeometry;
+  cases: Array<{ kind: string; via: string; id: string; before: FocusGeometry; opened: FocusGeometry; initial: FocusGeometry; returnNeedsScroll: boolean;
     after: FocusGeometry; collapsed: boolean; escapeHandled: boolean; sameDocument: boolean }>;
 };
 type FocusGeometry = {
   active: boolean; focusVisible: boolean; indicator: boolean; outside: boolean; insideViewport: boolean;
+  shown: boolean; hiddenReasons: unknown[]; paneScroll: number;
   rect: { width: number; height: number }; clipped: unknown[];
 };
 
@@ -65,11 +67,22 @@ const peopleReturnScript = `
     const scenario = new URLSearchParams(location.search).get("scenario");
     const workspace = new URLSearchParams(location.search).get("workspace");
     const view = frame.contentWindow, doc = frame.contentDocument;
-    const settle = (ms) => new Promise((resolve) => view.setTimeout(resolve, ms || 150));
-    const until = async (check, label) => { for (let i = 0; i < 80; i += 1) { if (check()) return true; await settle(100); } throw new Error("timed out waiting for " + label); };
-    const visible = (element) => !!element && !element.closest("[hidden]") && element.getClientRects().length > 0;
+    const visible = (element) => !!element && !element.closest("[hidden],[inert]") && element.getClientRects().length > 0 && view.getComputedStyle(element).visibility === "visible";
+    const diagnostics = () => ({ search: view.location.search, viewport: [view.innerWidth, view.innerHeight],
+      phone: view.matchMedia("(max-width:52rem)").matches, fonts: doc.fonts.status, active: doc.activeElement?.outerHTML,
+      page: !!doc.querySelector("[data-people-page]"), contexts: [...doc.querySelectorAll("[data-people-context]")].map(node => ({ parent: node.parentElement?.className, shown: visible(node) })),
+      detail: { shown: visible(doc.querySelector("[data-people-detail]")), hosts: doc.querySelectorAll("[data-people-detail]").length },
+      dialog: [...doc.querySelectorAll("dialog")].map(node => ({ open: node.open, modal: node.matches(":modal") })),
+      inert: [...doc.querySelectorAll("[inert]")].map(node => node.className), signIn: doc.querySelector("[data-member-details]")?.parentElement?.className });
+    const until = async (check, label, budget = 2000) => {
+      const deadline = view.performance.now() + budget;
+      while (!check()) {
+        if (view.performance.now() >= deadline) throw new Error("timed out waiting for " + label + ": " + JSON.stringify(diagnostics()));
+        await new Promise(resolve => view.setTimeout(resolve, budget === 8000 ? 100 : 20));
+      }
+    };
     const app = doc.querySelector("live-dashboard");
-    await until(() => app && app.dataset.state === "channel", "the sample workspace");
+    await until(() => app && app.dataset.state === "channel", "the sample workspace", 8000);
     view.__peopleReturnDocument = true;
     const go = (search) => { view.history.pushState({ home: true }, "", "/app" + search); view.dispatchEvent(new view.PopStateEvent("popstate", { state: { home: true } })); };
     if (scenario === "detail-focus") {
@@ -96,7 +109,12 @@ const peopleReturnScript = `
         }
         const ring = { left: rect.left - outset.left, right: rect.right + outset.right, top: rect.top - outset.top, bottom: rect.bottom + outset.bottom };
         const viewport = { left: 0, top: 0, right: view.innerWidth, bottom: view.innerHeight };
-        const intersection = { ...viewport }, ancestors = [], ignoredNonbox = []; let opacity = number(style.opacity);
+        const intersection = { ...viewport }, ancestors = [], ignoredNonbox = [], hiddenReasons = []; let opacity = number(style.opacity);
+        for (let node = element; node; node = node.parentElement) {
+          const css = view.getComputedStyle(node);
+          if (node.hidden || node.inert || css.display === "none" || css.visibility !== "visible")
+            hiddenReasons.push({ tag: node.tagName, classes: node.className, hidden: node.hidden, inert: node.inert, display: css.display, visibility: css.visibility });
+        }
         for (let ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
           const css = view.getComputedStyle(ancestor);
           opacity *= number(css.opacity);
@@ -111,53 +129,60 @@ const peopleReturnScript = `
           ancestors.push({ tag: ancestor.tagName, classes: ancestor.className, bounds, clipX, clipY, scrollTop: ancestor.scrollTop, scrollLeft: ancestor.scrollLeft,
             cutsX: clipX && (ring.left < bounds.left - .5 || ring.right > bounds.right + .5), cutsY: clipY && (ring.top < bounds.top - .5 || ring.bottom > bounds.bottom + .5) });
         }
-        return { active: doc.activeElement === element, focusVisible: element.matches(":focus-visible"), indicator: opacity > 0 && style.visibility === "visible" && (outline || shadow),
+        const shown = element.getClientRects().length > 0 && hiddenReasons.length === 0 && opacity > 0;
+        return { active: doc.activeElement === element, focusVisible: element.matches(":focus-visible"), indicator: shown && (outline || shadow), shown, hiddenReasons,
+          paneScroll: doc.querySelector("[data-home-route-pane]").scrollTop,
           rect, ring, outset, opacity, outline: style.outline, outlineOffset: style.outlineOffset, boxShadow: style.boxShadow, viewport, intersection, ancestors, ignoredNonbox,
           clipped: ancestors.filter((ancestor) => ancestor.cutsX || ancestor.cutsY),
           outside: rect.bottom <= intersection.top || rect.top >= intersection.bottom || rect.right <= intersection.left || rect.left >= intersection.right,
           insideViewport: ring.left >= -.5 && ring.right <= view.innerWidth + .5 && ring.top >= -.5 && ring.bottom <= view.innerHeight + .5 };
       };
-      const waitFor = async (check, label) => {
-        const deadline = view.performance.now() + 2000;
-        while (!check()) {
-          if (view.performance.now() >= deadline) throw new Error(label + ": " + JSON.stringify({ search: view.location.search, fonts: doc.fonts.status,
-            active: doc.activeElement?.outerHTML, detailHidden: doc.querySelector("[data-people-detail]")?.hidden,
-            pane: doc.querySelector("[data-home-route-pane]")?.getBoundingClientRect().toJSON() }));
-          await new Promise((resolve) => view.setTimeout(resolve, 20));
-        }
-      };
+      const waitFor = until;
       go("?w=" + workspace + "&v=people");
-      await waitFor(() => visible(doc.querySelector("[data-people-page]")) && doc.querySelectorAll("[data-people-page] .pd-agent-disclosure").length === 9 && doc.fonts.status === "loaded", "Field lab roster and fonts");
+      await waitFor(() => visible(doc.querySelector("[data-people-page]")) && doc.querySelectorAll("[data-people-context] .pd-agent-disclosure").length === 9 && doc.fonts.status === "loaded", "Field lab roster and fonts");
       const cases = [];
       for (const kind of ["person", "agent"]) for (const via of ["Close", "Escape"]) {
-        const opener = doc.querySelector("[data-people-page] .pd-" + kind + "-disclosure");
+        const rows = [...doc.querySelectorAll("[data-people-context] .pd-" + kind + "-disclosure")];
+        const opener = kind === "agent" ? rows.at(-1) : rows[0];
         if (!opener) throw new Error("missing " + kind + " disclosure");
-        const id = opener.id, before = measure(opener);
-        if (before.outside) throw new Error("the starting " + kind + " disclosure is outside the visible pane: " + JSON.stringify(before));
+        // Explicit pre-action positioning only. No scroll/focus correction follows Close/Escape.
+        doc.querySelector("[data-home-route-pane]").scrollTop = 0;
+        const initial = measure(opener), id = opener.id;
+        if (kind === "agent" && (!initial.shown || !initial.outside)) throw new Error("last Field lab agent must start genuinely below the phone viewport: " + JSON.stringify(initial));
+        opener.scrollIntoView({ block: "center" });
+        await waitFor(() => { const q = measure(opener); return q.shown && q.insideViewport && !q.clipped.length; }, "painted starting " + kind + " row");
+        const before = measure(opener);
+        if (!before.shown || before.outside) throw new Error("the starting disclosure is not painted: " + JSON.stringify(before));
         opener.click();
         await waitFor(() => visible(doc.querySelector("[data-people-detail]")) && doc.activeElement === doc.querySelector("#pd-detail-title"), "focused " + kind + " detail");
         const opened = measure(doc.getElementById(id));
-        if (!opened.outside) throw new Error("negative control: opening " + kind + " details did not put its row outside the visible pane: " + JSON.stringify(opened));
+        if (opened.shown && !opened.outside) throw new Error("opening details must hide or genuinely move its row offscreen: " + JSON.stringify(opened));
+        const returnNeedsScroll = before.rect.top + before.paneScroll - opened.paneScroll >= before.intersection.bottom;
+        if (kind === "agent" && !returnNeedsScroll) throw new Error("last-agent counterfactual does not require native return scrolling: " + JSON.stringify({ initial, before, opened }));
         let escapeHandled = false;
         if (via === "Close") doc.querySelector("[data-people-detail] .pd-close-detail").click();
         else { const event = new view.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }); doc.dispatchEvent(event); escapeHandled = event.defaultPrevented; }
         await waitFor(() => !visible(doc.querySelector("[data-people-detail]")) && doc.activeElement === doc.getElementById(id), "closed " + kind + " detail and returned focus via " + via);
         const returned = doc.getElementById(id), after = measure(returned);
-        cases.push({ kind, via, id, before, opened, after, escapeHandled, collapsed: returned.getAttribute("aria-expanded") === "false", sameDocument: view.__peopleReturnDocument === true });
+        cases.push({ kind, via, id, initial, before, opened, after, returnNeedsScroll, escapeHandled, collapsed: returned.getAttribute("aria-expanded") === "false", sameDocument: view.__peopleReturnDocument === true });
+        report("data-people-return-partial", { viewport: [view.innerWidth, view.innerHeight], cases });
         // Stop at the first product failure, preserving the exact uncorrected geometry in the report.
-        if (!after.active || !after.focusVisible || !after.indicator || !after.insideViewport || after.clipped.length)
+        if (!after.shown || !after.active || !after.focusVisible || !after.indicator || !after.insideViewport || after.clipped.length)
           throw new Error("returned " + kind + " focus via " + via + " is not fully visible: " + JSON.stringify(cases));
       }
       return { viewport: { width: view.innerWidth, height: view.innerHeight }, cases };
     }
     const state = () => {
-      const page = doc.querySelector("[data-people-page]"); const detail = doc.querySelector("[data-people-detail]");
+      const page = doc.querySelector("[data-people-page]"), context = doc.querySelector("[data-people-context]"), detail = doc.querySelector("[data-people-detail]");
       return { search: view.location.search, page: visible(page), detailInPage: !!page && !!detail && page.contains(detail),
-        detailHosts: doc.querySelectorAll("[data-people-detail]").length, openers: doc.querySelectorAll("[data-people-page] [aria-controls='pd-detail']").length };
+        detailHosts: doc.querySelectorAll("[data-people-detail]").length, openers: doc.querySelectorAll("[data-people-context] [aria-controls='pd-detail']").length,
+        contexts: doc.querySelectorAll("[data-people-context]").length, contextInShell: !!context?.closest(".cs-org-context-body"), contextInPage: !!page && !!context && page.contains(context) };
     };
+    const pageReady = () => { const q = state(); return q.page && q.detailInPage && q.detailHosts === 1 && q.contexts === 1 && q.openers > 0 &&
+      (view.matchMedia("(max-width:52rem)").matches ? q.contextInPage : q.contextInShell) && doc.fonts.status === "loaded" &&
+      visible(doc.querySelector("[data-people-context] .pd-page-head [data-member-details]")); };
     go("?w=" + workspace + "&v=people");
-    await until(() => visible(doc.querySelector("[data-people-page]")), "the People page");
-    await settle(200);
+    await until(pageReady, "the People page/context/sign-in host/fonts");
     const before = state();
     const original = doc.querySelector("[data-people-detail]");
     /* A refused removal, as the app's FreshLoginRequired handler leaves it: the error and the sign-in block shown
@@ -167,14 +192,15 @@ const peopleReturnScript = `
     if (reauth) reauth.hidden = false;
     const signInControls = () => Array.from(doc.querySelectorAll("[data-member-error], [data-member-reauth] button")).filter(visible).length;
     const signInBefore = signInControls();
-    const agentRow = doc.querySelector("[data-people-page] [id^='pd-agent-']");
+    const agentRow = doc.querySelector("[data-people-context] .pd-agent-disclosure");
     const agentId = agentRow ? agentRow.id.slice("pd-agent-".length) : "";
     const away = { manage: "?w=" + workspace + "&agent=" + agentId, agent: "?w=" + workspace + "&agent=" + agentId,
       todos: "?w=" + workspace + "&v=todos", catchup: "?v=catchup" }[scenario];
     if (!away || ((scenario === "manage" || scenario === "agent") && !agentId)) throw new Error("no route for scenario " + scenario + " (agent " + agentId + ")");
     go(away);
-    await until(() => view.location.search === away, "the route " + away);
-    await settle(600);
+    await until(() => view.location.search === away && !doc.querySelector("[data-people-page],[data-people-context]") &&
+      original.isConnected && original.hidden && !original.closest("[data-home-route-pane]") && signInControls() === 0 &&
+      (scenario === "catchup" ? visible(doc.querySelector("[data-home-catchup]")) : visible(doc.querySelector("[data-home-route-pane]"))), "settled away route " + away);
     const awayState = { search: view.location.search, peoplePageInDom: !!doc.querySelector("[data-people-page]"),
       detailConnected: !!original && original.isConnected && !!original.closest("[data-home-route-pane]"), visibleSignIn: signInControls() };
     let returnedBy = "Back";
@@ -186,16 +212,14 @@ const peopleReturnScript = `
       else if (door) { returnedBy = "People door"; door.click(); }
       else { returnedBy = "route"; go("?w=" + workspace + "&v=people"); }
     } else view.history.back();
-    await until(() => view.location.search.includes("v=people"), "the People route again").catch(() => {});
-    await until(() => visible(doc.querySelector("[data-people-page]")), "the People page again").catch(() => {});
-    await settle(300);
+    await until(() => view.location.search.includes("v=people") && pageReady(), "the People route/context/sign-in host again");
     const after = state();
     const host = doc.querySelector("[data-member-details]");
-    const signInAfter = { mounted: !!host && !!host.closest("[data-people-page] .pd-page-head") && !host.hidden, visible: signInControls() };
+    const signInAfter = { mounted: !!host && !!host.closest("[data-people-context] .pd-page-head") && !host.hidden, visible: signInControls() };
     let detail = { opened: false, title: null };
-    const opener = Array.from(doc.querySelectorAll("[data-people-page] [aria-controls='pd-detail']")).find(visible);
+    const opener = Array.from(doc.querySelectorAll("[data-people-context] [aria-controls='pd-detail']")).find(visible);
     if (opener) {
-      opener.click(); await settle(300);
+      opener.click(); await until(() => visible(doc.querySelector("[data-people-detail]")) && doc.activeElement === doc.querySelector("#pd-detail-title"), "the returned page's focused detail");
       const host = doc.querySelector("[data-people-detail]"); const title = doc.querySelector("#pd-detail-title");
       detail = { opened: !!host && visible(host) && !!title && !!host.closest("[data-people-page]"), title: title ? title.textContent : null };
     }
@@ -267,12 +291,15 @@ test("People & agents comes back with its detail column after another route took
          leaving, and the other route really replaced the pane (the page left the document). Without them,
          an unrendered page or a route that never left would pass the checks below. */
       assert.ok(result.before.page && result.before.detailInPage && result.before.openers > 0, `${label}: the People page never rendered: ${facts}`);
+      assert.ok(result.before.contexts === 1 && result.before.contextInShell && !result.before.contextInPage, `${label}: the actual desktop roster must be projected once into context: ${facts}`);
       assert.equal(result.away.peoplePageInDom, false, `${label}: the other route did not replace the pane, so this measures nothing: ${facts}`);
       assert.equal(result.sameDocument, true, `${label}: the app reloaded, so this is not the in-app path: ${facts}`);
       assert.match(result.after.search, /v=people/, `${label}: the route did not return to People: ${facts}`);
       assert.ok(result.after.page, `${label}: the URL says People but the page is blank: ${facts}`);
       assert.ok(result.after.detailInPage, `${label}: the page came back without its detail column: ${facts}`);
       assert.equal(result.after.detailHosts, 1, `${label}: there must be exactly one detail host: ${facts}`);
+      assert.ok(result.after.contexts === 1 && result.after.contextInShell && !result.after.contextInPage && result.after.openers === result.before.openers,
+        `${label}: return must restore the whole desktop roster once, outside the main profile: ${facts}`);
       /* Parking keeps the one host (and any state on it); a recreated host means a route cleared the pane unparked. */
       assert.equal(result.sameDetailHost, true, `${label}: the detail host was lost and recreated, so a pane replacement skipped parkPeopleHosts: ${facts}`);
       assert.equal(result.detail.opened, true, `${label}: a person's details did not open on the returned page: ${facts}`);
@@ -296,8 +323,11 @@ test("closing a person's or agent's details returns visible focus to its row on 
       assert.deepEqual(result.cases.map(({ kind, via }) => [kind, via]), [["person", "Close"], ["person", "Escape"], ["agent", "Close"], ["agent", "Escape"]]);
       for (const row of result.cases) {
         const facts = `${width}×${height} ${row.kind}/${row.via}: ${JSON.stringify(row)}`;
-        assert.equal(row.opened.outside, true, `the opener must really leave the visible pane: ${facts}`);
-        assert.ok(row.after.active && row.collapsed && row.sameDocument, `Close must restore the actual matching row in the same app: ${facts}`);
+        assert.ok(row.before.shown && !row.before.outside, `the origin must be painted before the real action: ${facts}`);
+        assert.ok(!row.opened.shown || row.opened.outside, `selection must actually hide or move the origin offscreen: ${facts}`);
+        if (row.kind === "agent") assert.ok(row.initial.shown && row.initial.outside && row.returnNeedsScroll,
+          `the real last Field lab row must require return scrolling, making preventScroll:true a failing negative: ${facts}`);
+        assert.ok(row.after.shown && row.after.active && row.collapsed && row.sameDocument, `Close must restore the actual matching painted row in the same app: ${facts}`);
         assert.ok(row.after.focusVisible && row.after.indicator, `the returned row must paint its focus indicator: ${facts}`);
         assert.ok(row.after.insideViewport, `the whole painted ring must fit the iframe viewport: ${facts}`);
         assert.deepEqual(row.after.clipped, [], `every generated clipping ancestor must contain the whole ring: ${facts}`);
