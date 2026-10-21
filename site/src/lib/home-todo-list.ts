@@ -48,7 +48,7 @@ function row(doc: Document, entry: TodoListRow, vm: TodoListVM, callbacks: TodoL
     title.id = `${base}-title`; sub.id = `${base}-sub`;
     copy.setAttribute("aria-labelledby", `${title.id} ${sub.id}`);
   }
-  copy.append(title, sub);
+  copy.append(title, doc.createTextNode(" "), sub);
   item.append(copy);
   // The assignee's avatar on the right, as on the workspace To-dos card. The subline already names them.
   const assignee = todo.assignee;
