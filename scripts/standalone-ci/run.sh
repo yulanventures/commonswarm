@@ -122,9 +122,16 @@ os.umask(0o077)
 SOURCE_URL = 'https://github.com/yulanventures/commonswarm.git'
 if cfg.get('source_url') != SOURCE_URL:
     refuse('source must be the public CommonSwarm HTTPS URL')
-timeout = cfg.get('timeout_seconds', 1800)
+default_timeout = cfg.get('timeout_seconds', 1800)
+timeout = default_timeout
 if not isinstance(timeout, int) or not 1 <= timeout <= 1800:
     refuse('suite timeout must be 1..1800 seconds')
+# Latest green server run csci-763b682fe6d64c0c9d4c3064f9fde956,
+# 2026-10-20: suite_started_at -> ended_at = 1780.806374 seconds.
+# ceil(duration * 1.5) = 2672; only server receives this measured bound.
+server_timeout = cfg.get('server_timeout_seconds', 2672)
+if type(server_timeout) is not int or not 1 <= server_timeout <= 2672:
+    refuse('server timeout must be 1..2672 seconds')
 for key in ('worker_image', 'dind_image'):
     if not re.fullmatch(r'(?:[^\s]+@)?sha256:[0-9a-f]{64}', cfg[key]):
         refuse('images must be resolved immutable digests')
@@ -247,8 +254,10 @@ with (state / 'queue.lock').open('a') as lock:
         if stopping:
             overall = 130
             break
+        timeout = server_timeout if suite == 'server' else default_timeout
         suite_clock = time.monotonic()
         deadline = suite_clock + timeout
+        deferred_wait = 0.0
         suite_started = stamp()
         attempt = 0
         prior_attempts = []
@@ -277,7 +286,8 @@ with (state / 'queue.lock').open('a') as lock:
                            controller_sha=cfg['controller_sha'], images={k: cfg[k] for k in ('worker_image', 'dind_image')},
                            timeout_seconds=timeout, timed_out=False, gates={}, cleanup_errors=[],
                            attempt=attempt, prior_attempts=list(prior_attempts), state='running',
-                           pending=True, suite_started_at=suite_started)
+                           pending=True, suite_started_at=suite_started,
+                           deferred_wait_seconds=round(deferred_wait, 3))
             receipt['controller_checksums'] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                                                  for p in sorted(controller.iterdir()) if p.is_file()}
             active = None
@@ -440,6 +450,7 @@ with (state / 'queue.lock').open('a') as lock:
                 receipt['state'] = 'completed' if code == 0 else 'failed'
             receipt.update(exit_code=code, ended_at=stamp(),
                            elapsed_seconds=round(time.monotonic() - suite_clock, 3),
+                           active_elapsed_seconds=round(time.monotonic() - suite_clock - deferred_wait, 3),
                            pending=receipt['state'] == 'deferred')
             def artifact_bytes(path):
                 fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -485,27 +496,41 @@ with (state / 'queue.lock').open('a') as lock:
             print(json.dumps({'receipt': str(run / 'receipt.json'), 'suite': suite, 'state': receipt['state'], 'exit_code': code}), flush=True)
             if receipt['state'] == 'deferred':
                 # Deferred is unfinished work, never a suite pass. Retry this snapshot
-                # only after PE becomes quiet, within the original suite deadline.
+                # only after PE becomes quiet. Pause only this waiting interval;
+                # setup, interrupted attempts and cleanup remain charged. The
+                # independent queue ceiling still bounds a continuously busy PE.
+                quiet_started = time.monotonic()
+                quiet_deadline = quiet_started + 600
                 try:
+                    if quiet_started >= deadline:
+                        raise sp.TimeoutExpired(['active-budget'], timeout)
                     while True:
-                        if time.monotonic() >= deadline:
-                            raise sp.TimeoutExpired(['quiet-retry'], timeout)
+                        if time.monotonic() >= quiet_deadline:
+                            raise sp.TimeoutExpired(['quiet-retry'], 600)
                         try:
                             check_capacity()
                             break
                         except Deferred:
-                            time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+                            time.sleep(min(0.25, max(0, quiet_deadline - time.monotonic())))
                 except sp.TimeoutExpired:
                     code = 124
                     receipt.update(state='failed', pending=False, timed_out=True, exit_code=code, ended_at=stamp(),
-                                   elapsed_seconds=round(time.monotonic() - suite_clock, 3))
+                                   elapsed_seconds=round(time.monotonic() - suite_clock, 3),
+                                   active_elapsed_seconds=round(quiet_started - suite_clock - deferred_wait, 3),
+                                   deferred_wait_seconds=round(deferred_wait + time.monotonic() - quiet_started, 3))
                     persist_receipt(run, receipt)
                 except (Exception, KeyboardInterrupt, StopRequested) as e:
                     code = 130 if isinstance(e, (KeyboardInterrupt, StopRequested)) else 1
                     receipt.update(state='failed', pending=False, exit_code=code, ended_at=stamp(),
+                                   elapsed_seconds=round(time.monotonic() - suite_clock, 3),
+                                   active_elapsed_seconds=round(quiet_started - suite_clock - deferred_wait, 3),
+                                   deferred_wait_seconds=round(deferred_wait + time.monotonic() - quiet_started, 3),
                                    controller_error=type(e).__name__)
                     persist_receipt(run, receipt)
                 else:
+                    waited = time.monotonic() - quiet_started
+                    deadline += waited
+                    deferred_wait += waited
                     prior_attempts.append(run_id)
                     continue
             # Readiness failures are visible but never change CI exits or skip

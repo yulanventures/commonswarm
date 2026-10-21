@@ -224,6 +224,7 @@ test('all suites aggregate failures and retain exact source provenance and log c
     assert.equal(r.controller_sha, f.cfg.controller_sha);
     assert.equal(r.exit_code, r.suite === 'p1-cli' ? 9 : 0);
     assert.equal(r.timed_out, false); assert.deepEqual(r.cleanup_errors, []);
+    assert.equal(r.timeout_seconds, r.suite === 'server' ? 2672 : 10);
     if (process.platform==='linux') assert.deepEqual(r.github_status,{state:'ready',version:1});
     assert.ok(r.queued_at <= r.started_at && r.started_at <= r.ended_at);
     assert.match(r.artifacts['suite.log'], /^[a-f0-9]{64}$/);
@@ -246,9 +247,9 @@ test('concurrent invocations serialize actual worker lifetimes through the share
 });
 
 test('timeout writes failure receipt and removes owned services without removing an unrelated container', async () => {
-  const f = fixture({sleep: 10}); f.cfg.timeout_seconds = 1;
+  const f = fixture({sleep: 10}); f.cfg.timeout_seconds = 1; f.cfg.server_timeout_seconds = 1;
   writeFileSync(f.config,JSON.stringify(f.cfg));
-  const r = await start(f); assert.equal(r.status,124,r.stderr);
+  const r = await start(f,f.args('server')); assert.equal(r.status,124,r.stderr);
   const [receipt] = f.receipts(); assert.equal(receipt.timed_out,true); assert.equal(receipt.exit_code,124);
   assert.deepEqual(receipt.cleanup_errors,[]);
   assert.deepEqual(JSON.parse(readFileSync(join(f.root,'containers.json'))), {unowned:{label:'some-other-run'}});
@@ -347,16 +348,60 @@ test('own status worker permits CI; PE starting mid-suite defers owned work then
   assert.ok(!events.some(e=>e.action==='finish' && e.name===firstWorker.name));
 });
 
-test('PE quiet waiting consumes the suite budget and fails rather than passing deferred work', async () => {
-  const f = fixture(); f.cfg.timeout_seconds=1;
-  writeFileSync(f.config,JSON.stringify(f.cfg));
-  writeFileSync(join(f.root,'pe-active'),'active');
-  const result = await start(f); assert.equal(result.status,124,result.stderr);
-  const [receipt] = f.receipts();
-  assert.equal(receipt.timed_out,true); assert.equal(receipt.state,'failed');
-  assert.equal(receipt.pending,false); assert.equal(receipt.exit_code,124);
-  assert.ok(!existsSync(join(f.root,'events.jsonl')) || !readFileSync(join(f.root,'events.jsonl'),'utf8').includes('-worker'));
-  assert.deepEqual(JSON.parse(readFileSync(join(f.root,'containers.json'))),{unowned:{label:'some-other-run'}});
+// Test-audit: real controller deadlines/receipts own deferred accounting.
+// Old wall-clock expiry fails the long-wait positive; resetting the timer on
+// retry fails the interrupted-work negative. Existing timeout proof has no
+// deferral. Only the external PE process boundary is simulated, without hooks.
+test('deferred wait longer than the active budget permits completion but preserves consumed work', async () => {
+  for (const exhaust of [false,true]) {
+    const f=fixture({sleep:exhaust ? 3 : 0.15}); f.cfg.timeout_seconds=5;
+    writeFileSync(f.config,JSON.stringify(f.cfg));
+    const busy=join(f.root,'pe-active');
+    if (!exhaust) writeFileSync(busy,'active');
+    const running=start(f);
+    if (exhaust) {
+      let entered=false;
+      for(let n=0;n<400;n++) {
+        const path=join(f.root,'events.jsonl');
+        if(existsSync(path) && readFileSync(path,'utf8').includes('-worker')) {entered=true;break;}
+        await delay(10);
+      }
+      assert.ok(entered,'active work started before interruption');
+      await delay(1600); writeFileSync(busy,'active');
+    }
+    let deferred;
+    for(let n=0;n<400;n++) {
+      const runs=join(f.state,'runs');
+      if(existsSync(runs)) for(const id of readdirSync(runs)) {
+        const path=join(runs,id,'receipt.json');
+        if(existsSync(path)) {
+          const r=JSON.parse(readFileSync(path));
+          if(r.state==='deferred') deferred=r;
+        }
+      }
+      if(deferred) break;
+      await delay(10);
+    }
+    assert.ok(deferred); assert.equal(deferred.github_status,undefined);
+    await delay(6000); // exceeds the entire five-second active allowance
+    assert.equal(running.child.exitCode,null,'waiting is still pending after active allowance');
+    renameSync(busy,join(f.root,'pe-finished'));
+    const result=await running;
+    assert.equal(result.status,exhaust ? 124 : 0,result.stderr);
+    const receipts=f.receipts().sort((a,b)=>a.attempt-b.attempt);
+    assert.equal(receipts.length,2);
+    assert.equal(receipts[0].state,'deferred'); assert.equal(receipts[0].pending,true);
+    const last=receipts[1];
+    assert.equal(last.state,exhaust ? 'failed' : 'completed');
+    assert.equal(last.timed_out,exhaust); assert.equal(last.pending,false);
+    assert.deepEqual(last.prior_attempts,[deferred.run_id]);
+    assert.ok(last.started_at>=deferred.ended_at);
+    assert.ok(last.deferred_wait_seconds>=6);
+    assert.ok(last.elapsed_seconds>=last.active_elapsed_seconds+6);
+    if(exhaust) assert.ok(last.active_elapsed_seconds>=5,'earlier active work remains charged');
+    for(const r of receipts) {assert.equal(r.resolved_sha,f.sha);assert.deepEqual(r.cleanup_errors,[]);}
+    assert.deepEqual(JSON.parse(readFileSync(join(f.root,'containers.json'))),{unowned:{label:'some-other-run'}});
+  }
 });
 
 // Test-audit: invalid identity config must refuse before fetch/worker startup.
