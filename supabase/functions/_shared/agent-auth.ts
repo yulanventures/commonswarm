@@ -53,6 +53,8 @@ export interface AgentAuthRow {
 export class LocalCredentialDenied extends Error {
   constructor(readonly credentialInvalid: boolean = false) { super('Local credential is no longer authorized'); }
 }
+/** Named route-policy denial; callers may preserve an operation's external class. */
+export class LocalCredentialWorkspaceMismatch extends LocalCredentialDenied {}
 export async function loadAgentCredential(
   tx: Sql, tokenHash: Uint8Array, expected: LocalAuthLockPlan,
   allowExpiredRenewal = false,
@@ -646,7 +648,7 @@ export async function planLocalOperation(tx: Sql, options: {
   const workspace = credential?.workspace_id ?? joinRows[0]?.workspace_id ?? options.workspace ?? null;
   if (!workspace && !options.admin) return null;
   // Nonlocking admission; authority is repeated after the final wait.
-  if (credential && options.workspace && credential.workspace_id!==options.workspace) throw new LocalCredentialDenied();
+  if (credential && options.workspace && credential.workspace_id!==options.workspace) throw new LocalCredentialWorkspaceMismatch();
   const owner=options.actor ?? credential?.owner_user_id ?? joinRows[0]?.owner_user_id;
   if (workspace && owner && !options.join) {
     const [admitted]=await tx<{ok:boolean}[]>`SELECT EXISTS(
