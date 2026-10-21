@@ -196,7 +196,16 @@ test("saved web sessions survive transient verification/refresh and reload; term
   });
   const helper = bundle.outputFiles[0]!.text;
   const rotatedAccessToken = accessToken.slice(0, accessToken.lastIndexOf(".") + 1) + encode({ rotated: true });
+  const otherUser = { ...user, id: "33333333-3333-4333-8333-333333333333", email: "peer@example.com" };
+  const otherAccessToken = [encode({ alg: "ES256", typ: "JWT" }),
+    encode({ aud: "authenticated", exp: Math.floor(Date.now() / 1000) + 3600, sub: otherUser.id }),
+    encode({ other: true })].join(".");
+  const heldMembership = new Map<string, () => void>();
   const recovered = new Set<string>();
+  const rotatingTokens = new Map<string, string>();
+  const holdRefresh = new Set<string>();
+  const releaseRefresh = new Map<string, () => void>();
+  const revoked = new Set<string>();
   const releases = new Map<string, number>();
   const commandRequests = new Map<string, { bodies: string[]; fetchCalls: string[]; committed: Map<string, string>; writes: number }>();
   const releaseOldUser = new Map<string, () => void>();
@@ -213,12 +222,12 @@ test("saved web sessions survive transient verification/refresh and reload; term
       res.writeHead(status, { "content-type": "application/json", ...(modern ? { "x-supabase-api-version": "2024-01-01" } : {}) });
       res.end(JSON.stringify(payload));
     };
-    if (url.pathname === "/probe") { json(200, counts); return; }
+    if (url.pathname === "/probe") { json(200, { ...counts, membershipPending: heldMembership.has(mode), refreshPending: releaseRefresh.has(mode) }); return; }
     if (url.pathname === "/deploy") {
       releases.set(mode, (releases.get(mode) ?? 1) + 1);
       json(200, { revision: releases.get(mode) }); return;
     }
-    if (url.pathname === "/release") { recovered.add(mode); releaseOldUser.get(mode)?.(); json(200, {}); return; }
+    if (url.pathname === "/release") { recovered.add(mode); releaseOldUser.get(mode)?.(); heldMembership.get(mode)?.(); json(200, {}); return; }
     if (url.pathname === "/functions/v1/command") {
       const record = commandRequests.get(mode) ?? { bodies: [], fetchCalls: [], committed: new Map<string, string>(), writes: 0 };
       commandRequests.set(mode, record);
@@ -244,6 +253,9 @@ test("saved web sessions survive transient verification/refresh and reload; term
       });
       return;
     }
+    if (url.pathname === "/hold-refresh") { holdRefresh.add(mode); json(200, {}); return; }
+    if (url.pathname === "/release-refresh") { releaseRefresh.get(mode)?.(); releaseRefresh.delete(mode); json(200, {}); return; }
+    if (url.pathname === "/revoke") { revoked.add(mode); json(200, {}); return; }
     if (url.pathname === "/recover") { recovered.add(mode); json(200, {}); return; }
     if (url.pathname.startsWith("/auth/v1/")) {
       const refresh = url.pathname.endsWith("/token");
@@ -251,10 +263,30 @@ test("saved web sessions survive transient verification/refresh and reload; term
       if (url.pathname.endsWith('/otp')) { json(200, {}); return; }
       if (url.pathname.endsWith('/logout')) { res.writeHead(204).end(); return; }
       if (refresh) counts.refreshes += 1; else if (url.pathname.endsWith("/user")) counts.users += 1;
+      if (!refresh && revoked.has(mode)) { json(403, { error_code: "session_not_found" }); return; }
+      if (refresh && (mode.startsWith("storage-rotation") || ["storage-unwritable", "storage-late-failure"].includes(mode))) {
+        let body = "";
+        req.on("data", chunk => { body += chunk; });
+        req.on("end", () => {
+          const current = rotatingTokens.get(mode) ?? "browser-refresh";
+          if (JSON.parse(body).refresh_token !== current) {
+            json(400, { error_code: "refresh_token_not_found" }); return;
+          }
+          const successor = `consumed-${counts.refreshes}`;
+          rotatingTokens.set(mode, successor);
+          const respond = () => json(200, { access_token: rotatedAccessToken, refresh_token: successor,
+            expires_in: 3600, token_type: "bearer", user });
+          if (holdRefresh.delete(mode)) releaseRefresh.set(mode, respond); else respond();
+        });
+        return;
+      }
       if (["race", "race-unlocked"].includes(mode) && !refresh && counts.users === 1) {
         releaseOldUser.set(mode, () => json(403, { error_code: "session_not_found" })); return;
       }
       if (!recovered.has(mode)) {
+        if ((mode === "recovery-user" || mode.startsWith("recovery-late-")) && !refresh) { json(503, { error_code: "unexpected_failure" }); return; }
+        if (mode === "recovery-refresh-hang" && refresh) return;
+        if (mode === "recovery-refresh" && refresh) { json(503, { error_code: "unexpected_failure" }); return; }
         if ((mode === "user-network" && !refresh) || (mode === "refresh-network" && refresh)) {
           req.socket.destroy(); return;
         }
@@ -266,10 +298,16 @@ test("saved web sessions survive transient verification/refresh and reload; term
       }
       if (refresh) json(200, { access_token: rotatedAccessToken, refresh_token: "browser-rotated",
         expires_in: 3600, token_type: "bearer", user });
-      else json(200, user);
+      else json(200, req.headers.authorization === `Bearer ${otherAccessToken}` ? otherUser : user);
       return;
     }
-    if (url.pathname.startsWith("/rest/v1/")) { json(200, []); return; }
+    if (url.pathname.startsWith("/rest/v1/")) {
+      if (mode.startsWith("recovery-late-") && !heldMembership.has(mode)) {
+        heldMembership.set(mode, () => json(200, [])); return;
+      }
+      if (mode === "recovery-membership") { json(503, { message: "Fixture membership unavailable" }); return; }
+      json(200, []); return;
+    }
     if (url.pathname === "/helper.js") {
       res.writeHead(200, { "content-type": "text/javascript", "cache-control": "no-store" })
         .end(helper + `\n/* fixture release ${releases.get(mode) ?? 1} */`); return;
@@ -280,7 +318,7 @@ test("saved web sessions survive transient verification/refresh and reload; term
       const commandFetchCalls=new Map();
       window.fetch=(input,init)=>{
         const u=new URL(typeof input==='string'?input:input.url,location.href);
-        const routed=u.pathname.startsWith('/auth/v1/')||u.pathname==='/functions/v1/command';
+        const routed=u.pathname.startsWith('/auth/v1/')||u.pathname.startsWith('/rest/v1/')||u.pathname==='/functions/v1/command';
         if(routed)u.searchParams.set('mode',${JSON.stringify(mode)});
         if(u.pathname==='/functions/v1/command'){
           const id=JSON.parse(init.body).command_id;
@@ -310,11 +348,19 @@ test("saved web sessions survive transient verification/refresh and reload; term
         })().catch(e=>document.body.dataset.failure=e.message);
       </script></body>`); return;
     }
+    if (url.pathname === "/durable") {
+      res.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><head>${bootstrap}<script src="/helper.js"></script></head><body><script>
+        cs.currentSession().then(session=>{
+          if(!session?.refresh_token.startsWith('consumed-'))throw Error('durable successor lost on process reopen');
+          document.body.dataset.result='passed';
+        }).catch(e=>document.body.dataset.failure=e.message);
+      </script></body>`); return;
+    }
     if (url.pathname === "/peer") {
       res.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><head>${bootstrap}<script src="/helper.js"></script></head><body></body>`); return;
     }
     if (url.pathname === "/measure") {
-      const expired = mode.startsWith("refresh") || mode.startsWith("terminal-refresh") || mode === "race-refresh429";
+      const expired = mode.startsWith("recovery-refresh") || mode.startsWith("refresh") || mode.startsWith("terminal-refresh") || mode === "race-refresh429";
       const seed = { access_token: accessToken, refresh_token: "browser-refresh",
         expires_at: expired ? Math.floor(Date.now()/1000)-60 : Math.floor(Date.now()/1000)+(mode === "terminal-proactive" ? 60 : 3600),
         token_type: "bearer", user };
@@ -336,18 +382,120 @@ test("saved web sessions survive transient verification/refresh and reload; term
           if(mode.startsWith('lifecycle-')){
             location.replace('/lifecycle?mode='+mode);return;
           }
-          if(mode==='storage-unwritable'||mode==='storage-late-failure'){
-            if(mode==='storage-late-failure')await cs.currentSession();
+          if(mode==='storage-fresh-signin'||mode==='storage-read-denied'){
+            const key='sb-127-auth-token';
+            const nativeSet=Storage.prototype.setItem;
+            const nativeGet=Storage.prototype.getItem;
+            const old=localStorage.getItem(key);
+            if(mode==='storage-fresh-signin')localStorage.removeItem(key);
+            else Storage.prototype.getItem=function(){throw new DOMException('Fixture read denial','SecurityError');};
             Storage.prototype.setItem=function(){throw new DOMException('Fixture quota','QuotaExceededError');};
             const api=cs.client();
-            check((await cs.currentSession())?.refresh_token==='browser-refresh','failed write probe must retain readable login');
-            check(JSON.parse(localStorage.getItem('sb-127-auth-token')).refresh_token==='browser-refresh','probe alone must not erase persistent login');
-            check(!(await api.auth.setSession({access_token:${JSON.stringify(rotatedAccessToken)},refresh_token:'memory-successor'})).error,'fallback sign-in');
-            check((await cs.currentSession())?.refresh_token==='memory-successor','fallback must shadow old readable slot');
-            check(localStorage.getItem('sb-127-auth-token')===null,'failed replacement must remove superseded persistent credential');
-            check((await api.auth.refreshSession()).data.session?.refresh_token==='browser-rotated','fallback refresh');
-            check((await cs.currentSession())?.refresh_token==='browser-rotated','fallback must retain rotation within page');
-            await checkReloadSignedOut();
+            await api.auth.getSession();
+            check(!(await api.auth.setSession({access_token:${JSON.stringify(rotatedAccessToken)},refresh_token:'fresh-signin'})).error,'fresh sign-in succeeds in memory');
+            Storage.prototype.getItem=nativeGet;
+            check((await cs.currentSession())?.refresh_token==='fresh-signin','read recovery must preserve the page successor');
+            if(mode==='storage-read-denied'){
+              Storage.prototype.setItem=nativeSet;
+              await new Promise(r=>setTimeout(r,3500));
+              check(localStorage.getItem(key)===old,'unknown ownership cannot overwrite native bytes');
+              check((await cs.currentSession())?.refresh_token==='fresh-signin','unknown disk snapshot cannot replace memory successor');
+              const peer=document.createElement('iframe');peer.src='/peer?mode='+mode;
+              document.body.append(peer);await wait(()=>peer.contentWindow.cs);
+              check(!(await peer.contentWindow.cs.client().auth.signOut({scope:'local'})).error,'peer logout with unknown snapshot');
+              await wait(()=>localStorage.getItem(key)===null,'peer removal');
+              check(await cs.currentSession()===null,'observed peer logout cancels unknown-snapshot save');
+            }else{
+              let ready,release;
+              const acquired=new Promise(r=>ready=r);
+              const held=navigator.locks.request('lock:'+key,async()=>{ready();await new Promise(r=>release=r);});
+              await acquired;
+              Storage.prototype.setItem=nativeSet;
+              await new Promise(r=>setTimeout(r,3500));
+              check(localStorage.getItem(key)===null,'fresh sign-in retry must respect the SDK session lock');
+              check(!(await navigator.locks.query()).pending.some(lock=>lock.name==='lock:'+key),'busy retry must not leave a queued lock request');
+              release();await held;
+              await wait(()=>JSON.parse(localStorage.getItem(key)||'null')?.refresh_token==='fresh-signin','fresh sign-in durable retry after lock release');
+            }
+            document.body.dataset.result='passed';return;
+          }
+          if(mode==='storage-unwritable'||mode==='storage-late-failure'||mode.startsWith('storage-rotation')){
+            const key='sb-127-auth-token';
+            let predecessor='browser-refresh';
+            if(mode==='storage-late-failure'){
+              await cs.currentSession();
+              const established=await cs.client().auth.refreshSession();
+              check(!established.error,'native storage works before late denial');
+              predecessor=established.data.session.refresh_token;
+            }
+            const old=localStorage.getItem(key);
+            const nativeSet=Storage.prototype.setItem;
+            Storage.prototype.setItem=function(){throw new DOMException('Fixture quota','QuotaExceededError');};
+            const api=cs.client();
+            check((await cs.currentSession())?.refresh_token===predecessor,'failed write probe must retain readable login');
+            check(localStorage.getItem(key)===old,'probe must preserve exact saved bytes');
+            const rotated=await api.auth.refreshSession();
+            check(!rotated.error,'real SDK refresh must succeed despite denied native writes');
+            const successor=rotated.data.session.refresh_token;
+            check((await cs.currentSession())?.refresh_token===successor,'page must use rotated successor');
+            check(localStorage.getItem(key)===old,'failed replacement must preserve exact saved bytes');
+            const obsolete=await fetch('/auth/v1/token?grant_type=refresh_token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({refresh_token:predecessor})});
+            check(obsolete.status===400&&(await obsolete.json()).error_code==='refresh_token_not_found','consumed predecessor must actually be invalid');
+            check(!(await api.auth.refreshSession()).error,'current successor is the consuming fixture positive control');
+            if(mode==='storage-rotation-terminal'){
+              await fetch('/revoke?mode='+mode);
+              let error;try{await cs.currentSession();}catch(e){error=e;}
+              check(error?.name==='SessionExpired','matching terminal proof defeats pending successor');
+              check(localStorage.getItem(key)===null,'terminal proof still removes persistent auth');
+              Storage.prototype.setItem=nativeSet;
+              await new Promise(r=>setTimeout(r,3500));
+              check(localStorage.getItem(key)===null,'retry cannot resurrect terminally removed login');
+              await checkReloadSignedOut();
+            }else if(mode.includes('peer-')){
+              const peer=document.createElement('iframe');peer.src='/peer?mode='+mode;
+              document.body.append(peer);await wait(()=>peer.contentWindow.cs);
+              const peerApi=mode.endsWith('-unlocked')?peer.contentWindow.cs.rawClient(location.origin,'fixture-anon',{auth:{autoRefreshToken:false}}):peer.contentWindow.cs.client();
+              check((await peerApi.auth.getSession()).data.session!==null,'peer loads saved owner');
+              let lateRefresh;
+              let beforeLate;
+              if(mode.endsWith('-unlocked')){
+                beforeLate=(await (await fetch('/probe?mode='+mode)).json()).refreshes;
+                await fetch('/hold-refresh?mode='+mode);
+                lateRefresh=api.auth.refreshSession();
+                for(let i=0;i<100;i++){
+                  if((await (await fetch('/probe?mode='+mode)).json()).refreshPending)break;
+                  await new Promise(r=>setTimeout(r,20));
+                }
+                check((await (await fetch('/probe?mode='+mode)).json()).refreshPending,'consuming refresh response must be held');
+              }
+              let signedOut=false;peerApi.auth.onAuthStateChange(event=>{if(event==='SIGNED_OUT')signedOut=true;});
+              if(mode.includes('peer-logout'))check(!(await peerApi.auth.signOut({scope:'local'})).error,'peer logout');
+              else check(!(await peerApi.auth.setSession({access_token:${JSON.stringify(rotatedAccessToken)},refresh_token:'peer-successor'})).error,'peer successor');
+              await new Promise(r=>setTimeout(r,100));
+              if(lateRefresh){
+                await fetch('/release-refresh?mode='+mode);
+                const discarded=await Promise.race([lateRefresh,new Promise(resolve=>setTimeout(()=>resolve(null),2000))]);
+                check(discarded?.error?.name==='AuthRefreshDiscardedError','peer ownership must discard consumed refresh without retry or cooldown');
+                check((await (await fetch('/probe?mode='+mode)).json()).refreshes===beforeLate+1,'consumed refresh must reach HTTP exactly once');
+              }
+              Storage.prototype.setItem=nativeSet;
+              await new Promise(r=>setTimeout(r,3500));
+              if(mode.includes('peer-logout')){
+                check(localStorage.getItem(key)===null,'pending save must not resurrect peer logout');
+                check(await cs.currentSession()===null,'peer logout defeats page successor');
+              }else{
+                check(JSON.parse(localStorage.getItem(key)).refresh_token==='peer-successor','peer successor defeats pending save');
+                check((await cs.currentSession())?.refresh_token==='peer-successor','page reconciles peer successor');
+                check(!signedOut,'pending save cannot broadcast sign-out over peer successor');
+              }
+            }else{
+              const latest=(await cs.currentSession()).refresh_token;
+              Storage.prototype.setItem=nativeSet;
+              await wait(()=>JSON.parse(localStorage.getItem(key)||'null')?.refresh_token===latest,'native write/readback recovery');
+              const peer=document.createElement('iframe');peer.src='/peer?mode='+mode;
+              document.body.append(peer);await wait(()=>peer.contentWindow.cs);
+              check((await peer.contentWindow.cs.currentSession())?.refresh_token===latest,'fresh client reads durable successor');
+            }
             document.body.dataset.result='passed';return;
           }
           if(mode==='storage-explicit-logout'||mode==='storage-removal-retry'){
@@ -355,6 +503,7 @@ test("saved web sessions survive transient verification/refresh and reload; term
             if(mode==='storage-explicit-logout')Storage.prototype.setItem=function(){throw new DOMException('Fixture quota','QuotaExceededError');};
             const api=cs.client();
             check((await cs.currentSession())?.refresh_token==='browser-refresh','readable login before logout');
+            if(mode==='storage-explicit-logout')check(!(await api.auth.refreshSession()).error,'logout must cancel a real pending successor');
             if(mode==='storage-removal-retry'){
               Storage.prototype.removeItem=function(){throw new DOMException('Fixture denial','SecurityError');};
               check(!(await api.auth.signOut({scope:'local'})).error,'logout with denied persistent removal');
@@ -437,6 +586,57 @@ test("saved web sessions survive transient verification/refresh and reload; term
             await new Promise(r=>setTimeout(r,100));check(!successorSignedOut,'stale terminal proof must not broadcast successor sign-out');
             document.body.dataset.result='passed';return;
           }
+          if(mode.startsWith('recovery-')){
+            let peer;
+            const readyPeer=async()=>{
+              peer=document.createElement('iframe');peer.src='/peer?mode='+mode;
+              document.body.append(peer);await wait(()=>peer.contentWindow.cs);
+              check((await peer.contentWindow.cs.client().auth.getSession()).data.session,'peer initialized before refresh');
+            };
+            // Initialize an unexpired peer before the dashboard subscribes, so
+            // peer initialization cannot supply a SIGNED_IN recovery shortcut.
+            if(!mode.startsWith('recovery-refresh'))await readyPeer();
+            const frame=document.createElement('iframe');frame.src='/app/?mode='+mode;document.body.append(frame);
+            const state=()=>frame.contentDocument?.querySelector('live-dashboard')?.dataset.state;
+            await wait(()=>state()==='workspace-error','auth or membership recovery panel');
+            const before=frame.contentDocument.querySelector('[data-workspace-error]').textContent;
+            await fetch('/recover?mode='+mode);
+            // Expired/hanging cases finish the dashboard's own pending SDK
+            // refresh. Other cases get a real peer TOKEN_REFRESHED broadcast.
+            if(peer)check(!(await peer.contentWindow.cs.client().auth.refreshSession()).error,'SDK same-user refresh succeeds');
+            if(mode.startsWith('recovery-late-')){
+              for(let i=0;i<200;i++){
+                if((await(await fetch('/probe?mode='+mode)).json()).membershipPending)break;
+                await new Promise(r=>setTimeout(r,20));
+              }
+              check((await(await fetch('/probe?mode='+mode)).json()).membershipPending,'recovery boot must actually reach held membership');
+              const peerApi=peer.contentWindow.cs.client();
+              if(mode==='recovery-late-logout')check(!(await peerApi.auth.signOut({scope:'local'})).error,'logout during recovery boot');
+              else check(!(await peerApi.auth.setSession({access_token:${JSON.stringify(otherAccessToken)},refresh_token:'other-owner'})).error,'identity changes during recovery boot');
+              await new Promise(r=>setTimeout(r,100));
+              await fetch('/release?mode='+mode);
+              const wanted=mode==='recovery-late-logout'?'signed-out':'create';
+              await wait(()=>state()===wanted,'new identity defeats late recovery boot');
+              if(wanted==='signed-out')check(localStorage.getItem('sb-127-auth-token')===null,'late boot cannot resurrect logout');
+              else check(JSON.parse(localStorage.getItem('sb-127-auth-token')).user.id===${JSON.stringify(otherUser.id)},'late boot cannot replace new owner');
+            }else if(mode==='recovery-membership'){
+              await new Promise(r=>setTimeout(r,500));
+              check(state()==='workspace-error'&&frame.contentDocument.querySelector('[data-workspace-error]').textContent===before,'membership error must retain its own recovery');
+            }else{
+              for(let i=0;i<2000&&state()!=='create';i++)await new Promise(r=>setTimeout(r,20));
+              check(state()==='create','same-user refresh must recover without click or reload');
+              check(frame.contentDocument.querySelector('[data-panel="workspace-error"]').hidden,'auth recovery panel closes');
+              if(!peer)await readyPeer();
+              // Healthy refresh bursts must leave the rendered workspace intact.
+              const heading=frame.contentDocument.querySelector('[data-panel="create"] h1');
+              check(heading,'healthy workspace positive control');
+              await peer.contentWindow.cs.client().auth.refreshSession();
+              await peer.contentWindow.cs.client().auth.refreshSession();
+              await new Promise(r=>setTimeout(r,100));
+              check(state()==='create'&&heading===frame.contentDocument.querySelector('[data-panel="create"] h1'),'healthy refresh does not rebuild workspace');
+            }
+            document.body.dataset.result='passed';return;
+          }
           const frame=document.createElement('iframe');frame.src='/app/?mode=${mode}';document.body.append(frame);
           await wait(()=>['workspace-error','signed-out','create'].includes(frame.contentDocument?.querySelector('live-dashboard')?.dataset.state),'initial recovery panel');
           const state=()=>frame.contentDocument.querySelector('live-dashboard').dataset.state;
@@ -478,6 +678,10 @@ test("saved web sessions survive transient verification/refresh and reload; term
     const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     assert.equal(process.env.SESSION_CONTINUITY_CASES, undefined, "case subsets are forbidden for this gate");
     const modes = [
+      "recovery-user", "recovery-refresh", "recovery-refresh-hang", "recovery-membership", "recovery-late-logout", "recovery-late-user",
+      "storage-fresh-signin", "storage-read-denied",
+      "storage-rotation-terminal", "storage-rotation-peer-successor", "storage-rotation-peer-logout",
+      "storage-rotation-peer-successor-unlocked", "storage-rotation-peer-logout-unlocked",
       "user503", "user-network", "refresh429", "refresh-network", "terminal-user", "terminal-refresh", "terminal-proactive",
       "command-recover", "command-repeat", "command-unknown", "race", "race-unlocked",
       "storage-unwritable", "storage-late-failure", "storage-explicit-logout", "storage-removal-retry",
@@ -488,13 +692,14 @@ test("saved web sessions survive transient verification/refresh and reload; term
     // cases progress together within the existing 180s file gate.
     await Promise.all(modes.map(mode => t.test(mode, async () => {
       const lifecycle = mode.startsWith("lifecycle-");
-      const profile = lifecycle ? await mkdtemp(join(tmpdir(), "cswarm-web-continuity-")) : undefined;
+      const durable = ["storage-unwritable", "storage-late-failure"].includes(mode);
+      const profile = lifecycle || durable ? await mkdtemp(join(tmpdir(), "cswarm-web-continuity-")) : undefined;
       if (profile) t.after(async () => { await rm(profile, { recursive: true, force: true }); });
-      const phases = mode === "lifecycle-restart-deploy" ? ["seed", "restart", "deploy"] : ["seed"];
+      const phases = mode === "lifecycle-restart-deploy" ? ["seed", "restart", "deploy"] : durable ? ["seed", "durable"] : ["seed"];
       for (const phase of phases) {
       if (phase === "deploy") await nativeFetch(`${origin}/deploy?mode=${mode}`, { method: "POST" });
-      // Each phase launches a fresh browser process; the two lifecycle modes
-      // alone retain their own freshly created temporary profile across phases.
+      // Each phase launches a fresh browser process; lifecycle and durable-save
+      // modes retain only their own temporary profile, without reseeding.
       const reservation = createServer();
       await new Promise<void>(resolve => reservation.listen(0, "127.0.0.1", resolve));
       const port = (reservation.address() as { port: number }).port;
@@ -543,7 +748,7 @@ test("saved web sessions survive transient verification/refresh and reload; term
           });
           socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
         });
-        await send("Page.navigate", { url: `${origin}/${phase === "seed" ? "measure" : "lifecycle"}?mode=${mode}` });
+        await send("Page.navigate", { url: `${origin}/${phase === "seed" ? "measure" : phase === "durable" ? "durable" : "lifecycle"}?mode=${mode}` });
         let result: { result?: string; failure?: string } = {};
         for (let attempt = 0; attempt < 550; attempt++) {
           const message = await send("Runtime.evaluate", { expression: "JSON.stringify({result:document.body?.dataset.result,failure:document.body?.dataset.failure})", returnByValue: true });
