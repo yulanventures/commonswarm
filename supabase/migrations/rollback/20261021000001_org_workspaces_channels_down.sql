@@ -1,0 +1,70 @@
+-- Fail-Closed Rollback for 20261021000001_org_workspaces_channels.sql
+-- Refuses to drop privacy columns or tables if any visibility='private' channel exists,
+-- preventing accidental widening of private room history or file attachments to workspace-wide visibility.
+
+DO $org_workspaces_channels_rollback_guard$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_catalog.pg_attribute AS a
+    JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid
+    JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'swarm'
+      AND c.relname = 'channels'
+      AND a.attname = 'visibility'
+      AND NOT a.attisdropped
+  ) THEN
+    IF EXISTS (SELECT 1 FROM swarm.channels WHERE visibility = 'private') THEN
+      RAISE EXCEPTION 'ROLLBACK_REFUSED_PRIVATE_CHANNELS_EXIST: cannot drop private channel schema while visibility=private rows exist'
+        USING ERRCODE = '55000';
+    END IF;
+  END IF;
+
+  IF to_regclass('swarm.file_channel_bindings') IS NOT NULL THEN
+    IF EXISTS (
+      SELECT 1 FROM swarm.file_channel_bindings AS fb
+      JOIN swarm.channels AS c ON c.channel_id = fb.channel_id
+      WHERE c.visibility = 'private'
+    ) THEN
+      RAISE EXCEPTION 'ROLLBACK_REFUSED_PRIVATE_FILE_BINDINGS_EXIST: cannot drop file_channel_bindings while private channel bindings exist'
+        USING ERRCODE = '55000';
+    END IF;
+  END IF;
+END
+$org_workspaces_channels_rollback_guard$;
+
+DROP TRIGGER IF EXISTS channel_memberships_write_guard ON swarm.channel_memberships;
+DROP TRIGGER IF EXISTS channels_visibility_transition_guard ON swarm.channels;
+DROP FUNCTION IF EXISTS swarm.guard_channel_visibility_transition();
+DROP FUNCTION IF EXISTS swarm.private_channels_enabled();
+DROP FUNCTION IF EXISTS swarm.org_move_workspace(uuid, uuid, uuid, text);
+DROP FUNCTION IF EXISTS swarm.can_read_channel(uuid, text, uuid, uuid, uuid);
+DROP FUNCTION IF EXISTS swarm.can_read_workspace(uuid, text, uuid, uuid, uuid);
+DROP FUNCTION IF EXISTS swarm.can_read_org(uuid, text, uuid, uuid, uuid);
+DROP FUNCTION IF EXISTS swarm.has_live_ws_grant(uuid, text, uuid);
+DROP FUNCTION IF EXISTS swarm.live_org_role(uuid, text, uuid);
+
+DROP TABLE IF EXISTS swarm.org_approval_requests;
+DROP TABLE IF EXISTS swarm.file_channel_bindings;
+DROP TABLE IF EXISTS swarm.channel_memberships;
+DROP TABLE IF EXISTS swarm.connection_org_policies;
+DROP TABLE IF EXISTS swarm.workspace_principal_grants;
+DROP TABLE IF EXISTS swarm.org_invites;
+DROP TABLE IF EXISTS swarm.org_memberships;
+
+ALTER TABLE swarm.channels
+  DROP CONSTRAINT IF EXISTS channels_private_join_policy_check,
+  DROP COLUMN IF EXISTS topic,
+  DROP COLUMN IF EXISTS join_policy,
+  DROP COLUMN IF EXISTS visibility;
+
+DROP INDEX IF EXISTS swarm.workspaces_org_slug_lower_key;
+ALTER TABLE swarm.workspaces
+  DROP COLUMN IF EXISTS slug,
+  DROP COLUMN IF EXISTS org_id;
+
+ALTER TABLE swarm.agent_principals
+  DROP CONSTRAINT IF EXISTS agent_principals_workspace_identity_key,
+  DROP COLUMN IF EXISTS agent_identity_id;
+
+DROP TABLE IF EXISTS swarm.organizations;
+DROP TABLE IF EXISTS swarm.agent_identities;
