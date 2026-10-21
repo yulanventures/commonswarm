@@ -143,7 +143,7 @@ test("the page has Back, Escape for details, modal confirmations, and focus on a
   assert.match(dashboard, /back: \(\) => homeBack\(\)/);
   assert.match(route, /route.view === "people"\) return \{ view: "chat", workspaceId: route.workspaceId \}/, "Back without history returns to the workspace");
   assert.match(dashboard, /event.key !== "Escape" \|\| homeRoute.view !== "people" \|\| !peopleDialogState.selected/);
-  assert.match(dashboard, /\(peopleDialogFocus \? one<HTMLElement>\("#pd-detail-title"\) : null\)\s*\?\? one<HTMLElement>\("#pd-page-title"\)/);
+  // Actual arrival target preference/hidden/inert exclusion: existing home-integration owner.
   assert.match(
     dashboard,
     /one<HTMLButtonElement>\("\[data-roster-open\]"\)[\s\S]*?focus\(\{ preventScroll: true \}\)/,
