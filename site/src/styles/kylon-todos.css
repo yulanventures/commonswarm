@@ -71,7 +71,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos,
   border-radius: 6px; font-family: inherit; font-size: 13px; font-weight: 500; line-height: 1.5;
   white-space: normal; overflow-wrap: anywhere; text-align: start;
 }
-live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) :is(.hm-todo-save, .hm-todo-cancel, .hm-todos-filter-button, .hm-todos-add-open, .hm-choice) {
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) :is(.hm-todo-save, .hm-todo-cancel, .hm-todos-add-open, .hm-choice) {
   border: 1px solid var(--k-shell-control); padding-inline: 12px; box-shadow: none;
   background: var(--k-shell-surface); color: var(--k-shell-ink);
 }
@@ -82,8 +82,14 @@ live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos,
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) .hm-todo-save:not(:disabled):hover {
   border-color: var(--cs-accent-hover, #535d33); background: var(--cs-accent-hover, #535d33);
 }
-live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) :is(.hm-todos-filter-button[aria-pressed="true"], .hm-choice:has(input:checked), .hm-choice[data-selected="true"]) {
-  border-color: var(--k-shell-focus); background: var(--k-shell-selected); color: var(--k-shell-ink); font-weight: 600;
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todos-filter-button {
+  border: 0; padding-inline: 12px; background: transparent; color: var(--k-shell-ink); box-shadow: none;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todos-filter-button[aria-pressed="true"] {
+  background: var(--k-shell-selected); font-weight: 600; box-shadow: none;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) :is(.hm-choice:has(input:checked), .hm-choice[data-selected="true"]) {
+  border-color: var(--cs-accent); background: var(--k-shell-selected); color: var(--k-shell-ink); font-weight: 600;
   box-shadow: none;
 }
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-pick-option[aria-selected="true"] {
