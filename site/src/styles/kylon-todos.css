@@ -1,3 +1,5 @@
+@import "./kylon-todos-layout.css";
+
 /* To-dos only. Actual builders retain order, permissions, hidden/busy state and native controls.
    Request answers and receipts appended outside these roots retain their existing presentation. */
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) {
@@ -33,30 +35,8 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame[data-home-standalone] [data
 live-dashboard.dashboard[data-kylon-shell] .hm-frame[data-home-standalone] > .hm-frame__main:has(> [data-home-route-pane] > .hm-todo) {
   container-type: size; scroll-padding: 4px;
 }
-live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos {
-  inline-size: 100%; max-inline-size: 720px; gap: 16px; padding: 4px 4px 16px;
-}
-live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo {
-  gap: 24px; padding-block-end: 32px;
-}
-live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todos-title {
-  font-size: 20px; font-weight: 600; line-height: 1.35; letter-spacing: -0.3px;
-}
-live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-title {
-  font-size: 24px; font-weight: 600; line-height: 1.35; letter-spacing: -0.4px;
-}
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) :is(.hm-todo-panel-title, .hm-todo-start legend) {
   font-size: 14px; font-weight: 600; line-height: 1.5; letter-spacing: 0;
-}
-live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-rows {
-  padding: 0; border: 0; border-radius: 0; box-shadow: none; background: transparent;
-}
-live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-rows > .hm-todo-row {
-  grid-template-columns: 44px minmax(0, 1fr) auto; gap: 8px;
-  min-block-size: 60px; padding: 8px 4px; margin-inline-start: 0;
-}
-live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-row-copy {
-  border-radius: 6px; padding: 4px; min-block-size: 44px; box-sizing: border-box;
 }
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-row-title {
   font-size: 14px; font-weight: 600; line-height: 1.5;
@@ -70,10 +50,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo :is(.hm-todo-back, .hm-todo-where, .hm-todo-status-more, .hm-todo-steer) {
   font-size: 13px; line-height: 1.55;
 }
-live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-panel {
-  padding: 16px 4px; border-block: 1px solid var(--k-shell-line); border-radius: 0;
-}
-live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo :is(.hm-todo-editor, .hm-assign-capsule, .hm-picker-pop) {
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo :is(.hm-todo-editor, .hm-picker-pop) {
   border-radius: 8px;
 }
 /* The combobox controls this listbox. Scroll its options while keeping the
@@ -94,7 +71,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos,
   border-radius: 6px; font-family: inherit; font-size: 13px; font-weight: 500; line-height: 1.5;
   white-space: normal; overflow-wrap: anywhere; text-align: start;
 }
-live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) :is(.hm-todo-save, .hm-todo-cancel, .hm-todos-filter-button, .hm-assign-chip) {
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) :is(.hm-todo-save, .hm-todo-cancel, .hm-todos-filter-button) {
   border: 1px solid var(--k-shell-control); padding-inline: 12px; box-shadow: none;
 }
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) .hm-todo-save {
@@ -104,7 +81,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos,
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) .hm-todo-save:not(:disabled):hover {
   border-color: var(--cs-accent-hover, #535d33); background: var(--cs-accent-hover, #535d33);
 }
-live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) :is(.hm-todos-filter-button[aria-pressed="true"], .hm-assign-chip[aria-checked="true"], .hm-choice:has(input:checked), .hm-choice[data-selected="true"]) {
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) :is(.hm-todos-filter-button[aria-pressed="true"], .hm-choice:has(input:checked), .hm-choice[data-selected="true"]) {
   background: var(--k-shell-selected); color: var(--k-shell-ink); font-weight: 600;
   box-shadow: inset 0 0 0 1px var(--k-shell-control);
 }

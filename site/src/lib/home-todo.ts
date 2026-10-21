@@ -104,10 +104,17 @@ function displayTags(tags: { id: Id; label: string }[], vm: TodoViewVM): { id: I
 function topBar(doc: Document, vm: TodoViewVM, callbacks: TodoViewCallbacks, meta: string | null, sample = false): HTMLElement {
   const top = node(doc, "div", "hm-todo-top");
   const where = `${vm.workspace.name} · To-dos`;
-  if (sample) top.append(node(doc, "p", "hm-todo-where", where));
+  // The phone already shows workspace context. Keep the full link name and desktop copy.
+  const context = () => {
+    const text = node(doc, "span");
+    text.append(node(doc, "span", "hm-todo-back-workspace", `${vm.workspace.name} · `), "To-dos");
+    return text;
+  };
+  if (sample) { const line = node(doc, "p", "hm-todo-where"); line.append(context()); top.append(line); }
   else {
     const back = node(doc, "a", "hm-todo-back"); back.href = vm.workspace.todosHref; back.dataset.todoBack = "";
-    back.append(backIcon(doc), node(doc, "span", "", where));
+    back.setAttribute("aria-label", where);
+    back.append(backIcon(doc), context());
     if (callbacks.back) back.addEventListener("click", (event) => callbacks.back!(event));
     top.append(back);
   }

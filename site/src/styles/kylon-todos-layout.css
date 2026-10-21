@@ -1,0 +1,108 @@
+/* Private Todo composition. Shared controls, route/container sizing and picker cap stay in
+   their existing owners. No permission, hidden-state or callback changes. */
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos {
+  inline-size: 100%; max-inline-size: 720px; gap: 16px; padding: 4px 4px 16px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo {
+  gap: 24px; padding-block-end: 32px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todos-title {
+  font-size: 20px; font-weight: 600; line-height: 1.35; letter-spacing: -0.3px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-title {
+  font-size: 24px; font-weight: 600; line-height: 1.35; letter-spacing: -0.4px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-rows {
+  padding: 0; border: 0; border-radius: 0; box-shadow: none; background: transparent;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-rows > .hm-todo-row {
+  grid-template-columns: 44px minmax(0, 1fr) auto; gap: 8px;
+  min-block-size: 60px; padding: 8px 4px; margin-inline-start: 0;
+}
+/* Keep every placeholder if ANY row has a checkbox: mixed rights remain aligned.
+   An entirely read-only list needs no reserved control column. */
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-rows:not(:has(.hm-todo-check)) > .hm-todo-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-rows:not(:has(.hm-todo-check)) > .hm-todo-row > span.hm-todo-check-hit {
+  display: none;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-row-copy {
+  border-radius: 6px; padding: 4px; min-block-size: 44px; box-sizing: border-box;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-panel {
+  padding: 16px 0; border-block: 1px solid var(--k-shell-line); border-radius: 0;
+}
+/* Ownership groups use space, never a second frame around the native radio buttons.
+   Outer gap16 / inner gap4 retains grouping when the rows wrap. */
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-assign-chips {
+  gap: 16px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-assign-capsule {
+  gap: 4px; padding: 0; border: 0; border-radius: 0; background: transparent;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-picker .hm-assign-chip.hm-assign-chip {
+  border: 1px solid var(--k-shell-control); padding-inline: 8px 12px;
+  border-radius: 6px; box-shadow: none;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-picker .hm-assign-chip.hm-assign-chip[aria-checked="true"] {
+  border-color: var(--k-shell-focus); background: var(--k-shell-selected);
+  color: var(--k-shell-ink); font-weight: 600; box-shadow: none; opacity: 1;
+}
+/* A recorded unavailable selection keeps its visible edge; aria-disabled, its caption
+   and the existing not-allowed cursor still describe availability. */
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-picker .hm-assign-chip.hm-assign-chip[aria-checked="true"] {
+    border-color: Highlight;
+  }
+}
+@media (max-width: 52rem) {
+  /* Both routes own a 24px phone inset. The index adds its existing 4px inside 20px. */
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane]:has(> .hm-todos) {
+    padding: 20px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo {
+    padding: 16px 24px 32px; gap: 12px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-title {
+    font-size: 20px; letter-spacing: -0.3px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-back-workspace {
+    display: none;
+  }
+  /* Flatten presentation wrappers only. Article, H1, section labels, native controls
+     and DOM reading order survive. Metadata paints below the title and before notes. */
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] {
+    grid-template-columns: 44px minmax(0, 1fr); column-gap: 8px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] :is(.hm-todo-top, .hm-todo-head, .hm-todo-head-copy) {
+    display: contents;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] :is(.hm-todo-back, .hm-todo-where) {
+    order: 1; grid-column: 1 / -1; padding: 0; margin: 0;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] .hm-todo-word {
+    order: 2; grid-column: 1 / -1;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] .hm-todo-done {
+    order: 3; grid-column: 1; margin: 0; justify-content: flex-start;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] .hm-todo-title {
+    order: 3; grid-column: 2;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"]:not(:has(> .hm-todo-head > .hm-todo-done)) .hm-todo-title {
+    grid-column: 1 / -1;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] .hm-todo-meta {
+    order: 4; grid-column: 1 / -1;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] .hm-todo-notes {
+    order: 5; grid-column: 1 / -1;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] > .hm-todo-panel {
+    order: 6; grid-column: 1 / -1;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] > .hm-todo-comments {
+    order: 7; grid-column: 1 / -1;
+  }
+}
