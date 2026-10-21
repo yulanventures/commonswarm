@@ -40,7 +40,7 @@ function fixture(port) {
   return {root,runs,script,put,invoke};
 }
 async function api(t,options={}) {
-  const requests=[], rows=[]; let next=1000;
+  const requests=[], rows=[]; let next=1000, readbacks=0;
   const server=createServer(async(req,res)=>{
     let raw=''; for await(const part of req) raw+=part;
     const url=new URL(req.url,'http://localhost');
@@ -51,7 +51,13 @@ async function api(t,options={}) {
     if(req.method==='GET') {
       const page=Number(url.searchParams.get('page'));
       let data=rows.filter(r=>r.sha===url.pathname.split('/').at(-2)).sort((a,b)=>b.id-a.id).map(({sha,...r})=>r);
-      if(options.readbackMissing && requests.some(r=>r.method==='POST')) data=[];
+      if(requests.some(r=>r.method==='POST')) {
+        readbacks++;
+        if(options.readbackMissing || readbacks <= (options.readbackDelay ?? 0)) data=[];
+        if(options.readbackField) data=data.map(r=>({...r,[options.readbackField]:options.readbackField==='state'?'failure':'wrong'}));
+        if(options.readbackFault==='malformed') data=[{id:'invalid'}];
+        if(options.readbackFault==='unknown') data=[{id:999,context:'hetzner/p1-cli',state:'success',description:'unknown writer'}];
+      }
       if(options.malformedPage===page) data={secret:token};
       else data=data.slice((page-1)*100,page*100);
       res.end(JSON.stringify(data)); return;
@@ -193,11 +199,31 @@ test('legacy chronology resolves readable original receipt and fails on missing 
   }
 });
 
+// Test-audit: first readback can lag the actual stored POST. The existing owner
+// lacked that recovery case; old one-shot code must report status_readback_failed.
+// Exercise HTTP and stored rows, with no production retry/test injection seam.
 test('lost POST response reconciles next invocation and missing readback never reports published',async t=>{
-  for(const options of [{losePost:true},{readbackMissing:true}]) {
+  const cases=[
+    {options:{readbackDelay:1},published:true,gets:2},
+    {options:{readbackDelay:2},published:true,gets:3},
+    {options:{losePost:true},error:'publisher_unavailable',gets:0},
+    {options:{readbackMissing:true},error:'status_readback_failed',gets:3},
+    ...['state','context','description'].map(readbackField=>({options:{readbackField},error:'status_readback_failed',gets:1})),
+    {options:{readbackFault:'malformed'},error:'invalid_status',gets:1},
+    {options:{readbackFault:'unknown'},error:'unknown_status_provenance',gets:1},
+    {options:{reject:(r,requests)=>r.method==='GET' && requests.some(p=>p.method==='POST')},error:'github_http_403',gets:1},
+  ];
+  for(const {options,published,error,gets} of cases) {
     const a=await api(t,options), f=fixture(a.port); f.put(receipt());
-    const first=await f.invoke(); assert.equal(first.status,1); assert.equal(first.result.state,'failed'); assert.equal(a.posts().length,1);
-    options.readbackMissing=false;
+    const first=await f.invoke();
+    assert.equal(first.status,published?0:1,JSON.stringify(first.result));
+    if(published) assert.equal(first.result.published,1);
+    else assert.equal(first.result.error,error);
+    assert.equal(a.posts().length,1);
+    const postIndex=a.requests.findIndex(r=>r.method==='POST');
+    assert.equal(a.requests.slice(postIndex+1).filter(r=>r.method==='GET').length,gets);
+    // Clear only the HTTP fault: the original row actually persisted on POST.
+    options.readbackMissing=false; options.readbackField=null; options.readbackFault=null; options.reject=null;
     const again=await f.invoke(); assert.equal(again.status,0); assert.equal(again.result.skipped,1); assert.equal(a.posts().length,1);
   }
 });
