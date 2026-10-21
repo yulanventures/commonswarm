@@ -101,10 +101,13 @@ export function canReadWorkspace(
     return false;
   const ownerRole = orgRole(s, ws.org_id, 'user', ownerId);
   const agentRole = orgRole(s, ws.org_id, 'agent', c.principal_id);
+  const ownerWsGuest = s.workspaceGrants.some(
+    (g) => g.workspace_id === wsId && isPrin(g, 'user', ownerId) && isLive(g) && g.role === 'guest',
+  );
   const inheritedOwnerRole =
-    ownerRole === 'guest' ? 'guest' : ownerRole ? 'member' : null;
+    ownerRole === 'guest' || ownerWsGuest ? 'guest' : ownerRole ? 'member' : null;
   const eff =
-    ownerRole === 'guest' || agentRole === 'guest'
+    ownerRole === 'guest' || ownerWsGuest || agentRole === 'guest'
       ? 'guest'
       : (agentRole ?? inheritedOwnerRole);
   return eff === 'guest' ? explicitGrant : explicitGrant || eff !== null;
@@ -115,7 +118,7 @@ export function canReadChannel(
   c: CallerContext,
   chId: string,
 ): boolean {
-  const ch = s.channels.find((x) => x.channel_id === chId && x.revoked_at == null);
+  const ch = s.channels.find((x) => x.channel_id === chId);
   if (!ch || !canReadWorkspace(s, c, ch.workspace_id)) return false;
   const ws = s.workspaces.find((w) => w.workspace_id === ch.workspace_id);
   const hasChMem = (k: PrincipalKind, id: string) =>

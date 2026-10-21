@@ -1,4 +1,4 @@
--- CommonSwarm Organizations > Workspaces > Channels (Phase 0 Predicates, Guards, Workspace Move & Permissions)
+-- CommonSwarm Phase 0 Predicates & Guards
 SET search_path = swarm, pg_catalog, public;
 
 CREATE FUNCTION swarm.private_channels_enabled() RETURNS boolean LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
@@ -22,13 +22,18 @@ BEGIN
     END IF;
     IF TG_OP = 'UPDATE' AND OLD.visibility <> NEW.visibility THEN
       IF OLD.visibility = 'private' THEN RAISE EXCEPTION 'PRIVATE_CHANNEL_CANNOT_BECOME_PUBLIC'; END IF;
-      IF EXISTS (SELECT 1 FROM signals WHERE channel_id = OLD.channel_id) OR EXISTS (SELECT 1 FROM file_channel_bindings WHERE channel_id = OLD.channel_id) THEN
+      IF NOT pg_try_advisory_xact_lock(20261021, hashtext(OLD.channel_id::text))
+         OR EXISTS (SELECT 1 FROM signals WHERE channel_id = OLD.channel_id)
+         OR EXISTS (SELECT 1 FROM file_channel_bindings WHERE channel_id = OLD.channel_id) THEN
         RAISE EXCEPTION 'CHANNEL_HAS_PUBLIC_HISTORY';
       END IF;
     END IF;
   ELSIF TG_TABLE_NAME IN ('signals', 'file_channel_bindings') THEN
-    IF NEW.channel_id IS NOT NULL AND EXISTS (SELECT 1 FROM channels WHERE channel_id = NEW.channel_id AND visibility = 'private') AND NOT private_channels_enabled() THEN
-      RAISE EXCEPTION 'PRIVATE_CHANNELS_DISABLED';
+    IF NEW.channel_id IS NOT NULL THEN
+      PERFORM pg_advisory_xact_lock_shared(20261021, hashtext(NEW.channel_id::text));
+      IF EXISTS (SELECT 1 FROM channels WHERE channel_id = NEW.channel_id AND visibility = 'private') AND NOT private_channels_enabled() THEN
+        RAISE EXCEPTION 'PRIVATE_CHANNELS_DISABLED';
+      END IF;
     END IF;
   ELSIF EXISTS (SELECT 1 FROM channels WHERE channel_id = NEW.channel_id AND visibility = 'private') THEN
     IF NOT private_channels_enabled() THEN RAISE EXCEPTION 'PRIVATE_CHANNELS_DISABLED'; END IF;
@@ -87,7 +92,7 @@ RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = swarm, pg
         SELECT 1 FROM agent_identities ai WHERE ai.id = p_id
         AND can_read_workspace(p_ws, 'user', coalesce(p_owner, ai.owner_user_id))
         AND NOT EXISTS (SELECT 1 FROM agent_principals ap WHERE (ap.workspace_id, ap.agent_identity_id) = (p_ws, p_id) AND ap.revoked_at IS NOT NULL)
-        AND (has_live_ws_grant(p_ws, 'agent', p_id) OR (live_org_role(w.org_id, 'user', coalesce(p_owner, ai.owner_user_id)) IS DISTINCT FROM 'guest' AND coalesce(live_org_role(w.org_id, 'agent', p_id), live_org_role(w.org_id, 'user', coalesce(p_owner, ai.owner_user_id))) <> 'guest'))
+        AND (has_live_ws_grant(p_ws, 'agent', p_id) OR (live_org_role(w.org_id, 'user', coalesce(p_owner, ai.owner_user_id)) IS DISTINCT FROM 'guest' AND coalesce(live_org_role(w.org_id, 'agent', p_id), live_org_role(w.org_id, 'user', coalesce(p_owner, ai.owner_user_id))) <> 'guest' AND NOT EXISTS (SELECT 1 FROM workspace_principal_grants wg WHERE (wg.workspace_id, wg.principal_kind, wg.principal_id) = (p_ws, 'user', coalesce(p_owner, ai.owner_user_id)) AND wg.revoked_at IS NULL AND wg.role = 'guest')))
       )))
   );
 $$;
@@ -162,31 +167,26 @@ BEGIN
   END IF;
   UPDATE workspaces SET org_id = p_dst WHERE workspace_id = p_ws;
   UPDATE workspace_principal_grants SET org_id = p_dst WHERE workspace_id = p_ws;
-  IF p_mode = 'all' THEN
+  INSERT INTO workspace_principal_grants (workspace_id, org_id, principal_kind, principal_id, role, granted_by, created_at)
+  SELECT p_ws, p_dst, 'agent', ap.agent_identity_id, 'member', p_actor, v_now FROM agent_principals ap WHERE p_mode = 'all' AND ap.workspace_id = p_ws AND ap.revoked_at IS NULL
+  UNION ALL
+  SELECT p_ws, p_dst, cm.principal_kind, cm.principal_id, 'member', p_actor, v_now FROM channel_memberships cm WHERE p_mode = 'all' AND cm.workspace_id = p_ws AND cm.revoked_at IS NULL
+  UNION ALL
+  SELECT p_ws, p_dst, 'user', m.user_id, 'admin', p_actor, v_now FROM memberships m WHERE p_mode = 'owners_only' AND m.workspace_id = p_ws AND m.revoked_at IS NULL AND 'owner' IN (live_org_role(v_src, 'user', m.user_id), live_org_role(p_dst, 'user', m.user_id))
+  ON CONFLICT (workspace_id, principal_kind, principal_id) DO NOTHING;
+  UPDATE workspace_principal_grants wg SET revoked_at = v_now
+  WHERE wg.workspace_id = p_ws AND wg.revoked_at IS NULL
+    AND (EXISTS (SELECT 1 FROM org_memberships om WHERE (om.org_id, om.principal_kind, om.principal_id) = (p_dst, wg.principal_kind, wg.principal_id) AND om.revoked_at IS NOT NULL)
+      OR (p_mode = 'owners_only' AND wg.role <> 'owner' AND 'owner' NOT IN (coalesce(live_org_role(v_src, wg.principal_kind, wg.principal_id), ''), coalesce(live_org_role(p_dst, wg.principal_kind, wg.principal_id), ''))));
+  INSERT INTO org_memberships (org_id, principal_kind, principal_id, role, invited_by, created_at)
+  SELECT p_dst, principal_kind, principal_id, (CASE WHEN role = 'owner' THEN 'admin' ELSE role END), p_actor, v_now
+  FROM workspace_principal_grants WHERE workspace_id = p_ws AND revoked_at IS NULL ON CONFLICT (org_id, principal_kind, principal_id) DO NOTHING;
+  IF p_mode = 'owners_only' THEN
     INSERT INTO workspace_principal_grants (workspace_id, org_id, principal_kind, principal_id, role, granted_by, created_at, revoked_at)
-    SELECT p_ws, p_dst, 'agent', ap.agent_identity_id, 'member', p_actor, v_now, NULL
-    FROM agent_principals ap WHERE ap.workspace_id = p_ws AND ap.revoked_at IS NULL
+    SELECT p_ws, p_dst, 'agent', ai.id, 'member', p_actor, v_now, v_now FROM agent_identities ai WHERE ai.revoked_at IS NULL AND live_org_role(p_dst, 'agent', ai.id) IS DISTINCT FROM 'owner'
+    UNION ALL
+    SELECT p_ws, p_dst, om.principal_kind, om.principal_id, om.role, p_actor, v_now, v_now FROM org_memberships om WHERE om.org_id = p_dst AND om.revoked_at IS NULL AND om.role <> 'owner'
     ON CONFLICT (workspace_id, principal_kind, principal_id) DO NOTHING;
-    INSERT INTO workspace_principal_grants (workspace_id, org_id, principal_kind, principal_id, role, granted_by, created_at, revoked_at)
-    SELECT p_ws, p_dst, cm.principal_kind, cm.principal_id, 'member', p_actor, v_now, NULL
-    FROM channel_memberships cm WHERE cm.workspace_id = p_ws AND cm.revoked_at IS NULL
-    ON CONFLICT (workspace_id, principal_kind, principal_id) DO NOTHING;
-    UPDATE workspace_principal_grants wg SET revoked_at = v_now
-    WHERE wg.workspace_id = p_ws AND wg.revoked_at IS NULL
-    AND EXISTS (SELECT 1 FROM org_memberships om WHERE (om.org_id, om.principal_kind, om.principal_id) = (p_dst, wg.principal_kind, wg.principal_id) AND om.revoked_at IS NOT NULL);
-    INSERT INTO org_memberships (org_id, principal_kind, principal_id, role, invited_by, created_at)
-    SELECT p_dst, principal_kind, principal_id, (CASE WHEN role = 'owner' THEN 'admin' ELSE role END), p_actor, v_now
-    FROM workspace_principal_grants WHERE workspace_id = p_ws AND revoked_at IS NULL ON CONFLICT (org_id, principal_kind, principal_id) DO NOTHING;
-  ELSE
-    UPDATE workspace_principal_grants SET revoked_at = v_now WHERE workspace_id = p_ws AND revoked_at IS NULL AND live_org_role(p_dst, principal_kind, principal_id) IS DISTINCT FROM 'owner';
-    INSERT INTO workspace_principal_grants (workspace_id, org_id, principal_kind, principal_id, role, granted_by, created_at, revoked_at)
-    SELECT p_ws, p_dst, 'agent', ai.id, 'member', p_actor, v_now, v_now
-    FROM agent_identities ai WHERE ai.revoked_at IS NULL AND live_org_role(p_dst, 'agent', ai.id) IS DISTINCT FROM 'owner'
-    ON CONFLICT (workspace_id, principal_kind, principal_id) DO UPDATE SET org_id = EXCLUDED.org_id, revoked_at = coalesce(workspace_principal_grants.revoked_at, EXCLUDED.revoked_at);
-    INSERT INTO workspace_principal_grants (workspace_id, org_id, principal_kind, principal_id, role, granted_by, created_at, revoked_at)
-    SELECT p_ws, p_dst, om.principal_kind, om.principal_id, om.role, p_actor, v_now, v_now
-    FROM org_memberships om WHERE om.org_id = p_dst AND om.revoked_at IS NULL AND om.role <> 'owner'
-    ON CONFLICT (workspace_id, principal_kind, principal_id) DO UPDATE SET org_id = EXCLUDED.org_id, revoked_at = coalesce(workspace_principal_grants.revoked_at, EXCLUDED.revoked_at);
   END IF;
   UPDATE memberships SET revoked_at = v_now WHERE workspace_id = p_ws AND revoked_at IS NULL AND NOT has_live_ws_grant(p_ws, 'user', user_id);
   UPDATE workspace_principal_grants wg SET revoked_at = v_now FROM agent_identities ai
