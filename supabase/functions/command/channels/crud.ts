@@ -4,9 +4,9 @@ import {
   agentOwner, buildOrgChannelRefusal, fail, isLive, isPrin, norm, orgRole,
 } from '../../../../src/protocol/org-channels-types.ts';
 import {
-  canReadChannel, canReadOrg, canReadWorkspace, validateChannelVisibilityTransition,
+  canReadChannel, canReadOrg, canReadWorkspace, matchPrin, normPrinId, validateChannelVisibilityTransition,
 } from './index.ts';
-export { canReadChannel, canReadOrg, canReadWorkspace, validateChannelVisibilityTransition };
+export { canReadChannel, canReadOrg, canReadWorkspace, matchPrin, normPrinId, validateChannelVisibilityTransition };
 
 export const CHANNEL_SLUG_MAX = 32, CHANNEL_TOPIC_MAX = 500, CHANNEL_PURPOSE_MAX = 500;
 export const RESERVED_CHANNEL_SLUGS = ['all-signals'] as const;
@@ -34,12 +34,12 @@ export function wsScope(s: OrgChannelAuthorityState, workspaceId: string, channe
 }
 
 export const isChannelOwner = (s: OrgChannelAuthorityState, caller: CallerContext, channelId: string): boolean =>
-  s.channelMemberships.some((m) => m.channel_id === channelId && isPrin(m, caller.principal_kind, caller.principal_id) && m.role === 'owner' && isLive(m));
+  s.channelMemberships.some((m) => m.channel_id === channelId && matchPrin(s, m, caller.principal_kind, caller.principal_id) && m.role === 'owner' && isLive(m));
 
 export function isWorkspaceAdminOrOwner(s: OrgChannelAuthorityState, caller: CallerContext, workspaceId: string): boolean {
   const ws = s.workspaces.find((w) => w.workspace_id === workspaceId && isLive(w));
   if (!ws) return false;
-  const grant = s.workspaceGrants.find((g) => g.workspace_id === workspaceId && isPrin(g, caller.principal_kind, caller.principal_id) && isLive(g));
+  const grant = s.workspaceGrants.find((g) => g.workspace_id === workspaceId && matchPrin(s, g, caller.principal_kind, caller.principal_id) && isLive(g));
   const role = grant?.role ?? orgRole(s, ws.org_id, caller.principal_kind, caller.principal_id);
   return role === 'owner' || role === 'admin';
 }
@@ -79,25 +79,25 @@ export function channelCreate(
   if (!trans.ok) return trans;
   if (input.topic != null && input.topic.length > CHANNEL_TOPIC_MAX) return fail('CHANNEL_TOPIC_TOO_LONG', 'topic_max_500_chars', scope);
   if (input.purpose != null && input.purpose.length > CHANNEL_PURPOSE_MAX) return fail('CHANNEL_PURPOSE_TOO_LONG', 'purpose_max_500_chars', scope);
-  if (s.channels.some((ch) => ch.workspace_id === input.workspace_id && norm(ch.slug) === slug && isLive(ch))) return fail('CHANNEL_SLUG_TAKEN', 'unique_channel_slug', scope);
+  if (s.channels.some((ch) => ch.workspace_id === input.workspace_id && norm(ch.slug) === slug)) return fail('CHANNEL_SLUG_TAKEN', 'unique_channel_slug', scope);
   const ws = s.workspaces.find((w) => w.workspace_id === input.workspace_id)!, now = input.now ?? new Date().toISOString();
-  const channelId = input.channel_id ?? `ch-${ws.workspace_id}-${slug}`;
+  const channelId = input.channel_id ?? `ch-${ws.workspace_id}-${slug}`, pid = normPrinId(s, caller.principal_kind, caller.principal_id);
   if (!channelId.trim() || s.channels.some((ch) => ch.channel_id === channelId)) return fail('CHANNEL_SLUG_TAKEN', 'unique_channel_id', scope);
   const channel: ChannelSummary = {
     channel_id: channelId, workspace_id: input.workspace_id, org_id: ws.org_id, slug, purpose: input.purpose ?? null, topic: input.topic ?? null,
-    visibility, join_policy: joinPolicy, archived_at: null, created_by_principal: caller.principal_id, created_by_kind: caller.principal_kind, created_at: now, has_history: false,
+    visibility, join_policy: joinPolicy, archived_at: null, created_by_principal: pid, created_by_kind: caller.principal_kind, created_at: now, has_history: false,
   };
   s.channels.push(channel);
   const upsertOwner = (k: 'user' | 'agent', id: string, addedByKind: 'user' | 'agent', addedBy: string | null) => {
-    const existing = s.channelMemberships.find((m) => m.channel_id === channelId && isPrin(m, k, id));
-    if (existing) Object.assign(existing, { role: 'owner', added_by_kind: addedByKind, added_by: addedBy, revoked_at: null, joined_at: now });
-    else s.channelMemberships.push({ channel_id: channelId, workspace_id: input.workspace_id, principal_kind: k, principal_id: id, role: 'owner' as ChannelRole, notify_pref: 'all', added_by_kind: addedByKind, added_by: addedBy, joined_at: now, revoked_at: null });
+    const nid = normPrinId(s, k, id), existing = s.channelMemberships.find((m) => m.channel_id === channelId && matchPrin(s, m, k, nid));
+    if (existing) Object.assign(existing, { principal_id: nid, role: 'owner', added_by_kind: addedByKind, added_by: addedBy, revoked_at: null, joined_at: now });
+    else s.channelMemberships.push({ channel_id: channelId, workspace_id: input.workspace_id, principal_kind: k, principal_id: nid, role: 'owner' as ChannelRole, notify_pref: 'all', added_by_kind: addedByKind, added_by: addedBy, joined_at: now, revoked_at: null });
   };
-  if (caller.principal_kind === 'user') upsertOwner('user', caller.principal_id, 'user', caller.principal_id);
+  if (caller.principal_kind === 'user') upsertOwner('user', pid, 'user', pid);
   else {
-    upsertOwner('agent', caller.principal_id, 'agent', caller.principal_id);
+    upsertOwner('agent', pid, 'agent', pid);
     const ownerId = agentOwner(s, caller);
-    if (ownerId) upsertOwner('user', ownerId, 'agent', caller.principal_id);
+    if (ownerId) upsertOwner('user', ownerId, 'agent', pid);
   }
   return { ok: true, channel };
 }
@@ -160,7 +160,7 @@ export function channelRename(s: OrgChannelAuthorityState, caller: CallerContext
   }
   const slugCheck = validateChannelSlug(input.slug, scope);
   if (!slugCheck.ok) return slugCheck;
-  if (s.channels.some((o) => o.workspace_id === input.workspace_id && o.channel_id !== ch.channel_id && norm(o.slug) === slugCheck.slug && isLive(o))) {
+  if (s.channels.some((o) => o.workspace_id === input.workspace_id && o.channel_id !== ch.channel_id && norm(o.slug) === slugCheck.slug)) {
     return fail('CHANNEL_SLUG_TAKEN', 'unique_channel_slug', { ...scope, channel: slugCheck.slug });
   }
   ch.slug = slugCheck.slug;

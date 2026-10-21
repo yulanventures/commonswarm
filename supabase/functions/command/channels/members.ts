@@ -1,10 +1,10 @@
 import {
   type CallerContext, type ChannelMembershipRecord, type ChannelRole,
   type NotifyPref, type OrgChannelAuthorityState, type PrincipalKind,
-  agentOwner, fail, hasWsGrant, isLive, isPrin, norm, orgRole,
+  agentOwner, fail, hasWsGrant, isLive, norm, orgRole,
 } from '../../../../src/protocol/org-channels-types.ts';
 import {
-  type ChannelResult, canReadChannel, canReadWorkspace, isChannelOwner, isPrivateChannelsEnabled, isWorkspaceAdminOrOwner, requireReadableChannel, wsScope,
+  type ChannelResult, canReadChannel, canReadWorkspace, isChannelOwner, isPrivateChannelsEnabled, isWorkspaceAdminOrOwner, matchPrin, normPrinId, requireReadableChannel, wsScope,
 } from './crud.ts';
 
 export const NOTIFY_PREFS = ['all', 'mentions', 'mute'] as const;
@@ -16,7 +16,7 @@ function hasLiveChannelMember(
   id: string,
 ): boolean {
   return s.channelMemberships.some(
-    (m) => m.channel_id === channelId && isPrin(m, kind, id) && isLive(m),
+    (m) => m.channel_id === channelId && matchPrin(s, m, kind, id) && isLive(m),
   );
 }
 
@@ -32,7 +32,7 @@ function isGuestInWorkspace(
     s.workspaceGrants.some(
       (g) =>
         g.workspace_id === workspaceId &&
-        isPrin(g, kind, id) &&
+        matchPrin(s, g, kind, id) &&
         isLive(g) &&
         g.role === 'guest',
     )
@@ -50,14 +50,15 @@ function cascadeOwnedAgentsOnChannelExit(
   );
   const cascaded: string[] = [];
   for (const m of s.channelMemberships) {
+    const mid = normPrinId(s, 'agent', m.principal_id);
     if (
       m.channel_id === channelId &&
       m.principal_kind === 'agent' &&
-      ownedIds.has(m.principal_id) &&
+      ownedIds.has(mid) &&
       isLive(m)
     ) {
       m.revoked_at = now;
-      cascaded.push(m.principal_id);
+      cascaded.push(mid);
     }
   }
   return cascaded;
@@ -78,8 +79,8 @@ function isLastPrivateChannelOwner(
       m.channel_id === channelId &&
       isLive(m) &&
       m.role === 'owner' &&
-      !isPrin(m, kind, id) &&
-      !(cascadedAgents && m.principal_kind === 'agent' && cascadedAgents.has(m.principal_id)),
+      !matchPrin(s, m, kind, id) &&
+      !(cascadedAgents && m.principal_kind === 'agent' && cascadedAgents.has(normPrinId(s, 'agent', m.principal_id))),
   );
   return otherOwners.length === 0;
 }
@@ -106,11 +107,12 @@ export function channelJoin(
     return fail('PRIVATE_CHANNELS_DISABLED', 'private_channels_enabled', baseScope);
   }
   const scope = wsScope(s, input.workspace_id, ch.slug);
+  const callerPid = normPrinId(s, caller.principal_kind, caller.principal_id);
   if (ch.visibility === 'private' || ch.join_policy === 'invite_only') {
     const existingLive = s.channelMemberships.find(
       (m) =>
         m.channel_id === ch.channel_id &&
-        isPrin(m, caller.principal_kind, caller.principal_id) &&
+        matchPrin(s, m, caller.principal_kind, callerPid) &&
         isLive(m),
     );
     if (existingLive && canReadChannel(s, caller, ch.channel_id)) {
@@ -126,7 +128,7 @@ export function channelJoin(
     s,
     ch.workspace_id,
     caller.principal_kind,
-    caller.principal_id,
+    callerPid,
   );
   const ownerIsGuest =
     caller.principal_kind === 'agent' &&
@@ -136,7 +138,7 @@ export function channelJoin(
       s,
       ch.channel_id,
       caller.principal_kind,
-      caller.principal_id,
+      callerPid,
     );
     const hasOwnerLive =
       caller.principal_kind !== 'agent' ||
@@ -151,9 +153,10 @@ export function channelJoin(
   const existing = s.channelMemberships.find(
     (m) =>
       m.channel_id === ch.channel_id &&
-      isPrin(m, caller.principal_kind, caller.principal_id),
+      matchPrin(s, m, caller.principal_kind, callerPid),
   );
   if (existing) {
+    existing.principal_id = callerPid;
     existing.revoked_at = null;
     existing.joined_at = now;
     if (input.notify_pref) existing.notify_pref = notifyPref;
@@ -164,11 +167,11 @@ export function channelJoin(
     channel_id: ch.channel_id,
     workspace_id: ch.workspace_id,
     principal_kind: caller.principal_kind,
-    principal_id: caller.principal_id,
+    principal_id: callerPid,
     role: 'member',
     notify_pref: notifyPref,
     added_by_kind: caller.principal_kind,
-    added_by: caller.principal_id,
+    added_by: callerPid,
     joined_at: now,
     revoked_at: null,
   };
@@ -214,6 +217,8 @@ export function channelAddMember(
     );
   }
 
+  const targetPid = normPrinId(s, input.principal_kind, input.principal_id);
+  const actorPid = normPrinId(s, actor.principal_kind, actor.principal_id);
   const targetCaller: CallerContext = {
     principal_kind: input.principal_kind,
     principal_id: input.principal_id,
@@ -243,21 +248,22 @@ export function channelAddMember(
   const existing = s.channelMemberships.find(
     (m) =>
       m.channel_id === ch.channel_id &&
-      isPrin(m, input.principal_kind, input.principal_id),
+      matchPrin(s, m, input.principal_kind, targetPid),
   );
   if (existing) {
     if (
       isLive(existing) &&
       existing.role === 'owner' &&
       role !== 'owner' &&
-      isLastPrivateChannelOwner(s, ch.channel_id, input.principal_kind, input.principal_id)
+      isLastPrivateChannelOwner(s, ch.channel_id, input.principal_kind, targetPid)
     ) {
       return fail('CANNOT_REMOVE_LAST_CHANNEL_OWNER', 'another_channel_owner', scope);
     }
+    existing.principal_id = targetPid;
     existing.role = role;
     existing.notify_pref = notifyPref;
     existing.added_by_kind = actor.principal_kind;
-    existing.added_by = actor.principal_id;
+    existing.added_by = actorPid;
     existing.joined_at = now;
     existing.revoked_at = null;
     return { ok: true, membership: existing };
@@ -267,11 +273,11 @@ export function channelAddMember(
     channel_id: ch.channel_id,
     workspace_id: ch.workspace_id,
     principal_kind: input.principal_kind,
-    principal_id: input.principal_id,
+    principal_id: targetPid,
     role,
     notify_pref: notifyPref,
     added_by_kind: actor.principal_kind,
-    added_by: actor.principal_id,
+    added_by: actorPid,
     joined_at: now,
     revoked_at: null,
   };
@@ -296,20 +302,21 @@ export function channelRemoveMember(
   const check = requireReadableChannel(s, actor, input.workspace_id, input.channel_id);
   if (!check.ok) return check;
   const { channel: ch, scope } = check;
+  const targetPid = normPrinId(s, input.principal_kind, input.principal_id);
 
   const isOwnAgent =
     actor.principal_kind === 'user' &&
     input.principal_kind === 'agent' &&
     s.agentIdentities.some(
       (ai) =>
-        ai.id === input.principal_id &&
+        ai.id === targetPid &&
         ai.owner_user_id === actor.principal_id &&
         isLive(ai),
     );
   const actorChannelRole = s.channelMemberships.find(
     (m) =>
       m.channel_id === ch.channel_id &&
-      isPrin(m, actor.principal_kind, actor.principal_id) &&
+      matchPrin(s, m, actor.principal_kind, actor.principal_id) &&
       isLive(m),
   )?.role;
   const allowed =
@@ -325,7 +332,7 @@ export function channelRemoveMember(
   const targetMem = s.channelMemberships.find(
     (m) =>
       m.channel_id === ch.channel_id &&
-      isPrin(m, input.principal_kind, input.principal_id) &&
+      matchPrin(s, m, input.principal_kind, targetPid) &&
       isLive(m),
   );
   if (!targetMem) {
@@ -334,7 +341,7 @@ export function channelRemoveMember(
   if (
     ch.visibility === 'private' &&
     targetMem.role === 'owner' &&
-    isLastPrivateChannelOwner(s, ch.channel_id, input.principal_kind, input.principal_id)
+    isLastPrivateChannelOwner(s, ch.channel_id, input.principal_kind, targetPid)
   ) {
     return fail('CANNOT_REMOVE_LAST_CHANNEL_OWNER', 'another_channel_owner', scope);
   }
@@ -343,7 +350,7 @@ export function channelRemoveMember(
   targetMem.revoked_at = now;
   const cascaded =
     input.principal_kind === 'user'
-      ? cascadeOwnedAgentsOnChannelExit(s, ch.channel_id, input.principal_id, now)
+      ? cascadeOwnedAgentsOnChannelExit(s, ch.channel_id, targetPid, now)
       : [];
   return { ok: true, revoked_membership: targetMem, cascaded_agent_ids: cascaded };
 }
@@ -362,11 +369,12 @@ export function channelLeave(
   if (norm(ch.slug) === 'general') {
     return fail('CANNOT_LEAVE_GENERAL_CHANNEL', 'non_general_channel', scope);
   }
+  const callerPid = normPrinId(s, caller.principal_kind, caller.principal_id);
 
   const selfMem = s.channelMemberships.find(
     (m) =>
       m.channel_id === ch.channel_id &&
-      isPrin(m, caller.principal_kind, caller.principal_id) &&
+      matchPrin(s, m, caller.principal_kind, callerPid) &&
       isLive(m),
   );
   if (!selfMem) return fail('CHANNEL_ACCESS_DENIED', 'channel_membership', scope);
@@ -374,7 +382,7 @@ export function channelLeave(
   if (
     ch.visibility === 'private' &&
     selfMem.role === 'owner' &&
-    isLastPrivateChannelOwner(s, ch.channel_id, caller.principal_kind, caller.principal_id)
+    isLastPrivateChannelOwner(s, ch.channel_id, caller.principal_kind, callerPid)
   ) {
     return fail('CANNOT_LEAVE_AS_LAST_CHANNEL_OWNER', 'another_channel_owner', scope);
   }
@@ -383,7 +391,7 @@ export function channelLeave(
   selfMem.revoked_at = now;
   const cascaded =
     caller.principal_kind === 'user'
-      ? cascadeOwnedAgentsOnChannelExit(s, ch.channel_id, caller.principal_id, now)
+      ? cascadeOwnedAgentsOnChannelExit(s, ch.channel_id, callerPid, now)
       : [];
   return { ok: true, revoked_membership: selfMem, cascaded_agent_ids: cascaded };
 }
@@ -426,13 +434,15 @@ export function channelSetNotifyPref(
   if (!(NOTIFY_PREFS as readonly string[]).includes(input.notify_pref)) {
     return fail('INVALID_NOTIFY_PREF', 'notify_pref_all_mentions_or_mute', scope);
   }
+  const callerPid = normPrinId(s, caller.principal_kind, caller.principal_id);
   const existing = s.channelMemberships.find(
     (m) =>
       m.channel_id === ch.channel_id &&
-      isPrin(m, caller.principal_kind, caller.principal_id) &&
+      matchPrin(s, m, caller.principal_kind, callerPid) &&
       isLive(m),
   );
   if (existing) {
+    existing.principal_id = callerPid;
     existing.notify_pref = input.notify_pref;
     return { ok: true, membership: existing };
   }
@@ -440,11 +450,11 @@ export function channelSetNotifyPref(
     channel_id: ch.channel_id,
     workspace_id: ch.workspace_id,
     principal_kind: caller.principal_kind,
-    principal_id: caller.principal_id,
+    principal_id: callerPid,
     role: 'member',
     notify_pref: input.notify_pref,
     added_by_kind: caller.principal_kind,
-    added_by: caller.principal_id,
+    added_by: callerPid,
     joined_at: input.now ?? new Date().toISOString(),
     revoked_at: null,
   };

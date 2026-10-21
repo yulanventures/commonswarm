@@ -16,6 +16,9 @@ import {
   resolveAgentId,
 } from '../../../../src/protocol/org-channels-types.ts';
 
+export const normPrinId = (s: OrgChannelAuthorityState, k: PrincipalKind, id: string): string => (k === 'agent' ? resolveAgentId(s, id) : id);
+export const matchPrin = (s: OrgChannelAuthorityState, r: { principal_kind: PrincipalKind; principal_id: string }, k: PrincipalKind, id: string): boolean => r.principal_kind === k && normPrinId(s, r.principal_kind, r.principal_id) === normPrinId(s, k, id);
+
 export function canReadOrg(s: OrgChannelAuthorityState, c: CallerContext, orgId: string, now?: string | number | null): boolean {
   if (!s.organizations.some((o) => o.id === orgId && isLive(o))) return false;
   if (c.principal_kind === 'user') return orgRole(s, orgId, 'user', c.principal_id) !== null;
@@ -52,9 +55,9 @@ export function canReadChannel(s: OrgChannelAuthorityState, c: CallerContext, ch
   if (!canReadWorkspace(s, c, ch.workspace_id, now)) return false;
   const ws = s.workspaces.find((w) => w.workspace_id === ch.workspace_id);
   if (!ws) return false;
-  const hasCh = s.channelMemberships.some((m) => m.channel_id === chId && isPrin(m, c.principal_kind, pid) && isLive(m));
+  const hasCh = s.channelMemberships.some((m) => m.channel_id === chId && matchPrin(s, m, c.principal_kind, pid) && isLive(m));
   if (ch.visibility === 'workspace') {
-    const gRole = s.workspaceGrants.find((g) => g.workspace_id === ch.workspace_id && isPrin(g, c.principal_kind, pid) && isLive(g))?.role;
+    const gRole = s.workspaceGrants.find((g) => g.workspace_id === ch.workspace_id && matchPrin(s, g, c.principal_kind, pid) && isLive(g))?.role;
     if ((orgRole(s, ws.org_id, c.principal_kind, pid) === 'guest' || gRole === 'guest') && !hasCh) return false;
     if (c.principal_kind === 'agent') {
       const ownerId = agentOwner(s, c, now);
