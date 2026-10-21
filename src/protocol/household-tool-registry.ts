@@ -522,7 +522,7 @@ export interface HouseholdRefusalDetails {
 }
 /** Scope comes only from verified current membership, never the refused object/draft input.
  * A verified eligible owner may receive the closed confirmation command. */
-export function householdRefusalDetails(reason: string, scope: HouseholdRefusalDetails['scope'] = {}, remedy?: 'object_permissions_confirm' | 'list_permissions_confirm'): HouseholdRefusalDetails {
+export function householdRefusalDetails(reason: string, scope: HouseholdRefusalDetails['scope'] = {}, remedy?: 'object_permissions_confirm' | 'list_permissions_confirm', caller: 'human' | 'local' | 'hosted' = 'local'): HouseholdRefusalDetails {
   const missing = reason === 'owner_confirmation_required' ? ['workspace_content_boundary']
     : reason === 'content_consent_required' ? ['content_consent']
     : reason === 'connection_access_refused' ? ['connection_content_access']
@@ -533,6 +533,7 @@ export function householdRefusalDetails(reason: string, scope: HouseholdRefusalD
     remedy_url: workspace && reason !== 'draft_access_refused'
       ? `https://commonswarm.com/app?w=${encodeURIComponent(workspace)}&v=lists` : null,
     mcp_tool: workspace && ['owner_confirmation_required','content_consent_required'].includes(reason) ? remedy ?? null : null,
-    cli_command: workspace && remedy && ['owner_confirmation_required','content_consent_required'].includes(reason)
-      ? `cswarm object object_permissions_confirm --input-file <confirmation.json> --workspace-id ${workspace} --agent-token-file <token-file> --json` : null };
+    cli_command: workspace && remedy === 'object_permissions_confirm' && caller !== 'hosted'
+      && ['owner_confirmation_required','content_consent_required'].includes(reason)
+      ? `cswarm object object_permissions_confirm --input-file <confirmation.json> --workspace-id ${workspace}${caller === 'local' ? ' --agent-token-file <token-file>' : ''} --json` : null };
 }

@@ -41,7 +41,10 @@ export async function checkedConnection(tx: Sql, workspaceId: string, actor: Hou
     AND principal_id=${connection.principal_id}::uuid AND owner_user_id=${actor.user_id}::uuid FOR SHARE`;
   if (!principal || principal.revoked_at !== null) return { allowed: false as const, expires_at: null };
   if (connection.kind === 'hosted') {
-    const [seat] = await tx`SELECT s.seat_id FROM swarm.hosted_mcp_seats s
+    const [seat] = await tx`SELECT s.seat_id,g.provider_grant_id,
+      (SELECT h.handle FROM swarm.hosted_mcp_seat_handles h WHERE h.seat_id=s.seat_id
+        AND h.revoked_at IS NULL ORDER BY h.created_at DESC LIMIT 1) AS handle
+      FROM swarm.hosted_mcp_seats s
       JOIN swarm.hosted_mcp_grants g USING(grant_id)
       JOIN swarm.hosted_mcp_grant_workspaces b ON b.grant_id=s.grant_id AND b.workspace_id=s.workspace_id
       WHERE s.seat_id=${connection.connection_id}::uuid AND s.grant_id=${connection.grant_id}::uuid
@@ -49,20 +52,18 @@ export async function checkedConnection(tx: Sql, workspaceId: string, actor: Hou
       AND s.owner_user_id=${actor.user_id}::uuid AND g.owner_user_id=${actor.user_id}::uuid
       AND g.state='active' AND g.revoked_at IS NULL AND s.revoked_at IS NULL AND b.revoked_at IS NULL
       FOR SHARE OF s,g,b`;
-    if (!seat) return { allowed: false as const, expires_at: null };
+    if (!seat?.handle) return { allowed: false as const, expires_at: null };
     // Reuse the existing canonical hosted authorization port without granting
     // the edge command role direct OAuth access. Always restore transaction role.
     const [role] = await tx`SELECT current_setting('role') AS value`;
     await tx`SELECT set_config('role','swarm_read',true)`;
     let live = false;
     try {
-      const [resolved] = await tx`SELECT EXISTS(SELECT 1 FROM swarm.hosted_mcp_seat_handles h
-        CROSS JOIN LATERAL swarm.resolve_hosted_seat_read_authorization(${connection.grant_id}::uuid,h.handle,'whoami') a
-        JOIN swarm.hosted_mcp_grants g ON g.grant_id=${connection.grant_id}::uuid
-        WHERE h.seat_id=${connection.connection_id}::uuid AND h.revoked_at IS NULL
-          AND a.workspace_id=${workspaceId}::uuid AND a.principal_id=${connection.principal_id}::uuid
-          AND a.owner_user_id=${actor.user_id}::uuid
-          AND commonswarm_oauth.provider_family_active(g.provider_grant_id)) AS live`;
+      const [resolved] = await tx`SELECT EXISTS(SELECT 1 FROM swarm.resolve_hosted_seat_read_authorization(
+        ${connection.grant_id}::uuid,${seat.handle}::text,'whoami') a
+        WHERE a.workspace_id=${workspaceId}::uuid AND a.principal_id=${connection.principal_id}::uuid
+          AND a.owner_user_id=${actor.user_id}::uuid)
+        AND commonswarm_oauth.provider_family_active(${seat.provider_grant_id}::text) AS live`;
       live = resolved?.live === true;
     } finally { await tx`SELECT set_config('role',${String(role!.value)},true)`; }
     if (!live) return { allowed: false as const, expires_at: null };

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import {
-  HOUSEHOLD_CONTENT_CONSENT, HOUSEHOLD_TOOLS, householdToolInvocation,
+  HOUSEHOLD_CONTENT_CONSENT, HOUSEHOLD_TOOLS, householdToolInvocation, householdRefusalDetails,
   householdToolOperation, HouseholdToolInputError, validateHouseholdToolArguments, validateHouseholdHumanCommand,
   type HouseholdToolName,
 } from '../src/protocol/household-tool-registry.js';
@@ -360,4 +360,20 @@ test('human-only HTTP schemas refuse extra identity fields and invalid action or
     { ...valid[2], accepts_from: 'all' }, { ...valid[3], limit: 101 },
     { ...valid[0], answer: 'replaced' }, { kind: 'todo_start' },
   ]) assert.throws(() => validateHouseholdHumanCommand(invalid), HouseholdToolInputError);
+});
+
+
+test('permission refusal remedies match hosted, human and local authentication without inventing a hosted CLI', () => {
+ const scope = {workspace_id: 'workspace-1'};
+ const hosted = householdRefusalDetails('owner_confirmation_required', scope, 'list_permissions_confirm', 'hosted');
+ assert.equal(hosted.mcp_tool, 'list_permissions_confirm'); assert.equal(hosted.cli_command, null);
+ const human = householdRefusalDetails('content_consent_required', scope, 'object_permissions_confirm', 'human');
+ assert.equal(human.cli_command, 'cswarm object object_permissions_confirm --input-file <confirmation.json> --workspace-id workspace-1 --json');
+ const local = householdRefusalDetails('content_consent_required', scope, 'object_permissions_confirm', 'local');
+ assert.equal(local.cli_command, 'cswarm object object_permissions_confirm --input-file <confirmation.json> --workspace-id workspace-1 --agent-token-file <token-file> --json');
+ assert.equal(local.remedy_url, 'https://commonswarm.com/app?w=workspace-1&v=lists');
+ for (const reason of ['draft_access_refused','caller_content_restricted','self_permission_change_refused']) {
+  const denied = householdRefusalDetails(reason, scope);
+  assert.equal(denied.mcp_tool, null); assert.equal(denied.cli_command, null);
+ }
 });

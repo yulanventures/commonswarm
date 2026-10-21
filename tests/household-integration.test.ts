@@ -61,6 +61,9 @@ test('recovery assembles proposal and recorded revisions without storage metadat
   proposal = 'x'.repeat(40 * 1024);
   assert.deepEqual(await readHouseholdDraft(null as any, 'w', identity, 'd', store as any),
     { status: 'refused', reason: 'draft_response_too_large' });
+  const human = await readHouseholdDraft(null as any, 'w', identity, 'd', store as any, undefined, false);
+  assert.equal(human.status, 'ok');
+  assert.equal((human as any).proposed.markdown, proposal, 'human recovery retains the full large proposal');
   reads = 0;
   assert.deepEqual(await readHouseholdDraft(null as any, 'w', identity, '', store as any), { status: 'refused', reason: 'invalid_request' });
   assert.equal(reads, 0);
@@ -103,7 +106,7 @@ function permissionFixture(overrides: Record<string, any> = {}) {
     if (sql.includes('FROM swarm.hosted_mcp_grants')) return [{ state: 'active', revoked_at: null }];
     if (sql.includes('FROM swarm.hosted_mcp_grant_workspaces')) return [{ revoked_at: null }];
     if (sql.includes('SELECT revoked_at FROM swarm.hosted_mcp_seats')) return [{ revoked_at: null }];
-    if (sql.includes('FROM swarm.hosted_mcp_seats s')) return f.principal ? [{ seat_id: sourceConnection }] : [];
+    if (sql.includes('FROM swarm.hosted_mcp_seats s')) return f.principal ? [{ seat_id: sourceConnection, handle: 'synthetic-handle', provider_grant_id: 'synthetic-provider' }] : [];
     if (sql.includes('FROM swarm.agent_tokens')) return [{ expires_at: '2099-01-01T00:00:00Z' }];
     if (sql.includes('FROM swarm.household_owner_permission_receipts')) return f.prior ? [f.prior] : [];
     if (sql.includes('FROM swarm.household_workspace_boundaries')) return f.boundary ? [f.boundary] : [];

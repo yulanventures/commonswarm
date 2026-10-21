@@ -98,14 +98,17 @@ transfer drafts or grant permissions; hosted docs/files remain excluded. The dis
 catalog and its original eight coordination entries stay unchanged. No directory
 submission or live catalog claim is made by this source update.
 
-CLI publication plan: package source remains 0.1.82. After review and assigned gates,
-the release owner must allocate the next unclaimed version, update package/lock in
-sync, run the single-file and npm packaging checks, then publish through the existing
-release process. Installed 0.1.82 has no draft-read command. Once that release is
+CLI publication plan: package and lock source are 0.1.83. After review and assigned
+gates, the release owner must run the single-file and npm packaging checks, then
+publish through the existing release process. Installed 0.1.82 has no draft-read command. Once that release is
 installed, put {"draft_id":"<retained draft ID>"} in draft.json and run
 `cswarm object object_draft_read --input-file draft.json --workspace-id <workspace UUID> --json`
 with the existing selected human/agent profile (or existing agent token input).
-Permission repair CLI/MCP operations remain unavailable pending Root's permission SCR.
+The 0.1.83 source includes the owner-confirmed permission operations described below.
+Hosted callers use `list_permissions_confirm` in their existing MCP connection; they
+do not receive a local agent token or a CLI command. Human CLI callers use their
+existing selected profile; local agents may supply their existing token file.
+No credential value belongs in the confirmation JSON or chat.
 
 D1 source candidate for CLI 0.1.83 appends `list_permissions_confirm` (local
 `object_permissions_confirm`). Closed actions are `setup` and `allow_connection`;

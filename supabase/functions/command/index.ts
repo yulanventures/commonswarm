@@ -133,6 +133,7 @@ import { HOUSEHOLD_FEATURE_GATES } from "../_shared/household-feature-gates.ts";
 import { assertHouseholdContentServiceReady, HouseholdContentServiceUpdating } from "./household-content-access.ts";
 import { HOUSEHOLD_SURFACE_KINDS, executeHouseholdSurface } from "./household-integration.ts";
 import type { HouseholdTodoNoticePort } from './household-todos.ts';
+import { HouseholdOwnerPermissionAborted } from './household-owner-permissions.ts';
 import { provisionHouseholdPermissions, pendingLinkInvitationIds, revokeRemovedMemberHousehold } from "./household-permissions.ts";
 import { drainFilePurgeQueue } from "./file-artifacts.ts";
 import {
@@ -153,7 +154,7 @@ import {
 // src/protocol/index.ts by build:command-core; it is not a second implementation.
 import {
   HOUSEHOLD_LOCAL_SEAT, HOUSEHOLD_JOIN_RATE_PER_HOUR,
-  HouseholdToolInputError,
+  HouseholdToolInputError, householdRefusalDetails,
   applyCommand,
   canonicalPrincipal,
   decideWorkspace,
@@ -10603,6 +10604,11 @@ async function handleTransaction(
 ): Promise<HttpResult> {
   const kind = commandKind(body);
   const commandId = String(body.command_id);
+  const surface = record(body.command);
+  // D1 introduces these tool operations. Older household and human surfaces
+  // retain their established HTTP result semantics.
+  const d1Tool = kind === "household_tool" && ["object_draft_read", "list_draft_read",
+    "object_permissions_confirm", "list_permissions_confirm"].includes(String(surface?.tool));
   return await db.begin("isolation level read committed", async (tx) => {
     let authenticatedAgent: AgentAuthRow | null = null;
     let acceptedPresenceRoute: PresenceRoute | null = null;
@@ -10938,7 +10944,7 @@ async function handleTransaction(
         await insertAudit(tx, { auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
           outcome: output.status === "refused" ? "authz" : "accepted",
           reason: output.status === "refused" ? String(output.reason) : null });
-        return { status: 200, body: output };
+        return { status: d1Tool && output.status === "refused" ? 409 : 200, body: output };
       } catch (error) {
         if (error instanceof HouseholdToolInputError) return { status: 400, body: { status: "refused", reason: error.code } };
         throw error;
@@ -13029,6 +13035,12 @@ async function handleTransaction(
     // idempotency, presence, audit or notice effects survive this refusal.
     if (error instanceof HouseholdContentServiceUpdating) {
       return { status: 503, headers: { "retry-after": "1" }, body: HouseholdContentServiceUpdating.body };
+    }
+    if (d1Tool && error instanceof HouseholdOwnerPermissionAborted) {
+      // Only this closed reason crosses the post-rollback boundary. A failed
+      // recheck cannot authorize scope, a remedy or a success/notice receipt.
+      return { status: 409, body: { status: "refused", committed: false,
+        reason: error.reason, ...householdRefusalDetails(error.reason) } };
     }
     throw error;
   });

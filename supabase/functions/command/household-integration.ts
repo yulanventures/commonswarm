@@ -61,7 +61,7 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
   const remedy = scope.workspace_id && ['owner_confirmation_required','content_consent_required'].includes(reason)
     && await canOfferOwnerHouseholdSetup(tx, workspaceId, identity)
     ? identity.principal_id !== null && identity.run_id === null ? 'list_permissions_confirm' : 'object_permissions_confirm' : undefined;
-  return { ...result, ...core.householdRefusalDetails(reason, scope, remedy) };
+  return { ...result, ...core.householdRefusalDetails(reason, scope, remedy, identity.principal_id === null ? 'human' : identity.run_id === null ? 'hosted' : 'local') };
 }
 
 async function executeHouseholdSurfaceResult(tx: Sql, workspaceId: string, identity: HouseholdIdentity,
@@ -168,7 +168,7 @@ async function executeHouseholdSurfaceResult(tx: Sql, workspaceId: string, ident
     return { status: 'ok', content_role: access.facts.member!.content_role,
       operations: core.HOUSEHOLD_CONTENT_OPERATIONS.filter(op => !core.householdAccessRefusal(access.facts, workspaceId, op, access.now)) };
   }
-  if (value.kind === 'household_draft') return readHouseholdDraft(tx, workspaceId, identity, value.draft_id, store);
+  if (value.kind === 'household_draft') return readHouseholdDraft(tx, workspaceId, identity, value.draft_id, store, undefined, false);
   if (value.kind !== 'household_tool' || typeof value.tool !== 'string') return refused('invalid_request');
   const args = core.validateHouseholdToolArguments(value.tool, value.arguments);
   if (args.request_id !== undefined && args.request_id !== requestId) return refused('request_id_mismatch');

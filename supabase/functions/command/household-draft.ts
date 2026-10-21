@@ -11,7 +11,7 @@ export const householdRevisionMetadata = (revision: HouseholdRevision) => ({
   author: revision.author, occurred_at_server: revision.occurred_at_server, command_id: revision.command_id,
 });
 export async function readHouseholdDraft(tx: Sql, workspaceId: string, identity: HouseholdIdentity,
-  draftId: unknown, store: ReturnType<typeof createHouseholdObjectStore>, allowedKinds: readonly string[] = ['list', 'doc', 'file']) {
+  draftId: unknown, store: ReturnType<typeof createHouseholdObjectStore>, allowedKinds: readonly string[] = ['list', 'doc', 'file'], toolTransport = true) {
   const refused = (reason: string) => ({ status: 'refused', reason });
   if (typeof draftId !== 'string' || (!draftId.length || draftId.length > 255)) return refused('invalid_request');
   const result = await store.readBytes(tx, workspaceId, identity, { kind: 'draft_read', draft_id: draftId }, allowedKinds);
@@ -27,6 +27,6 @@ export async function readHouseholdDraft(tx: Sql, workspaceId: string, identity:
       content: transfers.decodeHouseholdContent(base.bytes, draft.kind) },
     current: { ...householdRevisionMetadata(current.metadata.revision), live: current.metadata.live,
       content: transfers.decodeHouseholdContent(current.bytes, draft.kind) } };
-  return new TextEncoder().encode(JSON.stringify(JSON.stringify(output))).length > 28 * 1024
+  return toolTransport && new TextEncoder().encode(JSON.stringify(JSON.stringify(output))).length > 28 * 1024
     ? { status: 'refused', reason: 'draft_response_too_large' } : output;
 }

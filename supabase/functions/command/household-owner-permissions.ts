@@ -11,7 +11,10 @@ import type { HouseholdOwnerPermissionCommand } from '../_shared/household-tool-
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 const refused = (reason: string) => ({ status: 'refused', reason });
 export class HouseholdOwnerPermissionAborted extends Error {
-  constructor() { super('Owner permission transaction aborted.'); this.name = 'HouseholdOwnerPermissionAborted'; }
+  constructor(readonly reason: 'owner_notice_unavailable' | 'credential_revoked'
+    | 'connection_access_refused' | 'owner_confirmation_required' = 'owner_notice_unavailable') {
+    super('Owner permission transaction aborted.'); this.name = 'HouseholdOwnerPermissionAborted';
+  }
 }
 
 export async function confirmOwnerHouseholdPermissions(tx: Sql, workspaceId: string, actor: HouseholdIdentity,
@@ -38,7 +41,7 @@ export async function confirmOwnerHouseholdPermissions(tx: Sql, workspaceId: str
     source: actor, input: args })));
   const [prior] = await tx`SELECT request_digest,response FROM swarm.household_owner_permission_receipts
     WHERE workspace_id=${workspaceId}::uuid AND actor_user=${actor.user_id}::uuid
-      AND actor_key=${actor.principal_id ?? actor.user_id}::uuid AND request_id=${requestId} FOR UPDATE`;
+      AND actor_key=${actor.principal_id ?? actor.user_id}::uuid AND request_id=${requestId}`;
   if (prior) return prior.request_digest === digest
     ? { ...prior.response as Record<string, unknown>, replayed: true } : refused('request_id_reused');
   const [boundary] = await tx`SELECT purpose,owner_user_id FROM swarm.household_workspace_boundaries
@@ -100,7 +103,7 @@ export async function confirmOwnerHouseholdPermissions(tx: Sql, workspaceId: str
       VALUES (${workspaceId}::uuid,${actor.user_id}::uuid,${action.content_role},${crypto.randomUUID()}::uuid,clock_timestamp())`;
   } else {
     const checked = await checkedConnection(tx, workspaceId, actor, action.connection);
-    if (!checked.allowed) throw new HouseholdOwnerPermissionAborted();
+    if (!checked.allowed) throw new HouseholdOwnerPermissionAborted('connection_access_refused');
     await writeConnection(tx, workspaceId, actor, action.connection, String(boundary!.purpose),
       String(rights!.content_consent_id), checked.expires_at, true);
   }
@@ -108,12 +111,12 @@ export async function confirmOwnerHouseholdPermissions(tx: Sql, workspaceId: str
     about: 'Lists permissions', body: `Owner chat confirmed Lists permissions: ${householdCanonical({ request_id: requestId,
       action, audit_context: args.audit_context ?? {}, principal_id: actor.principal_id })}` });
   if (receipt.status !== 'sent' || !receipt.signal_id) throw new HouseholdOwnerPermissionAborted();
-  if (!await recheck(tx, actor)) throw new HouseholdOwnerPermissionAborted();
+  if (!await recheck(tx, actor)) throw new HouseholdOwnerPermissionAborted('credential_revoked');
   if (action.kind === 'allow_connection' && !(await checkedConnection(tx, workspaceId, actor, action.connection)).allowed)
-    throw new HouseholdOwnerPermissionAborted();
+    throw new HouseholdOwnerPermissionAborted('connection_access_refused');
   const [live] = await tx`SELECT role FROM swarm.memberships WHERE workspace_id=${workspaceId}::uuid
     AND user_id=${actor.user_id}::uuid AND revoked_at IS NULL FOR SHARE`;
-  if (live?.role !== 'owner') throw new HouseholdOwnerPermissionAborted();
+  if (live?.role !== 'owner') throw new HouseholdOwnerPermissionAborted('owner_confirmation_required');
   const response = { status: 'committed', request_id: requestId, action: action.kind,
     notice: { status: 'sent', signal_id: receipt.signal_id }, replayed: false };
   await tx`INSERT INTO swarm.household_owner_permission_receipts(workspace_id,actor_user,actor_key,actor_principal,request_id,request_digest,source,action,audit_context,response)
