@@ -36,8 +36,9 @@ const fixtureScript = `
     host.sync(project(chat));
     if (innerWidth > 832) {
     check('52px product rail', Math.abs(app.querySelector('.cs-org-rail').getBoundingClientRect().width - 52) < 0.5);
-    check('390px context at1471', Math.abs(app.querySelector('.cs-org-context-parking').getBoundingClientRect().width - 390) < 0.5);
+    check('responsive context width', Math.abs(app.querySelector('.cs-org-context-parking').getBoundingClientRect().width - (innerWidth >= 1400 ? 390 : 280)) < 0.5);
     }
+    check('legacy tablet nav hidden', [...app.querySelectorAll('.hm-ws-nav')].every(node => !node.getClientRects().length));
     const label = app.querySelector('.cs-org-identity-copy').textContent;
     check('truthful identity', label === 'Workspaces' + workspace.name, label);
     host.syncMenu(false);
@@ -90,6 +91,19 @@ const fixtureScript = `
     check('resize closes modal/restores inert', !app.querySelector('dialog').open && inertRestored());
     check('resize retains host nodes', sameNodes());
   },
+  refreshFocus() {
+    if (innerWidth <= 832) for (const kind of ['trigger', 'item', 'heading']) {
+      const trigger = menu.querySelector('.hm-menu__trigger');
+      if (kind === 'heading') heading.focus();
+      else if (kind === 'item') trigger.click(); else trigger.focus();
+      renderHeader();
+      check('structural refresh retains ' + kind + ' focus', document.activeElement === (kind === 'heading' ? heading : menu.querySelector('.hm-menu__trigger')));
+    }
+    const unrelated = app.querySelector('[data-user-menu]'), option = unrelated.querySelector('[data-local-account-option]');
+    unrelated.hidden = false; option.focus(); renderHeader();
+    check('header refresh preserves unrelated account popup and focus', !unrelated.hidden && document.activeElement === option);
+    unrelated.hidden = true;
+  },
   async finish() {
     host.syncMenu(false); slot.replaceChildren(); frame.classList.add('hm-frame--catchup');
     host.sync(project({ view: 'catchup' })); await settle();
@@ -136,7 +150,7 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
     for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: name, code: name, windowsVirtualKeyCode: name === "Tab" ? 9 : 27, nativeVirtualKeyCode: name === "Tab" ? 9 : 27 });
   };
   await send("Emulation.setFocusEmulationEnabled", { enabled: true });
-  for (const [width, height] of [[1471, 900], [390, 844], [320, 568]]) {
+  for (const [width, height] of [[1471, 900], [833, 900], [390, 844], [320, 568]]) {
     await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
     await send("Page.navigate", { url: pathToFileURL(fixture).href + `?case=${width}` });
     let ready = false;
@@ -155,6 +169,7 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
     await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
     await evaluate("window.hostObserver.settle()");
     }
+    await evaluate("window.hostObserver.refreshFocus()");
     const checks = await evaluate("window.hostObserver.finish()") as Check[];
     assert.ok(Array.isArray(checks) && checks.length > 0, `${width}px must reach lifecycle checks`);
     for (const check of checks) assert.equal(check.pass, true, `${width}px ${check.name}: ${JSON.stringify(check.detail)}`);

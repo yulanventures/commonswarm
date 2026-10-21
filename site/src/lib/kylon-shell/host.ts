@@ -54,7 +54,10 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
     const heading = app.querySelector<HTMLElement>(".hm-phone-bar > .hm-phone-bar__title") ?? phoneHeading?.node;
     const headingDock = shell!.slots.phoneHeader.querySelector(".cs-org-phone-title")!;
     if ((!node || node.parentElement === menuDock) && (!heading || heading.parentElement === headingDock)) return;
-    closeOverlays(); restoreMenu();
+    const oldPanel = phoneMenu?.node.querySelector<HTMLElement>(".hm-menu__list");
+    if (oldPanel) oldPanel.hidden = true;
+    phoneMenu?.node.querySelector(".hm-menu__trigger")?.setAttribute("aria-expanded", "false");
+    restoreMenu();
     if (node) { phoneMenu = { node, parent: node.parentElement! }; menuDock.append(node); }
     if (heading) { phoneHeading = { node: heading, parent: heading.parentElement! }; headingDock.replaceChildren(heading); }
   };
@@ -98,6 +101,14 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
       syncMenu();
     },
     syncMenu,
+    replaceHeader(replace: () => void) {
+      const active = doc.activeElement;
+      const owned = phoneMenu?.node.contains(active) ? "menu" : active === phoneHeading?.node ? "heading" : null;
+      replace(); syncMenu();
+      if (!owned || (doc.activeElement !== doc.body && doc.activeElement !== active)) return;
+      const target = owned === "menu" ? phoneMenu?.node.querySelector<HTMLElement>(".hm-menu__trigger") : phoneHeading?.node;
+      if (target?.getClientRects().length && !target.closest("[hidden], [inert]")) target.focus({ preventScroll: true });
+    },
     suspend() { if (shell) restore(); },
     get mounted() { return shell !== null; },
   };

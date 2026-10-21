@@ -4497,9 +4497,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           else if (item === "settings") openWorkspaceDetailsDialog();
           // AdminDelegations owns the data-admin-access-open click through its delegated listener.
         } };
-      replaceHomeRegion(slot, "shell", [buildPhoneTopBar(document, vm, callbacks), buildWorkspaceHeader(document, vm, callbacks),
-        buildWorkspaceNav(document, vm, callbacks, "tablet")]);
-      layout.syncMenu();
+      layout.replaceHeader(() => replaceHomeRegion(slot, "shell", [buildPhoneTopBar(document, vm, callbacks), buildWorkspaceHeader(document, vm, callbacks),
+        buildWorkspaceNav(document, vm, callbacks, "tablet")]));
       /* The doors open the People & agents PAGE. A page is not a popup, so the door carries no
          aria-controls/aria-expanded; on the page itself it is the current page. */
       for (const button of slot.querySelectorAll<HTMLButtonElement>("[data-roster-open], .hm-phone-bar__people")) {
@@ -4509,7 +4508,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         else button.removeAttribute("aria-current");
       }
       if (bottom) replaceHomeRegion(bottom, "phone-nav", [buildWorkspaceNav(document, vm, callbacks, "phone")],
-        Array.from(slot.querySelectorAll<HTMLElement>("h1")).find(heading => heading.getClientRects().length > 0));
+        all<HTMLElement>("[data-home-workspace-shell] h1, .cs-org-phone-title h1").find(heading => heading.getClientRects().length > 0));
       homeShellKey = key;
       syncFeedChrome();
     };

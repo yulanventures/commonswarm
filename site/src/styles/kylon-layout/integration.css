@@ -30,6 +30,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context { paddi
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame__rail-content { block-size: 100%; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail { padding: 0; gap: 16px; font-family: var(--k-shell-font); }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__brand { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-ws-nav { display: none; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__catch-up { display: none; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__workspaces > .hm-rail__heading {
   position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%);

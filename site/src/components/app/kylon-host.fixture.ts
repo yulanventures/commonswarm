@@ -6,7 +6,7 @@ import { build } from "esbuild";
 const siteRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const setupScript = `
 (() => {
-  const { createKylonHost, projectHomeLayout, buildPhoneTopBar } = KylonHostFixture;
+  const { createKylonHost, projectHomeLayout, buildPhoneTopBar, buildWorkspaceHeader, buildWorkspaceNav, replaceHomeRegion } = KylonHostFixture;
   const app = document.querySelector('live-dashboard'), frame = app.querySelector('.hm-frame');
   const context = app.querySelector('[data-home-rail-slot]'), account = app.querySelector('[data-user-menu-root]');
   const frameParent = frame.parentElement, contextParent = context.parentElement;
@@ -30,7 +30,7 @@ const setupScript = `
   function renderHeader() {
   bar = buildPhoneTopBar(document, vm, callbacks);
   menu = bar.querySelector('.hm-menu'); heading = bar.querySelector('h1');
-  slot.replaceChildren(bar); host.syncMenu();
+  host.replaceHeader(() => replaceHomeRegion(slot, "shell", [bar, buildWorkspaceHeader(document, vm, callbacks), buildWorkspaceNav(document, vm, callbacks, "tablet")]));
   }
   renderHeader(); host.sync(project(chat));
   window.hostFixtureData = { app, frame, context, account, frameParent, contextParent, accountParent, slot, calls, host, workspace, chat, project, renderHeader, get bar() { return bar; }, get menu() { return menu; }, get heading() { return heading; } };
@@ -41,7 +41,8 @@ export async function kylonHostFixture(observe: string): Promise<string> {
   outfile: "kylon-host-fixture.js", external: ["/fonts/*"], stdin: { resolveDir: siteRoot, loader: "ts", contents: `
     export { createKylonHost } from './src/lib/kylon-shell/host.ts';
     export { projectHomeLayout } from './src/lib/kylon-shell/projection.ts';
-    export { buildPhoneTopBar } from './src/lib/home-shell.ts';
+    export { buildPhoneTopBar, buildWorkspaceHeader, buildWorkspaceNav } from './src/lib/home-shell.ts';
+    export { replaceHomeRegion } from './src/lib/home-focus.ts';
     import './src/styles/tokens.css'; import './src/styles/home/index.css';
     import './src/styles/kylon-shell.css'; import './src/styles/kylon-layout/index.css';` } });
   const js = bundle.outputFiles.find(file => file.path.endsWith(".js"))?.text;
@@ -55,7 +56,7 @@ export async function kylonHostFixture(observe: string): Promise<string> {
     <live-dashboard class="dashboard" data-kylon-shell data-state="channel"><div class="dashboard__root"><section class="dashboard__product">
     <div hidden></div><div hidden></div><div class="hm-frame dashboard__frame"><aside class="hm-frame__rail dashboard__rail">
     <div class="dashboard__rail-foot" data-user-menu-root><button class="dashboard__user-trigger" data-user-menu-trigger type="button" aria-label="Invented account">
-    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"></path></svg></button><div data-user-menu hidden></div></div>
+    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"></path></svg></button><div data-user-menu hidden><button type="button" data-local-account-option>Local account option</button></div></div>
     <div class="hm-frame__rail-content" data-home-rail-slot><nav aria-label="Invented context"><a href="#fixture">Invented workspace</a></nav></div></aside>
     <div class="hm-frame__main"><div data-home-workspace-shell></div><section data-home-route-pane><p>Invented local callbacks; no backend.</p></section></div><aside class="hm-frame__side">Invented side content</aside>
     </div></section></div></live-dashboard><script>${(js + setupScript + observe).replace(/<\/script/giu, "<\\/script")}</script></body></html>`;
