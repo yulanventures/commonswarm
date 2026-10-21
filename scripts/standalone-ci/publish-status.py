@@ -144,19 +144,22 @@ def reconcile(api, root, item):
     history = api.history(item['sha'])
     context = [r for r in history if r['context'] == payload['context']]
     legacy_description = f"{item['run_id']} exit {item['code']}"
-    matches = [r for r in context if r['description'] in (payload['description'], legacy_description)
-               and r['state'] == payload['state']]
-    if matches:
-        return 'skipped'
-    # Every earlier same-context status needs known completion provenance. API
-    # insertion order alone says nothing about the time the tests finished.
+    identical, superseded = False, False
+    provenance = {}
+    completions = {item['ended']: item['run_id']}
+    # Validate the entire context before skipping, including when an identical
+    # or newer result exists. API insertion order is not completion order.
     for row in context:
         description = row['description'] or ''
         match = re.fullmatch(f'({ID}) exit ([0-9]{{1,3}})(?: ended (.+))?', description)
         need(match is not None, 'unknown_status_provenance')
         prior_id, code, ended = match.groups()
-        need(prior_id != item['run_id'], 'conflicting_run_status')
-        if ended is None:
+        if prior_id == item['run_id']:
+            need(description in (payload['description'], legacy_description)
+                 and row['state'] == payload['state'], 'conflicting_run_status')
+            identical = True
+            completed = item['ended']
+        elif ended is None:
             prior = candidate(read_receipt(root, prior_id))
             need(prior['sha'] == item['sha'] and prior['payload']['context'] == payload['context']
                  and prior['code'] == int(code) and prior['payload']['state'] == row['state'], 'invalid_legacy_provenance')
@@ -164,7 +167,14 @@ def reconcile(api, root, item):
         else:
             need(int(code) <= 255 and row['state'] != 'pending', 'invalid_status_provenance')
             completed = timestamp(ended)
-        need(completed < item['ended'], 'newer_or_ambiguous_result')
+        signature = (int(code), row['state'], completed)
+        need(prior_id not in provenance or provenance[prior_id] == signature, 'conflicting_run_status')
+        provenance[prior_id] = signature
+        need(completed not in completions or completions[completed] == prior_id, 'newer_or_ambiguous_result')
+        completions[completed] = prior_id
+        superseded = superseded or completed > item['ended']
+    if identical or superseded:
+        return 'skipped'
     created = api.request('POST', '/statuses/' + item['sha'], payload)
     need(isinstance(created, dict) and type(created.get('id')) is int and created['id'] > 0, 'invalid_create_response')
     readback = api.history(item['sha'])
@@ -200,6 +210,13 @@ def main():
             need(ready or run_id in LEGACY, 'selected_receipt_not_ready')
             items.append(candidate(receipt))
         items.sort(key=lambda i: (i['sha'], i['payload']['context'], i['ended'], i['run_id']))
+        # Equal completions from different ready runs are ambiguous even if a
+        # later published result would otherwise supersede both. Check before POST.
+        completions = set()
+        for item in items:
+            key = (item['sha'], item['payload']['context'], item['ended'])
+            need(key not in completions, 'newer_or_ambiguous_result')
+            completions.add(key)
         counts = dict(published=0, skipped=0, eligible=len(items))
         api = API(token)
         for item in items:
