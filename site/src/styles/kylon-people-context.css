@@ -1,4 +1,5 @@
 @import "./kylon-people-roster.css";
+@import "./kylon-people-semantics.css";
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] {
   display: flex; flex-direction: column; gap: 16px; min-inline-size: 0;
   color: var(--k-shell-ink); font: 400 13px/1.5 var(--k-shell-font);
@@ -7,7 +8,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(h1,h2,h3,p,
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-head { display: grid; gap: 10px; min-inline-size: 0; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-title-row { display: flex; align-items: center; gap: 8px; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-title-row h1 { flex: 1; min-inline-size: 0; }
-live-dashboard.dashboard[data-kylon-shell] [data-people-context] h1 { font: 600 18px/1.4 var(--k-shell-font); letter-spacing: -.3px; overflow-wrap: anywhere; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] h1 { font: 600 20px/1.4 var(--k-shell-font); letter-spacing: -.3px; overflow-wrap: anywhere; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-back {
   display: inline-flex; align-items: center; justify-self: start; min-block-size: 44px; min-inline-size: 44px;
   padding: 4px; border-radius: 6px; color: var(--k-shell-secondary); font: 500 13px/1.5 var(--k-shell-font); text-decoration: none;
@@ -19,10 +20,16 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-search
 }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters { display: flex; gap: 4px; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters button {
+  position: relative; isolation: isolate;
   min-inline-size: 44px; min-block-size: 44px; padding: 6px 12px; border: 0; border-radius: 6px;
   background: transparent; color: var(--k-shell-secondary); font: 500 12px/1.5 var(--k-shell-font); cursor: pointer;
 }
-live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters button[aria-pressed="true"] { background: var(--k-shell-selected); color: var(--k-shell-ink); }
+/* Paint a32px pill inside the unchanged44px native hit/focus owner. */
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters button::before {
+  content: ""; position: absolute; inset: 6px 0; z-index: -1; border-radius: 999px; pointer-events: none;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters button[aria-pressed="true"] { background: transparent; color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters button[aria-pressed="true"]::before { background: var(--k-shell-selected); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-page-main,.pd-member-grid) { display: flex; flex-direction: column; gap: 0; min-inline-size: 0; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-context-footer { display: grid; gap: 12px; border-block-start: 1px solid var(--k-shell-line); padding-block-start: 12px; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-actions { display: flex; flex-wrap: wrap; gap: 8px; }
