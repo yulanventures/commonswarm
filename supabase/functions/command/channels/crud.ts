@@ -130,13 +130,13 @@ export function requireReadableChannel(
     (c) => c.workspace_id === workspaceId && c.channel_id === channelId,
   );
   if (!ch) return fail('CHANNEL_ACCESS_DENIED', 'channel_membership', baseScope);
-  const scope = wsScope(s, workspaceId, ch.slug);
   if (ch.visibility === 'private' && !isPrivateChannelsEnabled(s)) {
-    return fail('PRIVATE_CHANNELS_DISABLED', 'private_channels_enabled', scope);
+    return fail('PRIVATE_CHANNELS_DISABLED', 'private_channels_enabled', baseScope);
   }
   if (!canReadChannel(s, caller, ch.channel_id)) {
-    return fail('CHANNEL_ACCESS_DENIED', 'channel_membership', scope);
+    return fail('CHANNEL_ACCESS_DENIED', 'channel_membership', baseScope);
   }
+  const scope = wsScope(s, workspaceId, ch.slug);
   if (requireLive && !isLive(ch)) {
     return fail('CHANNEL_ARCHIVED', 'active_channel', scope);
   }
@@ -196,6 +196,9 @@ export function channelCreate(
   const ws = s.workspaces.find((w) => w.workspace_id === input.workspace_id)!;
   const now = input.now ?? new Date().toISOString();
   const channelId = input.channel_id ?? `ch-${ws.workspace_id}-${slug}`;
+  if (!channelId.trim() || s.channels.some((ch) => ch.channel_id === channelId)) {
+    return fail('CHANNEL_SLUG_TAKEN', 'unique_channel_id', scope);
+  }
 
   const channel: ChannelSummary = {
     channel_id: channelId,
@@ -319,8 +322,14 @@ export function channelSetVisibility(
   const actualBoundFileCount = (s.fileChannelBindings ?? []).filter(
     (b) => b.channel_id === ch.channel_id,
   ).length;
-  const signalCount = Math.max(actualSignalCount, input.signal_count ?? 0);
-  const boundFiles = Math.max(actualBoundFileCount, input.bound_file_count ?? 0);
+  const parseCount = (v: unknown): number | null =>
+    v === undefined ? 0 : typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null;
+  const inputSignalCount = parseCount(input.signal_count);
+  const inputBoundFiles = parseCount(input.bound_file_count);
+  const signalCount =
+    inputSignalCount === null ? Math.max(1, actualSignalCount) : Math.max(actualSignalCount, inputSignalCount);
+  const boundFiles =
+    inputBoundFiles === null ? Math.max(1, actualBoundFileCount) : Math.max(actualBoundFileCount, inputBoundFiles);
 
   const trans = validateChannelVisibilityTransition({
     privateChannelsEnabled: isPrivateChannelsEnabled(s),

@@ -408,9 +408,9 @@ export function scrubLinkPreviews(
                 (x.workspace_id === undefined || x.workspace_id === cand.workspace_id),
             )
           : undefined;
-        if (sig) {
+        if (sig && (!cand.channel_id || sig.channel_id === cand.channel_id)) {
           resolvedChannelId = sig.channel_id ?? null;
-        } else if ((s.signals ?? []).length > 0 && cand.signal_id) {
+        } else {
           resolvedChannelId = null;
         }
       }
