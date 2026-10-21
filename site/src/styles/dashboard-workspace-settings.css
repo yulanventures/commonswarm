@@ -1,0 +1,96 @@
+  .dashboard__workspace-details-dialog {
+    inline-size: min(calc(100% - var(--s-8)), 23rem);
+    max-inline-size: calc(100% - var(--s-8));
+    max-block-size: min(42rem, calc(100dvh - var(--s-8)));
+    margin: auto;
+    padding: 0;
+    color: var(--text);
+    background: var(--surface-3);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .dashboard__workspace-details-dialog::backdrop {
+    background: color-mix(in oklab, var(--text) 32%, transparent);
+  }
+
+  .dashboard__workspace-details-dialog[open] {
+    display: flex;
+    flex-direction: column;
+    animation: dashboard-dialog-in var(--dur-3) var(--ease-decelerate);
+  }
+
+  .dashboard__workspace-details-dialog-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s-3);
+    padding: var(--s-3) var(--s-3) var(--s-3) var(--s-4);
+    border-block-end: 1px solid var(--border);
+  }
+
+  .dashboard__workspace-details-dialog-head p {
+    margin: 0;
+    color: var(--text);
+    font-size: var(--t-sm);
+    font-weight: var(--weight-semibold);
+  }
+
+  .dashboard__workspace-details-dialog-body {
+    min-block-size: 0;
+    display: grid;
+    gap: var(--s-2);
+    padding: var(--s-4);
+    overflow-y: auto;
+  }
+
+  .dashboard__workspace-settings-title,
+  .dashboard__workspace-danger h3 {
+    margin: 0;
+    color: var(--text);
+    font-size: var(--t-sm);
+  }
+
+  .dashboard__workspace-settings-counts,
+  .dashboard__workspace-danger p {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--t-xs);
+    line-height: 1.5;
+  }
+
+  .dashboard__workspace-danger {
+    display: grid;
+    gap: var(--s-2);
+    margin-block-start: var(--s-2);
+    padding-block-start: var(--s-3);
+    border-block-start: 1px solid color-mix(in oklab, var(--danger) 45%, var(--border));
+  }
+
+  .dashboard__workspace-danger form,
+  .dashboard__workspace-danger label {
+    display: grid;
+    gap: var(--s-2);
+  }
+
+  .dashboard__workspace-danger label {
+    color: var(--text-muted);
+    font-size: var(--t-xs);
+  }
+
+  .dashboard__workspace-danger input {
+    min-inline-size: 0;
+    inline-size: 100%;
+    padding: var(--s-2) var(--s-3);
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    font: inherit;
+  }
+
+  .dashboard__workspace-danger input:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+  }
