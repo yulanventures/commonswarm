@@ -260,7 +260,7 @@ test("HM6 Caddy activates OAuth only and preserves the dark MCP resource contrac
   assert.match(caddy, /\(mcp_resource_active\)[\s\S]*?method POST[\s\S]*?rewrite \* \/functions\/v1\/mcp\n\s+reverse_proxy 127\.0\.0\.1:9000/);
   assert.match(caddy, /\(mcp_resource_active\)[\s\S]*?method GET HEAD[\s\S]*?functions\/v1\/mcp\/\.well-known\/oauth-protected-resource\/mcp/);
   assert.match(caddy, /\(mcp_oauth_active\)[\s\S]*?reverse_proxy 127\.0\.0\.1:\{\$MCP_OAUTH_HOST_PORT\}/);
-  assert.match(caddy, /@mcp_unavailable path \/mcp \/\.well-known\/oauth-protected-resource\/mcp\n\s+handle @mcp_unavailable \{[\s\S]*?feature_disabled[\s\S]*?503/);
+  assert.match(caddy, /@mcp_unavailable path \/mcp \/\.well-known\/oauth-protected-resource\/mcp \/\.well-known\/oauth-protected-resource\n\s+handle @mcp_unavailable \{[\s\S]*?feature_disabled[\s\S]*?503/);
   const activeSite = caddy.slice(caddy.indexOf("mcp.commonswarm.com {"));
   assert.equal((activeSite.match(/import mcp_oauth_active/g) ?? []).length, 1);
   assert.doesNotMatch(activeSite, /import mcp_resource_active/);

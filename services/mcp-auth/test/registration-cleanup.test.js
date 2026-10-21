@@ -151,7 +151,8 @@ test("disabled public authorization creates no registration store, timer, or que
   await h.tick();
   const disabled = await register(h);
   assert.equal(disabled.status, 503);
-  assert.equal(disabled.body.error, "authorization_service_disabled");
+  assert.deepEqual(disabled.body, { error: "temporarily_unavailable",
+    error_description: "client registration is unavailable" });
   assert.deepEqual(h.queries, []);
   assert.deepEqual(h.logs.filter((line) => line.includes("cleanup")), []);
 });
