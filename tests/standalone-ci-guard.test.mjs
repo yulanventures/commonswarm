@@ -61,6 +61,11 @@ assert os.environ['DOCKER_CONTEXT']=='default'
 assert os.environ['DOCKER_HOST']=='unix:///var/run/docker.sock'
 def event(action,name):
     with (root/'events.jsonl').open('a') as f: f.write(json.dumps(dict(action=action,name=name,at=time.monotonic()))+'\\n')
+if args[0]=='ps':
+    if (root/'foreign-heavy').exists(): print('foreign-id other-owner')
+    for name,item in json.loads(p.read_text()).items():
+        if name.endswith(('-worker','-docker','-cleaner')): print(name+' '+item['label'])
+    sys.exit(0)
 if args[0]=='run':
     name=args[args.index('--name')+1]
     label=args[args.index('--label')+1].split('=',1)[1]
@@ -116,12 +121,28 @@ sys.exit(2)
 import pathlib,sys
 args=sys.argv[1:]
 processes=[(0,'systemd'),(1003,'Runner.Worker')]
-if pathlib.Path(${JSON.stringify(join(root,'pe-active'))}).exists(): processes.append((1001,'Runner.Worker'))
+busy=pathlib.Path(${JSON.stringify(join(root,'pe-active'))})
+if busy.exists(): processes.append((1001,'Runner.Worker'))
 uid=args[args.index('-u')+1] if '-u' in args else None
 uid=0 if uid=='root' else int(uid) if uid is not None else None
 name=args[args.index('-x')+1]
+if name=='Runner.Worker' and uid==1001:
+    (busy.parent/'pe-probed').write_text('yes')
+    if busy.exists():
+        value=busy.read_text()
+        print(' '.join(value.split(',')) if value[:1].isdigit() else '4242')
 sys.exit(0 if any(pname==name and (uid is None or owner==uid) for owner,pname in processes) else 1)
 `); chmodSync(join(bin, 'pgrep'), 0o755);
+  writeFileSync(join(bin,'ps'), `#!/usr/bin/env python3
+import pathlib,sys
+busy=pathlib.Path(${JSON.stringify(join(root,'pe-active'))})
+if not busy.exists(): sys.exit(1)
+if busy.read_text()=='unknown': sys.exit(1)
+for pid in sys.argv[-1].split(','):
+    identity=busy.parent/'pe-identity'
+    second=identity.read_text() if pid=='5000' and identity.exists() else '00'
+    print(pid+' 1001 Tue Oct 21 00:00:'+second+' 2026 Runner.Worker')
+`); chmodSync(join(bin,'ps'),0o755);
   const realGit = good('which', ['git']);
   // Only the external source transport is replaced; git still resolves/clones
   // real commits. Inspect the fetch environment before redirecting it locally.
@@ -157,7 +178,7 @@ os.execv(${JSON.stringify(realGit)},[${JSON.stringify(realGit)},*args])
   const cfg = {state, controller: installed, service_uid:process.getuid(), service_gid:process.getgid(),
     controller_checksums:Object.fromEntries(['run.sh','suite.sh','retain.py','publish-status.py'].map(name=>[name,createHash('sha256').update(readFileSync(join(installed,name))).digest('hex')])), source_url: 'https://github.com/yulanventures/commonswarm.git', allowed_hostname: good('hostname',['-s']),
     controller_sha: 'a'.repeat(40), worker_image: 'sha256:' + '1'.repeat(64),
-    dind_image: 'fixture@sha256:' + '2'.repeat(64), timeout_seconds: 10, pe_runner_uid: 1001, status_reader_uid: process.platform === 'linux' ? 65534 : null};
+    dind_image: 'fixture@sha256:' + '2'.repeat(64), timeout_seconds: 10, pe_worker_grace_seconds: 1, pe_runner_uid: 1001, status_reader_uid: process.platform === 'linux' ? 65534 : null};
   const config = join(root, 'config.json');
   writeFileSync(config, JSON.stringify(cfg), {mode:0o600});
   const env = {...process.env, PATH: `${bin}:${process.env.PATH}`, COMMONSWARM_CI_CONFIG: config};
@@ -370,7 +391,7 @@ test('deferred wait longer than the active budget permits completion but preserv
       await delay(1600); writeFileSync(busy,'active');
     }
     let deferred;
-    for(let n=0;n<400;n++) {
+    for(let n=0;exhaust && n<400;n++) {
       const runs=join(f.state,'runs');
       if(existsSync(runs)) for(const id of readdirSync(runs)) {
         const path=join(runs,id,'receipt.json');
@@ -382,20 +403,21 @@ test('deferred wait longer than the active budget permits completion but preserv
       if(deferred) break;
       await delay(10);
     }
-    assert.ok(deferred); assert.equal(deferred.github_status,undefined);
+    if(exhaust) {assert.ok(deferred); assert.equal(deferred.github_status,undefined);}
+    else {await waitFor(()=>existsSync(join(f.root,'pe-probed')));}
     await delay(6000); // exceeds the entire five-second active allowance
     assert.equal(running.child.exitCode,null,'waiting is still pending after active allowance');
     renameSync(busy,join(f.root,'pe-finished'));
     const result=await running;
     assert.equal(result.status,exhaust ? 124 : 0,result.stderr);
     const receipts=f.receipts().sort((a,b)=>a.attempt-b.attempt);
-    assert.equal(receipts.length,2);
-    assert.equal(receipts[0].state,'deferred'); assert.equal(receipts[0].pending,true);
-    const last=receipts[1];
+    assert.equal(receipts.length,exhaust ? 2 : 1);
+    if(exhaust) {assert.equal(receipts[0].state,'deferred'); assert.equal(receipts[0].pending,true);}
+    const last=receipts.at(-1);
     assert.equal(last.state,exhaust ? 'failed' : 'completed');
     assert.equal(last.timed_out,exhaust); assert.equal(last.pending,false);
-    assert.deepEqual(last.prior_attempts,[deferred.run_id]);
-    assert.ok(last.started_at>=deferred.ended_at);
+    assert.deepEqual(last.prior_attempts,exhaust ? [deferred.run_id] : []);
+    if(exhaust) assert.ok(last.started_at>=deferred.ended_at);
     assert.ok(last.deferred_wait_seconds>=6);
     assert.ok(last.elapsed_seconds>=last.active_elapsed_seconds+6);
     if(exhaust) assert.ok(last.active_elapsed_seconds>=5,'earlier active work remains charged');
@@ -620,4 +642,78 @@ test('actual Linux named-reader ACL denies logs/write/private state and survives
   good('setfacl',['-m','u:65533:--x',f.state]);
   const denied=await start(f); assert.notEqual(denied.status,0); assert.match(denied.stderr,/ACL mismatch/);
   assert.ok(entries.includes('user:65534:--x'));
+});
+
+// Test-audit: these owners protect process continuity, admission, persistent
+// identity, and stop/deadline boundaries. The previous owners require a real
+// deferral and cannot detect an unnecessary short-job abort. External process
+// and Docker transport are fixtures; all decisions/receipts are the controller.
+async function waitFor(predicate) {
+  for(let n=0;n<1000;n++) {if(predicate()) return; await delay(10);}
+  assert.fail('fixture boundary was not reached');
+}
+function events(f) {
+  const path=join(f.root,'events.jsonl');
+  return existsSync(path) ? readFileSync(path,'utf8').trim().split('\n').map(JSON.parse) : [];
+}
+async function workerEntered(f) {await waitFor(()=>events(f).some(e=>e.action==='start' && e.name.endsWith('-worker')));}
+function cleanResult(f) {
+  for(const r of f.receipts()) {assert.equal(r.resolved_sha,f.sha);assert.deepEqual(r.cleanup_errors,[]);}
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root,'containers.json'))),{unowned:{label:'some-other-run'}});
+}
+test('short PE worker starting mid-work preserves the same owned worker without extra attempts', async () => {
+  const f=fixture({sleep:2}); const running=start(f); await workerEntered(f);
+  writeFileSync(join(f.root,'pe-active'),'4242'); await delay(500);
+  renameSync(join(f.root,'pe-active'),join(f.root,'pe-finished'));
+  const result=await running; assert.equal(result.status,0,result.stderr);
+  const receipts=f.receipts(); assert.equal(receipts.length,1);
+  assert.equal(receipts[0].state,'completed');assert.equal(receipts[0].attempt,1);
+  assert.deepEqual(receipts[0].prior_attempts,[]);
+  const workers=events(f).filter(e=>e.name.endsWith('-worker'));
+  assert.deepEqual(workers.map(e=>e.action),['start','finish','remove']);
+  assert.equal(new Set(workers.map(e=>e.name)).size,1);cleanResult(f);
+});
+test('short PE worker before allocation waits without a deferred attempt then starts exactly once', async () => {
+  const f=fixture();writeFileSync(join(f.root,'pe-active'),'active');const running=start(f);
+  await waitFor(()=>existsSync(join(f.root,'pe-probed')));await delay(500);
+  assert.equal(events(f).length,0);assert.equal(running.child.exitCode,null);
+  renameSync(join(f.root,'pe-active'),join(f.root,'pe-finished'));
+  assert.equal((await running).status,0);assert.equal(f.receipts().length,1);
+  assert.equal(events(f).filter(e=>e.action==='start' && e.name.endsWith('-worker')).length,1);cleanResult(f);
+});
+test('foreign running container is an immediate conflict even during PE grace', async () => {
+  const f=fixture({sleep:3}); f.cfg.pe_worker_grace_seconds=60;writeFileSync(f.config,JSON.stringify(f.cfg));
+  const running=start(f);await workerEntered(f);
+  writeFileSync(join(f.root,'pe-active'),'active');writeFileSync(join(f.root,'foreign-heavy'),'active');
+  await waitFor(()=>events(f).some(e=>e.action==='remove' && e.name.endsWith('-worker')));
+  assert.equal(events(f).some(e=>e.action==='finish' && e.name.endsWith('-worker')),false);
+  renameSync(join(f.root,'pe-active'),join(f.root,'pe-finished'));
+  renameSync(join(f.root,'foreign-heavy'),join(f.root,'foreign-finished'));
+  assert.equal((await running).status,0);assert.equal(f.receipts().length,2);cleanResult(f);
+});
+test('new worker PIDs cannot refresh persistent worker grace and unknown metadata is bounded', async () => {
+  for(const kind of ['pid','identity','unknown']) {
+    const unknown=kind==='unknown';
+    const f=fixture({sleep:4});const running=start(f);await workerEntered(f);
+    const busy=join(f.root,'pe-active');writeFileSync(busy,unknown ? 'unknown' : '4242');
+    for(let n=0;n<6;n++) {await delay(200);if(!unknown) {writeFileSync(busy,'4242,'+(kind==='identity' ? 5000 : 5000+n));writeFileSync(join(f.root,'pe-identity'),String(n).padStart(2,'0'));}}
+    await waitFor(()=>events(f).some(e=>e.action==='remove' && e.name.endsWith('-worker')));
+    assert.equal(events(f).some(e=>e.action==='finish' && e.name.endsWith('-worker')),false);
+    renameSync(busy,join(f.root,'pe-finished'));
+    assert.equal((await running).status,0);assert.equal(f.receipts().length,2);cleanResult(f);
+  }
+});
+test('cancellation and active deadline remain bounded while waiting for PE', async () => {
+  for(const mode of ['initial-cancel','mid-cancel','mid-deadline']) {
+    const f=fixture({sleep:8}); f.cfg.pe_worker_grace_seconds=60;f.cfg.timeout_seconds=mode==='mid-deadline' ? 3 : 10;
+    writeFileSync(f.config,JSON.stringify(f.cfg));
+    if(mode==='initial-cancel')writeFileSync(join(f.root,'pe-active'),'active');
+    const running=start(f);
+    if(mode==='initial-cancel') await waitFor(()=>existsSync(join(f.root,'pe-probed')));
+    else {await workerEntered(f);writeFileSync(join(f.root,'pe-active'),'active');}
+    if(mode!=='mid-deadline') {await delay(300);running.child.kill('SIGTERM');}
+    const result=await Promise.race([running,delay(10000).then(()=>{running.child.kill('SIGKILL');throw Error('wait hung');})]);
+    assert.equal(result.status,mode==='mid-deadline' ? 124 : 130,result.stderr);
+    assert.equal(f.receipts().length,1);assert.equal(f.receipts()[0].state,'failed');cleanResult(f);
+  }
 });

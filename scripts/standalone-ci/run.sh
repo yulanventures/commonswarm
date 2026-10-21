@@ -132,6 +132,9 @@ if not isinstance(timeout, int) or not 1 <= timeout <= 1800:
 server_timeout = cfg.get('server_timeout_seconds', 2672)
 if type(server_timeout) is not int or not 1 <= server_timeout <= 2672:
     refuse('server timeout must be 1..2672 seconds')
+worker_grace = cfg.get('pe_worker_grace_seconds', 60)
+if type(worker_grace) is not int or not 1 <= worker_grace <= 60:
+    refuse('PE worker grace must be 1..60 seconds')
 for key in ('worker_image', 'dind_image'):
     if not re.fullmatch(r'(?:[^\s]+@)?sha256:[0-9a-f]{64}', cfg[key]):
         refuse('images must be resolved immutable digests')
@@ -261,6 +264,47 @@ with (state / 'queue.lock').open('a') as lock:
         suite_started = stamp()
         attempt = 0
         prior_attempts = []
+        # Identity is PID plus kernel start time; a new PID never refreshes an
+        # older worker's clock. Keep this across attempts, not per subprocess.
+        worker_seen = {}
+        class Deferred(Exception):
+            pass
+        def capacity():
+            check_stopping()
+            probe = sp.run(['pgrep', '-u', str(pe_runner_uid), '-x', 'Runner.Worker'],
+                           capture_output=True, text=True, timeout=2)
+            identities = set()
+            if probe.returncode == 0:
+                pids = probe.stdout.split()
+                if not pids or any(not p.isdigit() for p in pids):
+                    identities.add('unresolved')
+                else:
+                    metadata = sp.run(['ps', '-o', 'pid=,uid=,lstart=,comm=', '-p', ','.join(pids)],
+                                      capture_output=True, text=True, timeout=2)
+                    rows = [row.split() for row in metadata.stdout.splitlines()]
+                    for row in rows:
+                        if len(row) != 8 or row[0] not in pids or row[1] != str(pe_runner_uid) or row[-1] != 'Runner.Worker':
+                            identities.add('unresolved')
+                        else:
+                            identities.add(tuple(row))
+                    if metadata.returncode != 0 or len(rows) != len(pids):
+                        identities.add('unresolved')
+            elif probe.returncode != 1:
+                identities.add('unresolved')
+            now = time.monotonic()
+            for identity in list(worker_seen):
+                if identity not in identities and 'unresolved' not in identities:
+                    del worker_seen[identity]
+            for identity in identities:
+                worker_seen.setdefault(identity, now)
+            # The existing Docker endpoint/ownership label is sufficient; no
+            # private runner diagnostics, job-name inference or new authority.
+            containers = sp.check_output(['docker', 'ps', '--format',
+                '{{.ID}} {{.Label "com.commonswarm.ci.run"}}'], text=True, timeout=2)
+            if any(row.split()[1:] != [run_id] for row in containers.splitlines() if row.strip()):
+                raise Deferred()
+            return bool(identities)
+
         while True:
             if stopping:
                 overall = 130
@@ -294,15 +338,17 @@ with (state / 'queue.lock').open('a') as lock:
             code = 1
             suite_command = None
             with (run / 'suite.log').open('wb') as log:
-                class Deferred(Exception):
-                    pass
                 def check_capacity():
-                    check_stopping()
-                    probe = sp.run(['pgrep', '-u', str(pe_runner_uid), '-x', 'Runner.Worker'], stdout=sp.DEVNULL, timeout=2)
-                    if probe.returncode == 0:
-                        raise Deferred()
-                    if probe.returncode != 1:
-                        raise RuntimeError('PE worker probe failed')
+                    while capacity():
+                        if time.monotonic() >= deadline:
+                            raise sp.TimeoutExpired(['active-budget'], timeout)
+                        if any(time.monotonic() - since >= worker_grace for since in worker_seen.values()):
+                            raise Deferred()
+                        # An existing child keeps doing useful work. Otherwise
+                        # wait before allocating the next owned subprocess.
+                        if active is not None and active.poll() is None:
+                            return
+                        time.sleep(min(0.25, max(0, deadline - time.monotonic())))
                 def bounded(argv):
                     global active
                     if time.monotonic() >= deadline:
@@ -337,6 +383,26 @@ with (state / 'queue.lock').open('a') as lock:
                     finally:
                         active = None
                 try:
+                    if attempt == 1:
+                        quiet_started = time.monotonic()
+                        quiet_deadline = quiet_started + 600
+                        try:
+                            while True:
+                                check_stopping()
+                                if time.monotonic() >= quiet_deadline:
+                                    raise sp.TimeoutExpired(['initial-quiet'], 600)
+                                try:
+                                    busy = capacity()
+                                except Deferred:
+                                    busy = True
+                                if not busy:
+                                    break
+                                time.sleep(min(0.25, max(0, quiet_deadline - time.monotonic())))
+                        finally:
+                            waited = time.monotonic() - quiet_started
+                            deadline += waited
+                            deferred_wait += waited
+                            receipt['deferred_wait_seconds'] = round(deferred_wait, 3)
                     bounded(['git', 'clone', '--quiet', '--no-hardlinks', '--no-checkout', str(source), str(work)])
                     bounded(['git', '-C', str(work), 'checkout', '--quiet', '--detach', resolved])
                     bounded(['git', '-C', str(work), 'remote', 'set-url', 'origin', 'https://github.com/yulanventures/commonswarm.git'])
@@ -508,7 +574,8 @@ with (state / 'queue.lock').open('a') as lock:
                         if time.monotonic() >= quiet_deadline:
                             raise sp.TimeoutExpired(['quiet-retry'], 600)
                         try:
-                            check_capacity()
+                            if capacity():
+                                raise Deferred()
                             break
                         except Deferred:
                             time.sleep(min(0.25, max(0, quiet_deadline - time.monotonic())))
