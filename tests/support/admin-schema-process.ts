@@ -1,9 +1,9 @@
 /** SQL subprocess boundary: retain child failures without exposing SQL or rows. */
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync, type SpawnSyncReturns } from 'node:child_process';
-import { closeSync, mkdirSync, mkdtempSync, openSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdtempSync, openSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
+import { privateHarnessEvidence } from './admin-principal-lock-order-harness.mjs';
 import { join } from 'node:path';
 
 export function sqlPhase(label: string, sql: string): string {
@@ -36,24 +36,15 @@ export function runSqlProcess(command: string, args: string[], sql: string): voi
     fd = openSync(path, 'r');
     // A file descriptor keeps the same stdin/psql transaction semantics, but
     // Node has no large pipe write to fail with EPIPE when psql exits early.
+    // Retain exact input before the child starts, including parent interruption.
+    const retainedInput = privateHarnessEvidence('issuer-input', sql);
     const result = spawnSync(command, args, { stdio: [fd, 'pipe', 'pipe'],
       encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024 });
     if (result.error || result.status !== 0 || result.signal !== null) {
-      // This stays under the checkout's private CI evidence, outside the temporary
-      // SQL directory. Never expose input, rows or raw stderr in public assertions.
-      const evidenceRoot = fileURLToPath(new URL('../../scratchpad/server-harness-evidence/', import.meta.url));
-      mkdirSync(evidenceRoot, { recursive: true, mode: 0o700 });
-      const evidence = mkdtempSync(join(evidenceRoot, 'issuer-sql-'));
-      const cap = 16 * 1024 * 1024;
-      const input = Buffer.from(sql);
-      const stderr = Buffer.from(result.stderr ?? '');
-      if (input.length <= cap) writeFileSync(join(evidence, 'input.sql'), input, { mode: 0o600, flag: 'wx' });
-      writeFileSync(join(evidence, 'stderr.txt'), stderr.subarray(0, cap), { mode: 0o600, flag: 'wx' });
-      writeFileSync(join(evidence, 'capture.json'), JSON.stringify({input_bytes: input.length,
-        input_retained: input.length <= cap, stderr_bytes: stderr.length, stderr_truncated: stderr.length > cap}),
-        { mode: 0o600, flag: 'wx' });
+      privateHarnessEvidence('issuer-stderr', result.stderr ?? '');
     }
     assertSqlProcessResult(result);
+    execFileSync('rm', ['-f', ...retainedInput]);
   } finally {
     try {
       if (fd !== undefined) closeSync(fd);
