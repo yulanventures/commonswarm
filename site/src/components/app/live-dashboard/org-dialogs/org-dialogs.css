@@ -565,14 +565,17 @@ dd { margin: 0; overflow-wrap: anywhere; }
   margin: 0;
   min-width: 0;
 }
-dialog.spec-card.dialog-surface { position: static; width: 100%; margin: 0; color: var(--cs-ink); }
-dialog:modal {
+dialog.spec-card.dialog-surface:not(:modal) { position: static; width: 100%; margin: 0; color: var(--cs-ink); }
+dialog.spec-card.dialog-surface:modal, dialog:modal {
   position: fixed;
   inset: 0;
   margin: auto;
   width: min(560px, calc(100vw - 32px));
+  max-width: 560px;
+  height: fit-content;
   max-height: calc(100dvh - 48px);
   overflow: auto;
+  color: var(--cs-ink);
   z-index: 100;
   box-shadow: var(--cs-shadow-popover);
 }
