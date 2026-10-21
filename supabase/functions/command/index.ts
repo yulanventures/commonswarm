@@ -10944,7 +10944,7 @@ async function handleTransaction(
         await insertAudit(tx, { auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
           outcome: output.status === "refused" ? "authz" : "accepted",
           reason: output.status === "refused" ? String(output.reason) : null });
-        return { status: d1Tool && output.status === "refused" ? 409 : 200, body: output };
+        return { status: d1Tool && hostedSeatCapability === null && output.status === "refused" ? 409 : 200, body: output };
       } catch (error) {
         if (error instanceof HouseholdToolInputError) return { status: 400, body: { status: "refused", reason: error.code } };
         throw error;
@@ -13039,7 +13039,7 @@ async function handleTransaction(
     if (d1Tool && error instanceof HouseholdOwnerPermissionAborted) {
       // Only this closed reason crosses the post-rollback boundary. A failed
       // recheck cannot authorize scope, a remedy or a success/notice receipt.
-      return { status: 409, body: { status: "refused", committed: false,
+      return { status: hostedSeatCapability === null ? 409 : 200, body: { status: "refused", committed: false,
         reason: error.reason, ...householdRefusalDetails(error.reason) } };
     }
     throw error;

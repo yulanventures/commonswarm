@@ -441,6 +441,16 @@ const input = JSON.parse(await new Response(Deno.stdin.readable).text());
 const api = await import(input.commandModule);
 const auth = await import(input.authModule);
 const { HOUSEHOLD_LOCAL_SEAT } = await import(input.protocolModule);
+// Expose the actual executor and its external SQL pools in this test module
+// only. All imports, capability checks, command/read dispatch and MCP rendering
+// remain production code; the pools share the real rollback-only fixture below.
+const mcpSource = (await Deno.readTextFile(new URL(input.mcpModule)))
+ .replace(/(from\s+|import\()(["'])(\.[^"']+)\2/g,
+  (_,prefix,quote,specifier)=>prefix+quote+new URL(specifier,input.mcpModule).href+quote)
+ .replace('async function executeTool(', 'export async function executeTool(')
+ + '\nexport { authDb, statusDb, createMcpProtocolHandler };';
+const mcp = await import('data:application/typescript,'+encodeURIComponent(mcpSource));
+const poolBegins = [mcp.authDb.begin, mcp.statusDb.begin];
 const originalBegin = api.db.begin.bind(api.db);
 class RollbackProof extends Error {}
 try {
@@ -460,7 +470,22 @@ try {
    try { return await outer.savepoint(async nested => { active=nested; return await args.at(-1)(nested); }); }
    finally { active=outer; await restore(); }
   };
+  // Independent MCP pools use real savepoints and preserve the calling SQL
+  // role across the nested provider-status transaction, as separate pools do.
+  const poolBegin=async(...args)=>{
+   const outer=active,role=(await q("SELECT current_setting('role') AS value"))[0].value;
+   const values=await Promise.all(settings.map(async name=>(await q('SELECT current_setting($1,true) AS value',[name]))[0].value));
+   try{return await outer.savepoint(async nested=>{active=nested;return await args.at(-1)(nested);});}
+   finally{active=outer;await q('SELECT set_config($1,$2,true)',['role',role]);for(let i=0;i<settings.length;i++)await q('SELECT set_config($1,$2,true)',[settings[i],values[i]??'']);}
+  };
+  mcp.authDb.begin = poolBegin; mcp.statusDb.begin = poolBegin;
   const f=input.f;
+  const hostedCaller=caller=>caller==='hosted'||caller==='mcp';
+  const mcpHandler=mcp.createMcpProtocolHandler({
+   issuer:'https://mcp.commonswarm.com',resource:'https://mcp.commonswarm.com/mcp',publicEnabled:true,allowedOrigins:new Set(),
+   limits:{maxBodyBytes:128*1024,maxResponseBytes:64*1024,requestTimeoutMs:25_000,maxConcurrentRequests:4},
+   verifyToken:async()=>({providerGrantId:'synthetic-'+f.grant,subject:f.owner,expiresAt:1_900_000_000}),executeTool:mcp.executeTool,
+  });
   const token='swm_agt_'+'D'.repeat(43);
   const digest=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(token)));
   await q("INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only) VALUES($1,$2,$3,'Synthetic D1 local','local',false)",[f.local,f.workspace,f.owner]);
@@ -481,10 +506,24 @@ try {
   const cap=await capabilityFor('list_permissions_confirm');
   assert.ok(cap,'real hosted capability positive control');
   const invoke=async (caller,action,id=crypto.randomUUID(),workspace=f.workspace,command,capability=cap)=>{
-   const args={seat:caller==='hosted'?f.handle:HOUSEHOLD_LOCAL_SEAT,request_id:id,confirmation:{kind:'owner_chat',confirmed:true},action};
-   const envelope={command_id:id,client_version:'0.1.83',workspace_id:workspace,stream:{kind:'workspace'},command:command??{kind:'household_tool',tool:caller==='hosted'?'list_permissions_confirm':'object_permissions_confirm',arguments:args}};
+   const args={seat:hostedCaller(caller)?f.handle:HOUSEHOLD_LOCAL_SEAT,request_id:id,confirmation:{kind:'owner_chat',confirmed:true},action};
+   const envelope={command_id:id,client_version:'0.1.83',workspace_id:workspace,stream:{kind:'workspace'},command:command??{kind:'household_tool',tool:hostedCaller(caller)?'list_permissions_confirm':'object_permissions_confirm',arguments:args}};
    await q('SET LOCAL SESSION AUTHORIZATION commonswarm_edge');
    try {
+    if(caller==='mcp'){
+     const response=await mcpHandler(new Request('https://mcp.commonswarm.com/mcp',{method:'POST',
+      headers:{authorization:'Bearer synthetic-d1','content-type':'application/json'},
+      body:JSON.stringify({jsonrpc:'2.0',id:'d1',method:'tools/call',params:{name:envelope.command.tool,arguments:envelope.command.arguments}})}));
+     assert.equal(response.status,200,'MCP transport remains successful');
+     const rpc=await response.json();assert.equal(rpc.error,undefined,'MCP must return tool content');
+     const output=JSON.parse(rpc.result.content[0].text);
+     assert.notEqual(output.reason,'hosted_seat_forbidden','D1 refusal must survive executeTool');
+     assert.equal(rpc.result.isError,undefined,'D1 refusal remains structured content');
+     assert.equal(rpc.result._meta,undefined,'D1 refusal must not request reconnect');
+     assert.notEqual(output.error,'hosted_seat_forbidden');
+     if(output.status==='refused')assert.equal(typeof output.next_action,'string','MCP retains the recovery step');
+     return {status:response.status,body:output};
+    }
     if(caller==='hosted')return await api.handleHostedCommand(envelope,capability);
     if(caller==='human')return await api.handleHostedManagementCommand(envelope,{userId:f.owner,email:null,displayName:'Synthetic owner',identityVerified:true,interactiveAuthAtSeconds:null});
     const response=await api.handleRequest(new Request('http://localhost/command',{method:'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json'},body:JSON.stringify(envelope)}));
@@ -497,7 +536,7 @@ try {
     result[table]=await q('SELECT to_jsonb(r)::text AS row FROM swarm.'+table+' r WHERE workspace_id=$1 ORDER BY to_jsonb(r)::text',[f.workspace]);return result;
   };
   const setup={kind:'setup',purpose:'shared',content_role:'editor'};
-  for(const caller of ['human','local','hosted']){
+  for(const caller of ['human','local','hosted','mcp']){
    await q('DELETE FROM swarm.household_content_connections WHERE workspace_id=$1',[f.workspace]);
    await q('DELETE FROM swarm.household_member_content_roles WHERE workspace_id=$1',[f.workspace]);
    await q('DELETE FROM swarm.household_workspace_boundaries WHERE workspace_id=$1',[f.workspace]);
@@ -509,7 +548,7 @@ try {
    const delivery=await q('SELECT recipient_user_id FROM swarm.signal_deliveries WHERE signal_id=$1',[result.body.notice.signal_id]);
    assert.ok(delivery.some(row=>row.recipient_user_id===f.owner),'owner notice delivery persists');
    const frozen=await snapshot();const replay=await invoke(caller,setup,id);assert.equal(replay.body.replayed,true);assert.deepEqual(await snapshot(),frozen);assert.equal(await count('signals'),before+1);
-   const reused=await invoke(caller,{...setup,content_role:'reader'},id);assert.equal(reused.status,409);assert.equal(reused.body.status,'refused');assert.equal(reused.body.reason,'request_id_reused');assert.deepEqual(await snapshot(),frozen);
+   const reused=await invoke(caller,{...setup,content_role:'reader'},id);assert.equal(reused.status,hostedCaller(caller)?200:409);assert.equal(reused.body.status,'refused');assert.equal(reused.body.reason,'request_id_reused');assert.equal(reused.body.code,'request_id_reused');assert.equal(reused.body.mcp_tool,null);assert.equal(reused.body.cli_command,null);assert.deepEqual(await snapshot(),frozen);
   }
   const allow={kind:'allow_connection',connection:{kind:'hosted',connection_id:f.target.connection,grant_id:f.target.grant,principal_id:f.target.principal,operations:['read','update']}};
   for(const caller of ['human','local','hosted']){
@@ -520,7 +559,7 @@ try {
   // runs after restoration, so a broad unrelated denial cannot satisfy the test.
   const negative=async(label,mutate,action=allow,reason,caller='hosted',workspace=f.workspace)=>{
    const before=await snapshot();
-   await assert.rejects(tx.savepoint(async nested=>{active=nested;await mutate();const result=await invoke(caller,action,crypto.randomUUID(),workspace);assert.ok(result.status>=400,label);assert.notEqual(result.body.status,'committed',label);if(reason)assert.equal(result.body.reason,reason,label);throw new RollbackProof();}),RollbackProof);
+   await assert.rejects(tx.savepoint(async nested=>{active=nested;await mutate();const result=await invoke(caller,action,crypto.randomUUID(),workspace);assert.ok(result.status>=400||(caller==='hosted'&&result.status===200&&result.body.status==='refused'),label);assert.notEqual(result.body.status,'committed',label);if(reason)assert.equal(result.body.reason,reason,label);throw new RollbackProof();}),RollbackProof);
    active=tx;await restore();assert.deepEqual(await snapshot(),before,label+' rolls back');assert.equal((await invoke('hosted',allow)).body.status,'committed',label+' restored positive');
   };
   await negative('downgraded owner',()=>q("UPDATE swarm.memberships SET role='admin' WHERE workspace_id=$1 AND user_id=$2",[f.workspace,f.owner]),allow,'owner_confirmation_required');
@@ -534,25 +573,26 @@ try {
   await negative('revoked provider family',()=>q('INSERT INTO commonswarm_oauth.refresh_family_tombstones(grant_id,revoked_at) VALUES($1,clock_timestamp())',['synthetic-'+f.target.grant]),allow,'connection_access_refused');
   await negative('revoked source',()=>q('UPDATE swarm.hosted_mcp_seats SET revoked_at=clock_timestamp() WHERE seat_id=$1',[f.connection]));
   await negative('restricted source',()=>q("INSERT INTO swarm.household_hosted_content_restrictions(grant_id,workspace_id,owner_user_id,principal_id,operations,origin) VALUES($1,$2,$3,$4,ARRAY['read'],'human_allow')",[f.grant,f.workspace,f.owner,f.principal]),allow,'caller_content_restricted');
-  // New routes return structured refusals; legacy tools and the human draft
-  // surface keep their existing 200 refusal contract beside those controls.
+  // Human/local D1 HTTP uses 409; hosted D1 preserves structured 200 tool
+  // content through executeTool. Legacy tools and human drafts retain 200.
   const draftCap=await capabilityFor('list_draft_read'),legacyCap=await capabilityFor('list_list');
-  for(const caller of ['human','local','hosted']){
-   const command={kind:'household_tool',tool:caller==='hosted'?'list_draft_read':'object_draft_read',
-    arguments:{seat:caller==='hosted'?f.handle:HOUSEHOLD_LOCAL_SEAT,draft_id:'missing-private-draft'}};
+  for(const caller of ['human','local','hosted','mcp']){
+   const command={kind:'household_tool',tool:hostedCaller(caller)?'list_draft_read':'object_draft_read',
+    arguments:{seat:hostedCaller(caller)?f.handle:HOUSEHOLD_LOCAL_SEAT,draft_id:'missing-private-draft'}};
    const denied=await invoke(caller,null,crypto.randomUUID(),f.workspace,command,draftCap);
-   assert.equal(denied.status,409);assert.equal(denied.body.status,'refused');
+   assert.equal(denied.status,hostedCaller(caller)?200:409);assert.equal(denied.body.status,'refused');
+   assert.equal(denied.body.reason,'draft_access_refused');
    assert.equal(denied.body.mcp_tool,null);assert.equal(denied.body.cli_command,null);
   }
   const humanDraft=await invoke('human',null,crypto.randomUUID(),f.workspace,{kind:'household_draft',draft_id:'missing-private-draft'});
   assert.equal(humanDraft.status,200);assert.equal(humanDraft.body.status,'refused');
   for(const caller of ['local','hosted']){
    const legacy=await invoke(caller,null,crypto.randomUUID(),f.workspace,{kind:'household_tool',
-    tool:caller==='hosted'?'list_list':'object_list',arguments:{seat:caller==='hosted'?f.handle:HOUSEHOLD_LOCAL_SEAT}},legacyCap);
+    tool:caller==='hosted'?'list_list':'object_list',arguments:{seat:hostedCaller(caller)?f.handle:HOUSEHOLD_LOCAL_SEAT}},legacyCap);
    assert.equal(legacy.status,200);assert.equal(legacy.body.status,'ok');
   }
-  const assertAborted=(result,reason)=>{
-   assert.equal(result.status,409);assert.equal(result.body.status,'refused');assert.equal(result.body.committed,false);
+  const assertAborted=(result,reason,caller='hosted')=>{
+   assert.equal(result.status,hostedCaller(caller)?200:409);assert.equal(result.body.status,'refused');assert.equal(result.body.committed,false);
    assert.equal(result.body.reason,reason);assert.equal(result.body.code,reason);
    assert.deepEqual(result.body.scope,{});assert.equal(result.body.remedy_url,null);
    assert.equal(result.body.mcp_tool,null);assert.equal(result.body.cli_command,null);
@@ -560,12 +600,12 @@ try {
   };
   // A real port refusal occurs after permission/audit writes. Inspect the
   // handler's rollback immediately, before rolling back fixture rate limits.
-  for(const caller of ['local','hosted']){
+  for(const caller of ['local','hosted','mcp']){
    const before=await snapshot();
    await assert.rejects(tx.savepoint(async nested=>{
-    active=nested;const bucket=caller==='hosted'?'hosted_seat:'+f.connection:'agent:'+f.token;
+    active=nested;const bucket=hostedCaller(caller)?'hosted_seat:'+f.connection:'agent:'+f.token;
     await q("INSERT INTO swarm.rate_buckets(bucket_key,window_start,count) VALUES($1,date_trunc('hour',statement_timestamp()),10000) ON CONFLICT(bucket_key,window_start) DO UPDATE SET count=excluded.count",['signal:credential:'+bucket]);
-    assertAborted(await invoke(caller,{...allow,connection:{...allow.connection,operations:['read']}}),'owner_notice_unavailable');
+    assertAborted(await invoke(caller,{...allow,connection:{...allow.connection,operations:['read']}}),'owner_notice_unavailable',caller);
     assert.deepEqual(await snapshot(),before,'failed notice rolled back before response');
     throw new RollbackProof();
    }),RollbackProof);active=tx;await restore();
@@ -604,10 +644,10 @@ try {
   throw new RollbackProof();
  }),RollbackProof);
  console.log('D1_ROLE_NOTICE_RESULT:ok');
-} finally {api.db.begin=originalBegin;await api.db.end();}
+} finally {api.db.begin=originalBegin;[mcp.authDb.begin,mcp.statusDb.begin]=poolBegins;await Promise.all([api.db.end(),mcp.authDb.end(),mcp.statusDb.end()]);}
 `;
 
-test('D1 real edge session human/local/hosted confirmation commits audited notices, refuses ceilings and rolls back failed delivery', {timeout:120_000}, () => {
+test('D1 real edge session and MCP executeTool preserve draft/replay/notice refusals and roll back failed delivery', {timeout:120_000}, () => {
  const local=JSON.parse(execFileSync('supabase',['status','-o','json'],{encoding:'utf8',stdio:['ignore','pipe','ignore']})) as {DB_URL:string;API_URL:string;SERVICE_ROLE_KEY:string};
  assert.ok(['127.0.0.1','localhost','[::1]'].includes(new URL(local.API_URL).hostname));
  const f={...fixture(),local:randomUUID(),device:randomUUID(),run:randomUUID(),token:randomUUID(),lineage:randomUUID(),target:null as ReturnType<typeof hostedFixture>|null};
@@ -615,6 +655,7 @@ test('D1 real edge session human/local/hosted confirmation commits audited notic
  const result=spawnSync('deno',['eval','--no-lock','--config','supabase/functions/command/deno.json',d1Harness],{
   cwd:process.cwd(),encoding:'utf8',input:JSON.stringify({f,setup:f.setup+f.target.setup,schema:emptyApplicationSchema(),
    commandModule:new URL('../../supabase/functions/command/index.ts',import.meta.url).href,
+   mcpModule:new URL('../../supabase/functions/mcp/index.ts',import.meta.url).href,
    authModule:new URL('../../supabase/functions/_shared/hosted-seat-auth.ts',import.meta.url).href,
    protocolModule:new URL('../../supabase/functions/_shared/protocol.js',import.meta.url).href}),
   env:{PATH:process.env.PATH??'',...(process.env.DENO_DIR?{DENO_DIR:process.env.DENO_DIR}:{}),SWARM_ENV:'test',SWARM_DATABASE_URL:localClusterAdminUrl(local.DB_URL),SUPABASE_URL:local.API_URL,SUPABASE_ANON_KEY:'synthetic-anon',SUPABASE_SERVICE_ROLE_KEY:local.SERVICE_ROLE_KEY},timeout:110_000,maxBuffer:1024*1024});
