@@ -87,8 +87,15 @@ const fixtureScript = `
     check('Escape restores opener/inert', !app.querySelector('dialog').open && inertRestored() && document.activeElement === app.querySelector('.cs-org-phone-bar > button'));
   },
   async resized() {
-    await settle();
-    check('resize closes modal/restores inert', !app.querySelector('dialog').open && inertRestored());
+    const dialog = app.querySelector('dialog'), deadline = performance.now() + 2000;
+    while ((dialog.open || !inertRestored()) && performance.now() < deadline) {
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    }
+    check('resize closes modal/restores inert', !dialog.open && inertRestored(), {
+      width: innerWidth, phoneMedia: matchMedia('(max-width:52rem)').matches,
+      dialogOpen: dialog.open, modal: dialog.matches(':modal'),
+      inert: [...app.querySelector('.cs-org-shell').children].map(node => ({ tag: node.tagName, className: node.className, inert: node.inert })),
+    });
     check('resize retains host nodes', sameNodes());
   },
   refreshFocus() {
