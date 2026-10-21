@@ -89,7 +89,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-
   background: var(--k-shell-selected); font-weight: 600; box-shadow: none;
 }
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) :is(.hm-choice:has(input:checked), .hm-choice[data-selected="true"]) {
-  border-color: var(--cs-accent); background: var(--k-shell-selected); color: var(--k-shell-ink); font-weight: 600;
+  border-color: var(--cs-accent); background: var(--k-shell-subtle); color: var(--k-shell-ink); font-weight: 600;
   box-shadow: none;
 }
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-pick-option[aria-selected="true"] {
