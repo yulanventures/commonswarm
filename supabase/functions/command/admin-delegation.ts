@@ -140,6 +140,7 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
   const token = oauth?.token;
   const auditKind: AdminAuditKind = operation ?? (adminRecord(input.command)?.kind === 'admin_read_metadata' ? 'read' : 'action');
   let boundCapabilities: string[] = [];
+  let preflightRefusal: string | null = null;
   const requestId = typeof input.command_id === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(input.command_id) ? input.command_id : crypto.randomUUID();
   const plannedRoutine=token ? parseAdminRoutineCommand(adminRecord(input.command)) : null;
   const recipients=plannedRoutine?.kind==='admin_invite_member' ? [plannedRoutine.recipient_user_id]
@@ -148,67 +149,78 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
   // This is a rejection filter only; the full status gate runs after the plan.
   if (oauth && token) {
     const admission=await adminAccessState(tx,oauth,undefined,true);
-    if (!admission.known || !admission.active) return {result:errorResult(403,'grant_inactive')};
+    if (!admission.known) {
+      await adminSecurityFailure(tx, 'unknown_admin_credential');
+      return { result: errorResult(401, 'unauthenticated') };
+    }
+    if (!admission.active) return {result:errorResult(403,'grant_inactive')};
     const [grant]=await tx<AdminAccountState['grants'][string][]>`SELECT * FROM swarm.admin_grants
       WHERE grant_id=${token.admin_grant_id}::uuid AND owner_user_id=${token.owner_user_id}::uuid`;
     if (!grant || grant.state!=='active' || grant.revoked_at!==null || grant.suspended_at!==null
       || new Date(grant.expires_at).getTime()<=Date.now() || new Date(grant.refresh_deadline).getTime()<=Date.now()
       || grant.admin_identity_id!==token.admin_identity_id || grant.connection_id!==token.connection_id
-      || grant.client_id!==token.client_id || grant.manifest_digest!==token.manifest_digest
-      || !await currentRights(tx,token.owner_user_id,grant.workspace_ids.filter(w=>!grant.withdrawn_workspace_ids.includes(w)),token.scope_names,false))
+      || grant.client_id!==token.client_id || grant.manifest_digest!==token.manifest_digest)
       return {result:errorResult(403,'grant_inactive')};
-    const requestedKind=String(adminRecord(input.command)?.kind);
-    const requestedScope=Object.entries(ADMIN_SCOPE_REGISTRY).find(([,commands])=>
-      (commands as readonly string[]).includes(requestedKind))?.[0];
-    if (!admission.capabilities.includes(requestedKind) || !requestedScope
-      || !token.scope_names.includes(requestedScope) || !grant.scope_names.includes(requestedScope as AdminScope))
-      return {result:errorResult(403,'capability_forbidden')};
-    if (plannedRoutine && 'principal_id' in plannedRoutine) {
-      const [principal]=await tx<{principal_id:string;owner_user_id:string;transport:string}[]>`SELECT principal_id,owner_user_id,transport
-        FROM swarm.agent_principals WHERE principal_id=${plannedRoutine.principal_id}::uuid
-          AND workspace_id=${plannedRoutine.workspace_id}::uuid`;
-      const [account]=await tx<{projection:AdminAccountState}[]>`SELECT projection FROM swarm.admin_accounts WHERE owner_user_id=${token.owner_user_id}::uuid`;
-      if (!principal || principal.owner_user_id!==token.owner_user_id
-        || !grant.target_rules.transports.includes(principal.transport as 'local')
-        || !(grant.target_rules.own_seats || grant.target_rules.seat_ids.includes(principal.principal_id)
-          || grant.target_rules.grant_created_seats && account?.projection.routine?.seats[principal.principal_id]?.grant_id===token.admin_grant_id))
-        return {result:errorResult(403,'target_forbidden')};
-    }
-    if (plannedRoutine && 'recipient_connection_id' in plannedRoutine
-      && !grant.target_rules.recipient_connection_ids.includes(plannedRoutine.recipient_connection_id))
-      return {result:errorResult(403,'recipient_forbidden')};
-    if (recipients.some(id=>!grant.target_rules.recipient_user_ids.includes(id)))
-      return {result:errorResult(403,'recipient_forbidden')};
-    if (plannedRoutine) {
-      if (plannedRoutine.grant_id!==token.admin_grant_id) return {result:errorResult(403,'forbidden')};
-      const [target]=await tx<{ok:boolean}[]>`SELECT EXISTS(
-        SELECT 1 FROM swarm.memberships m JOIN swarm.workspaces w USING(workspace_id)
-        WHERE m.workspace_id=${plannedRoutine.workspace_id}::uuid AND m.user_id=${token.owner_user_id}::uuid
-          AND m.revoked_at IS NULL AND w.archived_at IS NULL AND m.role IN ('owner','admin')
-          AND NOT ${plannedRoutine.workspace_id}::uuid=ANY(${grant.withdrawn_workspace_ids ?? []}::uuid[])
-          AND (${plannedRoutine.workspace_id}::uuid=ANY(${grant.workspace_ids}::uuid[])
-            OR ${grant.workspace_selector==='owned_and_selected'} AND m.role='owner'
-            OR EXISTS(SELECT 1 FROM swarm.admin_created_workspaces c
-              WHERE c.workspace_id=w.workspace_id AND c.grant_id=${token.admin_grant_id}::uuid))
-        ) OR (${plannedRoutine.kind==='admin_create_workspace'} AND NOT EXISTS(
-          SELECT 1 FROM swarm.workspaces WHERE workspace_id=${plannedRoutine.workspace_id}::uuid)) AS ok`;
-      if (!target?.ok) return {result:errorResult(403,'current_rights_required')};
-    }
+    preflightRefusal = await (async (): Promise<string | null> => {
+      if (!await currentRights(tx,token.owner_user_id,grant.workspace_ids.filter(w=>!grant.withdrawn_workspace_ids.includes(w)),token.scope_names,false))
+        return 'grant_inactive';
+      const requestedKind=String(adminRecord(input.command)?.kind);
+      const requestedScope=Object.entries(ADMIN_SCOPE_REGISTRY).find(([,commands])=>
+        (commands as readonly string[]).includes(requestedKind))?.[0];
+      if (!admission.capabilities.includes(requestedKind) || !requestedScope
+        || !token.scope_names.includes(requestedScope) || !grant.scope_names.includes(requestedScope as AdminScope))
+        return 'capability_forbidden';
+      if (plannedRoutine && 'principal_id' in plannedRoutine) {
+        const [principal]=await tx<{principal_id:string;owner_user_id:string;transport:string}[]>`SELECT principal_id,owner_user_id,transport
+          FROM swarm.agent_principals WHERE principal_id=${plannedRoutine.principal_id}::uuid
+            AND workspace_id=${plannedRoutine.workspace_id}::uuid`;
+        const [account]=await tx<{projection:AdminAccountState}[]>`SELECT projection FROM swarm.admin_accounts WHERE owner_user_id=${token.owner_user_id}::uuid`;
+        if (!principal || principal.owner_user_id!==token.owner_user_id
+          || !grant.target_rules.transports.includes(principal.transport as 'local')
+          || !(grant.target_rules.own_seats || grant.target_rules.seat_ids.includes(principal.principal_id)
+            || grant.target_rules.grant_created_seats && account?.projection.routine?.seats[principal.principal_id]?.grant_id===token.admin_grant_id))
+          return 'target_forbidden';
+      }
+      if (plannedRoutine && 'recipient_connection_id' in plannedRoutine
+        && !grant.target_rules.recipient_connection_ids.includes(plannedRoutine.recipient_connection_id))
+        return 'recipient_forbidden';
+      if (recipients.some(id=>!grant.target_rules.recipient_user_ids.includes(id)))
+        return 'recipient_forbidden';
+      if (plannedRoutine) {
+        if (plannedRoutine.grant_id!==token.admin_grant_id) return 'forbidden';
+        const [target]=await tx<{ok:boolean}[]>`SELECT EXISTS(
+          SELECT 1 FROM swarm.memberships m JOIN swarm.workspaces w USING(workspace_id)
+          WHERE m.workspace_id=${plannedRoutine.workspace_id}::uuid AND m.user_id=${token.owner_user_id}::uuid
+            AND m.revoked_at IS NULL AND w.archived_at IS NULL AND m.role IN ('owner','admin')
+            AND NOT ${plannedRoutine.workspace_id}::uuid=ANY(${grant.withdrawn_workspace_ids ?? []}::uuid[])
+            AND (${plannedRoutine.workspace_id}::uuid=ANY(${grant.workspace_ids}::uuid[])
+              OR ${grant.workspace_selector==='owned_and_selected'} AND m.role='owner'
+              OR EXISTS(SELECT 1 FROM swarm.admin_created_workspaces c
+                WHERE c.workspace_id=w.workspace_id AND c.grant_id=${token.admin_grant_id}::uuid))
+          ) OR (${plannedRoutine.kind==='admin_create_workspace'} AND NOT EXISTS(
+            SELECT 1 FROM swarm.workspaces WHERE workspace_id=${plannedRoutine.workspace_id}::uuid)) AS ok`;
+        if (!target?.ok) return 'current_rights_required';
+      }
+      return null;
+    })();
   }
-  const routineToken=plannedRoutine && 'predecessor_credential_id' in plannedRoutine ? plannedRoutine.predecessor_credential_id
-    : plannedRoutine && 'credential_id' in plannedRoutine ? plannedRoutine.credential_id:null;
-  const routinePrincipal=plannedRoutine && 'principal_id' in plannedRoutine ? plannedRoutine.principal_id:null;
+  // Refused requests retain only the caller/account/parent closure. Unadmitted
+  // targets and recipients must never enter the canonical lock plan.
+  const admittedRoutine = preflightRefusal === null ? plannedRoutine : null;
+  const routineToken=admittedRoutine && 'predecessor_credential_id' in admittedRoutine ? admittedRoutine.predecessor_credential_id
+    : admittedRoutine && 'credential_id' in admittedRoutine ? admittedRoutine.credential_id:null;
+  const routinePrincipal=admittedRoutine && 'principal_id' in admittedRoutine ? admittedRoutine.principal_id:null;
   const localPlan=token ? await planLocalOperation(tx,{
-    workspace:plannedRoutine?.workspace_id,actor:token.owner_user_id,
-    allowMissingWorkspace:plannedRoutine?.kind==='admin_create_workspace',
-    ...(plannedRoutine?.kind==='admin_revoke_seat' && routinePrincipal
+    workspace:admittedRoutine?.workspace_id,actor:token.owner_user_id,
+    allowMissingWorkspace:admittedRoutine?.kind==='admin_create_workspace',
+    ...(admittedRoutine?.kind==='admin_revoke_seat' && routinePrincipal
       ? {revocation:{principal:routinePrincipal}}
-      : plannedRoutine?.kind==='admin_revoke_seat_credential' && routineToken ? {revocation:{token:routineToken}}
+      : admittedRoutine?.kind==='admin_revoke_seat_credential' && routineToken ? {revocation:{token:routineToken}}
       : routineToken ? {target:{principals:[],tokens:[routineToken]}}
       : routinePrincipal ? {target:{principals:[routinePrincipal],tokens:[]}}:{}),
-    principalMode:plannedRoutine?.kind==='admin_revoke_seat' || plannedRoutine?.kind==='admin_revoke_seat_credential' ? 'update':'share',sessionMode:'share',
-    hostedMode:plannedRoutine?.kind==='admin_revoke_seat' ? 'update':'share',
-    admin:{owner:token.owner_user_id,grant:token.admin_grant_id,recipients},
+    principalMode:admittedRoutine?.kind==='admin_revoke_seat' || admittedRoutine?.kind==='admin_revoke_seat_credential' ? 'update':'share',sessionMode:'share',
+    hostedMode:admittedRoutine?.kind==='admin_revoke_seat' ? 'update':'share',
+    admin:{owner:token.owner_user_id,grant:token.admin_grant_id,recipients:preflightRefusal === null ? recipients : []},
   }) : null;
   if (oauth) {
     const status = await adminAccessState(tx, oauth, localPlan ?? undefined);
@@ -234,9 +246,9 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
   const commandId = validCommandId ? input.command_id as string : crypto.randomUUID();
   const wireValid = validCommandId && stream !== null && adminExactKeys(stream, ['kind']) && stream.kind === 'account' && input.resource === ADMIN_RESOURCE &&
     !Object.keys(input).some(key => !['command_id', 'stream', 'resource', 'command', 'client_version', 'client_build'].includes(key));
-  if (oauth && (raw?.kind === 'admin_read_metadata' || parseAdminRoutineCommand(raw)) && !boundCapabilities.includes(String(raw?.kind))) return await finish(errorResult(403, 'capability_forbidden'));
+  if (oauth && (raw?.kind === 'admin_read_metadata' || parseAdminRoutineCommand(raw)) && !boundCapabilities.includes(String(raw?.kind))) preflightRefusal ??= 'capability_forbidden';
   const prepare = raw?.kind === 'prepare_admin_consent';
-  const proposed = parseCommand(raw);
+  const proposed = preflightRefusal === null ? parseCommand(raw) : null;
   let owner: string | undefined = authentication.kind === 'human' ? authentication.identity.user_id : token!.owner_user_id;
   if (authentication.kind === 'human' && proposed?.kind === 'withdraw_admin_workspace_access') {
     const withdrawal = await tx<{ owner_user_id: string }[]>`
@@ -298,7 +310,7 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
   // both hold SHARE and wait to raise it, nor lock two workspaces in opposite orders. As in
   // currentRights, only workspaces where the owner has a membership row are locked, except an
   // admin_create_workspace target: admin-routine.ts:48 locks an existing one (workspace_exists).
-  const routineTarget = plannedRoutine;
+  const routineTarget = admittedRoutine;
   const routineGrant = routineTarget ? state.grants[token!.admin_grant_id] : undefined;
   const createTarget = routineTarget?.kind === 'admin_create_workspace' ? routineTarget.workspace_id : null;
   if (localPlan) await lockLocalAuthPlan(tx,localPlan);
@@ -322,10 +334,11 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
         bound.registry_version !== token.registry_version || bound.manifest_digest !== token.manifest_digest ||
         !adminScopes(bound.scope_names, bound.registry_version) ||
         !adminManifestValid(adminGrantManifest(bound), now, false) ||
-        !token.scope_names.every(scope => bound.scope_names.includes(scope as AdminScope)) ||
-        !await currentRights(tx, owner, bound.workspace_ids.filter(w => !bound.withdrawn_workspace_ids.includes(w)), token.scope_names)) {
+        !token.scope_names.every(scope => bound.scope_names.includes(scope as AdminScope))) {
       return await finish(errorResult(403, 'grant_inactive'));
     }
+    if (!await currentRights(tx, owner, bound.workspace_ids.filter(w => !bound.withdrawn_workspace_ids.includes(w)), token.scope_names))
+      preflightRefusal = 'grant_inactive';
   }
   let actor: AdminActor;
   if (authentication.kind === 'human') actor = { kind: 'human', user_id: authentication.identity.user_id, session_binding: authentication.identity.session_binding };
@@ -341,6 +354,8 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
   // Cached replies recheck current policy and rights before returning any data.
   if (prior[0]) {
     if (prior[0].request_digest !== requestDigest) return await finish(errorResult(409, 'command_id_conflict'));
+    if (preflightRefusal !== null) return await finish(prior[0].response.status === 200
+      ? errorResult(403, preflightRefusal) : prior[0].response);
     if (actor.kind === 'delegated_admin') {
       const g = state.grants[actor.grant_id];
       if (!g || g.state !== 'active' || g.expires_at <= now || g.refresh_deadline <= now || actor.access_expires_at <= now ||
@@ -456,7 +471,7 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
   context.now=routineClock!.now;
   now=context.now;
   const routineContext = routineCommand && routineRefusal === null ? await prepareAdminRoutine(tx, routineCommand, state, context, oauth && authentication.kind === 'oauth' ? adminWorkerChannelConnection(authentication.worker_channel, oauth) : null) : null;
-  let refusal: string | null = !wireValid ? 'invalid_request' : command === null ? actor.kind === 'delegated_admin' ? 'human_confirmation_required' : 'invalid_request' : routineRefusal;
+  let refusal: string | null = preflightRefusal ?? (!wireValid ? 'invalid_request' : command === null ? actor.kind === 'delegated_admin' ? 'human_confirmation_required' : 'invalid_request' : routineRefusal);
   let allowance: Awaited<ReturnType<typeof charge>> | null = null;
   if (authentication.kind === 'human' && (prepare || approvalCommand || command?.kind === 'grant_admin_delegation' || command?.kind === 'narrow_admin_delegation') && (!hasFreshInteractiveAuth(authentication.identity.interactive_at_seconds, now) || !authentication.identity.csrf_verified || !/^[0-9a-f]{64}$/u.test(authentication.identity.session_binding))) refusal = 'human_confirmation_required';
   if (command?.kind === 'narrow_admin_delegation' && await adminDigest(command.manifest) !== command.manifest_digest) refusal = 'manifest_mismatch';
