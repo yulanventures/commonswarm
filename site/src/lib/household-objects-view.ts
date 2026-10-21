@@ -156,7 +156,7 @@ export function renderHouseholdConflict(state: HouseholdObjectsState): string {
   if (conflict.owner_user_id !== state.workspace.viewer_user_id || conflict.workspace_id !== state.workspace.workspace_id
     || conflict.object_id !== state.selected_id || !bound(conflict.base.revision, conflict.workspace_id, conflict.object_id)
     || !bound(conflict.current.revision, conflict.workspace_id, conflict.object_id)) return '';
-  const canSave = householdCanUpdate(state.workspace) && state.save_state === 'conflict' && conflict.proposed.kind !== 'file';
+  const canSave = householdCanUpdate(state.workspace) && ['conflict', 'refused'].includes(state.save_state) && conflict.proposed.kind !== 'file';
   return `<section class="hh-conflict" aria-label="Save conflict"><h3>Review the changes</h3>
     <p>Your retained draft is available to you. Compare all three versions before saving again.</p>
     <div class="hh-comparison">${[
@@ -172,7 +172,7 @@ export function renderHouseholdObjects(state: HouseholdObjectsState): string {
   const { workspace } = state;
   const object = selectedHouseholdObject(state);
   const busy = state.save_state === 'saving' || state.save_state === 'pending' || state.save_state === 'unknown';
-  const canEdit = householdCanUpdate(workspace) && !busy && state.save_state !== 'conflict';
+  const canEdit = householdCanUpdate(workspace) && !busy && !state.conflict && state.save_state !== 'conflict';
   const content = state.opened_version?.content ?? object?.current.content ?? null;
   const capabilities = HOUSEHOLD_CONTENT_OPERATIONS.filter((operation) => workspace.operations.includes(operation)
     && (operation === 'read' || workspace.content_role === 'editor'));
@@ -286,7 +286,7 @@ export function createHouseholdObjectsController(workspace: HouseholdWorkspaceVi
   }
   function stage(proposed: HouseholdContent): boolean {
     const object = selectedHouseholdObject(state);
-    if (!object || !householdCanUpdate(state.workspace) || locked() || state.opened_version || state.save_state === 'conflict'
+    if (!object || !householdCanUpdate(state.workspace) || locked() || state.opened_version || state.conflict || state.save_state === 'conflict'
       || proposed.kind !== object.kind || proposed.kind === 'file') return false;
     state.proposed = structuredClone(proposed); return true;
   }
@@ -315,7 +315,8 @@ export function createHouseholdObjectsController(workspace: HouseholdWorkspaceVi
       if (!householdCanUpdate(state.workspace) || locked() || state.opened_version) return false;
       const object = selectedHouseholdObject(state);
       if (!object) return false;
-      if (state.save_state === 'conflict' && (!reviewed || !state.conflict)) return false;
+      // A refused reviewed save retains its recovered draft and still needs explicit review.
+      if ((state.conflict || state.save_state === 'conflict') && (!reviewed || !state.conflict)) return false;
       const base = state.conflict?.current ?? object.current;
       const proposed = state.conflict?.proposed ?? state.proposed;
       if (!base.content || !proposed) return false;
