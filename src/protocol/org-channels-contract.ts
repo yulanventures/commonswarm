@@ -58,7 +58,7 @@ export function resolveOrgWorkspaceChannelSelector(
   if (input.seat_id) {
     if (!seat || !seatWs || !seatOrg) return fail('WORKSPACE_SEAT_MISMATCH', 'active_seat', { seat_id: input.seat_id });
     const callerAid = c.principal_kind === 'agent' ? resolveAgentId(s, c.principal_id) : c.principal_id;
-    const seatAid = seat.agent_identity_id ?? (s.agentPrincipals ?? []).find((ap) => ap.principal_id === seat.principal_id)?.agent_identity_id ?? seat.principal_id;
+    const seatAid = (s.agentPrincipals ?? []).find((ap) => ap.principal_id === seat.principal_id)?.agent_identity_id ?? seat.agent_identity_id ?? seat.principal_id;
     if (c.principal_kind !== 'agent' || seatAid !== callerAid) return fail('WORKSPACE_SEAT_MISMATCH', 'seat_principal_ownership', { seat_id: input.seat_id });
     if (!canReadWorkspace(s, c, seatWs.workspace_id)) return fail('WORKSPACE_ACCESS_DENIED', 'active_seat_workspace_access', { seat_id: input.seat_id });
   }
@@ -233,8 +233,6 @@ export function reconcileWorkspaceMove(
     return fail('WORKSPACE_SLUG_TAKEN', 'unique_workspace_slug_in_org', { org: target_org_id, workspace: ws.slug });
   }
   const srcOrg = ws.org_id;
-  ws.org_id = target_org_id;
-  for (const g of s.workspaceGrants) if (g.workspace_id === ws.workspace_id) g.org_id = target_org_id;
   const closed = new Set<string>();
   const cands = new Map<string, { principal_kind: PrincipalKind; principal_id: string; role: OrgRole }>();
   for (const g of s.workspaceGrants.filter((x) => x.workspace_id === ws.workspace_id)) {
@@ -249,7 +247,7 @@ export function reconcileWorkspaceMove(
     if (!cands.has(k)) cands.set(k, { principal_kind: cm.principal_kind, principal_id: cm.principal_id, role: 'member' });
   }
   for (const seat of (s.seats ?? []).filter((x) => x.workspace_id === ws.workspace_id && isLive(x))) {
-    const aid = seat.agent_identity_id ?? (s.agentPrincipals ?? []).find((a) => a.principal_id === seat.principal_id)?.agent_identity_id ?? seat.principal_id;
+    const aid = (s.agentPrincipals ?? []).find((a) => a.principal_id === seat.principal_id)?.agent_identity_id ?? seat.agent_identity_id ?? seat.principal_id;
     const k = `agent:${aid}`;
     if (!cands.has(k)) cands.set(k, { principal_kind: 'agent', principal_id: aid, role: 'member' });
   }
@@ -257,10 +255,18 @@ export function reconcileWorkspaceMove(
     const k = `user:${m.user_id}`;
     if (!cands.has(k)) cands.set(k, { principal_kind: 'user', principal_id: m.user_id, role: orgRole(s, srcOrg, 'user', m.user_id) ?? 'member' });
   }
+  const srcOk = new Set<string>();
+  for (const [k, p] of cands.entries()) {
+    if (canReadWorkspace(s, { principal_kind: p.principal_kind, principal_id: p.principal_id, now }, ws.workspace_id)) srcOk.add(k);
+  }
+  ws.org_id = target_org_id;
+  for (const g of s.workspaceGrants) if (g.workspace_id === ws.workspace_id) g.org_id = target_org_id;
   const dropCand = (p: { principal_kind: PrincipalKind; principal_id: string }) => {
     for (const sid of cascadeWorkspaceMemberRemoval(s, { workspace_id: ws.workspace_id, principal_kind: p.principal_kind, principal_id: p.principal_id, now }).closed_seat_ids) closed.add(sid);
   };
   const syncCand = (p: { principal_kind: PrincipalKind; principal_id: string; role: OrgRole }) => {
+    const k = `${p.principal_kind}:${p.principal_id}`;
+    if (!srcOk.has(k)) { dropCand(p); return; }
     let wg = s.workspaceGrants.find((x) => x.workspace_id === ws.workspace_id && isPrin(x, p.principal_kind, p.principal_id));
     if (!wg) {
       wg = { workspace_id: ws.workspace_id, org_id: target_org_id, principal_kind: p.principal_kind, principal_id: p.principal_id, role: p.role === 'owner' ? 'admin' : p.role, granted_by: actor_user_id, created_at: now, revoked_at: null };
@@ -327,9 +333,9 @@ export function buildMultiOrgWhoamiResponse(
   if (seat_id) {
     const seat = (s.seats ?? []).find((x) => x.seat_id === seat_id && isLive(x));
     const seatAid =
-      seat?.agent_identity_id ??
       (s.agentPrincipals ?? []).find((ap) => ap.principal_id === seat?.principal_id && isLive(ap))
         ?.agent_identity_id ??
+      seat?.agent_identity_id ??
       seat?.principal_id;
     const ws =
       seat && seatAid === id.id

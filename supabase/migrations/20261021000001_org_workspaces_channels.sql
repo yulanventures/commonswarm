@@ -89,7 +89,7 @@ SELECT workspace_id, left(coalesce(nullif(trim(both '-' from regexp_replace(lowe
 FROM workspaces ON CONFLICT DO NOTHING;
 UPDATE workspaces w SET org_id = o.id, slug = o.slug FROM organizations o WHERE o.id = w.workspace_id;
 WITH rp AS (
-SELECT ap.*, g.grant_id, CASE WHEN g.grant_id IS NULL THEN 0 ELSE row_number() OVER (PARTITION BY ap.workspace_id, g.grant_id, ap.name ORDER BY ap.revoked_at NULLS FIRST, ap.created_at, ap.principal_id) END AS rn
+SELECT ap.*, g.grant_id, CASE WHEN g.grant_id IS NULL THEN 0 ELSE row_number() OVER (PARTITION BY ap.workspace_id, g.grant_id, ap.name ORDER BY ap.revoked_at NULLS FIRST, ap.created_at, ap.principal_id) END rn
 FROM agent_principals ap LEFT JOIN LATERAL (SELECT grant_id FROM hosted_mcp_seats WHERE principal_id = ap.principal_id ORDER BY revoked_at NULLS FIRST, created_at DESC LIMIT 1) g ON true
 ), ins AS (
 INSERT INTO agent_identities
@@ -105,28 +105,28 @@ INSERT INTO workspace_principal_grants
 SELECT gen_random_uuid(), workspace_id, workspace_id, 'user', user_id, role, invited_by, joined_at, revoked_at FROM memberships
 UNION ALL
 SELECT DISTINCT ON (workspace_id, agent_identity_id) gen_random_uuid(), workspace_id, workspace_id, 'agent', agent_identity_id, 'member', owner_user_id, created_at, revoked_at
-FROM agent_principals ORDER BY 2, 5, 9 NULLS FIRST, 8 ASC ON CONFLICT DO NOTHING;
+FROM agent_principals ORDER BY 2, 5, 9 NULLS FIRST, 8 ON CONFLICT DO NOTHING;
 INSERT INTO org_memberships
 SELECT gen_random_uuid(), org_id, principal_kind, principal_id, role, granted_by, created_at, revoked_at
 FROM workspace_principal_grants ON CONFLICT DO NOTHING;
 INSERT INTO channels (channel_id, workspace_id, slug, purpose, visibility, join_policy, created_by_principal, created_by_kind, created_at)
 SELECT gen_random_uuid(), w.workspace_id, 'general', 'General coordination', 'workspace', 'open', w.created_by, 'user', w.created_at
-FROM workspaces w WHERE NOT EXISTS (SELECT 1 FROM channels c WHERE c.workspace_id = w.workspace_id AND lower(c.slug) = 'general');
+FROM workspaces w WHERE NOT EXISTS (SELECT 1 FROM channels WHERE workspace_id = w.workspace_id AND lower(slug) = 'general');
 FOREACH t IN ARRAY ARRAY['agent_identities','organizations','org_memberships','org_invites','workspace_principal_grants','connection_org_policies','channel_memberships','file_channel_bindings','org_approval_requests'] LOOP
 EXECUTE format('ALTER TABLE %1$I OWNER TO swarm_admin; ALTER TABLE %1$I ENABLE ROW LEVEL SECURITY; CREATE POLICY swarm_command_all ON %1$I FOR ALL TO swarm_command USING (true) WITH CHECK (true); REVOKE ALL ON %1$I FROM PUBLIC, anon, authenticated; GRANT SELECT, INSERT, UPDATE ON %1$I TO swarm_command', t);
 END LOOP;
 END $$;
-ALTER TABLE workspaces ALTER COLUMN org_id SET NOT NULL, ALTER COLUMN slug SET NOT NULL;
-ALTER TABLE agent_principals ALTER COLUMN agent_identity_id SET NOT NULL;
+ALTER TABLE workspaces ALTER org_id SET NOT NULL, ALTER slug SET NOT NULL;
+ALTER TABLE agent_principals ALTER agent_identity_id SET NOT NULL;
 CREATE UNIQUE INDEX agent_principals_workspace_identity_key ON agent_principals(workspace_id, agent_identity_id);
 CREATE UNIQUE INDEX workspaces_org_slug_lower_key ON workspaces(org_id, lower(slug));
 CREATE FUNCTION ensure_workspace_org_and_slug() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
 BEGIN
-IF NEW.slug IS NULL OR btrim(NEW.slug) = '' THEN
+IF btrim(coalesce(NEW.slug, '')) = '' THEN
 NEW.slug := left(coalesce(nullif(trim(both '-' from regexp_replace(lower(NEW.name), '[^a-z0-9]+', '-', 'g')), ''), 'org'), 39) || '-' || left(NEW.workspace_id::text, 8);
 END IF;
 IF NEW.org_id IS NULL THEN
-INSERT INTO organizations VALUES (NEW.workspace_id, NEW.slug, NEW.name, NULL, NULL, NEW.created_by, coalesce(NEW.created_at, now()), coalesce(NEW.created_at, now()), NEW.archived_at) ON CONFLICT (id) DO NOTHING;
+INSERT INTO organizations VALUES (NEW.workspace_id, NEW.slug, NEW.name, NULL, NULL, NEW.created_by, coalesce(NEW.created_at, now()), coalesce(NEW.created_at, now()), NEW.archived_at) ON CONFLICT DO NOTHING;
 NEW.org_id := NEW.workspace_id;
 END IF;
 RETURN NEW;
@@ -154,7 +154,7 @@ CREATE FUNCTION ensure_agent_principal_identity() RETURNS trigger LANGUAGE plpgs
 BEGIN
 IF NEW.agent_identity_id IS NULL THEN
 INSERT INTO agent_identities (id, owner_user_id, display_name, created_at, revoked_at)
-VALUES (NEW.principal_id, NEW.owner_user_id, NEW.name, coalesce(NEW.created_at, now()), NEW.revoked_at) ON CONFLICT (id) DO NOTHING;
+VALUES (NEW.principal_id, NEW.owner_user_id, NEW.name, coalesce(NEW.created_at, now()), NEW.revoked_at) ON CONFLICT DO NOTHING;
 NEW.agent_identity_id := NEW.principal_id;
 END IF;
 RETURN NEW;
@@ -163,9 +163,8 @@ CREATE TRIGGER agent_principals_ensure_identity BEFORE INSERT ON agent_principal
 CREATE FUNCTION sync_standing_grant_to_agent_identity() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
 DECLARE v_ap RECORD; v_ai uuid; v_old uuid; v_ws uuid; v_ret uuid := gen_random_uuid(); v_j jsonb := to_jsonb(NEW); v_gid uuid := (v_j->>'grant_id')::uuid; v_rgid uuid := (v_j->>'renewal_grant_id')::uuid; v_rg uuid;
 BEGIN
-IF v_gid IS NOT NULL OR v_rgid IS NOT NULL THEN
-SELECT principal_id, workspace_id, agent_identity_id, owner_user_id, name, created_at, revoked_at INTO v_ap FROM agent_principals WHERE principal_id = NEW.principal_id;
-IF v_ap.principal_id IS NOT NULL THEN
+SELECT * INTO v_ap FROM agent_principals WHERE principal_id = NEW.principal_id;
+IF (v_gid IS NOT NULL OR v_rgid IS NOT NULL) AND v_ap.principal_id IS NOT NULL THEN
 v_old := v_ap.agent_identity_id; v_ws := v_ap.workspace_id;
 IF v_rgid IS NOT NULL THEN
 SELECT renewal_grant_id INTO v_rg FROM renewal_grants WHERE principal_id = v_ap.principal_id ORDER BY revoked_at NULLS FIRST, horizon_expires_at DESC LIMIT 1;
@@ -174,7 +173,7 @@ END IF;
 IF v_gid IS NOT NULL THEN
 SELECT id INTO v_ai FROM agent_identities WHERE standing_grant_id = v_gid AND display_name = v_ap.name ORDER BY revoked_at NULLS FIRST, created_at LIMIT 1;
 IF v_ai IS NOT NULL AND v_ai <> v_old AND (v_ap.revoked_at IS NULL OR NOT EXISTS (SELECT 1 FROM agent_principals WHERE (workspace_id, agent_identity_id) = (v_ws, v_ai) AND principal_id <> v_ap.principal_id)) THEN
-INSERT INTO agent_identities (id, owner_user_id, display_name, created_at, revoked_at) SELECT CASE WHEN principal_id = v_ai THEN v_ret ELSE principal_id END, owner_user_id, name, created_at, coalesce(revoked_at, now()) FROM agent_principals WHERE (workspace_id, agent_identity_id) = (v_ws, v_ai) AND principal_id <> v_ap.principal_id ON CONFLICT (id) DO NOTHING;
+INSERT INTO agent_identities (id, owner_user_id, display_name, created_at, revoked_at) SELECT CASE WHEN principal_id = v_ai THEN v_ret ELSE principal_id END, owner_user_id, name, created_at, coalesce(revoked_at, now()) FROM agent_principals WHERE (workspace_id, agent_identity_id) = (v_ws, v_ai) AND principal_id <> v_ap.principal_id ON CONFLICT DO NOTHING;
 UPDATE agent_principals SET agent_identity_id = CASE WHEN principal_id = v_ai THEN v_ret ELSE principal_id END, revoked_at = coalesce(revoked_at, now()) WHERE (workspace_id, agent_identity_id) = (v_ws, v_ai) AND principal_id <> v_ap.principal_id;
 UPDATE agent_principals SET agent_identity_id = v_ai WHERE principal_id = v_ap.principal_id;
 WITH d AS (DELETE FROM workspace_principal_grants WHERE (workspace_id, principal_kind, principal_id) = (v_ws, 'agent', v_old) RETURNING *)
@@ -182,18 +181,21 @@ INSERT INTO workspace_principal_grants SELECT gen_random_uuid(), workspace_id, o
 ON CONFLICT (workspace_id, principal_kind, principal_id) DO UPDATE SET revoked_at = coalesce(workspace_principal_grants.revoked_at, EXCLUDED.revoked_at);
 INSERT INTO org_memberships SELECT gen_random_uuid(), org_id, 'agent', v_ai, role, invited_by, created_at, revoked_at FROM org_memberships WHERE (principal_kind, principal_id) = ('agent', v_old)
 ON CONFLICT (org_id, principal_kind, principal_id) DO UPDATE SET revoked_at = coalesce(org_memberships.revoked_at, EXCLUDED.revoked_at);
-DELETE FROM org_memberships WHERE (principal_kind, principal_id) = ('agent', v_old) AND NOT EXISTS (SELECT 1 FROM agent_principals WHERE agent_identity_id = v_old);
 WITH d AS (DELETE FROM channel_memberships WHERE (workspace_id, principal_kind, principal_id) = (v_ws, 'agent', v_old) RETURNING *)
 INSERT INTO channel_memberships SELECT gen_random_uuid(), channel_id, workspace_id, 'agent', v_ai, role, notify_pref, added_by_kind, added_by, joined_at, revoked_at FROM d
 ON CONFLICT (channel_id, principal_kind, principal_id) DO UPDATE SET role = CASE WHEN 'owner' IN (channel_memberships.role, EXCLUDED.role) THEN 'owner' ELSE channel_memberships.role END, revoked_at = coalesce(channel_memberships.revoked_at, EXCLUDED.revoked_at);
-DELETE FROM agent_identities WHERE id = v_old AND NOT EXISTS (SELECT 1 FROM agent_principals WHERE agent_identity_id = v_old);
+IF NOT EXISTS (SELECT 1 FROM agent_principals WHERE agent_identity_id = v_old) THEN
+UPDATE connection_org_policies SET agent_identity_id = v_ai WHERE agent_identity_id = v_old;
+UPDATE org_approval_requests SET requested_by_agent_identity_id = v_ai WHERE requested_by_agent_identity_id = v_old;
+DELETE FROM org_memberships WHERE (principal_kind, principal_id) = ('agent', v_old);
+DELETE FROM agent_identities WHERE id = v_old;
+END IF;
 ELSIF v_ai IS NULL THEN
-UPDATE agent_identities SET standing_grant_id = v_gid WHERE id = v_old AND (standing_grant_id IS NULL OR standing_grant_id = v_gid);
+UPDATE agent_identities SET standing_grant_id = v_gid WHERE id = v_old AND coalesce(standing_grant_id, v_gid) = v_gid;
 IF NOT FOUND THEN
 INSERT INTO agent_identities VALUES (v_ap.principal_id, v_ap.owner_user_id, v_gid, v_rg, v_ap.name, coalesce(v_ap.created_at, now()), v_ap.revoked_at)
 ON CONFLICT (id) DO UPDATE SET standing_grant_id = coalesce(EXCLUDED.standing_grant_id, agent_identities.standing_grant_id), standing_renewal_grant_id = coalesce(agent_identities.standing_renewal_grant_id, EXCLUDED.standing_renewal_grant_id);
 UPDATE agent_principals SET agent_identity_id = v_ap.principal_id WHERE principal_id = v_ap.principal_id;
-END IF;
 END IF;
 END IF;
 END IF;

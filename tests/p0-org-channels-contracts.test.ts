@@ -20,6 +20,7 @@ import {
 function createFixture(): OrgChannelAuthorityState {
   const now = '2026-10-21T00:00:00Z';
   return {
+    now: '2026-10-21T02:00:00Z',
     privateChannelsEnabled: true,
     organizations: [
       { id: 'org-1', slug: 'yulan', display_name: 'Yulan Ventures', created_by: 'u-owner', created_at: now, updated_at: now },
@@ -90,6 +91,7 @@ test('multi-org agent identity whoami pre-seat, post-seat, and standing credenti
   s.hostedGrants![0]!.state = 'active';
   s.hostedGrants![0]!.revoked_at = null;
   eq(canReadOrg(s, caller, 'org-1'), true);
+  eq(canReadOrg({ ...s, now: null }, caller, 'org-1'), false);
   eq(canReadOrg(s, { ...caller, now: '2100-01-01T00:00:00Z' }, 'org-1'), false);
   s.renewalGrants![0]!.revoked_at = '2026-10-21T01:00:00Z';
   eq(canReadOrg(s, caller, 'org-1'), false);
@@ -165,8 +167,14 @@ test('explicit org/workspace revocation overrides owner inheritance (including t
   s.agentIdentities.push({ id: 'ap-1b-temp', owner_user_id: 'u-owner', display_name: 'Argon Lead', created_at: '2026-10-21T00:00:00Z' });
   s.agentPrincipals!.push({ principal_id: 'ap-1b-temp', workspace_id: 'ws-1b', agent_identity_id: 'ap-1b-temp', owner_user_id: 'u-owner', name: 'Argon Lead' });
   s.agentPrincipals!.push({ principal_id: 'ap-1b-retained', workspace_id: 'ws-1a', agent_identity_id: 'ap-1b-temp', owner_user_id: 'u-owner', name: 'Argon Lead' });
-  cascadeOrgMemberRemoval(s, { org_id: 'org-1', principal_kind: 'agent', principal_id: 'ap-1b-temp' });
+  s.seats!.push({ seat_id: 'seat-1b-temp', workspace_id: 'ws-1b', principal_id: 'ap-1b-temp', agent_identity_id: 'ap-1b-temp' });
   reconcileAgentIdentityMerge(s, { principal_id: 'ap-1b-temp', target_agent_identity_id: 'ag-1' });
+  eq(resolveOrgWorkspaceChannelSelector(s, ag('ap-1b-temp'), { seat_id: 'seat-1b-temp' }).ok, true);
+  cascadeOrgMemberRemoval(s, { org_id: 'org-1', principal_kind: 'agent', principal_id: 'ap-1b-retained' });
+  ap1bReset: {
+    s.agentPrincipals!.find((a) => a.principal_id === 'ap-1b-temp')!.agent_identity_id = 'ap-1b-temp';
+    reconcileAgentIdentityMerge(s, { principal_id: 'ap-1b-temp', target_agent_identity_id: 'ag-1' });
+  }
   eq(canReadWorkspace(s, caller, 'ws-1b'), false);
   eq(canReadOrg(s, ag('ap-1b-retained'), 'org-1'), false);
 });

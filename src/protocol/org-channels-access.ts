@@ -349,7 +349,10 @@ export function reconcileAgentIdentityMerge(
       oldCm.principal_id = target_agent_identity_id;
     }
   }
+  for (const x of s.seats ?? []) if (x.principal_id === principal_id || (!oldRetained && x.agent_identity_id === oldId)) x.agent_identity_id = target_agent_identity_id;
   if (!oldRetained) {
+    for (const p of s.connectionPolicies ?? []) if (p.agent_identity_id === oldId) p.agent_identity_id = target_agent_identity_id;
+    for (const r of s.approvalRequests ?? []) if (r.requested_by_agent_identity_id === oldId) r.requested_by_agent_identity_id = target_agent_identity_id;
     s.agentIdentities = s.agentIdentities.filter((a) => a.id !== oldId);
   }
   return { ok: true as const };

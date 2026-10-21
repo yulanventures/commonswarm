@@ -327,11 +327,11 @@ export const fail = (
 });
 
 export const resolveAgentId = (s: OrgChannelAuthorityState, id: string) =>
-  s.agentIdentities.some((a) => a.id === id)
-    ? id
-    : ((s.agentPrincipals ?? []).find(
-        (ap) => ap.principal_id === id && isLive(ap),
-      )?.agent_identity_id ?? id);
+  (s.agentPrincipals ?? []).find((ap) => ap.principal_id === id && isLive(ap))
+    ?.agent_identity_id ??
+  (s.agentPrincipals ?? []).find((ap) => ap.principal_id === id)
+    ?.agent_identity_id ??
+  id;
 
 export const orgRole = (
   s: OrgChannelAuthorityState,
@@ -359,14 +359,9 @@ export const hasWsGrant = (
   );
 };
 
-export const toEvalMs = (
-  now?: string | number | null,
-  fallback?: string | null,
-): number => {
+export const toEvalMs = (now?: string | number | null): number => {
   if (typeof now === 'number') return now;
-  const raw = now ?? fallback ?? '1970-01-01T00:00:00Z';
-  const ms = Date.parse(raw);
-  return Number.isNaN(ms) ? 0 : ms;
+  return now ? Date.parse(now) : NaN;
 };
 
 export const agentOwner = (
@@ -389,10 +384,7 @@ export const agentOwner = (
     )
   )
     return null;
-  const refMs = toEvalMs(
-    now ?? c.now ?? s.now,
-    ai.created_at ?? s.organizations[0]?.updated_at ?? s.organizations[0]?.created_at,
-  );
+  const refMs = toEvalMs(now ?? c.now ?? s.now);
   if (
     ai.standing_renewal_grant_id &&
     !(s.renewalGrants ?? []).some(
@@ -400,7 +392,7 @@ export const agentOwner = (
         rg.renewal_grant_id === ai.standing_renewal_grant_id &&
         rg.revoked_at == null &&
         (rg.horizon_expires_at == null ||
-          Date.parse(rg.horizon_expires_at) > refMs),
+          (Number.isFinite(refMs) && Date.parse(rg.horizon_expires_at) > refMs)),
     )
   )
     return null;

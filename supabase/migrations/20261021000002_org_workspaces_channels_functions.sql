@@ -131,7 +131,7 @@ UNION ALL SELECT p_ws, p_dst, principal_kind, principal_id, 'member', p_actor, v
 UNION ALL SELECT p_ws, p_dst, 'user', user_id, 'admin', p_actor, v_now FROM memberships WHERE p_mode = 'owners_only' AND workspace_id = p_ws AND revoked_at IS NULL AND 'owner' IN (live_org_role(v_src, 'user', user_id), live_org_role(p_dst, 'user', user_id))
 ON CONFLICT (workspace_id, principal_kind, principal_id) DO NOTHING;
 UPDATE workspace_principal_grants wg SET revoked_at = v_now WHERE workspace_id = p_ws AND revoked_at IS NULL
-AND (EXISTS (SELECT 1 FROM org_memberships WHERE (org_id, principal_kind, principal_id) = (p_dst, wg.principal_kind, wg.principal_id) AND revoked_at IS NOT NULL)
+AND (NOT can_read_org(v_src, wg.principal_kind, wg.principal_id) OR EXISTS (SELECT 1 FROM org_memberships WHERE (org_id, principal_kind, principal_id) = (p_dst, wg.principal_kind, wg.principal_id) AND revoked_at IS NOT NULL)
 OR (p_mode = 'owners_only' AND role <> 'owner' AND 'owner' NOT IN (coalesce(live_org_role(v_src, principal_kind, principal_id), ''), coalesce(live_org_role(p_dst, principal_kind, principal_id), ''))));
 INSERT INTO org_memberships (org_id, principal_kind, principal_id, role, invited_by, created_at)
 SELECT p_dst, principal_kind, principal_id, CASE WHEN role = 'owner' THEN 'admin' ELSE role END, p_actor, v_now
