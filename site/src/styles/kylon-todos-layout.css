@@ -67,7 +67,8 @@ live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-
   margin-inline-start: -2px;
 }
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-row .hm-todo-row-who {
-  margin-inline-start: 8px;
+  /* The owner badge extends 6px beyond its avatar. Reserve that space inside the row. */
+  margin-inline: 8px 6px;
 }
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-panel {
   padding: 16px 0; border-block: 1px solid var(--k-shell-line); border-radius: 0;
