@@ -1,0 +1,45 @@
+/* Existing decorative rules extracted unchanged from LiveDashboard. */
+  .dashboard__wordmark {
+    inline-size: fit-content;
+    color: var(--text);
+    font-size: var(--t-base);
+    line-height: 1;
+    font-weight: var(--weight-head);
+    letter-spacing: var(--track-head);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+
+  .dashboard__wordmark::after {
+    content: "";
+    display: block;
+    inline-size: 1.45rem;
+    block-size: 3px;
+    margin-block-start: var(--s-2);
+    border-radius: var(--radius-pill);
+    background: var(--accent);
+    transition: inline-size var(--dur-2) var(--ease-standard);
+  }
+
+  .dashboard__wordmark:hover::after {
+    inline-size: 100%;
+  }
+
+  .dashboard__popover-label {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--t-2xs);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .dashboard__sample-chip {
+    padding: 0.2rem 0.45rem;
+    color: var(--warning);
+    background: var(--warning-dim);
+    border-radius: var(--radius-pill);
+    font-size: var(--t-2xs);
+    font-weight: var(--weight-semibold);
+    letter-spacing: var(--track-eyebrow);
+    text-transform: uppercase;
+  }

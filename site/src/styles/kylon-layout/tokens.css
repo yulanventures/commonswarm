@@ -1,0 +1,86 @@
+/* CommonSwarm v0.3 candidate contract. Explicit opt-in; no font/assets loaded.
+   This file neither writes legacy/Home tokens nor changes the app theme owner. */
+.cs-ui {
+  --cs-canvas: #f5f5f2;
+  --cs-surface: #ffffff;
+  --cs-subtle: #f5f5f2;
+  --cs-selected: #eeefea;
+  --cs-ink: #282720;
+  --cs-secondary: #655e53;
+  --cs-muted: #716b60;
+  --cs-line: #e9e7e2;
+  --cs-control: #7e887c;
+  --cs-accent: #697344;
+  --cs-accent-hover: #535d33;
+  --cs-accent-soft: #eef1e6;
+  --cs-danger: #a32f3c;
+  --cs-danger-hover: #842331;
+  --cs-danger-soft: #fff0f1;
+  --cs-warning: #805313;
+  --cs-warning-soft: #fff6e6;
+  --cs-focus: #586339;
+  --cs-on-accent: #ffffff;
+  --cs-on-danger: #ffffff;
+  --cs-radius-sm: 6px;
+  --cs-radius-row: 8px;
+  --cs-radius: 10px;
+  --cs-radius-lg: 16px;
+  --cs-radius-panel: 0px;
+  --cs-shadow: 0 2px 10px #29271c0c;
+  --cs-shadow-popover: 0 12px 40px #1d2b1f24, 0 2px 6px #1d2b1f0d;
+  --cs-space-1: 4px;
+  --cs-space-2: 8px;
+  --cs-space-3: 12px;
+  --cs-space-4: 16px;
+  --cs-space-5: 20px;
+  --cs-space-6: 24px;
+  --cs-space-8: 32px;
+  --cs-space-12: 48px;
+  --cs-text: 14px;
+  --cs-text-control: 13px;
+  --cs-text-meta: 12px;
+  --cs-leading: 1.55;
+  --cs-row-target: 36px;
+  --cs-icon-size: 20px;
+  --cs-header: 64px;
+  --cs-list-width: 340px;
+  --cs-detail-width: 320px;
+  --cs-content-width: 800px;
+  --cs-motion: 140ms;
+  --cs-ease: ease-out;
+  --cs-scheme: light;
+  color-scheme: var(--cs-scheme);
+  color: var(--cs-ink);
+  font-family: inherit;
+  font-size: var(--cs-text);
+  line-height: var(--cs-leading);
+}
+
+/* Optional bridge, only when this subtree explicitly opts into the resolved
+   live shell theme. Reads actual --k-shell-*; creates no new dark palette.
+   Semantic fills retain their complete v0.3 foreground/background pairs. */
+.cs-ui[data-cs-theme="shell"] {
+  --cs-canvas: var(--k-shell-subtle, #f5f5f2);
+  --cs-surface: var(--k-shell-surface, #ffffff);
+  --cs-subtle: var(--k-shell-subtle, #f5f5f2);
+  --cs-selected: var(--k-shell-selected, #eeefea);
+  --cs-ink: var(--k-shell-ink, #282720);
+  --cs-secondary: var(--k-shell-secondary, #655e53);
+  --cs-muted: var(--k-shell-muted, #716b60);
+  --cs-line: var(--k-shell-line, #e9e7e2);
+  --cs-control: var(--k-shell-control, #7e887c);
+  --cs-focus: var(--k-shell-focus, #586339);
+  --cs-shadow-popover: var(--k-shell-shadow, 0 12px 40px #1d2b1f24, 0 2px 6px #1d2b1f0d);
+  --cs-scheme: var(--k-shell-scheme, light);
+  font-family: var(--k-shell-font, inherit);
+}
+
+@media (min-width: 1400px) {
+  .cs-ui { --cs-list-width: 390px; }
+}
+@media (max-width: 1100px) {
+  .cs-ui { --cs-list-width: 280px; }
+}
+@media (max-width: 52rem) {
+  .cs-ui { --cs-row-target: 44px; }
+}

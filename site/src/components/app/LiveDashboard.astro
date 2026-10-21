@@ -33,7 +33,9 @@ import { ALL_SIGNALS_SLUG, channelLabel } from "../../lib/channels";
 import { THREAD_REPLY_CANCEL_LABEL } from "../../lib/thread-reply";
 import "../../styles/tokens.css";
 import "../../styles/home/index.css";
+import "../../styles/dashboard-decoration.css";
 import "../../styles/kylon-shell.css";
+import "../../styles/kylon-layout/index.css";
 
 const signInMethods = signInDoors(await enabledProvidersForBuild({
   url: import.meta.env.PUBLIC_SUPABASE_URL,
@@ -988,6 +990,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 </live-dashboard>
 
 <script>
+  import { createKylonHost } from "../../lib/kylon-shell/host";
+  import { projectHomeLayout } from "../../lib/kylon-shell/projection";
+  import { greetingName } from "../../lib/greeting-name";
   import { parseRoute, routeHref, parentRoute, type HomeRoute } from "../../lib/home-route";
   import { buildHomeRail, setRailDraftName } from "../../lib/home-rail";
   import { buildWorkspaceHeader, buildPhoneTopBar, buildWorkspaceNav, buildChannelMenu,
@@ -1731,6 +1736,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
        technology past the surrounding context. Later presentations of that same
        surface move focus. One gate per surface: panels and the auth form present
        independently, so a signed-in boot does not pre-consume the auth form's skip. */
+    const layout = createKylonHost(app, href => navigateHomeHref(href));
+    const syncVisibleShell = (): void => layout.sync(projectHomeLayout(app.dataset.state, homeRoute, workspaces, sampleMode));
     const panelBootFocus = new BootFocusGate();
     const authBootFocus = new BootFocusGate();
 
@@ -1742,6 +1749,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const standalone = !leaveChannel && app.dataset.state === "channel" &&
         (homeRoute.view === "todo" || (homeRoute.view === "add-agent" && app.dataset.channelView === "agent-choice"));
       frame?.toggleAttribute("data-home-standalone", standalone);
+      if (layout.mounted) return;
       const account = one<HTMLElement>("[data-user-menu-root]");
       if (account) account.hidden = standalone;
       const host = one<HTMLElement>(standalone ? ".hm-frame__main" : ".hm-frame__rail");
@@ -1755,6 +1763,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       name: "loading" | "signed-out" | "create" | "workspace-error" | "channel",
     ): void => {
       const previous = app.dataset.state;
+      if (name !== "channel") layout.suspend();
       if (name !== "channel") syncStandalonePage(true);
       /* ONE rail (New-Space.dc.html): a new workspace opens beside the same rail as every other route. The
          create panel borrows the frame's rail while it shows with `data-create-rail`; every other panel
@@ -1773,6 +1782,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         section.hidden = section.dataset.panel !== name;
       }
       app.dataset.state = name;
+      syncVisibleShell();
       const root = one<HTMLElement>(".dashboard__root");
       root?.setAttribute("aria-busy", name === "loading" ? "true" : "false");
       if (previous !== name && name !== "loading") {
@@ -4427,6 +4437,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       await openRosterDialog({ kind: "person", id }, workspaceId);
     };
     const renderHomeRail = (): void => {
+      syncVisibleShell();
       const slot = one<HTMLElement>("[data-home-rail-slot]");
       if (!slot) return;
       /* One rail on every route: everyone in every workspace the overview read, with the workspace in view
@@ -4462,6 +4473,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const bottom = one<HTMLElement>("[data-home-phone-nav]");
       const workspace = workspaces.find(workspace => workspace.id === activeWorkspaceId);
       if (!slot || !workspace || homeRoute.view === "catchup" || homeRoute.view === "new") {
+        layout.syncMenu(false);
         homeShellKey = "";
         slot?.replaceChildren(); bottom?.replaceChildren(); return;
       }
@@ -4477,7 +4489,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (composerLabel) composerLabel.textContent = composerName;
       one<HTMLTextAreaElement>("[data-composer-input]")?.setAttribute("aria-label", composerName);
       const key = homeStructureKey(vm);
-      if (key === homeShellKey && slot.childElementCount) return;
+      if (key === homeShellKey && slot.childElementCount) { layout.syncMenu(); return; }
       const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: () => openRosterDialog(),
         feedMenu: feedMenuState, feed: feedMenuAction, account: accountMenuState, accountAction: accountMenuAction,
         menu: item => {
@@ -4485,8 +4497,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           else if (item === "settings") openWorkspaceDetailsDialog();
           // AdminDelegations owns the data-admin-access-open click through its delegated listener.
         } };
-      replaceHomeRegion(slot, "shell", [buildPhoneTopBar(document, vm, callbacks), buildWorkspaceHeader(document, vm, callbacks),
-        buildWorkspaceNav(document, vm, callbacks, "tablet")]);
+      layout.replaceHeader(() => replaceHomeRegion(slot, "shell", [buildPhoneTopBar(document, vm, callbacks), buildWorkspaceHeader(document, vm, callbacks),
+        buildWorkspaceNav(document, vm, callbacks, "tablet")]));
       /* The doors open the People & agents PAGE. A page is not a popup, so the door carries no
          aria-controls/aria-expanded; on the page itself it is the current page. */
       for (const button of slot.querySelectorAll<HTMLButtonElement>("[data-roster-open], .hm-phone-bar__people")) {
@@ -4496,7 +4508,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         else button.removeAttribute("aria-current");
       }
       if (bottom) replaceHomeRegion(bottom, "phone-nav", [buildWorkspaceNav(document, vm, callbacks, "phone")],
-        Array.from(slot.querySelectorAll<HTMLElement>("h1")).find(heading => heading.getClientRects().length > 0));
+        all<HTMLElement>("[data-home-workspace-shell] h1, .cs-org-phone-title h1").find(heading => heading.getClientRects().length > 0));
       homeShellKey = key;
       syncFeedChrome();
     };
@@ -4504,7 +4516,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (homeRoute.view !== "catchup") return;
       const slot = one<HTMLElement>("[data-home-catchup]");
       if (!slot) return;
-      const vm = mapCatchUp(catchUpData, homeViewerId(), session ? accountName(session) : Object.values(SAMPLE_ROSTERS)[0]?.members.find(member => member.userId === homeViewerId())?.name ?? "there", Date.now(), sampleMode, catchUpExpanded);
+      const viewerName = members.find(member => member.userId === homeViewerId())?.name ||
+        catchUpData.flatMap(entry => entry.detail?.people.groups ?? []).find(group => group.person.id === homeViewerId())?.person.name;
+      const vm = mapCatchUp(catchUpData, homeViewerId(), greetingName(session?.user, viewerName || (sampleMode ? Object.values(SAMPLE_ROSTERS)[0]?.members.find(member => member.userId === homeViewerId())?.name : undefined)), Date.now(), sampleMode, catchUpExpanded);
       const key = homeStructureKey(vm);
       if (key === homeCatchUpKey && slot.childElementCount) {
         refreshHomeCatchUpTimes(slot, vm); renderHomeRail(); return;
@@ -4651,7 +4665,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           : "[data-home-workspace-shell]";
         // People & agents with a focus target lands on that person's or agent's details instead.
         const target = homeRoute.view === "people" && peopleDialogFocus ? one<HTMLElement>("#pd-detail-title") : null;
-        (target ?? all<HTMLElement>(`${scope} h1`).find(heading => heading.getClientRects().length > 0))?.focus({ preventScroll: true });
+        (target ?? all<HTMLElement>(`${scope} h1, .cs-org-phone-title h1`).find(heading => heading.getClientRects().length > 0))?.focus({ preventScroll: true });
       });
     };
     const navigateHome = async (requested: HomeRoute, historyMode: "push" | "replace" | "pop"): Promise<void> => {
@@ -9514,7 +9528,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         set(willOpen);
         if (willOpen) {
           const first = popover.querySelector<HTMLElement>("button, a, [tabindex]");
-          window.requestAnimationFrame(() => first?.focus({ preventScroll: true }));
+          window.requestAnimationFrame(() => { if (!popover.hidden && trigger.isConnected) first?.focus({ preventScroll: true }); });
         } else {
           trigger.focus({ preventScroll: true });
         }
@@ -11182,31 +11196,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     }
   }
 
-  .dashboard__wordmark {
-    inline-size: fit-content;
-    color: var(--text);
-    font-size: var(--t-base);
-    line-height: 1;
-    font-weight: var(--weight-head);
-    letter-spacing: var(--track-head);
-    text-decoration: none;
-    white-space: nowrap;
-  }
 
-  .dashboard__wordmark::after {
-    content: "";
-    display: block;
-    inline-size: 1.45rem;
-    block-size: 3px;
-    margin-block-start: var(--s-2);
-    border-radius: var(--radius-pill);
-    background: var(--accent);
-    transition: inline-size var(--dur-2) var(--ease-standard);
-  }
 
-  .dashboard__wordmark:hover::after {
-    inline-size: 100%;
-  }
 
   .dashboard__gateway {
     min-block-size: 100svh;
@@ -11915,13 +11906,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     opacity: 0.45;
   }
 
-  .dashboard__popover-label {
-    margin: 0;
-    color: var(--text-muted);
-    font-size: var(--t-2xs);
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-  }
 
   /* Account button + menu at the rail foot. */
   .dashboard__user-trigger {
@@ -12013,16 +11997,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     font-weight: var(--weight-semibold);
   }
 
-  .dashboard__sample-chip {
-    padding: 0.2rem 0.45rem;
-    color: var(--warning);
-    background: var(--warning-dim);
-    border-radius: var(--radius-pill);
-    font-size: var(--t-2xs);
-    font-weight: var(--weight-semibold);
-    letter-spacing: var(--track-eyebrow);
-    text-transform: uppercase;
-  }
 
   .dashboard__rail-section {
     display: grid;
@@ -14617,11 +14591,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     gap: 0.32rem var(--s-2);
   }
 
-  .dashboard__message-meta strong {
-    color: var(--text);
-    font-size: var(--t-sm);
-    font-weight: var(--weight-semibold);
-  }
 
   .dashboard__message-identity-badge {
     padding: 0.08rem 0.32rem;
@@ -14648,11 +14617,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     white-space: nowrap;
   }
 
-  .dashboard__message-meta time {
-    margin-inline-start: auto;
-    color: var(--text-muted);
-    font-size: var(--t-xs);
-  }
 
   .dashboard__message-kind {
     padding: 0.16rem 0.42rem;

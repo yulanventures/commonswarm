@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { greetingName } from "./greeting-name.ts";
+import { mapCatchUp } from "./home-map.ts";
 import {
   catchUpAgentAttentionLine,
   catchUpCardFooter,
@@ -32,6 +34,28 @@ test("greeting follows the local clock without home-names", () => {
   assert.equal(catchUpGreeting("2026-10-05T08:30:00", "Tom"), "Good morning, Tom.");
   assert.equal(catchUpGreeting("2026-10-05T13:00:00", "Tom"), "Good afternoon, Tom.");
   assert.equal(catchUpGreeting("2026-10-05T20:00:00", "Tom"), "Good evening, Tom.");
+});
+
+test("Catch up greets the person before a login handle and falls back to email's local part", () => {
+  const cases = [
+    { user: { email: "ada.ops@example.invalid", user_metadata: { full_name: "Ada Lovelace", name: "Grace Hopper", user_name: "ada-login" } }, confirmed: "Katherine Johnson", expected: "Good morning, Katherine." },
+    { user: { email: "ada.ops@example.invalid", user_metadata: { full_name: "  Ada Lovelace  ", name: "Grace Hopper", user_name: "ada-login" } }, expected: "Good morning, Ada." },
+    { user: { email: "grace@example.invalid", user_metadata: { full_name: " ", name: "Grace Hopper", preferred_username: "grace-login" } }, expected: "Good morning, Grace." },
+    { user: { email: "ada@example.invalid", user_metadata: { full_name: false, name: { first: "Wrong" }, user_name: "ada-login" } }, expected: "Good morning, ada-login." },
+    { user: { email: "ada@example.invalid", user_metadata: { preferred_username: "ada-handle" } }, expected: "Good morning, ada-handle." },
+    { user: { email: "  ada.ops@example.invalid  ", user_metadata: { full_name: "your account", user_name: "ada.ops@example.invalid" } }, confirmed: "ada.ops@example.invalid", expected: "Good morning, ada.ops." },
+    { user: { email: "李@example.invalid", user_metadata: { name: "李 小龍" } }, expected: "Good morning, 李." },
+    { user: null, confirmed: "Sample Person", expected: "Good morning, Sample." },
+    { user: null, expected: "Good morning, there." },
+    { user: { email: "@example.invalid" }, expected: "Good morning, there." },
+  ];
+  const localMorning = "2026-10-05T08:30:00";
+  const visibleGreeting = name => catchUpGreeting(localMorning,
+    mapCatchUp([], "viewer", name, Date.parse(localMorning), false).viewerFirstName);
+  for (const { user, confirmed, expected } of cases) {
+    assert.equal(visibleGreeting(greetingName(user, confirmed)), expected);
+  }
+  assert.equal(visibleGreeting("ada.ops@example.invalid"), "Good morning, ada.ops.", "legacy mapper callers must not expose a whole email");
 });
 
 test("people summaries match the possessive naming table", () => {

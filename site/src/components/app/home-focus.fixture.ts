@@ -5,7 +5,7 @@ import ts from "typescript";
 export async function focusFixture() {
   const source = await readFile(new URL("LiveDashboard.astro", import.meta.url), "utf8");
   const file = ts.createSourceFile("dashboard.ts", source.match(/<script>([\s\S]*?)<\/script>/u)![1], ts.ScriptTarget.Latest, true);
-  const names = ["homeViewerId", "currentHomePeople", "renderHomeRail", "renderHomeShell", "renderHomeCatchUp",
+  const names = ["layout", "syncVisibleShell", "homeViewerId", "currentHomePeople", "renderHomeRail", "renderHomeShell", "renderHomeCatchUp",
     "wakeMarkKey", "renderRoster", "hasPendingAccess", "refreshPendingAccess"];
   const declarations = new Map<string, string>();
   const visit = (node: ts.Node): void => {
@@ -16,6 +16,7 @@ export async function focusFixture() {
   for (const name of names) assert.ok(declarations.has(name), `production ${name} is available`);
   const setup = `
     const one = (selector) => document.querySelector(selector);
+    const all = (selector) => [...document.querySelectorAll(selector)];
     let now = Date.parse('2026-10-05T12:00:00Z'); Date.now = () => now;
     const session = {user:{id:'tom'}}, sampleMode = false, accountName = () => 'Tom';
     let workspaces = [{id:'W',name:'Home'},{id:'X',name:'Trip'}];
@@ -42,10 +43,6 @@ export async function focusFixture() {
     const feedMenuState = () => null, feedMenuAction = () => {}, syncFeedChrome = () => {};
     // renderHomeShell's phone account entries (round 7). No account here: the phone ⋯ offers none and the door stays.
     const accountMenuState = () => null, accountMenuAction = () => {};
-    // renderHomeRail's joined rail (home-map homeRailPeople). The browser fixture imports catchUpRailPeople, which is
-    // homeRailPeople(entries); with the view's people as the first source it is the same rail for every state this
-    // fixture reaches (catchUpData is empty on its workspace route). Called lazily, so the vm unit test never needs it.
-    const homeRailPeople = (entries, current = null) => catchUpRailPeople(current ? [{ detail: { people: current } }, ...entries] : entries);
     const poll = async (elapsed = 30001) => { now += elapsed; await refreshPendingAccess('W',1); return {reads:rosterReads,rendered:rosterRenders}; };
   `;
   const production = (selected = names) => selected.map(name => `const ${declarations.get(name)};`).join("\n");
