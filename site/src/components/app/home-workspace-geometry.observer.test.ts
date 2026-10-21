@@ -14,6 +14,7 @@ type Geometry = {
   width: number; scrollWidth: number; cardOverflow: boolean; touchTargets: boolean; smallTargets: string[];
   order: string[]; todoRows: number; checkboxCalls: string[]; hostileElements: number; hostileTitleText: boolean;
   noTodoOrder: string[]; doorOrder: string[]; doorButtons: number; doorCalls: number; doorTitle: string; doorButtonText: string;
+  indexOrder: string[]; indexOtherActions: string[][]; chatOtherActions: string[][];
   narrowTargets: string[];
   sampleChecks: number; sampleAdd: number; sampleDoor: number; shared: string[];
   streamOverflow: boolean; streamTargets: boolean; dividers: string[]; hostileAuthorText: boolean; extrasCount: number;
@@ -36,7 +37,7 @@ test("W right column and stream decorations have usable geometry and keep hostil
       * { box-sizing: border-box; } body { margin: 0; font-family: sans-serif; }
       ${tokens} ${primitives} ${workspace}
       #column { width: min(22rem, 100%); } #stream { width: 100%; margin: 0; padding: 0; list-style: none; }
-    </style></head><body><div id="column"></div><div id="column-no-todos"></div><div id="column-door"></div><div id="column-sample"></div><ol id="stream"></ol>
+    </style></head><body><div id="column"></div><div id="column-no-todos"></div><div id="column-index"></div><div id="column-door"></div><div id="column-sample"></div><ol id="stream"></ol>
       <script>${script}</script><script>
       (async () => {
         const data = ${JSON.stringify(data).replace(/</gu, "\\u003c")};
@@ -56,6 +57,9 @@ test("W right column and stream decorations have usable geometry and keep hostil
         const keys = (element) => [...element.children].map((child) => child.dataset.sideCard || (child.querySelector('[data-side-link=wiki]') ? 'wiki' : '?'));
         const main = mount('column', base);
         const noTodos = mount('column-no-todos', { ...base, todos: null });
+        const index = mount('column-index', { ...base, todosInMain: true });
+        const otherActions = element => [...element.querySelectorAll('a,button,input')].filter(node => !node.closest('[data-side-card=todos]'))
+          .map(node => [node.tagName, node.getAttribute('href') || '', node.getAttribute('aria-label') || '', node.textContent]);
         const door = mount('column-door', { ...base, objects: { state: 'refused' } });
         const sample = mount('column-sample', { ...base, sample: true });
 
@@ -92,6 +96,7 @@ test("W right column and stream decorations have usable geometry and keep hostil
           order: keys(main), todoRows: main.querySelectorAll('[data-side-todo]').length, checkboxCalls, hostileElements: document.querySelectorAll('img').length,
           hostileTitleText: hostileTitle.textContent.includes(data.hostile) && main.querySelector('[data-side-card=lists]').textContent.includes(data.hostile),
           noTodoOrder: keys(noTodos), doorOrder: keys(door), doorButtons: door.querySelectorAll('[data-side-door]').length, doorCalls,
+          indexOrder: keys(index), indexOtherActions: otherActions(index), chatOtherActions: otherActions(main),
           doorTitle: door.querySelector('[data-side-card=objects] h2').textContent, doorButtonText: door.querySelector('[data-side-door]').textContent, narrowTargets,
           sampleChecks: sample.querySelectorAll('input[type=checkbox]').length, sampleAdd: sample.querySelectorAll('[data-side-add-todo]').length, sampleDoor: sample.querySelectorAll('[data-side-door]').length,
           shared: [...main.querySelectorAll('[data-side-card=shared] p')].map((p) => p.textContent),
@@ -119,6 +124,8 @@ test("W right column and stream decorations have usable geometry and keep hostil
       assert.deepEqual(geometry.checkboxCalls, ["td1"], "the first row has a checkbox and it reports its own to-do");
       // An absent to-dos read removes every To-dos surface; a refused Lists & docs read shows one door in place of Lists and Files.
       assert.deepEqual(geometry.noTodoOrder, ["lists", "files", "shared", "wiki"]);
+      assert.deepEqual(geometry.indexOrder, ["lists", "files", "shared", "wiki"], "the ready index does not repeat its To-dos card");
+      assert.deepEqual(geometry.indexOtherActions, geometry.chatOtherActions, "omitting the duplicate preserves every other destination and action");
       assert.deepEqual(geometry.doorOrder, ["todos", "objects", "shared", "wiki"]);
       assert.equal(geometry.doorButtons, 1); assert.equal(geometry.doorCalls, 1);
       assert.equal(geometry.doorTitle, "Turn on Lists & docs", "the door carries the Lists pane's own heading"); assert.equal(geometry.doorButtonText, "Turn on Lists & docs");
