@@ -960,30 +960,32 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       assert.ok(events.includes("credential_check_cleared"), "actual successful renewal/read clears it");
       assert.ok(events.includes("ready"));
     });
-    await t.test("selected elapsed expiry, revocation and security suspension deny while permanent control succeeds", async () => {
+    await t.test("selected elapsed expiry, revocation and security suspension deny while permanent control succeeds", async (policyTests) => {
       for (const policy of ["elapsed", "revoked", "security", "permanent"] as const) {
-        const f = await fixture(policy);
-        const session = await AgentCredentialSession.open({ target, workspaceId: f.workspace,
-          presented: { ...f.presented, expiresAt: null }, store: f.store, warn: () => {} });
-        const work = async () => await new ThinCommandClient(target).send({ workspaceId: f.workspace,
-          stream: { kind: "workspace" }, command: { kind: "create", task_id: randomUUID(), slug: "policy" },
-          credential: await session.bearer() }, (rejected) => session.recoverUnauthenticated(rejected));
-        if (policy === "permanent") assert.equal((await work()).response.status, "accepted");
-        else {
-          await assert.rejects(work, (error: unknown) => {
-            // M3 can refuse at admission (the exact 401 sample) or at the
-            // renewal command's named policy fence. Transport/parse/storage
-            // failures and unrelated domain reasons must fail this negative.
-            if (error instanceof RenewalCredentialCheckError) {
-              return error.status === 401 && error.code === "unauthenticated";
-            }
-            if (policy === "elapsed") return error instanceof RenewalReauthorisationRequired && error.reason === "horizon_reached";
-            if (policy === "revoked") return error instanceof RenewalRevoked &&
-              ["renewal_grant_revoked", "renewal_lineage_revoked", "predecessor_revoked"].includes(error.code);
-            return error instanceof RenewalSuspended && error.code === "renewal_grant_suspended";
-          }, `${policy} must reach its server authentication/policy fence`);
-          assert.equal((await f.store.read())?.token ?? null, null, "no replacement is stored after denial");
-        }
+        await policyTests.test(policy, async () => {
+          const f = await fixture(policy);
+          const session = await AgentCredentialSession.open({ target, workspaceId: f.workspace,
+            presented: { ...f.presented, expiresAt: null }, store: f.store, warn: () => {} });
+          const work = async () => await new ThinCommandClient(target).send({ workspaceId: f.workspace,
+            stream: { kind: "workspace" }, command: { kind: "create", task_id: randomUUID(), slug: "policy" },
+            credential: await session.bearer() }, (rejected) => session.recoverUnauthenticated(rejected));
+          if (policy === "permanent") assert.equal((await work()).response.status, "accepted");
+          else {
+            await assert.rejects(work, (error: unknown) => {
+              // M3 can refuse at admission (the exact 401 sample) or at the
+              // renewal command's named policy fence. Transport/parse/storage
+              // failures and unrelated domain reasons must fail this negative.
+              if (error instanceof RenewalCredentialCheckError) {
+                return error.status === 401 && error.code === "unauthenticated";
+              }
+              if (policy === "elapsed") return error instanceof RenewalReauthorisationRequired && error.reason === "horizon_reached";
+              if (policy === "revoked") return error instanceof RenewalRevoked &&
+                ["renewal_grant_revoked", "renewal_lineage_revoked", "predecessor_revoked"].includes(error.code);
+              return error instanceof RenewalSuspended && error.code === "renewal_grant_suspended";
+            }, `${policy} must reach its server authentication/policy fence`);
+            assert.equal((await f.store.read())?.token ?? null, null, "no replacement is stored after denial");
+          }
+        });
       }
     });
   } finally {

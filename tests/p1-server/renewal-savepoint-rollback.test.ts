@@ -82,6 +82,15 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
         assert.ok(result.checks?.some(check => check.name === name && check.ok), name);
     }
     if(mode==='permanence') {
+      for(const policy of ['permanent','future-date','resumed-metadata'])
+        for(const proof of ['live-positive','read-denied','renewal-denied','no-write']) {
+          const name=`security-${policy}-${proof}`;
+          assert.ok(result.checks?.some(check=>check.name===name && check.ok),name);
+        }
+      for(const name of ['security-model-live-positive','security-model-projections-deny',
+        'security-model-projections-no-write','security-model-read-denied','security-model-no-write'])
+        assert.ok(result.checks?.some(check=>check.name===name && check.ok),name);
+
       for(const contract of ['command denial rolls back both adoptions and every table','activity denial rolls back both adoptions and every table',
         'ordinary-timeboxed-live-positive','ordinary-expired-unused-refused','ordinary-expired-unused-full-denial-rollback'])
         assert.ok(result.checks?.some(check=>check.name===contract && check.ok),contract);

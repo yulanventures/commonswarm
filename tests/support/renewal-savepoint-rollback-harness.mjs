@@ -265,6 +265,20 @@ try {
     const ordinaryBefore=await snapshot(),ordinaryDenied=await renew(ordinaryUnused.raw,id());
     check('ordinary-expired-unused-refused',[401,403].includes(ordinaryDenied.status) && credential(ordinaryDenied)===null);
     check('ordinary-expired-unused-full-denial-rollback',JSON.stringify(ordinaryBefore)===JSON.stringify(await snapshot()));
+    for(const policy of ['permanent','future-date','resumed-metadata']) {
+      const secured=await seat(`security-${policy}`,false);
+      if(policy==='future-date') await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '1 day'
+        WHERE renewal_grant_id=${secured.grant}::uuid`;
+      check(`security-${policy}-live-positive`,(await readAs(secured.raw)).status===200);
+      await observer`UPDATE swarm.renewal_grants SET suspended_at=clock_timestamp() WHERE renewal_grant_id=${secured.grant}::uuid`;
+      if(policy==='resumed-metadata') await observer`UPDATE swarm.renewal_grants SET resumed_at=clock_timestamp(),resumed_by=${owner}::uuid,resume_count=resume_count+1
+        WHERE renewal_grant_id=${secured.grant}::uuid`;
+      const securityBefore=await snapshot();
+      const securityRead=await readAs(secured.raw),securityRenew=await renew(secured.raw,id());
+      check(`security-${policy}-read-denied`,[401,403].includes(securityRead.status));
+      check(`security-${policy}-renewal-denied`,[401,403].includes(securityRenew.status) && credential(securityRenew)===null);
+      check(`security-${policy}-no-write`,JSON.stringify(securityBefore)===JSON.stringify(await snapshot()));
+    }
     const s=await seat('expired-proof');
     await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${s.t0}::uuid`;
     const [before]=await observer`SELECT expires_at,first_used_at FROM swarm.agent_tokens WHERE token_id=${s.t0}::uuid`;
@@ -317,8 +331,7 @@ try {
     // Saved pending credentials are exercised as real proofs, including two
     // consecutive crashes after durable save and before first use.
     const crash=await seat('future-crash');
-    await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '1 day',
-      suspended_at=clock_timestamp() WHERE renewal_grant_id=${crash.grant}::uuid`;
+    await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '1 day' WHERE renewal_grant_id=${crash.grant}::uuid`;
     await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${crash.t0}::uuid`;
     let saved=await renew(crash.raw,id());
     check('future chosen date permits expired used proof renewal',credential(saved)!==null);
@@ -675,6 +688,21 @@ try {
       await tx`SET LOCAL ROLE swarm_read`;
       return await tx`SELECT * FROM swarm_read.renewal_grant_for_token(${readWorkspace}::uuid,${token}::uuid)`;
     });
+    const securityModel=await readSeat('security-model');
+    const securityConnection=overview=>overview.workspaces.find(w=>w.workspace_id===readWorkspace)?.people
+      .flatMap(person=>person.agents).find(agent=>agent.principal_id===securityModel.principal)?.status.facts.connection;
+    check('security-model-live-positive',securityConnection(await overviewAs(owner))==='live'
+      && (await readAs(securityModel.raw,readWorkspace)).status===200);
+    const [securityStamp]=await observer`UPDATE swarm.renewal_grants SET suspended_at=clock_timestamp()
+      WHERE renewal_grant_id=${securityModel.grant}::uuid RETURNING suspended_at`;
+    const securityProjectionBefore=await snapshot();
+    const securityHome=await overviewAs(owner),securityRoster=await rosterAs(owner),securityScoped=await scoped(securityModel.t0);
+    check('security-model-projections-deny',securityConnection(securityHome)==='paused'
+      && iso(securityRoster.find(row=>row.renewal_grant_id===securityModel.grant)?.suspended_at)===iso(securityStamp.suspended_at)
+      && iso(securityScoped[0]?.suspended_at)===iso(securityStamp.suspended_at));
+    check('security-model-projections-no-write',JSON.stringify(securityProjectionBefore)===JSON.stringify(await snapshot()));
+    check('security-model-read-denied',[401,403].includes((await readAs(securityModel.raw,readWorkspace)).status));
+    check('security-model-no-write',JSON.stringify(securityProjectionBefore)===JSON.stringify(await snapshot()));
     for(const variant of ['elapsed','dead-run','dead-device','legacy','silent-renewal','both-revoked','none-eligible','newer-eligible','dead-token']) {
       const old=await readSeat(`mixed-${variant}`,true,undefined,variant==='legacy'?'no-family':'standing',{createdAt:new Date(Date.now()-86400000)});
       const newer=await readSeat(`mixed-new-${variant}`,true,undefined,'standing',{principal:old.principal});
@@ -894,10 +922,10 @@ try {
       .find(agent=>agent.principal_id===mismatch.principal)?.status.facts.connection;
     check('non-NULL mismatched device cannot claim renewal liveness',mismatchConnection!=='live');
 
-    await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '1 day',suspended_at=clock_timestamp()
+    await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '1 day'
       WHERE renewal_grant_id=${readModels.grant}::uuid`;
     await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${readModels.t0}::uuid`;
-    check('future dated family with idle history stays live through renewal liveness',connectionFrom(await overviewAs(owner))==='live');
+    check('future dated idle family stays live through renewal liveness',connectionFrom(await overviewAs(owner))==='live');
     check('live bearer control exists before terminal precedence',credential(await readRenew(readModels.raw,id()))!==null);
     const [deadline]=await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second'
       WHERE renewal_grant_id=${readModels.grant}::uuid RETURNING connection_expires_at`;
