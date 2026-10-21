@@ -27,9 +27,9 @@ export function createPeopleContext(app: HTMLElement, getShell: () => {
   };
   const clear = () => {
     phone.removeEventListener("change", arrange);
+    if (roster && navigation) navigation.hidden = priorHidden;
     if (home?.parentNode) move(home.parentNode, home.nextSibling);
     home?.remove(); home = null; roster = null;
-    if (navigation) navigation.hidden = priorHidden;
     getShell()?.root.removeAttribute("data-people-composition");
   };
   return {
