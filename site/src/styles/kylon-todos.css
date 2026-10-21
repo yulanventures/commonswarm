@@ -120,6 +120,13 @@ live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos,
   scroll-margin: 18px;
 }
 @media (forced-colors: active) {
+  /* Preserve the site's stronger system-color outline on the actual hit owner. */
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) :is(.hm-todo-done, .hm-todo-check-hit, .hm-todo-gate-kind, .hm-choice):has(input:focus-visible) {
+    outline: 3px solid Highlight !important; outline-offset: 2px !important;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) input:is([type="checkbox"], [type="radio"]):focus-visible {
+    outline: none !important;
+  }
   live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-pick-option[aria-selected="true"] {
     background: Highlight; color: HighlightText;
   }
