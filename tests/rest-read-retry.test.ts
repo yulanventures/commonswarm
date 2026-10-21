@@ -87,11 +87,18 @@ function snapshot(input: Parameters<typeof fetch>[0], init?: RequestInit): Reque
   return { url: String(input), method: init?.method ?? "GET", headers: [...new Headers(init?.headers)], body: init?.body, signal: init?.signal };
 }
 function memoryStore(): CredentialStore {
+  let record: Awaited<ReturnType<CredentialStore["read"]>> = null;
+  let profile: Awaited<ReturnType<CredentialStore["readProfile"]>> = {
+    version: 1, userId: null, workspaceId: null, pendingCommands: {},
+  };
   return {
     kind: "file", location: "memory only",
-    read: async () => null, write: async () => {}, delete: async () => {},
-    readProfile: async () => ({ version: 1, userId: null, workspaceId: null, pendingCommands: {} }),
-    writeProfile: async () => {}, withLock: async (work) => await work(),
+    read: async () => structuredClone(record),
+    write: async (value) => { record = structuredClone(value); },
+    delete: async () => { record = null; },
+    readProfile: async () => structuredClone(profile),
+    writeProfile: async (value) => { profile = structuredClone(value); },
+    withLock: async (work) => await work(),
   };
 }
 async function loginWithFetch(t: TestContext, restFetch: typeof fetch): Promise<string | null> {
