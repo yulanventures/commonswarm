@@ -396,7 +396,7 @@ test("workspace changes synchronously retarget AgentConnect before its panel ope
   );
   assert.match(
     connect,
-    /const const verified = await currentSession\(\);[\s\S]*if \(version !== this\.#loadVersion\) return/,
+    /const session = await currentSession\(\);[\s\S]*if \(version !== this\.#loadVersion\) return/,
   );
   assert.match(
     connect,

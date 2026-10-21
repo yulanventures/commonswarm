@@ -203,6 +203,8 @@ test("saved web sessions survive transient verification/refresh and reload; term
   const heldMembership = new Map<string, () => void>();
   const recovered = new Set<string>();
   const rotatingTokens = new Map<string, string>();
+  const holdRefresh = new Set<string>();
+  const releaseRefresh = new Map<string, () => void>();
   const revoked = new Set<string>();
   const releases = new Map<string, number>();
   const commandRequests = new Map<string, { bodies: string[]; fetchCalls: string[]; committed: Map<string, string>; writes: number }>();
@@ -220,7 +222,7 @@ test("saved web sessions survive transient verification/refresh and reload; term
       res.writeHead(status, { "content-type": "application/json", ...(modern ? { "x-supabase-api-version": "2024-01-01" } : {}) });
       res.end(JSON.stringify(payload));
     };
-    if (url.pathname === "/probe") { json(200, { ...counts, membershipPending: heldMembership.has(mode) }); return; }
+    if (url.pathname === "/probe") { json(200, { ...counts, membershipPending: heldMembership.has(mode), refreshPending: releaseRefresh.has(mode) }); return; }
     if (url.pathname === "/deploy") {
       releases.set(mode, (releases.get(mode) ?? 1) + 1);
       json(200, { revision: releases.get(mode) }); return;
@@ -251,6 +253,8 @@ test("saved web sessions survive transient verification/refresh and reload; term
       });
       return;
     }
+    if (url.pathname === "/hold-refresh") { holdRefresh.add(mode); json(200, {}); return; }
+    if (url.pathname === "/release-refresh") { releaseRefresh.get(mode)?.(); releaseRefresh.delete(mode); json(200, {}); return; }
     if (url.pathname === "/revoke") { revoked.add(mode); json(200, {}); return; }
     if (url.pathname === "/recover") { recovered.add(mode); json(200, {}); return; }
     if (url.pathname.startsWith("/auth/v1/")) {
@@ -270,8 +274,9 @@ test("saved web sessions survive transient verification/refresh and reload; term
           }
           const successor = `consumed-${counts.refreshes}`;
           rotatingTokens.set(mode, successor);
-          json(200, { access_token: rotatedAccessToken, refresh_token: successor,
+          const respond = () => json(200, { access_token: rotatedAccessToken, refresh_token: successor,
             expires_in: 3600, token_type: "bearer", user });
+          if (holdRefresh.delete(mode)) releaseRefresh.set(mode, respond); else respond();
         });
         return;
       }
@@ -377,6 +382,43 @@ test("saved web sessions survive transient verification/refresh and reload; term
           if(mode.startsWith('lifecycle-')){
             location.replace('/lifecycle?mode='+mode);return;
           }
+          if(mode==='storage-fresh-signin'||mode==='storage-read-denied'){
+            const key='sb-127-auth-token';
+            const nativeSet=Storage.prototype.setItem;
+            const nativeGet=Storage.prototype.getItem;
+            const old=localStorage.getItem(key);
+            if(mode==='storage-fresh-signin')localStorage.removeItem(key);
+            else Storage.prototype.getItem=function(){throw new DOMException('Fixture read denial','SecurityError');};
+            Storage.prototype.setItem=function(){throw new DOMException('Fixture quota','QuotaExceededError');};
+            const api=cs.client();
+            await api.auth.getSession();
+            check(!(await api.auth.setSession({access_token:${JSON.stringify(rotatedAccessToken)},refresh_token:'fresh-signin'})).error,'fresh sign-in succeeds in memory');
+            Storage.prototype.getItem=nativeGet;
+            check((await cs.currentSession())?.refresh_token==='fresh-signin','read recovery must preserve the page successor');
+            if(mode==='storage-read-denied'){
+              Storage.prototype.setItem=nativeSet;
+              await new Promise(r=>setTimeout(r,3500));
+              check(localStorage.getItem(key)===old,'unknown ownership cannot overwrite native bytes');
+              check((await cs.currentSession())?.refresh_token==='fresh-signin','unknown disk snapshot cannot replace memory successor');
+              const peer=document.createElement('iframe');peer.src='/peer?mode='+mode;
+              document.body.append(peer);await wait(()=>peer.contentWindow.cs);
+              check(!(await peer.contentWindow.cs.client().auth.signOut({scope:'local'})).error,'peer logout with unknown snapshot');
+              await wait(()=>localStorage.getItem(key)===null,'peer removal');
+              check(await cs.currentSession()===null,'observed peer logout cancels unknown-snapshot save');
+            }else{
+              let ready,release;
+              const acquired=new Promise(r=>ready=r);
+              const held=navigator.locks.request('lock:'+key,async()=>{ready();await new Promise(r=>release=r);});
+              await acquired;
+              Storage.prototype.setItem=nativeSet;
+              await new Promise(r=>setTimeout(r,3500));
+              check(localStorage.getItem(key)===null,'fresh sign-in retry must respect the SDK session lock');
+              check(!(await navigator.locks.query()).pending.some(lock=>lock.name==='lock:'+key),'busy retry must not leave a queued lock request');
+              release();await held;
+              await wait(()=>JSON.parse(localStorage.getItem(key)||'null')?.refresh_token==='fresh-signin','fresh sign-in durable retry after lock release');
+            }
+            document.body.dataset.result='passed';return;
+          }
           if(mode==='storage-unwritable'||mode==='storage-late-failure'||mode.startsWith('storage-rotation')){
             const key='sb-127-auth-token';
             let predecessor='browser-refresh';
@@ -414,10 +456,28 @@ test("saved web sessions survive transient verification/refresh and reload; term
               document.body.append(peer);await wait(()=>peer.contentWindow.cs);
               const peerApi=mode.endsWith('-unlocked')?peer.contentWindow.cs.rawClient(location.origin,'fixture-anon',{auth:{autoRefreshToken:false}}):peer.contentWindow.cs.client();
               check((await peerApi.auth.getSession()).data.session!==null,'peer loads saved owner');
+              let lateRefresh;
+              let beforeLate;
+              if(mode.endsWith('-unlocked')){
+                beforeLate=(await (await fetch('/probe?mode='+mode)).json()).refreshes;
+                await fetch('/hold-refresh?mode='+mode);
+                lateRefresh=api.auth.refreshSession();
+                for(let i=0;i<100;i++){
+                  if((await (await fetch('/probe?mode='+mode)).json()).refreshPending)break;
+                  await new Promise(r=>setTimeout(r,20));
+                }
+                check((await (await fetch('/probe?mode='+mode)).json()).refreshPending,'consuming refresh response must be held');
+              }
               let signedOut=false;peerApi.auth.onAuthStateChange(event=>{if(event==='SIGNED_OUT')signedOut=true;});
               if(mode.includes('peer-logout'))check(!(await peerApi.auth.signOut({scope:'local'})).error,'peer logout');
               else check(!(await peerApi.auth.setSession({access_token:${JSON.stringify(rotatedAccessToken)},refresh_token:'peer-successor'})).error,'peer successor');
               await new Promise(r=>setTimeout(r,100));
+              if(lateRefresh){
+                await fetch('/release-refresh?mode='+mode);
+                const discarded=await Promise.race([lateRefresh,new Promise(resolve=>setTimeout(()=>resolve(null),2000))]);
+                check(discarded?.error?.name==='AuthRefreshDiscardedError','peer ownership must discard consumed refresh without retry or cooldown');
+                check((await (await fetch('/probe?mode='+mode)).json()).refreshes===beforeLate+1,'consumed refresh must reach HTTP exactly once');
+              }
               Storage.prototype.setItem=nativeSet;
               await new Promise(r=>setTimeout(r,3500));
               if(mode.includes('peer-logout')){
@@ -619,6 +679,7 @@ test("saved web sessions survive transient verification/refresh and reload; term
     assert.equal(process.env.SESSION_CONTINUITY_CASES, undefined, "case subsets are forbidden for this gate");
     const modes = [
       "recovery-user", "recovery-refresh", "recovery-refresh-hang", "recovery-membership", "recovery-late-logout", "recovery-late-user",
+      "storage-fresh-signin", "storage-read-denied",
       "storage-rotation-terminal", "storage-rotation-peer-successor", "storage-rotation-peer-logout",
       "storage-rotation-peer-successor-unlocked", "storage-rotation-peer-logout-unlocked",
       "user503", "user-network", "refresh429", "refresh-network", "terminal-user", "terminal-refresh", "terminal-proactive",

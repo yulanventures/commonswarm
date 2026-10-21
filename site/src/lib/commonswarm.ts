@@ -184,7 +184,9 @@ function reconcileAuthItem(key: string): void {
   const value = readPersistentAuthItem(key);
   if (value === undefined || removedStorageKeys.has(key)) return;
   const pending = pendingStorageWrites.get(key);
-  if (pending && value === pending.expected) return;
+  // Without a readable pre-write snapshot, neither replacing memory with disk
+  // nor writing over disk can establish ownership. Keep the page successor.
+  if (pending && (pending.expected === undefined || value === pending.expected)) return;
   // A peer successor or logout wins over a delayed page-local save.
   acceptPersistentAuthItem(key, value);
 }
@@ -193,20 +195,22 @@ async function retryStorageWrites(): Promise<void> {
   storageRetryInFlight = true;
   try {
     const lock = typeof navigator !== "undefined" && navigator.locks ? navigatorLock : processLock;
-    // Use the SDK's lock namespace so a durable retry cannot race a peer refresh
-    // or logout between its ownership check and native write/readback.
-    await lock(`lock:${sessionStorageKey ?? "commonswarm-storage"}`, -1, async () => {
-      const storage = storageBackend();
-      for (const [key, pending] of pendingStorageWrites) {
-        reconcileAuthItem(key);
-        if (pendingStorageWrites.get(key) !== pending || !storage ||
-            readPersistentAuthItem(key) === undefined) continue;
-        try {
-          storage.setItem(key, pending.value);
-          if (storage.getItem(key) === pending.value) acceptPersistentAuthItem(key, pending.value);
-        } catch { persistentStorage = null; }
-      }
-    });
+    for (const [key, pending] of pendingStorageWrites) {
+      // A fresh sign-in identifies its SDK key before the first successful read.
+      // Try once without waiting or stealing; a busy owner gets the next tick.
+      try {
+        await lock(`lock:${sessionStorageKey ?? key}`, 0, async () => {
+          const storage = storageBackend();
+          reconcileAuthItem(key);
+          if (pendingStorageWrites.get(key) !== pending || !storage ||
+              pending.expected === undefined || readPersistentAuthItem(key) === undefined) return;
+          try {
+            storage.setItem(key, pending.value);
+            if (storage.getItem(key) === pending.value) acceptPersistentAuthItem(key, pending.value);
+          } catch { persistentStorage = null; }
+        });
+      } catch { /* A busy SDK lock is retried without stealing or queueing. */ }
+    }
   } catch { persistentStorage = null; }
   finally {
     storageRetryInFlight = false;
@@ -219,6 +223,8 @@ function scheduleStorageRetry(): void {
   if (!("localStorage" in globalThis)) return;
   if (storageRetryTimer !== undefined || storageRetryInFlight || pendingStorageWrites.size === 0) return;
   storageRetryTimer = setTimeout(retryStorageWrites, storageRetryDelay);
+  // Browser retries stay live; a denied Node localStorage must not keep Node alive.
+  (storageRetryTimer as unknown as { unref?: () => void }).unref?.();
 }
 if (typeof globalThis.addEventListener === "function") {
   globalThis.addEventListener("storage", (event: StorageEvent) => {
@@ -263,10 +269,12 @@ const authStorage = {
     importedStorageKeys.add(key);
     const pending = pendingStorageWrites.get(key);
     const disk = readPersistentAuthItem(key);
-    if (pending && disk !== undefined && disk !== pending.expected) {
+    if (pending && pending.expected !== undefined && disk !== undefined && disk !== pending.expected) {
       acceptPersistentAuthItem(key, disk);
-      return;
+      // Stop the SDK before it can announce a save that lost ownership.
+      throw new AuthRetryableFetchError("Sign-in changed during storage save", 0);
     }
+    if (savedSession(value)) sessionStorageKey = key;
     if (key === sessionStorageKey) removalSnapshot = null;
     removedStorageKeys.delete(key);
     authMemory.set(key, value);
@@ -274,7 +282,7 @@ const authStorage = {
     storageRetryDelay = 1_000;
     try {
       const storage = storageBackend();
-      if (storage && disk !== undefined) {
+      if (storage && disk !== undefined && pendingStorageWrites.get(key)?.expected !== undefined) {
         storage.setItem(key, value);
         if (storage.getItem(key) === value) acceptPersistentAuthItem(key, value);
       }
@@ -340,9 +348,8 @@ const authFetch: typeof fetch = async (input, init) => {
   if (response.ok) {
     if (isRefresh) {
       refreshRetryAfter = 0;
-      if (sessionStorageKey && authStorage.getItem(sessionStorageKey) !== savedAtStart) {
-        throw new AuthRetryableFetchError("Sign-in changed during refresh", 0);
-      }
+      // auth-js's storedAfter guard discards a peer replacement/logout without
+      // re-sending the now-consumed predecessor or entering a retry cooldown.
     }
     return response;
   }
