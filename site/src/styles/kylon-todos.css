@@ -69,6 +69,14 @@ live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-t
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo :is(.hm-todo-editor, .hm-assign-capsule, .hm-picker-pop) {
   border-radius: 8px;
 }
+/* The combobox controls this listbox. Scroll its options while keeping the
+   heading and delivery guidance outside the scroll region. */
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-tag-picker .hm-picker-pop {
+  grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-tag-picker .hm-pick-list {
+  min-block-size: 0; overflow: auto; overscroll-behavior: contain;
+}
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo :is(.hm-comment-author, .hm-todo-gate legend) {
   font-weight: 600;
 }
