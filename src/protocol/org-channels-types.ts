@@ -433,8 +433,9 @@ export const hasLiveWsRenewal = (
   const refMs = toEvalMs(now ?? c.now ?? s.now);
   const wsRgs = (s.renewalGrants ?? []).filter(
     (rg) =>
-      rg.workspace_id === wsId ||
-      (rg.principal_id != null && wsAps.some((ap) => ap.principal_id === rg.principal_id)),
+      rg.principal_id != null &&
+      wsAps.some((ap) => ap.principal_id === rg.principal_id) &&
+      (rg.workspace_id == null || rg.workspace_id === wsId),
   );
   return (
     wsRgs.length === 0 ||
@@ -456,7 +457,9 @@ export const cascadeWsRenewalGrants = (
   for (const rg of s.renewalGrants ?? []) {
     if (
       rg.revoked_at == null &&
-      (rg.workspace_id === workspace_id || (rg.principal_id && affected.has(rg.principal_id)))
+      rg.principal_id != null &&
+      affected.has(rg.principal_id) &&
+      (rg.workspace_id == null || rg.workspace_id === workspace_id)
     )
       rg.revoked_at = now;
   }
