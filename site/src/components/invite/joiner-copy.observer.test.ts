@@ -375,7 +375,14 @@ test("on the create screen the card watches the dashboard, moves above the form 
   const dashboard = await readFile(new URL("../app/LiveDashboard.astro", import.meta.url), "utf8");
   assert.match(dashboard, /name: "loading" \| "signed-out" \| "create" \| "workspace-error" \| "channel"/);
   assert.match(dashboard, /app\.dataset\.state = name;/);
-  assert.match(dashboard, /<live-dashboard class="dashboard" data-state="loading">/);
+  const opening = /<live-dashboard(?=\s|>)[^>]*>/.exec(dashboard)?.[0];
+  assert.ok(opening, "the invitation inbox observes the real live-dashboard root");
+  const attributes = new Map([...opening.matchAll(/\s([\w-]+)\s*=\s*(["'])(.*?)\2/g)]
+    .map((match) => [match[1], match[3]]));
+  assert.ok(attributes.get("class")?.split(/\s+/).includes("dashboard"),
+    "the dashboard styling hook remains on the root");
+  assert.equal(attributes.get("data-state"), "loading",
+    "the dashboard starts loading before invitation visibility is decided");
   // The dashboard is read, never edited, from here.
   assert.doesNotMatch(page.source, /LiveDashboard/);
 });

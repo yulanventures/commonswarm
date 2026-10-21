@@ -277,8 +277,9 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu :is(
   .dashboard__theme-toggle, .dashboard__user-menu-item, .dashboard__user-menu-brand
 ):hover { background: var(--k-shell-hover); }
 @media (width <= 52rem) {
-  /* A sample has the separate account door, so it needs no empty menu track. */
-  live-dashboard.dashboard[data-kylon-shell] .hm-phone-bar:not([data-home-account-menu]) {
+  /* Reserve the fourth track whenever the actual workspace menu exists,
+     including the interval before account entries are available. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-phone-bar:not(:has(> .hm-menu)) {
     grid-template-columns: 44px minmax(0, 1fr) auto;
   }
   live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu :is(
