@@ -1,275 +1,130 @@
-import {
-  type OrgRole,
-  type OrgRosterMemberItem,
-  type PrincipalKind,
-  ORG_ROLE_LABELS,
-  REVOCATION_SCOPE_DISCLOSURE,
-} from './org-members-screen.js';
+import { type OrgRole, type OrgRosterMemberItem, type PrincipalKind, ORG_ROLE_LABELS, REVOCATION_SCOPE_DISCLOSURE } from './org-members-screen.js';
+import { esc, dis, bdg, fld, inp, opt, rad, btn, act, fset, dlg, createOrgDialogsController, mountOrgDialogsController } from './approval-remedy-cards.js';
+export { createOrgDialogsController, mountOrgDialogsController };
 
 export type WorkspaceMoveTransferMode = 'all' | 'owners_only';
 export type ChannelVisibility = 'workspace' | 'private';
 export type ChannelRole = 'owner' | 'member';
 export type NotifyPref = 'all' | 'mentions' | 'mute';
+export type ChannelIcon = '#' | 'lock' | 'bolt' | 'shield' | 'book' | 'hash' | 'spark';
 
 export const LOGO_RENDITION_SIZES = [64, 128, 256] as const;
 export const LOGO_MAX_BYTES = 1_048_576;
 export const LOGO_ALLOWED_MIMES = ['image/png', 'image/jpeg', 'image/webp', 'image/svg+xml'] as const;
+export const SVG_STATIC_GEOMETRY_ALLOWLIST = 'svg,g,path,rect,circle,ellipse,line,polyline,polygon,defs,lineargradient,radialgradient,stop,clippath,title,desc'.split(',');
+const ALLOWED_SVG_TAGS = new Set<string>(SVG_STATIC_GEOMETRY_ALLOWLIST);
+
+export const CHANNEL_ICON_OPTIONS: ReadonlyArray<{ id: ChannelIcon; label: string }> = [
+  { id: '#', label: '# Hash' }, { id: 'lock', label: 'Lock' }, { id: 'bolt', label: 'Bolt' }, { id: 'shield', label: 'Shield' }, { id: 'book', label: 'Book' },
+];
 
 export const NOTIFY_PREF_OPTIONS: ReadonlyArray<{ id: NotifyPref; label: string; description: string }> = [
   { id: 'all', label: 'All activity', description: 'Every message and signal in this channel' },
   { id: 'mentions', label: 'Mentions & replies', description: 'Direct @mentions, replies, and approvals' },
   { id: 'mute', label: 'Mute channel', description: 'No push or badge wakes' },
-] as const;
+];
 
-const esc = (v: unknown): string =>
-  String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] ?? c));
+const UNSAFE_SVG_RE = /<\/?[a-z0-9_-]+:|(?:^|[\s"'/])[a-z0-9_-]+:[a-z0-9_-]+\s*=|\bxmlns\s*=\s*(?!(?:"http:\/\/www\.w3\.org\/2000\/svg"|'http:\/\/www\.w3\.org\/2000\/svg'))|<\s*\/?\s*(?:script|foreignobject|iframe|object|embed|image|use|animate|set|handler|listener)\b|(?:^|[\s"'/])(?:on[a-z]+|href)\s*=|xlink:href|javascript:|data:|@import|url\s*\(|=\s*(?:"[^"]*(?:&#|&[a-z0-9]+;)[^"]*"|'[^']*(?:&#|&[a-z0-9]+;)[^']*'|[^\s>]*?(?:&#|&[a-z0-9]+;))|<![a-z[]|<\?/i;
 
 export function isTypedDeleteMatch(expectedName: string, typedValue: string): boolean {
   const exp = expectedName.trim();
   return exp.length > 0 && typedValue.trim() === exp;
 }
 
-export function validateOrgLogoUpload(input: {
-  actorRole: OrgRole;
-  mimeType: string;
-  sizeBytes: number;
-  svgText?: string;
-}): { ok: boolean; error?: string; sanitizedSvg?: string } {
-  if (input.actorRole !== 'owner' && input.actorRole !== 'admin') {
-    return { ok: false, error: 'ORG_LOGO_REQUIRES_ADMIN_OR_OWNER' };
-  }
-  if (!LOGO_ALLOWED_MIMES.includes(input.mimeType as (typeof LOGO_ALLOWED_MIMES)[number])) {
-    return { ok: false, error: 'UNSUPPORTED_LOGO_MIME_TYPE' };
-  }
-  if (input.sizeBytes <= 0 || input.sizeBytes > LOGO_MAX_BYTES) {
-    return { ok: false, error: 'LOGO_EXCEEDS_1MB_LIMIT' };
-  }
-  if (input.mimeType === 'image/svg+xml' && input.svgText != null) {
-    const sanitized = input.svgText
-      .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '')
-      .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-      .replace(/(?:href|xlink:href)\s*=\s*(?:"https?:\/\/[^"]*"|'https?:\/\/[^']*')/gi, '');
-    return { ok: true, sanitizedSvg: sanitized };
+export function validateOrgLogoUpload(i: { actorRole: OrgRole; mimeType: string; sizeBytes: number; svgText?: string }): { ok: boolean; error?: string; sanitizedSvg?: string } {
+  if (i.actorRole !== 'owner' && i.actorRole !== 'admin') return { ok: false, error: 'ORG_LOGO_REQUIRES_ADMIN_OR_OWNER' };
+  if (!LOGO_ALLOWED_MIMES.includes(i.mimeType as (typeof LOGO_ALLOWED_MIMES)[number])) return { ok: false, error: 'UNSUPPORTED_LOGO_MIME_TYPE' };
+  if (i.sizeBytes <= 0 || i.sizeBytes > LOGO_MAX_BYTES) return { ok: false, error: 'LOGO_EXCEEDS_1MB_LIMIT' };
+  if (i.mimeType === 'image/svg+xml') {
+    const raw = (i.svgText ?? '').trim();
+    if (!raw || UNSAFE_SVG_RE.test(raw)) return { ok: false, error: 'Unsafe SVG content refused' };
+    const tags = [...raw.matchAll(/<\/?([a-zA-Z0-9_-]+)/g)].map((m) => m[1]!.toLowerCase());
+    if (!tags.length || !tags.includes('svg')) return { ok: false, error: 'Unsafe SVG content refused' };
+    for (const t of tags) if (!ALLOWED_SVG_TAGS.has(t)) return { ok: false, error: 'Disallowed SVG element' };
+    return { ok: true, sanitizedSvg: raw };
   }
   return { ok: true };
 }
 
-export interface WorkspaceMembersPanelProps {
-  org_slug: string;
-  workspace_id: string;
-  workspace_slug: string;
-  workspace_name: string;
-  actor_role: OrgRole;
-  workspace_members: OrgRosterMemberItem[];
-  org_candidates: OrgRosterMemberItem[];
+interface WsCtx { org_slug: string; workspace_slug: string; workspace_name: string; }
+export interface WorkspaceMembersPanelProps extends WsCtx { workspace_id: string; actor_role: OrgRole; workspace_members: OrgRosterMemberItem[]; org_candidates: OrgRosterMemberItem[]; }
+
+export function renderWorkspaceMembersPanel(p: WorkspaceMembersPanelProps): string {
+  const can = p.actor_role === 'owner' || p.actor_role === 'admin';
+  const rows = p.workspace_members.map((m) => {
+    const ag = m.principal_kind === 'agent';
+    return `<div class="ws-member-row" data-member-id="${esc(m.principal_id)}"><span class="avatar ${ag ? 'agent' : ''} small">${esc(m.initials)}</span><div class="ws-member-copy"><strong>${esc(m.display_name)} ${bdg(ag ? 'Agent' : 'Person')} ${bdg(esc(ORG_ROLE_LABELS[m.role]))}</strong><small class="meta">${esc(m.handle)}${ag ? ` · ${m.active_seat_id ? `Active seat ${esc(m.active_seat_id)} (closes immediately on removal)` : 'No active seat'}` : ''}</small></div><button type="button" class="button danger" data-action="ws-remove-member" data-member-id="${esc(m.principal_id)}" ${dis(!can)}>Remove</button></div>`;
+  }).join('');
+  const opts = p.org_candidates.map((c) => opt(c.principal_id, false, `${esc(c.display_name)} (${c.principal_kind === 'agent' ? 'Agent' : 'Person'})`)).join('');
+  return `<section class="spec-card ws-members-panel" data-workspace-slug="${esc(p.workspace_slug)}" aria-label="Workspace members"><div class="dialog-heading"><h2>Workspace Members · ${esc(p.workspace_name)}</h2>${bdg(`${p.workspace_members.length} assigned`)}</div><div class="ws-add-bar sample-row"><select id="ws-candidate-select" class="ws-select" ${dis(!can || !opts)}>${opts || '<option value="">All org members in workspace</option>'}</select>${btn('primary', 'ws-add-member', '+ Add to workspace', !can || !opts)}</div><div class="ws-member-list">${rows}</div><div class="notice" role="note"><strong>Agent seat cascade</strong><p>${esc(REVOCATION_SCOPE_DISCLOSURE)}.</p></div></section>`;
 }
 
-export function renderWorkspaceMembersPanel(props: WorkspaceMembersPanelProps): string {
-  const canManage = props.actor_role === 'owner' || props.actor_role === 'admin';
-  const rows = props.workspace_members
-    .map((m) => {
-      const isAgent = m.principal_kind === 'agent';
-      return `<div class="ws-member-row" data-member-id="${esc(m.principal_id)}">
-        <span class="avatar ${isAgent ? 'agent' : ''} small">${esc(m.initials)}</span>
-        <div class="ws-member-copy">
-          <strong>${esc(m.display_name)} <span class="badge">${isAgent ? 'Agent' : 'Person'}</span> <span class="badge">${esc(ORG_ROLE_LABELS[m.role])}</span></strong>
-          <small class="meta">${esc(m.handle)}${isAgent ? ` · ${m.active_seat_id ? `Active seat ${esc(m.active_seat_id)} (closes immediately on removal)` : 'No active seat'}` : ''}</small>
-        </div>
-        <button type="button" class="button danger" data-action="ws-remove-member" data-member-id="${esc(m.principal_id)}" ${!canManage ? 'disabled' : ''}>Remove</button>
-      </div>`;
-    })
-    .join('');
-  const opts = props.org_candidates
-    .map((c) => `<option value="${esc(c.principal_id)}">${esc(c.display_name)} (${c.principal_kind === 'agent' ? 'Agent' : 'Person'})</option>`)
-    .join('');
+export interface CreateWorkspaceModalProps extends WsCtx { org_id?: string; org_name?: string; organizations?: Array<{ org_id: string; slug: string; display_name: string }>; actor_role?: OrgRole; }
 
-  return `<section class="spec-card ws-members-panel" data-workspace-slug="${esc(props.workspace_slug)}" aria-label="Workspace members">
-    <div class="dialog-heading"><h2>Workspace Members · ${esc(props.workspace_name)}</h2><span class="badge">${props.workspace_members.length} assigned</span></div>
-    <div class="ws-add-bar sample-row">
-      <select id="ws-candidate-select" class="ws-select" ${!canManage || !opts ? 'disabled' : ''}>${opts || '<option value="">All org members in workspace</option>'}</select>
-      <button type="button" class="button primary" data-action="ws-add-member" ${!canManage || !opts ? 'disabled' : ''}>+ Add to workspace</button>
-    </div>
-    <div class="ws-member-list">${rows}</div>
-    <div class="notice" role="note"><strong>Agent seat cascade</strong><p>${esc(REVOCATION_SCOPE_DISCLOSURE)}.</p></div>
-  </section>`;
+export function renderCreateWorkspaceModal(p: CreateWorkspaceModalProps): string {
+  const orgs = p.organizations?.length ? p.organizations : [{ org_id: p.org_id ?? 'org-1', slug: p.org_slug, display_name: p.org_name ?? p.org_slug }];
+  const sel = orgs.find((o) => o.slug === p.org_slug || (p.org_id && o.org_id === p.org_id)) ?? orgs[0]!;
+  const orgSlug = sel.slug || p.org_slug || 'org';
+  const can = !p.actor_role || p.actor_role === 'owner' || p.actor_role === 'admin';
+  const orgOpts = orgs.map((o) => opt(o.slug, o.slug === orgSlug, `${esc(o.display_name)} (${esc(o.slug)})`)).join('');
+  return dlg('create-workspace', 'Create Workspace', bdg('org_create_workspace'), `${fld('Organization', `<select name="org_slug" ${dis(!can)}>${orgOpts}</select>`)}${fld('Workspace name', inp('workspace_name', p.workspace_name, !can))}${fld('Workspace slug (<code>[a-z0-9-]</code>)', inp('workspace_slug', p.workspace_slug, !can, ' pattern="[a-z0-9-]+"'))}<div class="notice" role="note"><strong>Default channel provisioning</strong><p>Provisions default <code>#general</code> channel automatically.</p><code>${esc(`cswarm workspace create ${p.workspace_slug || 'new-workspace'} --org ${orgSlug}`)}</code></div>${act(btn('primary', 'submit-create-workspace', 'Create workspace', !can))}`, ' aria-label="Create workspace"');
 }
 
-export interface WorkspaceMoveModalProps {
-  workspace_id: string;
-  workspace_slug: string;
-  workspace_name: string;
-  source_org_id: string;
-  source_org_slug: string;
-  source_org_name: string;
-  target_orgs: Array<{ org_id: string; slug: string; display_name: string; actor_is_owner: boolean }>;
-  selected_target_org_id: string;
-  transfer_members: WorkspaceMoveTransferMode;
-  affected_non_owner_count: number;
-  affected_agent_seat_count: number;
+export interface WorkspaceMoveModalProps { workspace_id: string; workspace_slug: string; workspace_name: string; source_org_id: string; source_org_slug: string; source_org_name: string; target_orgs: Array<{ org_id: string; slug: string; display_name: string; actor_is_owner: boolean }>; selected_target_org_id: string; transfer_members: WorkspaceMoveTransferMode; affected_non_owner_count: number; affected_agent_seat_count: number; }
+
+export function renderWorkspaceMoveModal(p: WorkspaceMoveModalProps): string {
+  const target = p.target_orgs.find((o) => o.org_id === p.selected_target_org_id) ?? p.target_orgs[0];
+  const dualOk = Boolean(target?.actor_is_owner);
+  const cliCmd = `cswarm workspace move ${p.source_org_slug}/${p.workspace_slug} --to-org ${target?.slug ?? 'target-org'} --transfer-members ${p.transfer_members}`;
+  const orgOpts = p.target_orgs.map((o) => opt(o.org_id, o.org_id === p.selected_target_org_id, `${esc(o.display_name)} (${esc(o.slug)})`)).join('');
+  return dlg('move-workspace', `Move Workspace · ${esc(p.workspace_name)}`, bdg('org_move_workspace'), `${fld('Destination organization', `<select id="move-ws-target-org">${orgOpts}</select>`)}<fieldset class="transfer-fieldset"><legend>Member &amp; agent transfer policy (<code>transfer_members</code>)</legend>${rad('transfer_members', 'all', p.transfer_members === 'all', '<strong>Transfer all (<code>all</code>)</strong> — grants destination org memberships and keeps grants &amp; seats.')}${rad('transfer_members', 'owners_only', p.transfer_members === 'owners_only', '<strong>Transfer owners only (<code>owners_only</code>)</strong> — only destination Owners keep access.')}</fieldset><div class="notice" role="alert" data-move-warning="true"><strong>Non-transferred principals lose grants &amp; active seats immediately</strong><p>Non-transferred principals (${p.affected_non_owner_count} principals, ${p.affected_agent_seat_count} active seats) lose grants and active seats in this workspace; history is preserved.</p><code>${esc(cliCmd)}</code></div>${!dualOk ? '<p class="dialog-error" role="alert">ORG_MOVE_REQUIRES_DUAL_OWNER</p>' : ''}${act(btn('primary', 'submit-move-workspace', 'Move workspace', !dualOk))}`, ' aria-label="Move workspace"');
 }
 
-export function renderWorkspaceMoveModal(props: WorkspaceMoveModalProps): string {
-  const target = props.target_orgs.find((o) => o.org_id === props.selected_target_org_id) ?? props.target_orgs[0];
-  const targetSlug = target?.slug ?? 'target-org';
-  const dualOwnerOk = Boolean(target?.actor_is_owner);
-  const cliCmd = `cswarm workspace move ${props.source_org_slug}/${props.workspace_slug} --to-org ${targetSlug} --transfer-members ${props.transfer_members}`;
-  const orgOpts = props.target_orgs
-    .map((o) => `<option value="${esc(o.org_id)}" ${o.org_id === props.selected_target_org_id ? 'selected' : ''}>${esc(o.display_name)} (${esc(o.slug)})</option>`)
-    .join('');
+export interface OrganizationCrudModalProps { mode: 'create' | 'rename' | 'delete'; org_id?: string; org_slug: string; org_name: string; initial_workspace_name?: string; actor_role: OrgRole; typed_delete_input?: string; }
 
-  return `<section class="spec-card dialog-surface" data-dialog="move-workspace" aria-label="Move workspace">
-    <div class="dialog-heading"><h2>Move Workspace · ${esc(props.workspace_name)}</h2><span class="badge">org_move_workspace</span></div>
-    <label class="field">Destination organization<select id="move-ws-target-org">${orgOpts}</select></label>
-    <fieldset class="transfer-fieldset">
-      <legend>Member &amp; agent transfer policy (<code>transfer_members</code>)</legend>
-      <label class="check-field"><input type="radio" name="transfer_members" value="all" ${props.transfer_members === 'all' ? 'checked' : ''}><span><strong>Transfer all (<code>all</code>)</strong> — grants destination org memberships and keeps grants &amp; seats.</span></label>
-      <label class="check-field"><input type="radio" name="transfer_members" value="owners_only" ${props.transfer_members === 'owners_only' ? 'checked' : ''}><span><strong>Transfer owners only (<code>owners_only</code>)</strong> — only destination Owners keep access.</span></label>
-    </fieldset>
-    <div class="notice" role="alert" data-move-warning="true">
-      <strong>Non-transferred principals lose grants &amp; active seats immediately</strong>
-      <p>Non-transferred members/agents (${props.affected_non_owner_count} principals, ${props.affected_agent_seat_count} active seats) lose workspace/channel grants and active seats in this workspace; history is preserved.</p>
-      <code>${esc(cliCmd)}</code>
-    </div>
-    ${!dualOwnerOk ? '<p class="dialog-error" role="alert">ORG_MOVE_REQUIRES_DUAL_OWNER</p>' : ''}
-    <div class="actions"><button type="button" class="button primary" data-action="submit-move-workspace" ${!dualOwnerOk ? 'disabled' : ''}>Move workspace</button></div>
-  </section>`;
+export function renderOrganizationCrudModal(p: OrganizationCrudModalProps): string {
+  const canDel = p.actor_role === 'owner';
+  const canEdit = canDel || p.actor_role === 'admin';
+  const delOk = isTypedDeleteMatch(p.org_name, p.typed_delete_input ?? '');
+  const title = p.mode === 'create' ? 'Create Organization' : p.mode === 'rename' ? `Rename ${esc(p.org_name)}` : `Delete ${esc(p.org_name)}`;
+  const body = p.mode === 'delete'
+    ? `<div class="typed-delete-box">${fld(`Type <code>${esc(p.org_name)}</code> to confirm delete`, inp('typed_delete_input', p.typed_delete_input ?? '', !canDel, ` data-delete-confirm-target="${esc(p.org_name)}"`))}${act(btn('primary danger', 'confirm-delete-org', 'Delete organization', !canDel || !delOk))}</div>`
+    : `${fld('Organization display name', inp('org_display_name', p.org_name, p.mode === 'rename' && !canEdit))}${fld('Organization slug (<code>[a-z0-9-]</code>)', inp('org_slug', p.org_slug, p.mode === 'rename' && !canEdit, ' pattern="[a-z0-9-]+"'))}${p.mode === 'create' ? `${fld('Initial workspace name', inp('initial_workspace_name', p.initial_workspace_name ?? 'General'))}${act(btn('primary', 'submit-create-org', 'Create organization'))}` : act(btn('primary', 'submit-rename-org', 'Save changes', !canEdit))}`;
+  return dlg('org-crud', title, '', body, ` data-org-crud-mode="${esc(p.mode)}"`);
 }
 
-export interface OrganizationCrudModalProps {
-  mode: 'create' | 'rename' | 'delete';
-  org_id?: string;
-  org_slug: string;
-  org_name: string;
-  actor_role: OrgRole;
-  typed_delete_input?: string;
+export interface OrgLogoUploadModalProps { org_id: string; org_slug: string; org_name: string; actor_role: OrgRole; current_logo_key?: string | null; }
+
+export function renderOrgLogoUploadModal(p: OrgLogoUploadModalProps): string {
+  const can = p.actor_role === 'owner' || p.actor_role === 'admin';
+  const init = (p.org_name.trim()[0] || 'O').toUpperCase();
+  const prev = LOGO_RENDITION_SIZES.map((px) => `<div class="logo-rendition-box" data-rendition-size="${px}"><div class="logo-rendition-frame">${esc(init)}</div><small class="meta">${px}×${px}px</small><code>orgs/${esc(p.org_id)}/logo/${px}.webp</code></div>`).join('');
+  return dlg('org-logo-upload', `Organization Logo · ${esc(p.org_name)}`, bdg('64 / 128 / 256px'), `<div class="logo-dropzone"><strong>Drop PNG, JPEG, WebP, or SVG (&lt;= 1 MB)</strong><input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" ${dis(!can)}></div><div class="logo-rendition-grid">${prev}</div>${act(btn('primary', 'submit-logo-upload', 'Save organization logo', !can))}`);
 }
 
-export function renderOrganizationCrudModal(props: OrganizationCrudModalProps): string {
-  const canDelete = props.actor_role === 'owner';
-  const canEdit = props.actor_role === 'owner' || props.actor_role === 'admin';
-  const deleteMatches = isTypedDeleteMatch(props.org_name, props.typed_delete_input ?? '');
-  return `<section class="spec-card dialog-surface" data-dialog="org-crud" data-org-crud-mode="${esc(props.mode)}">
-    <div class="dialog-heading"><h2>${props.mode === 'create' ? 'Create Organization' : props.mode === 'rename' ? `Rename ${esc(props.org_name)}` : `Delete ${esc(props.org_name)}`}</h2></div>
-    <label class="field">Organization name<input type="text" value="${esc(props.org_name)}" ${!canEdit && props.mode !== 'create' ? 'disabled' : ''}></label>
-    <label class="field">Organization slug<input type="text" value="${esc(props.org_slug)}" ${!canEdit && props.mode !== 'create' ? 'disabled' : ''}></label>
-    <div class="typed-delete-box">
-      <label class="field">Type <code>${esc(props.org_name)}</code> to confirm delete<input type="text" value="${esc(props.typed_delete_input ?? '')}"></label>
-      <button type="button" class="button primary danger" data-action="confirm-delete-org" ${!canDelete || !deleteMatches ? 'disabled' : ''}>Delete Organization</button>
-    </div>
-  </section>`;
-}
+export interface CreateChannelModalProps extends WsCtx { step: 1 | 2 | 3; private_channels_enabled: boolean; visibility: ChannelVisibility; channel_slug: string; channel_name?: string; channel_icon?: ChannelIcon; topic: string; guidelines: string; available_principals: Array<{ principal_id: string; principal_kind: PrincipalKind; display_name: string; role: OrgRole }>; selected_principal_ids: string[]; }
 
-export interface OrgLogoUploadModalProps {
-  org_id: string;
-  org_slug: string;
-  org_name: string;
-  actor_role: OrgRole;
-  current_logo_key?: string | null;
-}
-
-export function renderOrgLogoUploadModal(props: OrgLogoUploadModalProps): string {
-  const canUpload = props.actor_role === 'owner' || props.actor_role === 'admin';
-  const initial = (props.org_name.trim()[0] || 'O').toUpperCase();
-  const previews = LOGO_RENDITION_SIZES.map(
-    (px) => `<div class="logo-rendition-box" data-rendition-size="${px}"><div class="logo-rendition-frame">${esc(initial)}</div><small class="meta">${px}×${px}px</small><code>orgs/${esc(props.org_id)}/logo/${px}.webp</code></div>`,
-  ).join('');
-  return `<section class="spec-card dialog-surface" data-dialog="org-logo-upload">
-    <div class="dialog-heading"><h2>Organization Logo · ${esc(props.org_name)}</h2><span class="badge">64 / 128 / 256px</span></div>
-    <div class="logo-dropzone"><strong>Drop PNG, JPEG, WebP, or SVG (&lt;= 1 MB)</strong><input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" ${!canUpload ? 'disabled' : ''}></div>
-    <div class="logo-rendition-grid">${previews}</div>
-    <div class="actions"><button type="button" class="button primary" data-action="submit-logo-upload" ${!canUpload ? 'disabled' : ''}>Save organization logo</button></div>
-  </section>`;
-}
-
-export interface CreateChannelModalProps {
-  org_slug: string;
-  workspace_slug: string;
-  workspace_name: string;
-  step: 1 | 2 | 3;
-  private_channels_enabled: boolean;
-  visibility: ChannelVisibility;
-  channel_slug: string;
-  channel_icon?: 'hash' | 'lock' | 'spark' | 'book';
-  topic: string;
-  guidelines: string;
-  available_principals: Array<{ principal_id: string; principal_kind: PrincipalKind; display_name: string; role: OrgRole }>;
-  selected_principal_ids: string[];
-}
-
-export function renderCreateChannelModal(props: CreateChannelModalProps): string {
-  const isPrivate = props.visibility === 'private';
-  const privBadge = props.private_channels_enabled
-    ? '<span class="badge good" data-private-gate="enabled">PRIVATE_CHANNELS_ENABLED: true</span>'
-    : '<span class="badge" data-private-gate="disabled">PRIVATE_CHANNELS_ENABLED: false (fail-closed)</span>';
+export function renderCreateChannelModal(p: CreateChannelModalProps): string {
+  const isPriv = p.visibility === 'private';
+  const selIcon = p.channel_icon ?? (isPriv ? 'lock' : '#');
+  const canCreate = p.step === 3 && (p.visibility === 'workspace' || p.private_channels_enabled);
+  const privBadge = `<span class="badge${p.private_channels_enabled ? ' good' : ''}" data-private-gate="${p.private_channels_enabled ? 'enabled' : 'disabled'}">PRIVATE_CHANNELS_ENABLED: ${p.private_channels_enabled ? 'true' : 'false (fail-closed)'}</span>`;
   const steps = ([[1, '1. Visibility'], [2, '2. Name & Guidelines'], [3, '3. Members & Agents']] as const)
-    .map(([n, label]) => `<span class="step-pill ${props.step === n ? 'active' : ''}" data-step-indicator="${n}">${esc(label)}</span>`)
-    .join('');
-  const checklist = props.available_principals
-    .map((p) => `<label class="check-field"><input type="checkbox" value="${esc(p.principal_id)}" ${props.selected_principal_ids.includes(p.principal_id) ? 'checked' : ''}><span>${esc(p.display_name)} (${p.principal_kind === 'agent' ? 'Agent' : 'Person'})</span></label>`)
-    .join('');
-
-  return `<section class="spec-card dialog-surface" data-dialog="create-channel" data-current-step="${props.step}">
-    <div class="dialog-heading"><h2>Create Channel in ${esc(props.workspace_name)}</h2>${privBadge}</div>
-    <div class="step-progress">${steps}</div>
-    <div class="channel-step-pane" data-step-pane="1" ${props.step !== 1 ? 'hidden' : ''}>
-      <label class="visibility-option ${!isPrivate ? 'selected' : ''}"><input type="radio" name="channel_visibility" value="workspace" ${!isPrivate ? 'checked' : ''}><div><strong># Public Workspace Channel (<code>visibility="workspace"</code>)</strong></div></label>
-      <label class="visibility-option ${isPrivate ? 'selected' : ''}"><input type="radio" name="channel_visibility" value="private" ${isPrivate ? 'checked' : ''} ${!props.private_channels_enabled ? 'disabled' : ''}><div><strong>Lock Private Channel (<code>visibility="private"</code>)</strong><p class="meta">Joined-room boundary: only invited members/agents can read messages, files, search, or wakes.</p></div></label>
-      <div class="notice" role="note" data-private-channel-rules="true">
-        <p>Private channels require an explicit channel <code>owner</code> invite and cannot flip to public later (<code>PRIVATE_CHANNEL_CANNOT_BECOME_PUBLIC</code>). Non-empty public channels cannot flip to private in-place (<code>CHANNEL_HAS_PUBLIC_HISTORY</code>).</p>
-      </div>
-    </div>
-    <div class="channel-step-pane" data-step-pane="2" ${props.step !== 2 ? 'hidden' : ''}>
-      <label class="field">Channel slug<input type="text" value="${esc(props.channel_slug)}"></label>
-      <label class="field">Guidelines &amp; topic<textarea rows="2">${esc(props.guidelines || props.topic)}</textarea></label>
-    </div>
-    <div class="channel-step-pane" data-step-pane="3" ${props.step !== 3 ? 'hidden' : ''}>
-      <div class="channel-initial-members">${checklist}</div>
-      <code>cswarm channel create ${esc(props.channel_slug || 'new-channel')} --workspace ${esc(props.org_slug)}/${esc(props.workspace_slug)} --visibility ${esc(props.visibility)}</code>
-    </div>
-    <div class="actions">
-      <button type="button" class="button" data-action="channel-step-back" ${props.step === 1 ? 'disabled' : ''}>Back</button>
-      <button type="button" class="button" data-action="channel-step-next" ${props.step === 3 ? 'hidden' : ''}>Next</button>
-      <button type="button" class="button primary" data-action="channel-create-submit" ${isPrivate && !props.private_channels_enabled ? 'disabled' : ''}>Create</button>
-    </div>
-  </section>`;
+    .map(([n, lbl]) => `<button type="button" class="step-pill ${p.step === n ? 'active' : ''}" data-step-indicator="${n}" aria-current="${p.step === n ? 'step' : 'false'}">${esc(lbl)}</button>`).join('');
+  const iconOpts = CHANNEL_ICON_OPTIONS.map((ic) => opt(ic.id, selIcon === ic.id, esc(ic.label))).join('');
+  const checklist = p.available_principals.map((m) => `<label class="check-field"><input type="checkbox" value="${esc(m.principal_id)}" ${p.selected_principal_ids.includes(m.principal_id) ? 'checked' : ''}><span>${esc(m.display_name)} (${m.principal_kind === 'agent' ? 'Agent' : 'Person'})</span></label>`).join('');
+  const pane = (n: number, b: string) => `<fieldset class="channel-step-pane" data-step-pane="${n}" ${p.step !== n ? 'hidden' : ''}>${b}</fieldset>`;
+  const vopt = (v: string, s: boolean, t: string, m = '', d = false) => `<label class="visibility-option ${s ? 'selected' : ''}"><input type="radio" name="channel_visibility" value="${v}" ${s ? 'checked' : ''} ${dis(d)}><div><strong>${t}</strong>${m}</div></label>`;
+  return dlg('create-channel', `Create Channel in ${esc(p.workspace_name)}`, privBadge, `<div class="step-progress">${steps}</div>${pane(1, `${vopt('workspace', !isPriv, '# Public Workspace Channel (<code>visibility="workspace"</code>)')}${vopt('private', isPriv, 'Lock Private Channel (<code>visibility="private"</code>)', '<p class="meta">Joined-room boundary: only invited members/agents can read messages, files, search, or wakes.</p>', !p.private_channels_enabled)}<div class="notice" role="note" data-private-channel-rules="true"><p>Private channels require an explicit channel <code>owner</code> invite and cannot flip to public later (<code>PRIVATE_CHANNEL_CANNOT_BECOME_PUBLIC</code>). Non-empty public channels cannot flip to private in-place (<code>CHANNEL_HAS_PUBLIC_HISTORY</code>).</p></div>`)}${pane(2, `${fld('Channel icon (<code>channel_icon</code>)', `<select name="channel_icon">${iconOpts}</select>`)}${fld('Channel name', inp('channel_slug', p.channel_name ?? p.channel_slug))}${fld('Topic', inp('channel_topic', p.topic))}${fld('Guidelines / Purpose', `<textarea name="channel_guidelines" rows="2">${esc(p.guidelines)}</textarea>`)}`)}${pane(3, `<div class="channel-initial-members">${checklist}</div><code>cswarm channel create ${esc(p.channel_slug || 'new-channel')} --workspace ${esc(p.org_slug)}/${esc(p.workspace_slug)} --visibility ${esc(p.visibility)}</code>`)}${act(`${btn('', 'prev-channel-step', 'Back', p.step === 1)}${p.step < 3 ? btn('primary', 'next-channel-step', 'Next step') : ''}${btn(p.step === 3 ? 'primary' : '', 'submit-create-channel', 'Create channel', !canCreate)}`)}`, ` data-current-step="${p.step}"`);
 }
 
-export interface ChannelMembersModalProps {
-  org_slug: string;
-  workspace_slug: string;
-  channel_id: string;
-  channel_slug: string;
-  visibility: ChannelVisibility;
-  actor_channel_role: ChannelRole | null;
-  actor_org_role: OrgRole;
-  notify_pref: NotifyPref;
-  members: Array<{ principal_id: string; principal_kind: PrincipalKind; display_name: string; channel_role: ChannelRole; notify_pref: NotifyPref }>;
-  typed_delete_input?: string;
-}
+export interface ChannelMembersModalProps { org_slug: string; workspace_slug: string; channel_id: string; channel_slug: string; visibility: ChannelVisibility; actor_channel_role: ChannelRole | null; actor_org_role: OrgRole; notify_pref: NotifyPref; members: Array<{ principal_id: string; principal_kind: PrincipalKind; display_name: string; channel_role: ChannelRole; notify_pref: NotifyPref }>; typed_delete_input?: string; }
 
-export function renderChannelMembersModal(props: ChannelMembersModalProps): string {
-  const isPrivate = props.visibility === 'private';
-  const canInvite = !isPrivate || props.actor_channel_role === 'owner';
-  const deleteMatches = isTypedDeleteMatch(props.channel_slug, props.typed_delete_input ?? '');
-  const radios = NOTIFY_PREF_OPTIONS.map(
-    (opt) => `<label class="check-field"><input type="radio" name="channel_notify_pref" value="${opt.id}" ${props.notify_pref === opt.id ? 'checked' : ''}><span><strong>${esc(opt.label)} (<code>${opt.id}</code>)</strong> — ${esc(opt.description)}</span></label>`,
-  ).join('');
-  const rows = props.members
-    .map((m) => `<div class="ws-member-row"><span><strong>${esc(m.display_name)}</strong> <span class="badge">${esc(m.channel_role)}</span></span><small class="meta">Notify: ${esc(m.notify_pref)}</small></div>`)
-    .join('');
-
-  return `<section class="spec-card dialog-surface" data-dialog="channel-members-prefs">
-    <div class="dialog-heading"><h2>${isPrivate ? 'Lock' : '#'} ${esc(props.channel_slug)} · Members &amp; Notifications</h2></div>
-    <fieldset class="transfer-fieldset"><legend>Notification preference (<code>all | mentions | mute</code>)</legend>${radios}</fieldset>
-    <div class="ws-member-list">${rows}</div>
-    <div class="ws-add-bar sample-row">
-      <input type="text" id="channel-invite-input" placeholder="Person or agent handle" ${!canInvite ? 'disabled' : ''}>
-      <button type="button" class="button primary" data-action="channel-invite-submit" ${!canInvite ? 'disabled' : ''}>Invite to channel</button>
-    </div>
-    ${isPrivate && !canInvite ? `<p class="dialog-error" role="alert" data-private-owner-gate="blocked">PRIVATE_CHANNEL_OWNER_REQUIRED: Only a live channel <code>owner</code> can invite to a private channel (org role <code>${esc(props.actor_org_role)}</code> cannot self-join or invite).</p>` : ''}
-    <div class="typed-delete-box">
-      <label class="field">Type <code>${esc(props.channel_slug)}</code> to confirm delete<input type="text" value="${esc(props.typed_delete_input ?? '')}"></label>
-      <button type="button" class="button primary danger" data-action="confirm-delete-channel" ${!deleteMatches ? 'disabled' : ''}>Delete #${esc(props.channel_slug)}</button>
-    </div>
-  </section>`;
+export function renderChannelMembersModal(p: ChannelMembersModalProps): string {
+  const isPriv = p.visibility === 'private';
+  const canInvite = !isPriv || p.actor_channel_role === 'owner';
+  const delOk = isTypedDeleteMatch(p.channel_slug, p.typed_delete_input ?? '');
+  const radios = NOTIFY_PREF_OPTIONS.map((o) => rad('channel_notify_pref', o.id, p.notify_pref === o.id, `<strong>${esc(o.label)} (<code>${o.id}</code>)</strong> — ${esc(o.description)}`)).join('');
+  const rows = p.members.map((m) => `<div class="ws-member-row"><span><strong>${esc(m.display_name)}</strong> ${bdg(esc(m.channel_role))}</span><small class="meta">Notify: ${esc(m.notify_pref)}</small></div>`).join('');
+  return dlg('channel-members-prefs', `${isPriv ? 'Lock' : '#'} ${esc(p.channel_slug)} · Members &amp; Notifications`, '', `${fset('Notification preference (<code>all | mentions | mute</code>)', radios)}<div class="ws-member-list">${rows}</div><div class="ws-add-bar sample-row"><input type="text" id="channel-invite-input" placeholder="Person or agent handle" ${dis(!canInvite)}>${btn('primary', 'channel-invite-submit', 'Invite to channel', !canInvite)}</div>${isPriv && !canInvite ? `<p class="dialog-error" role="alert" data-private-owner-gate="blocked">PRIVATE_CHANNEL_OWNER_REQUIRED: Only a live channel <code>owner</code> can invite to a private channel (org role <code>${esc(p.actor_org_role)}</code> cannot self-join or invite).</p>` : ''}<div class="typed-delete-box">${fld(`Type <code>${esc(p.channel_slug)}</code> to confirm delete`, `<input type="text" name="typed_delete_input" data-delete-confirm-target="${esc(p.channel_slug)}" value="${esc(p.typed_delete_input ?? '')}">`)}${btn('primary danger', 'confirm-delete-channel', `Delete #${esc(p.channel_slug)}`, !delOk)}</div>`);
 }
