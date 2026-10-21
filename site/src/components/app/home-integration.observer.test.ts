@@ -127,7 +127,7 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
     let finishBoot!: () => void, boots = 0;
     const pendingBoot = new Promise<void>(resolve => { finishBoot = resolve; });
     const context = createContext({
-      layout: { mounted: false },
+      layout: { mounted: false, refreshTodoContext: (replace: () => void) => replace() },
       one: (selector: string) => nodes.get(selector) ?? null,
       all: (selector: string) => selector.split(',').some(part => part.trim() === '[data-home-route-pane]') ? [pane] : [],
       queueMicrotask: (callback: () => void) => microtasks.push(callback),
@@ -609,7 +609,7 @@ test('an ask card keeps the full sanitized question, links, topic controls and S
   }
 });
 test('the ready To-dos index omits its duplicate card; other routes and unavailable reads keep their honest doors', async () => {
-  const context = createContext({});
+  const context = createContext({ layout: { refreshTodoContext: (replace: () => void) => replace() } });
   runInContext(`
     const slot={}, activeWorkspaceId='W', workspaces=[{id:'W',name:'Home'}], homeRoute={view:'chat'}, sampleMode=false;
     let homeTodosState='ready', homeTodoReceipt=''; const homeObjects={state:'pending'}, files=[], householdConnectionsReadState='pending';
@@ -1118,6 +1118,7 @@ test('accepted agent removals leave every current surface immediately and after 
       replaceHomeRegion: (region: RailNode, _key: string, children: RailNode[]) => region.replaceChildren(...children),
       refreshHomeRailTimes: () => {},
       // Shell placement is unrelated to accepted removal; retain the real rail builder below.
+      layout: { refreshTodoContext: (replace: () => void) => replace() },
       syncVisibleShell: () => {},
       roster: () => new Promise(resolve => { finishRoster = resolve; }),
       homeOverview: () => new Promise(resolve => { finishOverview = resolve; }),
