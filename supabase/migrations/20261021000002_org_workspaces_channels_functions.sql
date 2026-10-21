@@ -26,8 +26,8 @@ BEGIN
       IF NOT pg_try_advisory_xact_lock(20261021, hashtext(OLD.channel_id::text)) OR EXISTS (SELECT 1 FROM signals WHERE channel_id = OLD.channel_id) OR EXISTS (SELECT 1 FROM file_channel_bindings WHERE channel_id = OLD.channel_id) THEN RAISE EXCEPTION 'CHANNEL_HAS_PUBLIC_HISTORY'; END IF;
     END IF;
   ELSIF TG_TABLE_NAME IN ('signals', 'file_channel_bindings') THEN
-    IF TG_OP = 'UPDATE' AND TG_TABLE_NAME = 'file_channel_bindings' AND (NEW.file_id, NEW.workspace_id, NEW.channel_id) IS DISTINCT FROM (OLD.file_id, OLD.workspace_id, OLD.channel_id) THEN
-      RAISE EXCEPTION 'PRIVATE_CHANNEL_CANNOT_BECOME_PUBLIC';
+    IF TG_OP = 'UPDATE' AND TG_TABLE_NAME = 'file_channel_bindings' THEN
+      IF (NEW.file_id, NEW.workspace_id, NEW.channel_id) IS DISTINCT FROM (OLD.file_id, OLD.workspace_id, OLD.channel_id) THEN RAISE EXCEPTION 'PRIVATE_CHANNEL_CANNOT_BECOME_PUBLIC'; END IF;
     END IF;
     IF TG_OP = 'UPDATE' AND OLD.channel_id IS NOT NULL THEN
       PERFORM pg_advisory_xact_lock_shared(20261021, hashtext(OLD.channel_id::text));
