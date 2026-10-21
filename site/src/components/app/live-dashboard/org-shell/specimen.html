@@ -9,9 +9,10 @@
 <a class="skip" href="#main">Skip to main content</a>
 <div class="app" id="app" data-kylon-shell="true">
 <button class="nav-scrim" aria-label="Dismiss navigation" data-action="close-nav" tabindex="-1"></button>
-<nav class="rail" aria-label="Product" data-home-rail-slot>
+<nav class="rail" aria-label="Product">
 <div class="mark" aria-label="CommonSwarm">cs</div>
 <div id="rail-nav" style="display:contents"></div>
+<div data-home-rail-slot hidden></div>
 <div class="rail-bottom" id="dashboard-user-menu" data-user-menu-root>
 <button class="icon-button" aria-label="Settings" data-ic="settings" data-theme-toggle><span class="sr-only" data-theme-toggle-label>Light</span></button>
 <button class="avatar small" aria-label="Account" data-user-menu-trigger>TL</button>
@@ -38,19 +39,21 @@
 <button class="icon-button mobile-menu" aria-label="Open navigation" data-ic="menu" data-action="open-nav" data-home-back aria-controls="sidebar" aria-expanded="false"></button>
 <span class="room-icon" id="room-symbol">#</span>
 <div class="topbar-copy">
-<h1 id="dashboard-channel-title" data-channel-name><span id="hm-ws-title" class="sr-only"></span><span id="hm-phone-title" class="sr-only"></span><span id="screen-title">general</span><span class="badge private-badge" id="priv-badge" hidden>Private</span></h1>
+<span id="hm-ws-title" class="sr-only"></span><span id="hm-phone-title" class="sr-only"></span>
+<h1 id="dashboard-channel-title"><span id="screen-title" data-channel-name>general</span><span class="badge private-badge" id="priv-badge" hidden>Private</span></h1>
 <p class="topic" id="screen-topic" data-channel-description></p>
 <div data-home-channel-menu hidden>
 <button id="hm-channel-menu-trigger" class="sr-only" aria-controls="hm-channel-menu-panel" aria-expanded="false"><span data-channel-menu-label>general</span></button>
-<div id="hm-channel-menu-panel" hidden data-workspace-view="signals" data-channel-place="ch-general" data-channel-filter="all" data-channel-new data-channel-list data-home-workspace-shell="ws-build" data-home-route-pane data-home-catchup data-update-notice data-update-dismiss data-update-reload data-roster-open></div>
+<div id="hm-channel-menu-panel" hidden data-workspace-view="signals" data-channel-place="ch-general" data-channel-filter="all" data-channel-new data-channel-list></div>
 </div>
 </div>
 <div class="topbar-actions" id="topbar-actions">
 <span class="badge good" data-live-chip>Live</span>
-<button class="text-button" data-view="members" data-ic="people"><span>Members</span></button>
+<button class="text-button" data-view="members" data-roster-open data-ic="people"><span>Members</span></button>
 <button class="icon-button" aria-label="Refresh" data-ic="bell" data-refresh></button>
 </div>
 </header>
+<div data-home-workspace-shell="ws-build" hidden></div><section data-home-route-pane hidden></section><div data-home-catchup hidden></div><div data-update-notice hidden><button data-update-dismiss></button><button data-update-reload></button></div>
 <section id="v-chat" class="conversation">
 <div class="messages" id="messages"></div>
 <form class="composer-wrap" id="composer-form">
@@ -78,26 +81,13 @@ const IC = {
   people: 'M9 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-6 9v-2a6 6 0 0 1 12 0v2m1-15a3 3 0 0 1 0 6m2 3a5 5 0 0 1 3 4v2',
   book: 'M12 6c-3-2-6-2-9-1v14c3-1 6-1 9 1 3-2 6-2 9-1V5c-3-1-6-1-9 1Zm0 0v14',
   settings: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm0-11v2m0 12v2M5.6 5.6l1.4 1.4m10 10 1.4 1.4M4 12h2m12 0h2M5.6 18.4 7 17m10-10 1.4-1.4',
-  bell: 'M5 17h14l-2-3V9a5 5 0 0 0-10 0v5Zm5 3h4', menu: 'M4 6h16M4 12h16M4 18h16',
-  close: 'm6 6 12 12M6 18 18 6', check: 'm5 12 5 5L20 7',
-  doc: 'M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Zm0 0v6h6M8 13h8M8 17h5',
-  send: 'm3 4 18 8-18 8 3-8Zm3 8h15', at: 'M11 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm4-8v7c0 3 6 1 6-4a9 9 0 1 0-3 8',
-  lock: 'M7 10h10a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Zm1 0V7a4 4 0 0 1 8 0v3m-4 4v3'
+  bell: 'M5 17h14l-2-3V9a5 5 0 0 0-10 0v5Zm5 3h4', menu: 'M4 6h16M4 12h16M4 18h16', close: 'm6 6 12 12M6 18 18 6', check: 'm5 12 5 5L20 7',
+  doc: 'M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Zm0 0v6h6M8 13h8M8 17h5', send: 'm3 4 18 8-18 8 3-8Zm3 8h15',
+  at: 'M11 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm4-8v7c0 3 6 1 6-4a9 9 0 1 0-3 8', lock: 'M7 10h10a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Zm1 0V7a4 4 0 0 1 8 0v3m-4 4v3'
 };
 const LOGO = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23697344'/><path d='M10 9l6 7 6-7M16 16v7' stroke='%23fff' stroke-width='2.4' fill='none'/></svg>";
-const ORGS = [
-  ['yulan', 'Yulan Ventures', 'Owner', LOGO, 'YV', [['commonswarm-build', 'CommonSwarm Build', 'Owner', 1], ['operations', 'Operations', 'Owner', 1], ['advisory', 'Customer Advisory', 'Open', 0]], 4],
-  ['household', 'Langridge Household', 'Admin', 0, 'LH', [['family-hub', 'Family Hub', 'Admin', 1]], 1],
-  ['ridge-studio', 'Ridge Partner Studio', 'Member', 0, 'RP', [['design-systems', 'Design Systems', 'Member', 1]], 0],
-  ['external-review', 'External Design Review', 'Guest', 0, 'ED', [['shared-review', 'Shared Review Room', 'Guest', 1]], 0]
-];
-const CHANNELS = [
-  ['general', 0, 0, 'Shared coordination', ['Top-left switcher', 4]],
-  ['design', 0, 3, 'Kylon geometry', 0],
-  ['releases', 0, 0, 'Release readiness', 0],
-  ['sec-incident', 1, 1, 'Private · Invited only', ['Grant audit', 2]],
-  ['board-prep', 1, 0, 'Private · Q4 notes', 0]
-];
+const ORGS = [['yulan', 'Yulan Ventures', 'Owner', LOGO, 'YV', [['commonswarm-build', 'CommonSwarm Build', 'Owner', 1], ['operations', 'Operations', 'Owner', 1], ['advisory', 'Customer Advisory', 'Open', 0]], 4], ['household', 'Langridge Household', 'Admin', 0, 'LH', [['family-hub', 'Family Hub', 'Admin', 1]], 1], ['ridge-studio', 'Ridge Partner Studio', 'Member', 0, 'RP', [['design-systems', 'Design Systems', 'Member', 1]], 0], ['external-review', 'External Design Review', 'Guest', 0, 'ED', [['shared-review', 'Shared Review Room', 'Guest', 1]], 0]];
+const CHANNELS = [['general', 0, 0, 'Shared coordination', ['Top-left switcher', 4]], ['design', 0, 3, 'Kylon geometry', 0], ['releases', 0, 0, 'Release readiness', 0], ['sec-incident', 1, 1, 'Private · Invited only', ['Grant audit', 2]], ['board-prep', 1, 0, 'Private · Q4 notes', 0]];
 const ROSTER = [['Tom Langridge', 'TL', 'Person', 'Owner'], ['HezLead', 'HL', 'Agent', 'Admin'], ['Argon', 'AR', 'Agent', 'Member'], ['Codex Sol', 'CS', 'Agent', 'Member'], ['External Reviewer', 'ER', 'Person', 'Guest']];
 let cO = 'yulan', cW = 'commonswarm-build', cC = 'general', cM = 'chat', cF = 'all', mF = 'all', popId = null, popTrig = null;
 const $ = (s) => document.querySelector(s), $$ = (s) => [...document.querySelectorAll(s)], cap = (s) => s[0].toUpperCase() + s.slice(1);
@@ -110,15 +100,8 @@ $('#phone-nav').innerHTML = [...NAVS.map(([v]) => v), 'settings'].map((v) => btn
 $$('button:not([type])').forEach((b) => (b.type = 'button'));
 $$('[data-ic]').forEach((el) => el.insertAdjacentHTML(el.dataset.ic === 'chevron' ? 'beforeend' : 'afterbegin', ic(el.dataset.ic)));
 const gO = () => ORGS.find((o) => o[0] === cO) || ORGS[0], gW = () => gO()[5].find((w) => w[0] === cW) || gO()[5][0], gC = () => CHANNELS.find((c) => c[0] === cC) || CHANNELS[0];
-const lgH = (o, sz) => {
-  const c = sz === 32 ? '' : 'cs-org-logo--24';
-  return o[3] ? `<span class="cs-org-logo ${c}" role="img" aria-label="${o[1]} logo"><img class="cs-org-logo__img" src="${o[3]}" alt="${o[1]} logo" width="${sz}" height="${sz}"/></span>` : `<span class="cs-org-logo-placeholder logo-placeholder ${c}" role="img" aria-label="${o[1]} logo — click to upload">${o[4]}</span>`;
-};
-const rId = () => {
-  const o = gO(), w = gW();
-  $('#logo-slot').innerHTML = lgH(o, 32); $('#org-name').textContent = o[1]; $('#org-role').textContent = o[2]; $('#workspace-label').textContent = w[1];
-  $('#org-trigger').setAttribute('aria-expanded', popId === 'org-menu'); $('#workspace-trigger').setAttribute('aria-expanded', popId === 'workspace-menu');
-};
+const lgH = (o, sz) => o[3] ? `<span class="cs-org-logo ${sz === 32 ? '' : 'cs-org-logo--24'}" role="img" aria-label="${o[1]} logo"><img class="cs-org-logo__img" src="${o[3]}" alt="${o[1]} logo" width="${sz}" height="${sz}"/></span>` : `<span class="cs-org-logo-placeholder logo-placeholder ${sz === 32 ? '' : 'cs-org-logo--24'}" role="img" aria-label="${o[1]} logo — click to upload">${o[4]}</span>`;
+const rId = () => { const o = gO(), w = gW(); $('#logo-slot').innerHTML = lgH(o, 32); $('#org-name').textContent = o[1]; $('#org-role').textContent = o[2]; $('#workspace-label').textContent = w[1]; $('#org-trigger').setAttribute('aria-expanded', popId === 'org-menu'); $('#workspace-trigger').setAttribute('aria-expanded', popId === 'workspace-menu'); };
 const rSb = () => {
   const o = gO(), sc = $('#sidebar-content'), pane = (h, l, b) => `<div class="pane-heading"><h2>${h}</h2>${btn(`class="icon-button" aria-label="${l}"`, ic('plus'))}</div>${b}`;
   if (cM === 'members') {
@@ -127,11 +110,7 @@ const rSb = () => {
   } else if (cM === 'wiki') {
     sc.innerHTML = pane('Knowledge', 'Draft knowledge', `<nav>${[['Design-principles.md', 'v2', 1], ['Working-agreements.md', 'v1', 0]].map(([t, v, c]) => btn(`class="nav-row"${c ? ' aria-current="page"' : ''}`, `${ic('book')}<span>${t}</span><span class="count">${v}</span>`)).join('')}</nav>`);
   } else {
-    const rows = CHANNELS.filter((c) => cF === 'all' ? true : cF === 'unread' ? c[2] > 0 : c[1]).map((c) => {
-      const cur = c[0] === cC, u = c[2] > 0 ? `<span class="count cs-unread-pill">${c[2]}</span>` : '';
-      const th = cur && c[4] ? `<div class="cs-channel-threads">${btn('class="cs-thread-row"', `<span>${c[4][0]}</span><small class="meta">${c[4][1]} replies</small>`)}</div>` : '';
-      return `<div>${btn(`class="nav-row" data-channel="${c[0]}" ${cur ? 'aria-current="page"' : ''}`, `<span class="cs-channel-prefix">${c[1] ? ic('lock') : '#'}</span><span>${c[0]}</span>${u}`)}${th}</div>`;
-    }).join('');
+    const rows = CHANNELS.filter((c) => cF === 'all' ? true : cF === 'unread' ? c[2] > 0 : c[1]).map((c) => `<div>${btn(`class="nav-row" data-channel="${c[0]}" ${c[0] === cC ? 'aria-current="page"' : ''}`, `<span class="cs-channel-prefix">${c[1] ? ic('lock') : '#'}</span><span>${c[0]}</span>${c[2] > 0 ? `<span class="count cs-unread-pill">${c[2]}</span>` : ''}`)}${c[0] === cC && c[4] ? `<div class="cs-channel-threads">${btn('class="cs-thread-row"', `<span>${c[4][0]}</span><small class="meta">${c[4][1]} replies</small>`)}</div>` : ''}</div>`).join('');
     sc.innerHTML = pane('Chat', 'Create channel', `<div class="filters">${pills('channel-filter', ['all', 'unread', 'private'], cF)}</div><div class="section-heading"><span>Channels</span></div><nav>${rows}${o[2] !== 'Guest' ? btn('class="nav-row"', `${ic('plus')}<span>+ New Channel</span>`) : ''}</nav>`);
   }
 };
@@ -151,8 +130,7 @@ const rMn = () => {
 const clP = (restore = false) => {
   if (!popId) return;
   $('#org-menu').hidden = $('#workspace-menu').hidden = true;
-  const t = popTrig; popId = popTrig = null; rId();
-  if (restore && t) t.focus();
+  const t = popTrig; popId = popTrig = null; rId(); if (restore && t) t.focus();
 };
 const opP = (id, trig, last = false) => {
   const o = gO(), w = gW();
@@ -162,8 +140,7 @@ const opP = (id, trig, last = false) => {
   t.innerHTML = id === 'org-menu'
     ? `<p class="cs-popover-heading">Organizations</p><div>${ORGS.map((x) => mi(`data-org-select="${x[0]}" data-org-unread-count="${x[6]}"`, `${lgH(x, 24)}<span class="copy"><strong>${x[1]}</strong><small>${x[2]} · ${x[5].length} ws</small></span><span class="badge">${x[2]}</span>${x[6] > 0 ? `<span class="count cs-unread-pill">${x[6]}</span>` : ''}${x[0] === o[0] ? ic('check') : ''}`, x[0] === o[0])).join('')}</div><hr/><div>${mi('data-view="members"', 'Organization Members')}${mi('data-view="settings"', 'Organization Settings / Logo')}${mi('data-action="new-org"', '+ New Organization')}</div>`
     : `<p class="cs-popover-heading">Workspaces in ${o[1]}</p><div>${(o[2] === 'Guest' ? o[5].filter((x) => x[3]) : o[5]).map((x) => mi(`data-ws-select="${x[0]}"`, `<span>${x[1]}</span><span class="badge">${x[2]}</span>${x[0] === w[0] ? ic('check') : ''}`, x[0] === w[0])).join('')}</div><hr/>${mi('data-view="members"', 'Workspace Members')}${o[2] !== 'Guest' ? mi('data-action="new-workspace"', '+ New Workspace') : ''}`;
-  t.hidden = false;
-  const r = trig.getBoundingClientRect();
+  t.hidden = false; const r = trig.getBoundingClientRect();
   t.style.left = Math.max(12, r.left) + 'px'; t.style.top = (r.bottom + 6) + 'px';
   const items = $$('#' + id + ' button');
   (last ? items.at(-1) : t.querySelector('[aria-checked="true"]') || items[0])?.focus();
@@ -197,11 +174,7 @@ document.addEventListener('keydown', (e) => {
   if (popId) {
     const items = $$('#' + popId + ' button'), idx = items.indexOf(document.activeElement);
     if (e.key === 'Escape' || e.key === 'Tab') { e.preventDefault(); return clP(true); }
-    if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) {
-      e.preventDefault();
-      items[e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1 : (idx + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length]?.focus();
-      return;
-    }
+    if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) { e.preventDefault(); items[e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1 : (idx + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length]?.focus(); return; }
   }
   const trig = e.target.closest?.('#org-trigger, #workspace-trigger');
   if (trig && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) { e.preventDefault(); return opP(trig.id === 'org-trigger' ? 'org-menu' : 'workspace-menu', trig, e.key === 'ArrowUp'); }
