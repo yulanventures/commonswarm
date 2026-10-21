@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CommonSwarm · Slice 5 Org Members, Workspaces &amp; Channel Dialogs</title><link rel="stylesheet" href="./org-dialogs.css"></head>
+<body>
+<div class="app-shell" id="specimen-app">
+<nav class="rail" aria-label="Product navigation"><div class="mark">cs</div><button class="icon-button" aria-label="Chat">#</button><button class="icon-button" aria-label="Members" aria-current="page">P</button><button class="icon-button" aria-label="Wiki">W</button><button class="icon-button" aria-label="Connections">C</button><div class="rail-bottom"><span class="avatar small">TL</span></div></nav>
+<aside class="sidebar" id="roster-sidebar" aria-label="Unified organization roster">
+<div class="identity">
+<button class="org-button" data-specimen-screen="workspace-move-logo"><span class="logo-placeholder">Y</span><strong>Yulan Ventures</strong><span class="badge good" style="margin-left:auto">Owner</span></button>
+<button class="workspace-button" data-specimen-screen="workspace-move-logo"><span>Workspace: <strong>Operations (yulan/ops)</strong></span></button>
+</div>
+<div class="pane-heading"><h2>Members &amp; Agents</h2><div class="creation-menu-wrap"><button class="icon-button" id="creation-menu-btn" aria-label="Add menu">+</button><div class="creation-menu-popover" id="creation-menu-popover" hidden role="menu"><button role="menuitem"><strong>New Agent</strong><small class="meta">Name, specialty, runtime &amp; model</small></button><button role="menuitem"><strong>Invite a Person</strong><small class="meta">Org role &amp; workspace grants</small></button><button role="menuitem"><strong>Connect an Existing Agent</strong><small class="meta">Standing MCP or CLI identity</small></button></div></div></div>
+<div class="sample-row" style="margin-bottom:8px"><button class="button primary">+ Invite Person</button><button class="button">+ Connect / Grant Agent</button></div>
+<div class="filters" role="toolbar" aria-label="Roster filter tabs"><button data-roster-filter="all" aria-pressed="true">All (4)</button><button data-roster-filter="people" aria-pressed="false">People (2)</button><button data-roster-filter="agents" aria-pressed="false">Agents (2)</button><button data-roster-filter="guests" aria-pressed="false">Guests (1)</button><button data-roster-filter="invites" aria-pressed="false">Pending Invites (1)</button></div>
+<div class="roster-list" id="roster-list" role="list"></div>
+<div class="sidebar-parity-footer"><small class="meta">MCP / CLI Parity</small><code>cswarm org member add @argon-lead --org yulan --role admin</code><code>cswarm workspace grant @argon-lead --workspace yulan/ops --role admin</code></div>
+</aside>
+<main class="main-area" id="main-area">
+<header class="topbar">
+<div><h1>Organization Members &amp; Workspace Grants</h1><p class="meta">Yulan Ventures (<code>yulan</code>) · Workspace <code>yulan/ops</code> · 4-tier org roles + Kylon unified roster</p></div>
+<div class="specimen-tabs" role="tablist"><button class="button" data-specimen-screen="members" aria-pressed="true">1. Org Members</button><button class="button" data-specimen-screen="workspace-move-logo" aria-pressed="false">2. Workspace &amp; Logo</button><button class="button" data-specimen-screen="private-channel" aria-pressed="false">3. Private Channel</button><button class="button" data-specimen-screen="approval-refusal" aria-pressed="false">4. Approvals &amp; Refusals</button></div>
+</header>
+<section class="page-content" id="screen-members"><div class="profile" id="member-detail-container"></div></section>
+<section class="page-content" id="screen-workspace-move-logo" hidden><div class="dialog-grid">
+<section class="spec-card dialog-surface" data-dialog="move-workspace">
+<div class="dialog-heading"><h2>Move Workspace · Operations (<code>yulan/ops</code>)</h2><span class="badge">org_move_workspace</span></div>
+<p class="meta">Requires live <strong>Owner</strong> role in source (<code>yulan</code>) and destination (<code>household</code>) orgs.</p>
+<label class="field">Destination organization<select><option selected>Langridge Household (household) · Owner</option><option>Partner Sandbox · Not Owner (blocked)</option></select></label>
+<fieldset class="transfer-fieldset"><legend>Member &amp; agent transfer mode (<code>transfer_members</code>)</legend>
+<label class="check-field"><input type="radio" name="spec_transfer_mode" value="all"><span><strong>Transfer all (<code>all</code>)</strong> — grants destination org memberships and preserves grants &amp; seats.</span></label>
+<label class="check-field"><input type="radio" name="spec_transfer_mode" value="owners_only" checked><span><strong>Transfer owners only (<code>owners_only</code>)</strong> — only destination org Owners keep access.</span></label>
+</fieldset>
+<div class="notice"><strong>Non-transferred principals lose grants and active seats immediately</strong><p>Non-transferred principals (3 principals, 2 active seats) lose <code>workspace_principal_grants</code> and <code>channel_memberships</code> and close active seats in <code>ops</code>; history is preserved.</p><code>cswarm workspace move yulan/ops --to-org household --transfer-members owners_only</code></div>
+<div class="actions"><button class="button">Cancel</button><button class="button primary">Move Workspace</button></div>
+</section>
+<section class="spec-card dialog-surface" data-dialog="org-logo-upload">
+<div class="dialog-heading"><h2>Organization Logo · Yulan Ventures</h2><span class="badge">64 / 128 / 256px</span></div>
+<p class="meta">Magic-byte PNG, JPEG, WebP, or sanitized SVG (<code>&lt;= 1 MB</code>). Live <code>Owner | Admin</code> required.</p>
+<div class="logo-dropzone"><strong>Drop PNG, JPEG, WebP, or SVG (&lt;= 1 MB)</strong><small class="meta">Strips <code>&lt;script&gt;</code> &amp; external refs and generates square renditions.</small></div>
+<div class="logo-rendition-grid">
+<div class="logo-rendition-box"><div class="logo-rendition-frame" style="width:32px;height:32px">Y</div><small class="meta">64×64</small><code>orgs/org-1/logo/64.webp</code></div>
+<div class="logo-rendition-box"><div class="logo-rendition-frame" style="width:48px;height:48px">Y</div><small class="meta">128×128</small><code>orgs/org-1/logo/128.webp</code></div>
+<div class="logo-rendition-box"><div class="logo-rendition-frame" style="width:68px;height:68px">Y</div><small class="meta">256×256</small><code>orgs/org-1/logo/256.webp</code></div>
+</div>
+<h3>Workspace Members · Operations (<code>yulan/ops</code>)</h3>
+<div class="ws-member-row"><div class="ws-member-copy"><strong>Argon Lead <span class="badge">Agent</span> <span class="badge">Admin</span></strong><small class="meta">Active seat <code>seat-1a</code> closes immediately on workspace removal</small></div><button class="button danger">Remove from Workspace</button></div>
+</section>
+</div></section>
+<section class="page-content" id="screen-private-channel" hidden><div class="dialog-grid">
+<section class="spec-card dialog-surface" data-dialog="create-channel">
+<div class="dialog-heading"><h2>Create Channel in Operations</h2><span class="badge good">PRIVATE_CHANNELS_ENABLED: true</span></div>
+<div class="step-progress" role="group"><button class="step-pill active">Step 1 · Visibility</button><button class="step-pill">Step 2 · Name &amp; Guidelines</button><button class="step-pill">Step 3 · Members &amp; Agents</button></div>
+<label class="visibility-option"><input type="radio" name="spec_ch_vis" value="workspace"><div><strong># Public Workspace Channel (<code>visibility="workspace"</code>)</strong><p class="meta">Open to every human and agent in <code>yulan/ops</code>.</p></div></label>
+<label class="visibility-option selected"><input type="radio" name="spec_ch_vis" value="private" checked><div><strong>Lock Private Channel (<code>visibility="private"</code>, <code>join_policy="invite_only"</code>)</strong><p class="meta">Joined-room boundary: messages, files (<code>file_channel_bindings</code>), search, and wakes restricted to invited members.</p></div></label>
+<div class="notice"><strong>Channel Owner Invite Rule &amp; One-Way Privacy</strong><p>Private channels require an explicit channel <code>owner</code> invite (non-member Org/Workspace Owners &amp; Admins cannot read or self-join) and <strong>cannot flip to public later</strong> (<code>PRIVATE_CHANNEL_CANNOT_BECOME_PUBLIC</code>).</p></div>
+<label class="field">Step 2 — Channel slug &amp; guidelines<input type="text" value="sec-incident"></label>
+<div class="check-field"><input type="checkbox" checked><span>Step 3 — Include <strong>Argon Lead</strong> (<code>ag-1</code>) &amp; <strong>HezLead</strong> (<code>ag-2</code>)</span></div>
+<div class="actions"><button class="button">Back</button><button class="button">Next</button><button class="button primary">Create Private Channel</button></div>
+</section>
+<section class="spec-card dialog-surface" data-dialog="channel-members-prefs">
+<div class="dialog-heading"><h2>Lock sec-incident · Members &amp; Notifications</h2><span class="badge">Private · Channel Owner</span></div>
+<fieldset class="transfer-fieldset"><legend>Notification Preferences (<code>all | mentions | mute</code>)</legend>
+<label class="check-field"><input type="radio" name="spec_notify" value="all" checked><span><strong>All activity (<code>all</code>)</strong> — every signal &amp; reply</span></label>
+<label class="check-field"><input type="radio" name="spec_notify" value="mentions"><span><strong>Mentions only (<code>mentions</code>)</strong> — direct @mentions &amp; approvals</span></label>
+<label class="check-field"><input type="radio" name="spec_notify" value="mute"><span><strong>Mute (<code>mute</code>)</strong> — suppress push wakes</span></label>
+</fieldset>
+<div class="ws-member-list">
+<div class="ws-member-row"><span><strong>Tom Langridge</strong> <span class="badge">Person</span> <span class="badge good">Channel Owner</span></span><small class="meta">Can invite</small></div>
+<div class="ws-member-row"><span><strong>Argon Lead</strong> <span class="badge">Agent</span> <span class="badge">Member</span></span><small class="meta">Owner: Tom · Notify: all</small></div>
+</div>
+<div class="typed-delete-box"><label class="field">Typed Delete Confirmation — type <code>sec-incident</code><input type="text" value="sec-incident"></label><button class="button primary danger">Delete Private Channel</button></div>
+</section>
+</div></section>
+<section class="page-content" id="screen-approval-refusal" hidden><div class="dialog-grid">
+<article class="spec-card dialog-surface" data-dialog="inline-approval-card">
+<div class="dialog-heading"><div><h2>Owner Approval Request · <code>org_move_workspace</code></h2><p class="meta">Requested by <strong>Argon Lead</strong> (<code>ag-1</code>) for owner <strong>Tom Langridge</strong></p></div><span class="badge good">PENDING</span></div>
+<dl class="approval-dl"><dt>Action</dt><dd>Grant workspace access &amp; promote agent in <code>yulan/ops</code></dd><dt>Target scope</dt><dd><code>org=yulan · workspace=ops · principal=ag-2</code></dd><dt>Approver</dt><dd>Organization Owner (<code>u-owner</code>)</dd><dt>Policy</dt><dd>No session timeout · instant backend revocation if rejected</dd></dl>
+<div class="parity-command-box">
+<div class="parity-row"><span class="meta">CLI confirm</span><code>cswarm org confirm appr_01jb8x9k2m</code><button class="button">Copy CLI</button></div>
+<div class="parity-row"><span class="meta">MCP tool</span><code>org_confirm_action {"approval_id":"appr_01jb8x9k2m","decision":"approve"}</code><button class="button">Copy MCP</button></div>
+</div>
+<div class="sample-row"><button class="button primary">Approve</button><button class="button danger">Reject</button></div>
+</article>
+<aside class="notice spec-card" role="alert" data-dialog="actionable-refusal-card" style="margin:0">
+<div class="dialog-heading"><strong>Actionable Refusal · <code>AMBIGUOUS_WORKSPACE_SELECTOR</code></strong><span class="badge">missing: org_qualifier</span></div>
+<p>Bare selector <code>workspace="ops"</code> matched multiple orgs. Qualify with <code>&lt;org&gt;/&lt;workspace&gt;</code> or open remedy URL:</p>
+<p style="margin-top:6px"><a href="https://commonswarm.com/app/yulan/ops">https://commonswarm.com/app/yulan/ops</a></p>
+<div class="parity-command-box">
+<div class="parity-row"><span class="meta">MCP tool</span><code>cswarm_list_workspaces</code><button class="button">Copy MCP</button></div>
+<div class="parity-row"><span class="meta">CLI command</span><code>cswarm check --workspace yulan/ops</code><button class="button">Copy CLI</button></div>
+</div>
+<small class="meta">Reachable workspace choices:</small>
+<div class="sample-row" style="margin-top:6px"><button class="button"><code>yulan/ops</code></button><button class="button"><code>household/ops</code></button></div>
+</aside>
+</div></section>
+</main>
+</div>
+<script>
+const ROSTER=[
+{id:'ag-1',k:'agent',n:'Argon Lead',h:'@argon-lead (ag-1)',i:'AL',r:'Admin',s:'Architecture & UI verification',o:'Tom Langridge (u-owner)',seat:'seat-1a (yulan/ops)',ws:['Operations (Admin · seat-1a)','Product (Member)'],other:'Langridge Household (household): Member'},
+{id:'u-owner',k:'user',n:'Tom Langridge',h:'@tom (u-owner)',i:'TL',r:'Owner',s:'Founder & Organization Owner',o:'Direct human account',seat:null,ws:['Operations (Owner)','Product (Owner)'],other:'Langridge Household (household): Owner'},
+{id:'ag-2',k:'agent',n:'HezLead',h:'@hezlead (ag-2)',i:'HL',r:'Member',s:'Infrastructure & release ops',o:'Tom Langridge (u-owner)',seat:'seat-1b (yulan/product)',ws:['Operations (Member)','Product (Member · seat-1b)'],other:'Langridge Household (household): Guest'},
+{id:'u-guest',k:'user',n:'External Auditor',h:'@auditor (u-guest)',i:'EA',r:'Guest',s:'Scoped security guest',o:'Explicit grant only',seat:null,ws:['Operations (Guest)'],other:'None'},
+{id:'inv-1',k:'user',n:'alex@yulanventures.com',h:'Pending Invite',i:'AX',r:'Member',s:'Pending org invite',o:'Invited by Tom',seat:null,ws:['Operations (on accept)'],other:'None',inv:true}
+];
+let flt='all',sel='ag-1';
+function render(){
+const items=ROSTER.filter(m=>flt==='people'?(!m.inv&&m.k==='user'):flt==='agents'?(!m.inv&&m.k==='agent'):flt==='guests'?(!m.inv&&m.r==='Guest'):flt==='invites'?Boolean(m.inv):!m.inv);
+document.getElementById('roster-list').innerHTML=items.map(m=>`<button class="member-row" data-select-member="${m.id}" aria-current="${m.id===sel}"><span class="avatar ${m.k==='agent'?'agent':''}">${m.i}</span><span class="member-row-copy"><strong>${m.n} <span class="badge ${m.r==='Owner'?'good':''}">${m.r}</span></strong><small>${m.k==='agent'?'Agent':'Person'} · ${m.s}${m.seat?' · '+m.seat:''}</small></span></button>`).join('');
+const m=ROSTER.find(x=>x.id===sel)||ROSTER[0],ag=m.k==='agent';
+document.getElementById('member-detail-container').innerHTML=`<div class="profile-heading"><span class="avatar ${ag?'agent':''}">${m.i}</span><div class="profile-identity"><div class="profile-title-row"><h2>${m.n}</h2><span class="badge">${ag?'Agent':'Person'}</span><span class="badge ${m.r==='Owner'?'good':''}">${m.r}</span>${m.seat?`<span class="badge good">Active seat · ${m.seat}</span>`:''}</div><p class="meta">${m.h} · ${m.s}</p></div><button class="button">Message</button></div><div class="filters" role="tablist"><button aria-pressed="true">Profile &amp; Workspace Grants</button><button aria-pressed="false">Skills &amp; CLI Parity</button></div><dl class="profile-dl"><dt>Organization Role</dt><dd><select class="role-select">${['Owner','Admin','Member','Guest'].map(r=>`<option ${m.r===r?'selected':''}>${r}</option>`).join('')}</select> <small class="meta">4-tier org role in Yulan Ventures (<code>yulan</code>)</small></dd><dt>Workspace Grants</dt><dd><div class="ws-chip-list">${m.ws.map(w=>`<span class="ws-chip"><span>${w}</span><button class="ws-chip-remove">×</button></span>`).join('')}</div><div class="ws-grant-add-row"><select class="ws-select"><option>Research Lab (yulan/research)</option></select><button class="button">+ Add to workspace</button></div></dd><dt>Owner Connection</dt><dd>${m.o} · ${ag?'Inherits live owner access unless explicitly revoked; explicit org/workspace revocation overrides owner inheritance.':'Direct human sign-in'}</dd><dt>Multi-Org Identity</dt><dd><span class="badge">${m.other}</span></dd></dl><div class="notice"><strong>Revocation scope &amp; active seat cascade</strong><p>Removing this agent from the workspace closes its active seat in this workspace; removing from the organization revokes all workspaces, channels, and seats in this org.</p></div><div class="sample-row"><button class="button danger">Remove from Workspace (yulan/ops)</button><button class="button primary danger">Remove from Organization</button></div>`;
+}
+function setScreen(s){
+['members','workspace-move-logo','private-channel','approval-refusal'].forEach(k=>{const el=document.getElementById('screen-'+k);if(el)el.hidden=(k!==s);});
+document.querySelectorAll('.specimen-tabs [data-specimen-screen]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.specimenScreen===s)));
+}
+document.addEventListener('click',e=>{
+const b=e.target.closest('button');if(!b)return;
+if(b.id==='creation-menu-btn'){const p=document.getElementById('creation-menu-popover');p.hidden=!p.hidden;return;}
+if(b.dataset.rosterFilter){flt=b.dataset.rosterFilter;document.querySelectorAll('[data-roster-filter]').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));render();return;}
+if(b.dataset.selectMember){sel=b.dataset.selectMember;setScreen('members');render();return;}
+if(b.dataset.specimenScreen)setScreen(b.dataset.specimenScreen);
+});
+window.addEventListener('hashchange',()=>{const h=location.hash.slice(1);if(h)setScreen(h);});
+render();if(location.hash.slice(1))setScreen(location.hash.slice(1));
+</script>
+</body>
+</html>
