@@ -122,7 +122,8 @@ test(`${lane}: preparation refuses a changed local validator`, async () => {
 test(`${lane}: H0=1 requires emitted controls; explicit H0=0 omits them`, async () => {
   const original = JSON.parse(await readFile(join(await artifactDir(), 'BUILD.json'), 'utf8'));
   assert.equal(original.h0, '1', 'supply the approved H0=1 real build for this regression');
-  await prepare('h0-control');
+  const enabled = await prepare('h0-control');
+  assert.match(await readFile(join(enabled, 'SITE-DIRECT.sh'), 'utf8'), /PASS deploy revision=[0-9a-f]{40} H0=1\\n/);
   for (const variant of ['data-h0-link-join', 'mint-join', 'revoke-join', 'all', 'disabled-present', 'disabled-absent']) {
     const run = prepare(`h0-${variant}`, async dir => {
       const tree = join(dir, 'html'); await mkdir(tree);
@@ -148,9 +149,33 @@ test(`${lane}: H0=1 requires emitted controls; explicit H0=0 omits them`, async 
       receipt.artifact = hash(await readFile(join(dir, 'site.tar'))); receipt.html['app/index.html'] = hash(html);
       await writeFile(join(dir, 'BUILD.json'), JSON.stringify(receipt));
     });
-    if (variant === 'disabled-absent') await run;
-    else await assert.rejects(run, (error: unknown) => {
+    if (variant === 'disabled-absent') {
+      const disabled = await run;
+      assert.match(await readFile(join(disabled, 'SITE-DIRECT.sh'), 'utf8'), /PASS deploy revision=[0-9a-f]{40} H0=0\\n/);
+    } else await assert.rejects(run, (error: unknown) => {
       assert.match((error as { stderr: string }).stderr, /Refusing site artifact: built H0=[01] controls mismatch:/); return true;
+    });
+  }
+});
+
+test(`${lane}: packet rendering rejects unknown placeholders including digits`, async () => {
+  await prepare('placeholder-control');
+  for (const placeholder of ['UNKNOWN', 'UNKNOWN0']) {
+    await assert.rejects(prepare(`placeholder-${placeholder}`, async dir => {
+      const template = (await readFile(join(dir, 'finalize-release.sh'), 'utf8')) + `\n# @@${placeholder}@@\n`;
+      await chmod(join(dir, 'finalize-release.sh'), 0o600);
+      await writeFile(join(dir, 'finalize-release.sh'), template);
+      // Rebind through the real receipt CLI so provenance cannot mask rendering.
+      const source = await readFile(join(dir, 'source.tar'));
+      const paths = ['site/package-lock.json', 'deploy/site/build-artifact.sh', 'deploy/site/validate-site-env.mjs', 'deploy/site/finalize-release.sh'];
+      const entries = await Promise.all(paths.map(async path => tarMember(path, path.endsWith('/finalize-release.sh') ? Buffer.from(template) : await readFile(join(repo, path)))));
+      await chmod(join(dir, 'source.tar'), 0o600);
+      await writeFile(join(dir, 'source.tar'), Buffer.concat([source.subarray(0, 1024), ...entries, tarEnd]));
+      const receipt = JSON.parse(await readFile(join(dir, 'BUILD.json'), 'utf8'));
+      await rm(join(dir, 'BUILD.json'));
+      await exec(process.execPath, [validator, 'receipt', dir, receipt.revision, receipt.image]);
+    }), (error: unknown) => {
+      assert.match((error as { stderr: string }).stderr, /Refusing site artifact: template placeholder/); return true;
     });
   }
 });
@@ -203,7 +228,7 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
       if (['success', 'closed-pipe', 'missing-old', 'unchanged-unhealthy'].includes(variant)) {
         const completed = await run();
         assert.equal(completed.stdout, ''); assert.equal(completed.stderr, '');
-        assert.match(await readFile(join(packet, 'hostrun.log'), 'utf8'), /PASS deploy/);
+        assert.match(await readFile(join(packet, 'hostrun.log'), 'utf8'), /PASS deploy revision=[0-9a-f]{40} H0=1\n/);
         const current = await readlink(join(site, 'current')); assert.notEqual(current, 'releases/old');
         assert.equal(await readFile(join(site, 'current/_astro/retained.js'), 'utf8'), 'old asset');
         if (variant === 'missing-old') {
