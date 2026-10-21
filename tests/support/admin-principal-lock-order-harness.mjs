@@ -906,7 +906,7 @@ export async function assertActiveFloorCatalog(sql) {
       if(acl.can_read!==['authenticated','swarm_read'].includes(role) || acl.can_write || acl.can_mutate)
         throw new Error('active_catalog_view_effective_acl');
     }
-    return {functions:expected.size,migrations:migrations.length,view_columns:columns.length,
+    return {functions:expected.size,migrations:migrations.length,migration_names:[...migrations],view_columns:columns.length,
       measured_view_sha256:createHash('sha256').update(view.body).digest('hex')};
   });
 }
@@ -967,17 +967,45 @@ export async function runScenario(target, scenario, timeoutMs = 170_000, generat
       '--allow-read', '--allow-env', '--allow-net', fileURLToPath(import.meta.url), configPath, scenario],
     { cwd: REPO_ROOT, env, stdio: ['ignore', 'pipe', 'ignore'] });
     let stdout = '';
+    let oversized = false;
+    const outputLimit = 1024 * 1024;
     child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stdout.on('data', (chunk) => {
+      if (Buffer.byteLength(stdout) + Buffer.byteLength(chunk) > outputLimit) { oversized = true; child.kill('SIGKILL'); }
+      else if (!oversized) stdout += chunk;
+    });
     const exit = await new Promise((resolve) => {
       const timer = setTimeout(() => { child.kill('SIGKILL'); }, timeoutMs);
       child.on('error', () => { clearTimeout(timer); resolve({code:null,signal:'spawn_error'}); });
       child.on('close', (code, signal) => { clearTimeout(timer); resolve({ code, signal }); });
     });
-    const line = stdout.split('\n').reverse().find((entry) => entry.startsWith('LOCK_ORDER_RESULT '));
-    if (exit.code !== 0 || exit.signal !== null || line === undefined) return { scenario, stage: 'process_failed', exit_code: exit.code, signal: exit.signal,
-      ...(scenario==='floor-first-use-vs-head-revocation' ? {required_compatibility:'BLOCKED',floor_compatibility:'INCONCLUSIVE'} : {}) };
-    const result = JSON.parse(line.slice('LOCK_ORDER_RESULT '.length));
+    const lines = stdout.split('\n').filter(entry => entry.startsWith('LOCK_ORDER_RESULT '));
+    let result, invalid = oversized ? 'oversize_result' : lines.length !== 1 ? 'missing_or_duplicate_result' : null;
+    if (!invalid) {
+      try {
+        result = JSON.parse(lines[0].slice('LOCK_ORDER_RESULT '.length));
+        if (!result || typeof result !== 'object' || Array.isArray(result) || result.scenario !== scenario
+          || typeof result.stage !== 'string' || !new Set(['blocker', 'complete', 'config', 'control-timeout', 'creator-inserts', 'creator-stream', 'deadlock-timeout', 'fixture', 'golden-calls', 'golden-fixture', 'holder-rows', 'holder-waits-for-stream', 'import', 'min-client-version', 'park-creation', 'park-first-admin', 'park-holder', 'park-second-admin', 'race', 'release', 'sqlstate-capture-control', 'warm-up', 'writes']).has(result.stage)
+          || !Number.isSafeInteger(result.http_refused) || result.http_refused < 0
+          || (result.error !== undefined && (typeof result.error !== 'string'
+            || !(new Set(['EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EPIPE', 'ETIMEDOUT', 'active_floor_chain_binding', 'active_floor_first_owned_queue_inconclusive', 'active_floor_principal_control', 'active_floor_renew_control', 'active_floor_root_use', 'active_floor_second_owned_queue_inconclusive', 'active_floor_successor_use', 'admin_consent_refused', 'admin_extra_consent_refused', 'admin_grant_refused', 'allow_foreign_fixture', 'allow_other_workspace_fixture', 'allow_principal_control', 'allow_provision_control', 'allow_retirement_control', 'allow_workspace_not_reached', 'alone_claim_setup', 'budget_successor_control', 'compat_old_wire_mint', 'compat_principal_control', 'compat_silent_renewal_control', 'creation_did_not_park', 'deadlock_timeout_not_below_lock_timeout', 'delegated_child_read_control', 'delegated_create_control', 'delegated_provision_control', 'first_admin_did_not_park', 'fixture_endpoint_not_127_0_0_1', 'floor_C_use', 'floor_T_use', 'floor_X_issue', 'floor_module_missing', 'floor_owned_X_queue_inconclusive', 'floor_principal_setup', 'floor_real_chain_binding', 'golden_claim_failed', 'golden_local_principal_refused', 'head_owned_C_not_held_inconclusive', 'head_owned_X_queue_inconclusive', 'higher_parent_not_parked', 'historical_catalog_changed', 'hosted_capability_refused', 'invitation_refused', 'issuer_artifact_setup', 'issuer_membership_contract', 'issuer_parent_not_reached', 'issuer_rollback_parent_not_reached', 'issuer_session_identity', 'issuer_set_role', 'issuer_unrelated_role_admitted', 'join_credential_mint_refused', 'last_budget_control', 'legal_used_child_control', 'native_parent_share_control', 'non_sql', 'permanent_actual_first_use', 'permanent_create_control', 'permanent_ordinary_mint', 'post_rollback_control', 'prefix_capability_setup', 'prefix_first_owned_G_queue_inconclusive', 'prefix_genuine_grant_setup', 'prefix_management_positive', 'prefix_second_owned_U_W_S_queue_inconclusive', 'provider_revoke_queue_inconclusive', 'race_timeout', 'resume_current_use_control', 'resume_first_use_control', 'resume_human_principal_control', 'resume_legal_delegated_mint', 'resume_middle_use_control', 'resume_ordinary_mint', 'resume_successor_control', 'resume_workspace_not_parked', 'same_owner_G1_queue_inconclusive', 'second_active_family_control', 'second_admin_did_not_park', 'sides_did_not_reach_barrier', 'sqlstate_capture_control_failed', 'target_not_loopback', 'terminal_actual_first_use', 'test_hook_set', 'ungranted_residual_runtime_control', 'unknown_scenario']).has(result.error) || /^[0-9A-Z]{5}$/u.test(result.error))))) invalid = 'malformed_result';
+      } catch { invalid = 'malformed_result'; }
+    }
+    if (exit.code !== 0 || exit.signal !== null || invalid || result.stage !== 'complete' || result.error !== undefined) {
+      // Retain only fixed protocol codes. Never retain stdout, stderr or target config.
+      const diagnostic = { scenario, stage: invalid ? 'process_failed' : result.stage,
+        error: invalid ?? result.error ?? 'process_failed',
+        sqlstate: !invalid && /^[0-9A-Z]{5}$/u.test(result.error ?? '') ? result.error : null,
+        exit_code: exit.code, signal: exit.signal };
+      const evidence = join(REPO_ROOT, 'scratchpad', 'server-harness-evidence');
+      mkdirSync(evidence, {recursive:true,mode:0o700});
+      const privateDir = join(evidence, randomUUID());
+      mkdirSync(privateDir, {mode:0o700});
+      writeFileSync(join(privateDir,'lock-result.json'), JSON.stringify(diagnostic), {mode:0o600,flag:'wx'});
+      // A child that failed after setting complete must never pass the parent stage assertion.
+      return { ...diagnostic, stage: diagnostic.stage === 'complete' ? 'process_failed' : diagnostic.stage,
+        ...(scenario==='floor-first-use-vs-head-revocation' ? {required_compatibility:'BLOCKED',floor_compatibility:'INCONCLUSIVE'} : {}) };
+    }
     process.stdout.write(`ACTIVE_FLOOR_SOURCE ${JSON.stringify({scenario,source:result.source,read_source:result.read_source})}\n`);
     return adminIssuance === null ? result : { ...result, admin_issuance: adminIssuance };
   } finally {
