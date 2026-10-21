@@ -32,9 +32,12 @@ const fixtureScript = `
     while (!predicate() && performance.now() < deadline) await new Promise(resolve => requestAnimationFrame(resolve));
     if (!predicate()) throw Error(label + ': ' + JSON.stringify({ width: innerWidth, height: innerHeight, fonts: document.fonts.status,
       phoneMedia: matchMedia('(max-width:52rem)').matches, scheme: getComputedStyle(app).getPropertyValue('--k-shell-scheme'), modal: app.querySelector('dialog')?.open,
-      standalone: frame.hasAttribute('data-home-standalone'), field: app.querySelector('[data-todo-comment]')?.outerHTML,
+      standalone: frame.hasAttribute('data-home-standalone'), active: document.activeElement?.outerHTML,
+      field: app.querySelector('[data-todo-comment]')?.outerHTML,
       context: { headerParent: slot.parentElement?.className, railParent: context.parentElement?.tagName,
-        sideParent: fixture.side?.parentElement?.tagName, summaries: [...app.querySelectorAll('.cs-todo-context summary')].map(node => node.textContent) } }));
+        sideParent: fixture.side?.parentElement?.tagName, summaries: [...app.querySelectorAll('.cs-todo-context summary')].map(node => ({
+          text: node.textContent, open: node.parentElement.open, focused: document.activeElement === node,
+        })) } }));
   };
   let todoAccountParent, tagDelivers, contextHomes, contextListeners, contextInventory;
   const visible = node => !!node?.getClientRects().length && !node.closest('[hidden],[inert]');
@@ -463,7 +466,11 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
   };
   const key = async (name: "Tab" | "Escape" | "ArrowDown" | "Enter") => {
     const code = { Tab: 9, Escape: 27, ArrowDown: 40, Enter: 13 }[name];
-    for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: name, code: name, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code });
+    for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", {
+      type, key: name, code: name, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code,
+      // Native Enter produces a character event; disclosures activate on that event.
+      ...(name === "Enter" && type === "keyDown" ? { text: String.fromCharCode(13), unmodifiedText: String.fromCharCode(13) } : {}),
+    });
   };
   await send("Emulation.setFocusEmulationEnabled", { enabled: true });
   const nativeTab = async (query: string, label: string) => {
