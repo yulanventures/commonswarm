@@ -2,6 +2,7 @@
  * Input: membership/overview facts; output: view models. DOM builders never interpret wire facts. */
 import { homeAgentState, type HomeAgentStatusInput } from "./agent-status";
 import { agentLabel, firstNames, initials, formatWhen, personTint } from "./home-names";
+import { greetingName } from "./greeting-name";
 import { foldIdentityName } from "./identity-label";
 import { disambiguateVisibleLabels } from "./home-visible-labels";
 import { groupParticipantsByOwner, type RailAgent, type RailMember } from "./participant-rail";
@@ -322,7 +323,7 @@ export function mapCatchUp(data: readonly CatchUpData[], _viewerId: string | nul
   return { emptySummary: checked < checks.length
       ? `Checked ${checked} of ${checks.length} ${checks.length === 1 ? "workspace" : "workspaces"}.`
       : complete ? null : checks.length ? `Checked ${checked} of ${checks.length} ${checks.length === 1 ? "workspace" : "workspaces"}.` : "Latest",
-    sample, viewerFirstName: viewerName.trim().split(/\s+/)[0] || "there", now: new Date(now).toISOString(), needsYouExpanded: expanded,
+    sample, viewerFirstName: greetingName(null, viewerName), now: new Date(now).toISOString(), needsYouExpanded: expanded,
     needsYou: data.flatMap(entry => detailNeeds(entry)), latest,
     workspaces: data.map(entry => ({ ...entry.workspace, href: routeHref({ view: "chat", workspaceId: entry.workspace.id }), state: entry.state,
       capsules: entry.detail?.people.groups ?? [], peopleSummary: entry.detail ? catchUpPeopleSummary(entry.detail.people.groups.map(group => group.person)) : "",

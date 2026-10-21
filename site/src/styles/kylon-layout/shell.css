@@ -1,0 +1,79 @@
+/* Original shell layout. All appearance stays under the explicit component root.
+   Host nodes retain their own classes, handlers, state and scroll ownership. */
+.cs-ui.cs-org-shell {
+  display: grid; grid-template-columns: 52px var(--cs-list-width) minmax(0, 1fr);
+  inline-size: 100%; block-size: 100%; min-inline-size: 0; min-block-size: 0;
+  overflow: hidden; background: var(--cs-surface); color: var(--cs-ink);
+}
+.cs-ui.cs-org-shell .cs-org-rail {
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  min-block-size: 0; padding: 10px 4px; border-inline-end: 1px solid var(--cs-line);
+  background: var(--cs-surface);
+}
+.cs-ui.cs-org-shell .cs-org-brand { display: grid; place-items: center; min-block-size: 36px; inline-size: 44px; flex: none; }
+.cs-ui.cs-org-shell .cs-org-products { display: flex; flex-direction: column; align-items: center; gap: 4px; min-block-size: 0; }
+.cs-ui.cs-org-shell .cs-org-product {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  inline-size: 44px; min-block-size: 44px; padding: 10px; flex: none;
+  border: 0; border-radius: var(--cs-radius-row); color: var(--cs-secondary);
+  background: transparent; text-decoration: none; cursor: pointer; font: inherit;
+}
+.cs-ui.cs-org-shell .cs-org-product:hover { background: var(--cs-subtle); color: var(--cs-ink); }
+.cs-ui.cs-org-shell .cs-org-product[aria-current="page"] { color: var(--cs-ink); background: var(--cs-selected); }
+.cs-ui.cs-org-shell .cs-org-product:disabled { color: var(--cs-muted); cursor: default; }
+.cs-ui.cs-org-shell .cs-org-product-label { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.cs-ui.cs-org-shell .cs-org-rail-account { margin-block-start: auto; padding-block-start: 8px; }
+.cs-ui.cs-org-shell .cs-org-account-slot { flex: none; }
+.cs-ui.cs-org-shell .cs-org-context-parking { min-inline-size: 0; min-block-size: 0; border-inline-end: 1px solid var(--cs-line); }
+.cs-ui.cs-org-shell .cs-org-context {
+  display: flex; flex-direction: column; gap: 16px; block-size: 100%; min-block-size: 0;
+  min-inline-size: 0; padding: 16px; background: var(--cs-surface);
+}
+.cs-ui.cs-org-shell .cs-org-identity {
+  display: flex; align-items: center; gap: 10px; min-inline-size: 0; inline-size: 100%;
+  min-block-size: 48px; padding: 0; flex: none; border: 0; border-radius: 6px;
+  background: transparent; color: var(--cs-ink); font: inherit; text-align: start;
+}
+.cs-ui.cs-org-shell button.cs-org-identity { cursor: pointer; padding: 6px; margin: -6px; inline-size: calc(100% + 12px); }
+.cs-ui.cs-org-shell button.cs-org-identity:hover { background: var(--cs-subtle); }
+.cs-ui.cs-org-shell .cs-org-logo {
+  display: grid; place-items: center; inline-size: 32px; block-size: 32px; flex: none;
+  border: 1px solid var(--cs-line); border-radius: 8px; color: var(--cs-secondary);
+}
+.cs-ui.cs-org-shell .cs-org-identity-copy { display: grid; gap: 3px; min-inline-size: 0; overflow-wrap: anywhere; }
+.cs-ui.cs-org-shell .cs-org-identity-copy strong { font-size: 13px; font-weight: 600; line-height: 1.45; }
+.cs-ui.cs-org-shell .cs-org-identity-copy small { color: var(--cs-secondary); font-size: 12px; line-height: 1.5; }
+.cs-ui.cs-org-shell .cs-org-context-scroll { display: contents; }
+.cs-ui.cs-org-shell .cs-org-context-body { flex: 1; min-block-size: 0; min-inline-size: 0; overflow: hidden; }
+.cs-ui.cs-org-shell .cs-org-context-body[data-scroll="pane"] { overflow: auto; }
+.cs-ui.cs-org-shell .cs-org-workspace { display: flex; flex-direction: column; min-inline-size: 0; min-block-size: 0; overflow: hidden; }
+.cs-ui.cs-org-shell .cs-org-main-slot { flex: 1; min-inline-size: 0; min-block-size: 0; overflow: hidden; }
+.cs-ui.cs-org-shell :is(.cs-org-phone-bar, .cs-org-drawer-heading, .cs-org-phone-products, .cs-org-drawer-account) { display: none; }
+.cs-ui.cs-org-shell .cs-org-drawer { padding: 0; border: 0; margin: 0; color: var(--cs-ink); background: var(--cs-surface); }
+.cs-ui.cs-org-shell .cs-org-drawer::backdrop { background: #28272050; }
+@media (max-width: 52rem) {
+  .cs-ui.cs-org-shell { display: flex; flex-direction: column; }
+  .cs-ui.cs-org-shell :is(.cs-org-rail, .cs-org-context-parking) { display: none; }
+  .cs-ui.cs-org-shell .cs-org-workspace { flex: 1; }
+  .cs-ui.cs-org-shell .cs-org-phone-bar {
+    display: flex; align-items: center; gap: 8px; flex: none; min-block-size: 64px;
+    padding: 8px; border-block-end: 1px solid var(--cs-line); background: var(--cs-surface);
+  }
+  .cs-ui.cs-org-shell .cs-org-phone-title { flex: 1; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; font-weight: 600; }
+  .cs-ui.cs-org-shell .cs-org-drawer[open] {
+    display: flex; position: fixed; inset: 0 auto 0 0; inline-size: min(390px, calc(100vw - 24px));
+    block-size: 100dvh; max-inline-size: none; max-block-size: none; overflow: hidden;
+    border-inline-end: 1px solid var(--cs-line); box-shadow: var(--cs-shadow-popover);
+  }
+  .cs-ui.cs-org-shell .cs-org-context { gap: 12px; padding: 12px; inline-size: 100%; }
+  .cs-ui.cs-org-shell .cs-org-context-scroll { display: flex; flex-direction: column; flex: 1; gap: 12px; min-block-size: 0; overflow: auto; }
+  .cs-ui.cs-org-shell .cs-org-context-scroll > :is(.cs-org-identity-slot, .cs-org-phone-products, .cs-org-context-body) { flex: none; }
+  .cs-ui.cs-org-shell .cs-org-context-body[data-scroll] { overflow: visible; }
+  .cs-ui.cs-org-shell .cs-org-drawer-heading { display: flex; align-items: center; gap: 8px; justify-content: space-between; flex: none; }
+  .cs-ui.cs-org-shell .cs-org-drawer-heading h2 { margin: 0; font: inherit; font-size: 13px; font-weight: 600; }
+  .cs-ui.cs-org-shell .cs-org-phone-products { display: block; flex: none; }
+  .cs-ui.cs-org-shell .cs-org-phone-products .cs-org-products { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
+  .cs-ui.cs-org-shell .cs-org-phone-products .cs-org-product { inline-size: 100%; justify-content: start; min-inline-size: 44px; padding: 8px; font-size: 12px; }
+  .cs-ui.cs-org-shell .cs-org-phone-products .cs-org-product-label { position: static; inline-size: auto; block-size: auto; overflow: visible; clip-path: none; white-space: normal; text-align: start; overflow-wrap: anywhere; }
+  .cs-ui.cs-org-shell .cs-org-drawer-account { display: flex; flex: none; justify-content: end; border-block-start: 1px solid var(--cs-line); padding-block-start: 8px; }
+}

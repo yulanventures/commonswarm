@@ -1,0 +1,95 @@
+/* Real app mount: preserve the original feed, account, panes and route handlers. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] {
+  grid-row: 3;
+  --home-font-body: var(--k-shell-font);
+  --home-font-display: var(--k-shell-font);
+  --home-canvas: var(--k-shell-surface);
+  --home-card: var(--k-shell-surface);
+  --home-rail-bg: var(--k-shell-surface);
+  --home-rail-raised: var(--k-shell-hover);
+  --home-rail-text: var(--k-shell-secondary);
+  --home-rail-strong: var(--k-shell-ink);
+  --home-rail-muted: var(--k-shell-muted);
+  --home-focus-ring: var(--k-shell-ring);
+  --home-accent-text: var(--cs-accent-hover);
+  --home-capsule: var(--k-shell-selected);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame.hm-frame.hm-frame {
+  grid-template-columns: minmax(0, 1fr) minmax(16rem, 18rem);
+  max-block-size: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame > .hm-frame__rail { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame > .hm-frame__main { grid-column: 1; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame > :is(.hm-frame__side, .hm-frame__profile) { grid-column: 2; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame.hm-frame.hm-frame:is(.hm-frame--catchup, .hm-frame--agent, .hm-frame--people, .hm-frame--todo, .hm-frame--add-agent) {
+  grid-template-columns: minmax(0, 1fr);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame:is(.hm-frame--catchup, .hm-frame--agent, .hm-frame--people, .hm-frame--todo, .hm-frame--add-agent) > .hm-frame__side { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame--catchup .hm-frame__main { background: var(--k-shell-surface); }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context { padding: 12px; gap: 12px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame__rail-content { block-size: 100%; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail { padding: 0; gap: 16px; font-family: var(--k-shell-font); }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__brand { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__catch-up { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__workspaces > .hm-rail__heading {
+  position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__people:has(.hm-rail__people-list:empty) { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-rail :is(a, button):focus-visible { outline-offset: 1px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__nav { max-block-size: 45%; gap: 12px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__heading { font-size: 12px; font-weight: 500; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-rail__name, .hm-rail__status, .hm-rail__link) { font-size: 13px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-rail__person, .hm-rail__agent) { min-block-size: 36px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__new { font-size: 13px; border-radius: 6px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-kylon-brand { display: grid; place-items: center; inline-size: 44px; block-size: 44px; border-radius: 8px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .dashboard__rail-foot { position: relative; padding: 0; border: 0; background: transparent; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .dashboard__user-trigger {
+  display: grid; place-items: center; inline-size: 44px; block-size: 44px; min-block-size: 44px;
+  padding: 10px; border: 1px solid var(--cs-line); border-radius: 50%; background: var(--cs-subtle); color: var(--cs-ink);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .dashboard__user-trigger :is(.dashboard__user-trigger-brand, .dashboard__user-trigger-name, .dashboard__user-trigger-mark) { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .dashboard__user-trigger > svg { display: block; inline-size: 20px; block-size: 20px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .dashboard__user-menu {
+  position: fixed; inset: auto auto 12px 56px; inline-size: min(280px, calc(100vw - 72px)); max-block-size: calc(100dvh - 24px); overflow-y: auto; z-index: 100;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .dashboard__user-menu-account { display: block; font-size: 12px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-kylon-workspace-menu { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-phone-title > .hm-phone-bar__title {
+  margin: 0; padding: 0; font: inherit; color: inherit; line-height: inherit;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup-card {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px 16px;
+  min-block-size: 88px; padding: 16px 4px; border: 0; border-block-end: 1px solid var(--k-shell-line); border-radius: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup-card-capsules { max-inline-size: 210px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup-card-foot { grid-column: 1 / -1; padding: 0; border: 0; margin: 0; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-capsule { background: var(--k-shell-selected); }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup-needs .hm-needs-you { background: var(--k-shell-subtle); }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-needs-you[data-needs-rank="first"] .hm-button[data-primary="true"] {
+  background: var(--cs-accent); color: var(--cs-on-accent); border-radius: 6px; box-shadow: none;
+}
+@media (width <= 1399px) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame.hm-frame.hm-frame { grid-template-columns: minmax(0, 1fr); }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame > .hm-frame__side { display: none; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame > .hm-frame__profile { grid-column: 1; z-index: 10; justify-self: end; inline-size: min(22rem, 100%); }
+}
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context-scroll { padding: 4px; scroll-padding: 4px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-phone-products .cs-org-product:focus-visible { outline-offset: 2px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-kylon-workspace-menu { display: block; flex: none; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-kylon-workspace-menu .hm-menu__trigger { min-inline-size: 44px; min-block-size: 44px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame__rail-content { display: flex; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context-body .hm-rail { overflow: visible; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__nav { max-block-size: none; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-rail__people, .hm-rail__workspace-list) { overflow: visible; max-block-size: none; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-rail__person, .hm-rail__agent) { min-block-size: 44px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-phone-bar { display: none; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell [data-home-phone-nav] { display: none; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup-header { padding-inline-end: 0; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .dashboard__user-menu { position: absolute; inset: calc(100% + 8px) 0 auto auto; inline-size: min(280px, calc(100vw - 16px)); }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer[open] .dashboard__user-menu { inset: auto 0 calc(100% + 8px) auto; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup-card { grid-template-columns: minmax(0, 1fr); }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup-card-capsules { max-inline-size: 100%; }
+}

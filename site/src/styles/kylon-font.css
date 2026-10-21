@@ -1,0 +1,13 @@
+/* App-only font opt-in. Unmodified Inter 4.001; OFL in /fonts/OFL-Inter.txt. */
+@font-face {
+  font-family: "CommonSwarm Inter";
+  src: url("/fonts/inter-latin.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+live-dashboard.dashboard[data-kylon-shell] {
+  --k-shell-font: "CommonSwarm Inter", "InterVariable", Inter, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", sans-serif;
+}

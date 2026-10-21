@@ -1,0 +1,23 @@
+/* Existing workspace summary, permissions and actions; quiet contextual rows. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame__side {
+  background: var(--k-shell-surface); border-inline-start-color: var(--k-shell-line);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-side {
+  gap: 20px; padding: 20px 16px; color: var(--k-shell-ink);
+  font-family: var(--k-shell-font); font-size: 13px; line-height: 1.55;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-side-card {
+  padding: 0 0 16px; border: 0; border-block-end: 1px solid var(--k-shell-line);
+  border-radius: 0; background: transparent; box-shadow: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-side-card[data-side-card="shared"]::before { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-side-card__title, .hm-side-card__title-link, .hm-side-entry > .hm-side-link) {
+  color: var(--k-shell-ink); font-family: var(--k-shell-font); font-size: 14px; font-weight: 600; line-height: 1.5;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-side-card__empty, .hm-side-card__line) {
+  color: var(--k-shell-secondary); font-size: 13px; line-height: 1.55;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-side-entry > .hm-side-link { padding-inline: 0; border-radius: 6px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-side-button, .hm-side-link) {
+  min-block-size: 44px; font-family: var(--k-shell-font); font-size: 13px; border-radius: 6px;
+}
