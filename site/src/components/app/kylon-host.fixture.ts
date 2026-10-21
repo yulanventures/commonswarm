@@ -6,11 +6,21 @@ import { build } from "esbuild";
 const siteRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const setupScript = `
 (() => {
-  const { createKylonHost, projectHomeLayout, buildPhoneTopBar, buildWorkspaceHeader, buildWorkspaceNav, replaceHomeRegion } = KylonHostFixture;
+  const { createKylonHost, projectHomeLayout, buildPhoneTopBar, buildWorkspaceHeader, buildWorkspaceNav, replaceHomeRegion, renderPeopleDialog } = KylonHostFixture;
   const app = document.querySelector('live-dashboard'), frame = app.querySelector('.hm-frame');
   const context = app.querySelector('[data-home-rail-slot]'), account = app.querySelector('[data-user-menu-root]');
   const frameParent = frame.parentElement, contextParent = context.parentElement;
+  const frameNext = frame.nextSibling, contextNext = context.nextSibling, accountNext = account.nextSibling;
   const accountParent = account.parentElement, slot = app.querySelector('[data-home-workspace-shell]');
+  // Observe registrations on genuine held MediaQueryLists; all operations still use native APIs/events.
+  const mediaQueries = [], nativeMatchMedia = window.matchMedia.bind(window);
+  window.matchMedia = query => {
+    const media = nativeMatchMedia(query), listeners = new Set();
+    const add = media.addEventListener.bind(media), remove = media.removeEventListener.bind(media);
+    media.addEventListener = (type, listener, options) => { if (type === 'change') listeners.add(listener); add(type, listener, options); };
+    media.removeEventListener = (type, listener, options) => { if (type === 'change') listeners.delete(listener); remove(type, listener, options); };
+    mediaQueries.push({ media, listeners }); return media;
+  };
   const calls = [], workspace = { id: 'fixture-w', name: 'Invented workspace', todosAvailable: true };
   const host = createKylonHost(app, href => calls.push({ kind: 'navigate', href }));
   const chat = { view: 'chat', workspaceId: workspace.id };
@@ -29,11 +39,47 @@ const setupScript = `
   let bar, menu, heading;
   function renderHeader() {
   bar = buildPhoneTopBar(document, vm, callbacks);
-  menu = bar.querySelector('.hm-menu'); heading = bar.querySelector('h1');
+  menu = bar.querySelector('.hm-menu'); heading = bar.querySelector('.hm-phone-bar__title');
   host.replaceHeader(() => replaceHomeRegion(slot, "shell", [bar, buildWorkspaceHeader(document, vm, callbacks), buildWorkspaceNav(document, vm, callbacks, "tablet")]));
   }
+  // Actual page builder and actual projection; invented read-only data/local query callbacks.
+  // This is physical host ownership coverage, not a router, sign-in or backend fixture.
+  const pane = app.querySelector('[data-home-route-pane]'); pane.className = 'hm-route-pane';
+  const detail = document.createElement('section'); detail.className = 'pd-detail'; detail.id = 'pd-detail';
+  detail.dataset.peopleDetail = ''; detail.hidden = true; detail.setAttribute('aria-labelledby', 'pd-detail-title');
+  const peopleState = { selected: null, collapsed: new Set(), showAllAttention: false, query: '', filter: 'all' };
+  const peopleModel = { sample: true, workspaceName: workspace.name, pendingFailed: false, invites: [],
+    people: [{ id: 'fixture-person', name: 'Invented Person', role: 'owner', own: true, mayRemove: false }],
+    agents: [{ id: 'fixture-agent', name: 'Invented Agent', ownerId: 'fixture-person', ownerName: 'Invented Person', model: null,
+      app: null, hosted: false, status: { kind: 'idle', label: 'Idle', attention: false, sentence: 'Invented local idle state.' },
+      receive: null, lastActive: 'Not reported', technical: [], updateAvailable: false, access: null, accessReadState: 'pending',
+      key: null, liveKey: false, own: true, mayManage: false, receipt: '' }] };
+  let roster = null, homeParent = null, homeNext = null, priorHidden = false;
+  function renderPeople() {
+    host.peopleContext(null);
+    renderPeopleDialog(pane, detail, peopleModel, peopleState, {
+      render: renderPeople, action: () => { throw new Error('read-only fixture action'); },
+      saveModel: async () => { throw new Error('read-only fixture save'); }, confirm: () => { throw new Error('read-only fixture confirm'); },
+    }, { layout: 'page', page: { homeLabel: workspace.name, homeHref: '?w=fixture-w', workspacesHref: '?v=catchup',
+      onQuery(value) { peopleState.query = value; calls.push({ kind: 'people-query', value }); renderPeople(); } } });
+    roster = pane.querySelector('[data-people-context]'); homeParent = roster.parentNode; homeNext = roster.nextSibling;
+    host.peopleContext(roster);
+  }
+  const people = {
+    mount(hidden = false) {
+      peopleState.query = ''; peopleState.selected = null; peopleState.filter = 'all';
+      priorHidden = hidden; context.hidden = hidden; vm.contextTitle = true; frame.classList.add('hm-frame--people');
+      renderHeader(); host.sync(project({ view: 'people', workspaceId: workspace.id })); renderPeople();
+    },
+    render: renderPeople,
+    clear() { host.peopleContext(null); host.sync(project(chat)); frame.classList.remove('hm-frame--people'); vm.contextTitle = false; renderHeader(); },
+    get roster() { return roster; }, get search() { return roster.querySelector('.pd-page-search'); },
+    get homeParent() { return homeParent; }, get homeNext() { return homeNext; },
+    get priorHidden() { return priorHidden; }, detail, state: peopleState,
+  };
   renderHeader(); host.sync(project(chat));
-  window.hostFixtureData = { app, frame, context, account, frameParent, contextParent, accountParent, slot, calls, host, workspace, chat, project, renderHeader, get bar() { return bar; }, get menu() { return menu; }, get heading() { return heading; } };
+  window.hostFixtureData = { app, frame, context, account, frameParent, contextParent, accountParent, frameNext, contextNext, accountNext,
+    slot, calls, host, workspace, chat, project, renderHeader, people, mediaQueries, get bar() { return bar; }, get menu() { return menu; }, get heading() { return heading; } };
 })();`;
 
 export async function kylonHostFixture(observe: string): Promise<string> {
@@ -43,8 +89,10 @@ export async function kylonHostFixture(observe: string): Promise<string> {
     export { projectHomeLayout } from './src/lib/kylon-shell/projection.ts';
     export { buildPhoneTopBar, buildWorkspaceHeader, buildWorkspaceNav } from './src/lib/home-shell.ts';
     export { replaceHomeRegion } from './src/lib/home-focus.ts';
+    export { renderPeopleDialog } from './src/lib/people-dialog-view.ts';
     import './src/styles/tokens.css'; import './src/styles/home/index.css';
-    import './src/styles/kylon-shell.css'; import './src/styles/kylon-layout/index.css';` } });
+    import './src/styles/kylon-shell.css'; import './src/styles/kylon-layout/index.css';
+    import './src/styles/kylon-people.css';` } });
   const js = bundle.outputFiles.find(file => file.path.endsWith(".js"))?.text;
   const css = bundle.outputFiles.find(file => file.path.endsWith(".css"))?.text;
   if (!js || !css) throw new Error("actual host/CSS bundle missing");

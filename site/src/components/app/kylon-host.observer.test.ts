@@ -19,6 +19,26 @@ const fixtureScript = `
   const check = (name, pass, detail) => checks.push({ name, pass: !!pass, detail });
   const renderHeader = () => { fixture.renderHeader(); ({ bar, menu, heading } = fixture); };
   const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  let heldSearch = null, releasedPeople = null;
+  const listeners = () => fixture.mediaQueries.reduce((count, query) => count + query.listeners.size, 0);
+  const peopleFacts = () => ({ width: innerWidth, phone: matchMedia('(max-width:52rem)').matches,
+    rosterParent: fixture.people.roster?.parentElement?.className, navHidden: context.hidden,
+    active: document.activeElement?.outerHTML, accountParent: account.parentElement?.className,
+    dialog: { open: app.querySelector('dialog')?.open, modal: app.querySelector('dialog')?.matches(':modal') },
+    inert: [...app.querySelectorAll('[inert]')].map(node => node.className), listeners: listeners() });
+  const until = async (condition, label) => {
+    const deadline = performance.now() + 2000;
+    while (!condition()) {
+      if (performance.now() >= deadline) throw new Error(label + ': ' + JSON.stringify(peopleFacts()));
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  };
+  const peopleUnique = () => {
+    const ids = [...app.querySelectorAll('[id]')].map(node => node.id);
+    return ids.length === new Set(ids).size && app.querySelectorAll('[data-people-context]').length === 1 &&
+      app.querySelectorAll('.pd-page-search').length === 1 && app.querySelectorAll('.pd-person-disclosure').length === 1 &&
+      app.querySelectorAll('.pd-agent-disclosure').length === 1 && app.querySelectorAll('[data-user-menu-root]').length === 1;
+  };
   const sameNodes = () => frame === app.querySelector('.hm-frame') && context === app.querySelector('[data-home-rail-slot]') && account === app.querySelector('[data-user-menu-root]');
   const inertRestored = () => [...app.querySelector('.cs-org-shell').children].every(node => !node.inert);
   function docked() {
@@ -119,6 +139,66 @@ const fixtureScript = `
     check('header refresh preserves unrelated account popup and focus', !unrelated.hidden && document.activeElement === option);
     unrelated.hidden = true;
   },
+  async peopleStart(hidden) {
+    fixture.people.mount(hidden); ({ bar, menu, heading } = fixture); heldSearch = null;
+    await this.peoplePlaced(1471, false);
+    check('People registers one native responsive owner', listeners() === 2, peopleFacts());
+    check('People main keeps actual detail host and context heading once', fixture.people.detail.closest('[data-people-page]') &&
+      app.querySelectorAll('#pd-page-title').length === 1 && heading.tagName === 'P', peopleFacts());
+    fixture.people.roster.querySelector('.pd-page-back').focus();
+  },
+  async peopleTyped() {
+    await until(() => fixture.people.state.query === 'Invented' && document.activeElement === fixture.people.search, 'native search input and actual rerender');
+    check('native search reached actual query callback', calls.some(call => call.kind === 'people-query' && call.value === 'Invented'), peopleFacts());
+  },
+  peopleHold() {
+    const node = fixture.people.search;
+    heldSearch = { node, value: node.value, start: node.selectionStart, end: node.selectionEnd };
+    check('native caret selection exists before relocation', document.activeElement === node && node.value === 'Invented' &&
+      node.selectionStart === 5 && node.selectionEnd === 6, { value: node.value, start: node.selectionStart, end: node.selectionEnd });
+  },
+  async peoplePlaced(width, hold = true) {
+    const phone = width <= 832, p = fixture.people;
+    await until(() => innerWidth === width && matchMedia('(max-width:52rem)').matches === phone &&
+      p.roster.parentNode === (phone ? p.homeParent : app.querySelector('.cs-org-context-body')) && !app.querySelector('dialog').open && inertRestored(), 'actual People relocation at ' + width);
+    const facts = peopleFacts();
+    check('People owns one real roster/account/context at ' + width, peopleUnique() && sameNodes() &&
+      context.hidden === (phone ? p.priorHidden : true) && p.detail.closest('[data-people-page]') &&
+      account.closest(phone ? '.cs-org-phone-account' : '.cs-org-rail-account'), facts);
+    if (phone) check('phone roster returns to exact page anchor at ' + width, p.roster.nextSibling === p.homeNext, facts);
+    if (hold) check('relocation retains real search focus/value/caret at ' + width, !!heldSearch && p.search === heldSearch.node &&
+      document.activeElement === heldSearch.node && p.search.getClientRects().length > 0 && !p.search.closest('[hidden],[inert]') && p.search.value === heldSearch.value &&
+      p.search.selectionStart === heldSearch.start && p.search.selectionEnd === heldSearch.end, facts);
+  },
+  peopleRefresh() {
+    const p = fixture.people, previous = p.roster, detail = p.detail;
+    renderHeader();
+    check('header refresh leaves held People search and caret untouched', p.search === heldSearch.node && document.activeElement === p.search &&
+      p.search.selectionStart === heldSearch.start && p.search.selectionEnd === heldSearch.end, peopleFacts());
+    p.render();
+    check('actual roster refresh releases previous generation without duplicates', !previous.isConnected && p.roster !== previous && peopleUnique() &&
+      p.detail === detail && p.search.value === 'Invented' && document.activeElement === p.search, peopleFacts());
+    heldSearch = null;
+  },
+  peopleDrawer() {
+    const p = fixture.people, dialog = app.querySelector('dialog');
+    check('native drawer keeps phone roster in page and account in modal', dialog.matches(':modal') &&
+      p.roster.parentNode === p.homeParent && !dialog.contains(p.roster) && dialog.contains(account) &&
+      dialog.contains(document.activeElement) && peopleUnique(), peopleFacts());
+  },
+  peopleClear() {
+    const p = fixture.people;
+    p.clear(); ({ bar, menu, heading } = fixture);
+    releasedPeople = { node: p.roster, parent: p.homeParent, next: p.homeNext, hidden: p.priorHidden };
+    check('leave People restores exact anchor and original nav hidden state', p.roster.parentNode === p.homeParent &&
+      p.roster.nextSibling === p.homeNext && context.hidden === p.priorHidden && !app.querySelector('.cs-org-shell').hasAttribute('data-people-composition') &&
+      listeners() === 1, peopleFacts());
+  },
+  async peopleReleased(width) {
+    await until(() => innerWidth === width && matchMedia('(max-width:52rem)').matches === (width <= 832), 'released native media query at ' + width);
+    check('held native query cannot reproject released roster', releasedPeople.node.parentNode === releasedPeople.parent &&
+      releasedPeople.node.nextSibling === releasedPeople.next && context.hidden === releasedPeople.hidden && listeners() === 1, peopleFacts());
+  },
   async finish() {
     host.syncMenu(false); slot.replaceChildren(); frame.classList.add('hm-frame--catchup');
     host.sync(project({ view: 'catchup' })); await settle();
@@ -130,9 +210,18 @@ const fixtureScript = `
     check('header replaces menu/H1', docked() && !previousMenu.isConnected && !previousHeading.isConnected);
     host.suspend();
     check('destroy restores parents', sameNodes() && frame.parentElement === frameParent && context.parentElement === contextParent && account.parentElement === accountParent);
+    check('destroy restores exact next siblings and removes held query listeners', frame.nextSibling === fixture.frameNext &&
+      context.nextSibling === fixture.contextNext && account.nextSibling === fixture.accountNext && listeners() === 0);
     check('destroy restores menu/H1', menu.parentElement === bar && heading.parentElement === bar);
     check('destroy restores SVG', account.querySelector('svg').getAttribute('viewBox') === '0 0 16 16' && account.querySelector('path').getAttribute('d') === 'm4 6 4 4 4-4');
     check('destroy removes shell/modal', !app.querySelector('.cs-org-shell,dialog'));
+    return checks;
+  },
+  async afterSuspend(width) {
+    await until(() => innerWidth === width && matchMedia('(max-width:52rem)').matches === (width <= 832), 'post-suspend native media query');
+    check('post-suspend held query leaves restored DOM untouched', frame.parentElement === frameParent && context.parentElement === contextParent &&
+      account.parentElement === accountParent && frame.nextSibling === fixture.frameNext && context.nextSibling === fixture.contextNext &&
+      account.nextSibling === fixture.accountNext && !app.querySelector('.cs-org-shell,dialog') && listeners() === 0, peopleFacts());
     return checks;
   },
   };
@@ -161,8 +250,10 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
     const value = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
     assert.equal(value.exceptionDetails, undefined, JSON.stringify(value.exceptionDetails)); return value.result?.value;
   };
-  const key = async (name: "Tab" | "Escape") => {
-    for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: name, code: name, windowsVirtualKeyCode: name === "Tab" ? 9 : 27, nativeVirtualKeyCode: name === "Tab" ? 9 : 27 });
+  const key = async (name: "Tab" | "Escape" | "ArrowLeft", shift = false) => {
+    const code = name === "Tab" ? 9 : name === "Escape" ? 27 : 37;
+    for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: name, code: name, modifiers: shift ? 8 : 0,
+      windowsVirtualKeyCode: code, nativeVirtualKeyCode: code });
   };
   await send("Emulation.setFocusEmulationEnabled", { enabled: true });
   for (const [width, height] of [[1471, 900], [833, 900], [390, 844], [320, 568]]) {
@@ -186,7 +277,36 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
     await evaluate("window.hostObserver.settle()");
     }
     await evaluate("window.hostObserver.refreshFocus()");
-    const checks = await evaluate("window.hostObserver.finish()") as Check[];
+    // One existing host owner, one actual People composition case. Read-only invented data;
+    // native CDP search/caret and actual responsive/drawer events, no replacement adapter.
+    if (width === 1471) for (const hidden of [false, true]) {
+      await evaluate(`window.hostObserver.peopleStart(${hidden})`);
+      await key("Tab");
+      await send("Input.insertText", { text: "Invented" });
+      await evaluate("window.hostObserver.peopleTyped()");
+      await key("ArrowLeft"); await key("ArrowLeft"); await key("ArrowLeft", true);
+      await evaluate("window.hostObserver.peopleHold()");
+      for (const [nextWidth, nextHeight] of [[390, 844], [1471, 900]]) {
+        await send("Emulation.setDeviceMetricsOverride", { width: nextWidth, height: nextHeight, deviceScaleFactor: 1, mobile: false });
+        await evaluate(`window.hostObserver.peoplePlaced(${nextWidth})`);
+      }
+      await evaluate("window.hostObserver.peopleRefresh()");
+      await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+      await evaluate("window.hostObserver.peoplePlaced(390,false)");
+      await evaluate("window.hostObserver.openDrawer();window.hostObserver.drawerState()");
+      await key("Tab"); await evaluate("window.hostObserver.tabState();window.hostObserver.peopleDrawer()");
+      await send("Emulation.setDeviceMetricsOverride", { width: 1024, height: 900, deviceScaleFactor: 1, mobile: false });
+      await evaluate("window.hostObserver.peoplePlaced(1024,false)");
+      await evaluate("window.hostObserver.peopleClear()");
+      for (const nextWidth of [320, 1471]) {
+        await send("Emulation.setDeviceMetricsOverride", { width: nextWidth, height: nextWidth === 320 ? 568 : 900, deviceScaleFactor: 1, mobile: false });
+        await evaluate(`window.hostObserver.peopleReleased(${nextWidth})`);
+      }
+    }
+    await evaluate("window.hostObserver.finish()");
+    const nextWidth = width <= 832 ? 1024 : 390;
+    await send("Emulation.setDeviceMetricsOverride", { width: nextWidth, height: 900, deviceScaleFactor: 1, mobile: false });
+    const checks = await evaluate(`window.hostObserver.afterSuspend(${nextWidth})`) as Check[];
     assert.ok(Array.isArray(checks) && checks.length > 0, `${width}px must reach lifecycle checks`);
     for (const check of checks) assert.equal(check.pass, true, `${width}px ${check.name}: ${JSON.stringify(check.detail)}`);
   }
