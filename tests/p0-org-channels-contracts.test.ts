@@ -112,22 +112,14 @@ test('universal selector precedence, explicit org with connection default, and r
   const s = createFixture();
   const caller = { principal_kind: 'agent' as const, principal_id: 'ag-1', connection_id: 'conn-1' };
 
-  // Bare workspace="ops" matches both yulan/ops and household/ops -> AMBIGUOUS_WORKSPACE_SELECTOR
   const ambig = resolveOrgWorkspaceChannelSelector(s, caller, { workspace: 'ops' });
   assert.equal(ambig.ok, false);
-  if (!ambig.ok) {
-    assert.equal(ambig.refusal.code, 'AMBIGUOUS_WORKSPACE_SELECTOR');
-    assert.equal(ambig.refusal.choices?.length, 2);
-  }
+  if (!ambig.ok) { assert.equal(ambig.refusal.code, 'AMBIGUOUS_WORKSPACE_SELECTOR'); assert.equal(ambig.refusal.choices?.length, 2); }
 
-  // Explicit org="yulan" without workspace uses connection default_workspace_id (ws-1a)
   const explicitOrg = resolveOrgWorkspaceChannelSelector(s, caller, { org: 'yulan' });
   assert.equal(explicitOrg.ok, true);
-  if (explicitOrg.ok) {
-    assert.equal(explicitOrg.workspace.workspace_id, 'ws-1a');
-  }
+  if (explicitOrg.ok) assert.equal(explicitOrg.workspace.workspace_id, 'ws-1a');
 
-  // Qualified yulan/ops succeeds
   const explicit = resolveOrgWorkspaceChannelSelector(s, caller, { workspace: 'yulan/ops' });
   assert.equal(explicit.ok, true);
   if (explicit.ok) {
@@ -136,53 +128,35 @@ test('universal selector precedence, explicit org with connection default, and r
     assert.equal(explicit.source, 'explicit');
   }
 
-  //Seat mismatch fails closed with WORKSPACE_SEAT_MISMATCH and actionable claim_seat tool
-  const orgSeatMismatch = resolveOrgWorkspaceChannelSelector(s, caller, {
-    org: 'yulan',
-    seat_id: 'seat-2a',
-  });
+  const seatViaAp = resolveOrgWorkspaceChannelSelector(s, { principal_kind: 'agent', principal_id: 'ap-1a', connection_id: 'conn-1' }, { seat_id: 'seat-1a' });
+  assert.equal(seatViaAp.ok, true);
+  if (seatViaAp.ok) { assert.equal(seatViaAp.workspace.workspace_id, 'ws-1a'); assert.equal(seatViaAp.source, 'seat'); }
+
+  const orgSeatMismatch = resolveOrgWorkspaceChannelSelector(s, caller, { org: 'yulan', seat_id: 'seat-2a' });
   assert.equal(orgSeatMismatch.ok, false);
   if (!orgSeatMismatch.ok) assert.equal(orgSeatMismatch.refusal.code, 'WORKSPACE_SEAT_MISMATCH');
-  const mismatch = resolveOrgWorkspaceChannelSelector(s, caller, {
-    workspace: 'household/ops',
-    seat_id: 'seat-1a',
-  });
+  const mismatch = resolveOrgWorkspaceChannelSelector(s, caller, { workspace: 'household/ops', seat_id: 'seat-1a' });
   assert.equal(mismatch.ok, false);
-  if (!mismatch.ok) {
-    assert.equal(mismatch.refusal.code, 'WORKSPACE_SEAT_MISMATCH');
-    assert.equal(mismatch.refusal.mcp_tool, 'claim_seat');
-  }
+  if (!mismatch.ok) { assert.equal(mismatch.refusal.code, 'WORKSPACE_SEAT_MISMATCH'); assert.equal(mismatch.refusal.mcp_tool, 'claim_seat'); }
 
-  // When default_org_id has 2 reachable workspaces (ws-1a, ws-1b) and no default_workspace_id, preserves default_org_id in choices
   s.connectionPolicies![0]!.default_workspace_id = null;
   const multiWsOrgDefault = resolveOrgWorkspaceChannelSelector(s, caller, {});
   assert.equal(multiWsOrgDefault.ok, false);
   if (!multiWsOrgDefault.ok) {
     assert.equal(multiWsOrgDefault.refusal.code, 'AMBIGUOUS_WORKSPACE_SELECTOR');
     assert.equal(multiWsOrgDefault.refusal.scope.org, 'yulan');
-    assert.deepEqual(
-      multiWsOrgDefault.refusal.choices?.map((c) => c.workspace_id),
-      ['ws-1a', 'ws-1b'],
-    );
+    assert.deepEqual(multiWsOrgDefault.refusal.choices?.map((c) => c.workspace_id), ['ws-1a', 'ws-1b']);
   }
   s.connectionPolicies![0]!.default_workspace_id = 'ws-1a';
 
-  // Connection default fallback when no explicit or seat selector is given
   const fromDefault = resolveOrgWorkspaceChannelSelector(s, caller, {});
   assert.equal(fromDefault.ok, true);
-  if (fromDefault.ok) {
-    assert.equal(fromDefault.workspace.workspace_id, 'ws-1a');
-    assert.equal(fromDefault.source, 'connection_default');
-  }
+  if (fromDefault.ok) { assert.equal(fromDefault.workspace.workspace_id, 'ws-1a'); assert.equal(fromDefault.source, 'connection_default'); }
 
-  // When default_workspace_id (ws-1a) is revoked, falls back to remaining workspace (ws-1b) in default_org_id
   cascadeWorkspaceMemberRemoval(s, { workspace_id: 'ws-1a', principal_kind: 'agent', principal_id: 'ag-1' });
   const fallbackToOrg = resolveOrgWorkspaceChannelSelector(s, caller, {});
   assert.equal(fallbackToOrg.ok, true);
-  if (fallbackToOrg.ok) {
-    assert.equal(fallbackToOrg.workspace.workspace_id, 'ws-1b');
-    assert.equal(fallbackToOrg.source, 'connection_default');
-  }
+  if (fallbackToOrg.ok) { assert.equal(fallbackToOrg.workspace.workspace_id, 'ws-1b'); assert.equal(fallbackToOrg.source, 'connection_default'); }
 });
 
 test('explicit org/workspace revocation overrides owner inheritance (including tombstone creation) and cascades seats', () => {
@@ -190,47 +164,24 @@ test('explicit org/workspace revocation overrides owner inheritance (including t
   const caller = { principal_kind: 'agent' as const, principal_id: 'ag-1', connection_id: 'conn-1' };
   const inheritedCaller = { principal_kind: 'agent' as const, principal_id: 'ag-inherited' };
 
-  // Inherited agent has no explicit orgMemberships or workspaceGrants rows, yet can read via u-owner
   assert.equal(canReadWorkspace(s, inheritedCaller, 'ws-1a'), true);
-  cascadeWorkspaceMemberRemoval(s, {
-    workspace_id: 'ws-1a',
-    principal_kind: 'agent',
-    principal_id: 'ag-inherited',
-  });
+  cascadeWorkspaceMemberRemoval(s, { workspace_id: 'ws-1a', principal_kind: 'agent', principal_id: 'ag-inherited' });
   assert.equal(canReadWorkspace(s, inheritedCaller, 'ws-1a'), false);
   assert.equal(canReadOrg(s, inheritedCaller, 'org-1'), true);
-  cascadeOrgMemberRemoval(s, {
-    org_id: 'org-1',
-    principal_kind: 'agent',
-    principal_id: 'ag-inherited',
-  });
+  cascadeOrgMemberRemoval(s, { org_id: 'org-1', principal_kind: 'agent', principal_id: 'ag-inherited' });
   assert.equal(canReadOrg(s, inheritedCaller, 'org-1'), false);
 
-  // Revoking one agent identity does not deny an independent agent with the same display_name
-  s.agentIdentities!.push({
-    id: 'ag-same-name-b',
-    owner_user_id: 'u-owner',
-    display_name: 'Inherited Helper',
-    created_at: '2026-10-21T00:00:00Z',
-  });
+  s.agentIdentities!.push({ id: 'ag-same-name-b', owner_user_id: 'u-owner', display_name: 'Inherited Helper', created_at: '2026-10-21T00:00:00Z' });
   assert.equal(canReadOrg(s, { principal_kind: 'agent', principal_id: 'ag-same-name-b' }, 'org-1'), true);
   assert.equal(canReadWorkspace(s, { principal_kind: 'agent', principal_id: 'ag-same-name-b' }, 'ws-1a'), true);
 
-  const resWs = cascadeWorkspaceMemberRemoval(s, {
-    workspace_id: 'ws-1a',
-    principal_kind: 'agent',
-    principal_id: 'ag-1',
-  });
+  const resWs = cascadeWorkspaceMemberRemoval(s, { workspace_id: 'ws-1a', principal_kind: 'agent', principal_id: 'ag-1' });
   assert.deepEqual(resWs.closed_seat_ids, ['seat-1a']);
   assert.equal(canReadWorkspace(s, caller, 'ws-1a'), false);
   assert.equal(s.seats?.find((x) => x.seat_id === 'seat-2a')?.revoked_at ?? null, null);
   assert.equal(canReadWorkspace(s, caller, 'ws-2a'), true);
 
-  const resOrg = cascadeOrgMemberRemoval(s, {
-    org_id: 'org-2',
-    principal_kind: 'agent',
-    principal_id: 'ag-1',
-  });
+  const resOrg = cascadeOrgMemberRemoval(s, { org_id: 'org-2', principal_kind: 'agent', principal_id: 'ag-1' });
   assert.deepEqual(resOrg.closed_seat_ids, ['seat-2a']);
   assert.equal(canReadOrg(s, caller, 'org-2'), false);
 

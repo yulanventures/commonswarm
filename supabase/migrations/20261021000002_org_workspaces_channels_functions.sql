@@ -6,11 +6,11 @@ CREATE FUNCTION swarm.private_channels_enabled() RETURNS boolean LANGUAGE sql ST
 $$;
 
 CREATE FUNCTION swarm.live_org_role(p_org uuid, p_kind text, p_id uuid) RETURNS text LANGUAGE sql STABLE SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
-  SELECT role FROM org_memberships WHERE (org_id, principal_kind, principal_id) = (p_org, p_kind, p_id) AND revoked_at IS NULL;
+  SELECT role FROM org_memberships WHERE (org_id, principal_kind, principal_id) = (p_org, p_kind, coalesce((SELECT agent_identity_id FROM agent_principals WHERE p_kind = 'agent' AND principal_id = p_id AND revoked_at IS NULL), p_id)) AND revoked_at IS NULL;
 $$;
 
 CREATE FUNCTION swarm.has_live_ws_grant(p_ws uuid, p_kind text, p_id uuid) RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
-  SELECT EXISTS (SELECT 1 FROM workspace_principal_grants WHERE (workspace_id, principal_kind, principal_id) = (p_ws, p_kind, p_id) AND revoked_at IS NULL);
+  SELECT EXISTS (SELECT 1 FROM workspace_principal_grants WHERE (workspace_id, principal_kind, principal_id) = (p_ws, p_kind, coalesce((SELECT agent_identity_id FROM agent_principals WHERE p_kind = 'agent' AND principal_id = p_id AND revoked_at IS NULL), p_id)) AND revoked_at IS NULL);
 $$;
 
 CREATE FUNCTION swarm.guard_channel_visibility_transition() RETURNS trigger LANGUAGE plpgsql SET search_path = swarm, pg_catalog AS $$
@@ -106,22 +106,22 @@ CREATE FUNCTION can_read_channel(p_ch uuid, p_kind text, p_id uuid, p_owner uuid
 RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
   SELECT EXISTS (
     SELECT 1 FROM channels c JOIN workspaces w ON w.workspace_id = c.workspace_id
-    WHERE c.channel_id = p_ch AND can_read_workspace(c.workspace_id, p_kind, p_id, p_owner, p_conn)
+    LEFT JOIN agent_identities ai ON p_kind = 'agent' AND ai.revoked_at IS NULL AND (ai.id = p_id OR EXISTS (SELECT 1 FROM agent_principals ap WHERE (ap.principal_id, ap.agent_identity_id) = (p_id, ai.id) AND ap.revoked_at IS NULL))
+    WHERE c.channel_id = p_ch AND (p_kind = 'user' OR ai.id IS NOT NULL)
+    AND can_read_workspace(c.workspace_id, p_kind, coalesce(ai.id, p_id), p_owner, p_conn)
     AND ((c.visibility = 'workspace'
-      AND ((live_org_role(w.org_id, p_kind, p_id) IS DISTINCT FROM 'guest'
-        AND NOT EXISTS (SELECT 1 FROM workspace_principal_grants wg WHERE (wg.workspace_id, wg.principal_kind, wg.principal_id, wg.role) = (c.workspace_id, p_kind, p_id, 'guest') AND wg.revoked_at IS NULL))
-        OR EXISTS (SELECT 1 FROM channel_memberships cm WHERE (cm.channel_id, cm.principal_kind, cm.principal_id) = (p_ch, p_kind, p_id) AND cm.revoked_at IS NULL))
-      AND (p_kind = 'user' OR EXISTS (
-        SELECT 1 FROM agent_identities ai WHERE (ai.id = p_id OR EXISTS (SELECT 1 FROM agent_principals ap WHERE (ap.principal_id, ap.agent_identity_id) = (p_id, ai.id) AND ap.revoked_at IS NULL)) AND ai.revoked_at IS NULL
-        AND ((live_org_role(w.org_id, 'user', coalesce(p_owner, ai.owner_user_id)) IS DISTINCT FROM 'guest'
+      AND ((live_org_role(w.org_id, p_kind, coalesce(ai.id, p_id)) IS DISTINCT FROM 'guest'
+        AND NOT EXISTS (SELECT 1 FROM workspace_principal_grants wg WHERE (wg.workspace_id, wg.principal_kind, wg.principal_id, wg.role) = (c.workspace_id, p_kind, coalesce(ai.id, p_id), 'guest') AND wg.revoked_at IS NULL))
+        OR EXISTS (SELECT 1 FROM channel_memberships cm WHERE (cm.channel_id, cm.principal_kind, cm.principal_id) = (p_ch, p_kind, coalesce(ai.id, p_id)) AND cm.revoked_at IS NULL))
+      AND (p_kind = 'user'
+        OR ((live_org_role(w.org_id, 'user', coalesce(p_owner, ai.owner_user_id)) IS DISTINCT FROM 'guest'
           AND NOT EXISTS (SELECT 1 FROM workspace_principal_grants wg WHERE (wg.workspace_id, wg.principal_kind, wg.principal_id, wg.role) = (c.workspace_id, 'user', coalesce(p_owner, ai.owner_user_id), 'guest') AND wg.revoked_at IS NULL))
           OR (EXISTS (SELECT 1 FROM channel_memberships cm WHERE (cm.channel_id, cm.principal_kind, cm.principal_id) = (p_ch, 'user', coalesce(p_owner, ai.owner_user_id)) AND cm.revoked_at IS NULL)
-            AND EXISTS (SELECT 1 FROM channel_memberships cm WHERE (cm.channel_id, cm.principal_kind, cm.principal_id) = (p_ch, 'agent', ai.id) AND cm.revoked_at IS NULL))))))
+            AND EXISTS (SELECT 1 FROM channel_memberships cm WHERE (cm.channel_id, cm.principal_kind, cm.principal_id) = (p_ch, 'agent', ai.id) AND cm.revoked_at IS NULL)))))
       OR (c.visibility = 'private' AND private_channels_enabled()
-        AND EXISTS (SELECT 1 FROM channel_memberships WHERE (channel_id, principal_kind, principal_id) = (p_ch, p_kind, p_id) AND revoked_at IS NULL)
+        AND EXISTS (SELECT 1 FROM channel_memberships WHERE (channel_id, principal_kind, principal_id) = (p_ch, p_kind, coalesce(ai.id, p_id)) AND revoked_at IS NULL)
         AND (p_kind = 'user' OR EXISTS (
-          SELECT 1 FROM agent_identities ai JOIN channel_memberships cm ON (cm.channel_id, cm.principal_kind, cm.principal_id) = (p_ch, 'user', coalesce(p_owner, ai.owner_user_id))
-          WHERE (ai.id = p_id OR EXISTS (SELECT 1 FROM agent_principals ap WHERE (ap.principal_id, ap.agent_identity_id) = (p_id, ai.id) AND ap.revoked_at IS NULL)) AND ai.revoked_at IS NULL AND cm.revoked_at IS NULL))))
+          SELECT 1 FROM channel_memberships cm WHERE (cm.channel_id, cm.principal_kind, cm.principal_id) = (p_ch, 'user', coalesce(p_owner, ai.owner_user_id)) AND cm.revoked_at IS NULL))))
   );
 $$;
 

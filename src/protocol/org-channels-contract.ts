@@ -14,6 +14,7 @@ import {
   isPrin,
   norm,
   orgRole,
+  resolveAgentId,
 } from './org-channels-types.js';
 import {
   canReadChannel,
@@ -86,12 +87,16 @@ export function resolveOrgWorkspaceChannelSelector(
         seat_id: input.seat_id,
       });
     }
+    const callerAid =
+      c.principal_kind === 'agent'
+        ? resolveAgentId(s, c.principal_id)
+        : c.principal_id;
     const seatAid =
       seat.agent_identity_id ??
       (s.agentPrincipals ?? []).find((ap) => ap.principal_id === seat.principal_id)
         ?.agent_identity_id ??
       seat.principal_id;
-    if (c.principal_kind !== 'agent' || seatAid !== c.principal_id) {
+    if (c.principal_kind !== 'agent' || seatAid !== callerAid) {
       return fail('WORKSPACE_SEAT_MISMATCH', 'seat_principal_ownership', {
         seat_id: input.seat_id,
       });
@@ -389,7 +394,8 @@ export function buildMultiOrgWhoamiResponse(
     seat_id?: string | null;
   },
 ): MultiOrgWhoamiResponse {
-  const id = s.agentIdentities.find((a) => a.id === agent_identity_id && isLive(a));
+  const resolvedAid = resolveAgentId(s, agent_identity_id);
+  const id = s.agentIdentities.find((a) => a.id === resolvedAid && isLive(a));
   if (!id) throw new Error(`Unknown or revoked agent identity: ${agent_identity_id}`);
   const c: CallerContext = {
     principal_kind: 'agent',

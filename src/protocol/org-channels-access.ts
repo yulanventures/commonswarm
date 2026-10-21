@@ -174,18 +174,26 @@ export function canModifyChannelMembership(
     const scope = { workspace: ch.workspace_id, channel: ch.slug };
     if (!Boolean(s.privateChannelsEnabled))
       return fail('PRIVATE_CHANNELS_DISABLED', 'private_channels_enabled', scope);
+    const actorId =
+      actor.principal_kind === 'agent'
+        ? resolveAgentId(s, actor.principal_id)
+        : actor.principal_id;
+    const targetId =
+      target.principal_kind === 'agent'
+        ? resolveAgentId(s, target.principal_id)
+        : target.principal_id;
     if (
       !canReadChannel(s, actor, chId) ||
       !s.channelMemberships.some(
         (m) =>
           m.channel_id === chId &&
-          isPrin(m, actor.principal_kind, actor.principal_id) &&
+          isPrin(m, actor.principal_kind, actorId) &&
           m.role === 'owner' &&
           isLive(m),
       )
     ) {
       return fail(
-        isPrin(target, actor.principal_kind, actor.principal_id)
+        target.principal_kind === actor.principal_kind && targetId === actorId
           ? 'PRIVATE_CHANNEL_INVITE_REQUIRED'
           : 'PRIVATE_CHANNEL_OWNER_REQUIRED',
         'channel_owner_membership',
@@ -201,7 +209,7 @@ export function cascadeWorkspaceMemberRemoval(
   {
     workspace_id,
     principal_kind,
-    principal_id,
+    principal_id: raw_principal_id,
     now = new Date().toISOString(),
   }: {
     workspace_id: string;
@@ -210,6 +218,10 @@ export function cascadeWorkspaceMemberRemoval(
     now?: string;
   },
 ) {
+  const principal_id =
+    principal_kind === 'agent'
+      ? resolveAgentId(s, raw_principal_id)
+      : raw_principal_id;
   const revoke = <T extends { revoked_at?: string | null }>(
     rows: T[] | undefined,
     pred: (r: T) => boolean,
@@ -279,7 +291,7 @@ export function cascadeOrgMemberRemoval(
   {
     org_id,
     principal_kind,
-    principal_id,
+    principal_id: raw_principal_id,
     now = new Date().toISOString(),
   }: {
     org_id: string;
@@ -288,6 +300,10 @@ export function cascadeOrgMemberRemoval(
     now?: string;
   },
 ) {
+  const principal_id =
+    principal_kind === 'agent'
+      ? resolveAgentId(s, raw_principal_id)
+      : raw_principal_id;
   let foundMem = false;
   for (const m of s.orgMemberships) {
     if (m.org_id === org_id && isPrin(m, principal_kind, principal_id)) {

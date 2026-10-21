@@ -324,32 +324,38 @@ export const fail = (
   refusal: buildOrgChannelRefusal({ code, missing, scope, choices }),
 });
 
-export const orgRole = (
-  s: OrgChannelAuthorityState,
-  orgId: string,
-  k: PrincipalKind,
-  id: string,
-): OrgRole | null =>
-  s.orgMemberships.find(
-    (m) => m.org_id === orgId && isPrin(m, k, id) && isLive(m),
-  )?.role ?? null;
-
-export const hasWsGrant = (
-  s: OrgChannelAuthorityState,
-  wsId: string,
-  k: PrincipalKind,
-  id: string,
-) =>
-  s.workspaceGrants.some(
-    (g) => g.workspace_id === wsId && isPrin(g, k, id) && isLive(g),
-  );
-
 export const resolveAgentId = (s: OrgChannelAuthorityState, id: string) =>
   s.agentIdentities.some((a) => a.id === id)
     ? id
     : ((s.agentPrincipals ?? []).find(
         (ap) => ap.principal_id === id && isLive(ap),
       )?.agent_identity_id ?? id);
+
+export const orgRole = (
+  s: OrgChannelAuthorityState,
+  orgId: string,
+  k: PrincipalKind,
+  id: string,
+): OrgRole | null => {
+  const pid = k === 'agent' ? resolveAgentId(s, id) : id;
+  return (
+    s.orgMemberships.find(
+      (m) => m.org_id === orgId && isPrin(m, k, pid) && isLive(m),
+    )?.role ?? null
+  );
+};
+
+export const hasWsGrant = (
+  s: OrgChannelAuthorityState,
+  wsId: string,
+  k: PrincipalKind,
+  id: string,
+) => {
+  const pid = k === 'agent' ? resolveAgentId(s, id) : id;
+  return s.workspaceGrants.some(
+    (g) => g.workspace_id === wsId && isPrin(g, k, pid) && isLive(g),
+  );
+};
 
 export const agentOwner = (s: OrgChannelAuthorityState, c: CallerContext) => {
   const aid = resolveAgentId(s, c.principal_id);
