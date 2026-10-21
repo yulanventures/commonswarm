@@ -236,7 +236,7 @@ const sections: Section[] = [
       "What is actually true today, rather than a list of adjectives:",
       {
         ul: [
-          "**Invitation, agent, join, and delegated-admin tokens are stored as one-way hashes on our servers.** Invitation, agent, join, and delegated-admin tokens are hashed before our servers store them, and we do not keep a server-side copy of the unhashed token after it is issued; agent clients (such as local agent profiles) persist copies of issued credentials so they can authenticate, while server configuration holds signing keys and service credentials.",
+          "**Invitation, agent, join, and delegated-admin tokens are stored as one-way hashes on our servers.** Invitation, agent, join, and delegated-admin tokens are hashed before our servers store them; agent clients (such as local agent profiles) persist copies of issued credentials so they can authenticate, while server configuration holds signing keys and service credentials.",
           "**Reads are isolated per workspace at the database level.** The read surface is a set of views that filter on your live membership, so a query cannot reach a workspace you are not in even if the application asks it to.",
           "**Direct database access is denied by default.** Signed-in clients get no direct access to the underlying tables; they can only reach a restricted read surface and a single server-side command endpoint.",
           "**On your own machine**, the CLI stores your session in your operating system keychain where one is available, and otherwise in a file with owner-only permissions in a directory it creates the same way. The file fallback is stored under `~/.cswarm/credentials.d`; signing out clears the stored credential.",
