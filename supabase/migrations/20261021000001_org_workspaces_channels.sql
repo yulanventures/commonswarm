@@ -5,7 +5,7 @@ CREATE TABLE swarm.agent_identities (
   standing_grant_id uuid REFERENCES hosted_mcp_grants(grant_id),
   standing_renewal_grant_id uuid UNIQUE REFERENCES renewal_grants(renewal_grant_id),
   display_name text NOT NULL CHECK (btrim(display_name) <> ''),
-  created_at timestamptz NOT NULL DEFAULT now(), revoked_at timestamptz, UNIQUE (standing_grant_id, display_name)
+  created_at timestamptz NOT NULL DEFAULT now(), revoked_at timestamptz
 );
 CREATE TABLE swarm.organizations (
   id uuid PRIMARY KEY,
@@ -203,7 +203,7 @@ BEGIN
             UPDATE swarm.workspace_principal_grants SET principal_id = v_ai WHERE (workspace_id, principal_kind, principal_id) = (v_ap.workspace_id, 'agent', v_ap.agent_identity_id)
               AND NOT EXISTS (SELECT 1 FROM swarm.workspace_principal_grants WHERE (workspace_id, principal_kind, principal_id) = (v_ap.workspace_id, 'agent', v_ai));
           ELSE
-            UPDATE swarm.agent_identities ai SET revoked_at = coalesce(ai.revoked_at, o.revoked_at) FROM swarm.agent_identities o WHERE ai.id = v_ap.agent_identity_id AND o.id = v_ai AND o.revoked_at IS NOT NULL;
+            UPDATE swarm.agent_identities ai SET standing_grant_id = coalesce(ai.standing_grant_id, v_gid), revoked_at = coalesce(ai.revoked_at, o.revoked_at) FROM swarm.agent_identities o WHERE ai.id = v_ap.agent_identity_id AND o.id = v_ai;
           END IF;
         ELSIF v_ai IS NULL THEN
           UPDATE swarm.agent_identities SET standing_grant_id = v_gid WHERE id = v_ap.agent_identity_id AND (standing_grant_id IS NULL OR standing_grant_id = v_gid);

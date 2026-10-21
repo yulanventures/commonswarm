@@ -136,7 +136,13 @@ test('universal selector precedence, explicit org with connection default, and r
     assert.equal(explicit.source, 'explicit');
   }
 
-  // Seat mismatch fails closed with WORKSPACE_SEAT_MISMATCH and actionable claim_seat tool
+  //Seat mismatch fails closed with WORKSPACE_SEAT_MISMATCH and actionable claim_seat tool
+  const orgSeatMismatch = resolveOrgWorkspaceChannelSelector(s, caller, {
+    org: 'yulan',
+    seat_id: 'seat-2a',
+  });
+  assert.equal(orgSeatMismatch.ok, false);
+  if (!orgSeatMismatch.ok) assert.equal(orgSeatMismatch.refusal.code, 'WORKSPACE_SEAT_MISMATCH');
   const mismatch = resolveOrgWorkspaceChannelSelector(s, caller, {
     workspace: 'household/ops',
     seat_id: 'seat-1a',
@@ -236,18 +242,15 @@ test('guest channel isolation, every-channel file bindings, and fail-closed priv
   const admin = { principal_kind: 'user' as const, principal_id: 'u-admin' };
   const owner = { principal_kind: 'user' as const, principal_id: 'u-owner' };
 
-  // Guest without workspace grant -> denied workspace
   assert.equal(canReadOrg(s, guest, 'org-1'), true);
   assert.equal(canReadWorkspace(s, guest, 'ws-1a'), false);
 
-  // Guest WITH workspace grant can read workspace, but is isolated from workspace-visible channel until added to channelMemberships
   s.workspaceGrants.push({ workspace_id: 'ws-1a', org_id: 'org-1', principal_kind: 'user', principal_id: 'u-guest', role: 'guest', created_at: now });
   assert.equal(canReadWorkspace(s, guest, 'ws-1a'), true);
   assert.equal(canReadChannel(s, guest, 'ch-1a-gen'), false);
   s.channelMemberships.push({ channel_id: 'ch-1a-gen', workspace_id: 'ws-1a', principal_kind: 'user', principal_id: 'u-guest', role: 'member', notify_pref: 'all', joined_at: now });
   assert.equal(canReadChannel(s, guest, 'ch-1a-gen'), true);
 
-  // Workspace admin who is not a member of ch-1a-priv cannot read private channel or dual-bound file
   assert.equal(canReadChannel(s, admin, 'ch-1a-priv'), false);
   assert.equal(canReadChannelBoundFile(s, admin, 'file-priv-1', 'ws-1a'), false);
   assert.equal(canReadChannelBoundFile(s, admin, 'file-dual-1', 'ws-1a'), false);
@@ -255,60 +258,41 @@ test('guest channel isolation, every-channel file bindings, and fail-closed priv
   assert.equal(selfJoin.ok, false);
   if (!selfJoin.ok) assert.equal(selfJoin.refusal.code, 'PRIVATE_CHANNEL_INVITE_REQUIRED');
 
-  // Channel owner can read both channels and dual-bound file
   assert.equal(canReadChannel(s, owner, 'ch-1a-priv'), true);
   assert.equal(canReadChannelBoundFile(s, owner, 'file-dual-1', 'ws-1a'), true);
+  s.channels.find((c) => c.channel_id === 'ch-1a-priv')!.archived_at = now;
+  assert.equal(canReadChannel(s, owner, 'ch-1a-priv'), true);
+  assert.equal(canReadChannelBoundFile(s, owner, 'file-dual-1', 'ws-1a'), true);
+  s.channels.find((c) => c.channel_id === 'ch-1a-priv')!.archived_at = null;
 
-  // Omitting privateChannelsEnabled (undefined) fails CLOSED on private channels
   delete s.privateChannelsEnabled;
   assert.equal(canReadChannel(s, owner, 'ch-1a-priv'), false);
   assert.equal(canModifyChannelMembership(s, owner, 'ch-1a-priv', admin).ok, false);
-  const defaultTrans = validateChannelVisibilityTransition({
-    nextVisibility: 'private',
-    nextJoinPolicy: 'invite_only',
-  });
+  const defaultTrans = validateChannelVisibilityTransition({ nextVisibility: 'private', nextJoinPolicy: 'invite_only' });
   assert.equal(defaultTrans.ok, false);
   if (!defaultTrans.ok) assert.equal(defaultTrans.refusal.code, 'PRIVATE_CHANNELS_DISABLED');
 
-  // Visibility transitions with privateChannelsEnabled=true: non-empty public -> private blocked; private -> public blocked
-  const pubToPriv = validateChannelVisibilityTransition({
-    privateChannelsEnabled: true,
-    currentVisibility: 'workspace',
-    nextVisibility: 'private',
-    nextJoinPolicy: 'invite_only',
-    signalCount: 3,
-  });
+  const pubToPriv = validateChannelVisibilityTransition({ privateChannelsEnabled: true, currentVisibility: 'workspace', nextVisibility: 'private', nextJoinPolicy: 'invite_only', signalCount: 3 });
   assert.equal(pubToPriv.ok, false);
   if (!pubToPriv.ok) assert.equal(pubToPriv.refusal.code, 'CHANNEL_HAS_PUBLIC_HISTORY');
 
-  const privToPub = validateChannelVisibilityTransition({
-    privateChannelsEnabled: true,
-    currentVisibility: 'private',
-    nextVisibility: 'workspace',
-    nextJoinPolicy: 'open',
-  });
+  const privToPub = validateChannelVisibilityTransition({ privateChannelsEnabled: true, currentVisibility: 'private', nextVisibility: 'workspace', nextJoinPolicy: 'open' });
   assert.equal(privToPub.ok, false);
   if (!privToPub.ok) assert.equal(privToPub.refusal.code, 'PRIVATE_CHANNEL_CANNOT_BECOME_PUBLIC');
 });
 
 test('workspace move enforces dual owner, owners_only revocation, and transfer_members=all revoked-target reconciliation', () => {
   const s1 = createFixture();
-  // Non-owner actor refused with ORG_MOVE_REQUIRES_DUAL_OWNER
-  const denied = reconcileWorkspaceMove(s1, {
-    workspace_id: 'ws-1a',
-    target_org_id: 'org-2',
-    actor_user_id: 'u-admin',
-    transfer_members: 'owners_only',
-  });
+  const slugConflict = reconcileWorkspaceMove(s1, { workspace_id: 'ws-1a', target_org_id: 'org-2', actor_user_id: 'u-owner', transfer_members: 'owners_only' });
+  assert.equal(slugConflict.ok, false);
+  if (!slugConflict.ok) assert.equal(slugConflict.refusal.code, 'WORKSPACE_SLUG_TAKEN');
+  s1.workspaces.find((w) => w.workspace_id === 'ws-2a')!.slug = 'home-ops';
+
+  const denied = reconcileWorkspaceMove(s1, { workspace_id: 'ws-1a', target_org_id: 'org-2', actor_user_id: 'u-admin', transfer_members: 'owners_only' });
   assert.equal(denied.ok, false);
   if (!denied.ok) assert.equal(denied.refusal.code, 'ORG_MOVE_REQUIRES_DUAL_OWNER');
 
-  const moved = reconcileWorkspaceMove(s1, {
-    workspace_id: 'ws-1a',
-    target_org_id: 'org-2',
-    actor_user_id: 'u-owner',
-    transfer_members: 'owners_only',
-  });
+  const moved = reconcileWorkspaceMove(s1, { workspace_id: 'ws-1a', target_org_id: 'org-2', actor_user_id: 'u-owner', transfer_members: 'owners_only' });
   assert.equal(moved.ok, true);
   if (moved.ok) {
     assert.equal(moved.source_org_id, 'org-1');
@@ -316,39 +300,23 @@ test('workspace move enforces dual owner, owners_only revocation, and transfer_m
     assert.deepEqual(moved.closed_seat_ids, ['seat-1a']);
   }
 
-  // Under transfer_members='all', a principal explicitly revoked in target_org_id has their workspace grant & seat revoked
   const s2 = createFixture();
-  const ag2 = s2.orgMemberships.find((m) => m.org_id === 'org-2' && m.principal_kind === 'agent' && m.principal_id === 'ag-1')!;
-  ag2.revoked_at = '2026-10-21T00:30:00Z';
-  const movedAll = reconcileWorkspaceMove(s2, {
-    workspace_id: 'ws-1a',
-    target_org_id: 'org-2',
-    actor_user_id: 'u-owner',
-    transfer_members: 'all',
-  });
+  s2.workspaces.find((w) => w.workspace_id === 'ws-2a')!.slug = 'home-ops';
+  s2.orgMemberships.find((m) => m.org_id === 'org-2' && m.principal_kind === 'agent' && m.principal_id === 'ag-1')!.revoked_at = '2026-10-21T00:30:00Z';
+  const movedAll = reconcileWorkspaceMove(s2, { workspace_id: 'ws-1a', target_org_id: 'org-2', actor_user_id: 'u-owner', transfer_members: 'all' });
   assert.equal(movedAll.ok, true);
   if (movedAll.ok) {
     assert.deepEqual(movedAll.closed_seat_ids, ['seat-1a']);
-    // u-admin was not in org-2 at all -> transferred as active admin in org-2
     assert.equal(canReadWorkspace(s2, { principal_kind: 'user', principal_id: 'u-admin' }, 'ws-1a'), true);
-    // ag-1 was explicitly revoked in org-2 -> remains denied in ws-1a with no duplicate orgMemberships row
     assert.equal(canReadWorkspace(s2, { principal_kind: 'agent', principal_id: 'ag-1' }, 'ws-1a'), false);
-    assert.equal(
-      s2.orgMemberships.filter((m) => m.org_id === 'org-2' && m.principal_kind === 'agent' && m.principal_id === 'ag-1').length,
-      1,
-    );
+    assert.equal(s2.orgMemberships.filter((m) => m.org_id === 'org-2' && m.principal_kind === 'agent' && m.principal_id === 'ag-1').length, 1);
   }
 
-  // Inherited agent without explicit workspaceGrants row loses access and seat on owners_only move
   const s3 = createFixture();
+  s3.workspaces.find((w) => w.workspace_id === 'ws-2a')!.slug = 'home-ops';
   s3.workspaceGrants = s3.workspaceGrants.filter((g) => !(g.workspace_id === 'ws-1a' && g.principal_kind === 'agent' && g.principal_id === 'ag-1'));
   assert.equal(canReadWorkspace(s3, { principal_kind: 'agent', principal_id: 'ag-1' }, 'ws-1a'), true);
-  const movedInherited = reconcileWorkspaceMove(s3, {
-    workspace_id: 'ws-1a',
-    target_org_id: 'org-2',
-    actor_user_id: 'u-owner',
-    transfer_members: 'owners_only',
-  });
+  const movedInherited = reconcileWorkspaceMove(s3, { workspace_id: 'ws-1a', target_org_id: 'org-2', actor_user_id: 'u-owner', transfer_members: 'owners_only' });
   assert.equal(movedInherited.ok, true);
   if (movedInherited.ok) {
     assert.deepEqual(movedInherited.closed_seat_ids, ['seat-1a']);

@@ -115,7 +115,7 @@ export function canReadChannel(
   c: CallerContext,
   chId: string,
 ): boolean {
-  const ch = s.channels.find((x) => x.channel_id === chId && isLive(x));
+  const ch = s.channels.find((x) => x.channel_id === chId && x.revoked_at == null);
   if (!ch || !canReadWorkspace(s, c, ch.workspace_id)) return false;
   const ws = s.workspaces.find((w) => w.workspace_id === ch.workspace_id);
   const hasChMem = (k: PrincipalKind, id: string) =>

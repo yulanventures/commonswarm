@@ -141,6 +141,12 @@ export function resolveOrgWorkspaceChannelSelector(
       resWs = cands[0];
       resOrg = resOrg ?? reachOrgs.find((o) => o.id === resWs!.org_id);
     } else if (resOrg) {
+      if (seatWs && seatOrg && seatOrg.id !== resOrg.id) {
+        return fail('WORKSPACE_SEAT_MISMATCH', `seat_in_${resOrg.slug}`, {
+          org: resOrg.slug,
+          seat_id: seat?.seat_id ?? null,
+        });
+      }
       const defWs = pol?.default_workspace_id
         ? reachWs.find(
             (w) =>
@@ -256,6 +262,19 @@ export function reconcileWorkspaceMove(
     orgRole(s, target_org_id, 'user', actor_user_id) !== 'owner'
   ) {
     return fail('ORG_MOVE_REQUIRES_DUAL_OWNER', 'dual_org_owner_role', {
+      org: target_org_id,
+      workspace: ws.slug,
+    });
+  }
+  if (
+    s.workspaces.some(
+      (w) =>
+        w.workspace_id !== workspace_id &&
+        w.org_id === target_org_id &&
+        norm(w.slug) === norm(ws.slug),
+    )
+  ) {
+    return fail('WORKSPACE_SLUG_TAKEN', 'unique_workspace_slug_in_org', {
       org: target_org_id,
       workspace: ws.slug,
     });

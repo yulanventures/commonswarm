@@ -96,7 +96,7 @@ CREATE FUNCTION swarm.can_read_channel(p_ch uuid, p_kind text, p_id uuid, p_owne
 RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
   SELECT EXISTS (
     SELECT 1 FROM channels c JOIN workspaces w ON w.workspace_id = c.workspace_id
-    WHERE c.channel_id = p_ch AND c.archived_at IS NULL
+    WHERE c.channel_id = p_ch
     AND can_read_workspace(c.workspace_id, p_kind, p_id, p_owner, p_conn)
     AND (
       (c.visibility = 'workspace'
