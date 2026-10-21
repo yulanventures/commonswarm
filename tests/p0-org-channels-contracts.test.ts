@@ -24,22 +24,20 @@ function createFixture(): OrgChannelAuthorityState {
     privateChannelsEnabled: true,
     organizations: [
       { id: 'org-1', slug: 'yulan', display_name: 'Yulan Ventures', created_by: 'u-owner', created_at: now, updated_at: now },
-      { id: 'org-2', slug: 'household', display_name: 'Langridge Household', created_by: 'u-owner', created_at: now, updated_at: now },
+      { id: 'org-2', slug: 'household', display_name: 'Household', created_by: 'u-owner', created_at: now, updated_at: now },
     ],
     workspaces: [
-      { workspace_id: 'ws-1a', org_id: 'org-1', slug: 'ops', name: 'Operations' },
+      { workspace_id: 'ws-1a', org_id: 'org-1', slug: 'ops', name: 'Ops' },
       { workspace_id: 'ws-1b', org_id: 'org-1', slug: 'product', name: 'Product' },
-      { workspace_id: 'ws-2a', org_id: 'org-2', slug: 'ops', name: 'Household Ops' },
+      { workspace_id: 'ws-2a', org_id: 'org-2', slug: 'ops', name: 'Home Ops' },
     ],
-    channels: ([
-      ['ch-1a-gen', 'ws-1a', 'general', 'workspace', 'open'],
-      ['ch-1a-priv', 'ws-1a', 'sec-incident', 'private', 'invite_only'],
-      ['ch-1b-gen', 'ws-1b', 'general', 'workspace', 'open'],
-      ['ch-2a-gen', 'ws-2a', 'general', 'workspace', 'open'],
-    ] as const).map(([channel_id, workspace_id, slug, visibility, join_policy]) => ({ channel_id, workspace_id, slug, visibility, join_policy })),
+    channels: (['ch-1a-gen:ws-1a:general:workspace:open', 'ch-1a-priv:ws-1a:sec-incident:private:invite_only', 'ch-1b-gen:ws-1b:general:workspace:open', 'ch-2a-gen:ws-2a:general:workspace:open'] as const).map((x) => {
+      const [channel_id, workspace_id, slug, visibility, join_policy] = x.split(':') as [string, string, string, 'workspace' | 'private', 'open' | 'invite_only'];
+      return { channel_id, workspace_id, slug, visibility, join_policy };
+    }),
     agentIdentities: [
-      { id: 'ag-1', owner_user_id: 'u-owner', standing_grant_id: 'hg-1', standing_renewal_grant_id: 'rg-1', display_name: 'Argon Lead', created_at: now },
-      { id: 'ag-inherited', owner_user_id: 'u-owner', display_name: 'Inherited Helper', created_at: now },
+      { id: 'ag-1', owner_user_id: 'u-owner', standing_grant_id: 'hg-1', standing_renewal_grant_id: 'rg-1', display_name: 'Argon', created_at: now },
+      { id: 'ag-inherited', owner_user_id: 'u-owner', display_name: 'Helper', created_at: now },
     ],
     hostedGrants: [{ grant_id: 'hg-1', state: 'active', revoked_at: null }],
     renewalGrants: [{ renewal_grant_id: 'rg-1', horizon_expires_at: '2099-01-01T00:00:00Z', revoked_at: null }],
@@ -47,26 +45,16 @@ function createFixture(): OrgChannelAuthorityState {
     workspaceGrants: ([['ws-1a','org-1','user','u-owner','owner'],['ws-1b','org-1','user','u-owner','owner'],['ws-2a','org-2','user','u-owner','owner'],['ws-1a','org-1','user','u-admin','admin'],['ws-1a','org-1','agent','ag-1','admin'],['ws-1b','org-1','agent','ag-1','member'],['ws-2a','org-2','agent','ag-1','member']] as const).map(([workspace_id, org_id, principal_kind, principal_id, role]) => ({ workspace_id, org_id, principal_kind, principal_id, role, created_at: now })),
     agentPrincipals: (['ap-1a:ws-1a', 'ap-1b:ws-1b', 'ap-2a:ws-2a'] as const).map((x) => {
       const [principal_id, workspace_id] = x.split(':') as [string, string];
-      return { principal_id, workspace_id, agent_identity_id: 'ag-1', owner_user_id: 'u-owner', name: 'Argon Lead' };
+      return { principal_id, workspace_id, agent_identity_id: 'ag-1', owner_user_id: 'u-owner', name: 'Argon' };
     }),
-    channelMemberships: ([
-      ['ch-1a-priv', 'ws-1a', 'user', 'u-owner', 'owner'],
-      ['ch-1a-priv', 'ws-1a', 'agent', 'ag-1', 'member'],
-    ] as const).map(([channel_id, workspace_id, principal_kind, principal_id, role]) => ({ channel_id, workspace_id, principal_kind, principal_id, role, notify_pref: 'all', joined_at: now })),
-    fileChannelBindings: ([
-      ['file-priv-1', 'ws-1a', 'ch-1a-priv'],
-      ['file-dual-1', 'ws-1a', 'ch-1a-gen'],
-      ['file-dual-1', 'ws-1a', 'ch-1a-priv'],
-    ] as const).map(([file_id, workspace_id, channel_id]) => ({ file_id, workspace_id, channel_id, bound_by_kind: 'user', created_at: now })),
+    channelMemberships: ([['ch-1a-priv', 'ws-1a', 'user', 'u-owner', 'owner'], ['ch-1a-priv', 'ws-1a', 'agent', 'ag-1', 'member']] as const).map(([channel_id, workspace_id, principal_kind, principal_id, role]) => ({ channel_id, workspace_id, principal_kind, principal_id, role, notify_pref: 'all', joined_at: now })),
+    fileChannelBindings: (['file-priv-1:ch-1a-priv', 'file-dual-1:ch-1a-gen', 'file-dual-1:ch-1a-priv'] as const).map((x) => {
+      const [file_id, channel_id] = x.split(':') as [string, string];
+      return { file_id, workspace_id: 'ws-1a', channel_id, bound_by_kind: 'user' as const, created_at: now };
+    }),
     connectionPolicies: [{ connection_id: 'conn-1', owner_user_id: 'u-owner', agent_identity_id: 'ag-1', default_org_id: 'org-1', default_workspace_id: 'ws-1a' }],
-    seats: [
-      { seat_id: 'seat-1a', workspace_id: 'ws-1a', principal_id: 'ap-1a', agent_identity_id: 'ag-1' },
-      { seat_id: 'seat-2a', workspace_id: 'ws-2a', principal_id: 'ap-2a', agent_identity_id: 'ag-1' },
-    ],
-    seatHandles: [
-      { handle_id: 'h-1a', seat_id: 'seat-1a', workspace_id: 'ws-1a' },
-      { handle_id: 'h-2a', seat_id: 'seat-2a', workspace_id: 'ws-2a' },
-    ],
+    seats: [{ seat_id: 'seat-1a', workspace_id: 'ws-1a', principal_id: 'ap-1a', agent_identity_id: 'ag-1' }, { seat_id: 'seat-2a', workspace_id: 'ws-2a', principal_id: 'ap-2a', agent_identity_id: 'ag-1' }],
+    seatHandles: [{ handle_id: 'h-1a', seat_id: 'seat-1a', workspace_id: 'ws-1a' }, { handle_id: 'h-2a', seat_id: 'seat-2a', workspace_id: 'ws-2a' }],
   };
 }
 
@@ -95,15 +83,18 @@ test('multi-org agent identity whoami pre-seat, post-seat, and standing credenti
   eq(canReadOrg(s, { ...c, now: '2100-01-01T00:00:00Z' }, 'org-1'), false);
   s.renewalGrants![0]!.revoked_at = '2026-10-21T01:00:00Z';
   eq(canReadOrg(s, c, 'org-1'), false);
-  s.renewalGrants![0]!.principal_id = 'ap-1a';
-  s.renewalGrants![0]!.workspace_id = 'ws-1a';
-  s.agentPrincipals!.push({ principal_id: 'ap-inh-1a', workspace_id: 'ws-1a', agent_identity_id: 'ag-inherited', owner_user_id: 'u-owner', name: 'Inherited Helper' });
+  s.agentIdentities[0]!.standing_renewal_grant_id = null;
+  Object.assign(s.renewalGrants![0]!, { principal_id: 'ap-1a', workspace_id: 'ws-1a', revoked_at: null });
+  s.agentPrincipals!.push({ principal_id: 'ap-inh-1a', workspace_id: 'ws-1a', agent_identity_id: 'ag-inherited', owner_user_id: 'u-owner', name: 'Inh' });
   s.renewalGrants!.push({ renewal_grant_id: 'rg-inh-1a', principal_id: 'ap-inh-1a', workspace_id: 'ws-1a', horizon_expires_at: '2099-01-01T00:00:00Z', revoked_at: null });
+  eq(canReadOrg(s, c, 'org-1') && canReadWorkspace(s, c, 'ws-1a') && canReadWorkspace(s, ag('ag-inherited'), 'ws-1a'), true);
+  s.renewalGrants![0]!.revoked_at = '2026-10-21T01:00:00Z';
   eq(canReadWorkspace(s, c, 'ws-1a'), false);
+  eq(canReadWorkspace(s, ag('ag-inherited'), 'ws-1a'), true);
+  s.renewalGrants![0]!.revoked_at = null;
   cascadeWorkspaceMemberRemoval(s, { workspace_id: 'ws-1a', principal_kind: 'agent', principal_id: 'ag-1' });
-  eq(canReadOrg(s, c, 'org-1'), true);
-  eq(canReadWorkspace(s, c, 'ws-1a'), false);
-  eq(canReadWorkspace(s, c, 'ws-1b'), true);
+  eq(s.renewalGrants![0]!.revoked_at != null && s.renewalGrants![1]!.revoked_at == null, true);
+  eq(canReadOrg(s, c, 'org-1') && canReadWorkspace(s, c, 'ws-1b') && !canReadWorkspace(s, c, 'ws-1a'), true);
   eq(canReadWorkspace(s, ag('ag-inherited'), 'ws-1a'), true);
 });
 
@@ -157,9 +148,8 @@ test('explicit org/workspace revocation overrides owner inheritance (including t
   cascadeOrgMemberRemoval(s, { org_id: 'org-1', principal_kind: 'agent', principal_id: 'ag-inherited' });
   eq(canReadOrg(s, inh, 'org-1'), false);
 
-  s.agentIdentities!.push({ id: 'ag-b', owner_user_id: 'u-owner', display_name: 'Inherited Helper', created_at: now });
-  eq(canReadOrg(s, ag('ag-b'), 'org-1'), true);
-  eq(canReadWorkspace(s, ag('ag-b'), 'ws-1a'), true);
+  s.agentIdentities!.push({ id: 'ag-b', owner_user_id: 'u-owner', display_name: 'H', created_at: now });
+  eq(canReadOrg(s, ag('ag-b'), 'org-1') && canReadWorkspace(s, ag('ag-b'), 'ws-1a'), true);
 
   const rw = cascadeWorkspaceMemberRemoval(s, { workspace_id: 'ws-1a', principal_kind: 'agent', principal_id: 'ag-1' });
   deq(rw.closed_seat_ids, ['seat-1a']);
@@ -171,11 +161,10 @@ test('explicit org/workspace revocation overrides owner inheritance (including t
   deq(ro.closed_seat_ids, ['seat-2a']);
   eq(canReadOrg(s, c, 'org-2'), false);
 
-  s.agentPrincipals!.push({ principal_id: 'ap-2a-rec', workspace_id: 'ws-2a', agent_identity_id: 'ag-1', owner_user_id: 'u-owner', name: 'Argon Lead' });
-  eq(canReadOrg(s, ag('ap-2a-rec'), 'org-2'), false);
-  eq(canReadWorkspace(s, ag('ap-2a-rec'), 'ws-2a'), false);
-  s.agentIdentities.push({ id: 'ap-1b-t', owner_user_id: 'u-owner', display_name: 'Argon Lead', created_at: now });
-  s.agentPrincipals!.push({ principal_id: 'ap-1b-t', workspace_id: 'ws-1b', agent_identity_id: 'ap-1b-t', owner_user_id: 'u-owner', name: 'Argon Lead' }, { principal_id: 'ap-1b-r', workspace_id: 'ws-1a', agent_identity_id: 'ap-1b-t', owner_user_id: 'u-owner', name: 'Argon Lead' });
+  s.agentPrincipals!.push({ principal_id: 'ap-2a-rec', workspace_id: 'ws-2a', agent_identity_id: 'ag-1', owner_user_id: 'u-owner', name: 'A' });
+  eq(canReadOrg(s, ag('ap-2a-rec'), 'org-2') || canReadWorkspace(s, ag('ap-2a-rec'), 'ws-2a'), false);
+  s.agentIdentities.push({ id: 'ap-1b-t', owner_user_id: 'u-owner', display_name: 'A', created_at: now });
+  s.agentPrincipals!.push({ principal_id: 'ap-1b-t', workspace_id: 'ws-1b', agent_identity_id: 'ap-1b-t', owner_user_id: 'u-owner', name: 'A' }, { principal_id: 'ap-1b-r', workspace_id: 'ws-1a', agent_identity_id: 'ap-1b-t', owner_user_id: 'u-owner', name: 'A' });
   s.seats!.push({ seat_id: 'seat-1b-t', workspace_id: 'ws-1b', principal_id: 'ap-1b-t', agent_identity_id: 'ap-1b-t' });
   reconcileAgentIdentityMerge(s, { principal_id: 'ap-1b-t', target_agent_identity_id: 'ag-1' });
   eq(resolveOrgWorkspaceChannelSelector(s, ag('ap-1b-t'), { seat_id: 'seat-1b-t' }).ok, true);
@@ -213,15 +202,12 @@ test('guest channel isolation, every-channel file bindings, and fail-closed priv
   eq(bootstrapPrivateChannelMemberships(s, ag('ap-1a'), 'ch-ag-priv', now).ok, true);
   eq(canReadChannel(s, ag('ap-1a'), 'ch-ag-priv'), true);
   s.channelMemberships.forEach((m) => { if (m.channel_id === 'ch-ag-priv') m.revoked_at = now; });
-  eq(bootstrapPrivateChannelMemberships(s, ag('ap-1a'), 'ch-ag-priv', now).ok, false);
-  eq(canModifyChannelMembership(s, ag('ap-1a'), 'ch-ag-priv', ag('ag-1'), 'owner').ok, false);
+  eq(bootstrapPrivateChannelMemberships(s, ag('ap-1a'), 'ch-ag-priv', now).ok || canModifyChannelMembership(s, ag('ap-1a'), 'ch-ag-priv', ag('ag-1'), 'owner').ok, false);
   s.channels.find((c) => c.channel_id === 'ch-1a-priv')!.archived_at = now;
-  eq(canReadChannel(s, own, 'ch-1a-priv'), true);
-  eq(canReadChannelBoundFile(s, own, 'file-dual-1', 'ws-1a'), true);
+  eq(canReadChannel(s, own, 'ch-1a-priv') && canReadChannelBoundFile(s, own, 'file-dual-1', 'ws-1a'), true);
   s.channels.find((c) => c.channel_id === 'ch-1a-priv')!.archived_at = null;
   delete s.privateChannelsEnabled;
-  eq(canReadChannel(s, own, 'ch-1a-priv'), false);
-  eq(canModifyChannelMembership(s, own, 'ch-1a-priv', adm).ok, false);
+  eq(canReadChannel(s, own, 'ch-1a-priv') || canModifyChannelMembership(s, own, 'ch-1a-priv', adm).ok, false);
   const dTr = validateChannelVisibilityTransition({ nextVisibility: 'private', nextJoinPolicy: 'invite_only' });
   eq(dTr.ok, false);
   if (!dTr.ok) eq(dTr.refusal.code, 'PRIVATE_CHANNELS_DISABLED');
