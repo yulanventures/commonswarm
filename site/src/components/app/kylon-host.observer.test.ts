@@ -30,7 +30,8 @@ const fixtureScript = `
   const until = async (predicate, label) => {
     const deadline = performance.now() + 2000;
     while (!predicate() && performance.now() < deadline) await new Promise(resolve => requestAnimationFrame(resolve));
-    if (!predicate()) throw Error(label + ': ' + JSON.stringify({ width: innerWidth, fonts: document.fonts.status,
+    if (!predicate()) throw Error(label + ': ' + JSON.stringify({ width: innerWidth, height: innerHeight, fonts: document.fonts.status,
+      phoneMedia: matchMedia('(max-width:52rem)').matches, scheme: getComputedStyle(app).getPropertyValue('--k-shell-scheme'), modal: app.querySelector('dialog')?.open,
       standalone: frame.hasAttribute('data-home-standalone'), field: app.querySelector('[data-todo-comment]')?.outerHTML,
       context: { headerParent: slot.parentElement?.className, railParent: context.parentElement?.tagName,
         sideParent: fixture.side?.parentElement?.tagName, summaries: [...app.querySelectorAll('.cs-todo-context summary')].map(node => node.textContent) } }));
@@ -58,6 +59,59 @@ const fixtureScript = `
         || /hidden|clip|auto|scroll/.test(s.overflowY) && (ring.top < q.top - .5 || ring.bottom > q.bottom + .5)) clips.push({ className: a.className, bounds: q });
     }
     return { width: b.width, height: b.height, ring, clips, inside: ring.left >= -.5 && ring.top >= -.5 && ring.right <= innerWidth + .5 && ring.bottom <= innerHeight + .5 };
+  };
+  const rect = node => node.getBoundingClientRect().toJSON();
+  const firstLine = node => { const range = document.createRange(); range.selectNodeContents(node); return [...range.getClientRects()].find(r => r.width && r.height)?.toJSON(); };
+  const mainBounds = () => { const node = frame.querySelector('.hm-frame__main'), b = rect(node); return { left: b.left + node.clientLeft, right: b.left + node.clientLeft + node.clientWidth }; };
+  const column = node => ({ ...rect(node), main: mainBounds() });
+  const columnPair = (index, detail) => {
+    const desktop = !matchMedia('(max-width:52rem)').matches;
+    check('paired actual index/detail content edges', Math.abs(index.left - detail.left) <= .5 && Math.abs(index.right - detail.right) <= .5, { index, detail });
+    check(desktop ? 'centered desktop content gutters' : '24px phone content insets', [index, detail].every(b => desktop
+      ? Math.abs((b.left - b.main.left) - (b.main.right - b.right)) <= 2
+      : Math.abs(b.left - 24) <= .5 && Math.abs(innerWidth - b.right - 24) <= .5), { width: innerWidth, index, detail });
+  };
+  const color = value => {
+    const v = value.trim(), hex = v.match(/^#([0-9a-f]{6})$/i);
+    if (hex) return [0, 2, 4].map(at => parseInt(hex[1].slice(at, at + 2), 16)).concat(1);
+    const nums = v.match(/[0-9.]+/g)?.map(Number);
+    if (!/^rgba?[(]/.test(v) || !nums || nums.length < 3) throw Error('Unsupported measured color: ' + value);
+    return [...nums.slice(0, 3), nums[3] ?? 1];
+  };
+  const equalColor = (a, b) => color(a).every((v, i) => Math.abs(v - color(b)[i]) < .01);
+  const surface = node => {
+    const mixed = [0, 0, 0]; let alpha = 0;
+    for (let n = node; n; n = n.parentElement) {
+      const c = color(getComputedStyle(n).backgroundColor), contribution = (1 - alpha) * c[3];
+      for (let i = 0; i < 3; i++) mixed[i] += c[i] * contribution;
+      alpha += contribution; if (alpha >= .999) return mixed;
+    }
+    throw Error('No measured opaque surface');
+  };
+  const contrast = (a, b) => {
+    const luminance = rgb => rgb.slice(0, 3).map(v => v / 255).map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4)
+      .reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i], 0);
+    const x = luminance(a), y = luminance(b); return (Math.max(x, y) + .05) / (Math.min(x, y) + .05);
+  };
+  const token = (node, name) => getComputedStyle(node).getPropertyValue(name).trim();
+  const summaryAppearance = (label, open) => {
+    const node = summary(label), style = getComputedStyle(node), icon = getComputedStyle(node, '::before'), marker = getComputedStyle(node, '::marker');
+    const m = new DOMMatrixReadOnly(icon.transform === 'none' ? undefined : icon.transform);
+    const detail = { open, rect: rect(node), display: style.display, list: style.listStyleType, marker: marker.content,
+      webkitMarker: getComputedStyle(node, '::-webkit-details-marker').display, icon: { width: icon.width, height: icon.height, background: icon.backgroundColor, clip: icon.clipPath, transform: icon.transform } };
+    check('native summary has product16px secondary chevron: ' + label, style.display !== 'list-item' && style.listStyleType === 'none'
+      && ['none', 'normal', '""'].includes(marker.content) && icon.content === '""'
+      && parseFloat(icon.width) === 16 && parseFloat(icon.height) === 16 && icon.clipPath !== 'none'
+      && equalColor(icon.backgroundColor, token(node, '--k-shell-secondary')), detail);
+    check('native chevron rotation ' + label + '/' + open, Math.abs(m.a - (open ? 0 : 1)) < .001 && Math.abs(m.b - (open ? 1 : 0)) < .001
+      && Math.abs(m.c - (open ? -1 : 0)) < .001 && Math.abs(m.d - (open ? 0 : 1)) < .001, detail);
+  };
+  const checkboxAlignment = (input, title, edge) => {
+    const box = rect(input), line = firstLine(title), hit = rect(input.closest('label'));
+    check('painted checkbox meets content/13px gap/first line', Math.abs(box.left - edge) <= 1 && !!line
+      && Math.abs(line.left - box.right - 13) <= 1 && Math.abs((box.top + box.bottom - line.top - line.bottom) / 2) <= 1,
+      { width: innerWidth, edge, box, line, hit });
+    check('checkbox retains44px nonoverlapping hit owner', !!line && hit.width >= 44 && hit.height >= 44 && hit.right <= line.left + .5, { hit, line });
   };
   window.hostObserver = {
   checks, settle,
@@ -205,11 +259,12 @@ const fixtureScript = `
     check('native disclosures initially closed, retain original descendants', ['Workspace navigation', 'Workspace resources'].every(label => {
       const node = summary(label); return node?.tagName === 'SUMMARY' && node.parentElement.tagName === 'DETAILS' && !node.parentElement.open;
     }));
+    for (const label of ['Workspace navigation', 'Workspace resources']) summaryAppearance(label, false);
     const main = frame.querySelector('.hm-frame__main'), a = frame.getBoundingClientRect(), b = main.getBoundingClientRect();
     check('Todo main uses available working column without permanent resource column', Math.abs(a.width - b.width) <= 1, { frameWidth: a.width, mainWidth: b.width });
     check('ready index retains unique resource facts/URLs and omits only duplicate Todo card', JSON.stringify(inventory()) === JSON.stringify(contextInventory)
       && !fixture.side.querySelector('[data-side-card=todos]'), inventory());
-    const title = app.querySelector('[data-home-todos] h1'); this.contextIndexLeft = title.getBoundingClientRect().left;
+    const indexColumn = column(app.querySelector('[data-home-todos] .hm-todo-rows'));
     for (const view of ['todos', 'todo']) for (const state of ['pending', 'refused', 'failed', 'absent', view === 'todos' ? 'empty' : 'not-found', 'ready']) {
       fixture.renderContext(view, state);
       await until(() => contextMounted() && !!app.querySelector('[data-home-route-pane] h1'), 'Todo context/read state lost its real heading');
@@ -225,17 +280,18 @@ const fixtureScript = `
     }
     ({ bar, menu, heading } = fixture);
     const back = app.querySelector('[data-todo-back]'), assigned = app.querySelector('[data-todo-assigned] h2');
-    check('index/detail content gutter delta at most12px', Math.abs(this.contextIndexLeft - back.getBoundingClientRect().left) <= 12
-      && Math.abs(this.contextIndexLeft - assigned.getBoundingClientRect().left) <= 12,
-      { index: this.contextIndexLeft, back: back.getBoundingClientRect().left, assigned: assigned.getBoundingClientRect().left });
+    columnPair(indexColumn, column(assigned));
+    check('Back meets actual paired content edge', Math.abs(indexColumn.left - rect(back).left) <= .5, { indexColumn, back: rect(back) });
     check('mode listener has one active registration beyond original shell', fixture.listenerCount() === contextListeners + 1);
   },
   contextSummaryFocused(label) { return document.activeElement === summary(label); },
   async contextSummaryOpened(label, expected = true) {
     await until(() => summary(label)?.parentElement.open === expected, 'Native disclosure did not toggle: ' + label);
+    summaryAppearance(label, expected);
     const node = summary(label), style = getComputedStyle(node), geometry = paint(node, parseFloat(style.outlineWidth) + parseFloat(style.outlineOffset));
     check('native summary target/ring ' + label, node.matches(':focus-visible') && geometry.width >= 44 && geometry.height >= 44
-      && parseFloat(style.outlineWidth) === 2 && parseFloat(style.outlineOffset) === 2 && geometry.inside && !geometry.clips.length, geometry);
+      && parseFloat(style.outlineWidth) === 2 && parseFloat(style.outlineOffset) === 2 && geometry.inside && !geometry.clips.length
+      && contrast(color(style.outlineColor), surface(node.parentElement)) >= 3, { geometry, outline: style.outline, surface: surface(node.parentElement) });
   },
   async contextControlsAndRefresh() {
     const before = calls.length, parent = account.parentElement;
@@ -297,6 +353,71 @@ const fixtureScript = `
     check('leaving Todo removes context without losing resource facts/listener', !app.querySelector('.cs-todo-context')
       && fixture.listenerCount() === contextListeners && JSON.stringify(inventory()) === JSON.stringify(contextInventory));
   },
+  async styleIndex() {
+    this.styleWrites = calls.filter(call => call.kind === 'todo-write').length;
+    fixture.renderContext('todos'); ({ bar, menu, heading } = fixture);
+    await until(() => document.fonts.status === 'loaded' && !!app.querySelector('[data-home-todos] [data-todo-complete]'), 'Skinned mixed index not ready');
+    const pane = app.querySelector('[data-home-todos]'), rows = pane.querySelector('.hm-todo-rows');
+    this.styleColumn = column(rows);
+    const filters = [...pane.querySelectorAll('[data-todo-filter]')];
+    check('filters are borderless44px tabs with semantic selected fill', filters.length === 2 && filters.every(node => {
+      const s = getComputedStyle(node), b = rect(node), borders = [s.borderTopWidth, s.borderRightWidth, s.borderBottomWidth, s.borderLeftWidth].map(parseFloat);
+      return borders.every(v => v === 0) && b.width >= 44 && b.height >= 44 && s.boxShadow === 'none'
+        && (node.getAttribute('aria-pressed') === 'true' ? equalColor(s.backgroundColor, token(node, '--k-shell-selected')) : color(s.backgroundColor)[3] === 0);
+    }), filters.map(node => ({ text: node.textContent, rect: rect(node), border: getComputedStyle(node).border, fill: getComputedStyle(node).backgroundColor })));
+    const input = rows.querySelector('[data-todo-complete]'), title = input.closest('li').querySelector('.hm-todo-row-title');
+    checkboxAlignment(input, title, this.styleColumn.left);
+    const reader = rows.querySelector('[data-todo-row="main-reader"]');
+    check('mixed row rights and text alignment retained', !!reader && !reader.querySelector('input') && !!reader.querySelector('span.hm-todo-check-hit')
+      && Math.abs(firstLine(reader.querySelector('.hm-todo-row-title')).left - firstLine(title).left) <= .5);
+  },
+  async styleDetail() {
+    // Same bounded optional VM variant: real read-only index, then real writable detail. No write is made.
+    fixture.renderTodo('todos', false, true);
+    const reader = app.querySelector('[data-home-todos] .hm-todo-row-title'), indexTitle = app.querySelector('[data-home-todos] h1');
+    check('entirely read-only row text meets index heading', !app.querySelector('[data-home-todos] input[type=checkbox]')
+      && Math.abs(firstLine(reader).left - firstLine(indexTitle).left) <= 1, { row: firstLine(reader), heading: firstLine(indexTitle) });
+    fixture.renderTodo('todo', false, true); ({ bar, menu, heading } = fixture);
+    await until(() => document.fonts.status === 'loaded' && app.querySelectorAll('[data-todo-start] .hm-choice').length === 4, 'Controlled native detail controls not ready');
+    const assigned = app.querySelector('[data-todo-assigned] h2'), detail = column(assigned);
+    columnPair(this.styleColumn, detail);
+    check('detail Back meets paired column', Math.abs(rect(app.querySelector('[data-todo-back]')).left - detail.left) <= .5);
+    checkboxAlignment(app.querySelector('.hm-todo-done-box'), app.querySelector('.hm-todo-title'), detail.left);
+    const choices = [...app.querySelectorAll('[data-todo-start] .hm-choice')], bounds = choices.map(rect), phone = matchMedia('(max-width:52rem)').matches;
+    check('start choices retain44px natural labels', bounds.every(b => b.width >= 44 && b.height >= 44) && choices.every(node => {
+      const range = document.createRange(); range.selectNodeContents(node.querySelector('.hm-choice-copy')); const b = rect(node);
+      const glyphs = [...range.getClientRects()].filter(r => r.width && r.height);
+      return glyphs.length > 0 && glyphs.every(r => r.left >= b.left - .5 && r.right <= b.right + .5 && r.top >= b.top - .5 && r.bottom <= b.bottom + .5);
+    }), bounds);
+    check(phone ? 'phone start choices form equal2x2' : 'desktop start choices keep one row', phone
+      ? Math.abs(bounds[0].top - bounds[1].top) <= .5 && Math.abs(bounds[2].top - bounds[3].top) <= .5 && bounds[2].top >= bounds[0].bottom
+        && Math.abs(bounds[0].left - bounds[2].left) <= .5 && Math.abs(bounds[1].right - bounds[3].right) <= .5
+        && Math.max(...bounds.map(b => b.width)) - Math.min(...bounds.map(b => b.width)) <= 1 && Math.abs(bounds[3].right - detail.right) <= .5
+      : bounds.every(b => Math.abs(b.top - bounds[0].top) <= .5), { phone, bounds, detail });
+    for (const node of [app.querySelector('.hm-assign-chip[aria-checked="true"]'), app.querySelector('.hm-choice:has(input:checked)')]) {
+      const s = getComputedStyle(node), inside = surface(node), outside = surface(node.parentElement), ratios = [inside, outside].map(bg => contrast(color(s.borderLeftColor), bg));
+      check('selected actual chip/choice uses distinct olive with3:1 both sides', equalColor(s.borderLeftColor, token(node, '--cs-accent'))
+        && parseFloat(s.borderLeftWidth) >= 1 && s.boxShadow === 'none' && ratios.every(ratio => ratio >= 3),
+        { text: node.textContent, border: s.border, background: s.backgroundColor, inside, outside, ratios });
+    }
+  },
+  styleFocused(kind) {
+    const selector = kind === 'index' ? '[data-home-todos] [data-todo-complete]' : kind === 'chip' ? '.hm-assign-chip[aria-checked="true"]' : '.hm-choice input:checked';
+    return document.activeElement === app.querySelector(selector);
+  },
+  async schemeReady(scheme) {
+    await until(() => token(app, '--k-shell-scheme') === scheme && document.fonts.status === 'loaded', 'Actual scheme/fonts did not settle: ' + scheme);
+  },
+  styleRing(kind) {
+    const active = document.activeElement, node = kind === 'chip' ? active : active.closest('label'), s = getComputedStyle(node), geometry = paint(node, parseFloat(s.outlineWidth) + parseFloat(s.outlineOffset));
+    const ratios = [surface(node), surface(node.parentElement)].map(bg => contrast(color(s.outlineColor), bg));
+    check('native ' + kind + ' retains full distinct2+2 ring/44px', active.matches(':focus-visible') && geometry.width >= 44 && geometry.height >= 44
+      && parseFloat(s.outlineWidth) === 2 && parseFloat(s.outlineOffset) === 2 && s.boxShadow === 'none' && geometry.inside && !geometry.clips.length
+      && equalColor(s.outlineColor, token(node, '--k-shell-focus')) && ratios.every(ratio => ratio >= 3)
+      && (kind === 'index' || !equalColor(s.outlineColor, s.borderLeftColor)), { kind, width: innerWidth, geometry, outline: s.outline, border: s.border, ratios });
+    check('native control focus submits no invented writes', calls.filter(call => call.kind === 'todo-write').length === this.styleWrites);
+  },
+  styleRestore() { fixture.renderResources('ready', 'chat'); fixture.restoreTodo(); ({ bar, menu, heading } = fixture); },
   async finish() {
     host.syncMenu(false); slot.replaceChildren(); frame.classList.add('hm-frame--catchup');
     host.sync(project({ view: 'catchup' })); await settle();
@@ -345,10 +466,15 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
     for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: name, code: name, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code });
   };
   await send("Emulation.setFocusEmulationEnabled", { enabled: true });
-  const tabSummary = async (label: string) => {
-    const query = `window.hostObserver.contextSummaryFocused(${JSON.stringify(label)})`, deadline = Date.now() + 2000;
+  const nativeTab = async (query: string, label: string) => {
+    const deadline = Date.now() + 2000;
     while (!await evaluate(query) && Date.now() < deadline) await key("Tab");
-    assert.equal(await evaluate(query), true, `native Tab reaches actual ${label}`);
+    assert.equal(await evaluate(query), true, `native Tab reaches actual ${label}: ${JSON.stringify(await evaluate("({width:innerWidth,media:matchMedia('(max-width:52rem)').matches,modal:document.querySelector('dialog')?.open,active:document.activeElement?.outerHTML})"))}`);
+  };
+  const tabSummary = (label: string) => nativeTab(`window.hostObserver.contextSummaryFocused(${JSON.stringify(label)})`, label);
+  const scheme = async (value: string) => {
+    await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value }] });
+    await evaluate(`window.hostObserver.schemeReady(${JSON.stringify(value)})`);
   };
   for (const [width, height] of [[1471, 900], [1024, 900], [833, 900], [390, 844], [320, 568], [735, 424]]) {
     await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
@@ -373,10 +499,16 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
     await evaluate("window.hostObserver.refreshFocus()");
     if ([1471, 1024].includes(width)) {
       await evaluate("window.hostObserver.contextBegin()");
-      for (const label of ["Workspace navigation", "Workspace resources"]) {
-        await tabSummary(label); await key("Enter");
-        await evaluate(`window.hostObserver.contextSummaryOpened(${JSON.stringify(label)})`);
+      for (const theme of ["light", "dark"]) {
+        await scheme(theme);
+        for (const label of ["Workspace navigation", "Workspace resources"]) {
+          await tabSummary(label); await evaluate(`window.hostObserver.contextSummaryOpened(${JSON.stringify(label)}, false)`);
+          await key("Enter"); await evaluate(`window.hostObserver.contextSummaryOpened(${JSON.stringify(label)})`);
+          await key("Enter"); await evaluate(`window.hostObserver.contextSummaryOpened(${JSON.stringify(label)}, false)`);
+        }
       }
+      await scheme("light");
+      for (const label of ["Workspace navigation", "Workspace resources"]) { await tabSummary(label); await key("Enter"); await evaluate(`window.hostObserver.contextSummaryOpened(${JSON.stringify(label)})`); }
       await evaluate("window.hostObserver.contextControlsAndRefresh()");
       // Native Tab establishes the actual disclosure focus before width relocation; no post-resize correction.
       await tabSummary("Workspace resources");
@@ -392,6 +524,19 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
       await evaluate("window.hostObserver.openDrawer()");
       await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
       await evaluate("window.hostObserver.contextReturnedDesktop()");
+    }
+    if ([1471, 1024, 390, 320, 735].includes(width)) {
+      for (const theme of ["light", "dark"]) {
+        await scheme(theme); await evaluate("window.hostObserver.styleIndex()");
+        await nativeTab("window.hostObserver.styleFocused('index')", "mixed-index checkbox"); await evaluate("window.hostObserver.styleRing('index')");
+        await evaluate("window.hostObserver.styleDetail()");
+        for (const kind of ["chip", "choice"]) {
+          await nativeTab(`window.hostObserver.styleFocused(${JSON.stringify(kind)})`, `selected ${kind}`);
+          await evaluate(`window.hostObserver.styleRing(${JSON.stringify(kind)})`);
+        }
+        await evaluate("window.hostObserver.styleRestore()");
+      }
+      await scheme("light");
     }
     if ([1471, 320, 735].includes(width)) for (const delivers of [true, false]) {
       await evaluate(`window.hostObserver.todoEnter(${delivers})`);
