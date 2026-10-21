@@ -1,5 +1,6 @@
 @import "./dashboard-rail-brand.css";
 @import "./kylon-tokens.css";
+@import "./kylon-font.css";
 
 /* Candidate: existing shell presentation only. No route/visibility/layout reset.
  * Prefix beats the legacy inline global rules without !important. Home/status
