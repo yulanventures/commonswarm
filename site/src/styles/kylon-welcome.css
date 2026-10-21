@@ -1,0 +1,243 @@
+/* Signed-out welcome only. Existing auth states, provider order and action variants
+   remain owned by the dashboard. No reference assets, extra steps or motion. */
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] {
+  --accent: #697344;
+  --accent-bright: #535d33;
+  --accent-ink: #fff;
+  --accent-dim: var(--k-shell-selected);
+  --text: var(--k-shell-ink);
+  --text-muted: var(--k-shell-secondary);
+  --elev-1: var(--k-shell-surface);
+  --elev-2: var(--k-shell-surface);
+  --border-interactive: var(--k-shell-control);
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-inline-size: 0;
+  min-block-size: 100svh;
+  margin-inline: 0;
+  padding-block: 48px;
+  padding-inline: max(24px, calc((100% - 40rem) / 2));
+  gap: 24px;
+  background: var(--k-shell-subtle);
+  color: var(--k-shell-ink);
+  font-family: var(--k-shell-font);
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] > * {
+  min-inline-size: 0;
+  max-inline-size: 100%;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__gateway-mark {
+  min-block-size: 44px;
+  color: var(--k-shell-ink);
+  font-family: var(--k-shell-font);
+  font-size: 18px;
+  letter-spacing: -0.3px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__gateway-copy {
+  gap: 12px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] h1 {
+  max-inline-size: none;
+  color: var(--k-shell-ink);
+  font-family: var(--k-shell-font);
+  font-size: 32px;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.5px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__gateway-copy > p {
+  max-inline-size: 52ch;
+  margin: 0;
+  color: var(--k-shell-secondary);
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__gateway-copy > .dashboard__gateway-note {
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] :is(.dashboard__signin-choices, .dashboard__email, .dashboard__email-sent, .dashboard__form-error) {
+  box-sizing: border-box;
+  inline-size: 100%;
+  max-inline-size: 28rem;
+  gap: 12px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__email-row {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__email label {
+  color: var(--k-shell-ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] :is(.dashboard__email input, .dashboard__button) {
+  box-sizing: border-box;
+  min-inline-size: 0;
+  min-block-size: 44px;
+  border-radius: var(--k-shell-radius);
+  font-family: var(--k-shell-font);
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__email input {
+  /* Keep 16px input text on phones without changing the browser's zoom behavior. */
+  font-size: 16px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__button {
+  inline-size: 100%;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] :is(.dashboard__auth-note, .dashboard__legal-note) {
+  max-inline-size: 28rem;
+  color: var(--k-shell-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note a {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-block-size: 44px;
+  /* Preserve the prose line box while keeping the actual link target 44px tall. */
+  margin-block: calc(.8em - 22px);
+  padding-inline: 2px;
+  color: var(--k-shell-ink);
+  text-underline-offset: 3px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__auth-divider {
+  color: var(--k-shell-muted);
+  font-size: 12px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] :is(.dashboard__auth-note, .dashboard__email-sent, .dashboard__form-error, .dashboard__legal-note) {
+  overflow-wrap: anywhere;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__text-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  justify-self: start;
+  box-sizing: border-box;
+  inline-size: auto;
+  max-inline-size: 100%;
+  min-inline-size: 0;
+  min-block-size: 44px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  padding-inline: 0;
+  text-align: start;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] div.dashboard__form-error:not([hidden]) {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__form-error > p {
+  margin: 0;
+}
+
+/* ProviderButtons omits its markup when no provider is enabled. The sole
+   available sign-in action then takes the primary treatment, with no new flag. */
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__signin-choices:not(:has([data-signin-provider])) .dashboard__email button[type="submit"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__signin-choices:not(:has([data-signin-provider])) .dashboard__email button[type="submit"]:hover:not(:disabled) {
+  background: var(--accent-bright);
+  border-color: var(--accent-bright);
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__email-sent {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__email-sent > * {
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  overflow-wrap: anywhere;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] :is(a, button, input) {
+  scroll-margin-block: 6px;
+}
+
+/* The column has 24px edge clearance and 12px control gaps for the full ring.
+   Native [hidden], disabled, busy, success and error styling is not replaced. */
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] :is(a, button, input):focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 3px;
+  box-shadow: none;
+}
+
+/* Keep the 44px link target; draw focus around its text, clear of wrapped prose. */
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note a:focus-visible {
+  outline: none;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note a:focus-visible::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  inset-block: calc(50% - .7em);
+  inset-inline: 2px;
+  border-radius: 2px;
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 0;
+}
+
+@media (width <= 34rem) {
+  live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] {
+    padding-block: 24px;
+    gap: 20px;
+  }
+
+  live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] h1 {
+    font-size: 28px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] :is(a, button, input) {
+    animation: none;
+    transition: none;
+    transform: none;
+  }
+}
+
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] :is(a, button, input):focus-visible {
+    outline-color: Highlight;
+  }
+  /* Replace the global forced full-target outline with the visible Highlight pseudo. */
+  live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note a:focus-visible {
+    outline: none !important;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note a:focus-visible::after {
+    outline-color: Highlight;
+  }
+}

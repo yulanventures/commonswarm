@@ -38,6 +38,7 @@ import "../../styles/kylon-shell.css";
 import "../../styles/kylon-layout/index.css";
 import "../../styles/kylon-workspace-settings-integration.css";
 import "../../styles/kylon-files.css";
+import "../../styles/dashboard-welcome.css";
 
 const signInMethods = signInDoors(await enabledProvidersForBuild({
   url: import.meta.env.PUBLIC_SUPABASE_URL,
@@ -11423,35 +11424,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     color: var(--text-muted);
     font-size: var(--t-sm);
     line-height: var(--lh-sm);
-  }
-
-  /* ProviderButtons renders its buttons inside ONE wrapper, so the wrapper is a single grid
-     item of .dashboard__signin-choices and has to carry the row gap itself. Without this rule
-     a second provider stacks flush against the first, which is invisible on a one-provider
-     build and wrong when multiple providers are enabled. */
-  .dashboard__providers {
-    display: grid;
-    gap: var(--s-3);
-  }
-
-  .dashboard__providers > .dashboard__button {
-    inline-size: 100%;
-  }
-
-  .dashboard__auth-divider {
-    display: grid;
-    grid-template-columns: 1fr auto 1fr;
-    align-items: center;
-    gap: var(--s-3);
-    color: var(--text-faint);
-    font-size: var(--t-xs);
-  }
-
-  .dashboard__auth-divider::before,
-  .dashboard__auth-divider::after {
-    content: "";
-    block-size: 1px;
-    background: var(--border);
   }
 
   .dashboard__email input,
