@@ -22,6 +22,7 @@ export const registerOrgActionExecutor = (k: string, fn: OrgActionExecutor) => {
 export const getOrgDb = (s: OrgAuthorityState, db?: OrgSqlExecutor): OrgSqlExecutor | undefined => db ?? s.db;
 export const execOrgSql = (db: OrgSqlExecutor | undefined, sql: string, p: readonly unknown[] = []) => (db ? db.query(sql, p) : undefined);
 
+const isTh = (v: unknown): v is PromiseLike<unknown> => Boolean(v && typeof (v as { then?: unknown }).then === 'function');
 const snapS = (s: OrgAuthorityState) => {
  const o: Record<string, unknown> = {}, r = s as unknown as Record<string, unknown>;
  for (const k of Object.keys(r)) if (k !== 'db' && k !== '_inTx' && r[k] !== undefined) o[k] = structuredClone(r[k]);
@@ -35,20 +36,74 @@ const restS = (s: OrgAuthorityState, sn: Record<string, unknown>) => {
 
 export function withOrgTx<T>(s: OrgAuthorityState, db: OrgSqlExecutor | undefined, fn: (tx: OrgSqlExecutor | undefined) => T): T {
  const act = getOrgDb(s, db), sn = !s._inTx ? snapS(s) : null;
+ const failTx = (e: unknown): never => { if (sn) restS(s, sn); throw e; };
  if (!act) {
-  try { const r = fn(undefined); return r instanceof Promise ? (r.catch((e) => { if (sn) restS(s, sn); throw e; }) as T) : r; }
-  catch (e) { if (sn) restS(s, sn); throw e; }
+  try { const r = fn(undefined); return isTh(r) ? (Promise.resolve(r).catch(failTx) as unknown as T) : r; }
+  catch (e) { return failTx(e); }
  }
  const run = (tx: OrgSqlExecutor): T => {
-  const pD = s.db, pT = s._inTx; s.db = tx; s._inTx = true; let asy = false;
-  try {
-   const o = fn(tx);
-   if (o instanceof Promise) { asy = true; return o.then((v) => { s.db = pD; s._inTx = pT; return v; }, (e) => { s.db = pD; s._inTx = pT; if (sn) restS(s, sn); throw e; }) as T; }
-   return o;
-  } catch (e) { if (sn) restS(s, sn); throw e; } finally { if (!asy) { s.db = pD; s._inTx = pT; } }
+  if ((tx as { _w?: boolean })._w) return fn(tx);
+  const pD = s.db, pT = s._inTx, qRes: unknown[] = [];
+  let qi = 0, pend: Array<() => Promise<unknown>> = [], hadSusp = false;
+  const wTx: OrgSqlExecutor & { _w?: boolean } = {
+   _w: true, rpc: tx.rpc?.bind(tx),
+   storage: tx.storage ? {
+    put: (k, d, ct) => {
+     if (pend.length) { pend.push(() => Promise.resolve(tx.storage!.put?.(k, d, ct))); return; }
+     const r = tx.storage!.put?.(k, d, ct); if (isTh(r)) pend.push(() => Promise.resolve(r)); return r;
+    },
+    delete: (k) => {
+     if (pend.length) { pend.push(() => Promise.resolve(tx.storage!.delete?.(k))); return; }
+     const r = tx.storage!.delete?.(k); if (isTh(r)) pend.push(() => Promise.resolve(r)); return r;
+    },
+   } : undefined,
+   query(sql, p = []) {
+    const idx = qi++;
+    if (idx < qRes.length) return qRes[idx];
+    const need = /^SELECT\s+\*|^UPDATE\s+swarm\.org_(?:invites|approval_requests)\b/i.test(sql.trim());
+    if (pend.length) {
+     if (need) { const ps = pend; pend = []; throw { _susp: (async () => { for (const f of ps) await f(); return tx.query(sql, p); })(), idx }; }
+     pend.push(() => Promise.resolve(tx.query(sql, p)));
+     return (qRes[idx] = { rows: [], rowCount: 1 });
+    }
+    const r = tx.query(sql, p);
+    if (isTh(r)) {
+     if (need) throw { _susp: r, idx };
+     pend.push(() => Promise.resolve(r));
+     return (qRes[idx] = { rows: [], rowCount: 1 });
+    }
+    return (qRes[idx] = r);
+   },
+  };
+  const step = (): T => {
+   const pre = snapS(s); qi = 0; pend = []; s.db = wTx; s._inTx = true;
+   try {
+    const out = fn(wTx);
+    if (isTh(out) || pend.length || hadSusp) {
+     const ps = pend; pend = [];
+     return (async () => {
+      try { const v = await out; for (const f of ps) await f(); s.db = pD; s._inTx = pT; return v; }
+      catch (e) { s.db = pD; s._inTx = pT; return failTx(e); }
+     })() as unknown as T;
+    }
+    s.db = pD; s._inTx = pT; return out;
+   } catch (e) {
+    s.db = pD; s._inTx = pT;
+    if (e && typeof e === 'object' && '_susp' in e) {
+     hadSusp = true; restS(s, pre);
+     const sp = e as { _susp: PromiseLike<unknown>; idx: number };
+     return Promise.resolve(sp._susp).then((v) => { qRes[sp.idx] = v; return step(); }, failTx) as unknown as T;
+    }
+    return failTx(e);
+   }
+  };
+  return step();
  };
  if (s._inTx || !act.withTransaction) return run(act);
- try { return act.withTransaction((tx) => run(tx)); } catch (e) { if (sn) restS(s, sn); throw e; }
+ try {
+  const r = act.withTransaction((tx) => run(tx));
+  return isTh(r) ? (Promise.resolve(r).catch(failTx) as unknown as T) : r;
+ } catch (e) { return failTx(e); }
 }
 
 export const roleRank = (r: OrgRole | null | undefined): number => r === 'owner' ? 4 : r === 'admin' ? 3 : r === 'member' ? 2 : r === 'guest' ? 1 : 0;
@@ -57,14 +112,18 @@ export const findLiveOrg = (s: OrgAuthorityState, idOrSlug: string): Organizatio
  return s.organizations.find((o) => isLive(o) && (o.id === t || norm(o.slug) === norm(t)));
 };
 
-export function syncLockedOrgRows(s: OrgAuthorityState, orgId: string, tx?: OrgSqlExecutor) {
+export function syncLockedOrgRows(s: OrgAuthorityState, orgId: string, tx?: OrgSqlExecutor, between?: () => void) {
  const oR = execOrgSql(tx, 'SELECT * FROM swarm.organizations WHERE id = $1 FOR UPDATE', [orgId]) as OrgSqlQueryResult<Partial<OrganizationSummary>> | undefined;
- for (const r of oR?.rows ?? []) { const ex = s.organizations.find((o) => o.id === r.id); if (ex && r.slug) Object.assign(ex, r); }
+ for (const r of oR?.rows ?? []) {
+  const ex = s.organizations.find((o) => o.id === r.id);
+  if (ex) { if (r.slug) Object.assign(ex, r); } else if (r.id && r.slug) s.organizations.push({ display_name: r.slug, created_by: '', created_at: '', updated_at: '', ...r } as OrganizationSummary);
+ }
+ between?.();
  const mR = execOrgSql(tx, 'SELECT * FROM swarm.org_memberships WHERE org_id = $1 ORDER BY id FOR UPDATE', [orgId]) as OrgSqlQueryResult<Partial<OrgMembershipRecord>> | undefined;
  for (const r of mR?.rows ?? []) {
   if (!r.principal_kind || !r.principal_id || !r.role) continue;
-  const ex = s.orgMemberships.find((m) => m.org_id === (r.org_id ?? orgId) && isPrin(m, r.principal_kind!, r.principal_id!));
-  if (ex) Object.assign(ex, r);
+  const oId = r.org_id ?? orgId, ex = s.orgMemberships.find((m) => m.org_id === oId && isPrin(m, r.principal_kind!, r.principal_id!));
+  if (ex) Object.assign(ex, r); else s.orgMemberships.push({ org_id: oId, created_at: '', ...r } as OrgMembershipRecord);
  }
 }
 
@@ -107,7 +166,20 @@ export function upsertAgentPrincipalInWorkspace(s: OrgAuthorityState, wsId: stri
  return ap;
 }
 
-const IGN = new Set(['approval_id', 'require_approval', 'on_behalf_of_owner', 'now', 'kind']);
+const IGN = new Set(['approval_id', 'require_approval', 'on_behalf_of_owner', 'now', 'kind', '_consumed_at']);
+export const isApprConsumed = (a: OrgApprovalRequest) => Boolean((a as { consumed_at?: unknown }).consumed_at || (a.target_scope as Record<string, unknown> | undefined)?._consumed_at);
+export const markApprConsumed = (a: OrgApprovalRequest, iso: string) => {
+ (a as { consumed_at?: string }).consumed_at = iso;
+ a.target_scope = { ...(a.target_scope ?? {}), _consumed_at: iso };
+};
+export function syncLockedApprovalRow(s: OrgAuthorityState, id: string, tx?: OrgSqlExecutor) {
+ const r = execOrgSql(tx, 'SELECT * FROM swarm.org_approval_requests WHERE approval_id = $1 FOR UPDATE', [id]) as OrgSqlQueryResult<OrgApprovalRequest> | undefined;
+ for (const row of r?.rows ?? []) {
+  if (!row.approval_id) continue;
+  const ex = (s.approvalRequests ??= []).find((a) => a.approval_id === row.approval_id);
+  if (ex) Object.assign(ex, row); else s.approvalRequests.push(row);
+ }
+}
 export function canonicalApprovalJson(v: unknown): string {
  if (v === null || typeof v !== 'object') return JSON.stringify(v);
  if (Array.isArray(v)) return `[${v.map(canonicalApprovalJson).join(',')}]`;
@@ -132,25 +204,29 @@ export function createOrgApprovalCard(s: OrgAuthorityState, c: CallerContext, in
  execOrgSql(aDb, 'INSERT INTO swarm.org_approval_requests (approval_id,org_id,workspace_id,channel_id,requested_by_agent_identity_id,owner_user_id,action_kind,target_scope,payload,state,decided_by,decided_at,expires_at,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,NULL,$11,$12)', [a.approval_id, a.org_id, a.workspace_id, a.channel_id, a.requested_by_agent_identity_id, a.owner_user_id, a.action_kind, JSON.stringify(a.target_scope), JSON.stringify(a.payload), a.state, a.expires_at, a.created_at]);
  let sig: OrgChatSignal | null = null;
  if (ws) {
+  const until = new Date((Date.parse(now) || Date.now()) + 7 * 86400_000).toISOString();
   sig = { signal_id: crypto.randomUUID(), workspace_id: ws.workspace_id, channel_id: ch?.channel_id ?? null, from_principal_kind: 'agent', from_principal_id: c.principal_id, kind: 'ask', body: `[Approval Card] Agent ${c.principal_id} requested ${input.action_kind} in ${input.org.slug}. Confirm via MCP org_confirm_action or CLI: cswarm org confirm ${a.approval_id} --approve`, approval_id: a.approval_id, created_at: now };
   (s.signals ??= []).push(sig);
-  execOrgSql(aDb, 'INSERT INTO swarm.signals (signal_id,workspace_id,channel_id,from_principal_kind,from_principal_id,kind,body,approval_id,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)', [sig.signal_id, sig.workspace_id, sig.channel_id, sig.from_principal_kind, sig.from_principal_id, sig.kind, sig.body, sig.approval_id ?? null, sig.created_at]);
+  execOrgSql(aDb, 'INSERT INTO swarm.signals (id,workspace_id,channel_id,from_principal,from_kind,to_user_id,about,kind,body,until,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [sig.signal_id, sig.workspace_id, sig.channel_id, sig.from_principal_id, sig.from_principal_kind, oId, `approval:${a.approval_id}`, sig.kind, sig.body, until, sig.created_at]);
  }
  return { ok: true, status: 'approval_required', code: 'APPROVAL_REQUIRED', approval_required: true, approval: a, card_signal: sig };
 }
 
 export function hasVerifiedHumanApproval(s: OrgAuthorityState, orgId: string, actionKind: string, minRole: 'owner' | 'admin', approvalId: unknown, caller?: CallerContext, expPayload?: Record<string, unknown>, expScope?: Record<string, unknown>, nowMs = Date.now(), db?: OrgSqlExecutor) {
  if (typeof approvalId !== 'string' || !approvalId.trim()) return null;
- const a = (s.approvalRequests ?? []).find((x) => x.approval_id === approvalId.trim() && x.org_id === orgId && x.action_kind === actionKind && x.state === 'approved' && !(x as { consumed_at?: string | null }).consumed_at);
+ const id = approvalId.trim(), aDb = getOrgDb(s, db);
+ syncLockedApprovalRow(s, id, aDb);
+ const a = (s.approvalRequests ?? []).find((x) => x.approval_id === id && x.org_id === orgId && x.action_kind === actionKind && x.state === 'approved' && !isApprConsumed(x));
  if (!a?.decided_by || (a.expires_at != null && Date.parse(a.expires_at) <= nowMs)) return null;
  if (caller?.principal_kind === 'agent' && a.requested_by_agent_identity_id !== caller.principal_id) return null;
  if (expPayload && canonicalApprovalJson(a.payload) !== canonicalApprovalJson(expPayload)) return null;
  if (expScope && canonicalApprovalJson(a.target_scope) !== canonicalApprovalJson(expScope)) return null;
  const dRole = orgRole(s, orgId, 'user', a.decided_by);
  if (!dRole || roleRank(dRole) < roleRank(minRole)) return null;
- const iso = new Date(nowMs).toISOString();
- (a as { consumed_at?: string | null }).consumed_at = iso;
- execOrgSql(getOrgDb(s, db), 'UPDATE swarm.org_approval_requests SET decided_at = COALESCE(decided_at, $2) WHERE approval_id = $1 AND state = $3', [a.approval_id, iso, 'approved']);
+ const iso = new Date(nowMs).toISOString(), nextScope = { ...(a.target_scope ?? {}), _consumed_at: iso };
+ const upd = execOrgSql(aDb, "UPDATE swarm.org_approval_requests SET decided_at = COALESCE(decided_at, $2), target_scope = $3 WHERE approval_id = $1 AND state = $4 AND (target_scope->>'_consumed_at') IS NULL", [a.approval_id, iso, JSON.stringify(nextScope), 'approved']) as { rowCount?: number } | undefined;
+ if (upd && upd.rowCount !== undefined && upd.rowCount <= 0) return null;
+ markApprConsumed(a, iso);
  return { ok: true as const, decided_by: a.decided_by, role: dRole };
 }
 
@@ -163,6 +239,23 @@ export function orgMoveWorkspace(s: OrgAuthorityState, c: CallerContext, input: 
   const { workspace: ws, org: src } = wsRes, tgt = findLiveOrg(s, input.target_org_id), wId = ws.workspace_id;
   if (!src || !tgt) return fail('ORG_NOT_FOUND', 'target_organization', { org: input.target_org_id, workspace: ws.slug });
   if (src.id === tgt.id) return fail('WORKSPACE_ALREADY_IN_TARGET_ORG', 'distinct_target_org', { org: tgt.slug, workspace: ws.slug });
+  const locks = [...CANONICAL_ORG_CHANNEL_LOCK_ORDER];
+  (s.lockLog ??= []).push(...locks);
+  const oR = execOrgSql(tx, 'SELECT * FROM swarm.organizations WHERE id IN ($1,$2) ORDER BY id FOR UPDATE', [src.id, tgt.id]) as OrgSqlQueryResult<Partial<OrganizationSummary>> | undefined;
+  for (const r of oR?.rows ?? []) { const ex = s.organizations.find((o) => o.id === r.id); if (ex && r.slug) Object.assign(ex, r); }
+  const wR = execOrgSql(tx, 'SELECT * FROM swarm.workspaces WHERE workspace_id=$1 FOR UPDATE', [wId]) as OrgSqlQueryResult<Partial<WorkspaceRecord>> | undefined;
+  for (const r of wR?.rows ?? []) if (r.workspace_id === wId) Object.assign(ws, r);
+  execOrgSql(tx, 'SELECT channel_id FROM swarm.channels WHERE workspace_id=$1 ORDER BY channel_id FOR UPDATE', [wId]);
+  const mR = execOrgSql(tx, 'SELECT * FROM swarm.org_memberships WHERE org_id IN ($1,$2) ORDER BY id FOR UPDATE', [src.id, tgt.id]) as OrgSqlQueryResult<Partial<OrgMembershipRecord>> | undefined;
+  for (const r of mR?.rows ?? []) {
+   if (!r.principal_kind || !r.principal_id || !r.role || !r.org_id) continue;
+   const ex = s.orgMemberships.find((m) => m.org_id === r.org_id && isPrin(m, r.principal_kind!, r.principal_id!));
+   if (ex) Object.assign(ex, r); else s.orgMemberships.push({ created_at: '', ...r } as OrgMembershipRecord);
+  }
+  for (const [t, k] of [['workspace_principal_grants','id'],['channel_memberships','id'],['agent_principals','principal_id'],['hosted_mcp_seats','seat_id']] as const) {
+   execOrgSql(tx, `SELECT ${k} FROM swarm.${t} WHERE workspace_id=$1 ORDER BY ${k} FOR UPDATE`, [wId]);
+  }
+  if (!isLive(src) || !isLive(tgt) || !isLive(ws)) return fail('ORG_NOT_FOUND', 'target_organization', { org: input.target_org_id, workspace: ws.slug });
   if (s.workspaces.some((w) => w.org_id === tgt.id && w.workspace_id !== wId && isLive(w) && norm(w.slug) === norm(ws.slug))) return fail('WORKSPACE_SLUG_CONFLICT_IN_TARGET_ORG', 'unique_workspace_slug_in_target_org', { org: tgt.slug, workspace: ws.slug });
   const isDual = (u?: string | null) => Boolean(u && orgRole(s, src.id, 'user', u) === 'owner' && orgRole(s, tgt.id, 'user', u) === 'owner');
   const needDual = () => fail('ORG_MOVE_REQUIRES_DUAL_OWNER', 'dual_org_owner_role', { org: tgt.slug, workspace: ws.slug });
@@ -174,13 +267,6 @@ export function orgMoveWorkspace(s: OrgAuthorityState, c: CallerContext, input: 
    if (!ver || !isDual(ver.decided_by)) return createOrgApprovalCard(s, c, { org: src, workspace_id: wId, action_kind: 'org_move_workspace', target_scope: mScope, payload: mPay, now }, tx);
    actorId = ver.decided_by;
   } else if (!isDual(c.principal_id)) return needDual();
-  const locks = [...CANONICAL_ORG_CHANNEL_LOCK_ORDER];
-  (s.lockLog ??= []).push(...locks);
-  execOrgSql(tx, 'SELECT id FROM swarm.organizations WHERE id IN ($1,$2) ORDER BY id FOR UPDATE', [src.id, tgt.id]);
-  execOrgSql(tx, 'SELECT workspace_id,org_id FROM swarm.workspaces WHERE workspace_id=$1 FOR UPDATE', [wId]);
-  for (const [t, k, byO] of [['channels','channel_id',false],['org_memberships','id',true],['workspace_principal_grants','id',false],['channel_memberships','id',false],['agent_principals','principal_id',false],['hosted_mcp_seats','seat_id',false]] as const) {
-   execOrgSql(tx, `SELECT ${k} FROM swarm.${t} WHERE ${byO ? 'org_id IN ($1,$2)' : 'workspace_id=$1'} ORDER BY ${k} FOR UPDATE`, byO ? [src.id, tgt.id] : [wId]);
-  }
   execOrgSql(tx, 'SELECT swarm.org_move_workspace($1, $2, $3, $4)', [wId, tgt.id, actorId, tm]);
   const rec = reconcileWorkspaceMove(s, { workspace_id: wId, target_org_id: tgt.id, actor_user_id: actorId, transfer_members: tm, now });
   if (!rec.ok) return rec;

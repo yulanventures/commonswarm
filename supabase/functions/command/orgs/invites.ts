@@ -7,9 +7,9 @@ import {
 } from '../../../../src/protocol/org-channels-contract.js';
 import type { OrgLogoObjectRecord, OrgLogoPendingUpload } from './logo.js';
 import {
- ORG_ACTION_EXECUTORS, type OrgCallerContext, type OrgCommandOptions, type OrgSqlExecutor,
- createOrgApprovalCard, execOrgSql, findLiveOrg, hasVerifiedHumanApproval,
- registerOrgActionExecutor, resolveWorkspaceSelector, roleRank,
+ ORG_ACTION_EXECUTORS, type OrgCallerContext, type OrgCommandOptions, type OrgSqlExecutor, type OrgSqlQueryResult,
+ createOrgApprovalCard, execOrgSql, findLiveOrg, hasVerifiedHumanApproval, isApprConsumed, markApprConsumed,
+ registerOrgActionExecutor, resolveWorkspaceSelector, roleRank, syncLockedApprovalRow, syncLockedOrgRows,
  upsertAgentPrincipalInWorkspace, withOrgTx,
 } from './move-workspace.js';
 export * from './move-workspace.js';
@@ -40,6 +40,7 @@ export type ApprovalPendingResult = {
 };
 export const isValidOrgRole = (v: unknown): v is OrgRole => typeof v === 'string' && (VALID_ORG_ROLES as readonly string[]).includes(v);
 export const isValidOrgSlug = (s: string): boolean => s.length >= 1 && s.length <= 48 && ORG_SLUG_RE.test(s);
+export const normTokenHash = (v: unknown): string => v instanceof Uint8Array ? Buffer.from(v).toString('hex') : typeof v === 'string' ? v.replace(/^\\x/i, '').toLowerCase() : '';
 export function effectiveCallerOrgRole(s: OrgAuthorityState, c: CallerContext, orgId: string): OrgRole | null {
  if (!canReadOrg(s, c, orgId)) return null;
  if (c.principal_kind === 'user') return orgRole(s, orgId, 'user', c.principal_id);
@@ -87,6 +88,8 @@ export function orgInviteCreate(
  return withOrgTx(s, db, (tx) => {
   const now = input.now ?? new Date().toISOString(), org = findLiveOrg(s, input.org_id);
   if (!org) return fail('ORG_NOT_FOUND', 'organization', { org: input.org_id });
+  syncLockedOrgRows(s, org.id, tx);
+  if (!isLive(org)) return fail('ORG_NOT_FOUND', 'organization', { org: input.org_id });
   const role: OrgRole = input.role ?? 'member';
   if (!isValidOrgRole(role)) return fail('INVALID_ORG_ROLE', 'valid_org_role', { org: org.slug });
   const auth = authorizeOrgAction(s, c, { org, min_role: role === 'owner' ? 'owner' : 'admin', action_kind: 'org_invite_create', payload: { ...input, role }, require_approval: input.require_approval, now, db: tx });
@@ -117,14 +120,20 @@ export function orgInviteAccept(
   const iso = opts?.testClockIso ?? new Date().toISOString(), ms = Date.parse(iso), raw = typeof input.token === 'string' ? input.token.trim() : '';
   if (!raw) return fail('ORG_INVITE_TOKEN_REQUIRED', 'invite_token', { org: null });
   const h = hashInviteToken(raw);
-  execOrgSql(tx, "SELECT invite_id, revoked_at, consumed_at FROM swarm.org_invites WHERE token_hash = decode($1, 'hex') FOR UPDATE", [h]);
-  const inv = (s.orgInvites ?? []).find((x) => x.token_hash === h && (!input.invite_id || x.invite_id === input.invite_id));
+  const iR = execOrgSql(tx, "SELECT * FROM swarm.org_invites WHERE token_hash = decode($1, 'hex') FOR UPDATE", [h]) as OrgSqlQueryResult<OrgInviteRecord> | undefined;
+  for (const r of iR?.rows ?? []) {
+   const th = normTokenHash(r.token_hash) || h, nr = { ...r, token_hash: th };
+   const ex = (s.orgInvites ??= []).find((x) => x.invite_id === r.invite_id || normTokenHash(x.token_hash) === th);
+   if (ex) Object.assign(ex, nr); else if (r.invite_id) s.orgInvites.push(nr);
+  }
+  const inv = (s.orgInvites ?? []).find((x) => normTokenHash(x.token_hash) === h && (!input.invite_id || x.invite_id === input.invite_id));
   if (!inv || inv.revoked_at != null || inv.consumed_at != null) return fail('ORG_INVITE_UNAVAILABLE', 'active_org_invite', { org: inv?.org_id ?? null });
   if (Date.parse(inv.expires_at) <= ms) return fail('ORG_INVITE_EXPIRED', 'unexpired_org_invite', { org: inv.org_id });
   if (inv.email) {
    const em = typeof c.authenticated_email === 'string' ? c.authenticated_email.trim().toLowerCase() : '';
    if (!em || em !== inv.email.trim().toLowerCase()) return fail('INVITE_EMAIL_MISMATCH', 'matching_authenticated_email', { org: inv.org_id });
   }
+  syncLockedOrgRows(s, inv.org_id, tx);
   const org = findLiveOrg(s, inv.org_id);
   if (!org) return fail('ORG_NOT_FOUND', 'organization', { org: inv.org_id });
   const actId = c.principal_kind === 'user' ? c.principal_id : agentOwner(s, c);
@@ -158,6 +167,8 @@ export function orgInviteRevoke(
  return withOrgTx(s, db, (tx) => {
   const now = input.now ?? new Date().toISOString(), org = findLiveOrg(s, input.org_id);
   if (!org) return fail('ORG_NOT_FOUND', 'organization', { org: input.org_id });
+  syncLockedOrgRows(s, org.id, tx);
+  if (!isLive(org)) return fail('ORG_NOT_FOUND', 'organization', { org: input.org_id });
   const auth = authorizeOrgAction(s, c, { org, min_role: 'admin', action_kind: 'org_invite_revoke', payload: { ...input }, require_approval: input.require_approval, now, db: tx });
   if (auth.status !== 'authorized') return auth.result;
   const inv = (s.orgInvites ?? []).find((x) => x.invite_id === input.invite_id && x.org_id === org.id && x.revoked_at == null);
@@ -175,31 +186,35 @@ export function orgConfirmAction(
  return withOrgTx(s, opts?.db, (tx) => {
   const iso = opts?.testClockIso ?? new Date().toISOString(), ms = Date.parse(iso);
   if (c.principal_kind !== 'user') return fail('HUMAN_OWNER_CONFIRMATION_REQUIRED', 'human_owner_session', {});
-  execOrgSql(tx, 'SELECT approval_id, state FROM swarm.org_approval_requests WHERE approval_id = $1 FOR UPDATE', [input.approval_id]);
+  syncLockedApprovalRow(s, input.approval_id, tx);
   const appr = (s.approvalRequests ?? []).find((a) => a.approval_id === input.approval_id);
   if (!appr) return fail('APPROVAL_NOT_FOUND', 'approval_request', {});
-  if (appr.state !== 'pending') return fail('APPROVAL_ALREADY_DECIDED', 'pending_approval_request', { org: appr.org_id });
+  if (appr.state !== 'pending' || isApprConsumed(appr)) return fail('APPROVAL_ALREADY_DECIDED', 'pending_approval_request', { org: appr.org_id });
   if (appr.expires_at != null && Date.parse(appr.expires_at) <= ms) {
    appr.state = 'expired'; appr.decided_at = iso;
    execOrgSql(tx, 'UPDATE swarm.org_approval_requests SET state = $2, decided_at = $3 WHERE approval_id = $1', [appr.approval_id, 'expired', iso]);
    return fail('APPROVAL_REQUEST_EXPIRED', 'unexpired_approval_request', { org: appr.org_id });
   }
+  syncLockedOrgRows(s, appr.org_id, tx);
   const org = findLiveOrg(s, appr.org_id);
   if (!org) return fail('ORG_NOT_FOUND', 'organization', { org: appr.org_id });
   const cR = orgRole(s, org.id, 'user', c.principal_id), minR: 'owner' | 'admin' = appr.action_kind === 'org_delete' || appr.action_kind === 'org_move_workspace' || appr.payload?.role === 'owner' ? 'owner' : 'admin';
   if (!cR || roleRank(cR) < roleRank(minR) || (c.principal_id !== appr.owner_user_id && roleRank(cR) < roleRank('admin'))) return fail('ORG_APPROVAL_ACCESS_DENIED', 'approval_owner_or_admin', { org: org.slug });
   if ((input.decision ?? (input.approve === false ? 'reject' : 'approve')) === 'reject') {
+   const upd = execOrgSql(tx, 'UPDATE swarm.org_approval_requests SET state = $2, decided_by = $3, decided_at = $4 WHERE approval_id = $1 AND state = $5', [appr.approval_id, 'rejected', c.principal_id, iso, 'pending']) as { rowCount?: number } | undefined;
+   if (upd && upd.rowCount !== undefined && upd.rowCount <= 0) return fail('APPROVAL_ALREADY_DECIDED', 'pending_approval_request', { org: appr.org_id });
    appr.state = 'rejected'; appr.decided_by = c.principal_id; appr.decided_at = iso;
-   execOrgSql(tx, 'UPDATE swarm.org_approval_requests SET state = $2, decided_by = $3, decided_at = $4 WHERE approval_id = $1 AND state = $5', [appr.approval_id, 'rejected', c.principal_id, iso, 'pending']);
    return { ok: true as const, approval: appr, executed: false as const, result: null };
   }
   const exec = ORG_ACTION_EXECUTORS[appr.action_kind];
   if (!exec) return fail('UNSUPPORTED_APPROVAL_ACTION', appr.action_kind, { org: org.slug });
+  const nextScope = { ...(appr.target_scope ?? {}), _consumed_at: iso };
+  const upd = execOrgSql(tx, "UPDATE swarm.org_approval_requests SET state = $2, decided_by = $3, decided_at = $4, target_scope = $6 WHERE approval_id = $1 AND state = $5 AND (target_scope->>'_consumed_at') IS NULL", [appr.approval_id, 'approved', c.principal_id, iso, 'pending', JSON.stringify(nextScope)]) as { rowCount?: number } | undefined;
+  if (upd && upd.rowCount !== undefined && upd.rowCount <= 0) return fail('APPROVAL_ALREADY_DECIDED', 'pending_approval_request', { org: appr.org_id });
   const res = exec(s, { principal_kind: 'user', principal_id: c.principal_id }, { ...appr.payload, now: iso, require_approval: false }, tx) as { ok?: boolean; refusal?: OrgChannelRefusal };
   if (!res?.ok) return (res as RefusalResult) ?? fail('APPROVAL_EXECUTION_FAILED', appr.action_kind, { org: org.slug });
   appr.state = 'approved'; appr.decided_by = c.principal_id; appr.decided_at = iso;
-  (appr as { consumed_at?: string | null }).consumed_at = iso;
-  execOrgSql(tx, 'UPDATE swarm.org_approval_requests SET state = $2, decided_by = $3, decided_at = $4 WHERE approval_id = $1 AND state = $5', [appr.approval_id, 'approved', c.principal_id, iso, 'pending']);
+  markApprConsumed(appr, iso);
   return { ok: true as const, approval: appr, executed: true as const, result: res };
  });
 }

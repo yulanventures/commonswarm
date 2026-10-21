@@ -110,8 +110,11 @@ export function orgDelete(
     if (!org) return fail('ORG_NOT_FOUND', 'organization', { org: input.org_id });
     const wsIds = s.workspaces.filter((w) => w.org_id === org.id && isLive(w)).map((w) => w.workspace_id);
     (s.lockLog ??= []).push(...CANONICAL_ORG_CHANNEL_LOCK_ORDER);
-    syncLockedOrgRows(s, org.id, tx);
-    for (const [t, k, p] of [['workspaces', 'workspace_id', 'org_id = $1'], ['channels', 'channel_id', 'workspace_id = ANY($1::uuid[])'], ['workspace_principal_grants', 'id', 'org_id = $1'], ['channel_memberships', 'id', 'workspace_id = ANY($1::uuid[])'], ['agent_principals', 'principal_id', 'workspace_id = ANY($1::uuid[])'], ['hosted_mcp_seats', 'seat_id', 'workspace_id = ANY($1::uuid[])']] as const) {
+    syncLockedOrgRows(s, org.id, tx, () => {
+      execOrgSql(tx, 'SELECT workspace_id FROM swarm.workspaces WHERE org_id = $1 ORDER BY workspace_id FOR UPDATE', [org.id]);
+      execOrgSql(tx, 'SELECT channel_id FROM swarm.channels WHERE workspace_id = ANY($1::uuid[]) ORDER BY channel_id FOR UPDATE', [wsIds]);
+    });
+    for (const [t, k, p] of [['workspace_principal_grants', 'id', 'org_id = $1'], ['channel_memberships', 'id', 'workspace_id = ANY($1::uuid[])'], ['agent_principals', 'principal_id', 'workspace_id = ANY($1::uuid[])'], ['hosted_mcp_seats', 'seat_id', 'workspace_id = ANY($1::uuid[])']] as const) {
       execOrgSql(tx, `SELECT ${k} FROM swarm.${t} WHERE ${p} ORDER BY ${k} FOR UPDATE`, [p.includes('ANY') ? wsIds : org.id]);
     }
     if (!isLive(org)) return fail('ORG_NOT_FOUND', 'organization', { org: input.org_id });
