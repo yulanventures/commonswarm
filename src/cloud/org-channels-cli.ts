@@ -1,4 +1,3 @@
-import { createRequire } from 'node:module';
 import {
   type CallerContext,
   type OrgApprovalRequest,
@@ -12,6 +11,7 @@ import {
   agentOwner,
   resolveOrgWorkspaceChannelSelector,
 } from '../protocol/org-channels-contract.js';
+import { executeOrgChannelMcpTool } from '../../supabase/functions/mcp/org-channels-handlers.js';
 
 export interface CliCallerContext extends CallerContext {
   seat?: string | null;
@@ -28,6 +28,11 @@ export interface CliOrgChannelState extends OrgChannelAuthorityState {
 export interface ParsedOrgChannelCliCommand { tool: string; arguments: Record<string, unknown>; json: boolean; }
 
 const BOOL_FLAGS = new Set(['json', 'approve', 'reject', 'request-approval']);
+const KNOWN_FLAGS = new Set([
+  ...BOOL_FLAGS, 'org', 'workspace', 'channel', 'seat', 'seat-id', 'slug', 'new-slug', 'name', 'display-name',
+  'confirm', 'confirm-slug', 'principal', 'principal-id', 'kind', 'role', 'email', 'approval-id', 'decision',
+  'to-org', 'target-org', 'transfer-members', 'content-type', 'data-base64', 'svg', 'visibility', 'join-policy', 'topic', 'purpose', 'notify',
+]);
 
 function makeEmptyCliState(): CliOrgChannelState {
   return {
@@ -52,8 +57,14 @@ export function parseOrgChannelsCliArgs(argv: readonly string[]): ParsedOrgChann
     const tok = tokens[i]!;
     if (!tok.startsWith('--')) { pos.push(tok); continue; }
     const eq = tok.indexOf('=');
-    if (eq !== -1) { f.set(tok.slice(2, eq), tok.slice(eq + 1)); continue; }
+    if (eq !== -1) {
+      const k = tok.slice(2, eq);
+      if (!KNOWN_FLAGS.has(k)) throw new Error(`Unknown option: --${k}`);
+      f.set(k, tok.slice(eq + 1));
+      continue;
+    }
     const name = tok.slice(2);
+    if (!KNOWN_FLAGS.has(name)) throw new Error(`Unknown option: --${name}`);
     if (BOOL_FLAGS.has(name)) { f.set(name, 'true'); continue; }
     const next = tokens[i + 1];
     if (next === undefined || next.startsWith('--')) throw new Error(`--${name} requires a value`);
@@ -155,26 +166,13 @@ export type OrgChannelToolDispatcher = (
   args: Record<string, unknown>,
 ) => Record<string, unknown>;
 
-let defaultDispatcher: OrgChannelToolDispatcher | null = null;
+var defaultDispatcher: OrgChannelToolDispatcher | null = null;
 export function registerDefaultOrgChannelCliExecutor(fn: OrgChannelToolDispatcher): void {
   defaultDispatcher = fn;
 }
 
 function resolveDefaultDispatcher(): OrgChannelToolDispatcher {
-  if (defaultDispatcher) return defaultDispatcher;
-  try {
-    const req = createRequire(import.meta.url);
-    const mod = req('../../supabase/functions/mcp/org-channels-handlers.js') as {
-      executeOrgChannelMcpTool?: OrgChannelToolDispatcher;
-    };
-    if (mod.executeOrgChannelMcpTool) {
-      defaultDispatcher = mod.executeOrgChannelMcpTool;
-      return defaultDispatcher;
-    }
-  } catch {
-    // Fallback used only if handlers module cannot be loaded in isolated build environment.
-  }
-  return fallbackDispatch;
+  return defaultDispatcher ?? ((s, c, t, a) => executeOrgChannelMcpTool(s, c, t, a));
 }
 
 const ROLE_RANK: Record<OrgRole, number> = { guest: 1, member: 2, admin: 3, owner: 4 };
@@ -267,17 +265,3 @@ export function executeOrgChannelsCli(argv: readonly string[], options: ExecuteO
   return { exitCode: ok ? 0 : 1, ok, tool: parsed.tool, payload, stdout, stderr: ok ? '' : stdout };
 }
 
-function fallbackDispatch(s: CliOrgChannelState, caller: CliCallerContext, tool: string, args: Record<string, unknown>): Record<string, unknown> {
-  const seatId = (args.seat_id as string | undefined) ?? caller.seat_id ?? null;
-  if (tool === 'whoami' || tool === 'discover') {
-    const base = buildMultiOrgWhoamiResponse(s, { agent_identity_id: caller.principal_id, connection_id: caller.connection_id ?? null, seat_id: seatId });
-    return { ok: true, ...base };
-  }
-  const res = resolveOrgWorkspaceChannelSelector(s, caller, {
-    org: (args.org as string | undefined) ?? null,
-    workspace: (args.workspace as string | undefined) ?? null,
-    channel: (args.channel as string | undefined) ?? null,
-    seat_id: seatId,
-  });
-  return res.ok ? { ok: true, org: res.org, workspace: res.workspace, channel: res.channel, source: res.source } : { ok: false, status: 'refused', refusal: res.refusal };
-}

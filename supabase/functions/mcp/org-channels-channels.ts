@@ -139,7 +139,7 @@ export function executeChannelMcpSubtool(
     const vis = ((args.visibility as ChannelVisibility | undefined) ?? 'workspace') as ChannelVisibility;
     const jp = ((args.join_policy as ChannelJoinPolicy | undefined) ?? (vis === 'private' ? 'invite_only' : 'open')) as ChannelJoinPolicy;
     if (slug === 'general' && (vis === 'private' || jp !== 'open')) return ref('DEFAULT_CHANNEL_MUST_BE_PUBLIC', 'public_general_channel', { org: org.slug, workspace: ws.slug, channel: slug });
-    const tr = validateChannelVisibilityTransition({ privateChannelsEnabled: s.privateChannelsEnabled ?? true, nextVisibility: vis, nextJoinPolicy: jp, channelSlug: slug, workspaceSlug: `${org.slug}/${ws.slug}` });
+    const tr = validateChannelVisibilityTransition({ privateChannelsEnabled: s.privateChannelsEnabled === true, nextVisibility: vis, nextJoinPolicy: jp, channelSlug: slug, workspaceSlug: `${org.slug}/${ws.slug}` });
     if (!tr.ok) return { ok: false, status: 'refused', refusal: enrichOrgChannelRefusal(tr.refusal) };
     if (s.channels.some((c) => c.workspace_id === ws.workspace_id && norm(c.slug) === slug && isLive(c))) return ref('CHANNEL_SLUG_TAKEN', 'unique_channel_slug', { org: org.slug, workspace: ws.slug, channel: slug });
     const ch: ChannelSummary = { channel_id: `ch-${s.channels.length + 1}`, workspace_id: ws.workspace_id, org_id: org.id, slug, visibility: vis, join_policy: jp, topic: typeof args.topic === 'string' ? args.topic : null, purpose: typeof args.purpose === 'string' ? args.purpose : null, created_by_principal: caller.principal_id, created_by_kind: caller.principal_kind, created_at: now };
@@ -203,11 +203,19 @@ export function executeChannelMcpSubtool(
   }
   if (name === 'channel_rename' || name === 'channel_set_visibility' || name === 'channel_update') {
     if (!isChAdmin) return ref(ch.visibility === 'private' ? 'PRIVATE_CHANNEL_OWNER_REQUIRED' : 'CHANNEL_ADMIN_REQUIRED', ch.visibility === 'private' ? 'channel_owner_role' : 'channel_owner_or_admin_role', cScope);
+    const rawNew = (args.new_slug ?? args.slug) as string | undefined;
+    let nextSlug: string | null = null;
+    if (rawNew) {
+      if (isDef(ch)) return ref('CANNOT_RENAME_GENERAL_CHANNEL', 'non_general_channel', cScope);
+      nextSlug = norm(rawNew);
+      if (!SLUG_RE.test(nextSlug)) return ref('INVALID_CHANNEL_SLUG', 'valid_channel_slug', { org: org.slug, workspace: ws.slug, channel: nextSlug });
+      if (s.channels.some((c) => c.workspace_id === ws.workspace_id && c.channel_id !== ch.channel_id && norm(c.slug) === nextSlug && isLive(c))) return ref('CHANNEL_SLUG_TAKEN', 'unique_channel_slug', { org: org.slug, workspace: ws.slug, channel: nextSlug });
+    }
     if (args.visibility || args.join_policy) {
       const nextVis = ((args.visibility as ChannelVisibility | undefined) ?? ch.visibility) as ChannelVisibility;
       const nextJp = ((args.join_policy as ChannelJoinPolicy | undefined) ?? (nextVis === 'private' ? 'invite_only' : ch.join_policy)) as ChannelJoinPolicy;
       const tr = validateChannelVisibilityTransition({
-        privateChannelsEnabled: s.privateChannelsEnabled ?? true,
+        privateChannelsEnabled: s.privateChannelsEnabled === true,
         currentVisibility: ch.visibility,
         nextVisibility: nextVis,
         nextJoinPolicy: nextJp,
@@ -221,14 +229,7 @@ export function executeChannelMcpSubtool(
       ch.visibility = nextVis;
       ch.join_policy = nextJp;
     }
-    const rawNew = (args.new_slug ?? args.slug) as string | undefined;
-    if (rawNew) {
-      if (isDef(ch)) return ref('CANNOT_RENAME_GENERAL_CHANNEL', 'non_general_channel', cScope);
-      const nextSlug = norm(rawNew);
-      if (!SLUG_RE.test(nextSlug)) return ref('INVALID_CHANNEL_SLUG', 'valid_channel_slug', { org: org.slug, workspace: ws.slug, channel: nextSlug });
-      if (s.channels.some((c) => c.workspace_id === ws.workspace_id && c.channel_id !== ch.channel_id && norm(c.slug) === nextSlug && isLive(c))) return ref('CHANNEL_SLUG_TAKEN', 'unique_channel_slug', { org: org.slug, workspace: ws.slug, channel: nextSlug });
-      ch.slug = nextSlug;
-    }
+    if (nextSlug) ch.slug = nextSlug;
     return { ok: true, channel: ch };
   }
   if (name === 'channel_set_topic') {

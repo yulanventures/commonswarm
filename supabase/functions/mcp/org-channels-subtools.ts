@@ -5,15 +5,15 @@ import {
   agentOwner, canReadOrg, isLive, isPrin, norm, orgRole,
 } from '../../../src/protocol/org-channels-contract.js';
 import { effCallerOrgRole } from '../../../src/cloud/org-channels-cli.js';
-import { type McpCallerAuth, type OrgChannelSlice3State, type OrgLogoRenditionBlob, resolveMcpOrgWorkspaceChannel, resolveSeatIdFromAuthOrArgs } from './org-channels-tools.js';
+import { type McpCallerAuth, type OrgChannelSlice3State, resolveMcpOrgWorkspaceChannel, resolveSeatIdFromAuthOrArgs } from './org-channels-tools.js';
 import { executeWorkspaceScopeTool, ref } from './org-channels-channels.js';
 
 export { executeWorkspaceScopeTool, ref };
 export const SLUG_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
-const MAX_LOGO = 1_048_576;
+const MAX_LOGO = 1_048_576, str = (v: unknown) => (typeof v === 'string' && v.trim()) || null;
 export const toCtx = (c: McpCallerAuth): CallerContext => ({ principal_kind: c.principal_kind, principal_id: c.principal_id, owner_user_id: c.owner_user_id ?? null, connection_id: c.connection_id ?? null });
 
-export function upsertWsGrant(s: OrgChannelSlice3State, wsId: string, orgId: string, k: PrincipalKind, id: string, role: OrgRole, now: string, ownerFallback: string) {
+export function upsertWsGrant(s: OrgChannelSlice3State, wsId: string, orgId: string, k: PrincipalKind, id: string, role: OrgRole, now: string, ownFb: string) {
   const ex = s.workspaceGrants.find((g) => g.workspace_id === wsId && isPrin(g, k, id));
   if (ex) { ex.role = role; ex.revoked_at = null; } else s.workspaceGrants.push({ workspace_id: wsId, org_id: orgId, principal_kind: k, principal_id: id, role, created_at: now, revoked_at: null });
   if (k !== 'agent') return null;
@@ -21,24 +21,20 @@ export function upsertWsGrant(s: OrgChannelSlice3State, wsId: string, orgId: str
   const ai = s.agentIdentities.find((a) => a.id === id);
   let ap = s.agentPrincipals.find((a) => a.workspace_id === wsId && a.agent_identity_id === id);
   if (ap) ap.revoked_at = null;
-  else s.agentPrincipals.push(ap = { principal_id: `ap-${wsId}-${id}`, workspace_id: wsId, agent_identity_id: id, owner_user_id: ai?.owner_user_id ?? ownerFallback, name: ai?.display_name ?? id, revoked_at: null });
+  else s.agentPrincipals.push(ap = { principal_id: `ap-${wsId}-${id}`, workspace_id: wsId, agent_identity_id: id, owner_user_id: ai?.owner_user_id ?? ownFb, name: ai?.display_name ?? id, revoked_at: null });
   return ap.principal_id;
 }
 
 export function resolveOrg(s: OrgChannelSlice3State, caller: McpCallerAuth, args: Record<string, unknown>) {
-  const seatRes = resolveSeatIdFromAuthOrArgs(s, caller, args);
-  if (!seatRes.ok) return { ok: false as const, status: 'refused' as const, refusal: seatRes.refusal };
-  const str = (v: unknown) => (typeof v === 'string' && v.trim()) || null;
+  const sr = resolveSeatIdFromAuthOrArgs(s, caller, args);
+  if (!sr.ok) return { ok: false as const, status: 'refused' as const, refusal: sr.refusal };
   if (str(args.workspace) || str(args.channel)) {
     const r = resolveMcpOrgWorkspaceChannel(s, caller, args as Record<string, string | null | undefined>);
     return r.ok ? { ok: true as const, org: r.org, seat_id: r.seat_id } : { ok: false as const, status: 'refused' as const, refusal: r.refusal };
   }
-  const seatId = seatRes.seat_id, ctx = toCtx(caller), reach = s.organizations.filter((o) => isLive(o) && canReadOrg(s, ctx, o.id));
-  const seat = seatId ? (s.seats ?? []).find((x) => x.seat_id === seatId && isLive(x)) : undefined;
-  const seatWs = seat ? s.workspaces.find((w) => w.workspace_id === seat.workspace_id && isLive(w)) : undefined;
-  const seatOrg = seatWs ? s.organizations.find((o) => o.id === seatWs.org_id && isLive(o)) : undefined;
-  const exp = str(args.org);
-  const pol = caller.connection_id ? (s.connectionPolicies ?? []).find((p) => p.connection_id === caller.connection_id && isLive(p)) : undefined;
+  const seatId = sr.seat_id, ctx = toCtx(caller), reach = s.organizations.filter((o) => isLive(o) && canReadOrg(s, ctx, o.id));
+  const seat = seatId ? (s.seats ?? []).find((x) => x.seat_id === seatId && isLive(x)) : undefined, seatWs = seat ? s.workspaces.find((w) => w.workspace_id === seat.workspace_id && isLive(w)) : undefined, seatOrg = seatWs ? s.organizations.find((o) => o.id === seatWs.org_id && isLive(o)) : undefined;
+  const exp = str(args.org), pol = caller.connection_id ? (s.connectionPolicies ?? []).find((p) => p.connection_id === caller.connection_id && isLive(p)) : undefined;
   const found = exp ? reach.find((o) => o.id === exp || norm(o.slug) === norm(exp))
     : seatOrg ?? (pol?.default_org_id ? reach.find((o) => o.id === pol.default_org_id) : undefined) ?? (reach.length === 1 ? reach[0] : undefined);
   if (exp && !found) return ref('ORG_ACCESS_DENIED', 'org_membership', { org: exp, seat_id: seatId });
@@ -61,33 +57,30 @@ export function enqueueApproval(s: OrgChannelSlice3State, caller: McpCallerAuth,
 }
 
 const ENT: Record<string, string> = { colon: ':', tab: '\t', newline: '\n', quot: '"', apos: "'", amp: '&', lt: '<', gt: '>' };
-const decodeEnt = (v: string): string => v.replace(/&#x([0-9a-f]+);?/gi, (_, h) => String.fromCodePoint(parseInt(h, 16) || 0)).replace(/&#([0-9]+);?/g, (_, d) => String.fromCodePoint(parseInt(d, 10) || 0)).replace(/&(colon|tab|newline|quot|apos|amp|lt|gt);/gi, (_, n: string) => ENT[n.toLowerCase()] ?? '').replace(/\\([0-9a-f]{1,6})\s?/gi, (_, h) => String.fromCodePoint(parseInt(h, 16) || 0));
+const decEnt = (v: string): string => v.replace(/&#x([0-9a-f]+);?/gi, (_, h) => String.fromCodePoint(parseInt(h, 16) || 0)).replace(/&#([0-9]+);?/g, (_, d) => String.fromCodePoint(parseInt(d, 10) || 0)).replace(/&(colon|tab|newline|quot|apos|amp|lt|gt);/gi, (_, n: string) => ENT[n.toLowerCase()] ?? '').replace(/\\([0-9a-f]{1,6})\s?/gi, (_, h) => String.fromCodePoint(parseInt(h, 16) || 0));
 
-export function checkLogo(ct: string, b64?: string, svg?: string): { ok: true; bytes: number; sourceBytes: Buffer; sanitizedSvg?: string } | { ok: false; reason: 'size' | 'format' } {
+export function checkLogo(ct: string, b64?: string, svg?: string) {
   if (ct === 'image/svg+xml') {
     const raw = (svg ?? (b64 ? Buffer.from(b64, 'base64').toString('utf8') : '')).trim(), len = Buffer.byteLength(raw, 'utf8');
-    if (len === 0 || len > MAX_LOGO) return { ok: false, reason: len > MAX_LOGO ? 'size' : 'format' };
-    if (!raw.toLowerCase().includes('<svg')) return { ok: false, reason: 'format' };
-    const sanitizedSvg = raw.replace(/<\?[\s\S]*?\?>|<!--[\s\S]*?-->/g, '').replace(/<(script|foreignObject|iframe|object|embed|image|use)[\s\S]*?>[\s\S]*?<\/\1>/gi, '').replace(/<\/?(script|foreignObject|iframe|object|embed|image|use)[^>]*>/gi, '').replace(/\son[a-z0-9_-]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '').replace(/\s([a-z0-9_:-]+)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/gi, (full, attr, _q, dq, sq, uq) => {
-      const name = String(attr).toLowerCase();
-      if (name.startsWith('on')) return '';
-      const val = decodeEnt(String(dq ?? sq ?? uq ?? '')).replace(/[\u0000-\u0020]+/g, '');
-      if (name === 'xmlns' && val === 'http://www.w3.org/2000/svg') return full;
-      if (/(javascript|data|vbscript):|https?:|\/\/|@import/i.test(val)) return name === 'style' ? ' style="url()"' : '';
-      return full;
+    if (len === 0 || len > MAX_LOGO || !raw.toLowerCase().includes('<svg')) return { ok: false as const, reason: (len > MAX_LOGO ? 'size' : 'format') as 'size' | 'format' };
+    const sSvg = raw.replace(/<\?[\s\S]*?\?>|<!--[\s\S]*?-->|<(script|foreignObject|iframe|object|embed|image|use)[\s\S]*?>[\s\S]*?<\/\1>|<\/?(script|foreignObject|iframe|object|embed|image|use)[^>]*>/gi, '').replace(/\son[a-z0-9_-]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '').replace(/\s([a-z0-9_:-]+)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/gi, (f, a, _q, dq, sq, uq) => {
+      const n = String(a).toLowerCase(), val = decEnt(String(dq ?? sq ?? uq ?? '')).replace(/[\u0000-\u0020]+/g, '');
+      if (n.startsWith('on')) return '';
+      if (n === 'xmlns' && val === 'http://www.w3.org/2000/svg') return f;
+      return /(javascript|data|vbscript):|https?:|\/\/|@import/i.test(val) ? (n === 'style' ? ' style="url()"' : '') : f;
     });
-    return { ok: true, bytes: len, sourceBytes: Buffer.from(sanitizedSvg, 'utf8'), sanitizedSvg };
+    return { ok: true as const, bytes: len, srcB: Buffer.from(sSvg, 'utf8'), sSvg };
   }
-  if (!b64) return { ok: false, reason: 'format' };
-  const buf = Buffer.from(b64, 'base64');
-  if (buf.byteLength === 0 || buf.byteLength > MAX_LOGO) return { ok: false, reason: buf.byteLength > MAX_LOGO ? 'size' : 'format' };
-  const png = ct === 'image/png' && buf.length >= 24 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47 && buf.subarray(12, 16).toString('ascii') === 'IHDR';
-  const jpg = ct === 'image/jpeg' && buf.length >= 4 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
-  const webp = ct === 'image/webp' && buf.length >= 12 && buf.subarray(0, 4).toString('ascii') === 'RIFF' && buf.subarray(8, 12).toString('ascii') === 'WEBP';
-  return png || jpg || webp ? { ok: true, bytes: buf.byteLength, sourceBytes: buf } : { ok: false, reason: 'format' };
+  if (!b64) return { ok: false as const, reason: 'format' as const };
+  const b = Buffer.from(b64, 'base64'), n = b.byteLength;
+  if (n === 0 || n > MAX_LOGO) return { ok: false as const, reason: (n > MAX_LOGO ? 'size' : 'format') as 'size' | 'format' };
+  const ok = (ct === 'image/png' && n >= 24 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 && b.subarray(12, 16).toString('ascii') === 'IHDR')
+    || (ct === 'image/jpeg' && n >= 4 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff)
+    || (ct === 'image/webp' && n >= 12 && b.subarray(0, 4).toString('ascii') === 'RIFF' && b.subarray(8, 12).toString('ascii') === 'WEBP');
+  return ok ? { ok: true as const, bytes: n, srcB: b } : { ok: false as const, reason: 'format' as const };
 }
 
-function decodeLogoRgba(ct: string, src: Buffer, svg?: string): { w: number; h: number; rgba: Uint8Array } {
+function decodeLogoRgba(ct: string, src: Buffer, svg?: string) {
   if (ct === 'image/png' && src.length >= 29) {
     try {
       const w = Math.max(1, Math.min(1024, src.readUInt32BE(16))), h = Math.max(1, Math.min(1024, src.readUInt32BE(20))), cT = src[25]!;
@@ -108,28 +101,45 @@ function decodeLogoRgba(ct: string, src: Buffer, svg?: string): { w: number; h: 
       }
       for (let i = 0; i < w * h; i++) {
         const o = i * bpp, d = i * 4;
-        rgba[d] = rec[o]!; rgba[d + 1] = bpp >= 3 ? rec[o + 1]! : rec[o]!; rgba[d + 2] = bpp >= 3 ? rec[o + 2]! : rec[o]!; rgba[d + 3] = bpp === 4 ? rec[o + 3]! : bpp === 2 ? rec[o + 1]! : 255;
+        rgba.set([rec[o]!, bpp >= 3 ? rec[o + 1]! : rec[o]!, bpp >= 3 ? rec[o + 2]! : rec[o]!, bpp === 4 ? rec[o + 3]! : bpp === 2 ? rec[o + 1]! : 255], d);
       }
       return { w, h, rgba };
-    } catch { /* fallback */ }
+    } catch {}
   }
-  const w = 64, h = 64, rgba = new Uint8Array(w * h * 4), m = svg?.match(/#([0-9a-f]{6})/i);
-  const cR = m ? parseInt(m[1]!.slice(0, 2), 16) : src[0] ?? 80, cG = m ? parseInt(m[1]!.slice(2, 4), 16) : src[1 % src.length] ?? 120, cB = m ? parseInt(m[1]!.slice(4, 6), 16) : src[2 % src.length] ?? 160;
+  if (ct === 'image/webp' && src.length >= 26 && src.subarray(12, 16).toString('ascii') === 'VP8L' && src[20] === 0x2f) {
+    try {
+      const hdr = src.readUInt32LE(21), w = (hdr & 0x3fff) + 1, h = ((hdr >> 14) & 0x3fff) + 1;
+      let pos = 200, subG = false, palG = -1;
+      const rb = (n: number) => { let v = 0; for (let i = 0; i < n; i++) { v |= (((src[pos >> 3] ?? 0) >> (pos & 7)) & 1) << i; pos++; } return v; };
+      const rT = (main: boolean) => {
+        if (!main && rb(1)) rb(rb(4));
+        if (rb(1)) rb(main ? 1 : 3);
+        const out = [0, 0, 0, 0, 0];
+        for (let t = 0; t < 5; t++) { if (!rb(1)) throw 0; const ns = rb(1) + 1, f8 = rb(1), s0 = rb(f8 ? 8 : 1); if (ns === 2) rb(8); out[t] = s0; }
+        return out;
+      };
+      while (rb(1)) { const tt = rb(2); if (tt === 2) subG = true; else if (tt === 3) { rb(8); palG = rT(false)[0]!; } }
+      const rgba = new Uint8Array(w * h * 4), m0 = palG >= 0 ? [palG, palG, palG, 255] : rT(true);
+      let g = m0[0]!, r = m0[1]!, b = m0[2]!;
+      if (subG && palG < 0) { r = (r + g) & 255; b = (b + g) & 255; }
+      for (let i = 0; i < w * h; i++) rgba.set([r, g, b, m0[3] || 255], i * 4);
+      return { w, h, rgba };
+    } catch {}
+  }
+  const w = 64, h = 64, rgba = new Uint8Array(w * h * 4), m = svg?.match(/#([0-9a-f]{6})/i), hd = createHash('sha256').update(src).digest();
+  const cR = m ? parseInt(m[1]!.slice(0, 2), 16) : hd[0]!, cG = m ? parseInt(m[1]!.slice(2, 4), 16) : hd[1]!, cB = m ? parseInt(m[1]!.slice(4, 6), 16) : hd[2]!;
   for (let i = 0; i < w * h; i++) {
-    const b = src[i % src.length] ?? 0, d = i * 4;
-    rgba[d] = (cR + b) & 0xff; rgba[d + 1] = (cG + (b >> 1)) & 0xff; rgba[d + 2] = (cB ^ b) & 0xff; rgba[d + 3] = 255;
+    const b = src[i % src.length] ?? 0;
+    rgba.set([(cR + b) & 255, (cG + (b >> 1)) & 255, (cB ^ b) & 255, 255], i * 4);
   }
   return { w, h, rgba };
 }
 
-function makeRenditionBlob(orgId: string, dim: 64 | 128 | 256, src: Buffer, ct = 'image/png', svg?: string): OrgLogoRenditionBlob {
+function makeRenditionBlob(orgId: string, dim: 64 | 128 | 256, src: Buffer, ct = 'image/png', svg?: string) {
   const dec = decodeLogoRgba(ct, src, svg), dst = new Uint8Array(dim * dim * 4);
   for (let y = 0; y < dim; y++) {
     const sy = Math.min(dec.h - 1, Math.floor((y * dec.h) / dim));
-    for (let x = 0; x < dim; x++) {
-      const sO = (sy * dec.w + Math.min(dec.w - 1, Math.floor((x * dec.w) / dim))) * 4, dO = (y * dim + x) * 4;
-      dst.set(dec.rgba.subarray(sO, sO + 4), dO);
-    }
+    for (let x = 0; x < dim; x++) { const o = (sy * dec.w + Math.min(dec.w - 1, Math.floor((x * dec.w) / dim))) * 4; dst.set(dec.rgba.subarray(o, o + 4), (y * dim + x) * 4); }
   }
   let bitBuf = 0n, bitCnt = 0;
   const hdr = ((dim - 1) & 0x3fff) | (((dim - 1) & 0x3fff) << 14) | (1 << 28);
@@ -138,12 +148,12 @@ function makeRenditionBlob(orgId: string, dim: 64 | 128 | 256, src: Buffer, ct =
   const rev8 = (x: number) => { let r = 0; for (let i = 0; i < 8; i++) r = (r << 1) | ((x >> i) & 1); return r; };
   put(0, 3);
   for (let t = 0; t < 4; t++) {
-    put(6, 6);
-    for (let i = 0; i < 18; i++) put(i === 8 ? 1 : 0, 3);
-    if (t === 0) { put(13, 4); put(256, 8); } else put(0, 1);
-    for (let i = 0; i < 256; i++) put(0, 1);
+    put(0, 1); put(8, 4);
+    for (let i = 0; i < 12; i++) put(i === 2 || i === 11 ? 1 : 0, 3);
+    if (t === 0) { put(1, 1); put(3, 3); put(254, 8); } else put(0, 1);
+    for (let i = 0; i < 256; i++) put(1, 1);
   }
-  put(5, 3); put(0, 8);
+  put(1, 1); put(0, 3);
   for (let i = 0; i < dim * dim; i++) {
     const o = i * 4;
     put(rev8(dst[o + 1]!), 8); put(rev8(dst[o]!), 8); put(rev8(dst[o + 2]!), 8); put(rev8(dst[o + 3]!), 8);
@@ -171,38 +181,29 @@ export function executeOrgLogoOrWorkspaceCreate(s: OrgChannelSlice3State, caller
     return { ok: true, workspace: ws, default_channel: genCh };
   }
   if (name === 'org_logo_upload') {
-    const ct = String(args.content_type);
-    const chk = checkLogo(ct, args.data_base64 as string | undefined, args.svg as string | undefined);
+    const ct = String(args.content_type), chk = checkLogo(ct, args.data_base64 as string | undefined, args.svg as string | undefined);
     if (!chk.ok) return ref(chk.reason === 'size' ? 'LOGO_TOO_LARGE' : 'INVALID_LOGO_FORMAT', chk.reason === 'size' ? 'logo_under_1mb' : 'valid_png_jpeg_webp_svg', { org: org.slug });
     s.orgLogos = s.orgLogos ?? {};
-    const rendition_blobs = { '64': makeRenditionBlob(org.id, 64, chk.sourceBytes, ct, chk.sanitizedSvg), '128': makeRenditionBlob(org.id, 128, chk.sourceBytes, ct, chk.sanitizedSvg), '256': makeRenditionBlob(org.id, 256, chk.sourceBytes, ct, chk.sanitizedSvg) };
-    const renditions = { '64': rendition_blobs['64'].object_key, '128': rendition_blobs['128'].object_key, '256': rendition_blobs['256'].object_key };
-    const logo = { org_id: org.id, object_key: renditions['256'], content_type: ct as 'image/png' | 'image/jpeg' | 'image/webp' | 'image/svg+xml', byte_length: chk.bytes, renditions, rendition_blobs, ...(chk.sanitizedSvg ? { sanitized_svg: chk.sanitizedSvg } : {}), updated_at: now };
-    s.orgLogos[org.id] = logo;
-    org.logo_object_key = logo.object_key;
-    org.logo_updated_at = now;
+    const mB = (d: 64 | 128 | 256) => makeRenditionBlob(org.id, d, chk.srcB, ct, chk.sSvg);
+    const rb = { '64': mB(64), '128': mB(128), '256': mB(256) }, renditions = { '64': rb['64'].object_key, '128': rb['128'].object_key, '256': rb['256'].object_key };
+    const logo = { org_id: org.id, object_key: renditions['256'], content_type: ct as 'image/png', byte_length: chk.bytes, renditions, rendition_blobs: rb, ...(chk.sSvg ? { sanitized_svg: chk.sSvg } : {}), updated_at: now };
+    s.orgLogos[org.id] = logo; org.logo_object_key = logo.object_key; org.logo_updated_at = now;
     return { ok: true, org_id: org.id, logo };
   }
   if (s.orgLogos) delete s.orgLogos[org.id];
-  org.logo_object_key = null;
-  org.logo_updated_at = now;
+  org.logo_object_key = null; org.logo_updated_at = now;
   return { ok: true, org_id: org.id, logo: null };
 }
 
 export function executeWorkspaceJoinTool(s: OrgChannelSlice3State, caller: McpCallerAuth, args: Record<string, unknown>, now: string) {
-  const seatRes = resolveSeatIdFromAuthOrArgs(s, caller, args);
-  if (!seatRes.ok) return { ok: false as const, status: 'refused' as const, refusal: seatRes.refusal };
-  const seatId = seatRes.seat_id, seat = seatId ? (s.seats ?? []).find((x) => x.seat_id === seatId && isLive(x)) : undefined;
-  const ctx = toCtx(caller), expWs = typeof args.workspace === 'string' ? args.workspace.trim() : '';
-  const argOrg = typeof args.org === 'string' && args.org.trim() ? args.org.trim() : '';
-  const wsOrgPre = expWs.includes('/') ? expWs.split('/', 2)[0]!.trim() : '';
-  if (argOrg && wsOrgPre) {
-    const o1 = s.organizations.find((o) => isLive(o) && (o.id === argOrg || norm(o.slug) === norm(argOrg)));
-    const o2 = s.organizations.find((o) => isLive(o) && (o.id === wsOrgPre || norm(o.slug) === norm(wsOrgPre)));
-    if (!o1 || !o2 || o1.id !== o2.id) return ref('WORKSPACE_SEAT_MISMATCH', 'org_workspace_selector_conflict', { org: argOrg, workspace: expWs, seat_id: seatId });
-  }
-  const expOrg = argOrg || wsOrgPre, wsTok = norm(expWs.includes('/') ? expWs.split('/', 2)[1]! : expWs);
-  const cands = s.workspaces.filter((w) => isLive(w) && (w.workspace_id === expWs || norm(w.slug) === wsTok) && (!expOrg || s.organizations.some((o) => o.id === w.org_id && (o.id === expOrg || norm(o.slug) === norm(expOrg)))));
+  const sr = resolveSeatIdFromAuthOrArgs(s, caller, args);
+  if (!sr.ok) return { ok: false as const, status: 'refused' as const, refusal: sr.refusal };
+  const seatId = sr.seat_id, seat = seatId ? (s.seats ?? []).find((x) => x.seat_id === seatId && isLive(x)) : undefined;
+  const ctx = toCtx(caller), expWs = str(args.workspace) ?? '', argOrg = str(args.org) ?? '', wsPre = expWs.includes('/') ? expWs.split('/', 2)[0]!.trim() : '';
+  const fOrg = (t: string) => s.organizations.find((o) => isLive(o) && (o.id === t || norm(o.slug) === norm(t)));
+  if (argOrg && wsPre && fOrg(argOrg)?.id !== fOrg(wsPre)?.id) return ref('WORKSPACE_SEAT_MISMATCH', 'org_workspace_selector_conflict', { org: argOrg, workspace: expWs, seat_id: seatId });
+  const expOrg = argOrg || wsPre, wsTok = norm(expWs.includes('/') ? expWs.split('/', 2)[1]! : expWs);
+  const cands = s.workspaces.filter((w) => isLive(w) && (w.workspace_id === expWs || norm(w.slug) === wsTok) && (!expOrg || fOrg(expOrg)?.id === w.org_id));
   if (cands.length === 0) return ref('WORKSPACE_NOT_FOUND', 'workspace', { workspace: expWs || null, seat_id: seatId });
   if (cands.length > 1) return ref('AMBIGUOUS_WORKSPACE_SELECTOR', 'org_qualifier', { workspace: expWs, seat_id: seatId });
   const cand = cands[0]!, org = s.organizations.find((o) => o.id === cand.org_id)!;
