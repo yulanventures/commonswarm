@@ -1339,7 +1339,7 @@ test("managed current-family proof is repeated after the final effect wait", {ti
 });
 
 // The served owner command owns set/clear admission; SQL-only preparation cannot
-// prove that a real human can change a live future date with retained idle history.
+// prove that a real human can change a live future date without resuming a grant.
 test("owner can set and clear a future local date without resume; elapsed date stays terminal", {timeout:30_000},async()=>{
   const agent=await seedAgent('chosen-date-owner');
   const minted=await runCmd(shared.ownerJwt,{kind:'mint_agent_token',principal_id:agent.principalId,
@@ -1350,7 +1350,10 @@ test("owner can set and clear a future local date without resume; elapsed date s
   assert.ok(family?.renewal_grant_id);
   const grant=family!.renewal_grant_id;
   assert.equal((await readMembers(raw,shared.workspace)).status,200);
-  await sql`UPDATE swarm.renewal_grants SET suspended_at=clock_timestamp() WHERE renewal_grant_id=${grant}::uuid`;
+  const [live] = await sql`SELECT suspension_active, suspended_at, resumed_at
+    FROM swarm.renewal_grants WHERE renewal_grant_id=${grant}::uuid`;
+  assert.deepEqual(live, { suspension_active: false, suspended_at: null, resumed_at: null },
+    "the date fixture starts live without changing security suspension");
   const setDate=(date:string|null,commandId?:string)=>runCmd(shared.ownerJwt,{kind:'set_connection_expiry',connection_kind:'renewal',grant_id:grant,connection_expires_at:date},{commandId});
   const future=new Date(Date.now()+86_400_000).toISOString();
   const datedCommand=randomUUID();
@@ -1363,11 +1366,52 @@ test("owner can set and clear a future local date without resume; elapsed date s
   assert.equal(replayed.body.connection_expired_at,null);
   const [history]=await sql`SELECT suspended_at,resumed_at,connection_expires_at,connection_expired_at
     FROM swarm.renewal_grants WHERE renewal_grant_id=${grant}::uuid`;
-  assert.ok(history!.suspended_at instanceof Date);assert.equal(history!.resumed_at,null);
+  assert.equal(history!.suspended_at,null);assert.equal(history!.resumed_at,null);
   assert.equal(history!.connection_expires_at,null);assert.equal(history!.connection_expired_at,null);
   await sql`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second' WHERE renewal_grant_id=${grant}::uuid`;
   assert.equal((await setDate(null)).status,403,"the served setter cannot clear elapsed terminal authority");
   assert.equal((await runCmd(String(renewed.body.agent_token),{kind:'renew_agent_token'})).status,403);
+});
+
+// Date policy cannot resume security suspension. This is the served setter
+// boundary; the prepare/resume suites own their separate suspension contracts.
+test("owner date edits refuse a security-suspended live family without effects", async()=>{
+  const agent=await seedAgent('chosen-date-suspended');
+  const minted=await runCmd(shared.ownerJwt,{kind:'mint_agent_token',principal_id:agent.principalId,
+    run_id:randomUUID(),task_id:randomUUID(),epoch:1,device_id:shared.device,scopes:['post_signal']});
+  assert.equal(minted.body.status,'accepted');
+  const raw=String(minted.body.agent_token);
+  assert.equal((await readMembers(raw,shared.workspace)).status,200,'credential works before suspension');
+  const [binding]=await sql<{renewal_grant_id:string}[]>`SELECT renewal_grant_id FROM swarm.agent_tokens
+    WHERE token_id=${String(minted.body.token_id)}::uuid`;
+  assert.ok(binding?.renewal_grant_id);
+  const grant=binding!.renewal_grant_id;
+  const future=new Date(Date.now()+86_400_000).toISOString();
+  const control=await runCmd(shared.ownerJwt,{kind:'set_connection_expiry',connection_kind:'renewal',
+    grant_id:grant,connection_expires_at:future});
+  assert.equal(control.status,200,JSON.stringify(control.body));
+  assert.equal(control.body.status,'accepted','same owner can edit this live family before suspension');
+  await sql`UPDATE swarm.renewal_grants SET suspended_at=clock_timestamp() WHERE renewal_grant_id=${grant}::uuid`;
+  const [paused]=await sql`SELECT suspension_active,connection_expires_at,connection_expired_at,revoked_at
+    FROM swarm.renewal_grants WHERE renewal_grant_id=${grant}::uuid`;
+  assert.equal(paused!.suspension_active,true);
+  assert.equal(paused!.connection_expires_at.toISOString(),future);
+  assert.equal(paused!.connection_expired_at,null);assert.equal(paused!.revoked_at,null);
+  const state=async()=>JSON.stringify({
+    grant:await sql`SELECT * FROM swarm.renewal_grants WHERE renewal_grant_id=${grant}::uuid`,
+    tokens:await sql`SELECT * FROM swarm.agent_tokens WHERE renewal_grant_id=${grant}::uuid ORDER BY token_id`,
+    events:await sql`SELECT * FROM swarm.events WHERE workspace_id=${shared.workspace}::uuid ORDER BY event_id`,
+    ledger:await sql`SELECT * FROM swarm.idempotency_keys WHERE workspace_id=${shared.workspace}::uuid ORDER BY command_id`,
+    audit:await sql`SELECT * FROM swarm.audit_log WHERE workspace_id=${shared.workspace}::uuid ORDER BY audit_id`,
+  });
+  const before=await state();
+  for(const date of [future,null]) {
+    const denied=await runCmd(shared.ownerJwt,{kind:'set_connection_expiry',connection_kind:'renewal',
+      grant_id:grant,connection_expires_at:date});
+    assert.equal(denied.status,403,JSON.stringify(denied.body));
+    assert.equal(denied.body.error,'connection_expiry_unavailable');
+    assert.equal(await state(),before,'no resume, policy, token, event, ledger or audit effects');
+  }
 });
 
 // Attempt metering is a distinct refusal contract from reducer ledger replay.
