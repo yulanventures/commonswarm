@@ -8,7 +8,7 @@ import { buildOrgChannelRefusal as mkRef, type OrgRole, type PrincipalKind } fro
 const eq = assert.equal, deq = assert.deepEqual, ok = assert.ok, th = assert.throws, NOW = '2026-10-20T12:00:00Z';
 const OY = 'o-y', OA = 'o-a', WC = 'w-yc', WO = 'w-yo', WA = 'w-ao', AG = 'ag-argon', CN = 'cn-a', WYC = 'yulan/core', Y = 'yulan';
 const T = 'u-tom', AL = 'u-alice', B = 'u-bob', G = 'u-guest';
-const R: Record<string, OrgRole> = { o: 'owner', d: 'admin', m: 'member', g: 'guest' }, K = (k: string): PrincipalKind => (k === 'a' ? 'agent' : 'user');
+const R: Record<string, OrgRole> = { o: 'owner', d: 'admin', m: 'member', g: 'guest' }, K = (k: string): PrincipalKind => (k==='a' ? 'agent' : 'user');
 const U = (principal_id: string, connection_id?: string): Ctx => ({ principal_kind: 'user', principal_id, connection_id });
 const A = (principal_id = AG, connection_id?: string, seat?: string): Ctx => ({ principal_kind: 'agent', principal_id, connection_id, seat });
 const uT = U(T, 'ct'), uA = U(AL), uB = U(B), uG = U(G), cA = A(AG, CN);
@@ -24,7 +24,7 @@ function makeFixture(): St {
     orgMemberships: ([[OY, 'u', T, 'o'], [OY, 'u', AL, 'd'], [OY, 'u', B, 'm'], [OY, 'u', G, 'g'], [OY, 'a', AG, 'd'], [OA, 'u', T, 'o'], [OA, 'a', AG, 'm']] as const).map(([o, k, id, r]) => ({ org_id: o, principal_kind: K(k), principal_id: id, role: R[r]!, created_at: NOW, revoked_at: null })),
     workspaces: ([[WC, OY, 'core', 'Core'], [WO, OY, 'ops', 'Ops'], [WA, OA, 'ops', 'Ops']] as const).map(([workspace_id, org_id, slug, name]) => ({ workspace_id, org_id, slug, name, archived_at: null })),
     workspaceGrants: ([[WC, OY, 'u', T, 'o'], [WC, OY, 'u', AL, 'd'], [WC, OY, 'u', B, 'm'], [WC, OY, 'a', AG, 'd'], [WO, OY, 'u', T, 'o'], [WO, OY, 'a', AG, 'd'], [WA, OA, 'u', T, 'o'], [WA, OA, 'a', AG, 'm']] as const).map(([w, o, k, id, r]) => ({ workspace_id: w, org_id: o, principal_kind: K(k), principal_id: id, role: R[r]!, created_at: NOW, revoked_at: null })),
-    channels: ([['c-yg', WC, OY, 'general', 0], ['c-ys', WC, OY, 'security', 1], ['c-yo', WO, OY, 'general', 0], ['c-ag', WA, OA, 'general', 0]] as const).map(([channel_id, workspace_id, org_id, slug, p]) => ({ channel_id, workspace_id, org_id, slug, visibility: (p ? 'private' : 'workspace') as 'workspace' | 'private', join_policy: (p ? 'invite_only' : 'open') as 'open' | 'invite_only', is_default: slug === 'general', created_at: NOW })),
+    channels: ([['c-yg', WC, OY, 'general', 0], ['c-ys', WC, OY, 'security', 1], ['c-yo', WO, OY, 'general', 0], ['c-ag', WA, OA, 'general', 0]] as const).map(([channel_id, workspace_id, org_id, slug, p]) => ({ channel_id, workspace_id, org_id, slug, visibility: (p ? 'private' : 'workspace') as 'workspace' | 'private', join_policy: (p ? 'invite_only' : 'open') as 'open' | 'invite_only', is_default: slug==='general', created_at: NOW })),
     channelMemberships: ([['u', T, 'owner'], ['a', AG, 'member']] as const).map(([k, id, role]) => ({ channel_id: 'c-ys', workspace_id: WC, principal_kind: K(k), principal_id: id, role, notify_pref: 'all' as const, joined_at: NOW, revoked_at: null })),
     agentIdentities: [{ id: AG, owner_user_id: T, display_name: 'Argon', created_at: NOW }],
     agentPrincipals: [], seats: [], seatHandles: [],
@@ -37,8 +37,8 @@ function makeFixture(): St {
 test('schemas', () => {
   deq([NAMES.length, TOOLS.length], [34, 34]);
   for (const t of TOOLS) for (const sel of ['seat', 'seat_id', 'org', 'workspace', 'channel']) ok(sel in t.inputSchema.properties);
-  const inv = TOOLS.find((t) => t.name === 'org_invite_member')!.inputSchema.properties, arrT = { type: 'array', items: { type: 'string' } };
-  deq([inv.workspace_ids, inv.request_approval, TOOLS.find((t) => t.name === 'whoami')!.inputSchema.properties.allowed_org_ids], [arrT, { type: 'boolean' }, arrT]);
+  const inv = TOOLS.find((t) => t.name==='org_invite_member')!.inputSchema.properties, arrT = { type: 'array', items: { type: 'string' } };
+  deq([inv.workspace_ids, inv.request_approval, TOOLS.find((t) => t.name==='whoami')!.inputSchema.properties.allowed_org_ids], [arrT, { type: 'boolean' }, arrT]);
   for (const fn of [() => valArgs('unknown_tool', {}), () => valArgs('org_create', { slug: 'only' }), () => parseCli(['org', 'list', '--bogus'])]) th(fn);
   for (const [t, bad] of [
     ['org_set_member_role', { principal_id: 'u', role: 'x' }], ['channel_add_member', { principal_id: 'u', role: 'admin' }],
@@ -53,7 +53,7 @@ test('whoami+cli', () => {
   const s = makeFixture(), pre = whoami(s, cA, {}), j = (cmd: string) => JSON.parse(sh(s, cA, cmd).stdout);
   if (!pre.ok) assert.fail('whoami');
   const disc = mcp(s, cA, 'discover', {});
-  deq([pre.active_seat, pre.organizations[0]?.role, pre.organizations[1]?.role, (s.agentPrincipals?.length ?? 0) + (s.seats?.length ?? 0), rCode(whoami(s, cA, { org: Y, workspace: 'acme/ops' }) as Record<string, unknown>), rCode(whoami(s, uB, { workspace: WYC, channel: 'security' }) as Record<string, unknown>), j('cswarm whoami --json'), disc.total_organizations, disc.total_workspaces, disc.total_channels, j('discover --json')], [null, 'admin', 'member', 0, 'WORKSPACE_SEAT_MISMATCH', 'CHANNEL_ACCESS_DENIED', pre, 2, 3, 4, disc]);
+  deq([pre.active_seat, pre.organizations[0]?.role, pre.organizations[1]?.role, (s.agentPrincipals?.length??0) + (s.seats?.length??0), rCode(whoami(s, cA, { org: Y, workspace: 'acme/ops' }) as Record<string, unknown>), rCode(whoami(s, uB, { workspace: WYC, channel: 'security' }) as Record<string, unknown>), j('cswarm whoami --json'), disc.total_organizations, disc.total_workspaces, disc.total_channels, j('discover --json')], [null, 'admin', 'member', 0, 'WORKSPACE_SEAT_MISMATCH', 'CHANNEL_ACCESS_DENIED', pre, 2, 3, 4, disc]);
   s.agentPrincipals!.push({ principal_id: 'ap-argon', workspace_id: WC, agent_identity_id: AG, owner_user_id: T, name: 'Argon', revoked_at: null });
   addS(s, 'seat-1', WC, 'ap-argon', AG); addH(s, 'h-live', 'seat-1', WC);
   Object.assign(s.connectionPolicies![0]!, { default_org_id: OA, default_workspace_id: 'ws-del' });
@@ -100,10 +100,10 @@ test('org+logos', () => {
   upL('image/png', mkPng(25)); const w2 = rb('64');
   upL('image/webp', w1.data_base64); const w3 = rb('64').sha256;
   upL('image/webp', w2.data_base64);
-  ok(w1.sha256 !== w2.sha256 && w3 !== rb('64').sha256);
+  ok(w1.sha256!==w2.sha256&&w3!==rb('64').sha256);
 
   deq([rCode(upL('image/png', 'iVBORw==')), sh(s, uT, 'org logo remove --org ridge').exitCode, sh(s, cA, 'org switch acme --workspace ops').exitCode, sh(s, uT, 'org update ridge --name RidgeInc').exitCode, s.connectionPolicies![0]!.default_org_id], ['INVALID_LOGO_FORMAT', 0, 0, 0, OA]);
-  deq([rcY(uA, 'org_invite_member', { principal_id: T, role: 'member' }), rcY(uT, 'org_invite_member', { principal_id: T, role: 'admin' }), rcY(uT, 'org_invite_member', { principal_id: 'u-bw', role: 'member', workspace_ids: ['bad'] }), s.orgMemberships.some((m) => m.principal_id === 'u-bw')], ['ORG_OWNER_ROLE_REQUIRED', 'LAST_ORG_OWNER_REQUIRED', 'WORKSPACE_ACCESS_DENIED', false]);
+  deq([rcY(uA, 'org_invite_member', { principal_id: T, role: 'member' }), rcY(uT, 'org_invite_member', { principal_id: T, role: 'admin' }), rcY(uT, 'org_invite_member', { principal_id: 'u-bw', role: 'member', workspace_ids: ['bad'] }), s.orgMemberships.some((m) => m.principal_id==='u-bw')], ['ORG_OWNER_ROLE_REQUIRED', 'LAST_ORG_OWNER_REQUIRED', 'WORKSPACE_ACCESS_DENIED', false]);
 
   s.orgMemberships[0]!.role = 'guest';
   deq([effRole(s, cA, OY), rcY(cA, 'org_set_member_role', { principal_id: T, role: 'admin' })], ['guest', 'ORG_ADMIN_REQUIRED']);
@@ -112,15 +112,15 @@ test('org+logos', () => {
 
   for (const [cmd, dec, end] of [['org set-role u-tom admin --org yulan --request-approval', 'approve', 0], ['org delete ridge --confirm ridge', 'typo', 1]] as const) {
     const req = sh(s, cA, cmd), id = (req.payload.approval as { approval_id: string }).approval_id;
-    deq([/pending_owner_approval/.test(req.stdout), rc(s, uT, 'org_confirm_action', { approval_id: id, decision: 'approve', org: 'acme' }), mcp(s, uT, 'org_confirm_action', { approval_id: id, decision: dec }).ok, s.approvalRequests?.find((a) => a.approval_id === id)?.state], [true, 'WORKSPACE_SEAT_MISMATCH', false, 'pending']);
+    deq([/pending_owner_approval/.test(req.stdout), rc(s, uT, 'org_confirm_action', { approval_id: id, decision: 'approve', org: 'acme' }), mcp(s, uT, 'org_confirm_action', { approval_id: id, decision: dec }).ok, s.approvalRequests?.find((a) => a.approval_id===id)?.state], [true, 'WORKSPACE_SEAT_MISMATCH', false, 'pending']);
     if (end) eq(sh(s, uT, `org confirm ${id} --approve`).payload.status, 'approved');
   }
-  ok(s.organizations.find((o) => o.id === newOrgId)?.archived_at);
+  ok(s.organizations.find((o) => o.id===newOrgId)?.archived_at);
 });
 
 test('workspaces', () => {
   const s = makeFixture(), yr = 'yulan/research';
-  deq([sh(s, uT, 'workspace list --org yulan').exitCode, sh(s, uA, 'workspace members yulan/ops').exitCode, sh(s, uA, 'org members grant u-bob --org yulan --workspace yulan/ops --role member').exitCode], [0, 0, 0]);
+  deq([sh(s, uT, 'workspace list --org yulan').exitCode, sh(s, uA, 'workspace members yulan/ops').exitCode, sh(s, uA, 'org members grant u-bob --org yulan --workspace yulan/ops --role member').exitCode, sh(s, uA, 'org invite f@y.io --workspace yulan/ops').exitCode], [0, 0, 0, 0]);
   const defCh = sh(s, uT, 'workspace create research --org yulan --name Research').payload.default_channel as { slug: string; is_default?: boolean };
   deq([defCh.slug, defCh.is_default, rCode(sh(s, uG, `workspace join ${yr}`).payload), sh(s, uT, 'org invite ag-h --org yulan --kind agent --role member').exitCode], ['general', true, 'GUEST_WORKSPACE_GRANT_REQUIRED', 0]);
   const grantAg = sh(s, uT, `org members grant ag-h --org yulan --workspace ${WYC} --kind agent --role member`);
@@ -129,7 +129,7 @@ test('workspaces', () => {
   const revAg = sh(s, uT, `org members revoke ag-h --org yulan --workspace ${WYC} --kind agent`);
   deq([revAg.payload.closed_seat_ids, revAg.payload.closed_handle_ids], [['s-h'], ['h-h']]);
   for (const [c, cmd] of [[uT, `workspace members ${WYC}`], [uA, `workspace join ${yr}`], [uA, `workspace leave ${yr}`], [uT, `workspace move ${yr} --to-org acme`]] as const) eq(sh(s, c, cmd).exitCode, 0);
-  eq(s.workspaces.find((w) => w.slug === 'research')?.org_id, OA);
+  eq(s.workspaces.find((w) => w.slug==='research')?.org_id, OA);
 });
 
 test('channels', () => {
@@ -140,11 +140,11 @@ test('channels', () => {
   deq([rCode(shC(uG, 'create g1').payload), rCode(sh(s, uB, 'channel create g2 --workspace yulan/ops').payload), rCode(shC(cA, 'create war-room --visibility private').payload)], ['CHANNEL_CREATE_FORBIDDEN', 'CHANNEL_CREATE_FORBIDDEN', 'PRIVATE_CHANNELS_DISABLED']);
   s.privateChannelsEnabled = true;
   shC(uT, 'create pub1');
-  deq([rcC(uT, 'channel_rename', 'pub1', { new_slug: 'bad!', visibility: 'private' }), s.channels.find((c) => c.slug === 'pub1')?.visibility], ['INVALID_CHANNEL_SLUG', 'workspace']);
+  deq([rcC(uT, 'channel_rename', 'pub1', { new_slug: 'bad!', visibility: 'private' }), s.channels.find((c) => c.slug==='pub1')?.visibility], ['INVALID_CHANNEL_SLUG', 'workspace']);
   const privId = (shC(cA, 'create war-room --visibility private --topic Sev-1').payload.channel as { channel_id: string }).channel_id;
-  deq([(shC(uT, 'members war-room').payload.members as unknown[]).length, shC(uT, 'notify mentions --channel war-room').exitCode, s.channelMemberships.find((m) => m.channel_id === privId && m.principal_id === T)?.role], [2, 0, 'owner']);
-  ok(!(shC(uB, 'list').payload.channels as Array<{ slug: string }>).some((c) => c.slug === 'war-room'));
-  deq(['join war-room', 'add-member --channel war-room --principal u-bob', 'topic Resolved --channel war-room', 'notify mentions --channel war-room'].map((c, i) => shC(i === 1 ? uT : uB, c).exitCode), [1, 0, 0, 0]);
+  deq([(shC(uT, 'members war-room').payload.members as unknown[]).length, shC(uT, 'notify mentions --channel war-room').exitCode, s.channelMemberships.find((m) => m.channel_id===privId&&m.principal_id===T)?.role], [2, 0, 'owner']);
+  ok(!(shC(uB, 'list').payload.channels as Array<{ slug: string }>).some((c) => c.slug==='war-room'));
+  deq(['join war-room', 'add-member --channel war-room --principal u-bob', 'topic Resolved --channel war-room', 'notify mentions --channel war-room'].map((c, i) => shC(i===1 ? uT : uB, c).exitCode), [1, 0, 0, 0]);
   deq([
     rcC(uB, 'channel_add_member', 'war-room', { principal_id: B, role: 'owner' }),
     rcC(uB, 'channel_add_member', 'general', { principal_id: B, role: 'owner' }),
@@ -155,5 +155,5 @@ test('channels', () => {
   eq(rcC(uT, 'channel_rename', 'general', { visibility: 'private' }), 'CHANNEL_HAS_PUBLIC_HISTORY');
   for (const [c, sub] of [[uB, 'leave general'], [uB, 'archive war-room'], [uG, 'archive general'], [uG, 'topic B --channel general'], [uT, 'archive general'], [uT, 'rename m --channel general']] as const) eq(shC(c, sub).exitCode, 1);
   deq([shC(uT, 'remove-member u-bob --channel war-room').exitCode, shC(uT, 'archive war-room').exitCode, parseCli(['cswarm', 'org', 'list', '--json']).tool], [0, 0, 'org_list']);
-  ok(s.channels.find((c) => c.channel_id === privId)?.archived_at && /Identity: ag-argon[\s\S]*Org yulan/.test(sh(s, cA, 'whoami').stdout));
+  ok(s.channels.find((c) => c.channel_id===privId)?.archived_at&&/Identity: ag-argon[\s\S]*Org yulan/.test(sh(s, cA, 'whoami').stdout));
 });
