@@ -18,6 +18,7 @@ import {
 import {
   type McpCallerAuth,
   type OrgChannelSlice3State,
+  OrgChannelToolInputError,
   type OrgChannelToolName,
   executeMultiOrgWhoami,
   resolveMcpOrgWorkspaceChannel,
@@ -42,7 +43,15 @@ export function executeOrgChannelMcpTool(
   name: OrgChannelToolName | string,
   rawArgs: Record<string, unknown> = {},
 ): Record<string, unknown> {
-  const args = validateOrgChannelToolArguments(name, rawArgs);
+  let args: Record<string, unknown>;
+  try {
+    args = validateOrgChannelToolArguments(name, rawArgs);
+  } catch (err) {
+    if (err instanceof OrgChannelToolInputError) {
+      return { ...ref('INVALID_ARGUMENTS', err.message), error: err.code };
+    }
+    throw err;
+  }
   const now = new Date().toISOString();
   const ctx = toCtx(caller);
   const inferKind = (id: string) =>
@@ -66,6 +75,13 @@ export function executeOrgChannelMcpTool(
   if (name === 'org_list') {
     const sr = resolveSeatIdFromAuthOrArgs(s, caller, args);
     if (!sr.ok) return { ok: false, status: 'refused', refusal: sr.refusal };
+    if (typeof args.workspace === 'string' || typeof args.channel === 'string') {
+      const chk = resolveMcpOrgWorkspaceChannel(s, caller, args as Record<string, string | null | undefined>);
+      if (!chk.ok) return { ok: false, status: 'refused', refusal: chk.refusal };
+    } else if (typeof args.org === 'string' && args.org.trim()) {
+      const or = resolveOrg(s, caller, args);
+      if (!or.ok) return or;
+    }
     const organizations = s.organizations
       .filter((o) => isLive(o) && canReadOrg(s, ctx, o.id))
       .map((o) => ({
@@ -125,25 +141,42 @@ export function executeOrgChannelMcpTool(
   }
 
   if (name === 'org_confirm_action') {
+    const decision = String(args.decision);
+    if (decision !== 'approve' && decision !== 'reject') {
+      return { ...ref('INVALID_ARGUMENTS', 'decision_approve_or_reject'), error: 'INVALID_ARGUMENTS' };
+    }
     const card = (s.approvalRequests ?? []).find((a) => a.approval_id === String(args.approval_id));
     if (!card) return ref('APPROVAL_NOT_FOUND', 'approval_id');
     if (card.state !== 'pending') return ref('APPROVAL_ALREADY_DECIDED', 'pending_approval', { org: card.org_id });
     if (caller.principal_kind !== 'user' || orgRole(s, card.org_id, 'user', caller.principal_id) !== 'owner') {
       return ref('ORG_OWNER_REQUIRED', 'human_org_owner', { org: card.org_id });
     }
-    card.decided_by = caller.principal_id;
-    card.decided_at = now;
-    if (String(args.decision) === 'reject') {
+    if (decision === 'reject') {
+      card.decided_by = caller.principal_id;
+      card.decided_at = now;
       card.state = 'rejected';
       return { ok: true, status: 'rejected', approval: card };
     }
-    card.state = 'approved';
     const executed = executeOrgChannelMcpTool(
       s,
       { principal_kind: 'user', principal_id: caller.principal_id },
       card.action_kind,
       card.payload,
     );
+    if (executed.ok !== true) {
+      const errCode = (executed.refusal as { code?: string } | undefined)?.code ?? String(executed.error ?? 'EXECUTION_FAILED');
+      return {
+        ...executed,
+        ok: false,
+        status: 'refused',
+        error: errCode,
+        approval: card,
+        executed,
+      };
+    }
+    card.decided_by = caller.principal_id;
+    card.decided_at = now;
+    card.state = 'approved';
     return { ok: true, status: 'approved', approval: card, executed };
   }
 
@@ -151,7 +184,11 @@ export function executeOrgChannelMcpTool(
     const sr = resolveSeatIdFromAuthOrArgs(s, caller, args);
     if (!sr.ok) return { ok: false, status: 'refused', refusal: sr.refusal };
     let filterOrgId: string | null = null;
-    if (typeof args.org === 'string' && args.org.trim()) {
+    if (typeof args.workspace === 'string' || typeof args.channel === 'string') {
+      const chk = resolveMcpOrgWorkspaceChannel(s, caller, args as Record<string, string | null | undefined>);
+      if (!chk.ok) return { ok: false, status: 'refused', refusal: chk.refusal };
+      filterOrgId = chk.org.id;
+    } else if (typeof args.org === 'string' && args.org.trim()) {
       const or = resolveOrg(s, caller, args);
       if (!or.ok) return or;
       filterOrgId = or.org.id;
@@ -212,6 +249,17 @@ export function executeOrgChannelMcpTool(
         }));
       return { ok: true, org_id: org.id, members, invites: (s.orgInvites ?? []).filter((i) => i.org_id === org.id && isLive(i)) };
     }
+    if (name === 'org_delete') {
+      if (String(args.confirm_slug) !== org.slug) return ref('ORG_DELETE_CONFIRMATION_MISMATCH', 'matching_confirm_slug', { org: org.slug });
+      if (caller.principal_kind === 'agent' || args.request_approval === true) return enqueueApproval(s, caller, org, 'org_delete', { org: org.id, confirm_slug: org.slug });
+      if (role !== 'owner') return ref('ORG_OWNER_REQUIRED', 'org_owner_role', { org: org.slug });
+      org.archived_at = now;
+      for (const m of s.orgMemberships.filter((x) => x.org_id === org.id && isLive(x))) cascadeOrgMemberRemoval(s, { org_id: org.id, principal_kind: m.principal_kind, principal_id: m.principal_id, now });
+      return { ok: true, deleted_org_id: org.id };
+    }
+    if (args.request_approval === true && caller.principal_kind === 'agent') {
+      return enqueueApproval(s, caller, org, name, { ...args, org: org.id, request_approval: false });
+    }
     if (role !== 'owner' && role !== 'admin') return ref('ORG_ADMIN_REQUIRED', 'org_owner_or_admin_role', { org: org.slug });
 
     if (name === 'workspace_create' || name === 'org_logo_upload' || name === 'org_logo_remove') {
@@ -228,21 +276,23 @@ export function executeOrgChannelMcpTool(
       org.updated_at = now;
       return { ok: true, organization: org };
     }
-    if (name === 'org_delete') {
-      if (String(args.confirm_slug) !== org.slug) return ref('ORG_DELETE_CONFIRMATION_MISMATCH', 'matching_confirm_slug', { org: org.slug });
-      if (caller.principal_kind === 'agent' || args.request_approval === true) return enqueueApproval(s, caller, org, 'org_delete', { org: org.id, confirm_slug: org.slug });
-      if (role !== 'owner') return ref('ORG_OWNER_REQUIRED', 'org_owner_role', { org: org.slug });
-      org.archived_at = now;
-      for (const m of s.orgMemberships.filter((x) => x.org_id === org.id && isLive(x))) cascadeOrgMemberRemoval(s, { org_id: org.id, principal_kind: m.principal_kind, principal_id: m.principal_id, now });
-      return { ok: true, deleted_org_id: org.id };
-    }
+    const humanOwners = () => s.orgMemberships.filter((m) => m.org_id === org.id && m.principal_kind === 'user' && m.role === 'owner' && isLive(m)).length;
     if (name === 'org_invite_member') {
       const tRole = ((args.role as OrgRole | undefined) ?? 'member') as OrgRole;
-      const pKind = ((args.principal_kind as PrincipalKind | undefined) ?? 'user') as PrincipalKind;
-      const pId = typeof args.principal_id === 'string' ? args.principal_id.trim() : null;
-      const email = typeof args.email === 'string' ? args.email.trim().toLowerCase() : null;
-      if (tRole === 'owner' && (caller.principal_kind === 'agent' || role !== 'owner')) {
-        return caller.principal_kind === 'agent' ? enqueueApproval(s, caller, org, 'org_invite_member', { ...args, org: org.id }) : ref('ORG_OWNER_REQUIRED', 'org_owner_role', { org: org.slug });
+      const pId = typeof args.principal_id === 'string' && args.principal_id.trim() ? args.principal_id.trim() : null;
+      const pKind = ((args.principal_kind as PrincipalKind | undefined) ?? (pId ? inferKind(pId) : 'user')) as PrincipalKind;
+      const email = typeof args.email === 'string' && args.email.trim() ? args.email.trim().toLowerCase() : null;
+      const ex = pId ? s.orgMemberships.find((m) => m.org_id === org.id && isPrin(m, pKind, pId)) : undefined;
+      const exIsLiveOwner = Boolean(ex && isLive(ex) && ex.role === 'owner');
+      if (exIsLiveOwner && tRole !== 'owner' && humanOwners() <= 1) {
+        return role !== 'owner'
+          ? ref('ORG_OWNER_ROLE_REQUIRED', 'org_owner_role', { org: org.slug })
+          : ref('LAST_ORG_OWNER_REQUIRED', 'another_org_owner', { org: org.slug });
+      }
+      if ((tRole === 'owner' || exIsLiveOwner) && (caller.principal_kind === 'agent' || role !== 'owner')) {
+        return caller.principal_kind === 'agent'
+          ? enqueueApproval(s, caller, org, 'org_invite_member', { ...args, org: org.id })
+          : ref('ORG_OWNER_ROLE_REQUIRED', 'org_owner_role', { org: org.slug });
       }
       if (!pId && !email) return ref('INVALID_INVITE_TARGET', 'principal_id_or_email', { org: org.slug });
       const wsIds = Array.isArray(args.workspace_ids) ? (args.workspace_ids as string[]) : [];
@@ -250,7 +300,6 @@ export function executeOrgChannelMcpTool(
         if (pKind === 'agent' && !s.agentIdentities.some((a) => a.id === pId)) {
           s.agentIdentities.push({ id: pId, owner_user_id: caller.principal_kind === 'user' ? caller.principal_id : (agentOwner(s, ctx) ?? caller.principal_id), display_name: typeof args.display_name === 'string' ? args.display_name : pId, created_at: now });
         }
-        const ex = s.orgMemberships.find((m) => m.org_id === org.id && isPrin(m, pKind, pId));
         if (ex) { ex.role = tRole; ex.revoked_at = null; } else s.orgMemberships.push({ org_id: org.id, principal_kind: pKind, principal_id: pId, role: tRole, created_at: now, revoked_at: null });
         for (const wid of wsIds) executeOrgChannelMcpTool(s, caller, 'org_assign_workspace_member', { org: org.id, workspace: wid, principal_id: pId, principal_kind: pKind, role: tRole });
       }
@@ -262,7 +311,6 @@ export function executeOrgChannelMcpTool(
       }
       return { ok: true, org_id: org.id, principal_id: pId, principal_kind: pKind, role: tRole };
     }
-    const humanOwners = () => s.orgMemberships.filter((m) => m.org_id === org.id && m.principal_kind === 'user' && m.role === 'owner' && isLive(m)).length;
     if (name === 'org_set_member_role') {
       const pId = String(args.principal_id);
       const pKind = inferKind(pId);

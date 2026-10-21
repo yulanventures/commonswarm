@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import {
   type CallerContext,
   type OrgApprovalRequest,
@@ -40,6 +41,18 @@ export interface CliOrgChannelState extends OrgChannelAuthorityState {
       content_type: string;
       byte_length: number;
       renditions: { '64': string; '128': string; '256': string };
+      rendition_blobs?: Record<
+        '64' | '128' | '256',
+        {
+          object_key: string;
+          width: number;
+          height: number;
+          content_type: string;
+          byte_length: number;
+          sha256: string;
+          data_base64: string;
+        }
+      >;
       sanitized_svg?: string;
       updated_at: string;
     }
@@ -59,6 +72,39 @@ export interface ParsedOrgChannelCliCommand {
 }
 
 const BOOL_FLAGS = new Set(['json', 'approve', 'reject', 'request-approval']);
+
+function makeEmptyCliState(): CliOrgChannelState {
+  return {
+    privateChannelsEnabled: true,
+    organizations: [],
+    workspaces: [],
+    channels: [],
+    agentIdentities: [],
+    orgMemberships: [],
+    workspaceGrants: [],
+    channelMemberships: [],
+    agentPrincipals: [],
+    seats: [],
+    seatHandles: [],
+    connectionPolicies: [],
+    fileChannelBindings: [],
+    orgInvites: [],
+    approvalRequests: [],
+    orgLogos: {},
+    signals: [],
+  };
+}
+
+let defaultCliState: CliOrgChannelState = makeEmptyCliState();
+
+export function getDefaultOrgChannelCliState(): CliOrgChannelState {
+  return defaultCliState;
+}
+
+export function resetDefaultOrgChannelCliState(next?: CliOrgChannelState): CliOrgChannelState {
+  defaultCliState = next ?? makeEmptyCliState();
+  return defaultCliState;
+}
 
 export function parseOrgChannelsCliArgs(argv: readonly string[]): ParsedOrgChannelCliCommand {
   const tokens = argv[0] === 'cswarm' ? argv.slice(1) : [...argv];
@@ -153,13 +199,14 @@ export function parseOrgChannelsCliArgs(argv: readonly string[]): ParsedOrgChann
   throw new Error(`Unknown org/workspace/channel CLI command: ${pos.join(' ')}`);
 }
 
-export function formatOrgChannelRefusal(refusal: OrgChannelRefusal): string {
+export function formatOrgChannelRefusal(refusal: OrgChannelRefusal & { grant_command_hint?: string }): string {
+  const hint = refusal.grant_command_hint ?? refusal.cli_command;
   const lines = [
     `Refused (${refusal.code}): missing ${refusal.missing}.`,
     `Scope: org=${refusal.scope.org ?? '-'} workspace=${refusal.scope.workspace ?? '-'} channel=${refusal.scope.channel ?? '-'}`,
   ];
   if (refusal.choices?.length) lines.push(`Matching workspaces: ${refusal.choices.map((c) => c.selector).join(', ')}`);
-  lines.push(`Remedy URL: ${refusal.remedy_url}`, `MCP tool: ${refusal.mcp_tool}`, `Run next: ${refusal.cli_command}`);
+  lines.push(`Remedy URL: ${refusal.remedy_url}`, `MCP tool: ${refusal.mcp_tool}`, `Run next: ${hint}`);
   return lines.join('\n');
 }
 
@@ -175,35 +222,65 @@ export function registerDefaultOrgChannelCliExecutor(fn: OrgChannelToolDispatche
   defaultDispatcher = fn;
 }
 
+function resolveDefaultDispatcher(): OrgChannelToolDispatcher {
+  if (defaultDispatcher) return defaultDispatcher;
+  try {
+    const req = createRequire(import.meta.url);
+    const mod = req('../../supabase/functions/mcp/org-channels-handlers.js') as {
+      executeOrgChannelMcpTool?: OrgChannelToolDispatcher;
+    };
+    if (mod.executeOrgChannelMcpTool) {
+      defaultDispatcher = mod.executeOrgChannelMcpTool;
+      return defaultDispatcher;
+    }
+  } catch {
+    // Fallback used only if handlers module cannot be loaded in isolated build environment.
+  }
+  return fallbackDispatch;
+}
+
 export function effCallerOrgRole(s: CliOrgChannelState, c: CallerContext, orgId: string): OrgRole | null {
   if (!canReadOrg(s, c, orgId)) return null;
   if (c.principal_kind === 'user') return orgRole(s, orgId, 'user', c.principal_id);
+  const explicit = orgRole(s, orgId, 'agent', c.principal_id);
+  if (explicit) return explicit;
   const owner = agentOwner(s, c);
-  return orgRole(s, orgId, 'agent', c.principal_id) ?? (owner ? orgRole(s, orgId, 'user', owner) : null);
+  const ownerRole = owner ? orgRole(s, orgId, 'user', owner) : null;
+  return ownerRole ? (ownerRole === 'guest' ? 'guest' : 'member') : null;
 }
 
 export interface ExecuteOrgChannelsCliOptions {
-  state: CliOrgChannelState;
-  caller: CliCallerContext;
+  state?: CliOrgChannelState;
+  caller?: CliCallerContext;
   executeTool?: OrgChannelToolDispatcher;
 }
 
-export function executeOrgChannelsCli(argv: readonly string[], options: ExecuteOrgChannelsCliOptions) {
+export function executeOrgChannelsCli(argv: readonly string[], options: ExecuteOrgChannelsCliOptions = {}) {
   const parsed = parseOrgChannelsCliArgs(argv);
+  const state = options.state ?? defaultCliState;
+  const caller: CliCallerContext = options.caller ?? { principal_kind: 'user', principal_id: 'u-cli-default' };
   const argsWithSeat: Record<string, unknown> = {
-    ...(options.caller.seat ? { seat: options.caller.seat } : {}),
-    ...(options.caller.seat_id ? { seat_id: options.caller.seat_id } : {}),
+    ...(caller.seat ? { seat: caller.seat } : {}),
+    ...(caller.seat_id ? { seat_id: caller.seat_id } : {}),
     ...parsed.arguments,
   };
-  const run = options.executeTool ?? defaultDispatcher ?? fallbackDispatch;
-  const payload = run(options.state, options.caller, parsed.tool, argsWithSeat);
+  const run = options.executeTool ?? resolveDefaultDispatcher();
+  const payload = run(state, caller, parsed.tool, argsWithSeat);
   const ok = payload.ok === true;
   if (!ok && payload.refusal) {
     const text = parsed.json ? JSON.stringify(payload) : formatOrgChannelRefusal(payload.refusal as OrgChannelRefusal);
     return { exitCode: 1, ok: false, tool: parsed.tool, payload, stdout: parsed.json ? text : '', stderr: parsed.json ? '' : text };
   }
-  const stdout = parsed.json ? JSON.stringify(payload) : `${parsed.tool}: ok`;
-  return { exitCode: ok ? 0 : 1, ok, tool: parsed.tool, payload, stdout, stderr: '' };
+  const pendingApproval = payload.status === 'pending_owner_approval' || payload.status === 'approval_required';
+  const statusLabel = pendingApproval
+    ? 'pending_owner_approval'
+    : typeof payload.status === 'string' && payload.status.length > 0
+      ? payload.status
+      : ok
+        ? 'ok'
+        : String(payload.error ?? 'error');
+  const stdout = parsed.json ? JSON.stringify(payload) : `${parsed.tool}: ${statusLabel}`;
+  return { exitCode: ok ? 0 : 1, ok, tool: parsed.tool, payload, stdout, stderr: ok ? '' : stdout };
 }
 
 function fallbackDispatch(s: CliOrgChannelState, caller: CliCallerContext, tool: string, args: Record<string, unknown>): Record<string, unknown> {
