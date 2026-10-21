@@ -26,11 +26,14 @@ BEGIN
       IF NOT pg_try_advisory_xact_lock(20261021, hashtext(OLD.channel_id::text)) OR EXISTS (SELECT 1 FROM signals WHERE channel_id = OLD.channel_id) OR EXISTS (SELECT 1 FROM file_channel_bindings WHERE channel_id = OLD.channel_id) THEN RAISE EXCEPTION 'CHANNEL_HAS_PUBLIC_HISTORY'; END IF;
     END IF;
   ELSIF TG_TABLE_NAME IN ('signals', 'file_channel_bindings') THEN
+    IF TG_OP = 'UPDATE' AND TG_TABLE_NAME = 'file_channel_bindings' AND (NEW.file_id, NEW.workspace_id, NEW.channel_id) IS DISTINCT FROM (OLD.file_id, OLD.workspace_id, OLD.channel_id) THEN
+      RAISE EXCEPTION 'PRIVATE_CHANNEL_CANNOT_BECOME_PUBLIC';
+    END IF;
     IF TG_OP = 'UPDATE' AND OLD.channel_id IS NOT NULL THEN
       PERFORM pg_advisory_xact_lock_shared(20261021, hashtext(OLD.channel_id::text));
       IF EXISTS (SELECT 1 FROM channels WHERE channel_id = OLD.channel_id AND visibility = 'private') THEN
         IF NOT private_channels_enabled() THEN RAISE EXCEPTION 'PRIVATE_CHANNELS_DISABLED'; END IF;
-        IF NEW.channel_id IS DISTINCT FROM OLD.channel_id THEN RAISE EXCEPTION 'PRIVATE_CHANNEL_CANNOT_BECOME_PUBLIC'; END IF;
+        IF (NEW.channel_id, NEW.workspace_id) IS DISTINCT FROM (OLD.channel_id, OLD.workspace_id) THEN RAISE EXCEPTION 'PRIVATE_CHANNEL_CANNOT_BECOME_PUBLIC'; END IF;
       END IF;
     END IF;
     IF NEW.channel_id IS NOT NULL THEN
@@ -135,9 +138,8 @@ BEGIN
   PERFORM 1 FROM channel_memberships WHERE workspace_id = p_ws ORDER BY id FOR UPDATE;
   PERFORM 1 FROM agent_principals WHERE workspace_id = p_ws ORDER BY principal_id FOR UPDATE;
   PERFORM 1 FROM hosted_mcp_seats WHERE workspace_id = p_ws ORDER BY seat_id FOR UPDATE;
-  IF live_org_role(v_src, 'user', p_actor) IS DISTINCT FROM 'owner' OR live_org_role(p_dst, 'user', p_actor) IS DISTINCT FROM 'owner' THEN
-    RAISE EXCEPTION 'ORG_MOVE_REQUIRES_DUAL_OWNER';
-  END IF;
+  IF live_org_role(v_src, 'user', p_actor) IS DISTINCT FROM 'owner' OR live_org_role(p_dst, 'user', p_actor) IS DISTINCT FROM 'owner' THEN RAISE EXCEPTION 'ORG_MOVE_REQUIRES_DUAL_OWNER'; END IF;
+  IF v_src = p_dst THEN RETURN jsonb_build_object('workspace_id', p_ws, 'source_org_id', v_src, 'target_org_id', p_dst, 'transfer_members', p_mode); END IF;
   UPDATE workspaces SET org_id = p_dst WHERE workspace_id = p_ws;
   UPDATE workspace_principal_grants SET org_id = p_dst WHERE workspace_id = p_ws;
   INSERT INTO workspace_principal_grants (workspace_id, org_id, principal_kind, principal_id, role, granted_by, created_at)
@@ -172,16 +174,12 @@ BEGIN
   RETURN jsonb_build_object('workspace_id', p_ws, 'source_org_id', v_src, 'target_org_id', p_dst, 'transfer_members', p_mode);
 END
 $$;
-ALTER FUNCTION private_channels_enabled OWNER TO swarm_admin;
-ALTER FUNCTION live_org_role OWNER TO swarm_admin;
-ALTER FUNCTION has_live_ws_grant OWNER TO swarm_admin;
-ALTER FUNCTION guard_channel_visibility_transition OWNER TO swarm_admin;
-ALTER FUNCTION can_read_org OWNER TO swarm_admin;
-ALTER FUNCTION can_read_workspace OWNER TO swarm_admin;
-ALTER FUNCTION can_read_channel OWNER TO swarm_admin;
-ALTER FUNCTION can_read_channel_bound_file OWNER TO swarm_admin;
-ALTER FUNCTION org_move_workspace OWNER TO swarm_admin;
-REVOKE ALL ON FUNCTION private_channels_enabled, live_org_role, has_live_ws_grant, guard_channel_visibility_transition, can_read_org, can_read_workspace, can_read_channel, can_read_channel_bound_file, org_move_workspace FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
-GRANT EXECUTE ON FUNCTION private_channels_enabled, live_org_role, has_live_ws_grant, can_read_org, can_read_workspace, can_read_channel, can_read_channel_bound_file TO swarm_command, swarm_read;
-GRANT EXECUTE ON FUNCTION guard_channel_visibility_transition, org_move_workspace TO swarm_command;
+DO $$
+DECLARE f text;
+BEGIN
+  FOREACH f IN ARRAY ARRAY['private_channels_enabled','live_org_role','has_live_ws_grant','guard_channel_visibility_transition','can_read_org','can_read_workspace','can_read_channel','can_read_channel_bound_file','org_move_workspace'] LOOP
+    EXECUTE format('ALTER FUNCTION %1$I OWNER TO swarm_admin; REVOKE ALL ON FUNCTION %1$I FROM PUBLIC, anon, authenticated, swarm_read, swarm_command; GRANT EXECUTE ON FUNCTION %1$I TO swarm_command, swarm_read', f);
+  END LOOP;
+  REVOKE EXECUTE ON FUNCTION guard_channel_visibility_transition, org_move_workspace FROM swarm_read;
+END $$;
 RESET search_path;

@@ -31,31 +31,15 @@ type State = OrgChannelAuthorityState;
 export function resolveOrgWorkspaceChannelSelector(
   s: State,
   c: CallerContext,
-  input: {
-    org?: string | null;
-    workspace?: string | null;
-    channel?: string | null;
-    seat_id?: string | null;
-  },
+  input: { org?: string | null; workspace?: string | null; channel?: string | null; seat_id?: string | null },
 ) {
-  let expOrg = input.org?.trim() || null,
-    expWs = input.workspace?.trim() || null;
+  let expOrg = input.org?.trim() || null, expWs = input.workspace?.trim() || null;
   if (expWs?.includes('/')) {
     const [oPart, wPart] = expWs.split('/', 2);
     const qualOrg = oPart?.trim() || null;
     if (expOrg && qualOrg && norm(expOrg) !== norm(qualOrg)) {
-      const sameOrg = s.organizations.find(
-        (o) =>
-          (o.id === expOrg || norm(o.slug) === norm(expOrg)) &&
-          (o.id === qualOrg || norm(o.slug) === norm(qualOrg)),
-      );
-      if (!sameOrg) {
-        return fail('WORKSPACE_ACCESS_DENIED', 'conflicting_org_workspace_selector', {
-          org: expOrg,
-          workspace: input.workspace ?? null,
-          seat_id: input.seat_id ?? null,
-        });
-      }
+      const sameOrg = s.organizations.find((o) => (o.id === expOrg || norm(o.slug) === norm(expOrg)) && (o.id === qualOrg || norm(o.slug) === norm(qualOrg)));
+      if (!sameOrg) return fail('WORKSPACE_ACCESS_DENIED', 'conflicting_org_workspace_selector', { org: expOrg, workspace: input.workspace ?? null, seat_id: input.seat_id ?? null });
     }
     if (!expOrg && qualOrg) expOrg = qualOrg;
     expWs = wPart?.trim() || null;
@@ -273,18 +257,11 @@ export function reconcileWorkspaceMove(
       workspace: ws.slug,
     });
   }
-  if (
-    s.workspaces.some(
-      (w) =>
-        w.workspace_id !== workspace_id &&
-        w.org_id === target_org_id &&
-        norm(w.slug) === norm(ws.slug),
-    )
-  ) {
-    return fail('WORKSPACE_SLUG_TAKEN', 'unique_workspace_slug_in_org', {
-      org: target_org_id,
-      workspace: ws.slug,
-    });
+  if (ws.org_id === target_org_id) {
+    return { ok: true as const, workspace_id: ws.workspace_id, source_org_id: ws.org_id, target_org_id, transfer_members, retained_principals: [] as string[], revoked_principals: [] as string[], closed_seat_ids: [] as string[] };
+  }
+  if (s.workspaces.some((w) => w.workspace_id !== workspace_id && w.org_id === target_org_id && norm(w.slug) === norm(ws.slug))) {
+    return fail('WORKSPACE_SLUG_TAKEN', 'unique_workspace_slug_in_org', { org: target_org_id, workspace: ws.slug });
   }
   const sourceOrgId = ws.org_id;
   ws.org_id = target_org_id;
