@@ -1,3 +1,5 @@
+live-dashboard[data-kylon-shell] [data-people-page] .pd-detail { position: static; }
+live-dashboard[data-kylon-shell] [data-people-page] .pd-detail :is(button,a,input,select,summary,[tabindex]) { scroll-margin: 6px; }
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] [data-people-page] > .pd-page-head > .pd-page-title-row { align-items: center; gap: 12px 16px; }
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] [data-people-page] > .pd-page-head > .pd-page-title-row > h1 {
   flex: 1 1 18rem; margin: 0; font: 600 20px/1.35 var(--k-shell-font);
