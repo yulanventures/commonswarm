@@ -149,7 +149,7 @@ export async function finishFlowFixture(t) {
   const provider = await createMcpProvider({ adapter: createPostgresAdapter(runtime), registrationStore: createPostgresRegistrationStore(runtime),
     nativeLoopbackEnabled: true, findAccount: createProductionFindAccount(runtime),
     fetch: async () => Response.json({ client_id: clientId, client_name: 'TEST client', application_type: 'native',
-      redirect_uris: [callback], response_types: ['code'], grant_types: ['authorization_code'], token_endpoint_auth_method: 'none' }),
+      redirect_uris: [callback], response_types: ['code'], grant_types: ['authorization_code', 'refresh_token'], token_endpoint_auth_method: 'none' }),
     providerGrantResource: async id => (await runtime.query('SELECT resource FROM commonswarm_oauth.resolve_hosted_grant_status($1)', [id])).rows[0]?.resource,
     providerGrantActive: async id => (await runtime.query('SELECT active FROM commonswarm_oauth.resolve_hosted_grant_status($1)', [id])).rows[0]?.active === true });
   writeFileSync(`${directory}/edge.json`, JSON.stringify({ databaseUrl: fixture.databaseUrl, gotrueUrl: root,

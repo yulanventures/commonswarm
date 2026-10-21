@@ -7,15 +7,20 @@ import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { AGENT_CREDENTIAL_MESSAGE_D088, AgentCredentialInputError } from "./agent-credential-input.js";
 import { parseAgentCredentialInput } from "./agent-credential-input.js";
-import { AgentSetupError, ONBOARDING_MAX_FILE_BYTES, agentProfileRoot, assertPrivateLocation, privatePath, readAgentProfile, readProfileCredential, saveAgentProfile, type AgentProfile } from "./agent-profile.js";
+import { AgentSetupError, ONBOARDING_MAX_FILE_BYTES, agentProfileRoot, assertPrivateLocation, privatePath, readAgentProfile, readProfileCredential, openProfileCredential, profileTarget, saveAgentProfile, type AgentProfile } from "./agent-profile.js";
 import { deleteSecureJsonFile, ensureSecureStateDirectory, isPublishedOwnerFileTarget, readSecureJsonFileIfPresent, withFileLock, writeSecureJsonFile, writeSecureJsonFileExclusive } from "./storage.js";
 import { ONBOARDING_UUID, type AgentConnectionEnvelope } from "./agent-onboarding-contract.js";
-import { type CloudTarget } from "./config.js";
+import { commandEndpoint, type CloudTarget } from "./config.js";
 import { quoteAgentArgument } from "./agent-onboarding-contract.js";
 import { CommandHttpError, ThinCommandClient } from "./command-client.js";
 import { H0_REGISTRATION_NAME_MAX } from "../h0/verbs.js";
 import { REGISTER_NO_SEAT_THIS_ATTEMPT, REGISTER_EXISTING_SEAT_REFUSALS } from "./mcp-register-refusals.js";
 import { CONNECT_PROFILE_FILES, connectProfileReservedPaths, reservedConnectProfileName, reservedConnectProfileNames } from "./connect-profile-files.js";
+
+import { assertProfileIdentity, withAgentDeadline } from "./agent-check.js";
+import { readAgentSignalDirectory, SignalTransportError, SignalReadTimeoutError, followHttpDetails, followErrorEnvelope } from "./signals.js";
+import { RenewalCredentialCheckError, RenewalOutcomeUnknown, RenewalRetryError, RenewalRevoked,
+  RenewalSuspended, RenewalReauthorisationRequired, RenewalRefused, RenewalSuperseded } from "./renewal.js";
 
 const JOIN_CODE = /^swm_join_[A-Za-z0-9_-]{43}$/;
 const SEAT_TOKEN = /^swm_agt_[A-Za-z0-9_-]{43}$/;
@@ -617,7 +622,102 @@ async function defaultPendingProfile(target: CloudTarget, code: string, probe: R
 
 export interface McpConnectResult { profile: string; principal_id: string; install: string }
 
-function connectedResult(path: string, profile: AgentProfile): McpConnectResult {
+async function connectedResult(path: string, profile: AgentProfile, fetcher: typeof fetch = fetch): Promise<McpConnectResult> {
+  let renewalRefusal: { status: 401 | 403 } | null = null;
+  try {
+    await withAgentDeadline(MCP_REGISTER_TIMEOUT_MS, async (bounded, signal) => {
+      // Reopen the durable profile, then adopt/renew its saved lineage winner
+      // through the existing session locks. Never probe a register-response copy.
+      const saved = await readAgentProfile(path, profile.host_session_id);
+      if (saved.url !== profile.url || saved.anon_key !== profile.anon_key ||
+          saved.workspace_id !== profile.workspace_id || saved.principal_id !== profile.principal_id) {
+        throw new AgentSetupError("authenticated_identity_mismatch", "The saved profile changed.");
+      }
+      const credential = await readProfileCredential(saved);
+      // Keep status evidence only; the session fallback and authenticated proof still decide success.
+      const renewalFetch: typeof fetch = async (input, init) => {
+        const response = await bounded(input, init);
+        const url = input instanceof Request ? input.url : String(input);
+        if (url === commandEndpoint(profileTarget(saved)) && (response.status === 401 || response.status === 403)) {
+          renewalRefusal = { status: response.status };
+        }
+        return response;
+      };
+      const session = await openProfileCredential(saved, renewalFetch);
+      const token = await session.bearer();
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const directory = await readAgentSignalDirectory(profileTarget(saved), token, saved.workspace_id, { fetcher: bounded, signal });
+          assertProfileIdentity(saved, directory);
+          if (directory.identity?.run_id !== undefined && credential.runId !== null && directory.identity.run_id !== credential.runId) {
+            throw new AgentSetupError("authenticated_identity_mismatch", "The saved run was not confirmed.");
+          }
+          break;
+        } catch (error) {
+          if (attempt !== 0 || signal.aborted ||
+              !(error instanceof SignalTransportError || error instanceof SignalReadTimeoutError)) throw error;
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+      }
+    }, fetcher);
+  } catch (error) {
+    const http = followHttpDetails(error);
+    const envelope = followErrorEnvelope(error);
+    const replacement = `Ask the owner to inspect the intended connection first. If a replacement is intended, the signed-in owner can run cswarm mcp code --workspace-id ${profile.workspace_id}. On this host, run cswarm mcp connect --url ${quoteAgentArgument(profile.url)} --anon-key <public-anon-key> --profile <absolute-new-directory>/profile.json and enter that code privately, then apply the emitted installation for that new profile. This creates a replacement connection; it does not restore the old principal.`;
+    let code = "connect_authentication_incomplete";
+    let reason = "The authentication outcome is unconfirmed. Ask the owner to inspect this saved connection before another attempt.";
+    if (error instanceof AgentSetupError &&
+        ["authenticated_identity_mismatch", "profile_identity_mismatch"].includes(error.code)) {
+      code = "connect_identity_mismatch";
+      reason = "The saved connection does not confirm the expected agent, workspace or run. Ask for the correct connection file; keep this profile for inspection.";
+    } else if (error instanceof AgentSetupError && error.code === "profile_credential_missing") {
+      code = "connect_credential_missing";
+      reason = "The saved credential is missing. Ask for the correct connection file.";
+    } else if (error instanceof RenewalRevoked) {
+      code = "connect_renewal_refused";
+      const reasons: Record<string, string> = {
+        renewal_lineage_revoked: "The renewal lineage was revoked.",
+        renewal_grant_revoked: "The renewal grant was revoked.",
+        predecessor_revoked: "The saved credential was revoked.",
+        predecessor_not_found: "The saved predecessor was removed.",
+        predecessor_not_owned: "The saved predecessor belongs to another identity.",
+        predecessor_expired: "The saved predecessor expired before renewal.",
+      };
+      if (error.code === "predecessor_superseded") {
+        reason = "Another process renewed this credential, but this copy has no usable saved successor. Ask the owner to inspect the connection copies and the intended connection before another attempt.";
+      } else if (error.code === "predecessor_not_owned") {
+        code = "connect_identity_mismatch";
+        reason = "The saved predecessor belongs to another identity. Ask for the correct connection file; keep this profile for inspection.";
+      } else reason = `${reasons[error.code] ?? "The deployment refused renewal; its cause is unconfirmed."} ${replacement}`;
+    } else if (error instanceof RenewalSuspended) {
+      code = "connect_renewal_refused";
+      reason = `Renewal is paused. The owner can inspect the grant and, if resuming is intended, run cswarm grant resume --workspace-id ${profile.workspace_id} --renewal-grant-id <grant-id>, then rerun the same connect command with the same code.`;
+    } else if (error instanceof RenewalReauthorisationRequired) {
+      code = "connect_renewal_refused";
+      reason = `${error.reason === "horizon_reached" ? "The technical renewal horizon was reached." : "The renewal successor budget was exhausted."} ${replacement}`;
+    } else if (error instanceof RenewalSuperseded) {
+      code = "connect_renewal_refused";
+      reason = "Another process renewed this credential, but this copy has no usable saved successor. Ask the owner to inspect the connection copies and the intended connection before another attempt.";
+    } else if (error instanceof RenewalRefused && error.status === 426 && error.code === "upgrade_required") {
+      code = "connect_renewal_refused";
+      reason = "The deployment requires a newer cswarm. Update cswarm, then rerun the same connect command with the same code.";
+    } else if (error instanceof RenewalRefused && error.commandDecided) {
+      code = "connect_renewal_refused";
+      reason = ["renewal_device_unavailable", "renewal_device_mismatch"].includes(error.code)
+        ? `Renewal was refused for this device. Ask the owner to inspect the intended device. ${replacement}`
+        : "The deployment refused renewal; its cause is unconfirmed. Ask the owner to inspect this grant before another attempt.";
+    } else if (http?.status === 401 || http?.status === 403 || error instanceof RenewalCredentialCheckError || renewalRefusal !== null) {
+      code = "connect_authentication_refused";
+      reason = `The credential or permission was refused; the cause is unconfirmed. ${replacement}`;
+    } else if (error instanceof SignalTransportError || error instanceof SignalReadTimeoutError ||
+        error instanceof RenewalRetryError || error instanceof RenewalOutcomeUnknown ||
+        (error instanceof AgentSetupError && error.code === "check_timeout") ||
+        (http !== null && (http.status === 429 || http.status >= 500) && envelope.retryable !== false) ||
+        (error instanceof RenewalRefused && (error.status === 429 || error.status >= 500))) {
+      reason = "Authentication is unconfirmed after the bounded attempt. Rerun the same mcp connect command later with the same code.";
+    }
+    throw new McpConnectError(code, `Setup is incomplete; its files were kept. ${reason}`);
+  }
   const arguments_ = ["mcp", "--profile", path, ...(profile.host_session_id ? ["--host-session-id", profile.host_session_id] : [])];
   const claude = `claude mcp add --scope user --transport stdio cswarm -- cswarm ${arguments_.map(quoteAgentArgument).join(" ")}`;
   const codex = `[mcp_servers.cswarm]\ncommand = "cswarm"\nargs = ${JSON.stringify(arguments_)}`;
@@ -747,7 +847,7 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
       await cleanConnectTemps(path);
       const current = await readPending(path);
       const complete = await readComplete(path, current !== null);
-      if (!current && complete?.url === options.target.url && complete.codeHash === codeHash(code, complete.attemptId) &&
+      if ((!current || current.attemptId === complete?.attemptId) && complete?.url === options.target.url && complete.codeHash === codeHash(code, complete.attemptId) &&
           (!await pathExists(path) || (await repairableProfileAt(path) && !await completedProfileAt(path)))) {
         return await withFileLock(profileDir, CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {
           if (await completedProfileAt(path) || (await pathExists(path) && !await repairableProfileAt(path))) {
@@ -775,12 +875,20 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
           const restored: AgentProfile = { version: 1, url: complete.url, anon_key: complete.anon_key,
             workspace_id: complete.workspace_id, principal_id: orphan.principalId,
             credential_file: join(profileDir, CONNECT_PROFILE_FILES.credential) };
+          // A failed rebuild/probe must remain resumable with the existing
+          // saved proof, including when the old completion marker predates this client.
+          if (!current) await writeSecureJsonFile(pendingPath(path), JSON.stringify({
+            attemptId: complete.attemptId, url: complete.url, name, codeHash: complete.codeHash,
+            createdAt: new Date().toISOString(),
+          } satisfies PendingConnect));
           const markerPath = join(profileDir, CONNECT_PROFILE_FILES.attemptMarker);
           await requireConnectReservedPath(markerPath, reservedProbe);
           await writeSecureJsonFile(markerPath, JSON.stringify({ attemptId: complete.attemptId }));
           if (await pathExists(path)) await writeSecureJsonFile(path, JSON.stringify(restored));
           else await writeSecureJsonFileExclusive(path, JSON.stringify(restored));
-          return connectedResult(path, restored);
+          const result = await connectedResult(path, restored, options.fetcher);
+          await deleteSecureJsonFile(pendingPath(path));
+          return result;
         }, { publishLink: options.publishLink });
       }
       if (!current && await pathExists(path)) throw new McpConnectError("profile_exists", `The connect was refused because ${path} already exists. No blocking file was deleted. Pass --profile with a profile file in a different directory.`);
@@ -804,12 +912,13 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
           }
           if (profile.url !== options.target.url) throw new Error("wrong profile target");
           const credential = await readProfileCredential(profile);
+          const result = await connectedResult(path, profile, options.fetcher);
           try { await (options.writeCompletion ?? writeSecureJsonFile)(completePath(path), JSON.stringify({ attemptId: current.attemptId, url: current.url, codeHash: current.codeHash,
             workspace_id: profile.workspace_id, anon_key: profile.anon_key, principal_id: profile.principal_id,
             ...(credential.runId ? { run_id: credential.runId } : {}) } satisfies CompleteConnect)); }
-          catch { throw new McpConnectError("connect_complete_write_failed", `The working profile at ${path} was kept, but the completion record at ${completePath(path)} could not be written. Inspect the completion record and rerun the same command.`); }
+          catch { throw new McpConnectError("connect_complete_write_failed", `The authenticated profile at ${path} was kept, but setup is incomplete because the completion record at ${completePath(path)} could not be written. Inspect the completion record and rerun the same command.`); }
           await deleteSecureJsonFile(pendingPath(path));
-          return connectedResult(path, profile);
+          return result;
         } catch (error) {
           if (error instanceof McpConnectError) throw error;
           throw new McpConnectError("connect_profile_damaged", damagedProfileMessage(path));
@@ -893,11 +1002,12 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
         }
         // saveAgentProfile owns the 0700 directory and 0600 file writes. The profile is intentionally unbound.
         const profile = await (options.saveProfile ?? saveAgentProfile)(path, connection, undefined, undefined, true, current !== null, orphanPrincipalId, undefined, attemptId);
+        const result = await connectedResult(path, profile, options.fetcher);
         try { await (options.writeCompletion ?? writeSecureJsonFile)(completePath(path), JSON.stringify({ attemptId, url: options.target.url, codeHash: codeHash(code, attemptId),
           workspace_id: connection.workspace_id, anon_key: connection.anon_key, principal_id: connection.principal_id, run_id: body.run_id } satisfies CompleteConnect)); }
-        catch { throw new McpConnectError("connect_complete_write_failed", `The profile at ${path} is saved and usable, but the completion record at ${completePath(path)} was not written. Inspect that record and run the same command again to finish the connect.`); }
+        catch { throw new McpConnectError("connect_complete_write_failed", `The profile at ${path} is saved and authenticated, but setup is incomplete because the completion record at ${completePath(path)} was not written. Inspect that record and run the same command again to finish the connect.`); }
         await deleteSecureJsonFile(pendingPath(path));
-        return connectedResult(path, profile);
+        return result;
       } catch (error) {
         clearTimeout(timer);
         if (error instanceof McpConnectError && error.code !== "register_outcome_unknown") throw error;

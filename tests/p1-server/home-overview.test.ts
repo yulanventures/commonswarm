@@ -414,3 +414,124 @@ test('hosted activity comes from check batches; waiting messages stay idle and r
   sql += 'RESET ROLE;';
   runSql(sql);
 });
+
+/** Contract owner: Home RPC facts, using real DDL and normal authenticated claims.
+ * Baseline Q10 omits policy keys and reports suspended timeboxed bearers live.
+ * Runtime red/green is deliberately deferred while C8 owns the Linux runner.
+ */
+test('Home RPC carries the selected connection policy and respects nonstanding suspension', () => {
+  const owner = randomUUID(), member = randomUUID(), outsider = randomUUID(), w = randomUUID();
+  const future = 'statement_timestamp()+interval \'2 days\'';
+  const elapsed = 'statement_timestamp()-interval \'2 days\'';
+  const localCases = [
+    { name:'permanent used expired proof', used:true, expiredProof:true, connection:'live' },
+    { name:'permanent unused expired proof', expiredProof:true, connection:'live' },
+    { name:'standing technical suspension', suspended:true, expiredProof:true, connection:'live' },
+    { name:'chosen future', deadline:future, connection:'live' },
+    { name:'chosen elapsed', deadline:elapsed, connection:'key_ended' },
+    { name:'elapsed evidence retained', deadline:future, ended:true, connection:'key_ended' },
+    { name:'suspended nonstanding current proof', timeboxed:true, suspended:true, connection:'paused' },
+    { name:'usable nonstanding control', timeboxed:true, connection:'live' },
+    { name:'removed beats elapsed and suspension', deadline:elapsed, removed:true, suspended:true, connection:'removed' },
+    { name:'revoked family cannot be live', revoked:true, connection:'key_off' },
+    { name:'member policy', memberOwned:true, deadline:future, connection:'live' },
+    { name:'older live beats newer elapsed', secondFamily:true, deadline:elapsed, connection:'live' },
+  ];
+  const facts = (id: string) => `(SELECT a->'status'->'facts' FROM overview_result,
+    jsonb_array_elements(value->'workspaces') ws,
+    jsonb_array_elements(ws->'people') person,
+    jsonb_array_elements(person->'agents') a WHERE a->>'principal_id'='${id}')`;
+  let sql = repoSql('supabase/migrations/20261019000010_local_permanence_read_models.sql')
+    + userSql(owner) + userSql(member) + userSql(outsider) + workspaceSql(w,owner) + boundarySql(w)
+    + `INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES ('${w}','${member}','member');`;
+  const expected: { principal: string; grant: string; token?: string; connection: string; name: string }[] = [];
+  for (const c of localCases) {
+    const [grant, nextGrant] = [randomUUID(),randomUUID()].sort() as [string,string];
+    const principal = randomUUID(), device = randomUUID(), run = randomUUID(), token = randomUUID();
+    const who = c.memberOwned ? member : owner;
+    sql += agentSql(w,who,principal);
+    sql += `INSERT INTO swarm.devices(device_id,user_id,label) VALUES ('${device}','${who}','Home policy proof');
+      INSERT INTO swarm.agent_runs(run_id,principal_id,device_id) VALUES ('${run}','${principal}','${device}');
+      INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,kind,
+        max_successors,horizon_expires_at,bound_device_id,created_by,connection_expires_at,connection_expired_at,suspended_at)
+      VALUES ('${grant}','${w}','${principal}','${run}','${c.timeboxed ? 'timeboxed' : 'standing'}',
+        ${c.timeboxed ? '800' : 'NULL'},${c.timeboxed ? "statement_timestamp()+interval '30 days'" : 'NULL'},
+        '${device}','${who}',${c.secondFamily ? future : c.deadline ?? 'NULL'},${c.ended ? elapsed : 'NULL'},
+        ${c.suspended ? 'statement_timestamp()' : 'NULL'});
+      INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,scopes,token_hash,issued_at,expires_at,
+        lineage_id,renewal_grant_id)
+      VALUES ('${token}','${principal}','${run}','[]',decode(replace('${randomUUID()}${randomUUID()}','-',''),'hex'),
+        statement_timestamp()-interval '2 hours',
+        statement_timestamp()${c.expiredProof ? "-interval '1 hour'" : "+interval '1 hour'"},
+        '${randomUUID()}','${grant}');`;
+    if (c.used) sql += `UPDATE swarm.agent_tokens SET first_used_at=clock_timestamp() WHERE token_id='${token}';`;
+    if (c.secondFamily) {
+      // A newer elapsed family cannot hide an older eligible bearer.
+      const chosen = nextGrant, nextRun = randomUUID();
+      sql += `INSERT INTO swarm.agent_runs(run_id,principal_id,device_id) VALUES ('${nextRun}','${principal}','${device}');
+        INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,kind,
+          max_successors,horizon_expires_at,bound_device_id,created_by,connection_expires_at)
+        VALUES ('${chosen}','${w}','${principal}','${nextRun}','standing',NULL,NULL,'${device}','${who}',${elapsed});`;
+      expected.push({principal,grant,token,connection:c.connection,name:c.name});
+    } else expected.push({principal,grant,token,connection:c.connection,name:c.name});
+    if (c.removed) sql += `UPDATE swarm.agent_principals SET revoked_at=statement_timestamp() WHERE principal_id='${principal}';`;
+    if (c.revoked) sql += `UPDATE swarm.renewal_grants SET revoked_at=statement_timestamp(),revoked_by='${who}' WHERE renewal_grant_id='${grant}';`;
+  }
+  for (const c of [
+    { name:'hosted permanent', connection:'live' },
+    { name:'hosted future', deadline:future, connection:'live' },
+    { name:'hosted elapsed', deadline:elapsed, connection:'connection_off' },
+    { name:'hosted elapsed evidence', deadline:future, ended:true, connection:'connection_off' },
+    { name:'hosted revoked retains policy', deadline:future, revoked:true, connection:'connection_off' },
+    { name:'hosted removed wins', deadline:elapsed, removed:true, connection:'removed' },
+  ]) {
+    const principal = randomUUID(), grant = randomUUID(), seat = randomUUID();
+    sql += `INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only,revoked_at)
+      VALUES ('${principal}','${w}','${owner}','Synthetic ${principal}','hosted_mcp',true,${c.removed ? 'statement_timestamp()' : 'NULL'});
+      INSERT INTO swarm.hosted_mcp_grants(grant_id,provider_grant_id,owner_user_id,home_workspace_id,client_id,resource,
+        selected_workspace_ids,manifest_digest,interaction_ref,state,created_at,activated_at,revoked_at,connection_expires_at,connection_expired_at)
+      VALUES ('${grant}','synthetic-${grant}','${owner}','${w}','synthetic-client','https://mcp.commonswarm.com/mcp',
+        ARRAY['${w}']::uuid[],decode(repeat('a',64),'hex'),'synthetic-confirmation','${c.revoked ? 'revoked' : 'active'}',
+        statement_timestamp(),statement_timestamp(),${c.revoked ? 'statement_timestamp()' : 'NULL'},${c.deadline ?? 'NULL'},${c.ended ? elapsed : 'NULL'});
+      INSERT INTO swarm.hosted_mcp_grant_workspaces(grant_id,workspace_id,owner_user_id,manifest_digest,consent_receipt_id,consented_at)
+      VALUES ('${grant}','${w}','${owner}',decode(repeat('a',64),'hex'),'${randomUUID()}',statement_timestamp());
+      INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,created_at)
+      VALUES ('${seat}','${grant}','${w}','${owner}','${principal}','Synthetic ${principal}',statement_timestamp());`;
+    expected.push({principal,grant,connection:c.connection,name:c.name});
+  }
+  const bare = randomUUID();
+  sql += agentSql(w,owner,bare) + localCredential(w,owner,bare);
+  // Snapshot authoritative rows before changing role: expected values come from
+  // stored policy, never a mock of the Home classifier.
+  sql += `CREATE TEMP TABLE expected_home_policy AS
+    SELECT renewal_grant_id AS grant_id,connection_expires_at,
+      coalesce(connection_expired_at,CASE WHEN connection_expires_at<=statement_timestamp() THEN connection_expires_at END) AS connection_expired_at
+    FROM swarm.renewal_grants WHERE workspace_id='${w}'
+    UNION ALL SELECT grant_id,connection_expires_at,
+      coalesce(connection_expired_at,CASE WHEN connection_expires_at<=statement_timestamp() THEN connection_expires_at END)
+    FROM swarm.hosted_mcp_grants WHERE home_workspace_id='${w}';
+    GRANT SELECT ON expected_home_policy TO authenticated;
+    ${claims(owner)} SET LOCAL ROLE authenticated; ${snapshot()}`;
+  for (const c of expected) {
+    sql += check(`${facts(c.principal)}->>'connection'='${c.connection}'`, c.name);
+    if(c.token) sql += check(`${facts(c.principal)}->>'renewal_grant_id'='${c.grant}' AND ${facts(c.principal)}->>'token_id'='${c.token}'`, `selected identity: ${c.name}`);
+    if(c.token && c.connection!=='removed') sql += check(`EXISTS (SELECT 1 FROM swarm_read.renewal_grant_roster('${w}') r WHERE r.principal_id='${c.principal}' AND r.renewal_grant_id='${c.grant}' AND r.token_id='${c.token}')`, `roster agrees: ${c.name}`);
+    sql += check(`${facts(c.principal)} ?& ARRAY['connection_expires_at','connection_expired_at']
+      AND ${facts(c.principal)}->'connection_expires_at' IS NOT DISTINCT FROM
+        (SELECT coalesce(to_jsonb(connection_expires_at),'null'::jsonb) FROM expected_home_policy WHERE grant_id='${c.grant}')
+      AND ${facts(c.principal)}->'connection_expired_at' IS NOT DISTINCT FROM
+        (SELECT coalesce(to_jsonb(connection_expired_at),'null'::jsonb) FROM expected_home_policy WHERE grant_id='${c.grant}')`,
+      `canonical policy: ${c.name}`);
+  }
+  sql += check(`${facts(bare)}->>'connection'='live' AND NOT (${facts(bare)} ?| ARRAY['connection_expires_at','connection_expired_at'])`,
+    'ungranted authority does not imply permanent policy');
+  sql += check(`${facts(bare)}->'renewal_grant_id'='null'::jsonb AND ${facts(bare)}->>'token_id' IS NOT NULL AND NOT EXISTS (SELECT 1 FROM swarm_read.renewal_grant_roster('${w}') r WHERE r.principal_id='${bare}')`, 'legacy identity has no grant roster row');
+  sql += `RESET ROLE; ${claims(member)} SET LOCAL ROLE authenticated; ${refresh()}`;
+  sql += check(`${facts(expected[0]!.principal)}->'connection_expires_at'='null'::jsonb`, 'member sees canonical roster facts');
+  sql += `RESET ROLE; ${claims(outsider)} SET LOCAL ROLE authenticated; ${refresh()}`;
+  sql += check(`value->'workspaces'='[]'::jsonb`, 'nonmember sees no authority');
+  sql += `RESET ROLE; ${claims(owner,{agent_principal_id:expected[0]!.principal})} SET LOCAL ROLE authenticated; ${refresh()}`;
+  sql += check('value IS NULL', 'agent claims cannot use human Home RPC');
+  sql += 'RESET ROLE;';
+  runSql(sql);
+});

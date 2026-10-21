@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, type ExecFileOptionsWithStringEncoding, type SpawnOptions } from "node:child_process";
 import { mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
@@ -173,9 +173,10 @@ const runAttempt = (
   options: ChromeLaunchOptions,
 ): Promise<ChromeLaunchResult> => new Promise((resolve, reject) => {
   // Own the process group and deadline: inherited output pipes must not delay timeout rejection.
-  const child = execFile(chrome, [...args], {
+  const execOptions: ExecFileOptionsWithStringEncoding & Pick<SpawnOptions, "detached"> = {
     maxBuffer: options.maxBuffer, encoding: "utf8", detached: process.platform !== "win32",
-  }, (error, stdout, stderr) => {
+  };
+  const child = execFile(chrome, [...args], execOptions, (error, stdout, stderr) => {
     clearTimeout(timer);
     if (error) {
       reject({

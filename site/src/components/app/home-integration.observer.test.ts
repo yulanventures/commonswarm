@@ -140,7 +140,8 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
       const homeRoute={view:${JSON.stringify(view)},workspaceId:'W'};
       let workspaces=[{id:'W',name:'Home'}], activeWorkspaceId='W';
       let renderedAuthUserId='tom', requestVersion=1, authReloadQueued=false, authRecoveryActive=false, bootInFlight=null, bootAgain=false;
-      let catchUpGeneration=0, railOverviewGeneration=0, connectedAppsGeneration=0;
+      let catchUpGeneration=0, railOverviewGeneration=0, connectedAppsGeneration=0, connectionSettingsGeneration=0;
+      const connectionDateDrafts=new Map();
       let homeWorkspaceGeneration=0, homeWorkspaceRead=0, homeDetailGeneration=0;
       let connectFocusObserver=null, humanSeenObserver=null, signalExpiryTimer;
       let catchUpData, homeWorkClaims, homePeopleReadState, homeShellKey, homeRailKey, homeCatchUpKey;
@@ -929,7 +930,7 @@ test('a stale self-role save ends on sign-in, and the email names Save; removal 
   assert.deepEqual(stored, ['commonswarm.pending-member-selection']);
   assert.equal(closed.includes('people'), true);
   await runInContext('emailReauth({currentTarget:{disabled:false}})', context);
-  assert.equal(shown.errorText, REMOVE_SIGN_IN_EMAIL);
+  assert.equal<string>(shown.errorText, REMOVE_SIGN_IN_EMAIL);
   assert.equal(shown.errorText.includes('Save'), false);
   focusLog.length = 0; closed.length = 0;
   roleError = Object.assign(new Error('ignored'), { code: 'last_owner' });

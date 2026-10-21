@@ -10,7 +10,7 @@ import { peopleDialogAccessUntil, peopleDialogCanAct, renderPeopleDialog, withdr
 import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
 import { agentStatus, peopleAgentStatus } from "../../lib/agent-status";
 import { classifyAgentPresence } from "../../../../src/cloud/agent-presence";
-import { grantRiskBadge, STANDING_GRANT_COPY } from "../../lib/standing-grants";
+import { grantRiskBadge, STANDING_GRANT_COPY, connectionPolicyCopy, connectionPolicyState, renewalGrantEnded } from "../../lib/standing-grants";
 
 /*
  * Source-level guards for the 2026-10-04 household redesign of /app (setup checklist, Add an
@@ -308,14 +308,15 @@ function dialogConnectionsFixture() {
     accessStatuses: [], pendingAgentsLoadFailed: false, people: new Map([["person", "Tom"]]),
     householdConnections: [], householdConnectionsReadState: "pending", householdReceipts: new Map(),
     peopleDialogReceipts: new Map(), identityRoster: () => ({ agents: [] }), identityDisplayLabel: (agent: any) => agent.name,
-    workspaces: [{id:"workspace",name:"Home"}], agentStatus, peopleAgentStatus, classifyAgentPresence, grantRiskBadge, STANDING_GRANT_COPY,
+    workspaces: [{id:"workspace",name:"Home"}], agentStatus, peopleAgentStatus, classifyAgentPresence, grantRiskBadge, STANDING_GRANT_COPY, connectionPolicyCopy, connectionPolicyState, renewalGrantEnded,
     agentPresenceLine: () => null, wakePathMark: () => null, currentPendingAccessRows: () => [],
     formatTime: () => ({ relative: "just now" }), createLatestRead, uuid: () => "command-id",
     householdScope: () => ({ workspaceId: ctx.activeWorkspaceId, session: ctx.session }),
     householdCurrent: (scope: any) => scope.workspaceId === ctx.activeWorkspaceId && scope.session === ctx.session,
     renderAgentApprovals: () => {}, renderDialogRoster: () => {},
   };
-  const source = section(script, "const connectionApproval =", "const approvalDescription =")
+  const source = section(script, "const renewalConnectionLive =", "const connectionDateFocus =")
+    + section(script, "const connectionApproval =", "const approvalDescription =")
     + section(script, "const peopleDialogModel =", "const syncPeopleDialogLayout =")
     + section(script, "const connectionReads =", "const approveAgent = async");
   const funcs = execute(`${source}; ({ peopleDialogModel, loadHouseholdConnections });`, ctx);
@@ -357,27 +358,29 @@ test("dialog connection facts stay unknown until a successful owner-scoped read,
   assert.equal(peopleDialogAccessUntil(currentAgent()), null, "an incomplete response is not a successful empty read");
 });
 
-test("an ended timeboxed key offers removal and a new key but no turn-off alternative", () => {
+test("server-confirmed key loss offers removal and a new key but no turn-off alternative", () => {
   const f = dialogConnectionsFixture();
   const grant = { principalId: "principal", grantKind: "timeboxed", horizonExpiresAt: "2000-01-01T00:00:00Z", revokedAt: null, grantRevokedAt: null, lastUsedAt: null };
   f.ctx.accessStatuses = [grant];
+  f.ctx.agents[0].work = { facts: { connection: "key_ended" } };
   const ended = f.model();
   assert.equal(ended.agents[0].status.kind, "key-ended");
   assert.equal(ended.agents[0].liveKey, false, "Remove confirmation uses liveKey for its alternative");
   assert.equal(peopleDialogCanAct(ended, "turn-off-key", "principal"), false);
   assert.equal(peopleDialogCanAct(ended, "remove-agent", "principal"), true);
   assert.equal(peopleDialogCanAct(ended, "new-key", "principal"), true);
+  f.ctx.agents[0].work.facts.connection = "live";
   grant.horizonExpiresAt = "2099-01-01T00:00:00Z";
-  assert.equal(peopleDialogCanAct(f.model(), "turn-off-key", "principal"), true, "a future key can still be turned off");
+  assert.equal(peopleDialogCanAct(f.model(), "turn-off-key", "principal"), true, "a server-confirmed live key can still be turned off");
   grant.grantKind = "standing";
   grant.horizonExpiresAt = "2000-01-01T00:00:00Z";
-  assert.equal(peopleDialogCanAct(f.model(), "turn-off-key", "principal"), true, "standing keys have no horizon");
+  assert.equal(peopleDialogCanAct(f.model(), "turn-off-key", "principal"), true, "a technical horizon does not end a live standing connection");
 });
 
 function creationFixture(outcome: "committed" | "refused" | "unknown", existing = false, storage = new Map<string, string>()) {
   const events: string[] = [], commands: any[] = [];
   const radios = [{ value: "shared", checked: false, disabled: false }, { value: "personal", checked: false, disabled: false }];
-  const warning = { textContent: "" }, receipt = { hidden: true, textContent: "", dataset: {} };
+  const warning = { textContent: "" }, receipt: { hidden: boolean; textContent: string; dataset: { setupWorkspaceId?: string } } = { hidden: true, textContent: "", dataset: {} };
   const session = { user: { id: "person" } };
   const ctx: any = {
     homeRoute: {view:"new"}, routeHref: () => "?w=workspace", focusHomeView: () => {},

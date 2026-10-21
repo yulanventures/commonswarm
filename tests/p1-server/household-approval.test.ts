@@ -1,7 +1,7 @@
 /** CI only: real PostgreSQL ACLs and triggers, with rollback-only fixtures. */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { build } from 'esbuild';
 import postgres from 'postgres';
@@ -244,7 +244,8 @@ test('real command adapters approve without role rewrite, list exact active appr
         { ...input, connection: { ...connection, operations: ['read'] } }, yes), { status: 'refused', reason: 'request_id_reused' });
       const listed = await api.executeHouseholdSurface(tx, f.workspace, actor, randomUUID(), { kind: 'household_connections' }, yes);
       assert.deepEqual(listed, { status: 'ok', connections: [{ kind: 'hosted', connection_id: f.connection, grant_id: f.grant, principal_id: f.principal,
-        name: f.name, approval: { operations: ['read', 'update'], expires_at: null },
+        name: f.name, renewal_grant_id: f.grant, connection_expires_at: null, connection_expired_at: null,
+        approval: { operations: ['read', 'update'], expires_at: null },
         effective_access: { source: 'explicit', operations: ['read', 'update'], restricted: true,
           restrictions: [{ operations: ['read', 'update'], origin: 'human_allow', principal_id: f.principal }] } }] });
       const withdrawInput = { kind: 'household_withdraw_connection', principal_id: f.principal };
@@ -354,26 +355,54 @@ test('real command adapters approve without role rewrite, list exact active appr
       assert.deepEqual(await api.provisionHouseholdPermissions(tx, f.workspace, actor, provisionId, provisionInput, yes), provision);
       await tx`RESET ROLE`;
       const localPrincipal = randomUUID(), device = randomUUID(), run = randomUUID(), token = randomUUID();
-      const tokenExpiry = new Date(Date.now() + 3600_000);
+      const family = randomUUID(), lineage = randomUUID(), successor = randomUUID();
+      // Use the native family's owner/workspace/run/device binding. All new local
+      // rows and the supported first-use/successor transitions use swarm_command;
+      // approval itself produces the consent receipt and latest-Allow pointer.
+      await tx`SET LOCAL ROLE swarm_command`;
       await tx`INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name)
         VALUES (${localPrincipal}::uuid,${f.workspace}::uuid,${f.owner}::uuid,'Synthetic local')`;
       await tx`INSERT INTO swarm.devices(device_id,user_id,label) VALUES (${device}::uuid,${f.owner}::uuid,'Synthetic device')`;
       await tx`INSERT INTO swarm.agent_runs(run_id,principal_id,device_id) VALUES (${run}::uuid,${localPrincipal}::uuid,${device}::uuid)`;
-      await tx`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,scopes,token_hash,expires_at,lineage_id)
-        VALUES (${token}::uuid,${localPrincipal}::uuid,${run}::uuid,'[]',decode(repeat('b',64),'hex'),${tokenExpiry},${randomUUID()}::uuid)`;
+      await tx`INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,kind,max_successors,successors_used,horizon_expires_at,bound_device_id,created_by)
+        VALUES (${family}::uuid,${f.workspace}::uuid,${localPrincipal}::uuid,${run}::uuid,'standing',NULL,0,NULL,${device}::uuid,${f.owner}::uuid)`;
+      await tx`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,scopes,token_hash,expires_at,lineage_id,renewal_grant_id)
+        VALUES (${token}::uuid,${localPrincipal}::uuid,${run}::uuid,'[]',${randomBytes(32)},clock_timestamp()+interval '1 hour',${lineage}::uuid,${family}::uuid)`;
       const localInput = { kind: 'household_approve_connection', connection: { kind: 'local', connection_id: token,
         grant_id: run, principal_id: localPrincipal, operations: ['read'] } };
-      await tx`SET LOCAL ROLE swarm_command`;
       assert.deepEqual(await api.approveHouseholdConnection(tx, f.workspace, actor, randomUUID(), localInput, yes),
-        { status: 'committed', operations: ['read'], expires_at: tokenExpiry.toISOString() });
-      const localListing = await api.executeHouseholdSurface(tx, f.workspace, actor, randomUUID(), { kind: 'household_connections' }, yes);
-      assert.deepEqual(localListing.connections.find((c: { principal_id: string }) => c.principal_id === localPrincipal)?.approval,
-        { operations: ['read'], expires_at: tokenExpiry.toISOString() });
-      await tx`RESET ROLE`;
+        { status: 'committed', operations: ['read'], expires_at: null });
+      const localRow = async () => {
+        const listing = await api.executeHouseholdSurface(tx, f.workspace, actor, randomUUID(), { kind: 'household_connections' }, yes);
+        assert.equal(listing.status, 'ok');
+        return listing.connections.find((c: { principal_id: string }) => c.principal_id === localPrincipal);
+      };
+      const initial = await localRow();
+      assert.equal(initial.connection_id, token);
+      assert.equal(initial.renewal_grant_id, family);
+      assert.equal(initial.connection_expires_at, null);
+      assert.equal(initial.connection_expired_at, null);
+      assert.deepEqual(initial.approval, { operations: ['read'], expires_at: null });
+      assert.deepEqual(initial.effective_access.operations, ['read']);
+      const approvals = () => tx`SELECT to_jsonb(c)::text AS row FROM swarm.household_content_connections c
+        WHERE workspace_id=${f.workspace}::uuid AND principal_id=${localPrincipal}::uuid ORDER BY connection_id`;
+      const originalApproval = await approvals();
+      await tx`UPDATE swarm.agent_tokens SET first_used_at=clock_timestamp() WHERE token_id=${token}::uuid AND first_used_at IS NULL`;
+      await tx`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,scopes,token_hash,expires_at,lineage_id,renewal_grant_id,predecessor_token_id)
+        VALUES (${successor}::uuid,${localPrincipal}::uuid,${run}::uuid,'[]',${randomBytes(32)},clock_timestamp()+interval '1 hour',${lineage}::uuid,${family}::uuid,${token}::uuid)`;
+      const rotated = await localRow();
+      assert.equal(rotated.connection_id, successor);
+      assert.equal(rotated.renewal_grant_id, family);
+      assert.equal(rotated.connection_expires_at, null);
+      assert.equal(rotated.connection_expired_at, null);
+      assert.deepEqual(rotated.approval, initial.approval);
+      assert.deepEqual(rotated.effective_access.operations, ['read']);
+      assert.deepEqual(await approvals(), originalApproval, 'renewal projects the original consent without a second Allow or expiry rewrite');
       await tx`INSERT INTO swarm.revocation_tombstones(kind,target_id) VALUES ('device',${device}::uuid)`;
-      await tx`SET LOCAL ROLE swarm_command`;
       assert.deepEqual(await api.approveHouseholdConnection(tx, f.workspace, actor, randomUUID(), localInput, yes),
         { status: 'refused', reason: 'connection_access_refused' });
+      assert.equal(await localRow(), undefined, 'device revocation removes the family from the owner projection');
+      assert.deepEqual(await approvals(), originalApproval, 'revocation retains original consent history');
       await tx`RESET ROLE`;
       const [forward] = await tx.unsafe(releaseCatalogQuery(repoSql(`${proofRoot}-catalog.sql`), 'catalog_ok'));
       assert.equal(forward!.catalog_ok, true);

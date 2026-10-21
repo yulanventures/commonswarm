@@ -1,3 +1,4 @@
+import { revokeHostedWorkspaceApproval } from "./admin-routine.ts";
 import { humanInvitationTransaction } from './household-invitations.ts';
 import { parseHouseholdAttachment, HouseholdAttachmentError } from "./household-attachments.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
@@ -19,6 +20,9 @@ import {
   enforceAgentSessionProof,
   hashSessionKey,
   loadAgentCredential,
+  planLocalOperation, planLocalConnection, lockLocalAuthPlan, type LocalAuthLockPlan, LocalCredentialDenied, LocalCredentialWorkspaceMismatch, recheckLocalCredential, LocalAuthDiscoveryChanged,
+  retryLocalAuthTransaction,
+  planHostedClaimPrefix,
   type AgentAuthRow,
 } from "../_shared/agent-auth.ts";
 import {
@@ -152,7 +156,7 @@ import {
 // frozen TypeScript core. This checked-in bundle is regenerated directly from
 // src/protocol/index.ts by build:command-core; it is not a second implementation.
 import {
-  HOUSEHOLD_LOCAL_SEAT, HOUSEHOLD_JOIN_RATE_PER_HOUR,
+  HOUSEHOLD_LOCAL_SEAT, HOUSEHOLD_JOIN_RATE_PER_HOUR, HUMAN_ONLY_COMMANDS,
   HouseholdToolInputError,
   applyCommand,
   canonicalPrincipal,
@@ -508,8 +512,10 @@ interface RenewalGrantFacts {
   /** Issued but never delivered; subtracted from `successors_used` for the ceiling. */
   successors_stranded: number;
   horizon_expires_at: number | null;
+  connection_expires_at: number | null;
+  connection_expired_at: number | null;
   revoked_at: number | null;
-  /** swarm.renewal_grants.suspension_active, unmodified. See the protocol interface. */
+  /** Active suspension denies authority until explicit authorized resume. */
   suspension_active: boolean;
 }
 
@@ -613,6 +619,9 @@ interface StoredResponse {
   grant_id?: string;
   seat_id?: string;
   handle?: string;
+  connection_expired_at?: string | null;
+  connection_expires_at?: string | null;
+  previous_connection_expires_at?: string | null;
 }
 
 interface EventEnvelope {
@@ -1021,6 +1030,7 @@ const HOSTED_MANAGEMENT_KINDS = new Set([
   "activate_hosted_mcp_grant",
   "revoke_hosted_mcp_grant",
   "revoke_hosted_mcp_seat",
+  "set_connection_expiry",
 ]);
 
 /** Hosted seats are turn-only and never enter local session/listener machinery. */
@@ -2970,6 +2980,12 @@ function storedResponse(value: unknown): StoredResponse {
         response.successors_remaining === null
       ? { successors_remaining: response.successors_remaining as number | null }
       : {}),
+    ...(typeof response.connection_expired_at === "string" || response.connection_expired_at === null
+      ? { connection_expired_at: response.connection_expired_at as string | null } : {}),
+    ...(typeof response.connection_expires_at === "string" || response.connection_expires_at === null
+      ? { connection_expires_at: response.connection_expires_at as string | null } : {}),
+    ...(typeof response.previous_connection_expires_at === "string" || response.previous_connection_expires_at === null
+      ? { previous_connection_expires_at: response.previous_connection_expires_at as string | null } : {}),
     ...(typeof response.revoked_at === "string"
       ? { revoked_at: response.revoked_at }
       : {}),
@@ -3048,9 +3064,9 @@ function replayResult(
  */
 async function authenticateAgent(
   tx: Sql,
-  tokenHash: Uint8Array,
+  tokenHash: Uint8Array, plan: LocalAuthLockPlan, allowExpiredRenewal = false,
 ): Promise<AuthContext | null> {
-  const agent = await loadAgentCredential(tx, tokenHash);
+  const agent = await loadAgentCredential(tx, tokenHash, plan, allowExpiredRenewal);
   if (!agent) return null;
   return {
     credentialKind: "agent",
@@ -3415,6 +3431,7 @@ function byteaHex(value: unknown): string {
 async function loadWorkspaceState(
   tx: Sql,
   route: Route,
+  tokenIds: string[] = [],
 ): Promise<WorkspaceState> {
   const [workspaceRows, memberRows, invitationRows, principalRows, tokenRows] =
     await Promise.all([
@@ -3450,6 +3467,7 @@ async function loadWorkspaceState(
         JOIN swarm.agent_principals AS p
           ON p.principal_id = t.principal_id
         WHERE p.workspace_id = ${route.workspaceId}::uuid
+          AND t.token_id=ANY(${tokenIds}::uuid[])
       `,
     ]);
   const workspace = workspaceRows[0];
@@ -3603,7 +3621,9 @@ async function prepareWorkspaceCommand(
    */
   selfHealStranded = false,
 ): Promise<PreparedWorkspace> {
-  const state = await loadWorkspaceState(tx, route);
+  const state = await loadWorkspaceState(tx, route,
+    wire.kind==='renew_agent_token' && auth.agent ? [auth.agent.token_id]
+      : wire.kind==='revoke_agent_token' ? [wire.token_id] : []);
   let invitationToken: string | null = null;
   let invitationHash: Uint8Array | null = null;
   let agentToken: string | null = null;
@@ -3704,6 +3724,9 @@ async function prepareWorkspaceCommand(
         auth.agentFirstUse,
         auth.agent?.device_id ?? null,
       );
+    if (auth.agent && !auth.agent.unexpired && renewalFacts?.grant?.kind==='standing' && predecessor) {
+      state.tokens[auth.agent.token_id] = {...predecessor,expires_at:now+1};
+    }
     if (renewalFacts !== null && !selfHealStranded) {
       renewalFacts = { ...renewalFacts, successor_pending: false };
     }
@@ -3730,10 +3753,11 @@ async function prepareWorkspaceCommand(
       epoch: wire.epoch,
       scopes: [...(wire.scopes ?? P0_AGENT_SCOPES)],
       ...(wire.ttl_ms === undefined ? {} : { ttl_ms: wire.ttl_ms }),
-      renewal_kind: wire.renewal_kind ?? "timeboxed",
-      renewal_horizon_ms: wire.renewal_kind === "standing"
-        ? null
-        : wire.renewal_horizon_ms ?? RENEWAL_HORIZON_DEFAULT_MS,
+      // The ordinary connection endpoint never represented owner-chosen expiry.
+      // Older clients sent timeboxed/30 days even for their default connection.
+      // Delegated/security/job issuance uses its separate bounded authority path.
+      renewal_kind: "standing",
+      renewal_horizon_ms: null,
     };
   } else {
     // Exhaustiveness: every ConnectCommand kind is armed above. Falling into a
@@ -3854,6 +3878,8 @@ async function loadRenewalFacts(
     successors_used: number | null;
     successors_stranded: number | null;
     horizon_expires_at: Date | null;
+    connection_expires_at: Date | null;
+    connection_expired_at: Date | null;
     grant_revoked_at: Date | null;
     grant_suspension_active: boolean | null;
     grant_bound_to_token: boolean | null;
@@ -3868,19 +3894,9 @@ async function loadRenewalFacts(
       g.successors_used,
       g.successors_stranded,
       g.horizon_expires_at,
+      g.connection_expires_at,COALESCE(g.connection_expired_at,CASE WHEN g.connection_expires_at<=clock_timestamp() THEN g.connection_expires_at END) AS connection_expired_at,
       g.revoked_at AS grant_revoked_at,
-      /* CURRENT suspension, not the last one recorded. suspended_at is never
-         cleared — a resume is written to resumed_at so the lapse stays readable
-         — and swarm.renewal_grants.suspension_active is the ONE definition of
-         "suspended right now". Reading the raw column here would keep every
-         resumed grant refused as renewal_grant_suspended, which is the bug
-         20260904000001_standing_grant_resume.sql exists to remove.
-         PASSED THROUGH, NOT REMAPPED, since 2026-09-04: this used to be
-         CASE WHEN g.suspension_active THEN g.suspended_at END, which handed the reducer a
-         timestamp it then tested for null. That turned this line into a second definition of
-         "paused" — correct only while the CASE survived, and the reducer had no way to know if
-         it did not. The reducer now reads the boolean itself. */
-      g.suspension_active AS grant_suspension_active,
+      (g.suspension_active) AS grant_suspension_active,
       (
         g.principal_id = t.principal_id
         AND g.run_id = t.run_id
@@ -3973,6 +3989,8 @@ async function loadRenewalFacts(
       successors_used: Number(row.successors_used),
       successors_stranded: Number(row.successors_stranded),
       horizon_expires_at: millis(row.horizon_expires_at),
+      connection_expires_at: millis(row.connection_expires_at),
+      connection_expired_at: millis(row.connection_expired_at),
       revoked_at: millis(row.grant_revoked_at),
       suspension_active: row.grant_suspension_active === true,
     };
@@ -3996,6 +4014,22 @@ async function loadRenewalFacts(
  * readable by swarm_command, so a replay identifies the successor and its
  * expiry but never re-issues the secret.
  */
+async function localPolicyFields(tx:Sql,family:string):Promise<{connection_expires_at:string|null;connection_expired_at:string|null}|null> {
+  const [current]=await tx<{connection_expires_at:Date|null;connection_expired_at:Date|null}[]>`
+    SELECT connection_expires_at,COALESCE(connection_expired_at,
+      CASE WHEN connection_expires_at<=clock_timestamp() THEN connection_expires_at END) AS connection_expired_at
+    FROM swarm.renewal_grants WHERE renewal_grant_id=${family}::uuid`;
+  return current ? {connection_expires_at:current.connection_expires_at?.toISOString() ?? null,
+    connection_expired_at:current.connection_expired_at?.toISOString() ?? null} : null;
+}
+async function currentLocalPolicyResponse(tx:Sql,response:StoredResponse,plan:LocalAuthLockPlan|null):Promise<StoredResponse> {
+  const {connection_expires_at:_deadline,connection_expired_at:_terminal,...receipt}=response;
+  const family=plan?.snapshot.bindings.find(r=>r.token_id===response.token_id)?.renewal_grant_id;
+  if (!family || !plan?.locked) return receipt;
+  const current=await localPolicyFields(tx,family);
+  return current ? {...receipt,...current} : receipt;
+}
+
 function renewalReplayFields(
   prepared: PreparedWorkspace,
   events: readonly EventEnvelope[],
@@ -4021,6 +4055,8 @@ function renewalReplayFields(
     ...(grant === null
       ? {}
       : {
+        connection_expires_at: grant.connection_expires_at===null ? null : new Date(grant.connection_expires_at).toISOString(),
+        connection_expired_at: grant.connection_expired_at===null ? null : new Date(grant.connection_expired_at).toISOString(),
         grant_kind: grant.kind,
         horizon_expires_at: grant.horizon_expires_at === null
           ? null
@@ -4580,6 +4616,14 @@ async function updateWorkspaceProjection(
       ) {
         throw new Error("MemberRemoved payload is malformed");
       }
+      if (prepared.ctx.actor.agent_principal !== null || event.actor_user===null) throw new Error('Human membership removal required');
+      await tx`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp(),revoked_by=${event.actor_user}::uuid
+        WHERE workspace_id=${route.workspaceId}::uuid AND principal_id IN
+          (SELECT principal_id FROM swarm.agent_principals WHERE workspace_id=${route.workspaceId}::uuid AND owner_user_id=${payload.user_id}::uuid AND transport='local')
+          AND revoked_at IS NULL`;
+      await tx`SELECT swarm.revoke_local_residual_tokens(${route.workspaceId}::uuid,${event.actor_user}::uuid,'remove_member',${payload.user_id}::uuid)`;
+      await revokeHostedWorkspaceApproval(tx, route.workspaceId, new Date(payload.revoked_at),
+        event.actor_user, { ownerUserId: payload.user_id });
       await revokeRemovedMemberHousehold(tx, route.workspaceId, payload.user_id, new Date(payload.revoked_at), event.actor_user, event.command_id, requestDigest); const updated = await tx<{ user_id: string }[]>`
         UPDATE swarm.memberships
         SET revoked_at = ${new Date(payload.revoked_at)}
@@ -4720,36 +4764,8 @@ async function updateWorkspaceProjection(
           "AgentPrincipalRevoked projection did not revoke exactly one principal",
         );
       }
-      // The workspace stream is already locked, as in claim/consent. Lock every
-      // linked grant in a stable order before changing consent, so claims in
-      // another workspace and simultaneous removals see a single decision.
-      const hostedGrants = await tx<HostedGrantRow[]>`
-        SELECT g.* FROM swarm.hosted_mcp_grants AS g
-        WHERE EXISTS (
-          SELECT 1 FROM swarm.hosted_mcp_seats AS hs
-          WHERE hs.grant_id = g.grant_id
-            AND hs.workspace_id = ${route.workspaceId}::uuid
-            AND hs.principal_id = ${principalId}::uuid
-        )
-        ORDER BY g.grant_id FOR UPDATE OF g
-      `;
-      for (const grant of hostedGrants) {
-        const seats = await tx<{ seat_id: string }[]>`
-          SELECT seat_id FROM swarm.hosted_mcp_seats
-          WHERE grant_id = ${grant.grant_id}::uuid
-            AND workspace_id = ${route.workspaceId}::uuid
-            AND principal_id = ${principalId}::uuid
-          ORDER BY seat_id FOR UPDATE
-        `;
-        for (const seat of seats) {
-          await projectHostedSeatRevocation(tx, seat.seat_id, revokedAt, createdBy);
-        }
-        await tx`
-          UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at = ${revokedAt}
-          WHERE grant_id = ${grant.grant_id}::uuid
-            AND workspace_id = ${route.workspaceId}::uuid AND revoked_at IS NULL
-        `;
-      }
+      await revokeHostedWorkspaceApproval(tx, route.workspaceId, revokedAt, createdBy,
+        { principalId });
       await rotateWakeId(tx, principalId);
       await tx`
         INSERT INTO swarm.revocation_tombstones (kind, target_id, created_by)
@@ -4760,41 +4776,6 @@ async function updateWorkspaceProjection(
         )
         ON CONFLICT (kind, target_id) DO NOTHING
       `;
-      const liveTokens = await tx<{ token_id: string; lineage_id: string }[]>`
-        SELECT token_id, lineage_id
-        FROM swarm.agent_tokens
-        WHERE principal_id = ${principalId}::uuid
-          AND revoked_at IS NULL
-      `;
-      await tx`
-        UPDATE swarm.agent_tokens
-        SET revoked_at = ${revokedAt}
-        WHERE principal_id = ${principalId}::uuid
-          AND revoked_at IS NULL
-      `;
-      for (const token of liveTokens) {
-        await tx`
-          INSERT INTO swarm.revocation_tombstones (kind, target_id, created_by)
-          VALUES (
-            'token',
-            ${token.token_id}::uuid,
-            ${createdBy}::uuid
-          )
-          ON CONFLICT (kind, target_id) DO NOTHING
-        `;
-      }
-      const lineageIds = [...new Set(liveTokens.map((row) => row.lineage_id))];
-      for (const lineageId of lineageIds) {
-        await tx`
-          INSERT INTO swarm.revocation_tombstones (kind, target_id, created_by)
-          VALUES (
-            'lineage',
-            ${lineageId}::uuid,
-            ${createdBy}::uuid
-          )
-          ON CONFLICT (kind, target_id) DO NOTHING
-        `;
-      }
       // Grant revoke is paired (revoked_at, revoked_by); the cascade trigger
       // tombstones the grant and stamps any residual tokens.
       if (createdBy !== null) {
@@ -4820,6 +4801,8 @@ async function updateWorkspaceProjection(
             AND revoked_at IS NULL
         `;
       }
+      if (prepared.ctx.actor.agent_principal===null && createdBy!==null) await tx`
+        SELECT swarm.revoke_local_residual_tokens(${route.workspaceId}::uuid,${createdBy}::uuid,'revoke_agent_principal',${principalId}::uuid)`;
     } else if (event.type === "AgentTokenRevoked") {
       if (
         typeof payload.token_id !== "string" ||
@@ -4836,8 +4819,7 @@ async function updateWorkspaceProjection(
         renewal_grant_id: string | null;
         principal_id: string;
       }[]>`
-        UPDATE swarm.agent_tokens
-        SET revoked_at = ${revokedAt}
+        SELECT token_id, lineage_id, renewal_grant_id, principal_id FROM swarm.agent_tokens
         WHERE token_id = ${tokenId}::uuid
           AND revoked_at IS NULL
           AND principal_id IN (
@@ -4845,7 +4827,7 @@ async function updateWorkspaceProjection(
             FROM swarm.agent_principals
             WHERE workspace_id = ${route.workspaceId}::uuid
           )
-        RETURNING token_id, lineage_id, renewal_grant_id, principal_id
+
       `;
       if (revoked.length !== 1) {
         throw new Error(
@@ -4873,6 +4855,10 @@ async function updateWorkspaceProjection(
             AND revoked_at IS NULL
         `;
       }
+      await tx`UPDATE swarm.agent_tokens SET revoked_at=coalesce(revoked_at,${revokedAt})
+        WHERE token_id=${tokenId}::uuid`;
+      if (prepared.ctx.actor.agent_principal===null && createdBy!==null) await tx`
+        SELECT swarm.revoke_local_residual_tokens(${route.workspaceId}::uuid,${createdBy}::uuid,'revoke_agent_token',${tokenId}::uuid)`;
       // Distinct lineage tombstone so successors and renewals fail closed even
       // when only this one token was named.
       await tx`
@@ -6029,7 +6015,10 @@ interface ExistingJoinAttempt {
   principal_revoked_at: Date | null;
   run_ended_at: Date | null;
   grant_revoked_at: Date | null;
-  grant_horizon_expires_at: Date;
+  grant_horizon_expires_at: Date | null;
+  grant_kind: 'standing'|'timeboxed';
+  grant_connection_expires_at: Date|null;
+  grant_connection_expired_at: Date|null;
 }
 
 async function lockJoinCredential(
@@ -6048,7 +6037,7 @@ async function lockJoinCredential(
       c.seat_cap,
       c.seats_used,
       c.revoked_at,
-      c.expires_at > statement_timestamp() AS unexpired
+      c.expires_at > clock_timestamp() AS unexpired
     FROM swarm.agent_join_credentials AS c
     JOIN swarm.agent_runs AS r
       ON r.run_id = c.registrar_run_id
@@ -6105,8 +6094,7 @@ async function lockRegistrationStream(
 ): Promise<RegistrationStreamFrame> {
   const rows = await tx<{ head_seq: string | number; now_ms: string | number }[]>`
     SELECT
-      s.head_seq,
-      floor(extract(epoch FROM statement_timestamp()) * 1000)::bigint AS now_ms
+      s.head_seq
     FROM swarm.streams AS s
     WHERE s.stream_id = ${route.streamId}::uuid
       AND s.workspace_id = ${route.workspaceId}::uuid
@@ -6114,7 +6102,8 @@ async function lockRegistrationStream(
   `;
   const row = rows[0];
   if (!row) throw new Error("join credential workspace stream disappeared");
-  return { headSeq: Number(row.head_seq), now: Number(row.now_ms) };
+  const [clock]=await tx<{now_ms:string|number}[]>`SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now_ms`;
+  return { headSeq: Number(row.head_seq), now: Number(clock!.now_ms) };
 }
 
 async function appendRegistrationEvents(
@@ -6295,7 +6284,9 @@ async function replaceUnusedRegistrationToken(
           AND g.principal_id = ${existing.principal_id}::uuid
           AND g.run_id = ${existing.run_id}::uuid
           AND g.revoked_at IS NULL
-          AND g.horizon_expires_at > ${new Date(frame.now)}
+          AND (g.kind='standing' OR g.horizon_expires_at > clock_timestamp())
+          AND NOT g.suspension_active AND g.connection_expired_at IS NULL
+          AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
       )
     RETURNING token_id
   `;
@@ -6334,7 +6325,7 @@ async function replaceUnusedRegistrationToken(
   const tokenHash = await sha256(secret);
   const expiresAt = new Date(Math.min(
     frame.now + H0_SEAT_TOKEN_TTL_MS,
-    existing.grant_horizon_expires_at.getTime(),
+    existing.grant_horizon_expires_at?.getTime() ?? Infinity,
   ));
   await tx`
     INSERT INTO swarm.agent_tokens (
@@ -6586,7 +6577,8 @@ async function registerAgentSeat(
       p.revoked_at AS principal_revoked_at,
       r.ended_at AS run_ended_at,
       g.revoked_at AS grant_revoked_at,
-      g.horizon_expires_at AS grant_horizon_expires_at
+      g.horizon_expires_at AS grant_horizon_expires_at,g.kind AS grant_kind,
+      g.connection_expires_at AS grant_connection_expires_at,g.connection_expired_at AS grant_connection_expired_at
     FROM swarm.agent_join_attempts AS a
     JOIN swarm.agent_tokens AS t
       ON t.token_id = a.token_id
@@ -6605,7 +6597,7 @@ async function registerAgentSeat(
      AND g.run_id = a.run_id
     WHERE a.join_credential_id = ${credential.id}::uuid
       AND a.attempt_id = ${command.attempt_id}::uuid
-    FOR UPDATE OF a, t, p, r, g
+    FOR UPDATE OF a
   `;
   const existing = attemptRows[0];
   if (existing) {
@@ -6634,7 +6626,9 @@ async function registerAgentSeat(
       existing.principal_revoked_at !== null ||
       existing.run_ended_at !== null ||
       existing.grant_revoked_at !== null ||
-      existing.grant_horizon_expires_at.getTime() <= frame.now
+      existing.grant_kind==='timeboxed' && (existing.grant_horizon_expires_at?.getTime() ?? 0) <= frame.now ||
+      existing.grant_connection_expired_at!==null ||
+      existing.grant_connection_expires_at!==null && existing.grant_connection_expires_at.getTime()<=frame.now
     ) {
       return await refuseRegistrationDomain(
         tx,
@@ -6852,11 +6846,11 @@ async function registerAgentSeat(
       ${credential.workspace_id}::uuid,
       ${principalId}::uuid,
       ${runId}::uuid,
-      'timeboxed',
-      ${RENEWAL_MAX_SUCCESSORS_DEFAULT},
-      0,
-      ${expiresAt},
+      'standing',
       NULL,
+      0,
+      NULL,
+      ${deviceId}::uuid,
       ${credential.owner_user_id}::uuid
     )
   `;
@@ -8183,13 +8177,21 @@ async function resumeRenewalGrant(
   /* The whole gate, in one call, under its own row lock. The returned value is a
      code we assign — never a message, and never classified by parsing one
      (D-053). NULL means the resume happened. */
-  const outcomeRows = await tx<{ resume_outcome: string | null }[]>`
-    SELECT swarm.resume_renewal_grant(
-      ${workspaceId}::uuid,
-      ${renewalGrantId}::uuid,
-      ${userId}::uuid
-    ) AS resume_outcome
-  `;
+  let outcomeRows: { resume_outcome: string | null }[];
+  try {
+    outcomeRows = await tx.savepoint(sp => sp<{ resume_outcome: string | null }[]>`
+      SELECT swarm.resume_renewal_grant(
+        ${workspaceId}::uuid, ${renewalGrantId}::uuid, ${userId}::uuid
+      ) AS resume_outcome
+    `);
+  } catch (error) {
+    // Only our private binding marker is a domain refusal. The savepoint has
+    // unwound before auditing; all other SQL errors (including 40001) escape.
+    const failure = record(error);
+    if (failure?.code !== '22023' || failure.detail !== 'LOCAL_DISCOVERY_BINDING') throw error;
+    return await refuse('authz', 'renewal_resume_renewal_resume_forbidden', forbidden,
+      `renewal_grant_id=${renewalGrantId}`);
+  }
   /* ★ NULL IS THE SUCCESS VALUE, SO IT MUST SURVIVE THE READ.
    *
    * This was `outcomeRows[0]?.resume_outcome ?? "renewal_resume_forbidden"`, and `??` cannot
@@ -9202,6 +9204,7 @@ type AskChainRefusal =
 type PostSignalOutcome =
   | { status: "inserted"; signal: SignalRecord }
   | { status: "thread_horizon" }
+  | { status: "hosted_refused" }
   | { status: "chain_refused"; error: AskChainRefusal };
 
 /** Fixed-content notices share signal targeting, rate and delivery truth.
@@ -9237,6 +9240,7 @@ async function postSignal(
   target: SignalWriteTarget,
   attachments: readonly SignalAttachment[],
   placement: SignalPlacement,
+  hostedCapability: HostedSeatCapability | null = null,
 ): Promise<PostSignalOutcome> {
   const signalCredentialKind: SignalCredentialKind =
     auth.credentialKind === "user" ? "user" : "agent";
@@ -9267,6 +9271,11 @@ async function postSignal(
         hashtextextended(${`${route.workspaceId}:${parentSignalId}`}, 0)
       )
     `;
+  }
+  // The optional parent advisory can wait too. Resolve policy with a fresh
+  // statement after it, before any signal effect.
+  if (hostedCapability !== null && await revalidateHostedSeatCommand(tx, hostedCapability) === null) {
+    return { status: "hosted_refused" };
   }
   const rows = await tx<{
     inserted: boolean;
@@ -9708,7 +9717,9 @@ type HostedManagementCommand =
   }
   | { kind: "activate_hosted_mcp_grant"; grant_id: string }
   | { kind: "revoke_hosted_mcp_grant"; grant_id: string }
-  | { kind: "revoke_hosted_mcp_seat"; grant_id: string; seat_id: string };
+  | { kind: "revoke_hosted_mcp_seat"; grant_id: string; seat_id: string }
+  | { kind: "set_connection_expiry"; connection_kind: "hosted" | "renewal"; grant_id: string;
+      connection_expires_at: string | null };
 
 interface HostedGrantRow {
   grant_id: string;
@@ -9724,6 +9735,8 @@ interface HostedGrantRow {
   created_at: Date;
   activated_at: Date | null;
   revoked_at: Date | null;
+  connection_expires_at: Date | null;
+  connection_expired_at: Date | null;
 }
 
 // Close seat identity under the command role; OAuth owns provider retirement.
@@ -9778,6 +9791,17 @@ function parseHostedManagementCommand(value: unknown): HostedManagementCommand |
         typeof command.manifest_digest !== "string" ||
         !/^[0-9a-f]{64}$/u.test(command.manifest_digest)) return null;
     return command as HostedManagementCommand;
+  }
+  if (command.kind === "set_connection_expiry") {
+    const expiry = command.connection_expires_at;
+    return exactKeys(command, ["kind", "connection_kind", "grant_id", "connection_expires_at"]) &&
+        (command.connection_kind === "hosted" || command.connection_kind === "renewal") &&
+        typeof command.grant_id === "string" && UUID_RE.test(command.grant_id) &&
+        (expiry === null || (typeof expiry === "string" &&
+          /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u.test(expiry) &&
+          Number.isFinite(Date.parse(expiry)) &&
+          new Date(expiry).toISOString() === (expiry.length === 20 ? expiry.slice(0,-1) + ".000Z" : expiry)))
+      ? command as HostedManagementCommand : null;
   }
   if (command.kind === "activate_hosted_mcp_grant" ||
       command.kind === "revoke_hosted_mcp_grant") {
@@ -9857,6 +9881,77 @@ function hostedProjectionBefore(grant: HostedGrantRow, seat: ReturnType<typeof r
   };
 }
 
+/** Exact renewal-family policy edit through the existing verified human command.
+ * The coordinator has preheld U/A/W/E/P/D/G/T before human authentication.
+ * No client owner or token deadline is a policy input. */
+async function handleLocalConnectionExpiry(
+  tx:Sql,body:RequestBody,auth:AuthContext,
+  command:Extract<HostedManagementCommand,{kind:"set_connection_expiry"}>,
+):Promise<HttpResult> {
+  const forbidden:HttpResult={status:403,body:{error:"connection_expiry_unavailable"}};
+  if (!auth.identityVerified || auth.credentialKind!=="user" || auth.actor.user===null) return forbidden;
+  const [binding]=await tx<{workspace_id:string;principal_id:string;run_id:string;created_by:string}[]>`
+    SELECT workspace_id,principal_id,run_id,created_by FROM swarm.renewal_grants
+    WHERE renewal_grant_id=${command.grant_id}::uuid`;
+  if (!binding || binding.workspace_id!==body.workspace_id) return forbidden;
+  const [stream]=await tx<{stream_id:string}[]>`SELECT stream_id FROM swarm.streams
+    WHERE workspace_id=${binding.workspace_id}::uuid AND kind='workspace'`;
+  if (!stream) return forbidden;
+  const route:Route={workspaceId:binding.workspace_id,streamId:stream.stream_id,membershipRole:null,membershipRevokedAt:null};
+  await lockRegistrationStream(tx,route);
+  const [grant]=await tx<{connection_expires_at:Date|null;connection_expired_at:Date|null}[]>`
+    SELECT connection_expires_at,connection_expired_at FROM swarm.renewal_grants
+    WHERE renewal_grant_id=${command.grant_id}::uuid FOR UPDATE`;
+  // Fresh SQL proof after stream/family waits; exact human owner, all current
+  // parents, membership, run/device and terminal fences remain mandatory.
+  const [current]=await tx<{now:number}[]>`SELECT floor(extract(epoch FROM clock_timestamp())*1000)::float8 AS now
+    FROM swarm.renewal_grants g JOIN swarm.agent_principals p USING(principal_id)
+    JOIN swarm.agent_runs r ON r.run_id=g.run_id AND r.principal_id=p.principal_id
+    JOIN swarm.devices d ON d.device_id=r.device_id
+    JOIN swarm.workspaces w ON w.workspace_id=g.workspace_id
+    JOIN swarm.memberships m ON m.workspace_id=g.workspace_id AND m.user_id=${auth.actor.user}::uuid
+    WHERE g.renewal_grant_id=${command.grant_id}::uuid AND g.workspace_id=${body.workspace_id}::uuid
+      AND g.created_by=${auth.actor.user}::uuid AND p.owner_user_id=${auth.actor.user}::uuid
+      AND p.workspace_id=g.workspace_id AND p.transport='local' AND NOT p.turn_only
+      AND p.revoked_at IS NULL AND r.ended_at IS NULL AND d.revoked_at IS NULL
+      AND m.revoked_at IS NULL AND w.archived_at IS NULL AND g.revoked_at IS NULL
+      AND (g.bound_device_id IS NULL OR g.bound_device_id=d.device_id)
+      AND (g.kind='standing' OR g.horizon_expires_at>clock_timestamp() AND g.successors_used<g.max_successors)
+      AND NOT g.suspension_active
+      AND g.connection_expired_at IS NULL AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
+      AND swarm.admin_child_live(p.parent_admin_grant_id,g.workspace_id)
+      AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z
+        WHERE z.kind='renewal_grant' AND z.target_id=g.renewal_grant_id
+          OR z.kind='principal' AND z.target_id=p.principal_id
+          OR z.kind IN ('lineage','family') AND z.target_id IN
+            (SELECT t.lineage_id FROM swarm.agent_tokens t WHERE t.renewal_grant_id=g.renewal_grant_id))
+      AND EXISTS(SELECT 1 FROM swarm.agent_tokens t WHERE t.renewal_grant_id=g.renewal_grant_id
+        AND t.revoked_at IS NULL AND swarm.admin_child_live(t.parent_admin_grant_id,g.workspace_id))`;
+  if (!grant || !current) return forbidden;
+  if (command.connection_expires_at!==null && Date.parse(command.connection_expires_at)<=current.now)
+    return {status:400,body:{error:"invalid_connection_expiry"}};
+  const hash=await hostedRequestHash("user",auth.actor.user,body);
+  const [prior]=await tx<{workspace_id:string;stream_id:string;request_hash:string;response:unknown}[]>`
+    SELECT workspace_id,stream_id,request_hash,response FROM swarm.idempotency_keys
+    WHERE principal_kind='user' AND principal_id=${auth.actor.user} AND command_id=${body.command_id}`;
+  if (prior) return prior.workspace_id===route.workspaceId && prior.stream_id===route.streamId && prior.request_hash===hash
+    ? replayResult({...storedResponse(prior.response),...await localPolicyFields(tx,command.grant_id)},command.kind)
+    : {status:409,body:{error:"command_id_conflict"}};
+  const [changed]=await tx`UPDATE swarm.renewal_grants SET connection_expires_at=${command.connection_expires_at}::timestamptz
+    WHERE renewal_grant_id=${command.grant_id}::uuid AND revoked_at IS NULL AND connection_expired_at IS NULL
+      AND (connection_expires_at IS NULL OR connection_expires_at>clock_timestamp())
+      AND (${command.connection_expires_at}::timestamptz IS NULL OR ${command.connection_expires_at}::timestamptz>clock_timestamp())
+    RETURNING renewal_grant_id`;
+  if (!changed) return forbidden;
+  const response:StoredResponse={ok:true,event_ids:[],grant_id:command.grant_id,renewal_grant_id:command.grant_id,
+    workspace_id:route.workspaceId,previous_connection_expires_at:grant.connection_expires_at?.toISOString() ?? null,
+    connection_expires_at:command.connection_expires_at,connection_expired_at:null};
+  await tx`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response)
+    VALUES('user',${auth.actor.user},${body.command_id},${route.workspaceId}::uuid,${route.streamId}::uuid,${hash},${tx.json(response as unknown as postgres.JSONValue)})`;
+  await insertAudit(tx,{auth,commandKind:command.kind,workspaceId:route.workspaceId,streamId:route.streamId,outcome:"accepted",hash});
+  return {status:200,body:{status:"accepted",...response,...await localPolicyFields(tx,command.grant_id),events:[]}};
+}
+
 async function handleHostedManagement(
   tx: Sql,
   body: RequestBody,
@@ -9873,6 +9968,9 @@ async function handleHostedManagement(
       record(body.stream)?.kind !== "workspace") {
     return { status: 400, body: { error: "invalid_request" } };
   }
+
+  if (command.kind==="set_connection_expiry" && command.connection_kind==="renewal")
+    return await handleLocalConnectionExpiry(tx,body,auth,command);
 
   const preliminary = command.kind === "begin_hosted_mcp_grant"
     ? []
@@ -9893,10 +9991,46 @@ async function handleHostedManagement(
           AND grant_id = ${command.grant_id}::uuid
         LIMIT 1
       `)[0]?.workspace_id ?? null
+    : command.kind === "set_connection_expiry" && preliminaryGrant
+    ? (await tx<{ workspace_id: string }[]>`
+        SELECT a.workspace_id FROM unnest(${preliminaryGrant.selected_workspace_ids}::uuid[]) selected(workspace_id)
+        CROSS JOIN LATERAL swarm.resolve_hosted_grant_authorization(
+          ${command.grant_id}::uuid,${auth.actor.user}::uuid,selected.workspace_id,'claim_hosted_seat') a
+        ORDER BY (a.workspace_id=${preliminaryGrant.home_workspace_id}::uuid) DESC,a.workspace_id LIMIT 1
+      `)[0]?.workspace_id ?? null
     : preliminaryGrant?.home_workspace_id ?? null;
-  if (routeWorkspaceId === null || body.workspace_id !== routeWorkspaceId) {
+  if (routeWorkspaceId === null || body.workspace_id !==
+      (command.kind === "set_connection_expiry" ? preliminaryGrant?.home_workspace_id : routeWorkspaceId)) {
     return { status: 403, body: { error: "forbidden" } };
   }
+  // The authenticated actor already owns its human U lock. This prefix
+  // adds no human authority and fences every server-bound workspace before S/G.
+  const prefix = await planHostedClaimPrefix(tx, async () => {
+    const rows = await tx<{grant_id:string;owner_user_id:string;home_workspace_id:string;
+      selected_workspace_ids:string[];provider_grant_id:string}[]>`
+      SELECT grant_id,owner_user_id,home_workspace_id,selected_workspace_ids,provider_grant_id
+      FROM swarm.hosted_mcp_grants WHERE grant_id=${command.grant_id}::uuid`;
+    const current=rows[0];
+    if (current && current.owner_user_id!==auth.actor.user) return null;
+    if (!current && command.kind!=='begin_hosted_mcp_grant') return null;
+    if (current && preliminaryGrant && current.home_workspace_id!==preliminaryGrant.home_workspace_id) throw new LocalAuthDiscoveryChanged();
+    const seats=command.kind==='revoke_hosted_mcp_seat' ? await tx<{workspace_id:string;principal_id:string}[]>`
+      SELECT workspace_id,principal_id FROM swarm.hosted_mcp_seats
+      WHERE seat_id=${command.seat_id}::uuid AND grant_id=${command.grant_id}::uuid` : [];
+    if (seats.some(seat=>seat.workspace_id!==routeWorkspaceId)) throw new LocalAuthDiscoveryChanged();
+    const eligible = command.kind==='set_connection_expiry' && current ? (await tx<{workspace_id:string}[]>`
+      SELECT a.workspace_id FROM unnest(${current.selected_workspace_ids}::uuid[]) selected(workspace_id)
+      CROSS JOIN LATERAL swarm.resolve_hosted_grant_authorization(
+        ${command.grant_id}::uuid,${auth.actor.user}::uuid,selected.workspace_id,'claim_hosted_seat') a
+      ORDER BY (a.workspace_id=${current.home_workspace_id}::uuid) DESC,a.workspace_id LIMIT 1`)[0]?.workspace_id : null;
+    if (command.kind==='set_connection_expiry' && eligible!==routeWorkspaceId) throw new LocalAuthDiscoveryChanged();
+    const workspaces=command.kind==='activate_hosted_mcp_grant'
+      ? [routeWorkspaceId,...(current?.selected_workspace_ids ?? [])] : [routeWorkspaceId];
+    return {owner:auth.actor.user!,workspaces,
+      binding:JSON.stringify({current:current ?? null,seats,eligible})};
+  });
+  if (prefix===null) return {status:403,body:{error:'forbidden'}};
+  await lockLocalAuthPlan(tx,prefix);
   const routeRows = await tx<{
     stream_id: string;
     archived_at: Date | null;
@@ -9915,7 +10049,7 @@ async function handleHostedManagement(
     WHERE w.workspace_id = ${routeWorkspaceId}::uuid
     LIMIT 1
   `;
-  const routeRow = routeRows[0];
+  let routeRow = routeRows[0];
   if (!routeRow) return { status: 403, body: { error: "forbidden" } };
   const route: Route = {
     workspaceId: routeWorkspaceId,
@@ -9943,37 +10077,13 @@ async function handleHostedManagement(
     return { status: 403, body: { error: "forbidden" } };
   }
 
-  const hash = await hostedRequestHash("user", auth.actor.user, body);
-  const consentRows = grant === null ? [] : await tx<{ workspace_id: string }[]>`
-    SELECT workspace_id
-    FROM swarm.hosted_mcp_grant_workspaces
-    WHERE grant_id = ${grant.grant_id}::uuid AND revoked_at IS NULL
-  `;
-  const allRequired = grant === null ? [{ consents: false, memberships: false }] :
-    await tx<{ consents: boolean; memberships: boolean }[]>`
-      SELECT
-        NOT EXISTS (
-          SELECT required.workspace_id
-          FROM unnest(${grant.selected_workspace_ids}::uuid[]) AS required(workspace_id)
-          EXCEPT
-          SELECT c.workspace_id
-          FROM swarm.hosted_mcp_grant_workspaces AS c
-          WHERE c.grant_id = ${grant.grant_id}::uuid AND c.revoked_at IS NULL
-        ) AS consents,
-        NOT EXISTS (
-          SELECT required.workspace_id
-          FROM unnest(${grant.selected_workspace_ids}::uuid[]) AS required(workspace_id)
-          LEFT JOIN swarm.workspaces AS w ON w.workspace_id = required.workspace_id
-          LEFT JOIN swarm.memberships AS m
-            ON m.workspace_id = required.workspace_id
-           AND m.user_id = ${grant.owner_user_id}::uuid
-           AND m.revoked_at IS NULL
-          WHERE w.workspace_id IS NULL OR w.archived_at IS NOT NULL OR m.user_id IS NULL
-        ) AS memberships
-    `;
-  const existingConsent = grant === null ? false : consentRows.some(
-    (row) => row.workspace_id === route.workspaceId,
-  );
+  const consentWorkspaceIds = command.kind==='activate_hosted_mcp_grant'
+    ? grant?.selected_workspace_ids ?? []
+    : ['consent_hosted_mcp_workspace','revoke_hosted_mcp_seat','set_connection_expiry'].includes(command.kind)
+    ? [routeWorkspaceId] : [];
+  if (grant !== null && consentWorkspaceIds.length) await tx`SELECT workspace_id FROM swarm.hosted_mcp_grant_workspaces
+    WHERE grant_id=${grant.grant_id}::uuid AND workspace_id=ANY(${consentWorkspaceIds}::uuid[])
+    ORDER BY workspace_id FOR UPDATE`;
   const seatRows = command.kind === "revoke_hosted_mcp_seat"
     ? await tx<{
       seat_id: string; grant_id: string; workspace_id: string; owner_user_id: string;
@@ -10004,6 +10114,101 @@ async function handleHostedManagement(
     transport: seatRow.transport as "hosted_mcp",
     turn_only: seatRow.turn_only as true,
   } : null;
+  if (seatRow) await tx`SELECT handle FROM swarm.hosted_mcp_seat_handles
+    WHERE seat_id=${seatRow.seat_id}::uuid ORDER BY handle FOR UPDATE`;
+  if ((await prefix.rediscover()).hostedPrefix !== prefix.snapshot.hostedPrefix) throw new LocalAuthDiscoveryChanged();
+  // Fresh statement after the last seat/handle wait: route facts and time
+  // cannot authorize a policy edit or activation.
+  const [freshRoute] = await tx<{ stream_id: string; archived_at: Date | null;
+    live_member: boolean; now_ms: string | number }[]>`
+    SELECT s.stream_id,w.archived_at,
+      EXISTS (SELECT 1 FROM swarm.memberships m WHERE m.workspace_id=w.workspace_id
+        AND m.user_id=${auth.actor.user}::uuid AND m.revoked_at IS NULL) AS live_member,
+      floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now_ms
+    FROM swarm.workspaces w JOIN swarm.streams s ON s.workspace_id=w.workspace_id AND s.kind='workspace'
+    WHERE w.workspace_id=${routeWorkspaceId}::uuid AND s.stream_id=${route.streamId}::uuid
+  `;
+  if (!freshRoute) return { status: 403, body: { error: "forbidden" } };
+  routeRow = freshRoute;
+  frame.now = Number(freshRoute.now_ms);
+  if (grant !== null && command.kind !== "revoke_hosted_mcp_grant" &&
+      command.kind !== "revoke_hosted_mcp_seat" &&
+      (grant.connection_expired_at !== null ||
+       (grant.connection_expires_at !== null && grant.connection_expires_at.getTime() <= frame.now))) {
+    return { status: 403, body: { error: "connection_expired" } };
+  }
+  if (command.kind === "set_connection_expiry") {
+    const [eligible] = await tx<{ workspace_id: string }[]>`
+      SELECT a.workspace_id FROM unnest(${grant!.selected_workspace_ids}::uuid[]) selected(workspace_id)
+      CROSS JOIN LATERAL swarm.resolve_hosted_grant_authorization(
+        ${command.grant_id}::uuid,${auth.actor.user}::uuid,selected.workspace_id,'claim_hosted_seat') a
+      ORDER BY (a.workspace_id=${grant!.home_workspace_id}::uuid) DESC,a.workspace_id LIMIT 1`;
+    if (!auth.identityVerified || eligible?.workspace_id !== route.workspaceId ||
+        grant!.home_workspace_id !== body.workspace_id ||
+        !routeRow.live_member || routeRow.archived_at !== null) {
+      return { status: 403, body: { error: "forbidden" } };
+    }
+    if (command.connection_expires_at !== null && Date.parse(command.connection_expires_at) <= frame.now) {
+      return { status: 400, body: { error: "invalid_connection_expiry" } };
+    }
+  }
+
+  const finalAuthorization = async () => {
+    if ((await prefix.rediscover()).hostedPrefix !== prefix.snapshot.hostedPrefix &&
+        command.kind !== 'begin_hosted_mcp_grant') throw new LocalAuthDiscoveryChanged();
+    if (command.kind==='revoke_hosted_mcp_grant' || command.kind==='revoke_hosted_mcp_seat') return;
+    const required=command.kind==='activate_hosted_mcp_grant' ? grant!.selected_workspace_ids : [route.workspaceId];
+    const [fresh]=await tx<{ok:boolean}[]>`SELECT
+      NOT EXISTS (SELECT 1 FROM unnest(${required}::uuid[]) r(workspace_id)
+        LEFT JOIN swarm.workspaces w USING(workspace_id)
+        LEFT JOIN swarm.memberships m ON m.workspace_id=r.workspace_id AND m.user_id=${auth.actor.user}::uuid
+        WHERE w.workspace_id IS NULL OR w.archived_at IS NOT NULL OR m.user_id IS NULL OR m.revoked_at IS NOT NULL)
+      AND EXISTS(SELECT 1 FROM swarm.hosted_mcp_grants g WHERE g.grant_id=${command.grant_id}::uuid
+        AND g.owner_user_id=${auth.actor.user}::uuid AND g.state<>'revoked' AND g.revoked_at IS NULL
+        AND g.connection_expired_at IS NULL
+        AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp()))
+      AND (NOT ${command.kind==='consent_hosted_mcp_workspace' || command.kind==='activate_hosted_mcp_grant' || command.kind==='set_connection_expiry'}::boolean OR
+        NOT EXISTS(SELECT 1 FROM unnest(${required}::uuid[]) r(workspace_id)
+          WHERE NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_grant_workspaces c
+            WHERE c.grant_id=${command.grant_id}::uuid AND c.workspace_id=r.workspace_id AND c.revoked_at IS NULL)))
+      AND (${grant?.connection_expires_at ?? null}::timestamptz IS NULL OR
+        ${grant?.connection_expires_at ?? null}::timestamptz>clock_timestamp())
+      AND (${command.kind==='set_connection_expiry' ? command.connection_expires_at : null}::timestamptz IS NULL OR
+        ${command.kind==='set_connection_expiry' ? command.connection_expires_at : null}::timestamptz>clock_timestamp()) AS ok`;
+    if (!fresh?.ok) throw new LocalCommandRefused({status:403,body:{error:'forbidden'}});
+  };
+  const hash = await hostedRequestHash("user", auth.actor.user, body);
+  const consentRows = grant === null || !['consent_hosted_mcp_workspace','activate_hosted_mcp_grant'].includes(command.kind) ? [] : await tx<{ workspace_id: string }[]>`
+    SELECT workspace_id
+    FROM swarm.hosted_mcp_grant_workspaces
+    WHERE grant_id = ${grant.grant_id}::uuid AND revoked_at IS NULL
+      AND workspace_id=ANY(${consentWorkspaceIds}::uuid[])
+  `;
+  const allRequired = grant === null || command.kind!=='activate_hosted_mcp_grant' ? [{ consents: false, memberships: false }] :
+    await tx<{ consents: boolean; memberships: boolean }[]>`
+      SELECT
+        NOT EXISTS (
+          SELECT required.workspace_id
+          FROM unnest(${grant.selected_workspace_ids}::uuid[]) AS required(workspace_id)
+          EXCEPT
+          SELECT c.workspace_id
+          FROM swarm.hosted_mcp_grant_workspaces AS c
+          WHERE c.grant_id = ${grant.grant_id}::uuid AND c.revoked_at IS NULL
+        ) AS consents,
+        NOT EXISTS (
+          SELECT required.workspace_id
+          FROM unnest(${grant.selected_workspace_ids}::uuid[]) AS required(workspace_id)
+          LEFT JOIN swarm.workspaces AS w ON w.workspace_id = required.workspace_id
+          LEFT JOIN swarm.memberships AS m
+            ON m.workspace_id = required.workspace_id
+           AND m.user_id = ${grant.owner_user_id}::uuid
+           AND m.revoked_at IS NULL
+          WHERE w.workspace_id IS NULL OR w.archived_at IS NOT NULL OR m.user_id IS NULL
+        ) AS memberships
+    `;
+  const existingConsent = grant === null ? false : consentRows.some(
+    (row) => row.workspace_id === route.workspaceId,
+  );
   const replayRows = await tx<{
     request_hash: string;
     workspace_id: string;
@@ -10039,10 +10244,15 @@ async function handleHostedManagement(
         replay.stream_id !== route.streamId) {
       return { status: 409, body: { error: "command_id_conflict" } };
     }
+    await finalAuthorization();
     return replayResult(storedResponse(replay.response), command.kind);
   }
   let nextSeq = frame.headSeq;
-  const decision = decideHostedAuthority(command, {
+  const decision: Decision = command.kind === "set_connection_expiry"
+    // Policy has no workspace-core event type. Its typed before/after receipt
+    // lives in the existing command ledger, with the verified actor and audit.
+    ? { ok: true, events: [] }
+    : decideHostedAuthority(command, {
     grant: grant === null ? null : hostedGrantFacts(
       grant,
       consentRows.map((row) => row.workspace_id),
@@ -10072,6 +10282,19 @@ async function handleHostedManagement(
     };
   }
 
+  if (command.kind === "set_connection_expiry") {
+    const changed = await tx<{ grant_id: string }[]>`UPDATE swarm.hosted_mcp_grants
+      SET connection_expires_at = ${command.connection_expires_at}::timestamptz
+      WHERE grant_id = ${command.grant_id}::uuid
+        AND state = 'active' AND revoked_at IS NULL AND connection_expired_at IS NULL
+        AND (connection_expires_at IS NULL OR connection_expires_at > clock_timestamp())
+        AND (${command.connection_expires_at}::timestamptz IS NULL
+          OR ${command.connection_expires_at}::timestamptz > clock_timestamp())
+      RETURNING grant_id`;
+    if (changed.length !== 1) {
+      return { status: 403, body: { error: "connection_expiry_unavailable" } };
+    }
+  }
   const event = decision.events[0];
   if (event) {
     if (event.type === "HostedMcpGrantBegun") {
@@ -10163,6 +10386,10 @@ async function handleHostedManagement(
     grant_id: command.grant_id,
     workspace_id: route.workspaceId,
     ...(command.kind === "revoke_hosted_mcp_seat" ? { seat_id: command.seat_id } : {}),
+    ...(command.kind === "set_connection_expiry" ? {
+      previous_connection_expires_at: grant?.connection_expires_at?.toISOString() ?? null,
+      connection_expires_at: command.connection_expires_at,
+    } : {}),
   };
   const inserted = await tx<{ command_id: string }[]>`
     INSERT INTO swarm.idempotency_keys (
@@ -10182,9 +10409,10 @@ async function handleHostedManagement(
     commandKind: command.kind,
     workspaceId: route.workspaceId,
     streamId: route.streamId,
-    outcome: event ? "accepted" : "replayed",
+    outcome: event || command.kind === "set_connection_expiry" ? "accepted" : "replayed",
     hash,
   });
+  await finalAuthorization();
   return { status: 200, body: { status: "accepted", ...response, events: decision.events } };
 }
 
@@ -10196,12 +10424,22 @@ async function claimHostedSeat(
   if (input === null || hostedCapabilityTool(capability) !== "claim_hosted_seat") {
     return { status: 400, body: { error: "invalid_request" } };
   }
-  return await db.begin(HOSTED_TRANSACTION_ISOLATION, async (tx) => {
+  return await retryLocalAuthTransaction(() => db.begin(HOSTED_TRANSACTION_ISOLATION, async (tx) => {
     await setTransaction(tx);
     let resolved = await revalidateHostedGrantCommand(tx, capability);
     if (resolved === null || resolved.workspace_id !== input.workspace_id) {
       return { status: 403, body: { error: "forbidden" } };
     }
+    const prefix = await planHostedClaimPrefix(tx, async () => {
+      const current = await revalidateHostedGrantCommand(tx, capability);
+      return current === null ? null : {owner:current.owner_user_id,
+        workspaces:[current.workspace_id],binding:JSON.stringify(current)};
+    });
+    if (prefix === null) return {status:403,body:{error:'forbidden'}};
+    await lockLocalAuthPlan(tx, prefix);
+    resolved = await revalidateHostedGrantCommand(tx, capability);
+    if (resolved === null || resolved.workspace_id !== input.workspace_id) return {status:403,body:{error:'forbidden'}};
+    if (JSON.stringify(resolved) !== prefix.snapshot.hostedPrefix) throw new LocalAuthDiscoveryChanged();
     const route: Route = {
       workspaceId: resolved.workspace_id,
       streamId: resolved.stream_id,
@@ -10252,12 +10490,36 @@ async function claimHostedSeat(
       FOR UPDATE
     `;
     const grant = lockedGrantRows[0];
+    await tx`SELECT grant_id FROM swarm.hosted_mcp_grant_workspaces
+      WHERE grant_id=${resolved.grant_id}::uuid AND workspace_id=${route.workspaceId}::uuid FOR UPDATE`;
+    // Include later name-reclaim writes in the owned suffix before deciding.
+    const closureGrant = resolved;
+    const discoverClosure = () => tx<{seat_id:string;principal_id:string}[]>`
+      SELECT hs.seat_id,hs.principal_id FROM swarm.hosted_mcp_seats hs
+      JOIN swarm.agent_principals p ON p.principal_id=hs.principal_id
+      WHERE hs.workspace_id=${route.workspaceId}::uuid
+        AND (hs.grant_id=${closureGrant.grant_id}::uuid OR
+          (p.name=${input.command.name} AND p.owner_user_id=${closureGrant.owner_user_id}::uuid))
+      ORDER BY hs.seat_id`;
+    const closure=await discoverClosure();
+    for (const seat of closure) await tx`SELECT seat_id FROM swarm.hosted_mcp_seats WHERE seat_id=${seat.seat_id}::uuid FOR UPDATE`;
+    await tx`SELECT handle FROM swarm.hosted_mcp_seat_handles
+      WHERE seat_id=ANY(${closure.map(row=>row.seat_id)}::uuid[]) ORDER BY handle FOR UPDATE`;
+    await tx`SELECT principal_id FROM swarm.agent_principals
+      WHERE workspace_id=${route.workspaceId}::uuid AND
+        (principal_id=ANY(${closure.map(row=>row.principal_id)}::uuid[]) OR name=${input.command.name})
+      ORDER BY principal_id FOR UPDATE`;
+    if (JSON.stringify(await discoverClosure())!==JSON.stringify(closure)) throw new LocalAuthDiscoveryChanged();
     resolved = await revalidateHostedGrantCommand(tx, capability);
     if (grant === undefined || resolved === null ||
         resolved.workspace_id !== route.workspaceId ||
         grant.provider_grant_id !== resolved.provider_grant_id) {
       return { status: 403, body: { error: "forbidden" } };
     }
+
+    const [freshClock] = await tx<[{ now_ms: string | number }]>`
+      SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now_ms`;
+    frame.now = Number(freshClock.now_ms);
 
     const hash = await hostedRequestHash("hosted_grant", grant.grant_id, input);
     const storedRows = await tx<{
@@ -10311,6 +10573,11 @@ async function claimHostedSeat(
       if (replayRows.length !== 1) {
         return { status: 403, body: { error: "hosted_seat_revoked" } };
       }
+      const current = await revalidateHostedGrantCommand(tx, capability);
+      if (current === null) return {status:403,body:{error:'forbidden'}};
+      if (JSON.stringify(current) !== prefix.snapshot.hostedPrefix) throw new LocalAuthDiscoveryChanged();
+      const [clock] = await tx<[{now_ms:string|number}]>`SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now_ms`;
+      frame.now=Number(clock.now_ms);
       const context = await resolveHostedConnectionContext(tx, capability, resolved, {
         handle: response.handle, principal_id: response.principal_id,
       });
@@ -10385,6 +10652,15 @@ async function claimHostedSeat(
         AND p.name = ${input.command.name}
         AND p.owner_user_id = ${grant.owner_user_id}::uuid
     `;
+    const current = await revalidateHostedGrantCommand(tx, capability);
+    if (current === null) return {status:403,body:{error:'forbidden'}};
+    if (JSON.stringify(current) !== prefix.snapshot.hostedPrefix) throw new LocalAuthDiscoveryChanged();
+    const [clock] = await tx<[{now_ms:string|number}]>`SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now_ms`;
+    frame.now=Number(clock.now_ms);
+    // Current resolver authority replaces the pre-wait EXISTS snapshot.
+    grant.owner_is_live_member=true;
+    grant.workspace_archived=false;
+    grant.workspace_consented=true;
     const liveSeatCount = Number(seatCountRows[0]?.live ?? "0") - reclaimableSeats.length;
     const seatId = crypto.randomUUID();
     const principalId = crypto.randomUUID();
@@ -10589,7 +10865,21 @@ async function claimHostedSeat(
       hash,
     });
     return { status: 200, body: { status: "accepted", ...response, context } };
-  });
+  }));
+}
+
+/** Failed business work rolls back its savepoint before a deliberate refusal
+ * is audited; authenticated use/attempt counters belong to the outer unit. */
+class LocalBusinessRefused<T> extends Error {
+  constructor(readonly outcome:T) { super('Local business operation refused'); }
+}
+/** Authenticated validation intent survives only after its business savepoint
+ * (including first-use and predecessor handover) has rolled back. */
+class LocalValidationRefused extends Error {
+  constructor(readonly result: HttpResult, readonly audit: Audit) { super('Local validation refused'); }
+}
+class LocalCommandRefused extends Error {
+  constructor(readonly result: HttpResult) { super('Local credential operation refused'); }
 }
 
 async function handleTransaction(
@@ -10603,8 +10893,19 @@ async function handleTransaction(
 ): Promise<HttpResult> {
   const kind = commandKind(body);
   const commandId = String(body.command_id);
-  return await db.begin("isolation level read committed", async (tx) => {
-    let authenticatedAgent: AgentAuthRow | null = null;
+  let recoverSavedPending = false;
+  const response = await retryLocalAuthTransaction(() => db.begin("isolation level read committed", async (tx) => {
+    recoverSavedPending = false;
+    // Only explicit, completed domain decisions may commit a refusal. Unknown
+    // failures and credential/session denials still unwind the whole transaction.
+    type LocalOutcome = {kind:'rollback'} | {kind:'decided';result:HttpResult};
+    const outcome: {value:LocalOutcome} = {value:{kind:'rollback'}};
+    const decided = (result:HttpResult):HttpResult => {
+      outcome.value={kind:'decided',result}; return result;
+    };
+    const localState: { authenticatedAgent: AgentAuthRow | null; localPlan: LocalAuthLockPlan | null } = {
+      authenticatedAgent: null, localPlan: null,
+    };
     let acceptedPresenceRoute: PresenceRoute | null = null;
     const result = await (async (): Promise<HttpResult> => {
     await beforeStep(2);
@@ -10622,18 +10923,187 @@ async function handleTransaction(
       return { status: 403, body: { error: "forbidden" } };
     }
 
+    let localWorkspace = typeof body.workspace_id==='string' && UUID_RE.test(body.workspace_id) ? body.workspace_id : undefined;
+    const invitationHint=verifiedHuman && kind==='accept_invitation' ? invitationTokenForRoute(body) : null;
+    const invitationHintHash=invitationHint ? await sha256(invitationHint) : null;
+    if(invitationHintHash) {
+      const [hint]=await tx<{workspace_id:string}[]>`SELECT workspace_id FROM swarm.invitations WHERE token_hash=${invitationHintHash}`;
+      localWorkspace=hint?.workspace_id;
+    }
+    const rawLocal = record(body.command);
+    if (agentTokenHash && HUMAN_ONLY_COMMANDS.has(kind as never))
+      return {status:403,body:{error:'human_sign_in_required'}};
+    // Admission selects a lock suffix, never a domain reason. The reducer
+    // remains the sole owner of authenticated business refusals.
+    const humanLocalAdmission = async (): Promise<'allowed' | 'business-refusal' | 'forbidden'> => {
+      if (!verifiedHuman || !localWorkspace || kind==='accept_invitation') return 'allowed';
+      const [admission]=await tx<{role:string}[]>`SELECT m.role FROM swarm.memberships m
+        JOIN swarm.workspaces w USING(workspace_id)
+        WHERE m.workspace_id=${localWorkspace}::uuid AND m.user_id=${verifiedHuman.userId}::uuid
+          AND m.revoked_at IS NULL AND w.archived_at IS NULL`;
+      if (!admission) return 'forbidden';
+      if (['remove_member','change_role','archive_workspace'].includes(kind)
+        && !['owner','admin'].includes(admission.role))
+        return kind==='change_role' ? 'forbidden' : 'business-refusal';
+      const targetPrincipal=typeof rawLocal?.principal_id==='string' && UUID_RE.test(rawLocal.principal_id) ? rawLocal.principal_id:null;
+      if (targetPrincipal && ['mint_agent_token','revoke_agent_principal','set_agent_model','disable_agent_session','recover_agent_session'].includes(kind)) {
+        const [target]=await tx<{owner_user_id:string}[]>`SELECT owner_user_id FROM swarm.agent_principals
+          WHERE principal_id=${targetPrincipal}::uuid AND workspace_id=${localWorkspace}::uuid`;
+        if (!target || target.owner_user_id!==verifiedHuman.userId && !['owner','admin'].includes(admission.role))
+          return ['revoke_agent_principal','set_agent_model'].includes(kind) ? 'business-refusal' : 'forbidden';
+      }
+      return 'allowed';
+    };
+    const humanAdmission = await humanLocalAdmission();
+    if (humanAdmission==='forbidden') return {status:403,body:{error:'forbidden'}};
+    const humanBusinessRefusal = humanAdmission==='business-refusal';
+    if (kind===RESUME_RENEWAL_GRANT_KIND && (!rawLocal || !exactKeys(rawLocal,['kind','renewal_grant_id'])
+      || typeof rawLocal.renewal_grant_id!=='string' || !UUID_RE.test(rawLocal.renewal_grant_id)))
+      return {status:400,body:{error:'invalid_request'}};
+    const resumeFamily=kind===RESUME_RENEWAL_GRANT_KIND && typeof rawLocal?.renewal_grant_id==='string'
+      && UUID_RE.test(rawLocal.renewal_grant_id) ? rawLocal.renewal_grant_id : undefined;
+    let resumeAdmissionRefusal: 'renewal_grant_not_found' | 'renewal_resume_forbidden' | null = null;
+    if (resumeFamily && verifiedHuman && localWorkspace) {
+      // Nonlocking route-scoped discovery chooses a plan, never authority.
+      // Known refusals retain only the actor's plan until real authentication.
+      const [admitted]=await tx<{owner_user_id:string;role:string}[]>`SELECT p.owner_user_id,m.role FROM swarm.renewal_grants g
+        JOIN swarm.agent_principals p USING(principal_id)
+        JOIN swarm.memberships m ON m.workspace_id=g.workspace_id AND m.user_id=${verifiedHuman.userId}::uuid
+        JOIN swarm.workspaces w ON w.workspace_id=g.workspace_id
+        WHERE g.renewal_grant_id=${resumeFamily}::uuid AND g.workspace_id=${localWorkspace}::uuid
+          AND p.workspace_id=g.workspace_id AND m.revoked_at IS NULL AND w.archived_at IS NULL`;
+      if (!admitted) resumeAdmissionRefusal='renewal_grant_not_found';
+      else if (admitted.owner_user_id!==verifiedHuman.userId && !['owner','admin'].includes(admitted.role))
+        resumeAdmissionRefusal='renewal_resume_forbidden';
+    }
+    const joinAttempt = kind===REGISTER_AGENT_SEAT_KIND && typeof rawLocal?.attempt_id==='string' && UUID_RE.test(rawLocal.attempt_id)
+      ? rawLocal.attempt_id : null;
+    if(joinCredentialHash && joinAttempt) {
+      const [admitted]=await tx`SELECT c.id FROM swarm.agent_join_credentials c
+        JOIN swarm.agent_principals p ON p.principal_id=c.registrar_principal_id
+        JOIN swarm.agent_runs r ON r.run_id=c.registrar_run_id AND r.principal_id=p.principal_id
+        JOIN swarm.devices d USING(device_id) JOIN swarm.workspaces w ON w.workspace_id=c.workspace_id
+        JOIN swarm.memberships m ON m.workspace_id=c.workspace_id AND m.user_id=c.owner_user_id
+        WHERE c.credential_hash=${joinCredentialHash} AND c.revoked_at IS NULL AND c.expires_at>clock_timestamp()
+          AND p.revoked_at IS NULL AND p.owner_user_id=c.owner_user_id AND p.workspace_id=c.workspace_id
+          AND r.ended_at IS NULL AND d.revoked_at IS NULL AND w.archived_at IS NULL AND m.revoked_at IS NULL
+          AND NOT EXISTS(SELECT 1 FROM swarm.admin_grants a WHERE a.grant_id=p.parent_admin_grant_id
+            AND (a.state<>'active' OR a.revoked_at IS NOT NULL OR a.expires_at<=clock_timestamp()
+              OR a.refresh_deadline<=clock_timestamp() OR c.workspace_id=ANY(a.withdrawn_workspace_ids)))`;
+      if(!admitted) return {status:403,body:{error:'forbidden'}};
+    }
+    const localStreams = localWorkspace && (record(body.stream)?.kind==='workspace' || invitationHintHash!==null)
+      ? await tx<{stream_id:string}[]>`SELECT stream_id FROM swarm.streams WHERE workspace_id=${localWorkspace}::uuid AND kind='workspace'`
+      : localWorkspace && record(body.stream)?.kind==='repo' && typeof record(body.stream)?.repo_mapping_id==='string' && UUID_RE.test(String(record(body.stream)?.repo_mapping_id))
+      ? await tx<{stream_id:string}[]>`SELECT stream_id FROM swarm.streams WHERE workspace_id=${localWorkspace}::uuid AND repo_mapping_id=${String(record(body.stream)?.repo_mapping_id)}::uuid AND kind='repo'` : [];
+    const localExpiry=kind==='set_connection_expiry' && rawLocal?.connection_kind==='renewal';
+    const expiryBinding=localExpiry && typeof rawLocal.grant_id==='string' && UUID_RE.test(rawLocal.grant_id)
+      ? (await tx<{principal_id:string;workspace_id:string}[]>`SELECT principal_id,workspace_id FROM swarm.renewal_grants
+          WHERE renewal_grant_id=${rawLocal.grant_id}::uuid`)[0] : null;
+    const household=(HOUSEHOLD_SURFACE_KINDS as readonly string[]).includes(kind) || kind==='household_legacy';
+    const args=record(rawLocal?.arguments) ?? rawLocal;
+    const consent=record(rawLocal?.connection);
+    const principalTargets=new Set<string>();
+    for (const value of [rawLocal?.principal_id,args?.principal_id,consent?.principal_id,
+      record(args?.assignee)?.kind==='agent' ? record(args?.assignee)?.id:null,
+      record(args?.to)?.kind==='agent' ? record(args?.to)?.id:null,
+      record(record(args?.assign)?.to)?.kind==='agent' ? record(record(args?.assign)?.to)?.id:null]) {
+      if(!humanBusinessRefusal && typeof value==='string' && UUID_RE.test(value)) principalTargets.add(value);
+    }
+    // Existing to-do assignment is DB-owned metadata, reselected after each wait.
+    const todoId=!humanBusinessRefusal && typeof args?.todo_id==='string' && UUID_RE.test(args.todo_id) ? args.todo_id:null;
+    if(expiryBinding && expiryBinding.workspace_id===localWorkspace) principalTargets.add(expiryBinding.principal_id);
+    const tokenTargets=!humanBusinessRefusal && typeof rawLocal?.token_id==='string' && UUID_RE.test(rawLocal.token_id) ? [rawLocal.token_id]:[];
+    // The Allow writer selects the exact connection, including retired tokens
+    // absent from principal discovery. Reuse its nonlocking selector/refusal
+    // boundary before adding that token's server-derived parent to the prefix.
+    // Invalid/foreign bindings retain the existing command/writer refusal path.
+    if (verifiedHuman && localWorkspace && consent?.kind==='local'
+      && ['household_permissions','household_approve_connection'].includes(kind)
+      && typeof consent.principal_id==='string' && UUID_RE.test(consent.principal_id)
+      && typeof consent.connection_id==='string' && UUID_RE.test(consent.connection_id)
+      && await planLocalConnection(tx,localWorkspace,verifiedHuman.userId,consent.principal_id,consent.connection_id)) {
+      tokenTargets.push(consent.connection_id);
+    }
+    const removeUser=!humanBusinessRefusal && kind==='remove_member' && typeof rawLocal?.user_id==='string' && UUID_RE.test(rawLocal.user_id) ? rawLocal.user_id:null;
+    const revocation=removeUser ? {user:removeUser}
+      : kind==='revoke_agent_principal' && principalTargets.size===1 ? {principal:[...principalTargets][0]!}
+      : kind==='revoke_agent_token' && tokenTargets[0] ? {token:tokenTargets[0]} : undefined;
+    const target=principalTargets.size || tokenTargets.length ? {principals:[...principalTargets],tokens:tokenTargets}:undefined;
+    if (resumeFamily && hostedSeat===null) {
+      if (verifiedHuman && !resumeAdmissionRefusal) {
+        try {
+          localState.localPlan=await tx.savepoint(async sp=>{
+            const plan=await planLocalOperation(sp,{workspace:localWorkspace,actor:verifiedHuman.userId,
+              resumeFamily,streamIds:localStreams.map(r=>r.stream_id),workspaceMode:'update'});
+            if (plan) await lockLocalAuthPlan(sp,plan);
+            return plan;
+          });
+        } catch (error) {
+          const failure=record(error);
+          if (failure?.code!=='22023' || failure.detail!=='LOCAL_DISCOVERY_BINDING') throw error;
+          // No locks or closure from the failed family plan may survive. Rebuild
+          // actor-only from scratch, in the same canonical order, after rollback.
+          localState.localPlan=null;
+          resumeAdmissionRefusal='renewal_resume_forbidden';
+        }
+      }
+      if (!localState.localPlan) {
+        localState.localPlan=await planLocalOperation(tx,{
+          ...(agentTokenHash ? {hash:agentTokenHash}:{}),workspace:localWorkspace,actor:verifiedHuman?.userId,
+          streamIds:localStreams.map(r=>r.stream_id),workspaceMode:verifiedHuman?'update':'share'});
+        if (localState.localPlan) await lockLocalAuthPlan(tx,localState.localPlan);
+      }
+    } else {
+      localState.localPlan = hostedSeat===null && (!HOSTED_MANAGEMENT_KINDS.has(kind) || localExpiry) ? await planLocalOperation(tx, {
+        ...(agentTokenHash ? {hash:agentTokenHash}:{}), workspace:localWorkspace,actor:verifiedHuman?.userId,
+        household,householdQueue:rawLocal?.tool==='todo_queue',...(todoId ? {todo:todoId}:{}),
+        streamIds:[CLAIM_AGENT_INBOX_KIND,ACK_AGENT_DELIVERY_KIND,TOUCH_PRESENCE_KIND].includes(kind) ? [] : localStreams.map(r=>r.stream_id),
+        workspaceMode: household || revocation || localExpiry || verifiedHuman
+          || (WORKSPACE_COMMAND_KINDS as readonly string[]).includes(kind) && kind!==RENEW_AGENT_TOKEN_KIND ? 'update':'share',
+        ...(target && !revocation ? {target}:tokenTargets.length ? {target:{principals:[],tokens:tokenTargets}}:{}),
+        ...(revocation ? {revocation}:{}),
+        memberTargets:removeUser ? [removeUser] : kind==='change_role' && typeof rawLocal?.user_id==='string' && UUID_RE.test(rawLocal.user_id) ? [rawLocal.user_id]:[],
+        principalMode: kind===CLAIM_AGENT_INBOX_KIND?'noKeyUpdate'
+          : kind==='acquire_agent_session' || revocation || ['enable_agent_management','disable_agent_management','recover_agent_session','declare_agent_model','set_agent_model'].includes(kind) ? 'update':'share',
+        sessionMode:['acquire_agent_session','renew_agent_session','release_agent_session','enable_agent_management','disable_agent_management','recover_agent_session'].includes(kind)?'update':'share',
+        hostedMode:revocation ? 'update':'share',
+        ...(joinCredentialHash && joinAttempt ? {join:{hash:joinCredentialHash,attempt:joinAttempt}}:{}),
+      }) : null;
+      if(localState.localPlan && verifiedHuman && (kind==='revoke_agent_token' || consent?.kind==='local')) {
+        const selected=localState.localPlan.snapshot.bindings.find(b=>b.token_id===(kind==='revoke_agent_token'?rawLocal?.token_id:consent?.connection_id));
+        const [member]=await tx<{role:string}[]>`SELECT role FROM swarm.memberships
+          WHERE workspace_id=${localWorkspace ?? null}::uuid AND user_id=${verifiedHuman.userId}::uuid AND revoked_at IS NULL`;
+        if(selected && selected.owner_user_id!==verifiedHuman.userId
+          && (consent?.kind==='local' || !member || !['owner','admin'].includes(member.role)))
+          return {status:403,body:{error:'forbidden'}};
+      }
+      if (localState.localPlan) await lockLocalAuthPlan(tx,localState.localPlan);
+    }
+    // A changed role/target binding needs a new complete plan, not a suffix
+    // appended after the actor-only refusal plan has already been locked.
+    if (await humanLocalAdmission()!==humanAdmission) throw new LocalAuthDiscoveryChanged();
+    if(invitationHintHash) {
+      const [hint]=await tx<{workspace_id:string}[]>`SELECT workspace_id FROM swarm.invitations WHERE token_hash=${invitationHintHash}`;
+      if(hint?.workspace_id!==localWorkspace) throw new LocalAuthDiscoveryChanged();
+    }
+
     if (kind === REGISTER_AGENT_SEAT_KIND) {
-      if (joinCredentialHash === null) {
+      if (joinCredentialHash === null || localState.localPlan===null) {
         return { status: 403, body: { error: "forbidden" } };
       }
       return await registerAgentSeat(tx, body, joinCredentialHash);
     }
 
+    // The canonical discovery locks above survive validation rollback; use and
+    // all later business effects belong to this savepoint.
+    try {
+    const executeAuthenticated = async (tx: Sql): Promise<HttpResult> => {
     await beforeStep(3);
     const auth = hostedSeat !== null
       ? hostedSeatAuth(hostedSeat)
       : agentTokenHash !== null
-      ? await authenticateAgent(tx, agentTokenHash)
+      ? localState.localPlan ? await authenticateAgent(tx, agentTokenHash, localState.localPlan, kind===RENEW_AGENT_TOKEN_KIND) : null
       : verifiedHuman !== null
       ? await authenticateHuman(tx, verifiedHuman)
       : null;
@@ -10664,7 +11134,7 @@ async function handleTransaction(
     }
     // Hosted turns do not advertise listener presence or touch local delivery
     // state. Their durable authorization was reloaded above for this call.
-    authenticatedAgent = hostedSeat === null ? auth.agent : null;
+    localState.authenticatedAgent = hostedSeat === null ? auth.agent : null;
 
     if (
       auth.agent?.transport === "hosted_mcp" &&
@@ -10726,13 +11196,16 @@ async function handleTransaction(
     const isSeenCommand = kind === SIGNALS_SEEN_KIND;
 
     if (Object.hasOwn(body, "from")) {
-      await insertAudit(tx, {
+      const audit: Audit = {
         auth,
         commandKind: kind,
         outcome: "validation",
         reason: "client-supplied from is forbidden",
-      });
-      return { status: 400, body: { error: "invalid_request" } };
+      };
+      const refusal: HttpResult = { status: 400, body: { error: "invalid_request" } };
+      if (agentTokenHash !== null) throw new LocalValidationRefused(refusal, audit);
+      await insertAudit(tx, audit);
+      return refusal;
     }
 
     if (kind === REGISTER_DEVICE_KIND) {
@@ -10801,6 +11274,21 @@ async function handleTransaction(
     }
     await afterStep(5);
 
+    if (hostedSeat !== null && hostedSeatCapability !== null && kind !== "household_tool") {
+      // Hosted commands serialize with workspace removal and owner policy edits.
+      // Keep command order one stream -> exact grant; never enter the runtime all-stream helper.
+      await lockRegistrationStream(tx, route);
+      await tx`SELECT grant_id FROM swarm.hosted_mcp_grants
+        WHERE grant_id=${hostedSeat.grant_id}::uuid FOR UPDATE`;
+      const freshSeat = await revalidateHostedSeatCommand(tx, hostedSeatCapability);
+      if (freshSeat === null || freshSeat.seat_id !== hostedSeat.seat_id ||
+          freshSeat.principal_id !== hostedSeat.principal_id || freshSeat.handle !== hostedSeat.handle ||
+          freshSeat.grant_id !== hostedSeat.grant_id || freshSeat.provider_grant_id !== hostedSeat.provider_grant_id ||
+          freshSeat.owner_user_id !== hostedSeat.owner_user_id || freshSeat.workspace_id !== route.workspaceId || freshSeat.stream_id !== route.streamId) {
+        return { status: 403, body: { error: "forbidden" } };
+      }
+    }
+
     await beforeStep(6);
     if (await revoked(tx, auth, route)) {
       await insertAudit(tx, {
@@ -10831,7 +11319,16 @@ async function handleTransaction(
        not a reducer command and has no arm there; falling through would earn
        "unknown command kind". */
     if (kind === RESUME_RENEWAL_GRANT_KIND) {
-      return await resumeRenewalGrant(tx, body, auth, route, ignoredIdentity);
+      if (resumeAdmissionRefusal && auth.credentialKind==='user' && auth.identityVerified) {
+        return decided(await auditRefusal(tx,auth,kind,{
+          outcome:'authz',reason:`renewal_resume_${resumeAdmissionRefusal}`,
+          detail:[ignoredIdentity,`renewal_grant_id=${resumeFamily}`].filter(Boolean).join('; '),
+          workspaceId:route.workspaceId,streamId:route.streamId,
+        },{status:403,body:{error:'forbidden'}}));
+      }
+      // Agent domain refusals commit their audit/use only after the final
+      // credential and session fences below; failed authentication rolls back.
+      return decided(await resumeRenewalGrant(tx, body, auth, route, ignoredIdentity));
     }
     if (kind === "claim_wake_lease" || kind === "renew_wake_lease" || kind === "release_wake_lease") {
       const command = record(body.command);
@@ -10844,7 +11341,7 @@ async function handleTransaction(
               AND expires_at > clock_timestamp()) AS held
         `;
         if (poll[0]?.held) {
-          return { status: 409, body: { error: "notify_held_elsewhere", surface: "h0_poll" } };
+          return decided({ status: 409, body: { error: "notify_held_elsewhere", surface: "h0_poll" } });
         }
       }
       if (agent === null ||
@@ -10918,7 +11415,8 @@ async function handleTransaction(
           const seat = await revalidateHouseholdSeat(checkTx, hostedSeatCapability, setTransaction);
           return seat !== null && seat.workspace_id === route.workspaceId && seat.principal_id === identity.principal_id;
         }
-        return !await revoked(checkTx, auth, route);
+        return localState.localPlan && agentTokenHash ? await recheckLocalCredential(checkTx,agentTokenHash,localState.localPlan)!==null
+          : !await revoked(checkTx, auth, route);
       };
       try {
         const surface = record(body.command)!;
@@ -10929,18 +11427,18 @@ async function handleTransaction(
           const legacy = record(surface.command);
           if (!legacy || ![...FILE_COMMAND_KINDS,"brain_put","brain_get","brain_history"].includes(String(legacy.kind))) return { status: 400, body: { error: "invalid_request" } };
         }
-        const output = kind === "household_legacy"
-          ? await executeHouseholdLegacy(tx, { workspace_id: route.workspaceId, request_id: commandId, command: surface.command as never,
+        const output = await tx.savepoint(async sp => kind === "household_legacy"
+          ? await executeHouseholdLegacy(sp, { workspace_id: route.workspaceId, request_id: commandId, command: surface.command as never,
             ...(surface.base_revision ? { base_revision: surface.base_revision as never } : {}) }, identity, recheck, body.household_attachment instanceof Uint8Array ? body.household_attachment : undefined)
           : kind === "household_permissions"
-          ? await provisionHouseholdPermissions(tx, route.workspaceId, identity, commandId, surface, recheck)
-          : await executeHouseholdSurface(tx, route.workspaceId, identity, commandId, surface, recheck, body.household_attachment instanceof Uint8Array ? body.household_attachment : undefined, householdNotice(route, auth));
+          ? await provisionHouseholdPermissions(sp, route.workspaceId, identity, commandId, surface, recheck)
+          : await executeHouseholdSurface(sp, route.workspaceId, identity, commandId, surface, recheck, body.household_attachment instanceof Uint8Array ? body.household_attachment : undefined, householdNotice(route, auth)));
         await insertAudit(tx, { auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
           outcome: output.status === "refused" ? "authz" : "accepted",
           reason: output.status === "refused" ? String(output.reason) : null });
-        return { status: 200, body: output };
+        return decided({ status: 200, body: output });
       } catch (error) {
-        if (error instanceof HouseholdToolInputError) return { status: 400, body: { status: "refused", reason: error.code } };
+        if (error instanceof HouseholdToolInputError) return decided({ status: 400, body: { status: "refused", reason: error.code } });
         throw error;
       }
     }
@@ -10953,7 +11451,7 @@ async function handleTransaction(
       throw new Error("min_client_version config is missing or malformed");
     }
     if (!validation.ok) {
-      await insertAudit(tx, {
+      const audit: Audit = {
         auth,
         commandKind: kind,
         workspaceId: route.workspaceId,
@@ -10961,7 +11459,7 @@ async function handleTransaction(
         outcome: "validation",
         reason: validation.reason,
         detail: ignoredIdentity,
-      });
+      };
       /* The reason reaches the CALLER, not only the audit table.
        *
        * It used to go to insertAudit alone, so a 400 was a bare
@@ -10975,7 +11473,7 @@ async function handleTransaction(
        * fields by contract (src/cloud/signals.ts:315-326), and the error code
        * they branch on is unchanged. Nothing secret is added -- the strings are
        * validator-authored and already stored in swarm.audit. */
-      return {
+      const refusal: HttpResult = {
         status: validation.status,
         body: {
           error: validation.error ?? (validation.status === 413
@@ -10984,6 +11482,9 @@ async function handleTransaction(
           message: validation.reason,
         },
       };
+      if (agentTokenHash !== null) throw new LocalValidationRefused(refusal, audit);
+      await insertAudit(tx, audit);
+      return refusal;
     }
     if (typeof body.client_version !== "string") {
       await insertAudit(tx, {
@@ -11024,6 +11525,13 @@ async function handleTransaction(
         status: 426,
         body: { error: "upgrade_required", min_client_version: minClientVersion },
       };
+    }
+    if (kind===RENEW_AGENT_TOKEN_KIND && auth.agentFirstUse && auth.agent && !auth.agent.unexpired) {
+      // Exact pending-child or unused permanent-root recovery. Route, revocation,
+      // kind-only wire and client-version checks must precede committing use.
+      // Final credential/session fences below still roll back failed adoption.
+      recoverSavedPending=true;
+      return {status:204,body:{}};
     }
     // §2.3 renewal is the one command an agent presents that is NOT authorised
     // by a scope — a "renew token" scope is intrinsically denylisted, so no
@@ -11237,7 +11745,7 @@ async function handleTransaction(
           operation,
         );
         if (!rateCheck.allowed) {
-          return rateCheck.result;
+          return decided(rateCheck.result);
         }
       }
     }
@@ -11355,7 +11863,9 @@ async function handleTransaction(
           };
         }
         return matches
-          ? replayResult(storedResponse(existing.response), kind)
+          ? decided(replayResult(kind==="mint_agent_token" || kind===RENEW_AGENT_TOKEN_KIND
+            ? await currentLocalPolicyResponse(tx,storedResponse(existing.response),localState.localPlan)
+            : storedResponse(existing.response), kind))
           : { status: 409, body: { error: "command_id_conflict" } };
       }
       renewalRecovery = true;
@@ -11403,7 +11913,7 @@ async function handleTransaction(
 
     if (commandNeedsFreshInteractiveAuth(command.kind)) {
       const serverTime = await tx<{ now_ms: string | number }[]>`
-        SELECT floor(extract(epoch FROM statement_timestamp()) * 1000)::bigint AS now_ms
+        SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now_ms
       `;
       const serverNowMs = Number(serverTime[0]?.now_ms);
       const freshAuth = freshInteractiveAuthRefusal(
@@ -11532,10 +12042,11 @@ async function handleTransaction(
           reason: outcome.reason,
           hash,
         });
-        return {
+        const refusal:HttpResult = {
           status: outcome.status,
           body: { error: outcome.error, message: outcome.message },
         };
+        return outcome.status===404 ? refusal : decided(refusal);
       }
       const channelResponse: StoredResponse = {
         ok: true,
@@ -11622,7 +12133,7 @@ async function handleTransaction(
           reason: attachmentResolution.reason,
           hash,
         });
-        return {
+        const refusal:HttpResult = {
           status: attachmentResolution.status,
           body: {
             error: attachmentResolution.error,
@@ -11632,6 +12143,7 @@ async function handleTransaction(
               : {}),
           },
         };
+        return attachmentResolution.status===404 ? refusal : decided(refusal);
       }
       const rateLimit = await enforceSignalRate(
         tx,
@@ -11667,7 +12179,7 @@ async function handleTransaction(
             })}::jsonb
           )
         `;
-        return {
+        return decided({
           status: 429,
           body: {
             error: "rate_limited",
@@ -11675,7 +12187,7 @@ async function handleTransaction(
             limit: rateLimit.limit,
             resets_at: rateLimit.resetsAt,
           },
-        };
+        });
       }
 
       const channelResolution = await resolveSignalChannel(tx, route, command);
@@ -11689,13 +12201,14 @@ async function handleTransaction(
           reason: channelResolution.reason!,
           hash,
         });
-        return {
+        const refusal:HttpResult = {
           status: channelResolution.status!,
           body: {
             error: channelResolution.error!,
             message: channelResolution.message!,
           },
         };
+        return channelResolution.status===404 ? refusal : decided(refusal);
       }
       const threadResolution = await resolveThreadRoot(tx, route, command);
       if (!threadResolution.ok) {
@@ -11708,13 +12221,14 @@ async function handleTransaction(
           reason: threadResolution.reason!,
           hash,
         });
-        return {
+        const refusal:HttpResult = {
           status: threadResolution.status!,
           body: {
             error: threadResolution.error!,
             message: threadResolution.message!,
           },
         };
+        return threadResolution.status===404 ? refusal : decided(refusal);
       }
       /* Reply expiry: the server CLAMPS a defaulted horizon and REFUSES an
        * explicit one it cannot honour. Silently shortening a horizon the caller
@@ -11746,7 +12260,7 @@ async function handleTransaction(
             reason: "thread_reply_until_exceeds_root",
             hash,
           });
-          return {
+          return decided({
             status: 409,
             body: {
               error: "thread_reply_until_exceeds_root",
@@ -11754,7 +12268,7 @@ async function handleTransaction(
                 `A reply cannot outlive the message its thread starts from. That thread ends at ${rootUntil.toISOString()}. Ask for a shorter horizon, or leave it out and it is set for you.`,
               root_until: rootUntil.toISOString(),
             },
-          };
+          });
         }
       }
       /* A threaded reply inherits its root's channel. The client does not get
@@ -11781,7 +12295,11 @@ async function handleTransaction(
           untilCeiling: rootUntil === null ? null : rootUntil.toISOString(),
           untilExplicit: command.until_ms !== undefined,
         },
+        hostedSeatCapability,
       );
+      if (postOutcome.status === "hosted_refused") {
+        return { status: 403, body: { error: "forbidden" } };
+      }
       if (postOutcome.status === "chain_refused") {
         const messages: Record<AskChainRefusal, string> = {
           chain_parent_invalid:
@@ -12022,7 +12540,7 @@ async function handleTransaction(
             detail,
             hash,
           });
-          return {
+          return decided({
             status: 429,
             body: {
               error: "rate_limited",
@@ -12031,7 +12549,7 @@ async function handleTransaction(
               resets_at: bucket.resetsAt,
               scope: "identity",
             },
-          };
+          });
         }
         const wsBucket = await incrementRateBucket(
           tx,
@@ -12056,7 +12574,7 @@ async function handleTransaction(
             detail,
             hash,
           });
-          return {
+          return decided({
             status: 429,
             body: {
               error: "rate_limited",
@@ -12065,13 +12583,13 @@ async function handleTransaction(
               resets_at: wsBucket.resetsAt,
               scope: "workspace",
             },
-          };
+          });
         }
       }
       const storage = fileStorage();
-      const outcome = fileCommand.kind === FILE_VERSION_CREATE_KIND
+      const applyFile = async (sp:Sql) => fileCommand.kind === FILE_VERSION_CREATE_KIND
         ? await fileVersionCreate(
-          tx,
+          sp,
           route.workspaceId,
           fileActor,
           fileCommand,
@@ -12080,7 +12598,7 @@ async function handleTransaction(
         )
         : fileCommand.kind === FILE_VERSION_COMMIT_KIND
         ? await fileVersionCommit(
-          tx,
+          sp,
           route.workspaceId,
           fileActor,
           fileCommand,
@@ -12088,22 +12606,33 @@ async function handleTransaction(
           ledgerRecheck,
         )
         : fileCommand.kind === FILE_DOWNLOAD_URL_KIND
-        ? await fileDownloadUrl(tx, route.workspaceId, fileCommand, storage)
+        ? await fileDownloadUrl(sp, route.workspaceId, fileCommand, storage)
         : fileCommand.kind === FILE_TOMBSTONE_KIND
         ? await fileTombstone(
-          tx,
+          sp,
           route.workspaceId,
           fileActor,
           fileCommand,
           ledgerRecheck,
         )
         : await fileRestore(
-          tx,
+          sp,
           route.workspaceId,
           fileActor,
           fileCommand,
           ledgerRecheck,
         );
+      let outcome:Awaited<ReturnType<typeof applyFile>>;
+      try {
+        outcome=await tx.savepoint(async sp=>{
+          const applied=await applyFile(sp);
+          if (!applied.ok) throw new LocalBusinessRefused(applied);
+          return applied;
+        });
+      } catch(error) {
+        if (!(error instanceof LocalBusinessRefused)) throw error;
+        outcome=error.outcome as Awaited<ReturnType<typeof applyFile>>;
+      }
       if (outcome.ok === "replay") {
         // The ledger holds accepted results only (see the refusal comment
         // below), so a recheck hit is always the winner's 200.
@@ -12132,13 +12661,14 @@ async function handleTransaction(
          * the post-lock recheck above prevents double-execution of those.
          * Same-id-different-content is command_id_conflict via the hash
          * comparison, never a replay. */
-        return {
+        const refusal:HttpResult = {
           status: outcome.refusal.status,
           body: {
             error: outcome.refusal.error,
             message: outcome.refusal.message,
           },
         };
+        return outcome.refusal.status===403 ? refusal : decided(refusal);
       }
       const fileResponse = {
         ok: true,
@@ -12346,7 +12876,7 @@ async function handleTransaction(
           detail: ignoredIdentity,
           hash,
         });
-        return ackRefused.http;
+        return ackRefused.auditOutcome==='domain' ? decided(ackRefused.http) : ackRefused.http;
       }
       const ackResponse = "response" in result ? result.response : undefined;
       if (ackResponse === undefined) {
@@ -12413,7 +12943,7 @@ async function handleTransaction(
 
     await beforeStep(9);
     const timeRows = await tx<{ now_ms: string | number }[]>`
-      SELECT floor(extract(epoch FROM statement_timestamp()) * 1000)::bigint AS now_ms
+      SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now_ms
     `;
     let now = Number(timeRows[0]?.now_ms);
     const workspaceWire =
@@ -12529,7 +13059,7 @@ async function handleTransaction(
           reason: "rate_limited",
           detail,
         });
-        return {
+        return decided({
           status: 429,
           body: {
             error: "rate_limited",
@@ -12537,7 +13067,7 @@ async function handleTransaction(
             limit: MODEL_DECLARE_RATE_LIMIT_PER_HOUR,
             resets_at: setBucket.resetsAt,
           },
-        };
+        });
       }
     }
     if (prepared !== null && prepared.command.kind === "submit_feedback") {
@@ -12599,7 +13129,7 @@ async function handleTransaction(
             reason: "rate_limited",
             detail,
           });
-          return {
+          return decided({
             status: 429,
             body: {
               error: "rate_limited",
@@ -12607,7 +13137,7 @@ async function handleTransaction(
               limit: FEEDBACK_RATE_LIMIT_PER_HOUR,
               resets_at: feedbackBucket.resetsAt,
             },
-          };
+          });
         }
       }
     }
@@ -12665,7 +13195,7 @@ async function handleTransaction(
             reason: "rate_limited",
             detail,
           });
-          return {
+          return decided({
             status: 429,
             body: {
               error: "rate_limited",
@@ -12673,7 +13203,7 @@ async function handleTransaction(
               limit: MODEL_DECLARE_RATE_LIMIT_PER_HOUR,
               resets_at: declareBucket.resetsAt,
             },
-          };
+          });
         }
       }
     }
@@ -12689,7 +13219,7 @@ async function handleTransaction(
         !await consumeInvitation(tx, prepared, auth, now)
       ) {
         const retryTime = await tx<{ now_ms: string | number }[]>`
-          SELECT floor(extract(epoch FROM statement_timestamp()) * 1000)::bigint AS now_ms
+          SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now_ms
         `;
         now = Number(retryTime[0]?.now_ms);
         prepared = await prepareWorkspaceCommand(
@@ -12719,7 +13249,7 @@ async function handleTransaction(
         !await fenceRenewal(tx, prepared, auth, decision.events, now)
       ) {
         const retryTime = await tx<{ now_ms: string | number }[]>`
-          SELECT floor(extract(epoch FROM statement_timestamp()) * 1000)::bigint AS now_ms
+          SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now_ms
         `;
         now = Number(retryTime[0]?.now_ms);
         prepared = await prepareWorkspaceCommand(
@@ -12784,6 +13314,8 @@ async function handleTransaction(
                   ).toISOString(),
                 }
                 : {}),
+              connection_expires_at: null,
+              connection_expired_at: null,
               grant_kind: prepared.command.renewal_kind,
               horizon_expires_at: prepared.command.renewal_horizon_ms === null
                 ? null
@@ -12846,7 +13378,7 @@ async function handleTransaction(
     // the window rolls over is the same fresh command.
     if (outcome.decision.ok) {
       const budget = await enforceFreeTierBudget(tx, auth, route, command, hash);
-      if (budget !== null) return budget;
+      if (budget !== null) return decided(budget);
     }
 
     await beforeStep(11);
@@ -13011,177 +13543,137 @@ async function handleTransaction(
         },
       };
     await afterStep(15);
-    return result;
+    return !outcome.decision.ok ? decided(result) : result;
+    };
+    return agentTokenHash === null ? await executeAuthenticated(tx) : await tx.savepoint(executeAuthenticated);
+    } catch (error) {
+      if (!(error instanceof LocalValidationRefused)) throw error;
+      if (!agentTokenHash || !localState.localPlan || !localState.authenticatedAgent) throw error;
+      // No credential stamping on this recheck. The final session fence below
+      // also runs before this outer transaction can retain its one audit row.
+      if (!await recheckLocalCredential(tx, agentTokenHash, localState.localPlan)) throw new LocalCredentialDenied(true);
+      await insertAudit(tx, error.audit);
+      return decided(error.result);
+    }
     })();
+    const localBody=record(result.body);
+    const successfulRenewal = recoverSavedPending || (result.status >= 200 && result.status < 300
+      && localBody?.status === 'accepted' && localBody?.ok === true);
+    if (agentTokenHash!==null && (result.status>=400 || localBody?.ok===false || localBody?.status==='rejected'
+      || localBody?.status==='refused' || record(localBody?.result)?.status==='refused')
+      && (outcome.value.kind!=='decided' || outcome.value.result!==result)) throw new LocalCommandRefused(result);
     if (
-      result.status >= 200 && result.status < 300 && authenticatedAgent !== null
+      !recoverSavedPending && result.status >= 200 && result.status < 300 && localState.authenticatedAgent !== null
+      && (kind !== RENEW_AGENT_TOKEN_KIND || successfulRenewal)
     ) {
       await recordAgentPresence(
         tx,
-        authenticatedAgent,
+        localState.authenticatedAgent,
         body.client_build,
         acceptedPresenceRoute,
       );
+    }
+    if (agentTokenHash!==null && localState.localPlan && localState.authenticatedAgent && !['renew_agent_token','revoke_agent_token','revoke_agent_principal','acquire_agent_session','release_agent_session'].includes(kind)) {
+      const finalAgent=await recheckLocalCredential(tx,agentTokenHash,localState.localPlan);
+      if (!finalAgent) throw new LocalCredentialDenied(true);
+    }
+    if (agentTokenHash!==null && localState.authenticatedAgent && kind===RENEW_AGENT_TOKEN_KIND) {
+      if (recoverSavedPending && localState.localPlan && !await loadAgentCredential(tx,agentTokenHash,localState.localPlan,true))
+        throw new LocalCredentialDenied(true);
+      if (!successfulRenewal && (!localState.localPlan
+        || !await recheckLocalCredential(tx, agentTokenHash, localState.localPlan, true)))
+        throw new LocalCredentialDenied(true);
+      if (successfulRenewal) {
+      // Issuance intentionally adds one owned token to discovery. Recheck the
+      // original proof and family after INSERT/ledger/presence waits without
+      // adopting a newly discovered external row or stamping the successor.
+      const current=await tx`SELECT t.token_id FROM swarm.agent_tokens t
+        JOIN swarm.agent_principals p USING(principal_id)
+        JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=t.principal_id
+        JOIN swarm.devices d USING(device_id) JOIN swarm.renewal_grants g USING(renewal_grant_id)
+        JOIN swarm.workspaces w ON w.workspace_id=p.workspace_id
+        JOIN swarm.memberships m ON m.workspace_id=p.workspace_id AND m.user_id=p.owner_user_id
+        WHERE t.token_hash=${agentTokenHash} AND t.token_id=${localState.authenticatedAgent.token_id}::uuid
+          AND p.revoked_at IS NULL AND r.ended_at IS NULL AND d.revoked_at IS NULL
+          AND t.revoked_at IS NULL AND NOT t.surrender_only AND m.revoked_at IS NULL AND w.archived_at IS NULL
+          AND p.transport='local' AND NOT p.turn_only AND d.user_id=p.owner_user_id
+          AND ROW(g.principal_id,g.run_id,g.workspace_id,g.created_by)=ROW(t.principal_id,t.run_id,p.workspace_id,p.owner_user_id)
+          AND (g.bound_device_id IS NULL OR g.bound_device_id=d.device_id)
+          AND g.revoked_at IS NULL AND NOT g.suspension_active AND g.connection_expired_at IS NULL
+          AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
+          AND (g.kind='standing' OR g.horizon_expires_at>clock_timestamp())
+          AND (t.expires_at>clock_timestamp() OR (g.kind='standing' AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp()) AND t.first_used_at IS NOT NULL))
+          AND swarm.admin_child_live(t.parent_admin_grant_id,p.workspace_id)
+          AND swarm.admin_child_live(p.parent_admin_grant_id,p.workspace_id)
+          AND swarm.admin_child_scopes_live(t.parent_admin_grant_id,t.scopes)
+          AND swarm.admin_child_scopes_live(p.parent_admin_grant_id,t.scopes)
+          AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE (z.kind,z.target_id) IN
+            (('token',t.token_id),('principal',p.principal_id),('run',r.run_id),('device',d.device_id),
+             ('renewal_grant',g.renewal_grant_id),('membership',p.owner_user_id),('lineage',t.lineage_id),('family',t.lineage_id)))`;
+      if(!current.length) {
+        const known=await tx<{credential_invalid:boolean}[]>`SELECT
+          (t.revoked_at IS NOT NULL OR t.surrender_only OR g.revoked_at IS NOT NULL OR g.suspension_active
+            OR g.connection_expired_at IS NOT NULL OR g.connection_expires_at<=clock_timestamp()) IS TRUE AS credential_invalid
+          FROM swarm.agent_tokens t LEFT JOIN swarm.renewal_grants g ON g.renewal_grant_id=t.renewal_grant_id
+          WHERE t.token_hash=${agentTokenHash}`;
+        throw new LocalCredentialDenied(known[0]?.credential_invalid===true);
+      }
+      }
+    }
+    if(localState.authenticatedAgent && agentTokenHash && !isAgentSessionProofExempt(kind)
+      && !['release_agent_session','revoke_agent_token','revoke_agent_principal'].includes(kind)) {
+      const currentSession=await enforceAgentSessionProof(tx,{
+        principalId:localState.authenticatedAgent.principal_id,workspaceId:localState.authenticatedAgent.principal_workspace_id,
+        proofParse:sessionProofParse,managedAt:localState.authenticatedAgent.managed_at,
+      });
+      if(!currentSession.ok) throw new LocalCommandRefused({
+        status:currentSession.status,body:{error:currentSession.error},
+      });
+    }
+    if (kind===REGISTER_AGENT_SEAT_KIND && joinCredentialHash && localState.localPlan && localBody?.status==='accepted') {
+      const original=localState.localPlan.snapshot.joins?.[0];
+      const current=await tx`SELECT c.id FROM swarm.agent_join_credentials c
+        JOIN swarm.agent_principals p ON p.principal_id=c.registrar_principal_id
+        JOIN swarm.agent_runs r ON r.run_id=c.registrar_run_id AND r.principal_id=p.principal_id
+        JOIN swarm.devices d USING(device_id) JOIN swarm.workspaces w ON w.workspace_id=c.workspace_id
+        JOIN swarm.memberships m ON m.workspace_id=c.workspace_id AND m.user_id=c.owner_user_id
+        WHERE c.credential_hash=${joinCredentialHash} AND c.id=${original?.credential ?? null}::uuid
+          AND c.revoked_at IS NULL AND c.expires_at>clock_timestamp() AND p.revoked_at IS NULL
+          AND p.owner_user_id=c.owner_user_id AND p.workspace_id=c.workspace_id
+          AND r.ended_at IS NULL AND d.revoked_at IS NULL AND m.revoked_at IS NULL AND w.archived_at IS NULL
+          AND swarm.admin_child_live(p.parent_admin_grant_id,p.workspace_id)
+          AND EXISTS(SELECT 1 FROM swarm.agent_tokens issued JOIN swarm.renewal_grants g USING(renewal_grant_id)
+            WHERE issued.token_id=${typeof localBody.token_id==='string'?localBody.token_id:null}::uuid
+              AND issued.principal_id=${typeof localBody.principal_id==='string'?localBody.principal_id:null}::uuid
+              AND issued.run_id=${typeof localBody.run_id==='string'?localBody.run_id:null}::uuid
+              AND issued.revoked_at IS NULL AND issued.expires_at>clock_timestamp() AND g.revoked_at IS NULL AND NOT g.suspension_active
+              AND g.connection_expired_at IS NULL AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp()))`;
+      if(!current.length) throw new LocalCommandRefused({status:403,body:{error:'forbidden'}});
+    }
+    if (localState.authenticatedAgent && !isAgentSessionProofExempt(kind) && !['acquire_agent_session','release_agent_session'].includes(kind)) {
+      const finalSession=await enforceAgentSessionProof(tx,{principalId:localState.authenticatedAgent.principal_id,
+        workspaceId:localState.authenticatedAgent.principal_workspace_id,proofParse:sessionProofParse});
+      if(!finalSession.ok) throw new LocalCommandRefused({status:finalSession.status,body:{error:finalSession.error}});
     }
     return result;
   }).catch((error: unknown): HttpResult => {
     // postgres.js rejects begin only after rollback: no authority/content,
     // idempotency, presence, audit or notice effects survive this refusal.
+    if (error instanceof LocalCredentialWorkspaceMismatch
+      && (kind===CLAIM_AGENT_INBOX_KIND || kind===ACK_AGENT_DELIVERY_KIND))
+      return {status:403,body:{error:'delivery_unavailable'}};
+    if (error instanceof LocalCredentialDenied) return error.credentialInvalid
+      ? {status:401,body:{error:'unauthenticated'}}
+      : {status:403,body:{error:'forbidden'}};
+    if (error instanceof LocalCommandRefused) return error.result;
     if (error instanceof HouseholdContentServiceUpdating) {
       return { status: 503, headers: { "retry-after": "1" }, body: HouseholdContentServiceUpdating.body };
     }
     throw error;
-  });
-}
-
-async function resolveLedgerRace(
-  error: LedgerRace,
-  body: RequestBody,
-): Promise<HttpResult> {
-  return await db.begin("isolation level read committed", async (tx) => {
-    await setTransaction(tx);
-    const result = await (async (): Promise<HttpResult> => {
-
-    if (
-      (error.commandKind === CLAIM_AGENT_INBOX_KIND ||
-        error.commandKind === ACK_AGENT_DELIVERY_KIND) &&
-      error.auth.agent !== null
-    ) {
-      const op = error.commandKind === CLAIM_AGENT_INBOX_KIND ? "claim" : "ack";
-      const rateRes = await checkDeliveryRateLimit(
-        tx,
-        error.auth,
-        error.workspaceId,
-        error.auth.agent.principal_id,
-        op,
-      );
-      if (!rateRes.allowed) {
-        return rateRes.result;
-      }
-    }
-
-    const configRows = await tx<{ value: unknown }[]>`
-      SELECT value FROM swarm.config WHERE key = 'min_client_version' LIMIT 1
-    `;
-    const minClientVersion =
-      typeof configRows[0]?.value === "string" ? configRows[0].value : "0.1.0";
-    const rows = await tx<
-      {
-        workspace_id: string;
-        stream_id: string;
-        request_hash: string;
-        response: unknown;
-      }[]
-    >`
-      SELECT workspace_id, stream_id, request_hash, response
-      FROM swarm.idempotency_keys
-      WHERE principal_kind = ${error.auth.ledgerCredentialKind}
-        AND principal_id = ${error.auth.ledgerPrincipalId}
-        AND command_id = ${error.commandId}
-      LIMIT 1
-    `;
-    const winner = rows[0];
-    if (!winner) throw new Error("idempotency race winner is missing");
-    const matches = winner.request_hash === error.hash &&
-      winner.workspace_id === error.workspaceId &&
-      winner.stream_id === error.streamId;
-    if (error.commandKind === TOUCH_PRESENCE_KIND) {
-      return matches
-        ? { status: 200, body: { ok: true } }
-        : { status: 409, body: { error: "command_id_conflict" } };
-    }
-    await insertAudit(tx, {
-      auth: error.auth,
-      commandKind: error.commandKind,
-      workspaceId: error.workspaceId,
-      streamId: error.streamId,
-      outcome: matches ? "replayed" : "conflict",
-      reason: matches ? null : "command_id_conflict",
-      hash: error.hash,
-      detail: "resolved concurrent idempotency race",
-    });
-    if (!matches) {
-      return { status: 409, body: { error: "command_id_conflict" } };
-    }
-    // Body-free claim ledger must rehydrate after race resolution.
-    if (
-      error.commandKind === CLAIM_AGENT_INBOX_KIND &&
-      error.auth.agent !== null
-    ) {
-      const ledger = parseClaimLedger(winner.response);
-      if (ledger === null) {
-        return { status: 403, body: { error: "delivery_unavailable" } };
-      }
-      const deliveries = await hydrateDeliveryRefs(tx, {
-        workspaceId: error.workspaceId,
-        recipientPrincipalId: error.auth.agent.principal_id,
-        recipientOwnerUserId: error.auth.agent.owner_user_id,
-        refs: ledger.delivery_refs,
-      });
-      if (deliveries === null) {
-        return { status: 403, body: { error: "delivery_unavailable" } };
-      }
-      return {
-        status: 200,
-        body: {
-          ok: true,
-          status: "accepted",
-          capabilities: DELIVERY_CAPABILITIES,
-          deliveries,
-          pending_delivery_count: ledger.pending_delivery_count,
-          terminal_delivery_failure_count: ledger.terminal_delivery_failure_count,
-          /* Spread, never defaulted: an ABSENT oldest_pending_at (a replay of a
-           * claim stored before the field existed) must stay absent rather than
-           * become null, which would say the queue is empty beside a count that
-           * says it is not. */
-          ...(ledger.oldest_pending_at === undefined
-            ? {}
-            : { oldest_pending_at: ledger.oldest_pending_at }),
-          event_ids: [],
-          events: [],
-          min_client_version: minClientVersion,
-          ...(await optionalWakeForPrincipal(tx, error.auth.agent.principal_id)),
-        },
-      };
-    }
-    if (error.commandKind === ACK_AGENT_DELIVERY_KIND) {
-      const response = record(winner.response);
-      if (
-        !response ||
-        response.ok !== true ||
-        typeof response.signal_id !== "string" ||
-        typeof response.outcome !== "string"
-      ) {
-        return { status: 403, body: { error: "delivery_unavailable" } };
-      }
-      return {
-        status: 200,
-        body: {
-          ok: true,
-          status: "accepted",
-          signal_id: response.signal_id,
-          outcome: response.outcome,
-          event_ids: [],
-          events: [],
-          min_client_version: minClientVersion,
-        },
-      };
-    }
-    return replayResult(storedResponse(winner.response), error.commandKind);
-    })();
-    if (
-      result.status >= 200 && result.status < 300 && error.auth.agent !== null
-    ) {
-      const routeClassification = presenceRoute(record(body.command));
-      await recordAgentPresence(
-        tx,
-        error.auth.agent,
-        body.client_build,
-        routeClassification.ok ? routeClassification.route : null,
-      );
-    }
-    return result;
-  });
+  }));
+  return recoverSavedPending && response.status===204
+    ? await handleTransaction(body,verifiedHuman,agentTokenHash,joinCredentialHash,sessionProofParse,acquireProofParse,hostedSeatCapability)
+    : response;
 }
 
 /** Persist one allowlisted failure row after the command transaction is gone. */
@@ -13207,7 +13699,7 @@ async function insertCommandFailure(
 
 import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
 import { createAdminHttpHandler } from '../_shared/admin-http.ts';
-import { adminDbRole, adminSecurityFailure, type AdminAuditKind } from '../_shared/admin-oauth-db.ts';
+import { adminAccessState, adminDbRole, adminSecurityFailure, type AdminAuditKind } from '../_shared/admin-oauth-db.ts';
 import { admitAdminRequest } from './admin-admission.ts';
 import { createAdminWorkerChannel } from './admin-worker-delivery.ts';
 import type { AdminAdmission } from '../_shared/admin-oauth-auth.ts';
@@ -13229,7 +13721,7 @@ export async function handleAdminMcpRequest(request: Request): Promise<Response>
 async function runAdminOAuthCommand(input: AdminInput, admission: AdminAdmission, kind: AdminAuditKind, signal: AbortSignal): Promise<HttpResult> {
   const authentication: AdminAuthentication = { kind: 'oauth', admission };
   try {
-    const outcome = await db.begin('isolation level read committed', async tx => {
+    const outcome = await retryLocalAuthTransaction(() => db.begin('isolation level read committed', async tx => {
       await adminDbRole(tx, 'swarm_command');
       const remaining = Math.min(10_000, admission.token.expires_at - Date.now());
       if (remaining <= 0 || signal.aborted) throw new Error('admin_request_expired');
@@ -13237,7 +13729,7 @@ async function runAdminOAuthCommand(input: AdminInput, admission: AdminAdmission
       const result = await adminTransaction(tx, input, authentication, kind);
       if (signal.aborted || Date.now() >= admission.token.expires_at) throw new Error('admin_request_expired');
       return result;
-    });
+    }));
     return outcome.result;
   } catch (error) {
     console.error('admin_command_failed', 'transaction_failed');
@@ -13443,7 +13935,8 @@ let verifiedHuman: VerifiedHuman | null = null;
   } catch (error) {
     if (error instanceof LedgerRace) {
       try {
-        const result = await resolveLedgerRace(error, body);
+        const result = await handleTransaction(body, verifiedHuman, agentTokenHash, joinCredentialHash,
+          sessionProofParse, acquireProofParse);
         return json(result.status, result.body, result.headers);
       } catch (raceError) {
         console.error("command race resolution failed", safeError(raceError));
@@ -13499,11 +13992,11 @@ async function runAdminAccountCommand(
   human: VerifiedHuman | null = null,
 ): Promise<HttpResult> {
   try {
-    const outcome = await db.begin("isolation level read committed", async tx => {
+    const outcome = await retryLocalAuthTransaction(() => db.begin("isolation level read committed", async tx => {
       await setTransaction(tx);
       if (human !== null) await authenticateHuman(tx, human);
       return await adminTransaction(tx, input, authentication);
-    });
+    }));
     return outcome.result;
   } catch (error) {
     console.error("admin_command_failed", safeAdminError(error));
@@ -13599,6 +14092,17 @@ async function handleHostedCheck(
     const seat = await revalidateHostedSeatCommand(tx, capability);
     if (seat === null || seat.workspace_id !== input.workspace_id ||
         seat.handle !== input.command.seat) {
+      return { status: 403, body: { error: "forbidden" } };
+    }
+
+    await lockRegistrationStream(tx, { workspaceId: seat.workspace_id, streamId: seat.stream_id,
+      membershipRole: null, membershipRevokedAt: null });
+    await tx`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=${seat.grant_id}::uuid FOR UPDATE`;
+    const freshSeat = await revalidateHostedSeatCommand(tx, capability);
+    if (freshSeat === null || freshSeat.seat_id !== seat.seat_id ||
+        freshSeat.principal_id !== seat.principal_id || freshSeat.handle !== seat.handle ||
+        freshSeat.grant_id !== seat.grant_id || freshSeat.provider_grant_id !== seat.provider_grant_id ||
+        freshSeat.owner_user_id !== seat.owner_user_id || freshSeat.workspace_id !== seat.workspace_id || freshSeat.stream_id !== seat.stream_id) {
       return { status: 403, body: { error: "forbidden" } };
     }
 
@@ -13775,6 +14279,10 @@ async function handleHostedCheck(
         })),
       });
       if (!decision.ok) throw new Error("hosted check decision changed after selection");
+    }
+
+    if (await revalidateHostedSeatCommand(tx, capability) === null) {
+      throw new HostedCheckRefusal("hosted_check_batch_forbidden");
     }
 
     // Test-only rollback hook shared with the command transaction harness.
@@ -14551,7 +15059,7 @@ export async function handleAdminWorkerCommand(
   if (request.signal.aborted) abort();
   const timer = setTimeout(abort, Math.max(0, Math.min(25_000, admission.token.expires_at - Date.now())));
   try {
-    const outcome = await db.begin(async tx => {
+    const outcome = await retryLocalAuthTransaction(() => db.begin(async tx => {
       await setTransaction(tx);
       const remaining = Math.min(10_000, admission.token.expires_at - Date.now());
       if (remaining <= 0 || deadline.signal.aborted) throw new Error('request_expired');
@@ -14585,8 +15093,30 @@ export async function handleAdminWorkerCommand(
         }
       }
       if (deadline.signal.aborted || Date.now() >= admission.token.expires_at) throw new Error('request_expired');
+      if (result.worker_delivery) {
+        // The delivery callback may wait. Recheck the admitted parent and the
+        // exact newly written child after it returns, before COMMIT. All rows
+        // and parent modes are preheld; no second connection is opened here.
+        const status=await adminAccessState(tx,admission);
+        const [live]=await tx`SELECT t.token_id FROM swarm.agent_tokens t
+          JOIN swarm.renewal_grants g USING(renewal_grant_id)
+          JOIN swarm.agent_principals p ON p.principal_id=t.principal_id AND g.principal_id=t.principal_id AND g.run_id=t.run_id AND g.workspace_id=p.workspace_id
+          JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=p.principal_id
+          JOIN swarm.devices d ON d.device_id=r.device_id
+          JOIN swarm.workspaces w ON w.workspace_id=p.workspace_id
+          JOIN swarm.memberships m ON m.workspace_id=p.workspace_id AND m.user_id=p.owner_user_id
+          WHERE t.token_id=${result.worker_delivery.credential_id}::uuid AND t.revoked_at IS NULL AND t.expires_at>clock_timestamp()
+            AND p.owner_user_id=${admission.token.owner_user_id}::uuid AND p.revoked_at IS NULL
+            AND r.ended_at IS NULL AND d.revoked_at IS NULL AND m.revoked_at IS NULL AND w.archived_at IS NULL
+            AND g.revoked_at IS NULL AND NOT g.suspension_active AND g.connection_expired_at IS NULL
+            AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
+            AND (g.kind='standing' OR g.horizon_expires_at>clock_timestamp())
+            AND swarm.admin_child_live(p.parent_admin_grant_id,p.workspace_id)
+            AND swarm.admin_child_live(t.parent_admin_grant_id,p.workspace_id)`;
+        if (!status.known || !status.active || !live) throw new Error('admin_authority_changed');
+      }
       return result;
-    });
+    }));
     return Date.now() < admission.token.expires_at && !deadline.signal.aborted ? outcome.result : { status: 401, body: { error: 'credential_expired' } };
   } catch (error) {
     try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication, undefined, adminFailureRetryable(error)); }); }

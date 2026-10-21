@@ -317,3 +317,48 @@ test("three seats: ask, poll, ack and reply complete through H0", { timeout: 80_
   assert.equal(askerPoll.status, 200);
   assert.ok((askerPoll.body.deliveries as Array<{ signal: { id: string } }>).some((item) => item.signal.id === reply));
 });
+
+// The forward transport owns discovery failures before command dispatch.
+// Existing successful forwarding cannot detect a denied routing-hint lookup.
+for (const denial of ["revoked", "removed", "elapsed"] as const) {
+  test(`known ${denial} local credential returns authoritative 403 through H0`, { timeout: 40_000 }, async () => {
+    const isolated = randomUUID();
+    const [creator] = await sql<{ created_by: string }[]>`
+      SELECT created_by FROM swarm.workspaces WHERE workspace_id = ${workspace}::uuid`;
+    assert.ok(creator);
+    await sql.begin(async (tx) => {
+      await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by)
+        VALUES (${isolated}::uuid, 'Denied H0 forwarding', ${creator.created_by}::uuid)`;
+      await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role)
+        VALUES (${isolated}::uuid, ${creator.created_by}::uuid, 'owner')`;
+      await tx`INSERT INTO swarm.streams (stream_id, workspace_id, kind)
+        VALUES (${randomUUID()}::uuid, ${isolated}::uuid, 'workspace')`;
+    });
+    const minted = await post("command", {
+      command_id: randomUUID(), client_version: "0.1.0", workspace_id: isolated,
+      stream: { kind: "workspace" }, command: { kind: "mint_agent_join_credential", seat_cap: 1, ttl_hours: 4 },
+    }, ownerJwt);
+    assert.equal(minted.status, 200);
+    const seat = await register(String(minted.body.join_credential));
+    signalId(await h0("note", { body: "current credential control" }, seat.token));
+    if (denial === "revoked") {
+      await sql`UPDATE swarm.agent_principals SET revoked_at = clock_timestamp()
+        WHERE principal_id = ${seat.principalId}::uuid`;
+    } else if (denial === "removed") {
+      await sql`UPDATE swarm.memberships SET revoked_at = clock_timestamp()
+        WHERE workspace_id = ${isolated}::uuid AND user_id = ${creator.created_by}::uuid`;
+    } else {
+      const changed = await sql`UPDATE swarm.renewal_grants SET connection_expires_at = clock_timestamp() - interval '1 second'
+        WHERE principal_id = ${seat.principalId}::uuid RETURNING renewal_grant_id`;
+      assert.equal(changed.length, 1);
+    }
+    const counts = async () => (await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.signals
+      WHERE from_principal = ${seat.principalId}::uuid`)[0]!.n;
+    const before = await counts();
+    const denied = await h0("note", { body: "denied credential" }, seat.token);
+    assert.equal(denied.status, 403, JSON.stringify(denied.body));
+    assert.equal(denied.body.error, "forbidden");
+    assertHeaders(denied);
+    assert.equal(await counts(), before, "denial appended no signal");
+  });
+}

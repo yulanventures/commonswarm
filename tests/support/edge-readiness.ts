@@ -99,10 +99,10 @@ export function readinessVerdict(status: number, body: string): ReadinessVerdict
 /** A decided refusal the gate stopped on, carrying its evidence rather than re-deriving it. */
 export class ReadinessRefused extends Error {
   override name = "ReadinessRefused";
-  constructor(readonly status: number, readonly body: string) {
+  constructor(readonly status: number, readonly body: string, readonly diagnostics = "") {
     super(
       `the readiness probe was refused with HTTP ${status}: ${body.slice(0, 300)}. ` +
-        `That is a decided answer, not a cold runtime, so the gate stopped instead of waiting it out.`,
+        `That is a decided answer, not a cold runtime, so the gate stopped instead of waiting it out.\n${diagnostics}`,
     );
   }
 }
@@ -114,7 +114,7 @@ export interface ReadinessOptions {
   timeoutMs: number;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
-  /** Included in the failure message so a timeout is diagnosable. */
+  /** Called on refusal and timeout; only bounded, known safe categories are retained. */
   diagnostics?: () => string;
 }
 
@@ -144,7 +144,14 @@ export async function awaitFunctionRunning(options: ReadinessOptions): Promise<v
        * decided answer is never erased" structural: there is no later response, because
        * there is no later request. */
       if (verdict.kind === "refused") {
-        throw new ReadinessRefused(verdict.status, verdict.body);
+        let diagnostics = "diagnostics unavailable";
+        try {
+          const captured = (options.diagnostics?.() ?? "").slice(-8000);
+          diagnostics = [...new Set(captured.match(
+            /Serving functions on|Setting up Edge Functions runtime|(?:TypeError|SyntaxError|ReferenceError|RangeError|PostgresError)|supabase\/functions\/[A-Za-z0-9_/-]+\.[cm]?[jt]s:\d+(?::\d+)?/g,
+          ) ?? [])].slice(0, 16).join("\n");
+        } catch { /* Diagnostics cannot replace the decided refusal. */ }
+        throw new ReadinessRefused(verdict.status, verdict.body, diagnostics);
       }
       lastSeen = verdict.detail;
     } catch (error) {
@@ -154,11 +161,14 @@ export async function awaitFunctionRunning(options: ReadinessOptions): Promise<v
     }
     await options.sleep(200);
   }
-  throw new Error(
-    `command function never reported running (last: ${lastSeen})\n${
-      options.diagnostics?.() ?? ""
-    }`,
-  );
+  let diagnostics = "diagnostics unavailable";
+  try {
+    const captured = (options.diagnostics?.() ?? "").slice(-8000);
+    diagnostics = [...new Set(captured.match(
+      /Serving functions on|Setting up Edge Functions runtime|(?:TypeError|SyntaxError|ReferenceError|RangeError|PostgresError)|supabase\/functions\/[A-Za-z0-9_/-]+\.[cm]?[jt]s:\d+(?::\d+)?/g,
+    ) ?? [])].slice(0, 16).join("\n");
+  } catch { /* Timeout evidence survives a failed callback too. */ }
+  throw new Error(`command function never reported running (last: ${lastSeen})\n${diagnostics}`);
 }
 
 /* ------------------------------------------------------------------------- *

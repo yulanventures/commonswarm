@@ -187,7 +187,7 @@ before(async () => {
     const bootDeadline = Date.now() + 60_000;
     while (!functionLogs.includes("Serving functions on")) {
       if (Date.now() > bootDeadline) {
-        throw new Error(`functions serve never booted:\n${functionLogs.slice(-3000)}`);
+        throw new Error("functions serve never booted (phase: waiting for serve banner)");
       }
       await delay(250);
     }
@@ -198,7 +198,7 @@ before(async () => {
     timeoutMs: 30_000,
     sleep: (ms) => delay(ms),
     now: () => Date.now(),
-    diagnostics: () => `command function logs:\n${functionLogs.slice(-4000)}`,
+    diagnostics: () => functionLogs.slice(-8000),
   });
   f = await setFixture();
 });
