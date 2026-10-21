@@ -1,0 +1,171 @@
+/* Candidate only. Native dialog/renderer remain the behavior and status owners. */
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] {
+  inline-size: min(520px, calc(100% - 48px));
+  max-inline-size: calc(100% - 48px);
+  max-block-size: min(720px, calc(100dvh - 48px));
+  color: var(--k-shell-ink);
+  background: var(--k-shell-surface);
+  border: 1px solid var(--k-shell-line);
+  border-radius: 12px;
+  box-shadow: var(--k-shell-shadow);
+  font-family: var(--k-shell-font);
+  color-scheme: var(--k-shell-scheme);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover]::backdrop {
+  background: rgb(0 0 0 / 32%);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-details-dialog-head {
+  padding: 16px 20px;
+  border-block-end: 1px solid var(--k-shell-line);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-details-dialog-head p {
+  color: var(--k-shell-ink);
+  font-size: 15px;
+  line-height: 22px;
+  font-weight: 600;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] [data-workspace-details-close] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 36px;
+  min-inline-size: 36px;
+  block-size: 36px;
+  min-block-size: 36px;
+  color: var(--k-shell-secondary);
+  border-radius: 6px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] [data-workspace-details-close]:hover {
+  background: var(--k-shell-subtle);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] [data-workspace-details-content] {
+  gap: 10px;
+  grid-auto-rows: max-content;
+  padding: 24px;
+  scroll-padding-block: 5px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-settings-title {
+  font-family: var(--k-shell-font);
+  font-size: 20px;
+  line-height: 27px;
+  font-weight: 600;
+  letter-spacing: -.4px;
+  color: var(--k-shell-ink);
+  overflow-wrap: anywhere;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] :is(.dashboard__workspace-settings-counts, .dashboard__workspace-danger p) {
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--k-shell-secondary);
+  overflow-wrap: anywhere;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__popover-label {
+  margin-block-start: 12px;
+  font-size: 12px;
+  line-height: 18px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--k-shell-muted);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-id {
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  min-block-size: max-content;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  padding: 10px 12px;
+  border: 1px solid var(--k-shell-line);
+  border-radius: 6px;
+  background: var(--k-shell-subtle);
+  color: var(--k-shell-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] [data-copy-workspace-id] {
+  justify-self: start;
+  text-decoration: none;
+  min-block-size: 36px;
+  padding: 7px 10px;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--k-shell-ink);
+  border: 1px solid var(--k-shell-control);
+  border-radius: 6px;
+  background: var(--k-shell-surface);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] [data-copy-workspace-id]:hover {
+  background: var(--k-shell-subtle);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] [data-workspace-id-status] {
+  font-size: 12px;
+  line-height: 18px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-danger {
+  gap: 12px;
+  margin-block-start: 14px;
+  padding-block-start: 20px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-danger h3 {
+  font-family: var(--k-shell-font);
+  color: var(--k-shell-ink);
+  font-size: 14px;
+  line-height: 21px;
+  font-weight: 600;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-danger label {
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--k-shell-secondary);
+  overflow-wrap: anywhere;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-danger input {
+  min-block-size: 40px;
+  padding: 9px 12px;
+  border: 1px solid var(--k-shell-control);
+  border-radius: 6px;
+  color: var(--k-shell-ink);
+  background: var(--k-shell-surface);
+  font-size: 14px;
+  line-height: 20px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] [data-workspace-close-submit] {
+  min-block-size: 36px;
+  padding: 7px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 600;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] :is(button, input):focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] {
+    inline-size: 100%;
+    max-inline-size: 100%;
+    max-block-size: calc(var(--dashboard-viewport-height, 100dvh) * .82);
+    border-inline: 0;
+    border-block-end: 0;
+    border-radius: 12px 12px 0 0;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-details-dialog-head {
+    padding: 10px 16px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] [data-workspace-details-content] {
+    padding: 20px 16px 24px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] :is([data-workspace-details-close], [data-copy-workspace-id], [data-workspace-close-submit], input) {
+    min-block-size: 44px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] [data-workspace-details-close] {
+    inline-size: 44px;
+    min-inline-size: 44px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-danger input {
+    min-block-size: 44px;
+    font-size: 16px;
+  }
+}
