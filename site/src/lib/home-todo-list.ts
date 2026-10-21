@@ -39,14 +39,14 @@ function row(doc: Document, entry: TodoListRow, vm: TodoListVM, callbacks: TodoL
     const hit = node(doc, "label", "hm-todo-check-hit"); hit.append(box); item.append(hit);
   } else item.append(node(doc, "span", "hm-todo-check-hit"));
   // The title and its subline are one link, as on the workspace To-dos card, so the whole text block
-  // is the 44 px target. The link's name stays the title; the subline is its description.
+  // is the 44 px target. Its accessible name includes both visible lines.
   const copy = vm.sample ? node(doc, "div", "hm-todo-row-copy") : Object.assign(node(doc, "a", "hm-todo-row-copy"), { href: entry.href });
   const title = node(doc, "span", "hm-todo-row-title", todo.title); title.title = todo.title;
   const sub = node(doc, "span", "hm-todo-row-sub", todoSubline(todo, ctx));
   if (!vm.sample) {
     const base = `hm-todos-${todo.id}`.replace(/[^A-Za-z0-9_-]/g, "_");
     title.id = `${base}-title`; sub.id = `${base}-sub`;
-    copy.setAttribute("aria-labelledby", title.id); copy.setAttribute("aria-describedby", sub.id);
+    copy.setAttribute("aria-labelledby", `${title.id} ${sub.id}`);
   }
   copy.append(title, sub);
   item.append(copy);
