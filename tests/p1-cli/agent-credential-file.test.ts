@@ -825,19 +825,20 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       });
       session = await AgentCredentialSession.open(options);
       await assert.rejects(() => session.bearer(), RenewalRetryError);
-      // Expire the exact unused child. M3, not a fixture response, decides whether
-      // a fresh command may replace it after its same-id replay has no secret.
+      // Expire the exact unused child. The real server replaces it on the
+      // same pending command id without persisting or replaying its secret.
       await sql`UPDATE swarm.agent_tokens SET expires_at = clock_timestamp() - interval '1 millisecond'
         WHERE predecessor_token_id = ${f.tokenId}::uuid AND first_used_at IS NULL AND revoked_at IS NULL`;
       const bearer = await session.bearer();
       assert.ok(bearer !== f.token, "a stored live successor is required");
+      assert.equal(ids.length, 5, "same-id recovery is bounded");
+      for (const id of ids) assert.ok(typeof id === "string" && id.length > 0, "every request has a defined command id");
+      assert.ok(ids[0], "the original issuance id is defined before reuse");
+      assert.equal(ids[4], ids[0], "same-id replay replaces the undelivered child");
       assert.equal(await use(f.workspace, bearer), 200);
       assert.equal(ids[1], ids[0], "outage retains id");
       assert.equal(ids[2], ids[0], "pre-ledger upgrade refusal retains the lost-reply id");
       assert.equal(ids[3], ids[0], "old pending evidence is retained after reopen/upgrade");
-      assert.equal(ids[4], ids[0], "same-id replay precedes recovery");
-      assert.notEqual(ids[5], ids[4], "only null replay permits one fresh id");
-      assert.equal(ids.length, 6, "recovery is bounded");
       const recovered = await f.store.read();
       assert.ok(recovered?.token === bearer, "recovery is durable before the bearer is used again");
       assert.equal(recovered.pendingRenewal, null);
@@ -854,20 +855,53 @@ test("M3 agent continuity at the real command, secure-store and listener boundar
       assert.notEqual(otherOrigin.profileId, target.profileId, "fixture requires distinct origins");
       const isolated = await agentCredentialStore({ target: otherOrigin, lineageKey: credentialLineageKey(f.token), stateDirectory: directory });
       assert.equal(await isolated.read(), null, "another origin cannot find the winner");
-      // ids[5] issued the CURRENT winner. ids[4] names the expired, replaced
-      // child and cannot exercise the used-winner self-heal fence.
+      // The original command id now names the current winner after both
+      // undelivered children were replaced. Exercise its used-winner fence.
       const winner = await f.store.read();
       assert.ok(winner?.tokenId);
+      const children = await sql<{ token_id: string; first_used_at: Date | null; revoked_at: Date | null; stranded: boolean }[]>`
+        SELECT t.token_id, t.first_used_at, t.revoked_at,
+          EXISTS (SELECT 1 FROM swarm.revocation_tombstones r
+            WHERE r.target_id = t.token_id AND r.kind = 'stranded_successor') AS stranded
+        FROM swarm.agent_tokens t WHERE t.predecessor_token_id = ${f.tokenId}::uuid`;
+      const live = children.filter(row => row.revoked_at === null);
+      assert.equal(live.length, 1, "exactly one unrevoked child survives recovery");
+      assert.equal(live[0]?.token_id, winner.tokenId, "the durable winner is the surviving child");
+      assert.equal(live[0]?.stranded, false, "the winner has no stranded tombstone");
+      const stranded = children.filter(row => row.revoked_at !== null);
+      assert.equal(stranded.length, 2, "both lost replies leave revoked children");
+      assert.ok(stranded.some(row => row.token_id === child.token_id), "the first undelivered child was discarded");
+      for (const row of stranded) {
+        assert.equal(row.first_used_at, null, "discarded children never authenticated");
+        assert.equal(row.stranded, true, "each revoked child has its own stranded tombstone");
+      }
+      const [audit] = await sql<{ n: number }[]>`
+        SELECT count(*)::integer AS n FROM swarm.audit_log
+        WHERE workspace_id = ${f.workspace}::uuid AND actor_agent_principal = ${f.principal}::uuid
+          AND credential_id = ${f.tokenId}::uuid AND command_kind = 'renew_agent_token'
+          AND outcome = 'renewal_recovered' AND reason = 'successor_never_delivered'`;
+      assert.equal(audit?.n, 2, "both replacements have committed recovery audits");
+      const ledger = await sql<{ command_id: string; response: { token_id?: string; agent_token?: unknown } }[]>`
+        SELECT command_id, response FROM swarm.idempotency_keys
+        WHERE workspace_id = ${f.workspace}::uuid AND principal_kind = 'agent'
+          AND principal_id = ${f.principal}`;
+      assert.equal(ledger.length, 1, "same-id recovery updates one command ledger row");
+      assert.equal(ledger[0]?.command_id, ids[0]);
+      assert.equal(ledger[0]?.response.token_id, winner.tokenId, "the ledger names the current winner");
+      assert.equal(Object.hasOwn(ledger[0]!.response, "agent_token"), false, "no credential field is persisted");
+      const persisted = JSON.stringify(ledger[0]!.response);
+      assert.equal(persisted.includes("swm_agt_"), false, "the owned fixture ledger contains no raw credential");
+      assert.equal(persisted.includes(bearer) || persisted.includes(f.token), false, "neither fixture secret is persisted");
       const [before] = await sql<{ first_used_at: Date | null; tokens: number }[]>`
         SELECT t.first_used_at, (SELECT count(*)::integer FROM swarm.agent_tokens
           WHERE predecessor_token_id = ${f.tokenId}::uuid) AS tokens
         FROM swarm.agent_tokens t WHERE token_id = ${winner.tokenId}::uuid`;
       assert.ok(before?.first_used_at, "the current winner really authenticated");
       type UsedWinnerState = { first_used_at: Date | null; revoked_at: Date | null; tokens: number };
-      for (const commandId of [ids[5]!, newRenewalCommandId()]) {
+      for (const commandId of [ids[0], newRenewalCommandId()]) {
         try {
           const recovered = await requestSuccessor({ target, workspaceId: f.workspace, predecessor: f.token, commandId });
-          assert.equal(commandId, ids[5], "a new id must be refused for a used winner");
+          assert.equal(commandId, ids[0], "a new id must be refused for a used winner");
           assert.equal(recovered, null, "the actual issuance replay cannot return another secret");
         } catch (error) {
           assert.ok((error instanceof RenewalCredentialCheckError && error.status === 401 && error.code === "unauthenticated") ||
