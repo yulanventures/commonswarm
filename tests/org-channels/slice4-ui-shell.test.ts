@@ -3,27 +3,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { OrgChannelAuthorityState } from '../../src/protocol/org-channels-contract.js';
-import {
-  ORG_ROLE_LABELS,
-  ORG_SWITCHER_ACTIONS,
-  type OrgDomDocument,
-  type OrgDomElement,
-  buildOrgHeaderSwitcherDom,
-  deriveOrgHeaderSwitcherVM,
-  renderOrgHeaderSwitcherHtml,
-  renderOrgLogoBadgeHtml,
-} from '../../site/src/components/app/live-dashboard/org-shell/org-header-switcher.js';
-import {
-  PRESERVED_SHELL_HOOKS,
-  bindWorkspaceChannelNavDom,
-  deriveWorkspaceChannelNavVM,
-  formatUnreadCountPill,
-  renderKylonOrgShellHtml,
-  renderModeContextualListPaneHtml,
-  renderWorkspaceSwitcherMenuHtml,
-} from '../../site/src/components/app/live-dashboard/org-shell/workspace-channel-nav.js';
+import { ORG_ROLE_LABELS, ORG_SWITCHER_ACTIONS, type OrgDomDocument, type OrgDomElement, buildOrgHeaderSwitcherDom, deriveOrgHeaderSwitcherVM, renderOrgHeaderSwitcherHtml, renderOrgLogoBadgeHtml } from '../../site/src/components/app/live-dashboard/org-shell/org-header-switcher.js';
+import { PRESERVED_SHELL_HOOKS, bindWorkspaceChannelNavDom, deriveWorkspaceChannelNavVM, formatUnreadCountPill, renderKylonOrgShellHtml, renderModeContextualListPaneHtml, renderWorkspaceSwitcherMenuHtml } from '../../site/src/components/app/live-dashboard/org-shell/workspace-channel-nav.js';
 
-const REPO_ROOT = resolve(import.meta.dirname, '../..'), ORG_SHELL_DIR = 'site/src/components/app/live-dashboard/org-shell';
+const eq = assert.equal, deq = assert.deepEqual, REPO_ROOT = resolve(import.meta.dirname, '../..'), ORG_SHELL_DIR = 'site/src/components/app/live-dashboard/org-shell';
 
 function fixture(): OrgChannelAuthorityState {
   const now = '2026-10-21T00:00:00Z';
@@ -78,7 +61,7 @@ const ag = (principal_id: string) => ({ principal_kind: 'agent' as const, princi
 test('switcher renders 4 role tiers, unread totals, ARIA, keyboard nav, and callbacks', () => {
   const s = fixture(), tom = u('u-tom');
   const vm = deriveOrgHeaderSwitcherVM(s, tom, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build', switcherOpen: true, unreadCounts: { 'ch-design': 3, 'ch-sec': 2 }, orgUnreadCounts: { 'org-household': 4 } });
-  assert.deepEqual(vm.organizations.map((o) => [o.slug, o.role, o.roleLabel, o.current, o.unreadCount, o.unreadBadge]), [
+  deq(vm.organizations.map((o) => [o.slug, o.role, o.roleLabel, o.current, o.unreadCount, o.unreadBadge]), [
     ['yulan', 'owner', 'Owner', true, 5, '5'], ['household', 'admin', 'Admin', false, 4, '4'], ['ridge-studio', 'member', 'Member', false, 0, null], ['external-audit', 'guest', 'Guest', false, 0, null],
   ]);
   const { identityHtml, popoverHtml } = renderOrgHeaderSwitcherHtml(vm);
@@ -91,11 +74,11 @@ test('switcher renders 4 role tiers, unread totals, ARIA, keyboard nav, and call
     onOpenOrgMembers: () => calls.push('act:m'), onOpenOrgSettingsLogo: () => calls.push('act:s'), onCreateOrganization: () => calls.push('act:n'),
   });
   const orgTrigger = (dom.identityEl as FakeEl).children[0] as FakeEl, pop = dom.popoverEl as FakeEl, btns = pop.children.filter((c): c is FakeEl => typeof c !== 'string');
-  assert.equal(pop.attrs.get('role'), 'menu'); assert.equal(pop.dataset.anchorTop, '58px'); assert.equal(pop.dataset.anchorLeft, '64px');
-  assert.equal(btns[0]?.attrs.get('role'), 'menuitemradio'); assert.equal(btns[0]?.attrs.get('aria-checked'), 'true'); assert.equal(btns[0]?.dataset.orgUnreadCount, '5');
-  pop.trigger('keydown', { key: 'ArrowDown' }); assert.equal(getFocused()?.dataset.orgSlug, 'household');
-  pop.trigger('keydown', { key: 'ArrowUp' }); assert.equal(getFocused()?.dataset.orgSlug, 'yulan');
-  pop.trigger('keydown', { key: 'Escape' }); assert.equal(pop.hidden, true); assert.equal(getFocused(), orgTrigger);
+  eq(pop.attrs.get('role'), 'menu'); eq(pop.dataset.anchorTop, '58px'); eq(pop.dataset.anchorLeft, '64px');
+  eq(btns[0]?.attrs.get('role'), 'menuitemradio'); eq(btns[0]?.attrs.get('aria-checked'), 'true'); eq(btns[0]?.dataset.orgUnreadCount, '5');
+  pop.trigger('keydown', { key: 'ArrowDown' }); eq(getFocused()?.dataset.orgSlug, 'household');
+  pop.trigger('keydown', { key: 'ArrowUp' }); eq(getFocused()?.dataset.orgSlug, 'yulan');
+  pop.trigger('keydown', { key: 'Escape' }); eq(pop.hidden, true); eq(getFocused(), orgTrigger);
   for (const b of btns.filter((x) => x.dataset.orgAction)) b.trigger('click');
   for (const a of ['act:m', 'act:s', 'act:n']) assert.ok(calls.includes(a));
 });
@@ -111,8 +94,8 @@ test('org logo renders 32x32 image when logo_object_key is set and placeholder w
 test('workspace selector enforces canReadWorkspace and blocks revoked user/agent grants', () => {
   const s = fixture(), mem = u('u-member'), gst = u('u-guest'), agn = ag('ag-argon');
   const mNav = deriveWorkspaceChannelNavVM(s, mem, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-open', workspaceMenuOpen: true });
-  assert.equal(mNav.activeWorkspace?.workspaceId, 'ws-build'); assert.equal(mNav.activeWorkspace?.granted, true); assert.equal(mNav.header.activeWorkspace?.workspaceId, 'ws-build');
-  assert.deepEqual(mNav.workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['commonswarm-build', true, false], ['customer-advisory', false, true]]);
+  eq(mNav.activeWorkspace?.workspaceId, 'ws-build'); eq(mNav.activeWorkspace?.granted, true); eq(mNav.header.activeWorkspace?.workspaceId, 'ws-build');
+  deq(mNav.workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['commonswarm-build', true, false], ['customer-advisory', false, true]]);
   const revU: OrgChannelAuthorityState = {
     ...s,
     workspaceGrants: [
@@ -120,33 +103,33 @@ test('workspace selector enforces canReadWorkspace and blocks revoked user/agent
       { workspace_id: 'ws-ops', org_id: 'org-yulan', principal_kind: 'user', principal_id: 'u-member', role: 'member', created_at: '2026-10-21T00:00:00Z', revoked_at: '2026-10-21T01:00:00Z' },
     ],
   };
-  assert.deepEqual(deriveWorkspaceChannelNavVM(revU, mem, { activeOrgId: 'org-yulan' }).workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['customer-advisory', false, true]]);
-  assert.deepEqual(deriveWorkspaceChannelNavVM(s, agn, { activeOrgId: 'org-yulan' }).workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['commonswarm-build', true, false], ['operations', true, false]]);
+  deq(deriveWorkspaceChannelNavVM(revU, mem, { activeOrgId: 'org-yulan' }).workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['customer-advisory', false, true]]);
+  deq(deriveWorkspaceChannelNavVM(s, agn, { activeOrgId: 'org-yulan' }).workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['commonswarm-build', true, false], ['operations', true, false]]);
   const revO: OrgChannelAuthorityState = { ...s, workspaceGrants: s.workspaceGrants.map((g) => (g.workspace_id === 'ws-ops' && g.principal_id === 'u-tom' ? { ...g, revoked_at: '2026-10-21T01:00:00Z' } : g)) };
-  assert.deepEqual(deriveWorkspaceChannelNavVM(revO, agn, { activeOrgId: 'org-yulan' }).workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['commonswarm-build', true, false]]);
+  deq(deriveWorkspaceChannelNavVM(revO, agn, { activeOrgId: 'org-yulan' }).workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['commonswarm-build', true, false]]);
   const gNav = deriveWorkspaceChannelNavVM(s, gst, { activeOrgId: 'org-yulan', workspaceMenuOpen: true });
-  assert.deepEqual(gNav.workspaces.map((w) => w.slug), ['commonswarm-build']);
+  deq(gNav.workspaces.map((w) => w.slug), ['commonswarm-build']);
   assert.doesNotMatch(renderWorkspaceSwitcherMenuHtml(gNav), /\+ New Workspace/);
   assert.doesNotMatch(renderModeContextualListPaneHtml(gNav), /Create channel|\+ New Channel/);
 });
 
 test('privateChannelsEnabled defaults to false (fail-closed), member filters work, and topbar reflects mode', () => {
   const s = fixture(), tom = u('u-tom');
-  assert.deepEqual(deriveWorkspaceChannelNavVM({ ...s, privateChannelsEnabled: undefined }, tom, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build' }).channels.map((c) => c.slug), ['general', 'design']);
+  deq(deriveWorkspaceChannelNavVM({ ...s, privateChannelsEnabled: undefined }, tom, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build' }).channels.map((c) => c.slug), ['general', 'design']);
   const chatVm = deriveWorkspaceChannelNavVM(s, tom, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build', activeChannelId: 'ch-sec', mode: 'chat', unreadCounts: { 'ch-design': 3, 'ch-sec': 150 }, threadsByChannel: { 'ch-sec': [{ threadId: 'th-1', title: 'Audit log check', replyCount: 2 }] } });
-  assert.deepEqual(chatVm.channels.map((c) => [c.slug, c.visibility, c.prefix, c.unreadBadge, c.current]), [['general', 'workspace', '#', null, false], ['design', 'workspace', '#', '3', false], ['sec-incident', 'private', 'lock', '99+', true]]);
-  assert.equal(formatUnreadCountPill(0), null); assert.equal(formatUnreadCountPill(120), '99+');
+  deq(chatVm.channels.map((c) => [c.slug, c.visibility, c.prefix, c.unreadBadge, c.current]), [['general', 'workspace', '#', null, false], ['design', 'workspace', '#', '3', false], ['sec-incident', 'private', 'lock', '99+', true]]);
+  eq(formatUnreadCountPill(0), null); eq(formatUnreadCountPill(120), '99+');
   assert.doesNotMatch(renderModeContextualListPaneHtml(chatVm), /cs-workspace-quick-links/);
   const privHtml = renderKylonOrgShellHtml(chatVm);
   for (const r of [/<span id="screen-title" data-channel-name>sec-incident<\/span>/, /id="screen-visibility-badge">Private<\/span>/, /data-room-symbol="lock"/]) assert.match(privHtml, r);
   const agVm = deriveWorkspaceChannelNavVM(s, tom, { activeOrgId: 'org-yulan', mode: 'members', memberFilter: 'agents' });
-  assert.deepEqual(agVm.members.map((m) => m.displayName), ['Argon']);
+  deq(agVm.members.map((m) => m.displayName), ['Argon']);
   const agPane = renderModeContextualListPaneHtml(agVm);
   assert.match(agPane, /data-member-filter="agents" aria-pressed="true"/);
   assert.doesNotMatch(agPane, /data-channel-list/);
-  assert.deepEqual(deriveWorkspaceChannelNavVM(s, tom, { activeOrgId: 'org-yulan', mode: 'members', memberFilter: 'guests' }).members.map((m) => m.principalId), ['u-guest']);
+  deq(deriveWorkspaceChannelNavVM(s, tom, { activeOrgId: 'org-yulan', mode: 'members', memberFilter: 'guests' }).members.map((m) => m.principalId), ['u-guest']);
   const wikiVm = deriveWorkspaceChannelNavVM(s, tom, { activeOrgId: 'org-yulan', mode: 'wiki', mobileDrawerOpen: true });
-  assert.equal(wikiVm.wikiDocuments.length, 0);
+  eq(wikiVm.wikiDocuments.length, 0);
   const wikiPane = renderModeContextualListPaneHtml(wikiVm);
   assert.match(wikiPane, /data-wiki-empty="true"/); assert.doesNotMatch(wikiPane, /data-channel-list/);
   const wikiHtml = renderKylonOrgShellHtml(wikiVm);
@@ -176,15 +159,17 @@ test('all 38 preserved hooks, scoped Kylon v0.3 CSS, and <= 4,500 token budget',
     return { dataset, textContent: '', hidden: false, attrs, setAttribute: (k: string, v: string) => attrs.set(k, v), removeAttribute: (k: string) => attrs.delete(k), addEventListener: (_t: string, fn: () => void) => ls.push(fn), click: () => ls.forEach((fn) => fn()) };
   };
   const allP = mk({ channelPlace: '' }), rGen = mk({ channelId: 'ch-gen', channel: 'general', channelVisibility: 'workspace' }), rSec = mk({ channelId: 'ch-sec', channel: 'sec-incident', channelVisibility: 'private' });
-  const places = [allP], tNode = mk(), bNode = mk();
+  const places = [allP], tNode = mk(), bNode = mk(), sNode = mk({ roomSymbol: '#' });
   allP.addEventListener('click', () => sel.push(null));
   for (const ch of chatVm.channels) { const lp = mk({ channelPlace: ch.channelId }); lp.addEventListener('click', () => sel.push(ch.channelId)); places.push(lp); }
-  bindWorkspaceChannelNavDom((q) => (q === '[data-channel-id]' ? [rGen, rSec] : q === '[data-channel-place]' ? places : q === '[data-channel-place=""]' ? [allP] : q.includes('channel-name') ? [tNode] : q === '#screen-visibility-badge' ? [bNode] : []), chatVm, { onSelectChannel: (id, sl) => cbs.push(`${id}:${sl ?? ''}`) });
+  bindWorkspaceChannelNavDom((q) => (q === '[data-channel-id]' ? [rGen, rSec] : q === '[data-channel-place]' ? places : q === '[data-channel-place=""]' ? [allP] : q.includes('channel-name') ? [tNode] : q === '#screen-visibility-badge' ? [bNode] : q.includes('room-symbol') ? [sNode] : []), chatVm, { onSelectChannel: (id, sl) => cbs.push(`${id}:${sl ?? ''}`) });
   rSec.click();
-  assert.deepEqual(sel, ['ch-sec']); assert.deepEqual(cbs, ['ch-sec:sec-incident']);
-  assert.equal(rSec.attrs.get('aria-current'), 'page'); assert.equal(tNode.textContent, 'sec-incident'); assert.equal(bNode.hidden, false);
+  deq(sel, ['ch-sec']); deq(cbs, ['ch-sec:sec-incident']);
+  eq(rSec.attrs.get('aria-current'), 'page'); eq(tNode.textContent, 'sec-incident'); eq(bNode.hidden, false); eq(sNode.dataset.roomSymbol, 'lock'); eq(sNode.textContent, 'lock');
+  rGen.click();
+  eq(bNode.hidden, true); eq(sNode.dataset.roomSymbol, '#'); eq(sNode.textContent, '#');
   allP.click();
-  assert.deepEqual(sel, ['ch-sec', null]); assert.equal(rSec.attrs.get('aria-current'), undefined);
+  deq(sel, ['ch-sec', 'ch-gen', null]); eq(rSec.attrs.get('aria-current'), undefined);
   const css = readFileSync(resolve(REPO_ROOT, `${ORG_SHELL_DIR}/org-shell.css`), 'utf8');
   assert.doesNotMatch(css, /\/Users\/|^body\s*\{/m);
   for (const [t, v] of [['--cs-canvas', '#f5f5f2'], ['--cs-surface', '#ffffff'], ['--cs-subtle', '#f5f5f2'], ['--cs-selected', '#eeefea'], ['--cs-ink', '#282720'], ['--cs-secondary', '#655e53'], ['--cs-muted', '#716b60'], ['--cs-line', '#e9e7e2'], ['--cs-control', '#7e887c'], ['--cs-accent', '#697344'], ['--cs-focus', '#586339'], ['--cs-rail', '52px'], ['--cs-sidebar', '390px'], ['--cs-radius-panel', '0px']] as const) assert.match(css, new RegExp(`${t}:\\s*${v}`));

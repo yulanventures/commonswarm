@@ -27,14 +27,14 @@ export function deriveWorkspaceChannelNavVM(s0: OrgChannelAuthorityState, c: Cal
   const workspaces = wsList.map((w) => {
     const rev = isWsRevoked(s, c, w.workspace_id, w.org_id), granted = !rev && canReadWorkspace(s, c, w.workspace_id);
     const role = s.workspaceGrants.find((g) => g.workspace_id === w.workspace_id && isPrin(g, pk, pid) && isLive(g))?.role ?? org.role;
-    return { workspaceId: w.workspace_id, orgId: w.org_id, slug: w.slug, name: w.name, role, roleLabel: formatOrgRoleBadge(role), granted, joinable: !granted && !rev && isOpen(w), current: curWs ? w.workspace_id === curWs.workspace_id : false };
+    return { workspaceId: w.workspace_id, orgId: w.org_id, slug: w.slug, name: w.name, role, roleLabel: formatOrgRoleBadge(role), granted, joinable: !granted && !rev && isOpen(w), current: curWs?.workspace_id === w.workspace_id };
   });
   const activeWorkspace = workspaces.find((w) => w.current) ?? null, unreads = opt.unreadCounts ?? {}, tMap = opt.threadsByChannel ?? {};
   const rawChs = activeWorkspace?.granted ? s.channels.filter((ch) => ch.workspace_id === activeWorkspace.workspaceId && isLive(ch) && canReadChannel(s, c, ch.channel_id)) : [];
   const curCh = rawChs.find((ch) => ch.channel_id === opt.activeChannelId || norm(ch.slug) === norm(opt.activeChannelId ?? '')) ?? rawChs.find((ch) => norm(ch.slug) === 'general') ?? rawChs[0] ?? null;
   const channels = rawChs.map((ch) => {
     const u = unreads[ch.channel_id] ?? 0, isPrivate = ch.visibility === 'private';
-    return { channelId: ch.channel_id, workspaceId: ch.workspace_id, slug: ch.slug, topic: ch.topic ?? ch.purpose ?? null, visibility: ch.visibility, isPrivate, prefix: (isPrivate ? 'lock' : '#') as '#' | 'lock', unreadCount: u > 0 ? Math.floor(u) : 0, unreadBadge: formatUnreadCountPill(u), current: curCh ? ch.channel_id === curCh.channel_id : false, threads: (tMap[ch.channel_id] ?? []) as Array<{ threadId: string; title: string; replyCount: number }> };
+    return { channelId: ch.channel_id, workspaceId: ch.workspace_id, slug: ch.slug, topic: ch.topic ?? ch.purpose ?? null, visibility: ch.visibility, isPrivate, prefix: (isPrivate ? 'lock' : '#') as '#' | 'lock', unreadCount: u > 0 ? Math.floor(u) : 0, unreadBadge: formatUnreadCountPill(u), current: curCh?.channel_id === ch.channel_id, threads: (tMap[ch.channel_id] ?? []) as Array<{ threadId: string; title: string; replyCount: number }> };
   });
   const cf = String(opt.channelFilter ?? 'all').toLowerCase(), channelFilter: ChannelFilterPill = cf === 'unread' || cf === 'private' ? cf : 'all';
   const visibleChannels = channels.filter((ch) => (channelFilter === 'unread' ? ch.unreadCount > 0 : channelFilter === 'private' ? ch.isPrivate : true));
@@ -90,28 +90,17 @@ export function renderKylonOrgShellHtml(vm: WorkspaceChannelNavVM): string {
   return `<div class="app${vm.mobileDrawerOpen ? ' nav-open' : ''}" id="app">${btn('class="nav-scrim" aria-label="Close" data-action="close-nav" tabindex="-1"')}<nav class="rail" aria-label="Product"${iA}><div class="mark" aria-label="CommonSwarm">cs</div>${rB}<div data-home-rail-slot></div><div class="rail-bottom" id="dashboard-user-menu" data-user-menu-root>${ib('Theme', 'data-theme-toggle', 'settings', '<span class="sr-only" data-theme-toggle-label>Theme: Light</span>')}${btn('class="avatar small" aria-label="Account menu" data-user-menu-trigger', 'TL')}<div class="popover" data-user-menu hidden><p class="sr-only" data-rail-account>Your account</p>${btn('data-connected-apps-open', 'Connected apps')}${btn('data-signout', 'Sign out')}</div></div></nav><aside class="sidebar" id="sidebar" aria-label="Context navigation"${dA}>${btn('class="icon-button drawer-close" aria-label="Close" data-action="close-nav"', ic('close'))}${renderOrgHeaderIdentityHtml(vm.header)}<nav class="phone-nav" aria-label="Product sections" data-home-workspace-nav="phone">${pB}</nav><div id="sidebar-content">${renderModeContextualListPaneHtml(vm)}</div></aside><div class="workspace" id="workspace"><main class="panel" id="main" tabindex="-1"${iA}><header class="topbar" data-home-workspace-header="${wid}" data-home-phone-bar="${wid}" data-home-account-menu>${btn(`class="icon-button mobile-menu" aria-label="Menu" data-action="open-nav" data-home-back aria-controls="sidebar" aria-expanded="${vm.mobileDrawerOpen}"`, ic('menu'))}<span class="room-icon" id="room-symbol" data-room-symbol="${symK}">${symB}</span><div class="topbar-copy"><span id="hm-ws-title" class="sr-only">${wn}</span><span id="hm-phone-title" class="sr-only">${wn}</span><h1 id="dashboard-channel-title"><span id="screen-title" data-channel-name>${title}</span><span class="badge private-badge" id="screen-visibility-badge"${priv ? '' : ' hidden'}>Private</span></h1><p class="topic" id="screen-topic" data-channel-description>${topic}</p><div data-home-channel-menu>${btn('id="hm-channel-menu-trigger" class="sr-only" aria-controls="hm-channel-menu-panel" aria-expanded="false"', `<span data-channel-menu-label>${cs}</span>`)}<div id="hm-channel-menu-panel" hidden>${btn(`data-workspace-view="signals" data-channel-place="" data-channel-filter="${esc(vm.channelFilter)}"`)}${btn(`data-channel-new${vm.canCreateChannel ? '' : ' hidden disabled'}`)}<div data-channel-list></div></div></div></div><div class="topbar-actions" id="topbar-actions"><span class="badge good" data-live-chip>Live</span>${ib('Refresh', 'data-refresh', 'bell')}</div></header><div data-home-workspace-shell="${wid}"></div><section class="hm-route-pane" data-home-route-pane hidden></section><div data-home-catchup hidden></div><div data-update-notice hidden>${btn('data-update-dismiss', 'Dismiss')}${btn('data-update-reload', 'Reload')}</div></main></div>${renderOrgSwitcherMenuHtml(vm.header)}${renderWorkspaceSwitcherMenuHtml(vm)}</div>`;
 }
 
-export function bindWorkspaceChannelNavDom(
-  root: { querySelectorAll(s: string): Iterable<any> } | ((s: string) => Iterable<any>),
-  vm: WorkspaceChannelNavVM,
-  cb: {
-    onSelectChannel?: (id: string | null, slug?: string) => void; onCreateChannel?: () => void;
-    onSelectChannelFilter?: (f: ChannelFilterPill) => void; onSelectMemberFilter?: (f: MemberFilterPill) => void;
-    onSelectWorkspace?: (id: string, slug: string) => void;
-  } = {},
-): void {
-  const q = (s: string): any[] => [...(typeof root === 'function' ? root(s) : root.querySelectorAll(s))];
-  const on = (s: string, fn: (el: any) => void) => q(s).forEach((el) => el.addEventListener?.('click', () => fn(el)));
+export function bindWorkspaceChannelNavDom(root: any, vm: WorkspaceChannelNavVM, cb: Record<string, any> = {}): void {
+  const q = (s: string): any[] => [...(typeof root === 'function' ? root(s) : root.querySelectorAll(s))], on = (s: string, fn: (el: any) => void) => q(s).forEach((el) => el.addEventListener?.('click', () => fn(el)));
   const cur = (s: string, p: (x: any) => boolean) => q(s).forEach((x) => (p(x) ? x.setAttribute('aria-current', 'page') : x.removeAttribute?.('aria-current')));
+  const sym = (p: boolean) => { const v = p ? 'lock' : '#'; q('#screen-visibility-badge').forEach((b) => (b.hidden = !p)); q('#room-symbol,[data-room-symbol]').forEach((s) => { if (s.dataset) s.dataset.roomSymbol = v; s.setAttribute?.('data-room-symbol', v); s.textContent = v; if ('innerHTML' in s) s.innerHTML = p ? ic('lock') : '#'; }); };
   on('[data-channel-id]', (el) => {
     const cid = el.dataset.channelId ?? '', slug = el.dataset.channel ?? cid;
-    cur('[data-channel-id]', (r) => r.dataset.channelId === cid);
-    cur('[data-channel-place]', (p) => (p.dataset.channelPlace ?? '') === cid);
+    cur('[data-channel-id]', (r) => r.dataset.channelId === cid); cur('[data-channel-place]', (p) => (p.dataset.channelPlace ?? '') === cid);
     q('[data-channel-place]').filter((p) => (p.dataset.channelPlace ?? '') === cid).forEach((p) => p.click?.());
-    q('[data-channel-name],[data-channel-menu-label]').forEach((n) => (n.textContent = slug));
-    q('#screen-visibility-badge').forEach((b) => (b.hidden = el.dataset.channelVisibility !== 'private'));
-    cb.onSelectChannel?.(cid, slug);
+    q('[data-channel-name],[data-channel-menu-label]').forEach((n) => (n.textContent = slug)); sym(el.dataset.channelVisibility === 'private'); cb.onSelectChannel?.(cid, slug);
   });
-  on('[data-channel-place=""]', (el) => { cur('[data-channel-id]', () => false); el.setAttribute('aria-current', 'page'); cb.onSelectChannel?.(null); });
+  on('[data-channel-place=""]', (el) => { cur('[data-channel-id]', () => false); el.setAttribute('aria-current', 'page'); sym(false); cb.onSelectChannel?.(null); });
   on('[data-channel-create-trigger]', () => { if (vm.canCreateChannel) { q('#hm-channel-menu-panel [data-channel-new]').forEach((b) => b.click?.()); cb.onCreateChannel?.(); } });
   on('[data-channel-filter]', (el) => { const f = el.dataset.channelFilter ?? 'all'; q('[data-channel-filter]').forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.channelFilter === f))); cb.onSelectChannelFilter?.(f); });
   on('[data-member-filter]', (el) => { const f = el.dataset.memberFilter ?? 'all'; q('[data-member-filter]').forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.memberFilter === f))); cb.onSelectMemberFilter?.(f); });

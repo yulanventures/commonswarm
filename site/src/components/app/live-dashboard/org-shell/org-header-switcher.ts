@@ -52,12 +52,11 @@ export function resolveOrgLogoUrl(key?: string | null, base = 'https://api.commo
   if (!t || /^(?:javascript|data|vbscript):/i.test(t) || t.startsWith('//') || t.includes('..')) return null;
   return /^https?:\/\//i.test(t) || t.startsWith('/') ? t : `${base.replace(/\/$/, '')}/${t.replace(/^\//, '')}`;
 }
-export const escapeHtml = (v: string): string =>
-  String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
+export const escapeHtml = (v: string): string => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
 
 function effRole(s: OrgChannelAuthorityState, c: CallerContext, orgId: string): OrgRole {
   if (c.principal_kind === 'user') return orgRole(s, orgId, 'user', c.principal_id) ?? 'guest';
-  const uRole = ((o) => (o ? orgRole(s, orgId, 'user', o) : null))(agentOwner(s, c));
+  const o = agentOwner(s, c), uRole = o ? orgRole(s, orgId, 'user', o) : null;
   return uRole === 'guest' ? 'guest' : orgRole(s, orgId, 'agent', c.principal_id) ?? (uRole ? 'member' : 'guest');
 }
 
