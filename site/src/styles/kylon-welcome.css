@@ -65,7 +65,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
   line-height: 1.55;
 }
 
-live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] :is(.dashboard__signin-choices, .dashboard__email, .dashboard__email-sent) {
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] :is(.dashboard__signin-choices, .dashboard__email, .dashboard__email-sent, .dashboard__form-error) {
   box-sizing: border-box;
   inline-size: 100%;
   max-inline-size: 28rem;
@@ -116,6 +116,9 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
   display: inline-flex;
   align-items: center;
   min-block-size: 44px;
+  /* Preserve the prose line box while keeping the actual link target 44px tall. */
+  margin-block: calc(.8em - 22px);
+  padding-inline: 2px;
   color: var(--k-shell-ink);
   text-underline-offset: 3px;
 }
@@ -130,12 +133,42 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
 }
 
 live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__text-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  justify-self: start;
   box-sizing: border-box;
-  inline-size: 100%;
+  inline-size: auto;
+  max-inline-size: 100%;
   min-inline-size: 0;
   min-block-size: 44px;
   white-space: normal;
   overflow-wrap: anywhere;
+  padding-inline: 0;
+  text-align: start;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] div.dashboard__form-error:not([hidden]) {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__form-error > p {
+  margin: 0;
+}
+
+/* ProviderButtons omits its markup when no provider is enabled. The sole
+   available sign-in action then takes the primary treatment, with no new flag. */
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__signin-choices:not(:has([data-signin-provider])) .dashboard__email button[type="submit"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__signin-choices:not(:has([data-signin-provider])) .dashboard__email button[type="submit"]:hover:not(:disabled) {
+  background: var(--accent-bright);
+  border-color: var(--accent-bright);
 }
 
 live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__email-sent {
