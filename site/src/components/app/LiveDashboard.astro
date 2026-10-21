@@ -1549,6 +1549,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     let pendingWorkspaceCreate = false;
     let renderedAuthUserId = "";
     let authReloadQueued = false;
+    let authRecoveryActive = false;
     let bootInFlight: Promise<void> | null = null;
     let bootAgain = false;
     let signalExpiryTimer: number | undefined;
@@ -9105,12 +9106,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         return;
       }
 
+      authRecoveryActive = false;
       sampleMode = false;
       for (const button of all<HTMLButtonElement>("[data-signout]")) button.hidden = false;
       setLoading("Checking your sign-in…");
       try {
-        session = await currentSession();
+        const verified = await currentSession();
         if (version !== requestVersion) return;
+        session = verified;
         renderedAuthUserId = session?.user.id ?? "";
         if (!session) {
           resetWorkspaceSessionState();
@@ -9148,6 +9151,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       } catch (error) {
         if (version !== requestVersion) return;
         if (error instanceof AuthRecoveryRequired) {
+          authRecoveryActive = true;
           const target = panel("workspace-error");
           const account = target?.querySelector<HTMLElement>(".dashboard__account-line");
           if (account) account.hidden = !session;
@@ -10922,17 +10926,24 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       });
     });
 
-    const queueAuthReload = (nextSession: Session | null): void => {
+    const queueAuthReload = (nextSession: Session | null, recovered = false, signedOut = false): void => {
       const nextUserId = nextSession?.user.id ?? "";
-      if (nextUserId === renderedAuthUserId || authReloadQueued) return;
-      resetWorkspaceSessionState();
-      renderedAuthUserId = nextUserId;
-      requestVersion += 1;
+      const identityChanged = signedOut || nextUserId !== renderedAuthUserId;
+      if (!identityChanged && !recovered) return;
+      if (identityChanged) {
+        resetWorkspaceSessionState();
+        renderedAuthUserId = nextUserId;
+        requestVersion += 1;
+        authRecoveryActive = false;
+      }
+      if (authReloadQueued) return;
       authReloadQueued = true;
-      queueMicrotask(() => {
+      // Auth subscribers run under the SDK lock. Boot starts in a later task,
+      // and reads current identity afresh after logout or a peer identity change.
+      window.setTimeout(() => {
         authReloadQueued = false;
         runBoot();
-      });
+      }, 0);
     };
 
     /* /start now preserves its query and hash while handing old callbacks to /app, so this
@@ -10941,12 +10952,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       // SDK events can carry saved, unverified identity during initialization.
       // Only update an identity this dashboard has already verified.
       if (session && nextSession?.user.id === session.user.id) session = nextSession;
+      const recovered = event === "TOKEN_REFRESHED" && !!nextSession &&
+        authRecoveryActive && app.dataset.state === "workspace-error" &&
+        (!renderedAuthUserId || nextSession.user.id === renderedAuthUserId);
       if (
         event === "INITIAL_SESSION" ||
         event === "SIGNED_IN" ||
-        event === "SIGNED_OUT"
+        event === "SIGNED_OUT" || recovered
       ) {
-        queueAuthReload(nextSession);
+        queueAuthReload(nextSession, recovered, event === "SIGNED_OUT");
       }
     });
 

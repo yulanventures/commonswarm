@@ -97,10 +97,11 @@ test("dashboard auth transitions include INITIAL_SESSION and coalesce reloads", 
   assert.notEqual(endAt, -1);
   const source = dashboard.slice(startAt, endAt + "runBoot();".length);
 
-  assert.match(source, /nextUserId === renderedAuthUserId \|\| authReloadQueued/);
+  // Behavioral recovery/coalescing belongs to the browser owner. Keep this
+  // sibling guard focused on lifecycle invalidation and the bounded boot owner.
+  assert.match(source, /requestVersion \+= 1/);
   assert.match(source, /authReloadQueued = true/);
-  assert.match(source, /renderedAuthUserId = nextUserId;[\s\S]*requestVersion \+= 1/);
-  assert.match(source, /queueMicrotask\(\(\) =>/);
+  assert.match(source, /window\.setTimeout\(\(\) =>/);
   assert.match(source, /authReloadQueued = false;[\s\S]*runBoot\(\)/);
   // Identity verification belongs to the real user503/user-network browser
   // cases in dead-session.observer.test.ts, including the first-load retry UI.
@@ -108,7 +109,7 @@ test("dashboard auth transitions include INITIAL_SESSION and coalesce reloads", 
   assert.match(dashboard, /do \{[\s\S]*await boot\(\);[\s\S]*\} while \(bootAgain\)/);
   assert.match(
     dashboard,
-    /const boot = async[\s\S]*const version = \+\+requestVersion;[\s\S]*session = await currentSession\(\);[\s\S]*if \(version !== requestVersion\) return;[\s\S]*workspaces = await workspaceMemberships\(\);[\s\S]*if \(version !== requestVersion\) return;[\s\S]*catch \(error\) \{[\s\S]*if \(version !== requestVersion\) return/,
+    /const boot = async[\s\S]*const version = \+\+requestVersion;[\s\S]*const verified = await currentSession\(\);[\s\S]*if \(version !== requestVersion\) return;[\s\S]*workspaces = await workspaceMemberships\(\);[\s\S]*if \(version !== requestVersion\) return;[\s\S]*catch \(error\) \{[\s\S]*if \(version !== requestVersion\) return/,
   );
   assert.match(
     source,
@@ -395,7 +396,7 @@ test("workspace changes synchronously retarget AgentConnect before its panel ope
   );
   assert.match(
     connect,
-    /const session = await currentSession\(\);[\s\S]*if \(version !== this\.#loadVersion\) return/,
+    /const const verified = await currentSession\(\);[\s\S]*if \(version !== this\.#loadVersion\) return/,
   );
   assert.match(
     connect,
