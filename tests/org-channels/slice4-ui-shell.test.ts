@@ -15,6 +15,7 @@ import {
 } from '../../site/src/components/app/live-dashboard/org-shell/org-header-switcher.js';
 import {
   PRESERVED_SHELL_HOOKS,
+  bindWorkspaceChannelNavDom,
   deriveWorkspaceChannelNavVM,
   formatUnreadCountPill,
   renderKylonOrgShellHtml,
@@ -22,22 +23,16 @@ import {
   renderWorkspaceSwitcherMenuHtml,
 } from '../../site/src/components/app/live-dashboard/org-shell/workspace-channel-nav.js';
 
-const REPO_ROOT = resolve(import.meta.dirname, '../..');
+const REPO_ROOT = resolve(import.meta.dirname, '../..'), ORG_SHELL_DIR = 'site/src/components/app/live-dashboard/org-shell';
 
-function createMultiOrgFixture(): OrgChannelAuthorityState {
+function fixture(): OrgChannelAuthorityState {
   const now = '2026-10-21T00:00:00Z';
   const org = (id: string, slug: string, display_name: string, logo_object_key: string | null = null, created_by = 'u-tom') => ({
     id, slug, display_name, logo_object_key, ...(logo_object_key ? { logo_updated_at: now } : {}), created_by, created_at: now, updated_at: now,
   });
   const ws = (workspace_id: string, org_id: string, slug: string, name: string, join_policy?: 'open' | 'invite_only') => ({ workspace_id, org_id, slug, name, ...(join_policy ? { join_policy } : {}) });
-  const ch = (channel_id: string, slug: string, topic: string, visibility: 'workspace' | 'private') => ({
-    channel_id, workspace_id: 'ws-build', slug, topic, visibility, join_policy: (visibility === 'private' ? 'invite_only' : 'open') as 'open' | 'invite_only',
-  });
-  const om = (org_id: string, principal_kind: 'user' | 'agent', principal_id: string, role: 'owner' | 'admin' | 'member' | 'guest') => ({
-    org_id, principal_kind, principal_id, role, created_at: now,
-  });
-  const wg = (workspace_id: string, org_id: string, principal_id: string, role: 'owner' | 'admin' | 'member' | 'guest') => ({
-    workspace_id, org_id, principal_kind: 'user' as const, principal_id, role, created_at: now,
+  const ch = (channel_id: string, slug: string, visibility: 'workspace' | 'private') => ({
+    channel_id, workspace_id: 'ws-build', slug, topic: slug, visibility, join_policy: (visibility === 'private' ? 'invite_only' : 'open') as 'open' | 'invite_only',
   });
   return {
     privateChannelsEnabled: true,
@@ -51,45 +46,38 @@ function createMultiOrgFixture(): OrgChannelAuthorityState {
       ws('ws-studio', 'org-studio', 'design-systems', 'Design Systems'), ws('ws-audit-granted', 'org-audit', 'shared-review', 'Shared Review Room'),
       ws('ws-audit-internal', 'org-audit', 'internal-audit', 'Internal Audit Only'),
     ],
-    channels: [
-      ch('ch-gen', 'general', 'Shared coordination across people and agents', 'workspace'), ch('ch-design', 'design', 'Kylon shell geometry and token review', 'workspace'),
-      ch('ch-sec', 'sec-incident', 'Private incident coordination', 'private'), ch('ch-hidden-priv', 'exec-comp', 'Restricted private channel', 'private'),
-    ],
+    channels: [ch('ch-gen', 'general', 'workspace'), ch('ch-design', 'design', 'workspace'), ch('ch-sec', 'sec-incident', 'private'), ch('ch-hidden-priv', 'exec-comp', 'private')],
     agentIdentities: [{ id: 'ag-argon', owner_user_id: 'u-tom', display_name: 'Argon', created_at: now }],
-    orgMemberships: [
-      om('org-yulan', 'user', 'u-tom', 'owner'), om('org-household', 'user', 'u-tom', 'admin'), om('org-studio', 'user', 'u-tom', 'member'),
-      om('org-audit', 'user', 'u-tom', 'guest'), om('org-yulan', 'user', 'u-member', 'member'), om('org-yulan', 'user', 'u-guest', 'guest'), om('org-yulan', 'agent', 'ag-argon', 'admin'),
-    ],
-    workspaceGrants: [
-      wg('ws-build', 'org-yulan', 'u-tom', 'owner'), wg('ws-ops', 'org-yulan', 'u-tom', 'owner'), wg('ws-home', 'org-household', 'u-tom', 'admin'),
-      wg('ws-studio', 'org-studio', 'u-tom', 'member'), wg('ws-audit-granted', 'org-audit', 'u-tom', 'guest'), wg('ws-build', 'org-yulan', 'u-member', 'member'), wg('ws-build', 'org-yulan', 'u-guest', 'guest'),
-    ],
+    orgMemberships: ([['org-yulan','user','u-tom','owner'],['org-household','user','u-tom','admin'],['org-studio','user','u-tom','member'],['org-audit','user','u-tom','guest'],['org-yulan','user','u-member','member'],['org-yulan','user','u-guest','guest'],['org-yulan','agent','ag-argon','admin']] as const).map(([org_id, principal_kind, principal_id, role]) => ({ org_id, principal_kind, principal_id, role, created_at: now })),
+    workspaceGrants: ([['ws-build','org-yulan','u-tom','owner'],['ws-ops','org-yulan','u-tom','owner'],['ws-home','org-household','u-tom','admin'],['ws-studio','org-studio','u-tom','member'],['ws-audit-granted','org-audit','u-tom','guest'],['ws-build','org-yulan','u-member','member'],['ws-build','org-yulan','u-guest','guest']] as const).map(([workspace_id, org_id, principal_id, role]) => ({ workspace_id, org_id, principal_kind: 'user' as const, principal_id, role, created_at: now })),
     channelMemberships: [{ channel_id: 'ch-sec', workspace_id: 'ws-build', principal_kind: 'user', principal_id: 'u-tom', role: 'owner', notify_pref: 'all', joined_at: now }],
   };
 }
 
 interface FakeEl extends OrgDomElement { children: Array<FakeEl | string>; attrs: Map<string, string>; trigger(type: string, event?: { key?: string; preventDefault?(): void }): void; }
 
-function createFakeDomDoc(): { doc: OrgDomDocument; getFocused: () => FakeEl | null } {
+function fakeDoc(): { doc: OrgDomDocument; getFocused: () => FakeEl | null } {
   let focused: FakeEl | null = null;
   const makeEl = (tag: string): FakeEl => {
-    const attrs = new Map<string, string>(), children: Array<FakeEl | string> = [], dataset: Record<string, string | undefined> = {};
-    const listeners = new Map<string, Array<(event: { key?: string; preventDefault?(): void }) => void>>();
+    const attrs = new Map<string, string>(), children: Array<FakeEl | string> = [], dataset: Record<string, string | undefined> = {}, ls = new Map<string, Array<(e: { key?: string; preventDefault?(): void }) => void>>();
     const el: FakeEl = {
       tagName: tag.toUpperCase(), className: '', id: '', textContent: null, hidden: false, dataset, children, attrs,
       setAttribute: (k, v) => { attrs.set(k, v); }, getAttribute: (k) => attrs.get(k) ?? null,
       append: (...n) => { children.push(...(n as Array<FakeEl | string>)); }, focus: () => { focused = el; },
-      addEventListener: (t, fn) => { listeners.set(t, [...(listeners.get(t) ?? []), fn]); },
-      trigger: (t, ev = { preventDefault() {} }) => { for (const fn of listeners.get(t) ?? []) fn(ev); },
+      addEventListener: (t, fn) => { ls.set(t, [...(ls.get(t) ?? []), fn]); },
+      trigger: (t, ev = { preventDefault() {} }) => { for (const fn of ls.get(t) ?? []) fn(ev); },
     };
     return el;
   };
   return { doc: { createElement: makeEl }, getFocused: () => focused };
 }
 
-test('multi-org switcher renders 4 role tiers, unread totals, menu ARIA, keyboard nav, and callbacks', () => {
-  const state = createMultiOrgFixture(), caller = { principal_kind: 'user' as const, principal_id: 'u-tom' };
-  const vm = deriveOrgHeaderSwitcherVM(state, caller, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build', switcherOpen: true, unreadCounts: { 'ch-design': 3, 'ch-sec': 2 }, orgUnreadCounts: { 'org-household': 4 } });
+const u = (principal_id: string) => ({ principal_kind: 'user' as const, principal_id });
+const ag = (principal_id: string) => ({ principal_kind: 'agent' as const, principal_id });
+
+test('switcher renders 4 role tiers, unread totals, ARIA, keyboard nav, and callbacks', () => {
+  const s = fixture(), tom = u('u-tom');
+  const vm = deriveOrgHeaderSwitcherVM(s, tom, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build', switcherOpen: true, unreadCounts: { 'ch-design': 3, 'ch-sec': 2 }, orgUnreadCounts: { 'org-household': 4 } });
   assert.deepEqual(vm.organizations.map((o) => [o.slug, o.role, o.roleLabel, o.current, o.unreadCount, o.unreadBadge]), [
     ['yulan', 'owner', 'Owner', true, 5, '5'], ['household', 'admin', 'Admin', false, 4, '4'], ['ridge-studio', 'member', 'Member', false, 0, null], ['external-audit', 'guest', 'Guest', false, 0, null],
   ]);
@@ -97,107 +85,111 @@ test('multi-org switcher renders 4 role tiers, unread totals, menu ARIA, keyboar
   for (const r of [/id="org-trigger"/, /role="menu"/, /role="menuitemradio" aria-checked="true"/, /data-org-unread-count="5"/]) assert.match(identityHtml + popoverHtml, r);
   for (const r of ['owner', 'admin', 'member', 'guest'] as const) assert.match(popoverHtml, new RegExp(`data-org-item-role-badge="${r}">${ORG_ROLE_LABELS[r]}<`));
   for (const act of ORG_SWITCHER_ACTIONS) assert.ok(popoverHtml.includes(act.label));
-
-  const { doc, getFocused } = createFakeDomDoc(), calls: string[] = [];
+  const { doc, getFocused } = fakeDoc(), calls: string[] = [];
   const dom = buildOrgHeaderSwitcherDom(doc, vm, {
     onSelectOrg: (id, slug) => calls.push(`select:${id}:${slug}`), onToggleOrgSwitcher: (open) => calls.push(`toggle:${open}`),
-    onOpenOrgMembers: () => calls.push('action:org-members'), onOpenOrgSettingsLogo: () => calls.push('action:org-settings-logo'), onCreateOrganization: () => calls.push('action:new-organization'),
+    onOpenOrgMembers: () => calls.push('act:m'), onOpenOrgSettingsLogo: () => calls.push('act:s'), onCreateOrganization: () => calls.push('act:n'),
   });
-  const orgTrigger = (dom.identityEl as FakeEl).children[0] as FakeEl, pop = dom.popoverEl as FakeEl, popButtons = pop.children.filter((c): c is FakeEl => typeof c !== 'string');
+  const orgTrigger = (dom.identityEl as FakeEl).children[0] as FakeEl, pop = dom.popoverEl as FakeEl, btns = pop.children.filter((c): c is FakeEl => typeof c !== 'string');
   assert.equal(pop.attrs.get('role'), 'menu'); assert.equal(pop.dataset.anchorTop, '58px'); assert.equal(pop.dataset.anchorLeft, '64px');
-  assert.equal(popButtons[0]?.attrs.get('role'), 'menuitemradio'); assert.equal(popButtons[0]?.attrs.get('aria-checked'), 'true'); assert.equal(popButtons[0]?.dataset.orgUnreadCount, '5');
-  pop.trigger('keydown', { key: 'ArrowDown', preventDefault() {} }); assert.equal(getFocused()?.dataset.orgSlug, 'household');
-  pop.trigger('keydown', { key: 'ArrowUp', preventDefault() {} }); assert.equal(getFocused()?.dataset.orgSlug, 'yulan');
-  pop.trigger('keydown', { key: 'Escape', preventDefault() {} }); assert.equal(pop.hidden, true); assert.equal(getFocused(), orgTrigger);
-  for (const actBtn of popButtons.filter((b) => b.dataset.orgAction)) actBtn.trigger('click');
-  for (const a of ['action:org-members', 'action:org-settings-logo', 'action:new-organization']) assert.ok(calls.includes(a));
+  assert.equal(btns[0]?.attrs.get('role'), 'menuitemradio'); assert.equal(btns[0]?.attrs.get('aria-checked'), 'true'); assert.equal(btns[0]?.dataset.orgUnreadCount, '5');
+  pop.trigger('keydown', { key: 'ArrowDown' }); assert.equal(getFocused()?.dataset.orgSlug, 'household');
+  pop.trigger('keydown', { key: 'ArrowUp' }); assert.equal(getFocused()?.dataset.orgSlug, 'yulan');
+  pop.trigger('keydown', { key: 'Escape' }); assert.equal(pop.hidden, true); assert.equal(getFocused(), orgTrigger);
+  for (const b of btns.filter((x) => x.dataset.orgAction)) b.trigger('click');
+  for (const a of ['act:m', 'act:s', 'act:n']) assert.ok(calls.includes(a));
 });
 
-test('org logo renders 32x32 image when logo_object_key is set and named upload placeholder when null', () => {
-  const state = createMultiOrgFixture(), caller = { principal_kind: 'user' as const, principal_id: 'u-tom' };
-  const withLogoHtml = renderOrgLogoBadgeHtml(deriveOrgHeaderSwitcherVM(state, caller, { activeOrgId: 'org-yulan' }).activeOrg, 32);
-  assert.match(withLogoHtml, /data-org-logo="orgs\/org-yulan\/logo\/64\.png"/);
-  assert.doesNotMatch(withLogoHtml, /data-org-logo-upload-placeholder/);
-  const placeholderHtml = renderOrgLogoBadgeHtml(deriveOrgHeaderSwitcherVM(state, caller, { activeOrgId: 'org-household' }).activeOrg, 32);
-  for (const r of [/data-org-logo-placeholder="LH"/, /role="img"/, /aria-label="Upload organization logo for Langridge Household"/]) assert.match(placeholderHtml, r);
+test('org logo renders 32x32 image when logo_object_key is set and placeholder when null', () => {
+  const s = fixture(), tom = u('u-tom');
+  const logo = renderOrgLogoBadgeHtml(deriveOrgHeaderSwitcherVM(s, tom, { activeOrgId: 'org-yulan' }).activeOrg, 32);
+  assert.match(logo, /data-org-logo="orgs\/org-yulan\/logo\/64\.png"/); assert.doesNotMatch(logo, /data-org-logo-upload-placeholder/);
+  const ph = renderOrgLogoBadgeHtml(deriveOrgHeaderSwitcherVM(s, tom, { activeOrgId: 'org-household' }).activeOrg, 32);
+  for (const r of [/data-org-logo-placeholder="LH"/, /role="img"/, /aria-label="Upload organization logo for Langridge Household"/]) assert.match(ph, r);
 });
 
-test('workspace selector enforces canReadWorkspace and blocks revoked user or owner-revoked agent grants from appearing joinable', () => {
-  const state = createMultiOrgFixture();
-  const memberCaller = { principal_kind: 'user' as const, principal_id: 'u-member' }, guestCaller = { principal_kind: 'user' as const, principal_id: 'u-guest' }, agentCaller = { principal_kind: 'agent' as const, principal_id: 'ag-argon' };
-  const memberNav = deriveWorkspaceChannelNavVM(state, memberCaller, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-open', workspaceMenuOpen: true });
-  assert.equal(memberNav.activeWorkspace?.workspaceId, 'ws-build');
-  assert.equal(memberNav.activeWorkspace?.granted, true);
-  assert.equal(memberNav.header.activeWorkspace?.workspaceId, 'ws-build');
-  assert.deepEqual(memberNav.workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['commonswarm-build', true, false], ['customer-advisory', false, true]]);
-  const revokedUserState: OrgChannelAuthorityState = {
-    ...state,
+test('workspace selector enforces canReadWorkspace and blocks revoked user/agent grants', () => {
+  const s = fixture(), mem = u('u-member'), gst = u('u-guest'), agn = ag('ag-argon');
+  const mNav = deriveWorkspaceChannelNavVM(s, mem, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-open', workspaceMenuOpen: true });
+  assert.equal(mNav.activeWorkspace?.workspaceId, 'ws-build'); assert.equal(mNav.activeWorkspace?.granted, true); assert.equal(mNav.header.activeWorkspace?.workspaceId, 'ws-build');
+  assert.deepEqual(mNav.workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['commonswarm-build', true, false], ['customer-advisory', false, true]]);
+  const revU: OrgChannelAuthorityState = {
+    ...s,
     workspaceGrants: [
-      ...state.workspaceGrants.map((g) => (g.workspace_id === 'ws-build' && g.principal_id === 'u-member' ? { ...g, revoked_at: '2026-10-21T01:00:00Z' } : g)),
+      ...s.workspaceGrants.map((g) => (g.workspace_id === 'ws-build' && g.principal_id === 'u-member' ? { ...g, revoked_at: '2026-10-21T01:00:00Z' } : g)),
       { workspace_id: 'ws-ops', org_id: 'org-yulan', principal_kind: 'user', principal_id: 'u-member', role: 'member', created_at: '2026-10-21T00:00:00Z', revoked_at: '2026-10-21T01:00:00Z' },
     ],
   };
-  assert.deepEqual(deriveWorkspaceChannelNavVM(revokedUserState, memberCaller, { activeOrgId: 'org-yulan' }).workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['customer-advisory', false, true]]);
-  assert.deepEqual(deriveWorkspaceChannelNavVM(state, agentCaller, { activeOrgId: 'org-yulan' }).workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['commonswarm-build', true, false], ['operations', true, false]]);
-  const ownerRevokedState: OrgChannelAuthorityState = { ...state, workspaceGrants: state.workspaceGrants.map((g) => (g.workspace_id === 'ws-ops' && g.principal_id === 'u-tom' ? { ...g, revoked_at: '2026-10-21T01:00:00Z' } : g)) };
-  assert.deepEqual(deriveWorkspaceChannelNavVM(ownerRevokedState, agentCaller, { activeOrgId: 'org-yulan' }).workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['commonswarm-build', true, false]]);
-  const guestNav = deriveWorkspaceChannelNavVM(state, guestCaller, { activeOrgId: 'org-yulan', workspaceMenuOpen: true });
-  assert.deepEqual(guestNav.workspaces.map((w) => w.slug), ['commonswarm-build']);
-  assert.doesNotMatch(renderWorkspaceSwitcherMenuHtml(guestNav), /\+ New Workspace/);
-  assert.doesNotMatch(renderModeContextualListPaneHtml(guestNav), /Create channel|\+ New Channel/);
+  assert.deepEqual(deriveWorkspaceChannelNavVM(revU, mem, { activeOrgId: 'org-yulan' }).workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['customer-advisory', false, true]]);
+  assert.deepEqual(deriveWorkspaceChannelNavVM(s, agn, { activeOrgId: 'org-yulan' }).workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['commonswarm-build', true, false], ['operations', true, false]]);
+  const revO: OrgChannelAuthorityState = { ...s, workspaceGrants: s.workspaceGrants.map((g) => (g.workspace_id === 'ws-ops' && g.principal_id === 'u-tom' ? { ...g, revoked_at: '2026-10-21T01:00:00Z' } : g)) };
+  assert.deepEqual(deriveWorkspaceChannelNavVM(revO, agn, { activeOrgId: 'org-yulan' }).workspaces.map((w) => [w.slug, w.granted, w.joinable]), [['commonswarm-build', true, false]]);
+  const gNav = deriveWorkspaceChannelNavVM(s, gst, { activeOrgId: 'org-yulan', workspaceMenuOpen: true });
+  assert.deepEqual(gNav.workspaces.map((w) => w.slug), ['commonswarm-build']);
+  assert.doesNotMatch(renderWorkspaceSwitcherMenuHtml(gNav), /\+ New Workspace/);
+  assert.doesNotMatch(renderModeContextualListPaneHtml(gNav), /Create channel|\+ New Channel/);
 });
 
 test('privateChannelsEnabled defaults to false (fail-closed), member filters work, and topbar reflects mode', () => {
-  const state = createMultiOrgFixture(), caller = { principal_kind: 'user' as const, principal_id: 'u-tom' };
-  const defaultOffVm = deriveWorkspaceChannelNavVM({ ...state, privateChannelsEnabled: undefined }, caller, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build' });
-  assert.deepEqual(defaultOffVm.channels.map((c) => c.slug), ['general', 'design']);
-  const chatVm = deriveWorkspaceChannelNavVM(state, caller, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build', activeChannelId: 'ch-sec', mode: 'chat', unreadCounts: { 'ch-design': 3, 'ch-sec': 150 }, threadsByChannel: { 'ch-sec': [{ threadId: 'th-1', title: 'Audit log check', replyCount: 2 }] } });
+  const s = fixture(), tom = u('u-tom');
+  assert.deepEqual(deriveWorkspaceChannelNavVM({ ...s, privateChannelsEnabled: undefined }, tom, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build' }).channels.map((c) => c.slug), ['general', 'design']);
+  const chatVm = deriveWorkspaceChannelNavVM(s, tom, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build', activeChannelId: 'ch-sec', mode: 'chat', unreadCounts: { 'ch-design': 3, 'ch-sec': 150 }, threadsByChannel: { 'ch-sec': [{ threadId: 'th-1', title: 'Audit log check', replyCount: 2 }] } });
   assert.deepEqual(chatVm.channels.map((c) => [c.slug, c.visibility, c.prefix, c.unreadBadge, c.current]), [['general', 'workspace', '#', null, false], ['design', 'workspace', '#', '3', false], ['sec-incident', 'private', 'lock', '99+', true]]);
   assert.equal(formatUnreadCountPill(0), null); assert.equal(formatUnreadCountPill(120), '99+');
   assert.doesNotMatch(renderModeContextualListPaneHtml(chatVm), /cs-workspace-quick-links/);
-  const privShellHtml = renderKylonOrgShellHtml(chatVm);
-  assert.match(privShellHtml, /<span id="screen-title" data-channel-name>sec-incident<\/span>/);
-  assert.match(privShellHtml, /id="screen-visibility-badge">Private<\/span>/);
-  assert.match(privShellHtml, /data-room-symbol="lock"/);
-  const agentsOnlyVm = deriveWorkspaceChannelNavVM(state, caller, { activeOrgId: 'org-yulan', mode: 'members', memberFilter: 'agents' });
-  assert.deepEqual(agentsOnlyVm.members.map((m) => m.displayName), ['Argon']);
-  const agentsPaneHtml = renderModeContextualListPaneHtml(agentsOnlyVm);
-  assert.match(agentsPaneHtml, /data-member-filter="agents" aria-pressed="true"/);
-  assert.doesNotMatch(agentsPaneHtml, /data-channel-list/);
-  assert.deepEqual(deriveWorkspaceChannelNavVM(state, caller, { activeOrgId: 'org-yulan', mode: 'members', memberFilter: 'guests' }).members.map((m) => m.principalId), ['u-guest']);
-  const wikiVm = deriveWorkspaceChannelNavVM(state, caller, { activeOrgId: 'org-yulan', mode: 'wiki', mobileDrawerOpen: true });
+  const privHtml = renderKylonOrgShellHtml(chatVm);
+  for (const r of [/<span id="screen-title" data-channel-name>sec-incident<\/span>/, /id="screen-visibility-badge">Private<\/span>/, /data-room-symbol="lock"/]) assert.match(privHtml, r);
+  const agVm = deriveWorkspaceChannelNavVM(s, tom, { activeOrgId: 'org-yulan', mode: 'members', memberFilter: 'agents' });
+  assert.deepEqual(agVm.members.map((m) => m.displayName), ['Argon']);
+  const agPane = renderModeContextualListPaneHtml(agVm);
+  assert.match(agPane, /data-member-filter="agents" aria-pressed="true"/);
+  assert.doesNotMatch(agPane, /data-channel-list/);
+  assert.deepEqual(deriveWorkspaceChannelNavVM(s, tom, { activeOrgId: 'org-yulan', mode: 'members', memberFilter: 'guests' }).members.map((m) => m.principalId), ['u-guest']);
+  const wikiVm = deriveWorkspaceChannelNavVM(s, tom, { activeOrgId: 'org-yulan', mode: 'wiki', mobileDrawerOpen: true });
   assert.equal(wikiVm.wikiDocuments.length, 0);
-  const wikiPaneHtml = renderModeContextualListPaneHtml(wikiVm);
-  assert.match(wikiPaneHtml, /data-wiki-empty="true"/);
-  assert.doesNotMatch(wikiPaneHtml, /data-channel-list/);
-  const wikiShellHtml = renderKylonOrgShellHtml(wikiVm);
-  assert.match(wikiShellHtml, /<span id="screen-title" data-channel-name>Wiki<\/span>/);
-  assert.match(wikiShellHtml, /id="sidebar"[^>]*role="dialog" aria-modal="true"/);
-  assert.match(wikiShellHtml, /id="main" tabindex="-1" inert/);
+  const wikiPane = renderModeContextualListPaneHtml(wikiVm);
+  assert.match(wikiPane, /data-wiki-empty="true"/); assert.doesNotMatch(wikiPane, /data-channel-list/);
+  const wikiHtml = renderKylonOrgShellHtml(wikiVm);
+  for (const r of [/<span id="screen-title" data-channel-name>Wiki<\/span>/, /id="sidebar"[^>]*role="dialog" aria-modal="true"/, /id="main" tabindex="-1" inert/]) assert.match(wikiHtml, r);
 });
 
-test('all 38 preserved hooks across chat/members/wiki modes, scoped Kylon v0.3 CSS, and <= 4,500 token budget', () => {
+test('all 38 preserved hooks, scoped Kylon v0.3 CSS, and <= 4,500 token budget', () => {
   assert.equal(PRESERVED_SHELL_HOOKS.length, 38);
-  const state = createMultiOrgFixture(), caller = { principal_kind: 'user' as const, principal_id: 'u-tom' };
-  const specimenHtml = readFileSync(resolve(REPO_ROOT, 'site/src/components/app/live-dashboard/org-shell/specimen.html'), 'utf8');
-  const applyUpdates = (h: string) => h.replace(/<div[^>]*data-home-rail-slot[^>]*>[\s\S]*?<\/div>/, '<div data-home-rail-slot>r</div>').replace(/<div[^>]*data-home-workspace-shell[^>]*>[\s\S]*?<\/div>/, '<div data-home-workspace-shell="ws-build">s</div>').replace(/<(?:p|span)[^>]*data-rail-account[^>]*>[\s\S]*?<\/(?:p|span)>/, '<span data-rail-account>a</span>').replace(/<span id="screen-title" data-channel-name>[\s\S]*?<\/span>/, '<span id="screen-title" data-channel-name>c</span>').replace(/<p class="topic" id="screen-topic" data-channel-description>[\s\S]*?<\/p>/, '<p class="topic" id="screen-topic" data-channel-description>t</p>');
+  const s = fixture(), tom = u('u-tom');
+  const spec = readFileSync(resolve(REPO_ROOT, `${ORG_SHELL_DIR}/specimen.html`), 'utf8');
+  const up = (h: string) => h.replace(/<div[^>]*data-home-rail-slot[^>]*>[\s\S]*?<\/div>/, '<div data-home-rail-slot>r</div>').replace(/<div[^>]*data-home-workspace-shell[^>]*>[\s\S]*?<\/div>/, '<div data-home-workspace-shell="ws-build">s</div>').replace(/<(?:p|span)[^>]*data-rail-account[^>]*>[\s\S]*?<\/(?:p|span)>/, '<span data-rail-account>a</span>').replace(/<span id="screen-title" data-channel-name>[\s\S]*?<\/span>/, '<span id="screen-title" data-channel-name>c</span>').replace(/<p class="topic" id="screen-topic" data-channel-description>[\s\S]*?<\/p>/, '<p class="topic" id="screen-topic" data-channel-description>t</p>');
+  const uSpec = up(spec);
   for (const mode of ['chat', 'members', 'wiki'] as const) {
-    const shellHtml = renderKylonOrgShellHtml(deriveWorkspaceChannelNavVM(state, caller, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build', mode }));
-    const uShell = applyUpdates(shellHtml), uSpec = applyUpdates(specimenHtml);
-    assert.doesNotMatch(shellHtml, /data-home-rail-slot[^>]*hidden|data-home-workspace-shell[^>]*hidden/);
-    for (const p of [/data-theme-toggle/, /data-user-menu-trigger/, /id="hm-ws-title"/, /id="hm-phone-title"/, /id="screen-visibility-badge"/]) assert.match(uShell, p);
-    if (mode === 'chat') assert.match(shellHtml, /data-channel-id="ch-gen" data-channel-place="ch-gen"/);
+    const sh = renderKylonOrgShellHtml(deriveWorkspaceChannelNavVM(s, tom, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build', mode })), uSh = up(sh);
+    assert.doesNotMatch(sh, /data-home-rail-slot[^>]*hidden|data-home-workspace-shell[^>]*hidden|<use href="#i-/);
+    for (const p of [/data-theme-toggle/, /data-user-menu-trigger/, /id="hm-ws-title"/, /id="hm-phone-title"/, /id="screen-visibility-badge"/, /<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M/]) assert.match(uSh, p);
+    if (mode === 'chat') { assert.match(sh, /data-channel-id="ch-gen"/); assert.doesNotMatch(sh, /data-channel-id="ch-gen"[^>]*data-channel-place/); }
     for (const hook of PRESERVED_SHELL_HOOKS) {
-      const needle = hook.startsWith('#') ? `id="${hook.slice(1)}"` : hook.slice(1, -1);
-      assert.ok(uShell.includes(needle), `uShell (${mode}) missing ${hook}`);
-      assert.ok(uSpec.includes(needle), `uSpec missing ${hook}`);
+      const n = hook.startsWith('#') ? `id="${hook.slice(1)}"` : hook.slice(1, -1);
+      assert.ok(uSh.includes(n)); assert.ok(uSpec.includes(n));
     }
   }
-  const css = readFileSync(resolve(REPO_ROOT, 'site/src/components/app/live-dashboard/org-shell/org-shell.css'), 'utf8');
-  assert.doesNotMatch(css, /\/Users\//); assert.doesNotMatch(css, /^body\s*\{/m);
+  const chatVm = deriveWorkspaceChannelNavVM(s, tom, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build' });
+  const sel: Array<string | null> = [], cbs: string[] = [];
+  const mk = (dataset: Record<string, string> = {}) => {
+    const attrs = new Map<string, string>(), ls: Array<() => void> = [];
+    return { dataset, textContent: '', hidden: false, attrs, setAttribute: (k: string, v: string) => attrs.set(k, v), removeAttribute: (k: string) => attrs.delete(k), addEventListener: (_t: string, fn: () => void) => ls.push(fn), click: () => ls.forEach((fn) => fn()) };
+  };
+  const allP = mk({ channelPlace: '' }), rGen = mk({ channelId: 'ch-gen', channel: 'general', channelVisibility: 'workspace' }), rSec = mk({ channelId: 'ch-sec', channel: 'sec-incident', channelVisibility: 'private' });
+  const places = [allP], tNode = mk(), bNode = mk();
+  allP.addEventListener('click', () => sel.push(null));
+  for (const ch of chatVm.channels) { const lp = mk({ channelPlace: ch.channelId }); lp.addEventListener('click', () => sel.push(ch.channelId)); places.push(lp); }
+  bindWorkspaceChannelNavDom((q) => (q === '[data-channel-id]' ? [rGen, rSec] : q === '[data-channel-place]' ? places : q === '[data-channel-place=""]' ? [allP] : q.includes('channel-name') ? [tNode] : q === '#screen-visibility-badge' ? [bNode] : []), chatVm, { onSelectChannel: (id, sl) => cbs.push(`${id}:${sl ?? ''}`) });
+  rSec.click();
+  assert.deepEqual(sel, ['ch-sec']); assert.deepEqual(cbs, ['ch-sec:sec-incident']);
+  assert.equal(rSec.attrs.get('aria-current'), 'page'); assert.equal(tNode.textContent, 'sec-incident'); assert.equal(bNode.hidden, false);
+  allP.click();
+  assert.deepEqual(sel, ['ch-sec', null]); assert.equal(rSec.attrs.get('aria-current'), undefined);
+  const css = readFileSync(resolve(REPO_ROOT, `${ORG_SHELL_DIR}/org-shell.css`), 'utf8');
+  assert.doesNotMatch(css, /\/Users\/|^body\s*\{/m);
   for (const [t, v] of [['--cs-canvas', '#f5f5f2'], ['--cs-surface', '#ffffff'], ['--cs-subtle', '#f5f5f2'], ['--cs-selected', '#eeefea'], ['--cs-ink', '#282720'], ['--cs-secondary', '#655e53'], ['--cs-muted', '#716b60'], ['--cs-line', '#e9e7e2'], ['--cs-control', '#7e887c'], ['--cs-accent', '#697344'], ['--cs-focus', '#586339'], ['--cs-rail', '52px'], ['--cs-sidebar', '390px'], ['--cs-radius-panel', '0px']] as const) assert.match(css, new RegExp(`${t}:\\s*${v}`));
-  for (const p of ['org-header-switcher.ts', 'workspace-channel-nav.ts', 'org-shell.css', 'specimen.html'].map((f) => `site/src/components/app/live-dashboard/org-shell/${f}`).concat('tests/org-channels/slice4-ui-shell.test.ts')) {
-    const c = readFileSync(resolve(REPO_ROOT, p), 'utf8'), tok = Math.ceil(c.length / 4);
-    assert.ok(tok <= 4500, `${p} exceeds 4,500 tokens: ${tok} (${c.length} chars)`);
+  for (const p of ['org-header-switcher.ts', 'workspace-channel-nav.ts', 'org-shell.css', 'specimen.html'].map((f) => `${ORG_SHELL_DIR}/${f}`).concat('tests/org-channels/slice4-ui-shell.test.ts')) {
+    const c = readFileSync(resolve(REPO_ROOT, p), 'utf8');
+    assert.ok(Math.ceil(c.length / 4) <= 4500, p);
   }
 });
