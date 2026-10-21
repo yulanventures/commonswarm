@@ -13,7 +13,7 @@ export type ChannelNavItemVM = WorkspaceChannelNavVM['channels'][number];
 export type RosterSummaryItemVM = WorkspaceChannelNavVM['members'][number];
 export type WikiDocumentNavItemVM = { slug: string; title: string; versionLabel: string; current: boolean };
 
-const btn = (a: string, b = '') => `<button type="button" ${a}>${b}</button>`;
+const btn = (a: string, b = '') => `<button type="button" ${a}>${b}</button>`, n0 = (v: unknown) => Math.max(0, Math.floor(Number(v) || 0));
 const ib = (l: string, a: string, i: string, p = '') => btn(`class="icon-button" aria-label="${l}" ${a}`, `${p}${ic(i)}`);
 const pills = (k: string, vs: readonly string[], cur: string) =>
   vs.map((v) => btn(`data-${k}="${v}" aria-pressed="${cur === v}"`, v[0].toUpperCase() + v.slice(1))).join('');
@@ -33,18 +33,19 @@ export function deriveWorkspaceChannelNavVM(s0: OrgChannelAuthorityState, c: Cal
   const rawChs = activeWorkspace?.granted ? s.channels.filter((ch) => ch.workspace_id === activeWorkspace.workspaceId && isLive(ch) && canReadChannel(s, c, ch.channel_id)) : [];
   const curCh = rawChs.find((ch) => ch.channel_id === opt.activeChannelId || norm(ch.slug) === norm(opt.activeChannelId ?? '')) ?? rawChs.find((ch) => norm(ch.slug) === 'general') ?? rawChs[0] ?? null;
   const channels = rawChs.map((ch) => {
-    const u = unreads[ch.channel_id] ?? 0, isPrivate = ch.visibility === 'private';
-    return { channelId: ch.channel_id, workspaceId: ch.workspace_id, slug: ch.slug, topic: ch.topic ?? ch.purpose ?? null, visibility: ch.visibility, isPrivate, prefix: (isPrivate ? 'lock' : '#') as '#' | 'lock', unreadCount: u > 0 ? Math.floor(u) : 0, unreadBadge: formatUnreadCountPill(u), current: curCh?.channel_id === ch.channel_id, threads: (tMap[ch.channel_id] ?? []) as Array<{ threadId: string; title: string; replyCount: number }> };
+    const u = n0(unreads[ch.channel_id]), isPrivate = ch.visibility === 'private';
+    const threads = (tMap[ch.channel_id] ?? []).map((t: any) => ({ threadId: String(t.threadId ?? ''), title: String(t.title ?? ''), replyCount: n0(t.replyCount) }));
+    return { channelId: ch.channel_id, workspaceId: ch.workspace_id, slug: ch.slug, topic: ch.topic ?? ch.purpose ?? null, visibility: ch.visibility, isPrivate, prefix: (isPrivate ? 'lock' : '#') as '#' | 'lock', unreadCount: u, unreadBadge: formatUnreadCountPill(u), current: curCh?.channel_id === ch.channel_id, threads };
   });
-  const cf = String(opt.channelFilter ?? 'all').toLowerCase(), channelFilter: ChannelFilterPill = cf === 'unread' || cf === 'private' ? cf : 'all';
+  const cf0 = String(opt.channelFilter ?? 'all').toLowerCase(), channelFilter: ChannelFilterPill = cf0 === 'unread' || cf0 === 'private' ? cf0 : 'all';
   const visibleChannels = channels.filter((ch) => (channelFilter === 'unread' ? ch.unreadCount > 0 : channelFilter === 'private' ? ch.isPrivate : true));
-  const activeChannel = channels.find((ch) => ch.current) ?? channels[0] ?? null, mf = String(opt.memberFilter ?? 'all').toLowerCase();
-  const memberFilter: MemberFilterPill = mf.startsWith('pe') ? 'people' : mf.startsWith('ag') ? 'agents' : mf.startsWith('gu') ? 'guests' : 'all';
+  const activeChannel = channels.find((ch) => ch.current) ?? channels[0] ?? null, mf0 = String(opt.memberFilter ?? 'all').toLowerCase();
+  const memberFilter: MemberFilterPill = mf0.startsWith('pe') ? 'people' : mf0.startsWith('ag') ? 'agents' : mf0.startsWith('gu') ? 'guests' : 'all';
   const allRoster = (opt.roster ?? s.orgMemberships.filter((m) => m.org_id === org.orgId && isLive(m)).map((m) => {
     const dn = (m.principal_kind === 'agent' ? s.agentIdentities.find((a) => a.id === m.principal_id)?.display_name : undefined) ?? m.principal_id;
     return { principalKind: m.principal_kind, principalId: m.principal_id, displayName: dn, initials: dn.slice(0, 2).toUpperCase(), role: m.role, roleLabel: formatOrgRoleBadge(m.role), specialty: m.principal_kind === 'agent' ? 'Agent' : 'Person' };
-  })) as Array<{ principalKind: 'user' | 'agent'; principalId: string; displayName: string; initials: string; role: typeof org.role; roleLabel: string; specialty: string }>;
-  const members = allRoster.filter((m) => (memberFilter === 'people' ? m.principalKind === 'user' : memberFilter === 'agents' ? m.principalKind === 'agent' : memberFilter === 'guests' ? m.role === 'guest' : true));
+  })) as Array<Record<string, any>>;
+  const members = allRoster.filter((m) => (memberFilter === 'people' ? m.principalKind === 'user' : memberFilter === 'agents' ? m.principalKind === 'agent' : memberFilter === 'guests' ? m.role === 'guest' : true)) as Array<{ principalKind: 'user' | 'agent'; principalId: string; displayName: string; initials: string; role: typeof org.role; roleLabel: string; specialty: string }>;
   const md = String(opt.mode ?? 'chat').toLowerCase(), mode: KylonListPaneMode = md === 'members' || md === 'wiki' ? md : 'chat';
   return { header, mode, channelFilter, memberFilter, workspaces, activeWorkspace, canCreateWorkspace: !isGuest, canCreateChannel: Boolean(activeWorkspace?.granted && !isGuest), channels, visibleChannels, activeChannel, roster: members, members, wikiDocuments: (opt.wikiDocuments ?? []) as WikiDocumentNavItemVM[], mobileDrawerOpen: Boolean(opt.mobileDrawerOpen) };
 }
@@ -59,8 +60,8 @@ export function renderWorkspaceSwitcherMenuHtml(vm: WorkspaceChannelNavVM): stri
 
 export function renderChannelRowHtml(ch: ChannelNavItemVM): string {
   const pfx = ch.isPrivate ? `<span class="cs-channel-prefix" aria-label="Private channel">${ic('lock')}</span>` : '<span class="cs-channel-prefix" aria-hidden="true">#</span>';
-  const u = ch.unreadBadge ? `<span class="count cs-unread-pill" data-channel-unread-count="${ch.unreadCount}">${esc(ch.unreadBadge)}</span>` : '', s = esc(ch.slug), cid = esc(ch.channelId), v = esc(ch.visibility);
-  const th = ch.current && ch.threads.length ? `<div class="cs-channel-threads">${ch.threads.map((t) => btn(`class="cs-thread-row" data-thread-id="${esc(t.threadId)}"`, `<span>${esc(t.title)}</span><small class="meta">${t.replyCount} ${t.replyCount === 1 ? 'reply' : 'replies'}</small>`)).join('')}</div>` : '';
+  const u = ch.unreadBadge ? `<span class="count cs-unread-pill" data-channel-unread-count="${n0(ch.unreadCount)}">${esc(ch.unreadBadge)}</span>` : '', s = esc(ch.slug), cid = esc(ch.channelId), v = esc(ch.visibility);
+  const th = ch.current && ch.threads.length ? `<div class="cs-channel-threads">${ch.threads.map((t) => { const r = n0(t.replyCount); return btn(`class="cs-thread-row" data-thread-id="${esc(t.threadId)}"`, `<span>${esc(t.title)}</span><small class="meta">${r} ${r === 1 ? 'reply' : 'replies'}</small>`); }).join('')}</div>` : '';
   return `<div class="cs-channel-group">${btn(`class="nav-row" data-channel="${s}" data-channel-id="${cid}" data-channel-visibility="${v}"${ch.current ? ' aria-current="page"' : ''}`, `${pfx}<span>${s}</span>${u}`)}${th}</div>`;
 }
 export function renderModeContextualListPaneHtml(vm: WorkspaceChannelNavVM): string {
@@ -95,14 +96,14 @@ export function bindWorkspaceChannelNavDom(root: any, vm: WorkspaceChannelNavVM,
   const cur = (s: string, p: (x: any) => boolean) => q(s).forEach((x) => (p(x) ? x.setAttribute('aria-current', 'page') : x.removeAttribute?.('aria-current')));
   const sym = (p: boolean) => { const v = p ? 'lock' : '#'; q('#screen-visibility-badge').forEach((b) => (b.hidden = !p)); q('#room-symbol,[data-room-symbol]').forEach((s) => { if (s.dataset) s.dataset.roomSymbol = v; s.setAttribute?.('data-room-symbol', v); s.textContent = v; if ('innerHTML' in s) s.innerHTML = p ? ic('lock') : '#'; }); };
   on('[data-channel-id]', (el) => {
-    const cid = el.dataset.channelId ?? '', slug = el.dataset.channel ?? cid;
-    cur('[data-channel-id]', (r) => r.dataset.channelId === cid); cur('[data-channel-place]', (p) => (p.dataset.channelPlace ?? '') === cid);
-    q('[data-channel-place]').filter((p) => (p.dataset.channelPlace ?? '') === cid).forEach((p) => p.click?.());
+    const cid = el.dataset.channelId ?? '', slug = el.dataset.channel ?? cid, match = (x: any) => (x.dataset.channelPlace ?? '') === cid;
+    cur('[data-channel-id]', (r) => r.dataset.channelId === cid); cur('[data-channel-place]', match);
+    q('[data-channel-place]').filter(match).forEach((p) => p.click?.());
     q('[data-channel-name],[data-channel-menu-label]').forEach((n) => (n.textContent = slug)); sym(el.dataset.channelVisibility === 'private'); cb.onSelectChannel?.(cid, slug);
   });
   on('[data-channel-place=""]', (el) => { cur('[data-channel-id]', () => false); el.setAttribute('aria-current', 'page'); sym(false); cb.onSelectChannel?.(null); });
   on('[data-channel-create-trigger]', () => { if (vm.canCreateChannel) { q('#hm-channel-menu-panel [data-channel-new]').forEach((b) => b.click?.()); cb.onCreateChannel?.(); } });
-  on('[data-channel-filter]', (el) => { const f = el.dataset.channelFilter ?? 'all'; q('[data-channel-filter]').forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.channelFilter === f))); cb.onSelectChannelFilter?.(f); });
-  on('[data-member-filter]', (el) => { const f = el.dataset.memberFilter ?? 'all'; q('[data-member-filter]').forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.memberFilter === f))); cb.onSelectMemberFilter?.(f); });
+  const pill = (k: string, fn?: (v: string) => void) => on(`[data-${k}-filter]`, (el) => { const f = el.dataset[`${k}Filter`] ?? 'all'; q(`[data-${k}-filter]`).forEach((x) => x.setAttribute('aria-pressed', String(x.dataset[`${k}Filter`] === f))); fn?.(f); });
+  pill('channel', cb.onSelectChannelFilter); pill('member', cb.onSelectMemberFilter);
   on('[data-workspace-id]', (el) => { const id = el.dataset.workspaceId ?? ''; q('[data-workspace-id]').forEach((x) => { const c = String(x.dataset.workspaceId === id); x.setAttribute('aria-checked', c); x.setAttribute('aria-current', c); }); cb.onSelectWorkspace?.(id, el.dataset.workspaceSlug ?? ''); });
 }

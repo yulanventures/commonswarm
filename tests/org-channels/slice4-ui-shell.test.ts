@@ -116,10 +116,12 @@ test('workspace selector enforces canReadWorkspace and blocks revoked user/agent
 test('privateChannelsEnabled defaults to false (fail-closed), member filters work, and topbar reflects mode', () => {
   const s = fixture(), tom = u('u-tom');
   deq(deriveWorkspaceChannelNavVM({ ...s, privateChannelsEnabled: undefined }, tom, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build' }).channels.map((c) => c.slug), ['general', 'design']);
-  const chatVm = deriveWorkspaceChannelNavVM(s, tom, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build', activeChannelId: 'ch-sec', mode: 'chat', unreadCounts: { 'ch-design': 3, 'ch-sec': 150 }, threadsByChannel: { 'ch-sec': [{ threadId: 'th-1', title: 'Audit log check', replyCount: 2 }] } });
+  const chatVm = deriveWorkspaceChannelNavVM(s, tom, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build', activeChannelId: 'ch-sec', mode: 'chat', unreadCounts: { 'ch-design': 3, 'ch-sec': 150 }, threadsByChannel: { 'ch-sec': [{ threadId: 'th-1', title: 'Audit log check', replyCount: '<img src=x onerror=alert(1)>' as any }] } });
   deq(chatVm.channels.map((c) => [c.slug, c.visibility, c.prefix, c.unreadBadge, c.current]), [['general', 'workspace', '#', null, false], ['design', 'workspace', '#', '3', false], ['sec-incident', 'private', 'lock', '99+', true]]);
   eq(formatUnreadCountPill(0), null); eq(formatUnreadCountPill(120), '99+');
-  assert.doesNotMatch(renderModeContextualListPaneHtml(chatVm), /cs-workspace-quick-links/);
+  const chatPane = renderModeContextualListPaneHtml(chatVm);
+  assert.doesNotMatch(chatPane, /cs-workspace-quick-links|<img src=x/);
+  assert.match(chatPane, /0 replies<\/small>/);
   const privHtml = renderKylonOrgShellHtml(chatVm);
   for (const r of [/<span id="screen-title" data-channel-name>sec-incident<\/span>/, /id="screen-visibility-badge">Private<\/span>/, /data-room-symbol="lock"/]) assert.match(privHtml, r);
   const agVm = deriveWorkspaceChannelNavVM(s, tom, { activeOrgId: 'org-yulan', mode: 'members', memberFilter: 'agents' });
