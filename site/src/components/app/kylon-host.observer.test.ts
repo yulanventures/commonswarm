@@ -31,9 +31,18 @@ const fixtureScript = `
     const deadline = performance.now() + 2000;
     while (!predicate() && performance.now() < deadline) await new Promise(resolve => requestAnimationFrame(resolve));
     if (!predicate()) throw Error(label + ': ' + JSON.stringify({ width: innerWidth, fonts: document.fonts.status,
-      standalone: frame.hasAttribute('data-home-standalone'), field: app.querySelector('[data-todo-comment]')?.outerHTML }));
+      standalone: frame.hasAttribute('data-home-standalone'), field: app.querySelector('[data-todo-comment]')?.outerHTML,
+      context: { headerParent: slot.parentElement?.className, railParent: context.parentElement?.tagName,
+        sideParent: fixture.side?.parentElement?.tagName, summaries: [...app.querySelectorAll('.cs-todo-context summary')].map(node => node.textContent) } }));
   };
-  let todoAccountParent, tagDelivers;
+  let todoAccountParent, tagDelivers, contextHomes, contextListeners, contextInventory;
+  const visible = node => !!node?.getClientRects().length && !node.closest('[hidden],[inert]');
+  const summary = label => [...app.querySelectorAll('.cs-todo-context summary')].find(node => node.textContent === label);
+  const inventory = () => [...fixture.side.querySelectorAll('[data-side-card],.hm-side-entry')].filter(node => node.dataset.sideCard !== 'todos')
+    .map(node => ({ key: node.dataset.sideCard || 'entry', text: node.textContent, links: [...node.querySelectorAll('a')].map(a => a.getAttribute('href')) }));
+  const contextMounted = () => fixture.side.closest('details') === summary('Workspace resources')?.parentElement
+    && context.closest('details') === summary('Workspace navigation')?.parentElement
+    && slot.parentElement?.classList.contains('cs-todo-context');
   const tagState = () => {
     const field = app.querySelector('[data-todo-comment]'), pop = app.querySelector('.hm-tag-picker .hm-picker-pop');
     return { field, pop, list: pop?.querySelector('[role=listbox]'), active: document.getElementById(field?.getAttribute('aria-activedescendant')) };
@@ -187,6 +196,107 @@ const fixtureScript = `
     fixture.restoreTodo(); ({ bar, menu, heading } = fixture);
     check('Chat restores adopted original heading/menu after detail', docked() && !frame.hasAttribute('data-home-standalone') && sameNodes());
   },
+  async contextBegin() {
+    contextHomes = [context, slot, fixture.side].map(node => ({ node, parent: node.parentNode, next: node.nextSibling, hidden: node.hidden }));
+    contextListeners = fixture.listenerCount(); contextInventory = inventory();
+    fixture.renderContext('todos');
+    await until(() => contextMounted() && !!app.querySelector('[data-home-todos] h1') && document.fonts.status === 'loaded', 'Todo context did not mount original slots');
+    check('Todo context owns same header/navigation/resources/account nodes', sameNodes() && contextMounted() && app.querySelector('[data-home-side-slot]') === fixture.side);
+    check('native disclosures initially closed, retain original descendants', ['Workspace navigation', 'Workspace resources'].every(label => {
+      const node = summary(label); return node?.tagName === 'SUMMARY' && node.parentElement.tagName === 'DETAILS' && !node.parentElement.open;
+    }));
+    const main = frame.querySelector('.hm-frame__main'), a = frame.getBoundingClientRect(), b = main.getBoundingClientRect();
+    check('Todo main uses available working column without permanent resource column', Math.abs(a.width - b.width) <= 1, { frameWidth: a.width, mainWidth: b.width });
+    check('ready index retains unique resource facts/URLs and omits only duplicate Todo card', JSON.stringify(inventory()) === JSON.stringify(contextInventory)
+      && !fixture.side.querySelector('[data-side-card=todos]'), inventory());
+    const title = app.querySelector('[data-home-todos] h1'); this.contextIndexLeft = title.getBoundingClientRect().left;
+    for (const view of ['todos', 'todo']) for (const state of ['pending', 'refused', 'failed', 'absent', view === 'todos' ? 'empty' : 'not-found', 'ready']) {
+      fixture.renderContext(view, state);
+      await until(() => contextMounted() && !!app.querySelector('[data-home-route-pane] h1'), 'Todo context/read state lost its real heading');
+      const pane = app.querySelector('[data-home-route-pane]'), text = pane.textContent;
+      const expected = state === 'empty' ? 'To-dos' : state === 'not-found' ? 'Nothing with this link in Invented workspace.' : state === 'pending' ? view === 'todo' ? 'Loading this to-do…' : 'To-dos' : state === 'ready'
+        ? view === 'todo' ? 'Check the household filters' : 'To-dos' : state === 'absent' && view === 'todo' ? 'Could not load this to-do.' : 'Could not load to-dos.';
+      check('whole Todo mode retains ' + view + '/' + state + ' content/context', pane.querySelector('h1').textContent === expected && contextMounted(), { expected, text });
+      check('read ' + view + '/' + state + ' resources not discarded', !!fixture.side.querySelector('[data-side-card=shared]') && !!fixture.side.querySelector('.hm-side-entry')
+        && (state !== 'pending' || !!fixture.side.querySelector('[aria-busy=true]')));
+      if (state === 'empty') check('real empty index stays empty', !pane.querySelector('[data-todo-row]') && text.includes('No to-dos here yet.'));
+      if (view === 'todos' && state === 'ready') check('controlled index retains mayAdd false and completion true',
+        !pane.querySelector('[data-todo-add]') && pane.querySelectorAll('[data-todo-complete]').length === 1);
+    }
+    ({ bar, menu, heading } = fixture);
+    const back = app.querySelector('[data-todo-back]'), assigned = app.querySelector('[data-todo-assigned] h2');
+    check('index/detail content gutter delta at most12px', Math.abs(this.contextIndexLeft - back.getBoundingClientRect().left) <= 12
+      && Math.abs(this.contextIndexLeft - assigned.getBoundingClientRect().left) <= 12,
+      { index: this.contextIndexLeft, back: back.getBoundingClientRect().left, assigned: assigned.getBoundingClientRect().left });
+    check('mode listener has one active registration beyond original shell', fixture.listenerCount() === contextListeners + 1);
+  },
+  contextSummaryFocused(label) { return document.activeElement === summary(label); },
+  async contextSummaryOpened(label, expected = true) {
+    await until(() => summary(label)?.parentElement.open === expected, 'Native disclosure did not toggle: ' + label);
+    const node = summary(label), style = getComputedStyle(node), geometry = paint(node, parseFloat(style.outlineWidth) + parseFloat(style.outlineOffset));
+    check('native summary target/ring ' + label, node.matches(':focus-visible') && geometry.width >= 44 && geometry.height >= 44
+      && parseFloat(style.outlineWidth) === 2 && parseFloat(style.outlineOffset) === 2 && geometry.inside && !geometry.clips.length, geometry);
+  },
+  async contextControlsAndRefresh() {
+    const before = calls.length, parent = account.parentElement;
+    context.querySelector('[data-rail-workspace="fixture-other"]').click();
+    context.querySelector('[data-rail-person="context-owner"]').click(); context.querySelector('[data-rail-agent="context-agent"]').click();
+    slot.querySelector('.hm-ws-header [data-roster-open]').click();
+    const originalMenu = slot.querySelector('.hm-ws-header .hm-menu');
+    for (const [label, item] of [['Workspace settings', 'settings'], ['Admin access and history', 'admin-access']]) {
+      originalMenu.querySelector('.hm-menu__trigger').click();
+      const button = [...originalMenu.querySelectorAll('[role=menuitem]')].find(node => node.textContent === label);
+      check('projected header door visible ' + label, visible(button)); button?.click();
+      check('projected header callback ' + item, calls.slice(before).filter(call => call.kind === 'menu' && call.item === item).length === 1);
+    }
+    check('original rail/People callbacks retain exact targets once',
+      calls.slice(before).filter(call => call.kind === 'rail-navigate' && call.href === '?w=fixture-other').length === 1
+      && calls.slice(before).filter(call => call.kind === 'rail-person' && call.id === 'context-owner').length === 1
+      && calls.slice(before).filter(call => call.kind === 'rail-agent' && call.id === 'context-agent').length === 1
+      && calls.slice(before).filter(call => call.kind === 'people').length === 1);
+    check('original local read-only/writable resource gates retained', fixture.side.querySelectorAll('[data-side-todo-complete]').length === 1
+      && !fixture.side.querySelector('[data-side-todo=side-reader] input'));
+    fixture.side.querySelector('[data-side-todo-complete]').click(); fixture.side.querySelector('[data-side-add-todo]').click();
+    await until(() => calls.slice(before).some(call => call.kind === 'resource-complete'), 'Original local complete callback did not settle');
+    check('original resource callbacks retain exact targets once', calls.slice(before).filter(call => call.kind === 'resource-complete' && call.id === 'side-allowed').length === 1
+      && calls.slice(before).filter(call => call.kind === 'resource-add').length === 1);
+    fixture.renderResources('refused'); const door = fixture.side.querySelector('[data-side-door]');
+    check('real refusal remediation remains reachable', visible(door)); door.click();
+    check('real refusal callback retained, no invented approval', calls.slice(before).some(call => call.kind === 'resource-access'));
+    fixture.renderResources('ready');
+    context.querySelector('[data-rail-person="context-owner"]').focus(); fixture.renderRail();
+    check('replaced navigation child restores focus to retained native summary', document.activeElement === summary('Workspace navigation'));
+    fixture.side.querySelector('[data-side-todo-complete]').focus(); fixture.renderResources();
+    check('replaced resource child restores focus to retained native summary', document.activeElement === summary('Workspace resources'));
+    const start = fixture.refreshRecords.length, accountMenu = account.querySelector('[data-user-menu]'), option = account.querySelector('[data-local-account-option]');
+    accountMenu.hidden = false; option.focus(); fixture.renderHeader(); fixture.renderResources(); fixture.renderRail();
+    ({ bar, menu, heading } = fixture);
+    check('projected owner refresh preserves unrelated original account popup/focus', account.parentElement === parent && !accountMenu.hidden && document.activeElement === option);
+    check('owner refresh restores original slot parents before replacing content', fixture.refreshRecords.slice(start).every(record =>
+      contextHomes.some(home => home.node === record.node && home.parent === record.parent)) && fixture.refreshRecords.slice(start).length === 3);
+    check('refresh reprojects same slots and keeps native disclosure states', contextMounted() && summary('Workspace navigation').parentElement.open && summary('Workspace resources').parentElement.open);
+    check('refresh preserves all unique resource content/URLs', JSON.stringify(inventory()) === JSON.stringify(contextInventory), inventory());
+    accountMenu.hidden = true;
+  },
+  async contextAtPhone() {
+    await until(() => innerWidth === 390 && slot.parentElement === contextHomes.find(home => home.node === slot).parent, 'Todo header did not return to original phone location');
+    check('phone keeps original slots/menus and one existing drawer', sameNodes() && document.querySelectorAll('.cs-org-drawer').length === 1
+      && app.querySelector('.cs-kylon-workspace-menu > .hm-menu') === fixture.menu && context.closest('details') && fixture.side.closest('details'));
+    check('resize does not strand focus in hidden/inert context', document.activeElement === document.body || visible(document.activeElement));
+  },
+  contextDrawerState() {
+    const dialog = app.querySelector('.cs-org-drawer');
+    check('existing modal owns Todo summaries/resources/account', dialog.matches(':modal') && dialog.contains(summary('Workspace resources'))
+      && dialog.contains(fixture.side) && dialog.contains(account) && dialog.contains(document.activeElement));
+  },
+  async contextReturnedDesktop() {
+    await until(() => innerWidth > 832 && contextMounted() && !app.querySelector('.cs-org-drawer').open && inertRestored(), 'Todo desktop resize did not settle');
+    check('desktop restores projected header/resources and original account', sameNodes() && contextMounted() && !frame.querySelector('[data-home-side-slot]'));
+    fixture.restoreTodo(); ({ bar, menu, heading } = fixture);
+    check('leaving Todo restores exact parent/sibling/hidden state', contextHomes.every(home => home.node.parentNode === home.parent && home.node.nextSibling === home.next && home.node.hidden === home.hidden));
+    check('leaving Todo removes context without losing resource facts/listener', !app.querySelector('.cs-todo-context')
+      && fixture.listenerCount() === contextListeners && JSON.stringify(inventory()) === JSON.stringify(contextInventory));
+  },
   async finish() {
     host.syncMenu(false); slot.replaceChildren(); frame.classList.add('hm-frame--catchup');
     host.sync(project({ view: 'catchup' })); await settle();
@@ -201,6 +311,7 @@ const fixtureScript = `
     check('destroy restores menu/H1', menu.parentElement === bar && heading.parentElement === bar);
     check('destroy restores SVG', account.querySelector('svg').getAttribute('viewBox') === '0 0 16 16' && account.querySelector('path').getAttribute('d') === 'm4 6 4 4 4-4');
     check('destroy removes shell/modal', !app.querySelector('.cs-org-shell,dialog'));
+    check('destroy balances native shell/Todo listeners', fixture.listenerCount() === 0); fixture.restoreMedia();
     return checks;
   },
   };
@@ -229,12 +340,17 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
     const value = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
     assert.equal(value.exceptionDetails, undefined, JSON.stringify(value.exceptionDetails)); return value.result?.value;
   };
-  const key = async (name: "Tab" | "Escape" | "ArrowDown") => {
-    const code = { Tab: 9, Escape: 27, ArrowDown: 40 }[name];
+  const key = async (name: "Tab" | "Escape" | "ArrowDown" | "Enter") => {
+    const code = { Tab: 9, Escape: 27, ArrowDown: 40, Enter: 13 }[name];
     for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: name, code: name, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code });
   };
   await send("Emulation.setFocusEmulationEnabled", { enabled: true });
-  for (const [width, height] of [[1471, 900], [833, 900], [390, 844], [320, 568], [735, 424]]) {
+  const tabSummary = async (label: string) => {
+    const query = `window.hostObserver.contextSummaryFocused(${JSON.stringify(label)})`, deadline = Date.now() + 2000;
+    while (!await evaluate(query) && Date.now() < deadline) await key("Tab");
+    assert.equal(await evaluate(query), true, `native Tab reaches actual ${label}`);
+  };
+  for (const [width, height] of [[1471, 900], [1024, 900], [833, 900], [390, 844], [320, 568], [735, 424]]) {
     await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
     await send("Page.navigate", { url: pathToFileURL(fixture).href + `?case=${width}` });
     let ready = false;
@@ -255,6 +371,28 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
     await evaluate("window.hostObserver.settle()");
     }
     await evaluate("window.hostObserver.refreshFocus()");
+    if ([1471, 1024].includes(width)) {
+      await evaluate("window.hostObserver.contextBegin()");
+      for (const label of ["Workspace navigation", "Workspace resources"]) {
+        await tabSummary(label); await key("Enter");
+        await evaluate(`window.hostObserver.contextSummaryOpened(${JSON.stringify(label)})`);
+      }
+      await evaluate("window.hostObserver.contextControlsAndRefresh()");
+      // Native Tab establishes the actual disclosure focus before width relocation; no post-resize correction.
+      await tabSummary("Workspace resources");
+      await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+      await evaluate("window.hostObserver.contextAtPhone()");
+      await evaluate("window.hostObserver.refreshFocus()");
+      await evaluate("window.hostObserver.openDrawer();window.hostObserver.contextDrawerState()");
+      await tabSummary("Workspace resources"); await key("Enter");
+      await evaluate("window.hostObserver.contextSummaryOpened('Workspace resources', false)");
+      await key("Enter"); await evaluate("window.hostObserver.contextSummaryOpened('Workspace resources')");
+      await key("Escape"); await evaluate("window.hostObserver.escaped()");
+      await evaluate("window.hostObserver.openMenu()"); await key("Escape"); await evaluate("window.hostObserver.menuEscaped()");
+      await evaluate("window.hostObserver.openDrawer()");
+      await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+      await evaluate("window.hostObserver.contextReturnedDesktop()");
+    }
     if ([1471, 320, 735].includes(width)) for (const delivers of [true, false]) {
       await evaluate(`window.hostObserver.todoEnter(${delivers})`);
       const deadline = Date.now() + 2000;
