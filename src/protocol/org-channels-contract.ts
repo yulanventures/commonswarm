@@ -341,7 +341,7 @@ export function reconcileWorkspaceMove(
     for (const [k, p] of candidates.entries()) {
       if (p.role === 'owner' || orgRole(s, sourceOrgId, p.principal_kind, p.principal_id) === 'owner' || orgRole(s, target_org_id, p.principal_kind, p.principal_id) === 'owner') {
         keptOwners.add(k);
-        syncCandidateToTarget({ ...p, role: 'owner' });
+        syncCandidateToTarget(p);
       }
     }
     for (const om of s.orgMemberships.filter((m) => m.org_id === target_org_id && isLive(m) && m.role !== 'owner')) {

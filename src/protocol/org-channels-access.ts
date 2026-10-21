@@ -129,7 +129,11 @@ export function canReadChannel(
   const ws = s.workspaces.find((w) => w.workspace_id === ch.workspace_id);
   const hasChMem = (k: PrincipalKind, id: string) =>
     s.channelMemberships.some(
-      (m) => m.channel_id === chId && isPrin(m, k, id) && isLive(m),
+      (m) =>
+        m.channel_id === chId &&
+        m.principal_kind === k &&
+        (k === 'agent' ? resolveAgentId(s, m.principal_id) : m.principal_id) === id &&
+        isLive(m),
     );
   const isGuest = (k: PrincipalKind, id: string) =>
     (ws != null && orgRole(s, ws.org_id, k, id) === 'guest') ||
@@ -187,7 +191,8 @@ export function canModifyChannelMembership(
       !s.channelMemberships.some(
         (m) =>
           m.channel_id === chId &&
-          isPrin(m, actor.principal_kind, actorId) &&
+          m.principal_kind === actor.principal_kind &&
+          (actor.principal_kind === 'agent' ? resolveAgentId(s, m.principal_id) : m.principal_id) === actorId &&
           m.role === 'owner' &&
           isLive(m),
       )

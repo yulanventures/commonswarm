@@ -94,16 +94,12 @@ test('multi-org agent identity whoami pre-seat, post-seat, and standing credenti
   const postSeat = buildMultiOrgWhoamiResponse(s, { agent_identity_id: 'ag-1', connection_id: 'conn-1', seat_id: 'seat-2a' });
   assert.equal(postSeat.active_seat?.workspace_id, 'ws-2a');
   assert.equal(postSeat.active_seat?.org_slug, 'household');
-
-  // Revoking standing hosted grant revokes canReadOrg
   s.hostedGrants![0]!.state = 'revoked';
   s.hostedGrants![0]!.revoked_at = '2026-10-21T01:00:00Z';
   assert.equal(canReadOrg(s, caller, 'org-1'), false);
   s.hostedGrants![0]!.state = 'active';
   s.hostedGrants![0]!.revoked_at = null;
   assert.equal(canReadOrg(s, caller, 'org-1'), true);
-
-  // Revoking standing renewal grant revokes canReadOrg
   s.renewalGrants![0]!.revoked_at = '2026-10-21T01:00:00Z';
   assert.equal(canReadOrg(s, caller, 'org-1'), false);
 });
@@ -115,23 +111,15 @@ test('universal selector precedence, explicit org with connection default, and r
   const ambig = resolveOrgWorkspaceChannelSelector(s, caller, { workspace: 'ops' });
   assert.equal(ambig.ok, false);
   if (!ambig.ok) { assert.equal(ambig.refusal.code, 'AMBIGUOUS_WORKSPACE_SELECTOR'); assert.equal(ambig.refusal.choices?.length, 2); }
-
   const explicitOrg = resolveOrgWorkspaceChannelSelector(s, caller, { org: 'yulan' });
   assert.equal(explicitOrg.ok, true);
   if (explicitOrg.ok) assert.equal(explicitOrg.workspace.workspace_id, 'ws-1a');
-
   const explicit = resolveOrgWorkspaceChannelSelector(s, caller, { workspace: 'yulan/ops' });
   assert.equal(explicit.ok, true);
-  if (explicit.ok) {
-    assert.equal(explicit.workspace.workspace_id, 'ws-1a');
-    assert.equal(explicit.channel?.slug, 'general');
-    assert.equal(explicit.source, 'explicit');
-  }
-
+  if (explicit.ok) { assert.equal(explicit.workspace.workspace_id, 'ws-1a'); assert.equal(explicit.channel?.slug, 'general'); assert.equal(explicit.source, 'explicit'); }
   const seatViaAp = resolveOrgWorkspaceChannelSelector(s, { principal_kind: 'agent', principal_id: 'ap-1a', connection_id: 'conn-1' }, { seat_id: 'seat-1a' });
   assert.equal(seatViaAp.ok, true);
   if (seatViaAp.ok) { assert.equal(seatViaAp.workspace.workspace_id, 'ws-1a'); assert.equal(seatViaAp.source, 'seat'); }
-
   const orgSeatMismatch = resolveOrgWorkspaceChannelSelector(s, caller, { org: 'yulan', seat_id: 'seat-2a' });
   assert.equal(orgSeatMismatch.ok, false);
   if (!orgSeatMismatch.ok) assert.equal(orgSeatMismatch.refusal.code, 'WORKSPACE_SEAT_MISMATCH');
@@ -215,6 +203,8 @@ test('guest channel isolation, every-channel file bindings, and fail-closed priv
 
   assert.equal(canReadChannel(s, owner, 'ch-1a-priv'), true);
   assert.equal(canReadChannelBoundFile(s, owner, 'file-dual-1', 'ws-1a'), true);
+  s.channelMemberships.find((m) => m.channel_id === 'ch-1a-priv' && m.principal_id === 'ag-1')!.role = 'owner';
+  assert.equal(canModifyChannelMembership(s, { principal_kind: 'agent', principal_id: 'ap-1a' }, 'ch-1a-priv', admin).ok, true);
   s.channels.find((c) => c.channel_id === 'ch-1a-priv')!.archived_at = now;
   assert.equal(canReadChannel(s, owner, 'ch-1a-priv'), true);
   assert.equal(canReadChannelBoundFile(s, owner, 'file-dual-1', 'ws-1a'), true);
@@ -254,6 +244,12 @@ test('workspace move enforces dual owner, owners_only revocation, and transfer_m
     assert.equal(moved.target_org_id, 'org-2');
     assert.deepEqual(moved.closed_seat_ids, ['seat-1a']);
   }
+  const sOwnerMember = createFixture();
+  sOwnerMember.workspaces.find((w) => w.workspace_id === 'ws-2a')!.slug = 'home-ops';
+  sOwnerMember.orgMemberships.find((m) => m.org_id === 'org-1' && m.principal_id === 'u-admin')!.role = 'owner';
+  sOwnerMember.workspaceGrants.find((g) => g.workspace_id === 'ws-1a' && g.principal_id === 'u-admin')!.role = 'member';
+  assert.equal(reconcileWorkspaceMove(sOwnerMember, { workspace_id: 'ws-1a', target_org_id: 'org-2', actor_user_id: 'u-owner', transfer_members: 'owners_only' }).ok, true);
+  assert.equal(sOwnerMember.orgMemberships.find((m) => m.org_id === 'org-2' && m.principal_id === 'u-admin')?.role, 'member');
 
   const s2 = createFixture();
   s2.workspaces.find((w) => w.workspace_id === 'ws-2a')!.slug = 'home-ops';
