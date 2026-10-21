@@ -214,7 +214,7 @@ const sections: Section[] = [
     id: "retention",
     title: "How long we keep it",
     blocks: [
-      "Files and hosted MCP OAuth records are deleted when you delete them or your account. Backups age out within 35 days. A backup restore does not re-create deleted data except for disaster recovery, after which deletions are re-applied.",
+      "Files and hosted MCP OAuth records are deleted when you delete them or your account. Nightly backups are written to local server storage and an offsite Cloudflare R2 bucket; our backup runner does not prune local backup sets, and current R2 lifecycle enforcement is unverified from host credentials beyond a 35-day deletion rule recorded in Cloudflare dashboard metadata on 18 September 2026. A backup restore does not re-create deleted data except for disaster recovery, after which deletions are re-applied.",
       "We are a pre-launch, free service, and retention varies by record type. Broadly:",
       {
         ul: [
@@ -236,7 +236,7 @@ const sections: Section[] = [
       "What is actually true today, rather than a list of adjectives:",
       {
         ul: [
-          "**Credentials are stored as one-way hashes.** Invitation credentials and agent credentials are hashed before they are written; the originals exist only in the moment they are shown to you.",
+          "**Invitation, agent, join, and delegated-admin tokens are stored as one-way hashes.** Invitation, agent, join, and delegated-admin tokens are hashed before they are written; the originals exist only in the moment they are shown to you, while server configuration holds signing keys and service credentials.",
           "**Reads are isolated per workspace at the database level.** The read surface is a set of views that filter on your live membership, so a query cannot reach a workspace you are not in even if the application asks it to.",
           "**Direct database access is denied by default.** Signed-in clients get no direct access to the underlying tables; they can only reach a restricted read surface and a single server-side command endpoint.",
           "**On your own machine**, the CLI stores your session in your operating system keychain where one is available, and otherwise in a file with owner-only permissions in a directory it creates the same way. The file fallback is stored under `~/.cswarm/credentials.d`; signing out clears the stored credential.",
@@ -245,6 +245,17 @@ const sections: Section[] = [
       },
       { note: "**No system is secure, and we do not warrant that this one is.** We are a small pre-launch operation with no independent security certification and no third-party audit. Judge the service accordingly, and do not put anything into it that would be serious to lose or to leak." },
       "If you find a vulnerability, tell us at legal@commonswarm.com before telling anyone else.",
+    ],
+  },
+  {
+    id: "server-visibility",
+    title: "What Our Servers Can See",
+    blocks: [
+      "CommonSwarm is a hosted coordination service, not an end-to-end encrypted (E2EE) system. Our API and hosted MCP servers decrypt requests to validate, store, and deliver workspace activity. Signals, coordination events, tasks, to-dos, lists, comments, member and workspace names, email addresses, and uploaded files are stored in server-readable form in PostgreSQL and Cloudflare R2. Expired signals leave normal feeds, while signal, coordination, and audit records remain stored unless removed by a direct database operation. Invitation, agent, join, and delegated-admin tokens are stored as SHA-256 hashes; server configuration holds signing keys and service credentials.",
+      "Proxy logs strip query strings and standard auth headers, our database configuration disables statement logging, and read-error diagnostics use an allowlist. We do not claim a zero-log guarantee: ordinary command-failure records bound error messages without scrubbing all text, some custom header filters are not yet synced live, and upstream or edge logs may retain metadata. Nightly backups copy database and file data in server-readable form to local storage and an offsite R2 bucket; the backup runner does not prune local sets, and current R2 lifecycle enforcement is unverified from host credentials beyond a September 2026 35-day rule observation.",
+      "Workspace members and agents can read only their own workspaces. Authorized Yulan Ventures infrastructure operators can access server-readable data, logs, and backups to operate and recover the service.",
+      "When a CLI, MCP client, or assistant connects, content it reads is delivered to that client in plaintext. AI providers receive content only if the client forwards it under their terms. Revoking a seat stops future CommonSwarm reads, but cannot erase copies already received by an endpoint or provider.",
+      "TLS encrypts traffic in transit through Cloudflare to our server, and access controls protect storage, but CommonSwarm servers remain inside the plaintext trust boundary today.",
     ],
   },
   {
