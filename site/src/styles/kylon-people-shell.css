@@ -2,6 +2,12 @@
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-people-composition] .cs-org-context-body { overflow: auto; padding: 6px; scroll-padding: 6px; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-people-composition] .hm-frame--people .hm-route-pane { padding: 24px clamp(12px,3vw,40px) 40px; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-close-phone { display: none; }
+@media (width > 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-close-detail {
+    inline-size: auto; min-inline-size: 44px; padding-inline: 10px;
+    font: 500 13px/20px var(--k-shell-font); white-space: nowrap;
+  }
+}
 live-dashboard.dashboard[data-kylon-shell] :is([data-people-page],[data-people-context]) :is(button,a,input,select,summary):focus-visible:not(dialog *) {
   outline: 2px solid var(--k-shell-focus); outline-offset: 2px; box-shadow: none; scroll-margin: 6px;
 }
