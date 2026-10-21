@@ -39,6 +39,7 @@ import "../../styles/kylon-layout/index.css";
 import "../../styles/kylon-workspace-settings-integration.css";
 import "../../styles/kylon-files.css";
 import "../../styles/dashboard-welcome.css";
+import "../../styles/kylon-todos.css";
 
 const signInMethods = signInDoors(await enabledProvidersForBuild({
   url: import.meta.env.PUBLIC_SUPABASE_URL,
@@ -4480,7 +4481,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         homeShellKey = "";
         slot?.replaceChildren(); bottom?.replaceChildren(); return;
       }
-      const pane = homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" ? homeRoute.view : "chat";
+      const pane = homeRoute.view === "todo" ? "todos" : homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" ? homeRoute.view : "chat";
       const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
         people: currentHomePeople().groups, pane, todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
         hrefs: { chat: routeHref({ view: "chat", workspaceId: workspace.id }), todos: routeHref({ view: "todos", workspaceId: workspace.id }),
