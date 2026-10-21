@@ -133,3 +133,4 @@ tests/household-member-removal.test.ts
 tests/household-managed-file-fence.test.ts
 tests/household-member-removal-backfill.test.ts
 tests/admin-release-w4-second-pass.test.ts
+tests/p0-org-channels-contracts.test.ts
