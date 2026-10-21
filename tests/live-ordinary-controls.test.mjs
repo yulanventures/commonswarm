@@ -295,6 +295,16 @@ function consentSchema(r, phase, producer) {
     }
   }
 }
+// Rotation controls cross the cache-expiry boundary; ordinary commands reuse a
+// still-valid access token instead of consuming another refresh token.
+async function expireHumanSession(f) {
+  const path = join(f.human, `${hash(api).slice(0, 24)}.profile.json`);
+  const profile = JSON.parse(await readFile(path));
+  assert.ok(profile.humanSession, 'the previous refresh persisted its cache');
+  profile.humanSession.expiresAt = Math.floor(Date.now() / 1000) - 1;
+  await privateWrite(path, profile);
+}
+
 async function pre(f) {
   const r = await f.run('consent'); assert.equal(r.exit, 0, r.output); f.consent = r.out; return r;
 }
@@ -624,6 +634,7 @@ test('probe-credentials exclusively writes the binding secret schema, rotates th
 
   // Ordinary controls keep using CIMD. None of these lifecycle callers may
   // consume or revoke the DCR family now owned by the W2 plan.
+  await expireHumanSession(f);
   const w = await f.run('window', ['--window', 'W2']); assert.equal(w.exit, 0, w.output);
   assert.equal(JSON.parse(await readFile(sessionPath)).generation, 2, 'window uses the rotated shared session');
   await post(f, p);
@@ -718,6 +729,7 @@ test('executable produces exact consent/live bytes with real PKCE, rotating refr
   assert.equal(p.bytes.toString(), JSON.stringify(p.receipt, null, 2) + '\n');
   let generation = 0;
   for (const [window, phase] of [['W1', 'before'], ['W2', 'after'], ['W3', 'recovery']]) {
+    if (generation > 0) await expireHumanSession(f);
     const r = await f.run('window', ['--window', window, '--phase', phase]); assert.equal(r.exit, 0, r.output);
     keys(r.receipt, ['release_sha', 'live_edge_sha', 'window_id', 'window', 'phase', 'controls', 'consent_receipt_sha256', 'producer_sha256', 'dcr_client_ids']);
     assert.deepEqual(r.receipt.controls, { hosted_mcp_consent_refresh: true, dcr_registration_consent: true, cimd_consent: true, human_recovery: true, worker_command_read: true });

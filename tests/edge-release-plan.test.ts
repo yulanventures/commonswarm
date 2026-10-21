@@ -934,7 +934,8 @@ edge_fence
 
 
 // Parse the deployed Caddy shape from its owners: the base files, the MCP
-// activation transform, then W4's actual candidate generator. No probe paths
+// archived activation transform on its historical input, then W4's actual
+// candidate generator. Current routes use the current resource snippet. No probe paths
 // are copied into this parser or its matchers.
 type CaddyNode = { words: string[]; children: CaddyNode[] };
 function parseCaddy(source: string): CaddyNode[] {
@@ -953,16 +954,32 @@ function parseCaddy(source: string): CaddyNode[] {
 }
 function deployedCaddy() {
   const stage = mkdtempSync(join(scratch, 'caddy-'));
-  writeFileSync(join(stage, 'mcp.off.caddy'), readFileSync(resolve('deploy/supabase-stack/commonswarm-mcp.caddy')));
+  // Byte-for-byte source at 6f3ee396380ac1a9fd11d98e5ba1a82d7e2e670e.
+  // The archived exact guard must continue to reject the later root alias.
+  const historical = readFileSync(resolve('tests/fixtures/mcp-before-root-discovery.caddy'));
+  const current = readFileSync(resolve('deploy/supabase-stack/commonswarm-mcp.caddy'), 'utf8');
+  writeFileSync(join(stage, 'mcp.off.caddy'), historical);
   writeFileSync(join(stage, 'api.caddy'), readFileSync(resolve('deploy/supabase-stack/commonswarm-api.caddy')));
   const activationPlan = readFileSync(resolve('docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md'), 'utf8');
   const activation = /^(text=\(stage\/'mcp.off.caddy'\)[\s\S]*?^\(stage\/'mcp.on.caddy'\)[^\n]*)/m.exec(activationPlan)![1]!;
-  passed(spawnSync('python3', ['-', stage], { input: 'import os,pathlib,re,sys\nstage=pathlib.Path(sys.argv[1])\n' + activation, encoding: 'utf8' }));
+  const activate = () => spawnSync('python3', ['-', stage], { input: 'import os,pathlib,re,sys\nstage=pathlib.Path(sys.argv[1])\n' + activation, encoding: 'utf8' });
+  passed(activate());
+  writeFileSync(join(stage, 'mcp.off.caddy'), current);
+  const refused = activate();
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /live Caddy differs; stop/);
   writeFileSync(join(stage, 'mcp.caddy'), readFileSync(join(stage, 'mcp.on.caddy')));
   const w4 = readFileSync(resolve('docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'), 'utf8');
   const candidate = /# step: ai-w4-caddy-candidate\n[\s\S]*?^```/m.exec(w4)![0];
   passed(spawnSync('python3', ['-', stage], { input: python(candidate), encoding: 'utf8' }));
-  return parseCaddy(readFileSync(join(stage, 'api.new.caddy'), 'utf8') + '\n' + readFileSync(join(stage, 'mcp.new.caddy'), 'utf8'));
+  const archived = readFileSync(join(stage, 'mcp.new.caddy'), 'utf8');
+  const snippet = /^\(mcp_resource_active\) \{[\s\S]*?^\}/m;
+  // Site activation/admin placement comes from the executed historical kit;
+  // discovery paths and method restrictions come from today's resource owner.
+  assert.equal([...archived.matchAll(new RegExp(snippet.source, 'gm'))].length, 1);
+  const resource = snippet.exec(current); assert.ok(resource);
+  const deployed = archived.replace(snippet, () => resource[0]);
+  return parseCaddy(readFileSync(join(stage, 'api.new.caddy'), 'utf8') + '\n' + deployed);
 }
 function caddyRoute(config: CaddyNode[], host: string, path: string, method: string) {
   const snippets = new Map(config.filter(n => n.words[0]!.startsWith('(')).map(n => [n.words[0]!.slice(1, -1), n.children]));
@@ -1017,7 +1034,7 @@ print(json.dumps(calls))
   const r = spawnSync('python3', ['-c', extractor, 'unused-ca', 'forward', 'unused-baseline'], { input: source, encoding: 'utf8' }); passed(r);
   return JSON.parse(r.stdout.trim().split('\n').pop()!);
 }
-test('every extracted probe request has a route in parsed deployed Caddy; bare metadata fails', () => {
+test('every extracted probe request has a route in parsed deployed Caddy; root discovery alias is supported', () => {
   const config = deployedCaddy();
   const source = python(/^edge_route_probes\(\) \{[\s\S]*?^\}/m.exec(helpers)![0]);
   const verify = (source: string) => {
@@ -1031,11 +1048,24 @@ test('every extracted probe request has a route in parsed deployed Caddy; bare m
   verify(source);
   const old = source.replace("'/.well-known/oauth-protected-resource/mcp',headers=discovery_headers", "'/.well-known/oauth-protected-resource',headers=discovery_headers");
   assert.notEqual(old, source);
-  assert.throws(() => verify(old), /GET mcp.commonswarm.com\/\.well-known\/oauth-protected-resource: respond.*404/);
+  verify(old);
+  for (const path of ['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp']) {
+    assert.equal(caddyRoute(config, 'mcp.commonswarm.com', path, 'GET').words[0], 'reverse_proxy');
+    assert.equal(caddyRoute(config, 'mcp.commonswarm.com', path, 'HEAD').words[0], 'reverse_proxy');
+    assert.equal(caddyRoute(config, 'mcp.commonswarm.com', path, 'POST').words.at(-1), '405');
+  }
+  const wrong = source.replace("'/.well-known/oauth-protected-resource/mcp',headers=discovery_headers", "'/.well-known/oauth-protected-resource/wrong',headers=discovery_headers");
+  assert.notEqual(wrong, source);
+  assert.throws(() => verify(wrong), /GET mcp.commonswarm.com\/\.well-known\/oauth-protected-resource\/wrong: respond.*404/);
   verify(source);
 });
 
 test('extracted route probes use real MCP origin/auth checks; refuse injected Origin, metadata drift and _meta error', async () => {
+  const resource = parseCaddy(readFileSync(resolve('deploy/supabase-stack/commonswarm-mcp.caddy'), 'utf8'))
+    .find(n => n.words[0] === '(mcp_resource_active)')!;
+  const metadataRewrite = resource.children.find(n => n.words[0] === 'handle' && n.words[1] === '@mcp_metadata')!
+    .children.find(n => n.words[0] === 'rewrite')!.words[2]!;
+  assert.ok(metadataRewrite.startsWith('/functions/v1/mcp/'));
   const source = python(/^edge_route_probes\(\) \{[\s\S]*?^\}/m.exec(helpers)![0]);
   const harness = isolatedPythonHarness(`
 import http.client,json,ssl,sys
@@ -1057,7 +1087,7 @@ class Connection:
    if self.method=='HEAD': return Response(405,b'{}')
    return Response(200,b'{"resource":"https://api.commonswarm.com/admin","authorization_servers":["https://mcp.commonswarm.com"]}')
   if path=='/.well-known/oauth-authorization-server': return Response(200,b'{"issuer":"https://mcp.commonswarm.com"}')
-  if path=='/.well-known/oauth-protected-resource/mcp' or path=='/mcp':
+  if path in ('/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp', '/mcp'):
    # Replay responses from the real TS handler for the exact captured request.
    row=next(r for r in rows if r['request']==[self.host,path,self.method,self.body,self.headers])
    doc=json.loads(row['body'])
@@ -1082,12 +1112,19 @@ exec(compile(payload['source'],'<extracted-local-caddy-probes>','exec'),plan_glo
     const rows = [];
     for (const request of probeRequests(probeSource)) {
       const [host, path, method, body, headers] = request;
-      if (path !== '/mcp' && path !== '/.well-known/oauth-protected-resource/mcp') continue;
-      const response = await handle(new Request(`https://${host}${path}`, { method, body, headers }));
+      if (path !== '/mcp' && path !== '/.well-known/oauth-protected-resource/mcp' && path !== '/.well-known/oauth-protected-resource') continue;
+      // Caddy rewrites either discovery alias to the canonical handler path.
+      const handlerPath = path === '/mcp' ? path : metadataRewrite.slice('/functions/v1/mcp'.length);
+      const response = await handle(new Request(`https://${host}${handlerPath}`, { method, body, headers }));
       rows.push({ request, status: response.status, body: await response.text(), headers: Object.fromEntries(response.headers) });
     }
     return { rows, result: spawnSync('python3', ['-c', harness, 'unused-public-ca', phase, baseline, kind], { input: JSON.stringify({ rows, source: probeSource }), encoding: 'utf8' }) };
   };
+  const rootDiscovery = source.replace("'/.well-known/oauth-protected-resource/mcp',headers=discovery_headers", "'/.well-known/oauth-protected-resource',headers=discovery_headers");
+  assert.notEqual(rootDiscovery, source);
+  const rootAlias = await run(rootDiscovery, []);
+  passed(rootAlias.result);
+  assert.deepEqual(rootAlias.rows.filter(r => r.request[1] === '/.well-known/oauth-protected-resource').map(r => r.status), [200]);
   const call = "request('mcp.commonswarm.com','/mcp','POST',body,headers=mcp_headers)";
   const injectedOrigin = source.replace(call, call.replace('headers=mcp_headers', "headers={**mcp_headers,'Origin':'https://commonswarm.com'}"));
   assert.notEqual(injectedOrigin, source);
