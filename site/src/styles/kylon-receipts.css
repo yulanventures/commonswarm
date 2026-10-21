@@ -1,0 +1,62 @@
+/* Native details retains its DOM/semantics and open behavior. Its generated
+ * layout boxes participate in the same grid as Reply: summary/actions stay
+ * on row1; the native disclosure body spans row2 without displacing Reply.
+ * No event, state, receipt provenance or accessibility attribute is changed.
+ */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-body > .dashboard__message-tools {
+  flex: 1 1 208px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: start;
+  justify-content: start;
+  gap: 2px 4px;
+  min-inline-size: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools > .dashboard__message-receipt {
+  grid-column: 1;
+  grid-row: 1;
+  min-inline-size: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools > .dashboard__message-actions {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: start;
+  justify-self: start;
+  margin: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt > summary {
+  grid-column: 1;
+  grid-row: 1;
+  margin: 0;
+  padding-inline: 2px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt::details-content {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  min-inline-size: 0;
+}
+/* Modern native disclosure layout keeps summary and Reply adjacent while
+ * letting the body's natural row use the whole bar. Older engines keep the
+ * stable two-column fallback above. No display:contents on native controls. */
+@supports (grid-template-columns: subgrid) and selector(::details-content) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-body > .dashboard__message-tools {
+    grid-template-columns: max-content minmax(0, 1fr);
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools > .dashboard__message-receipt {
+    display: grid;
+    grid-template-columns: subgrid;
+    grid-column: 1 / -1;
+  }
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt > :not(summary) {
+  grid-column: 1 / -1;
+  margin-block-start: 4px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-receipt summary:hover {
+  color: inherit;
+  background: var(--k-shell-hover);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-receipt :is(p, .dashboard__message-receipt-section) {
+  background: var(--k-shell-subtle);
+  border-radius: 6px;
+}
