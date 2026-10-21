@@ -24,7 +24,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos,
   box-sizing: border-box;
 }
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane]:has(> :is(.hm-todos, .hm-todo)) {
-  scroll-padding: 4px;
+  scroll-padding: 4px; container-type: size;
 }
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos {
   inline-size: 100%; max-inline-size: 720px; gap: 16px; padding: 4px 4px 16px;
@@ -73,6 +73,8 @@ live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo :is(.
    heading and delivery guidance outside the scroll region. */
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-tag-picker .hm-picker-pop {
   grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden;
+  /* Leave room in the actual pane for the comment label, field and focus ring. */
+  max-block-size: min(22rem, 55vh, calc(100cqb - 112px));
 }
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-tag-picker .hm-pick-list {
   min-block-size: 0; overflow: auto; overscroll-behavior: contain;
