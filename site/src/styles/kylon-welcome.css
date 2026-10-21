@@ -1,6 +1,15 @@
 /* Signed-out welcome only. Existing auth states, provider order and action variants
    remain owned by the dashboard. No reference assets, extra steps or motion. */
 live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] {
+  --accent: #697344;
+  --accent-bright: #535d33;
+  --accent-ink: #fff;
+  --accent-dim: var(--k-shell-selected);
+  --text: var(--k-shell-ink);
+  --text-muted: var(--k-shell-secondary);
+  --elev-1: var(--k-shell-surface);
+  --elev-2: var(--k-shell-surface);
+  --border-interactive: var(--k-shell-control);
   box-sizing: border-box;
   inline-size: 100%;
   min-inline-size: 0;
@@ -124,6 +133,10 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
   min-block-size: 44px;
   white-space: normal;
   overflow-wrap: anywhere;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] :is(a, button, input) {
+  scroll-margin-block: 6px;
 }
 
 /* The column has 24px edge clearance and 12px control gaps for the full ring.
