@@ -31,8 +31,8 @@ BEGIN
   IF grant_row.revoked_at IS NOT NULL THEN
     RETURN 'renewal_grant_revoked';
   END IF;
-  -- Suspension is a security fence, regardless of standing/date/resume metadata.
-  IF grant_row.suspended_at IS NOT NULL THEN
+  -- Active suspension denies every kind; explicit owner resume remains effective.
+  IF grant_row.suspension_active THEN
     RETURN 'renewal_grant_suspended';
   END IF;
 
@@ -114,7 +114,7 @@ BEGIN
       WHERE m.workspace_id=p.workspace_id AND m.user_id=p.owner_user_id
         AND m.revoked_at IS NULL AND w.archived_at IS NULL)
     AND NOT EXISTS(SELECT 1 FROM swarm.renewal_grants g WHERE g.renewal_grant_id=t.renewal_grant_id
-      AND (g.revoked_at IS NOT NULL OR g.suspended_at IS NOT NULL OR g.connection_expired_at IS NOT NULL
+      AND (g.revoked_at IS NOT NULL OR g.suspension_active OR g.connection_expired_at IS NOT NULL
         OR g.connection_expires_at<=clock_timestamp()))
     AND NOT EXISTS(SELECT 1 FROM swarm.admin_grants a WHERE a.grant_id IN
         (t.parent_admin_grant_id,p.parent_admin_grant_id)
@@ -123,6 +123,13 @@ BEGIN
     AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE (z.kind,z.target_id) IN
       (('token',t.token_id),('principal',p.principal_id),('run',r.run_id),('device',r.device_id),
        ('renewal_grant',t.renewal_grant_id),('lineage',t.lineage_id),('family',t.lineage_id),('membership',p.owner_user_id)))) THEN
+    IF EXISTS(SELECT 1 FROM swarm.agent_tokens t
+      LEFT JOIN swarm.renewal_grants g ON g.renewal_grant_id=t.renewal_grant_id
+      WHERE t.token_hash=p_hash AND (t.revoked_at IS NOT NULL OR t.surrender_only
+        OR g.revoked_at IS NOT NULL OR g.suspension_active OR g.connection_expired_at IS NOT NULL
+        OR g.connection_expires_at<=clock_timestamp())) THEN
+      RAISE EXCEPTION 'LOCAL_CREDENTIAL_INVALID' USING ERRCODE='42501',DETAIL='LOCAL_CREDENTIAL_INVALID';
+    END IF;
     RAISE EXCEPTION 'LOCAL_CREDENTIAL_DENIED' USING ERRCODE='42501',DETAIL='LOCAL_CREDENTIAL_DENIED';
   END IF;
   RETURN QUERY
@@ -140,7 +147,7 @@ BEGIN
       WHERE m.workspace_id=p.workspace_id AND m.user_id=p.owner_user_id
         AND m.revoked_at IS NULL AND w.archived_at IS NULL)
     AND NOT EXISTS(SELECT 1 FROM swarm.renewal_grants g WHERE g.renewal_grant_id=t.renewal_grant_id
-      AND (g.revoked_at IS NOT NULL OR g.suspended_at IS NOT NULL OR g.connection_expired_at IS NOT NULL
+      AND (g.revoked_at IS NOT NULL OR g.suspension_active OR g.connection_expired_at IS NOT NULL
         OR g.connection_expires_at<=clock_timestamp()))
     AND NOT EXISTS(SELECT 1 FROM swarm.admin_grants a WHERE a.grant_id IN
         (t.parent_admin_grant_id,p.parent_admin_grant_id)
@@ -376,7 +383,7 @@ BEGIN
       AND swarm.admin_child_live(p.parent_admin_grant_id,p.workspace_id)
       AND swarm.admin_child_scopes_live(p.parent_admin_grant_id,v_worker_scopes))
     OR EXISTS(SELECT 1 FROM swarm.agent_tokens t JOIN swarm.renewal_grants g USING(renewal_grant_id)
-      WHERE t.token_id=v_token_id AND (g.revoked_at IS NOT NULL OR g.suspended_at IS NOT NULL OR g.connection_expired_at IS NOT NULL
+      WHERE t.token_id=v_token_id AND (g.revoked_at IS NOT NULL OR g.suspension_active OR g.connection_expired_at IS NOT NULL
         OR g.connection_expires_at<=local_now OR g.workspace_id<>v_principal_workspace_id
         OR g.principal_id<>v_principal_id OR g.run_id<>v_run_id OR g.created_by<>v_owner_user_id
         OR g.bound_device_id IS NOT NULL AND g.bound_device_id<>v_device_id
@@ -592,8 +599,8 @@ BEGIN
   IF grant_row.revoked_at IS NOT NULL THEN
     RAISE EXCEPTION 'SWARM_RENEWAL_GRANT_REVOKED' USING ERRCODE = '55000';
   END IF;
-  -- Suspension is a security fence, regardless of standing/date/resume metadata.
-  IF grant_row.suspended_at IS NOT NULL THEN
+  -- Active suspension denies every kind; explicit owner resume remains effective.
+  IF grant_row.suspension_active THEN
     RAISE EXCEPTION 'SWARM_RENEWAL_GRANT_SUSPENDED' USING ERRCODE = '55000';
   END IF;
   IF grant_row.kind = 'timeboxed'
@@ -669,7 +676,7 @@ BEGIN
   END IF;
   v_now:=clock_timestamp();
   IF token.revoked_at IS NOT NULL OR token.surrender_only OR token.expires_at<=v_now
-    OR grant_row.revoked_at IS NOT NULL OR (grant_row.suspended_at IS NOT NULL)
+    OR grant_row.revoked_at IS NOT NULL OR (grant_row.suspension_active)
     OR grant_row.connection_expired_at IS NOT NULL OR grant_row.connection_expires_at<=v_now
     OR NOT EXISTS(SELECT 1 FROM swarm.agent_principals p JOIN swarm.agent_runs r USING(principal_id)
       JOIN swarm.devices d USING(device_id) JOIN swarm.workspaces w ON w.workspace_id=p.workspace_id
@@ -742,7 +749,7 @@ BEGIN
     OR ROW(g.workspace_id,g.principal_id,g.run_id,g.created_by)
       IS DISTINCT FROM ROW(NEW.workspace_id,NEW.principal_id,NEW.grant_id,NEW.owner_user_id)
     OR t.revoked_at IS NOT NULL OR t.surrender_only OR t.expires_at<=v_now
-    OR g.revoked_at IS NOT NULL OR g.suspended_at IS NOT NULL OR g.connection_expired_at IS NOT NULL
+    OR g.revoked_at IS NOT NULL OR g.suspension_active OR g.connection_expired_at IS NOT NULL
     OR (g.connection_expires_at IS NOT NULL AND g.connection_expires_at<=v_now)
     OR (g.bound_device_id IS NOT NULL AND g.bound_device_id<>d.device_id)
     OR NOT EXISTS (SELECT 1 FROM swarm.workspaces w JOIN swarm.memberships m USING(workspace_id)
@@ -814,7 +821,7 @@ BEGIN
   v_now:=clock_timestamp();
   IF c.connection_id IS NULL OR c.revoked_at IS NOT NULL
     OR (c.expires_at IS NOT NULL AND c.expires_at<=v_now)
-    OR NEW.revoked_at IS NOT NULL OR NEW.suspended_at IS NOT NULL OR NEW.connection_expired_at IS NOT NULL
+    OR NEW.revoked_at IS NOT NULL OR (NEW.suspended_at IS NOT NULL AND (NEW.resumed_at IS NULL OR NEW.resumed_at<=NEW.suspended_at)) OR NEW.connection_expired_at IS NOT NULL
     OR (NEW.connection_expires_at IS NOT NULL AND NEW.connection_expires_at<=v_now)
     OR p.principal_id IS NULL OR p.transport<>'local' OR p.turn_only OR p.revoked_at IS NOT NULL
     OR ROW(p.workspace_id,p.owner_user_id) IS DISTINCT FROM ROW(NEW.workspace_id,NEW.created_by)
@@ -861,7 +868,7 @@ LANGUAGE sql VOLATILE SECURITY INVOKER SET search_path=pg_catalog AS $$
           AND t.revoked_at IS NULL AND NOT t.surrender_only AND r.ended_at IS NULL AND d.revoked_at IS NULL
           AND d.user_id=p.owner_user_id AND m.revoked_at IS NULL AND w.archived_at IS NULL
           AND (t.renewal_grant_id IS NULL OR g.renewal_grant_id IS NOT NULL AND g.revoked_at IS NULL
-            AND g.suspended_at IS NULL
+            AND NOT g.suspension_active
             AND g.connection_expired_at IS NULL AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
             AND ROW(g.principal_id,g.run_id,g.workspace_id,g.created_by)=ROW(t.principal_id,t.run_id,p.workspace_id,p.owner_user_id)
             AND (g.bound_device_id IS NULL OR g.bound_device_id=d.device_id))
@@ -1095,7 +1102,7 @@ BEGIN
       THEN 'live' ELSE 'connection_off' END
      WHEN selected.is_live THEN 'live'
      WHEN local_policy.connection_expired_at IS NOT NULL OR local_policy.connection_expires_at<=clock_timestamp() THEN 'key_ended'
-     WHEN local_policy.revoked_at IS NULL AND local_policy.suspended_at IS NOT NULL
+     WHEN local_policy.revoked_at IS NULL AND local_policy.suspension_active
       AND local_policy.connection_expired_at IS NULL
       AND (local_policy.connection_expires_at IS NULL OR local_policy.connection_expires_at>clock_timestamp()) THEN 'paused'
      WHEN local_policy.revoked_at IS NOT NULL THEN 'key_off'
@@ -1174,7 +1181,7 @@ BEGIN
     grant_row.last_used_device_id,
     grant_row.last_used_from,
     grant_row.new_host_at,
-    grant_row.suspended_at,
+    CASE WHEN grant_row.suspension_active THEN grant_row.suspended_at END,
     grant_row.revoked_at,
     token.token_id,
     token.issued_at,
@@ -1239,7 +1246,7 @@ AS $$
     grant_row.last_used_device_id,
     grant_row.last_used_from,
     grant_row.new_host_at,
-    grant_row.suspended_at,
+    CASE WHEN grant_row.suspension_active THEN grant_row.suspended_at END,
     grant_row.revoked_at,
     latest.token_id,
     latest.issued_at,

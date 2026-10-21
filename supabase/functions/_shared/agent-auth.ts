@@ -99,7 +99,7 @@ async function lockedCredentialFacts(tx:Sql,tokenHash:Uint8Array,exact:LocalCred
       t.expires_at>clock_timestamp() AS unexpired,p.managed_at,p.transport,
       t.first_used_at IS NULL AS first_use,
       (g.kind='standing' AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
-        AND g.connection_expired_at IS NULL AND g.revoked_at IS NULL AND g.suspended_at IS NULL
+        AND g.connection_expired_at IS NULL AND g.revoked_at IS NULL AND NOT g.suspension_active
         AND (t.first_used_at IS NOT NULL
           OR (t.first_used_at IS NULL AND t.predecessor_token_id IS NULL
             AND g.horizon_expires_at IS NULL AND g.max_successors IS NULL)
@@ -125,7 +125,7 @@ async function lockedCredentialFacts(tx:Sql,tokenHash:Uint8Array,exact:LocalCred
       AND swarm.admin_child_live(p.parent_admin_grant_id,p.workspace_id)
       AND swarm.admin_child_scopes_live(t.parent_admin_grant_id,t.scopes)
       AND swarm.admin_child_scopes_live(p.parent_admin_grant_id,t.scopes)
-      AND (g.renewal_grant_id IS NULL OR (g.revoked_at IS NULL AND g.suspended_at IS NULL AND g.connection_expired_at IS NULL
+      AND (g.renewal_grant_id IS NULL OR (g.revoked_at IS NULL AND NOT g.suspension_active AND g.connection_expired_at IS NULL
         AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
         AND ROW(g.principal_id,g.run_id,g.workspace_id,g.created_by)=ROW(t.principal_id,t.run_id,p.workspace_id,p.owner_user_id)
         AND (g.bound_device_id IS NULL OR g.bound_device_id=d.device_id)))
@@ -134,8 +134,12 @@ async function lockedCredentialFacts(tx:Sql,tokenHash:Uint8Array,exact:LocalCred
          ('membership',p.owner_user_id),('lineage',t.lineage_id),('family',t.lineage_id),('renewal_grant',t.renewal_grant_id)))`;
   const agent=rows[0];
   if(!agent) {
-    const known=await tx`SELECT t.token_id FROM swarm.agent_tokens t WHERE t.token_hash=${tokenHash}`;
-    if(known.length) throw new LocalCredentialDenied(true);
+    const known=await tx<{credential_invalid:boolean}[]>`SELECT
+      (t.revoked_at IS NOT NULL OR t.surrender_only OR g.revoked_at IS NOT NULL OR g.suspension_active
+        OR g.connection_expired_at IS NOT NULL OR g.connection_expires_at<=clock_timestamp()) IS TRUE AS credential_invalid
+      FROM swarm.agent_tokens t LEFT JOIN swarm.renewal_grants g ON g.renewal_grant_id=t.renewal_grant_id
+      WHERE t.token_hash=${tokenHash}`;
+    if(known.length) throw new LocalCredentialDenied(known[0]!.credential_invalid);
     return null;
   }
   if (!agent.unexpired && !(allowExpiredRenewal && agent.eligible_renewal)) return null;
@@ -369,7 +373,8 @@ export async function discoverLocalCredential(tx: Sql, hash: Uint8Array): Promis
     return rows[0] ?? null;
   } catch(error) {
     if(error!==null && typeof error==='object' && 'code' in error && error.code==='42501'
-      && 'detail' in error && error.detail==='LOCAL_CREDENTIAL_DENIED') throw new LocalCredentialDenied(true);
+      && 'detail' in error && (error.detail==='LOCAL_CREDENTIAL_DENIED' || error.detail==='LOCAL_CREDENTIAL_INVALID'))
+      throw new LocalCredentialDenied(error.detail==='LOCAL_CREDENTIAL_INVALID');
     throw error;
   }
 }
