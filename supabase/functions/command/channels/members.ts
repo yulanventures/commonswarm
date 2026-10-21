@@ -1,28 +1,11 @@
 import {
-  type CallerContext,
-  type ChannelMembershipRecord,
-  type ChannelRole,
-  type NotifyPref,
-  type OrgChannelAuthorityState,
-  type PrincipalKind,
-  agentOwner,
-  canReadChannel,
-  canReadWorkspace,
-  fail,
-  hasWsGrant,
-  isLive,
-  isPrin,
-  norm,
-  orgRole,
-} from '../../../../src/protocol/org-channels-contract.js';
+  type CallerContext, type ChannelMembershipRecord, type ChannelRole,
+  type NotifyPref, type OrgChannelAuthorityState, type PrincipalKind,
+  agentOwner, fail, hasWsGrant, isLive, isPrin, norm, orgRole,
+} from '../../../../src/protocol/org-channels-types.ts';
 import {
-  type ChannelResult,
-  isChannelOwner,
-  isPrivateChannelsEnabled,
-  isWorkspaceAdminOrOwner,
-  requireReadableChannel,
-  wsScope,
-} from './crud.js';
+  type ChannelResult, canReadChannel, canReadWorkspace, isChannelOwner, isPrivateChannelsEnabled, isWorkspaceAdminOrOwner, requireReadableChannel, wsScope,
+} from './crud.ts';
 
 export const NOTIFY_PREFS = ['all', 'mentions', 'mute'] as const;
 
@@ -184,7 +167,8 @@ export function channelJoin(
     principal_id: caller.principal_id,
     role: 'member',
     notify_pref: notifyPref,
-    added_by: caller.principal_kind === 'user' ? caller.principal_id : null,
+    added_by_kind: caller.principal_kind,
+    added_by: caller.principal_id,
     joined_at: now,
     revoked_at: null,
   };
@@ -255,8 +239,6 @@ export function channelAddMember(
   const now = input.now ?? new Date().toISOString();
   const role: ChannelRole = input.role ?? 'member';
   const notifyPref: NotifyPref = input.notify_pref ?? 'all';
-  const addedByUser =
-    actor.principal_kind === 'user' ? actor.principal_id : agentOwner(s, actor);
 
   const existing = s.channelMemberships.find(
     (m) =>
@@ -274,7 +256,8 @@ export function channelAddMember(
     }
     existing.role = role;
     existing.notify_pref = notifyPref;
-    existing.added_by = addedByUser;
+    existing.added_by_kind = actor.principal_kind;
+    existing.added_by = actor.principal_id;
     existing.joined_at = now;
     existing.revoked_at = null;
     return { ok: true, membership: existing };
@@ -287,7 +270,8 @@ export function channelAddMember(
     principal_id: input.principal_id,
     role,
     notify_pref: notifyPref,
-    added_by: addedByUser,
+    added_by_kind: actor.principal_kind,
+    added_by: actor.principal_id,
     joined_at: now,
     revoked_at: null,
   };
@@ -459,7 +443,8 @@ export function channelSetNotifyPref(
     principal_id: caller.principal_id,
     role: 'member',
     notify_pref: input.notify_pref,
-    added_by: caller.principal_kind === 'user' ? caller.principal_id : null,
+    added_by_kind: caller.principal_kind,
+    added_by: caller.principal_id,
     joined_at: input.now ?? new Date().toISOString(),
     revoked_at: null,
   };

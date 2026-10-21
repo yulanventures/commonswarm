@@ -5,12 +5,15 @@ import {
   type OrgChannelAuthorityState,
   type OrgChannelRefusal,
   type PrincipalKind,
-  canReadChannel,
-  canReadWorkspace,
   fail,
   isLive,
-} from '../../../../src/protocol/org-channels-contract.js';
-import { type ChannelResult, isPrivateChannelsEnabled } from './crud.js';
+} from '../../../../src/protocol/org-channels-types.ts';
+import {
+  type ChannelResult,
+  canReadChannel,
+  canReadWorkspace,
+  isPrivateChannelsEnabled,
+} from './crud.ts';
 
 export interface ChannelFileRecord {
   file_id: string;
@@ -143,6 +146,7 @@ export function bindFileToChannel(
     return fail('PRIVATE_FILE_CANNOT_BECOME_PUBLIC', 'private_file_isolation', scope);
   }
   const already = existingBindings.find((b) => b.channel_id === ch.channel_id);
+  ch.has_history = true;
   if (already) return { ok: true, binding: already };
 
   const binding: FileChannelBinding = {
@@ -324,16 +328,24 @@ export function resolvePermalink(
   }
 
   if (input.signal_id) {
-    const sig = (input.signals ?? s.signals ?? []).find(
-      (x) => x.signal_id === input.signal_id && x.workspace_id === input.workspace_id,
+    const sig =
+      (s.signals ?? []).find(
+        (x) => x.signal_id === input.signal_id && x.workspace_id === input.workspace_id,
+      ) ??
+      (input.signals ?? []).find(
+        (x) => x.signal_id === input.signal_id && x.workspace_id === input.workspace_id,
+      );
+    if (!sig) {
+      return fail('CHANNEL_ACCESS_DENIED', 'resource_access', scope);
+    }
+    const resolvedChannelId = sig.channel_id ?? null;
+    if (resolvedChannelId === null) {
+      return { ok: true, target_kind: 'signal', signal: sig };
+    }
+    const ch = s.channels.find(
+      (c) => c.channel_id === resolvedChannelId && c.workspace_id === input.workspace_id,
     );
-    const resolvedChannelId = sig?.channel_id ?? null;
-    const ch = resolvedChannelId
-      ? s.channels.find(
-          (c) => c.channel_id === resolvedChannelId && c.workspace_id === input.workspace_id,
-        )
-      : undefined;
-    if (!sig || !resolvedChannelId || !ch) {
+    if (!ch) {
       return fail('CHANNEL_ACCESS_DENIED', 'resource_access', scope);
     }
     if (ch.visibility === 'private' && !isPrivateChannelsEnabled(s)) {
@@ -503,50 +515,15 @@ export function scrubLinkPreviews(
 export function exportWorkspaceData(
   s: OrgChannelAuthorityState,
   caller: CallerContext,
-  input: {
-    workspace_id: string;
-    signals: readonly SearchableSignalRecord[];
-    files: readonly ChannelFileRecord[];
-  },
-): ChannelResult<{
-  channels: ChannelSummary[];
-  signals: SearchableSignalRecord[];
-  files: ChannelFileRecord[];
-  file_channel_bindings: FileChannelBinding[];
-}> {
+  input: { workspace_id: string; signals: readonly SearchableSignalRecord[]; files: readonly ChannelFileRecord[] },
+): ChannelResult<{ channels: ChannelSummary[]; signals: SearchableSignalRecord[]; files: ChannelFileRecord[]; file_channel_bindings: FileChannelBinding[] }> {
   const scope = wsScope(s, input.workspace_id, null);
-  if (!canReadWorkspace(s, caller, input.workspace_id)) {
-    return fail('WORKSPACE_ACCESS_DENIED', 'workspace_grant', scope);
-  }
-
-  const channels = s.channels.filter(
-    (ch) =>
-      ch.workspace_id === input.workspace_id &&
-      canReadChannel(s, caller, ch.channel_id),
-  );
+  if (!canReadWorkspace(s, caller, input.workspace_id)) return fail('WORKSPACE_ACCESS_DENIED', 'workspace_grant', scope);
+  const channels = s.channels.filter((ch) => ch.workspace_id === input.workspace_id && canReadChannel(s, caller, ch.channel_id));
   const readableChannelIds = new Set(channels.map((ch) => ch.channel_id));
-
-  const signals = input.signals.filter(
-    (sig) =>
-      sig.workspace_id === input.workspace_id &&
-      (sig.channel_id === null || readableChannelIds.has(sig.channel_id)),
-  );
-
+  const signals = input.signals.filter((sig) => sig.workspace_id === input.workspace_id && (sig.channel_id === null || readableChannelIds.has(sig.channel_id)));
   const files = filterWorkspaceFiles(s, caller, input.workspace_id, input.files);
   const readableFileIds = new Set(files.map((f) => f.file_id));
-
-  const bindings = (s.fileChannelBindings ?? []).filter(
-    (b) =>
-      b.workspace_id === input.workspace_id &&
-      readableChannelIds.has(b.channel_id) &&
-      readableFileIds.has(b.file_id),
-  );
-
-  return {
-    ok: true,
-    channels,
-    signals,
-    files,
-    file_channel_bindings: bindings,
-  };
+  const bindings = (s.fileChannelBindings ?? []).filter((b) => b.workspace_id === input.workspace_id && readableChannelIds.has(b.channel_id) && readableFileIds.has(b.file_id));
+  return { ok: true, channels, signals, files, file_channel_bindings: bindings };
 }
