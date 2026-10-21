@@ -268,7 +268,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
         WHERE t.principal_id=p.principal_id AND p.revoked_at IS NULL AND NOT p.turn_only
           AND t.revoked_at IS NULL AND NOT t.surrender_only AND r.ended_at IS NULL AND d.revoked_at IS NULL
           AND d.user_id=p.owner_user_id AND m.revoked_at IS NULL AND w.archived_at IS NULL
-          AND (t.renewal_grant_id IS NULL OR g.renewal_grant_id IS NOT NULL AND g.revoked_at IS NULL
+          AND (t.renewal_grant_id IS NULL OR g.renewal_grant_id IS NOT NULL AND g.revoked_at IS NULL AND NOT g.suspension_active
             AND g.connection_expired_at IS NULL AND (g.connection_expires_at IS NULL OR g.connection_expires_at>${new Date(now)})
             AND ROW(g.principal_id,g.run_id,g.workspace_id,g.created_by)=ROW(t.principal_id,t.run_id,p.workspace_id,p.owner_user_id)
             AND (g.bound_device_id IS NULL OR g.bound_device_id=d.device_id))
@@ -301,7 +301,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
         WHERE t.principal_id=p.principal_id AND p.revoked_at IS NULL AND NOT p.turn_only
           AND t.revoked_at IS NULL AND NOT t.surrender_only AND r.ended_at IS NULL AND d.revoked_at IS NULL
           AND d.user_id=p.owner_user_id AND m.revoked_at IS NULL AND w.archived_at IS NULL
-          AND (t.renewal_grant_id IS NULL OR g.renewal_grant_id IS NOT NULL AND g.revoked_at IS NULL
+          AND (t.renewal_grant_id IS NULL OR g.renewal_grant_id IS NOT NULL AND g.revoked_at IS NULL AND NOT g.suspension_active
             AND g.connection_expired_at IS NULL AND (g.connection_expires_at IS NULL OR g.connection_expires_at>${new Date(now)})
             AND ROW(g.principal_id,g.run_id,g.workspace_id,g.created_by)=ROW(t.principal_id,t.run_id,p.workspace_id,p.owner_user_id)
             AND (g.bound_device_id IS NULL OR g.bound_device_id=d.device_id))
@@ -337,8 +337,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
             AND child.revoked_at IS NULL AND child.first_used_at IS NOT NULL))) AS renewal_live,
       coalesce((SELECT g.revoked_at IS NOT NULL FROM swarm.renewal_grants g WHERE g.renewal_grant_id=ANY(${familyIds}::uuid[]) AND g.principal_id=p.principal_id ORDER BY g.created_at DESC,g.renewal_grant_id LIMIT 1),
         (SELECT t.revoked_at IS NOT NULL FROM swarm.agent_tokens t WHERE t.token_id=ANY(${tokenIds}::uuid[]) AND t.principal_id=p.principal_id ORDER BY t.issued_at DESC,t.token_id LIMIT 1),false) AS key_off,
-      EXISTS (SELECT 1 FROM swarm.renewal_grants g WHERE g.renewal_grant_id=ANY(${familyIds}::uuid[]) AND g.principal_id=p.principal_id AND g.revoked_at IS NULL AND g.suspension_active
-        AND g.kind<>'standing') AS paused
+      EXISTS (SELECT 1 FROM swarm.renewal_grants g WHERE g.renewal_grant_id=ANY(${familyIds}::uuid[]) AND g.principal_id=p.principal_id AND g.revoked_at IS NULL AND g.suspension_active) AS paused
       FROM swarm.agent_principals p WHERE p.workspace_id=${workspaceId}::uuid AND p.principal_id=${principalId}::uuid`;
     if (!agent) return null;
     const [activity] = await tx`SELECT greatest(

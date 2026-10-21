@@ -515,7 +515,7 @@ interface RenewalGrantFacts {
   connection_expires_at: number | null;
   connection_expired_at: number | null;
   revoked_at: number | null;
-  /** Any recorded suspension denies local family authority. */
+  /** Active suspension denies authority until explicit authorized resume. */
   suspension_active: boolean;
 }
 
@@ -3896,7 +3896,7 @@ async function loadRenewalFacts(
       g.horizon_expires_at,
       g.connection_expires_at,COALESCE(g.connection_expired_at,CASE WHEN g.connection_expires_at<=clock_timestamp() THEN g.connection_expires_at END) AS connection_expired_at,
       g.revoked_at AS grant_revoked_at,
-      (g.suspended_at IS NOT NULL) AS grant_suspension_active,
+      (g.suspension_active) AS grant_suspension_active,
       (
         g.principal_id = t.principal_id
         AND g.run_id = t.run_id
@@ -6285,7 +6285,7 @@ async function replaceUnusedRegistrationToken(
           AND g.run_id = ${existing.run_id}::uuid
           AND g.revoked_at IS NULL
           AND (g.kind='standing' OR g.horizon_expires_at > clock_timestamp())
-          AND g.suspended_at IS NULL AND g.connection_expired_at IS NULL
+          AND NOT g.suspension_active AND g.connection_expired_at IS NULL
           AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
       )
     RETURNING token_id
@@ -9917,7 +9917,7 @@ async function handleLocalConnectionExpiry(
       AND m.revoked_at IS NULL AND w.archived_at IS NULL AND g.revoked_at IS NULL
       AND (g.bound_device_id IS NULL OR g.bound_device_id=d.device_id)
       AND (g.kind='standing' OR g.horizon_expires_at>clock_timestamp() AND g.successors_used<g.max_successors)
-      AND g.suspended_at IS NULL
+      AND NOT g.suspension_active
       AND g.connection_expired_at IS NULL AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
       AND swarm.admin_child_live(p.parent_admin_grant_id,g.workspace_id)
       AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z
@@ -13555,7 +13555,7 @@ async function handleTransaction(
           AND p.transport='local' AND NOT p.turn_only AND d.user_id=p.owner_user_id
           AND ROW(g.principal_id,g.run_id,g.workspace_id,g.created_by)=ROW(t.principal_id,t.run_id,p.workspace_id,p.owner_user_id)
           AND (g.bound_device_id IS NULL OR g.bound_device_id=d.device_id)
-          AND g.revoked_at IS NULL AND g.suspended_at IS NULL AND g.connection_expired_at IS NULL
+          AND g.revoked_at IS NULL AND NOT g.suspension_active AND g.connection_expired_at IS NULL
           AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
           AND (g.kind='standing' OR g.horizon_expires_at>clock_timestamp())
           AND (t.expires_at>clock_timestamp() OR (g.kind='standing' AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp()) AND t.first_used_at IS NOT NULL))
@@ -13566,7 +13566,7 @@ async function handleTransaction(
           AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE (z.kind,z.target_id) IN
             (('token',t.token_id),('principal',p.principal_id),('run',r.run_id),('device',d.device_id),
              ('renewal_grant',g.renewal_grant_id),('membership',p.owner_user_id),('lineage',t.lineage_id),('family',t.lineage_id)))`;
-      if(!current.length) throw new LocalCredentialDenied(true);
+      if(!current.length) throw new LocalCredentialDenied();
     }
     if(localState.authenticatedAgent && agentTokenHash && !isAgentSessionProofExempt(kind)
       && !['release_agent_session','revoke_agent_token','revoke_agent_principal'].includes(kind)) {
@@ -13594,7 +13594,7 @@ async function handleTransaction(
             WHERE issued.token_id=${typeof localBody.token_id==='string'?localBody.token_id:null}::uuid
               AND issued.principal_id=${typeof localBody.principal_id==='string'?localBody.principal_id:null}::uuid
               AND issued.run_id=${typeof localBody.run_id==='string'?localBody.run_id:null}::uuid
-              AND issued.revoked_at IS NULL AND issued.expires_at>clock_timestamp() AND g.revoked_at IS NULL AND g.suspended_at IS NULL
+              AND issued.revoked_at IS NULL AND issued.expires_at>clock_timestamp() AND g.revoked_at IS NULL AND NOT g.suspension_active
               AND g.connection_expired_at IS NULL AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp()))`;
       if(!current.length) throw new LocalCommandRefused({status:403,body:{error:'forbidden'}});
     }
@@ -15053,7 +15053,7 @@ export async function handleAdminWorkerCommand(
           WHERE t.token_id=${result.worker_delivery.credential_id}::uuid AND t.revoked_at IS NULL AND t.expires_at>clock_timestamp()
             AND p.owner_user_id=${admission.token.owner_user_id}::uuid AND p.revoked_at IS NULL
             AND r.ended_at IS NULL AND d.revoked_at IS NULL AND m.revoked_at IS NULL AND w.archived_at IS NULL
-            AND g.revoked_at IS NULL AND g.suspended_at IS NULL AND g.connection_expired_at IS NULL
+            AND g.revoked_at IS NULL AND NOT g.suspension_active AND g.connection_expired_at IS NULL
             AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
             AND (g.kind='standing' OR g.horizon_expires_at>clock_timestamp())
             AND swarm.admin_child_live(p.parent_admin_grant_id,p.workspace_id)
