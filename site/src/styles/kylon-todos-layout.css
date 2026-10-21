@@ -6,6 +6,26 @@ live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos {
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo {
   gap: 24px; padding-block-end: 32px;
 }
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-intro {
+  display: grid; gap: 8px; min-inline-size: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-back {
+  padding: 0; margin: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-head {
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px;
+  align-items: start; font-size: 24px; line-height: 1.35;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-head:has(> .hm-todo-done) {
+  grid-template-columns: 44px minmax(0, 1fr);
+}
+/* A26px box centres on the first title line inside a separate44px hit area.
+   With4px between hit area and title, the painted box-to-text gap is13px. */
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-done {
+  margin: 0; box-sizing: border-box; align-self: start;
+  align-items: flex-start; justify-content: center;
+  padding-block-start: calc((1.35em - 26px) / 2);
+}
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todos-title {
   font-size: 20px; font-weight: 600; line-height: 1.35; letter-spacing: -0.3px;
 }
@@ -64,45 +84,10 @@ live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-p
   live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo {
     padding: 16px 24px 32px; gap: 12px;
   }
-  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-title {
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo :is(.hm-todo-head, .hm-todo-title) {
     font-size: 20px; letter-spacing: -0.3px;
   }
   live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-back-workspace {
     display: none;
-  }
-  /* Flatten presentation wrappers only. Article, H1, section labels, native controls
-     and DOM reading order survive. Metadata paints below the title and before notes. */
-  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] {
-    grid-template-columns: 44px minmax(0, 1fr); column-gap: 8px;
-  }
-  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] :is(.hm-todo-top, .hm-todo-head, .hm-todo-head-copy) {
-    display: contents;
-  }
-  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] :is(.hm-todo-back, .hm-todo-where) {
-    order: 1; grid-column: 1 / -1; padding: 0; margin: 0;
-  }
-  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] .hm-todo-word {
-    order: 2; grid-column: 1 / -1;
-  }
-  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] .hm-todo-done {
-    order: 3; grid-column: 1; margin: 0; justify-content: flex-start;
-  }
-  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] .hm-todo-title {
-    order: 3; grid-column: 2;
-  }
-  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"]:not(:has(> .hm-todo-head > .hm-todo-done)) .hm-todo-title {
-    grid-column: 1 / -1;
-  }
-  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] .hm-todo-meta {
-    order: 4; grid-column: 1 / -1;
-  }
-  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] .hm-todo-notes {
-    order: 5; grid-column: 1 / -1;
-  }
-  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] > .hm-todo-panel {
-    order: 6; grid-column: 1 / -1;
-  }
-  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo[data-home-todo="ready"] > .hm-todo-comments {
-    order: 7; grid-column: 1 / -1;
   }
 }
