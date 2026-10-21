@@ -1,6 +1,7 @@
 /* Only People changes the desktop context. Native rail, account and workspace switching survive. */
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-people-composition] .cs-org-context-body { overflow: auto; padding: 6px; scroll-padding: 6px; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-people-composition] .hm-frame--people .hm-route-pane { padding: 24px clamp(12px,3vw,40px) 40px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-close-phone { display: none; }
 live-dashboard.dashboard[data-kylon-shell] :is([data-people-page],[data-people-context]) :is(button,a,input,select,summary):focus-visible:not(dialog *) {
   outline: 2px solid var(--k-shell-focus); outline-offset: 2px; box-shadow: none; scroll-margin: 6px;
 }
@@ -43,7 +44,14 @@ live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],
   live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail [data-people-context] > :is(.pd-page-main,.pd-context-footer) { display: none; }
   live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-head > :is(.pd-page-actions,.pd-page-search,.pd-page-filters) { display: none; }
   live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-back { display: none; }
-  live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-head { padding: 8px 6px 0; }
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-close-wide { display: none; }
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-close-phone { display: inline-flex; align-items: center; gap: 6px; }
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-close-detail { inline-size: auto; min-inline-size: 44px; padding-inline: 4px; }
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail-top { justify-content: flex-start; margin: 0; }
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-title-row h1 {
+    position: absolute; inline-size: 1px; block-size: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-head { padding: 0; gap: 0; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-people-composition] :is(.cs-org-phone-bar > .cs-org-product,.cs-kylon-workspace-menu .hm-menu__trigger,.dashboard__user-trigger) { border: 0; box-shadow: none; background: transparent; }
 }
 @media (forced-colors: active) {
