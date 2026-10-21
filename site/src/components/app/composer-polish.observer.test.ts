@@ -4,7 +4,8 @@
  * transcript end-gap and its 12px contract belong to feed-composer-clearance.
  */
 import assert from "node:assert/strict";
-import { browserTest as test, findChrome, launchChrome } from "../../../tests/chrome.js";
+import { browserTest as test } from "../../../tests/chrome.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 import { startComposerPolishServer } from "./composer-polish.fixture.js";
 
 type FocusProbe = { visible: boolean; quiet: boolean; active: boolean; contrast: number; blurred: string; focused: string };
