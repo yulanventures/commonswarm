@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { test } from "node:test";
-import { createInteractionHandler } from "../src/interactions.js";
+import { createInteractionHandler, ensureSession } from "../src/interactions.js";
 import { createFinishFlow } from "../src/finish-flow.js";
 import { SESSION_COOKIE } from "../src/browser-security.js";
 
@@ -72,7 +72,8 @@ test("verified callback rotates the browser; the second connect reuses the live 
   const callback = await h.run(`/oauth/callback/gotrue?interaction=${uid}&state=DUMMYSTATE&code=DUMMYCODE&provider=github`);
   assert.equal(callback.status, 303);
   assert.match(callback.headers["set-cookie"], /DUMMYROTATED-long-enough/u);
-  assert.doesNotMatch(callback.headers["set-cookie"], /Max-Age|Expires|Domain/iu);
+  assert.match(callback.headers["set-cookie"], /; Max-Age=34560000$/u);
+  assert.doesNotMatch(callback.headers["set-cookie"], /Domain=/iu);
   assert.equal(h.session.gotrue_session_id, authId);
   assert.equal(h.session.authenticated_at.getTime(), h.at * 1000);
   assert.equal(h.session.expires_at, h.expires);
@@ -150,5 +151,27 @@ test("revocation after consent consumption prevents activation and finish, with 
     assert.equal(res.status, revoked ? 502 : 303);
     assert.equal(h.state().activated, revoked ? 0 : 1);
     assert.equal(h.state().saved !== undefined, !revoked);
+  }
+});
+
+// Cookie retention belongs at the HTTP boundary; the real store/PG test owns
+// live binding/adoption, so this test supplies only that boundary's outcomes.
+test("verified reuse renews the same persistent handle; a transient lookup cannot replace or clear it", async () => {
+  for (const failure of [false, true]) {
+    const headers = new Map(); let created = 0;
+    const request = { headers: { cookie: `${SESSION_COOKIE}=${cookie}` } };
+    const response = { setHeader: (k, v) => headers.set(k, v) };
+    const error = Object.assign(new Error("DUMMY database unavailable"), { code: "ECONNRESET" });
+    const store = { requireSession: async () => { if (failure) throw error; return { user_id: userId }; },
+      createSession: async () => { created++; return "DUMMYUNVERIFIED-new-handle"; } };
+    if (failure) {
+      await assert.rejects(ensureSession(request, response, store), { code: "ECONNRESET" });
+      assert.equal(headers.has("set-cookie"), false);
+    } else {
+      const reused = await ensureSession(request, response, store);
+      assert.equal(reused.id, cookie);
+      assert.equal(headers.get("set-cookie"), `${SESSION_COOKIE}=${cookie}; Secure; HttpOnly; Path=/; SameSite=Lax; Max-Age=34560000`);
+    }
+    assert.equal(created, 0);
   }
 });

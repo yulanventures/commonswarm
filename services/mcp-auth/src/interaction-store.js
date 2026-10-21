@@ -1,8 +1,8 @@
 // Persist browser/interaction bindings from opaque cookies and verified identities.
-// Outputs are bound rows or refusals; GoTrue evidence and fixed expiry survive rotation.
+// Outputs are bound rows or refusals; GoTrue evidence and explicit expiry survive rotation.
 import { AUTH_PROVIDER_CATALOG } from "./auth-provider-catalog.js";
 import { readGoTrueSession } from "./gotrue.js";
-import { SESSION_TTL_SECONDS, sessionReuseDecision } from "./session-policy.js";
+import { SESSION_TTL_SECONDS, normalizeBrowserExpiry, sessionReuseDecision } from "./session-policy.js";
 import { adminTransactionContext, joinAdminTransaction } from "./admin-transaction.js";
 import { createHash } from "node:crypto";
 
@@ -63,16 +63,52 @@ export class InteractionStore {
     if (typeof value !== "string" || value.length < 20) return null;
     const result = await this.pool.query(
       `SELECT session_hash, user_id, user_email, user_display_name, authenticated_at,
-              gotrue_session_id, expires_at
+              gotrue_session_id, expires_at,
+              (user_id IS NOT NULL AND gotrue_session_id IS NOT NULL
+                AND expires_at = authenticated_at + (604800 * interval '1 second')) AS legacy_deadline
          FROM commonswarm_oauth.browser_sessions
         WHERE session_hash = $1 AND invalidated_at IS NULL
-          AND expires_at > statement_timestamp()
+          AND (expires_at > statement_timestamp()
+            OR (user_id IS NOT NULL AND gotrue_session_id IS NOT NULL
+              AND expires_at = authenticated_at + (604800 * interval '1 second')))
         LIMIT 1`,
       [hashOpaque(value)],
     );
-    const row = result.rows[0];
-    if (row?.user_id && !(await sessionReuseDecision(row, {}, { pool: this.pool })).allowed) return null;
-    return row ?? null;
+    const stored = result.rows[0];
+    if (!stored) return null;
+    const { legacy_deadline: legacy, ...row } = stored;
+    row.expires_at = normalizeBrowserExpiry(row.expires_at);
+    if (legacy) {
+      // The old generated deadline is the only expired value eligible for
+      // adoption. Prove its original binding before attempting a scoped CAS.
+      if (!(await sessionReuseDecision({ ...row, expires_at: "infinity" }, {}, { pool: this.pool })).allowed) return null;
+      return transaction(this.pool, async client => {
+        const adopted = await client.query(
+          `UPDATE commonswarm_oauth.browser_sessions AS browser
+              SET expires_at = 'infinity'::timestamptz
+            WHERE session_hash = $1 AND user_id = $2::uuid
+              AND gotrue_session_id = $3::uuid AND authenticated_at = $4
+              AND invalidated_at IS NULL
+              AND (expires_at = $5::timestamptz OR expires_at = 'infinity'::timestamptz)
+              AND $5::timestamptz = authenticated_at + (604800 * interval '1 second')
+              AND EXISTS (SELECT 1 FROM commonswarm_oauth.live_gotrue_session($3::uuid, $2::uuid) AS live
+                WHERE date_trunc('second', live.authenticated_at) = browser.authenticated_at)
+            RETURNING session_hash, user_id, user_email, user_display_name,
+                      authenticated_at, gotrue_session_id, expires_at`,
+          [hashOpaque(value), row.user_id, row.gotrue_session_id, row.authenticated_at, row.expires_at],
+        );
+        // Another verified request may already have adopted this exact binding;
+        // invalidation, identity changes and unexplained finite dates cannot win.
+        const winner = adopted.rows[0];
+        if (!winner) return null;
+        if (!(await sessionReuseDecision(winner, {}, { pool: client })).allowed) {
+          throw conflict("browser session is unavailable");
+        }
+        return { ...winner, expires_at: normalizeBrowserExpiry(winner.expires_at) };
+      });
+    }
+    if (row.user_id && !(await sessionReuseDecision(row, {}, { pool: this.pool })).allowed) return null;
+    return row;
   }
 
   async rotateSession(value) {
@@ -98,7 +134,7 @@ export class InteractionStore {
            authenticated_at, expires_at, gotrue_session_id
          ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [hashOpaque(next), row.user_id, row.user_email, row.user_display_name,
-          row.authenticated_at, row.expires_at, row.gotrue_session_id],
+          row.authenticated_at, normalizeBrowserExpiry(row.expires_at), row.gotrue_session_id],
       );
       await client.query(
         `UPDATE commonswarm_oauth.interactions
@@ -179,8 +215,7 @@ export class InteractionStore {
   async attachUser(interactionUid, sessionId, user) {
     return await transaction(this.pool, async (client) => {
       const live = await readGoTrueSession(client, { sessionId: user.gotrueSessionId, userId: user.id });
-      if (user.identityVerified !== true || !live || live.interactiveAuthAtSeconds !== user.interactiveAuthAtSeconds
-          || live.interactiveAuthAtSeconds + this.sessionTtlSeconds <= Math.floor(Date.now() / 1000)) {
+      if (user.identityVerified !== true || !live || live.interactiveAuthAtSeconds !== user.interactiveAuthAtSeconds) {
         throw conflict("verified sign-in evidence is unavailable");
       }
       const sessionHash = hashOpaque(sessionId);
@@ -200,14 +235,14 @@ export class InteractionStore {
                 authenticated_at = to_timestamp($5), gotrue_session_id = $6::uuid,
                 expires_at = CASE WHEN authenticated_at IS NULL
                   OR (gotrue_session_id IS DISTINCT FROM $6::uuid AND authenticated_at < to_timestamp($5))
-                  THEN to_timestamp($5) + ($7 * interval '1 second') ELSE expires_at END
+                  THEN 'infinity'::timestamptz ELSE expires_at END
           WHERE session_hash = $4 AND invalidated_at IS NULL
             AND expires_at > statement_timestamp() AND (user_id IS NULL OR user_id = $1::uuid)
             AND (authenticated_at IS NULL
               OR (gotrue_session_id IS DISTINCT FROM $6::uuid AND authenticated_at < to_timestamp($5))
               OR (authenticated_at = to_timestamp($5) AND gotrue_session_id = $6::uuid))`,
         [user.id, user.email ?? null, user.displayName, sessionHash,
-          live.interactiveAuthAtSeconds, live.sessionId, this.sessionTtlSeconds],
+          live.interactiveAuthAtSeconds, live.sessionId],
       );
       if (updated.rowCount !== 1) throw new InteractionStateError("different_account");
       const interaction = await client.query(
