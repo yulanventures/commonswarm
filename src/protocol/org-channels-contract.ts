@@ -3,6 +3,7 @@ import {
   type ChannelSummary,
   type MultiOrgWhoamiResponse,
   type OrgChannelAuthorityState,
+  type OrgRole,
   type OrganizationSummary,
   type PrincipalKind,
   type WorkspaceMoveTransferMode,
@@ -39,7 +40,22 @@ export function resolveOrgWorkspaceChannelSelector(
     expWs = input.workspace?.trim() || null;
   if (expWs?.includes('/')) {
     const [oPart, wPart] = expWs.split('/', 2);
-    if (!expOrg && oPart) expOrg = oPart.trim();
+    const qualOrg = oPart?.trim() || null;
+    if (expOrg && qualOrg && norm(expOrg) !== norm(qualOrg)) {
+      const sameOrg = s.organizations.find(
+        (o) =>
+          (o.id === expOrg || norm(o.slug) === norm(expOrg)) &&
+          (o.id === qualOrg || norm(o.slug) === norm(qualOrg)),
+      );
+      if (!sameOrg) {
+        return fail('WORKSPACE_ACCESS_DENIED', 'conflicting_org_workspace_selector', {
+          org: expOrg,
+          workspace: input.workspace ?? null,
+          seat_id: input.seat_id ?? null,
+        });
+      }
+    }
+    if (!expOrg && qualOrg) expOrg = qualOrg;
     expWs = wPart?.trim() || null;
   }
   const reachOrgs = s.organizations.filter((o) => isLive(o) && canReadOrg(s, c, o.id));
@@ -63,10 +79,27 @@ export function resolveOrgWorkspaceChannelSelector(
   const seatOrg = seatWs
     ? s.organizations.find((o) => o.id === seatWs.org_id && isLive(o))
     : undefined;
-  if (seat && (!seatWs || !seatOrg || !canReadWorkspace(s, c, seatWs.workspace_id))) {
-    return fail('WORKSPACE_ACCESS_DENIED', 'active_seat_workspace_access', {
-      seat_id: input.seat_id ?? null,
-    });
+  if (input.seat_id) {
+    if (!seat || !seatWs || !seatOrg) {
+      return fail('WORKSPACE_SEAT_MISMATCH', 'active_seat', {
+        seat_id: input.seat_id,
+      });
+    }
+    const seatAid =
+      seat.agent_identity_id ??
+      (s.agentPrincipals ?? []).find((ap) => ap.principal_id === seat.principal_id)
+        ?.agent_identity_id ??
+      seat.principal_id;
+    if (c.principal_kind !== 'agent' || seatAid !== c.principal_id) {
+      return fail('WORKSPACE_SEAT_MISMATCH', 'seat_principal_ownership', {
+        seat_id: input.seat_id,
+      });
+    }
+    if (!canReadWorkspace(s, c, seatWs.workspace_id)) {
+      return fail('WORKSPACE_ACCESS_DENIED', 'active_seat_workspace_access', {
+        seat_id: input.seat_id,
+      });
+    }
   }
   const pol = c.connection_id
     ? (s.connectionPolicies ?? []).find((p) => p.connection_id === c.connection_id && isLive(p))
@@ -366,12 +399,24 @@ export function reconcileWorkspaceMove(
     const k = `agent:${aid}`;
     if (!candidates.has(k)) candidates.set(k, { principal_kind: 'agent', principal_id: aid, role: 'member' });
   }
-  for (const ai of s.agentIdentities.filter((x) => isLive(x))) {
-    const k = `agent:${ai.id}`;
-    if (!candidates.has(k)) candidates.set(k, { principal_kind: 'agent', principal_id: ai.id, role: 'member' });
-  }
   if (transfer_members === 'all') {
     for (const p of candidates.values()) {
+      let wg = s.workspaceGrants.find(
+        (x) => x.workspace_id === ws.workspace_id && isPrin(x, p.principal_kind, p.principal_id),
+      );
+      if (!wg) {
+        wg = {
+          workspace_id: ws.workspace_id,
+          org_id: target_org_id,
+          principal_kind: p.principal_kind,
+          principal_id: p.principal_id,
+          role: p.role === 'owner' ? 'admin' : p.role,
+          granted_by: actor_user_id,
+          created_at: now,
+          revoked_at: null,
+        };
+        s.workspaceGrants.push(wg);
+      }
       const existingOrgMem = s.orgMemberships.find(
         (m) =>
           m.org_id === target_org_id &&
@@ -386,7 +431,7 @@ export function reconcileWorkspaceMove(
             now,
           }).closed_seat_ids,
         );
-      } else if (!existingOrgMem && s.workspaceGrants.some((x) => x.workspace_id === ws.workspace_id && isPrin(x, p.principal_kind, p.principal_id) && isLive(x))) {
+      } else if (!existingOrgMem) {
         s.orgMemberships.push({
           org_id: target_org_id,
           principal_kind: p.principal_kind,
@@ -399,6 +444,10 @@ export function reconcileWorkspaceMove(
       }
     }
   } else {
+    for (const om of s.orgMemberships.filter((m) => m.org_id === target_org_id && isLive(m) && m.role !== 'owner')) {
+      const k = `${om.principal_kind}:${om.principal_id}`;
+      if (!candidates.has(k)) candidates.set(k, { principal_kind: om.principal_kind, principal_id: om.principal_id, role: om.role });
+    }
     for (const p of candidates.values()) {
       if (orgRole(s, target_org_id, p.principal_kind, p.principal_id) !== 'owner') {
         closedSeats.push(

@@ -270,17 +270,34 @@ export function buildOrgChannelRefusal({
       ? 'cswarm_register_seat'
       : code === 'AMBIGUOUS_WORKSPACE_SELECTOR'
         ? 'cswarm_list_workspaces'
-        : code.includes('CHANNEL')
-          ? 'cswarm_channel_invite'
-          : 'cswarm_request_access';
+        : code === 'CHANNEL_HAS_PUBLIC_HISTORY' ||
+            code === 'PRIVATE_CHANNEL_CANNOT_BECOME_PUBLIC' ||
+            code === 'PRIVATE_CHANNEL_OPEN_JOIN_FORBIDDEN'
+          ? 'cswarm_channel_create'
+          : code === 'PRIVATE_CHANNELS_DISABLED'
+            ? 'cswarm_channel_list'
+            : code === 'ORG_MOVE_REQUIRES_DUAL_OWNER'
+              ? 'cswarm_org_list_members'
+              : code.includes('CHANNEL')
+                ? 'cswarm_channel_invite'
+                : 'cswarm_request_access';
   const cli =
     code === 'WORKSPACE_SEAT_MISMATCH'
       ? `cswarm check --workspace ${sel}`
       : code === 'AMBIGUOUS_WORKSPACE_SELECTOR'
         ? 'cswarm workspaces list'
-        : s.channel
-          ? `cswarm channel invite ${s.channel} --workspace ${sel}`
-          : `cswarm org members grant --workspace ${sel}`;
+        : code === 'CHANNEL_HAS_PUBLIC_HISTORY' ||
+            code === 'PRIVATE_CHANNEL_OPEN_JOIN_FORBIDDEN'
+          ? `cswarm channel create <new-name> --private --workspace ${sel}`
+          : code === 'PRIVATE_CHANNEL_CANNOT_BECOME_PUBLIC'
+            ? `cswarm channel create <new-name> --workspace ${sel}`
+            : code === 'PRIVATE_CHANNELS_DISABLED'
+              ? `cswarm channel ls --workspace ${sel}`
+              : code === 'ORG_MOVE_REQUIRES_DUAL_OWNER'
+                ? `cswarm org members list --org ${s.org ?? '<org>'}`
+                : s.channel
+                  ? `cswarm channel invite ${s.channel} --workspace ${sel}`
+                  : `cswarm org members grant --workspace ${sel}`;
   return {
     code,
     missing,

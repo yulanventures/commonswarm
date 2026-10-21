@@ -133,7 +133,8 @@ export function canReadChannel(
       return false;
     if (c.principal_kind === 'agent') {
       const ownerId = agentOwner(s, c);
-      if (!ownerId || (isGuest('user', ownerId) && !hasChMem('user', ownerId)))
+      if (!ownerId) return false;
+      if (isGuest('user', ownerId) && (!hasChMem('user', ownerId) || !hasChMem('agent', c.principal_id)))
         return false;
     }
     return true;

@@ -36,6 +36,8 @@ $org_workspaces_channels_rollback_guard$;
 
 DROP TRIGGER IF EXISTS channel_memberships_write_guard ON swarm.channel_memberships;
 DROP TRIGGER IF EXISTS channels_visibility_transition_guard ON swarm.channels;
+DROP TRIGGER IF EXISTS renewal_grants_sync_identity ON swarm.renewal_grants;
+DROP TRIGGER IF EXISTS hosted_mcp_seats_sync_identity ON swarm.hosted_mcp_seats;
 DROP TRIGGER IF EXISTS agent_principals_ensure_identity ON swarm.agent_principals;
 DROP TRIGGER IF EXISTS memberships_sync_org_grants ON swarm.memberships;
 DROP TRIGGER IF EXISTS workspaces_ensure_org_and_slug ON swarm.workspaces;
@@ -49,6 +51,7 @@ DROP FUNCTION IF EXISTS swarm.can_read_workspace(uuid, text, uuid, uuid, uuid);
 DROP FUNCTION IF EXISTS swarm.can_read_org(uuid, text, uuid, uuid, uuid);
 DROP FUNCTION IF EXISTS swarm.has_live_ws_grant(uuid, text, uuid);
 DROP FUNCTION IF EXISTS swarm.live_org_role(uuid, text, uuid);
+DROP FUNCTION IF EXISTS swarm.sync_standing_grant_to_agent_identity();
 DROP FUNCTION IF EXISTS swarm.ensure_agent_principal_identity();
 DROP FUNCTION IF EXISTS swarm.sync_legacy_membership_to_org_grants();
 DROP FUNCTION IF EXISTS swarm.ensure_workspace_org_and_slug();

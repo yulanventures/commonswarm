@@ -262,10 +262,41 @@ END
 $$;
 CREATE TRIGGER agent_principals_ensure_identity BEFORE INSERT ON swarm.agent_principals FOR EACH ROW EXECUTE FUNCTION swarm.ensure_agent_principal_identity();
 
+CREATE FUNCTION swarm.sync_standing_grant_to_agent_identity() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = swarm, pg_catalog AS $$
+DECLARE v_ap RECORD; v_existing_ai uuid;
+BEGIN
+  IF TG_TABLE_NAME = 'hosted_mcp_seats' AND NEW.grant_id IS NOT NULL THEN
+    SELECT principal_id, workspace_id, agent_identity_id, owner_user_id, name INTO v_ap FROM swarm.agent_principals WHERE principal_id = NEW.principal_id;
+    IF v_ap.principal_id IS NOT NULL THEN
+      SELECT id INTO v_existing_ai FROM swarm.agent_identities WHERE standing_grant_id = NEW.grant_id AND display_name = v_ap.name LIMIT 1;
+      IF v_existing_ai IS NOT NULL AND v_existing_ai <> v_ap.agent_identity_id THEN
+        IF NOT EXISTS (SELECT 1 FROM swarm.agent_principals WHERE workspace_id = v_ap.workspace_id AND agent_identity_id = v_existing_ai AND principal_id <> v_ap.principal_id) THEN
+          UPDATE swarm.agent_principals SET agent_identity_id = v_existing_ai WHERE principal_id = v_ap.principal_id;
+          UPDATE swarm.workspace_principal_grants SET principal_id = v_existing_ai WHERE workspace_id = v_ap.workspace_id AND principal_kind = 'agent' AND principal_id = v_ap.agent_identity_id
+            AND NOT EXISTS (SELECT 1 FROM swarm.workspace_principal_grants WHERE (workspace_id, principal_kind, principal_id) = (v_ap.workspace_id, 'agent', v_existing_ai));
+        END IF;
+      ELSIF v_existing_ai IS NULL THEN
+        UPDATE swarm.agent_identities SET standing_grant_id = NEW.grant_id WHERE id = v_ap.agent_identity_id AND standing_grant_id IS NULL;
+      END IF;
+    END IF;
+  ELSIF TG_TABLE_NAME = 'renewal_grants' THEN
+    UPDATE swarm.agent_identities ai SET standing_renewal_grant_id = NEW.renewal_grant_id
+    FROM swarm.agent_principals ap
+    WHERE ap.principal_id = NEW.principal_id AND ai.id = ap.agent_identity_id
+      AND (ai.standing_renewal_grant_id IS NULL OR ai.standing_renewal_grant_id = NEW.renewal_grant_id)
+      AND NOT EXISTS (SELECT 1 FROM swarm.agent_identities o WHERE o.standing_renewal_grant_id = NEW.renewal_grant_id AND o.id <> ai.id);
+  END IF;
+  RETURN NEW;
+END
+$$;
+CREATE TRIGGER hosted_mcp_seats_sync_identity AFTER INSERT OR UPDATE ON swarm.hosted_mcp_seats FOR EACH ROW EXECUTE FUNCTION swarm.sync_standing_grant_to_agent_identity();
+CREATE TRIGGER renewal_grants_sync_identity AFTER INSERT OR UPDATE ON swarm.renewal_grants FOR EACH ROW EXECUTE FUNCTION swarm.sync_standing_grant_to_agent_identity();
+
 ALTER FUNCTION swarm.ensure_workspace_org_and_slug() OWNER TO swarm_admin;
 ALTER FUNCTION swarm.sync_legacy_membership_to_org_grants() OWNER TO swarm_admin;
 ALTER FUNCTION swarm.ensure_agent_principal_identity() OWNER TO swarm_admin;
-REVOKE ALL ON FUNCTION swarm.ensure_workspace_org_and_slug(), swarm.sync_legacy_membership_to_org_grants(), swarm.ensure_agent_principal_identity() FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
-GRANT EXECUTE ON FUNCTION swarm.ensure_workspace_org_and_slug(), swarm.sync_legacy_membership_to_org_grants(), swarm.ensure_agent_principal_identity() TO swarm_command;
+ALTER FUNCTION swarm.sync_standing_grant_to_agent_identity() OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.ensure_workspace_org_and_slug(), swarm.sync_legacy_membership_to_org_grants(), swarm.ensure_agent_principal_identity(), swarm.sync_standing_grant_to_agent_identity() FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+GRANT EXECUTE ON FUNCTION swarm.ensure_workspace_org_and_slug(), swarm.sync_legacy_membership_to_org_grants(), swarm.ensure_agent_principal_identity(), swarm.sync_standing_grant_to_agent_identity() TO swarm_command;
 
 RESET search_path;
