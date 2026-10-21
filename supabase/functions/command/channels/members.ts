@@ -13,6 +13,7 @@ import {
   isLive,
   isPrin,
   norm,
+  orgRole,
 } from '../../../../src/protocol/org-channels-contract.js';
 import {
   type ChannelResult,
@@ -33,6 +34,25 @@ function hasLiveChannelMember(
 ): boolean {
   return s.channelMemberships.some(
     (m) => m.channel_id === channelId && isPrin(m, kind, id) && isLive(m),
+  );
+}
+
+function isGuestInWorkspace(
+  s: OrgChannelAuthorityState,
+  workspaceId: string,
+  kind: PrincipalKind,
+  id: string,
+): boolean {
+  const ws = s.workspaces.find((w) => w.workspace_id === workspaceId);
+  return (
+    (ws != null && orgRole(s, ws.org_id, kind, id) === 'guest') ||
+    s.workspaceGrants.some(
+      (g) =>
+        g.workspace_id === workspaceId &&
+        isPrin(g, kind, id) &&
+        isLive(g) &&
+        g.role === 'guest',
+    )
   );
 }
 
@@ -114,6 +134,31 @@ export function channelJoin(
       return { ok: true, membership: existingLive };
     }
     return fail('CHANNEL_ACCESS_DENIED', 'channel_owner_invite', scope);
+  }
+
+  const ownerId = caller.principal_kind === 'agent' ? agentOwner(s, caller) : null;
+  const callerIsGuest = isGuestInWorkspace(
+    s,
+    ch.workspace_id,
+    caller.principal_kind,
+    caller.principal_id,
+  );
+  const ownerIsGuest =
+    caller.principal_kind === 'agent' &&
+    (!ownerId || isGuestInWorkspace(s, ch.workspace_id, 'user', ownerId));
+  if (callerIsGuest || ownerIsGuest) {
+    const hasSelfLive = hasLiveChannelMember(
+      s,
+      ch.channel_id,
+      caller.principal_kind,
+      caller.principal_id,
+    );
+    const hasOwnerLive =
+      caller.principal_kind !== 'agent' ||
+      (ownerId !== null && hasLiveChannelMember(s, ch.channel_id, 'user', ownerId));
+    if (!hasSelfLive || !hasOwnerLive) {
+      return fail('CHANNEL_INVITE_REQUIRED', 'channel_invitation', scope);
+    }
   }
 
   const now = input.now ?? new Date().toISOString();
@@ -267,10 +312,18 @@ export function channelRemoveMember(
         ai.owner_user_id === actor.principal_id &&
         isLive(ai),
     );
+  const actorChannelRole = s.channelMemberships.find(
+    (m) =>
+      m.channel_id === ch.channel_id &&
+      isPrin(m, actor.principal_kind, actor.principal_id) &&
+      isLive(m),
+  )?.role;
   const allowed =
-    isChannelOwner(s, actor, ch.channel_id) ||
-    isOwnAgent ||
-    (ch.visibility === 'workspace' && isWorkspaceAdminOrOwner(s, actor, ch.workspace_id));
+    ch.visibility === 'private'
+      ? actorChannelRole === 'owner'
+      : actorChannelRole === 'owner' ||
+        isOwnAgent ||
+        isWorkspaceAdminOrOwner(s, actor, ch.workspace_id);
   if (!allowed) {
     return fail('PRIVATE_CHANNEL_OWNER_REQUIRED', 'channel_owner_membership', scope);
   }

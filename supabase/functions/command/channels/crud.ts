@@ -28,8 +28,23 @@ export type ChannelResult<T> =
   | ({ ok: true } & T)
   | { ok: false; refusal: OrgChannelRefusal };
 
+declare module '../../../../src/protocol/org-channels-types.js' {
+  interface OrgChannelAuthorityState {
+    signals?: ReadonlyArray<{
+      signal_id: string;
+      workspace_id: string;
+      channel_id: string | null;
+      thread_root_id?: string | null;
+      author_kind: 'user' | 'agent';
+      author_id: string;
+      body: string;
+      created_at: string;
+    }>;
+  }
+}
+
 export const isPrivateChannelsEnabled = (s: OrgChannelAuthorityState): boolean =>
-  s.privateChannelsEnabled ?? true;
+  s.privateChannelsEnabled === true;
 
 export function resolvePrivateChannelsEnabledFromEnv(
   env?: Record<string, string | undefined>,
@@ -298,18 +313,21 @@ export function channelSetVisibility(
 
   const nextJoinPolicy: ChannelJoinPolicy =
     input.join_policy ?? (input.visibility === 'private' ? 'invite_only' : ch.join_policy);
-  const boundFiles =
-    input.bound_file_count ??
-    (s.fileChannelBindings ?? []).filter(
-      (b) => b.workspace_id === input.workspace_id && b.channel_id === ch.channel_id,
-    ).length;
+  const actualSignalCount = (s.signals ?? []).filter(
+    (sig) => sig.channel_id === ch.channel_id,
+  ).length;
+  const actualBoundFileCount = (s.fileChannelBindings ?? []).filter(
+    (b) => b.channel_id === ch.channel_id,
+  ).length;
+  const signalCount = Math.max(actualSignalCount, input.signal_count ?? 0);
+  const boundFiles = Math.max(actualBoundFileCount, input.bound_file_count ?? 0);
 
   const trans = validateChannelVisibilityTransition({
     privateChannelsEnabled: isPrivateChannelsEnabled(s),
     currentVisibility: ch.visibility,
     nextVisibility: input.visibility,
     nextJoinPolicy,
-    signalCount: input.signal_count ?? 0,
+    signalCount,
     boundFileCount: boundFiles,
     channelSlug: ch.slug,
     workspaceSlug: scope.workspace ?? input.workspace_id,

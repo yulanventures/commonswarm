@@ -45,7 +45,9 @@ export interface LinkPreviewCandidate {
   title: string;
   snippet: string;
   author?: string | null;
+  author_name?: string | null;
   channel_slug?: string | null;
+  channel_name?: string | null;
 }
 
 export interface ScrubbedLinkPreview {
@@ -59,7 +61,9 @@ export interface ScrubbedLinkPreview {
   title: string | null;
   snippet: string | null;
   author: string | null;
+  author_name: string | null;
   channel_slug: string | null;
+  channel_name: string | null;
 }
 
 function wsScope(
@@ -76,10 +80,7 @@ function wsScope(
   };
 }
 
-/**
- * Enforces `canReadChannel` across all bound channels for `fileId` in `workspaceId`.
- * Fails closed when `PRIVATE_CHANNELS_ENABLED=false` for any file bound to a private channel.
- */
+/** Enforces `canReadChannel` across all bound channels for `fileId` in `workspaceId`. */
 export function canAccessBoundFile(
   s: OrgChannelAuthorityState,
   caller: CallerContext,
@@ -90,15 +91,10 @@ export function canAccessBoundFile(
   const bindings = (s.fileChannelBindings ?? []).filter(
     (b) => b.file_id === fileId && b.workspace_id === workspaceId,
   );
-  if (bindings.length === 0) return true;
-  return bindings.every((b) => canReadChannel(s, caller, b.channel_id));
+  return bindings.length === 0 || bindings.every((b) => canReadChannel(s, caller, b.channel_id));
 }
 
-/**
- * Durable `file_channel_bindings` creation on channel file attach/upload.
- * Prevents cross-channel laundering: a caller cannot bind a private file they cannot read,
- * and a file already bound to a private channel cannot be bound to a workspace-public channel.
- */
+/** Durable `file_channel_bindings` creation on channel file attach/upload. */
 export function bindFileToChannel(
   s: OrgChannelAuthorityState,
   caller: CallerContext,
@@ -116,9 +112,7 @@ export function bindFileToChannel(
   const ch = s.channels.find(
     (c) => c.workspace_id === input.workspace_id && c.channel_id === input.channel_id,
   );
-  if (!ch) {
-    return fail('CHANNEL_ACCESS_DENIED', 'channel_membership', baseScope);
-  }
+  if (!ch) return fail('CHANNEL_ACCESS_DENIED', 'channel_membership', baseScope);
   const scope = wsScope(s, input.workspace_id, ch.slug);
   if (ch.visibility === 'private' && !isPrivateChannelsEnabled(s)) {
     return fail('PRIVATE_CHANNELS_DISABLED', 'private_channels_enabled', scope);
@@ -126,16 +120,12 @@ export function bindFileToChannel(
   if (!canReadChannel(s, caller, ch.channel_id)) {
     return fail('CHANNEL_ACCESS_DENIED', 'channel_membership', scope);
   }
-  if (!isLive(ch)) {
-    return fail('CHANNEL_ARCHIVED', 'active_channel', scope);
-  }
+  if (!isLive(ch)) return fail('CHANNEL_ARCHIVED', 'active_channel', scope);
 
   s.fileChannelBindings = s.fileChannelBindings ?? [];
   const existingBindings = s.fileChannelBindings.filter(
     (b) => b.file_id === input.file_id && b.workspace_id === input.workspace_id,
   );
-
-  // Caller must already have read access to any existing bindings of this file.
   if (
     existingBindings.length > 0 &&
     !canAccessBoundFile(s, caller, input.file_id, input.workspace_id)
@@ -146,21 +136,14 @@ export function bindFileToChannel(
       channel: null,
     });
   }
-
-  // A file bound to a private channel cannot be re-bound to a workspace-visible channel
-  // (which would widen its context).
-  const hasPrivateBinding = existingBindings.some((b) => {
-    const boundCh = s.channels.find((c) => c.channel_id === b.channel_id);
-    return boundCh?.visibility === 'private';
-  });
+  const hasPrivateBinding = existingBindings.some(
+    (b) => s.channels.find((c) => c.channel_id === b.channel_id)?.visibility === 'private',
+  );
   if (hasPrivateBinding && ch.visibility === 'workspace') {
     return fail('PRIVATE_FILE_CANNOT_BECOME_PUBLIC', 'private_file_isolation', scope);
   }
-
   const already = existingBindings.find((b) => b.channel_id === ch.channel_id);
-  if (already) {
-    return { ok: true, binding: already };
-  }
+  if (already) return { ok: true, binding: already };
 
   const binding: FileChannelBinding = {
     file_id: input.file_id,
@@ -341,22 +324,25 @@ export function resolvePermalink(
   }
 
   if (input.signal_id) {
-    const sig = (input.signals ?? []).find(
+    const sig = (input.signals ?? s.signals ?? []).find(
       (x) => x.signal_id === input.signal_id && x.workspace_id === input.workspace_id,
     );
-    if (!sig) {
+    const resolvedChannelId = sig?.channel_id ?? null;
+    const ch = resolvedChannelId
+      ? s.channels.find(
+          (c) => c.channel_id === resolvedChannelId && c.workspace_id === input.workspace_id,
+        )
+      : undefined;
+    if (!sig || !resolvedChannelId || !ch) {
       return fail('CHANNEL_ACCESS_DENIED', 'resource_access', scope);
     }
-    if (sig.channel_id !== null) {
-      const ch = s.channels.find((c) => c.channel_id === sig.channel_id);
-      if (ch?.visibility === 'private' && !isPrivateChannelsEnabled(s)) {
-        return fail('PRIVATE_CHANNELS_DISABLED', 'private_channels_enabled', scope);
-      }
-      if (!canReadChannel(s, caller, sig.channel_id)) {
-        return fail('CHANNEL_ACCESS_DENIED', 'resource_access', scope);
-      }
+    if (ch.visibility === 'private' && !isPrivateChannelsEnabled(s)) {
+      return fail('PRIVATE_CHANNELS_DISABLED', 'private_channels_enabled', scope);
     }
-    return { ok: true, target_kind: 'signal', signal: sig };
+    if (!canReadChannel(s, caller, resolvedChannelId)) {
+      return fail('CHANNEL_ACCESS_DENIED', 'resource_access', scope);
+    }
+    return { ok: true, target_kind: 'signal', channel: ch, signal: sig };
   }
 
   if (input.file_id) {
@@ -366,16 +352,13 @@ export function resolvePermalink(
         x.workspace_id === input.workspace_id &&
         x.tombstoned_at == null,
     );
-    if (!f) {
-      return fail('CHANNEL_ACCESS_DENIED', 'resource_access', scope);
-    }
+    if (!f) return fail('CHANNEL_ACCESS_DENIED', 'resource_access', scope);
     const bindings = (s.fileChannelBindings ?? []).filter(
       (b) => b.file_id === f.file_id && b.workspace_id === input.workspace_id,
     );
-    const hasPrivate = bindings.some((b) => {
-      const ch = s.channels.find((c) => c.channel_id === b.channel_id);
-      return ch?.visibility === 'private';
-    });
+    const hasPrivate = bindings.some(
+      (b) => s.channels.find((c) => c.channel_id === b.channel_id)?.visibility === 'private',
+    );
     if (hasPrivate && !isPrivateChannelsEnabled(s)) {
       return fail('PRIVATE_CHANNELS_DISABLED', 'private_channels_enabled', scope);
     }
@@ -389,9 +372,7 @@ export function resolvePermalink(
     const ch = s.channels.find(
       (c) => c.channel_id === input.channel_id && c.workspace_id === input.workspace_id,
     );
-    if (!ch) {
-      return fail('CHANNEL_ACCESS_DENIED', 'resource_access', scope);
-    }
+    if (!ch) return fail('CHANNEL_ACCESS_DENIED', 'resource_access', scope);
     if (ch.visibility === 'private' && !isPrivateChannelsEnabled(s)) {
       return fail('PRIVATE_CHANNELS_DISABLED', 'private_channels_enabled', scope);
     }
@@ -406,8 +387,7 @@ export function resolvePermalink(
 
 /**
  * Link-preview scrubber: redacts title, snippet, author, and channel slug whenever a viewer
- * lacks access to the target channel, signal, or bound file. Workspace-scoped files merely
- * linked inside a private channel retain `is_private: false` and their workspace boundary.
+ * lacks access to the target channel, signal, or bound file, or when channel context is missing.
  */
 export function scrubLinkPreviews(
   s: OrgChannelAuthorityState,
@@ -417,23 +397,54 @@ export function scrubLinkPreviews(
   return candidates.map((cand) => {
     let authorized = canReadWorkspace(s, viewer, cand.workspace_id);
     let isPrivate = false;
+    let resolvedChannelId: string | null = cand.channel_id ?? null;
 
-    if (cand.target_kind === 'channel' || cand.target_kind === 'signal') {
-      if (cand.channel_id) {
-        const ch = s.channels.find((c) => c.channel_id === cand.channel_id);
-        isPrivate = ch?.visibility === 'private';
-        authorized = authorized && canReadChannel(s, viewer, cand.channel_id);
+    if (cand.target_kind === 'signal' || cand.target_kind === 'channel' || Boolean(cand.signal_id)) {
+      if (cand.target_kind === 'signal' || Boolean(cand.signal_id)) {
+        const sig = cand.signal_id
+          ? (s.signals ?? []).find(
+              (x) =>
+                x.signal_id === cand.signal_id &&
+                (x.workspace_id === undefined || x.workspace_id === cand.workspace_id),
+            )
+          : undefined;
+        if (sig) {
+          resolvedChannelId = sig.channel_id ?? null;
+        } else if ((s.signals ?? []).length > 0 && cand.signal_id) {
+          resolvedChannelId = null;
+        }
       }
-    } else if (cand.target_kind === 'file' && cand.file_id) {
-      const bindings = (s.fileChannelBindings ?? []).filter(
-        (b) => b.file_id === cand.file_id && b.workspace_id === cand.workspace_id,
-      );
-      isPrivate = bindings.some((b) => {
-        const ch = s.channels.find((c) => c.channel_id === b.channel_id);
-        return ch?.visibility === 'private';
-      });
+      const ch = resolvedChannelId
+        ? s.channels.find(
+            (c) => c.channel_id === resolvedChannelId && c.workspace_id === cand.workspace_id,
+          )
+        : undefined;
+      isPrivate = ch?.visibility === 'private';
       authorized =
-        authorized && canAccessBoundFile(s, viewer, cand.file_id, cand.workspace_id);
+        authorized &&
+        Boolean(resolvedChannelId && ch) &&
+        (!isPrivate || isPrivateChannelsEnabled(s)) &&
+        Boolean(resolvedChannelId && canReadChannel(s, viewer, resolvedChannelId));
+    } else if (cand.target_kind === 'file') {
+      if (!cand.file_id) {
+        authorized = false;
+      } else {
+        const bindings = (s.fileChannelBindings ?? []).filter(
+          (b) => b.file_id === cand.file_id && b.workspace_id === cand.workspace_id,
+        );
+        isPrivate = bindings.some(
+          (b) => s.channels.find((c) => c.channel_id === b.channel_id)?.visibility === 'private',
+        );
+        if (resolvedChannelId) {
+          authorized = authorized && canReadChannel(s, viewer, resolvedChannelId);
+        }
+        authorized =
+          authorized &&
+          (!isPrivate || isPrivateChannelsEnabled(s)) &&
+          canAccessBoundFile(s, viewer, cand.file_id, cand.workspace_id);
+      }
+    } else {
+      authorized = false;
     }
 
     if (!authorized) {
@@ -448,22 +459,26 @@ export function scrubLinkPreviews(
         title: null,
         snippet: null,
         author: null,
+        author_name: null,
         channel_slug: null,
+        channel_name: null,
       };
     }
 
     return {
       target_kind: cand.target_kind,
       workspace_id: cand.workspace_id,
-      channel_id: cand.channel_id ?? null,
+      channel_id: resolvedChannelId,
       signal_id: cand.signal_id ?? null,
       file_id: cand.file_id ?? null,
       redacted: false,
       is_private: isPrivate,
       title: cand.title,
       snippet: cand.snippet,
-      author: cand.author ?? null,
-      channel_slug: cand.channel_slug ?? null,
+      author: cand.author ?? cand.author_name ?? null,
+      author_name: cand.author_name ?? cand.author ?? null,
+      channel_slug: cand.channel_slug ?? cand.channel_name ?? null,
+      channel_name: cand.channel_name ?? cand.channel_slug ?? null,
     };
   });
 }

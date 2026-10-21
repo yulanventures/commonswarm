@@ -142,7 +142,11 @@ export function postChannelSignal(
     if (threadRootId !== null && signalKind === 'working-on') {
       return fail('INVALID_THREAD_REPLY_KIND', 'note_or_ask_signal_kind', baseScope);
     }
-    const rootSig = (input.existing_signals ?? []).find((x) => x.signal_id === parentId);
+    const rootSig = (
+      input.existing_signals ??
+      (s.signals as readonly ChannelSignalRecord[] | undefined) ??
+      []
+    ).find((x) => x.signal_id === parentId);
     if (!rootSig || rootSig.workspace_id !== input.workspace_id) {
       return fail('CHANNEL_ACCESS_DENIED', 'thread_channel_access', baseScope);
     }
@@ -207,6 +211,11 @@ export function postChannelSignal(
     attachment_file_ids: [...attachmentFileIds],
     created_at: now,
   };
+
+  const prevSignals = s.signals ?? input.existing_signals ?? [];
+  if (!prevSignals.some((x) => x.signal_id === signal.signal_id)) {
+    s.signals = [...prevSignals, signal];
+  }
 
   const { deliveries, wakes } = planSignalDeliveries(
     s,
