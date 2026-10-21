@@ -107,6 +107,9 @@ live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos,
 }
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) input:is([type="checkbox"], [type="radio"]):focus-visible {
   outline: none; box-shadow: none;
+  /* Focus scrolls the input, while its 44px label paints the ring. Reserve the
+     18px radio's 13px label inset, 4px outline, and 1px rounding allowance. */
+  scroll-margin: 18px;
 }
 @media (forced-colors: active) {
   live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-pick-option[aria-selected="true"] {
