@@ -63,12 +63,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.ref || github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -130,11 +130,11 @@ jobs:
           set -o pipefail
           sudo --preserve-env=BOX_DRY_RUN,BOX_DRY_RUN_PART,GITHUB_ACTIONS,CI \
             "$(command -v npm)" run test:box-dry-run 2>&1 | tee box-dry-run.log
-      - uses: supabase/setup-cli@v1
+      - uses: supabase/setup-cli@1dedf2c611547ede7232d26866dd3c56ab903bbb # v1
         if: matrix.suite == 'server'
         with:
           version: 2.118.0
-      - uses: supabase/setup-cli@v1
+      - uses: supabase/setup-cli@1dedf2c611547ede7232d26866dd3c56ab903bbb # v1
         if: matrix.suite == 'server-repeat'
         with:
           version: 2.118.0
@@ -145,7 +145,7 @@ jobs:
       - name: Cache the pinned edge-runtime image
         if: matrix.suite == 'server' || matrix.suite == 'server-repeat'
         id: edge-runtime-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ runner.temp }}/edge-runtime-image.tar
           key: ${{ runner.os }}-${{ runner.arch }}-edge-runtime-v1-${{ steps.edge-runtime-image.outputs.key }}
@@ -344,7 +344,7 @@ jobs:
           npm test 2>&1 | tee unit.log
       - name: Upload the log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.suite }}-log
           path: ${{ matrix.suite }}.log
