@@ -100,8 +100,8 @@ function displayTags(tags: { id: Id; label: string }[], vm: TodoViewVM): { id: I
   return [...tags, ...aliases];
 }
 
-/** The back link and meta line. A sample to-do has no doors, so its back line is plain text. */
-function topBar(doc: Document, vm: TodoViewVM, callbacks: TodoViewCallbacks, meta: string | null, sample = false): HTMLElement {
+/** Back context. A sample to-do has no doors, so its back line is plain text. */
+function topBar(doc: Document, vm: TodoViewVM, callbacks: TodoViewCallbacks, sample = false): HTMLElement {
   const top = node(doc, "div", "hm-todo-top");
   const where = `${vm.workspace.name} · To-dos`;
   // The phone already shows workspace context. Keep the full link name and desktop copy.
@@ -118,7 +118,6 @@ function topBar(doc: Document, vm: TodoViewVM, callbacks: TodoViewCallbacks, met
     if (callbacks.back) back.addEventListener("click", (event) => callbacks.back!(event));
     top.append(back);
   }
-  if (meta) top.append(node(doc, "p", "hm-todo-meta", meta));
   return top;
 }
 
@@ -287,7 +286,7 @@ export function todoView(doc: Document, vm: TodoViewVM, callbacks: TodoViewCallb
   if (vm.view.kind === "loading") {
     root.setAttribute("aria-busy", "true");
     const title = node(doc, "h1", "hm-todo-title", TODO_LOADING); title.tabIndex = -1;
-    root.append(topBar(doc, vm, callbacks, null), title);
+    const intro = node(doc, "header", "hm-todo-intro"); intro.append(topBar(doc, vm, callbacks), title); root.append(intro);
     return root;
   }
   if (vm.view.kind === "not-found") {
@@ -299,11 +298,12 @@ export function todoView(doc: Document, vm: TodoViewVM, callbacks: TodoViewCallb
   }
   const todo = vm.view.todo;
   root.dataset.todoState = todo.state;
-  const head = node(doc, "header", "hm-todo-head");
+  const intro = node(doc, "header", "hm-todo-intro");
+  const head = node(doc, "div", "hm-todo-head");
   const titleId = `hm-todo-${todo.id}-title`.replace(/[^A-Za-z0-9_-]/g, "_");
   const title = node(doc, "h1", "hm-todo-title", todo.title); title.id = titleId; title.tabIndex = -1;
   root.setAttribute("aria-labelledby", titleId);
-  // Todo canvas: the box sits left of the title, and the notes run under the title.
+  // One semantic sequence on every viewport: Back, completion/title, metadata, then full-width notes.
   const checkable = !todo.sample && todo.may.complete && todo.state !== "dropped";
   if (checkable) {
     const label = node(doc, "label", "hm-todo-done");
@@ -315,9 +315,12 @@ export function todoView(doc: Document, vm: TodoViewVM, callbacks: TodoViewCallb
   const copy = node(doc, "div", "hm-todo-head-copy");
   if (!checkable && (todo.state === "done" || todo.state === "dropped")) copy.append(node(doc, "span", "hm-todo-word", todo.state === "done" ? "Done" : "Dropped"));
   copy.append(title);
-  if (todo.notes.trim()) copy.append(node(doc, "p", "hm-todo-notes", todo.notes));
   head.append(copy);
-  root.append(topBar(doc, vm, callbacks, todoMetaLine(todo, ctx), todo.sample), head);
+  intro.append(topBar(doc, vm, callbacks, todo.sample), head);
+  const meta = todoMetaLine(todo, ctx);
+  if (meta) intro.append(node(doc, "p", "hm-todo-meta", meta));
+  if (todo.notes.trim()) intro.append(node(doc, "p", "hm-todo-notes", todo.notes));
+  root.append(intro);
   root.append(assignedPanel(doc, todo, vm, callbacks, ctx), commentsSection(doc, todo, vm, callbacks, ctx));
   return root;
 }
