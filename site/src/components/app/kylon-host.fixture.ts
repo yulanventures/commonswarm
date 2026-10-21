@@ -81,21 +81,24 @@ const setupScript = `
   }
   renderRail(); renderResources(); renderHeader(); host.sync(project(chat));
   const pane = app.querySelector('[data-home-route-pane]'), original = [...pane.childNodes];
-  function renderTodo(view, tagDelivers = false) {
+  function renderTodo(view, tagDelivers = false, controls = false) {
     homeRoute = { view, workspaceId: workspace.id, todoId: 'bounded' };
     frame.classList.toggle('hm-frame--todo', view === 'todo'); syncStandalonePage();
     vm.pane = 'todos'; host.sync(project(homeRoute)); renderHeader();
-    const people = { groups: ['Rowan', 'Avery', 'Quinn', 'Morgan', 'Sage'].map((name, i) => ({
+    const people = controls ? { groups, other: [] } : { groups: ['Rowan', 'Avery', 'Quinn', 'Morgan', 'Sage'].map((name, i) => ({
       person: { id: 'person-' + i, name, firstName: name, initials: name[0], you: i === 0, role: i ? 'member' : 'owner' }, agents: [] })), other: [] };
-    const todo = { id: 'bounded', workspaceId: workspace.id, title: 'Check the household filters', notes: '', state: 'open',
+    // One controlled style variant; permissions are invented VMs, never a backend result.
+    const todo = { id: 'bounded', workspaceId: workspace.id, title: controls ? 'Invented weekly maintenance and household supplies review with every detail retained' : 'Check the household filters', notes: '', state: 'open',
       addedBy: people.groups[0].person, addedAt: '2026-10-21T12:00:00Z', due: null, request: null, doneBy: null, doneAt: null,
-      receipt: null, sample: false, may: { edit: false, assign: false, start: false, reorder: false, complete: false, comment: true },
-      tagDelivers, comments: [], assignee: null, start: null };
+      receipt: null, sample: false, may: { edit: controls, assign: controls, start: controls, reorder: false, complete: controls, comment: !controls },
+      tagDelivers, comments: [], assignee: controls ? { kind: 'agent', agent } : null,
+      start: controls ? { mode: 'queue', position: 1, gate: null, at: null } : null };
     const callbacks = { complete: () => calls.push({ kind: 'todo-write' }), assign: () => calls.push({ kind: 'todo-write' }),
       setStart: () => calls.push({ kind: 'todo-write' }), comment: () => calls.push({ kind: 'todo-write' }) };
     const content = view === 'todo' ? todoView(document, { workspace: { name: workspace.name, todosHref: '?w=fixture-w&v=todos', homeHref: '?w=fixture-w' },
       view: { kind: 'ready', todo }, now: Date.parse('2026-10-21T12:00:00Z'), people, openTodos: [], save: 'idle' }, callbacks)
-      : todosPane(document, { filter: 'open', rows: [], now: 0, sample: true, mayAdd: false }, { filter() {}, complete() {}, add() {} });
+      : todosPane(document, { filter: 'open', rows: controls ? [{ todo: { ...todo, may: { ...todo.may, complete: false } }, href: '?w=fixture-w&v=todo&t=bounded' }] : [],
+        now: 0, sample: !controls, mayAdd: false }, { filter() {}, complete() {}, add() {} });
     replaceHomeRegion(pane, view, [content]); pane.hidden = false;
   }
   function restoreTodo() { homeRoute = chat; syncStandalonePage(); frame.classList.remove('hm-frame--todo');
@@ -107,7 +110,9 @@ const setupScript = `
       const todo = { id: 'main-allowed', workspaceId: workspace.id, title: 'Invented main task', notes: '', state: 'open', addedBy: owner,
         addedAt: '2026-10-21T12:00:00Z', due: null, assignee: null, start: null, request: null, doneBy: null, doneAt: null, receipt: null,
         sample: false, may: { edit: true, assign: false, start: false, reorder: false, complete: true, comment: false }, comments: [], tagDelivers: false };
-      replaceHomeRegion(pane, 'todos', [todosPane(document, { filter: 'all', rows: state === 'pending' ? null : state === 'empty' ? [] : [{ todo, href: '?w=fixture-w&v=todo&t=main-allowed' }],
+      replaceHomeRegion(pane, 'todos', [todosPane(document, { filter: 'all', rows: state === 'pending' ? null : state === 'empty' ? [] : [
+        { todo: { ...todo, title: 'Invented editable task with a long title that must wrap naturally on a narrow screen' }, href: '?w=fixture-w&v=todo&t=main-allowed' },
+        { todo: { ...todo, id: 'main-reader', title: 'Invented read-only task', may: { ...todo.may, complete: false } }, href: '?w=fixture-w&v=todo&t=main-reader' }],
         now: 0, sample: false, mayAdd: false }, { filter: value => calls.push({ kind: 'list-filter', value }),
         complete: () => calls.push({ kind: 'todo-write' }), add: () => calls.push({ kind: 'todo-write' }) })]);
     } else if (state === 'pending' || state === 'not-found') replaceHomeRegion(pane, 'todo', [todoView(document, { workspace: { name: workspace.name, todosHref: '?w=fixture-w&v=todos', homeHref: '?w=fixture-w' },
