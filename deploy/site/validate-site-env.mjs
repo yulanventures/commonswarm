@@ -81,7 +81,7 @@ function provenance(dir, revision, pinnedImage) {
   const pub = JSON.parse(read(join(dir, 'public.json'))); config(pub, pub.PUBLIC_H0_LINK_JOIN);
   return { revision, image, source: fileHash(join(dir, 'source.tar')), config: fileHash(join(dir, 'public.json')), h0: pub.PUBLIC_H0_LINK_JOIN,
     lock: hash(sourceFile(dir, 'site/package-lock.json')), builder: hash(sourceFile(dir, 'deploy/site/build-artifact.sh')),
-    validator: hash(sourceFile(dir, 'deploy/site/validate-site-env.mjs')), template: hash(sourceFile(dir, 'deploy/site/finalize-release.sh')),
+    validator: hash(sourceFile(dir, 'deploy/site/validate-site-env.mjs')), refresh: hash(sourceFile(dir, 'deploy/site/refresh-site.py')), template: hash(sourceFile(dir, 'deploy/site/finalize-release.sh')),
     artifact: fileHash(join(dir, 'site.tar')), html: htmlHashes(dir, pub) };
 }
 try {
@@ -99,12 +99,13 @@ try {
     const template = read(join(dir, 'finalize-release.sh'), 'utf8'); check(hash(template) === receipt.template, 'template provenance mismatch');
     check(/^\/root\/cswarm-site-[A-Za-z0-9-]+$/.test(extra), 'reserve path');
     const release = `${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}-${receipt.revision.slice(0, 12)}-${randomBytes(8).toString('hex')}`;
-    const values = { RESERVE: extra, RELEASE: release, BUILD_SHA: arg, ARTIFACT_SHA: receipt.artifact, ROOT_SHA: receipt.html['index.html'], APP_SHA: receipt.html['app/index.html'], REVISION: receipt.revision, H0: receipt.h0 };
-    const script = template.replace(/@@([A-Z_]+)@@/g, (_, k) => { check(k in values, 'template placeholder'); return values[k]; });
+    const values = { RESERVE: extra, RELEASE: release, BUILD_SHA: arg, ARTIFACT_SHA: receipt.artifact, ROOT_SHA: receipt.html['index.html'], APP_SHA: receipt.html['app/index.html'], REVISION: receipt.revision, H0: receipt.h0, REFRESH_SHA: receipt.refresh };
+    const script = template.replace(/@@([A-Z_0-9]+)@@/g, (_, k) => { check(k in values, 'template placeholder'); return values[k]; });
     const packet = resolve(dir, 'packet'); mkdirSync(packet);
     for (const name of ['site.tar', 'BUILD.json']) copyFileSync(join(dir, name), join(packet, name));
+    write(join(packet, 'refresh-site.py'), sourceFile(dir, 'deploy/site/refresh-site.py'));
     write(join(packet, 'SITE-DIRECT.sh'), script); write(join(packet, 'RESERVE'), extra + '\n');
-    const names = ['site.tar', 'BUILD.json', 'SITE-DIRECT.sh', 'RESERVE'];
+    const names = ['site.tar', 'BUILD.json', 'SITE-DIRECT.sh', 'refresh-site.py', 'RESERVE'];
     write(join(packet, 'PACKET.sha256'), names.map(n => `${fileHash(join(packet, n))}  ${n}\n`).join(''));
     for (const name of [...names, 'PACKET.sha256']) chmodSync(join(packet, name), 0o444);
     console.log(`PASS packet=${packet} release=${release} PACKET.sha256=${fileHash(join(packet, 'PACKET.sha256'))}`);
