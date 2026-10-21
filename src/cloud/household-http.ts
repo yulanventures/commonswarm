@@ -1,3 +1,4 @@
+import { projectHouseholdRefusalDetails } from '../protocol/household-next-steps.js';
 import { randomUUID } from 'node:crypto';
 import { commandEndpoint, CLIENT_PROTOCOL_VERSION, type CloudTarget } from './config.js';
 import { withClientBuild } from './client-build.js';
@@ -20,7 +21,7 @@ export function householdWireRequest(invocation: HouseholdToolInvocation): { too
     ...(invocation.request_id ? { request_id: invocation.request_id } : {}) };
   if ('query' in invocation) {
     const { kind, ...query } = invocation.query;
-    return { tool: kind === 'object_read' && invocation.objectTypes.length === 1 && invocation.objectTypes[0] === 'file' ? 'file_read' : kind,
+    return { tool: kind === 'draft_read' ? 'object_draft_read' : kind === 'object_read' && invocation.objectTypes.length === 1 && invocation.objectTypes[0] === 'file' ? 'file_read' : kind,
       arguments: { ...args, ...query } };
   }
   const { kind, ...command } = invocation.command;
@@ -52,7 +53,7 @@ export function createHouseholdHttpTransport(options: { target: CloudTarget;
         try { body = await response.json(); } catch { /* A non-JSON refusal has no code. */ }
         const data = body !== null && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : {};
         const code = data.reason ?? data.error ?? data.code;
-        return { status: 'refused', reason: typeof code === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : 'request_refused' };
+        return { ...projectHouseholdRefusalDetails(data, invocation.workspace_id), status: 'refused', reason: typeof code === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : 'request_refused' };
       }
       return await response.json();
     },

@@ -154,6 +154,16 @@ test('a stale write preserves a private draft, current history and merge referen
   assert.equal(readHouseholdObjects({ kind: 'draft_read', draft_id: 'losing-draft' }, conflicted, access('blair'), 100).status, 'ok');
   assert.deepEqual(readHouseholdObjects({ kind: 'draft_read', draft_id: 'losing-draft' }, conflicted, access('alex'), 100),
     { status: 'refused', reason: 'draft_access_refused' });
+  for (const field of ['principal_id', 'grant_id', 'connection_id'] as const) {
+    const wrong = agent('blair');
+    if (field === 'principal_id') { wrong.actor.principal_id = 'different'; wrong.credential.kind === 'agent' && (wrong.credential.connection.principal_id = 'different'); }
+    else if (wrong.credential.kind === 'agent') wrong.credential.connection[field] = 'different';
+    assert.deepEqual(readHouseholdObjects({ kind: 'draft_read', draft_id: 'losing-draft' }, conflicted, wrong, 100),
+      { status: 'refused', reason: 'draft_access_refused' }, field);
+  }
+  const reader = agent('blair'); reader.member!.content_role = 'reader';
+  if (reader.credential.kind === 'agent') reader.credential.connection.operations = ['read'];
+  assert.equal(readHouseholdObjects({ kind: 'draft_read', draft_id: 'losing-draft' }, conflicted, reader, 100).status, 'ok');
   assert.deepEqual(householdObjectUsage(conflicted), { object_count: 1, storage_bytes: content.blob.size_bytes + 2 * prepared.blob.size_bytes });
 });
 

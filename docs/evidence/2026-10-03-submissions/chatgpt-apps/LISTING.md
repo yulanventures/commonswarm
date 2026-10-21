@@ -88,3 +88,21 @@ Use cases: identify a named seat and roster (P1); ask and retrieve a synthetic q
 
 
 **Ready for submission?** Materials prepared; [C3-ACTIONS](../../2026-10-03-reviewer-packet/C3-ACTIONS.md) still has remaining blockers listed per vendor; the Tom morning reviewer-account step is nonblocking under ruling B. C6 GO once C3 is met; no new legal or admin gate.
+
+
+Source update pending review/release (21 October 2026): local CLI/MCP adds
+`object_draft_read(seat,draft_id)`; hosted catalog adds `list_draft_read(seat,draft_id)`
+only with server `SWARM_MCP_TODOS_LISTS_ENABLED=1`. It reads the caller's private
+retained list proposal and recorded base/current revisions. It cannot save, merge,
+transfer drafts or grant permissions; hosted docs/files remain excluded. The disabled
+catalog and its original eight coordination entries stay unchanged. No directory
+submission or live catalog claim is made by this source update.
+
+CLI publication plan: package source remains 0.1.82. After review and assigned gates,
+the release owner must allocate the next unclaimed version, update package/lock in
+sync, run the single-file and npm packaging checks, then publish through the existing
+release process. Installed 0.1.82 has no draft-read command. Once that release is
+installed, put {"draft_id":"<retained draft ID>"} in draft.json and run
+`cswarm object object_draft_read --input-file draft.json --workspace-id <workspace UUID> --json`
+with the existing selected human/agent profile (or existing agent token input).
+Permission repair CLI/MCP operations remain unavailable pending Root's permission SCR.

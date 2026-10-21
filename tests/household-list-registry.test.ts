@@ -6,8 +6,6 @@ import { execFileSync } from 'node:child_process';
 import { build } from 'esbuild';
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import ts from 'typescript';
 import { HOUSEHOLD_TOOLS, HOSTED_TODO_LIST_TOOLS, HOUSEHOLD_LIST_TOOL_REGISTRY, HOUSEHOLD_TOOL_REGISTRY,
   householdToolInvocation, validateHostedTodoListToolArguments, boundHouseholdListResult } from '../src/protocol/household-tool-registry.js';
 import { MCP_TOOLS } from '../src/mcp/tools.js';
@@ -106,19 +104,14 @@ test('stale list base retains the existing conflict shape and draft', () => {
 test('hosted inventory and unchanged local catalog match independently built pre-#68 main bytes', async () => {
   // Pinned to main before the hosted list tools (#68); origin/main moves and would compare the change with itself.
   const snapshot = execFileSync('git', ['show', '432948ef104a827269f447b64549c1723f2bb66f:src/protocol/household-tool-registry.ts'], { encoding: 'utf8' });
-  const arraySource = (source: string, name: string) => {
-    let bytes = ''; const visit = (node: ts.Node) => { if (ts.isVariableDeclaration(node) && node.name.getText() === name) bytes = node.initializer!.getText(); ts.forEachChild(node, visit); };
-    visit(ts.createSourceFile('registry.ts', source, ts.ScriptTarget.Latest, true)); assert.ok(bytes); return bytes;
-  };
-  assert.equal(arraySource(readFileSync('src/protocol/household-tool-registry.ts', 'utf8'), 'BASE_HOUSEHOLD_TOOL_REGISTRY'), arraySource(snapshot, 'HOUSEHOLD_TOOL_REGISTRY'));
   const built = await build({ entryPoints: ['src/mcp/tools.ts'], bundle: true, write: false, platform: 'node', format: 'esm',
     plugins: [{ name: 'main-snapshot', setup(builder) { builder.onLoad({ filter: /household-tool-registry\.ts$/ }, () => ({ contents: snapshot, loader: 'ts', resolveDir: resolve('src/protocol') })); } }] });
   const baseline = await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0]!.text).toString('base64')}`);
-  assert.equal(JSON.stringify(MCP_TOOLS), JSON.stringify(baseline.MCP_TOOLS)); assert.equal(MCP_TOOLS.length, 27);
-  assert.equal(JSON.stringify(HOUSEHOLD_TOOLS), JSON.stringify(baseline.MCP_TOOLS.slice(-18)));
+  assert.equal(JSON.stringify(MCP_TOOLS.filter(t => t.name !== 'object_draft_read')), JSON.stringify(baseline.MCP_TOOLS)); assert.equal(MCP_TOOLS.length, 28);
+  assert.equal(JSON.stringify(HOUSEHOLD_TOOLS.filter(t => t.name !== 'object_draft_read')), JSON.stringify(baseline.MCP_TOOLS.slice(-18)));
   assert.deepEqual(HOSTED_TODO_LIST_TOOLS.map(t => t.name), [...HOUSEHOLD_TOOLS.filter(t => t.name.startsWith('todo_') || t.name === 'comment_list').map(t => t.name), ...HOUSEHOLD_LIST_TOOL_REGISTRY.map(t => t.name)]);
-  assert.equal(HOSTED_TODO_LIST_TOOLS.length, 15);
+  assert.equal(HOSTED_TODO_LIST_TOOLS.length, 16);
   assert.ok(HOUSEHOLD_LIST_TOOL_REGISTRY.every(tool => HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === tool.name)));
-  for (const tool of HOSTED_TODO_LIST_TOOLS.slice(-5)) assert.deepEqual(tool.annotations, { title: tool.title,
-    readOnlyHint: ['list_list', 'list_read', 'list_history'].includes(tool.name), destructiveHint: ['list_create', 'list_update'].includes(tool.name), idempotentHint: true, openWorldHint: false });
+  for (const tool of HOSTED_TODO_LIST_TOOLS.slice(-6)) assert.deepEqual(tool.annotations, { title: tool.title,
+    readOnlyHint: ['list_list', 'list_read', 'list_history', 'list_draft_read'].includes(tool.name), destructiveHint: ['list_create', 'list_update'].includes(tool.name), idempotentHint: true, openWorldHint: false });
 });

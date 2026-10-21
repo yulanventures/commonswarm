@@ -34,3 +34,34 @@ test('protected attachment parser carries bytes separately and refuses foreign m
   const foreign = form(); foreign.set('command', JSON.stringify({ command: { kind: 'post_signal' } }));
   await assert.rejects(parseHouseholdAttachment(new Request('https://example.test/command', { method: 'POST', body: foreign })), HouseholdAttachmentError);
 });
+
+// @ts-expect-error TS5097: edge recovery assembly is exercised through tsx.
+import { readHouseholdDraft } from '../supabase/functions/command/household-draft.ts';
+test('recovery assembles proposal and recorded revisions without storage metadata and refuses oversized content', async () => {
+  const bytes = (markdown: string) => new TextEncoder().encode(JSON.stringify({ kind: 'doc', markdown }));
+  const ref = (token: string) => ({ workspace_id: 'w', object_id: 'o', token });
+  const revision = (token: string) => ({ revision: ref(token), parent: null, title: token, kind: 'doc', file_metadata: null,
+    blob: { storage_key: 'private-storage-path', size_bytes: 1, sha256: 'a'.repeat(64) },
+    author: { user_id: 'u', principal_id: null, run_id: null }, occurred_at_server: 1, command_id: 'c' });
+  let proposal = 'proposal';
+  let reads = 0;
+  const store = { readBytes: async (_tx: unknown, _workspace: string, _identity: unknown, query: any) => {
+    reads++;
+    if (query.kind === 'draft_read') return { bytes: bytes(proposal), metadata: { kind: 'draft_read', draft: {
+      object_id: 'o', draft_id: 'd', kind: 'doc', owner: { user_id: 'u' }, base: ref('base'), current: ref('recorded-current') } } };
+    return { bytes: bytes(query.revision.token), metadata: { kind: 'object_read', revision: revision(query.revision.token), live: false } };
+  } };
+  const identity = { user_id: 'u', principal_id: null, run_id: null, connection: null };
+  const result = await readHouseholdDraft(null as any, 'w', identity, 'd', store as any);
+  assert.equal(result.status, 'ok');
+  assert.equal((result as any).base.content.markdown, 'base');
+  assert.equal((result as any).current.content.markdown, 'recorded-current');
+  assert.equal((result as any).proposed.markdown, 'proposal');
+  assert.equal(JSON.stringify(result).includes('private-storage-path'), false);
+  proposal = 'x'.repeat(40 * 1024);
+  assert.deepEqual(await readHouseholdDraft(null as any, 'w', identity, 'd', store as any),
+    { status: 'refused', reason: 'draft_response_too_large' });
+  reads = 0;
+  assert.deepEqual(await readHouseholdDraft(null as any, 'w', identity, '', store as any), { status: 'refused', reason: 'invalid_request' });
+  assert.equal(reads, 0);
+});
