@@ -16,6 +16,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-name-
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-person-sub,.pd-agent-app,.pd-muted) { color: var(--k-shell-secondary); font: 400 12px/1.5 var(--k-shell-font); overflow-wrap: anywhere; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-initials,.pd-orb) { flex: 0 0 30px; inline-size: 30px; block-size: 30px; font: 600 12px/1 var(--k-shell-font); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-initials[data-hue="0"] { background: var(--home-blue); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-initials[data-hue] { color: var(--home-on-person); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-initials[data-hue="1"] { background: var(--home-orange); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-initials[data-hue="2"] { background: var(--home-purple); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-initials[data-hue="3"] { background: var(--home-teal); }

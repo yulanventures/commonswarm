@@ -17,6 +17,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail-identit
 live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail-identity p { margin: 3px 0; color: var(--k-shell-secondary); font-size: 13px; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail-identity :is(.pd-initials,.pd-orb) { flex: 0 0 44px; inline-size: 44px; block-size: 44px; font: 600 16px/1 var(--k-shell-font); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail-identity .pd-orb { border-radius: 10px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail-identity .pd-initials[data-hue] { color: var(--home-on-person); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-fact-sheet { margin: 0 0 20px; overflow: visible; border: 0; border-radius: 0; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-fact-row { display: grid; grid-template-columns: 7rem minmax(0,1fr) auto; align-items: start; gap: 8px 20px; min-block-size: 52px; padding: 12px 0; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-fact-row + .pd-fact-row { border-block-start: 1px solid var(--k-shell-line); }
