@@ -38,34 +38,27 @@ function createFixture(): OrgChannelAuthorityState {
       { id: 'ag-1', owner_user_id: 'u-owner', standing_grant_id: 'hg-1', standing_renewal_grant_id: 'rg-1', display_name: 'Argon Lead', created_at: now },
       { id: 'ag-inherited', owner_user_id: 'u-owner', display_name: 'Inherited Helper', created_at: now },
     ],
-    hostedGrants: [
-      { grant_id: 'hg-1', state: 'active', revoked_at: null },
-    ],
-    renewalGrants: [
-      { renewal_grant_id: 'rg-1', horizon_expires_at: '2099-01-01T00:00:00Z', revoked_at: null },
-    ],
-    orgMemberships: [
-      { org_id: 'org-1', principal_kind: 'user', principal_id: 'u-owner', role: 'owner', created_at: now },
-      { org_id: 'org-1', principal_kind: 'user', principal_id: 'u-admin', role: 'admin', created_at: now },
-      { org_id: 'org-1', principal_kind: 'user', principal_id: 'u-guest', role: 'guest', created_at: now },
-      { org_id: 'org-1', principal_kind: 'agent', principal_id: 'ag-1', role: 'admin', created_at: now },
-      { org_id: 'org-2', principal_kind: 'user', principal_id: 'u-owner', role: 'owner', created_at: now },
-      { org_id: 'org-2', principal_kind: 'agent', principal_id: 'ag-1', role: 'member', created_at: now },
-    ],
-    workspaceGrants: [
-      { workspace_id: 'ws-1a', org_id: 'org-1', principal_kind: 'user', principal_id: 'u-owner', role: 'owner', created_at: now },
-      { workspace_id: 'ws-1b', org_id: 'org-1', principal_kind: 'user', principal_id: 'u-owner', role: 'owner', created_at: now },
-      { workspace_id: 'ws-2a', org_id: 'org-2', principal_kind: 'user', principal_id: 'u-owner', role: 'owner', created_at: now },
-      { workspace_id: 'ws-1a', org_id: 'org-1', principal_kind: 'user', principal_id: 'u-admin', role: 'admin', created_at: now },
-      { workspace_id: 'ws-1a', org_id: 'org-1', principal_kind: 'agent', principal_id: 'ag-1', role: 'admin', created_at: now },
-      { workspace_id: 'ws-1b', org_id: 'org-1', principal_kind: 'agent', principal_id: 'ag-1', role: 'member', created_at: now },
-      { workspace_id: 'ws-2a', org_id: 'org-2', principal_kind: 'agent', principal_id: 'ag-1', role: 'member', created_at: now },
-    ],
-    agentPrincipals: [
-      { principal_id: 'ap-1a', workspace_id: 'ws-1a', agent_identity_id: 'ag-1', owner_user_id: 'u-owner', name: 'Argon Lead' },
-      { principal_id: 'ap-1b', workspace_id: 'ws-1b', agent_identity_id: 'ag-1', owner_user_id: 'u-owner', name: 'Argon Lead' },
-      { principal_id: 'ap-2a', workspace_id: 'ws-2a', agent_identity_id: 'ag-1', owner_user_id: 'u-owner', name: 'Argon Lead' },
-    ],
+    hostedGrants: [{ grant_id: 'hg-1', state: 'active', revoked_at: null }],
+    renewalGrants: [{ renewal_grant_id: 'rg-1', horizon_expires_at: '2099-01-01T00:00:00Z', revoked_at: null }],
+    orgMemberships: (
+      [
+        ['org-1', 'user', 'u-owner', 'owner'], ['org-1', 'user', 'u-admin', 'admin'],
+        ['org-1', 'user', 'u-guest', 'guest'], ['org-1', 'agent', 'ag-1', 'admin'],
+        ['org-2', 'user', 'u-owner', 'owner'], ['org-2', 'agent', 'ag-1', 'member'],
+      ] as const
+    ).map(([org_id, principal_kind, principal_id, role]) => ({ org_id, principal_kind, principal_id, role, created_at: now })),
+    workspaceGrants: (
+      [
+        ['ws-1a', 'org-1', 'user', 'u-owner', 'owner'], ['ws-1b', 'org-1', 'user', 'u-owner', 'owner'],
+        ['ws-2a', 'org-2', 'user', 'u-owner', 'owner'], ['ws-1a', 'org-1', 'user', 'u-admin', 'admin'],
+        ['ws-1a', 'org-1', 'agent', 'ag-1', 'admin'], ['ws-1b', 'org-1', 'agent', 'ag-1', 'member'],
+        ['ws-2a', 'org-2', 'agent', 'ag-1', 'member'],
+      ] as const
+    ).map(([workspace_id, org_id, principal_kind, principal_id, role]) => ({ workspace_id, org_id, principal_kind, principal_id, role, created_at: now })),
+    agentPrincipals: (['ap-1a:ws-1a', 'ap-1b:ws-1b', 'ap-2a:ws-2a'] as const).map((x) => {
+      const [principal_id, workspace_id] = x.split(':') as [string, string];
+      return { principal_id, workspace_id, agent_identity_id: 'ag-1', owner_user_id: 'u-owner', name: 'Argon Lead' };
+    }),
     channelMemberships: [
       { channel_id: 'ch-1a-priv', workspace_id: 'ws-1a', principal_kind: 'user', principal_id: 'u-owner', role: 'owner', notify_pref: 'all', joined_at: now },
       { channel_id: 'ch-1a-priv', workspace_id: 'ws-1a', principal_kind: 'agent', principal_id: 'ag-1', role: 'member', notify_pref: 'all', joined_at: now },
@@ -143,13 +136,30 @@ test('universal selector precedence, explicit org with connection default, and r
     assert.equal(explicit.source, 'explicit');
   }
 
-  // Seat mismatch fails closed with WORKSPACE_SEAT_MISMATCH
+  // Seat mismatch fails closed with WORKSPACE_SEAT_MISMATCH and actionable claim_seat tool
   const mismatch = resolveOrgWorkspaceChannelSelector(s, caller, {
     workspace: 'household/ops',
     seat_id: 'seat-1a',
   });
   assert.equal(mismatch.ok, false);
-  if (!mismatch.ok) assert.equal(mismatch.refusal.code, 'WORKSPACE_SEAT_MISMATCH');
+  if (!mismatch.ok) {
+    assert.equal(mismatch.refusal.code, 'WORKSPACE_SEAT_MISMATCH');
+    assert.equal(mismatch.refusal.mcp_tool, 'claim_seat');
+  }
+
+  // When default_org_id has 2 reachable workspaces (ws-1a, ws-1b) and no default_workspace_id, preserves default_org_id in choices
+  s.connectionPolicies![0]!.default_workspace_id = null;
+  const multiWsOrgDefault = resolveOrgWorkspaceChannelSelector(s, caller, {});
+  assert.equal(multiWsOrgDefault.ok, false);
+  if (!multiWsOrgDefault.ok) {
+    assert.equal(multiWsOrgDefault.refusal.code, 'AMBIGUOUS_WORKSPACE_SELECTOR');
+    assert.equal(multiWsOrgDefault.refusal.scope.org, 'yulan');
+    assert.deepEqual(
+      multiWsOrgDefault.refusal.choices?.map((c) => c.workspace_id),
+      ['ws-1a', 'ws-1b'],
+    );
+  }
+  s.connectionPolicies![0]!.default_workspace_id = 'ws-1a';
 
   // Connection default fallback when no explicit or seat selector is given
   const fromDefault = resolveOrgWorkspaceChannelSelector(s, caller, {});
@@ -189,6 +199,16 @@ test('explicit org/workspace revocation overrides owner inheritance (including t
     principal_id: 'ag-inherited',
   });
   assert.equal(canReadOrg(s, inheritedCaller, 'org-1'), false);
+
+  // Revoking one agent identity does not deny an independent agent with the same display_name
+  s.agentIdentities!.push({
+    id: 'ag-same-name-b',
+    owner_user_id: 'u-owner',
+    display_name: 'Inherited Helper',
+    created_at: '2026-10-21T00:00:00Z',
+  });
+  assert.equal(canReadOrg(s, { principal_kind: 'agent', principal_id: 'ag-same-name-b' }, 'org-1'), true);
+  assert.equal(canReadWorkspace(s, { principal_kind: 'agent', principal_id: 'ag-same-name-b' }, 'ws-1a'), true);
 
   const resWs = cascadeWorkspaceMemberRemoval(s, {
     workspace_id: 'ws-1a',

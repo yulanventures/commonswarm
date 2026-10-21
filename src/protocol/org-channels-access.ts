@@ -15,24 +15,11 @@ import {
 
 type State = OrgChannelAuthorityState;
 
-function siblingAgentIds(s: State, agentId: string): string[] {
-  const ai = (s.agentIdentities ?? []).find((a) => a.id === agentId);
-  if (!ai) return [agentId];
-  return (s.agentIdentities ?? [])
-    .filter(
-      (a) =>
-        a.owner_user_id === ai.owner_user_id &&
-        norm(a.display_name) === norm(ai.display_name),
-    )
-    .map((a) => a.id);
-}
-
 export function canReadOrg(s: State, c: CallerContext, orgId: string): boolean {
   if (!s.organizations.some((o) => o.id === orgId && isLive(o))) return false;
   if (c.principal_kind === 'user')
     return orgRole(s, orgId, 'user', c.principal_id) !== null;
   const ownerId = agentOwner(s, c);
-  const sibs = siblingAgentIds(s, c.principal_id);
   const aRole = orgRole(s, orgId, 'agent', c.principal_id);
   if (
     !ownerId ||
@@ -40,7 +27,7 @@ export function canReadOrg(s: State, c: CallerContext, orgId: string): boolean {
       (m) =>
         m.org_id === orgId &&
         m.principal_kind === 'agent' &&
-        (m.principal_id === c.principal_id || (!aRole && sibs.includes(m.principal_id))) &&
+        m.principal_id === c.principal_id &&
         m.revoked_at != null,
     )
   )
@@ -102,24 +89,14 @@ export function canReadWorkspace(
     )
   )
     return false;
-  const sibs = siblingAgentIds(s, c.principal_id);
   const explicitGrant = hasWsGrant(s, wsId, 'agent', c.principal_id);
   if (
     (s.agentPrincipals ?? []).some(
       (ap) =>
         ap.workspace_id === wsId &&
-        (ap.agent_identity_id === c.principal_id ||
-          (!explicitGrant && sibs.includes(ap.agent_identity_id))) &&
+        ap.agent_identity_id === c.principal_id &&
         ap.revoked_at != null,
-    ) ||
-    (!explicitGrant &&
-      s.workspaceGrants.some(
-        (g) =>
-          g.workspace_id === wsId &&
-          g.principal_kind === 'agent' &&
-          sibs.includes(g.principal_id) &&
-          g.revoked_at != null,
-      ))
+    )
   )
     return false;
   const ownerRole = orgRole(s, ws.org_id, 'user', ownerId);

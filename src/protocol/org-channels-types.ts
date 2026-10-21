@@ -267,20 +267,20 @@ export function buildOrgChannelRefusal({
       : (s.workspace ?? s.org ?? '<org>/<workspace>');
   const mcp =
     code === 'WORKSPACE_SEAT_MISMATCH'
-      ? 'cswarm_register_seat'
+      ? 'claim_seat'
       : code === 'AMBIGUOUS_WORKSPACE_SELECTOR'
-        ? 'cswarm_list_workspaces'
+        ? 'workspace_list'
         : code === 'CHANNEL_HAS_PUBLIC_HISTORY' ||
             code === 'PRIVATE_CHANNEL_CANNOT_BECOME_PUBLIC' ||
             code === 'PRIVATE_CHANNEL_OPEN_JOIN_FORBIDDEN'
-          ? 'cswarm_channel_create'
+          ? 'channel_create'
           : code === 'PRIVATE_CHANNELS_DISABLED'
-            ? 'cswarm_channel_list'
+            ? 'channel_list'
             : code === 'ORG_MOVE_REQUIRES_DUAL_OWNER'
-              ? 'cswarm_org_list_members'
+              ? 'org_list_members'
               : code.includes('CHANNEL')
-                ? 'cswarm_channel_invite'
-                : 'cswarm_request_access';
+                ? 'channel_add_member'
+                : 'workspace_grant_member';
   const cli =
     code === 'WORKSPACE_SEAT_MISMATCH'
       ? `cswarm check --workspace ${sel}`

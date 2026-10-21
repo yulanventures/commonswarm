@@ -187,7 +187,14 @@ export function resolveOrgWorkspaceChannelSelector(
     if (!resWs && pol?.default_org_id) {
       const defOrg = reachOrgs.find((o) => o.id === pol.default_org_id);
       const orgWs = defOrg ? reachWs.filter((w) => w.org_id === defOrg.id) : [];
-      if (defOrg && orgWs.length === 1) {
+      if (defOrg && orgWs.length > 0) {
+        if (orgWs.length !== 1)
+          return fail(
+            'AMBIGUOUS_WORKSPACE_SELECTOR',
+            'workspace_selector',
+            { org: defOrg.slug, seat_id: input.seat_id ?? null },
+            orgWs.map(toChoice),
+          );
         resOrg = defOrg;
         resWs = orgWs[0];
         source = 'connection_default';
