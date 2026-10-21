@@ -61,11 +61,14 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
     assert.ok(line, `probe did not report: exit=${exit.code}, signal=${exit.signal}`);
     const result = JSON.parse(line.slice("R13_PROBE ".length)) as {
       stage: string; error?: string; verdict?: string; tables_counted: number;
+      source?: {commit: string; tree: string} | null;
+      read_source?: {commit: string; tree: string} | null;
       hook_sleep?: string | null;
       unused_root_baseline?: {commit: string; tree: string} | null;
       active_catalog?: {functions:number;migrations:number;view_columns:number;measured_view_sha256:string};
       checks?: { name: string; ok: boolean }[];
     };
+    process.stdout.write(`ACTIVE_FLOOR_RENEWAL_SOURCE ${JSON.stringify({generation,readGeneration,mode,source:result.source,read_source:result.read_source})}\n`);
     if (mode === "permanence") assert.equal(result.hook_sleep, null, "permanence runs without fault hooks");
     assert.equal(exit.signal, null, "a signalled child cannot supply proof");
     assert.equal(result.stage, "complete", `probe stopped at ${result.stage}: ${result.error ?? "unknown"}`);

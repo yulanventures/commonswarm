@@ -756,15 +756,15 @@ function removeSecretDirectory({ root, dir }) {
  * this checkout. Materialize the complete source trees so activity, config and
  * every relative/type import use the same generation as command/read. */
 export const ACTIVE_FLOOR_SOURCES = Object.freeze({
-  H: Object.freeze({commit:'131b1111fbd84cbcffb0178b00222872867bc3cf',tree:'89ab43e169d5d7604c6bbf02b1c538d76dacc79d'}),
+  H: Object.freeze({commit:'e7cc111bab342ab1b7b9afb575537bb86085f715',tree:'20f46a1b9d6f86d2754ccb5a3c371e459e3f3d07'}),
   // Pre-fix virgin-root witness only; b9 already supports expired USED renewal.
   B: Object.freeze({commit:'b9ee52592df924d945f800619ee31e6c483200df',tree:'6c97679c7ffe042e88addcfaf573c78d6a1379dc'}),
-  F: Object.freeze({commit:'6f2020b4830e9839fd35e40b436ea4677b8326d0',tree:'57186c773b9c25ee13bcfe42f0d190a51dcde90b'}),
+  F: Object.freeze({commit:'053a94f60bc00d0c6356866b76ac73d1a4b17243',tree:'0d21c6f5910cae5c721d2b358a68fca99d9a59e9'}),
 });
 export function materializeActiveFloorSource(directory, generation) {
-  if(generation==='current') return {path:REPO_ROOT,
-    commit:execFileSync('git',['-C',REPO_ROOT,'rev-parse','HEAD'],{encoding:'utf8'}).trim(),
-    tree:execFileSync('git',['-C',REPO_ROOT,'rev-parse','HEAD^{tree}'],{encoding:'utf8'}).trim()};
+  // Qualification HEAD changes test bindings only. Every current row loads the
+  // immutable integrated H3 product source, including the existing permission owners.
+  if(generation==='current') generation='H';
   if (generation!=='O' && !Object.hasOwn(ACTIVE_FLOOR_SOURCES,generation)) throw new Error('unknown_source_generation');
   const source=generation==='O' ? {commit:HISTORICAL_BASELINE_SOURCE.commit,tree:HISTORICAL_BASELINE_SOURCE.tree} : ACTIVE_FLOOR_SOURCES[generation];
   const git=args=>execFileSync('git',['-C',REPO_ROOT,...args],{stdio:['ignore','pipe','ignore'],maxBuffer:64*1024*1024});
@@ -939,7 +939,7 @@ export async function runScenario(target, scenario, timeoutMs = 170_000, generat
   const secret = secretDirectory();
   try {
     const configPath = join(secret.dir, 'target.json');
-    const source=generations ? materializeActiveFloorSource(secret.dir,generations.command) : null;
+    const source=materializeActiveFloorSource(secret.dir,generations?.command ?? 'current');
     const readSource=generations && generations.read!==generations.command ? materializeActiveFloorSource(secret.dir,generations.read) : source;
     const expectBaselineExpiry=source?.commit===HISTORICAL_BASELINE_SOURCE.commit && readSource?.commit===HISTORICAL_BASELINE_SOURCE.commit;
     if(scenario==='historical-baseline-expiry' && !expectBaselineExpiry) refuse('historical_expiry_requires_pinned_O');
@@ -977,6 +977,7 @@ export async function runScenario(target, scenario, timeoutMs = 170_000, generat
     if (exit.code !== 0 || exit.signal !== null || line === undefined) return { scenario, stage: 'process_failed', exit_code: exit.code, signal: exit.signal,
       ...(scenario==='floor-first-use-vs-head-revocation' ? {required_compatibility:'BLOCKED',floor_compatibility:'INCONCLUSIVE'} : {}) };
     const result = JSON.parse(line.slice('LOCK_ORDER_RESULT '.length));
+    process.stdout.write(`ACTIVE_FLOOR_SOURCE ${JSON.stringify({scenario,source:result.source,read_source:result.read_source})}\n`);
     return adminIssuance === null ? result : { ...result, admin_issuance: adminIssuance };
   } finally {
     removeSecretDirectory(secret);

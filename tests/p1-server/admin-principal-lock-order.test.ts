@@ -277,7 +277,7 @@ for (const name of ["delegated-local-permanent-suspension","delegated-local-revo
 
 
 // Generation rows extend existing owners; none supplies auth, a receipt, or
-// an outcome. F is loaded from its retained Git objects, current is this checkout.
+// an outcome. F is integrated rollback; current loads immutable integrated H3.
 const completedFloorCases=new Set<string>();
 for(const [command,read] of [['current','current'],['F','current'],['current','F'],['F','F']]) {
   for(const order of ['use-first','revoke-first']) {
