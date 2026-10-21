@@ -960,20 +960,47 @@ test('a stale self-role save ends on sign-in, and the email names Save; removal 
 
 /* People & agents is a page now (2026-10-07). ~~"falls back to the roster heading"~~ of the dialog:
    on the page an absent target falls back to the page title, and a visit from elsewhere navigates. */
-test('an absent People & agents target falls back to the page heading', async () => {
+test('People arrival prefers an eligible requested detail and otherwise the eligible page heading', async () => {
   const frames: (()=>void)[] = [], focused: string[] = [], navigations: unknown[] = []; let rendered = 0;
+  // Independent DOM facts only; the actual production declarations choose the target.
+  const heading = (name: string) => ({ present: true, rects: true, blocked: null as 'hidden' | 'inert' | null,
+    getClientRects() { return this.rects ? [{}] : []; },
+    closest(selector: string) { return selector.split(',').some(part => part.trim() === `[${this.blocked}]`) ? { reason: this.blocked } : null; },
+    focus() { focused.push(name); } });
+  const page = heading('page'), detail = heading('detail');
   const context = createContext({window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
-    one:(selector:string)=>selector==='#pd-page-title'?{getClientRects:()=>[{}],closest:()=>null,focus:()=>focused.push('page')}:null,
+    one:(selector:string)=>selector==='#pd-page-title' ? (page.present ? page : null)
+      : selector==='#pd-detail-title' ? (detail.present ? detail : null) : null,
     all:()=>[], renderDialogRoster:()=>{ rendered++; }, loadHouseholdConnections:()=>{},
     navigateHome:(route:unknown, mode:string)=>{ navigations.push([route, mode]); return Promise.resolve(); },
     peopleDialogState:{query:'',selected:null,focusApplied:null},sampleMode:true});
   runInContext("let peopleDialogFocus,rosterFilter='',activeWorkspaceId='W',homeRoute={view:'people',workspaceId:'W'};",context);
   runInContext(await dashboardFunctions(['openRosterDialog','focusPeoplePage']),context);
-  await runInContext("openRosterDialog({kind:'person',id:'gone'})",context);
-  for (const frame of frames) frame();
-  assert.deepEqual(focused,['page']);
-  assert.equal(rendered,1,'already on the page: it re-renders in place');
-  assert.deepEqual(navigations,[]);
+  const rows: Array<{ label: string; request: boolean; detailPresent?: boolean; detailRects?: boolean;
+    detailBlocked?: 'hidden' | 'inert'; pageRects?: boolean; pageBlocked?: 'hidden' | 'inert'; want: string[] }> = [
+    { label: 'ordinary entry ignores an unrequested visible detail', request: false, want: ['page'] },
+    { label: 'absent requested detail falls back', request: true, detailPresent: false, want: ['page'] },
+    { label: 'requested detail without a generated box falls back', request: true, detailRects: false, want: ['page'] },
+    { label: 'hidden-ancestor requested detail falls back', request: true, detailBlocked: 'hidden', want: ['page'] },
+    { label: 'inert-ancestor requested detail falls back', request: true, detailBlocked: 'inert', want: ['page'] },
+    { label: 'eligible requested detail takes precedence', request: true, want: ['detail'] },
+    { label: 'no focus when absent detail and boxless page', request: true, detailPresent: false, pageRects: false, want: [] },
+    { label: 'no focus when absent detail and hidden page', request: true, detailPresent: false, pageBlocked: 'hidden', want: [] },
+    { label: 'no focus when absent detail and inert page', request: true, detailPresent: false, pageBlocked: 'inert', want: [] },
+  ];
+  for (const row of rows) {
+    focused.length = 0;
+    Object.assign(detail, { present: row.detailPresent ?? true, rects: row.detailRects ?? true, blocked: row.detailBlocked ?? null });
+    Object.assign(page, { rects: row.pageRects ?? true, blocked: row.pageBlocked ?? null });
+    const before = rendered;
+    await runInContext(row.request ? "openRosterDialog({kind:'person',id:'requested'})" : 'openRosterDialog()', context);
+    const facts = JSON.stringify({ row, page: { rects: page.rects, blocked: page.blocked },
+      detail: { present: detail.present, rects: detail.rects, blocked: detail.blocked } });
+    assert.equal(rendered, before + 1, `already on People re-renders in place: ${facts}`);
+    for (const frame of frames.splice(0)) frame();
+    assert.deepEqual(focused, row.want, `the real owner requests the eligible target: ${facts}`);
+    assert.deepEqual(navigations, [], `the current People visit does not navigate: ${facts}`);
+  }
   /* Positive control on the same context: from the workspace, the door navigates to the page. */
   runInContext("homeRoute={view:'chat',workspaceId:'W'}",context);
   await runInContext("openRosterDialog()",context);
