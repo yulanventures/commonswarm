@@ -28,7 +28,7 @@ export type Schema = {
   pattern?: string;
   minimum?: number;
   maximum?: number;
-  const?: string;
+  const?: string | boolean;
   enum?: readonly string[];
   oneOf?: readonly Schema[];
   description?: string;
@@ -84,7 +84,15 @@ export type HouseholdTodoReadQuery =
   | { kind: 'todo_read'; todo_id: string; comment_offset?: number }
   | { kind: 'comment_list'; target: TodoComment['target']; offset?: number; limit?: number }
   | { kind: 'todo_queue'; principal_id?: string; section?: 'working' | 'up_next' | 'not_yet' | 'requests'; offset?: number; limit?: number };
-type CoreOperation = { query: HouseholdReadQuery | HouseholdTodoReadQuery } | { command: HouseholdObjectCommand | TodoCommand };
+export type HouseholdOwnerPermissionCommand = {
+  kind: 'household_owner_permissions';
+  confirmation: { kind: 'owner_chat'; confirmed: true };
+  audit_context?: { conversation_ref?: string; message_ref?: string };
+  action: { kind: 'setup'; purpose: 'personal' | 'shared'; content_role: 'reader' | 'editor' }
+    | { kind: 'allow_connection'; connection: { kind: 'hosted' | 'local'; connection_id: string;
+        grant_id: string; principal_id: string; operations: HouseholdContentOperation[] } };
+};
+type CoreOperation = { query: HouseholdReadQuery | HouseholdTodoReadQuery } | { command: HouseholdObjectCommand | TodoCommand | HouseholdOwnerPermissionCommand };
 type Effect = 'read' | 'commit' | 'reserve';
 type WriteOperation = Exclude<HouseholdContentOperation, 'read'>;
 interface Definition {
@@ -261,6 +269,21 @@ const BASE_HOUSEHOLD_TOOL_REGISTRY = [
     properties: { draft_id: text(1, 255) },
     toCore: (args) => ({ query: { kind: 'draft_read', draft_id: args.draft_id as string } }),
   }),
+  define({ name: 'object_permissions_confirm', title: 'Confirm owner chat permissions',
+    description: 'Record the authenticated owner chat confirmation for baseline Lists consent or another owned connection. Cannot remove caller restrictions or widen its source grant. Sends an audited owner notice.',
+    effect: 'commit', objectTypes: structuredTypes, operations: [], operation: () => 'update',
+    properties: {
+      confirmation: object({ kind: literal('owner_chat'), confirmed: { type: 'boolean', const: true } }),
+      audit_context: object({ conversation_ref: text(1, 128), message_ref: text(1, 128) }, ['conversation_ref','message_ref']),
+      action: { oneOf: [object({ kind: literal('setup'), purpose: { type: 'string', enum: ['personal','shared'] },
+        content_role: { type: 'string', enum: ['reader','editor'] } }),
+        object({ kind: literal('allow_connection'), connection: object({ kind: { type: 'string', enum: ['hosted','local'] },
+          connection_id: uuid, grant_id: uuid, principal_id: uuid,
+          operations: { type: 'array', maxItems: 3, items: { type: 'string', enum: HOUSEHOLD_CONTENT_OPERATIONS } } }) })] },
+    }, optional: ['audit_context'],
+    toCore: (args) => { const { seat: _seat, request_id: _request, ...input } = args;
+      return { command: { kind: 'household_owner_permissions', ...input } as HouseholdOwnerPermissionCommand }; },
+  }),
 ] as const;
 export type HouseholdToolName = typeof BASE_HOUSEHOLD_TOOL_REGISTRY[number]['name'];
 
@@ -296,6 +319,10 @@ HOUSEHOLD_LIST_TOOL_REGISTRY.push({ ...draftRow, name: 'list_draft_read',
   description: draftRow.description + ' Only lists are available on this hosted surface.',
   toCore: draftRow.toCore });
 
+const permissionRow = BASE_HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === 'object_permissions_confirm')!;
+HOUSEHOLD_LIST_TOOL_REGISTRY.push({ ...permissionRow, name: 'list_permissions_confirm',
+  objectTypes: ['list'], toCore: permissionRow.toCore });
+
 export const HOUSEHOLD_TOOL_REGISTRY = [...BASE_HOUSEHOLD_TOOL_REGISTRY, ...HOUSEHOLD_LIST_TOOL_REGISTRY];
 
 export class HouseholdToolInputError extends Error {
@@ -315,7 +342,7 @@ function definition(name: string): Definition {
 function matches(schema: Schema, value: unknown): boolean {
   if (schema.oneOf) return schema.oneOf.filter((choice) => matches(choice, value)).length === 1;
   if (schema.type === 'null') return value === null;
-  if (schema.type === 'boolean') return typeof value === 'boolean';
+  if (schema.type === 'boolean') return typeof value === 'boolean' && (schema.const === undefined || schema.const === value);
   if (schema.type === 'integer') return typeof value === 'number' && Number.isSafeInteger(value)
     && value >= schema.minimum! && value <= schema.maximum!;
   if (schema.type === 'string') return typeof value === 'string'
@@ -385,6 +412,12 @@ export function validateHouseholdToolArguments(name: string, value: unknown): Ar
   const row = definition(name);
   if (!matches(row.inputSchema, value) || !validSemantics(value)) throw new HouseholdToolInputError('invalid_arguments');
   const args = value as Arguments;
+  if (name === 'object_permissions_confirm' || name === 'list_permissions_confirm') {
+    const action = args.action as HouseholdOwnerPermissionCommand['action'];
+    if (action.kind === 'allow_connection' && (!action.connection.operations.includes('read')
+      || new Set(action.connection.operations).size !== action.connection.operations.length))
+      throw new HouseholdToolInputError('invalid_arguments');
+  }
   // Storage's existing ceiling counts UTF-16 units, including surrogate pairs.
   if (typeof args.object_id === 'string' && args.object_id.length > 255) throw new HouseholdToolInputError('invalid_arguments');
   const change = args.change as Arguments | undefined;
@@ -433,7 +466,7 @@ export const HOUSEHOLD_TOOLS = BASE_HOUSEHOLD_TOOL_REGISTRY.map((row) => ({
 export const HOSTED_TODO_LIST_TOOLS = [
   ...HOUSEHOLD_TOOLS.filter(tool => definition(tool.name).objectTypes.includes('todo')).map(tool => ({
     ...tool, inputSchema: tool.inputSchema.properties?.target ? object({ ...tool.inputSchema.properties,
-      target: { oneOf: target.oneOf!.filter(schema => ['todo', 'list'].includes(schema.properties!.kind!.const!)) },
+      target: { oneOf: target.oneOf!.filter(schema => ['todo', 'list'].includes(String(schema.properties!.kind!.const!))) },
     }, Object.keys(tool.inputSchema.properties).filter(key => !tool.inputSchema.required!.includes(key))) : tool.inputSchema,
   })),
   ...HOUSEHOLD_LIST_TOOL_REGISTRY.map(row => ({ name: row.name, title: row.title,
@@ -484,12 +517,12 @@ export interface HouseholdRefusalDetails {
   missing: readonly string[];
   scope: { workspace_id?: string; principal_id?: string };
   remedy_url: string | null;
-  mcp_tool: null;
-  cli_command: null;
+  mcp_tool: 'object_permissions_confirm' | 'list_permissions_confirm' | null;
+  cli_command: string | null;
 }
 /** Scope comes only from verified current membership, never the refused object/draft input.
- * Permission management has no agent route yet; null is explicitly unavailable. */
-export function householdRefusalDetails(reason: string, scope: HouseholdRefusalDetails['scope'] = {}): HouseholdRefusalDetails {
+ * A verified eligible owner may receive the closed confirmation command. */
+export function householdRefusalDetails(reason: string, scope: HouseholdRefusalDetails['scope'] = {}, remedy?: 'object_permissions_confirm' | 'list_permissions_confirm'): HouseholdRefusalDetails {
   const missing = reason === 'owner_confirmation_required' ? ['workspace_content_boundary']
     : reason === 'content_consent_required' ? ['content_consent']
     : reason === 'connection_access_refused' ? ['connection_content_access']
@@ -499,5 +532,7 @@ export function householdRefusalDetails(reason: string, scope: HouseholdRefusalD
   return { code: reason, missing, scope: { ...scope },
     remedy_url: workspace && reason !== 'draft_access_refused'
       ? `https://commonswarm.com/app?w=${encodeURIComponent(workspace)}&v=lists` : null,
-    mcp_tool: null, cli_command: null };
+    mcp_tool: workspace && ['owner_confirmation_required','content_consent_required'].includes(reason) ? remedy ?? null : null,
+    cli_command: workspace && remedy && ['owner_confirmation_required','content_consent_required'].includes(reason)
+      ? `cswarm object object_permissions_confirm --input-file <confirmation.json> --workspace-id ${workspace} --agent-token-file <token-file> --json` : null };
 }

@@ -107,11 +107,11 @@ test('hosted inventory and unchanged local catalog match independently built pre
   const built = await build({ entryPoints: ['src/mcp/tools.ts'], bundle: true, write: false, platform: 'node', format: 'esm',
     plugins: [{ name: 'main-snapshot', setup(builder) { builder.onLoad({ filter: /household-tool-registry\.ts$/ }, () => ({ contents: snapshot, loader: 'ts', resolveDir: resolve('src/protocol') })); } }] });
   const baseline = await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0]!.text).toString('base64')}`);
-  assert.equal(JSON.stringify(MCP_TOOLS.filter(t => t.name !== 'object_draft_read')), JSON.stringify(baseline.MCP_TOOLS)); assert.equal(MCP_TOOLS.length, 28);
-  assert.equal(JSON.stringify(HOUSEHOLD_TOOLS.filter(t => t.name !== 'object_draft_read')), JSON.stringify(baseline.MCP_TOOLS.slice(-18)));
+  assert.equal(JSON.stringify(MCP_TOOLS.filter(t => !['object_draft_read','object_permissions_confirm'].includes(t.name))), JSON.stringify(baseline.MCP_TOOLS)); assert.equal(MCP_TOOLS.length, 29);
+  assert.equal(JSON.stringify(HOUSEHOLD_TOOLS.filter(t => !['object_draft_read','object_permissions_confirm'].includes(t.name))), JSON.stringify(baseline.MCP_TOOLS.slice(-18)));
   assert.deepEqual(HOSTED_TODO_LIST_TOOLS.map(t => t.name), [...HOUSEHOLD_TOOLS.filter(t => t.name.startsWith('todo_') || t.name === 'comment_list').map(t => t.name), ...HOUSEHOLD_LIST_TOOL_REGISTRY.map(t => t.name)]);
-  assert.equal(HOSTED_TODO_LIST_TOOLS.length, 16);
+  assert.equal(HOSTED_TODO_LIST_TOOLS.length, 17);
   assert.ok(HOUSEHOLD_LIST_TOOL_REGISTRY.every(tool => HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === tool.name)));
-  for (const tool of HOSTED_TODO_LIST_TOOLS.slice(-6)) assert.deepEqual(tool.annotations, { title: tool.title,
-    readOnlyHint: ['list_list', 'list_read', 'list_history', 'list_draft_read'].includes(tool.name), destructiveHint: ['list_create', 'list_update'].includes(tool.name), idempotentHint: true, openWorldHint: false });
+  for (const tool of HOSTED_TODO_LIST_TOOLS.slice(-7)) assert.deepEqual(tool.annotations, { title: tool.title,
+    readOnlyHint: ['list_list', 'list_read', 'list_history', 'list_draft_read'].includes(tool.name), destructiveHint: ['list_create', 'list_update','list_permissions_confirm'].includes(tool.name), idempotentHint: true, openWorldHint: false });
 });

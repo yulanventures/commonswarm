@@ -204,12 +204,10 @@ export declare function adminAccountWithDurableGrants(state: AdminAccountState, 
 export declare function parseAdminClientApprovalCommand(input: unknown): Extract<AdminCommand, {
     client_id: string;
 }> | null;
-/** Shared counter keys and ceilings, including identifiable refused attempts. */
 export declare function adminRatePolicy(actor: AdminActor, grant: AdminGrant, action: string, workspaceId: string | null, lineageId: string | null, requestedGrantId: string | null): {
     key: string;
     limit: number;
 }[];
-/** Account-only decisions. No routine admin operation is enabled by lane B. */
 export declare function decideAdminAuthority(command: AdminCommand, state: AdminAccountState, ctx: AdminDecisionContext): AdminDecision;
 /** Consent session bindings are separate private adapter facts, excluded from canonical events. */
 export declare function reduceAdminAuthority(previous: AdminAccountState | null, event: AdminAccountEvent): AdminAccountState;

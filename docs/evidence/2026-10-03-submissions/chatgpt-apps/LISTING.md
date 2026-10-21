@@ -106,3 +106,11 @@ installed, put {"draft_id":"<retained draft ID>"} in draft.json and run
 `cswarm object object_draft_read --input-file draft.json --workspace-id <workspace UUID> --json`
 with the existing selected human/agent profile (or existing agent token input).
 Permission repair CLI/MCP operations remain unavailable pending Root's permission SCR.
+
+D1 source candidate for CLI 0.1.83 appends `list_permissions_confirm` (local
+`object_permissions_confirm`). Closed actions are `setup` and `allow_connection`;
+`confirmation: {kind: "owner_chat", confirmed: true}` is a caller assertion.
+Optional bounded chat references contain no message text. Authenticated owner
+lineage, caller ceilings, principal audit and a transactional sent owner notice
+are required. An agent cannot lift its own restrictions or widen its source grant.
+This is an unpublished source candidate; installed 0.1.82 lacks these commands.

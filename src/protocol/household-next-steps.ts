@@ -16,5 +16,5 @@ export function projectHouseholdRefusalDetails(value: Record<string, unknown>, w
   if (typeof value.code !== 'string' || value.code !== value.reason || !/^[a-z][a-z0-9_]{0,63}$/.test(value.code)) return {};
   const rawScope = value.scope as Record<string, unknown> | null;
   const scope = rawScope && typeof rawScope === 'object' && rawScope.workspace_id === workspace ? { workspace_id: workspace } : {};
-  return householdRefusalDetails(value.code, scope);
+  return householdRefusalDetails(value.code, scope, value.mcp_tool === 'object_permissions_confirm' || value.mcp_tool === 'list_permissions_confirm' ? value.mcp_tool : undefined);
 }

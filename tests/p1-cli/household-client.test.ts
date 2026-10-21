@@ -213,7 +213,7 @@ test('registry-derived local tools pass reads, surface reader refusal, and rejec
   const host = coreHost();
   const tools = createHouseholdMcpTools(host.client);
   assert.deepEqual(tools.tools, HOUSEHOLD_TOOLS);
-  assert.equal(tools.tools.length, 19, 'nine object/file/draft tools and ten to-do/comment tools');
+  assert.equal(tools.tools.length, 20, 'ten object/file/draft/permission tools and ten to-do/comment tools');
   const created = await tools.call('object_create', create());
   assert.equal(JSON.parse(created.content[0]!.text).status, 'committed');
   host.reader();

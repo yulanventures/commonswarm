@@ -4,6 +4,7 @@ import type postgres from 'postgres';
 import * as core from '../_shared/protocol.js';
 import { createHouseholdObjectStore, type HouseholdIdentity, type HouseholdCredentialRecheck } from './household-objects.ts';
 import { loadHouseholdContentAccess } from './household-content-access.ts';
+import { confirmOwnerHouseholdPermissions, canOfferOwnerHouseholdSetup } from './household-owner-permissions.ts';
 import { approveHouseholdConnection, withdrawHouseholdConnection } from './household-permissions.ts';
 import { createHouseholdTodoStore, type HouseholdTodoNoticePort } from './household-todos.ts';
 import { readHouseholdActivity } from './household-activity.ts';
@@ -39,8 +40,16 @@ export function householdStore(recheckCredential: HouseholdCredentialRecheck, ne
 export async function executeHouseholdSurface(tx: Sql, workspaceId: string, identity: HouseholdIdentity,
   requestId: string, value: Record<string, unknown>, recheckCredential: HouseholdCredentialRecheck,
   attachment?: Uint8Array, notice?: HouseholdTodoNoticePort): Promise<Record<string, unknown>> {
-  const result = await executeHouseholdSurfaceResult(tx, workspaceId, identity, requestId, value, recheckCredential, attachment, notice);
+  let result = await executeHouseholdSurfaceResult(tx, workspaceId, identity, requestId, value, recheckCredential, attachment, notice);
   if (result.status !== 'refused' || typeof result.reason !== 'string') return result;
+  const privateDraft = value.kind === 'household_draft' || value.kind === 'household_tool'
+    && ['object_draft_read', 'list_draft_read'].includes(String(value.tool));
+  // Content admission can fail before the private draft binding is inspected.
+  // It must never suggest that changing permissions can transfer that draft.
+  if (privateDraft && ['owner_confirmation_required', 'content_consent_required', 'connection_access_refused',
+    'workspace_access_refused', 'content_read_only'].includes(String(result.reason)))
+    result = refused('draft_access_refused');
+  const reason = String(result.reason);
   // Refusals cannot reveal another owner/object/draft. Scope only live membership.
   let scope: { workspace_id?: string; principal_id?: string } = {};
   if (await recheckCredential(tx, identity)) {
@@ -49,7 +58,10 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
         AND m.revoked_at IS NULL AND w.archived_at IS NULL FOR SHARE OF m,w`;
     if (member) scope = { workspace_id: workspaceId, ...(identity.principal_id ? { principal_id: identity.principal_id } : {}) };
   }
-  return { ...result, ...core.householdRefusalDetails(result.reason, scope) };
+  const remedy = scope.workspace_id && ['owner_confirmation_required','content_consent_required'].includes(reason)
+    && await canOfferOwnerHouseholdSetup(tx, workspaceId, identity)
+    ? identity.principal_id !== null && identity.run_id === null ? 'list_permissions_confirm' : 'object_permissions_confirm' : undefined;
+  return { ...result, ...core.householdRefusalDetails(reason, scope, remedy) };
 }
 
 async function executeHouseholdSurfaceResult(tx: Sql, workspaceId: string, identity: HouseholdIdentity,
@@ -163,6 +175,8 @@ async function executeHouseholdSurfaceResult(tx: Sql, workspaceId: string, ident
   // Local seat text supplies schema parity only. Existing token/session auth
   // determines identity; it never selects a different local principal.
   if (identity.connection === null && args.seat !== localSeat) return refused('seat_binding_mismatch');
+  if (value.tool === 'object_permissions_confirm' || value.tool === 'list_permissions_confirm')
+    return confirmOwnerHouseholdPermissions(tx, workspaceId, identity, requestId, args, recheckCredential, notice);
   const access = await store.access(tx, workspaceId, identity);
   const operation = core.householdToolOperation(value.tool, args);
   if (!access) return missingAccess();

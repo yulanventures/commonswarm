@@ -20,6 +20,7 @@ let denied = '', provider = true;
 function query(sql: string, values: any[]): Row[] {
   const ws = values.find(value => value === wa || value === wb);
   if (sql.startsWith('LOCK TABLE swarm.household_content_connections IN ACCESS SHARE MODE')) return [];
+  if (sql.includes('SELECT m.user_id FROM swarm.memberships')) return [{ user_id: owner }];
   if (sql.includes('FROM pg_catalog.pg_policy')) return [{ present: false }];
   // Match catalog/restriction/legacy queries before their nested seat references.
   if (sql.includes('FROM swarm.household_hosted_content_restrictions r')) return [];
@@ -40,9 +41,10 @@ function query(sql: string, values: any[]): Row[] {
   if (sql.includes('archived_at FROM swarm.workspaces')) return [{ archived_at: null }];
   if (sql.includes('purpose, owner_user_id')) return [{ purpose: 'shared', owner_user_id: owner }];
   if (sql.includes('revoked_at FROM swarm.memberships')) return [{ role: 'owner', revoked_at: null }];
-  if (sql.includes('revoked_at FROM swarm.agent_principals')) return [{ revoked_at: null }];
+  if (sql.includes('FROM swarm.agent_principals')) return [{ principal_id: principal, revoked_at: null }];
   if (sql.includes('household_member_content_roles')) return [{ revoked_at: denied === 'workspace_access_refused' ? at : null,
     content_role: 'editor', content_consent_id: denied === 'content_consent_required' ? null : id(8) }];
+  if (sql.includes('AS present')) return [{ present: true }];
   if (sql.includes('household_content_connections')) return [{ connection_id: connection, grant_id: grant, hosted_grant_id: grant,
     operations: ['read', 'create', 'update'], purpose: 'shared', revoked_at: denied === 'connection_access_refused' ? at : null, expires_at: null }];
   if (sql.includes('FROM swarm.hosted_mcp_grants')) return [{ state: 'active', revoked_at: null }];

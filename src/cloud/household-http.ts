@@ -28,6 +28,7 @@ export function householdWireRequest(invocation: HouseholdToolInvocation): { too
   if (invocation.objectTypes.includes('todo') && HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === kind && row.effect === 'commit')) {
     return { tool: kind, arguments: { ...args, ...command } };
   }
+  if (kind === 'household_owner_permissions') return { tool: 'object_permissions_confirm', arguments: { ...args, ...command } };
   if (kind === 'create_household_object') return { tool: 'object_create', arguments: { ...args, ...command } };
   if (kind === 'update_household_object') return { tool: 'object_update', arguments: { ...args, ...command } };
   if (kind === 'reserve_household_upload' && 'change' in command) return { tool: 'file_upload_begin', arguments: { ...args, object_id: command.object_id, change: command.change } };

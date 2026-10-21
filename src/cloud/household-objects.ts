@@ -34,6 +34,7 @@ export interface HouseholdRevisionView {
 }
 export type HouseholdClientResult =
   | HouseholdTodoClientResult
+  | { status: 'committed'; request_id: string; action: 'setup' | 'allow_connection'; notice: { status: 'sent'; signal_id: string }; replayed: boolean }
   | { status: 'committed'; request_id: string; object_id: string; revision: HouseholdRevisionRef }
   | { status: 'pending'; request_id: string; object_id: string; reservation_id: string }
   | { status: 'conflict'; request_id: string; object_id: string; current: HouseholdRevisionRef; draft_id: string }
@@ -170,6 +171,13 @@ function decodeResponse(value: unknown, invocation: HouseholdToolInvocation): Ho
   if (invocation.objectTypes.includes('todo')) return decodeHouseholdTodoResponse(data, invocation, envelope) ?? invalid();
   if ('command' in invocation) {
     const command = invocation.command;
+    if (command.kind === 'household_owner_permissions') {
+      const notice = row(data.notice);
+      return data.status === 'committed' && data.request_id === request_id && data.action === command.action.kind
+        && notice?.status === 'sent' && id(notice.signal_id) && typeof data.replayed === 'boolean'
+        ? { status: 'committed', request_id: request_id!, action: command.action.kind,
+            notice: { status: 'sent', signal_id: notice.signal_id }, replayed: data.replayed } : invalid();
+    }
     const object = 'object_id' in command ? command.object_id : undefined;
     if (!request_id || !id(data.object_id) || (object !== undefined && object !== data.object_id)) return invalid();
     if (data.status === 'committed' && command.kind !== 'reserve_household_upload') {

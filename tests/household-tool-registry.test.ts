@@ -26,6 +26,7 @@ const request = { seat, request_id: 'request_1' };
 // Independent spec examples: expectations below do not come from registry rows.
 const examples: Record<HouseholdToolName, Record<string, unknown>> = {
   object_draft_read: { seat, draft_id: 'draft_001' },
+  object_permissions_confirm: { ...request, confirmation: { kind: 'owner_chat', confirmed: true }, action: { kind: 'setup', purpose: 'shared', content_role: 'reader' } },
   object_list: { seat, offset: 0, limit: 10 },
   object_read: { seat, object_id: 'shopping', revision: ref('shopping') },
   object_history: { seat, object_id: 'shopping', offset: 0, limit: 10 },
@@ -47,6 +48,7 @@ const examples: Record<HouseholdToolName, Record<string, unknown>> = {
 };
 const contracts = [
   ['object_draft_read', 'draft_read', 'read', true],
+  ['object_permissions_confirm', 'household_owner_permissions', 'update', false],
   ['object_list', 'object_list', 'read', true],
   ['object_read', 'object_read', 'read', true],
   ['object_history', 'object_history', 'read', true],
@@ -57,9 +59,9 @@ const contracts = [
   ['file_upload_commit', 'commit_household_upload', 'create', false],
 ] as const;
 
-test('all nineteen tool contracts validate and map to lane 1 with spec hints and rights', () => {
-  assert.equal(HOUSEHOLD_TOOLS.length, 19);
-  assert.equal(new Set(HOUSEHOLD_TOOLS.map((tool) => tool.name)).size, 19);
+test('all twenty tool contracts validate and map to lane 1 with spec hints and rights', () => {
+  assert.equal(HOUSEHOLD_TOOLS.length, 20);
+  assert.equal(new Set(HOUSEHOLD_TOOLS.map((tool) => tool.name)).size, 20);
   for (const [name, kind, permission, readOnlyHint] of contracts) {
     assert.deepEqual(validateHouseholdToolArguments(name, examples[name]), examples[name]);
     const invocation = householdToolInvocation(name, examples[name], host);
@@ -205,7 +207,8 @@ test('mapped calls execute the real core: reads preserve state; begin reserves; 
     object_update: artifact('shopping', checked, ref('shopping')),
     file_upload_begin: artifact('new-file', file), file_upload_commit: artifact('new-file', file),
   };
-  for (const [name, , operation, readOnlyHint] of contracts) {
+  // Permission management is owned by the authenticated SQL integration tests.
+  for (const [name, , operation, readOnlyHint] of contracts.filter(([name]) => name !== 'object_permissions_confirm')) {
     const call = householdToolInvocation(name, readOnlyHint ? examples[name]
       : { ...examples[name], request_id: `request_${name}` }, host);
     const before = structuredClone(state);
