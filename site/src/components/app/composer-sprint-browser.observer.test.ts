@@ -288,6 +288,26 @@ const frameScript = (scenario: string): string => `<script>
 
     const input = doc.querySelector("[data-composer-input]");
     const send = doc.querySelector("[data-composer-send]");
+    // A virtual40ms sleep cannot establish that an HTTP font has loaded. Request
+    // the actual field font, then await its document's font work before sizing.
+    const fontStyle = view.getComputedStyle(input);
+    const font = fontStyle.font || (fontStyle.fontWeight + " " + fontStyle.fontSize + " " + fontStyle.fontFamily);
+    let fontsReady = false, fontError = "";
+    void (async () => {
+      await doc.fonts.load(font, "Ag @Orbit line one beta");
+      await doc.fonts.ready;
+      fontsReady = true;
+    })().catch(error => { fontError = String(error); });
+    for (let attempt = 0; attempt < 200 && !fontsReady && !fontError; attempt += 1) {
+      // The server clock gives network/font work real opportunity under virtual time.
+      await fetch("/__observer-font-tick");
+    }
+    if (!fontsReady || fontError) throw new Error("Composer geometry font readiness failed: " + JSON.stringify({
+      error: fontError, status: doc.fonts.status, font,
+      faces: [...doc.fonts].map(face => ({ family: face.family, status: face.status })),
+      viewport: { width: view.innerWidth, height: view.innerHeight },
+      state: doc.querySelector("live-dashboard")?.dataset.state,
+    }));
     const size = async (value) => {
       input.value = value;
       inputEvent(input);
@@ -403,9 +423,14 @@ const frameScript = (scenario: string): string => `<script>
       whitespaceDisabled,
     };
   };
-  const start = () => void runMeasurement()
-    .then((value) => { document.documentElement.dataset.composerBrowserMeasurement = encode(value); })
-    .catch((error) => reportError(error?.stack ?? error));
+  let started = false;
+  const start = () => {
+    if (started) return;
+    started = true;
+    void runMeasurement()
+      .then((value) => { document.documentElement.dataset.composerBrowserMeasurement = encode(value); })
+      .catch((error) => reportError(error?.stack ?? error));
+  };
   frame.addEventListener("load", start, { once: true });
   if (frame.contentDocument?.readyState === "complete" && frame.contentWindow?.location.pathname === "/app") start();
 </script>`;
@@ -414,6 +439,10 @@ const startDistServer = async (): Promise<{ close(): Promise<void>; origin: stri
   const server = createServer((request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      if (url.pathname === "/__observer-font-tick") {
+        setTimeout(() => response.writeHead(204).end(), 20);
+        return;
+      }
       if (url.pathname === "/__measure") {
         const width = Number.parseInt(url.searchParams.get("width") ?? "", 10);
         const height = Number.parseInt(url.searchParams.get("height") ?? "", 10);

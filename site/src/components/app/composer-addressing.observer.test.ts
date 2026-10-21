@@ -249,7 +249,12 @@ const frameScript = `<script>
       zeroCandidate,
     }))));
   };
-  const start = () => void runMeasurement().catch((error) => reportError(error?.stack ?? error));
+  let started = false;
+  const start = () => {
+    if (started) return;
+    started = true;
+    void runMeasurement().catch((error) => reportError(error?.stack ?? error));
+  };
   frame.addEventListener("load", start, { once: true });
   if (
     frame.contentDocument?.readyState === "complete" &&
