@@ -87,15 +87,15 @@ function createFakeDomDoc(): { doc: OrgDomDocument; getFocused: () => FakeEl | n
   return { doc: { createElement: makeEl }, getFocused: () => focused };
 }
 
-test('multi-org switcher renders 4 role tiers, org unread totals, menu ARIA roles, keyboard navigation, and action callbacks', () => {
+test('multi-org switcher renders 4 role tiers, unread totals, menu ARIA, keyboard nav, and callbacks', () => {
   const state = createMultiOrgFixture(), caller = { principal_kind: 'user' as const, principal_id: 'u-tom' };
-  const vm = deriveOrgHeaderSwitcherVM(state, caller, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build', switcherOpen: true, unreadCounts: { design: 3, 'sec-incident': 2 }, orgUnreadCounts: { household: 4 } });
+  const vm = deriveOrgHeaderSwitcherVM(state, caller, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build', switcherOpen: true, unreadCounts: { 'ch-design': 3, 'ch-sec': 2 }, orgUnreadCounts: { 'org-household': 4 } });
   assert.deepEqual(vm.organizations.map((o) => [o.slug, o.role, o.roleLabel, o.current, o.unreadCount, o.unreadBadge]), [
     ['yulan', 'owner', 'Owner', true, 5, '5'], ['household', 'admin', 'Admin', false, 4, '4'], ['ridge-studio', 'member', 'Member', false, 0, null], ['external-audit', 'guest', 'Guest', false, 0, null],
   ]);
   const { identityHtml, popoverHtml } = renderOrgHeaderSwitcherHtml(vm);
-  assert.match(identityHtml, /id="org-trigger"/); assert.match(popoverHtml, /role="menu"/); assert.match(popoverHtml, /role="menuitemradio" aria-checked="true"/); assert.match(popoverHtml, /data-org-unread-count="5"/);
-  for (const role of ['owner', 'admin', 'member', 'guest'] as const) assert.match(popoverHtml, new RegExp(`data-org-item-role-badge="${role}">${ORG_ROLE_LABELS[role]}<`));
+  for (const r of [/id="org-trigger"/, /role="menu"/, /role="menuitemradio" aria-checked="true"/, /data-org-unread-count="5"/]) assert.match(identityHtml + popoverHtml, r);
+  for (const r of ['owner', 'admin', 'member', 'guest'] as const) assert.match(popoverHtml, new RegExp(`data-org-item-role-badge="${r}">${ORG_ROLE_LABELS[r]}<`));
   for (const act of ORG_SWITCHER_ACTIONS) assert.ok(popoverHtml.includes(act.label));
 
   const { doc, getFocused } = createFakeDomDoc(), calls: string[] = [];
@@ -110,18 +110,16 @@ test('multi-org switcher renders 4 role tiers, org unread totals, menu ARIA role
   pop.trigger('keydown', { key: 'ArrowUp', preventDefault() {} }); assert.equal(getFocused()?.dataset.orgSlug, 'yulan');
   pop.trigger('keydown', { key: 'Escape', preventDefault() {} }); assert.equal(pop.hidden, true); assert.equal(getFocused(), orgTrigger);
   for (const actBtn of popButtons.filter((b) => b.dataset.orgAction)) actBtn.trigger('click');
-  assert.ok(calls.includes('action:org-members')); assert.ok(calls.includes('action:org-settings-logo')); assert.ok(calls.includes('action:new-organization'));
+  for (const a of ['action:org-members', 'action:org-settings-logo', 'action:new-organization']) assert.ok(calls.includes(a));
 });
 
-test('org logo renders 32x32 rounded-square image when logo_object_key is set and named upload placeholder when null', () => {
+test('org logo renders 32x32 image when logo_object_key is set and named upload placeholder when null', () => {
   const state = createMultiOrgFixture(), caller = { principal_kind: 'user' as const, principal_id: 'u-tom' };
   const withLogoHtml = renderOrgLogoBadgeHtml(deriveOrgHeaderSwitcherVM(state, caller, { activeOrgId: 'org-yulan' }).activeOrg, 32);
   assert.match(withLogoHtml, /data-org-logo="orgs\/org-yulan\/logo\/64\.png"/);
   assert.doesNotMatch(withLogoHtml, /data-org-logo-upload-placeholder/);
   const placeholderHtml = renderOrgLogoBadgeHtml(deriveOrgHeaderSwitcherVM(state, caller, { activeOrgId: 'org-household' }).activeOrg, 32);
-  assert.match(placeholderHtml, /data-org-logo-placeholder="LH"/);
-  assert.match(placeholderHtml, /role="img"/);
-  assert.match(placeholderHtml, /aria-label="Upload organization logo for Langridge Household"/);
+  for (const r of [/data-org-logo-placeholder="LH"/, /role="img"/, /aria-label="Upload organization logo for Langridge Household"/]) assert.match(placeholderHtml, r);
 });
 
 test('workspace selector enforces canReadWorkspace and blocks revoked user or owner-revoked agent grants from appearing joinable', () => {
@@ -153,7 +151,7 @@ test('privateChannelsEnabled defaults to false (fail-closed), member filters wor
   const state = createMultiOrgFixture(), caller = { principal_kind: 'user' as const, principal_id: 'u-tom' };
   const defaultOffVm = deriveWorkspaceChannelNavVM({ ...state, privateChannelsEnabled: undefined }, caller, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build' });
   assert.deepEqual(defaultOffVm.channels.map((c) => c.slug), ['general', 'design']);
-  const chatVm = deriveWorkspaceChannelNavVM(state, caller, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build', activeChannelId: 'ch-sec', mode: 'chat', unreadCounts: { design: 3, 'sec-incident': 150 }, threadsByChannel: { 'sec-incident': [{ threadId: 'th-1', title: 'Audit log check', replyCount: 2 }] } });
+  const chatVm = deriveWorkspaceChannelNavVM(state, caller, { activeOrgId: 'org-yulan', activeWorkspaceId: 'ws-build', activeChannelId: 'ch-sec', mode: 'chat', unreadCounts: { 'ch-design': 3, 'ch-sec': 150 }, threadsByChannel: { 'ch-sec': [{ threadId: 'th-1', title: 'Audit log check', replyCount: 2 }] } });
   assert.deepEqual(chatVm.channels.map((c) => [c.slug, c.visibility, c.prefix, c.unreadBadge, c.current]), [['general', 'workspace', '#', null, false], ['design', 'workspace', '#', '3', false], ['sec-incident', 'private', 'lock', '99+', true]]);
   assert.equal(formatUnreadCountPill(0), null); assert.equal(formatUnreadCountPill(120), '99+');
   assert.doesNotMatch(renderModeContextualListPaneHtml(chatVm), /cs-workspace-quick-links/);
@@ -168,7 +166,10 @@ test('privateChannelsEnabled defaults to false (fail-closed), member filters wor
   assert.doesNotMatch(agentsPaneHtml, /data-channel-list/);
   assert.deepEqual(deriveWorkspaceChannelNavVM(state, caller, { activeOrgId: 'org-yulan', mode: 'members', memberFilter: 'guests' }).members.map((m) => m.principalId), ['u-guest']);
   const wikiVm = deriveWorkspaceChannelNavVM(state, caller, { activeOrgId: 'org-yulan', mode: 'wiki', mobileDrawerOpen: true });
-  assert.doesNotMatch(renderModeContextualListPaneHtml(wikiVm), /data-channel-list/);
+  assert.equal(wikiVm.wikiDocuments.length, 0);
+  const wikiPaneHtml = renderModeContextualListPaneHtml(wikiVm);
+  assert.match(wikiPaneHtml, /data-wiki-empty="true"/);
+  assert.doesNotMatch(wikiPaneHtml, /data-channel-list/);
   const wikiShellHtml = renderKylonOrgShellHtml(wikiVm);
   assert.match(wikiShellHtml, /<span id="screen-title" data-channel-name>Wiki<\/span>/);
   assert.match(wikiShellHtml, /id="sidebar"[^>]*role="dialog" aria-modal="true"/);

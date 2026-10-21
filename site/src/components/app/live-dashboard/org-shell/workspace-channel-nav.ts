@@ -79,8 +79,8 @@ export function deriveWorkspaceChannelNavVM(s0: OrgChannelAuthorityState, c: Cal
   const rawChs = activeWorkspace?.granted ? s.channels.filter((ch) => ch.workspace_id === activeWorkspace.workspaceId && isLive(ch) && canReadChannel(s, c, ch.channel_id)) : [];
   const curCh = rawChs.find((ch) => ch.channel_id === opt.activeChannelId || norm(ch.slug) === norm(opt.activeChannelId ?? '')) ?? rawChs.find((ch) => norm(ch.slug) === 'general') ?? rawChs[0] ?? null;
   const channels: ChannelNavItemVM[] = rawChs.map((ch) => {
-    const u = unreads[ch.channel_id] ?? unreads[ch.slug] ?? 0, isPrivate = ch.visibility === 'private';
-    return { channelId: ch.channel_id, workspaceId: ch.workspace_id, slug: ch.slug, topic: ch.topic ?? ch.purpose ?? null, visibility: ch.visibility, isPrivate, prefix: (isPrivate ? 'lock' : '#') as '#' | 'lock', unreadCount: u > 0 ? Math.floor(u) : 0, unreadBadge: formatUnreadCountPill(u), current: curCh ? ch.channel_id === curCh.channel_id : false, threads: tMap[ch.channel_id] ?? tMap[ch.slug] ?? [] };
+    const u = unreads[ch.channel_id] ?? 0, isPrivate = ch.visibility === 'private';
+    return { channelId: ch.channel_id, workspaceId: ch.workspace_id, slug: ch.slug, topic: ch.topic ?? ch.purpose ?? null, visibility: ch.visibility, isPrivate, prefix: (isPrivate ? 'lock' : '#') as '#' | 'lock', unreadCount: u > 0 ? Math.floor(u) : 0, unreadBadge: formatUnreadCountPill(u), current: curCh ? ch.channel_id === curCh.channel_id : false, threads: tMap[ch.channel_id] ?? [] };
   });
   const channelFilter: ChannelFilterPill = opt.channelFilter ?? 'all';
   const visibleChannels = channels.filter((ch) => (channelFilter === 'unread' ? ch.unreadCount > 0 : channelFilter === 'private' ? ch.isPrivate : true));
@@ -92,10 +92,7 @@ export function deriveWorkspaceChannelNavVM(s0: OrgChannelAuthorityState, c: Cal
     return { principalKind: m.principal_kind, principalId: m.principal_id, displayName: dn, initials: dn.slice(0, 2).toUpperCase(), role: m.role, roleLabel: formatOrgRoleBadge(m.role), specialty: m.principal_kind === 'agent' ? 'Agent' : 'Person' };
   });
   const members = allRoster.filter((m) => (memberFilter === 'people' ? m.principalKind === 'user' : memberFilter === 'agents' ? m.principalKind === 'agent' : memberFilter === 'guests' ? m.role === 'guest' : true));
-  const wikiDocuments: WikiDocumentNavItemVM[] = opt.wikiDocuments ?? [
-    { slug: 'design-principles', title: 'Design-principles.md', versionLabel: 'v2', current: true },
-    { slug: 'working-agreements', title: 'Working-agreements.md', versionLabel: 'v1', current: false },
-  ];
+  const wikiDocuments: WikiDocumentNavItemVM[] = opt.wikiDocuments ?? [];
   return { header, mode: (opt.mode ?? 'chat') as KylonListPaneMode, channelFilter, memberFilter, workspaces, activeWorkspace, canCreateWorkspace: !isGuest, canCreateChannel: Boolean(activeWorkspace?.granted && !isGuest), channels, visibleChannels, activeChannel, roster: members, members, wikiDocuments, mobileDrawerOpen: Boolean(opt.mobileDrawerOpen) };
 }
 
@@ -124,12 +121,12 @@ export function renderModeContextualListPaneHtml(vm: WorkspaceChannelNavVM): str
     return pane('Members', 'Add members', vm.canCreateWorkspace ? 'data-action="invite"' : '', `<div class="filters" aria-label="Member filters">${pills('member-filter', ['all', 'people', 'agents', 'guests'], vm.memberFilter)}</div><div class="cs-roster-list" data-org-member-roster="true" aria-label="Organization roster">${rows}</div>`);
   }
   if (vm.mode === 'wiki') {
-    const docs = vm.wikiDocuments.map((d) => btn(`class="nav-row" data-document="${esc(d.title)}"${d.current ? ' aria-current="page"' : ''}`, `${ic('book')}<span>${esc(d.title)}</span><span class="count">${esc(d.versionLabel)}</span>`)).join('');
+    const docs = vm.wikiDocuments.length ? vm.wikiDocuments.map((d) => btn(`class="nav-row" data-document="${esc(d.title)}"${d.current ? ' aria-current="page"' : ''}`, `${ic('book')}<span>${esc(d.title)}</span><span class="count">${esc(d.versionLabel)}</span>`)).join('') : '<p class="meta" data-wiki-empty="true">No wiki pages yet.</p>';
     return pane('Knowledge', 'Draft knowledge', vm.canCreateChannel ? 'data-action="knowledge-assist"' : '', `<nav aria-label="Knowledge files" data-wiki-document-list="true">${docs}</nav>`);
   }
   const ncA = 'data-channel-new data-channel-create-trigger data-action="create-channel"';
   const nc = vm.canCreateChannel ? btn(`class="nav-row cs-channel-new-row" ${ncA}`, `${ic('plus')}<span>+ New Channel</span>`) : '';
-  return pane('Chat', 'Create channel', vm.canCreateChannel ? ncA : '', `<div class="filters cs-channel-filters" aria-label="Channel filters">${pills('channel-filter', ['all', 'unread', 'private'], vm.channelFilter)}</div><div class="section-heading"><span>Channels</span></div><nav aria-label="Channels" data-channel-list>${vm.visibleChannels.map(renderChannelRowHtml).join('')}${nc}</nav>`);
+  return pane('Chat', 'Create channel', vm.canCreateChannel ? ncA : '', `<div class="filters cs-channel-filters" aria-label="Channel filters">${pills('channel-filter', ['all', 'unread', 'private'], vm.channelFilter)}</div><div class="section-heading"><span>Channels</span></div><nav aria-label="Channels" data-kylon-channel-list>${vm.visibleChannels.map(renderChannelRowHtml).join('')}${nc}</nav>`);
 }
 
 export function renderKylonOrgShellHtml(vm: WorkspaceChannelNavVM): string {

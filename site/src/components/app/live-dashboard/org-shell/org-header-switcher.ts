@@ -89,7 +89,7 @@ export function deriveOrgHeaderSwitcherVM(
   const organizations = orgs.map((o) => {
     const role = effRole(s, caller, o.id);
     const ws = s.workspaces.filter((w) => w.org_id === o.id && isLive(w) && canReadWorkspace(s, caller, w.workspace_id));
-    const u = oU[o.id] ?? oU[o.slug] ?? cU[o.id] ?? cU[o.slug] ?? ws.reduce((sum, w) => sum + s.channels.filter((c) => c.workspace_id === w.workspace_id && isLive(c) && canReadChannel(s, caller, c.channel_id)).reduce((a, c) => a + Math.max(0, Math.floor(cU[c.channel_id] ?? cU[c.slug] ?? 0)), 0), 0);
+    const u = oU[o.id] ?? cU[o.id] ?? ws.reduce((sum, w) => sum + s.channels.filter((c) => c.workspace_id === w.workspace_id && isLive(c) && canReadChannel(s, caller, c.channel_id)).reduce((a, c) => a + Math.max(0, Math.floor(cU[c.channel_id] ?? 0)), 0), 0);
     return toOrgSwitcherItemVM(o, role, o.id === curOrg.id, ws.length, u);
   });
   const activeOrg = organizations.find((i) => i.current) ?? organizations[0]!;
