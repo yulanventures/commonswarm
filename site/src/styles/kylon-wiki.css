@@ -205,7 +205,7 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-view :is(button, te
   outline: 2px solid var(--k-shell-focus);
   outline-offset: 2px; box-shadow: none; scroll-margin: 5px;
 }
-live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-topic-head [data-brain-edit] {
+live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-topic .dashboard__brain-topic-head [data-brain-edit] {
   inline-size: auto; border-color: transparent;
 }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-history > ul {
@@ -218,7 +218,7 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-history > ul {
   live-dashboard.dashboard[data-kylon-shell] .dashboard__channel-body > .dashboard__brain-view:not([hidden]) {
     padding: 20px 16px;
   }
-  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-view .dashboard__brain-back {
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-view .dashboard__brain-topic .dashboard__brain-back {
     display: inline-flex; align-items: center; justify-content: center;
     inline-size: 44px; padding: 0; margin: 0; border-color: transparent;
   }
