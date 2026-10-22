@@ -56,7 +56,7 @@ test("an approval with an end date says so instead of promising until withdrawn"
 });
 
 test("a hosted agent with an approval gets the hosted note, never a promise of access", () => {
-  const note = "Lists & docs is not available through the CommonSwarm connector yet. Agents that use cswarm on a computer can use it.";
+  const note = "Connected agents can use shared lists when access is enabled. Docs and files are not available through the connector yet.";
   assert.deepEqual(sharedAgentLines([{ agent: agent("Your Claude", true, { hosted: true }), until: null }]), [`Your Claude: ${note}`]);
   assert.deepEqual(sharedAgentLines([{ agent: agent("Your Claude", true, { hosted: true }), until: "Oct 9" }]), [`Your Claude: ${note}`]);
   assert.deepEqual(sharedAgentLines([{ agent: agent("Your Claude", true, { hosted: true }), until: null }, { agent: agent("Your dot", true), until: null }]),

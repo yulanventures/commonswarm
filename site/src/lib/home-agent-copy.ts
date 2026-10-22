@@ -94,8 +94,8 @@ export function switchWord(state: "on" | "off" | "always" | "never" | "unavailab
 }
 
 /**
- * The Lists & docs fact on the agent page. An agent in a chat app (hosted connector) cannot use Lists & docs yet,
- * so it shows the hosted note and never "On", whether or not an approval is stored. Display only.
+ * The Lists & docs fact on the agent page. Hosted agents show the connector scope note.
+ * An approval row alone does not establish effective access; this display does not infer it.
  */
 export function listsAndDocsFact(hosted: boolean, approval: { until: string | null } | null | undefined) {
   if (hosted) return { id: "lists", label: "Lists & docs", detail: HOSTED_LISTS_NOTE, state: "unavailable" as const };
