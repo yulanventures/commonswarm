@@ -100,6 +100,13 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view :is(.dashboar
   color: var(--k-shell-ink);
 }
 
+/* This inline sentence action must not inflate the prerequisite line box. */
+live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view .dashboard__invite-prerequisite .dashboard__text-button {
+  min-block-size: 0;
+  padding: 0 4px;
+  vertical-align: baseline;
+}
+
 live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view .dashboard__invite-form {
   display: flex;
   flex-wrap: wrap;
@@ -281,8 +288,6 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp__waitin
   flex: 1 1 200px;
   min-inline-size: 0;
 }
-
-live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp__footer > .hm-ahp__link { margin-block: 0; }
 
 @media (width <= 52rem) {
   live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view,
