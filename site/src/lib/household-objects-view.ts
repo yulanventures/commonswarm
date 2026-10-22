@@ -176,10 +176,10 @@ export function renderHouseholdObjects(state: HouseholdObjectsState): string {
   const content = state.opened_version?.content ?? object?.current.content ?? null;
   const capabilities = HOUSEHOLD_CONTENT_OPERATIONS.filter((operation) => workspace.operations.includes(operation)
     && (operation === 'read' || workspace.content_role === 'editor'));
-  return `<header><p class="hh-eyebrow">Lists &amp; docs</p><h2>${esc(workspace.name)}</h2>
-    <p>Shared with: ${esc(workspace.audience.join(', ') || 'the people in this workspace')}.</p>
+  return `<header><div class="hh-workspace-identity"><p class="hh-eyebrow">Lists &amp; docs</p><h2>${esc(workspace.name)}</h2></div>
+    <div class="hh-workspace-meta"><p>Shared with: ${esc(workspace.audience.join(', ') || 'the people in this workspace')}.</p>
     <p>Content role: <strong>${esc(workspace.content_role === 'editor' ? 'Editor' : workspace.content_role === 'reader' ? 'Reader' : 'Not confirmed')}</strong>. You can ${esc(capabilities.length === 0 ? 'not open them yet'
-      : capabilities.length === 1 ? 'read lists and docs' : 'read and change lists and docs')}.</p>
+      : capabilities.length === 1 ? 'read lists and docs' : 'read and change lists and docs')}.</p></div>
     <p>Everyone here can read what is shared and its history. In /app you can check list items and edit docs; ask an agent to create a list or add items.</p></header>
     <p role="status" aria-live="polite" aria-atomic="true" class="hh-status">${esc(state.notice)}</p>
     <div class="hh-layout"><nav aria-label="Household objects">${workspace.objects.length ? `<ul>${workspace.objects.map((item) =>
