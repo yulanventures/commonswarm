@@ -24,6 +24,17 @@ live-dashboard.dashboard[data-kylon-shell] .cs-wiki-mode {
 live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-selection-prompt {
   margin: 0; color: var(--k-shell-secondary); font: 400 14px/1.55 var(--k-shell-font);
 }
+live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-selection-prompt:not([hidden]) {
+  display: flex; align-items: center; justify-content: center;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-selection-copy {
+  max-inline-size: 320px; padding: 48px 16px; margin-block-end: 12vh; text-align: center;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-selection-copy h2 {
+  margin: 16px 0 8px; color: var(--k-shell-ink);
+  font: 600 20px/1.35 var(--k-shell-font); letter-spacing: -.3px;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-selection-copy p { margin: 0; }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-back { display: none; }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-view > .dashboard__brain-index {
   grid-column: 1; grid-row: 3;
@@ -78,17 +89,27 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-view > .dashboard__
   background: var(--k-shell-surface);
 }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-topic-head {
-  align-items: center; gap: 4px 12px; margin-block-end: 20px; padding-block-end: 12px;
-  border-block-end: 1px solid var(--k-shell-line); flex-wrap: wrap;
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center; gap: 12px; margin-block-end: 20px; padding-block-end: 12px;
+  border-block-end: 1px solid var(--k-shell-line);
 }
-live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-topic-head > div:first-child {
-  min-inline-size: 0; flex: 1 1 160px;
+live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-identity {
+  min-inline-size: 0;
 }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-topic-head h2 {
   color: var(--k-shell-ink);
-  font: 600 14px/1.5 var(--k-shell-font);
+  font: 600 20px/1.35 var(--k-shell-font);
   letter-spacing: -.3px;
 }
+/* Ellipsis changes only presentation; the full title and metadata remain in the DOM. */
+live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-identity :is(h2, p) {
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-topic-head p { margin-block-start: 2px; }
+live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-actions {
+  display: flex; align-items: center; gap: 4px;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-history-icon { display: none; }
 live-dashboard.dashboard[data-kylon-shell] :is(.dashboard__brain-topic-head p, .dashboard__brain-view .dashboard__brain-empty:not(.dashboard__form-error), .dashboard__brain-status, .dashboard__brain-body-mode) {
   color: var(--k-shell-secondary);
   font: 400 12px/1.55 var(--k-shell-font);
@@ -198,10 +219,23 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-history > ul {
     padding: 20px 16px;
   }
   live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-view .dashboard__brain-back {
-    display: inline-flex; align-items: center; inline-size: auto; margin-block-end: 12px;
-    border-color: transparent;
+    display: inline-flex; align-items: center; justify-content: center;
+    inline-size: 44px; padding: 0; margin: 0; border-color: transparent;
   }
-  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-view :is(button, summary) {
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-topic-head {
+    grid-template-columns: 44px minmax(0, 1fr) auto; gap: 4px; margin-block-end: 16px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-actions { gap: 0; }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-actions button { padding-inline: 8px; }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-history summary {
+    display: flex; align-items: center; justify-content: center;
+    inline-size: 44px; padding: 0; list-style: none;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-history summary::marker { content: ""; }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-history summary::-webkit-details-marker { display: none; }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-history-icon { display: block; }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-history-label { display: none; }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-view :is(button, summary, .dashboard__brain-history a) {
     min-block-size: 44px;
   }
 }
