@@ -75,10 +75,10 @@ const fixtureScript = `
   }
   // The popup is a real todoView/tagPicker in the real standalone scroller. No pane height override.
   // This boundary was absent from primitive/index fixtures; old size containment must fail paint checks.
-  const until = async (predicate, label) => {
+  const until = async (predicate, label, diagnose = () => ({})) => {
     const deadline = performance.now() + 2000;
     while (!predicate() && performance.now() < deadline) await new Promise(resolve => requestAnimationFrame(resolve));
-    if (!predicate()) throw Error(label + ': ' + JSON.stringify({ width: innerWidth, height: innerHeight, fonts: document.fonts.status,
+    if (!predicate()) throw Error(label + ': ' + JSON.stringify({ ...diagnose(), width: innerWidth, height: innerHeight, fonts: document.fonts.status,
       phoneMedia: matchMedia('(max-width:52rem)').matches, scheme: getComputedStyle(app).getPropertyValue('--k-shell-scheme'), modal: app.querySelector('dialog')?.open,
       standalone: frame.hasAttribute('data-home-standalone'), active: document.activeElement?.outerHTML,
       field: app.querySelector('[data-todo-comment]')?.outerHTML,
@@ -325,11 +325,15 @@ const fixtureScript = `
       && calls.find(call => call.kind === 'wiki-read').version === 2 && fixture.wiki.targets.title.textContent === 'fixture');
     wikiButton = fixture.wiki.index.querySelector('button');
   },
-  wikiResource() {
+  async wikiResource() {
     const details = fixture.side.closest('details'), control = fixture.side.querySelector('[data-side-todo-complete="side-allowed"]');
     check('Wiki resources use native disclosure and original controls', details.open && !!control && visible(control));
-    const count = calls.filter(call => call.kind === 'resource-complete').length;
+    const before = calls.length, count = calls.filter(call => call.kind === 'resource-complete').length;
     control.click();
+    await until(() => calls.slice(before).filter(call => call.kind === 'resource-complete' && call.id === 'side-allowed').length >= 1,
+      'Wiki retained resource callback did not settle', () => ({ calls: calls.slice(before).slice(-6),
+        control: { ...elementFact(control), checked: control.checked, disabled: control.disabled, connected: control.isConnected,
+          visible: visible(control), disclosureOpen: details.open } }));
     check('Wiki retained resource callback preserves original principal', calls.filter(call => call.kind === 'resource-complete').length === count + 1
       && calls.at(-1).id === 'side-allowed');
     fixture.renderHeader(); fixture.renderRail(); fixture.renderResources(); ({ bar, menu, heading } = fixture);
@@ -346,9 +350,11 @@ const fixtureScript = `
     check('Wiki resize retains one original index and gives focus to the visible pane',
       visible(phone ? fixture.wiki.targets.title : wikiButton) && fixture.wiki.index.querySelector('button') === wikiButton && sameNodes(), { width, active: elementFact(document.activeElement) });
     if (phone) {
+      const back = fixture.wiki.targets.back, bounds = rect(back);
       check('Phone selected Wiki shows only the document and labelled native Back', !visible(wikiButton)
-        && visible(fixture.wiki.targets.back) && fixture.wiki.targets.back.textContent === 'Back to Wiki'
-        && fixture.wiki.targets.back.tagName === 'BUTTON' && visible(fixture.wiki.targets.title));
+        && visible(back) && back.getAttribute('aria-label') === 'Back to Wiki'
+        && back.tagName === 'BUTTON' && bounds.width >= 44 && bounds.height >= 44 && visible(fixture.wiki.targets.title),
+        { back: elementFact(back), label: back.getAttribute('aria-label'), bounds });
     }
   },
   wikiBack() {
