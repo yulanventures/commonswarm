@@ -751,7 +751,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                     id="dashboard-composer-input"
                     rows="1"
                     maxlength={SIGNAL_BODY_MAX}
-                    placeholder="Write to everyone, or type @ to tag a person or an agent"
+                    placeholder="Message…"
                     aria-label="Message"
                     role="combobox"
                     aria-autocomplete="list"
@@ -786,8 +786,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                   ~~"THE ADDRESS, always visible."~~ Retired 2026-10-07 by Tom's ruling 3 ("Quiet
                   forms", home-visual RULINGS.md): the row shows only when the address is not
                   "Everyone here" (a tag, a reply, a notice about names that could not be kept) or
-                  while a name is being chosen. At rest it is hidden, the placeholder says "Write to
-                  everyone", and the note stays the textarea's description so the delivery truth is
+                  while a name is being chosen. At rest it is hidden, the hint says "Message…",
+                  and the note stays the textarea's description so the delivery truth is
                   still read out. `syncComposerToVisibility` is the one rule. */}
               <div class="dashboard__composer-to" data-composer-to hidden>
                 <span class="dashboard__composer-to-label" id="dashboard-composer-to-label" data-composer-to-label>To:</span>
@@ -5898,6 +5898,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           ? "dashboard__message dashboard__message--reply"
           : "dashboard__message";
         row.dataset.signalId = signal.id;
+        markThreadReplyRoot(row);
         if (
           !sampleMode && session && activeWorkspaceId &&
           signal.toAgent === null &&
@@ -8275,7 +8276,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             channelById(channels, root.channelId)?.archivedAt != null,
         );
 
+    const markThreadReplyRoot = (row: HTMLElement): void => {
+      row.toggleAttribute("data-thread-reply-root",
+        threadReplyRoot !== null && row.dataset.signalId === threadReplyRoot.id);
+    };
+
     const syncComposerPlacement = (): void => {
+      for (const row of all<HTMLElement>("[data-feed-list] .dashboard__message[data-signal-id]")) {
+        markThreadReplyRoot(row);
+      }
       const input = one<HTMLTextAreaElement>("[data-composer-input]");
       const bar = one<HTMLElement>("[data-composer-reply]");
       const targetText = one<HTMLElement>("[data-composer-reply-target-text]");
@@ -8330,8 +8339,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const channel = activeChannel();
       if (!input) return;
       if (channel === null) {
-        input.placeholder = "Write to everyone, or type @ to tag a person or an agent";
-        input.setAttribute("aria-label", "Message");
+        input.placeholder = "Message…";
+        input.setAttribute("aria-label", one<HTMLElement>("[data-composer-label]")?.textContent || "Message");
         return;
       }
       input.placeholder = `Message ${channelLabel(channel.slug)}`;
@@ -16302,6 +16311,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
   .hm-frame .dashboard__message--reply {
     --message-row-background: transparent;
+  }
+
+  /* Paint the loaded reply root over Home's hover/addressed-row backgrounds.
+     Keep the variable for the fresh-arrival animation's endpoint. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-thread-reply-root] {
+    --message-row-background: var(--k-shell-selected);
+    background: var(--message-row-background);
   }
 
   .hm-frame .dashboard__message-markdown {
