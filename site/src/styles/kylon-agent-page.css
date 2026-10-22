@@ -1,0 +1,143 @@
+/* Routed agent only; home-agent.ts and LiveDashboard own content, gates and focus.
+   Import after home/index.css and kylon-layout/index.css. No pane geometry changes. */
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent {
+  --home-font-body: var(--k-shell-font);
+  --home-font-display: var(--k-shell-font);
+  --home-card: var(--k-shell-surface);
+  --home-ink: var(--k-shell-ink);
+  --home-ink-muted: var(--k-shell-secondary);
+  --home-soft: var(--k-shell-subtle);
+  --home-quiet: var(--k-shell-subtle);
+  --home-card-border: var(--k-shell-line);
+  --home-hairline: var(--k-shell-line);
+  --home-pill-border: var(--k-shell-control);
+  --home-focus-ring: var(--k-shell-ring);
+  gap: 16px;
+  font-family: var(--k-shell-font);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent .hm-agent__title {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.025em;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent :is(.hm-agent__h2, .hm-agent__fix-title) {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent .hm-agent__eyebrow {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent :is(.hm-agent__byline, .hm-agent__line > .hm-agent__meta) {
+  font-size: 13px;
+  line-height: 1.55;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent :is(.hm-agent__empty, .hm-agent__doing .hm-agent__detail, .hm-agent__policy-summary, .hm-agent__policy-note, .hm-agent__activity-slot .hm-agent__detail, .hm-queue-row, .hm-agent__fix .hm-notice) {
+  font-size: 14px;
+  line-height: 1.55;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent :is(.hm-agent__facts-summary, .hm-agent__fact-value, .hm-agent__policy-now strong, .hm-agent__doing .hm-agent__todo-link) {
+  font-weight: 600;
+}
+
+/* Keep the native orb dimensions, owner badge, semantic colors and status text. */
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent .hm-agent__header .hm-agent-orb[data-size="60"] {
+  border-radius: 10px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent .hm-agent__status .hm-status[data-form="pill"] {
+  min-block-size: 28px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent .hm-agent__status .hm-status[data-form="pill"] :is(.hm-status-word, .hm-status-detail) {
+  font-weight: 600;
+}
+
+/* Native flex bases and wrapping continue to own the desktop/phone composition. */
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent :is(.hm-agent__body, .hm-agent__aside) {
+  gap: 16px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent :is(.hm-agent__line, .hm-agent__facts, .hm-agent__policy, .hm-agent__activity) {
+  padding: 16px;
+  background: var(--k-shell-surface);
+  border-color: var(--k-shell-line);
+  border-radius: 8px;
+  box-shadow: none;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent .hm-agent__fix {
+  padding: 16px;
+  border-radius: 8px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent :is(.hm-agent__doing, .hm-agent__empty) {
+  padding: 16px;
+  border-radius: 6px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent .hm-agent__section {
+  margin-top: 16px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent .hm-queue-position {
+  font-family: var(--k-shell-font);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* Discrete buttons get full targets and room for wrapped labels. Action/warning
+   colors remain native; neutral controls use an identifying border, not a shadow. */
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent :is(.hm-agent__action, .hm-agent__manage, .hm-agent__remove, .hm-button) {
+  box-sizing: border-box;
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  max-inline-size: 100%;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-family: var(--k-shell-font);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent :is(.hm-agent__manage, .hm-button) {
+  border: 1px solid var(--k-shell-control);
+  box-shadow: none;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent .hm-agent__remove {
+  padding-inline: 0;
+}
+/* Preserve the native negative-margin target treatment on text links and the
+   policy sentence action: extra vertical padding would inflate the prose. */
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent :is(.hm-agent__policy-change, .hm-agent__todo-link, .hm-agent__home, .hm-queue-title) {
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.55;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent :is(a, button) {
+  transition: none;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent :is(a, button):focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 2px;
+  box-shadow: none;
+  scroll-margin: 4px;
+}
+/* global.css owns the stronger forced-color focus outline; retain system edges
+   when shadow-based native primary/status treatments are suppressed by the OS. */
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] > .hm-agent :is(.hm-agent__action, .hm-agent__status .hm-status[data-form="pill"]) {
+    border: 1px solid CanvasText;
+  }
+}
