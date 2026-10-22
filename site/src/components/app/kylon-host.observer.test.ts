@@ -317,8 +317,11 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
   };
   const key = async (name: "Tab" | "Enter" | "Escape" | "ArrowLeft", shift = false) => {
     const code = name === "Tab" ? 9 : name === "Enter" ? 13 : name === "Escape" ? 27 : 37;
-    for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: name, code: name, modifiers: shift ? 8 : 0,
-      windowsVirtualKeyCode: code, nativeVirtualKeyCode: code });
+    for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", {
+      type, key: name, code: name, modifiers: shift ? 8 : 0, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code,
+      // Native Enter produces a character event; disclosures activate on that event.
+      ...(name === "Enter" && type === "keyDown" ? { text: String.fromCharCode(13), unmodifiedText: String.fromCharCode(13) } : {}),
+    });
   };
   await send("Emulation.setFocusEmulationEnabled", { enabled: true });
   for (const [width, height] of [[1471, 900], [833, 900], [390, 844], [320, 568]]) {

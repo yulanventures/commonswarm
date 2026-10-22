@@ -48,6 +48,7 @@ export async function renderFileListFixtures(
   assert.ok(script, "the live file renderer must bundle for its browser fixture");
   const html = `<!doctype html>
 <html>
+  <head><meta charset="utf-8"></head>
   <body>
     <main id="fixtures"></main>
     <script>${script}</script>
