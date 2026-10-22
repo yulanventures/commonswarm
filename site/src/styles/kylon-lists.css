@@ -85,10 +85,18 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects nav
 live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects nav button[aria-current=true] {
   border-inline-start-color: var(--k-shell-selection-edge); background: var(--k-shell-selected); font-weight: 600;
 }
-/* Preserve each original Check/Uncheck action and label as a full-width action row. */
-live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects article > button[data-hh-action=toggle] {
-  display: block; inline-size: 100%; margin: 0; border-color: transparent; border-block-end-color: var(--k-shell-line);
-  text-align: start; font-weight: 400;
+/* Keep ordered markers; wrap item text beside one 44px check target. */
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list--editable > li { padding-block: 0; }
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row {
+  display: flex; align-items: center; gap: 8px; min-inline-size: 0;
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-text { min-inline-size: 0; overflow-wrap: anywhere; }
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button[data-hh-action=toggle] {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  inline-size: 44px; block-size: 44px; margin: 0; padding: 0; border-radius: 6px; font-size: 20px; line-height: 1;
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button[aria-checked=true] {
+  color: var(--accent-ink); background: var(--accent); border-color: var(--accent);
 }
 /* Keep the selected title, document sections and attribution distinct. */
 live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects article > h3:first-child {
