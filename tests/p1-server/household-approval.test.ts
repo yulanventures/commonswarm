@@ -357,7 +357,7 @@ test('real command adapters approve without role rewrite, list exact active appr
       const localPrincipal = randomUUID(), device = randomUUID(), run = randomUUID(), token = randomUUID();
       const family = randomUUID(), lineage = randomUUID(), successor = randomUUID();
       // Use the native family's owner/workspace/run/device binding. All new local
-      // rows and the supported first-use/successor transitions use swarm_command;
+      // rows prepare successor state under swarm_command, not the renewal path;
       // approval itself produces the consent receipt and latest-Allow pointer.
       await tx`SET LOCAL ROLE swarm_command`;
       await tx`INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name)
@@ -397,9 +397,28 @@ test('real command adapters approve without role rewrite, list exact active appr
       assert.equal(rotated.connection_expired_at, null);
       assert.deepEqual(rotated.approval, initial.approval);
       assert.deepEqual(rotated.effective_access.operations, ['read']);
-      assert.deepEqual(await approvals(), originalApproval, 'renewal projects the original consent without a second Allow or expiry rewrite');
+      assert.deepEqual(await approvals(), originalApproval, 'successor state projects the original consent without a second Allow or expiry rewrite');
+      const successorInput = { ...localInput, connection: { ...localInput.connection, connection_id: successor } };
+      await tx`RESET ROLE`;
+      const beforeControl = await writes(tx);
+      const familyRows = () => tx`SELECT to_jsonb(g)::text AS row FROM swarm.renewal_grants g WHERE renewal_grant_id=${family}::uuid`;
+      const originalFamily = await familyRows();
+      const allowAudits = () => tx`SELECT to_jsonb(a)::text AS row FROM swarm.audit_log a WHERE workspace_id=${f.workspace}::uuid ORDER BY 1`;
+      const originalAllowAudit = await allowAudits();
+      await tx`SET LOCAL ROLE swarm_command`;
+      // Roll back this approval control before testing the tombstone against the same input.
+      await assert.rejects(tx.savepoint(async nested => {
+        assert.deepEqual(await api.approveHouseholdConnection(nested, f.workspace, actor, randomUUID(), successorInput, yes),
+          { status: 'committed', operations: ['read'], expires_at: null });
+        throw new RollbackProof();
+      }), RollbackProof);
+      await tx`RESET ROLE`;
+      assert.deepEqual(await writes(tx), beforeControl, 'positive control rolls back all consent, audit and idempotency rows');
+      assert.deepEqual(await familyRows(), originalFamily, 'positive control restores the original latest-Allow pointer');
+      assert.deepEqual(await allowAudits(), originalAllowAudit, 'positive control rolls back local Allow history');
+      await tx`SET LOCAL ROLE swarm_command`;
       await tx`INSERT INTO swarm.revocation_tombstones(kind,target_id) VALUES ('device',${device}::uuid)`;
-      assert.deepEqual(await api.approveHouseholdConnection(tx, f.workspace, actor, randomUUID(), localInput, yes),
+      assert.deepEqual(await api.approveHouseholdConnection(tx, f.workspace, actor, randomUUID(), successorInput, yes),
         { status: 'refused', reason: 'connection_access_refused' });
       assert.equal(await localRow(), undefined, 'device revocation removes the family from the owner projection');
       assert.deepEqual(await approvals(), originalApproval, 'revocation retains original consent history');
