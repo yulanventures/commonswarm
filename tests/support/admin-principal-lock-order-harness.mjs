@@ -1126,7 +1126,8 @@ export async function runScenario(target, scenario, timeoutMs = 170_000, generat
     writeFileSync(configPath, JSON.stringify({ db_url: target.url, tls_ca_pem: target.tlsCaPem, floor_url, source, read_source:readSource, active_floor:generations!==null, expect_baseline_expiry:expectBaselineExpiry, history:target.history, retained_catalog:target.retainedCatalog }), { mode: 0o600 });
     const env = { PATH: process.env.PATH ?? '', NO_COLOR: '1' };
     for (const key of ['HOME', 'DENO_DIR', 'XDG_CACHE_HOME']) if (process.env[key]) env[key] = process.env[key];
-    const child = spawn('deno', ['run', '--no-lock', ...(scenario==='floor-first-use-vs-head-revocation' ? ['--cached-only'] : []), '--config', join(REPO_ROOT, 'supabase/functions/command/deno.json'),
+    // Deno 2.2.3 needs CJS detection for the installed pg fixture's untyped .js entry.
+    const child = spawn('deno', ['run', '--no-lock', ...(scenario.startsWith('local-allow-retired-parent-') ? ['--unstable-detect-cjs'] : []), ...(scenario==='floor-first-use-vs-head-revocation' ? ['--cached-only'] : []), '--config', join(REPO_ROOT, 'supabase/functions/command/deno.json'),
       '--allow-read', '--allow-env', '--allow-net', fileURLToPath(import.meta.url), configPath, scenario],
     { cwd: REPO_ROOT, env, stdio: ['ignore', 'pipe', 'ignore'] });
     let stdout = '';
@@ -1300,6 +1301,15 @@ function transactionException(error) {
   });
 }
 
+function prefixTransactionsCompleted(errors, results, expectedStatuses, allowOwnedRetries) {
+  // Match retryLocalAuthTransaction's owned metadata, never SQLSTATE alone.
+  // A retry is tolerated only after both outer commands reach their expected outcomes.
+  return errors.every(error => allowOwnedRetries && error !== null && typeof error === 'object'
+    && error.code === '40001' && error.detail === 'LOCAL_AUTH_DISCOVERY_CHANGED')
+    && results.length === expectedStatuses.length
+    && results.every((result, index) => !result.thrown && result.status === expectedStatuses[index]);
+}
+
 async function denoMain() {
   const [configPath, scenario] = Deno.args;
   const out = { scenario, stage: 'config', ...(scenario==='floor-first-use-vs-head-revocation'
@@ -1361,13 +1371,13 @@ async function denoMain() {
     out.read_source=config.read_source ? {commit:config.read_source.commit,tree:config.read_source.tree} : null;
     const { db } = command;
     // Every command-module transaction (admin, hosted, join and ordinary) runs through db.begin.
-    // Record the SQLSTATE of each rejected one while a race is open; no message is read.
-    const failures = { recording: false, codes: [], deadlocks: [], exception: null };
+    // Retain rejected attempts internally; only their safe SQLSTATE projection leaves the harness.
+    const failures = { recording: false, codes: [], errors: [], deadlocks: [], exception: null };
     const begin = db.begin;
     db.begin = function (...args) {
       return begin.apply(this, args).catch((error) => {
         failures.exception ??= transactionException(error);
-        if (failures.recording) { failures.codes.push(sqlstate(error));
+        if (failures.recording) { failures.codes.push(sqlstate(error)); failures.errors.push(error);
           if(sqlstate(error)==='40P01') failures.deadlocks.push(deadlockEdges(error));
         }
         throw error;
@@ -3332,7 +3342,7 @@ async function hostedOwnerRemovalScenario(ctx) {
       if(side) check(`${order}-rollback-admin-authority`,(await side.invoke({kind:'admin_read_metadata',grant_id:side.grant,resource_kind:'grant',workspace_id:null})).result.status===200);
       check(`${order}-rollback-usable-authority`,(await f.claim()).status===200);
     }
-    failures.codes.length=0;failures.exception=null;failures.recording=true;
+    failures.codes.length=0;failures.errors.length=0;failures.exception=null;failures.recording=true;
     await observer.begin(async gate=>{
       const [{pid}]=await gate`SELECT pg_backend_pid() AS pid`;
       await gate`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=${f.grantId}::uuid FOR SHARE`;
@@ -3348,7 +3358,8 @@ async function hostedOwnerRemovalScenario(ctx) {
     const results=await Promise.all([first,second]);failures.recording=false;
     prefixOrders.push(...(lockResultDiagnostics({prefix_orders:[{order,codes:failures.codes,exception:failures.exception,
       results:results.map(result=>({...result,code:result.body?.error}))}]}).prefix_orders ?? []));
-    check(`${order}-no-sqlstate`,failures.codes.length===0 && results.every(r=>!r.thrown));
+    check(`${order}-no-sqlstate`,prefixTransactionsCompleted(failures.errors,results,
+      reverse && !isManagement ? [200,403] : [200,200],!isManagement));
     check(`${order}-authority-entrypoint-committed`,results[reverse?0:1].status===200);
     if(isManagement) check(`${order}-management-committed`,results[reverse?1:0].status===200);
     if(isAdmin) {
