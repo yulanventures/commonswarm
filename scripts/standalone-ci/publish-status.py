@@ -13,7 +13,7 @@ import time
 RUNS = '/var/lib/commonswarm-ci/runs'
 REPO = '/repos/yulanventures/commonswarm'
 ID = r'csci-[0-9a-f]{32}'
-SUITES = ('box-dry-run', 'server', 'p1-cli', 'site', 'unit')
+SUITES = ('box-dry-run', 'server', 'p1-cli', 'site', 'unit', 'server-permanence')
 LEGACY = frozenset(('csci-2bcf14681e054e21b6706774db5a609a',
     'csci-0973a9b8bf7f4559bcbde822aaf23f95', 'csci-6707cacfa0064ebbae06842f6800f37b',
     'csci-163e0902286d4e40a6fff68a83d91824', 'csci-94eed54bd36b4f6fbaf796d9c337caf2',
