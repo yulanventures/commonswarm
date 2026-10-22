@@ -187,11 +187,13 @@ export function renderHouseholdObjects(state: HouseholdObjectsState): string {
     <article aria-label="Selected object">${object ? `<h3>${esc(object.current.title)}</h3>
       <p>${esc(householdAttribution((state.opened_version ?? object.current).author, workspace.names))}</p>
       ${state.opened_version ? '<p>Reading an earlier revision.</p>' : '<p>Current revision</p>'}
-      ${renderHouseholdContent(content)}
+      ${canEdit && !state.opened_version && content?.kind === 'list'
+        ? `<ol class="hh-list hh-list--editable">${[...content.items].sort((a, b) => a.order - b.order).map((item) =>
+          `<li><span class="hh-list-row"><button type="button" data-hh-action="toggle" data-hh-value="${esc(item.item_id)}" role="checkbox" aria-checked="${item.checked}" aria-label="${esc(item.text.trim() ? item.text : 'List item')}"><span aria-hidden="true">${item.checked ? '☑' : '☐'}</span></button><span class="hh-list-text">${esc(item.text)}</span></span></li>`).join('')}</ol>`
+        : renderHouseholdContent(content)}
       ${!content ? button('revision', 'Open current revision', object.current.revision.token, busy) : ''}
       ${canEdit && !state.opened_version && content?.kind === 'doc' ? `<label class="hh-editor">Edit document
         <textarea data-hh-document rows="8">${esc(state.proposed?.kind === 'doc' ? state.proposed.markdown : content.markdown)}</textarea></label>${button('save', 'Save document')}` : ''}
-      ${canEdit && !state.opened_version && content?.kind === 'list' ? content.items.map((item) => button('toggle', `${item.checked ? 'Uncheck' : 'Check'} ${item.text}`, item.item_id)).join('') : ''}
       ${!householdCanUpdate(workspace) ? '<p>You can read objects and history. Saving requires an editor content role and update permission.</p>' : ''}
       ${state.opened_version ? button('current', 'Back to current revision', '', busy) : ''}
       ${renderHouseholdConflict(state)}

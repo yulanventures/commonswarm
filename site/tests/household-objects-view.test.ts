@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { transform } from '@astrojs/compiler-rs';
 import { experimental_AstroContainer as AstroContainer } from 'astro/container';
+import { parseFragment, type DefaultTreeAdapterMap } from 'parse5';
 import type { HouseholdContent, HouseholdOutcome } from '../../src/protocol/household-object-events.js';
 import { decideHouseholdObject, emptyHouseholdObjectState, reduceHouseholdObjectStream,
   type DecideHouseholdObjectContext } from '../../src/protocol/household-objects.js';
@@ -270,6 +271,19 @@ test('a reader can recover their retained draft after reload without submitting 
 });
 
 test('all three Astro components compile and server-render escaped, accessible reader/editor states without a browser', async () => {
+  type HtmlNode = DefaultTreeAdapterMap['node'];
+  type HtmlElement = DefaultTreeAdapterMap['element'];
+  const attr = (element: HtmlElement, name: string) => element.attrs.find((attribute) => attribute.name === name)?.value;
+  function elements(node: HtmlNode, matches: (element: HtmlElement) => boolean): HtmlElement[] {
+    return [...('tagName' in node && matches(node) ? [node] : []),
+      ...('childNodes' in node ? node.childNodes.flatMap((child) => elements(child, matches)) : [])];
+  }
+  // Read visible item text without counting a control's decorative glyph.
+  function itemText(node: HtmlNode): string {
+    if ('tagName' in node && attr(node, 'aria-hidden') === 'true') return '';
+    if ('value' in node) return node.value;
+    return 'childNodes' in node ? node.childNodes.map(itemText).join('') : '';
+  }
   const fixture = setup(); fixture.controller.select('weekend');
   const state = fixture.controller.getState(); state.conflict = fixture.conflict; state.save_state = 'conflict';
   const container = await AstroContainer.create();
@@ -291,5 +305,115 @@ test('all three Astro components compile and server-render escaped, accessible r
     const html = await container.renderToString(component.default, { props });
     assert.match(html, expected);
     assert.doesNotMatch(html, /<script\b|\sonclick=/);
+    if (name !== 'HouseholdObjects') continue;
+
+    const hostile = '<img src=x onerror="alert(1)"><script>alert(2)</script><button data-hh-action="save">Save & "share"</button>';
+    const longLabel = 'Bring the folding chairs, picnic blanket, water bottles and the large insulated bag for the afternoon by the lake.';
+    const currentList: HouseholdContent = { kind: 'list', items: [
+      { item_id: 'long', order: 1, checked: true, text: longLabel },
+      { item_id: 'hostile', order: 0, checked: false, text: hostile },
+    ] };
+    const blankList: HouseholdContent = { kind: 'list', items: [
+      { item_id: 'whitespace', order: 1, checked: true, text: ' \t ' },
+      { item_id: 'empty', order: 0, checked: false, text: '' },
+    ] };
+    const earlierList: HouseholdContent = { kind: 'list', items: [
+      { item_id: 'earlier', order: 0, checked: true, text: 'Earlier retained item' },
+    ] };
+    // These expectations are supplied independently, not sorted or mapped from input.
+    const currentItems = [
+      { id: 'hostile', text: hostile, checked: false, accessibleName: hostile },
+      { id: 'long', text: longLabel, checked: true, accessibleName: longLabel },
+    ];
+    for (const scenario of [
+      { mode: 'editable', content: currentList, items: currentItems },
+      { mode: 'blank names', content: blankList, items: [
+        { id: 'empty', text: '', checked: false, accessibleName: 'List item' },
+        { id: 'whitespace', text: ' \t ', checked: true, accessibleName: 'List item' },
+      ] },
+      { mode: 'reader', content: currentList, items: currentItems },
+      { mode: 'restricted editor', content: currentList, items: currentItems },
+      { mode: 'historical', content: currentList, items: [
+        { id: 'earlier', text: 'Earlier retained item', checked: true, accessibleName: 'Earlier retained item' },
+      ] },
+      { mode: 'saving', content: currentList, items: currentItems },
+      { mode: 'pending', content: currentList, items: currentItems },
+      { mode: 'unknown', content: currentList, items: currentItems },
+      { mode: 'conflict', content: currentList, items: currentItems },
+    ] as const) {
+      const delayed = deferred<Awaited<ReturnType<HouseholdActions['save']>>>();
+      const listFixture = setup(scenario.mode === 'reader' ? 'reader' : 'editor', {
+        save: async (request) => {
+          if (scenario.mode === 'saving') return delayed.promise;
+          if (scenario.mode === 'pending') return { status: 'pending', object_id: request.object_id, reservation_id: 'list-save' };
+          if (scenario.mode === 'unknown') throw new Error('connection interrupted');
+          return { status: 'conflict', object_id: request.object_id,
+            current: { ...request.base, token: 'fixture-list-new-current' }, draft_id: 'list-draft' };
+        },
+      });
+      const object = listFixture.workspace.objects[0]!;
+      object.current.content = scenario.content;
+      object.history = [{ ...structuredClone(object.current),
+        revision: { ...object.current.revision, token: 'fixture-list-earlier' }, content: earlierList }, object.current];
+      if (scenario.mode === 'restricted editor') listFixture.workspace.operations = ['read'];
+      listFixture.controller.switchWorkspace(listFixture.workspace);
+      assert.equal(listFixture.controller.select('groceries'), true, scenario.mode);
+      let completion: Promise<boolean> | undefined;
+      if (scenario.mode === 'historical') {
+        assert.equal(await listFixture.controller.openRevision('fixture-list-earlier'), true);
+      } else if (['saving', 'pending', 'unknown', 'conflict'].includes(scenario.mode)) {
+        assert.equal(listFixture.controller.stage({ kind: 'list', items: [
+          { item_id: 'hostile', order: 0, checked: true, text: 'Unsaved draft item' },
+        ] }), true);
+        completion = listFixture.controller.save();
+        if (scenario.mode !== 'saving') assert.equal(await completion, true);
+        assert.equal(listFixture.controller.getState().save_state, scenario.mode);
+      }
+      try {
+        const rendered = await container.renderToString(component.default, { props: { state: listFixture.controller.getState() } });
+        const tree = parseFragment(rendered);
+        const articles = elements(tree, (element) => element.tagName === 'article' && attr(element, 'aria-label') === 'Selected object');
+        assert.equal(articles.length, 1, scenario.mode);
+        // The first ordered list is the selected content; history and local drafts follow it.
+        const list = elements(articles[0]!, (element) => element.tagName === 'ol')[0];
+        assert.ok(list, scenario.mode);
+        const items = elements(list, (element) => element.tagName === 'li');
+        assert.equal(items.length, scenario.items.length, scenario.mode);
+        const editable = scenario.mode === 'editable' || scenario.mode === 'blank names';
+        const checkboxes = elements(list, (element) => attr(element, 'role') === 'checkbox');
+        assert.equal(checkboxes.length, editable ? scenario.items.length : 0, scenario.mode);
+        for (const [index, wanted] of scenario.items.entries()) {
+          const item = items[index]!;
+          if (editable) {
+            const controls = elements(item, (element) => attr(element, 'role') === 'checkbox');
+            assert.equal(controls.length, 1, scenario.mode);
+            const control = controls[0]!;
+            assert.equal(control.tagName, 'button');
+            assert.equal(attr(control, 'type'), 'button');
+            assert.equal(attr(control, 'disabled'), undefined);
+            assert.equal(attr(control, 'aria-checked'), String(wanted.checked));
+            assert.equal(attr(control, 'aria-label'), wanted.accessibleName);
+            assert.ok(attr(control, 'aria-label')?.trim());
+            assert.equal(attr(control, 'data-hh-action'), 'toggle');
+            assert.equal(attr(control, 'data-hh-value'), wanted.id);
+            assert.equal(itemText(item), wanted.text, 'each label appears once with its original bytes');
+          } else {
+            assert.ok(itemText(item).endsWith(wanted.text), `${scenario.mode}: readable item ${index}`);
+          }
+        }
+        // Compare containment, not a private wrapper/class: no extra standalone toggles anywhere.
+        assert.deepEqual(elements(tree, (element) => attr(element, 'data-hh-action') === 'toggle'), checkboxes, scenario.mode);
+        if (!editable) assert.deepEqual(elements(articles[0]!, (element) =>
+          element.tagName === 'input' || element.tagName === 'textarea'
+          || attr(element, 'data-hh-action') === 'save' || attr(element, 'data-hh-action') === 'reviewed-save'), [], scenario.mode);
+        assert.deepEqual(elements(tree, (element) => element.tagName === 'script' || element.tagName === 'img'
+          || element.tagName === 'form' || element.attrs.some((attribute) => /^on/iu.test(attribute.name))), [], scenario.mode);
+      } finally {
+        if (scenario.mode === 'saving') {
+          delayed.resolve({ status: 'unknown' });
+          await completion;
+        }
+      }
+    }
   }
 });
