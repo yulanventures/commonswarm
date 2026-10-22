@@ -2896,7 +2896,7 @@ async function localAllowRetiredParentScenario(ctx,scenario) {
   const coordinator=new AdminTransactionCoordinator(pool,{adminIssuanceEnabled:true});
   const {oauth,kid}=admin.issuerFixture;
   const lifecycle=new AdminTokenLifecycle({activeKid:kid});
-  const Adapter=createPostgresAdapter(scopedAdminPool()),artifact=new Adapter('AuthorizationCode');
+  const Adapter=createPostgresAdapter(scopedAdminPool()),artifact=Adapter('AuthorizationCode');
   const code=id(),hash=createHash('sha256').update(code).digest('base64url');
   const [candidate]=await observer`SELECT * FROM commonswarm_oauth.admin_grant_bindings WHERE admin_grant_id=${admin.grant}::uuid`;
   const capability={kind:'token',owner:owner.userId,proof:null};
