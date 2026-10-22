@@ -86,7 +86,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-p
   border-radius: 6px; box-shadow: none;
 }
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-picker .hm-assign-chip.hm-assign-chip[aria-checked="true"] {
-  border-color: var(--cs-accent); background: var(--k-shell-subtle);
+  border-color: var(--k-shell-selection-edge); background: var(--k-shell-subtle);
   color: var(--k-shell-ink); font-weight: 600; box-shadow: none; opacity: 1;
 }
 /* Expose only the actual disconnected/not-picking-up description. Other captions stay quiet.
