@@ -292,9 +292,33 @@ export async function prepareAdminRoutine(
 export async function revokeHostedWorkspaceApproval(
   tx: Sql, workspaceId: string, revokedAt: Date, createdBy: string | null,
   target: { ownerUserId: string } | { principalId: string },
+  plan?: LocalAuthLockPlan,
 ): Promise<void> {
   const owner = "ownerUserId" in target ? target.ownerUserId : null;
   const principal = "principalId" in target ? target.principalId : null;
+  if (owner !== null) {
+    // Member removal already holds the complete owner closure. Never append
+    // principal locks after the grant/seat suffix of another entrypoint.
+    if (!plan?.locked || plan.principalMode !== "update" || plan.hostedMode !== "update") {
+      throw new LocalAuthDiscoveryChanged();
+    }
+    const principals = await tx<{ principal_id: string }[]>`
+      SELECT principal_id FROM swarm.agent_principals
+      WHERE workspace_id = ${workspaceId}::uuid AND owner_user_id = ${owner}::uuid
+        AND transport = 'hosted_mcp'
+      ORDER BY principal_id
+    `;
+    if (principals.some((row) => !plan.snapshot.bindings.some((binding) =>
+      binding.principal_id === row.principal_id && binding.workspace_id === workspaceId &&
+      binding.owner_user_id === owner))) throw new LocalAuthDiscoveryChanged();
+    for (const row of principals) {
+      await tx`UPDATE swarm.agent_principals SET revoked_at = coalesce(revoked_at,${revokedAt})
+        WHERE principal_id = ${row.principal_id}::uuid AND workspace_id = ${workspaceId}::uuid
+          AND owner_user_id = ${owner}::uuid AND transport = 'hosted_mcp'`;
+      await tx`INSERT INTO swarm.revocation_tombstones(kind,target_id,created_by)
+        VALUES('principal',${row.principal_id}::uuid,${createdBy}::uuid) ON CONFLICT DO NOTHING`;
+    }
+  }
   const grants = await tx<{ grant_id: string }[]>`
     SELECT g.grant_id FROM swarm.hosted_mcp_grants g
     WHERE (${owner}::uuid IS NOT NULL AND g.owner_user_id = ${owner}::uuid
@@ -488,6 +512,24 @@ export async function applyAdminRoutine(
       await tx`UPDATE swarm.admin_routine_invitations SET revoked_at=${
         date(ctx.now)
       } WHERE invitation_id=${String(p.invitation_id)}::uuid`;
+    }
+  }
+  // A management seat retirement leaves workspace consent live. An explicit
+  // admin removal must still close it when the principal was already retired
+  // and the authorized decision therefore emits no workspace revocation event.
+  if (command.kind === "admin_revoke_seat" && decision.workspace_events.length === 0) {
+    const principal = ctx.workspace?.principals[command.principal_id];
+    if (principal?.transport === "hosted_mcp" && principal.revoked_at !== null) {
+      if (!plan?.locked || plan.principalMode !== "update" || plan.hostedMode !== "update" ||
+        !plan.snapshot.bindings.some(b => b.principal_id === command.principal_id &&
+          b.owner_user_id === ctx.owner_user_id && b.workspace_id === command.workspace_id) ||
+        !decision.events.some(e => e.type === "AdminActionRecorded" &&
+          e.payload.action === command.kind && e.payload.target_id === command.principal_id &&
+          e.payload.workspace_id === command.workspace_id && e.payload.outcome === "accepted")) {
+        throw new LocalAuthDiscoveryChanged();
+      }
+      await revokeHostedWorkspaceApproval(tx, command.workspace_id, new Date(ctx.now), ctx.owner_user_id,
+        { principalId: command.principal_id });
     }
   }
   return delivery;

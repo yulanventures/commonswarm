@@ -1831,7 +1831,7 @@ async function assertSeatAccess(fixture: HostedFixture, seat: HarnessResult, wor
 
 for (const otherConsent of ["live", "revoked", "archived", "membership-removed"] as const) {
   test(`accepted hosted principal removal closes workspace access with ${otherConsent} other consent`, { timeout: 180_000 }, async () => {
-    const fixture = await seedHostedFixture();
+    const fixture = await seedHostedFixture(false, true);
     const name = `removed-${randomUUID()}`;
     const old = claimSeat(fixture, fixture.grantA, name);
     const unrelated = runHostedHarness<HarnessResult>({ operation: "claim",
@@ -1935,17 +1935,20 @@ test("accepted removal fences concurrent same-name and new-name claims", { timeo
 });
 
 test("refresh admitted before removal cannot restore access when its successor is written afterward", { timeout: 120_000 }, async () => {
-  const fixture = await seedHostedFixture();
+  const fixture = await seedHostedFixture(false, true);
   const name = `refresh-race-${randomUUID()}`;
   const old = claimSeat(fixture, fixture.grantA, name);
   await sql`UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at = statement_timestamp()
     WHERE grant_id = ${fixture.grantA}::uuid AND workspace_id = ${fixture.workspaceB}::uuid`;
-  assert.equal(await providerRefresh(fixture, { afterAdmission: async () => {
+  let removalCommitted = false;
+  await assert.rejects(() => providerRefresh(fixture, { afterAdmission: async () => {
     const removed = runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: fixture.ownerJwt,
       workspaceId: fixture.workspaceA,
       command: { kind: "revoke_agent_principal", principal_id: old.body.principal_id } });
     assert.equal(removed.body.status, "accepted");
-  } }), true, "in-flight adapter write can complete before OAuth retirement");
+    removalCommitted = true;
+  } }), { error: "invalid_grant" }, "bound retirement fence rejects the late successor upsert");
+  assert.equal(removalCommitted, true, "refresh was admitted before committed removal");
   await assertSeatAccess(fixture, old, fixture.workspaceA, 403);
   const refused = runHostedHarness<HarnessResult>({ operation: "claim",
     claim: claimSpec(fixture, fixture.grantA, fixture.workspaceA, name) });
@@ -2640,7 +2643,7 @@ test("authorized admin routine removal closes hosted consent, handle and seat wi
     assert.equal(refusedClaim.status,403);
     assert.equal(refusedClaim.body.error,"hosted_grant_forbidden");
     await assertSeatAccess(f, sibling, f.workspaceA, 403);
-    await assertSeatAccess(f, unrelatedGrant, f.workspaceA, 200);
+    await assertSeatAccess(f, unrelatedGrant, f.workspaceA, 200, f.grantB);
     const [siblingFence] = await sql`SELECT hs.revoked_at IS NOT NULL AS seat,h.revoked_at IS NOT NULL AS handle,
       EXISTS(SELECT 1 FROM swarm.revocation_tombstones t WHERE t.kind='hosted_seat' AND t.target_id=hs.seat_id) AS tombstone
       FROM swarm.hosted_mcp_seats hs JOIN swarm.hosted_mcp_seat_handles h USING(seat_id)

@@ -1680,6 +1680,7 @@ function logCommandFailure(
   outcome: string,
   reason: string,
   detail?: string,
+  dbCode?: string | null,
 ): void {
   console.error(JSON.stringify({
     event,
@@ -1687,6 +1688,7 @@ function logCommandFailure(
     outcome,
     reason,
     ...(detail === undefined ? {} : { detail: stripControls(detail) }),
+    ...(typeof dbCode === "string" && dbCode.length === 5 && /^[A-Z0-9]{5}$/.test(dbCode) ? { db_code: dbCode } : {}),
   }));
 }
 
@@ -4524,6 +4526,7 @@ async function updateWorkspaceProjection(
   route: Route,
   prepared: PreparedWorkspace,
   events: readonly EventEnvelope[], requestDigest: string,
+  plan: LocalAuthLockPlan | null,
 ): Promise<WorkspaceState> {
   let projection = prepared.state;
   for (const event of events) {
@@ -4623,7 +4626,7 @@ async function updateWorkspaceProjection(
           AND revoked_at IS NULL`;
       await tx`SELECT swarm.revoke_local_residual_tokens(${route.workspaceId}::uuid,${event.actor_user}::uuid,'remove_member',${payload.user_id}::uuid)`;
       await revokeHostedWorkspaceApproval(tx, route.workspaceId, new Date(payload.revoked_at),
-        event.actor_user, { ownerUserId: payload.user_id });
+        event.actor_user, { ownerUserId: payload.user_id }, plan ?? undefined);
       await revokeRemovedMemberHousehold(tx, route.workspaceId, payload.user_id, new Date(payload.revoked_at), event.actor_user, event.command_id, requestDigest); const updated = await tx<{ user_id: string }[]>`
         UPDATE swarm.memberships
         SET revoked_at = ${new Date(payload.revoked_at)}
@@ -13395,7 +13398,7 @@ async function handleTransaction(
 
     await beforeStep(12);
     if (prepared !== null) {
-      await updateWorkspaceProjection(tx, route, prepared, outcome.events, hash);
+      await updateWorkspaceProjection(tx, route, prepared, outcome.events, hash, localState.localPlan);
     } else {
       await updateProjection(
         tx,
@@ -13951,6 +13954,7 @@ let verifiedHuman: VerifiedHuman | null = null;
       "error",
       reason,
       safeError(error),
+      code,
     );
     // 40P01 (deadlock) returns the 503 of 55P03 (HezLead ruling 27); its row keeps
     // db_code 40P01. 40001 (serialization failure) deliberately still falls

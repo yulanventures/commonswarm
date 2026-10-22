@@ -68,6 +68,7 @@ export function privateCommandFailureCapture(label) {
       ...(value.command_kind === 'post_signal' ? {command_kind:'post_signal'} : {}),
       ...(['internal_error','lock_timeout','test_rollback'].includes(value.reason) ? {reason:value.reason} : {}),
       ...(errorClass ? {error_class:errorClass} : {}), ...(code ? {sqlstate:code} : {}),
+      ...(typeof value.db_code === 'string' && /^[0-9A-Z]{5}$/u.test(value.db_code) ? {db_code:value.db_code} : {}),
       ...(location ? {source:`${location[1]}:${location[2]}:${location[3]}`} : {}),
       ...(routine ? {routine_class:routine} : {}) }));
     while (records.length > 32 || Buffer.byteLength(records.join('\n')) > 16_384) records.shift();
@@ -994,8 +995,13 @@ export async function assertActiveFloorCatalog(sql) {
 /** Fixed diagnostic protocol for the six delegated checks; never copy child objects. */
 function lockResultDiagnostics(result) {
   const diagnostic = {};
-  if (['Error','TypeError','ReferenceError','SyntaxError','RangeError'].includes(result?.exception_kind))
+  if (['Error','TypeError','ReferenceError','SyntaxError','RangeError','PostgresError'].includes(result?.exception_kind))
     diagnostic.exception_kind = result.exception_kind;
+  if (['require','module','exports','__filename','__dirname','process','Buffer','global','UNKNOWN'].includes(result?.missing_primitive))
+    diagnostic.missing_primitive = result.missing_primitive;
+  if (/^(?:pg\/lib\/(?:index|client|connection|defaults|utils|stream)|pg-pool\/index|pg-connection-string\/index|pg-types\/index|pg-protocol\/dist\/(?:index|parser|serializer)|pgpass\/lib\/(?:index|helper))\.js$/u.test(result?.pg_dependency_site?.source ?? '')
+    && Number.isSafeInteger(result.pg_dependency_site.line) && result.pg_dependency_site.line > 0 && result.pg_dependency_site.line <= 9999999)
+    diagnostic.pg_dependency_site = {source:result.pg_dependency_site.source,line:result.pg_dependency_site.line};
   if (Array.isArray(result?.exception_sites)) diagnostic.exception_sites = result.exception_sites.slice(0,4)
     .filter(site => Number.isSafeInteger(site?.line) && site.line > 0 && site.line <= 9999999
       && Number.isSafeInteger(site?.column) && site.column > 0 && site.column <= 999999)
@@ -1046,6 +1052,26 @@ function lockResultDiagnostics(result) {
     rows.push(projected);
   }
   if (rows.length) diagnostic.failed_observations = rows;
+  // Existing prefix scenario only: fixed orders and bounded scalar projections, never bodies.
+  const orders = ['claim-first','remove-first','management-first','management-remove-first','management-admin-first','admin-first'];
+  const prefixOrders = [], seenOrders = new Set();
+  const exception = value => lockResultDiagnostics({exception_kind:value?.exception_kind,
+    exception_sites:Array.isArray(value?.exception_sites) ? value.exception_sites.slice(0,2) : [],sqlstate:value?.sqlstate});
+  if (Array.isArray(result?.prefix_orders)) for (const row of result.prefix_orders.slice(0,6)) {
+    if (!orders.includes(row?.order) || seenOrders.has(row.order)) continue;
+    seenOrders.add(row.order);
+    prefixOrders.push({order:row.order,
+      codes:Array.isArray(row.codes) ? row.codes.slice(0,8).filter(code => code === 'non_sql' || (code !== undefined && sqlstate({code}) === code)) : [],
+      exception:exception(row.exception),
+      results:Array.isArray(row.results) ? row.results.slice(0,2).map(item => ({
+        status:Number.isSafeInteger(item?.status) && item.status >= 100 && item.status <= 599 ? item.status : 'UNKNOWN',
+        code:codes.includes(item?.code) || ['hosted_grant_forbidden','hosted_seat_forbidden'].includes(item?.code) ? item.code : 'UNKNOWN',
+        ...(item?.thrown === 'non_sql' || (item?.thrown !== undefined && sqlstate({code:item.thrown}) === item.thrown) ? {thrown:item.thrown} : {}),
+        ...exception(item),
+      })) : [],
+    });
+  }
+  if (prefixOrders.length) diagnostic.prefix_orders = prefixOrders;
   return new TextEncoder().encode(JSON.stringify(diagnostic)).byteLength <= 8192 ? diagnostic : {};
 }
 
@@ -1140,7 +1166,7 @@ export async function runScenario(target, scenario, timeoutMs = 170_000, generat
         ...(scenario==='floor-first-use-vs-head-revocation' ? {required_compatibility:'BLOCKED',floor_compatibility:'INCONCLUSIVE'} : {}) };
     }
     const diagnostics = lockResultDiagnostics(result);
-    if (diagnostics.failed_observations?.length || diagnostics.exception_kind) privateHarnessEvidence('lock-result', JSON.stringify({scenario,...diagnostics}));
+    if (diagnostics.failed_observations?.length || diagnostics.exception_kind || diagnostics.prefix_orders?.length) privateHarnessEvidence('lock-result', JSON.stringify({scenario,...diagnostics}));
     process.stdout.write(`ACTIVE_FLOOR_SOURCE ${JSON.stringify({scenario,source:result.source,read_source:result.read_source})}\n`);
     return adminIssuance === null ? result : { ...result, admin_issuance: adminIssuance };
   } finally {
@@ -1258,8 +1284,13 @@ async function verifyTlsAgainstDialedAddress(host) {
 }
 
 function transactionException(error) {
+  // Fixed missing-primitive enum and first allowlisted pg frame only; raw text never leaves this projection.
+  const primitive = error instanceof ReferenceError && typeof error.message==='string' ? /^(require|module|exports|__filename|__dirname|process|Buffer|global) is not defined$/u.exec(error.message)?.[1] : undefined;
+  const pgSite = typeof error?.stack==='string' ? /^[ \t]+at (?:[^()\n]+ \()?(?:file:\/\/)?\/[^()\s?#]*\/node_modules\/((?:pg\/lib\/(?:index|client|connection|defaults|utils|stream)|pg-pool\/index|pg-connection-string\/index|pg-types\/index|pg-protocol\/dist\/(?:index|parser|serializer)|pgpass\/lib\/(?:index|helper))\.js):([1-9][0-9]{0,6}):[1-9][0-9]{0,5}\)?[ \t]*$/mu.exec(error.stack.slice(0,32768)) : null;
   return lockResultDiagnostics({
-    exception_kind:[TypeError,ReferenceError,SyntaxError,RangeError].find(type=>error instanceof type)?.name ?? 'Error',
+    exception_kind:error?.name === 'PostgresError' ? 'PostgresError' : [TypeError,ReferenceError,SyntaxError,RangeError].find(type=>error instanceof type)?.name ?? 'Error',
+    missing_primitive:error instanceof ReferenceError ? primitive ?? 'UNKNOWN' : undefined,
+    pg_dependency_site:pgSite ? {source:pgSite[1],line:Number(pgSite[2])} : undefined,
     sqlstate:sqlstate(error),
     pg_schema:error?.schema_name ?? error?.schema,
     pg_table:error?.table_name ?? error?.table,
@@ -3160,7 +3191,7 @@ async function ownedWait(sql, pid, targets, singleRowGate = null) {
 // These scenarios own the two V15 defects at real command/loader boundaries.
 // Setup, queue timeouts and parser failures are inconclusive, never a red witness.
 async function hostedOwnerRemovalScenario(ctx) {
-  const {observer,failures}=ctx,checks=[];
+  const {observer,failures}=ctx,checks=[],prefixOrders=[];
   const check=(name,ok)=>checks.push({name,ok:ok===true});
   const {authenticateHostedGrantCapability}=await ctx.load('supabase/functions/_shared/hosted-seat-auth.ts');
   const fixture=async (label,options={})=>{
@@ -3230,7 +3261,7 @@ async function hostedOwnerRemovalScenario(ctx) {
     AND NOT EXISTS(SELECT 1 FROM swarm.idempotency_keys WHERE principal_kind='hosted_grant'
       AND principal_id=${revoked.grantId} AND command_id=${revoked.body.command_id}) AS ok`)[0]?.ok===true);
   for(const kind of ['management','admin']) {
-    const f=await fixture(`alone-${kind}`,{ownedWorkspace:kind==='admin'}),claimed=await f.claim();
+    const f=await fixture(`alone-${kind}`,{ownedWorkspace:true}),claimed=await f.claim();
     if(claimed.status!==200) fail('alone_claim_setup');
     const [seat]=await observer`SELECT principal_id FROM swarm.hosted_mcp_seats WHERE seat_id=${claimed.body.seat_id}::uuid`;
     let result;
@@ -3240,7 +3271,25 @@ async function hostedOwnerRemovalScenario(ctx) {
         principal_id:seat.principal_id,reason_code:'owner_requested'})).result;
     } else result=await manage(ctx,f.owner,f.workspaceId,{kind:'revoke_hosted_mcp_seat',grant_id:f.grantId,seat_id:claimed.body.seat_id});
     check(`${kind}-alone-commits`,result.status===200);
-    check(`${kind}-alone-terminal-denial`,(await f.claim()).status===403);
+    check(`${kind}-alone-revoked-seat-replay-denied`,(await f.claim()).status===403);
+    const freshClaim=()=>ctx.command.handleHostedCommand({...f.body,command_id:id()},f.capability);
+    if(kind==='management') {
+      check('management-alone-consent-live',(await observer`SELECT revoked_at IS NULL AS ok FROM swarm.hosted_mcp_grant_workspaces
+        WHERE grant_id=${f.grantId}::uuid AND workspace_id=${f.workspaceId}::uuid`)[0]?.ok===true);
+      check('management-alone-seat-handle-principal-closed',(await observer`SELECT hs.revoked_at IS NOT NULL
+        AND p.revoked_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_seat_handles h WHERE h.seat_id=hs.seat_id AND h.revoked_at IS NULL) AS ok
+        FROM swarm.hosted_mcp_seats hs JOIN swarm.agent_principals p USING(principal_id) WHERE hs.seat_id=${claimed.body.seat_id}::uuid`)[0]?.ok===true);
+      const reclaimed=await freshClaim();
+      check('management-alone-same-grant-new-request-reclaim',reclaimed.status===200 &&
+        ['seat_id','principal_id','handle'].every(key=>typeof reclaimed.body[key]==='string' && reclaimed.body[key]!==claimed.body[key]));
+      const side=await adminSide(ctx,{owner:f.owner,workspaceId:f.workspaceId},'alone-management-then-admin');
+      const terminal=(await side.invoke({kind:'admin_revoke_seat',grant_id:side.grant,workspace_id:f.workspaceId,
+        principal_id:seat.principal_id,reason_code:'owner_requested'})).result;
+      check('management-then-admin-commits',terminal.status===200);
+      check('management-then-admin-consent-revoked',(await observer`SELECT revoked_at IS NOT NULL AS ok FROM swarm.hosted_mcp_grant_workspaces
+        WHERE grant_id=${f.grantId}::uuid AND workspace_id=${f.workspaceId}::uuid`)[0]?.ok===true);
+    }
+    check(kind==='management'?'management-then-admin-terminal-denial':'admin-alone-terminal-denial',(await freshClaim()).status===403);
   }
   // Both real authority entrypoints, both orders. Each fixture owns all UUIDs.
   for(const order of ['claim-first','remove-first','management-first','management-remove-first','management-admin-first','admin-first']) {
@@ -3280,23 +3329,25 @@ async function hostedOwnerRemovalScenario(ctx) {
       try {await (isAdmin?other:management)().catch(()=>{});} finally {ctx.db.begin=begin;}
       check(`${order}-rollback-reached`,reached);
       check(`${order}-rollback-restores-seat-consent-ledgers`,before===await state());
-      if(side) check(`${order}-rollback-admin-authority`,(await side.invoke({kind:'admin_read_metadata',grant_id:side.grant})).result.status===200);
+      if(side) check(`${order}-rollback-admin-authority`,(await side.invoke({kind:'admin_read_metadata',grant_id:side.grant,resource_kind:'grant',workspace_id:null})).result.status===200);
       check(`${order}-rollback-usable-authority`,(await f.claim()).status===200);
     }
-    failures.codes.length=0;failures.recording=true;
+    failures.codes.length=0;failures.exception=null;failures.recording=true;
     await observer.begin(async gate=>{
       const [{pid}]=await gate`SELECT pg_backend_pid() AS pid`;
       await gate`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=${f.grantId}::uuid FOR SHARE`;
-      first=(reverse?other():isManagement?management():f.claim()).catch(error=>({thrown:sqlstate(error)}));
+      first=(reverse?other():isManagement?management():f.claim()).catch(error=>({thrown:sqlstate(error),...transactionException(error)}));
       const firstPid=await waitForBlocked(observer,Number(pid),p=>ownedWait(observer,p,{grants:[f.grantId]},Number(pid)),3500);
       if(firstPid===null) fail('prefix_first_owned_G_queue_inconclusive');
-      second=(reverse?isManagement?management():f.claim():other()).catch(error=>({thrown:sqlstate(error)}));
+      second=(reverse?isManagement?management():f.claim():other()).catch(error=>({thrown:sqlstate(error),...transactionException(error)}));
       const secondPid=await waitForBlocked(observer,firstPid,p=>ownedWait(observer,p,
         {users:[f.owner.userId],workspaces:[f.workspaceId],streams:[f.streamId]}),3500);
       if(secondPid===null) fail('prefix_second_owned_U_W_S_queue_inconclusive');
       check(`${order}-owned-row-blocker-graph`,true);
     });
     const results=await Promise.all([first,second]);failures.recording=false;
+    prefixOrders.push(...(lockResultDiagnostics({prefix_orders:[{order,codes:failures.codes,exception:failures.exception,
+      results:results.map(result=>({...result,code:result.body?.error}))}]}).prefix_orders ?? []));
     check(`${order}-no-sqlstate`,failures.codes.length===0 && results.every(r=>!r.thrown));
     check(`${order}-authority-entrypoint-committed`,results[reverse?0:1].status===200);
     if(isManagement) check(`${order}-management-committed`,results[reverse?1:0].status===200);
@@ -3317,6 +3368,7 @@ async function hostedOwnerRemovalScenario(ctx) {
       AND p.revoked_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_seat_handles h WHERE h.seat_id=hs.seat_id AND h.revoked_at IS NULL) AS ok
       FROM swarm.hosted_mcp_seats hs JOIN swarm.agent_principals p USING(principal_id) WHERE hs.seat_id=${prior.body.seat_id}::uuid`)[0]?.ok===true);
     check(`${order}-terminal-claim-denial`,(await f.claim()).status===403);
+    check(`${order}-fresh-terminal-claim-denial`,(await ctx.command.handleHostedCommand({...f.body,command_id:id()},f.capability)).status===403);
   }
   // Same owner, two selected workspaces; G2 uses W2 while G1's one-W action waits.
   for(const pendingGrant of [false,true]) {
@@ -3342,7 +3394,7 @@ async function hostedOwnerRemovalScenario(ctx) {
     });
     check(`same-owner-W1-${pendingGrant}-commits`,(await action).status===200);await progress;
   }
-  return {checks};
+  return {checks,...lockResultDiagnostics({prefix_orders:prefixOrders})};
 }
 
 async function floorFirstUseScenario(ctx) {

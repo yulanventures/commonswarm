@@ -21,7 +21,7 @@ let sql: postgres.Sql;
 let admin: SupabaseClient;
 let ownerJwt: string;
 let workspace: string;
-const commandDiagnostics = privateCommandFailureCapture("h0-forward-command");
+const commandDiagnostics = privateCommandFailureCapture("hzero-forward-command");
 let processHandle: ReturnType<typeof spawn> | undefined;
 let envDir: string | undefined;
 let functionReady = false;
