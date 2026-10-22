@@ -16295,10 +16295,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     --message-row-background: transparent;
   }
 
-  /* The actual loaded reply root, not its author or an off-page placeholder.
-     The existing hover and fresh-arrival paint both consume this variable. */
+  /* Paint the loaded reply root over Home's hover/addressed-row backgrounds.
+     Keep the variable for the fresh-arrival animation's endpoint. */
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-thread-reply-root] {
     --message-row-background: var(--k-shell-selected);
+    background: var(--message-row-background);
   }
 
   .hm-frame .dashboard__message-markdown {
