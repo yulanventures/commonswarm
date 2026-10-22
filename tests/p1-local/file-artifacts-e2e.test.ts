@@ -284,8 +284,8 @@ test("SA-local schema keeps both attachment foreign keys tenant-honest and rows 
       "signal_attachments_same_transaction",
     ]),
   );
-  // Savepoint creation and committed-parent denials are measured at the
-  // database boundary by tests/support/signal-savepoint-creation-guard.sql.
+  // Supplemental savepoint and committed-parent cases live in
+  // tests/support/signal-savepoint-creation-guard.sql; CI does not invoke it.
 });
 
 test("S4-1 size lie low: an object larger than its declaration is refused at commit", async () => {

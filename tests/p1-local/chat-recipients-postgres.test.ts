@@ -1216,8 +1216,8 @@ test("recipients can be attached before and after a business savepoint", async (
   const afterSavepoint = randomUUID();
   try {
     // Both parents belong to this transaction, including the one inserted after
-    // ROLLBACK TO SAVEPOINT. Committed-parent denials are exercised by the
-    // isolated tests/support/signal-savepoint-creation-guard.sql fixture.
+    // ROLLBACK TO SAVEPOINT. Supplemental committed-parent cases live in
+    // tests/support/signal-savepoint-creation-guard.sql; CI does not invoke it.
     await inRolledBackTx(sql, f, async (tx) => {
       await insertSignal(tx, {
         id: sameTransaction,
@@ -1251,6 +1251,14 @@ test("recipients can be attached before and after a business savepoint", async (
       assert.deepEqual(
         new Set(rows.map((row) => row.signal_id)),
         new Set([sameTransaction, afterSavepoint]),
+      );
+      // The parent is fresh and position 1 is unused; third belongs to B.
+      // This must reach the creation guard's workspace check before the FK.
+      await assert.rejects(
+        addRecipients(tx, afterSavepoint, f.workspaceB, [{ user: f.third }], 1),
+        (error: unknown) =>
+          error instanceof postgres.PostgresError && error.code === "55000",
+        "a fresh signal cannot take a recipient row from another workspace",
       );
     });
   } finally {

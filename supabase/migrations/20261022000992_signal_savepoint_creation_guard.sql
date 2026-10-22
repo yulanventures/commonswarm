@@ -39,7 +39,8 @@ COMMENT ON COLUMN swarm.signals.creation_system_identifier IS
 -- one physical lineage. The system identifier binds that xid8 to its cluster:
 -- logical restore/replica apply either runs our stamp trigger (and then commits),
 -- or copies the original pair, whose cluster identifier differs on a new cluster.
--- Physical recovery preserves both the identifier and transaction counter.
+-- Ordinary physical restore retains the restored origin and transaction counter.
+-- Data imports from divergent timelines require separate validation.
 -- SAVEPOINT rollback removes the row and stamps together, RELEASE retains both.
 
 CREATE OR REPLACE FUNCTION swarm.require_new_signal_for_recipient()
