@@ -149,15 +149,20 @@ test("Grok Bot card activation generates, submits, mints and copies the actual p
   // Dashboard scope for the verbatim wiring: values only, no view logic of our own.
   const dashboardScope = `<script>
     const app = document.querySelector("[data-fixture-app]");
-    let sampleMode = false, signalExpiryTimer = undefined, connectFocusObserver = null;
+    let sampleMode = false, signalExpiryTimer = undefined, connectFocusObserver = null, listsAllowLanding = null;
     const unknownChannelId = null;
     const workspaces = [{ id: ${JSON.stringify(workspaceId)}, name: ${JSON.stringify(workspaceName)} }];
     const activeWorkspaceId = ${JSON.stringify(workspaceId)};
     const disarmLiveFeed = () => {}, syncComposerPlacement = () => {}, closeMentionPicker = () => {};
-    const syncStandalonePage = () => {}, syncFeedChrome = () => {}, armLiveFeed = () => {};
+    const syncListsChrome = () => {}, syncStandalonePage = () => {}, syncFeedChrome = () => {}, armLiveFeed = () => {};
   </script><script>${wiring}</script>`;
   const observe = `<script>
     let stage = "initializing";
+    const eventErrors = [];
+    addEventListener("error", event => {
+      const missing = String(event.message).match(/ReferenceError: ([A-Za-z_$][A-Za-z0-9_$]*) is not defined/);
+      if (eventErrors.length < 4) eventErrors.push({ name: event.error?.name ?? "Error", missing: missing?.[1] ?? null });
+    });
     const pickerEl = document.querySelector("agent-host-picker");
     const connectEl = document.querySelector("agent-connect");
     const visible = node => !!node && !node.hidden && node.getClientRects().length > 0;
@@ -205,6 +210,9 @@ test("Grok Bot card activation generates, submits, mints and copies the actual p
         copyStatus: connectEl.querySelector('[data-slot="copy-status"]').textContent });
     })().catch(error => report({ error: String(error), stage, requests, unexpected,
       connectState: connectEl?.dataset.state,
+      connectHidden: document.querySelector('[data-channel-view="connect"]')?.hidden,
+      connectRects: document.querySelector('[data-channel-view="connect"]')?.getClientRects().length,
+      eventErrors,
       formError: connectEl?.querySelector('[data-slot="form-error"]')?.textContent }));
   </script>`;
   const html = `<!doctype html><html><head><style>${picker.css}\n${connect.css}</style>${setup}</head><body>`
