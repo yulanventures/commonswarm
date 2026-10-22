@@ -21,6 +21,9 @@ import { CONTENT_ROLES, CONTENT_ROLE_COPY } from "../../lib/household-access";
 import { INVITE_CONNECT_FOOTNOTE, INVITE_CONNECT_LEAD, inviteAssistantHosts } from "../../lib/agent-hosts";
 import ProviderButtons from "../auth/ProviderButtons.astro";
 import "../../styles/home/onboarding.css";
+import "../../styles/kylon-tokens.css";
+import "../../styles/kylon-font.css";
+import "../../styles/kylon-invite-onramp.css";
 
 const assistantHosts = inviteAssistantHosts();
 /* The chat apps first, as the canvas Phone-Join draws them; the coding tools under More apps. */
@@ -28,7 +31,7 @@ const primaryAssistants = assistantHosts.filter((host) => host.joiner === "prima
 const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary");
 ---
 
-<invite-onramp class="invite-onramp" data-state="loading">
+<invite-onramp class="invite-onramp" data-state="loading" data-kylon-onramp>
   <div class="invite-onramp__brand">
     <a class="invite-onramp__brand-link" href="/" aria-label="CommonSwarm home">
       <svg class="invite-onramp__mark" width="24" height="24" viewBox="0 0 28 28" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="8"></circle><rect x="12" y="12" width="14" height="14" rx="4.5" stroke-width="2"></rect></svg>

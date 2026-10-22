@@ -8,7 +8,9 @@
 }
 
 live-dashboard.dashboard[data-kylon-shell],
-admin-delegations[data-kylon-account] {
+admin-delegations[data-kylon-account],
+human-invitation-inbox[data-kylon-invite],
+invite-onramp[data-kylon-onramp] {
   --k-shell-font: "CommonSwarm Inter", "InterVariable", Inter, -apple-system,
     BlinkMacSystemFont, "Segoe UI", sans-serif;
 }

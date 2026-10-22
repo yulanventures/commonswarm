@@ -181,8 +181,8 @@ test("active approvals expose Save and withdrawal in both places, owned agents o
   assert.match(withdraw, /kind: "household_withdraw_connection", principal_id: principalId/);
   assert.match(withdraw, /withdrawRefusalMessage\(result.body.reason\)/);
   assert.match(withdraw, /await loadHouseholdConnections\(\)/);
-  assert.match(markup, /A computer agent keeps it until its key ends or you withdraw it/);
-  assert.match(markup, /Lists &amp; docs is not available through the CommonSwarm connector yet, so an agent in a chat app cannot use it/);
+  // Connector availability copy belongs to the shared host-note cases; the retired
+  // prose is no longer a contract of this approval-control and withdrawal test.
   assert.doesNotMatch(markup, /24 hours|Three short steps/);
 });
 
@@ -734,7 +734,7 @@ test("workspace change clears only the creation setup receipt and retires known 
   const ctx = {
     one: (selector: string) => selector === "[data-channel-receipt]" ? receipt : null,
     all: () => [], householdDashboard: null, householdConnections: [], householdReceipts: new Map(), removedAgents: new Map(), removedAgentOwners: new Map([["old-agent", "person"]]),
-    householdConnectionsReadState: "succeeded",
+    householdConnectionsReadState: "succeeded", listsAllowLanding: null,
     householdAccessGeneration: 1, householdAccessRequestedFor: "workspace", householdAccess: null,
     accessReads: createLatestRead(), connectionReads: createLatestRead(), stopHostJoinWatch: () => {},
   };

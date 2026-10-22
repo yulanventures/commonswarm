@@ -1,5 +1,7 @@
 # UI-SPEC: CommonSwarm home (canvas build)
 
+> **Current policy amendment — 2026-10-22:** Agent connections stay connected until removed unless the owner chooses an expiry. Inactivity never causes an automatic pause or periodic reconnect. Show a pause only for an actual manual, security, or legacy paused state; do not infer its cause. Technical credential rotation renews silently and immediate removal remains available.
+
 2026-10-05. Branch `lane/home-ui` (base 6b72cd6d). The binding inputs are DECISIONS.md, DOC-CONSTRAINTS.md, GAP-TABLE.md, the people-dialog brief and report, and VISION-CANONICAL. Where the canvas and a rule disagree, the rule wins and this spec says what the UI does instead.
 
 **Reconciliation with "What not to copy: chat-first streams".** The app opens on Catch up, a Basecamp-style home. Each workspace's durable objects (to-dos, lists, files) stay visible in the right column. Objects also show up as cards inside the stream, so the stream is never the only way in.
@@ -242,7 +244,7 @@ Routing in `home-route.ts`: `parseRoute(search)`, `routeHref(route)`, `parentRou
 
 | Measured fact (highest first) | Shape | Word | Detail (exact) |
 |---|---|---|---|
-| Key turned off / key ended / paused / suspended / removed | diamond | Disconnected | "Key turned off" · "Key ended" · "Paused: unused for 14 days" · "Needs reconnecting" |
+| Key turned off / key ended / paused / suspended / removed | diamond | Disconnected | "Key turned off" · "Key ended" · "Access suspended" · "Needs reconnecting" |
 | A directed message unread for 3+ min (`wakePathMark`) | diamond | **Not picking up** | "A message has waited since 10:05 am" |
 | To-do in Doing | dot | Working | "Doing ‘Book plumber’ since 9:40 am" |
 | Unexpired working-on signal | dot | Working | "Said it’s working on ‘Budget sheet’ · 12 minutes ago". Always says when, because `until` defaults to 24 h. |

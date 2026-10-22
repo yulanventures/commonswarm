@@ -1,0 +1,160 @@
+/* Standalone /invite opt-in. Integration supplies the shared shell tokens/font
+   on this root. Repeated flags beat Astro's scoped legacy rules, including when
+   those rules load later. Native layout, visibility, input appearance and motion
+   remain with InviteOnramp and home/onboarding.css. No reference assets used. */
+invite-onramp[data-kylon-onramp] {
+  /* Do not remap --home-font-body: native copyable instructions read it.
+     Interface text gets Inter from the explicit root and type rules below. */
+  --home-font-display: var(--k-shell-font);
+  --home-canvas: var(--k-shell-surface);
+  --home-card: var(--k-shell-surface);
+  --home-soft: var(--k-shell-hover);
+  --home-ink: var(--k-shell-ink);
+  --home-ink-muted: var(--k-shell-secondary);
+  --home-ink-faint: var(--k-shell-control);
+  --home-field-border: var(--k-shell-control);
+  --home-hairline: var(--k-shell-line);
+  --home-rail-bg: var(--k-shell-subtle);
+  --home-rail-panel: var(--k-shell-subtle);
+  --home-rail-raised: var(--k-shell-selected);
+  --home-rail-choice: var(--k-shell-surface);
+  --home-rail-choice-edge: var(--k-shell-control);
+  --home-rail-strong: var(--k-shell-ink);
+  --home-rail-soft: var(--k-shell-secondary);
+  --home-rail-muted: var(--k-shell-muted);
+  --home-rail-divider: var(--k-shell-line);
+  --home-accent: #697344;
+  --home-accent-hover: #535d33;
+  --home-accent-ink: #ffffff;
+  --home-accent-text: var(--k-shell-selection-edge);
+  --home-focus: var(--k-shell-focus);
+  --home-focus-ring: var(--k-shell-ring);
+  color-scheme: var(--k-shell-scheme);
+  background: var(--k-shell-surface);
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp] {
+  color: var(--k-shell-secondary);
+  font: 400 14px/22px var(--k-shell-font);
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__panel, .invite-onramp__connect) {
+  font-size: 14px; line-height: 22px;
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__brand-link {
+  font: 600 17px/24px var(--k-shell-font);
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__title {
+  font: 600 28px/36px var(--k-shell-font);
+  letter-spacing: -0.5px; text-wrap: wrap;
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__receipt-title {
+  font: 600 20px/28px var(--k-shell-font); letter-spacing: 0;
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__lead, .invite-onramp__intro, .invite-onramp__facts p, .hm-invite-connect__lead, .hm-invite-connect__caption, .hm-invite-connect__step-line) {
+  font-size: 14px; line-height: 22px;
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__eyebrow, .invite-onramp__facet, .invite-onramp__choices legend, .invite-onramp__auth label) {
+  font: 600 13px/20px var(--k-shell-font);
+  letter-spacing: 0; text-transform: none;
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__eyebrow {
+  color: var(--k-shell-secondary);
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__steps li, .invite-onramp__choice, .invite-onramp__assistant strong, .hm-invite-connect__step-head) {
+  font-size: 14px; font-weight: 600; line-height: 22px;
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__steps span,
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .hm-ahp__step::before {
+  font: 600 14px/22px var(--k-shell-font);
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__choice small, .invite-onramp__consent, .invite-onramp__status, .invite-onramp__divider, .hm-ahp__notes, .hm-invite-connect__foot) {
+  font-size: 13px; line-height: 20px;
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__choice small {
+  font-weight: 400;
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__fineprint, .hm-invite-connect__step, .hm-invite-connect__status) {
+  font-size: 12px; line-height: 18px;
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__steps, .invite-onramp__choice, .invite-onramp__receipt, .invite-onramp__error, .invite-onramp__hint, .hm-invite-connect__panel, .hm-ahp__copyable, .hm-invite-connect__capsule) {
+  border-radius: 10px;
+}
+/* Keep the native minimum sizes, padding, widths and primary/quiet/disabled
+   state rules. Their palette comes from the local aliases above. */
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__button, .hm-ahp__button, .hm-invite-connect__copy-link),
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__actions .invite-onramp__button:not(.invite-onramp__button--quiet),
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .hm-invite-connect__actions > .invite-onramp__button,
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__connect:has([data-connect-open]:not([hidden])) .invite-onramp__button[href="/app"] {
+  border-radius: 6px; font: 500 14px/20px var(--k-shell-font);
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__auth input {
+  border-color: var(--k-shell-control); border-radius: 6px;
+  background: var(--k-shell-surface);
+  font: 400 16px/24px var(--k-shell-font);
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__auth input:focus-visible {
+  border-color: var(--k-shell-focus);
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] summary {
+  min-block-size: 44px; border-radius: 6px;
+  font: 400 13px/20px var(--k-shell-font);
+}
+/* This disclosure stays inline with the footnote. Its target overhangs the
+   20px line equally, following the native negative-margin treatment. */
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .hm-invite-connect__more > summary {
+  margin-block: -12px;
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .hm-invite-connect__foot {
+  margin-block-start: 16px; /* Clear the larger disclosure target above its line. */
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__consent {
+  min-block-size: 44px;
+}
+/* Selection and keyboard focus are independent. Keep the custom controls and
+   their forced-colour native fallback; focus also outlines the entire label. */
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__choice:has(input:focus-visible) {
+  box-shadow: inset 0 0 0 1.5px var(--k-shell-control);
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__choice:has(input:checked) {
+  background: var(--k-shell-selected);
+  box-shadow: inset 0 0 0 1.5px var(--k-shell-selection-edge);
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__choice:has(input:checked:focus-visible) {
+  box-shadow: inset 0 0 0 1.5px var(--k-shell-selection-edge);
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__consent input:checked {
+  background: var(--k-shell-selected);
+  box-shadow: inset 0 0 0 1.5px var(--k-shell-selection-edge);
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__consent input:checked:focus-visible {
+  background: var(--k-shell-selected);
+  box-shadow: inset 0 0 0 1.5px var(--k-shell-selection-edge);
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(a[href], button, input[type="email"], summary):focus-visible,
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__choice, .invite-onramp__consent):has(input:focus-visible) {
+  outline: 2px solid var(--k-shell-focus); outline-offset: 2px;
+}
+/* The full choice label owns keyboard focus; keep the native input rim and
+   checked fill without adding a second focus halo around the small control. */
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__choice, .invite-onramp__consent) input:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1.5px var(--k-shell-control);
+}
+/* Direct controls use the shared outline, replacing the inherited halo. */
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(a[href], button, input[type="email"], summary):focus-visible {
+  box-shadow: none;
+}
+/* Quiet actions keep their resting 1.5px edge under the shared outline. */
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__button--quiet:not(.invite-onramp__exit):focus-visible {
+  box-shadow: inset 0 0 0 1.5px var(--home-ink-faint);
+}
+@media (width <= 30rem) {
+  invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__title {
+    font-size: 24px; line-height: 32px;
+  }
+}
+@media (forced-colors: active) {
+  invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(a[href], button, input[type="email"], summary):focus-visible,
+  invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__choice, .invite-onramp__consent):has(input:focus-visible) {
+    outline: 2px solid Highlight; outline-offset: 2px;
+  }
+}
