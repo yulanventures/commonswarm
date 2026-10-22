@@ -95,6 +95,8 @@ SH
 )"
     if [[ "$suite" = server-permanence ]]; then
       gate command-core npm run build:command-core
+      gate mcp-auth npm --prefix services/mcp-auth test || failed=1
+      gate mcp-postgres npm --prefix services/mcp-auth run test:postgres || failed=1
       gate permanence-fixtures node --import tsx --test --test-concurrency=1 --test-name-pattern='^(delegated-local-(permanent-suspension|revocation-closure|renewal-budget|wait-removal-rollback)|local-resume-recovery-controls|active-floor-ordinary-local-compat-policy exact (F/current|F/F))$' tests/p1-server/admin-principal-lock-order.test.ts
       gate permanence-date node --import tsx --test --test-concurrency=1 --test-name-pattern='^owner can set and clear a future local date without resume; elapsed date stays terminal$' tests/p1-server/agent-execution-sessions.test.ts
       gate permanence-allow-resume node --import tsx --test --test-concurrency=1 --test-name-pattern='^(local-allow-retired-parent-(allow-first|issuer-first)|local-resume-parent-order|active-floor-(local-allow-retired-parent-(allow-first|issuer-first)|local-resume-parent-order) exact (F/current|current/F|F/F))$' tests/p1-server/admin-principal-lock-order.test.ts || failed=1
