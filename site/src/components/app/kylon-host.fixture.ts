@@ -7,7 +7,7 @@ import ts from "typescript";
 const siteRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const setupScript = `
 (() => {
-  const { createKylonHost, projectHomeLayout, buildPhoneTopBar, buildWorkspaceHeader, buildWorkspaceNav, replaceHomeRegion, todoView, todosPane, buildHomeRail, buildSideCards, routeHref, renderPeopleDialog } = KylonHostFixture;
+  const { createKylonHost, projectHomeLayout, buildPhoneTopBar, buildWorkspaceHeader, buildWorkspaceNav, replaceHomeRegion, todoView, todosPane, buildHomeRail, buildSideCards, routeHref, renderPeopleDialog, createBrainView } = KylonHostFixture;
   const app = document.querySelector('live-dashboard'), frame = app.querySelector('.hm-frame');
   const context = app.querySelector('[data-home-rail-slot]'), account = app.querySelector('[data-user-menu-root]');
   const frameParent = frame.parentElement, contextParent = context.parentElement;
@@ -42,6 +42,7 @@ const setupScript = `
   const activeWorkspaceId = workspace.id, workspaces = [workspace];
   const navigateHomeHref = href => calls.push({ kind: 'message-back', href });
   const parkPeopleHosts = () => host.peopleContext(null);
+  /* ACTUAL_BRAIN_TARGETS */
   const focusHomeView = () => {}; // Read-message focus is owned by the integration observer, not asserted here.
   /* ACTUAL_PANE_MESSAGE */
   const project = route => projectHomeLayout('channel', route, [workspace], false);
@@ -171,7 +172,23 @@ const setupScript = `
     get homeParent() { return homeParent; }, get homeNext() { return homeNext; },
     get priorHidden() { return priorHidden; }, detail, state: peopleState, addHref,
   };
+  const wikiSection = app.querySelector('.dashboard__brain-view'), wikiIndex = wikiSection.querySelector('.dashboard__brain-index');
+  const wikiHome = { parent: wikiIndex.parentNode, next: wikiIndex.nextSibling };
+  const wikiTargets = brainViewTargets();
+  const wikiView = createBrainView(wikiTargets, {
+    read: async (topic, version) => { calls.push({ kind: 'wiki-read', topic: topic.topic, version }); return '# Invented local Wiki document'; },
+    save: async () => { throw Error('Read-only host fixture must not save'); }, now: Date.parse('2026-10-21T12:00:00Z'),
+  });
+  wikiView.setTopics([{ fileId: 'fixture-wiki-file', name: 'brain--fixture.md', topic: 'fixture', currentVersion: 2,
+    sizeBytes: 38, uploadedByKind: 'user', uploadedBy: owner.id, committedAt: '2026-10-21T12:00:00Z', tombstonedAt: null, updaterName: owner.name }]);
+  const wiki = { index: wikiIndex, home: wikiHome, targets: wikiTargets,
+    mount() { homeRoute = { view: 'wiki', workspaceId: workspace.id }; vm.pane = 'chat'; vm.contextTitle = true;
+      pane.hidden = true; wikiSection.parentElement.hidden = false; wikiSection.hidden = false; host.sync(project(homeRoute)); renderHeader(); },
+    clear() { homeRoute = chat; vm.pane = 'chat'; vm.contextTitle = false; host.sync(project(chat));
+      wikiSection.hidden = true; wikiSection.parentElement.hidden = true; pane.hidden = false; renderHeader(); },
+  };
   window.hostFixtureData = { app, frame, context, account, frameParent, contextParent, accountParent, frameNext, contextNext, accountNext, slot, side, calls, host, workspace, chat, project,
+    wiki,
     people, mediaQueries, renderHeader, renderRail, renderResources, renderTodo, renderContext, restoreTodo, refreshRecords,
     listenerCount: () => mediaRecords.reduce((n, row) => n + row.listeners.size, 0),
     restoreMedia: () => { window.matchMedia = originalMatchMedia; },
@@ -189,10 +206,12 @@ export async function kylonHostFixture(observe: string): Promise<string> {
     export { buildHomeRail } from './src/lib/home-rail.ts'; export { buildSideCards } from './src/lib/home-side-cards.ts';
     export { renderPeopleDialog } from './src/lib/people-dialog-view.ts';
     export { routeHref } from './src/lib/home-route.ts';
+    export { createBrainView } from './src/lib/brain-view.ts';
     import './src/styles/tokens.css'; import './src/styles/home/index.css';
     import './src/styles/dashboard-decoration.css'; import './src/styles/kylon-shell.css'; import './src/styles/kylon-layout/index.css';
     import './src/styles/kylon-workspace-settings-integration.css'; import './src/styles/kylon-files.css';
-    import './src/styles/kylon-people.css'; import './src/styles/dashboard-welcome.css'; import './src/styles/kylon-todos.css'; import './src/styles/kylon-todos-context.css';` } });
+    import './src/styles/kylon-people.css'; import './src/styles/dashboard-welcome.css'; import './src/styles/kylon-todos.css'; import './src/styles/kylon-todos-context.css';
+    import './src/styles/kylon-wiki.css'; import './src/styles/kylon-wiki-context.css';` } });
   const js = bundle.outputFiles.find(file => file.path.endsWith(".js"))?.text;
   const css = bundle.outputFiles.find(file => file.path.endsWith(".css"))?.text;
   if (!js || !css) throw new Error("actual host/CSS bundle missing");
@@ -202,19 +221,21 @@ export async function kylonHostFixture(observe: string): Promise<string> {
   const ast = ts.createSourceFile("dashboard.ts", script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const fragments = new Map<string, string[]>();
   const visit = (node: ts.Node) => {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && ["syncStandalonePage", "homePaneMessage"].includes(node.name.text)) {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && ["syncStandalonePage", "homePaneMessage", "brainViewTargets"].includes(node.name.text)) {
       const entries = fragments.get(node.name.text) ?? []; entries.push(`const ${node.getText(ast)};`); fragments.set(node.name.text, entries);
     }
     ts.forEachChild(node, visit);
   };
   visit(ast);
   let setup = setupScript;
-  for (const [name, marker] of [["syncStandalonePage", "/* ACTUAL_STANDALONE_SYNC */"], ["homePaneMessage", "/* ACTUAL_PANE_MESSAGE */"]]) {
+  for (const [name, marker] of [["syncStandalonePage", "/* ACTUAL_STANDALONE_SYNC */"], ["homePaneMessage", "/* ACTUAL_PANE_MESSAGE */"], ["brainViewTargets", "/* ACTUAL_BRAIN_TARGETS */"]]) {
     const entries = fragments.get(name); if (entries?.length !== 1) throw new Error(`unique actual ${name} lifecycle missing`);
     setup = setup.replace(marker, ts.transpileModule(entries[0], { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText);
   }
   const inline = [...astro.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)].map(match => match[1]).join("\n");
   if (!inline.includes(".dashboard__frame")) throw new Error("actual inline frame CSS missing");
+  const wikiSections = [...astro.matchAll(/<section class="dashboard__brain-view"[\s\S]*?<\/section>/g)];
+  if (wikiSections.length !== 1) throw new Error("unique actual Wiki markup missing");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Actual host observer fixture</title>
     <style>${css}\n${inline}\nhtml,body{margin:0;height:100%}live-dashboard{display:block;height:100dvh}.dashboard__product{height:100dvh}</style></head><body>
     <live-dashboard class="dashboard" data-kylon-shell data-state="channel"><div class="dashboard__root"><section class="dashboard__product">
@@ -222,7 +243,7 @@ export async function kylonHostFixture(observe: string): Promise<string> {
     <div class="dashboard__rail-foot" data-user-menu-root><button class="dashboard__user-trigger" data-user-menu-trigger type="button" aria-label="Invented account">
     <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"></path></svg></button><div data-user-menu hidden><button type="button" data-local-account-option>Local account option</button></div></div>
     <div class="hm-frame__rail-content" data-home-rail-slot><nav aria-label="Invented context"><a href="#fixture">Invented workspace</a></nav></div></aside>
-    <div class="hm-frame__main"><div data-home-workspace-shell></div><section class="hm-route-pane" data-home-route-pane><p>Invented local callbacks; no backend.</p></section></div><aside class="hm-frame__side" data-home-side-slot aria-label="Workspace cards"></aside>
+    <div class="hm-frame__main"><div data-home-workspace-shell></div><section class="hm-route-pane" data-home-route-pane><p>Invented local callbacks; no backend.</p></section><div class="dashboard__channel-body" hidden>${wikiSections[0][0]}</div></div><aside class="hm-frame__side" data-home-side-slot aria-label="Workspace cards"></aside>
     </div></section></div></live-dashboard><script>${(js + setup + observe).replace(/<\/script/giu, "<\\/script")}</script></body></html>`;
 }
 

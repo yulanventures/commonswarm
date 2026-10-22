@@ -212,7 +212,8 @@ export function createBrainView(
       returnRetryFocus(ownsFocus, targets.title);
     } catch (error) {
       if (request !== requestVersion) return;
-      targets.meta.textContent = `${versionLabel(topic.currentVersion)} · ${topic.updaterName}`;
+      targets.meta.textContent = `${versionLabel(topic.currentVersion)} · ${topic.updaterName}` +
+        (selectedVersion === topic.currentVersion ? "" : ` · viewing v${selectedVersion}`);
       const message = !readCompleted && error instanceof TypeError ? "This page could not be loaded. Try again."
         : error instanceof Error ? error.message : "The topic could not be loaded.";
       setError(message);

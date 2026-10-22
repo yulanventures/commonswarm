@@ -275,7 +275,7 @@ export async function runBrainViewFixture(): Promise<BrainViewSnapshot> {
         stage = "read recovery";
         const failRead = async (error, version = 1) => { holdRead = false; view.setTopics(topics); readFailure = error; await view.open("architecture", version); };
         await failRead(new TypeError("Transport detail must never be displayed"));
-        expect("plain transport failure", targets.error.textContent === unavailable && !targets.error.hidden && !targets.retry.hidden && !targets.retry.disabled);
+        expect("plain transport failure", targets.error.textContent === unavailable && !targets.error.hidden && !targets.retry.hidden && !targets.retry.disabled && targets.meta.textContent.includes("viewing v1"));
         const count = reads.length;
         holdRead = true; targets.retry.focus(); targets.retry.click(); targets.retry.click();
         expect("pending Retry is one exact older-version read", !targets.retry.hidden && targets.retry.disabled && targets.retry.textContent === "Retrying…" &&

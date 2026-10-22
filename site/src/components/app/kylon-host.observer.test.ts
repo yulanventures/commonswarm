@@ -88,6 +88,7 @@ const fixtureScript = `
         })) } }));
   };
   let todoAccountParent, tagDelivers, contextHomes, contextListeners, contextInventory;
+  let wikiHomes, wikiListeners, wikiButton;
   const visible = node => !!node?.getClientRects().length && !node.closest('[hidden],[inert]');
   const summary = label => [...app.querySelectorAll('.cs-todo-context summary')].find(node => node.textContent === label);
   const inventory = () => [...fixture.side.querySelectorAll('[data-side-card],.hm-side-entry')].filter(node => node.dataset.sideCard !== 'todos')
@@ -300,6 +301,57 @@ const fixtureScript = `
       && [...document.querySelectorAll('h1')].filter(e => e.getClientRects().length).length === 1 && !!app.querySelector('[data-home-todos] h1'));
     fixture.restoreTodo(); ({ bar, menu, heading } = fixture);
     check('Chat restores adopted original heading/menu after detail', docked() && !frame.hasAttribute('data-home-standalone') && sameNodes());
+  },
+  async wikiBegin() {
+    wikiHomes = [fixture.wiki.index, context, slot, fixture.side].map(node => ({ node, parent: node.parentNode, next: node.nextSibling }));
+    wikiListeners = fixture.listenerCount(); fixture.wiki.mount(); ({ bar, menu, heading } = fixture);
+    await until(() => fixture.wiki.index.closest('.cs-wiki-context') && app.querySelector('[data-wiki-composition]'), 'Wiki index not projected');
+    check('Wiki owns one original index and reader with intact shell identities', sameNodes() && app.querySelectorAll('.dashboard__brain-index').length === 1
+      && app.querySelectorAll('[data-brain-detail]').length === 1 && fixture.wiki.targets.list === fixture.wiki.index.querySelector('[data-brain-list]'));
+    check('Wiki retains unique workspace/header/resources in native disclosures', context.closest('details')?.querySelector('summary')?.textContent === 'Workspace navigation'
+      && slot.closest('details') === context.closest('details') && fixture.side.closest('details')?.querySelector('summary')?.textContent === 'Workspace resources');
+  },
+  wikiFocused(kind) {
+    return document.activeElement === (kind === 'index' ? fixture.wiki.index.querySelector('button') :
+      [...app.querySelectorAll('.cs-wiki-context summary')].find(node => node.textContent === kind));
+  },
+  async wikiRead() {
+    await until(() => calls.some(call => call.kind === 'wiki-read') && fixture.wiki.targets.markdown.textContent.includes('Invented local Wiki document'), 'Actual Wiki controller did not read');
+    check('moved Wiki index invokes original current-version read callback', calls.filter(call => call.kind === 'wiki-read').length === 1
+      && calls.find(call => call.kind === 'wiki-read').version === 2 && fixture.wiki.targets.title.textContent === 'fixture');
+    wikiButton = fixture.wiki.index.querySelector('button');
+  },
+  wikiResource() {
+    const details = fixture.side.closest('details'), control = fixture.side.querySelector('[data-side-todo-complete="side-allowed"]');
+    check('Wiki resources use native disclosure and original controls', details.open && !!control && visible(control));
+    const count = calls.filter(call => call.kind === 'resource-complete').length;
+    control.click();
+    check('Wiki retained resource callback preserves original principal', calls.filter(call => call.kind === 'resource-complete').length === count + 1
+      && calls.at(-1).id === 'side-allowed');
+    fixture.renderHeader(); fixture.renderRail(); fixture.renderResources(); ({ bar, menu, heading } = fixture);
+    check('Wiki owner refresh restores before replacement and reuses real slots', context.closest('.cs-wiki-context') && slot.closest('.cs-wiki-context')
+      && fixture.side.closest('.cs-wiki-context') && fixture.wiki.index.querySelector('button') === wikiButton && sameNodes()
+      && fixture.refreshRecords.slice(-3).every(record => wikiHomes.some(home => home.node === record.node && home.parent === record.parent)));
+  },
+  async wikiPlaced(width) {
+    const phone = width <= 832;
+    await until(() => innerWidth === width && matchMedia('(max-width:52rem)').matches === phone &&
+      fixture.wiki.index.parentNode === (phone ? fixture.wiki.home.parent : app.querySelector('.cs-wiki-context')) &&
+      document.activeElement === wikiButton && visible(wikiButton),
+      'Wiki responsive original index placement/focus did not settle');
+    check('Wiki resize retains native index focus and original node', document.activeElement === wikiButton && visible(wikiButton)
+      && fixture.wiki.index.querySelector('button') === wikiButton && sameNodes(), { width, active: elementFact(document.activeElement) });
+  },
+  wikiRestore() {
+    fixture.wiki.clear(); ({ bar, menu, heading } = fixture);
+    check('Wiki Chat return restores exact homes and removes only its listener/adapter', wikiHomes.every(home => home.node.parentNode === home.parent && home.node.nextSibling === home.next)
+      && !app.querySelector('.cs-wiki-context') && !app.querySelector('[data-wiki-composition]') && fixture.listenerCount() === wikiListeners && sameNodes());
+    fixture.wiki.mount(); host.suspend();
+    check('Wiki suspend restores original index and workspace/resource slot homes', fixture.wiki.index.parentNode === fixture.wiki.home.parent
+      && fixture.wiki.index.nextSibling === fixture.wiki.home.next && context.parentNode === contextParent
+      && slot.parentNode === wikiHomes.find(home => home.node === slot).parent && fixture.side.parentNode === frame
+      && account.parentNode === accountParent && !app.querySelector('.cs-wiki-context') && !app.querySelector('.cs-org-shell') && fixture.listenerCount() === 0);
+    fixture.wiki.clear(); ({ bar, menu, heading } = fixture);
   },
   async contextBegin() {
     contextHomes = [context, slot, fixture.side].map(node => ({ node, parent: node.parentNode, next: node.nextSibling, hidden: node.hidden }));
@@ -731,6 +783,21 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
     await evaluate("window.hostObserver.settle()");
     }
     await evaluate("window.hostObserver.refreshFocus()");
+    if (width === 1471) {
+      // Existing real host + exact Astro Wiki targets + actual public brain controller.
+      // Native Enter owns the read/disclosure; no backend or replacement controller.
+      await evaluate("window.hostObserver.wikiBegin()");
+      await nativeTab("window.hostObserver.wikiFocused('index')", "original Wiki index");
+      await key("Enter"); await evaluate("window.hostObserver.wikiRead()");
+      await nativeTab("window.hostObserver.wikiFocused('Workspace resources')", "Wiki resources");
+      await key("Enter"); await evaluate("window.hostObserver.wikiResource()");
+      await nativeTab("window.hostObserver.wikiFocused('index')", "retained Wiki index");
+      for (const nextWidth of [390, 1471]) {
+        await send("Emulation.setDeviceMetricsOverride", { width: nextWidth, height: nextWidth === 390 ? 844 : 900, deviceScaleFactor: 1, mobile: false });
+        await evaluate(`window.hostObserver.wikiPlaced(${nextWidth})`);
+      }
+      await evaluate("window.hostObserver.wikiRestore()");
+    }
     if ([1471, 1024].includes(width)) {
       await evaluate("window.hostObserver.contextBegin()");
       for (const theme of ["light", "dark"]) {
