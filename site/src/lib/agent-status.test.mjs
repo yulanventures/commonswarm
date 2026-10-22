@@ -71,6 +71,7 @@ test("dialog status precedence preserves terminal, security, delivery and activi
     ["new-computer", "Used from a new computer", { grant: key({ kind: "timeboxed", horizonExpiresAt: at(-86400000), newHostAt: at(1000) }) }],
     ["new-computer", "Used from a new computer", { grant: key({ newHostAt: at(1000) }) }],
     ["inactive", "Not active for 15 days", { presence: row({ last_command_at: at(15 * 86400000) }) }],
+    ["inactive", "Not active for 90 days", { grant: key({ lastUsedAt: at(90 * 86400000) }), presence: row({ last_command_at: at(90 * 86400000) }) }],
     ["idle", "Not active yet", { presence: null }],
     ["connected", "Connected", { presence: undefined }],
     ["active", "Active now", {}],
@@ -150,7 +151,7 @@ test("resume preserves last activity: idle 15 days becomes inactive, never Activ
   const resumed = peopleAgentStatus({ ...facts, grant: { ...facts.grant, suspendedAt: null } }, NOW);
   assert.equal(resumed.label, "Not active for 15 days"); assert.equal(resumed.attention, false);
   assert.equal(peopleAgentActivityTime(facts.presence.last_command_at, NOW), "15 days ago");
-  assert.equal(agentResumeReceipt("Codex"), "Resumed. Nothing has reached Codex yet. It renews the next time it starts.");
+  assert.equal(agentResumeReceipt("Codex"), "Resumed. Nothing has reached Codex yet.");
 });
 
 import { homeAgentState, WORK_RECENT_MS } from "./agent-status.ts";

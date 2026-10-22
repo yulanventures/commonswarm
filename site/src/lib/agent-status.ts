@@ -178,7 +178,7 @@ export function peopleAgentStatus(input: PeopleAgentStatusInput, now = Date.now(
 }
 
 export function agentResumeReceipt(name: string): string {
-  return `Resumed. Nothing has reached ${name} yet. It renews the next time it starts.`;
+  return `Resumed. Nothing has reached ${name} yet.`;
 }
 
 /** Server-recorded activity keeps an old work claim from reading as current work. */

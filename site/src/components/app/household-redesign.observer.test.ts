@@ -134,14 +134,9 @@ test("the Add an agent poll runs only while its own host page is open, and stops
   assert.match(script, /hostPicker\?\.addEventListener\("agent-host-back", \(\) => stopHostJoinWatch\(\)\);/);
 });
 
-/* The doors moved with People & agents from a dialog to a page (2026-10-07, the canvas Members
-   artboard). Two doors still, built by the page, and Invite still opens the existing invite form. */
-test("a person and an agent have separate doors on the People & agents page", () => {
-  const page = section(peopleView, "if (page) {", "const select = ");
-  assert.match(page, /data-people-page-add-agent|peoplePageAddAgent/);
-  assert.match(page, /"Add an agent"/);
-  assert.match(page, /peoplePageInvite/);
-  assert.match(page, /"Invite someone"/);
+/* Real emitted doors are covered by the kylon-host owner. This separate dispatch guard
+   retains application ownership: Invite returns to Chat before opening the original form. */
+test("People Invite returns to Chat before opening the existing invite form", () => {
   assert.match(script, /invite: \(\) => \{ void navigateHome\(\{ view: "chat", workspaceId: workspace.id \}, "push"\)\.then\(\(\) => openInvite\("channel"\)\); \}/);
 });
 
