@@ -1360,6 +1360,9 @@ test("owner can set and clear a future local date without resume; elapsed date s
   assert.equal((await setDate(future,datedCommand)).body.status,'accepted');
   const renewed=await runCmd(raw,{kind:'renew_agent_token'});
   assert.equal(renewed.body.status,'accepted');assert.equal(renewed.body.connection_expires_at,future);
+  assert.equal(typeof renewed.body.agent_token,'string');
+  assert.equal((await readMembers(String(renewed.body.agent_token),shared.workspace)).status,200,
+    'the exact successor authenticates before the owner deadline elapses');
   assert.equal((await setDate(null)).body.status,'accepted');
   const replayed=await setDate(future,datedCommand);
   assert.equal(replayed.status,200);assert.equal(replayed.body.connection_expires_at,null,'old receipt exposes current cleared policy');
@@ -1370,7 +1373,13 @@ test("owner can set and clear a future local date without resume; elapsed date s
   assert.equal(history!.connection_expires_at,null);assert.equal(history!.connection_expired_at,null);
   await sql`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second' WHERE renewal_grant_id=${grant}::uuid`;
   assert.equal((await setDate(null)).status,403,"the served setter cannot clear elapsed terminal authority");
-  assert.equal((await runCmd(String(renewed.body.agent_token),{kind:'renew_agent_token'})).status,403);
+  const terminal=await runCmd(String(renewed.body.agent_token),{kind:'renew_agent_token'});
+  // SQL990 LOCAL_CREDENTIAL_INVALID is mapped to 401/unauthenticated. A known
+  // elapsed owner policy is credential invalidation, not a scope refusal.
+  assert.equal(terminal.status,401);assert.equal(terminal.body.error,'unauthenticated');
+  const [terminalPolicy]=await sql`SELECT connection_expires_at<=clock_timestamp() AS elapsed,
+    suspension_active FROM swarm.renewal_grants WHERE renewal_grant_id=${grant}::uuid`;
+  assert.deepEqual(terminalPolicy,{elapsed:true,suspension_active:false});
 });
 
 // Date policy cannot resume security suspension. This is the served setter

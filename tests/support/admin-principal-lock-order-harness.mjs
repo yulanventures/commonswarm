@@ -591,7 +591,7 @@ async function historicalCatalog(sql) {
         FROM pg_namespace n WHERE n.nspname=ANY(${schemas}::text[])
       UNION ALL SELECT 'extension',e.extname,jsonb_build_array(n.nspname,e.extversion,pg_get_userbyid(e.extowner))
         FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE n.nspname=ANY(${schemas}::text[])
-      UNION ALL SELECT 'default-acl',n.nspname||'.'||pg_get_userbyid(a.defaclrole)||'.'||a.defaclobjtype,
+      UNION ALL SELECT 'default-acl',n.nspname||'.'||pg_get_userbyid(a.defaclrole)||'.'||a.defaclobjtype::text,
         to_jsonb(a.defaclacl) FROM pg_default_acl a JOIN pg_namespace n ON n.oid=a.defaclnamespace WHERE n.nspname=ANY(${schemas}::text[])
       UNION ALL SELECT 'index',n.nspname||'.'||c.relname,to_jsonb(pg_get_indexdef(c.oid))
         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind='i' AND n.nspname=ANY(${schemas}::text[])
@@ -1253,7 +1253,11 @@ async function denoMain() {
   } catch (error) {
     exitCode = 1;
     console.log('LOCK_ORDER_RESULT ' + JSON.stringify({ ...out,
-      error: error instanceof HarnessStage ? error.code : failureCode(error), http_refused: http.refused }));
+      error: error instanceof HarnessStage ? error.code : failureCode(error),
+      ...(failureCode(error)==='non_sql' && !(error instanceof HarnessStage) ? {
+        exception_kind: [TypeError,ReferenceError,SyntaxError,RangeError].find(type=>error instanceof type)?.name ?? 'Error',
+        exception_sites: typeof error?.stack==='string' ? [...error.stack.matchAll(/tests\/support\/admin-principal-lock-order-harness\.mjs:(\d+):(\d+)/gu)].slice(0,4).map(match=>({line:Number(match[1]),column:Number(match[2])})) : [],
+      } : {}), http_refused: http.refused }));
   }
   Deno.exit(exitCode);
 }
@@ -2051,7 +2055,7 @@ async function delegatedLocalScenario(ctx,scenario) {
   if (scenario==='delegated-local-permanent-suspension') {
     // Ordinary standing issuance and explicitly consented delegated renewal.
     // No delegated-family conversion, preset first use, or ancestry mutation.
-    for (const mode of ['null-renew','future-renew','null-replace','future-replace','elapsed','revoked','parent-dead','deadline-wait']) {
+    for (const mode of ['null-renew','future-renew','null-replace','future-replace','elapsed','revoked','parent-dead','deadline-wait','security-suspended']) {
       const name=`permanent-${mode}-${ctx.tag}`;
       const created=await manage(ctx,owner,workspaceId,{kind:'create_agent_principal',name});
       if(created.status!==200 || !created.body.principal_id) fail('permanent_create_control');
@@ -2065,12 +2069,13 @@ async function delegatedLocalScenario(ctx,scenario) {
       const [binding]=await observer`SELECT renewal_grant_id FROM swarm.agent_tokens WHERE token_id=${root.token}::uuid`;
       root.grant=binding.renewal_grant_id;
       if(!mode.includes('replace') && (await use(root.raw)).status!==200) fail('permanent_actual_first_use');
-      await observer`UPDATE swarm.renewal_grants SET suspended_at=clock_timestamp(),
+      // Current security suspension is an independent negative, not an idle clock.
+      await observer`UPDATE swarm.renewal_grants SET suspended_at=CASE WHEN ${mode==='security-suspended'} THEN clock_timestamp() ELSE suspended_at END,
         connection_expires_at=CASE WHEN ${mode.startsWith('future')} THEN clock_timestamp()+interval '1 hour'
           WHEN ${mode==='elapsed'} THEN clock_timestamp()-interval '1 second'
           WHEN ${mode==='deadline-wait'} THEN clock_timestamp()+interval '3 seconds' ELSE NULL END
         WHERE renewal_grant_id=${root.grant}::uuid`;
-      if(mode==='revoked') await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp() WHERE renewal_grant_id=${root.grant}::uuid`;
+      if(mode==='revoked') await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp(),revoked_by=${owner.userId}::uuid WHERE renewal_grant_id=${root.grant}::uuid`;
       if(mode==='parent-dead') await observer`UPDATE swarm.admin_grants SET state='revoked',revoked_at=clock_timestamp() WHERE grant_id=${side.grant}::uuid`;
       const before=await family(root);
       const command=mode.includes('replace') ? {kind:'admin_replace_undelivered_seat_credential',grant_id:side.grant,
@@ -2149,9 +2154,10 @@ async function delegatedLocalScenario(ctx,scenario) {
       await observer`INSERT INTO swarm.agent_runs(run_id,principal_id,device_id)
         VALUES(${runId}::uuid,${residual.principal}::uuid,${device}::uuid)`;
       await observer`INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,kind,max_successors,
-        horizon_expires_at,bound_device_id,created_by,revoked_at)
+        horizon_expires_at,bound_device_id,created_by,revoked_at,revoked_by)
         VALUES(${familyId}::uuid,${workspaceId}::uuid,${residual.principal}::uuid,${runId}::uuid,'standing',NULL,NULL,
-          ${device}::uuid,${owner.userId}::uuid,CASE WHEN ${mode==='prior-grant'} THEN clock_timestamp() ELSE NULL END)`;
+          ${device}::uuid,${owner.userId}::uuid,CASE WHEN ${mode==='prior-grant'} THEN clock_timestamp() ELSE NULL END,
+           CASE WHEN ${mode==='prior-grant'} THEN ${owner.userId}::uuid ELSE NULL END)`;
       await observer`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,task_id,epoch,scopes,token_hash,
         expires_at,lineage_id,renewal_grant_id,recipient_connection_id)
         VALUES(${tokenId}::uuid,${residual.principal}::uuid,${runId}::uuid,${id()}::uuid,1,${observer.json(['post_signal'])},
@@ -2252,7 +2258,7 @@ async function delegatedLocalScenario(ctx,scenario) {
     const before=await family(seat);
     const foreign=await admin.invoke({...renewCommand(admin,seat),recipient_connection_id:id()},{worker:true});
     const broadened=await admin.invoke({...renewCommand(admin,seat),worker_scope_names:['post_signal','acquire']},{worker:true});
-    const humanOnly=await admin.invoke({kind:'set_connection_expiry',connection_kind:'renewal',grant_id:seat.grant,connection_expires_at:null});
+    const humanOnly=await admin.invoke({kind:'suspend_admin_delegation',grant_id:admin.grant,reason_code:'owner_requested'});
     check('recipient-scope-and-human-boundaries',foreign.result.status===403 && foreign.result.body.error==='recipient_runtime_required' && broadened.result.status===403 && broadened.result.body.error==='worker_scope_forbidden' && humanOnly.result.status===403 && humanOnly.result.body.error==='human_confirmation_required' && !foreign.calls && !broadened.calls);
     check('boundary-refusals-spend-nothing',await family(seat)===before);
     const winner=await Promise.all([admin.invoke(renewCommand(admin,seat),{worker:true}),admin.invoke(renewCommand(admin,seat),{worker:true})]);
@@ -2305,7 +2311,7 @@ async function delegatedLocalScenario(ctx,scenario) {
     check('actual-worker-transaction-serialization-rollback',rolled.result.status===503 && rolled.calls===0 && await family(seat)===before);
     const [success]=await observer`SELECT
       (SELECT count(*) FROM swarm.events WHERE command_id=${commandId})::int AS workspace_events,
-      (SELECT count(*) FROM swarm.admin_events WHERE command_id=${commandId} AND type<>'AdminActionRecorded')::int AS success_events,
+      (SELECT count(*) FROM swarm.admin_events WHERE command_id=${commandId} AND event->>'type'<>'AdminActionRecorded')::int AS success_events,
       (SELECT count(*) FROM swarm.admin_command_results WHERE command_id=${commandId} AND response->>'status'='200')::int AS success_replies`;
     check('rollback-no-success-event-or-credential-reply',success.workspace_events===0 && success.success_events===0 && success.success_replies===0);
     // An independent parent's SHARE lock must only serialize the real child
@@ -2439,7 +2445,7 @@ async function ordinaryLocalPolicyScenario(ctx,wire=null) {
   check('valid-stale-human-owner-may-choose-date',chosen.status===200 && chosen.body.connection_expires_at===earlier && chosen.body.previous_connection_expires_at===null);
   const chosenRead=await readPolicy();
   check('existing-read-reports-owner-canonical-date',chosenRead.status===200 && chosenRead.body.grants[0]?.connection_expires_at===earlier);
-  const agentAttempt=await ctx.command.handleRequest(new Request('http://127.0.0.1/functions/v1/command',{
+  const agentAttempt=await ctx.policyCommand.handleRequest(new Request('http://127.0.0.1/functions/v1/command',{
     method:'POST',headers:{authorization:`Bearer ${credential}`,'content-type':'application/json'},
     body:JSON.stringify({command_id:id(),client_version:ctx.clientVersion,workspace_id:workspaceId,stream:{kind:'workspace'},command:policy(null)})}));
   check('agent-cannot-edit-owner-policy',agentAttempt.status===403);
@@ -2821,7 +2827,7 @@ async function localResumeScenario(ctx,scenario) {
       const closed=await mint(mode);
       if(await use(closed.raw)!==200) fail('terminal_actual_first_use');
       await pause(closed);
-      if(mode==='revoked-cascade') await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp()
+      if(mode==='revoked-cascade') await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp(),revoked_by=${owner.userId}::uuid
         WHERE renewal_grant_id=${closed.grant}::uuid`;
       if(mode==='elapsed') await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second'
         WHERE renewal_grant_id=${closed.grant}::uuid`;
