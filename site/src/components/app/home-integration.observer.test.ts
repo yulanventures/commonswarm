@@ -679,12 +679,28 @@ test('People Allow lands from settled access, continues after consent, and retir
     'showChannelView', 'focusHomeView', 'householdScope', 'householdCurrent', 'readHouseholdAccess',
     'refreshHouseholdAccess', 'renderHouseholdAccess', 'openHouseholdView', 'loadHouseholdConnections',
     'renderAgentApprovals', 'connectionApproval', 'confirmOwnAccess', 'resetHouseholdSurface']);
+  // Execute the widget's real event registration, not a duplicated navigation callback.
+  const dashboard = await readFile(new URL('./LiveDashboard.astro', import.meta.url), 'utf8');
+  const script = dashboard.match(/<script>([\s\S]*?)<\/script>/)?.[1]; assert.ok(script);
+  const ast = ts.createSourceFile('dashboard.ts', script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let approveListener = '';
+  const findListener = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === 'addEventListener' && ts.isStringLiteral(node.arguments[0])
+      && node.arguments[0].text === 'agent-host-approve' && ts.isExpressionStatement(node.parent))
+      approveListener = node.parent.getText(ast);
+    ts.forEachChild(node, findListener);
+  };
+  findListener(ast); assert.ok(approveListener, 'the public widget approval event is registered');
+  const listenerCode = ts.transpileModule(approveListener, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   const ok = { status: 200, body: { status: 'ok', content_role: 'editor' } };
   const refused = { status: 200, body: { status: 'refused', reason: 'content_consent_required' } };
   const drain = () => new Promise<void>(resolve => setImmediate(resolve));
   const fixture = (immediate = false, connections = [{ kind: 'local', principal_id: 'A', name: 'Helper', approval: null }]) => {
     const focus: LandingNode[] = [], scroll: LandingNode[] = [], frames: (() => void)[] = [];
     const replies: ((reply: unknown) => void)[] = [], calls: string[] = [], contentReplies: (() => void)[] = [];
+    const hostListeners = new Map<string, () => unknown>();
+    const hostPicker = { addEventListener: (name: string, listener: () => unknown) => hostListeners.set(name, listener) };
     const document = { title: '', createElement: (tag: string) => new LandingNode(tag),
       createTextNode: (text: string) => { const node = new LandingNode('#text'); node.textContent = text; return node; } };
     class LandingNode extends RowNode {
@@ -719,7 +735,7 @@ test('People Allow lands from settled access, continues after consent, and retir
       ['[data-household-consent-result]', notice], ['[data-household-confirm]', confirm],
       ['[data-household-agent-list]', list], ['[data-household-agent-empty]', empty],
       ['[data-household-purpose]:checked', purpose], ['[data-household-role]:checked', role]]);
-    const context = createContext({ document, URL, routeHref, resolveHomeRoute, homeViewTitle, createLatestRead,
+    const context = createContext({ document, hostPicker, URL, routeHref, resolveHomeRoute, homeViewTitle, createLatestRead,
       // The renderer's completion is independent of access/connection transport settlement.
       householdDashboard: { clear() {}, open: () => new Promise<void>(resolve => contentReplies.push(resolve)) },
       peopleDialogCanAct, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, accessRefusalMessage,
@@ -761,22 +777,30 @@ test('People Allow lands from settled access, continues after consent, and retir
       const setHouseholdSetupNeeded=()=>{}, rememberPurpose=()=>{}, stopHostJoinWatch=()=>{}, initials=()=>'', markAgentAvatar=()=>{};
       const householdCall=()=>async()=>({});
     `, context);
-    runInContext(code, context);
+    runInContext(code + '\n' + listenerCode, context);
     const flushFrames = () => { for (const frame of frames.splice(0)) frame(); };
     return { context, focus, scroll, calls, replies, title, card, purpose, role, approvalTitle, list, fileTitle, notice,
       flushFrames, finishContent: async () => { assert.ok(contentReplies.length, 'existing content render is pending'); contentReplies.shift()!(); await drain(); },
-      allow: () => runInContext("peopleDialogAction('allow','A',{}, {})", context) as Promise<void>,
+      allow: (entry: 'people' | 'picker' = 'people') => {
+        if (entry === 'people') return runInContext("peopleDialogAction('allow','A',{}, {})", context) as Promise<void>;
+        runInContext("homeRoute={view:'add-agent',workspaceId:'W'}; app.dataset.channelView='agent-choice'", context);
+        hostListeners.get('agent-host-approve')!();
+        return drain();
+      },
       navigate: (view: string) => runInContext(`navigateHome({view:'${view}',workspaceId:'W'},'push')`, context) as Promise<void>,
       reply: async (value: unknown) => { assert.ok(replies.length, 'real access transport is pending'); replies.shift()!(value); await drain(); },
     };
   };
-  for (const row of [{ immediate: false, empty: false }, { immediate: true, empty: false }, { immediate: false, empty: true }]) {
+  for (const row of [
+    { entry: 'people', immediate: false, empty: false }, { entry: 'people', immediate: true, empty: false },
+    { entry: 'people', immediate: false, empty: true }, { entry: 'picker', immediate: false, empty: false },
+  ] as const) {
     const f = fixture(row.immediate, row.empty ? [] : undefined);
-    await f.allow();
+    await f.allow(row.entry);
     if (!row.immediate) {
       f.flushFrames();
       assert.deepEqual(f.scroll, [], 'pending access must not scroll the hidden consent card or trust cached access');
-      assert.deepEqual(f.focus, [], 'Allow waits for its actual visible access owner');
+      assert.deepEqual(f.focus, [], `${row.entry}: Allow waits for its actual visible access owner`);
       assert.deepEqual(f.calls, ['household_access'], 'Allow adds no read or duplicate open');
       await f.reply(ok); f.flushFrames();
     } else await drain();
@@ -820,9 +844,11 @@ test('People Allow lands from settled access, continues after consent, and retir
   assert.deepEqual(superseded.scroll, [], 'a superseded content completion cannot land during the new access read');
   await superseded.reply(ok); await reopening; await superseded.finishContent();
   superseded.flushFrames(); assert.deepEqual(superseded.scroll, [superseded.approvalTitle]);
-  const leftDuringRender = fixture(); await leftDuringRender.allow(); await leftDuringRender.reply(ok);
-  await leftDuringRender.navigate('files'); await leftDuringRender.finishContent(); leftDuringRender.flushFrames();
-  assert.deepEqual(leftDuringRender.scroll, [], 'a content completion cannot revive Allow after navigation away');
+  for (const entry of ['people', 'picker'] as const) {
+    const leftDuringRender = fixture(); await leftDuringRender.allow(entry); await leftDuringRender.reply(ok);
+    await leftDuringRender.navigate('files'); await leftDuringRender.finishContent(); leftDuringRender.flushFrames();
+    assert.deepEqual(leftDuringRender.scroll, [], `${entry}: a content completion cannot revive Allow after navigation away`);
+  }
   for (const change of ['plain Lists', 'Files', 'workspace reset', 'account switch', 'request version']) {
     const f = fixture(); await f.allow();
     if (change === 'plain Lists') await f.navigate('lists');

@@ -10663,7 +10663,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     hostPicker?.addEventListener("agent-host-home", () => {
       leaveAddAgentForHome();
     });
-    hostPicker?.addEventListener("agent-host-approve", () => activateWorkspaceView("objects"));
+    hostPicker?.addEventListener("agent-host-approve", () => {
+      if (activeWorkspaceId) void navigateHome({ view: "lists", workspaceId: activeWorkspaceId }, "push", true);
+    });
     hostPicker?.addEventListener("agent-host-done", (event: Event) => {
       const principalId = (event as CustomEvent<{ principalId?: unknown }>).detail?.principalId;
       finishJoinedAgent(typeof principalId === "string" ? principalId : "");
