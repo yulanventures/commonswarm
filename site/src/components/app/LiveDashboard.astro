@@ -38,8 +38,11 @@ import "../../styles/kylon-shell.css";
 import "../../styles/kylon-layout/index.css";
 import "../../styles/kylon-workspace-settings-integration.css";
 import "../../styles/kylon-files.css";
+import "../../styles/kylon-people.css";
 import "../../styles/kylon-account-dialogs.css";
 import "../../styles/dashboard-welcome.css";
+import "../../styles/kylon-todos.css";
+import "../../styles/kylon-todos-context.css";
 
 const signInMethods = signInDoors(await enabledProvidersForBuild({
   url: import.meta.env.PUBLIC_SUPABASE_URL,
@@ -749,7 +752,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                     id="dashboard-composer-input"
                     rows="1"
                     maxlength={SIGNAL_BODY_MAX}
-                    placeholder="Write to everyone, or type @ to tag a person or an agent"
+                    placeholder="Message…"
                     aria-label="Message"
                     role="combobox"
                     aria-autocomplete="list"
@@ -784,8 +787,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                   ~~"THE ADDRESS, always visible."~~ Retired 2026-10-07 by Tom's ruling 3 ("Quiet
                   forms", home-visual RULINGS.md): the row shows only when the address is not
                   "Everyone here" (a tag, a reply, a notice about names that could not be kept) or
-                  while a name is being chosen. At rest it is hidden, the placeholder says "Write to
-                  everyone", and the note stays the textarea's description so the delivery truth is
+                  while a name is being chosen. At rest it is hidden, the hint says "Message…",
+                  and the note stays the textarea's description so the delivery truth is
                   still read out. `syncComposerToVisibility` is the one rule. */}
               <div class="dashboard__composer-to" data-composer-to hidden>
                 <span class="dashboard__composer-to-label" id="dashboard-composer-to-label" data-composer-to-label>To:</span>
@@ -4109,7 +4112,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       homeObjects = { state: "pending" }; homeTodoDetails.clear(); homePolicies.clear();
       const workspace = workspaces.find(row => row.id === activeWorkspaceId) as { todosAvailable?: boolean } | undefined;
       if (workspace) workspace.todosAvailable = false;
-      one<HTMLElement>("[data-home-side-slot]")?.replaceChildren();
+      layout.refreshTodoContext(() => one<HTMLElement>("[data-home-side-slot]")?.replaceChildren());
     };
     const homeRefusalCopy = (reason: string): string => {
       const copy: Record<string, string> = { owner_only: "Only its owner can change its line.", content_read_only: "Choose editor access in Lists & docs before changing a to-do.",
@@ -4194,13 +4197,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const renderHomeSide = (): void => {
       const slot = one<HTMLElement>("[data-home-side-slot]");
       const workspace = workspaces.find(row => row.id === activeWorkspaceId);
-      if (!slot || !workspace || homeRoute.view === "catchup" || homeRoute.view === "new") { slot?.replaceChildren(); return; }
+      if (!slot || !workspace || homeRoute.view === "catchup" || homeRoute.view === "new") { layout.refreshTodoContext(() => slot?.replaceChildren()); return; }
       const ctx = homeTodoContext(), models = homeTodoModels();
       const objectsRead = homeObjects;
       const objects = objectsRead.state === "ready" ? { ...objectsRead, files: [...objectsRead.files,
         ...files.filter(file => !file.tombstonedAt && !objectsRead.files.some(object => object.id === file.fileId)).map(file => ({ kind: "file" as const, id: file.fileId, title: file.name,
           href: routeHref({ view: "files", workspaceId: workspace.id }), meta: formatAttachmentSize(file.sizeBytes), who: homeParty({ kind: file.uploadedByKind === "agent" ? "agent" : "user", id: file.uploadedBy }, ctx.people) }))] } : objectsRead;
       const vm = { sample: sampleMode, workspaceName: workspace.name,
+        todosInMain: homeRoute.view === "todos" && homeTodosState === "ready",
         todos: homeTodosAvailable() ? { items: homeTodosState === "ready" ? models.map(todo => { const card = homeTodoCard(todo, ctx.now); return { id: todo.id, title: todo.title, href: card.href,
           state: todo.state, mayComplete: todo.may.complete, subline: todoSubline(todo, { now: ctx.now }), who: card.who }; }) : [],
           allHref: routeHref({ view: "todos", workspaceId: workspace.id }), canAdd: homeTodosState === "ready" && ctx.editor,
@@ -4209,9 +4213,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           const approval = householdConnections.filter(row => row.principal_id === agent.id).map(connectionApproval).find(Boolean);
           return approval ? [{ agent, until: approval.expires_at ? new Date(approval.expires_at).toLocaleDateString() : null }] : [];
         }), hrefs: { lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }), wiki: routeHref({ view: "wiki", workspaceId: workspace.id }) } };
-      replaceHomeRegion(slot, "side", [buildSideCards(document, vm, { onComplete: id => completeHomeTodo(id, true), onAddTodo: () => {
+      layout.refreshTodoContext(() => replaceHomeRegion(slot, "side", [buildSideCards(document, vm, { onComplete: id => completeHomeTodo(id, true), onAddTodo: () => {
         void navigateHome({ view: "todos", workspaceId: workspace.id }, "push").then(() => one<HTMLButtonElement>("[data-todo-add]")?.click());
-      }, onOpenLists: () => navigateHomeHref(vm.hrefs.lists) })]);
+      }, onOpenLists: () => navigateHomeHref(vm.hrefs.lists) })]));
     };
     const homeWrite = async <T,>(run: (server: HomeServer, requestId: string) => Promise<WriteResult<T>>, receipt?: (value: T, notices: HomeNotice[]) => string): Promise<void> => {
       if (sampleMode || homeTodoSave === "saving") return;
@@ -4380,7 +4384,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       if (homeTodosState === "absent") {
         if (homeRoute.view === "todo") homePaneMessage("Could not load this to-do.", "");
-        else { slot.replaceChildren(); slot.hidden = true; }
+        else homePaneMessage("Could not load to-dos.", "");
         return;
       }
       if (homeTodosState === "refused" || homeTodosState === "failed") { homePaneMessage("Could not load to-dos.", homeTodoReceipt); return; }
@@ -4456,7 +4460,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (key === homeRailKey && slot.childElementCount) {
         refreshHomeRailTimes(slot, vm); return;
       }
-      replaceHomeRegion(slot, "rail", [buildHomeRail(document, vm, {
+      layout.refreshTodoContext(() => replaceHomeRegion(slot, "rail", [buildHomeRail(document, vm, {
         navigate: href => navigateHomeHref(href),
         openPerson: id => { void selectHomePerson(id); },
         /* As for a person: an agent opens in this workspace when it is here, otherwise in the first
@@ -4470,7 +4474,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         },
         toggleWorkspaces: expanded => { railExpanded = expanded; },
       }, { workspacesExpanded: railExpanded, newWorkspaceHref: routeHref({ view: "new" }),
-        ...(draftName === null ? {} : { draftWorkspace: { name: draftName } }) })]);
+        ...(draftName === null ? {} : { draftWorkspace: { name: draftName } }) })]));
       homeRailKey = key;
     };
     const renderHomeShell = (): void => {
@@ -4478,13 +4482,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const bottom = one<HTMLElement>("[data-home-phone-nav]");
       const workspace = workspaces.find(workspace => workspace.id === activeWorkspaceId);
       if (!slot || !workspace || homeRoute.view === "catchup" || homeRoute.view === "new") {
-        layout.syncMenu(false);
+        layout.refreshTodoContext(() => {
+          layout.syncMenu(false);
+          slot?.replaceChildren(); bottom?.replaceChildren();
+        });
         homeShellKey = "";
-        slot?.replaceChildren(); bottom?.replaceChildren(); return;
+        return;
       }
-      const pane = homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" ? homeRoute.view : "chat";
+      const pane = homeRoute.view === "todo" ? "todos" : homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" || homeRoute.view === "people" ? homeRoute.view : "chat";
       const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
-        people: currentHomePeople().groups, pane, todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
+        people: currentHomePeople().groups, pane, contextTitle: homeRoute.view === "people", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
         hrefs: { chat: routeHref({ view: "chat", workspaceId: workspace.id }), todos: routeHref({ view: "todos", workspaceId: workspace.id }),
           lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }),
           wiki: routeHref({ view: "wiki", workspaceId: workspace.id }), workspaces: routeHref({ view: "catchup" }) },
@@ -4619,7 +4626,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const back = document.createElement("a"); back.href = homeLink?.href ?? routeHref({ view: "chat", workspaceId: activeWorkspaceId }); back.textContent = homeLink?.label ?? workspace?.name ?? "Workspace";
       back.addEventListener("click", event => { event.preventDefault(); navigateHomeHref(back.href); });
       slot.replaceChildren(title, text, back); slot.hidden = false;
-      if (homeRoute.view === "todo") focusHomeView();
+      if (homeRoute.view === "todo" || homeRoute.view === "todos") focusHomeView();
     };
     const applyHomePane = (): void => {
       const catchUp = one<HTMLElement>("[data-home-catchup]");
@@ -4642,7 +4649,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       frame?.classList.toggle("hm-frame--todo", homeRoute.view === "todo");
       frame?.classList.toggle("hm-frame--add-agent", homeRoute.view === "add-agent");
       syncStandalonePage();
-      if (home) { one<HTMLElement>("[data-home-side-slot]")?.replaceChildren(); renderHomeCatchUp(); return; }
+      if (home) { layout.refreshTodoContext(() => one<HTMLElement>("[data-home-side-slot]")?.replaceChildren()); renderHomeCatchUp(); return; }
       renderHomeSide();
       if (homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos") {
         renderHomeObjectPane();
@@ -4664,7 +4671,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       document.title = homeRoute.view === "people" ? ["People & agents", workspace?.name, "CommonSwarm"].filter(Boolean).join(" · ") : homeViewTitle(homeRoute, workspace?.name);
       window.requestAnimationFrame(() => {
         const scope = homeRoute.view === "catchup" ? "[data-home-catchup]"
-          : homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos" || homeRoute.view === "people" ? "[data-home-route-pane]"
+          : homeRoute.view === "people" ? "[data-people-context]"
+          : homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos" ? "[data-home-route-pane]"
           : homeRoute.view === "new" ? "[data-panel=create]"
           : homeRoute.view === "add-agent" ? "[data-channel-view=agent-choice]"
           : homeRoute.view === "lists" ? "[data-channel-view=objects]"
@@ -4673,7 +4681,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           : "[data-home-workspace-shell]";
         // People & agents with a focus target lands on that person's or agent's details instead.
         const target = homeRoute.view === "people" && peopleDialogFocus ? one<HTMLElement>("#pd-detail-title") : null;
-        (target ?? all<HTMLElement>(`${scope} h1, .cs-org-phone-title h1`).find(heading => heading.getClientRects().length > 0))?.focus({ preventScroll: true });
+        const visible = (element: HTMLElement | null): element is HTMLElement => !!element?.getClientRects().length && !element.closest("[hidden], [inert]");
+        (visible(target) ? target : all<HTMLElement>(`${scope} h1, .cs-org-phone-title h1`).find(visible))?.focus({ preventScroll: homeRoute.view !== "people" });
       });
     };
     const navigateHome = async (requested: HomeRoute, historyMode: "push" | "replace" | "pop"): Promise<void> => {
@@ -4885,6 +4894,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       head.append(members); members.hidden = false;
     };
     const parkPeopleHosts = (): void => {
+      layout.peopleContext(null);
       parkMemberDetails();
       const detail = one<HTMLElement>("[data-people-detail]");
       // Hidden while parked: a selection's open details must not show at the foot of another route.
@@ -4909,15 +4919,18 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const signIn = one<HTMLElement>("[data-member-details]"); const active = document.activeElement;
       const held = signIn && active instanceof HTMLElement && signIn.contains(active) ? active : null;
       const range = held instanceof HTMLInputElement || held instanceof HTMLTextAreaElement ? [held.selectionStart, held.selectionEnd] as const : null;
+      layout.peopleContext(null);
       parkMemberDetails();
       list.hidden = false;
       renderPeopleDialog(list, detail, model, peopleDialogState, { render: renderDialogRoster, action: async (action, id, button, notice) => {
         if (button.disabled) return; button.disabled = true;
         const workspaceId = activeWorkspaceId, userId = session?.user.id;
         try { await peopleDialogAction(action, id, button, notice); }
-        catch (error) { if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
-          const errorTarget = Array.from(list.querySelectorAll<HTMLElement>("[data-agent-row-error]")).find((element) => element.dataset.agentRowError === id)
-            ?? one<HTMLElement>("[data-agent-error]");
+        catch (error) { if (workspaceId !== activeWorkspaceId || userId !== session?.user.id || homeRoute.view !== "people") return;
+          const selected = peopleDialogState.selected;
+          const errorTarget = selected?.type === "agent" && selected.id === id
+            ? list.querySelector<HTMLElement>("[data-people-detail] [data-agent-error]")
+            : Array.from(app.querySelectorAll<HTMLElement>("[data-people-context] [data-agent-row-error]")).find((element) => element.dataset.agentRowError === id);
           if (errorTarget) { errorTarget.textContent = readableError(error); errorTarget.hidden = false; }
         } finally { button.disabled = false; }
       },
@@ -4968,6 +4981,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           return personTint(owner, owner !== null && owner === session?.user.id);
         }, page: {
           homeLabel: workspace.name, homeHref: routeHref({ view: "chat", workspaceId: workspace.id }), back: () => homeBack(),
+          workspacesHref: routeHref({ view: "catchup" }),
           addAgentHref: routeHref({ view: "add-agent", workspaceId: workspace.id }),
           agentHref: (agentId) => routeHref({ view: "agent", workspaceId: workspace.id, agentId }),
           navigate: (href) => navigateHomeHref(href),
@@ -4977,6 +4991,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         } });
       // A removal or role change that needs a fresh sign-in shows its block under the page header.
       mountMemberDetails(list);
+      layout.peopleContext(list.querySelector<HTMLElement>("[data-people-context]"));
       if (held?.isConnected && document.activeElement !== held) {
         held.focus({ preventScroll: true });
         if (range && range[0] !== null && range[1] !== null) try { (held as HTMLInputElement).setSelectionRange(range[0], range[1]); } catch { /* not a text field */ }
@@ -5078,13 +5093,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         renderDialogRoster(); focusPeoplePage(); return Promise.resolve();
       }
       rosterFilter = "";
-      peopleDialogState.selected = null; peopleDialogState.showAllAttention = false;
+      peopleDialogState.selected = null; peopleDialogState.showAllAttention = false; peopleDialogState.filter = "all";
       if (!workspaceId) return Promise.resolve();
       return navigateHome({ view: "people", workspaceId }, "push");
     };
     const focusPeoplePage = (): void => {
-      window.requestAnimationFrame(() => ((peopleDialogFocus ? one<HTMLElement>("#pd-detail-title") : null)
-        ?? one<HTMLElement>("#pd-page-title"))?.focus({ preventScroll: true }));
+      window.requestAnimationFrame(() => [peopleDialogFocus ? one<HTMLElement>("#pd-detail-title") : null, one<HTMLElement>("#pd-page-title")]
+        .find(element => !!element?.getClientRects().length && !element.closest("[hidden], [inert]"))?.focus({ preventScroll: false }));
     };
 
     /** Leaving the page: the confirmation closes and every draft that belonged to it is dropped. */
@@ -5884,6 +5899,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           ? "dashboard__message dashboard__message--reply"
           : "dashboard__message";
         row.dataset.signalId = signal.id;
+        markThreadReplyRoot(row);
         if (
           !sampleMode && session && activeWorkspaceId &&
           signal.toAgent === null &&
@@ -6655,7 +6671,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       homeOverviewCounts.clear();
       // The People page's hosts may sit in the route pane: park them before it is cleared.
       parkPeopleHosts();
-      for (const slot of all<HTMLElement>("[data-home-catchup], [data-home-route-pane], [data-home-workspace-shell], [data-home-phone-nav], [data-home-rail-slot]")) slot.replaceChildren();
+      layout.refreshTodoContext(() => {
+        for (const slot of all<HTMLElement>("[data-home-catchup], [data-home-route-pane], [data-home-workspace-shell], [data-home-phone-nav], [data-home-rail-slot]")) slot.replaceChildren();
+      });
       stopFeedPush();
       stopAgentActivity();
       closeEntityPanel(false);
@@ -8259,7 +8277,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             channelById(channels, root.channelId)?.archivedAt != null,
         );
 
+    const markThreadReplyRoot = (row: HTMLElement): void => {
+      row.toggleAttribute("data-thread-reply-root",
+        threadReplyRoot !== null && row.dataset.signalId === threadReplyRoot.id);
+    };
+
     const syncComposerPlacement = (): void => {
+      for (const row of all<HTMLElement>("[data-feed-list] .dashboard__message[data-signal-id]")) {
+        markThreadReplyRoot(row);
+      }
       const input = one<HTMLTextAreaElement>("[data-composer-input]");
       const bar = one<HTMLElement>("[data-composer-reply]");
       const targetText = one<HTMLElement>("[data-composer-reply-target-text]");
@@ -8314,8 +8340,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const channel = activeChannel();
       if (!input) return;
       if (channel === null) {
-        input.placeholder = "Write to everyone, or type @ to tag a person or an agent";
-        input.setAttribute("aria-label", "Message");
+        input.placeholder = "Message…";
+        input.setAttribute("aria-label", one<HTMLElement>("[data-composer-label]")?.textContent || "Message");
         return;
       }
       input.placeholder = `Message ${channelLabel(channel.slug)}`;
@@ -10749,7 +10775,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (event.key !== "Escape" || homeRoute.view !== "people" || !peopleDialogState.selected) return;
       if (one<HTMLDialogElement>("[data-people-confirm]")?.open || document.querySelector("dialog[open]")) return;
       event.preventDefault(); const selection = peopleDialogState.selected; peopleDialogState.selected = null;
-      renderDialogRoster(); (document.getElementById(`pd-${selection.type}-${selection.id}`) ?? one<HTMLElement>("#pd-page-title"))?.focus({ preventScroll: true });
+      if (!document.getElementById(`pd-${selection.type}-${selection.id}`)) { rosterFilter = ""; peopleDialogState.filter = "all"; }
+      renderDialogRoster(); (document.getElementById(`pd-${selection.type}-${selection.id}`) ?? one<HTMLElement>("#pd-page-title"))?.focus({ preventScroll: false });
     });
     for (const button of all<HTMLButtonElement>("[data-agent-owner-self]")) {
       button.addEventListener("click", openConnect);
@@ -16285,6 +16312,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
   .hm-frame .dashboard__message--reply {
     --message-row-background: transparent;
+  }
+
+  /* Paint the loaded reply root over Home's hover/addressed-row backgrounds.
+     Keep the variable for the fresh-arrival animation's endpoint. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-thread-reply-root] {
+    --message-row-background: var(--k-shell-selected);
+    background: var(--message-row-background);
   }
 
   .hm-frame .dashboard__message-markdown {

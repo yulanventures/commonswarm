@@ -348,22 +348,44 @@ def run_drill(workdir, unique_label, result, local_artifact=None):
     artifact_tool('pg_restore', '--dbname=service=source', '--schema-only', '--clean', '--if-exists',
                   '--exit-on-error',
                   '--use-list=/artifacts/schema-list', '/artifacts/database.dump')
-    def schema_checksum(service):
+    def schema_checksum(service, ops_only=False):
         # PG17 --schema disables include_everything and silently omits all
         # publications/subscriptions. --exclude-schema keeps them dumpable.
         schemas = ','.join("'" + schema + "'" for schema in sorted(REQUIRED_DATABASE_SCHEMAS))
         excluded = artifact_tool('psql', '--dbname=service=' + service, '-XAt', '-v', 'ON_ERROR_STOP=1',
             '-c', f'SELECT pg_catalog.quote_ident(nspname) FROM pg_catalog.pg_namespace WHERE nspname NOT IN ({schemas}) ORDER BY nspname;')
-        ddl = artifact_tool('pg_dump', '--dbname=service=' + service, '--schema-only', '--no-owner', '--no-privileges',
-            '--exclude-table=public.commonswarm_cutover_probe',
-            '--exclude-table=public.commonswarm_cutover_state', '--exclude-table=realtime.messages_*',
-            *['--exclude-schema=' + schema for schema in excluded.splitlines()])
+        if ops_only:
+            # Keep owners, ACLs, policies, trigger and function bodies for ops.
+            ddl = artifact_tool('pg_dump', '--dbname=service=' + service,
+                                '--schema-only', '--schema=commonswarm_ops')
+        else:
+            ddl = artifact_tool('pg_dump', '--dbname=service=' + service, '--schema-only', '--no-owner', '--no-privileges',
+                '--exclude-table=public.commonswarm_cutover_probe',
+                '--exclude-table=public.commonswarm_cutover_state', '--exclude-table=realtime.messages_*',
+                *['--exclude-schema=' + schema for schema in excluded.splitlines()])
         # Anchors prevent header-shaped comments inside function bodies from
         # being normalized. Keep object headers, body comments and blank lines.
         ddl = re.sub(r'\A--\n-- PostgreSQL database dump\n--\n\n(?:\\restrict [A-Za-z0-9]+\n\n)?'
                      r'-- Dumped from database version [^\n]+\n-- Dumped by pg_dump version [^\n]+\n\n', '', ddl)
         ddl = re.sub(r'--\n-- PostgreSQL database dump complete\n--\n\n(?:\\unrestrict [A-Za-z0-9]+\n\n)?\Z', '', ddl)
         return hashlib.sha256(ddl.encode('utf-8')).hexdigest()
+    # The verified archive, not expected migration hashes, owns observed history.
+    # Restore only ops data into the existing independent schema reference.
+    artifact_tool('pg_restore', '--dbname=service=source', '--data-only',
+                  '--schema=commonswarm_ops', '--exit-on-error',
+                  '/artifacts/database.dump')
+
+    def ops_state(service):
+        # UTC and jsonb canonicalization cover ALL columns, including provenance.
+        rows = artifact_tool('psql', '--dbname=service=' + service, '-XAtq',
+            '-v', 'ON_ERROR_STOP=1', '-c',
+            "SET timezone='UTC'; SELECT to_jsonb(c)::text FROM "
+            "commonswarm_ops.migration_checksums c ORDER BY version;")
+        if len(rows.splitlines()) != counts['commonswarm_ops.migration_checksums']:
+            raise ValueError('ops ledger count differs from verified snapshot')
+        return hashlib.sha256(rows.encode('utf-8')).hexdigest(), schema_checksum(service, ops_only=True)
+
+    expected_ops = ops_state('source')
     result['schema_checksums']['source'] = schema_checksum('source')
     for script in ('restore-target.sh', 'prepare-target.sh', 'restore-cron-jobs.sh', 'verify-counts.sh'):
         res = run_cmd(args + ['/bin/bash', image, f'/work/migrate/{script}'], check=False, timeout=1800)
@@ -371,6 +393,33 @@ def run_drill(workdir, unique_label, result, local_artifact=None):
         if res.returncode != 0:
             raise RuntimeError(f"Script {script} failed")
         if script == 'restore-target.sh':
+            # Before bootstrap, application checks, migrations, or API startup.
+            # Compare the entire ledger and ops DDL, not just positive row counts.
+            if ops_state('target') != expected_ops:
+                raise ValueError('restored ops content or owner/ACL/DDL differs from archive')
+            inventory = artifact_tool('psql', '--dbname=service=target', '-XAtq',
+                '-v', 'ON_ERROR_STOP=1', '-c', '''
+SELECT
+  (SELECT nspowner = 'swarm_admin'::regrole FROM pg_namespace WHERE nspname='commonswarm_ops')
+  AND (SELECT relowner = 'swarm_admin'::regrole AND relrowsecurity
+       FROM pg_class WHERE oid='commonswarm_ops.migration_checksums'::regclass)
+  AND (SELECT count(*) = 3 FROM pg_proc WHERE
+       (oid=to_regprocedure('commonswarm_ops.guard_migration_checksums()')
+          AND proowner='swarm_admin'::regrole AND NOT prosecdef)
+       OR (oid=to_regprocedure('commonswarm_ops.migration_checksum_failures()')
+          AND proowner='swarm_admin'::regrole AND prosecdef)
+       OR (oid=to_regprocedure('commonswarm_ops.migration_ledger_versions()')
+          AND proowner='supabase_admin'::regrole AND prosecdef));
+''')
+            if inventory.strip() != 't':
+                raise ValueError('required ops functions, owners or RLS are missing')
+            gate = artifact_tool('psql', '--dbname=service=target', '-XAtq',
+                '-v', 'ON_ERROR_STOP=1', '-c',
+                'BEGIN READ ONLY; SET LOCAL ROLE commonswarm_oauth_runtime; '
+                'SELECT count(*) FROM commonswarm_ops.migration_checksum_failures(); ROLLBACK;')
+            if gate.strip() != '0':
+                raise ValueError('restored migration checksum gate failed')
+            result['ops_verified'] = True
             result['restored_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
             result['schema_checksums']['target'] = schema_checksum('target')
             measured = sql(' UNION ALL '.join(f"SELECT '{table}', count(*) FROM {table}" for table in KEY_TABLES) + ';')
@@ -533,7 +582,6 @@ def main():
             if sig in old_handlers:
                 signal.signal(sig, signal.SIG_IGN)
         try:
-            result['status'] = 'PASS' if result['state'] == 'verified_pending_cleanup' else 'FAIL'
             try:
                 atomic_write_status(status_file, result)
             finally:

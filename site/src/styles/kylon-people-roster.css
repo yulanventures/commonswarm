@@ -1,0 +1,67 @@
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-member-card { margin: 0; padding: 0; border: 0; border-radius: 0; box-shadow: none; background: transparent; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-member-card:has(.pd-person-head .pd-initials[data-hue]) { background: transparent; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-member-card + .pd-member-card { margin-block-start: 12px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-person-head { display: block; min-block-size: 0; padding: 0; border-radius: 6px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-person-disclosure,.pd-agent-disclosure) {
+  display: flex; flex: 1; align-items: center; gap: 10px; inline-size: 100%; min-inline-size: 44px; min-block-size: 56px;
+  padding: 8px 6px; box-sizing: border-box; border: 0; border-radius: 6px; background: transparent; color: var(--k-shell-ink); text-align: start;
+  font: 400 13px/1.5 var(--k-shell-font); cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-person-disclosure,.pd-agent-disclosure):hover { background: var(--k-shell-hover); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-person-disclosure,.pd-agent-disclosure)[aria-expanded="true"] { background: var(--k-shell-selected); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-person-copy,.pd-agent-copy) { display: grid; gap: 2px; min-inline-size: 0; flex: 1; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-person-name,.pd-agent-name-line > strong) {
+  font: 600 14px/1.5 var(--k-shell-font); white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-name-line { display: flex; flex-wrap: wrap; gap: 4px 6px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-person-sub,.pd-agent-app,.pd-muted) { color: var(--k-shell-secondary); font: 400 12px/1.5 var(--k-shell-font); overflow-wrap: anywhere; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-initials,.pd-orb) { flex: 0 0 30px; inline-size: 30px; block-size: 30px; font: 600 12px/1 var(--k-shell-font); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-initials[data-hue="0"] { background: var(--home-blue); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-initials[data-hue] { color: var(--home-on-person); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-initials[data-hue="1"] { background: var(--home-orange); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-initials[data-hue="2"] { background: var(--home-purple); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-initials[data-hue="3"] { background: var(--home-teal); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-orb { border-radius: 8px; background: var(--home-blue-tint); color: var(--home-blue-deep); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-orb[data-tint="1"] { background: var(--home-orange-tint); color: var(--home-orange-deep); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-orb[data-tint="2"] { background: var(--home-purple-tint); color: var(--home-purple-deep); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-orb[data-tint="3"] { background: var(--home-teal-tint); color: var(--home-teal-deep); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-orb:not([data-tint]) { background: transparent; border: 1px solid var(--k-shell-control); color: var(--k-shell-secondary); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agents-list { padding: 0; margin: 0; border: 0; list-style: none; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent {
+  position: relative; display: grid; grid-template-columns: minmax(0,1fr) 44px; align-items: start; gap: 0 4px;
+  padding: 0; margin: 0; border: 0; border-radius: 6px; background: transparent;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-disclosure { grid-column: 1; grid-row: 1; inline-size: 100%; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent:not(:has(> .pd-row-actions)) { grid-template-columns: minmax(0,1fr); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-status { padding: 0; border-radius: 0; background: transparent; color: var(--k-shell-secondary); font: 400 12px/1.5 var(--k-shell-font); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-status[data-attention="true"] { color: var(--home-offline-deep); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-row-actions { grid-column: 2; grid-row: 1; inline-size: 44px; max-inline-size: 100%; padding-block: 6px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-actions-toggle {
+  display: grid; place-items: center; min-inline-size: 44px; min-block-size: 44px; padding: 4px; border-radius: 6px;
+  color: var(--k-shell-muted); cursor: pointer; list-style: none;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent:is(:hover,:focus-within) .pd-actions-toggle { color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-actions-toggle::-webkit-details-marker { display: none; }
+/* Opening reserves one inline action row without moving the original summary or adding a box. */
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent:has(> .pd-row-actions[open]) { padding-block-end: 52px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-row-actions > .pd-agent-actions {
+  position: absolute; inset-inline: 46px 4px; inset-block-end: 4px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-actions { display: flex; flex-wrap: wrap; gap: 4px 12px; max-inline-size: 100%; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-agent-actions > *, .pd-invite button) {
+  display: inline-flex; align-items: center; min-block-size: 44px; min-inline-size: 44px; max-inline-size: 100%; padding: 6px;
+  border: 0; border-radius: 6px; box-shadow: none; background: transparent; color: var(--k-shell-ink);
+  font: 500 13px/1.5 var(--k-shell-font); white-space: normal; overflow-wrap: anywhere; text-decoration: none;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-row-repair {
+  grid-column: 1 / -1; justify-self: start; margin-inline-start: 46px;
+  min-block-size: 44px; min-inline-size: 44px; max-inline-size: calc(100% - 46px); padding: 6px 10px;
+  box-sizing: border-box; border: 1px solid var(--k-shell-control); border-radius: 6px;
+  background: var(--k-shell-surface); color: var(--k-shell-ink); font: 500 13px/1.5 var(--k-shell-font); white-space: normal; overflow-wrap: anywhere; text-decoration: none;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-roster-result,.pd-error,.pd-receipt) { grid-column: 1 / -1; padding: 6px; font-size: 12px; overflow-wrap: anywhere; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invited { margin-block-start: 16px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invited h3 { position: static; inline-size: auto; block-size: auto; overflow: visible; clip-path: none; white-space: normal; font-size: 12px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 6px; border-block-start: 1px solid var(--k-shell-line); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite .pd-agent-copy { flex: 1 1 140px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite strong { font: 600 14px/1.5 var(--k-shell-font); white-space: normal; overflow-wrap: anywhere; }

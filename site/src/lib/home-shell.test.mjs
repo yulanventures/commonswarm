@@ -14,14 +14,16 @@ test("names join in plain English", () => {
   assert.equal(joinNames(["Claude", "dot", "Grok"]), "Claude, dot and Grok");
 });
 
-test("the capsule subline puts you first, names two people, then +N", () => {
+test("the capsule subline puts you first, counts agents for two people, then +N", () => {
   const tom = { person: person("tom", "Tom Langridge", true), agents: [agent("c", "Claude"), agent("d", "dot")] };
   const nikki = { person: person("nikki", "Nikki Hale"), agents: [agent("m", "Muse")] };
   const priya = { person: person("priya", "Priya Shah"), agents: [] };
   const alex = { person: person("alex", "Alex Doe"), agents: [] };
-  assert.equal(capsuleSubline([nikki, tom]), "You with Claude and dot · Nikki with Muse");
-  assert.equal(capsuleSubline([priya, nikki, tom]), "You with Claude and dot · Nikki with Muse · +1");
-  assert.equal(capsuleSubline([priya, nikki, alex, tom]), "You with Claude and dot · Alex · +2");
+  assert.equal(capsuleSubline([nikki, tom]), "You with 2 agents · Nikki with 1 agent");
+  assert.equal(capsuleSubline([priya, nikki, tom]), "You with 2 agents · Nikki with 1 agent · +1");
+  assert.equal(capsuleSubline([priya, nikki, alex, tom]), "You with 2 agents · Alex · +2");
+  assert.equal(capsuleSubline([{ ...tom, agents: Array.from({ length: 17 }, (_, i) => agent(String(i), 'Long Agent Name ' + i)) }, nikki]),
+    "You with 17 agents · Nikki with 1 agent", "larger rosters keep truthful counts rather than an expanding name sentence");
   assert.equal(capsuleSubline([{ person: person("tom", "Tom", true), agents: [] }]), "You");
   assert.equal(capsuleSubline([]), "");
 });

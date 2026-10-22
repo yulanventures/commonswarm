@@ -31,6 +31,10 @@ type Geometry = {
   missingTitle: string; missingLink: { text: string; width: number; height: number } | null; loadingTitle: string; loadingBusy: boolean;
   readonlyControls: string[]; readonlyTitle: boolean; readonlyAssignee: string;
   unassignedStatus: string | null; savingBusy: boolean; savingMore: string | null; savingOpacity: number;
+  intros: Array<{ state: string; order: string[]; sharedHeader: boolean; title: string | null; titles: number; titleTabIndex: number;
+    metadata: string | null; notes: string | null; controls: string[]; backHref: string | null;
+    completionName: string | null; completionChecked: boolean | null; workspaceHref: string | null }>;
+  completed: boolean[]; backCalls: Array<{ state: string; href: string | null; prevented: boolean }>;
 };
 
 const site = fileURLToPath(new URL("../../../", import.meta.url));
@@ -48,6 +52,10 @@ test("To-do view, To-dos pane and pickers: keyboard paths, 44 px targets, wrappi
   assert.equal(script.includes("is not implemented yet"), false, "the bundle never reaches a pending() primitive");
   const css = await Promise.all(["tokens.css", "home/primitives.css", "home/todo.css", "home/pickers.css"]
     .map((name) => readFile(new URL(`../../styles/${name}`, import.meta.url), "utf8")));
+  const hostile = '<img src=x onerror="document.title=1">';
+  const filler = " Order the filters for the air conditioner in the hallway return and check the size printed on the old one";
+  const literalTitle = (hostile + filler + filler).slice(0, 200);
+  const literalNotes = hostile + " " + "x".repeat(160);
   const page = (theme: "light" | "dark") => `<!doctype html><html data-theme="${theme}"><head><meta name="viewport" content="width=device-width"><style>
       * { box-sizing: border-box; } body { margin: 0; background: var(--bg); }
       .dashboard [hidden] { display: none !important; }
@@ -55,9 +63,7 @@ test("To-do view, To-dos pane and pickers: keyboard paths, 44 px targets, wrappi
     </style></head><body><main class="dashboard"><div id="todo"></div><div id="off"></div><div id="person"></div><div id="pane"></div><div id="sample"></div><div id="missing"></div><div id="loading"></div><div id="readonly"></div><div id="unassigned"></div><div id="saving"></div></main>
     <script>${script}</script><script>
     (() => {
-      const hostile = '<img src=x onerror="document.title=1">';
-      const filler = ' Order the filters for the air conditioner in the hallway return and check the size printed on the old one';
-      const title = (hostile + filler + filler).slice(0, 200);
+      const hostile = ${JSON.stringify(hostile)}, title = ${JSON.stringify(literalTitle)};
       const st = (kind, word, detail, fix) => ({ kind, word, detail, attention: kind === 'disconnected', fix: fix || { action: null, allowed: false, askWho: null, sentence: '' } });
       const tom = { id: 'tom', name: 'Tom Langridge', firstName: 'Tom', initials: 'TL', you: true, role: 'owner' };
       const nikki = { id: 'nikki', name: 'Nikki Sato', firstName: 'Nikki', initials: 'NS', you: false, role: 'member' };
@@ -68,15 +74,17 @@ test("To-do view, To-dos pane and pickers: keyboard paths, 44 px targets, wrappi
       const muse = agent('muse', 'Muse', 'Nikki’s Muse', nikki, false, st('idle', 'Idle', 'Active 2 hours ago'));
       const people = { groups: [{ person: nikki, agents: [muse] }, { person: tom, agents: [claude, dot] }], other: [] };
       const may = { edit: true, assign: true, start: true, reorder: true, complete: true, comment: true };
-      const base = { workspaceId: 'w1', notes: hostile + ' ' + 'x'.repeat(160), state: 'open', addedBy: nikki, addedAt: '2026-10-06T18:52:00Z', due: '2026-10-09',
+      const base = { workspaceId: 'w1', notes: ${JSON.stringify(literalNotes)}, state: 'open', addedBy: nikki, addedAt: '2026-10-06T18:52:00Z', due: '2026-10-09',
         request: null, doneBy: null, doneAt: null, receipt: null, sample: false, may, tagDelivers: false,
         comments: [{ id: 'c1', author: muse, at: '2026-10-06T18:53:00Z', body: '@Nikki ' + hostile + ' ' + 'y'.repeat(140), tags: [{ id: 'nikki', label: 'Nikki' }] }] };
       const todo = { ...base, id: 't1', title, assignee: { kind: 'agent', agent: claude },
         start: { mode: 'gated', position: null, gate: { kind: 'todo', todo: { id: 't2', title: 'Get quotes', href: '#t2', done: false } }, at: null } };
       const off = { ...base, id: 't3', title: 'Book plumber', assignee: { kind: 'agent', agent: dot }, start: { mode: 'queue', position: 1, gate: null, at: null } };
       const personTodo = { ...base, id: 't4', title: 'Call the landlord', assignee: { kind: 'person', person: nikki }, start: null };
-      const calls = { assigned: [], comments: [] };
-      const callbacks = { complete: () => {}, assign: (option) => calls.assigned.push(option.value), setStart: () => {},
+      const calls = { assigned: [], comments: [], completed: [], back: [] };
+      const callbacks = { complete: (done) => calls.completed.push(done), assign: (option) => calls.assigned.push(option.value), setStart: () => {},
+        back: (event) => { event.preventDefault(); calls.back.push({ state: event.currentTarget.closest('[data-home-todo]').parentElement.id,
+          href: event.currentTarget.getAttribute('href'), prevented: event.defaultPrevented }); },
         comment: (body, tags) => calls.comments.push({ body, tags: tags.map((tag) => tag.id) }) };
       const vm = (value) => ({ workspace: { name: 'Home', todosHref: '#todos', homeHref: '#home' }, view: { kind: 'ready', todo: value },
         now: Date.parse('2026-10-07T15:00:00Z'), timeZone: 'UTC', people, facts: { lineCount: () => 2 }, openTodos: [{ id: 't2', title: 'Get quotes' }], save: 'idle' });
@@ -139,6 +147,24 @@ test("To-do view, To-dos pane and pickers: keyboard paths, 44 px targets, wrappi
         savingOpacity: (() => { let value = 1; for (let element = document.querySelector('#saving .hm-todo-status-more'); element; element = element.parentElement)
           value *= parseFloat(getComputedStyle(element).opacity); return value; })() };
 
+      // Observe actual document reading order and content, independent of wrapper classes or CSS order.
+      // Reuse the existing mounted states: the read-only and Sample cases must not acquire a checkbox/door.
+      metrics.intros = ['todo', 'sample', 'readonly', 'loading', 'missing'].map((state) => {
+        const article = document.getElementById(state).querySelector('[data-home-todo]');
+        const heading = article.querySelector('h1'), intro = heading?.closest('header');
+        const fragments = [...article.querySelectorAll('[data-todo-back],.hm-todo-where,[data-todo-complete],h1,.hm-todo-meta,.hm-todo-notes')];
+        const name = (node) => node.getAttribute('aria-label') || (node.labels?.[0] || node).textContent.trim();
+        const back = article.querySelector('[data-todo-back]'), completion = article.querySelector('[data-todo-complete]');
+        return { state, order: fragments.map(node => node.matches('[data-todo-back],.hm-todo-where') ? 'back'
+            : node.matches('[data-todo-complete]') ? 'complete' : node.matches('h1') ? 'title' : node.matches('.hm-todo-meta') ? 'metadata' : 'notes'),
+          sharedHeader: !!intro && article.contains(intro) && fragments.every(node => intro.contains(node)),
+          title: heading?.textContent ?? null, titles: article.querySelectorAll('h1').length, titleTabIndex: heading?.tabIndex,
+          metadata: article.querySelector('.hm-todo-meta')?.textContent ?? null, notes: article.querySelector('.hm-todo-notes')?.textContent ?? null,
+          controls: [...(intro?.querySelectorAll('a,button,input,select,textarea') || [])].map(name),
+          backHref: back?.getAttribute('href') ?? null, completionName: completion ? name(completion) : null,
+          completionChecked: completion?.checked ?? null, workspaceHref: article.querySelector('.hm-todo-link')?.getAttribute('href') ?? null };
+      });
+
       // Assign chips: one radiogroup named by the "Assigned to" heading, one roving tab stop on the recorded
       // assignee. Arrows move focus only (a pick is a write); Escape keeps focus and sends nothing; Enter and
       // Space pick the focused chip, and focus stays on it.
@@ -176,6 +202,11 @@ test("To-do view, To-dos pane and pickers: keyboard paths, 44 px targets, wrappi
       metrics.comments = calls.comments;
       field.value = 'again @'; field.setSelectionRange(7, 7); field.dispatchEvent(new Event('input', { bubbles: true })); key(field, 'Escape');
       metrics.tagEscapeClosed = field.getAttribute('aria-expanded') === 'false';
+      // The reparented native input still delivers the real checked boolean; Back still receives
+      // its cancellable actual anchor event in ready, reader and loading states.
+      root.querySelector('[data-todo-complete]').click(); root.querySelector('[data-todo-complete]').click();
+      for (const state of ['todo', 'readonly', 'loading']) document.getElementById(state).querySelector('[data-todo-back]').click();
+      metrics.completed = calls.completed; metrics.backCalls = calls.back;
       metrics.hostileElements = document.querySelectorAll('img').length;
       document.documentElement.dataset.metrics = btoa(unescape(encodeURIComponent(JSON.stringify(metrics))));
     })();
@@ -198,6 +229,36 @@ test("To-do view, To-dos pane and pickers: keyboard paths, 44 px targets, wrappi
       assert.ok(g.optionHeights.length === 5 && g.optionHeights.every((height) => height >= 44), `${where}: assign chips are 44 px`);
       assert.equal(g.titleWraps, true, `${where}: a 200-character title wraps`); assert.equal(g.titleOverflow, false);
       assert.equal(g.hostileElements, 0); assert.equal(g.hostileTitle, true); assert.equal(g.hostileComment, true); assert.equal(g.hostileRow, true);
+      assert.deepEqual(g.intros.map(row => row.state), ["todo", "sample", "readonly", "loading", "missing"], `${where}: every existing semantic state was observed`);
+      for (const row of g.intros) {
+        const detail = `${where} ${row.state}: ${JSON.stringify(row)}`;
+        assert.equal(row.titles, 1, `one actual page heading: ${detail}`);
+        assert.equal(row.titleTabIndex, -1, `navigation can focus the actual heading: ${detail}`);
+        const ready = ["todo", "sample", "readonly"].includes(row.state);
+        if (ready) {
+          assert.deepEqual(row.order, row.state === "todo" ? ["back", "complete", "title", "metadata", "notes"] : ["back", "title", "metadata", "notes"],
+            `single literal intro in document reading order, without duplicates: ${detail}`);
+          assert.equal(row.sharedHeader, true, `one semantic intro groups the actual context, title and facts: ${detail}`);
+          assert.equal(row.title, literalTitle, `the full hostile-looking title stays literal: ${detail}`);
+          assert.equal(row.notes, literalNotes, `the full unbroken note stays literal once: ${detail}`);
+          assert.equal(row.metadata, "Added by Nikki yesterday · Due Fri, Oct 9", `the real added/due facts occur once after the title: ${detail}`);
+          assert.deepEqual(row.controls, row.state === "todo" ? ["Home · To-dos", "Mark done"] : row.state === "sample" ? [] : ["Home · To-dos"],
+            `intro actions/names follow existing rights: ${detail}`);
+          assert.equal(row.backHref, row.state === "sample" ? null : "#todos", `back keeps the native destination and Sample has no door: ${detail}`);
+          assert.equal(row.completionName, row.state === "todo" ? "Mark done" : null, `completion keeps its native label and permission: ${detail}`);
+          assert.equal(row.completionChecked, row.state === "todo" ? false : null, `recorded completion state is unchanged before actions: ${detail}`);
+        } else {
+          assert.deepEqual(row.order, row.state === "loading" ? ["back", "title"] : ["title"], `loading/missing introduce no duplicate facts or completion: ${detail}`);
+          assert.equal(row.metadata, null); assert.equal(row.notes, null); assert.equal(row.completionName, null);
+          if (row.state === "loading") {
+            assert.equal(row.sharedHeader, true, `loading keeps one semantic Back/title intro: ${detail}`);
+            assert.deepEqual(row.controls, ["HR · To-dos"]); assert.equal(row.backHref, "#todos");
+          } else assert.equal(row.workspaceHref, "#home", `missing keeps the real workspace return destination: ${detail}`);
+        }
+      }
+      assert.deepEqual(g.completed, [true, false], `${where}: the native header checkbox retains both complete/undo payloads`);
+      assert.deepEqual(g.backCalls, ["todo", "readonly", "loading"].map(state => ({ state, href: "#todos", prevented: true })),
+        `${where}: the actual ready/reader/loading anchors still deliver their cancellable Back event`);
       assert.deepEqual(g.assignGroup, { role: "radiogroup", labelledBy: "hm-todo-t1-assigned", heading: "Assigned to", radios: 5, checked: ["claude"] },
         `${where}: the assign chips are one radiogroup named by the panel heading, with the recorded assignee checked`);
       assert.deepEqual(g.tabStops, ["claude"], "one tab stop, on the current assignee");
