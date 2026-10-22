@@ -33,6 +33,8 @@ export function renderWorkspaceSettings(
     countLabel(options.agentCount, "agent", "agents")
   }`;
 
+  const identity = document.createElement("div");
+  identity.className = "dashboard__workspace-identity";
   const idLabel = document.createElement("p");
   idLabel.className = "dashboard__popover-label";
   idLabel.textContent = "Workspace ID";
@@ -66,7 +68,11 @@ export function renderWorkspaceSettings(
   dangerTitle.textContent = "Close workspace";
   const warning = document.createElement("p");
   warning.textContent =
-    "This hides the workspace for everyone and frees its free-tier slot. Members lose access. Support can restore it.";
+    "This hides the workspace for everyone and frees its free-tier slot. Members lose access. ";
+  const support = document.createElement("a");
+  support.href = "/support";
+  support.textContent = "Contact support";
+  warning.append(support, " if you need help.");
   const form = document.createElement("form");
   form.dataset.workspaceCloseForm = "";
   const label = document.createElement("label");
@@ -122,6 +128,7 @@ export function renderWorkspaceSettings(
   label.append(input);
   form.append(label, button, status);
   danger.append(dangerTitle, warning, form);
-  root.replaceChildren(heading, counts, idLabel, id, copy, copyStatus, danger);
+  identity.append(idLabel, id, copy, copyStatus);
+  root.replaceChildren(heading, counts, identity, danger);
   return { confirmInput: input, closeButton: button };
 }
