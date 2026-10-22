@@ -991,6 +991,47 @@ export async function assertActiveFloorCatalog(sql) {
 }
 
 /** Runs one Deno scenario against the target. Only LOCK_ORDER_ lines are read back. */
+/** Fixed diagnostic protocol for the six delegated checks; never copy child objects. */
+function lockResultDiagnostics(result) {
+  const diagnostic = {};
+  if (['Error','TypeError','ReferenceError','SyntaxError','RangeError'].includes(result?.exception_kind))
+    diagnostic.exception_kind = result.exception_kind;
+  if (Array.isArray(result?.exception_sites)) diagnostic.exception_sites = result.exception_sites.slice(0,4)
+    .filter(site => Number.isSafeInteger(site?.line) && site.line > 0 && site.line <= 9999999
+      && Number.isSafeInteger(site?.column) && site.column > 0 && site.column <= 999999)
+    .map(site => ({source:'tests/support/admin-principal-lock-order-harness.mjs',line:site.line,column:site.column}));
+  const schemas = {
+    'residual-no-longer-authenticates': {status:'status'},
+    'revocation-final-ledger-wait-observed': {wait_result:'wait'},
+    'recipient-scope-and-human-boundaries': {foreign_status:'status',foreign_code:'code',foreign_calls:'count',
+      broadened_status:'status',broadened_code:'code',broadened_calls:'count',human_status:'status',human_code:'code'},
+    'fresh-parent-denial-after-wait': {status:'status',code:'code',calls:'count'},
+    'human-removal-through-real-command': {status:'status',code:'code',accepted:'boolean'},
+    'membership-and-hidden-parent-family-atomic': {removed:'boolean',revoked:'boolean',all_tokens_revoked:'boolean'},
+  };
+  const codes = ['recipient_runtime_required','worker_scope_forbidden','human_confirmation_required','grant_inactive',
+    'internal_error','forbidden','unauthenticated','unauthorized','invalid_request','fresh_auth_required',
+    'insufficient_scope','client_outdated','human_sign_in_required','not_found','admin_transaction_failed',
+    'admin_command_failed','admin_failure_audit_unavailable','temporarily_unavailable'];
+  const rows = [], seen = new Set();
+  if (Array.isArray(result?.failed_observations)) for (const row of result.failed_observations.slice(0,6)) {
+    if (!Object.hasOwn(schemas,row?.name) || seen.has(row.name)) continue;
+    seen.add(row.name);
+    const projected = {name:row.name};
+    for (const [key,type] of Object.entries(schemas[row.name])) {
+      const value = row[key];
+      projected[key] = type === 'status' ? (Number.isSafeInteger(value) && value >= 100 && value <= 599 ? value : 'redacted')
+        : type === 'count' ? (Number.isSafeInteger(value) && value >= 0 && value <= 1000 ? value : 'redacted')
+        : type === 'boolean' ? (typeof value === 'boolean' ? value : 'redacted')
+        : type === 'wait' ? (['blocked','timeout'].includes(value) ? value : 'redacted')
+        : codes.includes(value) ? value : 'redacted';
+    }
+    rows.push(projected);
+  }
+  if (rows.length) diagnostic.failed_observations = rows;
+  return new TextEncoder().encode(JSON.stringify(diagnostic)).byteLength <= 8192 ? diagnostic : {};
+}
+
 export async function runScenario(target, scenario, timeoutMs = 170_000, generations = null) {
   if(scenario==='historical-baseline-discriminator') {
     if(target.mode!=='ci' || typeof target.historicalChild!=='function') refuse('historical_initial_ci_child_required');
@@ -1075,12 +1116,14 @@ export async function runScenario(target, scenario, timeoutMs = 170_000, generat
       const diagnostic = { scenario, stage: invalid ? 'process_failed' : result.stage,
         error: invalid ?? result.error ?? 'process_failed',
         sqlstate: !invalid && /^(?:00|01|02|03|08|09|0A|0B|0F|0L|0P|0Z|20|21|22|23|24|25|26|27|28|2B|2D|2F|34|38|39|3B|3D|3F|40|42|44|53|54|55|57|58|F0|HV|P0|XX)[0-9A-Z]{3}$/u.test(result.error ?? '') ? result.error : null,
-        exit_code: exit.code, signal: exit.signal };
+        exit_code: exit.code, signal: exit.signal, ...lockResultDiagnostics(invalid ? null : result) };
       privateHarnessEvidence('lock-result', JSON.stringify(diagnostic));
       // A child that failed after setting complete must never pass the parent stage assertion.
       return { ...diagnostic, stage: diagnostic.stage === 'complete' ? 'process_failed' : diagnostic.stage,
         ...(scenario==='floor-first-use-vs-head-revocation' ? {required_compatibility:'BLOCKED',floor_compatibility:'INCONCLUSIVE'} : {}) };
     }
+    const diagnostics = lockResultDiagnostics(result);
+    if (diagnostics.failed_observations?.length) privateHarnessEvidence('lock-result', JSON.stringify({scenario,...diagnostics}));
     process.stdout.write(`ACTIVE_FLOOR_SOURCE ${JSON.stringify({scenario,source:result.source,read_source:result.read_source})}\n`);
     return adminIssuance === null ? result : { ...result, admin_issuance: adminIssuance };
   } finally {
@@ -2056,9 +2099,22 @@ async function golden(ctx) {
 /** M3 cases own the protected worker boundary, rather than re-testing the plan
  * helper. The regression is an own-parent status lock preceding a foreign
  * parent, or an unbounded/partially committed worker renewal after a wait. */
+const delegatedWaitForBlocked = waitForBlocked;
 async function delegatedLocalScenario(ctx,scenario) {
-  const {observer,out,failures}=ctx,checks=[];
-  const check=(name,ok)=>checks.push({name,ok:ok===true});
+  const {observer,out,failures}=ctx,checks=[],failed_observations=[];
+  let residualReadStatus, finalLedgerWaitState;
+  const waitForBlocked=async (...args)=>{
+    const result=await delegatedWaitForBlocked(...args);
+    finalLedgerWaitState=result===null ? 'timeout' : Number.isSafeInteger(result) && result>0 ? 'blocked' : 'redacted';
+    return result;
+  };
+  const check=(name,ok,observation)=>{
+    checks.push({name,ok:ok===true});
+    if (ok!==true && observation) {
+      const projected=lockResultDiagnostics({failed_observations:[{name,...observation()}]}).failed_observations;
+      if (projected && failed_observations.length<6) failed_observations.push(projected[0]);
+    }
+  };
   const accepted=r=>r.result.status===200 && r.result.body?.status==='accepted';
   const owner=await human(ctx,'m3-owner');
   const {workspaceId}=await workspace(ctx,owner,false);
@@ -2069,6 +2125,7 @@ async function delegatedLocalScenario(ctx,scenario) {
       method:'POST',headers:{authorization:`Bearer ${raw}`,'content-type':'application/json'},
       body:JSON.stringify({resource:'renewal_grants',workspace_id:workspaceId}),
     }));
+    residualReadStatus=response.status;
     return {status:response.status,body:await response.json()};
   };
   const provision=async (side,label)=>{
@@ -2229,7 +2286,7 @@ async function delegatedLocalScenario(ctx,scenario) {
       NOT EXISTS(SELECT 1 FROM swarm.renewal_grants g WHERE g.principal_id=t.principal_id AND g.revoked_at IS NULL) AS grants_ended
       FROM swarm.agent_tokens t WHERE t.token_id=${token}::uuid`;
     check('seat-revoke-ends-ungranted-residual-and-all-grants',ended.result.status===200 && facts.ended && facts.token_tomb && facts.lineage_tomb && facts.grants_ended);
-    check('residual-no-longer-authenticates',(await use(raw)).status===403);
+    check('residual-no-longer-authenticates',(await use(raw)).status===403,()=>({status:residualReadStatus}));
     const [extraEffects]=await observer`SELECT count(*)=2 AND bool_and(t.revoked_at IS NOT NULL) AS ended,
       bool_and(EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='lineage' AND z.target_id=t.lineage_id)) AS tombs
       FROM swarm.agent_tokens t WHERE token_id=ANY(${extra}::uuid[])`;
@@ -2245,7 +2302,7 @@ async function delegatedLocalScenario(ctx,scenario) {
       await tx`LOCK TABLE swarm.admin_command_results IN SHARE MODE`;
       latePending=lateAdmin.invoke({kind:'admin_revoke_seat',grant_id:lateAdmin.grant,workspace_id:workspaceId,
         principal_id:late.principal,reason_code:'owner_requested'});
-      check('revocation-final-ledger-wait-observed',await waitForBlocked(observer,Number(pid),async()=>true,2000)!==null);
+      check('revocation-final-ledger-wait-observed',await waitForBlocked(observer,Number(pid),async()=>true,2000)!==null,()=>({wait_result:finalLedgerWaitState}));
       await new Promise(resolve=>setTimeout(resolve,3200));
     });
     const lateResult=await latePending;
@@ -2314,7 +2371,7 @@ async function delegatedLocalScenario(ctx,scenario) {
     const foreign=await admin.invoke({...renewCommand(admin,seat),recipient_connection_id:id()},{worker:true});
     const broadened=await admin.invoke({...renewCommand(admin,seat),worker_scope_names:['post_signal','acquire']},{worker:true});
     const humanOnly=await admin.invoke({kind:'suspend_admin_delegation',grant_id:admin.grant,reason_code:'owner_requested'});
-    check('recipient-scope-and-human-boundaries',foreign.result.status===403 && foreign.result.body.error==='recipient_runtime_required' && broadened.result.status===403 && broadened.result.body.error==='worker_scope_forbidden' && humanOnly.result.status===403 && humanOnly.result.body.error==='human_confirmation_required' && !foreign.calls && !broadened.calls);
+    check('recipient-scope-and-human-boundaries',foreign.result.status===403 && foreign.result.body.error==='recipient_runtime_required' && broadened.result.status===403 && broadened.result.body.error==='worker_scope_forbidden' && humanOnly.result.status===403 && humanOnly.result.body.error==='human_confirmation_required' && !foreign.calls && !broadened.calls,()=>({foreign_status:foreign.result.status,foreign_code:foreign.result.body?.error,foreign_calls:foreign.calls,broadened_status:broadened.result.status,broadened_code:broadened.result.body?.error,broadened_calls:broadened.calls,human_status:humanOnly.result.status,human_code:humanOnly.result.body?.error}));
     check('boundary-refusals-spend-nothing',await family(seat)===before);
     const winner=await Promise.all([admin.invoke(renewCommand(admin,seat),{worker:true}),admin.invoke(renewCommand(admin,seat),{worker:true})]);
     const committed=winner.filter(r=>r.result.status===200 && r.calls===1),refused=winner.filter(r=>r.result.status===403 && r.calls===0);
@@ -2416,7 +2473,7 @@ async function delegatedLocalScenario(ctx,scenario) {
         WHERE grant_id=${admin.grant}::uuid`;
     });
     const denied=await pending;
-    check('fresh-parent-denial-after-wait',denied.result.status===403 && denied.calls===0 && denied.result.body.error==='grant_inactive');
+    check('fresh-parent-denial-after-wait',denied.result.status===403 && denied.calls===0 && denied.result.body.error==='grant_inactive',()=>({status:denied.result.status,code:denied.result.body?.error,calls:denied.calls}));
     check('parent-removal-no-renewal-or-budget-effect',await family(seat)===liveBefore);
     check('removed-parent-child-unusable',(await use(current.raw)).status!==200);
     // Same-invocation native human removal reaches the actual workspace command
@@ -2424,7 +2481,7 @@ async function delegatedLocalScenario(ctx,scenario) {
     const keeper=await human(ctx,'m3-keeper');await member(ctx,workspaceId,keeper,'owner');
     keeper.identity.interactiveAuthAtSeconds=Number((await observer`SELECT extract(epoch FROM clock_timestamp()) AS seconds`)[0].seconds);
     const removed=await manage(ctx,keeper,workspaceId,{kind:'remove_member',user_id:owner.userId,landing_authority_successor_user_id:keeper.userId});
-    check('human-removal-through-real-command',removed.status===200 && removed.body.status==='accepted');
+    check('human-removal-through-real-command',removed.status===200 && removed.body.status==='accepted',()=>({status:removed.status,code:removed.body?.error,accepted:removed.body?.status==='accepted'}));
     const [terminal]=await observer`SELECT m.revoked_at IS NOT NULL AS removed,g.revoked_at IS NOT NULL AS revoked,
       EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='renewal_grant' AND z.target_id=g.renewal_grant_id)
         AND NOT EXISTS(SELECT 1 FROM swarm.agent_tokens t WHERE t.renewal_grant_id=g.renewal_grant_id AND t.revoked_at IS NULL
@@ -2432,9 +2489,9 @@ async function delegatedLocalScenario(ctx,scenario) {
             AND child.first_used_at IS NOT NULL AND child.revoked_at IS NULL)) AS all_tokens_revoked
       FROM swarm.memberships m JOIN swarm.renewal_grants g ON g.workspace_id=m.workspace_id
       WHERE m.workspace_id=${workspaceId}::uuid AND m.user_id=${owner.userId}::uuid AND g.renewal_grant_id=${seat.grant}::uuid`;
-    check('membership-and-hidden-parent-family-atomic',terminal.removed && terminal.revoked && terminal.all_tokens_revoked);
+    check('membership-and-hidden-parent-family-atomic',terminal.removed && terminal.revoked && terminal.all_tokens_revoked,()=>({removed:terminal.removed,revoked:terminal.revoked,all_tokens_revoked:terminal.all_tokens_revoked}));
   }
-  return {checks};
+  return {checks,failed_observations};
 }
 
 /** Compatibility owns the old ordinary mint wire and the existing policy
