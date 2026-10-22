@@ -1,0 +1,40 @@
+/* Feed-empty presentation only; native visibility, width and scroll owners remain. */
+live-dashboard.dashboard[data-kylon-shell] [data-channel-view="feed-empty"] {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  text-align: center;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-channel-view="feed-empty"] > span.dashboard__feed-zero[aria-hidden="true"] {
+  display: none;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-channel-view="feed-empty"] > div {
+  min-inline-size: 0;
+  inline-size: 100%;
+  max-inline-size: 28rem;
+  margin-inline: auto;
+  gap: 8px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-channel-view="feed-empty"] [data-feed-empty-title] {
+  margin: 0;
+  color: var(--k-shell-ink);
+  font-family: var(--k-shell-font);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-channel-view="feed-empty"] [data-feed-empty-detail] {
+  max-inline-size: 48ch;
+  margin: 0 auto;
+  color: var(--k-shell-secondary);
+  font-family: var(--k-shell-font);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
