@@ -75,10 +75,10 @@ const fixtureScript = `
   }
   // The popup is a real todoView/tagPicker in the real standalone scroller. No pane height override.
   // This boundary was absent from primitive/index fixtures; old size containment must fail paint checks.
-  const until = async (predicate, label) => {
+  const until = async (predicate, label, diagnose = () => ({})) => {
     const deadline = performance.now() + 2000;
     while (!predicate() && performance.now() < deadline) await new Promise(resolve => requestAnimationFrame(resolve));
-    if (!predicate()) throw Error(label + ': ' + JSON.stringify({ width: innerWidth, height: innerHeight, fonts: document.fonts.status,
+    if (!predicate()) throw Error(label + ': ' + JSON.stringify({ ...diagnose(), width: innerWidth, height: innerHeight, fonts: document.fonts.status,
       phoneMedia: matchMedia('(max-width:52rem)').matches, scheme: getComputedStyle(app).getPropertyValue('--k-shell-scheme'), modal: app.querySelector('dialog')?.open,
       standalone: frame.hasAttribute('data-home-standalone'), active: document.activeElement?.outerHTML,
       field: app.querySelector('[data-todo-comment]')?.outerHTML,
@@ -88,6 +88,7 @@ const fixtureScript = `
         })) } }));
   };
   let todoAccountParent, tagDelivers, contextHomes, contextListeners, contextInventory;
+  let wikiHomes, wikiListeners, wikiButton;
   const visible = node => !!node?.getClientRects().length && !node.closest('[hidden],[inert]');
   const summary = label => [...app.querySelectorAll('.cs-todo-context summary')].find(node => node.textContent === label);
   const inventory = () => [...fixture.side.querySelectorAll('[data-side-card],.hm-side-entry')].filter(node => node.dataset.sideCard !== 'todos')
@@ -301,6 +302,81 @@ const fixtureScript = `
     fixture.restoreTodo(); ({ bar, menu, heading } = fixture);
     check('Chat restores adopted original heading/menu after detail', docked() && !frame.hasAttribute('data-home-standalone') && sameNodes());
   },
+  async wikiBegin() {
+    wikiHomes = [fixture.wiki.index, context, slot, fixture.side].map(node => ({ node, parent: node.parentNode, next: node.nextSibling }));
+    wikiListeners = fixture.listenerCount(); fixture.wiki.mount(); ({ bar, menu, heading } = fixture);
+    await until(() => fixture.wiki.index.closest('.cs-wiki-context') && app.querySelector('[data-wiki-composition]'), 'Wiki index not projected');
+    check('Wiki owns one original index and reader with intact shell identities', sameNodes() && app.querySelectorAll('.dashboard__brain-index').length === 1
+      && app.querySelectorAll('[data-brain-detail]').length === 1 && fixture.wiki.targets.list === fixture.wiki.index.querySelector('[data-brain-list]'));
+    const tools = app.querySelector('.cs-wiki-tools');
+    check('Wiki retains unique workspace/header/resources outside its index', tools?.closest('.cs-org-rail')
+      && !fixture.wiki.index.contains(tools) && context.closest('details') === tools && slot.closest('details') === tools
+      && fixture.side.closest('details') === tools && tools.querySelector('summary').getAttribute('aria-label') === 'Workspace tools');
+    check('Wiki initial selection is a prompt and does not read a file', !fixture.wiki.targets.selectionPrompt.hidden
+      && fixture.wiki.targets.detail.hidden && calls.filter(call => call.kind === 'wiki-read').length === 0);
+  },
+  wikiFocused(kind) {
+    return document.activeElement === (kind === 'index' ? fixture.wiki.index.querySelector('button') :
+      app.querySelector('.cs-wiki-tools > summary'));
+  },
+  async wikiRead() {
+    await until(() => calls.some(call => call.kind === 'wiki-read') && fixture.wiki.targets.markdown.textContent.includes('Invented local Wiki document'), 'Actual Wiki controller did not read');
+    check('moved Wiki index invokes original current-version read callback', calls.filter(call => call.kind === 'wiki-read').length === 1
+      && calls.find(call => call.kind === 'wiki-read').version === 2 && fixture.wiki.targets.title.textContent === 'fixture');
+    wikiButton = fixture.wiki.index.querySelector('button');
+  },
+  async wikiResource() {
+    const details = fixture.side.closest('details'), control = fixture.side.querySelector('[data-side-todo-complete="side-allowed"]');
+    check('Wiki resources use native disclosure and original controls', details.open && !!control && visible(control));
+    const before = calls.length, count = calls.filter(call => call.kind === 'resource-complete').length;
+    control.click();
+    await until(() => calls.slice(before).filter(call => call.kind === 'resource-complete' && call.id === 'side-allowed').length >= 1,
+      'Wiki retained resource callback did not settle', () => ({ calls: calls.slice(before).slice(-6),
+        control: { ...elementFact(control), checked: control.checked, disabled: control.disabled, connected: control.isConnected,
+          visible: visible(control), disclosureOpen: details.open } }));
+    check('Wiki retained resource callback preserves original principal', calls.filter(call => call.kind === 'resource-complete').length === count + 1
+      && calls.at(-1).id === 'side-allowed');
+    fixture.renderHeader(); fixture.renderRail(); fixture.renderResources(); ({ bar, menu, heading } = fixture);
+    check('Wiki owner refresh restores before replacement and reuses real slots', context.closest('.cs-wiki-tools') && slot.closest('.cs-wiki-tools')
+      && fixture.side.closest('.cs-wiki-tools') && fixture.wiki.index.querySelector('button') === wikiButton && sameNodes()
+      && fixture.refreshRecords.slice(-3).every(record => wikiHomes.some(home => home.node === record.node && home.parent === record.parent)));
+  },
+  async wikiPlaced(width) {
+    const phone = width <= 832;
+    await until(() => innerWidth === width && matchMedia('(max-width:52rem)').matches === phone &&
+      fixture.wiki.index.parentNode === (phone ? fixture.wiki.home.parent : app.querySelector('.cs-wiki-context')) &&
+      document.activeElement === (phone ? fixture.wiki.targets.title : wikiButton),
+      'Wiki responsive original index placement/focus did not settle');
+    check('Wiki resize retains one original index and gives focus to the visible pane',
+      visible(phone ? fixture.wiki.targets.title : wikiButton) && fixture.wiki.index.querySelector('button') === wikiButton && sameNodes(), { width, active: elementFact(document.activeElement) });
+    if (phone) {
+      const back = fixture.wiki.targets.back, bounds = rect(back);
+      check('Phone selected Wiki shows only the document and labelled native Back', !visible(wikiButton)
+        && visible(back) && back.getAttribute('aria-label') === 'Back to Wiki'
+        && back.tagName === 'BUTTON' && bounds.width >= 44 && bounds.height >= 44 && visible(fixture.wiki.targets.title),
+        { back: elementFact(back), label: back.getAttribute('aria-label'), bounds });
+    }
+  },
+  wikiBack() {
+    const readCount = calls.filter(call => call.kind === 'wiki-read').length;
+    const index = fixture.wiki.index, text = fixture.wiki.targets.markdown.textContent;
+    fixture.wiki.targets.back.click();
+    check('Phone Back restores selected topic focus in the retained index without a read',
+      index === app.querySelector(".dashboard__brain-index") && document.activeElement === wikiButton && visible(wikiButton)
+      && !visible(fixture.wiki.targets.title) && fixture.wiki.targets.markdown.textContent === text
+      && calls.filter(call => call.kind === 'wiki-read').length === readCount);
+  },
+  wikiRestore() {
+    fixture.wiki.clear(); ({ bar, menu, heading } = fixture);
+    check('Wiki Chat return restores exact homes and removes only its listener/adapter', wikiHomes.every(home => home.node.parentNode === home.parent && home.node.nextSibling === home.next)
+      && !app.querySelector('.cs-wiki-context') && !app.querySelector('[data-wiki-composition]') && fixture.listenerCount() === wikiListeners && sameNodes());
+    fixture.wiki.mount(); host.suspend();
+    check('Wiki suspend restores original index and workspace/resource slot homes', fixture.wiki.index.parentNode === fixture.wiki.home.parent
+      && fixture.wiki.index.nextSibling === fixture.wiki.home.next && context.parentNode === contextParent
+      && slot.parentNode === wikiHomes.find(home => home.node === slot).parent && fixture.side.parentNode === frame
+      && account.parentNode === accountParent && !app.querySelector('.cs-wiki-context') && !app.querySelector('.cs-org-shell') && fixture.listenerCount() === 0);
+    fixture.wiki.clear(); ({ bar, menu, heading } = fixture);
+  },
   async contextBegin() {
     contextHomes = [context, slot, fixture.side].map(node => ({ node, parent: node.parentNode, next: node.nextSibling, hidden: node.hidden }));
     contextListeners = fixture.listenerCount(); contextInventory = inventory();
@@ -492,10 +568,30 @@ const fixtureScript = `
         && Math.max(...bounds.map(b => b.width)) - Math.min(...bounds.map(b => b.width)) <= 1 && Math.abs(bounds[3].right - detail.right) <= .5
       : bounds.every(b => Math.abs(b.top - bounds[0].top) <= .5), { phone, bounds, detail });
     for (const node of [app.querySelector('.hm-assign-chip[aria-checked="true"]'), app.querySelector('.hm-choice:has(input:checked)')]) {
-      const s = getComputedStyle(node), inside = surface(node), outside = surface(node.parentElement), ratios = [inside, outside].map(bg => contrast(color(s.borderLeftColor), bg));
-      check('selected actual chip/choice uses distinct olive with3:1 both sides', equalColor(s.borderLeftColor, token(node, '--cs-accent'))
-        && parseFloat(s.borderLeftWidth) >= 1 && s.boxShadow === 'none' && ratios.every(ratio => ratio >= 3),
-        { text: node.textContent, border: s.border, background: s.backgroundColor, inside, outside, ratios });
+      const idle = node.parentElement.querySelector(node.matches('.hm-assign-chip')
+        ? '.hm-assign-chip[aria-checked="false"]' : '.hm-choice:not(:has(input:checked))');
+      const selectionEdge = () => {
+        const s = getComputedStyle(node), u = getComputedStyle(idle), inside = surface(node), outside = surface(node.parentElement);
+        const ratios = [inside, outside].map(bg => contrast(color(s.borderLeftColor), bg));
+        const idleRatios = [surface(idle), surface(idle.parentElement)].map(bg => contrast(color(u.borderLeftColor), bg));
+        return { pass: parseFloat(s.borderLeftWidth) >= Math.max(1, parseFloat(u.borderLeftWidth)) && s.boxShadow === 'none'
+          && ratios.every(ratio => ratio >= 3) && Math.min(...ratios) >= Math.min(...idleRatios)
+          && !equalColor(s.borderLeftColor, u.borderLeftColor),
+          text: node.textContent, border: s.border, idleBorder: u.border, background: s.backgroundColor, inside, outside, ratios, idleRatios };
+      };
+      const normal = selectionEdge();
+      check('selected actual chip/choice edge is distinct,3:1 and at least as strong as idle', normal.pass, normal);
+      if (innerWidth === 1471 && token(app, '--k-shell-scheme') === 'dark') {
+        // The former dark border clears3:1 yet loses to idle. Exercise that specific regression,
+        // then restore the actual cascade; no replacement builder or production test seam.
+        const old = node.style.getPropertyValue('border-color'), priority = node.style.getPropertyPriority('border-color');
+        let weakened;
+        try { node.style.setProperty('border-color', '#697344', 'important'); weakened = selectionEdge(); }
+        finally { if (old) node.style.setProperty('border-color', old, priority); else node.style.removeProperty('border-color'); }
+        check('former dark edge fails selection hierarchy despite3:1; actual cascade is restored', !weakened.pass
+          && weakened.ratios.every(ratio => ratio >= 3) && Math.min(...weakened.ratios) < Math.min(...weakened.idleRatios)
+          && selectionEdge().pass && getComputedStyle(node).border === normal.border, { weakened, restored: selectionEdge() });
+      }
     }
   },
   styleFocused(kind) {
@@ -731,6 +827,22 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
     await evaluate("window.hostObserver.settle()");
     }
     await evaluate("window.hostObserver.refreshFocus()");
+    if (width === 1471) {
+      // Existing real host + exact Astro Wiki targets + actual public brain controller.
+      // Native Enter owns the read/disclosure; no backend or replacement controller.
+      await evaluate("window.hostObserver.wikiBegin()");
+      await nativeTab("window.hostObserver.wikiFocused('index')", "original Wiki index");
+      await key("Enter"); await evaluate("window.hostObserver.wikiRead()");
+      await nativeTab("window.hostObserver.wikiFocused('Workspace tools')", "Wiki workspace tools");
+      await key("Enter"); await evaluate("window.hostObserver.wikiResource()");
+      await nativeTab("window.hostObserver.wikiFocused('index')", "retained Wiki index");
+      for (const nextWidth of [390, 1471]) {
+        await send("Emulation.setDeviceMetricsOverride", { width: nextWidth, height: nextWidth === 390 ? 844 : 900, deviceScaleFactor: 1, mobile: false });
+        await evaluate(`window.hostObserver.wikiPlaced(${nextWidth})`);
+        if (nextWidth === 390) await evaluate("window.hostObserver.wikiBack()");
+      }
+      await evaluate("window.hostObserver.wikiRestore()");
+    }
     if ([1471, 1024].includes(width)) {
       await evaluate("window.hostObserver.contextBegin()");
       for (const theme of ["light", "dark"]) {

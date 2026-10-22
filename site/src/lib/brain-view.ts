@@ -11,6 +11,9 @@ export interface BrainTopic extends WorkspaceFile {
 }
 
 export interface BrainViewTargets {
+  view: HTMLElement;
+  back: HTMLButtonElement;
+  selectionPrompt: HTMLElement;
   list: HTMLUListElement;
   empty: HTMLElement;
   detail: HTMLElement;
@@ -21,6 +24,7 @@ export interface BrainViewTargets {
   raw: HTMLElement;
   rawToggle: HTMLButtonElement;
   error: HTMLElement;
+  retry: HTMLButtonElement;
   edit: HTMLButtonElement;
   form: HTMLFormElement;
   textarea: HTMLTextAreaElement;
@@ -86,6 +90,34 @@ export function createBrainView(
   let activeVersion = 0;
   let activeMarkdown = "";
   let requestVersion = 0;
+  let failedRead: { topic: string; fileId: string; version: number; request: number; message: string; heldFocus: boolean } | null = null;
+  const resetRetry = (): void => {
+    failedRead = null;
+    targets.retry.hidden = true;
+    targets.retry.disabled = false;
+    targets.retry.textContent = "Retry";
+  };
+  const returnRetryFocus = (held: boolean, target: HTMLElement): void => {
+    const doc = target.ownerDocument;
+    if (held && (doc.activeElement === targets.retry || doc.activeElement === doc.body) &&
+      target.getClientRects().length && !target.closest("[hidden], [inert]")) target.focus();
+  };
+  resetRetry();
+
+  // Presentation state belongs to this controller, including pending/error readers.
+  // Back retains the selected file, source and draft; it never initiates a read.
+  const showSelection = (selected: boolean): void => {
+    targets.view.dataset.brainSelection = selected ? "document" : "index";
+    targets.detail.hidden = !selected;
+    targets.selectionPrompt.hidden = selected;
+  };
+  showSelection(false);
+  targets.back.addEventListener("click", () => {
+    showSelection(false);
+    const selected = Array.from(targets.list.querySelectorAll<HTMLButtonElement>("[data-brain-topic]"))
+      .find(button => button.dataset.brainTopic === activeTopic);
+    selected?.focus({ preventScroll: true });
+  });
 
   const setRawMode = (showRaw: boolean): void => {
     /* Keep the full source out of the DOM until a reader asks for it. The default
@@ -148,16 +180,23 @@ export function createBrainView(
     }
   };
 
-  const open = async (topicName: string, version?: number): Promise<void> => {
+  const open = async (topicName: string, version?: number, retrying = false): Promise<void> => {
     const topic = topics.find((candidate) => candidate.topic === topicName);
     if (!topic) return;
     const selectedVersion = version ?? topic.currentVersion;
     if (selectedVersion < 1 || selectedVersion > topic.currentVersion) return;
+    const enteringFromIndex = targets.list.contains(targets.list.ownerDocument.activeElement);
     const request = ++requestVersion;
+    const heldFocus = retrying && targets.retry.ownerDocument.activeElement === targets.retry;
+    if (retrying && failedRead) failedRead = { ...failedRead, request, heldFocus };
+    else resetRetry();
+    targets.retry.hidden = !retrying;
+    targets.retry.disabled = retrying;
+    targets.retry.textContent = retrying ? "Retrying…" : "Retry";
     activeTopic = topic.topic;
     activeFileId = topic.fileId;
     activeVersion = selectedVersion;
-    targets.detail.hidden = false;
+    showSelection(true);
     targets.title.textContent = topic.topic;
     targets.meta.textContent = "Loading topic…";
     targets.markdown.replaceChildren();
@@ -171,8 +210,13 @@ export function createBrainView(
     setError();
     setStatus();
     renderList();
+    // Only the phone presentation hides the activating topic button.
+    if (enteringFromIndex && targets.back.getClientRects().length && !targets.back.closest("[hidden], [inert]"))
+      targets.title.focus({ preventScroll: true });
+    let readCompleted = false;
     try {
       const markdown = await options.read(topic, selectedVersion);
+      readCompleted = true;
       if (request !== requestVersion) return;
       activeMarkdown = markdown;
       const age = formatFileAge(topic.committedAt, options.now);
@@ -184,13 +228,33 @@ export function createBrainView(
       targets.rawToggle.disabled = false;
       targets.edit.hidden = selectedVersion !== topic.currentVersion;
       renderHistory(topic);
+      const ownsFocus = heldFocus && (targets.retry.ownerDocument.activeElement === targets.retry ||
+        targets.retry.ownerDocument.activeElement === targets.retry.ownerDocument.body);
+      resetRetry();
+      returnRetryFocus(ownsFocus, targets.title);
     } catch (error) {
       if (request !== requestVersion) return;
-      targets.meta.textContent = `${versionLabel(topic.currentVersion)} · ${topic.updaterName}`;
-      setError(error instanceof Error ? error.message : "The topic could not be loaded.");
+      targets.meta.textContent = `${versionLabel(topic.currentVersion)} · ${topic.updaterName}` +
+        (selectedVersion === topic.currentVersion ? "" : ` · viewing v${selectedVersion}`);
+      const message = !readCompleted && error instanceof TypeError ? "This page could not be loaded. Try again."
+        : error instanceof Error ? error.message : "The topic could not be loaded.";
+      setError(message);
+      failedRead = { topic: topic.topic, fileId: topic.fileId, version: selectedVersion, request, message, heldFocus };
+      targets.retry.hidden = false;
+      targets.retry.disabled = false;
+      targets.retry.textContent = "Retry";
       renderHistory(topic);
+      returnRetryFocus(heldFocus, targets.retry);
     }
   };
+
+  targets.retry.addEventListener("click", () => {
+    const failed = failedRead;
+    if (targets.retry.disabled || !failed || failed.request !== requestVersion ||
+      activeTopic !== failed.topic || activeFileId !== failed.fileId || activeVersion !== failed.version ||
+      !topics.some(topic => topic.topic === failed.topic && topic.fileId === failed.fileId && topic.currentVersion >= failed.version)) return;
+    void open(failed.topic, failed.version, true);
+  });
 
   targets.rawToggle.addEventListener("click", () => {
     setRawMode(targets.rawToggle.getAttribute("aria-pressed") !== "true");
@@ -270,8 +334,19 @@ export function createBrainView(
         targets.raw.textContent = "";
         targets.rawToggle.disabled = true;
         setRawMode(false);
-        targets.detail.hidden = true;
+        showSelection(false);
         targets.form.hidden = true;
+      }
+      if (failedRead) {
+        if (!survivor || survivor.fileId !== failedRead.fileId || survivor.currentVersion < failedRead.version) resetRetry();
+        else {
+          failedRead = { ...failedRead, request: requestVersion };
+          setError(failedRead.message);
+          targets.retry.hidden = false;
+          targets.retry.disabled = false;
+          targets.retry.textContent = "Retry";
+          returnRetryFocus(failedRead.heldFocus, targets.retry);
+        }
       }
     },
   };

@@ -40,10 +40,17 @@ import "../../styles/kylon-layout/index.css";
 import "../../styles/kylon-workspace-settings-integration.css";
 import "../../styles/kylon-files.css";
 import "../../styles/kylon-people.css";
+import "../../styles/kylon-wiki.css";
+import "../../styles/kylon-wiki-context.css";
 import "../../styles/kylon-account-dialogs.css";
 import "../../styles/dashboard-welcome.css";
 import "../../styles/kylon-todos.css";
 import "../../styles/kylon-todos-context.css";
+import "../../styles/kylon-onboarding.css";
+import "../../styles/kylon-entity-profile.css";
+import "../../styles/kylon-channel-dialog.css";
+import "../../styles/kylon-agent-page.css";
+import "../../styles/kylon-chat-empty.css";
 
 const signInMethods = signInDoors(await enabledProvidersForBuild({
   url: import.meta.env.PUBLIC_SUPABASE_URL,
@@ -624,36 +631,62 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               <ul class="dashboard__file-list" data-file-list hidden></ul>
             </section>
 
-            <section class="dashboard__brain-view" data-channel-view="brain" hidden>
-              <h1 class="hm-pane-title" tabindex="-1">Wiki</h1>
+            <section class="dashboard__brain-view" data-channel-view="brain" aria-labelledby="dashboard-wiki-title" hidden>
+              <h1 id="dashboard-wiki-title" class="hm-pane-title" tabindex="-1">Wiki</h1>
               <aside class="dashboard__brain-index" aria-label="Wiki pages">
+                <p class="cs-wiki-mode">Wiki</p>
                 <p class="dashboard__brain-notice" role="status" data-brain-notice hidden></p>
                 <p class="dashboard__brain-empty" data-brain-empty></p>
                 <ul class="dashboard__brain-list" data-brain-list hidden></ul>
               </aside>
+              <div class="dashboard__brain-selection-prompt" data-brain-selection-prompt>
+                <div class="dashboard__brain-selection-copy">
+                  <svg width="28" height="28" viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M14 7c-3-2-7-2-11-1v17c4-1 8-1 11 1 3-2 7-2 11-1V6c-4-1-8-1-11 1Zm0 0v17" />
+                    <path d="M7 10h3m-3 4h3m8-4h3m-3 4h3" />
+                  </svg>
+                  <h2>Choose a Wiki page</h2>
+                  <p>Open a page from the Wiki list to read it and browse its versions.</p>
+                </div>
+              </div>
               <article class="dashboard__brain-topic" id="dashboard-brain-topic" data-brain-detail hidden>
                 <header class="dashboard__brain-topic-head">
-                  <div>
-                    <h2 data-brain-title></h2>
+                  <button class="dashboard__brain-back" type="button" data-brain-back aria-label="Back to Wiki" title="Back to Wiki">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="m12 5-5 5 5 5" />
+                    </svg>
+                  </button>
+                  <div class="dashboard__brain-identity">
+                    <h2 data-brain-title tabindex="-1"></h2>
                     <p data-brain-meta></p>
                   </div>
-                  <button class="dashboard__button dashboard__button--secondary" type="button" data-brain-edit>
-                    Edit
-                  </button>
+                  <div class="dashboard__brain-actions">
+                    <button class="dashboard__button dashboard__button--secondary" type="button" data-brain-edit>
+                      Edit
+                    </button>
+                    <div class="dashboard__brain-body-mode" data-brain-body-mode hidden>
+                      <button
+                        class="dashboard__brain-raw-toggle"
+                        type="button"
+                        aria-controls="dashboard-brain-markdown dashboard-brain-raw"
+                        aria-pressed="false"
+                        data-brain-raw-toggle
+                        disabled
+                      >Raw</button>
+                    </div>
+                    <details class="dashboard__brain-history" data-brain-history>
+                      <summary aria-label="Version history" title="Version history">
+                        <svg class="dashboard__brain-history-icon" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                          <path d="M3 7a7 7 0 1 1 0 6M3 3v4h4m3-1v4l3 2" />
+                        </svg>
+                        <span class="dashboard__brain-history-label">Version history</span>
+                      </summary>
+                      <ul data-brain-history-list></ul>
+                    </details>
+                  </div>
                 </header>
                 <p class="dashboard__form-error" role="alert" data-brain-error hidden></p>
-                <p class="dashboard__brain-body-mode" data-brain-body-mode hidden>
-                  <span>Rendered from markdown</span>
-                  <span aria-hidden="true"> · </span>
-                  <button
-                    class="dashboard__brain-raw-toggle"
-                    type="button"
-                    aria-controls="dashboard-brain-markdown dashboard-brain-raw"
-                    aria-pressed="false"
-                    data-brain-raw-toggle
-                    disabled
-                  >Raw</button>
-                </p>
+                <button class="dashboard__button dashboard__button--secondary" type="button" data-brain-retry hidden>Retry</button>
                 <div
                   class="dashboard__message-markdown dashboard__brain-markdown"
                   id="dashboard-brain-markdown"
@@ -676,10 +709,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                   </div>
                 </form>
                 <p class="dashboard__brain-status" role="status" aria-live="polite" data-brain-status></p>
-                <details class="dashboard__brain-history" data-brain-history>
-                  <summary>Version history</summary>
-                  <ul data-brain-history-list></ul>
-                </details>
               </article>
             </section>
 
@@ -4492,7 +4521,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       const pane = homeRoute.view === "todo" ? "todos" : homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" || homeRoute.view === "people" ? homeRoute.view : "chat";
       const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
-        people: currentHomePeople().groups, pane, contextTitle: homeRoute.view === "people", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
+        people: currentHomePeople().groups, pane, contextTitle: homeRoute.view === "people" || homeRoute.view === "wiki", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
         hrefs: { chat: routeHref({ view: "chat", workspaceId: workspace.id }), todos: routeHref({ view: "todos", workspaceId: workspace.id }),
           lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }),
           wiki: routeHref({ view: "wiki", workspaceId: workspace.id }), workspaces: routeHref({ view: "catchup" }) },
@@ -4639,8 +4668,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (homeRoute.view !== "people") parkPeopleHosts();
       if (channel) channel.hidden = home || homeRoute.view === "todo" || homeRoute.view === "agent" || homeRoute.view === "todos" || homeRoute.view === "people";
       const channelHead = channel?.querySelector<HTMLElement>(".dashboard__channel-head");
-      if (channelHead) channelHead.hidden = homeRoute.view === "files";
-      channel?.setAttribute("aria-labelledby", homeRoute.view === "files" ? "dashboard-files-title" : "dashboard-channel-title");
+      if (channelHead) channelHead.hidden = homeRoute.view === "files" || homeRoute.view === "wiki";
+      channel?.setAttribute("aria-labelledby", homeRoute.view === "files" ? "dashboard-files-title" : homeRoute.view === "wiki" ? "dashboard-wiki-title" : "dashboard-channel-title");
       const channelMenu = one<HTMLElement>("[data-home-channel-menu]");
       if (channelMenu) channelMenu.hidden = homeRoute.view !== "chat";
       const frame = one<HTMLElement>(".hm-frame");
@@ -5206,6 +5235,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
 
     const brainViewTargets = (): BrainViewTargets | null => {
+      const view = one<HTMLElement>("[data-channel-view=brain]");
+      const back = one<HTMLButtonElement>("[data-brain-back]");
+      const selectionPrompt = one<HTMLElement>("[data-brain-selection-prompt]");
       const list = one<HTMLUListElement>("[data-brain-list]");
       const empty = one<HTMLElement>("[data-brain-empty]");
       const detail = one<HTMLElement>("[data-brain-detail]");
@@ -5216,6 +5248,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const raw = one<HTMLElement>("[data-brain-raw]");
       const rawToggle = one<HTMLButtonElement>("[data-brain-raw-toggle]");
       const error = one<HTMLElement>("[data-brain-error]");
+      const retry = one<HTMLButtonElement>("[data-brain-retry]");
       const edit = one<HTMLButtonElement>("[data-brain-edit]");
       const form = one<HTMLFormElement>("[data-brain-form]");
       const textarea = one<HTMLTextAreaElement>("[data-brain-textarea]");
@@ -5225,14 +5258,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const history = one<HTMLDetailsElement>("[data-brain-history]");
       const historyList = one<HTMLUListElement>("[data-brain-history-list]");
       if (
-        !list || !empty || !detail || !title || !meta || !bodyMode || !markdown ||
+        !view || !back || !selectionPrompt || !list || !empty || !detail || !title || !meta || !bodyMode || !markdown ||
         !raw || !rawToggle || !error ||
-        !edit || !form || !textarea || !save || !cancel || !status || !history ||
+        !retry || !edit || !form || !textarea || !save || !cancel || !status || !history ||
         !historyList
       ) return null;
       return {
-        list, empty, detail, title, meta, bodyMode, markdown, raw, rawToggle,
-        error, edit, form, textarea, save, cancel, status, history, historyList,
+        view, back, selectionPrompt, list, empty, detail, title, meta, bodyMode, markdown, raw, rawToggle,
+        error, retry, edit, form, textarea, save, cancel, status, history, historyList,
       };
     };
 
@@ -8181,7 +8214,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (refresh) refresh.hidden = sampleMode || agents.length === 0;
         returnToChannel();
       }
-      window.requestAnimationFrame(() => (view === "files" ? one<HTMLElement>("#dashboard-files-title") : name)?.focus({ preventScroll: true }));
+      window.requestAnimationFrame(() => (view === "files" ? one<HTMLElement>("#dashboard-files-title") : view === "brain" ? one<HTMLElement>("#dashboard-wiki-title") : name)?.focus({ preventScroll: view !== "brain" }));
     };
 
 

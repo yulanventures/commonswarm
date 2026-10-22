@@ -59,8 +59,18 @@ live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] :is(
   color: var(--k-shell-secondary);
   overflow-wrap: anywhere;
 }
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-identity {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 10px;
+  min-inline-size: 0;
+  margin-block-start: 8px;
+}
 live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__popover-label {
-  margin-block-start: 12px;
+  grid-column: 1;
+  grid-row: 1;
+  margin: 0;
   font-size: 12px;
   line-height: 18px;
   letter-spacing: 0;
@@ -68,21 +78,28 @@ live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .das
   color: var(--k-shell-muted);
 }
 live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-id {
+  grid-column: 1;
+  grid-row: 2;
+  display: block;
   min-inline-size: 0;
   max-inline-size: 100%;
   min-block-size: max-content;
   overflow: visible;
   text-overflow: clip;
   white-space: normal;
-  padding: 10px 12px;
+  padding: 8px 10px;
   border: 1px solid var(--k-shell-line);
   border-radius: 6px;
   background: var(--k-shell-subtle);
   color: var(--k-shell-secondary);
   font-size: 12px;
+  line-height: 18px;
   overflow-wrap: anywhere;
+  user-select: text;
 }
 live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] [data-copy-workspace-id] {
+  grid-column: 2;
+  grid-row: 2;
   justify-self: start;
   text-decoration: none;
   min-block-size: 36px;
@@ -98,13 +115,17 @@ live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] [dat
   background: var(--k-shell-subtle);
 }
 live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] [data-workspace-id-status] {
+  grid-column: 2;
+  grid-row: 1;
   font-size: 12px;
   line-height: 18px;
+  color: var(--k-shell-secondary);
 }
 live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-danger {
-  gap: 12px;
-  margin-block-start: 14px;
-  padding-block-start: 20px;
+  gap: 8px;
+  margin-block-start: 8px;
+  padding-block-start: 16px;
+  border-block-start: 1px solid var(--k-shell-line);
 }
 live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-danger h3 {
   font-family: var(--k-shell-font);
@@ -137,7 +158,12 @@ live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] [dat
   line-height: 20px;
   font-weight: 600;
 }
-live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] :is(button, input):focus-visible {
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-danger a {
+  color: var(--k-shell-ink);
+  text-decoration: underline;
+  text-underline-offset: .15em;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] :is(button, input, a):focus-visible {
   outline: 2px solid var(--k-shell-focus);
   outline-offset: 2px;
   box-shadow: none;

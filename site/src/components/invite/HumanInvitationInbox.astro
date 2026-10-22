@@ -26,9 +26,12 @@
  * disclosure is shown exactly as sent.
  */
 import { CONTENT_ROLES, CONTENT_ROLE_COPY } from "../../lib/household-access";
+import "../../styles/kylon-tokens.css";
+import "../../styles/kylon-font.css";
+import "../../styles/kylon-invitation-inbox.css";
 ---
 
-<human-invitation-inbox hidden data-placement="corner">
+<human-invitation-inbox hidden data-kylon-invite data-placement="corner">
   <section class="human-invitations" aria-label="Workspace invitation">
     <p class="human-invitations__first" data-first hidden>
       Review this invitation first. You can still create your own workspace later.

@@ -312,7 +312,8 @@ test("/invite keeps every view and the join state machine", async () => {
 
 test("the invitation card is invisible unless there is something to show, and waits for the dashboard", async () => {
   const page = await load("HumanInvitationInbox.astro");
-  assert.match(page.markup, /<human-invitation-inbox hidden data-placement="corner">/);
+  // Initial visibility and placement are the contract; styling hooks and attribute order are not.
+  assert.match(page.markup, /<human-invitation-inbox(?=\s|>)(?=[^>]*\shidden(?=\s|>))(?=[^>]*\sdata-placement="corner"(?=\s|>))[^>]*>/);
   // The old rule showed the box to every signed-in person.
   assert.doesNotMatch(page.script, /root\.hidden\s*=\s*view\.account\s*===\s*null\s*;/);
   assert.match(page.script, /const listing=!joined && view\.invitations\.length>0;/);

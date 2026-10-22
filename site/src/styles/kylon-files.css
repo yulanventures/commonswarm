@@ -23,6 +23,10 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__file-description {
   overflow-wrap: anywhere;
 }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__file-list {
+  /* The pane supplies the width; only row descendants respond to it.
+     Inline containment leaves the list's content height and scroller intact. */
+  container: cs-files / inline-size;
+  inline-size: 100%;
   gap: 0;
   padding: 0;
   margin: 0;
@@ -31,8 +35,8 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__file-list {
   box-shadow: none;
 }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__file-row {
-  grid-template-columns: minmax(0, 2fr) 64px 40px minmax(80px, 1fr) 80px 112px;
-  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 16px;
   min-inline-size: 0;
   min-block-size: 76px;
   padding: 12px 0;
@@ -40,6 +44,9 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__file-row {
   border-block-end: 1px solid var(--k-shell-line);
   border-radius: 0;
   background: var(--k-shell-surface);
+}
+live-dashboard.dashboard[data-kylon-shell] :is(.dashboard__file-identity, .dashboard__file-action) {
+  grid-column: 1 / -1;
 }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__file-identity {
   gap: 4px;
@@ -55,7 +62,9 @@ live-dashboard.dashboard[data-kylon-shell] :is(.dashboard__file-state, .dashboar
   overflow-wrap: anywhere;
 }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__file-row [data-field-label]::before {
-  margin-block-end: 2px;
+  display: inline;
+  margin-block-end: 0;
+  margin-inline-end: 4px;
   color: var(--k-shell-secondary);
   font: 400 11px/1.5 var(--k-shell-font);
   letter-spacing: 0;
@@ -63,9 +72,11 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__file-row [data-field-labe
 }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__file-action {
   min-inline-size: 0;
+  justify-items: start;
   gap: 4px;
 }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__file-download {
+  inline-size: auto;
   min-inline-size: 88px;
   min-block-size: 44px;
   padding: 8px 12px;
@@ -91,6 +102,7 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__file-download:disabled {
 }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__file-download-status {
   max-inline-size: 100%;
+  text-align: start;
   font: 400 12px/1.5 var(--k-shell-font);
   overflow-wrap: anywhere;
 }
@@ -108,28 +120,50 @@ live-dashboard.dashboard[data-kylon-shell] :is(.dashboard__file-warning, .dashbo
   font-size: 13px;
   line-height: 1.55;
 }
-@media (max-width: 70rem) {
+/* Keep filenames above metadata until the content pane has room for six tracks. */
+@container cs-files (min-width: 36rem) {
   live-dashboard.dashboard[data-kylon-shell] .dashboard__file-row {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: 64px 48px minmax(0, 128px) 88px minmax(112px, 1fr);
+    column-gap: 12px;
   }
-  live-dashboard.dashboard[data-kylon-shell] :is(.dashboard__file-identity, .dashboard__file-action) {
-    grid-column: 1 / -1;
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__file-row [data-field-label]::before {
+    display: block;
+    margin-block-end: 2px;
+    margin-inline-end: 0;
   }
   live-dashboard.dashboard[data-kylon-shell] .dashboard__file-action {
-    justify-items: start;
+    grid-column: auto;
+    justify-items: end;
   }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__file-download-status {
+    text-align: end;
+  }
+}
+@container cs-files (min-width: 56rem) {
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__file-row {
+    grid-template-columns: minmax(0, 2fr) 64px 48px minmax(128px, 1fr) 88px 112px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__file-identity {
+    grid-column: auto;
+  }
+}
+
+/* This card combines household and legacy files; retain every entry and link. */
+live-dashboard.dashboard[data-kylon-shell][data-channel-view="files"] .cs-org-shell [data-side-card="files"] .hm-object-title {
+  display: block;
+  -webkit-line-clamp: unset;
+  -webkit-box-orient: initial;
+  overflow: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font: 500 14px/1.5 var(--k-shell-font);
+}
+live-dashboard.dashboard[data-kylon-shell][data-channel-view="files"] .cs-org-shell [data-side-card="files"] :is(.hm-side-card__title, .hm-side-card__title-link) {
+  font: 600 13px/1.5 var(--k-shell-font);
 }
 @media (max-width: 52rem) {
   live-dashboard.dashboard[data-kylon-shell] .dashboard__files-view {
     padding: 20px 16px;
-  }
-  live-dashboard.dashboard[data-kylon-shell] .dashboard__file-row {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px 16px;
-    padding-block: 16px;
-  }
-  live-dashboard.dashboard[data-kylon-shell] .dashboard__file-download-status {
-    text-align: start;
   }
 }
 @media (forced-colors: active) {

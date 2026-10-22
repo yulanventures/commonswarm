@@ -1,6 +1,6 @@
 /* LOCAL CANDIDATE. Catch up presentation only; requires kylon-shell tokens.
- * Preserve renderer text, states, counts, links, callbacks and scroll owner.
- * No shell topology, route, visibility, pseudo-content or metrics changes.
+ * Preserve status text, states, counts, links, callbacks and scroll owner.
+ * Catch up owns its visible section label and row spacing; shell stays intact.
  */
 live-dashboard.dashboard[data-kylon-shell] .hm-catchup {
   --home-font-body: var(--k-shell-font);
@@ -147,6 +147,78 @@ live-dashboard.dashboard[data-kylon-shell] .hm-catchup :is(.hm-button, .hm-catch
  * keeping the existing Show more target and expansion behavior. */
 live-dashboard.dashboard[data-kylon-shell] .hm-catchup .hm-catchup-show-more {
   margin-block: 0;
+}
+
+/* The shared card keeps its status heading and actions. Catch up has one
+ * visible section label, followed by workspace/time eyebrows in each row. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-needs-title {
+  position: static;
+  inline-size: auto;
+  block-size: auto;
+  overflow: visible;
+  clip-path: none;
+  white-space: normal;
+}
+
+/* Equal avatar tracks and border boxes keep copy and actions aligned across
+ * ranks. The existing first action carries emphasis; later actions stay quiet. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-needs :is(.hm-needs-you, .hm-catchup-needs-preview) {
+  gap: 3px 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--k-shell-line);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-needs [data-needs-rank="first"] {
+  border-color: transparent;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-needs .hm-needs-you {
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-needs .hm-needs-you > :is(.hm-person-avatar, .hm-agent-orb, .hm-needs-glyph) {
+  inline-size: 32px;
+  block-size: 32px;
+  font-size: 14px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-needs .hm-needs-you > .hm-agent-orb {
+  border-radius: 10px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-needs :is(.hm-needs-title, .hm-catchup-needs-what) {
+  font-size: 14px;
+  line-height: 1.5;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-needs .hm-button {
+  min-block-size: 44px;
+  padding-inline: 16px;
+  font-size: 13px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-needs [data-needs-rank="more"] .hm-button {
+  background: var(--k-shell-surface);
+  color: var(--k-shell-ink);
+  box-shadow: inset 0 0 0 1.5px var(--k-shell-control);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-needs [data-needs-rank="more"] .hm-button:hover {
+  background: var(--k-shell-hover);
+  color: var(--k-shell-ink);
+}
+@container hm-catchup (width < 560px) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-needs .hm-needs-you .hm-actions {
+    margin-block-start: 8px;
+  }
+}
+
+/* The integration's flat workspace rows share their heading's content edge.
+ * A single owner group occupies only the width of its existing identities. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-workspaces-head {
+  margin-block-end: 4px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-card {
+  min-block-size: 72px;
+  padding: 12px 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup :is(.hm-catchup-card-title, .hm-catchup-card-head) {
+  font-size: 14px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-card-capsules[data-count="1"] > .hm-capsule {
+  inline-size: auto;
 }
 
 live-dashboard.dashboard[data-kylon-shell] .hm-catchup .hm-catchup-latest > .hm-catchup-section-title {

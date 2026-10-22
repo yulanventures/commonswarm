@@ -18,5 +18,5 @@ export function projectHomeLayout(state: string | undefined, route: HomeRoute,
       href: routeHref({ view: view.id, workspaceId: workspace.id } as HomeRoute), current: route.view === view.id || route.view === "todo" && view.id === "todos" });
   }
   return { enabled: state === "channel", title: route.view === "catchup" ? "Catch up" : "Workspaces", workspaceName: workspace?.name, navigation,
-    people: route.view === "people", todo: !!workspace && (route.view === "todos" || route.view === "todo") };
+    people: route.view === "people", todo: !!workspace && (route.view === "todos" || route.view === "todo"), wiki: !!workspace && route.view === "wiki" };
 }
