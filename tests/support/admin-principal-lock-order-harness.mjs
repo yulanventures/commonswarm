@@ -1355,7 +1355,6 @@ async function denoMain() {
   let exitCode = 0;
   try {
     // Linux kernel argv attests arrival in this child, independently of parent construction.
-    if (process.platform === 'linux') out.detect_cjs_arrived = readFileSync('/proc/self/cmdline', 'utf8').split('\0').includes('--unstable-detect-cjs');
     const config = JSON.parse(await Deno.readTextFile(configPath));
     const host = new URL(config.db_url).hostname;
     if (!LOOPBACK_HOSTS.includes(host)) fail('target_not_loopback');
