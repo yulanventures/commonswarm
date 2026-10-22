@@ -191,4 +191,7 @@ admin-delegations[data-kylon-account] > dialog :is(article, li) {
     grid-column: 1 / -1;
     justify-self: end;
   }
+  admin-delegations[data-kylon-account] > dialog nav [data-admin-view="workspace"][hidden] + [data-admin-refresh] {
+    grid-column: auto;
+  }
 }
