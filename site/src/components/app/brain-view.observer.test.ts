@@ -97,3 +97,10 @@ test("Brain binds the open pane to the file, not the slug — a workspace switch
   assert.equal(snapshot.paneClosedOnForeignFile, true, "the pane survived a same-slug foreign file");
   assert.equal(snapshot.staleSaveRefused, true, "a stale-pane save reached the foreign file");
 });
+
+test("Brain read recovery preserves refusals and retries only its current file/version without stealing focus", async () => {
+  const snapshot = await getSnapshot();
+  assert.equal(snapshot.recovery.allPassed, true);
+  assert.ok(snapshot.recovery.cases.length >= 16, "all declared read-recovery boundaries must be reached");
+  for (const row of snapshot.recovery.cases) assert.equal(row.pass, true, JSON.stringify(row));
+});

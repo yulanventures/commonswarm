@@ -1,9 +1,10 @@
 import { createOrgShell } from "./shell.js";
 import { createPeopleContext } from "./people-context";
 import { createTodoContext } from "./todo-context";
+import { createWikiContext } from "./wiki-context";
 
 type Navigation = { id: string; label: string; href: string; current: boolean; icon: string };
-type Projection = { enabled: boolean; title: string; workspaceName?: string; navigation: Navigation[]; todo?: boolean; people?: boolean };
+type Projection = { enabled: boolean; title: string; workspaceName?: string; navigation: Navigation[]; todo?: boolean; people?: boolean; wiki?: boolean };
 
 /** Presentation adapter. The app retains all routes, data, account and action ownership. */
 export function createKylonHost(app: HTMLElement, navigate: (href: string) => void) {
@@ -23,11 +24,13 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
   const icons = new Map<string, SVGSVGElement>();
   const todoContext = createTodoContext(app, () => shell);
   const peopleContext = createPeopleContext(app, () => shell, context);
+  const wikiContext = createWikiContext(app, () => shell);
   const restoreMenu = () => {
     if (phoneMenu) { phoneMenu.parent.append(phoneMenu.node); phoneMenu = null; }
     if (phoneHeading) { phoneHeading.parent.append(phoneHeading.node); phoneHeading = null; }
   };
   const restore = () => {
+    wikiContext.clear();
     todoContext.clear();
     peopleContext.clear();
     restoreMenu();
@@ -70,6 +73,7 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
 
   return {
     sync(vm: Projection) {
+      if (!vm.wiki) wikiContext.clear();
       if (!vm.todo) todoContext.clear();
       if (!vm.people) peopleContext.clear();
       if (!vm.enabled || !frame || !context || !account) {
@@ -95,6 +99,7 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
         mark.append(logo); shell.slots.brand.append(mark);
       }
       todoContext.set(vm.todo === true);
+      wikiContext.set(vm.wiki === true);
       // Data/route changes update existing slots; time-only refreshes keep keyboard focus intact.
       const next = JSON.stringify([vm.title, vm.workspaceName, vm.navigation]);
       if (next === key) return;
@@ -110,12 +115,12 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
       syncMenu();
     },
     syncMenu,
-    refreshTodoContext: todoContext.refresh,
+    refreshTodoContext: (replace: () => void) => todoContext.refresh(() => wikiContext.refresh(replace)),
     peopleContext: peopleContext.set,
     replaceHeader(replace: () => void) {
       const active = doc.activeElement;
       const owned = phoneMenu?.node.contains(active) ? "menu" : active === phoneHeading?.node ? "heading" : null;
-      todoContext.refresh(replace); syncMenu();
+      todoContext.refresh(() => wikiContext.refresh(replace)); syncMenu();
       if (!owned || (doc.activeElement !== doc.body && doc.activeElement !== active)) return;
       const target = owned === "menu" ? phoneMenu?.node.querySelector<HTMLElement>(".hm-menu__trigger") : phoneHeading?.node;
       if (target?.getClientRects().length && !target.closest("[hidden], [inert]")) target.focus({ preventScroll: true });
