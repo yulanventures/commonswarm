@@ -1174,8 +1174,29 @@ export async function runScenario(target, scenario, timeoutMs = 170_000, generat
     writeFileSync(configPath, JSON.stringify({ db_url: target.url, tls_ca_pem: target.tlsCaPem, floor_url, source, read_source:readSource, active_floor:generations!==null, expect_baseline_expiry:expectBaselineExpiry, history:target.history, retained_catalog:target.retainedCatalog }), { mode: 0o600 });
     const env = { PATH: process.env.PATH ?? '', NO_COLOR: '1' };
     for (const key of ['HOME', 'DENO_DIR', 'XDG_CACHE_HOME']) if (process.env[key]) env[key] = process.env[key];
+    let denoConfig = join(REPO_ROOT, 'supabase/functions/command/deno.json');
+    if (scenario.startsWith('local-allow-retired-parent-')) {
+      for (const name of ['admin-policy.generated.js', 'admin-authority.generated.js']) {
+        if (!existsSync(new URL(`../../services/mcp-auth/src/${name}`, import.meta.url)))
+          throw new LockOrderSetupFailure('allow_loader_generated_missing');
+      }
+      const servicePackage = JSON.parse(readFileSync(new URL('../../services/mcp-auth/package.json', import.meta.url), 'utf8'));
+      const serviceLock = JSON.parse(readFileSync(new URL('../../services/mcp-auth/package-lock.json', import.meta.url), 'utf8'));
+      const imports = {};
+      for (const [name, version] of Object.entries({ 'oidc-provider': '9.12.2', jose: '6.2.10' })) {
+        if (servicePackage.dependencies[name] !== version || serviceLock.packages[''].dependencies[name] !== version
+          || serviceLock.packages[`node_modules/${name}`].version !== version)
+          throw new LockOrderSetupFailure('allow_loader_dependency_version');
+        imports[name] = `npm:${name}@${version}`;
+      }
+      const config = JSON.parse(readFileSync(denoConfig, 'utf8'));
+      const serviceScope = new URL('../../services/mcp-auth/', import.meta.url).href;
+      config.scopes = { ...config.scopes, [serviceScope]: { ...config.scopes?.[serviceScope], ...imports } };
+      denoConfig = join(secret.dir, 'allow-deno.json');
+      writeFileSync(denoConfig, JSON.stringify(config), { mode: 0o600, flag: 'wx' });
+    }
     // Deno 2.2.3 needs CJS detection for the installed pg fixture's untyped .js entry.
-    const child = spawn('deno', ['run', '--no-lock', ...(scenario.startsWith('local-allow-retired-parent-') ? ['--unstable-detect-cjs'] : []), ...(scenario==='floor-first-use-vs-head-revocation' ? ['--cached-only'] : []), '--config', join(REPO_ROOT, 'supabase/functions/command/deno.json'),
+    const child = spawn('deno', ['run', '--no-lock', ...(scenario.startsWith('local-allow-retired-parent-') ? ['--unstable-detect-cjs'] : []), ...(scenario==='floor-first-use-vs-head-revocation' ? ['--cached-only'] : []), '--config', denoConfig,
       '--allow-read', '--allow-env', '--allow-net', fileURLToPath(import.meta.url), configPath, scenario],
     { cwd: REPO_ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = Buffer.alloc(0);
