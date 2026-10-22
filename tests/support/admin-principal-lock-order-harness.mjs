@@ -41,6 +41,55 @@ export function privateHarnessEvidence(label, bytes) {
   return paths;
 }
 
+
+/** Only the owned functions-serve stderr; never persist messages, SQL or payloads. */
+export function privateCommandFailureCapture(label) {
+  let line = '', oversized = false;
+  const records = [];
+  const state = /^(?:00|01|02|03|08|09|0A|0B|0F|0L|0P|0Z|20|21|22|23|24|25|26|27|28|2B|2D|2F|34|38|39|3B|3D|3F|40|42|44|53|54|55|57|58|F0|HV|P0|XX)[0-9A-Z]{3}$/u;
+  function accept() {
+    if (oversized) return;
+    // Accept JSON with only the known local runtime log prefix, never access lines.
+    const match = /^(?:\d{4}-\d\d-\d\dT[\d:.]+Z\s+)?(?:\[Error\]\s*)?(\{.*\})\s*$/u.exec(line.replace(/\x1b\[[0-9;]*m/gu, ''));
+    if (!match) return;
+    let value;
+    try { value = JSON.parse(match[1]); } catch { return; }
+    if (value?.event !== 'command_request_failure') return;
+    const detail = typeof value.detail === 'string' ? value.detail.slice(0, 4096) : '';
+    const errorClass = /^(Error|TypeError|RangeError|ReferenceError|SyntaxError|PostgresError|TestRollback):/u.exec(detail)?.[1];
+    const code = [value.sqlstate, value.db_code, value.code,
+      /\b(?:SQLSTATE|code)[:= ]+([0-9A-Z]{5})\b/u.exec(detail)?.[1]]
+      .find(item => typeof item === 'string' && state.test(item));
+    // Fixed repository paths and numeric coordinates only; URLs/queries never leave memory.
+    const location = /(?:^|[\s(/])((?:supabase\/functions\/(?:command\/(?:index|failures)|_shared\/(?:protocol|channels))|src\/protocol\/index)\.ts):([1-9][0-9]{0,6}):([1-9][0-9]{0,5})(?=$|[\s)])/u.exec(detail);
+    const routine = ['parserOpenTable', 'transformInsertStmt', 'CheckInsertTargets',
+      'ExecConstraints', 'aclcheck_error', 'exec_simple_query'].includes(value.routine) ? value.routine : undefined;
+    records.push(JSON.stringify({ event: 'command_request_failure',
+      ...(value.command_kind === 'post_signal' ? {command_kind:'post_signal'} : {}),
+      ...(['internal_error','lock_timeout','test_rollback'].includes(value.reason) ? {reason:value.reason} : {}),
+      ...(errorClass ? {error_class:errorClass} : {}), ...(code ? {sqlstate:code} : {}),
+      ...(location ? {source:`${location[1]}:${location[2]}:${location[3]}`} : {}),
+      ...(routine ? {routine_class:routine} : {}) }));
+    while (records.length > 32 || Buffer.byteLength(records.join('\n')) > 16_384) records.shift();
+  }
+  return {
+    capture(chunk) {
+      for (const byte of chunk) {
+        if (byte === 10) { accept(); line = ''; oversized = false; }
+        else if (!oversized) {
+          if (line.length >= 8192) { line = ''; oversized = true; }
+          else line += byte < 128 ? String.fromCharCode(byte) : ' ';
+        }
+      }
+    },
+    retain() {
+      if (line) accept();
+      line = ''; oversized = false;
+      return privateHarnessEvidence(label, records.length ? records.join('\n') + '\n' : 'no-command-request-failure-observed\n');
+    },
+  };
+}
+
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 export const BINDING_ENV = 'C1B_LOCK_ORDER_BINDING';
 /** Exact key sets, sorted. A binding file is always a fixture binding (D1.2). */

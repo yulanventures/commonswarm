@@ -1,5 +1,6 @@
 /** Served H0 forwarding through the local command edge and local PostgreSQL only. */
 import assert from "node:assert/strict";
+import { privateCommandFailureCapture } from "../support/admin-principal-lock-order-harness.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -20,6 +21,7 @@ let sql: postgres.Sql;
 let admin: SupabaseClient;
 let ownerJwt: string;
 let workspace: string;
+const commandDiagnostics = privateCommandFailureCapture("h0-forward-command");
 let processHandle: ReturnType<typeof spawn> | undefined;
 let envDir: string | undefined;
 let functionReady = false;
@@ -113,6 +115,7 @@ before(async () => {
   let ready = "";
   processHandle.stdout?.on("data", (chunk: Buffer) => { ready = (ready + chunk.toString()).slice(-4_000); });
   processHandle.stderr?.on("data", (chunk: Buffer) => { ready = (ready + chunk.toString()).slice(-4_000); });
+  processHandle.stderr?.on("data", commandDiagnostics.capture);
   const deadline = Date.now() + 60_000;
   while (!ready.includes("Serving functions on")) {
     if (Date.now() > deadline) throw new Error("local functions did not start");
@@ -161,14 +164,18 @@ before(async () => {
 });
 
 after(async () => {
-  if (processHandle && processHandle.exitCode === null) {
-    const exited = new Promise<void>((resolve) => { processHandle?.once("close", () => resolve()); });
-    processHandle.kill();
-    await Promise.race([exited, delay(2_000)]);
-    if (processHandle.exitCode === null) processHandle.kill("SIGKILL");
+  try {
+    commandDiagnostics.retain();
+  } finally {
+    if (processHandle && processHandle.exitCode === null) {
+      const exited = new Promise<void>((resolve) => { processHandle?.once("close", () => resolve()); });
+      processHandle.kill();
+      await Promise.race([exited, delay(2_000)]);
+      if (processHandle.exitCode === null) processHandle.kill("SIGKILL");
+    }
+    await sql?.end({ timeout: 5 });
+    if (envDir) rmSync(envDir, { recursive: true, force: true });
   }
-  await sql?.end({ timeout: 5 });
-  if (envDir) rmSync(envDir, { recursive: true, force: true });
 });
 
 test("register retries one attempt on one seat, a new attempt takes another, and revocation refuses", { timeout: 80_000 }, async () => {
