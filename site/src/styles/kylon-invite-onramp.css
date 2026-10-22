@@ -69,6 +69,9 @@ invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .hm-ahp__
 invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__choice small, .invite-onramp__consent, .invite-onramp__status, .invite-onramp__divider, .hm-ahp__notes, .hm-invite-connect__foot) {
   font-size: 13px; line-height: 20px;
 }
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__choice small {
+  font-weight: 400;
+}
 invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__fineprint, .hm-invite-connect__step, .hm-invite-connect__status) {
   font-size: 12px; line-height: 18px;
 }
@@ -81,7 +84,7 @@ invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invi
 invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__actions .invite-onramp__button:not(.invite-onramp__button--quiet),
 invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .hm-invite-connect__actions > .invite-onramp__button,
 invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__connect:has([data-connect-open]:not([hidden])) .invite-onramp__button[href="/app"] {
-  border-radius: 6px; font: 500 13px/20px var(--k-shell-font);
+  border-radius: 6px; font: 500 14px/20px var(--k-shell-font);
 }
 invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__auth input {
   border-color: var(--k-shell-control); border-radius: 6px;
