@@ -37,8 +37,8 @@ human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations_
 }
 human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations__dialog::backdrop { background: rgb(0 0 0 / 32%); }
 human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations__dialog .human-invitations__facet {
-  margin-block-start: 4px;
-  color: var(--k-shell-secondary);
+  margin-block-start: 8px;
+  color: var(--k-shell-ink);
   font: 500 13px/20px var(--k-shell-font);
   letter-spacing: 0;
   text-transform: none;
@@ -105,6 +105,7 @@ human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations_
 human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations__text-button {
   min-block-size: 44px;
   padding: 8px;
+  margin-inline-start: -8px;
   color: var(--k-shell-secondary);
   border-radius: 6px;
   font: 500 13px/20px var(--k-shell-font);
