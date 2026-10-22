@@ -66,11 +66,12 @@ test("dialog status precedence: revoked, ended, paused, messages, expiry, new co
   const cases = [
     ["key-off", "Key turned off", { grant: collision, oldestUnobservedAt }],
     ["key-ended", "Key ended", { grant: key({ kind: "timeboxed", horizonExpiresAt: at(1), newHostAt: at(1000) }), oldestUnobservedAt }],
-    ["paused", "Paused: unused for 14 days", { grant: key({ suspendedAt: at(1000), newHostAt: at(1000) }), oldestUnobservedAt }],
+    ["paused", "Connection paused", { grant: key({ suspendedAt: at(1000), newHostAt: at(1000) }), oldestUnobservedAt }],
     ["stale-messages", "Hasn’t picked up messages for 3+ min", { grant: key({ kind: "timeboxed", horizonExpiresAt: at(-86400000), newHostAt: at(1000) }), oldestUnobservedAt }],
     ["key-ends-soon", "Key ends in 1 day", { grant: key({ kind: "timeboxed", horizonExpiresAt: at(-86400000), newHostAt: at(1000) }) }],
     ["new-computer", "Used from a new computer", { grant: key({ newHostAt: at(1000) }) }],
     ["inactive", "Not active for 15 days", { presence: row({ last_command_at: at(15 * 86400000) }) }],
+    ["inactive", "Not active for 90 days", { grant: key({ lastUsedAt: at(90 * 86400000) }), presence: row({ last_command_at: at(90 * 86400000) }) }],
     ["idle", "Not active yet", { presence: null }],
     ["connected", "Connected", { presence: undefined }],
     ["active", "Active now", {}],
@@ -110,7 +111,7 @@ test("resume preserves last activity: idle 15 days becomes inactive, never Activ
   const resumed = peopleAgentStatus({ ...facts, grant: { ...facts.grant, suspendedAt: null } }, NOW);
   assert.equal(resumed.label, "Not active for 15 days"); assert.equal(resumed.attention, false);
   assert.equal(peopleAgentActivityTime(facts.presence.last_command_at, NOW), "15 days ago");
-  assert.equal(agentResumeReceipt("Codex"), "Resumed. Nothing has reached Codex yet. It renews the next time it starts. Another 14 days without use will pause it again.");
+  assert.equal(agentResumeReceipt("Codex"), "Resumed. Nothing has reached Codex yet.");
 });
 
 import { homeAgentState, WORK_RECENT_MS } from "./agent-status.ts";
@@ -141,7 +142,7 @@ test("home disconnect and local message guidance reuse the dialog fixes", () => 
     [{ revoked: true }, "Removed"], [{ suspended: true }, "Needs reconnecting"],
     [{ grant: key({ revokedAt: at(1) }) }, "Key turned off"],
     [{ grant: key({ kind: "timeboxed", horizonExpiresAt: at(1) }) }, "Key ended"],
-    [{ grant: key({ suspendedAt: at(1) }) }, "Paused: unused for 14 days"],
+    [{ grant: key({ suspendedAt: at(1) }) }, "Connection paused"],
   ]) {
     const s = homeAgentState(input({ ...facts, workingOn, hasWakePath: true, oldestUnobservedAt: at(180000) }), NOW);
     assert.equal(s.kind, "disconnected"); assert.equal(s.word, "Disconnected"); assert.equal(s.detail, detail);
@@ -182,7 +183,7 @@ test("server work classification preserves credential details and repair guidanc
   const cases = [
     [{ grant: key({ revokedAt: at(1) }) }, "Key turned off", "new-key", "It needs a new key to connect again."],
     [{ grant: key({ kind: "timeboxed", horizonExpiresAt: at(1) }) }, "Key ended", "new-key", "It needs a new key to connect again."],
-    [{ grant: key({ suspendedAt: at(1) }) }, "Paused: unused for 14 days", "resume", "Resume it so it can connect again."],
+    [{ grant: key({ suspendedAt: at(1) }) }, "Connection paused", "resume", "Resume it so it can connect again."],
     [{ suspended: true }, "Needs reconnecting", null, "Connect it again from its app."],
     [{ revoked: true }, "Removed", null, "It can no longer read or post."],
   ];

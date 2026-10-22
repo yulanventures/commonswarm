@@ -204,6 +204,7 @@ async function routedPaneFixture(initialView: 'todo' | 'todos' = 'todo') {
       for (let node: RowNode | null = this; node; node = node.parent) if ((node as PaneNode).hidden) return [];
       return [{}];
     }
+    closest() { return null; }
     focus() { focused.push(this); }
   }
   const document = { title: '', createElement: (tag: string) => new PaneNode(tag),
@@ -745,14 +746,17 @@ test('browser reads retain a top-level directed reply reference', () => {
 
 test('each navigation focuses the visible H1 for that view', async () => {
   const frames: (()=>void)[] = [], focused: unknown[] = [];
-  const heading = (name: string) => ({ name, visible: false, getClientRects() { return this.visible ? [{}] : []; }, focus() { focused.push(this); } });
-  const scopes = {catchup:'[data-home-catchup]',chat:'[data-home-workspace-shell]',todos:'[data-home-route-pane]',todo:'[data-home-route-pane]',agent:'[data-home-route-pane]',new:'[data-panel=create]', 'add-agent':'[data-channel-view=agent-choice]',lists:'[data-channel-view=objects]',files:'[data-channel-view=files]',wiki:'[data-channel-view=brain]'};
+  const heading = (name: string) => ({ name, visible: false, inert: false,
+    getClientRects() { return this.visible ? [{}] : []; }, closest() { return this.inert ? this : null; }, focus() { focused.push(this); } });
+  const scopes = {catchup:'[data-home-catchup]',chat:'[data-home-workspace-shell]',todos:'[data-home-route-pane]',todo:'[data-home-route-pane]',agent:'[data-home-route-pane]',people:'[data-people-context]',new:'[data-panel=create]', 'add-agent':'[data-channel-view=agent-choice]',lists:'[data-channel-view=objects]',files:'[data-channel-view=files]',wiki:'[data-channel-view=brain]'};
   const headings = new Map([...new Set(Object.values(scopes))].map(scope => [`${scope} h1`, heading(scope)]));
   const phoneTitle = heading('phone workspace');
+  const selectedTitle = heading('selected profile');
   headings.set('.cs-org-phone-title h1', phoneTitle);
   const context = createContext({homeViewTitle:()=> 'View · CommonSwarm', window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
-    document:{title:''}, all:(selector:string)=>selector.split(',').flatMap(part => headings.get(part.trim()) ?? [])});
-  runInContext("let homeRoute, workspaces=[{id:'W',name:'Home'}];",context);
+    document:{title:''}, one:(selector:string)=>selector==='#pd-detail-title'?selectedTitle:null,
+    all:(selector:string)=>selector.split(',').flatMap(part => headings.get(part.trim()) ?? [])});
+  runInContext("let homeRoute, peopleDialogFocus, workspaces=[{id:'W',name:'Home'}];",context);
   runInContext(await dashboardFunctions(['focusHomeView']),context);
   for (const [view,scope] of Object.entries(scopes)) {
     focused.length = 0;
@@ -770,6 +774,17 @@ test('each navigation focuses the visible H1 for that view', async () => {
   runInContext("homeRoute={view:'chat',workspaceId:'W'};focusHomeView();",context);
   assert.equal(frames.length,1); frames.shift()!();
   assert.equal(focused.at(-1), phoneTitle, 'the relocated visible phone heading receives focus');
+  // A requested profile takes focus only while visible and outside an inert/hidden host.
+  focused.length = 0;
+  for (const node of headings.values()) node.visible = false;
+  const peopleTitle = headings.get('[data-people-context] h1')!;
+  peopleTitle.visible = true; selectedTitle.visible = true; selectedTitle.inert = true;
+  runInContext("homeRoute={view:'people',workspaceId:'W'}; peopleDialogFocus={kind:'agent',id:'A'}; focusHomeView();",context);
+  frames.shift()!();
+  assert.equal(focused.at(-1), peopleTitle, 'an inert profile falls back to the relocated context heading');
+  selectedTitle.inert = false;
+  runInContext('focusHomeView()',context); frames.shift()!();
+  assert.equal(focused.at(-1), selectedTitle, 'a visible requested profile retains its detail heading target');
 });
 
 
@@ -945,7 +960,7 @@ test('a stale self-role save ends on sign-in, and the email names Save; removal 
   const setup = "let session={user:{id:'tom'}},activeWorkspaceId='W',sampleMode=false,memberReauthNext='remove';"
     + "let members=[{userId:'tom',role:'owner',name:'Tom Langridge'}],draft={userId:'tom',role:'admin',confirming:true};"
     + "const peopleDialogState={rolePending:new Map(),selected:{type:'person',id:'tom'}},state=peopleDialogState,uuid=()=>'R';"
-    + "const person={id:'tom',name:'Tom Langridge',role:'owner'},model={workspaceName:'Home'},agents=[],accessStatuses=[];";
+    + "const person={id:'tom',name:'Tom Langridge',role:'owner'},model={workspaceName:'Home'},agents=[],accessStatuses=[],page=true;";
   runInContext(setup + code + "const callbacks={render(){focusLog.push('render');},changeRole(change){return changeRole(change);}};", context);
   await runInContext("commit('admin')", context);
   assert.deepEqual(focusLog, ['render', 'sign-in-dashboard', 'render', 'sign-in-final']);
@@ -983,20 +998,47 @@ test('a stale self-role save ends on sign-in, and the email names Save; removal 
 
 /* People & agents is a page now (2026-10-07). ~~"falls back to the roster heading"~~ of the dialog:
    on the page an absent target falls back to the page title, and a visit from elsewhere navigates. */
-test('an absent People & agents target falls back to the page heading', async () => {
+test('People arrival prefers an eligible requested detail and otherwise the eligible page heading', async () => {
   const frames: (()=>void)[] = [], focused: string[] = [], navigations: unknown[] = []; let rendered = 0;
+  // Independent DOM facts only; the actual production declarations choose the target.
+  const heading = (name: string) => ({ present: true, rects: true, blocked: null as 'hidden' | 'inert' | null,
+    getClientRects() { return this.rects ? [{}] : []; },
+    closest(selector: string) { return selector.split(',').some(part => part.trim() === `[${this.blocked}]`) ? { reason: this.blocked } : null; },
+    focus() { focused.push(name); } });
+  const page = heading('page'), detail = heading('detail');
   const context = createContext({window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
-    one:(selector:string)=>selector==='#pd-page-title'?{focus:()=>focused.push('page')}:null,
+    one:(selector:string)=>selector==='#pd-page-title' ? (page.present ? page : null)
+      : selector==='#pd-detail-title' ? (detail.present ? detail : null) : null,
     all:()=>[], renderDialogRoster:()=>{ rendered++; }, loadHouseholdConnections:()=>{},
     navigateHome:(route:unknown, mode:string)=>{ navigations.push([route, mode]); return Promise.resolve(); },
     peopleDialogState:{query:'',selected:null,focusApplied:null},sampleMode:true});
   runInContext("let peopleDialogFocus,rosterFilter='',activeWorkspaceId='W',homeRoute={view:'people',workspaceId:'W'};",context);
   runInContext(await dashboardFunctions(['openRosterDialog','focusPeoplePage']),context);
-  await runInContext("openRosterDialog({kind:'person',id:'gone'})",context);
-  for (const frame of frames) frame();
-  assert.deepEqual(focused,['page']);
-  assert.equal(rendered,1,'already on the page: it re-renders in place');
-  assert.deepEqual(navigations,[]);
+  const rows: Array<{ label: string; request: boolean; detailPresent?: boolean; detailRects?: boolean;
+    detailBlocked?: 'hidden' | 'inert'; pageRects?: boolean; pageBlocked?: 'hidden' | 'inert'; want: string[] }> = [
+    { label: 'ordinary entry ignores an unrequested visible detail', request: false, want: ['page'] },
+    { label: 'absent requested detail falls back', request: true, detailPresent: false, want: ['page'] },
+    { label: 'requested detail without a generated box falls back', request: true, detailRects: false, want: ['page'] },
+    { label: 'hidden-ancestor requested detail falls back', request: true, detailBlocked: 'hidden', want: ['page'] },
+    { label: 'inert-ancestor requested detail falls back', request: true, detailBlocked: 'inert', want: ['page'] },
+    { label: 'eligible requested detail takes precedence', request: true, want: ['detail'] },
+    { label: 'no focus when absent detail and boxless page', request: true, detailPresent: false, pageRects: false, want: [] },
+    { label: 'no focus when absent detail and hidden page', request: true, detailPresent: false, pageBlocked: 'hidden', want: [] },
+    { label: 'no focus when absent detail and inert page', request: true, detailPresent: false, pageBlocked: 'inert', want: [] },
+  ];
+  for (const row of rows) {
+    focused.length = 0;
+    Object.assign(detail, { present: row.detailPresent ?? true, rects: row.detailRects ?? true, blocked: row.detailBlocked ?? null });
+    Object.assign(page, { rects: row.pageRects ?? true, blocked: row.pageBlocked ?? null });
+    const before = rendered;
+    await runInContext(row.request ? "openRosterDialog({kind:'person',id:'requested'})" : 'openRosterDialog()', context);
+    const facts = JSON.stringify({ row, page: { rects: page.rects, blocked: page.blocked },
+      detail: { present: detail.present, rects: detail.rects, blocked: detail.blocked } });
+    assert.equal(rendered, before + 1, `already on People re-renders in place: ${facts}`);
+    for (const frame of frames.splice(0)) frame();
+    assert.deepEqual(focused, row.want, `the real owner requests the eligible target: ${facts}`);
+    assert.deepEqual(navigations, [], `the current People visit does not navigate: ${facts}`);
+  }
   /* Positive control on the same context: from the workspace, the door navigates to the page. */
   runInContext("homeRoute={view:'chat',workspaceId:'W'}",context);
   await runInContext("openRosterDialog()",context);

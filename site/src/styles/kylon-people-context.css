@@ -1,0 +1,50 @@
+@import "./kylon-people-roster.css";
+@import "./kylon-people-semantics.css";
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] {
+  display: flex; flex-direction: column; gap: 16px; min-inline-size: 0;
+  color: var(--k-shell-ink); font: 400 13px/1.5 var(--k-shell-font);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(h1,h2,h3,p,ul) { margin: 0; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-head { display: grid; gap: 10px; min-inline-size: 0; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-title-row { display: flex; align-items: center; gap: 8px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-title-row h1 { flex: 1; min-inline-size: 0; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] h1 { font: 600 20px/1.4 var(--k-shell-font); letter-spacing: -.3px; overflow-wrap: anywhere; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-back {
+  display: inline-flex; align-items: center; justify-self: start; min-block-size: 44px; min-inline-size: 44px;
+  padding: 4px; border-radius: 6px; color: var(--k-shell-secondary); font: 500 13px/1.5 var(--k-shell-font); text-decoration: none;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-search {
+  box-sizing: border-box; inline-size: 100%; max-inline-size: none; min-block-size: 44px; margin: 0; padding: 10px 12px;
+  border: 1px solid var(--k-shell-control); border-radius: 6px; background: var(--k-shell-surface); color: var(--k-shell-ink);
+  font: 400 14px/1.5 var(--k-shell-font); box-shadow: none;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters { display: flex; gap: 4px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters button {
+  position: relative; isolation: isolate;
+  min-inline-size: 44px; min-block-size: 44px; padding: 6px 12px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--k-shell-secondary); font: 500 12px/1.5 var(--k-shell-font); cursor: pointer;
+}
+/* Paint a32px pill inside the unchanged44px native hit/focus owner. */
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters button::before {
+  content: ""; position: absolute; inset: 6px 0; z-index: -1; border-radius: 999px; pointer-events: none;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters button[aria-pressed="true"] { background: transparent; color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters button[aria-pressed="true"]::before { background: var(--k-shell-selected); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-page-main,.pd-member-grid) { display: flex; flex-direction: column; gap: 0; min-inline-size: 0; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-context-footer { display: grid; gap: 12px; border-block-start: 1px solid var(--k-shell-line); padding-block-start: 12px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-actions > * {
+  display: inline-flex; align-items: center; justify-content: center; min-block-size: 44px; min-inline-size: 44px; max-inline-size: 100%;
+  padding: 8px 10px; box-sizing: border-box; border: 1px solid var(--k-shell-control); border-radius: 6px; box-shadow: none;
+  background: transparent; color: var(--k-shell-ink); text-decoration: none; white-space: normal; overflow-wrap: anywhere; font: 500 13px/1.5 var(--k-shell-font);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-actions > .pd-page-primary { border-color: var(--cs-accent); background: var(--cs-accent); color: var(--cs-on-accent); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-primary:hover:not(:disabled) { background: var(--cs-accent-hover); border-color: var(--cs-accent-hover); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-roles summary { display: flex; align-items: center; min-block-size: 44px; padding: 6px; cursor: pointer; color: var(--k-shell-secondary); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-roles-list { display: grid; gap: 8px; margin: 8px 6px; font-size: 12px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-roles-list dt { display: block; font-weight: 600; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-roles-list dd { display: block; margin: 0; color: var(--k-shell-secondary); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-note { margin: 8px 6px; font-size: 12px; color: var(--k-shell-secondary); overflow-wrap: anywhere; }
+@media (max-width: 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-search { font-size: 16px; }
+}
