@@ -441,6 +441,7 @@ const input = JSON.parse(await new Response(Deno.stdin.readable).text());
 const api = await import(input.commandModule);
 const auth = await import(input.authModule);
 const { HOUSEHOLD_LOCAL_SEAT } = await import(input.protocolModule);
+const { householdRefusalNextStep } = await import(new URL('../../../src/protocol/household-next-steps.ts',input.mcpModule).href);
 // Expose the actual executor and its external SQL pools in this test module
 // only. All imports, capability checks, command/read dispatch and MCP rendering
 // remain production code; the pools share the real rollback-only fixture below.
@@ -521,7 +522,7 @@ try {
      assert.equal(rpc.result.isError,undefined,'D1 refusal remains structured content');
      assert.equal(rpc.result._meta,undefined,'D1 refusal must not request reconnect');
      assert.notEqual(output.error,'hosted_seat_forbidden');
-     if(output.status==='refused')assert.equal(typeof output.next_action,'string','MCP retains the recovery step');
+     if(output.status==='refused')assert.equal(output.next_action,householdRefusalNextStep(output.reason),'MCP retains the documented optional recovery step');
      return {status:response.status,body:output};
     }
     if(caller==='hosted')return await api.handleHostedCommand(envelope,capability);
@@ -582,6 +583,7 @@ try {
    const denied=await invoke(caller,null,crypto.randomUUID(),f.workspace,command,draftCap);
    assert.equal(denied.status,hostedCaller(caller)?200:409);assert.equal(denied.body.status,'refused');
    assert.equal(denied.body.reason,'draft_access_refused');
+   if(caller==='mcp')assert.equal(denied.body.next_action,'Recover this private draft using its original user and agent connection. Permission changes cannot transfer a private draft.');
    assert.equal(denied.body.mcp_tool,null);assert.equal(denied.body.cli_command,null);
   }
   const humanDraft=await invoke('human',null,crypto.randomUUID(),f.workspace,{kind:'household_draft',draft_id:'missing-private-draft'});
