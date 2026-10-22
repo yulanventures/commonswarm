@@ -18,6 +18,8 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-side-card__empt
   color: var(--k-shell-secondary); font-size: 13px; line-height: 1.55;
 }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-side-entry > .hm-side-link { padding-inline: 0; border-radius: 6px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-side-list--todos .hm-todo-row__title { font-size: 14px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-side-list--todos .hm-todo-row__sub { font-size: 12px; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-side-button, .hm-side-link) {
   min-block-size: 44px; font-family: var(--k-shell-font); font-size: 13px; border-radius: 6px;
 }

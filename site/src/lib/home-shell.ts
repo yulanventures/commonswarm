@@ -340,7 +340,7 @@ export function buildWorkspaceHeader(doc: Document, vm: WorkspaceShellVM, callba
   const header = node(doc, "header", "hm-ws-header");
   header.dataset.homeWorkspaceHeader = vm.workspaceId;
   const copy = node(doc, "div", "hm-ws-header__copy");
-  copy.append(title(doc, vm.name, "hm-ws-title", "hm-ws-header__title", vm.pane === "files"), node(doc, "p", "hm-ws-header__subline", capsuleSubline(vm.people)));
+  copy.append(title(doc, vm.name, "hm-ws-title", "hm-ws-header__title", vm.pane === "files" || vm.pane === "todos"), node(doc, "p", "hm-ws-header__subline", capsuleSubline(vm.people)));
   const actions = node(doc, "div", "hm-ws-header__actions");
   const faces = compactCapsules(doc, vm.people, 2);
   faces.setAttribute("aria-hidden", "true");
@@ -437,7 +437,7 @@ export function buildPhoneTopBar(doc: Document, vm: WorkspaceShellVM, callbacks:
     people.append(node(doc, "span", "hm-sr", capsuleSubline(vm.people)));
   }
   people.append(faces);
-  bar.append(back, title(doc, vm.name, "hm-phone-title", "hm-phone-bar__title", vm.pane === "files"), people);
+  bar.append(back, title(doc, vm.name, "hm-phone-title", "hm-phone-bar__title", vm.pane === "files" || vm.pane === "todos"), people);
   if (doors.menu) {
     bar.append(buildWorkspaceMenu(doc, vm, callbacks, "hm-phone", { account: true }));
     /* This ⋯ carries the account entries, so the page's own phone account control stands down (integration.css). */

@@ -39,6 +39,8 @@ import "../../styles/kylon-layout/index.css";
 import "../../styles/kylon-workspace-settings-integration.css";
 import "../../styles/kylon-files.css";
 import "../../styles/dashboard-welcome.css";
+import "../../styles/kylon-todos.css";
+import "../../styles/kylon-todos-context.css";
 
 const signInMethods = signInDoors(await enabledProvidersForBuild({
   url: import.meta.env.PUBLIC_SUPABASE_URL,
@@ -4110,7 +4112,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       homeObjects = { state: "pending" }; homeTodoDetails.clear(); homePolicies.clear();
       const workspace = workspaces.find(row => row.id === activeWorkspaceId) as { todosAvailable?: boolean } | undefined;
       if (workspace) workspace.todosAvailable = false;
-      one<HTMLElement>("[data-home-side-slot]")?.replaceChildren();
+      layout.refreshTodoContext(() => one<HTMLElement>("[data-home-side-slot]")?.replaceChildren());
     };
     const homeRefusalCopy = (reason: string): string => {
       const copy: Record<string, string> = { owner_only: "Only its owner can change its line.", content_read_only: "Choose editor access in Lists & docs before changing a to-do.",
@@ -4196,13 +4198,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const renderHomeSide = (): void => {
       const slot = one<HTMLElement>("[data-home-side-slot]");
       const workspace = workspaces.find(row => row.id === activeWorkspaceId);
-      if (!slot || !workspace || homeRoute.view === "catchup" || homeRoute.view === "new") { slot?.replaceChildren(); return; }
+      if (!slot || !workspace || homeRoute.view === "catchup" || homeRoute.view === "new") { layout.refreshTodoContext(() => slot?.replaceChildren()); return; }
       const ctx = homeTodoContext(), models = homeTodoModels();
       const objectsRead = homeObjects;
       const objects = objectsRead.state === "ready" ? { ...objectsRead, files: [...objectsRead.files,
         ...files.filter(file => !file.tombstonedAt && !objectsRead.files.some(object => object.id === file.fileId)).map(file => ({ kind: "file" as const, id: file.fileId, title: file.name,
           href: routeHref({ view: "files", workspaceId: workspace.id }), meta: formatAttachmentSize(file.sizeBytes), who: homeParty({ kind: file.uploadedByKind === "agent" ? "agent" : "user", id: file.uploadedBy }, ctx.people) }))] } : objectsRead;
       const vm = { sample: sampleMode, workspaceName: workspace.name,
+        todosInMain: homeRoute.view === "todos" && homeTodosState === "ready",
         todos: homeTodosAvailable() ? { items: homeTodosState === "ready" ? models.map(todo => { const card = homeTodoCard(todo, ctx.now); return { id: todo.id, title: todo.title, href: card.href,
           state: todo.state, mayComplete: todo.may.complete, subline: todoSubline(todo, { now: ctx.now }), who: card.who }; }) : [],
           allHref: routeHref({ view: "todos", workspaceId: workspace.id }), canAdd: homeTodosState === "ready" && ctx.editor,
@@ -4211,9 +4214,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           const approval = householdConnections.filter(row => row.principal_id === agent.id).map(connectionApproval).find(Boolean);
           return approval ? [{ agent, until: approval.expires_at ? new Date(approval.expires_at).toLocaleDateString() : null }] : [];
         }), hrefs: { lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }), wiki: routeHref({ view: "wiki", workspaceId: workspace.id }) } };
-      replaceHomeRegion(slot, "side", [buildSideCards(document, vm, { onComplete: id => completeHomeTodo(id, true), onAddTodo: () => {
+      layout.refreshTodoContext(() => replaceHomeRegion(slot, "side", [buildSideCards(document, vm, { onComplete: id => completeHomeTodo(id, true), onAddTodo: () => {
         void navigateHome({ view: "todos", workspaceId: workspace.id }, "push").then(() => one<HTMLButtonElement>("[data-todo-add]")?.click());
-      }, onOpenLists: () => navigateHomeHref(vm.hrefs.lists) })]);
+      }, onOpenLists: () => navigateHomeHref(vm.hrefs.lists) })]));
     };
     const homeWrite = async <T,>(run: (server: HomeServer, requestId: string) => Promise<WriteResult<T>>, receipt?: (value: T, notices: HomeNotice[]) => string): Promise<void> => {
       if (sampleMode || homeTodoSave === "saving") return;
@@ -4400,7 +4403,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       if (homeTodosState === "absent") {
         if (homeRoute.view === "todo") homePaneMessage("Could not load this to-do.", "");
-        else { slot.replaceChildren(); slot.hidden = true; }
+        else homePaneMessage("Could not load to-dos.", "");
         return;
       }
       if (homeTodosState === "refused" || homeTodosState === "failed") { homePaneMessage("Could not load to-dos.", homeTodoReceipt); return; }
@@ -4476,7 +4479,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (key === homeRailKey && slot.childElementCount) {
         refreshHomeRailTimes(slot, vm); return;
       }
-      replaceHomeRegion(slot, "rail", [buildHomeRail(document, vm, {
+      layout.refreshTodoContext(() => replaceHomeRegion(slot, "rail", [buildHomeRail(document, vm, {
         navigate: href => navigateHomeHref(href),
         openPerson: id => { void selectHomePerson(id); },
         /* As for a person: an agent opens in this workspace when it is here, otherwise in the first
@@ -4490,7 +4493,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         },
         toggleWorkspaces: expanded => { railExpanded = expanded; },
       }, { workspacesExpanded: railExpanded, newWorkspaceHref: routeHref({ view: "new" }),
-        ...(draftName === null ? {} : { draftWorkspace: { name: draftName } }) })]);
+        ...(draftName === null ? {} : { draftWorkspace: { name: draftName } }) })]));
       homeRailKey = key;
     };
     const renderHomeShell = (): void => {
@@ -4498,11 +4501,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const bottom = one<HTMLElement>("[data-home-phone-nav]");
       const workspace = workspaces.find(workspace => workspace.id === activeWorkspaceId);
       if (!slot || !workspace || homeRoute.view === "catchup" || homeRoute.view === "new") {
-        layout.syncMenu(false);
+        layout.refreshTodoContext(() => {
+          layout.syncMenu(false);
+          slot?.replaceChildren(); bottom?.replaceChildren();
+        });
         homeShellKey = "";
-        slot?.replaceChildren(); bottom?.replaceChildren(); return;
+        return;
       }
-      const pane = homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" ? homeRoute.view : "chat";
+      const pane = homeRoute.view === "todo" ? "todos" : homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" ? homeRoute.view : "chat";
       const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
         people: currentHomePeople().groups, pane, todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
         hrefs: { chat: routeHref({ view: "chat", workspaceId: workspace.id }), todos: routeHref({ view: "todos", workspaceId: workspace.id }),
@@ -4639,7 +4645,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const back = document.createElement("a"); back.href = homeLink?.href ?? routeHref({ view: "chat", workspaceId: activeWorkspaceId }); back.textContent = homeLink?.label ?? workspace?.name ?? "Workspace";
       back.addEventListener("click", event => { event.preventDefault(); navigateHomeHref(back.href); });
       slot.replaceChildren(title, text, back); slot.hidden = false;
-      if (homeRoute.view === "todo") focusHomeView();
+      if (homeRoute.view === "todo" || homeRoute.view === "todos") focusHomeView();
     };
     const applyHomePane = (): void => {
       const catchUp = one<HTMLElement>("[data-home-catchup]");
@@ -4662,7 +4668,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       frame?.classList.toggle("hm-frame--todo", homeRoute.view === "todo");
       frame?.classList.toggle("hm-frame--add-agent", homeRoute.view === "add-agent");
       syncStandalonePage();
-      if (home) { one<HTMLElement>("[data-home-side-slot]")?.replaceChildren(); renderHomeCatchUp(); return; }
+      if (home) { layout.refreshTodoContext(() => one<HTMLElement>("[data-home-side-slot]")?.replaceChildren()); renderHomeCatchUp(); return; }
       renderHomeSide();
       if (homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos") {
         renderHomeObjectPane();
@@ -6857,7 +6863,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       homeOverviewCounts.clear();
       // The People page's hosts may sit in the route pane: park them before it is cleared.
       parkPeopleHosts();
-      for (const slot of all<HTMLElement>("[data-home-catchup], [data-home-route-pane], [data-home-workspace-shell], [data-home-phone-nav], [data-home-rail-slot]")) slot.replaceChildren();
+      layout.refreshTodoContext(() => {
+        for (const slot of all<HTMLElement>("[data-home-catchup], [data-home-route-pane], [data-home-workspace-shell], [data-home-phone-nav], [data-home-rail-slot]")) slot.replaceChildren();
+      });
       stopFeedPush();
       stopAgentActivity();
       closeEntityPanel(false);

@@ -7,17 +7,18 @@ import { HomeToolsUnavailable, HomeCommandRefused } from '../../lib/home/client'
 import { CommandOutcomeUnknown, FreshLoginRequired, WorkspaceRoleRefused, BROWSER_SIGNAL_COLUMNS, browserSignalFromRow, browserDeliveryReceiptCandidates, BROWSER_RECEIPT_REQUESTS_PER_TICK } from '../../lib/commonswarm';
 import { createLatestRead } from '../../lib/latest-read';
 import { buildAuthorLine, buildStreamExtras, deriveStreamExtras } from '../../lib/home-stream';
-import { homeParty, mapHomePeople, homeAskAnswered, homeViewTitle, homeAgentFixCards } from '../../lib/home-map';
+import { homeParty, mapHomePeople, homeAskAnswered, homeViewTitle, resolveHomeRoute, homeAgentFixCards } from '../../lib/home-map';
 import { peopleRoleBeginSave, peopleRoleErrorCode, peopleRoleFinishSave, peopleRoleReceipt, peopleRoleRefusal } from '../../lib/people-dialog-view';
 import { addAgentOwnershipLine, agentLabelInSentence, personFirstName } from '../../lib/home-names';
 import { canStartThread, THREAD_REPLY_CONTROL_LABEL, threadReplyPlace, threadReplyTargetText } from '../../lib/thread-reply';
 import { channelLabel } from '../../lib/channels';
 import { parentRoute, routeHref } from '../../lib/home-route';
 import { todoView } from '../../lib/home-todo';
+import { todosPane } from '../../lib/home-todo-list';
 import { homeRailPeople, mapHomeRail, initialCatchUpData, overviewCatchUpData, homeNeedsYouCount, catchUpDetailFromOverview } from '../../lib/home-map';
 import { buildHomeRail } from '../../lib/home-rail';
 import { homeStructureKey } from '../../lib/home-focus';
-import { assignOptions, tagOptions } from '../../lib/home-pickers';
+import { assignOptions, tagOptions, personNames } from '../../lib/home-pickers';
 import { peopleDialogCanAct } from '../../lib/people-dialog-view';
 import * as agentStatusFunctions from '../../lib/agent-status';
 import { classifyAgentPresence } from '../../../../src/cloud/agent-presence';
@@ -126,7 +127,7 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
     let finishBoot!: () => void, boots = 0;
     const pendingBoot = new Promise<void>(resolve => { finishBoot = resolve; });
     const context = createContext({
-      layout: { mounted: false },
+      layout: { mounted: false, refreshTodoContext: (replace: () => void) => replace() },
       one: (selector: string) => nodes.get(selector) ?? null,
       all: (selector: string) => selector.split(',').some(part => part.trim() === '[data-home-route-pane]') ? [pane] : [],
       queueMicrotask: (callback: () => void) => microtasks.push(callback),
@@ -191,7 +192,7 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
   });
 }
 
-test('applyHomePane keeps standalone to-do states readable, with a back link and heading focus when tools become unavailable', async () => {
+async function routedPaneFixture(initialView: 'todo' | 'todos' = 'todo') {
   const focused: PaneNode[] = [], frames: (() => void)[] = [];
   class PaneNode extends RowNode {
     hidden = false; tabIndex = 0; href = '';
@@ -213,8 +214,12 @@ test('applyHomePane keeps standalone to-do states readable, with a back link and
   frame.append(rail, main); rail.append(account); main.append(slot, channel);
   const nodes = new Map<string, PaneNode>([['.hm-frame', frame], ['.hm-frame__main', main], ['.hm-frame__rail', rail],
     ['[data-home-route-pane]', slot], ['.dashboard__channel', channel], ['[data-user-menu-root]', account]]);
-  const context = createContext({ document, routeHref, homeViewTitle, todoView, layout: { mounted: false },
-    window: { requestAnimationFrame: (callback: () => void) => frames.push(callback) },
+  const navigations: string[] = [], history: string[] = [];
+  const context = createContext({ document, routeHref, resolveHomeRoute, homeViewTitle, todoView, todosPane, personNames, URL,
+    layout: { mounted: false }, navigateHomeHref: (href: string) => navigations.push(href),
+    window: { requestAnimationFrame: (callback: () => void) => frames.push(callback), location: { origin: 'https://example.test' },
+      history: { state: { home: true }, pushState: (_state: unknown, _title: string, href: string) => history.push(href),
+        replaceState: (_state: unknown, _title: string, href: string) => history.push(href) } },
     one: (selector: string) => nodes.get(selector) ?? null,
     all: (selector: string) => selector.split(',').some(part => part.trim() === '[data-home-route-pane] h1') ? slot.querySelectorAll('h1') : [],
     // Paint replacement has its own focus tests; keep the production to-do DOM builder here.
@@ -222,20 +227,25 @@ test('applyHomePane keeps standalone to-do states readable, with a back link and
   });
   runInContext(`
     const app={dataset:{state:'channel',channelView:'feed'}}, activeWorkspaceId='W', workspaces=[{id:'W',name:'Home'}];
-    const homeRoute={view:'todo',workspaceId:'W',todoId:'T'}, sampleMode=false;
+    let homeRoute={view:${JSON.stringify(initialView)},workspaceId:'W',todoId:'T'}; const sampleMode=false;
     let homeTodosState='pending', homeQueueRead='pending', homeTodoReceipt='';
-    const homeTodoRead=null, homeTodoRows=[], homeQueue=null, homePolicies=new Map(), homeDetailKey='';
-    const homeTodoSave='idle', homeTodoNotice=null, homeGateEditorId=null;
+    let homeTodoRead=null, homeQueue=null, homeDetailKey='', homeTodoSave='idle', homeTodoNotice=null;
+    const homeTodoRows=[], homePolicies=new Map(), homeGateEditorId=null;
+    let homeNavigation=0, homeDetailGeneration=0, catchUpGeneration=0; const homeScroll=new Map();
+    const session={user:{id:'tom'}}, keepConnectCredentialVisible=()=>false;
+    let homeTodoFilter='open'; const homeTodoModels=()=>[];
     const homeTodoContext=()=>({now:0,viewerId:'tom',editor:true,people:{groups:[],other:[]}}), homeServer=()=>null;
     const parkPeopleHosts=()=>{}, renderHomeSide=()=>{}, syncFeedChrome=()=>{};
+    const closeEntityPanel=()=>{}, closeRosterDialog=()=>{}, closeWorkspaceDetailsDialog=()=>{};
+    const renderHomeRail=()=>{}, renderHomeShell=()=>{}, loadRailOverview=()=>{}, renderChannelRail=()=>{};
   `, context);
-  runInContext(await dashboardFunctions(['syncStandalonePage', 'homePaneMessage', 'renderHomeObjectPane', 'loadHomeObject', 'applyHomePane', 'focusHomeView']), context);
+  runInContext(await dashboardFunctions(['syncStandalonePage', 'homePaneMessage', 'renderHomeObjectPane', 'loadHomeObject', 'applyHomePane', 'focusHomeView', 'navigateHome']), context);
   const flushFocus = () => { for (const callback of frames.splice(0)) callback(); };
   const assertPage = (label: string, expectedHref: string) => {
-    assert.equal(frame.getAttribute('data-home-standalone'), '', `${label}: this exercises the standalone route`);
-    assert.equal(account.hidden, true, `${label}: workspace account access uses the back link`);
+    assert.equal(frame.getAttribute('data-home-standalone'), initialView === 'todo' ? '' : null, `${label}: actual route frame flag`);
+    assert.equal(account.hidden, initialView === 'todo', `${label}: account placement follows its route`);
     assert.equal(channel.hidden, true);
-    assert.equal(slot.hidden, false, `${label}: the standalone detail page must not be blank`);
+    assert.equal(slot.hidden, false, `${label}: the routed page must not be blank`);
     const back = slot.querySelectorAll('a').find(node => (node as PaneNode).href === expectedHref) as PaneNode | undefined;
     assert.ok(back, `${label}: a back link returns to the workspace`);
     assert.ok(back.getClientRects().length, `${label}: the back link is visible`);
@@ -245,6 +255,12 @@ test('applyHomePane keeps standalone to-do states readable, with a back link and
     assert.ok(title.getClientRects().length, `${label}: the focus target is visible`);
     assert.equal(focused.at(-1), title, `${label}: focus reaches the current heading`);
   };
+  return { context, slot, focused, navigations, history, assertPage, flushFocus,
+    navigate: (mode: 'replace' | 'pop') => runInContext(`navigateHome({view:'todos',workspaceId:'W'},'${mode}')`, context) as Promise<void> };
+}
+
+test('applyHomePane keeps standalone to-do states readable, with a back link and heading focus when tools become unavailable', async () => {
+  const { context, focused, flushFocus, assertPage } = await routedPaneFixture();
   for (const [state, queue, receipt, label, expectedHref] of [
     ['absent', 'failed', 'Could not load to-dos. Reload to try again.', 'unavailable tools', '/app?w=W'],
     ['failed', 'pending', 'Could not load to-dos. Reload to try again.', 'failed workspace read', '/app?w=W'],
@@ -329,20 +345,30 @@ test('a home read cannot overwrite newer Lists access or a new account in the sa
   await current.load();
   assert.equal(runInContext('householdAccess.contentRole', current.context), 'editor');
 });
-test('a routed To-dos pane becomes visible after rendering and hides again when tools are absent', async () => {
-  const slot = { hidden: true, replaceChildren() {} };
-  const context = createContext({ slot });
-  runInContext(`
-    const activeWorkspaceId='W', workspaces=[{id:'W',name:'Home'}], homeRoute={view:'todos'};
-    let homeTodosState='ready'; const homeTodoReceipt='', homeTodoFilter='open', homeTodoSave='idle', sampleMode=false;
-    const one=()=>slot, homeTodoContext=()=>({now:0,editor:true,people:{groups:[]}}), homeTodoModels=()=>[];
-    const personNames=()=>new Map(), todosPane=()=>({}), document={}, replaceHomeRegion=()=>{}, parkPeopleHosts=()=>{};
-  `, context);
-  runInContext(await dashboardFunctions(['renderHomeObjectPane']), context);
-  runInContext('renderHomeObjectPane()', context);
-  assert.equal(slot.hidden, false);
-  runInContext("homeTodosState='absent'; renderHomeObjectPane();", context);
-  assert.equal(slot.hidden, true);
+test('routed To-dos keeps an honest message, workspace back link and heading focus when tools are absent', async () => {
+  // Gate: real route/read settlement can replace the index after its navigation focus ran.
+  // Row/policy tests do not own that lifecycle; no production seam or fake pane builder.
+  const f = await routedPaneFixture('todos');
+  runInContext("homeTodosState='ready'", f.context);
+  await f.navigate('replace'); f.flushFocus();
+  assert.equal(f.slot.hidden, false);
+  assert.equal(f.slot.querySelector('h1')?.textContent, 'To-dos', 'positive reaches the real index builder');
+  const unavailable = (label: string) => {
+    f.assertPage(label, '/app?w=W');
+    assert.equal(f.slot.querySelector('h1')?.textContent, 'Could not load to-dos.');
+    assert.equal(f.slot.descendants().some(node => ['button', 'input', 'textarea', 'select'].includes(node.tag)), false,
+      `${label}: unavailable tools expose no mutation or filter controls`);
+  };
+  f.focused.length = 0;
+  runInContext("homeTodosState='absent'; applyHomePane()", f.context); f.flushFocus();
+  unavailable('late unavailable read without another navigation focus');
+  for (const mode of ['replace', 'pop'] as const) {
+    await f.navigate(mode); f.flushFocus(); unavailable(`${mode} navigation to absent index`);
+  }
+  const back = f.slot.querySelector('a')!; let prevented = false;
+  Reflect.apply(back.handlers.get('click')!, back, [{ preventDefault() { prevented = true; } }]);
+  assert.ok(prevented); assert.deepEqual(f.navigations, ['/app?w=W']);
+  assert.deepEqual(f.history, ['/app?w=W&v=todos', '/app?w=W&v=todos'], 'pop re-entry does not create history');
 });
 async function routedTodoFixture() {
   const context = createContext({});
@@ -583,8 +609,8 @@ test('an ask card keeps the full sanitized question, links, topic controls and S
     assert.equal(markdown.classes.has('dashboard__message-markdown--collapsed'), false);
   }
 });
-test('a refused or failed to-do read keeps an honest right-column door, while absent tools hide it', async () => {
-  const context = createContext({});
+test('the ready To-dos index omits its duplicate card; other routes and unavailable reads keep their honest doors', async () => {
+  const context = createContext({ layout: { refreshTodoContext: (replace: () => void) => replace() } });
   runInContext(`
     const slot={}, activeWorkspaceId='W', workspaces=[{id:'W',name:'Home'}], homeRoute={view:'chat'}, sampleMode=false;
     let homeTodosState='ready', homeTodoReceipt=''; const homeObjects={state:'pending'}, files=[], householdConnectionsReadState='pending';
@@ -594,10 +620,22 @@ test('a refused or failed to-do read keeps an honest right-column door, while ab
   runInContext(await dashboardFunctions(['homeTodosAvailable', 'renderHomeSide']), context);
   runInContext('renderHomeSide()', context);
   assert.equal(runInContext('painted.todos.canAdd', context), true);
+  assert.equal(runInContext('painted.todosInMain === true', context), false, 'Chat keeps its useful summary');
+  runInContext("homeRoute.view='todos'; renderHomeSide()", context);
+  assert.equal(runInContext('painted.todosInMain', context), true, 'the ready index supplies every open row, completion and add action');
+  assert.notEqual(runInContext('painted.todos', context), null, 'presentation omission does not invent tool absence');
+  for (const view of ['todo', 'lists', 'files', 'wiki', 'people', 'chat']) {
+    runInContext(`homeRoute.view='${view}'; renderHomeSide()`, context);
+    assert.equal(runInContext('painted.todosInMain === true', context), false, `${view} does not supply the full index`);
+  }
+  runInContext("homeRoute.view='todos'", context);
+  runInContext("homeTodosState='pending'; renderHomeSide()", context);
+  assert.equal(runInContext('painted.todosInMain === true', context), false, 'a pending index does not suppress the measured status');
   for (const state of ['refused', 'failed']) {
     runInContext(`homeTodosState='${state}'; homeTodoReceipt='Open Lists & docs to choose your access.'; renderHomeSide();`, context);
     assert.equal(runInContext('painted.todos.notice', context), 'Open Lists & docs to choose your access.');
     assert.equal(runInContext('painted.todos.canAdd', context), false);
+    assert.equal(runInContext('painted.todosInMain === true', context), false, `${state} remains visible`);
   }
   runInContext("homeTodosState='absent'; renderHomeSide();", context);
   assert.equal(runInContext('painted.todos', context), null);
@@ -1081,6 +1119,7 @@ test('accepted agent removals leave every current surface immediately and after 
       replaceHomeRegion: (region: RailNode, _key: string, children: RailNode[]) => region.replaceChildren(...children),
       refreshHomeRailTimes: () => {},
       // Shell placement is unrelated to accepted removal; retain the real rail builder below.
+      layout: { refreshTodoContext: (replace: () => void) => replace() },
       syncVisibleShell: () => {},
       roster: () => new Promise(resolve => { finishRoster = resolve; }),
       homeOverview: () => new Promise(resolve => { finishOverview = resolve; }),

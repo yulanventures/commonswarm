@@ -1,0 +1,80 @@
+/* Todo mode only. Original workspace/header/resource slots and native controls are relocated, not copied. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context {
+  display: flex; flex-direction: column; gap: 16px; min-inline-size: 0;
+  color: var(--k-shell-ink); font-family: var(--k-shell-font); font-size: 14px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-mode {
+  margin: 0; color: var(--k-shell-secondary); font-size: 12px; font-weight: 600; line-height: 1.5;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-disclosure {
+  min-inline-size: 0; border-block-start: 1px solid var(--k-shell-line); padding-block: 4px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-disclosure > summary {
+  display: flex; align-items: center; gap: 8px; list-style: none;
+  box-sizing: border-box; min-block-size: 44px; padding: 10px 4px; margin: 0 4px;
+  color: var(--k-shell-ink); font: inherit; font-weight: 500; line-height: 24px;
+  cursor: pointer; overflow-wrap: anywhere; border-radius: 4px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-disclosure > summary::marker { content: ""; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-disclosure > summary::-webkit-details-marker { display: none; }
+/* Our thin chevron occupies16px; the original native summary remains the hit and focus owner. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-disclosure > summary::before {
+  content: ""; flex: 0 0 16px; inline-size: 16px; block-size: 16px; align-self: start; margin-block-start: 4px;
+  background: var(--k-shell-secondary); clip-path: polygon(5px 2px,6px 1px,13px 8px,6px 15px,5px 14px,11px 8px);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-disclosure[open] > summary::before { transform: rotate(90deg); }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-disclosure > summary:focus-visible {
+  outline: 2px solid var(--k-shell-focus); outline-offset: 2px; box-shadow: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context [data-home-rail-slot] {
+  block-size: auto; min-block-size: 0; padding: 4px; overflow: visible;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context [data-home-rail-slot] .hm-rail__nav {
+  max-block-size: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context [data-home-rail-slot] :is(.hm-rail__person, .hm-rail__agent) {
+  min-block-size: 44px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context [data-home-side-slot]:not([hidden]) {
+  display: block; grid-area: auto; min-inline-size: 0; border: 0; padding: 4px; overflow: visible;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context .hm-side {
+  padding: 0; min-inline-size: 0;
+}
+@media (width > 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .hm-frame.hm-frame.hm-frame {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context > [data-home-workspace-shell] .hm-ws-header {
+    display: flex; flex-wrap: wrap; gap: 12px; padding: 0; border: 0; min-inline-size: 0;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context .hm-ws-header__copy {
+    min-inline-size: 0; flex-basis: 100%;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context .hm-ws-header__actions {
+    min-inline-size: 0; flex-wrap: wrap; gap: 8px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] [data-home-route-pane]:has(> .hm-todos) {
+    padding-inline: 24px;
+  }
+  /* Equal720px content columns: index728-2*4, detail776-2*28.
+     The pane contributes24px each side only for index; both totals retain28px when constrained. */
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] [data-home-route-pane] > .hm-todos {
+    margin-inline: auto;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] [data-home-route-pane] > .hm-todo {
+    inline-size: 100%; box-sizing: border-box; max-inline-size: 776px;
+    margin-inline: auto; padding-inline: 28px;
+  }
+}
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-context { padding: 4px; }
+}
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-disclosure > summary::before {
+    background: ButtonText; forced-color-adjust: none;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-todo-composition] .cs-todo-disclosure > summary:focus-visible {
+    outline: 3px solid Highlight; outline-offset: 2px;
+  }
+}
