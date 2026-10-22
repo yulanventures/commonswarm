@@ -14,6 +14,7 @@ admin-delegations[data-kylon-account] {
   --k-shell-line: #e9e7e2;
   /* Slightly darker than draft --cs-control: also clears 3:1 on selected rows. */
   --k-shell-control: #7e887c;
+  --k-shell-selection-edge: #697344;
   --k-shell-focus: #176548;
   --k-shell-ring: 0 0 0 2px var(--k-shell-surface), 0 0 0 4px var(--k-shell-focus);
   --k-shell-shadow: 0 12px 40px #1d2b1f24, 0 2px 6px #1d2b1f0d;
@@ -35,6 +36,7 @@ admin-delegations[data-kylon-account] {
   --k-shell-dark-muted: #b3afa4;
   --k-shell-dark-line: #343831;
   --k-shell-dark-control: #929a8c;
+  --k-shell-dark-selection-edge: #b2bb85;
   --k-shell-dark-focus: #9bc6ab;
   --k-shell-dark-shadow: 0 12px 40px #0000004d, 0 2px 6px #00000026;
 }
@@ -50,6 +52,7 @@ admin-delegations[data-kylon-account] {
     --k-shell-muted: var(--k-shell-dark-muted);
     --k-shell-line: var(--k-shell-dark-line);
     --k-shell-control: var(--k-shell-dark-control);
+    --k-shell-selection-edge: var(--k-shell-dark-selection-edge);
     --k-shell-focus: var(--k-shell-dark-focus);
     --k-shell-shadow: var(--k-shell-dark-shadow);
     --k-shell-scheme: dark;
@@ -66,6 +69,7 @@ admin-delegations[data-kylon-account] {
   --k-shell-muted: var(--k-shell-dark-muted);
   --k-shell-line: var(--k-shell-dark-line);
   --k-shell-control: var(--k-shell-dark-control);
+  --k-shell-selection-edge: var(--k-shell-dark-selection-edge);
   --k-shell-focus: var(--k-shell-dark-focus);
   --k-shell-shadow: var(--k-shell-dark-shadow);
   --k-shell-scheme: dark;
