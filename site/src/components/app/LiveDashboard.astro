@@ -626,13 +626,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
             <section class="dashboard__brain-view" data-channel-view="brain" aria-labelledby="dashboard-wiki-title" hidden>
               <h1 id="dashboard-wiki-title" class="hm-pane-title" tabindex="-1">Wiki</h1>
-              <p class="dashboard__wiki-description">Notes this workspace keeps, written in Markdown. Every save keeps the earlier version.</p>
               <aside class="dashboard__brain-index" aria-label="Wiki pages">
+                <p class="cs-wiki-mode">Wiki</p>
                 <p class="dashboard__brain-notice" role="status" data-brain-notice hidden></p>
                 <p class="dashboard__brain-empty" data-brain-empty></p>
                 <ul class="dashboard__brain-list" data-brain-list hidden></ul>
               </aside>
+              <p class="dashboard__brain-selection-prompt" data-brain-selection-prompt>Select a page to read.</p>
               <article class="dashboard__brain-topic" id="dashboard-brain-topic" data-brain-detail hidden>
+                <button class="dashboard__brain-back" type="button" data-brain-back>Back to Wiki</button>
                 <header class="dashboard__brain-topic-head">
                   <div>
                     <h2 data-brain-title tabindex="-1"></h2>
@@ -641,21 +643,23 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                   <button class="dashboard__button dashboard__button--secondary" type="button" data-brain-edit>
                     Edit
                   </button>
+                  <div class="dashboard__brain-body-mode" data-brain-body-mode hidden>
+                    <button
+                      class="dashboard__brain-raw-toggle"
+                      type="button"
+                      aria-controls="dashboard-brain-markdown dashboard-brain-raw"
+                      aria-pressed="false"
+                      data-brain-raw-toggle
+                      disabled
+                    >Raw</button>
+                  </div>
+                  <details class="dashboard__brain-history" data-brain-history>
+                    <summary>Version history</summary>
+                    <ul data-brain-history-list></ul>
+                  </details>
                 </header>
                 <p class="dashboard__form-error" role="alert" data-brain-error hidden></p>
                 <button class="dashboard__button dashboard__button--secondary" type="button" data-brain-retry hidden>Retry</button>
-                <p class="dashboard__brain-body-mode" data-brain-body-mode hidden>
-                  <span>Rendered from markdown</span>
-                  <span aria-hidden="true"> · </span>
-                  <button
-                    class="dashboard__brain-raw-toggle"
-                    type="button"
-                    aria-controls="dashboard-brain-markdown dashboard-brain-raw"
-                    aria-pressed="false"
-                    data-brain-raw-toggle
-                    disabled
-                  >Raw</button>
-                </p>
                 <div
                   class="dashboard__message-markdown dashboard__brain-markdown"
                   id="dashboard-brain-markdown"
@@ -678,10 +682,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                   </div>
                 </form>
                 <p class="dashboard__brain-status" role="status" aria-live="polite" data-brain-status></p>
-                <details class="dashboard__brain-history" data-brain-history>
-                  <summary>Version history</summary>
-                  <ul data-brain-history-list></ul>
-                </details>
               </article>
             </section>
 
@@ -5208,6 +5208,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
 
     const brainViewTargets = (): BrainViewTargets | null => {
+      const view = one<HTMLElement>("[data-channel-view=brain]");
+      const back = one<HTMLButtonElement>("[data-brain-back]");
+      const selectionPrompt = one<HTMLElement>("[data-brain-selection-prompt]");
       const list = one<HTMLUListElement>("[data-brain-list]");
       const empty = one<HTMLElement>("[data-brain-empty]");
       const detail = one<HTMLElement>("[data-brain-detail]");
@@ -5228,13 +5231,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const history = one<HTMLDetailsElement>("[data-brain-history]");
       const historyList = one<HTMLUListElement>("[data-brain-history-list]");
       if (
-        !list || !empty || !detail || !title || !meta || !bodyMode || !markdown ||
+        !view || !back || !selectionPrompt || !list || !empty || !detail || !title || !meta || !bodyMode || !markdown ||
         !raw || !rawToggle || !error ||
         !retry || !edit || !form || !textarea || !save || !cancel || !status || !history ||
         !historyList
       ) return null;
       return {
-        list, empty, detail, title, meta, bodyMode, markdown, raw, rawToggle,
+        view, back, selectionPrompt, list, empty, detail, title, meta, bodyMode, markdown, raw, rawToggle,
         error, retry, edit, form, textarea, save, cancel, status, history, historyList,
       };
     };

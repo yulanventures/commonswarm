@@ -308,12 +308,16 @@ const fixtureScript = `
     await until(() => fixture.wiki.index.closest('.cs-wiki-context') && app.querySelector('[data-wiki-composition]'), 'Wiki index not projected');
     check('Wiki owns one original index and reader with intact shell identities', sameNodes() && app.querySelectorAll('.dashboard__brain-index').length === 1
       && app.querySelectorAll('[data-brain-detail]').length === 1 && fixture.wiki.targets.list === fixture.wiki.index.querySelector('[data-brain-list]'));
-    check('Wiki retains unique workspace/header/resources in native disclosures', context.closest('details')?.querySelector('summary')?.textContent === 'Workspace navigation'
-      && slot.closest('details') === context.closest('details') && fixture.side.closest('details')?.querySelector('summary')?.textContent === 'Workspace resources');
+    const tools = app.querySelector('.cs-wiki-tools');
+    check('Wiki retains unique workspace/header/resources outside its index', tools?.closest('.cs-org-rail')
+      && !fixture.wiki.index.contains(tools) && context.closest('details') === tools && slot.closest('details') === tools
+      && fixture.side.closest('details') === tools && tools.querySelector('summary').getAttribute('aria-label') === 'Workspace tools');
+    check('Wiki initial selection is a prompt and does not read a file', !fixture.wiki.targets.selectionPrompt.hidden
+      && fixture.wiki.targets.detail.hidden && calls.filter(call => call.kind === 'wiki-read').length === 0);
   },
   wikiFocused(kind) {
     return document.activeElement === (kind === 'index' ? fixture.wiki.index.querySelector('button') :
-      [...app.querySelectorAll('.cs-wiki-context summary')].find(node => node.textContent === kind));
+      app.querySelector('.cs-wiki-tools > summary'));
   },
   async wikiRead() {
     await until(() => calls.some(call => call.kind === 'wiki-read') && fixture.wiki.targets.markdown.textContent.includes('Invented local Wiki document'), 'Actual Wiki controller did not read');
@@ -329,18 +333,32 @@ const fixtureScript = `
     check('Wiki retained resource callback preserves original principal', calls.filter(call => call.kind === 'resource-complete').length === count + 1
       && calls.at(-1).id === 'side-allowed');
     fixture.renderHeader(); fixture.renderRail(); fixture.renderResources(); ({ bar, menu, heading } = fixture);
-    check('Wiki owner refresh restores before replacement and reuses real slots', context.closest('.cs-wiki-context') && slot.closest('.cs-wiki-context')
-      && fixture.side.closest('.cs-wiki-context') && fixture.wiki.index.querySelector('button') === wikiButton && sameNodes()
+    check('Wiki owner refresh restores before replacement and reuses real slots', context.closest('.cs-wiki-tools') && slot.closest('.cs-wiki-tools')
+      && fixture.side.closest('.cs-wiki-tools') && fixture.wiki.index.querySelector('button') === wikiButton && sameNodes()
       && fixture.refreshRecords.slice(-3).every(record => wikiHomes.some(home => home.node === record.node && home.parent === record.parent)));
   },
   async wikiPlaced(width) {
     const phone = width <= 832;
     await until(() => innerWidth === width && matchMedia('(max-width:52rem)').matches === phone &&
       fixture.wiki.index.parentNode === (phone ? fixture.wiki.home.parent : app.querySelector('.cs-wiki-context')) &&
-      document.activeElement === wikiButton && visible(wikiButton),
+      document.activeElement === (phone ? fixture.wiki.targets.title : wikiButton),
       'Wiki responsive original index placement/focus did not settle');
-    check('Wiki resize retains native index focus and original node', document.activeElement === wikiButton && visible(wikiButton)
-      && fixture.wiki.index.querySelector('button') === wikiButton && sameNodes(), { width, active: elementFact(document.activeElement) });
+    check('Wiki resize retains one original index and gives focus to the visible pane',
+      visible(phone ? fixture.wiki.targets.title : wikiButton) && fixture.wiki.index.querySelector('button') === wikiButton && sameNodes(), { width, active: elementFact(document.activeElement) });
+    if (phone) {
+      check('Phone selected Wiki shows only the document and labelled native Back', !visible(wikiButton)
+        && visible(fixture.wiki.targets.back) && fixture.wiki.targets.back.textContent === 'Back to Wiki'
+        && fixture.wiki.targets.back.tagName === 'BUTTON' && visible(fixture.wiki.targets.title));
+    }
+  },
+  wikiBack() {
+    const readCount = calls.filter(call => call.kind === 'wiki-read').length;
+    const index = fixture.wiki.index, text = fixture.wiki.targets.markdown.textContent;
+    fixture.wiki.targets.back.click();
+    check('Phone Back restores selected topic focus in the retained index without a read',
+      index === app.querySelector(".dashboard__brain-index") && document.activeElement === wikiButton && visible(wikiButton)
+      && !visible(fixture.wiki.targets.title) && fixture.wiki.targets.markdown.textContent === text
+      && calls.filter(call => call.kind === 'wiki-read').length === readCount);
   },
   wikiRestore() {
     fixture.wiki.clear(); ({ bar, menu, heading } = fixture);
@@ -789,12 +807,13 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
       await evaluate("window.hostObserver.wikiBegin()");
       await nativeTab("window.hostObserver.wikiFocused('index')", "original Wiki index");
       await key("Enter"); await evaluate("window.hostObserver.wikiRead()");
-      await nativeTab("window.hostObserver.wikiFocused('Workspace resources')", "Wiki resources");
+      await nativeTab("window.hostObserver.wikiFocused('Workspace tools')", "Wiki workspace tools");
       await key("Enter"); await evaluate("window.hostObserver.wikiResource()");
       await nativeTab("window.hostObserver.wikiFocused('index')", "retained Wiki index");
       for (const nextWidth of [390, 1471]) {
         await send("Emulation.setDeviceMetricsOverride", { width: nextWidth, height: nextWidth === 390 ? 844 : 900, deviceScaleFactor: 1, mobile: false });
         await evaluate(`window.hostObserver.wikiPlaced(${nextWidth})`);
+        if (nextWidth === 390) await evaluate("window.hostObserver.wikiBack()");
       }
       await evaluate("window.hostObserver.wikiRestore()");
     }

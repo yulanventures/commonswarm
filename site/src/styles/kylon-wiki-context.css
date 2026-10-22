@@ -14,65 +14,63 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] 
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .dashboard__brain-index :is(.dashboard__brain-empty:not(.dashboard__form-error),.dashboard__brain-notice) {
   color: var(--k-shell-secondary); font: 400 12px/1.55 var(--k-shell-font); overflow-wrap: anywhere;
 }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-disclosure {
-  min-inline-size: 0; border-block-start: 1px solid var(--k-shell-line); padding-block: 4px;
-}
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-disclosure > summary {
-  display: flex; align-items: center; gap: 8px; list-style: none; box-sizing: border-box;
-  min-block-size: 44px; padding: 10px 4px; margin: 0 4px; border-radius: 4px;
-  color: var(--k-shell-ink); font: 500 13px/24px var(--k-shell-font); cursor: pointer; overflow-wrap: anywhere;
-}
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-disclosure > summary::marker { content: ""; }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-disclosure > summary::-webkit-details-marker { display: none; }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-disclosure > summary::before {
-  content: ""; flex: 0 0 16px; block-size: 16px; background: var(--k-shell-secondary);
-  clip-path: polygon(5px 2px,6px 1px,13px 8px,6px 15px,5px 14px,11px 8px);
-}
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-disclosure[open] > summary::before { transform: rotate(90deg); }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-disclosure > summary:focus-visible {
-  outline: 2px solid var(--k-shell-focus); outline-offset: 2px;
-}
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-context .dashboard__brain-index button:focus-visible {
-  outline: 2px solid var(--k-shell-focus); outline-offset: 2px;
-}
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-context :is(.hm-ws-header button,.hm-rail__link,.hm-rail__person,.hm-rail__agent,.hm-rail__new) {
-  min-block-size: 44px;
-}
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-context [data-home-rail-slot] {
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-tools-panel [data-home-rail-slot] {
   block-size: auto; min-block-size: 0; overflow: visible; padding: 4px;
 }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-context [data-home-rail-slot] .hm-rail__nav { max-block-size: none; }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-context [data-home-side-slot]:not([hidden]) {
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-tools-panel [data-home-rail-slot] .hm-rail__nav { max-block-size: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-tools-panel [data-home-side-slot]:not([hidden]) {
   display: block; grid-area: auto; min-inline-size: 0; border: 0; padding: 4px; overflow: visible;
 }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-context .hm-side { padding: 0; }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-context [data-home-workspace-shell] .hm-ws-header {
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-tools-panel .hm-side { padding: 0; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-tools-panel [data-home-workspace-shell] .hm-ws-header {
   display: flex; flex-wrap: wrap; min-inline-size: 0; gap: 8px; padding: 4px; border: 0;
 }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-context .hm-ws-header__copy { min-inline-size: 0; flex-basis: 100%; }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-context .hm-ws-header__actions { flex-wrap: wrap; }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .dashboard__channel-body > .dashboard__brain-view:not([hidden]) {
-  grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto minmax(0, 1fr); overflow: hidden;
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-tools-panel .hm-ws-header__copy { min-inline-size: 0; flex-basis: 100%; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-tools-panel .hm-ws-header__actions { flex-wrap: wrap; }
+/* Unique native commands live beside application navigation, outside the Wiki index. */
+live-dashboard.dashboard[data-kylon-shell] .cs-wiki-tools { color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] .cs-wiki-tools > summary {
+  display: flex; align-items: center; justify-content: center; list-style: none; cursor: pointer;
+  box-sizing: border-box; min-inline-size: 36px; min-block-size: 44px; border-radius: 6px;
+  font: 600 18px/1 var(--k-shell-font);
 }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .dashboard__brain-view > .dashboard__brain-topic {
-  box-sizing: border-box; grid-column: 1; grid-row: 3; inline-size: 100%; max-inline-size: 900px;
-  margin-inline: auto; padding: 5px; overflow: auto;
+live-dashboard.dashboard[data-kylon-shell] .cs-wiki-tools > summary::marker { content: ""; }
+live-dashboard.dashboard[data-kylon-shell] .cs-wiki-tools > summary::-webkit-details-marker { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-wiki-tools-panel {
+  position: fixed; z-index: 20; inset-inline-start: 60px; inset-block-end: 60px;
+  box-sizing: border-box; inline-size: min(360px, calc(100vw - 32px));
+  max-block-size: calc(100dvh - 120px); overflow: auto; padding: 12px;
+  border: 1px solid var(--k-shell-line); border-radius: 8px; box-shadow: var(--k-shell-shadow);
+  background: var(--k-shell-surface); color: var(--k-shell-ink); font: 400 13px/1.5 var(--k-shell-font);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-wiki-tools-title { margin: 0 4px 8px; font-weight: 600; }
+live-dashboard.dashboard[data-kylon-shell] .cs-wiki-tools :is(button, a) { min-block-size: 44px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-wiki-tools > summary:focus-visible {
+  outline: 2px solid var(--k-shell-focus); outline-offset: 2px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .dashboard__channel-body > .dashboard__brain-view:not([hidden]) {
+  grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); overflow: hidden;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .dashboard__brain-view > :is(.dashboard__brain-topic, .dashboard__brain-selection-prompt) {
+  box-sizing: border-box; grid-column: 1; grid-row: 1; inline-size: 100%; max-inline-size: none;
+  margin: 0; padding: 0; overflow: auto;
 }
 @media (width > 52rem) {
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .hm-frame.hm-frame.hm-frame { grid-template-columns: minmax(0, 1fr); }
 }
 @media (width <= 52rem) {
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-context { padding: 4px; }
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .dashboard__channel-body > .dashboard__brain-view:not([hidden]) {
-    grid-template-rows: auto auto auto auto; overflow: auto; scroll-padding: 5px;
+  live-dashboard.dashboard[data-kylon-shell] .cs-wiki-tools-panel {
+    inset-inline-start: auto; inset-inline-end: 16px; inset-block-start: 60px; inset-block-end: auto;
   }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .dashboard__brain-view > .dashboard__brain-index {
-    max-block-size: min(13rem,30dvh); overflow: auto; scroll-padding: 5px;
+    grid-column: 1; grid-row: 1; padding: 0; max-block-size: none; overflow: auto;
   }
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .dashboard__brain-view > .dashboard__brain-topic { grid-row: 4; padding-block-start: 16px; overflow: visible; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .dashboard__brain-view[data-brain-selection="document"] > .dashboard__brain-index,
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .dashboard__brain-selection-prompt {
+    display: none;
+  }
 }
 @media (forced-colors: active) {
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-disclosure > summary::before { background: ButtonText; forced-color-adjust: none; }
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-disclosure > summary:focus-visible { outline: 3px solid Highlight; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-wiki-tools > summary:focus-visible { outline: 3px solid Highlight; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-context .dashboard__brain-index button:focus-visible { outline: 3px solid Highlight; }
 }

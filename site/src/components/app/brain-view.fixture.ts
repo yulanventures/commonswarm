@@ -97,6 +97,8 @@ export async function runBrainViewFixture(): Promise<BrainViewSnapshot> {
 <html>
   <head><meta charset="utf-8"></head>
   <body>
+    <button type="button" data-brain-back hidden>Back to Wiki</button>
+    <p data-brain-selection-prompt>Select a page to read.</p>
     <ul data-brain-list hidden></ul>
     <p data-brain-empty></p>
     <article data-brain-detail hidden>
@@ -125,6 +127,7 @@ export async function runBrainViewFixture(): Promise<BrainViewSnapshot> {
       (async () => {
         const one = (selector) => document.querySelector(selector);
         const targets = {
+          view: document.body, back: one("[data-brain-back]"), selectionPrompt: one("[data-brain-selection-prompt]"),
           list: one("[data-brain-list]"), empty: one("[data-brain-empty]"),
           detail: one("[data-brain-detail]"), title: one("[data-brain-title]"),
           meta: one("[data-brain-meta]"), bodyMode: one("[data-brain-body-mode]"),

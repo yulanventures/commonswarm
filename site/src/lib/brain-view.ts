@@ -11,6 +11,9 @@ export interface BrainTopic extends WorkspaceFile {
 }
 
 export interface BrainViewTargets {
+  view: HTMLElement;
+  back: HTMLButtonElement;
+  selectionPrompt: HTMLElement;
   list: HTMLUListElement;
   empty: HTMLElement;
   detail: HTMLElement;
@@ -101,6 +104,21 @@ export function createBrainView(
   };
   resetRetry();
 
+  // Presentation state belongs to this controller, including pending/error readers.
+  // Back retains the selected file, source and draft; it never initiates a read.
+  const showSelection = (selected: boolean): void => {
+    targets.view.dataset.brainSelection = selected ? "document" : "index";
+    targets.detail.hidden = !selected;
+    targets.selectionPrompt.hidden = selected;
+  };
+  showSelection(false);
+  targets.back.addEventListener("click", () => {
+    showSelection(false);
+    const selected = Array.from(targets.list.querySelectorAll<HTMLButtonElement>("[data-brain-topic]"))
+      .find(button => button.dataset.brainTopic === activeTopic);
+    selected?.focus({ preventScroll: true });
+  });
+
   const setRawMode = (showRaw: boolean): void => {
     /* Keep the full source out of the DOM until a reader asks for it. The default
      * rendered view stays bounded even when the stored topic is large. */
@@ -167,6 +185,7 @@ export function createBrainView(
     if (!topic) return;
     const selectedVersion = version ?? topic.currentVersion;
     if (selectedVersion < 1 || selectedVersion > topic.currentVersion) return;
+    const enteringFromIndex = targets.list.contains(targets.list.ownerDocument.activeElement);
     const request = ++requestVersion;
     const heldFocus = retrying && targets.retry.ownerDocument.activeElement === targets.retry;
     if (retrying && failedRead) failedRead = { ...failedRead, request, heldFocus };
@@ -177,7 +196,7 @@ export function createBrainView(
     activeTopic = topic.topic;
     activeFileId = topic.fileId;
     activeVersion = selectedVersion;
-    targets.detail.hidden = false;
+    showSelection(true);
     targets.title.textContent = topic.topic;
     targets.meta.textContent = "Loading topic…";
     targets.markdown.replaceChildren();
@@ -191,6 +210,9 @@ export function createBrainView(
     setError();
     setStatus();
     renderList();
+    // Only the phone presentation hides the activating topic button.
+    if (enteringFromIndex && targets.back.getClientRects().length && !targets.back.closest("[hidden], [inert]"))
+      targets.title.focus({ preventScroll: true });
     let readCompleted = false;
     try {
       const markdown = await options.read(topic, selectedVersion);
@@ -312,7 +334,7 @@ export function createBrainView(
         targets.raw.textContent = "";
         targets.rawToggle.disabled = true;
         setRawMode(false);
-        targets.detail.hidden = true;
+        showSelection(false);
         targets.form.hidden = true;
       }
       if (failedRead) {
