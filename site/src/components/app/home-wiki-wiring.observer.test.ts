@@ -21,5 +21,11 @@ test("Wiki is reachable from the workspace menu and right column using the exist
     /new File\(\[markdown\], topic\.name[\s\S]*uploadBrowserAttachment/,
     "browser edits must use the current file create → PUT → commit flow",
   );
-  assert.match(dashboard, /<summary>Version history<\/summary>/);
+  const history = dashboard.match(/<details\b[^>]*\bdata-brain-history(?=[\s>])[^>]*>([\s\S]*?)<\/details>/);
+  assert.ok(history, "version history remains a native disclosure");
+  assert.match(
+    history[1]!,
+    /^\s*<summary\b[^>]*\baria-label="Version history"[^>]*>[\s\S]*?<\/summary>\s*<ul\b[^>]*\bdata-brain-history-list(?=[\s>])[^>]*>/,
+    "the accessible Version history summary opens the existing version list regardless of icon or text wrapping",
+  );
 });
