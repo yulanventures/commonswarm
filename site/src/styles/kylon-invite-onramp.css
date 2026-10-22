@@ -133,6 +133,16 @@ invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(a[hre
 invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__choice, .invite-onramp__consent):has(input:focus-visible) {
   outline: 2px solid var(--k-shell-focus); outline-offset: 2px;
 }
+/* The full choice label owns keyboard focus; keep the native input rim and
+   checked fill without adding a second focus halo around the small control. */
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__choice, .invite-onramp__consent) input:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1.5px var(--k-shell-control);
+}
+/* Direct controls use the shared outline, replacing the inherited halo. */
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(a[href], button, input[type="email"], summary):focus-visible {
+  box-shadow: none;
+}
 @media (width <= 30rem) {
   invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__title {
     font-size: 24px; line-height: 32px;
