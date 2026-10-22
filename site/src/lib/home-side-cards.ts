@@ -44,6 +44,8 @@ export interface SideCardsVM {
   sample: boolean;
   workspaceName: string;
   todos: SideTodosVM | null;
+  /** Presentation only: the ready To-dos index already supplies these rows and actions. */
+  todosInMain?: boolean;
   objects: SideObjectsVM;
   /** The viewer's agents only: the access read is owner-scoped, so other people's agents never appear here. */
   sharedAgents: SideSharedAgentVM[];
@@ -178,9 +180,9 @@ function headRow(doc: Document, root: HTMLElement, more: number): HTMLElement | 
   return head;
 }
 
-/** To-dos: up to 6 open rows and "+ Add a to-do"; the title opens all to-dos. Returns null when the read is absent. */
+/** To-dos: up to 6 open rows and "+ Add a to-do"; the title opens all to-dos. Returns null when the read is absent or the ready index supplies the same controls. */
 export function buildTodosCard(doc: Document, vm: SideCardsVM, callbacks: SideCardsCallbacks): HTMLElement | null {
-  if (!vm.todos) return null;
+  if (!vm.todos || vm.todosInMain) return null;
   const { root, body } = section(doc, "todos", "To-dos", vm.sample ? undefined : vm.todos.allHref);
   const { shown, more } = sideOpenTodos(vm.todos.items);
   const head = headRow(doc, root, more);
