@@ -16,6 +16,7 @@ interface SettingsSnapshot {
   title: string;
   counts: string;
   warning: string;
+  supportHref: string | null;
   initialDisabled: boolean;
   partialDisabled: boolean;
   exactDisabled: boolean;
@@ -64,6 +65,7 @@ async function renderSettingsFixture(): Promise<SettingsSnapshot> {
           title: root.querySelector("h2").textContent,
           counts: root.querySelector(".dashboard__workspace-settings-counts").textContent,
           warning: root.querySelector("[data-workspace-close-section] p").textContent,
+          supportHref: root.querySelector("[data-workspace-close-section] p a")?.getAttribute("href") ?? null,
           initialDisabled,
           partialDisabled,
           exactDisabled,
@@ -103,7 +105,9 @@ test("the real settings renderer gates close on the exact workspace name", async
   assert.match(snapshot.warning, /hides the workspace for everyone/);
   assert.match(snapshot.warning, /frees its free-tier slot/);
   assert.match(snapshot.warning, /Members lose access/);
-  assert.match(snapshot.warning, /Support can restore it/);
+  assert.match(snapshot.warning, /Contact support if you need help\./);
+  assert.equal(snapshot.supportHref, "/support");
+  assert.doesNotMatch(snapshot.warning, /Support can restore it/);
 });
 
 test("the dashboard closes through the human command and leaves the dead route", async () => {

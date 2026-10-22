@@ -2,7 +2,7 @@
 # Runs only inside the disposable worker, sharing its private DinD namespace.
 set -euo pipefail
 suite=${1:?suite required}
-case "$suite" in server|p1-cli|site|box-dry-run|unit) ;; *) exit 2 ;; esac
+case "$suite" in server|server-permanence|p1-cli|site|box-dry-run|unit) ;; *) exit 2 ;; esac
 test "$CI" = true
 test "$STANDALONE_CI" = 1
 test "$DOCKER_HOST" = tcp://127.0.0.1:2375
@@ -61,15 +61,15 @@ p.write_text(text)
 PY
 git diff -- supabase/config.toml >/receipt/checkout.patch
 gate dependencies npm ci
-if [[ "$suite" = server || "$suite" = p1-cli || "$suite" = unit ]]; then
-  if [[ "$suite" = server ]]; then
+if [[ "$suite" = server || "$suite" = server-permanence || "$suite" = p1-cli || "$suite" = unit ]]; then
+  if [[ "$suite" = server || "$suite" = server-permanence ]]; then
     gate mcp-dependencies npm ci --prefix services/mcp-auth --ignore-scripts --no-audit --no-fund
   fi
   gate management-bundle node services/mcp-auth/build-management.mjs
 fi
 failed=0
 case "$suite" in
-  server)
+  server|server-permanence)
     gate edge-image node --import tsx scripts/ci-edge-runtime-image.mjs ensure
     gate stack-start bash -euo pipefail -c 'SUPABASE_DB_MIGRATIONS_ENABLED=false SUPABASE_DB_SEED_ENABLED=false supabase start --ignore-health-check >/dev/null'
     gate migrations bash -euo pipefail -c "$(cat <<'SH'
@@ -93,6 +93,18 @@ diff -u /tmp/expected-migrations /tmp/actual-migrations
 test "$(psql -X -v ON_ERROR_STOP=1 -At --dbname postgresql://postgres@127.0.0.1:54322/postgres --command "SELECT current_user, session_user, NOT rolsuper, (SELECT count(*) = 4 AND count(DISTINCT roleid) = 4 AND bool_and(admin_option AND inherit_option AND set_option) FROM pg_auth_members WHERE member = 'postgres'::regrole AND roleid IN ('swarm_admin'::regrole, 'swarm_command'::regrole, 'swarm_read'::regrole, 'swarm_capability'::regrole)) FROM pg_roles WHERE rolname = current_user")" = 'postgres|postgres|t|t'
 SH
 )"
+    if [[ "$suite" = server-permanence ]]; then
+      gate command-core npm run build:command-core
+      gate permanence-fixtures node --import tsx --test --test-concurrency=1 --test-name-pattern='^(delegated-local-(permanent-suspension|revocation-closure|renewal-budget|wait-removal-rollback)|local-resume-recovery-controls|active-floor-ordinary-local-compat-policy exact (F/current|F/F))$' tests/p1-server/admin-principal-lock-order.test.ts
+      gate permanence-date node --import tsx --test --test-concurrency=1 --test-name-pattern='^owner can set and clear a future local date without resume; elapsed date stays terminal$' tests/p1-server/agent-execution-sessions.test.ts
+      gate permanence-allow-resume node --import tsx --test --test-concurrency=1 --test-name-pattern='^(local-allow-retired-parent-(allow-first|issuer-first)|local-resume-parent-order|active-floor-(local-allow-retired-parent-(allow-first|issuer-first)|local-resume-parent-order) exact (F/current|current/F|F/F))$' tests/p1-server/admin-principal-lock-order.test.ts || failed=1
+      gate permanence-hosted node --import tsx --test --test-concurrency=1 --test-name-pattern='^(accepted hosted principal removal closes workspace access with (live|revoked|archived|membership-removed) other consent|accepted removal fences concurrent same-name and new-name claims|refresh admitted before removal cannot restore access when its successor is written afterward|failed authority projection rolls back principal, hosted identity and consent|production edge login edits policy and removes hosted principal with command role only|authorized admin routine removal closes hosted consent, handle and seat without retiring other workspace|same-owner revoked local principal is reclaimable through the hosted command path)$' tests/p1-server/hosted-authority.test.ts || failed=1
+      gate permanence-prefix node --import tsx --test --test-concurrency=1 --test-name-pattern='^hosted-owner-removal-prefix$' tests/p1-server/admin-principal-lock-order.test.ts || failed=1
+      gate permanence-ask-signal node --import tsx --test --test-concurrency=1 --test-name-pattern='^a root ask charges every agent recipient pair at positions 1 through 8$' tests/p1-server/ask-chain.test.ts || failed=1
+      gate permanence-chat-signal node --import tsx --test --test-concurrency=1 --test-name-pattern='^a post with `to` stores the first recipient in the scalar column and the whole set beside it$' tests/p1-server/chat-signals.test.ts || failed=1
+      gate permanence-h0-signal node --import tsx --test --test-concurrency=1 --test-name-pattern='^(ask, note, reply and working-on store the same signal fields as a CLI command|three seats: ask, poll, ack and reply complete through H0)$' tests/p1-server/h0-forward.test.ts || failed=1
+      exit "$failed"
+    fi
     gate server npm run test:p1-server || failed=1
     # Match workflow !cancelled(): these gates still run after a server failure.
     gate mcp-auth npm --prefix services/mcp-auth test || failed=1
