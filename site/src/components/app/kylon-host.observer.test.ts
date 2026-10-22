@@ -568,10 +568,30 @@ const fixtureScript = `
         && Math.max(...bounds.map(b => b.width)) - Math.min(...bounds.map(b => b.width)) <= 1 && Math.abs(bounds[3].right - detail.right) <= .5
       : bounds.every(b => Math.abs(b.top - bounds[0].top) <= .5), { phone, bounds, detail });
     for (const node of [app.querySelector('.hm-assign-chip[aria-checked="true"]'), app.querySelector('.hm-choice:has(input:checked)')]) {
-      const s = getComputedStyle(node), inside = surface(node), outside = surface(node.parentElement), ratios = [inside, outside].map(bg => contrast(color(s.borderLeftColor), bg));
-      check('selected actual chip/choice uses distinct olive with3:1 both sides', equalColor(s.borderLeftColor, token(node, '--cs-accent'))
-        && parseFloat(s.borderLeftWidth) >= 1 && s.boxShadow === 'none' && ratios.every(ratio => ratio >= 3),
-        { text: node.textContent, border: s.border, background: s.backgroundColor, inside, outside, ratios });
+      const idle = node.parentElement.querySelector(node.matches('.hm-assign-chip')
+        ? '.hm-assign-chip[aria-checked="false"]' : '.hm-choice:not(:has(input:checked))');
+      const selectionEdge = () => {
+        const s = getComputedStyle(node), u = getComputedStyle(idle), inside = surface(node), outside = surface(node.parentElement);
+        const ratios = [inside, outside].map(bg => contrast(color(s.borderLeftColor), bg));
+        const idleRatios = [surface(idle), surface(idle.parentElement)].map(bg => contrast(color(u.borderLeftColor), bg));
+        return { pass: parseFloat(s.borderLeftWidth) >= Math.max(1, parseFloat(u.borderLeftWidth)) && s.boxShadow === 'none'
+          && ratios.every(ratio => ratio >= 3) && Math.min(...ratios) >= Math.min(...idleRatios)
+          && !equalColor(s.borderLeftColor, u.borderLeftColor),
+          text: node.textContent, border: s.border, idleBorder: u.border, background: s.backgroundColor, inside, outside, ratios, idleRatios };
+      };
+      const normal = selectionEdge();
+      check('selected actual chip/choice edge is distinct,3:1 and at least as strong as idle', normal.pass, normal);
+      if (innerWidth === 1471 && token(app, '--k-shell-scheme') === 'dark') {
+        // The former dark border clears3:1 yet loses to idle. Exercise that specific regression,
+        // then restore the actual cascade; no replacement builder or production test seam.
+        const old = node.style.getPropertyValue('border-color'), priority = node.style.getPropertyPriority('border-color');
+        let weakened;
+        try { node.style.setProperty('border-color', '#697344', 'important'); weakened = selectionEdge(); }
+        finally { if (old) node.style.setProperty('border-color', old, priority); else node.style.removeProperty('border-color'); }
+        check('former dark edge fails selection hierarchy despite3:1; actual cascade is restored', !weakened.pass
+          && weakened.ratios.every(ratio => ratio >= 3) && Math.min(...weakened.ratios) < Math.min(...weakened.idleRatios)
+          && selectionEdge().pass && getComputedStyle(node).border === normal.border, { weakened, restored: selectionEdge() });
+      }
     }
   },
   styleFocused(kind) {
