@@ -73,6 +73,7 @@ test("Catch up navigation keeps the signed-in account name after the workspace p
     window: { location: { origin: "https://example.test" }, history: { state: { home: true }, pushState: () => {}, replaceState: () => {} } },
     closeEntityPanel: () => {}, closeRosterDialog: () => {}, closeWorkspaceDetailsDialog: () => {}, resetComposer: () => {},
     resetWorkspaceSessionState: () => { calls.push("reset"); for (const target of targets) target.textContent = "Your account"; context.workspaces = []; },
+    listsAllowLanding: null, syncListsChrome: () => {},
     accountName: () => { calls.push("account"); return "Zoe"; }, showPanel: () => {}, renderHomeShell: () => {}, applyHomePane: () => {},
     focusHomeView: () => {}, loadHomeCatchUp: () => { calls.push("reads"); } };
   const script = ts.transpile(`const ${navigation.getText(file)}; navigateHome({view:"catchup"}, "push");`, { target: ts.ScriptTarget.ES2022 });

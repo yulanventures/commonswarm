@@ -18,6 +18,7 @@ import { todosPane } from '../../lib/home-todo-list';
 import { homeRailPeople, mapHomeRail, initialCatchUpData, overviewCatchUpData, homeNeedsYouCount, catchUpDetailFromOverview } from '../../lib/home-map';
 import { buildHomeRail } from '../../lib/home-rail';
 import { homeStructureKey } from '../../lib/home-focus';
+import { createListsChrome } from '../../lib/lists-chrome';
 import { assignOptions, tagOptions, personNames } from '../../lib/home-pickers';
 import { peopleDialogCanAct } from '../../lib/people-dialog-view';
 import * as agentStatusFunctions from '../../lib/agent-status';
@@ -26,7 +27,7 @@ import { agentPresenceLine } from '../../lib/agent-presence';
 import { wakePathMark } from '../../lib/wake-path';
 import { identityDisplayLabel } from '../../lib/identity-label';
 import { isTaggable } from '../../lib/mention-address';
-import { removedAgentLabel } from '../../lib/household-access';
+import { removedAgentLabel, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, accessRefusalMessage } from '../../lib/household-access';
 import type { HomeOverview } from '../../lib/home/contract';
 
 /** Execute the dashboard's read/write lifecycle, replacing only the DOM paint boundaries.
@@ -142,6 +143,7 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
       const app={dataset:{state:'channel',channelView:${JSON.stringify(view === 'todo' ? 'feed' : 'agent-choice')}}};
       const homeRoute={view:${JSON.stringify(view)},workspaceId:'W'};
       let workspaces=[{id:'W',name:'Home'}], activeWorkspaceId='W';
+      let listsAllowLanding=null;
       let renderedAuthUserId='tom', requestVersion=1, authReloadQueued=false, authRecoveryActive=false, bootInFlight=null, bootAgain=false;
       let catchUpGeneration=0, railOverviewGeneration=0, connectedAppsGeneration=0;
       let homeWorkspaceGeneration=0, homeWorkspaceRead=0, homeDetailGeneration=0;
@@ -218,6 +220,7 @@ async function routedPaneFixture(initialView: 'todo' | 'todos' = 'todo') {
     ['[data-home-route-pane]', slot], ['.dashboard__channel', channel], ['[data-user-menu-root]', account]]);
   const navigations: string[] = [], history: string[] = [];
   const context = createContext({ document, routeHref, resolveHomeRoute, homeViewTitle, todoView, todosPane, personNames, URL,
+    listsChrome: createListsChrome(channel as unknown as HTMLElement),
     layout: { mounted: false }, navigateHomeHref: (href: string) => navigations.push(href),
     window: { requestAnimationFrame: (callback: () => void) => frames.push(callback), location: { origin: 'https://example.test' },
       history: { state: { home: true }, pushState: (_state: unknown, _title: string, href: string) => history.push(href),
@@ -233,6 +236,7 @@ async function routedPaneFixture(initialView: 'todo' | 'todos' = 'todo') {
     let homeTodosState='pending', homeQueueRead='pending', homeTodoReceipt='';
     let homeTodoRead=null, homeQueue=null, homeDetailKey='', homeTodoSave='idle', homeTodoNotice=null;
     const homeTodoRows=[], homePolicies=new Map(), homeGateEditorId=null;
+    let listsAllowLanding=null;
     let homeNavigation=0, homeDetailGeneration=0, catchUpGeneration=0; const homeScroll=new Map();
     const session={user:{id:'tom'}}, keepConnectCredentialVisible=()=>false;
     let homeTodoFilter='open'; const homeTodoModels=()=>[];
@@ -241,7 +245,7 @@ async function routedPaneFixture(initialView: 'todo' | 'todos' = 'todo') {
     const closeEntityPanel=()=>{}, closeRosterDialog=()=>{}, closeWorkspaceDetailsDialog=()=>{};
     const renderHomeRail=()=>{}, renderHomeShell=()=>{}, loadRailOverview=()=>{}, renderChannelRail=()=>{};
   `, context);
-  runInContext(await dashboardFunctions(['syncStandalonePage', 'homePaneMessage', 'renderHomeObjectPane', 'loadHomeObject', 'applyHomePane', 'focusHomeView', 'navigateHome']), context);
+  runInContext(await dashboardFunctions(['syncListsChrome', 'syncStandalonePage', 'homePaneMessage', 'renderHomeObjectPane', 'loadHomeObject', 'applyHomePane', 'focusHomeView', 'navigateHome']), context);
   const flushFocus = () => { for (const callback of frames.splice(0)) callback(); };
   const assertPage = (label: string, expectedHref: string) => {
     assert.equal(frame.getAttribute('data-home-standalone'), initialView === 'todo' ? '' : null, `${label}: actual route frame flag`);
@@ -474,7 +478,7 @@ class RowNode {
     ? node.className.split(' ').includes(selector.slice(1)) : node.tag === selector); }
 }
 test('a signal page settling after a same-workspace view change retains data without taking the pane', async () => {
-  const code = await dashboardFunctions(['addAgentViewOpen', 'showChannelView', 'renderFeed', 'loadSignals',
+  const code = await dashboardFunctions(['syncListsChrome', 'addAgentViewOpen', 'showChannelView', 'renderFeed', 'loadSignals',
     'forgetFetchedPostedIds', 'prunePostedRows', 'rowShowsOnScreen', 'visibleReceiptSignalIds', 'refreshDeliveryReceipts']);
   for (const [route, workspaceView, channelView] of [
     ['files', 'files', 'files'], ['wiki', 'brain', 'brain'], ['lists', 'objects', 'objects'],
@@ -488,6 +492,8 @@ test('a signal page settling after a same-workspace view change retains data wit
     const nodes = new Map([['[data-composer]', composer], ['[data-feed-list]', list], ['[data-feed-empty-title]', emptyTitle]]);
     let resolvePage!: (page: { rows: unknown[]; hasMore: boolean }) => void, reads = 0;
     const context = createContext({ routeHref, homeAgentFixCards, browserDeliveryReceiptCandidates, BROWSER_RECEIPT_REQUESTS_PER_TICK,
+      // This signal fixture omits channel chrome; still execute its real projection dependency.
+      listsChrome: createListsChrome(new ViewNode('div') as unknown as HTMLElement),
       signalPage: () => { reads++; return new Promise(resolve => { resolvePage = resolve; }); },
       one: (selector: string) => nodes.get(selector) ?? null,
       all: (selector: string) => selector === '[data-channel-view]' ? sections : [],
@@ -495,6 +501,7 @@ test('a signal page settling after a same-workspace view change retains data wit
     });
     runInContext(`
       const app={dataset:{channelView:'feed'}}, activeWorkspaceId='W', requestVersion=1, sampleMode=false, session={user:{id:'viewer'}};
+      let listsAllowLanding=null;
       let homeRoute={view:'chat',workspaceId:'W'}, activeWorkspaceView='signals', signalExpiryTimer;
       let activeChannelId=null, unknownChannelId=null, signalCursor={createdAt:'old',id:'old'}, signalCutoff='', signalHasMore=true;
       let signals=[{id:'previous-page'}], feedWasEmpty=false; const agents=[], workspaces=[{id:'W',name:'Home'}];
@@ -531,6 +538,332 @@ test('a signal page settling after a same-workspace view change retains data wit
     assert.equal(emptyTitle.textContent, 'No messages yet.');
   }
 });
+test('Lists retains Refresh across Files and Wiki, then restores channel nodes and route focus', async () => {
+  const raw = await readFile(new URL('./LiveDashboard.astro', import.meta.url), 'utf8');
+  const ast = ts.createSourceFile('dashboard.ts', raw.match(/<script>([\s\S]*?)<\/script>/)![1], ts.ScriptTarget.Latest, true);
+  const handlers: string[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === 'addEventListener' && node.arguments[0]?.getText(ast) === '"click"'
+      && node.expression.expression.getText(ast) === 'one<HTMLButtonElement>("[data-refresh]")') {
+      handlers.push(node.arguments[1].getText(ast));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast); assert.equal(handlers.length, 1, 'use the actual sole Refresh listener');
+  const click = ts.transpileModule(`(${handlers[0]})`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const code = await dashboardFunctions(['syncListsChrome', 'showPanel', 'showChannelView', 'activateWorkspaceView', 'focusHomeView']);
+  for (const previous of ['files', 'brain'] as const) {
+    const frames: (() => void)[] = [], reloads: string[] = [];
+    const nodes = new Map<string, ChromeNode>();
+    let active: ChromeNode | null = null;
+    const document = { title: '', createComment: () => new ChromeNode('#comment') };
+    // Invented DOM primitives only: actual production declarations own all movement/state below.
+    class ChromeNode extends RowNode {
+      hidden = false; disabled = false; ownerDocument = document;
+      get parentElement() { return this.parent; }
+      get parentNode() { return this.parent; }
+      get previousSibling() { return this.parent?.children[this.parent.children.indexOf(this) - 1] ?? null; }
+      before(node: RowNode) { if (this.parent) { const parent = this.parent; node.remove(); node.parent = parent;
+        parent.children.splice(parent.children.indexOf(this), 0, node); } }
+      // A normal DOM detach drops focus; a no-op projection must avoid detaching its control.
+      remove() { if (active === this) active = null; super.remove(); }
+      focus() { active = this; }
+      closest() { return null; }
+      getClientRects(): unknown[] {
+        for (let node: RowNode | null = this; node; node = node.parent) if ((node as ChromeNode).hidden) return [];
+        return [{}];
+      }
+      querySelector(selector: string): ChromeNode | null {
+        if (this === root && nodes.has(selector)) return nodes.get(selector)!;
+        return super.querySelector(selector) as ChromeNode | null;
+      }
+    }
+    const root = new ChromeNode('live-dashboard'), channel = new ChromeNode('section'), legacy = new ChromeNode('header');
+    channel.className = 'dashboard__channel'; legacy.className = 'dashboard__channel-head';
+    const titleBlock = new ChromeNode('div'), actions = new ChromeNode('div'), name = new ChromeNode('h2');
+    const description = new ChromeNode('p'), refresh = new ChromeNode('button'), count = new ChromeNode('span');
+    description.textContent = 'Original channel description'; refresh.hidden = true;
+    refresh.setAttribute('aria-label', 'Refresh channel');
+    const sections = ['objects', 'files', 'brain', 'feed', 'connect'].map(view => {
+      const section = new ChromeNode('section'); section.dataset.channelView = view; section.hidden = true; return section;
+    });
+    const head = new ChromeNode('header'), title = new ChromeNode('h1'), fileTitle = new ChromeNode('h1'), wikiTitle = new ChromeNode('h1'), workspaceTitle = new ChromeNode('h1');
+    title.textContent = 'Lists'; fileTitle.textContent = 'Files'; wikiTitle.textContent = 'Wiki'; workspaceTitle.textContent = 'Home';
+    head.append(title); sections[0].append(head); sections[1].append(fileTitle); sections[2].append(wikiTitle);
+    titleBlock.append(name, description); actions.append(count, refresh); legacy.append(titleBlock, actions);
+    channel.append(legacy, ...sections); root.append(workspaceTitle, channel);
+    for (const [selector, node] of [['.dashboard__channel', channel], ['.dashboard__objects-view .dashboard__lists-head', head],
+      ['[data-channel-name]', name], ['[data-channel-description]', description], ['[data-refresh]', refresh],
+      ['[data-update-count]', count], ['#dashboard-lists-title', title], ['#dashboard-files-title', fileTitle], ['#dashboard-wiki-title', wikiTitle]] as const) nodes.set(selector, node);
+    const inventory = root.descendants();
+    const context = createContext({ document, homeViewTitle, listsChrome: createListsChrome(root as unknown as HTMLElement),
+      one: (selector: string) => nodes.get(selector) ?? null,
+      all: (selector: string) => selector === '[data-channel-view]' ? sections : selector.includes('[data-channel-view=objects] h1')
+        ? [title] : selector.includes('[data-channel-view=files] h1') ? [fileTitle]
+        : selector.includes('[data-channel-view=brain] h1') ? [wikiTitle] : selector.includes('[data-home-workspace-shell] h1') ? [workspaceTitle] : [],
+      window: { clearTimeout() {}, requestAnimationFrame: (callback: () => void) => frames.push(callback) }, queueMicrotask() {},
+      openWorkspace: async (id: string) => { reloads.push(id); },
+    });
+    context.root = root;
+    runInContext(`
+      const app=root, activeWorkspaceId='W', workspaces=[{id:'W',name:'Home'}];
+      let listsAllowLanding=null;
+      let homeRoute={view:'chat',workspaceId:'W'}, activeWorkspaceView='signals', sampleMode=false, agents=[{principalId:'A'}];
+      let signalExpiryTimer; const unknownChannelId=null;
+      const keepConnectCredentialVisible=()=>false, disarmLiveFeed=()=>{}, armLiveFeed=()=>{}, closeMentionPicker=()=>{};
+      const syncStandalonePage=()=>{}, syncFeedChrome=()=>{}, syncVisibleShell=()=>{}, syncComposerPlacement=()=>{};
+      const renderFiles=()=>{}, renderBrain=()=>{}, renderChannelHead=()=>{}, openHouseholdView=()=>{};
+      const layout={suspend(){}}, panel=()=>null, panelBootFocus={allowsFocus:()=>false};
+      const navigateHome=()=>{throw new Error('unexpected navigation');};
+      const openSampleWorkspace=()=>{throw new Error('Sample Refresh must remain hidden');};
+      const returnToChannel=()=>showChannelView('feed');
+      app.dataset.state='channel'; app.dataset.channelView='feed';
+    `, context);
+    runInContext(code, context);
+    refresh.addEventListener('click', runInContext(click, context));
+    const enter = (view: string, route: string) => {
+      runInContext(`homeRoute={view:${JSON.stringify(route)},workspaceId:'W'}; activateWorkspaceView(${JSON.stringify(view)}); focusHomeView();`, context);
+      for (const frame of frames.splice(0)) frame();
+    };
+    enter(previous, previous === 'brain' ? 'wiki' : 'files');
+    assert.equal(refresh.hidden, true, `${previous}: established previous-pane state`);
+    assert.equal(legacy.hidden, true, `${previous}: preserve the current standalone page header`);
+    assert.equal(channel.getAttribute('aria-labelledby'), previous === 'brain' ? 'dashboard-wiki-title' : 'dashboard-files-title');
+    refresh.disabled = true;
+    enter('objects', 'lists');
+    assert.equal(refresh.hidden, false, `${previous}→Lists restores real workspace Refresh availability`);
+    assert.equal(refresh.disabled, true, 'projection/availability never releases a pending control');
+    assert.equal(refresh.parentElement, head); assert.equal(description.parentElement, head);
+    assert.equal(legacy.hidden, true); assert.equal(channel.getAttribute('aria-labelledby'), 'dashboard-lists-title');
+    assert.equal(description.textContent, 'Shared lists, docs and files. Every saved version is kept.');
+    assert.equal(active, title, 'the Lists route focuses its main heading');
+    refresh.disabled = false; refresh.focus();
+    runInContext('syncListsChrome()', context);
+    assert.equal(active, refresh, 'no-op synchronization retains the focused original control');
+    refresh.handlers.get('click')!();
+    assert.deepEqual(reloads, ['W'], 'the actual Refresh listener reaches the existing workspace reload boundary');
+    assert.equal(refresh.getAttribute('aria-label'), 'Refresh channel');
+    for (const state of ['loading', 'signed-out', 'create', 'workspace-error']) {
+      runInContext(`showPanel(${JSON.stringify(state)})`, context);
+      assert.equal(refresh.parentElement, actions, `${state}: restore the original action parent`);
+      assert.equal(description.parentElement, titleBlock, `${state}: restore the original description parent`);
+      runInContext("showPanel('channel'); syncListsChrome()", context);
+      assert.equal(refresh.parentElement, head);
+    }
+    runInContext("showChannelView('connect')", context);
+    assert.equal(refresh.parentElement, actions, 'a non-Lists channel view restores the control even with a Lists route');
+    enter('objects', 'lists'); enter(previous, previous === 'brain' ? 'wiki' : 'files');
+    assert.equal(refresh.parentElement, actions); assert.equal(description.parentElement, titleBlock);
+    assert.equal(legacy.hidden, true, `${previous}: leaving Lists preserves the current page header`);
+    assert.equal(channel.getAttribute('aria-labelledby'), previous === 'brain' ? 'dashboard-wiki-title' : 'dashboard-files-title');
+    assert.equal(active, previous === 'brain' ? wikiTitle : fileTitle, 'the existing destination heading retains focus');
+    enter('objects', 'lists'); enter('signals', 'chat');
+    assert.equal(active, workspaceTitle, 'Chat route focus leaves the old Lists heading');
+    assert.equal(refresh.parentElement, actions); assert.equal(description.parentElement, titleBlock);
+    assert.equal(legacy.hidden, false); assert.equal(channel.getAttribute('aria-labelledby'), 'dashboard-channel-title');
+    assert.deepEqual(actions.children.filter(node => node.tag !== '#comment'), [count, refresh]);
+    assert.deepEqual(titleBlock.children.filter(node => node.tag !== '#comment'), [name, description]);
+    assert.deepEqual(root.descendants().filter(node => node.tag !== '#comment'), inventory, 'all original nodes and order return without clones');
+    for (const denied of ['sampleMode=true', 'sampleMode=false; agents=[]']) {
+      runInContext(denied, context); enter('objects', 'lists');
+      assert.equal(refresh.hidden, true, `${denied}: preserve actual workspace availability restrictions`);
+      assert.deepEqual(reloads, ['W'], 'state synchronization never activates Refresh');
+    }
+  }
+});
+// The real People action, router, access/connection readers, renderers and confirmation run here.
+// Only transport, DOM primitives and unrelated shell/content paint are replaced.
+test('People Allow lands from settled access, continues after consent, and retires with its visit', async () => {
+  const code = await dashboardFunctions(['peopleDialogAction', 'navigateHome', 'applyHomePane', 'activateWorkspaceView',
+    'showChannelView', 'focusHomeView', 'householdScope', 'householdCurrent', 'readHouseholdAccess',
+    'refreshHouseholdAccess', 'renderHouseholdAccess', 'openHouseholdView', 'loadHouseholdConnections',
+    'renderAgentApprovals', 'connectionApproval', 'confirmOwnAccess', 'resetHouseholdSurface']);
+  // Execute the widget's real event registration, not a duplicated navigation callback.
+  const dashboard = await readFile(new URL('./LiveDashboard.astro', import.meta.url), 'utf8');
+  const script = dashboard.match(/<script>([\s\S]*?)<\/script>/)?.[1]; assert.ok(script);
+  const ast = ts.createSourceFile('dashboard.ts', script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let approveListener = '';
+  const findListener = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === 'addEventListener' && ts.isStringLiteral(node.arguments[0])
+      && node.arguments[0].text === 'agent-host-approve' && ts.isExpressionStatement(node.parent))
+      approveListener = node.parent.getText(ast);
+    ts.forEachChild(node, findListener);
+  };
+  findListener(ast); assert.ok(approveListener, 'the public widget approval event is registered');
+  const listenerCode = ts.transpileModule(approveListener, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const ok = { status: 200, body: { status: 'ok', content_role: 'editor' } };
+  const refused = { status: 200, body: { status: 'refused', reason: 'content_consent_required' } };
+  const drain = () => new Promise<void>(resolve => setImmediate(resolve));
+  const fixture = (immediate = false, connections = [{ kind: 'local', principal_id: 'A', name: 'Helper', approval: null }]) => {
+    const focus: LandingNode[] = [], scroll: LandingNode[] = [], frames: (() => void)[] = [];
+    const replies: ((reply: unknown) => void)[] = [], calls: string[] = [], contentReplies: (() => void)[] = [];
+    const hostListeners = new Map<string, () => unknown>();
+    const hostPicker = { addEventListener: (name: string, listener: () => unknown) => hostListeners.set(name, listener) };
+    const document = { title: '', createElement: (tag: string) => new LandingNode(tag),
+      createTextNode: (text: string) => { const node = new LandingNode('#text'); node.textContent = text; return node; } };
+    class LandingNode extends RowNode {
+      hidden = false; disabled = false; checked = false; value = ''; tabIndex = -1;
+      getClientRects(): unknown[] {
+        for (let node: RowNode | null = this; node; node = node.parent) if ((node as LandingNode).hidden) return [];
+        return this.isConnected ? [{}] : [];
+      }
+      closest() { return null; }
+      focus() { if (this.getClientRects().length) focus.push(this); }
+      // Record even a hidden-target attempt: it is the original regression, not a browser success.
+      scrollIntoView() { scroll.push(this); }
+      querySelectorAll(selector: string): LandingNode[] {
+        return selector.split(',').flatMap(part => super.querySelectorAll(part.trim())) as LandingNode[];
+      }
+    }
+    const root = new LandingNode('main'); root.connected = true;
+    const channel = new LandingNode('section'), objects = new LandingNode('section'), files = new LandingNode('section');
+    objects.dataset.channelView = 'objects'; files.dataset.channelView = 'files';
+    const title = new LandingNode('h1'), fileTitle = new LandingNode('h1'), card = new LandingNode('form');
+    const purposeSet = new LandingNode('fieldset'), purpose = new LandingNode('input'), role = new LandingNode('input');
+    purpose.value = 'shared'; role.value = 'editor';
+    const confirm = new LandingNode('button'), notice = new LandingNode('p'), approvals = new LandingNode('section');
+    const approvalTitle = new LandingNode('h2'), list = new LandingNode('ul'), empty = new LandingNode('p');
+    purposeSet.append(purpose); card.append(purposeSet, role, confirm, notice); approvals.append(approvalTitle, list, empty);
+    // B1's upcoming native order; the selected content does not determine access.
+    objects.append(title, card, new LandingNode('article'), approvals); files.append(fileTitle);
+    channel.append(objects, files); root.append(channel);
+    const nodes = new Map<string, LandingNode>([['.dashboard__channel', channel], ['#dashboard-lists-title', title],
+      ['#dashboard-files-title', fileTitle], ['[data-household-consent]', card], ['[data-household-agents]', approvals],
+      ['#dashboard-agent-approvals-title', approvalTitle], ['[data-household-purpose-set]', purposeSet],
+      ['[data-household-consent-result]', notice], ['[data-household-confirm]', confirm],
+      ['[data-household-agent-list]', list], ['[data-household-agent-empty]', empty],
+      ['[data-household-purpose]:checked', purpose], ['[data-household-role]:checked', role]]);
+    const context = createContext({ document, hostPicker, URL, routeHref, resolveHomeRoute, homeViewTitle, createLatestRead,
+      // The renderer's completion is independent of access/connection transport settlement.
+      householdDashboard: { clear() {}, open: () => new Promise<void>(resolve => contentReplies.push(resolve)) },
+      peopleDialogCanAct, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, accessRefusalMessage,
+      one: (selector: string) => selector.endsWith(':checked')
+        ? (nodes.get(selector)?.checked ? nodes.get(selector) : null) : nodes.get(selector) ?? null,
+      all: (selector: string) => selector === '[data-channel-view]' ? [objects, files]
+        : selector.includes('[data-channel-view=objects] h1') ? [title]
+        : selector.includes('[data-channel-view=files] h1') ? [fileTitle]
+        : selector.includes('[data-household-purpose]') ? [purpose, role] : [],
+      window: { location: { origin: 'https://example.test' }, history: { state: { home: true }, pushState() {}, replaceState() {} },
+        requestAnimationFrame: (callback: () => void) => frames.push(callback), clearTimeout() {} },
+      queueMicrotask() {},
+      postCommand: async (_session: unknown, _request: string, command: { kind: string }) => {
+        calls.push(command.kind);
+        if (command.kind === 'household_access') return immediate ? ok : new Promise(resolve => replies.push(resolve));
+        if (command.kind === 'household_connections') return { status: 200, body: { status: 'ok', connections } };
+        if (command.kind === 'household_permissions') return { status: 200, body: { status: 'committed' } };
+        throw new Error(`unexpected command ${command.kind}`);
+      },
+    });
+    runInContext(`
+      let session={user:{id:'viewer'}}, activeWorkspaceId='W', requestVersion=1, sampleMode=false;
+      const app={dataset:{state:'channel',channelView:'feed'}}, workspaces=[{id:'W',name:'Home'}];
+      let homeRoute={view:'people',workspaceId:'W'}, homeNavigation=0, activeWorkspaceView='signals', listsAllowLanding=null;
+      let householdAccess={workspaceId:'W',status:'ok',contentRole:'editor'}, householdAccessGeneration=1, householdAccessRequestedFor='';
+      let householdConnections=[], householdConnectionsReadState='succeeded', householdConfirms=0;
+      const householdReceipts=new Map(), accessReads=createLatestRead(), connectionReads=createLatestRead();
+      const agents=[{principalId:'A',ownerUserId:'viewer',name:'Helper'}], accessStatuses=[], people=new Map();
+      let removedAgents=new Map(), removedAgentOwners=new Map();
+      let catchUpGeneration=0, homeDetailGeneration=0, homeDetailKey='', homeTodoRead=null, homeQueue=null;
+      let homeQueueRead='pending', homeTodoSave='idle', homeTodoReceipt='', homeTodoNotice=null, signalExpiryTimer;
+      const homeScroll=new Map(), unknownChannelId=null, layout={refreshTodoContext:replace=>replace()};
+      const keepConnectCredentialVisible=()=>false, uuid=()=>'request', viewerRole=()=>'owner';
+      const peopleDialogModel=()=>({sample:false,agents:[{id:'A',own:true,accessReadState:'succeeded',access:null}]});
+      const syncListsChrome=()=>{}, syncStandalonePage=()=>{}, syncFeedChrome=()=>{}, syncVisibleShell=()=>{};
+      const parkPeopleHosts=()=>{}, renderHomeSide=()=>{}, renderHomeRail=()=>{}, renderHomeShell=()=>{}, loadRailOverview=()=>{};
+      const closeEntityPanel=()=>{}, closeRosterDialog=()=>{}, closeWorkspaceDetailsDialog=()=>{}, renderChannelRail=()=>{};
+      const disarmLiveFeed=()=>{}, closeMentionPicker=()=>{}, renderFiles=()=>{}, renderSetupChecklist=()=>{}, renderDialogRoster=()=>{};
+      const setHouseholdSetupNeeded=()=>{}, rememberPurpose=()=>{}, stopHostJoinWatch=()=>{}, initials=()=>'', markAgentAvatar=()=>{};
+      const householdCall=()=>async()=>({});
+    `, context);
+    runInContext(code + '\n' + listenerCode, context);
+    const flushFrames = () => { for (const frame of frames.splice(0)) frame(); };
+    return { context, focus, scroll, calls, replies, title, card, purpose, role, approvalTitle, list, fileTitle, notice,
+      flushFrames, finishContent: async () => { assert.ok(contentReplies.length, 'existing content render is pending'); contentReplies.shift()!(); await drain(); },
+      allow: (entry: 'people' | 'picker' = 'people') => {
+        if (entry === 'people') return runInContext("peopleDialogAction('allow','A',{}, {})", context) as Promise<void>;
+        runInContext("homeRoute={view:'add-agent',workspaceId:'W'}; app.dataset.channelView='agent-choice'", context);
+        hostListeners.get('agent-host-approve')!();
+        return drain();
+      },
+      navigate: (view: string) => runInContext(`navigateHome({view:'${view}',workspaceId:'W'},'push')`, context) as Promise<void>,
+      reply: async (value: unknown) => { assert.ok(replies.length, 'real access transport is pending'); replies.shift()!(value); await drain(); },
+    };
+  };
+  for (const row of [
+    { entry: 'people', immediate: false, empty: false }, { entry: 'people', immediate: true, empty: false },
+    { entry: 'people', immediate: false, empty: true }, { entry: 'picker', immediate: false, empty: false },
+  ] as const) {
+    const f = fixture(row.immediate, row.empty ? [] : undefined);
+    await f.allow(row.entry);
+    if (!row.immediate) {
+      f.flushFrames();
+      assert.deepEqual(f.scroll, [], 'pending access must not scroll the hidden consent card or trust cached access');
+      assert.deepEqual(f.focus, [], `${row.entry}: Allow waits for its actual visible access owner`);
+      assert.deepEqual(f.calls, ['household_access'], 'Allow adds no read or duplicate open');
+      await f.reply(ok); f.flushFrames();
+    } else await drain();
+    assert.deepEqual(f.scroll, [], 'approvals wait for the existing content render above them');
+    await f.finishContent(); f.flushFrames();
+    assert.deepEqual(f.scroll, [f.approvalTitle], 'confirmed access lands at native approvals, even with no agent row');
+    assert.equal(f.focus.at(-1), f.approvalTitle, 'queued route/activation focus cannot steal the landing');
+    assert.equal(f.card.hidden, true);
+    assert.equal(f.list.children.length, row.empty ? 0 : 1, 'the real connections reader and row renderer settle');
+    assert.deepEqual(f.calls, ['household_access', 'household_connections']);
+    runInContext('renderHouseholdAccess(); renderAgentApprovals()', f.context);
+    assert.deepEqual(f.scroll, [f.approvalTitle], 'later paint never repeats a consumed landing');
+  }
+  const consent = fixture(); await consent.allow(); await consent.reply(refused); consent.flushFrames();
+  assert.equal(consent.card.hidden, false);
+  assert.deepEqual(consent.scroll, [consent.card]); assert.equal(consent.focus.at(-1), consent.purpose);
+  consent.role.focus();
+  const background = runInContext('refreshHouseholdAccess()', consent.context) as Promise<void>;
+  await consent.reply(refused); await background;
+  assert.equal(consent.focus.at(-1), consent.role, 'repeated refused paints preserve consent input focus');
+  assert.deepEqual(consent.scroll, [consent.card]);
+  await runInContext('confirmOwnAccess()', consent.context);
+  assert.equal(consent.calls.includes('household_permissions'), false, 'missing choices keep consent in place');
+  assert.deepEqual(consent.scroll, [consent.card]);
+  consent.purpose.checked = true; consent.role.checked = true;
+  const confirming = runInContext('confirmOwnAccess()', consent.context) as Promise<void>;
+  await drain(); await consent.reply(ok); await confirming; // The existing post-confirm open starts its own normal access read.
+  await consent.reply(ok); consent.flushFrames();
+  assert.deepEqual(consent.scroll, [consent.card], 'confirmed access waits for the existing content render');
+  await consent.finishContent(); consent.flushFrames();
+  assert.deepEqual(consent.scroll, [consent.card, consent.approvalTitle]);
+  assert.equal(consent.focus.at(-1), consent.approvalTitle, 'successful confirmation continues the original Allow intent');
+  const repeated = fixture(); await repeated.allow(); await repeated.allow();
+  await repeated.reply(ok); await repeated.finishContent();
+  assert.deepEqual(repeated.scroll, [], 'an older Allow open cannot adopt a newer visit before its access settles');
+  await repeated.reply(ok); await repeated.finishContent(); repeated.flushFrames();
+  assert.deepEqual(repeated.scroll, [repeated.approvalTitle]);
+  const superseded = fixture(); await superseded.allow(); await superseded.reply(ok);
+  const reopening = runInContext('openHouseholdView()', superseded.context) as Promise<void>;
+  await superseded.finishContent();
+  assert.deepEqual(superseded.scroll, [], 'a superseded content completion cannot land during the new access read');
+  await superseded.reply(ok); await reopening; await superseded.finishContent();
+  superseded.flushFrames(); assert.deepEqual(superseded.scroll, [superseded.approvalTitle]);
+  for (const entry of ['people', 'picker'] as const) {
+    const leftDuringRender = fixture(); await leftDuringRender.allow(entry); await leftDuringRender.reply(ok);
+    await leftDuringRender.navigate('files'); await leftDuringRender.finishContent(); leftDuringRender.flushFrames();
+    assert.deepEqual(leftDuringRender.scroll, [], `${entry}: a content completion cannot revive Allow after navigation away`);
+  }
+  for (const change of ['plain Lists', 'Files', 'workspace reset', 'account switch', 'request version']) {
+    const f = fixture(); await f.allow();
+    if (change === 'plain Lists') await f.navigate('lists');
+    else if (change === 'Files') await f.navigate('files');
+    else runInContext(change === 'workspace reset' ? 'resetHouseholdSurface()'
+      : change === 'account switch' ? "session={user:{id:'other'}}" : '++requestVersion', f.context);
+    await f.reply(ok);
+    if (change === 'plain Lists') await f.reply(ok); // Current ordinary visit's own read.
+    f.flushFrames();
+    assert.deepEqual(f.scroll, [], `${change}: an old Allow intent cannot move the current visit`);
+    if (change === 'plain Lists') assert.equal(f.focus.at(-1), f.title, 'ordinary Lists remains at content');
+    if (change === 'Files') assert.equal(f.focus.at(-1), f.fileTitle, 'Files retains its destination focus');
+  }
+});
+
 test('replying from a stream row preserves the agent ownership label and the root channel', async () => {
   const document = { createElement: (tag: string) => new RowNode(tag) };
   const loadedRows: RowNode[] = [];
@@ -798,7 +1131,7 @@ test('each navigation focuses the visible H1 for that view', async () => {
   const context = createContext({homeViewTitle:()=> 'View · CommonSwarm', window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
     document:{title:''}, one:(selector:string)=>selector==='#pd-detail-title'?selectedTitle:null,
     all:(selector:string)=>selector.split(',').flatMap(part => headings.get(part.trim()) ?? [])});
-  runInContext("let homeRoute, peopleDialogFocus, workspaces=[{id:'W',name:'Home'}];",context);
+  runInContext("let listsAllowLanding=null, homeRoute, peopleDialogFocus, workspaces=[{id:'W',name:'Home'}];",context);
   runInContext(await dashboardFunctions(['focusHomeView']),context);
   for (const [view,scope] of Object.entries(scopes)) {
     focused.length = 0;

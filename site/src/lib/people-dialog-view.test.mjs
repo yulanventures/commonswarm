@@ -48,7 +48,7 @@ test("Lists & docs facts require ownership and a successful connections read", (
   assert.equal(peopleDialogCanAct({ ...model(), agents: [value] }, "withdraw", value.id), true);
 });
 test("a hosted agent's approval is shown as withdrawable but not usable; a local agent's is unchanged", () => {
-  const note = "Lists & docs is not available through the CommonSwarm connector yet. Agents that use cswarm on a computer can use it.";
+  const note = "Connected agents can use shared lists when access is enabled. Docs and files are not available through the connector yet.";
   const local = agent("Muse", "mei", { own: true, access: { until: null } });
   const hosted = { ...local, hosted: true };
   assert.equal(peopleDialogAccessLabel(local), ", Can use Lists & docs");

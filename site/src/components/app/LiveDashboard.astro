@@ -39,6 +39,7 @@ import "../../styles/kylon-new-workspace.css";
 import "../../styles/kylon-layout/index.css";
 import "../../styles/kylon-workspace-settings-integration.css";
 import "../../styles/kylon-files.css";
+import "../../styles/kylon-lists.css";
 import "../../styles/kylon-people.css";
 import "../../styles/kylon-wiki.css";
 import "../../styles/kylon-wiki-context.css";
@@ -569,8 +570,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 and roles come from household-access.ts, keyed by what household_permissions
                 accepts, and operations from the policy constant. Nothing here grants access by
                 itself; the command decides. */}
-            <section class="dashboard__objects-view" data-channel-view="objects" hidden>
-              <h1 class="hm-pane-title" tabindex="-1">Lists</h1>
+            <section class="dashboard__objects-view" data-channel-view="objects" aria-labelledby="dashboard-lists-title" hidden>
+              <header class="dashboard__lists-head">
+                <h1 id="dashboard-lists-title" class="hm-pane-title" tabindex="-1">Lists</h1>
+              </header>
               <form class="dashboard__access-card" data-household-consent hidden>
                 <h2 class="dashboard__access-title">Turn on Lists &amp; docs</h2>
                 <p class="dashboard__access-lead">
@@ -607,11 +610,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                   <p class="dashboard__access-result" data-household-consent-result role="status" aria-live="polite"></p>
                 </div>
               </form>
+              <HouseholdObjects state={emptyHousehold} />
               <section class="dashboard__agent-approvals" data-household-agents hidden aria-labelledby="dashboard-agent-approvals-title">
-                <h2 class="dashboard__access-title" id="dashboard-agent-approvals-title">Let your agents use Lists &amp; docs</h2>
+                <h2 class="dashboard__access-title" id="dashboard-agent-approvals-title" tabindex="-1">Let your agents use Lists &amp; docs</h2>
                 <p class="dashboard__access-lead">
-                  Each of your agents needs your OK, here, for this workspace. A computer agent keeps it until its key ends or you withdraw it.
-                  Lists &amp; docs is not available through the CommonSwarm connector yet, so an agent in a chat app cannot use it.
+                  Connected agents can use shared lists when access is enabled. Docs and files are not available through the connector yet.
+                  Hosted agents you connect as workspace owner inherit your Lists access unless you restrict them.
                 </p>
                 <p data-household-agent-result hidden></p>
                 <ul class="dashboard__approval-list" data-household-agent-list></ul>
@@ -620,7 +624,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                   <button class="dashboard__text-button" type="button" data-add-agent-objects>Add an agent</button>
                 </p>
               </section>
-              <HouseholdObjects state={emptyHousehold} />
             </section>
             <section class="dashboard__files-view" data-channel-view="files" hidden>
               <h1 id="dashboard-files-title" class="hm-pane-title" tabindex="-1">Files</h1>
@@ -1037,6 +1040,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction, type AccountMenuState, type AccountMenuAction } from "../../lib/home-shell";
   import { renderCatchUp as buildCatchUp } from "../../lib/home-catchup";
   import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes } from "../../lib/home-focus";
+  import { createListsChrome } from "../../lib/lists-chrome";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
     overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
   import { myWorkspaces, homeOverview, homeOverviewAsks, homeWorkingOn, feed } from "../../lib/commonswarm";
@@ -1562,6 +1566,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       status: "ok" | "refused" | "unknown";
       contentRole: "reader" | "editor" | null;
     } = { workspaceId: "", status: "unknown", contentRole: null };
+    /** People → Allow follows the existing access render, then survives consent until approval. */
+    let listsAllowLanding: { scope: HouseholdScope; navigation: number; stage: "access" | "consent" | "done"; content?: Promise<void> } | null = null;
     let householdAccessGeneration = 0;
     /** The workspace whose access the setup checklist last asked about (one read per visit). */
     let householdAccessRequestedFor = "";
@@ -1797,10 +1803,26 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
     };
 
+    const listsChrome = createListsChrome(app);
+    const syncListsChrome = (): void => {
+      listsChrome(
+        app.dataset.state === "channel" && homeRoute.view === "lists" && app.dataset.channelView === "objects",
+        homeRoute.view === "files",
+      );
+      // Wiki already owns its heading and channel label on the current shell.
+      if (homeRoute.view === "wiki") {
+        const channel = one<HTMLElement>(".dashboard__channel");
+        const channelHead = channel?.querySelector<HTMLElement>(".dashboard__channel-head");
+        if (channelHead) channelHead.hidden = true;
+        channel?.setAttribute("aria-labelledby", "dashboard-wiki-title");
+      }
+    };
+
     const showPanel = (
       name: "loading" | "signed-out" | "create" | "workspace-error" | "channel",
     ): void => {
       const previous = app.dataset.state;
+      if (name !== "channel") listsAllowLanding = null;
       if (name !== "channel") layout.suspend();
       if (name !== "channel") syncStandalonePage(true);
       /* ONE rail (New-Space.dc.html): a new workspace opens beside the same rail as every other route. The
@@ -1820,6 +1842,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         section.hidden = section.dataset.panel !== name;
       }
       app.dataset.state = name;
+      syncListsChrome();
       syncVisibleShell();
       const root = one<HTMLElement>(".dashboard__root");
       root?.setAttribute("aria-busy", name === "loading" ? "true" : "false");
@@ -1855,6 +1878,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         | "brain"
         | "objects",
     ): void => {
+      if (name !== "objects") listsAllowLanding = null;
       if (name !== "feed") {
         window.clearTimeout(signalExpiryTimer);
         signalExpiryTimer = undefined;
@@ -1879,6 +1903,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         closeMentionPicker();
       }
       app.dataset.channelView = name;
+      syncListsChrome();
       syncStandalonePage();
       /* The Live chip is true exactly while armLiveFeed is allowed to run. */
       const liveChip = one<HTMLElement>("[data-live-chip]");
@@ -4521,7 +4546,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       const pane = homeRoute.view === "todo" ? "todos" : homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" || homeRoute.view === "people" ? homeRoute.view : "chat";
       const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
-        people: currentHomePeople().groups, pane, contextTitle: homeRoute.view === "people" || homeRoute.view === "wiki", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
+        people: currentHomePeople().groups, pane, contextTitle: homeRoute.view === "people" || homeRoute.view === "wiki" || homeRoute.view === "lists", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
         hrefs: { chat: routeHref({ view: "chat", workspaceId: workspace.id }), todos: routeHref({ view: "todos", workspaceId: workspace.id }),
           lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }),
           wiki: routeHref({ view: "wiki", workspaceId: workspace.id }), workspaces: routeHref({ view: "catchup" }) },
@@ -4667,9 +4692,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (routePane) routePane.hidden = true;
       if (homeRoute.view !== "people") parkPeopleHosts();
       if (channel) channel.hidden = home || homeRoute.view === "todo" || homeRoute.view === "agent" || homeRoute.view === "todos" || homeRoute.view === "people";
-      const channelHead = channel?.querySelector<HTMLElement>(".dashboard__channel-head");
-      if (channelHead) channelHead.hidden = homeRoute.view === "files" || homeRoute.view === "wiki";
-      channel?.setAttribute("aria-labelledby", homeRoute.view === "files" ? "dashboard-files-title" : homeRoute.view === "wiki" ? "dashboard-wiki-title" : "dashboard-channel-title");
+      syncListsChrome();
       const channelMenu = one<HTMLElement>("[data-home-channel-menu]");
       if (channelMenu) channelMenu.hidden = homeRoute.view !== "chat";
       const frame = one<HTMLElement>(".hm-frame");
@@ -4700,6 +4723,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       // home-map.ts has no label for this route yet; the page names itself.
       document.title = homeRoute.view === "people" ? ["People & agents", workspace?.name, "CommonSwarm"].filter(Boolean).join(" · ") : homeViewTitle(homeRoute, workspace?.name);
       window.requestAnimationFrame(() => {
+        // Allow's settled access render owns focus, including while consent is being completed.
+        if (homeRoute.view === "lists" && listsAllowLanding) return;
         const scope = homeRoute.view === "catchup" ? "[data-home-catchup]"
           : homeRoute.view === "people" ? "[data-people-context]"
           : homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos" ? "[data-home-route-pane]"
@@ -4715,14 +4740,17 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         (visible(target) ? target : all<HTMLElement>(`${scope} h1, .cs-org-phone-title h1`).find(visible))?.focus({ preventScroll: homeRoute.view !== "people" });
       });
     };
-    const navigateHome = async (requested: HomeRoute, historyMode: "push" | "replace" | "pop"): Promise<void> => {
+    const navigateHome = async (requested: HomeRoute, historyMode: "push" | "replace" | "pop", allowLanding = false): Promise<void> => {
       if ((!session && !sampleMode) || keepConnectCredentialVisible()) return;
       const route = resolveHomeRoute(new URL(routeHref(requested), window.location.origin).search, workspaces);
       const previous = window.history.state?.home === true;
       const scroll = one<HTMLElement>(".dashboard__feed-view");
       if (activeWorkspaceId && scroll) homeScroll.set(activeWorkspaceId, scroll.scrollTop);
       homeRoute = route;
+      syncListsChrome();
       const navigation = ++homeNavigation;
+      const allowScope = allowLanding && route.view === "lists" ? householdScope() : null;
+      listsAllowLanding = allowScope ? { scope: allowScope, navigation, stage: "access" } : null;
       if (historyMode !== "pop") window.history[historyMode === "push" ? "pushState" : "replaceState"](
         { home: true, homePrevious: historyMode === "push" ? previous : window.history.state?.homePrevious === true }, "", routeHref(route));
       catchUpGeneration += 1;
@@ -5058,7 +5086,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       // These three continue in the workspace: the key prompt and the consent card are channel views.
       if (action === "new-key") { await navigateHome({ view: "chat", workspaceId }, "push"); openConnect(); window.requestAnimationFrame(() => one<SecretHoldingAgentConnect>("agent-connect")?.requestPromptFor(id)); return; }
       if (action === "connected-apps") { one<HTMLButtonElement>("[data-connected-apps-open]")?.click(); return; }
-      if (action === "allow") { await navigateHome({ view: "lists", workspaceId }, "push"); one<HTMLElement>("[data-household-consent]")?.scrollIntoView({ block: "start" }); return; }
+      if (action === "allow") { await navigateHome({ view: "lists", workspaceId }, "push", true); return; }
       let receipt = "";
       if (action === "withdraw" && agent) { await withdrawAgent(id, agent.name, agent.transport === "hosted_mcp", button, notice, true); return; }
       if (action === "resume" && grant && agent) { await resumeRenewalGrant(session, uuid(), workspaceId, grant.grantId); receipt = agentResumeReceipt(agent.name); }
@@ -6691,6 +6719,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
     /** Clear every workspace-scoped value when auth identity or availability changes. */
     const resetWorkspaceSessionState = (): void => {
+      listsAllowLanding = null;
       syncStandalonePage(true);
       catchUpGeneration += 1;
       railOverviewGeneration += 1;
@@ -7206,6 +7235,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
     /** Clear every household surface when the workspace or the session changes. */
     const resetHouseholdSurface = (): void => {
+      listsAllowLanding = null;
       householdDashboard?.clear();
       householdConnections = [];
       householdConnectionsReadState = "pending";
@@ -7728,12 +7758,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           delete receipt.dataset.setupWorkspaceId;
         }
       }
-      renderHouseholdAccess();
+      renderHouseholdAccess("access");
       renderSetupChecklist();
     };
 
     /** Show the access card or the approvals, never both, from the last access answer. */
-    const renderHouseholdAccess = (): void => {
+    const renderHouseholdAccess = (landingReady: "access" | "content" | null = null): void => {
       const card = one<HTMLElement>("[data-household-consent]");
       const approvals = one<HTMLElement>("[data-household-agents]");
       const purposeSet = one<HTMLElement>("[data-household-purpose-set]");
@@ -7751,6 +7781,28 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
          first choice (owner_confirmation_required). A member joined through an invitation,
          which only works in a shared workspace, so their card asks only for their access. */
       if (purposeSet) purposeSet.hidden = viewerRole() !== "owner";
+      const landing = listsAllowLanding;
+      if (!landing) return;
+      if (!householdCurrent(landing.scope) || landing.navigation !== homeNavigation || homeRoute.view !== "lists" || activeWorkspaceView !== "objects") {
+        listsAllowLanding = null;
+        return;
+      }
+      // Cached/pre-read paints cannot choose the destination. Repaints never interrupt consent input.
+      if (!landingReady || !current || landing.stage === "done") return;
+      const visible = (element: HTMLElement | null): element is HTMLElement => !!element?.getClientRects().length && !element.closest("[hidden], [inert]");
+      if (confirmed) {
+        // Objects precede approvals; finish their existing render before choosing the scroll position.
+        if (landingReady !== "content") return;
+        const title = one<HTMLElement>("#dashboard-agent-approvals-title");
+        if (!visible(title)) return;
+        landing.stage = "done";
+        title.scrollIntoView({ block: "start" });
+        title.focus({ preventScroll: true });
+      } else if (landing.stage !== "consent" && visible(card)) {
+        landing.stage = "consent";
+        card.scrollIntoView({ block: "start" });
+        [...card.querySelectorAll<HTMLElement>("input, button")].find(visible)?.focus({ preventScroll: true });
+      }
     };
 
     /** Only a complete, active server approval may expose withdrawal. */
@@ -8031,6 +8083,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const activeSession = session;
       const selectedId = activeWorkspaceId;
       if (!selected || !activeSession || sampleMode) return;
+      const landing = listsAllowLanding;
+      if (landing) landing.content = undefined;
       renderHouseholdAccess();
       await refreshHouseholdAccess();
       if (selectedId !== activeWorkspaceId || activeWorkspaceView !== "objects") return;
@@ -8039,7 +8093,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         return;
       }
       void loadHouseholdConnections();
-      void householdDashboard?.open(
+      const content = householdDashboard?.open(
         {
           workspace_id: selectedId,
           name: selected.name,
@@ -8052,6 +8106,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         },
         householdCall(activeSession, selectedId),
       );
+      if (landing && content && listsAllowLanding === landing) {
+        landing.content = content;
+        void content.then(() => {
+          if (listsAllowLanding === landing && landing.content === content) renderHouseholdAccess("content");
+        });
+      }
     };
 
     /** The setup checklist, from current reads and a reminder of unsettled creation setup. */
@@ -8181,6 +8241,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (view === "objects") {
         if (name) name.textContent = "Lists & docs";
         if (description) description.textContent = "Shared lists, docs and files. Every saved version is kept.";
+        const refresh = one<HTMLButtonElement>("[data-refresh]");
+        if (refresh) refresh.hidden = sampleMode || agents.length === 0;
         showChannelView("objects");
         void openHouseholdView();
       } else if (view === "files") {
@@ -8214,7 +8276,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (refresh) refresh.hidden = sampleMode || agents.length === 0;
         returnToChannel();
       }
-      window.requestAnimationFrame(() => (view === "files" ? one<HTMLElement>("#dashboard-files-title") : view === "brain" ? one<HTMLElement>("#dashboard-wiki-title") : name)?.focus({ preventScroll: view !== "brain" }));
+      if (view !== "objects" || !listsAllowLanding) window.requestAnimationFrame(() => (view === "objects" ? one<HTMLElement>("#dashboard-lists-title")
+        : view === "files" ? one<HTMLElement>("#dashboard-files-title") : view === "brain" ? one<HTMLElement>("#dashboard-wiki-title") : name)?.focus({ preventScroll: view !== "brain" }));
     };
 
 
@@ -10600,7 +10663,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     hostPicker?.addEventListener("agent-host-home", () => {
       leaveAddAgentForHome();
     });
-    hostPicker?.addEventListener("agent-host-approve", () => activateWorkspaceView("objects"));
+    hostPicker?.addEventListener("agent-host-approve", () => {
+      if (activeWorkspaceId) void navigateHome({ view: "lists", workspaceId: activeWorkspaceId }, "push", true);
+    });
     hostPicker?.addEventListener("agent-host-done", (event: Event) => {
       const principalId = (event as CustomEvent<{ principalId?: unknown }>).detail?.principalId;
       finishJoinedAgent(typeof principalId === "string" ? principalId : "");
