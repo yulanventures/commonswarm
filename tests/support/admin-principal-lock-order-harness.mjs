@@ -780,14 +780,20 @@ function removeSecretDirectory({ root, dir }) {
  * this checkout. Materialize the complete source trees so activity, config and
  * every relative/type import use the same generation as command/read. */
 export const ACTIVE_FLOOR_SOURCES = Object.freeze({
-  H: Object.freeze({commit:'0e3552a4e7dab640cee39f789c22ef1d18ca2b82',tree:'a901908d7e15041ae8246d49b18bd56b361e8b90'}),
+  get H() {
+    const git=args=>execFileSync('git',['-C',REPO_ROOT,...args],{encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim();
+    const commit=git(['rev-parse','HEAD^{commit}']), tree=git(['rev-parse',`${commit}^{tree}`]);
+    if(!/^[0-9a-f]{40}$/u.test(commit) || !/^[0-9a-f]{40}$/u.test(tree)) throw new Error('source_tree_identity');
+    return Object.freeze({commit,tree});
+  },
+  // Explicit historical H witness; current/H always resolves the checked-out commit.
+  H0: Object.freeze({commit:'0e3552a4e7dab640cee39f789c22ef1d18ca2b82',tree:'a901908d7e15041ae8246d49b18bd56b361e8b90'}),
   // Pre-fix virgin-root witness only; b9 already supports expired USED renewal.
   B: Object.freeze({commit:'b9ee52592df924d945f800619ee31e6c483200df',tree:'6c97679c7ffe042e88addcfaf573c78d6a1379dc'}),
   F: Object.freeze({commit:'af9a82923377e7662e2b61aac3eeb8cdff6301fc',tree:'b4d2656379f81448a1ce88050450fb9c3da116a7'}),
 });
 export function materializeActiveFloorSource(directory, generation) {
-  // Qualification HEAD changes test bindings only. Every current row loads the
-  // immutable repaired H product source, including the existing permission owners.
+  // Resolve current/H from immutable checkout HEAD, preserving explicit historical controls.
   if(generation==='current') generation='H';
   if (generation!=='O' && !Object.hasOwn(ACTIVE_FLOOR_SOURCES,generation)) throw new Error('unknown_source_generation');
   const source=generation==='O' ? {commit:HISTORICAL_BASELINE_SOURCE.commit,tree:HISTORICAL_BASELINE_SOURCE.tree} : ACTIVE_FLOOR_SOURCES[generation];
