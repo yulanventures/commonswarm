@@ -4,7 +4,9 @@ import { test } from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { build } from 'esbuild';
-import { writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import postgres from 'postgres';
 import { runSql, repoSql, dbAssert, refuses, emptyApplicationSchema, localClusterAdminUrl } from '../support/admin-schema-db.js';
 import { releaseCatalogQuery } from '../support/release-catalog-query.js';
@@ -649,7 +651,9 @@ try {
 } finally {api.db.begin=originalBegin;[mcp.authDb.begin,mcp.statusDb.begin]=poolBegins;await Promise.all([api.db.end(),mcp.authDb.end(),mcp.statusDb.end()]);}
 `;
 
-test('D1 real edge session and MCP executeTool preserve draft/replay/notice refusals and roll back failed delivery', {timeout:120_000}, () => {
+test('D1 real edge session and MCP executeTool preserve draft/replay/notice refusals and roll back failed delivery', {timeout:120_000}, t => {
+ const evidenceDir=mkdtempSync(join(tmpdir(),'cswarm-d1-role-notice-'));
+ t.after(()=>rmSync(evidenceDir,{recursive:true,force:true}));
  const local=JSON.parse(execFileSync('supabase',['status','-o','json'],{encoding:'utf8',stdio:['ignore','pipe','ignore']})) as {DB_URL:string;API_URL:string;SERVICE_ROLE_KEY:string};
  assert.ok(['127.0.0.1','localhost','[::1]'].includes(new URL(local.API_URL).hostname));
  const f={...fixture(),local:randomUUID(),device:randomUUID(),run:randomUUID(),token:randomUUID(),lineage:randomUUID(),target:null as ReturnType<typeof hostedFixture>|null};
@@ -661,7 +665,7 @@ test('D1 real edge session and MCP executeTool preserve draft/replay/notice refu
    authModule:new URL('../../supabase/functions/_shared/hosted-seat-auth.ts',import.meta.url).href,
    protocolModule:new URL('../../supabase/functions/_shared/protocol.js',import.meta.url).href}),
   env:{PATH:process.env.PATH??'',...(process.env.DENO_DIR?{DENO_DIR:process.env.DENO_DIR}:{}),SWARM_ENV:'test',SWARM_DATABASE_URL:localClusterAdminUrl(local.DB_URL),SUPABASE_URL:local.API_URL,SUPABASE_ANON_KEY:'synthetic-anon',SUPABASE_SERVICE_ROLE_KEY:local.SERVICE_ROLE_KEY},timeout:110_000,maxBuffer:1024*1024});
- writeFileSync('.maker-evidence/d1-role-notice.stderr.log',result.stderr??'',{mode:0o600});
+ writeFileSync(join(evidenceDir,'d1-role-notice.stderr.log'),result.stderr??'',{mode:0o600});
  assert.equal(result.status,0,'D1 real-role/notice harness must complete; inspect private CI stderr on failure');
  assert.match(result.stdout,/D1_ROLE_NOTICE_RESULT:ok/);
 });
