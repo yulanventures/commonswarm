@@ -249,7 +249,6 @@ import {
 import {
   describeRenewalGrant,
   readRenewalGrants,
-  STANDING_IDLE_PAUSE_DAYS,
 } from "./cloud/renewal-grants.js";
 import {
   ASK_WAIT_TIMEOUT_MESSAGE,
@@ -2809,13 +2808,10 @@ async function runToken(args: Arguments): Promise<void> {
 }
 
 /**
- * `cswarm grant resume` — the human side of an idle pause.
+ * `cswarm grant resume` — explicit recovery for an existing paused grant.
  *
- * A standing grant pauses itself after a fortnight with no measured use. Before
- * this verb existed that was the end of the agent: `cswarm whoami` printed
- * SUSPENDED and told the reader to revoke the grant and mint a new credential —
- * the permanent kill offered as the cure for the recoverable one. This is the
- * cure.
+ * Legacy idle pauses remain resumable. The upgraded catalog does not create
+ * new idle pauses; security restrictions must be resolved before renewal.
  *
  * NO CONFIRMATION FLAG, unlike `token mint --standing --confirm-standing`. The
  * confirm on minting exists because minting CREATES authority that outlives the
@@ -10400,7 +10396,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   }, (args) => args.positionals[1] === "revoke" ? "revoke" : "mint", (args) => new Error(`unknown token command: ${args.positionals[1] ?? "(missing)"}`), {
     refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE },
   }),
-  grant: group({ resume: commandEntry({ ...noTool("human credential administration; never a model tool"), handler: traced("runGrant", runGrant), description: "Resume a paused renewal grant.", mutates: true, flags: [...humanFlags, "renewal-grant-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm grant resume [--url <url> --anon-key <key>] [--workspace-id <uuid>] --renewal-grant-id <uuid> [--json]  # lifts an idle pause; a REVOKED grant is refused"] }) }, () => "resume", (args) => new UsageError(`unknown grant command: ${args.positionals[1] ?? "(missing)"}`), {
+  grant: group({ resume: commandEntry({ ...noTool("human credential administration; never a model tool"), handler: traced("runGrant", runGrant), description: "Resume a paused renewal grant.", mutates: true, flags: [...humanFlags, "renewal-grant-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm grant resume [--url <url> --anon-key <key>] [--workspace-id <uuid>] --renewal-grant-id <uuid> [--json]  # resumes an existing pause; a REVOKED grant is refused"] }) }, () => "resume", (args) => new UsageError(`unknown grant command: ${args.positionals[1] ?? "(missing)"}`), {
     refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE },
   }),
   link: group({

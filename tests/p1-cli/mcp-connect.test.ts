@@ -1329,7 +1329,7 @@ test("connect verifies durable proof before completion, preserves failures and r
         return true;
       });
       assert.equal(f.calls(), before + 1);
-      assert.ok(seen.length >= 1 && seen.length <= 2);
+      assert.equal(seen.length, failure === "overload" ? 3 : failure === "transport" ? 2 : 1);
       for (const proof of seen) {
         assert.equal(proof.bearer, `Bearer ${proof.saved}`);
         assert.equal(proof.pending, true);
@@ -1492,6 +1492,7 @@ test("pending renewal keeps named terminal meanings and bounds stalled renewal",
     { reason: "stalled-body", expected: /Rerun the same.*later with the same code/ },
   ];
   const f = await fixture();
+  let safeToClose = true;
   try {
     for (const row of cases) {
       f.reset();
@@ -1499,6 +1500,7 @@ test("pending renewal keeps named terminal meanings and bounds stalled renewal",
       const path = join(f.root, row.reason, "profile.json");
       const root = `swm_agt_${randomUUID().replaceAll("-", "").padEnd(43, "R")}`;
       const store = await agentCredentialStore({ target: TARGET, lineageKey: credentialLineageKey(root) });
+      let mockClosed: Promise<void> | undefined;
       try {
         await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
           fetcher: async (input, init) => new URL(String(input)).pathname === "/functions/v1/read"
@@ -1517,8 +1519,23 @@ test("pending renewal keeps named terminal meanings and bounds stalled renewal",
             if (new URL(String(input)).pathname !== "/functions/v1/command") { proofs++; return Response.json(DIRECTORY); }
             commands++;
             assert.ok(init?.signal);
-            if (row.reason === "stalled-command") return new Promise<Response>(() => undefined);
-            if (row.reason === "stalled-body") return new Response(new ReadableStream({ start() {} }));
+            if (row.reason.startsWith("stalled")) {
+              const signal = init.signal;
+              signal.throwIfAborted();
+              safeToClose = false;
+              let abort!: () => void;
+              const stalled = new Promise<never>((_resolve, reject) => {
+                abort = () => reject(signal.reason);
+                signal.addEventListener("abort", abort, { once: true });
+              });
+              mockClosed = stalled.catch(error => {
+                assert.equal(signal.aborted, true, "the supplied deadline cancels the mock");
+                assert.equal(error, signal.reason);
+              }).finally(() => signal.removeEventListener("abort", abort));
+              if (row.reason === "stalled-command") return stalled;
+              // A rejected start errors the real Response body consumed by renewal.
+              return new Response(new ReadableStream({ start: () => stalled }));
+            }
             if (row.reason === "upgrade") return Response.json({ error: "upgrade_required", min_client_version: "99.0.0" }, { status: 426 });
             return Response.json({ status: "rejected", reason: row.reason });
           } }), error => {
@@ -1528,6 +1545,7 @@ test("pending renewal keeps named terminal meanings and bounds stalled renewal",
           assert.doesNotMatch(String(error), /token mint|swm_agt_|mcp add|mcp_servers/);
           return true;
         });
+        if (row.reason.startsWith("stalled")) assert.ok(mockClosed, "the stalled renewal fixture was reached");
         assert.ok(Date.now() - started < 12_000, "renewal headers/body share the ten-second connect budget");
         assert.equal(commands, 1);
         assert.equal(proofs, 0);
@@ -1535,9 +1553,22 @@ test("pending renewal keeps named terminal meanings and bounds stalled renewal",
         assert.deepEqual(await readFile(credential), bytes);
         assert.deepEqual(await readFile(pending), pendingBytes);
         assert.equal(existsSync(join(dirname(path), CONNECT_PROFILE_FILES.complete)), false);
-      } finally { await store.delete(); }
+      } finally {
+        if (mockClosed) {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([mockClosed, new Promise<never>((_resolve, reject) => {
+              timer = setTimeout(() => reject(new Error("stalled renewal mock did not settle")), 2_000);
+            })]);
+          } finally { clearTimeout(timer); }
+          // This is the real lineage lock: reacquisition joins the losing renewal work.
+          assert.equal(await store.withLock(async () => true), true, "renewal lock released before cleanup");
+          safeToClose = true;
+        }
+        await store.delete();
+      }
     }
-  } finally { await f.close(); }
+  } finally { if (safeToClose) await f.close(); }
 });
 
 test("restored profile failure remains pending and verifies again before installation", { timeout: 10_000 }, async () => {
@@ -2686,7 +2717,7 @@ test("unparseable pending blocks a fresh connect until cleared", { timeout: 1000
   } finally { if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome; await f.close(); }
 });
 
-test("default scan names a mode-0000 ~/.cswarm directory", { timeout: 10000 }, async () => {
+test("default and explicit connect name a mode-0000 ancestor (root models access-check denial)", { timeout: 10000 }, async () => {
   const f = await fixture();
   const previousHome = process.env.HOME;
   process.env.HOME = f.root;
@@ -2695,21 +2726,32 @@ test("default scan names a mode-0000 ~/.cswarm directory", { timeout: 10000 }, a
     await mkdir(join(base, "agents"), { recursive: true, mode: 0o700 });
     await chmod(base, 0o000);
     let posts = 0;
-    await assert.rejects(connectMcp({ target: TARGET, readCode: async () => JOIN,
+    const root = typeof process.getuid === "function" && process.getuid() === 0;
+    let accessChecks = 0;
+    // Non-root retains real filesystem EACCES. Root models only the existing
+    // access-check denial; the real classifier inspects the real 0000 ancestor.
+    const accessProbe = root ? { checkProfileAccess: async () => {
+      accessChecks++;
+      throw Object.assign(new Error("mode-0000 access-check denial"), { code: "EACCES" });
+    } } : {};
+    await assert.rejects(connectMcp({ ...accessProbe, target: TARGET, readCode: async () => JOIN,
       fetcher: async () => { posts++; throw new Error("unexpected POST"); } }), error => {
       assert.equal((error as { code: string }).code, "connect_directory_mode");
+      assert.equal((error as Error).message, `The connect directory at ${base} needs mode 0700. Run chmod 700 '${base}', then rerun the same command.`);
       assert.match(String(error), new RegExp(`chmod 700 '${base}'`));
       assert.match(String(error), /rerun the same command/);
       assert.doesNotMatch(String(error), /cannot be read|damaged/);
       return true;
     });
-    await assert.rejects(connectMcp({ target: TARGET,
+    await assert.rejects(connectMcp({ ...accessProbe, target: TARGET,
       profilePath: join(base, "agents", "mcp-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "profile.json"),
       readCode: async () => JOIN, fetcher: async () => { posts++; throw new Error("unexpected POST"); } }), error => {
       assert.equal((error as { code: string }).code, "connect_directory_mode");
+      assert.equal((error as Error).message, `The connect directory at ${base} needs mode 0700. Run chmod 700 '${base}', then rerun the same command.`);
       assert.match(String(error), new RegExp(`chmod 700 '${base}'`));
       return true;
     });
+    assert.equal(accessChecks, root ? 2 : 0);
     assert.equal(posts, 0);
   } finally {
     await chmod(base, 0o700);

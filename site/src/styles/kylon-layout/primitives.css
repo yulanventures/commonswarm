@@ -1,0 +1,127 @@
+/* Original primitives. Only explicitly opted-in component subtrees are styled. */
+/* Runtime/native hidden state must beat a component display declaration. */
+:where(.cs-ui)[hidden], :where(.cs-ui) [hidden] { display: none !important; }
+:where(.cs-ui), :where(.cs-ui) * { box-sizing: border-box; }
+:where(.cs-ui) :is(button, input, textarea, select) { font: inherit; }
+:where(.cs-ui) :is(button, a, input, textarea, select, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--cs-focus);
+  outline-offset: 3px;
+  box-shadow: none;
+}
+:where(.cs-ui) .cs-sr-only {
+  position: absolute; inline-size: 1px; block-size: 1px;
+  padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%);
+  white-space: nowrap;
+}
+:where(.cs-ui) .cs-icon {
+  inline-size: var(--cs-icon-size); block-size: var(--cs-icon-size);
+  flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+:where(.cs-ui) .cs-button {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--cs-space-2);
+  min-block-size: var(--cs-row-target); padding: 7px var(--cs-space-3);
+  border: 1px solid var(--cs-control); border-radius: var(--cs-radius-sm);
+  background: var(--cs-surface); color: var(--cs-ink);
+  font-family: inherit; font-size: var(--cs-text-control); font-weight: 500; line-height: 20px;
+  text-decoration: none; text-align: center; cursor: pointer;
+}
+:where(.cs-ui) .cs-button:not(:disabled):not([aria-disabled="true"]):hover { background: var(--cs-subtle); }
+:where(.cs-ui) .cs-button[data-variant="primary"] {
+  background: var(--cs-accent); color: var(--cs-on-accent); border-color: var(--cs-accent);
+}
+:where(.cs-ui) .cs-button[data-variant="primary"]:not(:disabled):not([aria-disabled="true"]):hover {
+  background: var(--cs-accent-hover); border-color: var(--cs-accent-hover);
+}
+/* One exclusive variant avoids a primary + danger cascade collision. */
+:where(.cs-ui) .cs-button[data-variant="danger"] {
+  background: var(--cs-danger); color: var(--cs-on-danger); border-color: var(--cs-danger);
+}
+:where(.cs-ui) .cs-button[data-variant="danger"]:not(:disabled):not([aria-disabled="true"]):hover {
+  background: var(--cs-danger-hover); border-color: var(--cs-danger-hover);
+}
+:where(.cs-ui) .cs-button[data-variant="quiet"] {
+  border-color: transparent; background: var(--cs-subtle); color: var(--cs-ink);
+}
+:where(.cs-ui) .cs-button:is(:disabled, [aria-disabled="true"]) {
+  border-color: var(--cs-control); background: var(--cs-subtle); color: var(--cs-secondary);
+  cursor: default;
+}
+:where(.cs-ui) .cs-button .cs-icon { inline-size: 16px; block-size: 16px; }
+:where(.cs-ui) .cs-icon-button {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  min-inline-size: var(--cs-row-target); min-block-size: var(--cs-row-target);
+  padding: var(--cs-space-2); border: 0; border-radius: var(--cs-radius-row);
+  background: transparent; color: var(--cs-secondary); cursor: pointer;
+}
+:where(.cs-ui) .cs-icon-button:hover { background: var(--cs-subtle); color: var(--cs-ink); }
+:where(.cs-ui) .cs-field { display: grid; gap: 6px; margin-block: 0 var(--cs-space-4); }
+:where(.cs-ui) .cs-field > label { font-size: var(--cs-text-meta); font-weight: 500; }
+:where(.cs-ui) .cs-input {
+  inline-size: 100%; min-inline-size: 0; min-block-size: 38px; padding: 9px 10px;
+  border: 1px solid var(--cs-control); border-radius: var(--cs-radius-sm);
+  background: var(--cs-surface); color: var(--cs-ink); font-family: inherit; font-size: 14px;
+}
+:where(.cs-ui) textarea.cs-input { resize: vertical; line-height: 1.6; }
+:where(.cs-ui) .cs-input::placeholder { color: var(--cs-muted); }
+:where(.cs-ui) :is(.cs-help, .cs-meta) { color: var(--cs-muted); font-size: var(--cs-text-meta); }
+:where(.cs-ui) .cs-check {
+  display: flex; align-items: start; gap: var(--cs-space-2);
+  min-block-size: var(--cs-row-target); font-size: var(--cs-text-control);
+}
+:where(.cs-ui) .cs-check input { margin-block-start: 4px; accent-color: var(--cs-accent); }
+:where(.cs-ui) .cs-actions { display: flex; justify-content: end; flex-wrap: wrap; gap: var(--cs-space-2); }
+:where(.cs-ui) .cs-badge {
+  display: inline-flex; align-items: center; gap: 5px; padding: 2px 6px;
+  border-radius: 5px; background: var(--cs-subtle); color: var(--cs-secondary);
+  font-size: 11px; line-height: 17px;
+}
+:where(.cs-ui) .cs-badge[data-variant="affirmative"] {
+  background: var(--cs-accent-soft); color: var(--cs-accent-hover);
+}
+:where(.cs-ui) .cs-feedback {
+  padding: var(--cs-space-3); border-radius: var(--cs-radius-row);
+  background: var(--cs-subtle); color: var(--cs-ink); font-size: var(--cs-text-meta);
+  overflow-wrap: anywhere;
+}
+:where(.cs-ui) .cs-feedback[data-variant="danger"] {
+  background: var(--cs-danger-soft); color: var(--cs-danger);
+}
+:where(.cs-ui) .cs-feedback[data-variant="warning"] {
+  background: var(--cs-warning-soft); color: var(--cs-warning);
+}
+:where(.cs-ui) .cs-feedback a { color: inherit; text-decoration: underline; }
+:where(.cs-ui) .cs-row {
+  display: flex; align-items: center; gap: 10px; inline-size: 100%; min-inline-size: 0;
+  min-block-size: var(--cs-row-target); padding: 6px 10px;
+  border: 0; border-radius: var(--cs-radius-row); background: transparent;
+  color: var(--cs-secondary); font: inherit; font-size: var(--cs-text-control);
+  text-decoration: none; text-align: start; cursor: pointer;
+}
+:where(.cs-ui) .cs-row:hover { background: var(--cs-subtle); }
+:where(.cs-ui) .cs-row:is([aria-current="page"], [aria-current="true"]) { background: var(--cs-selected); color: var(--cs-ink); font-weight: 600; }
+:where(.cs-ui) .cs-row__copy { min-inline-size: 0; overflow-wrap: anywhere; }
+:where(.cs-ui) .cs-row__copy :is(strong, small) { display: block; }
+:where(.cs-ui) .cs-row__copy strong { color: var(--cs-ink); font-weight: 600; }
+:where(.cs-ui) .cs-row__copy small { color: var(--cs-secondary); font-size: var(--cs-text-meta); font-weight: 400; }
+:where(.cs-ui) .cs-avatar {
+  display: inline-grid; place-items: center; flex-shrink: 0;
+  inline-size: 32px; block-size: 32px; border-radius: 50%;
+  background: var(--cs-selected); color: var(--cs-ink); font-size: 11px; font-weight: 600;
+}
+:where(.cs-ui) .cs-avatar[data-kind="agent"] { border-radius: var(--cs-radius); }
+:where(.cs-ui) .cs-filters { display: flex; flex-wrap: wrap; gap: var(--cs-space-1); }
+:where(.cs-ui) .cs-filter {
+  min-block-size: var(--cs-row-target); padding: 6px var(--cs-space-3);
+  border: 0; border-radius: 20px; background: transparent; color: var(--cs-secondary);
+  font-size: var(--cs-text-control); cursor: pointer;
+}
+:where(.cs-ui) .cs-filter[aria-pressed="true"] { background: var(--cs-subtle); color: var(--cs-ink); font-weight: 600; }
+@media (max-width: 52rem) {
+  :where(.cs-ui) .cs-input { min-block-size: 44px; font-size: 16px; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  :where(.cs-ui) :is(.cs-button, .cs-icon-button, .cs-row, .cs-filter) {
+    transition: background-color var(--cs-motion) var(--cs-ease), color var(--cs-motion) var(--cs-ease);
+  }
+}

@@ -1,14 +1,9 @@
 /** Reached by `npm --prefix site test` through the recursive component-observer glob. */
-import { build } from "esbuild";
 import assert from "node:assert/strict";
-import { createReadStream, statSync } from "node:fs";
-import { createServer } from "node:http";
-import { extname, join, normalize } from "node:path";
 import { browserTest as test } from "../../../tests/chrome.js";
 import { findChrome, launchChrome } from "../../../tests/chrome.js";
 
-const siteRoot = join(import.meta.dirname, "..", "..", "..");
-const distRoot = join(siteRoot, "dist");
+import { revertedStyles, startDistServer } from "./mobile-feed-layout.fixture.js";
 
 type Rect = {
   bottom: number;
@@ -28,6 +23,9 @@ type LayoutMeasurement = {
   headVisible: boolean;
   toolbarVisible: boolean;
   feedMenu: boolean;
+  feedControls: string[];
+  navigationOpen: boolean;
+  navigationTargets: Rect[];
   workspaceHeader: Rect;
   sendUncovered: boolean;
   phoneNav: Rect | null;
@@ -61,97 +59,6 @@ type LayoutMeasurement = {
   };
 };
 
-const contentTypes: Record<string, string> = {
-  ".css": "text/css; charset=utf-8",
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".png": "image/png",
-  ".svg": "image/svg+xml",
-  ".woff2": "font/woff2",
-};
-
-const revertedStyles = `<style>
-  .hm-frame.hm-frame .hm-frame__main .hm-frame__channel > header { min-block-size: 140px; }
-  .hm-frame .hm-frame__main .hm-frame__channel .dashboard__feed-toolbar { min-block-size: 96px; margin-block-end: 0; }
-  .dashboard__channel-head {
-    min-block-size: 6.25rem;
-    gap: var(--s-3) var(--s-6);
-    padding: var(--s-4) clamp(var(--s-5), 4vw, var(--s-8));
-  }
-  .dashboard__feed-toolbar { min-block-size: 3.25rem; }
-  .dashboard__composer-status:empty { display: block; }
-  @media (max-width: 52rem) {
-    .dashboard__channel-head {
-      min-block-size: 5.5rem;
-      padding: var(--s-4);
-    }
-    .dashboard__channel-titleblock { order: 1; }
-    .dashboard__channel-actions {
-      order: 2;
-      margin-inline-start: auto;
-    }
-    .dashboard__channel-roster {
-      order: 3;
-      flex: 1 1 100%;
-      margin-inline-start: 0;
-    }
-    .dashboard__channel--roster .dashboard__channel-body {
-      min-block-size: calc(100svh - 5.5rem - 4.5rem - 3.5rem);
-    }
-    .dashboard__channel-body {
-      min-block-size: calc(100svh - 5.5rem - 4.5rem);
-    }
-  }
-  @media (max-width: 52rem) {
-    /* The 2026-09-04 change put the channel head OUT of the flow and took the filter row's
-       height back with a negative margin. This is the state before it: both are rows again,
-       and the transcript starts below all three bars. */
-    .dashboard__channel {
-      position: static;
-      grid-template-rows: auto minmax(0, 1fr);
-    }
-    .dashboard__channel-head {
-      position: static;
-      min-block-size: 4.75rem;
-      justify-content: space-between;
-      flex-wrap: wrap;
-      padding: var(--s-3) var(--s-4);
-      border-block-end: 1px solid var(--border);
-      pointer-events: auto;
-    }
-    .dashboard__channel-titleblock {
-      position: static;
-      inline-size: auto;
-      block-size: auto;
-      margin: 0;
-      overflow: visible;
-      clip-path: none;
-    }
-    .dashboard__feed-toolbar {
-      margin-block-end: 0;
-      border-block-end: 1px solid var(--border);
-    }
-    .dashboard__feed { padding-block-start: 0; }
-  }
-  @media (max-width: 34rem) {
-    .dashboard__channel-head {
-      display: flex;
-      align-items: flex-start;
-      flex-direction: column;
-      flex-wrap: nowrap;
-      gap: var(--s-3);
-    }
-    .dashboard__channel-description { line-height: var(--lh-xs); }
-    .dashboard__channel-actions {
-      order: 2;
-      margin-inline-start: auto;
-    }
-    .dashboard__channel-roster {
-      order: 3;
-    }
-  }
-</style>`;
-
 const frameScript = (
   reverted: boolean,
   empty: boolean,
@@ -174,19 +81,28 @@ const frameScript = (
     doc.querySelectorAll(".dashboard__root > [data-panel]").forEach((panel) => {
       panel.hidden = panel.dataset.panel !== "channel";
     });
-    /* This fixture measures the signed-in channel shell, not the sample. The static
-       test build boots into sample mode and shows a notice above the frame; leaving it up makes
-       channel.top include the notice even though the app bar itself is still one row. */
+    // Actual built markup/CSS, with boot omitted: invented data never authenticates or changes Sample.
     doc.querySelector("[data-sample-notice]").hidden = true;
     doc.querySelector('[data-sample-chip]')?.setAttribute('hidden', '');
     const source = doc.createElement('script'); source.textContent = ${JSON.stringify(shellScript)}; doc.head.append(source);
     const H = view.MobileShell;
-    const vm = { sample: false, workspaceId: 'W', name: 'Home', people: [], pane: 'chat', todosAvailable: ${JSON.stringify(todos)},
-      hrefs: { chat:'/app?w=W', todos:'/app?w=W&v=todos', lists:'/app?w=W&v=lists', files:'/app?w=W&v=files', wiki:'/app?w=W&v=wiki', workspaces:'/app?v=catchup' },
+    const workspace = { id: 'fixture-w', name: 'Invented workspace', todosAvailable: ${JSON.stringify(todos)} };
+    const host = H.createKylonHost(app, () => {});
+    const vm = { sample: false, workspaceId: workspace.id, name: workspace.name, people: [], pane: 'chat', todosAvailable: workspace.todosAvailable,
+      hrefs: { chat:'/app?w=fixture-w', todos:'/app?w=fixture-w&v=todos', lists:'/app?w=fixture-w&v=lists', files:'/app?w=fixture-w&v=files', wiki:'/app?w=fixture-w&v=wiki', workspaces:'/app?v=catchup' },
       menu: { settings:true, adminAccess:true } };
-    const callbacks = { openPeople: () => {}, menu: () => {} };
-    doc.querySelector('[data-home-workspace-shell]').replaceChildren(H.buildPhoneTopBar(doc,vm,callbacks),H.buildWorkspaceHeader(doc,vm,callbacks));
-    doc.querySelector('[data-home-phone-nav]').replaceChildren(H.buildWorkspaceNav(doc,vm,callbacks,'phone'));
+    const callbacks = { openPeople: () => {}, menu: () => {},
+      feedMenu: () => ({ channels: [{ id: '', label: 'All messages', current: true }], mayCreateChannel: true,
+        filters: [{ value: 'all', label: 'All', current: true }, { value: 'broadcast', label: 'Broadcast', current: false }],
+        refresh: { label: 'Refresh observer data' } }), feed: () => {} };
+    host.replaceHeader(() => H.replaceHomeRegion(doc.querySelector('[data-home-workspace-shell]'), 'shell', [
+      H.buildPhoneTopBar(doc,vm,callbacks), H.buildWorkspaceHeader(doc,vm,callbacks), H.buildWorkspaceNav(doc,vm,callbacks,'tablet')]));
+    H.replaceHomeRegion(doc.querySelector('[data-home-phone-nav]'), 'phone-nav', [H.buildWorkspaceNav(doc,vm,callbacks,'phone')]);
+    host.sync(H.projectHomeLayout('channel', { view: 'chat', workspaceId: workspace.id }, [workspace], false));
+    // Account layout only: callbacks stand in for runtime wiring, never sign-in/sign-out behavior.
+    const accountMenu = doc.querySelector('[data-user-menu]');
+    doc.querySelector('[data-user-menu-trigger]').addEventListener('click', () => { accountMenu.hidden = !accountMenu.hidden; });
+    doc.querySelectorAll('[data-rail-account]').forEach(node => { node.textContent = 'Invented account'; });
     doc.querySelector('.hm-frame').classList.remove('hm-frame--catchup');
     doc.querySelector('.dashboard__channel').hidden = false;
     doc.querySelector('[data-home-catchup]').hidden = true;
@@ -194,8 +110,7 @@ const frameScript = (
     doc.querySelectorAll("[data-channel-view]").forEach((section) => {
       section.hidden = section.dataset.channelView !== ${JSON.stringify(empty ? "feed-empty" : "feed")};
     });
-    /* The sample build boots into sample mode, which correctly hides Sign out. This fixture
-       then forces the signed-in channel panel, so it must also restore the signed-in control. */
+    /* Invented signed-in account state for geometry only; no authentication is exercised. */
     doc.querySelectorAll("[data-signout]").forEach((button) => { button.hidden = false; });
     const people = doc.querySelector('[data-roster-open]');
     people.setAttribute('aria-label', ${JSON.stringify(pending ? "People & agents · 3 pending access" : "People & agents")});
@@ -231,17 +146,15 @@ const frameScript = (
       row.append(avatar, body);
       return row;
     }));
-    /* THE SIGNED-IN DEFAULT (Tom's ruling 2, 2026-10-07): the view switch, filters and refresh live in
-       the ⋯ menu and the stream head and filter row are hidden. LiveDashboard sets this attribute for a
-       signed-in feed at its default; the static build boots as a sample, which keeps both rows, so the
-       fixture states the signed-in default here. The reverted variant leaves it off: the old chrome. */
+    /* Same signed-in default input as LiveDashboard.syncFeedChrome. The taller negative
+       control retains visible feed controls but restores the old head/filter rows. */
     ${reverted ? "" : `doc.querySelector(".hm-frame").setAttribute("data-feed-quiet", "");`}
     await doc.fonts.ready;
     await settle();
     /* The real feed deliberately opens at the newest message. This fixture replaces that
-       already-scrolled sample transcript with oldest-first geometry, so reset the inherited
+       transcript with oldest-first geometry, so reset the inherited
        scroll only after the replacement and font layout have settled. "At rest" below then
-       measures the first synthetic row, not the sample feed's retained scroll position. */
+       measures the first synthetic row, with a known scroll position. */
     doc.querySelector(".dashboard__feed-view").scrollTop = 0;
     await settle();
     const rect = (selector) => {
@@ -275,12 +188,32 @@ const frameScript = (
     await settle();
     const feedMore = doc.querySelector("[data-feed-more]");
     const firstRow = doc.querySelector("[data-feed-list] > li");
+    const visible = node => !!node && node.getClientRects().length > 0;
+    const phone = view.innerWidth <= 832;
+    const workspaceSelector = phone ? '.cs-org-phone-bar' : '[data-home-workspace-shell]';
+    const feedTrigger = [...doc.querySelectorAll('.cs-kylon-workspace-menu .hm-menu__trigger, [data-home-workspace-shell] .hm-menu__trigger')].find(visible);
+    feedTrigger?.click(); await settle();
+    const feedControls = [...doc.querySelectorAll('.hm-menu__list [role^="menuitem"]')].filter(visible).map(node => node.textContent.trim());
+    feedTrigger?.click(); await settle();
+    const nav = doc.querySelector('[data-home-workspace-nav="phone"]');
+    const phoneNav = visible(nav) ? rect('[data-home-workspace-nav="phone"]') : null;
+    let navigationOpen = false, navItems = [], navigationTargets = [], peopleDoor = false;
+    if (phone) {
+      doc.querySelector('.cs-org-phone-bar > button').click(); await settle();
+      const dialog = doc.querySelector('.cs-org-drawer');
+      navigationOpen = dialog.matches(':modal');
+      const links = [...dialog.querySelectorAll('a.cs-org-product')].filter(visible);
+      navItems = links.map(node => node.textContent.trim());
+      navigationTargets = links.map(node => { const box = node.getBoundingClientRect(); return { bottom:box.bottom, height:box.height, left:box.left, right:box.right, top:box.top, width:box.width }; });
+      peopleDoor = navItems.includes('People & agents');
+      dialog.querySelector('[aria-label="Close navigation"]').click(); await settle();
+    }
     const header = rect(".dashboard__channel-head");
     const toolbar = rect(".dashboard__feed-toolbar");
     const composerBox = rect("[data-composer]");
     const headVisible = header.height > 0, toolbarVisible = toolbar.height > 0;
     const transcriptTop = Math.max(rect(".dashboard__feed-view").top, headVisible ? header.bottom : 0, toolbarVisible ? toolbar.bottom : 0);
-    const workspaceTop = rect("[data-home-workspace-shell]").top;
+    const workspaceTop = rect(workspaceSelector).top;
     const combinedHeaderHeight = transcriptTop - workspaceTop;
     const transcriptVisibleHeight = composerBox.top - transcriptTop;
     document.documentElement.dataset.layoutMeasurement = btoa(JSON.stringify({
@@ -288,12 +221,10 @@ const frameScript = (
       transcriptTop,
       headVisible,
       toolbarVisible,
-      feedMenu: [...doc.querySelectorAll("[data-home-workspace-shell] .hm-menu__trigger")].some((trigger) => trigger.getClientRects().length > 0),
-      workspaceHeader: rect("[data-home-workspace-shell]"),
+      feedMenu: visible(feedTrigger), feedControls, navigationOpen, navigationTargets,
+      workspaceHeader: rect(workspaceSelector),
       sendUncovered: Boolean(doc.elementFromPoint(rect("[data-composer-send]").left + rect("[data-composer-send]").width / 2, rect("[data-composer-send]").top + rect("[data-composer-send]").height / 2)?.closest("[data-composer-send]")),
-      phoneNav: view.innerWidth <= 832 ? rect('[data-home-workspace-nav="phone"]') : null,
-      navItems: [...doc.querySelectorAll('[data-home-workspace-nav="phone"] a')].map(link => link.textContent),
-      peopleDoor: !!doc.querySelector('.hm-phone-bar__people'),
+      phoneNav, navItems, peopleDoor,
       composer: composerBox,
       feedListPaddingBlockStart:
         view.getComputedStyle(doc.querySelector("[data-feed-list]")).paddingBlockStart,
@@ -323,66 +254,8 @@ const frameScript = (
   };
   const start = () => void runMeasurement().catch((error) => reportError(error?.stack ?? error));
   frame.addEventListener("load", start, { once: true });
-  if (frame.contentDocument?.readyState === "complete" && frame.contentWindow?.location.pathname === "/app") start();
+  if (frame.contentDocument?.readyState === "complete" && frame.contentWindow?.location.pathname === "/__fixture") start();
 </script>`;
-
-const startDistServer = async (): Promise<{ close(): Promise<void>; origin: string }> => {
-  const bundle = await build({ absWorkingDir: siteRoot, bundle: true, entryPoints: ["src/lib/home-shell.ts"], format: "iife", globalName: "MobileShell", platform: "browser", write: false });
-  const shellScript = bundle.outputFiles[0]?.text; assert.ok(shellScript);
-  const server = createServer((request, response) => {
-    const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    if (url.pathname === "/__measure") {
-      const width = Number.parseInt(url.searchParams.get("width") ?? "", 10);
-      const height = Number.parseInt(url.searchParams.get("height") ?? "", 10);
-      const reverted = url.searchParams.get("reverted") === "1";
-      const empty = url.searchParams.get("empty") === "1";
-      const pending = url.searchParams.get("pending") === "1";
-      const more = url.searchParams.get("more") === "1";
-      const todos = url.searchParams.get("todos") === "1";
-      if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)) {
-        response.writeHead(400).end("Invalid measurement");
-        return;
-      }
-      response.writeHead(200, { "content-type": contentTypes[".html"] });
-      response.end(
-        `<!doctype html><html><body style="margin:0"><iframe title="Layout measurement viewport" src="/app" style="border:0;width:${width}px;height:${height}px"></iframe>${frameScript(reverted, empty, pending, more, todos, shellScript)}</body></html>`,
-      );
-      return;
-    }
-
-    const relative = url.pathname === "/app" || url.pathname === "/app/"
-      ? "app/index.html"
-      : url.pathname.replace(/^\/+/, "");
-    const filePath = normalize(join(distRoot, relative));
-    if (!filePath.startsWith(`${distRoot}/`)) {
-      response.writeHead(403).end("Forbidden");
-      return;
-    }
-    try {
-      const stat = statSync(filePath);
-      if (!stat.isFile()) throw new Error("not a file");
-      response.writeHead(200, {
-        "content-length": stat.size,
-        "content-type": contentTypes[extname(filePath)] ?? "application/octet-stream",
-      });
-      createReadStream(filePath).pipe(response);
-    } catch {
-      response.writeHead(404).end("Not found");
-    }
-  });
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = server.address();
-  assert.ok(address && typeof address !== "string", "layout observer server must bind a port");
-  return {
-    close: () => new Promise<void>((resolve, reject) => {
-      server.close((error) => error ? reject(error) : resolve());
-    }),
-    origin: `http://127.0.0.1:${address.port}`,
-  };
-};
 
 const measureAt = async (
   chrome: string,
@@ -419,8 +292,8 @@ const measureAt = async (
   return JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as LayoutMeasurement;
 };
 
-/* UI-SPEC 1.1 replaces the floating phone band with a top bar, an in-flow channel menu and
- * bottom links. Keep the header compact, all doors reachable and the first message unobscured.
+/* The real Kylon phone header keeps the original workspace menu and puts route links in its
+ * native drawer. Keep that header compact, feed controls reachable and the first message clear.
  * The reverted-header fixture adds height to these same elements and must fail this rule. */
 const assertPhoneHeaderRule = (measurement: LayoutMeasurement, width: number): void => {
   const appBar = measurement.shell.channel.top;
@@ -517,10 +390,20 @@ const assertDensity = (measurement: LayoutMeasurement, width: number): void => {
 
 const assertInsideViewport = (measurement: LayoutMeasurement, todosAvailable = false): void => {
   assert.equal(measurement.sendUncovered, true, "the account door and other controls must leave Send clickable at its centre");
-  if (measurement.phoneNav) {
-    assert.deepEqual(measurement.navItems, todosAvailable ? ["Chat", "To-dos", "Lists", "Files"] : ["Chat", "Lists", "Files"],
-      "To-dos appears only when its read exists; the phone keeps native Chat, Lists and Files links");
+  assert.ok(measurement.feedControls.includes("All messages") && measurement.feedControls.includes("Broadcast") &&
+    measurement.feedControls.includes("Refresh observer data"), "the visible menu retains channel, filter and refresh controls");
+  if (measurement.viewport.width <= 832) {
+    assert.equal(measurement.navigationOpen, true, "the real phone navigation must open as a native modal");
+    assert.deepEqual(measurement.navItems, ["Catch up", "Chat", "People & agents", ...(todosAvailable ? ["To-dos"] : []), "Lists", "Files", "Wiki"],
+      "To-dos appears only when its read exists; the phone keeps the projected native route links");
     assert.equal(measurement.peopleDoor, true);
+    assert.ok(measurement.navigationTargets.every(target => target.height >= 44 && target.width >= 44 &&
+      target.left >= -0.1 && target.right <= measurement.viewport.width + 0.1 && target.top >= -0.1 &&
+      target.bottom <= measurement.viewport.height + 0.1), "phone route links retain visible 44px targets");
+    assert.ok(measurement.input.height >= 44 && measurement.send.height >= 44 && measurement.send.width >= 44,
+      "the narrow composer keeps its editable field and Send targets");
+  }
+  if (measurement.phoneNav) {
     assert.ok(measurement.phoneNav.height >= 44);
     assert.ok(measurement.composer.bottom <= measurement.phoneNav.top + 0.5, "the composer stays above bottom navigation");
   }
@@ -541,7 +424,7 @@ const assertInsideViewport = (measurement: LayoutMeasurement, todosAvailable = f
 
 test("the live feed header stays compact and the narrow composer stays in view", async () => {
   const chrome = await findChrome();
-  const server = await startDistServer();
+  const server = await startDistServer(frameScript);
   try {
     for (const [width, height] of [[1440, 900], [390, 844]]) {
       const current = await measureAt(chrome, server.origin, width, height, false);
@@ -550,6 +433,8 @@ test("the live feed header stays compact and the narrow composer stays in view",
       assert.equal(current.viewport.height, height, `${width}px iframe height drifted`);
       assertDensity(current, width);
       assertInsideViewport(current);
+      assert.equal(reverted.feedMenu, true, "the negative control retains the visible feed menu");
+      assert.deepEqual(reverted.feedControls, current.feedControls, "the negative control retains the same feed controls");
       /* A larger header must consume reading space within the same bounded frame. */
       if (width === 1440) {
         assert.ok(
@@ -581,11 +466,11 @@ test("the live feed header stays compact and the narrow composer stays in view",
    the taller padding back and made the head 61px against a 57px app bar. The transcript floor
    in the shared rule does not apply at 568px of screen, so this case asserts the rule's other
    three parts and the viewport containment. */
-test("the smallest phone fits the workspace header, channel menu, composer and bottom links", async () => {
+test("the smallest phone fits the workspace header, channel menu, composer and native navigation", async () => {
   const chrome = await findChrome();
-  const server = await startDistServer();
+  const server = await startDistServer(frameScript);
   try {
-    /* With the pending label, which is the widest the roster pill gets. */
+    /* Keep the pending roster input while measuring the real header and native route doors. */
     const measurement = await measureAt(chrome, server.origin, 320, 568, false, false, true);
     assert.deepEqual(measurement.viewport, { width: 320, height: 568 });
     const appBar = measurement.shell.channel.top;
@@ -600,9 +485,8 @@ test("the smallest phone fits the workspace header, channel menu, composer and b
       `320x568: ${measurement.transcriptTop - appBar}px of header sits between the ${appBar}px workspace bar and the transcript`,
     );
     assert.ok(measurement.feedMenu, `320x568: no ⋯ menu in the bar: ${JSON.stringify(measurement.shell)}`);
-    /* The at-rest clearance, re-pinned at the smallest phone and with the widest roster label,
-       which is where a band that grew a line would first stop fitting. The shared rule cannot be
-       reused whole here: its transcript floor is written for an 844px screen. */
+    /* At-rest clearance at the shortest phone: a wrapped header must not cover the first message.
+       The shared rule's transcript floor is written for an 844px screen. */
     assert.equal(
       measurement.feedViewScrollTop,
       0,
@@ -635,7 +519,7 @@ test("the smallest phone fits the workspace header, channel menu, composer and b
    on a phone this popover is the only Sign out there is. */
 test("the account menu paints in DOM order and stays on screen at phone widths", async () => {
   const chrome = await findChrome();
-  const server = await startDistServer();
+  const server = await startDistServer(frameScript);
   try {
     for (const [width, height] of [[390, 844], [320, 568]]) {
       const measurement = await measureAt(chrome, server.origin, width, height, false);
@@ -676,7 +560,7 @@ test("the account menu paints in DOM order and stays on screen at phone widths",
 
 test("an empty feed keeps the app shell at the dynamic viewport height", async () => {
   const chrome = await findChrome();
-  const server = await startDistServer();
+  const server = await startDistServer(frameScript);
   try {
     for (const [width, height] of [[1440, 900], [390, 844]]) {
       const measurement = await measureAt(chrome, server.origin, width, height, false, true);
@@ -690,9 +574,8 @@ test("an empty feed keeps the app shell at the dynamic viewport height", async (
           `${width}x${height}: ${name} does not fill the empty app viewport: ${JSON.stringify(rect)}`,
         );
       }
-      /* The frame is product grid row 2, below the product header. Requiring its
-       * top to be viewport row 0 contradicts that layout. It must fill the
-       * remaining row to the viewport bottom, like its channel children. */
+      /* The host moves the original frame below the visible phone header. It must fill
+       * the remaining space to the viewport bottom, like its channel children. */
       for (const name of ["frame"] as const) {
         const rect = measurement.shell[name];
         assert.ok(
@@ -713,12 +596,12 @@ test("an empty feed keeps the app shell at the dynamic viewport height", async (
   }
 });
 
-/* The channel menu is in flow. Showing Load older must not change the list's own padding
+/* The workspace menu stays in the visible header. Showing Load older must not change list padding
    or create a second header-sized gap before the first message. Both cases measure the same
    production shell and keep a visible button as the positive control. */
 test("the channel menu stays above older updates without a second clearance gap", async () => {
   const chrome = await findChrome();
-  const server = await startDistServer();
+  const server = await startDistServer(frameScript);
   try {
     const withMore = await measureAt(chrome, server.origin, 390, 844, false, false, false, true);
     const withoutMore = await measureAt(chrome, server.origin, 390, 844, false, false, false, false);

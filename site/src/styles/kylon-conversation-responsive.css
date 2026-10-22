@@ -1,0 +1,167 @@
+/* Focus remains visible on existing controls. No animation is added. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(
+  .dashboard__message button, .dashboard__message a,
+  .dashboard__message summary, .dashboard__thread-toggle,
+  .dashboard__composer button, .dashboard__composer input
+):focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed {
+    max-inline-size: none;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message {
+    gap: 10px;
+    padding: 8px 16px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-body {
+    column-gap: 4px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-body > .dashboard__message-about {
+    padding-inline: 4px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__thread {
+    padding: 0 16px 4px 58px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__thread-replies {
+    padding: 10px;
+    border-radius: 8px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message--reply {
+    grid-template-columns: 24px minmax(0, 1fr);
+    gap: 8px;
+    padding: 0;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message--reply .dashboard__message-avatar {
+    inline-size: 24px;
+    block-size: 24px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer {
+    padding: 8px 16px calc(10px + env(safe-area-inset-bottom));
+    gap: 4px;
+  }
+  /* A 16px editable font avoids iOS focus zoom. Viewport-based maximum and
+   * textarea autogrow remain the runtime's existing responsibility. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer textarea {
+    font-size: 16px;
+    min-block-size: 44px;
+  }
+  /* Keep the actual channel label accessible. The legacy phone name overlay
+   * shares its SR presentation; it must not cover the native field hint. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-box:has(textarea[placeholder^="Write to everyone"]:placeholder-shown):has(.dashboard__composer-attachments[hidden]) .dashboard__composer-label {
+    inset: auto;
+    inline-size: 1px;
+    max-inline-size: none;
+    block-size: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  /* Preserve the real label/accessibility name; the long native hint may
+     truncate on narrow fields but no fake overlay text obscures the draft. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-box:has(.dashboard__composer-attachments[hidden]) textarea[placeholder^="Write to everyone"]::placeholder {
+    color: var(--k-shell-muted);
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(
+    .dashboard__message-reply, .dashboard__message-toggle,
+    .dashboard__message summary, .dashboard__thread-toggle,
+    .dashboard__composer button
+  ) {
+    min-inline-size: 44px;
+    min-block-size: 44px;
+  }
+  /* Explicit density exception: inline identity/profile links are24px.
+     They retain full labels, distinct spacing and keyboard access. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-entity,
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-channel {
+    min-inline-size: 24px;
+    min-block-size: 24px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-reply-broadcast {
+    min-block-size: 44px;
+  }
+  /* Metadata remains readable on short phones; only the runtime's native
+   * hidden attribute may remove the near-limit count. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-meta:not([hidden]) {
+    display: flex;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-meta:empty,
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-meta:has(> [hidden]:only-child) {
+    display: none;
+  }
+}
+
+@media (width <= 52rem) and (height <= 36rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-reply {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 4px 8px;
+    padding: 4px 8px;
+    margin-block-end: 0;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-reply-target {
+    grid-column: 1;
+    min-inline-size: 0;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame [data-composer-reply-cancel] {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-reply-broadcast {
+    grid-column: 1 / -1;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-input {
+    min-block-size: 52px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer textarea {
+    min-block-size: 44px;
+    padding-block: 10px;
+  }
+  /* Short reply viewports keep addressing truth and Cancel in view. Longer
+     drafts scroll inside the textarea instead of covering the address note. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:has(.dashboard__composer-reply:not([hidden])) textarea {
+    max-block-size: 52px;
+  }
+}
+
+/* Short viewports need a height budget as well as a width budget. Reclaim
+ * chrome padding, preserve safe areas and 44px actions, and scroll long drafts
+ * inside the existing textarea instead of consuming the history viewport. */
+@media (width <= 52rem) and (height <= 28rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-phone-bar {
+    padding-block: max(4px, env(safe-area-inset-top, 0px)) 4px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-ws-nav--phone {
+    padding-block: 4px max(4px, env(safe-area-inset-bottom, 0px));
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer {
+    padding-block: 4px calc(4px + env(safe-area-inset-bottom, 0px));
+    gap: 0;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:has(.dashboard__composer-reply:not([hidden])) textarea {
+    max-block-size: 44px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(
+    .dashboard__message button, .dashboard__message a,
+    .dashboard__message summary, .dashboard__thread-toggle
+  ):focus-visible {
+    outline-offset: 1px;
+  }
+}
+
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-input::before {
+    border: 1px solid ButtonText;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-input:focus-within::before {
+    outline: 2px solid Highlight;
+    outline-offset: 1px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__thread-replies {
+    border-inline-start-color: CanvasText;
+  }
+}

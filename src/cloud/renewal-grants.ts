@@ -136,13 +136,8 @@ export async function readRenewalGrants(
   return grants.map(parseGrant);
 }
 
-/**
- * Days a standing grant may go unused before it pauses itself.
- *
- * MIRRORS `interval '14 days'` in swarm.prepare_renewal_grant, installed by
- * supabase/migrations/20260904000001_standing_grant_resume.sql, and the same
- * number in site/src/lib/standing-grants.ts. The CLI shares the reducer's
- * constant; tests/p1-cli/standing-grants.test.ts checks the site and SQL mirrors.
+/** Historical idle interval, retained for legacy SQL/protocol compatibility only.
+ * The upgraded catalog does not create idle suspensions.
  */
 export const STANDING_IDLE_PAUSE_DAYS = RENEWAL_IDLE_PAUSE_DAYS;
 
@@ -173,9 +168,8 @@ function orList(items: readonly string[]): string {
 export const STANDING_RESUME_ACTORS_SENTENCE = orList(STANDING_RESUME_ACTORS);
 
 export const STANDING_GRANT_RULES: readonly string[] = [
-  "Access does not expire.",
-  `${STANDING_IDLE_PAUSE_DAYS} days with no use pauses it; ${STANDING_RESUME_ACTORS_SENTENCE} can resume it.`,
-  "Revoking it is the only permanent stop.",
+  "Connection settings are managed by the server.",
+  "Removal, revocation and security restrictions still apply.",
 ];
 
 /**
@@ -190,9 +184,9 @@ export const STANDING_GRANT_RULES: readonly string[] = [
  */
 export function standingPausedRenewalMessage(idle: boolean): string {
   const cause = idle
-    ? `This standing grant went ${STANDING_IDLE_PAUSE_DAYS} days with no use, so CommonSwarm paused it and refused renewal.`
+    ? "This renewal grant has a legacy idle pause, so CommonSwarm refused renewal."
     : "This renewal grant is paused, so CommonSwarm refused renewal.";
-  return `${cause} It is not revoked and this agent is not gone. Next step: ${STANDING_RESUME_ACTORS_SENTENCE} runs cswarm grant resume, then this agent continues.`;
+  return `${cause} It is not revoked and this agent is not gone. Next step: ${STANDING_RESUME_ACTORS_SENTENCE} can run cswarm grant resume for a resumable pause. A workspace owner must resolve any security restrictions before renewal can continue.`;
 }
 
 /** Canonical policy must be present and well formed before making lifetime claims. */

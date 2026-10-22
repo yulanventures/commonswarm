@@ -41,9 +41,10 @@ function fixture() {
     if (query.includes('SELECT revoked_at FROM swarm.memberships')) return [{ revoked_at: null }];
     if (query.includes('SELECT * FROM swarm.household_member_content_roles')) return [{ revoked_at: null, content_role: 'editor', content_consent_id: id(7) }];
     if (query.includes('SELECT revoked_at FROM swarm.agent_principals')) return [{ revoked_at: null }];
-    if (query.includes('SELECT * FROM swarm.household_content_connections')) return [{ ...connection,
+    if (query.includes('SELECT t.renewal_grant_id,t.lineage_id,t.run_id')) return [];
+    if (query.includes('SELECT c.* FROM swarm.household_content_connections c') || query.includes('SELECT * FROM swarm.household_content_connections')) return [{ ...connection,
       hosted_grant_id: connection.grant_id, operations: ['read'], purpose: 'shared', revoked_at: null, expires_at: null }];
-    if (query.includes('SELECT state,revoked_at FROM swarm.hosted_mcp_grants')) return [{ state: 'active', revoked_at: null }];
+    if (query.includes('SELECT state,revoked_at,connection_expires_at,connection_expired_at FROM swarm.hosted_mcp_grants')) return [{ state: 'active', revoked_at: null, connection_expires_at: null, connection_expired_at: null }];
     if (query.includes('SELECT revoked_at FROM swarm.hosted_mcp_grant_workspaces')
       || query.includes('SELECT revoked_at FROM swarm.hosted_mcp_seats')) return [{ revoked_at: null }];
     if (query.includes('SELECT clock_timestamp() AS now')) return [{ now: at }];
@@ -97,4 +98,61 @@ test('authorized dispatch leaves storage untouched until a blob read and retains
   assert.deepEqual(await dispatch('object_read', { object_id: 'shopping' }, false),
     { status: 'refused', reason: 'workspace_access_refused' });
   assert.equal(http.mock.callCount(), 1, 'revocation must prevent another byte request');
+});
+
+// This dispatch boundary owns connection-summary projection. SQL returns raw
+// facts; the real content resolver computes effective operations and policy.
+test('connection summaries preserve family consent across bearer replacement and separate canonical policy', async () => {
+  const family = id(20), original = id(21), current = id(22), run = id(23), receipt = id(7);
+  const cases: { name: string; deadline: string | null; expired: string | null;
+    bearerExpired: boolean; revoked: boolean; expected: string[]; principalRevoked?: boolean;
+    familyRevoked?: boolean; sourceTamper?: boolean; receiptTamper?: boolean; purposeTamper?: boolean }[] = [
+    { name: 'rotated permanent', deadline: null, expired: null, bearerExpired: false, revoked: false, expected: ['read'] },
+    { name: 'technical bearer elapsed', deadline: null, expired: null, bearerExpired: true, revoked: false, expected: [] },
+    { name: 'future owner policy', deadline: '2026-12-01T00:00:00.000Z', expired: null, bearerExpired: false, revoked: false, expected: ['read'] },
+    { name: 'terminal policy', deadline: null, expired: at, bearerExpired: false, revoked: false, expected: [] },
+    { name: 'withdrawal', deadline: null, expired: null, bearerExpired: false, revoked: true, expected: [] },
+    { name: 'revoked principal', deadline: null, expired: null, bearerExpired: false, revoked: false, principalRevoked: true, expected: [] },
+    { name: 'revoked family', deadline: null, expired: null, bearerExpired: false, revoked: false, familyRevoked: true, expected: [] },
+    { name: 'source tamper', deadline: null, expired: null, bearerExpired: false, revoked: false, sourceTamper: true, expected: [] },
+    { name: 'receipt tamper', deadline: null, expired: null, bearerExpired: false, revoked: false, receiptTamper: true, expected: [] },
+    { name: 'purpose tamper', deadline: null, expired: null, bearerExpired: false, revoked: false, purposeTamper: true, expected: [] },
+  ];
+  for (const c of cases) {
+    const approval = { connection_id: original, grant_id: run, principal_id: principal, workspace_id: workspace,
+      owner_user_id: user, lineage_id: id(24), renewal_grant_id: family, hosted_grant_id: c.sourceTamper ? run : null, consent_receipt_id: c.receiptTamper ? id(99) : receipt,
+      operations: ['read'], expires_at: null, revoked_at: c.revoked ? at : null, purpose: c.purposeTamper ? 'personal' : 'shared' };
+    const policy = { renewal_grant_id: family, revoked_at: c.familyRevoked ? at : null, local_content_approval_token_id: original,
+      connection_expires_at: c.deadline, connection_expired_at: c.expired };
+    const tx = (async (parts: TemplateStringsArray) => {
+      const q = parts.join('?');
+      if (q.includes("'hosted' AS kind")) return [];
+      if (q.includes("'local' AS kind")) return [{ kind: 'local', connection_id: current, grant_id: run,
+        principal_id: principal, lineage_id: id(24), name: 'Synthetic local', ...policy }];
+      if (q.includes('SELECT connection_id, grant_id, principal_id, operations, expires_at') || q.includes('SELECT c.connection_id,c.grant_id')) return c.revoked ? [] : [approval];
+      if (q.startsWith('LOCK TABLE')) return [];
+      if (q.includes('FROM pg_catalog.pg_policy')) return [{ present: false }];
+      if (q.includes('SELECT archived_at')) return [{ archived_at: null }];
+      if (q.includes('SELECT purpose, owner_user_id')) return [{ purpose: 'shared', owner_user_id: user }];
+      if (q.includes('SELECT role, revoked_at')) return [{ role: 'owner', revoked_at: null }];
+      if (q.includes('household_member_content_roles')) return [{ content_role: 'editor', content_consent_id: receipt, revoked_at: null }];
+      if (q.includes('SELECT revoked_at FROM swarm.agent_principals')) return c.principalRevoked ? [] : [{ revoked_at: null }];
+      if (q.includes('SELECT t.renewal_grant_id,t.lineage_id,t.run_id')) return c.bearerExpired ? [] : [{ renewal_grant_id: family, lineage_id: id(24), run_id: run }];
+      if (q.includes('FROM swarm.renewal_grants')) return [policy];
+      if (q.includes('SELECT c.*')) return [approval];
+      if (q.includes('SELECT seat_id,grant_id,owner_user_id')) return [];
+      if (q.includes('clock_timestamp() AS now')) return [{ now: at }];
+      throw new Error(`Unexpected summary query: ${q}`);
+    }) as unknown as Parameters<typeof executeHouseholdSurface>[0];
+    const result = await executeHouseholdSurface(tx, workspace,
+      { user_id: user, principal_id: null, run_id: null, connection: null }, 'summary_request',
+      { kind: 'household_connections' }, async () => true);
+    assert.equal(result.status, 'ok', c.name);
+    const row = (result.connections as any[])[0];
+    assert.equal(row.renewal_grant_id, family, c.name);
+    assert.equal(row.connection_expires_at, c.deadline, c.name);
+    assert.equal(row.connection_expired_at, c.expired, c.name);
+    assert.deepEqual(row.approval, c.revoked ? null : { operations: ['read'], expires_at: null }, c.name);
+    assert.deepEqual(row.effective_access.operations, c.expected, c.name);
+  }
 });

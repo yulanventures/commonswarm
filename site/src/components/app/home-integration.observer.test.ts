@@ -4,10 +4,10 @@ import { readFile } from 'node:fs/promises';
 import { createContext, runInContext } from 'node:vm';
 import ts from 'typescript';
 import { HomeToolsUnavailable, HomeCommandRefused } from '../../lib/home/client';
-import { CommandOutcomeUnknown, FreshLoginRequired, WorkspaceRoleRefused, BROWSER_SIGNAL_COLUMNS, browserSignalFromRow } from '../../lib/commonswarm';
+import { CommandOutcomeUnknown, FreshLoginRequired, WorkspaceRoleRefused, BROWSER_SIGNAL_COLUMNS, browserSignalFromRow, browserDeliveryReceiptCandidates, BROWSER_RECEIPT_REQUESTS_PER_TICK } from '../../lib/commonswarm';
 import { createLatestRead } from '../../lib/latest-read';
 import { buildAuthorLine, buildStreamExtras, deriveStreamExtras } from '../../lib/home-stream';
-import { homeParty, mapHomePeople, homeAskAnswered, homeViewTitle } from '../../lib/home-map';
+import { homeParty, mapHomePeople, homeAskAnswered, homeViewTitle, homeAgentFixCards } from '../../lib/home-map';
 import { peopleRoleBeginSave, peopleRoleErrorCode, peopleRoleFinishSave, peopleRoleReceipt, peopleRoleRefusal } from '../../lib/people-dialog-view';
 import { addAgentOwnershipLine, agentLabelInSentence, personFirstName } from '../../lib/home-names';
 import { canStartThread, THREAD_REPLY_CONTROL_LABEL, threadReplyPlace, threadReplyTargetText } from '../../lib/thread-reply';
@@ -67,7 +67,8 @@ test('standalone details hide the account door and restore the same DOM to works
   const frame = { toggleAttribute(_name: string, enabled: boolean) { standalone = enabled; } };
   const nodes = new Map<string, unknown>([['.hm-frame', frame], ['[data-user-menu-root]', account],
     ['.hm-frame__main', main], ['.hm-frame__rail', rail]]);
-  const context = createContext({ one: (selector: string) => nodes.get(selector) });
+  // Exercise the legacy/parked frame; the mounted adapter owns its account placement.
+  const context = createContext({ layout: { mounted: false }, one: (selector: string) => nodes.get(selector) });
   runInContext("let homeRoute={view:'todo'}; const app={dataset:{state:'channel',channelView:'feed'}};", context);
   runInContext(await dashboardFunctions(['syncStandalonePage']), context);
   const sync = (statement = '') => runInContext(`${statement}; syncStandalonePage();`, context);
@@ -125,11 +126,12 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
     let finishBoot!: () => void, boots = 0;
     const pendingBoot = new Promise<void>(resolve => { finishBoot = resolve; });
     const context = createContext({
+      layout: { mounted: false },
       one: (selector: string) => nodes.get(selector) ?? null,
       all: (selector: string) => selector.split(',').some(part => part.trim() === '[data-home-route-pane]') ? [pane] : [],
       queueMicrotask: (callback: () => void) => microtasks.push(callback),
       boot: () => { boots++; return boots === 1 ? pendingBoot : Promise.resolve(); },
-      window: { clearTimeout() {}, dispatchEvent() {} },
+      window: { setTimeout: (callback: () => void) => microtasks.push(callback), clearTimeout() {}, dispatchEvent() {} },
       CustomEvent: class { constructor(readonly type: string, readonly options: unknown) {} },
     });
     // Paint and transport boundaries are inert; the production reset owns pane removal.
@@ -137,7 +139,7 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
       const app={dataset:{state:'channel',channelView:${JSON.stringify(view === 'todo' ? 'feed' : 'agent-choice')}}};
       const homeRoute={view:${JSON.stringify(view)},workspaceId:'W'};
       let workspaces=[{id:'W',name:'Home'}], activeWorkspaceId='W';
-      let renderedAuthUserId='tom', requestVersion=1, authReloadQueued=false, bootInFlight=null, bootAgain=false;
+      let renderedAuthUserId='tom', requestVersion=1, authReloadQueued=false, authRecoveryActive=false, bootInFlight=null, bootAgain=false;
       let catchUpGeneration=0, railOverviewGeneration=0, connectedAppsGeneration=0, connectionSettingsGeneration=0;
       const connectionDateDrafts=new Map();
       let homeWorkspaceGeneration=0, homeWorkspaceRead=0, homeDetailGeneration=0;
@@ -211,10 +213,10 @@ test('applyHomePane keeps standalone to-do states readable, with a back link and
   frame.append(rail, main); rail.append(account); main.append(slot, channel);
   const nodes = new Map<string, PaneNode>([['.hm-frame', frame], ['.hm-frame__main', main], ['.hm-frame__rail', rail],
     ['[data-home-route-pane]', slot], ['.dashboard__channel', channel], ['[data-user-menu-root]', account]]);
-  const context = createContext({ document, routeHref, homeViewTitle, todoView,
+  const context = createContext({ document, routeHref, homeViewTitle, todoView, layout: { mounted: false },
     window: { requestAnimationFrame: (callback: () => void) => frames.push(callback) },
     one: (selector: string) => nodes.get(selector) ?? null,
-    all: (selector: string) => selector === '[data-home-route-pane] h1' ? slot.querySelectorAll('h1') : [],
+    all: (selector: string) => selector.split(',').some(part => part.trim() === '[data-home-route-pane] h1') ? slot.querySelectorAll('h1') : [],
     // Paint replacement has its own focus tests; keep the production to-do DOM builder here.
     replaceHomeRegion: (region: PaneNode, _key: string, children: PaneNode[]) => region.replaceChildren(...children),
   });
@@ -429,6 +431,64 @@ class RowNode {
   querySelectorAll(selector: string) { return this.descendants().filter(node => selector.startsWith('.')
     ? node.className.split(' ').includes(selector.slice(1)) : node.tag === selector); }
 }
+test('a signal page settling after a same-workspace view change retains data without taking the pane', async () => {
+  const code = await dashboardFunctions(['addAgentViewOpen', 'showChannelView', 'renderFeed', 'loadSignals',
+    'forgetFetchedPostedIds', 'prunePostedRows', 'rowShowsOnScreen', 'visibleReceiptSignalIds', 'refreshDeliveryReceipts']);
+  for (const [route, workspaceView, channelView] of [
+    ['files', 'files', 'files'], ['wiki', 'brain', 'brain'], ['lists', 'objects', 'objects'],
+    ['chat', 'signals', 'connect'], ['add-agent', 'signals', 'agent-choice'],
+  ]) {
+    class ViewNode extends RowNode { hidden = false; }
+    const sections = ['feed', 'feed-empty', 'feed-pending', 'files', 'brain', 'objects', 'connect', 'agent-choice'].map(name => {
+      const node = new ViewNode('section'); node.dataset.channelView = name; return node;
+    });
+    const composer = new ViewNode('form'), list = new ViewNode('ol'), emptyTitle = new ViewNode('h2');
+    const nodes = new Map([['[data-composer]', composer], ['[data-feed-list]', list], ['[data-feed-empty-title]', emptyTitle]]);
+    let resolvePage!: (page: { rows: unknown[]; hasMore: boolean }) => void, reads = 0;
+    const context = createContext({ routeHref, homeAgentFixCards, browserDeliveryReceiptCandidates, BROWSER_RECEIPT_REQUESTS_PER_TICK,
+      signalPage: () => { reads++; return new Promise(resolve => { resolvePage = resolve; }); },
+      one: (selector: string) => nodes.get(selector) ?? null,
+      all: (selector: string) => selector === '[data-channel-view]' ? sections : [],
+      queueMicrotask: () => {}, window: { clearTimeout() {} },
+    });
+    runInContext(`
+      const app={dataset:{channelView:'feed'}}, activeWorkspaceId='W', requestVersion=1, sampleMode=false, session={user:{id:'viewer'}};
+      let homeRoute={view:'chat',workspaceId:'W'}, activeWorkspaceView='signals', signalExpiryTimer;
+      let activeChannelId=null, unknownChannelId=null, signalCursor={createdAt:'old',id:'old'}, signalCutoff='', signalHasMore=true;
+      let signals=[{id:'previous-page'}], feedWasEmpty=false; const agents=[], workspaces=[{id:'W',name:'Home'}];
+      const postedSinceReset=new Map(), POSTED_ROW_GRACE_MS=30000, previousSignalIds=new Set();
+      const deliveryReceiptCache=new Map([['retained-receipt',{result:null,checkedAt:123}]]); let deliveryReceiptRefreshOwner='';
+      const humanSeenReporter={resetVisible(){}}, humanSeenObserver=null, activeChannel=()=>null;
+      const currentHomePeople=()=>({groups:[],other:[]}), atBottom=()=>true, feedScroller=()=>null;
+      // Unrelated chrome/focus/decoration boundaries; no substitute for the guarded renderer or view switch.
+      const syncComposerPlacement=()=>{}, disarmLiveFeed=()=>{}, armLiveFeed=()=>{}, closeMentionPicker=()=>{};
+      const syncStandalonePage=()=>{}, syncFeedChrome=()=>{}, renderSignalCounts=()=>{}, focusComposerOnEntry=()=>{};
+    `, context);
+    runInContext(code, context);
+    const pending = runInContext("loadSignals('W',true,1)", context) as Promise<void>;
+    assert.equal(reads, 1, 'the real loader reached its deferred transport before the view changed');
+    // Explicit fixture route transition, not the full history/router: production showChannelView owns hidden flags.
+    runInContext(`homeRoute={view:${JSON.stringify(route)},workspaceId:'W'}; activeWorkspaceView=${JSON.stringify(workspaceView)}; showChannelView(${JSON.stringify(channelView)});`, context);
+    const selected = sections.find(node => node.dataset.channelView === channelView)!;
+    assert.equal(selected.hidden, false, `${route}/${channelView}: selected pane starts visible`);
+    assert.equal(composer.hidden, true);
+    resolvePage({ rows: [], hasMore: false }); // A valid authoritative empty page, not a failed or stale read.
+    await pending;
+    assert.equal(selected.hidden, false, `${route}/${channelView}: late feed paint must not hide the actual selected section`);
+    assert.equal(runInContext('app.dataset.channelView', context), channelView);
+    assert.equal(composer.hidden, true, 'a late read cannot expose the feed composer');
+    assert.equal(runInContext('signals.length', context), 0, 'the valid new page replaced old data despite holding its paint');
+    assert.equal(runInContext('signalCursor', context), null);
+    assert.equal(runInContext('signalHasMore', context), false);
+    assert.equal(runInContext("deliveryReceiptCache.get('retained-receipt').checkedAt", context), 123, 'holding paint does not discard cached receipts');
+    // Chat re-entry positive: the same actual renderer must reach the actual empty-feed view switch.
+    runInContext("homeRoute={view:'chat',workspaceId:'W'}; activeWorkspaceView='signals'; showChannelView('feed'); renderFeed();", context);
+    assert.equal(runInContext('app.dataset.channelView', context), 'feed-empty');
+    assert.equal(sections.find(node => node.dataset.channelView === 'feed-empty')!.hidden, false);
+    assert.equal(composer.hidden, false);
+    assert.equal(emptyTitle.textContent, 'No messages yet.');
+  }
+});
 test('replying from a stream row preserves the agent ownership label and the root channel', async () => {
   const document = { createElement: (tag: string) => new RowNode(tag) };
   const input = { placeholder: '', setAttribute() {}, focus() {} };
@@ -647,17 +707,32 @@ test('browser reads retain a top-level directed reply reference', () => {
 
 
 test('each navigation focuses the visible H1 for that view', async () => {
-  const frames: (()=>void)[] = [], selectors: string[] = [], focused: string[] = [];
+  const frames: (()=>void)[] = [], focused: unknown[] = [];
+  const heading = (name: string) => ({ name, visible: false, getClientRects() { return this.visible ? [{}] : []; }, focus() { focused.push(this); } });
+  const scopes = {catchup:'[data-home-catchup]',chat:'[data-home-workspace-shell]',todos:'[data-home-route-pane]',todo:'[data-home-route-pane]',agent:'[data-home-route-pane]',new:'[data-panel=create]', 'add-agent':'[data-channel-view=agent-choice]',lists:'[data-channel-view=objects]',files:'[data-channel-view=files]',wiki:'[data-channel-view=brain]'};
+  const headings = new Map([...new Set(Object.values(scopes))].map(scope => [`${scope} h1`, heading(scope)]));
+  const phoneTitle = heading('phone workspace');
+  headings.set('.cs-org-phone-title h1', phoneTitle);
   const context = createContext({homeViewTitle:()=> 'View · CommonSwarm', window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
-    document:{title:''}, all:(selector:string)=>{selectors.push(selector);return [{getClientRects:()=>[],focus:()=>focused.push('hidden')},{getClientRects:()=>[{}],focus:()=>focused.push(selector)}];}});
+    document:{title:''}, all:(selector:string)=>selector.split(',').flatMap(part => headings.get(part.trim()) ?? [])});
   runInContext("let homeRoute, workspaces=[{id:'W',name:'Home'}];",context);
   runInContext(await dashboardFunctions(['focusHomeView']),context);
-  const scopes = {catchup:'[data-home-catchup]',chat:'[data-home-workspace-shell]',todos:'[data-home-route-pane]',todo:'[data-home-route-pane]',agent:'[data-home-route-pane]',new:'[data-panel=create]', 'add-agent':'[data-channel-view=agent-choice]',lists:'[data-channel-view=objects]',files:'[data-channel-view=files]',wiki:'[data-channel-view=brain]'};
   for (const [view,scope] of Object.entries(scopes)) {
+    focused.length = 0;
+    for (const node of headings.values()) node.visible = false;
+    const target = headings.get(`${scope} h1`)!;
+    target.visible = true;
     runInContext(`homeRoute={view:${JSON.stringify(view)},workspaceId:'W'};focusHomeView();`,context);
     assert.equal(frames.length,1); frames.shift()!();
-    assert.equal(selectors.at(-1), `${scope} h1`); assert.equal(focused.at(-1),`${scope} h1`);
+    assert.equal(focused.at(-1), target, `${view} focuses its visible page heading`);
   }
+  // The adapter moves the phone H1 outside the workspace-header slot.
+  focused.length = 0;
+  for (const node of headings.values()) node.visible = false;
+  phoneTitle.visible = true;
+  runInContext("homeRoute={view:'chat',workspaceId:'W'};focusHomeView();",context);
+  assert.equal(frames.length,1); frames.shift()!();
+  assert.equal(focused.at(-1), phoneTitle, 'the relocated visible phone heading receives focus');
 });
 
 
@@ -1005,6 +1080,8 @@ test('accepted agent removals leave every current surface immediately and after 
       window: { setInterval: (fn: () => void) => { tick = fn; return 1; } },
       replaceHomeRegion: (region: RailNode, _key: string, children: RailNode[]) => region.replaceChildren(...children),
       refreshHomeRailTimes: () => {},
+      // Shell placement is unrelated to accepted removal; retain the real rail builder below.
+      syncVisibleShell: () => {},
       roster: () => new Promise(resolve => { finishRoster = resolve; }),
       homeOverview: () => new Promise(resolve => { finishOverview = resolve; }),
       // The accepted command's transport receipt; it neither edits nor filters UI state.

@@ -33,7 +33,12 @@ import { ALL_SIGNALS_SLUG, channelLabel } from "../../lib/channels";
 import { THREAD_REPLY_CANCEL_LABEL } from "../../lib/thread-reply";
 import "../../styles/tokens.css";
 import "../../styles/home/index.css";
+import "../../styles/dashboard-decoration.css";
 import "../../styles/kylon-shell.css";
+import "../../styles/kylon-layout/index.css";
+import "../../styles/kylon-workspace-settings-integration.css";
+import "../../styles/kylon-files.css";
+import "../../styles/dashboard-welcome.css";
 
 const signInMethods = signInDoors(await enabledProvidersForBuild({
   url: import.meta.env.PUBLIC_SUPABASE_URL,
@@ -606,7 +611,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               <HouseholdObjects state={emptyHousehold} />
             </section>
             <section class="dashboard__files-view" data-channel-view="files" hidden>
-              <h1 class="hm-pane-title" tabindex="-1">Files</h1>
+              <h1 id="dashboard-files-title" class="hm-pane-title" tabindex="-1">Files</h1>
+              <p class="dashboard__file-description">Files shared for this workspace’s work.</p>
               <p class="dashboard__file-warning" data-file-warning hidden></p>
               <p class="dashboard__file-empty" data-file-empty hidden>No files shared yet.</p>
               <p class="dashboard__form-error dashboard__file-error" data-file-error role="alert" hidden></p>
@@ -988,6 +994,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 </live-dashboard>
 
 <script>
+  import { createKylonHost } from "../../lib/kylon-shell/host";
+  import { projectHomeLayout } from "../../lib/kylon-shell/projection";
+  import { greetingName } from "../../lib/greeting-name";
   import { parseRoute, routeHref, parentRoute, type HomeRoute } from "../../lib/home-route";
   import { buildHomeRail, setRailDraftName } from "../../lib/home-rail";
   import { buildWorkspaceHeader, buildPhoneTopBar, buildWorkspaceNav, buildChannelMenu,
@@ -1055,7 +1064,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     SignupRefused,
     WorkspaceOutcomeUnknown,
     WorkspaceLimitReached,
-    FILE_CONTENT_WARNING,
     BROWSER_ATTACHMENT_MAX,
     agentAccessStatuses,
     pendingAgentAccess,
@@ -1545,6 +1553,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     let pendingWorkspaceCreate = false;
     let renderedAuthUserId = "";
     let authReloadQueued = false;
+    let authRecoveryActive = false;
     let bootInFlight: Promise<void> | null = null;
     let bootAgain = false;
     let signalExpiryTimer: number | undefined;
@@ -1735,6 +1744,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
        technology past the surrounding context. Later presentations of that same
        surface move focus. One gate per surface: panels and the auth form present
        independently, so a signed-in boot does not pre-consume the auth form's skip. */
+    const layout = createKylonHost(app, href => navigateHomeHref(href));
+    const syncVisibleShell = (): void => layout.sync(projectHomeLayout(app.dataset.state, homeRoute, workspaces, sampleMode));
     const panelBootFocus = new BootFocusGate();
     const authBootFocus = new BootFocusGate();
 
@@ -1746,6 +1757,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const standalone = !leaveChannel && app.dataset.state === "channel" &&
         (homeRoute.view === "todo" || (homeRoute.view === "add-agent" && app.dataset.channelView === "agent-choice"));
       frame?.toggleAttribute("data-home-standalone", standalone);
+      if (layout.mounted) return;
       const account = one<HTMLElement>("[data-user-menu-root]");
       if (account) account.hidden = standalone;
       const host = one<HTMLElement>(standalone ? ".hm-frame__main" : ".hm-frame__rail");
@@ -1759,6 +1771,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       name: "loading" | "signed-out" | "create" | "workspace-error" | "channel",
     ): void => {
       const previous = app.dataset.state;
+      if (name !== "channel") layout.suspend();
       if (name !== "channel") syncStandalonePage(true);
       /* ONE rail (New-Space.dc.html): a new workspace opens beside the same rail as every other route. The
          create panel borrows the frame's rail while it shows with `data-create-rail`; every other panel
@@ -1777,6 +1790,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         section.hidden = section.dataset.panel !== name;
       }
       app.dataset.state = name;
+      syncVisibleShell();
       const root = one<HTMLElement>(".dashboard__root");
       root?.setAttribute("aria-busy", name === "loading" ? "true" : "false");
       if (previous !== name && name !== "loading") {
@@ -4448,6 +4462,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       await openRosterDialog({ kind: "person", id }, workspaceId);
     };
     const renderHomeRail = (): void => {
+      syncVisibleShell();
       const slot = one<HTMLElement>("[data-home-rail-slot]");
       if (!slot) return;
       /* One rail on every route: everyone in every workspace the overview read, with the workspace in view
@@ -4483,6 +4498,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const bottom = one<HTMLElement>("[data-home-phone-nav]");
       const workspace = workspaces.find(workspace => workspace.id === activeWorkspaceId);
       if (!slot || !workspace || homeRoute.view === "catchup" || homeRoute.view === "new") {
+        layout.syncMenu(false);
         homeShellKey = "";
         slot?.replaceChildren(); bottom?.replaceChildren(); return;
       }
@@ -4498,7 +4514,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (composerLabel) composerLabel.textContent = composerName;
       one<HTMLTextAreaElement>("[data-composer-input]")?.setAttribute("aria-label", composerName);
       const key = homeStructureKey(vm);
-      if (key === homeShellKey && slot.childElementCount) return;
+      if (key === homeShellKey && slot.childElementCount) { layout.syncMenu(); return; }
       const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: () => openRosterDialog(),
         feedMenu: feedMenuState, feed: feedMenuAction, account: accountMenuState, accountAction: accountMenuAction,
         menu: item => {
@@ -4506,8 +4522,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           else if (item === "settings") openWorkspaceDetailsDialog();
           // AdminDelegations owns the data-admin-access-open click through its delegated listener.
         } };
-      replaceHomeRegion(slot, "shell", [buildPhoneTopBar(document, vm, callbacks), buildWorkspaceHeader(document, vm, callbacks),
-        buildWorkspaceNav(document, vm, callbacks, "tablet")]);
+      layout.replaceHeader(() => replaceHomeRegion(slot, "shell", [buildPhoneTopBar(document, vm, callbacks), buildWorkspaceHeader(document, vm, callbacks),
+        buildWorkspaceNav(document, vm, callbacks, "tablet")]));
       /* The doors open the People & agents PAGE. A page is not a popup, so the door carries no
          aria-controls/aria-expanded; on the page itself it is the current page. */
       for (const button of slot.querySelectorAll<HTMLButtonElement>("[data-roster-open], .hm-phone-bar__people")) {
@@ -4517,7 +4533,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         else button.removeAttribute("aria-current");
       }
       if (bottom) replaceHomeRegion(bottom, "phone-nav", [buildWorkspaceNav(document, vm, callbacks, "phone")],
-        Array.from(slot.querySelectorAll<HTMLElement>("h1")).find(heading => heading.getClientRects().length > 0));
+        all<HTMLElement>("[data-home-workspace-shell] h1, .cs-org-phone-title h1").find(heading => heading.getClientRects().length > 0));
       homeShellKey = key;
       syncFeedChrome();
     };
@@ -4525,7 +4541,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (homeRoute.view !== "catchup") return;
       const slot = one<HTMLElement>("[data-home-catchup]");
       if (!slot) return;
-      const vm = mapCatchUp(catchUpData, homeViewerId(), session ? accountName(session) : Object.values(SAMPLE_ROSTERS)[0]?.members.find(member => member.userId === homeViewerId())?.name ?? "there", Date.now(), sampleMode, catchUpExpanded);
+      const viewerName = members.find(member => member.userId === homeViewerId())?.name ||
+        catchUpData.flatMap(entry => entry.detail?.people.groups ?? []).find(group => group.person.id === homeViewerId())?.person.name;
+      const vm = mapCatchUp(catchUpData, homeViewerId(), greetingName(session?.user, viewerName || (sampleMode ? Object.values(SAMPLE_ROSTERS)[0]?.members.find(member => member.userId === homeViewerId())?.name : undefined)), Date.now(), sampleMode, catchUpExpanded);
       const key = homeStructureKey(vm);
       if (key === homeCatchUpKey && slot.childElementCount) {
         refreshHomeCatchUpTimes(slot, vm); renderHomeRail(); return;
@@ -4632,6 +4650,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (routePane) routePane.hidden = true;
       if (homeRoute.view !== "people") parkPeopleHosts();
       if (channel) channel.hidden = home || homeRoute.view === "todo" || homeRoute.view === "agent" || homeRoute.view === "todos" || homeRoute.view === "people";
+      const channelHead = channel?.querySelector<HTMLElement>(".dashboard__channel-head");
+      if (channelHead) channelHead.hidden = homeRoute.view === "files";
+      channel?.setAttribute("aria-labelledby", homeRoute.view === "files" ? "dashboard-files-title" : "dashboard-channel-title");
       const channelMenu = one<HTMLElement>("[data-home-channel-menu]");
       if (channelMenu) channelMenu.hidden = homeRoute.view !== "chat";
       const frame = one<HTMLElement>(".hm-frame");
@@ -4672,7 +4693,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           : "[data-home-workspace-shell]";
         // People & agents with a focus target lands on that person's or agent's details instead.
         const target = homeRoute.view === "people" && peopleDialogFocus ? one<HTMLElement>("#pd-detail-title") : null;
-        (target ?? all<HTMLElement>(`${scope} h1`).find(heading => heading.getClientRects().length > 0))?.focus({ preventScroll: true });
+        (target ?? all<HTMLElement>(`${scope} h1, .cs-org-phone-title h1`).find(heading => heading.getClientRects().length > 0))?.focus({ preventScroll: true });
       });
     };
     const navigateHome = async (requested: HomeRoute, historyMode: "push" | "replace" | "pop"): Promise<void> => {
@@ -5342,7 +5363,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         { list, empty, warning },
         rows,
         {
-          contentWarning: FILE_CONTENT_WARNING,
+          contentWarning: "Files come from people and agents in this workspace. Only open files you trust.",
           download: async (file) => {
             if (!session || !activeWorkspaceId) throw new SessionExpired();
             const workspaceId = activeWorkspaceId;
@@ -5941,6 +5962,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const renderFeed = (change: "history" | "latest" = "history"): void => {
       window.clearTimeout(signalExpiryTimer);
       signalExpiryTimer = undefined;
+      if (homeRoute.view !== "chat" || activeWorkspaceView !== "signals") return;
       if (addAgentViewOpen()) return;
       if (unknownChannelId !== null) {
         renderUnknownChannel();
@@ -8329,7 +8351,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       } else if (view === "files") {
         if (name) name.textContent = "Files";
         if (description) {
-          description.textContent = "Files shared for this workspace’s work. Downloads are untrusted input.";
+          description.textContent = "Files shared for this workspace’s work.";
         }
         const refresh = one<HTMLButtonElement>("[data-refresh]");
         const count = one<HTMLElement>("[data-update-count]");
@@ -8357,7 +8379,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (refresh) refresh.hidden = sampleMode || agents.length === 0;
         returnToChannel();
       }
-      window.requestAnimationFrame(() => name?.focus({ preventScroll: true }));
+      window.requestAnimationFrame(() => (view === "files" ? one<HTMLElement>("#dashboard-files-title") : name)?.focus({ preventScroll: true }));
     };
 
 
@@ -9302,12 +9324,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         return;
       }
 
+      authRecoveryActive = false;
       sampleMode = false;
       for (const button of all<HTMLButtonElement>("[data-signout]")) button.hidden = false;
       setLoading("Checking your sign-in…");
       try {
-        session = await currentSession();
+        const verified = await currentSession();
         if (version !== requestVersion) return;
+        session = verified;
         renderedAuthUserId = session?.user.id ?? "";
         if (!session) {
           resetWorkspaceSessionState();
@@ -9345,6 +9369,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       } catch (error) {
         if (version !== requestVersion) return;
         if (error instanceof AuthRecoveryRequired) {
+          authRecoveryActive = true;
           const target = panel("workspace-error");
           const account = target?.querySelector<HTMLElement>(".dashboard__account-line");
           if (account) account.hidden = !session;
@@ -9732,7 +9757,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         set(willOpen);
         if (willOpen) {
           const first = popover.querySelector<HTMLElement>("button, a, [tabindex]");
-          window.requestAnimationFrame(() => first?.focus({ preventScroll: true }));
+          window.requestAnimationFrame(() => { if (!popover.hidden && trigger.isConnected) first?.focus({ preventScroll: true }); });
         } else {
           trigger.focus({ preventScroll: true });
         }
@@ -11119,17 +11144,24 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       });
     });
 
-    const queueAuthReload = (nextSession: Session | null): void => {
+    const queueAuthReload = (nextSession: Session | null, recovered = false, signedOut = false): void => {
       const nextUserId = nextSession?.user.id ?? "";
-      if (nextUserId === renderedAuthUserId || authReloadQueued) return;
-      resetWorkspaceSessionState();
-      renderedAuthUserId = nextUserId;
-      requestVersion += 1;
+      const identityChanged = signedOut || nextUserId !== renderedAuthUserId;
+      if (!identityChanged && !recovered) return;
+      if (identityChanged) {
+        resetWorkspaceSessionState();
+        renderedAuthUserId = nextUserId;
+        requestVersion += 1;
+        authRecoveryActive = false;
+      }
+      if (authReloadQueued) return;
       authReloadQueued = true;
-      queueMicrotask(() => {
+      // Auth subscribers run under the SDK lock. Boot starts in a later task,
+      // and reads current identity afresh after logout or a peer identity change.
+      window.setTimeout(() => {
         authReloadQueued = false;
         runBoot();
-      });
+      }, 0);
     };
 
     /* /start now preserves its query and hash while handing old callbacks to /app, so this
@@ -11138,12 +11170,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       // SDK events can carry saved, unverified identity during initialization.
       // Only update an identity this dashboard has already verified.
       if (session && nextSession?.user.id === session.user.id) session = nextSession;
+      const recovered = event === "TOKEN_REFRESHED" && !!nextSession &&
+        authRecoveryActive && app.dataset.state === "workspace-error" &&
+        (!renderedAuthUserId || nextSession.user.id === renderedAuthUserId);
       if (
         event === "INITIAL_SESSION" ||
         event === "SIGNED_IN" ||
-        event === "SIGNED_OUT"
+        event === "SIGNED_OUT" || recovered
       ) {
-        queueAuthReload(nextSession);
+        queueAuthReload(nextSession, recovered, event === "SIGNED_OUT");
       }
     });
 
@@ -11400,31 +11435,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     }
   }
 
-  .dashboard__wordmark {
-    inline-size: fit-content;
-    color: var(--text);
-    font-size: var(--t-base);
-    line-height: 1;
-    font-weight: var(--weight-head);
-    letter-spacing: var(--track-head);
-    text-decoration: none;
-    white-space: nowrap;
-  }
 
-  .dashboard__wordmark::after {
-    content: "";
-    display: block;
-    inline-size: 1.45rem;
-    block-size: 3px;
-    margin-block-start: var(--s-2);
-    border-radius: var(--radius-pill);
-    background: var(--accent);
-    transition: inline-size var(--dur-2) var(--ease-standard);
-  }
 
-  .dashboard__wordmark:hover::after {
-    inline-size: 100%;
-  }
 
   .dashboard__gateway {
     min-block-size: 100svh;
@@ -11644,35 +11656,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     color: var(--text-muted);
     font-size: var(--t-sm);
     line-height: var(--lh-sm);
-  }
-
-  /* ProviderButtons renders its buttons inside ONE wrapper, so the wrapper is a single grid
-     item of .dashboard__signin-choices and has to carry the row gap itself. Without this rule
-     a second provider stacks flush against the first, which is invisible on a one-provider
-     build and wrong when multiple providers are enabled. */
-  .dashboard__providers {
-    display: grid;
-    gap: var(--s-3);
-  }
-
-  .dashboard__providers > .dashboard__button {
-    inline-size: 100%;
-  }
-
-  .dashboard__auth-divider {
-    display: grid;
-    grid-template-columns: 1fr auto 1fr;
-    align-items: center;
-    gap: var(--s-3);
-    color: var(--text-faint);
-    font-size: var(--t-xs);
-  }
-
-  .dashboard__auth-divider::before,
-  .dashboard__auth-divider::after {
-    content: "";
-    block-size: 1px;
-    background: var(--border);
   }
 
   .dashboard__email input,
@@ -12019,103 +12002,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     box-shadow: 0 1rem 2.5rem color-mix(in oklab, var(--text) 14%, transparent);
   }
 
-  .dashboard__workspace-details-dialog {
-    inline-size: min(calc(100% - var(--s-8)), 23rem);
-    max-inline-size: calc(100% - var(--s-8));
-    max-block-size: min(42rem, calc(100dvh - var(--s-8)));
-    margin: auto;
-    padding: 0;
-    color: var(--text);
-    background: var(--surface-3);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-lg);
-  }
-
-  .dashboard__workspace-details-dialog::backdrop {
-    background: color-mix(in oklab, var(--text) 32%, transparent);
-  }
-
-  .dashboard__workspace-details-dialog[open] {
-    display: flex;
-    flex-direction: column;
-    animation: dashboard-dialog-in var(--dur-3) var(--ease-decelerate);
-  }
-
-  .dashboard__workspace-details-dialog-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--s-3);
-    padding: var(--s-3) var(--s-3) var(--s-3) var(--s-4);
-    border-block-end: 1px solid var(--border);
-  }
-
-  .dashboard__workspace-details-dialog-head p {
-    margin: 0;
-    color: var(--text);
-    font-size: var(--t-sm);
-    font-weight: var(--weight-semibold);
-  }
-
-  .dashboard__workspace-details-dialog-body {
-    min-block-size: 0;
-    display: grid;
-    gap: var(--s-2);
-    padding: var(--s-4);
-    overflow-y: auto;
-  }
-
-  .dashboard__workspace-settings-title,
-  .dashboard__workspace-danger h3 {
-    margin: 0;
-    color: var(--text);
-    font-size: var(--t-sm);
-  }
-
-  .dashboard__workspace-settings-counts,
-  .dashboard__workspace-danger p {
-    margin: 0;
-    color: var(--text-muted);
-    font-size: var(--t-xs);
-    line-height: 1.5;
-  }
-
-  .dashboard__workspace-danger {
-    display: grid;
-    gap: var(--s-2);
-    margin-block-start: var(--s-2);
-    padding-block-start: var(--s-3);
-    border-block-start: 1px solid color-mix(in oklab, var(--danger) 45%, var(--border));
-  }
-
-  .dashboard__workspace-danger form,
-  .dashboard__workspace-danger label {
-    display: grid;
-    gap: var(--s-2);
-  }
-
-  .dashboard__workspace-danger label {
-    color: var(--text-muted);
-    font-size: var(--t-xs);
-  }
-
-  .dashboard__workspace-danger input {
-    min-inline-size: 0;
-    inline-size: 100%;
-    padding: var(--s-2) var(--s-3);
-    color: var(--text);
-    background: var(--surface);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius);
-    font: inherit;
-  }
-
-  .dashboard__workspace-danger input:focus-visible {
-    outline: none;
-    box-shadow: var(--focus-ring);
-  }
-
   .dashboard__danger-button {
     justify-self: start;
     padding: var(--s-2) var(--s-3);
@@ -12133,13 +12019,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     opacity: 0.45;
   }
 
-  .dashboard__popover-label {
-    margin: 0;
-    color: var(--text-muted);
-    font-size: var(--t-2xs);
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-  }
 
   /* Account button + menu at the rail foot. */
   .dashboard__user-trigger {
@@ -12231,16 +12110,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     font-weight: var(--weight-semibold);
   }
 
-  .dashboard__sample-chip {
-    padding: 0.2rem 0.45rem;
-    color: var(--warning);
-    background: var(--warning-dim);
-    border-radius: var(--radius-pill);
-    font-size: var(--t-2xs);
-    font-weight: var(--weight-semibold);
-    letter-spacing: var(--track-eyebrow);
-    text-transform: uppercase;
-  }
 
   .dashboard__rail-section {
     display: grid;
@@ -13726,108 +13595,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     white-space: nowrap;
   }
 
-  .dashboard__files-view {
-    align-self: stretch;
-    min-inline-size: 0;
-    min-block-size: 0;
-    padding: clamp(var(--s-5), 4vw, var(--s-8));
-  }
-
-  .dashboard__file-warning {
-    max-inline-size: 72rem;
-    margin: 0 0 var(--s-5);
-    padding: var(--s-3) var(--s-4);
-    color: var(--warning);
-    background: var(--warning-dim);
-    border-radius: var(--radius-sm);
-    font-size: var(--t-xs);
-    line-height: var(--lh-sm);
-  }
-
-  .dashboard__file-empty {
-    margin: 0;
-    color: var(--text-muted);
-    font-size: var(--t-sm);
-  }
-
-  .dashboard__file-error {
-    margin: 0;
-  }
-
-  .dashboard__file-list {
-    display: grid;
-    gap: var(--s-2);
-    padding: 0;
-    margin: 0;
-    list-style: none;
-  }
-
-  .dashboard__file-row {
-    display: grid;
-    grid-template-columns: minmax(12rem, 2fr) 5rem 3rem minmax(8rem, 1fr) 6rem minmax(8rem, auto);
-    align-items: center;
-    gap: var(--s-3);
-    min-inline-size: 0;
-    padding: var(--s-3) var(--s-4);
-    background: var(--elev-1);
-    border-radius: var(--radius-sm);
-  }
-
-  .dashboard__file-identity {
-    display: grid;
-    gap: var(--s-1);
-    min-inline-size: 0;
-  }
-
-  .dashboard__file-identity strong {
-    overflow-wrap: anywhere;
-    color: var(--text);
-    font-size: var(--t-sm);
-  }
-
-  .dashboard__file-state,
-  .dashboard__file-row > span,
-  .dashboard__file-row > time,
-  .dashboard__file-download-status {
-    color: var(--text-muted);
-    font-size: var(--t-xs);
-    line-height: var(--lh-sm);
-  }
-
-  .dashboard__file-row [data-field-label]::before {
-    content: attr(data-field-label);
-    display: block;
-    margin-block-end: var(--s-1);
-    color: var(--text-faint);
-    font-size: var(--t-2xs);
-    font-weight: var(--weight-semibold);
-    letter-spacing: var(--track-eyebrow);
-    text-transform: uppercase;
-  }
-
-  .dashboard__file-row--removed [data-file-name] {
-    color: var(--text-muted);
-    text-decoration: line-through;
-  }
-
-  .dashboard__file-action {
-    display: grid;
-    justify-items: end;
-    gap: var(--s-1);
-  }
-
-  .dashboard__file-download {
-    min-block-size: 2.25rem;
-    padding: var(--s-1) var(--s-3);
-    font-size: var(--t-xs);
-  }
-
-  .dashboard__file-download-status {
-    max-inline-size: 18rem;
-    color: var(--danger);
-    text-align: end;
-  }
-
   .dashboard__channel-body > .dashboard__brain-view {
     align-self: stretch;
     min-inline-size: 0;
@@ -14835,11 +14602,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     gap: 0.32rem var(--s-2);
   }
 
-  .dashboard__message-meta strong {
-    color: var(--text);
-    font-size: var(--t-sm);
-    font-weight: var(--weight-semibold);
-  }
 
   .dashboard__message-identity-badge {
     padding: 0.08rem 0.32rem;
@@ -14866,11 +14628,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     white-space: nowrap;
   }
 
-  .dashboard__message-meta time {
-    margin-inline-start: auto;
-    color: var(--text-muted);
-    font-size: var(--t-xs);
-  }
 
   .dashboard__message-kind {
     padding: 0.16rem 0.42rem;
@@ -15444,25 +15201,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     text-align: center;
   }
 
-  @media (max-width: 70rem) {
-    .dashboard__file-row {
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-    }
-
-    .dashboard__file-identity,
-    .dashboard__file-action {
-      grid-column: 1 / -1;
-    }
-
-    .dashboard__file-action {
-      justify-items: start;
-    }
-
-    .dashboard__file-download-status {
-      text-align: start;
-    }
-  }
-
   @media (max-width: 52rem) {
     .dashboard__product {
       padding: 0;
@@ -15896,23 +15634,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       overflow: hidden;
       white-space: nowrap;
       text-overflow: ellipsis;
-    }
-
-    .dashboard__file-row {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    .dashboard__file-identity,
-    .dashboard__file-action {
-      grid-column: 1 / -1;
-    }
-
-    .dashboard__file-action {
-      justify-items: start;
-    }
-
-    .dashboard__file-download-status {
-      text-align: start;
     }
 
     .dashboard__channel-actions {

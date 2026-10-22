@@ -77,6 +77,7 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
     const access = await store.access(tx, workspaceId, identity);
     if (!access || core.householdAccessRefusal(access.facts, workspaceId, 'read', access.now)) return refused('workspace_access_refused');
     const hosted = await tx`SELECT 'hosted' AS kind,s.seat_id AS connection_id,s.grant_id,s.principal_id,p.name,g.provider_grant_id,
+        g.grant_id AS renewal_grant_id,g.connection_expires_at,g.connection_expired_at,
         (SELECT h.handle FROM swarm.hosted_mcp_seat_handles h WHERE h.seat_id=s.seat_id
           AND h.revoked_at IS NULL ORDER BY h.created_at DESC LIMIT 1) AS handle
       FROM swarm.hosted_mcp_seats s JOIN swarm.agent_principals p USING(principal_id)
@@ -85,28 +86,54 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
       WHERE s.workspace_id=${workspaceId}::uuid AND s.owner_user_id=${identity.user_id}::uuid
         AND g.state='active' AND g.revoked_at IS NULL AND s.revoked_at IS NULL AND p.revoked_at IS NULL AND b.revoked_at IS NULL
       ORDER BY s.created_at LIMIT 50`;
-    const local = await tx`SELECT 'local' AS kind,t.token_id AS connection_id,t.run_id AS grant_id,t.principal_id,p.name
-      FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING(principal_id) JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=t.principal_id
+    // Enumerate durable families, including an elapsed technical bearer. The
+    // content resolver below alone decides whether a bearer can act now.
+    const local = await tx`SELECT DISTINCT ON (g.renewal_grant_id) 'local' AS kind,
+        t.token_id AS connection_id,t.run_id AS grant_id,t.principal_id,p.name,t.lineage_id,
+        g.renewal_grant_id,g.local_content_approval_token_id,g.connection_expires_at,g.connection_expired_at
+      FROM swarm.renewal_grants g JOIN swarm.agent_principals p ON p.principal_id=g.principal_id
+      JOIN swarm.agent_runs r ON r.run_id=g.run_id AND r.principal_id=g.principal_id
       JOIN swarm.devices d ON d.device_id=r.device_id
-      WHERE p.workspace_id=${workspaceId}::uuid AND p.owner_user_id=${identity.user_id}::uuid AND p.transport='local'
-        AND t.revoked_at IS NULL AND NOT t.surrender_only AND t.expires_at>clock_timestamp() AND p.revoked_at IS NULL AND r.ended_at IS NULL AND d.revoked_at IS NULL
-      ORDER BY t.issued_at DESC LIMIT 50`;
-    const approvals = await tx`SELECT connection_id, grant_id, principal_id, operations, expires_at
-      FROM swarm.household_content_connections WHERE workspace_id=${workspaceId}::uuid AND owner_user_id=${identity.user_id}::uuid
-        AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>clock_timestamp())`;
-    const key = (row: Record<string, unknown>) => JSON.stringify([row.connection_id, row.grant_id, row.principal_id]);
-    const byConnection = new Map(approvals.map(row => [key(row), { operations: row.operations,
-      expires_at: row.expires_at == null ? null : new Date(row.expires_at as string).toISOString() }]));
+      JOIN swarm.agent_tokens t ON t.renewal_grant_id=g.renewal_grant_id AND t.run_id=g.run_id AND t.principal_id=g.principal_id
+      WHERE g.workspace_id=${workspaceId}::uuid AND g.created_by=${identity.user_id}::uuid
+        AND p.workspace_id=g.workspace_id AND p.owner_user_id=g.created_by AND p.transport='local'
+        AND g.revoked_at IS NULL AND NOT g.suspension_active AND g.connection_expired_at IS NULL
+        AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
+        AND t.revoked_at IS NULL AND NOT t.surrender_only AND p.revoked_at IS NULL AND r.ended_at IS NULL
+        AND d.revoked_at IS NULL AND d.user_id=g.created_by AND (g.bound_device_id IS NULL OR g.bound_device_id=d.device_id)
+        AND swarm.admin_child_live(t.parent_admin_grant_id,${workspaceId}::uuid)
+        AND swarm.admin_child_scopes_live(t.parent_admin_grant_id,t.scopes)
+        AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE (z.kind,z.target_id) IN
+          (('token',t.token_id),('principal',t.principal_id),('run',t.run_id),('device',d.device_id),
+           ('renewal_grant',g.renewal_grant_id),('lineage',t.lineage_id),('family',t.lineage_id),('membership',g.created_by)))
+      ORDER BY g.renewal_grant_id,t.issued_at DESC,t.token_id LIMIT 50`;
+    const approvals = await tx`SELECT c.connection_id,c.grant_id,c.principal_id,c.operations,c.expires_at,c.renewal_grant_id,
+        (SELECT original.lineage_id FROM swarm.agent_tokens original WHERE original.token_id=c.connection_id
+          AND original.renewal_grant_id=c.renewal_grant_id AND original.run_id=c.grant_id AND original.principal_id=c.principal_id) AS lineage_id
+      FROM swarm.household_content_connections c
+      JOIN swarm.household_member_content_roles rights ON rights.workspace_id=c.workspace_id AND rights.user_id=c.owner_user_id
+        AND rights.content_consent_id=c.consent_receipt_id AND rights.revoked_at IS NULL
+      JOIN swarm.household_workspace_boundaries boundary ON boundary.workspace_id=c.workspace_id AND boundary.purpose=c.purpose
+      WHERE c.workspace_id=${workspaceId}::uuid AND c.owner_user_id=${identity.user_id}::uuid
+        AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at>clock_timestamp())
+        AND (c.renewal_grant_id IS NULL OR (c.hosted_grant_id IS NULL AND EXISTS(
+          SELECT 1 FROM swarm.agent_tokens original JOIN swarm.renewal_grants g ON g.renewal_grant_id=original.renewal_grant_id
+          WHERE original.token_id=c.connection_id AND original.run_id=c.grant_id AND original.principal_id=c.principal_id
+            AND g.renewal_grant_id=c.renewal_grant_id AND g.workspace_id=c.workspace_id AND g.created_by=c.owner_user_id
+            AND g.run_id=c.grant_id AND g.principal_id=c.principal_id
+            AND (g.local_content_approval_token_id IS NULL OR g.local_content_approval_token_id=c.connection_id))))`;
+    const approvalFor = (row: Record<string, unknown>) => {
+      const approval = approvals.find(c => c.grant_id === row.grant_id && c.principal_id === row.principal_id
+        && (row.kind === 'local' ? ((c.renewal_grant_id === row.renewal_grant_id && c.lineage_id === row.lineage_id)
+          || (c.renewal_grant_id == null && c.connection_id === row.connection_id))
+          && (row.local_content_approval_token_id == null || c.connection_id === row.local_content_approval_token_id)
+          : c.connection_id === row.connection_id && c.renewal_grant_id == null));
+      return approval ? { operations: approval.operations,
+        expires_at: approval.expires_at == null ? null : new Date(approval.expires_at as string).toISOString() } : null;
+    };
+    const stamp = (value: unknown) => value == null ? null : new Date(value as string).toISOString();
     const connections = [];
     for (const row of [...hosted,...local]) {
-      // The local query does not prove the canonical token/lineage/tombstone
-      // fences. Preserve its manual approval without claiming effective rights.
-      if (row.kind === 'local') {
-        connections.push({ kind: row.kind, connection_id: row.connection_id, grant_id: row.grant_id,
-          principal_id: row.principal_id, name: row.name, approval: byConnection.get(key(row)) ?? null,
-          effective_access: null, effective_access_reason: 'local_credential_liveness_not_computed' });
-        continue;
-      }
       // Hosted tuples are checked by the existing canonical resolver below.
       let credentialLive = true;
       if (row.kind === 'hosted') {
@@ -129,7 +156,9 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
       const operations = effective ? core.HOUSEHOLD_CONTENT_OPERATIONS.filter(op =>
         !core.householdAccessRefusal(effective.facts, workspaceId, op, effective.now)) : [];
       connections.push({ kind: row.kind, connection_id: row.connection_id, grant_id: row.grant_id,
-        principal_id: row.principal_id, name: row.name, approval: byConnection.get(key(row)) ?? null,
+        principal_id: row.principal_id, name: row.name, renewal_grant_id: row.renewal_grant_id,
+        connection_expires_at: stamp(row.connection_expires_at), connection_expired_at: stamp(row.connection_expired_at),
+        approval: approvalFor(row),
         effective_access: { source: effective?.source ?? 'none', operations,
           restricted: operations.length === 0 || (effective?.facts.member?.content_role === 'editor'
             && operations.length < core.HOUSEHOLD_CONTENT_OPERATIONS.length),
