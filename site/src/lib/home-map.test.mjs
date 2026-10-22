@@ -224,7 +224,7 @@ test("a failed ask preview, an assigned to-do and a disconnected agent share one
 });
 test("overview credentials retain each measured fault and last activity without an access or presence row", () => {
   const facts = { transport: "hosted_mcp", turn_only: true, last_activity_at: "2026-10-05T10:00:00Z", messages_waiting_since: null, doing: null, working_on: null };
-  for (const [connection, detail, action] of [["removed", "Removed", null], ["key_off", "Key turned off", "new-key"], ["key_ended", "Key ended", "new-key"], ["paused", "Paused: unused for 14 days", "resume"], ["live", "Active 2 hours ago", null]]) {
+  for (const [connection, detail, action] of [["removed", "Removed", null], ["key_off", "Key turned off", "new-key"], ["key_ended", "Key ended", "new-key"], ["paused", "Connection paused", "resume"], ["live", "Active 2 hours ago", null]]) {
     const people = mapHomePeople({ ...input, agents: [{ ...input.agents[0], work: { work: "idle", facts: { ...facts, connection } } }] });
     const state = people.groups[0].agents[0].state;
     assert.equal(state.word, connection === "live" ? "Idle" : "Disconnected");

@@ -60,7 +60,7 @@ async function artifactDir() {
     // this source archive proves fixture semantics, never a real committed build.
     const archive = (await exec('git', ['archive', '--format=tar', revision, 'package.json'], { cwd: repo, encoding: 'buffer' })).stdout;
     assert.equal(archive.subarray(156, 157).toString(), 'g');
-    const paths = ['site/package-lock.json', 'deploy/site/build-artifact.sh', 'deploy/site/validate-site-env.mjs', 'deploy/site/finalize-release.sh'];
+    const paths = ['site/package-lock.json', 'deploy/site/build-artifact.sh', 'deploy/site/validate-site-env.mjs', 'deploy/site/finalize-release.sh', 'deploy/site/refresh-site.py'];
     const source = await Promise.all(paths.map(async path => tarMember(path, await readFile(join(repo, path)))));
     await writeFile(join(dir, 'source.tar'), Buffer.concat([archive.subarray(0, 1024), ...source, tarEnd]));
     await writeFile(join(dir, 'public.json'), JSON.stringify({ ...config, PUBLIC_H0_LINK_JOIN: '1' }));
@@ -89,7 +89,7 @@ async function prepare(name: string, mutate?: (dir: string) => Promise<void>) {
 
 test(`${lane}: provenance and unsafe tar members are rejected before packet creation`, async () => {
   await prepare('provenance-control');
-  for (const field of ['source', 'config', 'lock', 'builder', 'validator', 'template', 'image', 'revision', 'h0', 'artifact']) {
+  for (const field of ['source', 'config', 'lock', 'builder', 'validator', 'template', 'refresh', 'image', 'revision', 'h0', 'artifact']) {
     await assert.rejects(prepare(`bad-${field}`, async dir => {
       const p = join(dir, 'BUILD.json'), value = JSON.parse(await readFile(p, 'utf8')); value[field] = 'bad'; await writeFile(p, JSON.stringify(value));
     }));
@@ -185,7 +185,7 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
     await writeFile(join(bin, 'curl'), `#!/bin/bash\nargs=(); for a in "$@"; do case "$a" in https://commonswarm.com*) args+=("http://127.0.0.1:${address.port}\${a#https://commonswarm.com}");; *) args+=("$a");; esac; done\n${variant === 'curl-failure' ? `if [[ $(readlink '${site}/current') != releases/old ]]; then exit 7; fi\nexec ${curl} "\${args[@]}"` : `exec ${curl} "\${args[@]}"`}\n`);
     // Simulate a concurrent pointer edit during permissions normalization.
     await writeFile(join(bin, 'chmod'), `#!/bin/sh\n/bin/chmod "$@"\n${variant === 'current-drift' ? `ln -sfn releases/reserve '${site}/current'` : ':'}\n`);
-    await writeFile(join(bin, 'find'), `#!/bin/sh\n${variant === 'find-failure' ? 'case "$*" in *"-type f -print0"*) exit 1;; esac\nexec /usr/bin/find "$@"' : 'exec /usr/bin/find "$@"'}\n`);
+    await writeFile(join(bin, 'find'), `#!/bin/sh\n${variant === 'find-failure' ? 'case "$*" in *"-type d -exec"*) exit 1;; esac\nexec /usr/bin/find "$@"' : 'exec /usr/bin/find "$@"'}\n`);
     await writeFile(join(bin, 'mv'), `#!/bin/sh\n${variant === 'flip-failure' ? 'exit 1' : 'exec /bin/mv "$@"'}\n`);
     for (const name of ['hostname', 'curl', 'chmod', 'find', 'mv']) await chmod(join(bin, name), 0o755);
     let script = await readFile(join(packet, 'SITE-DIRECT.sh'), 'utf8');
@@ -250,13 +250,13 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
         if (['root-status', 'app-status'].includes(variant)) assert.match(output, /assertion=httpstatus/);
         if (['root-body', 'app-body'].includes(variant)) assert.match(output, /assertion=httphash/);
         if (['root-status', 'app-status', 'root-body', 'app-body', 'curl-failure', 'closed-pipe-failure', 'hup'].includes(variant)) assert.match(output, /PASS rollback/);
-        if (variant === 'asset-drift') assert.match(output, /assertion=old-asset-identical/);
+        if (variant === 'asset-drift') assert.match(output, /Refusing site refresh: asset byte collision/);
         if (variant === 'current-drift') assert.match(output, /assertion=exact-old-link/);
         if (variant === 'artifact-pin') assert.match(output, /assertion=artifactSHA/);
         if (variant === 'build-pin') assert.match(output, /assertion=buildSHA/);
         if (variant === 'flip-failure') assert.match(output, /PASS rollback unchanged/);
         if (variant === 'rollback-status') assert.match(output, /assertion=rollback-httpstatus/);
-        if (variant === 'find-failure') assert.match(output, /FAIL step=old-assets/);
+        if (variant === 'find-failure') assert.match(output, /FAIL step=assets-and-freshness/);
         assert.equal(await readlink(join(site, 'current')), variant === 'current-drift' ? 'releases/reserve' : 'releases/old');
       }
       if (['success', 'closed-pipe', 'closed-pipe-failure', 'missing-old', 'root-status', 'app-status', 'root-body', 'app-body', 'curl-failure', 'hup', 'unchanged-unhealthy'].includes(variant)) assert.deepEqual([...oldProbes].sort(), ['/', '/app']);
@@ -271,4 +271,14 @@ test('production script requires only static file tools and never compiles or pr
   const source = await readFile(join(repo, 'deploy/site/finalize-release.sh'), 'utf8');
   assert.doesNotMatch(source, /\b(?:npm|node|docker|rsync|rm)\b/);
   assert.ok(source.trim().split('\n').length >= 24 && source.trim().split('\n').length <= 100);
+});
+
+// Keep cache regressions in the canonical artifact owner: box-dry-run and p1-cli
+// both execute this file. Python drives the real source tools over local HTTP.
+test('release cache helper, full shell lifecycle, and producer provenance regressions', async () => {
+  for (const name of ['test-cache-http.py', 'test-shell-http.py', 'test-prepare.py']) {
+    const result = await exec('python3', ['-I', join(repo, 'tests/p1-cli/fixtures/site-release-cache', name)], { cwd: repo, timeout: 120_000 });
+    const proof = JSON.parse(result.stdout);
+    assert.equal(proof.passed, true, name);
+  }
 });

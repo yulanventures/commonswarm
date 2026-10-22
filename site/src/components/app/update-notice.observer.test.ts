@@ -13,7 +13,7 @@
  * redirect, an SSO interstitial) both mean the poll learned nothing.
  */
 import assert from "node:assert/strict";
-import { createReadStream, readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, normalize } from "node:path";
 import { browserTest as test } from "../../../tests/chrome.js";
@@ -144,6 +144,51 @@ const dismissThenMarkupBody = (): string => {
   return rewritten;
 };
 
+/* Observe the real app poll at the HTTP fixture boundary. No response body, notice
+   state or production export is replaced. MessageChannel runs after the promise
+   continuation that consumes text and synchronously parses/applies the build. */
+const pollReadinessScript = `<script>
+(() => {
+  const nativeFetch = window.fetch.bind(window);
+  const state = window.__updateObserverReadiness = { polls: [], errors: [] };
+  const turns = new MessageChannel();
+  turns.port1.onmessage = event => {
+    const poll = state.polls.find(item => item.id === event.data);
+    if (poll) poll.applicationTurn = true;
+  };
+  window.fetch = async (...args) => {
+    const response = await nativeFetch(...args);
+    const id = Number(response.headers.get("x-update-observer-poll"));
+    if (!id) return response;
+    const poll = { id, stage: Number(response.headers.get("x-update-observer-stage")),
+      status: response.status, consumed: false, applicationTurn: false, error: "" };
+    state.polls.push(poll);
+    const afterApplicationTurn = () => turns.port2.postMessage(id);
+    if (!response.ok) {
+      // The owner returns on non-OK status without consuming the body.
+      afterApplicationTurn();
+      return response;
+    }
+    const readText = response.text.bind(response);
+    response.text = async (...textArgs) => {
+      try {
+        const body = await readText(...textArgs);
+        poll.consumed = true;
+        afterApplicationTurn();
+        return body;
+      } catch (error) {
+        poll.error = String(error);
+        afterApplicationTurn();
+        throw error;
+      }
+    };
+    return response;
+  };
+  window.addEventListener("error", event => state.errors.push(String(event.message)));
+  window.addEventListener("unhandledrejection", event => state.errors.push(String(event.reason)));
+})();
+</script>`;
+
 const frameScript = `<script>
   const frame = document.querySelector("iframe");
   const report = (value) => {
@@ -152,7 +197,28 @@ const frameScript = `<script>
   const runMeasurement = async () => {
     /* Re-read the frame's document every time. Holding one reference goes stale the moment the
        app navigates or replaces it, and a stale document answers every query with null. */
-    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const tick = () => fetch("/__observer-tick");
+    const appliedAtLeast = async (target, stage) => {
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const state = frame.contentWindow?.__updateObserverReadiness;
+        const poll = state?.polls.find(item => item.id >= target &&
+          (stage === undefined || item.stage === stage) && item.applicationTurn);
+        if (poll) {
+          if (poll.error || (poll.status >= 200 && poll.status < 300 && !poll.consumed)) {
+            throw new Error("App poll body failed: " + JSON.stringify(poll));
+          }
+          return;
+        }
+        await tick();
+      }
+      const bar = frame.contentDocument?.querySelector("[data-update-notice]");
+      throw new Error("Timed out waiting for applied app poll: " + JSON.stringify({
+        target, stage, state: frame.contentWindow?.__updateObserverReadiness,
+        requested: await (await fetch("/__polls")).text(),
+        servedStages: await (await fetch("/__served")).text(),
+        hidden: bar?.hidden, display: bar ? frame.contentWindow.getComputedStyle(bar).display : "absent",
+      }));
+    };
     let dismissSawBuildTwo = null;
     let dismissTookEffect = null;
     let rollbackWentBackInStep = null;
@@ -160,20 +226,19 @@ const frameScript = `<script>
     let staleHeldBeforeClick = null;
     let staleLandedAfterClick = null;
     const notice = () => frame.contentDocument?.querySelector("[data-update-notice]") ?? null;
-    for (let attempt = 0; attempt < 160 && !notice(); attempt += 1) await wait(25);
+    for (let attempt = 0; attempt < 160 && !notice(); attempt += 1) await tick();
     /* WAIT ON THE CONDITION, NOT A DURATION. A flat sleep made this case pass or fail with the
        load on the host: the third poll is two round trips deep and a busy box does not finish it
        in a fixed window. The server counts polls, so wait for the count. */
     const polledAtLeast = async (target) => {
       for (let attempt = 0; attempt < 300; attempt += 1) {
         if (Number(await (await fetch("/__polls")).text()) >= target) return true;
-        await wait(25);
+        await tick();
       }
       return false;
     };
     await polledAtLeast(1);
-    /* The decision runs after the response resolves, so give that microtask turn room. */
-    await wait(120);
+    await appliedAtLeast(1);
     /* Then the second poll, which is the one that meets the deploy. The page polls on a timer
        and when a hidden tab comes back; driving the visibility path is how a test gets the
        second poll without waiting out the interval, and it exercises the real listener. */
@@ -184,7 +249,7 @@ const frameScript = `<script>
     Object.defineProperty(doc0, "visibilityState", { value: "visible", configurable: true });
     doc0.dispatchEvent(new view.Event("visibilitychange"));
     await polledAtLeast(2);
-    await wait(120);
+    await appliedAtLeast(2);
     if (new URL(location.href).searchParams.get("dismiss") === "1") {
       const cycle = () => {
         Object.defineProperty(doc0, "visibilityState", { value: "hidden", configurable: true });
@@ -195,7 +260,7 @@ const frameScript = `<script>
       const until = async (predicate) => {
         for (let attempt = 0; attempt < 200; attempt += 1) {
           if (predicate()) return true;
-          await wait(25);
+          await tick();
         }
         return false;
       };
@@ -209,6 +274,7 @@ const frameScript = `<script>
          condition the dismiss below depends on. */
       await fetch("/__stage?to=2");
       cycle();
+      await appliedAtLeast(1, 2);
       dismissSawBuildTwo = await until(shownNow);
       if (new URL(location.href).searchParams.get("ordering") === "1") {
         /* THE SEQUENCE, in the order the browser runs it:
@@ -231,9 +297,6 @@ const frameScript = `<script>
            --virtual-time-budget, which stops virtual time while a fetch is pending, so setTimeout
            can sit unfired for the whole time the poll is held. Every wait in this branch is a
            real round trip to the harness server instead, which advances on its own. */
-        const spin = async (turns) => {
-          for (let attempt = 0; attempt < turns; attempt += 1) await fetch("/__polls");
-        };
         const untilFetched = async (path, want) => {
           for (let attempt = 0; attempt < 600; attempt += 1) {
             if ((await (await fetch(path)).text()) === want) return true;
@@ -241,18 +304,18 @@ const frameScript = `<script>
           return false;
         };
         staleHeldBeforeClick = await untilFetched("/__held", "1");
+        const heldPoll = Number(await (await fetch("/__polls")).text());
         frame.contentDocument.querySelector("[data-update-dismiss]").click();
         dismissTookEffect = !shownNow();
         staleLandedAfterClick = (await (await fetch("/__release")).text()) === "1";
-        /* Give the page room to receive and act on the released body. */
-        await spin(60);
+        await appliedAtLeast(heldPoll, 3);
         const before = Number(await (await fetch("/__polls")).text());
         await fetch("/__stage?to=4");
         cycle();
         for (let attempt = 0; attempt < 600; attempt += 1) {
           if (Number(await (await fetch("/__polls")).text()) > before) break;
         }
-        await spin(60);
+        await appliedAtLeast(before + 1, 4);
       } else {
       frame.contentDocument.querySelector("[data-update-dismiss]").click();
       dismissTookEffect = !shownNow();
@@ -272,13 +335,13 @@ const frameScript = `<script>
         const before = Number(await (await fetch("/__polls")).text());
         cycle();
         await polledAtLeast(before + 1);
-        await wait(200);
+        await appliedAtLeast(before + 1, 3);
         rollbackWentBackInStep = !shownNow();
         await fetch("/__stage?to=4");
         cycle();
       }
+      await appliedAtLeast(1, new URL(location.href).searchParams.get("rollback") === "1" ? 4 : 3);
       await until(shownNow);
-      await wait(120);
       }
     }
     const polls = Number(await (await fetch("/__polls")).text());
@@ -352,6 +415,10 @@ const startServer = async (
   let releasedAt = 0;
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    if (url.pathname === "/__observer-tick") {
+      setTimeout(() => response.writeHead(204).end(), 20);
+      return;
+    }
     if (url.pathname === "/__polls") {
       response.writeHead(200, { "content-type": "text/plain" }).end(String(polls));
       return;
@@ -431,11 +498,13 @@ const startServer = async (
         holdNextPoll = false;
         heldRest = body.slice(1);
         heldResponse = response;
-        response.writeHead(status, { "content-type": contentTypes[".html"] });
+        response.writeHead(status, { "content-type": contentTypes[".html"],
+          "x-update-observer-poll": String(polls), "x-update-observer-stage": String(stage) });
         response.write(body.slice(0, 1));
         return;
       }
-      response.writeHead(status, { "content-type": contentTypes[".html"] }).end(body);
+      response.writeHead(status, { "content-type": contentTypes[".html"],
+          "x-update-observer-poll": String(polls), "x-update-observer-stage": String(stage) }).end(body);
       return;
     }
     const relative = isApp ? "app/index.html" : url.pathname.replace(/^\/+/, "");
@@ -448,6 +517,11 @@ const startServer = async (
       const stat = statSync(filePath);
       if (!stat.isFile()) throw new Error("not a file");
       let body = readFileSync(filePath);
+      if (isApp) {
+        const page = body.toString("utf8");
+        assert.equal((page.match(/<head(?:\s[^>]*)?>/gu) ?? []).length, 1, "one app head for poll observation");
+        body = Buffer.from(page.replace(/<head(?:\s[^>]*)?>/u, head => head + pollReadinessScript), "utf8");
+      }
       if (extname(filePath) === ".js") {
         /* Sample mode, the same rewrite the composer browser observer uses: with a backend
            configured the page renders the signed-out panel and never mounts the dashboard. */
@@ -465,10 +539,10 @@ const startServer = async (
         return;
       }
       response.writeHead(200, {
-        "content-length": stat.size,
+        "content-length": body.byteLength,
         "content-type": contentTypes[extname(filePath)] ?? "application/octet-stream",
       });
-      createReadStream(filePath).pipe(response);
+      response.end(body);
     } catch {
       response.writeHead(404).end("Not found");
     }

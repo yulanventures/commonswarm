@@ -115,6 +115,7 @@ export async function runBrainViewFixture(): Promise<BrainViewSnapshot> {
     <script>${script}</script>
     <script>
       window.alert = () => {};
+      let failureContext = () => ({ stage: "setup" });
       (async () => {
         const one = (selector) => document.querySelector(selector);
         const targets = {
@@ -134,6 +135,27 @@ export async function runBrainViewFixture(): Promise<BrainViewSnapshot> {
           [2, ${JSON.stringify(BRAIN_BODY_MARKDOWN)}],
         ]);
         const saves = [];
+        let stage = "setup";
+        const diagnostics = () => ({ stage, readyState: document.readyState,
+          saveCount: saves.length, status: targets.status.textContent,
+          error: targets.error.textContent, errorHidden: targets.error.hidden,
+          saveDisabled: targets.save.disabled, saveLabel: targets.save.textContent,
+          formHidden: targets.form.hidden, detailHidden: targets.detail.hidden,
+          metadata: targets.meta.textContent, bodyModeHidden: targets.bodyMode.hidden,
+          rawToggleDisabled: targets.rawToggle.disabled,
+          historyCount: targets.historyList.querySelectorAll("a").length });
+        failureContext = diagnostics;
+        const waitFor = async (name, predicate) => {
+          stage = name;
+          const deadline = performance.now() + 2000;
+          while (!predicate()) {
+            if (!targets.error.hidden || performance.now() >= deadline) {
+              throw new Error("Brain readiness failed: " + JSON.stringify(diagnostics()));
+            }
+            // Poll pacing only; observed controller state, not elapsed time, permits success.
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+        };
         const topics = BrainView.brainTopics(${JSON.stringify(files)}, () => "Atlas");
         const view = BrainView.createBrainView(targets, {
           now: Date.parse("2026-08-31T18:00:00.000Z"),
@@ -171,8 +193,10 @@ export async function runBrainViewFixture(): Promise<BrainViewSnapshot> {
         one("[data-brain-edit]").click();
         one("[data-brain-textarea]").value = "**File layer**\\n\\nUse the existing file verbs.\\n\\n<img src=x>";
         one("[data-brain-form]").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        await waitFor("confirmed v3 save and reread", () => !targets.save.disabled && targets.form.hidden
+          && targets.status.textContent === "Saved architecture as v3."
+          && targets.meta.textContent.includes("3 versions") && targets.meta.textContent.includes("Dana")
+          && !targets.bodyMode.hidden && !targets.rawToggle.disabled);
         const statusAfterSave = one("[data-brain-status]").textContent;
         const metaAfterSave = one("[data-brain-meta]").textContent;
         await view.open("architecture", 1);
@@ -190,7 +214,11 @@ export async function runBrainViewFixture(): Promise<BrainViewSnapshot> {
         view.setTopics(foreignTopics);
         const paneClosedOnForeignFile = one("[data-brain-detail]").hidden && one("[data-brain-form]").hidden;
         one("[data-brain-form]").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        stage = "immediate stale-file refusal";
+        if (targets.error.hidden || targets.error.textContent !== "This topic changed underneath the editor. Reopen it, then save."
+          || !targets.detail.hidden || !targets.form.hidden || saves.length !== savesBeforeSwitch) {
+          throw new Error("Brain stale-file refusal failed: " + JSON.stringify(diagnostics()));
+        }
         const staleSaveRefused = saves.length === savesBeforeSwitch;
         const snapshot = {
           paneClosedOnForeignFile,
@@ -217,7 +245,11 @@ export async function runBrainViewFixture(): Promise<BrainViewSnapshot> {
           versionAfterSave: metaAfterSave,
         };
         document.documentElement.dataset.fixture = encodeURIComponent(JSON.stringify(snapshot));
-      })();
+      })().catch((error) => {
+        document.documentElement.dataset.fixtureError = encodeURIComponent(JSON.stringify({
+          error: String(error), ...failureContext(),
+        }));
+      });
     </script>
   </body>
 </html>`;
@@ -239,6 +271,8 @@ export async function runBrainViewFixture(): Promise<BrainViewSnapshot> {
       timeout: 15_000,
       killSignal: "SIGKILL",
     });
+    const failure = stdout.match(/data-fixture-error="([^"]+)"/)?.[1];
+    assert.equal(failure, undefined, failure ? decodeURIComponent(failure) : "brain fixture failed");
     const encoded = stdout.match(/data-fixture="([^"]+)"/)?.[1];
     assert.ok(encoded, "headless Chrome must return the live brain-view snapshot");
     return JSON.parse(decodeURIComponent(encoded)) as BrainViewSnapshot;

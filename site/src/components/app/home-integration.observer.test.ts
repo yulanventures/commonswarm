@@ -4,20 +4,21 @@ import { readFile } from 'node:fs/promises';
 import { createContext, runInContext } from 'node:vm';
 import ts from 'typescript';
 import { HomeToolsUnavailable, HomeCommandRefused } from '../../lib/home/client';
-import { CommandOutcomeUnknown, FreshLoginRequired, WorkspaceRoleRefused, BROWSER_SIGNAL_COLUMNS, browserSignalFromRow } from '../../lib/commonswarm';
+import { CommandOutcomeUnknown, FreshLoginRequired, WorkspaceRoleRefused, BROWSER_SIGNAL_COLUMNS, browserSignalFromRow, browserDeliveryReceiptCandidates, BROWSER_RECEIPT_REQUESTS_PER_TICK } from '../../lib/commonswarm';
 import { createLatestRead } from '../../lib/latest-read';
 import { buildAuthorLine, buildStreamExtras, deriveStreamExtras } from '../../lib/home-stream';
-import { homeParty, mapHomePeople, homeAskAnswered, homeViewTitle } from '../../lib/home-map';
+import { homeParty, mapHomePeople, homeAskAnswered, homeViewTitle, resolveHomeRoute, homeAgentFixCards } from '../../lib/home-map';
 import { peopleRoleBeginSave, peopleRoleErrorCode, peopleRoleFinishSave, peopleRoleReceipt, peopleRoleRefusal } from '../../lib/people-dialog-view';
 import { addAgentOwnershipLine, agentLabelInSentence, personFirstName } from '../../lib/home-names';
 import { canStartThread, THREAD_REPLY_CONTROL_LABEL, threadReplyPlace, threadReplyTargetText } from '../../lib/thread-reply';
 import { channelLabel } from '../../lib/channels';
 import { parentRoute, routeHref } from '../../lib/home-route';
 import { todoView } from '../../lib/home-todo';
+import { todosPane } from '../../lib/home-todo-list';
 import { homeRailPeople, mapHomeRail, initialCatchUpData, overviewCatchUpData, homeNeedsYouCount, catchUpDetailFromOverview } from '../../lib/home-map';
 import { buildHomeRail } from '../../lib/home-rail';
 import { homeStructureKey } from '../../lib/home-focus';
-import { assignOptions, tagOptions } from '../../lib/home-pickers';
+import { assignOptions, tagOptions, personNames } from '../../lib/home-pickers';
 import { peopleDialogCanAct } from '../../lib/people-dialog-view';
 import * as agentStatusFunctions from '../../lib/agent-status';
 import { classifyAgentPresence } from '../../../../src/cloud/agent-presence';
@@ -30,18 +31,20 @@ import type { HomeOverview } from '../../lib/home/contract';
 
 /** Execute the dashboard's read/write lifecycle, replacing only the DOM paint boundaries.
  * No browser, model, network or customer data. Expected surface states come from UI-SPEC 3.3. */
-async function dashboardFunctions(names: string[]): Promise<string> {
+async function dashboardFunctions(names: string[], optionalDependencies: string[] = []): Promise<string> {
   const raw = await readFile(new URL('./LiveDashboard.astro', import.meta.url), 'utf8');
   const script = raw.match(/<script>([\s\S]*?)<\/script>/)?.[1]; assert.ok(script);
   const ast = ts.createSourceFile('dashboard.ts', script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const found = new Map<string, string>();
   const visit = (node: ts.Node) => {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && names.includes(node.name.text)) found.set(node.name.text, `const ${node.getText(ast)};`);
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && [...names, ...optionalDependencies].includes(node.name.text)) found.set(node.name.text, `const ${node.getText(ast)};`);
     ts.forEachChild(node, visit);
   };
   visit(ast);
   for (const name of names) assert.ok(found.has(name), `production declaration ${name}`);
-  return ts.transpileModule(names.map(name => found.get(name)).join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  // Optional private dependencies may be absent in the real old source: the behavioral
+  // assertion must fail on its row/name output, not a newly introduced helper declaration.
+  return ts.transpileModule([...optionalDependencies.filter(name => found.has(name)), ...names].map(name => found.get(name)).join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 }
 
 test('standalone details hide the account door and restore the same DOM to workspace navigation', async () => {
@@ -126,12 +129,12 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
     let finishBoot!: () => void, boots = 0;
     const pendingBoot = new Promise<void>(resolve => { finishBoot = resolve; });
     const context = createContext({
-      layout: { mounted: false },
+      layout: { mounted: false, refreshTodoContext: (replace: () => void) => replace() },
       one: (selector: string) => nodes.get(selector) ?? null,
       all: (selector: string) => selector.split(',').some(part => part.trim() === '[data-home-route-pane]') ? [pane] : [],
       queueMicrotask: (callback: () => void) => microtasks.push(callback),
       boot: () => { boots++; return boots === 1 ? pendingBoot : Promise.resolve(); },
-      window: { clearTimeout() {}, dispatchEvent() {} },
+      window: { setTimeout: (callback: () => void) => microtasks.push(callback), clearTimeout() {}, dispatchEvent() {} },
       CustomEvent: class { constructor(readonly type: string, readonly options: unknown) {} },
     });
     // Paint and transport boundaries are inert; the production reset owns pane removal.
@@ -139,7 +142,7 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
       const app={dataset:{state:'channel',channelView:${JSON.stringify(view === 'todo' ? 'feed' : 'agent-choice')}}};
       const homeRoute={view:${JSON.stringify(view)},workspaceId:'W'};
       let workspaces=[{id:'W',name:'Home'}], activeWorkspaceId='W';
-      let renderedAuthUserId='tom', requestVersion=1, authReloadQueued=false, bootInFlight=null, bootAgain=false;
+      let renderedAuthUserId='tom', requestVersion=1, authReloadQueued=false, authRecoveryActive=false, bootInFlight=null, bootAgain=false;
       let catchUpGeneration=0, railOverviewGeneration=0, connectedAppsGeneration=0;
       let homeWorkspaceGeneration=0, homeWorkspaceRead=0, homeDetailGeneration=0;
       let connectFocusObserver=null, humanSeenObserver=null, signalExpiryTimer;
@@ -190,7 +193,7 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
   });
 }
 
-test('applyHomePane keeps standalone to-do states readable, with a back link and heading focus when tools become unavailable', async () => {
+async function routedPaneFixture(initialView: 'todo' | 'todos' = 'todo') {
   const focused: PaneNode[] = [], frames: (() => void)[] = [];
   class PaneNode extends RowNode {
     hidden = false; tabIndex = 0; href = '';
@@ -203,6 +206,7 @@ test('applyHomePane keeps standalone to-do states readable, with a back link and
       for (let node: RowNode | null = this; node; node = node.parent) if ((node as PaneNode).hidden) return [];
       return [{}];
     }
+    closest() { return null; }
     focus() { focused.push(this); }
   }
   const document = { title: '', createElement: (tag: string) => new PaneNode(tag),
@@ -212,8 +216,12 @@ test('applyHomePane keeps standalone to-do states readable, with a back link and
   frame.append(rail, main); rail.append(account); main.append(slot, channel);
   const nodes = new Map<string, PaneNode>([['.hm-frame', frame], ['.hm-frame__main', main], ['.hm-frame__rail', rail],
     ['[data-home-route-pane]', slot], ['.dashboard__channel', channel], ['[data-user-menu-root]', account]]);
-  const context = createContext({ document, routeHref, homeViewTitle, todoView, layout: { mounted: false },
-    window: { requestAnimationFrame: (callback: () => void) => frames.push(callback) },
+  const navigations: string[] = [], history: string[] = [];
+  const context = createContext({ document, routeHref, resolveHomeRoute, homeViewTitle, todoView, todosPane, personNames, URL,
+    layout: { mounted: false }, navigateHomeHref: (href: string) => navigations.push(href),
+    window: { requestAnimationFrame: (callback: () => void) => frames.push(callback), location: { origin: 'https://example.test' },
+      history: { state: { home: true }, pushState: (_state: unknown, _title: string, href: string) => history.push(href),
+        replaceState: (_state: unknown, _title: string, href: string) => history.push(href) } },
     one: (selector: string) => nodes.get(selector) ?? null,
     all: (selector: string) => selector.split(',').some(part => part.trim() === '[data-home-route-pane] h1') ? slot.querySelectorAll('h1') : [],
     // Paint replacement has its own focus tests; keep the production to-do DOM builder here.
@@ -221,20 +229,25 @@ test('applyHomePane keeps standalone to-do states readable, with a back link and
   });
   runInContext(`
     const app={dataset:{state:'channel',channelView:'feed'}}, activeWorkspaceId='W', workspaces=[{id:'W',name:'Home'}];
-    const homeRoute={view:'todo',workspaceId:'W',todoId:'T'}, sampleMode=false;
+    let homeRoute={view:${JSON.stringify(initialView)},workspaceId:'W',todoId:'T'}; const sampleMode=false;
     let homeTodosState='pending', homeQueueRead='pending', homeTodoReceipt='';
-    const homeTodoRead=null, homeTodoRows=[], homeQueue=null, homePolicies=new Map(), homeDetailKey='';
-    const homeTodoSave='idle', homeTodoNotice=null, homeGateEditorId=null;
+    let homeTodoRead=null, homeQueue=null, homeDetailKey='', homeTodoSave='idle', homeTodoNotice=null;
+    const homeTodoRows=[], homePolicies=new Map(), homeGateEditorId=null;
+    let homeNavigation=0, homeDetailGeneration=0, catchUpGeneration=0; const homeScroll=new Map();
+    const session={user:{id:'tom'}}, keepConnectCredentialVisible=()=>false;
+    let homeTodoFilter='open'; const homeTodoModels=()=>[];
     const homeTodoContext=()=>({now:0,viewerId:'tom',editor:true,people:{groups:[],other:[]}}), homeServer=()=>null;
     const parkPeopleHosts=()=>{}, renderHomeSide=()=>{}, syncFeedChrome=()=>{};
+    const closeEntityPanel=()=>{}, closeRosterDialog=()=>{}, closeWorkspaceDetailsDialog=()=>{};
+    const renderHomeRail=()=>{}, renderHomeShell=()=>{}, loadRailOverview=()=>{}, renderChannelRail=()=>{};
   `, context);
-  runInContext(await dashboardFunctions(['syncStandalonePage', 'homePaneMessage', 'renderHomeObjectPane', 'loadHomeObject', 'applyHomePane', 'focusHomeView']), context);
+  runInContext(await dashboardFunctions(['syncStandalonePage', 'homePaneMessage', 'renderHomeObjectPane', 'loadHomeObject', 'applyHomePane', 'focusHomeView', 'navigateHome']), context);
   const flushFocus = () => { for (const callback of frames.splice(0)) callback(); };
   const assertPage = (label: string, expectedHref: string) => {
-    assert.equal(frame.getAttribute('data-home-standalone'), '', `${label}: this exercises the standalone route`);
-    assert.equal(account.hidden, true, `${label}: workspace account access uses the back link`);
+    assert.equal(frame.getAttribute('data-home-standalone'), initialView === 'todo' ? '' : null, `${label}: actual route frame flag`);
+    assert.equal(account.hidden, initialView === 'todo', `${label}: account placement follows its route`);
     assert.equal(channel.hidden, true);
-    assert.equal(slot.hidden, false, `${label}: the standalone detail page must not be blank`);
+    assert.equal(slot.hidden, false, `${label}: the routed page must not be blank`);
     const back = slot.querySelectorAll('a').find(node => (node as PaneNode).href === expectedHref) as PaneNode | undefined;
     assert.ok(back, `${label}: a back link returns to the workspace`);
     assert.ok(back.getClientRects().length, `${label}: the back link is visible`);
@@ -244,6 +257,12 @@ test('applyHomePane keeps standalone to-do states readable, with a back link and
     assert.ok(title.getClientRects().length, `${label}: the focus target is visible`);
     assert.equal(focused.at(-1), title, `${label}: focus reaches the current heading`);
   };
+  return { context, slot, focused, navigations, history, assertPage, flushFocus,
+    navigate: (mode: 'replace' | 'pop') => runInContext(`navigateHome({view:'todos',workspaceId:'W'},'${mode}')`, context) as Promise<void> };
+}
+
+test('applyHomePane keeps standalone to-do states readable, with a back link and heading focus when tools become unavailable', async () => {
+  const { context, focused, flushFocus, assertPage } = await routedPaneFixture();
   for (const [state, queue, receipt, label, expectedHref] of [
     ['absent', 'failed', 'Could not load to-dos. Reload to try again.', 'unavailable tools', '/app?w=W'],
     ['failed', 'pending', 'Could not load to-dos. Reload to try again.', 'failed workspace read', '/app?w=W'],
@@ -328,20 +347,30 @@ test('a home read cannot overwrite newer Lists access or a new account in the sa
   await current.load();
   assert.equal(runInContext('householdAccess.contentRole', current.context), 'editor');
 });
-test('a routed To-dos pane becomes visible after rendering and hides again when tools are absent', async () => {
-  const slot = { hidden: true, replaceChildren() {} };
-  const context = createContext({ slot });
-  runInContext(`
-    const activeWorkspaceId='W', workspaces=[{id:'W',name:'Home'}], homeRoute={view:'todos'};
-    let homeTodosState='ready'; const homeTodoReceipt='', homeTodoFilter='open', homeTodoSave='idle', sampleMode=false;
-    const one=()=>slot, homeTodoContext=()=>({now:0,editor:true,people:{groups:[]}}), homeTodoModels=()=>[];
-    const personNames=()=>new Map(), todosPane=()=>({}), document={}, replaceHomeRegion=()=>{}, parkPeopleHosts=()=>{};
-  `, context);
-  runInContext(await dashboardFunctions(['renderHomeObjectPane']), context);
-  runInContext('renderHomeObjectPane()', context);
-  assert.equal(slot.hidden, false);
-  runInContext("homeTodosState='absent'; renderHomeObjectPane();", context);
-  assert.equal(slot.hidden, true);
+test('routed To-dos keeps an honest message, workspace back link and heading focus when tools are absent', async () => {
+  // Gate: real route/read settlement can replace the index after its navigation focus ran.
+  // Row/policy tests do not own that lifecycle; no production seam or fake pane builder.
+  const f = await routedPaneFixture('todos');
+  runInContext("homeTodosState='ready'", f.context);
+  await f.navigate('replace'); f.flushFocus();
+  assert.equal(f.slot.hidden, false);
+  assert.equal(f.slot.querySelector('h1')?.textContent, 'To-dos', 'positive reaches the real index builder');
+  const unavailable = (label: string) => {
+    f.assertPage(label, '/app?w=W');
+    assert.equal(f.slot.querySelector('h1')?.textContent, 'Could not load to-dos.');
+    assert.equal(f.slot.descendants().some(node => ['button', 'input', 'textarea', 'select'].includes(node.tag)), false,
+      `${label}: unavailable tools expose no mutation or filter controls`);
+  };
+  f.focused.length = 0;
+  runInContext("homeTodosState='absent'; applyHomePane()", f.context); f.flushFocus();
+  unavailable('late unavailable read without another navigation focus');
+  for (const mode of ['replace', 'pop'] as const) {
+    await f.navigate(mode); f.flushFocus(); unavailable(`${mode} navigation to absent index`);
+  }
+  const back = f.slot.querySelector('a')!; let prevented = false;
+  Reflect.apply(back.handlers.get('click')!, back, [{ preventDefault() { prevented = true; } }]);
+  assert.ok(prevented); assert.deepEqual(f.navigations, ['/app?w=W']);
+  assert.deepEqual(f.history, ['/app?w=W&v=todos', '/app?w=W&v=todos'], 'pop re-entry does not create history');
 });
 async function routedTodoFixture() {
   const context = createContext({});
@@ -381,27 +410,40 @@ test('the first assignment picker uses owner requests until a measured policy al
   assert.equal(runInContext('receivedVM.facts.goesAsRequest("muse")', context), true);
 });
 test('workspace and channel composers keep their own addresses when a thread closes', async () => {
-  const input = { placeholder: '', setAttribute() {} };
-  const context = createContext({ input });
+  const attributes = new Map<string, string>();
+  const input = { placeholder: '', setAttribute(name: string, value: string) { attributes.set(name, value); } };
+  const label = { textContent: 'Message Home' };
+  const context = createContext({ input, label });
   runInContext(`
-    const one=selector=>selector==='[data-composer-input]' ? input : null;
+    const one=selector=>selector==='[data-composer-input]' ? input : selector==='[data-composer-label]' ? label : null;
+    const all=()=>[];
     let channel=null, threadReplyRoot=null;
     const activeChannel=()=>channel, channelLabel=slug=>slug==='everyone' ? 'everyone' : '#'+slug;
     const threadReplyPlaceOf=()=>({kind:'unfiled'}), threadReplyBlock=()=>null, threadReplyMayBroadcast=()=>false;
   `, context);
-  runInContext(await dashboardFunctions(['syncComposerPlacement']), context);
+  runInContext(await dashboardFunctions(['syncComposerPlacement'], ['markThreadReplyRoot']), context);
   runInContext('syncComposerPlacement()', context);
-  assert.equal(input.placeholder, 'Write to everyone, or type @ to tag a person or an agent');
+  assert.equal(input.placeholder, 'Message…');
+  assert.equal(attributes.get('aria-label'), 'Message Home');
   runInContext("channel={slug:'mobile'}; syncComposerPlacement();", context);
   assert.equal(input.placeholder, 'Message #mobile');
+  assert.equal(attributes.get('aria-label'), 'Message in #mobile');
   runInContext("channel={slug:'everyone'}; threadReplyRoot={}; syncComposerPlacement();", context);
   assert.equal(input.placeholder, 'Reply in this thread');
+  assert.equal(attributes.get('aria-label'), 'Thread reply');
   runInContext('threadReplyRoot=null; syncComposerPlacement();', context);
   assert.equal(input.placeholder, 'Message everyone');
   runInContext('channel=null; threadReplyRoot={}; syncComposerPlacement();', context);
   assert.equal(input.placeholder, 'Reply in this thread');
   runInContext('threadReplyRoot=null; syncComposerPlacement();', context);
-  assert.equal(input.placeholder, 'Write to everyone, or type @ to tag a person or an agent');
+  assert.equal(input.placeholder, 'Message…');
+  assert.equal(attributes.get('aria-label'), 'Message Home');
+  label.textContent = 'Message Another workspace';
+  runInContext('syncComposerPlacement()', context);
+  assert.equal(attributes.get('aria-label'), 'Message Another workspace', 'default placement reads current workspace context');
+  label.textContent = '';
+  runInContext('syncComposerPlacement()', context);
+  assert.equal(attributes.get('aria-label'), 'Message', 'initial missing context has a plain fallback');
 });
 
 /** Record the row builder's tree operations. Sanitizing and topic parsing are separate
@@ -423,6 +465,7 @@ class RowNode {
   replaceChildren(...nodes: RowNode[]) { for (const child of [...this.children]) child.remove(); this.append(...nodes); }
   after(node: RowNode) { if (this.parent) { const parent = this.parent; node.remove(); node.parent = parent; parent.children.splice(parent.children.indexOf(this) + 1, 0, node); } }
   setAttribute(name: string, value: string) { this.attributes.set(name, value); }
+  toggleAttribute(name: string, enabled: boolean) { if (enabled) this.attributes.set(name, ''); else this.attributes.delete(name); return enabled; }
   getAttribute(name: string) { return this.attributes.get(name) ?? null; }
   addEventListener(name: string, handler: () => void) { this.handlers.set(name, handler); }
   descendants(): RowNode[] { return this.children.flatMap(node => [node, ...node.descendants()]); }
@@ -430,11 +473,70 @@ class RowNode {
   querySelectorAll(selector: string) { return this.descendants().filter(node => selector.startsWith('.')
     ? node.className.split(' ').includes(selector.slice(1)) : node.tag === selector); }
 }
+test('a signal page settling after a same-workspace view change retains data without taking the pane', async () => {
+  const code = await dashboardFunctions(['addAgentViewOpen', 'showChannelView', 'renderFeed', 'loadSignals',
+    'forgetFetchedPostedIds', 'prunePostedRows', 'rowShowsOnScreen', 'visibleReceiptSignalIds', 'refreshDeliveryReceipts']);
+  for (const [route, workspaceView, channelView] of [
+    ['files', 'files', 'files'], ['wiki', 'brain', 'brain'], ['lists', 'objects', 'objects'],
+    ['chat', 'signals', 'connect'], ['add-agent', 'signals', 'agent-choice'],
+  ]) {
+    class ViewNode extends RowNode { hidden = false; }
+    const sections = ['feed', 'feed-empty', 'feed-pending', 'files', 'brain', 'objects', 'connect', 'agent-choice'].map(name => {
+      const node = new ViewNode('section'); node.dataset.channelView = name; return node;
+    });
+    const composer = new ViewNode('form'), list = new ViewNode('ol'), emptyTitle = new ViewNode('h2');
+    const nodes = new Map([['[data-composer]', composer], ['[data-feed-list]', list], ['[data-feed-empty-title]', emptyTitle]]);
+    let resolvePage!: (page: { rows: unknown[]; hasMore: boolean }) => void, reads = 0;
+    const context = createContext({ routeHref, homeAgentFixCards, browserDeliveryReceiptCandidates, BROWSER_RECEIPT_REQUESTS_PER_TICK,
+      signalPage: () => { reads++; return new Promise(resolve => { resolvePage = resolve; }); },
+      one: (selector: string) => nodes.get(selector) ?? null,
+      all: (selector: string) => selector === '[data-channel-view]' ? sections : [],
+      queueMicrotask: () => {}, window: { clearTimeout() {} },
+    });
+    runInContext(`
+      const app={dataset:{channelView:'feed'}}, activeWorkspaceId='W', requestVersion=1, sampleMode=false, session={user:{id:'viewer'}};
+      let homeRoute={view:'chat',workspaceId:'W'}, activeWorkspaceView='signals', signalExpiryTimer;
+      let activeChannelId=null, unknownChannelId=null, signalCursor={createdAt:'old',id:'old'}, signalCutoff='', signalHasMore=true;
+      let signals=[{id:'previous-page'}], feedWasEmpty=false; const agents=[], workspaces=[{id:'W',name:'Home'}];
+      const postedSinceReset=new Map(), POSTED_ROW_GRACE_MS=30000, previousSignalIds=new Set();
+      const deliveryReceiptCache=new Map([['retained-receipt',{result:null,checkedAt:123}]]); let deliveryReceiptRefreshOwner='';
+      const humanSeenReporter={resetVisible(){}}, humanSeenObserver=null, activeChannel=()=>null;
+      const currentHomePeople=()=>({groups:[],other:[]}), atBottom=()=>true, feedScroller=()=>null;
+      // Unrelated chrome/focus/decoration boundaries; no substitute for the guarded renderer or view switch.
+      const syncComposerPlacement=()=>{}, disarmLiveFeed=()=>{}, armLiveFeed=()=>{}, closeMentionPicker=()=>{};
+      const syncStandalonePage=()=>{}, syncFeedChrome=()=>{}, renderSignalCounts=()=>{}, focusComposerOnEntry=()=>{};
+    `, context);
+    runInContext(code, context);
+    const pending = runInContext("loadSignals('W',true,1)", context) as Promise<void>;
+    assert.equal(reads, 1, 'the real loader reached its deferred transport before the view changed');
+    // Explicit fixture route transition, not the full history/router: production showChannelView owns hidden flags.
+    runInContext(`homeRoute={view:${JSON.stringify(route)},workspaceId:'W'}; activeWorkspaceView=${JSON.stringify(workspaceView)}; showChannelView(${JSON.stringify(channelView)});`, context);
+    const selected = sections.find(node => node.dataset.channelView === channelView)!;
+    assert.equal(selected.hidden, false, `${route}/${channelView}: selected pane starts visible`);
+    assert.equal(composer.hidden, true);
+    resolvePage({ rows: [], hasMore: false }); // A valid authoritative empty page, not a failed or stale read.
+    await pending;
+    assert.equal(selected.hidden, false, `${route}/${channelView}: late feed paint must not hide the actual selected section`);
+    assert.equal(runInContext('app.dataset.channelView', context), channelView);
+    assert.equal(composer.hidden, true, 'a late read cannot expose the feed composer');
+    assert.equal(runInContext('signals.length', context), 0, 'the valid new page replaced old data despite holding its paint');
+    assert.equal(runInContext('signalCursor', context), null);
+    assert.equal(runInContext('signalHasMore', context), false);
+    assert.equal(runInContext("deliveryReceiptCache.get('retained-receipt').checkedAt", context), 123, 'holding paint does not discard cached receipts');
+    // Chat re-entry positive: the same actual renderer must reach the actual empty-feed view switch.
+    runInContext("homeRoute={view:'chat',workspaceId:'W'}; activeWorkspaceView='signals'; showChannelView('feed'); renderFeed();", context);
+    assert.equal(runInContext('app.dataset.channelView', context), 'feed-empty');
+    assert.equal(sections.find(node => node.dataset.channelView === 'feed-empty')!.hidden, false);
+    assert.equal(composer.hidden, false);
+    assert.equal(emptyTitle.textContent, 'No messages yet.');
+  }
+});
 test('replying from a stream row preserves the agent ownership label and the root channel', async () => {
   const document = { createElement: (tag: string) => new RowNode(tag) };
+  const loadedRows: RowNode[] = [];
   const input = { placeholder: '', setAttribute() {}, focus() {} };
   const target = { textContent: '' };
-  const context = createContext({ document, HTMLElement: RowNode, input, target, mapHomePeople, homeParty,
+  const context = createContext({ document, HTMLElement: RowNode, input, target, loadedRows, mapHomePeople, homeParty,
     buildAuthorLine, buildStreamExtras, deriveStreamExtras, canStartThread, THREAD_REPLY_CONTROL_LABEL,
     threadReplyPlace, threadReplyTargetText, agentLabelInSentence, homeAskAnswered, channelLabel, window: { requestAnimationFrame() {} },
     setSanitizedMessageMarkdown: (node: RowNode, body: string) => { node.textContent = body; }, linkifyBrainTopics() {},
@@ -457,10 +559,11 @@ test('replying from a stream row preserves the agent ownership label and the roo
     const entityName=entity=>agentById.get(entity.id).name;
     const entityControl=name=>{const node=document.createElement('button'); node.textContent=name; return node;};
     const one=selector=>selector==='[data-composer-input]'?input:selector==='[data-composer-reply-target-text]'?target:null;
+    const all=()=>loadedRows;
     let threadReplyRoot=null; const composerSending=false, threadReplyBlock=()=>null, threadReplyMayBroadcast=()=>false;
     const retireComposerIntentOnAddressMove=()=>{}, syncComposerAddress=()=>{}, renderFeed=()=>{}, selectChannel=()=>{};
   `, context);
-  runInContext(await dashboardFunctions(['threadReplyPlaceOf', 'syncComposerPlacement', 'setThreadReplyRoot', 'buildMessageRow']), context);
+  runInContext(await dashboardFunctions(['threadReplyPlaceOf', 'syncComposerPlacement', 'setThreadReplyRoot', 'buildMessageRow'], ['markThreadReplyRoot']), context);
   for (const [id, channelId, expected] of [
     ['orbit', null, 'Replying to your Orbit in All messages.'],
     ['river', 'mobile', 'Replying to your River in #mobile.'],
@@ -471,11 +574,35 @@ test('replying from a stream row preserves the agent ownership label and the roo
       createdAt:'2026-10-05T12:00:00Z'},false)`, context) as RowNode;
     const reply = row.querySelector('.dashboard__message-reply');
     assert.ok(reply, `${id}: the eligible root offers a reply`);
+    loadedRows.splice(0, loadedRows.length, row);
     reply.handlers.get('click')!();
     assert.equal(target.textContent, expected, `${id}: the row's author and root channel reach the reply bar`);
     assert.equal(input.placeholder, 'Reply in this thread');
+    assert.equal(row.getAttribute('data-thread-reply-root'), '', 'the actual reply row carries its selected-root state');
     runInContext('setThreadReplyRoot(null)', context);
+    assert.equal(row.getAttribute('data-thread-reply-root'), null, 'closing clears existing loaded rows without a feed rebuild');
   }
+  const build = (id: string, reply = false) => runInContext(`buildMessageRow(${JSON.stringify({ id, from: 'orbit', fromKind: 'agent', kind: 'note', body: 'Same author, distinct message',
+    to: null, toAgent: null, about: null, attachments: [], channelId: null, until: null, threadRootId: reply ? 'root-a' : null, createdAt: '2026-10-05T12:00:00Z' })},${reply})`, context) as RowNode;
+  const first = build('root-a'), second = build('root-b'), child = build('reply-a', true);
+  loadedRows.splice(0, loadedRows.length, first, second, child);
+  const marked = () => loadedRows.filter(row => row.getAttribute('data-thread-reply-root') !== null).map(row => row.dataset.signalId);
+  first.querySelector('.dashboard__message-reply')!.handlers.get('click')!();
+  assert.deepEqual(marked(), ['root-a'], 'same-author neighbor and reply remain unmarked');
+  second.querySelector('.dashboard__message-reply')!.handlers.get('click')!();
+  assert.deepEqual(marked(), ['root-b'], 'switching roots transfers only the immutable message identity');
+  loadedRows.splice(0, loadedRows.length, first, child);
+  runInContext('syncComposerPlacement()', context);
+  assert.deepEqual(marked(), [], 'a filtered or unloaded selected root creates no replacement row');
+  const rebuilt = build('root-b');
+  assert.equal(rebuilt.getAttribute('data-thread-reply-root'), '', 'row creation projects selection before placement sync can run');
+  loadedRows.push(rebuilt);
+  assert.deepEqual(marked(), ['root-b']);
+  runInContext('setThreadReplyRoot(null)', context);
+  assert.deepEqual(marked(), [], 'Cancel state clears the freshly rebuilt row too');
+  first.querySelector('.dashboard__message-reply')!.handlers.get('click')!();
+  runInContext('threadReplyRoot=null; syncComposerPlacement()', context);
+  assert.deepEqual(marked(), [], 'the direct reset-state projection also clears the old root');
 });
 test('an ask card keeps the full sanitized question, links, topic controls and Show more', async () => {
   const document = { createElement: (tag: string) => new RowNode(tag) };
@@ -499,9 +626,9 @@ test('an ask card keeps the full sanitized question, links, topic controls and S
       ownerFirstName:'Tom',ownerInitial:'T',yours:true,tint:0,hosted:true,state:{kind:'idle',word:'Idle'}});
     const signalIsDirectToViewer=(signal,viewer)=>signal.to===viewer, initials=()=>'', kindLabel=kind=>kind;
     const formatTime=()=>({absolute:'Oct 5',relative:'Now'}), channelById=()=>null, brainTopicNames=()=>['Budget'];
-    const appendDeliveryReceipt=()=>{}, canStartThread=()=>false;
+    const appendDeliveryReceipt=()=>{}, canStartThread=()=>false, threadReplyRoot=null;
   `, context);
-  runInContext(await dashboardFunctions(['buildMessageRow']), context);
+  runInContext(await dashboardFunctions(['buildMessageRow'], ['markThreadReplyRoot']), context);
   for (const [kind, from, reply, missingTitle] of [['ask','claude',null,false],['note','claude',null,false],['ask','claude','removed-own',false],['ask','claude','removed-other',false],['ask','claude',null,true]] as const) {
     withoutTitle = missingTitle;
     runInContext(`expandedSignalIds.clear(); signals.splice(0, signals.length, ...${reply ? JSON.stringify([{id:'reply',from:reply,fromKind:'agent',kind:'note',inReplyTo:`S-${kind}`}]) : '[]'});`, context);
@@ -524,8 +651,8 @@ test('an ask card keeps the full sanitized question, links, topic controls and S
     assert.equal(markdown.classes.has('dashboard__message-markdown--collapsed'), false);
   }
 });
-test('a refused or failed to-do read keeps an honest right-column door, while absent tools hide it', async () => {
-  const context = createContext({});
+test('the ready To-dos index omits its duplicate card; other routes and unavailable reads keep their honest doors', async () => {
+  const context = createContext({ layout: { refreshTodoContext: (replace: () => void) => replace() } });
   runInContext(`
     const slot={}, activeWorkspaceId='W', workspaces=[{id:'W',name:'Home'}], homeRoute={view:'chat'}, sampleMode=false;
     let homeTodosState='ready', homeTodoReceipt=''; const homeObjects={state:'pending'}, files=[], householdConnectionsReadState='pending';
@@ -535,10 +662,22 @@ test('a refused or failed to-do read keeps an honest right-column door, while ab
   runInContext(await dashboardFunctions(['homeTodosAvailable', 'renderHomeSide']), context);
   runInContext('renderHomeSide()', context);
   assert.equal(runInContext('painted.todos.canAdd', context), true);
+  assert.equal(runInContext('painted.todosInMain === true', context), false, 'Chat keeps its useful summary');
+  runInContext("homeRoute.view='todos'; renderHomeSide()", context);
+  assert.equal(runInContext('painted.todosInMain', context), true, 'the ready index supplies every open row, completion and add action');
+  assert.notEqual(runInContext('painted.todos', context), null, 'presentation omission does not invent tool absence');
+  for (const view of ['todo', 'lists', 'files', 'wiki', 'people', 'chat']) {
+    runInContext(`homeRoute.view='${view}'; renderHomeSide()`, context);
+    assert.equal(runInContext('painted.todosInMain === true', context), false, `${view} does not supply the full index`);
+  }
+  runInContext("homeRoute.view='todos'", context);
+  runInContext("homeTodosState='pending'; renderHomeSide()", context);
+  assert.equal(runInContext('painted.todosInMain === true', context), false, 'a pending index does not suppress the measured status');
   for (const state of ['refused', 'failed']) {
     runInContext(`homeTodosState='${state}'; homeTodoReceipt='Open Lists & docs to choose your access.'; renderHomeSide();`, context);
     assert.equal(runInContext('painted.todos.notice', context), 'Open Lists & docs to choose your access.');
     assert.equal(runInContext('painted.todos.canAdd', context), false);
+    assert.equal(runInContext('painted.todosInMain === true', context), false, `${state} remains visible`);
   }
   runInContext("homeTodosState='absent'; renderHomeSide();", context);
   assert.equal(runInContext('painted.todos', context), null);
@@ -649,14 +788,17 @@ test('browser reads retain a top-level directed reply reference', () => {
 
 test('each navigation focuses the visible H1 for that view', async () => {
   const frames: (()=>void)[] = [], focused: unknown[] = [];
-  const heading = (name: string) => ({ name, visible: false, getClientRects() { return this.visible ? [{}] : []; }, focus() { focused.push(this); } });
-  const scopes = {catchup:'[data-home-catchup]',chat:'[data-home-workspace-shell]',todos:'[data-home-route-pane]',todo:'[data-home-route-pane]',agent:'[data-home-route-pane]',new:'[data-panel=create]', 'add-agent':'[data-channel-view=agent-choice]',lists:'[data-channel-view=objects]',files:'[data-channel-view=files]',wiki:'[data-channel-view=brain]'};
+  const heading = (name: string) => ({ name, visible: false, inert: false,
+    getClientRects() { return this.visible ? [{}] : []; }, closest() { return this.inert ? this : null; }, focus() { focused.push(this); } });
+  const scopes = {catchup:'[data-home-catchup]',chat:'[data-home-workspace-shell]',todos:'[data-home-route-pane]',todo:'[data-home-route-pane]',agent:'[data-home-route-pane]',people:'[data-people-context]',new:'[data-panel=create]', 'add-agent':'[data-channel-view=agent-choice]',lists:'[data-channel-view=objects]',files:'[data-channel-view=files]',wiki:'[data-channel-view=brain]'};
   const headings = new Map([...new Set(Object.values(scopes))].map(scope => [`${scope} h1`, heading(scope)]));
   const phoneTitle = heading('phone workspace');
+  const selectedTitle = heading('selected profile');
   headings.set('.cs-org-phone-title h1', phoneTitle);
   const context = createContext({homeViewTitle:()=> 'View · CommonSwarm', window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
-    document:{title:''}, all:(selector:string)=>selector.split(',').flatMap(part => headings.get(part.trim()) ?? [])});
-  runInContext("let homeRoute, workspaces=[{id:'W',name:'Home'}];",context);
+    document:{title:''}, one:(selector:string)=>selector==='#pd-detail-title'?selectedTitle:null,
+    all:(selector:string)=>selector.split(',').flatMap(part => headings.get(part.trim()) ?? [])});
+  runInContext("let homeRoute, peopleDialogFocus, workspaces=[{id:'W',name:'Home'}];",context);
   runInContext(await dashboardFunctions(['focusHomeView']),context);
   for (const [view,scope] of Object.entries(scopes)) {
     focused.length = 0;
@@ -674,6 +816,17 @@ test('each navigation focuses the visible H1 for that view', async () => {
   runInContext("homeRoute={view:'chat',workspaceId:'W'};focusHomeView();",context);
   assert.equal(frames.length,1); frames.shift()!();
   assert.equal(focused.at(-1), phoneTitle, 'the relocated visible phone heading receives focus');
+  // A requested profile takes focus only while visible and outside an inert/hidden host.
+  focused.length = 0;
+  for (const node of headings.values()) node.visible = false;
+  const peopleTitle = headings.get('[data-people-context] h1')!;
+  peopleTitle.visible = true; selectedTitle.visible = true; selectedTitle.inert = true;
+  runInContext("homeRoute={view:'people',workspaceId:'W'}; peopleDialogFocus={kind:'agent',id:'A'}; focusHomeView();",context);
+  frames.shift()!();
+  assert.equal(focused.at(-1), peopleTitle, 'an inert profile falls back to the relocated context heading');
+  selectedTitle.inert = false;
+  runInContext('focusHomeView()',context); frames.shift()!();
+  assert.equal(focused.at(-1), selectedTitle, 'a visible requested profile retains its detail heading target');
 });
 
 
@@ -849,7 +1002,7 @@ test('a stale self-role save ends on sign-in, and the email names Save; removal 
   const setup = "let session={user:{id:'tom'}},activeWorkspaceId='W',sampleMode=false,memberReauthNext='remove';"
     + "let members=[{userId:'tom',role:'owner',name:'Tom Langridge'}],draft={userId:'tom',role:'admin',confirming:true};"
     + "const peopleDialogState={rolePending:new Map(),selected:{type:'person',id:'tom'}},state=peopleDialogState,uuid=()=>'R';"
-    + "const person={id:'tom',name:'Tom Langridge',role:'owner'},model={workspaceName:'Home'},agents=[],accessStatuses=[];";
+    + "const person={id:'tom',name:'Tom Langridge',role:'owner'},model={workspaceName:'Home'},agents=[],accessStatuses=[],page=true;";
   runInContext(setup + code + "const callbacks={render(){focusLog.push('render');},changeRole(change){return changeRole(change);}};", context);
   await runInContext("commit('admin')", context);
   assert.deepEqual(focusLog, ['render', 'sign-in-dashboard', 'render', 'sign-in-final']);
@@ -887,20 +1040,47 @@ test('a stale self-role save ends on sign-in, and the email names Save; removal 
 
 /* People & agents is a page now (2026-10-07). ~~"falls back to the roster heading"~~ of the dialog:
    on the page an absent target falls back to the page title, and a visit from elsewhere navigates. */
-test('an absent People & agents target falls back to the page heading', async () => {
+test('People arrival prefers an eligible requested detail and otherwise the eligible page heading', async () => {
   const frames: (()=>void)[] = [], focused: string[] = [], navigations: unknown[] = []; let rendered = 0;
+  // Independent DOM facts only; the actual production declarations choose the target.
+  const heading = (name: string) => ({ present: true, rects: true, blocked: null as 'hidden' | 'inert' | null,
+    getClientRects() { return this.rects ? [{}] : []; },
+    closest(selector: string) { return selector.split(',').some(part => part.trim() === `[${this.blocked}]`) ? { reason: this.blocked } : null; },
+    focus() { focused.push(name); } });
+  const page = heading('page'), detail = heading('detail');
   const context = createContext({window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
-    one:(selector:string)=>selector==='#pd-page-title'?{focus:()=>focused.push('page')}:null,
+    one:(selector:string)=>selector==='#pd-page-title' ? (page.present ? page : null)
+      : selector==='#pd-detail-title' ? (detail.present ? detail : null) : null,
     all:()=>[], renderDialogRoster:()=>{ rendered++; }, loadHouseholdConnections:()=>{},
     navigateHome:(route:unknown, mode:string)=>{ navigations.push([route, mode]); return Promise.resolve(); },
     peopleDialogState:{query:'',selected:null,focusApplied:null},sampleMode:true});
   runInContext("let peopleDialogFocus,rosterFilter='',activeWorkspaceId='W',homeRoute={view:'people',workspaceId:'W'};",context);
   runInContext(await dashboardFunctions(['openRosterDialog','focusPeoplePage']),context);
-  await runInContext("openRosterDialog({kind:'person',id:'gone'})",context);
-  for (const frame of frames) frame();
-  assert.deepEqual(focused,['page']);
-  assert.equal(rendered,1,'already on the page: it re-renders in place');
-  assert.deepEqual(navigations,[]);
+  const rows: Array<{ label: string; request: boolean; detailPresent?: boolean; detailRects?: boolean;
+    detailBlocked?: 'hidden' | 'inert'; pageRects?: boolean; pageBlocked?: 'hidden' | 'inert'; want: string[] }> = [
+    { label: 'ordinary entry ignores an unrequested visible detail', request: false, want: ['page'] },
+    { label: 'absent requested detail falls back', request: true, detailPresent: false, want: ['page'] },
+    { label: 'requested detail without a generated box falls back', request: true, detailRects: false, want: ['page'] },
+    { label: 'hidden-ancestor requested detail falls back', request: true, detailBlocked: 'hidden', want: ['page'] },
+    { label: 'inert-ancestor requested detail falls back', request: true, detailBlocked: 'inert', want: ['page'] },
+    { label: 'eligible requested detail takes precedence', request: true, want: ['detail'] },
+    { label: 'no focus when absent detail and boxless page', request: true, detailPresent: false, pageRects: false, want: [] },
+    { label: 'no focus when absent detail and hidden page', request: true, detailPresent: false, pageBlocked: 'hidden', want: [] },
+    { label: 'no focus when absent detail and inert page', request: true, detailPresent: false, pageBlocked: 'inert', want: [] },
+  ];
+  for (const row of rows) {
+    focused.length = 0;
+    Object.assign(detail, { present: row.detailPresent ?? true, rects: row.detailRects ?? true, blocked: row.detailBlocked ?? null });
+    Object.assign(page, { rects: row.pageRects ?? true, blocked: row.pageBlocked ?? null });
+    const before = rendered;
+    await runInContext(row.request ? "openRosterDialog({kind:'person',id:'requested'})" : 'openRosterDialog()', context);
+    const facts = JSON.stringify({ row, page: { rects: page.rects, blocked: page.blocked },
+      detail: { present: detail.present, rects: detail.rects, blocked: detail.blocked } });
+    assert.equal(rendered, before + 1, `already on People re-renders in place: ${facts}`);
+    for (const frame of frames.splice(0)) frame();
+    assert.deepEqual(focused, row.want, `the real owner requests the eligible target: ${facts}`);
+    assert.deepEqual(navigations, [], `the current People visit does not navigate: ${facts}`);
+  }
   /* Positive control on the same context: from the workspace, the door navigates to the page. */
   runInContext("homeRoute={view:'chat',workspaceId:'W'}",context);
   await runInContext("openRosterDialog()",context);
@@ -1022,6 +1202,7 @@ test('accepted agent removals leave every current surface immediately and after 
       replaceHomeRegion: (region: RailNode, _key: string, children: RailNode[]) => region.replaceChildren(...children),
       refreshHomeRailTimes: () => {},
       // Shell placement is unrelated to accepted removal; retain the real rail builder below.
+      layout: { refreshTodoContext: (replace: () => void) => replace() },
       syncVisibleShell: () => {},
       roster: () => new Promise(resolve => { finishRoster = resolve; }),
       homeOverview: () => new Promise(resolve => { finishOverview = resolve; }),

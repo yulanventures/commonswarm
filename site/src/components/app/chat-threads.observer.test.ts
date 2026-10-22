@@ -370,6 +370,8 @@ test("the app ships the reply bar, its window line and its broadcast control", (
  * ──────────────────────────────────────────────────────────────────────────────────────── */
 
 type ThreadMeasurement = {
+  rootMarks: { rest: string[]; reply: string[]; cancelled: string[]; other: string[]; sent: string[]; rowRebuilt: boolean };
+  defaultHints: { phase: string; hint: string; aria: string; label: string }[];
   /** The feed at rest: two threads, collapsed, with a count under each root. */
   atRest: {
     rows: number;
@@ -468,6 +470,12 @@ const frameScript = `<script>
     const barTarget = () =>
       doc.querySelector("[data-composer-reply-target-text]")?.textContent ?? "";
     const placeholder = () => input().getAttribute("placeholder") ?? "";
+    const defaultHint = (phase) => ({ phase, hint: placeholder(), aria: input().getAttribute("aria-label") ?? "",
+      label: doc.querySelector("[data-composer-label]")?.textContent ?? "" });
+    const defaultHints = [defaultHint("initial")];
+    const markedRootIds = () => [...list().querySelectorAll(".dashboard__message[data-thread-reply-root]")]
+      .map((row) => row.dataset.signalId).sort();
+    const rootMarks = { rest: markedRootIds() };
     const type = (value) => {
       const field = input();
       field.value = value;
@@ -541,10 +549,13 @@ const frameScript = `<script>
 
     /* OPEN A REPLY ON THE UNFILED ROOT. The bar names the root and #all-signals, the box
        promises the thread, and To: is locked with the reply's own sentence. */
+    const beforeReplyRow = doc.querySelector('[data-signal-id="sample-3"]');
     doc.querySelector('[data-message-reply="sample-3"]').click();
     await waitFor(() => bar().hidden === false, "the reply bar");
     await settle(60);
     const toRow = doc.querySelector("[data-composer-to]");
+    rootMarks.reply = markedRootIds();
+    rootMarks.rowRebuilt = beforeReplyRow !== doc.querySelector('[data-signal-id="sample-3"]');
     const replyBar = {
       hidden: bar().hidden,
       /* THE ADDRESS THE ROW NAMES. Read here and not only as a count of chips: the reply's
@@ -583,6 +594,8 @@ const frameScript = `<script>
       toChips: chipNames(),
       placeholder: placeholder(),
     };
+    rootMarks.cancelled = markedRootIds();
+    defaultHints.push(defaultHint("cancelled"));
 
     /* A ROOT IN A CHANNEL OFFERS THE BROADCAST CONTROL, named after that channel. */
     doc.querySelector('[data-message-reply="sample-2"]').click();
@@ -594,6 +607,7 @@ const frameScript = `<script>
         doc.querySelector("[data-composer-reply-broadcast-label]")?.textContent ?? "",
       target: barTarget(),
     };
+    rootMarks.other = markedRootIds();
 
     /* SEND IT. One row, under its root, and the bar comes down with the send. */
     const rootsBefore = topLevelIds().length;
@@ -614,6 +628,8 @@ const frameScript = `<script>
       toChips: chipNames(),
       placeholder: placeholder(),
     };
+    rootMarks.sent = markedRootIds();
+    defaultHints.push(defaultHint("sent"));
 
     /* ── THE COMPOSITION CLAIM ─────────────────────────────────────────────────────────
        The same reply reads under its root in #mobile and in all-signals. Sample mode narrows
@@ -655,6 +671,8 @@ const frameScript = `<script>
     const composed = { inChannel, inAllSignals };
 
     document.documentElement.dataset.threadMeasurement = btoa(unescape(encodeURIComponent(JSON.stringify({
+      rootMarks,
+      defaultHints,
       atRest,
       expanded,
       collapsedAgain,
@@ -669,7 +687,12 @@ const frameScript = `<script>
       composed,
     }))));
   };
-  const start = () => void runMeasurement().catch((error) => report(error?.stack ?? error));
+  let started = false;
+  const start = () => {
+    if (started) return;
+    started = true;
+    void runMeasurement().catch((error) => report(error?.stack ?? error));
+  };
   frame.addEventListener("load", start, { once: true });
   if (
     frame.contentDocument?.readyState === "complete" &&
@@ -760,6 +783,15 @@ test("replies collapse under their root, and a reply carries no recipient", asyn
       Buffer.from(encoded, "base64").toString("utf8"),
     ) as ThreadMeasurement;
 
+    assert.deepEqual(measured.rootMarks, { rest: [], reply: ["sample-3"], cancelled: [], other: ["sample-2"], sent: [], rowRebuilt: true },
+      "actual reply selection survives row replacement, transfers to the other root and clears on Cancel/completed send");
+    assert.deepEqual(measured.defaultHints.map(row => row.phase), ["initial", "cancelled", "sent"]);
+    for (const row of measured.defaultHints) {
+      assert.equal(row.hint, "Message…", row.phase + ": the visible default hint stays short");
+      assert.match(row.label.trim(), /^Message .+/u, row.phase + ": actual workspace label retains context");
+      assert.equal(row.aria, row.label, row.phase + ": full actual label remains the accessible name");
+    }
+
     /* COLLAPSED AT REST, with a count under each root. The sample has two threads: one on the
        unfiled ask (`sample-3`) and one on the message filed in #mobile (`sample-2`). */
     assert.deepEqual(
@@ -842,7 +874,7 @@ test("replies collapse under their root, and a reply carries no recipient", asyn
     assert.deepEqual(measured.cancelled, {
       hidden: true,
       toChips: ["Orbit", "River"],
-      placeholder: "Write to everyone, or type @ to tag a person or an agent",
+      placeholder: "Message…",
     }, "cancelled: the held pair comes back, and the body's own tag joins it");
 
     /* BROADCAST IS OFFERED ONLY WHERE THERE IS A CHANNEL TO BROADCAST TO. */
@@ -887,7 +919,7 @@ test("replies collapse under their root, and a reply carries no recipient", asyn
       measured.sentReply.toChips.length > 0,
       "sentReply: the comparison above must not be two empty sets",
     );
-    assert.equal(measured.sentReply.placeholder, "Write to everyone, or type @ to tag a person or an agent");
+    assert.equal(measured.sentReply.placeholder, "Message…");
 
     /* ── THE COMPOSITION CLAIM, MEASURED ───────────────────────────────────────────────
        The #mobile root and its replies read the same in the channel and in all-signals. The

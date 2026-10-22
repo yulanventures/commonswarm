@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { extname, join, normalize } from "node:path";
 import { browserTest as test } from "../../../tests/chrome.js";
 import { findChrome, launchChrome } from "../../../tests/chrome.js";
+import { measurementScript, frameScript } from "./heading-lines.fixture.js";
 
 const siteRoot = join(import.meta.dirname, "..", "..", "..");
 const distRoot = join(siteRoot, "dist");
@@ -20,6 +21,8 @@ type PageMeasurement = {
   headings: HeadingMeasurement[];
   scrollWidth: number;
   viewportWidth: number;
+  error?: unknown;
+  diagnostics?: unknown;
 };
 
 const contentTypes: Record<string, string> = {
@@ -30,42 +33,6 @@ const contentTypes: Record<string, string> = {
   ".svg": "image/svg+xml",
   ".woff2": "font/woff2",
 };
-
-const measurementScript = `<script>
-  (async () => {
-    await document.fonts.ready;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const headings = Array.from(document.querySelectorAll("main h1, main h2, main h3, main h4, main h5, main h6"))
-      .map((heading) => {
-        const lineHeight = Number.parseFloat(getComputedStyle(heading).lineHeight);
-        return {
-          level: heading.tagName,
-          lines: Math.round(heading.getBoundingClientRect().height / lineHeight),
-          text: heading.textContent.replace(/\\s+/g, " ").trim(),
-        };
-      });
-    document.documentElement.dataset.pageMeasurement = btoa(unescape(encodeURIComponent(JSON.stringify({
-      clientWidth: document.documentElement.clientWidth,
-      headings,
-      scrollWidth: document.documentElement.scrollWidth,
-      viewportWidth: window.innerWidth,
-    }))));
-  })();
-</script>`;
-
-const frameScript = `<script>
-  const frame = document.querySelector("iframe");
-  const copyMeasurement = () => {
-    const measurement = frame.contentDocument?.documentElement.dataset.pageMeasurement;
-    if (measurement) {
-      document.documentElement.dataset.pageMeasurement = measurement;
-      return;
-    }
-    setTimeout(copyMeasurement, 10);
-  };
-  frame.addEventListener("load", copyMeasurement);
-  copyMeasurement();
-</script>`;
 
 const startDistServer = async (): Promise<{
   close(): Promise<void>;
@@ -81,7 +48,7 @@ const startDistServer = async (): Promise<{
         return;
       }
       response.writeHead(200, { "content-type": contentTypes[".html"] });
-      response.end(`<!doctype html><html><body><iframe title="Measurement viewport" src="/" style="border:0;width:${width}px;height:1200px"></iframe>${frameScript}</body></html>`);
+      response.end(`<!doctype html><html><body><iframe title="Measurement viewport" data-observer-width="${width}" src="/" style="border:0;width:${width}px;height:1200px"></iframe>${frameScript}</body></html>`);
       return;
     }
     const relative = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
@@ -142,7 +109,9 @@ const measureAt = async (
   });
   const encoded = stdout.match(/data-page-measurement="([^"]+)"/)?.[1];
   assert.ok(encoded, `${width}px: headless Chrome did not return page measurements`);
-  return JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as PageMeasurement;
+  const measurement = JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as PageMeasurement;
+  assert.equal(measurement.error, undefined, `${width}px: heading readiness failed: ${JSON.stringify(measurement)}`);
+  return measurement;
 };
 
 test("story svgs are labeled and retired surfaces stay gone", () => {

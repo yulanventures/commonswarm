@@ -17,7 +17,7 @@
 import { classifyAgentPresence, type AgentPresenceRow } from "../../../src/cloud/agent-presence";
 import { WAKE_STALE_MS } from "../../../src/cloud/idle-poll";
 import { wakePathMark } from "./wake-path";
-import { STANDING_IDLE_PAUSE_DAYS, STANDING_RESUME_ACTORS, type GrantRiskInput } from "./standing-grants";
+import { STANDING_RESUME_ACTORS, type GrantRiskInput } from "./standing-grants";
 import type { AgentStateVM } from "./home-types";
 import { formatWhen } from "./home-names";
 
@@ -149,8 +149,9 @@ export function peopleAgentStatus(input: PeopleAgentStatusInput, now = Date.now(
   if (grant?.revokedAt || input.connection === "key_off") return keyFix("key-off", "Key turned off");
   const horizon = grant?.kind === "timeboxed" && grant.horizonExpiresAt ? Date.parse(grant.horizonExpiresAt) : NaN;
   if (horizon <= now || input.connection === "key_ended") return keyFix("key-ended", "Key ended");
+  // A recorded pause does not establish its cause or an inactivity policy.
   if ((grant?.kind === "standing" && grant.suspendedAt) || input.connection === "paused") return result("paused",
-    `Paused: unused for ${STANDING_IDLE_PAUSE_DAYS} days`, input.mayManage ? "Resume it so it can connect again."
+    "Connection paused", input.mayManage ? "Resume it so it can connect again."
       : input.ownerName ? `Ask ${owner} to resume it.` : `Ask ${actors} to resume it.`,
     "resume", input.mayManage, input.mayManage ? null : input.ownerName ? owner : actors);
   if (wakePathMark(input.oldestUnobservedAt, now)) {
@@ -170,7 +171,7 @@ export function peopleAgentStatus(input: PeopleAgentStatusInput, now = Date.now(
 }
 
 export function agentResumeReceipt(name: string): string {
-  return `Resumed. Nothing has reached ${name} yet. It renews the next time it starts. Another ${STANDING_IDLE_PAUSE_DAYS} days without use will pause it again.`;
+  return `Resumed. Nothing has reached ${name} yet.`;
 }
 
 /** Server-recorded activity keeps an old work claim from reading as current work. */
