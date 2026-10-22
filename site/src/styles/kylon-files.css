@@ -123,7 +123,7 @@ live-dashboard.dashboard[data-kylon-shell] :is(.dashboard__file-warning, .dashbo
 /* Keep filenames above metadata until the content pane has room for six tracks. */
 @container cs-files (min-width: 36rem) {
   live-dashboard.dashboard[data-kylon-shell] .dashboard__file-row {
-    grid-template-columns: 64px 48px minmax(0, 1fr) 88px 112px;
+    grid-template-columns: 64px 48px minmax(0, 128px) 88px minmax(112px, 1fr);
     column-gap: 12px;
   }
   live-dashboard.dashboard[data-kylon-shell] .dashboard__file-row [data-field-label]::before {
