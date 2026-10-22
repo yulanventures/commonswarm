@@ -999,7 +999,11 @@ function lockResultDiagnostics(result) {
   if (Array.isArray(result?.exception_sites)) diagnostic.exception_sites = result.exception_sites.slice(0,4)
     .filter(site => Number.isSafeInteger(site?.line) && site.line > 0 && site.line <= 9999999
       && Number.isSafeInteger(site?.column) && site.column > 0 && site.column <= 999999)
-    .map(site => ({source:'tests/support/admin-principal-lock-order-harness.mjs',line:site.line,column:site.column}));
+    .filter(site => site.source===undefined || ['tests/support/admin-principal-lock-order-harness.mjs','supabase/functions/command/admin-delegation.ts','supabase/functions/command/index.ts','src/protocol/admin-authority.ts'].includes(site.source))
+    .map(site => ({source:site.source ?? 'tests/support/admin-principal-lock-order-harness.mjs',line:site.line,column:site.column}));
+  if (/^(?:00|01|02|03|08|09|0A|0B|0F|0L|0P|0Z|20|21|22|23|24|25|26|27|28|2B|2D|2F|34|38|39|3B|3D|3F|40|42|44|53|54|55|57|58|F0|HV|P0|XX)[0-9A-Z]{3}$/u.test(result?.sqlstate ?? '')) diagnostic.sqlstate=result.sqlstate;
+  if (['null-renew','future-renew','null-replace','future-replace','elapsed','revoked','parent-dead','deadline-wait','security-suspended'].includes(result?.loop_mode)) diagnostic.loop_mode=result.loop_mode;
+  if (['setup','invoked','waiting','settled'].includes(result?.late_revoke_phase)) diagnostic.late_revoke_phase=result.late_revoke_phase;
   const schemas = {
     'residual-no-longer-authenticates': {status:'status'},
     'revocation-final-ledger-wait-observed': {wait_result:'wait'},
@@ -1010,7 +1014,7 @@ function lockResultDiagnostics(result) {
     'membership-and-hidden-parent-family-atomic': {removed:'boolean',revoked:'boolean',all_tokens_revoked:'boolean'},
   };
   const codes = ['recipient_runtime_required','worker_scope_forbidden','human_confirmation_required','grant_inactive',
-    'internal_error','forbidden','unauthenticated','unauthorized','invalid_request','fresh_auth_required',
+    'recipient_forbidden','capability_forbidden','current_rights_required','target_forbidden','scope_forbidden','credential_kind_forbidden','internal_error','forbidden','unauthenticated','unauthorized','invalid_request','fresh_auth_required',
     'insufficient_scope','client_outdated','human_sign_in_required','not_found','admin_transaction_failed',
     'admin_command_failed','admin_failure_audit_unavailable','temporarily_unavailable'];
   const rows = [], seen = new Set();
@@ -1105,7 +1109,7 @@ export async function runScenario(target, scenario, timeoutMs = 170_000, generat
       try {
         result = JSON.parse(lines[0].slice('LOCK_ORDER_RESULT '.length));
         if (!result || typeof result !== 'object' || Array.isArray(result) || result.scenario !== scenario
-          || typeof result.stage !== 'string' || !new Set(['active_catalog', 'historical-guards', 'forced-rollback', 'allow-issuer-race', 'blocker', 'complete', 'config', 'control-timeout', 'creator-inserts', 'creator-stream', 'deadlock-timeout', 'fixture', 'golden-calls', 'golden-fixture', 'holder-rows', 'holder-waits-for-stream', 'import', 'min-client-version', 'park-creation', 'park-first-admin', 'park-holder', 'park-second-admin', 'race', 'release', 'sqlstate-capture-control', 'warm-up', 'writes']).has(result.stage)
+          || typeof result.stage !== 'string' || !new Set(['active_catalog', 'historical-guards', 'forced-rollback', 'allow-issuer-race', 'blocker', 'complete', 'config', 'control-timeout', 'creator-inserts', 'creator-stream', 'deadlock-timeout', 'delegated-local', 'fixture', 'golden-calls', 'golden-fixture', 'holder-rows', 'holder-waits-for-stream', 'import', 'min-client-version', 'park-creation', 'park-first-admin', 'park-holder', 'park-second-admin', 'race', 'release', 'sqlstate-capture-control', 'warm-up', 'writes']).has(result.stage)
           || !Number.isSafeInteger(result.http_refused) || result.http_refused < 0
           || (result.error !== undefined && (typeof result.error !== 'string'
             || !(new Set(['CERT_HAS_EXPIRED','DEPTH_ZERO_SELF_SIGNED_CERT','ECONNABORTED','EHOSTUNREACH','ENETUNREACH','ERR_SSL_WRONG_VERSION_NUMBER','ERR_TLS_CERT_ALTNAME_INVALID','SELF_SIGNED_CERT_IN_CHAIN','UNABLE_TO_VERIFY_LEAF_SIGNATURE','active_catalog_body_owner_or_mode','active_catalog_column','active_catalog_effective_acl','active_catalog_exact_function_acl','active_catalog_public_execute','active_catalog_search_path','active_catalog_signature','active_catalog_source_unreadable','active_catalog_trigger','active_catalog_trigger_predicate','active_catalog_view_acl','active_catalog_view_effective_acl','active_catalog_view_owner_barrier','active_catalog_view_shape','active_floor_chain_binding','active_floor_first_owned_queue_inconclusive','active_floor_principal_control','active_floor_renew_control','active_floor_root_use','active_floor_second_owned_queue_inconclusive','active_floor_successor_use','admin_consent_refused','admin_extra_consent_refused','admin_grant_refused','allow_foreign_fixture','allow_other_workspace_fixture','allow_principal_control','allow_provision_control','allow_retirement_control','allow_workspace_not_reached','alone_claim_setup','budget_successor_control','compat_old_wire_mint','compat_principal_control','compat_silent_renewal_control','creation_did_not_park','deadlock_timeout_not_below_lock_timeout','delegated_child_read_control','delegated_create_control','delegated_provision_control','first_admin_did_not_park','fixture rollback','fixture_endpoint_not_127_0_0_1','fixture_tls_ca_missing','floor_C_use','floor_T_use','floor_X_issue','floor_module_missing','floor_owned_X_queue_inconclusive','floor_principal_setup','floor_real_chain_binding','golden_claim_failed','golden_local_principal_refused','head_owned_C_not_held_inconclusive','head_owned_X_queue_inconclusive','higher_parent_not_parked','historical_baseline-denial-every-table-unchanged','historical_baseline-expiry-refusal','historical_baseline-live-renewal-positive','historical_catalog_changed','historical_coherent-old-credential','historical_complete-successor-inheritance','historical_exact-agent_presence-append','historical_exact-audit_log-append','historical_exact-events-append','historical_exact-grant-counter-and-use','historical_exact-idempotency_keys-append','historical_exact-stream-sequence','historical_exact-successor-adoption','historical_expired-read-denied','historical_expired-read-every-table-unchanged','historical_extension_owner_or_dependency','historical_grant-history-preserved','historical_guard-probes-rollback-every-table','historical_guard_settings','historical_hash-and-live-authority','historical_monotonic_guard_missing','historical_one-pending-hash-matched-successor','historical_ordinary-denial-every-table-unchanged','historical_ordinary-renewal-denied','historical_other-grants-unchanged','historical_retained-catalog-after-cases','historical_same-invocation-positive','historical_server_clock_not_pinned','historical_silent-short-successor','historical_standing-null-technical-windows','historical_successor-read-usable','historical_table-inventory-unchanged','historical_unauthorized_write_not_denied','historical_unchanged-commonswarm_oauth.admin_access_issuances','historical_unchanged-commonswarm_oauth.admin_client_owner_approvals','historical_unchanged-commonswarm_oauth.admin_consent_orchestration','historical_unchanged-commonswarm_oauth.admin_cutover_state','historical_unchanged-commonswarm_oauth.admin_grant_bindings','historical_unchanged-commonswarm_oauth.admin_interactions','historical_unchanged-commonswarm_oauth.admin_oauth_audit','historical_unchanged-commonswarm_oauth.admin_oauth_audit_daily','historical_unchanged-commonswarm_oauth.admin_verified_clients','historical_unchanged-commonswarm_oauth.browser_sessions','historical_unchanged-commonswarm_oauth.cimd_cache','historical_unchanged-commonswarm_oauth.consent_orchestration','historical_unchanged-commonswarm_oauth.dpop_nonces','historical_unchanged-commonswarm_oauth.dpop_proof_replays','historical_unchanged-commonswarm_oauth.finish_records','historical_unchanged-commonswarm_oauth.interactions','historical_unchanged-commonswarm_oauth.issuer_key_denials','historical_unchanged-commonswarm_oauth.provider_artifacts','historical_unchanged-commonswarm_oauth.provider_grant_resources','historical_unchanged-commonswarm_oauth.refresh_family_tombstones','historical_unchanged-commonswarm_oauth.registered_clients','historical_unchanged-commonswarm_ops.migration_checksums','historical_unchanged-swarm.admin_accounts','historical_unchanged-swarm.admin_command_results','historical_unchanged-swarm.admin_consents','historical_unchanged-swarm.admin_created_workspaces','historical_unchanged-swarm.admin_credentials','historical_unchanged-swarm.admin_events','historical_unchanged-swarm.admin_grants','historical_unchanged-swarm.admin_rate_buckets','historical_unchanged-swarm.admin_routine_invitations','historical_unchanged-swarm.admin_security_audit','historical_unchanged-swarm.agent_execution_sessions','historical_unchanged-swarm.agent_join_attempts','historical_unchanged-swarm.agent_join_credentials','historical_unchanged-swarm.agent_presence','historical_unchanged-swarm.agent_principals','historical_unchanged-swarm.agent_runs','historical_unchanged-swarm.agent_tokens','historical_unchanged-swarm.agent_wake_leases','historical_unchanged-swarm.audit_log','historical_unchanged-swarm.capability_urls','historical_unchanged-swarm.channels','historical_unchanged-swarm.command_failures','historical_unchanged-swarm.config','historical_unchanged-swarm.devices','historical_unchanged-swarm.events','historical_unchanged-swarm.feedback','historical_unchanged-swarm.file_purge_queue','historical_unchanged-swarm.file_versions','historical_unchanged-swarm.files','historical_unchanged-swarm.github_installations','historical_unchanged-swarm.grant_consumptions','historical_unchanged-swarm.grants','historical_unchanged-swarm.h','historical_unchanged-swarm.hosted_mcp_check_batches','historical_unchanged-swarm.hosted_mcp_check_cursors','historical_unchanged-swarm.hosted_mcp_grant_workspaces','historical_unchanged-swarm.hosted_mcp_grants','historical_unchanged-swarm.hosted_mcp_seat_handles','historical_unchanged-swarm.hosted_mcp_seats','historical_unchanged-swarm.household_agent_work_policies','historical_unchanged-swarm.household_comments','historical_unchanged-swarm.household_content_connections','historical_unchanged-swarm.household_hosted_content_restrictions','historical_unchanged-swarm.household_member_content_roles','historical_unchanged-swarm.household_object_artifacts','historical_unchanged-swarm.household_object_audit','historical_unchanged-swarm.household_object_bindings','historical_unchanged-swarm.household_object_events','historical_unchanged-swarm.household_object_streams','historical_unchanged-swarm.household_todo_events','historical_unchanged-swarm.household_todo_receipts','historical_unchanged-swarm.household_todo_streams','historical_unchanged-swarm.household_todos','historical_unchanged-swarm.household_workspace_boundaries','historical_unchanged-swarm.idempotency_keys','historical_unchanged-swarm.inbox_deliveries','historical_unchanged-swarm.invitations','historical_unchanged-swarm.leases','historical_unchanged-swarm.memberships','historical_unchanged-swarm.rate_buckets','historical_unchanged-swarm.renewal_grants','historical_unchanged-swarm.repositories','historical_unchanged-swarm.retired_agent_sessions','historical_unchanged-swarm.revocation_tombstones','historical_unchanged-swarm.security_alerts','historical_unchanged-swarm.signal_agent_receipts','historical_unchanged-swarm.signal_attachments','historical_unchanged-swarm.signal_deliveries','historical_unchanged-swarm.signal_human_receipts','historical_unchanged-swarm.signal_recipients','historical_unchanged-swarm.signals','historical_unchanged-swarm.spend_breaker','historical_unchanged-swarm.streams','historical_unchanged-swarm.tasks','historical_unchanged-swarm.users','historical_unchanged-swarm.wake_path_release','historical_unchanged-swarm.workspaces','holder_did_not_wait_for_stream','hosted_capability_refused','invitation_refused','isolated_database_ci_only','issuer_artifact_setup','issuer_membership_contract','issuer_parent_not_reached','issuer_rollback_parent_not_reached','issuer_session_identity','issuer_set_role','issuer_unrelated_role_admitted','join_credential_mint_refused','last_budget_control','legal_used_child_control','min_client_version_missing','min_client_version_non_semver','min_client_version_non_string','native_parent_share_control','permanent_actual_first_use','permanent_create_control','permanent_ordinary_mint','post_rollback_control','prefix_capability_setup','prefix_first_owned_G_queue_inconclusive','prefix_genuine_grant_setup','prefix_management_positive','prefix_second_owned_U_W_S_queue_inconclusive','provider_revoke_queue_inconclusive','race_timeout','restored_database_schema_missing','resume_current_use_control','resume_first_use_control','resume_human_principal_control','resume_legal_delegated_mint','resume_middle_use_control','resume_ordinary_mint','resume_successor_control','resume_workspace_not_parked','same_owner_G1_queue_inconclusive','second_active_family_control','second_admin_did_not_park','sides_did_not_reach_barrier','source_blob_identity','source_destination_exists','source_not_regular_blob','source_path_unsafe','source_schema_missing','source_tree_empty','source_tree_identity','sqlstate_capture_control_failed','target_not_loopback','terminal_actual_first_use','test_hook_set','ungranted_residual_runtime_control','unknown_scenario','unknown_source_generation','unsafe_cleanup_path','unsafe_database_cleanup','unsafe_evidence_label','unsafe_private_artifact_root','EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EPIPE', 'ETIMEDOUT', 'active_floor_chain_binding', 'active_floor_first_owned_queue_inconclusive', 'active_floor_principal_control', 'active_floor_renew_control', 'active_floor_root_use', 'active_floor_second_owned_queue_inconclusive', 'active_floor_successor_use', 'admin_consent_refused', 'admin_extra_consent_refused', 'admin_grant_refused', 'allow_foreign_fixture', 'allow_other_workspace_fixture', 'allow_principal_control', 'allow_provision_control', 'allow_retirement_control', 'allow_workspace_not_reached', 'alone_claim_setup', 'budget_successor_control', 'compat_old_wire_mint', 'compat_principal_control', 'compat_silent_renewal_control', 'creation_did_not_park', 'deadlock_timeout_not_below_lock_timeout', 'delegated_child_read_control', 'delegated_create_control', 'delegated_provision_control', 'first_admin_did_not_park', 'fixture_endpoint_not_127_0_0_1', 'floor_C_use', 'floor_T_use', 'floor_X_issue', 'floor_module_missing', 'floor_owned_X_queue_inconclusive', 'floor_principal_setup', 'floor_real_chain_binding', 'golden_claim_failed', 'golden_local_principal_refused', 'head_owned_C_not_held_inconclusive', 'head_owned_X_queue_inconclusive', 'higher_parent_not_parked', 'historical_catalog_changed', 'hosted_capability_refused', 'invitation_refused', 'issuer_artifact_setup', 'issuer_membership_contract', 'issuer_parent_not_reached', 'issuer_rollback_parent_not_reached', 'issuer_session_identity', 'issuer_set_role', 'issuer_unrelated_role_admitted', 'join_credential_mint_refused', 'last_budget_control', 'legal_used_child_control', 'native_parent_share_control', 'non_sql', 'permanent_actual_first_use', 'permanent_create_control', 'permanent_ordinary_mint', 'post_rollback_control', 'prefix_capability_setup', 'prefix_first_owned_G_queue_inconclusive', 'prefix_genuine_grant_setup', 'prefix_management_positive', 'prefix_second_owned_U_W_S_queue_inconclusive', 'provider_revoke_queue_inconclusive', 'race_timeout', 'resume_current_use_control', 'resume_first_use_control', 'resume_human_principal_control', 'resume_legal_delegated_mint', 'resume_middle_use_control', 'resume_ordinary_mint', 'resume_successor_control', 'resume_workspace_not_parked', 'same_owner_G1_queue_inconclusive', 'second_active_family_control', 'second_admin_did_not_park', 'sides_did_not_reach_barrier', 'sqlstate_capture_control_failed', 'target_not_loopback', 'terminal_actual_first_use', 'test_hook_set', 'ungranted_residual_runtime_control', 'unknown_scenario']).has(result.error) || /^(?:creation_positive_control_failed|holder_positive_control_failed|holder_returned_before_stream):(?:none|[1-5][0-9]{2}):(?:admin_command_failed|admin_failure_audit_unavailable|admin_transaction_failed|already_revoked|capability_limit_reached|channel_archived|channel_exists|channel_not_found|client_outdated|command_id_conflict|connection_attempt_expired|connection_attempt_forbidden|credential_expired|credential_kind_forbidden|delivery_ack_conflict|delivery_unavailable|email_domain_not_accepted|email_not_verified|feature_disabled|forbidden|fresh_auth_required|h0_command_not_configured|h0_command_unreadable|h0_transaction_retryable|hosted_check_batch_forbidden|hosted_seat_limit_reached|hosted_seat_revoked|household_attachment_refused|household_content_service_updating|household_legacy_disabled|human_sign_in_required|insufficient_scope|internal_error|invalid_dpop|invalid_request|join_credential_limit_reached|member_limit_reached|method_not_allowed|non_sql|none|not_found|notify_held_elsewhere|notify_unavailable|origin_not_allowed|payload_too_large|principal_limit_reached|rate_limited|registration_seat_revoked|registration_token_already_used|reply_status_not_reply|reply_status_thread|request_timeout|request_too_large|route_not_allowed|session_proof_missing|signal_attachment_duplicate|signal_attachment_limit|signal_attachment_not_live|signal_attachment_unavailable|signal_attachment_version_unavailable|signup_paused|storage_unavailable|temporarily_unavailable|thread_reply_until_exceeds_root|thread_root_is_a_reply|thread_root_not_found|too_many_requests|tool_failed|transport_unavailable|unauthenticated|unauthorized|unknown_tool|unsupported_media_type|upgrade_required|use_dpop_nonce|worker_delivery_failed|workspace_limit_reached|(?:00|01|02|03|08|09|0A|0B|0F|0L|0P|0Z|20|21|22|23|24|25|26|27|28|2B|2D|2F|34|38|39|3B|3D|3F|40|42|44|53|54|55|57|58|F0|HV|P0|XX)[0-9A-Z]{3})$/u.test(result.error) || /^min_client_version_non_semver:observed=[0-9A-Za-z.+-]{1,32}$/u.test(result.error) || /^(?:00|01|02|03|08|09|0A|0B|0F|0L|0P|0Z|20|21|22|23|24|25|26|27|28|2B|2D|2F|34|38|39|3B|3D|3F|40|42|44|53|54|55|57|58|F0|HV|P0|XX)[0-9A-Z]{3}$/u.test(result.error))))) invalid = 'malformed_result';
@@ -1123,7 +1127,7 @@ export async function runScenario(target, scenario, timeoutMs = 170_000, generat
         ...(scenario==='floor-first-use-vs-head-revocation' ? {required_compatibility:'BLOCKED',floor_compatibility:'INCONCLUSIVE'} : {}) };
     }
     const diagnostics = lockResultDiagnostics(result);
-    if (diagnostics.failed_observations?.length) privateHarnessEvidence('lock-result', JSON.stringify({scenario,...diagnostics}));
+    if (diagnostics.failed_observations?.length || diagnostics.exception_kind) privateHarnessEvidence('lock-result', JSON.stringify({scenario,...diagnostics}));
     process.stdout.write(`ACTIVE_FLOOR_SOURCE ${JSON.stringify({scenario,source:result.source,read_source:result.read_source})}\n`);
     return adminIssuance === null ? result : { ...result, admin_issuance: adminIssuance };
   } finally {
@@ -1240,6 +1244,14 @@ async function verifyTlsAgainstDialedAddress(host) {
   };
 }
 
+function transactionException(error) {
+  return lockResultDiagnostics({
+    exception_kind:[TypeError,ReferenceError,SyntaxError,RangeError].find(type=>error instanceof type)?.name ?? 'Error',
+    sqlstate:sqlstate(error),
+    exception_sites:typeof error?.stack==='string' ? [...error.stack.matchAll(/(tests\/support\/admin-principal-lock-order-harness\.mjs|supabase\/functions\/command\/(?:admin-delegation|index)\.ts|src\/protocol\/admin-authority\.ts):([1-9][0-9]{0,6}):([1-9][0-9]{0,5})(?=$|[\s)])/gu)].slice(0,4).map(m=>({source:m[1],line:Number(m[2]),column:Number(m[3])})) : [],
+  });
+}
+
 async function denoMain() {
   const [configPath, scenario] = Deno.args;
   const out = { scenario, stage: 'config', ...(scenario==='floor-first-use-vs-head-revocation'
@@ -1302,10 +1314,11 @@ async function denoMain() {
     const { db } = command;
     // Every command-module transaction (admin, hosted, join and ordinary) runs through db.begin.
     // Record the SQLSTATE of each rejected one while a race is open; no message is read.
-    const failures = { recording: false, codes: [], deadlocks: [] };
+    const failures = { recording: false, codes: [], deadlocks: [], exception: null };
     const begin = db.begin;
     db.begin = function (...args) {
       return begin.apply(this, args).catch((error) => {
+        failures.exception ??= transactionException(error);
         if (failures.recording) { failures.codes.push(sqlstate(error));
           if(sqlstate(error)==='40P01') failures.deadlocks.push(deadlockEdges(error));
         }
@@ -1352,10 +1365,7 @@ async function denoMain() {
     exitCode = 1;
     console.log('LOCK_ORDER_RESULT ' + JSON.stringify({ ...out,
       error: error instanceof HarnessStage ? error.code : failureCode(error),
-      ...(failureCode(error)==='non_sql' && !(error instanceof HarnessStage) ? {
-        exception_kind: [TypeError,ReferenceError,SyntaxError,RangeError].find(type=>error instanceof type)?.name ?? 'Error',
-        exception_sites: typeof error?.stack==='string' ? [...error.stack.matchAll(/tests\/support\/admin-principal-lock-order-harness\.mjs:(\d+):(\d+)/gu)].slice(0,4).map(match=>({line:Number(match[1]),column:Number(match[2])})) : [],
-      } : {}), http_refused: http.refused }));
+      ...(failureCode(error)==='non_sql' && !(error instanceof HarnessStage) ? transactionException(error) : {}), http_refused: http.refused }));
   }
   Deno.exit(exitCode);
 }
@@ -1580,12 +1590,14 @@ async function adminSide(ctx, fixture, label = 'admin', options = {}) {
     name,
     grant,
     connection,
+    revoke:()=>transact(wire({kind:'revoke_admin_delegation',grant_id:grant,reason_code:'owner_requested'})),
     issuerFixture: { oauth, signing, kid:jwk.kid },
     // Private fixture driver: the same raw JWT+DPoP admission and runtime worker
     // channel as production, with no direct import of a lock helper.
-    invoke: async (command, {worker=false,deliver=async()=>{},commandId=id()}={}) => {
-      const input=wire(command,commandId),request=await oauth.request(input);
+    invoke: async (command, {worker=false,deliver=async()=>{},commandId=id(),access}={}) => {
+      const input=wire(command,commandId),request=await oauth.request(input,'admin_command',{},access);
       let result,delivery=null,calls=0;
+      ctx.failures.exception=null;
       if (worker) result=await ctx.command.handleAdminWorkerCommand(input,request,async c=>{
         delivery=c;calls++;await deliver(c);
       });
@@ -1593,7 +1605,7 @@ async function adminSide(ctx, fixture, label = 'admin', options = {}) {
         const response=await ctx.command.handleRequest(request);
         result={status:response.status,body:await response.json()};
       }
-      return {result,delivery,calls,commandId};
+      return {result,delivery,calls,commandId,exception:ctx.failures.exception};
     },
     warm: async () => {
       const warmed = await send(await armed(seat(`warm-${label}-seat-${ctx.tag}`)));
@@ -2115,6 +2127,7 @@ async function delegatedLocalScenario(ctx,scenario) {
       if (projected && failed_observations.length<6) failed_observations.push(projected[0]);
     }
   };
+  out.stage='delegated-local';
   const accepted=r=>r.result.status===200 && r.result.body?.status==='accepted';
   const owner=await human(ctx,'m3-owner');
   const {workspaceId}=await workspace(ctx,owner,false);
@@ -2168,6 +2181,7 @@ async function delegatedLocalScenario(ctx,scenario) {
     // Ordinary standing issuance and explicitly consented delegated renewal.
     // No delegated-family conversion, preset first use, or ancestry mutation.
     for (const mode of ['null-renew','future-renew','null-replace','future-replace','elapsed','revoked','parent-dead','deadline-wait','security-suspended']) {
+      out.loop_mode=mode;
       const name=`permanent-${mode}-${ctx.tag}`;
       const created=await manage(ctx,owner,workspaceId,{kind:'create_agent_principal',name});
       if(created.status!==200 || !created.body.principal_id) fail('permanent_create_control');
@@ -2188,7 +2202,10 @@ async function delegatedLocalScenario(ctx,scenario) {
           WHEN ${mode==='deadline-wait'} THEN clock_timestamp()+interval '3 seconds' ELSE NULL END
         WHERE renewal_grant_id=${root.grant}::uuid`;
       if(mode==='revoked') await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp(),revoked_by=${owner.userId}::uuid WHERE renewal_grant_id=${root.grant}::uuid`;
-      if(mode==='parent-dead') await observer`UPDATE swarm.admin_grants SET state='revoked',revoked_at=clock_timestamp() WHERE grant_id=${side.grant}::uuid`;
+      if(mode==='parent-dead') {
+        const revoked=await side.revoke();
+        if(revoked.result.status!==200) fail('admin_grant_refused');
+      }
       const before=await family(root);
       const command=mode.includes('replace') ? {kind:'admin_replace_undelivered_seat_credential',grant_id:side.grant,
         workspace_id:workspaceId,principal_id:root.principal,credential_id:root.token,recipient_connection_id:side.connection}
@@ -2286,7 +2303,7 @@ async function delegatedLocalScenario(ctx,scenario) {
       NOT EXISTS(SELECT 1 FROM swarm.renewal_grants g WHERE g.principal_id=t.principal_id AND g.revoked_at IS NULL) AS grants_ended
       FROM swarm.agent_tokens t WHERE t.token_id=${token}::uuid`;
     check('seat-revoke-ends-ungranted-residual-and-all-grants',ended.result.status===200 && facts.ended && facts.token_tomb && facts.lineage_tomb && facts.grants_ended);
-    check('residual-no-longer-authenticates',(await use(raw)).status===403,()=>({status:residualReadStatus}));
+    check('residual-no-longer-authenticates',(await use(raw)).status===401,()=>({status:residualReadStatus}));
     const [extraEffects]=await observer`SELECT count(*)=2 AND bool_and(t.revoked_at IS NOT NULL) AS ended,
       bool_and(EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='lineage' AND z.target_id=t.lineage_id)) AS tombs
       FROM swarm.agent_tokens t WHERE token_id=ANY(${extra}::uuid[])`;
@@ -2294,18 +2311,42 @@ async function delegatedLocalScenario(ctx,scenario) {
 
     const lateAdmin=await adminSide(ctx,{owner,workspaceId},'revoke-final-fence');
     const late=await provision(lateAdmin,'late-revoke');
-    await observer`UPDATE swarm.admin_grants SET expires_at=clock_timestamp()+interval '3 seconds'
-      WHERE grant_id=${lateAdmin.grant}::uuid`;
+    out.late_revoke_phase='setup';
+    // Shorten only this disposable parent's deadline. The account reconciler
+    // requires identical millisecond deadlines in durable and projected state.
+    // Shorten the bound ceiling too; use real signed/ledgered short issuance
+    // below, since the existing five-minute JWT cannot fit this parent.
+    const lateExpiry=await observer.begin(async tx=>{
+      await tx`SELECT owner_user_id FROM swarm.admin_accounts WHERE owner_user_id=${owner.userId}::uuid FOR UPDATE`;
+      const [deadline]=await tx`UPDATE swarm.admin_grants
+        SET expires_at=date_trunc('milliseconds',clock_timestamp()+interval '3 seconds')
+        WHERE grant_id=${lateAdmin.grant}::uuid AND owner_user_id=${owner.userId}::uuid
+          AND expires_at>clock_timestamp()+interval '3 seconds'
+        RETURNING floor(extract(epoch FROM expires_at)*1000)::float8 AS ms`;
+      if(!deadline) fail('admin_grant_refused');
+      await tx`UPDATE swarm.admin_accounts SET projection=jsonb_set(projection,
+        ARRAY['grants',${lateAdmin.grant},'expires_at'],to_jsonb(${deadline.ms}::float8),false)
+        WHERE owner_user_id=${owner.userId}::uuid`;
+      await tx`UPDATE commonswarm_oauth.admin_grant_bindings SET expires_at=to_timestamp(${deadline.ms}/1000.0)
+        WHERE admin_grant_id=${lateAdmin.grant}::uuid AND owner_user_id=${owner.userId}::uuid
+          AND provider_grant_id=${lateAdmin.issuerFixture.oauth.provider}`;
+      return deadline.ms;
+    });
+    const lateAccess=await lateAdmin.issuerFixture.oauth.issue(0,{exp:Math.floor(lateExpiry/1000)});
     const before=await family(late);let latePending;
     await observer.begin(async tx=>{
       const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
       await tx`LOCK TABLE swarm.admin_command_results IN SHARE MODE`;
+      out.late_revoke_phase='invoked';
       latePending=lateAdmin.invoke({kind:'admin_revoke_seat',grant_id:lateAdmin.grant,workspace_id:workspaceId,
-        principal_id:late.principal,reason_code:'owner_requested'});
+        principal_id:late.principal,reason_code:'owner_requested'},{access:lateAccess});
+      out.late_revoke_phase='waiting';
       check('revocation-final-ledger-wait-observed',await waitForBlocked(observer,Number(pid),async()=>true,2000)!==null,()=>({wait_result:finalLedgerWaitState}));
       await new Promise(resolve=>setTimeout(resolve,3200));
     });
     const lateResult=await latePending;
+    out.late_revoke_phase='settled';
+    if(lateResult.exception) Object.assign(out,lateResult.exception);
     check('final-admin-expiry-rolls-back-revocation',lateResult.result.status!==200 && await family(late)===before
       && (await observer`SELECT revoked_at IS NULL AS live FROM swarm.agent_principals WHERE principal_id=${late.principal}::uuid`)[0].live);
 
@@ -2371,7 +2412,7 @@ async function delegatedLocalScenario(ctx,scenario) {
     const foreign=await admin.invoke({...renewCommand(admin,seat),recipient_connection_id:id()},{worker:true});
     const broadened=await admin.invoke({...renewCommand(admin,seat),worker_scope_names:['post_signal','acquire']},{worker:true});
     const humanOnly=await admin.invoke({kind:'suspend_admin_delegation',grant_id:admin.grant,reason_code:'owner_requested'});
-    check('recipient-scope-and-human-boundaries',foreign.result.status===403 && foreign.result.body.error==='recipient_runtime_required' && broadened.result.status===403 && broadened.result.body.error==='worker_scope_forbidden' && humanOnly.result.status===403 && humanOnly.result.body.error==='human_confirmation_required' && !foreign.calls && !broadened.calls,()=>({foreign_status:foreign.result.status,foreign_code:foreign.result.body?.error,foreign_calls:foreign.calls,broadened_status:broadened.result.status,broadened_code:broadened.result.body?.error,broadened_calls:broadened.calls,human_status:humanOnly.result.status,human_code:humanOnly.result.body?.error}));
+    check('recipient-scope-and-human-boundaries',foreign.result.status===403 && foreign.result.body.error==='recipient_forbidden' && broadened.result.status===403 && broadened.result.body.error==='worker_scope_forbidden' && humanOnly.result.status===403 && humanOnly.result.body.error==='capability_forbidden' && !foreign.calls && !broadened.calls,()=>({foreign_status:foreign.result.status,foreign_code:foreign.result.body?.error,foreign_calls:foreign.calls,broadened_status:broadened.result.status,broadened_code:broadened.result.body?.error,broadened_calls:broadened.calls,human_status:humanOnly.result.status,human_code:humanOnly.result.body?.error}));
     check('boundary-refusals-spend-nothing',await family(seat)===before);
     const winner=await Promise.all([admin.invoke(renewCommand(admin,seat),{worker:true}),admin.invoke(renewCommand(admin,seat),{worker:true})]);
     const committed=winner.filter(r=>r.result.status===200 && r.calls===1),refused=winner.filter(r=>r.result.status===403 && r.calls===0);
@@ -2473,6 +2514,7 @@ async function delegatedLocalScenario(ctx,scenario) {
         WHERE grant_id=${admin.grant}::uuid`;
     });
     const denied=await pending;
+    if(denied.exception) Object.assign(out,denied.exception);
     check('fresh-parent-denial-after-wait',denied.result.status===403 && denied.calls===0 && denied.result.body.error==='grant_inactive',()=>({status:denied.result.status,code:denied.result.body?.error,calls:denied.calls}));
     check('parent-removal-no-renewal-or-budget-effect',await family(seat)===liveBefore);
     check('removed-parent-child-unusable',(await use(current.raw)).status!==200);
@@ -2480,7 +2522,7 @@ async function delegatedLocalScenario(ctx,scenario) {
     // and revokes the other member's family before membership is removed.
     const keeper=await human(ctx,'m3-keeper');await member(ctx,workspaceId,keeper,'owner');
     keeper.identity.interactiveAuthAtSeconds=Number((await observer`SELECT extract(epoch FROM clock_timestamp()) AS seconds`)[0].seconds);
-    const removed=await manage(ctx,keeper,workspaceId,{kind:'remove_member',user_id:owner.userId,landing_authority_successor_user_id:keeper.userId});
+    const removed=await manage(ctx,keeper,workspaceId,{kind:'remove_member',user_id:owner.userId});
     check('human-removal-through-real-command',removed.status===200 && removed.body.status==='accepted',()=>({status:removed.status,code:removed.body?.error,accepted:removed.body?.status==='accepted'}));
     const [terminal]=await observer`SELECT m.revoked_at IS NOT NULL AS removed,g.revoked_at IS NOT NULL AS revoked,
       EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='renewal_grant' AND z.target_id=g.renewal_grant_id)
@@ -2924,8 +2966,10 @@ async function localResumeScenario(ctx,scenario) {
       const side=await adminSide(ctx,{owner,workspaceId},`resume-${policy}`);
       const s=await mint(policy,side);check(`live-before-${policy}`,await use(s.raw)===200);await pause(s);
       const before=await state(s);
-      if(policy==='revoked') await observer`UPDATE swarm.admin_grants SET state='revoked',revoked_at=clock_timestamp()
-        WHERE grant_id=${side.grant}::uuid`;
+      if(policy==='revoked') {
+        const revoked=await side.revoke();
+        if(revoked.result.status!==200) fail('admin_grant_refused');
+      }
       else await observer`UPDATE swarm.admin_grants SET worker_scope_ceiling=ARRAY[]::text[] WHERE grant_id=${side.grant}::uuid`;
       const result=await resume(s);
       check(`current-${policy}-parent-denies-without-resume`,result.status===403 && await state(s)===before);
