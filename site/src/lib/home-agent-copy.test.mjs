@@ -160,7 +160,7 @@ test("the Lists & docs fact never reads On for a hosted agent; a local agent kee
   for (const approval of [null, { until: null }, { until: "Oct 9, 2026" }]) {
     const fact = listsAndDocsFact(true, approval);
     assert.deepEqual(fact, { id: "lists", label: "Lists & docs", detail: HOSTED_LISTS_NOTE, state: "unavailable" });
-    assert.equal(switchWord(fact.state), "Not available");
+    assert.equal(switchWord(fact.state), "Lists when enabled");
   }
   assert.deepEqual(listsAndDocsFact(false, { until: null }), { id: "lists", label: "Lists & docs", detail: "Allowed until you withdraw it.", state: "on" });
   assert.deepEqual(listsAndDocsFact(false, { until: "Oct 9, 2026" }), { id: "lists", label: "Lists & docs", detail: "Allowed until Oct 9, 2026.", state: "on" });

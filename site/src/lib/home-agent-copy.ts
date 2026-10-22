@@ -90,7 +90,7 @@ export function policyChangeLabel(next: "owner" | "anyone"): string {
 
 /** The value word of a plain fact row (Lists & docs, What it posts here); the same words the switch row used. */
 export function switchWord(state: "on" | "off" | "always" | "never" | "unavailable"): string {
-  return { on: "On", off: "Off", always: AGENT_COPY.postsHereAlways, never: "Never", unavailable: "Not available" }[state];
+  return { on: "On", off: "Off", always: AGENT_COPY.postsHereAlways, never: "Never", unavailable: "Lists when enabled" }[state];
 }
 
 /**
