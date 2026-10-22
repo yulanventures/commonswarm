@@ -20,15 +20,20 @@ test("New workspace and role controls wrap, support native forms, and keep confi
     }));
     const dashboard = await readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
     const style = dashboard.match(/<style\b[^>]*>([\s\S]*?)<\/style>/)?.[1]; assert.ok(style);
-    const styles = await Promise.all(["tokens.css", "home/onboarding.css", "home/people.css"].map(file => readFile(new URL(`../../styles/${file}`, import.meta.url), "utf8")));
+    const styles = await Promise.all(["tokens.css", "home/onboarding.css", "home/people.css", "kylon-tokens.css", "kylon-font.css", "kylon-new-workspace.css"].map(async file => {
+      const css = await readFile(new URL(`../../styles/${file}`, import.meta.url), "utf8");
+      // File fixtures load the same licensed source font, without copying or substituting its bytes.
+      return file === "kylon-font.css" ? css.replace('url("/fonts/inter-latin.woff2")',
+        `url("${new URL("../../../public/fonts/inter-latin.woff2", import.meta.url).href}")`) : css;
+    }));
     for (const dark of [false, true]) {
-      await writeFile(fixture, `<!doctype html><html${dark ? ' data-theme="dark"' : ''}><head><style>
+      await writeFile(fixture, `<!doctype html><html${dark ? ' data-theme="dark"' : ''}><head><meta charset="utf-8"><style>
         * { box-sizing: border-box; } body { margin: 0; } [hidden] { display: none !important; }
         ${styles.join("\n")} ${style}
-      </style></head><body><main class="dashboard"><div id="form"></div>
+      </style></head><body><live-dashboard class="dashboard" data-kylon-shell><div id="form"></div>
         <dialog class="dashboard__roster-dialog" data-roster-dialog><div class="dashboard__roster-dialog-body">
           <div class="dashboard__roster-dialog-list" id="roster"></div><section class="pd-detail" id="detail" hidden></section>
-        </div></dialog></main><script>${bundles.join("\n")}</script><script>
+        </div></dialog></live-dashboard><script>${bundles.join("\n")}</script><script>
         (async () => {
           const hostile = '<img src=x onerror="document.title=1">';
           const formRoot = document.querySelector('#form');
