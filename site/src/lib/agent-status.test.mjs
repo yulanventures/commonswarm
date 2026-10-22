@@ -187,8 +187,17 @@ test("home disconnect and local message guidance reuse the dialog fixes", () => 
     const s = homeAgentState(input({ ...facts, workingOn, hasWakePath: true, oldestUnobservedAt: at(180000) }), NOW);
     assert.equal(s.kind, "disconnected"); assert.equal(s.word, "Disconnected"); assert.equal(s.detail, detail);
   }
-  const paused = homeAgentState(input({ own: false, mayManage: false, grant: key({ suspendedAt: at(1) }) }), NOW);
-  assert.equal(paused.fix.action, null); assert.equal(paused.fix.allowed, false); assert.equal(paused.fix.sentence, "Ask the connection owner to check its access.");
+  // An owner-chosen end date prevents resuming even while access is suspended.
+  const paused = homeAgentState(input({ own: false, mayManage: false, grant: key({ suspendedAt: at(1), connectionExpiresAt: at(1), connectionExpiredAt: null }) }), NOW);
+  assert.equal(paused.fix.action, null); assert.equal(paused.fix.allowed, false); assert.equal(paused.fix.sentence, "This connection has also ended and cannot be resumed.");
+  // A legacy technical horizon is recoverable; viewer permissions still apply.
+  for (const mayManage of [true, false]) {
+    const legacy = homeAgentState(input({ own: mayManage, mayManage, grant: key({ kind: "timeboxed", horizonExpiresAt: at(1), suspendedAt: at(1) }) }), NOW);
+    assert.equal(legacy.detail, "Access suspended");
+    assert.equal(legacy.fix.action, "resume"); assert.equal(legacy.fix.allowed, mayManage);
+    assert.equal(legacy.fix.askWho, mayManage ? null : "Mei");
+    assert.equal(legacy.fix.sentence, mayManage ? "Review its access before resuming it." : "Ask Mei to review and resume it.");
+  }
   const sample = homeAgentState(input({ sample: true, grant: key({ revokedAt: at(1) }) }), NOW);
   assert.equal(sample.fix.allowed, false);
   const clock = new Date(2026, 9, 5, 10, 10).getTime();
