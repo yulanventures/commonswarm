@@ -14,7 +14,15 @@ const setupScript = `
   const accountParent = account.parentElement, slot = app.querySelector('[data-home-workspace-shell]');
   const side = app.querySelector('[data-home-side-slot]');
   const calls = [], refreshRecords = [], workspace = { id: 'fixture-w', name: 'Invented workspace', todosAvailable: true };
-  const refreshing = (owner, node, replace) => { refreshRecords.push({ owner, node, parent: node.parentNode, next: node.nextSibling }); replace(); };
+  const refreshing = (owner, node, replace) => {
+    const active = () => { const element = document.activeElement; return {
+      tag: element?.tagName, id: element?.id, homeFocusKey: element?.dataset?.homeFocusKey,
+    }; };
+    const record = { owner, node, parent: node.parentNode, next: node.nextSibling,
+      rendererHadFocus: node.contains(document.activeElement), rendererBefore: active(), rendererAfter: null, rendererHasFocusAfter: null };
+    refreshRecords.push(record);
+    try { replace(); } finally { record.rendererAfter = active(); record.rendererHasFocusAfter = node.contains(document.activeElement); }
+  };
   // Instrument actual native MQL registrations; never replace their events or matches.
   const originalMatchMedia = window.matchMedia, mediaRecords = [];
   window.matchMedia = query => {
@@ -58,11 +66,11 @@ const setupScript = `
     state: { kind: 'idle', word: 'Idle', detail: 'Invented local display fact', attention: false,
       fix: { action: null, allowed: false, askWho: null, sentence: '' } } };
   const groups = [{ person: owner, agents: [agent] }];
-  function renderRail() {
+  function renderRail(includePeople = true) {
     host.refreshTodoContext(() => refreshing('navigation', context, () => replaceHomeRegion(context, 'rail', [buildHomeRail(document, {
       sample: false, catchUp: { href: '?v=catchup', current: false, needsYou: null },
       workspaces: [workspace, { id: 'fixture-other', name: 'Invented other workspace' }].map(row => ({ ...row, href: '?w=' + row.id, current: row.id === workspace.id, needsYou: null })),
-      people: { title: 'People & agents', groups, other: [] },
+      people: { title: 'People & agents', groups: includePeople ? groups : [], other: [] },
     }, { navigate: href => calls.push({ kind: 'rail-navigate', href }), openPerson: id => calls.push({ kind: 'rail-person', id }),
       openAgent: id => calls.push({ kind: 'rail-agent', id }) })])));
   }

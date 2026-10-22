@@ -323,10 +323,56 @@ const fixtureScript = `
     check('real refusal remediation remains reachable', visible(door)); door.click();
     check('real refusal callback retained, no invented approval', calls.slice(before).some(call => call.kind === 'resource-access'));
     fixture.renderResources('ready');
-    context.querySelector('[data-rail-person="context-owner"]').focus(); fixture.renderRail();
-    check('replaced navigation child restores focus to retained native summary', document.activeElement === summary('Workspace navigation'));
-    fixture.side.querySelector('[data-side-todo-complete]').focus(); fixture.renderResources();
-    check('replaced resource child restores focus to retained native summary', document.activeElement === summary('Workspace resources'));
+    const focusFact = node => ({ tag: node?.tagName, id: node?.id, key: node?.dataset?.homeFocusKey,
+      principal: node?.dataset?.railPerson ?? node?.dataset?.sideTodoComplete, connected: node?.isConnected,
+      rect: node?.getBoundingClientRect().toJSON(), blocked: node?.closest('[hidden],[inert]')?.className });
+    for (const row of [
+      { owner: 'navigation', node: context, selector: '[data-rail-person="context-owner"]', principal: 'context-owner',
+        summary: 'Workspace navigation', heading: 'hm-rail-workspaces-title', text: 'Workspaces',
+        ready: () => fixture.renderRail(), absent: () => fixture.renderRail(false) },
+      { owner: 'resources', node: fixture.side, selector: '[data-side-todo-complete="side-allowed"]', principal: 'side-allowed',
+        summary: 'Workspace resources', heading: 'hm-side-todos-title', text: 'To-dos',
+        ready: () => fixture.renderResources('ready'), absent: () => fixture.renderResources('refused') },
+    ]) {
+      const old = row.node.querySelector(row.selector), key = old?.dataset.homeFocusKey, callCount = calls.length;
+      const nativeSummary = summary(row.summary), detail = () => ({ width: innerWidth, phone: matchMedia('(max-width:52rem)').matches,
+        old: focusFact(old), active: focusFact(document.activeElement), slot: { same: row.node === (row.owner === 'navigation' ? context : fixture.side),
+          parent: row.node.parentElement?.className, ownsActive: row.node.contains(document.activeElement) }, summaries: ['Workspace navigation', 'Workspace resources'].map(label => ({
+            text: label, open: summary(label)?.parentElement.open, active: document.activeElement === summary(label) })),
+        callsBefore: callCount, callsAfter: calls.length });
+      old?.focus();
+      check('focused ' + row.owner + ' principal owns pre-refresh focus', !!key && document.activeElement === old && visible(old)
+        && !old.closest('[inert]') && focusFact(old).principal === row.principal, detail());
+      let start = fixture.refreshRecords.length; row.ready();
+      const replacement = row.node.querySelector(row.selector), stableRecords = fixture.refreshRecords.slice(start);
+      check('replaced ' + row.owner + ' child retains exact logical focus on new node', stableRecords.length === 1
+        && stableRecords[0].owner === row.owner && !!old && !old.isConnected && replacement !== old && !!replacement
+        && replacement.dataset.homeFocusKey === key && focusFact(replacement).principal === row.principal
+        && document.activeElement === replacement && visible(replacement) && !replacement.closest('[inert]')
+        && calls.length === callCount, { ...detail(), replacement: focusFact(replacement), renderer: stableRecords.map(record => ({
+          owner: record.owner, rendererHadFocus: record.rendererHadFocus, before: record.rendererBefore, after: record.rendererAfter,
+          rendererHasFocusAfter: record.rendererHasFocusAfter })) });
+      check('focused ' + row.owner + ' principal owns pre-removal focus', document.activeElement === replacement && visible(replacement)
+        && replacement.dataset.homeFocusKey === key && !replacement.closest('[inert]'), { ...detail(), replacement: focusFact(replacement) });
+      start = fixture.refreshRecords.length; row.absent();
+      const absentRecords = fixture.refreshRecords.slice(start), record = absentRecords[0], heading = row.node.querySelector('#' + row.heading);
+      // Ownership was observed BEFORE replaceHomeRegion; never select the expectation from its result.
+      const expected = record?.rendererHadFocus ? heading : nativeSummary;
+      const matches = [...app.querySelectorAll('[data-home-focus-key]')].filter(node => node.dataset.homeFocusKey === key);
+      check('removed ' + row.owner + ' principal reaches exact owner fallback', absentRecords.length === 1 && record.owner === row.owner
+        && typeof record.rendererHadFocus === 'boolean' && !!replacement && !replacement.isConnected && !row.node.querySelector(row.selector) && matches.length === 0
+        && !!expected && document.activeElement === expected && visible(expected) && !expected.closest('[inert]')
+        && (record.rendererHadFocus ? expected.id === row.heading && expected.textContent === row.text && !!expected.dataset.homeFocusKey
+          : expected.tagName === 'SUMMARY' && expected.textContent === row.summary && expected === summary(row.summary))
+        && nativeSummary === summary(row.summary) && nativeSummary.parentElement.open && calls.length === callCount,
+        { ...detail(), removed: focusFact(replacement), heading: focusFact(heading), expected: focusFact(expected), matchingKeys: matches.length,
+          renderer: absentRecords.map(item => ({ owner: item.owner, rendererHadFocus: item.rendererHadFocus, before: item.rendererBefore, after: item.rendererAfter,
+            rendererHasFocusAfter: item.rendererHasFocusAfter })) });
+      row.ready();
+      check('restored ' + row.owner + ' data keeps exact context and callbacks', !!row.node.querySelector(row.selector) && contextMounted()
+        && sameNodes() && summary('Workspace navigation').parentElement.open && summary('Workspace resources').parentElement.open
+        && calls.length === callCount, detail());
+    }
     const start = fixture.refreshRecords.length, accountMenu = account.querySelector('[data-user-menu]'), option = account.querySelector('[data-local-account-option]');
     accountMenu.hidden = false; option.focus(); fixture.renderHeader(); fixture.renderResources(); fixture.renderRail();
     ({ bar, menu, heading } = fixture);
