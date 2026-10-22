@@ -1004,6 +1004,16 @@ function lockResultDiagnostics(result) {
   if (/^(?:00|01|02|03|08|09|0A|0B|0F|0L|0P|0Z|20|21|22|23|24|25|26|27|28|2B|2D|2F|34|38|39|3B|3D|3F|40|42|44|53|54|55|57|58|F0|HV|P0|XX)[0-9A-Z]{3}$/u.test(result?.sqlstate ?? '')) diagnostic.sqlstate=result.sqlstate;
   if (['null-renew','future-renew','null-replace','future-replace','elapsed','revoked','parent-dead','deadline-wait','security-suspended'].includes(result?.loop_mode)) diagnostic.loop_mode=result.loop_mode;
   if (['setup','invoked','waiting','settled'].includes(result?.late_revoke_phase)) diagnostic.late_revoke_phase=result.late_revoke_phase;
+  if (['late-deadline-update','late-access-rotation','parent-policy-reduction','permanent-delivery'].includes(result?.fixture_site))
+    diagnostic.fixture_site=result.fixture_site;
+  const pgFields = {
+    pg_schema:['swarm','commonswarm_oauth','public'],
+    pg_table:['admin_accounts','admin_grants','admin_grant_bindings','admin_access_issuances','agent_tokens','renewal_grants','revocation_tombstones'],
+    pg_constraint:['admin_access_issuances_provider_grant_id_generation_key','admin_access_issuances_pkey','admin_access_issuances_access_token_digest_key'],
+    pg_routine:['_bt_check_unique','DeadLockReport','aclcheck_error'],
+  };
+  for (const [field,allowed] of Object.entries(pgFields))
+    if (allowed.includes(result?.[field])) diagnostic[field]=result[field];
   const schemas = {
     'residual-no-longer-authenticates': {status:'status'},
     'revocation-final-ledger-wait-observed': {wait_result:'wait'},
@@ -1011,12 +1021,15 @@ function lockResultDiagnostics(result) {
       broadened_status:'status',broadened_code:'code',broadened_calls:'count',human_status:'status',human_code:'code'},
     'fresh-parent-denial-after-wait': {status:'status',code:'code',calls:'count'},
     'human-removal-through-real-command': {status:'status',code:'code',accepted:'boolean'},
-    'membership-and-hidden-parent-family-atomic': {removed:'boolean',revoked:'boolean',all_tokens_revoked:'boolean'},
+    'membership-and-hidden-parent-family-atomic': {removed:'boolean',revoked:'boolean',all_tokens_revoked:'boolean',
+      renewal_tombstone:'boolean',no_live_leaf_tokens:'boolean'},
+    ...Object.fromEntries(['null-renew','future-renew','null-replace','future-replace','elapsed','revoked','parent-dead','deadline-wait','security-suspended']
+      .map(mode=>[`permanent-${mode}-delivery`,{status:'status',code:'code',calls:'count'}])),
   };
   const codes = ['recipient_runtime_required','worker_scope_forbidden','human_confirmation_required','grant_inactive',
     'recipient_forbidden','capability_forbidden','current_rights_required','target_forbidden','scope_forbidden','credential_kind_forbidden','internal_error','forbidden','unauthenticated','unauthorized','invalid_request','fresh_auth_required',
     'insufficient_scope','client_outdated','human_sign_in_required','not_found','admin_transaction_failed',
-    'admin_command_failed','admin_failure_audit_unavailable','temporarily_unavailable'];
+    'admin_command_failed','admin_failure_audit_unavailable','temporarily_unavailable','renewal_grant_suspended','renewal_idle_suspended','renewal_grant_revoked','renewal_horizon_reached'];
   const rows = [], seen = new Set();
   if (Array.isArray(result?.failed_observations)) for (const row of result.failed_observations.slice(0,6)) {
     if (!Object.hasOwn(schemas,row?.name) || seen.has(row.name)) continue;
@@ -1248,6 +1261,10 @@ function transactionException(error) {
   return lockResultDiagnostics({
     exception_kind:[TypeError,ReferenceError,SyntaxError,RangeError].find(type=>error instanceof type)?.name ?? 'Error',
     sqlstate:sqlstate(error),
+    pg_schema:error?.schema_name ?? error?.schema,
+    pg_table:error?.table_name ?? error?.table,
+    pg_constraint:error?.constraint_name ?? error?.constraint,
+    pg_routine:error?.routine,
     exception_sites:typeof error?.stack==='string' ? [...error.stack.matchAll(/(tests\/support\/admin-principal-lock-order-harness\.mjs|supabase\/functions\/command\/(?:admin-delegation|index)\.ts|src\/protocol\/admin-authority\.ts):([1-9][0-9]{0,6}):([1-9][0-9]{0,5})(?=$|[\s)])/gu)].slice(0,4).map(m=>({source:m[1],line:Number(m[2]),column:Number(m[3])})) : [],
   });
 }
@@ -1365,7 +1382,7 @@ async function denoMain() {
     exitCode = 1;
     console.log('LOCK_ORDER_RESULT ' + JSON.stringify({ ...out,
       error: error instanceof HarnessStage ? error.code : failureCode(error),
-      ...(failureCode(error)==='non_sql' && !(error instanceof HarnessStage) ? transactionException(error) : {}), http_refused: http.refused }));
+      ...(!(error instanceof HarnessStage) ? transactionException(error) : {}), http_refused: http.refused }));
   }
   Deno.exit(exitCode);
 }
@@ -2221,9 +2238,10 @@ async function delegatedLocalScenario(ctx,scenario) {
         });
       } else pending=side.invoke(command,{worker:true});
       const result=await pending;
+      if(result.exception) Object.assign(out,result.exception,{fixture_site:'permanent-delivery'});
       const positive=mode.startsWith('null') || mode.startsWith('future');
       check(`permanent-${mode}-delivery`,positive ? result.result.status===200 && result.calls===1 && result.delivery!==null
-        : result.result.status===403 && result.calls===0);
+        : result.result.status===403 && result.calls===0,()=>({status:result.result.status,code:result.result.body?.error,calls:result.calls}));
       if(!positive) check(`permanent-${mode}-no-effects`,await family(root)===before);
     }
   } else if (scenario==='delegated-local-selector-compatibility') {
@@ -2316,6 +2334,7 @@ async function delegatedLocalScenario(ctx,scenario) {
     // requires identical millisecond deadlines in durable and projected state.
     // Shorten the bound ceiling too; use real signed/ledgered short issuance
     // below, since the existing five-minute JWT cannot fit this parent.
+    out.fixture_site='late-deadline-update';
     const lateExpiry=await observer.begin(async tx=>{
       await tx`SELECT owner_user_id FROM swarm.admin_accounts WHERE owner_user_id=${owner.userId}::uuid FOR UPDATE`;
       const [deadline]=await tx`UPDATE swarm.admin_grants
@@ -2332,7 +2351,10 @@ async function delegatedLocalScenario(ctx,scenario) {
           AND provider_grant_id=${lateAdmin.issuerFixture.oauth.provider}`;
       return deadline.ms;
     });
-    const lateAccess=await lateAdmin.issuerFixture.oauth.issue(0,{exp:Math.floor(lateExpiry/1000)});
+    // oauthFixture already ledgered generation 0. Rotate once; uniqueness and
+    // the real binding/issuance triggers remain active.
+    out.fixture_site='late-access-rotation';
+    const lateAccess=await lateAdmin.issuerFixture.oauth.issue(1,{exp:Math.floor(lateExpiry/1000)});
     const before=await family(late);let latePending;
     await observer.begin(async tx=>{
       const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
@@ -2502,6 +2524,7 @@ async function delegatedLocalScenario(ctx,scenario) {
     current={...seat,token:nativeBody.token_id,raw:nativeBody.agent_token};
     check('cross-connection-child-remains-usable',(await use(current.raw)).status===200);
     const liveBefore=await family(seat);
+    out.fixture_site='parent-policy-reduction';
     // This is a trusted backend policy reduction under the production role,
     // never a caller UUID masquerading as a new cryptographic authority.
     await observer.begin(async tx=>{
@@ -2514,7 +2537,7 @@ async function delegatedLocalScenario(ctx,scenario) {
         WHERE grant_id=${admin.grant}::uuid`;
     });
     const denied=await pending;
-    if(denied.exception) Object.assign(out,denied.exception);
+    if(denied.exception) Object.assign(out,denied.exception,{fixture_site:'parent-policy-reduction'});
     check('fresh-parent-denial-after-wait',denied.result.status===403 && denied.calls===0 && denied.result.body.error==='grant_inactive',()=>({status:denied.result.status,code:denied.result.body?.error,calls:denied.calls}));
     check('parent-removal-no-renewal-or-budget-effect',await family(seat)===liveBefore);
     check('removed-parent-child-unusable',(await use(current.raw)).status!==200);
@@ -2525,13 +2548,17 @@ async function delegatedLocalScenario(ctx,scenario) {
     const removed=await manage(ctx,keeper,workspaceId,{kind:'remove_member',user_id:owner.userId});
     check('human-removal-through-real-command',removed.status===200 && removed.body.status==='accepted',()=>({status:removed.status,code:removed.body?.error,accepted:removed.body?.status==='accepted'}));
     const [terminal]=await observer`SELECT m.revoked_at IS NOT NULL AS removed,g.revoked_at IS NOT NULL AS revoked,
+      EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='renewal_grant' AND z.target_id=g.renewal_grant_id) AS renewal_tombstone,
+      NOT EXISTS(SELECT 1 FROM swarm.agent_tokens t WHERE t.renewal_grant_id=g.renewal_grant_id AND t.revoked_at IS NULL
+        AND NOT EXISTS(SELECT 1 FROM swarm.agent_tokens child WHERE child.predecessor_token_id=t.token_id
+          AND child.first_used_at IS NOT NULL AND child.revoked_at IS NULL)) AS no_live_leaf_tokens,
       EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='renewal_grant' AND z.target_id=g.renewal_grant_id)
         AND NOT EXISTS(SELECT 1 FROM swarm.agent_tokens t WHERE t.renewal_grant_id=g.renewal_grant_id AND t.revoked_at IS NULL
           AND NOT EXISTS(SELECT 1 FROM swarm.agent_tokens child WHERE child.predecessor_token_id=t.token_id
             AND child.first_used_at IS NOT NULL AND child.revoked_at IS NULL)) AS all_tokens_revoked
       FROM swarm.memberships m JOIN swarm.renewal_grants g ON g.workspace_id=m.workspace_id
       WHERE m.workspace_id=${workspaceId}::uuid AND m.user_id=${owner.userId}::uuid AND g.renewal_grant_id=${seat.grant}::uuid`;
-    check('membership-and-hidden-parent-family-atomic',terminal.removed && terminal.revoked && terminal.all_tokens_revoked,()=>({removed:terminal.removed,revoked:terminal.revoked,all_tokens_revoked:terminal.all_tokens_revoked}));
+    check('membership-and-hidden-parent-family-atomic',terminal.removed && terminal.revoked && terminal.all_tokens_revoked,()=>({removed:terminal.removed,revoked:terminal.revoked,all_tokens_revoked:terminal.all_tokens_revoked,renewal_tombstone:terminal.renewal_tombstone,no_live_leaf_tokens:terminal.no_live_leaf_tokens}));
   }
   return {checks,failed_observations};
 }

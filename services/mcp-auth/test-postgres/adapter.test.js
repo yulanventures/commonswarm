@@ -5,7 +5,7 @@ import { after, before, test } from "node:test";
 import { Pool } from "pg";
 
 import { createPostgresAdapter } from "../src/postgres-adapter.js";
-import { fixture as adminFixture } from "../../../tests/support/admin-schema-db.ts";
+import { fixture as adminFixture, localClusterAdminUrl } from "../../../tests/support/admin-schema-db.ts";
 
 const databaseUrl = process.env.MCP_OAUTH_TEST_DATABASE_URL ??
   "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
@@ -782,14 +782,39 @@ test('unknown and permission resolve failures roll back without tombstones or ar
 });
 
 test('real delegated-admin artifacts refuse hosted reads and retirement outside their transaction', async () => {
-  const f = adminFixture(), c = await admin.connect();
+  const f = adminFixture();
+  // The shared schema fixture uses SET LOCAL ROLE for each guarded insert.
+  // Its established loopback cluster-admin context can SET those roles; the
+  // ordinary postgres login intentionally has no runtime-role membership.
+  const preparation = new Pool({ connectionString: localClusterAdminUrl(databaseUrl), max: 1 });
+  const c = await preparation.connect();
+  let preparationStep = 'fixture-prepare:begin';
   try {
     await c.query('BEGIN');
     // Reuse the established schema fixture and its actual resource/binding
     // guards; no authority or admin transaction context is mocked.
-    for (const part of f.preparation.filter(p => ['fixture-prepare:account','fixture-prepare:grant','fixture-prepare:resource','fixture-prepare:binding'].includes(p.step))) await c.query(part.sql);
+    for (const part of f.preparation) {
+      preparationStep = part.step;
+      await c.query(part.sql);
+    }
     await c.query('COMMIT');
-  } finally { await c.query('ROLLBACK').catch(() => {}); c.release(); }
+  } catch (error) {
+    // Fixed fixture phase/role/object only: never driver messages or SQL.
+    const diagnostic = Object.assign(new Error('delegated-admin fixture preparation failed'), {
+      preparation_step: preparationStep,
+      preparation_role: 'supabase_admin',
+      ...(preparationStep === 'fixture-prepare:resource' ? { requested_role: 'commonswarm_oauth_runtime' } : {}),
+      ...(/^[0-9A-Z]{5}$/u.test(error.code ?? '') ? { code: error.code } : {}),
+      ...(['swarm','commonswarm_oauth','auth'].includes(error.schema) ? { schema: error.schema } : {}),
+      ...(['admin_grant_bindings','provider_grant_resources','admin_verified_clients','admin_client_owner_approvals'].includes(error.table) ? { table: error.table } : {}),
+      ...(['aclcheck_error','check_role','check_role_membership'].includes(error.routine) ? { routine: error.routine } : {}),
+    });
+    throw diagnostic;
+  } finally {
+    await c.query('ROLLBACK').catch(() => {});
+    c.release();
+    await preparation.end();
+  }
   const resource = 'https://api.commonswarm.com/admin', token = randomUUID();
   for (const [model,id,payload] of [
     ['Grant',f.provider,{ accountId: f.owner,clientId: f.client,jti: f.provider,resources: { [resource]: 'admin:read' } }],
