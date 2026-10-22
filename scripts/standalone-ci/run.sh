@@ -17,16 +17,17 @@ import time
 import uuid
 
 SUITES = ('box-dry-run', 'server', 'p1-cli', 'site', 'unit')
+PROFILES = ('server-permanence',)
 def refuse(message):
     sys.exit('REFUSE: ' + message)
 
 args = sys.argv[1:]
 if len(args) != 4 or args[0] not in ('--sha', '--ref') or args[2] != '--suite':
-    refuse('use --sha <40hex> or --ref main, followed by --suite all|server|p1-cli|site|box-dry-run|unit')
+    refuse('use --sha <40hex> or --ref main, followed by --suite all|server|p1-cli|site|box-dry-run|unit|server-permanence')
 requested, selection = args[1], args[3]
 if (args[0] == '--sha' and not re.fullmatch('[0-9a-f]{40}', requested)) or (args[0] == '--ref' and requested != 'main'):
     refuse('only an exact lowercase SHA or --ref main is accepted')
-if selection not in (*SUITES, 'all'):
+if selection not in (*SUITES, *PROFILES, 'all'):
     refuse('unknown suite')
 cfg_path = Path(os.environ.get('COMMONSWARM_CI_CONFIG', '/opt/commonswarm-ci/config.json'))
 cfg = json.loads(cfg_path.read_text())
@@ -164,7 +165,7 @@ def interrupted(sig, frame):
     stopping = True
     if active is not None and active.poll() is None:
         try:
-            os.killpg(active.pid, signal.SIGTERM)
+            os.kill(active.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
 signal.signal(signal.SIGTERM, interrupted)
@@ -178,6 +179,21 @@ if probe.returncode != 0:
     refuse('cannot observe root systemd; PE process visibility unproven')
 def stamp():
     return dt.datetime.now(dt.timezone.utc).isoformat()
+def stop_child(child, grace=1):
+    # Only the Popen child recorded by this controller; never a process group.
+    if child.poll() is None:
+        try:
+            child.terminate()
+        except ProcessLookupError:
+            pass
+    try:
+        child.wait(timeout=grace)
+    except sp.TimeoutExpired:
+        try:
+            child.kill()
+        except ProcessLookupError:
+            pass
+        child.wait(timeout=5)
 def cmd(argv, interruptible=False, **kw):
     global active
     if not interruptible:
@@ -199,13 +215,7 @@ def cmd(argv, interruptible=False, **kw):
         if active.returncode:
             raise sp.CalledProcessError(active.returncode, argv)
     except BaseException as failure:
-        if active.poll() is None:
-            os.killpg(active.pid, signal.SIGTERM)
-            try:
-                active.wait(timeout=1)
-            except sp.TimeoutExpired:
-                os.killpg(active.pid, signal.SIGKILL)
-                active.wait(timeout=5)
+        stop_child(active)
         if isinstance(failure, StopRequested):
             sys.exit(130)
         raise
@@ -257,7 +267,7 @@ with (state / 'queue.lock').open('a') as lock:
         if stopping:
             overall = 130
             break
-        timeout = server_timeout if suite == 'server' else default_timeout
+        timeout = server_timeout if suite in ('server', *PROFILES) else default_timeout
         suite_clock = time.monotonic()
         deadline = suite_clock + timeout
         deferred_wait = 0.0
@@ -373,12 +383,7 @@ with (state / 'queue.lock').open('a') as lock:
                             raise sp.TimeoutExpired(argv, timeout)
                         check_capacity()
                     except BaseException as failure:
-                        os.killpg(active.pid, signal.SIGTERM) if active.poll() is None else None
-                        try:
-                            active.wait(timeout=1 if isinstance(failure, Deferred) else 60)
-                        except sp.TimeoutExpired:
-                            os.killpg(active.pid, signal.SIGKILL)
-                            active.wait(timeout=5)
+                        stop_child(active, 1 if isinstance(failure, Deferred) else 60)
                         raise
                     finally:
                         active = None
