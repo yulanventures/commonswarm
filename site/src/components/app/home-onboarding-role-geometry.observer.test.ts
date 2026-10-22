@@ -20,7 +20,7 @@ test("New workspace and role controls wrap, support native forms, and keep confi
     }));
     const dashboard = await readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
     const style = dashboard.match(/<style\b[^>]*>([\s\S]*?)<\/style>/)?.[1]; assert.ok(style);
-    const styles = await Promise.all(["tokens.css", "home/onboarding.css", "home/people.css", "kylon-tokens.css", "kylon-font.css"].map(async file => {
+    const styles = await Promise.all(["tokens.css", "home/onboarding.css", "home/people.css", "kylon-tokens.css", "kylon-font.css", "kylon-new-workspace.css"].map(async file => {
       const css = await readFile(new URL(`../../styles/${file}`, import.meta.url), "utf8");
       // File fixtures load the same licensed source font, without copying or substituting its bytes.
       return file === "kylon-font.css" ? css.replace('url("/fonts/inter-latin.woff2")',
