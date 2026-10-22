@@ -591,7 +591,7 @@ async function historicalCatalog(sql) {
         FROM pg_namespace n WHERE n.nspname=ANY(${schemas}::text[])
       UNION ALL SELECT 'extension',e.extname,jsonb_build_array(n.nspname,e.extversion,pg_get_userbyid(e.extowner))
         FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE n.nspname=ANY(${schemas}::text[])
-      UNION ALL SELECT 'default-acl',n.nspname||'.'||pg_get_userbyid(a.defaclrole)||'.'||a.defaclobjtype::text,
+      UNION ALL SELECT 'default-acl',n.nspname||'.'||pg_get_userbyid(a.defaclrole)||'.'||a.defaclobjtype,
         to_jsonb(a.defaclacl) FROM pg_default_acl a JOIN pg_namespace n ON n.oid=a.defaclnamespace WHERE n.nspname=ANY(${schemas}::text[])
       UNION ALL SELECT 'index',n.nspname||'.'||c.relname,to_jsonb(pg_get_indexdef(c.oid))
         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind='i' AND n.nspname=ANY(${schemas}::text[])
