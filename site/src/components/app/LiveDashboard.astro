@@ -38,6 +38,7 @@ import "../../styles/kylon-shell.css";
 import "../../styles/kylon-layout/index.css";
 import "../../styles/kylon-workspace-settings-integration.css";
 import "../../styles/kylon-files.css";
+import "../../styles/kylon-wiki.css";
 import "../../styles/dashboard-welcome.css";
 
 const signInMethods = signInDoors(await enabledProvidersForBuild({
@@ -619,8 +620,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               <ul class="dashboard__file-list" data-file-list hidden></ul>
             </section>
 
-            <section class="dashboard__brain-view" data-channel-view="brain" hidden>
-              <h1 class="hm-pane-title" tabindex="-1">Wiki</h1>
+            <section class="dashboard__brain-view" data-channel-view="brain" aria-labelledby="dashboard-wiki-title" hidden>
+              <h1 id="dashboard-wiki-title" class="hm-pane-title" tabindex="-1">Wiki</h1>
+              <p class="dashboard__wiki-description">Notes this workspace keeps, written in Markdown. Every save keeps the earlier version.</p>
               <aside class="dashboard__brain-index" aria-label="Wiki pages">
                 <p class="dashboard__brain-notice" role="status" data-brain-notice hidden></p>
                 <p class="dashboard__brain-empty" data-brain-empty></p>
@@ -629,7 +631,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               <article class="dashboard__brain-topic" id="dashboard-brain-topic" data-brain-detail hidden>
                 <header class="dashboard__brain-topic-head">
                   <div>
-                    <h2 data-brain-title></h2>
+                    <h2 data-brain-title tabindex="-1"></h2>
                     <p data-brain-meta></p>
                   </div>
                   <button class="dashboard__button dashboard__button--secondary" type="button" data-brain-edit>
@@ -637,6 +639,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                   </button>
                 </header>
                 <p class="dashboard__form-error" role="alert" data-brain-error hidden></p>
+                <button class="dashboard__button dashboard__button--secondary" type="button" data-brain-retry hidden>Retry</button>
                 <p class="dashboard__brain-body-mode" data-brain-body-mode hidden>
                   <span>Rendered from markdown</span>
                   <span aria-hidden="true"> · </span>
@@ -4483,7 +4486,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       const pane = homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" ? homeRoute.view : "chat";
       const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
-        people: currentHomePeople().groups, pane, todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
+        people: currentHomePeople().groups, pane, contextTitle: homeRoute.view === "wiki", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
         hrefs: { chat: routeHref({ view: "chat", workspaceId: workspace.id }), todos: routeHref({ view: "todos", workspaceId: workspace.id }),
           lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }),
           wiki: routeHref({ view: "wiki", workspaceId: workspace.id }), workspaces: routeHref({ view: "catchup" }) },
@@ -4630,8 +4633,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (homeRoute.view !== "people") parkPeopleHosts();
       if (channel) channel.hidden = home || homeRoute.view === "todo" || homeRoute.view === "agent" || homeRoute.view === "todos" || homeRoute.view === "people";
       const channelHead = channel?.querySelector<HTMLElement>(".dashboard__channel-head");
-      if (channelHead) channelHead.hidden = homeRoute.view === "files";
-      channel?.setAttribute("aria-labelledby", homeRoute.view === "files" ? "dashboard-files-title" : "dashboard-channel-title");
+      if (channelHead) channelHead.hidden = homeRoute.view === "files" || homeRoute.view === "wiki";
+      channel?.setAttribute("aria-labelledby", homeRoute.view === "files" ? "dashboard-files-title" : homeRoute.view === "wiki" ? "dashboard-wiki-title" : "dashboard-channel-title");
       const channelMenu = one<HTMLElement>("[data-home-channel-menu]");
       if (channelMenu) channelMenu.hidden = homeRoute.view !== "chat";
       const frame = one<HTMLElement>(".hm-frame");
@@ -5199,6 +5202,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const raw = one<HTMLElement>("[data-brain-raw]");
       const rawToggle = one<HTMLButtonElement>("[data-brain-raw-toggle]");
       const error = one<HTMLElement>("[data-brain-error]");
+      const retry = one<HTMLButtonElement>("[data-brain-retry]");
       const edit = one<HTMLButtonElement>("[data-brain-edit]");
       const form = one<HTMLFormElement>("[data-brain-form]");
       const textarea = one<HTMLTextAreaElement>("[data-brain-textarea]");
@@ -5210,12 +5214,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (
         !list || !empty || !detail || !title || !meta || !bodyMode || !markdown ||
         !raw || !rawToggle || !error ||
-        !edit || !form || !textarea || !save || !cancel || !status || !history ||
+        !retry || !edit || !form || !textarea || !save || !cancel || !status || !history ||
         !historyList
       ) return null;
       return {
         list, empty, detail, title, meta, bodyMode, markdown, raw, rawToggle,
-        error, edit, form, textarea, save, cancel, status, history, historyList,
+        error, retry, edit, form, textarea, save, cancel, status, history, historyList,
       };
     };
 
@@ -8161,7 +8165,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (refresh) refresh.hidden = sampleMode || agents.length === 0;
         returnToChannel();
       }
-      window.requestAnimationFrame(() => (view === "files" ? one<HTMLElement>("#dashboard-files-title") : name)?.focus({ preventScroll: true }));
+      window.requestAnimationFrame(() => (view === "files" ? one<HTMLElement>("#dashboard-files-title") : view === "brain" ? one<HTMLElement>("#dashboard-wiki-title") : name)?.focus({ preventScroll: view !== "brain" }));
     };
 
 

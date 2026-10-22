@@ -28,6 +28,7 @@ const BOUNDED_BRAIN_MARKDOWN =
   `${"> ".repeat(12)}bottom\n` + Array.from({ length: 9_999 }, () => "line").join("\n");
 
 export interface BrainViewSnapshot {
+  recovery: { cases: Record<string, unknown>[]; allPassed: boolean };
   paneClosedOnForeignFile: boolean;
   staleSaveRefused: boolean;
   boundedBlockquoteCount: number;
@@ -59,7 +60,10 @@ export async function runBrainViewFixture(): Promise<BrainViewSnapshot> {
   const bundle = await build({
     absWorkingDir: siteRoot,
     bundle: true,
-    entryPoints: ["src/lib/brain-view.ts"],
+    stdin: { resolveDir: siteRoot, loader: "ts", contents: `
+      export { brainTopics, createBrainView } from './src/lib/brain-view.ts';
+      export { SessionExpired, AuthRecoveryRequired, BrowserReadTimedOut, NoDeployment,
+        CommandOutcomeUnknown, WorkspaceOutcomeUnknown } from './src/lib/commonswarm.ts';` },
     format: "iife",
     globalName: "BrainView",
     platform: "browser",
@@ -91,12 +95,14 @@ export async function runBrainViewFixture(): Promise<BrainViewSnapshot> {
   ];
   const html = `<!doctype html>
 <html>
+  <head><meta charset="utf-8"></head>
   <body>
     <ul data-brain-list hidden></ul>
     <p data-brain-empty></p>
     <article data-brain-detail hidden>
-      <h2 data-brain-title></h2><p data-brain-meta></p>
+      <h2 data-brain-title tabindex="-1"></h2><p data-brain-meta></p>
       <p data-brain-error hidden></p>
+      <button type="button" data-brain-retry hidden>Retry</button>
       <p data-brain-body-mode hidden>
         <span>Rendered from markdown</span> ·
         <button type="button" aria-pressed="false" data-brain-raw-toggle disabled>Raw</button>
@@ -124,7 +130,7 @@ export async function runBrainViewFixture(): Promise<BrainViewSnapshot> {
           meta: one("[data-brain-meta]"), bodyMode: one("[data-brain-body-mode]"),
           markdown: one("[data-brain-markdown]"), raw: one("[data-brain-raw]"),
           rawToggle: one("[data-brain-raw-toggle]"),
-          error: one("[data-brain-error]"), edit: one("[data-brain-edit]"),
+          error: one("[data-brain-error]"), retry: one("[data-brain-retry]"), edit: one("[data-brain-edit]"),
           form: one("[data-brain-form]"), textarea: one("[data-brain-textarea]"),
           save: one("[data-brain-save]"), cancel: one("[data-brain-cancel]"),
           status: one("[data-brain-status]"), history: one("[data-brain-history]"),
@@ -135,6 +141,8 @@ export async function runBrainViewFixture(): Promise<BrainViewSnapshot> {
           [2, ${JSON.stringify(BRAIN_BODY_MARKDOWN)}],
         ]);
         const saves = [];
+        const reads = [];
+        let readFailure = null, holdRead = false, pendingRead = null;
         let stage = "setup";
         const diagnostics = () => ({ stage, readyState: document.readyState,
           saveCount: saves.length, status: targets.status.textContent,
@@ -143,6 +151,9 @@ export async function runBrainViewFixture(): Promise<BrainViewSnapshot> {
           formHidden: targets.form.hidden, detailHidden: targets.detail.hidden,
           metadata: targets.meta.textContent, bodyModeHidden: targets.bodyMode.hidden,
           rawToggleDisabled: targets.rawToggle.disabled,
+          retryHidden: targets.retry.hidden, retryDisabled: targets.retry.disabled,
+          retryLabel: targets.retry.textContent, active: document.activeElement?.tagName,
+          readCount: reads.length, lastRead: reads.at(-1),
           historyCount: targets.historyList.querySelectorAll("a").length });
         failureContext = diagnostics;
         const waitFor = async (name, predicate) => {
@@ -159,7 +170,16 @@ export async function runBrainViewFixture(): Promise<BrainViewSnapshot> {
         const topics = BrainView.brainTopics(${JSON.stringify(files)}, () => "Atlas");
         const view = BrainView.createBrainView(targets, {
           now: Date.parse("2026-08-31T18:00:00.000Z"),
-          read: async (_topic, version) => contents.get(version) || "# older",
+          read: (topic, version) => {
+            reads.push({ fileId: topic.fileId, version });
+            if (readFailure) { const error = readFailure; readFailure = null; return Promise.reject(error); }
+            if (holdRead) {
+              let resolve, reject;
+              const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+              pendingRead = { promise, resolve, reject }; return promise;
+            }
+            return Promise.resolve(contents.get(version) || "# older");
+          },
           save: async (topic, markdown) => {
             saves.push(markdown);
             const saved = {
@@ -221,6 +241,7 @@ export async function runBrainViewFixture(): Promise<BrainViewSnapshot> {
         }
         const staleSaveRefused = saves.length === savesBeforeSwitch;
         const snapshot = {
+          recovery: { cases: [], allPassed: false },
           paneClosedOnForeignFile,
           staleSaveRefused,
           boundedBlockquoteCount,
@@ -244,6 +265,60 @@ export async function runBrainViewFixture(): Promise<BrainViewSnapshot> {
           title: one("[data-brain-title]").textContent,
           versionAfterSave: metaAfterSave,
         };
+        const recovery = snapshot.recovery;
+        const expect = (name, condition, facts = {}) => {
+          stage = name;
+          recovery.cases.push({ name, pass: !!condition, ...facts });
+          if (!condition) throw new Error("Brain recovery failed: " + JSON.stringify({ name, facts, ...diagnostics() }));
+        };
+        const unavailable = "This page could not be loaded. Try again.";
+        stage = "read recovery";
+        const failRead = async (error, version = 1) => { holdRead = false; view.setTopics(topics); readFailure = error; await view.open("architecture", version); };
+        await failRead(new TypeError("Transport detail must never be displayed"));
+        expect("plain transport failure", targets.error.textContent === unavailable && !targets.error.hidden && !targets.retry.hidden && !targets.retry.disabled);
+        const count = reads.length;
+        holdRead = true; targets.retry.focus(); targets.retry.click(); targets.retry.click();
+        expect("pending Retry is one exact older-version read", !targets.retry.hidden && targets.retry.disabled && targets.retry.textContent === "Retrying…" &&
+          reads.length === count + 1 && reads.at(-1).fileId === topics[0].fileId && reads.at(-1).version === 1);
+        let pending = pendingRead;
+        pending.reject(new TypeError("Another transport detail must never be displayed"));
+        await pending.promise.catch(() => {}); // The actual controller subscribed first to this same read promise.
+        expect("repeat failure restores Retry focus", targets.error.textContent === unavailable && !targets.retry.hidden && !targets.retry.disabled && document.activeElement === targets.retry);
+        targets.retry.click(); pending = pendingRead; pending.resolve("# Recovered v1"); await pending.promise;
+        expect("successful retry keeps v1 and returns title focus", targets.retry.hidden && !targets.bodyMode.hidden && targets.edit.hidden &&
+          targets.markdown.textContent.includes("Recovered v1") && document.activeElement === targets.title && reads.at(-1).version === 1);
+        const refused = [new BrainView.SessionExpired(), new BrainView.AuthRecoveryRequired(), new BrainView.BrowserReadTimedOut("Wiki page read"),
+          new BrainView.NoDeployment(), new BrainView.CommandOutcomeUnknown("CommonSwarm accepted the download without returning a usable storage path."),
+          new BrainView.WorkspaceOutcomeUnknown("CommonSwarm could not read this result. Reload to check."),
+          new Error("File download was refused: workspace_access_refused."), new Error("Topic download failed (HTTP 403).")];
+        for (const error of refused) {
+          await failRead(error);
+          expect("preserves " + error.name + " refusal", targets.error.textContent === error.message && !targets.retry.hidden && !targets.retry.disabled);
+        }
+        await failRead(new TypeError("Not public")); holdRead = true; targets.retry.focus(); targets.retry.click(); pending = pendingRead;
+        const other = targets.history.querySelector("summary"); other.focus(); pending.resolve("# Recovered without stealing focus"); await pending.promise;
+        expect("retry does not steal a moved focus", document.activeElement === other && targets.retry.hidden);
+        await failRead(new TypeError("Not public")); holdRead = true; targets.retry.focus(); targets.retry.click(); pending = pendingRead;
+        holdRead = false; await view.open("architecture", 2); const newerBody = targets.markdown.textContent;
+        pending.resolve("# Stale v1 must not replace v2"); await pending.promise;
+        expect("new version retires old retry response", targets.retry.hidden && targets.markdown.textContent === newerBody && reads.at(-1).version === 2);
+        await failRead(new TypeError("Not public")); holdRead = true; targets.retry.focus(); targets.retry.click(); pending = pendingRead;
+        view.setTopics(topics);
+        pending.resolve("# Retired generation must not paint"); await pending.promise;
+        expect("same-file refresh retains safe exact-version recovery", !targets.retry.hidden && !targets.retry.disabled && targets.error.textContent === unavailable && targets.bodyMode.hidden);
+        holdRead = false; targets.retry.click();
+        await waitFor("same-file exact-version retry completed", () => targets.retry.hidden && !targets.bodyMode.hidden);
+        expect("refresh retry retains requested version", reads.at(-1).version === 1 && targets.edit.hidden);
+        await failRead(new TypeError("Not public")); holdRead = true; targets.retry.focus(); targets.retry.click(); pending = pendingRead;
+        view.setTopics(foreignTopics); const foreignCount = reads.length;
+        targets.retry.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        pending.resolve("# Foreign workspace stale read"); await pending.promise;
+        expect("foreign-file stale Retry and response are inert", reads.length === foreignCount && targets.retry.hidden && targets.detail.hidden && targets.bodyMode.hidden);
+        await failRead(new TypeError("Not public"), 2); view.setTopics(topics.map(topic => ({ ...topic, currentVersion: 1 })));
+        const retiredCount = reads.length; targets.retry.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        expect("unavailable selected version cannot retry latest", targets.retry.hidden && reads.length === retiredCount);
+        expect("read recovery never saves", saves.length === savesBeforeSwitch);
+        recovery.allPassed = true;
         document.documentElement.dataset.fixture = encodeURIComponent(JSON.stringify(snapshot));
       })().catch((error) => {
         document.documentElement.dataset.fixtureError = encodeURIComponent(JSON.stringify({
