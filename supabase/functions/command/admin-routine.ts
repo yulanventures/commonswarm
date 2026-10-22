@@ -400,23 +400,29 @@ export async function applyAdminRoutine(
         expires_at: c.expires_at,
       };
     } else if (e.type === "AgentPrincipalRevoked") {
-      await tx`UPDATE swarm.agent_principals SET revoked_at=${
+      const revoked = await tx<{ transport: "local" | "hosted_mcp" }[]>`UPDATE swarm.agent_principals SET revoked_at=${
         date(ctx.now)
-      } WHERE principal_id=${String(p.principal_id)}::uuid`;
+      } WHERE principal_id=${String(p.principal_id)}::uuid AND workspace_id=${e.workspace_id}::uuid
+        AND revoked_at IS NULL RETURNING transport`;
+      if (revoked.length!==1) throw new LocalAuthDiscoveryChanged();
       await revokeHostedWorkspaceApproval(tx, e.workspace_id, new Date(ctx.now), ctx.owner_user_id,
         { principalId: String(p.principal_id) });
-      if (!plan?.locked || plan.principalMode!=='update' || !plan.snapshot.bindings.some(b=>
-        b.principal_id===String(p.principal_id) && b.owner_user_id===ctx.owner_user_id && b.workspace_id===e.workspace_id))
-        throw new LocalAuthDiscoveryChanged();
-      const families=[...new Set(plan.snapshot.bindings.filter(b=>b.principal_id===String(p.principal_id))
-        .flatMap(b=>b.renewal_grant_id ? [b.renewal_grant_id]:[]))].sort();
-      for (const family of families) {
-        await tx`UPDATE swarm.renewal_grants SET revoked_at=coalesce(revoked_at,${date(ctx.now)}),
-          revoked_by=coalesce(revoked_by,${ctx.owner_user_id}::uuid)
-          WHERE renewal_grant_id=${family}::uuid AND principal_id=${String(p.principal_id)}::uuid AND revoked_at IS NULL`;
+      // Local family/residual cleanup requires its complete preheld plan.
+      // Hosted approval revocation above has its own grant/seat closure.
+      if (revoked[0]!.transport==='local') {
+        if (!plan?.locked || plan.principalMode!=='update' || !plan.snapshot.bindings.some(b=>
+          b.principal_id===String(p.principal_id) && b.owner_user_id===ctx.owner_user_id && b.workspace_id===e.workspace_id))
+          throw new LocalAuthDiscoveryChanged();
+        const families=[...new Set(plan.snapshot.bindings.filter(b=>b.principal_id===String(p.principal_id))
+          .flatMap(b=>b.renewal_grant_id ? [b.renewal_grant_id]:[]))].sort();
+        for (const family of families) {
+          await tx`UPDATE swarm.renewal_grants SET revoked_at=coalesce(revoked_at,${date(ctx.now)}),
+            revoked_by=coalesce(revoked_by,${ctx.owner_user_id}::uuid)
+            WHERE renewal_grant_id=${family}::uuid AND principal_id=${String(p.principal_id)}::uuid AND revoked_at IS NULL`;
+        }
+        await tx`SELECT swarm.revoke_local_residual_tokens(${e.workspace_id}::uuid,${ctx.owner_user_id}::uuid,
+          'revoke_agent_principal',${String(p.principal_id)}::uuid)`;
       }
-      await tx`SELECT swarm.revoke_local_residual_tokens(${e.workspace_id}::uuid,${ctx.owner_user_id}::uuid,
-        'revoke_agent_principal',${String(p.principal_id)}::uuid)`;
       await tx`INSERT INTO swarm.revocation_tombstones(kind,target_id,created_by) VALUES('principal',${
         String(p.principal_id)
       }::uuid,${ctx.owner_user_id}::uuid) ON CONFLICT DO NOTHING`;

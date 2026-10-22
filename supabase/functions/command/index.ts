@@ -4751,13 +4751,13 @@ async function updateWorkspaceProjection(
       const principalId = payload.principal_id;
       const revokedAt = new Date(payload.revoked_at);
       const createdBy = authUser(prepared.ctx.actor);
-      const updated = await tx<{ principal_id: string }[]>`
+      const updated = await tx<{ principal_id: string; transport: "local" | "hosted_mcp" }[]>`
         UPDATE swarm.agent_principals
         SET revoked_at = ${revokedAt}
         WHERE principal_id = ${principalId}::uuid
           AND workspace_id = ${route.workspaceId}::uuid
           AND revoked_at IS NULL
-        RETURNING principal_id
+        RETURNING principal_id, transport
       `;
       if (updated.length !== 1) {
         throw new Error(
@@ -4801,7 +4801,8 @@ async function updateWorkspaceProjection(
             AND revoked_at IS NULL
         `;
       }
-      if (prepared.ctx.actor.agent_principal===null && createdBy!==null) await tx`
+      // Use the row locked by the projection, not the requesting actor's transport.
+      if (updated[0]!.transport==='local' && prepared.ctx.actor.agent_principal===null && createdBy!==null) await tx`
         SELECT swarm.revoke_local_residual_tokens(${route.workspaceId}::uuid,${createdBy}::uuid,'revoke_agent_principal',${principalId}::uuid)`;
     } else if (event.type === "AgentTokenRevoked") {
       if (

@@ -2124,11 +2124,28 @@ test("same-owner revoked local principal is reclaimable through the hosted comma
     WHERE workspace_id = ${fixture.workspaceA}::uuid AND name = ${name}
   `;
   assert.equal(localPrincipal?.transport, "local");
+  // A familyless legacy token can only be cleared by residual cleanup, so this
+  // local control catches accidentally skipping that helper for every target.
+  const device = randomUUID(), run = randomUUID(), token = randomUUID(), lineage = randomUUID();
+  await sql`INSERT INTO swarm.devices(device_id,user_id,label)
+    VALUES(${device}::uuid,${fixture.owner}::uuid,'Local removal residual')`;
+  await sql`INSERT INTO swarm.agent_runs(run_id,principal_id,device_id)
+    VALUES(${run}::uuid,${localPrincipal!.principal_id}::uuid,${device}::uuid)`;
+  await sql`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,task_id,epoch,scopes,token_hash,expires_at,lineage_id)
+    VALUES(${token}::uuid,${localPrincipal!.principal_id}::uuid,${run}::uuid,${randomUUID()}::uuid,1,
+      ${sql.json(['post_signal'])},${randomBytes(32)},clock_timestamp()+interval '1 hour',${lineage}::uuid)`;
+  const [residualBefore] = await sql`SELECT revoked_at,renewal_grant_id FROM swarm.agent_tokens WHERE token_id=${token}::uuid`;
+  assert.deepEqual(residualBefore, { revoked_at: null, renewal_grant_id: null });
   const revoked = runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: fixture.ownerJwt,
     workspaceId: fixture.workspaceA,
     command: { kind: "revoke_agent_principal", principal_id: localPrincipal!.principal_id } });
   assert.equal(revoked.status, 200, JSON.stringify(revoked.body));
   assert.equal(revoked.body.status, "accepted");
+  const [residualAfter] = await sql`SELECT revoked_at FROM swarm.agent_tokens WHERE token_id=${token}::uuid`;
+  assert.ok(residualAfter?.revoked_at);
+  const residualFences = await sql`SELECT kind FROM swarm.revocation_tombstones
+    WHERE (kind='token' AND target_id=${token}::uuid) OR (kind='lineage' AND target_id=${lineage}::uuid) ORDER BY kind`;
+  assert.deepEqual(residualFences.map(row => row.kind), ['lineage','token']);
   const [before] = await sql`SELECT * FROM swarm.agent_principals WHERE principal_id = ${localPrincipal!.principal_id}::uuid`;
   assert.ok(before?.revoked_at);
   const next = claimSeat(fixture, fixture.grantA, name);
@@ -2608,9 +2625,15 @@ test("authorized admin routine removal closes hosted consent, handle and seat wi
     const other = runHostedHarness<HarnessResult>({ operation: "claim",
       claim: claimSpec(f, f.grantA, f.workspaceB, `admin-other-${randomUUID()}`) });
     await assertSeatAccess(f, old, f.workspaceA, 200);
+    const otherBefore = await hostedRows(other.body.seat_id);
     const removed = runHostedHarness<{ status: number; stage: string }>({ operation: "admin-removal",
       ownerUserId: f.owner, workspaceId: f.workspaceA, principalId: old.body.principal_id });
     assert.deepEqual(removed, { stage: "remove", status: 200 });
+    const rows = await hostedRows(old.body.seat_id);
+    for (const field of ["principal", "seat", "handle"]) assert.ok(rows[0]![field].revoked_at);
+    const principalFence = await sql`SELECT kind FROM swarm.revocation_tombstones
+      WHERE kind='principal' AND target_id=${String(old.body.principal_id)}::uuid`;
+    assert.deepEqual(principalFence.map(row => row.kind), ["principal"]);
     await assertSeatAccess(f, old, f.workspaceA, 403);
     const refusedClaim = runHostedHarness<HarnessResult>({ operation: "claim",
       claim: claimSpec(f,f.grantA,f.workspaceA,`admin-new-${randomUUID()}`) });
@@ -2624,6 +2647,7 @@ test("authorized admin routine removal closes hosted consent, handle and seat wi
       WHERE hs.seat_id=${String(sibling.body.seat_id)}::uuid`;
     assert.deepEqual(siblingFence, { seat: true, handle: true, tombstone: true });
     await assertSeatAccess(f, other, f.workspaceB, 200);
+    assert.deepEqual(await hostedRows(other.body.seat_id), otherBefore, "other workspace history survives admin removal");
     assert.equal(await providerActive(f.grantA), true);
     const [fence] = await sql`SELECT c.revoked_at IS NOT NULL AS consent,h.revoked_at IS NOT NULL AS handle,
       EXISTS(SELECT 1 FROM swarm.revocation_tombstones t WHERE t.kind='hosted_seat' AND t.target_id=h.seat_id) AS tombstone
