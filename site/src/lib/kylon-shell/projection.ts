@@ -15,7 +15,8 @@ export function projectHomeLayout(state: string | undefined, route: HomeRoute,
       ...(!sample ? [{ id: "wiki", label: "Wiki", icon: "M4 3h12l4 4v14H4zM14 3v6h6M8 13h8M8 17h6" }] : []),
     ];
     for (const view of views) navigation.push({ ...view,
-      href: routeHref({ view: view.id, workspaceId: workspace.id } as HomeRoute), current: route.view === view.id });
+      href: routeHref({ view: view.id, workspaceId: workspace.id } as HomeRoute), current: route.view === view.id || route.view === "todo" && view.id === "todos" });
   }
-  return { enabled: state === "channel", title: route.view === "catchup" ? "Catch up" : "Workspaces", workspaceName: workspace?.name, navigation };
+  return { enabled: state === "channel", title: route.view === "catchup" ? "Catch up" : "Workspaces", workspaceName: workspace?.name, navigation,
+    todo: !!workspace && (route.view === "todos" || route.view === "todo") };
 }

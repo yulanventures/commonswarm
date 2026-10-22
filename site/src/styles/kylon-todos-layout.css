@@ -1,0 +1,130 @@
+/* Private Todo composition. Shared controls, route/container sizing and picker cap stay in
+   their existing owners. No permission, hidden-state or callback changes. */
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos {
+  inline-size: 100%; max-inline-size: 728px; gap: 16px; padding: 4px 4px 16px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo {
+  gap: 24px; padding-block-end: 32px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-intro {
+  display: grid; gap: 8px; min-inline-size: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-back {
+  padding: 0; margin: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-head {
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px;
+  align-items: start; font-size: 24px; line-height: 1.35;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-head:has(> .hm-todo-done) {
+  grid-template-columns: 35px minmax(0, 1fr);
+}
+/* Only the invisible9px leading half of the44px hit area enters the gutter.
+   Painted box begins at the content edge;35px track+4px gap-26px box leaves13px to title. */
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-done {
+  margin: 0; margin-inline-start: -9px; box-sizing: border-box; align-self: start;
+  align-items: flex-start; justify-content: center;
+  padding-block-start: calc((1.35em - 26px) / 2);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todos-title {
+  font-size: 20px; font-weight: 600; line-height: 1.35; letter-spacing: -0.3px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-title {
+  font-size: 24px; font-weight: 600; line-height: 1.35; letter-spacing: -0.4px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-rows {
+  padding: 0; border: 0; border-radius: 0; box-shadow: none; background: transparent;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-rows > .hm-todo-row {
+  grid-template-columns: 33px minmax(0, 1fr) auto; gap: 0;
+  min-block-size: 60px; padding: 8px 0; margin-inline-start: 0;
+}
+/* The22px index box begins at the column; only its invisible44px label enters the gutter.
+   A14px leading inset leaves the stronger5px ring clear of text at33+2px (13px after the box). */
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-check-hit {
+  margin-inline-start: -14px; align-self: start; align-items: start; box-sizing: border-box;
+  font-size: 14px; padding-block-start: calc(4px + (1.5em - 22px) / 2);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-check {
+  justify-self: start; margin-inline-start: 14px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-check-hit .hm-todo-check:focus-visible {
+  scroll-margin: 20px;
+}
+/* Keep every placeholder if ANY row has a checkbox: mixed rights remain aligned.
+   An entirely read-only list needs no reserved control column. */
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-rows:not(:has(.hm-todo-check)) > .hm-todo-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-rows:not(:has(.hm-todo-check)) > .hm-todo-row > span.hm-todo-check-hit {
+  display: none;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-row-copy {
+  border-radius: 6px; padding: 4px 2px; align-content: start; min-block-size: 44px; box-sizing: border-box;
+}
+/* A read-only row has no painted control column. Keep its text flush, retaining its invisible focus inset. */
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-rows:not(:has(.hm-todo-check)) .hm-todo-row-copy {
+  margin-inline-start: -2px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todo-row .hm-todo-row-who {
+  /* The owner badge extends 6px beyond its avatar. Reserve that space inside the row. */
+  margin-inline: 8px 6px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-panel {
+  padding: 16px 0; border-block: 1px solid var(--k-shell-line); border-radius: 0;
+}
+/* Ownership groups use space, never a second frame around the native radio buttons.
+   Outer gap16 / inner gap4 retains grouping when the rows wrap. */
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-assign-chips {
+  gap: 16px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-assign-capsule {
+  gap: 4px; padding: 0; border: 0; border-radius: 0; background: transparent;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-picker .hm-assign-chip.hm-assign-chip {
+  border: 1px solid var(--k-shell-control); padding-inline: 8px 12px;
+  border-radius: 6px; box-shadow: none;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-picker .hm-assign-chip.hm-assign-chip[aria-checked="true"] {
+  border-color: var(--cs-accent); background: var(--k-shell-subtle);
+  color: var(--k-shell-ink); font-weight: 600; box-shadow: none; opacity: 1;
+}
+/* Expose only the actual disconnected/not-picking-up description. Other captions stay quiet.
+   Existing radio name/description IDs, disabled state and native callbacks are unchanged. */
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-picker .hm-assign-chip[data-pick-state="disconnected"] {
+  display: inline-grid; grid-template-columns: auto minmax(0, 1fr); gap: 0 8px; padding-block: 8px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-assign-chip[data-pick-state="disconnected"] > :first-child {
+  grid-column: 1; grid-row: 1 / span 2;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-assign-chip[data-pick-state="disconnected"] .hm-assign-name { grid-column: 2; grid-row: 1; }
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-assign-chip[data-pick-state="disconnected"] .hm-assign-caption {
+  position: static; inline-size: auto; block-size: auto; margin: 0; overflow: visible; clip: auto; clip-path: none; white-space: normal;
+  grid-column: 2; grid-row: 2; min-inline-size: 0; color: var(--k-shell-secondary); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere;
+}
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-picker .hm-assign-chip.hm-assign-chip[aria-checked="true"] {
+    border-color: Highlight;
+  }
+}
+@media (max-width: 52rem) {
+  /* Both routes own a 24px phone inset. The index adds its existing 4px inside 20px. */
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane]:has(> .hm-todos) {
+    padding: 20px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo {
+    padding: 16px 24px 32px; gap: 12px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-start .hm-choice-options {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-start .hm-choice {
+    min-inline-size: 0; inline-size: 100%; justify-content: center; padding-block: 8px; text-align: center;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo :is(.hm-todo-head, .hm-todo-title) {
+    font-size: 20px; letter-spacing: -0.3px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-todo-back-workspace {
+    display: none;
+  }
+}
