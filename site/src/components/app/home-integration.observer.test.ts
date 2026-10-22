@@ -18,6 +18,7 @@ import { todosPane } from '../../lib/home-todo-list';
 import { homeRailPeople, mapHomeRail, initialCatchUpData, overviewCatchUpData, homeNeedsYouCount, catchUpDetailFromOverview } from '../../lib/home-map';
 import { buildHomeRail } from '../../lib/home-rail';
 import { homeStructureKey } from '../../lib/home-focus';
+import { createListsChrome } from '../../lib/lists-chrome';
 import { assignOptions, tagOptions, personNames } from '../../lib/home-pickers';
 import { peopleDialogCanAct } from '../../lib/people-dialog-view';
 import * as agentStatusFunctions from '../../lib/agent-status';
@@ -218,6 +219,7 @@ async function routedPaneFixture(initialView: 'todo' | 'todos' = 'todo') {
     ['[data-home-route-pane]', slot], ['.dashboard__channel', channel], ['[data-user-menu-root]', account]]);
   const navigations: string[] = [], history: string[] = [];
   const context = createContext({ document, routeHref, resolveHomeRoute, homeViewTitle, todoView, todosPane, personNames, URL,
+    listsChrome: createListsChrome(channel as unknown as HTMLElement),
     layout: { mounted: false }, navigateHomeHref: (href: string) => navigations.push(href),
     window: { requestAnimationFrame: (callback: () => void) => frames.push(callback), location: { origin: 'https://example.test' },
       history: { state: { home: true }, pushState: (_state: unknown, _title: string, href: string) => history.push(href),
@@ -241,7 +243,7 @@ async function routedPaneFixture(initialView: 'todo' | 'todos' = 'todo') {
     const closeEntityPanel=()=>{}, closeRosterDialog=()=>{}, closeWorkspaceDetailsDialog=()=>{};
     const renderHomeRail=()=>{}, renderHomeShell=()=>{}, loadRailOverview=()=>{}, renderChannelRail=()=>{};
   `, context);
-  runInContext(await dashboardFunctions(['syncStandalonePage', 'homePaneMessage', 'renderHomeObjectPane', 'loadHomeObject', 'applyHomePane', 'focusHomeView', 'navigateHome']), context);
+  runInContext(await dashboardFunctions(['syncListsChrome', 'syncStandalonePage', 'homePaneMessage', 'renderHomeObjectPane', 'loadHomeObject', 'applyHomePane', 'focusHomeView', 'navigateHome']), context);
   const flushFocus = () => { for (const callback of frames.splice(0)) callback(); };
   const assertPage = (label: string, expectedHref: string) => {
     assert.equal(frame.getAttribute('data-home-standalone'), initialView === 'todo' ? '' : null, `${label}: actual route frame flag`);
@@ -474,7 +476,7 @@ class RowNode {
     ? node.className.split(' ').includes(selector.slice(1)) : node.tag === selector); }
 }
 test('a signal page settling after a same-workspace view change retains data without taking the pane', async () => {
-  const code = await dashboardFunctions(['addAgentViewOpen', 'showChannelView', 'renderFeed', 'loadSignals',
+  const code = await dashboardFunctions(['syncListsChrome', 'addAgentViewOpen', 'showChannelView', 'renderFeed', 'loadSignals',
     'forgetFetchedPostedIds', 'prunePostedRows', 'rowShowsOnScreen', 'visibleReceiptSignalIds', 'refreshDeliveryReceipts']);
   for (const [route, workspaceView, channelView] of [
     ['files', 'files', 'files'], ['wiki', 'brain', 'brain'], ['lists', 'objects', 'objects'],
@@ -488,6 +490,8 @@ test('a signal page settling after a same-workspace view change retains data wit
     const nodes = new Map([['[data-composer]', composer], ['[data-feed-list]', list], ['[data-feed-empty-title]', emptyTitle]]);
     let resolvePage!: (page: { rows: unknown[]; hasMore: boolean }) => void, reads = 0;
     const context = createContext({ routeHref, homeAgentFixCards, browserDeliveryReceiptCandidates, BROWSER_RECEIPT_REQUESTS_PER_TICK,
+      // This signal fixture omits channel chrome; still execute its real projection dependency.
+      listsChrome: createListsChrome(new ViewNode('div') as unknown as HTMLElement),
       signalPage: () => { reads++; return new Promise(resolve => { resolvePage = resolve; }); },
       one: (selector: string) => nodes.get(selector) ?? null,
       all: (selector: string) => selector === '[data-channel-view]' ? sections : [],
@@ -529,6 +533,139 @@ test('a signal page settling after a same-workspace view change retains data wit
     assert.equal(sections.find(node => node.dataset.channelView === 'feed-empty')!.hidden, false);
     assert.equal(composer.hidden, false);
     assert.equal(emptyTitle.textContent, 'No messages yet.');
+  }
+});
+test('Lists retains Refresh across Files and Wiki, then restores channel nodes and route focus', async () => {
+  const raw = await readFile(new URL('./LiveDashboard.astro', import.meta.url), 'utf8');
+  const ast = ts.createSourceFile('dashboard.ts', raw.match(/<script>([\s\S]*?)<\/script>/)![1], ts.ScriptTarget.Latest, true);
+  const handlers: string[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === 'addEventListener' && node.arguments[0]?.getText(ast) === '"click"'
+      && node.expression.expression.getText(ast) === 'one<HTMLButtonElement>("[data-refresh]")') {
+      handlers.push(node.arguments[1].getText(ast));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast); assert.equal(handlers.length, 1, 'use the actual sole Refresh listener');
+  const click = ts.transpileModule(`(${handlers[0]})`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const code = await dashboardFunctions(['syncListsChrome', 'showPanel', 'showChannelView', 'activateWorkspaceView', 'focusHomeView']);
+  for (const previous of ['files', 'brain'] as const) {
+    const frames: (() => void)[] = [], reloads: string[] = [];
+    const nodes = new Map<string, ChromeNode>();
+    let active: ChromeNode | null = null;
+    const document = { title: '', createComment: () => new ChromeNode('#comment') };
+    // Invented DOM primitives only: actual production declarations own all movement/state below.
+    class ChromeNode extends RowNode {
+      hidden = false; disabled = false; ownerDocument = document;
+      get parentElement() { return this.parent; }
+      get parentNode() { return this.parent; }
+      get previousSibling() { return this.parent?.children[this.parent.children.indexOf(this) - 1] ?? null; }
+      before(node: RowNode) { if (this.parent) { const parent = this.parent; node.remove(); node.parent = parent;
+        parent.children.splice(parent.children.indexOf(this), 0, node); } }
+      // A normal DOM detach drops focus; a no-op projection must avoid detaching its control.
+      remove() { if (active === this) active = null; super.remove(); }
+      focus() { active = this; }
+      closest() { return null; }
+      getClientRects(): unknown[] {
+        for (let node: RowNode | null = this; node; node = node.parent) if ((node as ChromeNode).hidden) return [];
+        return [{}];
+      }
+      querySelector(selector: string): ChromeNode | null {
+        if (this === root && nodes.has(selector)) return nodes.get(selector)!;
+        return super.querySelector(selector) as ChromeNode | null;
+      }
+    }
+    const root = new ChromeNode('live-dashboard'), channel = new ChromeNode('section'), legacy = new ChromeNode('header');
+    channel.className = 'dashboard__channel'; legacy.className = 'dashboard__channel-head';
+    const titleBlock = new ChromeNode('div'), actions = new ChromeNode('div'), name = new ChromeNode('h2');
+    const description = new ChromeNode('p'), refresh = new ChromeNode('button'), count = new ChromeNode('span');
+    description.textContent = 'Original channel description'; refresh.hidden = true;
+    refresh.setAttribute('aria-label', 'Refresh channel');
+    const sections = ['objects', 'files', 'brain', 'feed', 'connect'].map(view => {
+      const section = new ChromeNode('section'); section.dataset.channelView = view; section.hidden = true; return section;
+    });
+    const head = new ChromeNode('header'), title = new ChromeNode('h1'), fileTitle = new ChromeNode('h1'), wikiTitle = new ChromeNode('h1'), workspaceTitle = new ChromeNode('h1');
+    title.textContent = 'Lists'; fileTitle.textContent = 'Files'; wikiTitle.textContent = 'Wiki'; workspaceTitle.textContent = 'Home';
+    head.append(title); sections[0].append(head); sections[1].append(fileTitle); sections[2].append(wikiTitle);
+    titleBlock.append(name, description); actions.append(count, refresh); legacy.append(titleBlock, actions);
+    channel.append(legacy, ...sections); root.append(workspaceTitle, channel);
+    for (const [selector, node] of [['.dashboard__channel', channel], ['.dashboard__objects-view .dashboard__lists-head', head],
+      ['[data-channel-name]', name], ['[data-channel-description]', description], ['[data-refresh]', refresh],
+      ['[data-update-count]', count], ['#dashboard-lists-title', title], ['#dashboard-files-title', fileTitle], ['#dashboard-wiki-title', wikiTitle]] as const) nodes.set(selector, node);
+    const inventory = root.descendants();
+    const context = createContext({ document, homeViewTitle, listsChrome: createListsChrome(root as unknown as HTMLElement),
+      one: (selector: string) => nodes.get(selector) ?? null,
+      all: (selector: string) => selector === '[data-channel-view]' ? sections : selector.includes('[data-channel-view=objects] h1')
+        ? [title] : selector.includes('[data-channel-view=files] h1') ? [fileTitle]
+        : selector.includes('[data-channel-view=brain] h1') ? [wikiTitle] : selector.includes('[data-home-workspace-shell] h1') ? [workspaceTitle] : [],
+      window: { clearTimeout() {}, requestAnimationFrame: (callback: () => void) => frames.push(callback) }, queueMicrotask() {},
+      openWorkspace: async (id: string) => { reloads.push(id); },
+    });
+    context.root = root;
+    runInContext(`
+      const app=root, activeWorkspaceId='W', workspaces=[{id:'W',name:'Home'}];
+      let homeRoute={view:'chat',workspaceId:'W'}, activeWorkspaceView='signals', sampleMode=false, agents=[{principalId:'A'}];
+      let signalExpiryTimer; const unknownChannelId=null;
+      const keepConnectCredentialVisible=()=>false, disarmLiveFeed=()=>{}, armLiveFeed=()=>{}, closeMentionPicker=()=>{};
+      const syncStandalonePage=()=>{}, syncFeedChrome=()=>{}, syncVisibleShell=()=>{}, syncComposerPlacement=()=>{};
+      const renderFiles=()=>{}, renderBrain=()=>{}, renderChannelHead=()=>{}, openHouseholdView=()=>{};
+      const layout={suspend(){}}, panel=()=>null, panelBootFocus={allowsFocus:()=>false};
+      const navigateHome=()=>{throw new Error('unexpected navigation');};
+      const openSampleWorkspace=()=>{throw new Error('Sample Refresh must remain hidden');};
+      const returnToChannel=()=>showChannelView('feed');
+      app.dataset.state='channel'; app.dataset.channelView='feed';
+    `, context);
+    runInContext(code, context);
+    refresh.addEventListener('click', runInContext(click, context));
+    const enter = (view: string, route: string) => {
+      runInContext(`homeRoute={view:${JSON.stringify(route)},workspaceId:'W'}; activateWorkspaceView(${JSON.stringify(view)}); focusHomeView();`, context);
+      for (const frame of frames.splice(0)) frame();
+    };
+    enter(previous, previous === 'brain' ? 'wiki' : 'files');
+    assert.equal(refresh.hidden, true, `${previous}: established previous-pane state`);
+    assert.equal(legacy.hidden, true, `${previous}: preserve the current standalone page header`);
+    assert.equal(channel.getAttribute('aria-labelledby'), previous === 'brain' ? 'dashboard-wiki-title' : 'dashboard-files-title');
+    refresh.disabled = true;
+    enter('objects', 'lists');
+    assert.equal(refresh.hidden, false, `${previous}→Lists restores real workspace Refresh availability`);
+    assert.equal(refresh.disabled, true, 'projection/availability never releases a pending control');
+    assert.equal(refresh.parentElement, head); assert.equal(description.parentElement, head);
+    assert.equal(legacy.hidden, true); assert.equal(channel.getAttribute('aria-labelledby'), 'dashboard-lists-title');
+    assert.equal(description.textContent, 'Shared lists, docs and files. Every saved version is kept.');
+    assert.equal(active, title, 'the Lists route focuses its main heading');
+    refresh.disabled = false; refresh.focus();
+    runInContext('syncListsChrome()', context);
+    assert.equal(active, refresh, 'no-op synchronization retains the focused original control');
+    refresh.handlers.get('click')!();
+    assert.deepEqual(reloads, ['W'], 'the actual Refresh listener reaches the existing workspace reload boundary');
+    assert.equal(refresh.getAttribute('aria-label'), 'Refresh channel');
+    for (const state of ['loading', 'signed-out', 'create', 'workspace-error']) {
+      runInContext(`showPanel(${JSON.stringify(state)})`, context);
+      assert.equal(refresh.parentElement, actions, `${state}: restore the original action parent`);
+      assert.equal(description.parentElement, titleBlock, `${state}: restore the original description parent`);
+      runInContext("showPanel('channel'); syncListsChrome()", context);
+      assert.equal(refresh.parentElement, head);
+    }
+    runInContext("showChannelView('connect')", context);
+    assert.equal(refresh.parentElement, actions, 'a non-Lists channel view restores the control even with a Lists route');
+    enter('objects', 'lists'); enter(previous, previous === 'brain' ? 'wiki' : 'files');
+    assert.equal(refresh.parentElement, actions); assert.equal(description.parentElement, titleBlock);
+    assert.equal(legacy.hidden, true, `${previous}: leaving Lists preserves the current page header`);
+    assert.equal(channel.getAttribute('aria-labelledby'), previous === 'brain' ? 'dashboard-wiki-title' : 'dashboard-files-title');
+    assert.equal(active, previous === 'brain' ? wikiTitle : fileTitle, 'the existing destination heading retains focus');
+    enter('objects', 'lists'); enter('signals', 'chat');
+    assert.equal(active, workspaceTitle, 'Chat route focus leaves the old Lists heading');
+    assert.equal(refresh.parentElement, actions); assert.equal(description.parentElement, titleBlock);
+    assert.equal(legacy.hidden, false); assert.equal(channel.getAttribute('aria-labelledby'), 'dashboard-channel-title');
+    assert.deepEqual(actions.children.filter(node => node.tag !== '#comment'), [count, refresh]);
+    assert.deepEqual(titleBlock.children.filter(node => node.tag !== '#comment'), [name, description]);
+    assert.deepEqual(root.descendants().filter(node => node.tag !== '#comment'), inventory, 'all original nodes and order return without clones');
+    for (const denied of ['sampleMode=true', 'sampleMode=false; agents=[]']) {
+      runInContext(denied, context); enter('objects', 'lists');
+      assert.equal(refresh.hidden, true, `${denied}: preserve actual workspace availability restrictions`);
+      assert.deepEqual(reloads, ['W'], 'state synchronization never activates Refresh');
+    }
   }
 });
 test('replying from a stream row preserves the agent ownership label and the root channel', async () => {
