@@ -136,8 +136,8 @@ export function renderHouseholdContent(content: HouseholdContent | null): string
   return `<ol class="hh-list">${[...content.items].sort((a, b) => a.order - b.order).map((item) =>
     `<li><span aria-label="${item.checked ? 'Checked' : 'Unchecked'}">${item.checked ? '☑' : '☐'}</span> ${esc(item.text)}</li>`).join('')}</ol>`;
 }
-const button = (action: string, label: string, value = '', disabled = false): string =>
-  `<button type="button" data-hh-action="${action}" data-hh-value="${esc(value)}"${disabled ? ' disabled' : ''}>${esc(label)}</button>`;
+const button = (action: string, label: string, value = '', disabled = false, current = false): string =>
+  `<button type="button" data-hh-action="${action}" data-hh-value="${esc(value)}"${disabled ? ' disabled' : ''}${current ? ' aria-current="true"' : ''}>${esc(label)}</button>`;
 export function renderHouseholdObjectHistory(object: HouseholdObjectView | null, busy = false,
   names?: HouseholdWorkspaceView['names']): string {
   if (!object) return '<p>Select a list or doc to see its history.</p>';
@@ -183,7 +183,7 @@ export function renderHouseholdObjects(state: HouseholdObjectsState): string {
     <p>Everyone here can read what is shared and its history. In /app you can check list items and edit docs; ask an agent to create a list or add items.</p></header>
     <p role="status" aria-live="polite" aria-atomic="true" class="hh-status">${esc(state.notice)}</p>
     <div class="hh-layout"><nav aria-label="Household objects">${workspace.objects.length ? `<ul>${workspace.objects.map((item) =>
-      `<li>${button('select', `${item.current.title} · ${item.kind}`, item.object_id, busy)}</li>`).join('')}</ul>` : '<p>No lists or docs yet. Ask an agent: “Create a CommonSwarm list called Groceries.”</p>'}</nav>
+      `<li>${button('select', `${item.current.title} · ${item.kind}`, item.object_id, busy, item.object_id === state.selected_id)}</li>`).join('')}</ul>` : '<p>No lists or docs yet. Ask an agent: “Create a CommonSwarm list called Groceries.”</p>'}</nav>
     <article aria-label="Selected object">${object ? `<h3>${esc(object.current.title)}</h3>
       <p>${esc(householdAttribution((state.opened_version ?? object.current).author, workspace.names))}</p>
       ${state.opened_version ? '<p>Reading an earlier revision.</p>' : '<p>Current revision</p>'}
