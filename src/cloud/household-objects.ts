@@ -10,6 +10,7 @@ import type {
   HouseholdContent, HouseholdObjectType, HouseholdRevisionRef,
 } from '../protocol/household-object-events.js';
 import { decodeHouseholdTodoResponse, type HouseholdTodoClientResult } from './household-todos.js';
+import { projectHouseholdRefusalDetails, type HouseholdRefusalDetails } from '../protocol/household-next-steps.js';
 import { ServerError } from './household-http.js';
 
 export interface HouseholdTransport {
@@ -33,12 +34,16 @@ export interface HouseholdRevisionView {
 }
 export type HouseholdClientResult =
   | HouseholdTodoClientResult
+  | { status: 'committed'; request_id: string; action: 'setup' | 'allow_connection'; notice: { status: 'sent'; signal_id: string }; replayed: boolean }
   | { status: 'committed'; request_id: string; object_id: string; revision: HouseholdRevisionRef }
   | { status: 'pending'; request_id: string; object_id: string; reservation_id: string }
   | { status: 'conflict'; request_id: string; object_id: string; current: HouseholdRevisionRef; draft_id: string }
-  | { status: 'refused'; request_id?: string; reason: string }
+  | ({ status: 'refused'; request_id?: string; reason: string } & Partial<HouseholdRefusalDetails>)
   | { status: 'error'; reason: 'server_error' }
   | { status: 'unknown'; request_id?: string; reason: 'transport_interrupted' | 'invalid_response' | 'server_error' }
+  | { status: 'ok'; kind: 'draft_read'; workspace_id: string; object_id: string; draft_id: string;
+      proposed: HouseholdContent; base: HouseholdRevisionView & { live: boolean; content: HouseholdContent };
+      current: HouseholdRevisionView & { live: boolean; content: HouseholdContent } }
   | { status: 'ok'; kind: 'object_list'; objects: readonly {
       object_id: string; kind: HouseholdObjectType; title: string; revision: HouseholdRevisionRef;
     }[]; next_offset: number | null }
@@ -161,11 +166,18 @@ function decodeResponse(value: unknown, invocation: HouseholdToolInvocation): Ho
   const data = row(envelope.outcome ?? envelope.metadata ?? envelope);
   if (!data) return invalid();
   const request_id = invocation.request_id;
-  if (data.status === 'refused') return { status: 'refused', ...(request_id ? { request_id } : {}),
+  if (data.status === 'refused') return { ...projectHouseholdRefusalDetails(data, invocation.workspace_id), status: 'refused', ...(request_id ? { request_id } : {}),
     reason: text(data.reason) && /^[a-z][a-z0-9_]{0,63}$/.test(data.reason) ? data.reason : 'request_refused' };
   if (invocation.objectTypes.includes('todo')) return decodeHouseholdTodoResponse(data, invocation, envelope) ?? invalid();
   if ('command' in invocation) {
     const command = invocation.command;
+    if (command.kind === 'household_owner_permissions') {
+      const notice = row(data.notice);
+      return data.status === 'committed' && data.request_id === request_id && data.action === command.action.kind
+        && notice?.status === 'sent' && id(notice.signal_id) && typeof data.replayed === 'boolean'
+        ? { status: 'committed', request_id: request_id!, action: command.action.kind,
+            notice: { status: 'sent', signal_id: notice.signal_id }, replayed: data.replayed } : invalid();
+    }
     const object = 'object_id' in command ? command.object_id : undefined;
     if (!request_id || !id(data.object_id) || (object !== undefined && object !== data.object_id)) return invalid();
     if (data.status === 'committed' && command.kind !== 'reserve_household_upload') {
@@ -185,6 +197,21 @@ function decodeResponse(value: unknown, invocation: HouseholdToolInvocation): Ho
   }
   const query = invocation.query;
   if (data.status !== 'ok' || data.kind !== query.kind) return invalid();
+  if (query.kind === 'draft_read') {
+    if (data.workspace_id !== invocation.workspace_id || data.draft_id !== query.draft_id || !id(data.object_id)) return invalid();
+    const draftRevision = (value: unknown) => {
+      const view = revisionView(value, invocation.workspace_id, data.object_id as string);
+      const raw = row(value);
+      if (!view || !invocation.objectTypes.includes(view.kind) || view.kind === 'file' || typeof raw?.live !== 'boolean') return null;
+      const projected = content(raw.content, view.kind);
+      return projected ? { ...view, live: raw.live, content: projected } : null;
+    };
+    const base = draftRevision(data.base), current = draftRevision(data.current);
+    if (!base || !current || base.kind !== current.kind) return invalid();
+    const proposed = content(data.proposed, base.kind);
+    return proposed ? { status: 'ok', kind: 'draft_read', workspace_id: invocation.workspace_id,
+      object_id: data.object_id, draft_id: query.draft_id, proposed, base, current } : invalid();
+  }
   if (query.kind === 'object_list') {
     if (!Array.isArray(data.objects) || data.objects.length > query.limit || !page(data.next_offset)) return invalid();
     const objects: Extract<HouseholdClientResult, { kind: 'object_list' }>['objects'][number][] = [];

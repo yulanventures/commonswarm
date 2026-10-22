@@ -2,8 +2,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { build } from 'esbuild';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import postgres from 'postgres';
 import { runSql, repoSql, dbAssert, refuses, emptyApplicationSchema, localClusterAdminUrl } from '../support/admin-schema-db.js';
 import { releaseCatalogQuery } from '../support/release-catalog-query.js';
@@ -31,12 +34,12 @@ function hostedFixture(workspace: string, owner: string) {
     INSERT INTO swarm.hosted_mcp_seat_handles(handle,seat_id,grant_id,workspace_id,principal_id,created_at)
       VALUES ('${handle}','${connection}','${grant}','${workspace}','${principal}',clock_timestamp());
   `;
-  return { principal, connection, grant, name, setup };
+  return { principal, connection, grant, name, handle, setup };
 }
 function fixture() {
   const owner = randomUUID(), other = randomUUID(), workspace = randomUUID(), consent = randomUUID();
   const hosted = hostedFixture(workspace, owner);
-  const { principal, connection, grant, name } = hosted;
+  const { principal, connection, grant, name, handle } = hosted;
   const setup = `
     INSERT INTO auth.users(id,aud,role,email) VALUES ('${owner}','authenticated','authenticated','${owner}@example.test'),
       ('${other}','authenticated','authenticated','${other}@example.test');
@@ -57,7 +60,7 @@ function fixture() {
   const context = (kind: string, actor = owner) => `SELECT set_config('cswarm.household_actor','${actor}',true),
     set_config('cswarm.household_request','proof-${kind}',true),set_config('cswarm.household_digest',repeat('a',64),true),
     set_config('cswarm.household_command','${kind}',true);`;
-  return { owner, other, workspace, principal, consent, connection, grant, name, setup, insert, where, context };
+  return { owner, other, workspace, principal, consent, connection, grant, name, handle, setup, insert, where, context };
 }
 function psqlProof(suffix: 'catalog' | 'rollback-catalog') {
   const alias = suffix === 'catalog' ? 'catalog_ok' : 'rollback_ok';
@@ -164,8 +167,11 @@ test('real command adapters approve without role rewrite, list exact active appr
       const refusalWithoutWrites = async (sql: typeof tx, identity: typeof actor, command: Record<string, unknown>, reason: string) => {
         const beforeWrites = await writes(sql), refusedId = randomUUID();
         await sql`SET LOCAL ROLE swarm_command`;
-        assert.deepEqual(await api.executeHouseholdSurface(sql, f.workspace, identity, refusedId, command, yes),
-          { status: 'refused', reason });
+        const result = await api.executeHouseholdSurface(sql, f.workspace, identity, refusedId, command, yes);
+        assert.equal(result.status, 'refused'); assert.equal(result.reason, reason);
+        assert.equal(result.code, reason); assert.ok(Array.isArray(result.missing));
+        assert.ok(Object.hasOwn(result, 'scope')); assert.ok(Object.hasOwn(result, 'remedy_url'));
+        assert.ok(Object.hasOwn(result, 'mcp_tool')); assert.ok(Object.hasOwn(result, 'cli_command'));
         await sql`RESET ROLE`;
         assert.deepEqual(await writes(sql), beforeWrites, `${reason} leaves connections, audits and keys unchanged`);
         const [key] = await sql`SELECT count(*)::int AS count FROM swarm.idempotency_keys WHERE command_id=${refusedId}`;
@@ -427,4 +433,239 @@ test('real command adapters approve without role rewrite, list exact active appr
       throw new RollbackProof();
     }), RollbackProof);
   } finally { await db.end(); }
+});
+
+// D1 owns permission transaction behavior here. SQL privilege regressions must
+// fail through the actual handler; neither authority nor notice delivery is mocked.
+const d1Harness = String.raw`
+import assert from 'node:assert/strict';
+const input = JSON.parse(await new Response(Deno.stdin.readable).text());
+const api = await import(input.commandModule);
+const auth = await import(input.authModule);
+const { HOUSEHOLD_LOCAL_SEAT } = await import(input.protocolModule);
+const { householdRefusalNextStep } = await import(new URL('../../../src/protocol/household-next-steps.ts',input.mcpModule).href);
+// Expose the actual executor and its external SQL pools in this test module
+// only. All imports, capability checks, command/read dispatch and MCP rendering
+// remain production code; the pools share the real rollback-only fixture below.
+const mcpSource = (await Deno.readTextFile(new URL(input.mcpModule)))
+ .replace(/(from\s+|import\()(["'])(\.[^"']+)\2/g,
+  (_,prefix,quote,specifier)=>prefix+quote+new URL(specifier,input.mcpModule).href+quote)
+ .replace('async function executeTool(', 'export async function executeTool(')
+ + '\nexport { authDb, statusDb, createMcpProtocolHandler };';
+const mcp = await import('data:application/typescript,'+encodeURIComponent(mcpSource));
+const poolBegins = [mcp.authDb.begin, mcp.statusDb.begin];
+const originalBegin = api.db.begin.bind(api.db);
+class RollbackProof extends Error {}
+try {
+ await assert.rejects(originalBegin(async tx => {
+  await tx.unsafe(input.schema); await tx.unsafe(input.setup);
+  let active = tx;
+  const q = (sql, args=[]) => active.unsafe(sql,args);
+  const reset = async () => { await q('RESET ROLE'); };
+  await q("DO $edge$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='commonswarm_edge') THEN CREATE ROLE commonswarm_edge LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS; END IF; END $edge$; GRANT swarm_command,swarm_read,swarm_capability TO commonswarm_edge;");
+  const settings=['search_path','lock_timeout','statement_timeout','row_security','request.jwt.claims','cswarm.household_actor','cswarm.household_principal','cswarm.household_request','cswarm.household_digest','cswarm.household_command'];
+  const prior = await Promise.all(settings.map(async name => (await q('SELECT current_setting($1,true) AS value',[name]))[0].value));
+  const restore = async () => { await reset(); for(let i=0;i<settings.length;i++) await q('SELECT set_config($1,$2,true)',[settings[i],prior[i]??'']); };
+  // A real SQL savepoint supplies the handler's transaction rejection boundary
+  // inside this rollback-only fixture. Inspect effects BEFORE fixture cleanup.
+  api.db.begin = async (...args) => {
+   const outer = active;
+   try { return await outer.savepoint(async nested => { active=nested; return await args.at(-1)(nested); }); }
+   finally { active=outer; await restore(); }
+  };
+  // Independent MCP pools use real savepoints and preserve the calling SQL
+  // role across the nested provider-status transaction, as separate pools do.
+  const poolBegin=async(...args)=>{
+   const outer=active,role=(await q("SELECT current_setting('role') AS value"))[0].value;
+   const values=await Promise.all(settings.map(async name=>(await q('SELECT current_setting($1,true) AS value',[name]))[0].value));
+   try{return await outer.savepoint(async nested=>{active=nested;return await args.at(-1)(nested);});}
+   finally{active=outer;await q('SELECT set_config($1,$2,true)',['role',role]);for(let i=0;i<settings.length;i++)await q('SELECT set_config($1,$2,true)',[settings[i],values[i]??'']);}
+  };
+  mcp.authDb.begin = poolBegin; mcp.statusDb.begin = poolBegin;
+  const f=input.f;
+  const hostedCaller=caller=>caller==='hosted'||caller==='mcp';
+  const mcpHandler=mcp.createMcpProtocolHandler({
+   issuer:'https://mcp.commonswarm.com',resource:'https://mcp.commonswarm.com/mcp',publicEnabled:true,allowedOrigins:new Set(),
+   limits:{maxBodyBytes:128*1024,maxResponseBytes:64*1024,requestTimeoutMs:25_000,maxConcurrentRequests:4},
+   verifyToken:async()=>({providerGrantId:'synthetic-'+f.grant,subject:f.owner,expiresAt:1_900_000_000}),executeTool:mcp.executeTool,
+  });
+  const token='swm_agt_'+'D'.repeat(43);
+  const digest=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(token)));
+  await q("INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only) VALUES($1,$2,$3,'Synthetic D1 local','local',false)",[f.local,f.workspace,f.owner]);
+  await q("INSERT INTO swarm.devices(device_id,user_id,label) VALUES($1,$2,'Synthetic D1 device')",[f.device,f.owner]);
+  await q('INSERT INTO swarm.agent_runs(run_id,principal_id,device_id) VALUES($1,$2,$3)',[f.run,f.local,f.device]);
+  await q("INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,scopes,token_hash,expires_at,lineage_id) VALUES($1,$2,$3,'[]',$4,clock_timestamp()+interval '1 hour',$5)",[f.token,f.local,f.run,digest,f.lineage]);
+  await q("INSERT INTO swarm.config(key,value) VALUES('min_client_version','\"0.1.0\"') ON CONFLICT(key) DO UPDATE SET value=excluded.value");
+  const sibling=crypto.randomUUID(),siblingSeat=crypto.randomUUID();
+  await q("INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only) VALUES($1,$2,$3,'Synthetic same-grant sibling','hosted_mcp',true)",[sibling,f.workspace,f.owner]);
+  await q("INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,created_at) VALUES($1,$2,$3,$4,$5,'Synthetic same-grant sibling',clock_timestamp())",[siblingSeat,f.grant,f.workspace,f.owner,sibling]);
+  const oauthBefore=await q("SELECT to_jsonb(m)::text AS row FROM pg_auth_members m WHERE roleid='commonswarm_oauth_runtime'::regrole AND member='commonswarm_edge'::regrole ORDER BY grantor");
+  const capabilityFor = async(tool)=>{
+   await q('SET LOCAL SESSION AUTHORIZATION commonswarm_edge'); await q('SET LOCAL ROLE swarm_command');
+   try { return await auth.authenticateHostedSeatCapability(active,{grantId:f.grant,providerGrantId:'synthetic-'+f.grant,handle:f.handle,tool,providerStatus:async provider=>{
+    await q('SET LOCAL ROLE swarm_read');try{return {active:(await q('SELECT commonswarm_oauth.provider_family_active($1) AS active',[provider]))[0].active};}finally{await q('SET LOCAL ROLE swarm_command');}
+   }},'command'); } finally { await reset(); await q('RESET SESSION AUTHORIZATION'); }
+  };
+  const cap=await capabilityFor('list_permissions_confirm');
+  assert.ok(cap,'real hosted capability positive control');
+  const invoke=async (caller,action,id=crypto.randomUUID(),workspace=f.workspace,command,capability=cap)=>{
+   const args={seat:hostedCaller(caller)?f.handle:HOUSEHOLD_LOCAL_SEAT,request_id:id,confirmation:{kind:'owner_chat',confirmed:true},action};
+   const envelope={command_id:id,client_version:'0.1.83',workspace_id:workspace,stream:{kind:'workspace'},command:command??{kind:'household_tool',tool:hostedCaller(caller)?'list_permissions_confirm':'object_permissions_confirm',arguments:args}};
+   await q('SET LOCAL SESSION AUTHORIZATION commonswarm_edge');
+   try {
+    if(caller==='mcp'){
+     const response=await mcpHandler(new Request('https://mcp.commonswarm.com/mcp',{method:'POST',
+      headers:{authorization:'Bearer synthetic-d1','content-type':'application/json'},
+      body:JSON.stringify({jsonrpc:'2.0',id:'d1',method:'tools/call',params:{name:envelope.command.tool,arguments:envelope.command.arguments}})}));
+     assert.equal(response.status,200,'MCP transport remains successful');
+     const rpc=await response.json();assert.equal(rpc.error,undefined,'MCP must return tool content');
+     const output=JSON.parse(rpc.result.content[0].text);
+     assert.notEqual(output.reason,'hosted_seat_forbidden','D1 refusal must survive executeTool');
+     assert.equal(rpc.result.isError,undefined,'D1 refusal remains structured content');
+     assert.equal(rpc.result._meta,undefined,'D1 refusal must not request reconnect');
+     assert.notEqual(output.error,'hosted_seat_forbidden');
+     if(output.status==='refused')assert.equal(output.next_action,householdRefusalNextStep(output.reason),'MCP retains the documented optional recovery step');
+     return {status:response.status,body:output};
+    }
+    if(caller==='hosted')return await api.handleHostedCommand(envelope,capability);
+    if(caller==='human')return await api.handleHostedManagementCommand(envelope,{userId:f.owner,email:null,displayName:'Synthetic owner',identityVerified:true,interactiveAuthAtSeconds:null});
+    const response=await api.handleRequest(new Request('http://localhost/command',{method:'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json'},body:JSON.stringify(envelope)}));
+    return {status:response.status,body:await response.json()};
+   } finally {await reset();await q('RESET SESSION AUTHORIZATION');}
+  };
+  const count=async(table)=>Number((await q('SELECT count(*)::int AS n FROM swarm.'+table+' WHERE workspace_id=$1',[f.workspace]))[0].n);
+  const snapshot=async()=>{
+   const result={};for(const table of ['memberships','hosted_mcp_seats','household_workspace_boundaries','household_member_content_roles','household_content_connections','household_owner_permission_receipts','household_object_audit','signals','signal_deliveries'])
+    result[table]=await q('SELECT to_jsonb(r)::text AS row FROM swarm.'+table+' r WHERE workspace_id=$1 ORDER BY to_jsonb(r)::text',[f.workspace]);return result;
+  };
+  const setup={kind:'setup',purpose:'shared',content_role:'editor'};
+  for(const caller of ['human','local','hosted','mcp']){
+   await q('DELETE FROM swarm.household_content_connections WHERE workspace_id=$1',[f.workspace]);
+   await q('DELETE FROM swarm.household_member_content_roles WHERE workspace_id=$1',[f.workspace]);
+   await q('DELETE FROM swarm.household_workspace_boundaries WHERE workspace_id=$1',[f.workspace]);
+   const id=crypto.randomUUID(),before=await count('signals');
+   const result=await invoke(caller,setup,id);assert.equal(result.status,200,caller+' setup HTTP');assert.equal(result.body.status,'committed',caller+' setup');
+   const principal=caller==='human'?null:caller==='local'?f.local:f.principal;
+   const rows=await q('SELECT actor_user,actor_principal,command_kind FROM swarm.household_object_audit WHERE workspace_id=$1 AND command_id=$2',[f.workspace,id]);
+   assert.equal(rows.length,2);for(const row of rows){assert.equal(row.actor_user,f.owner);assert.equal(row.actor_principal,principal);assert.equal(row.command_kind,'household_owner_permissions');}
+   const delivery=await q('SELECT recipient_user_id FROM swarm.signal_deliveries WHERE signal_id=$1',[result.body.notice.signal_id]);
+   assert.ok(delivery.some(row=>row.recipient_user_id===f.owner),'owner notice delivery persists');
+   const frozen=await snapshot();const replay=await invoke(caller,setup,id);assert.equal(replay.body.replayed,true);assert.deepEqual(await snapshot(),frozen);assert.equal(await count('signals'),before+1);
+   const reused=await invoke(caller,{...setup,content_role:'reader'},id);assert.equal(reused.status,hostedCaller(caller)?200:409);assert.equal(reused.body.status,'refused');assert.equal(reused.body.reason,'request_id_reused');assert.equal(reused.body.code,'request_id_reused');assert.equal(reused.body.mcp_tool,null);assert.equal(reused.body.cli_command,null);assert.deepEqual(await snapshot(),frozen);
+  }
+  const allow={kind:'allow_connection',connection:{kind:'hosted',connection_id:f.target.connection,grant_id:f.target.grant,principal_id:f.target.principal,operations:['read','update']}};
+  for(const caller of ['human','local','hosted']){
+   const result=await invoke(caller,allow);assert.equal(result.status,200,caller+' Allow');assert.equal(result.body.status,'committed');
+   assert.deepEqual((await q('SELECT operations FROM swarm.household_content_connections WHERE connection_id=$1',[f.target.connection]))[0].operations,['read','update']);
+  }
+  // Every negative changes one live fact in a rollback savepoint. A valid Allow
+  // runs after restoration, so a broad unrelated denial cannot satisfy the test.
+  const negative=async(label,mutate,action=allow,reason,caller='hosted',workspace=f.workspace)=>{
+   const before=await snapshot();
+   await assert.rejects(tx.savepoint(async nested=>{active=nested;await mutate();const result=await invoke(caller,action,crypto.randomUUID(),workspace);assert.ok(result.status>=400||(caller==='hosted'&&result.status===200&&result.body.status==='refused'),label);assert.notEqual(result.body.status,'committed',label);if(reason)assert.equal(result.body.reason,reason,label);throw new RollbackProof();}),RollbackProof);
+   active=tx;await restore();assert.deepEqual(await snapshot(),before,label+' rolls back');assert.equal((await invoke('hosted',allow)).body.status,'committed',label+' restored positive');
+  };
+  await negative('downgraded owner',()=>q("UPDATE swarm.memberships SET role='admin' WHERE workspace_id=$1 AND user_id=$2",[f.workspace,f.owner]),allow,'owner_confirmation_required');
+  await negative('self',async()=>{}, {...allow,connection:{...allow.connection,connection_id:f.connection,grant_id:f.grant,principal_id:f.principal}},'self_permission_change_refused');
+  await negative('shared source grant',async()=>{}, {...allow,connection:{...allow.connection,connection_id:siblingSeat,grant_id:f.grant,principal_id:sibling}},'self_permission_change_refused');
+  await negative('revoked local source',()=>q('UPDATE swarm.agent_tokens SET revoked_at=clock_timestamp() WHERE token_id=$1',[f.token]),allow,undefined,'local');
+  await negative('foreign tuple',async()=>{}, {...allow,connection:{...allow.connection,grant_id:crypto.randomUUID()}},'connection_access_refused');
+  await negative('reader ceiling',()=>q("UPDATE swarm.household_member_content_roles SET content_role='reader' WHERE workspace_id=$1 AND user_id=$2",[f.workspace,f.owner]),allow,'content_read_only');
+  await negative('revoked target',()=>q('UPDATE swarm.hosted_mcp_seats SET revoked_at=clock_timestamp() WHERE seat_id=$1',[f.target.connection]),allow,'connection_access_refused');
+  await negative('revoked target handle',()=>q('UPDATE swarm.hosted_mcp_seat_handles SET revoked_at=clock_timestamp() WHERE seat_id=$1',[f.target.connection]),allow,'connection_access_refused');
+  await negative('revoked provider family',()=>q('INSERT INTO commonswarm_oauth.refresh_family_tombstones(grant_id,revoked_at) VALUES($1,clock_timestamp())',['synthetic-'+f.target.grant]),allow,'connection_access_refused');
+  await negative('revoked source',()=>q('UPDATE swarm.hosted_mcp_seats SET revoked_at=clock_timestamp() WHERE seat_id=$1',[f.connection]));
+  await negative('restricted source',()=>q("INSERT INTO swarm.household_hosted_content_restrictions(grant_id,workspace_id,owner_user_id,principal_id,operations,origin) VALUES($1,$2,$3,$4,ARRAY['read'],'human_allow')",[f.grant,f.workspace,f.owner,f.principal]),allow,'caller_content_restricted');
+  // Human/local D1 HTTP uses 409; hosted D1 preserves structured 200 tool
+  // content through executeTool. Legacy tools and human drafts retain 200.
+  const draftCap=await capabilityFor('list_draft_read'),legacyCap=await capabilityFor('list_list');
+  for(const caller of ['human','local','hosted','mcp']){
+   const command={kind:'household_tool',tool:hostedCaller(caller)?'list_draft_read':'object_draft_read',
+    arguments:{seat:hostedCaller(caller)?f.handle:HOUSEHOLD_LOCAL_SEAT,draft_id:'missing-private-draft'}};
+   const denied=await invoke(caller,null,crypto.randomUUID(),f.workspace,command,draftCap);
+   assert.equal(denied.status,hostedCaller(caller)?200:409);assert.equal(denied.body.status,'refused');
+   assert.equal(denied.body.reason,'draft_access_refused');
+   if(caller==='mcp')assert.equal(denied.body.next_action,'Recover this private draft using its original user and agent connection. Permission changes cannot transfer a private draft.');
+   assert.equal(denied.body.mcp_tool,null);assert.equal(denied.body.cli_command,null);
+  }
+  const humanDraft=await invoke('human',null,crypto.randomUUID(),f.workspace,{kind:'household_draft',draft_id:'missing-private-draft'});
+  assert.equal(humanDraft.status,200);assert.equal(humanDraft.body.status,'refused');
+  for(const caller of ['local','hosted']){
+   const legacy=await invoke(caller,null,crypto.randomUUID(),f.workspace,{kind:'household_tool',
+    tool:caller==='hosted'?'list_list':'object_list',arguments:{seat:hostedCaller(caller)?f.handle:HOUSEHOLD_LOCAL_SEAT}},legacyCap);
+   assert.equal(legacy.status,200);assert.equal(legacy.body.status,'ok');
+  }
+  const assertAborted=(result,reason,caller='hosted')=>{
+   assert.equal(result.status,hostedCaller(caller)?200:409);assert.equal(result.body.status,'refused');assert.equal(result.body.committed,false);
+   assert.equal(result.body.reason,reason);assert.equal(result.body.code,reason);
+   assert.deepEqual(result.body.scope,{});assert.equal(result.body.remedy_url,null);
+   assert.equal(result.body.mcp_tool,null);assert.equal(result.body.cli_command,null);
+   for(const key of ['notice','request_id','replayed','action','signal_id'])assert.equal(key in result.body,false,key+' cannot imply success');
+  };
+  // A real port refusal occurs after permission/audit writes. Inspect the
+  // handler's rollback immediately, before rolling back fixture rate limits.
+  for(const caller of ['local','hosted','mcp']){
+   const before=await snapshot();
+   await assert.rejects(tx.savepoint(async nested=>{
+    active=nested;const bucket=hostedCaller(caller)?'hosted_seat:'+f.connection:'agent:'+f.token;
+    await q("INSERT INTO swarm.rate_buckets(bucket_key,window_start,count) VALUES($1,date_trunc('hour',statement_timestamp()),10000) ON CONFLICT(bucket_key,window_start) DO UPDATE SET count=excluded.count",['signal:credential:'+bucket]);
+    assertAborted(await invoke(caller,{...allow,connection:{...allow.connection,operations:['read']}}),'owner_notice_unavailable',caller);
+    assert.deepEqual(await snapshot(),before,'failed notice rolled back before response');
+    throw new RollbackProof();
+   }),RollbackProof);active=tx;await restore();
+   assert.equal((await invoke(caller,allow)).body.status,'committed','restored notice positive');
+  }
+  // Database-trigger fault injection leaves real permission, audit, signal and
+  // delivery writes in flight before the final live authority check rejects.
+  // No production hook, fake notice implementation or extra role grant is used.
+  for(const [label,mutation,reason] of [
+   ['source',"UPDATE swarm.hosted_mcp_seats SET revoked_at=clock_timestamp() WHERE seat_id='"+f.connection+"'",'credential_revoked'],
+   ['target',"UPDATE swarm.hosted_mcp_seats SET revoked_at=clock_timestamp() WHERE seat_id='"+f.target.connection+"'",'connection_access_refused'],
+   ['owner',"UPDATE swarm.memberships SET role='admin' WHERE workspace_id='"+f.workspace+"' AND user_id='"+f.owner+"'",'owner_confirmation_required']
+  ]){
+   const before=await snapshot();
+   await assert.rejects(tx.savepoint(async nested=>{
+    active=nested;
+    await q("CREATE FUNCTION pg_temp.d1_delivery_fence() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $f$ BEGIN IF NEW.recipient_user_id='"+f.owner+"'::uuid THEN "+mutation+"; END IF; RETURN NEW; END $f$; CREATE TRIGGER d1_delivery_fence AFTER INSERT ON swarm.signal_deliveries FOR EACH ROW EXECUTE FUNCTION pg_temp.d1_delivery_fence()");
+    assertAborted(await invoke('hosted',{...allow,connection:{...allow.connection,operations:['read']}}),reason);
+    assert.deepEqual(await snapshot(),before,label+' rollback includes actual notice and delivery before response');
+    throw new RollbackProof();
+   }),RollbackProof);active=tx;await restore();
+   assert.equal((await invoke('hosted',allow)).body.status,'committed',label+' restored positive');
+  }
+  // An unknown exception must stay a failure, even after permission writes.
+  // It cannot become a success or a known-abort refusal.
+  const beforeUnknown=await snapshot();
+  await assert.rejects(tx.savepoint(async nested=>{
+   active=nested;
+   await q("CREATE FUNCTION pg_temp.d1_unknown_failure() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RAISE EXCEPTION 'synthetic-private-db-details'; END $f$; CREATE TRIGGER d1_unknown_failure AFTER INSERT ON swarm.signal_deliveries FOR EACH ROW EXECUTE FUNCTION pg_temp.d1_unknown_failure()");
+   await assert.rejects(invoke('hosted',{...allow,connection:{...allow.connection,operations:['read']}}),error=>error.code==='P0001');
+   assert.deepEqual(await snapshot(),beforeUnknown,'unknown failure also rolls back before escaping');
+   throw new RollbackProof();
+  }),RollbackProof);active=tx;await restore();
+  assert.equal((await invoke('hosted',allow)).body.status,'committed','unknown failure restored positive');
+  assert.deepEqual(await q("SELECT to_jsonb(m)::text AS row FROM pg_auth_members m WHERE roleid='commonswarm_oauth_runtime'::regrole AND member='commonswarm_edge'::regrole ORDER BY grantor"),oauthBefore);
+  throw new RollbackProof();
+ }),RollbackProof);
+ console.log('D1_ROLE_NOTICE_RESULT:ok');
+} finally {api.db.begin=originalBegin;[mcp.authDb.begin,mcp.statusDb.begin]=poolBegins;await Promise.all([api.db.end(),mcp.authDb.end(),mcp.statusDb.end()]);}
+`;
+
+test('D1 real edge session and MCP executeTool preserve draft/replay/notice refusals and roll back failed delivery', {timeout:120_000}, t => {
+ const evidenceDir=mkdtempSync(join(tmpdir(),'cswarm-d1-role-notice-'));
+ t.after(()=>rmSync(evidenceDir,{recursive:true,force:true}));
+ const local=JSON.parse(execFileSync('supabase',['status','-o','json'],{encoding:'utf8',stdio:['ignore','pipe','ignore']})) as {DB_URL:string;API_URL:string;SERVICE_ROLE_KEY:string};
+ assert.ok(['127.0.0.1','localhost','[::1]'].includes(new URL(local.API_URL).hostname));
+ const f={...fixture(),local:randomUUID(),device:randomUUID(),run:randomUUID(),token:randomUUID(),lineage:randomUUID(),target:null as ReturnType<typeof hostedFixture>|null};
+ f.target=hostedFixture(f.workspace,f.owner);
+ const result=spawnSync('deno',['eval','--no-lock','--config','supabase/functions/command/deno.json',d1Harness],{
+  cwd:process.cwd(),encoding:'utf8',input:JSON.stringify({f,setup:f.setup+f.target.setup,schema:emptyApplicationSchema(),
+   commandModule:new URL('../../supabase/functions/command/index.ts',import.meta.url).href,
+   mcpModule:new URL('../../supabase/functions/mcp/index.ts',import.meta.url).href,
+   authModule:new URL('../../supabase/functions/_shared/hosted-seat-auth.ts',import.meta.url).href,
+   protocolModule:new URL('../../supabase/functions/_shared/protocol.js',import.meta.url).href}),
+  env:{PATH:process.env.PATH??'',...(process.env.DENO_DIR?{DENO_DIR:process.env.DENO_DIR}:{}),SWARM_ENV:'test',SWARM_DATABASE_URL:localClusterAdminUrl(local.DB_URL),SUPABASE_URL:local.API_URL,SUPABASE_ANON_KEY:'synthetic-anon',SUPABASE_SERVICE_ROLE_KEY:local.SERVICE_ROLE_KEY},timeout:110_000,maxBuffer:1024*1024});
+ writeFileSync(join(evidenceDir,'d1-role-notice.stderr.log'),result.stderr??'',{mode:0o600});
+ assert.equal(result.status,0,'D1 real-role/notice harness must complete; inspect private CI stderr on failure');
+ assert.match(result.stdout,/D1_ROLE_NOTICE_RESULT:ok/);
 });

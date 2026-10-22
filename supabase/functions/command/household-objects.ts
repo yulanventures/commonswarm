@@ -255,9 +255,11 @@ export function createHouseholdObjectStore(dependencies: {
     return core.readHouseholdObjects(query, current, latest!.facts, latest!.now);
   }
 
-  async function readBytes(tx: Sql, workspaceId: string, identity: HouseholdIdentity, query: Extract<HouseholdReadQuery, { kind: 'object_read' | 'draft_read' }>) {
+  async function readBytes(tx: Sql, workspaceId: string, identity: HouseholdIdentity, query: Extract<HouseholdReadQuery, { kind: 'object_read' | 'draft_read' }>, allowedKinds?: readonly string[]) {
     const result = await read(tx, workspaceId, identity, query);
     if (result.status !== 'ok' || (result.kind !== 'object_read' && result.kind !== 'draft_read')) return result;
+    const kind = result.kind === 'object_read' ? result.revision.kind : result.draft.kind;
+    if (allowedKinds && !allowedKinds.includes(kind)) return { status: 'refused' as const, reason: 'object_type_mismatch' };
     const blob: HouseholdBlob = result.kind === 'object_read' ? result.revision.blob : result.draft.proposed;
     const bytes = await transfers.verifiedHouseholdBytes(storage, blob);
     const latest = await access(tx, workspaceId, identity);

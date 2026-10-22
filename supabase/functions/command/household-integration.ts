@@ -4,23 +4,19 @@ import type postgres from 'postgres';
 import * as core from '../_shared/protocol.js';
 import { createHouseholdObjectStore, type HouseholdIdentity, type HouseholdCredentialRecheck } from './household-objects.ts';
 import { loadHouseholdContentAccess } from './household-content-access.ts';
+import { confirmOwnerHouseholdPermissions, canOfferOwnerHouseholdSetup } from './household-owner-permissions.ts';
 import { approveHouseholdConnection, withdrawHouseholdConnection } from './household-permissions.ts';
 import { createHouseholdTodoStore, type HouseholdTodoNoticePort } from './household-todos.ts';
 import { readHouseholdActivity } from './household-activity.ts';
 import * as transfers from './household-transfers.ts';
 import { FILE_BUCKET, fileContentAllowed } from './file-artifacts.ts';
-import type { HouseholdContent, HouseholdRevision } from '../_shared/household-object-events.d.ts';
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 export const HOUSEHOLD_SURFACE_KINDS = ['household_tool', 'household_draft', 'household_permissions', 'household_access', 'household_connections', 'household_approve_connection', 'household_withdraw_connection', 'household_todo_answer', 'household_todo_steer', 'household_agent_work_policy', 'household_activity'] as const;
 const localSeat = core.HOUSEHOLD_LOCAL_SEAT;
 const refused = (reason: string) => ({ status: 'refused', reason });
-export const householdRevisionMetadata = (revision: HouseholdRevision) => ({
-  revision: revision.revision, parent: revision.parent, title: revision.title,
-  kind: revision.kind, file_metadata: revision.file_metadata,
-  blob: { size_bytes: revision.blob.size_bytes, sha256: revision.blob.sha256 },
-  author: revision.author, occurred_at_server: revision.occurred_at_server, command_id: revision.command_id,
-});
+export { householdRevisionMetadata } from './household-draft.ts';
+import { householdRevisionMetadata, readHouseholdDraft } from './household-draft.ts';
 
 /** Build a transaction store with lazy byte I/O. Missing configuration fails
  * closed at read/put; metadata and authorization retain their existing paths. */
@@ -42,6 +38,33 @@ export function householdStore(recheckCredential: HouseholdCredentialRecheck, ne
 /** Reserved IDs/expiry are server facts recovered from the durable projection.
  * The workspace lock covers preparation, quota, decision and receipt together. */
 export async function executeHouseholdSurface(tx: Sql, workspaceId: string, identity: HouseholdIdentity,
+  requestId: string, value: Record<string, unknown>, recheckCredential: HouseholdCredentialRecheck,
+  attachment?: Uint8Array, notice?: HouseholdTodoNoticePort): Promise<Record<string, unknown>> {
+  let result = await executeHouseholdSurfaceResult(tx, workspaceId, identity, requestId, value, recheckCredential, attachment, notice);
+  if (result.status !== 'refused' || typeof result.reason !== 'string') return result;
+  const privateDraft = value.kind === 'household_draft' || value.kind === 'household_tool'
+    && ['object_draft_read', 'list_draft_read'].includes(String(value.tool));
+  // Content admission can fail before the private draft binding is inspected.
+  // It must never suggest that changing permissions can transfer that draft.
+  if (privateDraft && ['owner_confirmation_required', 'content_consent_required', 'connection_access_refused',
+    'workspace_access_refused', 'content_read_only'].includes(String(result.reason)))
+    result = refused('draft_access_refused');
+  const reason = String(result.reason);
+  // Refusals cannot reveal another owner/object/draft. Scope only live membership.
+  let scope: { workspace_id?: string; principal_id?: string } = {};
+  if (await recheckCredential(tx, identity)) {
+    const [member] = await tx`SELECT m.user_id FROM swarm.memberships m JOIN swarm.workspaces w USING(workspace_id)
+      WHERE m.workspace_id=${workspaceId}::uuid AND m.user_id=${identity.user_id}::uuid
+        AND m.revoked_at IS NULL AND w.archived_at IS NULL FOR SHARE OF m,w`;
+    if (member) scope = { workspace_id: workspaceId, ...(identity.principal_id ? { principal_id: identity.principal_id } : {}) };
+  }
+  const remedy = scope.workspace_id && ['owner_confirmation_required','content_consent_required'].includes(reason)
+    && await canOfferOwnerHouseholdSetup(tx, workspaceId, identity)
+    ? identity.principal_id !== null && identity.run_id === null ? 'list_permissions_confirm' : 'object_permissions_confirm' : undefined;
+  return { ...result, ...core.householdRefusalDetails(reason, scope, remedy, identity.principal_id === null ? 'human' : identity.run_id === null ? 'hosted' : 'local') };
+}
+
+async function executeHouseholdSurfaceResult(tx: Sql, workspaceId: string, identity: HouseholdIdentity,
   requestId: string, value: Record<string, unknown>, recheckCredential: HouseholdCredentialRecheck,
   attachment?: Uint8Array, notice?: HouseholdTodoNoticePort): Promise<Record<string, unknown>> {
   if (value.kind === 'household_approve_connection') return approveHouseholdConnection(tx, workspaceId, identity, requestId, value, recheckCredential);
@@ -145,28 +168,15 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
     return { status: 'ok', content_role: access.facts.member!.content_role,
       operations: core.HOUSEHOLD_CONTENT_OPERATIONS.filter(op => !core.householdAccessRefusal(access.facts, workspaceId, op, access.now)) };
   }
-  if (value.kind === 'household_draft') {
-    if (typeof value.draft_id !== 'string' || value.draft_id.length > 255) return refused('invalid_request');
-    const result = await store.readBytes(tx, workspaceId, identity, { kind: 'draft_read', draft_id: value.draft_id });
-    if (!('bytes' in result) || result.metadata.kind !== 'draft_read') return result;
-    const draft = result.metadata.draft;
-    const current = await store.readBytes(tx, workspaceId, identity, { kind: 'object_read', object_id: draft.object_id, revision: draft.current });
-    const base = await store.readBytes(tx, workspaceId, identity, { kind: 'object_read', object_id: draft.object_id, revision: draft.base });
-    if (!('bytes' in current) || !('bytes' in base) || current.metadata.kind !== 'object_read' || base.metadata.kind !== 'object_read') return refused('revision_not_found');
-    if (draft.kind === 'file') return refused('protected_attachment_required');
-    return { status: 'ok', workspace_id: workspaceId, object_id: draft.object_id, draft_id: draft.draft_id,
-      owner_user_id: draft.owner.user_id, proposed: transfers.decodeHouseholdContent(result.bytes, draft.kind),
-      base: { ...householdRevisionMetadata(base.metadata.revision), live: base.metadata.live,
-        content: transfers.decodeHouseholdContent(base.bytes, draft.kind) },
-      current: { ...householdRevisionMetadata(current.metadata.revision), live: current.metadata.live,
-        content: transfers.decodeHouseholdContent(current.bytes, draft.kind) } };
-  }
+  if (value.kind === 'household_draft') return readHouseholdDraft(tx, workspaceId, identity, value.draft_id, store, undefined, false);
   if (value.kind !== 'household_tool' || typeof value.tool !== 'string') return refused('invalid_request');
   const args = core.validateHouseholdToolArguments(value.tool, value.arguments);
   if (args.request_id !== undefined && args.request_id !== requestId) return refused('request_id_mismatch');
   // Local seat text supplies schema parity only. Existing token/session auth
   // determines identity; it never selects a different local principal.
   if (identity.connection === null && args.seat !== localSeat) return refused('seat_binding_mismatch');
+  if (value.tool === 'object_permissions_confirm' || value.tool === 'list_permissions_confirm')
+    return confirmOwnerHouseholdPermissions(tx, workspaceId, identity, requestId, args, recheckCredential, notice);
   const access = await store.access(tx, workspaceId, identity);
   const operation = core.householdToolOperation(value.tool, args);
   if (!access) return missingAccess();
@@ -194,6 +204,7 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
   const invocation = core.householdToolInvocation(value.tool, args, { workspace_id: workspaceId,
     upload: { reservation_id: reservationId, expires_at: previous?.expires_at ?? access.now + 15 * 60_000 } });
   if ('query' in invocation) {
+    if (invocation.query.kind === 'draft_read') return readHouseholdDraft(tx, workspaceId, identity, invocation.query.draft_id, store, invocation.objectTypes);
     if ('limit' in invocation.query && invocation.query.limit !== undefined && invocation.query.limit > 100) return refused('page_limit_exceeded');
     if (invocation.query.kind === 'object_read') {
       const result = await store.readBytes(tx, workspaceId, identity, invocation.query);

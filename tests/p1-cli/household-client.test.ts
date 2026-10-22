@@ -213,7 +213,7 @@ test('registry-derived local tools pass reads, surface reader refusal, and rejec
   const host = coreHost();
   const tools = createHouseholdMcpTools(host.client);
   assert.deepEqual(tools.tools, HOUSEHOLD_TOOLS);
-  assert.equal(tools.tools.length, 18, 'eight object/file tools and ten to-do/comment tools');
+  assert.equal(tools.tools.length, 20, 'ten object/file/draft/permission tools and ten to-do/comment tools');
   const created = await tools.call('object_create', create());
   assert.equal(JSON.parse(created.content[0]!.text).status, 'committed');
   host.reader();
@@ -370,4 +370,44 @@ test('read retries recheck permission and oversized content is explicitly bounde
   assert.equal(JSON.parse(result.content[0]!.text).status, 'refused');
   assert.equal(JSON.parse(result.content[0]!.text).truncated, true);
   assert.ok(Buffer.byteLength(result.content[0]!.text) <= MCP_RESULT_MAX_BYTES);
+});
+
+// Owns new transport/decoder behavior; existing core tests own private-draft authorization.
+test('draft recovery reaches HTTP as object_draft_read, projects recorded revisions, and rejects substitution', async () => {
+  const body = { status: 'ok', kind: 'draft_read', workspace_id: workspace, object_id: 'shopping', draft_id: 'draft_001',
+    owner_user_id: 'human-a', proposed: { kind: 'doc', markdown: 'proposal' },
+    base: { ...readRevision(), live: false, content: { kind: 'doc', markdown: 'base' } },
+    current: { ...readRevision(), live: true, content: { kind: 'doc', markdown: 'current' } } };
+  let response: unknown = body;
+  const client = new HouseholdObjectClient(createHouseholdHttpTransport({
+    target: { url: 'https://edge.invalid', anonKey: 'fake-anon', profileId: 'test' },
+    authenticate: async () => ({ credential: 'fake-agent', fetcher: async (_url, init) => {
+      assert.deepEqual(JSON.parse(String(init?.body)).command, { kind: 'household_tool', tool: 'object_draft_read',
+        arguments: { seat: LOCAL_HOUSEHOLD_SEAT, draft_id: 'draft_001' } });
+      return new Response(JSON.stringify(response));
+    } }),
+  }), workspace);
+  const prepared = client.prepare('object_draft_read', { seat, draft_id: 'draft_001' });
+  const result = await prepared.send();
+  assert.equal(result.status, 'ok');
+  assert.equal(JSON.stringify(result).includes('owner_user_id'), false);
+  if (result.status === 'ok' && result.kind === 'draft_read') assert.equal(result.proposed.kind, 'doc');
+  for (const broken of [{ ...body, draft_id: 'foreign' }, { ...body, workspace_id: 'foreign' },
+    { ...body, current: { ...body.current, revision: { ...ref(), workspace_id: 'foreign' } } }]) {
+    response = broken; assert.equal((await prepared.retry()).status, 'unknown');
+  }
+});
+test('structured refusals survive non-200 HTTP and local MCP without forwarding foreign links or commands', async () => {
+  const client = new HouseholdObjectClient(createHouseholdHttpTransport({
+    target: { url: 'https://edge.invalid', anonKey: 'fake-anon', profileId: 'test' },
+    authenticate: async () => ({ credential: 'fake-agent', fetcher: async () => new Response(JSON.stringify({
+      status: 'refused', reason: 'content_consent_required', code: 'content_consent_required',
+      scope: { workspace_id: workspace, owner_user_id: 'foreign' }, remedy_url: 'https://secret.invalid',
+      cli_command: 'unsafe command', mcp_tool: 'invented' }), { status: 403 }) }),
+  }), workspace);
+  const output = JSON.parse((await createHouseholdMcpTools(client).call('object_draft_read', { seat, draft_id: 'draft_001' })).content[0]!.text);
+  assert.equal(output.status, 'refused'); assert.deepEqual(output.missing, ['content_consent']);
+  assert.deepEqual(output.scope, { workspace_id: workspace });
+  assert.equal(output.remedy_url, 'https://commonswarm.com/app?w=household-test&v=lists');
+  assert.equal(output.cli_command, null); assert.equal(output.mcp_tool, null);
 });

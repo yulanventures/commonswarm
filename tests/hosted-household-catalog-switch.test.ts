@@ -24,14 +24,14 @@ test('server to-do/list switch preserves OFF bytes and admits only the registry 
     const listed = await rpc('tools/list'), core = JSON.parse(golden['tools/list']).result.tools;
     if (flag !== '1') assert.equal(listed, golden['tools/list'], String(flag));
     else {
-      assert.equal(JSON.parse(listed).result.tools.length, 23);
+      assert.equal(JSON.parse(listed).result.tools.length, 25);
       assert.deepEqual(JSON.parse(listed).result.tools, [...core, ...HOSTED_TODO_LIST_TOOLS.map(row => ({ ...row, securitySchemes: [{ type: 'oauth2', scopes: ['mcp'] }] }))]);
       for (const { name } of HOSTED_TODO_LIST_TOOLS) assert.equal(JSON.parse(await rpc('tools/call', { name, arguments: {} }, 400)).error.message, 'invalid_arguments', name);
-      for (const [name, args] of [['todo_list', { scope: 'open' }], ['list_list', { offset: 0, limit: 1 }]] as const) await rpc('tools/call', { name, arguments: { seat, ...args } });
+      for (const [name, args] of [['todo_list', { scope: 'open' }], ['list_list', { offset: 0, limit: 1 }], ['list_permissions_confirm', { request_id: 'confirm_01', confirmation: { kind: 'owner_chat', confirmed: true }, action: { kind: 'setup', purpose: 'shared', content_role: 'reader' } }]] as const) await rpc('tools/call', { name, arguments: { seat, ...args } });
     }
     await rpc('tools/call', { name: 'whoami', arguments: { seat } });
     const refusal = await rpc('tools/call', { name: 'unknown_tool', arguments: {} }, 400);
     for (const { name } of HOUSEHOLD_TOOL_REGISTRY.filter(row => flag !== '1' || !HOSTED_TODO_LIST_TOOLS.some(tool => tool.name === row.name))) assert.equal(await rpc('tools/call', { name, arguments: {} }, 400), refusal, name);
-    assert.deepEqual(calls, flag === '1' ? ['todo_list', 'list_list', 'whoami'] : ['whoami']);
+    assert.deepEqual(calls, flag === '1' ? ['todo_list', 'list_list', 'list_permissions_confirm', 'whoami'] : ['whoami']);
   }
 });

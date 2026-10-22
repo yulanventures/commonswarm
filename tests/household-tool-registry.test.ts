@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import {
-  HOUSEHOLD_CONTENT_CONSENT, HOUSEHOLD_TOOLS, householdToolInvocation,
+  HOUSEHOLD_CONTENT_CONSENT, HOUSEHOLD_TOOLS, householdToolInvocation, householdRefusalDetails,
   householdToolOperation, HouseholdToolInputError, validateHouseholdToolArguments, validateHouseholdHumanCommand,
   type HouseholdToolName,
 } from '../src/protocol/household-tool-registry.js';
@@ -25,6 +25,8 @@ const request = { seat, request_id: 'request_1' };
 
 // Independent spec examples: expectations below do not come from registry rows.
 const examples: Record<HouseholdToolName, Record<string, unknown>> = {
+  object_draft_read: { seat, draft_id: 'draft_001' },
+  object_permissions_confirm: { ...request, confirmation: { kind: 'owner_chat', confirmed: true }, action: { kind: 'setup', purpose: 'shared', content_role: 'reader' } },
   object_list: { seat, offset: 0, limit: 10 },
   object_read: { seat, object_id: 'shopping', revision: ref('shopping') },
   object_history: { seat, object_id: 'shopping', offset: 0, limit: 10 },
@@ -45,6 +47,8 @@ const examples: Record<HouseholdToolName, Record<string, unknown>> = {
   todo_set_state: { ...request, todo_id: '00000000-0000-4000-8000-000000000001', base_version: 1, state: 'done' },
 };
 const contracts = [
+  ['object_draft_read', 'draft_read', 'read', true],
+  ['object_permissions_confirm', 'household_owner_permissions', 'update', false],
   ['object_list', 'object_list', 'read', true],
   ['object_read', 'object_read', 'read', true],
   ['object_history', 'object_history', 'read', true],
@@ -55,9 +59,9 @@ const contracts = [
   ['file_upload_commit', 'commit_household_upload', 'create', false],
 ] as const;
 
-test('all eighteen tool contracts validate and map to lane 1 with spec hints and rights', () => {
-  assert.equal(HOUSEHOLD_TOOLS.length, 18);
-  assert.equal(new Set(HOUSEHOLD_TOOLS.map((tool) => tool.name)).size, 18);
+test('all twenty tool contracts validate and map to lane 1 with spec hints and rights', () => {
+  assert.equal(HOUSEHOLD_TOOLS.length, 20);
+  assert.equal(new Set(HOUSEHOLD_TOOLS.map((tool) => tool.name)).size, 20);
   for (const [name, kind, permission, readOnlyHint] of contracts) {
     assert.deepEqual(validateHouseholdToolArguments(name, examples[name]), examples[name]);
     const invocation = householdToolInvocation(name, examples[name], host);
@@ -203,7 +207,8 @@ test('mapped calls execute the real core: reads preserve state; begin reserves; 
     object_update: artifact('shopping', checked, ref('shopping')),
     file_upload_begin: artifact('new-file', file), file_upload_commit: artifact('new-file', file),
   };
-  for (const [name, , operation, readOnlyHint] of contracts) {
+  // Permission management is owned by the authenticated SQL integration tests.
+  for (const [name, , operation, readOnlyHint] of contracts.filter(([name]) => name !== 'object_permissions_confirm')) {
     const call = householdToolInvocation(name, readOnlyHint ? examples[name]
       : { ...examples[name], request_id: `request_${name}` }, host);
     const before = structuredClone(state);
@@ -211,9 +216,10 @@ test('mapped calls execute the real core: reads preserve state; begin reserves; 
     const reader = access(); reader.member!.content_role = 'reader';
     assert.equal(householdAccessRefusal(reader, workspace, call.operation, 100), operation === 'read' ? null : 'content_read_only');
     if ('query' in call) {
-      assert.ok(call.query.kind === 'object_list' || call.query.kind === 'object_read' || call.query.kind === 'object_history');
+      assert.ok(call.query.kind === 'object_list' || call.query.kind === 'object_read' || call.query.kind === 'object_history' || call.query.kind === 'draft_read');
       const result = readHouseholdObjects(call.query, state, access(), 100);
-      assert.equal(result.status, 'ok');
+      assert.equal(result.status, call.query.kind === 'draft_read' ? 'refused' : 'ok');
+      if (call.query.kind === 'draft_read') assert.deepEqual(result, { status: 'refused', reason: 'draft_access_refused' });
       if (result.status === 'ok' && result.kind === 'object_read') assert.ok(call.objectTypes.includes(result.revision.kind));
       assert.deepEqual(state, before);
       assert.equal(readOnlyHint, true);
@@ -247,7 +253,7 @@ test('mapped calls execute the real core: reads preserve state; begin reserves; 
 
 test('consent groups only the matching content tools and explains workspace audience and retained history', () => {
   const expected = {
-    read: ['object_list', 'object_read', 'object_history', 'file_read', 'todo_list', 'todo_read', 'todo_queue', 'comment_list'],
+    read: ['object_list', 'object_read', 'object_history', 'file_read', 'todo_list', 'todo_read', 'todo_queue', 'comment_list', 'object_draft_read'],
     create: ['object_create', 'file_upload_begin', 'file_upload_commit', 'todo_create', 'todo_comment'],
     update: ['object_update', 'file_upload_begin', 'file_upload_commit', 'todo_update', 'todo_assign', 'todo_start', 'todo_set_state'],
   };
@@ -354,4 +360,20 @@ test('human-only HTTP schemas refuse extra identity fields and invalid action or
     { ...valid[2], accepts_from: 'all' }, { ...valid[3], limit: 101 },
     { ...valid[0], answer: 'replaced' }, { kind: 'todo_start' },
   ]) assert.throws(() => validateHouseholdHumanCommand(invalid), HouseholdToolInputError);
+});
+
+
+test('permission refusal remedies match hosted, human and local authentication without inventing a hosted CLI', () => {
+ const scope = {workspace_id: 'workspace-1'};
+ const hosted = householdRefusalDetails('owner_confirmation_required', scope, 'list_permissions_confirm', 'hosted');
+ assert.equal(hosted.mcp_tool, 'list_permissions_confirm'); assert.equal(hosted.cli_command, null);
+ const human = householdRefusalDetails('content_consent_required', scope, 'object_permissions_confirm', 'human');
+ assert.equal(human.cli_command, 'cswarm object object_permissions_confirm --input-file <confirmation.json> --workspace-id workspace-1 --json');
+ const local = householdRefusalDetails('content_consent_required', scope, 'object_permissions_confirm', 'local');
+ assert.equal(local.cli_command, 'cswarm object object_permissions_confirm --input-file <confirmation.json> --workspace-id workspace-1 --agent-token-file <token-file> --json');
+ assert.equal(local.remedy_url, 'https://commonswarm.com/app?w=workspace-1&v=lists');
+ for (const reason of ['draft_access_refused','caller_content_restricted','self_permission_change_refused']) {
+  const denied = householdRefusalDetails(reason, scope);
+  assert.equal(denied.mcp_tool, null); assert.equal(denied.cli_command, null);
+ }
 });

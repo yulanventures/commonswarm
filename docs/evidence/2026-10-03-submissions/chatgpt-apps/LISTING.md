@@ -88,3 +88,32 @@ Use cases: identify a named seat and roster (P1); ask and retrieve a synthetic q
 
 
 **Ready for submission?** Materials prepared; [C3-ACTIONS](../../2026-10-03-reviewer-packet/C3-ACTIONS.md) still has remaining blockers listed per vendor; the Tom morning reviewer-account step is nonblocking under ruling B. C6 GO once C3 is met; no new legal or admin gate.
+
+
+Source update pending review/release (21 October 2026): local CLI/MCP adds
+`object_draft_read(seat,draft_id)`; hosted catalog adds `list_draft_read(seat,draft_id)`
+only with server `SWARM_MCP_TODOS_LISTS_ENABLED=1`. It reads the caller's private
+retained list proposal and recorded base/current revisions. It cannot save, merge,
+transfer drafts or grant permissions; hosted docs/files remain excluded. The disabled
+catalog and its original eight coordination entries stay unchanged. No directory
+submission or live catalog claim is made by this source update.
+
+CLI publication plan: package and lock source are 0.1.83. After review and assigned
+gates, the release owner must run the single-file and npm packaging checks, then
+publish through the existing release process. Installed 0.1.82 has no draft-read command. Once that release is
+installed, put {"draft_id":"<retained draft ID>"} in draft.json and run
+`cswarm object object_draft_read --input-file draft.json --workspace-id <workspace UUID> --json`
+with the existing selected human/agent profile (or existing agent token input).
+The 0.1.83 source includes the owner-confirmed permission operations described below.
+Hosted callers use `list_permissions_confirm` in their existing MCP connection; they
+do not receive a local agent token or a CLI command. Human CLI callers use their
+existing selected profile; local agents may supply their existing token file.
+No credential value belongs in the confirmation JSON or chat.
+
+D1 source candidate for CLI 0.1.83 appends `list_permissions_confirm` (local
+`object_permissions_confirm`). Closed actions are `setup` and `allow_connection`;
+`confirmation: {kind: "owner_chat", confirmed: true}` is a caller assertion.
+Optional bounded chat references contain no message text. Authenticated owner
+lineage, caller ceilings, principal audit and a transactional sent owner notice
+are required. An agent cannot lift its own restrictions or widen its source grant.
+This is an unpublished source candidate; installed 0.1.82 lacks these commands.

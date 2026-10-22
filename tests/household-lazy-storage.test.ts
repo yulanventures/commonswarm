@@ -71,6 +71,9 @@ test('authorized dispatch leaves storage untouched until a blob read and retains
     assert.equal(new Headers(options.headers).get('authorization'), 'Bearer synthetic-storage-key');
     return new Response(bytes);
   });
+  const revokedRefusal = { status: 'refused', reason: 'workspace_access_refused',
+    code: 'workspace_access_refused', missing: ['workspace_access_refused'], scope: {},
+    remedy_url: null, mcp_tool: null, cli_command: null };
   const dispatch = fixture();
   const todos = await dispatch('todo_list', { scope: 'all' });
   assert.equal(todos.status, 'ok');
@@ -78,7 +81,7 @@ test('authorized dispatch leaves storage untouched until a blob read and retains
   assert.equal((await dispatch('object_list', { offset: 0, limit: 10 })).status, 'ok');
   assert.deepEqual(requested, [], 'to-dos and metadata must not resolve storage configuration');
   assert.deepEqual(await dispatch('object_read', { object_id: 'shopping' }, false),
-    { status: 'refused', reason: 'workspace_access_refused' });
+    revokedRefusal);
   assert.deepEqual(requested, [], 'revoked access must fail before storage setup');
   for (const missing of [{}, { SUPABASE_URL: 'https://storage.invalid' }, { SUPABASE_SERVICE_ROLE_KEY: 'synthetic-storage-key' }]) {
     settings.SUPABASE_URL = missing.SUPABASE_URL;
@@ -95,6 +98,6 @@ test('authorized dispatch leaves storage untouched until a blob read and retains
   assert.deepEqual((read.revision as { revision: unknown }).revision, revision.revision);
   assert.equal(http.mock.callCount(), 1);
   assert.deepEqual(await dispatch('object_read', { object_id: 'shopping' }, false),
-    { status: 'refused', reason: 'workspace_access_refused' });
+    revokedRefusal);
   assert.equal(http.mock.callCount(), 1, 'revocation must prevent another byte request');
 });

@@ -6,7 +6,6 @@ export declare class UnknownEventTypeError extends Error {
     readonly seq: number;
     constructor(type: string, seq: number);
 }
-/** Thrown when a stream is malformed (e.g. a non-create event before the task exists). */
 export declare class StreamIntegrityError extends Error {
     constructor(message: string);
 }
