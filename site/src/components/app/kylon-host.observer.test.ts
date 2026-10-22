@@ -21,29 +21,54 @@ const fixtureScript = `
   const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   let heldSearch = null, releasedPeople = null, suspendedHidden = null, doorCounts = null;
   const listeners = () => fixture.mediaQueries.reduce((count, query) => count + query.listeners.size, 0);
-  const peopleFacts = () => ({ width: innerWidth, phone: matchMedia('(max-width:52rem)').matches,
+  const elementFact = node => node ? { tag: node.tagName, id: node.id?.slice(0, 120),
+    classes: String(node.className ?? '').slice(0, 240), key: node.dataset?.homeFocusKey?.slice(0, 240),
+    pdFocus: node.dataset?.pdFocus?.slice(0, 120) } : null;
+  const peopleInventory = () => {
+    const ids = new Map();
+    for (const node of app.querySelectorAll('[id]')) ids.set(node.id, (ids.get(node.id) ?? 0) + 1);
+    const duplicates = [...ids].filter(([, count]) => count > 1);
+    return { idCount: [...ids.values()].reduce((sum, count) => sum + count, 0), uniqueIdCount: ids.size,
+      duplicateIdCount: duplicates.length, duplicateIds: duplicates.slice(0, 12).map(([id, count]) => ({ id: id.slice(0, 120), count })),
+      contexts: app.querySelectorAll('[data-people-context]').length, searches: app.querySelectorAll('.pd-page-search').length,
+      people: app.querySelectorAll('.pd-person-disclosure').length, agents: app.querySelectorAll('.pd-agent-disclosure').length,
+      accounts: app.querySelectorAll('[data-user-menu-root]').length };
+  };
+  const peopleFacts = (expectedWidth = innerWidth) => ({ width: innerWidth, expectedWidth, phone: matchMedia('(max-width:52rem)').matches,
     rosterParent: fixture.people.roster?.parentElement?.className, navHidden: context.hidden,
-    active: document.activeElement?.outerHTML, accountParent: account.parentElement?.className,
+    active: elementFact(document.activeElement), account: elementFact(account), accountParent: elementFact(account.parentElement),
+    accountPhoneOwner: !!account.closest('.cs-org-phone-account'), accountDesktopOwner: !!account.closest('.cs-org-rail-account'),
+    inventory: peopleInventory(), predicates: peoplePlacement(expectedWidth),
+    media: fixture.mediaQueries.filter(query => query.listeners.size).slice(0, 8).map(query => ({
+      query: query.media.media, matches: query.media.matches, listeners: query.listeners.size })),
     dialog: { open: app.querySelector('dialog')?.open, modal: app.querySelector('dialog')?.matches(':modal') },
     inert: [...app.querySelectorAll('[inert]')].map(node => node.className), listeners: listeners(),
     doors: [...app.querySelectorAll('[data-people-page-invite],[data-people-page-add-agent]')].map(node => ({
       tag: node.tagName, text: node.textContent, href: node.getAttribute('href'), visible: !!node.getClientRects().length })),
     intents: calls.filter(call => call.kind === 'people-invite' || call.kind === 'people-navigate') });
-  const until = async (condition, label) => {
+  const until = async (condition, label, diagnose = peopleFacts) => {
     const deadline = performance.now() + 2000;
     while (!condition()) {
-      if (performance.now() >= deadline) throw new Error(label + ': ' + JSON.stringify(peopleFacts()));
+      if (performance.now() >= deadline) throw new Error(label + ': ' + JSON.stringify(diagnose()));
       await new Promise(resolve => setTimeout(resolve, 20));
     }
   };
   const peopleUnique = () => {
-    const ids = [...app.querySelectorAll('[id]')].map(node => node.id);
-    return ids.length === new Set(ids).size && app.querySelectorAll('[data-people-context]').length === 1 &&
-      app.querySelectorAll('.pd-page-search').length === 1 && app.querySelectorAll('.pd-person-disclosure').length === 1 &&
-      app.querySelectorAll('.pd-agent-disclosure').length === 1 && app.querySelectorAll('[data-user-menu-root]').length === 1;
+    const counts = peopleInventory();
+    return counts.idCount === counts.uniqueIdCount && counts.contexts === 1 && counts.searches === 1 &&
+      counts.people === 1 && counts.agents === 1 && counts.accounts === 1;
   };
   const sameNodes = () => frame === app.querySelector('.hm-frame') && context === app.querySelector('[data-home-rail-slot]') && account === app.querySelector('[data-user-menu-root]');
   const inertRestored = () => [...app.querySelector('.cs-org-shell').children].every(node => !node.inert);
+  const peoplePlacement = width => {
+    const phone = width <= 832, p = fixture.people, dialog = app.querySelector('dialog');
+    return { width: innerWidth === width, media: matchMedia('(max-width:52rem)').matches === phone,
+      rosterParent: !!p.roster && p.roster.parentNode === (phone ? p.homeParent : app.querySelector('.cs-org-context-body')),
+      dialogClosed: !!dialog && !dialog.open, inertRestored: !!app.querySelector('.cs-org-shell') && inertRestored(),
+      unique: peopleUnique(), sameNodes: sameNodes(), navHidden: context.hidden === (phone ? p.priorHidden : true),
+      detailInPage: !!p.detail.closest('[data-people-page]'),
+      accountOwner: !!account.closest(phone ? '.cs-org-phone-account' : '.cs-org-rail-account') };
+  };
   function docked() {
   return app.querySelector('.cs-kylon-workspace-menu > .hm-menu') === menu &&
     app.querySelector('.cs-org-phone-title > h1') === heading && document.querySelectorAll('#hm-phone-title').length === 1;
@@ -163,8 +188,9 @@ const fixtureScript = `
   async peoplePlaced(width, hold = true) {
     const phone = width <= 832, p = fixture.people;
     await until(() => innerWidth === width && matchMedia('(max-width:52rem)').matches === phone &&
-      p.roster.parentNode === (phone ? p.homeParent : app.querySelector('.cs-org-context-body')) && !app.querySelector('dialog').open && inertRestored(), 'actual People relocation at ' + width);
-    const facts = peopleFacts();
+      p.roster.parentNode === (phone ? p.homeParent : app.querySelector('.cs-org-context-body')) && !app.querySelector('dialog').open && inertRestored() &&
+      !!account.closest(phone ? '.cs-org-phone-account' : '.cs-org-rail-account'), 'actual People relocation at ' + width, () => peopleFacts(width));
+    const facts = peopleFacts(width);
     check('People owns one real roster/account/context at ' + width, peopleUnique() && sameNodes() &&
       context.hidden === (phone ? p.priorHidden : true) && p.detail.closest('[data-people-page]') &&
       account.closest(phone ? '.cs-org-phone-account' : '.cs-org-rail-account'), facts);
