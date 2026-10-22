@@ -417,6 +417,7 @@ with (state / 'queue.lock').open('a') as lock:
                              '--mount', f'type=bind,src={work},dst=/work',
                              '--mount', f'type=bind,src={tmp},dst=/tmp',
                              '--mount', f'type=bind,src={tmp},dst=/private/tmp',
+                             '--sysctl', 'net.ipv4.ip_local_reserved_ports=54320-54329,8083',
                              '--env', 'DOCKER_TLS_CERTDIR=', cfg['dind_image'],
                              'dockerd', '--host=tcp://127.0.0.1:2375', '--host=unix:///var/run/docker.sock', '--ip=127.0.0.1', '--tls=false'])
                     # Filter in this namespace before Docker DNAT, including future bridges.
