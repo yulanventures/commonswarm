@@ -1,0 +1,32 @@
+{
+  "utc": "2026-10-22T20:51:41.034420+00:00",
+  "head": "9ed6cda1796a7124df805e392ee8386412d2c9c2",
+  "tree": "9fc23475f2384098df486c58484af9634ea69e5c",
+  "base": "3a45f7f67ff8fb50a17de4a2ce2d7cafd20e20fb",
+  "baseTree": "601c359061d8d3f9de9882e6391c9dbde965346c",
+  "branch": "design/kylon-lists-compact-header-20261022",
+  "paths": [
+    "site/src/lib/household-objects-view.ts",
+    "site/src/styles/kylon-lists.css"
+  ],
+  "candidateFiles": {
+    "site/src/lib/household-objects-view.ts": {
+      "bytes": 32370,
+      "sha256": "f4dbbe13ea8fa052c1b8b5e81bcf5aa9268365e95d3e6b983149b1ae93b2358d",
+      "blob": "11a35c0c13e55dfbd00681d009b6f5f69f6a5c4d"
+    },
+    "site/src/styles/kylon-lists.css": {
+      "bytes": 13330,
+      "sha256": "0717e03ccebbed93c0cb0f2c81c1a347cabcc3d8192d88871cce7b897f5dc138",
+      "blob": "e8a2b31a954fb844b551cd364f29ce61c5a661a6"
+    }
+  },
+  "state": "PUSHED source-adopted; actual images/review/CI pending; separate stack above frozen184",
+  "sourceChecks": "Onlytwo wrappers/two scoped layout rules; removing additions restores complete originals. No application/compiler/test/browser runtime.",
+  "owner": "CS inboxdceab28d confirms no overlapping renderer/CSS writer and separate scope",
+  "limits": "No visual score, no new agent tools or backend/parity claim; no bundle into184.",
+  "pr": 185,
+  "url": "https://github.com/yulanventures/commonswarm/pull/185",
+  "worktreeRemoved": true,
+  "worktreePruned": true
+}

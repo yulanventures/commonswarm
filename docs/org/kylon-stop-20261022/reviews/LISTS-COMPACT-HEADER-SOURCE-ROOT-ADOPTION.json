@@ -1,0 +1,25 @@
+{
+  "utc": "2026-10-22T20:50:41.612368+00:00",
+  "base": "3a45f7f67ff8fb50a17de4a2ce2d7cafd20e20fb",
+  "sourceOnly": true,
+  "rendererRemovingExactlyTwoWrappersEqualsBase": true,
+  "cssRemovingOnlyTwoScopedRulesEqualsBase": true,
+  "noFontOrBehaviorChanges": true,
+  "paths": [
+    "site/src/lib/household-objects-view.ts",
+    "site/src/styles/kylon-lists.css"
+  ],
+  "files": {
+    "site/src/lib/household-objects-view.ts": {
+      "bytes": 32370,
+      "sha256": "f4dbbe13ea8fa052c1b8b5e81bcf5aa9268365e95d3e6b983149b1ae93b2358d"
+    },
+    "site/src/styles/kylon-lists.css": {
+      "bytes": 13330,
+      "sha256": "0717e03ccebbed93c0cb0f2c81c1a347cabcc3d8192d88871cce7b897f5dc138"
+    }
+  },
+  "owner": "CS inboxdceab28d confirms presentation ownership/no overlap; no bundle into184",
+  "unit": "No new tests for reversible presentation wrapper/CSS change. ExistingSSR owner/relevantCI remain later gate; no runtime claimed.",
+  "proposal": "reviews/LISTS-COMPACT-HEADER-PROPOSAL.patch"
+}

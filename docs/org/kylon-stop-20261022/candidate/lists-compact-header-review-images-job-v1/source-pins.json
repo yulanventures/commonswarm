@@ -1,0 +1,1979 @@
+{
+  "head": "9ed6cda1796a7124df805e392ee8386412d2c9c2",
+  "tree": "9fc23475f2384098df486c58484af9634ea69e5c",
+  "baseline": "3a45f7f67ff8fb50a17de4a2ce2d7cafd20e20fb",
+  "baselineTree": "601c359061d8d3f9de9882e6391c9dbde965346c",
+  "functionalOwnedPaths": [],
+  "presentationOwnedPaths": [
+    "site/src/lib/household-objects-view.ts",
+    "site/src/styles/kylon-lists.css"
+  ],
+  "changedPaths": {
+    "site/src/lib/household-objects-view.ts": {
+      "bytes": 32370,
+      "sha256": "f4dbbe13ea8fa052c1b8b5e81bcf5aa9268365e95d3e6b983149b1ae93b2358d"
+    },
+    "site/src/styles/kylon-lists.css": {
+      "bytes": 13330,
+      "sha256": "0717e03ccebbed93c0cb0f2c81c1a347cabcc3d8192d88871cce7b897f5dc138"
+    }
+  },
+  "sourceFiles": {
+    "AGENTS.md": {
+      "bytes": 20096,
+      "sha256": "a3cce9609746171c2b2b314b46597940e7d67e09fbcdd457e0d0b3646580f389"
+    },
+    "package-lock.json": {
+      "bytes": 63084,
+      "sha256": "192a267d20218ca02118b307535663a7473ec7c3e7d02e22c7cb093434e858b2"
+    },
+    "package.json": {
+      "bytes": 3049,
+      "sha256": "78ca7660731b64e2a6696e9bab2afb824a45bd548c957a0e192b5fd4cc28e396"
+    },
+    "site/AGENTS.md": {
+      "bytes": 2615,
+      "sha256": "e853b158ed9ef91ba4ba34f5b0d04fbba0fdbc4ba84961fefb436a096a0e9b15"
+    },
+    "site/astro.config.mjs": {
+      "bytes": 3114,
+      "sha256": "7eada7aff8a0fdaa0e545ae0a6ed55c3f3b3b5588e103aabac9ad76dba94d7c2"
+    },
+    "site/package-lock.json": {
+      "bytes": 154265,
+      "sha256": "8e1e81423fd9ca98ac7b4faad94bcf28ede427c052ac0bfb45c8643c3900ccd9"
+    },
+    "site/package.json": {
+      "bytes": 1329,
+      "sha256": "0c425d4d3caef2e5d5a8e34f74ee2ed2b63fd13b5f2a4cffc9d4ee2e6699e046"
+    },
+    "site/public/fonts/OFL-BricolageGrotesque.txt": {
+      "bytes": 4401,
+      "sha256": "923f4ddf0fd39f9b7794ab0df7332f3d95dc43e8ad7ec2289d6d9e8491177f51"
+    },
+    "site/public/fonts/OFL-DMSans.txt": {
+      "bytes": 4482,
+      "sha256": "9af36190332437f5ecd09974de43c1f7c77a310a996cdd8ceb25628b458840e1"
+    },
+    "site/public/fonts/OFL-InstrumentSans.txt": {
+      "bytes": 4538,
+      "sha256": "c27a3c53c3beed7f5c26853afa15991478ff7145d3754a36b0382f84e10c0d03"
+    },
+    "site/public/fonts/OFL-Inter.txt": {
+      "bytes": 4380,
+      "sha256": "262481e844521b326f5ecd053e59b98c8b2da78c8ee1bdbb6e8174305e54935a"
+    },
+    "site/public/fonts/OFL-PlusJakartaSans.txt": {
+      "bytes": 4402,
+      "sha256": "995c7199cab65954f545996326755daee7b63cc6b42b06c13da1f9502ab08a99"
+    },
+    "site/public/fonts/bricolage-grotesque-latin-ext.woff2": {
+      "bytes": 30736,
+      "sha256": "776f6dcaf03636cd69a5802c94808cc8896c0a66c8e9ce0fe147231b6ee01957"
+    },
+    "site/public/fonts/bricolage-grotesque-latin.woff2": {
+      "bytes": 76888,
+      "sha256": "a79fdb52d4a5c76552452f69202add96e287401fff03d3e8c0e38b4dcb5a99cd"
+    },
+    "site/public/fonts/dm-sans-latin-ext.woff2": {
+      "bytes": 31312,
+      "sha256": "0d0609aee778d21b40bda1d27b7e6b5b3cb1a3e96b90b8831c681aca097c2219"
+    },
+    "site/public/fonts/dm-sans-latin.woff2": {
+      "bytes": 62556,
+      "sha256": "aa530716b0d351866af7dbfa3eee4120fb36f2d071baff8c234185141865c7ff"
+    },
+    "site/public/fonts/instrument-sans-latin-ext.woff2": {
+      "bytes": 11144,
+      "sha256": "c4fcfea41f2c1cfeea9211fa43679845454a1d0e0d7e95e069c7e73c4ae302d2"
+    },
+    "site/public/fonts/instrument-sans-latin.woff2": {
+      "bytes": 30092,
+      "sha256": "2ee17598a98d8a59e4df8152d015bec9ab8e4d5672cc0ab42bef806b568e3971"
+    },
+    "site/public/fonts/inter-latin.woff2": {
+      "bytes": 48432,
+      "sha256": "c940764593d0fe5d596be327ca7558855e018039fb78509aa21921fd3644c3e4"
+    },
+    "site/public/fonts/jetbrains-mono-latin-ext.woff2": {
+      "bytes": 15204,
+      "sha256": "7db7affbce1fdee69c1ffc2641bbca289b049867f524c9d861fe35ab6670bf29"
+    },
+    "site/public/fonts/jetbrains-mono-latin.woff2": {
+      "bytes": 40480,
+      "sha256": "1e06740a02a443fb7f3eeda8fcaa685a0f6c620e3f01e6666e847295469ce3ad"
+    },
+    "site/public/fonts/plus-jakarta-sans-latin-ext.woff2": {
+      "bytes": 21688,
+      "sha256": "0303e02b53b0298fb26a0193941a2e8754f0f9a9fce50d90b178d8da3424873f"
+    },
+    "site/public/fonts/plus-jakarta-sans-latin.woff2": {
+      "bytes": 27272,
+      "sha256": "cd8db90cd950e26bc8761f65d323588bd5cd112d326d6d322bc7c8ea86771215"
+    },
+    "site/src/components/SiteFooter.astro": {
+      "bytes": 20051,
+      "sha256": "f61b4c3f1bf2a9b7f5e9833695d1f1ea10ab78f1c4fc0d598e20aa4076819790"
+    },
+    "site/src/components/SiteHeader.astro": {
+      "bytes": 25614,
+      "sha256": "41146abe8a2e1bbda8ff98b309c2b7e5b55dd54fffd929edabff544064cb10c1"
+    },
+    "site/src/components/Wordmark.astro": {
+      "bytes": 3414,
+      "sha256": "2628b640d9f2013394be2e94d112591cf02f05a985987be559b9ba8e88198d1e"
+    },
+    "site/src/components/app/AdminDelegations.astro": {
+      "bytes": 26458,
+      "sha256": "f511792876653b20eed7880dba84924835be0ca857b12fd936a6017f83461f91"
+    },
+    "site/src/components/app/HouseholdObjects.astro": {
+      "bytes": 3769,
+      "sha256": "25158a3d3b4f008682d8de8a345f89e2bd9d1482974a0e80623475c5bdf979c4"
+    },
+    "site/src/components/app/LiveDashboard.astro": {
+      "bytes": 743908,
+      "sha256": "2f6a8f8ce3a54644bafaf762c273d558fea9019a75e389c0981c8223c23c0129"
+    },
+    "site/src/components/app/SampleNotice.astro": {
+      "bytes": 3693,
+      "sha256": "147b9172977b21bb301df4c04293cb9a98e9c5fd6405e1efac0724b8d2036e2e"
+    },
+    "site/src/components/auth/ProviderButtons.astro": {
+      "bytes": 3442,
+      "sha256": "9f219fe6ceed19373db9f241bbe64d02447825d9b655eec8286e95549de0c317"
+    },
+    "site/src/components/connect/AgentConnect.astro": {
+      "bytes": 53450,
+      "sha256": "1c64880d1d9e27d8a9b17b5a3b81f5fd3fe3f0a3f104d4d555ea515d69e18cae"
+    },
+    "site/src/components/connect/AgentHostPicker.astro": {
+      "bytes": 24167,
+      "sha256": "626852fb870c185b64b10b035fb2aae9e96b03ca2156ed8602edd0e65f289d24"
+    },
+    "site/src/components/connect/agent-prompt.ts": {
+      "bytes": 5316,
+      "sha256": "fdd535779141d4e68ef3dbb301d627901a5a8942a7a45d7b995b55f9fa5ee1c8"
+    },
+    "site/src/components/invite/HumanInvitationInbox.astro": {
+      "bytes": 24975,
+      "sha256": "2f376065ee61fd7151f2c66394ec43dd76781e17e6fc359b4fd3eed59aeb7513"
+    },
+    "site/src/components/ui/Button.astro": {
+      "bytes": 5824,
+      "sha256": "38fb984c5a5bafc1716d96aba54b6b4f0935fb52714b20cd8f14878514aa7e37"
+    },
+    "site/src/layouts/Base.astro": {
+      "bytes": 14249,
+      "sha256": "d485455ee3d9caf8c5a4e94ac3a1a23922978582de48d5294510247ad66f21c4"
+    },
+    "site/src/lib/agent-activity.ts": {
+      "bytes": 6967,
+      "sha256": "926c9ca5ff9a03cb978cf0929089a9f0a16f6bc6fdbc1aacb25f3fea00966079"
+    },
+    "site/src/lib/agent-connect.ts": {
+      "bytes": 28462,
+      "sha256": "530eeba4b3056e90efd8cd5185dc82a8e1e8e406202ce63d2f7c565db956eae1"
+    },
+    "site/src/lib/agent-hosts.ts": {
+      "bytes": 19446,
+      "sha256": "46301952c0f461f4e55921b0b82696fd1094b1082772496a9c343f1ac9a6c0a1"
+    },
+    "site/src/lib/agent-status.ts": {
+      "bytes": 14271,
+      "sha256": "06b9540baaefdac9ab6928e0f32ad7cd4bc81fbeb7a4c837f4a87e300862896a"
+    },
+    "site/src/lib/auth-providers.ts": {
+      "bytes": 14500,
+      "sha256": "9f88705c3420ef61044329c3af3e291a4116055c0408b8f833b115b4fceca2e3"
+    },
+    "site/src/lib/channels.ts": {
+      "bytes": 6958,
+      "sha256": "4a7e727ebb302646cbf8dfdc2c5f60b1b62a9fd71310835cc5843ac02c465bbd"
+    },
+    "site/src/lib/commonswarm.ts": {
+      "bytes": 124825,
+      "sha256": "ef2b24a8177028c69bc848ad8c5f8ea6a7e10d94394ff48a4f04bef5c478a09c"
+    },
+    "site/src/lib/composer-address.ts": {
+      "bytes": 27340,
+      "sha256": "5ece4c2b380d9631907349cd4d1ac2c0686d5e7b088808511954ccc84c04d519"
+    },
+    "site/src/lib/feed-push.ts": {
+      "bytes": 9122,
+      "sha256": "c8140200de725d541a7cc6d9e142ea7bd01ecebed21729a2a6fc47efe69d8818"
+    },
+    "site/src/lib/greeting-name.ts": {
+      "bytes": 794,
+      "sha256": "2dd7eb9b0c792fad7b58b2882748486631151f95216c416f67376210da0f2289"
+    },
+    "site/src/lib/h0-link-join-flag.ts": {
+      "bytes": 545,
+      "sha256": "6f8dd561f66e5f6ccc0d70abb6dfaa70202a96cddcdb9c2c6ecaff155ab4dd64"
+    },
+    "site/src/lib/home-agent-copy.ts": {
+      "bytes": 6501,
+      "sha256": "1c4114a62bf22dcb74d131afefebab59244516a9ca346aa86b052df3d4b6203f"
+    },
+    "site/src/lib/home-agent.ts": {
+      "bytes": 17350,
+      "sha256": "d5c76df3fab6c07815b29dbccdbb1ab6ba293a57167dfa6ed04760c688b8383f"
+    },
+    "site/src/lib/home-catchup.ts": {
+      "bytes": 16584,
+      "sha256": "fbefe132ba53b54d36b7f7a4e7cafb274776d070ab0bfece339b2c1ae856c533"
+    },
+    "site/src/lib/home-focus.ts": {
+      "bytes": 8051,
+      "sha256": "f7aec42a36c443e81158aae0907ffb45f473091bf70ab90d1cc3a21c92595bc5"
+    },
+    "site/src/lib/home-map.ts": {
+      "bytes": 32589,
+      "sha256": "607bc0d7c772da4f6e2c78bb3c15a82671f954635f147792374fc274ad64e2c1"
+    },
+    "site/src/lib/home-names.ts": {
+      "bytes": 6062,
+      "sha256": "213ff02aff82e21069ae8a9981b150a75524b80d7182cb154cd9f8a313284507"
+    },
+    "site/src/lib/home-primitives.ts": {
+      "bytes": 19271,
+      "sha256": "3b2ad66df574f041d6682879550e28eedac3f79ed8851c8041b4c836cd57832b"
+    },
+    "site/src/lib/home-rail.ts": {
+      "bytes": 17226,
+      "sha256": "bdf0b49a3f62b5ab68704971dd57499afc0135e7787deb4c4d2bbefbf079564e"
+    },
+    "site/src/lib/home-route.ts": {
+      "bytes": 2453,
+      "sha256": "b86112fca2ec99bf8d034c5a9748f63047660cd9fc4e07f5a9c7982563d3e61b"
+    },
+    "site/src/lib/home-shell.ts": {
+      "bytes": 24219,
+      "sha256": "fe4edb288ebaa6116b0ef4dd2f648a72862b08ac3d9b50accf34aa124668a8af"
+    },
+    "site/src/lib/home-side-cards.ts": {
+      "bytes": 15417,
+      "sha256": "25979f4a9644c34ac70e7bb4bced98b7c349d9e3ebc1b2dfa903102ce5033533"
+    },
+    "site/src/lib/home-todo-copy.ts": {
+      "bytes": 15761,
+      "sha256": "bfde7ce6b61e74c496218a1c3da181859702b7f0ad0ccb595b94c03968ffe3ff"
+    },
+    "site/src/lib/home-types.ts": {
+      "bytes": 3644,
+      "sha256": "f5f15bdbe572466f76ac07f165cec176e0e127f4b9cccc7514013f6f45a9ae22"
+    },
+    "site/src/lib/home-visible-labels.ts": {
+      "bytes": 2298,
+      "sha256": "7ff77470a3eccfd501dd03b990818a7fe6e148ff80b61e2ac47e964e6f353ab1"
+    },
+    "site/src/lib/home/contract.ts": {
+      "bytes": 8397,
+      "sha256": "3fb75c7761f3556dd0f405ac03e6f29a480d45b046eec07d8d9ad294067a6af3"
+    },
+    "site/src/lib/hosted-lists-note.ts": {
+      "bytes": 447,
+      "sha256": "6b495c1fb434f922e13b6e152095f4efb04eeaed8d882fc1fbaadbc56207c0bb"
+    },
+    "site/src/lib/household-access.ts": {
+      "bytes": 6151,
+      "sha256": "3055bedfd1825f9756d82db2700eb86046e5542f0e9aa4f36d789edf90107d84"
+    },
+    "site/src/lib/household-objects-view.ts": {
+      "bytes": 32370,
+      "sha256": "f4dbbe13ea8fa052c1b8b5e81bcf5aa9268365e95d3e6b983149b1ae93b2358d"
+    },
+    "site/src/lib/human-seen-reporter.ts": {
+      "bytes": 4885,
+      "sha256": "2e27f5bb27df56e0a442f6b7a45d9ff774812c5d4578b3c4fad593da7adc380a"
+    },
+    "site/src/lib/identity-label.ts": {
+      "bytes": 7755,
+      "sha256": "a5afaf4fe299c6d5adeb0b2917cb98088c6fce483e6c66f489c5b3a880a6b687"
+    },
+    "site/src/lib/install.ts": {
+      "bytes": 2652,
+      "sha256": "50021c0238d994b09712f9628fe1a4eb5ca5c4bac77f313fcf4b18373272209a"
+    },
+    "site/src/lib/kylon-shell/drawer.js": {
+      "bytes": 4213,
+      "sha256": "d47966b6a3820433f4f48d0d1150eb589a07786eea7d577f49ed14b7bf55a003"
+    },
+    "site/src/lib/kylon-shell/host.ts": {
+      "bytes": 7331,
+      "sha256": "413cb912bb634203c401a66959ffdea015a13773942d9228c92607a819b6966d"
+    },
+    "site/src/lib/kylon-shell/people-context.ts": {
+      "bytes": 4412,
+      "sha256": "eeb032c950d88b0de8146933b37b8cb24d58dc7052dc26c8ee2d9c14e5457d95"
+    },
+    "site/src/lib/kylon-shell/projection.ts": {
+      "bytes": 1901,
+      "sha256": "853cc4d1c7966a4f4dc8dc19190cfe78c9c25262e09ed7a792bf16635dbb90b6"
+    },
+    "site/src/lib/kylon-shell/shell.js": {
+      "bytes": 8236,
+      "sha256": "5ec4f9f3f95940d966c9b59812df98f6eb1c408f53c7b4cf78de2047007ec1d6"
+    },
+    "site/src/lib/kylon-shell/todo-context.ts": {
+      "bytes": 6013,
+      "sha256": "de96fa45a2acbf9413cb78eadde9308f845b0a572b89ed3fa9a7d07e6860880f"
+    },
+    "site/src/lib/kylon-shell/wiki-context.ts": {
+      "bytes": 8188,
+      "sha256": "7886c04f7b3bc7441aa1d0f497520c1d2b50292f21d71d5c6012562817f21d67"
+    },
+    "site/src/lib/lists-chrome.ts": {
+      "bytes": 1343,
+      "sha256": "6797b21a6b497d3f80ffc7b8bbfa9d19cd00d17893f0ac1c7f1aa719a9232d88"
+    },
+    "site/src/lib/message-markdown.ts": {
+      "bytes": 27934,
+      "sha256": "7eef883f33e6e74c6ab8cbc203fda731d0bd9bc28100f1292ec3428b16631a81"
+    },
+    "site/src/lib/model-glyph.ts": {
+      "bytes": 5511,
+      "sha256": "98fe2f2075520718a6bcc9aa215564e0b71c0408d0ae766449b63194b4bd874a"
+    },
+    "site/src/lib/participant-rail.ts": {
+      "bytes": 7893,
+      "sha256": "66b4208456f581d391dbbbbfe73ba91942a9518feb52b9ed70cc87513856dfe2"
+    },
+    "site/src/lib/release.ts": {
+      "bytes": 4345,
+      "sha256": "7fffb8bd57b8e4a458ce4c702e7a83717bd87e785e5e7744806dfcda1d738036"
+    },
+    "site/src/lib/standing-grants.ts": {
+      "bytes": 4982,
+      "sha256": "9466e6e628ce260b27aeb3268b1aed89c4d0707e87f4305e612bd93d056b38f7"
+    },
+    "site/src/lib/thread-reply.ts": {
+      "bytes": 15186,
+      "sha256": "d2ec5f6531393e59d7e04a8b7a162a4044a0698aa96eb145d6edbba77bafe5c4"
+    },
+    "site/src/lib/wake-path.ts": {
+      "bytes": 679,
+      "sha256": "200ad79afa9f2db8ed8cb33268a1c084e34a5326253a5be91029d35136a9fb9b"
+    },
+    "site/src/pages/app.astro": {
+      "bytes": 3626,
+      "sha256": "3080e7bed31597b863e02e300e0e237863b81414a03cfae25ee3ce143c638ad3"
+    },
+    "site/src/styles/dashboard-decoration.css": {
+      "bytes": 1164,
+      "sha256": "d3dc8406a0f76336af3dac93d9fbe92e1d5f2138d127df4531c2dd8f0adb8329"
+    },
+    "site/src/styles/dashboard-files.css": {
+      "bytes": 2971,
+      "sha256": "b5bf83a0afd3966d48d86eb86ea3abef5c2b17fb8a31c13d9fc1125f2ac859f4"
+    },
+    "site/src/styles/dashboard-message-meta.css": {
+      "bytes": 351,
+      "sha256": "f7c2cddc19e745d3488ab3f34bb7820519929a4d5ffe1a80a363bcea8b2dd107"
+    },
+    "site/src/styles/dashboard-rail-brand.css": {
+      "bytes": 330,
+      "sha256": "94fb72b3842a92b34b44bfb9d600d9bef6d21c2293ed15a83ed34af86568d392"
+    },
+    "site/src/styles/dashboard-welcome-legacy.css": {
+      "bytes": 830,
+      "sha256": "3224ae74ac1a4bb715d6de222f37e8f272cbde73893a66db952f46f01c963bfc"
+    },
+    "site/src/styles/dashboard-welcome.css": {
+      "bytes": 73,
+      "sha256": "d1bc6596bd6d6e940307d21fd990edd82084f026d19946039d17774620632111"
+    },
+    "site/src/styles/dashboard-workspace-settings.css": {
+      "bytes": 2463,
+      "sha256": "085b6351b20f060b24d59ae811deb251089bc3f0d962ebde5ed16f898d05cfa1"
+    },
+    "site/src/styles/global.css": {
+      "bytes": 44293,
+      "sha256": "7d20b246bf72b7a2f6ed367b6854186e631701a25f9fae0c13cfeee9ff656e7d"
+    },
+    "site/src/styles/home/agent.css": {
+      "bytes": 17470,
+      "sha256": "15e56b2bddebbdbd8202c86fe884b6ee5f38cf00d39cc2a098c1ded5833a87ca"
+    },
+    "site/src/styles/home/catchup.css": {
+      "bytes": 12885,
+      "sha256": "1f8965fe098d9bbf01cf2daf8a5f713ead0fcb8c72de3017262f15e6152460d1"
+    },
+    "site/src/styles/home/index.css": {
+      "bytes": 475,
+      "sha256": "63384a311372cb355e3632e44935977ca937fb28ad4709db3d1ce56d49ad863c"
+    },
+    "site/src/styles/home/integration.css": {
+      "bytes": 11796,
+      "sha256": "67d2e2e191d80b25b9e0adf026c7f52fc22a248f33149d8f72e1d1420c85dcc5"
+    },
+    "site/src/styles/home/onboarding.css": {
+      "bytes": 41126,
+      "sha256": "af7c148808080bbe295a387226898d238914c1aaf7284c9733af04a4a5ea1d66"
+    },
+    "site/src/styles/home/people.css": {
+      "bytes": 57982,
+      "sha256": "4b0467fd18ea2b43e09a850c8f03f08c6829351055027273140f8c87063be654"
+    },
+    "site/src/styles/home/pickers.css": {
+      "bytes": 7346,
+      "sha256": "25e4995cba48de58601ead187dd6124742c5a8b4c73177c0c2d881d4791bf592"
+    },
+    "site/src/styles/home/primitives.css": {
+      "bytes": 22063,
+      "sha256": "f0895924b8e959bf01f93e6951fd5b05d2c8264f369032bdf56b5c5cf16a6b7c"
+    },
+    "site/src/styles/home/rail.css": {
+      "bytes": 17447,
+      "sha256": "00eee1545e657b4391c20dcab89713098d42f0e30f4bebfa0271cf8fc288d211"
+    },
+    "site/src/styles/home/shell.css": {
+      "bytes": 14313,
+      "sha256": "5e002b2e3e13f2fdbc297594e338e1d9f634208f973d8e57954f42f14f5da601"
+    },
+    "site/src/styles/home/todo.css": {
+      "bytes": 17662,
+      "sha256": "42c879adac34af82b400b140184ffb2896ff29760a9364e427d6af6c7e5322cf"
+    },
+    "site/src/styles/home/workspace.css": {
+      "bytes": 44166,
+      "sha256": "b2ec617d0fe669bacf4372d0117a1baf4f2111a2415f80e54fddbca607eeca3d"
+    },
+    "site/src/styles/kylon-account-dialogs.css": {
+      "bytes": 7734,
+      "sha256": "f75643944fcd53dc3d45b95711b2e3e695c6da86067c68c69efaec21033a1a4f"
+    },
+    "site/src/styles/kylon-agent-page.css": {
+      "bytes": 5977,
+      "sha256": "d1bcdee915f034f054fd8183ce6fc7b01c9ea3b6b224783f577ccc43019e2309"
+    },
+    "site/src/styles/kylon-catchup.css": {
+      "bytes": 11120,
+      "sha256": "ce7a646c37b2c4d1726e0f522615a28e5436ea63f3ad31215b2e7175264c5f49"
+    },
+    "site/src/styles/kylon-channel-dialog.css": {
+      "bytes": 6484,
+      "sha256": "59a25bf00bd77fc49bb5f6e039caa897e3a05c47b089c6cc845f771567a060e0"
+    },
+    "site/src/styles/kylon-chat-empty.css": {
+      "bytes": 1173,
+      "sha256": "01543a902ece08d747f929cb633010f18006a6963716ff5e2aeed76debfee414"
+    },
+    "site/src/styles/kylon-composer.css": {
+      "bytes": 8529,
+      "sha256": "0a295f29e58a62357b4774466921b2efd33d31d1a4cefdf239d5263e2476abaa"
+    },
+    "site/src/styles/kylon-conversation-responsive.css": {
+      "bytes": 6891,
+      "sha256": "4bdc053bb8bb7a3f0286c82a5fc387db4048f7982192b05d80b20f56bc6f154e"
+    },
+    "site/src/styles/kylon-conversation.css": {
+      "bytes": 342,
+      "sha256": "3a6ec882eba790108d6b1c43b160d7f0a06c81f516c2e9164c73797dc4db47ae"
+    },
+    "site/src/styles/kylon-entity-profile.css": {
+      "bytes": 5800,
+      "sha256": "f11920a7e9e694be56c9e822fcadab9653a756f5b8f4ef970dd20d4a5acd8a76"
+    },
+    "site/src/styles/kylon-files.css": {
+      "bytes": 6153,
+      "sha256": "32cbfee0817c4f53991967bcd3ec3cb16b305eaf78e3dcfd2a5d21458213cbb1"
+    },
+    "site/src/styles/kylon-font.css": {
+      "bytes": 546,
+      "sha256": "b599775dd6e4d5e22a884a6eef8ce45cadb14aeb9c2f9271241b50a22a4e4f48"
+    },
+    "site/src/styles/kylon-invitation-inbox.css": {
+      "bytes": 8540,
+      "sha256": "aa13845011610e4ab2ba4a176223b819a37e06bd2a089461f058cf00e548ba9f"
+    },
+    "site/src/styles/kylon-layout/context.css": {
+      "bytes": 1789,
+      "sha256": "d3c184230a2178bf00d7ff44ca067917a9f02767ef0558f1aa51b281ae40e0ec"
+    },
+    "site/src/styles/kylon-layout/index.css": {
+      "bytes": 227,
+      "sha256": "d9f60cee5dbf5d0f9f80410373f366bdb1676a9bebc551bb44a35ab1486407f8"
+    },
+    "site/src/styles/kylon-layout/integration.css": {
+      "bytes": 8696,
+      "sha256": "dd76550aa126a5ccfa10c8361f868575782b536548fecd6f725a8c3fd27ae232"
+    },
+    "site/src/styles/kylon-layout/primitives.css": {
+      "bytes": 7071,
+      "sha256": "d0cc5e8d2d1c9da9fa23963695ba354d62e8d4cd34cab85e037d48808e1cb133"
+    },
+    "site/src/styles/kylon-layout/shell.css": {
+      "bytes": 6503,
+      "sha256": "5c0f8e523c18de52cc0eff5ed8462c922ca6cd8369ab25d9407bcf8da1cf91e1"
+    },
+    "site/src/styles/kylon-layout/tokens.css": {
+      "bytes": 2661,
+      "sha256": "7d8c92f07185a2c7611a1102741a8a9546d87d5b124c0381da858cceea3f064d"
+    },
+    "site/src/styles/kylon-lists.css": {
+      "bytes": 13330,
+      "sha256": "0717e03ccebbed93c0cb0f2c81c1a347cabcc3d8192d88871cce7b897f5dc138"
+    },
+    "site/src/styles/kylon-messages.css": {
+      "bytes": 7223,
+      "sha256": "448a8239ef255ff33666f4d5b43e50f053ce1191f8d79b10002ecc4824a76ff4"
+    },
+    "site/src/styles/kylon-new-workspace.css": {
+      "bytes": 4483,
+      "sha256": "246d18e59d51670fe9dd9f4531bc0a84859ebb66fec6377b12c94d9af17537c7"
+    },
+    "site/src/styles/kylon-onboarding.css": {
+      "bytes": 10644,
+      "sha256": "9a105bce9e0941f8052fcfdb48fda8b03d82316e721db69677caa89eb3b958a9"
+    },
+    "site/src/styles/kylon-people-context.css": {
+      "bytes": 5024,
+      "sha256": "c6eb34b6068c20166b85a86c7d2559ab4252c057a0a845e23d6497619e8e6616"
+    },
+    "site/src/styles/kylon-people-profile.css": {
+      "bytes": 8310,
+      "sha256": "cf136651da79a1810130731a51573f6ef912541cff4b622ca00afbf454c35520"
+    },
+    "site/src/styles/kylon-people-roster.css": {
+      "bytes": 8080,
+      "sha256": "5d1388ff0b8543690b0f0ac26cb9c843414d15215f13a7f200f2eebd88879b40"
+    },
+    "site/src/styles/kylon-people-semantics.css": {
+      "bytes": 2217,
+      "sha256": "df44ed8456d352fbfbcd01c37529b185fe8bf28c0ee3fef7e9b063f552a28357"
+    },
+    "site/src/styles/kylon-people-shell.css": {
+      "bytes": 7935,
+      "sha256": "fac78624bd758c761138bdcaa65fcc1da54aac4978af4b1edf6745e88bbcb374"
+    },
+    "site/src/styles/kylon-people.css": {
+      "bytes": 194,
+      "sha256": "723a45041a18b49a43c3df91f10ad957b6536085397ae1f17a96a695ca4bd57f"
+    },
+    "site/src/styles/kylon-receipts.css": {
+      "bytes": 3006,
+      "sha256": "5c7b8b7202f4aee7b2c9041db53470dfa9e02cf8da044329fca713c0088e3146"
+    },
+    "site/src/styles/kylon-shell.css": {
+      "bytes": 10131,
+      "sha256": "fabce5d01e765f39135afdfce917968b08e9ea1e7f80dba2e43cdccd31321e1b"
+    },
+    "site/src/styles/kylon-todos-context.css": {
+      "bytes": 5207,
+      "sha256": "66c493e893ed23172923b6682aec2bd881aa7637fef13b87cec80fb731d4ff74"
+    },
+    "site/src/styles/kylon-todos-layout.css": {
+      "bytes": 7878,
+      "sha256": "745d07bffa4e478701b39daa2265723372afdda12aabd6d5c8ed7d52b8ca4f3b"
+    },
+    "site/src/styles/kylon-todos.css": {
+      "bytes": 8199,
+      "sha256": "0fb2aee42f9dada38651d2cc9ea8682b3662ce3d0d3ae392758e9514f4b1eaff"
+    },
+    "site/src/styles/kylon-tokens.css": {
+      "bytes": 3484,
+      "sha256": "1bc62c292a1af9c8da2257b076a8b34ecf14217998d020972694c5e66e7903f0"
+    },
+    "site/src/styles/kylon-welcome.css": {
+      "bytes": 8782,
+      "sha256": "5c38ac9add64830ef274fbce10d953d4c3c45c13f670e2e8829260341af575dc"
+    },
+    "site/src/styles/kylon-wiki-context.css": {
+      "bytes": 5816,
+      "sha256": "01347a5d176b73d621010260837cac4fb2e8b7c19170bb3470fd0d3a72fc33d5"
+    },
+    "site/src/styles/kylon-wiki.css": {
+      "bytes": 11186,
+      "sha256": "ff01e1582ff51dff16f172409db7fd32a187bf6346be004ad8721a3dd5c739dd"
+    },
+    "site/src/styles/kylon-workspace-settings-integration.css": {
+      "bytes": 88,
+      "sha256": "7b1c2fd04058bc9f496705ffe59bb160882ce1a9788dc0523cdca3e1e0ee88d4"
+    },
+    "site/src/styles/kylon-workspace-settings.css": {
+      "bytes": 6967,
+      "sha256": "4a0bdffca58c1b86c68fbc7e85ba989ef76c08d40c1dea0462ce5e3af24f8845"
+    },
+    "site/src/styles/landing.css": {
+      "bytes": 23946,
+      "sha256": "7a332a1ae2388ba0a65fe987c8058b48606795b54807a98ef41780011c1d3ddd"
+    },
+    "site/src/styles/legal.css": {
+      "bytes": 13100,
+      "sha256": "3d8c02f0bd8da24031d57119e625fd277593c89fe1baf90210aa59d254ebdcce"
+    },
+    "site/src/styles/motion.css": {
+      "bytes": 11319,
+      "sha256": "8f075a8f54f8872940e49b41a2373a3a66d1f0f3a598ce3f745dc43a818728e5"
+    },
+    "site/src/styles/seo.css": {
+      "bytes": 9052,
+      "sha256": "c591879be66cfa9a7d49bf0d4b9cb65e47b57b97eb739dded367ee2ecffa100b"
+    },
+    "site/src/styles/tokens.css": {
+      "bytes": 72889,
+      "sha256": "ee021493c2750376753feb3553c467f3ba92001ad92cd2afb2d450b2bb585b54"
+    },
+    "site/src/styles/ui.css": {
+      "bytes": 34415,
+      "sha256": "64181d645c91fd49169adbc19bbd1062e28b37a0fe1a6abe559b62322a078c98"
+    },
+    "site/tsconfig.json": {
+      "bytes": 109,
+      "sha256": "b5b0a5b04a14cddd7713c5e1c82e86c79c17c2f86b170e26e9b170b3d5e01cd9"
+    },
+    "src/cloud/agent-connection-codec.ts": {
+      "bytes": 2196,
+      "sha256": "d59d3a29e7a6a62359181e565b368e963b76e00cc63200340821bfd81157fdee"
+    },
+    "src/cloud/agent-credential-input.ts": {
+      "bytes": 7367,
+      "sha256": "4eb7f6133f5843e00f9a18f199c27bc924e4bd161f978318cfde75b7bdab4173"
+    },
+    "src/cloud/agent-onboarding-contract.ts": {
+      "bytes": 4915,
+      "sha256": "1bd205b5cbc5bf2ffd49d934bf47c3542d8524e352bd40813203ebb5fcaa9553"
+    },
+    "src/cloud/agent-presence.ts": {
+      "bytes": 4200,
+      "sha256": "a8af1f59d52c2e951b59087e0573f3699e8e425748211ac3e325ba5b40c662f1"
+    },
+    "src/cloud/config.ts": {
+      "bytes": 1802,
+      "sha256": "6dea624900eb3e87d3bea737d6f84f1177f6cac32aea96fb77b0bee888a9cff1"
+    },
+    "src/cloud/idle-poll.ts": {
+      "bytes": 4858,
+      "sha256": "61e0cc1b27829c45d553d9b72ea4ecfe0abc62d4e074961e595a9cc8a3d06402"
+    },
+    "src/cloud/wake-lease-constants.ts": {
+      "bytes": 5909,
+      "sha256": "ff752e7269d65747afd4575f96ff450f804be75d92443cf13ee9091cb5263532"
+    },
+    "src/host/types.ts": {
+      "bytes": 6395,
+      "sha256": "b819c880fb54df1d8816a24f588a61a4f8f74bc6712ce430a6d1418a387fbfcb"
+    },
+    "src/host/version.ts": {
+      "bytes": 4228,
+      "sha256": "26b6b079baf0b7c054efe92d676832d09bd83c4eca10b01772a46bc14883b811"
+    },
+    "src/protocol/admin-authority.ts": {
+      "bytes": 39031,
+      "sha256": "d200170210ed23498e893055a3297a3eeeb9d7e0657a410919f4295cd0c6e23a"
+    },
+    "src/protocol/admin-policy.ts": {
+      "bytes": 16372,
+      "sha256": "24801cdfe8af0c1764db32195083f4cb8b6cbdf5771bdf04a85725b31a9a56ac"
+    },
+    "src/protocol/admin-routine-events.ts": {
+      "bytes": 436,
+      "sha256": "8c149c60e960408402e1cf872ded53dcd9fb7555621d6c86550ad5c0e5bf6984"
+    },
+    "src/protocol/admin-routine.ts": {
+      "bytes": 45099,
+      "sha256": "887c809740f6e0a8cefbe9348e4e3aaa4209edd828ea5ecf0368031e98d593ae"
+    },
+    "src/protocol/agent-join-limits.ts": {
+      "bytes": 5808,
+      "sha256": "9c06abe298f32d48308fe2811176a595a6033def56e37c609bb90c8c41d4222a"
+    },
+    "src/protocol/events.ts": {
+      "bytes": 4629,
+      "sha256": "02418d19b7fcf4184ef4442ba3103e5bf3b03c6dcc5f4727f6419a75543b2d74"
+    },
+    "src/protocol/hosted-authority.ts": {
+      "bytes": 19932,
+      "sha256": "79a5ac17ffa2c49979bc91dbb64069afac73d2decbd2790a1b47f6c92bfaae72"
+    },
+    "src/protocol/household-object-events.ts": {
+      "bytes": 5518,
+      "sha256": "37cc00f9acf59beea4a396cb2a73fb6316eae193dc17cb6ef860ac6f24a4e0ec"
+    },
+    "src/protocol/household-object-policy.ts": {
+      "bytes": 4196,
+      "sha256": "8e1a63ef0154a7da5768869ed9c44263bbbd32dffbe14bc4ddf405c802ea7b52"
+    },
+    "src/protocol/workspace-commands.ts": {
+      "bytes": 64272,
+      "sha256": "2919369eaa941dc0b514154b820145b11fea8741e5edcc47774e8b644f2f5854"
+    },
+    "src/protocol/workspace-events.ts": {
+      "bytes": 7989,
+      "sha256": "133e0b30dde1ad2be0d15d1d17f453c15948dc80567f34f9c096f928c1c0c264"
+    },
+    "supabase/functions/_shared/channels.ts": {
+      "bytes": 25439,
+      "sha256": "e824621648f0366e6f124a95fd2e6efb68df4dab1cee2b6ccb38a278637a4b40"
+    },
+    "supabase/functions/_shared/signal-text.ts": {
+      "bytes": 1052,
+      "sha256": "42b4756e5f6683bdddc020041ab333a0af3a92fbc9f14ffdae28c04978643497"
+    },
+    "supabase/functions/activity/core.ts": {
+      "bytes": 3050,
+      "sha256": "586f8c352abd6156467a3b112f4a31e5ab4d6cfb8cd88b2d389921fda5d846be"
+    }
+  },
+  "bundleModules": [
+    "site/src/lib/channels.ts",
+    "site/src/lib/home-catchup.ts",
+    "site/src/lib/home-focus.ts",
+    "site/src/lib/home-names.ts",
+    "site/src/lib/home-primitives.ts",
+    "site/src/lib/home-rail.ts",
+    "site/src/lib/home-route.ts",
+    "site/src/lib/home-shell.ts",
+    "site/src/lib/home-side-cards.ts",
+    "site/src/lib/hosted-lists-note.ts",
+    "site/src/lib/household-objects-view.ts",
+    "site/src/lib/identity-label.ts",
+    "site/src/lib/kylon-shell/drawer.js",
+    "site/src/lib/kylon-shell/host.ts",
+    "site/src/lib/kylon-shell/people-context.ts",
+    "site/src/lib/kylon-shell/projection.ts",
+    "site/src/lib/kylon-shell/shell.js",
+    "site/src/lib/kylon-shell/todo-context.ts",
+    "site/src/lib/kylon-shell/wiki-context.ts",
+    "site/src/lib/lists-chrome.ts",
+    "site/src/lib/message-markdown.ts",
+    "src/protocol/household-object-policy.ts",
+    "supabase/functions/_shared/channels.ts"
+  ],
+  "pureHelpers": {},
+  "dashboardScript": {
+    "bytes": 528093,
+    "sha256": "27a464d3d333c5f3303a6ae4d1e523fd79851617aeb141022ddd51014687d9eb"
+  },
+  "ownerDeclarations": {
+    "renderHomeShell": {
+      "bytes": 3555,
+      "sha256": "6dd7be8255c10f68b5578570cd58eb01357ec4b00a14d0db9764e164ecc8a326"
+    },
+    "showPanel": {
+      "bytes": 2018,
+      "sha256": "4a34ba62ca5050b8438537e80dfa310d92f0c57c4e3156d5147c6fb6ee4db185"
+    },
+    "applyHomePane": {
+      "bytes": 2041,
+      "sha256": "3ecd20b8a619218466eaecdb7ad6d8f1ed7a6df0ca7f4dff2409e0750a2f3b59"
+    },
+    "showChannelView": {
+      "bytes": 1889,
+      "sha256": "94ba612e667ba3d539c9b318a4243fb5c10a72a5560235e301e5fcb3e856695e"
+    },
+    "activateWorkspaceView": {
+      "bytes": 3596,
+      "sha256": "95ee9c509fc0680ec920e29ac5225cc2d976a29be2f5feb2a4b45667bc791fd5"
+    },
+    "renderHouseholdAccess": {
+      "bytes": 2602,
+      "sha256": "121ddea850018bded67ababe78edda14515a7f51fd469470caf56a4f55c26e45"
+    },
+    "renderAgentApprovals": {
+      "bytes": 4180,
+      "sha256": "9430a2eedc30c1386896ae3dd61add94ebd2a0eb45c83fc2fc73378e52e3e0f0"
+    },
+    "syncListsChrome": {
+      "bytes": 623,
+      "sha256": "8898619f52629b564c48784993522d726c03a3adee749f9da3b07a25d7fe7418"
+    },
+    "accountMenuState": {
+      "bytes": 731,
+      "sha256": "d2d39df2afdf482f4a13839c357181de8f64d1fa11b0d9013fdb131dddf1ec88"
+    }
+  },
+  "extractions": {
+    "renderHomeShell/4": {
+      "start": 239733,
+      "end": 239928,
+      "byteStart": 239863,
+      "byteEnd": 240058,
+      "bytes": 195,
+      "sha256": "ccd6c8029faf0a505478e029c481652f31fdba91da37e7dfa9262a1a11868f22"
+    },
+    "renderHomeShell/5": {
+      "start": 239935,
+      "end": 240725,
+      "byteStart": 240065,
+      "byteEnd": 240855,
+      "bytes": 790,
+      "sha256": "7518fbe55216a0cc0f7ecf69a72cefe586064322c54a1db25d75ba10329dbef3"
+    },
+    "showPanel/8": {
+      "start": 94563,
+      "end": 94704,
+      "byteStart": 94619,
+      "byteEnd": 94760,
+      "bytes": 141,
+      "sha256": "c68bdf75b27d92aad782bb43a86442b32d45d1cff7c384e03ab76b166f7eece7"
+    },
+    "showPanel/9": {
+      "start": 94711,
+      "end": 94736,
+      "byteStart": 94767,
+      "byteEnd": 94792,
+      "bytes": 25,
+      "sha256": "c0d25a8d43d6e921cf42aef832874762722f01e313aef9ec031b22e825c8dee1"
+    },
+    "showPanel/10": {
+      "start": 94743,
+      "end": 94761,
+      "byteStart": 94799,
+      "byteEnd": 94817,
+      "bytes": 18,
+      "sha256": "85e2217bda4680e76d5940ef55f0d45c27f28f0d7565ea8e894f3e891512cb54"
+    },
+    "showPanel/12": {
+      "start": 94794,
+      "end": 94844,
+      "byteStart": 94850,
+      "byteEnd": 94900,
+      "bytes": 50,
+      "sha256": "3f43c48abdd59beff6b0854c39882f8bdbc6d6fd58d00a46c7dd0efcc59d589c"
+    },
+    "showPanel/13": {
+      "start": 94851,
+      "end": 94922,
+      "byteStart": 94907,
+      "byteEnd": 94978,
+      "bytes": 71,
+      "sha256": "8ea64e922d697d68babd5a10560da16f7ad17dea12ce045d5f711aa4f6fda2b0"
+    },
+    "applyHomePane/0": {
+      "start": 249846,
+      "end": 249902,
+      "byteStart": 249976,
+      "byteEnd": 250032,
+      "bytes": 56,
+      "sha256": "6241a60efdaaf04e530f42a6d15a4481ac4fe4eb5f7576d093c564152fac4a21"
+    },
+    "applyHomePane/1": {
+      "start": 249909,
+      "end": 249970,
+      "byteStart": 250039,
+      "byteEnd": 250100,
+      "bytes": 61,
+      "sha256": "dc2ea8bb609618aa203b29330f18201b21a6c0a1882cdfe99ec7d90d68448190"
+    },
+    "applyHomePane/2": {
+      "start": 249977,
+      "end": 250033,
+      "byteStart": 250107,
+      "byteEnd": 250163,
+      "bytes": 56,
+      "sha256": "ebe4a870c7dbb462dd2457ddb1dbdb4c6fccc1894d7499ff9474560e96edb3a1"
+    },
+    "applyHomePane/3": {
+      "start": 250040,
+      "end": 250082,
+      "byteStart": 250170,
+      "byteEnd": 250212,
+      "bytes": 42,
+      "sha256": "bd0b1163abdabb468173980b9a516cd2f79b678a1956762f4a13293560e69fe5"
+    },
+    "applyHomePane/4": {
+      "start": 250089,
+      "end": 250125,
+      "byteStart": 250219,
+      "byteEnd": 250255,
+      "bytes": 36,
+      "sha256": "209173b8aa4e70fd38a3eca8bdbae9ebaa703f3ffdbfe78e9e89ef475bd7909a"
+    },
+    "applyHomePane/5": {
+      "start": 250132,
+      "end": 250171,
+      "byteStart": 250262,
+      "byteEnd": 250301,
+      "bytes": 39,
+      "sha256": "8c74d18abf3297e017a66c7e24667d67b5feb8a858c53b14ab9fdfd4ac3910bc"
+    },
+    "applyHomePane/7": {
+      "start": 250236,
+      "end": 250391,
+      "byteStart": 250366,
+      "byteEnd": 250521,
+      "bytes": 155,
+      "sha256": "569f585d0472d4a358d1f3ff35ca906baaf61042761f22ccf32c2c0e509eec90"
+    },
+    "applyHomePane/8": {
+      "start": 250398,
+      "end": 250416,
+      "byteStart": 250528,
+      "byteEnd": 250546,
+      "bytes": 18,
+      "sha256": "85e2217bda4680e76d5940ef55f0d45c27f28f0d7565ea8e894f3e891512cb54"
+    },
+    "applyHomePane/9": {
+      "start": 250423,
+      "end": 250488,
+      "byteStart": 250553,
+      "byteEnd": 250618,
+      "bytes": 65,
+      "sha256": "ae08f4edaf43a50da2581dcc65fdfd443a8cccce1308114ed7ce666ce8d5a443"
+    },
+    "applyHomePane/10": {
+      "start": 250495,
+      "end": 250559,
+      "byteStart": 250625,
+      "byteEnd": 250689,
+      "bytes": 64,
+      "sha256": "f07d0db2db61a2350f2a8e6bd779c2d43a58bff22d70397853e47ff758e10e39"
+    },
+    "applyHomePane/11": {
+      "start": 250566,
+      "end": 250610,
+      "byteStart": 250696,
+      "byteEnd": 250740,
+      "bytes": 44,
+      "sha256": "3ca390824398e8c44522af7b29b430dcbb587bb0cf1ad48ed2691c664aec3bd7"
+    },
+    "applyHomePane/12": {
+      "start": 250617,
+      "end": 250668,
+      "byteStart": 250747,
+      "byteEnd": 250798,
+      "bytes": 51,
+      "sha256": "ef27cf79ed1b9d5e6b32c8df74e2031b111b6279f5ba7eadf33606f50edd2415"
+    },
+    "applyHomePane/13": {
+      "start": 250675,
+      "end": 250746,
+      "byteStart": 250805,
+      "byteEnd": 250876,
+      "bytes": 71,
+      "sha256": "41232c58c82e7649efdd58993e1b59e66ce0e15ef9497cd237d4d65d7b13e431"
+    },
+    "applyHomePane/14": {
+      "start": 250753,
+      "end": 250826,
+      "byteStart": 250883,
+      "byteEnd": 250956,
+      "bytes": 73,
+      "sha256": "0a568b08314a4244c3d352da57a5c9670f538ba8b6475ef9dfba0b09c77d1019"
+    },
+    "applyHomePane/15": {
+      "start": 250833,
+      "end": 250902,
+      "byteStart": 250963,
+      "byteEnd": 251032,
+      "bytes": 69,
+      "sha256": "4e79c3d20435261bce3f2800b9a283bd3a87000f507784e119ce30bd70263f7d"
+    },
+    "applyHomePane/16": {
+      "start": 250909,
+      "end": 250988,
+      "byteStart": 251039,
+      "byteEnd": 251118,
+      "bytes": 79,
+      "sha256": "dcb8aaab0ceef8563b9ad8270838432470a7b77d0e2516a8c3fcfba9620d05c2"
+    },
+    "showChannelView/3": {
+      "start": 96086,
+      "end": 96221,
+      "byteStart": 96142,
+      "byteEnd": 96277,
+      "bytes": 135,
+      "sha256": "87a5d61c7db73a9536b1a2c92d6165806a797c99cc556f0b0401add4561e9df9"
+    },
+    "showChannelView/4": {
+      "start": 96228,
+      "end": 96285,
+      "byteStart": 96284,
+      "byteEnd": 96341,
+      "bytes": 57,
+      "sha256": "bc574e841d1cda431164a647f83cde6185b0c57302f4b672d780717b74554ad6"
+    },
+    "showChannelView/7": {
+      "start": 96945,
+      "end": 96976,
+      "byteStart": 97001,
+      "byteEnd": 97032,
+      "bytes": 31,
+      "sha256": "b7611a5d671a054c78ecc2d050f751d4cdbd21e44254b451f850eaa4c19989e9"
+    },
+    "showChannelView/8": {
+      "start": 96983,
+      "end": 97001,
+      "byteStart": 97039,
+      "byteEnd": 97057,
+      "bytes": 18,
+      "sha256": "85e2217bda4680e76d5940ef55f0d45c27f28f0d7565ea8e894f3e891512cb54"
+    },
+    "showChannelView/10": {
+      "start": 97115,
+      "end": 97169,
+      "byteStart": 97171,
+      "byteEnd": 97225,
+      "bytes": 54,
+      "sha256": "95990a2cf44368216cd50ad4d4e77cfa2ae97f531522193dedef3923ebb1d192"
+    },
+    "showChannelView/11": {
+      "start": 97176,
+      "end": 97284,
+      "byteStart": 97232,
+      "byteEnd": 97340,
+      "bytes": 108,
+      "sha256": "30431c014f9300ddbbede97429ab6acdb903bc89496cc6fe86afe9f6f481bd0f"
+    },
+    "activateWorkspaceView/4": {
+      "start": 432820,
+      "end": 432873,
+      "byteStart": 433144,
+      "byteEnd": 433197,
+      "bytes": 53,
+      "sha256": "feef1c6170e1bf1c99715836926f12a41f118b307d9060692b9184ec8eb7c838"
+    },
+    "activateWorkspaceView/5": {
+      "start": 432880,
+      "end": 432947,
+      "byteStart": 433204,
+      "byteEnd": 433271,
+      "bytes": 67,
+      "sha256": "783f514f005edeb6c0c1fb3aa22cb70e6cc76f601993a78d9f689fb852713e4d"
+    },
+    "activateWorkspaceView/6": {
+      "start": 432954,
+      "end": 433182,
+      "byteStart": 433278,
+      "byteEnd": 433506,
+      "bytes": 228,
+      "sha256": "745174f140443c8e12139f8c1261ad22ab968713dc2e0422e6ac4fa14e74ff9c"
+    },
+    "activateWorkspaceView/7": {
+      "start": 433557,
+      "end": 433729,
+      "byteStart": 433881,
+      "byteEnd": 434053,
+      "bytes": 172,
+      "sha256": "799abe0fc02b82629c80e49791d5ec9750fa0e828f3ab55a69449aaa5a41a557"
+    },
+    "activateWorkspaceView/9": {
+      "start": 435512,
+      "end": 435846,
+      "byteStart": 435838,
+      "byteEnd": 436172,
+      "bytes": 334,
+      "sha256": "d187af53f7107edba079696feca8643efae33dc2bacbb5e91e96ad0f484aba5c"
+    },
+    "renderHouseholdAccess/0": {
+      "start": 410476,
+      "end": 410534,
+      "byteStart": 410794,
+      "byteEnd": 410852,
+      "bytes": 58,
+      "sha256": "d42f097ec87c047bf111bd45437b7f23c05f2dd9efcc98451d3ea66dc7971154"
+    },
+    "renderHouseholdAccess/1": {
+      "start": 410541,
+      "end": 410603,
+      "byteStart": 410859,
+      "byteEnd": 410921,
+      "bytes": 62,
+      "sha256": "a355c03599db6ee4b08976bf89aaf3d7c166922ca80cd7d425fccab027a5df0e"
+    },
+    "renderHouseholdAccess/2": {
+      "start": 410610,
+      "end": 410678,
+      "byteStart": 410928,
+      "byteEnd": 410996,
+      "bytes": 68,
+      "sha256": "f77be350a389d8b02b45bf673263c9868c5292c9b87b96adaffdc0eb62be8e3f"
+    },
+    "renderHouseholdAccess/5": {
+      "start": 410987,
+      "end": 411033,
+      "byteStart": 411305,
+      "byteEnd": 411351,
+      "bytes": 46,
+      "sha256": "558df4b40d1ca44c3ad3d6e1888651bd19bf17a3d3f27370ab1ccb5de69e0697"
+    },
+    "renderHouseholdAccess/6": {
+      "start": 411040,
+      "end": 411085,
+      "byteStart": 411358,
+      "byteEnd": 411403,
+      "bytes": 45,
+      "sha256": "f0b79edf95d302d0c87f7f2ddc997a3ace677542284455bedd8f961180077ab7"
+    },
+    "renderHouseholdAccess/9": {
+      "start": 411621,
+      "end": 411682,
+      "byteStart": 411939,
+      "byteEnd": 412000,
+      "bytes": 61,
+      "sha256": "26bb832c3930cdd01e3eff972f8994e9d439e50d8835ef04c5db41b76ff90bac"
+    },
+    "renderAgentApprovals/0": {
+      "start": 414190,
+      "end": 414256,
+      "byteStart": 414508,
+      "byteEnd": 414574,
+      "bytes": 66,
+      "sha256": "8a7b8c76056e7079ab573405336337100545dde85a8c86f2cecbbdeb45b7c2ec"
+    },
+    "renderAgentApprovals/1": {
+      "start": 414263,
+      "end": 414326,
+      "byteStart": 414581,
+      "byteEnd": 414644,
+      "bytes": 63,
+      "sha256": "0e0cb20e0fd72b47971d276d2a3ff81267f95e7648d4b0d3a8c5678f31b748be"
+    },
+    "renderAgentApprovals/2": {
+      "start": 414333,
+      "end": 414351,
+      "byteStart": 414651,
+      "byteEnd": 414669,
+      "bytes": 18,
+      "sha256": "52803cf475f90b9d09ed35e7cc04db9cb0f241d299a71ab1480b3cdab4ccb0bf"
+    },
+    "renderAgentApprovals/3": {
+      "start": 414358,
+      "end": 414381,
+      "byteStart": 414676,
+      "byteEnd": 414699,
+      "bytes": 23,
+      "sha256": "c8f0130c7e0cab95f2b9131e872fa2aa99b5f7df976ec363b404d651ac7290f0"
+    },
+    "renderAgentApprovals/4": {
+      "start": 414388,
+      "end": 414446,
+      "byteStart": 414706,
+      "byteEnd": 414764,
+      "bytes": 58,
+      "sha256": "0c8187aec3dfd6cfa0aa2d302de88b7ad351f6d36491efa9549167eb76f24001"
+    },
+    "syncListsChrome": {
+      "start": 92670,
+      "end": 93293,
+      "byteStart": 92726,
+      "byteEnd": 93349,
+      "bytes": 623,
+      "sha256": "8898619f52629b564c48784993522d726c03a3adee749f9da3b07a25d7fe7418"
+    },
+    "accountMenuState": {
+      "start": 100480,
+      "end": 101211,
+      "byteStart": 100547,
+      "byteEnd": 101278,
+      "bytes": 731,
+      "sha256": "d2d39df2afdf482f4a13839c357181de8f64d1fa11b0d9013fdb131dddf1ec88"
+    },
+    "composer-hidden": {
+      "start": 96762,
+      "end": 96862,
+      "byteStart": 96818,
+      "byteEnd": 96918,
+      "bytes": 100,
+      "sha256": "c7914884d8ba7e1b754bbd08ba8eb746d43b1d391b17b9a3459ae0533fbb891f"
+    },
+    "objects/0": {
+      "start": 433770,
+      "end": 433814,
+      "byteStart": 434094,
+      "byteEnd": 434138,
+      "bytes": 44,
+      "sha256": "61b1e0c0660f40c42a6775efd7f61119bd32f198258b31955e577801fa360a82"
+    },
+    "objects/1": {
+      "start": 433823,
+      "end": 433927,
+      "byteStart": 434147,
+      "byteEnd": 434251,
+      "bytes": 104,
+      "sha256": "c6968729158a63ca7cd2acc2733f9a344bffa34d28ea8b1993a6ed9ba011eee3"
+    },
+    "objects/2": {
+      "start": 433936,
+      "end": 433993,
+      "byteStart": 434260,
+      "byteEnd": 434317,
+      "bytes": 57,
+      "sha256": "06f4ea98409c8609b35425be4a3b9dffec79879824302077e02c840efd2677af"
+    },
+    "objects/3": {
+      "start": 434002,
+      "end": 434066,
+      "byteStart": 434326,
+      "byteEnd": 434390,
+      "bytes": 64,
+      "sha256": "11e976b6501011111b315440b3606a08e052fe6d7aceecea2d0ea9ed3bd0a59a"
+    },
+    "objects/4": {
+      "start": 434075,
+      "end": 434102,
+      "byteStart": 434399,
+      "byteEnd": 434426,
+      "bytes": 27,
+      "sha256": "f7168f889afb144d3636c69ce140083536693fe0eaf6ec7e18dc54fe03544f62"
+    }
+  },
+  "cssImports": [
+    "../../styles/tokens.css",
+    "../../styles/home/index.css",
+    "../../styles/dashboard-decoration.css",
+    "../../styles/kylon-shell.css",
+    "../../styles/kylon-new-workspace.css",
+    "../../styles/kylon-layout/index.css",
+    "../../styles/kylon-workspace-settings-integration.css",
+    "../../styles/kylon-files.css",
+    "../../styles/kylon-lists.css",
+    "../../styles/kylon-people.css",
+    "../../styles/kylon-wiki.css",
+    "../../styles/kylon-wiki-context.css",
+    "../../styles/kylon-account-dialogs.css",
+    "../../styles/dashboard-welcome.css",
+    "../../styles/kylon-todos.css",
+    "../../styles/kylon-todos-context.css",
+    "../../styles/kylon-onboarding.css",
+    "../../styles/kylon-entity-profile.css",
+    "../../styles/kylon-channel-dialog.css",
+    "../../styles/kylon-agent-page.css",
+    "../../styles/kylon-chat-empty.css"
+  ],
+  "adoption": {
+    "file": "reviews/LISTS-COMPACT-HEADER-PREPARED.json",
+    "bytes": 1462,
+    "sha256": "5664c7abead02eeea4aca6853c3eb5897a7612118ffe22d654a0914489cbab19"
+  },
+  "tools": {
+    "package": {
+      "bytes": 179,
+      "sha256": "37dc2985db4eb6eccb6a70f7c8501811c6390f18b47f1da3a873ce255ce67e12"
+    },
+    "lock": {
+      "bytes": 1598,
+      "sha256": "1eded2880b70774af425e63fdeed805feaa3ff13d9732b60a12bec4f100593e3"
+    }
+  },
+  "readMethod": "All174 facts from exact Git show; only renderer/CSS differ from frozen184. WholeDashboard identical, hence original9declarations/53ranges/template facts unchanged. Source-only metadata adaptation; no runtime execution.",
+  "runtime": "SOURCE ONLY / UNRUN",
+  "referenceHelpers": {
+    "lists-inline-review-images-job-v1/run.py": {
+      "bytes": 15028,
+      "sha256": "2a8d6416b5d194b59cae842f76f1a6babe7b291bbea90acfca6ad09380172066"
+    },
+    "lists-inline-review-images-job-v1/source-pins.json": {
+      "bytes": 73382,
+      "sha256": "1b5c09488fbb9dc5708648f28b0f64b779ce7c9ae48642063112dce733bfbc2b"
+    },
+    "lists-inline-review-images-job-v1/fixture-entry.ts": {
+      "bytes": 9116,
+      "sha256": "e5397f7f0dad7ea50143067a73baf9a763c3403cbca4295bf1feeeeb71c1be69"
+    },
+    "lists-inline-review-images-job-v1/camera.mjs": {
+      "bytes": 36360,
+      "sha256": "dde9fbe6088863bd81a24b2fac0568a4d7f175cca6dbc4d275fd66374ed3eaf8"
+    },
+    "lists-inline-review-images-job-v1/README.md": {
+      "bytes": 2660,
+      "sha256": "3d1fc8e01eecc1cac93cf69f9980f785d06afd19a7b0eed2eac1183ecfa07378"
+    },
+    "lists-inline-review-images-job-v1/native-owner.mjs": {
+      "bytes": 6550,
+      "sha256": "b0e111b89e8a3d014b237845be5624aba4a2270874ee6bf52e81c0ecbb47aa23"
+    },
+    "lists-inline-review-images-job-v1/job.sh": {
+      "bytes": 3426,
+      "sha256": "6ec651f87102d8956f3c989d05c7fb69ccbdad36b684c5b4c93eaefdc8c12a43"
+    }
+  },
+  "sourceOnlyTemplateSyntax": {
+    "pathAtFutureRuntime": "/tmp/qa/proofs/lists/native-owner.ts",
+    "bytes": 7079,
+    "sha256": "5d7b7cd9a53c031b1d848ec4f3c179d84718a4070b42649a21ed132745855195",
+    "meaning": "Template reconstructed strictly as AST/source data and TypeScript syntax parsed; nativeOwner generator, renderer and application modules UNRUN"
+  },
+  "sourceReconciliation": {
+    "fromHead": "3a45f7f67ff8fb50a17de4a2ce2d7cafd20e20fb",
+    "toHead": "9ed6cda1796a7124df805e392ee8386412d2c9c2",
+    "changedSourceFiles": [
+      "site/src/lib/household-objects-view.ts",
+      "site/src/styles/kylon-lists.css"
+    ],
+    "changedRuntimeModuleSources": [
+      "site/src/lib/household-objects-view.ts"
+    ],
+    "runtimeModuleMembershipUnchanged": true,
+    "wholeDashboardUnchangedFrom184": true,
+    "all53ExtractionTextsRangesAndNineDeclarationsUnchangedFrom184": true,
+    "sourceOnlyTemplateUnchanged": true,
+    "actualLifecycleReference": "v4 actual capture217hashes/PASS0errors/exactcleanup;184 adaptation sourceonly/unrun",
+    "previousReconciliation": {
+      "fromHead": "4e391f63e9342825e581056ff888dc14d56410e4",
+      "toHead": "3a45f7f67ff8fb50a17de4a2ce2d7cafd20e20fb",
+      "changedSourceFiles": [
+        "site/src/components/app/LiveDashboard.astro",
+        "site/src/lib/household-objects-view.ts",
+        "site/src/styles/kylon-lists.css"
+      ],
+      "changedRuntimeModuleSources": [
+        "site/src/lib/household-objects-view.ts"
+      ],
+      "runtimeModuleMembershipUnchanged": true,
+      "all53ExtractionTextsAndRangesUnchangedFromV5": true,
+      "nineOwnerDeclarationsUnchanged": true,
+      "wholeDashboardScriptChangedOnlyByApprovedN1EventSinceV5": true,
+      "sourceOnlyTemplateUnchanged": true,
+      "actualLifecycleReference": "v4 actual capturePASS217hashes, errors0, exactcleanup",
+      "previousReconciliation": {
+        "fromHead": "bb7dd84aa699602ff1380fcedea0b60932815f13",
+        "toHead": "4e391f63e9342825e581056ff888dc14d56410e4",
+        "changedSourceFiles": [
+          "site/src/components/app/LiveDashboard.astro"
+        ],
+        "copyQualification": "Hosted agents you connect as workspace owner inherit your Lists access unless you restrict them.",
+        "all53RangeShifts": -6,
+        "all53TextsAnd9DeclarationsAndWholeScriptUnchanged": true,
+        "runtimeModulesUnchanged": true,
+        "sourceOnlyTemplateUnchanged": true,
+        "previousReconciliation": {
+          "fromHead": "a49be686aabc0ec9966f71b68870013109f8593f",
+          "toHead": "bb7dd84aa699602ff1380fcedea0b60932815f13",
+          "changedSourceFiles": [
+            "site/src/components/connect/AgentConnect.astro",
+            "site/src/lib/agent-hosts.ts",
+            "site/src/lib/home-agent-copy.ts",
+            "site/src/lib/hosted-lists-note.ts"
+          ],
+          "sourceInputCount": 174,
+          "changedPathCount": 13,
+          "exactUiSource": "a49be686aabc0ec9966f71b68870013109f8593f",
+          "exactCopySource": "7811248441c7cbc051ac213700e6853cc5bbacc2",
+          "all13SourceBlobsPreserved": true,
+          "ownerDeclarationsAnd53ExtractionsUnchanged": true,
+          "sourceOnlyTemplateUnchanged": true,
+          "runtimeModuleMembershipUnchanged": true,
+          "changedRuntimeModuleSources": [
+            "site/src/lib/hosted-lists-note.ts"
+          ],
+          "previousReconciliation": {
+            "fromHead": "c0c8e68d4e315a4f6f056a1a917b37687fedcd9c",
+            "toHead": "a49be686aabc0ec9966f71b68870013109f8593f",
+            "removedSourceFiles": [
+              "site/src/lib/household-dashboard.ts",
+              "site/src/styles/kylon-invite-onramp.css"
+            ],
+            "newSourceFiles": [
+              "site/src/components/SiteFooter.astro",
+              "site/src/components/SiteHeader.astro",
+              "site/src/components/Wordmark.astro",
+              "site/src/components/app/AdminDelegations.astro",
+              "site/src/components/auth/ProviderButtons.astro",
+              "site/src/components/connect/AgentConnect.astro",
+              "site/src/components/connect/AgentHostPicker.astro",
+              "site/src/components/connect/agent-prompt.ts",
+              "site/src/components/invite/HumanInvitationInbox.astro",
+              "site/src/components/ui/Button.astro",
+              "site/src/lib/agent-activity.ts",
+              "site/src/lib/agent-connect.ts",
+              "site/src/lib/agent-hosts.ts",
+              "site/src/lib/agent-status.ts",
+              "site/src/lib/auth-providers.ts",
+              "site/src/lib/commonswarm.ts",
+              "site/src/lib/composer-address.ts",
+              "site/src/lib/feed-push.ts",
+              "site/src/lib/greeting-name.ts",
+              "site/src/lib/h0-link-join-flag.ts",
+              "site/src/lib/home-agent-copy.ts",
+              "site/src/lib/home-agent.ts",
+              "site/src/lib/home-map.ts",
+              "site/src/lib/home-todo-copy.ts",
+              "site/src/lib/home-visible-labels.ts",
+              "site/src/lib/home/contract.ts",
+              "site/src/lib/household-access.ts",
+              "site/src/lib/human-seen-reporter.ts",
+              "site/src/lib/install.ts",
+              "site/src/lib/model-glyph.ts",
+              "site/src/lib/participant-rail.ts",
+              "site/src/lib/release.ts",
+              "site/src/lib/standing-grants.ts",
+              "site/src/lib/thread-reply.ts",
+              "site/src/lib/wake-path.ts",
+              "src/cloud/agent-connection-codec.ts",
+              "src/cloud/agent-credential-input.ts",
+              "src/cloud/agent-onboarding-contract.ts",
+              "src/cloud/agent-presence.ts",
+              "src/cloud/config.ts",
+              "src/cloud/idle-poll.ts",
+              "src/cloud/wake-lease-constants.ts",
+              "src/host/types.ts",
+              "src/host/version.ts",
+              "src/protocol/admin-authority.ts",
+              "src/protocol/admin-policy.ts",
+              "src/protocol/admin-routine-events.ts",
+              "src/protocol/admin-routine.ts",
+              "src/protocol/agent-join-limits.ts",
+              "src/protocol/events.ts",
+              "src/protocol/hosted-authority.ts",
+              "src/protocol/workspace-commands.ts",
+              "src/protocol/workspace-events.ts",
+              "supabase/functions/_shared/signal-text.ts",
+              "supabase/functions/activity/core.ts"
+            ],
+            "changedSourceFiles": [
+              "package-lock.json",
+              "package.json",
+              "site/src/components/app/LiveDashboard.astro",
+              "site/src/lib/household-objects-view.ts",
+              "site/src/styles/kylon-lists.css"
+            ],
+            "unchangedSourceFileCount": 114,
+            "ssrFrontmatterClosure": [
+              "package.json",
+              "site/src/components/SiteFooter.astro",
+              "site/src/components/SiteHeader.astro",
+              "site/src/components/Wordmark.astro",
+              "site/src/components/app/AdminDelegations.astro",
+              "site/src/components/app/HouseholdObjects.astro",
+              "site/src/components/app/LiveDashboard.astro",
+              "site/src/components/app/SampleNotice.astro",
+              "site/src/components/auth/ProviderButtons.astro",
+              "site/src/components/connect/AgentConnect.astro",
+              "site/src/components/connect/AgentHostPicker.astro",
+              "site/src/components/connect/agent-prompt.ts",
+              "site/src/components/invite/HumanInvitationInbox.astro",
+              "site/src/components/ui/Button.astro",
+              "site/src/layouts/Base.astro",
+              "site/src/lib/agent-activity.ts",
+              "site/src/lib/agent-connect.ts",
+              "site/src/lib/agent-hosts.ts",
+              "site/src/lib/agent-status.ts",
+              "site/src/lib/auth-providers.ts",
+              "site/src/lib/channels.ts",
+              "site/src/lib/commonswarm.ts",
+              "site/src/lib/composer-address.ts",
+              "site/src/lib/feed-push.ts",
+              "site/src/lib/greeting-name.ts",
+              "site/src/lib/h0-link-join-flag.ts",
+              "site/src/lib/home-agent-copy.ts",
+              "site/src/lib/home-agent.ts",
+              "site/src/lib/home-catchup.ts",
+              "site/src/lib/home-map.ts",
+              "site/src/lib/home-names.ts",
+              "site/src/lib/home-primitives.ts",
+              "site/src/lib/home-rail.ts",
+              "site/src/lib/home-route.ts",
+              "site/src/lib/home-todo-copy.ts",
+              "site/src/lib/home-types.ts",
+              "site/src/lib/home-visible-labels.ts",
+              "site/src/lib/home/contract.ts",
+              "site/src/lib/hosted-lists-note.ts",
+              "site/src/lib/household-access.ts",
+              "site/src/lib/household-objects-view.ts",
+              "site/src/lib/human-seen-reporter.ts",
+              "site/src/lib/identity-label.ts",
+              "site/src/lib/install.ts",
+              "site/src/lib/message-markdown.ts",
+              "site/src/lib/model-glyph.ts",
+              "site/src/lib/participant-rail.ts",
+              "site/src/lib/release.ts",
+              "site/src/lib/standing-grants.ts",
+              "site/src/lib/thread-reply.ts",
+              "site/src/lib/wake-path.ts",
+              "site/src/pages/app.astro",
+              "site/src/styles/dashboard-decoration.css",
+              "site/src/styles/dashboard-files.css",
+              "site/src/styles/dashboard-message-meta.css",
+              "site/src/styles/dashboard-rail-brand.css",
+              "site/src/styles/dashboard-welcome-legacy.css",
+              "site/src/styles/dashboard-welcome.css",
+              "site/src/styles/dashboard-workspace-settings.css",
+              "site/src/styles/global.css",
+              "site/src/styles/home/agent.css",
+              "site/src/styles/home/catchup.css",
+              "site/src/styles/home/index.css",
+              "site/src/styles/home/integration.css",
+              "site/src/styles/home/onboarding.css",
+              "site/src/styles/home/people.css",
+              "site/src/styles/home/pickers.css",
+              "site/src/styles/home/primitives.css",
+              "site/src/styles/home/rail.css",
+              "site/src/styles/home/shell.css",
+              "site/src/styles/home/todo.css",
+              "site/src/styles/home/workspace.css",
+              "site/src/styles/kylon-account-dialogs.css",
+              "site/src/styles/kylon-agent-page.css",
+              "site/src/styles/kylon-catchup.css",
+              "site/src/styles/kylon-channel-dialog.css",
+              "site/src/styles/kylon-chat-empty.css",
+              "site/src/styles/kylon-composer.css",
+              "site/src/styles/kylon-conversation-responsive.css",
+              "site/src/styles/kylon-conversation.css",
+              "site/src/styles/kylon-entity-profile.css",
+              "site/src/styles/kylon-files.css",
+              "site/src/styles/kylon-font.css",
+              "site/src/styles/kylon-invitation-inbox.css",
+              "site/src/styles/kylon-layout/context.css",
+              "site/src/styles/kylon-layout/index.css",
+              "site/src/styles/kylon-layout/integration.css",
+              "site/src/styles/kylon-layout/primitives.css",
+              "site/src/styles/kylon-layout/shell.css",
+              "site/src/styles/kylon-layout/tokens.css",
+              "site/src/styles/kylon-lists.css",
+              "site/src/styles/kylon-messages.css",
+              "site/src/styles/kylon-new-workspace.css",
+              "site/src/styles/kylon-onboarding.css",
+              "site/src/styles/kylon-people-context.css",
+              "site/src/styles/kylon-people-profile.css",
+              "site/src/styles/kylon-people-roster.css",
+              "site/src/styles/kylon-people-semantics.css",
+              "site/src/styles/kylon-people-shell.css",
+              "site/src/styles/kylon-people.css",
+              "site/src/styles/kylon-receipts.css",
+              "site/src/styles/kylon-shell.css",
+              "site/src/styles/kylon-todos-context.css",
+              "site/src/styles/kylon-todos-layout.css",
+              "site/src/styles/kylon-todos.css",
+              "site/src/styles/kylon-tokens.css",
+              "site/src/styles/kylon-welcome.css",
+              "site/src/styles/kylon-wiki-context.css",
+              "site/src/styles/kylon-wiki.css",
+              "site/src/styles/kylon-workspace-settings-integration.css",
+              "site/src/styles/kylon-workspace-settings.css",
+              "site/src/styles/motion.css",
+              "site/src/styles/tokens.css",
+              "site/src/styles/ui.css",
+              "src/cloud/agent-connection-codec.ts",
+              "src/cloud/agent-credential-input.ts",
+              "src/cloud/agent-onboarding-contract.ts",
+              "src/cloud/agent-presence.ts",
+              "src/cloud/config.ts",
+              "src/cloud/idle-poll.ts",
+              "src/cloud/wake-lease-constants.ts",
+              "src/host/types.ts",
+              "src/host/version.ts",
+              "src/protocol/admin-authority.ts",
+              "src/protocol/admin-policy.ts",
+              "src/protocol/admin-routine-events.ts",
+              "src/protocol/admin-routine.ts",
+              "src/protocol/agent-join-limits.ts",
+              "src/protocol/events.ts",
+              "src/protocol/hosted-authority.ts",
+              "src/protocol/household-object-events.ts",
+              "src/protocol/household-object-policy.ts",
+              "src/protocol/workspace-commands.ts",
+              "src/protocol/workspace-events.ts",
+              "supabase/functions/_shared/channels.ts",
+              "supabase/functions/_shared/signal-text.ts",
+              "supabase/functions/activity/core.ts"
+            ],
+            "cssClosure": [
+              "site/src/styles/dashboard-decoration.css",
+              "site/src/styles/dashboard-files.css",
+              "site/src/styles/dashboard-message-meta.css",
+              "site/src/styles/dashboard-rail-brand.css",
+              "site/src/styles/dashboard-welcome-legacy.css",
+              "site/src/styles/dashboard-welcome.css",
+              "site/src/styles/dashboard-workspace-settings.css",
+              "site/src/styles/global.css",
+              "site/src/styles/home/agent.css",
+              "site/src/styles/home/catchup.css",
+              "site/src/styles/home/index.css",
+              "site/src/styles/home/integration.css",
+              "site/src/styles/home/onboarding.css",
+              "site/src/styles/home/people.css",
+              "site/src/styles/home/pickers.css",
+              "site/src/styles/home/primitives.css",
+              "site/src/styles/home/rail.css",
+              "site/src/styles/home/shell.css",
+              "site/src/styles/home/todo.css",
+              "site/src/styles/home/workspace.css",
+              "site/src/styles/kylon-account-dialogs.css",
+              "site/src/styles/kylon-agent-page.css",
+              "site/src/styles/kylon-catchup.css",
+              "site/src/styles/kylon-channel-dialog.css",
+              "site/src/styles/kylon-chat-empty.css",
+              "site/src/styles/kylon-composer.css",
+              "site/src/styles/kylon-conversation-responsive.css",
+              "site/src/styles/kylon-conversation.css",
+              "site/src/styles/kylon-entity-profile.css",
+              "site/src/styles/kylon-files.css",
+              "site/src/styles/kylon-font.css",
+              "site/src/styles/kylon-layout/context.css",
+              "site/src/styles/kylon-layout/index.css",
+              "site/src/styles/kylon-layout/integration.css",
+              "site/src/styles/kylon-layout/primitives.css",
+              "site/src/styles/kylon-layout/shell.css",
+              "site/src/styles/kylon-layout/tokens.css",
+              "site/src/styles/kylon-lists.css",
+              "site/src/styles/kylon-messages.css",
+              "site/src/styles/kylon-new-workspace.css",
+              "site/src/styles/kylon-onboarding.css",
+              "site/src/styles/kylon-people-context.css",
+              "site/src/styles/kylon-people-profile.css",
+              "site/src/styles/kylon-people-roster.css",
+              "site/src/styles/kylon-people-semantics.css",
+              "site/src/styles/kylon-people-shell.css",
+              "site/src/styles/kylon-people.css",
+              "site/src/styles/kylon-receipts.css",
+              "site/src/styles/kylon-shell.css",
+              "site/src/styles/kylon-todos-context.css",
+              "site/src/styles/kylon-todos-layout.css",
+              "site/src/styles/kylon-todos.css",
+              "site/src/styles/kylon-tokens.css",
+              "site/src/styles/kylon-welcome.css",
+              "site/src/styles/kylon-wiki-context.css",
+              "site/src/styles/kylon-wiki.css",
+              "site/src/styles/kylon-workspace-settings-integration.css",
+              "site/src/styles/kylon-workspace-settings.css",
+              "site/src/styles/motion.css",
+              "site/src/styles/tokens.css"
+            ],
+            "runtimeModuleDeltas": [
+              {
+                "path": "site/src/lib/household-objects-view.ts",
+                "before": {
+                  "bytes": 31819,
+                  "sha256": "7f4c1b1f9d920e9097dfa9b76052679f7c2c33ecf11eada83ac15b039a582f49"
+                },
+                "after": {
+                  "bytes": 31914,
+                  "sha256": "3992603bc4415ef95326c8c590c14a426a3253390b120c891b47b76b72eb93a4"
+                }
+              }
+            ],
+            "removedChangedPaths": [
+              "docs/evidence/2026-10-03-submissions/chatgpt-apps/LISTING.md",
+              "docs/evidence/2026-10-03-submissions/claude-connector-directory/LISTING.md",
+              "package-lock.json",
+              "package.json",
+              "site/src/lib/household-dashboard.ts",
+              "src/cloud/household-http.ts",
+              "src/cloud/household-objects.ts",
+              "src/protocol/household-next-steps.ts",
+              "src/protocol/household-tool-registry.ts",
+              "supabase/functions/_shared/admin-authority.d.ts",
+              "supabase/functions/_shared/events.d.ts",
+              "supabase/functions/_shared/household-object-policy.d.ts",
+              "supabase/functions/_shared/household-tool-registry.d.ts",
+              "supabase/functions/_shared/protocol.js",
+              "supabase/functions/_shared/reducer.d.ts",
+              "supabase/functions/command/household-draft.ts",
+              "supabase/functions/command/household-integration.ts",
+              "supabase/functions/command/household-objects.ts",
+              "supabase/functions/command/household-owner-permissions.ts",
+              "supabase/functions/command/household-permissions.ts",
+              "supabase/functions/command/index.ts",
+              "supabase/migrations/20261021000991_household_owner_chat_permissions.sql",
+              "tests/hosted-household-catalog-switch.test.ts",
+              "tests/hosted-list-tools.test.ts",
+              "tests/household-integration.test.ts",
+              "tests/household-lazy-storage.test.ts",
+              "tests/household-list-registry.test.ts",
+              "tests/household-objects.test.ts",
+              "tests/household-tool-registry.test.ts",
+              "tests/p1-cli/household-client.test.ts",
+              "tests/p1-server/household-approval.test.ts",
+              "tests/p1-server/household-permission-provisioning.test.ts"
+            ],
+            "newChangedPaths": [
+              "site/src/lib/household-objects-view.ts"
+            ],
+            "scope": "SSR frontmatter/local import-export/type closure freshly enumerated from exact Git bytes; original client scripts never executed. Runtime value-import closure is separate. Unused standalone onramp CSS and nonexecuted household admission module removed from explicit sourceFiles; both remain covered by full source before/after inventory where tracked. No functional D1 adoption claims.",
+            "extractionMapping": [
+              {
+                "from": "renderHomeShell/4",
+                "to": "renderHomeShell/4",
+                "textUnchanged": true
+              },
+              {
+                "from": "renderHomeShell/5",
+                "to": "renderHomeShell/5",
+                "textUnchanged": true
+              },
+              {
+                "from": "showPanel/7",
+                "to": "showPanel/8",
+                "textUnchanged": true
+              },
+              {
+                "from": "showPanel/8",
+                "to": "showPanel/9",
+                "textUnchanged": true
+              },
+              {
+                "from": "showPanel/9",
+                "to": "showPanel/10",
+                "textUnchanged": true
+              },
+              {
+                "from": "showPanel/11",
+                "to": "showPanel/12",
+                "textUnchanged": true
+              },
+              {
+                "from": "showPanel/12",
+                "to": "showPanel/13",
+                "textUnchanged": true
+              },
+              {
+                "from": "applyHomePane/0",
+                "to": "applyHomePane/0",
+                "textUnchanged": true
+              },
+              {
+                "from": "applyHomePane/1",
+                "to": "applyHomePane/1",
+                "textUnchanged": true
+              },
+              {
+                "from": "applyHomePane/2",
+                "to": "applyHomePane/2",
+                "textUnchanged": true
+              },
+              {
+                "from": "applyHomePane/3",
+                "to": "applyHomePane/3",
+                "textUnchanged": true
+              },
+              {
+                "from": "applyHomePane/4",
+                "to": "applyHomePane/4",
+                "textUnchanged": true
+              },
+              {
+                "from": "applyHomePane/5",
+                "to": "applyHomePane/5",
+                "textUnchanged": true
+              },
+              {
+                "from": "applyHomePane/7",
+                "to": "applyHomePane/7",
+                "textUnchanged": true
+              },
+              {
+                "from": "applyHomePane/8",
+                "to": "applyHomePane/8",
+                "textUnchanged": true
+              },
+              {
+                "from": "applyHomePane/9",
+                "to": "applyHomePane/9",
+                "textUnchanged": true
+              },
+              {
+                "from": "applyHomePane/10",
+                "to": "applyHomePane/10",
+                "textUnchanged": true
+              },
+              {
+                "from": "applyHomePane/11",
+                "to": "applyHomePane/11",
+                "textUnchanged": true
+              },
+              {
+                "from": "applyHomePane/12",
+                "to": "applyHomePane/12",
+                "textUnchanged": true
+              },
+              {
+                "from": "applyHomePane/13",
+                "to": "applyHomePane/13",
+                "textUnchanged": true
+              },
+              {
+                "from": "applyHomePane/14",
+                "to": "applyHomePane/14",
+                "textUnchanged": true
+              },
+              {
+                "from": "applyHomePane/15",
+                "to": "applyHomePane/15",
+                "textUnchanged": true
+              },
+              {
+                "from": "applyHomePane/16",
+                "to": "applyHomePane/16",
+                "textUnchanged": true
+              },
+              {
+                "from": "showChannelView/2",
+                "to": "showChannelView/3",
+                "textUnchanged": true
+              },
+              {
+                "from": "showChannelView/3",
+                "to": "showChannelView/4",
+                "textUnchanged": true
+              },
+              {
+                "from": "showChannelView/6",
+                "to": "showChannelView/7",
+                "textUnchanged": true
+              },
+              {
+                "from": "showChannelView/7",
+                "to": "showChannelView/8",
+                "textUnchanged": true
+              },
+              {
+                "from": "showChannelView/9",
+                "to": "showChannelView/10",
+                "textUnchanged": true
+              },
+              {
+                "from": "showChannelView/10",
+                "to": "showChannelView/11",
+                "textUnchanged": true
+              },
+              {
+                "from": "activateWorkspaceView/4",
+                "to": "activateWorkspaceView/4",
+                "textUnchanged": true
+              },
+              {
+                "from": "activateWorkspaceView/5",
+                "to": "activateWorkspaceView/5",
+                "textUnchanged": true
+              },
+              {
+                "from": "activateWorkspaceView/6",
+                "to": "activateWorkspaceView/6",
+                "textUnchanged": true
+              },
+              {
+                "from": "activateWorkspaceView/7",
+                "to": "activateWorkspaceView/7",
+                "textUnchanged": true
+              },
+              {
+                "from": "activateWorkspaceView/9",
+                "to": "activateWorkspaceView/9",
+                "textUnchanged": false
+              },
+              {
+                "from": "renderHouseholdAccess/0",
+                "to": "renderHouseholdAccess/0",
+                "textUnchanged": true
+              },
+              {
+                "from": "renderHouseholdAccess/1",
+                "to": "renderHouseholdAccess/1",
+                "textUnchanged": true
+              },
+              {
+                "from": "renderHouseholdAccess/2",
+                "to": "renderHouseholdAccess/2",
+                "textUnchanged": true
+              },
+              {
+                "from": "renderHouseholdAccess/5",
+                "to": "renderHouseholdAccess/5",
+                "textUnchanged": true
+              },
+              {
+                "from": "renderHouseholdAccess/6",
+                "to": "renderHouseholdAccess/6",
+                "textUnchanged": true
+              },
+              {
+                "from": "renderHouseholdAccess/9",
+                "to": "renderHouseholdAccess/9",
+                "textUnchanged": true
+              },
+              {
+                "from": "renderAgentApprovals/0",
+                "to": "renderAgentApprovals/0",
+                "textUnchanged": true
+              },
+              {
+                "from": "renderAgentApprovals/1",
+                "to": "renderAgentApprovals/1",
+                "textUnchanged": true
+              },
+              {
+                "from": "renderAgentApprovals/2",
+                "to": "renderAgentApprovals/2",
+                "textUnchanged": true
+              },
+              {
+                "from": "renderAgentApprovals/3",
+                "to": "renderAgentApprovals/3",
+                "textUnchanged": true
+              },
+              {
+                "from": "renderAgentApprovals/4",
+                "to": "renderAgentApprovals/4",
+                "textUnchanged": true
+              },
+              {
+                "from": "syncListsChrome",
+                "to": "syncListsChrome",
+                "textUnchanged": true
+              },
+              {
+                "from": "accountMenuState",
+                "to": "accountMenuState",
+                "textUnchanged": true
+              },
+              {
+                "from": "composer-hidden",
+                "to": "composer-hidden",
+                "textUnchanged": true
+              },
+              {
+                "from": "objects/0",
+                "to": "objects/0",
+                "textUnchanged": true
+              },
+              {
+                "from": "objects/1",
+                "to": "objects/1",
+                "textUnchanged": true
+              },
+              {
+                "from": "objects/2",
+                "to": "objects/2",
+                "textUnchanged": true
+              },
+              {
+                "from": "objects/3",
+                "to": "objects/3",
+                "textUnchanged": true
+              },
+              {
+                "from": "objects/4",
+                "to": "objects/4",
+                "textUnchanged": true
+              }
+            ],
+            "ownerDeclarationDeltas": [
+              "showPanel",
+              "showChannelView",
+              "activateWorkspaceView",
+              "renderHouseholdAccess"
+            ],
+            "excludedDynamicImports": [
+              {
+                "path": "site/src/lib/h0-link-join-flag.ts",
+                "specifier": "./h0-link-join",
+                "reason": "Conditional link-join loader is not invoked by native SSR/normal presentation; original client scripts never run. Complete tracked source inventory remains before/after bound."
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "referenceEvidence": {
+    "reviews/LISTS-D1-CAPTURE-HELPER-ROOT-ADOPTION.json": {
+      "bytes": 3040,
+      "sha256": "e173ab6707f3387630bd3b62ffe730374f520561c92170e4c6d85e495701bdd1"
+    },
+    "reviews/LISTS-PR181-IMAGE-ROOT-ADOPTION.json": {
+      "bytes": 6944,
+      "sha256": "cf469a77a278d9b088257e344bba0c81873a13c9c2174e74ee2e3d8bfdfbc388"
+    },
+    "candidate/lists-review-images-job-v2/generated/lists-review-images-01/ROOT-READBACK.json": {
+      "bytes": 6218,
+      "sha256": "f62ba5aae234b69a62ae39e88b7ffac071787c904cd6b523d9cd306ad5e795c6"
+    },
+    "evidence/unit/lists-allow-vm-01/result.json": {
+      "bytes": 8037,
+      "sha256": "2c5693d363599daaac9802af2cce533faf58d3b67ac3d823541f59312cd69516"
+    }
+  }
+}

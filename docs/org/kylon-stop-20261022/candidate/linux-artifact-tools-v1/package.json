@@ -1,0 +1,9 @@
+{
+  "name": "kylon-artifact-proof-tools",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@axe-core/playwright": "4.14.0",
+    "playwright-core": "1.64.1"
+  }
+}

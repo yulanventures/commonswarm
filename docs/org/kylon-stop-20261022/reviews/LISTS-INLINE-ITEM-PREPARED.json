@@ -1,0 +1,45 @@
+{
+  "utc": "2026-10-22T20:31:53.140746+00:00",
+  "head": "3a45f7f67ff8fb50a17de4a2ce2d7cafd20e20fb",
+  "tree": "601c359061d8d3f9de9882e6391c9dbde965346c",
+  "base": "81b5fb71f20030cf71b7927964a2c08c425a1ab3",
+  "baseTree": "bebce6110da28f6e33438223b3768d9b7640fc6a",
+  "originalUnitBase": "6dc1575d7606384c93f1184b782ff08eb34329ce",
+  "preRebaseCommit": "38b95d64553791f13a1288a15322a44cacd35aef",
+  "branch": "design/kylon-lists-inline-items-20261022",
+  "paths": [
+    "site/src/lib/household-objects-view.ts",
+    "site/src/styles/kylon-lists.css",
+    "site/tests/household-objects-view.test.ts"
+  ],
+  "candidateFiles": {
+    "site/src/lib/household-objects-view.ts": {
+      "bytes": 32292,
+      "sha256": "2e1f03e8eef60feb0c86332e6290b10f127970ac379c9a79bd6f4a6af92e25cb",
+      "blob": "8c12d10252e4cf1a242e8bdb5040f59ef30e9410"
+    },
+    "site/src/styles/kylon-lists.css": {
+      "bytes": 12768,
+      "sha256": "65f1b7b5efb8dbb47624d64d9c45ad86824d50684cbd2fe3c72508fd85676d53",
+      "blob": "9cca8819ffa720a62a37eaf874ef24397dc0b129"
+    },
+    "site/tests/household-objects-view.test.ts": {
+      "bytes": 28251,
+      "sha256": "8255dbcc908d82879ebd317ce0138da0f2bdee2689a1a097c8d371df5ed5d21f",
+      "blob": "c0cec8bf819f96487e4c5d3937347b1cbc534965"
+    }
+  },
+  "allThreeValidatedSourceBlobsPreservedThroughRebase": true,
+  "allOtherCurrentMainBlobsPreserved": true,
+  "ownership": "reviews/LISTS-INLINE-ITEM-OWNER-CONTRACT.json",
+  "unitProof": "evidence/unit/lists-inline-ssr-01/result.json",
+  "unitScope": "One existing real compiledSSR owner: oldmarkup intendedFAIL, oldblanklabel intendedFAIL, repairedPASS; nineactualcontroller scenarios. No browser/network/build/fullsuite. Rebaseonly parent; exact3testedblobs unchanged.",
+  "makers": [
+    "gpt-6.1-sol via codex-worker0.159.0 sourceproposal",
+    "gpt-6.1-sol via codex-worker0.159.0 existingSSRtest/fallback"
+  ],
+  "state": "PUSHED isolatednextslice; actual normal images/crossfamily review/siteCI pending; NOT partof183release",
+  "limits": "No numeric score, runtimegeometry/keyboard/CI/live/tool/parity change claim.",
+  "pr": 184,
+  "url": "https://github.com/yulanventures/commonswarm/pull/184"
+}

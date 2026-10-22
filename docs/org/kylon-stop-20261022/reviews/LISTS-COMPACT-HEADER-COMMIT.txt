@@ -1,0 +1,13 @@
+Compact Lists workspace facts into wrapping rows
+
+Keep every audience, role and capability sentence visible while grouping
+workspace identity and metadata. Preserve source order, native headings,
+all existing actions and the prior inline list control slice.
+
+Agent-Name: KylonDesigner
+Agent-Model: unknown
+Agent-Family: openai
+Agent-Tool: codex
+Agent-Model-Source: none
+Co-Authored-By: Yulan Bot <yulanbot@gmail.com>
+AI-Author: gpt/unknown via codex 0.159.0

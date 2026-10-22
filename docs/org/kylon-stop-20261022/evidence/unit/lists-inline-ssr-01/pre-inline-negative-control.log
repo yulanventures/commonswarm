@@ -1,0 +1,28 @@
+✖ all three Astro components compile and server-render escaped, accessible reader/editor states without a browser (30.063458ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 0
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 540.575666
+
+✖ failing tests:
+
+test at tests/household-objects-view.test.ts:5:10815
+✖ all three Astro components compile and server-render escaped, accessible reader/editor states without a browser (30.063458ms)
+  AssertionError [ERR_ASSERTION]: editable
+  
+  0 !== 2
+  
+      at TestContext.<anonymous> (/Users/yulanbot/work/kylon-redesign/app-lists-inline-items-20261022/site/tests/household-objects-view.test.ts:384:16)
+      at async Test.run (node:internal/test_runner/test:1404:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 0,
+    expected: 2,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

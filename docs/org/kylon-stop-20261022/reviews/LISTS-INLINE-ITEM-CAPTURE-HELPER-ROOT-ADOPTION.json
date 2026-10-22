@@ -1,0 +1,90 @@
+{
+  "utc": "2026-10-22T20:36:38.055Z",
+  "state": "ROOT SOURCE ADOPTED / UNRUN",
+  "pr": 184,
+  "head": "3a45f7f67ff8fb50a17de4a2ce2d7cafd20e20fb",
+  "tree": "601c359061d8d3f9de9882e6391c9dbde965346c",
+  "base": "81b5fb71f20030cf71b7927964a2c08c425a1ab3",
+  "sourceInputs": 174,
+  "changedPaths": 3,
+  "runtimeModules": 23,
+  "sourceASTDeclarations": {
+    "renderHomeShell": {
+      "bytes": 3555,
+      "sha256": "6dd7be8255c10f68b5578570cd58eb01357ec4b00a14d0db9764e164ecc8a326"
+    },
+    "showPanel": {
+      "bytes": 2018,
+      "sha256": "4a34ba62ca5050b8438537e80dfa310d92f0c57c4e3156d5147c6fb6ee4db185"
+    },
+    "applyHomePane": {
+      "bytes": 2041,
+      "sha256": "3ecd20b8a619218466eaecdb7ad6d8f1ed7a6df0ca7f4dff2409e0750a2f3b59"
+    },
+    "showChannelView": {
+      "bytes": 1889,
+      "sha256": "94ba612e667ba3d539c9b318a4243fb5c10a72a5560235e301e5fcb3e856695e"
+    },
+    "activateWorkspaceView": {
+      "bytes": 3596,
+      "sha256": "95ee9c509fc0680ec920e29ac5225cc2d976a29be2f5feb2a4b45667bc791fd5"
+    },
+    "renderHouseholdAccess": {
+      "bytes": 2602,
+      "sha256": "121ddea850018bded67ababe78edda14515a7f51fd469470caf56a4f55c26e45"
+    },
+    "renderAgentApprovals": {
+      "bytes": 4180,
+      "sha256": "9430a2eedc30c1386896ae3dd61add94ebd2a0eb45c83fc2fc73378e52e3e0f0"
+    },
+    "syncListsChrome": {
+      "bytes": 623,
+      "sha256": "8898619f52629b564c48784993522d726c03a3adee749f9da3b07a25d7fe7418"
+    },
+    "accountMenuState": {
+      "bytes": 731,
+      "sha256": "d2d39df2afdf482f4a13839c357181de8f64d1fa11b0d9013fdb131dddf1ec88"
+    }
+  },
+  "all53Utf16Utf8RangesVerified": true,
+  "actualExercisedLifecycleReference": "v4 capturePASS217errors0exactcleanup; no algorithm change",
+  "sourceOnlyTemplateUnchanged": true,
+  "files": {
+    "run.py": {
+      "bytes": 15028,
+      "sha256": "2a8d6416b5d194b59cae842f76f1a6babe7b291bbea90acfca6ad09380172066"
+    },
+    "job.sh": {
+      "bytes": 3426,
+      "sha256": "6ec651f87102d8956f3c989d05c7fb69ccbdad36b684c5b4c93eaefdc8c12a43"
+    },
+    "camera.mjs": {
+      "bytes": 36360,
+      "sha256": "dde9fbe6088863bd81a24b2fac0568a4d7f175cca6dbc4d275fd66374ed3eaf8"
+    },
+    "native-owner.mjs": {
+      "bytes": 6550,
+      "sha256": "b0e111b89e8a3d014b237845be5624aba4a2270874ee6bf52e81c0ecbb47aa23"
+    },
+    "fixture-entry.ts": {
+      "bytes": 9116,
+      "sha256": "e5397f7f0dad7ea50143067a73baf9a763c3403cbca4295bf1feeeeb71c1be69"
+    },
+    "README.md": {
+      "bytes": 2660,
+      "sha256": "3d1fc8e01eecc1cac93cf69f9980f785d06afd19a7b0eed2eac1183ecfa07378"
+    },
+    "source-pins.json": {
+      "bytes": 73382,
+      "sha256": "1b5c09488fbb9dc5708648f28b0f64b779ce7c9ae48642063112dce733bfbc2b"
+    }
+  },
+  "checks": [
+    "Git174facts/3changedpaths",
+    "53range/hash bindings",
+    "actualTS AST9declaration facts/fullscript parse",
+    "PythonAST/JSON/sh-n/node--check",
+    "runner/camera reverse pin/count normalization"
+  ],
+  "limits": "Static/source metadata parsing only; no generator/application/browser/SSH/install/build/test runtime for capture adaptation. Actual images/crossfamily/CI pending."
+}

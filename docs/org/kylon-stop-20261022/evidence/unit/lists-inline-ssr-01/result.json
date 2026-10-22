@@ -1,0 +1,34 @@
+{
+  "utc": "2026-10-22T20:24:01.143671+00:00",
+  "base": "6dc1575d7606384c93f1184b782ff08eb34329ce",
+  "scope": "One focused existing SSR owner; actual Astro component compilation/render, actual controller state, no browser/network/build/install/fullsuite",
+  "rows": [
+    {
+      "name": "pre-inline-negative-control",
+      "startedUtc": "2026-10-22T20:24:00.008741+00:00",
+      "endedUtc": "2026-10-22T20:24:00.589484+00:00",
+      "exitCode": 1,
+      "logSha256": "cfb5ac36189267d1a0dacf7731cf75ea70a6214b124b8ab6020632cd63e95b02",
+      "bytes": 950
+    },
+    {
+      "name": "blank-name-negative-control",
+      "startedUtc": "2026-10-22T20:24:00.589673+00:00",
+      "endedUtc": "2026-10-22T20:24:00.858603+00:00",
+      "exitCode": 1,
+      "logSha256": "b85bd506d5609158aff05203cc7ee695582e16a8616390333c97d88206a52f1c",
+      "bytes": 1000
+    },
+    {
+      "name": "repaired-positive-control",
+      "startedUtc": "2026-10-22T20:24:00.861116+00:00",
+      "endedUtc": "2026-10-22T20:24:01.143423+00:00",
+      "exitCode": 0,
+      "logSha256": "2b41ecd03edb796bb2ad0f9daae4e263930ac93a2b905be7bab51f51f07c8fb3",
+      "bytes": 245
+    }
+  ],
+  "error": null,
+  "sourceRestoredSha256": "2e1f03e8eef60feb0c86332e6290b10f127970ac379c9a79bd6f4a6af92e25cb",
+  "state": "PASS actual old-inline red/old-empty-name red/repairedgreen"
+}

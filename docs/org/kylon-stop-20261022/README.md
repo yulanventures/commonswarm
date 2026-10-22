@@ -1,0 +1,3 @@
+STOP handoff archive; do not execute or ship.
+
+Tom ordered STOP on2026-10-22. Source drafts184/185 are pushed separately and remain unreviewed/unqualified. This WIP branch is backup documentation only and must not merge or deploy. STOP-STATE-20261022.md is the concise handoff. ARCHIVE-MANIFEST.json binds exact source/helper/note bytes copied from the local Kylon workspace; its relative paths mirror that workspace, not runnable repository paths. Original private study images and historical runtime evidence remain local and were deliberately not published. No new CI, maker, review, capture or production work was started. Resume only on explicit instruction, then verify current Git/queue/permissions/pins before using any prepared script.

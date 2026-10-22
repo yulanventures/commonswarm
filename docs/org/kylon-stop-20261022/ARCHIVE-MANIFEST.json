@@ -1,0 +1,209 @@
+{
+  "utc": "2026-10-22T21:17:31.569754+00:00",
+  "branch": "wip/kylon-stop-20261022",
+  "files": {
+    "AUDIT-COVERAGE-CURRENT.md": {
+      "bytes": 5443,
+      "sha256": "ae0796307a0e8e92ec0f090a8e2b255684ddd6c0fb1cf9d1c5dfd27bcd132534"
+    },
+    "CURRENT-RELEASE-STATE.md": {
+      "bytes": 1052,
+      "sha256": "a708461762c8de7cfa8eff2a166d9a5355faea5a27d40e9f3c024ac7209e4358"
+    },
+    "DESIGN-SYSTEM.md": {
+      "bytes": 29970,
+      "sha256": "8aa184e04dfb89dfc866a31bc0730cefaf8fbc9d9fa6f48f7e18c0b2764f713c"
+    },
+    "STOP-STATE-20261022.md": {
+      "bytes": 2407,
+      "sha256": "454d6217455d7f195094eb007fb63b0efef42f06935fa471c2db5f7179ee08eb"
+    },
+    "VISIBLE-GAPS-CURRENT.md": {
+      "bytes": 2021,
+      "sha256": "bf3266e5a02b32168e103cf854d5661571d76a776ab720151e22ec8a64140a33"
+    },
+    "candidate/linux-artifact-tools-v1/package-lock.json": {
+      "bytes": 1598,
+      "sha256": "1eded2880b70774af425e63fdeed805feaa3ff13d9732b60a12bec4f100593e3"
+    },
+    "candidate/linux-artifact-tools-v1/package.json": {
+      "bytes": 179,
+      "sha256": "37dc2985db4eb6eccb6a70f7c8501811c6390f18b47f1da3a873ce255ce67e12"
+    },
+    "candidate/lists-compact-header-review-images-job-v1/README.md": {
+      "bytes": 1692,
+      "sha256": "e3985af12202af2b15e2a0db4e1901cbbb557a45e1ed0e82caaa3f1452e7f964"
+    },
+    "candidate/lists-compact-header-review-images-job-v1/camera.mjs": {
+      "bytes": 36360,
+      "sha256": "2b890a538af161a431dfa694245dc89312d9b90141ddef3023575b07c1ed3a6f"
+    },
+    "candidate/lists-compact-header-review-images-job-v1/fixture-entry.ts": {
+      "bytes": 9116,
+      "sha256": "e5397f7f0dad7ea50143067a73baf9a763c3403cbca4295bf1feeeeb71c1be69"
+    },
+    "candidate/lists-compact-header-review-images-job-v1/job.sh": {
+      "bytes": 3426,
+      "sha256": "c93ff7c1995abf94d1c7329936dd40c26e0c7879ddbd951972df36cd0d9d8ded"
+    },
+    "candidate/lists-compact-header-review-images-job-v1/native-owner.mjs": {
+      "bytes": 6550,
+      "sha256": "b0e111b89e8a3d014b237845be5624aba4a2270874ee6bf52e81c0ecbb47aa23"
+    },
+    "candidate/lists-compact-header-review-images-job-v1/run.py": {
+      "bytes": 15028,
+      "sha256": "957ae90b5cd55d18afc1999e6369a9b9d0d41dcf8c210f3d089bf54c1484b2dc"
+    },
+    "candidate/lists-compact-header-review-images-job-v1/source-pins.json": {
+      "bytes": 75184,
+      "sha256": "83ae998828ee7d2f62a3fcd6a327f9e446dcefc80db322ab3be212b0b73dd8ef"
+    },
+    "candidate/lists-inline-review-images-job-v1/README.md": {
+      "bytes": 2660,
+      "sha256": "3d1fc8e01eecc1cac93cf69f9980f785d06afd19a7b0eed2eac1183ecfa07378"
+    },
+    "candidate/lists-inline-review-images-job-v1/camera.mjs": {
+      "bytes": 36360,
+      "sha256": "dde9fbe6088863bd81a24b2fac0568a4d7f175cca6dbc4d275fd66374ed3eaf8"
+    },
+    "candidate/lists-inline-review-images-job-v1/fixture-entry.ts": {
+      "bytes": 9116,
+      "sha256": "e5397f7f0dad7ea50143067a73baf9a763c3403cbca4295bf1feeeeb71c1be69"
+    },
+    "candidate/lists-inline-review-images-job-v1/job.sh": {
+      "bytes": 3426,
+      "sha256": "6ec651f87102d8956f3c989d05c7fb69ccbdad36b684c5b4c93eaefdc8c12a43"
+    },
+    "candidate/lists-inline-review-images-job-v1/native-owner.mjs": {
+      "bytes": 6550,
+      "sha256": "b0e111b89e8a3d014b237845be5624aba4a2270874ee6bf52e81c0ecbb47aa23"
+    },
+    "candidate/lists-inline-review-images-job-v1/run.py": {
+      "bytes": 15028,
+      "sha256": "2a8d6416b5d194b59cae842f76f1a6babe7b291bbea90acfca6ad09380172066"
+    },
+    "candidate/lists-inline-review-images-job-v1/source-pins.json": {
+      "bytes": 73382,
+      "sha256": "1b5c09488fbb9dc5708648f28b0f64b779ce7c9ae48642063112dce733bfbc2b"
+    },
+    "evidence/unit/lists-inline-ssr-01/blank-name-negative-control.log": {
+      "bytes": 1000,
+      "sha256": "b85bd506d5609158aff05203cc7ee695582e16a8616390333c97d88206a52f1c"
+    },
+    "evidence/unit/lists-inline-ssr-01/pre-inline-negative-control.log": {
+      "bytes": 950,
+      "sha256": "cfb5ac36189267d1a0dacf7731cf75ea70a6214b124b8ab6020632cd63e95b02"
+    },
+    "evidence/unit/lists-inline-ssr-01/repaired-positive-control.log": {
+      "bytes": 245,
+      "sha256": "2b41ecd03edb796bb2ad0f9daae4e263930ac93a2b905be7bab51f51f07c8fb3"
+    },
+    "evidence/unit/lists-inline-ssr-01/result.json": {
+      "bytes": 1344,
+      "sha256": "bb4abd5783bbca190c24b685c1195e7aa98d28fc4d4c0f0df4de86f4b82c5165"
+    },
+    "reviews/ACTIVE-NEXT-WORK.json": {
+      "bytes": 3194,
+      "sha256": "53eb74c354a386163cb5454e5bc2d1f546f616a200f0f35920ac0d7111ff966d"
+    },
+    "reviews/LISTS-COMPACT-HEADER-CANDIDATE.patch": {
+      "bytes": 3856,
+      "sha256": "94ebb35394aa218347fc3f7f158a9349da5a735ef468b98f8138d14dfb0a6016"
+    },
+    "reviews/LISTS-COMPACT-HEADER-CAPTURE-HELPER-PREPARED.json": {
+      "bytes": 1721,
+      "sha256": "517664c0e1c6825940dc445c6216fe7097b408d74f0830c65ee8e22607dddc92"
+    },
+    "reviews/LISTS-COMPACT-HEADER-COMMIT.txt": {
+      "bytes": 458,
+      "sha256": "29dfcb518b3a65aa49b193225ff0ef572dbda394f90929ae17f410f686566963"
+    },
+    "reviews/LISTS-COMPACT-HEADER-PR-BODY.md": {
+      "bytes": 1036,
+      "sha256": "59d73cdcc2042a1caf0b1c50838eb378c153e76da870acae333de803e42779cd"
+    },
+    "reviews/LISTS-COMPACT-HEADER-PREPARED.json": {
+      "bytes": 1462,
+      "sha256": "5664c7abead02eeea4aca6853c3eb5897a7612118ffe22d654a0914489cbab19"
+    },
+    "reviews/LISTS-COMPACT-HEADER-PROPOSAL.md": {
+      "bytes": 3877,
+      "sha256": "32c9413af392d1250734316b6424dcda5c36b595349e581774607564b0fbb33e"
+    },
+    "reviews/LISTS-COMPACT-HEADER-PROPOSAL.patch": {
+      "bytes": 3852,
+      "sha256": "cdd98467204bf6c9a6e193e0417e09c917c6b4b4618b84a0ca1a05c04dcc71ba"
+    },
+    "reviews/LISTS-COMPACT-HEADER-SOURCE-ROOT-ADOPTION.json": {
+      "bytes": 994,
+      "sha256": "181e2a88a3de246990372ff875a96defb66db8f73dc026db746c9d1792ffe0e6"
+    },
+    "reviews/LISTS-INLINE-ITEM-CANDIDATE.patch": {
+      "bytes": 13921,
+      "sha256": "03b063e37a78251c8920b088ae5357c7285a24da256a12cb5b42c687347909bb"
+    },
+    "reviews/LISTS-INLINE-ITEM-CAPTURE-HELPER-ROOT-ADOPTION.json": {
+      "bytes": 3120,
+      "sha256": "4f01476fa60e6f69146daf5c80706269e2096e9d7b027253eea2dd767727914e"
+    },
+    "reviews/LISTS-INLINE-ITEM-COMMIT.txt": {
+      "bytes": 536,
+      "sha256": "d84e2658eaf43b7bbb2deee0c910213e06770e5313ba6ecbc0bb49782e85b902"
+    },
+    "reviews/LISTS-INLINE-ITEM-OWNER-CONTRACT.json": {
+      "bytes": 1066,
+      "sha256": "fb6a7817710a52507ed803189b12ccbdffa252e83557565f54adb2ded3fc789d"
+    },
+    "reviews/LISTS-INLINE-ITEM-PR-BODY.md": {
+      "bytes": 1019,
+      "sha256": "22a0c85c384a5df8304567c7c69e6c96f2aaacc8c5de4244f61c2a7e1a4d36f8"
+    },
+    "reviews/LISTS-INLINE-ITEM-PREPARED.json": {
+      "bytes": 2186,
+      "sha256": "c18037266c8fc1df30fd7db42738985810b192784e1e3593c9cbcbbb6c79c342"
+    },
+    "reviews/LISTS-INLINE-ITEM-PROPOSAL-ROOT-READBACK.json": {
+      "bytes": 1409,
+      "sha256": "bb6523f6eb46bc4f0f57fb0924c055e6a086df2dae5f0d04b3458cb3cd48261f"
+    },
+    "reviews/LISTS-INLINE-ITEM-SOURCE-PROPOSAL-TASK.md": {
+      "bytes": 3771,
+      "sha256": "20e33e0bd45d0312314632ae1b9edaa491c3a90281c08f60dff5849ad74bf14b"
+    },
+    "reviews/LISTS-INLINE-ITEM-TEST-ADAPT-MAKER-TASK.md": {
+      "bytes": 4146,
+      "sha256": "1dee1bb50da14e1d08d81d48c69b888b006a5567298499d74b9e125fc8745fe8"
+    },
+    "reviews/LISTS-INLINE-ITEM-TEST-MAKER.json": {
+      "bytes": 691,
+      "sha256": "a2ba350cc508e5c4a7e709b439d5158e4e1e73a57b90f805278eea031b33cdfc"
+    },
+    "reviews/LISTS-INLINE-ITEM-TEST-PROPOSAL.md": {
+      "bytes": 11747,
+      "sha256": "f2b59fbcd968998cf58d29abb6896d883fc0926b940b9345182b17134e04170c"
+    },
+    "reviews/LISTS-NEXT-GAPS-SOURCE-STUDY.md": {
+      "bytes": 5289,
+      "sha256": "0e920bafb0b629b9bc423f6284d7e822f06ed35f37a7a149100a6f4116f80d5e"
+    },
+    "reviews/LISTS-PR184-SOURCE-IMAGE-CRITIC-TASK.md": {
+      "bytes": 5900,
+      "sha256": "6555571214864a82397cb8e748bb67b00d895ba0284f6bc0ab5b8d4704aad04e"
+    },
+    "reviews/PR183-LIVE-RECEIPT.json": {
+      "bytes": 853,
+      "sha256": "354cac93c4be58ee951971cf7590630763b2d4e0d4085c1f033374405dbd4358"
+    },
+    "reviews/collect-pr184-images.py": {
+      "bytes": 4872,
+      "sha256": "4f0fa754c7e012c126bda6546c8f1adf3f8811be80f969d244dd044fb4ed68f8"
+    },
+    "reviews/run-pr184-canonical-site-ci.py": {
+      "bytes": 3386,
+      "sha256": "4f9c3ddcb7465d5d7ec71f9724c05c5f0163ddeab4af8f6245e4746c30b49aed"
+    }
+  },
+  "count": 50,
+  "totalBytes": 424449,
+  "scope": "Owned current source/helper/handoff text and three small synthetic unit TAP regression receipts only. No private study images, customer content, profiles, credentials, node_modules, build output, raw access logs or browser/server runtime logs."
+}

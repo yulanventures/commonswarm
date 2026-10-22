@@ -1,0 +1,14 @@
+{
+  "utc": "2026-10-22T20:41:07.006600+00:00",
+  "state": "LIVE",
+  "pr": 183,
+  "main": "81b5fb71f20030cf71b7927964a2c08c425a1ab3",
+  "testedSource": "84fad586f4cf1d15067d5f0abf12fd9d86c4d15e",
+  "tree": "bebce6110da28f6e33438223b3768d9b7640fc6a",
+  "authority": "HezLead direct message: Lists PR183 LIVE main81b5fb71 at~20:39Z, baseline273, assets200, rollbackPR182. CS inbox078171cd corroborates packet6ed8b054 consumed/stage+deploy+smokePASS/BOXreleased.",
+  "baselineAssets": 273,
+  "rollback": "PR182; actual deployment retained by release owner",
+  "releasePacket": "reviews/PR183-RELEASE-READY-PACKET.json",
+  "releaseNote": "Lists UI/copy refresh only; no new agent tools; existing MCP/CLI gaps unchanged; no parity claim.",
+  "limits": "Operator LIVE receipt; no new signed-in Chrome capture claimed. Existing E1-E4 and D1 remain CS-owned."
+}

@@ -1,0 +1,21 @@
+{
+  "utc": "2026-10-22T19:53:52.950890+00:00",
+  "state": "MAKER DONE0; root full report/patch read; NOT adopted/reviewed/CI/ship",
+  "baseline": "bb7dd84aa699602ff1380fcedea0b60932815f13",
+  "scope": "Two source-only files in isolated candidate; no app/branch mutation",
+  "report": "/Users/yulanbot/work/kylon-critic-replies/lists-inline-item-source-proposal-01.md",
+  "reportSha256": "9127c058befd9a76a94bd1f1ca2ec3a0bc376d8b877b95684d20307558de8d7a",
+  "patch": "/Users/yulanbot/work/kylon-redesign/candidate/lists-inline-item-proposal-v1/INLINE-ITEM.patch",
+  "patchSha256": "79e8700aa24d60de95a6937fe3b5c90b07a22d71b2c9ad1a0797884ba35d3c22",
+  "netSourceLines": 10,
+  "proposedUi": "Inline44px checkbox-role controls next to ordered list items; existing toggle intents unchanged",
+  "rootFollowupsBeforeAdoption": [
+    "Read full actual renderer/test owner to judge caller-specific render semantics",
+    "Ensure empty allowed item text still has a useful nonempty accessible name",
+    "CS ownership contract currently authorized selected ARIA only: agree expanded inline render scope before shared app changes",
+    "Adapt one existing meaningful SSR owner case and demonstrate intended baseline failure; no production test seams",
+    "One cross-family review and changed-area CI; no scores inferred from source"
+  ],
+  "final183FrozenUntouched": true,
+  "ownedPathsUnchangedAcrossFinal183": true
+}

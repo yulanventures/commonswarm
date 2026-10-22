@@ -1,0 +1,47 @@
+{
+  "utc": "2026-10-22T20:54:26.854697+00:00",
+  "head": "9ed6cda1796a7124df805e392ee8386412d2c9c2",
+  "tree": "9fc23475f2384098df486c58484af9634ea69e5c",
+  "base": "3a45f7f67ff8fb50a17de4a2ce2d7cafd20e20fb",
+  "state": "SOURCE BINDINGS PREPARED/UNRUN; must rebind actual merged184 parent before runtime",
+  "sourceInputs": 174,
+  "changedPaths": 2,
+  "wholeDashboardByteIdenticalTo184": true,
+  "original53RangesNineDeclarationsTemplateUnchanged": true,
+  "changedSourceFiles": [
+    "site/src/lib/household-objects-view.ts",
+    "site/src/styles/kylon-lists.css"
+  ],
+  "staticSyntax": "PythonAST/JSON/sh-n/node--check PASS; no app/compiler/generator/browser/SSH/install/test/build runtime",
+  "files": {
+    "run.py": {
+      "bytes": 15028,
+      "sha256": "957ae90b5cd55d18afc1999e6369a9b9d0d41dcf8c210f3d089bf54c1484b2dc"
+    },
+    "source-pins.json": {
+      "bytes": 75184,
+      "sha256": "83ae998828ee7d2f62a3fcd6a327f9e446dcefc80db322ab3be212b0b73dd8ef"
+    },
+    "fixture-entry.ts": {
+      "bytes": 9116,
+      "sha256": "e5397f7f0dad7ea50143067a73baf9a763c3403cbca4295bf1feeeeb71c1be69"
+    },
+    "camera.mjs": {
+      "bytes": 36360,
+      "sha256": "2b890a538af161a431dfa694245dc89312d9b90141ddef3023575b07c1ed3a6f"
+    },
+    "README.md": {
+      "bytes": 1692,
+      "sha256": "e3985af12202af2b15e2a0db4e1901cbbb557a45e1ed0e82caaa3f1452e7f964"
+    },
+    "native-owner.mjs": {
+      "bytes": 6550,
+      "sha256": "b0e111b89e8a3d014b237845be5624aba4a2270874ee6bf52e81c0ecbb47aa23"
+    },
+    "job.sh": {
+      "bytes": 3426,
+      "sha256": "c93ff7c1995abf94d1c7329936dd40c26e0c7879ddbd951972df36cd0d9d8ded"
+    }
+  },
+  "limits": "No capture, visual score, critic or CI inference;184 goes first."
+}

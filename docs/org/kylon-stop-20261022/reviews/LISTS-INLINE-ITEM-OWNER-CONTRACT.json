@@ -1,0 +1,16 @@
+{
+  "utc": "2026-10-22T20:04:17.055332+00:00",
+  "owner": "KylonDesigner",
+  "base": "6dc1575d7606384c93f1184b782ff08eb34329ce",
+  "branch": "design/kylon-lists-inline-items-20261022",
+  "worktree": "/Users/yulanbot/work/kylon-redesign/app-lists-inline-items-20261022",
+  "scope": [
+    "site/src/lib/household-objects-view.ts",
+    "site/src/styles/kylon-lists.css",
+    "site/tests/household-objects-view.test.ts"
+  ],
+  "authority": "CommonSwarm Lead inboxe3c87808-7c05-41ee-a93e-4ec5a08ceabf: No active overlapping CS renderer/CSS writer; allowed isolated two presentation paths plus existing SSR owner test; frozen183 unchanged.",
+  "allowed": "Current editable-list markup/style only, same existing toggle actions and controller; meaningful existing SSR owner adaptation, accessible empty-name fallback.",
+  "excluded": "All controller/authority/backend/D1/permission/network/session/storage/CLI/MCP/package/migration/generated/source183 changes",
+  "state": "LIVE source-only maker; unpushed ownworktree kept; no test/browser/runtime/review/CI/score claim"
+}

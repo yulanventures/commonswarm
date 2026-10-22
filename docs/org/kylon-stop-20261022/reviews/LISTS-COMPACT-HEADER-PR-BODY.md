@@ -1,0 +1,5 @@
+Groups the existing workspace identity and audience/role facts into naturally wrapping rows, reducing repeated header height above Lists content. Every original sentence, value, heading, status and action remains visible in the same reading order. Type sizes remain unchanged.
+
+This draft stacks on PR184 so its diff contains only two presentation files: the renderer gains two noninteractive wrappers and scoped CSS supplies wrapping rows. It does not change the inline item controls, permissions, controllers, backend, agent tools or parity. It remains separate from PR184 and will be rebound to merged main before qualification.
+
+Source checks: removing exactly the two wrappers restores the entire original renderer byte for byte; removing only the two new scoped rules restores the stylesheet byte for byte. Diff whitespace and commit identity/trailer checks pass. No new tests for this reversible layout-only change. Actual desktop/phone images, one cross-family review and relevant CI are pending; no new score or runtime claim.

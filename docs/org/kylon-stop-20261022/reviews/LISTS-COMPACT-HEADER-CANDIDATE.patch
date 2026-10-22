@@ -1,0 +1,36 @@
+diff --git a/site/src/lib/household-objects-view.ts b/site/src/lib/household-objects-view.ts
+index 8c12d1025..11a35c0c1 100644
+--- a/site/src/lib/household-objects-view.ts
++++ b/site/src/lib/household-objects-view.ts
+@@ -176,10 +176,10 @@ export function renderHouseholdObjects(state: HouseholdObjectsState): string {
+   const content = state.opened_version?.content ?? object?.current.content ?? null;
+   const capabilities = HOUSEHOLD_CONTENT_OPERATIONS.filter((operation) => workspace.operations.includes(operation)
+     && (operation === 'read' || workspace.content_role === 'editor'));
+-  return `<header><p class="hh-eyebrow">Lists &amp; docs</p><h2>${esc(workspace.name)}</h2>
+-    <p>Shared with: ${esc(workspace.audience.join(', ') || 'the people in this workspace')}.</p>
++  return `<header><div class="hh-workspace-identity"><p class="hh-eyebrow">Lists &amp; docs</p><h2>${esc(workspace.name)}</h2></div>
++    <div class="hh-workspace-meta"><p>Shared with: ${esc(workspace.audience.join(', ') || 'the people in this workspace')}.</p>
+     <p>Content role: <strong>${esc(workspace.content_role === 'editor' ? 'Editor' : workspace.content_role === 'reader' ? 'Reader' : 'Not confirmed')}</strong>. You can ${esc(capabilities.length === 0 ? 'not open them yet'
+-      : capabilities.length === 1 ? 'read lists and docs' : 'read and change lists and docs')}.</p>
++      : capabilities.length === 1 ? 'read lists and docs' : 'read and change lists and docs')}.</p></div>
+     <p>Everyone here can read what is shared and its history. In /app you can check list items and edit docs; ask an agent to create a list or add items.</p></header>
+     <p role="status" aria-live="polite" aria-atomic="true" class="hh-status">${esc(state.notice)}</p>
+     <div class="hh-layout"><nav aria-label="Household objects">${workspace.objects.length ? `<ul>${workspace.objects.map((item) =>
+diff --git a/site/src/styles/kylon-lists.css b/site/src/styles/kylon-lists.css
+index 9cca8819f..e8a2b31a9 100644
+--- a/site/src/styles/kylon-lists.css
++++ b/site/src/styles/kylon-lists.css
+@@ -67,6 +67,13 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view button:is(.dashboard__
+ live-dashboard[data-kylon-shell] .dashboard__objects-view button:is(.dashboard__button--primary,[data-hh-action=save],[data-hh-action=reviewed-save]):hover:enabled { background: var(--accent-bright); border-color: var(--accent-bright); }
+ live-dashboard[data-kylon-shell] .dashboard__objects-view button:disabled { color: var(--k-shell-secondary); background: var(--k-shell-subtle); border-color: var(--k-shell-control); opacity: 1; cursor: default; }
+ live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects > header :is(p,.hh-eyebrow) { margin: 0 0 4px; color: var(--k-shell-secondary); font: 400 12px/1.55 var(--k-shell-font); letter-spacing: 0; text-transform: none; }
++/* Group existing header facts without changing their reading order or type. */
++live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects > header :is(.hh-workspace-identity,.hh-workspace-meta) {
++  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; min-inline-size: 0; margin-block-end: 4px;
++}
++live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects > header :is(.hh-workspace-identity,.hh-workspace-meta) > :is(p,h2) {
++  min-inline-size: 0; max-inline-size: 100%; margin: 0; overflow-wrap: anywhere;
++}
+ live-dashboard[data-kylon-shell] .dashboard__objects-view .hh-status { min-block-size: 0; padding-block: 8px; border-color: var(--k-shell-line); color: var(--k-shell-secondary); }
+ live-dashboard[data-kylon-shell] .dashboard__objects-view :is(nav,article,.hh-comparison > section) { min-inline-size: 0; overflow-wrap: anywhere; }
+ /* Keep the complete index as quiet navigation; selection and focus have separate cues. */

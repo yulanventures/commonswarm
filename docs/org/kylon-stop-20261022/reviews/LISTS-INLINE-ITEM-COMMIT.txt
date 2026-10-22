@@ -1,0 +1,15 @@
+Place list item check controls beside their text
+
+Keep ordered items readable and expose the existing toggle intent through
+one inline checkbox-role button, including a nonempty accessible fallback.
+Exercise actual compiled SSR markup at its existing owner boundary.
+
+Source and owner-test makers: gpt-6.1-sol via codex-worker 0.159.0.
+
+Agent-Name: KylonDesigner
+Agent-Model: unknown
+Agent-Family: openai
+Agent-Tool: codex
+Agent-Model-Source: none
+Co-Authored-By: Yulan Bot <yulanbot@gmail.com>
+AI-Author: gpt/unknown via codex 0.159.0
