@@ -311,11 +311,13 @@ export function renderCatchUp(doc: Document, vm: CatchUpVM, callbacks: CatchUpCa
     section.append(needsTitle);
     const list = node(doc, "div", "hm-catchup-needs-list");
     list.id = "hm-catchup-needs-list";
-    // The first item is the lime band; the rest are quieter rows under it (catchup.css).
+    // Keep the shared card intact; Catch up supplies the section label once.
     for (const [index, item] of visibleNeedsYou.entries()) {
       const entry = vm.sample
         ? needsYouPreview(doc, item)
         : needsYouCard(doc, item, (action, need) => callbacks.onNeedsYouAction(action, need));
+      const eyebrow = entry.querySelector(".hm-eyebrow, .hm-catchup-needs-eyebrow");
+      if (eyebrow) eyebrow.textContent = [item.workspace.name, item.when].filter(Boolean).join(" · ");
       entry.dataset.needsRank = index === 0 ? "first" : "more";
       list.append(entry);
     }
