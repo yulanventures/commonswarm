@@ -284,11 +284,8 @@ test("SA-local schema keeps both attachment foreign keys tenant-honest and rows 
       "signal_attachments_same_transaction",
     ]),
   );
-  const guards = await sql<{ definition: string }[]>`
-    SELECT pg_get_functiondef('swarm.require_new_signal_for_attachment()'::regprocedure)
-      AS definition
-  `;
-  assert.match(guards[0]?.definition ?? "", /signal\.xmin[\s\S]*pg_current_xact_id/);
+  // Savepoint creation and committed-parent denials are measured at the
+  // database boundary by tests/support/signal-savepoint-creation-guard.sql.
 });
 
 test("S4-1 size lie low: an object larger than its declaration is refused at commit", async () => {

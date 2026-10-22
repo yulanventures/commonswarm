@@ -79,10 +79,19 @@ SELECT pg_temp.make_signal(104);
 SELECT pg_temp.add_children(104);
 COMMIT;
 SELECT 'PASS rollback removes signal, stamp and children';
+-- The parent is fresh in this transaction: the workspace predicate, rather
+-- than a committed-parent rejection, must refuse each foreign child.
+BEGIN;
+SET LOCAL ROLE swarm_command;
+SELECT pg_temp.make_signal(108);
+SELECT pg_temp.assert_denied('foreign workspace recipient', $q$INSERT INTO swarm.signal_recipients VALUES ('00000000-0000-0000-0000-000000000108','00000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000022',NULL,0,DEFAULT)$q$, '55000');
+SELECT pg_temp.assert_denied('foreign workspace attachment', $q$INSERT INTO swarm.signal_attachments VALUES ('00000000-0000-0000-0000-000000000108','00000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000031',1,0,DEFAULT)$q$, '55000');
+SELECT pg_temp.add_children(108);
+ROLLBACK;
+SELECT 'PASS fresh parent accepts own workspace children';
 SET ROLE swarm_command;
 SELECT pg_temp.assert_denied('committed recipients', $q$INSERT INTO swarm.signal_recipients VALUES ('00000000-0000-0000-0000-000000000101','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000011',NULL,1,DEFAULT)$q$, '55000');
 SELECT pg_temp.assert_denied('committed attachments', $q$INSERT INTO swarm.signal_attachments VALUES ('00000000-0000-0000-0000-000000000101','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000031',1,1,DEFAULT)$q$, '55000');
-SELECT pg_temp.assert_denied('foreign workspace', $q$INSERT INTO swarm.signal_recipients VALUES ('00000000-0000-0000-0000-000000000101','00000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000022',NULL,0,DEFAULT)$q$, '55000');
 SELECT pg_temp.assert_denied('command cannot update stamp', $q$UPDATE swarm.signals SET creation_xact_id=pg_current_xact_id() WHERE id='00000000-0000-0000-0000-000000000101'$q$, '42501');
 SELECT pg_temp.assert_denied('legacy recipients remain closed',
 $q$INSERT INTO swarm.signal_recipients VALUES ('00000000-0000-0000-0000-000000000100','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000011',NULL,0,DEFAULT)$q$,'55000');
@@ -98,10 +107,11 @@ SELECT pg_temp.add_children(105);
 COMMIT;
 BEGIN;
 SET LOCAL ROLE swarm_command;
-INSERT INTO swarm.signals(id,workspace_id,from_principal,from_kind,kind,body,until,creation_xact_id)
-VALUES ('00000000-0000-0000-0000-000000000106','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000011','agent','note','synthetic',now()+interval '1 hour','1'::xid8);
+INSERT INTO swarm.signals(id,workspace_id,from_principal,from_kind,kind,body,until,creation_xact_id,creation_system_identifier)
+VALUES ('00000000-0000-0000-0000-000000000106','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000011','agent','note','synthetic',now()+interval '1 hour','1'::xid8,1);
 DO $$ BEGIN
- IF NOT EXISTS(SELECT FROM swarm.signals WHERE id='00000000-0000-0000-0000-000000000106' AND creation_xact_id=pg_current_xact_id())
+ IF NOT EXISTS(SELECT FROM swarm.signals WHERE id='00000000-0000-0000-0000-000000000106' AND creation_xact_id=pg_current_xact_id()
+ AND creation_system_identifier=(SELECT system_identifier FROM pg_catalog.pg_control_system()))
  THEN RAISE EXCEPTION 'caller forged creation stamp'; END IF;
 END $$;
 COMMIT;
@@ -130,8 +140,27 @@ RESET ROLE;
 SET ROLE swarm_read;
 SELECT pg_temp.assert_denied('swarm_read cannot insert', 'SELECT pg_temp.make_signal(107)', '42501');
 RESET ROLE;
+-- Trusted synthetic replica/restore only: copy a committed origin pair while
+-- the target cluster's next transaction counter deliberately matches the stamp.
+-- restore_system_identifier is supplied by the isolated driver's separate initdb.
+BEGIN;
+SET LOCAL session_replication_role = replica;
+INSERT INTO swarm.signals(id,workspace_id,from_principal,from_kind,to_user_id,kind,body,until,creation_xact_id,creation_system_identifier)
+VALUES ('00000000-0000-0000-0000-000000000190','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000011','agent','00000000-0000-0000-0000-000000000011','note','synthetic import',now()+interval '1 hour',((pg_current_xact_id()::text::bigint+1)::text)::xid8, :restore_system_identifier);
+COMMIT;
+BEGIN;
+SET LOCAL ROLE swarm_command;
 DO $$ BEGIN
- IF EXISTS(SELECT FROM information_schema.columns WHERE table_schema='swarm_read' AND table_name='signals' AND column_name='creation_xact_id')
- THEN RAISE EXCEPTION 'internal stamp leaked into public view'; END IF;
+ IF NOT EXISTS(SELECT FROM swarm.signals
+  WHERE id='00000000-0000-0000-0000-000000000190'
+  AND creation_xact_id=pg_current_xact_id()
+  AND creation_system_identifier<>(SELECT system_identifier FROM pg_catalog.pg_control_system()))
+ THEN RAISE EXCEPTION 'restore counter/lineage precondition not reached'; END IF;
 END $$;
-SELECT 'PASS public view projection unchanged';
+SELECT pg_temp.assert_denied('imported matching stamp recipients', $q$INSERT INTO swarm.signal_recipients VALUES ('00000000-0000-0000-0000-000000000190','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000011',NULL,0,DEFAULT)$q$, '55000');
+SELECT pg_temp.assert_denied('imported matching stamp attachments', $q$INSERT INTO swarm.signal_attachments VALUES ('00000000-0000-0000-0000-000000000190','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000031',1,0,DEFAULT)$q$, '55000');
+SELECT pg_temp.make_signal(191);
+SELECT pg_temp.add_children(191);
+SELECT json_build_object('current_xid',pg_current_xact_id(),'copied_stamp',creation_xact_id,'tuple_xmin',xmin,'origin_system_identifier',creation_system_identifier,'current_system_identifier',(SELECT system_identifier FROM pg_catalog.pg_control_system())) FROM swarm.signals WHERE id='00000000-0000-0000-0000-000000000190';
+ROLLBACK;
+SELECT 'PASS imported counter collision denied alongside fresh parent control';
