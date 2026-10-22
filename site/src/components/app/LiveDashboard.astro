@@ -38,6 +38,7 @@ import "../../styles/kylon-shell.css";
 import "../../styles/kylon-layout/index.css";
 import "../../styles/kylon-workspace-settings-integration.css";
 import "../../styles/kylon-files.css";
+import "../../styles/kylon-people.css";
 import "../../styles/dashboard-welcome.css";
 import "../../styles/kylon-todos.css";
 import "../../styles/kylon-todos-context.css";
@@ -750,7 +751,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                     id="dashboard-composer-input"
                     rows="1"
                     maxlength={SIGNAL_BODY_MAX}
-                    placeholder="Write to everyone, or type @ to tag a person or an agent"
+                    placeholder="Message…"
                     aria-label="Message"
                     role="combobox"
                     aria-autocomplete="list"
@@ -785,8 +786,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                   ~~"THE ADDRESS, always visible."~~ Retired 2026-10-07 by Tom's ruling 3 ("Quiet
                   forms", home-visual RULINGS.md): the row shows only when the address is not
                   "Everyone here" (a tag, a reply, a notice about names that could not be kept) or
-                  while a name is being chosen. At rest it is hidden, the placeholder says "Write to
-                  everyone", and the note stays the textarea's description so the delivery truth is
+                  while a name is being chosen. At rest it is hidden, the hint says "Message…",
+                  and the note stays the textarea's description so the delivery truth is
                   still read out. `syncComposerToVisibility` is the one rule. */}
               <div class="dashboard__composer-to" data-composer-to hidden>
                 <span class="dashboard__composer-to-label" id="dashboard-composer-to-label" data-composer-to-label>To:</span>
@@ -4487,9 +4488,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         homeShellKey = "";
         return;
       }
-      const pane = homeRoute.view === "todo" ? "todos" : homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" ? homeRoute.view : "chat";
+      const pane = homeRoute.view === "todo" ? "todos" : homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" || homeRoute.view === "people" ? homeRoute.view : "chat";
       const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
-        people: currentHomePeople().groups, pane, todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
+        people: currentHomePeople().groups, pane, contextTitle: homeRoute.view === "people", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
         hrefs: { chat: routeHref({ view: "chat", workspaceId: workspace.id }), todos: routeHref({ view: "todos", workspaceId: workspace.id }),
           lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }),
           wiki: routeHref({ view: "wiki", workspaceId: workspace.id }), workspaces: routeHref({ view: "catchup" }) },
@@ -4669,7 +4670,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       document.title = homeRoute.view === "people" ? ["People & agents", workspace?.name, "CommonSwarm"].filter(Boolean).join(" · ") : homeViewTitle(homeRoute, workspace?.name);
       window.requestAnimationFrame(() => {
         const scope = homeRoute.view === "catchup" ? "[data-home-catchup]"
-          : homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos" || homeRoute.view === "people" ? "[data-home-route-pane]"
+          : homeRoute.view === "people" ? "[data-people-context]"
+          : homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos" ? "[data-home-route-pane]"
           : homeRoute.view === "new" ? "[data-panel=create]"
           : homeRoute.view === "add-agent" ? "[data-channel-view=agent-choice]"
           : homeRoute.view === "lists" ? "[data-channel-view=objects]"
@@ -4678,7 +4680,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           : "[data-home-workspace-shell]";
         // People & agents with a focus target lands on that person's or agent's details instead.
         const target = homeRoute.view === "people" && peopleDialogFocus ? one<HTMLElement>("#pd-detail-title") : null;
-        (target ?? all<HTMLElement>(`${scope} h1, .cs-org-phone-title h1`).find(heading => heading.getClientRects().length > 0))?.focus({ preventScroll: true });
+        const visible = (element: HTMLElement | null): element is HTMLElement => !!element?.getClientRects().length && !element.closest("[hidden], [inert]");
+        (visible(target) ? target : all<HTMLElement>(`${scope} h1, .cs-org-phone-title h1`).find(visible))?.focus({ preventScroll: homeRoute.view !== "people" });
       });
     };
     const navigateHome = async (requested: HomeRoute, historyMode: "push" | "replace" | "pop"): Promise<void> => {
@@ -4890,6 +4893,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       head.append(members); members.hidden = false;
     };
     const parkPeopleHosts = (): void => {
+      layout.peopleContext(null);
       parkMemberDetails();
       const detail = one<HTMLElement>("[data-people-detail]");
       // Hidden while parked: a selection's open details must not show at the foot of another route.
@@ -4914,15 +4918,18 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const signIn = one<HTMLElement>("[data-member-details]"); const active = document.activeElement;
       const held = signIn && active instanceof HTMLElement && signIn.contains(active) ? active : null;
       const range = held instanceof HTMLInputElement || held instanceof HTMLTextAreaElement ? [held.selectionStart, held.selectionEnd] as const : null;
+      layout.peopleContext(null);
       parkMemberDetails();
       list.hidden = false;
       renderPeopleDialog(list, detail, model, peopleDialogState, { render: renderDialogRoster, action: async (action, id, button, notice) => {
         if (button.disabled) return; button.disabled = true;
         const workspaceId = activeWorkspaceId, userId = session?.user.id;
         try { await peopleDialogAction(action, id, button, notice); }
-        catch (error) { if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
-          const errorTarget = Array.from(list.querySelectorAll<HTMLElement>("[data-agent-row-error]")).find((element) => element.dataset.agentRowError === id)
-            ?? one<HTMLElement>("[data-agent-error]");
+        catch (error) { if (workspaceId !== activeWorkspaceId || userId !== session?.user.id || homeRoute.view !== "people") return;
+          const selected = peopleDialogState.selected;
+          const errorTarget = selected?.type === "agent" && selected.id === id
+            ? list.querySelector<HTMLElement>("[data-people-detail] [data-agent-error]")
+            : Array.from(app.querySelectorAll<HTMLElement>("[data-people-context] [data-agent-row-error]")).find((element) => element.dataset.agentRowError === id);
           if (errorTarget) { errorTarget.textContent = readableError(error); errorTarget.hidden = false; }
         } finally { button.disabled = false; }
       },
@@ -4973,6 +4980,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           return personTint(owner, owner !== null && owner === session?.user.id);
         }, page: {
           homeLabel: workspace.name, homeHref: routeHref({ view: "chat", workspaceId: workspace.id }), back: () => homeBack(),
+          workspacesHref: routeHref({ view: "catchup" }),
           addAgentHref: routeHref({ view: "add-agent", workspaceId: workspace.id }),
           agentHref: (agentId) => routeHref({ view: "agent", workspaceId: workspace.id, agentId }),
           navigate: (href) => navigateHomeHref(href),
@@ -4982,6 +4990,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         } });
       // A removal or role change that needs a fresh sign-in shows its block under the page header.
       mountMemberDetails(list);
+      layout.peopleContext(list.querySelector<HTMLElement>("[data-people-context]"));
       if (held?.isConnected && document.activeElement !== held) {
         held.focus({ preventScroll: true });
         if (range && range[0] !== null && range[1] !== null) try { (held as HTMLInputElement).setSelectionRange(range[0], range[1]); } catch { /* not a text field */ }
@@ -5083,13 +5092,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         renderDialogRoster(); focusPeoplePage(); return Promise.resolve();
       }
       rosterFilter = "";
-      peopleDialogState.selected = null; peopleDialogState.showAllAttention = false;
+      peopleDialogState.selected = null; peopleDialogState.showAllAttention = false; peopleDialogState.filter = "all";
       if (!workspaceId) return Promise.resolve();
       return navigateHome({ view: "people", workspaceId }, "push");
     };
     const focusPeoplePage = (): void => {
-      window.requestAnimationFrame(() => ((peopleDialogFocus ? one<HTMLElement>("#pd-detail-title") : null)
-        ?? one<HTMLElement>("#pd-page-title"))?.focus({ preventScroll: true }));
+      window.requestAnimationFrame(() => [peopleDialogFocus ? one<HTMLElement>("#pd-detail-title") : null, one<HTMLElement>("#pd-page-title")]
+        .find(element => !!element?.getClientRects().length && !element.closest("[hidden], [inert]"))?.focus({ preventScroll: false }));
     };
 
     /** Leaving the page: the confirmation closes and every draft that belonged to it is dropped. */
@@ -5889,6 +5898,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           ? "dashboard__message dashboard__message--reply"
           : "dashboard__message";
         row.dataset.signalId = signal.id;
+        markThreadReplyRoot(row);
         if (
           !sampleMode && session && activeWorkspaceId &&
           signal.toAgent === null &&
@@ -8266,7 +8276,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             channelById(channels, root.channelId)?.archivedAt != null,
         );
 
+    const markThreadReplyRoot = (row: HTMLElement): void => {
+      row.toggleAttribute("data-thread-reply-root",
+        threadReplyRoot !== null && row.dataset.signalId === threadReplyRoot.id);
+    };
+
     const syncComposerPlacement = (): void => {
+      for (const row of all<HTMLElement>("[data-feed-list] .dashboard__message[data-signal-id]")) {
+        markThreadReplyRoot(row);
+      }
       const input = one<HTMLTextAreaElement>("[data-composer-input]");
       const bar = one<HTMLElement>("[data-composer-reply]");
       const targetText = one<HTMLElement>("[data-composer-reply-target-text]");
@@ -8321,8 +8339,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const channel = activeChannel();
       if (!input) return;
       if (channel === null) {
-        input.placeholder = "Write to everyone, or type @ to tag a person or an agent";
-        input.setAttribute("aria-label", "Message");
+        input.placeholder = "Message…";
+        input.setAttribute("aria-label", one<HTMLElement>("[data-composer-label]")?.textContent || "Message");
         return;
       }
       input.placeholder = `Message ${channelLabel(channel.slug)}`;
@@ -10756,7 +10774,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (event.key !== "Escape" || homeRoute.view !== "people" || !peopleDialogState.selected) return;
       if (one<HTMLDialogElement>("[data-people-confirm]")?.open || document.querySelector("dialog[open]")) return;
       event.preventDefault(); const selection = peopleDialogState.selected; peopleDialogState.selected = null;
-      renderDialogRoster(); (document.getElementById(`pd-${selection.type}-${selection.id}`) ?? one<HTMLElement>("#pd-page-title"))?.focus({ preventScroll: true });
+      if (!document.getElementById(`pd-${selection.type}-${selection.id}`)) { rosterFilter = ""; peopleDialogState.filter = "all"; }
+      renderDialogRoster(); (document.getElementById(`pd-${selection.type}-${selection.id}`) ?? one<HTMLElement>("#pd-page-title"))?.focus({ preventScroll: false });
     });
     for (const button of all<HTMLButtonElement>("[data-agent-owner-self]")) {
       button.addEventListener("click", openConnect);
@@ -16292,6 +16311,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
   .hm-frame .dashboard__message--reply {
     --message-row-background: transparent;
+  }
+
+  /* Paint the loaded reply root over Home's hover/addressed-row backgrounds.
+     Keep the variable for the fresh-arrival animation's endpoint. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-thread-reply-root] {
+    --message-row-background: var(--k-shell-selected);
+    background: var(--message-row-background);
   }
 
   .hm-frame .dashboard__message-markdown {

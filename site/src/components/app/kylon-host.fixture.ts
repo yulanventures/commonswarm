@@ -7,10 +7,11 @@ import ts from "typescript";
 const siteRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const setupScript = `
 (() => {
-  const { createKylonHost, projectHomeLayout, buildPhoneTopBar, buildWorkspaceHeader, buildWorkspaceNav, replaceHomeRegion, todoView, todosPane, buildHomeRail, buildSideCards, routeHref } = KylonHostFixture;
+  const { createKylonHost, projectHomeLayout, buildPhoneTopBar, buildWorkspaceHeader, buildWorkspaceNav, replaceHomeRegion, todoView, todosPane, buildHomeRail, buildSideCards, routeHref, renderPeopleDialog } = KylonHostFixture;
   const app = document.querySelector('live-dashboard'), frame = app.querySelector('.hm-frame');
   const context = app.querySelector('[data-home-rail-slot]'), account = app.querySelector('[data-user-menu-root]');
   const frameParent = frame.parentElement, contextParent = context.parentElement;
+  const frameNext = frame.nextSibling, contextNext = context.nextSibling, accountNext = account.nextSibling;
   const accountParent = account.parentElement, slot = app.querySelector('[data-home-workspace-shell]');
   const side = app.querySelector('[data-home-side-slot]');
   const calls = [], refreshRecords = [], workspace = { id: 'fixture-w', name: 'Invented workspace', todosAvailable: true };
@@ -32,6 +33,7 @@ const setupScript = `
     media.removeEventListener = (type, listener, options) => { if (type === 'change') listeners.delete(listener); return remove(type, listener, options); };
     mediaRecords.push({ media, listeners }); return media;
   };
+  const mediaQueries = mediaRecords;
   const host = createKylonHost(app, href => calls.push({ kind: 'navigate', href }));
   const chat = { view: 'chat', workspaceId: workspace.id };
   let homeRoute = chat;
@@ -39,7 +41,7 @@ const setupScript = `
   /* ACTUAL_STANDALONE_SYNC */
   const activeWorkspaceId = workspace.id, workspaces = [workspace];
   const navigateHomeHref = href => calls.push({ kind: 'message-back', href });
-  const parkPeopleHosts = () => {}; // No mounted People hosts in this controlled fixture.
+  const parkPeopleHosts = () => host.peopleContext(null);
   const focusHomeView = () => {}; // Read-message focus is owned by the integration observer, not asserted here.
   /* ACTUAL_PANE_MESSAGE */
   const project = route => projectHomeLayout('channel', route, [workspace], false);
@@ -90,6 +92,7 @@ const setupScript = `
   renderRail(); renderResources(); renderHeader(); host.sync(project(chat));
   const pane = app.querySelector('[data-home-route-pane]'), original = [...pane.childNodes];
   function renderTodo(view, tagDelivers = false, controls = false) {
+    host.peopleContext(null); frame.classList.remove('hm-frame--people'); vm.contextTitle = false;
     homeRoute = { view, workspaceId: workspace.id, todoId: 'bounded' };
     frame.classList.toggle('hm-frame--todo', view === 'todo'); syncStandalonePage();
     vm.pane = 'todos'; host.sync(project(homeRoute)); renderHeader();
@@ -126,8 +129,50 @@ const setupScript = `
     } else if (state === 'pending' || state === 'not-found') replaceHomeRegion(pane, 'todo', [todoView(document, { workspace: { name: workspace.name, todosHref: '?w=fixture-w&v=todos', homeHref: '?w=fixture-w' },
       view: { kind: state === 'pending' ? 'loading' : 'not-found' }, now: 0, people: { groups, other: [] }, openTodos: [], save: 'idle' }, { complete() {}, assign() {}, setStart() {}, comment() {} })]);
   }
-  window.hostFixtureData = { app, frame, context, account, frameParent, contextParent, accountParent, slot, side, calls, host, workspace, chat, project,
-    renderHeader, renderRail, renderResources, renderTodo, renderContext, restoreTodo, refreshRecords,
+  const detail = document.createElement('section'); detail.className = 'pd-detail'; detail.id = 'pd-detail';
+  detail.dataset.peopleDetail = ''; detail.hidden = true; detail.setAttribute('aria-labelledby', 'pd-detail-title');
+  const peopleState = { selected: null, collapsed: new Set(), showAllAttention: false, query: '', filter: 'all' };
+  const peopleModel = { sample: true, workspaceName: workspace.name, pendingFailed: false, invites: [],
+    people: [{ id: 'fixture-person', name: 'Invented Person', role: 'owner', own: true, mayRemove: false }],
+    agents: [{ id: 'fixture-agent', name: 'Invented Agent', ownerId: 'fixture-person', ownerName: 'Invented Person', model: null,
+      app: null, hosted: false, status: { kind: 'idle', label: 'Idle', attention: false, sentence: 'Invented local idle state.' },
+      receive: null, lastActive: 'Not reported', technical: [], updateAvailable: false, access: null, accessReadState: 'pending',
+      key: null, liveKey: false, own: true, mayManage: false, receipt: '' }] };
+  let roster = null, homeParent = null, homeNext = null, priorHidden = false;
+  let doors = { invite: false, add: false };
+  const addHref = routeHref({ view: 'add-agent', workspaceId: workspace.id });
+  function renderPeople() {
+    host.peopleContext(null);
+    renderPeopleDialog(pane, detail, peopleModel, peopleState, {
+      render: renderPeople, action: () => { throw new Error('read-only fixture action'); },
+      saveModel: async () => { throw new Error('read-only fixture save'); }, confirm: () => { throw new Error('read-only fixture confirm'); },
+    }, { layout: 'page', page: { homeLabel: workspace.name, homeHref: '?w=fixture-w', workspacesHref: '?v=catchup',
+      invite: doors.invite ? () => calls.push({ kind: 'people-invite' }) : undefined,
+      addAgentHref: doors.add ? addHref : undefined,
+      navigate: doors.add ? href => calls.push({ kind: 'people-navigate', href }) : undefined,
+      onQuery(value) { peopleState.query = value; calls.push({ kind: 'people-query', value }); renderPeople(); } } });
+    roster = pane.querySelector('[data-people-context]'); homeParent = roster.parentNode; homeNext = roster.nextSibling;
+    host.peopleContext(roster);
+  }
+  const people = {
+    mount(hidden = false, options = {}) {
+      // Preserve original Sample/no-door defaults. These are inputs, not a permission model.
+      peopleModel.sample = options.sample ?? true; peopleModel.people[0].role = options.role ?? 'owner';
+      doors = { invite: options.invite ?? false, add: options.add ?? false };
+      peopleState.query = ''; peopleState.selected = null; peopleState.filter = 'all';
+      homeRoute = { view: 'people', workspaceId: workspace.id }; syncStandalonePage();
+      vm.pane = 'people'; priorHidden = hidden; context.hidden = hidden; vm.contextTitle = true; frame.classList.add('hm-frame--people');
+      renderHeader(); host.sync(project({ view: 'people', workspaceId: workspace.id })); renderPeople();
+    },
+    render: renderPeople,
+    clear() { host.peopleContext(null); homeRoute = chat; syncStandalonePage(); host.sync(project(chat));
+      frame.classList.remove('hm-frame--people'); vm.pane = 'chat'; vm.contextTitle = false; renderHeader(); },
+    get roster() { return roster; }, get search() { return roster.querySelector('.pd-page-search'); },
+    get homeParent() { return homeParent; }, get homeNext() { return homeNext; },
+    get priorHidden() { return priorHidden; }, detail, state: peopleState, addHref,
+  };
+  window.hostFixtureData = { app, frame, context, account, frameParent, contextParent, accountParent, frameNext, contextNext, accountNext, slot, side, calls, host, workspace, chat, project,
+    people, mediaQueries, renderHeader, renderRail, renderResources, renderTodo, renderContext, restoreTodo, refreshRecords,
     listenerCount: () => mediaRecords.reduce((n, row) => n + row.listeners.size, 0),
     restoreMedia: () => { window.matchMedia = originalMatchMedia; },
     get bar() { return bar; }, get menu() { return menu; }, get heading() { return heading; } };
@@ -142,11 +187,12 @@ export async function kylonHostFixture(observe: string): Promise<string> {
     export { replaceHomeRegion } from './src/lib/home-focus.ts';
     export { todoView } from './src/lib/home-todo.ts'; export { todosPane } from './src/lib/home-todo-list.ts';
     export { buildHomeRail } from './src/lib/home-rail.ts'; export { buildSideCards } from './src/lib/home-side-cards.ts';
+    export { renderPeopleDialog } from './src/lib/people-dialog-view.ts';
     export { routeHref } from './src/lib/home-route.ts';
     import './src/styles/tokens.css'; import './src/styles/home/index.css';
     import './src/styles/dashboard-decoration.css'; import './src/styles/kylon-shell.css'; import './src/styles/kylon-layout/index.css';
     import './src/styles/kylon-workspace-settings-integration.css'; import './src/styles/kylon-files.css';
-    import './src/styles/dashboard-welcome.css'; import './src/styles/kylon-todos.css'; import './src/styles/kylon-todos-context.css';` } });
+    import './src/styles/kylon-people.css'; import './src/styles/dashboard-welcome.css'; import './src/styles/kylon-todos.css'; import './src/styles/kylon-todos-context.css';` } });
   const js = bundle.outputFiles.find(file => file.path.endsWith(".js"))?.text;
   const css = bundle.outputFiles.find(file => file.path.endsWith(".css"))?.text;
   if (!js || !css) throw new Error("actual host/CSS bundle missing");

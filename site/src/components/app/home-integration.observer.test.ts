@@ -31,18 +31,20 @@ import type { HomeOverview } from '../../lib/home/contract';
 
 /** Execute the dashboard's read/write lifecycle, replacing only the DOM paint boundaries.
  * No browser, model, network or customer data. Expected surface states come from UI-SPEC 3.3. */
-async function dashboardFunctions(names: string[]): Promise<string> {
+async function dashboardFunctions(names: string[], optionalDependencies: string[] = []): Promise<string> {
   const raw = await readFile(new URL('./LiveDashboard.astro', import.meta.url), 'utf8');
   const script = raw.match(/<script>([\s\S]*?)<\/script>/)?.[1]; assert.ok(script);
   const ast = ts.createSourceFile('dashboard.ts', script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const found = new Map<string, string>();
   const visit = (node: ts.Node) => {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && names.includes(node.name.text)) found.set(node.name.text, `const ${node.getText(ast)};`);
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && [...names, ...optionalDependencies].includes(node.name.text)) found.set(node.name.text, `const ${node.getText(ast)};`);
     ts.forEachChild(node, visit);
   };
   visit(ast);
   for (const name of names) assert.ok(found.has(name), `production declaration ${name}`);
-  return ts.transpileModule(names.map(name => found.get(name)).join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  // Optional private dependencies may be absent in the real old source: the behavioral
+  // assertion must fail on its row/name output, not a newly introduced helper declaration.
+  return ts.transpileModule([...optionalDependencies.filter(name => found.has(name)), ...names].map(name => found.get(name)).join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 }
 
 test('standalone details hide the account door and restore the same DOM to workspace navigation', async () => {
@@ -204,6 +206,7 @@ async function routedPaneFixture(initialView: 'todo' | 'todos' = 'todo') {
       for (let node: RowNode | null = this; node; node = node.parent) if ((node as PaneNode).hidden) return [];
       return [{}];
     }
+    closest() { return null; }
     focus() { focused.push(this); }
   }
   const document = { title: '', createElement: (tag: string) => new PaneNode(tag),
@@ -407,27 +410,40 @@ test('the first assignment picker uses owner requests until a measured policy al
   assert.equal(runInContext('receivedVM.facts.goesAsRequest("muse")', context), true);
 });
 test('workspace and channel composers keep their own addresses when a thread closes', async () => {
-  const input = { placeholder: '', setAttribute() {} };
-  const context = createContext({ input });
+  const attributes = new Map<string, string>();
+  const input = { placeholder: '', setAttribute(name: string, value: string) { attributes.set(name, value); } };
+  const label = { textContent: 'Message Home' };
+  const context = createContext({ input, label });
   runInContext(`
-    const one=selector=>selector==='[data-composer-input]' ? input : null;
+    const one=selector=>selector==='[data-composer-input]' ? input : selector==='[data-composer-label]' ? label : null;
+    const all=()=>[];
     let channel=null, threadReplyRoot=null;
     const activeChannel=()=>channel, channelLabel=slug=>slug==='everyone' ? 'everyone' : '#'+slug;
     const threadReplyPlaceOf=()=>({kind:'unfiled'}), threadReplyBlock=()=>null, threadReplyMayBroadcast=()=>false;
   `, context);
-  runInContext(await dashboardFunctions(['syncComposerPlacement']), context);
+  runInContext(await dashboardFunctions(['syncComposerPlacement'], ['markThreadReplyRoot']), context);
   runInContext('syncComposerPlacement()', context);
-  assert.equal(input.placeholder, 'Write to everyone, or type @ to tag a person or an agent');
+  assert.equal(input.placeholder, 'Message…');
+  assert.equal(attributes.get('aria-label'), 'Message Home');
   runInContext("channel={slug:'mobile'}; syncComposerPlacement();", context);
   assert.equal(input.placeholder, 'Message #mobile');
+  assert.equal(attributes.get('aria-label'), 'Message in #mobile');
   runInContext("channel={slug:'everyone'}; threadReplyRoot={}; syncComposerPlacement();", context);
   assert.equal(input.placeholder, 'Reply in this thread');
+  assert.equal(attributes.get('aria-label'), 'Thread reply');
   runInContext('threadReplyRoot=null; syncComposerPlacement();', context);
   assert.equal(input.placeholder, 'Message everyone');
   runInContext('channel=null; threadReplyRoot={}; syncComposerPlacement();', context);
   assert.equal(input.placeholder, 'Reply in this thread');
   runInContext('threadReplyRoot=null; syncComposerPlacement();', context);
-  assert.equal(input.placeholder, 'Write to everyone, or type @ to tag a person or an agent');
+  assert.equal(input.placeholder, 'Message…');
+  assert.equal(attributes.get('aria-label'), 'Message Home');
+  label.textContent = 'Message Another workspace';
+  runInContext('syncComposerPlacement()', context);
+  assert.equal(attributes.get('aria-label'), 'Message Another workspace', 'default placement reads current workspace context');
+  label.textContent = '';
+  runInContext('syncComposerPlacement()', context);
+  assert.equal(attributes.get('aria-label'), 'Message', 'initial missing context has a plain fallback');
 });
 
 /** Record the row builder's tree operations. Sanitizing and topic parsing are separate
@@ -449,6 +465,7 @@ class RowNode {
   replaceChildren(...nodes: RowNode[]) { for (const child of [...this.children]) child.remove(); this.append(...nodes); }
   after(node: RowNode) { if (this.parent) { const parent = this.parent; node.remove(); node.parent = parent; parent.children.splice(parent.children.indexOf(this) + 1, 0, node); } }
   setAttribute(name: string, value: string) { this.attributes.set(name, value); }
+  toggleAttribute(name: string, enabled: boolean) { if (enabled) this.attributes.set(name, ''); else this.attributes.delete(name); return enabled; }
   getAttribute(name: string) { return this.attributes.get(name) ?? null; }
   addEventListener(name: string, handler: () => void) { this.handlers.set(name, handler); }
   descendants(): RowNode[] { return this.children.flatMap(node => [node, ...node.descendants()]); }
@@ -516,9 +533,10 @@ test('a signal page settling after a same-workspace view change retains data wit
 });
 test('replying from a stream row preserves the agent ownership label and the root channel', async () => {
   const document = { createElement: (tag: string) => new RowNode(tag) };
+  const loadedRows: RowNode[] = [];
   const input = { placeholder: '', setAttribute() {}, focus() {} };
   const target = { textContent: '' };
-  const context = createContext({ document, HTMLElement: RowNode, input, target, mapHomePeople, homeParty,
+  const context = createContext({ document, HTMLElement: RowNode, input, target, loadedRows, mapHomePeople, homeParty,
     buildAuthorLine, buildStreamExtras, deriveStreamExtras, canStartThread, THREAD_REPLY_CONTROL_LABEL,
     threadReplyPlace, threadReplyTargetText, agentLabelInSentence, homeAskAnswered, channelLabel, window: { requestAnimationFrame() {} },
     setSanitizedMessageMarkdown: (node: RowNode, body: string) => { node.textContent = body; }, linkifyBrainTopics() {},
@@ -541,10 +559,11 @@ test('replying from a stream row preserves the agent ownership label and the roo
     const entityName=entity=>agentById.get(entity.id).name;
     const entityControl=name=>{const node=document.createElement('button'); node.textContent=name; return node;};
     const one=selector=>selector==='[data-composer-input]'?input:selector==='[data-composer-reply-target-text]'?target:null;
+    const all=()=>loadedRows;
     let threadReplyRoot=null; const composerSending=false, threadReplyBlock=()=>null, threadReplyMayBroadcast=()=>false;
     const retireComposerIntentOnAddressMove=()=>{}, syncComposerAddress=()=>{}, renderFeed=()=>{}, selectChannel=()=>{};
   `, context);
-  runInContext(await dashboardFunctions(['threadReplyPlaceOf', 'syncComposerPlacement', 'setThreadReplyRoot', 'buildMessageRow']), context);
+  runInContext(await dashboardFunctions(['threadReplyPlaceOf', 'syncComposerPlacement', 'setThreadReplyRoot', 'buildMessageRow'], ['markThreadReplyRoot']), context);
   for (const [id, channelId, expected] of [
     ['orbit', null, 'Replying to your Orbit in All messages.'],
     ['river', 'mobile', 'Replying to your River in #mobile.'],
@@ -555,11 +574,35 @@ test('replying from a stream row preserves the agent ownership label and the roo
       createdAt:'2026-10-05T12:00:00Z'},false)`, context) as RowNode;
     const reply = row.querySelector('.dashboard__message-reply');
     assert.ok(reply, `${id}: the eligible root offers a reply`);
+    loadedRows.splice(0, loadedRows.length, row);
     reply.handlers.get('click')!();
     assert.equal(target.textContent, expected, `${id}: the row's author and root channel reach the reply bar`);
     assert.equal(input.placeholder, 'Reply in this thread');
+    assert.equal(row.getAttribute('data-thread-reply-root'), '', 'the actual reply row carries its selected-root state');
     runInContext('setThreadReplyRoot(null)', context);
+    assert.equal(row.getAttribute('data-thread-reply-root'), null, 'closing clears existing loaded rows without a feed rebuild');
   }
+  const build = (id: string, reply = false) => runInContext(`buildMessageRow(${JSON.stringify({ id, from: 'orbit', fromKind: 'agent', kind: 'note', body: 'Same author, distinct message',
+    to: null, toAgent: null, about: null, attachments: [], channelId: null, until: null, threadRootId: reply ? 'root-a' : null, createdAt: '2026-10-05T12:00:00Z' })},${reply})`, context) as RowNode;
+  const first = build('root-a'), second = build('root-b'), child = build('reply-a', true);
+  loadedRows.splice(0, loadedRows.length, first, second, child);
+  const marked = () => loadedRows.filter(row => row.getAttribute('data-thread-reply-root') !== null).map(row => row.dataset.signalId);
+  first.querySelector('.dashboard__message-reply')!.handlers.get('click')!();
+  assert.deepEqual(marked(), ['root-a'], 'same-author neighbor and reply remain unmarked');
+  second.querySelector('.dashboard__message-reply')!.handlers.get('click')!();
+  assert.deepEqual(marked(), ['root-b'], 'switching roots transfers only the immutable message identity');
+  loadedRows.splice(0, loadedRows.length, first, child);
+  runInContext('syncComposerPlacement()', context);
+  assert.deepEqual(marked(), [], 'a filtered or unloaded selected root creates no replacement row');
+  const rebuilt = build('root-b');
+  assert.equal(rebuilt.getAttribute('data-thread-reply-root'), '', 'row creation projects selection before placement sync can run');
+  loadedRows.push(rebuilt);
+  assert.deepEqual(marked(), ['root-b']);
+  runInContext('setThreadReplyRoot(null)', context);
+  assert.deepEqual(marked(), [], 'Cancel state clears the freshly rebuilt row too');
+  first.querySelector('.dashboard__message-reply')!.handlers.get('click')!();
+  runInContext('threadReplyRoot=null; syncComposerPlacement()', context);
+  assert.deepEqual(marked(), [], 'the direct reset-state projection also clears the old root');
 });
 test('an ask card keeps the full sanitized question, links, topic controls and Show more', async () => {
   const document = { createElement: (tag: string) => new RowNode(tag) };
@@ -583,9 +626,9 @@ test('an ask card keeps the full sanitized question, links, topic controls and S
       ownerFirstName:'Tom',ownerInitial:'T',yours:true,tint:0,hosted:true,state:{kind:'idle',word:'Idle'}});
     const signalIsDirectToViewer=(signal,viewer)=>signal.to===viewer, initials=()=>'', kindLabel=kind=>kind;
     const formatTime=()=>({absolute:'Oct 5',relative:'Now'}), channelById=()=>null, brainTopicNames=()=>['Budget'];
-    const appendDeliveryReceipt=()=>{}, canStartThread=()=>false;
+    const appendDeliveryReceipt=()=>{}, canStartThread=()=>false, threadReplyRoot=null;
   `, context);
-  runInContext(await dashboardFunctions(['buildMessageRow']), context);
+  runInContext(await dashboardFunctions(['buildMessageRow'], ['markThreadReplyRoot']), context);
   for (const [kind, from, reply, missingTitle] of [['ask','claude',null,false],['note','claude',null,false],['ask','claude','removed-own',false],['ask','claude','removed-other',false],['ask','claude',null,true]] as const) {
     withoutTitle = missingTitle;
     runInContext(`expandedSignalIds.clear(); signals.splice(0, signals.length, ...${reply ? JSON.stringify([{id:'reply',from:reply,fromKind:'agent',kind:'note',inReplyTo:`S-${kind}`}]) : '[]'});`, context);
@@ -745,14 +788,17 @@ test('browser reads retain a top-level directed reply reference', () => {
 
 test('each navigation focuses the visible H1 for that view', async () => {
   const frames: (()=>void)[] = [], focused: unknown[] = [];
-  const heading = (name: string) => ({ name, visible: false, getClientRects() { return this.visible ? [{}] : []; }, focus() { focused.push(this); } });
-  const scopes = {catchup:'[data-home-catchup]',chat:'[data-home-workspace-shell]',todos:'[data-home-route-pane]',todo:'[data-home-route-pane]',agent:'[data-home-route-pane]',new:'[data-panel=create]', 'add-agent':'[data-channel-view=agent-choice]',lists:'[data-channel-view=objects]',files:'[data-channel-view=files]',wiki:'[data-channel-view=brain]'};
+  const heading = (name: string) => ({ name, visible: false, inert: false,
+    getClientRects() { return this.visible ? [{}] : []; }, closest() { return this.inert ? this : null; }, focus() { focused.push(this); } });
+  const scopes = {catchup:'[data-home-catchup]',chat:'[data-home-workspace-shell]',todos:'[data-home-route-pane]',todo:'[data-home-route-pane]',agent:'[data-home-route-pane]',people:'[data-people-context]',new:'[data-panel=create]', 'add-agent':'[data-channel-view=agent-choice]',lists:'[data-channel-view=objects]',files:'[data-channel-view=files]',wiki:'[data-channel-view=brain]'};
   const headings = new Map([...new Set(Object.values(scopes))].map(scope => [`${scope} h1`, heading(scope)]));
   const phoneTitle = heading('phone workspace');
+  const selectedTitle = heading('selected profile');
   headings.set('.cs-org-phone-title h1', phoneTitle);
   const context = createContext({homeViewTitle:()=> 'View · CommonSwarm', window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
-    document:{title:''}, all:(selector:string)=>selector.split(',').flatMap(part => headings.get(part.trim()) ?? [])});
-  runInContext("let homeRoute, workspaces=[{id:'W',name:'Home'}];",context);
+    document:{title:''}, one:(selector:string)=>selector==='#pd-detail-title'?selectedTitle:null,
+    all:(selector:string)=>selector.split(',').flatMap(part => headings.get(part.trim()) ?? [])});
+  runInContext("let homeRoute, peopleDialogFocus, workspaces=[{id:'W',name:'Home'}];",context);
   runInContext(await dashboardFunctions(['focusHomeView']),context);
   for (const [view,scope] of Object.entries(scopes)) {
     focused.length = 0;
@@ -770,6 +816,17 @@ test('each navigation focuses the visible H1 for that view', async () => {
   runInContext("homeRoute={view:'chat',workspaceId:'W'};focusHomeView();",context);
   assert.equal(frames.length,1); frames.shift()!();
   assert.equal(focused.at(-1), phoneTitle, 'the relocated visible phone heading receives focus');
+  // A requested profile takes focus only while visible and outside an inert/hidden host.
+  focused.length = 0;
+  for (const node of headings.values()) node.visible = false;
+  const peopleTitle = headings.get('[data-people-context] h1')!;
+  peopleTitle.visible = true; selectedTitle.visible = true; selectedTitle.inert = true;
+  runInContext("homeRoute={view:'people',workspaceId:'W'}; peopleDialogFocus={kind:'agent',id:'A'}; focusHomeView();",context);
+  frames.shift()!();
+  assert.equal(focused.at(-1), peopleTitle, 'an inert profile falls back to the relocated context heading');
+  selectedTitle.inert = false;
+  runInContext('focusHomeView()',context); frames.shift()!();
+  assert.equal(focused.at(-1), selectedTitle, 'a visible requested profile retains its detail heading target');
 });
 
 
@@ -945,7 +1002,7 @@ test('a stale self-role save ends on sign-in, and the email names Save; removal 
   const setup = "let session={user:{id:'tom'}},activeWorkspaceId='W',sampleMode=false,memberReauthNext='remove';"
     + "let members=[{userId:'tom',role:'owner',name:'Tom Langridge'}],draft={userId:'tom',role:'admin',confirming:true};"
     + "const peopleDialogState={rolePending:new Map(),selected:{type:'person',id:'tom'}},state=peopleDialogState,uuid=()=>'R';"
-    + "const person={id:'tom',name:'Tom Langridge',role:'owner'},model={workspaceName:'Home'},agents=[],accessStatuses=[];";
+    + "const person={id:'tom',name:'Tom Langridge',role:'owner'},model={workspaceName:'Home'},agents=[],accessStatuses=[],page=true;";
   runInContext(setup + code + "const callbacks={render(){focusLog.push('render');},changeRole(change){return changeRole(change);}};", context);
   await runInContext("commit('admin')", context);
   assert.deepEqual(focusLog, ['render', 'sign-in-dashboard', 'render', 'sign-in-final']);
@@ -983,20 +1040,47 @@ test('a stale self-role save ends on sign-in, and the email names Save; removal 
 
 /* People & agents is a page now (2026-10-07). ~~"falls back to the roster heading"~~ of the dialog:
    on the page an absent target falls back to the page title, and a visit from elsewhere navigates. */
-test('an absent People & agents target falls back to the page heading', async () => {
+test('People arrival prefers an eligible requested detail and otherwise the eligible page heading', async () => {
   const frames: (()=>void)[] = [], focused: string[] = [], navigations: unknown[] = []; let rendered = 0;
+  // Independent DOM facts only; the actual production declarations choose the target.
+  const heading = (name: string) => ({ present: true, rects: true, blocked: null as 'hidden' | 'inert' | null,
+    getClientRects() { return this.rects ? [{}] : []; },
+    closest(selector: string) { return selector.split(',').some(part => part.trim() === `[${this.blocked}]`) ? { reason: this.blocked } : null; },
+    focus() { focused.push(name); } });
+  const page = heading('page'), detail = heading('detail');
   const context = createContext({window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
-    one:(selector:string)=>selector==='#pd-page-title'?{focus:()=>focused.push('page')}:null,
+    one:(selector:string)=>selector==='#pd-page-title' ? (page.present ? page : null)
+      : selector==='#pd-detail-title' ? (detail.present ? detail : null) : null,
     all:()=>[], renderDialogRoster:()=>{ rendered++; }, loadHouseholdConnections:()=>{},
     navigateHome:(route:unknown, mode:string)=>{ navigations.push([route, mode]); return Promise.resolve(); },
     peopleDialogState:{query:'',selected:null,focusApplied:null},sampleMode:true});
   runInContext("let peopleDialogFocus,rosterFilter='',activeWorkspaceId='W',homeRoute={view:'people',workspaceId:'W'};",context);
   runInContext(await dashboardFunctions(['openRosterDialog','focusPeoplePage']),context);
-  await runInContext("openRosterDialog({kind:'person',id:'gone'})",context);
-  for (const frame of frames) frame();
-  assert.deepEqual(focused,['page']);
-  assert.equal(rendered,1,'already on the page: it re-renders in place');
-  assert.deepEqual(navigations,[]);
+  const rows: Array<{ label: string; request: boolean; detailPresent?: boolean; detailRects?: boolean;
+    detailBlocked?: 'hidden' | 'inert'; pageRects?: boolean; pageBlocked?: 'hidden' | 'inert'; want: string[] }> = [
+    { label: 'ordinary entry ignores an unrequested visible detail', request: false, want: ['page'] },
+    { label: 'absent requested detail falls back', request: true, detailPresent: false, want: ['page'] },
+    { label: 'requested detail without a generated box falls back', request: true, detailRects: false, want: ['page'] },
+    { label: 'hidden-ancestor requested detail falls back', request: true, detailBlocked: 'hidden', want: ['page'] },
+    { label: 'inert-ancestor requested detail falls back', request: true, detailBlocked: 'inert', want: ['page'] },
+    { label: 'eligible requested detail takes precedence', request: true, want: ['detail'] },
+    { label: 'no focus when absent detail and boxless page', request: true, detailPresent: false, pageRects: false, want: [] },
+    { label: 'no focus when absent detail and hidden page', request: true, detailPresent: false, pageBlocked: 'hidden', want: [] },
+    { label: 'no focus when absent detail and inert page', request: true, detailPresent: false, pageBlocked: 'inert', want: [] },
+  ];
+  for (const row of rows) {
+    focused.length = 0;
+    Object.assign(detail, { present: row.detailPresent ?? true, rects: row.detailRects ?? true, blocked: row.detailBlocked ?? null });
+    Object.assign(page, { rects: row.pageRects ?? true, blocked: row.pageBlocked ?? null });
+    const before = rendered;
+    await runInContext(row.request ? "openRosterDialog({kind:'person',id:'requested'})" : 'openRosterDialog()', context);
+    const facts = JSON.stringify({ row, page: { rects: page.rects, blocked: page.blocked },
+      detail: { present: detail.present, rects: detail.rects, blocked: detail.blocked } });
+    assert.equal(rendered, before + 1, `already on People re-renders in place: ${facts}`);
+    for (const frame of frames.splice(0)) frame();
+    assert.deepEqual(focused, row.want, `the real owner requests the eligible target: ${facts}`);
+    assert.deepEqual(navigations, [], `the current People visit does not navigate: ${facts}`);
+  }
   /* Positive control on the same context: from the workspace, the door navigates to the page. */
   runInContext("homeRoute={view:'chat',workspaceId:'W'}",context);
   await runInContext("openRosterDialog()",context);

@@ -1,8 +1,9 @@
 import { createOrgShell } from "./shell.js";
+import { createPeopleContext } from "./people-context";
 import { createTodoContext } from "./todo-context";
 
 type Navigation = { id: string; label: string; href: string; current: boolean; icon: string };
-type Projection = { enabled: boolean; title: string; workspaceName?: string; navigation: Navigation[]; todo?: boolean };
+type Projection = { enabled: boolean; title: string; workspaceName?: string; navigation: Navigation[]; todo?: boolean; people?: boolean };
 
 /** Presentation adapter. The app retains all routes, data, account and action ownership. */
 export function createKylonHost(app: HTMLElement, navigate: (href: string) => void) {
@@ -21,12 +22,14 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
   let menuDock: HTMLElement | null = null;
   const icons = new Map<string, SVGSVGElement>();
   const todoContext = createTodoContext(app, () => shell);
+  const peopleContext = createPeopleContext(app, () => shell, context);
   const restoreMenu = () => {
     if (phoneMenu) { phoneMenu.parent.append(phoneMenu.node); phoneMenu = null; }
     if (phoneHeading) { phoneHeading.parent.append(phoneHeading.node); phoneHeading = null; }
   };
   const restore = () => {
     todoContext.clear();
+    peopleContext.clear();
     restoreMenu();
     if (accountIcon && originalIcon.viewBox != null) accountIcon.setAttribute("viewBox", originalIcon.viewBox);
     if (accountPath && originalIcon.path != null) accountPath.setAttribute("d", originalIcon.path);
@@ -68,6 +71,7 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
   return {
     sync(vm: Projection) {
       if (!vm.todo) todoContext.clear();
+      if (!vm.people) peopleContext.clear();
       if (!vm.enabled || !frame || !context || !account) {
         if (shell) restore();
         return;
@@ -107,6 +111,7 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
     },
     syncMenu,
     refreshTodoContext: todoContext.refresh,
+    peopleContext: peopleContext.set,
     replaceHeader(replace: () => void) {
       const active = doc.activeElement;
       const owned = phoneMenu?.node.contains(active) ? "menu" : active === phoneHeading?.node ? "heading" : null;

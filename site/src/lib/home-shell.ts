@@ -8,7 +8,7 @@ import { capsule } from "./home-primitives";
 import { orderCapsules } from "./home-rail";
 import type { CapsuleVM, Id } from "./home-types";
 
-export type WorkspacePane = "chat" | "todos" | "lists" | "files";
+export type WorkspacePane = "chat" | "todos" | "lists" | "files" | "people";
 export type WorkspaceMenuItem = "wiki" | "settings" | "admin-access";
 
 /** Local to this lane; home-types.ts has no shell view model. */
@@ -19,6 +19,8 @@ export interface WorkspaceShellVM {
   /** Everyone in the workspace with their agents (any order; the shell puts you first). */
   people: CapsuleVM[];
   pane: WorkspacePane;
+  /** The current route owns its main heading; workspace identity is context. */
+  contextTitle?: boolean;
   hrefs: { chat: string; todos: string; lists: string; files: string; wiki: string; workspaces: string };
   /** False while the to-dos read is absent: every To-dos entry hides. Nothing is faked. */
   todosAvailable: boolean;
@@ -71,8 +73,8 @@ export interface FeedMenuState {
 }
 export type FeedMenuAction = { kind: "channel"; id: string } | { kind: "new-channel" } | { kind: "filter"; value: FeedFilterValue } | { kind: "refresh" };
 
-export const PANE_LABELS: Record<WorkspacePane, string> = { chat: "Chat", todos: "To-dos", lists: "Lists", files: "Files" };
-const PANES: WorkspacePane[] = ["chat", "todos", "lists", "files"];
+export const PANE_LABELS: Record<WorkspacePane, string> = { chat: "Chat", todos: "To-dos", lists: "Lists", files: "Files", people: "People & agents" };
+const PANES: Exclude<WorkspacePane, "people">[] = ["chat", "todos", "lists", "files"];
 
 /** "Claude", "Claude and dot", "Claude, dot and Grok". */
 export function joinNames(names: readonly string[]): string {
@@ -80,12 +82,12 @@ export function joinNames(names: readonly string[]): string {
   return `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
 }
 
-/** "You with Claude and dot · Nikki with Muse", two people, then "+N" for the rest. */
+/** Two people with agent counts, then "+N"; the roster owns full member names. */
 export function capsuleSubline(groups: readonly CapsuleVM[]): string {
   const ordered = orderCapsules(groups);
   const parts = ordered.slice(0, 2).map(({ person, agents }) => {
     const who = person.you ? "You" : person.firstName || person.name;
-    return agents.length ? `${who} with ${joinNames(agents.map((agent) => agent.nestedLabel))}` : who;
+    return agents.length ? `${who} with ${agents.length} ${agents.length === 1 ? "agent" : "agents"}` : who;
   });
   if (ordered.length > 2) parts.push(`+${ordered.length - 2}`);
   return parts.join(" · ");
@@ -340,7 +342,7 @@ export function buildWorkspaceHeader(doc: Document, vm: WorkspaceShellVM, callba
   const header = node(doc, "header", "hm-ws-header");
   header.dataset.homeWorkspaceHeader = vm.workspaceId;
   const copy = node(doc, "div", "hm-ws-header__copy");
-  copy.append(title(doc, vm.name, "hm-ws-title", "hm-ws-header__title", vm.pane === "files" || vm.pane === "todos"), node(doc, "p", "hm-ws-header__subline", capsuleSubline(vm.people)));
+  copy.append(title(doc, vm.name, "hm-ws-title", "hm-ws-header__title", vm.pane === "files" || vm.pane === "todos" || vm.contextTitle === true), node(doc, "p", "hm-ws-header__subline", capsuleSubline(vm.people)));
   const actions = node(doc, "div", "hm-ws-header__actions");
   const faces = compactCapsules(doc, vm.people, 2);
   faces.setAttribute("aria-hidden", "true");
@@ -437,7 +439,7 @@ export function buildPhoneTopBar(doc: Document, vm: WorkspaceShellVM, callbacks:
     people.append(node(doc, "span", "hm-sr", capsuleSubline(vm.people)));
   }
   people.append(faces);
-  bar.append(back, title(doc, vm.name, "hm-phone-title", "hm-phone-bar__title", vm.pane === "files" || vm.pane === "todos"), people);
+  bar.append(back, title(doc, vm.name, "hm-phone-title", "hm-phone-bar__title", vm.pane === "files" || vm.pane === "todos" || vm.contextTitle === true), people);
   if (doors.menu) {
     bar.append(buildWorkspaceMenu(doc, vm, callbacks, "hm-phone", { account: true }));
     /* This ⋯ carries the account entries, so the page's own phone account control stands down (integration.css). */
