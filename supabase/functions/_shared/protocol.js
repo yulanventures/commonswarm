@@ -4802,7 +4802,7 @@ var HOUSEHOLD_CONTENT_CONSENT = HOUSEHOLD_CONTENT_OPERATIONS.map((operation) => 
   tools: BASE_HOUSEHOLD_TOOL_REGISTRY.filter((row) => row.operations.includes(operation)).map((row) => ({ name: row.name, description: row.description })),
   description: (operation === "read" ? "Read shared objects, to-dos, comments and retained committed history." : operation === "create" ? "Create shared objects, to-dos and comments, and reserve uploads for new files." : "Update to-dos, patch shared objects and reserve replacements against their base revisions.") + " Access applies only to the approved workspace. Members with access to Lists & docs can read committed content and history." + (operation === "read" ? "" : " Editing requires your confirmed editor role; committed revisions retain human/agent attribution. Upload reservations remain pending until commit.")
 }));
-function householdRefusalDetails(reason, scope = {}, remedy) {
+function householdRefusalDetails(reason, scope = {}, remedy, caller = "local") {
   const missing = reason === "owner_confirmation_required" ? ["workspace_content_boundary"] : reason === "content_consent_required" ? ["content_consent"] : reason === "connection_access_refused" ? ["connection_content_access"] : reason === "content_read_only" ? ["editor_content_role"] : reason === "draft_access_refused" ? ["original_draft_connection"] : [reason];
   const workspace = scope.workspace_id;
   return {
@@ -4811,7 +4811,7 @@ function householdRefusalDetails(reason, scope = {}, remedy) {
     scope: { ...scope },
     remedy_url: workspace && reason !== "draft_access_refused" ? `https://commonswarm.com/app?w=${encodeURIComponent(workspace)}&v=lists` : null,
     mcp_tool: workspace && ["owner_confirmation_required", "content_consent_required"].includes(reason) ? remedy ?? null : null,
-    cli_command: workspace && remedy && ["owner_confirmation_required", "content_consent_required"].includes(reason) ? `cswarm object object_permissions_confirm --input-file <confirmation.json> --workspace-id ${workspace} --agent-token-file <token-file> --json` : null
+    cli_command: workspace && remedy === "object_permissions_confirm" && caller !== "hosted" && ["owner_confirmation_required", "content_consent_required"].includes(reason) ? `cswarm object object_permissions_confirm --input-file <confirmation.json> --workspace-id ${workspace}${caller === "local" ? " --agent-token-file <token-file>" : ""} --json` : null
   };
 }
 

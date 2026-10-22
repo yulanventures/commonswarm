@@ -589,5 +589,5 @@ export interface HouseholdRefusalDetails {
 }
 /** Scope comes only from verified current membership, never the refused object/draft input.
  * A verified eligible owner may receive the closed confirmation command. */
-export declare function householdRefusalDetails(reason: string, scope?: HouseholdRefusalDetails['scope'], remedy?: 'object_permissions_confirm' | 'list_permissions_confirm'): HouseholdRefusalDetails;
+export declare function householdRefusalDetails(reason: string, scope?: HouseholdRefusalDetails['scope'], remedy?: 'object_permissions_confirm' | 'list_permissions_confirm', caller?: 'human' | 'local' | 'hosted'): HouseholdRefusalDetails;
 export {};
