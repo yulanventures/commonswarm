@@ -38,6 +38,7 @@ import "../../styles/kylon-shell.css";
 import "../../styles/kylon-layout/index.css";
 import "../../styles/kylon-workspace-settings-integration.css";
 import "../../styles/kylon-files.css";
+import "../../styles/kylon-lists.css";
 import "../../styles/dashboard-welcome.css";
 
 const signInMethods = signInDoors(await enabledProvidersForBuild({
@@ -557,8 +558,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 and roles come from household-access.ts, keyed by what household_permissions
                 accepts, and operations from the policy constant. Nothing here grants access by
                 itself; the command decides. */}
-            <section class="dashboard__objects-view" data-channel-view="objects" hidden>
-              <h1 class="hm-pane-title" tabindex="-1">Lists</h1>
+            <section class="dashboard__objects-view" data-channel-view="objects" aria-labelledby="dashboard-lists-title" hidden>
+              <header class="dashboard__lists-head">
+                <h1 id="dashboard-lists-title" class="hm-pane-title" tabindex="-1">Lists</h1>
+              </header>
               <form class="dashboard__access-card" data-household-consent hidden>
                 <h2 class="dashboard__access-title">Turn on Lists &amp; docs</h2>
                 <p class="dashboard__access-lead">
@@ -1003,6 +1006,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction, type AccountMenuState, type AccountMenuAction } from "../../lib/home-shell";
   import { renderCatchUp as buildCatchUp } from "../../lib/home-catchup";
   import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes } from "../../lib/home-focus";
+  import { createListsChrome } from "../../lib/lists-chrome";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
     overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
   import { myWorkspaces, homeOverview, homeOverviewAsks, homeWorkingOn, feed } from "../../lib/commonswarm";
@@ -1763,6 +1767,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
     };
 
+    const listsChrome = createListsChrome(app);
+    const syncListsChrome = (): void => listsChrome(
+      app.dataset.state === "channel" && homeRoute.view === "lists" && app.dataset.channelView === "objects",
+      homeRoute.view === "files",
+    );
+
     const showPanel = (
       name: "loading" | "signed-out" | "create" | "workspace-error" | "channel",
     ): void => {
@@ -1786,6 +1796,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         section.hidden = section.dataset.panel !== name;
       }
       app.dataset.state = name;
+      syncListsChrome();
       syncVisibleShell();
       const root = one<HTMLElement>(".dashboard__root");
       root?.setAttribute("aria-busy", name === "loading" ? "true" : "false");
@@ -1845,6 +1856,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         closeMentionPicker();
       }
       app.dataset.channelView = name;
+      syncListsChrome();
       syncStandalonePage();
       /* The Live chip is true exactly while armLiveFeed is allowed to run. */
       const liveChip = one<HTMLElement>("[data-live-chip]");
@@ -4483,7 +4495,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       const pane = homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" ? homeRoute.view : "chat";
       const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
-        people: currentHomePeople().groups, pane, todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
+        people: currentHomePeople().groups, pane, contextTitle: homeRoute.view === "lists", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
         hrefs: { chat: routeHref({ view: "chat", workspaceId: workspace.id }), todos: routeHref({ view: "todos", workspaceId: workspace.id }),
           lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }),
           wiki: routeHref({ view: "wiki", workspaceId: workspace.id }), workspaces: routeHref({ view: "catchup" }) },
@@ -4629,9 +4641,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (routePane) routePane.hidden = true;
       if (homeRoute.view !== "people") parkPeopleHosts();
       if (channel) channel.hidden = home || homeRoute.view === "todo" || homeRoute.view === "agent" || homeRoute.view === "todos" || homeRoute.view === "people";
-      const channelHead = channel?.querySelector<HTMLElement>(".dashboard__channel-head");
-      if (channelHead) channelHead.hidden = homeRoute.view === "files";
-      channel?.setAttribute("aria-labelledby", homeRoute.view === "files" ? "dashboard-files-title" : "dashboard-channel-title");
+      syncListsChrome();
       const channelMenu = one<HTMLElement>("[data-home-channel-menu]");
       if (channelMenu) channelMenu.hidden = homeRoute.view !== "chat";
       const frame = one<HTMLElement>(".hm-frame");
@@ -4682,6 +4692,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const scroll = one<HTMLElement>(".dashboard__feed-view");
       if (activeWorkspaceId && scroll) homeScroll.set(activeWorkspaceId, scroll.scrollTop);
       homeRoute = route;
+      syncListsChrome();
       const navigation = ++homeNavigation;
       if (historyMode !== "pop") window.history[historyMode === "push" ? "pushState" : "replaceState"](
         { home: true, homePrevious: historyMode === "push" ? previous : window.history.state?.homePrevious === true }, "", routeHref(route));
@@ -8128,6 +8139,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (view === "objects") {
         if (name) name.textContent = "Lists & docs";
         if (description) description.textContent = "Shared lists, docs and files. Every saved version is kept.";
+        const refresh = one<HTMLButtonElement>("[data-refresh]");
+        if (refresh) refresh.hidden = sampleMode || agents.length === 0;
         showChannelView("objects");
         void openHouseholdView();
       } else if (view === "files") {
@@ -8161,7 +8174,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (refresh) refresh.hidden = sampleMode || agents.length === 0;
         returnToChannel();
       }
-      window.requestAnimationFrame(() => (view === "files" ? one<HTMLElement>("#dashboard-files-title") : name)?.focus({ preventScroll: true }));
+      window.requestAnimationFrame(() => (view === "objects" ? one<HTMLElement>("#dashboard-lists-title")
+        : view === "files" ? one<HTMLElement>("#dashboard-files-title") : name)?.focus({ preventScroll: true }));
     };
 
 
