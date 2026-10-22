@@ -242,9 +242,7 @@ export async function prepareAdminRoutine(
           (row.lineage_revoked || row.grant_revoked_at || row.connection_expired_at ? ctx.now : null),
         first_used_at: row.first_used_at?.getTime() ?? null,
         superseded: row.superseded === true,
-        suspended: row.suspension_active === true && !(row.kind==='standing'
-          && row.grant_revoked_at===null && row.connection_expired_at===null
-          && (row.connection_expires_at===null || row.connection_expires_at instanceof Date && row.connection_expires_at.getTime()>ctx.now)),
+        suspended: row.suspension_active === true,
         device_valid: row.ended_at === null && row.device_revoked_at === null &&
           (row.bound_device_id === null ||
             row.bound_device_id === row.device_id),

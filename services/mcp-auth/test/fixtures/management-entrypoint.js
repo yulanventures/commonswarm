@@ -29,6 +29,8 @@ const postgresStub = moduleUrl(`
         return values[0] === ${JSON.stringify(workspaceId)} && values[1] === ${JSON.stringify(userId)}
           ? [{ role: "owner" }] : [];
       }
+      // Shared command discovery also reads this fixture's empty streams relation.
+      if (text === "SELECT stream_id FROM swarm.streams WHERE workspace_id=?::uuid AND kind='workspace'") return [];
       // There is no grant in this database: the real handler must refuse it.
       if (text.includes("FROM swarm.hosted_mcp_grants")) return [];
       if (text.includes("set_config(")) return [];

@@ -1021,12 +1021,12 @@ function lockResultDiagnostics(result) {
       broadened_status:'status',broadened_code:'code',broadened_calls:'count',human_status:'status',human_code:'code'},
     'fresh-parent-denial-after-wait': {status:'status',code:'code',calls:'count'},
     'human-removal-through-real-command': {status:'status',code:'code',accepted:'boolean'},
-    'membership-and-hidden-parent-family-atomic': {removed:'boolean',revoked:'boolean',all_tokens_revoked:'boolean',
-      renewal_tombstone:'boolean',no_live_leaf_tokens:'boolean'},
+    'membership-and-hidden-parent-family-atomic': {removed:'boolean',revoked:'boolean',
+      renewal_tombstone:'boolean',frontier_revoked:'boolean'},
     ...Object.fromEntries(['null-renew','future-renew','null-replace','future-replace','elapsed','revoked','parent-dead','deadline-wait','security-suspended']
       .map(mode=>[`permanent-${mode}-delivery`,{status:'status',code:'code',calls:'count'}])),
   };
-  const codes = ['recipient_runtime_required','worker_scope_forbidden','human_confirmation_required','grant_inactive',
+  const codes = ['predecessor_unavailable','recipient_runtime_required','worker_scope_forbidden','human_confirmation_required','grant_inactive',
     'recipient_forbidden','capability_forbidden','current_rights_required','target_forbidden','scope_forbidden','credential_kind_forbidden','internal_error','forbidden','unauthenticated','unauthorized','invalid_request','fresh_auth_required',
     'insufficient_scope','client_outdated','human_sign_in_required','not_found','admin_transaction_failed',
     'admin_command_failed','admin_failure_audit_unavailable','temporarily_unavailable','renewal_grant_suspended','renewal_idle_suspended','renewal_grant_revoked','renewal_horizon_reached'];
@@ -2243,6 +2243,21 @@ async function delegatedLocalScenario(ctx,scenario) {
       check(`permanent-${mode}-delivery`,positive ? result.result.status===200 && result.calls===1 && result.delivery!==null
         : result.result.status===403 && result.calls===0,()=>({status:result.result.status,code:result.result.body?.error,calls:result.calls}));
       if(!positive) check(`permanent-${mode}-no-effects`,await family(root)===before);
+      if(mode==='security-suspended') {
+        check('permanent-security-suspension-exact-refusal',result.result.status===403
+          && result.result.body.error==='predecessor_unavailable' && result.calls===0);
+        check('permanent-security-suspension-persists-until-owner-resume',
+          (await observer`SELECT suspension_active AS active FROM swarm.renewal_grants
+            WHERE renewal_grant_id=${root.grant}::uuid`)[0]?.active===true);
+        owner.identity.interactiveAuthAtSeconds=Number((await observer`SELECT extract(epoch FROM clock_timestamp()) AS seconds`)[0].seconds);
+        const resumed=await manage(ctx,owner,workspaceId,{kind:'resume_renewal_grant',renewal_grant_id:root.grant});
+        check('permanent-security-suspension-real-owner-resume',resumed.status===200
+          && (await observer`SELECT NOT suspension_active AND resumed_by=${owner.userId}::uuid AND resume_count=1 AS ok
+            FROM swarm.renewal_grants WHERE renewal_grant_id=${root.grant}::uuid`)[0]?.ok===true);
+        const recovered=await side.invoke(command,{worker:true});
+        check('permanent-owner-resume-restores-delivery',recovered.result.status===200 && recovered.calls===1
+          && recovered.delivery!==null && (await use(recovered.delivery.credential)).status===200);
+      }
     }
   } else if (scenario==='delegated-local-selector-compatibility') {
     const issued=await admin.invoke(renewCommand(admin,seat),{worker:true});
@@ -2504,7 +2519,8 @@ async function delegatedLocalScenario(ctx,scenario) {
     check('parent-wait-releases-without-self-deadlock',control.result.status===200 && control.calls===1);
     if (!control.delivery) fail('post_rollback_control');
     let current={...seat,token:control.delivery.credential_id,raw:control.delivery.credential};
-    await use(current.raw);
+    const retainedCredentials=[seat,{...current}];
+    if((await use(current.raw)).status!==200) fail('delegated_parent_share_read_control');
     // Native child mutation must finish while a DIFFERENT connection retains
     // parent SHARE. A new internal connection taking incompatible parent locks
     // would wait on itself here; releasing the fixture early would hide it.
@@ -2522,21 +2538,44 @@ async function delegatedLocalScenario(ctx,scenario) {
     const nativeResponse=nativeWhileHeld ?? await nativePending,nativeBody=await nativeResponse.json();
     if (typeof nativeBody.agent_token!=='string') fail('native_parent_share_control');
     current={...seat,token:nativeBody.token_id,raw:nativeBody.agent_token};
+    retainedCredentials.push({...current});
     check('cross-connection-child-remains-usable',(await use(current.raw)).status===200);
+    // Capture the current used/pending proof while live. Revocation must not
+    // redefine this frontier by exposing an expired historical predecessor.
+    const frontier=await observer`SELECT t.token_id FROM swarm.agent_tokens t
+      WHERE t.renewal_grant_id=${seat.grant}::uuid AND t.revoked_at IS NULL
+        AND NOT EXISTS(SELECT 1 FROM swarm.agent_tokens child WHERE child.predecessor_token_id=t.token_id
+          AND child.first_used_at IS NOT NULL AND child.revoked_at IS NULL) ORDER BY t.token_id`;
+    const familyTokens=await observer`SELECT token_id,lineage_id FROM swarm.agent_tokens
+      WHERE renewal_grant_id=${seat.grant}::uuid ORDER BY token_id`;
+    check('live-current-pending-frontier-captured',frontier.length>0 && frontier.some(t=>t.token_id===current.token)
+      && retainedCredentials.length===3 && familyTokens.length===3
+      && familyTokens.every(t=>retainedCredentials.some(c=>c.token===t.token_id)));
+    const frontierIds=frontier.map(t=>t.token_id),lineages=[...new Set(familyTokens.map(t=>t.lineage_id))];
     const liveBefore=await family(seat);
     out.fixture_site='parent-policy-reduction';
     // This is a trusted backend policy reduction under the production role,
     // never a caller UUID masquerading as a new cryptographic authority.
+    failures.codes.length=0;failures.recording=true;
     await observer.begin(async tx=>{
       await tx`SET LOCAL ROLE swarm_command`;
       pid=Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      // Match the production owner/account-before-parent prefix. The parent
+      // terminal trigger reacquires the account when applying the reduction.
+      await tx`SELECT user_id FROM swarm.users WHERE user_id=${owner.userId}::uuid FOR NO KEY UPDATE`;
+      await tx`SELECT owner_user_id FROM swarm.admin_accounts WHERE owner_user_id=${owner.userId}::uuid FOR UPDATE`;
       await tx`SELECT grant_id FROM swarm.admin_grants WHERE grant_id=${admin.grant}::uuid FOR UPDATE`;
       pending=admin.invoke(renewCommand(admin,current),{worker:true});
-      check('renewal-blocked-before-parent-policy-reduction',await waitForBlocked(observer,pid,async()=>true,3500)!==null);
+      check('renewal-blocked-before-parent-policy-reduction',await waitForBlocked(observer,pid,
+        p=>ownedWait(observer,p,{users:[owner.userId]},pid),3500)!==null);
       await tx`UPDATE swarm.admin_grants SET state='revoked',revoked_at=clock_timestamp(),reason_code='test_parent_removed'
         WHERE grant_id=${admin.grant}::uuid`;
     });
     const denied=await pending;
+    failures.recording=false;
+    check('parent-policy-reduction-no-deadlock-or-retry-masking',failures.codes.length===0 && !denied.exception);
+    check('parent-policy-reduction-committed',(await observer`SELECT state='revoked' AND revoked_at IS NOT NULL AS ok
+      FROM swarm.admin_grants WHERE grant_id=${admin.grant}::uuid`)[0]?.ok===true);
     if(denied.exception) Object.assign(out,denied.exception,{fixture_site:'parent-policy-reduction'});
     check('fresh-parent-denial-after-wait',denied.result.status===403 && denied.calls===0 && denied.result.body.error==='grant_inactive',()=>({status:denied.result.status,code:denied.result.body?.error,calls:denied.calls}));
     check('parent-removal-no-renewal-or-budget-effect',await family(seat)===liveBefore);
@@ -2549,16 +2588,34 @@ async function delegatedLocalScenario(ctx,scenario) {
     check('human-removal-through-real-command',removed.status===200 && removed.body.status==='accepted',()=>({status:removed.status,code:removed.body?.error,accepted:removed.body?.status==='accepted'}));
     const [terminal]=await observer`SELECT m.revoked_at IS NOT NULL AS removed,g.revoked_at IS NOT NULL AS revoked,
       EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='renewal_grant' AND z.target_id=g.renewal_grant_id) AS renewal_tombstone,
+      (SELECT count(*) FROM swarm.agent_tokens t WHERE t.token_id=ANY(${frontierIds}::uuid[])
+        AND t.renewal_grant_id=g.renewal_grant_id AND t.revoked_at IS NOT NULL)=${frontierIds.length} AS frontier_revoked,
+      NOT EXISTS(SELECT 1 FROM unnest(${lineages}::uuid[]) AS l(lineage_id)
+        WHERE NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='lineage' AND z.target_id=l.lineage_id)) AS lineage_tombstones,
       NOT EXISTS(SELECT 1 FROM swarm.agent_tokens t WHERE t.renewal_grant_id=g.renewal_grant_id AND t.revoked_at IS NULL
-        AND NOT EXISTS(SELECT 1 FROM swarm.agent_tokens child WHERE child.predecessor_token_id=t.token_id
-          AND child.first_used_at IS NOT NULL AND child.revoked_at IS NULL)) AS no_live_leaf_tokens,
-      EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='renewal_grant' AND z.target_id=g.renewal_grant_id)
-        AND NOT EXISTS(SELECT 1 FROM swarm.agent_tokens t WHERE t.renewal_grant_id=g.renewal_grant_id AND t.revoked_at IS NULL
-          AND NOT EXISTS(SELECT 1 FROM swarm.agent_tokens child WHERE child.predecessor_token_id=t.token_id
-            AND child.first_used_at IS NOT NULL AND child.revoked_at IS NULL)) AS all_tokens_revoked
+        AND (t.expires_at>clock_timestamp() OR NOT EXISTS(SELECT 1 FROM swarm.agent_tokens child
+          WHERE child.predecessor_token_id=t.token_id AND child.first_used_at IS NOT NULL))) AS only_expired_handed_over_history
       FROM swarm.memberships m JOIN swarm.renewal_grants g ON g.workspace_id=m.workspace_id
       WHERE m.workspace_id=${workspaceId}::uuid AND m.user_id=${owner.userId}::uuid AND g.renewal_grant_id=${seat.grant}::uuid`;
-    check('membership-and-hidden-parent-family-atomic',terminal.removed && terminal.revoked && terminal.all_tokens_revoked,()=>({removed:terminal.removed,revoked:terminal.revoked,all_tokens_revoked:terminal.all_tokens_revoked,renewal_tombstone:terminal.renewal_tombstone,no_live_leaf_tokens:terminal.no_live_leaf_tokens}));
+    check('membership-and-hidden-parent-family-atomic',terminal.removed && terminal.revoked
+      && terminal.renewal_tombstone && frontierIds.length>0 && terminal.frontier_revoked,
+      ()=>({removed:terminal.removed,revoked:terminal.revoked,renewal_tombstone:terminal.renewal_tombstone,frontier_revoked:terminal.frontier_revoked}));
+    check('removed-hidden-parent-current-pending-frontier-revoked',frontierIds.length>0 && terminal.frontier_revoked);
+    check('removed-hidden-parent-family-tombstone',terminal.renewal_tombstone);
+    check('removed-hidden-parent-lineage-tombstones',lineages.length>0 && terminal.lineage_tombstones);
+    check('unrevoked-history-only-expired-handed-over',terminal.only_expired_handed_over_history);
+    const removedState=await family(seat);
+    for(const [index,credential] of retainedCredentials.entries()) {
+      const deniedRead=await use(credential.raw);
+      check(`removed-credential-${index}-read-denied`,deniedRead.status===401 && deniedRead.body.error==='unauthenticated');
+      const deniedRenew=await ctx.command.handleRequest(new Request('http://127.0.0.1/functions/v1/command',{
+        method:'POST',headers:{authorization:`Bearer ${credential.raw}`,'content-type':'application/json'},
+        body:JSON.stringify({command_id:id(),client_version:ctx.clientVersion,workspace_id:workspaceId,
+          stream:{kind:'workspace'},command:{kind:'renew_agent_token'}})}));
+      const deniedBody=await deniedRenew.json();
+      check(`removed-credential-${index}-native-renew-denied`,deniedRenew.status===401 && deniedBody.error==='unauthenticated');
+    }
+    check('removed-credential-probes-no-family-or-budget-effect',await family(seat)===removedState);
   }
   return {checks,failed_observations};
 }
