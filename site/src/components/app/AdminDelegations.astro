@@ -1,8 +1,9 @@
 ---
 import { ADMIN_AVAILABILITY, ADMIN_REGISTRY_VERSION, adminAvailabilityDigest } from "../../../../src/protocol/admin-policy";
+import "../../styles/kylon-account-dialogs.css";
 const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDigest(ADMIN_REGISTRY_VERSION), definitions: ADMIN_AVAILABILITY[ADMIN_REGISTRY_VERSION] };
 ---
-<admin-delegations hidden data-admin-policy={JSON.stringify(policy)}>
+<admin-delegations hidden data-kylon-account data-admin-policy={JSON.stringify(policy)}>
   <button type="button" class="admin-indicator" data-admin-indicator hidden aria-haspopup="dialog">
     <strong data-admin-indicator-title>Admin access</strong>
     <span data-admin-indicator-detail>View actions or revoke</span>
