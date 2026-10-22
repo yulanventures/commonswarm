@@ -4,6 +4,7 @@ import type { HouseholdOutcome } from '../../../src/protocol/household-object-ev
 type Call = (command: Record<string, unknown>, requestId: string) => Promise<Record<string, unknown>>;
 import { HOUSEHOLD_LOCAL_SEAT } from '../../../src/protocol/household-tool-registry';
 import { HOUSEHOLD_OBJECT_LIMIT } from '../../../src/protocol/household-object-policy';
+import { projectHouseholdRefusalDetails } from '../../../src/protocol/household-next-steps';
 const seat = HOUSEHOLD_LOCAL_SEAT;
 const version = (raw: Record<string, unknown>): HouseholdVersionView => ({
   revision: raw.revision as HouseholdVersionView['revision'], title: String(raw.title),
@@ -29,7 +30,13 @@ export function createHouseholdDashboard(root: HTMLElement) {
       try {
         const access = await call({ kind: 'household_access' }, crypto.randomUUID());
         if (active !== generation) return;
-        if (access.status !== 'ok') { say('Content access needs your confirmation. Choose reader or editor access before opening shared objects.'); return; }
+        if (access.status !== 'ok') {
+          say('Content access needs your confirmation. Choose reader or editor access before opening shared objects.');
+          const details = projectHouseholdRefusalDetails(access, context.workspace_id);
+          if (details.remedy_url) { const link = document.createElement('a'); link.href = details.remedy_url;
+            link.textContent = 'Open Lists access'; root.append(document.createTextNode(' '), link); }
+          return;
+        }
         const entries: Record<string, unknown>[] = [];
         let offset = 0;
         for (;;) {

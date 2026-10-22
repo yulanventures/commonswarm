@@ -21,7 +21,7 @@ export type Schema = {
     pattern?: string;
     minimum?: number;
     maximum?: number;
-    const?: string;
+    const?: string | boolean;
     enum?: readonly string[];
     oneOf?: readonly Schema[];
     description?: string;
@@ -57,10 +57,35 @@ export type HouseholdTodoReadQuery = {
     offset?: number;
     limit?: number;
 };
+export type HouseholdOwnerPermissionCommand = {
+    kind: 'household_owner_permissions';
+    confirmation: {
+        kind: 'owner_chat';
+        confirmed: true;
+    };
+    audit_context?: {
+        conversation_ref?: string;
+        message_ref?: string;
+    };
+    action: {
+        kind: 'setup';
+        purpose: 'personal' | 'shared';
+        content_role: 'reader' | 'editor';
+    } | {
+        kind: 'allow_connection';
+        connection: {
+            kind: 'hosted' | 'local';
+            connection_id: string;
+            grant_id: string;
+            principal_id: string;
+            operations: HouseholdContentOperation[];
+        };
+    };
+};
 type CoreOperation = {
     query: HouseholdReadQuery | HouseholdTodoReadQuery;
 } | {
-    command: HouseholdObjectCommand | TodoCommand;
+    command: HouseholdObjectCommand | TodoCommand | HouseholdOwnerPermissionCommand;
 };
 type Effect = 'read' | 'commit' | 'reserve';
 /** The sole inventory: validation, MCP schemas/hints and consent use these rows. */
@@ -244,6 +269,26 @@ declare const BASE_HOUSEHOLD_TOOL_REGISTRY: readonly [{
     effect: Effect;
     toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
     name: "todo_set_state";
+}, {
+    inputSchema: Schema;
+    description: string;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    title: string;
+    operations: readonly HouseholdContentOperation[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    effect: Effect;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    name: "object_draft_read";
+}, {
+    inputSchema: Schema;
+    description: string;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    title: string;
+    operations: readonly HouseholdContentOperation[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    effect: Effect;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    name: "object_permissions_confirm";
 }];
 export type HouseholdToolName = typeof BASE_HOUSEHOLD_TOOL_REGISTRY[number]['name'];
 /** Additive hosted list definitions reuse object schemas and commands. Reads
@@ -429,9 +474,27 @@ export declare const HOUSEHOLD_LIST_TOOL_REGISTRY: ({
     operation: (args: Arguments) => HouseholdContentOperation;
     operations: readonly HouseholdContentOperation[];
     effect: Effect;
+} | {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
+} | {
+    name: string;
+    title: string;
+    description: string;
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    inputSchema: Schema;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    operations: readonly HouseholdContentOperation[];
+    effect: Effect;
 })[];
-/** Dispatch inventory includes additive variants; local publication stays on the
- * original rows until its own release. No existing definition is rewritten. */
 export declare const HOUSEHOLD_TOOL_REGISTRY: {
     name: string;
     title: string;
@@ -468,7 +531,7 @@ export type HouseholdToolInvocation = CoreOperation & {
  */
 export declare function householdToolInvocation(name: string, value: unknown, context: HouseholdToolHostContext): HouseholdToolInvocation;
 export declare const HOUSEHOLD_TOOLS: {
-    name: "object_list" | "object_read" | "object_history" | "todo_create" | "todo_update" | "todo_assign" | "todo_start" | "todo_set_state" | "todo_comment" | "todo_list" | "todo_read" | "comment_list" | "todo_queue" | "object_create" | "object_update" | "file_read" | "file_upload_begin" | "file_upload_commit";
+    name: "object_list" | "object_read" | "object_history" | "todo_create" | "todo_update" | "todo_assign" | "todo_start" | "todo_set_state" | "todo_comment" | "todo_list" | "todo_read" | "comment_list" | "todo_queue" | "object_create" | "object_update" | "file_read" | "file_upload_begin" | "file_upload_commit" | "object_draft_read" | "object_permissions_confirm";
     title: string;
     description: string;
     inputSchema: Schema;
@@ -508,9 +571,23 @@ export declare function boundHouseholdListResult(result: Record<string, unknown>
 export declare const HOUSEHOLD_CONTENT_CONSENT: {
     operation: "create" | "update" | "read";
     tools: {
-        name: "object_list" | "object_read" | "object_history" | "todo_create" | "todo_update" | "todo_assign" | "todo_start" | "todo_set_state" | "todo_comment" | "todo_list" | "todo_read" | "comment_list" | "todo_queue" | "object_create" | "object_update" | "file_read" | "file_upload_begin" | "file_upload_commit";
+        name: "object_list" | "object_read" | "object_history" | "todo_create" | "todo_update" | "todo_assign" | "todo_start" | "todo_set_state" | "todo_comment" | "todo_list" | "todo_read" | "comment_list" | "todo_queue" | "object_create" | "object_update" | "file_read" | "file_upload_begin" | "file_upload_commit" | "object_draft_read" | "object_permissions_confirm";
         description: string;
     }[];
     description: string;
 }[];
+export interface HouseholdRefusalDetails {
+    code: string;
+    missing: readonly string[];
+    scope: {
+        workspace_id?: string;
+        principal_id?: string;
+    };
+    remedy_url: string | null;
+    mcp_tool: 'object_permissions_confirm' | 'list_permissions_confirm' | null;
+    cli_command: string | null;
+}
+/** Scope comes only from verified current membership, never the refused object/draft input.
+ * A verified eligible owner may receive the closed confirmation command. */
+export declare function householdRefusalDetails(reason: string, scope?: HouseholdRefusalDetails['scope'], remedy?: 'object_permissions_confirm' | 'list_permissions_confirm', caller?: 'human' | 'local' | 'hosted'): HouseholdRefusalDetails;
 export {};

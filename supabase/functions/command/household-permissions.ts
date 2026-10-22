@@ -35,13 +35,16 @@ async function permissionContext(tx: Sql, workspaceId: string, actor: HouseholdI
     WHERE workspace_id=${workspaceId}::uuid AND user_id=${actor.user_id}::uuid FOR SHARE`;
   return { member, boundary, rights };
 }
-async function checkedConnection(tx: Sql, workspaceId: string, actor: HouseholdIdentity, connection: ConnectionConsent) {
+export async function checkedConnection(tx: Sql, workspaceId: string, actor: HouseholdIdentity, connection: ConnectionConsent) {
   let expiry: Date | null = null;
   const [principal] = await tx`SELECT revoked_at FROM swarm.agent_principals WHERE workspace_id=${workspaceId}::uuid
     AND principal_id=${connection.principal_id}::uuid AND owner_user_id=${actor.user_id}::uuid FOR SHARE`;
   if (!principal || principal.revoked_at !== null) return { allowed: false as const, expires_at: null };
   if (connection.kind === 'hosted') {
-    const [seat] = await tx`SELECT s.seat_id FROM swarm.hosted_mcp_seats s
+    const [seat] = await tx`SELECT s.seat_id,g.provider_grant_id,
+      (SELECT h.handle FROM swarm.hosted_mcp_seat_handles h WHERE h.seat_id=s.seat_id
+        AND h.revoked_at IS NULL ORDER BY h.created_at DESC LIMIT 1) AS handle
+      FROM swarm.hosted_mcp_seats s
       JOIN swarm.hosted_mcp_grants g USING(grant_id)
       JOIN swarm.hosted_mcp_grant_workspaces b ON b.grant_id=s.grant_id AND b.workspace_id=s.workspace_id
       WHERE s.seat_id=${connection.connection_id}::uuid AND s.grant_id=${connection.grant_id}::uuid
@@ -49,7 +52,21 @@ async function checkedConnection(tx: Sql, workspaceId: string, actor: HouseholdI
       AND s.owner_user_id=${actor.user_id}::uuid AND g.owner_user_id=${actor.user_id}::uuid
       AND g.state='active' AND g.revoked_at IS NULL AND s.revoked_at IS NULL AND b.revoked_at IS NULL
       FOR SHARE OF s,g,b`;
-    if (!seat) return { allowed: false as const, expires_at: null };
+    if (!seat?.handle) return { allowed: false as const, expires_at: null };
+    // Reuse the existing canonical hosted authorization port without granting
+    // the edge command role direct OAuth access. Always restore transaction role.
+    const [role] = await tx`SELECT current_setting('role') AS value`;
+    await tx`SELECT set_config('role','swarm_read',true)`;
+    let live = false;
+    try {
+      const [resolved] = await tx`SELECT EXISTS(SELECT 1 FROM swarm.resolve_hosted_seat_read_authorization(
+        ${connection.grant_id}::uuid,${seat.handle}::text,'whoami') a
+        WHERE a.workspace_id=${workspaceId}::uuid AND a.principal_id=${connection.principal_id}::uuid
+          AND a.owner_user_id=${actor.user_id}::uuid)
+        AND commonswarm_oauth.provider_family_active(${seat.provider_grant_id}::text) AS live`;
+      live = resolved?.live === true;
+    } finally { await tx`SELECT set_config('role',${String(role!.value)},true)`; }
+    if (!live) return { allowed: false as const, expires_at: null };
     expiry = null;
   } else if (connection.kind === 'local') {
     const [token] = await tx`SELECT t.expires_at FROM swarm.agent_tokens t JOIN swarm.agent_runs r USING(run_id)
@@ -80,8 +97,8 @@ async function auditContext(tx: Sql, actor: HouseholdIdentity, requestId: string
     set_config('cswarm.household_request',${requestId},true), set_config('cswarm.household_digest',${digest},true),
     set_config('cswarm.household_command',${command},true)`;
 }
-async function writeConnection(tx: Sql, workspaceId: string, actor: HouseholdIdentity, connection: ConnectionConsent,
-  purpose: string, consent: string, expiry: Date | null) {
+export async function writeConnection(tx: Sql, workspaceId: string, actor: HouseholdIdentity, connection: ConnectionConsent,
+  purpose: string, consent: string, expiry: Date | null, ownerChat = false) {
   // The workspace lock serializes this primary-key upsert. Lock the existing
   // row explicitly so a reapproval fires one audit trigger, rather than both
   // BEFORE INSERT and BEFORE UPDATE through INSERT ... ON CONFLICT.
@@ -98,7 +115,7 @@ async function writeConnection(tx: Sql, workspaceId: string, actor: HouseholdIde
       VALUES (${connection.connection_id}::uuid,${connection.grant_id}::uuid,${workspaceId}::uuid,${connection.principal_id}::uuid,
         ${actor.user_id}::uuid,${purpose},${connection.operations}::text[],${consent}::uuid,${expiry},${connection.kind === 'hosted' ? connection.grant_id : null}::uuid)`;
   }
-  if (connection.kind === 'hosted') await writeHostedContentRestriction(tx, workspaceId, actor.user_id,
+  if (connection.kind === 'hosted' && !ownerChat) await writeHostedContentRestriction(tx, workspaceId, actor.user_id,
     connection.grant_id, connection.principal_id, connection.operations, 'human_allow');
 }
 async function finish(tx: Sql, workspaceId: string, actor: HouseholdIdentity, requestId: string,
