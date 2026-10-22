@@ -125,13 +125,54 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to-lab
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-chip {
   border-radius: 6px;
 }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-reply {
+/* Target and Cancel share a natural row. The metadata stays in that paragraph,
+ * wrapping with long/unknown/closed-thread facts instead of becoming another card. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer .dashboard__composer-reply {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px 8px;
+  padding: 0 4px;
+  margin-block-end: 0;
   color: var(--k-shell-secondary);
-  background: var(--k-shell-subtle);
-  border-color: var(--k-shell-line);
-  border-radius: 8px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
   font-size: 12px;
   line-height: 1.5;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer .dashboard__composer-reply-target {
+  grid-column: 1;
+  min-inline-size: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer .dashboard__composer-reply-window {
+  display: inline;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer [data-composer-reply-cancel] {
+  grid-column: 2;
+  grid-row: 1;
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  padding: 8px 4px;
+  color: var(--k-shell-secondary);
+  font: inherit;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer .dashboard__composer-reply-broadcast {
+  grid-column: 1 / -1;
+  min-inline-size: 0;
+  min-block-size: 44px;
+  border-radius: 4px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-reply-broadcast:has(input:focus-visible) {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 2px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-reply-broadcast input:focus-visible {
+  outline: none;
+  scroll-margin: 20px;
+}
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-reply-broadcast:has(input:focus-visible) { outline: 3px solid Highlight; }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-reply-broadcast input:focus-visible { outline: none !important; }
 }
 /* Ensure error/reload/delivery facts retain semantic colors. Only sizing and
  * wrapping are changed; no new visibility rules affect runtime [hidden]. */
@@ -147,4 +188,28 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to-chips {
   padding-block: 3px;
+}
+
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer {
+    padding-inline: 16px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer textarea {
+    /* Keep the native field at the phone's non-zooming text size. Its measured
+     * auto-height, visible-viewport cap and internal scrolling remain app-owned. */
+    font-size: 16px;
+  }
+  /* Defeat Home's more-specific empty-workspace label overlay explicitly.
+   * The native hint owns this space; channel/thread hints keep their own text.
+   * No label content or accessible name changes, and no extra row is inserted. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-box:has(textarea[placeholder^="Write to everyone"]:placeholder-shown):has(.dashboard__composer-attachments[hidden]) .dashboard__composer-label {
+    inline-size: 1px;
+    block-size: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-box:has(.dashboard__composer-attachments[hidden]) textarea[placeholder^="Write to everyone"]::placeholder {
+    color: var(--k-shell-muted);
+  }
 }

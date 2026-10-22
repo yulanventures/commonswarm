@@ -6,7 +6,7 @@
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-body > .dashboard__message-tools {
   flex: 1 1 208px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) max-content;
+  grid-template-columns: minmax(0, 1fr) fit-content(50%);
   align-items: start;
   justify-content: start;
   gap: 2px 4px;
@@ -16,6 +16,8 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools >
   grid-column: 1;
   grid-row: 1;
   min-inline-size: 0;
+  max-inline-size: 100%;
+  overflow-wrap: anywhere;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools > .dashboard__message-actions {
   grid-column: 2;
@@ -23,25 +25,39 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools >
   align-self: start;
   justify-self: start;
   margin: 0;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  flex-wrap: wrap;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt > summary {
   grid-column: 1;
   grid-row: 1;
   margin: 0;
   padding-inline: 2px;
+  min-block-size: 44px;
+  max-inline-size: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt > summary > span:not(.dashboard__message-receipt-glyph) {
+  min-inline-size: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-reply {
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  max-inline-size: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt::details-content {
   grid-column: 1 / -1;
   grid-row: 2;
   min-inline-size: 0;
 }
-/* Modern native disclosure layout keeps summary and Reply adjacent while
- * letting the body's natural row use the whole bar. Older engines keep the
- * stable two-column fallback above. No display:contents on native controls. */
+/* Both branches keep the summary shrinkable and let Reply wrap within its
+ * half-bar budget. The native body's own second row can still use the full
+ * strip. No display:contents or detached/generated summary is used. */
 @supports (grid-template-columns: subgrid) and selector(::details-content) {
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-body > .dashboard__message-tools {
-    grid-template-columns: max-content minmax(0, 1fr);
-  }
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools > .dashboard__message-receipt {
     display: grid;
     grid-template-columns: subgrid;

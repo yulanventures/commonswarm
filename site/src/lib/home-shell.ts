@@ -80,12 +80,12 @@ export function joinNames(names: readonly string[]): string {
   return `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
 }
 
-/** "You with Claude and dot · Nikki with Muse", two people, then "+N" for the rest. */
+/** Two people with agent counts, then "+N"; the roster owns full member names. */
 export function capsuleSubline(groups: readonly CapsuleVM[]): string {
   const ordered = orderCapsules(groups);
   const parts = ordered.slice(0, 2).map(({ person, agents }) => {
     const who = person.you ? "You" : person.firstName || person.name;
-    return agents.length ? `${who} with ${joinNames(agents.map((agent) => agent.nestedLabel))}` : who;
+    return agents.length ? `${who} with ${agents.length} ${agents.length === 1 ? "agent" : "agents"}` : who;
   });
   if (ordered.length > 2) parts.push(`+${ordered.length - 2}`);
   return parts.join(" · ");
