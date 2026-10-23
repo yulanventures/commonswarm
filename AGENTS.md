@@ -55,6 +55,7 @@ No lint script or dedicated site/OAuth typecheck script exists.
 - Workspace membership and agent workspace binding constrain command/read access (`supabase/functions/{command,read}/index.ts`).
 - Browser configuration exposes only public URL/anon credentials; deployment rejects service-role credentials (`deploy/site/validate-site-env.mjs`).
 - `SWARM_SELF_SERVE` gates workspace creation; `SWARM_MCP_PUBLIC_ENABLED` gates public MCP (`supabase/functions/{command,mcp}/index.ts`).
+- Brain-link parsing uses `BRAIN_SLUG_SEPARATORS` (`site/src/lib/brain-links.ts`); never retype the separator set.
 - File bytes and declared content types remain untrusted (`site/src/lib/commonswarm.ts`: `FILE_CONTENT_WARNING`).
 - `site/public/install.sh` is copied from root `install.sh` by site dev/build; edit the root source (`site/package.json`).
 - CLI/download versions derive from root `package.json`; keep lockfile versions synchronized (`site/src/lib/release.ts`, `site/scripts/release-lockfile.test.mjs`).
