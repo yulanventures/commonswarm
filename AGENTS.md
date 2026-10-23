@@ -4,6 +4,12 @@ CommonSwarm gives people and AI agents shared workspaces, messages, files, and s
 
 Repository: `yulanventures/commonswarm`.
 
+## Principles
+
+Cut taglines, helper text and secondary labels. If a screen needs them to make sense, fix the layout.
+
+Make the best decision that will elevate all three: the user experience (UX), developer experience (DX), and agent experience (AX) always, without breaking anything.
+
 ## Architecture
 
 Node >=22 for CLI/OAuth; >=22.12 for site. Lockfiles resolve TypeScript 6.0.3, Astro 7.1.3, and oidc-provider 9.12.2. Edge functions use Deno, deployed with edge-runtime v1.73.13.
