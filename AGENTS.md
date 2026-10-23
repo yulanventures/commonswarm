@@ -1,309 +1,64 @@
-# AGENTS.md — CommonSwarm
+# CommonSwarm
 
-This is the canonical repository instruction file for all coding agents.
+CommonSwarm gives people and AI agents shared workspaces, messages, files, and shared knowledge. The browser app is https://commonswarm.com/app; `cswarm` and the browser use https://api.commonswarm.com. Hosted MCP/OAuth uses https://mcp.commonswarm.com.
 
-Read the workspace root `AGENTS.md` first (`Ridge.io/AGENTS.md`; on the Mac mini that is
-`/Users/yulanbot/Developer/Ridge.io/AGENTS.md`). It defines the Yulan Ventures
-workspace rules, agent process, security rules, and CI fleet. For production operations,
-read `hetzner-handoff/HETZNER-OPERATIONS.md` from the workspace root. Do not copy either
-file into this repository.
+Repository: `yulanventures/commonswarm`.
 
-## Scope and product
+## Architecture
 
-CommonSwarm is the shared workspace where people and their agents work together. The
-vision is an agent-first Basecamp blended with Skylight for the household: households
-first, then small teams and small businesses. See `docs/product/VISION.md`.
-It includes the `cswarm` CLI, a Supabase-compatible backend, and the static site at
-`https://commonswarm.com`. Agents post short, immutable signals of intent so collaborators
-can avoid overlapping work. A signal never claims, blocks, or closes a task.
-
-Status: P3-1, open free tier. `SWARM_SELF_SERVE=1` is live. `/app` owns sign-up and the
-workspace. `/start` is a compatibility handoff. Node 22 or newer is required; `site/`
-requires Node 22.12 or newer.
-
-The product was renamed from `coswarm` to CommonSwarm and `cswarm` in 2026. Prose says
-CommonSwarm. Text that a user types says `cswarm`. Keep these unrelated names unchanged:
-
-- `__COSWARM_VERSION__` in `scripts/build-release.sh` and `src/cli.ts`;
-- the PostgreSQL schema `swarm` and `SWARM_*` environment variables;
-- the separate local `swarm` CLI.
-
-The GitHub repository is `yulanventures/commonswarm`. Old `Ridge-io` URLs can redirect,
-but new URLs and documentation use `yulanventures`.
-
-## Product and code invariants
-
-- `docs/product/VISION.md` is canonical for product vision and audience.
-  `docs/design/SWARM-CLOUD.md` is canonical for product behavior and the technical
-  specification. Each wins on conflicts within its scope.
-- The authority core is a deterministic reducer. Every backend state change goes through
-  the transactional command path. Clients do not write authority state directly.
-- Signals are append-only. Corrections are new signals.
-- Durable operator or system state belongs in PostgreSQL. Process memory is only a cache
-  or a home for state that can be derived again.
-- A wake event is a latency hint. `swarm.signal_deliveries` is delivery truth. A status
-  may say push only while its Realtime socket is subscribed.
-- The optional local listener wakes its own seat. It does not start a model or create a
-  worker. Agent-based monitoring is not an active workspace practice; agents must not run
-  `cswarm listen` for repository coordination.
-- User-facing output says what happened, what is now true, and what the user must do next.
-  A success-shaped response must not hide work that is still in progress.
-- Product language is plain and calm. Describe coordination and unblocking, not control,
-  authority, or enforcement.
-- Claims about CommonSwarm behavior must hold for the hosted workspace and the optional
-  local listener unless the copy names one of them.
-- Onboarding asks for the minimum. Detect context instead of asking when detection is
-  reliable; return no value instead of guessing. Inherited runtime markers such as
-  `CLAUDE_CODE_ENTRYPOINT` are not reliable agent identity.
-- Brain-link parsing uses `BRAIN_SLUG_SEPARATORS` in `site/src/lib/brain-links.ts`. Do not
-  retype that separator set. See `docs/design/2026-09-04-BRAIN-LINKS-IN-SIGNALS.md`.
-
-## Repository layout
+Node >=22 for CLI/OAuth; >=22.12 for site. Lockfiles resolve TypeScript 6.0.3, Astro 7.1.3, and oidc-provider 9.12.2. Edge functions use Deno, deployed with edge-runtime v1.73.13.
 
 | Path | Purpose |
 |---|---|
-| `src/protocol/` | Pure authority core: commands, events, and reducer; no I/O. |
-| `src/cloud/` | Client auth, signals, workspaces, and transport. |
-| `src/cli.ts` | `cswarm` CLI entry point. |
-| `supabase/` | Migrations and Deno functions: `command`, `read`, `capability`, `activity`, and `h0`. |
-| `deploy/supabase-stack/` | Self-hosted PostgreSQL, GoTrue, PostgREST, Realtime, and Storage definitions. |
-| `deploy/edge-runtime/` | Self-hosted Deno edge runtime and router. |
-| `deploy/site/` | Static-site build, validation, release, and Caddy files. |
-| `tests/` | Pure, CLI, local-stack, server-stack, and UX suites. |
-| `site/` | Astro 7 site; see `site/AGENTS.md`. |
-| `docs/design/` | Product and technical design. |
-| `docs/evidence/` | Committed evidence for completion claims. |
+| `src/cli.ts`, `src/cloud/`, `src/mcp/` | CLI, API/auth clients, stdio MCP |
+| `src/protocol/` | Pure commands, events, reducers |
+| `src/listener/`, `src/host/` | Local delivery, wake handling, execution adapters |
+| `supabase/functions/`, `supabase/migrations/` | Command, read, capability, activity, H0, MCP and admin functions; schema |
+| `services/mcp-auth/` | Node OAuth server; PostgreSQL persistence |
+| `site/src/pages/`, `site/src/components/`, `site/src/lib/` | Static Astro pages, browser workspace UI/API client |
+| `site/src/styles/`, `site/emails/` | CSS tokens/styles; auth email templates |
+| `deploy/`, `scripts/`, `tests/` | Runtime definitions, packaging, verification |
 
-`scratchpad/` is ignored. Put durable evidence in `docs/evidence/` or `docs/org/`.
+Self-hosted PostgreSQL 17 stores authority, messages, and OAuth state. GoTrue handles auth with GitHub/Google providers and SMTP; PostgREST, Realtime, and Storage expose data, push, and files. Storage uses Cloudflare R2. Cloudflare and Caddy serve public traffic.
 
-## Local development and tests
+## Commands
 
-| Command | What it does |
+Run from the repository root unless shown otherwise.
+
+| Purpose | Command |
 |---|---|
-| `npm install` | Install dependencies; `prepare` builds the package. |
-| `npm run build` | Clean `dist/`, run `tsc`, and make `dist/cli.js` executable. |
-| `npm test` | Run the service-free files named in the literal `test` script. |
-| `npm run test:p1-cli` | Build the CLI if needed, then run `tests/p1-cli/**/*.test.ts`. |
-| `npm run check:tests` | Type-check `tests/` as well as `src/`. |
-| `npm run check:edge` | Run `deno check` on all five edge-function entry points. |
-| `npm run test:site` | Run the site test suite. |
-| `npm run test:p1-local` | Run the ten named local integration files serially; needs Docker and an exclusive database slot. |
-| `npm run test:p1-server` | Regenerate the protocol bundle, then run the server suite serially; needs Docker and an exclusive database slot. |
-| `npm run test:uxtest` | Run the cross-machine UX harness. |
-| `npm run db:start` / `db:stop` / `db:reset` / `db:status` | Control the local Supabase CLI stack. |
-| `npm run db:diff` / `db:migrate` | Inspect or apply local migrations only. |
-| `npm run build:command-core` | Regenerate `supabase/functions/_shared/protocol.js`. |
-| `npm run test:h0-upgrade:local` / `test:h0-counts` | Test the H0 migration and count artifacts locally. |
-| `bash scripts/build-release.sh` | Build and execute-check `dist-release/cswarm`, then write its checksum. |
+| Install | `npm ci`; `npm --prefix site ci`; `npm --prefix services/mcp-auth ci` |
+| Develop | `npm run dev` (TypeScript watch); `npm --prefix site run dev`; `npm --prefix services/mcp-auth start` |
+| Build | `npm run build`; `npm --prefix site run build` |
+| Typecheck | `npm run check:tests` (source/tests); `npm run check:edge` (seven functions plus the edge router) |
+| Unit/contracts | `npm test` (literal file list) |
+| CLI | `npm run build`, then `npm run test:p1-cli` (CLI glob; some tests start Docker) |
+| Integration | `npm run test:p1-local` (ten explicit files); `npm run test:p1-server` (server glob, regenerates protocol); local Supabase/Docker required |
+| Site | `npm --prefix site test`; build first for browser observers |
+| OAuth | `npm --prefix services/mcp-auth test`; `npm --prefix services/mcp-auth run test:postgres` (migrated test database) |
+| UX harness | `npm run test:uxtest` |
+| Local database | `npm run db:start`, `db:reset`, `db:migrate`, `db:stop` |
+| CLI artifacts | `bash scripts/build-release.sh`; `bash scripts/build-npm.sh` |
 
-The local Supabase CLI stack is development-only and listens at `127.0.0.1:54321`.
-Local Supabase commands do not target production.
+No lint script or dedicated site/OAuth typecheck script exists.
 
-The site is a separate package:
+## Code invariants
 
-```sh
-npm --prefix site install
-npm --prefix site run build
-npm --prefix site test
-```
+- `supabase/functions/_shared/protocol.js` is generated from `src/protocol/index.ts`: regenerate with `npm run build:command-core`, never hand-edit.
+- `supabase/migrations/` owns schema: 14-digit versions, filename order, tracked in `supabase_migrations.schema_migrations` (`deploy/RELEASE-TO-BOX.md`).
+- Workspace membership and agent workspace binding constrain command/read access (`supabase/functions/{command,read}/index.ts`).
+- Browser configuration exposes only public URL/anon credentials; deployment rejects service-role credentials (`deploy/site/validate-site-env.mjs`).
+- `SWARM_SELF_SERVE` gates workspace creation; `SWARM_MCP_PUBLIC_ENABLED` gates public MCP (`supabase/functions/{command,mcp}/index.ts`).
+- File bytes and declared content types remain untrusted (`site/src/lib/commonswarm.ts`: `FILE_CONTENT_WARNING`).
+- `site/public/install.sh` is copied from root `install.sh` by site dev/build; edit the root source (`site/package.json`).
+- CLI/download versions derive from root `package.json`; keep lockfile versions synchronized (`site/src/lib/release.ts`, `site/scripts/release-lockfile.test.mjs`).
 
-## Test and verification guardrails
+## Shipping
 
-- A test runs only when a package script names or globs it. `npm test` and
-  `test:p1-local` use literal file lists. Check the relevant gate whenever a test is
-  added.
-- `tsconfig.json` includes only `src/**/*.ts`. Edge functions are outside normal `tsc`.
-  Run `npm run check:edge`; when adding a function, add its entry point to that script.
-- `supabase/functions/_shared/protocol.js` is generated. Edit `src/protocol/index.ts`,
-  then run `npm run build:command-core`. Never hand-edit the bundle.
-- `supabase functions serve` receives only values in its `--env-file`. Parent-shell
-  variables do not reach it. Add test-gated values to the suite's temporary env file.
-- Source tests run TypeScript through `tsx`; they do not prove the shipped single-file
-  bundle works. Changes to loading, entry points, or packaging must run
-  `bash scripts/build-release.sh` and check its exit code.
-- Do not pipe a required gate into `grep`; that can hide the gate's exit code.
-- Resolve the path, URL, ref, symlink, or artifact before measuring it.
-- Enumerate a set and reconcile its count. Do not infer completeness from a pattern.
-- Run a positive control in the same invocation as a negative probe. A negative result
-  must reach the code path it claims to test.
-- Distinguish pushed, landed, applied, and live. State only the condition measured.
-- If a test pins user-readable copy, verify the claim against system behavior. A stable
-  false claim is still false.
-- Generate user-facing lists of required fields, accepted commands, options, or providers
-  from the same constant enforcement reads. Do not type a second list.
-- Never branch on `error.message`. Use a named error class, stable code, caller
-  `AbortSignal`, or owned state. Normalize raw stream failures at the boundary.
-- Only when the assignment changes listener code: prove the behavior change with a detached
-  listener on a temporary `--state-dir` and retain its status JSON as evidence, then stop it.
-  This is a product test of the listener feature; agents never run `cswarm listen` for
-  coordination or monitoring.
-- Read `docs/org/2026-07-26-simplification-state.md` before a nontrivial product change.
-  Read the newest `docs/org/*RESUME-HERE.md` before re-deriving release or production
-  state.
+A push to `main` runs `build.yml` (root package and site build). Pull requests to the `release` branch and a nightly cron run `commit-identity.yml`, `agent-trailers.yml` and `server-suite.yml` (matrix: server, p1-cli, site, box-dry-run, unit; also manual with `server-repeat`). CI deploys nothing.
 
-In zsh, brace every revision with a path: use `${rev}:path`, never `$rev:path`.
+Production on `yulan-vps-1`: `commonswarm-supabase-stack`, `commonswarm-edge`, `commonswarm-oauth`; static site `/srv/commonswarm/site/current`. Stack, edge plus stack, and schema: `deploy/RELEASE-TO-BOX.md`; edge only: `deploy/edge-runtime/EDGE-RELEASE.md`; OAuth: `deploy/mcp-auth/`. Site: `deploy/site/build-artifact.sh <reviewed-sha> <public.json> <H0> <out>` builds on a Linux build host (it refuses `yulan-vps-1`); then `deploy/site/deploy.sh prepare ...` and `deploy/site/deploy.sh stage|deploy|rollback ops@100.115.66.74 <packet-dir> <PACKET-sha256>` switch `current` atomically. See workspace `../INFRASTRUCTURE.md`, “CommonSwarm (production)”. Staging uses the same Compose projects on `c1-staging`. `edge-staging.commonswarm.com` shares production services. Merging deploys nothing.
 
-## Sandbox and deletion rules (measured 2026-09-25)
+Environment-name inventories: `deploy/{supabase-stack,edge-runtime,mcp-auth}/env.example`; runtime files `/home/commonswarm/.env`, `/etc/commonswarm-oauth/service.env`. Site `.env` names: `PUBLIC_SUPABASE_URL`, `PUBLIC_SUPABASE_ANON_KEY`, `PUBLIC_H0_LINK_JOIN`.
 
-On 2026-09-25 an unsandboxed Grok review arm wrote `HOME="$(mktemp -d)" env HOME="$HOME" node --test …`
-and then `rm -rf "$HOME"`. A prefix assignment applies to that one command only, and `"$HOME"` on the same
-line expands before it, so the tests ran in the real home and the last line was `rm -rf /Users/<user>`.
-It deleted every credential, checkout, and tool configuration under the home directory. There was no
-backup. Rules that follow:
-
-- Every arm and Maker runs in a sandbox: Codex with `-s workspace-write`; Claude with a permission mode;
-  Grok not at all until it has one. An arm or Maker never inherits a bypass-permissions session.
-- Only the lead runs test suites, in a sandbox or in a clean worktree with an absolute `HOME` it created.
-  A brief that says "tests with a temporary HOME" is a defect; the brief names the exact command instead.
-- A script that removes a directory named from a variable resolves the path first and refuses `/`, the
-  home directory, an empty value, and any path outside its own temporary root, with a control test that
-  proves the refusal.
-- Never write `rm -rf "$VAR"` where `VAR` can be `HOME`, empty, or set by a prefix assignment on the same
-  line. Delete only a path you created with an absolute `mktemp -d` and checked.
-- `HOME` is never assigned in a shell script, not as a prefix and not with `export`. Create a separate
-  variable and pass it only inside `env`, then delete only that variable:
-  `T=$(mktemp -d /tmp/lane-home.XXXXXX) || exit 1`, `env HOME="$T" node --import tsx --test …`, `rm -rf "$T"`.
-- A Grok CLI review arm runs read-only: `--permission-mode plan`, or
-  `--disallowed-tools run_terminal_command,kill_command_or_subagent,get_command_or_subagent_output,search_replace`.
-- Host controls on the Mac mini (HezLead, 2026-09-25): an `rm` guard first in `PATH` that refuses the home
-  directory, `/Users/*`, `/`, and the critical dot-folders and logs refusals to `/Users/Shared/safe-rm.log`;
-  hourly APFS local snapshots; and a Claude `PreToolUse` hook that blocks the pattern.
-
-The full record is `docs/org/2026-09-25-HOME-DELETION-RESUME-HERE.md`.
-
-## Git, review, and commits
-
-Follow the workspace process: Codex makes, Claude judges, one cross-family review round,
-and CI decides. The current model assignments are in the workspace `AGENTS.md`; do not
-duplicate them here.
-
-- Do not expand the assignment. Respect dirty worktrees and other agents' changes.
-- Before committing, run `git rev-parse --abbrev-ref HEAD` and inspect
-  `git worktree list`. Use one writer per branch and worktree. Never push a branch you do
-  not own.
-- Run `scripts/branch-audit.sh` before pruning branches. Do not delete a branch that still
-  contains work absent from `main`.
-- Every new non-merge commit covered by the repository rule needs the agent-authorship
-  fields defined by `scripts/lib/agent-trailer-vocab.sh`. Install the optional helper with
-  `npm run hooks:install`; CI is the guard.
-- Author and committer email addresses must pass `scripts/check-commit-identity.sh`.
-  The measured allowlist lives in that script. Do not reconstruct it from memory.
-- Do not backfill guessed agent trailers into old commits.
-
-## Where this runs now
-
-Production is one Hetzner server, `yulan-vps-1`, in Falkenstein. Its Tailscale address is
-`100.115.66.74`; its public address is `178.105.29.28`. Cloudflare provides DNS, proxying,
-TLS, and R2 object storage. Caddy uses Cloudflare Origin CA certificates on the box.
-
-| Surface | Production shape |
-|---|---|
-| API | Caddy on `api.commonswarm.com`. |
-| Core stack | Compose project `commonswarm-supabase-stack`: `commonswarm-postgres` (PostgreSQL 17), GoTrue, PostgREST, Realtime, and Storage API on `commonswarm-net`. |
-| Object storage | Storage API backed by Cloudflare R2 bucket `commonswarm-files`. |
-| Functions | Compose project `commonswarm-edge`, Deno edge runtime on loopback port `9000`, behind Caddy. |
-| Site | Static files at `/srv/commonswarm/site/current`, served by Caddy on `commonswarm.com`. |
-| CLI | Production clients use `https://api.commonswarm.com`. |
-
-Stack releases are under `/home/commonswarm/stack/releases/<sha>` and edge releases are
-under `/home/commonswarm/edge/releases/<sha>`. Each has a `current` symlink. Runtime values
-are in `/home/commonswarm/.env`.
-
-The box has a `compose.override.yaml` that raises the edge-runtime memory limit to 2 GiB.
-A six-hourly timer restarts that container (docker restart) because the runtime leaks memory. The timer is
-mitigation; the leak still needs a repository fix. When the edge container is recreated,
-`COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net` is required.
-
-The hosted Supabase project `ukezjcnxjvkpkeezxaew` was deleted on 2026-09-20. Production
-does not use hosted Supabase, Railway, or Vercel.
-
-## How it is released
-
-Only Anvil, the Hermes operations agent on the Mac mini, releases to the box or restarts
-box services. HezLead, the Claude infrastructure seat, directs the work. Other agents may
-prepare and verify release inputs, but must not deploy, restart, change Caddy, or change
-production symlinks.
-
-Every release input must be an exact reviewed SHA that has landed on `main`.
-The operational procedure is [deploy/RELEASE-TO-BOX.md](deploy/RELEASE-TO-BOX.md).
-
-| Surface | Release input and method | Automatic? |
-|---|---|---|
-| Stack | Reviewed repository archive for an exact SHA on `main`, unpacked at `/home/commonswarm/stack/releases/<sha>`, then released through `deploy/RELEASE-TO-BOX.md`. | No. |
-| Edge | Reviewed repository archive for an exact SHA on `main`, unpacked at `/home/commonswarm/edge/releases/<sha>`, then recreated on `commonswarm-net` through `deploy/RELEASE-TO-BOX.md`. | No. The six-hour recycle timer only mitigates the live leak. |
-| Site | `deploy/site/build-artifact.sh` builds the exact reviewed SHA off production with explicit public config/H0 and pinned Node; `deploy.sh prepare` renders a hash-bound packet. Anvil stages and executes static extraction, atomic swap and rollback under the held Mac release lock; old reserves remain. See `deploy/site/RUNBOOK.md`. | No. |
-| CLI | `scripts/build-release.sh` creates the checked single-file CLI and checksum. `scripts/build-npm.sh` creates the npm package from that same bundle. | No publish workflow exists in this repo. |
-| Schema | A schema change is a production operation performed once through `deploy/RELEASE-TO-BOX.md`. It is not applied by CI or by merging `main`. | No. |
-
-CI never deploys production. A merge to `main` does not release the stack, edge runtime,
-site, CLI, or a migration.
-
-The root `package.json` version feeds the CLI and `/download`. Bump it with
-`npm version --no-git-tag-version <version>` so `package-lock.json` stays in sync; the site
-tests reject version drift.
-
-`deploy/supabase-stack/RUNBOOK.md` records the completed hosted-to-box cutover. Its source
-migration steps and `/home/commonswarm/migration.env` are historical. Do not reuse them as
-the current release procedure. The linked repository procedure governs CommonSwarm releases;
-the cross-repository operations runbook remains authoritative for host operations.
-
-## CI
-
-Ordinary PRs run no workflows. A **release PR** is a `pull_request` whose base branch
-is `release`; no workflow uses `pull_request_target`.
-
-| Workflow | When and what |
-|---|---|
-| `.github/workflows/build.yml` | Push to `main` only: `npm ci`, root build, site install, site build. The site builds without secrets or `.env`. |
-| `deploy/ci/commonswarm-nightly.timer` | Five-suite Hetzner nightly at **06:00 UTC**: server (including MCP auth), p1-cli, site, box-dry-run, and `npm test`. GitHub `server-suite.yml` retains release PRs and manual dispatch; server-repeat is manual only. |
-| `.github/workflows/agent-trailers.yml` | Release PRs and nightly at 03:00 UTC: trailer checker self-test, required authorship fields, and informational summary. |
-| `.github/workflows/commit-identity.yml` | Release PRs and nightly at 03:00 UTC: author and committer allowlist. |
-
-Release guards check the PR base SHA through its head SHA. Nightly guards fetch
-`origin/main` and check the range after its latest first-parent commit at least 24 hours
-old. This includes branch commits landed in that window, even if authored earlier;
-an idle `main` yields an empty range. If all history is younger, they check all of it.
-Local hooks and `npm run hooks:install` are unchanged.
-
-Build and commit guards retain the ordered `CI_RUNS_ON_LIGHT`, `CI_RUNS_ON_NODE`,
-`CI_RUNS_ON`, `ubuntu-latest` fallback. Server suites retain `ubuntu-latest` for Linux
-containers, browsers, and root fixtures. Do not change fleet labels.
-
-**There is no CommonSwarm staging deploy.** Push to `main` builds only. CI never deploys
-production. Workflow files do not establish GitHub branch-protection requirements.
-
-## Secrets and environment
-
-Never print secret values or put them in repositories, shell arguments, logs, URLs, chat,
-documentation, commits, or issue comments. Production secrets live in the 1Password vault
-`Yulan Ventures Infra` and in root-only or service-owned files on the box.
-
-| Scope | Variable names and location |
-|---|---|
-| Production stack | The authoritative name inventory is `deploy/supabase-stack/env.example`. Values live in `/home/commonswarm/.env` with mode `0600`. |
-| Edge runtime | `SWARM_DATABASE_URL`, `SUPABASE_DB_URL`, `SWARM_DATABASE_TLS_CA_B64`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SWARM_ENV`, `SWARM_COMMAND_ALLOWED_ORIGINS`, `SWARM_CAPABILITY_URLS`, `SWARM_CAPABILITY_ALLOWED_ORIGINS`, and `SWARM_SELF_SERVE`; values use the same box env file. |
-| Site build | `PUBLIC_SUPABASE_URL` and `PUBLIC_SUPABASE_ANON_KEY` live in untracked `site/.env`. The URL is `https://api.commonswarm.com`; the key must be an anon JWT, never a service-role key. |
-| CLI target | `SWARM_CLOUD_URL`, `SWARM_CLOUD_ANON_KEY`, and optional `SWARM_CLOUD_WORKSPACE_ID`. Refresh credentials live in the OS keychain where supported, with a protected file fallback described in `README.md`. |
-| Local origin override | `CSWARM_DEV_ALLOWED_ORIGINS`; development only and ignored in non-interactive agent mode. |
-| Test-only command hooks | `SWARM_CMD_TEST_SLEEP_AFTER_STEP` and `SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP`; never set them in production. |
-| Historical cutover | Names are recorded in `deploy/supabase-stack/migration.env.example`. Any box `migration.env` is historical and must not be used to contact the deleted project. |
-
-Example env files contain names and safe placeholders only. Never add live values to them.
-
-## Do not
-
-- Do not deploy to the box, restart its services, edit its Caddy configuration, or change
-  release symlinks unless you are Anvil acting under HezLead's direction.
-- Do not run `supabase db push`, `supabase functions deploy`, `supabase link`, any
-  `supabase` command with `--linked`, `supabase projects api-keys`, or `vercel deploy` for
-  CommonSwarm.
-- Do not point code, DNS, a release, or an integration at hosted Supabase, Railway,
-  Vercel, a `supabase.co` production host, or the deleted project.
-- Do not rerun the completed source migration or treat a historical `migration.env` as a
-  live release input.
-- Do not run `cswarm listen` as an agent workflow, turn agent-based monitoring back on, or
-  add a listener path that starts models.
-- Do not put a service-role key under `site/`.
-- Do not hand-edit generated protocol code.
-- Do not rename `__COSWARM_VERSION__`, the `swarm` schema, or `SWARM_*` variables as part
-  of product-name cleanup.
+`docs/org/`, `docs/evidence/`, and completed cutover runbooks are history, not instructions; code plus this file are the source of truth.
