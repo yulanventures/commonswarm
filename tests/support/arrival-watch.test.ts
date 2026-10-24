@@ -874,7 +874,11 @@ test("a future-dated incomplete watcher lock obeys one deadline", { timeout: 7_0
     const future = new Date(Date.now() + 60_000);
     await utimes(path, future, future);
     const start = Date.now();
-    await assert.rejects(acquireArrivalWatchLock(path), /timed out waiting for the watch lock.*rm --/);
+    await assert.rejects(acquireArrivalWatchLock(path), (error: Error) => {
+      assert.match(error.message, /timed out waiting for the watch lock.*The lock was retained/);
+      assert.doesNotMatch(error.message, /rm --/, "never advises removing an unverified lock");
+      return true;
+    });
     assert.ok(Date.now() - start < 6_000);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
