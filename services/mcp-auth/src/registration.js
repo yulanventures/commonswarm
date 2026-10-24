@@ -233,11 +233,11 @@ export function createMemoryRegistrationStore() {
     async markUsed(id) {
       await store.cleanup();
       const row = clients.get(id);
-      if (row) { row.last_used_at = Date.now(); row.expires_at = Date.now() + REGISTRATION_IDLE_SECONDS * 1000; }
+      if (row) { row.last_used_at = Date.now(); if (row.expires_at !== null) row.expires_at = Date.now() + REGISTRATION_IDLE_SECONDS * 1000; }
     },
     async cleanup() {
       let removed = 0;
-      for (const [id, row] of clients) if (row.expires_at <= Date.now()) { clients.delete(id); removed += 1; }
+      for (const [id, row] of clients) if (row.expires_at !== null && row.expires_at <= Date.now()) { clients.delete(id); removed += 1; }
       return removed;
     },
     async list() { await store.cleanup(); return structuredClone([...clients.values()]); },
@@ -248,35 +248,77 @@ export function createMemoryRegistrationStore() {
 // Safe for an internal admin caller; never exposed as an unauthenticated route.
 export const LIST_REGISTRATIONS_SQL = `SELECT client_id, metadata, registered_at, last_used_at, expires_at
   FROM commonswarm_oauth.registered_clients
-  WHERE expires_at > statement_timestamp()
+  WHERE expires_at IS NULL OR expires_at > statement_timestamp()
   ORDER BY registered_at DESC, client_id LIMIT $1`;
 
 export function createPostgresRegistrationStore(pool) {
-  return {
+  async function reconcile(id, { used = false, remove = false } = {}) {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      // Exactly one client per transaction. Never take a second client's DCR
+      // row after streams/families belonging to the first client.
+      const row = (await client.query(`SELECT * FROM commonswarm_oauth.registered_clients
+        WHERE client_id=$1 FOR UPDATE`, [id])).rows[0];
+      if (!row) { await client.query("COMMIT"); return { removed: 0 }; }
+      const families = (await client.query("SELECT * FROM commonswarm_oauth.lock_hosted_client_streams($1)", [id])).rows;
+      let policies = [];
+      // Acquire every family's locks, then revalidate all policies with fresh
+      // statements AFTER the last potential wait. No artifact locks are needed.
+      for (let pass = 0; pass < 2; pass += 1) {
+        policies = [];
+        for (const family of families) {
+          const policy = (await client.query(`SELECT grant_id,state,active,connection_expires_at::text,connection_expired_at
+            FROM commonswarm_oauth.lock_hosted_family($1,$2::uuid,$3,$4)`,
+            [family.provider_grant_id,family.owner_user_id,family.client_id,family.resource])).rows[0];
+          if (policy?.active) policies.push(policy);
+        }
+      }
+      const unbounded = policies.some(policy => policy.connection_expires_at === null);
+      const deadlines = policies.flatMap(policy => policy.connection_expires_at === null ? [] : [policy.connection_expires_at]);
+      const result = await client.query(`WITH usage AS (
+        SELECT $3::boolean AND (expires_at IS NULL OR expires_at>clock_timestamp() OR $2::boolean
+          OR (SELECT max(deadline) FROM unnest($4::timestamptz[]) deadline)>clock_timestamp()) AS allowed
+        FROM commonswarm_oauth.registered_clients WHERE client_id=$1
+      ) UPDATE commonswarm_oauth.registered_clients
+        SET expires_at=CASE WHEN $2 THEN NULL ELSE greatest(
+          coalesce(expires_at,coalesce(last_used_at,registered_at)+interval '30 days'),
+          CASE WHEN (SELECT allowed FROM usage) THEN clock_timestamp()+interval '30 days' ELSE NULL END,
+          (SELECT max(deadline) FROM unnest($4::timestamptz[]) deadline)) END,
+          last_used_at=CASE WHEN (SELECT allowed FROM usage) THEN clock_timestamp() ELSE last_used_at END
+        WHERE client_id=$1 RETURNING *, (expires_at IS NULL OR expires_at>clock_timestamp()) AS live`,
+      [id,unbounded,used,deadlines]);
+      const current = result.rows[0];
+      let removed = 0;
+      if (remove && !current.live) removed = (await client.query(`DELETE FROM commonswarm_oauth.registered_clients
+        WHERE client_id=$1 AND expires_at<=clock_timestamp()`, [id])).rowCount;
+      await client.query("COMMIT");
+      return { row: current.live ? current : undefined, removed };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally { client.release(); }
+  }
+  const store = {
     async upsert(id, metadata) {
       await pool.query(`INSERT INTO commonswarm_oauth.registered_clients (client_id, metadata)
         VALUES ($1, $2::jsonb)`, [id, JSON.stringify(metadata)]);
     },
-    async find(id) {
-      const result = await pool.query(`SELECT metadata FROM commonswarm_oauth.registered_clients
-        WHERE client_id = $1 AND expires_at > statement_timestamp()`, [id]);
-      return result.rows[0]?.metadata;
-    },
+    async find(id) { return (await reconcile(id)).row?.metadata; },
     async destroy(id) {
       await pool.query("DELETE FROM commonswarm_oauth.registered_clients WHERE client_id = $1", [id]);
     },
-    async markUsed(id) {
-      await pool.query(`UPDATE commonswarm_oauth.registered_clients
-        SET last_used_at = statement_timestamp(), expires_at = statement_timestamp() + interval '30 days'
-        WHERE client_id = $1 AND expires_at > statement_timestamp()`, [id]);
-    },
+    async markUsed(id) { await reconcile(id, { used: true }); },
     async cleanup() {
       try {
-        return (await pool.query(`DELETE FROM commonswarm_oauth.registered_clients
-          WHERE expires_at <= statement_timestamp()`)).rowCount;
+        // Read retained raw registrations, including NULL and old technical
+        // deadlines. Reconcile under authority locks BEFORE TTL-only deletion.
+        const candidates = (await pool.query(`SELECT client_id FROM commonswarm_oauth.registered_clients
+          ORDER BY client_id`)).rows;
+        let removed = 0;
+        for (const { client_id: id } of candidates) removed += (await reconcile(id, { remove: true })).removed;
+        return removed;
       } catch (error) {
-        // Maintenance must not abort startup or the hourly retry. Request-time
-        // reads and writes still reject when the database is unavailable.
         const code = typeof error?.code === "string" && /^[A-Z0-9_]{1,40}$/u.test(error.code)
           ? error.code : "UNKNOWN";
         console.error(`mcp-auth registration cleanup failed (${code})`);
@@ -284,7 +326,10 @@ export function createPostgresRegistrationStore(pool) {
     },
     async list(limit = 100) {
       if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new TypeError("invalid listing limit");
+      const candidates = (await pool.query("SELECT client_id FROM commonswarm_oauth.registered_clients ORDER BY client_id")).rows;
+      for (const { client_id: id } of candidates) await reconcile(id);
       return (await pool.query(LIST_REGISTRATIONS_SQL, [limit])).rows;
     },
   };
+  return store;
 }

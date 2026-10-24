@@ -1,3 +1,4 @@
+import { connectionPolicyFields, type ConnectionPolicy } from "./standing-grants";
 import { homeOverviewUnavailable } from "./home-map";
 import type { HomeOverview } from "./home/contract";
 /*
@@ -1122,7 +1123,7 @@ export async function pendingMemberInvites(workspaceId: string): Promise<Pending
   }));
 }
 
-export interface AgentAccessStatus {
+export interface AgentAccessStatus extends ConnectionPolicy {
   workspaceId: string;
   principalId: string;
   ownerUserId: string;
@@ -1214,6 +1215,44 @@ export async function pendingAgentAccess(workspaceId: string): Promise<PendingAg
   }
 }
 
+/** A recognized validation refusal proves the end-date command did not write. */
+export class ConnectionExpiryRefused extends Error {
+  override name = "ConnectionExpiryRefused";
+}
+
+/** Existing command envelope; ownership, liveness and persistence remain server decisions. */
+export async function setConnectionExpiry(
+  session: Session,
+  workspaceId: string,
+  connectionKind: "hosted" | "renewal",
+  grantId: string,
+  connectionExpiresAt: string | null,
+  commandId = uuid(),
+): Promise<void> {
+  const result = await postCommand(session, commandId, {
+    kind: "set_connection_expiry", connection_kind: connectionKind,
+    grant_id: grantId, connection_expires_at: connectionExpiresAt,
+  }, { workspace_id: workspaceId, stream: { kind: "workspace" } },
+  "The end date result is unknown. Check the connection before saving again.");
+  if (result.status === 400) {
+    if (result.body.error === "invalid_connection_expiry") {
+      throw new ConnectionExpiryRefused("Choose a future end date after the server's current time. Nothing was changed.");
+    }
+    if (result.body.error === "invalid_request") {
+      throw new ConnectionExpiryRefused("The server rejected this end date request. Nothing was changed.");
+    }
+    if (result.body.error === "invalid_command") {
+      throw new ConnectionExpiryRefused("End date settings are unavailable on this server. Nothing was changed.");
+    }
+  }
+  if ([404, 405, 501].includes(result.status)) {
+    throw new Error("End date settings are unavailable on this server. Nothing was changed.");
+  }
+  if (result.status !== 200 || result.body.status !== "accepted" || result.body.ok !== true) {
+    throw new Error("The end date was not confirmed. Check the connection before saving again.");
+  }
+}
+
 /** Member-scoped grant status through the read edge; no direct table query. */
 export async function agentAccessStatuses(
   workspaceId: string,
@@ -1247,17 +1286,18 @@ export async function agentAccessStatuses(
     }
     return body.grants
       .map((row): AgentAccessStatus => ({
+        ...connectionPolicyFields(row),
         workspaceId,
         principalId: String(row.principal_id),
         ownerUserId: String(row.owner_user_id),
         agentName: String(row.agent_name),
         model: row.model === null ? null : String(row.model),
-        tokenId: String(row.token_id),
+        tokenId: typeof row.token_id === "string" ? row.token_id : "",
         issuedAt: String(row.issued_at),
         expiresAt: String(row.token_expires_at),
         firstUsedAt: row.first_used_at === null ? null : String(row.first_used_at),
         revokedAt: row.token_revoked_at === null ? null : String(row.token_revoked_at),
-        grantId: String(row.renewal_grant_id),
+        grantId: typeof row.renewal_grant_id === "string" ? row.renewal_grant_id : "",
         grantKind: row.kind === "standing" ? "standing" : "timeboxed",
         horizonExpiresAt: row.horizon_expires_at === null
           ? null

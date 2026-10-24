@@ -1209,23 +1209,15 @@ test("a recipient set cannot be changed, extended with a duplicate, or pointed a
   }
 });
 
-test("a recipient cannot be attached to a signal a different transaction wrote", async () => {
+test("recipients can be attached before and after a business savepoint", async () => {
   const sql = postgres(databaseUrl(), { max: 1 });
   const f = newFixture();
   const sameTransaction = randomUUID();
-  const otherTransaction = randomUUID();
+  const afterSavepoint = randomUUID();
   try {
-    /* WHAT THIS MEASURES, stated exactly. The trigger's predicate is
-     * signal.xmin = the current TOP-LEVEL transaction id. A signal written by
-     * an earlier transaction fails it -- and so does one written by a different
-     * SUBtransaction of this one, which is the same predicate and is the only
-     * form that can be measured without committing rows to a shared database
-     * that refuses every DELETE (swarm.signals is append-only, so a committed
-     * fixture here would be permanent).
-     *
-     * The pair is what makes it a measurement: the signal written before any
-     * savepoint takes its recipient, and the one written after a savepoint --
-     * therefore under a subtransaction id -- does not. */
+    // Both parents belong to this transaction, including the one inserted after
+    // ROLLBACK TO SAVEPOINT. Supplemental committed-parent cases live in
+    // tests/support/signal-savepoint-creation-guard.sql; CI does not invoke it.
     await inRolledBackTx(sql, f, async (tx) => {
       await insertSignal(tx, {
         id: sameTransaction,
@@ -1239,23 +1231,34 @@ test("a recipient cannot be attached to a signal a different transaction wrote",
       await tx`SAVEPOINT boundary`;
       await tx`ROLLBACK TO SAVEPOINT boundary`;
       await insertSignal(tx, {
-        id: otherTransaction,
+        id: afterSavepoint,
         workspaceId: f.workspaceA,
         from: f.owner,
         toUserId: f.second,
         toAgent: null,
         kind: "note",
-        body: "written under a different transaction id",
+        body: "written after the business savepoint",
       });
 
       await addRecipients(tx, sameTransaction, f.workspaceA, [
         { user: f.second },
       ]);
+      await addRecipients(tx, afterSavepoint, f.workspaceA, [{ user: f.second }]);
+      const rows = await tx<{ signal_id: string }[]>`
+        SELECT signal_id FROM swarm.signal_recipients
+        WHERE signal_id IN (${sameTransaction}::uuid, ${afterSavepoint}::uuid)
+      `;
+      assert.deepEqual(
+        new Set(rows.map((row) => row.signal_id)),
+        new Set([sameTransaction, afterSavepoint]),
+      );
+      // The parent is fresh and position 1 is unused; third belongs to B.
+      // This must reach the creation guard's workspace check before the FK.
       await assert.rejects(
-        addRecipients(tx, otherTransaction, f.workspaceA, [{ user: f.second }]),
+        addRecipients(tx, afterSavepoint, f.workspaceB, [{ user: f.third }], 1),
         (error: unknown) =>
-          /can be inserted only with a new signal/.test(String(error)),
-        "who can read an immutable signal cannot be changed after it is written",
+          error instanceof postgres.PostgresError && error.code === "55000",
+        "a fresh signal cannot take a recipient row from another workspace",
       );
     });
   } finally {

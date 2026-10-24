@@ -9,6 +9,8 @@ export interface RenewalGrantStatus {
   principal_id: string;
   kind: "timeboxed" | "standing";
   horizon_expires_at: string | null;
+  connection_expires_at?: string | null;
+  connection_expired_at?: string | null;
   bound_device_id: string | null;
   last_used_at: string | null;
   last_used_device_id: string | null;
@@ -72,6 +74,12 @@ function parseGrant(value: unknown): RenewalGrantStatus {
     principal_id: uuid(row.principal_id, "principal_id"),
     kind: row.kind,
     horizon_expires_at: horizon,
+    ...(row.connection_expires_at === undefined ? {} : {
+      connection_expires_at: nullableTimestamp(row.connection_expires_at, "connection_expires_at"),
+    }),
+    ...(row.connection_expired_at === undefined ? {} : {
+      connection_expired_at: nullableTimestamp(row.connection_expired_at, "connection_expired_at"),
+    }),
     bound_device_id: nullableUuid(row.bound_device_id, "bound_device_id"),
     last_used_at: nullableTimestamp(row.last_used_at, "last_used_at"),
     last_used_device_id: nullableUuid(
@@ -128,13 +136,8 @@ export async function readRenewalGrants(
   return grants.map(parseGrant);
 }
 
-/**
- * Days a standing grant may go unused before it pauses itself.
- *
- * MIRRORS `interval '14 days'` in swarm.prepare_renewal_grant, installed by
- * supabase/migrations/20260904000001_standing_grant_resume.sql, and the same
- * number in site/src/lib/standing-grants.ts. The CLI shares the reducer's
- * constant; tests/p1-cli/standing-grants.test.ts checks the site and SQL mirrors.
+/** Historical idle interval, retained for legacy SQL/protocol compatibility only.
+ * The upgraded catalog does not create idle suspensions.
  */
 export const STANDING_IDLE_PAUSE_DAYS = RENEWAL_IDLE_PAUSE_DAYS;
 
@@ -165,9 +168,8 @@ function orList(items: readonly string[]): string {
 export const STANDING_RESUME_ACTORS_SENTENCE = orList(STANDING_RESUME_ACTORS);
 
 export const STANDING_GRANT_RULES: readonly string[] = [
-  "Access does not expire.",
-  `${STANDING_IDLE_PAUSE_DAYS} days with no use pauses it; ${STANDING_RESUME_ACTORS_SENTENCE} can resume it.`,
-  "Revoking it is the only permanent stop.",
+  "Connection settings are managed by the server.",
+  "Removal, revocation and security restrictions still apply.",
 ];
 
 /**
@@ -182,38 +184,41 @@ export const STANDING_GRANT_RULES: readonly string[] = [
  */
 export function standingPausedRenewalMessage(idle: boolean): string {
   const cause = idle
-    ? `This standing grant went ${STANDING_IDLE_PAUSE_DAYS} days with no use, so CommonSwarm paused it and refused renewal.`
+    ? "This renewal grant has a legacy idle pause, so CommonSwarm refused renewal."
     : "This renewal grant is paused, so CommonSwarm refused renewal.";
-  return `${cause} It is not revoked and this agent is not gone. Next step: ${STANDING_RESUME_ACTORS_SENTENCE} runs cswarm grant resume, then this agent continues.`;
+  return `${cause} It is not revoked and this agent is not gone. Next step: ${STANDING_RESUME_ACTORS_SENTENCE} can run cswarm grant resume for a resumable pause. A workspace owner must resolve any security restrictions before renewal can continue.`;
 }
 
-/**
- * User-facing grant state, tied to server-enforced nullability.
- *
- * THE SUSPENDED LINE NAMED THE WRONG REMEDY. It said "ask a workspace owner to
- * revoke this grant and mint a new credential" — which was the only thing that
- * worked while suspension was one-way, and which told the reader to perform the
- * PERMANENT kill in order to recover from the RECOVERABLE one. A resume now
- * exists, so the line names it and prints the command. Honesty is not
- * sufficient: a state word with no next step is a state word people skip.
- */
+/** Canonical policy must be present and well formed before making lifetime claims. */
+export function describeConnectionPolicy(policy: {
+  connection_expires_at?: string | null;
+  connection_expired_at?: string | null;
+}): string {
+  const expiry = policy.connection_expires_at;
+  const terminal = policy.connection_expired_at;
+  if (expiry === undefined || terminal === undefined ||
+      (expiry !== null && !Number.isFinite(Date.parse(expiry))) ||
+      (terminal !== null && !Number.isFinite(Date.parse(terminal)))) {
+    return "Connection lifetime is server-managed; the server did not return canonical policy.";
+  }
+  if (terminal !== null) return `Connection expired at ${terminal}; it cannot be resumed.`;
+  if (expiry !== null) return `Connection owner-selected expiry: ${expiry}.`;
+  return "Connection has no chosen expiry or idle cutoff. Removal, revocation and security restrictions still apply.";
+}
+
 export function describeRenewalGrant(grant: RenewalGrantStatus): string[] {
-  const lines = grant.kind === "standing"
-    ? [`Grant: standing — ${STANDING_GRANT_RULES.join(" ")}`]
-    : [`Grant: timeboxed — renewal horizon ${grant.horizon_expires_at}.`];
+  const lines = [
+    `Grant: ${grant.kind}${grant.horizon_expires_at === null ? "." : ` — technical renewal horizon ${grant.horizon_expires_at}.`}`,
+    describeConnectionPolicy(grant),
+  ];
   if (grant.suspended_at !== null) {
-    lines.push(
-      `PAUSED since ${grant.suspended_at} after ${STANDING_IDLE_PAUSE_DAYS} days with no use. ` +
-        "This is not revoked and the agent is not gone. Next step: " +
-        `${orList(STANDING_RESUME_ACTORS)} runs ` +
-        `cswarm grant resume --renewal-grant-id ${grant.renewal_grant_id}`,
-    );
+    lines.push(`PAUSED since ${grant.suspended_at}. Renewal is blocked by the server; ask a workspace owner to check the cause.`);
+    if (grant.revoked_at === null && grant.connection_expired_at == null) {
+      lines.push(`For an idle pause, ${STANDING_RESUME_ACTORS_SENTENCE} runs cswarm grant resume. Security restrictions must be resolved by a workspace owner before renewal can continue.`);
+    }
   }
   if (grant.revoked_at !== null) {
-    lines.push(
-      `REVOKED since ${grant.revoked_at}. This is permanent and cannot be resumed. ` +
-        "Next step: mint a new grant if this agent should continue.",
-    );
+    lines.push(`REVOKED since ${grant.revoked_at}. This is permanent and cannot be resumed. Next step: mint a new grant if this agent should continue.`);
   }
   return lines;
 }

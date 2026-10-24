@@ -6,6 +6,7 @@ import {
   agentCredentialRevoked,
   enforceAgentSessionProof,
   loadAgentCredential,
+  planLocalOperation, lockLocalAuthPlan, retryLocalAuthTransaction, LocalCredentialDenied, recheckLocalCredential,
 } from "../_shared/agent-auth.ts";
 import { parseAgentSessionProofHeaders } from "../../../src/cloud/session-wire.ts";
 import { activityFailureResult } from "../command/failures.ts";
@@ -81,6 +82,9 @@ async function boundedJson(request: Request): Promise<unknown> {
   }
 }
 
+class LocalActivityRefused extends Error {
+  constructor(readonly response:Response) { super('Activity credential operation refused'); }
+}
 async function handle(request: Request): Promise<Response> {
   if (presentsAdminCredential(request)) {
     return json(401, { error: "unauthenticated" });
@@ -98,7 +102,8 @@ async function handle(request: Request): Promise<Response> {
 
   // One BEGIN with the isolation level and one statement for the local settings:
   // each round trip costs about 110 ms from the Falkenstein box to us-east-1.
-  return await db.begin("isolation level read committed", async (tx) => {
+  return await retryLocalAuthTransaction(()=>db.begin("isolation level read committed", async (tx) => {
+    const result=await (async()=>{
     await tx`
       SELECT
         set_config('role', 'swarm_command', true),
@@ -106,7 +111,9 @@ async function handle(request: Request): Promise<Response> {
         set_config('lock_timeout', '5s', true)
     `;
 
-    const agent = await loadAgentCredential(tx, tokenHash);
+    const plan=await planLocalOperation(tx,{hash:tokenHash});
+    if(plan) await lockLocalAuthPlan(tx,plan);
+    const agent = plan ? await loadAgentCredential(tx, tokenHash, plan) : null;
     if (agent === null) return json(401, { error: "unauthenticated" });
     if (agent.transport !== "local") {
       return json(403, { error: "transport_unavailable" });
@@ -168,6 +175,8 @@ async function handle(request: Request): Promise<Response> {
     // Restore the connection role only after every caller-controlled value has
     // passed the closed parser and agent/workspace authorization above. The
     // one privileged statement receives a derived topic and bound parameters.
+    if (!plan || !await loadAgentCredential(tx,tokenHash,plan)) return json(403,{error:'forbidden'});
+    await tx`SELECT swarm.record_renewal_grant_use(${agent.token_id}::uuid,${agent.device_id}::uuid,NULL)`;
     await tx.unsafe("RESET ROLE");
     await tx.unsafe("SET LOCAL search_path = pg_catalog");
     await tx`
@@ -178,8 +187,20 @@ async function handle(request: Request): Promise<Response> {
         true
       )
     `;
+    // realtime.send may wait. Its row/notification is transactional: validate
+    // after that final wait, and roll the entire send back if authority elapsed.
+    await tx`SELECT set_config('role','swarm_command',true)`;
+    const finalAgent=await recheckLocalCredential(tx,tokenHash,plan);
+    const finalSession=finalAgent ? await enforceAgentSessionProof(tx,{
+      principalId:finalAgent.principal_id,workspaceId:finalAgent.principal_workspace_id,
+      proofParse:parseAgentSessionProofHeaders(request.headers),
+    }) : null;
+    if(!finalAgent || !finalSession?.ok) return json(403,{error:'forbidden'});
     return json(202, { status: "accepted" });
-  });
+    })();
+    if(result.status>=400) throw new LocalActivityRefused(result);
+    return result;
+  }).catch(error=>{if(error instanceof LocalActivityRefused) return error.response;if(error instanceof LocalCredentialDenied) return json(403,{error:'forbidden'});throw error;}));
 }
 
 Deno.serve((request) =>

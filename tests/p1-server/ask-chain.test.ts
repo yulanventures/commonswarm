@@ -1,5 +1,6 @@
 /** T3 ask-chain and ask-rate behavior against the served edge and real Postgres. */
 import assert from "node:assert/strict";
+import { privateCommandFailureCapture } from "../support/admin-principal-lock-order-harness.mjs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -45,6 +46,7 @@ let local: LocalEnvironment;
 let sql: postgres.Sql;
 let admin: SupabaseClient;
 let fixture: Fixture;
+const commandDiagnostics = privateCommandFailureCapture("ask-chain-command");
 let functionProcess: ReturnType<typeof spawn>;
 let functionLogs = "";
 let envDir: string | undefined;
@@ -282,28 +284,33 @@ before(async () => {
   };
   functionProcess.stdout?.on("data", capture);
   functionProcess.stderr?.on("data", capture);
+  functionProcess.stderr?.on("data", commandDiagnostics.capture);
   const bootDeadline = Date.now() + 60_000;
   while (!functionLogs.includes("Serving functions on")) {
-    if (Date.now() > bootDeadline) throw new Error(`functions serve never booted:\n${functionLogs.slice(-4000)}`);
+    if (Date.now() > bootDeadline) throw new Error("functions serve never booted; private command diagnostics retained");
     await delay(250);
   }
   await awaitFunctionRunning({
     url: `${local.API_URL}/functions/v1/command`, fetcher: fetch, timeoutMs: 30_000,
     sleep: (ms) => delay(ms), now: () => Date.now(),
-    diagnostics: () => `command function logs:\n${functionLogs.slice(-5000)}`,
+    diagnostics: () => "command readiness failed; private command diagnostics retained",
   });
 });
 
 after(async () => {
-  if (functionProcess && functionProcess.exitCode === null) {
-    const exited = new Promise<boolean>((resolve) => functionProcess.once("close", () => resolve(true)));
-    functionProcess.kill();
-    if (!await Promise.race([exited, delay(2_000).then(() => false)]) && functionProcess.exitCode === null) {
-      functionProcess.kill("SIGKILL");
+  try {
+    commandDiagnostics.retain();
+  } finally {
+    if (functionProcess && functionProcess.exitCode === null) {
+      const exited = new Promise<boolean>((resolve) => functionProcess.once("close", () => resolve(true)));
+      functionProcess.kill();
+      if (!await Promise.race([exited, delay(2_000).then(() => false)]) && functionProcess.exitCode === null) {
+        functionProcess.kill("SIGKILL");
+      }
     }
+    await sql?.end({ timeout: 5 });
+    if (envDir) rmSync(envDir, { recursive: true, force: true });
   }
-  await sql?.end({ timeout: 5 });
-  if (envDir) rmSync(envDir, { recursive: true, force: true });
 });
 
 test("old clients post root asks and a two-hop chain stores deduplicated participants", async () => {

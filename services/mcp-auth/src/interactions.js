@@ -605,6 +605,17 @@ export function createInteractionHandler({
         homeWorkspaceId: body.home_workspace_id,
         grantId: consent.commonswarm_grant_id,
       });
+      // Activation and provider persistence have separate idempotent retries.
+      // A crash or revocation at either boundary must not reach finish/code.
+      if (provider.Grant.adapter?.promoteHostedGrant) {
+        await provider.Grant.adapter.promoteHostedGrant(consent.provider_grant_id, {
+          hostedGrantId: consent.commonswarm_grant_id,
+          accountId: session.user_id,
+          clientId: consent.client_id,
+        });
+        grant = await provider.Grant.find(consent.provider_grant_id);
+        if (!grant) throw new errors.InvalidGrant("activated Grant unavailable");
+      }
     } catch (error) {
       const progress = await consentOrchestrator.status?.(interactionUid) ??
         (error.consentProgress?.succeeded ?? []).map((step) => ({ ...step, complete: true }));

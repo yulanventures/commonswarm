@@ -2,7 +2,16 @@
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { catalog, dbAssert, refuses, repoSql, runSql } from '../support/admin-schema-db.js';
+import { catalog as catalogSql, dbAssert as assertSql, refuses as refusesSql, repoSql, runSql } from '../support/admin-schema-db.js';
+
+import { sqlPhase } from '../support/admin-schema-process.js';
+
+// Fixed statement identities are safe to print; SQL and driver text stay private.
+let statement = 0;
+const phase = (label: string, sql: string) => sqlPhase(`issuer-${label.replace(/[^a-z0-9_.-]+/g, '-').slice(0,80)}-${++statement}`, sql);
+const dbAssert = (expression: string, label: string) => phase(`assert-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0,65)}`, assertSql(expression, label));
+const refuses = (sql: string, state: string) => phase(`denial-${state.toLowerCase()}`, refusesSql(sql, state));
+const catalog = (version: string, rollback = false, expect = true) => phase(`catalog-${version}-${expect}`, catalogSql(version, rollback, expect));
 
 const allowlist = JSON.parse(readFileSync(new URL('../support/admin-issuer-privileges.json', import.meta.url), 'utf8'));
 // Household permissions: lane 2 reads with FOR SHARE; M5 permits provisioning
@@ -22,6 +31,12 @@ const allowlist = JSON.parse(readFileSync(new URL('../support/admin-issuer-privi
 // the issuer must still be unable to select it or read auth tables directly.
 // P4 adds finish SELECT and column-only INSERT/UPDATE. Inventory those exact
 // grants; mutation controls must still reject writes to binding and deadline columns.
+// S1b/S2 private helpers: pin signatures and the sole non-owner EXECUTE grant.
+// Keep these separate from the migrated read-only context resolver below.
+const hostedHelpers = [
+  'commonswarm_oauth.lock_hosted_family(text,uuid,text,text)',
+  'commonswarm_oauth.lock_hosted_client_streams(text)',
+];
 // The read-only context resolver adds only this command-parent EXECUTE ACL.
 // Keep its exact signature and grantability literal; no OAuth/issuer allowance.
 const literal = JSON.stringify([
@@ -101,6 +116,14 @@ BEGIN
  IF unexpected IS NOT NULL THEN
    RAISE EXCEPTION 'issuer privilege widening (grantee/kind/object/privilege/grantable):%',E'\n'||unexpected USING ERRCODE='ZX002';
  END IF;
+ IF (SELECT count(*) FROM pg_proc p
+   WHERE p.oid IN (${hostedHelpers.map(signature => `'${signature}'::regprocedure`).join(',')})
+     AND p.proowner='swarm_admin'::regrole
+     AND (SELECT count(*)=1 AND bool_and(a.grantee='commonswarm_oauth_runtime'::regrole
+       AND a.privilege_type='EXECUTE' AND NOT a.is_grantable)
+       FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee<>p.proowner))<>2 THEN
+   RAISE EXCEPTION 'hosted helper owner or private EXECUTE grant changed' USING ERRCODE='ZX002';
+ END IF;
  IF (SELECT array_agg(r.rolname::text ORDER BY r.rolname) FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.roleid
    WHERE m.member='commonswarm_admin_issuer'::regrole AND NOT m.admin_option AND NOT m.inherit_option AND m.set_option)
    IS DISTINCT FROM ARRAY['commonswarm_oauth_runtime','swarm_command']::text[]
@@ -147,41 +170,64 @@ REVOKE EXECUTE ON FUNCTION pg_temp.assert_issuer() FROM PUBLIC;
 test('admin-issuer-privileges: enumerate reachable roles, options, ownership and direct grants against literal allowlist with mutation controls', () => {
   const grantor = `ai_issuer_grantor_${randomUUID().replaceAll('-', '')}`;
   const issuerGuard = repoSql('supabase/migrations/20261003000002_admin_oauth_policy.sql').match(/DO \$issuer\$[\s\S]*?END \$issuer\$;/)![0];
-  runSql(`${inventory}
-SELECT pg_temp.assert_issuer();
+  runSql(`${phase('inventory', inventory)}
+${phase('inventory-assert', 'SELECT pg_temp.assert_issuer();')}
 ${catalog('20261003000002')}
 -- Reproduce production's constrained applying principal even when CI initially
 -- applied M2 as a superuser. All role/edge changes roll back with this fixture.
 ${repoSql('supabase/admin-delegation-reserve/20261003000002-rollback.sql').match(/DO \$issuer_memberships\$[\s\S]*?END \$issuer_memberships\$;/)![0]}
+${phase('create-role', '')}
 CREATE ROLE ${grantor} NOLOGIN NOINHERIT CREATEROLE NOSUPERUSER NOBYPASSRLS;
+${phase('grant-commonswarm_admin_issuer,commonswarm_oauth_runtime,swarm_command', '')}
 GRANT commonswarm_admin_issuer,commonswarm_oauth_runtime,swarm_command TO ${grantor} WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;
+${phase('set-local', '')}
 SET LOCAL ROLE ${grantor};
-${issuerGuard}
+${phase('issuer-membership-guard', issuerGuard)}
+${phase('reset-role;', '')}
 RESET ROLE;
 ${dbAssert(`SELECT count(*)=2 AND bool_and(grantor='${grantor}'::regrole) FROM pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole`, 'both issuer edges have a different constrained grantor')}
-SELECT pg_temp.assert_issuer();
+${phase('inventory-assert', 'SELECT pg_temp.assert_issuer();')}
+${phase('savepoint-duplicate_grantor;', '')}
 SAVEPOINT duplicate_grantor;
+${phase('grant-swarm_command', '')}
 GRANT swarm_command TO commonswarm_admin_issuer WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
 ${dbAssert("SELECT count(*)=3 FROM pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole", 'unqualified administrator grant creates a third edge')}
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+${phase('rollback-to', '')}
 ROLLBACK TO SAVEPOINT duplicate_grantor;
-SELECT pg_temp.assert_issuer();
+${phase('inventory-assert', 'SELECT pg_temp.assert_issuer();')}
+${phase('grant-execute', '')}
 GRANT EXECUTE ON FUNCTION pg_temp.assert_issuer() TO PUBLIC;
 ${dbAssert("SELECT count(*)=1 AND bool_and(privilege=jsonb_build_array('PUBLIC','FUNCTION',(SELECT nspname FROM pg_namespace WHERE oid=pg_my_temp_schema())||'.assert_issuer()','EXECUTE',false)) FROM issuer_widening", 'temporary PUBLIC EXECUTE is the offending inventory row')}
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+${phase('revoke-execute', '')}
 REVOKE EXECUTE ON FUNCTION pg_temp.assert_issuer() FROM PUBLIC;
-SELECT pg_temp.assert_issuer();
+${phase('inventory-assert', 'SELECT pg_temp.assert_issuer();')}
 ${dbAssert('SELECT count(*)>200 FROM issuer_acl_inventory', 'enumeration positive control includes existing command and runtime grants')}
+-- Each mutation is paired with an intact inventory before and after rollback.
+${hostedHelpers.map(signature => `
+${dbAssert(`SELECT has_function_privilege('commonswarm_oauth_runtime','${signature}','EXECUTE') AND NOT has_function_privilege('commonswarm_oauth_runtime','${signature}','EXECUTE WITH GRANT OPTION')`, 'runtime helper EXECUTE is usable and nongrantable')}
+${[
+  'GRANT EXECUTE ON FUNCTION ' + signature + ' TO commonswarm_oauth_runtime WITH GRANT OPTION;',
+  ...['commonswarm_admin_issuer','swarm_command','anon','authenticated','swarm_read','PUBLIC'].map(role =>
+    'GRANT EXECUTE ON FUNCTION ' + signature + ' TO ' + role + ';'),
+].map(mutation => `SAVEPOINT hosted_helper_mutation;
+${phase('acl-mutation', mutation)}
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+${phase('rollback-to', '')}
+ROLLBACK TO SAVEPOINT hosted_helper_mutation;
+${phase('inventory-assert', 'SELECT pg_temp.assert_issuer();')}`).join('\n')}`).join('\n')}
 -- The new literal permits neither grant options nor another callable role.
 ${[
   'GRANT EXECUTE ON FUNCTION swarm.resolve_hosted_mcp_connection_context(uuid,text,text,uuid,text) TO swarm_command WITH GRANT OPTION;',
   'GRANT EXECUTE ON FUNCTION swarm.resolve_hosted_mcp_connection_context(uuid,text,text,uuid,text) TO commonswarm_oauth_runtime;',
 ].map(mutation => `SAVEPOINT context_acl_mutation;
-${mutation}
+${phase('acl-mutation', mutation)}
 ${dbAssert("SELECT count(*)=1 FROM issuer_widening", 'context mutation adds exactly one offending ACL')}
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+${phase('rollback-to', '')}
 ROLLBACK TO SAVEPOINT context_acl_mutation;
-SELECT pg_temp.assert_issuer();`).join('\n')}
+${phase('inventory-assert', 'SELECT pg_temp.assert_issuer();')}`).join('\n')}
 
 -- Hosted restrictions allow only the five non-grantable migration ACLs.
 ${[
@@ -194,60 +240,82 @@ ${[
   'GRANT UPDATE (origin) ON swarm.household_hosted_content_restrictions TO swarm_command WITH GRANT OPTION;',
   'GRANT UPDATE (closed_target_replacements) ON swarm.household_hosted_content_restrictions TO swarm_command WITH GRANT OPTION;',
 ].map(mutation => `SAVEPOINT hosted_restriction_acl_mutation;
-${mutation}
+${phase('acl-mutation', mutation)}
 ${dbAssert("SELECT count(*)=1 FROM issuer_widening", 'hosted restriction mutation adds exactly one offending ACL')}
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+${phase('rollback-to', '')}
 ROLLBACK TO SAVEPOINT hosted_restriction_acl_mutation;
-SELECT pg_temp.assert_issuer();`).join('\n')}
+${phase('inventory-assert', 'SELECT pg_temp.assert_issuer();')}`).join('\n')}
 
 ${[
   ['household_workspace_boundaries','workspace_id','purpose','workspace_id'],
   ['household_member_content_roles','workspace_id','user_id','workspace_id,content_role,content_consent_id,confirmed_at,revoked_at'],
   ['household_content_connections','connection_id','purpose','connection_id,operations,consent_receipt_id,expires_at,revoked_at'],
 ].map(([table,key,nonkey,updateColumns]) => `
+${phase('set-local', '')}
 SET LOCAL ROLE swarm_command;
+${phase('select-read', '')}
 SELECT * FROM swarm.${table} WHERE false FOR SHARE;
 INSERT INTO swarm.${table} SELECT * FROM swarm.${table} WHERE false;
 ${table === 'household_member_content_roles' ? 'UPDATE swarm.' + table + ' SET content_role=content_role WHERE false;'
   : table === 'household_content_connections' ? 'UPDATE swarm.' + table + ' SET operations=operations WHERE false;' : ''}
 ${refuses(`UPDATE swarm.${table} SET ${nonkey}=${nonkey} WHERE false`,'42501')}
+${phase('reset-role;', '')}
 RESET ROLE;
+${phase('savepoint-household_lock_control;', '')}
 SAVEPOINT household_lock_control;
+${phase('revoke-update', '')}
 REVOKE UPDATE (${updateColumns}) ON swarm.${table} FROM swarm_command;
+${phase('set-local', '')}
 SET LOCAL ROLE swarm_command;
+${phase('select-read', '')}
 SELECT * FROM swarm.${table} WHERE false;
 ${refuses(`SELECT * FROM swarm.${table} WHERE false FOR SHARE`,'42501')}
+${phase('reset-role;', '')}
 RESET ROLE;
+${phase('rollback-to', '')}
 ROLLBACK TO SAVEPOINT household_lock_control;
+${phase('set-local', '')}
 SET LOCAL ROLE swarm_command;
+${phase('select-read', '')}
 SELECT * FROM swarm.${table} WHERE false FOR SHARE;
+${phase('reset-role;', '')}
 RESET ROLE;
-SELECT pg_temp.assert_issuer();
+${phase('inventory-assert', 'SELECT pg_temp.assert_issuer();')}
 ${[`DELETE`,`INSERT (${key})`,`UPDATE`,`UPDATE (${nonkey})`,`UPDATE (${key}) WITH GRANT OPTION`].map(privilege => {
   const grant = privilege.endsWith(' WITH GRANT OPTION')
     ? `GRANT UPDATE (${key}) ON swarm.${table} TO swarm_command WITH GRANT OPTION;`
     : `GRANT ${privilege} ON swarm.${table} TO swarm_command;`;
   return `SAVEPOINT household_acl_mutation;
-${grant}
+${phase('household-acl-mutation', grant)}
 ${dbAssert("SELECT count(*)=1 FROM issuer_widening", 'household mutation adds exactly one offending ACL')}
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+${phase('rollback-to', '')}
 ROLLBACK TO SAVEPOINT household_acl_mutation;
-SELECT pg_temp.assert_issuer();`;
+${phase('inventory-assert', 'SELECT pg_temp.assert_issuer();')}`;
 }).join('\n')}`).join('\n')}
 ${dbAssert("SELECT NOT pg_has_role('commonswarm_admin_issuer','swarm_command','USAGE') AND pg_has_role('commonswarm_admin_issuer','swarm_command','SET')", 'no inherited command authority')}
 -- SET ROLE checks the session user, not a previously selected current_user.
 -- Use the cluster admin only to establish the real issuer session identity.
+${phase('set-local', '')}
 SET LOCAL SESSION AUTHORIZATION commonswarm_admin_issuer;
 ${dbAssert("SELECT session_user='commonswarm_admin_issuer' AND current_user=session_user", 'issuer session identity positive')}
 ${refuses('SELECT * FROM swarm.admin_accounts','42501')}
+${phase('set-local', '')}
 SET LOCAL ROLE commonswarm_oauth_runtime;
 ${dbAssert("SELECT session_user='commonswarm_admin_issuer' AND current_user='commonswarm_oauth_runtime'", 'issuer can select OAuth parent')}
+${phase('select-read', '')}
 SELECT * FROM commonswarm_oauth.provider_artifacts;
+${phase('reset-role;', '')}
 RESET ROLE;
+${phase('set-local', '')}
 SET LOCAL ROLE swarm_command;
 ${dbAssert("SELECT session_user='commonswarm_admin_issuer' AND current_user='swarm_command'", 'issuer can select command parent')}
+${phase('select-read', '')}
 SELECT * FROM swarm.admin_accounts;
+${phase('reset-role;', '')}
 RESET ROLE;
+${phase('role-denials', '')}
 DO $role_denials$
 DECLARE target text; tested integer := 0;
 BEGIN
@@ -263,14 +331,19 @@ BEGIN
 END $role_denials$;
 ${dbAssert("SELECT session_user='commonswarm_admin_issuer' AND current_user=session_user", 'role denials retain issuer identity')}
 ${refuses('SELECT * FROM swarm.admin_accounts','42501')}
+${phase('reset-session', '')}
 RESET SESSION AUTHORIZATION;
 ${catalog('20261003000002')}
+${phase('grant-select', '')}
 GRANT SELECT ON swarm.admin_accounts TO commonswarm_admin_issuer;
 ${catalog('20261003000002',false,false)}
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+${phase('revoke-select', '')}
 REVOKE SELECT ON swarm.admin_accounts FROM commonswarm_admin_issuer;
+${phase('grant-delete', '')}
 GRANT DELETE ON swarm.admin_accounts TO swarm_command;
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+${phase('revoke-delete', '')}
 REVOKE DELETE ON swarm.admin_accounts FROM swarm_command;
 -- Mutate the existing edge, not a second edge owned by the test administrator.
 -- M2 may have been applied by a different, constrained release principal.
@@ -289,21 +362,30 @@ BEGIN
     WHERE m.member='commonswarm_admin_issuer'::regrole AND m.roleid='swarm_command'::regrole;
   EXECUTE format('GRANT swarm_command TO commonswarm_admin_issuer WITH ADMIN FALSE, INHERIT FALSE, SET TRUE GRANTED BY %I',grantor_name);
 END $membership_restore$;
-SELECT pg_temp.assert_issuer();`).join('\n')}
+${phase('inventory-assert', 'SELECT pg_temp.assert_issuer();')}`).join('\n')}
+${phase('grant-swarm_read', '')}
 GRANT swarm_read TO swarm_command WITH INHERIT TRUE, SET TRUE;
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+${phase('revoke-swarm_read', '')}
 REVOKE swarm_read FROM swarm_command;
+${phase('create-table', '')}
 CREATE TABLE public.issuer_mutation_control(id integer);
+${phase('grant-insert', '')}
 GRANT INSERT ON public.issuer_mutation_control TO commonswarm_oauth_runtime;
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+${phase('revoke-insert', '')}
 REVOKE INSERT ON public.issuer_mutation_control FROM commonswarm_oauth_runtime;
+${phase('grant-select', '')}
 GRANT SELECT ON public.issuer_mutation_control TO PUBLIC;
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+${phase('revoke-select', '')}
 REVOKE SELECT ON public.issuer_mutation_control FROM PUBLIC;
+${phase('alter-table', '')}
 ALTER TABLE public.issuer_mutation_control OWNER TO commonswarm_admin_issuer;
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+${phase('alter-table', '')}
 ALTER TABLE public.issuer_mutation_control OWNER TO supabase_admin;
-SELECT pg_temp.assert_issuer();
+${phase('inventory-assert', 'SELECT pg_temp.assert_issuer();')}
 -- Paired mutations prove the guard's column grants, ownership and role options
 -- remain bounded by the literal inventory; each rollback restores the control.
 ${[
@@ -312,10 +394,11 @@ ${[
   'GRANT CREATE ON SCHEMA public TO commonswarm_oauth_session_guard; ALTER TABLE public.issuer_mutation_control OWNER TO commonswarm_oauth_session_guard; REVOKE CREATE ON SCHEMA public FROM commonswarm_oauth_session_guard;',
   'ALTER ROLE commonswarm_oauth_session_guard LOGIN;',
 ].map(mutation => `SAVEPOINT session_guard_mutation;
-${mutation}
+${phase('acl-mutation', mutation)}
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+${phase('rollback-to', '')}
 ROLLBACK TO SAVEPOINT session_guard_mutation;
-SELECT pg_temp.assert_issuer();`).join('\n')}
+${phase('inventory-assert', 'SELECT pg_temp.assert_issuer();')}`).join('\n')}
 -- P4 grants only resume-state writes, never mutable identity/request/deadline.
 ${[
   'GRANT UPDATE (user_id) ON commonswarm_oauth.finish_records TO commonswarm_oauth_runtime;',
@@ -323,22 +406,30 @@ ${[
   'GRANT INSERT (resume_response) ON commonswarm_oauth.finish_records TO commonswarm_oauth_runtime;',
   'GRANT DELETE ON commonswarm_oauth.finish_records TO commonswarm_oauth_runtime;',
 ].map(mutation => `SAVEPOINT finish_mutation;
-${mutation}
+${phase('acl-mutation', mutation)}
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+${phase('rollback-to', '')}
 ROLLBACK TO SAVEPOINT finish_mutation;
-SELECT pg_temp.assert_issuer();`).join('\n')}
+${phase('inventory-assert', 'SELECT pg_temp.assert_issuer();')}`).join('\n')}
+${phase('create-function', '')}
 CREATE FUNCTION public.issuer_function_mutation() RETURNS boolean LANGUAGE sql AS 'SELECT true';
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+${phase('revoke-all', '')}
 REVOKE ALL ON FUNCTION public.issuer_function_mutation() FROM PUBLIC;
+${phase('grant-usage', '')}
 GRANT USAGE ON TYPE commonswarm_oauth.admin_security_reason TO PUBLIC;
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+${phase('revoke-usage', '')}
 REVOKE USAGE ON TYPE commonswarm_oauth.admin_security_reason FROM PUBLIC;
 ${['commonswarm_admin_issuer','commonswarm_oauth_runtime','swarm_command'].map(role => `GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_file(text) TO ${role};
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+${phase('revoke-execute', '')}
 REVOKE EXECUTE ON FUNCTION pg_catalog.pg_read_file(text) FROM ${role};`).join('\n')}
+${phase('alter-role', '')}
 ALTER ROLE commonswarm_admin_issuer INHERIT;
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+${phase('alter-role', '')}
 ALTER ROLE commonswarm_admin_issuer NOINHERIT;
-SELECT pg_temp.assert_issuer();
+${phase('inventory-assert', 'SELECT pg_temp.assert_issuer();')}
 `);
 });

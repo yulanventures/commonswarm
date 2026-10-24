@@ -1,6 +1,7 @@
 /** H0's in-process request adapter to the command edge. Authority stays in command/index.ts. */
 import type postgres from "npm:postgres@3.4.9";
 import { isAdminCredential, presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
+import { discoverLocalCredential, LocalCredentialDenied } from "../_shared/agent-auth.ts";
 import { CLIENT_PROTOCOL_VERSION } from "../../../src/cloud/config.ts";
 import { commandRequiredConfig } from "../command/required-config.ts";
 import { H0_CACHE_CONTROL, H0_ROBOTS_TAG } from "./core.ts";
@@ -69,14 +70,19 @@ async function workspaceForToken(token: string | null, database: postgres.Sql): 
   const hash = new Uint8Array(
     await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token)),
   );
-  const rows = await database<[{ workspace_id: string }]>`
-    SELECT p.workspace_id::text
-    FROM swarm.agent_tokens AS t
-    JOIN swarm.agent_principals AS p ON p.principal_id = t.principal_id
-    WHERE t.token_hash = ${hash}
-    LIMIT 1
-  `;
-  return rows[0]?.workspace_id ?? crypto.randomUUID();
+  try {
+    const credential = await database.begin(async (tx) => {
+      // Discovery is a routing hint; command performs authoritative admission.
+      await tx`SELECT set_config('role','swarm_command',true)`;
+      return await discoverLocalCredential(tx, hash);
+    });
+    return credential?.workspace_id ?? crypto.randomUUID();
+  } catch (error) {
+    // A known denial still enters command's existing authoritative 403 path.
+    // Only the owned denial may fall back; unexpected SQL failures propagate.
+    if (error instanceof LocalCredentialDenied) return crypto.randomUUID();
+    throw error;
+  }
 }
 
 async function commandResponse(response: Response, verb: H0ForwardVerb): Promise<Response> {

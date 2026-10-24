@@ -76,8 +76,8 @@ export function hasFreshInteractiveAuth(
 }
 
 /**
- * Membership commands a stale interactive session must not run. Idempotency
- * replay stays in front of this check: a stored result is returned as stored.
+ * Membership commands use the existing AMR age bounds.
+ * Membership handlers resolve stored replay first.
  */
 export const FRESH_INTERACTIVE_COMMAND_KINDS = [
   "remove_member",

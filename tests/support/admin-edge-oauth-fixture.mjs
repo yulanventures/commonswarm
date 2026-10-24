@@ -3,9 +3,11 @@
 import { adminTokenDigest, base64url } from '../../supabase/functions/_shared/admin-oauth-auth.ts';
 import * as policy from '../../supabase/functions/_shared/protocol.js';
 const encode = value => base64url(new TextEncoder().encode(JSON.stringify(value)));
-export async function oauthFixture(db, grantId, signing, kid) {
+export async function oauthFixture(db, grantId, signing, kid, initialIssuance = null) {
+  const jose = initialIssuance ? await import((await import('node:module')).createRequire(
+    new URL('../../services/mcp-auth/package.json', import.meta.url)).resolve('jose')) : null;
   const keys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign','verify']);
-  const jwk = await crypto.subtle.exportKey('jwk', keys.publicKey);
+  const jwk = jose ? await jose.exportJWK(keys.publicKey) : await crypto.subtle.exportKey('jwk', keys.publicKey);
   const jkt = base64url(await adminTokenDigest(JSON.stringify({ crv: 'P-256', kty: 'EC', x: jwk.x, y: jwk.y })));
   const [account] = await db`SELECT projection, stream_id, seq FROM swarm.admin_accounts
     WHERE owner_user_id=(SELECT owner_user_id FROM swarm.admin_grants WHERE grant_id=${grantId}::uuid)`;
@@ -38,14 +40,15 @@ export async function oauthFixture(db, grantId, signing, kid) {
   // JWT integer issue time must not precede millisecond consent activation.
   await new Promise(resolve => setTimeout(resolve, 1100));
   const now = Math.floor(Date.now()/1000);
-  const claims = { iss:'https://mcp.commonswarm.com',aud:g.resource,sub:g.owner_user_id,grant_class:'delegated_admin',grant_id:provider,
+  let claims = { iss:'https://mcp.commonswarm.com',aud:g.resource,sub:g.owner_user_id,grant_class:'delegated_admin',grant_id:provider,
     admin_grant_id:g.grant_id,admin_identity_id:g.admin_identity_id,connection_id:g.connection_id,client_id:g.client_id,scope:g.scope_names.join(' '),
     registry_version:g.registry_version,manifest_digest:g.manifest_digest,cnf:{jkt},jti:crypto.randomUUID(),iat:now,exp:now+300 };
-  const sign = async (header, body, key) => {
+  const sign = jose ? async (header, body, key) => new jose.SignJWT(body).setProtectedHeader(header).sign(key)
+    : async (header, body, key) => {
     const bytes = `${encode(header)}.${encode(body)}`;
     return `${bytes}.${base64url(new Uint8Array(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},key,new TextEncoder().encode(bytes))))}`;
   };
-  const access = await sign({typ:'at+jwt',alg:'ES256',kid},claims,signing.privateKey);
+  let access = initialIssuance ? null : await sign({typ:'at+jwt',alg:'ES256',kid},claims,signing.privateKey);
   const record = async (access, claims, generation=0, rowScopes=g.scope_names, rollback=false) => {
     const marker = new Error('fixture_issuance_rollback');
     await db.begin(async tx => {
@@ -67,7 +70,8 @@ export async function oauthFixture(db, grantId, signing, kid) {
       if (rollback) throw marker;
     }).catch(error=>{if(error!==marker)throw error;});
   };
-  await record(access,claims);
+  if (initialIssuance) ({ access, claims } = await initialIssuance({ g, provider, keys, jwk, jkt, sign, claims, signing, kid }));
+  else await record(access,claims);
   let nonce = base64url(crypto.getRandomValues(new Uint8Array(32)));
   await db.begin(async tx => {
     await tx`SELECT set_config('role','commonswarm_oauth_runtime',true)`;

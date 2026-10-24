@@ -1325,7 +1325,7 @@ test("a revoked unused seat cannot be revived by retrying its attempt", async (t
   });
 });
 
-test("a registered seat renews with a short successor inside its seat horizon", async () => {
+test("a registered standing seat renews with a short successor", async () => {
   const g = await createFixture();
   const credential = await mintJoinCredential(g, 1);
   const registered = await registrationCommand(credential.secret, randomUUID(), "renewing seat");
@@ -1335,9 +1335,11 @@ test("a registered seat renews with a short successor inside its seat horizon", 
   const before = await sql<{
     issued_at: Date;
     expires_at: Date;
-    horizon_expires_at: Date;
+    kind: string;
+    max_successors: number | null;
+    horizon_expires_at: Date | null;
   }[]>`
-    SELECT t.issued_at, t.expires_at, g.horizon_expires_at
+    SELECT t.issued_at, t.expires_at, g.kind, g.max_successors, g.horizon_expires_at
     FROM swarm.agent_tokens AS t
     JOIN swarm.renewal_grants AS g ON g.renewal_grant_id = t.renewal_grant_id
     WHERE t.token_id = ${tokenId}::uuid
@@ -1347,10 +1349,13 @@ test("a registered seat renews with a short successor inside its seat horizon", 
     before[0].expires_at.getTime() - before[0].issued_at.getTime(),
     H0_SEAT_TOKEN_TTL_MS,
   );
-  assert.equal(before[0].horizon_expires_at.getTime(), before[0].expires_at.getTime());
+  assert.equal(before[0].kind, "standing");
+  assert.equal(before[0].max_successors, null);
+  assert.equal(before[0].horizon_expires_at, null);
 
   const used = await useSeatToken(g, token, "before-renewal");
   assert.equal(used.status, 200, JSON.stringify(used.body));
+  const [renewalStart] = await sql<{ now: Date }[]>`SELECT clock_timestamp() AS now`;
   const renewed = await command(
     token,
     { kind: "renew_agent_token" },
@@ -1358,15 +1363,16 @@ test("a registered seat renews with a short successor inside its seat horizon", 
     g.workspace,
   );
   assert.equal(renewed.status, 200, JSON.stringify(renewed.body));
-  const successor = await sql<{ issued_at: Date; expires_at: Date }[]>`
-    SELECT issued_at, expires_at
+  const successor = await sql<{ expires_at: Date; observed_at: Date }[]>`
+    SELECT expires_at, clock_timestamp() AS observed_at
     FROM swarm.agent_tokens
     WHERE token_id = ${String(renewed.body.token_id)}::uuid
   `;
   assert.ok(successor[0]);
-  const successorTtl = successor[0].expires_at.getTime() - successor[0].issued_at.getTime();
-  assert.ok(Math.abs(successorTtl - AGENT_TOKEN_DEFAULT_TTL_MS) < 10_000);
-  assert.ok(successor[0].expires_at.getTime() <= before[0].horizon_expires_at.getTime());
+  // Bracket issuance on the database clock, without a scheduling tolerance.
+  const successorExpiresAt = successor[0].expires_at.getTime();
+  assert.ok(successorExpiresAt >= renewalStart.now.getTime() + AGENT_TOKEN_DEFAULT_TTL_MS);
+  assert.ok(successorExpiresAt <= successor[0].observed_at.getTime() + AGENT_TOKEN_DEFAULT_TTL_MS);
 });
 
 test("same registration POST deliberately remints only while its token is unused", async () => {
@@ -1433,17 +1439,26 @@ test("registration retry recovers only an unused token and never stores a secret
   assert.equal(replacement.body.principal_id, principalId);
   assert.equal(replacement.body.run_id, runId);
   assert.equal(replacement.body.seats_used, 1);
-  const replacementLifetime = await sql<{ expires_at: Date; horizon_expires_at: Date }[]>`
-    SELECT t.expires_at, g.horizon_expires_at
+  const replacementLifetime = await sql<{
+    issued_at: Date;
+    expires_at: Date;
+    kind: string;
+    max_successors: number | null;
+    horizon_expires_at: Date | null;
+  }[]>`
+    SELECT t.issued_at, t.expires_at, g.kind, g.max_successors, g.horizon_expires_at
     FROM swarm.agent_tokens AS t
     JOIN swarm.renewal_grants AS g ON g.renewal_grant_id = t.renewal_grant_id
     WHERE t.token_id = ${String(replacement.body.token_id)}::uuid
   `;
   assert.ok(replacementLifetime[0]);
-  assert.ok(
-    replacementLifetime[0].expires_at.getTime() <=
-      replacementLifetime[0].horizon_expires_at.getTime(),
-    "a replacement token must not outlive its seat horizon",
+  assert.equal(replacementLifetime[0].kind, "standing");
+  assert.equal(replacementLifetime[0].max_successors, null);
+  assert.equal(replacementLifetime[0].horizon_expires_at, null);
+  assert.equal(
+    replacementLifetime[0].expires_at.getTime() - replacementLifetime[0].issued_at.getTime(),
+    H0_SEAT_TOKEN_TTL_MS,
+    "an unused standing-seat replacement keeps the normal finite bearer lifetime",
   );
 
   const oldUse = await useSeatToken(g, firstSecret, "old");

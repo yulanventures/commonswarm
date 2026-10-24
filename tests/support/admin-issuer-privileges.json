@@ -107,6 +107,8 @@
   ["commonswarm_oauth_runtime","FUNCTION","commonswarm_oauth.issuer_key_allowed(text,text)","EXECUTE",false],
   ["commonswarm_oauth_runtime","FUNCTION","commonswarm_oauth.live_gotrue_session(uuid,uuid)","EXECUTE",false,"20261014000001_oauth_session_binding.sql: verified live GoTrue binding"],
   ["commonswarm_oauth_runtime","FUNCTION","commonswarm_oauth.lock_admin_consent_policy(text,integer,uuid)","EXECUTE",false],
+  ["commonswarm_oauth_runtime","FUNCTION","commonswarm_oauth.lock_hosted_client_streams(text)","EXECUTE",false],
+  ["commonswarm_oauth_runtime","FUNCTION","commonswarm_oauth.lock_hosted_family(text,uuid,text,text)","EXECUTE",false],
   ["commonswarm_oauth_runtime","FUNCTION","commonswarm_oauth.record_admin_request_audit(text,bytea,text,text,text,commonswarm_oauth.admin_security_reason,text,uuid,uuid[])","EXECUTE",false],
   ["commonswarm_oauth_runtime","FUNCTION","commonswarm_oauth.record_admin_security_failure(commonswarm_oauth.admin_security_reason)","EXECUTE",false],
   ["commonswarm_oauth_runtime","FUNCTION","commonswarm_oauth.register_dpop_nonce(bytea,text,text)","EXECUTE",false],
@@ -430,5 +432,12 @@
   ["swarm_command","TABLE","swarm.workspaces","SELECT",false],
   ["swarm_command","TABLE","swarm.workspaces","UPDATE",false],
   ["swarm_command","TYPE","commonswarm_oauth.admin_security_reason","USAGE",false],
-  ["swarm_read","FUNCTION","swarm_read.human_invitations()","EXECUTE",false,"Recipient-only bounded in-app delivery from verified JWT sub; no auth-schema grant, direct table access or agent enrollment."]
+  ["swarm_read","FUNCTION","swarm_read.human_invitations()","EXECUTE",false,"Recipient-only bounded in-app delivery from verified JWT sub; no auth-schema grant, direct table access or agent enrollment."],
+  ["swarm_command","COLUMN","swarm.household_content_connections.renewal_grant_id","UPDATE",false],
+  ["swarm_command","FUNCTION","swarm.discover_local_credential_ids(bytea)","EXECUTE",false],
+  ["swarm_command","FUNCTION","swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean)","EXECUTE",false],
+  ["swarm_command","FUNCTION","swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean,uuid)","EXECUTE",false],
+  ["swarm_command","FUNCTION","swarm.discover_local_target_ids(uuid,uuid,uuid[],uuid[],boolean,uuid,boolean)","EXECUTE",false],
+  ["swarm_command","FUNCTION","swarm.discover_local_join_ids(bytea,uuid)","EXECUTE",false],
+  ["swarm_command","FUNCTION","swarm.revoke_local_residual_tokens(uuid,uuid,text,uuid)","EXECUTE",false]
 ]

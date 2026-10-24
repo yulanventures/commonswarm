@@ -2953,7 +2953,7 @@ test("T-05/T-06 accepted replay and conflicting command-id reuse", async () => {
 
 test("T-10 concurrent acquire has exactly one winner", async () => {
   await scenario(async (f) => {
-    // Diagnostics emit only known literals and bounded HTTP integers.
+    // Diagnostics emit only known literals, fixed-key types, and bounded HTTP integers.
     const literal = (value: unknown): string => {
       switch (value) {
         case "accepted": return "accepted";
@@ -2967,25 +2967,63 @@ test("T-10 concurrent acquire has exactly one winner", async () => {
         case "WORKER_ERROR": return "WORKER_ERROR";
         case "WORKER_LIMIT": return "WORKER_LIMIT";
         case "BOOT_ERROR": return "BOOT_ERROR";
+        case "InvalidWorkerCreation": return "InvalidWorkerCreation";
+        case "InvalidWorkerResponse": return "InvalidWorkerResponse";
+        case "InvalidWorkerRequest": return "InvalidWorkerRequest";
+        case "WorkerRequestIdleTimeout": return "WorkerRequestIdleTimeout";
+        case "WorkerRequestCancelled": return "WorkerRequestCancelled";
+        case "WorkerAlreadyRetired": return "WorkerAlreadyRetired";
+        case "40001": return "40001";
+        case "40P01": return "40P01";
+        case "55P03": return "55P03";
+        case "57014": return "57014";
         case undefined: return "absent";
         case null: return "null";
         default: return "unrecognized";
       }
     };
-    const diagnostic = (iteration: number, responses: CommandResponse[]): string =>
-      `T-10 iteration=${iteration} ` + responses.map((response, index) => {
-        const http = Number.isInteger(response.status) && response.status >= 100 && response.status <= 599
-          ? response.status : "invalid";
-        return `response=${index} http=${http} status=${literal(response.body.status)} reason=${literal(response.body.reason)} error_class=${literal(response.body.error)} code_class=${literal(response.body.code)}`;
-      }).join("; ");
+    const shape = (body: Record<string, unknown>): string =>
+      ["ok", "status", "reason", "error", "code", "message", "msg", "detail", "class", "event_ids"]
+        .map((key) => {
+          const value = body[key];
+          const type = !Object.hasOwn(body, key) ? "absent"
+            : value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+          return `${key}:${type}`;
+        }).join(",");
+    const diagnostic = (
+      iteration: number,
+      phase: "create" | "acquire" | "replay-A" | "replay-B",
+      responses: CommandResponse[],
+      logStart: string,
+    ): string => {
+      // The capture is a rolling buffer. Mark fallback evidence as rolling,
+      // rather than attributing an older runtime error to this phase.
+      const phaseOnly = functionLogs.startsWith(logStart);
+      const logs = phaseOnly ? functionLogs.slice(logStart.length) : functionLogs;
+      const categories = [
+        "TypeError", "SyntaxError", "ReferenceError", "RangeError", "PostgresError",
+        "InvalidWorkerCreation", "InvalidWorkerResponse", "InvalidWorkerRequest",
+        "WorkerRequestIdleTimeout", "WorkerRequestCancelled", "WorkerAlreadyRetired",
+        "WORKER_ERROR", "WORKER_LIMIT", "BOOT_ERROR",
+        "command_request_failure", "command race resolution failed",
+        "command failure persistence failed",
+      ].filter((category) => logs.includes(category)).join(",") || "none-observed";
+      return `T-10 iteration=${iteration} phase=${phase} log_window=${phaseOnly ? "phase" : "rolling"} log_categories=${categories} ` +
+        responses.map((response, index) => {
+          const http = Number.isInteger(response.status) && response.status >= 100 && response.status <= 599
+            ? response.status : "invalid";
+          return `response=${index} http=${http} shape=${shape(response.body)} status=${literal(response.body.status)} reason=${literal(response.body.reason)} error_class=${literal(response.body.error)} code_class=${literal(response.body.code)}`;
+        }).join("; ");
+    };
     for (let iteration = 0; iteration < 50; iteration += 1) {
       const taskId = randomUUID();
+      const createLogStart = functionLogs;
       const created = await issue(f, f.uaJwt, {
         kind: "create",
         task_id: taskId,
         slug: `lease-race-${iteration}`,
       });
-      assert.equal(created.body.status, "accepted", diagnostic(iteration, [created]));
+      assert.equal(created.body.status, "accepted", diagnostic(iteration, "create", [created], createLogStart));
       const idA = commandId("racea");
       const idB = commandId("raceb");
       const command: Command = {
@@ -2993,12 +3031,13 @@ test("T-10 concurrent acquire has exactly one winner", async () => {
         task_id: taskId,
         ttl_ms: 60_000,
       };
+      const acquireLogStart = functionLogs;
       const [a, b] = await Promise.all([
         issue(f, f.uaJwt, command, idA),
         issue(f, f.ua2Jwt, command, idB),
       ]);
       const responses = [a, b];
-      const message = diagnostic(iteration, responses);
+      const message = diagnostic(iteration, "acquire", responses, acquireLogStart);
       assert.equal(
         responses.filter((r) => r.body.status === "accepted").length,
         1,
@@ -3026,12 +3065,13 @@ test("T-10 concurrent acquire has exactly one winner", async () => {
         1,
         message,
       );
+      const replayLogStart = functionLogs;
       const [replayA, replayB] = await Promise.all([
         issue(f, f.uaJwt, command, idA),
         issue(f, f.ua2Jwt, command, idB),
       ]);
-      assert.deepEqual(stored(replayA.body), stored(a.body), diagnostic(iteration, [a, replayA]));
-      assert.deepEqual(stored(replayB.body), stored(b.body), diagnostic(iteration, [b, replayB]));
+      assert.deepEqual(stored(replayA.body), stored(a.body), diagnostic(iteration, "replay-A", [a, replayA], replayLogStart));
+      assert.deepEqual(stored(replayB.body), stored(b.body), diagnostic(iteration, "replay-B", [b, replayB], replayLogStart));
     }
   });
 });
