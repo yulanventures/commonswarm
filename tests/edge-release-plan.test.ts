@@ -1017,7 +1017,7 @@ print(json.dumps(calls))
   const r = spawnSync('python3', ['-c', extractor, 'unused-ca', 'forward', 'unused-baseline'], { input: source, encoding: 'utf8' }); passed(r);
   return JSON.parse(r.stdout.trim().split('\n').pop()!);
 }
-test('every extracted probe request has a route in parsed deployed Caddy; bare metadata fails', () => {
+test('every extracted probe request has a route in parsed deployed Caddy; the root alias routes and an unaliased metadata path fails', () => {
   const config = deployedCaddy();
   const source = python(/^edge_route_probes\(\) \{[\s\S]*?^\}/m.exec(helpers)![0]);
   const verify = (source: string) => {
@@ -1029,9 +1029,13 @@ test('every extracted probe request has a route in parsed deployed Caddy; bare m
     }
   };
   verify(source);
-  const old = source.replace("'/.well-known/oauth-protected-resource/mcp',headers=discovery_headers", "'/.well-known/oauth-protected-resource',headers=discovery_headers");
-  assert.notEqual(old, source);
-  assert.throws(() => verify(old), /GET mcp.commonswarm.com\/\.well-known\/oauth-protected-resource: respond.*404/);
+  // 4d456bb9 aliased root protected-resource discovery to the same edge metadata response.
+  const aliased = source.replace("'/.well-known/oauth-protected-resource/mcp',headers=discovery_headers", "'/.well-known/oauth-protected-resource',headers=discovery_headers");
+  assert.notEqual(aliased, source);
+  verify(aliased);
+  const unaliased = source.replace("'/.well-known/oauth-protected-resource/mcp',headers=discovery_headers", "'/.well-known/oauth-protected-resource/other',headers=discovery_headers");
+  assert.notEqual(unaliased, source);
+  assert.throws(() => verify(unaliased), /GET mcp.commonswarm.com\/\.well-known\/oauth-protected-resource\/other: respond.*404/);
   verify(source);
 });
 
