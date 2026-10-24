@@ -507,7 +507,13 @@ async function run(o) {
       const profile = await store.readProfile();
       demand(profile.workspaceId === o['workspace-id'], 'same test workspace and hosted target');
       return { target, refresh: async () => {
-        const human = await refreshedCredential(target, store);
+        // Fresh recovery, not a cached read: reject the cached access token so the
+        // serialized shared auth path must rotate the session, then prove it by generation.
+        const before = await store.read(); demand(before, 'human session present before recovery');
+        const cached = (await store.readProfile()).humanSession?.accessToken;
+        const human = await refreshedCredential(target, store, { rejectedAccessToken: cached });
+        const after = await store.read();
+        demand(after && after.generation === before.generation + 1, 'fresh human session rotation', 'cached session reused');
         demand(human.userId === profile.userId, 'same human session after refresh'); return human;
       } };
     };
