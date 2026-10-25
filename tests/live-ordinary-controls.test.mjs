@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { mkdtemp, mkdir, readFile, writeFile, chmod, stat, lstat, symlink, link, unlink, rename } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, writeFile, chmod, stat, lstat, symlink, link, unlink, rename } from 'node:fs/promises';
 import { join, dirname, sep, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -977,6 +977,23 @@ test('every failed window leg withholds the entire receipt and redacts remote fa
     const r = await f.run('window'); assert.equal(r.exit, 1, r.output); assert.match(r.output, new RegExp(`FAIL ${control}:`)); await missing(r.out);
     assert.ok(p.receipt.controls.cimd_consent);
   });
+});
+
+test('human recovery fails closed on a durable pending successor instead of adopting it as fresh recovery', async t => {
+  const f = await fixture(t); const p = await pre(f);
+  const profileFile = (await readdir(f.human)).find(n => n.endsWith('.profile.json'));
+  const credential = JSON.parse(await readFile(join(f.human, profileFile.replace('.profile.json', '.json'))));
+  const profile = JSON.parse(await readFile(join(f.human, profileFile)));
+  const parentDigest = hash(JSON.stringify([credential.generation, credential.userId, credential.deviceId, credential.refreshToken]));
+  profile.humanSession = { generation: credential.generation, userId: credential.userId, deviceId: credential.deviceId, parentDigest,
+    operationId: randomUUID(), successor: { refreshToken: randomBytes(32).toString('base64url'), accessToken: randomBytes(32).toString('base64url'), expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      userId: credential.userId, deviceId: credential.deviceId, generation: credential.generation + 1 } };
+  await privateWrite(join(f.human, profileFile), profile);
+  const start = f.events.length;
+  const r = await f.run('window'); assert.equal(r.exit, 1, r.output);
+  assert.match(r.output, /FAIL human_recovery: control expected no pending human session successor before recovery/); await missing(r.out);
+  assert.ok(!f.events.slice(start).some(e => e.grant === 'refresh_token' && e.path === '/auth/v1/token'), 'no human refresh was attempted');
+  assert.ok(p.receipt.controls.cimd_consent);
 });
 
 test('consent callback binding, timeout, catalog and metadata failures produce no receipt', async t => {
