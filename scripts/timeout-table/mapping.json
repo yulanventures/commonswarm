@@ -1722,7 +1722,7 @@
             "/auth/v1/token",
             "/auth/v1/user"
           ],
-          "citation": "site/src/lib/commonswarm.ts:383-392,795,810",
+          "citation": "site/src/lib/commonswarm.ts:386-392,450,881,896",
           "detail": "Four-second boundedAuth caller deadline for session verification and recovery. Rejects to show recovery UI while SDK retries may continue under their lock; does not abort the SDK operation.",
           "operation": {
             "name": "browser-auth-recovery",
