@@ -12,7 +12,7 @@ import {
   JWT_ISSUED_AT_FUTURE_RETRY_DELAY_MS,
 } from "../src/cloud/rest-read-retry.js";
 import type { CloudTarget } from "../src/cloud/config.js";
-import type { CredentialStore } from "../src/cloud/storage.js";
+import type { CredentialProfile, CredentialRecord, CredentialStore } from "../src/cloud/storage.js";
 
 const target: CloudTarget = { url: "https://fixture.invalid", anonKey: "fixture-anon", profileId: "fixture" };
 const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -87,11 +87,14 @@ function snapshot(input: Parameters<typeof fetch>[0], init?: RequestInit): Reque
   return { url: String(input), method: init?.method ?? "GET", headers: [...new Headers(init?.headers)], body: init?.body, signal: init?.signal };
 }
 function memoryStore(): CredentialStore {
+  // Login now reads its own write back before it succeeds, so the store keeps state.
+  let record: CredentialRecord | null = null;
+  let profile: CredentialProfile = { version: 1, userId: null, workspaceId: null, pendingCommands: {} };
   return {
     kind: "file", location: "memory only",
-    read: async () => null, write: async () => {}, delete: async () => {},
-    readProfile: async () => ({ version: 1, userId: null, workspaceId: null, pendingCommands: {} }),
-    writeProfile: async () => {}, withLock: async (work) => await work(),
+    read: async () => record, write: async (next) => { record = next; }, delete: async () => { record = null; },
+    readProfile: async () => profile,
+    writeProfile: async (next) => { profile = next; }, withLock: async (work) => await work(),
   };
 }
 async function loginWithFetch(t: TestContext, restFetch: typeof fetch): Promise<string | null> {

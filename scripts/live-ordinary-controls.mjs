@@ -507,7 +507,25 @@ async function run(o) {
       const profile = await store.readProfile();
       demand(profile.workspaceId === o['workspace-id'], 'same test workspace and hosted target');
       return { target, refresh: async () => {
-        const human = await refreshedCredential(target, store);
+        // Fresh recovery, not a cached read: reject the cached access token so the
+        // serialized shared auth path must rotate the session, then prove it by generation.
+        const before = await store.read(); demand(before, 'human session present before recovery');
+        const state = (await store.readProfile()).humanSession;
+        // A durable pending successor would be adopted without any exchange and
+        // still advance the generation; fail closed instead of overstating recovery.
+        demand(!state?.successor, 'no pending human session successor before recovery', 'pending successor present');
+        let exchanges = 0; const realFetch = globalThis.fetch;
+        globalThis.fetch = async (input, init) => {
+          const url = new URL(typeof input === 'string' || input instanceof URL ? String(input) : input.url);
+          if (url.pathname === '/auth/v1/token' && url.searchParams.get('grant_type') === 'refresh_token' && init?.method === 'POST') exchanges += 1;
+          return realFetch(input, init);
+        };
+        let human;
+        try { human = await refreshedCredential(target, store, { rejectedAccessToken: state?.accessToken }); }
+        finally { globalThis.fetch = realFetch; }
+        demand(exchanges === 1, 'one human refresh exchange during recovery', `${exchanges} refresh exchanges`);
+        const after = await store.read();
+        demand(after && after.generation === before.generation + 1, 'fresh human session rotation', 'cached session reused');
         demand(human.userId === profile.userId, 'same human session after refresh'); return human;
       } };
     };

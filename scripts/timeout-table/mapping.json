@@ -1577,13 +1577,17 @@
         "src/cloud/wake-lease.ts:setTimeout": {
           "class": "network-api",
           "scope": "per-request",
-          "endpoints": ["/functions/v1/command"],
+          "endpoints": [
+            "/functions/v1/command"
+          ],
           "citation": "src/cloud/wake-lease.ts:57-130; supabase/functions/command/index.ts:1521,9514-9582",
           "detail": "Claim and 60-second timer renewal; 15-second client abort covers response body. Command-edge lock_timeout is 5 seconds. Staging renewal p50/p95 must be recorded before the box release; this lane may not contact staging.",
           "operation": {
             "name": "wake-lease-command",
             "class": "not-run",
-            "writes": ["agent wake lease claimed_at or renewed_at"],
+            "writes": [
+              "agent wake lease claimed_at or renewed_at"
+            ],
             "removes": [],
             "reason": "A claim or renewal writes durable lease state; no safe read-only proxy reaches this path."
           }
@@ -1591,7 +1595,9 @@
         "src/cloud/wake-lease.ts:setTimeout#2": {
           "class": "network-api",
           "scope": "per-request",
-          "endpoints": ["/functions/v1/read"],
+          "endpoints": [
+            "/functions/v1/read"
+          ],
           "citation": "src/cloud/wake-lease.ts:132-178",
           "detail": "Agent lease status read; 15-second client abort covers response body.",
           "operation": {
@@ -1694,13 +1700,29 @@
           }
         },
         "site/src/lib/commonswarm.ts:setTimeout": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "site/src/lib/commonswarm.ts:159,213-228",
+          "detail": "Browser localStorage write retry backoff: 1000ms initial, doubled to a 30000ms ceiling after each failed retry, reset after ownership changes; unref'd so a denied Node localStorage cannot keep Node alive.",
+          "operation": {
+            "name": "browser-storage-retry",
+            "class": "not-run",
+            "writes": [
+              "pending localStorage keys"
+            ],
+            "removes": [],
+            "reason": "Local bounded backoff for browser storage writes; not a network request timeout."
+          }
+        },
+        "site/src/lib/commonswarm.ts:setTimeout#2": {
           "class": "network-api",
           "scope": "whole-operation",
           "endpoints": [
             "/auth/v1/token",
             "/auth/v1/user"
           ],
-          "citation": "site/src/lib/commonswarm.ts:300-306,363-364,795,810",
+          "citation": "site/src/lib/commonswarm.ts:386-392,450,881,896",
           "detail": "Four-second boundedAuth caller deadline for session verification and recovery. Rejects to show recovery UI while SDK retries may continue under their lock; does not abort the SDK operation.",
           "operation": {
             "name": "browser-auth-recovery",
@@ -1712,7 +1734,7 @@
             "reason": "Browser session and recovery lifecycle; a CLI profile cannot exercise that client code or its SDK lock."
           }
         },
-        "site/src/lib/commonswarm.ts:setTimeout#2": {
+        "site/src/lib/commonswarm.ts:setTimeout#3": {
           "class": "network-api",
           "scope": "per-request",
           "endpoints": [
@@ -1722,7 +1744,7 @@
             "/storage/v1/...",
             "/auth/v1/..."
           ],
-          "citation": "site/src/lib/commonswarm.ts:718",
+          "citation": "site/src/lib/commonswarm.ts:74,802-806",
           "detail": "Browser requestDeadline timer for BROWSER_REQUEST_TIMEOUT_MS.",
           "operation": {
             "name": "browser-shared-request-site",
@@ -1796,13 +1818,17 @@
         "src/cli.ts:timeoutMs": {
           "class": "network-api",
           "scope": "per-request",
-          "endpoints": ["/functions/v1/command"],
+          "endpoints": [
+            "/functions/v1/command"
+          ],
           "citation": "src/cli.ts:5305-5310; src/cloud/wake-lease.ts:69,72",
           "detail": "Best-effort release of a cleanly stopped watcher; the command aborts after two seconds.",
           "operation": {
             "name": "wake-lease-release",
             "class": "not-run",
-            "writes": ["agent wake lease deletion when watcher and generation match"],
+            "writes": [
+              "agent wake lease deletion when watcher and generation match"
+            ],
             "removes": [],
             "reason": "Release changes durable lease state; the loopback CLI test exercises its request without contacting a real workspace."
           }
