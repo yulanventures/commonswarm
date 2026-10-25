@@ -85,21 +85,22 @@ RETURNS boolean LANGUAGE sql STABLE SET search_path=pg_catalog AS $fn$
 $fn$;
 CREATE OR REPLACE FUNCTION swarm.permanence_grandfather_restored()
 RETURNS boolean LANGUAGE sql STABLE SET search_path=pg_catalog AS $fn$
+  -- Every restorable entry is stamped and its target row exists exactly once
+  -- with the recorded prior values; a missing target is a failed restore.
   SELECT NOT EXISTS (SELECT 1 FROM swarm.permanence_grandfather_journal j
       WHERE j.action IN ('converted','bound') AND j.restored_at IS NULL)
     AND NOT EXISTS (SELECT 1 FROM swarm.permanence_grandfather_journal j
-      JOIN swarm.renewal_grants g ON g.renewal_grant_id=(j.row_key->>'renewal_grant_id')::uuid
-      WHERE j.action='converted' AND (g.kind IS DISTINCT FROM j.previous->>'kind'
-        OR g.horizon_expires_at IS DISTINCT FROM (j.previous->>'horizon_expires_at')::timestamptz
-        OR g.max_successors IS DISTINCT FROM (j.previous->>'max_successors')::integer))
+      WHERE j.action='converted' AND NOT EXISTS (SELECT 1 FROM swarm.renewal_grants g
+        WHERE g.renewal_grant_id=(j.row_key->>'renewal_grant_id')::uuid
+          AND g.kind=j.previous->>'kind'
+          AND g.horizon_expires_at IS NOT DISTINCT FROM (j.previous->>'horizon_expires_at')::timestamptz
+          AND g.max_successors IS NOT DISTINCT FROM (j.previous->>'max_successors')::integer))
     AND NOT EXISTS (SELECT 1 FROM swarm.permanence_grandfather_journal j
-      JOIN swarm.household_content_connections c
-        ON c.grant_id=(j.row_key->>'grant_id')::uuid AND c.workspace_id=(j.row_key->>'workspace_id')::uuid
-       AND c.principal_id=(j.row_key->>'principal_id')::uuid
-       AND c.connection_id IN ((j.row_key->>'connection_id')::uuid,(j.previous->>'connection_id')::uuid)
-      WHERE j.action='bound' AND (c.connection_id IS DISTINCT FROM (j.previous->>'connection_id')::uuid
-        OR c.renewal_grant_id IS NOT NULL
-        OR c.expires_at IS DISTINCT FROM (j.previous->>'expires_at')::timestamptz))
+      WHERE j.action='bound' AND (SELECT count(*) FROM swarm.household_content_connections c
+        WHERE c.connection_id=(j.previous->>'connection_id')::uuid AND c.grant_id=(j.row_key->>'grant_id')::uuid
+          AND c.workspace_id=(j.row_key->>'workspace_id')::uuid AND c.principal_id=(j.row_key->>'principal_id')::uuid
+          AND c.renewal_grant_id IS NULL
+          AND c.expires_at IS NOT DISTINCT FROM (j.previous->>'expires_at')::timestamptz) <> 1)
 $fn$;
 DO $acl$
 DECLARE f text;
@@ -132,6 +133,15 @@ BEGIN
           AND j.row_key->>'renewal_grant_id'=renewal_grants.renewal_grant_id::text)
     ORDER BY renewal_grant_id
   LOOP
+    -- The old edge keeps running during the window. Lock the row, then decide
+    -- on a fresh clock so an elapsed horizon is never revived.
+    PERFORM 1 FROM swarm.renewal_grants
+      WHERE renewal_grant_id=g.renewal_grant_id AND kind='timeboxed' AND revoked_at IS NULL
+        AND connection_expired_at IS NULL
+        AND (connection_expires_at IS NULL OR connection_expires_at > clock_timestamp())
+        AND horizon_expires_at > clock_timestamp()
+      FOR UPDATE;
+    IF NOT FOUND THEN CONTINUE; END IF;
     BEGIN
       UPDATE swarm.renewal_grants
         SET kind='standing', max_successors=NULL, horizon_expires_at=NULL
@@ -200,6 +210,15 @@ BEGIN
             OR j.previous->>'connection_id'=household_content_connections.connection_id::text))
     ORDER BY connection_id, grant_id, workspace_id, principal_id
   LOOP
+    -- Lock the approval and decide on a fresh clock: a lapsed or withdrawn
+    -- approval is never revived, whatever the selection snapshot saw.
+    PERFORM 1 FROM swarm.household_content_connections
+      WHERE connection_id=c.connection_id AND grant_id=c.grant_id
+        AND workspace_id=c.workspace_id AND principal_id=c.principal_id
+        AND hosted_grant_id IS NULL AND revoked_at IS NULL AND renewal_grant_id IS NULL
+        AND expires_at IS NOT NULL AND expires_at > clock_timestamp()
+      FOR UPDATE;
+    IF NOT FOUND THEN CONTINUE; END IF;
     key := jsonb_build_object('connection_id',c.connection_id,'grant_id',c.grant_id,
       'workspace_id',c.workspace_id,'principal_id',c.principal_id);
     prev := jsonb_build_object('connection_id',c.connection_id,'expires_at',c.expires_at,

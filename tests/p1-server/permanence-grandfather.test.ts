@@ -35,29 +35,48 @@ test('grandfather converts live time-boxed families, binds hosted families and l
   // token_hash is a 32-byte digest; the fixture never needs the plaintext.
   const hash = (n: number) => `decode('${'0'.repeat(60)}${String(n).padStart(4, '0')}','hex')`;
 
-  const familySql = (f: Family, kind: 'timeboxed' | 'standing', horizon: string, seq: number, event: boolean, tokenExpiry: string) => `
+  const familySql = (f: Family, kind: 'timeboxed' | 'standing', horizon: string, seq: number, event: boolean) => `
 INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name)
   VALUES('${f.principal}','${ws}','${owner}','Agent ${seq}');
 INSERT INTO swarm.agent_runs(run_id,principal_id,device_id) VALUES('${f.run}','${f.principal}','${device}');
 INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,kind,max_successors,successors_used,horizon_expires_at,bound_device_id,created_by)
   VALUES('${f.grant}','${ws}','${f.principal}','${f.run}','${kind}',${kind === 'timeboxed' ? '100' : 'NULL'},0,${kind === 'timeboxed' ? horizon : 'NULL'},NULL,'${owner}');
 INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,task_id,epoch,scopes,token_hash,expires_at,lineage_id,renewal_grant_id)
-  VALUES('${f.token}','${f.principal}','${f.run}','${f.task}',1,'["post_signal"]'::jsonb,${hash(seq)},${tokenExpiry},'${f.lineage}','${f.grant}');
+  VALUES('${f.token}','${f.principal}','${f.run}','${f.task}',1,'["post_signal"]'::jsonb,${hash(seq)},clock_timestamp()+interval '1 hour','${f.lineage}','${f.grant}');
 ${event ? `INSERT INTO swarm.events(workspace_id,stream_id,seq,event_id,command_id,type,schema_version,actor_user,payload)
   VALUES('${ws}','${stream}',${seq},'${randomUUID()}','${randomUUID()}','AgentTokenMinted',1,'${owner}','{"token_id":"${f.token}"}'::jsonb);` : ''}`;
 
   const fixture = `
+INSERT INTO auth.users(id,aud,role,email) VALUES('${owner}','authenticated','authenticated','${owner}@example.test'),
+  ('${hostedOwner}','authenticated','authenticated','${hostedOwner}@example.test');
 INSERT INTO swarm.users(user_id,display_name) VALUES('${owner}','Grandfather owner'),('${hostedOwner}','Hosted owner');
 INSERT INTO swarm.workspaces(workspace_id,name,created_by) VALUES('${ws}','Grandfather','${owner}'),('${hws}','Hosted','${hostedOwner}');
 INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES('${ws}','${owner}','owner'),('${hws}','${hostedOwner}','owner');
 INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES('${stream}','${ws}','workspace');
 INSERT INTO swarm.devices(device_id,user_id,label) VALUES('${device}','${owner}','Mac mini');
-${familySql(future, 'timeboxed', "clock_timestamp()+interval '19 days'", 1, true, "clock_timestamp()+interval '1 hour'")}
-${familySql(past, 'timeboxed', "clock_timestamp()-interval '1 day'", 2, true, "clock_timestamp()+interval '1 hour'")}
-${familySql(orphan, 'timeboxed', "clock_timestamp()+interval '19 days'", 3, false, "clock_timestamp()+interval '1 hour'")}
-${familySql(standing, 'standing', 'NULL', 4, true, "clock_timestamp()-interval '1 hour'")}
+${familySql(future, 'timeboxed', "clock_timestamp()+interval '19 days'", 1, true)}
+${familySql(orphan, 'timeboxed', "clock_timestamp()+interval '19 days'", 3, false)}
+${familySql(standing, 'standing', 'NULL', 4, true)}
+-- A family whose horizon already passed cannot be inserted through the server
+-- clock (created_at is pinned to now and the horizon must follow it); the
+-- fixture pins its own history with the clock trigger off for one statement.
+ALTER TABLE swarm.renewal_grants DISABLE TRIGGER renewal_grants_server_clock;
+INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name) VALUES('${past.principal}','${ws}','${owner}','Agent 2');
+INSERT INTO swarm.agent_runs(run_id,principal_id,device_id) VALUES('${past.run}','${past.principal}','${device}');
+INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,kind,max_successors,successors_used,horizon_expires_at,bound_device_id,created_by,created_at)
+  VALUES('${past.grant}','${ws}','${past.principal}','${past.run}','timeboxed',100,0,clock_timestamp()-interval '1 day',NULL,'${owner}',clock_timestamp()-interval '10 days');
+ALTER TABLE swarm.renewal_grants ENABLE TRIGGER renewal_grants_server_clock;
+INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,task_id,epoch,scopes,token_hash,expires_at,lineage_id,renewal_grant_id)
+  VALUES('${past.token}','${past.principal}','${past.run}','${past.task}',1,'["post_signal"]'::jsonb,${hash(2)},clock_timestamp()+interval '1 hour','${past.lineage}','${past.grant}');
+INSERT INTO swarm.events(workspace_id,stream_id,seq,event_id,command_id,type,schema_version,actor_user,payload)
+  VALUES('${ws}','${stream}',2,'${randomUUID()}','${randomUUID()}','AgentTokenMinted',1,'${owner}','{"token_id":"${past.token}"}'::jsonb);
+-- Rotate the standing family the way the server does: the root is used, a
+-- successor of the same epoch, task, lineage and family is issued, then the
+-- root's expiry is brought to now.
+UPDATE swarm.agent_tokens SET first_used_at=clock_timestamp() WHERE token_id='${standing.token}';
 INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,task_id,epoch,scopes,token_hash,expires_at,lineage_id,renewal_grant_id,predecessor_token_id)
-  VALUES('${rotated}','${standing.principal}','${standing.run}','${standing.task}',2,'["post_signal"]'::jsonb,${hash(5)},clock_timestamp()+interval '1 hour','${standing.lineage}','${standing.grant}','${standing.token}');
+  VALUES('${rotated}','${standing.principal}','${standing.run}','${standing.task}',1,'["post_signal"]'::jsonb,${hash(5)},clock_timestamp()+interval '1 hour','${standing.lineage}','${standing.grant}','${standing.token}');
+UPDATE swarm.agent_tokens SET expires_at=clock_timestamp() WHERE token_id='${standing.token}';
 INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose) VALUES('${ws}','shared');
 INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at)
   VALUES('${ws}','${owner}','editor','${consent}',clock_timestamp());
@@ -71,6 +90,7 @@ INSERT INTO swarm.hosted_mcp_grants(grant_id,provider_grant_id,owner_user_id,hom
         ('${hostedUnbound}','provider-${hostedUnbound}','${hostedOwner}','${hws}','test-client','https://mcp.commonswarm.com/mcp',ARRAY['${hws}']::uuid[],decode(repeat('07',32),'hex'),'interaction-${hostedUnbound}','active',statement_timestamp(),statement_timestamp());
 INSERT INTO commonswarm_oauth.provider_grant_resources(provider_grant_id,resource,grant_class,owner_user_id,client_id,connection_id,hosted_grant_id)
   VALUES('provider-${hostedBound}','https://mcp.commonswarm.com/mcp','hosted_mcp','${hostedOwner}','test-client','${hostedBound}','${hostedBound}');
+${dbAssert(`SELECT expires_at<=clock_timestamp() AND first_used_at IS NOT NULL FROM swarm.agent_tokens WHERE token_id='${standing.token}'`, 'fixture: the approved root is expired and used')}
 `;
 
   const grantRow = (grant: string) => `SELECT kind,max_successors,horizon_expires_at FROM swarm.renewal_grants WHERE renewal_grant_id='${grant}'`;
@@ -79,6 +99,7 @@ INSERT INTO commonswarm_oauth.provider_grant_resources(provider_grant_id,resourc
 
   runSql(`${fixture}
 CREATE TEMP TABLE before_horizon AS SELECT renewal_grant_id,horizon_expires_at FROM swarm.renewal_grants;
+CREATE TEMP TABLE before_approvals AS SELECT connection_id,grant_id,workspace_id,principal_id,expires_at FROM swarm.household_content_connections;
 ${proof('catalog', false)}
 ${repoSql(MIGRATION)}
 -- A. families
@@ -105,7 +126,9 @@ ${refuses(`UPDATE swarm.permanence_grandfather_journal SET previous='{}'::jsonb`
 ${refuses(`DELETE FROM swarm.permanence_grandfather_journal`, '55000')}
 ${refuses(`UPDATE swarm.permanence_grandfather_journal SET restored_at=clock_timestamp(),action='bound' WHERE action='converted'`, '55000')}
 ${dbAssert('SELECT swarm.permanence_grandfather_complete()', 'completion predicate holds')}
+${dbAssert('SELECT NOT swarm.permanence_grandfather_restored()', 'nothing is restored yet')}
 ${proof('catalog', true)}
+${proof('rollback-catalog', false)}
 ${repoSql(`${PROOFS}-functional.sql`)}
 -- a second application is a no-op
 ${repoSql(MIGRATION)}
@@ -113,21 +136,33 @@ ${dbAssert(`SELECT count(*)=5 FROM swarm.permanence_grandfather_journal`, 'secon
 -- rollback reserve
 ${repoSql(`${PROOFS}-rollback.sql`)}
 ${dbAssert(`SELECT g.kind='timeboxed' AND g.max_successors=100 AND g.horizon_expires_at=b.horizon_expires_at FROM swarm.renewal_grants g JOIN before_horizon b USING(renewal_grant_id) WHERE g.renewal_grant_id='${future.grant}'`, 'conversion restored exactly')}
-${dbAssert(`SELECT expires_at>clock_timestamp() AND renewal_grant_id IS NULL FROM swarm.household_content_connections WHERE connection_id='${future.token}'`, 'approval expiry restored')}
-${dbAssert(`SELECT expires_at>clock_timestamp() AND renewal_grant_id IS NULL FROM swarm.household_content_connections WHERE connection_id='${standing.token}' AND grant_id='${standing.run}'`, 'approval key restored to the original token')}
+${dbAssert(`SELECT count(*)=3 FROM swarm.household_content_connections c JOIN before_approvals b USING(connection_id,grant_id,workspace_id,principal_id) WHERE c.expires_at IS NOT DISTINCT FROM b.expires_at AND c.renewal_grant_id IS NULL`, 'every approval row restored to its original key and expiry')}
 ${dbAssert(`SELECT count(*)=0 FROM swarm.household_content_connections WHERE connection_id='${rotated}'`, 're-keyed row is gone after restore')}
 ${dbAssert(`SELECT count(*)=1 FROM commonswarm_oauth.provider_grant_resources WHERE hosted_grant_id='${hostedUnbound}'`, 'binding rows stay after rollback')}
 ${dbAssert(`SELECT count(*)=0 FROM swarm.permanence_grandfather_journal WHERE action IN ('converted','bound') AND restored_at IS NULL`, 'restorable entries stamped')}
 ${dbAssert(`SELECT bool_and(tgenabled='O') FROM pg_trigger WHERE NOT tgisinternal AND tgname IN ('renewal_grants_spend_or_revoke_only','aa_household_local_family_binding')`, 'guard triggers enabled again')}
 ${proof('rollback-catalog', true)}
 ${proof('catalog', false)}
+-- the restoration proof rejects a restored target that later vanished
+DELETE FROM swarm.household_content_connections WHERE connection_id='${future.token}';
+${dbAssert('SELECT NOT swarm.permanence_grandfather_restored()', 'missing restored row fails the proof')}
 `);
 });
 
-test('grandfather migration leaves an empty database untouched and both proofs hold', () => {
-  runSql(`${repoSql(MIGRATION)}
+test('grandfather proofs are error-safe before the migration and both hold on an empty database', () => {
+  runSql(`
+-- The schema clone already carries this migration's DDL; remove it to prove
+-- the catalog scripts resolve absent objects without erroring.
+DROP FUNCTION swarm.permanence_grandfather_complete();
+DROP FUNCTION swarm.permanence_grandfather_restored();
+DROP TABLE swarm.permanence_grandfather_journal;
+DROP FUNCTION swarm.permanence_grandfather_journal_guard();
+${proof('catalog', false)}
+${proof('rollback-catalog', false)}
+${repoSql(MIGRATION)}
 ${dbAssert('SELECT count(*)=0 FROM swarm.permanence_grandfather_journal', 'nothing to grandfather on an empty database')}
 ${proof('catalog', true)}
 ${proof('rollback-catalog', true)}
+${repoSql(`${PROOFS}-functional.sql`)}
 `);
 });
