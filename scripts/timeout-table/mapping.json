@@ -1688,7 +1688,7 @@
             "/storage/v1/...",
             "/auth/v1/..."
           ],
-          "citation": "site/src/lib/commonswarm.ts:74,716-724",
+          "citation": "site/src/lib/commonswarm.ts:75,803-810",
           "detail": "Shared browser request deadline used by reads and commands.",
           "operation": {
             "name": "browser-shared-request",
@@ -1703,7 +1703,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "site/src/lib/commonswarm.ts:159,213-228",
+          "citation": "site/src/lib/commonswarm.ts:161,218,223-229,283",
           "detail": "Browser localStorage write retry backoff: 1000ms initial, doubled to a 30000ms ceiling after each failed retry, reset after ownership changes; unref'd so a denied Node localStorage cannot keep Node alive.",
           "operation": {
             "name": "browser-storage-retry",
@@ -1722,7 +1722,7 @@
             "/auth/v1/token",
             "/auth/v1/user"
           ],
-          "citation": "site/src/lib/commonswarm.ts:386-392,450,881,896",
+          "citation": "site/src/lib/commonswarm.ts:387-393,451,882,897",
           "detail": "Four-second boundedAuth caller deadline for session verification and recovery. Rejects to show recovery UI while SDK retries may continue under their lock; does not abort the SDK operation.",
           "operation": {
             "name": "browser-auth-recovery",
@@ -1744,7 +1744,7 @@
             "/storage/v1/...",
             "/auth/v1/..."
           ],
-          "citation": "site/src/lib/commonswarm.ts:74,802-806",
+          "citation": "site/src/lib/commonswarm.ts:75,803-810",
           "detail": "Browser requestDeadline timer for BROWSER_REQUEST_TIMEOUT_MS.",
           "operation": {
             "name": "browser-shared-request-site",
@@ -1761,7 +1761,7 @@
             "/auth/v1/token",
             "/auth/v1/user"
           ],
-          "citation": "site/src/lib/commonswarm.ts:233-237,257-261",
+          "citation": "site/src/lib/commonswarm.ts:315,341-343",
           "detail": "Four-second fetch abort for browser refresh-token POST and user verification GET; composed with the caller signal.",
           "operation": {
             "name": "browser-auth-fetch",
