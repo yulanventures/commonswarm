@@ -43,10 +43,10 @@ test("home page budget is inventoried as bytes and never as a measured wait", as
 test("wake lease release citation points to the call and abort timer", { timeout: 2_000 }, async () => {
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
   const row = mapping.refs.HEAD.rows["src/cli.ts:timeoutMs"];
-  assert.equal(row.citation, "src/cli.ts:5305-5310; src/cloud/wake-lease.ts:69,72");
+  assert.equal(row.citation, "src/cli.ts:5336-5341; src/cloud/wake-lease.ts:69,72");
   const cli = (await readFile(join(repo, "src/cli.ts"), "utf8")).split("\n");
   const lease = (await readFile(join(repo, "src/cloud/wake-lease.ts"), "utf8")).split("\n");
-  assert.match(cli.slice(5304, 5310).join("\n"), /release_wake_lease[\s\S]*timeoutMs: 2_000/);
+  assert.match(cli.slice(5335, 5341).join("\n"), /release_wake_lease[\s\S]*timeoutMs: 2_000/);
   assert.match(lease[68]!, /timeoutMs\?: number/);
   assert.match(lease[71]!, /setTimeout\(\(\) => controller\.abort\(\)/);
 });
@@ -55,8 +55,9 @@ test("HEAD timeout citations resolve to their exact operations", { timeout: 2_00
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
   const rows = mapping.refs.HEAD.rows;
   const checks = [
-    [rows["src/cli.ts:setTimeout"].citation, "setTimeout(resolve, 100)"],
-    [rows["src/cli.ts:setTimeout#2"].citation, "setTimeout(done, 250)"],
+    [rows["src/cli.ts:setTimeout"].citation, "setTimeout(resolve, 250)"],
+    [rows["src/cli.ts:setTimeout#2"].citation, "setTimeout(resolve, 100)"],
+    [rows["src/cli.ts:setTimeout#3"].citation, "setTimeout(done, 250)"],
     [rows["src/cloud/storage.ts:timeoutMs#2"].citation, "options.timeoutMs ?? LOCK_TIMEOUT_MS"],
     [rows["src/cloud/storage.ts:timeoutMs"].citation, "export function pidStartMs"],
   ] as const;
@@ -136,10 +137,12 @@ test("timeout inventory and mapping are exact in both directions for each measur
   const headRows = new Map(enumerateRepository({ repo }).map(row => [row.id, row]));
   const headMapping = mappingForRef(mapping, "HEAD").rows;
   assert.equal(headRows.get("src/cli.ts:LISTENER_STOP_WAIT_TIMEOUT_MS")?.value_ms, 30_000);
-  assert.equal(headRows.get("src/cli.ts:setTimeout")?.value_ms, 100);
-  assert.equal(headMapping["src/cli.ts:setTimeout"].operation.name, "listener-stop-poll");
-  assert.equal(headRows.get("src/cli.ts:setTimeout#2")?.value_ms, 250);
-  assert.equal(headMapping["src/cli.ts:setTimeout#2"].operation.name, "hook-stdin");
+  assert.equal(headRows.get("src/cli.ts:setTimeout")?.value_ms, 250);
+  assert.equal(headMapping["src/cli.ts:setTimeout"].operation.name, "setup-identity-confirm-retry");
+  assert.equal(headRows.get("src/cli.ts:setTimeout#2")?.value_ms, 100);
+  assert.equal(headMapping["src/cli.ts:setTimeout#2"].operation.name, "listener-stop-poll");
+  assert.equal(headRows.get("src/cli.ts:setTimeout#3")?.value_ms, 250);
+  assert.equal(headMapping["src/cli.ts:setTimeout#3"].operation.name, "hook-stdin");
   assert.equal(
     headRows.get("src/cloud/agent-check-budget.ts:AGENT_CHECK_TIMEOUT_MS")?.value_ms,
     AGENT_CHECK_TIMEOUT_MS,
@@ -192,7 +195,7 @@ test("main alias validates the post-merge HEAD inventory including MCP rows", { 
 
 test("MCP register abort-timer citation points to the actual timer line", { timeout: 10000 }, async () => {
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
-  const citation = mappingForRef(mapping, "HEAD").rows["src/cloud/mcp-connect.ts:setTimeout"]?.citation;
+  const citation = mappingForRef(mapping, "HEAD").rows["src/cloud/mcp-connect.ts:setTimeout#2"]?.citation;
   const match = /^src\/cloud\/mcp-connect\.ts:(\d+)$/.exec(citation ?? "");
   assert.ok(match, `unexpected citation: ${citation}`);
   const source = await readFile(join(repo, "src/cloud/mcp-connect.ts"), "utf8");
@@ -281,8 +284,9 @@ test("HEAD timeout mapping citations point to their measured source lines", { ti
   };
   const patterns: Record<string, RegExp> = {
     "src/cli.ts:LISTENER_STOP_WAIT_TIMEOUT_MS": /const LISTENER_STOP_WAIT_TIMEOUT_MS/,
-    "src/cli.ts:setTimeout": /setTimeout\(resolve, 100\)/,
-    "src/cli.ts:setTimeout#2": /const timer = setTimeout\(done, 250\)/,
+    "src/cli.ts:setTimeout": /setTimeout\(resolve, 250\)/,
+    "src/cli.ts:setTimeout#2": /setTimeout\(resolve, 100\)/,
+    "src/cli.ts:setTimeout#3": /const timer = setTimeout\(done, 250\)/,
     "src/cli.ts:timeoutMs": /release_wake_lease[\s\S]*timeoutMs: 2_000/,
     "src/cli.ts:TURN_BUDGET_CREDENTIAL_MARGIN_MS": /export const TURN_BUDGET_CREDENTIAL_MARGIN_MS/,
     "src/cli.ts:turnBudgetMs": /const turnBudgetMs = options\.turnBudgetMs/,
@@ -307,7 +311,7 @@ test("HEAD timeout mapping citations point to their measured source lines", { ti
       if (file === "src/cli.ts") cliCount++; else onboardingCount++;
     }
   }
-  assert.equal(cliCount, 8, "reconcile HEAD CLI citations");
+  assert.equal(cliCount, 9, "reconcile HEAD CLI citations");
   assert.equal(onboardingCount, 2, "reconcile HEAD onboarding citations");
 });
 

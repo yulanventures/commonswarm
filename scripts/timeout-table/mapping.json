@@ -1777,7 +1777,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:324",
+          "citation": "src/cli.ts:325",
           "detail": "One 30-second deadline for waiting on listener stop.",
           "operation": {
             "name": "listener-stop-wait",
@@ -1791,7 +1791,21 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7800",
+          "citation": "src/cli.ts:2768",
+          "detail": "One 250ms pause before the single retry of the post-mint identity confirmation read after a transport or read timeout.",
+          "operation": {
+            "name": "setup-identity-confirm-retry",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local fixed pause between two reads; not a request timeout."
+          }
+        },
+        "src/cli.ts:setTimeout#2": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cli.ts:7829",
           "detail": "Poll the listener stop while the one command deadline remains active.",
           "operation": {
             "name": "listener-stop-poll",
@@ -1801,11 +1815,11 @@
             "reason": "Local listener control wait."
           }
         },
-        "src/cli.ts:setTimeout#2": {
+        "src/cli.ts:setTimeout#3": {
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:8591",
+          "citation": "src/cli.ts:8620",
           "detail": "Wait for Claude hook JSON on stdin.",
           "operation": {
             "name": "hook-stdin",
@@ -1821,7 +1835,7 @@
           "endpoints": [
             "/functions/v1/command"
           ],
-          "citation": "src/cli.ts:5305-5310; src/cloud/wake-lease.ts:69,72",
+          "citation": "src/cli.ts:5336-5341; src/cloud/wake-lease.ts:69,72",
           "detail": "Best-effort release of a cleanly stopped watcher; the command aborts after two seconds.",
           "operation": {
             "name": "wake-lease-release",
@@ -1837,7 +1851,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:3427",
+          "citation": "src/cli.ts:3456",
           "detail": "Margin reserved for credential work around an external model turn.",
           "operation": {
             "name": "listener-turn-margin",
@@ -1923,7 +1937,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:8642; src/onboarding-cli.ts:97",
+          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:8671; src/onboarding-cli.ts:97",
           "detail": "Hard process ceiling for hook check.",
           "operation": {
             "name": "hook-hard-exit",
@@ -2455,7 +2469,7 @@
           "endpoints": [
             "/functions/v1/command"
           ],
-          "citation": "src/cloud/renewal.ts:131,399-431",
+          "citation": "src/cloud/renewal.ts:138,372-390",
           "detail": "Agent credential renewal command.",
           "operation": {
             "name": "credential-renewal",
@@ -2468,14 +2482,14 @@
             "proxy": "No proxy is fair because the credential and grant statements are specific to renewal."
           }
         },
-        "src/cloud/renewal.ts:setTimeout": {
+        "src/cloud/renewal.ts:AbortSignal.timeout": {
           "class": "network-api",
           "scope": "per-request",
           "endpoints": [
             "/functions/v1/command"
           ],
-          "citation": "src/cloud/renewal.ts:413",
-          "detail": "Credential renewal command abort.",
+          "citation": "src/cloud/renewal.ts:372",
+          "detail": "Credential renewal command deadline, covering the response body as well as the headers.",
           "operation": {
             "name": "credential-renewal-site",
             "class": "not-run",
@@ -3344,7 +3358,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7152",
+          "citation": "src/cli.ts:7181",
           "detail": "Listener turn budget default options.turnBudgetMs ?? LISTENER_PROMPT_TIMEOUT_MS.",
           "operation": {
             "name": "listener-prompt-site",
@@ -3358,7 +3372,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7353",
+          "citation": "src/cli.ts:7382",
           "detail": "Delivery hold budget property deliveryHoldBudgetMs: turnBudgetMs.",
           "operation": {
             "name": "listener-prompt-site",
@@ -3374,7 +3388,7 @@
           "endpoints": [
             "/functions/v1/h0/register"
           ],
-          "citation": "src/cloud/mcp-connect.ts:22",
+          "citation": "src/cloud/mcp-connect.ts:27",
           "detail": "Register request budget for the H0 seat write.",
           "operation": {
             "name": "mcp-register",
@@ -3387,12 +3401,26 @@
           }
         },
         "src/cloud/mcp-connect.ts:setTimeout": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cloud/mcp-connect.ts:659",
+          "detail": "One 250ms pause before the single retry of the saved-profile identity confirmation read after a transport or read timeout.",
+          "operation": {
+            "name": "mcp-connect-identity-confirm-retry",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local fixed pause between two reads; not a request timeout."
+          }
+        },
+        "src/cloud/mcp-connect.ts:setTimeout#2": {
           "class": "network-api",
           "scope": "per-request",
           "endpoints": [
             "/functions/v1/h0/register"
           ],
-          "citation": "src/cloud/mcp-connect.ts:825",
+          "citation": "src/cloud/mcp-connect.ts:934",
           "detail": "Abort timer for the H0 register POST.",
           "operation": {
             "name": "mcp-register",
@@ -3408,7 +3436,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/mcp-connect.ts:353",
+          "citation": "src/cloud/mcp-connect.ts:358",
           "detail": "Local stty process deadline for hidden input.",
           "operation": {
             "name": "mcp-hidden-input",
