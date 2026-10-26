@@ -5,7 +5,7 @@
 -- No data repair: preserve every suspended_at and resumed_at value.
 -- CREATE OR REPLACE preserves routine OIDs, ownership, ACLs and signatures.
 -- All dependency discovery, lock acquisition and post-wait clocks are retained.
-BEGIN;
+-- The migration runner owns the transaction, so this file opens none of its own.
 
 CREATE OR REPLACE FUNCTION swarm.prepare_renewal_grant(
   p_renewal_grant_id uuid,
@@ -1273,4 +1273,3 @@ AS $$
     AND principal.revoked_at IS NULL;
 $$;
 
-COMMIT;

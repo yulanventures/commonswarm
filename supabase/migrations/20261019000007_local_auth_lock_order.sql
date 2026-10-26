@@ -1599,8 +1599,10 @@ BEGIN
   -- Ordinary issuance provenance is mandatory in addition to absent parents.
   converting := current_user='swarm_admin' AND OLD.kind='timeboxed'
     AND NEW.kind='standing' AND NEW.max_successors IS NULL AND NEW.horizon_expires_at IS NULL
-    AND (to_jsonb(NEW)-ARRAY['kind','max_successors','horizon_expires_at'])
-      IS NOT DISTINCT FROM (to_jsonb(OLD)-ARRAY['kind','max_successors','horizon_expires_at'])
+    -- suspension_active is a stored generated column: a BEFORE trigger sees NULL
+    -- for it in NEW, so it is left out here. Its inputs stay in the comparison.
+    AND (to_jsonb(NEW)-ARRAY['kind','max_successors','horizon_expires_at','suspension_active'])
+      IS NOT DISTINCT FROM (to_jsonb(OLD)-ARRAY['kind','max_successors','horizon_expires_at','suspension_active'])
     AND OLD.revoked_at IS NULL AND OLD.connection_expired_at IS NULL
     AND (OLD.connection_expires_at IS NULL OR OLD.connection_expires_at>clock_timestamp())
     AND EXISTS(SELECT 1 FROM swarm.agent_principals p JOIN swarm.memberships m

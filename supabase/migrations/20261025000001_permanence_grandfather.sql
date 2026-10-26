@@ -153,9 +153,11 @@ BEGIN
     EXCEPTION WHEN SQLSTATE '55000' THEN
       -- SWARM_RENEWAL_GRANT_IMMUTABLE: the carve-out's provenance checks refused
       -- this family. It keeps its horizon; the owner can issue a fresh Allow.
+      -- SQLERRM here is the guard's fixed refusal code, never row data.
       INSERT INTO swarm.permanence_grandfather_journal(relation,row_key,action,previous)
         VALUES ('swarm.renewal_grants', jsonb_build_object('renewal_grant_id',g.renewal_grant_id), 'skipped-provenance',
-          jsonb_build_object('kind',g.kind,'max_successors',g.max_successors,'horizon_expires_at',g.horizon_expires_at));
+          jsonb_build_object('kind',g.kind,'max_successors',g.max_successors,'horizon_expires_at',g.horizon_expires_at,
+            'refusal',left(SQLERRM,64)));
       skipped := skipped+1;
     END;
   END LOOP;
@@ -265,8 +267,9 @@ BEGIN
       -- The family binding guard refused (expired or revoked token, ended run,
       -- suspended or revoked family, or an existing row for the live token).
       -- The subtransaction rolled the re-key back; the row is unchanged.
+      -- SQLERRM is the guard's fixed refusal code, never row data.
       INSERT INTO swarm.permanence_grandfather_journal(relation,row_key,action,previous)
-        VALUES ('swarm.household_content_connections', key, 'skipped-binding', prev);
+        VALUES ('swarm.household_content_connections', key, 'skipped-binding', prev || jsonb_build_object('refusal',left(SQLERRM,64)));
       skipped := skipped+1;
     END;
   END LOOP;

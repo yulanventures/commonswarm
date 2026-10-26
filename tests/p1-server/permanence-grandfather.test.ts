@@ -2,17 +2,28 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
-import { dbAssert, refuses, repoSql, runSql } from '../support/admin-schema-db.js';
+import { refuses, repoSql, runSql } from '../support/admin-schema-db.js';
+import { sqlPhase } from '../support/admin-schema-process.js';
 
 const MIGRATION = 'supabase/migrations/20261025000001_permanence_grandfather.sql';
 const PROOFS = 'deploy/release-proofs/permanence/20261025000001';
 const RESERVE = 'supabase/permanence-reserve/20261025000001';
 
+
+// One SQLSTATE per assertion: the SQL child sanitizer withholds message text but
+// keeps the five-character state, so a CI failure still names its assertion.
+const LABELS: string[] = [];
+function check(expression: string, label: string): string {
+  const index = LABELS.push(label);
+  const state = `ZG${String(index).padStart(3, '0')}`;
+  return `DO $assert$ BEGIN IF NOT coalesce((${expression}),false) THEN RAISE EXCEPTION '${label}' USING ERRCODE='${state}'; END IF; END $assert$;`;
+}
+
 function proof(kind: 'catalog' | 'rollback-catalog', expect: boolean): string {
   const alias = kind === 'catalog' ? 'catalog_ok' : 'rollback_ok';
   return repoSql(`${PROOFS}-${kind}.sql`)
     + `\nSELECT :'${alias}'::boolean=${expect} AS proof_pass\n\\gset\n\\if :proof_pass\n\\else\n`
-    + `DO $fail$ BEGIN RAISE EXCEPTION '${kind} expected ${expect}'; END $fail$;\n\\endif\n`;
+    + `DO $fail$ BEGIN RAISE EXCEPTION '${kind} expected ${expect}' USING ERRCODE='ZP${kind === 'catalog' ? '001' : '002'}'; END $fail$;\n\\endif\n`;
 }
 
 test('permanence release proofs are the same bytes in the reserve and the release packet', () => {
@@ -90,62 +101,67 @@ INSERT INTO swarm.hosted_mcp_grants(grant_id,provider_grant_id,owner_user_id,hom
         ('${hostedUnbound}','provider-${hostedUnbound}','${hostedOwner}','${hws}','test-client','https://mcp.commonswarm.com/mcp',ARRAY['${hws}']::uuid[],decode(repeat('07',32),'hex'),'interaction-${hostedUnbound}','active',statement_timestamp(),statement_timestamp());
 INSERT INTO commonswarm_oauth.provider_grant_resources(provider_grant_id,resource,grant_class,owner_user_id,client_id,connection_id,hosted_grant_id)
   VALUES('provider-${hostedBound}','https://mcp.commonswarm.com/mcp','hosted_mcp','${hostedOwner}','test-client','${hostedBound}','${hostedBound}');
-${dbAssert(`SELECT expires_at<=clock_timestamp() AND first_used_at IS NOT NULL FROM swarm.agent_tokens WHERE token_id='${standing.token}'`, 'fixture: the approved root is expired and used')}
+${check(`SELECT expires_at<=clock_timestamp() AND first_used_at IS NOT NULL FROM swarm.agent_tokens WHERE token_id='${standing.token}'`, 'fixture: the approved root is expired and used')}
 `;
 
   const grantRow = (grant: string) => `SELECT kind,max_successors,horizon_expires_at FROM swarm.renewal_grants WHERE renewal_grant_id='${grant}'`;
   const journal = (relation: string, action: string, keyField: string, key: string) =>
     `SELECT count(*) FROM swarm.permanence_grandfather_journal WHERE relation='${relation}' AND action='${action}' AND row_key->>'${keyField}'='${key}'`;
 
-  runSql(`${fixture}
+  runSql(`${sqlPhase('fixture', fixture)}
 CREATE TEMP TABLE before_horizon AS SELECT renewal_grant_id,horizon_expires_at FROM swarm.renewal_grants;
 CREATE TEMP TABLE before_approvals AS SELECT connection_id,grant_id,workspace_id,principal_id,expires_at FROM swarm.household_content_connections;
-${proof('catalog', false)}
-${repoSql(MIGRATION)}
--- A. families
-${dbAssert(`SELECT kind='standing' AND max_successors IS NULL AND horizon_expires_at IS NULL FROM (${grantRow(future.grant)}) g`, 'future horizon converted to standing')}
-${dbAssert(`SELECT kind='timeboxed' AND max_successors=100 AND horizon_expires_at<clock_timestamp() FROM (${grantRow(past.grant)}) g`, 'past horizon untouched')}
-${dbAssert(`SELECT kind='timeboxed' AND max_successors=100 AND horizon_expires_at>clock_timestamp() FROM (${grantRow(orphan.grant)}) g`, 'family without mint provenance untouched')}
-${dbAssert(`SELECT kind='standing' FROM (${grantRow(standing.grant)}) g`, 'standing family untouched')}
-${dbAssert(`(${journal('swarm.renewal_grants', 'converted', 'renewal_grant_id', future.grant)})=1`, 'conversion journaled')}
-${dbAssert(`(${journal('swarm.renewal_grants', 'skipped-provenance', 'renewal_grant_id', orphan.grant)})=1`, 'provenance skip journaled')}
-${dbAssert(`(SELECT count(*) FROM swarm.permanence_grandfather_journal WHERE relation='swarm.renewal_grants')=2`, 'dead family has no journal entry')}
--- B. hosted bindings
-${dbAssert(`SELECT count(*)=1 FROM commonswarm_oauth.provider_grant_resources WHERE hosted_grant_id='${hostedUnbound}' AND provider_grant_id='provider-${hostedUnbound}' AND connection_id='${hostedUnbound}' AND grant_class='hosted_mcp' AND owner_user_id='${hostedOwner}' AND client_id='test-client'`, 'unbound hosted family gets the backfill-shaped binding')}
-${dbAssert(`SELECT count(*)=1 FROM commonswarm_oauth.provider_grant_resources WHERE hosted_grant_id='${hostedBound}'`, 'bound hosted family keeps its single binding')}
-${dbAssert(`(${journal('commonswarm_oauth.provider_grant_resources', 'inserted', 'hosted_grant_id', hostedUnbound)})=1 AND (SELECT count(*) FROM swarm.permanence_grandfather_journal WHERE relation='commonswarm_oauth.provider_grant_resources')=1`, 'exactly one binding journaled')}
--- C. approvals
-${dbAssert(`SELECT expires_at IS NULL AND renewal_grant_id='${future.grant}' FROM swarm.household_content_connections WHERE connection_id='${future.token}'`, 'live approval bound to its family without expiry')}
-${dbAssert(`SELECT expires_at IS NULL AND renewal_grant_id='${standing.grant}' FROM swarm.household_content_connections WHERE connection_id='${rotated}' AND grant_id='${standing.run}'`, 'rotated approval re-keyed to the live token and bound')}
-${dbAssert(`SELECT count(*)=0 FROM swarm.household_content_connections WHERE connection_id='${standing.token}'`, 'expired bearer no longer keys the approval')}
-${dbAssert(`SELECT expires_at<clock_timestamp() AND renewal_grant_id IS NULL FROM swarm.household_content_connections WHERE connection_id='${orphan.token}'`, 'lapsed approval untouched')}
-${dbAssert(`SELECT count(*)=1 FROM swarm.permanence_grandfather_journal WHERE relation='swarm.household_content_connections' AND action='bound' AND row_key->>'connection_id'='${rotated}' AND previous->>'connection_id'='${standing.token}'`, 're-key journaled with the original key')}
-${dbAssert(`(SELECT count(*) FROM swarm.permanence_grandfather_journal WHERE relation='swarm.household_content_connections')=2`, 'lapsed approval has no journal entry')}
--- journal is append-only evidence
+${sqlPhase('catalog-before', proof('catalog', false))}
+${sqlPhase('migration', repoSql(MIGRATION))}
+${sqlPhase('assert-families', '')}
+-- Diagnostic first: if the family is not standing, raise the journal's verdict and
+-- fixed refusal code for it (never row data) so a sanitized CI log still explains why.
+DO $diag$ DECLARE verdict text; BEGIN
+  IF NOT EXISTS (SELECT 1 FROM swarm.renewal_grants WHERE renewal_grant_id='${future.grant}' AND kind='standing') THEN
+    SELECT coalesce(string_agg(action || '/' || coalesce(previous->>'refusal','-'), ';'), 'no journal entry') INTO verdict
+      FROM swarm.permanence_grandfather_journal WHERE row_key->>'renewal_grant_id'='${future.grant}';
+    RAISE EXCEPTION 'future family not converted: %', verdict USING ERRCODE='ZD001';
+  END IF;
+END $diag$;
+${check(`SELECT kind='standing' AND max_successors IS NULL AND horizon_expires_at IS NULL FROM (${grantRow(future.grant)}) g`, 'future horizon converted to standing')}
+${check(`SELECT kind='timeboxed' AND max_successors=100 AND horizon_expires_at<clock_timestamp() FROM (${grantRow(past.grant)}) g`, 'past horizon untouched')}
+${check(`SELECT kind='timeboxed' AND max_successors=100 AND horizon_expires_at>clock_timestamp() FROM (${grantRow(orphan.grant)}) g`, 'family without mint provenance untouched')}
+${check(`SELECT kind='standing' FROM (${grantRow(standing.grant)}) g`, 'standing family untouched')}
+${check(`(${journal('swarm.renewal_grants', 'converted', 'renewal_grant_id', future.grant)})=1`, 'conversion journaled')}
+${check(`(${journal('swarm.renewal_grants', 'skipped-provenance', 'renewal_grant_id', orphan.grant)})=1`, 'provenance skip journaled')}
+${check(`(SELECT count(*) FROM swarm.permanence_grandfather_journal WHERE relation='swarm.renewal_grants')=2`, 'dead family has no journal entry')}
+${sqlPhase('assert-hosted', '')}
+${check(`SELECT count(*)=1 FROM commonswarm_oauth.provider_grant_resources WHERE hosted_grant_id='${hostedUnbound}' AND provider_grant_id='provider-${hostedUnbound}' AND connection_id='${hostedUnbound}' AND grant_class='hosted_mcp' AND owner_user_id='${hostedOwner}' AND client_id='test-client'`, 'unbound hosted family gets the backfill-shaped binding')}
+${check(`SELECT count(*)=1 FROM commonswarm_oauth.provider_grant_resources WHERE hosted_grant_id='${hostedBound}'`, 'bound hosted family keeps its single binding')}
+${check(`(${journal('commonswarm_oauth.provider_grant_resources', 'inserted', 'hosted_grant_id', hostedUnbound)})=1 AND (SELECT count(*) FROM swarm.permanence_grandfather_journal WHERE relation='commonswarm_oauth.provider_grant_resources')=1`, 'exactly one binding journaled')}
+${sqlPhase('assert-approvals', '')}
+${check(`SELECT expires_at IS NULL AND renewal_grant_id='${future.grant}' FROM swarm.household_content_connections WHERE connection_id='${future.token}'`, 'live approval bound to its family without expiry')}
+${check(`SELECT expires_at IS NULL AND renewal_grant_id='${standing.grant}' FROM swarm.household_content_connections WHERE connection_id='${rotated}' AND grant_id='${standing.run}'`, 'rotated approval re-keyed to the live token and bound')}
+${check(`SELECT count(*)=0 FROM swarm.household_content_connections WHERE connection_id='${standing.token}'`, 'expired bearer no longer keys the approval')}
+${check(`SELECT expires_at<clock_timestamp() AND renewal_grant_id IS NULL FROM swarm.household_content_connections WHERE connection_id='${orphan.token}'`, 'lapsed approval untouched')}
+${check(`SELECT count(*)=1 FROM swarm.permanence_grandfather_journal WHERE relation='swarm.household_content_connections' AND action='bound' AND row_key->>'connection_id'='${rotated}' AND previous->>'connection_id'='${standing.token}'`, 're-key journaled with the original key')}
+${check(`(SELECT count(*) FROM swarm.permanence_grandfather_journal WHERE relation='swarm.household_content_connections')=2`, 'lapsed approval has no journal entry')}
+${sqlPhase('journal-guard', '')}
 ${refuses(`UPDATE swarm.permanence_grandfather_journal SET previous='{}'::jsonb`, '55000')}
 ${refuses(`DELETE FROM swarm.permanence_grandfather_journal`, '55000')}
 ${refuses(`UPDATE swarm.permanence_grandfather_journal SET restored_at=clock_timestamp(),action='bound' WHERE action='converted'`, '55000')}
-${dbAssert('SELECT swarm.permanence_grandfather_complete()', 'completion predicate holds')}
-${dbAssert('SELECT NOT swarm.permanence_grandfather_restored()', 'nothing is restored yet')}
-${proof('catalog', true)}
-${proof('rollback-catalog', false)}
-${repoSql(`${PROOFS}-functional.sql`)}
--- a second application is a no-op
-${repoSql(MIGRATION)}
-${dbAssert(`SELECT count(*)=5 FROM swarm.permanence_grandfather_journal`, 'second application adds no journal entries')}
--- rollback reserve
-${repoSql(`${PROOFS}-rollback.sql`)}
-${dbAssert(`SELECT g.kind='timeboxed' AND g.max_successors=100 AND g.horizon_expires_at=b.horizon_expires_at FROM swarm.renewal_grants g JOIN before_horizon b USING(renewal_grant_id) WHERE g.renewal_grant_id='${future.grant}'`, 'conversion restored exactly')}
-${dbAssert(`SELECT count(*)=3 FROM swarm.household_content_connections c JOIN before_approvals b USING(connection_id,grant_id,workspace_id,principal_id) WHERE c.expires_at IS NOT DISTINCT FROM b.expires_at AND c.renewal_grant_id IS NULL`, 'every approval row restored to its original key and expiry')}
-${dbAssert(`SELECT count(*)=0 FROM swarm.household_content_connections WHERE connection_id='${rotated}'`, 're-keyed row is gone after restore')}
-${dbAssert(`SELECT count(*)=1 FROM commonswarm_oauth.provider_grant_resources WHERE hosted_grant_id='${hostedUnbound}'`, 'binding rows stay after rollback')}
-${dbAssert(`SELECT count(*)=0 FROM swarm.permanence_grandfather_journal WHERE action IN ('converted','bound') AND restored_at IS NULL`, 'restorable entries stamped')}
-${dbAssert(`SELECT bool_and(tgenabled='O') FROM pg_trigger WHERE NOT tgisinternal AND tgname IN ('renewal_grants_spend_or_revoke_only','aa_household_local_family_binding')`, 'guard triggers enabled again')}
-${proof('rollback-catalog', true)}
-${proof('catalog', false)}
--- the restoration proof rejects a restored target that later vanished
+${check('SELECT swarm.permanence_grandfather_complete()', 'completion predicate holds')}
+${check('SELECT NOT swarm.permanence_grandfather_restored()', 'nothing is restored yet')}
+${sqlPhase('proofs-after-migration', proof('catalog', true) + proof('rollback-catalog', false) + repoSql(`${PROOFS}-functional.sql`))}
+${sqlPhase('second-application', repoSql(MIGRATION))}
+${check(`SELECT count(*)=5 FROM swarm.permanence_grandfather_journal`, 'second application adds no journal entries')}
+${sqlPhase('rollback', repoSql(`${PROOFS}-rollback.sql`))}
+${sqlPhase('assert-rollback', '')}
+${check(`SELECT g.kind='timeboxed' AND g.max_successors=100 AND g.horizon_expires_at=b.horizon_expires_at FROM swarm.renewal_grants g JOIN before_horizon b USING(renewal_grant_id) WHERE g.renewal_grant_id='${future.grant}'`, 'conversion restored exactly')}
+${check(`SELECT count(*)=3 FROM swarm.household_content_connections c JOIN before_approvals b USING(connection_id,grant_id,workspace_id,principal_id) WHERE c.expires_at IS NOT DISTINCT FROM b.expires_at AND c.renewal_grant_id IS NULL`, 'every approval row restored to its original key and expiry')}
+${check(`SELECT count(*)=0 FROM swarm.household_content_connections WHERE connection_id='${rotated}'`, 're-keyed row is gone after restore')}
+${check(`SELECT count(*)=1 FROM commonswarm_oauth.provider_grant_resources WHERE hosted_grant_id='${hostedUnbound}'`, 'binding rows stay after rollback')}
+${check(`SELECT count(*)=0 FROM swarm.permanence_grandfather_journal WHERE action IN ('converted','bound') AND restored_at IS NULL`, 'restorable entries stamped')}
+${check(`SELECT bool_and(tgenabled='O') FROM pg_trigger WHERE NOT tgisinternal AND tgname IN ('renewal_grants_spend_or_revoke_only','aa_household_local_family_binding')`, 'guard triggers enabled again')}
+${sqlPhase('proofs-after-rollback', proof('rollback-catalog', true) + proof('catalog', false))}
+${sqlPhase('restored-missing-row', '')}
 DELETE FROM swarm.household_content_connections WHERE connection_id='${future.token}';
-${dbAssert('SELECT NOT swarm.permanence_grandfather_restored()', 'missing restored row fails the proof')}
+${check('SELECT NOT swarm.permanence_grandfather_restored()', 'missing restored row fails the proof')}
 `);
 });
 
@@ -160,7 +176,7 @@ DROP FUNCTION swarm.permanence_grandfather_journal_guard();
 ${proof('catalog', false)}
 ${proof('rollback-catalog', false)}
 ${repoSql(MIGRATION)}
-${dbAssert('SELECT count(*)=0 FROM swarm.permanence_grandfather_journal', 'nothing to grandfather on an empty database')}
+${check('SELECT count(*)=0 FROM swarm.permanence_grandfather_journal', 'nothing to grandfather on an empty database')}
 ${proof('catalog', true)}
 ${proof('rollback-catalog', true)}
 ${repoSql(`${PROOFS}-functional.sql`)}

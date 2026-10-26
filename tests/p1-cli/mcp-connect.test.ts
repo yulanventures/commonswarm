@@ -34,6 +34,13 @@ const TARGET = cloudTarget("http://127.0.0.1:39876", "public-test-key");
 // Wire fixtures only; actual first-use authority is owned by the real-M3 gate.
 const DIRECTORY = { members: [], agents: [{ principal_id: PRINCIPAL, name: "MCP agent", owner_user_id: WS }],
   identity: { credential_valid: true, principal_id: PRINCIPAL, workspace_id: WS, owner_user_id: WS, run_id: RUN } };
+/** A resumed or rebuilt profile is confirmed with one bounded directory read before it is
+ * trusted (permanence release). These controls still forbid every register POST. */
+const confirmReadOnly = (count: () => void): typeof fetch => async (input) => {
+  if (new URL(String(input)).pathname === "/functions/v1/read") return Response.json(DIRECTORY);
+  count();
+  throw new Error("unexpected POST");
+};
 let fileHome: string;
 let previousFileHome: string | undefined;
 before(() => {
@@ -105,7 +112,7 @@ test("connect refuses symlink locks that are not its private published owner fil
       await symlink(target, lockPath);
       let posts = 0;
       await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
-        fetcher: async () => { posts++; throw new Error("unexpected POST"); } }), { code: "connect_reserved_unreadable" });
+        fetcher: confirmReadOnly(() => { posts++; }) }), { code: "connect_reserved_unreadable" });
       assert.equal(posts, 0, variant);
     }
 
@@ -218,7 +225,7 @@ test("Fold 18 custom profile basename gets profile refusal codes", { timeout: 10
     const profile = join(f.root, "agent.json");
     let posts = 0;
     const attempt = () => connectMcp({ target: TARGET, profilePath: profile, readCode: async () => JOIN,
-      fetcher: async () => { posts++; throw new Error("unexpected POST"); } });
+      fetcher: confirmReadOnly(() => { posts++; }) });
     await writeFile(profile, "private body");
     await chmod(profile, 0o644);
     await assert.rejects(attempt(), { code: "connect_profile_mode" });
@@ -268,7 +275,7 @@ test("Fold 17 every reserved path refuses unsafe state before POST on explicit a
           }
           let posts = 0;
           const options = { target: TARGET, readCode: async () => JOIN,
-            fetcher: (async () => { posts++; throw new Error("unexpected POST"); }) as typeof fetch,
+            fetcher: (confirmReadOnly(() => { posts++; })) as typeof fetch,
             ...(route === "explicit" ? { profilePath: profile } : {}),
             ...(state === "other-owner" ? { inspectReserved: async (file: string) => {
               const info = await lstat(file);
@@ -319,7 +326,7 @@ test("Fold 17 fresh connect checks marker before pending write or register", { t
     await chmod(marker, 0o644);
     let posts = 0;
     const attempt = () => connectMcp({ target: TARGET, profilePath: profile, readCode: async () => JOIN,
-      fetcher: async () => { posts++; throw new Error("unexpected POST"); } });
+      fetcher: confirmReadOnly(() => { posts++; }) });
     await assert.rejects(attempt(), error => {
       assert.equal((error as { code: string }).code, "connect_marker_mode");
       assert.ok(String(error).includes(`chmod 600 '${marker}'`));
@@ -556,7 +563,7 @@ test("Fold 12 pending resume keeps a host-bound working profile from this attemp
       name: "MCP agent", codeHash: record.codeHash, createdAt: new Date().toISOString() }));
     let resumePosts = 0;
     const result = await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
-      fetcher: async () => { resumePosts++; throw new Error("unexpected POST"); } });
+      fetcher: confirmReadOnly(() => { resumePosts++; }) });
     assert.equal(result.profile, path);
     assert.equal(resumePosts, 0);
     assert.equal(existsSync(pending), false);
@@ -588,7 +595,7 @@ test("Fold 15 wrong-mode attempt marker gives an exact repair and same-command r
       name: "MCP agent", codeHash: complete.codeHash, createdAt: new Date().toISOString() }));
     const profileBytes = await readFile(path);
     let posts = 0;
-    const noPost: typeof fetch = async () => { posts++; throw new Error("unexpected POST"); };
+    const noPost: typeof fetch = confirmReadOnly(() => { posts++; });
     await chmod(marker, 0o644);
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: noPost }), error => {
       assert.equal((error as { code: string }).code, "connect_marker_mode");
@@ -620,7 +627,7 @@ test("Fold 16 pending without profile classifies marker mode before register", {
     await writeFile(marker, JSON.stringify({ attemptId: JSON.parse(pendingBytes.toString()).attemptId }));
     await chmod(marker, 0o644);
     let posts = 0;
-    const noPost: typeof fetch = async () => { posts++; throw new Error("unexpected POST"); };
+    const noPost: typeof fetch = confirmReadOnly(() => { posts++; });
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: noPost }), error => {
       assert.equal((error as { code: string }).code, "connect_marker_mode");
       assert.ok(String(error).includes(`chmod 600 '${marker}'`));
@@ -647,7 +654,7 @@ test("Fold 16 completion rebuild classifies marker mode before rewriting it", { 
     await chmod(marker, 0o644);
     const markerBytes = await readFile(marker);
     let posts = 0;
-    const noPost: typeof fetch = async () => { posts++; throw new Error("unexpected POST"); };
+    const noPost: typeof fetch = confirmReadOnly(() => { posts++; });
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: noPost }), error => {
       assert.equal((error as { code: string }).code, "connect_marker_mode");
       assert.ok(String(error).includes(`chmod 600 '${marker}'`));
@@ -699,7 +706,7 @@ test("Fold 15 unsafe attempt marker gets a typed file-specific refusal before PO
     await symlink(join(f.root, "elsewhere"), marker);
     let posts = 0;
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
-      fetcher: async () => { posts++; throw new Error("unexpected POST"); } }), error => {
+      fetcher: confirmReadOnly(() => { posts++; }) }), error => {
       assert.equal((error as { code: string }).code, "connect_marker_unreadable");
       assert.ok(String(error).includes(marker));
       assert.doesNotMatch(String(error), /not written by the pending connect|new --profile/);
@@ -733,7 +740,7 @@ test("Fold 13 pending profile must belong to this connect attempt", { timeout: 1
       const credentialBytes = await readFile(credential);
       let posts = 0;
       await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
-        fetcher: async () => { posts++; throw new Error("unexpected POST"); } }), error => {
+        fetcher: confirmReadOnly(() => { posts++; }) }), error => {
         assert.equal((error as { code: string }).code, "connect_profile_other_attempt");
         assert.ok(String(error).includes(path));
         assert.ok(String(error).includes(pending));
@@ -2544,7 +2551,7 @@ test("explicit record and profile modes get exact repair without a register POST
     const pending = join(dirname(path), "connect-pending.json");
     const originalPending = await readFile(pending, "utf8");
     let posts = 0;
-    const noPost: typeof fetch = async () => { posts++; throw new Error("unexpected POST"); };
+    const noPost: typeof fetch = confirmReadOnly(() => { posts++; });
     await chmod(pending, 0o644);
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: noPost }), error => {
       assert.equal((error as { code: string }).code, "connect_pending_mode");
@@ -2586,7 +2593,7 @@ test("working profile rejects another name or code without revocation advice", {
     let posts = 0;
     for (const options of [{ name: "Another agent", code: JOIN }, { name: "MCP agent", code: `swm_join_${"K".repeat(43)}` }]) {
       await assert.rejects(connectMcp({ target: TARGET, profilePath: path, name: options.name, readCode: async () => options.code,
-        fetcher: async () => { posts++; throw new Error("unexpected POST"); } }), error => {
+        fetcher: confirmReadOnly(() => { posts++; }) }), error => {
         assert.match(String(error), /working profile|already holds a profile/);
         assert.match(String(error), /new --profile path/);
         assert.doesNotMatch(String(error), /revoke/);
@@ -2735,7 +2742,7 @@ test("default and explicit connect name a mode-0000 ancestor (root models access
       throw Object.assign(new Error("mode-0000 access-check denial"), { code: "EACCES" });
     } } : {};
     await assert.rejects(connectMcp({ ...accessProbe, target: TARGET, readCode: async () => JOIN,
-      fetcher: async () => { posts++; throw new Error("unexpected POST"); } }), error => {
+      fetcher: confirmReadOnly(() => { posts++; }) }), error => {
       assert.equal((error as { code: string }).code, "connect_directory_mode");
       assert.equal((error as Error).message, `The connect directory at ${base} needs mode 0700. Run chmod 700 '${base}', then rerun the same command.`);
       assert.match(String(error), new RegExp(`chmod 700 '${base}'`));
@@ -2745,7 +2752,7 @@ test("default and explicit connect name a mode-0000 ancestor (root models access
     });
     await assert.rejects(connectMcp({ ...accessProbe, target: TARGET,
       profilePath: join(base, "agents", "mcp-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "profile.json"),
-      readCode: async () => JOIN, fetcher: async () => { posts++; throw new Error("unexpected POST"); } }), error => {
+      readCode: async () => JOIN, fetcher: confirmReadOnly(() => { posts++; }) }), error => {
       assert.equal((error as { code: string }).code, "connect_directory_mode");
       assert.equal((error as Error).message, `The connect directory at ${base} needs mode 0700. Run chmod 700 '${base}', then rerun the same command.`);
       assert.match(String(error), new RegExp(`chmod 700 '${base}'`));
@@ -2774,7 +2781,7 @@ test("default scan repairs modes before calling same-URL malformed pending damag
       await chmod(damaged, kind === "file" ? 0o644 : 0o755);
       let posts = 0;
       await assert.rejects(connectMcp({ target: TARGET, readCode: async () => JOIN,
-        fetcher: async () => { posts++; throw new Error("unexpected POST"); } }), error => {
+        fetcher: confirmReadOnly(() => { posts++; }) }), error => {
         assert.equal((error as { code: string }).code, "connect_pending_mode");
         assert.match(String(error), new RegExp(`chmod ${kind === "file" ? "600" : "700"}`));
         assert.match(String(error), /rerun the same command/);
@@ -2804,10 +2811,10 @@ test("owned pending with a wrong file or directory mode matches by HMAC and resu
       await chmod(damaged, kind === "file" ? 0o644 : 0o755);
       let otherPosts = 0;
       await assert.rejects(connectMcp({ target: TARGET, readCode: async () => `swm_join_${(kind === "file" ? "K" : "L").repeat(43)}`,
-        fetcher: async () => { otherPosts++; throw new Error("unexpected POST"); } }), { code: "connect_pending_mode" });
+        fetcher: confirmReadOnly(() => { otherPosts++; }) }), { code: "connect_pending_mode" });
       assert.equal(otherPosts, 0, "the same-URL mode problem is reported before checking another code");
       let posts = 0;
-      await assert.rejects(connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: async () => { posts++; throw new Error("unexpected POST"); } }), error => {
+      await assert.rejects(connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: confirmReadOnly(() => { posts++; }) }), error => {
         assert.equal((error as { code: string }).code, "connect_pending_mode");
         assert.ok(String(error).includes(pending));
         assert.match(String(error), new RegExp(`chmod ${kind === "file" ? "600" : "700"}`));
@@ -2842,7 +2849,7 @@ test("completed profile in a wrong-mode directory reports chmod without inventin
     await assert.rejects(stat(pending), { code: "ENOENT" });
     await chmod(dirname(path), 0o755);
     let posts = 0;
-    await assert.rejects(connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: async () => { posts++; throw new Error("unexpected POST"); } }), error => {
+    await assert.rejects(connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: confirmReadOnly(() => { posts++; }) }), error => {
       assert.equal((error as { code: string }).code, "connect_directory_mode");
       assert.match(String(error), /connect directory/);
       assert.match(String(error), /chmod 700/);
@@ -2851,7 +2858,7 @@ test("completed profile in a wrong-mode directory reports chmod without inventin
     });
     assert.equal(posts, 0);
     await chmod(dirname(path), 0o000);
-    await assert.rejects(connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: async () => { posts++; throw new Error("unexpected POST"); } }), error => {
+    await assert.rejects(connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: confirmReadOnly(() => { posts++; }) }), error => {
       assert.equal((error as { code: string }).code, "connect_directory_mode");
       assert.match(String(error), /chmod 700/);
       assert.doesNotMatch(String(error), /record|pending|damaged|revoke/);
@@ -2860,7 +2867,7 @@ test("completed profile in a wrong-mode directory reports chmod without inventin
     assert.equal(posts, 0);
     await chmod(dirname(path), 0o700);
     await chmod(path, 0o644);
-    await assert.rejects(connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: async () => { posts++; throw new Error("unexpected POST"); } }), error => {
+    await assert.rejects(connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: confirmReadOnly(() => { posts++; }) }), error => {
       assert.equal((error as { code: string }).code, "connect_profile_mode");
       assert.match(String(error), /chmod 600/);
       assert.doesNotMatch(String(error), /damaged|revoke/);
