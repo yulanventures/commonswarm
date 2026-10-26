@@ -2,7 +2,8 @@
 # Nightly 03:23 UTC and the Mac dispatch remain until Root verifies the separate
 # pe-ci-1 systemd timer (deploy/ci/README.md). Remove this schedule only at cutover.
 # Release PRs and manual suite selection remain after cutover.
-# Full suite: server (including MCP auth), p1-cli, site, box-dry-run, and npm test (unit).
+# Full suite: server (including MCP auth), p1-cli, site, and npm test (unit).
+# box-dry-run runs on pe-ci-1 because it needs the root CI host; manual dispatch remains available.
 # server-repeat remains a manual diagnostic; it is not part of the full-suite matrix.
 # Keep ubuntu-latest: these suites need Linux containers, headless browsers, or root fixtures.
 # No production secrets or deploys. The local stack generates its own development keys.
@@ -59,7 +60,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && (inputs.suite == 'server' && '[{"suite":"server","shard":1},{"suite":"server","shard":2},{"suite":"server","shard":3}]' || format('[{{"suite":"{0}","shard":0}}]', inputs.suite)) || '[{"suite":"server","shard":1},{"suite":"server","shard":2},{"suite":"server","shard":3},{"suite":"p1-cli","shard":0},{"suite":"site","shard":0},{"suite":"box-dry-run","shard":0},{"suite":"unit","shard":0}]') }}
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && (inputs.suite == 'server' && '[{"suite":"server","shard":1},{"suite":"server","shard":2},{"suite":"server","shard":3}]' || format('[{{"suite":"{0}","shard":0}}]', inputs.suite)) || '[{"suite":"server","shard":1},{"suite":"server","shard":2},{"suite":"server","shard":3},{"suite":"p1-cli","shard":0},{"suite":"site","shard":0},{"suite":"unit","shard":0}]') }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.suite == 'server' && 45 || 30 }}
     steps:
