@@ -113,6 +113,7 @@ tests/admin-oauth-auth.test.ts
 tests/admin-http.test.ts
 tests/admin-command-entry.test.ts
 tests/admin-smoke.test.mjs
+tests/staging-allow-proof.test.ts
 tests/ci-compare-failures.test.mjs
 tests/affected-suites.test.mjs
 tests/run-test-list.test.ts
