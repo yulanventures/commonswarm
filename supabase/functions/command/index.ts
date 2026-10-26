@@ -20,7 +20,8 @@ import {
   enforceAgentSessionProof,
   hashSessionKey,
   loadAgentCredential,
-  planLocalOperation, planLocalConnection, lockLocalAuthPlan, type LocalAuthLockPlan, LocalCredentialDenied, LocalCredentialWorkspaceMismatch, recheckLocalCredential, LocalAuthDiscoveryChanged,
+  discoverLocalCredential,
+  planLocalOperation, planLocalConnection, lockLocalAuthPlan, type LocalAuthLockPlan, LocalCredentialDenied, recheckLocalCredential, LocalAuthDiscoveryChanged,
   retryLocalAuthTransaction,
   planHostedClaimPrefix,
   type AgentAuthRow,
@@ -163,6 +164,7 @@ import {
   decideWorkspace,
   DISPOSITIONS,
   FEEDBACK_CATEGORIES,
+  FILE_VERSION_PRECONDITION_FAILED,
   H0_SEAT_TOKEN_TTL_MS,
   normalizedFeedbackBody,
   normalizedFeedbackContext,
@@ -3625,7 +3627,8 @@ async function prepareWorkspaceCommand(
 ): Promise<PreparedWorkspace> {
   const state = await loadWorkspaceState(tx, route,
     wire.kind==='renew_agent_token' && auth.agent ? [auth.agent.token_id]
-      : wire.kind==='revoke_agent_token' ? [wire.token_id] : []);
+      : wire.kind==='revoke_agent_token'
+        && (auth.credentialKind!=='agent' || wire.token_id===auth.agent?.token_id) ? [wire.token_id] : []);
   let invitationToken: string | null = null;
   let invitationHash: Uint8Array | null = null;
   let agentToken: string | null = null;
@@ -10936,11 +10939,14 @@ async function handleTransaction(
     }
     const rawLocal = record(body.command);
     if (agentTokenHash && HUMAN_ONLY_COMMANDS.has(kind as never))
-      return {status:403,body:{error:'human_sign_in_required'}};
+      return {status:403,body:{error:'forbidden'}};
     // Admission selects a lock suffix, never a domain reason. The reducer
     // remains the sole owner of authenticated business refusals.
     const humanLocalAdmission = async (): Promise<'allowed' | 'business-refusal' | 'forbidden'> => {
-      if (!verifiedHuman || !localWorkspace || kind==='accept_invitation') return 'allowed';
+      // A grant owner can always withdraw their own hosted connection. Its
+      // handler checks stored ownership even after membership loss or archive.
+      if (!verifiedHuman || !localWorkspace || kind==='accept_invitation'
+        || kind==='revoke_hosted_mcp_grant') return 'allowed';
       const [admission]=await tx<{role:string}[]>`SELECT m.role FROM swarm.memberships m
         JOIN swarm.workspaces w USING(workspace_id)
         WHERE m.workspace_id=${localWorkspace}::uuid AND m.user_id=${verifiedHuman.userId}::uuid
@@ -10956,11 +10962,23 @@ async function handleTransaction(
         if (!target || target.owner_user_id!==verifiedHuman.userId && !['owner','admin'].includes(admission.role))
           return ['revoke_agent_principal','set_agent_model'].includes(kind) ? 'business-refusal' : 'forbidden';
       }
+      if (kind==='revoke_agent_token' && typeof rawLocal?.token_id==='string' && UUID_RE.test(rawLocal.token_id)) {
+        const [target]=await tx<{owner_user_id:string}[]>`SELECT p.owner_user_id FROM swarm.agent_tokens t
+          JOIN swarm.agent_principals p USING(principal_id)
+          WHERE t.token_id=${rawLocal.token_id}::uuid AND p.workspace_id=${localWorkspace}::uuid`;
+        if (!target || target.owner_user_id!==verifiedHuman.userId && !['owner','admin'].includes(admission.role))
+          return 'business-refusal';
+      }
       return 'allowed';
     };
     const humanAdmission = await humanLocalAdmission();
     if (humanAdmission==='forbidden') return {status:403,body:{error:'forbidden'}};
     const humanBusinessRefusal = humanAdmission==='business-refusal';
+    // Compare only with the presenting proof, never discover an agent's submitted
+    // revocation target before the reducer's exact-token confinement decision.
+    const agentTokenRevocationRefusal = agentTokenHash !== null && kind==='revoke_agent_token'
+      && (await discoverLocalCredential(tx,agentTokenHash))?.token_id!==rawLocal?.token_id;
+    const actorOnlyRefusal = humanBusinessRefusal || agentTokenRevocationRefusal;
     if (kind===RESUME_RENEWAL_GRANT_KIND && (!rawLocal || !exactKeys(rawLocal,['kind','renewal_grant_id'])
       || typeof rawLocal.renewal_grant_id!=='string' || !UUID_RE.test(rawLocal.renewal_grant_id)))
       return {status:400,body:{error:'invalid_request'}};
@@ -11012,12 +11030,12 @@ async function handleTransaction(
       record(args?.assignee)?.kind==='agent' ? record(args?.assignee)?.id:null,
       record(args?.to)?.kind==='agent' ? record(args?.to)?.id:null,
       record(record(args?.assign)?.to)?.kind==='agent' ? record(record(args?.assign)?.to)?.id:null]) {
-      if(!humanBusinessRefusal && typeof value==='string' && UUID_RE.test(value)) principalTargets.add(value);
+      if(!actorOnlyRefusal && typeof value==='string' && UUID_RE.test(value)) principalTargets.add(value);
     }
     // Existing to-do assignment is DB-owned metadata, reselected after each wait.
-    const todoId=!humanBusinessRefusal && typeof args?.todo_id==='string' && UUID_RE.test(args.todo_id) ? args.todo_id:null;
+    const todoId=!actorOnlyRefusal && typeof args?.todo_id==='string' && UUID_RE.test(args.todo_id) ? args.todo_id:null;
     if(expiryBinding && expiryBinding.workspace_id===localWorkspace) principalTargets.add(expiryBinding.principal_id);
-    const tokenTargets=!humanBusinessRefusal && typeof rawLocal?.token_id==='string' && UUID_RE.test(rawLocal.token_id) ? [rawLocal.token_id]:[];
+    const tokenTargets=!actorOnlyRefusal && typeof rawLocal?.token_id==='string' && UUID_RE.test(rawLocal.token_id) ? [rawLocal.token_id]:[];
     // The Allow writer selects the exact connection, including retired tokens
     // absent from principal discovery. Reuse its nonlocking selector/refusal
     // boundary before adding that token's server-derived parent to the prefix.
@@ -11029,7 +11047,7 @@ async function handleTransaction(
       && await planLocalConnection(tx,localWorkspace,verifiedHuman.userId,consent.principal_id,consent.connection_id)) {
       tokenTargets.push(consent.connection_id);
     }
-    const removeUser=!humanBusinessRefusal && kind==='remove_member' && typeof rawLocal?.user_id==='string' && UUID_RE.test(rawLocal.user_id) ? rawLocal.user_id:null;
+    const removeUser=!actorOnlyRefusal && kind==='remove_member' && typeof rawLocal?.user_id==='string' && UUID_RE.test(rawLocal.user_id) ? rawLocal.user_id:null;
     const revocation=removeUser ? {user:removeUser}
       : kind==='revoke_agent_principal' && principalTargets.size===1 ? {principal:[...principalTargets][0]!}
       : kind==='revoke_agent_token' && tokenTargets[0] ? {token:tokenTargets[0]} : undefined;
@@ -11821,7 +11839,9 @@ async function handleTransaction(
           hash,
         });
         if (!matches) {
-          return { status: 409, body: { error: "command_id_conflict" } };
+          // Keep this authenticated conflict's rate charge and audit. Final
+          // credential and session checks still roll back any authority loss.
+          return decided({ status: 409, body: { error: "command_id_conflict" } });
         }
         if (kind === CLAIM_AGENT_INBOX_KIND && auth.agent !== null) {
           const ledger = parseClaimLedger(existing.response);
@@ -12630,7 +12650,13 @@ async function handleTransaction(
       try {
         outcome=await tx.savepoint(async sp=>{
           const applied=await applyFile(sp);
-          if (!applied.ok) throw new LocalBusinessRefused(applied);
+          // A losing commit deliberately retires its pending slot and queues
+          // its bytes. Keep that cleanup, subject to the final credential and
+          // session fences. Other refusals still roll back their business work.
+          const retiredLosingCommit = !applied.ok
+            && fileCommand.kind === FILE_VERSION_COMMIT_KIND
+            && applied.refusal.error === FILE_VERSION_PRECONDITION_FAILED;
+          if (!applied.ok && !retiredLosingCommit) throw new LocalBusinessRefused(applied);
           return applied;
         });
       } catch(error) {
@@ -13663,7 +13689,7 @@ async function handleTransaction(
   }).catch((error: unknown): HttpResult => {
     // postgres.js rejects begin only after rollback: no authority/content,
     // idempotency, presence, audit or notice effects survive this refusal.
-    if (error instanceof LocalCredentialWorkspaceMismatch
+    if (error instanceof LocalCredentialDenied
       && (kind===CLAIM_AGENT_INBOX_KIND || kind===ACK_AGENT_DELIVERY_KIND))
       return {status:403,body:{error:'delivery_unavailable'}};
     if (error instanceof LocalCredentialDenied) return error.credentialInvalid

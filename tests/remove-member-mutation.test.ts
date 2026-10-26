@@ -79,11 +79,7 @@ test("fresh-auth helper cannot be weakened to JWT iat or token refresh", async (
   }
 });
 
-test("idempotency replay is resolved before remove_member fresh-auth refusal", async () => {
-  const source = await readFile(
-    "supabase/functions/command/index.ts",
-    "utf8",
-  );
+function assertReplayBeforeFreshAuth(source: string): void {
   // Pin the live command path: step 7 is the idempotency lookup/replay, and
   // remove_member freshness must only run after that step completes. An earlier
   // existingRows in another route must not mask a reordered fresh-auth gate.
@@ -98,33 +94,55 @@ test("idempotency replay is resolved before remove_member fresh-auth refusal", a
   );
   assert.match(
     between,
-    /\? replayResult\(storedResponse\(existing\.response\), kind\)/,
+    // Mint/renew replays refresh owner policy fields; membership commands keep
+    // their stored response. Both remain decided replays before fresh auth.
+    /\? decided\(replayResult\(kind\s*===\s*"mint_agent_token" \|\| kind\s*===\s*RENEW_AGENT_TOKEN_KIND\s*\? await currentLocalPolicyResponse\(tx,\s*storedResponse\(existing\.response\),\s*localState\.localPlan\)\s*:\s*storedResponse\(existing\.response\), kind\)\)/,
   );
   assert.doesNotMatch(
     between,
     /commandNeedsFreshInteractiveAuth|freshInteractiveAuthRefusal|command\.kind === "remove_member"|command\.kind === "change_role"/,
     "fresh-auth must not run inside the idempotency step",
   );
-  const after = source.slice(afterStep7, afterStep7 + 1400);
+  // Search from step 7, not from the gate: an earlier ledger insert must fail
+  // even if another valid ledger insert remains after the refusal.
+  const ledgerAt = source.indexOf("INSERT INTO swarm.idempotency_keys", afterStep7);
+  assert.ok(ledgerAt > afterStep7, "the first later ledger write must remain reachable");
+  const after = source.slice(afterStep7, ledgerAt);
   assert.match(
     after,
-    /if \(commandNeedsFreshInteractiveAuth\(command\.kind\)\) \{\s*const serverTime = await tx/,
+    /^await afterStep\(7\);\s*if \(commandNeedsFreshInteractiveAuth\(command\.kind\)\) \{\s*const serverTime = await tx/,
     "fresh-auth must immediately follow idempotency completion",
   );
   assert.match(after, /freshInteractiveAuthRefusal\(\s*command\.kind,/);
   assert.match(after, /if \(freshAuth !== null\)/);
   assert.match(after, /message: freshAuth\.message/);
+  const gateAt = source.indexOf("freshInteractiveAuthRefusal(", afterStep7);
+  assert.ok(gateAt > afterStep7 && gateAt < ledgerAt, "fresh auth must precede the first ledger write");
+  const refusal = after.match(/if \(freshAuth !== null\) \{\s*await insertAudit\(tx, \{[\s\S]*?\}\);\s*return \{\s*status: 401,\s*body: \{\s*error: freshAuth\.error,\s*message: freshAuth\.message,\s*\},\s*\};\s*\}/);
+  assert.ok(refusal, "the complete fresh-auth refusal and 401 return must precede the first ledger write");
   assert.doesNotMatch(
-    after,
+    after.slice(0, refusal.index! + refusal[0].length),
     /command\.kind === "remove_member"|command\.kind === "change_role"/,
     "the gate must follow the shared kind set, not one hard-coded kind",
   );
-  const gateAt = source.indexOf("freshInteractiveAuthRefusal(", afterStep7);
-  const ledgerAt = source.indexOf("INSERT INTO swarm.idempotency_keys", gateAt);
-  assert.ok(gateAt > afterStep7 && ledgerAt > gateAt);
-  const beforeLedger = source.slice(gateAt, ledgerAt);
-  assert.match(beforeLedger, /status: 401/);
-  assert.match(beforeLedger, /return \{/);
+}
+
+test("idempotency replay is resolved before remove_member fresh-auth refusal", async () => {
+  const source = await readFile("supabase/functions/command/index.ts", "utf8");
+  assertReplayBeforeFreshAuth(source);
+});
+
+test("fresh-auth ordering rejects a ledger write before the gate or its refusal return", async () => {
+  const source = await readFile("supabase/functions/command/index.ts", "utf8");
+  const insert = 'await tx`INSERT INTO swarm.idempotency_keys (command_id) VALUES (${commandId})`;';
+  for (const [name, marker] of [
+    ["before gate", "await afterStep(7);"],
+    ["inside refusal before 401", "if (freshAuth !== null) {"],
+  ]) {
+    const mutated = source.replace(marker!, `${marker}\n${insert}`);
+    assert.notEqual(mutated, source, `${name}: mutation must change the source`);
+    assert.throws(() => assertReplayBeforeFreshAuth(mutated), assert.AssertionError, name);
+  }
 });
 
 test("fresh-login refusal preserves pending remove_member command id", async () => {

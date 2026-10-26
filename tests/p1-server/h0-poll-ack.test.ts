@@ -490,7 +490,9 @@ for (const conflict of ["watcher", "poll"] as const) {
         await pending?.catch(() => undefined);
         await gate.end({ timeout: 5 });
         await sql`DELETE FROM swarm.agent_wake_leases WHERE principal_id = ${seat.principalId}::uuid`;
-        await sql`DELETE FROM swarm.h0_poll_locks WHERE principal_id = ${seat.principalId}::uuid`;
+        // Poll lock identities are immutable, including for fixture cleanup.
+        await sql`UPDATE swarm.h0_poll_locks SET expires_at = clock_timestamp(), waiting = false
+          WHERE principal_id = ${seat.principalId}::uuid`;
       }
     });
   }
@@ -804,16 +806,36 @@ test("a slice blocked on its seat row cannot collect after the lock ends", { tim
   let secondPromise: Promise<HttpResult> | undefined;
   let signalId = "";
   await sql.begin(async (tx) => {
+    const [{ pid }] = await tx<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
     await tx`
       SELECT holder FROM swarm.h0_poll_locks
       WHERE principal_id = ${seat.principalId}::uuid FOR UPDATE
     `;
-    signalId = await postAsk(seat.principalId);
-    await delay(1_500);
+    // Seed the queued input in the lock-holder transaction. A human command
+    // needs U/W locks now held by the waiting slice, so awaiting that command
+    // here would form a fixture-only lock cycle before releasing the seat row.
+    // Real recipient and fan-out triggers still create the delivery.
+    signalId = randomUUID();
+    await tx`INSERT INTO swarm.signals
+      (id, workspace_id, from_principal, from_kind, kind, body, to_agent_principal_id, until)
+      VALUES (${signalId}::uuid, ${owner.workspace}::uuid, ${owner.ownerId}::uuid,
+        'user', 'ask', 'Seat lock expiry probe', ${seat.principalId}::uuid,
+        statement_timestamp() + interval '1 hour')`;
+    await tx`INSERT INTO swarm.signal_recipients
+      (signal_id, workspace_id, recipient_agent_principal_id, position)
+      VALUES (${signalId}::uuid, ${owner.workspace}::uuid, ${seat.principalId}::uuid, 0)`;
+    let blocked = false;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const [row] = await tx<{ blocked: boolean }[]>`SELECT EXISTS(SELECT 1 FROM pg_stat_activity a
+        WHERE ${pid} = ANY(pg_blocking_pids(a.pid)) AND a.wait_event_type = 'Lock') AS blocked`;
+      if (row?.blocked) { blocked = true; break; }
+      await delay(25);
+    }
+    assert.equal(blocked, true, "the real slice must wait on the seat lock");
     assert.equal(firstSettled, false, "slice collected while another transaction held its lock row");
     await tx`
       UPDATE swarm.h0_poll_locks
-      SET expires_at = statement_timestamp() - interval '1 second'
+      SET expires_at = acquired_at
       WHERE principal_id = ${seat.principalId}::uuid
     `;
     secondPromise = h0("poll", seat.token, { wait: 0 });

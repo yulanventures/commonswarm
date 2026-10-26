@@ -167,8 +167,12 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
       const requestedKind=String(adminRecord(input.command)?.kind);
       const requestedScope=Object.entries(ADMIN_SCOPE_REGISTRY).find(([,commands])=>
         (commands as readonly string[]).includes(requestedKind))?.[0];
-      if (!admission.capabilities.includes(requestedKind) || !requestedScope
-        || !token.scope_names.includes(requestedScope) || !grant.scope_names.includes(requestedScope as AdminScope))
+      // The registry governs metadata and routine capabilities. Lifecycle
+      // commands use the authority reducer's actor/grant checks, including
+      // self-surrender, which must remain usable after mutation exhaustion.
+      if ((requestedKind==='admin_read_metadata' || plannedRoutine !== null)
+        && (!admission.capabilities.includes(requestedKind) || !requestedScope
+          || !token.scope_names.includes(requestedScope) || !grant.scope_names.includes(requestedScope as AdminScope)))
         return 'capability_forbidden';
       if (plannedRoutine && 'principal_id' in plannedRoutine) {
         const [principal]=await tx<{principal_id:string;owner_user_id:string;transport:string}[]>`SELECT principal_id,owner_user_id,transport

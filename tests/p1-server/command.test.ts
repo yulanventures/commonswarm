@@ -1680,7 +1680,8 @@ test("P3-1 signals are authored, sanitized, isolated, idempotent, stale at read 
       f.agentToken,
       f.workspaceA,
     );
-    assert.equal(revokedRead.status, 403);
+    assert.equal(revokedRead.status, 401);
+    assert.deepEqual(revokedRead.body, { error: "unauthenticated" });
 
     const afterStream = await sql<{ head_seq: string | number }[]>`
       SELECT head_seq
@@ -2451,7 +2452,8 @@ test("wake-relation-contract: sender_owner_relation matrix, capabilities, and cu
     });
     assert.equal(overAbout.status, 400);
 
-    // Revocation control: revoked receiver credential still 403s.
+    // A revoked bearer is an authoritative credential failure. Route and
+    // principal denials remain forbidden; this exact token is unauthenticated.
     await sql`
       UPDATE swarm.agent_tokens
       SET revoked_at = statement_timestamp()
@@ -2464,7 +2466,8 @@ test("wake-relation-contract: sender_owner_relation matrix, capabilities, and cu
       null,
       { after_created_at: null, after_id: null },
     );
-    assert.equal(revokedReceiver.status, 403);
+    assert.equal(revokedReceiver.status, 401);
+    assert.deepEqual(revokedReceiver.body, { error: "unauthenticated" });
   });
 });
 
@@ -4566,7 +4569,7 @@ function registerAgentCredential(f: Fixture, token: string): void {
  */
 async function seedRenewalGrant(
   f: Fixture,
-  options: { horizonMs?: number; maxSuccessors?: number } = {},
+  options: { horizonMs?: number; maxSuccessors?: number; standing?: boolean } = {},
 ): Promise<string> {
   const horizonMs = options.horizonMs ?? RENEWAL_HORIZON_DEFAULT_MS;
   assert.ok(
@@ -4577,15 +4580,17 @@ async function seedRenewalGrant(
   await sql`
     INSERT INTO swarm.renewal_grants (
       renewal_grant_id, workspace_id, principal_id, run_id,
-      max_successors, successors_used, horizon_expires_at, created_by
+      kind, max_successors, successors_used, horizon_expires_at, created_by
     ) VALUES (
       ${grantId}::uuid,
       ${f.workspaceA}::uuid,
       ${f.agentPrincipal}::uuid,
       ${f.agentRun}::uuid,
-      ${options.maxSuccessors ?? RENEWAL_MAX_SUCCESSORS_DEFAULT},
+      ${options.standing ? "standing" : "timeboxed"},
+      ${options.standing ? null : options.maxSuccessors ?? RENEWAL_MAX_SUCCESSORS_DEFAULT},
       0,
-      statement_timestamp() + ${`${horizonMs} milliseconds`}::interval,
+      CASE WHEN ${options.standing === true} THEN NULL
+        ELSE statement_timestamp() + ${`${horizonMs} milliseconds`}::interval END,
       ${f.ua}::uuid
     )
   `;
@@ -4885,8 +4890,8 @@ test("§2.3 renewal revocation is fail-closed and lineage-wide", async () => {
       WHERE token_id = ${revokedPredecessor.tokenId}::uuid
     `;
     const refused = await issueRenewal(f, revokedPredecessor.token);
-    assert.equal(refused.status, 403, refused.text);
-    assert.deepEqual(refused.body, { error: "forbidden" });
+    assert.equal(refused.status, 401, refused.text);
+    assert.deepEqual(refused.body, { error: "unauthenticated" });
     assert.equal(await lineageTokenCount(revokedPredecessor.lineageId), 1);
     assert.equal(await successorsUsed(grantId), 0);
 
@@ -4939,13 +4944,15 @@ test("§2.3 renewal revocation is fail-closed and lineage-wide", async () => {
 
 test("§2.3 renewal stops at the horizon, at a revoked grant, and at the successor budget", async () => {
   await scenario(async (f) => {
-    // THE HORIZON. A grant whose horizon has passed is the periodic human
-    // checkpoint firing — the thing that stops silent renewal becoming an
-    // unbounded deputy. The horizon is immutable after insert (the database
+    // THE TIMEBOXED HORIZON. Bounded families still stop at their explicit
+    // horizon; ordinary standing connections have no such checkpoint.
+    // The horizon is immutable after insert (the database
     // refuses to push it out), so this seeds a deliberately short one and waits
     // for it rather than editing it afterwards.
     const shortGrant = await seedRenewalGrant(f, { horizonMs: 1_200 });
     const atHorizon = await seedPredecessor(f, { grantId: shortGrant });
+    const standingGrant = await seedRenewalGrant(f, { standing: true });
+    const permanent = await seedPredecessor(f, { grantId: standingGrant });
     await delay(1_600);
     const past = await issueRenewal(f, atHorizon.token);
     assert.equal(past.status, 200, past.text);
@@ -4953,6 +4960,20 @@ test("§2.3 renewal stops at the horizon, at a revoked grant, and at the success
     assert.equal(past.body.reason, "renewal_horizon_reached");
     assert.equal(await lineageTokenCount(atHorizon.lineageId), 1);
     assert.equal(await successorsUsed(shortGrant), 0);
+
+    const [standing] = await sql`SELECT kind, horizon_expires_at, max_successors,
+      connection_expires_at FROM swarm.renewal_grants WHERE renewal_grant_id = ${standingGrant}::uuid`;
+    assert.equal(standing?.kind, "standing");
+    assert.equal(standing?.horizon_expires_at, null);
+    assert.equal(standing?.max_successors, null);
+    assert.equal(standing?.connection_expires_at, null);
+    const continued = await issueRenewal(f, permanent.token);
+    assert.equal(continued.status, 200, continued.text);
+    assert.equal(continued.body.status, "accepted", continued.text);
+    assert.equal(continued.body.horizon_expires_at, null);
+    assert.equal(continued.body.successors_remaining, null);
+    assert.equal(await lineageTokenCount(permanent.lineageId), 2);
+    assert.equal(await successorsUsed(standingGrant), 1);
 
     // THE BUDGET. max_successors is immutable too, so the budget is expressed
     // by creating a grant that allows exactly one successor.
@@ -5001,8 +5022,8 @@ test("§2.3 renewal stops at the horizon, at a revoked grant, and at the success
       WHERE renewal_grant_id = ${revocableGrant}::uuid
     `;
     const afterRevoke = await issueRenewal(f, underGrant.token);
-    assert.equal(afterRevoke.status, 403, afterRevoke.text);
-    assert.deepEqual(afterRevoke.body, { error: "forbidden" });
+    assert.equal(afterRevoke.status, 401, afterRevoke.text);
+    assert.deepEqual(afterRevoke.body, { error: "unauthenticated" });
     assert.equal(await lineageTokenCount(underGrant.lineageId), 1);
     assert.equal(await successorsUsed(revocableGrant), 0);
     const [cascaded] = await sql<{ revoked_at: Date | null }[]>`
@@ -5270,13 +5291,14 @@ test("§2.3 fence transaction abort preserves recovery and revocation wins on re
 
         if (afterAbort === "revoke") {
           // The winning revoke commits before the client retries. The real
-          // cascade revokes T0 and S1, so auth refuses before the domain fence.
+          // cascade revokes T0 and S1, so typed credential invalidation refuses
+          // before the domain fence. Membership/lineage denials remain 403.
           await sql`UPDATE swarm.renewal_grants
             SET revoked_at = statement_timestamp(), revoked_by = ${f.ua}::uuid
             WHERE renewal_grant_id = ${grantId}::uuid`;
           const refused = await issueRenewal(f, predecessor.token, id);
-          assert.equal(refused.status, 403);
-          assert.deepEqual(refused.body, { error: "forbidden" });
+          assert.equal(refused.status, 401);
+          assert.deepEqual(refused.body, { error: "unauthenticated" });
           assert.equal(await lineageTokenCount(predecessor.lineageId), 2);
         } else if (afterAbort === "first_use") {
           // Ruling 38 also covers a successor holder completing the handover:
@@ -5467,8 +5489,8 @@ test("§2.3 a renewal whose response is lost is recoverable, and the stranded su
     assert.equal(stranded.firstUsedAt, null, "the stranded successor was never used");
     assert.notEqual(stranded.revokedAt, null, "the stranded successor is revoked");
     const strandedUse = await useToken(f, strandedToken);
-    assert.equal(strandedUse.status, 403, strandedUse.text);
-    assert.deepEqual(strandedUse.body, { error: "forbidden" });
+    assert.equal(strandedUse.status, 401, strandedUse.text);
+    assert.deepEqual(strandedUse.body, { error: "unauthenticated" });
 
     const successors = await successorsOf(predecessor.tokenId);
     assert.equal(successors.length, 2, JSON.stringify(successors));
@@ -5763,7 +5785,8 @@ test("§2.3 self-healing renewal keeps exactly one live successor per predecesso
         workable += 1;
       } else {
         // Superseded by a later retry: refused, not silently half-working.
-        assert.equal(used.status, 403, used.text);
+        assert.equal(used.status, 401, used.text);
+        assert.deepEqual(used.body, { error: "unauthenticated" });
       }
     }
     assert.equal(
@@ -6169,6 +6192,135 @@ test("§2.3 a pending successor cannot renew: the overlap window cannot be stack
   });
 });
 
+test("agent token revocation conceals sibling, foreign and absent targets without effects", async () => {
+  await scenario(async (f) => {
+    const sibling = await seedPredecessor(f, {});
+    const otherOwner = await createFixtureAgent(f, f.ua2, "other-owner");
+    const foreign = await createFixtureAgent(f, f.ub, "foreign", f.workspaceB);
+    const workspaces = [f.workspaceA, f.workspaceB];
+    const users = [f.ua, f.ua2, f.ub];
+    const rateSubjects = [...workspaces, ...users, f.agentPrincipal, f.agentTokenId];
+    const snapshot = async () => {
+      const [counts] = await sql`
+        WITH principals AS (
+          SELECT principal_id FROM swarm.agent_principals WHERE workspace_id = ANY(${workspaces}::uuid[])
+        ), tokens AS (
+          SELECT * FROM swarm.agent_tokens WHERE principal_id IN (SELECT principal_id FROM principals)
+        ), families AS (
+          SELECT * FROM swarm.renewal_grants WHERE workspace_id = ANY(${workspaces}::uuid[])
+        )
+        SELECT
+          (SELECT count(*) FROM tokens) AS tokens,
+          (SELECT count(*) FROM tokens WHERE revoked_at IS NOT NULL) AS revoked,
+          (SELECT count(*) FROM swarm.revocation_tombstones
+            WHERE created_by = ANY(${users}::uuid[]) OR target_id IN (
+              SELECT token_id FROM tokens UNION SELECT lineage_id FROM tokens
+              UNION SELECT principal_id FROM principals UNION SELECT renewal_grant_id FROM families
+            )) AS tombstones,
+          (SELECT count(*) FROM swarm.events WHERE workspace_id = ANY(${workspaces}::uuid[])) AS events,
+          (SELECT count(*) FROM swarm.idempotency_keys WHERE workspace_id = ANY(${workspaces}::uuid[])) AS ledger,
+          (SELECT count(*) FROM swarm.audit_log WHERE actor_user = ANY(${users}::uuid[])) AS audits,
+          (SELECT coalesce(sum(count), 0) FROM swarm.rate_buckets
+            WHERE bucket_key LIKE ANY(${rateSubjects.map((id) => `%${id}%`)}::text[])) AS charges,
+          (SELECT coalesce(sum(successors_used), 0) FROM families) AS successors
+      `;
+      assert.ok(counts);
+      return counts;
+    };
+    const before = await snapshot();
+    for (const workspace of [f.workspaceA, f.workspaceB, randomUUID()]) {
+      for (const target of [sibling.tokenId, otherOwner.tokenId, foreign.tokenId, randomUUID()]) {
+        const response = await issueConnect(f, f.agentToken,
+          { kind: "revoke_agent_token", token_id: target }, commandId("concealed"), workspace);
+        assert.equal(response.status, 403, response.text);
+        assert.equal(response.text, '{"error":"forbidden"}', "all refusals have identical bytes");
+        assert.deepEqual(await snapshot(), before, "refused revocation changes no counts");
+      }
+    }
+    for (const target of [sibling.tokenId, otherOwner.tokenId, foreign.tokenId]) {
+      assert.equal((await tokenLifecycle(target)).revokedAt, null);
+    }
+    const tokenRows = () => sql`
+      SELECT t.token_id, md5(to_jsonb(t)::text) AS fingerprint
+      FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING (principal_id)
+      WHERE p.workspace_id = ANY(${workspaces}::uuid[])
+      ORDER BY t.token_id
+    `;
+    const assertHumanRefusal = async (human: string, target: string, reason: string) => {
+      const countsBefore = await snapshot();
+      const tokensBefore = await tokenRows();
+      const id = commandId("human-revoke-refusal");
+      const response = await issueConnect(f, human,
+        { kind: "revoke_agent_token", token_id: target }, id);
+      assert.equal(response.status, 200, response.text);
+      assert.equal(response.body.status, "rejected", response.text);
+      assert.equal(response.body.reason, reason, response.text);
+      assert.equal(response.body.ok, false);
+      assert.equal(response.body.class, "domain");
+      const countsAfter = await snapshot();
+      for (const count of ["events", "ledger", "audits"] as const) {
+        assert.equal(Number(countsAfter[count]), Number(countsBefore[count]) + 1,
+          `one ${count} row per human domain refusal`);
+      }
+      for (const count of ["tokens", "revoked", "tombstones", "successors"] as const) {
+        assert.equal(countsAfter[count], countsBefore[count], `${count} unchanged by refusal`);
+      }
+      assert.deepEqual(await tokenRows(), tokensBefore, "refusal changes no target token row");
+      const events = await sql`
+        SELECT event_id, type, payload->>'reason' AS reason
+        FROM swarm.events WHERE workspace_id = ${f.workspaceA}::uuid AND command_id = ${id}
+      `;
+      assert.equal(events.length, 1, "one domain-refusal event for this request");
+      assert.equal(events[0]?.type, "CommandRejected");
+      assert.equal(events[0]?.reason, reason);
+      assert.ok(Array.isArray(response.body.event_ids));
+      assert.equal(response.body.event_ids.length, 1, "one returned rejection event identity");
+      assert.equal(typeof response.body.event_ids[0], "string");
+      assert.match(response.body.event_ids[0],
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+      assert.deepEqual(response.body.event_ids, [events[0]?.event_id]);
+      const ledger = await sql`
+        SELECT request_hash FROM swarm.idempotency_keys
+        WHERE workspace_id = ${f.workspaceA}::uuid AND command_id = ${id}
+      `;
+      assert.equal(ledger.length, 1, "one ledger row for this request");
+      const audits = await sql`
+        SELECT outcome, reason FROM swarm.audit_log
+        WHERE workspace_id = ${f.workspaceA}::uuid AND request_hash = ${ledger[0]?.request_hash}
+      `;
+      assert.deepEqual(audits.map((row) => ({ outcome: row.outcome, reason: row.reason })),
+        [{ outcome: "domain", reason }], "one domain-refusal audit for this request");
+      return response;
+    };
+    // Workspace owner and ordinary member both conceal foreign and absent tokens.
+    const humanResponses: [CommandResponse, CommandResponse][] = [];
+    for (const human of [f.uaJwt, f.ua2Jwt]) {
+      humanResponses.push([
+        await assertHumanRefusal(human, foreign.tokenId, "token_not_found"),
+        await assertHumanRefusal(human, randomUUID(), "token_not_found"),
+      ]);
+    }
+    // Members can see their own workspace's agents, but cannot revoke another owner's token.
+    await assertHumanRefusal(f.ua2Jwt, f.agentTokenId, "principal_not_owned");
+    for (const [foreignResponse, absentResponse] of humanResponses) {
+      assert.equal(foreignResponse.status, absentResponse.status);
+      // Only the freshly recorded rejection identity differs between requests.
+      const { event_ids: foreignEventIds, ...foreignBody } = foreignResponse.body;
+      const { event_ids: absentEventIds, ...absentBody } = absentResponse.body;
+      assert.deepEqual(foreignBody, absentBody,
+        "foreign and absent human responses match except for rejection event identity");
+      assert.notDeepEqual(foreignEventIds, absentEventIds,
+        "separate refusals record distinct rejection events");
+    }
+    // The same credential can surrender itself. Confinement must not deny all revocations.
+    const surrender = await issueConnect(f, f.agentToken,
+      { kind: "revoke_agent_token", token_id: f.agentTokenId });
+    assert.equal(surrender.status, 200, surrender.text);
+    assert.equal(surrender.body.status, "accepted", surrender.text);
+    assert.notEqual((await tokenLifecycle(f.agentTokenId)).revokedAt, null);
+  });
+});
+
 test("hosted agent revocation: human roles, agent confinement, lineage fail-closed", async () => {
   await scenario(async (f) => {
     const tombstonesFor = async (
@@ -6463,6 +6615,8 @@ test("hosted agent revocation: human roles, agent confinement, lineage fail-clos
     });
     assert.equal(cascadeMint.body.status, "accepted", cascadeMint.text);
     const cascadeTokenId = String(cascadeMint.body.token_id);
+    const cascadeToken = String(cascadeMint.body.agent_token);
+    registerAgentCredential(f, cascadeToken);
     const [cascadeRow] = await sql<{ lineage_id: string; renewal_grant_id: string | null }[]>`
       SELECT lineage_id, renewal_grant_id
       FROM swarm.agent_tokens
@@ -6495,14 +6649,21 @@ test("hosted agent revocation: human roles, agent confinement, lineage fail-clos
     assert.equal(await tombstonesFor("principal", memberPrincipal2Id), 1);
     assert.equal(await tombstonesFor("token", ownerOtherTokenId), 1);
     assert.equal(await tombstonesFor("principal", cascadePrincipalId), 1);
-    assert.equal(await tombstonesFor("token", cascadeTokenId), 1);
+    // The bounded family cascade stamps its current proof and tombstones the
+    // grant, rather than writing one tombstone for every historical token.
+    assert.equal(await tombstonesFor("token", cascadeTokenId), 0);
     assert.equal(await tombstonesFor("lineage", String(cascadeRow.lineage_id)), 1);
-    if (cascadeRow.renewal_grant_id) {
-      const [g] = await sql<{ revoked_at: Date | null }[]>`
-        SELECT revoked_at FROM swarm.renewal_grants
-        WHERE renewal_grant_id = ${cascadeRow.renewal_grant_id}::uuid
-      `;
-      assert.notEqual(g?.revoked_at, null);
+    assert.ok(cascadeRow.renewal_grant_id);
+    assert.equal(await tombstonesFor("renewal_grant", cascadeRow.renewal_grant_id), 1);
+    const [g] = await sql<{ revoked_at: Date | null }[]>`
+      SELECT revoked_at FROM swarm.renewal_grants
+      WHERE renewal_grant_id = ${cascadeRow.renewal_grant_id}::uuid
+    `;
+    assert.ok(g?.revoked_at instanceof Date);
+    assert.ok((await tokenLifecycle(cascadeTokenId)).revokedAt instanceof Date);
+    for (const denied of [await useToken(f, cascadeToken), await issueRenewal(f, cascadeToken)]) {
+      assert.equal(denied.status, 401, denied.text);
+      assert.deepEqual(denied.body, { error: "unauthenticated" });
     }
   });
 });
@@ -10271,9 +10432,9 @@ test("durable-delivery: Phase B revocation wins in exact queue order", { timeout
       }, claimCId);
       claimC = claimCPromise;
 
-      // 6. Prove C reached the session-proof fence's principal SELECT ... FOR
-      //    SHARE after authentication (that fence precedes the idempotency
-      //    lookup and claimAgentInbox step 1), and is queued behind B. C must
+      // 6. Prove C reached the canonical plan's principal SELECT ... FOR NO
+      //    KEY UPDATE before authentication and the idempotency lookup, and
+      //    is queued behind B. C must
       //    remain pending until observed blocked.
       const cBlocked = await waitForBlockedBackends({
         queryPattern: /FROM swarm\.agent_principals/,
@@ -10284,8 +10445,8 @@ test("durable-delivery: Phase B revocation wins in exact queue order", { timeout
       });
       assert.match(
         cBlocked[0]?.query ?? "",
-        /FOR SHARE/,
-        "C is blocked on the session-proof fence principal FOR SHARE query",
+        /FOR NO KEY UPDATE/,
+        "C is blocked on the canonical principal FOR NO KEY UPDATE query",
       );
       assert.equal(
         cBlocked[0]?.blockingPids.includes(bPid),
@@ -11331,32 +11492,19 @@ test("durable-delivery: Phase B harness control — cleanup adjudication preserv
 });
 
 // ---------------------------------------------------------------------------
-// Phase C — prove the delivery-rate recharge at resolveLedgerRace by holding
-// the initial ledger lookup, mapping both original charges to exact request
-// PIDs, staging the ACK-row/principal releases, and retaining the losing
-// claim's queued rate probe so the resolver recharge is directly observable.
+// Phase C: canonical authentication serializes same-owner requests before
+// rate charging and the ledger. Prove the queued loser still pays exactly once,
+// preserves the ACK winner and never leases another signal on a conflict.
 // ---------------------------------------------------------------------------
-
-interface PhaseCRateProbe extends RetainedLock {
-  acquired: Promise<number>;
-}
-
-interface PhaseCSafeResponse {
-  status: number;
-  error: string | null;
-}
 
 interface PhaseCRaceResult {
   mode: "allowed" | "denied";
   windowStart: string;
-  resolverObserved: boolean;
-  holderPids: { ledger: number; ackRow: number; principal: number };
-  requestPids: { ack: number; claim: number; resolver: number | null };
-  probePids: { ack: number; claim: number };
+  serializedObserved: boolean;
   ack: CommandResponse;
   claim: CommandResponse;
-  ackProbeCount: number;
-  claimProbeCount: number;
+  ackCountAfterWinner: number;
+  claimCountWhileQueued: number;
   ackBucketCount: number;
   claimBucketCount: number;
   signalBUnchanged: boolean;
@@ -11387,29 +11535,6 @@ interface PhaseCRaceResult {
   ackListener: string;
   claimListener: string;
   privateSentinels: string[];
-}
-
-/** Retain ACCESS EXCLUSIVE on the exact shared-ledger table until release. */
-async function retainPhaseCLedgerTableLock(): Promise<RetainedLock> {
-  let markReady: () => void = () => {};
-  const ready = new Promise<void>((resolve) => {
-    markReady = resolve;
-  });
-  let openGate: () => void = () => {};
-  const gate = new Promise<void>((resolve) => {
-    openGate = resolve;
-  });
-  let pid = 0;
-  const done = sql.begin(async (tx) => {
-    const rows = await tx<{ pid: string | number }[]>`SELECT pg_backend_pid() AS pid`;
-    pid = Number(rows[0]?.pid);
-    await tx.unsafe("LOCK TABLE swarm.idempotency_keys IN ACCESS EXCLUSIVE MODE");
-    markReady();
-    await gate;
-    return null;
-  });
-  await awaitMarkerBeforeSettlement(ready, done, "Phase C ledger table holder ready");
-  return { pid, release: openGate, done };
 }
 
 /** Retain FOR UPDATE on the exact live ACK tuple until release. */
@@ -11445,83 +11570,6 @@ async function retainPhaseCAckRowLock(
   });
   await awaitMarkerBeforeSettlement(ready, done, "Phase C ACK-row holder ready");
   return { pid, release: openGate, done };
-}
-
-/** Start one retained exact-window probe that exposes its PID before blocking. */
-async function startPhaseCRateProbe(opts: {
-  mode: "ack_noop" | "claim_allowed_noop" | "claim_denied_saturator";
-  bucketKey: string;
-  windowStart: string;
-}): Promise<PhaseCRateProbe> {
-  let markPidReady: () => void = () => {};
-  const pidReady = new Promise<void>((resolve) => {
-    markPidReady = resolve;
-  });
-  let markAcquired: (count: number) => void = () => {};
-  const acquired = new Promise<number>((resolve) => {
-    markAcquired = resolve;
-  });
-  let openGate: () => void = () => {};
-  const gate = new Promise<void>((resolve) => {
-    openGate = resolve;
-  });
-  let pid = 0;
-  const done = sql.begin(async (tx) => {
-    const rows = await tx<{ pid: string | number }[]>`SELECT pg_backend_pid() AS pid`;
-    pid = Number(rows[0]?.pid);
-    markPidReady();
-    const result = opts.mode === "claim_denied_saturator"
-      ? await tx<{ count: string | number }[]>`
-        /* phase_c_claim_denied_rate_probe */
-        INSERT INTO swarm.rate_buckets (bucket_key, window_start, count)
-        VALUES (${opts.bucketKey}, ${opts.windowStart}::timestamptz, 1)
-        ON CONFLICT (bucket_key, window_start) DO UPDATE
-        SET count = LEAST(swarm.rate_buckets.count + 1, 122)
-        RETURNING count
-      `
-      : opts.mode === "claim_allowed_noop"
-      ? await tx<{ count: string | number }[]>`
-        /* phase_c_claim_allowed_rate_probe */
-        INSERT INTO swarm.rate_buckets (bucket_key, window_start, count)
-        VALUES (${opts.bucketKey}, ${opts.windowStart}::timestamptz, 0)
-        ON CONFLICT (bucket_key, window_start) DO UPDATE
-        SET count = swarm.rate_buckets.count
-        RETURNING count
-      `
-      : await tx<{ count: string | number }[]>`
-        /* phase_c_ack_rate_probe */
-        INSERT INTO swarm.rate_buckets (bucket_key, window_start, count)
-        VALUES (${opts.bucketKey}, ${opts.windowStart}::timestamptz, 0)
-        ON CONFLICT (bucket_key, window_start) DO UPDATE
-        SET count = swarm.rate_buckets.count
-        RETURNING count
-      `;
-    const count = Number(result[0]?.count);
-    if (!Number.isInteger(count)) throw new Error(`Phase C rate probe returned invalid count ${String(result[0]?.count)}`);
-    markAcquired(count);
-    await gate;
-    return count;
-  });
-  await awaitMarkerBeforeSettlement(pidReady, done, `Phase C ${opts.mode} PID ready`);
-  return { pid, release: openGate, done, acquired };
-}
-
-/** Await a probe marker without losing an early transaction failure. */
-async function awaitPhaseCProbeAcquired(
-  probe: PhaseCRateProbe,
-  label: string,
-): Promise<number> {
-  const winner = await Promise.race([
-    probe.acquired.then((count) => ({ kind: "acquired" as const, count })),
-    settlementOutcome(probe.done),
-  ]);
-  if (winner.kind === "acquired") return winner.count;
-  if (winner.kind === "rejected") {
-    throw new Error(`${label}: probe rejected before acquisition: ${describeError(winner.error)}`, {
-      cause: winner.error,
-    });
-  }
-  throw new Error(`${label}: probe completed before its acquisition marker`);
 }
 
 /** Enter a DB minute with the binding specification's minimum safe remainder. */
@@ -11563,44 +11611,8 @@ async function seedDeliveryRateBucket(bucketKey: string, count: number): Promise
   return windowStart;
 }
 
-/** Record only the bounded status/error summary used to race resolver observation. */
-function phaseCSafeResponse(promise: Promise<CommandResponse>): Promise<PhaseCSafeResponse> {
-  return promise.then(
-    (response) => ({
-      status: response.status,
-      error: typeof response.body.error === "string" ? response.body.error : null,
-    }),
-    () => ({ status: 0, error: "request_rejected" }),
-  );
-}
-
-/** Prove both request transactions began and reached the ledger query in one DB minute. */
-async function assertPhaseCRequestWindow(
-  requestPids: number[],
-  windowStart: string,
-): Promise<void> {
-  const rows = await sql<{
-    pid: string | number;
-    xact_window: Date | null;
-    query_window: Date | null;
-  }[]>`
-    SELECT
-      pid::int AS pid,
-      date_trunc('minute', xact_start) AS xact_window,
-      date_trunc('minute', query_start) AS query_window
-    FROM pg_stat_activity
-    WHERE pid = ANY(${requestPids}::int[])
-    ORDER BY pid
-  `;
-  assert.equal(rows.length, 2, "both exact request backends remain visible at the ledger barrier");
-  for (const row of rows) {
-    assert.equal(row.xact_window?.toISOString(), windowStart, `request ${row.pid} xact_start stays in the recorded DB minute`);
-    assert.equal(row.query_window?.toISOString(), windowStart, `request ${row.pid} query_start stays in the recorded DB minute`);
-  }
-}
-
-/** Execute one complete allowed/denied resolver-recharge topology. */
-async function runPhaseCRechargeRace(
+/** Queue a real public claim behind the ACK's canonical owner lock. */
+async function runPhaseCSerializedRace(
   f: Fixture,
   mode: "allowed" | "denied",
 ): Promise<PhaseCRaceResult> {
@@ -11706,184 +11718,60 @@ async function runPhaseCRechargeRace(
   if (mode === "denied") {
     await sql`
       INSERT INTO swarm.rate_buckets (bucket_key, window_start, count)
-      VALUES (${claimBucketKey}, ${windowStart}::timestamptz, 119)
+      VALUES (${claimBucketKey}, ${windowStart}::timestamptz, 120)
     `;
   }
 
-  let ledgerHolder: RetainedLock | null = null;
   let ackRowHolder: RetainedLock | null = null;
-  let principalHolder: RetainedLock | null = null;
-  let ackProbe: PhaseCRateProbe | null = null;
-  let claimProbe: PhaseCRateProbe | null = null;
   let ackPromise: Promise<CommandResponse> | null = null;
   let claimPromise: Promise<CommandResponse> | null = null;
   let bodyFailure: { failed: boolean; value: unknown } = { failed: false, value: undefined };
   try {
-    ledgerHolder = await retainPhaseCLedgerTableLock();
     ackRowHolder = await retainPhaseCAckRowLock(f.workspaceA, agent.principalId, signalAId);
-    // SHARE, not UPDATE: the session-proof fence takes FOR SHARE on this row
-    // before the idempotency lookup. UPDATE would park both requests at the
-    // fence and they would never reach L. SHARE lets the fence through and
-    // still parks claimAgentInbox's later FOR UPDATE.
-    principalHolder = await retainPrincipalRowLock(agent.principalId, f.workspaceA, "FOR SHARE");
-
     ackPromise = issueDelivery(f, agent.token, ackCommand, sharedCommandId);
-    claimPromise = issueDelivery(f, agent.token, claimCommand, sharedCommandId);
-    const initialLedgerBlocked = await waitForBlockedBackends({
-      queryPattern: /FROM swarm\.idempotency_keys/,
-      blockerPids: [ledgerHolder.pid],
-      minCount: 2,
-      label: `Phase C ${mode}: both initial ledger lookups blocked only by L`,
-      mustRemainPending: [ackPromise, claimPromise],
-    });
-    assert.equal(initialLedgerBlocked.length, 2, "exactly two initial ledger lookups are blocked");
-    assert.equal(new Set(initialLedgerBlocked.map((row) => row.pid)).size, 2, "initial ledger lookups use distinct backend PIDs");
-    for (const backend of initialLedgerBlocked) {
-      assert.deepEqual(backend.blockingPids, [ledgerHolder.pid], `initial request ${backend.pid} is blocked only by L`);
-    }
-    const initialRequestPids = initialLedgerBlocked.map((row) => row.pid);
-
-    ackProbe = await startPhaseCRateProbe({
-      mode: "ack_noop",
-      bucketKey: ackBucketKey,
-      windowStart,
-    });
-    claimProbe = await startPhaseCRateProbe({
-      mode: mode === "allowed" ? "claim_allowed_noop" : "claim_denied_saturator",
-      bucketKey: claimBucketKey,
-      windowStart,
-    });
-    const ackProbeBlocked = await waitForBlockedBackends({
-      queryPattern: /phase_c_ack_rate_probe/,
-      blockerPids: [],
-      minCount: 1,
-      label: `Phase C ${mode}: ACK rate probe maps its original charge`,
-      mustRemainPending: [ackPromise, claimPromise, ackProbe.done, claimProbe.done],
-    });
-    assert.equal(ackProbeBlocked.length, 1, "one exact ACK probe backend is blocked");
-    assert.equal(ackProbeBlocked[0]?.pid, ackProbe.pid, "ACK probe PID is exact");
-    assert.equal(ackProbeBlocked[0]?.blockingPids.length, 1, "ACK probe has exactly one request blocker");
-    const ackRequestPid = ackProbeBlocked[0]!.blockingPids[0]!;
-    assert.ok(initialRequestPids.includes(ackRequestPid), "ACK probe maps to one initial request PID");
-    const claimProbePattern = mode === "allowed"
-      ? /phase_c_claim_allowed_rate_probe/
-      : /phase_c_claim_denied_rate_probe/;
-    const claimProbeBlocked = await waitForBlockedBackends({
-      queryPattern: claimProbePattern,
-      blockerPids: [],
-      minCount: 1,
-      label: `Phase C ${mode}: claim rate probe maps its original charge`,
-      mustRemainPending: [ackPromise, claimPromise, ackProbe.done, claimProbe.done],
-    });
-    assert.equal(claimProbeBlocked.length, 1, "one exact claim probe backend is blocked");
-    assert.equal(claimProbeBlocked[0]?.pid, claimProbe.pid, "claim probe PID is exact");
-    assert.equal(claimProbeBlocked[0]?.blockingPids.length, 1, "claim probe has exactly one request blocker");
-    const claimRequestPid = claimProbeBlocked[0]!.blockingPids[0]!;
-    assert.ok(initialRequestPids.includes(claimRequestPid), "claim probe maps to one initial request PID");
-    assert.notEqual(ackRequestPid, claimRequestPid, "distinct exact rate buckets map both request PIDs");
-    assert.deepEqual(
-      new Set([ackRequestPid, claimRequestPid]),
-      new Set(initialRequestPids),
-      "rate probes account for both initial requests with no hidden serialization",
-    );
-    await assertPhaseCRequestWindow(initialRequestPids, windowStart);
-
-    ledgerHolder.release();
-    await ledgerHolder.done;
     const ackAtRow = await waitForBlockedBackends({
       queryPattern: /FROM swarm\.signal_deliveries/,
       blockerPids: [ackRowHolder.pid],
       minCount: 1,
-      label: `Phase C ${mode}: mapped ACK reaches exact A row`,
-      mustRemainPending: [ackPromise, claimPromise, ackProbe.done, claimProbe.done],
+      label: `Phase C ${mode}: ACK reaches its exact live tuple`,
+      mustRemainPending: [ackPromise],
     });
-    assert.equal(ackAtRow[0]?.pid, ackRequestPid, "mapped ACK request is behind A");
-    assert.deepEqual(ackAtRow[0]?.blockingPids, [ackRowHolder.pid], "mapped ACK is blocked only by A");
-    const claimAtPrincipal = await waitForBlockedBackends({
-      queryPattern: /FROM swarm\.agent_principals/,
-      blockerPids: [principalHolder.pid],
+    assert.equal(ackAtRow.length, 1, "one exact ACK request is blocked");
+    const ackRequestPid = ackAtRow[0]!.pid;
+    claimPromise = issueDelivery(f, agent.token, claimCommand, sharedCommandId);
+    const claimAtOwner = await waitForBlockedBackends({
+      queryPattern: /FROM swarm\.users/,
+      blockerPids: [ackRequestPid],
       minCount: 1,
-      label: `Phase C ${mode}: mapped claim reaches exact P row`,
-      mustRemainPending: [ackPromise, claimPromise, ackProbe.done, claimProbe.done],
+      label: `Phase C ${mode}: claim queues at the canonical owner lock`,
+      mustRemainPending: [ackPromise, claimPromise],
     });
-    assert.equal(claimAtPrincipal[0]?.pid, claimRequestPid, "mapped claim request is behind P");
-    assert.deepEqual(claimAtPrincipal[0]?.blockingPids, [principalHolder.pid], "mapped claim is blocked only by P");
-    const ledgerWhileBlocked = await sql<{ n: string | number }[]>`
-      SELECT count(*)::int AS n
-      FROM swarm.idempotency_keys
-      WHERE principal_kind = 'agent'
-        AND principal_id = ${agent.principalId}
-        AND command_id = ${sharedCommandId}
+    assert.equal(claimAtOwner.length, 1, "one exact claim request is queued");
+    assert.notEqual(claimAtOwner[0]!.pid, ackRequestPid, "requests use distinct backends");
+    assert.deepEqual(claimAtOwner[0]!.blockingPids, [ackRequestPid], "only the ACK blocks the claim");
+    assert.match(claimAtOwner[0]!.query, /FOR NO KEY UPDATE/, "claim waits on canonical owner authority");
+    const [queuedBucket] = await sql<{ count: number }[]>`
+      SELECT count::int AS count FROM swarm.rate_buckets
+      WHERE bucket_key = ${claimBucketKey} AND window_start = ${windowStart}::timestamptz
     `;
-    assert.equal(Number(ledgerWhileBlocked[0]?.n), 0, "shared ledger remains absent while ACK and claim are behind A/P");
-
+    const claimCountWhileQueued = queuedBucket?.count ?? 0;
+    assert.equal(claimCountWhileQueued, mode === "allowed" ? 0 : 120,
+      "queued claim has not charged a rate bucket before authentication");
+    const [uncommittedLedger] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM swarm.idempotency_keys
+      WHERE principal_kind = 'agent' AND principal_id = ${agent.principalId} AND command_id = ${sharedCommandId}
+    `;
+    assert.equal(uncommittedLedger?.n, 0, "neither request has committed a ledger before the ACK is released");
     ackRowHolder.release();
     await ackRowHolder.done;
     const ack = await ackPromise;
-    const ackProbeCount = await awaitPhaseCProbeAcquired(ackProbe, `Phase C ${mode} ACK probe acquisition`);
-    assert.equal(ackProbeCount, 1, "ACK probe sees the committed original charge exactly once");
-    ackProbe.release();
-    await ackProbe.done;
-    const committedLedger = await sql<{ n: string | number }[]>`
-      SELECT count(*)::int AS n
-      FROM swarm.idempotency_keys
-      WHERE principal_kind = 'agent'
-        AND principal_id = ${agent.principalId}
-        AND command_id = ${sharedCommandId}
-    `;
-    assert.equal(Number(committedLedger[0]?.n), 1, "ACK winner ledger is committed before P releases");
-    const claimStillAtPrincipal = await waitForBlockedBackends({
-      queryPattern: /FROM swarm\.agent_principals/,
-      blockerPids: [principalHolder.pid],
-      minCount: 1,
-      label: `Phase C ${mode}: claim remains behind P after ACK commit`,
-      mustRemainPending: [claimPromise, claimProbe.done],
-    });
-    assert.equal(claimStillAtPrincipal[0]?.pid, claimRequestPid, "exact claim PID remains behind P");
-
-    principalHolder.release();
-    await principalHolder.done;
-    const claimProbeCount = await awaitPhaseCProbeAcquired(claimProbe, `Phase C ${mode} claim probe acquisition`);
-    assert.equal(
-      claimProbeCount,
-      mode === "allowed" ? 0 : 120,
-      "queued claim-rate gate acquires the rolled-back original charge's exact bucket state",
-    );
-    const claimSummary = phaseCSafeResponse(claimPromise);
-    const resolverObservation = waitForBlockedBackends({
-      queryPattern: /INSERT INTO swarm\.rate_buckets/,
-      blockerPids: [claimProbe.pid],
-      minCount: 1,
-      label: `Phase C ${mode}: resolveLedgerRace recharge blocked behind claim probe`,
-      deadlineMs: 1500,
-    });
-    const observationOutcome = resolverObservation.then(
-      (rows) => ({ kind: "observed" as const, rows }),
-      (error) => ({ kind: "observation_error" as const, error }),
-    );
-    const responseOutcome = claimSummary.then((summary) => ({ kind: "response" as const, summary }));
-    const lateWinner = await Promise.race([observationOutcome, responseOutcome]);
-    let resolverObserved = false;
-    let resolverPid: number | null = null;
-    if (lateWinner.kind === "observed") {
-      resolverObserved = true;
-      resolverPid = lateWinner.rows[0]?.pid ?? null;
-      assert.equal(lateWinner.rows.length, 1, "one exact resolver recharge query is blocked");
-      assert.deepEqual(lateWinner.rows[0]?.blockingPids, [claimProbe.pid], "resolver recharge is blocked only by the retained claim probe");
-    } else if (lateWinner.kind === "observation_error") {
-      throw lateWinner.error;
-    } else {
-      const settledObservation = await observationOutcome;
-      if (settledObservation.kind === "observed") {
-        resolverObserved = true;
-        resolverPid = settledObservation.rows[0]?.pid ?? null;
-      }
-    }
-    claimProbe.release();
-    await claimProbe.done;
     const claim = await claimPromise;
-    await Promise.allSettled([claimSummary, observationOutcome]);
-
+    const [winnerBucket] = await sql<{ count: number }[]>`
+      SELECT count::int AS count FROM swarm.rate_buckets
+      WHERE bucket_key = ${ackBucketKey} AND window_start = ${windowStart}::timestamptz
+    `;
+    const ackCountAfterWinner = winnerBucket?.count ?? 0;
+    assert.equal(ackCountAfterWinner, 1, "ACK commits exactly one rate charge");
     const bucketRows = await sql<{ bucket_key: string; count: string | number }[]>`
       SELECT bucket_key, count
       FROM swarm.rate_buckets
@@ -11929,18 +11817,11 @@ async function runPhaseCRechargeRace(
     const result: PhaseCRaceResult = {
       mode,
       windowStart,
-      resolverObserved,
-      holderPids: {
-        ledger: ledgerHolder.pid,
-        ackRow: ackRowHolder.pid,
-        principal: principalHolder.pid,
-      },
-      requestPids: { ack: ackRequestPid, claim: claimRequestPid, resolver: resolverPid },
-      probePids: { ack: ackProbe.pid, claim: claimProbe.pid },
+      serializedObserved: claimAtOwner[0]!.blockingPids.includes(ackRequestPid),
       ack,
       claim,
-      ackProbeCount,
-      claimProbeCount,
+      ackCountAfterWinner,
+      claimCountWhileQueued,
       ackBucketCount: bucketCounts.get(ackBucketKey) ?? 0,
       claimBucketCount: bucketCounts.get(claimBucketKey) ?? 0,
       signalBUnchanged: JSON.stringify(signalBAfter) === JSON.stringify(signalBSnapshot),
@@ -11973,45 +11854,14 @@ async function runPhaseCRechargeRace(
         aboutB,
       ],
     };
-    console.log(`PHASE_C_TOPOLOGY ${JSON.stringify({
-      mode,
-      windowStart,
-      holders: result.holderPids,
-      requests: result.requestPids,
-      probes: result.probePids,
-      initialLedgerQueries: initialLedgerBlocked.map((row) => boundedQueryExcerpt(row.query)),
-      ackRowQuery: boundedQueryExcerpt(ackAtRow[0]!.query),
-      claimPrincipalQuery: boundedQueryExcerpt(claimAtPrincipal[0]!.query),
-    })}`);
-    console.log(`PHASE_C_RESULT ${JSON.stringify({
-      mode,
-      resolverObserved,
-      ackStatus: ack.status,
-      claimStatus: claim.status,
-      claimError: typeof claim.body.error === "string" ? claim.body.error : null,
-      ackProbeCount,
-      claimProbeCount,
-      ackBucketCount: result.ackBucketCount,
-      claimBucketCount: result.claimBucketCount,
-      auditCount: audits.length,
-      alertCount: alerts.length,
-    })}`);
     return result;
   } catch (error) {
     bodyFailure = { failed: true, value: error };
     throw error;
   } finally {
-    ledgerHolder?.release();
     ackRowHolder?.release();
-    principalHolder?.release();
-    ackProbe?.release();
-    claimProbe?.release();
     await settleCleanupTruthfully(bodyFailure, [
-      { label: "Phase C ledger holder L", promise: ledgerHolder?.done ?? Promise.resolve(null) },
       { label: "Phase C ACK-row holder A", promise: ackRowHolder?.done ?? Promise.resolve(null) },
-      { label: "Phase C principal holder P", promise: principalHolder?.done ?? Promise.resolve(null) },
-      { label: "Phase C ACK rate probe", promise: ackProbe?.done ?? Promise.resolve(null) },
-      { label: "Phase C claim rate probe", promise: claimProbe?.done ?? Promise.resolve(null) },
       { label: "Phase C ACK HTTP request", promise: ackPromise ?? Promise.resolve(null) },
       { label: "Phase C claim HTTP request", promise: claimPromise ?? Promise.resolve(null) },
     ]);
@@ -12061,32 +11911,32 @@ function assertPhaseCCommonWinner(result: PhaseCRaceResult): void {
   }
 }
 
-test("durable-delivery: Phase C resolveLedgerRace recharge — allowed losing claim is recharged once", { timeout: 30_000 }, async () => {
+test("durable-delivery: Phase C canonical serialization: allowed losing claim is charged once", { timeout: 30_000 }, async () => {
   await scenario(async (f) => {
-    const result = await runPhaseCRechargeRace(f, "allowed");
+    const result = await runPhaseCSerializedRace(f, "allowed");
     assert.deepEqual({
-      resolverObserved: result.resolverObserved,
+      serializedObserved: result.serializedObserved,
       ackStatus: result.ack.status,
       claimStatus: result.claim.status,
       claimError: result.claim.body.error,
-      ackProbeCount: result.ackProbeCount,
-      claimProbeCount: result.claimProbeCount,
+      ackCountAfterWinner: result.ackCountAfterWinner,
+      claimCountWhileQueued: result.claimCountWhileQueued,
       ackBucketCount: result.ackBucketCount,
       claimBucketCount: result.claimBucketCount,
       auditCount: result.audits.length,
       alertCount: result.alerts.length,
     }, {
-      resolverObserved: true,
+      serializedObserved: true,
       ackStatus: 200,
       claimStatus: 409,
       claimError: "command_id_conflict",
-      ackProbeCount: 1,
-      claimProbeCount: 0,
+      ackCountAfterWinner: 1,
+      claimCountWhileQueued: 0,
       ackBucketCount: 1,
       claimBucketCount: 1,
       auditCount: 2,
       alertCount: 0,
-    }, "allowed recharge reaches the late resolver topology and charges exactly once");
+    }, "allowed claim queues before authentication and commits exactly one charge");
     assert.deepEqual(result.claim.body, { error: "command_id_conflict" }, "allowed loser returns exact 409 conflict body");
     assertPhaseCCommonWinner(result);
     assert.deepEqual(Array.from(result.audits), [
@@ -12105,39 +11955,39 @@ test("durable-delivery: Phase C resolveLedgerRace recharge — allowed losing cl
         stream_id: result.ledgerRows[0]!.stream_id,
         outcome: "conflict",
         reason: "command_id_conflict",
-        detail: "resolved concurrent idempotency race",
+        detail: null,
         request_hash: result.expectedClaimHash,
       },
-    ], "allowed path writes exactly ACK accepted plus resolver conflict audits");
+    ], "allowed path writes exactly ACK accepted plus conflict audits");
   });
 });
 
-test("durable-delivery: Phase C resolveLedgerRace recharge — denied losing claim is rate-limited", { timeout: 30_000 }, async () => {
+test("durable-delivery: Phase C canonical serialization: denied losing claim is rate-limited", { timeout: 30_000 }, async () => {
   await scenario(async (f) => {
-    const result = await runPhaseCRechargeRace(f, "denied");
+    const result = await runPhaseCSerializedRace(f, "denied");
     assert.deepEqual({
-      resolverObserved: result.resolverObserved,
+      serializedObserved: result.serializedObserved,
       ackStatus: result.ack.status,
       claimStatus: result.claim.status,
       claimError: result.claim.body.error,
-      ackProbeCount: result.ackProbeCount,
-      claimProbeCount: result.claimProbeCount,
+      ackCountAfterWinner: result.ackCountAfterWinner,
+      claimCountWhileQueued: result.claimCountWhileQueued,
       ackBucketCount: result.ackBucketCount,
       claimBucketCount: result.claimBucketCount,
       auditCount: result.audits.length,
       alertCount: result.alerts.length,
     }, {
-      resolverObserved: true,
+      serializedObserved: true,
       ackStatus: 200,
       claimStatus: 429,
       claimError: "rate_limited",
-      ackProbeCount: 1,
-      claimProbeCount: 120,
+      ackCountAfterWinner: 1,
+      claimCountWhileQueued: 120,
       ackBucketCount: 1,
       claimBucketCount: 121,
       auditCount: 2,
       alertCount: 1,
-    }, "denied recharge reaches the late resolver topology and crosses the exact rate boundary");
+    }, "denied claim queues before authentication and crosses the exact rate boundary");
     const expectedReset = new Date(new Date(result.windowStart).getTime() + 60_000).toISOString();
     assert.deepEqual(result.claim.body, {
       error: "rate_limited",

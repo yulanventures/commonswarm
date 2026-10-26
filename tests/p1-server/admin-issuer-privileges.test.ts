@@ -250,7 +250,9 @@ ${phase('inventory-assert', 'SELECT pg_temp.assert_issuer();')}`).join('\n')}
 ${[
   ['household_workspace_boundaries','workspace_id','purpose','workspace_id'],
   ['household_member_content_roles','workspace_id','user_id','workspace_id,content_role,content_consent_id,confirmed_at,revoked_at'],
-  ['household_content_connections','connection_id','purpose','connection_id,operations,consent_receipt_id,expires_at,revoked_at'],
+  // Include the family's SQL7 consent-binding update: any remaining UPDATE
+  // column permits FOR SHARE, so the negative lock control must revoke it too.
+  ['household_content_connections','connection_id','purpose','connection_id,operations,consent_receipt_id,expires_at,revoked_at,renewal_grant_id'],
 ].map(([table,key,nonkey,updateColumns]) => `
 ${phase('set-local', '')}
 SET LOCAL ROLE swarm_command;

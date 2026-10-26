@@ -187,8 +187,8 @@ test("register retries one attempt on one seat, a new attempt takes another, and
   assert.equal(retry.principalId, first.principalId);
   assert.notEqual(retry.token, first.token, "unused token recovery must replace its secret");
   const replaced = await h0("note", { body: "replaced token must be refused" }, first.token);
-  assert.equal(replaced.status, 403);
-  assert.equal(replaced.body.error, "forbidden");
+  assert.equal(replaced.status, 401);
+  assert.deepEqual(replaced.body, { error: "unauthenticated" });
   signalId(await h0("note", { body: "live recovered token" }, retry.token));
   const usedRetry = await h0("register", {
     joinCredential: join.secret, attemptId: attempt, name: "First",
@@ -328,7 +328,8 @@ test("three seats: ask, poll, ack and reply complete through H0", { timeout: 80_
 // The forward transport owns discovery failures before command dispatch.
 // Existing successful forwarding cannot detect a denied routing-hint lookup.
 for (const denial of ["revoked", "removed", "elapsed"] as const) {
-  test(`known ${denial} local credential returns authoritative 403 through H0`, { timeout: 40_000 }, async () => {
+  const expectedStatus = denial === "elapsed" ? 401 : 403;
+  test(`known ${denial} local credential returns authoritative ${expectedStatus} through H0`, { timeout: 40_000 }, async () => {
     const isolated = randomUUID();
     const [creator] = await sql<{ created_by: string }[]>`
       SELECT created_by FROM swarm.workspaces WHERE workspace_id = ${workspace}::uuid`;
@@ -363,8 +364,8 @@ for (const denial of ["revoked", "removed", "elapsed"] as const) {
       WHERE from_principal = ${seat.principalId}::uuid`)[0]!.n;
     const before = await counts();
     const denied = await h0("note", { body: "denied credential" }, seat.token);
-    assert.equal(denied.status, 403, JSON.stringify(denied.body));
-    assert.equal(denied.body.error, "forbidden");
+    assert.equal(denied.status, expectedStatus, JSON.stringify(denied.body));
+    assert.deepEqual(denied.body, { error: denial === "elapsed" ? "unauthenticated" : "forbidden" });
     assertHeaders(denied);
     assert.equal(await counts(), before, "denial appended no signal");
   });

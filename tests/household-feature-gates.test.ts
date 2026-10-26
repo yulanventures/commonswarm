@@ -39,16 +39,29 @@ async function commandEntry(flags: Record<string, string | undefined> = {}, boun
       builder.onLoad({ filter: /.*/, namespace: 'inert-edge' }, args => {
         if (args.path === 'npm:postgres@3.4.9') return { contents: `
           export default function postgres() {
-            const sql = async (strings, ...values) => {
+            const read = (strings, ...values) => {
               const query = strings.join('?'); queries.push(query);
               if (query.includes('INSERT INTO swarm.users')) return [{ user_id: '${owner}', email: null }];
-              if (query.includes('SELECT m.role, m.revoked_at')) return [{ role: 'owner', revoked_at: null }];
+              // Both admission and route resolution read the same live member.
+              if (query.includes('SELECT m.role')) return [{ role: 'owner', revoked_at: null }];
+              if (query.includes('SELECT EXISTS(') && query.includes('FROM swarm.memberships')) return [{ ok: true }];
+              if (query.includes('SELECT workspace_id AS workspace,user_id AS user FROM swarm.memberships'))
+                return [{ workspace: '${workspace}', user: '${owner}' }];
+              if (query.includes('FROM swarm.workspaces')) return [{ workspace_id: '${workspace}', archived_at: null }];
+              if (query.includes('FROM swarm.streams') && query.includes('AS id'))
+                return [{ id: '${stream}', workspace: '${workspace}', kind: 'workspace', repo: null }];
               if (query.includes('SELECT stream_id') && query.includes('FROM swarm.streams')) return [{ stream_id: '${stream}' }];
               if (query.includes('FROM swarm.config')) return [{ value: '0.1.0' }];
-              if (query.includes('FROM swarm.household_workspace_boundaries')) return ${boundary ? "[{ purpose: 'shared' }]" : '[]'};
+              if (query.includes('FROM swarm.household_workspace_boundaries'))
+                return ${boundary ? `[{ workspace_id: '${workspace}', purpose: 'shared' }]` : '[]'};
               return [];
             };
+            const sql = (strings, ...values) => {
+              const rows = read(strings, ...values);
+              return Object.assign(Promise.resolve(rows), { cursor: async function* () { yield rows; } });
+            };
             sql.begin = async (...args) => args.at(-1)(sql);
+            sql.savepoint = async callback => callback(sql);
             sql.json = value => value;
             return sql;
           }`, loader: 'js' };
