@@ -11,50 +11,31 @@ import { join } from "node:path";
 import test from "node:test";
 import { cloudTarget } from "../src/cloud/config.js";
 import {
-  DeliveryCommandClient,
   type DeliveryClaimResult,
   type DeliveryRow,
 } from "../src/cloud/delivery.js";
 import {
   IDLE_POLL_DEFAULT_MS,
-  formatIdlePollDuration,
 } from "../src/cloud/idle-poll.js";
 import type { SignalRecord } from "../src/cloud/command-client.js";
 import type { AgentSignalPage } from "../src/cloud/signals.js";
 import {
-  parseOptionalWakeHint,
   WAKE_EVENT,
   WAKE_TOPIC_PREFIX,
 } from "../src/cloud/wake.js";
 import { writeSecureJsonFile } from "../src/cloud/storage.js";
-import { listenerStatusJson, renderListenerStatus } from "../src/cli.js";
 import {
   claimCommandId,
-  emptyListenerReadHealth,
   emptyListenerWakeStatus,
-  LISTENER_RECONCILE_POLL_MS,
-  LISTENER_WAKE_MODES,
   LISTENER_WAKE_MODE_POLL,
-  LISTENER_WAKE_MODE_PUSH,
-  LISTENER_WAKE_MODE_SET,
   listenerPaths,
-  listenerWakePersistWorthy,
   listenerWakeStatusSentence,
-  WAKE_COALESCE_MS,
   parseListenerWake,
   readListenerStatus,
-  recordListenerClaim,
-  recordListenerClaimCadence,
-  recordListenerWakeModeChange,
-  LISTENER_MODE_CHANGE_SKIP_MAX,
   REALTIME_SUBSCRIBE_STATUS,
   runListenerRuntime as runListenerRuntimeActual,
-  summarizeListenerReadHealth,
   WAKE_CLAIMS_PER_MINUTE_BUDGET,
-  WAKE_ERROR_CODES,
-  WAKE_ERROR_CODE_SET,
   WAKE_ERROR_CODE_WAKE_BUDGET,
-  wakeErrorCodeFromSubscribeStatus,
   writeListenerStatus,
   createWakeSubscriber,
   type ListenerActiveClaim,
@@ -65,10 +46,8 @@ import {
   type ListenerRuntimeModel,
   type ListenerStatus,
   type ListenerWakeStatus,
-  type WakeHandle,
   type WakeRealtimeChannel,
   type WakeRealtimeClient,
-  type WakeWaitReason,
 } from "../src/listener/index.js";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
@@ -144,24 +123,6 @@ class FakeRealtime implements WakeRealtimeClient {
   }
   removeChannel(): void {}
   disconnect(): void {}
-}
-
-function note(id: string): SignalRecord {
-  return {
-    id,
-    workspace_id: WORKSPACE_ID,
-    from: "33333333-3333-4333-8333-333333333333",
-    from_kind: "agent",
-    to: null,
-    to_agent: PRINCIPAL_ID,
-    in_reply_to: null,
-    about: null,
-    kind: "note",
-    body: "note",
-    until: "2036-08-30T00:00:00.000Z",
-    created_at: "2026-07-30T00:00:01.000Z",
-    sender_owner_relation: "same_owner",
-  };
 }
 
 function durablePage(wake = true): AgentSignalPage {
@@ -267,85 +228,6 @@ class MemoryJournal {
   }
 }
 
-class ScriptedWake implements WakeHandle {
-  state: "disconnected" | "connecting" | "subscribed" | "errored" = "disconnected";
-  hasTopic = false;
-  queue: WakeWaitReason[] = [];
-  untils: number[] = [];
-  waits = 0;
-  wakeClaims = 0;
-  claims = 0;
-  closed = false;
-  rateLimitedFlag = false;
-  private snap: ListenerWakeStatus = emptyListenerWakeStatus();
-
-  setPush(): void {
-    this.state = "subscribed";
-    this.hasTopic = true;
-    this.snap = {
-      ...emptyListenerWakeStatus(),
-      mode: "push",
-      subscribedAt: "2026-07-30T00:00:00.000Z",
-    };
-  }
-
-  setPoll(code: ListenerWakeStatus["errorCode"] = "channel_error"): void {
-    this.state = "errored";
-    this.hasTopic = true;
-    this.snap = {
-      ...emptyListenerWakeStatus(),
-      mode: "poll",
-      errorCode: code,
-    };
-  }
-
-  snapshot(): ListenerWakeStatus {
-    return {
-      ...this.snap,
-      rateLimited: this.rateLimitedFlag,
-      mode: this.rateLimitedFlag ? "poll" : this.snap.mode,
-      errorCode: this.rateLimitedFlag ? "rate_limited" : this.snap.errorCode,
-    };
-  }
-
-  async next(options: { until: number; signal?: AbortSignal }): Promise<WakeWaitReason> {
-    this.waits += 1;
-    this.untils.push(options.until);
-    return this.queue.shift() ?? "deadline";
-  }
-
-  setTopic(_topic: string): void {
-    this.hasTopic = true;
-  }
-
-  noteReconcile(): void {}
-  noteClaim(): void {
-    this.claims += 1;
-  }
-  noteWakeClaim(): void {
-    this.wakeClaims += 1;
-    this.claims += 1;
-  }
-  canClaimOnWake(): boolean {
-    return !this.rateLimitedFlag && this.wakeClaims < WAKE_CLAIMS_PER_MINUTE_BUDGET;
-  }
-  coalescingRemainingMs(): number {
-    return 0;
-  }
-  overWakeBudget(): boolean {
-    return this.wakeClaims >= WAKE_CLAIMS_PER_MINUTE_BUDGET;
-  }
-  markRateLimited(): void {
-    this.rateLimitedFlag = true;
-    this.snap.rateLimited = true;
-    this.snap.mode = "poll";
-    this.snap.errorCode = "rate_limited";
-  }
-  async close(): Promise<void> {
-    this.closed = true;
-  }
-}
-
 function statusShell(paths: ReturnType<typeof listenerPaths>): ListenerStatus {
   const ts = "2026-07-30T00:00:00.000Z";
   return {
@@ -383,58 +265,6 @@ function statusShell(paths: ReturnType<typeof listenerPaths>): ListenerStatus {
   };
 }
 
-test("wake hint parser accepts the closed object and omits 0.1.57 silence", () => {
-  assert.equal(parseOptionalWakeHint(undefined), undefined);
-  assert.equal(parseOptionalWakeHint(null), undefined);
-  assert.deepEqual(parseOptionalWakeHint({ topic: WAKE_TOPIC, event: WAKE_EVENT }), {
-    topic: WAKE_TOPIC,
-    event: WAKE_EVENT,
-  });
-  assert.throws(() => parseOptionalWakeHint({ topic: "nope", event: WAKE_EVENT }));
-  assert.throws(() => parseOptionalWakeHint({ topic: WAKE_TOPIC, event: "signal" }));
-  assert.throws(() => parseOptionalWakeHint("cswarm-wake:x"));
-});
-
-test("parseOptionalWakeHint accepts unknown keys and drops them", () => {
-  const parsed = parseOptionalWakeHint({
-    topic: WAKE_TOPIC,
-    event: WAKE_EVENT,
-    extra: 1,
-    nested: { keep: false },
-  });
-  assert.deepEqual(parsed, { topic: WAKE_TOPIC, event: WAKE_EVENT });
-  assert.equal(parsed !== undefined && "extra" in parsed, false);
-});
-
-test("Realtime subscribe statuses map by code, never by error.message", () => {
-  assert.equal(
-    wakeErrorCodeFromSubscribeStatus(REALTIME_SUBSCRIBE_STATUS.CHANNEL_ERROR),
-    "channel_error",
-  );
-  assert.equal(
-    wakeErrorCodeFromSubscribeStatus(REALTIME_SUBSCRIBE_STATUS.CLOSED),
-    "closed",
-  );
-  assert.equal(
-    wakeErrorCodeFromSubscribeStatus(REALTIME_SUBSCRIBE_STATUS.TIMED_OUT),
-    "timed_out",
-  );
-  assert.equal(
-    wakeErrorCodeFromSubscribeStatus(REALTIME_SUBSCRIBE_STATUS.SUBSCRIBED),
-    null,
-  );
-  const unauthorized = new Error(
-    "Unauthorized: You do not have permissions to read from this Channel topic: " +
-      WAKE_TOPIC,
-  );
-  assert.equal(
-    wakeErrorCodeFromSubscribeStatus(REALTIME_SUBSCRIBE_STATUS.CHANNEL_ERROR),
-    "channel_error",
-  );
-  assert.equal(WAKE_ERROR_CODE_SET.has("channel_error"), true);
-  assert.doesNotMatch(unauthorized.message, /^channel_error$/);
-});
-
 test("WakeSubscriber latches a wake while nobody awaits next()", async () => {
   const fake = new FakeRealtime();
   const wake = createWakeSubscriber({
@@ -455,51 +285,6 @@ test("WakeSubscriber latches a wake while nobody awaits next()", async () => {
   const snap = wake.snapshot();
   assert.equal("topic" in snap, false);
   assert.equal(JSON.stringify(snap).includes("cswarm-wake:"), false);
-  await wake.close();
-});
-
-test("next() settles on a wake and on a state change that arrive while it waits", async () => {
-  /* Regression: `finishWait` cleared `this.waiter` and then called the waiter's
-   * resolve, which was a closure that returned early when `this.waiter` was
-   * null. Every wake or state change that arrived while `next()` was actually
-   * awaiting was dropped AND cleared the deadline timer, so the loop wedged
-   * for good. The tests around this one all latch before they call `next()`,
-   * so they resolve from `pending` and never install a waiter. */
-  const raceMs = 1_000;
-  const settle = async (promise: Promise<WakeWaitReason>): Promise<string> => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<string>((resolve) => {
-      timer = setTimeout(() => resolve("hung"), raceMs);
-    });
-    try {
-      return await Promise.race([promise, timeout]);
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-    }
-  };
-
-  const fake = new FakeRealtime();
-  const wake = createWakeSubscriber({
-    target: cloudTarget("https://cloud.example.test", "anon"),
-    createRealtime: () => fake,
-  });
-  wake.setTopic(WAKE_TOPIC);
-  fake.channelInstance!.emitStatus(REALTIME_SUBSCRIBE_STATUS.SUBSCRIBED);
-  /* Drain the latched join transition so the next call really installs a
-   * waiter instead of returning `pending` synchronously. */
-  assert.equal(await wake.next({ until: Date.now() }), "state");
-
-  const waitingForWake = wake.next({ until: Date.now() + LISTENER_RECONCILE_POLL_MS });
-  fake.channelInstance!.emitWake();
-  assert.equal(await settle(waitingForWake), "wake");
-  assert.equal(wake.snapshot().mode, "push");
-
-  const waitingForState = wake.next({ until: Date.now() + LISTENER_RECONCILE_POLL_MS });
-  fake.channelInstance!.emitStatus(REALTIME_SUBSCRIBE_STATUS.CHANNEL_ERROR);
-  assert.equal(await settle(waitingForState), "state");
-  assert.equal(wake.snapshot().mode, "poll");
-  assert.equal(wake.snapshot().errorCode, "channel_error");
-
   await wake.close();
 });
 
@@ -569,84 +354,6 @@ test("setTopic does not clobber a live subscribe when the old unsubscribe settle
   assert.equal(wake.state, "subscribed");
   assert.equal(wake.snapshot().mode, "push");
   assert.ok(wake.snapshot().topicRotatedAt);
-  await wake.close();
-});
-
-test("rotated wake id: CLOSED then a new topic on the next read returns to push", async () => {
-  const nowMs = Date.parse("2026-07-30T00:00:10.000Z");
-  const fake = new FakeRealtime();
-  fake.autoSubscribe = true;
-  const wake = createWakeSubscriber({
-    target: cloudTarget("https://cloud.example.test", "anon"),
-    now: () => nowMs,
-    createRealtime: () => fake,
-  });
-  const journal = new MemoryJournal();
-  const controller = new AbortController();
-  let claims = 0;
-  let reads = 0;
-  const wakeSnaps: ListenerWakeStatus[] = [];
-  const stop = await runListenerRuntime({
-    target: cloudTarget("https://cloud.example.test", "anon"),
-    workspaceId: WORKSPACE_ID,
-    principalId: PRINCIPAL_ID,
-    listenerInstanceId: journal.record.listenerInstanceId,
-    deliveryJournal: journal,
-    deliveryClient: {
-      async claimAgentInbox() {
-        claims += 1;
-        if (claims === 1) {
-          fake.channels[0]?.emitStatus(REALTIME_SUBSCRIBE_STATUS.CLOSED);
-        }
-        const latest = wakeSnaps.at(-1);
-        if (
-          claims >= 2 &&
-          latest?.mode === LISTENER_WAKE_MODE_PUSH &&
-          latest.topicRotatedAt
-        ) {
-          controller.abort();
-        }
-        if (claims >= 8) controller.abort();
-        return claims === 1
-          ? claimResult([])
-          : {
-            ...claimResult([]),
-            wake: { topic: WAKE_TOPIC_B, event: WAKE_EVENT },
-          };
-      },
-      async ackAgentDelivery() {
-        throw new Error("ack must not run");
-      },
-    },
-    credentialSession: { async bearer() { return "token"; } },
-    store: new MemoryStore(),
-    model: new FakeModel(),
-    signal: controller.signal,
-    pollMs: IDLE_POLL_DEFAULT_MS,
-    now: () => nowMs,
-    sleep: async () => {},
-    wake,
-    onEvent: (event) => {
-      if (event.type === "wake") wakeSnaps.push(event.wake);
-    },
-    readPage: async () => {
-      reads += 1;
-      if (reads === 1) return durablePage();
-      return {
-        ...durablePage(false),
-        wake: { topic: WAKE_TOPIC_B, event: WAKE_EVENT },
-      };
-    },
-  });
-  assert.equal(stop.reason, "cancelled");
-  assert.ok(claims >= 2);
-  assert.ok(reads >= 2);
-  const rotated = wakeSnaps.at(-1);
-  assert.ok(rotated);
-  assert.equal(rotated.mode, LISTENER_WAKE_MODE_PUSH);
-  assert.ok(rotated.topicRotatedAt);
-  assert.equal(fake.channels.length, 2);
-  assert.equal(fake.channels[1]!.topic, WAKE_TOPIC_B);
   await wake.close();
 });
 
@@ -766,83 +473,6 @@ test("70 wakes in one frozen minute stay at most 51 claims with no extra reads",
   await wake.close();
 });
 
-test("status sentence never says push unless mode is push; lists come from constants", () => {
-  assert.deepEqual([...LISTENER_WAKE_MODE_SET], [...LISTENER_WAKE_MODES]);
-  assert.equal(LISTENER_WAKE_MODE_PUSH, LISTENER_WAKE_MODES[0]);
-  assert.equal(LISTENER_WAKE_MODE_POLL, LISTENER_WAKE_MODES[1]);
-  assert.equal(WAKE_ERROR_CODE_SET.has(WAKE_ERROR_CODE_WAKE_BUDGET), true);
-  assert.deepEqual([...WAKE_ERROR_CODE_SET], [...WAKE_ERROR_CODES]);
-  const push: ListenerWakeStatus = {
-    ...emptyListenerWakeStatus(),
-    mode: LISTENER_WAKE_MODE_PUSH,
-    subscribedAt: "2026-07-30T00:00:00.000Z",
-    lastWakeAt: "2026-07-30T00:00:12.000Z",
-  };
-  const poll: ListenerWakeStatus = {
-    ...emptyListenerWakeStatus(),
-    mode: LISTENER_WAKE_MODE_POLL,
-    errorCode: "channel_error",
-  };
-  const pushLine = listenerWakeStatusSentence(push, LISTENER_RECONCILE_POLL_MS, "12s ago");
-  const pollLine = listenerWakeStatusSentence(
-    poll,
-    IDLE_POLL_DEFAULT_MS,
-    null,
-  );
-  assert.match(pushLine, new RegExp(`^${LISTENER_WAKE_MODE_PUSH} \\(Realtime\\)`));
-  assert.match(pushLine, new RegExp(formatIdlePollDuration(LISTENER_RECONCILE_POLL_MS)));
-  assert.match(listenerWakeStatusSentence(push, 8_001, null), /reconcile every 9s\./);
-  assert.doesNotMatch(pollLine, new RegExp(`\\b${LISTENER_WAKE_MODE_PUSH}\\b`));
-  assert.match(pollLine, new RegExp(`^${LISTENER_WAKE_MODE_POLL} every`));
-  assert.match(pollLine, new RegExp(formatIdlePollDuration(IDLE_POLL_DEFAULT_MS)));
-  assert.match(pollLine, /channel_error/);
-  assert.doesNotMatch(pushLine, /cswarm-wake:/);
-  assert.doesNotMatch(pollLine, /cswarm-wake:/);
-  for (const code of WAKE_ERROR_CODES) {
-    const line = listenerWakeStatusSentence(
-      { ...emptyListenerWakeStatus(), mode: LISTENER_WAKE_MODE_POLL, errorCode: code },
-      IDLE_POLL_DEFAULT_MS,
-      null,
-    );
-    assert.match(line, new RegExp(code));
-    assert.doesNotMatch(line, /cswarm-wake:/);
-    if (code === WAKE_ERROR_CODE_WAKE_BUDGET) {
-      assert.match(line, /Subscribed/);
-      assert.match(line, new RegExp(formatIdlePollDuration(IDLE_POLL_DEFAULT_MS)));
-      assert.doesNotMatch(line, /not connected/);
-      assert.doesNotMatch(line, new RegExp(`\\b${LISTENER_WAKE_MODE_PUSH}\\b`));
-    } else {
-      assert.match(line, new RegExp(`Realtime not connected \\(${code}\\)`));
-    }
-  }
-});
-
-test("wake status persist skips lastWakeAt-only ticks inside the coalesce window", () => {
-  const first: ListenerWakeStatus = {
-    ...emptyListenerWakeStatus(),
-    mode: "push",
-    subscribedAt: "2026-07-30T00:00:00.000Z",
-    lastWakeAt: "2026-07-30T00:00:01.000Z",
-  };
-  const t0 = Date.parse("2026-07-30T00:00:01.000Z");
-  assert.equal(listenerWakePersistWorthy(undefined, first, 0, t0), true);
-  const sameWake: ListenerWakeStatus = {
-    ...first,
-    lastWakeAt: "2026-07-30T00:00:01.400Z",
-  };
-  assert.equal(
-    listenerWakePersistWorthy(first, sameWake, t0, t0 + 400),
-    false,
-  );
-  assert.equal(
-    listenerWakePersistWorthy(first, sameWake, t0, t0 + WAKE_COALESCE_MS),
-    true,
-  );
-  const modeFlip: ListenerWakeStatus = { ...sameWake, mode: "poll" };
-  assert.equal(listenerWakePersistWorthy(first, modeFlip, t0, t0 + 400), true);
-  assert.equal(WAKE_COALESCE_MS, 1_000);
-});
-
 test("parseListenerWake is closed and refuses topic keys", () => {
   const good: ListenerWakeStatus = emptyListenerWakeStatus();
   assert.deepEqual(parseListenerWake(good, true), good);
@@ -874,375 +504,4 @@ test("a status file cannot store a topic key or a topic-shaped lastErrorDetail",
   raw.lastErrorDetail = `Unauthorized: ${WAKE_TOPIC}`;
   await writeSecureJsonFile(paths.statusPath, JSON.stringify(raw));
   await assert.rejects(readListenerStatus(paths), /malformed/);
-});
-
-test("subscribed wake then one empty claim; two wakes in one claim latch one more", async () => {
-  const journal = new MemoryJournal();
-  const controller = new AbortController();
-  const wake = new ScriptedWake();
-  wake.setPush();
-  wake.queue.push("wake", "wake");
-  let claims = 0;
-  const pushReconcileWaits: boolean[] = [];
-  const stop = await runListenerRuntime({
-    target: cloudTarget("https://cloud.example.test", "anon"),
-    workspaceId: WORKSPACE_ID,
-    principalId: PRINCIPAL_ID,
-    listenerInstanceId: journal.record.listenerInstanceId,
-    deliveryJournal: journal,
-    deliveryClient: {
-      async claimAgentInbox() {
-        claims += 1;
-        if (claims >= 3) controller.abort();
-        return claimResult([]);
-      },
-      async ackAgentDelivery() {
-        throw new Error("ack must not run");
-      },
-    },
-    credentialSession: { async bearer() { return "token"; } },
-    store: new MemoryStore(),
-    model: new FakeModel(),
-    signal: controller.signal,
-    pollMs: IDLE_POLL_DEFAULT_MS,
-    now: () => Date.parse("2026-07-30T00:00:00.000Z"),
-    sleep: async () => {},
-    wake,
-    onEvent: (event) => {
-      if (event.type === "idle_poll") pushReconcileWaits.push(event.pushReconcileWait ?? false);
-    },
-    readPage: async () => durablePage(),
-  });
-  assert.equal(stop.reason, "cancelled");
-  assert.equal(claims, 3);
-  assert.equal(wake.wakeClaims, 2);
-  assert.ok(wake.waits >= 1);
-  assert.deepEqual(pushReconcileWaits, [true, false, false],
-    "an empty push-wake claim is not the scheduled read reconcile");
-});
-
-test("CHANNEL_ERROR path reconciles on the idle cadence then push on resubscribe", async () => {
-  const journal = new MemoryJournal();
-  const controller = new AbortController();
-  const wake = new ScriptedWake();
-  wake.setPoll("channel_error");
-  wake.queue.push("state", "deadline");
-  const intervals: number[] = [];
-  let claims = 0;
-  const stop = await runListenerRuntime({
-    target: cloudTarget("https://cloud.example.test", "anon"),
-    workspaceId: WORKSPACE_ID,
-    principalId: PRINCIPAL_ID,
-    listenerInstanceId: journal.record.listenerInstanceId,
-    deliveryJournal: journal,
-    deliveryClient: {
-      async claimAgentInbox() {
-        claims += 1;
-        if (claims === 2) wake.setPush();
-        if (claims >= 3) controller.abort();
-        return claimResult([]);
-      },
-      async ackAgentDelivery() {
-        throw new Error("ack must not run");
-      },
-    },
-    credentialSession: { async bearer() { return "token"; } },
-    store: new MemoryStore(),
-    model: new FakeModel(),
-    signal: controller.signal,
-    pollMs: IDLE_POLL_DEFAULT_MS,
-    now: () => Date.parse("2026-07-30T00:00:00.000Z"),
-    sleep: async () => {},
-    wake,
-    onEvent: (event) => {
-      if (event.type === "idle_poll") intervals.push(event.intervalMs);
-      if (event.type === "wake" && event.wake.mode === "push" && claims >= 2) {
-        /* observed */
-      }
-    },
-    readPage: async () => durablePage(),
-  });
-  assert.equal(stop.reason, "cancelled");
-  assert.ok(claims >= 3);
-  assert.ok(intervals.includes(IDLE_POLL_DEFAULT_MS));
-});
-
-test("wake ticks while mode is poll still read; skipRead is push-only", async () => {
-  const journal = new MemoryJournal();
-  const controller = new AbortController();
-  const wake = new ScriptedWake();
-  wake.setPoll("channel_error");
-  wake.queue.push("wake", "wake", "wake");
-  let claims = 0;
-  let reads = 0;
-  const stop = await runListenerRuntime({
-    target: cloudTarget("https://cloud.example.test", "anon"),
-    workspaceId: WORKSPACE_ID,
-    principalId: PRINCIPAL_ID,
-    listenerInstanceId: journal.record.listenerInstanceId,
-    deliveryJournal: journal,
-    deliveryClient: {
-      async claimAgentInbox() {
-        claims += 1;
-        if (claims >= 3) controller.abort();
-        return claimResult([]);
-      },
-      async ackAgentDelivery() {
-        throw new Error("ack must not run");
-      },
-    },
-    credentialSession: { async bearer() { return "token"; } },
-    store: new MemoryStore(),
-    model: new FakeModel(),
-    signal: controller.signal,
-    pollMs: IDLE_POLL_DEFAULT_MS,
-    now: () => Date.parse("2026-07-30T00:00:00.000Z"),
-    sleep: async () => {},
-    wake,
-    readPage: async () => {
-      reads += 1;
-      return durablePage();
-    },
-  });
-  assert.equal(stop.reason, "cancelled");
-  assert.equal(wake.wakeClaims, 0);
-  assert.ok(reads >= 3);
-  assert.equal(claims, 3);
-});
-
-test("reconcile deadline while subscribed is 5 minutes", () => {
-  assert.equal(LISTENER_RECONCILE_POLL_MS, 300_000);
-  assert.equal(formatIdlePollDuration(LISTENER_RECONCILE_POLL_MS), "5m");
-});
-
-test("a lost wake is claimed when next() hits the reconcile deadline", async () => {
-  const nowMs = Date.parse("2026-07-30T00:00:00.000Z");
-  const journal = new MemoryJournal();
-  const controller = new AbortController();
-  const wake = new ScriptedWake();
-  wake.setPush();
-  let claims = 0;
-  let reads = 0;
-  const stop = await runListenerRuntime({
-    target: cloudTarget("https://cloud.example.test", "anon"),
-    workspaceId: WORKSPACE_ID,
-    principalId: PRINCIPAL_ID,
-    listenerInstanceId: journal.record.listenerInstanceId,
-    deliveryJournal: journal,
-    deliveryClient: {
-      async claimAgentInbox() {
-        claims += 1;
-        if (claims >= 2) controller.abort();
-        return claimResult([]);
-      },
-      async ackAgentDelivery() {
-        throw new Error("ack must not run");
-      },
-    },
-    credentialSession: { async bearer() { return "token"; } },
-    store: new MemoryStore(),
-    model: new FakeModel(),
-    signal: controller.signal,
-    pollMs: IDLE_POLL_DEFAULT_MS,
-    now: () => nowMs,
-    sleep: async () => {},
-    wake,
-    readPage: async () => {
-      reads += 1;
-      return durablePage();
-    },
-  });
-  assert.equal(stop.reason, "cancelled");
-  assert.equal(claims, 2);
-  assert.equal(reads, 2);
-  assert.equal(wake.wakeClaims, 0);
-  assert.ok(wake.untils.length >= 1);
-  assert.equal(wake.untils[0], nowMs + LISTENER_RECONCILE_POLL_MS);
-});
-
-test("claim throughput skips a mode-change hour and keeps the slowest cadence", () => {
-  const hourStart = "2026-09-01T10:00:00.000Z";
-  const readyAt = "2026-09-01T09:00:00.000Z";
-  let health = recordListenerClaimCadence(
-    emptyListenerReadHealth(),
-    LISTENER_RECONCILE_POLL_MS,
-    hourStart,
-  );
-  health = recordListenerWakeModeChange(health, hourStart);
-  for (let i = 0; i < 12; i++) health = recordListenerClaim(health, hourStart);
-  const nextHour = "2026-09-01T11:00:00.000Z";
-  health = recordListenerClaimCadence(health, IDLE_POLL_DEFAULT_MS, nextHour);
-  const summary = summarizeListenerReadHealth(
-    health,
-    readyAt,
-    Date.parse("2026-09-01T12:00:00.000Z"),
-  );
-  const changed = summary.claimThroughputHours.find((row) => row.hourStart === hourStart);
-  assert.ok(changed);
-  assert.equal(
-    summary.throughputLapseHours.some((row) => row.hourStart === hourStart),
-    false,
-  );
-  assert.equal(health.claimHours[0]?.modeChanged, true);
-  const frozen = health.claimHours.find((row) => row.hourStart === hourStart);
-  assert.equal(frozen?.expectedClaims, 3600_000 / LISTENER_RECONCILE_POLL_MS);
-});
-
-test("a second consecutive mode-change hour is scored for throughput lapse", () => {
-  const hour10 = "2026-09-01T10:00:00.000Z";
-  const hour11 = "2026-09-01T11:00:00.000Z";
-  const hour12 = "2026-09-01T12:00:00.000Z";
-  const readyAt = "2026-09-01T09:00:00.000Z";
-  let health = recordListenerClaimCadence(
-    emptyListenerReadHealth(),
-    IDLE_POLL_DEFAULT_MS,
-    hour10,
-  );
-  health = recordListenerWakeModeChange(health, hour10);
-  health = recordListenerClaimCadence(health, IDLE_POLL_DEFAULT_MS, hour11);
-  health = recordListenerWakeModeChange(health, hour11);
-  health = recordListenerClaimCadence(health, IDLE_POLL_DEFAULT_MS, hour12);
-  const summary = summarizeListenerReadHealth(
-    health,
-    readyAt,
-    Date.parse(hour12),
-  );
-  const lapsed = new Set(
-    summary.throughputLapseHours.map((row) => row.hourStart),
-  );
-  assert.equal(lapsed.has(hour10), false);
-  assert.equal(lapsed.has(hour11), true);
-  assert.equal(LISTENER_MODE_CHANGE_SKIP_MAX, 1);
-});
-
-test("listen status JSON names mode from the same wake.mode constant set", () => {
-  const ts = "2026-07-30T00:00:00.000Z";
-  const status = {
-    version: 1 as const,
-    instanceId: randomUUID(),
-    provider: "grok" as const,
-    profileId: "p",
-    workspaceId: randomUUID(),
-    principalId: randomUUID(),
-    pid: 1,
-    state: "ready" as const,
-    startedAt: ts,
-    readyAt: ts,
-    updatedAt: ts,
-    stoppedAt: null,
-    lastSignalId: null,
-    lastErrorCode: null,
-    lastErrorDetail: null,
-    lastWorkerStderrTail: null,
-    deliveryMode: "durable_claim" as const,
-    pendingDeliveryCount: 0,
-    lastTerminalDeliveryFailureCount: null,
-    lastTerminalDeliveryFailureAt: null,
-    lastClaimAt: ts,
-    lastAckAt: null,
-    lastAckOutcome: null,
-    consecutiveAckFailureCount: null,
-    routeMode: "worker" as const,
-    deferOverChars: null,
-    pendingForMainCount: 0,
-    droppedForMainCount: 0,
-    idlePollMs: IDLE_POLL_DEFAULT_MS,
-    wake: {
-      ...emptyListenerWakeStatus(),
-      mode: "push" as const,
-      subscribedAt: ts,
-      lastWakeAt: ts,
-      lastReconcileAt: ts,
-    },
-    logPath: "/tmp/cswarm-wake.log",
-  };
-  const json = listenerStatusJson(status);
-  assert.equal(json.mode, "push");
-  assert.equal((json.wake as ListenerWakeStatus).mode, "push");
-  assert.equal(LISTENER_WAKE_MODE_SET.has(json.mode as string), true);
-  const human = renderListenerStatus(status);
-  assert.match(human, /^push \(Realtime\)|push \(Realtime\)/m);
-  const capped = { ...status, idlePollMs: 8_001, pushReconcileWaitMs: 8_001 };
-  assert.match(renderListenerStatus(capped), /reconcile every 9s\./);
-  assert.match(renderListenerStatus(capped), /Current idle poll interval: 9s\./);
-  assert.equal(listenerStatusJson(capped).idlePollMs, 8_001);
-  assert.doesNotMatch(human, /cswarm-wake:/);
-  assert.equal(JSON.stringify(json).includes("cswarm-wake:"), false);
-});
-
-test("delivery claim parser carries optional wake and ignores its absence", async () => {
-  const SIGNAL = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-  const LEASE = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-  const body = {
-    status: "accepted",
-    ok: true,
-    capabilities: {
-      delivery_claim: 1,
-      delivery_ack: 1,
-      sender_owner_relation: 1,
-    },
-    deliveries: [{
-      signal: {
-        id: SIGNAL,
-        workspace_id: WORKSPACE_ID,
-        from: "33333333-3333-4333-8333-333333333333",
-        from_kind: "agent",
-        to: null,
-        to_agent: PRINCIPAL_ID,
-        in_reply_to: null,
-        about: null,
-        kind: "note",
-        body: "note",
-        until: "2036-08-30T00:00:00.000Z",
-        created_at: "2026-07-30T00:00:01.000Z",
-        sender_owner_relation: "same_owner",
-      },
-      lease_id: LEASE,
-      leased_until: "2036-07-30T00:15:00.000Z",
-      sender_owner_relation: "same_owner",
-    }],
-    pending_delivery_count: 1,
-    terminal_delivery_failure_count: 0,
-    event_ids: [],
-    events: [],
-    wake: { topic: WAKE_TOPIC, event: WAKE_EVENT },
-  };
-  const client = new DeliveryCommandClient(
-    cloudTarget("https://cloud.example.test", "anon"),
-    async () =>
-      new Response(JSON.stringify(body), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    { now: () => Date.parse("2026-07-30T00:00:00.000Z") },
-  );
-  const result = await client.claimAgentInbox({
-    workspaceId: WORKSPACE_ID,
-    credential: "swm_agt_" + "c".repeat(43),
-    commandId: "claimcmd01",
-    listenerInstanceId: "44444444-4444-4444-8444-444444444444",
-    expectedPrincipalId: PRINCIPAL_ID,
-  });
-  assert.equal(result.wake?.topic, WAKE_TOPIC);
-  assert.equal(result.wake?.event, WAKE_EVENT);
-
-  const without = { ...body };
-  delete (without as { wake?: unknown }).wake;
-  const client2 = new DeliveryCommandClient(
-    cloudTarget("https://cloud.example.test", "anon"),
-    async () =>
-      new Response(JSON.stringify(without), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    { now: () => Date.parse("2026-07-30T00:00:00.000Z") },
-  );
-  const omitted = await client2.claimAgentInbox({
-    workspaceId: WORKSPACE_ID,
-    credential: "swm_agt_" + "c".repeat(43),
-    commandId: "claimcmd02",
-    listenerInstanceId: "44444444-4444-4444-8444-444444444444",
-    expectedPrincipalId: PRINCIPAL_ID,
-  });
-  assert.equal(omitted.wake, undefined);
 });

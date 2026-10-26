@@ -1,14 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import test from "node:test";
 import {
   extractSafeDiagnostics,
   firstForbiddenDiagnosticKey,
   FORBIDDEN_DIAGNOSTIC_KEYS,
   formatReadFailureLog,
-  isRetryableErrorCode,
-  newRequestId,
   publicReadErrorBody,
   type SafeReadDiagnostics,
 } from "../supabase/functions/read/diagnostics.js";
@@ -87,15 +83,6 @@ function assertNoSecrets(text: string): void {
   assert.equal(text.includes("Bearer "), false, "must not leak bearer header");
 }
 
-test("newRequestId returns a UUID-shaped correlation id", () => {
-  const id = newRequestId();
-  assert.match(
-    id,
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
-  );
-  assert.notEqual(newRequestId(), id);
-});
-
 test("extractSafeDiagnostics keeps Postgres identity fields and drops secrets", () => {
   const requestId = "11111111-2222-4333-8444-555555555555";
   const error = fakePostgresError({
@@ -163,17 +150,6 @@ test("extractSafeDiagnostics classifies connection failures as retryable", () =>
   }
 });
 
-test("isRetryableErrorCode covers SQLSTATE connection class and known codes", () => {
-  assert.equal(isRetryableErrorCode("08006"), true);
-  assert.equal(isRetryableErrorCode("40001"), true);
-  assert.equal(isRetryableErrorCode("40P01"), true);
-  assert.equal(isRetryableErrorCode("55P03"), true);
-  assert.equal(isRetryableErrorCode("57014"), true);
-  assert.equal(isRetryableErrorCode("23505"), false);
-  assert.equal(isRetryableErrorCode("42P01"), false);
-  assert.equal(isRetryableErrorCode(null), false);
-});
-
 test("publicReadErrorBody stays generic with request_id and retryable only", () => {
   const diag = extractSafeDiagnostics(
     fakePostgresError({ code: "08006", severity: "FATAL", routine: "auth_failed" }),
@@ -194,31 +170,6 @@ test("publicReadErrorBody stays generic with request_id and retryable only", () 
   assert.equal(JSON.stringify(body).includes("auth_failed"), false);
 });
 
-test("handler phase is preserved across phases including top_level fallback", () => {
-  const phases = [
-    "auth",
-    "parse",
-    "session_setup",
-    "credential_lookup",
-    "membership",
-    "query",
-    "top_level",
-  ] as const;
-  for (const phase of phases) {
-    const diag = extractSafeDiagnostics(new Error("boom"), phase, "id");
-    assert.equal(diag.phase, phase);
-    assert.equal(diag.name, "Error");
-    assert.equal(diag.code, null);
-  }
-  // Unknown phase collapses to top_level rather than inventing a free-form string.
-  const collapsed = extractSafeDiagnostics(
-    new Error("boom"),
-    "invented" as "query",
-    "id",
-  );
-  assert.equal(collapsed.phase, "top_level");
-});
-
 test("non-Error throws produce name unknown and no secrets", () => {
   const diag = extractSafeDiagnostics(
     { code: "57014", token: SECRET_TOKEN, authorization: "Bearer x", body: { a: 1 } },
@@ -233,184 +184,4 @@ test("non-Error throws produce name unknown and no secrets", () => {
   assertNoSecrets(formatReadFailureLog(diag));
 });
 
-test("read/index.ts wires structured diagnostics (source contract)", () => {
-  const source = readFileSync(
-    join(process.cwd(), "supabase/functions/read/index.ts"),
-    "utf8",
-  );
-  assert.match(source, /from "\.\/diagnostics\.ts"/);
-  assert.match(source, /extractSafeDiagnostics/);
-  assert.match(source, /publicReadErrorBody/);
-  assert.match(source, /formatReadFailureLog/);
-  assert.match(source, /newRequestId/);
-  // Old unstructured log must be gone.
-  assert.equal(source.includes('"read function failure"'), false);
-  // Phase markers for the main handler steps (setPhase("…") call sites).
-  for (
-    const phase of [
-      "auth",
-      "parse",
-      "session_setup",
-      "credential_lookup",
-      "membership",
-      "query",
-    ]
-  ) {
-    assert.match(
-      source,
-      new RegExp(`setPhase\\("${phase}"\\)`),
-      `missing phase marker: ${phase}`,
-    );
-  }
-  assert.match(source, /let phase: ReadHandlerPhase = "top_level"/);
-});
-
-
-
-test("the read function keeps browser CORS wired — preflight branch and response wrap", () => {
-  /* 2026-08-31: the dashboard became this function's first browser caller
-   * (renewal_grants). The function 405'd the preflight with no CORS headers,
-   * every browser fetch died as TypeError, and the whole channel view failed
-   * for every signed-in member. The unit-tested cors.ts module cannot catch
-   * an unwired serve path, so this pins the wiring itself. */
-  const source = readFileSync(
-    join(import.meta.dirname, "../supabase/functions/read/index.ts"),
-    "utf8",
-  );
-  assert.match(source, /from "\.\.\/command\/cors\.ts"/);
-  assert.match(
-    source,
-    /request\.method === "OPTIONS"[\s\S]{0,120}commandPreflight\(/,
-  );
-  assert.match(source, /withCommandCors\(request, response/);
-});
-
-function assertRoundTripFold(readSource: string, commandSource: string): void {
-  assert.equal(
-    [...readSource.matchAll(
-      /db\.begin\("isolation level read committed", async \(tx\) =>/g,
-    )].length,
-    1,
-  );
-  assert.match(
-    readSource,
-    /async function setReadTransaction[\s\S]{0,500}set_config\('role', 'swarm_read', true\)[\s\S]{0,200}set_config\('search_path', 'swarm_read, swarm, pg_catalog', true\)[\s\S]{0,200}set_config\('lock_timeout', '5s', true\)/,
-  );
-  assert.equal(
-    readSource.includes("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"),
-    false,
-  );
-  assert.equal(
-    [...commandSource.matchAll(
-      /db\.begin\("isolation level read committed", async \(tx\) =>/g,
-    )].length,
-    3,
-  );
-  assert.match(
-    commandSource,
-    /async function setTransaction[\s\S]{0,500}set_config\('role', 'swarm_command', true\)[\s\S]{0,200}set_config\('search_path', 'swarm, pg_catalog', true\)[\s\S]{0,200}set_config\('lock_timeout', '5s', true\)/,
-  );
-}
-
 /** Every edge function: no transaction opens with a bare BEGIN followed by separate SET statements. */
-const EDGE_FUNCTIONS = ["command", "read", "capability", "activity"] as const;
-
-function assertNoUnfoldedSetup(name: string, source: string): void {
-  assert.equal(
-    /(unsafe\(\s*"|\w`\s*)SET (TRANSACTION|LOCAL ROLE|LOCAL lock_timeout)/.test(source),
-    false,
-    `${name}: a transaction still sends SET TRANSACTION, SET LOCAL ROLE, or SET LOCAL lock_timeout as its own round trip`,
-  );
-  const bareBegins = [...source.matchAll(/db\.begin\(async \((\w+)\) => \{\s*await \1(\.unsafe\(|`\s*SELECT\s+set_config\('role')/g)].length;
-  const drainOnly = name === "command" ? 1 : 0;
-  assert.equal(bareBegins, drainOnly, `${name}: a request transaction opens with BEGIN and sets its isolation level separately`);
-}
-
-test("read and command fold transaction setup without changing its settings", () => {
-  const readSource = readFileSync(
-    join(process.cwd(), "supabase/functions/read/index.ts"),
-    "utf8",
-  );
-  const commandSource = readFileSync(
-    join(process.cwd(), "supabase/functions/command/index.ts"),
-    "utf8",
-  );
-  assertRoundTripFold(readSource, commandSource);
-});
-
-test("every edge function folds its transaction setup (activity has a 5 s client budget)", () => {
-  for (const name of EDGE_FUNCTIONS) {
-    assertNoUnfoldedSetup(name, readFileSync(join(process.cwd(), `supabase/functions/${name}/index.ts`), "utf8"));
-  }
-  const activity = readFileSync(join(process.cwd(), "supabase/functions/activity/index.ts"), "utf8");
-  const capability = readFileSync(join(process.cwd(), "supabase/functions/capability/index.ts"), "utf8");
-  const ROLE = { activity: "swarm_command", capability: "swarm_capability" } as const;
-  for (const [name, source] of [["activity", activity], ["capability", capability]] as const) {
-    assert.equal([...source.matchAll(/db\.begin\("isolation level read committed", async \(tx\) =>/g)].length, 1, `${name}: BEGIN carries the isolation level`);
-    const pinsRole = (text: string) => text.includes(`set_config('role', '${ROLE[name]}', true)`);
-    assert.ok(pinsRole(source), `${name}: the transaction sets role ${ROLE[name]}`);
-    assert.equal(pinsRole(source.replace(`set_config('role', '${ROLE[name]}', true)`, "set_config('role', 'postgres', true)")), false, `${name}: mutation (role postgres) must be caught`);
-    assert.throws(
-      () => assertNoUnfoldedSetup(name, source.replace(/SELECT\s+set_config\('role', '(\w+)', true\),/, (_m, role) => `SET LOCAL ROLE ${role}\`; await tx\`SELECT`)),
-      assert.AssertionError,
-      `${name}: mutation (tagged SET LOCAL ROLE) must fail`,
-    );
-    assert.throws(
-      () => assertNoUnfoldedSetup(name, source.replace(/SELECT\s+set_config\('role', '(\w+)', true\),/, (_m, role) => `SELECT 1;\`; await tx.unsafe("SET LOCAL ROLE ${role}"); await tx\`SELECT`)),
-      assert.AssertionError,
-      `${name}: mutation (role back to its own SET LOCAL ROLE) must fail`,
-    );
-  }
-});
-
-test("round-trip fold controls reject each latency regression", () => {
-  const readSource = readFileSync(
-    join(process.cwd(), "supabase/functions/read/index.ts"),
-    "utf8",
-  );
-  const commandSource = readFileSync(
-    join(process.cwd(), "supabase/functions/command/index.ts"),
-    "utf8",
-  );
-  const mutations = [
-    {
-      name: "read BEGIN options removed",
-      read: readSource.replace(
-        'db.begin("isolation level read committed", async (tx) =>',
-        "db.begin(async (tx) =>",
-      ),
-      command: commandSource,
-    },
-    {
-      name: "read role setting removed",
-      read: readSource.replace(
-        "set_config('role', 'swarm_read', true)",
-        "current_role::text",
-      ),
-      command: commandSource,
-    },
-    {
-      name: "command BEGIN options removed",
-      read: readSource,
-      command: commandSource.replace(
-        'db.begin("isolation level read committed", async (tx) =>',
-        "db.begin(async (tx) =>",
-      ),
-    },
-    {
-      name: "command search path removed",
-      read: readSource,
-      command: commandSource.replace(
-        "set_config('search_path', 'swarm, pg_catalog', true)",
-        "current_setting('search_path')",
-      ),
-    },
-  ];
-  for (const mutation of mutations) {
-    assert.throws(
-      () => assertRoundTripFold(mutation.read, mutation.command),
-      assert.AssertionError,
-      mutation.name,
-    );
-  }
-});

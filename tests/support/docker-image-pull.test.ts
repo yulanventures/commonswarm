@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -42,7 +42,7 @@ for (const diagnostic of [
 
 for (const failure of [
   { status: 1, stdout: "", stderr: "permission denied" },
-  { status: 1, stdout: "", stderr: "toomanyrequests: Rate exceeded\npermission denied" },
+  { status: 1, stdout: "", stderr: "toomanyrequests: Rate exceeded\\npermission denied" },
   { status: 1, stdout: "manifest unknown", stderr: "" },
   { status: null, stdout: "", stderr: "", error: new Error("spawn docker ENOENT") },
   { status: null, stdout: "", stderr: "toomanyrequests: Rate exceeded", error: new Error("spawn docker ETIMEDOUT"), signal: "SIGTERM" as const },
@@ -139,11 +139,14 @@ const prepareScript = prepareStep.split("        run: |\n")[1]?.replace(/^      
 assert.ok(prepareScript, "the prepare step must have an executable shell block");
 
 for (const scenario of [
-  { name: "cold", hit: false, load: "valid", pullFails: false },
-  { name: "warm", hit: true, load: "valid", pullFails: false },
-  { name: "corrupt archive", hit: true, load: "error", pullFails: false },
-  { name: "archive without the exact pin", hit: true, load: "wrong-image", pullFails: false },
-  { name: "corrupt archive and exhausted pull", hit: true, load: "error", pullFails: true },
+  { name: "cold", hit: false, load: "valid", pull: "success" },
+  { name: "warm", hit: true, load: "valid", pull: "success" },
+  { name: "corrupt archive", hit: true, load: "error", pull: "success" },
+  { name: "archive with wrong image bytes", hit: true, load: "wrong-image", pull: "success" },
+  { name: "ECR rate limit and matching GHCR mirror", hit: false, load: "valid", pull: "rate-limit" },
+  { name: "GHCR digest mismatch", hit: false, load: "valid", pull: "bad-mirror" },
+  { name: "non-rate-limit error", hit: false, load: "valid", pull: "denied" },
+  { name: "mixed rate-limit and permission error", hit: false, load: "valid", pull: "mixed" },
 ]) {
   test(`workflow image preparation handles ${scenario.name}`, { timeout: 15_000 }, (context) => {
     const tempRoot = realpathSync(tmpdir());
@@ -155,38 +158,58 @@ for (const scenario of [
       const removed = spawnSync("rm", ["-r", resolved], { encoding: "utf8" });
       assert.equal(removed.status, 0, removed.stderr);
     });
+    const digest = 'sha256:e8ddc7b0f4888818159d4b665e922de667948e2864c895ed62acdfd29e7c6c80';
+    const primary = `public.ecr.aws/supabase/edge-runtime@${digest}`;
+    const mirror = `ghcr.io/supabase/edge-runtime@${digest}`;
+    const id = 'sha256:' + 'a'.repeat(64);
     const statePath = join(work, "state.json");
-    const archivePath = join(work, "edge-runtime-image.tar");
+    const cache = join(work, "cache");
+    mkdirSync(cache);
+    const archivePath = join(cache, "images.tar");
     const sentinelPath = join(work, "unrelated.txt");
-    writeFileSync(statePath, JSON.stringify({ images: [], calls: [] }));
+    writeFileSync(statePath, JSON.stringify({ images: {}, calls: [] }));
     writeFileSync(sentinelPath, "keep this file");
-    if (scenario.hit) writeFileSync(archivePath, "restored archive");
+    if (scenario.hit) {
+      writeFileSync(archivePath, "restored archive");
+      writeFileSync(join(cache, "images.json"), JSON.stringify({
+        images: [{ image, digest, primary, mirror }], ids: { [image]: id },
+      }));
+    }
     writeFileSync(join(work, "docker"), `#!${process.execPath}
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 const state = JSON.parse(fs.readFileSync(process.env.DOCKER_STATE, "utf8"));
-const image = process.env.EDGE_RUNTIME_IMAGE;
+const image = ${JSON.stringify(image)};
+const primary = ${JSON.stringify(primary)};
+const mirror = ${JSON.stringify(mirror)};
+const id = ${JSON.stringify(id)};
 state.calls.push(args);
 let status = 0;
-if (args[0] === "load" && args[1] === "--input" && args[2] === process.env.EDGE_RUNTIME_CACHE) {
+if (args[0] === "load" && args[1] === "--input" && args[2] === process.env.PINNED_IMAGE_CACHE + "/images.tar") {
   if (!fs.existsSync(args[2])) throw new Error("missing cache archive");
   if (process.env.DOCKER_LOAD === "error") {
     console.error("unexpected EOF");
     status = 1;
   } else {
-    state.images.push(process.env.DOCKER_LOAD === "valid" ? image : image + "-other");
+    state.images[image] = { Id: process.env.DOCKER_LOAD === "valid" ? id : "sha256:" + "b".repeat(64) };
   }
-} else if (args[0] === "image" && args[1] === "inspect" && args[2] === image) {
-  status = state.images.includes(image) ? 0 : 1;
-} else if (args[0] === "pull" && args[1] === image) {
-  if (process.env.DOCKER_PULL_FAILS === "true") {
+} else if (args[0] === "image" && args[1] === "inspect") {
+  if (state.images[args[2]]) console.log(JSON.stringify([state.images[args[2]]]));
+  else status = 1;
+} else if (args[0] === "pull" && [primary, mirror].includes(args[1])) {
+  if (process.env.DOCKER_PULL === "denied" || process.env.DOCKER_PULL === "mixed") {
+    console.error(process.env.DOCKER_PULL === "mixed" ? "toomanyrequests: Rate exceeded\\npermission denied" : "permission denied");
+    status = 1;
+  } else if (args[1] === primary && process.env.DOCKER_PULL !== "success") {
     console.error("toomanyrequests: Rate exceeded");
     status = 1;
   } else {
-    state.images.push(image);
+    state.images[args[1]] = { Id: id, RepoDigests: process.env.DOCKER_PULL === "bad-mirror" ? [mirror + "wrong"] : [args[1]] };
   }
-} else if (args[0] === "save" && args[1] === "--output" && args[2] === process.env.EDGE_RUNTIME_CACHE && args[3] === image) {
-  if (!state.images.includes(image)) throw new Error("saving an absent image");
+} else if (args[0] === "tag" && state.images[args[1]] && args[2] === image) {
+  state.images[image] = state.images[args[1]];
+} else if (args[0] === "save" && args[1] === "--output" && args[2] === process.env.PINNED_IMAGE_CACHE + "/images.tar" && args[3] === image) {
+  if (!state.images[image]) throw new Error("saving an absent image");
   fs.writeFileSync(args[2], "fresh archive: " + image);
 } else {
   throw new Error("unexpected Docker call: " + JSON.stringify(args));
@@ -201,35 +224,33 @@ process.exit(status);
       env: {
         ...process.env,
         PATH: `${work}:${process.env.PATH}`,
-        EDGE_RUNTIME_IMAGE: image,
-        EDGE_RUNTIME_CACHE: archivePath,
-        EDGE_RUNTIME_CACHE_HIT: scenario.hit ? "true" : "",
+        PINNED_IMAGE_CACHE: cache,
+        PINNED_IMAGE_CACHE_HIT: scenario.hit ? "true" : "",
         DOCKER_STATE: statePath,
         DOCKER_LOAD: scenario.load,
-        DOCKER_PULL_FAILS: String(scenario.pullFails),
+        DOCKER_PULL: scenario.pull,
       },
     });
     assert.equal(result.error, undefined);
-    const state = JSON.parse(readFileSync(statePath, "utf8")) as { images: string[]; calls: string[][] };
+    const state = JSON.parse(readFileSync(statePath, "utf8")) as { images: Record<string, { Id: string }>; calls: string[][] };
     assert.equal(readFileSync(sentinelPath, "utf8"), "keep this file");
     const calls = (command: string) => state.calls.filter(args => args[0] === command);
     assert.equal(calls("load").length, scenario.hit ? 1 : 0);
     const needsPull = !scenario.hit || scenario.load !== "valid";
-    assert.equal(calls("pull").length, scenario.pullFails ? 3 : needsPull ? 1 : 0);
-    assert.equal(`${result.stdout}${result.stderr}`.match(/^Warning:.*$/gm)?.length ?? 0,
-      scenario.hit && scenario.load !== "valid" ? 1 : 0);
-    if (scenario.pullFails) {
+    const fallback = ["rate-limit", "bad-mirror"].includes(scenario.pull);
+    assert.equal(calls("pull").length, fallback ? 4 : needsPull ? 1 : 0);
+    if (fallback) assert.deepEqual(calls("pull").map(args => args[1]), [primary, primary, primary, mirror]);
+    const fails = ["bad-mirror", "denied", "mixed"].includes(scenario.pull);
+    if (fails) {
       assert.notEqual(result.status, 0);
-      assert.match(result.stderr, /after 3 bounded image-pull attempts.*\n.*Rate exceeded/s);
-      assert.ok(!state.images.includes(image));
+      assert.match(result.stderr, scenario.pull === "bad-mirror" ? /exact registry digest/ : /permission denied/);
       assert.equal(calls("save").length, 0);
     } else {
       assert.equal(result.status, 0, result.stdout + result.stderr);
-      assert.ok(state.images.includes(image), "the exact Compose image must be available");
+      assert.equal(state.images[image].Id, id, "the exact Compose image must be available");
       assert.equal(calls("save").length, needsPull ? 1 : 0);
       assert.ok(existsSync(archivePath));
       assert.equal(readFileSync(archivePath, "utf8"), needsPull ? `fresh archive: ${image}` : "restored archive");
-      if (needsPull) assert.ok(state.calls.findIndex(args => args[0] === "save") > state.calls.findIndex(args => args[0] === "pull"));
     }
   });
 }

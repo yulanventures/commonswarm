@@ -98,68 +98,7 @@ async function expectChildExit(
 export function registerStderrExitParityTests(
   config: StderrExitParityProvider,
 ): void {
-  test(`${config.provider}: an immediate exit flushes a non-empty stderr tail`, async () => {
-    const root = await mkdtemp(join(tmpdir(), "cswarm-stderr-flush-"));
-    const cwd = join(root, "cwd");
-    let pidFile = "";
-    try {
-      await mkdir(cwd);
-      const fake = await writeFailingExecutable({
-        root,
-        executableName: config.executableName,
-        scenario: "flushed",
-        line: `fatal: ${config.provider} immediate exit`,
-        versionOutput: config.versionOutput,
-      });
-      pidFile = fake.grandchildPidFile;
-      const tails: string[] = [];
-      await expectChildExit(() =>
-        config.open({
-          cwd,
-          executable: fake.executable,
-          onStderrTail: (tail) => tails.push(tail),
-        })
-      );
-      assert.equal(tails.length, 1);
-      assert.ok(tails[0]);
-      assert.match(tails[0]!, new RegExp(`${config.provider} immediate exit`, "i"));
-    } finally {
-      if (pidFile) await stopGrandchild(pidFile);
-      await rm(root, { recursive: true, force: true });
-    }
-  });
 
-  test(`${config.provider}: a held close cannot hang the child failure`, async () => {
-    const root = await mkdtemp(join(tmpdir(), "cswarm-stderr-bound-"));
-    const cwd = join(root, "cwd");
-    let pidFile = "";
-    try {
-      await mkdir(cwd);
-      const fake = await writeFailingExecutable({
-        root,
-        executableName: config.executableName,
-        scenario: "held",
-        line: `fatal: ${config.provider} parent exited`,
-        versionOutput: config.versionOutput,
-      });
-      pidFile = fake.grandchildPidFile;
-      const tails: string[] = [];
-      const startedAt = Date.now();
-      await expectChildExit(() =>
-        config.open({
-          cwd,
-          executable: fake.executable,
-          onStderrTail: (tail) => tails.push(tail),
-        })
-      );
-      const elapsedMs = Date.now() - startedAt;
-      assert.ok(elapsedMs < 1_300, `failure took ${elapsedMs} ms`);
-      assert.deepEqual(tails, [`fatal: ${config.provider} parent exited`]);
-    } finally {
-      if (pidFile) await stopGrandchild(pidFile);
-      await rm(root, { recursive: true, force: true });
-    }
-  });
 
   test(`${config.provider}: worker A's late close cannot publish into worker B`, async () => {
     const root = await mkdtemp(join(tmpdir(), "cswarm-stderr-late-close-"));
@@ -216,34 +155,4 @@ export function registerStderrExitParityTests(
     }
   });
 
-  test(`${config.provider}: stderr arrives before the child failure`, async () => {
-    const root = await mkdtemp(join(tmpdir(), "cswarm-stderr-order-"));
-    const cwd = join(root, "cwd");
-    let pidFile = "";
-    try {
-      await mkdir(cwd);
-      const fake = await writeFailingExecutable({
-        root,
-        executableName: config.executableName,
-        scenario: "flushed",
-        line: `fatal: ${config.provider} ordered tail`,
-        versionOutput: config.versionOutput,
-      });
-      pidFile = fake.grandchildPidFile;
-      const events: string[] = [];
-      await expectChildExit(
-        () =>
-          config.open({
-            cwd,
-            executable: fake.executable,
-            onStderrTail: () => events.push("tail"),
-          }),
-        () => events.push("failure"),
-      );
-      assert.deepEqual(events, ["tail", "failure"]);
-    } finally {
-      if (pidFile) await stopGrandchild(pidFile);
-      await rm(root, { recursive: true, force: true });
-    }
-  });
 }

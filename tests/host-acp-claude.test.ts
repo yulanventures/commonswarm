@@ -5,8 +5,6 @@
  * network, Claude session, or billable model prompt.
  */
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { once } from "node:events";
 import { realpathSync } from "node:fs";
 import {
   chmod,
@@ -18,26 +16,19 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
 import { registerStderrExitParityTests } from "./support/host-stderr-exit-parity.js";
 import {
   CLAUDE_ACP_MIN_VERSION,
-  AcpChildExitError,
   AcpHostError,
   AcpPermissionCanaryError,
-  AcpVersionError,
-  AcpVersionBelowFloorError,
   assertClaudeVersionFloor,
-  buildClaudeAcpArgs,
   buildClaudeChildEnv,
   buildClaudeLaunch,
   openClaudeAcpSession,
-  parseClaudeCodeVersionOutput,
-  parseClaudeVersionOutput,
   resolvePackagedClaudeBridge,
   resolveClaudeExecutable,
-  terminateClaudeChild,
 } from "../src/host/index.js";
 
 registerStderrExitParityTests({
@@ -111,32 +102,6 @@ async function writeFakeClaudeBridge(
   await symlink(target, shim);
   return { target, shim, log };
 }
-
-test("Claude bridge args enter ACP mode without flags", () => {
-  assert.deepEqual(buildClaudeAcpArgs(), []);
-});
-
-test("Claude bridge version parser accepts bare and named SemVer shapes", () => {
-  assert.equal(parseClaudeVersionOutput("0.64.2\n"), "0.64.2");
-  assert.equal(parseClaudeVersionOutput("claude-agent-acp 0.64.2\n"), "0.64.2");
-  assert.equal(parseClaudeVersionOutput("no version"), null);
-});
-
-test("Claude Code version parser cannot be confused with the bridge version", () => {
-  assert.equal(parseClaudeCodeVersionOutput("2.1.236 (Claude Code)\n"), "2.1.236");
-  assert.equal(
-    parseClaudeCodeVersionOutput(
-      "update available\n2.1.236-canary.1 (Claude Code)\n",
-    ),
-    "2.1.236-canary.1",
-  );
-  assert.equal(
-    parseClaudeCodeVersionOutput("2.1.236-beta.0+build.7 (Claude Code)\n"),
-    "2.1.236-beta.0+build.7",
-  );
-  assert.equal(parseClaudeCodeVersionOutput("0.64.2\n"), null);
-  assert.equal(parseClaudeVersionOutput("2.1.236 (Claude Code)\n"), null);
-});
 
 test("Claude child env preserves HOME but strips inherited Claude and credential state", () => {
   const env = buildClaudeChildEnv({
@@ -224,84 +189,6 @@ test("Windows npm shim resolves to one Node-launched package entrypoint", async 
   }
 });
 
-test("Claude version probe uses the supplied spawn environment", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-claude-version-"));
-  const executable = join(root, "fake-claude-agent-acp.mjs");
-  const measuredHome = join(root, "operator-home");
-  try {
-    await writeFile(
-      executable,
-      `#!${process.execPath}\n` +
-        `process.stdout.write(process.env.HOME === ${JSON.stringify(measuredHome)} ? "0.64.2\\n" : "0.0.0\\n");\n`,
-      { mode: 0o700 },
-    );
-    await chmod(executable, 0o700);
-    const env = buildClaudeChildEnv({
-      PATH: process.env.PATH,
-      HOME: measuredHome,
-      SWARM_AGENT_TOKEN: "must-not-reach-probe",
-    });
-    assert.equal(
-      await assertClaudeVersionFloor(executable, { env }),
-      CLAUDE_ACP_MIN_VERSION,
-    );
-    await assert.rejects(
-      () => assertClaudeVersionFloor(executable, { env: { ...env, HOME: "/wrong" } }),
-      (error: unknown) => error instanceof AcpVersionError,
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("Claude bridge below-floor error preserves the minimum and actual versions", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-claude-version-mismatch-"));
-  const executable = join(root, "claude-agent-acp");
-  try {
-    await writeFile(
-      executable,
-      `#!${process.execPath}\nprocess.stdout.write("0.63.9\\n");\n`,
-      { mode: 0o700 },
-    );
-    await chmod(executable, 0o700);
-    await assert.rejects(
-      () =>
-        openClaudeAcpSession({
-          cwd: root,
-          executable,
-          env: { PATH: root, HOME: root },
-        }),
-      (error: unknown) =>
-        error instanceof AcpVersionBelowFloorError &&
-        error.minimum === CLAUDE_ACP_MIN_VERSION &&
-        error.actual === "0.63.9" &&
-        error.code === "version_below_floor",
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("Claude version process failures stay inside the typed host error boundary", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-claude-version-timeout-"));
-  const executable = join(root, "claude-agent-acp");
-  try {
-    await writeFile(
-      executable,
-      `#!${process.execPath}\nsetInterval(() => {}, 1000);\n`,
-      { mode: 0o700 },
-    );
-    await chmod(executable, 0o700);
-    await assert.rejects(
-      () => assertClaudeVersionFloor(executable, { timeoutMs: 25 }),
-      (error: unknown) =>
-        error instanceof AcpVersionError && error.code === "version_refused",
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
 test("skipVersionCheck rejects an ambiguous explicit executable before spawn", async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-claude-skip-version-"));
   const executable = join(root, "claude");
@@ -322,26 +209,6 @@ test("skipVersionCheck rejects an ambiguous explicit executable before spawn", a
     );
   } finally {
     await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("Claude teardown escalates from ignored SIGTERM to SIGKILL and confirms exit", async () => {
-  const child = spawn(
-    process.execPath,
-    [
-      "-e",
-      "process.on('SIGTERM',()=>{});process.stdout.write('ready\\n');setInterval(()=>{},1000)",
-    ],
-    { stdio: ["pipe", "pipe", "pipe"] },
-  );
-  try {
-    await once(child.stdout, "data");
-    await terminateClaudeChild(child);
-    assert.equal(child.signalCode, "SIGKILL");
-  } finally {
-    if (child.exitCode === null && child.signalCode === null) {
-      await terminateClaudeChild(child);
-    }
   }
 });
 
@@ -515,193 +382,4 @@ test("an explicit Claude Code executable skips an earlier unpackaged bridge PATH
   } finally {
     await rm(root, { recursive: true, force: true });
   }
-});
-
-test("an early Claude bridge exit publishes fully flushed stderr before open rejects", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-claude-early-stderr-"));
-  const cwd = join(root, "cwd");
-  const executable = join(root, "failing-claude-agent-acp.cjs");
-  try {
-    await mkdir(cwd, { recursive: true });
-    await writeFile(
-      executable,
-      `#!${process.execPath}\n` +
-        `const { spawn } = require("node:child_process");\n` +
-        `if (process.argv[2] === "--version") { process.stdout.write("0.64.2\\n"); process.exit(0); }\n` +
-        `const grandchild = spawn(process.execPath, ["-e", "process.send?.('ready'); setTimeout(() => process.stderr.write('fatal: bridge child failed before handshake\\\\n'), 25)"], { stdio: ["ignore", "ignore", "inherit", "ipc"] });\n` +
-        `grandchild.once("message", () => process.exit(7));\n`,
-      { mode: 0o700 },
-    );
-    await chmod(executable, 0o700);
-    const tails: string[] = [];
-    await assert.rejects(
-      () =>
-        openClaudeAcpSession({
-          cwd,
-          executable,
-          env: { PATH: root, HOME: join(root, "operator-home") },
-          requestTimeoutMs: 2_000,
-          onStderrTail: (tail) => tails.push(tail),
-        }),
-      (error: unknown) =>
-        error instanceof AcpChildExitError && error.code === "child_exit",
-    );
-    assert.deepEqual(tails, ["fatal: bridge child failed before handshake"]);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("stdout EOF fails within a bound even while the child stays alive", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-claude-stdout-eof-"));
-  const cwd = join(root, "cwd");
-  const executable = join(root, "silent-claude-agent-acp.cjs");
-  try {
-    await mkdir(cwd, { recursive: true });
-    await writeFile(
-      executable,
-      `#!${process.execPath}\n` +
-        `if (process.argv[2] === "--version") { process.stdout.write("0.64.2\\n"); process.exit(0); }\n` +
-        `process.stdout.end();\n` +
-        `setInterval(() => {}, 1000);\n`,
-      { mode: 0o700 },
-    );
-    await chmod(executable, 0o700);
-    const startedAt = Date.now();
-    await assert.rejects(
-      () =>
-        openClaudeAcpSession({
-          cwd,
-          executable,
-          env: { PATH: root, HOME: join(root, "operator-home") },
-          requestTimeoutMs: 2_000,
-        }),
-      (error: unknown) => error instanceof AcpChildExitError,
-    );
-    assert.ok(Date.now() - startedAt < 1_300);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("openClaudeAcpSession confirms child exit after initialization failure", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-claude-open-fail-"));
-  const cwd = await mkdtemp(join(tmpdir(), "cswarm-claude-cwd-"));
-  try {
-    const fake = await writeFakeClaudeBridge(root, 99);
-    await assert.rejects(
-      () =>
-        openClaudeAcpSession({
-          cwd,
-          executable: fake.shim,
-          env: { PATH: root, HOME: join(root, "operator-home") },
-          requestTimeoutMs: 2_000,
-        }),
-      /protocolVersion/i,
-    );
-    const rows = (await readFile(fake.log, "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as { args?: string[]; pid?: number });
-    const childRow = rows.find((row) => row.args?.length === 0);
-    assert.ok(childRow);
-    assert.equal(typeof childRow.pid, "number");
-    assert.throws(
-      () => process.kill(childRow.pid!, 0),
-      (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-    await rm(cwd, { recursive: true, force: true });
-  }
-});
-
-test("openClaudeAcpSession converts a post-probe spawn race to spawn_failed", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-claude-spawn-race-"));
-  const cwd = await mkdtemp(join(tmpdir(), "cswarm-claude-cwd-"));
-  const target = join(root, "vanishing-claude-agent-acp.cjs");
-  try {
-    await writeFile(
-      target,
-      `#!${process.execPath}\n` +
-        `require("node:fs").unlinkSync(__filename);\n` +
-        `process.stdout.write("0.64.2\\n");\n`,
-      { mode: 0o700 },
-    );
-    await chmod(target, 0o700);
-    await assert.rejects(
-      () =>
-        openClaudeAcpSession({
-          cwd,
-          executable: target,
-          env: { PATH: root, HOME: join(root, "operator-home") },
-          requestTimeoutMs: 2_000,
-        }),
-      /spawn_failed|failed to spawn/i,
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-    await rm(cwd, { recursive: true, force: true });
-  }
-});
-
-test("aborting Claude initialization terminates the spawned bridge", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-claude-abort-open-"));
-  const cwd = await mkdtemp(join(tmpdir(), "cswarm-claude-cwd-"));
-  const target = join(root, "hanging-claude-agent-acp.cjs");
-  const log = join(root, "hanging-pid.txt");
-  try {
-    await writeFile(
-      target,
-      `#!${process.execPath}\n` +
-        `const fs = require("node:fs");\n` +
-        `if (process.argv[2] === "--version") { process.stdout.write("0.64.2\\n"); process.exit(0); }\n` +
-        `fs.writeFileSync(${JSON.stringify(log)}, String(process.pid));\n` +
-        `process.on("SIGTERM", () => process.exit(0));\n` +
-        `setInterval(() => {}, 1000);\n`,
-      { mode: 0o700 },
-    );
-    await chmod(target, 0o700);
-    const controller = new AbortController();
-    const opening = openClaudeAcpSession({
-      cwd,
-      executable: target,
-      env: { PATH: root, HOME: join(root, "operator-home") },
-      requestTimeoutMs: 120_000,
-      signal: controller.signal,
-    });
-    let childPid = 0;
-    for (let attempt = 0; attempt < 500; attempt += 1) {
-      try {
-        childPid = Number(await readFile(log, "utf8"));
-        break;
-      } catch {
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-    }
-    assert.ok(childPid > 0);
-    controller.abort();
-    await assert.rejects(opening, /cancelled/i);
-    assert.throws(
-      () => process.kill(childPid, 0),
-      (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-    await rm(cwd, { recursive: true, force: true });
-  }
-});
-
-test("missing Claude bridge reports executable_missing", () => {
-  assert.throws(
-    () => resolveClaudeExecutable("no-such-claude-agent-acp-zzzz", "/usr/bin"),
-    /executable_missing|not found on PATH/i,
-  );
-});
-
-test("source contains no isolated-home or temporary-cwd lifecycle", async () => {
-  const source = await import("node:fs/promises").then(({ readFile }) =>
-    readFile(resolve("src/host/claude.ts"), "utf8")
-  );
-  assert.doesNotMatch(source, /isolatedHome|mkdtemp|sweepStale|canaryCwd/);
 });

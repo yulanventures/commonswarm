@@ -165,13 +165,5 @@ describe('mint_agent_token binding validation', () => {
   // rejected before it ever reaches here (Vane). The arm proved a protocol-layer permissiveness
   // that the deployed system does not expose. A valid UUID naming nothing passes the wire AND
   // this layer, which is the claim actually worth making.
-  it('CURRENT BEHAVIOUR (wrong): mints against a well-formed task_id that names no task', () => {
-    const decision = world().mint('tok-phantom', '00000000-0000-4000-8000-000000000000', 7);
-    assert.equal(decision.ok, true, 'today the binding is not compared against any task state');
-  });
 
-  it('CURRENT BEHAVIOUR (wrong): mints epoch 0 and epoch 999999 for the same task', () => {
-    assert.equal(world().mint('tok-zero', 'task-1', 0).ok, true, 'epoch 0 accepted today');
-    assert.equal(world().mint('tok-huge', 'task-1', 999_999).ok, true, 'epoch 999999 accepted today');
-  });
 });

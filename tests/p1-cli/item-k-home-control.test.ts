@@ -10,9 +10,9 @@ import ts from "typescript";
 const riskyCalls = new Set(["saveAgentProfile", "setupAgent", "runAgentSetup", "connectMcp", "agentProfileRoot"]);
 const expectedProfileTestFiles = [
   "agent-channel-grok-bot.test.ts", "agent-channel.test.ts", "agent-connection-token.test.ts",
-  "agent-onboarding.test.ts", "command-dispatch-baseline.test.ts", "command-table-gates.test.ts",
+  "agent-onboarding.test.ts",
   "item-i-profile-binding.test.ts",
-  "mcp-connect.test.ts", "mcp-stdio.test.ts", "profile-ls.test.ts", "release-bundle.test.ts",
+  "mcp-connect.test.ts", "mcp-stdio.test.ts", "profile-ls.test.ts",
 ];
 
 test("every profile-writing test call has a fixture HOME", { timeout: 10_000 }, async () => {

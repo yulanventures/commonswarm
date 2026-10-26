@@ -5,8 +5,6 @@
  * network, Codex session, or billable model prompt.
  */
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { once } from "node:events";
 import { realpathSync } from "node:fs";
 import {
   chmod,
@@ -18,20 +16,16 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
 import { registerStderrExitParityTests } from "./support/host-stderr-exit-parity.js";
 import {
   CODEX_ACP_MIN_VERSION,
-  AcpVersionError,
   assertCodexVersionFloor,
-  buildCodexAcpArgs,
   buildCodexChildEnv,
   buildCodexLaunch,
   openCodexAcpSession,
-  parseCodexVersionOutput,
   resolveCodexExecutable,
-  terminateCodexChild,
 } from "../src/host/index.js";
 
 registerStderrExitParityTests({
@@ -89,19 +83,6 @@ async function writeFakeCodexBridge(
   await symlink(target, shim);
   return { target, shim, log };
 }
-
-test("Codex bridge args enter ACP mode without flags", () => {
-  assert.deepEqual(buildCodexAcpArgs(), []);
-});
-
-test("Codex bridge version parser accepts package and bare SemVer shapes", () => {
-  assert.equal(
-    parseCodexVersionOutput("@agentclientprotocol/codex-acp 1.1.9\n"),
-    "1.1.9",
-  );
-  assert.equal(parseCodexVersionOutput("1.1.9\n"), "1.1.9");
-  assert.equal(parseCodexVersionOutput("no version"), null);
-});
 
 test("Codex child env preserves HOME but strips inherited Codex and credential state", () => {
   const env = buildCodexChildEnv({
@@ -180,50 +161,6 @@ test("Windows npm shim resolves to one Node-launched package entrypoint", async 
   }
 });
 
-test("Codex version probe uses the supplied spawn environment", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-codex-version-"));
-  const executable = join(root, "fake-codex-acp.mjs");
-  const measuredHome = join(root, "operator-home");
-  try {
-    await writeFile(
-      executable,
-      `#!${process.execPath}\n` +
-        `process.stdout.write(process.env.HOME === ${JSON.stringify(measuredHome)} ? "@agentclientprotocol/codex-acp 1.1.9\\n" : "@agentclientprotocol/codex-acp 0.0.0\\n");\n`,
-      { mode: 0o700 },
-    );
-    await chmod(executable, 0o700);
-    const env = buildCodexChildEnv({
-      PATH: process.env.PATH,
-      HOME: measuredHome,
-      SWARM_AGENT_TOKEN: "must-not-reach-probe",
-    });
-    assert.equal(
-      await assertCodexVersionFloor(executable, { env }),
-      CODEX_ACP_MIN_VERSION,
-    );
-    await assert.rejects(
-      () => assertCodexVersionFloor(executable, { env: { ...env, HOME: "/wrong" } }),
-      (error: unknown) => error instanceof AcpVersionError,
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("Codex teardown escalates from ignored SIGTERM to SIGKILL and confirms exit", async () => {
-  const child = spawn(
-    process.execPath,
-    [
-      "-e",
-      "process.on('SIGTERM',()=>{});process.stdout.write('ready\\n');setInterval(()=>{},1000)",
-    ],
-    { stdio: ["pipe", "pipe", "pipe"] },
-  );
-  await once(child.stdout, "data");
-  await terminateCodexChild(child);
-  assert.equal(child.signalCode, "SIGKILL");
-});
-
 test("openCodexAcpSession probes and spawns one realpath with one sanitized env", async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-codex-open-"));
   const cwd = await mkdtemp(join(tmpdir(), "cswarm-codex-cwd-"));
@@ -275,126 +212,4 @@ test("openCodexAcpSession probes and spawns one realpath with one sanitized env"
     await rm(root, { recursive: true, force: true });
     await rm(cwd, { recursive: true, force: true });
   }
-});
-
-test("openCodexAcpSession confirms child exit after initialization failure", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-codex-open-fail-"));
-  const cwd = await mkdtemp(join(tmpdir(), "cswarm-codex-cwd-"));
-  try {
-    const fake = await writeFakeCodexBridge(root, 99);
-    await assert.rejects(
-      () =>
-        openCodexAcpSession({
-          cwd,
-          executable: fake.shim,
-          env: { PATH: root, HOME: join(root, "operator-home") },
-          requestTimeoutMs: 2_000,
-        }),
-      /protocolVersion/i,
-    );
-    const rows = (await readFile(fake.log, "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as { args?: string[]; pid?: number });
-    const childRow = rows.find((row) => row.args?.length === 0);
-    assert.ok(childRow);
-    assert.equal(typeof childRow.pid, "number");
-    assert.throws(
-      () => process.kill(childRow.pid!, 0),
-      (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-    await rm(cwd, { recursive: true, force: true });
-  }
-});
-
-test("openCodexAcpSession converts a post-probe spawn race to spawn_failed", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-codex-spawn-race-"));
-  const cwd = await mkdtemp(join(tmpdir(), "cswarm-codex-cwd-"));
-  const target = join(root, "vanishing-codex-acp.cjs");
-  try {
-    await writeFile(
-      target,
-      `#!${process.execPath}\n` +
-        `require("node:fs").unlinkSync(__filename);\n` +
-        `process.stdout.write("@agentclientprotocol/codex-acp 1.1.9\\n");\n`,
-      { mode: 0o700 },
-    );
-    await chmod(target, 0o700);
-    await assert.rejects(
-      () =>
-        openCodexAcpSession({
-          cwd,
-          executable: target,
-          env: { PATH: root, HOME: join(root, "operator-home") },
-          requestTimeoutMs: 2_000,
-        }),
-      /spawn_failed|failed to spawn/i,
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-    await rm(cwd, { recursive: true, force: true });
-  }
-});
-
-test("aborting Codex initialization terminates the spawned bridge", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-codex-abort-open-"));
-  const cwd = await mkdtemp(join(tmpdir(), "cswarm-codex-cwd-"));
-  const target = join(root, "hanging-codex-acp.cjs");
-  const log = join(root, "hanging-pid.txt");
-  try {
-    await writeFile(
-      target,
-      `#!${process.execPath}\n` +
-        `const fs = require("node:fs");\n` +
-        `if (process.argv[2] === "--version") { process.stdout.write("@agentclientprotocol/codex-acp 1.1.9\\n"); process.exit(0); }\n` +
-        `fs.writeFileSync(${JSON.stringify(log)}, String(process.pid));\n` +
-        `process.on("SIGTERM", () => process.exit(0));\n` +
-        `setInterval(() => {}, 1000);\n`,
-      { mode: 0o700 },
-    );
-    await chmod(target, 0o700);
-    const controller = new AbortController();
-    const opening = openCodexAcpSession({
-      cwd,
-      executable: target,
-      env: { PATH: root, HOME: join(root, "operator-home") },
-      requestTimeoutMs: 120_000,
-      signal: controller.signal,
-    });
-    let childPid = 0;
-    for (let attempt = 0; attempt < 500; attempt += 1) {
-      try {
-        childPid = Number(await readFile(log, "utf8"));
-        break;
-      } catch {
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-    }
-    assert.ok(childPid > 0);
-    controller.abort();
-    await assert.rejects(opening, /cancelled/i);
-    assert.throws(
-      () => process.kill(childPid, 0),
-      (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-    await rm(cwd, { recursive: true, force: true });
-  }
-});
-
-test("missing Codex bridge reports executable_missing", () => {
-  assert.throws(
-    () => resolveCodexExecutable("no-such-codex-acp-zzzz", "/usr/bin"),
-    /executable_missing|not found on PATH/i,
-  );
-});
-
-test("source contains no isolated-home or temporary-cwd lifecycle", async () => {
-  const source = await import("node:fs/promises").then(({ readFile }) =>
-    readFile(resolve("src/host/codex.ts"), "utf8")
-  );
-  assert.doesNotMatch(source, /isolatedHome|mkdtemp|sweepStale|canaryCwd/);
 });

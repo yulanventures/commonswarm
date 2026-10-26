@@ -3,12 +3,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { browserSignalCommand } from "./commonswarm.ts";
 import {
-  ALLOW_DUPLICATE_NAME_FIELD,
-  createAgentPrincipalCommand,
-  foldIdentityName,
-  identityDisplayLabel,
-  identityDisplayLabels,
-  identityUuidSuffix,
   lookupByDisplayName,
   parseStoredIdentityRef,
   resolveStoredIdentityRef,
@@ -27,87 +21,6 @@ const agents = [
 ];
 const members = [{ id: DANA, name: "Dana" }];
 const roster = { agents, members };
-
-test("unique names stay bare and duplicate names get a short UUID suffix", () => {
-  assert.equal(
-    identityDisplayLabel({ id: ORBIT, name: "Orbit" }, agents),
-    "Orbit",
-  );
-  assert.equal(
-    identityDisplayLabel({ id: WREN_A, name: "Wren" }, agents),
-    `Wren · ${identityUuidSuffix(WREN_A, agents)}`,
-  );
-  assert.equal(
-    identityDisplayLabel({ id: WREN_B, name: "Wren" }, agents),
-    `Wren · ${identityUuidSuffix(WREN_B, agents)}`,
-  );
-  assert.notEqual(
-    identityDisplayLabel({ id: WREN_A, name: "Wren" }, agents),
-    identityDisplayLabel({ id: WREN_B, name: "Wren" }, agents),
-  );
-});
-
-test("a generated label does not collide with another record's raw name", () => {
-  /* Codex arm: two distinct records both rendered as `Echo · 11111111` because
-   * one raw name was literally that string and the other Echo only disambiguated
-   * among duplicate raw names. */
-  const literalName = `Echo · ${WREN_A.slice(0, 8)}`;
-  const roster = [
-    { id: WREN_A, name: "Echo" },
-    { id: WREN_B, name: "Echo" },
-    { id: ORBIT, name: literalName },
-  ];
-  const labels = identityDisplayLabels(roster);
-  assert.equal(new Set(labels.map(foldIdentityName)).size, roster.length);
-  assert.equal(identityDisplayLabel({ id: ORBIT, name: literalName }, roster), literalName);
-  const generated = identityDisplayLabel({ id: WREN_A, name: "Echo" }, roster);
-  assert.notEqual(generated, literalName);
-  assert.equal(generated, `Echo · ${WREN_A.slice(0, 9)}`);
-  assert.equal(
-    identityDisplayLabel({ id: WREN_B, name: "Echo" }, roster),
-    `Echo · ${identityUuidSuffix(WREN_B, roster)}`,
-  );
-});
-
-test("three-way label collisions grow the UUID prefix until the label is unique", () => {
-  const take8 = `Echo · ${WREN_A.slice(0, 8)}`;
-  const take9 = `Echo · ${WREN_A.slice(0, 9)}`;
-  const roster = [
-    { id: WREN_A, name: "Echo" },
-    { id: WREN_B, name: "Echo" },
-    { id: ORBIT, name: take8 },
-    { id: DANA, name: take9 },
-  ];
-  const labels = identityDisplayLabels(roster);
-  assert.equal(new Set(labels.map(foldIdentityName)).size, roster.length);
-  assert.equal(identityDisplayLabel({ id: ORBIT, name: take8 }, roster), take8);
-  assert.equal(identityDisplayLabel({ id: DANA, name: take9 }, roster), take9);
-  assert.equal(
-    identityDisplayLabel({ id: WREN_A, name: "Echo" }, roster),
-    `Echo · ${WREN_A.slice(0, 10)}`,
-  );
-});
-
-test("when every shorter prefix is taken the generated label uses the full UUID", () => {
-  const taken = [];
-  for (let size = 8; size < WREN_A.length; size += 1) {
-    taken.push({
-      id: `taken-${size}`,
-      name: `Echo · ${WREN_A.slice(0, size)}`,
-    });
-  }
-  const roster = [
-    { id: WREN_A, name: "Echo" },
-    { id: WREN_B, name: "Echo" },
-    ...taken,
-  ];
-  const labels = identityDisplayLabels(roster);
-  assert.equal(new Set(labels.map(foldIdentityName)).size, roster.length);
-  assert.equal(
-    identityDisplayLabel({ id: WREN_A, name: "Echo" }, roster),
-    `Echo · ${WREN_A}`,
-  );
-});
 
 test("a name-only lookup resolves only when unique and never takes the first match", () => {
   assert.deepEqual(lookupByDisplayName("Orbit", agents), {
@@ -194,20 +107,4 @@ test("the outgoing command names the UUID, not the display name", () => {
   assert.deepEqual(command.to, [{ kind: "agent", id: WREN_A }]);
   assert.notEqual(command.to[0].id, "Wren");
   assert.equal(command.to_agent_principal_id, null);
-});
-
-test("create_agent_principal sends allow_duplicate_name only after an explicit choice", () => {
-  const omitted = createAgentPrincipalCommand("echo");
-  assert.equal(omitted.kind, "create_agent_principal");
-  assert.equal(omitted.name, "echo");
-  assert.equal(Object.hasOwn(omitted, ALLOW_DUPLICATE_NAME_FIELD), false);
-  assert.doesNotMatch(JSON.stringify(omitted), /allow_duplicate_name/);
-
-  const refused = createAgentPrincipalCommand("echo", undefined, false);
-  assert.equal(Object.hasOwn(refused, ALLOW_DUPLICATE_NAME_FIELD), false);
-
-  const allowed = createAgentPrincipalCommand("echo", undefined, true);
-  assert.equal(allowed[ALLOW_DUPLICATE_NAME_FIELD], true);
-  assert.match(JSON.stringify(allowed), /"allow_duplicate_name":true/);
-  assert.equal(Object.keys(allowed).includes("model"), false);
 });

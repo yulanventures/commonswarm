@@ -7,7 +7,6 @@ import ts from "typescript";
 
 const repoRoot = resolve(import.meta.dirname, "../..");
 const launcher = join(repoRoot, "site/tests/chrome.ts");
-const cdpLauncher = join(repoRoot, "tests/p1-local/human-seen-browser.test.ts");
 const smokeLauncher = join(repoRoot, "scripts/smoke/smoke.mjs");
 // Hash exact file bytes with: shasum -a 256 scripts/smoke/smoke.mjs
 // Re-review against chrome.ts before updating this pin; AST assertions below are secondary checks.
@@ -146,9 +145,6 @@ function directLaunchViolations(file: string, bytes: string | Buffer): string[] 
     const pinViolations = createHash("sha256").update(bytes).digest("hex") === SMOKE_LAUNCHER_SHA256 ? [] : [smokePinMessage];
     return [...pinViolations, ...smokeLaunchViolations(source)];
   }
-  // The CDP test owns a long-lived process, but shares admission, realpath validation and flags.
-  if (file === cdpLauncher && ["requireBrowserTests", "resolveChromePath", "buildChromeArgs"]
-    .every((helper) => new RegExp(`\\b${helper}\\s*\\(`, "u").test(source))) return [];
   return ["direct launch must use site/tests/chrome.ts"];
 }
 

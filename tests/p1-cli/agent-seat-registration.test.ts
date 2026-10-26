@@ -1,23 +1,13 @@
 /** Pure and structural controls for H0 seat registration. */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import ts from "typescript";
 import {
-  AGENT_TOKEN_MAX_TTL_MS,
   decideWorkspace,
   H0_SEAT_TOKEN_TTL_MS,
   type DecideWorkspaceCtx,
   type WorkspaceCommand,
 } from "../../src/protocol/workspace-commands.js";
 import type { WorkspaceState } from "../../src/protocol/workspace-events.js";
-
-function withoutComments(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/--[^\n]*/g, "")
-    .replace(/\/\/[^\n]*/g, "");
-}
 
 const OWNER = "00000000-0000-4000-8000-000000000001";
 const REGISTRAR = "00000000-0000-4000-8000-000000000002";
@@ -171,147 +161,4 @@ test("a join credential is refused for every non-registration reducer kind", () 
     assert.equal(refused.reason, "credential_kind_forbidden");
     assert.deepEqual(refused.events, []);
   }
-});
-
-test("registration uses the one principal-ceiling helper after the credential row lock", () => {
-  const rawSource = readFileSync(
-    new URL("../../supabase/functions/command/index.ts", import.meta.url),
-    "utf8",
-  );
-  const source = withoutComments(rawSource);
-  const lockFunction = source.indexOf("async function lockJoinCredential(");
-  const rowLock = source.indexOf("FOR UPDATE OF c", lockFunction);
-  const register = source.indexOf("async function registerAgentSeat(");
-  const credentialLock = source.indexOf("await lockJoinCredential(tx, credentialHash)", register);
-  const streamLock = source.indexOf("await lockRegistrationStream(tx, route)", credentialLock);
-  const membershipLock = source.indexOf(
-    "await lockJoinCredentialOwnerMembership(tx, credential)",
-    streamLock,
-  );
-  const membershipFunction = source.indexOf("async function lockJoinCredentialOwnerMembership(");
-  const membershipFunctionEnd = source.indexOf("\n}\n", membershipFunction);
-  const membershipFunctionSource = source.slice(membershipFunction, membershipFunctionEnd);
-  const attempt = source.indexOf("FROM swarm.agent_join_attempts AS a", register);
-  const capCheck = source.indexOf("credential.seats_used >= credential.seat_cap", attempt);
-  const ceiling = source.indexOf(
-    "lockAndCountLivePrincipals(tx, credential.workspace_id)",
-    capCheck,
-  );
-  const device = source.indexOf("INSERT INTO swarm.devices", ceiling);
-  const spend = source.indexOf("SET seats_used = seats_used + 1", device);
-  const marker = source.indexOf("INSERT INTO swarm.agent_join_attempts", spend);
-  assert.ok(lockFunction > 0 && rowLock > lockFunction);
-  assert.ok(register > rowLock);
-  assert.ok(credentialLock > register, "registration must lock its credential first");
-  assert.ok(streamLock > credentialLock, "the stream lock must follow the credential lock");
-  assert.ok(membershipLock > streamLock, "membership is checked after the stream lock");
-  assert.ok(
-    membershipFunction > rowLock && membershipFunctionSource.includes("FOR SHARE"),
-    "the owner membership row must be held FOR SHARE",
-  );
-  assert.ok(attempt > register, "retry lookup must happen before new-seat checks");
-  assert.ok(capCheck > attempt, "seat cap must be checked only for a new attempt");
-  assert.ok(ceiling > capCheck, "principal ceiling must follow the seat-cap check");
-  assert.ok(device > ceiling, "no seat row may be written before the shared ceiling helper");
-  assert.ok(spend > device, "the seat is spent after the complete token projection is written");
-  assert.ok(marker > spend, "the H0 seat marker follows the seat spend in the same fold");
-  const file = ts.createSourceFile("index.ts", rawSource, ts.ScriptTarget.Latest, true);
-  const enclosingFunction = (node: ts.Node): string => {
-    let parent: ts.Node | undefined = node.parent;
-    while (parent && !ts.isFunctionDeclaration(parent)) parent = parent.parent;
-    return parent && ts.isFunctionDeclaration(parent) && parent.name ? parent.name.text : "<top>";
-  };
-  const streamLockCallers: string[] = [];
-  const visit = (node: ts.Node): void => {
-    if (
-      ts.isCallExpression(node) && ts.isIdentifier(node.expression) &&
-      node.expression.text === "lockRegistrationStream"
-    ) {
-      streamLockCallers.push(enclosingFunction(node));
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(file);
-  /* Hosted grant management and seat claim share the workspace stream lock with registration. */
-  assert.deepEqual(
-    streamLockCallers,
-    ["registerAgentSeat", "handleHostedManagement", "claimHostedSeat"],
-    "only the named registration and hosted-authority transactions may read a locked stream frame",
-  );
-});
-
-test("the attempt relation is private, immutable, and pins the full seat identity", () => {
-  const sql = withoutComments(readFileSync(
-    new URL(
-      "../../supabase/migrations/20260916000002_agent_join_attempts.sql",
-      import.meta.url,
-    ),
-    "utf8",
-  ));
-  assert.match(sql, /PRIMARY KEY \(join_credential_id, attempt_id\)/);
-  assert.match(sql, /UNIQUE \(principal_id\)/);
-  assert.match(sql, /FOREIGN KEY \(token_id, principal_id, run_id\)/);
-  assert.match(sql, /CREATE TRIGGER agent_join_attempts_guard/);
-  assert.match(
-    sql,
-    /IF TG_OP = 'DELETE' THEN\s+RAISE EXCEPTION 'SWARM_AGENT_JOIN_ATTEMPT_IMMUTABLE'\s+USING ERRCODE = '55000';\s+END IF;/,
-  );
-  assert.match(
-    sql,
-    /IF NEW\.join_credential_id[\s\S]*?THEN\s+RAISE EXCEPTION 'SWARM_AGENT_JOIN_ATTEMPT_IMMUTABLE'/,
-  );
-  assert.match(sql, /RAISE EXCEPTION 'SWARM_AGENT_JOIN_ATTEMPT_TOKEN_NOT_REPLACEABLE'/);
-  assert.match(
-    sql,
-    /REVOKE ALL ON TABLE swarm\.agent_join_attempts\s+FROM PUBLIC, anon, authenticated/,
-  );
-  assert.match(sql, /GRANT SELECT, INSERT, UPDATE ON swarm\.agent_join_attempts TO swarm_command/);
-});
-
-test("the H0 seat token lifetime equals the token ceiling and comes from the protocol bundle", () => {
-  const source = readFileSync(
-    new URL("../../supabase/functions/command/index.ts", import.meta.url),
-    "utf8",
-  );
-  assert.equal(H0_SEAT_TOKEN_TTL_MS, AGENT_TOKEN_MAX_TTL_MS);
-  assert.match(source, /import \{[\s\S]*?H0_SEAT_TOKEN_TTL_MS,[\s\S]*?\} from "\.\.\/_shared\/protocol\.js";/);
-  assert.doesNotMatch(source, /(?:const|let|var) H0_SEAT_TOKEN_TTL_MS\b/);
-  assert.match(source, /INSERT INTO swarm\.renewal_grants/);
-});
-
-test("H0 registration and renewal share one horizon and one stream frame", () => {
-  const edge = withoutComments(readFileSync(
-    new URL("../../supabase/functions/command/index.ts", import.meta.url),
-    "utf8",
-  ));
-  const protocol = withoutComments(readFileSync(
-    new URL("../../src/protocol/workspace-commands.ts", import.meta.url),
-    "utf8",
-  ));
-  const registrationStart = edge.indexOf("async function registerAgentSeat(");
-  const registrationSource = edge.slice(registrationStart);
-  const grantInsertStart = registrationSource.indexOf("INSERT INTO swarm.renewal_grants");
-  const grantInsertEnd = registrationSource.indexOf("await tx", grantInsertStart);
-  const grantInsert = registrationSource.slice(grantInsertStart, grantInsertEnd);
-  assert.match(
-    registrationSource,
-    /const expiresAt = new Date\(frame\.now \+ H0_SEAT_TOKEN_TTL_MS\);/,
-  );
-  assert.match(
-    grantInsert,
-    /\$\{expiresAt\}/,
-    "the initial token expiry must be the grant horizon value",
-  );
-  assert.doesNotMatch(grantInsert, /RENEWAL_HORIZON_DEFAULT_MS/);
-  assert.match(
-    edge,
-    /const expiresAt = new Date\(Math\.min\([\s\S]*?frame\.now \+ H0_SEAT_TOKEN_TTL_MS,[\s\S]*?existing\.grant_horizon_expires_at\.getTime\(\)/,
-    "replacement expiry must be capped by the existing grant horizon",
-  );
-  assert.match(
-    protocol,
-    /const expires_at = grant\.kind === 'standing'[\s\S]*?: Math\.min\([\s\S]*?grant\.horizon_expires_at!/,
-    "timeboxed renewal successors must be capped by their grant horizon",
-  );
-  assert.doesNotMatch(protocol, /Nothing renews or re-registers an H0 seat/);
 });

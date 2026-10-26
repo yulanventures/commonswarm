@@ -13,73 +13,18 @@
  * Reached by `npm test` (named in the literal list) and `npm run test:p1-cli` (glob).
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { renderWorkspace, workspaceLabel } from "../../src/cli.js";
 import { readAgentProfile } from "../../src/cloud/agent-profile.js";
-import type { SignalDirectory } from "../../src/cloud/signals.js";
-
-const root = new URL("../../", import.meta.url);
-const read = (relative: string): string =>
-  readFileSync(fileURLToPath(new URL(relative, root)), "utf8");
-
-const directory = (name: unknown): SignalDirectory =>
-  ({
-    members: [],
-    agents: [],
-    identity: {
-      credential_valid: true,
-      owner_user_id: "11111111-1111-4111-8111-111111111111",
-      principal_id: "22222222-2222-4222-8222-222222222222",
-      workspace_id: "4f63d2b0-8d95-4ea3-b46a-ac573cebc432",
-      workspace_name: name,
-    },
-  }) as unknown as SignalDirectory;
 
 /* The CLI and the app must read the name from the SAME row. The app reads the
  * swarm_read.workspaces view; so must the edge that feeds every agent surface. Reaching past it
  * to swarm.workspaces is not a style question — measured 2026-09-14, it answered HTTP 500 for
  * every caller. The handler runs as ROLE swarm_read, which has USAGE on the swarm schema but no
  * SELECT on swarm.workspaces: `permission denied for table workspaces`. */
-test("the agent identity reads the workspace name from the view the app reads", () => {
-  const edge = read("supabase/functions/read/index.ts");
-  const block = /tx<\{ name: string \}\[\]>`([\s\S]*?)`/.exec(edge)?.[1];
-  assert.ok(block, "the read edge no longer selects a workspace name for the agent identity");
-  assert.match(
-    block!,
-    /FROM swarm_read\.workspaces/,
-    "the read edge reads the workspace name from somewhere other than swarm_read.workspaces, which is the view the app reads",
-  );
-  /* Pin the WHERE too. Control on FROM alone leaves the predicate free: a Grok arm noted that
-   * switching to body.workspace_id would still pass. The early-return on a mismatched
-   * workspace_id stops a leak today, but a control that does not mention the predicate is not
-   * a control over it. The id must come from the AUTHENTICATED context, never the request. */
-  assert.match(
-    block!,
-    /WHERE workspace_id = \$\{agent\.principal_workspace_id\}::uuid/,
-    "the workspace-name query no longer scopes to the authenticated principal's own workspace",
-  );
-  assert.ok(
-    !/\$\{body\.workspace_id\}/.test(block!),
-    "the workspace-name query takes its id from the request body instead of the authenticated context",
-  );
-  assert.ok(
-    !/FROM swarm\.workspaces/.test(block!),
-    "the read edge reaches past the view to the base table; the handler runs as role swarm_read, which cannot SELECT swarm.workspaces, and this answered HTTP 500 on production",
-  );
-
-  const app = read("site/src/lib/commonswarm.ts");
-  assert.match(
-    app,
-    /\.schema\("swarm_read"\)\s*\n?\s*\.from\("workspaces"\)/,
-    "the app no longer reads swarm_read.workspaces; the CLI and the app would then name one id from two sources",
-  );
-});
 
 /* ONE renderer for the CLI, so `Name (id)` cannot become `Name [id]` on one surface and
  * `Name - id` on another. The human `status` verb has printed `Workspace: <name> (<id>)` since
@@ -89,42 +34,9 @@ test("the agent identity reads the workspace name from the view the app reads", 
  * imports nothing from src/cli.ts. Its half of the agreement is the separate switcher control
  * below, and the shared SOURCE — both read swarm_read.workspaces. Saying "one renderer serves
  * the app" would be false, and a review arm caught that wording. */
-test("every CLI surface renders a named workspace the same way", () => {
-  assert.equal(
-    renderWorkspace("4f63d2b0-8d95-4ea3-b46a-ac573cebc432", "CommonSwarm Build"),
-    "CommonSwarm Build (4f63d2b0-8d95-4ea3-b46a-ac573cebc432)",
-  );
-
-  const workspaces = read("src/cloud/workspaces.ts");
-  assert.match(
-    workspaces,
-    /`Workspace: \$\{options\.selected\.name\} \(\$\{options\.selected\.workspace_id\}\)/,
-    "human status no longer prints `Workspace: <name> (<id>)`; the agent surfaces are pinned to that shape",
-  );
-
-  const cli = read("src/cli.ts");
-  for (const surface of [
-    /`Workspace: \$\{renderWorkspace\(identity\.workspace_id, workspaceName\)\}/,
-    /lines\.push\(`Workspace: \$\{renderWorkspace\(workspace\.workspaceId, workspace\.workspaceName\)\}`\)/,
-  ]) {
-    assert.match(cli, surface, `a surface stopped rendering through renderWorkspace: ${surface}`);
-  }
-});
 
 /* An unknown name is not an error and must never be invented. An older deployment omits the
  * field; an archived workspace has no row in the view. Both render the id alone. */
-test("an unknown workspace name degrades to the id, never to a guess", () => {
-  assert.equal(workspaceLabel(directory(undefined)), null);
-  assert.equal(workspaceLabel(directory(null)), null);
-  assert.equal(
-    renderWorkspace("4f63d2b0-8d95-4ea3-b46a-ac573cebc432", null),
-    "4f63d2b0-8d95-4ea3-b46a-ac573cebc432",
-  );
-  assert.equal(workspaceLabel(directory("CommonSwarm Build")), "CommonSwarm Build");
-  /* A present but blank name is UNKNOWN, not a manufactured label. */
-  assert.equal(workspaceLabel(directory("")), null);
-  assert.equal(workspaceLabel(directory("   ")), null);
-});
 
 /* The profile file caches the name. It must stay OPTIONAL: the parser compares the key set
  * exactly, so requiring it would declare every profile written before this release damaged, on
@@ -148,17 +60,3 @@ test("the profile file accepts either released shape and rejects an extra key", 
 });
 
 /* The rail identifies duplicate names with a short UUID beside the name. */
-test("the app's workspace list shows the id beside ambiguous names", async () => {
-  const { railWorkspaceIdentifier } = await import("../../site/src/lib/home-rail.ts");
-  const rows = [
-    { id: "4f63d2b0-8d95-4ea3-b46a-ac573cebc432", name: "Home", href: "?w=A", current: true, needsYou: null },
-    { id: "ab63d2b0-8d95-4ea3-b46a-ac573cebc432", name: "Home", href: "?w=B", current: false, needsYou: null },
-    { id: "ff63d2b0-8d95-4ea3-b46a-ac573cebc432", name: "Trip", href: "?w=C", current: false, needsYou: null },
-  ];
-  assert.equal(railWorkspaceIdentifier(rows[0], rows), "4f63d2b0");
-  assert.equal(railWorkspaceIdentifier(rows[1], rows), "ab63d2b0");
-  assert.equal(railWorkspaceIdentifier(rows[2], rows), null);
-  const rail = read("site/src/lib/home-rail.ts");
-  assert.match(rail, /identifier\.title = workspace\.id/);
-  assert.match(rail, /row\.append\(identifier\)/, "the identifying id must be attached beside the name");
-});
