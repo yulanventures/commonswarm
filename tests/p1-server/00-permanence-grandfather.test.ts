@@ -157,7 +157,9 @@ ${check(`SELECT count(*)=3 FROM swarm.household_content_connections c JOIN befor
 ${check(`SELECT count(*)=0 FROM swarm.household_content_connections WHERE connection_id='${rotated}'`, 're-keyed row is gone after restore')}
 ${check(`SELECT count(*)=1 FROM commonswarm_oauth.provider_grant_resources WHERE hosted_grant_id='${hostedUnbound}'`, 'binding rows stay after rollback')}
 ${check(`SELECT count(*)=0 FROM swarm.permanence_grandfather_journal WHERE action IN ('converted','bound') AND restored_at IS NULL`, 'restorable entries stamped')}
-${check(`SELECT bool_and(tgenabled='O') FROM pg_trigger WHERE NOT tgisinternal AND tgname IN ('renewal_grants_spend_or_revoke_only','aa_household_local_family_binding')`, 'guard triggers enabled again')}
+${check(`SELECT count(*)=2 AND bool_and(tgenabled='O') FROM pg_trigger WHERE NOT tgisinternal AND (
+  (tgrelid=to_regclass('swarm.renewal_grants') AND tgname='renewal_grants_spend_or_revoke_only')
+  OR (tgrelid=to_regclass('swarm.household_content_connections') AND tgname='aa_household_local_family_binding'))`, 'guard triggers enabled again')}
 ${sqlPhase('proofs-after-rollback', proof('rollback-catalog', true) + proof('catalog', false))}
 ${sqlPhase('restored-missing-row', '')}
 DELETE FROM swarm.household_content_connections WHERE connection_id='${future.token}';

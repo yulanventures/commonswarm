@@ -83,7 +83,11 @@ const unchanged = (table: string, signatures: string[], label: string) => dbAsse
   `(SELECT count(*) FROM ${table} s JOIN (${identities(signatures)}) n USING (fn,def,owner_role,prosecdef,volatility,config,acl,note))=${signatures.length}`, label);
 
 const column = `EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='swarm.renewal_grants'::regclass AND attname='local_content_approval_token_id' AND NOT attisdropped)`;
-const guardTriggers = `(SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgname IN ('aa_household_local_family_binding','aa_local_content_approval_pointer'))`;
+// runSql retains the original tables and triggers in renamed schemas. Count only
+// the application relations being proved, not those saved originals.
+const guardTriggers = `(SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND (
+  (tgrelid=to_regclass('swarm.household_content_connections') AND tgname='aa_household_local_family_binding')
+  OR (tgrelid=to_regclass('swarm.renewal_grants') AND tgname='aa_local_content_approval_pointer')))`;
 const columnGrant = `EXISTS(SELECT 1 FROM pg_attribute a CROSS JOIN LATERAL aclexplode(a.attacl) x WHERE a.attrelid='swarm.household_content_connections'::regclass AND a.attname='renewal_grant_id' AND x.grantee='swarm_command'::regrole AND x.privilege_type='UPDATE')`;
 const createdCount = `(SELECT count(*) FROM pg_proc WHERE oid IN (${CREATED.map(signature => `to_regprocedure('${signature}')`).join(',')}))`;
 

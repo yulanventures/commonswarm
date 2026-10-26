@@ -35,8 +35,11 @@ SELECT (SELECT count(*)=8 FROM verified)
  AND to_regprocedure('swarm.discover_local_join_ids(bytea,uuid)') IS NULL
  AND to_regprocedure('swarm.household_local_family_binding_guard()') IS NULL
  AND to_regprocedure('swarm.local_content_approval_pointer_guard()') IS NULL
- AND NOT EXISTS(SELECT 1 FROM pg_trigger WHERE NOT tgisinternal
-   AND tgname IN ('aa_household_local_family_binding','aa_local_content_approval_pointer'))
+ -- Trigger names are local to their table; saved or unrelated schemas may
+ -- retain their own guards after the application rollback.
+ AND NOT EXISTS(SELECT 1 FROM pg_trigger WHERE NOT tgisinternal AND (
+   (tgrelid=to_regclass('swarm.household_content_connections') AND tgname='aa_household_local_family_binding')
+   OR (tgrelid=to_regclass('swarm.renewal_grants') AND tgname='aa_local_content_approval_pointer')))
  AND NOT EXISTS(SELECT 1 FROM pg_attribute a CROSS JOIN LATERAL aclexplode(a.attacl) x
    WHERE a.attrelid=to_regclass('swarm.household_content_connections') AND a.attname='renewal_grant_id'
    AND NOT a.attisdropped AND x.grantee='swarm_command'::regrole AND x.privilege_type='UPDATE')

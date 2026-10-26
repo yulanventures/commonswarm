@@ -43,7 +43,7 @@ interface RaceResult {
   fixture_digest?: string;
   baseline?: RaceResult;
   current?: RaceResult;
-  active_catalog?: {functions:number;migrations:number;view_columns:number;measured_view_sha256:string};
+  active_catalog?: {functions:number;migrations:number;migration_names:string[];view_columns:number;measured_view_sha256:string};
   canonical_witness?: {first_pid:number;second_pid:number;gate_pid:number;token_ids:string[];order:string};
   floor_compatibility?: string;
   required_compatibility?: string;
@@ -352,9 +352,9 @@ for(const [command,read] of [['current','current'],['F','current'],['current','F
     if(command==='F') assert.deepEqual(result.source,harness.ACTIVE_FLOOR_SOURCES.F);
     if(read==='F') assert.deepEqual(result.read_source,harness.ACTIVE_FLOOR_SOURCES.F);
     assert.equal(result.http_refused,0);
-    assert.deepEqual(result.historical_completed,['standing','suspended','horizon-expired','expired-unused']);
+    assert.deepEqual(result.historical_completed,['standing','standing-unused','suspended','horizon-expired','expired-unused']);
     for(const contract of ['same-invocation-positive','coherent-old-credential','expired-read-every-table-unchanged',
-      'ordinary-denial-every-table-unchanged','silent-short-successor','successor-read-usable',
+      'ordinary-denial-every-table-unchanged','expired-unused-standing-root-adopted','silent-short-successor','successor-read-usable',
       'exact-successor-adoption','grant-history-preserved','guard-probes-rollback-every-table','retained-catalog-after-cases'])
       assert.ok(result.checks?.some(check=>check.name===contract && check.ok),contract);
     assert.deepEqual(result.checks?.filter(check=>!check.ok),[]);
@@ -381,16 +381,16 @@ test('historical-baseline-discriminator unsupported O/ACTIVE diagnostic and curr
     assert.equal(row.stage,'complete');
     assert.equal(row.fixture_label,'synthetic-initial-history');
     assert.equal(row.http_refused,0);
-    assert.deepEqual(row.historical_completed,['standing','suspended','horizon-expired','expired-unused']);
+    assert.deepEqual(row.historical_completed,['standing','standing-unused','suspended','horizon-expired','expired-unused']);
     assert.ok(row.checks && row.checks.length>0);
     assert.deepEqual(row.checks.filter(c=>!c.ok),[]);
     for(const name of ['same-invocation-positive','hash-and-live-authority','coherent-old-credential',
       'expired-read-every-table-unchanged','guard-probes-rollback-every-table','retained-catalog-after-cases'])
       assert.ok(row.checks.some(c=>c.name===name && c.ok),name);
   }
-  for(const name of ['baseline-live-renewal-positive','baseline-expiry-refusal','baseline-denial-every-table-unchanged'])
+  for(const name of ['baseline-live-renewal-positive','baseline-expiry-refusal','baseline-suspension-read-refusal','baseline-denial-every-table-unchanged'])
     assert.ok(baseline.checks?.some(c=>c.name===name && c.ok),name);
-  for(const name of ['silent-short-successor','successor-read-usable','exact-successor-adoption','grant-history-preserved',
+  for(const name of ['expired-unused-standing-root-adopted','silent-short-successor','successor-read-usable','exact-successor-adoption','grant-history-preserved',
     'ordinary-denial-every-table-unchanged']) assert.ok(current.checks?.some(c=>c.name===name && c.ok),name);
   completedHistoricalBaseline=true;
 });

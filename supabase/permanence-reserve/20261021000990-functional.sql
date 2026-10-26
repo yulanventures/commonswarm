@@ -16,8 +16,15 @@ DO $proof$ BEGIN
     OR to_regprocedure('swarm_read.renewal_grant_for_token(uuid,uuid)') IS NULL THEN
     RAISE EXCEPTION 'local suspension fence routines are absent';
   END IF;
-  IF (SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgenabled='O'
-      AND tgname IN ('agent_tokens_successor_fence','aa_household_local_family_binding','aa_local_content_approval_pointer'))<>3 THEN
+  -- Check the application relations and guard bindings. Trigger names in saved
+  -- or unrelated schemas do not describe this installation.
+  IF (SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgenabled='O' AND (
+      (tgrelid=to_regclass('swarm.agent_tokens') AND tgname='agent_tokens_successor_fence'
+        AND tgfoid=to_regprocedure('swarm.agent_tokens_successor_fence()'))
+      OR (tgrelid=to_regclass('swarm.household_content_connections') AND tgname='aa_household_local_family_binding'
+        AND tgfoid=to_regprocedure('swarm.household_local_family_binding_guard()'))
+      OR (tgrelid=to_regclass('swarm.renewal_grants') AND tgname='aa_local_content_approval_pointer'
+        AND tgfoid=to_regprocedure('swarm.local_content_approval_pointer_guard()'))))<>3 THEN
     RAISE EXCEPTION 'local suspension fence triggers are not all enabled';
   END IF;
   -- An unknown credential hash matches no token: the discovery returns no row and raises nothing.
