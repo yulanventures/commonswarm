@@ -446,14 +446,31 @@ try {
       const [capped]=await db`SELECT read_requests,read_rows,suppressed_read_rows FROM commonswarm_oauth.admin_oauth_audit_daily WHERE admin_grant_id=${grant.grantId}::uuid`;
       check(Number(capped.read_requests)===1001 && Number(capped.read_rows)===1000 && Number(capped.suppressed_read_rows)===1,'D3 suppresses row while counting beyond cap');
       const keys=[`mutation:grant:${grant.grantId}`,`mutation:connection:${grant.manifest.connection_id}`,`mutation:account:${config.owner}`];
-      for (let n=1;n<policy.ADMIN_MUTATION_RATE_PER_HOUR.lineage;n++) {
+      const limit=policy.ADMIN_MUTATION_RATE_PER_HOUR.lineage;
+      const mutationCounts=async (total,exhausted=false)=>{
+        const rows=await db`SELECT bucket_key,hour_start,attempts FROM swarm.admin_rate_buckets WHERE bucket_key=ANY(${keys})`;
+        const hours=[...new Set(rows.map(r=>String(r.hour_start)))].map(hour=>rows.filter(r=>String(r.hour_start)===hour));
+        check(keys.every(key=>rows.filter(r=>r.bucket_key===key).reduce((sum,r)=>sum+r.attempts,0)===total)
+          && hours.every(group=>group.length===keys.length && group.every(r=>r.attempts===group[0].attempts && r.attempts<=limit+(exhausted?1:0)))
+          && (!exhausted || hours.some(group=>group[0].attempts===limit+1)),'durable connection/account/grant allowance counts');
+      };
+      // The child runs for at most 150 seconds, so it can cross one UTC hour.
+      // Count every request across windows and exhaust one actual hourly bucket.
+      let exhausted=false;
+      for (let n=1;n<=2*limit;n++) {
         const attempt=wire({kind:'unsupported_command'}), prior=await count();
-        check((await http(attempt,token)).status===403,'refused mutation consumes finite allowance');
-        const rows=await db`SELECT attempts FROM swarm.admin_rate_buckets WHERE bucket_key=ANY(${keys}) AND hour_start=floor(extract(epoch FROM clock_timestamp())/3600)::bigint`;
-        check(rows.length===keys.length && rows.every(r=>r.attempts===n+1),'durable connection/account/grant allowance counts');
+        const result=await http(attempt,token);
+        if (result.status===429) {
+          await mutationCounts(n+1,true);
+          exhausted=true;
+          break;
+        }
+        check(result.status===403,'refused mutation consumes finite allowance');
+        await mutationCounts(n+1);
         check((await http(attempt,token)).status===403 && await count()===prior+1,'idempotent domain refusal does not spend twice');
+        await mutationCounts(n+1);
       }
-      check((await http(wire({kind:'unsupported_command'}),token)).status===429,'finite mutation ceiling blocks next attempt');
+      check(exhausted,'finite mutation ceiling blocks next attempt');
       const [actions]=await db`SELECT count(*)::integer AS n FROM commonswarm_oauth.admin_oauth_audit WHERE admin_grant_id=${grant.grantId}::uuid AND event_kind='action'`;
       const [daily]=await db`SELECT action_rows FROM commonswarm_oauth.admin_oauth_audit_daily WHERE admin_grant_id=${grant.grantId}::uuid`;
       check(actions.n===Number(daily.action_rows) && actions.n>2,'every action retained beyond metadata cap');
