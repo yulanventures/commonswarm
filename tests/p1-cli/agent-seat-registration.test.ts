@@ -221,22 +221,33 @@ test("registration uses the one principal-ceiling helper after the credential ro
     while (parent && !ts.isFunctionDeclaration(parent)) parent = parent.parent;
     return parent && ts.isFunctionDeclaration(parent) && parent.name ? parent.name.text : "<top>";
   };
-  const streamLockCallers: string[] = [];
+  const frameReaders: string[] = [];
+  const lockOnlyCallers: string[] = [];
   const visit = (node: ts.Node): void => {
     if (
       ts.isCallExpression(node) && ts.isIdentifier(node.expression) &&
       node.expression.text === "lockRegistrationStream"
     ) {
-      streamLockCallers.push(enclosingFunction(node));
+      // `await lockRegistrationStream(...)` as a bare statement discards the frame.
+      const awaited = ts.isAwaitExpression(node.parent) ? node.parent : node;
+      (ts.isExpressionStatement(awaited.parent) ? lockOnlyCallers : frameReaders).push(enclosingFunction(node));
     }
     ts.forEachChild(node, visit);
   };
   visit(file);
   /* Hosted grant management and seat claim share the workspace stream lock with registration. */
   assert.deepEqual(
-    streamLockCallers,
+    frameReaders,
     ["registerAgentSeat", "handleHostedManagement", "claimHostedSeat"],
     "only the named registration and hosted-authority transactions may read a locked stream frame",
+  );
+  /* The permanence release takes the same lock, without reading the frame, to serialize with
+   * workspace removal and owner policy edits: an owner's local connection date, a hosted
+   * command's exact-grant check, and a hosted message check. Nothing else may take it. */
+  assert.deepEqual(
+    lockOnlyCallers,
+    ["handleLocalConnectionExpiry", "handleTransaction", "handleHostedCheck"],
+    "only the named policy and hosted-command transactions may take the stream lock for ordering alone",
   );
 });
 
@@ -297,16 +308,19 @@ test("H0 registration and renewal share one horizon and one stream frame", () =>
     registrationSource,
     /const expiresAt = new Date\(frame\.now \+ H0_SEAT_TOKEN_TTL_MS\);/,
   );
+  /* Permanence release: an H0 seat registers a standing, device-bound family with no
+   * horizon and no successor cap; only the bearer carries the H0_SEAT_TOKEN_TTL_MS expiry. */
   assert.match(
     grantInsert,
-    /\$\{expiresAt\}/,
-    "the initial token expiry must be the grant horizon value",
+    /VALUES \(\s*\$\{grantId\}::uuid,\s*\$\{credential\.workspace_id\}::uuid,\s*\$\{principalId\}::uuid,\s*\$\{runId\}::uuid,\s*'standing',\s*NULL,\s*0,\s*NULL,\s*\$\{deviceId\}::uuid,/,
+    "registration creates a standing, device-bound family with no horizon",
   );
+  assert.doesNotMatch(grantInsert, /\$\{expiresAt\}/, "the bearer expiry is not a family horizon");
   assert.doesNotMatch(grantInsert, /RENEWAL_HORIZON_DEFAULT_MS/);
   assert.match(
     edge,
-    /const expiresAt = new Date\(Math\.min\([\s\S]*?frame\.now \+ H0_SEAT_TOKEN_TTL_MS,[\s\S]*?existing\.grant_horizon_expires_at\.getTime\(\)/,
-    "replacement expiry must be capped by the existing grant horizon",
+    /const expiresAt = new Date\(Math\.min\([\s\S]*?frame\.now \+ H0_SEAT_TOKEN_TTL_MS,[\s\S]*?existing\.grant_horizon_expires_at\?\.getTime\(\) \?\? Infinity,/,
+    "replacement expiry must be capped by the existing grant horizon when the family has one",
   );
   assert.match(
     protocol,
