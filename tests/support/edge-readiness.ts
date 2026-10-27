@@ -101,9 +101,11 @@ export class ReadinessRefused extends Error {
   override name = "ReadinessRefused";
   constructor(readonly status: number, readonly body: string, readonly diagnostics = "") {
     super(
-      `the readiness probe was refused with HTTP ${status}: ${body.slice(0, 300)}. ` +
+      `the readiness probe was refused with HTTP ${status} (identity=${publicResponseIdentity(body)}). ` +
         `That is a decided answer, not a cold runtime, so the gate stopped instead of waiting it out.\n${diagnostics}`,
     );
+    // Preserve programmatic access without printing arbitrary bodies in error inspection.
+    Object.defineProperty(this, "body", { enumerable: false });
   }
 }
 
@@ -116,6 +118,43 @@ export interface ReadinessOptions {
   now: () => number;
   /** Called on refusal and timeout; only bounded, known safe categories are retained. */
   diagnostics?: () => string;
+  /** Owned process state, independent of logs which can be truncated or unavailable. */
+  cliState?: () => "starting" | "serving" | "exited";
+}
+
+/** A public identity is evidence of a response shape, never proof of its origin. */
+function publicResponseIdentity(body: string): string {
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed && Object.keys(parsed).length === 1 &&
+      parsed.message === "An unexpected error occurred") return "unexpected-error-message";
+  } catch { /* Arbitrary bodies are retained on the refusal, never interpolated in logs. */ }
+  return "unclassified";
+}
+
+function readinessDiagnostics(options: ReadinessOptions): { logs: string; cli: string } {
+  let logs = "diagnostics unavailable";
+  let cli = "starting";
+  try {
+    const captured = (options.diagnostics?.() ?? "").slice(-8000);
+    logs = [...new Set(captured.match(
+      /Serving functions on|Setting up Edge Functions runtime|(?:TypeError|SyntaxError|ReferenceError|RangeError|PostgresError)|supabase\/functions\/[A-Za-z0-9_/-]+\.[cm]?[jt]s:\d+(?::\d+)?/g,
+    ) ?? [])].slice(0, 16).map((item) => item.slice(0, 100)).join("\n");
+    if (logs.includes("Serving functions on")) cli = "serving";
+  } catch { /* Diagnostics cannot replace the decided refusal or timeout. */ }
+  try {
+    const state = options.cliState?.();
+    if (state === "starting" || state === "serving" || state === "exited") cli = state;
+  } catch { /* Fall back to bounded announcement evidence. */ }
+  return { logs, cli };
+}
+
+/** Never echo an arbitrary URL, query, or path segment into a failure report. */
+function probedFunction(url: string): string {
+  try {
+    const path = new URL(url).pathname;
+    return path.match(/^\/functions\/v1\/(command|read|capability|activity|h0(?:\/poll|\/ack)?|mcp|admin)$/)?.[1] ?? "unknown";
+  } catch { return "unknown"; }
 }
 
 /**
@@ -128,9 +167,12 @@ export interface ReadinessOptions {
  * defect in whatever ran next.
  */
 export async function awaitFunctionRunning(options: ReadinessOptions): Promise<void> {
-  const deadline = options.now() + options.timeoutMs;
+  const started = options.now();
+  const deadline = started + options.timeoutMs;
+  let attempt = 0;
   let lastSeen = "no response";
   while (options.now() < deadline) {
+    attempt += 1;
     try {
       const response = await options.fetcher(options.url, {
         method: "POST",
@@ -144,31 +186,24 @@ export async function awaitFunctionRunning(options: ReadinessOptions): Promise<v
        * decided answer is never erased" structural: there is no later response, because
        * there is no later request. */
       if (verdict.kind === "refused") {
-        let diagnostics = "diagnostics unavailable";
-        try {
-          const captured = (options.diagnostics?.() ?? "").slice(-8000);
-          diagnostics = [...new Set(captured.match(
-            /Serving functions on|Setting up Edge Functions runtime|(?:TypeError|SyntaxError|ReferenceError|RangeError|PostgresError)|supabase\/functions\/[A-Za-z0-9_/-]+\.[cm]?[jt]s:\d+(?::\d+)?/g,
-          ) ?? [])].slice(0, 16).join("\n");
-        } catch { /* Diagnostics cannot replace the decided refusal. */ }
+        const { logs, cli } = readinessDiagnostics(options);
+        // No trusted origin marker is available here. Even the exact public message and
+        // a proxy's Server header cannot distinguish a gateway error from a proxied one.
+        const diagnostics = `function=${probedFunction(options.url)} attempt=${attempt} ` +
+          `elapsedMs=${Math.max(0, options.now() - started)} cli=${cli} ` +
+          `status=${verdict.status} origin=unknown identity=${publicResponseIdentity(verdict.body)}\n${logs}`;
         throw new ReadinessRefused(verdict.status, verdict.body, diagnostics);
       }
       lastSeen = verdict.detail;
     } catch (error) {
       // A refusal must not be caught by the transport handler and demoted to "keep waiting".
       if (error instanceof ReadinessRefused) throw error;
-      lastSeen = `transport: ${(error as Error).message}`;
+      lastSeen = "transport error";
     }
     await options.sleep(200);
   }
-  let diagnostics = "diagnostics unavailable";
-  try {
-    const captured = (options.diagnostics?.() ?? "").slice(-8000);
-    diagnostics = [...new Set(captured.match(
-      /Serving functions on|Setting up Edge Functions runtime|(?:TypeError|SyntaxError|ReferenceError|RangeError|PostgresError)|supabase\/functions\/[A-Za-z0-9_/-]+\.[cm]?[jt]s:\d+(?::\d+)?/g,
-    ) ?? [])].slice(0, 16).join("\n");
-  } catch { /* Timeout evidence survives a failed callback too. */ }
-  throw new Error(`command function never reported running (last: ${lastSeen})\n${diagnostics}`);
+  const { logs } = readinessDiagnostics(options);
+  throw new Error(`command function never reported running (last: ${lastSeen})\n${logs}`);
 }
 
 /* ------------------------------------------------------------------------- *

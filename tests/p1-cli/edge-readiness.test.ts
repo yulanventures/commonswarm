@@ -20,6 +20,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { inspect } from "node:util";
 import {
   awaitFunctionRunning,
   readinessVerdict,
@@ -138,7 +139,7 @@ test("D-024: a 403 followed by a good 401 rejects after exactly ONE call", async
     (error: unknown) => {
       assert.ok(error instanceof ReadinessRefused, "must be the refusal, not a timeout");
       assert.equal(error.status, 403);
-      assert.match(error.message, /forbidden/);
+      assert.equal(error.body, FORBIDDEN);
       return true;
     },
   );
@@ -184,26 +185,45 @@ test("D-020: once the gate returns it performs no further requests", async () =>
 
 
 test("readiness refusal invokes bounded diagnostics without exposing logs or replacing the refusal", async () => {
-  for (const broken of [false, true]) {
-    const { fetcher, calls } = scriptedFetcher([
-      { status: 500, body: "original refusal" }, { status: 401, body: FUNCTION_401 },
-    ]);
-    let captured = 0;
-    await assert.rejects(() => gate(fetcher, 1000, () => {
-      captured++;
-      if (broken) throw new Error("private callback failure");
-      return "Serving functions on http://private/?token=secret\nTypeError: private payload\n" +
-        "at file:///srv/supabase/functions/command/index.ts:99:4\n".repeat(1000);
-    }), (error: unknown) => {
-      assert.ok(error instanceof ReadinessRefused);
-      assert.equal(error.status, 500);
-      assert.equal(error.body, "original refusal");
-      assert.doesNotMatch(error.message, /private|token=|secret|callback failure/);
-      assert.ok(error.diagnostics.length < 2000);
-      if (!broken) assert.match(error.diagnostics, /supabase\/functions\/command\/index.ts:99:4/);
-      return true;
-    });
-    assert.equal(captured, 1);
-    assert.equal(calls(), 1);
+  const scenarios = [
+    { fn: "command", cli: "serving", body: JSON.stringify({ message: "An unexpected error occurred" }), identity: "unexpected-error-message" },
+    { fn: "read", cli: "exited", body: "private response token=secret", identity: "unclassified" },
+    { fn: "command", cli: "starting", body: JSON.stringify({ message: "An unexpected error occurred", private: "secret" }), identity: "unclassified" },
+  ] as const;
+  for (const scenario of scenarios) {
+    for (const broken of [false, true]) {
+      const { fetcher, calls } = scriptedFetcher([
+        { status: 502, body: "booting" },
+        { status: 500, body: scenario.body },
+        { status: 401, body: FUNCTION_401 },
+      ]);
+      let captured = 0;
+      const { now, sleep } = clock();
+      await assert.rejects(() => awaitFunctionRunning({
+        url: `http://local/functions/v1/${scenario.fn}?token=secret`,
+        fetcher, timeoutMs: 1000, now, sleep,
+        cliState: () => scenario.cli,
+        diagnostics: () => {
+          captured++;
+          if (broken) throw new Error("private callback failure");
+          return "Serving functions on http://private/?token=secret\nTypeError: private payload\n" +
+            "at file:///srv/supabase/functions/command/index.ts:99:4\n".repeat(1000);
+        },
+      }), (error: unknown) => {
+        assert.ok(error instanceof ReadinessRefused);
+        assert.equal(error.status, 500);
+        assert.equal(error.body, scenario.body);
+        assert.ok(error.diagnostics.includes(
+          `function=${scenario.fn} attempt=2 elapsedMs=200 cli=${scenario.cli} status=500 origin=unknown identity=${scenario.identity}`,
+        ));
+        assert.doesNotMatch(error.message, /private|token=|secret|callback failure/);
+        assert.doesNotMatch(inspect(error), /private response|private payload|"private"|token=|secret|callback failure/);
+        assert.ok(error.diagnostics.length < 2000);
+        if (!broken) assert.match(error.diagnostics, /supabase\/functions\/command\/index.ts:99:4/);
+        return true;
+      });
+      assert.equal(captured, 1);
+      assert.equal(calls(), 2, "the 500 must stop the gate before the good 401");
+    }
   }
 });

@@ -114,6 +114,7 @@ let sql: postgres.Sql;
 let superuserSql: postgres.Sql;
 let admin: SupabaseClient;
 let functionProcess: ReturnType<typeof spawn>;
+let functionClosed: Promise<boolean> | undefined;
 let functionLogs = "";
 let envDir: string | undefined;
 
@@ -259,6 +260,10 @@ before(async () => {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  // Subscribe at spawn so an exit before teardown still has an observed close.
+  functionClosed = new Promise<boolean>((resolve) => {
+    functionProcess.once("close", () => resolve(true));
+  });
   const capture = (chunk: Buffer) => {
     functionLogs = (functionLogs + chunk.toString("utf8")).slice(-20_000);
   };
@@ -268,22 +273,29 @@ before(async () => {
 });
 
 after(async () => {
-  if (functionProcess && functionProcess.exitCode === null) {
-    const exited = new Promise<boolean>((resolve) => {
-      functionProcess.once("close", () => resolve(true));
-    });
-    functionProcess.kill("SIGTERM");
-    const stopped = await Promise.race([
-      exited,
+  let closed = true;
+  if (functionProcess && functionClosed) {
+    if (functionProcess.exitCode === null && functionProcess.signalCode === null) {
+      functionProcess.kill("SIGTERM");
+    }
+    closed = await Promise.race([
+      functionClosed,
       delay(2_000).then(() => false),
     ]);
-    if (!stopped && functionProcess.exitCode === null) {
-      functionProcess.kill("SIGKILL");
+    if (!closed) {
+      if (functionProcess.exitCode === null && functionProcess.signalCode === null) {
+        functionProcess.kill("SIGKILL");
+      }
+      closed = await Promise.race([
+        functionClosed,
+        delay(2_000).then(() => false),
+      ]);
     }
   }
   await sql?.end({ timeout: 5 });
   await superuserSql?.end({ timeout: 5 });
   if (envDir) rmSync(envDir, { recursive: true, force: true });
+  assert.ok(closed, "functions serve teardown failed: cli-close-timeout");
 });
 
 async function createUser(
